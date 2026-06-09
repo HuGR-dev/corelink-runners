@@ -20,7 +20,8 @@ HuGR (the company / brand)
 repo right now is to design a marvelous product AND lock the integration contract
 with hugit (which is already built and waiting to consume Runners).
 
-Read first: `docs/product/product.md` · `docs/spec/hugit-integration-contract.md`
+Read first: `docs/whitepaper/corelink-runners-v1.md` (**canonical vision** — source of
+truth) · `docs/product/product.md` · `docs/spec/hugit-integration-contract.md`
 (what hugit needs) · `docs/spec/corelink-fabric-stub.md` (the CoreLink-side stub).
 
 ## Principles (decided — don't relitigate without the owner)
