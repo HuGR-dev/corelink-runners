@@ -1,5 +1,9 @@
 # CoreLink Runners — fabric spec  ⟨STUB — for the CoreLink techlead to fill⟩
 
+> **🟡 NEW HERE? Read `docs/handoff/corelink-techlead-onboarding.md` FIRST** — it is
+> your complete briefing (what this is, why it exists, what already exists, and exactly
+> what to do). Then come back and fill this stub.
+>
 > **To: CoreLink techlead.** hugit's side of the seam is fully specified and frozen
 > in `hugit-integration-contract.md` — please read it first; it is the set of
 > constraints the fabric must satisfy. This document is the **other half**: the

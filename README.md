@@ -23,6 +23,8 @@ beneath hugit's "checks-as-code, memoized, cache-hit ⇒ 0 execution" CI.
 
 ## Read first
 
+- **🟡 CoreLink techlead: `docs/handoff/corelink-techlead-onboarding.md`** — your
+  full briefing + exactly what to do. Start there.
 - `docs/product/product.md` — the product: vision, market wedge, user stories,
   pricing / cost / margin, positioning, roadmap.
 - `docs/spec/hugit-integration-contract.md` — **what hugit needs** from Runners
