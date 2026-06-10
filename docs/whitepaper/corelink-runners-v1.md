@@ -63,7 +63,8 @@ not merely a cheaper minute.
 ## 2. The insight: the cache rewrites the unit economics of compute
 
 CoreLink already operates the hard, defensible asset — a **content-addressed CAS + Action
-Cache with cross-tenant dedup**, live in production. That asset does three things to compute
+Cache, live in production** (dedup intra-tenant at GA; the cross-tenant lever designed in,
+`CAP-DEDUP-CROSS-TENANT`, staged post-GA). That asset does three things to compute
 that a per-minute vendor structurally cannot:
 
 - **Cache-warm boot.** A runner starts with the job's inputs *already local* — toolchain, deps,
@@ -73,9 +74,11 @@ that a per-minute vendor structurally cannot:
   (inputs ‖ command ‖ toolchain). If the key is present, the result is **returned from cache —
   the job never runs.** At fleet scale, much of CI is re-runs of already-computed states; for
   those, "running CI" is a lookup, not a core-second.
-- **Cross-tenant dedup.** Public dependencies are shared content. One tenant warming `tokio` or
-  `node_modules` warms it for all. **The cache gets cheaper per job as more customers join** —
-  a network effect on the COGS itself, the rarest kind of moat: one that *deepens with scale*.
+- **Cross-tenant dedup (staged).** Public dependencies are shared content: one tenant warming
+  `tokio` or `node_modules` warms it for all — **the cache gets cheaper per job as more
+  customers join**, a network effect on the COGS itself, the rarest kind of moat: one that
+  *deepens with scale*. Intra-tenant dedup is live at GA; this lever is designed in
+  (`CAP-DEDUP-CROSS-TENANT`) and turns on post-GA.
 
 This is the whole bet in one line: **compute is a commodity; the cache is the moat; Runners is
 the product that turns the moat into compute revenue.**
@@ -136,7 +139,7 @@ cost money; it suppresses the behavior our customers most need. We sell that beh
                             │ consumes (never forks)
             ┌───────────────▼─────────────────────────────────────────────┐
             │  CoreLink Cache — CAS + Action Cache + R2 · tenancy · PAT    │
-            │   (content-addressed, cross-tenant dedup)        ✅ LIVE      │
+            │   (content-addressed; cross-tenant dedup staged) ✅ LIVE      │
             └───────────────────────────────────────────────────────────────┘
 ```
 
@@ -171,22 +174,25 @@ That is the point: it is what makes us *safe for agent fleets*, and a moat again
 
 ## 6. The moat, stated as a theorem
 
-> **Claim.** No competitor without a content-addressed cache with cross-tenant dedup at
-> production scale can match CoreLink Runners' cost-per-job.
+> **Claim.** No competitor without a content-addressed CAS/AC at production scale — with the
+> tenancy and privacy machinery to turn on cross-tenant dedup — can match CoreLink Runners'
+> cost-per-job.
 >
 > **Why.** Our cost advantage is three levers, each *strictly downstream of the cache*:
 > (1) **warm ⇒ shorter jobs** — no cold-start tax; (2) **memoized ⇒ jobs that never run** — a hit
 > is a lookup, not a core-second; (3) **flat-for-concurrency ⇒ idle is margin** — ephemeral jobs
 > let one core back several advertised slots within SLO. To copy levers (1) and (2) you must
-> boot warm and elide memoized work — both of which *require* a content-addressed CAS/AC with
-> cross-tenant dedup at scale. That asset is not a feature you ship in a quarter; it takes years
-> and a customer base to warm. We already have it, live. A new entrant on rented metal can only
+> boot warm and elide memoized work — both of which *require* a content-addressed CAS/AC at
+> scale. That asset is not a feature you ship in a quarter; it takes years and a customer base
+> to warm. **We have the asset live and the cross-tenant lever staged** (intra-tenant dedup at
+> GA; `CAP-DEDUP-CROSS-TENANT` post-GA — it *deepens* the moat when it lands). A new entrant on
+> rented metal can only
 > compete on the price of a minute — the one axis where the cache makes us structurally cheaper.
 > **∎**
 
-And the moat *deepens with scale* (§2): every new tenant's public artifacts lower the marginal
-cost of the next tenant's jobs. Unit economics that improve as you grow are the opposite of
-renting raw compute.
+And once the staged lever lands, the moat *deepens with scale* (§2): every new tenant's public
+artifacts lower the marginal cost of the next tenant's jobs. Unit economics that improve as you
+grow are the opposite of renting raw compute.
 
 ---
 
@@ -254,8 +260,9 @@ Same fabric, two packagings, two buyers. Built once.
   fabric spec; owner signs off economics + pricing.
 - **M1 — MVP fabric.** Single region, 2/4-vCPU ephemeral microVMs, cache-warm boot, the
   exec/lease/attestation contract green against hugit's client, per-tenant caps + fairness.
-  **This is the milestone that lights up hugit's live CI** (its P2 seam) — the highest-value
-  first deliverable, because it unblocks the forge end-to-end.
+  **Replaces hugit's interim transport** (`hugit-runner-01`, which lights live CI at P2)
+  **with the production fabric** — same contract, production grade; the highest-value first
+  deliverable, because it makes the forge's execution substrate multi-tenant and sellable.
 - **M2 — Direct GA.** Self-serve concurrency plans, the GitHub-Actions front door, billing meters, dashboards, SLOs.
 - **M3 — Scale.** Multi-region, autoscale + oversubscription within SLO, larger sizes.
 - **M4 — Adjacencies.** GPU runners; agent sandboxes / dev boxes (the Workspaces tie-in).

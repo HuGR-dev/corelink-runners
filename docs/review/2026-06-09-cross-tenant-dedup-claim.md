@@ -1,8 +1,11 @@
 # Review — "cross-tenant dedup, live in production" overstates the cache's GA state
 
 - **Date:** 2026-06-09 · found during a full-stack read (hugit-anchored session)
-- **Status:** OPEN — language fix required at the next revision of the whitepaper
-  and the product brief; **no vision or principle change**
+- **Status:** **RESOLVED 2026-06-09** — the corrected language landed in the
+  whitepaper (§2 intro · §2 lever 3 · §5.1 diagram · §6 theorem ×2 · §11 M1)
+  and the product brief (§2.3 · §6 · §7 · §8), and in hugit's whitepaper §5.2,
+  all in the same revision pass; **no vision or principle change**. This note
+  stays as the record + the rule below.
 - **Severity:** docs-only today; becomes a real liability the moment the claim is
   quoted in public material (pricing page, pitch, sales deck) or read by a diligent
   design partner / investor / competitor, because it is falsifiable against

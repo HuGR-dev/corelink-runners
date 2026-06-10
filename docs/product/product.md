@@ -29,10 +29,12 @@ Three forces converge:
    one free escape hatch. The market is being pushed toward "pay for compute" right
    as compute demand explodes. Tailwind.
 3. **CoreLink already owns the cache.** The hard, defensible asset — a content-addressed
-   CAS + Action Cache with cross-tenant dedup — already exists and is live. Runners is
-   how that asset converts into compute revenue: a runner that boots with the cache
-   warm is faster and cheaper per job, and a job whose result is already cached costs
-   **nothing to "run."** Nobody without the cache can match the unit economics.
+   CAS + Action Cache — already exists and is live in production (dedup is intra-tenant
+   at GA; **cross-tenant dedup of public deps is designed in and staged post-GA**,
+   `CAP-DEDUP-CROSS-TENANT`). Runners is how that asset converts into compute revenue:
+   a runner that boots with the cache warm is faster and cheaper per job, and a job
+   whose result is already cached costs **nothing to "run."** Nobody without the cache
+   can match the unit economics.
 
 The bet: **flat concurrency + cache-warm + memoized** beats **per-minute + cold** on
 both price and speed, and the gap widens exactly as fleets scale.
@@ -113,7 +115,8 @@ The COGS of a parallel-runner slot:
   densely via ephemeral microVMs. A "slot" ≠ a reserved core: ephemeral jobs + idle gaps
   let one core back several slots' *advertised* concurrency at realistic utilization.
 - **Cache I/O:** CoreLink CAS/AC, R2-backed — **egress $0**, storage ~$0.033/GB-mo. The
-  warm working set is small and shared (cross-tenant dedup of public deps).
+  warm working set is small and shared within a tenant today; the staged cross-tenant
+  dedup of public deps widens the sharing further when it lands.
 - **Orchestration + Stripe** (2.9% + $0.30).
 
 **The three margin levers (all flow from owning the cache):**
@@ -142,7 +145,8 @@ behind this in `docs/spec/corelink-fabric-stub.md`.
 | **Buildkite / CircleCI** | per-minute / per-seat, bring-your-compute | one stack: cache + compute + (via hugit) landing |
 
 The defensibility is **the cache**: a competitor can rent the same metal, but cannot
-boot warm or memoize without a content-addressed CAS/AC with cross-tenant dedup at scale.
+boot warm or memoize without a content-addressed CAS/AC at scale — and the staged
+cross-tenant lever only deepens the gap when it lands.
 
 ---
 
@@ -152,9 +156,11 @@ boot warm or memoize without a content-addressed CAS/AC with cross-tenant dedup 
   the fabric stub; agree COGS/pricing with the owner.
 - **M1 — MVP fabric:** single region, 2/4-vCPU ephemeral microVMs, cache-warm boot off
   CAS/AC, the exec/lease/attestation contract green against hugit's `hugit-runner` client,
-  per-tenant concurrency caps + fairness. **Unblocks hugit's live CI (the P2 seam).**
+  per-tenant concurrency caps + fairness. **Replaces hugit's interim transport**
+  (`hugit-runner-01`, which lights live CI at P2) **with the production fabric — same
+  contract, production grade, multi-tenant.**
 - **M2 — Direct GA:** self-serve concurrency plans, the GitHub-Actions-shim front door,
-  billing meters, dashboards, SLOs.
+  billing meters, dashboards, SLOs. Onboarding via the **HuGR account** (ADR-0002).
 - **M3 — Scale:** multi-region, autoscale/oversubscription within SLO, bigger sizes.
 - **M4 — Adjacencies:** GPU runners, agent sandboxes / dev boxes (the Workspaces tie-in).
 

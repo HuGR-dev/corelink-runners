@@ -22,7 +22,9 @@ with hugit (which is already built and waiting to consume Runners).
 
 Read first: `docs/whitepaper/corelink-runners-v1.md` (**canonical vision** — source of
 truth) · `docs/product/product.md` · `docs/spec/hugit-integration-contract.md`
-(what hugit needs) · `docs/spec/corelink-fabric-stub.md` (the CoreLink-side stub).
+(what hugit needs) · `docs/spec/corelink-fabric-stub.md` (the CoreLink-side stub) ·
+`docs/interop.md` (the seams, microscopic) · `docs/adr/0002-hugr-identity.md`
+(identity) · `docs/review/2026-06-09-cross-tenant-dedup-claim.md` (the tense rule).
 
 ## Principles (decided — don't relitigate without the owner)
 
@@ -39,6 +41,15 @@ truth) · `docs/product/product.md` · `docs/spec/hugit-integration-contract.md`
 - **One product, one bill (downstream).** A hugit customer never sees a "Runners" line
   item — Runners is COGS under hugit. Runners is *also* sold directly to its own ICP
   (infra/CI teams). Same fabric, two front doors.
+- **Tense discipline.** Production-state claims about the cache cite its GA
+  notes: dedup is **intra-tenant at GA**; cross-tenant is staged
+  (`CAP-DEDUP-CROSS-TENANT`). Never propagate the "cross-tenant dedup, live"
+  overclaim (see the review note in Read-first).
+- **M1 replaces the transport, not the contract.** hugit's live CI lights at
+  **P2** on the interim box (`hugit-runner-01`, SSH); M1 is the production
+  fabric behind the same `RunnerLease` semantics — multi-tenant, capped, sellable.
+- **Identity is decided (ADR-0002):** M2 direct GA onboards via the **HuGR
+  account** (same Clerk pool; org = tenant keys caps/fairness/billing).
 
 ## Relationship to the rest of HuGR
 
