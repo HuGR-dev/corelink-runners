@@ -11,6 +11,15 @@ CoreLink expansion **campaign #1**. Part of the HuGR family:
 > the fabric side. The hugit-side client already exists (the `hugit-runner`
 > crate); Runners is the production fabric it will ride.
 
+> **Workspace status (2026-06-10): code exists.** The repo now carries a Rust
+> workspace (`crates/corelink-runners-contracts`, a placeholder until the R1b
+> contract transcription) with the full HuGR gate from day 1 — fmt · clippy
+> `-D warnings --locked` · test `--locked` · `cargo deny check` · `cargo audit
+> --deny warnings`, CI on the self-hosted fleet, never GitHub-hosted. The
+> campaign-#1 seed (the proven execution core transplanted from hugit's
+> `hugit-runner` crate) is incoming per the runner-transfer plan in hugit
+> (`docs/plan/2026-06-10-runner-transfer-campaign.md`).
+
 ## What it is, in one paragraph
 
 GitHub Actions charges per-minute and is about to charge for self-hosted runners
