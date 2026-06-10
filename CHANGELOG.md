@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(runner): **WP-R2 — transplant the execution core (runner-transfer
+  campaign)**. Moved `hugit/crates/hugit-runner` → `crates/corelink-runner`
+  with **zero behavioral change**: every module transplanted intact (`lease`,
+  `isolation`, `teardown`, `pin`, `boot/`, `concurrency/`, `expiry/`,
+  `recovery/`, `shim/{broker,executor,parser,report,subset}`, `ws/`, `lib`) —
+  **minus** the F2 envelope-capture files (`src/envelope/`,
+  `tests/acceptance_f2.rs`), which stay in hugit (relocate to
+  `hugit-ledger::envelope` in R4 per R0). Every moved file carries a provenance
+  header citing hugit-runner @ ead800d83d19bfd7f90bf4241ee27b18b09007f1.
+  Imports retargeted `hugit_contracts::{RunnerLease, RunnerState,
+  FenceManifest}` → `corelink_runners_contracts::…` (the R0-frozen triplet, the
+  runner's whole hugit-contracts surface — nothing else needed) and the crate
+  self-path `hugit_runner::` → `corelink_runner::`. Acceptance suites
+  C2a/C2b/C3/C9/E4 + `hermetic_supply_chain` moved unmodified except imports +
+  header; C9's box-lane behavior preserved exactly (FAIL on unreachable box
+  when `HUGIT_RUNNER_HOST` set; SKIP-return when unset). Crate deps trimmed to
+  the scout budget: `corelink-runners-contracts` + `anyhow =1.0.102` (new
+  workspace pin) + dev `serde_json =1.0.150`; no `hugit-ledger`/`sha2`/`hex`
+  (those left with the envelope). Full gate green: fmt · clippy `-D warnings
+  --locked` · test `--locked` · `cargo deny check` · `cargo audit --deny
+  warnings`. Plan: hugit `docs/plan/2026-06-10-runner-transfer-campaign.md` §3
+  (WP-R2) + R0 FREEZE.
+
 - feat(contracts): **WP-R1b — wire-contract types + conformance vectors
   (runner-transfer campaign)**. Transcribed `RunnerLease`, `RunnerState`,
   `FenceManifest`, and closure type `MaterializedEntry` into
