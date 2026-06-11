@@ -1,4 +1,18 @@
-# What hugit needs from CoreLink Runners — the integration contract
+# What hugit needs from CoreLink Runners — integration contract v1.1
+
+> **Version note — WP-R6 draft (2026-06-10):** this file is the WP-R6
+> deliverable: a draft amendment that the hugit lead will review, then apply
+> to `corelink-runners/docs/spec/hugit-integration-contract.md` once WP-R4
+> frees that tree. The v1.0 body below is REPRODUCED VERBATIM and is
+> READ-ONLY in this file; the amendment is ADDITIVE — a new section (§13)
+> plus the amendment log appended here. Nothing in §0–§12 is edited.
+>
+> **How to apply:** replace the v1.0 header (first paragraph and the version
+> implied by the date) with the header below, append §13 and the amendment
+> log, commit on branch `integ/seed-runner` with the normal fixup discipline
+> (no amend, status/log sanity first).
+
+---
 
 > Authored by the **hugit techlead** (2026-06-09). This is the seam **frozen from
 > hugit's side**: the fabric must satisfy it for hugit's live CI to light up. It is
@@ -215,3 +229,153 @@ This contract reflects code hugit has already built and gated. If the fabric nee
 change to any shape or guarantee here, **raise it with the owner / hugit techlead** —
 do not assume hugit will adapt. The `hugit-contracts` types are golden-pinned; a change
 there is a deliberate, owner-gated event.
+
+---
+
+## 13. Agent/check execution — envelope emission obligations  *(Amendment v1.1)*
+
+> Added 2026-06-10, WP-R6. Closes the deferred dependency flagged when
+> ADR-0001 was ratified (hugit `docs/adr/0001-intent-context-envelope.md`,
+> ratified same date). The obligations in this section are additive to §0–§12;
+> nothing above is relaxed or superseded. The frozen `hugit-contracts` types
+> remain unchanged — this section names a subset of them by their Rust paths
+> for precision.
+
+When the runner product hosts **agent-driven or agent-triggered check execution**
+(i.e. when the job executing on a runner was submitted by or on behalf of an agent
+fleet), it acquires three new obligations: **metrics emission**, **capture hook
+points**, and **no-persistence**. Each is stated below with the exact guarantee
+hugit's forge side expects at the wire.
+
+### 13.1 Per-job metrics emission  (consistent with `IntentMetrics`)
+
+The runner MUST report, at job close, a per-job metrics payload whose fields are
+**consistent with** the `IntentMetrics` type frozen in
+`hugit-contracts::context_envelope::IntentMetrics` (schema 1.1.0):
+
+| Field | Type | What the runner reports |
+|---|---|---|
+| `tokens.input` | `u64` | non-cached input tokens consumed by the job's model calls |
+| `tokens.output` | `u64` | output tokens |
+| `tokens.cache_read` | `u64` | tokens read from prompt cache |
+| `tokens.cache_write` | `u64` | tokens written to prompt cache |
+| `tokens.total` | `u64` | derived total |
+| `wall_ms` | `u64` | job born → job dead wall-clock, ms |
+| `active_ms` | `u64` | model + tool busy time, ms (excludes idle/queue wait) |
+| `tool_calls` | `u64` | total tool-call count |
+| `tool_breakdown` | `[{tool, count}]` | per-tool breakdown (same shape as `ToolCount`) |
+| `model_turns` | `u64` | number of model turns |
+| `cost_usd` | `f64` | derived COGS in USD (NEVER a billable meter; for trust/audit) |
+
+"Consistent with" means: the runner's payload is a **strict superset-compatible
+projection** of `IntentMetrics` — every named field above uses the same name,
+the same JSON type, and the same semantic. The runner MAY carry additional
+runner-specific fields alongside them (e.g. `cpu_ms`, `mem_peak_mb`); hugit's
+forge will ignore fields outside the `IntentMetrics` vocabulary. Missing or
+wrong-typed fields in that vocabulary are a contract violation.
+
+**Delivery:** the metrics are returned as part of the `CheckResult` response on
+the job-close path (same wire call that returns the result bytes and the
+attestation §7). A separate per-job metrics endpoint is acceptable only if it is
+always populated before the `CheckResult` is considered final. The forge MUST be
+able to read them in the same atomic step as the result — they must never be
+optional when the job succeeded.
+
+**The cache split is mandatory.** The forge's cost decomposition (ADR-0001 §2.3
+`ci` bucket) distinguishes cache-hit saves from actual execution cost; without
+the `cache_read`/`cache_write` split the memoization economics are not
+computable. "We don't track cache tokens on the runner side" is not acceptable
+for an agent-execution job.
+
+### 13.2 Capture hook points for trajectory blobs  (two-transcript imperative)
+
+hugit's forge maintains the two-transcript imperative (ADR-0001 §2.2, second
+owner directive 2026-06-10): at **every altitude** (intent · PR · campaign ·
+session) the captured envelope MUST carry both the **full transcript**
+(`raw_transcript_ref`) and the **compacted transcript** (`task_transcript_ref`).
+These are not optional under the ratified default capture level.
+
+The runner does **not** hold, store, or interpret transcript bytes. That is forge
+domain. What the runner MUST provide is:
+
+1. **A streaming hook point** — a channel (e.g. a side-channel pipe, a
+   structured event stream, or a callback endpoint) through which the job's
+   agent loop can write raw transcript events (model turns, tool calls + results,
+   system/charter prompts) as they occur. The hook point is opened at lease
+   acquire and closed at job close. Hugit's `hugit-ledger::envelope` producer
+   subscribes to this channel and writes the raw bytes directly to cold-tier
+   object store via `CAS`. **The runner never buffers or persists these bytes
+   beyond in-flight forwarding.**
+
+2. **Trajectory event metadata** — alongside the raw stream, the runner emits
+   structured per-turn metadata (turn index, timestamp ms, tool name if
+   applicable, token count if known) as a lightweight side-channel. This powers
+   the compacted-transcript (`task_transcript_ref`) summariser on the forge side
+   without requiring the forge to re-parse the full raw stream.
+
+3. **Job-close signal** — an explicit job-close event carrying the final
+   `wall_ms` and `active_ms` values, so the forge-side producer can finalise
+   both transcript blobs atomically before the lease transitions to `Released`.
+   The forge MUST have written both blobs (or received a confirmed write
+   acknowledgement from CAS) before it acknowledges the job-close signal back
+   to the runner. If the forge side fails to acknowledge within a
+   runner-configured timeout, the runner closes the lease anyway (fail-closed)
+   and emits a `capture_incomplete` flag in the `CheckResult`.
+
+**Forge-side producer identity:** `hugit-ledger::envelope` (relocated from
+`hugit-runner::envelope` by WP-R4 per the R0 freeze). The runner exposes the
+hook point; it does not know or care which hugit module subscribes. The hook
+point is authenticated (Bearer PAT, same as the CAS/AC boundary) so only
+authorised forge-side callers can subscribe.
+
+### 13.3 No transcript persistence on the runner  (redaction stays forge-side)
+
+The runner is execution infrastructure, not a data store. Therefore:
+
+- **The runner MUST NOT persist transcript bytes** — not to disk, not to a
+  local DB, not to any object store the runner controls. The bytes are forwarded
+  through the capture hook (§13.2) and then released. An in-flight forwarding
+  buffer (ring buffer, bounded FIFO) is acceptable; a write to any durable
+  medium is not.
+- **Redaction is on the forge's write path.** The forge's `hugit-ledger::envelope`
+  producer applies `redaction_policy` (as carried in `Trajectory.redaction_policy`,
+  `hugit-contracts::context_envelope::Trajectory`) before committing the blob to
+  CAS. The runner forwards raw bytes; it does not scrub secrets or PII. This is by
+  design: the forge owns the tenant's privacy contract; the runner must not silently
+  drop or modify transcript content before it reaches the redaction stage.
+- **Credential-scan attestation (§5) is unchanged.** The §5 guarantee (`env=0,
+  proc=0, disk=0`) applies to job secrets/credentials, not to transcript content.
+  The transcript channel is a separate, explicitly authenticated stream and is not
+  in scope of the credential-scan attestation.
+
+### 13.4 Conformance-vector drift tripwire
+
+The `IntentMetrics` shape named in §13.1 is part of the cross-repo conformance
+vector set maintained by hugit (WP-R3/R4 of the runner-transfer campaign,
+`../hugit/conformance/`). The same byte-identical vector manifest is committed in
+both `hugit` and `corelink-runners`; each side's golden tests pin every vector.
+
+Any change to a field named in §13.1 — name, JSON type, or documented semantic
+— is a **contract event** requiring:
+
+1. A new vector version committed byte-identically in both repos (PR in each,
+   reviewed against the frozen hugit side before merge).
+2. A version bump to the `CONTEXT_ENVELOPE_SCHEMA_VERSION` constant in
+   `hugit-contracts::context_envelope` (currently `"1.1.0"`; next would be
+   `"1.2.0"` for additive changes).
+3. A corresponding amendment to this contract (§12 change protocol applies).
+
+The shared vector manifest is the **drift tripwire**: either side's golden suite
+breaks on silent drift, before any integration test is needed. This is the
+AC/CAS pattern applied to the runner seam.
+
+---
+
+## Amendment log
+
+| Version | Date | Author | Summary |
+|---|---|---|---|
+| v1.0 | 2026-06-09 | hugit techlead | Initial contract; §0–§12; frozen from hugit's side. |
+| v1.1 | 2026-06-10 | hugit techlead (WP-R6 draft) | Added §13: per-job metrics emission consistent with `IntentMetrics` (§13.1); capture hook points for full + compacted transcript blobs — two-transcript imperative (§13.2); no-persistence + forge-side redaction obligation (§13.3); conformance-vector drift tripwire (§13.4). Cross-reference: hugit ADR-0001 (ratified 2026-06-10). **DRAFT — lead review pending; apply after WP-R4 frees corelink-runners tree.** |
+
+*Change protocol (§12) applies to all future amendments.*
