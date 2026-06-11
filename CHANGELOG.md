@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- docs: **WP-R5 — runner-transfer campaign records** (2026-06-10). CLAUDE.md
+  advanced from spec-phase → CODE: workspace status, gate commands, wire-contract
+  law, CI labels, and "seeded ≠ shipped" scope statement documented. Handoff note
+  `docs/handoff/2026-06-10-runner-seed.md` authored for campaign-#1 sessions:
+  what arrived (execution core + fence enforcement + X4 oracle + suites, all gate
+  green @ b6319a3; contracts + vectors @ 78702d6; integration contract v1.1 @
+  9796aa8), what it proves (lease loop · fence enforcement real · supply-chain
+  proven over live spawn surface · wire seam tripwired · envelope emission
+  contracted), what the PRODUCT still needs (multi-tenant control plane · public
+  API · billing · Firecracker · C5b broker stays hugit-side), and the v1.1
+  obligations (per-job metric emission + trajectory blob hook points). hugit side:
+  supersession appendix in `docs/plan/decomposition.md`, absorption-map touchup,
+  and hugit CHANGELOG entry — all in the same campaign. (runner-transfer-campaign)
+
 - feat(runner): **WP-R4④ — receive fence enforcement (materialize/enforce) +
   X4 oracle (runner-transfer campaign)**. The fence's runner-side half arrives
   from hugit-fence: `materialize` (sparse hydrate by path-set — sparse
