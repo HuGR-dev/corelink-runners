@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use corelink_runners_contracts::{IntentMetrics, TokenCounts, ToolCount};
 
 use super::event::{PriceCard, TranscriptEvent};
