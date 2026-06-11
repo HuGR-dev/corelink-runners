@@ -1,5 +1,7 @@
 //! Context-envelope emission: per-job metrics derived from observed
-//! transcript events (contract §13.1, WP-S13b mechanism; built WP-B1).
+//! transcript events (contract §13.1, WP-S13b mechanism; built WP-B1) plus
+//! the in-process §13.2/§13.3 capture hook + close/ack state machine
+//! (WP-B2).
 //!
 //! Implements the metrics half of the envelope emission obligations in
 //! `docs/spec/hugit-integration-contract.md` v1.2.0 §13.1: at job close the
@@ -18,16 +20,31 @@
 //!   metrics are a **required** field, so a successful close without metrics
 //!   is unrepresentable (§13.1 "never optional when the job succeeded").
 //!
+//! # Scope (WP-B2)
+//! - [`hook`] — [`CaptureHook`], the two §13.2 capture surfaces (raw
+//!   transcript events + per-turn [`TurnMeta`]): bounded in-memory
+//!   forwarding only, bearer-gated [`Subscriber`] drain, per-surface
+//!   overflow flags — never durable, never silent, never scrubbed (§13.3).
+//! - [`close`] — [`JobClose`], the §13.2 item-3 close/ack state machine:
+//!   finalize exactly once → publish [`CloseSignal`] (same metrics value as
+//!   the outcome) → bearer-gated ack window (`cfg.ack_timeout`) →
+//!   fail-closed [`CloseOutcome`] with the honest `capture_incomplete`
+//!   flag; abnormal closes ([`AbnormalKind`]) share the exactly-once rule.
+//!
 //! The metrics type itself is the transcribed wire contract
 //! (`corelink-runners-contracts`, hugit-contracts @ 7c2f1e6 / schema 1.2.0)
-//! — never redefined here. WP-B2 wires the collector into the job loop and
-//! adds the close-signal channel.
+//! — never redefined here. In-process mechanism only: M1 puts the fabric
+//! transport + PAT verification behind the same hook/close semantics.
 
+pub mod close;
 pub mod collector;
 pub mod event;
+pub mod hook;
 
+pub use close::{AbnormalKind, CloseSignal, JobClose};
 pub use collector::MetricsCollector;
 pub use event::{PriceCard, TranscriptEvent, TurnUsage};
+pub use hook::{CaptureHook, EnvelopeConfig, Subscriber, TurnMeta};
 
 use corelink_runners_contracts::IntentMetrics;
 
