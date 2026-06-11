@@ -21,9 +21,11 @@
 //! hugit-contracts @ 7c2f1e64bc1ba46d4941dc3e5b4a6247c21b0ec0
 
 pub mod fence_manifest;
+pub mod intent_metrics;
 pub mod runner_lease;
 
 pub use fence_manifest::{FenceManifest, MaterializedEntry};
+pub use intent_metrics::{CONTEXT_ENVELOPE_SCHEMA_VERSION, IntentMetrics, TokenCounts, ToolCount};
 pub use runner_lease::{RunnerLease, RunnerState};
 
 #[cfg(test)]
@@ -31,9 +33,9 @@ mod golden_tests {
     use super::*;
     use std::path::Path;
 
-    /// Load a conformance vector from the workspace-root `conformance/`
+    /// Path of a conformance vector in the workspace-root `conformance/`
     /// directory. Works whether tests run from crate root or workspace root.
-    fn load_vector(name: &str) -> String {
+    fn vector_path(name: &str) -> std::path::PathBuf {
         // Walk up from the manifest dir until we find `conformance/`.
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
         // crate is at <workspace>/crates/corelink-runners-contracts → two levels up
@@ -41,9 +43,48 @@ mod golden_tests {
             .parent() // crates/
             .and_then(|p| p.parent()) // workspace root
             .expect("workspace root not found");
-        let path = workspace.join("conformance").join(name);
-        std::fs::read_to_string(&path)
+        workspace.join("conformance").join(name)
+    }
+
+    /// Load a conformance vector as a UTF-8 string.
+    fn load_vector(name: &str) -> String {
+        std::fs::read_to_string(vector_path(name))
             .unwrap_or_else(|e| panic!("cannot read conformance vector {name}: {e}"))
+    }
+
+    /// Load a conformance vector's raw bytes.
+    fn load_vector_bytes(name: &str) -> Vec<u8> {
+        std::fs::read(vector_path(name))
+            .unwrap_or_else(|e| panic!("cannot read conformance vector {name}: {e}"))
+    }
+
+    /// Verify a conformance vector's raw bytes against a recorded lowercase
+    /// hex SHA-256 digest.
+    fn verify_vector(bytes: &[u8], expected_hex: &str) -> bool {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(bytes);
+        let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+        hex == expected_hex
+    }
+
+    /// Parse `manifest.sha256` lines into `(hex digest, filename)` pairs.
+    /// Format: `<hex sha256>  <filename>` per line.
+    fn parse_manifest(content: &str) -> Vec<(String, String)> {
+        content
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                let mut parts = line.split_whitespace();
+                let hex = parts
+                    .next()
+                    .unwrap_or_else(|| panic!("manifest.sha256 line missing digest: {line}"));
+                let name = parts
+                    .next()
+                    .unwrap_or_else(|| panic!("manifest.sha256 line missing filename: {line}"));
+                (hex.to_string(), name.to_string())
+            })
+            .collect()
     }
 
     // ── RunnerLease golden round-trip ─────────────────────────────────────
@@ -92,18 +133,55 @@ mod golden_tests {
         );
     }
 
-    // ── manifest.sha256 integrity check ──────────────────────────────────
+    // ── manifest.sha256 integrity checks ──────────────────────────────────
 
     #[test]
-    fn manifest_sha256_exists_and_covers_both_vectors() {
-        let content = load_vector("manifest.sha256");
-        assert!(
-            content.contains("RunnerLease.json"),
-            "manifest.sha256 must list RunnerLease.json"
+    fn conformance_vectors_hash_verified() {
+        let entries = parse_manifest(&load_vector("manifest.sha256"));
+        assert!(!entries.is_empty(), "manifest.sha256 lists no vectors");
+        for (hex, name) in &entries {
+            let bytes = load_vector_bytes(name);
+            assert!(
+                verify_vector(&bytes, hex),
+                "conformance vector {name} does not match its recorded SHA-256 digest"
+            );
+        }
+    }
+
+    #[test]
+    fn conformance_manifest_membership_pinned() {
+        let listed: std::collections::BTreeSet<String> =
+            parse_manifest(&load_vector("manifest.sha256"))
+                .into_iter()
+                .map(|(_, name)| name)
+                .collect();
+        let expected: std::collections::BTreeSet<String> =
+            ["RunnerLease.json", "FenceManifest.json"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+        assert_eq!(
+            listed, expected,
+            "manifest.sha256 membership drifted from the pinned vector set"
         );
+    }
+
+    #[test]
+    fn conformance_hash_verifier_rejects_tamper() {
+        let entries = parse_manifest(&load_vector("manifest.sha256"));
+        let (hex, _) = entries
+            .iter()
+            .find(|(_, name)| name == "RunnerLease.json")
+            .expect("manifest.sha256 must list RunnerLease.json");
+        let mut bytes = load_vector_bytes("RunnerLease.json");
         assert!(
-            content.contains("FenceManifest.json"),
-            "manifest.sha256 must list FenceManifest.json"
+            verify_vector(&bytes, hex),
+            "pre-tamper sanity: RunnerLease.json must verify"
+        );
+        bytes[0] ^= 0x01;
+        assert!(
+            !verify_vector(&bytes, hex),
+            "tampered RunnerLease.json bytes must fail verification"
         );
     }
 }
