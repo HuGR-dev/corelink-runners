@@ -16,18 +16,14 @@ distance between the two; one line per item, struck through when closed.
 The contract obligations and audit findings that are closable **inside this
 repo, now**, with no owner input:
 
-- [ ] **§13.1 metrics envelope** — transcribed `JobMetrics` type
-      (`IntentMetrics`-consistent, `cost_usd_micros|u64`, mandatory cache
-      split) + golden fixture pinning the exact JSON shape.
-- [ ] **§13.2 capture hook points** — `envelope` module: streaming hook
-      (open at lease acquire / close at job close), per-turn trajectory
-      metadata side-channel, job-close signal with ack-timeout → fail-closed
-      lease close + `capture_incomplete` flag.
-- [ ] **§13.3 no-persistence** — capture path holds bytes only in a bounded
-      in-flight buffer; nothing durable on the runner; proven by test.
-- [ ] **Conformance manifest hash-verify** — golden test verifies the actual
-      SHA-256 of every vector against `conformance/manifest.sha256`
-      (today it only checks the listing); tamper-mutation test proves it bites.
+- [x] **§13.1 metrics envelope** — transcribed `IntentMetrics` type +
+      golden fixture + derivation collector (`558842e`, `fdccc33`).
+- [x] **§13.2 capture hook points** — CaptureHook (two surfaces, bearer
+      seam, progressive forwarding) + JobClose ack state machine (`31157e6`).
+- [x] **§13.3 no-persistence** — bounded in-flight only, release-after-
+      delivery, overflow never silent; proven by test (`31157e6`).
+- [x] **Conformance manifest hash-verify** — real SHA-256 per vector +
+      membership pin + tamper-mutation proof (`558842e`).
 - [x] Fixup squashed; contract title + CLAUDE.md at v1.2.0; transplant prose
       fixed (`9c86744`). deny.toml `Zlib` kept deliberately (house set ≡ hugit).
 
