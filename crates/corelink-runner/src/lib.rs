@@ -1,5 +1,5 @@
 // Transplanted from hugit/crates/hugit-runner @ ead800d83d19bfd7f90bf4241ee27b18b09007f1 (runner-transfer campaign R2, 2026-06-10) — wire-contract seam, no git dep.
-//! hugit-runner — ephemeral runner v0 (WP-C2a).
+//! corelink-runner — ephemeral runner v0 (WP-C2a, transplanted from hugit-runner).
 //!
 //! The lifecycle + isolation half of the ephemeral runner: acquire a
 //! [`RunnerLease`](corelink_runners_contracts::RunnerLease), run **one** job in an

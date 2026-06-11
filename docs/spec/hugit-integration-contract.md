@@ -1,4 +1,4 @@
-# What hugit needs from CoreLink Runners — integration contract v1.1
+# What hugit needs from CoreLink Runners — integration contract v1.2.0
 
 > **Version note — WP-R6 draft (2026-06-10):** this file is the WP-R6
 > deliverable: a draft amendment that the hugit lead will review, then apply

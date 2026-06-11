@@ -19,11 +19,14 @@
 //! # Container naming
 //! All C9 workspace containers are prefixed `hugit-c9-` so forensic scans and
 //! kill-sweeps stay scoped to this WP on the shared box. Scans/cleanups target
-//! ONLY this prefix — no other WP's containers are touched.
+//! ONLY this prefix — no other WP's containers are touched. The prefix value
+//! predates the runner transfer (hugit → corelink-runners, 2026-06-10) and is
+//! ops-visible on the shared interim box (`hugit-runner-01`); renaming it is a
+//! seam change that needs owner/hugit-techlead sign-off, not a local cleanup.
 //!
 //! # Firecracker note
-//! Runtime is container-per-job on the Hetzner box; Firecracker is the
-//! documented upgrade path, not built here.
+//! Runtime is container-per-job on the interim box (`hugit-runner-01`,
+//! Hetzner-class); Firecracker is the documented upgrade path, not built here.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex};

@@ -27,7 +27,7 @@ transfer campaign (hugit campaign #3 → CoreLink campaign #1 seed, owner-direct
 - `crates/corelink-runners-contracts` — wire-contract types (RunnerLease,
   RunnerState, FenceManifest, MaterializedEntry) transcribed from hugit-contracts
   @ 7c2f1e6; conformance vectors byte-identical to hugit under `conformance/`.
-- `docs/spec/hugit-integration-contract.md` v1.1 — envelope emission obligations
+- `docs/spec/hugit-integration-contract.md` v1.2.0 — envelope emission obligations
   added (WP-R6 @ 9796aa8).
 - Full gate: `cargo fmt --check` · `cargo clippy --workspace --all-targets
   --locked -D warnings` · `cargo test --workspace --locked` · `cargo deny check`
@@ -47,7 +47,7 @@ multi-tenant control plane · public API · billing (concurrency SKUs) · Firecr
 isolation. See `docs/handoff/2026-06-10-runner-seed.md`.
 
 Read first: `docs/whitepaper/corelink-runners-v1.md` (**canonical vision** — source of
-truth) · `docs/product/product.md` · `docs/spec/hugit-integration-contract.md` v1.1
+truth) · `docs/product/product.md` · `docs/spec/hugit-integration-contract.md` v1.2.0
 (what hugit needs, now with envelope emission obligations) · `docs/spec/corelink-fabric-stub.md`
 (the CoreLink-side stub) · `docs/interop.md` (the seams, microscopic) ·
 `docs/adr/0002-hugr-identity.md` (identity) ·
@@ -86,7 +86,7 @@ truth) · `docs/product/product.md` · `docs/spec/hugit-integration-contract.md`
   hugit's seam is `hugit-fence::{broker,seam}` + `hugit-invariants` wire oracle;
   the execution core now lives HERE (runner-transfer 2026-06-10). This repo is the
   FABRIC. The contract between them is `docs/spec/hugit-integration-contract.md`
-  v1.1 — **frozen from hugit's side**; the fabric must satisfy it.
+  v1.2.0 — **frozen from hugit's side**; the fabric must satisfy it.
 - **Is consumed by CoreLink Workspaces** (campaign #2) — agent sandboxes / dev boxes
   are workspace SKUs that run on this fabric.
 
