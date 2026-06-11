@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(runner): **WP-R4④ — receive fence enforcement (materialize/enforce) +
+  X4 oracle (runner-transfer campaign)**. The fence's runner-side half arrives
+  from hugit-fence: `materialize` (sparse hydrate by path-set — sparse
+  materialization IS the fence; SHA-256 content digests, new `sha2 =0.10.9`
+  workspace pin) and `enforce` (in/out classifier + box-backed ENOENT probe),
+  WITH the container-escape red-team harness (`redteam`: six vectors incl.
+  the load-bearing fence-materialized-escape that would go RED under a no-op
+  classifier, plus its hermetic FakeFsBox twin in the bare gate) and its
+  box-gated acceptance (`tests/acceptance_redteam.rs`, c5b item ⑤) — moved
+  rather than re-pointed so every red-team assertion keeps driving the REAL
+  classifier in-process (relocated, never weakened). The WP-X4 supply-chain
+  oracle arrives too (`x4::pin`: content-pinning + verify-before-spawn
+  fail-closed ordering over the LIVE spawn surface, `tests/acceptance_x4.rs`
+  with the hermetic ordering proof in the bare gate; item ② retargeted to
+  THIS workspace's pinned lockfile/CI — same invariant, honest home). All
+  env-gated lanes preserved exactly (`HUGIT_RUNNER_HOST`: FAIL-not-skip when
+  set, short-circuit when unset); `tests/acceptance_c5a.rs` moved with its
+  deterministic allow-all-rejection lane. Every file carries a provenance
+  header citing hugit @ 69e28e5 (removed hugit-side by WP-R4②). The secrets
+  broker (C5b items ②③④⑥) stays hugit-side with the forge; the seam is the
+  wire contract. Full gate green: fmt · clippy `-D warnings --locked` · test
+  `--locked` · `cargo deny check` · `cargo audit --deny warnings`.
+
 - feat(runner): **WP-R2 — transplant the execution core (runner-transfer
   campaign)**. Moved `hugit/crates/hugit-runner` → `crates/corelink-runner`
   with **zero behavioral change**: every module transplanted intact (`lease`,

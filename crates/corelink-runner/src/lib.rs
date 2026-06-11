@@ -16,9 +16,16 @@
 //!   prove nothing was left behind.
 //!
 //! Concurrency/throughput, expiry hard-kill, and crash recovery are **WP-C2b**;
-//! cache-warm boot is **C3**; the Actions-YAML shim is **E4**; fence path
-//! enforcement (ENOENT) is **C5a** and the secrets broker is **C5b**. None of
-//! those are implemented here.
+//! cache-warm boot is **C3**; the Actions-YAML shim is **E4**. Fence path
+//! enforcement (ENOENT, **C5a**) arrived with WP-R4: [`materialize`] (sparse
+//! hydrate by path-set — sparse materialization IS the fence) and [`enforce`]
+//! (the in/out classifier + the box-backed ENOENT probe), together with the
+//! container-escape red-team harness ([`redteam`], six vectors incl. the
+//! load-bearing fence-materialized-escape that would go RED under a no-op
+//! classifier) and the WP-X4 supply-chain oracle ([`x4`]: content-pinning +
+//! verify-before-spawn fail-closed ordering over the LIVE spawn surface).
+//! The secrets broker (**C5b**) stays hugit-side (forge domain); it reaches
+//! the job container over the wire seam, never via a crate link.
 //!
 //! # Runtime: container-per-job (Firecracker upgrade path)
 //! v0 runs each job as a single Docker container on one Hetzner-class box.
@@ -38,16 +45,28 @@
 
 pub mod boot;
 pub mod concurrency;
+pub mod enforce;
 pub mod expiry;
 pub mod isolation;
 pub mod lease;
+pub mod materialize;
 pub mod pin;
 pub mod recovery;
+pub mod redteam;
 pub mod shim;
 pub mod teardown;
+mod util;
 pub mod ws;
+pub mod x4;
 
+pub use enforce::{
+    FenceVerdict, FenceViolation, check_access, classify, is_admitted, probe_outside_enoent,
+};
 pub use isolation::{Engine, IsolationProbe, RunningContainer};
 pub use lease::{BoxExec, ContainerSpec, SshBox};
+pub use materialize::{CandidateEntry, MaterializeError, materialize_sparse};
 pub use pin::{PinnedImageRef, require_pinned};
+pub use redteam::{
+    AttackVector, ContainerLimits, ContainmentReport, RedTeamHarness, RedTeamOutcome,
+};
 pub use teardown::{ForensicReport, teardown};

@@ -9,6 +9,9 @@ publish.workspace = true
 [dependencies]
 corelink-runners-contracts = { path = "../corelink-runners-contracts" }
 anyhow = { workspace = true }
+# WP-R4: fence materialization content digests (SHA-256 lowercase hex, the
+# frozen WP-00 scalar convention).
+sha2 = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
