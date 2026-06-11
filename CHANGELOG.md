@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- docs(spec): **contract 1.2.0 — `cost_usd_micros|u64` (E-DOCS, 2026-06-11)**.
+  §13.1 money field renamed: `cost_usd|f64` → `cost_usd_micros|u64` (integer
+  micro-USD, 1 USD = 1,000,000 units; exact-integer, no f64 epsilon; owner-
+  ratified 2026-06-11 as hugit WA4). §13.4 schema version updated to 1.2.0
+  SHIPPED. §12 amendment-log entry added. Additive — all other §0–§12 and
+  §13.2/13.3/13.4 content unchanged. Conformance-vector drift tripwire: new
+  vectors must be committed byte-identical in both repos (tracked).
+
 - docs: **WP-R5 — runner-transfer campaign records** (2026-06-10). CLAUDE.md
   advanced from spec-phase → CODE: workspace status, gate commands, wire-contract
   law, CI labels, and "seeded ≠ shipped" scope statement documented. Handoff note

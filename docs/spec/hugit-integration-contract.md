@@ -251,7 +251,7 @@ hugit's forge side expects at the wire.
 
 The runner MUST report, at job close, a per-job metrics payload whose fields are
 **consistent with** the `IntentMetrics` type frozen in
-`hugit-contracts::context_envelope::IntentMetrics` (schema 1.1.0):
+`hugit-contracts::context_envelope::IntentMetrics` (schema 1.2.0):
 
 | Field | Type | What the runner reports |
 |---|---|---|
@@ -265,7 +265,7 @@ The runner MUST report, at job close, a per-job metrics payload whose fields are
 | `tool_calls` | `u64` | total tool-call count |
 | `tool_breakdown` | `[{tool, count}]` | per-tool breakdown (same shape as `ToolCount`) |
 | `model_turns` | `u64` | number of model turns |
-| `cost_usd` | `f64` | derived COGS in USD (NEVER a billable meter; for trust/audit) |
+| `cost_usd_micros` | `u64` | derived COGS in integer micro-USD (1 USD = 1,000,000 units; NEVER a billable meter; for trust/audit; exact-integer, no f64 epsilon) |
 
 "Consistent with" means: the runner's payload is a **strict superset-compatible
 projection** of `IntentMetrics` — every named field above uses the same name,
@@ -361,8 +361,8 @@ Any change to a field named in §13.1 — name, JSON type, or documented semanti
 1. A new vector version committed byte-identically in both repos (PR in each,
    reviewed against the frozen hugit side before merge).
 2. A version bump to the `CONTEXT_ENVELOPE_SCHEMA_VERSION` constant in
-   `hugit-contracts::context_envelope` (currently `"1.1.0"`; next would be
-   `"1.2.0"` for additive changes).
+   `hugit-contracts::context_envelope` (currently `"1.2.0"`, SHIPPED
+   2026-06-11 — integer micro-USD, owner-ratified).
 3. A corresponding amendment to this contract (§12 change protocol applies).
 
 The shared vector manifest is the **drift tripwire**: either side's golden suite
@@ -376,6 +376,7 @@ AC/CAS pattern applied to the runner seam.
 | Version | Date | Author | Summary |
 |---|---|---|---|
 | v1.0 | 2026-06-09 | hugit techlead | Initial contract; §0–§12; frozen from hugit's side. |
-| v1.1 | 2026-06-10 | hugit techlead (WP-R6 draft) | Added §13: per-job metrics emission consistent with `IntentMetrics` (§13.1); capture hook points for full + compacted transcript blobs — two-transcript imperative (§13.2); no-persistence + forge-side redaction obligation (§13.3); conformance-vector drift tripwire (§13.4). Cross-reference: hugit ADR-0001 (ratified 2026-06-10). **DRAFT — lead review pending; apply after WP-R4 frees corelink-runners tree.** |
+| v1.1 | 2026-06-10 | hugit techlead (WP-R6 draft) | Added §13: per-job metrics emission consistent with `IntentMetrics` (§13.1); capture hook points for full + compacted transcript blobs — two-transcript imperative (§13.2); no-persistence + forge-side redaction obligation (§13.3); conformance-vector drift tripwire (§13.4). Cross-reference: hugit ADR-0001 (ratified 2026-06-10). |
+| v1.2.0 | 2026-06-11 | hugit techlead (E-DOCS) | §13.1 money field rename: `cost_usd\|f64` → `cost_usd_micros\|u64` (integer micro-USD, 1 USD = 1,000,000 units). Owner-ratified 2026-06-11 as part of hugit WA4 (CHANGELOG). Additive — all other §13.1 fields and §0–§12 unchanged. §13.4 conformance-vector drift tripwire: new vectors must be committed byte-identical in both repos. |
 
 *Change protocol (§12) applies to all future amendments.*
