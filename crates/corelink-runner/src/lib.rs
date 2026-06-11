@@ -46,6 +46,9 @@
 pub mod boot;
 pub mod concurrency;
 pub mod enforce;
+/// Context-envelope emission: per-job `IntentMetrics` from observed
+/// transcript events (contract §13.1, WP-B1).
+pub mod envelope;
 pub mod expiry;
 pub mod isolation;
 pub mod lease;
