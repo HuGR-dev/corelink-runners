@@ -19,6 +19,9 @@
 //!
 //! Source repo for the originals:
 //! hugit-contracts @ 7c2f1e64bc1ba46d4941dc3e5b4a6247c21b0ec0
+//! (RunnerLease/RunnerState/FenceManifest/MaterializedEntry);
+//! IntentMetrics/TokenCounts/ToolCount @ 443ff1b (context_envelope,
+//! schema 1.2.0 — see `intent_metrics`).
 
 pub mod fence_manifest;
 pub mod intent_metrics;

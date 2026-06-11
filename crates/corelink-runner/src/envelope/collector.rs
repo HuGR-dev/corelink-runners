@@ -82,18 +82,22 @@ impl MetricsCollector {
         match ev {
             TranscriptEvent::ModelTurn { usage, busy_ms, .. } => {
                 self.model_turns += 1;
-                self.active_ms += busy_ms;
+                // Saturating accumulation: per-turn usage is untrusted input;
+                // a lying job must cap the meters, never wrap them (a wrapped
+                // u64 is a falsified wire metric) and never panic the close
+                // path (debug-build overflow).
+                self.active_ms = self.active_ms.saturating_add(*busy_ms);
                 if let Some(u) = usage {
-                    self.input += u.input;
-                    self.output += u.output;
-                    self.cache_read += u.cache_read;
-                    self.cache_write += u.cache_write;
+                    self.input = self.input.saturating_add(u.input);
+                    self.output = self.output.saturating_add(u.output);
+                    self.cache_read = self.cache_read.saturating_add(u.cache_read);
+                    self.cache_write = self.cache_write.saturating_add(u.cache_write);
                 }
             }
             TranscriptEvent::ToolCall { tool, busy_ms, .. } => {
                 self.tool_calls += 1;
                 *self.tool_breakdown.entry(tool.clone()).or_insert(0) += 1;
-                self.active_ms += busy_ms;
+                self.active_ms = self.active_ms.saturating_add(*busy_ms);
             }
             TranscriptEvent::ToolResult { .. } | TranscriptEvent::SystemPrompt { .. } => {}
         }
@@ -127,7 +131,11 @@ impl MetricsCollector {
         // Defensive clamp (see method docs): active may never exceed wall.
         let active_ms = self.active_ms.min(wall_ms);
 
-        let total = self.input + self.output + self.cache_read + self.cache_write;
+        let total = self
+            .input
+            .saturating_add(self.output)
+            .saturating_add(self.cache_read)
+            .saturating_add(self.cache_write);
 
         // Exact-integer COGS: u128 intermediate per class, floor division,
         // summed, then narrowed back to u64.
@@ -135,8 +143,11 @@ impl MetricsCollector {
             + class_cost_micros(self.output, price.output_per_mtok_micros)
             + class_cost_micros(self.cache_read, price.cache_read_per_mtok_micros)
             + class_cost_micros(self.cache_write, price.cache_write_per_mtok_micros);
-        let cost_usd_micros =
-            u64::try_from(cost).context("derived cost_usd_micros overflows u64")?;
+        // Saturating narrow: absurd usage×price caps at u64::MAX micro-USD
+        // instead of erroring — finalize failure here would wedge the close
+        // path and leave the lease unreleasable (fail-closed law: the lease
+        // never hangs on lying input).
+        let cost_usd_micros = u64::try_from(cost).unwrap_or(u64::MAX);
 
         Ok(IntentMetrics {
             tokens: TokenCounts {

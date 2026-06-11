@@ -32,7 +32,7 @@
 //!   flag; abnormal closes ([`AbnormalKind`]) share the exactly-once rule.
 //!
 //! The metrics type itself is the transcribed wire contract
-//! (`corelink-runners-contracts`, hugit-contracts @ 7c2f1e6 / schema 1.2.0)
+//! (`corelink-runners-contracts`, hugit-contracts @ 443ff1b / schema 1.2.0)
 //! — never redefined here. In-process mechanism only: M1 puts the fabric
 //! transport + PAT verification behind the same hook/close semantics.
 

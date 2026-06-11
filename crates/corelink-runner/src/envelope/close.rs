@@ -105,11 +105,11 @@ impl JobClose {
             bail!("job close refused: close already signalled (job close is exactly-once)");
         }
 
-        // (1) Close both surfaces; snapshot lossiness AT close time:
-        // overflow during the job, or undelivered residue still in flight.
+        // (1) Close both surfaces. Overflow lossiness is latched from the
+        // job's lifetime; RESIDUE is judged after the ack window (§13.2(3):
+        // the forge finalises the blobs between signal and ack, so in-window
+        // draining must count as delivered).
         inner.phase = HookPhase::Closed;
-        let residue = !inner.raw.is_empty() || !inner.meta.is_empty();
-        let lossy = residue || inner.raw_overflow || inner.meta_overflow;
 
         let metrics = inner
             .collector
@@ -136,7 +136,11 @@ impl JobClose {
             .unwrap_or_else(|p| p.into_inner());
 
         // (4) Outcome: the window is over either way; a later ack is inert.
+        // Residue is judged NOW — events the forge drained in-window count
+        // as delivered; what is still sitting in either buffer was lost.
         let acked = inner.acked;
+        let residue = !inner.raw.is_empty() || !inner.meta.is_empty();
+        let lossy = residue || inner.raw_overflow || inner.meta_overflow;
         inner.ack_window_open = false;
         inner.close_done = true;
         inner.released = true;

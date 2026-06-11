@@ -571,6 +571,30 @@ fn both_channels_drained_before_close_signal() {
         .unwrap();
     acker.join().unwrap();
     assert!(out.capture_incomplete, "meta residue at close → incomplete");
+
+    // Sub-case 3: residue at SIGNAL time but drained IN-WINDOW before the
+    // ack → complete. §13.2(3): the forge finalises the blobs between the
+    // close signal and its ack, so in-window draining counts as delivered.
+    let hook = open_hook(2_000, 64);
+    let sub = hook.subscribe(CRED_A).unwrap();
+    hook.write(turn(b"in-window-drain")).unwrap();
+    let h = hook.clone();
+    let drainer_acker = std::thread::spawn(move || {
+        // Give close() time to publish the signal first.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let _ = drain_raw(&sub);
+        let _ = drain_meta(&sub);
+        sub.ack(CRED_A).unwrap();
+        drop(h);
+    });
+    let out = JobClose::new(&hook)
+        .close(JobStatus::Succeeded, Instant::now(), &zero_price())
+        .unwrap();
+    drainer_acker.join().unwrap();
+    assert!(
+        !out.capture_incomplete,
+        "residue drained in-window before ack → capture complete"
+    );
 }
 
 // ── B5 ────────────────────────────────────────────────────────────────────────
