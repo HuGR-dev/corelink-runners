@@ -12,6 +12,10 @@
 //! - **Freeze item 5 — meter event schema**: [`meter::SlotOccupancyEvent`] /
 //!   [`meter::SlotEventKind`] / [`meter::CogsCounters`] (BIL1 emits, CP1/ENV2
 //!   produce; the SLOT is the billable unit, never minutes).
+//! - **CP1 lifecycle wiring**: [`lifecycle::LeaseLifecycle`] (mark-then-kill
+//!   expiry + surfaced-not-green crash sweeps, legal matrix only) over the
+//!   thin [`lifecycle::BoxProbe`] port — the runner adapts at the composition
+//!   root, so this crate stays hermetic (no runner dep).
 //!
 //! Scope discipline: **no scheduler, no HTTP here.** This crate is the typed
 //! seam; CP3 (scheduler) and API1+ (HTTP surface) live in their own crates and
@@ -22,9 +26,11 @@
 //! contract type.
 
 pub mod ledger;
+pub mod lifecycle;
 pub mod meter;
 pub mod tenant;
 
 pub use ledger::{FileLedger, InMemoryLedger, LeaseLedger, LeaseRecord, LeaseState};
+pub use lifecycle::{BoxProbe, LeaseLifecycle};
 pub use meter::{CogsCounters, SlotEventKind, SlotOccupancyEvent};
 pub use tenant::{TenantId, TenantPlan};
