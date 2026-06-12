@@ -392,15 +392,23 @@ fn provider_5xx_fails_closed() {
     }
 }
 
-// ── Test 10: exec_captured_returns_logs_as_stdout ────────────────────────────
+// ── Test 10: exec_captured_parses_structured_logs_per_stream ─────────────────
 
 #[test]
-fn exec_captured_returns_logs_as_stdout() {
+fn exec_captured_parses_structured_logs_per_stream() {
+    // Structured CRI JSON logs: two stdout entries and one stderr entry.
+    // exec_captured must return clean messages (no ts/stream prefix) in the
+    // correct buckets, live-confirmed shape.
+    let logs_body = r#"{"data":[
+        {"containerId":"abc","type":"runtime","ts":"2026-06-12T19:54:09.849Z","log":"2026-06-12T19:54:09.849348083Z stdout F hello-from-northflank"},
+        {"containerId":"abc","type":"runtime","ts":"2026-06-12T19:54:09.850Z","log":"2026-06-12T19:54:09.850000000Z stdout F second stdout line"},
+        {"containerId":"abc","type":"runtime","ts":"2026-06-12T19:54:09.851Z","log":"2026-06-12T19:54:09.851000000Z stderr F some warning"}
+    ]}"#;
     let responses = vec![
         resp(200, "{}"),                        // PATCH set-command
         resp(200, r#"{"data":{"id":"run1"}}"#), // POST trigger-run
         resp(200, r#"{"status":"SUCCESS"}"#),   // GET poll
-        resp(200, "build log line\n"),          // GET logs
+        resp(200, logs_body),                   // GET logs
     ];
     let (engine, _fake) = engine_shared(responses);
 
@@ -410,8 +418,14 @@ fn exec_captured_returns_logs_as_stdout() {
         .expect("exec_captured");
 
     assert_eq!(out.code, Some(0), "exit code should be 0");
-    assert_eq!(out.stdout, "build log line\n", "stdout should be log body");
-    assert_eq!(out.stderr, "", "stderr should be empty");
+    assert_eq!(
+        out.stdout, "hello-from-northflank\nsecond stdout line",
+        "stdout should be clean messages joined with newline, no ts/stream prefix"
+    );
+    assert_eq!(
+        out.stderr, "some warning",
+        "stderr should contain the stderr message, no ts/stream prefix"
+    );
 }
 
 // ── Test 11: delete_job_idempotent_on_404 ────────────────────────────────────
@@ -759,6 +773,74 @@ fn bearer_on_every_request_in_full_flow() {
             req.url
         );
     }
+}
+
+// ── Test 22b: fetch_logs_defensive_on_non_json ───────────────────────────────
+
+#[test]
+fn fetch_logs_defensive_on_non_json() {
+    // A logs body that is not the expected JSON shape: exec_captured must
+    // return the raw body as stdout, no panic or Err.
+    let responses = vec![
+        resp(200, "{}"),                        // PATCH set-command
+        resp(200, r#"{"data":{"id":"run1"}}"#), // POST trigger-run
+        resp(200, r#"{"status":"SUCCESS"}"#),   // GET poll
+        resp(200, "plain text"),                // GET logs — not structured JSON
+    ];
+    let (engine, _fake) = engine_shared(responses);
+
+    let c = container("myjob");
+    let out = engine
+        .exec_captured(&c, &["echo", "hi"])
+        .expect("exec_captured must succeed even on non-JSON logs body");
+
+    assert_eq!(out.code, Some(0), "exit code should be 0");
+    assert_eq!(
+        out.stdout, "plain text",
+        "non-JSON logs body should be returned verbatim as stdout"
+    );
+    assert_eq!(
+        out.stderr, "",
+        "stderr should be empty for non-JSON fallback"
+    );
+}
+
+// ── Test 22c: from_env_team_id_sets_team_scoped_base_url ─────────────────────
+
+#[test]
+fn from_env_team_id_sets_team_scoped_base_url() {
+    let cfg = NorthflankConfig::from_env_with(|k| match k {
+        "NORTHFLANK_API_TOKEN" => Some("tok".to_string()),
+        "NORTHFLANK_PROJECT_ID" => Some("proj".to_string()),
+        "NORTHFLANK_TEAM_ID" => Some("humangr".to_string()),
+        _ => None,
+    })
+    .expect("config must be Some");
+
+    assert_eq!(
+        cfg.base_url, "https://api.northflank.com/v1/teams/humangr",
+        "NORTHFLANK_TEAM_ID should produce a team-scoped base_url"
+    );
+}
+
+// ── Test 22d: from_env_explicit_base_url_beats_team_id ───────────────────────
+
+#[test]
+fn from_env_explicit_base_url_beats_team_id() {
+    let explicit = "https://my-proxy.example.com/v1";
+    let cfg = NorthflankConfig::from_env_with(|k| match k {
+        "NORTHFLANK_API_TOKEN" => Some("tok".to_string()),
+        "NORTHFLANK_PROJECT_ID" => Some("proj".to_string()),
+        "NORTHFLANK_BASE_URL" => Some(explicit.to_string()),
+        "NORTHFLANK_TEAM_ID" => Some("humangr".to_string()),
+        _ => None,
+    })
+    .expect("config must be Some");
+
+    assert_eq!(
+        cfg.base_url, explicit,
+        "NORTHFLANK_BASE_URL must take precedence over NORTHFLANK_TEAM_ID"
+    );
 }
 
 // ── Test 23: spawn_sends_pinned_image_verbatim ────────────────────────────────
