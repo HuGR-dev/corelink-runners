@@ -152,32 +152,59 @@ pub(crate) async fn acquire(
     // wire sees. A failure on either write is a 503, never a half-admitted
     // lease handed to the caller.
     //
+    // IMPORTANT — leak guard: provision has already bound the box/registry.
+    // Any failure on the ledger path MUST tear down the provisioned box
+    // before returning an error, otherwise the binding is orphaned with
+    // nothing to reclaim it.  `teardown_lease` is best-effort (no-op under
+    // `NoBoxProvisioner`) and MUST NOT be called while the ledger `MutexGuard`
+    // is held (it is async; holding a `MutexGuard` across an await is
+    // unsound).  The pattern below: compute the error (if any) inside a block
+    // that owns and drops the guard, then await teardown OUTSIDE that block.
+    //
     // `box_ref` is set to `"box:<lease_id>"` to signal "provisioned" when
     // a real provisioner is wired. Under `NoBoxProvisioner` (default), the
     // registry stays empty and the marker is still set — the actual
     // `RunningContainer` lives in the `BoxRegistry`; `box_ref` is just the
     // ledger's marker (not the real handle). ──
-    let Ok(mut ledger) = state.ledger.lock() else {
-        return fail_closed("lease ledger lock poisoned after provision");
+
+    // Returns `Some(err_msg)` on any ledger failure; `None` on success.
+    // The `MutexGuard` is guaranteed dead by the time this expression yields
+    // its value — the block drops it before returning — so the subsequent
+    // `await` never crosses a live `!Send` guard.
+    let ledger_err: Option<&'static str> = {
+        match state.ledger.lock() {
+            Err(_) => {
+                // Poisoned lock: no guard to drop, just signal failure.
+                Some("lease ledger lock poisoned after provision")
+            }
+            Ok(mut ledger) => {
+                let record = LeaseRecord {
+                    lease_id: lease_id.clone(),
+                    tenant: tenant.clone(),
+                    state: LeaseState::Pending,
+                    box_ref: format!("box:{lease_id}"),
+                    created_at_ms: now_ms,
+                    updated_at_ms: now_ms,
+                };
+                if ledger.put(record).is_err() {
+                    Some("lease ledger refused the admission record")
+                } else if ledger
+                    .transition(&lease_id, RunnerState::Held, now_ms)
+                    .is_err()
+                {
+                    Some("lease ledger refused Pending->Held")
+                } else {
+                    None // success — guard drops here at end of block
+                }
+                // `ledger` (MutexGuard) is dropped here in every path
+            }
+        }
     };
-    let record = LeaseRecord {
-        lease_id: lease_id.clone(),
-        tenant: tenant.clone(),
-        state: LeaseState::Pending,
-        box_ref: format!("box:{lease_id}"),
-        created_at_ms: now_ms,
-        updated_at_ms: now_ms,
-    };
-    if ledger.put(record).is_err() {
-        return fail_closed("lease ledger refused the admission record");
+    if let Some(msg) = ledger_err {
+        // Guard is long gone; safe to await teardown.
+        state.teardown_lease(&lease_id).await;
+        return fail_closed(msg);
     }
-    if ledger
-        .transition(&lease_id, RunnerState::Held, now_ms)
-        .is_err()
-    {
-        return fail_closed("lease ledger refused Pending->Held");
-    }
-    drop(ledger);
 
     // ── 5. Contract §1: acquire returns lease id + exec endpoint +
     // deadline. The endpoint is the frozen template, substituted. The
@@ -287,5 +314,184 @@ pub(crate) async fn cancel(
             ApiError::Invalid,
             "lease is terminal (expired/crashed): contract §1 legal matrix forbids release",
         ),
+    }
+}
+
+// ── Regression tests ─────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    //! Focused unit tests for the acquire handler's post-provision teardown
+    //! guard introduced by the audit fix.
+    //!
+    //! **What is tested here:** when the ledger write fails AFTER a successful
+    //! provision, the handler MUST call `teardown_lease` before returning 503.
+    //! We exercise the `ledger.put` failure branch by pre-seeding the ledger
+    //! with the mint's predicted first ID so that the duplicate-key guard fires.
+    //!
+    //! **Full HTTP regression** (the `ledger.transition` failure branch and the
+    //! poisoned-lock-after-provision branch) requires a failing-ledger double
+    //! with a recording provisioner wired through the HTTP stack; that machinery
+    //! belongs in the WP-CF acceptance suite for cloud provisioning (the
+    //! `cloud_*` integration tests, owned by the parallel agent).
+
+    use std::sync::{Arc, Mutex};
+
+    use anyhow::Result;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode, header};
+    use corelink_fabric::{
+        InMemoryLedger, LeaseLedger, LeaseRecord, LeaseState, TenantId, TenantPlan,
+    };
+    use corelink_fabric_api::{AcquireRequest, paths};
+    use corelink_runner::lease::ContainerSpec;
+    use tower::ServiceExt;
+
+    use crate::app::{AppState, Clock, StaticPlans};
+    use crate::auth::StaticTokenStore;
+    use crate::cloud_exec::BoxProvisioner;
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /// Deterministic test clock.
+    struct FixedClock(u64);
+    impl Clock for FixedClock {
+        fn now_ms(&self) -> u64 {
+            self.0
+        }
+    }
+
+    /// Content-pinned image accepted by `ContainerSpec::from_lease`.
+    const PINNED: &str =
+        "alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc";
+
+    /// The first `lease_id` that `AppState::new(...).mint_lease_id()` produces.
+    /// The counter starts at 1 and `fetch_add` returns the prior value (1),
+    /// so the first mint is always `"lease-0000000000000001"`.
+    const FIRST_MINT: &str = "lease-0000000000000001";
+
+    /// A recording `BoxProvisioner`: `provision` always succeeds; `teardown`
+    /// records the `lease_id` in the shared log.  No-op on re-teardown.
+    struct RecordingProvisioner {
+        torn_down: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl RecordingProvisioner {
+        fn new() -> (Self, Arc<Mutex<Vec<String>>>) {
+            let log = Arc::new(Mutex::new(Vec::new()));
+            (
+                Self {
+                    torn_down: Arc::clone(&log),
+                },
+                log,
+            )
+        }
+    }
+
+    impl BoxProvisioner for RecordingProvisioner {
+        fn provision(&self, _lease_id: &str, _spec: &ContainerSpec) -> Result<()> {
+            Ok(())
+        }
+
+        fn teardown(&self, lease_id: &str) -> Result<()> {
+            self.torn_down.lock().unwrap().push(lease_id.to_string());
+            Ok(())
+        }
+    }
+
+    /// Build a test `AppState` wired with a `RecordingProvisioner` and the
+    /// provided ledger.  Returns the state, the provisioner's teardown log, and
+    /// the ledger handle.
+    fn state_with_recording(
+        ledger: Arc<Mutex<dyn LeaseLedger + Send>>,
+    ) -> (AppState, Arc<Mutex<Vec<String>>>) {
+        let (prov, log) = RecordingProvisioner::new();
+        let plans = StaticPlans::new([TenantPlan {
+            tenant: TenantId::new("acme").unwrap(),
+            max_concurrency: 5,
+            rate_ceiling_per_min: 100,
+        }]);
+        let mut state = AppState::new(
+            Arc::clone(&ledger),
+            Arc::new(plans),
+            Arc::new(FixedClock(1_717_000_000_000)),
+        );
+        state.provisioner = Arc::new(prov);
+        (state, log)
+    }
+
+    fn acme_token_store() -> Arc<StaticTokenStore> {
+        Arc::new(StaticTokenStore::new([(
+            "pat-acme".to_string(),
+            TenantId::new("acme").unwrap(),
+        )]))
+    }
+
+    fn acquire_request(path: &str, body: &AcquireRequest) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri(path)
+            .header(header::AUTHORIZATION, "Bearer pat-acme")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(body).unwrap()))
+            .unwrap()
+    }
+
+    // ── Test: teardown on ledger-put failure ──────────────────────────────────
+
+    /// **Regression guard (audit fix):** if `ledger.put` fails after a
+    /// successful provision, the handler must call `teardown_lease` before
+    /// returning 503 — no orphaned box.
+    ///
+    /// Mechanism: pre-seed the ledger with the mint's predicted first ID so
+    /// `InMemoryLedger::put` fires its "already exists" guard, simulating the
+    /// post-provision ledger write failure.
+    #[tokio::test]
+    async fn acquire_ledger_put_failure_triggers_teardown() {
+        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
+            Arc::new(Mutex::new(InMemoryLedger::new()));
+
+        // Pre-seed the ledger with the ID that `mint_lease_id` will produce,
+        // so that `ledger.put(record)` fires the duplicate-key error.
+        {
+            let mut l = ledger.lock().unwrap();
+            l.put(LeaseRecord {
+                lease_id: FIRST_MINT.to_string(),
+                tenant: TenantId::new("acme").unwrap(),
+                state: LeaseState::Pending,
+                box_ref: String::new(),
+                created_at_ms: 0,
+                updated_at_ms: 0,
+            })
+            .unwrap();
+        }
+
+        let (state, teardown_log) = state_with_recording(Arc::clone(&ledger));
+        let router = crate::app::app(acme_token_store(), state);
+
+        let body = AcquireRequest {
+            image_digest: PINNED.to_string(),
+            net_policy: "isolated".to_string(),
+            tmp_root: "/work/tmp".to_string(),
+            expiry_ms: 60_000,
+        };
+        let resp = router
+            .oneshot(acquire_request(paths::LEASES, &body))
+            .await
+            .unwrap();
+
+        // Handler must return 503 (fail-closed).
+        assert_eq!(
+            resp.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "expected 503 when ledger.put fails after provision"
+        );
+
+        // The provisioned box MUST have been torn down.
+        let log = teardown_log.lock().unwrap();
+        assert!(
+            log.contains(&FIRST_MINT.to_string()),
+            "teardown_lease must be called for the orphaned box; got log: {log:?}"
+        );
     }
 }

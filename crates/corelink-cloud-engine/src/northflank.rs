@@ -59,7 +59,7 @@ use crate::http::{HttpRequest, HttpResponse, HttpTransport, Method};
 
 /// Tunables for the Northflank backend. Defaults match the docs' example shapes;
 /// `token`/`project_id` are required.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct NorthflankConfig {
     /// API root, e.g. `https://api.northflank.com/v1`.
     pub base_url: String,
@@ -141,6 +141,24 @@ impl NorthflankConfig {
     #[must_use]
     pub fn from_env() -> Option<Self> {
         Self::from_env_with(|k| std::env::var(k).ok())
+    }
+}
+
+/// Manual `Debug` for [`NorthflankConfig`] — the `token` field is redacted so
+/// the raw API bearer token never appears in logs, error context, or panic
+/// output even when the struct is `{:?}`-formatted.
+impl std::fmt::Debug for NorthflankConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NorthflankConfig")
+            .field("base_url", &self.base_url)
+            .field("project_id", &self.project_id)
+            .field("token", &"***REDACTED***")
+            .field("deployment_plan", &self.deployment_plan)
+            .field("ephemeral_storage_mb", &self.ephemeral_storage_mb)
+            .field("active_deadline_secs", &self.active_deadline_secs)
+            .field("max_poll_attempts", &self.max_poll_attempts)
+            .field("poll_interval_ms", &self.poll_interval_ms)
+            .finish()
     }
 }
 
@@ -242,10 +260,21 @@ fn shell_join(argv: &[&str]) -> String {
 
 /// Northflank-backed [`Engine`], generic over the HTTP transport so the engine
 /// logic is fully unit-testable against a fake.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct NorthflankEngine<H: HttpTransport> {
     http: H,
     cfg: NorthflankConfig,
+}
+
+/// Manual `Debug` for [`NorthflankEngine`] — delegates to [`NorthflankConfig`]'s
+/// redacting `Debug` impl so the bearer token is never exposed. The `H`
+/// transport generic is not required to implement `Debug`.
+impl<H: HttpTransport> std::fmt::Debug for NorthflankEngine<H> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NorthflankEngine")
+            .field("cfg", &self.cfg)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<H: HttpTransport> NorthflankEngine<H> {
@@ -517,5 +546,51 @@ impl<H: HttpTransport> Engine for NorthflankEngine<H> {
                 resp.status
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::http::{HttpRequest, HttpResponse, HttpTransport};
+
+    /// Trivial transport stub — always returns 200 with an empty body.
+    struct StubTransport;
+
+    impl HttpTransport for StubTransport {
+        fn send(&self, _req: &HttpRequest) -> anyhow::Result<HttpResponse> {
+            Ok(HttpResponse {
+                status: 200,
+                body: String::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn token_is_redacted_in_debug() {
+        let cfg = NorthflankConfig::new("proj", "super-secret-token-value");
+
+        // NorthflankConfig must not expose the raw token.
+        let s = format!("{cfg:?}");
+        assert!(
+            !s.contains("super-secret-token-value"),
+            "NorthflankConfig Debug leaked the token: {s}"
+        );
+        assert!(
+            s.contains("REDACTED"),
+            "NorthflankConfig Debug missing REDACTED placeholder: {s}"
+        );
+
+        // NorthflankEngine wrapping that config must also not expose the token.
+        let engine = NorthflankEngine::new(StubTransport, cfg);
+        let es = format!("{engine:?}");
+        assert!(
+            !es.contains("super-secret-token-value"),
+            "NorthflankEngine Debug leaked the token: {es}"
+        );
+        assert!(
+            es.contains("REDACTED"),
+            "NorthflankEngine Debug missing REDACTED placeholder: {es}"
+        );
     }
 }
