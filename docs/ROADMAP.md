@@ -37,12 +37,12 @@ hosts agent-driven execution", i.e. the M1 fabric.
 The repo is local-only today: no remote, no backup, CI has never executed as
 CI, and branch→PR→merge is physically impossible. To ship the seed milestone:
 
-- [ ] Create the GitHub repo + remote (org/name = owner call).
-- [ ] Decide default branch: CLAUDE.md says PR to `main`; only `master`
-      exists; `ci.yml` triggers on `master`. Align all three.
-- [ ] Register the self-hosted runner (`corelink-builder`) with the repo.
-- [ ] Push → PR `integ/seed-runner` → default branch → first real CI run
-      green → merge → tag `v0.1.0-seed`.
+- [x] Create the GitHub repo + remote — `humangr-labs/corelink-runners` (private).
+- [x] Default branch `main` (house standard); `ci.yml` trigger aligned.
+- [x] Runner `corelink-runners-builder-01` registered (labels mac,
+      corelink-builder), service installed on the builder Mac.
+- [x] PR #1 → first real CI run green → merged `6b42bcb` → tag
+      `v0.1.0-seed` (2026-06-12).
 - [ ] **Cross-repo `IntentMetrics` conformance vector** — §13.4 requires it
       byte-identical in both repos; `../hugit/conformance/` does not have it
       yet either. Needs a hugit-side PR (hugit techlead) + mirror here.
