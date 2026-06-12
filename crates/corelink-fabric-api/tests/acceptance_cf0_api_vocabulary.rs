@@ -7,9 +7,11 @@
 
 use corelink_fabric_api::{
     AcquireRequest, AcquireResponse, ApiError, CancelResponse, ErrorBody, ExecRequest,
-    ExecResponse, StatusResponse, paths,
+    ExecResponse, StatusResponse, TriggerRequest, TriggerResponse, paths,
 };
-use corelink_runners_contracts::{Artifact, CheckDef, CheckResult, RunnerLease, RunnerState};
+use corelink_runners_contracts::{
+    Artifact, CheckDef, CheckResult, LandableEntry, RunnerLease, RunnerState,
+};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::json;
@@ -176,6 +178,28 @@ fn dtos_roundtrip_and_deny_unknown() {
             result: sample_check_result(),
         },
         "ExecResponse",
+    );
+    // API4 amendment to the CF0 freeze (lead-ratified): the §9 trigger DTOs.
+    roundtrip_and_deny_unknown(
+        &TriggerRequest {
+            entry: LandableEntry {
+                item_id: "item-0007".to_string(),
+                intent_id: "intent-0042".to_string(),
+                tree_hash: "34".repeat(32),
+                order_index: 7,
+            },
+            check_def: sample_check_def(),
+            tree_hash: "34".repeat(32),
+            lease_id: "lease-0001".to_string(),
+        },
+        "TriggerRequest",
+    );
+    roundtrip_and_deny_unknown(
+        &TriggerResponse {
+            item_id: "item-0007".to_string(),
+            result: sample_check_result(),
+        },
+        "TriggerResponse",
     );
     roundtrip_and_deny_unknown(
         &ErrorBody {

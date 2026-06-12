@@ -18,6 +18,8 @@ use corelink_fabric::{
 };
 use corelink_fabric_api::paths;
 
+use corelink_runners_contracts::CheckResult;
+
 use crate::auth::{self, TokenStore};
 use crate::exec::{LeasedExec, NoBoxExec};
 use crate::handlers;
@@ -30,6 +32,11 @@ pub trait Clock: Send + Sync {
     /// Current time, unix epoch milliseconds.
     fn now_ms(&self) -> u64;
 }
+
+/// §9 trigger idempotency map (WP-API4): `(tenant, item_id, tree_hash)` →
+/// the `CheckResult` already produced for that delivery (at-least-once
+/// dedup; see `handlers::queue`).
+pub(crate) type TriggerDedupMap = HashMap<(TenantId, String, String), CheckResult>;
 
 /// Production [`Clock`]: `SystemTime::now()`.
 #[derive(Debug, Clone, Copy, Default)]
@@ -109,6 +116,12 @@ pub struct AppState {
     /// the expired-at-exec-time gate reads it BEFORE any execution
     /// (`expired_job_stores_nothing_ever`).
     pub(crate) deadlines: Arc<Mutex<HashMap<String, u64>>>,
+    /// §9 trigger idempotency map (WP-API4): `(tenant, item_id, tree_hash)`
+    /// → the `CheckResult` already produced for that delivery. hugit's
+    /// landing queue delivers at-least-once; a duplicate trigger answers
+    /// from here WITHOUT re-executing. Bounded by a simple insertion cap
+    /// (`handlers::queue::TRIGGER_DEDUP_CAP`) — see the queue module docs.
+    pub(crate) trigger_dedup: Arc<Mutex<TriggerDedupMap>>,
     /// Monotonic mint counter for lease ids.
     lease_seq: Arc<AtomicU64>,
 }
@@ -129,6 +142,7 @@ impl AppState {
             rate_windows: Arc::new(Mutex::new(HashMap::new())),
             exec: Arc::new(NoBoxExec),
             deadlines: Arc::new(Mutex::new(HashMap::new())),
+            trigger_dedup: Arc::new(Mutex::new(HashMap::new())),
             lease_seq: Arc::new(AtomicU64::new(1)),
         }
     }
@@ -220,6 +234,7 @@ pub fn app_full(
             post(handlers::leases::cancel),
         )
         .route(&capture(paths::EXEC), post(handlers::exec_handler::exec))
+        .route(paths::QUEUE_TRIGGER, post(handlers::queue::trigger))
         .route(&capture(paths::ENVELOPE_EVENTS), get(envelope::poll_events))
         .route(&capture(paths::ENVELOPE_META), get(envelope::poll_meta))
         .with_state(state)

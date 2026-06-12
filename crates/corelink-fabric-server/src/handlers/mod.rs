@@ -11,3 +11,4 @@ pub mod envelope;
 pub mod exec_handler;
 pub mod leases;
 pub mod metrics;
+pub mod queue;

@@ -18,5 +18,6 @@ pub mod paths;
 
 pub use dto::{
     AcquireRequest, AcquireResponse, CancelResponse, ExecRequest, ExecResponse, StatusResponse,
+    TriggerRequest, TriggerResponse,
 };
 pub use error::{ApiError, ErrorBody};
