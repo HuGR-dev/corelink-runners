@@ -43,6 +43,9 @@
 //! [`teardown`] forensic re-scan. The acceptance contract (destroy leaves
 //! nothing; tmp/net isolated) is unchanged across engines.
 
+/// Attestation signing: the frozen sig-preimage + ed25519 `FabricSigner` and
+/// `verify_chain` (WP-ATT1a; ratified decision #2).
+pub mod attest;
 pub mod boot;
 pub mod concurrency;
 pub mod enforce;
