@@ -15,6 +15,11 @@ serde_json = { workspace = true }
 corelink-fabric-api        = { path = "../corelink-fabric-api" }
 corelink-fabric            = { path = "../corelink-fabric" }
 corelink-runners-contracts = { path = "../corelink-runners-contracts" }
+# Validation reuse ONLY (API2): `ContainerSpec::from_lease` is the runner's
+# own lease gate (pinned image, allowed net_policy, tmp_root injection
+# guard). No box/VM is ever contacted from this crate in API2 — pinned at
+# source level by `acquire_unpinned_image_rejected_400_before_box_contact`.
+corelink-runner            = { path = "../corelink-runner" }
 
 [dev-dependencies]
 tokio = { workspace = true }
