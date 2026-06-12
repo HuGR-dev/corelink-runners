@@ -182,6 +182,14 @@ impl Engine for FakeEngine {
         Ok(Some(0))
     }
 
+    fn exec_captured(&self, _c: &RunningContainer, _argv: &[&str]) -> Result<CmdOutput> {
+        Ok(CmdOutput {
+            code: Some(0),
+            stdout: String::new(),
+            stderr: String::new(),
+        })
+    }
+
     fn is_alive(&self, c: &RunningContainer) -> Result<bool> {
         Ok(self.alive.lock().unwrap().contains(&c.name))
     }

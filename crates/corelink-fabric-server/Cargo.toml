@@ -1,0 +1,21 @@
+[package]
+name = "corelink-fabric-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+axum       = { workspace = true }
+serde_json = { workspace = true }
+# Same-workspace path deps (house law allows these; the crates.io-only rule in
+# deny.toml governs EXTERNAL deps): the FROZEN API vocabulary (paths, DTOs,
+# error semantics), the control-plane core types (TenantId), and the frozen
+# wire-contract transcriptions the lease handlers (API2/3) will carry.
+corelink-fabric-api        = { path = "../corelink-fabric-api" }
+corelink-fabric            = { path = "../corelink-fabric" }
+corelink-runners-contracts = { path = "../corelink-runners-contracts" }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tower = { workspace = true }

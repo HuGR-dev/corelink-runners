@@ -178,6 +178,14 @@ impl Engine for FakeEngine {
         Ok(Some(0))
     }
 
+    fn exec_captured(&self, _c: &RunningContainer, _argv: &[&str]) -> anyhow::Result<CmdOutput> {
+        Ok(CmdOutput {
+            code: Some(0),
+            stdout: String::new(),
+            stderr: String::new(),
+        })
+    }
+
     fn is_alive(&self, _c: &RunningContainer) -> anyhow::Result<bool> {
         Ok(true)
     }

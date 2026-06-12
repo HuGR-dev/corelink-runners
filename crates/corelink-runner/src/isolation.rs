@@ -15,6 +15,9 @@
 use anyhow::{Context, Result, bail};
 
 use crate::lease::{BoxExec, ContainerSpec};
+// Re-exported so Engine consumers get the full trait surface (including the
+// `exec_captured` return type) from one coherent import path.
+pub use crate::lease::CmdOutput;
 
 /// Maximum size of the per-job private tmpfs mounted at `tmp_root`.
 ///
@@ -65,6 +68,13 @@ pub trait Engine {
 
     /// Run one job command inside the container, returning its exit code.
     fn exec(&self, c: &RunningContainer, argv: &[&str]) -> Result<Option<i32>>;
+
+    /// Run one job command inside the container, capturing stdout/stderr bytes
+    /// and the exit code. The captured-output half of the seam (Engine v2,
+    /// CF0 freeze): the CheckResult path derives canonical bytes + content
+    /// digest from this, and a Firecracker engine must implement it without
+    /// any docker-exec analogue.
+    fn exec_captured(&self, c: &RunningContainer, argv: &[&str]) -> Result<CmdOutput>;
 
     /// `true` iff the container `c` is still live on the box.
     ///
@@ -212,6 +222,18 @@ impl<B: BoxExec> Engine for DockerEngine<B> {
         Ok(out.code)
     }
 
+    fn exec_captured(&self, c: &RunningContainer, argv: &[&str]) -> Result<CmdOutput> {
+        // Same docker-exec transport path as `exec`, but the whole captured
+        // output is handed back verbatim: stdout and stderr separately, exit
+        // code as-is. No trimming, no scrubbing — the CheckResult path derives
+        // canonical bytes + a content digest from exactly what the job wrote.
+        let mut full = vec!["docker", "exec", &c.name];
+        full.extend_from_slice(argv);
+        self.boxx
+            .run(&full)
+            .with_context(|| format!("docker exec (captured) in {}", c.name))
+    }
+
     fn is_alive(&self, c: &RunningContainer) -> Result<bool> {
         // `docker ps` (running only) filtered to the exact name. A dead/reaped
         // container does not appear, so the cached handle is not reused.
@@ -227,5 +249,123 @@ impl<B: BoxExec> Engine for DockerEngine<B> {
             ])
             .with_context(|| format!("liveness probe for {}", c.name))?;
         Ok(out.stdout.lines().any(|l| l.trim() == c.name))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+
+    /// Hermetic loopback box (the FakeBox house pattern, cf.
+    /// `tests/hermetic_supply_chain.rs`): records every argv and replays one
+    /// scripted [`CmdOutput`] verbatim. No box, no docker, no network.
+    #[derive(Clone)]
+    struct FakeBox {
+        calls: Arc<Mutex<Vec<Vec<String>>>>,
+        reply: CmdOutput,
+    }
+
+    impl FakeBox {
+        fn replying(reply: CmdOutput) -> Self {
+            Self {
+                calls: Arc::new(Mutex::new(Vec::new())),
+                reply,
+            }
+        }
+
+        fn calls(&self) -> Vec<Vec<String>> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl BoxExec for FakeBox {
+        fn run(&self, argv: &[&str]) -> Result<CmdOutput> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(argv.iter().map(ToString::to_string).collect());
+            Ok(self.reply.clone())
+        }
+    }
+
+    fn container() -> RunningContainer {
+        RunningContainer {
+            name: "hugit-job-cf0b".to_string(),
+        }
+    }
+
+    #[test]
+    fn exec_captured_returns_bytes_and_exit() {
+        let boxx = FakeBox::replying(CmdOutput {
+            code: Some(7),
+            stdout: "out-bytes\n".to_string(),
+            stderr: "err-bytes\n".to_string(),
+        });
+        let engine = DockerEngine::new(boxx.clone());
+        let out = engine
+            .exec_captured(&container(), &["sh", "-c", "exit 7"])
+            .expect("exec_captured");
+        assert_eq!(out.code, Some(7), "exit code must pass through as-is");
+        assert_eq!(out.stdout, "out-bytes\n");
+        assert_eq!(out.stderr, "err-bytes\n");
+        // The transport is the engine's own docker-exec plumbing (same path
+        // as `exec`): `docker exec <name> <argv…>`, nothing else.
+        assert_eq!(
+            boxx.calls(),
+            vec![vec![
+                "docker".to_string(),
+                "exec".to_string(),
+                "hugit-job-cf0b".to_string(),
+                "sh".to_string(),
+                "-c".to_string(),
+                "exit 7".to_string(),
+            ]],
+        );
+    }
+
+    #[test]
+    fn exec_captured_bytes_are_byte_faithful() {
+        // Binary-unsafe content: NUL, BEL, ESC/ANSI, CRLF, tabs, and
+        // leading/trailing whitespace + trailing newlines. Everything must come
+        // back verbatim — no trimming, no scrubbing, no normalization.
+        let hostile = "\u{0}\u{7}\u{1b}[31m  spaced  \r\n\ttab\u{0} trailing \n\n";
+        let boxx = FakeBox::replying(CmdOutput {
+            code: Some(0),
+            stdout: hostile.to_string(),
+            stderr: hostile.to_string(),
+        });
+        let engine = DockerEngine::new(boxx);
+        let out = engine
+            .exec_captured(&container(), &["cat", "/hugit/tmp/blob"])
+            .expect("exec_captured");
+        assert_eq!(out.stdout, hostile, "stdout must be byte-faithful");
+        assert_eq!(out.stderr, hostile, "stderr must be byte-faithful");
+        assert_eq!(out.code, Some(0));
+    }
+
+    #[test]
+    fn exec_captured_separates_stdout_stderr() {
+        let boxx = FakeBox::replying(CmdOutput {
+            code: Some(3),
+            stdout: "ONLY-ON-STDOUT".to_string(),
+            stderr: "ONLY-ON-STDERR".to_string(),
+        });
+        let engine = DockerEngine::new(boxx);
+        let out = engine
+            .exec_captured(&container(), &["sh", "-c", "true"])
+            .expect("exec_captured");
+        assert_eq!(out.stdout, "ONLY-ON-STDOUT");
+        assert_eq!(out.stderr, "ONLY-ON-STDERR");
+        assert!(
+            !out.stdout.contains("STDERR"),
+            "stderr must never bleed into stdout"
+        );
+        assert!(
+            !out.stderr.contains("STDOUT"),
+            "stdout must never bleed into stderr"
+        );
+        assert_eq!(out.code, Some(3));
     }
 }
