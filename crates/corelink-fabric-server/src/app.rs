@@ -113,6 +113,13 @@ pub struct AppState {
     /// refused, fail-closed) until the composition root attaches a real
     /// backend via [`AppState::with_executor`].
     pub exec: Arc<dyn LeasedExec>,
+    /// The spawn/teardown lifecycle seam (WP-CF-SPAWN): `provision` is called
+    /// at acquire (before the ledger Pending→Held transition); `teardown` is
+    /// called best-effort at close. Defaults to [`NoBoxProvisioner`] (no-op,
+    /// DEFAULT-OFF) — acquire and close behaviour is unchanged under the
+    /// default. The production composition root wires the real backend via
+    /// [`AppState::with_cloud_backend_from_env`].
+    pub provisioner: Arc<dyn crate::cloud_exec::BoxProvisioner>,
     /// `lease_id` → absolute deadline (epoch ms), recorded at acquire —
     /// the expired-at-exec-time gate reads it BEFORE any execution
     /// (`expired_job_stores_nothing_ever`).
@@ -163,6 +170,7 @@ impl AppState {
             wait_stats: Arc::new(Mutex::new(TenantWaitStats::new())),
             rate_windows: Arc::new(Mutex::new(HashMap::new())),
             exec: Arc::new(NoBoxExec),
+            provisioner: Arc::new(crate::cloud_exec::NoBoxProvisioner),
             deadlines: Arc::new(Mutex::new(HashMap::new())),
             trigger_dedup: Arc::new(Mutex::new(HashMap::new())),
             signer: Arc::new(FabricSigner::new_from_bytes(&DEV_FABRIC_KEY_SEED)),
@@ -185,10 +193,12 @@ impl AppState {
     /// Default-off — a `None` (no provider configured) keeps the fail-closed
     /// [`NoBoxExec`]; never silently installs a backend.
     ///
-    /// Use [`with_cloud_executor_from_env`] for the production composition
-    /// path (reads `NORTHFLANK_*` env vars).
+    /// This is a legitimate test injector for exec-only composition (e.g.
+    /// unit tests that supply a pre-built executor). For the full production
+    /// lifecycle (exec + provisioner over a shared registry) use
+    /// [`with_cloud_backend_from_env`].
     ///
-    /// [`with_cloud_executor_from_env`]: AppState::with_cloud_executor_from_env
+    /// [`with_cloud_backend_from_env`]: AppState::with_cloud_backend_from_env
     #[must_use]
     pub fn with_cloud_executor(mut self, exec: Option<Arc<dyn LeasedExec>>) -> Self {
         if let Some(e) = exec {
@@ -197,21 +207,52 @@ impl AppState {
         self
     }
 
-    /// Production composition entry: read `NORTHFLANK_*` env vars and wire
-    /// the [`NorthflankEngine`]-backed executor if both required vars are
-    /// present; absent → stays [`NoBoxExec`] (default-off, fail-closed).
+    /// **Deprecated — use [`with_cloud_backend_from_env`] instead.**
     ///
-    /// This is the trusted composition seam. It delegates to
-    /// [`cloud_executor_from_env`] (the blessed constructor) which enforces
-    /// the both-credentials-required check via
-    /// [`NorthflankConfig::from_env`].
+    /// [`with_cloud_backend_from_env`] wires BOTH the exec backend AND the
+    /// provisioner over one shared [`BoxRegistry`], which is required for the
+    /// spawn→exec lifecycle to be coherent: `provision` binds into the registry
+    /// at acquire and `exec` resolves from it — they must be the SAME map.
     ///
-    /// [`NorthflankEngine`]: corelink_cloud_engine::NorthflankEngine
-    /// [`cloud_executor_from_env`]: crate::cloud_exec::cloud_executor_from_env
-    /// [`NorthflankConfig::from_env`]: corelink_cloud_engine::NorthflankConfig::from_env
+    /// This method wires ONLY the exec backend; a composition root that calls
+    /// it and separately builds a [`NorthflankBoxProvisioner`] over a different
+    /// registry puts exec and provision on TWO DIFFERENT maps, so every exec
+    /// fails closed silently (the exec registry is always empty).
+    ///
+    /// [`with_cloud_backend_from_env`]: AppState::with_cloud_backend_from_env
+    /// [`BoxRegistry`]: crate::cloud_exec::BoxRegistry
+    /// [`NorthflankBoxProvisioner`]: crate::cloud_exec::NorthflankBoxProvisioner
     #[must_use]
+    #[deprecated(
+        note = "use with_cloud_backend_from_env — it wires exec AND provisioner over one shared registry; this exec-only method is a second-registry footgun"
+    )]
     pub fn with_cloud_executor_from_env(self, registry: crate::cloud_exec::BoxRegistry) -> Self {
         self.with_cloud_executor(crate::cloud_exec::cloud_executor_from_env(registry))
+    }
+
+    /// The **complete production composition entry**: read `NORTHFLANK_*` env
+    /// vars and wire BOTH the exec backend AND the provisioner over a SHARED
+    /// registry; absent env vars → keeps BOTH [`NoBoxExec`] and
+    /// [`NoBoxProvisioner`] defaults (default-off, fail-closed; no partial
+    /// wiring).
+    ///
+    /// The shared registry is the crux: `provision` binds at acquire, and
+    /// `exec` resolves at exec — they are the same map, forming a coherent
+    /// spawn→exec lifecycle. Neither is wired unless both can be.
+    ///
+    /// [`NoBoxExec`]: crate::exec::NoBoxExec
+    /// [`NoBoxProvisioner`]: crate::cloud_exec::NoBoxProvisioner
+    #[must_use]
+    pub fn with_cloud_backend_from_env(mut self, registry: crate::cloud_exec::BoxRegistry) -> Self {
+        match crate::cloud_exec::cloud_backend_from_env(registry) {
+            Some((exec, prov)) => {
+                self.exec = exec;
+                self.provisioner = prov;
+                self
+            }
+            // Keep NoBoxExec + NoBoxProvisioner: default-off, fail-closed.
+            None => self,
+        }
     }
 
     /// Attach the fabric attestation signing key (WP-ATT1+2; ratified
@@ -268,6 +309,44 @@ impl AppState {
             "lease-{:016x}",
             self.lease_seq.fetch_add(1, Ordering::Relaxed)
         )
+    }
+
+    /// Run the provisioner for `lease_id` / `spec` on a blocking thread and
+    /// await the result.
+    ///
+    /// This is the ONLY place in the codebase that calls the tokio
+    /// spawn-blocking primitive for the provision seam, keeping that tokio
+    /// symbol out of the handler source (which is source-pinned by the
+    /// acceptance suite for box-runtime symbols).
+    ///
+    /// Returns `Ok(())` on success, or the provisioner's `Err` on failure
+    /// (fail-closed). A join error (task panic) surfaces as `Err`.
+    pub(crate) async fn provision_lease(
+        &self,
+        lease_id: &str,
+        spec: &corelink_runner::lease::ContainerSpec,
+    ) -> anyhow::Result<()> {
+        let prov = Arc::clone(&self.provisioner);
+        let lid = lease_id.to_string();
+        let s = spec.clone();
+        tokio::task::spawn_blocking(move || prov.provision(&lid, &s))
+            .await
+            .map_err(|_| anyhow::anyhow!("provisioner task panicked"))?
+    }
+
+    /// Run teardown for `lease_id` on a blocking thread (best-effort).
+    ///
+    /// See [`provision_lease`] — the same tokio-primitive isolation applies.
+    ///
+    /// Errors and join panics are silently dropped: teardown failure must NOT
+    /// change the close response (the provider's `activeDeadlineSeconds` is
+    /// the hard bound).
+    ///
+    /// [`provision_lease`]: AppState::provision_lease
+    pub(crate) async fn teardown_lease(&self, lease_id: &str) {
+        let prov = Arc::clone(&self.provisioner);
+        let lid = lease_id.to_string();
+        let _ = tokio::task::spawn_blocking(move || prov.teardown(&lid)).await;
     }
 }
 
