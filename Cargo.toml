@@ -19,3 +19,7 @@ schemars   = { version = "=1.2.1", features = ["derive"] }
 # Cryptography — exact-pinned matching hugit (WP-R4: fence materialize's
 # content digests, the X4 supply-chain pin convention)
 sha2       = "=0.10.9"
+# Attestation signing — exact-pinned (WP-ATT1a; ratified decision #2:
+# ed25519, fabric key; base64 = standard alphabet for sig/pubkey wire form)
+base64        = "=0.22.1"
+ed25519-dalek = "=2.2.0"
