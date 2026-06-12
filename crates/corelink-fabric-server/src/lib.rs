@@ -18,6 +18,7 @@
 pub mod app;
 pub mod attestation;
 pub mod auth;
+pub mod cloud_exec;
 pub mod exec;
 pub mod handlers;
 
@@ -28,6 +29,7 @@ pub use attestation::{
     build_attestation, result_binding_preimage, sign_result_binding, verify_execution,
 };
 pub use auth::{StaticTokenStore, TokenStore, TokenStoreError};
+pub use cloud_exec::{BoxRegistry, EngineLeasedExec, cloud_executor_from_env};
 pub use exec::{FakeLeasedExec, LeasedExec, NoBoxExec, compute_memo_key, run_check};
 pub use handlers::close::close_abnormal;
 pub use handlers::envelope::HookRegistry;

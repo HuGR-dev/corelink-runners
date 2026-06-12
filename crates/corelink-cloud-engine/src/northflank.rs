@@ -87,6 +87,44 @@ impl NorthflankConfig {
             poll_interval_ms: 1000,
         }
     }
+
+    /// Build a config from an arbitrary key→value lookup (testable without
+    /// mutating the process environment).
+    ///
+    /// **Required:** `NORTHFLANK_API_TOKEN` and `NORTHFLANK_PROJECT_ID` — if
+    /// EITHER is absent or empty, returns `None` (NEVER a partial config;
+    /// fail-closed).
+    ///
+    /// **Optional overrides** (numeric tunables stay at defaults):
+    /// - `NORTHFLANK_BASE_URL` → `base_url`
+    /// - `NORTHFLANK_DEPLOYMENT_PLAN` → `deployment_plan`
+    #[must_use]
+    pub fn from_env_with(get: impl Fn(&str) -> Option<String>) -> Option<Self> {
+        let token = get("NORTHFLANK_API_TOKEN").filter(|s| !s.is_empty())?;
+        let project_id = get("NORTHFLANK_PROJECT_ID").filter(|s| !s.is_empty())?;
+
+        let mut cfg = Self::new(project_id, token);
+
+        if let Some(base_url) = get("NORTHFLANK_BASE_URL").filter(|s| !s.is_empty()) {
+            cfg.base_url = base_url;
+        }
+        if let Some(plan) = get("NORTHFLANK_DEPLOYMENT_PLAN").filter(|s| !s.is_empty()) {
+            cfg.deployment_plan = plan;
+        }
+
+        Some(cfg)
+    }
+
+    /// Build a config from the real process environment.
+    ///
+    /// Thin wrapper over [`Self::from_env_with`] — returns `None` when the
+    /// required `NORTHFLANK_API_TOKEN` or `NORTHFLANK_PROJECT_ID` env vars are
+    /// absent or empty. When this returns `None`, the composition root MUST
+    /// keep the `NoBoxExec` default (default-off, fail-closed).
+    #[must_use]
+    pub fn from_env() -> Option<Self> {
+        Self::from_env_with(|k| std::env::var(k).ok())
+    }
 }
 
 /// Terminal/!terminal classification of a Northflank run.

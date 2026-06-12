@@ -180,6 +180,40 @@ impl AppState {
         self
     }
 
+    /// Conditionally attach a cloud execution backend (WP-CF-WIRE).
+    ///
+    /// Default-off — a `None` (no provider configured) keeps the fail-closed
+    /// [`NoBoxExec`]; never silently installs a backend.
+    ///
+    /// Use [`with_cloud_executor_from_env`] for the production composition
+    /// path (reads `NORTHFLANK_*` env vars).
+    ///
+    /// [`with_cloud_executor_from_env`]: AppState::with_cloud_executor_from_env
+    #[must_use]
+    pub fn with_cloud_executor(mut self, exec: Option<Arc<dyn LeasedExec>>) -> Self {
+        if let Some(e) = exec {
+            self.exec = e;
+        }
+        self
+    }
+
+    /// Production composition entry: read `NORTHFLANK_*` env vars and wire
+    /// the [`NorthflankEngine`]-backed executor if both required vars are
+    /// present; absent → stays [`NoBoxExec`] (default-off, fail-closed).
+    ///
+    /// This is the trusted composition seam. It delegates to
+    /// [`cloud_executor_from_env`] (the blessed constructor) which enforces
+    /// the both-credentials-required check via
+    /// [`NorthflankConfig::from_env`].
+    ///
+    /// [`NorthflankEngine`]: corelink_cloud_engine::NorthflankEngine
+    /// [`cloud_executor_from_env`]: crate::cloud_exec::cloud_executor_from_env
+    /// [`NorthflankConfig::from_env`]: corelink_cloud_engine::NorthflankConfig::from_env
+    #[must_use]
+    pub fn with_cloud_executor_from_env(self, registry: crate::cloud_exec::BoxRegistry) -> Self {
+        self.with_cloud_executor(crate::cloud_exec::cloud_executor_from_env(registry))
+    }
+
     /// Attach the fabric attestation signing key (WP-ATT1+2; ratified
     /// decision #2: per-region fabric key, M1 single region). Without this,
     /// the state keeps the deterministic DEV key — fine for tests, never
