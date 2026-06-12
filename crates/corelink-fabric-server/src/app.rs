@@ -334,19 +334,49 @@ impl AppState {
             .map_err(|_| anyhow::anyhow!("provisioner task panicked"))?
     }
 
-    /// Run teardown for `lease_id` on a blocking thread (best-effort).
+    /// Run teardown for `lease_id` on a blocking thread.
     ///
     /// See [`provision_lease`] — the same tokio-primitive isolation applies.
     ///
-    /// Errors and join panics are silently dropped: teardown failure must NOT
-    /// change the close response (the provider's `activeDeadlineSeconds` is
-    /// the hard bound).
+    /// Returns `true` if teardown succeeded (or the provisioner is a no-op),
+    /// `false` if the provider errored or the task panicked. The caller
+    /// decides what to do on failure; the reaper retries on `false`.
     ///
     /// [`provision_lease`]: AppState::provision_lease
-    pub(crate) async fn teardown_lease(&self, lease_id: &str) {
+    pub(crate) async fn teardown_lease(&self, lease_id: &str) -> bool {
         let prov = Arc::clone(&self.provisioner);
         let lid = lease_id.to_string();
-        let _ = tokio::task::spawn_blocking(move || prov.teardown(&lid)).await;
+        match tokio::task::spawn_blocking(move || prov.teardown(&lid)).await {
+            Ok(Ok(())) => true,
+            // Provider error or task panic — caller retries.
+            Ok(Err(_)) | Err(_) => false,
+        }
+    }
+
+    /// Snapshot of all recorded deadlines without holding the ledger lock.
+    ///
+    /// Returns a cloned `HashMap` — the guard is released before the caller
+    /// proceeds, so there is no risk of holding `deadlines` across an await.
+    pub(crate) fn deadlines_snapshot(&self) -> std::collections::HashMap<String, u64> {
+        self.deadlines
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    /// Remove `lease_id` from both side-tables (`deadlines` + `images`).
+    ///
+    /// Called by the reaper after a successful teardown to GC entries that are
+    /// no longer needed — prevents unbounded growth for long-running processes.
+    pub(crate) fn forget_lease(&self, lease_id: &str) {
+        self.deadlines
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(lease_id);
+        self.images
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(lease_id);
     }
 }
 

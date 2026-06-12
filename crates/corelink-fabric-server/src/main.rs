@@ -4,13 +4,17 @@
 //! assembles every seam via [`corelink_fabric_server::server::build_app`], and
 //! serves the axum router on the configured TCP address.
 
-use corelink_fabric_server::server::{build_app, config_from_env};
+use corelink_fabric_server::server::{build_app_and_state, config_from_env};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cfg = config_from_env(|k| std::env::var(k).ok())?;
 
-    let app = build_app(&cfg)?;
+    let (app, state) = build_app_and_state(&cfg)?;
+    let reaper_cfg =
+        corelink_fabric_server::reaper::reaper_config_from_env(|k| std::env::var(k).ok())?;
+    let reaper_interval = reaper_cfg.interval;
+    let reaper_handle = corelink_fabric_server::reaper::spawn_reaper(state, reaper_cfg);
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind_addr).await?;
 
@@ -21,10 +25,14 @@ async fn main() -> anyhow::Result<()> {
     } else {
         eprintln!("cloud backend: NONE — fail-closed: no box backend, execs will 503");
     }
+    eprintln!("reaper: started (interval={}s)", reaper_interval.as_secs());
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
+
+    // Shutdown: abort the reaper so it does not outlive the server.
+    reaper_handle.abort();
     Ok(())
 }
 

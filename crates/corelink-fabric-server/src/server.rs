@@ -199,21 +199,22 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
     })
 }
 
-/// Assemble the full axum [`Router`] from a resolved [`ServerConfig`].
+/// Assemble the full axum [`Router`] and the shared [`AppState`] from a
+/// resolved [`ServerConfig`].
 ///
 /// Wires every seam — signing key, token store, ledger, plans, clock, and the
-/// cloud backend (default-off; env-driven) — and returns the router ready to
-/// serve.
+/// cloud backend (default-off; env-driven) — and returns both the router and
+/// the state.  The state is needed by any background task (e.g. the reaper)
+/// that shares the same ledger/provisioner Arcs.
 ///
 /// # Not yet wired
 ///
 /// **Envelope / §13 emission** (CF-ENVELOPE-WIRE) — per-lease `CaptureHook`
 /// registration at acquire time is a separate work-package.  The envelope poll
 /// endpoints are mounted (routes exist) but return 404 until that wiring lands.
-pub fn build_app(cfg: &ServerConfig) -> anyhow::Result<Router> {
+pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, crate::AppState)> {
     let registry = BoxRegistry::new();
 
-    // TenantId was already validated in config_from_env; .expect() is safe.
     let tenant = TenantId::new(&cfg.bootstrap_tenant)
         .expect("bootstrap_tenant was validated in config_from_env");
 
@@ -228,8 +229,6 @@ pub fn build_app(cfg: &ServerConfig) -> anyhow::Result<Router> {
 
     let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
 
-    // Seed the bootstrap tenant's plan so acquire is possible (FIX 1: a
-    // StaticPlans::default() is EMPTY → every acquire is rejected with 0 slots).
     let plans = StaticPlans::new([TenantPlan {
         tenant: tenant.clone(),
         max_concurrency: cfg.max_concurrency,
@@ -240,5 +239,14 @@ pub fn build_app(cfg: &ServerConfig) -> anyhow::Result<Router> {
         .with_signer(signer)
         .with_cloud_backend_from_env(registry.clone_handle());
 
-    Ok(app_full(store, state, Arc::new(HookRegistry::default())))
+    let router = app_full(store, state.clone(), Arc::new(HookRegistry::default()));
+    Ok((router, state))
+}
+
+/// Assemble the full axum [`Router`] from a resolved [`ServerConfig`].
+///
+/// This is a thin wrapper around [`build_app_and_state`] that discards the
+/// state — existing tests that only need the router are unaffected.
+pub fn build_app(cfg: &ServerConfig) -> anyhow::Result<Router> {
+    Ok(build_app_and_state(cfg)?.0)
 }

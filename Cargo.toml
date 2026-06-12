@@ -27,7 +27,7 @@ ed25519-dalek = "=2.2.0"
 # stack: corelink-server runs axum 0.7 minimal — mirrored, not forked).
 # tower is dev-only today (ServiceExt::oneshot in acceptance tests).
 axum  = { version = "=0.7.9", default-features = false, features = ["http1", "tokio", "json"] }
-tokio = { version = "=1.52.3", features = ["rt-multi-thread", "macros", "net", "signal"] }
+tokio = { version = "=1.52.3", features = ["rt-multi-thread", "macros", "net", "signal", "time"] }
 tower = { version = "=0.5.3", default-features = false, features = ["util"] }
 # Outbound HTTP client — exact-pinned (WP-CLOUD1: the CloudSandboxEngine's
 # Northflank adapter). Sync/blocking by design (no tokio contagion into the sync

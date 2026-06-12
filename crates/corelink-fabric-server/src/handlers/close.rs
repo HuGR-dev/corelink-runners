@@ -202,7 +202,7 @@ pub(crate) async fn close(
     // failure MUST NOT change the close response (cleanup is best-effort;
     // the provider's `activeDeadlineSeconds` is the hard bound). Under
     // `NoBoxProvisioner` (the default), teardown is a no-op. ──
-    state.teardown_lease(&lease_id).await;
+    let _ = state.teardown_lease(&lease_id).await;
 
     // ── 6. Attest the close (WP-ATT1+2 / ATT2: the attestation travels
     // with the CheckResult on the SAME atomic close payload as the §13.1
