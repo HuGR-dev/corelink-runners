@@ -1,5 +1,6 @@
-//! M1 fabric HTTP server: PAT auth + health (WP-API1) and the lease
-//! lifecycle — acquire / status / cancel (WP-API2); exec arrives with API3.
+//! M1 fabric HTTP server: PAT auth + health (WP-API1), the lease
+//! lifecycle — acquire / status / cancel (WP-API2) — and the exec + result
+//! path: `CheckDef` in, frozen `CheckResult` out (WP-API3).
 //!
 //! WP-API1 (`docs/plan/m1-decomposition-draft.md` Epic 2): Bearer PAT auth
 //! mapping token → tenant — the same scheme as the CoreLink Cache product
@@ -16,10 +17,12 @@
 
 pub mod app;
 pub mod auth;
+pub mod exec;
 pub mod handlers;
 
 pub use app::{
     AppState, Clock, PlanSource, StaticPlans, SystemClock, app, app_full, app_with_registry,
 };
 pub use auth::{StaticTokenStore, TokenStore, TokenStoreError};
+pub use exec::{FakeLeasedExec, LeasedExec, NoBoxExec, compute_memo_key, run_check};
 pub use handlers::envelope::HookRegistry;

@@ -17,6 +17,7 @@ use corelink_fabric::{CapGate, InMemoryLedger, LeaseLedger, RateWindow, TenantId
 use corelink_fabric_api::paths;
 
 use crate::auth::{self, TokenStore};
+use crate::exec::{LeasedExec, NoBoxExec};
 use crate::handlers;
 use crate::handlers::envelope::{self, HookRegistry};
 
@@ -92,6 +93,15 @@ pub struct AppState {
     pub clock: Arc<dyn Clock>,
     /// Per-tenant sliding 60s acquire-attempt windows (CP2 rate ceiling).
     pub(crate) rate_windows: Arc<Mutex<HashMap<TenantId, RateWindow>>>,
+    /// The execution port (WP-API3): "run argv inside the box serving a
+    /// lease, capturing output". Defaults to [`NoBoxExec`] (every exec
+    /// refused, fail-closed) until the composition root attaches a real
+    /// backend via [`AppState::with_executor`].
+    pub exec: Arc<dyn LeasedExec>,
+    /// `lease_id` → absolute deadline (epoch ms), recorded at acquire —
+    /// the expired-at-exec-time gate reads it BEFORE any execution
+    /// (`expired_job_stores_nothing_ever`).
+    pub(crate) deadlines: Arc<Mutex<HashMap<String, u64>>>,
     /// Monotonic mint counter for lease ids.
     lease_seq: Arc<AtomicU64>,
 }
@@ -109,8 +119,36 @@ impl AppState {
             plans,
             clock,
             rate_windows: Arc::new(Mutex::new(HashMap::new())),
+            exec: Arc::new(NoBoxExec),
+            deadlines: Arc::new(Mutex::new(HashMap::new())),
             lease_seq: Arc::new(AtomicU64::new(1)),
         }
+    }
+
+    /// Attach the execution backend (WP-API3). Without this, the state
+    /// keeps the [`NoBoxExec`] default: every exec is refused fail-closed,
+    /// never silently succeeded.
+    #[must_use]
+    pub fn with_executor(mut self, exec: Arc<dyn LeasedExec>) -> Self {
+        self.exec = exec;
+        self
+    }
+
+    /// Record the lease's absolute deadline at acquire (epoch ms).
+    pub(crate) fn record_deadline(&self, lease_id: &str, deadline_ms: u64) {
+        self.deadlines
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(lease_id.to_string(), deadline_ms);
+    }
+
+    /// The lease's recorded absolute deadline, if one is on file.
+    pub(crate) fn deadline_of(&self, lease_id: &str) -> Option<u64> {
+        self.deadlines
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(lease_id)
+            .copied()
     }
 
     /// Mint a unique lease id (`lease-<16-hex>`, monotonic per process).
@@ -173,6 +211,7 @@ pub fn app_full(
             &capture(paths::LEASE_CANCEL),
             post(handlers::leases::cancel),
         )
+        .route(&capture(paths::EXEC), post(handlers::exec_handler::exec))
         .route(&capture(paths::ENVELOPE_EVENTS), get(envelope::poll_events))
         .route(&capture(paths::ENVELOPE_META), get(envelope::poll_meta))
         .with_state(state)
