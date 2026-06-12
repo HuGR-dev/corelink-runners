@@ -143,6 +143,13 @@ pub trait LeaseLedger {
 
     /// All records for a tenant, ordered by `lease_id` (deterministic).
     fn by_tenant(&self, t: &TenantId) -> anyhow::Result<Vec<LeaseRecord>>;
+
+    /// All currently `Held` records, ordered by `lease_id` (deterministic).
+    ///
+    /// The enumeration seam for the lifecycle sweeps (CP1b:
+    /// [`crate::lifecycle::LeaseLifecycle`]) and the slot-occupancy view
+    /// (BIL1: slot occupancy = held leases).
+    fn held(&self) -> anyhow::Result<Vec<LeaseRecord>>;
 }
 
 /// In-memory ledger — dev/test impl; disqualified for production by
@@ -193,6 +200,17 @@ impl LeaseLedger for InMemoryLedger {
             .records
             .values()
             .filter(|r| &r.tenant == t)
+            .cloned()
+            .collect();
+        out.sort_by(|a, b| a.lease_id.cmp(&b.lease_id));
+        Ok(out)
+    }
+
+    fn held(&self) -> anyhow::Result<Vec<LeaseRecord>> {
+        let mut out: Vec<LeaseRecord> = self
+            .records
+            .values()
+            .filter(|r| r.state.is_held())
             .cloned()
             .collect();
         out.sort_by(|a, b| a.lease_id.cmp(&b.lease_id));
@@ -295,5 +313,9 @@ impl LeaseLedger for FileLedger {
 
     fn by_tenant(&self, t: &TenantId) -> anyhow::Result<Vec<LeaseRecord>> {
         self.index.by_tenant(t)
+    }
+
+    fn held(&self) -> anyhow::Result<Vec<LeaseRecord>> {
+        self.index.held()
     }
 }
