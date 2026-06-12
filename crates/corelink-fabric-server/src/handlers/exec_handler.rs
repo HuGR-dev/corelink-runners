@@ -22,6 +22,13 @@
 //!    (`crate::exec::run_check`). Any refusal — transport down, no backend
 //!    attached, signal-killed process — is 503 `fail_closed`: a
 //!    `CheckResult` is NEVER fabricated (contract §3 fail-closed law).
+//! 5. **Attestation** (WP-ATT1+2, contract §7): every emitted result
+//!    travels with its signed `AttestationChain` + result-binding signature
+//!    — REQUIRED response fields, so a result without an attestation is
+//!    unrepresentable (`no_attestation_no_result_fail_closed` at type
+//!    level). A held lease with no image digest on file is the same kind of
+//!    internal inconsistency as a missing deadline → 503, never an
+//!    unattested execution.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -32,6 +39,7 @@ use corelink_fabric_api::{ApiError, ExecRequest, ExecResponse};
 use corelink_runners_contracts::RunnerState;
 
 use crate::app::AppState;
+use crate::attestation::{build_attestation, sign_result_binding};
 use crate::auth::error_response;
 use crate::exec::run_check;
 
@@ -96,6 +104,18 @@ pub(crate) async fn exec(
         );
     }
 
+    // The attestation's image identity: the pinned digest recorded (and
+    // X4-validated) at acquire. A held lease with no image on file is an
+    // internal inconsistency → 503, never an unattested execution
+    // (contract §7: emission is mandatory).
+    let Some(image_digest) = state.image_of(&lease_id) else {
+        return error_response(
+            ApiError::FailClosed,
+            "held lease has no image digest on file: refusing to execute unattested; \
+             failing closed",
+        );
+    };
+
     // ── 4. Execute via the port; build the frozen CheckResult. Any failure
     // is fail-closed — no result is ever fabricated.
     //
@@ -113,7 +133,31 @@ pub(crate) async fn exec(
         &clock,
         &box_ref,
     ) {
-        Ok(result) => (StatusCode::OK, Json(ExecResponse { result })).into_response(),
+        // ── 5. Attest what ran (WP-ATT1+2, contract §7): the signed chain
+        // and the result-binding signature travel in the SAME response as
+        // the result — both REQUIRED, so an unattested result cannot exist
+        // on the wire. The principal chain mirrors the lease's minted
+        // `principal_chain` (the authenticated tenant).
+        Ok(result) => {
+            let attestation = build_attestation(
+                state.signer.as_ref(),
+                &image_digest,
+                &req.tree_hash,
+                &req.check_def,
+                &result,
+                vec![format!("tenant:{tenant}")],
+            );
+            let result_binding_sig = sign_result_binding(state.signer.as_ref(), &result);
+            (
+                StatusCode::OK,
+                Json(ExecResponse {
+                    result,
+                    attestation,
+                    result_binding_sig,
+                }),
+            )
+                .into_response()
+        }
         Err(e) => error_response(
             ApiError::FailClosed,
             &format!("execution failed; no result fabricated: {e:#}"),

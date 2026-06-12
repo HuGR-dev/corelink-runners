@@ -154,6 +154,9 @@ pub(crate) async fn acquire(
     // gate refuses execution past it (`expired_job_stores_nothing_ever`),
     // even before the expiry sweep marks the ledger. ──
     state.record_deadline(&lease_id, lease.expiry);
+    // The validated pinned image digest is also recorded: it is the image
+    // identity the attestation path (WP-ATT1, contract §7) reads at exec.
+    state.record_image(&lease_id, &req.image_digest);
     let exec_endpoint = paths::EXEC.replace("{lease_id}", &lease_id);
     (
         StatusCode::OK,

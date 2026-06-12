@@ -7,7 +7,7 @@
 //! `corelink-runners-contracts` — wrapped, never redefined.
 
 use corelink_runners_contracts::{
-    CheckDef, CheckResult, IntentMetrics, LandableEntry, RunnerLease, RunnerState,
+    AttestationChain, CheckDef, CheckResult, IntentMetrics, LandableEntry, RunnerLease, RunnerState,
 };
 use serde::{Deserialize, Serialize};
 
@@ -98,12 +98,36 @@ pub struct ExecRequest {
 }
 
 /// `POST /v1/leases/{lease_id}/exec` response body.
+///
+/// `attestation` and `result_binding_sig` are **required** fields (ATT1+ATT2
+/// amendment to the CF0 freeze, lead-ratified): emission is MANDATORY — a
+/// result without an attestation is unrepresentable on the wire, which is
+/// the contract §7 `no_attestation_no_result_fail_closed` rule enforced at
+/// type level.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecResponse {
     /// The execution result — the frozen `CheckResult` transcription. Same
     /// `CheckDef` over the same inputs MUST be byte-identical (contract §3).
     pub result: CheckResult,
+
+    /// The signed provenance chain over this execution — the frozen
+    /// `AttestationChain` transcription (contract §7): `tree` = the
+    /// workspace snapshot (resolved-inputs axis), `def` = the check
+    /// definition digest (pins command + declared inputs), `runner` = the
+    /// executor identity, signed with the published fabric key
+    /// (`GET /v1/attestation/key`).
+    pub attestation: AttestationChain,
+
+    /// The fabric's result-binding signature — a detached standard-base64
+    /// ed25519 signature over `LP(memo_key) ‖ LP(stdout_ref) ‖
+    /// LP(stderr_ref)` of `result` (same LP framing as the frozen chain
+    /// pre-image). Binds the RESULT CONTENT to the attestation without
+    /// touching the frozen `AttestationChain` shape — the fabric's
+    /// result-binding extension, flagged for §12 amendment-log discussion
+    /// with hugit. Verified by
+    /// `corelink-fabric-server::attestation::verify_execution`.
+    pub result_binding_sig: String,
 }
 
 /// `POST /v1/queue/trigger` request body — hugit's landing queue triggers
@@ -137,6 +161,12 @@ pub struct TriggerRequest {
 
 /// `POST /v1/queue/trigger` response body. (API4 amendment to the CF0
 /// freeze, lead-ratified.)
+///
+/// `attestation` and `result_binding_sig` are **required** fields (ATT
+/// parity amendment, lead-ratified): the trigger is the SAME execution
+/// engine as the exec path, so it carries the SAME mandatory attestation —
+/// the contract §7 emission obligation makes an unattested result
+/// unrepresentable here exactly as on [`ExecResponse`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TriggerResponse {
@@ -147,6 +177,19 @@ pub struct TriggerResponse {
     /// The execution result — the frozen `CheckResult` transcription.
     /// Byte-identical on duplicate delivery (idempotency, contract §9).
     pub result: CheckResult,
+
+    /// The signed provenance chain over this execution — same coverage map,
+    /// same fabric key as [`ExecResponse::attestation`] (one execution
+    /// engine, one §7 obligation). Byte-identical on duplicate delivery:
+    /// the dedup map stores the ATTESTED response. (ATT parity amendment,
+    /// lead-ratified.)
+    pub attestation: AttestationChain,
+
+    /// The fabric's result-binding signature over `result` — same pre-image
+    /// (`LP(memo_key) ‖ LP(stdout_ref) ‖ LP(stderr_ref)`) and verification
+    /// as [`ExecResponse::result_binding_sig`]. (ATT parity amendment,
+    /// lead-ratified.)
+    pub result_binding_sig: String,
 }
 
 /// `POST /v1/leases/{lease_id}/close` request body — drive the §13.2 item-3
@@ -194,4 +237,35 @@ pub struct CloseResponse {
     /// The `CheckResult` echoed from the request: the forge reads result and
     /// metrics in the same atomic step (§13.1 delivery rule).
     pub check_result: Option<CheckResult>,
+
+    /// The signed provenance chain over the closed job — REQUIRED (ATT1+ATT2
+    /// amendment, lead-ratified): the attestation travels with the
+    /// `CheckResult` on the SAME atomic close payload as the §13.1 metrics.
+    /// When the close delivers a `check_result`, the chain links are that
+    /// result's `tree_hash` / `def_digest` / `runner_ref`; when it delivers
+    /// none, the links are empty strings — the honest "no result claimed"
+    /// attestation, still signed (the verifier can prove the fabric claimed
+    /// nothing).
+    pub attestation: AttestationChain,
+
+    /// The fabric's result-binding signature over the echoed result's
+    /// `LP(memo_key) ‖ LP(stdout_ref) ‖ LP(stderr_ref)` (empty frames when
+    /// no result is delivered) — REQUIRED; same extension and verification
+    /// as on [`ExecResponse`].
+    pub result_binding_sig: String,
+}
+
+/// `GET /v1/attestation/key` response body — the published well-known
+/// fabric attestation key. (ATT2 amendment, lead-ratified.)
+///
+/// Key custody per ratified decision #2: ed25519, one fabric signing key
+/// per region (M1: single region). Every `AttestationChain.sig` and
+/// `result_binding_sig` this fabric emits verifies against this key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttestationKeyResponse {
+    /// The fabric's 32-byte ed25519 public key, standard-base64 encoded
+    /// (RFC 4648 §4, padded) — the wire form `verify_chain`/`verify_raw`
+    /// accept.
+    pub ed25519_pubkey_b64: String,
 }
