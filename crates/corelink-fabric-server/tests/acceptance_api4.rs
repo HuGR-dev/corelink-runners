@@ -278,7 +278,10 @@ async fn trigger_is_tenant_scoped_and_capped() {
 }
 
 /// At-least-once delivery (contract §9): the same trigger delivered twice
-/// executes ONCE; the duplicate answers the SAME result, byte-identical.
+/// executes ONCE; the duplicate answers the SAME result, byte-identical —
+/// INCLUDING the mandatory attestation (ATT parity amendment: the dedup map
+/// stores the attested response, so the replayed chain + binding signature
+/// are the same bytes, never re-signed).
 #[tokio::test]
 async fn trigger_idempotent_on_duplicate_delivery() {
     let h = harness(ok_reply());
@@ -302,7 +305,21 @@ async fn trigger_idempotent_on_duplicate_delivery() {
     );
     assert_eq!(
         first_bytes, second_bytes,
-        "the duplicate answers the SAME CheckResult, byte-identical"
+        "the duplicate answers the SAME attested response, byte-identical"
+    );
+
+    // The replayed bytes parse as the frozen ATTESTED shape (attestation +
+    // result_binding_sig are REQUIRED fields), and the attestation is
+    // populated — byte-identity above therefore covers the signatures too.
+    let replay: TriggerResponse = serde_json::from_slice(&second_bytes)
+        .expect("the duplicate parses as the frozen attested TriggerResponse shape");
+    assert!(
+        !replay.attestation.sig.is_empty(),
+        "the replayed duplicate carries the signed chain"
+    );
+    assert!(
+        !replay.result_binding_sig.is_empty(),
+        "the replayed duplicate carries the result-binding signature"
     );
 }
 

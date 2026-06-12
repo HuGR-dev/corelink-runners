@@ -16,9 +16,9 @@ use axum::{Extension, Router, middleware};
 use corelink_fabric::{
     CapGate, InMemoryLedger, LeaseLedger, RateWindow, TenantId, TenantPlan, TenantWaitStats,
 };
-use corelink_fabric_api::paths;
+use corelink_fabric_api::{TriggerResponse, paths};
 
-use corelink_runners_contracts::CheckResult;
+use corelink_runner::attest::FabricSigner;
 
 use crate::auth::{self, TokenStore};
 use crate::exec::{LeasedExec, NoBoxExec};
@@ -34,9 +34,10 @@ pub trait Clock: Send + Sync {
 }
 
 /// §9 trigger idempotency map (WP-API4): `(tenant, item_id, tree_hash)` →
-/// the `CheckResult` already produced for that delivery (at-least-once
-/// dedup; see `handlers::queue`).
-pub(crate) type TriggerDedupMap = HashMap<(TenantId, String, String), CheckResult>;
+/// the full ATTESTED `TriggerResponse` already produced for that delivery
+/// (at-least-once dedup; ATT parity amendment: a duplicate must replay the
+/// same attested bytes — see `handlers::queue`).
+pub(crate) type TriggerDedupMap = HashMap<(TenantId, String, String), TriggerResponse>;
 
 /// Production [`Clock`]: `SystemTime::now()`.
 #[derive(Debug, Clone, Copy, Default)]
@@ -117,14 +118,35 @@ pub struct AppState {
     /// (`expired_job_stores_nothing_ever`).
     pub(crate) deadlines: Arc<Mutex<HashMap<String, u64>>>,
     /// §9 trigger idempotency map (WP-API4): `(tenant, item_id, tree_hash)`
-    /// → the `CheckResult` already produced for that delivery. hugit's
-    /// landing queue delivers at-least-once; a duplicate trigger answers
-    /// from here WITHOUT re-executing. Bounded by a simple insertion cap
+    /// → the ATTESTED `TriggerResponse` already produced for that delivery
+    /// (ATT parity amendment). hugit's landing queue delivers
+    /// at-least-once; a duplicate trigger answers from here WITHOUT
+    /// re-executing or re-signing. Bounded by a simple insertion cap
     /// (`handlers::queue::TRIGGER_DEDUP_CAP`) — see the queue module docs.
     pub(crate) trigger_dedup: Arc<Mutex<TriggerDedupMap>>,
+    /// The fabric attestation signing key (WP-ATT1+2, contract §7). Key
+    /// custody per ratified decision #2: ed25519, ONE fabric key per region
+    /// (M1: single region), public half published at
+    /// `GET /v1/attestation/key`. [`AppState::new`] wires a deterministic
+    /// DEV key ([`DEV_FABRIC_KEY_SEED`]) for tests/local composition; the
+    /// production composition root injects the region key via
+    /// [`AppState::with_signer`].
+    pub signer: Arc<FabricSigner>,
+    /// `lease_id` → pinned image digest, recorded at acquire (the
+    /// `AcquireRequest.image_digest` that `ContainerSpec::from_lease`
+    /// already validated) — the image-identity axis the attestation path
+    /// reads (WP-ATT1 scope note: FC2/FC3 pending, the acquire-pinned
+    /// digest IS the image identity at M1).
+    pub(crate) images: Arc<Mutex<HashMap<String, String>>>,
     /// Monotonic mint counter for lease ids.
     lease_seq: Arc<AtomicU64>,
 }
+
+/// Deterministic DEV seed for the default fabric signing key wired by
+/// [`AppState::new`] — tests and local composition only; NEVER a production
+/// key (the production composition root injects the per-region key via
+/// [`AppState::with_signer`], ratified decision #2).
+const DEV_FABRIC_KEY_SEED: [u8; 32] = *b"corelink-runners-DEV-fabric-key!";
 
 impl AppState {
     /// Assemble state over a ledger, a plan source, and a clock.
@@ -143,6 +165,8 @@ impl AppState {
             exec: Arc::new(NoBoxExec),
             deadlines: Arc::new(Mutex::new(HashMap::new())),
             trigger_dedup: Arc::new(Mutex::new(HashMap::new())),
+            signer: Arc::new(FabricSigner::new_from_bytes(&DEV_FABRIC_KEY_SEED)),
+            images: Arc::new(Mutex::new(HashMap::new())),
             lease_seq: Arc::new(AtomicU64::new(1)),
         }
     }
@@ -153,6 +177,16 @@ impl AppState {
     #[must_use]
     pub fn with_executor(mut self, exec: Arc<dyn LeasedExec>) -> Self {
         self.exec = exec;
+        self
+    }
+
+    /// Attach the fabric attestation signing key (WP-ATT1+2; ratified
+    /// decision #2: per-region fabric key, M1 single region). Without this,
+    /// the state keeps the deterministic DEV key — fine for tests, never
+    /// for production.
+    #[must_use]
+    pub fn with_signer(mut self, signer: Arc<FabricSigner>) -> Self {
+        self.signer = signer;
         self
     }
 
@@ -171,6 +205,25 @@ impl AppState {
             .unwrap_or_else(|p| p.into_inner())
             .get(lease_id)
             .copied()
+    }
+
+    /// Record the lease's pinned image digest at acquire (the validated
+    /// `AcquireRequest.image_digest`) — the attestation path's image
+    /// identity (WP-ATT1).
+    pub(crate) fn record_image(&self, lease_id: &str, image_digest: &str) {
+        self.images
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(lease_id.to_string(), image_digest.to_string());
+    }
+
+    /// The lease's recorded pinned image digest, if one is on file.
+    pub(crate) fn image_of(&self, lease_id: &str) -> Option<String> {
+        self.images
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(lease_id)
+            .cloned()
     }
 
     /// Mint a unique lease id (`lease-<16-hex>`, monotonic per process).
@@ -234,6 +287,7 @@ pub fn app_full(
             post(handlers::leases::cancel),
         )
         .route(&capture(paths::EXEC), post(handlers::exec_handler::exec))
+        .route(paths::ATTESTATION_KEY, get(crate::attestation::key))
         .route(paths::QUEUE_TRIGGER, post(handlers::queue::trigger))
         .route(&capture(paths::LEASE_CLOSE), post(handlers::close::close))
         .route(&capture(paths::ENVELOPE_EVENTS), get(envelope::poll_events))

@@ -97,16 +97,28 @@ impl FabricSigner {
     pub fn public_key_b64(&self) -> String {
         BASE64_STANDARD.encode(self.key.verifying_key().as_bytes())
     }
+
+    /// Detached ed25519 signature over ARBITRARY message bytes, returned as
+    /// **standard** base64 (RFC 4648 §4, padded) — verified by [`verify_raw`].
+    ///
+    /// ADDITIVE helper (WP-ATT1+2) for fabric-side signature *extensions* —
+    /// e.g. the result-binding signature built in
+    /// `corelink-fabric-server::attestation`. The frozen chain pre-image
+    /// ([`sig_preimage`]) and [`FabricSigner::sign_chain`] are untouched;
+    /// this method never builds or alters a chain pre-image itself.
+    pub fn sign_raw(&self, msg: &[u8]) -> String {
+        BASE64_STANDARD.encode(self.key.sign(msg).to_bytes())
+    }
 }
 
-/// Verify a chain's detached signature against a standard-base64 ed25519
-/// public key.
+/// Verify a detached **standard**-base64 ed25519 signature over arbitrary
+/// message bytes against a standard-base64 public key.
 ///
-/// Rebuilds the frozen [`sig_preimage`] from the chain's fields (struct
-/// order) and verifies `chain.sig` over it. Returns `Ok(false)` for a
-/// well-formed but invalid signature; `Err` only for malformed inputs
-/// (bad base64, wrong key/signature length, invalid key point).
-pub fn verify_chain(chain: &AttestationChain, pubkey_b64: &str) -> anyhow::Result<bool> {
+/// Counterpart of [`FabricSigner::sign_raw`] (and the decode core
+/// [`verify_chain`] delegates to). Returns `Ok(false)` for a well-formed but
+/// invalid signature; `Err` only for malformed inputs (bad base64, wrong
+/// key/signature length, invalid key point).
+pub fn verify_raw(msg: &[u8], sig_b64: &str, pubkey_b64: &str) -> anyhow::Result<bool> {
     let pk_bytes = BASE64_STANDARD
         .decode(pubkey_b64)
         .context("public key is not valid standard base64")?;
@@ -117,14 +129,25 @@ pub fn verify_chain(chain: &AttestationChain, pubkey_b64: &str) -> anyhow::Resul
     let key = VerifyingKey::from_bytes(&pk).context("invalid ed25519 public key")?;
 
     let sig_bytes = BASE64_STANDARD
-        .decode(&chain.sig)
-        .context("chain.sig is not valid standard base64")?;
+        .decode(sig_b64)
+        .context("signature is not valid standard base64")?;
     let sig: [u8; 64] = sig_bytes
         .as_slice()
         .try_into()
         .map_err(|_| anyhow::anyhow!("signature must be 64 bytes, got {}", sig_bytes.len()))?;
     let sig = Signature::from_bytes(&sig);
 
+    Ok(key.verify(msg, &sig).is_ok())
+}
+
+/// Verify a chain's detached signature against a standard-base64 ed25519
+/// public key.
+///
+/// Rebuilds the frozen [`sig_preimage`] from the chain's fields (struct
+/// order) and verifies `chain.sig` over it. Returns `Ok(false)` for a
+/// well-formed but invalid signature; `Err` only for malformed inputs
+/// (bad base64, wrong key/signature length, invalid key point).
+pub fn verify_chain(chain: &AttestationChain, pubkey_b64: &str) -> anyhow::Result<bool> {
     let preimage = sig_preimage(
         &chain.tree,
         &chain.def,
@@ -132,7 +155,7 @@ pub fn verify_chain(chain: &AttestationChain, pubkey_b64: &str) -> anyhow::Resul
         &chain.model,
         &chain.principal,
     );
-    Ok(key.verify(&preimage, &sig).is_ok())
+    verify_raw(&preimage, &chain.sig, pubkey_b64).context("chain signature verification")
 }
 
 #[cfg(test)]
@@ -209,6 +232,27 @@ mod tests {
         assert!(
             ok,
             "freshly signed chain must verify against the fabric key"
+        );
+    }
+
+    /// The additive raw sign/verify pair (fabric extension seam): roundtrip
+    /// verifies, a tampered message does not — and the raw path agrees with
+    /// the chain path when handed the frozen pre-image bytes.
+    #[test]
+    fn raw_sign_verify_roundtrip_and_tamper() {
+        let signer = FabricSigner::new_from_bytes(&SEED);
+        let msg = b"result-binding bytes";
+        let sig = signer.sign_raw(msg);
+        assert!(verify_raw(msg, &sig, &signer.public_key_b64()).unwrap());
+        assert!(!verify_raw(b"result-binding byteS", &sig, &signer.public_key_b64()).unwrap());
+
+        // Raw over the frozen pre-image == sign_chain, byte for byte.
+        let principal = owned(&["p"]);
+        let preimage = sig_preimage("t", "d", "r", "m", &principal);
+        assert_eq!(
+            signer.sign_raw(&preimage),
+            signer.sign_chain("t", "d", "r", "m", &principal),
+            "sign_raw over sig_preimage must equal sign_chain"
         );
     }
 

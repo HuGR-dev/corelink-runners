@@ -16,12 +16,16 @@
 //! governs an unreadable ledger or a tenant with no plan on file.
 
 pub mod app;
+pub mod attestation;
 pub mod auth;
 pub mod exec;
 pub mod handlers;
 
 pub use app::{
     AppState, Clock, PlanSource, StaticPlans, SystemClock, app, app_full, app_with_registry,
+};
+pub use attestation::{
+    build_attestation, result_binding_preimage, sign_result_binding, verify_execution,
 };
 pub use auth::{StaticTokenStore, TokenStore, TokenStoreError};
 pub use exec::{FakeLeasedExec, LeasedExec, NoBoxExec, compute_memo_key, run_check};
