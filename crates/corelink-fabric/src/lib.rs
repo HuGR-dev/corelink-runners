@@ -12,6 +12,9 @@
 //! - **Freeze item 5 — meter event schema**: [`meter::SlotOccupancyEvent`] /
 //!   [`meter::SlotEventKind`] / [`meter::CogsCounters`] (BIL1 emits, CP1/ENV2
 //!   produce; the SLOT is the billable unit, never minutes).
+//! - **BIL2 plan → cap enforcement**: [`plans::PlanTier`] (product §5 ladder)
+//!   and [`plans::PlanRegistry`] (org = tenant per ADR-0002; the live cap
+//!   source CP2 reads each check, fail-closed to zero for unknown tenants).
 //! - **CP1 lifecycle wiring**: [`lifecycle::LeaseLifecycle`] (mark-then-kill
 //!   expiry + surfaced-not-green crash sweeps, legal matrix only) over the
 //!   thin [`lifecycle::BoxProbe`] port — the runner adapts at the composition
@@ -30,6 +33,7 @@ pub mod caps;
 pub mod ledger;
 pub mod lifecycle;
 pub mod meter;
+pub mod plans;
 pub mod tenant;
 
 pub use billing::SlotMeter;
@@ -37,4 +41,5 @@ pub use caps::{CapDecision, CapGate, RateWindow};
 pub use ledger::{FileLedger, InMemoryLedger, LeaseLedger, LeaseRecord, LeaseState};
 pub use lifecycle::{BoxProbe, LeaseLifecycle};
 pub use meter::{CogsCounters, SlotEventKind, SlotOccupancyEvent};
+pub use plans::{PlanRegistry, PlanTier, plan_for};
 pub use tenant::{TenantId, TenantPlan};
