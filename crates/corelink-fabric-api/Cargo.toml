@@ -1,0 +1,16 @@
+[package]
+name = "corelink-fabric-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+# Same-workspace path dep (house law allows these; the crates.io-only rule in
+# deny.toml governs EXTERNAL deps). The wire types stay single-sourced in the
+# contracts crate; this crate only wraps them in API DTOs.
+corelink-runners-contracts = { path = "../corelink-runners-contracts" }
+
+[dev-dependencies]
+serde_json = { workspace = true }
