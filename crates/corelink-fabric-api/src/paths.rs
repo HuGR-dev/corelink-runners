@@ -45,6 +45,14 @@ pub const ENVELOPE_EVENTS: &str = "/v1/leases/{lease_id}/envelope/events";
 /// (ENV1 amendment to the CF0 freeze, lead-ratified.)
 pub const ENVELOPE_META: &str = "/v1/leases/{lease_id}/envelope/meta";
 
+/// The published well-known fabric attestation key: `GET` returns the
+/// fabric's ed25519 public key (standard base64) — the key every
+/// `AttestationChain.sig` and `result_binding_sig` emitted by this fabric
+/// verifies against (contract §7; key custody per ratified decision #2:
+/// per-region fabric key, M1 single region). ATT2.
+/// (ATT2 amendment, lead-ratified.)
+pub const ATTESTATION_KEY: &str = "/v1/attestation/key";
+
 /// Close a lease's job: `POST` drives the §13.2 item-3 close machinery —
 /// finalize-once → `CloseSignal` → ack window → fail-closed `CloseOutcome` —
 /// and ONLY THEN releases the lease (`Held → Released`). The response

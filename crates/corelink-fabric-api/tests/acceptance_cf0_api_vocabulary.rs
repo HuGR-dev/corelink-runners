@@ -6,12 +6,13 @@
 //! not a refactor casualty.
 
 use corelink_fabric_api::{
-    AcquireRequest, AcquireResponse, ApiError, CancelResponse, CloseRequest, CloseResponse,
-    ErrorBody, ExecRequest, ExecResponse, StatusResponse, TriggerRequest, TriggerResponse, paths,
+    AcquireRequest, AcquireResponse, ApiError, AttestationKeyResponse, CancelResponse,
+    CloseRequest, CloseResponse, ErrorBody, ExecRequest, ExecResponse, StatusResponse,
+    TriggerRequest, TriggerResponse, paths,
 };
 use corelink_runners_contracts::{
-    Artifact, CheckDef, CheckResult, IntentMetrics, LandableEntry, RunnerLease, RunnerState,
-    TokenCounts, ToolCount,
+    Artifact, AttestationChain, CheckDef, CheckResult, IntentMetrics, LandableEntry, RunnerLease,
+    RunnerState, TokenCounts, ToolCount,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -113,6 +114,19 @@ fn sample_check_result() -> CheckResult {
     }
 }
 
+/// A frozen-shape `AttestationChain` sample (ATT1+ATT2 amendment: the
+/// signed attestation travels with every emitted result).
+fn sample_attestation() -> AttestationChain {
+    AttestationChain {
+        tree: "34".repeat(32),
+        def: "ab".repeat(32),
+        runner: "runner-01".to_string(),
+        model: String::new(),
+        principal: vec!["tenant:acme".to_string()],
+        sig: "c2ln".to_string(),
+    }
+}
+
 /// Roundtrip a DTO and assert an injected unknown top-level field is
 /// rejected (deny_unknown_fields at the API boundary).
 fn roundtrip_and_deny_unknown<T>(value: &T, name: &str)
@@ -174,9 +188,15 @@ fn dtos_roundtrip_and_deny_unknown() {
         },
         "ExecRequest",
     );
+    // ATT1+ATT2 amendment (lead-ratified): `attestation` and
+    // `result_binding_sig` are REQUIRED fields — a result without an
+    // attestation is unrepresentable on the wire (contract §7
+    // `no_attestation_no_result_fail_closed` at type level).
     roundtrip_and_deny_unknown(
         &ExecResponse {
             result: sample_check_result(),
+            attestation: sample_attestation(),
+            result_binding_sig: "YmluZGluZw==".to_string(),
         },
         "ExecResponse",
     );
@@ -195,10 +215,16 @@ fn dtos_roundtrip_and_deny_unknown() {
         },
         "TriggerRequest",
     );
+    // ATT parity amendment (lead-ratified): the trigger is the SAME
+    // execution engine as the exec path, so `attestation` and
+    // `result_binding_sig` are REQUIRED here too — an unattested trigger
+    // result is unrepresentable on the wire.
     roundtrip_and_deny_unknown(
         &TriggerResponse {
             item_id: "item-0007".to_string(),
             result: sample_check_result(),
+            attestation: sample_attestation(),
+            result_binding_sig: "YmluZGluZw==".to_string(),
         },
         "TriggerResponse",
     );
@@ -236,8 +262,18 @@ fn dtos_roundtrip_and_deny_unknown() {
                 cost_usd_micros: 12_345,
             },
             check_result: Some(sample_check_result()),
+            attestation: sample_attestation(),
+            result_binding_sig: "YmluZGluZw==".to_string(),
         },
         "CloseResponse",
+    );
+    // ATT2 amendment (lead-ratified): the published well-known fabric
+    // attestation key.
+    roundtrip_and_deny_unknown(
+        &AttestationKeyResponse {
+            ed25519_pubkey_b64: "QQ==".to_string(),
+        },
+        "AttestationKeyResponse",
     );
     roundtrip_and_deny_unknown(
         &ErrorBody {
@@ -271,4 +307,7 @@ fn paths_are_v1_stable() {
     // ENV2 amendment to the CF0 freeze (lead-ratified): the §13.2 item-3
     // job-close path. Frozen from here on like the rest of /v1.
     assert_eq!(paths::LEASE_CLOSE, "/v1/leases/{lease_id}/close");
+    // ATT2 amendment (lead-ratified): the published well-known fabric
+    // attestation key. Frozen from here on like the rest of /v1.
+    assert_eq!(paths::ATTESTATION_KEY, "/v1/attestation/key");
 }

@@ -56,6 +56,7 @@ use corelink_runner::envelope::{AbnormalKind, CloseOutcome, JobClose, JobStatus}
 use corelink_runners_contracts::{IntentMetrics, RunnerState, TokenCounts};
 
 use crate::app::AppState;
+use crate::attestation::{attest_close_result, attest_no_result};
 use crate::auth::error_response;
 use crate::handlers::envelope::HookRegistry;
 
@@ -196,8 +197,20 @@ pub(crate) async fn close(
     // lives in the shared hook state, not in this entry.
     registry.unregister(&lease_id);
 
-    // ── 6. ONE atomic body: metrics (required) + flag + echoed CheckResult
-    // — the §13.1 same-step delivery at mechanism level.
+    // ── 6. Attest the close (WP-ATT1+2 / ATT2: the attestation travels
+    // with the CheckResult on the SAME atomic close payload as the §13.1
+    // metrics). A close that delivers a result gets a chain over that
+    // result's axes + the result-binding signature; a close that delivers
+    // none gets the honest all-empty "no result claimed" chain — both
+    // REQUIRED fields, so an unattested close is unrepresentable.
+    let principal = vec![format!("tenant:{tenant}")];
+    let (attestation, result_binding_sig) = match &req.check_result {
+        Some(result) => attest_close_result(state.signer.as_ref(), result, principal),
+        None => attest_no_result(state.signer.as_ref(), principal),
+    };
+
+    // ── 7. ONE atomic body: metrics (required) + flag + echoed CheckResult
+    // + attestation — the §13.1 same-step delivery at mechanism level.
     (
         StatusCode::OK,
         Json(CloseResponse {
@@ -206,6 +219,8 @@ pub(crate) async fn close(
             capture_incomplete,
             metrics,
             check_result: req.check_result,
+            attestation,
+            result_binding_sig,
         }),
     )
         .into_response()
