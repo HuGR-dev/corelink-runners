@@ -24,6 +24,11 @@
 //!   (deficit round-robin, p95-wait surface for CP4). No threads, no HTTP:
 //!   the composition root drives ticks and supplies the cap-check + dispatch
 //!   closures, so the execution-core seam stays in the runner crate.
+//! - **CP4 non-interference surface**: [`interference::TenantWaitStats`] /
+//!   [`interference::WaitSnapshot`] — per-tenant wait histogram + nearest-rank
+//!   p50/p95 over the scheduler's `TickReport::waits_ms` feed, strictly
+//!   tenant-scoped (contract §6 proof surface; served by the API1 metrics
+//!   endpoint).
 //!
 //! Scope discipline: **no HTTP, no execution here.** This crate is the typed
 //! seam plus the pure control-plane mechanisms; API1+ (HTTP surface) and the
@@ -35,6 +40,7 @@
 
 pub mod billing;
 pub mod caps;
+pub mod interference;
 pub mod ledger;
 pub mod lifecycle;
 pub mod meter;
@@ -44,6 +50,7 @@ pub mod tenant;
 
 pub use billing::SlotMeter;
 pub use caps::{CapDecision, CapGate, RateWindow};
+pub use interference::{TenantWaitStats, WaitSnapshot};
 pub use ledger::{FileLedger, InMemoryLedger, LeaseLedger, LeaseRecord, LeaseState};
 pub use lifecycle::{BoxProbe, LeaseLifecycle};
 pub use meter::{CogsCounters, SlotEventKind, SlotOccupancyEvent};

@@ -139,6 +139,7 @@ dependencies = [
 name = "corelink-fabric-server"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "axum",
  "base64",
  "corelink-fabric",
@@ -147,6 +148,7 @@ dependencies = [
  "corelink-runners-contracts",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "tower",
 ]

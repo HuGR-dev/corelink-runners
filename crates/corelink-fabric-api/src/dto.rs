@@ -88,6 +88,11 @@ pub struct ExecRequest {
     /// The check to execute — the frozen `CheckDef` transcription
     /// (`corelink-runners-contracts/src/check_def.rs`).
     pub check_def: CheckDef,
+    /// Merkle tree root hash of the workspace snapshot (lowercase hex) —
+    /// the FIRST memo axis of `CheckResult.memo_key`. (Wave-4 amendment to
+    /// the CF0 vocabulary, lead-ratified: without it the memo key collapses
+    /// across trees — audit finding at API3 integration.)
+    pub tree_hash: String,
 }
 
 /// `POST /v1/leases/{lease_id}/exec` response body.

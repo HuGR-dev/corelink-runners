@@ -12,11 +12,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::routing::{get, post};
-use axum::{Extension, Json, Router, middleware};
-use corelink_fabric::{CapGate, InMemoryLedger, LeaseLedger, RateWindow, TenantId, TenantPlan};
+use axum::{Extension, Router, middleware};
+use corelink_fabric::{
+    CapGate, InMemoryLedger, LeaseLedger, RateWindow, TenantId, TenantPlan, TenantWaitStats,
+};
 use corelink_fabric_api::paths;
 
 use crate::auth::{self, TokenStore};
+use crate::exec::{LeasedExec, NoBoxExec};
 use crate::handlers;
 use crate::handlers::envelope::{self, HookRegistry};
 
@@ -90,8 +93,22 @@ pub struct AppState {
     pub plans: Arc<dyn PlanSource>,
     /// Clock seam (deterministic under test).
     pub clock: Arc<dyn Clock>,
+    /// Per-tenant wait statistics (CP4 non-interference surface). The
+    /// composition root feeds it from the CP3 scheduler's
+    /// `TickReport::waits_ms`; the metrics endpoint serves each tenant ITS
+    /// OWN snapshot, never anyone else's.
+    pub wait_stats: Arc<Mutex<TenantWaitStats>>,
     /// Per-tenant sliding 60s acquire-attempt windows (CP2 rate ceiling).
     pub(crate) rate_windows: Arc<Mutex<HashMap<TenantId, RateWindow>>>,
+    /// The execution port (WP-API3): "run argv inside the box serving a
+    /// lease, capturing output". Defaults to [`NoBoxExec`] (every exec
+    /// refused, fail-closed) until the composition root attaches a real
+    /// backend via [`AppState::with_executor`].
+    pub exec: Arc<dyn LeasedExec>,
+    /// `lease_id` → absolute deadline (epoch ms), recorded at acquire —
+    /// the expired-at-exec-time gate reads it BEFORE any execution
+    /// (`expired_job_stores_nothing_ever`).
+    pub(crate) deadlines: Arc<Mutex<HashMap<String, u64>>>,
     /// Monotonic mint counter for lease ids.
     lease_seq: Arc<AtomicU64>,
 }
@@ -108,9 +125,38 @@ impl AppState {
             cap_gate: CapGate,
             plans,
             clock,
+            wait_stats: Arc::new(Mutex::new(TenantWaitStats::new())),
             rate_windows: Arc::new(Mutex::new(HashMap::new())),
+            exec: Arc::new(NoBoxExec),
+            deadlines: Arc::new(Mutex::new(HashMap::new())),
             lease_seq: Arc::new(AtomicU64::new(1)),
         }
+    }
+
+    /// Attach the execution backend (WP-API3). Without this, the state
+    /// keeps the [`NoBoxExec`] default: every exec is refused fail-closed,
+    /// never silently succeeded.
+    #[must_use]
+    pub fn with_executor(mut self, exec: Arc<dyn LeasedExec>) -> Self {
+        self.exec = exec;
+        self
+    }
+
+    /// Record the lease's absolute deadline at acquire (epoch ms).
+    pub(crate) fn record_deadline(&self, lease_id: &str, deadline_ms: u64) {
+        self.deadlines
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(lease_id.to_string(), deadline_ms);
+    }
+
+    /// The lease's recorded absolute deadline, if one is on file.
+    pub(crate) fn deadline_of(&self, lease_id: &str) -> Option<u64> {
+        self.deadlines
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(lease_id)
+            .copied()
     }
 
     /// Mint a unique lease id (`lease-<16-hex>`, monotonic per process).
@@ -166,13 +212,14 @@ pub fn app_full(
     registry: Arc<HookRegistry>,
 ) -> Router {
     let authenticated = Router::new()
-        .route(paths::METRICS_TENANT, get(metrics_tenant))
+        .route(paths::METRICS_TENANT, get(handlers::metrics::tenant_wait))
         .route(paths::LEASES, post(handlers::leases::acquire))
         .route(&capture(paths::LEASE_BY_ID), get(handlers::leases::status))
         .route(
             &capture(paths::LEASE_CANCEL),
             post(handlers::leases::cancel),
         )
+        .route(&capture(paths::EXEC), post(handlers::exec_handler::exec))
         .route(&capture(paths::ENVELOPE_EVENTS), get(envelope::poll_events))
         .route(&capture(paths::ENVELOPE_META), get(envelope::poll_meta))
         .with_state(state)
@@ -195,11 +242,4 @@ fn capture(template: &str) -> String {
 /// Liveness: 200 `"ok"`, no auth, no tenant data.
 async fn health() -> &'static str {
     "ok"
-}
-
-/// Placeholder authenticated endpoint: echoes the tenant the auth layer
-/// resolved, proving header → store → extension end-to-end. Real per-tenant
-/// metrics (wait histograms, contract §6) arrive with CP4.
-async fn metrics_tenant(Extension(tenant): Extension<TenantId>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "tenant": tenant.as_str() }))
 }

@@ -85,11 +85,15 @@ async fn valid_pat_maps_to_tenant() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
-    // The handler echoes the TenantId it received via request extensions —
-    // the auth layer's injection is observed end-to-end.
+    // The handler reports the TenantId it received via request extensions —
+    // the auth layer's injection is observed end-to-end. (Since WP-CP4 the
+    // route serves the real per-tenant WaitSnapshot rather than a bare echo;
+    // the `tenant` field — the thing THIS test pins — is unchanged, and a
+    // fresh app has zero samples.)
     let body: serde_json::Value =
         serde_json::from_slice(&body_bytes(response).await).expect("JSON body");
-    assert_eq!(body, serde_json::json!({ "tenant": "acme" }));
+    assert_eq!(body["tenant"], "acme");
+    assert_eq!(body["count"], 0, "fresh app: no waits recorded yet");
 }
 
 /// A token store that is down: every lookup fails `Unreachable`.
