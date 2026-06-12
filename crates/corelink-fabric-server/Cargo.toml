@@ -5,6 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[[bin]]
+name = "corelink-fabricd"
+path = "src/main.rs"
+
 [dependencies]
 axum       = { workspace = true }
 # WP-API3: the exec mechanism is fail-closed (`anyhow::Result`, no result

@@ -21,6 +21,7 @@ pub mod auth;
 pub mod cloud_exec;
 pub mod exec;
 pub mod handlers;
+pub mod server;
 
 pub use app::{
     AppState, Clock, PlanSource, StaticPlans, SystemClock, app, app_full, app_with_registry,
