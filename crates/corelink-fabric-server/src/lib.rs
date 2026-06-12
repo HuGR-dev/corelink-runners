@@ -13,6 +13,8 @@
 
 pub mod app;
 pub mod auth;
+pub mod handlers;
 
-pub use app::app;
+pub use app::{app, app_with_registry};
 pub use auth::{StaticTokenStore, TokenStore, TokenStoreError};
+pub use handlers::envelope::HookRegistry;

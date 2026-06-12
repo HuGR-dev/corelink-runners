@@ -7,13 +7,20 @@ publish.workspace = true
 
 [dependencies]
 axum       = { workspace = true }
+serde      = { workspace = true }
 serde_json = { workspace = true }
+# WP-ENV1: standard-base64 wire form of the drained raw transcript bytes
+# (same alphabet convention as the attestation wire form).
+base64     = { workspace = true }
 # Same-workspace path deps (house law allows these; the crates.io-only rule in
 # deny.toml governs EXTERNAL deps): the FROZEN API vocabulary (paths, DTOs,
-# error semantics), the control-plane core types (TenantId), and the frozen
-# wire-contract transcriptions the lease handlers (API2/3) will carry.
+# error semantics), the control-plane core types (TenantId), the frozen
+# wire-contract transcriptions the lease handlers (API2/3) will carry, and
+# the §13 envelope mechanism (CaptureHook/Subscriber — consumed, never
+# modified) the ENV1 transport adapter drains.
 corelink-fabric-api        = { path = "../corelink-fabric-api" }
 corelink-fabric            = { path = "../corelink-fabric" }
+corelink-runner            = { path = "../corelink-runner" }
 corelink-runners-contracts = { path = "../corelink-runners-contracts" }
 
 [dev-dependencies]
