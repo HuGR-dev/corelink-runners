@@ -24,10 +24,13 @@ Three forces converge:
    Per-minute pricing turns that into a terrifying, unpredictable bill — the exact
    "usage whiplash" the HuGR house principle forbids. The people who most need CI
    are the ones per-minute punishes hardest.
-2. **GitHub is raising the floor.** GitHub-hosted minutes were always metered; and
-   GitHub has signaled **charging for self-hosted runners (Mar 2026)** — removing the
-   one free escape hatch. The market is being pushed toward "pay for compute" right
-   as compute demand explodes. Tailwind.
+2. **Per-minute punishes parallelism + cold builds.** GitHub-hosted minutes are
+   metered and **divided by concurrency** — 4 parallel jobs drain the 2,000 free
+   private-repo minutes in ~8 wall-clock hours, then per-minute. (Note: GitHub's
+   announced Mar-2026 self-hosted charge was **reversed** after backlash, and
+   hosted prices were **cut ~39%** on 2026-01-01 — the "self-hosted hatch closing"
+   tailwind is gone; the durable wedge is the per-minute *model* punishing the
+   heavy/parallel/agent ICP, not GitHub's rate.)
 3. **CoreLink already owns the cache.** The hard, defensible asset — a content-addressed
    CAS + Action Cache — already exists and is live in production (dedup is intra-tenant
    at GA; **cross-tenant dedup of public deps is designed in and staged post-GA**,
@@ -83,27 +86,21 @@ both price and speed, and the gap widens exactly as fleets scale.
 
 ---
 
-## 5. Pricing (indicative — validate before publishing)
+## 5. Pricing
 
-Flat, by **parallel-runner slot**, unlimited minutes. Cache usage is the CoreLink
-cache product underneath (included for the runner's working set; large persistent
-pins are a Workspaces SKU).
+> **Canonical pricing lives in [`pricing.md`](./pricing.md)** (owner-decided
+> 2026-06-12). The earlier indicative ladder below was superseded; summary kept
+> for context.
 
-| Plan | Parallel runners | Runner size | Price (indicative) | For |
-|---|---|---|---|---|
-| **Free** | 1 (shared, fair-use mins) | 2 vCPU | **$0** | hobby / OSS / trials |
-| **Solo** | 1 dedicated | 2 vCPU | **$29 / mo** | solo dev + a few agents |
-| **Team** | 4 | 2–4 vCPU | **$99 / mo** ( = $24.75/runner) | small team / fleet |
-| **Scale** | 12 | up to 8 vCPU | **$249 / mo** ( = $20.75/runner) | busy fleet, volume discount |
-| **Enterprise** | custom / BYOC | custom | **custom** | dedicated, contract, self-host |
-
-- **Add-on runners** on any paid plan: ~**$22–29 / runner / mo**, declining with volume.
-- **Bigger sizes** (8/16 vCPU, GPU): a size multiplier on the slot price.
-- **Anchored against GitHub-hosted:** a GitHub 2-core minute is ~$0.008; a team running
-  ~1,500 min/runner/mo ≈ $12/runner *just in minutes that we make unlimited* — and our
-  cache-warm + memoization cut the **number** of billable minutes by a further large
-  factor. Target: **~60–70% cheaper** than equivalent GitHub-hosted utilization, with
-  a **predictable** bill.
+Flat by **concurrency**, unlimited minutes; the CoreLink cache (working-set
+storage) is bundled into every tier. Five tiers — Starter $8 · Pro $20 · Team
+$50 · Scale $100 · Max $200 — no free tier, a 5-day trial instead. Each tier
+pairs a concurrency cap with a **hard active-compute ceiling** so the maximum
+COGS a user can incur is structurally below the price (Starter caps at ~$5 COGS):
+**loss is impossible by construction**, while the ceiling is generous enough that
+a real workflow never sees it and heavy users sort up. Margin floor ~37–40%
+(worst case), ~85–95% typical. Full mechanism, COGS basis, and the two residuals
+to bound (storage allowance, provider rate) in `pricing.md`.
 
 ---
 
