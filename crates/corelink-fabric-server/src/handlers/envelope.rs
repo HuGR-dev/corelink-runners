@@ -36,7 +36,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use corelink_fabric::TenantId;
 use corelink_fabric_api::ApiError;
-use corelink_runner::envelope::{CaptureHook, TurnMeta};
+use corelink_runner::envelope::{CaptureHook, PriceCard, TurnMeta};
 use serde::Serialize;
 
 use crate::auth::error_response;
@@ -51,7 +51,21 @@ struct HookEntry {
     hook: CaptureHook,
     /// The credential the hook's `subscribe` seam expects.
     credential: String,
+    /// The fabric-side price card the close path finalizes COGS against
+    /// (ENV2). Fabric configuration, never caller-supplied — a forge that
+    /// could inject the price could fabricate `cost_usd_micros`.
+    price: PriceCard,
 }
+
+/// The "no price on file" card: every class free, so a close without a
+/// registered card derives an honest `cost_usd_micros` of 0 — a floor,
+/// never a fabricated figure.
+const ZERO_PRICE: PriceCard = PriceCard {
+    input_per_mtok_micros: 0,
+    output_per_mtok_micros: 0,
+    cache_read_per_mtok_micros: 0,
+    cache_write_per_mtok_micros: 0,
+};
 
 /// `lease_id` → [`CaptureHook`] handle registry — the composition root
 /// registers a lease's hook at lease acquire; the envelope handlers look it
@@ -75,12 +89,28 @@ impl HookRegistry {
         hook: CaptureHook,
         credential: impl Into<String>,
     ) {
+        self.register_priced(lease_id, tenant, hook, credential, ZERO_PRICE);
+    }
+
+    /// [`register`](Self::register), with the fabric-side [`PriceCard`] the
+    /// ENV2 close path finalizes `cost_usd_micros` against. The plain
+    /// `register` uses the zero card ("no price on file" → cost 0, an honest
+    /// floor).
+    pub fn register_priced(
+        &self,
+        lease_id: impl Into<String>,
+        tenant: TenantId,
+        hook: CaptureHook,
+        credential: impl Into<String>,
+        price: PriceCard,
+    ) {
         self.lock().insert(
             lease_id.into(),
             HookEntry {
                 tenant,
                 hook,
                 credential: credential.into(),
+                price,
             },
         );
     }
@@ -97,6 +127,29 @@ impl HookRegistry {
         let entries = self.lock();
         let entry = entries.get(lease_id)?;
         (entry.tenant == *tenant).then(|| (entry.hook.clone(), entry.credential.clone()))
+    }
+
+    /// Tenant-matched close-path lookup (ENV2): the hook handle + the
+    /// fabric-side price card. Same no-existence-oracle rule as
+    /// [`lookup`](Self::lookup).
+    pub(crate) fn close_handle(
+        &self,
+        lease_id: &str,
+        tenant: &TenantId,
+    ) -> Option<(CaptureHook, PriceCard)> {
+        let entries = self.lock();
+        let entry = entries.get(lease_id)?;
+        (entry.tenant == *tenant).then(|| (entry.hook.clone(), entry.price))
+    }
+
+    /// Trusted (composition-root) close-path lookup by lease id alone —
+    /// the abnormal path: the lifecycle sweeps already hold the ledger
+    /// record, so there is no tenant boundary to re-prove here. Never
+    /// reachable from a wire handler.
+    pub(crate) fn close_handle_any(&self, lease_id: &str) -> Option<(CaptureHook, PriceCard)> {
+        let entries = self.lock();
+        let entry = entries.get(lease_id)?;
+        Some((entry.hook.clone(), entry.price))
     }
 
     /// Lock with poison recovery (a panicking registrant must not DoS the

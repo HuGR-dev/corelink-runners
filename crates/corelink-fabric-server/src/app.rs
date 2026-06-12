@@ -220,6 +220,7 @@ pub fn app_full(
             post(handlers::leases::cancel),
         )
         .route(&capture(paths::EXEC), post(handlers::exec_handler::exec))
+        .route(&capture(paths::LEASE_CLOSE), post(handlers::close::close))
         .route(&capture(paths::ENVELOPE_EVENTS), get(envelope::poll_events))
         .route(&capture(paths::ENVELOPE_META), get(envelope::poll_meta))
         .with_state(state)
