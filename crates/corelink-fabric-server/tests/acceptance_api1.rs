@@ -4,14 +4,17 @@
 //! real sockets. Error bodies are asserted against the FROZEN vocabulary
 //! (`corelink_fabric_api::{ApiError, ErrorBody}`) — status AND machine code.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use axum::response::Response;
-use corelink_fabric::TenantId;
+use corelink_fabric::{InMemoryLedger, TenantId};
 use corelink_fabric_api::{ApiError, ErrorBody, paths};
-use corelink_fabric_server::{StaticTokenStore, TokenStore, TokenStoreError, app};
+use corelink_fabric_server::{
+    AppState, StaticPlans, StaticTokenStore, SystemClock, TokenStore, TokenStoreError, app,
+};
 use tower::ServiceExt;
 
 /// A store with one known PAT: `pat-acme` → tenant `acme`.
@@ -20,6 +23,17 @@ fn acme_store() -> Arc<dyn TokenStore + Send + Sync> {
         "pat-acme".to_string(),
         TenantId::new("acme").expect("valid tenant id"),
     )]))
+}
+
+/// App over `store` with empty lease state — API1 exercises auth + health
+/// only; the lease surface has its own suite (`acceptance_api2.rs`).
+fn test_app(store: Arc<dyn TokenStore + Send + Sync>) -> Router {
+    let state = AppState::new(
+        Arc::new(Mutex::new(InMemoryLedger::new())),
+        Arc::new(StaticPlans::new([])),
+        Arc::new(SystemClock),
+    );
+    app(store, state)
 }
 
 fn get_request(path: &str, bearer: Option<&str>) -> Request<Body> {
@@ -47,7 +61,7 @@ async fn assert_frozen_error(response: Response, err: ApiError) {
 
 #[tokio::test]
 async fn missing_pat_is_401() {
-    let response = app(acme_store())
+    let response = test_app(acme_store())
         .oneshot(get_request(paths::METRICS_TENANT, None))
         .await
         .unwrap();
@@ -56,7 +70,7 @@ async fn missing_pat_is_401() {
 
 #[tokio::test]
 async fn invalid_pat_is_401() {
-    let response = app(acme_store())
+    let response = test_app(acme_store())
         .oneshot(get_request(paths::METRICS_TENANT, Some("pat-nobody")))
         .await
         .unwrap();
@@ -65,7 +79,7 @@ async fn invalid_pat_is_401() {
 
 #[tokio::test]
 async fn valid_pat_maps_to_tenant() {
-    let response = app(acme_store())
+    let response = test_app(acme_store())
         .oneshot(get_request(paths::METRICS_TENANT, Some("pat-acme")))
         .await
         .unwrap();
@@ -91,7 +105,7 @@ impl TokenStore for DownStore {
 async fn token_store_down_fails_closed_503_never_open() {
     // Even a would-be-valid PAT must NOT be admitted when the store cannot
     // answer: 503 + "fail_closed", never 200, never anonymous fall-through.
-    let response = app(Arc::new(DownStore))
+    let response = test_app(Arc::new(DownStore))
         .oneshot(get_request(paths::METRICS_TENANT, Some("pat-acme")))
         .await
         .unwrap();
@@ -102,7 +116,7 @@ async fn token_store_down_fails_closed_503_never_open() {
 async fn health_is_open_everything_else_is_not() {
     // Health: 200 "ok" with no credentials — the single open route (LB
     // liveness; nothing tenant-scoped in the body).
-    let response = app(acme_store())
+    let response = test_app(acme_store())
         .oneshot(get_request(paths::HEALTH, None))
         .await
         .unwrap();
@@ -110,7 +124,7 @@ async fn health_is_open_everything_else_is_not() {
     assert_eq!(body_bytes(response).await, b"ok");
 
     // The same unauthenticated request against any other route is refused.
-    let response = app(acme_store())
+    let response = test_app(acme_store())
         .oneshot(get_request(paths::METRICS_TENANT, None))
         .await
         .unwrap();

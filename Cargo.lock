@@ -140,9 +140,12 @@ name = "corelink-fabric-server"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64",
  "corelink-fabric",
  "corelink-fabric-api",
+ "corelink-runner",
  "corelink-runners-contracts",
+ "serde",
  "serde_json",
  "tokio",
  "tower",
