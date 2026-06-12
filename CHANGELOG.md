@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-seed] — 2026-06-12
+
+The seed milestone: the proven ephemeral-runner execution core, shipped to
+`main` through the repo's first real CI run on `corelink-runners-builder-01`.
+
+- feat(envelope): **S13 wave — §13 contract obligations as mechanism**
+  (audit 2026-06-11 → P0). `IntentMetrics`/`TokenCounts`/`ToolCount`
+  transcribed @ hugit-contracts 443ff1b with in-crate golden fixture +
+  `CONTEXT_ENVELOPE_SCHEMA_VERSION` pin; conformance tripwire hardened
+  (real SHA-256 per vector, manifest membership, tamper proof); envelope
+  mechanism — derivation collector (saturating meters, exact-integer
+  micro-USD), CaptureHook (two bounded in-memory surfaces, bearer seam
+  both directions), JobClose ack state machine (fail-closed timeout,
+  in-window drain, exactly-once incl. abnormal paths). 41-item acceptance
+  suite, cold-reviewed (FIX-FIRST findings closed in-PR).
+- docs: ROADMAP (P0 closed · P1 ship-the-seed · M1 fabric · M2 GA);
+  contract title v1.2.0; CLAUDE.md refresh; transplant prose fixes.
+- ci: default branch `main`; install-action v2.81.10 + pinned tool
+  versions (cargo-audit@0.22.2, cargo-deny@0.19.8).
+
 - docs(spec): **contract 1.2.0 — `cost_usd_micros|u64` (E-DOCS, 2026-06-11)**.
   §13.1 money field renamed: `cost_usd|f64` → `cost_usd_micros|u64` (integer
   micro-USD, 1 USD = 1,000,000 units; exact-integer, no f64 epsilon; owner-
