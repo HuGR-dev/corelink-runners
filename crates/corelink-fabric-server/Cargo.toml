@@ -31,6 +31,7 @@ corelink-fabric-api        = { path = "../corelink-fabric-api" }
 corelink-fabric            = { path = "../corelink-fabric" }
 corelink-runner            = { path = "../corelink-runner" }
 corelink-runners-contracts = { path = "../corelink-runners-contracts" }
+corelink-cloud-engine      = { path = "../corelink-cloud-engine" }
 # corelink-runner serves two consumers: validation reuse (API2 —
 # `ContainerSpec::from_lease` is the runner's own lease gate: pinned image,
 # allowed net_policy, tmp_root injection guard; no box/VM is ever contacted
