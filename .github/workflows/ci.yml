@@ -14,7 +14,7 @@ jobs:
     # HuGR family CI runs on the self-hosted fleet, never GitHub-hosted
     # (same labels as corelink-server; ubuntu-latest was a founding mistake
     # that hit the org's Actions billing wall).
-    runs-on: [self-hosted, mac, corelink-builder]
+    runs-on: [self-hosted, corelink-builder]
     steps:
       - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0  # v6.0.3 (Node 24; v4 is Node 20, forced off runners 2026-06-16)
         with:
