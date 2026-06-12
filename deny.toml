@@ -20,10 +20,21 @@ allow = [
 private = { ignore = true }
 
 [bans]
-# Deny multiple versions of the same crate. No skips: this workspace has no
-# dependencies yet — add documented skips only when a transitive duplicate
-# genuinely cannot be collapsed (hugit's deny.toml is the template).
+# Deny multiple versions of the same crate. Skips are documented and added ONLY
+# when a transitive duplicate genuinely cannot be collapsed (hugit's deny.toml
+# is the template).
 multiple-versions = "deny"
+skip = [
+    # windows-sys 0.52.0 is pulled by `ring` (← rustls ← ureq, the
+    # CloudSandboxEngine's HTTP/TLS stack); the workspace's other copy is 0.61.2
+    # (← mio ← tokio). Both are **Windows-only** target-gated deps — neither is
+    # ever compiled on our mac/Linux build+CI targets (`cargo tree -i
+    # windows-sys@0.52.0` is empty without `--target all`). The two majors are
+    # pinned by upstreams we do not control (ring vs mio), so the duplicate is
+    # irreducible without an upstream change. Scoped to the exact version so any
+    # NEW/unexpected duplicate still trips the gate.
+    { crate = "windows-sys@0.52.0", reason = "Windows-only (never built on our targets); ring/rustls (ureq) vs mio/tokio pin different majors — irreducible transitive dup." },
+]
 
 [sources]
 # Only allow dependencies from crates.io; deny unknown registries and git deps.

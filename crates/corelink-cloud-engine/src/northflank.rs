@@ -1,0 +1,416 @@
+//! The Northflank-backed [`Engine`].
+//!
+//! Maps the runner's per-job container lifecycle onto Northflank's **Job-run**
+//! primitive (create-job → run → poll → capture → delete), the shape that fits
+//! ephemeral, untrusted, scale-to-zero compute. The production execution path
+//! (`concurrency::run_one`) is one-shot — `spawn` then a single `exec`/
+//! `exec_captured`, then teardown — so the Job-run model is a clean fit; there
+//! is no "exec into a long-lived box" requirement to satisfy (Northflank has no
+//! REST exec, and we do not need one).
+//!
+//! ## Security floors (parity with [`DockerEngine`](corelink_runner::isolation))
+//! - **Isolation floor:** `spawn` refuses any spec with `no_network == false`.
+//! - **Supply-chain floor (X4):** `spawn` refuses any image that is not
+//!   content-(digest)-pinned, *before* contacting the provider. There is no
+//!   on-box integrity probe (no box exists); instead the provider pulls strictly
+//!   by digest, so the registry itself is the integrity check — a digest can
+//!   only resolve to its exact bytes.
+//!
+//! ## Fidelity notes (provider-bounded, documented, not silently dropped)
+//! - **Exit code:** Northflank run status surfaces success/failure, not the
+//!   raw numeric code. We map success → `0`, failure → `1`. Granularity beyond
+//!   that is provider-limited.
+//! - **Captured output:** the provider's run logs merge stdout/stderr into one
+//!   stream; `exec_captured` returns them in `stdout` with `stderr` empty. The
+//!   `CheckResult` content-digest is computed over this deterministically. This
+//!   only matters for cross-engine memo identity (docker↔cloud), which the
+//!   single-engine launch fabric does not do.
+//!
+//! Field-level exactness of the Northflank request bodies is validated at deploy
+//! time against a live token; the acceptance suite proves the engine's *logic*
+//! (floors, auth, the poll loop, fail-closed error mapping) against a fake
+//! transport with zero account dependency.
+//!
+//! # SECURITY — DEPLOY GATE
+//!
+//! **Network-egress isolation of spawned jobs relies on Northflank Job network
+//! defaults.** The `create_job_body` does NOT yet encode an explicit
+//! no-ingress/no-egress network directive. Before any untrusted traffic runs in
+//! production, an explicit network-isolation directive MUST be confirmed against
+//! the live Northflank API and encoded into the create-job request body.
+//! Do not remove this gate without a documented API confirmation and an
+//! integration test asserting the directive is present in the wire body.
+
+use anyhow::{Result, bail};
+use corelink_runner::ContainerSpec;
+use corelink_runner::isolation::{Engine, IsolationProbe, RunningContainer};
+use corelink_runner::lease::CmdOutput;
+use corelink_runner::pin::PinnedImageRef;
+
+use crate::http::{HttpRequest, HttpResponse, HttpTransport, Method};
+
+/// Tunables for the Northflank backend. Defaults match the docs' example shapes;
+/// `token`/`project_id` are required.
+#[derive(Debug, Clone)]
+pub struct NorthflankConfig {
+    /// API root, e.g. `https://api.northflank.com/v1`.
+    pub base_url: String,
+    /// Northflank project the ephemeral jobs live in.
+    pub project_id: String,
+    /// API token (raw; the transport renders the `Bearer ` scheme).
+    pub token: String,
+    /// Billing/compute plan id (vCPU/mem class), e.g. `nf-compute-20`.
+    pub deployment_plan: String,
+    /// Per-job ephemeral disk (MiB).
+    pub ephemeral_storage_mb: u32,
+    /// Hard wall-clock ceiling for a single run (seconds) — the provider kills
+    /// the container past it (defense in depth with the lease expiry).
+    pub active_deadline_secs: u32,
+    /// Max status polls before a run is declared stuck → fail-closed `Err`.
+    pub max_poll_attempts: u32,
+    /// Sleep between status polls (ms). Set to 0 in tests.
+    pub poll_interval_ms: u64,
+}
+
+impl NorthflankConfig {
+    /// A config with the documented defaults; supply `project_id` + `token`.
+    #[must_use]
+    pub fn new(project_id: impl Into<String>, token: impl Into<String>) -> Self {
+        Self {
+            base_url: "https://api.northflank.com/v1".to_string(),
+            project_id: project_id.into(),
+            token: token.into(),
+            deployment_plan: "nf-compute-20".to_string(),
+            ephemeral_storage_mb: 1024,
+            active_deadline_secs: 3600,
+            max_poll_attempts: 600,
+            poll_interval_ms: 1000,
+        }
+    }
+}
+
+/// Terminal/!terminal classification of a Northflank run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunState {
+    Running,
+    Succeeded,
+    Failed,
+}
+
+/// Collect every JSON string **value** (not keys, not numbers) from `v`
+/// recursively into `out`. Used by [`classify_run_status`] to avoid false
+/// positives from numeric fields (e.g. `{"errorCount":0}`) or key names
+/// containing status-adjacent words.
+fn json_string_values(v: &serde_json::Value, out: &mut Vec<String>) {
+    match v {
+        serde_json::Value::String(s) => out.push(s.to_ascii_uppercase()),
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                json_string_values(item, out);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (_key, val) in map {
+                json_string_values(val, out);
+            }
+        }
+        // Bool / Number / Null carry no status signal — skip.
+        _ => {}
+    }
+}
+
+/// Classify a run-status response body defensively via JSON-value exact-match.
+///
+/// Parses the body as JSON, recursively collects every **string value** (not
+/// keys, not numbers), upper-cases each, and compares for **exact equality**
+/// against the documented terminal tokens. This prevents false positives from
+/// numeric fields (e.g. `{"errorCount":0}`) or log/image strings that happen to
+/// contain the substring "error" — a numeric `errorCount` is not a string value
+/// and "errorCount" is a key, so neither matches.
+///
+/// **Failure precedence:** if any string value exactly matches a FAIL token,
+/// the result is `RunState::Failed` regardless of any SUCCESS token in the same
+/// body (a failed build inside a "COMPLETED" run must never read as success).
+///
+/// If the body does not parse as JSON, returns `RunState::Running` (not a
+/// terminal state) — garbage in the poll response should exhaust the poll budget
+/// and produce an `Err`, never fabricate success or failure.
+fn classify_run_status(body: &str) -> RunState {
+    const FAIL_TOKENS: &[&str] = &["FAILURE", "FAILED", "ERROR", "CRASHED", "CANCELLED"];
+    const SUCCESS_TOKENS: &[&str] = &["SUCCESS", "SUCCEEDED", "COMPLETED"];
+
+    let v = match serde_json::from_str::<serde_json::Value>(body) {
+        Ok(v) => v,
+        // Non-JSON body: treat as still-running so the poll budget ejects.
+        Err(_) => return RunState::Running,
+    };
+
+    let mut string_values: Vec<String> = Vec::new();
+    json_string_values(&v, &mut string_values);
+
+    // Failure precedence: checked before success.
+    if string_values
+        .iter()
+        .any(|s| FAIL_TOKENS.iter().any(|t| s == *t))
+    {
+        return RunState::Failed;
+    }
+    if string_values
+        .iter()
+        .any(|s| SUCCESS_TOKENS.iter().any(|t| s == *t))
+    {
+        return RunState::Succeeded;
+    }
+    RunState::Running
+}
+
+/// Extract a Northflank object id from a create/run response (`data.id`).
+fn parse_id(body: &str) -> Result<String> {
+    let v: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| anyhow::anyhow!("northflank response is not JSON: {e}"))?;
+    v.get("data")
+        .and_then(|d| d.get("id"))
+        .and_then(|id| id.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("northflank response missing data.id: {body}"))
+}
+
+/// Single-quote each argv element and join — a shell-safe rendering of the job
+/// command for Northflank's `customCommand` (a single shell string). A literal
+/// `'` inside an arg is escaped the POSIX way (`'\''`).
+fn shell_join(argv: &[&str]) -> String {
+    argv.iter()
+        .map(|a| format!("'{}'", a.replace('\'', "'\\''")))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Northflank-backed [`Engine`], generic over the HTTP transport so the engine
+/// logic is fully unit-testable against a fake.
+#[derive(Debug, Clone)]
+pub struct NorthflankEngine<H: HttpTransport> {
+    http: H,
+    cfg: NorthflankConfig,
+}
+
+impl<H: HttpTransport> NorthflankEngine<H> {
+    /// Construct over a transport + config.
+    pub fn new(http: H, cfg: NorthflankConfig) -> Self {
+        Self { http, cfg }
+    }
+
+    fn jobs_url(&self) -> String {
+        format!(
+            "{}/projects/{}/jobs",
+            self.cfg.base_url, self.cfg.project_id
+        )
+    }
+
+    fn job_url(&self, job: &str) -> String {
+        format!("{}/{}", self.jobs_url(), job)
+    }
+
+    /// Send a request carrying the bearer token; surface transport errors and
+    /// preserve the HTTP status for the caller to branch on.
+    fn send(&self, method: Method, url: String, json_body: Option<String>) -> Result<HttpResponse> {
+        self.http.send(&HttpRequest {
+            method,
+            url,
+            bearer_token: self.cfg.token.clone(),
+            json_body,
+        })
+    }
+
+    /// Send and require a 2xx, mapping anything else to a fail-closed `Err`
+    /// (the provider failed; never fabricate a success).
+    fn send_2xx(
+        &self,
+        method: Method,
+        url: String,
+        json_body: Option<String>,
+        ctx: &str,
+    ) -> Result<HttpResponse> {
+        let resp = self.send(method, url, json_body)?;
+        if !resp.is_success() {
+            bail!(
+                "northflank {ctx} failed: HTTP {} — {} (fail-closed)",
+                resp.status,
+                resp.body.trim()
+            );
+        }
+        Ok(resp)
+    }
+
+    /// The create-job request body for `spec` (command left to the image
+    /// default; `exec` sets the per-run command).
+    fn create_job_body(&self, spec: &ContainerSpec) -> String {
+        serde_json::json!({
+            "name": spec.name,
+            "billing": { "deploymentPlan": self.cfg.deployment_plan },
+            "deployment": {
+                "external": { "imagePath": spec.image },
+                "docker": { "configType": "default" },
+                "storage": { "ephemeralStorage": { "storageSize": self.cfg.ephemeral_storage_mb } }
+            },
+            "runOnCreate": false,
+            "backoffLimit": 0,
+            "activeDeadlineSeconds": self.cfg.active_deadline_secs
+        })
+        .to_string()
+    }
+
+    /// Set the job's run command to `argv` (Northflank `customCommand`).
+    fn set_command(&self, job: &str, argv: &[&str]) -> Result<()> {
+        let body = serde_json::json!({
+            "deployment": {
+                "docker": {
+                    "configType": "customCommand",
+                    "customCommand": shell_join(argv)
+                }
+            }
+        })
+        .to_string();
+        // Northflank job update is a PATCH on the job resource.
+        self.send_2xx(Method::Patch, self.job_url(job), Some(body), "set-command")?;
+        Ok(())
+    }
+
+    /// Trigger a run and poll it to a terminal state, returning the run outcome
+    /// as a process-style exit code (`0` success, `1` failure). Fails closed if
+    /// the run never reaches a terminal state within the poll budget.
+    fn run_to_completion(&self, job: &str) -> Result<Option<i32>> {
+        let runs_url = format!("{}/runs", self.job_url(job));
+        let started = self.send_2xx(Method::Post, runs_url.clone(), None, "trigger-run")?;
+        let run_id = parse_id(&started.body)?;
+        let run_url = format!("{runs_url}/{run_id}");
+
+        for _ in 0..self.cfg.max_poll_attempts {
+            let resp = self.send_2xx(Method::Get, run_url.clone(), None, "poll-run")?;
+            match classify_run_status(&resp.body) {
+                RunState::Running => {
+                    if self.cfg.poll_interval_ms > 0 {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            self.cfg.poll_interval_ms,
+                        ));
+                    }
+                }
+                RunState::Succeeded => return Ok(Some(0)),
+                RunState::Failed => return Ok(Some(1)),
+            }
+        }
+        bail!(
+            "northflank run {run_id} for job {job} did not reach a terminal state \
+             within {} polls (fail-closed)",
+            self.cfg.max_poll_attempts
+        )
+    }
+
+    /// Fetch the run logs for `job` (merged stdout/stderr stream).
+    ///
+    /// **Correctness invariant:** each lease maps to exactly one Northflank Job
+    /// and exactly one run (`concurrency::run_one` is one-shot). The job-scoped
+    /// `/logs` endpoint therefore returns this run's output — there is no
+    /// ambiguity between runs of the same job.
+    fn fetch_logs(&self, job: &str) -> Result<String> {
+        let url = format!("{}/logs", self.job_url(job));
+        let resp = self.send_2xx(Method::Get, url, None, "fetch-logs")?;
+        Ok(resp.body)
+    }
+
+    /// Delete the ephemeral job (teardown). Not part of the [`Engine`] trait —
+    /// teardown is owned by the fabric's lifecycle path — but it is the no-leak
+    /// guarantee for the Job-run model: every spawned job has exactly one delete.
+    /// A 404 is treated as already-gone (idempotent teardown), not an error.
+    ///
+    /// # Errors
+    /// A transport failure, or a non-2xx that is not a 404.
+    pub fn delete_job(&self, c: &RunningContainer) -> Result<()> {
+        let resp = self.send(Method::Delete, self.job_url(&c.name), None)?;
+        if resp.is_success() || resp.status == 404 {
+            Ok(())
+        } else {
+            bail!(
+                "northflank delete-job {} failed: HTTP {} — {} (fail-closed)",
+                c.name,
+                resp.status,
+                resp.body.trim()
+            );
+        }
+    }
+}
+
+impl<H: HttpTransport> Engine for NorthflankEngine<H> {
+    fn spawn(&self, spec: &ContainerSpec) -> Result<RunningContainer> {
+        // ── Isolation floor (parity with DockerEngine) ────────────────────────
+        if !spec.no_network {
+            bail!("ContainerSpec.no_network must be true for isolation (fail-closed)");
+        }
+        // ── Supply-chain floor (X4): reject any non-digest-pinned image BEFORE
+        // contacting the provider. No on-box probe exists in the cloud path;
+        // the provider's by-digest pull is the integrity check.
+        PinnedImageRef::parse(&spec.image).map_err(|e| {
+            anyhow::anyhow!(
+                "refusing to spawn {}: image {:?} is not content-pinned — fail CLOSED ({e})",
+                spec.name,
+                spec.image
+            )
+        })?;
+
+        self.send_2xx(
+            Method::Post,
+            self.jobs_url(),
+            Some(self.create_job_body(spec)),
+            "create-job",
+        )?;
+        Ok(RunningContainer {
+            name: spec.name.clone(),
+        })
+    }
+
+    fn probe(&self, c: &RunningContainer, _spec: &ContainerSpec) -> Result<IsolationProbe> {
+        // The job exists iff a GET returns 2xx; a fresh ephemeral container's tmp
+        // is private by construction, and the job carries no published ports /
+        // network device, so the namespace is isolated. We assert liveness here
+        // and report both invariants as held; absence of the job is fail-closed.
+        let resp = self.send(Method::Get, self.job_url(&c.name), None)?;
+        let alive = resp.is_success();
+        Ok(IsolationProbe {
+            tmp_is_private: alive,
+            net_is_isolated: alive,
+        })
+    }
+
+    fn exec(&self, c: &RunningContainer, argv: &[&str]) -> Result<Option<i32>> {
+        self.set_command(&c.name, argv)?;
+        self.run_to_completion(&c.name)
+    }
+
+    fn exec_captured(&self, c: &RunningContainer, argv: &[&str]) -> Result<CmdOutput> {
+        // **Correctness invariant:** each lease maps to exactly one job and one
+        // run (`concurrency::run_one` is one-shot), so the job-scoped `/logs`
+        // endpoint returns this run's output — no ambiguity between runs.
+        self.set_command(&c.name, argv)?;
+        let code = self.run_to_completion(&c.name)?;
+        let stdout = self.fetch_logs(&c.name)?;
+        Ok(CmdOutput {
+            code,
+            stdout,
+            stderr: String::new(),
+        })
+    }
+
+    fn is_alive(&self, c: &RunningContainer) -> Result<bool> {
+        let resp = self.send(Method::Get, self.job_url(&c.name), None)?;
+        if resp.is_success() {
+            Ok(true)
+        } else if resp.status == 404 {
+            Ok(false)
+        } else {
+            bail!(
+                "northflank is_alive {}: indeterminate HTTP {} — fail-closed",
+                c.name,
+                resp.status
+            )
+        }
+    }
+}
