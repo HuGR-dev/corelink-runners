@@ -12,8 +12,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::routing::{get, post};
-use axum::{Extension, Json, Router, middleware};
-use corelink_fabric::{CapGate, InMemoryLedger, LeaseLedger, RateWindow, TenantId, TenantPlan};
+use axum::{Extension, Router, middleware};
+use corelink_fabric::{
+    CapGate, InMemoryLedger, LeaseLedger, RateWindow, TenantId, TenantPlan, TenantWaitStats,
+};
 use corelink_fabric_api::paths;
 
 use crate::auth::{self, TokenStore};
@@ -90,6 +92,11 @@ pub struct AppState {
     pub plans: Arc<dyn PlanSource>,
     /// Clock seam (deterministic under test).
     pub clock: Arc<dyn Clock>,
+    /// Per-tenant wait statistics (CP4 non-interference surface). The
+    /// composition root feeds it from the CP3 scheduler's
+    /// `TickReport::waits_ms`; the metrics endpoint serves each tenant ITS
+    /// OWN snapshot, never anyone else's.
+    pub wait_stats: Arc<Mutex<TenantWaitStats>>,
     /// Per-tenant sliding 60s acquire-attempt windows (CP2 rate ceiling).
     pub(crate) rate_windows: Arc<Mutex<HashMap<TenantId, RateWindow>>>,
     /// Monotonic mint counter for lease ids.
@@ -108,6 +115,7 @@ impl AppState {
             cap_gate: CapGate,
             plans,
             clock,
+            wait_stats: Arc::new(Mutex::new(TenantWaitStats::new())),
             rate_windows: Arc::new(Mutex::new(HashMap::new())),
             lease_seq: Arc::new(AtomicU64::new(1)),
         }
@@ -166,7 +174,7 @@ pub fn app_full(
     registry: Arc<HookRegistry>,
 ) -> Router {
     let authenticated = Router::new()
-        .route(paths::METRICS_TENANT, get(metrics_tenant))
+        .route(paths::METRICS_TENANT, get(handlers::metrics::tenant_wait))
         .route(paths::LEASES, post(handlers::leases::acquire))
         .route(&capture(paths::LEASE_BY_ID), get(handlers::leases::status))
         .route(
@@ -195,11 +203,4 @@ fn capture(template: &str) -> String {
 /// Liveness: 200 `"ok"`, no auth, no tenant data.
 async fn health() -> &'static str {
     "ok"
-}
-
-/// Placeholder authenticated endpoint: echoes the tenant the auth layer
-/// resolved, proving header → store → extension end-to-end. Real per-tenant
-/// metrics (wait histograms, contract §6) arrive with CP4.
-async fn metrics_tenant(Extension(tenant): Extension<TenantId>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "tenant": tenant.as_str() }))
 }
