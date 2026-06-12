@@ -25,4 +25,5 @@ pub use app::{
 };
 pub use auth::{StaticTokenStore, TokenStore, TokenStoreError};
 pub use exec::{FakeLeasedExec, LeasedExec, NoBoxExec, compute_memo_key, run_check};
+pub use handlers::close::close_abnormal;
 pub use handlers::envelope::HookRegistry;

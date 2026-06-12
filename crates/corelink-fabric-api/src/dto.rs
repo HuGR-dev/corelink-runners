@@ -6,7 +6,9 @@
 //! `CheckDef`, `CheckResult`) are the frozen transcriptions in
 //! `corelink-runners-contracts` — wrapped, never redefined.
 
-use corelink_runners_contracts::{CheckDef, CheckResult, RunnerLease, RunnerState};
+use corelink_runners_contracts::{
+    CheckDef, CheckResult, IntentMetrics, LandableEntry, RunnerLease, RunnerState,
+};
 use serde::{Deserialize, Serialize};
 
 /// `POST /v1/leases` request body — acquire a lease (contract §1 "Acquire").
@@ -102,4 +104,94 @@ pub struct ExecResponse {
     /// The execution result — the frozen `CheckResult` transcription. Same
     /// `CheckDef` over the same inputs MUST be byte-identical (contract §3).
     pub result: CheckResult,
+}
+
+/// `POST /v1/queue/trigger` request body — hugit's landing queue triggers
+/// execution of an uncached check on demand (contract §9, the `QueueApi`
+/// seam; hugit B5). (API4 amendment to the CF0 freeze, lead-ratified.)
+///
+/// The queue delivers at-least-once: the fabric dedups on
+/// `(tenant, entry.item_id, tree_hash)` and answers a duplicate delivery
+/// with the SAME result without re-executing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TriggerRequest {
+    /// The landable queue entry that needs the uncached check — the frozen
+    /// `LandableEntry` transcription
+    /// (`corelink-runners-contracts/src/queue_api.rs`).
+    pub entry: LandableEntry,
+
+    /// The check to execute — the frozen `CheckDef` transcription.
+    pub check_def: CheckDef,
+
+    /// Merkle tree root hash of the workspace snapshot (lowercase hex) —
+    /// the FIRST memo axis of `CheckResult.memo_key`, exactly as on the
+    /// exec path (wave-4 amendment).
+    pub tree_hash: String,
+
+    /// The lease whose box/VM executes the check. The lease was acquired
+    /// through the capped `POST /v1/leases` path — capping happened THERE;
+    /// the trigger is lease-scoped and tenant-scoped (404 cross-tenant).
+    pub lease_id: String,
+}
+
+/// `POST /v1/queue/trigger` response body. (API4 amendment to the CF0
+/// freeze, lead-ratified.)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TriggerResponse {
+    /// The queue item this result answers (`entry.item_id`, echoed so the
+    /// queue can correlate under at-least-once delivery).
+    pub item_id: String,
+
+    /// The execution result — the frozen `CheckResult` transcription.
+    /// Byte-identical on duplicate delivery (idempotency, contract §9).
+    pub result: CheckResult,
+}
+
+/// `POST /v1/leases/{lease_id}/close` request body — drive the §13.2 item-3
+/// job-close machinery and release the lease (ENV2 amendment to the CF0
+/// freeze, lead-ratified).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloseRequest {
+    /// Terminal job status: `"succeeded"` or `"failed"` (the only two the
+    /// caller may claim; `killed` is the fabric's own abnormal-path verdict,
+    /// never caller-supplied). Anything else is 400 `invalid`.
+    pub status: String,
+
+    /// The job's `CheckResult`, if the close is delivering one. It is echoed
+    /// back in the SAME [`CloseResponse`] that carries the metrics — the
+    /// §13.1 atomic same-step delivery at mechanism level.
+    pub check_result: Option<CheckResult>,
+}
+
+/// `POST /v1/leases/{lease_id}/close` response body (ENV2 amendment to the
+/// CF0 freeze, lead-ratified).
+///
+/// `metrics` is a **required** field (§13.1 "never optional when the job
+/// succeeded"): the DTO makes a metrics-less close unrepresentable on the
+/// wire, exactly like `CloseOutcome` does in the mechanism.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloseResponse {
+    /// Unique lease identifier.
+    pub lease_id: String,
+
+    /// Whether the lease reached `Released` as a result of this call. The
+    /// transition happens ONLY AFTER the close machinery produced its
+    /// outcome (`lease_not_released_before_close_signal_published`).
+    pub released: bool,
+
+    /// `true` iff transcript capture was lossy or unconfirmed (overflow,
+    /// undrained residue, or a missed ack window) — honest, never silent.
+    pub capture_incomplete: bool,
+
+    /// The finalized §13.1 per-job metrics — REQUIRED, never `Option`
+    /// (frozen `IntentMetrics` transcription, schema 1.2.0).
+    pub metrics: IntentMetrics,
+
+    /// The `CheckResult` echoed from the request: the forge reads result and
+    /// metrics in the same atomic step (§13.1 delivery rule).
+    pub check_result: Option<CheckResult>,
 }
