@@ -3,30 +3,57 @@
 //!
 //! Two pieces live here:
 //!
-//! 1. [`BoxRegistry`] — the lease→live-container seam. The spawn lifecycle (a
-//!    SEPARATE, future work-package) binds a [`RunningContainer`] into this
-//!    registry at spawn time. Today the registry starts empty — an unbound
-//!    lease fails closed (see [`EngineLeasedExec`]). State is honest: nothing
-//!    is silently fabricated when no container is bound.
+//! 1. [`BoxRegistry`] — the lease→live-container seam. The spawn lifecycle
+//!    calls [`BoxRegistry::bind`] at spawn time to record the
+//!    [`RunningContainer`] for a lease. An unbound lease fails closed (see
+//!    [`EngineLeasedExec`]). State is honest: nothing is silently fabricated
+//!    when no container is bound.
 //!
 //! 2. [`EngineLeasedExec`] — bridges the [`Engine`] trait (container-scoped)
 //!    to the [`LeasedExec`] port (lease-scoped) by resolving the lease id via
 //!    the registry before calling the engine. An unbound lease is
 //!    fail-closed (`bail!`); the engine is NEVER called for an unbound lease.
 //!
-//! 3. [`cloud_executor_from_env`] — the **BLESSED constructor** (see below).
-//!    Reads `NORTHFLANK_*` env vars and returns a wired `Arc<dyn LeasedExec>`,
-//!    or `None` if the required vars are absent (caller keeps [`NoBoxExec`]).
+//! 3. [`BoxProvisioner`] — the spawn/teardown lifecycle seam. `provision`
+//!    spawns the box and binds it into the registry; `teardown` deletes it and
+//!    unbinds on the NORMAL close path. The default is [`NoBoxProvisioner`]
+//!    (no-op, default-off); [`NorthflankBoxProvisioner`] is the cloud impl.
+//!
+//! ## Leak posture (honest)
+//!
+//! Teardown is wired to the **normal close path** only. A lease that is
+//! acquired but never closed (client crash / orphan) leaves:
+//! - (a) its [`RunningContainer`] entry in the in-memory [`BoxRegistry`] —
+//!   the map does NOT self-shrink for orphans; and
+//! - (b) the Northflank job object in the provider.
+//!
+//! The **cost** is bounded: a job created with `runOnCreate:false` never
+//! runs until `exec` triggers it (free, scale-to-zero); a run that did start
+//! is killed by Northflank `activeDeadlineSeconds`. No unbounded compute cost.
+//!
+//! The **object / registry-growth** cleanup for orphaned leases is NOT handled
+//! here — it is deferred to a future reaper work-package (CF-REAP), which
+//! should hook teardown into the existing `corelink_fabric::lifecycle` sweep
+//! that already drives `close_abnormal` for Expired / Crashed leases.
+//!
+//! 4. [`cloud_executor_from_env`] — builds only the exec side (legacy; prefer
+//!    [`cloud_backend_from_env`] which wires both exec + provisioner over a
+//!    SHARED registry, which is the crux of the spawn→exec lifecycle).
+//!
+//! 5. [`cloud_backend_from_env`] — the **complete production entry**: reads
+//!    `NORTHFLANK_*` env vars, builds ONE engine + ONE shared registry, and
+//!    returns BOTH the exec and the provisioner wired over them. Either both
+//!    are wired or neither is (default-off, fail-closed). Used by
+//!    [`AppState::with_cloud_backend_from_env`].
 //!
 //! ## Constructor discipline
 //!
-//! [`cloud_executor_from_env`] is the **BLESSED constructor**: it enforces the
-//! both-credentials-required check via [`NorthflankConfig::from_env`] and is
-//! consumed by the trusted composition seam
-//! (`AppState::with_cloud_executor` / `AppState::with_cloud_executor_from_env`).
-//! [`EngineLeasedExec::new`] remains public for composition and tests, but
-//! hand-built executors bypass the credential check — use the composition seam
-//! unless you specifically need direct construction.
+//! [`cloud_backend_from_env`] is the **BLESSED constructor** for the full
+//! lifecycle (provision + exec). [`cloud_executor_from_env`] is kept for
+//! exec-only composition; both enforce the both-credentials-required check via
+//! [`NorthflankConfig::from_env`]. Hand-built constructors bypass the
+//! credential check — use the composition seam unless you need direct
+//! construction (e.g. tests).
 //!
 //! ## Dependency note
 //!
@@ -35,7 +62,7 @@
 //! backend. Feature-gating it behind an off-by-default cargo feature is a
 //! possible future optimization, but it is NOT required for the fail-closed
 //! guarantee — the default-off property is enforced by the composition seam
-//! (absent env vars → `None` → `NoBoxExec`), not by conditional compilation.
+//! (absent env vars → `None` → defaults), not by conditional compilation.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -43,7 +70,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Result, bail};
 use corelink_cloud_engine::{NorthflankConfig, NorthflankEngine, UreqTransport};
 use corelink_runner::isolation::{Engine, RunningContainer};
-use corelink_runner::lease::CmdOutput;
+use corelink_runner::lease::{CmdOutput, ContainerSpec};
 
 use crate::exec::LeasedExec;
 
@@ -95,6 +122,21 @@ impl BoxRegistry {
             .unwrap_or_else(|p| p.into_inner())
             .get(lease_id)
             .cloned()
+    }
+
+    /// Remove the entry for `lease_id`, if any.
+    ///
+    /// Called by the teardown path ([`NorthflankBoxProvisioner::teardown`])
+    /// after the provider job is deleted, so a stale handle cannot be resolved
+    /// after teardown. Idempotent: a missing entry is silently ignored.
+    /// Poison-safe (mirrors [`bind`]/[`resolve`]).
+    ///
+    /// [`bind`]: BoxRegistry::bind
+    pub fn unbind(&self, lease_id: &str) {
+        self.0
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(lease_id);
     }
 
     /// Clone the inner [`Arc`] so multiple owners share the same registry
@@ -158,11 +200,157 @@ pub fn cloud_executor_from_env(registry: BoxRegistry) -> Option<Arc<dyn LeasedEx
     Some(Arc::new(EngineLeasedExec::new(engine, registry)) as Arc<dyn LeasedExec>)
 }
 
+// ── BoxProvisioner ────────────────────────────────────────────────────────────
+
+/// The spawn/teardown lifecycle seam.
+///
+/// `provision` spawns the box for a lease and binds the resulting
+/// [`RunningContainer`] into the [`BoxRegistry`] so the exec path
+/// (`EngineLeasedExec`) can resolve it.  `teardown` deletes the provider job
+/// and unbinds the entry on the **normal close path**.
+///
+/// Both operations are **fail-closed** in the cloud impl:
+/// - a `provision` failure leaves the registry EMPTY for that lease (nothing
+///   is bound on error), so a subsequent exec fails closed via the empty
+///   registry — no box is ever handed out from a failed spawn.
+/// - a `teardown` failure propagates `Err`; the caller (close handler) treats
+///   it best-effort and drops the error. On delete failure the registry entry
+///   is intentionally KEPT so a future reaper (CF-REAP) can retry.
+///
+/// **Orphan / crash posture:** teardown is only reachable via the normal close
+/// path. A lease acquired but never closed leaves its [`RunningContainer`]
+/// binding in the [`BoxRegistry`] and the Northflank job object alive.
+/// Compute cost is bounded (jobs are `runOnCreate:false`; runs are bounded by
+/// `activeDeadlineSeconds`). Registry-growth cleanup is deferred to CF-REAP
+/// (future work-package hooking into `corelink_fabric::lifecycle`'s
+/// `close_abnormal` sweep).
+///
+/// The default implementation is [`NoBoxProvisioner`] (no-op, DEFAULT-OFF):
+/// `provision` returns `Ok(())` without binding anything, so an exec on such
+/// a lease still fails closed via the empty registry; `teardown` is a no-op.
+pub trait BoxProvisioner: Send + Sync {
+    /// Spawn a container for `lease_id` / `spec` and bind it into the
+    /// registry.  Returns `Err` on any spawn failure (fail-closed; nothing is
+    /// bound on error).
+    fn provision(&self, lease_id: &str, spec: &ContainerSpec) -> Result<()>;
+
+    /// Delete the container for `lease_id` from the provider and unbind it
+    /// from the registry.  Idempotent: an already-unbound lease returns
+    /// `Ok(())` without calling the provider.
+    fn teardown(&self, lease_id: &str) -> Result<()>;
+}
+
+// ── NoBoxProvisioner ──────────────────────────────────────────────────────────
+
+/// The DEFAULT no-op provisioner (DEFAULT-OFF).
+///
+/// `provision` returns `Ok(())` without binding anything into the registry, so
+/// a subsequent exec on the lease still fails closed via the empty registry
+/// (the same failure mode as today — acquire behaviour is unchanged under this
+/// provisioner).  `teardown` is also a no-op.
+///
+/// This is the value wired by [`AppState::new`]; switching to a cloud backend
+/// requires calling [`AppState::with_cloud_backend_from_env`].
+pub struct NoBoxProvisioner;
+
+impl BoxProvisioner for NoBoxProvisioner {
+    fn provision(&self, _lease_id: &str, _spec: &ContainerSpec) -> Result<()> {
+        Ok(())
+    }
+
+    fn teardown(&self, _lease_id: &str) -> Result<()> {
+        Ok(())
+    }
+}
+
+// ── NorthflankBoxProvisioner ─────────────────────────────────────────────────
+
+/// Cloud provisioner backed by [`NorthflankEngine`].
+///
+/// `provision` calls `engine.spawn(spec)` and binds the returned
+/// [`RunningContainer`] into `registry`; `teardown` calls
+/// `engine.delete_job(c)` and unbinds the entry.
+///
+/// Both operations are fail-closed:
+/// - a spawn failure propagates `Err` without binding (registry stays empty).
+/// - a delete-job failure propagates `Err`; the caller (close handler) treats
+///   teardown failures as best-effort.
+///
+/// `NorthflankBoxProvisioner` and `EngineLeasedExec` share the SAME
+/// `BoxRegistry` instance (built via `BoxRegistry::clone_handle`); provision
+/// binds, exec resolves — the shared registry is the crux of the lifecycle.
+pub struct NorthflankBoxProvisioner<H: corelink_cloud_engine::HttpTransport> {
+    engine: Arc<NorthflankEngine<H>>,
+    registry: BoxRegistry,
+}
+
+impl<H: corelink_cloud_engine::HttpTransport> NorthflankBoxProvisioner<H> {
+    /// Construct over an engine and a (shared) registry.
+    pub fn new(engine: Arc<NorthflankEngine<H>>, registry: BoxRegistry) -> Self {
+        Self { engine, registry }
+    }
+}
+
+impl<H: corelink_cloud_engine::HttpTransport + Send + Sync> BoxProvisioner
+    for NorthflankBoxProvisioner<H>
+{
+    fn provision(&self, lease_id: &str, spec: &ContainerSpec) -> Result<()> {
+        // Fail-closed: if spawn errors, nothing is bound.
+        let container = self.engine.spawn(spec)?;
+        self.registry.bind(lease_id, container);
+        Ok(())
+    }
+
+    fn teardown(&self, lease_id: &str) -> Result<()> {
+        // Idempotent: if the lease is already unbound, skip the engine call.
+        if let Some(c) = self.registry.resolve(lease_id) {
+            // Delete-first, then unbind. If delete fails we propagate Err and
+            // intentionally do NOT call unbind — the registry entry is kept so
+            // a future reaper (CF-REAP) can retry teardown on the orphaned handle.
+            self.engine.delete_job(&c)?;
+            self.registry.unbind(lease_id);
+        }
+        Ok(())
+    }
+}
+
+// ── cloud_backend_from_env ────────────────────────────────────────────────────
+
+/// Build BOTH the exec backend AND the provisioner from the process
+/// environment, sharing ONE engine and ONE registry — or return `None` if the
+/// required `NORTHFLANK_*` vars are absent.
+///
+/// The shared registry is the crux: [`NorthflankBoxProvisioner::provision`]
+/// binds into it at acquire, and [`EngineLeasedExec`] resolves from it at
+/// exec — they are the same map, so provision → exec forms a coherent
+/// lifecycle.
+///
+/// When this returns `None`, the composition root MUST keep both the
+/// [`NoBoxExec`] and [`NoBoxProvisioner`] defaults (default-off, fail-closed).
+///
+/// Required env vars: `NORTHFLANK_API_TOKEN`, `NORTHFLANK_PROJECT_ID`.
+/// Optional: `NORTHFLANK_BASE_URL`, `NORTHFLANK_TEAM_ID`,
+///   `NORTHFLANK_DEPLOYMENT_PLAN`.
+///
+/// [`NoBoxExec`]: crate::exec::NoBoxExec
+pub fn cloud_backend_from_env(
+    registry: BoxRegistry,
+) -> Option<(Arc<dyn LeasedExec>, Arc<dyn BoxProvisioner>)> {
+    let cfg = NorthflankConfig::from_env()?;
+    let engine = Arc::new(NorthflankEngine::new(UreqTransport::new(), cfg));
+    let exec: Arc<dyn LeasedExec> = Arc::new(EngineLeasedExec::new(
+        Arc::clone(&engine),
+        registry.clone_handle(),
+    ));
+    let prov: Arc<dyn BoxProvisioner> = Arc::new(NorthflankBoxProvisioner::new(engine, registry));
+    Some((exec, prov))
+}
+
 // ── Static Send+Sync gate ──────────────────────────────────────────────────────
 
-// The concrete production executor MUST satisfy `Arc<dyn LeasedExec>` (Send+Sync)
-// even though no binary wires it yet — this static gate fails the build if a
-// future change makes the Northflank stack non-thread-safe.
+// The concrete production executor AND provisioner MUST satisfy Send+Sync
+// even though no binary wires them yet — these static gates fail the build if
+// a future change makes the Northflank stack non-thread-safe.
 const _: fn() = || {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<
@@ -170,4 +358,5 @@ const _: fn() = || {
             corelink_cloud_engine::NorthflankEngine<corelink_cloud_engine::UreqTransport>,
         >,
     >();
+    assert_send_sync::<NorthflankBoxProvisioner<corelink_cloud_engine::UreqTransport>>();
 };

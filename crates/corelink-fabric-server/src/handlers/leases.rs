@@ -72,69 +72,99 @@ pub(crate) async fn acquire(
         );
     };
 
-    // One ledger lock for the WHOLE acquire: the cap decision and the
-    // Pending→Held record are made under the same guard, so two racing
-    // acquires can never both be admitted into the last slot.
-    let Ok(mut ledger) = state.ledger.lock() else {
-        return fail_closed("lease ledger lock poisoned");
-    };
-
-    let decision = {
-        let Ok(mut windows) = state.rate_windows.lock() else {
-            return fail_closed("rate-window lock poisoned");
+    // ── 1b. Cap + rate check under the ledger lock. The lock is released
+    // after this block so that the (blocking) provision step can run without
+    // holding a Mutex guard on the async executor. The cap decision is
+    // committed inside this scope: two racing acquires that both pass the
+    // rate/cap gate here BOTH advance the window counter, so the ceiling is
+    // not bypassed. ──
+    let (lease_id, lease, spec) = {
+        let Ok(ledger) = state.ledger.lock() else {
+            return fail_closed("lease ledger lock poisoned");
         };
-        let window = windows.entry(tenant.clone()).or_default();
-        let decision = state.cap_gate.check(&*ledger, &plan, now_ms, window);
-        // Every acquire attempt counts toward the ceiling, admitted or not.
-        window.push(now_ms);
-        decision
+
+        let decision = {
+            let Ok(mut windows) = state.rate_windows.lock() else {
+                return fail_closed("rate-window lock poisoned");
+            };
+            let window = windows.entry(tenant.clone()).or_default();
+            let decision = state.cap_gate.check(&*ledger, &plan, now_ms, window);
+            // Every acquire attempt counts toward the ceiling, admitted or not.
+            window.push(now_ms);
+            decision
+        };
+        match decision {
+            CapDecision::Admit => {}
+            CapDecision::RejectOverCap => {
+                return error_response(
+                    ApiError::OverCap,
+                    "concurrency cap reached: rejected preventively, before any box/VM",
+                );
+            }
+            CapDecision::RejectRateCeiling => {
+                return error_response(
+                    ApiError::OverCap,
+                    "acquire rate ceiling reached: rejected preventively, before any box/VM",
+                );
+            }
+        }
+
+        // ── 2. Mint the RunnerLease (the wire shape the caller gets back). ──
+        let lease_id = state.mint_lease_id();
+        let lease = RunnerLease {
+            lease_id: lease_id.clone(),
+            principal_chain: vec![format!("tenant:{tenant}")],
+            path_set: vec![req.tmp_root.clone()],
+            expiry: now_ms.saturating_add(req.expiry_ms),
+            net_policy: req.net_policy.clone(),
+            tmp_root: req.tmp_root.clone(),
+            state: RunnerState::Held,
+        };
+
+        // ── 3. Validate via the runner's own lease gate, BEFORE any box
+        // contact: unpinned image, non-allowed net_policy, or an unsafe
+        // tmp_root (shell-injection guard) → 400 `invalid`. Build the spec
+        // once here; it is reused by the provision step below. ──
+        let spec = match ContainerSpec::from_lease(&lease, &req.image_digest) {
+            Ok(s) => s,
+            Err(e) => return error_response(ApiError::Invalid, &format!("lease rejected: {e:#}")),
+        };
+
+        // Ledger lock drops here — provision runs outside the lock.
+        drop(ledger);
+        (lease_id, lease, spec)
     };
-    match decision {
-        CapDecision::Admit => {}
-        CapDecision::RejectOverCap => {
-            return error_response(
-                ApiError::OverCap,
-                "concurrency cap reached: rejected preventively, before any box/VM",
-            );
-        }
-        CapDecision::RejectRateCeiling => {
-            return error_response(
-                ApiError::OverCap,
-                "acquire rate ceiling reached: rejected preventively, before any box/VM",
-            );
-        }
+
+    // ── 3b. Provision the container BEFORE the ledger Pending→Held
+    // transition — fail-closed ordering: a failure here means NO Held lease
+    // is ever handed out. The registry is bound (if the provisioner is the
+    // real one) before the ledger moves.
+    //
+    // Under `NoBoxProvisioner` (the default), provision is a no-op Ok →
+    // acquire behaves exactly as before (no box, exec later fails closed).
+    // Existing acquire/lease tests are unaffected. ──
+    if let Err(e) = state.provision_lease(&lease_id, &spec).await {
+        return fail_closed(&format!("box provisioning failed: {e:#}"));
     }
 
-    // ── 2. Mint the RunnerLease (the wire shape the caller gets back). ──
-    let lease_id = state.mint_lease_id();
-    let lease = RunnerLease {
-        lease_id: lease_id.clone(),
-        principal_chain: vec![format!("tenant:{tenant}")],
-        path_set: vec![req.tmp_root.clone()],
-        expiry: now_ms.saturating_add(req.expiry_ms),
-        net_policy: req.net_policy.clone(),
-        tmp_root: req.tmp_root.clone(),
-        state: RunnerState::Held,
-    };
-
-    // ── 3. Validate via the runner's own lease gate, BEFORE any box
-    // contact: unpinned image, non-allowed net_policy, or an unsafe
-    // tmp_root (shell-injection guard) → 400 `invalid`. Nothing in this
-    // module can reach a box at all; the attach arrives with API3. ──
-    if let Err(e) = ContainerSpec::from_lease(&lease, &req.image_digest) {
-        return error_response(ApiError::Invalid, &format!("lease rejected: {e:#}"));
-    }
-
-    // ── 4. Record Pending → Held atomically (one lock, both writes):
+    // ── 4. Record Pending → Held (re-acquire the ledger lock):
     // Pending is the contract's pre-wire admission state, Held is what the
     // wire sees. A failure on either write is a 503, never a half-admitted
-    // lease handed to the caller. ──
+    // lease handed to the caller.
+    //
+    // `box_ref` is set to `"box:<lease_id>"` to signal "provisioned" when
+    // a real provisioner is wired. Under `NoBoxProvisioner` (default), the
+    // registry stays empty and the marker is still set — the actual
+    // `RunningContainer` lives in the `BoxRegistry`; `box_ref` is just the
+    // ledger's marker (not the real handle). ──
+    let Ok(mut ledger) = state.ledger.lock() else {
+        return fail_closed("lease ledger lock poisoned after provision");
+    };
     let record = LeaseRecord {
         lease_id: lease_id.clone(),
         tenant: tenant.clone(),
         state: LeaseState::Pending,
-        // No box/VM exists in this WP; the real box_ref is attached by API3.
-        box_ref: format!("unattached:{lease_id}"),
+        box_ref: format!("box:{lease_id}"),
         created_at_ms: now_ms,
         updated_at_ms: now_ms,
     };
@@ -147,6 +177,7 @@ pub(crate) async fn acquire(
     {
         return fail_closed("lease ledger refused Pending->Held");
     }
+    drop(ledger);
 
     // ── 5. Contract §1: acquire returns lease id + exec endpoint +
     // deadline. The endpoint is the frozen template, substituted. The

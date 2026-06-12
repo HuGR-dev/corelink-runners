@@ -197,6 +197,13 @@ pub(crate) async fn close(
     // lives in the shared hook state, not in this entry.
     registry.unregister(&lease_id);
 
+    // ── 5b. Teardown (best-effort): delete the provider container and
+    // unbind the registry entry. Runs after the close ack; a teardown
+    // failure MUST NOT change the close response (cleanup is best-effort;
+    // the provider's `activeDeadlineSeconds` is the hard bound). Under
+    // `NoBoxProvisioner` (the default), teardown is a no-op. ──
+    state.teardown_lease(&lease_id).await;
+
     // ── 6. Attest the close (WP-ATT1+2 / ATT2: the attestation travels
     // with the CheckResult on the SAME atomic close payload as the §13.1
     // metrics). A close that delivers a result gets a chain over that
