@@ -16,23 +16,30 @@ HuGR (the company / brand)
    hugit (the forge for agent fleets)                          (campaign #3, BUILT)
 ```
 
-**Status (2026-06-10): CODE — execution core seeded, gate green.** The runner
-transfer campaign (hugit campaign #3 → CoreLink campaign #1 seed, owner-directed
-2026-06-10) delivered the proven ephemeral-runner v0 into this workspace:
+**Status (2026-06-12): SHIPPED `v0.1.0-seed`** — repo
+`humangr-labs/corelink-runners` (private), default branch `main`, real CI on
+the self-hosted runner `corelink-runners-builder-01`. The runner-transfer
+campaign (2026-06-10) plus the P0 seed-hardening wave (audit 2026-06-11)
+delivered:
 
 - `crates/corelink-runner` — execution core (lease · isolation · teardown · boot ·
   concurrency/expiry/recovery · Actions-YAML shim), fence enforcement
-  (`materialize`/`enforce` + red-team), and X4 supply-chain oracle.
-  Acceptance suites C2a/C2b/C3/C9/E4 + `hermetic_supply_chain` all green.
+  (`materialize`/`enforce` + red-team), X4 supply-chain oracle, and the
+  `envelope` module (contract §13 mechanism: derivation collector ·
+  CaptureHook · JobClose ack state machine). Acceptance suites
+  C2a/C2b/C3/C5a/C9/E4/X4 + redteam + `hermetic_supply_chain` +
+  `acceptance_s13` all green (182 tests).
 - `crates/corelink-runners-contracts` — wire-contract types (RunnerLease,
-  RunnerState, FenceManifest, MaterializedEntry) transcribed from hugit-contracts
-  @ 7c2f1e6; conformance vectors byte-identical to hugit under `conformance/`.
-- `docs/spec/hugit-integration-contract.md` v1.2.0 — envelope emission obligations
-  added (WP-R6 @ 9796aa8).
+  RunnerState, FenceManifest, MaterializedEntry @ hugit-contracts 7c2f1e6;
+  IntentMetrics/TokenCounts/ToolCount @ 443ff1b, schema 1.2.0); conformance
+  vectors byte-identical to hugit under `conformance/`, golden tests verify
+  real SHA-256 + manifest membership + tamper rejection.
+- `docs/spec/hugit-integration-contract.md` v1.2.0 (envelope emission
+  obligations) · `docs/ROADMAP.md` (P0/P1 closed, M1/M2 next).
 - Full gate: `cargo fmt --check` · `cargo clippy --workspace --all-targets
-  --locked -D warnings` · `cargo test --workspace --locked` · `cargo deny check`
-  · `cargo audit --deny warnings` — all green on `[self-hosted, mac,
-  corelink-builder]`.
+  --locked -- -D warnings` · `cargo test --workspace --locked` · `cargo deny
+  check` · `cargo audit --deny warnings` — green locally AND on CI
+  (`[self-hosted, mac, corelink-builder]`).
 
 **Wire-contract law (the seam between hugit and this repo — never break it):**
 - Types are TRANSCRIBED on each side; hugit-contracts is frozen, never imported.
@@ -42,9 +49,13 @@ transfer campaign (hugit campaign #3 → CoreLink campaign #1 seed, owner-direct
   divergence, so a difference is never silent.
 - No git/path dependency in either direction (`deny.toml` enforces crates.io only).
 
-**Seeded ≠ shipped.** What arrived is the execution core. The PRODUCT still needs:
-multi-tenant control plane · public API · billing (concurrency SKUs) · Firecracker
-isolation. See `docs/handoff/2026-06-10-runner-seed.md`.
+**Seeded ≠ shipped-as-product.** `v0.1.0-seed` is the execution core. The
+PRODUCT (M1) still needs: multi-tenant control plane · public API · billing
+(concurrency SKUs) · Firecracker isolation · §13 production wiring. Live list:
+`docs/ROADMAP.md`; context: `docs/handoff/2026-06-10-runner-seed.md`. Open
+cross-repo seams (owner/hugit-techlead-gated): the `IntentMetrics` conformance
+vector (hugit-side PR first, never added unilaterally) and the `hugit-c9-`
+container-prefix decision.
 
 Read first: `docs/whitepaper/corelink-runners-v1.md` (**canonical vision** — source of
 truth) · `docs/product/product.md` · `docs/spec/hugit-integration-contract.md` v1.2.0
@@ -110,7 +121,10 @@ sessions IN this directory. Fence changes need explicit owner approval.
 - English for repo documents; lean, evidence-cited (house style mirrors hugit +
   `corelink-server/marketing/`).
 - **Code exists** → branch → PR → merge, gates green before merge (inherit the
-  CoreLink/hugit discipline). All writes on `integ/seed-runner`; PR to `main`.
+  CoreLink/hugit discipline). Short-lived branches off `main`; PR to `main`
+  (the seed-era `integ/seed-runner` is merged and retired). NOTE: GitHub free
+  plan + private repo = no branch protection — the CI-green-before-merge rule
+  is manual discipline; never `gh pr merge --auto` (it merges before checks).
 - **Don't deviate gratuitously** from the GitHub-Actions / Buildkite mental model
   where it aids adoption — but the pricing model and the cache-warm boot are the
   deliberate, load-bearing deviations.
