@@ -27,9 +27,12 @@ jobs:
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
 
-      - uses: taiki-e/install-action@0631aa6515c7d545823c67cfae7ef4fc7f490154  # v2
+      - uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912  # v2.81.10
         with:
-          tool: cargo-audit,cargo-deny
+          # Pinned tool versions (proven on the corelink-builder box). The
+          # @latest default broke on a checksum mismatch between the action's
+          # vendored manifest and a re-published cargo-deny release asset.
+          tool: cargo-audit@0.22.2,cargo-deny@0.19.8
 
       - name: fmt
         run: cargo fmt --all --check
