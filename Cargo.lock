@@ -142,6 +142,7 @@ dependencies = [
  "axum",
  "corelink-fabric",
  "corelink-fabric-api",
+ "corelink-runner",
  "corelink-runners-contracts",
  "serde_json",
  "tokio",
