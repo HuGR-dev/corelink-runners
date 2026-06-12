@@ -21,6 +21,7 @@ pub mod auth;
 pub mod cloud_exec;
 pub mod exec;
 pub mod handlers;
+pub mod reaper;
 pub mod server;
 
 pub use app::{
