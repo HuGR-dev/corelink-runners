@@ -1,0 +1,274 @@
+//! `JobClose` — the §13.2 item-3 close/ack state machine over the capture
+//! hook: finalize → signal → bearer-gated ack window → fail-closed outcome
+//! (WP-B2).
+//!
+//! In-process mechanism only (same std `Mutex`/`Condvar` shared state as
+//! [`super::hook`]); the M1 fabric carries the same signal/ack handshake
+//! over the wire behind the same semantics. The lease itself is a SEAM:
+//! this module exposes [`JobClose::released`] for the lease lifecycle to
+//! poll/consume — it never touches `lease.rs` or the `RunnerState`
+//! transitions directly.
+//!
+//! Dependency-surface law (§13.3): like the hook, this module imports no
+//! filesystem, database, or object-store module — the outcome and the
+//! signal are in-memory values only (the S13 source-inclusion oracle pins
+//! this).
+
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result, bail};
+use corelink_runners_contracts::IntentMetrics;
+
+use super::event::PriceCard;
+use super::hook::{CaptureHook, HookPhase, Shared, Subscriber, credential_matches};
+use super::{CloseOutcome, JobStatus};
+
+/// The job-close signal (§13.2 item 3): the value the subscriber's
+/// ack-wait API hands back when the close fires.
+///
+/// `metrics` is the **same finalized [`IntentMetrics`] value** the
+/// [`CloseOutcome`] carries — single source of truth, finalized exactly
+/// once; the forge and the runner can never disagree on the final
+/// wall/active/token figures.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CloseSignal {
+    /// Terminal status of the job.
+    pub status: JobStatus,
+    /// The finalized per-job metrics (identical to the outcome's).
+    pub metrics: IntentMetrics,
+}
+
+/// Why an abnormal close fired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AbnormalKind {
+    /// Lease expiry hard-kill.
+    Expiry,
+    /// Runner/job crash while the lease was held.
+    Crash,
+}
+
+/// The close/ack state machine for one job's capture hook.
+///
+/// Exactly-once: across ALL handles to the same hook (the state lives in
+/// the shared hook state, not in this handle), only one
+/// [`close`](Self::close) / [`close_abnormal`](Self::close_abnormal) may
+/// succeed; every later attempt is `Err`.
+#[derive(Clone)]
+pub struct JobClose {
+    /// State shared with the hook and its subscribers.
+    shared: Arc<Shared>,
+}
+
+impl JobClose {
+    /// Build the close state machine over `hook` (shares its state; the
+    /// hook handle remains usable by the job loop until close).
+    #[must_use]
+    pub fn new(hook: &CaptureHook) -> Self {
+        Self {
+            shared: hook.shared(),
+        }
+    }
+
+    /// Normal job close: finalize → signal → ack window → outcome.
+    ///
+    /// 1. Both capture surfaces close (further writes refused) and the
+    ///    collector finalizes exactly once into the final [`IntentMetrics`].
+    /// 2. The close signal is published carrying that SAME metrics value
+    ///    (single source of truth) — subscribers see it via
+    ///    [`Subscriber::wait_close_signal`].
+    /// 3. The machine waits up to `cfg.ack_timeout` (the runner config
+    ///    field) for a credential-valid [`Subscriber::ack`].
+    /// 4. Acked in window → `capture_incomplete: false` (capture permitting,
+    ///    see 5) and the lease is released only after the ack. Timeout →
+    ///    the close completes anyway (**fail-closed**: the forge MUST have
+    ///    written both blobs before acking, so a missing ack means capture
+    ///    is not confirmed — but the lease never hangs on the forge) with
+    ///    `capture_incomplete: true`.
+    /// 5. `capture_incomplete` is ALSO `true` — regardless of the ack — if
+    ///    either surface overflowed during the job, or undelivered residue
+    ///    remained in either buffer at close time (the forge had not
+    ///    drained both channels before the close signal).
+    ///
+    /// # Errors
+    /// A second close attempt (normal or abnormal) on the same hook, or a
+    /// collector finalize failure. Exactly-once is enforced on the shared
+    /// state, so clones of this handle cannot double-close either.
+    pub fn close(
+        &self,
+        status: JobStatus,
+        died: Instant,
+        price: &PriceCard,
+    ) -> Result<CloseOutcome> {
+        let mut inner = self.shared.lock();
+        if inner.close_done || inner.close_signal.is_some() {
+            bail!("job close refused: close already signalled (job close is exactly-once)");
+        }
+
+        // (1) Close both surfaces. Overflow lossiness is latched from the
+        // job's lifetime; RESIDUE is judged after the ack window (§13.2(3):
+        // the forge finalises the blobs between signal and ack, so in-window
+        // draining must count as delivered).
+        inner.phase = HookPhase::Closed;
+
+        let metrics = inner
+            .collector
+            .finalize(died, price)
+            .context("finalizing the metrics collector at job close")?;
+
+        // (2) Publish the signal with the SAME metrics value the outcome
+        // will carry, and arm the ack window.
+        inner.close_signal = Some(CloseSignal {
+            status,
+            metrics: metrics.clone(),
+        });
+        inner.ack_window_open = true;
+        let ack_timeout = inner.cfg.ack_timeout;
+        self.shared.cv.notify_all();
+
+        // (3) Wait for a credential-valid ack up to the configured window.
+        // The condvar releases the lock while waiting, so the subscriber's
+        // ack (and any in-window draining) can proceed.
+        let (mut inner, _timeout) = self
+            .shared
+            .cv
+            .wait_timeout_while(inner, ack_timeout, |i| !i.acked)
+            .unwrap_or_else(|p| p.into_inner());
+
+        // (4) Outcome: the window is over either way; a later ack is inert.
+        // Residue is judged NOW — events the forge drained in-window count
+        // as delivered; what is still sitting in either buffer was lost.
+        let acked = inner.acked;
+        let residue = !inner.raw.is_empty() || !inner.meta.is_empty();
+        let lossy = residue || inner.raw_overflow || inner.meta_overflow;
+        inner.ack_window_open = false;
+        inner.close_done = true;
+        inner.released = true;
+        drop(inner);
+        self.shared.cv.notify_all();
+
+        Ok(CloseOutcome {
+            status,
+            metrics,
+            capture_incomplete: lossy || !acked,
+        })
+    }
+
+    /// Abnormal close (expiry hard-kill / crash): both surfaces close, the
+    /// collector finalizes with what was honestly observed (wall =
+    /// born→kill, active = busy accumulated so far), and the single outcome
+    /// carries `capture_incomplete: true` unconditionally — an abnormal end
+    /// can never claim confirmed capture, so no ack window is armed (the
+    /// signal is still published for any live subscriber; an ack against it
+    /// is inert).
+    ///
+    /// Status mapping: [`AbnormalKind::Expiry`] → [`JobStatus::Killed`]
+    /// (expiry hard-kill); [`AbnormalKind::Crash`] → [`JobStatus::Failed`].
+    /// Lease-side, the terminal `RunnerState` is `Expired`/`Crashed` — that
+    /// transition stays behind the [`released`](Self::released) seam.
+    ///
+    /// # Errors
+    /// Shares exactly-once with [`close`](Self::close): any second close
+    /// attempt is `Err`.
+    pub fn close_abnormal(
+        &self,
+        kind: AbnormalKind,
+        died: Instant,
+        price: &PriceCard,
+    ) -> Result<CloseOutcome> {
+        let mut inner = self.shared.lock();
+        if inner.close_done || inner.close_signal.is_some() {
+            bail!("job close refused: close already signalled (job close is exactly-once)");
+        }
+
+        inner.phase = HookPhase::Closed;
+        let metrics = inner
+            .collector
+            .finalize(died, price)
+            .context("finalizing the metrics collector at abnormal job close")?;
+
+        let status = match kind {
+            AbnormalKind::Expiry => JobStatus::Killed,
+            AbnormalKind::Crash => JobStatus::Failed,
+        };
+        inner.close_signal = Some(CloseSignal {
+            status,
+            metrics: metrics.clone(),
+        });
+        // No ack window: close_done immediately; a later ack is inert.
+        inner.close_done = true;
+        inner.released = true;
+        drop(inner);
+        self.shared.cv.notify_all();
+
+        Ok(CloseOutcome {
+            status,
+            metrics,
+            capture_incomplete: true,
+        })
+    }
+
+    /// `true` once the close state machine has produced its outcome and the
+    /// lease may proceed to its terminal state. The lease seam:
+    ///
+    /// - Acked close: the outcome (and so `released() == true`) happens
+    ///   ONLY AFTER the ack — the forge finalizes both blobs before the
+    ///   lease transitions to `Released` (§13.2 item 3).
+    /// - Timed-out close: **fail-closed still closes** — the job is over
+    ///   and the lease must not hang on a missing forge ack, so the outcome
+    ///   is produced (and `released() == true`) at the window's end with
+    ///   `capture_incomplete: true` carrying the incompleteness.
+    /// - Abnormal close: the outcome is immediate; the lease's terminal
+    ///   `RunnerState` is `Expired`/`Crashed` rather than `Released`, but
+    ///   the seam boolean has the same meaning (the close completed; the
+    ///   lease lifecycle may transition).
+    #[must_use]
+    pub fn released(&self) -> bool {
+        self.shared.lock().released
+    }
+}
+
+impl Subscriber {
+    /// The ack-wait API (§13.2 item 3): block up to `timeout` for the close
+    /// signal and return it. Returns the signal immediately if the close
+    /// already fired; `None` if no close fires within `timeout`.
+    #[must_use]
+    pub fn wait_close_signal(&self, timeout: Duration) -> Option<CloseSignal> {
+        let inner = self.shared.lock();
+        let (inner, _timeout) = self
+            .shared
+            .cv
+            .wait_timeout_while(inner, timeout, |i| i.close_signal.is_none())
+            .unwrap_or_else(|p| p.into_inner());
+        inner.close_signal.clone()
+    }
+
+    /// Acknowledge the close signal — bearer-gated, window-bound.
+    ///
+    /// Only a credential-valid ack inside the open ack window counts; the
+    /// forge calls this after both transcript blobs are durably written
+    /// (its obligation, not the runner's).
+    ///
+    /// # Errors
+    /// - Wrong/absent credential → `Err`, and the ack does NOT count.
+    /// - Before any close was signalled → `Err` (an ack cannot be
+    ///   pre-armed).
+    /// - After the window closed (timeout fired, or abnormal close) →
+    ///   `Err` and inert: the produced outcome cannot be flipped.
+    pub fn ack(&self, credential: &str) -> Result<()> {
+        let mut inner = self.shared.lock();
+        if !credential_matches(&inner.expected_credential, credential.as_bytes()) {
+            bail!("ack refused: bearer credential mismatch for this hook");
+        }
+        if inner.close_signal.is_none() {
+            bail!("ack refused: no close signal yet (an ack cannot be pre-armed)");
+        }
+        if !inner.ack_window_open {
+            bail!("ack inert: the close already completed; the produced outcome cannot change");
+        }
+        inner.acked = true;
+        drop(inner);
+        self.shared.cv.notify_all();
+        Ok(())
+    }
+}

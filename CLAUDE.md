@@ -16,15 +16,43 @@ HuGR (the company / brand)
    hugit (the forge for agent fleets)                          (campaign #3, BUILT)
 ```
 
-**Status (2026-06-09): greenfield / spec phase.** No code yet. The job of this
-repo right now is to design a marvelous product AND lock the integration contract
-with hugit (which is already built and waiting to consume Runners).
+**Status (2026-06-10): CODE — execution core seeded, gate green.** The runner
+transfer campaign (hugit campaign #3 → CoreLink campaign #1 seed, owner-directed
+2026-06-10) delivered the proven ephemeral-runner v0 into this workspace:
+
+- `crates/corelink-runner` — execution core (lease · isolation · teardown · boot ·
+  concurrency/expiry/recovery · Actions-YAML shim), fence enforcement
+  (`materialize`/`enforce` + red-team), and X4 supply-chain oracle.
+  Acceptance suites C2a/C2b/C3/C9/E4 + `hermetic_supply_chain` all green.
+- `crates/corelink-runners-contracts` — wire-contract types (RunnerLease,
+  RunnerState, FenceManifest, MaterializedEntry) transcribed from hugit-contracts
+  @ 7c2f1e6; conformance vectors byte-identical to hugit under `conformance/`.
+- `docs/spec/hugit-integration-contract.md` v1.2.0 — envelope emission obligations
+  added (WP-R6 @ 9796aa8).
+- Full gate: `cargo fmt --check` · `cargo clippy --workspace --all-targets
+  --locked -D warnings` · `cargo test --workspace --locked` · `cargo deny check`
+  · `cargo audit --deny warnings` — all green on `[self-hosted, mac,
+  corelink-builder]`.
+
+**Wire-contract law (the seam between hugit and this repo — never break it):**
+- Types are TRANSCRIBED on each side; hugit-contracts is frozen, never imported.
+- Conformance vectors (`conformance/RunnerLease.json`, `conformance/FenceManifest.json`,
+  `conformance/manifest.sha256`) are committed byte-identical in both repos.
+  They are the **drift tripwire**: either side's golden tests break on any type
+  divergence, so a difference is never silent.
+- No git/path dependency in either direction (`deny.toml` enforces crates.io only).
+
+**Seeded ≠ shipped.** What arrived is the execution core. The PRODUCT still needs:
+multi-tenant control plane · public API · billing (concurrency SKUs) · Firecracker
+isolation. See `docs/handoff/2026-06-10-runner-seed.md`.
 
 Read first: `docs/whitepaper/corelink-runners-v1.md` (**canonical vision** — source of
-truth) · `docs/product/product.md` · `docs/spec/hugit-integration-contract.md`
-(what hugit needs) · `docs/spec/corelink-fabric-stub.md` (the CoreLink-side stub) ·
-`docs/interop.md` (the seams, microscopic) · `docs/adr/0002-hugr-identity.md`
-(identity) · `docs/review/2026-06-09-cross-tenant-dedup-claim.md` (the tense rule).
+truth) · `docs/product/product.md` · `docs/spec/hugit-integration-contract.md` v1.2.0
+(what hugit needs, now with envelope emission obligations) · `docs/spec/corelink-fabric-stub.md`
+(the CoreLink-side stub) · `docs/interop.md` (the seams, microscopic) ·
+`docs/adr/0002-hugr-identity.md` (identity) ·
+`docs/review/2026-06-09-cross-tenant-dedup-claim.md` (the tense rule) ·
+`docs/handoff/2026-06-10-runner-seed.md` (what arrived, what it proves, what remains).
 
 ## Principles (decided — don't relitigate without the owner)
 
@@ -55,9 +83,10 @@ truth) · `docs/product/product.md` · `docs/spec/hugit-integration-contract.md`
 
 - **Consumes CoreLink Cache** (CAS/AC/R2, tenancy, PAT auth) — does not fork it.
 - **Is consumed by hugit** (campaign #3) as the execution substrate for memoized CI.
-  The `hugit-runner` crate (in `../hugit`) is the CLIENT; this repo is the FABRIC.
-  The contract between them is `docs/spec/hugit-integration-contract.md` — **frozen
-  from hugit's side**; the fabric must satisfy it.
+  hugit's seam is `hugit-fence::{broker,seam}` + `hugit-invariants` wire oracle;
+  the execution core now lives HERE (runner-transfer 2026-06-10). This repo is the
+  FABRIC. The contract between them is `docs/spec/hugit-integration-contract.md`
+  v1.2.0 — **frozen from hugit's side**; the fabric must satisfy it.
 - **Is consumed by CoreLink Workspaces** (campaign #2) — agent sandboxes / dev boxes
   are workspace SKUs that run on this fabric.
 
@@ -80,8 +109,8 @@ sessions IN this directory. Fence changes need explicit owner approval.
   Canonical author: `gustavo@humangr.com`.
 - English for repo documents; lean, evidence-cited (house style mirrors hugit +
   `corelink-server/marketing/`).
-- Once code exists: branch → PR → merge, gates green before merge (inherit the
-  CoreLink/hugit discipline). Until then, docs may land on `main`.
+- **Code exists** → branch → PR → merge, gates green before merge (inherit the
+  CoreLink/hugit discipline). All writes on `integ/seed-runner`; PR to `main`.
 - **Don't deviate gratuitously** from the GitHub-Actions / Buildkite mental model
   where it aids adoption — but the pricing model and the cache-warm boot are the
   deliberate, load-bearing deviations.

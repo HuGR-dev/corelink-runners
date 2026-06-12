@@ -1,0 +1,24 @@
+{
+  "tokens": {
+    "input": 101,
+    "output": 53,
+    "cache_read": 29,
+    "cache_write": 7,
+    "total": 190
+  },
+  "wall_ms": 1500,
+  "active_ms": 900,
+  "tool_calls": 5,
+  "tool_breakdown": [
+    {
+      "tool": "Bash",
+      "count": 3
+    },
+    {
+      "tool": "Edit",
+      "count": 2
+    }
+  ],
+  "model_turns": 4,
+  "cost_usd_micros": 4200
+}

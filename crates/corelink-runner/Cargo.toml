@@ -1,0 +1,17 @@
+# Transplanted from hugit/crates/hugit-runner @ ead800d83d19bfd7f90bf4241ee27b18b09007f1 (runner-transfer campaign R2, 2026-06-10) — wire-contract seam, no git dep.
+[package]
+name = "corelink-runner"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+corelink-runners-contracts = { path = "../corelink-runners-contracts" }
+anyhow = { workspace = true }
+# WP-R4: fence materialization content digests (SHA-256 lowercase hex, the
+# frozen WP-00 scalar convention).
+sha2 = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
