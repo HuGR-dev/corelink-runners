@@ -235,6 +235,7 @@ pub fn app_full(
         )
         .route(&capture(paths::EXEC), post(handlers::exec_handler::exec))
         .route(paths::QUEUE_TRIGGER, post(handlers::queue::trigger))
+        .route(&capture(paths::LEASE_CLOSE), post(handlers::close::close))
         .route(&capture(paths::ENVELOPE_EVENTS), get(envelope::poll_events))
         .route(&capture(paths::ENVELOPE_META), get(envelope::poll_meta))
         .with_state(state)

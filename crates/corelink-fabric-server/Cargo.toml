@@ -17,6 +17,10 @@ serde_json = { workspace = true }
 # WP-ENV1: standard-base64 wire form of the drained raw transcript bytes
 # (same alphabet convention as the attestation wire form).
 base64     = { workspace = true }
+# WP-ENV2: the close handler drives the frozen JobClose state machine, which
+# blocks for up to the runner-configured ack window — it runs on a blocking
+# thread (`tokio::task::spawn_blocking`), never on the async workers.
+tokio      = { workspace = true }
 # Same-workspace path deps (house law allows these; the crates.io-only rule in
 # deny.toml governs EXTERNAL deps): the FROZEN API vocabulary (paths, DTOs,
 # error semantics), the control-plane core types (TenantId), the frozen

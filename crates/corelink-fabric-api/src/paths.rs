@@ -44,3 +44,11 @@ pub const ENVELOPE_EVENTS: &str = "/v1/leases/{lease_id}/envelope/events";
 /// §13.2 surface 2; bounded in-flight only, never durable — §13.3). ENV1.
 /// (ENV1 amendment to the CF0 freeze, lead-ratified.)
 pub const ENVELOPE_META: &str = "/v1/leases/{lease_id}/envelope/meta";
+
+/// Close a lease's job: `POST` drives the §13.2 item-3 close machinery —
+/// finalize-once → `CloseSignal` → ack window → fail-closed `CloseOutcome` —
+/// and ONLY THEN releases the lease (`Held → Released`). The response
+/// carries the §13.1 metrics in the same atomic step as the echoed
+/// `CheckResult` (the §13.1 delivery rule at mechanism level). ENV2.
+/// (ENV2 amendment to the CF0 freeze, lead-ratified.)
+pub const LEASE_CLOSE: &str = "/v1/leases/{lease_id}/close";

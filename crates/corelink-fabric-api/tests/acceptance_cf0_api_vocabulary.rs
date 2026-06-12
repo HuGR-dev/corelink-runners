@@ -6,11 +6,12 @@
 //! not a refactor casualty.
 
 use corelink_fabric_api::{
-    AcquireRequest, AcquireResponse, ApiError, CancelResponse, ErrorBody, ExecRequest,
-    ExecResponse, StatusResponse, TriggerRequest, TriggerResponse, paths,
+    AcquireRequest, AcquireResponse, ApiError, CancelResponse, CloseRequest, CloseResponse,
+    ErrorBody, ExecRequest, ExecResponse, StatusResponse, TriggerRequest, TriggerResponse, paths,
 };
 use corelink_runners_contracts::{
-    Artifact, CheckDef, CheckResult, LandableEntry, RunnerLease, RunnerState,
+    Artifact, CheckDef, CheckResult, IntentMetrics, LandableEntry, RunnerLease, RunnerState,
+    TokenCounts, ToolCount,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -201,6 +202,43 @@ fn dtos_roundtrip_and_deny_unknown() {
         },
         "TriggerResponse",
     );
+    // ENV2 amendment (lead-ratified): the job-close DTOs. `metrics` is a
+    // required (non-Option) field of CloseResponse — a metrics-less close is
+    // unrepresentable (§13.1 "never optional when the job succeeded").
+    roundtrip_and_deny_unknown(
+        &CloseRequest {
+            status: "succeeded".to_string(),
+            check_result: Some(sample_check_result()),
+        },
+        "CloseRequest",
+    );
+    roundtrip_and_deny_unknown(
+        &CloseResponse {
+            lease_id: "lease-0001".to_string(),
+            released: true,
+            capture_incomplete: false,
+            metrics: IntentMetrics {
+                tokens: TokenCounts {
+                    input: 1200,
+                    output: 340,
+                    cache_read: 9000,
+                    cache_write: 410,
+                    total: 10_950,
+                },
+                wall_ms: 60_000,
+                active_ms: 42_000,
+                tool_calls: 7,
+                tool_breakdown: vec![ToolCount {
+                    tool: "Bash".to_string(),
+                    count: 7,
+                }],
+                model_turns: 5,
+                cost_usd_micros: 12_345,
+            },
+            check_result: Some(sample_check_result()),
+        },
+        "CloseResponse",
+    );
     roundtrip_and_deny_unknown(
         &ErrorBody {
             code: "fail_closed".to_string(),
@@ -230,4 +268,7 @@ fn paths_are_v1_stable() {
         "/v1/leases/{lease_id}/envelope/events"
     );
     assert_eq!(paths::ENVELOPE_META, "/v1/leases/{lease_id}/envelope/meta");
+    // ENV2 amendment to the CF0 freeze (lead-ratified): the §13.2 item-3
+    // job-close path. Frozen from here on like the rest of /v1.
+    assert_eq!(paths::LEASE_CLOSE, "/v1/leases/{lease_id}/close");
 }

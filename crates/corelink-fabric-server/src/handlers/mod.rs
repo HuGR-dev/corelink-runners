@@ -7,6 +7,7 @@
 //! redefined here, only served. Routes are assembled in [`crate::app`] from
 //! the FROZEN path constants (`corelink_fabric_api::paths`).
 
+pub mod close;
 pub mod envelope;
 pub mod exec_handler;
 pub mod leases;
