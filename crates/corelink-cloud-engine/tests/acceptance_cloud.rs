@@ -843,6 +843,143 @@ fn from_env_explicit_base_url_beats_team_id() {
     );
 }
 
+// ── FailingHttp transport ─────────────────────────────────────────────────────
+
+/// Test transport that ALWAYS returns a transport-layer `Err` — models DNS, TLS,
+/// or connection-timeout failures (no HTTP response is ever obtained).
+struct FailingHttp;
+
+impl HttpTransport for FailingHttp {
+    fn send(&self, _req: &HttpRequest) -> Result<HttpResponse> {
+        Err(anyhow::anyhow!(
+            "simulated transport failure (DNS/TLS/timeout)"
+        ))
+    }
+}
+
+/// Build a `NorthflankEngine` over the always-failing transport.
+fn engine_failing() -> NorthflankEngine<FailingHttp> {
+    let mut cfg = NorthflankConfig::new("proj", "nf_tok_test");
+    cfg.poll_interval_ms = 0;
+    NorthflankEngine::new(FailingHttp, cfg)
+}
+
+// ── Test T1: spawn_transport_error_fails_closed ───────────────────────────────
+
+#[test]
+fn spawn_transport_error_fails_closed() {
+    // A transport-layer error (DNS/TLS/timeout) on the create-job POST must
+    // propagate as Err — never fabricate an Ok RunningContainer.
+    let engine = engine_failing();
+    let spec = pinned_spec("hugit-c2b-z1");
+    assert!(
+        engine.spawn(&spec).is_err(),
+        "spawn must return Err on transport-layer failure (fail-closed)"
+    );
+}
+
+// ── Test T2: exec_transport_error_fails_closed ────────────────────────────────
+
+#[test]
+fn exec_transport_error_fails_closed() {
+    // A transport-layer error on the very first outbound call (PATCH set-command)
+    // must propagate as Err — exec must never return Ok on network failure.
+    let engine = engine_failing();
+    let c = container("myjob");
+    assert!(
+        engine.exec(&c, &["echo", "hi"]).is_err(),
+        "exec must return Err on transport-layer failure (fail-closed)"
+    );
+}
+
+// ── Test T3: exec_captured_transport_error_fails_closed ──────────────────────
+
+#[test]
+fn exec_captured_transport_error_fails_closed() {
+    // exec_captured calls set_command first (PATCH); a transport error there
+    // must propagate immediately as Err.
+    let engine = engine_failing();
+    let c = container("myjob");
+    assert!(
+        engine.exec_captured(&c, &["make", "build"]).is_err(),
+        "exec_captured must return Err on transport-layer failure (fail-closed)"
+    );
+}
+
+// ── Test T4: is_alive_transport_error_fails_closed ───────────────────────────
+
+#[test]
+fn is_alive_transport_error_fails_closed() {
+    // is_alive uses self.send() which propagates the transport Err via ?.
+    // A network-layer failure must NOT be silently swallowed as Ok(false) —
+    // it is indeterminate, not "absent", and must surface as Err.
+    let engine = engine_failing();
+    let c = container("myjob");
+    assert!(
+        engine.is_alive(&c).is_err(),
+        "is_alive must return Err on transport-layer failure (not silent false)"
+    );
+}
+
+// ── Test T5: delete_job_transport_error_fails_closed ─────────────────────────
+
+#[test]
+fn delete_job_transport_error_fails_closed() {
+    // delete_job uses self.send(); a transport error propagates via ?.
+    // Never treat a network failure as idempotent success.
+    let engine = engine_failing();
+    let c = container("myjob");
+    assert!(
+        engine.delete_job(&c).is_err(),
+        "delete_job must return Err on transport-layer failure (fail-closed)"
+    );
+}
+
+// ── Test T6: probe_non_2xx_reports_not_isolated ───────────────────────────────
+
+#[test]
+fn probe_non_2xx_reports_not_isolated() {
+    use corelink_runner::isolation::IsolationProbe;
+
+    // probe uses self.send() (not send_2xx) and returns Ok with alive = resp.is_success().
+    // A 500 → alive=false → both isolation flags false → fully_isolated()==false.
+    // This is the fail-safe direction: an absent/unhealthy job is reported as not isolated,
+    // never as falsely isolated.
+    let (engine, _fake) = engine_shared(vec![resp(500, "Internal Server Error")]);
+    let c = container("job1");
+    let spec = pinned_spec("job1");
+    let probe = engine
+        .probe(&c, &spec)
+        .expect("probe must return Ok on a non-2xx HTTP response (transport succeeded)");
+    assert_eq!(
+        probe,
+        IsolationProbe {
+            tmp_is_private: false,
+            net_is_isolated: false,
+        },
+        "HTTP 500 from probe must yield both isolation flags false"
+    );
+    assert!(
+        !probe.fully_isolated(),
+        "fully_isolated() must be false when probe receives HTTP 500"
+    );
+}
+
+// ── Test T7: probe_transport_error_fails_closed ───────────────────────────────
+
+#[test]
+fn probe_transport_error_fails_closed() {
+    // probe uses self.send() which propagates a transport Err via ?.
+    // A network-layer failure must surface as Err — never fabricate isolation state.
+    let engine = engine_failing();
+    let c = container("job1");
+    let spec = pinned_spec("job1");
+    assert!(
+        engine.probe(&c, &spec).is_err(),
+        "probe must return Err on transport-layer failure (fail-closed)"
+    );
+}
+
 // ── Test 23: spawn_sends_pinned_image_verbatim ────────────────────────────────
 
 #[test]
