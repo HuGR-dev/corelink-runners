@@ -7,6 +7,11 @@ publish.workspace = true
 
 [dependencies]
 axum       = { workspace = true }
+# WP-API3: the exec mechanism is fail-closed (`anyhow::Result`, no result
+# ever fabricated) and content-addresses captured output + the frozen
+# memo-key formula via SHA-256 (sha2 is the workspace-pinned hash dep).
+anyhow     = { workspace = true }
+sha2       = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
 # WP-ENV1: standard-base64 wire form of the drained raw transcript bytes

@@ -149,7 +149,11 @@ pub(crate) async fn acquire(
     }
 
     // ── 5. Contract §1: acquire returns lease id + exec endpoint +
-    // deadline. The endpoint is the frozen template, substituted. ──
+    // deadline. The endpoint is the frozen template, substituted. The
+    // deadline is also recorded server-side: the API3 expired-at-exec-time
+    // gate refuses execution past it (`expired_job_stores_nothing_ever`),
+    // even before the expiry sweep marks the ledger. ──
+    state.record_deadline(&lease_id, lease.expiry);
     let exec_endpoint = paths::EXEC.replace("{lease_id}", &lease_id);
     (
         StatusCode::OK,
