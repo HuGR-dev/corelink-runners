@@ -56,16 +56,21 @@ caps enforced before load, p95 fairness, measurable non-interference,
 byte-determinism, signed attestation. "M1 replaces the transport, not the
 contract." Epics:
 
-- [ ] Multi-tenant control plane — scheduler, per-tenant caps, fairness.
-- [ ] Public lease API — REST acquire/status/cancel, PAT auth (CAS/AC pattern).
-- [ ] Billing — per-concurrency-slot metering, org→tenant keys, invoicing;
-      **concurrency pricing, never per-minute** (decided principle).
-- [ ] Firecracker isolation engine — microVM per job behind the existing
-      engine-agnostic `ContainerSpec`/`BoxExec` seam; same teardown oracle.
-- [ ] §13 wiring — envelope hooks + metrics on the production job-close path;
-      authenticated (Bearer PAT) hook subscription.
-- [ ] Attestation chain at the API surface (§7) + secrets-broker wire seam
-      (§5; C5b implementation stays forge-side).
+- [x] Multi-tenant control plane — ledger+lifecycle+caps+scheduler+
+      non-interference surface (CP1–CP4, waves 1–4).
+- [x] Public lease API — PAT fail-closed, acquire/status/cancel, exec→
+      CheckResult (frozen memo formula), §9 trigger (API1–API4, waves 2–5).
+- [x] Billing M1 scope — slot metering (no duration accumulator by
+      construction) + product §5 ladder→caps (BIL1/2); invoicing deferred
+      to M2 (ratified decision #4).
+- [ ] Firecracker engine (FC1–FC5) — **blocked on the KVM bare-metal buy**
+      (ratified decision #5); Engine v2 seam frozen and waiting.
+- [x] §13 wiring — authenticated hook transport + close machinery on the
+      real release path (ENV1/2, waves 3+5); ENV3 vector = hugit PR #104.
+- [x] Attestation §7 — mandatory signed chain + result-binding sig on every
+      execution surface, published key (ATT1/2, wave 6; binding extension
+      flagged for §12). ATT3 secrets seam awaits the hugit payload contract
+      (decision #7).
 
 ## M2 — direct GA
 
