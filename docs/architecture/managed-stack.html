@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CoreLink Runners — stack gerenciado</title>
+<style>
+  :root {
+    --teu: #16a34a;        --teu-bg: #f0fdf4;     --teu-br: #86efac;
+    --live: #2563eb;       --live-bg: #eff6ff;    --live-br: #93c5fd;
+    --buy: #9333ea;        --buy-bg: #faf5ff;     --buy-br: #d8b4fe;
+    --falta: #ea580c;      --falta-bg: #fff7ed;   --falta-br: #fdba74;
+    --ink: #0f172a;        --muted: #64748b;      --line: #cbd5e1;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: #f8fafc; color: var(--ink); margin: 0; padding: 40px 16px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 720px; margin: 0 auto; }
+  h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -0.02em; }
+  .sub { color: var(--muted); font-size: 14px; margin: 0 0 28px; }
+  .flow { display: flex; flex-direction: column; align-items: center; gap: 0; }
+  .card {
+    width: 100%; max-width: 540px; border-radius: 14px; padding: 16px 20px;
+    border: 1.5px solid var(--line); background: #fff; position: relative;
+    box-shadow: 0 1px 2px rgba(15,23,42,.04);
+  }
+  .card .tag {
+    position: absolute; top: -10px; right: 16px; font-size: 11px; font-weight: 700;
+    letter-spacing: .04em; text-transform: uppercase; padding: 3px 9px; border-radius: 999px;
+  }
+  .card h3 { margin: 0 0 4px; font-size: 15px; }
+  .card p { margin: 0; font-size: 13px; color: var(--muted); line-height: 1.5; }
+  .card .small { font-size: 12px; color: var(--muted); margin-top: 6px; font-style: italic; }
+
+  .teu   { border-color: var(--teu-br);   background: var(--teu-bg); }
+  .teu   .tag { background: var(--teu);   color: #fff; }
+  .live  { border-color: var(--live-br);  background: var(--live-bg); }
+  .live  .tag { background: var(--live);  color: #fff; }
+  .buy   { border-color: var(--buy-br);   background: var(--buy-bg); }
+  .buy   .tag { background: var(--buy);   color: #fff; }
+  .falta { border-color: var(--falta-br); background: var(--falta-bg); border-style: dashed; }
+  .falta .tag { background: var(--falta); color: #fff; }
+
+  .arrow {
+    width: 2px; height: 30px; background: var(--line); position: relative;
+  }
+  .arrow::after {
+    content: ""; position: absolute; bottom: 0; left: 50%; transform: translateX(-50%);
+    border-left: 5px solid transparent; border-right: 5px solid transparent;
+    border-top: 7px solid var(--line);
+  }
+  .arrow .lbl {
+    position: absolute; left: 14px; top: 50%; transform: translateY(-50%);
+    font-size: 11px; color: var(--muted); white-space: nowrap;
+  }
+  .nested {
+    margin-top: 12px; border: 1.5px dashed var(--falta-br); background: var(--falta-bg);
+    border-radius: 10px; padding: 10px 14px;
+  }
+  .nested .tag2 { font-size: 10px; font-weight: 700; color: var(--falta);
+    text-transform: uppercase; letter-spacing: .04em; }
+  .nested h4 { margin: 2px 0 2px; font-size: 13px; }
+  .nested p { margin: 0; font-size: 12px; color: var(--muted); }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; margin: 30px 0 22px; justify-content: center; }
+  .legend .item { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--ink); }
+  .dot { width: 13px; height: 13px; border-radius: 4px; border: 1.5px solid; }
+  .d-teu { background: var(--teu-bg); border-color: var(--teu); }
+  .d-live { background: var(--live-bg); border-color: var(--live); }
+  .d-buy { background: var(--buy-bg); border-color: var(--buy); }
+  .d-falta { background: var(--falta-bg); border-color: var(--falta); border-style: dashed; }
+
+  .callout {
+    max-width: 540px; margin: 8px auto 0; background: #fff; border: 1.5px solid var(--line);
+    border-left: 4px solid var(--falta); border-radius: 10px; padding: 14px 18px;
+  }
+  .callout h3 { margin: 0 0 8px; font-size: 14px; }
+  .callout ol { margin: 0; padding-left: 20px; }
+  .callout li { font-size: 13px; color: var(--ink); margin-bottom: 4px; line-height: 1.5; }
+  .callout .free { color: var(--muted); font-size: 12.5px; margin-top: 10px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>CoreLink Runners — o stack gerenciado</h1>
+  <p class="sub">O que é teu, o que você compra pronto, o que falta construir.</p>
+
+  <div class="legend">
+    <span class="item"><span class="dot d-teu"></span> Teu produto (construído)</span>
+    <span class="item"><span class="dot d-live"></span> Compra — já vivo</span>
+    <span class="item"><span class="dot d-buy"></span> Compra — pay-per-use</span>
+    <span class="item"><span class="dot d-falta"></span> Falta construir</span>
+  </div>
+
+  <div class="flow">
+
+    <div class="card">
+      <h3>👤 Cliente — CI / agente de IA</h3>
+      <p>Cadastra uma vez. Usa o mesmo PAT pro Cache e pro Runners.</p>
+    </div>
+
+    <div class="arrow"><span class="lbl">1 · cadastro</span></div>
+
+    <div class="card live">
+      <span class="tag">compra · vivo</span>
+      <h3>Conta CoreLink — auth</h3>
+      <p>Emite o PAT, cria o tenant. <code>corelink-auth</code> · app.corelink.humangr.com — em produção.</p>
+    </div>
+
+    <div class="arrow"><span class="lbl">2 · PAT → "me dá um runner" (lease)</span></div>
+
+    <div class="card teu">
+      <span class="tag">teu</span>
+      <h3>⚙️ O Fabric — teu produto</h3>
+      <p>Roda numa caixa minúscula (€5-15) ou no Cloudflare. lease API · checa PAT · caps · scheduler · ledger · §13 envelope · attestation · metering de slot.</p>
+      <div class="nested">
+        <span class="tag2">⬚ falta construir — WP pequena</span>
+        <h4>CloudSandboxEngine</h4>
+        <p>Cliente fininho da API, atrás do <code>Engine</code> seam que já existe.</p>
+      </div>
+    </div>
+
+    <div class="arrow"><span class="lbl">3 · "roda esse job, isolado"</span></div>
+
+    <div class="card buy">
+      <span class="tag">compra · pay-per-use</span>
+      <h3>🔒 Northflank (ou Fly.io)</h3>
+      <p><strong>microVM Firecracker por job</strong> — isolamento real, estranho é seguro. Boot sub-segundo, escala sozinho.</p>
+      <p class="small">Substitui "Hetzner + Firecracker" de uma vez → sem máquina pra gerenciar, sem Firecracker pra construir, sem bare metal.</p>
+    </div>
+
+    <div class="arrow"><span class="lbl">4 · hidrata o working set (cache-warm)</span></div>
+
+    <div class="card live">
+      <span class="tag">compra · vivo</span>
+      <h3>💾 CoreLink CAS / AC</h3>
+      <p>Cache + memoização. No R2 do Cloudflare — em produção. Re-run memoizado = custo zero.</p>
+    </div>
+
+  </div>
+
+  <div style="height:28px"></div>
+
+  <div class="callout">
+    <h3>O que separa hoje de "cliente pagante usando"</h3>
+    <ol>
+      <li><strong>Deploy</strong> do fabric numa caixa mínima / Cloudflare.</li>
+      <li><strong>CloudSandboxEngine</strong> — adapter da API do Northflank (WP pequena).</li>
+      <li><strong>Integração CoreLink</strong> — auth + billing (o doc do PR #15).</li>
+    </ol>
+    <p class="free">Sem bare metal · sem campanha de Firecracker · sem €20 de máquina.<br>
+    Billing herdado do CoreLink (Stripe), $8 flat. Isolamento, cache, auth e signup: já vivos.</p>
+  </div>
+
+</div>
+</body>
+</html>
