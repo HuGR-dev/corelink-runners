@@ -198,4 +198,11 @@ fn paths_are_v1_stable() {
     assert_eq!(paths::QUEUE_TRIGGER, "/v1/queue/trigger");
     assert_eq!(paths::METRICS_TENANT, "/v1/metrics/tenant");
     assert_eq!(paths::HEALTH, "/v1/health");
+    // ENV1 amendment to the CF0 freeze (lead-ratified): the §13 envelope
+    // drain surface. Frozen from here on like the rest of /v1.
+    assert_eq!(
+        paths::ENVELOPE_EVENTS,
+        "/v1/leases/{lease_id}/envelope/events"
+    );
+    assert_eq!(paths::ENVELOPE_META, "/v1/leases/{lease_id}/envelope/meta");
 }

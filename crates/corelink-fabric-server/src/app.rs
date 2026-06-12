@@ -1,9 +1,10 @@
-//! Router assembly + shared state for the M1 fabric server (WP-API1/API2).
+//! Router assembly + shared state for the M1 fabric server (WP-API1/API2,
+//! WP-ENV1).
 //!
 //! Routes are the FROZEN path constants from `corelink_fabric_api::paths` —
 //! never string literals — so the server cannot drift from the vocabulary.
 //! The frozen templates use `{lease_id}` placeholders (OpenAPI style); this
-//! crate substitutes them into axum 0.7's `:lease_id` syntax ([`axum_path`]),
+//! crate substitutes them into axum 0.7's `:lease_id` syntax ([`capture`]),
 //! exactly as `paths.rs` documents.
 
 use std::collections::HashMap;
@@ -12,11 +13,12 @@ use std::sync::{Arc, Mutex};
 
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router, middleware};
-use corelink_fabric::{CapGate, LeaseLedger, RateWindow, TenantId, TenantPlan};
+use corelink_fabric::{CapGate, InMemoryLedger, LeaseLedger, RateWindow, TenantId, TenantPlan};
 use corelink_fabric_api::paths;
 
 use crate::auth::{self, TokenStore};
 use crate::handlers;
+use crate::handlers::envelope::{self, HookRegistry};
 
 /// Clock seam: "now" in unix epoch ms. Injected so admission, expiry math,
 /// and ledger timestamps are deterministic under test ([`SystemClock`] in
@@ -128,19 +130,53 @@ impl AppState {
 /// liveness without credentials, and the body reports nothing tenant-scoped.
 /// Every other route — today and as API3/4 land — sits behind the
 /// Bearer-PAT layer (pinned by `health_is_open_everything_else_is_not`).
+///
+/// This convenience constructor wires an EMPTY [`HookRegistry`] (every
+/// envelope poll is a tenant-matched miss → 404); the composition root that
+/// registers hooks at lease acquire uses [`app_full`].
 pub fn app(store: Arc<dyn TokenStore + Send + Sync>, state: AppState) -> Router {
+    app_full(store, state, Arc::new(HookRegistry::default()))
+}
+
+/// [`app`], with the envelope [`HookRegistry`] injected and a default
+/// in-process lease state (empty [`InMemoryLedger`], no plans on file —
+/// fail-closed for leases). Thin alias over [`app_full`] for envelope-focused
+/// composition: the composition root keeps the same `Arc` and registers each
+/// lease's [`CaptureHook`] (`corelink_runner::envelope::CaptureHook`) at
+/// lease acquire (WP-ENV1).
+pub fn app_with_registry(
+    store: Arc<dyn TokenStore + Send + Sync>,
+    registry: Arc<HookRegistry>,
+) -> Router {
+    let state = AppState::new(
+        Arc::new(Mutex::new(InMemoryLedger::new())),
+        Arc::new(StaticPlans::default()),
+        Arc::new(SystemClock),
+    );
+    app_full(store, state, registry)
+}
+
+/// The FULL constructor: every seam injected — token store (auth), lease
+/// [`AppState`] (WP-API2), and the envelope [`HookRegistry`] (WP-ENV1).
+/// [`app`] and [`app_with_registry`] are thin conveniences over this; all
+/// routes from both surfaces are registered here, once.
+pub fn app_full(
+    store: Arc<dyn TokenStore + Send + Sync>,
+    state: AppState,
+    registry: Arc<HookRegistry>,
+) -> Router {
     let authenticated = Router::new()
         .route(paths::METRICS_TENANT, get(metrics_tenant))
         .route(paths::LEASES, post(handlers::leases::acquire))
+        .route(&capture(paths::LEASE_BY_ID), get(handlers::leases::status))
         .route(
-            &axum_path(paths::LEASE_BY_ID),
-            get(handlers::leases::status),
-        )
-        .route(
-            &axum_path(paths::LEASE_CANCEL),
+            &capture(paths::LEASE_CANCEL),
             post(handlers::leases::cancel),
         )
+        .route(&capture(paths::ENVELOPE_EVENTS), get(envelope::poll_events))
+        .route(&capture(paths::ENVELOPE_META), get(envelope::poll_meta))
         .with_state(state)
+        .layer(Extension(registry))
         .layer(middleware::from_fn_with_state(store, auth::require_tenant));
 
     Router::new()
@@ -148,10 +184,11 @@ pub fn app(store: Arc<dyn TokenStore + Send + Sync>, state: AppState) -> Router 
         .merge(authenticated)
 }
 
-/// Substitute the frozen `{lease_id}` template into axum 0.7's `:lease_id`
-/// capture syntax — the one place the two notations meet (`paths.rs`: "the
-/// server crate substitutes them").
-fn axum_path(template: &str) -> String {
+/// Substitute the frozen OpenAPI-style `{lease_id}` placeholder with axum
+/// 0.7 capture syntax (`:lease_id`) — the substitution the `paths` module
+/// docs assign to the server crate. The FROZEN form stays the template; the
+/// capture form is a router detail and never appears on the wire.
+fn capture(template: &str) -> String {
     template.replace("{lease_id}", ":lease_id")
 }
 

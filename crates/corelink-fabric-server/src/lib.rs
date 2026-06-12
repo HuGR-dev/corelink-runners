@@ -18,5 +18,8 @@ pub mod app;
 pub mod auth;
 pub mod handlers;
 
-pub use app::{AppState, Clock, PlanSource, StaticPlans, SystemClock, app};
+pub use app::{
+    AppState, Clock, PlanSource, StaticPlans, SystemClock, app, app_full, app_with_registry,
+};
 pub use auth::{StaticTokenStore, TokenStore, TokenStoreError};
+pub use handlers::envelope::HookRegistry;

@@ -32,3 +32,15 @@ pub const METRICS_TENANT: &str = "/v1/metrics/tenant";
 
 /// Liveness/readiness. Unauthenticated; reports nothing tenant-scoped.
 pub const HEALTH: &str = "/v1/health";
+
+/// Envelope raw-event drain: `GET` polls the lease's §13.2 capture hook and
+/// drains the currently in-flight raw transcript events (contract §13.2
+/// surface 1; bounded in-flight only, never durable — §13.3). ENV1.
+/// (ENV1 amendment to the CF0 freeze, lead-ratified.)
+pub const ENVELOPE_EVENTS: &str = "/v1/leases/{lease_id}/envelope/events";
+
+/// Envelope per-turn metadata drain: `GET` polls the lease's §13.2 capture
+/// hook and drains the currently in-flight `TurnMeta` entries (contract
+/// §13.2 surface 2; bounded in-flight only, never durable — §13.3). ENV1.
+/// (ENV1 amendment to the CF0 freeze, lead-ratified.)
+pub const ENVELOPE_META: &str = "/v1/leases/{lease_id}/envelope/meta";
