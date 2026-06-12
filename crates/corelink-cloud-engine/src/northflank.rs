@@ -20,11 +20,12 @@
 //! - **Exit code:** Northflank run status surfaces success/failure, not the
 //!   raw numeric code. We map success → `0`, failure → `1`. Granularity beyond
 //!   that is provider-limited.
-//! - **Captured output:** the provider's run logs merge stdout/stderr into one
-//!   stream; `exec_captured` returns them in `stdout` with `stderr` empty. The
-//!   `CheckResult` content-digest is computed over this deterministically. This
-//!   only matters for cross-engine memo identity (docker↔cloud), which the
-//!   single-engine launch fabric does not do.
+//! - **Captured output:** the provider returns structured CRI JSON logs
+//!   (`{"data":[{"log":"<ts> <stream> <flag> <message>"}]}`); `fetch_logs`
+//!   parses each entry and routes `stdout`/`stderr` into separate buckets
+//!   (live-confirmed shape). The `CheckResult` content-digest is computed over
+//!   `stdout` deterministically. This only matters for cross-engine memo
+//!   identity (docker↔cloud), which the single-engine launch fabric does not do.
 //!
 //! Field-level exactness of the Northflank request bodies is validated at deploy
 //! time against a live token; the acceptance suite proves the engine's *logic*
@@ -33,13 +34,20 @@
 //!
 //! # SECURITY — DEPLOY GATE
 //!
-//! **Network-egress isolation of spawned jobs relies on Northflank Job network
-//! defaults.** The `create_job_body` does NOT yet encode an explicit
-//! no-ingress/no-egress network directive. Before any untrusted traffic runs in
-//! production, an explicit network-isolation directive MUST be confirmed against
-//! the live Northflank API and encoded into the create-job request body.
-//! Do not remove this gate without a documented API confirmation and an
-//! integration test asserting the directive is present in the wire body.
+//! **Cross-tenant isolation is the hard guarantee:** Northflank deploys Cilium
+//! network policies between projects/namespaces by default; multi-project
+//! networking is OFF, so a job cannot reach other tenants' projects. This is
+//! the tenant-isolation guarantee.
+//!
+//! **Internet egress is ACCEPTED at launch (owner decision, ADR-0003):** full
+//! outbound-internet blocking is a BYOC-tier feature, not a managed-PaaS
+//! per-job toggle. The accepted-risk posture rests on: no free tier /
+//! card-on-file (no anonymous untrusted code — abuse is identified and
+//! billable), secrets brokered (never on the box), ephemeral microVM-per-job,
+//! and cache-warm reducing real egress need. BYOC egress-gateway is the
+//! enterprise lockdown upgrade path.
+//!
+//! See `docs/adr/0003-egress-isolation-posture.md` for the decision record.
 
 use anyhow::{Result, bail};
 use corelink_runner::ContainerSpec;
@@ -96,8 +104,15 @@ impl NorthflankConfig {
     /// fail-closed).
     ///
     /// **Optional overrides** (numeric tunables stay at defaults):
-    /// - `NORTHFLANK_BASE_URL` → `base_url`
+    /// - `NORTHFLANK_BASE_URL` → `base_url` (explicit; takes precedence over all)
+    /// - `NORTHFLANK_TEAM_ID` → `base_url = https://api.northflank.com/v1/teams/{team}`
+    ///   (required for ORG API tokens, which need team-scoped paths)
     /// - `NORTHFLANK_DEPLOYMENT_PLAN` → `deployment_plan`
+    ///
+    /// **`base_url` precedence:**
+    /// 1. `NORTHFLANK_BASE_URL` (non-empty) — verbatim, wins over everything.
+    /// 2. `NORTHFLANK_TEAM_ID` (non-empty) — `https://api.northflank.com/v1/teams/{team}`.
+    /// 3. Default from [`NorthflankConfig::new`] (`https://api.northflank.com/v1`).
     #[must_use]
     pub fn from_env_with(get: impl Fn(&str) -> Option<String>) -> Option<Self> {
         let token = get("NORTHFLANK_API_TOKEN").filter(|s| !s.is_empty())?;
@@ -107,6 +122,8 @@ impl NorthflankConfig {
 
         if let Some(base_url) = get("NORTHFLANK_BASE_URL").filter(|s| !s.is_empty()) {
             cfg.base_url = base_url;
+        } else if let Some(team) = get("NORTHFLANK_TEAM_ID").filter(|s| !s.is_empty()) {
+            cfg.base_url = format!("https://api.northflank.com/v1/teams/{team}");
         }
         if let Some(plan) = get("NORTHFLANK_DEPLOYMENT_PLAN").filter(|s| !s.is_empty()) {
             cfg.deployment_plan = plan;
@@ -343,16 +360,66 @@ impl<H: HttpTransport> NorthflankEngine<H> {
         )
     }
 
-    /// Fetch the run logs for `job` (merged stdout/stderr stream).
+    /// Fetch the run logs for `job`, split into `(stdout, stderr)`.
+    ///
+    /// The Northflank logs endpoint returns structured CRI JSON:
+    /// `{"data":[{"log":"<RFC3339Nano-ts> <stream> <flag> <message>", ...}, ...]}`.
+    /// We parse each `.data[].log` CRI line, routing the message part to the
+    /// stdout or stderr bucket based on the `<stream>` field (`"stdout"` /
+    /// `"stderr"`). Lines with fewer than 3 leading whitespace-delimited fields
+    /// are placed verbatim into stdout (defensive).
+    ///
+    /// If the body does not parse as the expected JSON shape, the raw body is
+    /// returned as stdout with stderr empty (defensive fallback — never error on
+    /// shape).
     ///
     /// **Correctness invariant:** each lease maps to exactly one Northflank Job
     /// and exactly one run (`concurrency::run_one` is one-shot). The job-scoped
     /// `/logs` endpoint therefore returns this run's output — there is no
     /// ambiguity between runs of the same job.
-    fn fetch_logs(&self, job: &str) -> Result<String> {
+    fn fetch_logs(&self, job: &str) -> Result<(String, String)> {
         let url = format!("{}/logs", self.job_url(job));
         let resp = self.send_2xx(Method::Get, url, None, "fetch-logs")?;
-        Ok(resp.body)
+
+        // Parse as structured CRI JSON: {"data":[{"log":"<ts> <stream> <flag> <msg>"},...]}
+        // Defensive: on any parse/shape failure, return raw body as stdout.
+        let parsed = serde_json::from_str::<serde_json::Value>(&resp.body).ok();
+        let data = parsed
+            .as_ref()
+            .and_then(|v| v.get("data"))
+            .and_then(|d| d.as_array());
+
+        let Some(entries) = data else {
+            return Ok((resp.body, String::new()));
+        };
+
+        let mut stdout_lines: Vec<String> = Vec::new();
+        let mut stderr_lines: Vec<String> = Vec::new();
+
+        for entry in entries {
+            let log = match entry.get("log").and_then(|l| l.as_str()) {
+                Some(s) => s,
+                None => continue,
+            };
+            // CRI format: "<ts> <stream> <flag> <message…>"
+            // splitn(4, ' ') produces at most [ts, stream, flag, message].
+            let mut parts = log.splitn(4, ' ');
+            let _ts = parts.next();
+            let stream = parts.next();
+            let _flag = parts.next();
+            let message = parts.next();
+
+            match (stream, message) {
+                (Some("stdout"), Some(msg)) => stdout_lines.push(msg.to_string()),
+                (Some("stderr"), Some(msg)) => stderr_lines.push(msg.to_string()),
+                _ => {
+                    // Fewer than 3 leading fields — put the whole log line into stdout.
+                    stdout_lines.push(log.to_string());
+                }
+            }
+        }
+
+        Ok((stdout_lines.join("\n"), stderr_lines.join("\n")))
     }
 
     /// Delete the ephemeral job (teardown). Not part of the [`Engine`] trait —
@@ -429,11 +496,11 @@ impl<H: HttpTransport> Engine for NorthflankEngine<H> {
         // endpoint returns this run's output — no ambiguity between runs.
         self.set_command(&c.name, argv)?;
         let code = self.run_to_completion(&c.name)?;
-        let stdout = self.fetch_logs(&c.name)?;
+        let (stdout, stderr) = self.fetch_logs(&c.name)?;
         Ok(CmdOutput {
             code,
             stdout,
-            stderr: String::new(),
+            stderr,
         })
     }
 
