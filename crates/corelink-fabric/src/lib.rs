@@ -21,10 +21,12 @@
 //! `corelink_runners_contracts::RunnerState` — this crate never redefines a
 //! contract type.
 
+pub mod billing;
 pub mod ledger;
 pub mod meter;
 pub mod tenant;
 
+pub use billing::SlotMeter;
 pub use ledger::{FileLedger, InMemoryLedger, LeaseLedger, LeaseRecord, LeaseState};
 pub use meter::{CogsCounters, SlotEventKind, SlotOccupancyEvent};
 pub use tenant::{TenantId, TenantPlan};
