@@ -16,10 +16,15 @@
 //!   expiry + surfaced-not-green crash sweeps, legal matrix only) over the
 //!   thin [`lifecycle::BoxProbe`] port — the runner adapts at the composition
 //!   root, so this crate stays hermetic (no runner dep).
+//! - **CP3 fair scheduler**: [`scheduler::FairScheduler`] /
+//!   [`scheduler::TenantQueues`] — the tick-driven pure dispatch mechanism
+//!   (deficit round-robin, p95-wait surface for CP4). No threads, no HTTP:
+//!   the composition root drives ticks and supplies the cap-check + dispatch
+//!   closures, so the execution-core seam stays in the runner crate.
 //!
-//! Scope discipline: **no scheduler, no HTTP here.** This crate is the typed
-//! seam; CP3 (scheduler) and API1+ (HTTP surface) live in their own crates and
-//! consume these types.
+//! Scope discipline: **no HTTP, no execution here.** This crate is the typed
+//! seam plus the pure control-plane mechanisms; API1+ (HTTP surface) and the
+//! execution core live in their own crates and consume these types.
 //!
 //! Wire-contract law: lease lifecycle states REUSE the frozen, transcribed
 //! `corelink_runners_contracts::RunnerState` — this crate never redefines a
@@ -30,6 +35,7 @@ pub mod caps;
 pub mod ledger;
 pub mod lifecycle;
 pub mod meter;
+pub mod scheduler;
 pub mod tenant;
 
 pub use billing::SlotMeter;
@@ -37,4 +43,5 @@ pub use caps::{CapDecision, CapGate, RateWindow};
 pub use ledger::{FileLedger, InMemoryLedger, LeaseLedger, LeaseRecord, LeaseState};
 pub use lifecycle::{BoxProbe, LeaseLifecycle};
 pub use meter::{CogsCounters, SlotEventKind, SlotOccupancyEvent};
+pub use scheduler::{FairScheduler, TenantQueues, TickReport, WorkItem};
 pub use tenant::{TenantId, TenantPlan};
