@@ -6,7 +6,7 @@
 //! `CheckDef`, `CheckResult`) are the frozen transcriptions in
 //! `corelink-runners-contracts` — wrapped, never redefined.
 
-use corelink_runners_contracts::{CheckDef, CheckResult, RunnerLease, RunnerState};
+use corelink_runners_contracts::{CheckDef, CheckResult, LandableEntry, RunnerLease, RunnerState};
 use serde::{Deserialize, Serialize};
 
 /// `POST /v1/leases` request body — acquire a lease (contract §1 "Acquire").
@@ -101,5 +101,48 @@ pub struct ExecRequest {
 pub struct ExecResponse {
     /// The execution result — the frozen `CheckResult` transcription. Same
     /// `CheckDef` over the same inputs MUST be byte-identical (contract §3).
+    pub result: CheckResult,
+}
+
+/// `POST /v1/queue/trigger` request body — hugit's landing queue triggers
+/// execution of an uncached check on demand (contract §9, the `QueueApi`
+/// seam; hugit B5). (API4 amendment to the CF0 freeze, lead-ratified.)
+///
+/// The queue delivers at-least-once: the fabric dedups on
+/// `(tenant, entry.item_id, tree_hash)` and answers a duplicate delivery
+/// with the SAME result without re-executing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TriggerRequest {
+    /// The landable queue entry that needs the uncached check — the frozen
+    /// `LandableEntry` transcription
+    /// (`corelink-runners-contracts/src/queue_api.rs`).
+    pub entry: LandableEntry,
+
+    /// The check to execute — the frozen `CheckDef` transcription.
+    pub check_def: CheckDef,
+
+    /// Merkle tree root hash of the workspace snapshot (lowercase hex) —
+    /// the FIRST memo axis of `CheckResult.memo_key`, exactly as on the
+    /// exec path (wave-4 amendment).
+    pub tree_hash: String,
+
+    /// The lease whose box/VM executes the check. The lease was acquired
+    /// through the capped `POST /v1/leases` path — capping happened THERE;
+    /// the trigger is lease-scoped and tenant-scoped (404 cross-tenant).
+    pub lease_id: String,
+}
+
+/// `POST /v1/queue/trigger` response body. (API4 amendment to the CF0
+/// freeze, lead-ratified.)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TriggerResponse {
+    /// The queue item this result answers (`entry.item_id`, echoed so the
+    /// queue can correlate under at-least-once delivery).
+    pub item_id: String,
+
+    /// The execution result — the frozen `CheckResult` transcription.
+    /// Byte-identical on duplicate delivery (idempotency, contract §9).
     pub result: CheckResult,
 }
