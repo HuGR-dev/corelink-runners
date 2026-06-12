@@ -1,0 +1,15 @@
+# WP-CF0d — control-plane core types (CF0 freeze items 4+5).
+# Workspace-internal path dep only; wire-contract law (deny.toml: crates.io
+# only for external sources) is untouched.
+[package]
+name = "corelink-fabric"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+corelink-runners-contracts = { path = "../corelink-runners-contracts" }
+anyhow     = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
