@@ -169,11 +169,14 @@ mod golden_tests {
                 .into_iter()
                 .map(|(_, name)| name)
                 .collect();
-        let expected: std::collections::BTreeSet<String> =
-            ["RunnerLease.json", "FenceManifest.json"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
+        let expected: std::collections::BTreeSet<String> = [
+            "RunnerLease.json",
+            "FenceManifest.json",
+            "IntentMetrics.json",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
         assert_eq!(
             listed, expected,
             "manifest.sha256 membership drifted from the pinned vector set"
