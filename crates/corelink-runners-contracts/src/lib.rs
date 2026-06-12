@@ -21,14 +21,25 @@
 //! hugit-contracts @ 7c2f1e64bc1ba46d4941dc3e5b4a6247c21b0ec0
 //! (RunnerLease/RunnerState/FenceManifest/MaterializedEntry);
 //! IntentMetrics/TokenCounts/ToolCount @ 443ff1b (context_envelope,
-//! schema 1.2.0 — see `intent_metrics`).
+//! schema 1.2.0 — see `intent_metrics`);
+//! CheckDef/Artifact/CheckResult/AttestationChain/LandableEntry/UnionResult/
+//! MinimalFailingPair/BatchSeal/QueueApi @ 7736d02 (frozen WP-00 — see
+//! `check_def`, `check_result`, `attestation_chain`, `queue_api`).
 
+pub mod attestation_chain;
+pub mod check_def;
+pub mod check_result;
 pub mod fence_manifest;
 pub mod intent_metrics;
+pub mod queue_api;
 pub mod runner_lease;
 
+pub use attestation_chain::AttestationChain;
+pub use check_def::CheckDef;
+pub use check_result::{Artifact, CheckResult};
 pub use fence_manifest::{FenceManifest, MaterializedEntry};
 pub use intent_metrics::{CONTEXT_ENVELOPE_SCHEMA_VERSION, IntentMetrics, TokenCounts, ToolCount};
+pub use queue_api::{BatchSeal, LandableEntry, MinimalFailingPair, QueueApi, UnionResult};
 pub use runner_lease::{RunnerLease, RunnerState};
 
 #[cfg(test)]
