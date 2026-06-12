@@ -726,6 +726,17 @@ mod tests {
         fn exec(&self, _c: &RunningContainer, _argv: &[&str]) -> Result<Option<i32>> {
             Ok(Some(0))
         }
+        fn exec_captured(
+            &self,
+            _c: &RunningContainer,
+            _argv: &[&str],
+        ) -> Result<crate::lease::CmdOutput> {
+            Ok(crate::lease::CmdOutput {
+                code: Some(0),
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
         fn is_alive(&self, _c: &RunningContainer) -> Result<bool> {
             Ok(true)
         }

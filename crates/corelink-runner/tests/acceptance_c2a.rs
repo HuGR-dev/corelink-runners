@@ -187,3 +187,46 @@ fn item_2_lease_isolation() {
         "lease isolation (tmp+net) must hold"
     );
 }
+
+// ── exec_captured (Engine v2 seam, WP-CF0b) — box-gated like exec() ──────────
+//
+// `Engine::exec` is exercised only on the live-box lane (item ①), so the
+// captured-output half of the seam is extended here the same way it gates:
+// short-circuit when `HUGIT_RUNNER_HOST` is absent, FAIL (never skip) inside
+// the active lane. Hermetic FakeBox units live in `src/isolation.rs`.
+#[test]
+fn exec_captured_separates_streams_on_live_box() {
+    if !box_lane_active() {
+        return;
+    }
+    let boxx = live_box();
+    let image = pinned_image(&boxx);
+    let lease = fresh_lease("execcap");
+    let spec = ContainerSpec::from_lease(&lease, &image).expect("derive spec");
+    let engine = DockerEngine::new(boxx.clone());
+
+    let container = engine.spawn(&spec).expect("spawn isolated container");
+    let out = engine.exec_captured(
+        &container,
+        // `printf` (no trailing newline) so byte-exact stdout can be asserted;
+        // distinct markers per stream; non-zero exit proves code passthrough.
+        &["sh", "-c", "printf 'to-out'; printf 'to-err' >&2; exit 3"],
+    );
+    // Always clean up the live box regardless of outcome.
+    let _ = teardown(&boxx, &container);
+    let out = out.expect("exec_captured on live box");
+
+    assert_eq!(out.code, Some(3), "exit code must pass through as-is");
+    assert_eq!(out.stdout, "to-out", "stdout must be byte-exact, untrimmed");
+    assert!(
+        out.stderr.contains("to-err"),
+        "stderr must carry the stderr-only marker; got {:?}",
+        out.stderr
+    );
+    assert!(
+        !out.stdout.contains("to-err") && !out.stderr.contains("to-out"),
+        "streams must not bleed into each other (stdout={:?} stderr={:?})",
+        out.stdout,
+        out.stderr
+    );
+}
