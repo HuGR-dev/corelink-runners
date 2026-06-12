@@ -167,6 +167,7 @@ fn dtos_roundtrip_and_deny_unknown() {
     roundtrip_and_deny_unknown(
         &ExecRequest {
             check_def: sample_check_def(),
+            tree_hash: "ab".repeat(32),
         },
         "ExecRequest",
     );

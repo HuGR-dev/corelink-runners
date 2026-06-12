@@ -99,20 +99,17 @@ pub(crate) async fn exec(
     // ── 4. Execute via the port; build the frozen CheckResult. Any failure
     // is fail-closed — no result is ever fabricated.
     //
-    // `tree_hash` (first memo axis): the frozen `ExecRequest` carries only
-    // the `CheckDef` — the workspace-snapshot tree hash is fabric-derived,
-    // and the fence/materialize attach that produces it is FC-domain. Until
-    // it lands, the axis is the EMPTY string, explicitly: the LP framing of
-    // the memo formula keeps the empty axis unambiguous (it can never
-    // collide with a real hash), and the value is honest — no snapshot was
-    // materialized, so no snapshot is claimed. `runner_ref` is the ledger's
-    // own box_ref — the opaque reference to the box/VM serving this lease.
+    // `tree_hash` (first memo axis) comes from the request — the wave-4
+    // CF0 amendment: the caller (hugit's forge) owns the workspace snapshot
+    // identity, and the memo key must never collapse across trees.
+    // `runner_ref` is the ledger's own box_ref — the opaque reference to
+    // the box/VM serving this lease.
     let clock = || state.clock.now_ms();
     match run_check(
         state.exec.as_ref(),
         &lease_id,
         &req.check_def,
-        "",
+        &req.tree_hash,
         &clock,
         &box_ref,
     ) {

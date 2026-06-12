@@ -155,6 +155,7 @@ async fn acquire(h: &Harness, bearer: &str) -> String {
 async fn post_exec(h: &Harness, lease_id: &str, bearer: &str) -> Response {
     let body = ExecRequest {
         check_def: check_def(),
+        tree_hash: "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90".to_string(),
     };
     h.app
         .clone()
