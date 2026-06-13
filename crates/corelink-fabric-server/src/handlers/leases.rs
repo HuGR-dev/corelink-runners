@@ -229,13 +229,16 @@ pub(crate) async fn acquire(
     // Registration is on the SUCCESS path only — a failed acquire (any
     // branch above that returns early) never registers a hook.
     // The credential = the acquiring tenant's Bearer PAT (the contract's
-    // §13.2 authenticated-hook-point seam). ⚠️ CROSS-REPO SEAM — UNCONFIRMED:
-    // this assumes hugit's envelope SUBSCRIBER presents the SAME PAT that
-    // acquired the lease. If the forge subscribes with a different PAT (e.g.
-    // acquire = build orchestrator, subscribe = envelope consumer), every poll
-    // would 503 on the credential gate. This binding must be confirmed with the
-    // hugit techlead before the §13 subscribe path is relied on in production;
-    // it is one line to change (the credential source) once the seam is settled.
+    // §13.2 authenticated-hook-point seam). CROSS-REPO SEAM — RATIFIED (hugit
+    // techlead, owner-ratified Gustavo, 2026-06-12; Option A "same tenant PAT"):
+    // hugit's envelope subscriber polls as the SAME machine principal with the
+    // SAME tenant PAT that acquired the lease (ADR-0002: one HuGR account, one
+    // machine PAT — acquire and subscribe roles are not separated), so the
+    // wrong-PAT 503 cannot occur. No per-lease (Option C) or out-of-band
+    // (Option B) credential is needed; no AcquireResponse wire change. See
+    // hugit/docs/handoff/2026-06-12-to-corelink-runners-envelope-reply.md.
+    // (If a future family consumer separates the roles, that is a new decision
+    // then — this binding is a one-line change at that point.)
     let hook = CaptureHook::open(
         EnvelopeConfig {
             ack_timeout: std::time::Duration::from_secs(30),
