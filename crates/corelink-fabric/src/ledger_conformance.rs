@@ -406,6 +406,13 @@ mod pg_runs {
     use super::*;
     use crate::pg_ledger::PgLedger;
 
+    /// Both Pg tests share ONE `leases` table and each TRUNCATEs it; cargo runs
+    /// them in parallel by default, so without serialization one test's truncate
+    /// wipes the other's rows (the cross-instance count then sees 0/2, not 1).
+    /// This lock serializes the Pg tests within the process — dep-free (no
+    /// `serial_test` crate). CI is unaffected (the tests skip without a DB).
+    static PG_TEST_SERIAL: Mutex<()> = Mutex::new(());
+
     /// `TEST_DATABASE_URL`, or `None` (the gate is OFF — skip cleanly).
     fn db_url() -> Option<String> {
         std::env::var("TEST_DATABASE_URL").ok()
@@ -450,6 +457,7 @@ mod pg_runs {
             eprintln!("conformance_pg_ledger: TEST_DATABASE_URL unset — skipping (expected on CI)");
             return;
         }
+        let _serial = PG_TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         // Clean slate before the suite (the factory also truncates per group).
         let rt = rt();
         let led = connect(&rt, &db_url().unwrap());
@@ -469,6 +477,7 @@ mod pg_runs {
             );
             return;
         };
+        let _serial = PG_TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
 
         let rt = rt();
         // Unique tenant per run so parallel test processes don't collide.
