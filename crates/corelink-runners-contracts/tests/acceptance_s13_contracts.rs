@@ -165,3 +165,30 @@ fn cost_field_carries_never_billable_semantic() {
 fn schema_version_pinned_1_2_0() {
     assert_eq!(CONTEXT_ENVELOPE_SCHEMA_VERSION, "1.2.0");
 }
+
+#[test]
+fn intent_metrics_conformance_vector_round_trips_byte_exact() {
+    // The cross-repo §13.4 vector (conformance/IntentMetrics.json) must
+    // round-trip through the transcribed type byte-exactly, mirroring
+    // hugit's item-② oracle: to_string_pretty + the committed trailing
+    // newline, compared without trim so any whitespace drift breaks here.
+    let raw = include_str!("../../../conformance/IntentMetrics.json");
+    let parsed: IntentMetrics =
+        serde_json::from_str(raw).expect("IntentMetrics vector must parse (deny_unknown_fields)");
+    let re = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&parsed).expect("IntentMetrics must re-serialize")
+    );
+    assert_eq!(
+        raw, re,
+        "IntentMetrics conformance vector round-trip is not byte-exact"
+    );
+    // Internal consistency the §13.1 semantics demand of any committed vector.
+    let t = &parsed.tokens;
+    assert_eq!(t.total, t.input + t.output + t.cache_read + t.cache_write);
+    assert_eq!(
+        parsed.tool_calls,
+        parsed.tool_breakdown.iter().map(|tc| tc.count).sum::<u64>()
+    );
+    assert!(parsed.active_ms <= parsed.wall_ms);
+}
