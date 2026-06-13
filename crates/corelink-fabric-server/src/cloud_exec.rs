@@ -408,6 +408,56 @@ pub fn cloud_backend_from_env(
     Some((exec, prov))
 }
 
+// ── boot diagnostic ─────────────────────────────────────────────────────────
+
+/// What the cloud-backend wiring will ACTUALLY resolve to — for an honest boot
+/// log.
+///
+/// The trap this exists to kill: [`cloud_backend_from_env`] (via
+/// [`NorthflankConfig::from_env`]) requires BOTH `NORTHFLANK_API_TOKEN` and
+/// `NORTHFLANK_PROJECT_ID`. A naive "is the token set?" boot check reports
+/// "Northflank" while the backend silently falls back to NoBox when the project
+/// id is missing/empty — every `exec` then 503s "no execution backend attached"
+/// with no clue why. This status mirrors the wiring's REAL condition so the
+/// diagnostic can never lie, and names the missing var on a partial config.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CloudBackendStatus {
+    /// Both required vars present (non-empty) → the Northflank backend is wired.
+    Wired,
+    /// Exactly one required var present → cloud is OFF (NoBox), but the operator
+    /// almost certainly INTENDED cloud. Name the missing var loudly.
+    PartialConfig {
+        /// The required var that IS set.
+        present: &'static str,
+        /// The required var that is missing/empty (the fix).
+        missing: &'static str,
+    },
+    /// No required `NORTHFLANK_*` vars → cloud deliberately off (fail-closed).
+    Off,
+}
+
+/// Resolve the [`CloudBackendStatus`] from an env accessor, using the SAME two
+/// required vars as [`cloud_backend_from_env`] / [`NorthflankConfig::from_env`].
+///
+/// A present-but-empty value counts as missing — matching `from_env`'s
+/// `filter(|s| !s.is_empty())`, so this status can never disagree with the
+/// actual wiring.
+pub fn cloud_backend_status(get: impl Fn(&str) -> Option<String>) -> CloudBackendStatus {
+    let has = |k: &str| get(k).is_some_and(|s| !s.is_empty());
+    match (has("NORTHFLANK_API_TOKEN"), has("NORTHFLANK_PROJECT_ID")) {
+        (true, true) => CloudBackendStatus::Wired,
+        (true, false) => CloudBackendStatus::PartialConfig {
+            present: "NORTHFLANK_API_TOKEN",
+            missing: "NORTHFLANK_PROJECT_ID",
+        },
+        (false, true) => CloudBackendStatus::PartialConfig {
+            present: "NORTHFLANK_PROJECT_ID",
+            missing: "NORTHFLANK_API_TOKEN",
+        },
+        (false, false) => CloudBackendStatus::Off,
+    }
+}
+
 // ── Static Send+Sync gate ──────────────────────────────────────────────────────
 
 // The concrete production executor AND provisioner MUST satisfy Send+Sync
@@ -428,6 +478,79 @@ const _: fn() = || {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Helper: a map-backed env accessor for the status tests. Owns its data so
+    /// the returned closure borrows nothing (no lifetime threading).
+    fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let owned: Vec<(String, String)> = pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        move |k: &str| {
+            owned
+                .iter()
+                .find(|(key, _)| key == k)
+                .map(|(_, v)| v.clone())
+        }
+    }
+
+    #[test]
+    fn cloud_status_wired_when_both_required_present() {
+        let s = cloud_backend_status(env(&[
+            ("NORTHFLANK_API_TOKEN", "tok"),
+            ("NORTHFLANK_PROJECT_ID", "corelink-runners"),
+        ]));
+        assert_eq!(s, CloudBackendStatus::Wired);
+    }
+
+    #[test]
+    fn cloud_status_partial_names_the_missing_project_id() {
+        // The exact production trap: token set, project id absent → NoBox,
+        // and the diagnostic must name PROJECT_ID as the fix (not claim "Northflank").
+        let s = cloud_backend_status(env(&[("NORTHFLANK_API_TOKEN", "tok")]));
+        assert_eq!(
+            s,
+            CloudBackendStatus::PartialConfig {
+                present: "NORTHFLANK_API_TOKEN",
+                missing: "NORTHFLANK_PROJECT_ID",
+            }
+        );
+    }
+
+    #[test]
+    fn cloud_status_partial_names_the_missing_token() {
+        let s = cloud_backend_status(env(&[("NORTHFLANK_PROJECT_ID", "corelink-runners")]));
+        assert_eq!(
+            s,
+            CloudBackendStatus::PartialConfig {
+                present: "NORTHFLANK_PROJECT_ID",
+                missing: "NORTHFLANK_API_TOKEN",
+            }
+        );
+    }
+
+    #[test]
+    fn cloud_status_empty_value_counts_as_missing() {
+        // Mirrors `NorthflankConfig::from_env`'s `filter(|s| !s.is_empty())`:
+        // a present-but-empty PROJECT_ID is NOT wired — the status must agree
+        // with the wiring, else the log lies again.
+        let s = cloud_backend_status(env(&[
+            ("NORTHFLANK_API_TOKEN", "tok"),
+            ("NORTHFLANK_PROJECT_ID", ""),
+        ]));
+        assert_eq!(
+            s,
+            CloudBackendStatus::PartialConfig {
+                present: "NORTHFLANK_API_TOKEN",
+                missing: "NORTHFLANK_PROJECT_ID",
+            }
+        );
+    }
+
+    #[test]
+    fn cloud_status_off_when_neither_present() {
+        assert_eq!(cloud_backend_status(env(&[])), CloudBackendStatus::Off);
+    }
 
     /// `NoBoxProvisioner` never holds boxes, so `probe` is always `Unbound`
     /// (FAIL-SAFE: an `Unbound` lease is never reclaimed by the crash sweep).
