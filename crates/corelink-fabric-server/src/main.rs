@@ -37,14 +37,26 @@ async fn main() -> anyhow::Result<()> {
         eprintln!();
     }
 
-    let northflank_configured = std::env::var("NORTHFLANK_API_TOKEN").is_ok();
     eprintln!("corelink-fabricd listening on {}", cfg.bind_addr);
     if cfg.mock_exec {
         eprintln!("cloud backend: MOCK (deterministic stub, offline adapter dev only)");
-    } else if northflank_configured {
-        eprintln!("cloud backend: Northflank (NORTHFLANK_API_TOKEN set)");
     } else {
-        eprintln!("cloud backend: NONE — fail-closed: no box backend, execs will 503");
+        // Report the backend the wiring ACTUALLY resolved — the same two-var
+        // condition as `cloud_backend_from_env`, never a token-only guess that
+        // claims "Northflank" while silently running NoBox.
+        use corelink_fabric_server::cloud_exec::{CloudBackendStatus, cloud_backend_status};
+        match cloud_backend_status(|k| std::env::var(k).ok()) {
+            CloudBackendStatus::Wired => eprintln!(
+                "cloud backend: Northflank (NORTHFLANK_API_TOKEN + NORTHFLANK_PROJECT_ID set)"
+            ),
+            CloudBackendStatus::PartialConfig { present, missing } => eprintln!(
+                "cloud backend: NONE — {present} is set but {missing} is missing/empty; \
+                 cloud exec is OFF and every exec will 503. Set {missing} to enable it."
+            ),
+            CloudBackendStatus::Off => eprintln!(
+                "cloud backend: NONE — no NORTHFLANK_* configured; execs will 503 (fail-closed)"
+            ),
+        }
     }
     eprintln!("reaper: started (interval={}s)", reaper_interval.as_secs());
     match &crash_sweep_handle {
