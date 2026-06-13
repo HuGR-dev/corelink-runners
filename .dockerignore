@@ -1,0 +1,23 @@
+# Keep the Docker build context small (the Dockerfile does `COPY . .`).
+# Without this, the 4+ GB `target/` and the full `.git` history are sent to the
+# daemon and copied into the builder layer — slow builds, wasted disk, and on a
+# managed build (Northflank) wasted build minutes/space.
+
+# Rust build artifacts — rebuilt inside the image; never ship the host's.
+target/
+
+# Git metadata — not needed to build the binary.
+.git/
+.github/
+
+# Local editor / OS cruft.
+.DS_Store
+*.swp
+
+# Docs / deploy / non-build assets (the binary build needs none of these).
+docs/
+deploy/
+conformance/
+
+# Claude / tooling local state.
+.claude/

@@ -66,6 +66,7 @@
 
 use std::time::Duration;
 
+use corelink_fabric::SlotEventKind;
 use corelink_runners_contracts::RunnerState;
 
 /// Configuration for the background reaper.
@@ -156,15 +157,43 @@ pub async fn reap_once(state: &crate::AppState) -> usize {
         let torn = state.teardown_lease(&rec.lease_id).await;
 
         if torn {
-            // ── 5. Mark Expired ONLY after teardown succeeds.
-            {
+            // ── 5. Mark Expired ONLY after teardown succeeds, and only if WE
+            // won the transition race.
+            //
+            // A concurrent close/cancel may have already moved the lease to
+            // Released between teardown succeeding and this lock acquisition.
+            // In that case `transition` returns Err (no legal pair out of a
+            // terminal state). We bind the result: if it's Err, the lease was
+            // already terminalized by someone else — do NOT GC or emit Expired
+            // (that would double-free the slot in the journal).
+            let expired_ok = {
                 let mut ledger = state.ledger.lock().unwrap_or_else(|e| e.into_inner());
-                let _ = ledger.transition(&rec.lease_id, RunnerState::Expired, now);
-            } // guard dropped before continuing
+                ledger
+                    .transition(&rec.lease_id, RunnerState::Expired, now)
+                    .is_ok()
+                // guard dropped here at end of block
+            };
 
-            // ── 6. GC side-tables (deadline + image entries).
-            state.forget_lease(&rec.lease_id);
-            reaped += 1;
+            if expired_ok {
+                // ── 6. GC side-tables (deadline + image entries).
+                state.forget_lease(&rec.lease_id);
+
+                // ── BIL1 / WP-SLOT-EMIT: slot expired — ledger lock is dropped
+                // (the transition block above), forget_lease holds no ledger lock.
+                // Crashed is out of scope (no crash-surfacing path is wired yet —
+                // non-goal, consistent with the reaper's known non-goals above).
+                //
+                // Note: `close_abnormal` (the lifecycle-sweep path for
+                // Crashed/abnormal leases) is NOT a live emission site in the
+                // current binary — no running sweep drives it; Crashed-slot
+                // metering is a documented non-goal here.
+                state.record_slot(&rec.lease_id, &rec.tenant, SlotEventKind::Expired);
+
+                reaped += 1;
+            }
+            // else: concurrent close/cancel won the race — their transition
+            // already freed the slot; we do NOT emit Expired (would double-free)
+            // and do NOT count this as a reaper reclaim.
         }
         // else: leave Held — do NOT transition, do NOT GC.
         // The next sweep finds it again and retries teardown.
@@ -215,7 +244,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use anyhow::Result;
-    use corelink_fabric::{InMemoryLedger, LeaseLedger, LeaseRecord, LeaseState, TenantId};
+    use corelink_fabric::{
+        InMemoryLedger, LeaseLedger, LeaseRecord, LeaseState, SlotEventKind, TenantId,
+    };
     use corelink_runners_contracts::RunnerState;
 
     use super::*;
@@ -571,6 +602,112 @@ mod tests {
         assert!(
             prov.teardown_calls().is_empty(),
             "no teardowns on empty ledger"
+        );
+    }
+
+    // ── WP-SLOT-EMIT: reaper_expiry_emits_expired_slot ───────────────────────
+    //
+    // Lives here (in-crate) because `record_deadline` is `pub(crate)` and
+    // integration tests in `tests/` cannot call it.
+
+    /// Reaper LOST RACE: if a concurrent close/cancel already terminalized the
+    /// lease (Released), the reaper's `held()` snapshot excludes it — so
+    /// `reap_once` processes zero overdue leases and emits no Expired event.
+    ///
+    /// This guards FIX 2: even before the transition gate, the held() snapshot
+    /// already filters out Released/terminal leases, so a race-lost reaper pass
+    /// produces no phantom Expired event and occupied stays 0.
+    #[tokio::test]
+    async fn reaper_lost_race_emits_no_phantom_expired() {
+        // Clock at 2 000 ms; deadline 1 000 ms → overdue if still Held.
+        let (state, _clock, _prov) = build_state(2_000);
+        let acme = TenantId::new("acme").unwrap();
+
+        // Insert a lease, record it in the slot meter as Acquired (1 occupied).
+        insert_held(&state, "lease-race", 1_000);
+        state.record_slot("lease-race", &acme, SlotEventKind::Acquired);
+
+        // Simulate close/cancel winning the race: transition to Released under
+        // the ledger lock, then emit Released in the slot meter.
+        {
+            let mut ledger = state.ledger.lock().unwrap();
+            ledger
+                .transition("lease-race", RunnerState::Released, 1_500)
+                .expect("Held→Released must succeed");
+        }
+        state.record_slot("lease-race", &acme, SlotEventKind::Released);
+
+        // Now run the reaper. The lease is Released (terminal), so `held()`
+        // excludes it — reap_once does nothing.
+        let reaped = reap_once(&state).await;
+        assert_eq!(
+            reaped, 0,
+            "reaper must reap 0: the lease is already Released"
+        );
+
+        let meter = state.slot_meter.lock().unwrap();
+        // No Expired event: the reaper never saw the lease as Held.
+        let expired_count = meter
+            .journal()
+            .iter()
+            .filter(|e| matches!(e.kind, corelink_fabric::SlotEventKind::Expired))
+            .count();
+        assert_eq!(
+            expired_count, 0,
+            "no Expired event must be emitted when the reaper loses the race"
+        );
+        // Slot is correctly at 0 (Acquired then Released; no phantom Expired).
+        assert_eq!(
+            meter.occupied(&acme),
+            0,
+            "occupied must be 0 (no double-free from phantom Expired)"
+        );
+        // Journal must contain exactly the Acquired + Released pair from the
+        // simulated close, nothing else.
+        assert_eq!(
+            meter.journal().len(),
+            2,
+            "journal must have exactly Acquired + Released, no extra Expired"
+        );
+    }
+
+    /// A Held lease reaped via `reap_once` frees its slot: `occupied == 0`
+    /// and the journal records an `Expired` event.
+    #[tokio::test]
+    async fn reaper_expiry_emits_expired_slot() {
+        // Clock at 2 000 ms; deadline 1 000 ms → already past.
+        let (state, _clock, _prov) = build_state(2_000);
+        insert_held(&state, "lease-slot-expiry", 1_000);
+
+        let reaped = reap_once(&state).await;
+        assert_eq!(reaped, 1, "one lease must be reaped");
+
+        let acme = TenantId::new("acme").unwrap();
+        let meter = state.slot_meter.lock().unwrap();
+
+        // Slot freed: occupied back to zero.
+        assert_eq!(
+            meter.occupied(&acme),
+            0,
+            "slot must be freed after expiry (occupied==0)"
+        );
+        // Exactly one event: the Expired emission.
+        assert_eq!(
+            meter.journal().len(),
+            1,
+            "journal must have exactly one Expired event"
+        );
+        assert!(
+            matches!(
+                meter.journal()[0].kind,
+                corelink_fabric::SlotEventKind::Expired
+            ),
+            "the journaled event must be Expired"
+        );
+        assert_eq!(
+            meter.journal()[0].lease_id,
+            "lease-slot-expiry",
+            "event lease_id must match"
         );
     }
 }

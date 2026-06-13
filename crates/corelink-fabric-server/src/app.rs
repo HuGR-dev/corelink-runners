@@ -14,7 +14,8 @@ use std::sync::{Arc, Mutex};
 use axum::routing::{get, post};
 use axum::{Extension, Router, middleware};
 use corelink_fabric::{
-    CapGate, InMemoryLedger, LeaseLedger, RateWindow, TenantId, TenantPlan, TenantWaitStats,
+    CapGate, InMemoryLedger, LeaseLedger, RateWindow, SlotEventKind, SlotMeter, SlotOccupancyEvent,
+    TenantId, TenantPlan, TenantWaitStats,
 };
 use corelink_fabric_api::{TriggerResponse, paths};
 
@@ -152,6 +153,13 @@ pub struct AppState {
     /// HTTP Extension stack so both the handlers AND the reaper reference
     /// the SAME map (the shared-instance crux, mirroring BoxRegistry).
     pub hook_registry: Arc<HookRegistry>,
+    /// Slot-occupancy meter (BIL1, WP-SLOT-EMIT): tracks per-tenant
+    /// concurrent slot occupancy and peak. Internal metering only — NOT a
+    /// wire type, NOT a billing change. Emitted at the three lifecycle points:
+    /// Acquired (acquire success), Released (close), Expired (reaper).
+    /// Crashed is out of scope: no crash-surfacing path is wired yet
+    /// (non-goal, consistent with the reaper's known non-goals in reaper.rs).
+    pub slot_meter: Arc<Mutex<SlotMeter>>,
 }
 
 /// Deterministic DEV seed for the default fabric signing key wired by
@@ -182,6 +190,7 @@ impl AppState {
             images: Arc::new(Mutex::new(HashMap::new())),
             lease_seq: Arc::new(AtomicU64::new(1)),
             hook_registry: Arc::new(HookRegistry::default()),
+            slot_meter: Arc::new(Mutex::new(SlotMeter::new())),
         }
     }
 
@@ -387,6 +396,28 @@ impl AppState {
             .unwrap_or_else(|p| p.into_inner())
             .remove(lease_id);
         self.hook_registry.unregister(lease_id);
+    }
+
+    /// Emit one slot-occupancy event into the internal meter (BIL1,
+    /// WP-SLOT-EMIT).
+    ///
+    /// # Lock discipline
+    ///
+    /// This helper locks ONLY the `slot_meter` mutex — it MUST NEVER be
+    /// called while the ledger `MutexGuard` is held.  All three call sites
+    /// (acquire, close, reaper) invoke it after the relevant ledger guard has
+    /// been released.
+    pub(crate) fn record_slot(&self, lease_id: &str, tenant: &TenantId, kind: SlotEventKind) {
+        let ev = SlotOccupancyEvent {
+            tenant: tenant.clone(),
+            lease_id: lease_id.to_string(),
+            kind,
+            at_ms: self.clock.now_ms(),
+        };
+        self.slot_meter
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .record(ev);
     }
 }
 
