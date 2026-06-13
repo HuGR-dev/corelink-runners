@@ -53,6 +53,31 @@ impl Clock for SystemClock {
     }
 }
 
+/// Failure of the plan-source seam itself (distinct from "no plan on file",
+/// which is `Ok(None)` and an over-cap reject). Mirrors [`TokenStoreError`]
+/// in `auth.rs` exactly: an unanswerable cap question is a refusal (503),
+/// never a false no-plan reject.
+///
+/// [`TokenStoreError`]: crate::auth::TokenStoreError
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanSourceError {
+    /// The cap source could not be reached. Maps to 503 `fail_closed`: an
+    /// unanswerable cap question is a refusal, never a silent admission and
+    /// never a false no-plan reject (which would 0-slot a legitimate tenant
+    /// on a transient backend glitch).
+    Unreachable,
+}
+
+impl std::fmt::Display for PlanSourceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PlanSourceError::Unreachable => f.write_str("plan source unreachable"),
+        }
+    }
+}
+
+impl std::error::Error for PlanSourceError {}
+
 /// Source of per-tenant plan caps — the cap source of truth the [`CapGate`]
 /// reads (BIL2 feeds the production impl; org = tenant per ADR-0002).
 ///
@@ -61,6 +86,20 @@ impl Clock for SystemClock {
 pub trait PlanSource: Send + Sync {
     /// The plan for `tenant`, if one is on file.
     fn plan_of(&self, tenant: &TenantId) -> Option<TenantPlan>;
+
+    /// Resolve the plan for `tenant`, given the request's bearer `token` for
+    /// backends (e.g. CoreLink introspection) that key off the token. Default
+    /// delegates to the token-free [`plan_of`](PlanSource::plan_of)
+    /// (static/in-memory backends ignore the token). `Err(Unreachable)` => the
+    /// cap source could not be reached => the caller MUST 503 (fail-closed),
+    /// never a false no-plan reject.
+    fn plan_of_resolving(
+        &self,
+        tenant: &TenantId,
+        _token: &str,
+    ) -> Result<Option<TenantPlan>, PlanSourceError> {
+        Ok(self.plan_of(tenant))
+    }
 }
 
 /// In-memory [`PlanSource`] for tests and local dev — a fixed tenant → plan

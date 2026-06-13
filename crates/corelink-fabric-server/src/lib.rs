@@ -20,13 +20,15 @@ pub mod attestation;
 pub mod auth;
 pub mod cloud_exec;
 pub mod corelink_auth;
+pub mod corelink_plans;
 pub mod exec;
 pub mod handlers;
 pub mod reaper;
 pub mod server;
 
 pub use app::{
-    AppState, Clock, PlanSource, StaticPlans, SystemClock, app, app_full, app_with_registry,
+    AppState, Clock, PlanSource, PlanSourceError, StaticPlans, SystemClock, app, app_full,
+    app_with_registry,
 };
 pub use attestation::{
     build_attestation, result_binding_preimage, sign_result_binding, verify_execution,
@@ -39,6 +41,7 @@ pub use cloud_exec::{
 pub use corelink_auth::{
     CoreLinkAuthConfig, CoreLinkTokenStore, IntrospectHttp, IntrospectResponse, UreqIntrospect,
 };
+pub use corelink_plans::CoreLinkPlanStore;
 pub use exec::{
     FakeLeasedExec, LeasedExec, MOCK_STDOUT, MockLeasedExec, NoBoxExec, compute_memo_key, run_check,
 };

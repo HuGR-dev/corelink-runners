@@ -41,6 +41,7 @@ use base64::Engine as _;
 use corelink_fabric::{InMemoryLedger, LeaseLedger, TenantId, TenantPlan};
 
 use crate::corelink_auth::{CoreLinkAuthConfig, CoreLinkTokenStore, UreqIntrospect};
+use crate::corelink_plans::CoreLinkPlanStore;
 use crate::{
     AppState, BoxRegistry, HookRegistry, StaticPlans, StaticTokenStore, SystemClock, app_full,
 };
@@ -413,56 +414,65 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
 
     let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
 
-    // ── Token store + bootstrap tenant/plan ──────────────────────────────────
-    // Static: keep the existing StaticTokenStore path byte-identical.
-    // CoreLink: wire CoreLinkTokenStore; the bootstrap plan still requires a
-    //   tenant — for now we use a placeholder that admits all tenants through
-    //   the plans gate.  (M1 production wiring will replace StaticPlans with a
-    //   live plan source.)
-    let (store, bootstrap_tenant_for_plan): (Arc<dyn crate::auth::TokenStore + Send + Sync>, _) =
-        match &cfg.auth_backend {
-            AuthBackend::Static => {
-                // This is the ONLY path that existed before WP-CORELINK-AUTH.
-                // It is byte-identical to the pre-change code.
-                let tenant = TenantId::new(&cfg.bootstrap_tenant)
-                    .expect("bootstrap_tenant was validated in config_from_env");
-                let static_store = Arc::new(StaticTokenStore::new([(
-                    cfg.bootstrap_pat.clone(),
-                    tenant.clone(),
-                )]));
-                (static_store, tenant)
-            }
-            AuthBackend::CoreLink(auth_cfg) => {
-                // Build the CoreLink token store with the real ureq transport.
-                // The timeout is already resolved in config_from_env.
-                let transport = UreqIntrospect::new(auth_cfg.timeout);
-                // We need a CoreLinkAuthConfig to pass — reconstruct from fields.
-                let store_cfg = CoreLinkAuthConfig {
-                    introspect_url: auth_cfg.introspect_url.clone(),
-                    service_secret: auth_cfg.service_secret.clone(),
-                    timeout: auth_cfg.timeout,
-                };
-                let cl_store = Arc::new(CoreLinkTokenStore::new(transport, store_cfg));
+    // ── Token store + plan source ────────────────────────────────────────────
+    // Static: keep the existing StaticTokenStore + StaticPlans path
+    //   byte-identical to the pre-WP-CORELINK-PLANSTORE code.
+    // CoreLink: wire CoreLinkTokenStore for auth AND CoreLinkPlanStore for the
+    //   cap — BOTH off the SAME introspect URL + secret + timeout. The cap is
+    //   derived per-acquire from the introspect response's (provisional)
+    //   `max_concurrency` field (WP-CORELINK-PLANSTORE).
+    //
+    // Known M1 inefficiency: this means TWO introspect round-trips per acquire
+    // (auth + plan). A future optimization threads one introspect result
+    // through request extensions; today they are independent calls.
+    let (store, plans): (
+        Arc<dyn crate::auth::TokenStore + Send + Sync>,
+        Arc<dyn crate::PlanSource>,
+    ) = match &cfg.auth_backend {
+        AuthBackend::Static => {
+            // This is the ONLY path that existed before WP-CORELINK-AUTH.
+            // It is byte-identical to the pre-change code.
+            let tenant = TenantId::new(&cfg.bootstrap_tenant)
+                .expect("bootstrap_tenant was validated in config_from_env");
+            let static_store = Arc::new(StaticTokenStore::new([(
+                cfg.bootstrap_pat.clone(),
+                tenant.clone(),
+            )]));
+            let static_plans = Arc::new(StaticPlans::new([TenantPlan {
+                tenant,
+                max_concurrency: cfg.max_concurrency,
+                rate_ceiling_per_min: cfg.rate_ceiling_per_min,
+            }]));
+            (static_store, static_plans)
+        }
+        AuthBackend::CoreLink(auth_cfg) => {
+            // Auth: CoreLinkTokenStore over the real ureq transport (timeout
+            // already resolved in config_from_env).
+            let auth_transport = UreqIntrospect::new(auth_cfg.timeout);
+            let auth_store_cfg = CoreLinkAuthConfig {
+                introspect_url: auth_cfg.introspect_url.clone(),
+                service_secret: auth_cfg.service_secret.clone(),
+                timeout: auth_cfg.timeout,
+            };
+            let cl_store = Arc::new(CoreLinkTokenStore::new(auth_transport, auth_store_cfg));
 
-                // In CoreLink mode there's no single bootstrap tenant.  The
-                // max_concurrency plan is seeded under a sentinel tenant id
-                // that won't match any real token (the real tenant caps come
-                // from the plan source in M1).  For M0 seed the plan is
-                // effectively unused; we still satisfy the StaticPlans
-                // constructor with a valid key.
-                let sentinel =
-                    TenantId::new("corelink-introspect-mode").expect("valid sentinel tenant id");
-                (cl_store, sentinel)
-            }
-        };
+            // Cap: CoreLinkPlanStore over a SECOND ureq transport, SAME endpoint
+            // + secret + timeout. The cap is read from the introspect response
+            // per-acquire — StaticPlans (which had no real tenant in this mode)
+            // is no longer used here.
+            let plan_transport = UreqIntrospect::new(auth_cfg.timeout);
+            let plan_store_cfg = CoreLinkAuthConfig {
+                introspect_url: auth_cfg.introspect_url.clone(),
+                service_secret: auth_cfg.service_secret.clone(),
+                timeout: auth_cfg.timeout,
+            };
+            let cl_plans = Arc::new(CoreLinkPlanStore::new(plan_transport, plan_store_cfg));
 
-    let plans = StaticPlans::new([TenantPlan {
-        tenant: bootstrap_tenant_for_plan,
-        max_concurrency: cfg.max_concurrency,
-        rate_ceiling_per_min: cfg.rate_ceiling_per_min,
-    }]);
+            (cl_store, cl_plans)
+        }
+    };
 
-    let state = AppState::new(ledger, Arc::new(plans), Arc::new(SystemClock)).with_signer(signer);
+    let state = AppState::new(ledger, plans, Arc::new(SystemClock)).with_signer(signer);
 
     // Default-off: when mock_exec is false the existing cloud-backend
     // composition is byte-identical to before this change (NoBoxExec +
