@@ -112,6 +112,26 @@ Two documented in-code known-gaps, closed:
       both sides. The §13 envelope flush on abnormal lease termination is routed
       to hugit for a ruling (`2548e2f`) — awaits their decision.
 
+## Post-go-live hardening + persistence campaign (CLOSED 2026-06-13)
+
+A 7-agent adversarial audit of the LIVE fabric (security + fail-closed integrity
+came back CLEAN, cold-verified) drove a multi-bundle hardening + persistence wave:
+
+- [x] **Audit fixes** (#35) — closed every surfaced defect: **[P0]** over-admission
+      (atomic `LeaseLedger::try_admit` reserve-before-provision), **[P1]** occupancy
+      drift, cancel-leak, close-leak (teardown-first), ureq infinite-hang
+      (`timeout_global`), **[P2]** §13.4 terminal-variant coverage.
+- [x] **Persistent ledger** (#36) + **backend wiring** (#37) — `PgLedger`,
+      cross-instance cap-safe, real-DB verified; `FABRIC_LEDGER_BACKEND` selector.
+- [x] **§13.5 abnormal-close flush** (#37) — best-effort partial envelope on
+      Expired/Crashed per hugit Option B (`close_reason` + `capture_incomplete`,
+      fire-and-forget, M1 forensic / P2 push). **All three §13 seams now closed.**
+- [x] **`corelink-introspect` conformance vector** (this bundle) — the ratified
+      4-case auth/billing drift tripwire frozen byte-identical for both repos.
+- [x] **[P2] exec-result-integrity race** (this bundle) — no attested `CheckResult`
+      for a lease terminalized mid-exec (re-assert Held after `run_check`; trigger
+      path guarded before memoization).
+
 ## Remaining work — owner-gated or cross-repo
 
 Items that cannot close without owner input or a hugit-side move:
@@ -146,11 +166,15 @@ Items that cannot close without owner input or a hugit-side move:
       hugit landed their twin (`02584d4`); our `conformance/IntentMetrics.json` is
       byte-identical (sha256 `2d8d2215…`, manifest membership pinned). #5 rebased,
       gates green, merged. The drift tripwire is now live on both sides.
-- [~] **Persistent (Postgres) ledger** _(IN FLIGHT)_ — the live fabric runs on
-      `InMemoryLedger`: leases reset on restart, and `instances` MUST stay `1`
-      (>1 = silent split-brain). A shared/persistent ledger is the unlock for
-      multi-instance scale-out (ratified decision #3). NOT done — do not mark the
-      deploy "multi-instance" until this lands.
+- [~] **Persistent (Postgres) ledger** _(BUILT 2026-06-13, #36/#37; deploy owner-gated)_ —
+      `PgLedger` (`pg_ledger.rs`, #36) impl `LeaseLedger` over `tokio-postgres`+
+      `deadpool-postgres`; **cross-instance cap-safe** via `pg_advisory_xact_lock`
+      + atomic count-and-insert (verified against real Postgres incl. the
+      concurrent-admit proof). WP-4 (#37) wires the backend selector
+      (`FABRIC_LEDGER_BACKEND=memory|pg` + `DATABASE_URL`, fail-closed). **Remaining
+      = deploy only:** provision a Postgres + set the env vars + restart → then
+      `instances>1` is safe. Until deployed, the LIVE fabric still runs
+      `InMemoryLedger` (`instances` MUST stay `1`).
 - [ ] **`hugit-c9-` container-prefix rename decision** — ops-visible seam change;
       not a local cleanup.
 - [ ] **ATT3 secrets seam** — awaits the hugit payload contract (decision #7).
