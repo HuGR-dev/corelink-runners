@@ -487,3 +487,31 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
 pub fn build_app(cfg: &ServerConfig) -> anyhow::Result<Router> {
     Ok(build_app_and_state(cfg)?.0)
 }
+
+// ── Crash-sweep wiring (WP-CRASH-SWEEP, OPT-IN) ─────────────────────────────────
+
+/// Resolve the crash-sweep config from `get` and, if opted in, spawn the
+/// background crash-surfacing sweep over `state`.
+///
+/// The crash sweep ([`crate::reaper::surface_crashes`]) is **OPT-IN**: it is
+/// spawned ONLY when `FABRIC_CRASH_PROBE_INTERVAL_SECS` is present and valid.
+/// - Absent/empty → `Ok(None)` (NOT spawned; the always-on deadline reaper is
+///   the backstop).
+/// - Present, valid `u32 >= 1` → `Ok(Some(handle))` (spawned at that interval).
+/// - Present but `0`/unparseable → `Err` (a deployer mistake; absence is the
+///   disable path).
+///
+/// The composition root binds the returned handle and `.abort()`s it on
+/// graceful shutdown, exactly like the reaper handle, so the task never
+/// outlives the process.
+///
+/// `get` is `|k| std::env::var(k).ok()` in production; a map lookup in tests.
+pub fn maybe_spawn_crash_sweep_from_env(
+    state: crate::AppState,
+    get: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<Option<tokio::task::JoinHandle<()>>> {
+    match crate::reaper::crash_probe_config_from_env(get)? {
+        Some(interval) => Ok(Some(crate::reaper::spawn_crash_sweep(state, interval))),
+        None => Ok(None),
+    }
+}

@@ -15,6 +15,14 @@ use std::collections::BTreeMap;
 use crate::meter::{SlotEventKind, SlotOccupancyEvent};
 use crate::tenant::TenantId;
 
+/// In-memory audit-tail bound for the journal: when the journal holds this
+/// many events, the OLDEST event is dropped (and counted in
+/// `journal_dropped`) before a new one is appended. An exporter that drains
+/// the meter into durable storage is a future WP; until it lands, drops are
+/// bounded and **never silent** (matching the §13 envelope discipline:
+/// bounded in-flight, overflow surfaced via the snapshot, never lost quietly).
+const JOURNAL_CAP: usize = 100_000;
+
 /// Per-tenant slot-occupancy meter over the frozen [`SlotOccupancyEvent`]
 /// schema (CF0 freeze item 5).
 ///
@@ -35,8 +43,30 @@ pub struct SlotMeter {
     occupied: BTreeMap<TenantId, u32>,
     /// High-water mark of concurrent occupancy per tenant.
     peak: BTreeMap<TenantId, u32>,
-    /// Append-only event journal, arrival order.
+    /// Bounded event journal, arrival order (oldest dropped past `JOURNAL_CAP`).
     journal: Vec<SlotOccupancyEvent>,
+    /// Count of journal events dropped to stay under `JOURNAL_CAP` — the
+    /// audit-tail overflow, surfaced (never silent) via the snapshot.
+    journal_dropped: u64,
+}
+
+/// One tenant's slot occupancy in an [`OccupancySnapshot`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct TenantOccupancy {
+    pub tenant: TenantId,
+    pub occupied: u32,
+    pub peak: u32,
+}
+
+/// A non-destructive, point-in-time read of the meter for billing / ops
+/// reconciliation (peak vs the plan's `max_concurrency`). Taking it reads
+/// only — it never mutates or drains the meter.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct OccupancySnapshot {
+    /// Per-tenant occupancy, sorted by tenant for determinism.
+    pub per_tenant: Vec<TenantOccupancy>,
+    pub journal_len: usize,
+    pub journal_dropped: u64,
 }
 
 impl SlotMeter {
@@ -63,6 +93,12 @@ impl SlotMeter {
                 *occ = occ.saturating_sub(1);
             }
         }
+        // Bound the in-memory audit tail: drop the oldest event when full,
+        // counting it so the overflow is never silent.
+        if self.journal.len() >= JOURNAL_CAP {
+            self.journal.remove(0);
+            self.journal_dropped += 1;
+        }
         self.journal.push(ev);
     }
 
@@ -77,9 +113,50 @@ impl SlotMeter {
         self.peak.get(t).copied().unwrap_or(0)
     }
 
-    /// The append-only journal of every event recorded, in arrival order.
+    /// The bounded journal of recorded events, in arrival order. Past
+    /// `JOURNAL_CAP` the oldest entries are dropped (see [`Self::journal_dropped`]).
     pub fn journal(&self) -> &[SlotOccupancyEvent] {
         &self.journal
+    }
+
+    /// Number of journal events dropped to keep the audit tail under
+    /// `JOURNAL_CAP` (0 until the cap is first reached).
+    pub fn journal_dropped(&self) -> u64 {
+        self.journal_dropped
+    }
+
+    /// A non-destructive read of current occupancy/peak per tenant plus the
+    /// journal length and drop count. Builds `per_tenant` from the union of
+    /// the occupied and peak maps (a tenant at occupied 0 but peak > 0 still
+    /// appears), sorted by tenant (the maps are `BTreeMap`, so iteration is
+    /// already in order). Reads only — never mutates or drains the meter.
+    pub fn snapshot(&self) -> OccupancySnapshot {
+        let mut per_tenant: BTreeMap<&TenantId, TenantOccupancy> = BTreeMap::new();
+        for (t, &occ) in &self.occupied {
+            per_tenant.insert(
+                t,
+                TenantOccupancy {
+                    tenant: t.clone(),
+                    occupied: occ,
+                    peak: 0,
+                },
+            );
+        }
+        for (t, &pk) in &self.peak {
+            per_tenant
+                .entry(t)
+                .and_modify(|e| e.peak = pk)
+                .or_insert_with(|| TenantOccupancy {
+                    tenant: t.clone(),
+                    occupied: 0,
+                    peak: pk,
+                });
+        }
+        OccupancySnapshot {
+            per_tenant: per_tenant.into_values().collect(),
+            journal_len: self.journal.len(),
+            journal_dropped: self.journal_dropped,
+        }
     }
 }
 
@@ -230,5 +307,125 @@ mod tests {
             m.journal().iter().all(|e| e.tenant != memoized),
             "journal must be empty for the zero-slot tenant"
         );
+    }
+
+    /// The journal is capped at `JOURNAL_CAP`: past it the oldest event is
+    /// dropped and counted, so growth is bounded and the overflow is visible.
+    #[test]
+    fn journal_is_bounded_and_drops_are_counted() {
+        let t = tenant("acme");
+        let mut m = SlotMeter::new();
+        // Record JOURNAL_CAP + 50 events, alternating acquire/release so the
+        // occupancy stays in {0, 1} the whole time.
+        let total = JOURNAL_CAP + 50;
+        for i in 0..total {
+            let kind = if i % 2 == 0 {
+                SlotEventKind::Acquired
+            } else {
+                SlotEventKind::Released
+            };
+            m.record(ev(&t, "lease-x", kind, i as u64));
+        }
+        assert_eq!(m.journal().len(), JOURNAL_CAP, "journal stays at the cap");
+        assert_eq!(m.journal_dropped(), 50, "exactly the overflow was dropped");
+        // The very first event (at_ms 0) was dropped — the oldest survivor is
+        // not it. With 50 dropped, the oldest survivor was recorded at i == 50.
+        assert_eq!(
+            m.journal()[0].at_ms,
+            50,
+            "oldest survivor is the 51st event, not the first recorded"
+        );
+    }
+
+    /// The snapshot reports occupied + peak for every tenant that ever held a
+    /// slot, sorted by tenant, and omits a memoized (never-acquired) tenant.
+    #[test]
+    fn snapshot_reports_occupied_and_peak_per_tenant() {
+        let zed = tenant("zed");
+        let acme = tenant("acme");
+        let memoized = tenant("memoized");
+        let mut m = SlotMeter::new();
+
+        // acme: peaks at 2, ends at 1.
+        m.record(ev(&acme, "a1", SlotEventKind::Acquired, 1));
+        m.record(ev(&acme, "a2", SlotEventKind::Acquired, 2));
+        m.record(ev(&acme, "a2", SlotEventKind::Released, 3));
+        // zed: peaks at 1, ends at 0.
+        m.record(ev(&zed, "z1", SlotEventKind::Acquired, 4));
+        m.record(ev(&zed, "z1", SlotEventKind::Crashed, 5));
+        // memoized: never acquires — must not appear.
+        let _ = memoized;
+
+        let snap = m.snapshot();
+        assert_eq!(snap.per_tenant.len(), 2, "only tenants that metered appear");
+        // Sorted by tenant: "acme" < "zed".
+        assert_eq!(
+            snap.per_tenant[0],
+            TenantOccupancy {
+                tenant: acme.clone(),
+                occupied: 1,
+                peak: 2,
+            }
+        );
+        assert_eq!(
+            snap.per_tenant[1],
+            TenantOccupancy {
+                tenant: zed.clone(),
+                occupied: 0,
+                peak: 1,
+            }
+        );
+        assert!(
+            snap.per_tenant.iter().all(|to| to.tenant != memoized),
+            "the never-acquired tenant is absent"
+        );
+    }
+
+    /// Taking a snapshot does not drain the meter: a later snapshot reflects
+    /// the advanced state while the earlier one is unchanged.
+    #[test]
+    fn snapshot_is_non_destructive() {
+        let t = tenant("acme");
+        let mut m = SlotMeter::new();
+        m.record(ev(&t, "l1", SlotEventKind::Acquired, 1));
+
+        let first = m.snapshot();
+        assert_eq!(first.per_tenant[0].occupied, 1);
+        assert_eq!(first.per_tenant[0].peak, 1);
+        assert_eq!(first.journal_len, 1);
+
+        // Advance the meter after snapshotting.
+        m.record(ev(&t, "l2", SlotEventKind::Acquired, 2));
+        let second = m.snapshot();
+
+        // The first snapshot is untouched (owned, point-in-time copy).
+        assert_eq!(first.per_tenant[0].occupied, 1);
+        assert_eq!(first.journal_len, 1);
+        // The meter advanced — snapshot did not drain it.
+        assert_eq!(second.per_tenant[0].occupied, 2);
+        assert_eq!(second.per_tenant[0].peak, 2);
+        assert_eq!(second.journal_len, 2);
+        assert_eq!(m.journal().len(), 2, "snapshot left the journal intact");
+    }
+
+    /// Once the journal overflows, the snapshot surfaces the drop count.
+    #[test]
+    fn snapshot_surfaces_dropped_count() {
+        let t = tenant("acme");
+        let mut m = SlotMeter::new();
+        // One past the cap forces exactly one drop.
+        let total = JOURNAL_CAP + 1;
+        for i in 0..total {
+            let kind = if i % 2 == 0 {
+                SlotEventKind::Acquired
+            } else {
+                SlotEventKind::Released
+            };
+            m.record(ev(&t, "lease-x", kind, i as u64));
+        }
+        let snap = m.snapshot();
+        assert_eq!(snap.journal_len, JOURNAL_CAP);
+        assert_eq!(snap.journal_dropped, 1, "the snapshot reports the drop");
+        assert!(snap.journal_dropped >= 1);
     }
 }

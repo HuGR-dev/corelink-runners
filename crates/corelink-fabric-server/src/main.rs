@@ -14,6 +14,13 @@ async fn main() -> anyhow::Result<()> {
     let reaper_cfg =
         corelink_fabric_server::reaper::reaper_config_from_env(|k| std::env::var(k).ok())?;
     let reaper_interval = reaper_cfg.interval;
+    // Opt-in crash-surfacing sweep (FABRIC_CRASH_PROBE_INTERVAL_SECS). Cloned
+    // state (all-Arc, cheap) BEFORE the reaper consumes `state`; absent env var
+    // → None (not spawned) — the always-on deadline reaper remains the backstop.
+    let crash_sweep_handle =
+        corelink_fabric_server::server::maybe_spawn_crash_sweep_from_env(state.clone(), |k| {
+            std::env::var(k).ok()
+        })?;
     let reaper_handle = corelink_fabric_server::reaper::spawn_reaper(state, reaper_cfg);
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind_addr).await?;
@@ -40,13 +47,20 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("cloud backend: NONE — fail-closed: no box backend, execs will 503");
     }
     eprintln!("reaper: started (interval={}s)", reaper_interval.as_secs());
+    match &crash_sweep_handle {
+        Some(_) => eprintln!("crash-sweep: started (FABRIC_CRASH_PROBE_INTERVAL_SECS set)"),
+        None => eprintln!("crash-sweep: OFF (set FABRIC_CRASH_PROBE_INTERVAL_SECS to enable)"),
+    }
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 
-    // Shutdown: abort the reaper so it does not outlive the server.
+    // Shutdown: abort the background sweeps so they do not outlive the server.
     reaper_handle.abort();
+    if let Some(h) = crash_sweep_handle {
+        h.abort();
+    }
     Ok(())
 }
 
