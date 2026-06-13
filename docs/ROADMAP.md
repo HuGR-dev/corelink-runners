@@ -115,9 +115,10 @@ Items that cannot close without owner input or a hugit-side move:
       (`pricing.md §2`); ratification-confirm routed to corelink-server in
       `docs/handoff/2026-06-13-corelink-pricing-ratified.md`. Their field + our
       `CoreLinkPlanStore` are the remaining two moves.
-- [ ] **`IntentMetrics` §13.4 conformance vector** _(hugit PR #5 mirror)_ —
-      §13.4 requires the vector byte-identical in both repos; blocked on the
-      hugit-side twin PR (hugit techlead); mirror here immediately after.
+- [x] **`IntentMetrics` §13.4 conformance vector** _(RESOLVED 2026-06-13, #5)_ —
+      hugit landed their twin (`02584d4`); our `conformance/IntentMetrics.json` is
+      byte-identical (sha256 `2d8d2215…`, manifest membership pinned). #5 rebased,
+      gates green, merged. The drift tripwire is now live on both sides.
 - [ ] **`hugit-c9-` container-prefix rename decision** — ops-visible seam change;
       not a local cleanup.
 - [ ] **ATT3 secrets seam** — awaits the hugit payload contract (decision #7).
