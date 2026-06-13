@@ -51,6 +51,7 @@ pub(crate) fn run_all(make: LedgerFactory) {
     transition_matrix_legal_and_illegal(make);
     by_tenant_and_held_are_isolated_and_ordered(make);
     try_admit_atomic_cap(make);
+    remove_frees_cap_and_get(make);
 }
 
 /// `put` rejects a duplicate `lease_id`; `get` returns None/Some correctly.
@@ -308,6 +309,54 @@ fn try_admit_atomic_cap(make: LedgerFactory) {
         assert!(
             led.try_admit(pending("dup", &acme), 5).is_err(),
             "admitting a duplicate lease_id must Err like put"
+        );
+    }
+}
+
+/// `remove` is the admission-rollback seam: it erases a record (freeing the
+/// cap/occupancy it held) and reports whether anything was removed. A
+/// reserved-then-rolled-back `Pending` must leave no trace, and the freed slot
+/// must be re-admittable under the same cap.
+fn remove_frees_cap_and_get(make: LedgerFactory) {
+    let acme = tenant("acme");
+
+    // Removing an absent lease is Ok(false), idempotent.
+    {
+        let mut led = make();
+        assert!(
+            !led.remove("ghost").unwrap(),
+            "removing an absent lease must be Ok(false)"
+        );
+    }
+
+    // Reserve a Pending at cap 1 (slot full), remove it, then re-admit: the
+    // removal must have freed the cap, and get must read absent.
+    {
+        let mut led = make();
+        assert!(
+            led.try_admit(pending("p-1", &acme), 1).unwrap(),
+            "first reserve at cap 1 must admit"
+        );
+        // Cap is full: a second reserve is rejected.
+        assert!(
+            !led.try_admit(pending("p-2", &acme), 1).unwrap(),
+            "cap 1 is full while p-1 is reserved"
+        );
+        // Roll back the reservation.
+        assert!(led.remove("p-1").unwrap(), "remove must report a removal");
+        assert!(
+            led.get("p-1").unwrap().is_none(),
+            "the removed lease must read absent"
+        );
+        // The freed slot is re-admittable.
+        assert!(
+            led.try_admit(pending("p-3", &acme), 1).unwrap(),
+            "removing the reservation must free the cap"
+        );
+        // Double-remove is Ok(false) (already gone).
+        assert!(
+            !led.remove("p-1").unwrap(),
+            "removing an already-removed lease must be Ok(false)"
         );
     }
 }

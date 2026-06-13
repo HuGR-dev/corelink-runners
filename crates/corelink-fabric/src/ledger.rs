@@ -161,6 +161,21 @@ pub trait LeaseLedger {
     /// Concurrency cap ONLY — the per-instance rate ceiling stays in the caller's
     /// in-memory RateWindow (it is admission bookkeeping, not ledger state).
     fn try_admit(&mut self, rec: LeaseRecord, max_concurrency: u32) -> anyhow::Result<bool>;
+
+    /// Remove a record from the ledger, freeing the cap/occupancy it held.
+    /// Returns `Ok(true)` if a record was removed, `Ok(false)` if the lease
+    /// was already absent.
+    ///
+    /// This is the ADMISSION-ROLLBACK seam, NOT a lifecycle transition: it
+    /// exists solely so an acquire that RESERVED a `Pending` slot (via
+    /// [`LeaseLedger::try_admit`]) but then FAILED to provision can release
+    /// that reservation, leaving no trace and freeing the concurrency cap.
+    /// The §1 legal matrix forbids `Pending -> terminal`, so a failed
+    /// admission cannot be "transitioned away"; removal is the only honest
+    /// rollback. It is NOT a way to delete a `Held` lease out from under a
+    /// running box — callers must restrict its use to rolling back a
+    /// just-reserved `Pending` admission they own.
+    fn remove(&mut self, lease_id: &str) -> anyhow::Result<bool>;
 }
 
 /// In-memory ledger — dev/test impl; disqualified for production by
@@ -248,6 +263,10 @@ impl LeaseLedger for InMemoryLedger {
             Ok(false)
         }
     }
+
+    fn remove(&mut self, lease_id: &str) -> anyhow::Result<bool> {
+        Ok(self.records.remove(lease_id).is_some())
+    }
 }
 
 /// File-backed ledger: append-only JSONL journal + replay-on-open.
@@ -266,6 +285,23 @@ pub struct FileLedger {
     index: InMemoryLedger,
 }
 
+/// One physical line in the [`FileLedger`] journal.
+///
+/// Historically every line was a bare [`LeaseRecord`]; admission rollback
+/// (`remove`) needs a durable "this lease is gone" marker too. The two are
+/// distinguished by a `kind` tag (`#[serde(tag = "kind")]`), so a `Record`
+/// line still round-trips its full `LeaseRecord` fields and replay can erase
+/// a lease that was later tombstoned. A line that is neither shape is corrupt
+/// and refuses to open (fail-closed, unchanged).
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum JournalLine {
+    /// A lease record write (put / transition outcome).
+    Record(LeaseRecord),
+    /// An admission-rollback tombstone: the lease id is removed on replay.
+    Tombstone { lease_id: String },
+}
+
 impl FileLedger {
     /// Open (or create) the journal at `path` and replay it.
     pub fn open(path: impl AsRef<Path>) -> anyhow::Result<Self> {
@@ -278,15 +314,23 @@ impl FileLedger {
                 if line.trim().is_empty() {
                     continue;
                 }
-                let rec: LeaseRecord = serde_json::from_str(line).map_err(|e| {
+                let entry: JournalLine = serde_json::from_str(line).map_err(|e| {
                     anyhow::anyhow!(
                         "corrupt ledger journal {path:?} line {}: {e} (fail-closed: refusing \
                          to open)",
                         n + 1,
                     )
                 })?;
-                // Replay: last record per lease wins (journal is append-only).
-                index.records.insert(rec.lease_id.clone(), rec);
+                // Replay: last write per lease wins (journal is append-only).
+                // A tombstone erases the lease (admission rollback).
+                match entry {
+                    JournalLine::Record(rec) => {
+                        index.records.insert(rec.lease_id.clone(), rec);
+                    }
+                    JournalLine::Tombstone { lease_id } => {
+                        index.records.remove(&lease_id);
+                    }
+                }
             }
         }
         let file = OpenOptions::new()
@@ -302,14 +346,18 @@ impl FileLedger {
         &self.path
     }
 
-    fn append(&mut self, rec: &LeaseRecord) -> anyhow::Result<()> {
-        let line = serde_json::to_string(rec)?;
+    fn append_line(&mut self, entry: &JournalLine) -> anyhow::Result<()> {
+        let line = serde_json::to_string(entry)?;
         writeln!(self.file, "{line}")
             .map_err(|e| anyhow::anyhow!("cannot append to ledger journal {:?}: {e}", self.path))?;
         self.file
             .flush()
             .map_err(|e| anyhow::anyhow!("cannot flush ledger journal {:?}: {e}", self.path))?;
         Ok(())
+    }
+
+    fn append(&mut self, rec: &LeaseRecord) -> anyhow::Result<()> {
+        self.append_line(&JournalLine::Record(rec.clone()))
     }
 }
 
@@ -370,5 +418,20 @@ impl LeaseLedger for FileLedger {
         } else {
             Ok(false)
         }
+    }
+
+    fn remove(&mut self, lease_id: &str) -> anyhow::Result<bool> {
+        // Nothing to do (and nothing to journal) if the lease is absent.
+        if !self.index.records.contains_key(lease_id) {
+            return Ok(false);
+        }
+        // Durable first: append the tombstone (flushed) before the in-memory
+        // index forgets the lease, so a crash between the two leaves a journal
+        // that replays to the same erased state.
+        self.append_line(&JournalLine::Tombstone {
+            lease_id: lease_id.to_string(),
+        })?;
+        self.index.records.remove(lease_id);
+        Ok(true)
     }
 }

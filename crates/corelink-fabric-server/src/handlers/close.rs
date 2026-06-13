@@ -19,17 +19,33 @@
 //!    the same lease lands here, because the first close released it).
 //! 3. **Status vocabulary** — `"succeeded"` | `"failed"` only; `killed` is
 //!    the fabric's own abnormal-path verdict, never caller-claimable.
-//! 4. **The close machinery, BEFORE the ledger moves** — if the lease has a
-//!    registered [`CaptureHook`] (agent jobs), `JobClose::close` runs to its
-//!    outcome, honoring the runner-configured ack window (§13.2 item 3); a
-//!    lease without a hook closes plain (non-agent job: nothing was hooked,
-//!    so the metrics are the honest zero projection — observed-nothing,
-//!    never fabricated).
-//! 5. **`Held → Released` ONLY after the outcome** — the ledger is the
+//! 4. **Teardown FIRST (WP-FIX-CLOSE-LEAK)** — the provider box is torn down
+//!    BEFORE the lease is terminalized, mirroring the reaper's proven
+//!    teardown-first posture. A failed teardown returns 503 `fail_closed`
+//!    and leaves the lease `Held` and the hook un-driven — so the next
+//!    reaper sweep or a client re-close retries cleanly; the box is NEVER
+//!    stranded behind a `Released`-terminal mark with no retry path. Under
+//!    `NoBoxProvisioner` (the default), teardown is a no-op that always
+//!    succeeds. The captured transcript/metrics live in the in-process
+//!    [`CaptureHook`], not on the box, so tearing the box down before the
+//!    §13 close machinery loses nothing.
+//! 5. **The close machinery, BEFORE the ledger moves** — only AFTER teardown
+//!    succeeds: if the lease has a registered [`CaptureHook`] (agent jobs),
+//!    `JobClose::close` runs to its outcome, honoring the runner-configured
+//!    ack window (§13.2 item 3); a lease without a hook closes plain
+//!    (non-agent job: nothing was hooked, so the metrics are the honest zero
+//!    projection — observed-nothing, never fabricated). The exactly-once
+//!    close fires on the attempt whose teardown succeeded; a retry after a
+//!    failed teardown never reached this gate, so the close signal is
+//!    delivered exactly once and never re-driven.
+//! 6. **`Held → Released` ONLY after the outcome** — the ledger is the
 //!    authority and it moves AFTER the close machinery, never before
 //!    (`lease_not_released_before_close_signal_published`). The transition
 //!    goes through `LeaseLedger::transition` — the contract §1 legal
-//!    matrix, never bypassed.
+//!    matrix, never bypassed. The hook-unregister and the `Released`
+//!    slot-event are gated on WINNING this transition (a concurrent
+//!    cancel/reaper that already terminalized the lease loses the race —
+//!    no second `Released` emit, no double-free).
 //!
 //! The response is ONE atomic body: the §13.1 metrics (a REQUIRED field —
 //! the DTO makes a metrics-less close unrepresentable), the honest
@@ -141,10 +157,35 @@ pub(crate) async fn close(
         }
     };
 
-    // ── 4. The close machinery, BEFORE the ledger moves. Agent jobs have a
-    // registered hook: drive the frozen JobClose state machine (it blocks
-    // for up to the runner-configured ack window, so it runs on a blocking
-    // thread, off the async workers). A lease without a hook closes plain.
+    // ── 4. TEARDOWN FIRST (WP-FIX-CLOSE-LEAK). Delete the provider box and
+    // unbind it BEFORE the lease is terminalized — the reaper's proven
+    // posture. If teardown FAILS, do NOT drive the close machinery and do NOT
+    // transition: return 503 with the lease still `Held` and the hook
+    // un-driven, so the next reaper sweep (which iterates `held()`) or a
+    // client re-close retries cleanly. The old ordering terminalized the
+    // lease FIRST and discarded the teardown result, so a provider hiccup
+    // stranded the box permanently — neither reaper sweep ever revisits a
+    // `Released`-terminal lease. Under `NoBoxProvisioner` (the default),
+    // teardown is a no-op that always succeeds.
+    //
+    // The captured transcript/metrics live in the in-process CaptureHook, not
+    // on the box, so tearing the box down before the §13 close machinery
+    // (gate 5) drains nothing live — exactly-once close is unaffected.
+    if !state.teardown_lease(&lease_id).await {
+        return error_response(
+            ApiError::FailClosed,
+            "teardown failed: the provider box could not be reclaimed; the lease \
+             remains held and a retry (reaper sweep or re-close) will reclaim it",
+        );
+    }
+
+    // ── 5. The close machinery, BEFORE the ledger moves — and only AFTER
+    // teardown succeeded. Agent jobs have a registered hook: drive the frozen
+    // JobClose state machine (it blocks for up to the runner-configured ack
+    // window, so it runs on a blocking thread, off the async workers). A
+    // lease without a hook closes plain. The exactly-once close fires here, on
+    // the attempt whose teardown succeeded; a retry after a failed teardown
+    // never reached this gate, so the close signal is delivered exactly once.
     let (metrics, capture_incomplete) = match registry.close_handle(&lease_id, &tenant) {
         Some((hook, price)) => {
             let job_close = JobClose::new(&hook);
@@ -174,41 +215,45 @@ pub(crate) async fn close(
         None => (zero_metrics(), false),
     };
 
-    // ── 5. Held → Released ONLY NOW — the outcome exists, so the forge had
-    // its full ack window before the ledger (the authority) moves
-    // (`lease_not_released_before_close_signal_published`). Through the
-    // legal matrix, never written directly.
-    {
+    // ── 6. Held → Released ONLY NOW — teardown succeeded (gate 4) and the
+    // outcome exists, so the box is reclaimed and the forge had its full ack
+    // window before the ledger (the authority) moves
+    // (`lease_not_released_before_close_signal_published`). Through the legal
+    // matrix, never written directly.
+    //
+    // We BIND the transition result. A concurrent cancel/reaper may have
+    // terminalized the lease between our Held-gate (gate 1) and here; in that
+    // case `transition` returns Err (no legal pair out of a terminal state) —
+    // the lost-race arm, fail-closed exactly as before: we return 503 and,
+    // critically, do NOT emit a second `Released`, do NOT double-free the
+    // slot, and do NOT re-unregister. The §13 exactly-once latch lives in the
+    // shared hook state (not in the registry entry), so the close already
+    // fired exactly once regardless of who won the ledger race.
+    let released_won = {
         let Ok(mut ledger) = state.ledger.lock() else {
             return error_response(ApiError::FailClosed, "lease ledger lock poisoned");
         };
-        if ledger
+        ledger
             .transition(&lease_id, RunnerState::Released, state.clock.now_ms())
-            .is_err()
-        {
-            return error_response(
-                ApiError::FailClosed,
-                "lease ledger refused Held->Released after close; failing closed",
-            );
-        }
-    }
-    // The lease is terminal: drop its hook entry (the registry doc's
-    // unregister-at-close obligation). The mechanism's exactly-once latch
-    // lives in the shared hook state, not in this entry.
-    registry.unregister(&lease_id);
+            .is_ok()
+    };
 
-    // ── BIL1 / WP-SLOT-EMIT: slot released — ledger lock dropped above,
-    // the Held→Released transition is committed. Outside the ledger lock.
+    if !released_won {
+        return error_response(
+            ApiError::FailClosed,
+            "lease ledger refused Held->Released after close (a concurrent \
+             cancel/reaper won the race); not double-freeing the slot",
+        );
+    }
+
+    // We won the terminal transition: drop the hook entry (the registry doc's
+    // unregister-at-close obligation) and emit the single `Released` slot
+    // event — both gated on the WINNING transition, so a lost race never
+    // double-frees. Ledger lock dropped above; neither call holds it.
+    registry.unregister(&lease_id);
     state.record_slot(&lease_id, &tenant, SlotEventKind::Released);
 
-    // ── 5b. Teardown (best-effort): delete the provider container and
-    // unbind the registry entry. Runs after the close ack; a teardown
-    // failure MUST NOT change the close response (cleanup is best-effort;
-    // the provider's `activeDeadlineSeconds` is the hard bound). Under
-    // `NoBoxProvisioner` (the default), teardown is a no-op. ──
-    let _ = state.teardown_lease(&lease_id).await;
-
-    // ── 6. Attest the close (WP-ATT1+2 / ATT2: the attestation travels
+    // ── 7. Attest the close (WP-ATT1+2 / ATT2: the attestation travels
     // with the CheckResult on the SAME atomic close payload as the §13.1
     // metrics). A close that delivers a result gets a chain over that
     // result's axes + the result-binding signature; a close that delivers
@@ -220,7 +265,7 @@ pub(crate) async fn close(
         None => attest_no_result(state.signer.as_ref(), principal),
     };
 
-    // ── 7. ONE atomic body: metrics (required) + flag + echoed CheckResult
+    // ── 8. ONE atomic body: metrics (required) + flag + echoed CheckResult
     // + attestation — the §13.1 same-step delivery at mechanism level.
     (
         StatusCode::OK,

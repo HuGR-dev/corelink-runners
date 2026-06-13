@@ -24,5 +24,8 @@
 pub mod http;
 pub mod northflank;
 
-pub use http::{HttpRequest, HttpResponse, HttpTransport, Method, UreqTransport};
+pub use http::{
+    DEFAULT_HTTP_TIMEOUT, HTTP_TIMEOUT_ENV, HttpRequest, HttpResponse, HttpTransport, Method,
+    UreqTransport, timeout_from_env_with,
+};
 pub use northflank::{NorthflankConfig, NorthflankEngine};

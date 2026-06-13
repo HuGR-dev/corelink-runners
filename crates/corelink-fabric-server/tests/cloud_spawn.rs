@@ -657,7 +657,7 @@ async fn close_invokes_teardown() {
 // to prove the default-off, fail-closed, and shared-registry invariants at the
 // HTTP layer, not just at unit-test depth.
 
-use corelink_fabric::{LeaseRecord, LeaseState};
+use corelink_fabric::LeaseState;
 use corelink_fabric_api::{ExecRequest, paths as api_paths};
 use corelink_runner::isolation::{Engine, IsolationProbe};
 use corelink_runner::lease::CmdOutput;
@@ -961,24 +961,17 @@ async fn http_split_registry_exec_503() {
 async fn http_orphan_teardown_on_post_provision_failure() {
     const FIRST_MINT: &str = "lease-0000000000000001";
 
+    // WP-FIX-ACQUIRE-CANCEL: the slot is now RESERVED (Pending) atomically
+    // BEFORE provisioning. So the orphan-teardown guard fires on a PROVISION
+    // FAILURE: the handler must tear down any partial box AND remove the
+    // reserved Pending so the cap/occupancy frees. (The old put-after-provision
+    // collision can no longer happen — the reserve `put` is the FIRST ledger
+    // write, before provision.)
     let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
 
-    // Pre-seed the ledger with the id that mint_lease_id() will produce on
-    // the FIRST call, so that ledger.put fires the duplicate-key error.
-    {
-        let mut l = ledger.lock().unwrap();
-        l.put(LeaseRecord {
-            lease_id: FIRST_MINT.to_string(),
-            tenant: TenantId::new("acme").unwrap(),
-            state: LeaseState::Pending,
-            box_ref: String::new(),
-            created_at_ms: 0,
-            updated_at_ms: 0,
-        })
-        .unwrap();
-    }
-
     let rec = Arc::new(RecordingProvisioner::new());
+    // Script the provision to FAIL — the post-reserve cleanup path.
+    rec.provision_ok.store(false, Ordering::SeqCst);
     let prov = Arc::clone(&rec) as Arc<dyn BoxProvisioner>;
 
     use corelink_fabric_server::app;
@@ -1012,33 +1005,43 @@ async fn http_orphan_teardown_on_post_provision_failure() {
         .await
         .unwrap();
 
-    // ledger.put fails after provision → 503.
+    // Provision fails after the slot was reserved → 503.
     assert_eq!(
         resp.status(),
         StatusCode::SERVICE_UNAVAILABLE,
-        "acquire must return 503 when ledger.put fails after provision"
+        "acquire must return 503 when provision fails after the slot is reserved"
     );
 
     // Give the spawn_blocking teardown task a moment to complete.
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-    // The provisioned box MUST have been torn down — not orphaned.
+    // The (partially) provisioned box MUST have been torn down — not orphaned.
     let calls = rec.teardown_calls();
     assert!(
         calls.contains(&FIRST_MINT.to_string()),
-        "teardown must be called for the lease whose ledger.put failed (orphan guard); \
+        "teardown must be called for the lease whose provision failed (orphan guard); \
          calls={calls:?}"
+    );
+
+    // The reserved Pending MUST be removed — no dangling slot held.
+    assert!(
+        ledger.lock().unwrap().get(FIRST_MINT).unwrap().is_none(),
+        "the reserved Pending must be removed on provision failure (cap freed)"
     );
 }
 
-/// H5 — Teardown failure does not affect the close ack.
+/// H5 — Teardown failure on close is FAIL-CLOSED and RETRYABLE
+/// (WP-FIX-CLOSE-LEAK).
 ///
-/// Wire a `FailingTeardownProvisioner` (teardown always returns Err).  Acquire
-/// (200) → close (with `status="succeeded"`) → assert close still returns 200
-/// (teardown failure is best-effort, never changes the response) AND the ledger
-/// shows the lease as `Released`.
+/// Wire a `FailingTeardownProvisioner` (teardown always returns Err). Acquire
+/// (200) → close (`status="succeeded"`) → assert close returns 503 AND the
+/// lease stays `Held`. Teardown-first: terminalizing a lease whose box could
+/// not be reclaimed would strand the provider job + registry entry forever
+/// (neither reaper sweep revisits a terminal lease — real money). The 503 +
+/// still-`Held` posture leaves the lease reclaimable by the next reaper sweep
+/// or a client re-close.
 #[tokio::test]
-async fn http_close_teardown_failure_still_acks() {
+async fn http_close_teardown_failure_is_fail_closed_and_retryable() {
     let prov = Arc::new(FailingTeardownProvisioner) as Arc<dyn BoxProvisioner>;
     let (router, ledger) = harness_with_provisioner(prov);
 
@@ -1063,7 +1066,8 @@ async fn http_close_teardown_failure_still_acks() {
     let acq_json: serde_json::Value = serde_json::from_slice(&body_vec(acq_resp).await).unwrap();
     let lease_id = acq_json["lease"]["lease_id"].as_str().unwrap().to_string();
 
-    // Close — teardown will fail, but the handler must still return 200.
+    // Close — teardown will fail, so the handler must FAIL CLOSED (503) and
+    // NOT terminalize the lease.
     let close_body = CloseRequest {
         status: "succeeded".to_string(),
         check_result: None,
@@ -1079,20 +1083,22 @@ async fn http_close_teardown_failure_still_acks() {
         .unwrap();
     assert_eq!(
         close_resp.status(),
-        StatusCode::OK,
-        "close must return 200 even when teardown fails (best-effort teardown)"
+        StatusCode::SERVICE_UNAVAILABLE,
+        "close must fail closed (503) when the box could not be torn down — \
+         never report a clean close over a leaked box"
     );
 
-    // Give the spawn_blocking teardown task a moment to complete.
+    // Give any spawn_blocking teardown task a moment to complete.
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-    // The lease must be Released in the ledger (teardown failure is
-    // best-effort and must not revert the release).
+    // The lease must remain Held — NOT Released. Terminalizing it would strand
+    // the box with no retry path; staying Held keeps it reclaimable.
     let guard = ledger.lock().unwrap();
     let record = guard.get(&lease_id).unwrap().expect("lease must exist");
     assert_eq!(
         record.state,
-        LeaseState::Wire(corelink_runners_contracts::RunnerState::Released),
-        "lease must be Released in the ledger after close, regardless of teardown failure"
+        LeaseState::Wire(corelink_runners_contracts::RunnerState::Held),
+        "lease must remain Held after a failed teardown — never Released while \
+         the box is un-reclaimed (no permanent leak)"
     );
 }
