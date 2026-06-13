@@ -116,6 +116,13 @@ pub struct ServerConfig {
     ///
     /// [`MockLeasedExec`]: crate::exec::MockLeasedExec
     pub mock_exec: bool,
+    /// Internal observability secret gating `GET /internal/v1/occupancy`
+    /// (WP-OCCUPANCY-API), from `FABRIC_OBSERVABILITY_KEY`.  Optional and
+    /// **default-off**: absent/empty → `None` → the route returns 404.  When
+    /// `Some`, requests must present a matching `X-Corelink-Internal-Auth`
+    /// header.  Held raw; must NEVER appear in log output (see the manual
+    /// `Debug` below, which redacts it).
+    pub observability_key: Option<String>,
 }
 
 impl std::fmt::Debug for ServerConfig {
@@ -129,6 +136,10 @@ impl std::fmt::Debug for ServerConfig {
             .field("max_concurrency", &self.max_concurrency)
             .field("rate_ceiling_per_min", &self.rate_ceiling_per_min)
             .field("mock_exec", &self.mock_exec)
+            .field(
+                "observability_key",
+                &self.observability_key.as_ref().map(|_| "***REDACTED***"),
+            )
             .finish()
     }
 }
@@ -370,6 +381,14 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
         }
     }
 
+    // ── Observability key (WP-OCCUPANCY-API) ─────────────────────────────────
+    // Optional, default-off: absent/empty → None → GET /internal/v1/occupancy
+    // returns 404. Trimmed (secret mounts append newlines); a whitespace-only
+    // value is treated as unset so a blank var can never arm the route.
+    let observability_key = get("FABRIC_OBSERVABILITY_KEY")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
     Ok(ServerConfig {
         bind_addr,
         signing_key,
@@ -379,6 +398,7 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
         max_concurrency,
         rate_ceiling_per_min,
         mock_exec,
+        observability_key,
     })
 }
 
@@ -485,6 +505,9 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
     } else {
         state.with_cloud_backend_from_env(registry.clone_handle())
     };
+
+    // Arm the internal observability endpoint (default-off: None → 404).
+    let state = state.with_observability_key(cfg.observability_key.clone());
 
     let router = app_full(store, state.clone(), Arc::new(HookRegistry::default()));
     Ok((router, state))
