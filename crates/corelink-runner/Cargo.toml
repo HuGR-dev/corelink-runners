@@ -9,6 +9,10 @@ publish.workspace = true
 [dependencies]
 corelink-runners-contracts = { path = "../corelink-runners-contracts" }
 anyhow = { workspace = true }
+# WP-S13.5: serde-Serialize for the wrapper-level `CloseReason`
+# (`normal|expired|crashed`) close-metadata — NOT inside the frozen §13.4
+# IntentMetrics vector.
+serde = { workspace = true }
 # WP-R4: fence materialization content digests (SHA-256 lowercase hex, the
 # frozen WP-00 scalar convention).
 sha2 = { workspace = true }

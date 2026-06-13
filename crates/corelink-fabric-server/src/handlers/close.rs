@@ -57,6 +57,15 @@
 //! composition root drives [`close_abnormal`] for each swept lease that has
 //! a hook — outcome flag unconditionally `true` (the mechanism's rule: an
 //! abnormal end can never claim confirmed capture).
+//!
+//! ## §13.5 close-reason (WP-S13.5)
+//!
+//! `JobClose::close` stamps the WRAPPER-level `close_reason: Normal` on the
+//! [`CloseOutcome`] this normal path drives (the abnormal sweeps stamp
+//! `Expired`/`Crashed`). `close_reason` lives on the close-machinery wrapper,
+//! NOT inside the frozen §13.4 `IntentMetrics` vector — so the normal
+//! `CloseResponse` wire DTO is unchanged. The abnormal partial-envelope flush
+//! (Expired/Crashed) is wired in `reaper.rs::flush_partial_envelope`.
 
 use std::sync::Arc;
 use std::time::Instant;

@@ -41,7 +41,7 @@ pub mod collector;
 pub mod event;
 pub mod hook;
 
-pub use close::{AbnormalKind, CloseSignal, JobClose};
+pub use close::{AbnormalKind, CloseReason, CloseSignal, JobClose};
 pub use collector::MetricsCollector;
 pub use event::{PriceCard, TranscriptEvent, TurnUsage};
 pub use hook::{CaptureHook, EnvelopeConfig, Subscriber, TurnMeta};
@@ -74,6 +74,12 @@ pub struct CloseOutcome {
     /// `true` iff transcript capture was lossy (events may be missing); the
     /// metrics then form a lower bound, flagged rather than fabricated.
     pub capture_incomplete: bool,
+    /// WRAPPER-level close-metadata: WHY this close fired
+    /// (`normal|expired|crashed`, §13.5). This rides on the close machinery,
+    /// NOT inside the frozen §13.4 [`IntentMetrics`] vector. A partial
+    /// envelope from an abnormal end carries `Expired`/`Crashed` here AND
+    /// `capture_incomplete: true` above.
+    pub close_reason: CloseReason,
 }
 
 #[cfg(test)]
@@ -107,6 +113,7 @@ mod tests {
             status: JobStatus::Succeeded,
             metrics,
             capture_incomplete: false,
+            close_reason: CloseReason::Normal,
         }
     }
 
