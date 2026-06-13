@@ -79,6 +79,23 @@ proven end-to-end against the live Northflank provider. PRs #17–#23 + audit:
       surface, frozen `MOCK_STDOUT` content-address + signed-attestation verify
       against the wire key. Drift here breaks githugr's pre-build and goes red first.
 
+## Hardening wave 2 (CLOSED 2026-06-13, #31)
+
+Two documented in-code known-gaps, closed:
+
+- [x] **WP-METER-BOUND** — the `SlotMeter.journal` was an unbounded `Vec` (latent
+      OOM on a long-running fabric). Now bounded (`JOURNAL_CAP`, oldest-dropped with a
+      never-silent `journal_dropped` counter — mirrors the §13 envelope's
+      bounded/overflow discipline) + a non-destructive `OccupancySnapshot`
+      (per-tenant occupied/peak for billing & ops reconciliation vs `max_concurrency`).
+- [x] **WP-CRASH-SWEEP** — implements the `surface_crashes` liveness sweep that
+      `reaper.rs` documented as a separate WP non-goal. `BoxProvisioner::probe`
+      (fail-safe: only `Ok(Dead)` reclaims; `Alive`/`Unbound`/`Err` leave the lease
+      `Held`, deadline reaper backstops) → teardown-first → `Held→Crashed` → emit
+      `SlotEventKind::Crashed`. Symmetric with the Expired path, Send-guarded,
+      **opt-in** via `FABRIC_CRASH_PROBE_INTERVAL_SECS` (absent → not spawned). Fixes
+      occupancy drift + lingering dead containers between crash and deadline.
+
 ## Remaining work — owner-gated or cross-repo
 
 Items that cannot close without owner input or a hugit-side move:
