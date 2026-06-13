@@ -17,10 +17,10 @@ async fn main() -> anyhow::Result<()> {
     // Opt-in crash-surfacing sweep (FABRIC_CRASH_PROBE_INTERVAL_SECS). Cloned
     // state (all-Arc, cheap) BEFORE the reaper consumes `state`; absent env var
     // → None (not spawned) — the always-on deadline reaper remains the backstop.
-    let crash_sweep_handle = corelink_fabric_server::server::maybe_spawn_crash_sweep_from_env(
-        state.clone(),
-        |k| std::env::var(k).ok(),
-    )?;
+    let crash_sweep_handle =
+        corelink_fabric_server::server::maybe_spawn_crash_sweep_from_env(state.clone(), |k| {
+            std::env::var(k).ok()
+        })?;
     let reaper_handle = corelink_fabric_server::reaper::spawn_reaper(state, reaper_cfg);
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind_addr).await?;
