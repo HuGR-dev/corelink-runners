@@ -35,6 +35,8 @@ pub use cloud_exec::{
     BoxProvisioner, BoxRegistry, EngineLeasedExec, NoBoxProvisioner, NorthflankBoxProvisioner,
     cloud_backend_from_env, cloud_executor_from_env,
 };
-pub use exec::{FakeLeasedExec, LeasedExec, NoBoxExec, compute_memo_key, run_check};
+pub use exec::{
+    FakeLeasedExec, LeasedExec, MOCK_STDOUT, MockLeasedExec, NoBoxExec, compute_memo_key, run_check,
+};
 pub use handlers::close::close_abnormal;
 pub use handlers::envelope::HookRegistry;

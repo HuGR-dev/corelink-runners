@@ -392,3 +392,327 @@ async fn bootstrap_tenant_can_acquire() {
         "bootstrap tenant acquire must succeed (2xx); got {status}"
     );
 }
+
+// ── WP-MOCK-EXEC: mock execution backend tests ────────────────────────────────
+
+/// Helper: a minimal env that passes all FABRIC_* guards AND the mock
+/// interlock: dev-unsafe, loopback bind, no signing key, no Northflank.
+fn mock_env() -> impl Fn(&str) -> Option<String> {
+    |k| match k {
+        "FABRIC_MOCK_EXEC" => Some("1".to_string()),
+        "FABRIC_DEV_UNSAFE" => Some("1".to_string()),
+        "FABRIC_PAT" => Some("test-pat-abc".to_string()),
+        "FABRIC_TENANT" => Some("acme".to_string()),
+        "FABRIC_BIND_ADDR" => Some("127.0.0.1:8080".to_string()),
+        "FABRIC_TENANT_MAX_CONCURRENCY" => Some("4".to_string()),
+        _ => None,
+    }
+}
+
+/// Interlock 1: FABRIC_MOCK_EXEC=1 without FABRIC_DEV_UNSAFE → boot error.
+#[test]
+fn mock_requires_dev_unsafe() {
+    let result = config_from_env(|k| match k {
+        "FABRIC_MOCK_EXEC" => Some("1".to_string()),
+        "FABRIC_PAT" => Some("p".to_string()),
+        "FABRIC_TENANT" => Some("acme".to_string()),
+        "FABRIC_BIND_ADDR" => Some("127.0.0.1:8080".to_string()),
+        "FABRIC_TENANT_MAX_CONCURRENCY" => Some("4".to_string()),
+        _ => None,
+    });
+    assert!(result.is_err(), "mock without dev-unsafe must fail");
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("FABRIC_DEV_UNSAFE"),
+        "error should mention FABRIC_DEV_UNSAFE: {msg}"
+    );
+}
+
+/// Interlock 2: FABRIC_MOCK_EXEC=1 + FABRIC_DEV_UNSAFE=1 + a real signing
+/// key → boot error (mock attestations would carry production-valid sigs).
+#[test]
+fn mock_rejects_real_signing_key() {
+    let result = config_from_env(|k| match k {
+        "FABRIC_MOCK_EXEC" => Some("1".to_string()),
+        "FABRIC_DEV_UNSAFE" => Some("1".to_string()),
+        "FABRIC_SIGNING_KEY" => Some(b64_key(&[0xaau8; 32])),
+        "FABRIC_PAT" => Some("p".to_string()),
+        "FABRIC_TENANT" => Some("acme".to_string()),
+        "FABRIC_BIND_ADDR" => Some("127.0.0.1:8080".to_string()),
+        "FABRIC_TENANT_MAX_CONCURRENCY" => Some("4".to_string()),
+        _ => None,
+    });
+    assert!(result.is_err(), "mock + real signing key must fail");
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("FABRIC_SIGNING_KEY"),
+        "error should mention FABRIC_SIGNING_KEY: {msg}"
+    );
+}
+
+/// Interlock 3: FABRIC_MOCK_EXEC=1 + FABRIC_DEV_UNSAFE=1 + Northflank vars
+/// set → boot error (mutually exclusive with cloud backend).
+#[test]
+fn mock_rejects_northflank() {
+    // NORTHFLANK_API_TOKEN present
+    let result = config_from_env(|k| match k {
+        "FABRIC_MOCK_EXEC" => Some("1".to_string()),
+        "FABRIC_DEV_UNSAFE" => Some("1".to_string()),
+        "NORTHFLANK_API_TOKEN" => Some("nf-token".to_string()),
+        "FABRIC_PAT" => Some("p".to_string()),
+        "FABRIC_TENANT" => Some("acme".to_string()),
+        "FABRIC_BIND_ADDR" => Some("127.0.0.1:8080".to_string()),
+        "FABRIC_TENANT_MAX_CONCURRENCY" => Some("4".to_string()),
+        _ => None,
+    });
+    assert!(result.is_err(), "mock + NORTHFLANK_API_TOKEN must fail");
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("NORTHFLANK"),
+        "error should mention NORTHFLANK: {msg}"
+    );
+
+    // NORTHFLANK_PROJECT_ID present
+    let result = config_from_env(|k| match k {
+        "FABRIC_MOCK_EXEC" => Some("1".to_string()),
+        "FABRIC_DEV_UNSAFE" => Some("1".to_string()),
+        "NORTHFLANK_PROJECT_ID" => Some("proj-123".to_string()),
+        "FABRIC_PAT" => Some("p".to_string()),
+        "FABRIC_TENANT" => Some("acme".to_string()),
+        "FABRIC_BIND_ADDR" => Some("127.0.0.1:8080".to_string()),
+        "FABRIC_TENANT_MAX_CONCURRENCY" => Some("4".to_string()),
+        _ => None,
+    });
+    assert!(result.is_err(), "mock + NORTHFLANK_PROJECT_ID must fail");
+}
+
+/// All three interlocks satisfied → Ok, cfg.mock_exec == true.
+#[test]
+fn mock_all_clear_ok() {
+    let cfg = config_from_env(mock_env()).expect("mock all-clear must succeed");
+    assert!(cfg.mock_exec, "mock_exec must be true");
+    // Signing key is the dev seed (FABRIC_DEV_UNSAFE path).
+    assert_eq!(cfg.signing_key, DEV_UNSAFE_SEED);
+    // Bind is loopback (the dev-unsafe guard already checked this).
+    assert_eq!(cfg.bind_addr, "127.0.0.1:8080");
+}
+
+/// Default-off: no FABRIC_MOCK_EXEC → cfg.mock_exec == false.
+/// build_app_and_state wires NoBoxExec: an exec on a held lease returns 503.
+#[tokio::test]
+async fn default_off_no_mock_is_noboxexec() {
+    let cfg = valid_config(); // no FABRIC_MOCK_EXEC
+    assert!(!cfg.mock_exec, "mock_exec must be false by default");
+
+    // Acquire a lease so the exec path reaches NoBoxExec.
+    let app = build_app(&cfg).expect("build_app must succeed");
+    let req = post_json(paths::LEASES, "test-pat-abc", &valid_acquire_body());
+    let resp = app.clone().oneshot(req).await.expect("handler responded");
+    let lease_id = {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        v["lease"]["lease_id"].as_str().unwrap().to_string()
+    };
+
+    // Exec on a held lease with no backend → 503 fail-closed.
+    use corelink_fabric_api::ExecRequest;
+    use corelink_runners_contracts::CheckDef;
+    let exec_body = ExecRequest {
+        check_def: CheckDef {
+            def_digest: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+                .to_string(),
+            command: "echo hello".to_string(),
+            inputs: vec![],
+            toolchain_ref: "rust-1.96.0".to_string(),
+            env_manifest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                .to_string(),
+            glob_set: vec![],
+        },
+        tree_hash: "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90".to_string(),
+    };
+    let req = Request::builder()
+        .method("POST")
+        .uri(paths::EXEC.replace("{lease_id}", &lease_id))
+        .header(header::AUTHORIZATION, "Bearer test-pat-abc")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&exec_body).expect("serializable"),
+        ))
+        .expect("valid request");
+    let resp = app.oneshot(req).await.expect("handler responded");
+    assert_eq!(
+        resp.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "NoBoxExec must produce 503 fail-closed; got {}",
+        resp.status()
+    );
+}
+
+/// Full lifecycle through the mock backend: acquire → exec → close.
+///
+/// Asserts:
+/// - acquire returns 200.
+/// - exec returns 200 with `exit == 0` and `stdout_ref == sha256:<hex of
+///   MOCK_STDOUT>` (the frozen constant).
+/// - The attestation is present and verifies under the dev public key.
+/// - close returns 200.
+#[tokio::test]
+async fn mock_drives_full_lifecycle() {
+    use corelink_fabric_api::{
+        AttestationKeyResponse, CloseRequest, CloseResponse, ExecRequest, ExecResponse, paths,
+    };
+    use corelink_fabric_server::{MOCK_STDOUT, server::build_app_and_state, verify_execution};
+    use corelink_runners_contracts::CheckDef;
+    use sha2::{Digest, Sha256};
+
+    let cfg = config_from_env(mock_env()).expect("mock config must succeed");
+    let (app, _state) = build_app_and_state(&cfg).expect("build_app_and_state must succeed");
+
+    let bearer = "Bearer test-pat-abc";
+
+    // ── Acquire ──────────────────────────────────────────────────────────────
+    let acquire_body = AcquireRequest {
+        image_digest:
+            "alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
+                .to_string(),
+        net_policy: "isolated".to_string(),
+        tmp_root: "/work/tmp".to_string(),
+        expiry_ms: 600_000,
+    };
+    let req = Request::builder()
+        .method("POST")
+        .uri(paths::LEASES)
+        .header(header::AUTHORIZATION, bearer)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&acquire_body).expect("serializable"),
+        ))
+        .expect("valid acquire request");
+    let resp = app.clone().oneshot(req).await.expect("handler responded");
+    assert_eq!(resp.status(), StatusCode::OK, "acquire must return 200");
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let acquire_json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let lease_id = acquire_json["lease"]["lease_id"]
+        .as_str()
+        .expect("lease_id present")
+        .to_string();
+
+    // ── Fetch the published attestation key ──────────────────────────────────
+    let key_req = Request::builder()
+        .method("GET")
+        .uri(paths::ATTESTATION_KEY)
+        .header(header::AUTHORIZATION, bearer)
+        .body(Body::empty())
+        .expect("valid key request");
+    let key_resp = app.clone().oneshot(key_req).await.expect("key responded");
+    assert_eq!(key_resp.status(), StatusCode::OK);
+    let key_bytes = axum::body::to_bytes(key_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let key_body: AttestationKeyResponse =
+        serde_json::from_slice(&key_bytes).expect("AttestationKeyResponse shape");
+    let pubkey_b64 = key_body.ed25519_pubkey_b64;
+
+    // ── Exec ─────────────────────────────────────────────────────────────────
+    let check_def = CheckDef {
+        def_digest: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08".to_string(),
+        command: "cargo test --workspace --locked".to_string(),
+        inputs: vec!["src/**".to_string()],
+        toolchain_ref: "rust-1.96.0".to_string(),
+        env_manifest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+            .to_string(),
+        glob_set: vec!["**/*.rs".to_string()],
+    };
+    let exec_body = ExecRequest {
+        check_def: check_def.clone(),
+        tree_hash: "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90".to_string(),
+    };
+    let req = Request::builder()
+        .method("POST")
+        .uri(paths::EXEC.replace("{lease_id}", &lease_id))
+        .header(header::AUTHORIZATION, bearer)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&exec_body).expect("serializable"),
+        ))
+        .expect("valid exec request");
+    let resp = app.clone().oneshot(req).await.expect("handler responded");
+    assert_eq!(resp.status(), StatusCode::OK, "exec must return 200");
+    let exec_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let exec_resp: ExecResponse =
+        serde_json::from_slice(&exec_bytes).expect("frozen ExecResponse shape");
+
+    // exit == 0 (MockLeasedExec always returns Some(0)).
+    assert_eq!(exec_resp.result.exit, 0, "mock exec exit must be 0");
+
+    // stdout_ref == sha256:<hex of MOCK_STDOUT bytes>.
+    let expected_stdout_ref = format!("sha256:{}", hex_of(&Sha256::digest(MOCK_STDOUT.as_bytes())));
+    assert_eq!(
+        exec_resp.result.stdout_ref, expected_stdout_ref,
+        "stdout_ref must be the digest of MOCK_STDOUT"
+    );
+
+    // stderr_ref == sha256:<hex of empty string>.
+    let expected_stderr_ref = format!("sha256:{}", hex_of(&Sha256::digest(b"")));
+    assert_eq!(
+        exec_resp.result.stderr_ref, expected_stderr_ref,
+        "stderr_ref must be the digest of empty stderr"
+    );
+
+    // Attestation present and verifies under the dev public key.
+    assert!(
+        verify_execution(
+            &exec_resp.attestation,
+            &exec_resp.result_binding_sig,
+            &exec_resp.result,
+            &pubkey_b64,
+        )
+        .expect("well-formed signatures"),
+        "exec attestation (chain AND binding) must verify against the dev public key"
+    );
+
+    // ── Close ────────────────────────────────────────────────────────────────
+    let close_req = CloseRequest {
+        status: "succeeded".to_string(),
+        check_result: Some(exec_resp.result.clone()),
+    };
+    let req = Request::builder()
+        .method("POST")
+        .uri(paths::LEASE_CLOSE.replace("{lease_id}", &lease_id))
+        .header(header::AUTHORIZATION, bearer)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&close_req).expect("serializable"),
+        ))
+        .expect("valid close request");
+    let resp = app.clone().oneshot(req).await.expect("handler responded");
+    assert_eq!(resp.status(), StatusCode::OK, "close must return 200");
+    let close_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let _close_resp: CloseResponse =
+        serde_json::from_slice(&close_bytes).expect("frozen CloseResponse shape");
+}
+
+/// Frozen-constant guard: MOCK_STDOUT must equal the documented string
+/// exactly.  This guards against accidental drift that would silently break
+/// the SHA-256 digest pinned by githugr's offline adapter.
+#[test]
+fn mock_stdout_is_frozen() {
+    use corelink_fabric_server::MOCK_STDOUT;
+    assert_eq!(
+        MOCK_STDOUT, "corelink-fabricd mock-exec: deterministic stub output\n",
+        "MOCK_STDOUT must never change (githugr pins its sha256)"
+    );
+}
+
+// helper: lowercase hex of a byte slice
+fn hex_of(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}

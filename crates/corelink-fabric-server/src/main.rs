@@ -18,9 +18,23 @@ async fn main() -> anyhow::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind_addr).await?;
 
+    if cfg.mock_exec {
+        eprintln!();
+        eprintln!("╔══════════════════════════════════════════════════════════════╗");
+        eprintln!("║  MOCK EXECUTION BACKEND ACTIVE                               ║");
+        eprintln!("║                                                              ║");
+        eprintln!("║  Every exec returns a FAKE deterministic CheckResult.        ║");
+        eprintln!("║  FOR OFFLINE ADAPTER DEVELOPMENT ONLY.                       ║");
+        eprintln!("║  NEVER PRODUCTION.                                           ║");
+        eprintln!("╚══════════════════════════════════════════════════════════════╝");
+        eprintln!();
+    }
+
     let northflank_configured = std::env::var("NORTHFLANK_API_TOKEN").is_ok();
     eprintln!("corelink-fabricd listening on {}", cfg.bind_addr);
-    if northflank_configured {
+    if cfg.mock_exec {
+        eprintln!("cloud backend: MOCK (deterministic stub, offline adapter dev only)");
+    } else if northflank_configured {
         eprintln!("cloud backend: Northflank (NORTHFLANK_API_TOKEN set)");
     } else {
         eprintln!("cloud backend: NONE — fail-closed: no box backend, execs will 503");

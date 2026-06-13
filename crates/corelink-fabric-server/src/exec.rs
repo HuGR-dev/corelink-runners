@@ -53,6 +53,42 @@ impl LeasedExec for NoBoxExec {
     }
 }
 
+/// The FROZEN deterministic output emitted by [`MockLeasedExec`] on every
+/// exec.
+///
+/// **FROZEN — DO NOT CHANGE.** External consumers (e.g. githugr's offline
+/// adapter) pin the SHA-256 of this string (`sha256:a30dd181a99e2acecd791e826
+/// 347f30104e7e7db30fd14035d0287affb51d254`) in their test fixtures. Any edit
+/// to this constant silently breaks those pinned digests.
+pub const MOCK_STDOUT: &str = "corelink-fabricd mock-exec: deterministic stub output\n";
+
+/// A named mock [`LeasedExec`] for offline adapter development.
+///
+/// Every call to [`exec_captured_for`] returns a deterministic
+/// `Ok(CmdOutput { code: Some(0), stdout: MOCK_STDOUT, stderr: "" })`
+/// regardless of `lease_id` or `argv`. This is NOT a real execution — it
+/// is a pure offline stub that allows external consumers (e.g. githugr) to
+/// drive the REAL binary + REAL HTTP API + REAL signed attestation without a
+/// cloud provider.
+///
+/// **Prod-safety:** wired only when `FABRIC_MOCK_EXEC=1`, which requires
+/// `FABRIC_DEV_UNSAFE=1` (loopback-only bind, dev signing key, forged-but-
+/// detectable attestations) and no real `FABRIC_SIGNING_KEY` or
+/// `NORTHFLANK_*` vars. See `config_from_env` interlock.
+///
+/// [`exec_captured_for`]: LeasedExec::exec_captured_for
+pub struct MockLeasedExec;
+
+impl LeasedExec for MockLeasedExec {
+    fn exec_captured_for(&self, _lease_id: &str, _argv: &[&str]) -> Result<CmdOutput> {
+        Ok(CmdOutput {
+            code: Some(0),
+            stdout: MOCK_STDOUT.to_string(),
+            stderr: String::new(),
+        })
+    }
+}
+
 /// Scripted [`LeasedExec`] test double: replies with a fixed [`CmdOutput`]
 /// and records every invocation (lease id + argv), so tests can assert both
 /// the bytes-to-digest path and — crucially — that refused/expired paths
