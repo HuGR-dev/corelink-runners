@@ -238,6 +238,47 @@ pub trait BoxProvisioner: Send + Sync {
     /// from the registry.  Idempotent: an already-unbound lease returns
     /// `Ok(())` without calling the provider.
     fn teardown(&self, lease_id: &str) -> Result<()>;
+
+    /// Liveness of the box bound to `lease_id`. FAIL-SAFE: only `Ok(Dead)`
+    /// authorizes reclamation; `Alive`/`Unbound`/`Err` all leave the lease alone.
+    ///
+    /// Resolves the lease's binding from the registry exactly as
+    /// [`teardown`](BoxProvisioner::teardown) does (no binding →
+    /// [`ProbeStatus::Unbound`]); a present binding is probed via
+    /// [`Engine::is_alive`], whose `Ok(true)`→`Alive`, `Ok(false)`→`Dead`, and
+    /// whose `Err` (transient/unreachable — NOT death) propagates unchanged.
+    ///
+    /// The default is the FAIL-SAFE [`ProbeStatus::Unbound`] — an implementor
+    /// that holds no liveness signal reports "nothing to reclaim", so the crash
+    /// sweep never touches its leases. The two production impls
+    /// ([`NoBoxProvisioner`], [`NorthflankBoxProvisioner`]) override it
+    /// explicitly per the contract.
+    fn probe(&self, _lease_id: &str) -> Result<ProbeStatus> {
+        Ok(ProbeStatus::Unbound)
+    }
+}
+
+// ── ProbeStatus ───────────────────────────────────────────────────────────────
+
+/// The liveness verdict for the box bound to a lease, returned by
+/// [`BoxProvisioner::probe`].
+///
+/// **Fail-safe semantics:** only [`ProbeStatus::Dead`] authorizes reclamation.
+/// [`ProbeStatus::Alive`], [`ProbeStatus::Unbound`], and any `Err` from `probe`
+/// all leave the lease alone — the crash sweep ([`crate::reaper::surface_crashes`])
+/// acts ONLY on an authoritative `Ok(Dead)`. This mirrors the underlying
+/// [`Engine::is_alive`] guarantee, which itself only reports `Ok(false)` for an
+/// authoritative dead/terminal status (ambiguous/5xx → `Ok(true)` = alive).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeStatus {
+    /// The box is live on the provider (or `is_alive` could not authoritatively
+    /// prove it dead — fail-safe-alive).
+    Alive,
+    /// The box is authoritatively gone (provider reports a terminal/dead
+    /// status). This is the ONLY status that authorizes crash reclamation.
+    Dead,
+    /// No box is bound to the lease in the registry — nothing to probe.
+    Unbound,
 }
 
 // ── NoBoxProvisioner ──────────────────────────────────────────────────────────
@@ -260,6 +301,11 @@ impl BoxProvisioner for NoBoxProvisioner {
 
     fn teardown(&self, _lease_id: &str) -> Result<()> {
         Ok(())
+    }
+
+    fn probe(&self, _lease_id: &str) -> Result<ProbeStatus> {
+        // It never holds boxes — nothing to reclaim.
+        Ok(ProbeStatus::Unbound)
     }
 }
 
@@ -312,6 +358,22 @@ impl<H: corelink_cloud_engine::HttpTransport + Send + Sync> BoxProvisioner
         }
         Ok(())
     }
+
+    fn probe(&self, lease_id: &str) -> Result<ProbeStatus> {
+        // Resolve the binding EXACTLY as teardown does: no binding → Unbound.
+        let Some(c) = self.registry.resolve(lease_id) else {
+            return Ok(ProbeStatus::Unbound);
+        };
+        // FAIL-SAFE: is_alive only returns Ok(false) for an authoritative
+        // dead/terminal status; ambiguous/5xx → Ok(true) (alive). A transient
+        // or unreachable provider surfaces as Err and is propagated — it is NOT
+        // death (the crash sweep treats Err as leave-Held).
+        match self.engine.is_alive(&c) {
+            Ok(true) => Ok(ProbeStatus::Alive),
+            Ok(false) => Ok(ProbeStatus::Dead),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 // ── cloud_backend_from_env ────────────────────────────────────────────────────
@@ -360,3 +422,22 @@ const _: fn() = || {
     >();
     assert_send_sync::<NorthflankBoxProvisioner<corelink_cloud_engine::UreqTransport>>();
 };
+
+// ── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `NoBoxProvisioner` never holds boxes, so `probe` is always `Unbound`
+    /// (FAIL-SAFE: an `Unbound` lease is never reclaimed by the crash sweep).
+    #[test]
+    fn no_box_provisioner_probe_is_unbound() {
+        let prov = NoBoxProvisioner;
+        assert_eq!(
+            prov.probe("any-lease").unwrap(),
+            ProbeStatus::Unbound,
+            "NoBoxProvisioner::probe must always be Unbound"
+        );
+    }
+}

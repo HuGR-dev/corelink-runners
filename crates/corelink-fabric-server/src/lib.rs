@@ -34,7 +34,7 @@ pub use attestation::{
 pub use auth::{BearerPat, StaticTokenStore, TokenStore, TokenStoreError};
 pub use cloud_exec::{
     BoxProvisioner, BoxRegistry, EngineLeasedExec, NoBoxProvisioner, NorthflankBoxProvisioner,
-    cloud_backend_from_env, cloud_executor_from_env,
+    ProbeStatus, cloud_backend_from_env, cloud_executor_from_env,
 };
 pub use corelink_auth::{
     CoreLinkAuthConfig, CoreLinkTokenStore, IntrospectHttp, IntrospectResponse, UreqIntrospect,

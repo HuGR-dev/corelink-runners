@@ -157,8 +157,11 @@ pub struct AppState {
     /// concurrent slot occupancy and peak. Internal metering only — NOT a
     /// wire type, NOT a billing change. Emitted at the three lifecycle points:
     /// Acquired (acquire success), Released (close), Expired (reaper).
-    /// Crashed is out of scope: no crash-surfacing path is wired yet
-    /// (non-goal, consistent with the reaper's known non-goals in reaper.rs).
+    /// Crashed is now surfaced (OPT-IN) by the crash sweep
+    /// [`crate::reaper::surface_crashes`], which reclaims a box probed
+    /// authoritatively-Dead and emits the `Crashed` slot event. The sweep is
+    /// opt-in (`FABRIC_CRASH_PROBE_INTERVAL_SECS`); the always-on deadline
+    /// reaper remains the backstop.
     pub slot_meter: Arc<Mutex<SlotMeter>>,
 }
 
@@ -366,6 +369,30 @@ impl AppState {
             // Provider error or task panic — caller retries.
             Ok(Err(_)) | Err(_) => false,
         }
+    }
+
+    /// Probe the liveness of the box bound to `lease_id` on a blocking thread
+    /// and await the result (WP-CRASH-SWEEP).
+    ///
+    /// Mirrors [`teardown_lease`]'s tokio isolation: the provisioner is cloned
+    /// and `probe` runs on a `spawn_blocking` worker, so NO lock is held across
+    /// the await.
+    ///
+    /// FAIL-SAFE mapping: a join error (task panic) maps to `Err` — NEVER to a
+    /// false [`ProbeStatus::Dead`]. The crash sweep acts only on `Ok(Dead)`, so
+    /// a panic can never be misread as authoritative death.
+    ///
+    /// [`teardown_lease`]: AppState::teardown_lease
+    /// [`ProbeStatus::Dead`]: crate::cloud_exec::ProbeStatus::Dead
+    pub(crate) async fn probe_lease(
+        &self,
+        lease_id: &str,
+    ) -> anyhow::Result<crate::cloud_exec::ProbeStatus> {
+        let prov = Arc::clone(&self.provisioner);
+        let lid = lease_id.to_string();
+        tokio::task::spawn_blocking(move || prov.probe(&lid))
+            .await
+            .map_err(|_| anyhow::anyhow!("probe task panicked"))?
     }
 
     /// Snapshot of all recorded deadlines without holding the ledger lock.
