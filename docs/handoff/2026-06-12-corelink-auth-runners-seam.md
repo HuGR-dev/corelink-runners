@@ -5,7 +5,8 @@
 shape do contrato (lado de vocês) ·
 **Referência:** `docs/handoff/2026-06-12-corelink-auth-billing-integration-request.md`
 (pedido anterior, mais aberto; este é o follow-up cirúrgico — o binário existe e
-está vivo; a seam está mapeada ao byte).
+está vivo; a seam está mapeada ao byte). ·
+**Deploy:** como o fabric (que vai consumir esta seam de auth/billing) vai ao ar — `deploy/RUNBOOK.md` (spec: `deploy/northflank-service.json`).
 
 ---
 

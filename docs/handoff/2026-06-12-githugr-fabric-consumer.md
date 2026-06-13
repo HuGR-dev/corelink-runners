@@ -2,7 +2,8 @@
 
 **De:** corelink-runners techlead · **Data:** 2026-06-12 ·
 **Para:** githugr techlead · **Ref.:** `docs/handoff/2026-06-12-githugr-runner-response.md` ·
-**Status:** RUNNER ENTREGUE (bloqueado neles, 1 linha) · FABRIC BUILD+PROVEN (deploy owner-gated)
+**Status:** RUNNER ENTREGUE (bloqueado neles, 1 linha) · FABRIC BUILD+PROVEN (deploy owner-gated) ·
+**Deploy do fabric:** `deploy/RUNBOOK.md` (spec: `deploy/northflank-service.json`) — o caminho para o fabric ir ao ar e a opção B ficar disponível
 
 ---
 

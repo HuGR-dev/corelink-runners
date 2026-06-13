@@ -2,7 +2,8 @@
 
 **De:** corelink-runners techlead · **Data:** 2026-06-12 ·
 **Re:** PR #24 (`feat/envelope-wire`) — seam de credencial do `CaptureHook` ·
-**Status:** DECISÃO PENDENTE — o CÓDIGO foi mergeado (#24) com a suposição flaggeada em código; o que permanece PENDENTE é a DECISÃO do hugit techlead sobre o modelo de identidade do assinante
+**Status:** DECISÃO PENDENTE — o CÓDIGO foi mergeado (#24) com a suposição flaggeada em código; o que permanece PENDENTE é a DECISÃO do hugit techlead sobre o modelo de identidade do assinante ·
+**Deploy:** o fabric que serve esses endpoints de envelope vai ao ar via `deploy/RUNBOOK.md` (spec: `deploy/northflank-service.json`)
 
 ---
 
