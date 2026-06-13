@@ -284,6 +284,20 @@ impl LeaseLedger for PgLedger {
         })
     }
 
+    fn remove(&mut self, lease_id: &str) -> anyhow::Result<bool> {
+        // Admission-rollback seam (the over-admission fix in the acquire path):
+        // drop a reserved `Pending` row when provisioning fails so the slot +
+        // cap free immediately. Unconditional delete by id — `Ok(true)` if a
+        // row was removed, `Ok(false)` if the lease was already gone/unknown.
+        self.block_on(async {
+            let client = self.pool.get().await?;
+            let n = client
+                .execute("DELETE FROM leases WHERE lease_id = $1", &[&lease_id])
+                .await?;
+            Ok(n == 1)
+        })
+    }
+
     fn by_tenant(&self, t: &TenantId) -> anyhow::Result<Vec<LeaseRecord>> {
         self.block_on(async {
             let client = self.pool.get().await?;
