@@ -115,13 +115,56 @@ mod golden_tests {
         let raw = load_vector("RunnerLease.json");
         let lease: RunnerLease =
             serde_json::from_str(&raw).expect("RunnerLease golden must deserialize");
-        let re_serialized =
-            serde_json::to_string_pretty(&lease).expect("RunnerLease must re-serialize");
+        // Truly byte-exact: mirror the committed vector's actual bytes —
+        // to_string_pretty + the committed trailing newline — compared
+        // WITHOUT trim so any whitespace/trailing-byte drift breaks here
+        // (matches the IntentMetrics vector oracle's rigor).
+        let re_serialized = format!(
+            "{}\n",
+            serde_json::to_string_pretty(&lease).expect("RunnerLease must re-serialize")
+        );
         assert_eq!(
-            raw.trim_end(),
-            re_serialized.trim_end(),
+            raw, re_serialized,
             "RunnerLease round-trip is not byte-exact"
         );
+    }
+
+    // ── RunnerState terminal-variant wire-string pinning ──────────────────
+
+    /// Pin the EXACT wire string of EVERY `RunnerState` variant and assert
+    /// each round-trips. The committed conformance vectors only ever pin
+    /// `"state":"held"`, so without this test an accidental rename of a
+    /// terminal variant (`released`/`expired`/`crashed`) would NOT be caught
+    /// by the §13.4 drift tripwire on OUR side. This is our-side coverage.
+    ///
+    /// NOTE (cross-repo gap): this does NOT add a shared cross-repo vector for
+    /// the terminal states — that is hugit-gated (a shared terminal-state
+    /// `RunnerLease` vector must land in hugit-contracts first, then be
+    /// committed byte-identical here). Fully closing the cross-repo tripwire
+    /// for the terminal variants requires that coordination; this test closes
+    /// only the local serialization-rename hole.
+    #[test]
+    fn runner_state_all_variants_wire_string_pinned() {
+        // (variant, exact snake_case wire string)
+        let cases: &[(RunnerState, &str)] = &[
+            (RunnerState::Held, "\"held\""),
+            (RunnerState::Released, "\"released\""),
+            (RunnerState::Expired, "\"expired\""),
+            (RunnerState::Crashed, "\"crashed\""),
+        ];
+        for (variant, expected_wire) in cases {
+            let serialized = serde_json::to_string(variant).expect("RunnerState must serialize");
+            assert_eq!(
+                serialized, *expected_wire,
+                "RunnerState::{variant:?} wire string drifted from the pinned snake_case form"
+            );
+            let back: RunnerState = serde_json::from_str(&serialized)
+                .expect("RunnerState wire string must deserialize back");
+            assert_eq!(
+                back, *variant,
+                "RunnerState::{variant:?} did not round-trip from its wire string"
+            );
+        }
     }
 
     // ── FenceManifest golden round-trip ───────────────────────────────────
@@ -138,11 +181,16 @@ mod golden_tests {
         let raw = load_vector("FenceManifest.json");
         let manifest: FenceManifest =
             serde_json::from_str(&raw).expect("FenceManifest golden must deserialize");
-        let re_serialized =
-            serde_json::to_string_pretty(&manifest).expect("FenceManifest must re-serialize");
+        // Truly byte-exact: mirror the committed vector's actual bytes —
+        // to_string_pretty + the committed trailing newline — compared
+        // WITHOUT trim so any whitespace/trailing-byte drift breaks here
+        // (matches the IntentMetrics vector oracle's rigor).
+        let re_serialized = format!(
+            "{}\n",
+            serde_json::to_string_pretty(&manifest).expect("FenceManifest must re-serialize")
+        );
         assert_eq!(
-            raw.trim_end(),
-            re_serialized.trim_end(),
+            raw, re_serialized,
             "FenceManifest round-trip is not byte-exact"
         );
     }
