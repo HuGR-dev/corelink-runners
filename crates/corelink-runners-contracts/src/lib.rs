@@ -217,10 +217,17 @@ mod golden_tests {
                 .into_iter()
                 .map(|(_, name)| name)
                 .collect();
+        // `corelink-introspect.json` mirrors **corelink-server** (the
+        // `/internal/v1/auth/introspect` response, ratified 2026-06-13), NOT
+        // hugit — a DIFFERENT cross-repo pair riding the same SHA-256
+        // hash-verify tripwire (`conformance_vectors_hash_verified`). The
+        // three hugit-side vectors are unchanged; this entry adds the
+        // auth/billing seam without touching the hugit-vector coverage.
         let expected: std::collections::BTreeSet<String> = [
             "RunnerLease.json",
             "FenceManifest.json",
             "IntentMetrics.json",
+            "corelink-introspect.json",
         ]
         .iter()
         .map(|s| s.to_string())
