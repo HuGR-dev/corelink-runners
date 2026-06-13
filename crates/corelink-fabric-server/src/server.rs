@@ -58,6 +58,22 @@ pub struct ServerConfig {
     /// Acquire-request rate ceiling per minute for the bootstrap tenant.
     /// Defaults to 120 when `FABRIC_TENANT_RATE_PER_MIN` is absent.
     pub rate_ceiling_per_min: u32,
+    /// When `true`, the server wires [`MockLeasedExec`] instead of the cloud
+    /// backend — every exec returns a deterministic fake `CheckResult`.
+    ///
+    /// **Prod-unsafe.** Accepted only under a three-way AND interlock (checked
+    /// at config time, never at request time):
+    /// 1. `FABRIC_DEV_UNSAFE=1` must also be set (forces the dev signing key
+    ///    AND refuses a non-loopback bind).
+    /// 2. `FABRIC_SIGNING_KEY` must be absent (mock attestations are then
+    ///    detectably-dev, never signed by a real region key).
+    /// 3. `NORTHFLANK_API_TOKEN` and `NORTHFLANK_PROJECT_ID` must be absent
+    ///    (mutually exclusive with a cloud backend; no silent downgrade).
+    ///
+    /// Default: `false` (off). Set `FABRIC_MOCK_EXEC=1` to enable.
+    ///
+    /// [`MockLeasedExec`]: crate::exec::MockLeasedExec
+    pub mock_exec: bool,
 }
 
 /// Resolve [`ServerConfig`] from an environment-variable accessor.
@@ -189,6 +205,44 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
         }
     };
 
+    // ── Mock execution backend ───────────────────────────────────────────────
+    // Default-off.  When enabled, a strict three-way AND interlock is
+    // enforced here at config time — failure is a hard boot error, never a
+    // silent per-request degradation.
+    let mock_exec = get("FABRIC_MOCK_EXEC").as_deref() == Some("1");
+    if mock_exec {
+        // Interlock 1: FABRIC_DEV_UNSAFE=1 must also be set.  The dev-unsafe
+        // path already forces the well-known forgeable dev seed AND refuses
+        // non-loopback binds — reuse that invariant; don't re-implement it.
+        if get("FABRIC_DEV_UNSAFE").as_deref() != Some("1") {
+            anyhow::bail!(
+                "FABRIC_MOCK_EXEC requires FABRIC_DEV_UNSAFE=1 \
+                 (the mock serves fake results and must never run in production)"
+            );
+        }
+        // Interlock 2: FABRIC_SIGNING_KEY must be absent.  The mock is then
+        // forced onto the well-known dev seed, making its attestations
+        // detectably-dev and never signed by a real region key.
+        if get("FABRIC_SIGNING_KEY")
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
+        {
+            anyhow::bail!(
+                "FABRIC_MOCK_EXEC must not be combined with a real FABRIC_SIGNING_KEY \
+                 (mock results would carry production-valid attestations)"
+            );
+        }
+        // Interlock 3: NORTHFLANK_* must be absent — the mock is mutually
+        // exclusive with a cloud backend; no silent downgrade of a real
+        // backend to fakes.
+        if get("NORTHFLANK_API_TOKEN").is_some() || get("NORTHFLANK_PROJECT_ID").is_some() {
+            anyhow::bail!(
+                "FABRIC_MOCK_EXEC is mutually exclusive with NORTHFLANK_* \
+                 (a cloud backend is configured)"
+            );
+        }
+    }
+
     Ok(ServerConfig {
         bind_addr,
         signing_key,
@@ -196,6 +250,7 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
         bootstrap_tenant: bootstrap_tenant_raw,
         max_concurrency,
         rate_ceiling_per_min,
+        mock_exec,
     })
 }
 
@@ -235,9 +290,19 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
         rate_ceiling_per_min: cfg.rate_ceiling_per_min,
     }]);
 
-    let state = AppState::new(ledger, Arc::new(plans), Arc::new(SystemClock))
-        .with_signer(signer)
-        .with_cloud_backend_from_env(registry.clone_handle());
+    let state = AppState::new(ledger, Arc::new(plans), Arc::new(SystemClock)).with_signer(signer);
+
+    // Default-off: when mock_exec is false the existing cloud-backend
+    // composition is byte-identical to before this change (NoBoxExec +
+    // NoBoxProvisioner unless NORTHFLANK_* are set).  When mock_exec is true
+    // the executor is replaced with MockLeasedExec; the provisioner stays
+    // NoBoxProvisioner (no-op) — acquire still provisions, the lease goes
+    // Held, and the full auth/lease/exec/attestation/close surface runs.
+    let state = if cfg.mock_exec {
+        state.with_executor(Arc::new(crate::exec::MockLeasedExec))
+    } else {
+        state.with_cloud_backend_from_env(registry.clone_handle())
+    };
 
     let router = app_full(store, state.clone(), Arc::new(HookRegistry::default()));
     Ok((router, state))
