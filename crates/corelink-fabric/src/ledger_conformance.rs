@@ -394,3 +394,150 @@ mod runs {
         run_all(make_file);
     }
 }
+
+// ── Postgres backend: the SAME conformance suite + a cross-instance proof ──
+//
+// Gated on `TEST_DATABASE_URL`. ABSENT (the builder Mac has no Postgres) → the
+// tests return early so CI stays green; PRESENT → the full suite plus an
+// advisory-lock cross-instance proof runs against a real `PgLedger`.
+mod pg_runs {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+    use crate::pg_ledger::PgLedger;
+
+    /// `TEST_DATABASE_URL`, or `None` (the gate is OFF — skip cleanly).
+    fn db_url() -> Option<String> {
+        std::env::var("TEST_DATABASE_URL").ok()
+    }
+
+    /// A multi-thread runtime (required for `PgLedger`'s `block_in_place`).
+    fn rt() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("multi-thread runtime")
+    }
+
+    /// Connect a `PgLedger` against `url` on `rt`.
+    fn connect(rt: &tokio::runtime::Runtime, url: &str) -> PgLedger {
+        rt.block_on(async { PgLedger::connect(url, 4).await.expect("PgLedger::connect") })
+    }
+
+    /// A `LedgerFactory` (`fn`, so no captures) that TRUNCATEs the shared table
+    /// on every call, handing each conformance assertion-group a fresh ledger.
+    /// The runtime + url live in process-wide statics because the factory must
+    /// be a bare `fn` pointer.
+    fn make_pg() -> Box<dyn LeaseLedger + Send> {
+        thread_local! {
+            static RT: tokio::runtime::Runtime = rt();
+        }
+        let url = db_url().expect("make_pg only called when TEST_DATABASE_URL is set");
+        RT.with(|rt| {
+            let led = connect(rt, &url);
+            led.truncate_for_test().expect("truncate between groups");
+            // SAFETY-OF-LIFETIME: the thread-local runtime outlives every ledger
+            // built on this thread within a single `run_all` call; conformance
+            // runs are single-threaded per test.
+            Box::new(led)
+        })
+    }
+
+    #[test]
+    fn conformance_pg_ledger() {
+        if db_url().is_none() {
+            eprintln!("conformance_pg_ledger: TEST_DATABASE_URL unset — skipping (expected on CI)");
+            return;
+        }
+        // Clean slate before the suite (the factory also truncates per group).
+        let rt = rt();
+        let led = connect(&rt, &db_url().unwrap());
+        led.truncate_for_test().expect("initial truncate");
+        drop(led);
+        run_all(make_pg);
+    }
+
+    /// The advisory-lock proof: two INDEPENDENT `PgLedger` handles on the SAME
+    /// database, concurrent `try_admit` at cap-1 → EXACTLY ONE admits. This is
+    /// the cross-instance cap-safety guarantee that InMemory/File cannot give.
+    #[test]
+    fn cross_instance_try_admit_admits_exactly_one_at_cap_1() {
+        let Some(url) = db_url() else {
+            eprintln!(
+                "cross_instance_try_admit...: TEST_DATABASE_URL unset — skipping (expected on CI)"
+            );
+            return;
+        };
+
+        let rt = rt();
+        // Unique tenant per run so parallel test processes don't collide.
+        let tenant_str = format!(
+            "xinst-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let t = tenant(&tenant_str);
+        // DISTINCT lease ids per run (suffixed with the unique tenant nonce) so
+        // neither admit fails on the PRIMARY KEY across repeated runs / parallel
+        // processes — the ONLY gate under test is the cap.
+        let id_a = format!("a-{tenant_str}");
+        let id_b = format!("b-{tenant_str}");
+
+        // Self-contained: clear any residue before the race (the suite is not
+        // guaranteed to have truncated first when this test runs alone).
+        {
+            let led = connect(&rt, &url);
+            led.truncate_for_test().expect("pre-race truncate");
+        }
+
+        // Two independent handles = two "instances" of the control plane.
+        let mut led_a = connect(&rt, &url);
+        let mut led_b = connect(&rt, &url);
+
+        // Both race to admit into the same tenant at cap 1. Run the two admits on
+        // two OS threads; each enters the runtime via `block_on` in `try_admit`.
+        let outcome_a = Arc::new(Mutex::new(None::<bool>));
+        let outcome_b = Arc::new(Mutex::new(None::<bool>));
+        let oa = Arc::clone(&outcome_a);
+        let ob = Arc::clone(&outcome_b);
+        let t_a = t.clone();
+        let t_b = t.clone();
+
+        rt.block_on(async {
+            let ha = tokio::task::spawn_blocking(move || {
+                let r = led_a.try_admit(pending(&id_a, &t_a), 1).unwrap();
+                *oa.lock().unwrap() = Some(r);
+            });
+            let hb = tokio::task::spawn_blocking(move || {
+                let r = led_b.try_admit(pending(&id_b, &t_b), 1).unwrap();
+                *ob.lock().unwrap() = Some(r);
+            });
+            ha.await.unwrap();
+            hb.await.unwrap();
+        });
+
+        let a = outcome_a.lock().unwrap().unwrap();
+        let b = outcome_b.lock().unwrap().unwrap();
+        assert!(
+            a ^ b,
+            "advisory lock must serialize: EXACTLY ONE of the two cross-instance \
+             admits succeeds at cap 1 (got a={a}, b={b})"
+        );
+
+        // And the ledger holds exactly one active lease for the tenant.
+        let active = led_active_count(&rt, &url, &t);
+        assert_eq!(
+            active, 1,
+            "exactly one lease admitted across both instances"
+        );
+    }
+
+    fn led_active_count(rt: &tokio::runtime::Runtime, url: &str, t: &TenantId) -> usize {
+        let led = connect(rt, url);
+        led.by_tenant(t).unwrap().len()
+    }
+}

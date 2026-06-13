@@ -121,8 +121,9 @@ fn apply_transition(
 /// duplicate `put`s are errors, never silent.
 ///
 /// Impls here: [`InMemoryLedger`] (tests/dev) and [`FileLedger`] (the
-/// restart-survival oracle). The production Postgres impl is a **later WP**
-/// per ratified decision #3 (`docs/plan/m1-decomposition-draft.md` §4).
+/// restart-survival oracle). The production Postgres impl is
+/// [`crate::pg_ledger::PgLedger`] (WP-3-PGLEDGER) — cross-instance cap-safe,
+/// verified by the same conformance suite against a real database.
 pub trait LeaseLedger {
     /// Register a new record. Fails if `lease_id` already exists — state is
     /// mutated only through [`LeaseLedger::transition`], never by overwrite.

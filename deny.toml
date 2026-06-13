@@ -34,6 +34,30 @@ skip = [
     # irreducible without an upstream change. Scoped to the exact version so any
     # NEW/unexpected duplicate still trips the gate.
     { crate = "windows-sys@0.52.0", reason = "Windows-only (never built on our targets); ring/rustls (ureq) vs mio/tokio pin different majors — irreducible transitive dup." },
+    # OWNER-GATED (WP-3-PGLEDGER): the modern crypto stack pulled by
+    # `postgres-protocol 0.6.12` (SCRAM/MD5 auth uses sha2 0.11 / hmac 0.13 /
+    # rand 0.10). The workspace's OTHER copies are the X4-pinned `sha2 =0.10.9`
+    # line (fence digests, wire-contract conformance) + tokio's getrandom 0.2.
+    # postgres-protocol 0.6.12 is the FLOOR that fixes three RUSTSEC advisories
+    # (RUSTSEC-2026-0178 tokio-postgres DataRow panic, -0179 SCRAM-iteration DoS,
+    # -0180 hstore panic); downgrading reintroduces all three. Bumping the X4
+    # sha2 pin to 0.11 is out of this WP's scope and risks wire-contract drift.
+    # So these two-major splits are irreducible here — a clean security trade
+    # (kill 3 real vulns, accept benign duplicate hashing/RNG crates). Each is
+    # scoped to the EXACT newer version so any NEW/unexpected dup still trips.
+    { crate = "sha2@0.11.0",          reason = "postgres-protocol 0.6.12 SCRAM auth; X4 pins sha2 0.10.9. OWNER-GATED, WP-3-PGLEDGER." },
+    { crate = "digest@0.11.3",        reason = "← sha2 0.11 / hmac 0.13 (postgres-protocol 0.6.12); X4 stack is digest 0.10. OWNER-GATED, WP-3-PGLEDGER." },
+    { crate = "block-buffer@0.12.1",  reason = "← digest 0.11 (postgres-protocol 0.6.12); X4 stack is block-buffer 0.10. OWNER-GATED, WP-3-PGLEDGER." },
+    { crate = "crypto-common@0.2.2",  reason = "← digest 0.11 (postgres-protocol 0.6.12); X4 stack is crypto-common 0.1. OWNER-GATED, WP-3-PGLEDGER." },
+    { crate = "cpufeatures@0.3.0",    reason = "← chacha20/rand 0.10 (postgres-protocol 0.6.12); other copy is cpufeatures 0.2. OWNER-GATED, WP-3-PGLEDGER." },
+    { crate = "getrandom@0.4.2",      reason = "← rand 0.10 (postgres-protocol 0.6.12); tokio pulls getrandom 0.2. OWNER-GATED, WP-3-PGLEDGER." },
+    # WASM-only tail of the getrandom 0.4 stack (← rand 0.10 ← postgres-protocol
+    # 0.6.12). wasi 0.14 / wit-bindgen 0.57 are pulled ONLY on the
+    # wasm32-wasi target; never compiled on our mac/Linux build+CI targets. The
+    # other copies (wasi 0.11, wit-bindgen 0.51) come from the older getrandom
+    # 0.2 line. Same irreducibility as the crypto split above.
+    { crate = "wasi@0.14.7+wasi-0.2.4", reason = "wasm-only (getrandom 0.4 ← postgres-protocol 0.6.12); never built on our targets. OWNER-GATED, WP-3-PGLEDGER." },
+    { crate = "wit-bindgen@0.57.1",     reason = "wasm-only (← wasi 0.14 ← getrandom 0.4 ← postgres-protocol 0.6.12); never built on our targets. OWNER-GATED, WP-3-PGLEDGER." },
 ]
 
 [sources]
