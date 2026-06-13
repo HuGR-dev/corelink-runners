@@ -12,9 +12,11 @@
 //! property — the ledger never reaching `Released` before the close
 //! machinery produced its outcome.
 
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use anyhow::Result;
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
@@ -22,12 +24,14 @@ use axum::response::Response;
 use corelink_fabric::{InMemoryLedger, LeaseLedger, LeaseState, TenantId, TenantPlan};
 use corelink_fabric_api::{AcquireRequest, CloseRequest, CloseResponse, paths};
 use corelink_fabric_server::{
-    AppState, HookRegistry, StaticPlans, StaticTokenStore, SystemClock, app_full, close_abnormal,
+    AppState, BoxProvisioner, HookRegistry, ProbeStatus, StaticPlans, StaticTokenStore,
+    SystemClock, app_full, close_abnormal,
 };
 use corelink_runner::envelope::{
     AbnormalKind, CaptureHook, EnvelopeConfig, JobStatus, MetricsCollector, TranscriptEvent,
     TurnUsage,
 };
+use corelink_runner::lease::ContainerSpec;
 use corelink_runners_contracts::{Artifact, CheckResult, RunnerState};
 use tower::ServiceExt;
 
@@ -47,6 +51,15 @@ struct Harness {
 }
 
 fn harness() -> Harness {
+    harness_with_provisioner(None)
+}
+
+/// Build the harness, optionally injecting a custom [`BoxProvisioner`].
+///
+/// With `None` the default `NoBoxProvisioner` (teardown is a no-op that always
+/// succeeds) is used. With `Some(prov)` the close path's teardown-first gate
+/// (WP-FIX-CLOSE-LEAK) is driven by the injected provisioner.
+fn harness_with_provisioner(prov: Option<Arc<dyn BoxProvisioner>>) -> Harness {
     let store = Arc::new(StaticTokenStore::new([(
         "pat-acme".to_string(),
         tenant("acme"),
@@ -58,11 +71,54 @@ fn harness() -> Harness {
     }]);
     let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
     let registry = Arc::new(HookRegistry::default());
-    let state = AppState::new(ledger.clone(), Arc::new(plans), Arc::new(SystemClock));
+    let mut state = AppState::new(ledger.clone(), Arc::new(plans), Arc::new(SystemClock));
+    if let Some(prov) = prov {
+        state.provisioner = prov;
+    }
     Harness {
         app: app_full(store, state, registry.clone()),
         ledger,
         registry,
+    }
+}
+
+/// A provisioner whose `teardown` result is toggled by an `AtomicBool`
+/// (`true` → `Ok`, `false` → `Err`), recording how many times it was called.
+/// Mirrors the reaper's `TogglesTeardownProvisioner` so the close path's
+/// teardown-first gate can be driven through a transient failure and a retry.
+struct TogglesTeardownProvisioner {
+    should_succeed: Arc<AtomicBool>,
+    teardown_calls: Arc<AtomicUsize>,
+}
+
+impl TogglesTeardownProvisioner {
+    fn new(initial: bool) -> (Arc<Self>, Arc<AtomicBool>, Arc<AtomicUsize>) {
+        let flag = Arc::new(AtomicBool::new(initial));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let prov = Arc::new(Self {
+            should_succeed: Arc::clone(&flag),
+            teardown_calls: Arc::clone(&calls),
+        });
+        (prov, flag, calls)
+    }
+}
+
+impl BoxProvisioner for TogglesTeardownProvisioner {
+    fn provision(&self, _lease_id: &str, _spec: &ContainerSpec) -> Result<()> {
+        Ok(())
+    }
+    fn teardown(&self, _lease_id: &str) -> Result<()> {
+        self.teardown_calls.fetch_add(1, Ordering::SeqCst);
+        if self.should_succeed.load(Ordering::SeqCst) {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(
+                "teardown intentionally failed (provider incident)"
+            ))
+        }
+    }
+    fn probe(&self, _lease_id: &str) -> Result<ProbeStatus> {
+        Ok(ProbeStatus::Unbound)
     }
 }
 
@@ -478,5 +534,206 @@ async fn lease_not_released_before_close_signal_published() {
     assert_eq!(
         ledger_state(&h.ledger, &lease_id),
         LeaseState::Wire(RunnerState::Released)
+    );
+}
+
+// ── WP-FIX-CLOSE-LEAK: teardown-first on close ───────────────────────────────
+
+/// THE LEAK REGRESSION TEST: a teardown failure on close must NOT strand a
+/// `Released`-terminal lease with a leaked box. The close returns 503, the
+/// lease stays `Held` (so a reaper sweep / re-close retries), and a subsequent
+/// close with a working teardown reclaims it cleanly.
+#[tokio::test]
+async fn close_teardown_failure_is_retryable_not_terminalized() {
+    let (prov, succeed_flag, calls) = TogglesTeardownProvisioner::new(/* initial */ false);
+    let h = harness_with_provisioner(Some(prov as Arc<dyn BoxProvisioner>));
+    let lease_id = acquire(&h).await;
+    // A non-agent (no hook) lease isolates the teardown-first behavior from the
+    // §13 ack machinery — the close still drives the teardown-first gate.
+
+    // ── Attempt 1: teardown FAILS ────────────────────────────────────────────
+    let response = post_close(
+        &h,
+        &lease_id,
+        &CloseRequest {
+            status: "succeeded".to_string(),
+            check_result: None,
+        },
+    )
+    .await;
+
+    // 503 fail-closed — the box could not be reclaimed.
+    assert_eq!(
+        response.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "a failed teardown must fail closed (503), never report a clean close"
+    );
+    // CRITICAL: the lease is NOT terminalized — it stays Held so the box is
+    // still reclaimable. The old ordering left it Released-with-leaked-box.
+    assert_eq!(
+        ledger_state(&h.ledger, &lease_id),
+        LeaseState::Wire(RunnerState::Held),
+        "the lease must remain Held after a failed teardown — never Released \
+         while the box is un-reclaimed (no permanent leak)"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "teardown was attempted exactly once"
+    );
+
+    // ── Attempt 2: a retry with a working teardown reclaims it ───────────────
+    succeed_flag.store(true, Ordering::SeqCst);
+    let response = post_close(
+        &h,
+        &lease_id,
+        &CloseRequest {
+            status: "succeeded".to_string(),
+            check_result: None,
+        },
+    )
+    .await;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "the retry with a working teardown closes cleanly"
+    );
+    let body: CloseResponse =
+        serde_json::from_value(body_json(response).await).expect("CloseResponse-shaped JSON");
+    assert!(body.released, "the retry reports the lease released");
+    assert_eq!(
+        ledger_state(&h.ledger, &lease_id),
+        LeaseState::Wire(RunnerState::Released),
+        "only after a SUCCESSFUL teardown is the lease terminalized"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "teardown was retried (called twice total: one fail, one success)"
+    );
+}
+
+/// Teardown-success path is unchanged: a normal close with a working
+/// provisioner returns 200, the box is torn down exactly once, and the lease
+/// reaches `Released`.
+#[tokio::test]
+async fn close_teardown_success_path_unchanged() {
+    let (prov, _flag, calls) = TogglesTeardownProvisioner::new(/* initial */ true);
+    let h = harness_with_provisioner(Some(prov as Arc<dyn BoxProvisioner>));
+    let lease_id = acquire(&h).await;
+
+    let response = post_close(
+        &h,
+        &lease_id,
+        &CloseRequest {
+            status: "succeeded".to_string(),
+            check_result: None,
+        },
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: CloseResponse =
+        serde_json::from_value(body_json(response).await).expect("CloseResponse-shaped JSON");
+    assert!(body.released);
+    assert_eq!(
+        ledger_state(&h.ledger, &lease_id),
+        LeaseState::Wire(RunnerState::Released)
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "the box is torn down exactly once on the happy path"
+    );
+}
+
+/// §13 exactly-once close survives the teardown-first reordering: with a
+/// registered capture hook, the close fires the JobClose machinery exactly
+/// once on the attempt whose teardown succeeds. A retry after a teardown
+/// failure does NOT re-drive the hook (the close signal is delivered once),
+/// and a SECOND close of the already-Released lease is the idempotent
+/// double-close arm (400 invalid), never a second delivery or a double-free.
+#[tokio::test]
+async fn close_exactly_once_preserved_across_teardown_retry() {
+    let (prov, succeed_flag, _calls) = TogglesTeardownProvisioner::new(/* initial */ false);
+    let h = harness_with_provisioner(Some(prov as Arc<dyn BoxProvisioner>));
+    let lease_id = acquire(&h).await;
+    // Register a capture hook so the §13 JobClose machinery is exercised.
+    let hook = open_and_register(&h, &lease_id, Duration::from_millis(100));
+
+    hook.write(TranscriptEvent::ModelTurn {
+        bytes: b"turn-0".to_vec(),
+        usage: Some(TurnUsage {
+            input: 7,
+            output: 11,
+            cache_read: 0,
+            cache_write: 0,
+        }),
+        busy_ms: 0,
+    })
+    .unwrap();
+
+    // ── Attempt 1: teardown FAILS — the close must 503 and, crucially, must
+    // NOT drive the JobClose hook (teardown is gated FIRST). If the hook had
+    // fired here, the retry would hit the exactly-once latch and could never
+    // reclaim the box. ──
+    let response = post_close(
+        &h,
+        &lease_id,
+        &CloseRequest {
+            status: "succeeded".to_string(),
+            check_result: None,
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        ledger_state(&h.ledger, &lease_id),
+        LeaseState::Wire(RunnerState::Held),
+        "still Held after the failed teardown"
+    );
+
+    // ── Attempt 2: teardown succeeds — the JobClose machinery fires for the
+    // FIRST time, delivering metrics exactly once. ──
+    succeed_flag.store(true, Ordering::SeqCst);
+    let response = post_close(
+        &h,
+        &lease_id,
+        &CloseRequest {
+            status: "succeeded".to_string(),
+            check_result: None,
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: CloseResponse =
+        serde_json::from_value(body_json(response).await).expect("CloseResponse-shaped JSON");
+    assert!(body.released);
+    // The metrics from the fed collector are present — the close fired (once).
+    assert_eq!(body.metrics.tokens.input, 7);
+    assert_eq!(body.metrics.tokens.output, 11);
+    assert_eq!(body.metrics.model_turns, 1);
+    assert_eq!(
+        ledger_state(&h.ledger, &lease_id),
+        LeaseState::Wire(RunnerState::Released)
+    );
+
+    // ── Double-close: the lease is already Released — the idempotent arm
+    // (400 invalid, the legal matrix forbids closing a terminal lease). No
+    // second delivery, no double-free. ──
+    let response = post_close(
+        &h,
+        &lease_id,
+        &CloseRequest {
+            status: "succeeded".to_string(),
+            check_result: None,
+        },
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "a double-close of a Released lease is the idempotent 400 arm"
     );
 }
