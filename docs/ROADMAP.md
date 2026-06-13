@@ -1,20 +1,20 @@
 # CoreLink Runners — roadmap
 
-> Owner: HuGR TechLead · baseline: audit 2026-06-11 on `integ/seed-runner`
-> (post runner-seed, full gate verified green locally: fmt · clippy `-D warnings` ·
-> 141 tests · deny · audit · conformance hashes byte-checked).
+> Owner: HuGR TechLead · baseline: cloud-execution campaign 2026-06-12
+> (post seed + cloud fabric, full gate green on CI: fmt · clippy `-D warnings` ·
+> tests · deny · audit · conformance hashes byte-checked; live E2E proven against
+> Northflank).
 > Evidence: `docs/handoff/2026-06-10-runner-seed.md` ·
 > `docs/spec/hugit-integration-contract.md` v1.2.0 ·
-> `docs/whitepaper/corelink-runners-v1.md` (M1 bar).
+> `docs/whitepaper/corelink-runners-v1.md` (M1 bar) · ADR-0003 (egress posture).
 
-Seeded ≠ shipped. What is green today is the **execution core** (single box,
-Docker isolation, SSH transport). The **product** is M1. This file tracks the
-distance between the two; one line per item, struck through when closed.
+Built ≠ deployed to paying customers. The **cloud-execution fabric is built and
+live-proven** (managed microVM on Northflank, end-to-end acquire→provision→exec→
+attestation→teardown verified against the live provider). What remains is deploy,
+cross-repo seams, and billing integration. This file tracks the distance; one line
+per item, struck through when closed.
 
-## P0 — seed hardening (current wave, in flight)
-
-The contract obligations and audit findings that are closable **inside this
-repo, now**, with no owner input:
+## P0 — seed hardening (CLOSED 2026-06-12)
 
 - [x] **§13.1 metrics envelope** — transcribed `IntentMetrics` type +
       golden fixture + derivation collector (`558842e`, `fdccc33`).
@@ -27,50 +27,74 @@ repo, now**, with no owner input:
 - [x] Fixup squashed; contract title + CLAUDE.md at v1.2.0; transplant prose
       fixed (`9c86744`). deny.toml `Zlib` kept deliberately (house set ≡ hugit).
 
-Scope note (recorded, not silent): §13 lands as the **mechanism** (module with
-the contracted semantics + acceptance suite). Wiring it into the production
-lease/API path is M1 work — the obligation binds "when the runner product
-hosts agent-driven execution", i.e. the M1 fabric.
+## P1 — ship the seed (CLOSED 2026-06-12)
 
-## P1 — ship the seed (owner-gated: every item needs Gustavo)
+- [x] GitHub repo + remote — `humangr-labs/corelink-runners` (private).
+- [x] Default branch `main`; `ci.yml` trigger aligned; `corelink-runners-builder-01`
+      registered (labels mac, corelink-builder).
+- [x] PR #1 → first real CI run green → merged → tag `v0.1.0-seed` (2026-06-12).
 
-The repo is local-only today: no remote, no backup, CI has never executed as
-CI, and branch→PR→merge is physically impossible. To ship the seed milestone:
+## Cloud-execution campaign (SHIPPED 2026-06-12)
 
-- [x] Create the GitHub repo + remote — `humangr-labs/corelink-runners` (private).
-- [x] Default branch `main` (house standard); `ci.yml` trigger aligned.
-- [x] Runner `corelink-runners-builder-01` registered (labels mac,
-      corelink-builder), service installed on the builder Mac.
-- [x] PR #1 → first real CI run green → merged `6b42bcb` → tag
-      `v0.1.0-seed` (2026-06-12).
-- [ ] **Cross-repo `IntentMetrics` conformance vector** — §13.4 requires it
-      byte-identical in both repos; `../hugit/conformance/` does not have it
-      yet either. Needs a hugit-side PR (hugit techlead) + mirror here.
-- [ ] **`hugit-c9-` container-prefix rename decision** — ops-visible on the
-      shared interim box; rename is a seam change, not a local cleanup.
+The managed-microVM production fabric, built behind the frozen Engine seam and
+proven end-to-end against the live Northflank provider. PRs #17–#23 + audit:
 
-## M1 — the production fabric (campaign; decompose when P1 closes)
+- [x] **WP-CLOUD1** (#17) — `corelink-cloud-engine`: Engine→Northflank Job-run
+      adapter; `ureq` quarantined behind an `HttpTransport` trait.
+- [x] **WP-CF-WIRE** (#18) — engine wired into `LeasedExec`; default-off
+      (no creds → fail-closed `NoBoxExec`).
+- [x] **WP-CLOUD-EGRESS** (#19) — adapter validated against the live Northflank
+      API; structured CRI-log parsing + team-scoped base URL; ADR-0003 (egress
+      posture: cross-tenant isolation is the hard guarantee, internet egress accepted
+      at launch bounded by no-free-tier model; BYOC = enterprise lockdown).
+- [x] **WP-CF-SPAWN** (#20) — spawn/teardown lifecycle binding leases→containers
+      into a `BoxRegistry` (provision at acquire, teardown at close); default-off,
+      fail-closed.
+- [x] **WP-DEPLOY-MIN-BIN** (#21) — `corelink-fabricd`, the production server
+      binary: config-from-env, fail-closed signing key (dev-unsafe refused on
+      non-loopback bind), bootstrap-tenant plan, Dockerfile + deploy doc.
+- [x] **audit-fixes** (#22) — 13-agent adversarial audit: token redaction
+      (NorthflankConfig/Engine, no Debug leak), orphan teardown on post-provision
+      ledger failure, fail-closed HTTP acceptance coverage, engine transport/probe
+      error-path coverage.
+- [x] **WP-CF-REAP** (#23) — expiry-driven orphan box reaper (teardown-first then
+      mark-Expired, retryable on failure; side-table GC; shutdown-abort).
+- [x] **Live E2E** — `corelink-fabricd` booted against live Northflank: acquire →
+      provision (real job) → exec (real run, exit 0) → signed attestation →
+      teardown; provider verified clean.
 
-The bar (whitepaper): multi-tenant behind the same `RunnerLease` semantics —
-caps enforced before load, p95 fairness, measurable non-interference,
-byte-determinism, signed attestation. "M1 replaces the transport, not the
-contract." Epics:
+## In flight (this branch)
 
-- [x] Multi-tenant control plane — ledger+lifecycle+caps+scheduler+
-      non-interference surface (CP1–CP4, waves 1–4).
-- [x] Public lease API — PAT fail-closed, acquire/status/cancel, exec→
-      CheckResult (frozen memo formula), §9 trigger (API1–API4, waves 2–5).
-- [x] Billing M1 scope — slot metering (no duration accumulator by
-      construction) + product §5 ladder→caps (BIL1/2); invoicing deferred
-      to M2 (ratified decision #4).
-- [ ] Firecracker engine (FC1–FC5) — **blocked on the KVM bare-metal buy**
-      (ratified decision #5); Engine v2 seam frozen and waiting.
-- [x] §13 wiring — authenticated hook transport + close machinery on the
-      real release path (ENV1/2, waves 3+5); ENV3 vector = hugit PR #104.
-- [x] Attestation §7 — mandatory signed chain + result-binding sig on every
-      execution surface, published key (ATT1/2, wave 6; binding extension
-      flagged for §12). ATT3 secrets seam awaits the hugit payload contract
-      (decision #7).
+- [ ] **WP-ENVELOPE-WIRE** — register the per-lease §13 `CaptureHook` at acquire
+      so envelope endpoints + close machinery are live on the real exec path
+      (internal plumbing; `IntentMetrics` §13.4 conformance vector remains
+      owner/hugit-gated — see cross-repo items below).
+
+## Remaining work — owner-gated or cross-repo
+
+Items that cannot close without owner input or a hugit-side move:
+
+- [ ] **Real cloud deploy** _(owner-gated)_ — provision the box where
+      `corelink-fabricd` runs; set `NORTHFLANK_*` secrets in the environment;
+      point the fabric at a real tenant. The binary and Dockerfile are ready (#21).
+- [ ] **CoreLink auth+billing integration** _(cross-repo, PR #15 handoff)_ —
+      PAT validation + slot metering wired to the CoreLink platform; prerequisite
+      for selling concurrency SKUs.
+- [ ] **`IntentMetrics` §13.4 conformance vector** _(hugit PR #5 mirror)_ —
+      §13.4 requires the vector byte-identical in both repos; blocked on the
+      hugit-side twin PR (hugit techlead); mirror here immediately after.
+- [ ] **`hugit-c9-` container-prefix rename decision** — ops-visible seam change;
+      not a local cleanup.
+- [ ] **ATT3 secrets seam** — awaits the hugit payload contract (decision #7).
+- [ ] **Full §13 exec-time intent emission** — wiring `IntentMetrics` collection
+      into the live exec path at M1 scale; depends on §13.4 vector landing first.
+
+## Firecracker / own-metal (deferred — off critical path)
+
+- [ ] **FC1–FC5** — Firecracker engine: **blocked on KVM bare-metal buy**
+      (ratified decision #5). The managed-microVM provider (Northflank) removes
+      this from the critical path for the initial product; Engine v2 seam is frozen
+      and waiting for when the hardware arrives.
 
 ## M2 — direct GA
 

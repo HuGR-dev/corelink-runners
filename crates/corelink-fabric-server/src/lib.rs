@@ -30,7 +30,7 @@ pub use app::{
 pub use attestation::{
     build_attestation, result_binding_preimage, sign_result_binding, verify_execution,
 };
-pub use auth::{StaticTokenStore, TokenStore, TokenStoreError};
+pub use auth::{BearerPat, StaticTokenStore, TokenStore, TokenStoreError};
 pub use cloud_exec::{
     BoxProvisioner, BoxRegistry, EngineLeasedExec, NoBoxProvisioner, NorthflankBoxProvisioner,
     cloud_backend_from_env, cloud_executor_from_env,

@@ -147,6 +147,11 @@ pub struct AppState {
     pub(crate) images: Arc<Mutex<HashMap<String, String>>>,
     /// Monotonic mint counter for lease ids.
     lease_seq: Arc<AtomicU64>,
+    /// The §13 capture-hook registry: registered at acquire, unregistered
+    /// at close or reap. Shared instance: `app_full` layers this onto the
+    /// HTTP Extension stack so both the handlers AND the reaper reference
+    /// the SAME map (the shared-instance crux, mirroring BoxRegistry).
+    pub hook_registry: Arc<HookRegistry>,
 }
 
 /// Deterministic DEV seed for the default fabric signing key wired by
@@ -176,6 +181,7 @@ impl AppState {
             signer: Arc::new(FabricSigner::new_from_bytes(&DEV_FABRIC_KEY_SEED)),
             images: Arc::new(Mutex::new(HashMap::new())),
             lease_seq: Arc::new(AtomicU64::new(1)),
+            hook_registry: Arc::new(HookRegistry::default()),
         }
     }
 
@@ -364,10 +370,13 @@ impl AppState {
             .clone()
     }
 
-    /// Remove `lease_id` from both side-tables (`deadlines` + `images`).
+    /// Remove `lease_id` from both side-tables (`deadlines` + `images`) and
+    /// from the hook registry (GC the §13 capture hook, if any).
     ///
     /// Called by the reaper after a successful teardown to GC entries that are
     /// no longer needed — prevents unbounded growth for long-running processes.
+    /// The close handler's own `registry.unregister` covers normal close;
+    /// this covers the reaper/orphan teardown path.
     pub(crate) fn forget_lease(&self, lease_id: &str) {
         self.deadlines
             .lock()
@@ -377,6 +386,7 @@ impl AppState {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(lease_id);
+        self.hook_registry.unregister(lease_id);
     }
 }
 
@@ -416,11 +426,22 @@ pub fn app_with_registry(
 /// [`AppState`] (WP-API2), and the envelope [`HookRegistry`] (WP-ENV1).
 /// [`app`] and [`app_with_registry`] are thin conveniences over this; all
 /// routes from both surfaces are registered here, once.
+///
+/// **Shared-instance crux:** `app_full` writes `registry` onto
+/// `state.hook_registry` so the same `Arc` is reachable from BOTH the HTTP
+/// Extension (poll/close handlers) AND `AppState` (reaper, acquire handler).
+/// Any caller that retains the `AppState` for the reaper MUST use `app_full`
+/// to guarantee the registry instances are identical.
 pub fn app_full(
     store: Arc<dyn TokenStore + Send + Sync>,
-    state: AppState,
+    mut state: AppState,
     registry: Arc<HookRegistry>,
 ) -> Router {
+    // Wire the shared instance onto AppState so the reaper and the acquire
+    // handler (which extracts the registry from AppState, NOT from the HTTP
+    // Extension) operate on the SAME map as the HTTP poll/close handlers.
+    state.hook_registry = Arc::clone(&registry);
+
     let authenticated = Router::new()
         .route(paths::METRICS_TENANT, get(handlers::metrics::tenant_wait))
         .route(paths::LEASES, post(handlers::leases::acquire))
