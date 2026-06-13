@@ -29,6 +29,9 @@
 //! `Pending → Held` atomically under one ledger lock — so a wire-visible
 //! `Pending` never exists. Defensively, a `Pending` record reads as 404.
 
+use std::sync::Arc;
+use std::time::Instant;
+
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -37,11 +40,13 @@ use corelink_fabric::{CapDecision, LeaseRecord, LeaseState, TenantId};
 use corelink_fabric_api::{
     AcquireRequest, AcquireResponse, ApiError, CancelResponse, StatusResponse, paths,
 };
+use corelink_runner::envelope::{CaptureHook, EnvelopeConfig, MetricsCollector};
 use corelink_runner::lease::ContainerSpec;
 use corelink_runners_contracts::{RunnerLease, RunnerState};
 
 use crate::app::AppState;
-use crate::auth::error_response;
+use crate::auth::{BearerPat, error_response};
+use crate::handlers::envelope::HookRegistry;
 
 /// 404 with the frozen body — used identically for "does not exist" and
 /// "exists for another tenant", so the response is never an existence oracle.
@@ -58,6 +63,8 @@ fn fail_closed(what: &str) -> Response {
 pub(crate) async fn acquire(
     State(state): State<AppState>,
     Extension(tenant): Extension<TenantId>,
+    Extension(registry): Extension<Arc<HookRegistry>>,
+    Extension(pat): Extension<BearerPat>,
     Json(req): Json<AcquireRequest>,
 ) -> Response {
     let now_ms = state.clock.now_ms();
@@ -215,6 +222,30 @@ pub(crate) async fn acquire(
     // The validated pinned image digest is also recorded: it is the image
     // identity the attestation path (WP-ATT1, contract §7) reads at exec.
     state.record_image(&lease_id, &req.image_digest);
+
+    // ── 5b. §13 hook registration (WP-ENVELOPE-WIRE): open a CaptureHook
+    // for the newly-Held lease and register it in the shared HookRegistry
+    // so the envelope poll endpoints are live immediately for this lease.
+    // Registration is on the SUCCESS path only — a failed acquire (any
+    // branch above that returns early) never registers a hook.
+    // The credential = the acquiring tenant's Bearer PAT (the contract's
+    // §13.2 authenticated-hook-point seam). ⚠️ CROSS-REPO SEAM — UNCONFIRMED:
+    // this assumes hugit's envelope SUBSCRIBER presents the SAME PAT that
+    // acquired the lease. If the forge subscribes with a different PAT (e.g.
+    // acquire = build orchestrator, subscribe = envelope consumer), every poll
+    // would 503 on the credential gate. This binding must be confirmed with the
+    // hugit techlead before the §13 subscribe path is relied on in production;
+    // it is one line to change (the credential source) once the seam is settled.
+    let hook = CaptureHook::open(
+        EnvelopeConfig {
+            ack_timeout: std::time::Duration::from_secs(30),
+            buffer_capacity: 256,
+        },
+        &pat.0,
+        MetricsCollector::new(Instant::now()),
+    );
+    registry.register(&lease_id, tenant.clone(), hook, &pat.0);
+
     let exec_endpoint = paths::EXEC.replace("{lease_id}", &lease_id);
     (
         StatusCode::OK,

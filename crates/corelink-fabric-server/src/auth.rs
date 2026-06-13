@@ -21,6 +21,20 @@ use axum::response::{IntoResponse, Response};
 use corelink_fabric::TenantId;
 use corelink_fabric_api::ApiError;
 
+/// The raw Bearer PAT injected into request extensions by [`require_tenant`].
+///
+/// Security: `Debug` is intentionally NOT derived — use the redacting impl
+/// below so the PAT can never appear in `{:?}` output (log lines, panic
+/// messages, structured traces).  This is the audit-lesson newtype.
+#[derive(Clone)]
+pub struct BearerPat(pub String);
+
+impl std::fmt::Debug for BearerPat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "BearerPat(***REDACTED***)")
+    }
+}
+
 /// Failure of the token-store seam itself (distinct from "token unknown",
 /// which is `Ok(None)` and a 401).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,11 +95,12 @@ pub(crate) async fn require_tenant(
     mut req: Request,
     next: Next,
 ) -> Response {
-    let Some(token) = bearer_token(&req) else {
+    let Some(token_str) = bearer_token(&req).map(str::to_string) else {
         return error_response(ApiError::Unauthorized, "missing Bearer PAT");
     };
-    match store.tenant_of(token) {
+    match store.tenant_of(&token_str) {
         Ok(Some(tenant)) => {
+            req.extensions_mut().insert(BearerPat(token_str));
             req.extensions_mut().insert(tenant);
             next.run(req).await
         }
