@@ -70,13 +70,27 @@ pub(crate) async fn acquire(
     let now_ms = state.clock.now_ms();
 
     // ── 1. CapGate BEFORE anything (contract §6: preventive admission). ──
-    // No plan on file = zero purchased slots: fail-closed over-cap, never a
-    // default allowance.
-    let Some(plan) = state.plans.plan_of(&tenant) else {
-        return error_response(
-            ApiError::OverCap,
-            "no plan on file for tenant: zero concurrency slots",
-        );
+    // Resolve the plan through the token-aware seam: token-keyed backends
+    // (CoreLink introspection) read the cap from the request's bearer PAT;
+    // static backends ignore the token via the default delegation.
+    //   - Ok(Some) → admit through the cap gate below.
+    //   - Ok(None) → no plan on file = zero purchased slots: fail-closed
+    //     over-cap, never a default allowance (byte-identical to the prior
+    //     reject).
+    //   - Err(Unreachable) → the cap source could not be consulted: 503
+    //     fail-closed, NEVER a false no-plan reject that would 0-slot a
+    //     legitimate tenant on a transient backend glitch.
+    let plan = match state.plans.plan_of_resolving(&tenant, &pat.0) {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            return error_response(
+                ApiError::OverCap,
+                "no plan on file for tenant: zero concurrency slots",
+            );
+        }
+        Err(crate::app::PlanSourceError::Unreachable) => {
+            return fail_closed("plan source unreachable");
+        }
     };
 
     // ── 1b. Cap + rate check under the ledger lock. The lock is released
