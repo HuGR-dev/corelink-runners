@@ -8,9 +8,13 @@
 //!   loud well-known dev seed (attestations are forgeable — never production).
 //!   The dev-unsafe path additionally refuses any non-loopback bind address.
 //!   Missing both → startup fails.
-//! - **Token store** — `FABRIC_PAT` / `FABRIC_TENANT` bootstrap a single
-//!   `StaticTokenStore` entry.  M1 production expands this to the CoreLink
-//!   Cache PAT backend; the seam is the same `TokenStore` trait.
+//! - **Token store** — controlled by `FABRIC_AUTH_BACKEND` (default `"static"`):
+//!   - `"static"` (default): `FABRIC_PAT` / `FABRIC_TENANT` bootstrap a single
+//!     `StaticTokenStore` entry.  Existing tests unaffected.
+//!   - `"corelink"`: a [`CoreLinkTokenStore`] backed by the CoreLink
+//!     introspection endpoint (`CORELINK_INTROSPECT_URL` +
+//!     `FABRIC_INTROSPECT_AUTH_KEY`).  `FABRIC_PAT`/`FABRIC_TENANT` are NOT
+//!     required in this mode; the tenant comes from introspection.
 //! - **Plans** — `FABRIC_TENANT_MAX_CONCURRENCY` (required, ≥ 1) and
 //!   `FABRIC_TENANT_RATE_PER_MIN` (optional, default 120) seed a
 //!   `StaticPlans` entry for the bootstrap tenant.  Without a plan the server
@@ -36,6 +40,7 @@ use axum::Router;
 use base64::Engine as _;
 use corelink_fabric::{InMemoryLedger, LeaseLedger, TenantId, TenantPlan};
 
+use crate::corelink_auth::{CoreLinkAuthConfig, CoreLinkTokenStore, UreqIntrospect};
 use crate::{
     AppState, BoxRegistry, HookRegistry, StaticPlans, StaticTokenStore, SystemClock, app_full,
 };
@@ -45,13 +50,49 @@ use crate::{
 /// trivially forgeable; **never use in production**.
 pub const DEV_UNSAFE_SEED: [u8; 32] = *b"corelink-runners-DEV-fabric-key!";
 
+// ── Auth backend discriminant ─────────────────────────────────────────────────
+
+/// Which token-store backend to wire at startup.
+///
+/// `Debug` is MANUALLY implemented — the `CoreLink` variant carries a
+/// [`CoreLinkAuthConfig`] whose `service_secret` must never appear in logs.
+pub enum AuthBackend {
+    /// Static in-memory map: `FABRIC_PAT` → `FABRIC_TENANT`.  Default.
+    Static,
+    /// CoreLink introspection endpoint.
+    CoreLink(CoreLinkAuthConfig),
+}
+
+impl std::fmt::Debug for AuthBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AuthBackend::Static => write!(f, "AuthBackend::Static"),
+            AuthBackend::CoreLink(cfg) => {
+                f.debug_tuple("AuthBackend::CoreLink").field(cfg).finish()
+            }
+        }
+    }
+}
+
+// ── ServerConfig ──────────────────────────────────────────────────────────────
+
 /// All resolved configuration for the fabric server.
-#[derive(Debug)]
+///
+/// `Debug` is MANUALLY implemented because `auth_backend` carries a
+/// [`CoreLinkAuthConfig`] (when `FABRIC_AUTH_BACKEND=corelink`) that contains
+/// a service secret which must never appear in log output.  The legacy
+/// `bootstrap_pat` field also must not be leaked.
 pub struct ServerConfig {
     pub bind_addr: String,
     pub signing_key: [u8; 32],
+    /// The bootstrap PAT — populated from `FABRIC_PAT` when the static backend
+    /// is active.  Empty string in `corelink` mode (not used).
     pub bootstrap_pat: String,
+    /// The bootstrap tenant key — populated from `FABRIC_TENANT` when the
+    /// static backend is active.  Empty string in `corelink` mode (not used).
     pub bootstrap_tenant: String,
+    /// The resolved auth backend discriminant.
+    pub auth_backend: AuthBackend,
     /// Maximum concurrently-held leases for the bootstrap tenant.  The
     /// billable concurrency unit.  Must be ≥ 1.
     pub max_concurrency: u32,
@@ -76,6 +117,23 @@ pub struct ServerConfig {
     pub mock_exec: bool,
 }
 
+impl std::fmt::Debug for ServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerConfig")
+            .field("bind_addr", &self.bind_addr)
+            .field("signing_key", &"[redacted 32 bytes]")
+            .field("bootstrap_pat", &"***REDACTED***")
+            .field("bootstrap_tenant", &self.bootstrap_tenant)
+            .field("auth_backend", &self.auth_backend)
+            .field("max_concurrency", &self.max_concurrency)
+            .field("rate_ceiling_per_min", &self.rate_ceiling_per_min)
+            .field("mock_exec", &self.mock_exec)
+            .finish()
+    }
+}
+
+// ── config_from_env ───────────────────────────────────────────────────────────
+
 /// Resolve [`ServerConfig`] from an environment-variable accessor.
 ///
 /// `get` is `|k| std::env::var(k).ok()` in production; a map lookup in tests.
@@ -86,8 +144,12 @@ pub struct ServerConfig {
 ///   OR `FABRIC_DEV_UNSAFE=1` must be set (loud warning printed to stderr).
 ///   The dev-unsafe path additionally requires a loopback bind address.
 ///   Neither key path → error.
-/// - `FABRIC_PAT` must be present and non-whitespace.
-/// - `FABRIC_TENANT` must be present and well-shaped (`[a-z0-9-]`).
+/// - `FABRIC_AUTH_BACKEND` (default `"static"`):
+///   - `"static"`: `FABRIC_PAT` must be present + non-whitespace; `FABRIC_TENANT`
+///     must be present and well-shaped (`[a-z0-9-]`).
+///   - `"corelink"`: `CORELINK_INTROSPECT_URL` + `FABRIC_INTROSPECT_AUTH_KEY`
+///     required (non-empty); `FABRIC_INTROSPECT_TIMEOUT_MS` optional (default
+///     2000).  `FABRIC_PAT`/`FABRIC_TENANT` are NOT required.
 /// - `FABRIC_BIND_ADDR` must parse as a `SocketAddr` if non-default.
 /// - `FABRIC_TENANT_MAX_CONCURRENCY` is **required** and must be ≥ 1 (no
 ///   default — a deployer must choose; 0 would silently serve an unusable
@@ -151,27 +213,91 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
         );
     };
 
-    // ── Bootstrap PAT ────────────────────────────────────────────────────────
-    // Trim: secret mounts append newlines.
-    let bootstrap_pat = get("FABRIC_PAT")
-        .map(|s| s.trim().to_string())
+    // ── Auth backend ─────────────────────────────────────────────────────────
+    // Default "static" keeps the current FABRIC_PAT/FABRIC_TENANT path exactly
+    // as today so existing tests and deployments are unaffected.
+    let auth_backend_name = get("FABRIC_AUTH_BACKEND")
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("FABRIC_PAT is required and must not be empty"))?;
-    if bootstrap_pat.trim().is_empty() {
-        anyhow::bail!("FABRIC_PAT must not be whitespace-only");
-    }
+        .unwrap_or_else(|| "static".to_string());
 
-    // ── Bootstrap tenant ─────────────────────────────────────────────────────
-    // Trim + validate shape at config time so a malformed FABRIC_TENANT is
-    // caught here, not silently later.
-    let bootstrap_tenant_raw = get("FABRIC_TENANT")
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("FABRIC_TENANT is required and must not be empty"))?;
-    // Validate shape now; build_app can re-construct via .expect() since it's
-    // already known-good.
-    TenantId::new(&bootstrap_tenant_raw)
-        .with_context(|| format!("invalid FABRIC_TENANT: {bootstrap_tenant_raw:?}"))?;
+    let (auth_backend, bootstrap_pat, bootstrap_tenant) = match auth_backend_name.as_str() {
+        "static" => {
+            // ── Bootstrap PAT ────────────────────────────────────────────────
+            // Trim: secret mounts append newlines.
+            let pat = get("FABRIC_PAT")
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("FABRIC_PAT is required and must not be empty"))?;
+            if pat.trim().is_empty() {
+                anyhow::bail!("FABRIC_PAT must not be whitespace-only");
+            }
+
+            // ── Bootstrap tenant ─────────────────────────────────────────────
+            // Trim + validate shape at config time so a malformed FABRIC_TENANT
+            // is caught here, not silently later.
+            let tenant_raw = get("FABRIC_TENANT")
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("FABRIC_TENANT is required and must not be empty")
+                })?;
+            // Validate shape now; build_app can re-construct via .expect() since
+            // it's already known-good.
+            TenantId::new(&tenant_raw)
+                .with_context(|| format!("invalid FABRIC_TENANT: {tenant_raw:?}"))?;
+
+            (AuthBackend::Static, pat, tenant_raw)
+        }
+
+        "corelink" => {
+            // CORELINK_INTROSPECT_URL: required, non-empty.
+            let introspect_url = get("CORELINK_INTROSPECT_URL")
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "CORELINK_INTROSPECT_URL is required when FABRIC_AUTH_BACKEND=corelink"
+                    )
+                })?;
+
+            // FABRIC_INTROSPECT_AUTH_KEY: required, non-empty.
+            let service_secret = get("FABRIC_INTROSPECT_AUTH_KEY")
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "FABRIC_INTROSPECT_AUTH_KEY is required when FABRIC_AUTH_BACKEND=corelink"
+                    )
+                })?;
+
+            // FABRIC_INTROSPECT_TIMEOUT_MS: optional, default 2000.
+            let timeout_ms: u64 = match get("FABRIC_INTROSPECT_TIMEOUT_MS") {
+                None => 2000,
+                Some(v) => v
+                    .trim()
+                    .parse::<u64>()
+                    .context("FABRIC_INTROSPECT_TIMEOUT_MS must be a valid u64")?,
+            };
+            let timeout = std::time::Duration::from_millis(timeout_ms);
+
+            let cfg = CoreLinkAuthConfig {
+                introspect_url,
+                service_secret,
+                timeout,
+            };
+
+            // In corelink mode FABRIC_PAT/FABRIC_TENANT are not required.
+            // bootstrap_pat/tenant are left empty; build_app_and_state will not
+            // attempt to construct a StaticTokenStore from them.
+            (AuthBackend::CoreLink(cfg), String::new(), String::new())
+        }
+
+        other => {
+            anyhow::bail!(
+                "unknown FABRIC_AUTH_BACKEND {other:?}; expected \"static\" or \"corelink\""
+            );
+        }
+    };
 
     // ── Concurrency plan ─────────────────────────────────────────────────────
     // REQUIRED — no default: the deployer must consciously choose a cap.  A 0
@@ -247,12 +373,15 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
         bind_addr,
         signing_key,
         bootstrap_pat,
-        bootstrap_tenant: bootstrap_tenant_raw,
+        bootstrap_tenant,
+        auth_backend,
         max_concurrency,
         rate_ceiling_per_min,
         mock_exec,
     })
 }
+
+// ── build_app_and_state ───────────────────────────────────────────────────────
 
 /// Assemble the full axum [`Router`] and the shared [`AppState`] from a
 /// resolved [`ServerConfig`].
@@ -262,6 +391,14 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
 /// the state.  The state is needed by any background task (e.g. the reaper)
 /// that shares the same ledger/provisioner Arcs.
 ///
+/// # Token store dispatch
+///
+/// - `AuthBackend::Static` → [`StaticTokenStore`] (FABRIC_PAT / FABRIC_TENANT).
+///   Byte-identical to the pre-WP-CORELINK-AUTH path.
+/// - `AuthBackend::CoreLink` → [`CoreLinkTokenStore`] backed by the CoreLink
+///   introspection endpoint.  The `UreqIntrospect` transport is configured
+///   with the resolved timeout.
+///
 /// # Not yet wired
 ///
 /// **Envelope / §13 emission** (CF-ENVELOPE-WIRE) — per-lease `CaptureHook`
@@ -270,22 +407,57 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
 pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, crate::AppState)> {
     let registry = BoxRegistry::new();
 
-    let tenant = TenantId::new(&cfg.bootstrap_tenant)
-        .expect("bootstrap_tenant was validated in config_from_env");
-
-    let store = Arc::new(StaticTokenStore::new([(
-        cfg.bootstrap_pat.clone(),
-        tenant.clone(),
-    )]));
-
     let signer = Arc::new(corelink_runner::attest::FabricSigner::new_from_bytes(
         &cfg.signing_key,
     ));
 
     let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
 
+    // ── Token store + bootstrap tenant/plan ──────────────────────────────────
+    // Static: keep the existing StaticTokenStore path byte-identical.
+    // CoreLink: wire CoreLinkTokenStore; the bootstrap plan still requires a
+    //   tenant — for now we use a placeholder that admits all tenants through
+    //   the plans gate.  (M1 production wiring will replace StaticPlans with a
+    //   live plan source.)
+    let (store, bootstrap_tenant_for_plan): (Arc<dyn crate::auth::TokenStore + Send + Sync>, _) =
+        match &cfg.auth_backend {
+            AuthBackend::Static => {
+                // This is the ONLY path that existed before WP-CORELINK-AUTH.
+                // It is byte-identical to the pre-change code.
+                let tenant = TenantId::new(&cfg.bootstrap_tenant)
+                    .expect("bootstrap_tenant was validated in config_from_env");
+                let static_store = Arc::new(StaticTokenStore::new([(
+                    cfg.bootstrap_pat.clone(),
+                    tenant.clone(),
+                )]));
+                (static_store, tenant)
+            }
+            AuthBackend::CoreLink(auth_cfg) => {
+                // Build the CoreLink token store with the real ureq transport.
+                // The timeout is already resolved in config_from_env.
+                let transport = UreqIntrospect::new(auth_cfg.timeout);
+                // We need a CoreLinkAuthConfig to pass — reconstruct from fields.
+                let store_cfg = CoreLinkAuthConfig {
+                    introspect_url: auth_cfg.introspect_url.clone(),
+                    service_secret: auth_cfg.service_secret.clone(),
+                    timeout: auth_cfg.timeout,
+                };
+                let cl_store = Arc::new(CoreLinkTokenStore::new(transport, store_cfg));
+
+                // In CoreLink mode there's no single bootstrap tenant.  The
+                // max_concurrency plan is seeded under a sentinel tenant id
+                // that won't match any real token (the real tenant caps come
+                // from the plan source in M1).  For M0 seed the plan is
+                // effectively unused; we still satisfy the StaticPlans
+                // constructor with a valid key.
+                let sentinel =
+                    TenantId::new("corelink-introspect-mode").expect("valid sentinel tenant id");
+                (cl_store, sentinel)
+            }
+        };
+
     let plans = StaticPlans::new([TenantPlan {
-        tenant: tenant.clone(),
+        tenant: bootstrap_tenant_for_plan,
         max_concurrency: cfg.max_concurrency,
         rate_ceiling_per_min: cfg.rate_ceiling_per_min,
     }]);

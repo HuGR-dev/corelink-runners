@@ -19,6 +19,7 @@ pub mod app;
 pub mod attestation;
 pub mod auth;
 pub mod cloud_exec;
+pub mod corelink_auth;
 pub mod exec;
 pub mod handlers;
 pub mod reaper;
@@ -34,6 +35,9 @@ pub use auth::{BearerPat, StaticTokenStore, TokenStore, TokenStoreError};
 pub use cloud_exec::{
     BoxProvisioner, BoxRegistry, EngineLeasedExec, NoBoxProvisioner, NorthflankBoxProvisioner,
     cloud_backend_from_env, cloud_executor_from_env,
+};
+pub use corelink_auth::{
+    CoreLinkAuthConfig, CoreLinkTokenStore, IntrospectHttp, IntrospectResponse, UreqIntrospect,
 };
 pub use exec::{
     FakeLeasedExec, LeasedExec, MOCK_STDOUT, MockLeasedExec, NoBoxExec, compute_memo_key, run_check,

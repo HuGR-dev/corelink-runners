@@ -18,6 +18,10 @@ anyhow     = { workspace = true }
 sha2       = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
+# WP-CORELINK-AUTH: the CoreLinkTokenStore transport (UreqIntrospect).
+# ureq is already a workspace/lock dep (corelink-cloud-engine uses it) — adding
+# it here adds ZERO new crates to Cargo.lock.
+ureq       = { workspace = true }
 # WP-ENV1: standard-base64 wire form of the drained raw transcript bytes
 # (same alphabet convention as the attestation wire form).
 base64     = { workspace = true }
