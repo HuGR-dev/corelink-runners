@@ -1,31 +1,34 @@
 //! Plan tiers → per-tenant cap enforcement (BIL2).
 //!
-//! Maps the product §5 plan ladder to the [`TenantPlan`] values CP2 enforces.
+//! Maps the canonical plan ladder to the [`TenantPlan`] values CP2 enforces.
 //! The registry is keyed by **org = tenant** (ADR-0002 §3: "per-tenant caps,
 //! fairness, and billing key off the same org = tenant" — one identity, not
 //! three): the org IS the tenant key, so a plan set here is the same key the
 //! cap gate, fairness, and the Stripe customer all hang off.
 //!
-//! ## The ladder (product.md §5, concurrency column)
+//! ## The ladder (pricing.md §2, owner-decided 2026-06-12)
 //!
-//! | Tier  | max_concurrency | rate_ceiling_per_min |
-//! |-------|-----------------|----------------------|
-//! | Free  | 1               | 10                   |
-//! | Solo  | 1               | 20                   |
-//! | Team  | 4               | 60                   |
-//! | Scale | 12              | 240                  |
+//! | Tier    | $/mo | max_concurrency |
+//! |---------|------|-----------------|
+//! | Starter | $8   | 20              |
+//! | Pro     | $20  | 40              |
+//! | Team    | $50  | 80              |
+//! | Scale   | $100 | 160             |
+//! | Max     | $200 | 320             |
 //!
-//! Concurrency caps transcribe the product §5 ladder exactly (Free 1 shared ·
-//! Solo 1 dedicated · Team 4 · Scale 12). The **Enterprise** row is custom /
-//! BYOC per contract — it has no fixed cap, so it is deliberately NOT a
-//! [`PlanTier`] variant; an enterprise tenant gets a bespoke `TenantPlan`
-//! through whatever M2+ contract tooling provisions it, never through this
-//! fixed table.
+//! Concurrency caps transcribe the `pricing.md §2` ladder exactly (Starter 20 ·
+//! Pro 40 · Team 80 · Scale 160 · Max 320). Above Max is **Enterprise**
+//! (custom / governance / BYOC per contract) — it has no fixed cap, so it is
+//! deliberately NOT a [`PlanTier`] variant; an enterprise tenant gets a bespoke
+//! `TenantPlan` through whatever M2+ contract tooling provisions it, never
+//! through this fixed table.
 //!
-//! TODO(owner): the `rate_ceiling_per_min` column is an **M1 placeholder
-//! pending product sign-off** — product §5 prices the ladder but specifies no
-//! acquire-rate ceilings. Values chosen here scale with the concurrency cap;
-//! ratify or replace before M2 self-serve GA.
+//! TODO(owner): the `rate_ceiling_per_min` column is a **derived M1 placeholder
+//! pending product sign-off** — `pricing.md` defines no acquire-rate ceiling
+//! (it bounds compute with a vCPU-h/mo hard ceiling instead, not a per-minute
+//! rate dimension). corelink-server's model likewise has no per-minute rate
+//! dimension, so we keep this field optional/derived on our side: it is set to
+//! `max_concurrency * 10`. Ratify or replace before M2 self-serve GA.
 //!
 //! ## No caching layer — deliberate
 //!
@@ -42,40 +45,46 @@ use std::collections::HashMap;
 
 use crate::tenant::{TenantId, TenantPlan};
 
-/// Self-serve plan tiers from the product §5 ladder (fixed-cap rows only;
-/// Enterprise is custom-contract and intentionally absent — see module docs).
+/// Self-serve plan tiers from the `pricing.md §2` ladder (fixed-cap rows only;
+/// Enterprise — above Max — is custom-contract and intentionally absent, see
+/// module docs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PlanTier {
-    /// 1 shared runner, fair-use — hobby / OSS / trials.
-    Free,
-    /// 1 dedicated runner — solo dev + a few agents.
-    Solo,
-    /// 4 parallel runners — small team / fleet.
+    /// 20 parallel runners — solo dev / entry tier ($8/mo).
+    Starter,
+    /// 40 parallel runners — growing dev + agents ($20/mo).
+    Pro,
+    /// 80 parallel runners — small team / fleet ($50/mo).
     Team,
-    /// 12 parallel runners — busy fleet, volume discount.
+    /// 160 parallel runners — busy fleet ($100/mo).
     Scale,
+    /// 320 parallel runners — heavy fleet, volume tier ($200/mo).
+    Max,
 }
 
 impl PlanTier {
     /// Every fixed tier, for table-driven exhaustive checks.
-    pub const ALL: [PlanTier; 4] = [
-        PlanTier::Free,
-        PlanTier::Solo,
+    pub const ALL: [PlanTier; 5] = [
+        PlanTier::Starter,
+        PlanTier::Pro,
         PlanTier::Team,
         PlanTier::Scale,
+        PlanTier::Max,
     ];
 }
 
 /// The tier → cap table: `(max_concurrency, rate_ceiling_per_min)`.
 ///
-/// Concurrency is the product §5 ladder verbatim; the rate ceiling is the
-/// M1 placeholder documented at module level (TODO(owner) before M2 GA).
+/// Concurrency is the `pricing.md §2` ladder verbatim; the rate ceiling is the
+/// derived M1 placeholder documented at module level (`max_concurrency * 10`,
+/// TODO(owner) before M2 GA).
 pub fn plan_for(tier: PlanTier) -> (u32, u32) {
     match tier {
-        PlanTier::Free => (1, 10),
-        PlanTier::Solo => (1, 20),
-        PlanTier::Team => (4, 60),
-        PlanTier::Scale => (12, 240),
+        PlanTier::Starter => (20, 200),
+        PlanTier::Pro => (40, 400),
+        PlanTier::Team => (80, 800),
+        PlanTier::Scale => (160, 1600),
+        PlanTier::Max => (320, 3200),
     }
 }
 
@@ -151,12 +160,13 @@ mod tests {
     #[test]
     fn plan_tier_sets_cap_exactly() {
         // Table-driven over ALL tiers: registry output must equal the
-        // plan_for table, which must equal the product §5 ladder.
-        let expected: [(PlanTier, u32, u32); 4] = [
-            (PlanTier::Free, 1, 10),
-            (PlanTier::Solo, 1, 20),
-            (PlanTier::Team, 4, 60),
-            (PlanTier::Scale, 12, 240),
+        // plan_for table, which must equal the pricing.md §2 ladder.
+        let expected: [(PlanTier, u32, u32); 5] = [
+            (PlanTier::Starter, 20, 200),
+            (PlanTier::Pro, 40, 400),
+            (PlanTier::Team, 80, 800),
+            (PlanTier::Scale, 160, 1600),
+            (PlanTier::Max, 320, 3200),
         ];
         assert_eq!(expected.len(), PlanTier::ALL.len());
 
@@ -178,14 +188,16 @@ mod tests {
 
     #[test]
     fn plan_change_takes_effect_without_restart() {
-        // One tenant holds 1 lease; on Free (cap 1) a 2nd concurrent acquire
-        // is rejected.
+        // One tenant holds 20 leases; on Starter (cap 20) the next concurrent
+        // acquire is rejected — the tier is full.
         let t = tenant("acme");
         let mut ledger = InMemoryLedger::new();
-        ledger.put(held("l-1", "acme")).unwrap();
+        for i in 0..20 {
+            ledger.put(held(&format!("l-{i}"), "acme")).unwrap();
+        }
 
         let mut registry = PlanRegistry::new();
-        registry.set_plan(t.clone(), PlanTier::Free);
+        registry.set_plan(t.clone(), PlanTier::Starter);
 
         let window = RateWindow::new();
         assert_eq!(
@@ -194,8 +206,8 @@ mod tests {
         );
 
         // Upgrade on the SAME registry — no rebuild of the registry, ledger,
-        // gate, or window. The very next check admits.
-        registry.set_plan(t.clone(), PlanTier::Team);
+        // gate, or window. The very next check admits (Pro cap 40 > 20 held).
+        registry.set_plan(t.clone(), PlanTier::Pro);
         assert_eq!(
             CapGate.check(&ledger, &registry.tenant_plan(&t), 10_000, &window),
             CapDecision::Admit
