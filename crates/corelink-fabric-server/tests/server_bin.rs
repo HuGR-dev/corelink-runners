@@ -8,7 +8,9 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use base64::Engine as _;
 use corelink_fabric_api::{AcquireRequest, paths};
-use corelink_fabric_server::server::{DEV_UNSAFE_SEED, ServerConfig, build_app, config_from_env};
+use corelink_fabric_server::server::{
+    DEV_UNSAFE_SEED, LedgerBackend, ServerConfig, build_app, config_from_env,
+};
 use tower::ServiceExt as _;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -307,6 +309,172 @@ fn devunsafe_loopback_ok() {
     })
     .expect("dev-unsafe with loopback bind should succeed");
     assert_eq!(cfg.signing_key, DEV_UNSAFE_SEED);
+}
+
+// ── WP-4: lease ledger backend selection ──────────────────────────────────────
+
+/// Default (no FABRIC_LEDGER_BACKEND) → Memory; database_url None; pool 8.
+#[test]
+fn ledger_default_is_memory() {
+    let cfg = config_from_env(all_present_env(&[6u8; 32])).expect("valid config");
+    assert_eq!(cfg.ledger_backend, LedgerBackend::Memory);
+    assert_eq!(cfg.database_url, None);
+    assert_eq!(cfg.ledger_pool_size, 8);
+}
+
+/// FABRIC_LEDGER_BACKEND=pg + DATABASE_URL → Postgres with the url captured.
+#[test]
+fn ledger_pg_with_database_url_ok() {
+    let cfg = config_from_env(|k| match k {
+        "FABRIC_SIGNING_KEY" => Some(b64_key(&[6u8; 32])),
+        "FABRIC_PAT" => Some("p".to_string()),
+        "FABRIC_TENANT" => Some("acme".to_string()),
+        "FABRIC_TENANT_MAX_CONCURRENCY" => Some("4".to_string()),
+        "FABRIC_LEDGER_BACKEND" => Some("pg".to_string()),
+        "DATABASE_URL" => Some("postgres://u:p@localhost:5432/db".to_string()),
+        _ => None,
+    })
+    .expect("pg + DATABASE_URL must succeed");
+    assert_eq!(cfg.ledger_backend, LedgerBackend::Postgres);
+    assert_eq!(
+        cfg.database_url.as_deref(),
+        Some("postgres://u:p@localhost:5432/db")
+    );
+}
+
+/// "postgres" alias is accepted identically to "pg".
+#[test]
+fn ledger_postgres_alias_ok() {
+    let cfg = config_from_env(|k| match k {
+        "FABRIC_SIGNING_KEY" => Some(b64_key(&[6u8; 32])),
+        "FABRIC_PAT" => Some("p".to_string()),
+        "FABRIC_TENANT" => Some("acme".to_string()),
+        "FABRIC_TENANT_MAX_CONCURRENCY" => Some("4".to_string()),
+        "FABRIC_LEDGER_BACKEND" => Some("postgres".to_string()),
+        "DATABASE_URL" => Some("postgres://localhost/db".to_string()),
+        _ => None,
+    })
+    .expect("postgres alias must succeed");
+    assert_eq!(cfg.ledger_backend, LedgerBackend::Postgres);
+}
+
+/// FAIL-CLOSED: pg selected WITHOUT DATABASE_URL → Err (never a silent
+/// fallback to memory).
+#[test]
+fn ledger_pg_without_database_url_errs() {
+    let result = config_from_env(|k| match k {
+        "FABRIC_SIGNING_KEY" => Some(b64_key(&[6u8; 32])),
+        "FABRIC_PAT" => Some("p".to_string()),
+        "FABRIC_TENANT" => Some("acme".to_string()),
+        "FABRIC_TENANT_MAX_CONCURRENCY" => Some("4".to_string()),
+        "FABRIC_LEDGER_BACKEND" => Some("pg".to_string()),
+        _ => None,
+    });
+    assert!(result.is_err(), "pg without DATABASE_URL must fail-closed");
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("DATABASE_URL"),
+        "error should mention DATABASE_URL: {msg}"
+    );
+}
+
+/// FAIL-CLOSED: an empty DATABASE_URL is treated as absent → Err.
+#[test]
+fn ledger_pg_empty_database_url_errs() {
+    let result = config_from_env(|k| match k {
+        "FABRIC_SIGNING_KEY" => Some(b64_key(&[6u8; 32])),
+        "FABRIC_PAT" => Some("p".to_string()),
+        "FABRIC_TENANT" => Some("acme".to_string()),
+        "FABRIC_TENANT_MAX_CONCURRENCY" => Some("4".to_string()),
+        "FABRIC_LEDGER_BACKEND" => Some("pg".to_string()),
+        "DATABASE_URL" => Some("   ".to_string()),
+        _ => None,
+    });
+    assert!(result.is_err(), "empty/whitespace DATABASE_URL must fail");
+}
+
+/// FAIL-CLOSED: an unknown backend value → Err (no silent default).
+#[test]
+fn ledger_unknown_backend_errs() {
+    let result = config_from_env(|k| match k {
+        "FABRIC_SIGNING_KEY" => Some(b64_key(&[6u8; 32])),
+        "FABRIC_PAT" => Some("p".to_string()),
+        "FABRIC_TENANT" => Some("acme".to_string()),
+        "FABRIC_TENANT_MAX_CONCURRENCY" => Some("4".to_string()),
+        "FABRIC_LEDGER_BACKEND" => Some("mysql".to_string()),
+        _ => None,
+    });
+    assert!(result.is_err(), "unknown ledger backend must fail");
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("FABRIC_LEDGER_BACKEND"),
+        "error should mention the var: {msg}"
+    );
+}
+
+/// For the Memory backend, DATABASE_URL is ignored → None.
+#[test]
+fn ledger_memory_ignores_database_url() {
+    let cfg = config_from_env(|k| match k {
+        "FABRIC_SIGNING_KEY" => Some(b64_key(&[6u8; 32])),
+        "FABRIC_PAT" => Some("p".to_string()),
+        "FABRIC_TENANT" => Some("acme".to_string()),
+        "FABRIC_TENANT_MAX_CONCURRENCY" => Some("4".to_string()),
+        "FABRIC_LEDGER_BACKEND" => Some("memory".to_string()),
+        "DATABASE_URL" => Some("postgres://localhost/db".to_string()),
+        _ => None,
+    })
+    .expect("memory backend must succeed");
+    assert_eq!(cfg.ledger_backend, LedgerBackend::Memory);
+    assert_eq!(cfg.database_url, None, "memory must ignore DATABASE_URL");
+}
+
+/// FABRIC_LEDGER_POOL_SIZE: valid value is used.
+#[test]
+fn ledger_pool_size_valid_used() {
+    let cfg = config_from_env(|k| match k {
+        "FABRIC_SIGNING_KEY" => Some(b64_key(&[6u8; 32])),
+        "FABRIC_PAT" => Some("p".to_string()),
+        "FABRIC_TENANT" => Some("acme".to_string()),
+        "FABRIC_TENANT_MAX_CONCURRENCY" => Some("4".to_string()),
+        "FABRIC_LEDGER_POOL_SIZE" => Some("16".to_string()),
+        _ => None,
+    })
+    .expect("valid pool size must succeed");
+    assert_eq!(cfg.ledger_pool_size, 16);
+}
+
+/// FAIL-CLOSED: FABRIC_LEDGER_POOL_SIZE=0 → Err.
+#[test]
+fn ledger_pool_size_zero_errs() {
+    let result = config_from_env(|k| match k {
+        "FABRIC_SIGNING_KEY" => Some(b64_key(&[6u8; 32])),
+        "FABRIC_PAT" => Some("p".to_string()),
+        "FABRIC_TENANT" => Some("acme".to_string()),
+        "FABRIC_TENANT_MAX_CONCURRENCY" => Some("4".to_string()),
+        "FABRIC_LEDGER_POOL_SIZE" => Some("0".to_string()),
+        _ => None,
+    });
+    assert!(result.is_err(), "pool size 0 must fail");
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("must be >= 1"),
+        "error should say must be >= 1: {msg}"
+    );
+}
+
+/// FAIL-CLOSED: a non-numeric FABRIC_LEDGER_POOL_SIZE → Err.
+#[test]
+fn ledger_pool_size_garbage_errs() {
+    let result = config_from_env(|k| match k {
+        "FABRIC_SIGNING_KEY" => Some(b64_key(&[6u8; 32])),
+        "FABRIC_PAT" => Some("p".to_string()),
+        "FABRIC_TENANT" => Some("acme".to_string()),
+        "FABRIC_TENANT_MAX_CONCURRENCY" => Some("4".to_string()),
+        "FABRIC_LEDGER_POOL_SIZE" => Some("not-a-number".to_string()),
+        _ => None,
+    });
+    assert!(result.is_err(), "unparseable pool size must fail");
 }
 
 // ── build_app tests ───────────────────────────────────────────────────────────

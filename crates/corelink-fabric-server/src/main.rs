@@ -58,6 +58,18 @@ async fn main() -> anyhow::Result<()> {
             ),
         }
     }
+    // Report which lease ledger the wiring actually resolved (WP-4).  Never
+    // print database_url — it may carry a password.
+    use corelink_fabric_server::server::LedgerBackend;
+    match cfg.ledger_backend {
+        LedgerBackend::Memory => {
+            eprintln!("ledger backend: in-memory (leases reset on restart; single-instance only)")
+        }
+        LedgerBackend::Postgres => eprintln!(
+            "ledger backend: Postgres (persistent, multi-instance cap-safe; pool={})",
+            cfg.ledger_pool_size
+        ),
+    }
     eprintln!("reaper: started (interval={}s)", reaper_interval.as_secs());
     match &crash_sweep_handle {
         Some(_) => eprintln!("crash-sweep: started (FABRIC_CRASH_PROBE_INTERVAL_SECS set)"),
