@@ -393,6 +393,112 @@ fn memo_key_formula_known_vector() {
     );
 }
 
+/// WP-FIX-EXEC-RACE — the audit P2 result-integrity race: an exec admitted on
+/// a `Held` lease drops the ledger lock, then runs `run_check`. CONCURRENTLY a
+/// close/cancel wins `Held → Released` and tears the box down. The fix:
+/// re-assert the lease is STILL `Held` AFTER `run_check` and BEFORE attesting —
+/// a lease terminalized mid-exec must yield a fail-closed 503, NEVER a signed
+/// `CheckResult` attested for a now-`Released` lease.
+///
+/// The race is driven DETERMINISTICALLY by a `RacingExec` whose
+/// `exec_captured_for` transitions the lease to `Released` in the ledger
+/// (exactly what a concurrent close that won the transition does) and THEN
+/// returns its `Ok` output — so `run_check` completes against a lease the
+/// ledger now reads as `Released`.
+#[tokio::test]
+async fn exec_on_lease_terminalized_mid_exec_is_fail_closed_never_attested() {
+    use corelink_fabric::LeaseLedger;
+
+    /// A `LeasedExec` that, mid-exec, transitions its lease to `Released` in
+    /// the shared ledger (a concurrent close winning the race), then returns a
+    /// successful `CmdOutput`. `run_check` succeeds; the handler's re-check
+    /// then sees a non-`Held` lease.
+    struct RacingExec {
+        ledger: Arc<Mutex<dyn LeaseLedger + Send>>,
+        now_ms: u64,
+    }
+
+    impl corelink_fabric_server::LeasedExec for RacingExec {
+        fn exec_captured_for(&self, lease_id: &str, _argv: &[&str]) -> anyhow::Result<CmdOutput> {
+            // Simulate the concurrent close: teardown already happened, now it
+            // wins the Held→Released transition while this exec is in-flight.
+            self.ledger
+                .lock()
+                .unwrap()
+                .transition(lease_id, RunnerState::Released, self.now_ms)
+                .expect("Held→Released must succeed");
+            Ok(CmdOutput {
+                code: Some(0),
+                stdout: "work that must not be attested for a released lease\n".to_string(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    let store = Arc::new(StaticTokenStore::new([(
+        "pat-acme".to_string(),
+        TenantId::new("acme").unwrap(),
+    )]));
+    let plans = StaticPlans::new([TenantPlan {
+        tenant: TenantId::new("acme").unwrap(),
+        max_concurrency: 4,
+        rate_ceiling_per_min: 100,
+    }]);
+    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let clock = Arc::new(AtomicU64::new(NOW_MS));
+    let racing = Arc::new(RacingExec {
+        ledger: ledger.clone(),
+        now_ms: NOW_MS,
+    });
+    let state = AppState::new(
+        ledger.clone(),
+        Arc::new(plans),
+        Arc::new(SettableClock(clock.clone())),
+    )
+    .with_executor(racing);
+    let h = Harness {
+        app: app(store, state),
+        ledger: ledger.clone(),
+        // Unused here (the racing exec is the real port); a placeholder fake.
+        exec: Arc::new(FakeLeasedExec::replying(CmdOutput {
+            code: Some(0),
+            stdout: String::new(),
+            stderr: String::new(),
+        })),
+        clock,
+    };
+
+    let lease_id = acquire(&h, "pat-acme").await;
+
+    // The exec runs (the box does the work) but the lease is Released by the
+    // racing close before the handler's re-check.
+    let response = post_exec(&h, &lease_id, "pat-acme").await;
+
+    // FAIL-CLOSED: 503, NOT a signed CheckResult.
+    assert_eq!(
+        response.status().as_u16(),
+        503,
+        "a lease terminalized mid-exec must fail closed, never attest"
+    );
+    let body = body_json(response).await;
+    assert!(
+        body.get("result").is_none(),
+        "no CheckResult may be attested for a lease that is now Released"
+    );
+    assert!(
+        body.get("attestation").is_none(),
+        "no attestation may be emitted for a lease that is now Released"
+    );
+
+    // The lease stays Released (the exec did not resurrect or re-touch it).
+    let rec = h.ledger.lock().unwrap().get(&lease_id).unwrap().unwrap();
+    assert_eq!(
+        rec.state,
+        corelink_fabric::LeaseState::Wire(RunnerState::Released),
+        "the lease must remain Released — exec attests nothing and frees nothing"
+    );
+}
+
 #[tokio::test]
 async fn refused_exec_no_fabricated_result() {
     // A signal-killed process: captured output exists but there is NO exit

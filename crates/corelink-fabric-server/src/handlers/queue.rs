@@ -168,6 +168,37 @@ pub(crate) async fn trigger(
         &box_ref,
     ) {
         Ok(result) => {
+            // ── 4b. RE-ASSERT Held BEFORE attesting (WP-FIX-EXEC-RACE) — the
+            // SAME result-integrity guard as the exec path. The Held-gate
+            // dropped the ledger lock before `run_check`; a concurrent
+            // close/cancel/reaper may have won the `Held → terminal` transition
+            // and torn the box down while the check ran. The ledger's terminal
+            // transition is the atomic arbiter: re-acquire the lock and confirm
+            // the lease is STILL `Held` before producing a SIGNED result. A
+            // terminalized lease → discard the result and fail closed (503),
+            // never a `CheckResult` (NOR a memoized one) for a released lease.
+            // NO `MutexGuard` is held across an await (the guard drops at the
+            // end of this block).
+            let still_held = {
+                let Ok(ledger) = state.ledger.lock() else {
+                    return error_response(ApiError::FailClosed, "lease ledger lock poisoned");
+                };
+                matches!(
+                    ledger.get(&req.lease_id),
+                    Ok(Some(record))
+                        if record.tenant == tenant
+                            && matches!(record.state, LeaseState::Wire(RunnerState::Held))
+                )
+            };
+            if !still_held {
+                return error_response(
+                    ApiError::FailClosed,
+                    "lease was terminalized during execution (a concurrent \
+                     close/cancel/reaper won the race): result discarded, not attested for a \
+                     released lease",
+                );
+            }
+
             // ── 5. Attest what ran — the SAME helpers as the exec path
             // (ATT parity amendment, lead-ratified): the signed chain and
             // the result-binding signature travel in the SAME response as
