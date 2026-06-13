@@ -150,6 +150,17 @@ pub trait LeaseLedger {
     /// [`crate::lifecycle::LeaseLifecycle`]) and the slot-occupancy view
     /// (BIL1: slot occupancy = held leases).
     fn held(&self) -> anyhow::Result<Vec<LeaseRecord>>;
+
+    /// Atomically admit a `Pending` lease IFF the tenant's active (Pending+Held)
+    /// count is strictly under `max_concurrency`. Returns Ok(true) on admit (the
+    /// record is inserted as Pending), Ok(false) on over-cap (nothing inserted).
+    /// The count and the insert are ONE atomic operation w.r.t. this ledger — the
+    /// caller MUST use this instead of a separate count-then-put when admitting,
+    /// so the concurrency cap cannot be exceeded by a race.
+    ///
+    /// Concurrency cap ONLY — the per-instance rate ceiling stays in the caller's
+    /// in-memory RateWindow (it is admission bookkeeping, not ledger state).
+    fn try_admit(&mut self, rec: LeaseRecord, max_concurrency: u32) -> anyhow::Result<bool>;
 }
 
 /// In-memory ledger — dev/test impl; disqualified for production by
@@ -215,6 +226,27 @@ impl LeaseLedger for InMemoryLedger {
             .collect();
         out.sort_by(|a, b| a.lease_id.cmp(&b.lease_id));
         Ok(out)
+    }
+
+    fn try_admit(&mut self, rec: LeaseRecord, max_concurrency: u32) -> anyhow::Result<bool> {
+        // Active = Pending OR Held — mirrors CapGate/by_tenant's definition
+        // EXACTLY. Counted under the caller's Mutex, so count+put is atomic.
+        let active = self
+            .records
+            .values()
+            .filter(|r| {
+                r.tenant == rec.tenant
+                    && (matches!(r.state, LeaseState::Pending) || r.state.is_held())
+            })
+            .count();
+        if (active as u32) < max_concurrency {
+            // `put` keeps the caller-supplied (Pending) state and still errors
+            // on a duplicate lease_id (fail-closed).
+            self.put(rec)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 }
 
@@ -317,5 +349,26 @@ impl LeaseLedger for FileLedger {
 
     fn held(&self) -> anyhow::Result<Vec<LeaseRecord>> {
         self.index.held()
+    }
+
+    fn try_admit(&mut self, rec: LeaseRecord, max_concurrency: u32) -> anyhow::Result<bool> {
+        // Same active definition (Pending+Held) over the replayed index; the
+        // admit `put` is durable (journal-append + index-insert) like any other
+        // put, and still errors on a duplicate lease_id (fail-closed).
+        let active = self
+            .index
+            .records
+            .values()
+            .filter(|r| {
+                r.tenant == rec.tenant
+                    && (matches!(r.state, LeaseState::Pending) || r.state.is_held())
+            })
+            .count();
+        if (active as u32) < max_concurrency {
+            self.put(rec)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 }
