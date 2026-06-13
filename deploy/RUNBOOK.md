@@ -199,9 +199,11 @@ Scaling to >1 will produce split-brain lease state silently.
 consistent with the CoreLink concurrency pricing model (flat concurrency seats,
 not per-minute).
 
-**Envelope / §13 emission** routes are mounted but return 404 until
-`CF-ENVELOPE-WIRE` lands (noted in `docs/deploy/fabric-server.md`). Do not
-depend on those endpoints at this deployment stage.
+**Envelope / §13 emission** routes are LIVE (envelope-wire landed, PR #30). The
+per-lease `CaptureHook` is registered at acquire on the Held path, so
+`POST /v1/leases/{id}/envelope/events` and `GET /v1/leases/{id}/envelope/meta`
+serve on the real exec path. The §13.2 ack is driven through the lease `close`
+body. The `IntentMetrics` §13.4 conformance vector is live on both sides (#5).
 
 ---
 
@@ -219,3 +221,68 @@ Confirm the field name and HTTP verb against the Northflank API docs before
 executing. A soft rollback (redeploy previous image) is preferred where
 possible; use the Northflank dashboard rollback button on the service detail
 page.
+
+---
+
+## 8. Deploy gotchas (learned on the 2026-06-13 go-live)
+
+The fabric went LIVE on Northflank end-to-end on 2026-06-13 (acquire → real
+microVM → exit 0 → signed attestation → teardown, provider verified clean).
+These are the traps we hit; document-once so the next deploy is painless.
+
+**Live service facts (the deployed instance):**
+
+| Field | Value |
+|---|---|
+| Org | `human-guardrail` |
+| Team | `humangr` |
+| Service | `corelink-runners` |
+| Public host | `p01--corelink-runners--pmk6nf8xbcjb.code.run` |
+| Plan | `nf-compute-50` |
+| Instances | `1` — **NEVER >1** until a shared ledger lands (split-brain; see §6) |
+
+**8a. Dockerfile is NOT at the repo root.** It lives at
+`crates/corelink-fabric-server/Dockerfile`. In the Northflank build settings:
+
+- **Dockerfile location = `/crates/corelink-fabric-server/Dockerfile`**
+- **Build context = `/`** (repo root — the build needs the whole workspace)
+
+A root-relative Dockerfile path will fail the build with a "file not found".
+
+**8b. Env var changes need a real container restart.** Saving an env-var change
+in the Northflank UI does **not** by itself reload the running container — the
+pod keeps the OLD environment until it is recreated. Use **Terminate** (it
+recreates the pod) to force a true restart.
+
+- Diagnostic: the in-memory lease counter resets to `...0001` only on a true
+  restart. If a fresh acquire does not start at `...0001` after you changed an
+  env var, the container did **not** pick up the change yet.
+
+**8c. The killer trap — a typo'd env KEY fails silently to NoBox.** The required
+cloud var is the **singular** `NORTHFLANK_PROJECT_ID`. A plural typo
+(`NORTHFLANK_PROJECTS_ID`) leaves `NORTHFLANK_PROJECT_ID` unset, so the backend
+falls back to `NoBoxExec` and **every exec returns 503 "no execution backend
+attached"** — while the lease lifecycle keeps working, masking the cause.
+
+- Now self-diagnosing: the boot log names the missing var on a partial cloud
+  config (`cloud_backend_status`, PR #33) — it will never claim "Northflank"
+  while silently running NoBox. Check the boot log first.
+
+**8d. The two-stage rollout that worked.** Bring the service up fail-closed,
+then arm cloud exec — so a misconfig surfaces as an honest 503, never a
+silent-wrong exec:
+
+- **STAGE 1 — static backend.** Set the 7 `FABRIC_*` vars
+  (`FABRIC_SIGNING_KEY`, `FABRIC_PAT`, `FABRIC_TENANT`,
+  `FABRIC_TENANT_MAX_CONCURRENCY`, `FABRIC_TENANT_RATE_PER_MIN`, plus the
+  explicit `FABRIC_BIND_ADDR` / `FABRIC_REAP_INTERVAL_SECS` if not defaulting).
+  Health is `200`; the lease lifecycle works; exec is `503` (fail-closed, no
+  cloud creds — expected).
+- **STAGE 2 — arm cloud exec.** Add `NORTHFLANK_API_TOKEN`,
+  `NORTHFLANK_TEAM_ID=humangr`, `NORTHFLANK_PROJECT_ID=corelink-runners`, then
+  **restart** (§8b). Exec now provisions a real microVM and returns `200`.
+
+**8e. Smoke test.** The acquire → exec → close sequence in §5c is the exact one
+we ran live (`POST /v1/leases`, `POST /v1/leases/{id}/exec`,
+`POST /v1/leases/{id}/close {"status":"succeeded"}`). DTOs and URLs verified
+against `corelink-fabric-api` — no drift.

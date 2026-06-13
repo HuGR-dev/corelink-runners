@@ -42,6 +42,8 @@ pub mod billing;
 pub mod caps;
 pub mod interference;
 pub mod ledger;
+#[cfg(test)]
+mod ledger_conformance;
 pub mod lifecycle;
 pub mod meter;
 pub mod plans;

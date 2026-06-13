@@ -202,6 +202,15 @@ pub struct AppState {
     /// opt-in (`FABRIC_CRASH_PROBE_INTERVAL_SECS`); the always-on deadline
     /// reaper remains the backstop.
     pub slot_meter: Arc<Mutex<SlotMeter>>,
+    /// Internal observability secret gating `GET /internal/v1/occupancy`
+    /// (WP-OCCUPANCY-API).  **Default-off:** `None` (the [`AppState::new`]
+    /// default) makes the route return 404 — occupancy data is NEVER exposed
+    /// without an explicit operator key.  When `Some`, the handler requires the
+    /// `X-Corelink-Internal-Auth` header to match (constant-time).  The
+    /// production composition root wires it from `FABRIC_OBSERVABILITY_KEY` via
+    /// [`AppState::with_observability_key`].  Stored as `Arc<str>` (cheap clone);
+    /// it must never appear in any error body or log line.
+    pub(crate) observability_key: Option<Arc<str>>,
 }
 
 /// Deterministic DEV seed for the default fabric signing key wired by
@@ -233,7 +242,28 @@ impl AppState {
             lease_seq: Arc::new(AtomicU64::new(1)),
             hook_registry: Arc::new(HookRegistry::default()),
             slot_meter: Arc::new(Mutex::new(SlotMeter::new())),
+            // Default-off: no observability key → the occupancy route 404s.
+            observability_key: None,
         }
+    }
+
+    /// Arm the internal observability endpoint (`GET /internal/v1/occupancy`)
+    /// with `key` (WP-OCCUPANCY-API).
+    ///
+    /// **Default-off, fail-closed:** an empty key, or never calling this, keeps
+    /// `None` — the route returns 404 (the feature is off; occupancy data is
+    /// NEVER exposed without an explicit key).  A non-empty key arms the route:
+    /// requests must then present a matching `X-Corelink-Internal-Auth` header
+    /// (constant-time compared) or get 401.
+    #[must_use]
+    pub fn with_observability_key(mut self, key: Option<String>) -> Self {
+        // Treat an empty/whitespace key as "unset" so a blank env var can never
+        // arm the route with a trivially-guessable secret.
+        self.observability_key = key
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty())
+            .map(Arc::from);
+        self
     }
 
     /// Attach the execution backend (WP-API3). Without this, the state
@@ -539,6 +569,14 @@ pub fn app_full(
     // Extension) operate on the SAME map as the HTTP poll/close handlers.
     state.hook_registry = Arc::clone(&registry);
 
+    // Internal/ops route (WP-OCCUPANCY-API): the slot-occupancy snapshot.
+    // Mounted OUTSIDE the Bearer-PAT layer below — it is gated by its own
+    // observability secret (the `X-Corelink-Internal-Auth` header), NOT a tenant
+    // PAT. Default-off: 404 until `with_observability_key` arms it.
+    let internal = Router::new()
+        .route(OCCUPANCY_PATH, get(handlers::occupancy::occupancy))
+        .with_state(state.clone());
+
     let authenticated = Router::new()
         .route(paths::METRICS_TENANT, get(handlers::metrics::tenant_wait))
         .route(paths::LEASES, post(handlers::leases::acquire))
@@ -559,8 +597,15 @@ pub fn app_full(
 
     Router::new()
         .route(paths::HEALTH, get(health))
+        .merge(internal)
         .merge(authenticated)
 }
+
+/// The internal slot-occupancy route (WP-OCCUPANCY-API).  An ops/observability
+/// path under `/internal/v1` — deliberately NOT in the frozen tenant `paths`
+/// vocabulary (`corelink-fabric-api`), which governs only the customer-facing
+/// `/v1` surface.  Gated by the `X-Corelink-Internal-Auth` secret, not a PAT.
+const OCCUPANCY_PATH: &str = "/internal/v1/occupancy";
 
 /// Substitute the frozen OpenAPI-style `{lease_id}` placeholder with axum
 /// 0.7 capture syntax (`:lease_id`) — the substitution the `paths` module

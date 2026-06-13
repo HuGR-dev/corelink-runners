@@ -8,11 +8,13 @@
 > `docs/spec/hugit-integration-contract.md` v1.2.0 ·
 > `docs/whitepaper/corelink-runners-v1.md` (M1 bar) · ADR-0003 (egress posture).
 
-Built ≠ deployed to paying customers. The **cloud-execution fabric is built and
-live-proven** (managed microVM on Northflank, end-to-end acquire→provision→exec→
-attestation→teardown verified against the live provider). What remains is deploy,
-cross-repo seams, and billing integration. This file tracks the distance; one line
-per item, struck through when closed.
+Deployed ≠ shipped to paying customers. The **cloud-execution fabric is LIVE on
+Northflank** (2026-06-13, end-to-end acquire→provision→real microVM→exec exit 0→
+signed attestation→teardown, provider verified clean; deploy gotchas in
+`deploy/RUNBOOK.md §8`). It runs **single-instance on an in-memory ledger** — the
+persistent (Postgres) ledger that unlocks multi-instance is IN FLIGHT, not done.
+What remains is the persistent ledger, the cross-repo billing seam, and M2 GA.
+This file tracks the distance; one line per item, struck through when closed.
 
 ## P0 — seed hardening (CLOSED 2026-06-12)
 
@@ -96,13 +98,34 @@ Two documented in-code known-gaps, closed:
       **opt-in** via `FABRIC_CRASH_PROBE_INTERVAL_SECS` (absent → not spawned). Fixes
       occupancy drift + lingering dead containers between crash and deadline.
 
+## Go-live wave (CLOSED 2026-06-13)
+
+- [x] **Cloud-backend boot diagnostic** (#33) — `cloud_backend_status` makes the
+      boot log honest about the exec backend: it names the missing var on a
+      partial cloud config (one of `NORTHFLANK_API_TOKEN` / `NORTHFLANK_PROJECT_ID`
+      present, the other absent) and never claims "Northflank" while silently
+      running `NoBoxExec`. Closes the silent-NoBox fall-back that a typo'd env
+      KEY (`NORTHFLANK_PROJECTS_ID`) would otherwise mask as exec 503.
+- [x] **hugit §13 seam — Option A ack** (`1e65fa1`) — §13.2 envelope credential
+      seam ratified+wired (hugit Option A: same tenant PAT, #28); §13.4
+      `IntentMetrics` twin merged (#5, byte-identical both sides). Seam closed on
+      both sides. The §13 envelope flush on abnormal lease termination is routed
+      to hugit for a ruling (`2548e2f`) — awaits their decision.
+
 ## Remaining work — owner-gated or cross-repo
 
 Items that cannot close without owner input or a hugit-side move:
 
-- [ ] **Real cloud deploy** _(owner-gated)_ — provision the box where
-      `corelink-fabricd` runs; set `NORTHFLANK_*` secrets in the environment;
-      point the fabric at a real tenant. The binary and Dockerfile are ready (#21).
+- [x] **Real cloud deploy** _(LIVE 2026-06-13)_ — `corelink-fabricd` deployed on
+      Northflank end-to-end: org `human-guardrail`, team `humangr`, service
+      `corelink-runners`, public host `p01--corelink-runners--pmk6nf8xbcjb.code.run`,
+      plan `nf-compute-50`, `instances=1`. Two-stage rollout (STAGE 1 static
+      fail-closed `FABRIC_*` → exec 503; STAGE 2 add `NORTHFLANK_*` → cloud exec).
+      Proven live: acquire → real microVM → exit 0 → signed attestation →
+      teardown (provider verified clean). Deploy gotchas captured in
+      `deploy/RUNBOOK.md §8`. NOTE: the ledger is still **in-memory /
+      single-instance** — `instances` MUST stay `1` until the persistent
+      (Postgres) ledger lands; that work is IN FLIGHT, not done (ratified #3).
 - [x] **CoreLink PAT auth** _(cross-repo, RESOLVED 2026-06-13, #29)_ —
       `CoreLinkTokenStore` against corelink-server's frozen
       `POST /internal/v1/auth/introspect` contract (`X-Corelink-Internal-Auth`;
@@ -123,6 +146,11 @@ Items that cannot close without owner input or a hugit-side move:
       hugit landed their twin (`02584d4`); our `conformance/IntentMetrics.json` is
       byte-identical (sha256 `2d8d2215…`, manifest membership pinned). #5 rebased,
       gates green, merged. The drift tripwire is now live on both sides.
+- [~] **Persistent (Postgres) ledger** _(IN FLIGHT)_ — the live fabric runs on
+      `InMemoryLedger`: leases reset on restart, and `instances` MUST stay `1`
+      (>1 = silent split-brain). A shared/persistent ledger is the unlock for
+      multi-instance scale-out (ratified decision #3). NOT done — do not mark the
+      deploy "multi-instance" until this lands.
 - [ ] **`hugit-c9-` container-prefix rename decision** — ops-visible seam change;
       not a local cleanup.
 - [ ] **ATT3 secrets seam** — awaits the hugit payload contract (decision #7).
