@@ -34,3 +34,13 @@ tower = { version = "=0.5.3", default-features = false, features = ["util"] }
 # `Engine` seam); quarantined behind the crate's `HttpTransport` trait — ureq is
 # named in exactly one impl (`UreqTransport`), never in the engine logic or tests.
 ureq = "=3.3.0"
+# Persistent lease ledger — exact-pinned (WP-3-PGLEDGER: the production
+# cross-instance cap-safe `PgLedger`). Owner-ratified dep adoption; recon
+# confirmed MIT/Apache, no duplicate-version collision, `rsa` not reachable.
+# The sync `LeaseLedger` trait stays sync — `PgLedger` bridges via
+# block_in_place on the server's rt-multi-thread runtime (never made async).
+tokio-postgres    = "=0.7.18"
+deadpool-postgres = "=0.14.1"
+deadpool-runtime  = "=0.3.1"
+postgres-types    = "=0.2.14"
+postgres-protocol = "=0.6.12"

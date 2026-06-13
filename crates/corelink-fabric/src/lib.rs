@@ -8,7 +8,9 @@
 //!   [`ledger::LeaseLedger`] (CP1, the authoritative lease state machine —
 //!   contract §1 five states only, fail-closed) with [`ledger::InMemoryLedger`]
 //!   and the append-only-JSONL [`ledger::FileLedger`] (the restart-survival
-//!   oracle; the Postgres impl is a later WP per ratified decision #3).
+//!   oracle), and the production [`pg_ledger::PgLedger`] (WP-3-PGLEDGER:
+//!   Postgres-backed, **cross-instance cap-safe** `try_admit` via a per-tenant
+//!   advisory lock; the same conformance suite green against a real DB).
 //! - **Freeze item 5 — meter event schema**: [`meter::SlotOccupancyEvent`] /
 //!   [`meter::SlotEventKind`] / [`meter::CogsCounters`] (BIL1 emits, CP1/ENV2
 //!   produce; the SLOT is the billable unit, never minutes).
@@ -46,6 +48,7 @@ pub mod ledger;
 mod ledger_conformance;
 pub mod lifecycle;
 pub mod meter;
+pub mod pg_ledger;
 pub mod plans;
 pub mod scheduler;
 pub mod tenant;
@@ -56,6 +59,7 @@ pub use interference::{TenantWaitStats, WaitSnapshot};
 pub use ledger::{FileLedger, InMemoryLedger, LeaseLedger, LeaseRecord, LeaseState};
 pub use lifecycle::{BoxProbe, LeaseLifecycle};
 pub use meter::{CogsCounters, SlotEventKind, SlotOccupancyEvent};
+pub use pg_ledger::PgLedger;
 pub use plans::{PlanRegistry, PlanTier, plan_for};
 pub use scheduler::{FairScheduler, TenantQueues, TickReport, WorkItem};
 pub use tenant::{TenantId, TenantPlan};
