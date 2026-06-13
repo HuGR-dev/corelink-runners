@@ -34,6 +34,15 @@ jobs:
           # vendored manifest and a re-published cargo-deny release asset.
           tool: cargo-audit@0.22.2,cargo-deny@0.19.8
 
+      # Self-hosted builder hardening: a concurrent rustup churn + disk pressure
+      # has intermittently dropped CARGO_HOME/bin (the rustup proxy AND the
+      # pinned cargo-deny/cargo-audit) from the run-step PATH — surfacing as
+      # exit 127 on cargo/cargo-deny/cargo-audit even though the binaries are
+      # present in ~/.cargo/bin. Prepending it to GITHUB_PATH here makes every
+      # gate step below resilient to that flake in one place.
+      - name: ensure cargo bin on PATH
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
       - name: fmt
         run: cargo fmt --all --check
 
@@ -44,14 +53,7 @@ jobs:
         run: cargo test --workspace --locked
 
       - name: deny
-        # Ensure ~/.cargo/bin (where install-action places cargo-deny) is on PATH:
-        # on the self-hosted builder the run-step PATH has intermittently lacked it
-        # (exit 127) while the pinned binary is present in CARGO_HOME/bin.
-        run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
-          cargo deny check
+        run: cargo deny check
 
       - name: audit
-        run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
-          cargo audit --deny warnings
+        run: cargo audit --deny warnings
