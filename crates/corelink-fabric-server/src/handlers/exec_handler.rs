@@ -133,12 +133,54 @@ pub(crate) async fn exec(
         &clock,
         &box_ref,
     ) {
-        // ── 5. Attest what ran (WP-ATT1+2, contract §7): the signed chain
-        // and the result-binding signature travel in the SAME response as
-        // the result — both REQUIRED, so an unattested result cannot exist
-        // on the wire. The principal chain mirrors the lease's minted
-        // `principal_chain` (the authenticated tenant).
+        // ── 4b. RE-ASSERT Held BEFORE attesting (WP-FIX-EXEC-RACE). The
+        // Held-gate (gate 2) dropped the ledger lock before `run_check`, which
+        // can run long. CONCURRENTLY a close/cancel/reaper may have won the
+        // `Held → Released|Expired|Crashed` transition and torn down the box.
+        // The ledger's terminal transition is the ATOMIC ARBITER: re-acquire
+        // the ledger lock and confirm the lease is STILL `Held` before
+        // producing a SIGNED, attested result.
+        //
+        // - If the re-check sees `Held`, the concurrent close has not yet
+        //   committed its transition (it runs teardown-first, THEN takes this
+        //   same lock to transition) — so the attestation is for a lease that
+        //   is still legitimately `Held`, its slot still occupied.
+        // - If the re-check sees a terminal state, a concurrent writer already
+        //   freed the slot — the work happened but MUST NOT be attested for a
+        //   released lease (the audit P2 result-integrity race). Discard the
+        //   result and fail closed (503), never a `CheckResult` for a lease
+        //   that is now `Released`.
+        //
+        // A `Pending` re-read (impossible for a once-Held lease) or a vanished
+        // record is the same fail-closed refusal — never an attested result on
+        // an unknown lease state. NO `MutexGuard` is held across the await: the
+        // guard is dropped at the end of this block, before attestation.
         Ok(result) => {
+            let still_held = {
+                let Ok(ledger) = state.ledger.lock() else {
+                    return error_response(ApiError::FailClosed, "lease ledger lock poisoned");
+                };
+                matches!(
+                    ledger.get(&lease_id),
+                    Ok(Some(record))
+                        if record.tenant == tenant
+                            && matches!(record.state, LeaseState::Wire(RunnerState::Held))
+                )
+            };
+            if !still_held {
+                return error_response(
+                    ApiError::FailClosed,
+                    "lease was terminalized during execution (a concurrent \
+                     close/cancel/reaper won the race): result discarded, not attested for a \
+                     released lease",
+                );
+            }
+
+            // ── 5. Attest what ran (WP-ATT1+2, contract §7): the signed chain
+            // and the result-binding signature travel in the SAME response as
+            // the result — both REQUIRED, so an unattested result cannot exist
+            // on the wire. The principal chain mirrors the lease's minted
+            // `principal_chain` (the authenticated tenant).
             let attestation = build_attestation(
                 state.signer.as_ref(),
                 &image_digest,

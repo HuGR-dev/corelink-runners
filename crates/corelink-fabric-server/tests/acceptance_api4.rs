@@ -323,6 +323,101 @@ async fn trigger_idempotent_on_duplicate_delivery() {
     );
 }
 
+/// WP-FIX-EXEC-RACE (trigger path) — the trigger shares the exec path's
+/// result-integrity gap: admitted on a `Held` lease, it drops the ledger lock
+/// and runs `run_check`; a concurrent close can win `Held → Released` and tear
+/// the box down mid-exec. The fix re-asserts `Held` AFTER `run_check` and
+/// BEFORE attesting/memoizing — a lease terminalized mid-exec yields a
+/// fail-closed 503, NEVER a signed `TriggerResponse`, and the response is NOT
+/// memoized (a later duplicate must re-evaluate, never replay a fabricated
+/// result for a released lease).
+#[tokio::test]
+async fn trigger_on_lease_terminalized_mid_exec_is_fail_closed_never_attested() {
+    use corelink_fabric::LeaseLedger;
+
+    /// Mid-exec, transitions the lease to `Released` (a concurrent close that
+    /// won the race), then returns a successful output.
+    struct RacingExec {
+        ledger: Arc<Mutex<dyn LeaseLedger + Send>>,
+        now_ms: u64,
+    }
+
+    impl corelink_fabric_server::LeasedExec for RacingExec {
+        fn exec_captured_for(&self, lease_id: &str, _argv: &[&str]) -> anyhow::Result<CmdOutput> {
+            self.ledger
+                .lock()
+                .unwrap()
+                .transition(
+                    lease_id,
+                    corelink_runners_contracts::RunnerState::Released,
+                    self.now_ms,
+                )
+                .expect("Held→Released must succeed");
+            Ok(CmdOutput {
+                code: Some(0),
+                stdout: "trigger work that must not be attested for a released lease\n".to_string(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    let store = Arc::new(StaticTokenStore::new([(
+        "pat-acme".to_string(),
+        TenantId::new("acme").unwrap(),
+    )]));
+    let plans = StaticPlans::new([TenantPlan {
+        tenant: TenantId::new("acme").unwrap(),
+        max_concurrency: 4,
+        rate_ceiling_per_min: 100,
+    }]);
+    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let racing = Arc::new(RacingExec {
+        ledger: ledger.clone(),
+        now_ms: NOW_MS,
+    });
+    let state = AppState::new(
+        ledger.clone(),
+        Arc::new(plans),
+        Arc::new(FrozenClock(Arc::new(AtomicU64::new(NOW_MS)))),
+    )
+    .with_executor(racing);
+    let h = Harness {
+        app: app(store, state),
+        // Unused: the racing exec is the real port.
+        exec: Arc::new(FakeLeasedExec::replying(ok_reply())),
+    };
+
+    let lease_id = acquire(&h, "pat-acme").await;
+
+    let response = post_trigger(&h, "pat-acme", "item-race", TREE_A, &lease_id).await;
+    assert_eq!(
+        response.status().as_u16(),
+        503,
+        "a lease terminalized mid-trigger must fail closed, never attest"
+    );
+    let body: serde_json::Value =
+        serde_json::from_slice(&body_bytes(response).await).expect("JSON body");
+    assert!(
+        body.get("result").is_none(),
+        "no CheckResult may be attested for a now-Released lease"
+    );
+    assert!(
+        body.get("attestation").is_none(),
+        "no attestation may be emitted for a now-Released lease"
+    );
+
+    // NOT memoized: the racing-exec mutated the ledger, so even a second
+    // delivery re-enters the gates and sees the lease is no longer Held → it
+    // is refused too (a fabricated success was never cached for replay).
+    let dup = post_trigger(&h, "pat-acme", "item-race", TREE_A, &lease_id).await;
+    assert_eq!(
+        dup.status().as_u16(),
+        400,
+        "the refused trigger was not memoized: the re-delivery now hits the \
+         Held-gate (lease is Released) and is refused, never replays a fabricated result"
+    );
+}
+
 /// The dedup key is `(tenant, item_id, tree_hash)` — the same queue item on
 /// a DIFFERENT tree is new work (the workspace snapshot changed), never a
 /// duplicate.
