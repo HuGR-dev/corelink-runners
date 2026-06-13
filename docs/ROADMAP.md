@@ -63,12 +63,21 @@ proven end-to-end against the live Northflank provider. PRs #17–#23 + audit:
       provision (real job) → exec (real run, exit 0) → signed attestation →
       teardown; provider verified clean.
 
-## In flight (this branch)
+## Hardening wave (CLOSED 2026-06-13)
 
-- [ ] **WP-ENVELOPE-WIRE** — register the per-lease §13 `CaptureHook` at acquire
-      so envelope endpoints + close machinery are live on the real exec path
-      (internal plumbing; `IntentMetrics` §13.4 conformance vector remains
-      owner/hugit-gated — see cross-repo items below).
+- [x] **WP-ENVELOPE-WIRE** — per-lease §13 `CaptureHook` registered at acquire on
+      the Held path (`handlers/leases.rs`), so the envelope endpoints + close
+      machinery are live on the real exec path; gated on a real Held transition,
+      never on an early-return. Pinned by `envelope_wire.rs` (9 tests). The
+      `IntentMetrics` §13.4 conformance vector remains owner/hugit-gated (below).
+- [x] **WP-PLAN-LADDER** — `PlanTier` aligned to the canonical, owner-ratified
+      `pricing.md §2` ladder (Starter/Pro/Team/Scale/Max @ 20/40/80/160/320; was the
+      stale 1/1/4/12 from a pre-decision draft). corelink-server-requested before M2
+      GA; concurrency is structural, prices ratified.
+- [x] **WP-MOCK-E2E** — living end-to-end regression pinning the `FABRIC_MOCK_EXEC`
+      consumer contract (githugr): the real `MockLeasedExec` driven through the HTTP
+      surface, frozen `MOCK_STDOUT` content-address + signed-attestation verify
+      against the wire key. Drift here breaks githugr's pre-build and goes red first.
 
 ## Remaining work — owner-gated or cross-repo
 
@@ -77,9 +86,18 @@ Items that cannot close without owner input or a hugit-side move:
 - [ ] **Real cloud deploy** _(owner-gated)_ — provision the box where
       `corelink-fabricd` runs; set `NORTHFLANK_*` secrets in the environment;
       point the fabric at a real tenant. The binary and Dockerfile are ready (#21).
-- [ ] **CoreLink auth+billing integration** _(cross-repo, PR #15 handoff)_ —
-      PAT validation + slot metering wired to the CoreLink platform; prerequisite
-      for selling concurrency SKUs.
+- [x] **CoreLink PAT auth** _(cross-repo, RESOLVED 2026-06-13, #29)_ —
+      `CoreLinkTokenStore` against corelink-server's frozen
+      `POST /internal/v1/auth/introspect` contract (`X-Corelink-Internal-Auth`;
+      fail-closed: only `200 valid:true` admits, 401/5xx/transport → 503, never a
+      false 401). `FABRIC_AUTH_BACKEND=corelink` (default `static`). Slot metering
+      already emits (`SlotMeter`).
+- [ ] **CoreLink slot billing (M2)** _(cross-repo, one step left)_ —
+      corelink-server adds `max_concurrency` to the introspect response, then a
+      `CoreLinkPlanStore` derives the live cap. The $ ladder is **ratified**
+      (`pricing.md §2`); ratification-confirm routed to corelink-server in
+      `docs/handoff/2026-06-13-corelink-pricing-ratified.md`. Their field + our
+      `CoreLinkPlanStore` are the remaining two moves.
 - [ ] **`IntentMetrics` §13.4 conformance vector** _(hugit PR #5 mirror)_ —
       §13.4 requires the vector byte-identical in both repos; blocked on the
       hugit-side twin PR (hugit techlead); mirror here immediately after.
