@@ -36,7 +36,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
-use corelink_fabric::{CapDecision, LeaseRecord, LeaseState, TenantId};
+use corelink_fabric::{CapDecision, LeaseRecord, LeaseState, SlotEventKind, TenantId};
 use corelink_fabric_api::{
     AcquireRequest, AcquireResponse, ApiError, CancelResponse, StatusResponse, paths,
 };
@@ -246,6 +246,12 @@ pub(crate) async fn acquire(
     );
     registry.register(&lease_id, tenant.clone(), hook, &pat.0);
 
+    // ── BIL1 / WP-SLOT-EMIT: slot acquired — ledger lock is long gone
+    // (dropped in the block above), hook registry is already registered.
+    // SUCCESS PATH ONLY: every fail-closed / orphan-teardown branch above
+    // returns early before reaching this point.
+    state.record_slot(&lease_id, &tenant, SlotEventKind::Acquired);
+
     let exec_endpoint = paths::EXEC.replace("{lease_id}", &lease_id);
     (
         StatusCode::OK,
@@ -298,18 +304,6 @@ pub(crate) async fn cancel(
     Extension(tenant): Extension<TenantId>,
     Path(lease_id): Path<String>,
 ) -> Response {
-    let Ok(mut ledger) = state.ledger.lock() else {
-        return fail_closed("lease ledger lock poisoned");
-    };
-    let record = match ledger.get(&lease_id) {
-        Ok(Some(record)) => record,
-        Ok(None) => return not_found(),
-        Err(_) => return fail_closed("lease ledger unreadable"),
-    };
-    if record.tenant != tenant {
-        return not_found();
-    }
-
     // `forensic_clean` is an honest placeholder: teardown (and the real
     // forensic oracle) is wired in API3 — this WP never fakes `true`.
     let released = |lease_id: String| {
@@ -324,28 +318,79 @@ pub(crate) async fn cancel(
             .into_response()
     };
 
-    match record.state {
-        // Pre-wire: nothing wire-visible exists to cancel (see module doc).
-        LeaseState::Pending => not_found(),
-        LeaseState::Wire(RunnerState::Held) => {
-            // Held → Released through LeaseLedger::transition — the contract
-            // §1 legal matrix, never bypassed, never written directly.
-            match ledger.transition(&lease_id, RunnerState::Released, state.clock.now_ms()) {
-                Ok(updated) => released(updated.lease_id),
-                Err(_) => fail_closed("lease ledger refused Held->Released"),
-            }
+    // Compute the transition outcome under the ledger lock; capture whether
+    // a real Held→Released transition was performed so we can emit the slot
+    // event OUTSIDE the lock (lock discipline: never nest the slot_meter lock
+    // under the ledger lock; mirror the acquire handler's pattern).
+    //
+    // `emit_released`: Some(lease_id) means "we performed a real transition
+    // and must emit Released"; None means "idempotent path — no transition,
+    // no emit".
+    let (response, emit_released): (Response, Option<String>) = {
+        let Ok(mut ledger) = state.ledger.lock() else {
+            return fail_closed("lease ledger lock poisoned");
+        };
+        let record = match ledger.get(&lease_id) {
+            Ok(Some(record)) => record,
+            Ok(None) => return not_found(),
+            Err(_) => return fail_closed("lease ledger unreadable"),
+        };
+        if record.tenant != tenant {
+            return not_found();
         }
-        // Idempotent: the goal state is already reached; no transition is
-        // attempted (Released is terminal in the matrix).
-        LeaseState::Wire(RunnerState::Released) => released(record.lease_id),
-        // Expired/Crashed are terminal NON-released states: the matrix
-        // forbids any way out, and faking `released` would turn a dead lease
-        // green. Refused with the frozen 400.
-        LeaseState::Wire(RunnerState::Expired | RunnerState::Crashed) => error_response(
-            ApiError::Invalid,
-            "lease is terminal (expired/crashed): contract §1 legal matrix forbids release",
-        ),
+
+        match record.state {
+            // Pre-wire: nothing wire-visible exists to cancel (see module doc).
+            LeaseState::Pending => (not_found(), None),
+            LeaseState::Wire(RunnerState::Held) => {
+                // Held → Released through LeaseLedger::transition — the contract
+                // §1 legal matrix, never bypassed, never written directly.
+                // BIL1: emit Released only on the SUCCESSFUL transition (Ok arm).
+                // The idempotent Wire(Released) arm below does NO transition and
+                // therefore emits nothing — double-free avoided.
+                match ledger.transition(&lease_id, RunnerState::Released, state.clock.now_ms()) {
+                    Ok(updated) => {
+                        let id = updated.lease_id.clone();
+                        (released(updated.lease_id), Some(id))
+                    }
+                    Err(_) => (fail_closed("lease ledger refused Held->Released"), None),
+                }
+            }
+            // Idempotent: the goal state is already reached; no transition is
+            // attempted (Released is terminal in the matrix).
+            // BIL1: do NOT emit here — a prior cancel/close already freed the
+            // slot; a second emit would double-free and corrupt the journal.
+            LeaseState::Wire(RunnerState::Released) => (released(record.lease_id), None),
+            // Expired/Crashed are terminal NON-released states: the matrix
+            // forbids any way out, and faking `released` would turn a dead lease
+            // green. Refused with the frozen 400.
+            LeaseState::Wire(RunnerState::Expired | RunnerState::Crashed) => (
+                error_response(
+                    ApiError::Invalid,
+                    "lease is terminal (expired/crashed): contract §1 legal matrix forbids release",
+                ),
+                None,
+            ),
+        }
+        // `ledger` (MutexGuard) is dropped here.
+    };
+
+    // ── BIL1 / WP-SLOT-EMIT: emit Released only when WE performed the real
+    // Held→Released transition (emit_released is Some). The ledger lock is
+    // long gone — lock discipline: slot_meter lock never nested under ledger
+    // lock (mirror of the acquire and close handlers). The idempotent
+    // Wire(Released) arm above sets emit_released to None, so a double-cancel
+    // never produces a second Released event in the journal.
+    //
+    // Note: `close_abnormal` (the lifecycle-sweep path for Crashed/abnormal
+    // leases) is NOT a live emission site in the current binary — no running
+    // sweep drives it; Crashed-slot metering is a documented non-goal here,
+    // consistent with the reaper's crash-reclamation non-goal.
+    if let Some(id) = emit_released {
+        state.record_slot(&id, &tenant, SlotEventKind::Released);
     }
+
+    response
 }
 
 // ── Regression tests ─────────────────────────────────────────────────────────

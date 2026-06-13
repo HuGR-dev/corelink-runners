@@ -50,7 +50,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
-use corelink_fabric::{LeaseState, TenantId};
+use corelink_fabric::{LeaseState, SlotEventKind, TenantId};
 use corelink_fabric_api::{ApiError, CloseRequest, CloseResponse};
 use corelink_runner::envelope::{AbnormalKind, CloseOutcome, JobClose, JobStatus};
 use corelink_runners_contracts::{IntentMetrics, RunnerState, TokenCounts};
@@ -196,6 +196,10 @@ pub(crate) async fn close(
     // unregister-at-close obligation). The mechanism's exactly-once latch
     // lives in the shared hook state, not in this entry.
     registry.unregister(&lease_id);
+
+    // ── BIL1 / WP-SLOT-EMIT: slot released — ledger lock dropped above,
+    // the Held→Released transition is committed. Outside the ledger lock.
+    state.record_slot(&lease_id, &tenant, SlotEventKind::Released);
 
     // ── 5b. Teardown (best-effort): delete the provider container and
     // unbind the registry entry. Runs after the close ack; a teardown

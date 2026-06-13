@@ -44,7 +44,14 @@ jobs:
         run: cargo test --workspace --locked
 
       - name: deny
-        run: cargo deny check
+        # Ensure ~/.cargo/bin (where install-action places cargo-deny) is on PATH:
+        # on the self-hosted builder the run-step PATH has intermittently lacked it
+        # (exit 127) while the pinned binary is present in CARGO_HOME/bin.
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo deny check
 
       - name: audit
-        run: cargo audit --deny warnings
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo audit --deny warnings
