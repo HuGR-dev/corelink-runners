@@ -109,12 +109,16 @@ Items that cannot close without owner input or a hugit-side move:
       fail-closed: only `200 valid:true` admits, 401/5xx/transport → 503, never a
       false 401). `FABRIC_AUTH_BACKEND=corelink` (default `static`). Slot metering
       already emits (`SlotMeter`).
-- [ ] **CoreLink slot billing (M2)** _(cross-repo, one step left)_ —
-      corelink-server adds `max_concurrency` to the introspect response, then a
-      `CoreLinkPlanStore` derives the live cap. The $ ladder is **ratified**
-      (`pricing.md §2`); ratification-confirm routed to corelink-server in
-      `docs/handoff/2026-06-13-corelink-pricing-ratified.md`. Their field + our
-      `CoreLinkPlanStore` are the remaining two moves.
+- [~] **CoreLink slot billing (M2)** _(our side BUILT 2026-06-13, #32; awaits corelink-server field)_ —
+      `CoreLinkPlanStore` (`corelink_plans.rs`) derives the per-tenant cap from the
+      introspect `max_concurrency` (fail-closed: `Err(Unreachable)`→503, no-cap→reject;
+      wired behind `FABRIC_AUTH_BACKEND=corelink`). The field shape is **PROVISIONAL**
+      (corelink-server named `max_concurrency`; not yet ratified/conformance-pinned) —
+      tolerant parsing is forward-safe. The $ ladder is **ratified** (`pricing.md §2`);
+      ratification-confirm routed in `docs/handoff/2026-06-13-corelink-pricing-ratified.md`.
+      **Last move:** corelink-server ships `max_concurrency` on the introspect 200 body
+      → then freeze a conformance vector for the field. Until then a corelink-backed
+      acquire is uncapped→reject (honest M1 state).
 - [x] **`IntentMetrics` §13.4 conformance vector** _(RESOLVED 2026-06-13, #5)_ —
       hugit landed their twin (`02584d4`); our `conformance/IntentMetrics.json` is
       byte-identical (sha256 `2d8d2215…`, manifest membership pinned). #5 rebased,
