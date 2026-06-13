@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use corelink_runners_contracts::IntentMetrics;
+use serde::Serialize;
 
 use super::event::PriceCard;
 use super::hook::{CaptureHook, HookPhase, Shared, Subscriber, credential_matches};
@@ -46,6 +47,34 @@ pub enum AbnormalKind {
     Expiry,
     /// Runner/job crash while the lease was held.
     Crash,
+}
+
+/// Why a close fired — the WRAPPER-level close-metadata discriminant
+/// (§13.5 ruling, owner-ratified 2026-06-13).
+///
+/// This is close/JobClose-machinery metadata, NOT a field of the frozen
+/// §13.4 [`IntentMetrics`] vector — `close_reason` rides on the
+/// [`CloseOutcome`] wrapper, never inside the metrics. The serde
+/// representation is exactly `normal|expired|crashed` (snake_case) so the
+/// wire strings are stable across the hugit seam.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CloseReason {
+    /// A clean `POST /close` close.
+    Normal,
+    /// Lease-expiry hard-kill (deadline reaper) — a PARTIAL envelope.
+    Expired,
+    /// Runner/job crash (crash sweep) — a PARTIAL envelope.
+    Crashed,
+}
+
+impl From<AbnormalKind> for CloseReason {
+    fn from(kind: AbnormalKind) -> Self {
+        match kind {
+            AbnormalKind::Expiry => CloseReason::Expired,
+            AbnormalKind::Crash => CloseReason::Crashed,
+        }
+    }
 }
 
 /// The close/ack state machine for one job's capture hook.
@@ -151,6 +180,7 @@ impl JobClose {
             status,
             metrics,
             capture_incomplete: lossy || !acked,
+            close_reason: CloseReason::Normal,
         })
     }
 
@@ -205,6 +235,7 @@ impl JobClose {
             status,
             metrics,
             capture_incomplete: true,
+            close_reason: CloseReason::from(kind),
         })
     }
 
@@ -270,5 +301,39 @@ impl Subscriber {
         drop(inner);
         self.shared.cv.notify_all();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The §13.5 wrapper-level close-reason strings are exactly
+    /// `normal|expired|crashed` on the wire (snake_case).
+    #[test]
+    fn close_reason_serializes_to_snake_case_wire_strings() {
+        assert_eq!(
+            serde_json::to_string(&CloseReason::Normal).unwrap(),
+            r#""normal""#
+        );
+        assert_eq!(
+            serde_json::to_string(&CloseReason::Expired).unwrap(),
+            r#""expired""#
+        );
+        assert_eq!(
+            serde_json::to_string(&CloseReason::Crashed).unwrap(),
+            r#""crashed""#
+        );
+    }
+
+    /// `AbnormalKind` maps to the partial-envelope close reasons:
+    /// Expiry→Expired, Crash→Crashed (never Normal).
+    #[test]
+    fn abnormal_kind_maps_to_partial_close_reason() {
+        assert_eq!(
+            CloseReason::from(AbnormalKind::Expiry),
+            CloseReason::Expired
+        );
+        assert_eq!(CloseReason::from(AbnormalKind::Crash), CloseReason::Crashed);
     }
 }

@@ -22,8 +22,14 @@
 //! - **Cloud backend** — default-off: `with_cloud_backend_from_env` reads
 //!   `NORTHFLANK_*` env vars.  Without them both exec and provision stay on
 //!   `NoBoxExec` / `NoBoxProvisioner` (fail-closed).
-//! - **Ledger / clock** — `InMemoryLedger` (leases reset on restart, M1 scope)
-//!   / `SystemClock`.
+//! - **Ledger / clock** — selected by `FABRIC_LEDGER_BACKEND` (default
+//!   `"memory"`): `"memory"` → `InMemoryLedger` (leases reset on restart);
+//!   `"pg"`/`"postgres"` → `PgLedger` (persistent, restart-survival +
+//!   multi-instance cap-safe), which **requires** `DATABASE_URL` (non-empty)
+//!   and reads `FABRIC_LEDGER_POOL_SIZE` (default 8, must be ≥ 1).  Selecting
+//!   `pg` without a reachable `DATABASE_URL` is a hard boot error — the server
+//!   NEVER silently falls back to memory (that would re-introduce
+//!   split-brain / restart-loss invisibly).  `SystemClock` always.
 //!
 //! # Not yet wired
 //!
@@ -75,6 +81,25 @@ impl std::fmt::Debug for AuthBackend {
     }
 }
 
+// ── Ledger backend discriminant ───────────────────────────────────────────────
+
+/// Which lease-ledger backend to wire at startup.
+///
+/// Selected by `FABRIC_LEDGER_BACKEND` (default `Memory`).  `Postgres` is the
+/// production backend: persistent (restart-survival) and cross-instance
+/// cap-safe.  There is deliberately NO silent fallback from `Postgres` to
+/// `Memory` — a `pg` selection with an unreachable/absent `DATABASE_URL` is a
+/// hard boot error, never a downgrade that would re-introduce split-brain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LedgerBackend {
+    /// In-memory ledger: leases reset on restart, single-instance only.
+    /// The default.
+    Memory,
+    /// Postgres ledger: persistent + multi-instance cap-safe.  Requires
+    /// `DATABASE_URL`.
+    Postgres,
+}
+
 // ── ServerConfig ──────────────────────────────────────────────────────────────
 
 /// All resolved configuration for the fabric server.
@@ -123,6 +148,17 @@ pub struct ServerConfig {
     /// header.  Held raw; must NEVER appear in log output (see the manual
     /// `Debug` below, which redacts it).
     pub observability_key: Option<String>,
+    /// Which lease-ledger backend to wire.  From `FABRIC_LEDGER_BACKEND`
+    /// (default [`LedgerBackend::Memory`]).
+    pub ledger_backend: LedgerBackend,
+    /// Postgres connection URL.  Required + non-empty **iff**
+    /// `ledger_backend == Postgres` (guaranteed `Some` there by
+    /// [`config_from_env`]); `None` for the `Memory` backend.  May contain a
+    /// password — must never appear in log output (redacted in `Debug`).
+    pub database_url: Option<String>,
+    /// Postgres connection-pool size.  From `FABRIC_LEDGER_POOL_SIZE` (default
+    /// 8, must be ≥ 1).  Ignored by the `Memory` backend.
+    pub ledger_pool_size: usize,
 }
 
 impl std::fmt::Debug for ServerConfig {
@@ -140,6 +176,12 @@ impl std::fmt::Debug for ServerConfig {
                 "observability_key",
                 &self.observability_key.as_ref().map(|_| "***REDACTED***"),
             )
+            .field("ledger_backend", &self.ledger_backend)
+            .field(
+                "database_url",
+                &self.database_url.as_ref().map(|_| "***REDACTED***"),
+            )
+            .field("ledger_pool_size", &self.ledger_pool_size)
             .finish()
     }
 }
@@ -167,6 +209,11 @@ impl std::fmt::Debug for ServerConfig {
 ///   default — a deployer must choose; 0 would silently serve an unusable
 ///   server).
 /// - `FABRIC_TENANT_RATE_PER_MIN` is optional; defaults to 120.
+/// - `FABRIC_LEDGER_BACKEND` (default `"memory"`): `"memory"` → `Memory`;
+///   `"pg"`/`"postgres"` → `Postgres`; any other value → error (no silent
+///   default).  When `Postgres`, `DATABASE_URL` is **required** + non-empty
+///   (else error — NEVER a silent fallback to memory); for `Memory` it is
+///   ignored.  `FABRIC_LEDGER_POOL_SIZE` is optional (default 8, must be ≥ 1).
 pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<ServerConfig> {
     let bind_addr = get("FABRIC_BIND_ADDR")
         .filter(|s| !s.is_empty())
@@ -389,6 +436,61 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
+    // ── Lease ledger backend (WP-4) ──────────────────────────────────────────
+    // Default "memory" keeps the existing InMemoryLedger path byte-identical.
+    // "pg"/"postgres" selects the persistent PgLedger and makes DATABASE_URL a
+    // hard requirement — there is deliberately NO silent fallback to memory
+    // (that would re-introduce split-brain / restart-loss invisibly).
+    let ledger_backend_name = get("FABRIC_LEDGER_BACKEND")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "memory".to_string());
+
+    let ledger_backend = match ledger_backend_name.as_str() {
+        "memory" => LedgerBackend::Memory,
+        "pg" | "postgres" => LedgerBackend::Postgres,
+        other => {
+            anyhow::bail!(
+                "unknown FABRIC_LEDGER_BACKEND {other:?}; expected \"memory\", \"pg\", or \"postgres\""
+            );
+        }
+    };
+
+    // DATABASE_URL: required + non-empty IFF the pg backend is selected.  For
+    // Memory it is ignored (→ None).  Trimmed (secret mounts append newlines).
+    let database_url = match ledger_backend {
+        LedgerBackend::Memory => None,
+        LedgerBackend::Postgres => Some(
+            get("DATABASE_URL")
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "pg selected but DATABASE_URL absent/empty; \
+                         FABRIC_LEDGER_BACKEND=pg requires a reachable DATABASE_URL \
+                         (the server NEVER falls back to the in-memory ledger)"
+                    )
+                })?,
+        ),
+    };
+
+    // FABRIC_LEDGER_POOL_SIZE: optional, default 8; 0 or unparseable → error.
+    let ledger_pool_size: usize = match get("FABRIC_LEDGER_POOL_SIZE")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        None => 8,
+        Some(v) => {
+            let n = v
+                .parse::<usize>()
+                .context("FABRIC_LEDGER_POOL_SIZE must be a valid usize")?;
+            if n == 0 {
+                anyhow::bail!("FABRIC_LEDGER_POOL_SIZE must be >= 1");
+            }
+            n
+        }
+    };
+
     Ok(ServerConfig {
         bind_addr,
         signing_key,
@@ -399,6 +501,9 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
         rate_ceiling_per_min,
         mock_exec,
         observability_key,
+        ledger_backend,
+        database_url,
+        ledger_pool_size,
     })
 }
 
@@ -411,6 +516,14 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
 /// cloud backend (default-off; env-driven) — and returns both the router and
 /// the state.  The state is needed by any background task (e.g. the reaper)
 /// that shares the same ledger/provisioner Arcs.
+///
+/// # Runtime requirement (pg backend only)
+///
+/// When `cfg.ledger_backend == Postgres`, this fn drives an async
+/// `PgLedger::connect` via `block_in_place` + `block_on`, which is legal ONLY
+/// inside a `rt-multi-thread` runtime — main.rs's `#[tokio::main]` provides it.
+/// The `Memory` backend has no such requirement, so the synchronous `#[test]`
+/// callers (which never select pg) are unaffected.
 ///
 /// # Token store dispatch
 ///
@@ -432,7 +545,29 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
         &cfg.signing_key,
     ));
 
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    // ── Lease ledger (WP-4) ──────────────────────────────────────────────────
+    // Memory: byte-identical to the pre-WP-4 unconditional path; no runtime
+    //   requirement, so the sync `#[test]` callers (which never set the pg env)
+    //   are unaffected.
+    // Postgres: PgLedger::connect is async and captures Handle::current(), so it
+    //   MUST run inside a `rt-multi-thread` runtime — main.rs's `#[tokio::main]`
+    //   provides exactly that.  We bridge with block_in_place + block_on so this
+    //   sync fn can drive the async connect.  A connect Err propagates (fail-
+    //   closed: the server refuses to boot without a reachable ledger).
+    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = match cfg.ledger_backend {
+        LedgerBackend::Memory => Arc::new(Mutex::new(InMemoryLedger::new())),
+        LedgerBackend::Postgres => {
+            let pg = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(corelink_fabric::PgLedger::connect(
+                    cfg.database_url
+                        .as_deref()
+                        .expect("config_from_env guarantees Some(database_url) for the pg backend"),
+                    cfg.ledger_pool_size,
+                ))
+            })?;
+            Arc::new(Mutex::new(pg))
+        }
+    };
 
     // ── Token store + plan source ────────────────────────────────────────────
     // Static: keep the existing StaticTokenStore + StaticPlans path

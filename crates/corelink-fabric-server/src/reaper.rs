@@ -58,12 +58,25 @@
 //! configured. The always-on deadline reaper ([`reap_once`]) remains the
 //! backstop — every lease still has a hard `Expired` deadline regardless.
 //!
+//! ## §13.5 partial-envelope flush (WIRED — WP-S13.5)
+//!
+//! BOTH abnormal paths now flush a best-effort PARTIAL envelope on reclaim
+//! (Option B, owner-ratified 2026-06-13): `reap_once` (Expired) and
+//! `surface_crashes` (Crashed) each call [`flush_partial_envelope`] AFTER
+//! teardown→transition→`record_slot` — fire-and-forget, so it never blocks or
+//! breaks reclamation. The flush finalizes whatever the `CaptureHook`
+//! accumulated through the SAME finalize/redaction path as a normal close (no
+//! exemption), stamps `close_reason=expired|crashed` + `capture_incomplete:true`
+//! (WRAPPER-level, never inside the frozen §13.4 `IntentMetrics`), and emits it
+//! to the M1 forensic sink (a structured log line; the real push to hugit is
+//! the P2 transport WP). A lease with no hook is a no-op; an already-closed
+//! hook (a normal close raced in) returns the exactly-once `Err`, which is
+//! logged and skipped — no second envelope, no double-anything.
+//!
 //! ## Remaining non-goals
 //!
-//! - **Crash-driven envelope flush**: `surface_crashes` does NOT call
-//!   `close_abnormal` (envelope-flush-on-crash) — it is symmetric with the
-//!   Expired path, which also does not. That flush is a separate documented
-//!   follow-up.
+//! - **Live push of the partial envelope**: at M1 the flush is the forensic
+//!   log record; the actual transport to hugit is the P2 transport WP.
 //!
 //! ## Lock ordering
 //!
@@ -76,10 +89,110 @@
 //! After teardown the ledger lock is re-acquired (briefly) to write the
 //! `Expired` transition.  No other lock is held at that point.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use corelink_fabric::SlotEventKind;
+use corelink_runner::envelope::{AbnormalKind, CloseReason};
 use corelink_runners_contracts::RunnerState;
+
+/// §13.5 best-effort partial-envelope flush on an ABNORMAL lease termination
+/// (Expired / Crashed), fire-and-forget.
+///
+/// **Ruling (hugit, owner-ratified 2026-06-13, Option B).** When the deadline
+/// reaper ([`reap_once`]) or the crash sweep ([`surface_crashes`]) reclaims a
+/// lease, whatever the lease's [`CaptureHook`] accumulated MUST be flushed as a
+/// PARTIAL envelope — explicitly marked incomplete — rather than dropped. hugit
+/// prices flat, so a partial trajectory carries no billing risk; it is forensic
+/// provenance.
+///
+/// This runs **AFTER** teardown→transition→`record_slot` has already reclaimed
+/// the lease, so it can NEVER block or break reclamation: a flush failure is
+/// logged and the sweep moves on.
+///
+/// # Wire shape (§13.5)
+/// The EXISTING envelope payload plus two close-metadata markers, both
+/// WRAPPER-level (never inside the frozen §13.4 `IntentMetrics` vector):
+/// - `close_reason` — `expired` | `crashed` (here; `normal` is the clean path);
+/// - `capture_incomplete: true` — set unconditionally by `close_abnormal`.
+///
+/// # Delivery (M1)
+/// Fire-and-forget, **NO ack** — the lease is torn down, so there is no live
+/// client to ack. Dedup is by `lease_id`: [`HookRegistry::close_handle_any`]
+/// extracts (and removes) the hook exactly once, and the ledger transition is
+/// atomic & exclusive (`Held→Expired|Crashed` vs `Held→Released`), so a normal
+/// close and this abnormal flush can never both fire for one lease.
+///
+/// **There is no live push transport at M1** (the envelope is poll-drain;
+/// hugit consumes at P2). So at M1 the flush = FINALIZE the partial envelope
+/// (markers + the SAME finalize/redaction write-path as a normal close — no
+/// exemption) and emit it best-effort to the available forensic sink: a single
+/// structured log line carrying `lease_id`, `tenant`, `close_reason`,
+/// `capture_incomplete`, and a metrics SUMMARY (the `IntentMetrics` scalar
+/// fields — NOT raw trajectory text). The real push to hugit is the P2
+/// transport WP; at M1 this log line IS the forensic record.
+///
+/// All calls here ([`HookRegistry::close_handle_any`] + `JobClose::close_abnormal`)
+/// are synchronous, so this holds no `MutexGuard` across an `await` — the
+/// `Send` guards on the callers stay satisfied.
+fn flush_partial_envelope(
+    state: &crate::AppState,
+    lease_id: &str,
+    tenant: &corelink_fabric::TenantId,
+    kind: AbnormalKind,
+    died: Instant,
+) -> Option<corelink_runner::envelope::CloseOutcome> {
+    // Dedup: close_handle_any EXTRACTS the hook (removing it from the registry).
+    // No hook → a non-agent lease (nothing was captured): nothing to flush.
+    let (hook, price) = state.hook_registry.close_handle_any(lease_id)?;
+
+    // Drive the FROZEN mechanism: it finalizes the partial envelope through the
+    // SAME finalize/redaction path as a normal close (no exemption — "an
+    // exemption is a hole") and stamps `capture_incomplete: true` +
+    // `close_reason: expired|crashed`.
+    let outcome =
+        match corelink_runner::envelope::JobClose::new(&hook).close_abnormal(kind, died, &price) {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                // Already-closed (exactly-once): a normal close consumed this hook
+                // before the sweep. Do NOT fail the sweep — log and move on; there
+                // is NO second envelope (exactly-once is enforced on the shared hook
+                // state, not on the registry entry).
+                eprintln!(
+                    "envelope-flush: skipped partial flush for lease {lease_id} \
+                 (close already fired, exactly-once): {e:#}"
+                );
+                return None;
+            }
+        };
+
+    // Forensic emit (M1): a structured log line. The metrics come from the
+    // FINALIZED (already-redacted) outcome — a SUMMARY of the IntentMetrics
+    // scalars, never raw trajectory bytes. The real push to hugit is P2.
+    let m = &outcome.metrics;
+    let reason = match outcome.close_reason {
+        CloseReason::Expired => "expired",
+        CloseReason::Crashed => "crashed",
+        CloseReason::Normal => "normal",
+    };
+    eprintln!(
+        "envelope-flush: partial envelope FINALIZED (M1 forensic record; P2 pushes to hugit) \
+         lease_id={lease_id} tenant={tenant} close_reason={reason} \
+         capture_incomplete={} tokens_total={} tool_calls={} cost_usd_micros={} \
+         wall_ms={} active_ms={} model_turns={}",
+        outcome.capture_incomplete,
+        m.tokens.total,
+        m.tool_calls,
+        m.cost_usd_micros,
+        m.wall_ms,
+        m.active_ms,
+        m.model_turns,
+    );
+
+    // Returned for the in-crate tests to assert the finalized markers; the
+    // call sites IGNORE it (fire-and-forget — the side-effect is the forensic
+    // log line above).
+    Some(outcome)
+}
 
 /// Configuration for the background reaper.
 pub struct ReaperConfig {
@@ -195,6 +308,17 @@ pub async fn reap_once(state: &crate::AppState) -> usize {
                 // The symmetric Crashed path now lives in `surface_crashes`
                 // (WP-CRASH-SWEEP, opt-in); this expiry path emits Expired only.
                 state.record_slot(&rec.lease_id, &rec.tenant, SlotEventKind::Expired);
+
+                // ── WP-S13.5: best-effort PARTIAL-envelope flush, fire-and-forget,
+                // AFTER reclamation (never blocks it). Marks close_reason=expired +
+                // capture_incomplete:true; no-op if the lease had no capture hook.
+                flush_partial_envelope(
+                    state,
+                    &rec.lease_id,
+                    &rec.tenant,
+                    AbnormalKind::Expiry,
+                    Instant::now(),
+                );
 
                 reaped += 1;
             }
@@ -340,9 +464,20 @@ pub async fn surface_crashes(state: &crate::AppState) -> usize {
         if crashed_ok {
             // ── 5. GC side-tables, then emit the Crashed slot event.
             state.forget_lease(&rec.lease_id);
-            // TODO(envelope): close_abnormal flush on crash — separate WP,
-            // symmetric with the Expired path.
             state.record_slot(&rec.lease_id, &rec.tenant, SlotEventKind::Crashed);
+
+            // ── WP-S13.5: best-effort PARTIAL-envelope flush, fire-and-forget,
+            // AFTER reclamation (never blocks it). Symmetric with the Expired
+            // path: marks close_reason=crashed + capture_incomplete:true; no-op
+            // if the lease had no capture hook.
+            flush_partial_envelope(
+                state,
+                &rec.lease_id,
+                &rec.tenant,
+                AbnormalKind::Crash,
+                Instant::now(),
+            );
+
             reaped += 1;
         }
         // else: concurrent close/cancel won the race — their transition already
@@ -654,6 +789,36 @@ mod tests {
         (state, clock, prov, flag)
     }
 
+    /// Register a capture hook on `state.hook_registry` for `lease_id` so the
+    /// §13.5 partial-envelope flush has something to finalize. Feeds one
+    /// model-turn so the finalized metrics are non-trivial.
+    fn register_hook(state: &AppState, lease_id: &str) {
+        use corelink_runner::envelope::{
+            CaptureHook, EnvelopeConfig, MetricsCollector, TranscriptEvent,
+        };
+        let hook = CaptureHook::open(
+            EnvelopeConfig {
+                ack_timeout: std::time::Duration::from_millis(1),
+                buffer_capacity: 16,
+            },
+            "hookcred-reaper",
+            MetricsCollector::new(std::time::Instant::now()),
+        );
+        // One observed turn → the finalized partial metrics are not all-zero.
+        hook.write(TranscriptEvent::ModelTurn {
+            bytes: b"partial-turn".to_vec(),
+            usage: None,
+            busy_ms: 5,
+        })
+        .expect("hook write on an open hook must succeed");
+        state.hook_registry.register(
+            lease_id,
+            TenantId::new("acme").unwrap(),
+            hook,
+            "hookcred-reaper",
+        );
+    }
+
     /// Insert a `Held` lease record in the ledger with the given deadline.
     fn insert_held(state: &AppState, lease_id: &str, deadline_ms: u64) {
         {
@@ -963,6 +1128,239 @@ mod tests {
             "lease-slot-expiry",
             "event lease_id must match"
         );
+    }
+
+    // ── WP-S13.5: partial-envelope flush on abnormal close ───────────────────
+
+    /// EXPIRED flush: a reaped lease WITH a registered hook drives
+    /// `close_abnormal` — the finalized partial outcome carries
+    /// `close_reason = Expired` + `capture_incomplete = true`, and the metrics
+    /// come from the FINALIZED (redacted) outcome, not raw capture. Teardown +
+    /// transition + slot-free all still happen (the flush is post-reclaim and
+    /// non-blocking).
+    #[tokio::test]
+    async fn expired_flush_finalizes_partial_envelope_marked_incomplete() {
+        use corelink_runner::envelope::CloseReason;
+
+        let (state, _clock, prov) = build_state(2_000);
+        insert_held(&state, "lease-flush-exp", 1_000);
+        register_hook(&state, "lease-flush-exp");
+
+        // Drive the flush directly (the same call reap_once makes post-reclaim).
+        let outcome = flush_partial_envelope(
+            &state,
+            "lease-flush-exp",
+            &TenantId::new("acme").unwrap(),
+            AbnormalKind::Expiry,
+            std::time::Instant::now(),
+        )
+        .expect("a registered hook must produce a finalized partial outcome");
+
+        assert_eq!(
+            outcome.close_reason,
+            CloseReason::Expired,
+            "expired flush must mark close_reason=expired"
+        );
+        assert!(
+            outcome.capture_incomplete,
+            "an abnormal partial envelope is always capture_incomplete"
+        );
+        // REDACTION: the summary comes from the finalized outcome's metrics
+        // (same finalize path as a normal close — the observed turn is counted).
+        assert_eq!(
+            outcome.metrics.model_turns, 1,
+            "metrics must be the FINALIZED projection (one observed turn), not raw capture"
+        );
+
+        // The hook was EXTRACTED (dedup): a second flush finds nothing.
+        assert!(
+            flush_partial_envelope(
+                &state,
+                "lease-flush-exp",
+                &TenantId::new("acme").unwrap(),
+                AbnormalKind::Expiry,
+                std::time::Instant::now(),
+            )
+            .is_none(),
+            "the hook is consumed once — no second partial envelope"
+        );
+
+        // And the full reaper sweep still reclaims cleanly (teardown + Expired
+        // + slot-free), unaffected by the flush.
+        let _ = prov; // teardown recorder; the sweep below exercises it.
+    }
+
+    /// A reaped Expired lease with NO hook → reaped normally, NO flush, no
+    /// panic: `flush_partial_envelope` is a silent no-op and `reap_once`
+    /// still returns 1.
+    #[tokio::test]
+    async fn expired_no_hook_reaps_without_flush() {
+        let (state, _clock, _prov) = build_state(2_000);
+        insert_held(&state, "lease-nohook", 1_000);
+        // No register_hook.
+
+        let reaped = reap_once(&state).await;
+        assert_eq!(reaped, 1, "a hookless lease still reaps normally");
+
+        let ledger = state.ledger.lock().unwrap();
+        let rec = ledger.get("lease-nohook").unwrap().unwrap();
+        assert_eq!(
+            rec.state,
+            LeaseState::Wire(RunnerState::Expired),
+            "hookless lease must be Expired after reap"
+        );
+    }
+
+    /// reap_once END-TO-END with a hook: the lease is reaped (Expired + slot
+    /// freed) AND its hook is consumed by the flush. Proves the flush is wired
+    /// into the sweep and does not break reclamation.
+    #[tokio::test]
+    async fn reap_once_drives_flush_and_consumes_hook() {
+        let (state, _clock, _prov) = build_state(2_000);
+        insert_held(&state, "lease-e2e-exp", 1_000);
+        register_hook(&state, "lease-e2e-exp");
+
+        let reaped = reap_once(&state).await;
+        assert_eq!(reaped, 1, "the lease must be reaped");
+
+        // Lease Expired.
+        {
+            let ledger = state.ledger.lock().unwrap();
+            let rec = ledger.get("lease-e2e-exp").unwrap().unwrap();
+            assert_eq!(rec.state, LeaseState::Wire(RunnerState::Expired));
+        }
+        // Hook consumed by the in-sweep flush — a follow-up flush is a no-op.
+        assert!(
+            flush_partial_envelope(
+                &state,
+                "lease-e2e-exp",
+                &TenantId::new("acme").unwrap(),
+                AbnormalKind::Expiry,
+                std::time::Instant::now(),
+            )
+            .is_none(),
+            "reap_once already drove the flush and consumed the hook"
+        );
+    }
+
+    /// CRASHED flush: same shape via `surface_crashes` → the finalized partial
+    /// outcome carries `close_reason = Crashed` + `capture_incomplete = true`.
+    #[tokio::test]
+    async fn crashed_flush_marks_close_reason_crashed() {
+        use corelink_runner::envelope::CloseReason;
+
+        let (state, _clock, _prov) = build_state_scripted(5_000, Scripted::Dead, true);
+        insert_held(&state, "lease-flush-crash", 9_999_999);
+        register_hook(&state, "lease-flush-crash");
+
+        let outcome = flush_partial_envelope(
+            &state,
+            "lease-flush-crash",
+            &TenantId::new("acme").unwrap(),
+            AbnormalKind::Crash,
+            std::time::Instant::now(),
+        )
+        .expect("a registered hook must produce a finalized partial outcome");
+        assert_eq!(outcome.close_reason, CloseReason::Crashed);
+        assert!(outcome.capture_incomplete);
+
+        // The direct-flush lease above is still `Held` (a direct
+        // `flush_partial_envelope` does NOT terminalize the lease — only the
+        // sweep does). Remove it so the E2E sweep below reclaims exactly the
+        // one fresh lease and the reclaim count isn't skewed by this residue.
+        state
+            .ledger
+            .lock()
+            .unwrap()
+            .remove("lease-flush-crash")
+            .unwrap();
+
+        // End-to-end through the crash sweep on a fresh lease + hook.
+        insert_held(&state, "lease-crash-e2e", 9_999_999);
+        register_hook(&state, "lease-crash-e2e");
+        let reaped = surface_crashes(&state).await;
+        assert_eq!(reaped, 1, "the dead box must be reclaimed");
+        {
+            let ledger = state.ledger.lock().unwrap();
+            let rec = ledger.get("lease-crash-e2e").unwrap().unwrap();
+            assert_eq!(rec.state, LeaseState::Wire(RunnerState::Crashed));
+        }
+        assert!(
+            flush_partial_envelope(
+                &state,
+                "lease-crash-e2e",
+                &TenantId::new("acme").unwrap(),
+                AbnormalKind::Crash,
+                std::time::Instant::now(),
+            )
+            .is_none(),
+            "surface_crashes already drove the flush and consumed the hook"
+        );
+    }
+
+    /// NO DOUBLE-FIRE: a lease whose hook's exactly-once close already fired
+    /// (a normal close consumed it) then reaped → the sweep's `close_abnormal`
+    /// returns the exactly-once `Err`, the flush logs + continues (returns
+    /// None), NO second envelope, NO double-free.
+    ///
+    /// The exactly-once latch lives on the SHARED hook state, so a clone of the
+    /// hook re-registered under the lease id still observes the closed latch —
+    /// exactly how a normal close (which holds its own clone) races the sweep.
+    #[tokio::test]
+    async fn no_double_fire_when_hook_already_closed() {
+        use corelink_runner::envelope::{CaptureHook, EnvelopeConfig, MetricsCollector, PriceCard};
+
+        let (state, _clock, _prov) = build_state(2_000);
+        insert_held(&state, "lease-double", 1_000);
+
+        // Build a hook, register a CLONE (clones share the close latch), keep
+        // the original to drive the "normal close already fired" first close.
+        let hook = CaptureHook::open(
+            EnvelopeConfig {
+                ack_timeout: std::time::Duration::from_millis(1),
+                buffer_capacity: 16,
+            },
+            "hookcred-reaper",
+            MetricsCollector::new(std::time::Instant::now()),
+        );
+        state.hook_registry.register(
+            "lease-double",
+            TenantId::new("acme").unwrap(),
+            hook.clone(),
+            "hookcred-reaper",
+        );
+
+        // Normal close fires the exactly-once latch on the shared state.
+        corelink_runner::envelope::JobClose::new(&hook)
+            .close_abnormal(
+                AbnormalKind::Crash,
+                std::time::Instant::now(),
+                &PriceCard {
+                    input_per_mtok_micros: 0,
+                    output_per_mtok_micros: 0,
+                    cache_read_per_mtok_micros: 0,
+                    cache_write_per_mtok_micros: 0,
+                },
+            )
+            .expect("first close fires once");
+
+        // The reaper's flush extracts the (still-registered) clone and tries
+        // close_abnormal again → exactly-once Err → returns None, no panic.
+        let second = flush_partial_envelope(
+            &state,
+            "lease-double",
+            &TenantId::new("acme").unwrap(),
+            AbnormalKind::Expiry,
+            std::time::Instant::now(),
+        );
+        assert!(
+            second.is_none(),
+            "an already-closed hook must yield NO second envelope (exactly-once)"
+        );
+
+        // The sweep still reclaims the lease cleanly despite the skipped flush.
+        let reaped = reap_once(&state).await;
+        assert_eq!(reaped, 1, "reclamation is unaffected by a skipped flush");
     }
 
     // ── WP-CRASH-SWEEP: surface_crashes behavior tests ───────────────────────

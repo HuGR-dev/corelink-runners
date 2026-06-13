@@ -23,13 +23,16 @@ execution backend (default-off).
 | `NORTHFLANK_PROJECT_ID` | — | Northflank project id. |
 | `NORTHFLANK_TEAM_ID` | — | Northflank team/account id. |
 | `FABRIC_DEV_UNSAFE` | — | Set to `1` to boot with the insecure well-known dev signing key (LOCAL USE ONLY — attestations are forgeable; also requires a loopback bind address). |
+| `FABRIC_LEDGER_BACKEND` | `memory` | Lease ledger backend: `memory` (in-memory, leases reset on restart, single-instance) or `pg`/`postgres` (persistent, multi-instance cap-safe).  Any other value is a hard boot error. |
+| `DATABASE_URL` | — | Postgres connection URL.  **Required + non-empty** when `FABRIC_LEDGER_BACKEND=pg` — selecting `pg` without a reachable `DATABASE_URL` is a hard boot error (NEVER a silent fallback to memory).  Ignored for the `memory` backend. |
+| `FABRIC_LEDGER_POOL_SIZE` | `8` | Postgres connection-pool size (`usize`, ≥ 1).  `0` or unparseable is a hard boot error.  Ignored for the `memory` backend. |
 
 ## Fail-closed notes
 
 - **No `FABRIC_SIGNING_KEY` and no `FABRIC_DEV_UNSAFE=1`** → the process refuses to start.
 - **`FABRIC_DEV_UNSAFE=1` with a non-loopback bind** → the process refuses to start.  The dev key is forgeable and must never serve external traffic.
 - **No `NORTHFLANK_*` vars** → exec and provision stay on `NoBoxExec` / `NoBoxProvisioner`; every exec call returns 503.  The lease lifecycle still works; execution does not.
-- **`InMemoryLedger`** — leases are not persisted across restarts.  This is M1 scope; the Postgres ledger (ratified decision #3) arrives later.
+- **Ledger backend selection** — the default `memory` ledger does not persist leases across restarts and is single-instance only.  For production restart-survival + multi-instance cap-safety, set `FABRIC_LEDGER_BACKEND=pg` and provide `DATABASE_URL`.  Selecting `pg` with an absent/empty/unreachable `DATABASE_URL` is a hard boot error — the server NEVER silently falls back to memory (that would re-introduce split-brain / restart-loss invisibly).
 
 ## Scope / known gaps
 
