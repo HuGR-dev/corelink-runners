@@ -234,7 +234,15 @@ impl PgLedger {
     ) -> anyhow::Result<Self> {
         let mut cfg = Config::new();
         cfg.url = Some(database_url.to_string());
-        cfg.pool = Some(deadpool_postgres::PoolConfig::new(pool_size));
+        // Bound the pool-acquire wait (audit D2-P2). `PoolConfig::new` sets only
+        // the max size, leaving deadpool's `timeouts.wait` at the default `None`
+        // = wait forever. Under pool exhaustion `pool.get()` would then hang the
+        // lease-admission hot path indefinitely. A bounded wait makes `get()`
+        // return a `Timeout` error instead → mapped to `Err` → **fail-closed**
+        // (reject the acquire) rather than a silent unbounded stall.
+        let mut pool_cfg = deadpool_postgres::PoolConfig::new(pool_size);
+        pool_cfg.timeouts.wait = Some(std::time::Duration::from_secs(5));
+        cfg.pool = Some(pool_cfg);
         // TLS branch (WP-B). `Disable` is the original `NoTls` path, byte-for-
         // byte unchanged. `Require` wraps the same pool builder in a verify-full
         // rustls connector (public-CA trust anchors, hostname verification on).
