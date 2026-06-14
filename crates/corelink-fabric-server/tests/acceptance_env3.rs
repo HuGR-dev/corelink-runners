@@ -4,12 +4,20 @@
 //!
 //! In-process only (`tower::ServiceExt::oneshot`). Pins the transport
 //! contract: a valid POST advances the hook (a subsequent `events` poll sees
-//! the forwarded bytes); the lease-credential gate fails closed; an array /
-//! NDJSON batch is accepted; a no-hook lease is a tenant-matched 404 (no
-//! existence oracle). The §13.3 in-flight-only law lives in the mechanism and
-//! its own suite; here we prove the write reaches it.
+//! the forwarded bytes); an array / NDJSON batch is accepted.
+//!
+//! ## Auth — the per-lease SCOPED ingest token (WP-INGEST-SCOPE, P0 fix)
+//!
+//! The ingest path authenticates with a per-lease, write-only, ingest-SCOPED
+//! token — NOT the tenant PAT. The box (untrusted, contract §4) holds the
+//! scoped token; the endpoint recomputes + constant-time verifies it. A
+//! missing or wrong/forged/another-lease's token is rejected 401 fail-closed.
+//! The POLL endpoints are unchanged: they KEEP the tenant-PAT gate (hugit's
+//! trusted subscriber polls with the tenant PAT — that path puts nothing on
+//! the box). Two credentials, by trust boundary. The §13.3 in-flight-only law
+//! lives in the mechanism and its own suite; here we prove the write reaches it.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
@@ -17,14 +25,22 @@ use axum::http::{Request, StatusCode, header};
 use axum::response::Response;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use corelink_fabric::TenantId;
+use corelink_fabric::{InMemoryLedger, LeaseLedger, TenantId, TenantPlan};
 use corelink_fabric_api::{ApiError, ErrorBody, paths};
-use corelink_fabric_server::{HookRegistry, StaticTokenStore, TokenStore, app_with_registry};
+use corelink_fabric_server::{
+    AppState, HookRegistry, IngestSigner, StaticPlans, StaticTokenStore, SystemClock, TokenStore,
+    app_full,
+};
 use corelink_runner::envelope::{CaptureHook, EnvelopeConfig, MetricsCollector};
 use tower::ServiceExt;
 
 const LEASE_ID: &str = "lease-0001";
-const HOOK_CRED: &str = "pat-acme";
+/// The tenant PAT the hook is registered under — the POLL credential (Option
+/// A). It is NEVER injected into the box and is NOT the ingest credential.
+const TENANT_PAT: &str = "pat-acme";
+/// The dedicated ingest HMAC secret the test fabric is wired with, so the test
+/// can mint the SAME scoped token the box would receive.
+const INGEST_SECRET: &[u8] = b"test-ingest-secret-env3";
 
 fn tenant(id: &str) -> TenantId {
     TenantId::new(id).expect("valid tenant id")
@@ -32,25 +48,40 @@ fn tenant(id: &str) -> TenantId {
 
 fn store() -> Arc<dyn TokenStore + Send + Sync> {
     Arc::new(StaticTokenStore::new([
-        ("pat-acme".to_string(), tenant("acme")),
+        (TENANT_PAT.to_string(), tenant("acme")),
         ("pat-rival".to_string(), tenant("rival")),
     ]))
 }
 
-/// Register a hook whose credential == the acquiring tenant's PAT (Option A),
-/// return the hook + the wired router.
+/// The scoped ingest token for `lease_id` under the test fabric's ingest secret
+/// — what the box legitimately presents on the ingest path.
+fn scoped_token(lease_id: &str) -> String {
+    IngestSigner::new(INGEST_SECRET.to_vec()).ingest_token(lease_id)
+}
+
+/// Register a hook (poll credential == the tenant PAT, Option A) and wire the
+/// router with the test ingest secret. Returns the hook + the router.
 fn fixture() -> (CaptureHook, axum::Router) {
     let hook = CaptureHook::open(
         EnvelopeConfig {
             ack_timeout: Duration::from_secs(1),
             buffer_capacity: 64,
         },
-        HOOK_CRED,
+        TENANT_PAT,
         MetricsCollector::new(Instant::now()),
     );
     let registry = Arc::new(HookRegistry::default());
-    registry.register(LEASE_ID, tenant("acme"), hook.clone(), HOOK_CRED);
-    let router = app_with_registry(store(), registry);
+    registry.register(LEASE_ID, tenant("acme"), hook.clone(), TENANT_PAT);
+
+    let plans = StaticPlans::new([TenantPlan {
+        tenant: tenant("acme"),
+        max_concurrency: 8,
+        rate_ceiling_per_min: 100,
+    }]);
+    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let state = AppState::new(ledger, Arc::new(plans), Arc::new(SystemClock))
+        .with_ingest_signer(Arc::new(IngestSigner::new(INGEST_SECRET.to_vec())));
+    let router = app_full(store(), state, registry);
     (hook, router)
 }
 
@@ -101,8 +132,9 @@ fn one_turn_body(bytes: &[u8]) -> String {
     .to_string()
 }
 
-/// A valid POST writes the event into the hook: a following `events` poll
-/// drains exactly the forwarded bytes (byte-identical).
+/// A valid POST (with the SCOPED ingest token) writes the event into the hook:
+/// a following `events` poll (with the TENANT PAT) drains exactly the forwarded
+/// bytes (byte-identical). Proves ingest=scoped-token, poll=tenant-PAT.
 #[tokio::test]
 async fn valid_ingest_advances_the_hook() {
     let (_hook, router) = fixture();
@@ -110,16 +142,24 @@ async fn valid_ingest_advances_the_hook() {
 
     let resp = router
         .clone()
-        .oneshot(post(&path, Some("pat-acme"), one_turn_body(b"hello-turn")))
+        .oneshot(post(
+            &path,
+            Some(&scoped_token(LEASE_ID)),
+            one_turn_body(b"hello-turn"),
+        ))
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK, "valid ingest must 200");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "valid scoped ingest must 200"
+    );
 
-    // The poll sees the forwarded event, byte-identical.
+    // The poll (tenant PAT) sees the forwarded event, byte-identical.
     let events_path = lease_path(paths::ENVELOPE_EVENTS, LEASE_ID);
     let resp = router
         .clone()
-        .oneshot(get(&events_path, "pat-acme"))
+        .oneshot(get(&events_path, TENANT_PAT))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -149,13 +189,13 @@ async fn array_batch_forwards_all_events() {
 
     let resp = router
         .clone()
-        .oneshot(post(&path, Some("pat-acme"), batch))
+        .oneshot(post(&path, Some(&scoped_token(LEASE_ID)), batch))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
     let events_path = lease_path(paths::ENVELOPE_EVENTS, LEASE_ID);
-    let resp = router.oneshot(get(&events_path, "pat-acme")).await.unwrap();
+    let resp = router.oneshot(get(&events_path, TENANT_PAT)).await.unwrap();
     let body = body_json(resp).await;
     let events = body["events"].as_array().expect("events array");
     assert_eq!(events.len(), 4, "all four batch events are drainable");
@@ -175,15 +215,15 @@ async fn ndjson_batch_is_accepted() {
         serde_json::json!({ "kind": "model_turn", "bytes_b64": BASE64.encode(b"n1"), "busy_ms": 0 }),
     );
     let resp = router
-        .oneshot(post(&path, Some("pat-acme"), ndjson))
+        .oneshot(post(&path, Some(&scoped_token(LEASE_ID)), ndjson))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK, "NDJSON batch must 200");
 }
 
-/// The ingest endpoint sits behind the Bearer-PAT layer: no credential → 401.
+/// No credential at all → 401 fail-closed (never an accept).
 #[tokio::test]
-async fn ingest_requires_bearer_pat() {
+async fn ingest_requires_scoped_token() {
     let (_hook, router) = fixture();
     let path = lease_path(paths::ENVELOPE_INGEST, LEASE_ID);
     let resp = router
@@ -193,64 +233,120 @@ async fn ingest_requires_bearer_pat() {
     assert_frozen_error(resp, ApiError::Unauthorized).await;
 }
 
-/// A different tenant's valid PAT cannot ingest into this lease's hook: it is
-/// a tenant-matched registry MISS → 404 (no existence oracle), identical to
-/// the poll endpoints — never a 403 that would confirm the lease exists.
+/// The TENANT PAT is NOT the ingest credential: presenting it on the ingest
+/// path is rejected 401 (it is not the scoped token). This is the P0 inversion
+/// — the box must NOT be able to ingest with a tenant PAT, and a wrong token is
+/// never an accept.
 #[tokio::test]
-async fn cross_tenant_ingest_is_404_no_oracle() {
+async fn tenant_pat_is_not_an_ingest_credential() {
     let (_hook, router) = fixture();
     let path = lease_path(paths::ENVELOPE_INGEST, LEASE_ID);
     let resp = router
-        .oneshot(post(&path, Some("pat-rival"), one_turn_body(b"x")))
+        .oneshot(post(&path, Some(TENANT_PAT), one_turn_body(b"x")))
         .await
         .unwrap();
-    assert_frozen_error(resp, ApiError::NotFound).await;
+    assert_frozen_error(resp, ApiError::Unauthorized).await;
 }
 
-/// A lease with NO registered hook (non-agent / not registered) is the SAME
-/// 404 — the no-existence-oracle rule from the poll endpoints.
+/// A forged/garbage scoped token is rejected 401 fail-closed.
 #[tokio::test]
-async fn no_hook_lease_is_404() {
+async fn forged_scoped_token_is_rejected() {
     let (_hook, router) = fixture();
-    let path = lease_path(paths::ENVELOPE_INGEST, "lease-unknown");
+    let path = lease_path(paths::ENVELOPE_INGEST, LEASE_ID);
     let resp = router
-        .oneshot(post(&path, Some("pat-acme"), one_turn_body(b"x")))
+        .oneshot(post(
+            &path,
+            Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="),
+            one_turn_body(b"x"),
+        ))
         .await
         .unwrap();
-    assert_frozen_error(resp, ApiError::NotFound).await;
+    assert_frozen_error(resp, ApiError::Unauthorized).await;
 }
 
-/// Fail-closed 503 on a registry/hook credential disagreement: the registry
-/// stores one credential (tenant-matched, so the lookup passes) but the hook's
-/// own bearer seam expects a DIFFERENT token → the per-hook credential check
-/// refuses → 503, never an open accept. (Mirrors the poll endpoints' internal
-/// inconsistency posture.)
+/// CROSS-LEASE ISOLATION: the scoped token for lease A does NOT authorize
+/// ingest to lease B. Presenting lease A's token on lease B's ingest path is
+/// rejected 401 (the token folds the lease id into its HMAC pre-image).
 #[tokio::test]
-async fn registry_hook_credential_mismatch_fails_closed_503() {
-    // Hook expects "hook-secret"; registry registers it under the tenant PAT
-    // "pat-acme" — the lookup matches the tenant, but the hook's subscribe seam
-    // refuses the registered credential.
-    let hook = CaptureHook::open(
+async fn cross_lease_token_is_rejected() {
+    // Register two leases, B with its own hook, under one fabric.
+    let hook_a = CaptureHook::open(
         EnvelopeConfig {
             ack_timeout: Duration::from_secs(1),
             buffer_capacity: 16,
         },
-        "hook-secret",
+        TENANT_PAT,
+        MetricsCollector::new(Instant::now()),
+    );
+    let hook_b = CaptureHook::open(
+        EnvelopeConfig {
+            ack_timeout: Duration::from_secs(1),
+            buffer_capacity: 16,
+        },
+        TENANT_PAT,
         MetricsCollector::new(Instant::now()),
     );
     let registry = Arc::new(HookRegistry::default());
-    registry.register(LEASE_ID, tenant("acme"), hook, "pat-acme");
-    let router = app_with_registry(store(), registry);
+    registry.register("lease-A", tenant("acme"), hook_a, TENANT_PAT);
+    registry.register("lease-B", tenant("acme"), hook_b, TENANT_PAT);
 
-    let path = lease_path(paths::ENVELOPE_INGEST, LEASE_ID);
+    let plans = StaticPlans::new([TenantPlan {
+        tenant: tenant("acme"),
+        max_concurrency: 8,
+        rate_ceiling_per_min: 100,
+    }]);
+    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let state = AppState::new(ledger, Arc::new(plans), Arc::new(SystemClock))
+        .with_ingest_signer(Arc::new(IngestSigner::new(INGEST_SECRET.to_vec())));
+    let router = app_full(store(), state, registry);
+
+    // Lease A's token works for lease A...
+    let token_a = scoped_token("lease-A");
     let resp = router
-        .oneshot(post(&path, Some("pat-acme"), one_turn_body(b"x")))
+        .clone()
+        .oneshot(post(
+            &lease_path(paths::ENVELOPE_INGEST, "lease-A"),
+            Some(&token_a),
+            one_turn_body(b"a"),
+        ))
         .await
         .unwrap();
-    assert_frozen_error(resp, ApiError::FailClosed).await;
+    assert_eq!(resp.status(), StatusCode::OK, "lease A token works for A");
+
+    // ...but NOT for lease B — cross-lease isolation.
+    let resp = router
+        .oneshot(post(
+            &lease_path(paths::ENVELOPE_INGEST, "lease-B"),
+            Some(&token_a),
+            one_turn_body(b"b"),
+        ))
+        .await
+        .unwrap();
+    assert_frozen_error(resp, ApiError::Unauthorized).await;
+}
+
+/// A lease with NO registered hook, but presenting a VALID scoped token for
+/// that id, is a 404 — the auth passes (the token is well-formed for the id)
+/// but there is no live hook to write into. (A wrong token for the same id is
+/// 401, checked above — auth runs before the registry lookup, so existence is
+/// never leaked to an unauthenticated caller.)
+#[tokio::test]
+async fn valid_token_no_hook_is_404() {
+    let (_hook, router) = fixture();
+    let path = lease_path(paths::ENVELOPE_INGEST, "lease-unknown");
+    let resp = router
+        .oneshot(post(
+            &path,
+            Some(&scoped_token("lease-unknown")),
+            one_turn_body(b"x"),
+        ))
+        .await
+        .unwrap();
+    assert_frozen_error(resp, ApiError::NotFound).await;
 }
 
 /// A malformed event (bad base64) is rejected 400 — never silently dropped.
+/// (Auth with the valid scoped token passes first; the body is then rejected.)
 #[tokio::test]
 async fn malformed_event_is_rejected() {
     let (_hook, router) = fixture();
@@ -258,7 +354,7 @@ async fn malformed_event_is_rejected() {
     let body =
         serde_json::json!({ "kind": "model_turn", "bytes_b64": "!!!not-base64!!!" }).to_string();
     let resp = router
-        .oneshot(post(&path, Some("pat-acme"), body))
+        .oneshot(post(&path, Some(&scoped_token(LEASE_ID)), body))
         .await
         .unwrap();
     assert_frozen_error(resp, ApiError::Invalid).await;

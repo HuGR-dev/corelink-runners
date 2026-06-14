@@ -2359,6 +2359,7 @@ mod tests {
     async fn phase2b_ingest_writes_checkpoint_consumed_by_cross_instance_reap() {
         use crate::handlers::envelope::{HookRegistry, ingest};
         use axum::extract::{Path, State};
+        use axum::http::{HeaderMap, header};
         use axum::{Extension, http::StatusCode};
         use corelink_runner::envelope::{CaptureHook, EnvelopeConfig, MetricsCollector};
 
@@ -2399,11 +2400,20 @@ mod tests {
             { "kind": "model_turn", "bytes_b64": "dHVybi0x", "busy_ms": 4 }
         ])
         .to_string();
+        // The ingest path now authenticates with the per-lease SCOPED ingest
+        // token (NOT the tenant PAT), presented as the Bearer. Mint it from the
+        // fabric's own ingest secret for THIS lease.
+        let scoped = state_a.ingest_signer.ingest_token(LEASE);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {scoped}").parse().unwrap(),
+        );
         let resp = ingest(
             State(state_a.clone()),
             Extension(Arc::clone(&registry_a)),
-            Extension(TenantId::new("acme").unwrap()),
             Path(LEASE.to_string()),
+            headers,
             body,
         )
         .await;

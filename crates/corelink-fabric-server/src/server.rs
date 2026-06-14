@@ -647,6 +647,26 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
         &cfg.signing_key,
     ));
 
+    // ── §13.2 ingest-token secret (WP-INGEST-SCOPE) ──────────────────────────
+    // The HMAC key that mints + verifies the per-lease, write-only, ingest-
+    // scoped token injected into the UNTRUSTED box env IN PLACE OF the tenant
+    // PAT (the P0 fix — see `crate::ingest_token`). Derived deterministically
+    // from the fabric signing key via a DOMAIN-SEPARATED label, so it is a
+    // production-grade per-region secret that needs no extra env var and
+    // rotates with the signing key — yet is NEVER the ed25519 signing key
+    // itself (different algorithm, labeled SHA-256 derivation), so the
+    // attestation and ingest domains can never be confused. A box that
+    // exfiltrates the scoped token still cannot derive the signing key (SHA-256
+    // is one-way) nor any other capability.
+    let ingest_secret = {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(b"corelink-ingest-secret:v1:");
+        h.update(cfg.signing_key);
+        h.finalize().to_vec()
+    };
+    let ingest_signer = Arc::new(crate::ingest_token::IngestSigner::new(ingest_secret));
+
     // ── Lease ledger (WP-4) ──────────────────────────────────────────────────
     // Memory: byte-identical to the pre-WP-4 unconditional path; no runtime
     //   requirement, so the sync `#[test]` callers (which never set the pg env)
@@ -730,7 +750,9 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
         }
     };
 
-    let state = AppState::new(ledger, plans, Arc::new(SystemClock)).with_signer(signer);
+    let state = AppState::new(ledger, plans, Arc::new(SystemClock))
+        .with_signer(signer)
+        .with_ingest_signer(ingest_signer);
 
     // Default-off: when mock_exec is false the existing cloud-backend
     // composition is byte-identical to before this change (NoBoxExec +
