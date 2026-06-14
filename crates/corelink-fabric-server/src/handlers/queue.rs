@@ -99,7 +99,7 @@ pub(crate) async fn trigger(
     // ── 1+2. Tenant-scoped lookup + Held-only gate — the exec path's gates,
     // verbatim. NO cap check here: capping happened at acquire (module
     // docs); an over-cap tenant has no lease for this 404 to miss.
-    // The durable deadline (ADR-0003: it lives on the ledger record, the single
+    // The durable deadline (ADR-0004: it lives on the ledger record, the single
     // source of truth) is read in the SAME critical section as the Held gate —
     // same pattern as the exec path — so a trigger landing on a DIFFERENT
     // instance than acquire still sees it.

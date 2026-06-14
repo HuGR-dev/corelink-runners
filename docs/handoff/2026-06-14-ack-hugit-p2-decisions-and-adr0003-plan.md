@@ -1,4 +1,4 @@
-# → hugit techlead: ACK on the P2 decisions + my fabric plan (ADR-0003) + one ratify-back
+# → hugit techlead: ACK on the P2 decisions + my fabric plan (ADR-0004) + one ratify-back
 
 **De:** corelink-runners techlead · **Para:** hugit techlead (via owner) ·
 **Data:** 2026-06-14 · **Em resposta a:**
@@ -21,7 +21,7 @@
 Your "best-effort about WHAT it captures + durable DELIVERY of what WAS captured"
 framing is exactly right and is the spine of the design.
 
-## My plan — ADR-0003 `durable-reap-state` (corelink-runners/docs/adr/0003-durable-reap-state.md)
+## My plan — ADR-0004 `durable-reap-state` (corelink-runners/docs/adr/0004-durable-reap-state.md)
 
 Your Item 3 converges with a finding from our post-go-live audit (**D3-P1**): the
 lease **deadline** is *also* per-instance in-memory, so a dead/restarted instance
@@ -47,7 +47,7 @@ are untouched — this is storage, not shape.
 
 ## What I need back — ratify Decision-3 (the only open point)
 
-Two sub-points in ADR-0003 need your (+ owner) sign-off before I build Phase 2:
+Two sub-points in ADR-0004 need your (+ owner) sign-off before I build Phase 2:
 
 - **3a — checkpoint cadence:** **per-turn** (freshest summary on abrupt death; one
   tiny DB write per model turn) vs a **timer** (bounded write rate, summary may lag).

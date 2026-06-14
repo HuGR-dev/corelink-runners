@@ -135,17 +135,16 @@ redundant reaping harmless, so no leader election is needed.
 > (move deadline + hook into the `leases` table so any instance can reap/flush)
 > closes both. Cap-safety is unaffected — the cap is DB-global (§3.1).
 
-### 5a. Deadline-reaper locality (cap-slot leak on instance death) — audit D3-P1
+### 5a. Deadline-reaper locality — ✅ RESOLVED (ADR-0004 Phase 1, PR #43)
 
-A lease's expiry deadline is recorded in the **acquiring instance's** in-memory
-`deadlines` map; the `leases` table has no deadline column. So another instance's
-`reap_once` treats that lease as never-overdue and skips it. As long as the
-acquiring instance is alive it reaps its own leases fine, but if it **dies or
-restarts** (every NEW BUILD restarts instances) its in-flight `Held` leases become
-unreapable by the deadline path and **leak their cap slots** until the provider's
-hard `activeDeadlineSeconds` deadline. Compute cost is bounded; the ledger row is
-not freed. Fix = persist `deadline_ms` on the `leases` row (durable-reap-state WP);
-the opt-in crash sweep already covers it cross-instance for the box itself.
+*(Was audit D3-P1.)* The lease deadline used to live only in the acquiring
+instance's in-memory `deadlines` map, so a dead/restarted instance leaked its
+`Held` cap slots (another instance's `reap_once` could not date them). **Fixed:**
+`deadline_ms` is now a durable column on the `leases` row (ADR-0004 Decision-1);
+the reaper dates every overdue lease from the ledger, so **any instance reaps any
+overdue lease** — a true cross-instance backstop. Proven by
+`durable_deadline_survives_instance_boundary_and_is_reapable_cross_instance`
+(green against real Postgres). No cap-slot leak on instance death.
 
 ### 5b. §13.5 partial-envelope hook-locality
 

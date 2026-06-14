@@ -136,10 +136,10 @@ DO $$ BEGIN CREATE TYPE lease_state AS ENUM ('pending','held','released','expire
 CREATE TABLE IF NOT EXISTS leases (
   lease_id text PRIMARY KEY, tenant text NOT NULL, state lease_state NOT NULL,
   box_ref text NOT NULL, created_at_ms bigint NOT NULL, updated_at_ms bigint NOT NULL);
--- ADR-0003 Decision-1: the durable lease-expiry deadline (epoch ms, nullable =
+-- ADR-0004 Decision-1: the durable lease-expiry deadline (epoch ms, nullable =
 -- never-overdue). ADDITIVE + IDEMPOTENT so a fresh DB and an already-populated
 -- one both apply cleanly; existing rows get NULL (never-overdue), preserving
--- the pre-ADR-0003 fail-safe until the next acquire writes a deadline.
+-- the pre-ADR-0004 fail-safe until the next acquire writes a deadline.
 ALTER TABLE leases ADD COLUMN IF NOT EXISTS deadline_ms bigint;
 CREATE INDEX IF NOT EXISTS leases_tenant_active_idx ON leases (tenant) WHERE state IN ('pending','held');
 CREATE INDEX IF NOT EXISTS leases_held_idx ON leases (lease_id) WHERE state = 'held';
@@ -192,7 +192,7 @@ fn record_from_row(row: &tokio_postgres::Row) -> anyhow::Result<LeaseRecord> {
     let created: i64 = row.get("created_at_ms");
     let updated: i64 = row.get("updated_at_ms");
     let tenant_raw: String = row.get("tenant");
-    // ADR-0003 Decision-1: nullable `bigint` ↔ `Option<u64>` (NULL → None =
+    // ADR-0004 Decision-1: nullable `bigint` ↔ `Option<u64>` (NULL → None =
     // never-overdue), same `as u64` epoch-ms mapping as the other time fields.
     let deadline: Option<i64> = row.get("deadline_ms");
     Ok(LeaseRecord {
@@ -338,7 +338,7 @@ impl LeaseLedger for PgLedger {
                         &rec.box_ref,
                         &(rec.created_at_ms as i64),
                         &(rec.updated_at_ms as i64),
-                        // ADR-0003: Option<u64> → nullable bigint (None → NULL).
+                        // ADR-0004: Option<u64> → nullable bigint (None → NULL).
                         &rec.deadline_ms.map(|d| d as i64),
                     ],
                 )
@@ -390,7 +390,7 @@ impl LeaseLedger for PgLedger {
             let client = self.pool.get().await?;
             let row = client
                 .query_opt(
-                    // ADR-0003: the SET clause must NOT touch deadline_ms — a
+                    // ADR-0004: the SET clause must NOT touch deadline_ms — a
                     // state change never alters the durable deadline; it is only
                     // RETURNed so the updated record carries it back unchanged.
                     "UPDATE leases \
@@ -501,7 +501,7 @@ impl LeaseLedger for PgLedger {
                         &rec.box_ref,
                         &(rec.created_at_ms as i64),
                         &(max_concurrency as i64),
-                        // ADR-0003: Option<u64> → nullable bigint (None → NULL).
+                        // ADR-0004: Option<u64> → nullable bigint (None → NULL).
                         &rec.deadline_ms.map(|d| d as i64),
                     ],
                 )

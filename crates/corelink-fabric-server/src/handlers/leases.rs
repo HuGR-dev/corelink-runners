@@ -169,7 +169,7 @@ pub(crate) async fn acquire(
             box_ref: format!("box:{lease_id}"),
             created_at_ms: now_ms,
             updated_at_ms: now_ms,
-            // ADR-0003 Decision-1: the absolute expiry deadline rides the record
+            // ADR-0004 Decision-1: the absolute expiry deadline rides the record
             // into the ledger (the single source of truth), so ANY instance can
             // date+reap this lease — and the terminal transition preserves it.
             deadline_ms: Some(lease.expiry),
@@ -272,7 +272,7 @@ pub(crate) async fn acquire(
     // ── 5. Contract §1: acquire returns lease id + exec endpoint + deadline.
     // The endpoint is the frozen template, substituted. The deadline is NOT
     // recorded in a side-table anymore — it rode the `LeaseRecord` into the
-    // ledger above (`deadline_ms: Some(lease.expiry)`, ADR-0003 Decision-1), so
+    // ledger above (`deadline_ms: Some(lease.expiry)`, ADR-0004 Decision-1), so
     // the API3 expired-at-exec-time gate and the reaper both read it durably
     // from the ledger on ANY instance. ──
     // The validated pinned image digest IS recorded server-side: it is the

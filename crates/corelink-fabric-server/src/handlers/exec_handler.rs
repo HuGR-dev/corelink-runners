@@ -59,7 +59,7 @@ pub(crate) async fn exec(
     // ── 1+2. Tenant-scoped lookup + Held-only gate, under the ledger lock.
     // The lock is released before execution: a check can run long, and the
     // ledger must stay available to the rest of the control plane.
-    // The lease's durable deadline (ADR-0003 Decision-1: the deadline lives on
+    // The lease's durable deadline (ADR-0004 Decision-1: the deadline lives on
     // the `LeaseRecord` in the ledger, the single source of truth — read it in
     // the SAME critical section as the Held gate, so an exec that lands on a
     // DIFFERENT instance than acquire still sees it). `None` → internal
