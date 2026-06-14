@@ -81,6 +81,21 @@ pub struct JobOutcome {
     pub error: Option<String>,
 }
 
+/// A single container whose forensic teardown FAILED during a batch reclaim.
+///
+/// A failed teardown leaks a box (the container may still be running on the
+/// shared host). This record makes that leak VISIBLE and reclaimable — it is
+/// never silently dropped (a swallowed teardown error is an invisible leak,
+/// which the deadline reaper cannot find because it only knows about leases).
+#[derive(Debug, Clone)]
+pub struct TeardownFailure {
+    /// The C2b-namespaced container name that failed to tear down.
+    pub name: String,
+    /// The teardown error, rendered (the box may be unreachable, or `docker
+    /// rm -f` reported a non-idempotent failure).
+    pub error: String,
+}
+
 /// Result of running a concurrent batch and tearing it all down.
 #[derive(Debug, Clone)]
 pub struct BatchReport {
@@ -91,6 +106,12 @@ pub struct BatchReport {
     pub peak_concurrency: usize,
     /// Forensic re-scan after teardown of every job — must be clean.
     pub residue: ForensicReport,
+    /// Per-container teardown FAILURES, collected (never swallowed). One entry
+    /// per container whose forensic teardown returned `Err` — each is a leaked
+    /// box that must be surfaced so it can be reclaimed. A non-empty vector
+    /// means the batch did NOT fully reclaim; callers gate on
+    /// [`BatchReport::all_torn_down`].
+    pub teardown_failures: Vec<TeardownFailure>,
 }
 
 impl BatchReport {
@@ -98,6 +119,14 @@ impl BatchReport {
     #[must_use]
     pub fn ok_count(&self) -> usize {
         self.outcomes.iter().filter(|o| o.ok).count()
+    }
+
+    /// `true` iff every container in the batch tore down cleanly — i.e. no
+    /// box was leaked. The complement of a non-empty
+    /// [`teardown_failures`](BatchReport::teardown_failures).
+    #[must_use]
+    pub fn all_torn_down(&self) -> bool {
+        self.teardown_failures.is_empty()
     }
 }
 
@@ -202,16 +231,43 @@ where
         }
 
         // Teardown every container via C2a's forensic teardown and aggregate.
+        //
+        // A per-container teardown error MUST NOT be swallowed: a failed
+        // teardown leaks a box (the container may still be running on the
+        // shared host), and the deadline reaper cannot find it because it
+        // reasons over leases, not orphaned containers. So we COLLECT each
+        // failure — logging it AND recording it on the report — while still
+        // attempting teardown of every remaining container in the batch. The
+        // caller gates on `BatchReport::all_torn_down`; a leaked box is now
+        // visible and reclaimable, never silently dropped.
         let mut residue = ForensicReport::default();
+        let mut teardown_failures = Vec::new();
         for spec in &specs {
             let c = RunningContainer {
                 name: spec.name.clone(),
             };
-            if let Ok(r) = teardown(self.boxx.as_ref(), &c) {
-                residue.containers.extend(r.containers);
-                residue.processes.extend(r.processes);
-                residue.mounts.extend(r.mounts);
-                residue.network.extend(r.network);
+            match teardown(self.boxx.as_ref(), &c) {
+                Ok(r) => {
+                    residue.containers.extend(r.containers);
+                    residue.processes.extend(r.processes);
+                    residue.mounts.extend(r.mounts);
+                    residue.network.extend(r.network);
+                }
+                Err(e) => {
+                    // Surface, never swallow: log the leak AND record it so the
+                    // caller can reclaim it. Continue the loop so one bad
+                    // teardown never strands the rest of the batch.
+                    let error = format!("{e:#}");
+                    eprintln!(
+                        "run_batch: teardown FAILED for container {} — box LEAKED, \
+                         must be reclaimed: {error}",
+                        c.name
+                    );
+                    teardown_failures.push(TeardownFailure {
+                        name: c.name.clone(),
+                        error,
+                    });
+                }
             }
         }
 
@@ -219,6 +275,7 @@ where
             outcomes,
             peak_concurrency: peak,
             residue,
+            teardown_failures,
         })
     }
 }
@@ -313,5 +370,164 @@ mod tests {
             c2b_spec(&l, "alpine:3.20").is_err(),
             "c2b must reject an unpinned image (inherits the X4 floor)"
         );
+    }
+
+    // ── Batch-teardown no-swallow regression (P1) ────────────────────────────
+    //
+    // A failed per-container teardown in `run_batch` MUST be SURFACED, never
+    // swallowed: a swallowed teardown error leaks a box invisibly (the deadline
+    // reaper reasons over leases, not orphaned containers, so it can never
+    // reclaim it). This harness makes the teardown of ONE specific container
+    // fail (its `docker rm -f` errors at the box) and asserts:
+    //   1. the failure is reported in `teardown_failures` (not dropped),
+    //   2. `all_torn_down()` is false (the leak is visible),
+    //   3. EVERY other container is still torn down (one bad item never strands
+    //      the rest of the batch).
+
+    use std::sync::Mutex;
+
+    use crate::isolation::{Engine, IsolationProbe, RunningContainer};
+    use crate::lease::{BoxExec, CmdOutput, ContainerSpec};
+
+    const TEST_PIN: &str =
+        "alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc";
+
+    fn held_lease(id: &str) -> RunnerLease {
+        use corelink_runners_contracts::RunnerState;
+        RunnerLease {
+            lease_id: id.to_string(),
+            principal_chain: vec![],
+            path_set: vec![],
+            expiry: 0,
+            net_policy: "none".to_string(),
+            tmp_root: "/t".to_string(),
+            state: RunnerState::Held,
+        }
+    }
+
+    /// `BoxExec` that returns `Err` for the `docker rm -f` of one POISONED
+    /// container name (forcing `teardown` to return `Err`), and clean/empty
+    /// output for every other command (so other teardowns succeed). Records
+    /// which container names it was asked to `rm -f`.
+    struct PoisonRmBox {
+        poison: String,
+        rm_targets: Mutex<Vec<String>>,
+    }
+
+    impl PoisonRmBox {
+        fn new(poison: &str) -> Self {
+            Self {
+                poison: poison.to_string(),
+                rm_targets: Mutex::new(Vec::new()),
+            }
+        }
+        fn rm_targets(&self) -> Vec<String> {
+            self.rm_targets.lock().unwrap().clone()
+        }
+    }
+
+    impl BoxExec for PoisonRmBox {
+        fn run(&self, argv: &[&str]) -> Result<CmdOutput> {
+            // The teardown destroy step: `docker rm -f <name>`.
+            if argv.len() >= 3 && argv[0] == "docker" && argv[1] == "rm" && argv[2] == "-f" {
+                let name = argv[3];
+                self.rm_targets.lock().unwrap().push(name.to_string());
+                if name == self.poison {
+                    bail!("box unreachable: docker rm -f {name} failed (simulated)");
+                }
+            }
+            // Everything else (the four forensic scans, census ps) → clean.
+            Ok(CmdOutput {
+                code: Some(0),
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    /// `Engine` whose spawn/exec always succeed (so the batch reaches teardown).
+    struct OkEngine;
+
+    impl Engine for OkEngine {
+        fn spawn(&self, spec: &ContainerSpec) -> Result<RunningContainer> {
+            Ok(RunningContainer {
+                name: spec.name.clone(),
+            })
+        }
+        fn probe(&self, _c: &RunningContainer, _spec: &ContainerSpec) -> Result<IsolationProbe> {
+            Ok(IsolationProbe {
+                tmp_is_private: true,
+                net_is_isolated: true,
+            })
+        }
+        fn exec(&self, _c: &RunningContainer, _argv: &[&str]) -> Result<Option<i32>> {
+            Ok(Some(0))
+        }
+        fn exec_captured(&self, _c: &RunningContainer, _argv: &[&str]) -> Result<CmdOutput> {
+            Ok(CmdOutput {
+                code: Some(0),
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+        fn is_alive(&self, _c: &RunningContainer) -> Result<bool> {
+            Ok(false)
+        }
+    }
+
+    #[test]
+    fn run_batch_surfaces_failed_teardown_and_still_reclaims_the_rest() {
+        // Three jobs; the SECOND container's teardown is poisoned to fail.
+        let poison = c2b_container_name("leaky");
+        let boxx = PoisonRmBox::new(&poison);
+        let sched = Scheduler::new(boxx, OkEngine);
+
+        let leases = vec![
+            (held_lease("a"), TEST_PIN.to_string()),
+            (held_lease("leaky"), TEST_PIN.to_string()),
+            (held_lease("c"), TEST_PIN.to_string()),
+        ];
+
+        let report = sched
+            .run_batch(&leases, &["true"])
+            .expect("batch runs; per-item teardown failures are reported, not Err");
+
+        // 1. The failure is SURFACED, not swallowed.
+        assert!(
+            !report.all_torn_down(),
+            "a failed teardown must make all_torn_down() false (leak is visible)"
+        );
+        assert_eq!(
+            report.teardown_failures.len(),
+            1,
+            "exactly one teardown failure must be reported; got {:?}",
+            report.teardown_failures
+        );
+        assert_eq!(
+            report.teardown_failures[0].name, poison,
+            "the reported failure must name the leaked container"
+        );
+        assert!(
+            !report.teardown_failures[0].error.is_empty(),
+            "the failure must carry the rendered error"
+        );
+
+        // 2. Other items are STILL processed — teardown was attempted for all
+        //    three containers (one bad item never strands the rest).
+        let targets = sched_box_targets(&sched);
+        for id in ["a", "leaky", "c"] {
+            let name = c2b_container_name(id);
+            assert!(
+                targets.contains(&name),
+                "teardown must be attempted for {name} despite the leaky sibling; \
+                 rm targets = {targets:?}"
+            );
+        }
+    }
+
+    /// Helper: read the poisoned box's recorded `rm -f` targets back off the
+    /// scheduler (the scheduler owns the box behind an `Arc`).
+    fn sched_box_targets(sched: &Scheduler<PoisonRmBox, OkEngine>) -> Vec<String> {
+        sched.boxx.rm_targets()
     }
 }

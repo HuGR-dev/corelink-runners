@@ -500,6 +500,32 @@ impl LeaseLedger for PgLedger {
         })
     }
 
+    fn pending_older_than(
+        &self,
+        now_ms: u64,
+        max_age_ms: u64,
+    ) -> anyhow::Result<Vec<LeaseRecord>> {
+        // cutoff = now - max_age (saturating). A Pending row whose created_at_ms
+        // is at/below the cutoff has outlived any legitimate provision window
+        // and is reclaimable (the stale-Pending sweep). The filter is server-side
+        // so an instance never pulls fresh, mid-provision Pendings.
+        let cutoff = now_ms.saturating_sub(max_age_ms);
+        self.block_on(async {
+            let client = self.pool.get().await?;
+            let rows = client
+                .query(
+                    "SELECT lease_id, tenant, state::text AS state, box_ref, \
+                            created_at_ms, updated_at_ms, deadline_ms \
+                     FROM leases \
+                     WHERE state = 'pending' AND created_at_ms <= $1 \
+                     ORDER BY lease_id",
+                    &[&(cutoff as i64)],
+                )
+                .await?;
+            rows.iter().map(record_from_row).collect()
+        })
+    }
+
     fn try_admit(&mut self, rec: LeaseRecord, max_concurrency: u32) -> anyhow::Result<bool> {
         // THE crux: cross-instance cap-safe admission. An EXPLICIT transaction
         // takes a per-tenant advisory lock as its OWN statement FIRST, then the

@@ -55,6 +55,47 @@ pub(crate) fn run_all(make: LedgerFactory) {
     remove_frees_cap_and_get(make);
     deadline_roundtrips_and_transition_preserves_it(make);
     envelope_checkpoint_set_get_roundtrip(make);
+    pending_older_than_filters_by_age_and_state(make);
+}
+
+/// `pending_older_than(now, max_age)` returns ONLY `Pending` rows whose
+/// `created_at_ms <= now - max_age` — the stale-Pending sweep's enumeration
+/// seam. Every backend proves: (a) a stale Pending is returned, (b) a fresh
+/// Pending is NOT, (c) a Held lease (even an old one) is never returned (the
+/// deadline reaper owns Held), ordered by lease_id.
+fn pending_older_than_filters_by_age_and_state(make: LedgerFactory) {
+    let t = tenant("acme");
+    let mut led = make();
+
+    // created_at_ms = 1_000 for every `record(..)` helper row.
+    // Stale Pending (old), fresh Pending (we make it fresh by putting it then
+    // querying with a small max_age), and a Held lease that must never appear.
+    led.put(pending("p-stale", &t)).unwrap();
+    led.put(pending("p-fresh", &t)).unwrap();
+    led.put(held("h-old", &t)).unwrap();
+
+    // now = 100_000; max_age = 10_000 → cutoff = 90_000. Both Pendings have
+    // created_at_ms = 1_000 (<= 90_000), so BOTH are stale by this bound; the
+    // Held is excluded purely on state.
+    let stale = led.pending_older_than(100_000, 10_000).unwrap();
+    let ids: Vec<&str> = stale.iter().map(|r| r.lease_id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec!["p-fresh", "p-stale"],
+        "both Pendings past the cutoff are returned, ordered by lease_id; \
+         the Held lease is never returned"
+    );
+
+    // Tighten the bound so the cutoff falls BEFORE created_at_ms (1_000):
+    // now = 1_500, max_age = 10_000 → cutoff = saturating_sub = 0; rows with
+    // created_at_ms = 1_000 are NOT <= 0 → none returned (fail-safe: a
+    // not-yet-old-enough Pending is never reclaimed).
+    let none = led.pending_older_than(1_500, 10_000).unwrap();
+    assert!(
+        none.is_empty(),
+        "a Pending younger than the bound must NOT be returned (fail-safe); got {:?}",
+        none.iter().map(|r| &r.lease_id).collect::<Vec<_>>()
+    );
 }
 
 /// ADR-0004 Decision-2: the durable envelope checkpoint. `set` → `get` returns
