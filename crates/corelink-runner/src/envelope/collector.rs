@@ -125,9 +125,39 @@ impl MetricsCollector {
             bail!("MetricsCollector::finalize called twice — job close is exactly-once");
         }
         self.finalized = true;
+        Ok(self.project(died, price))
+    }
 
-        let wall_ms = u64::try_from(died.saturating_duration_since(self.born).as_millis())
-            .unwrap_or(u64::MAX);
+    /// Non-destructive PROJECTION of the current accumulated state to the
+    /// §13.1 [`IntentMetrics`] shape — the **turn-boundary checkpoint** read
+    /// (ADR-0004 Phase 2b, Decision-3a per-turn cadence).
+    ///
+    /// This is the **read side** of the once-only finalize: it computes the
+    /// exact same derived projection as [`finalize`](Self::finalize) over the
+    /// accumulators **as they currently stand**, but WITHOUT setting the
+    /// `finalized` latch and WITHOUT requiring `&mut self`. It NEVER consumes
+    /// or closes the collector, so a later `finalize` (the real close) still
+    /// runs exactly once. `now` is the projection instant for `wall_ms` (the
+    /// caller passes the current clock; the durable checkpoint is a mid-flight
+    /// summary, not the job's death).
+    ///
+    /// INTERNAL API only — this projects the *current totals* of the frozen
+    /// [`IntentMetrics`] shape (sha256 `2d8d2215…`); it does not alter that
+    /// wire type. There is no `finalized` mutation and no error path: a
+    /// snapshot can be taken any number of times.
+    #[must_use]
+    pub fn snapshot(&self, now: Instant, price: &PriceCard) -> IntentMetrics {
+        self.project(now, price)
+    }
+
+    /// The pure derivation shared by [`finalize`](Self::finalize) (once-only,
+    /// at job death) and [`snapshot`](Self::snapshot) (non-destructive, at a
+    /// turn boundary). Reads `&self` only — it NEVER touches `finalized` — so
+    /// both call sites produce a byte-identical projection of the same
+    /// accumulator state, and the snapshot can never disturb the close latch.
+    fn project(&self, at: Instant, price: &PriceCard) -> IntentMetrics {
+        let wall_ms =
+            u64::try_from(at.saturating_duration_since(self.born).as_millis()).unwrap_or(u64::MAX);
         // Defensive clamp (see method docs): active may never exceed wall.
         let active_ms = self.active_ms.min(wall_ms);
 
@@ -149,7 +179,7 @@ impl MetricsCollector {
         // never hangs on lying input).
         let cost_usd_micros = u64::try_from(cost).unwrap_or(u64::MAX);
 
-        Ok(IntentMetrics {
+        IntentMetrics {
             tokens: TokenCounts {
                 input: self.input,
                 output: self.output,
@@ -170,7 +200,7 @@ impl MetricsCollector {
                 .collect(),
             model_turns: self.model_turns,
             cost_usd_micros,
-        })
+        }
     }
 }
 
@@ -399,6 +429,76 @@ mod tests {
         };
         let m = c.finalize(born, &price).unwrap();
         assert_eq!(m.cost_usd_micros, 8_100_000);
+    }
+
+    #[test]
+    fn snapshot_is_non_destructive_and_reflects_accumulated_state() {
+        // ADR-0004 Phase 2b: a turn-boundary snapshot PROJECTS current totals
+        // without consuming/closing the collector. After two turns the
+        // snapshot reflects two turns; a third turn then a finalize still
+        // succeeds (the once-only latch was never tripped by the snapshots).
+        let born = Instant::now();
+        let mut c = MetricsCollector::new(born);
+        c.observe(&turn(Some(TurnUsage {
+            input: 10,
+            output: 5,
+            cache_read: 3,
+            cache_write: 1,
+        })));
+        c.observe(&turn(Some(TurnUsage {
+            input: 20,
+            output: 7,
+            cache_read: 2,
+            cache_write: 0,
+        })));
+
+        let snap = c.snapshot(born, &zero_price());
+        assert_eq!(snap.model_turns, 2, "snapshot reflects 2 accumulated turns");
+        assert_eq!(snap.tokens.input, 30);
+        assert_eq!(snap.tokens.total, 30 + 12 + 5 + 1);
+
+        // A second snapshot is still allowed (no exactly-once latch on read).
+        let snap2 = c.snapshot(born, &zero_price());
+        assert_eq!(snap2.model_turns, 2);
+
+        // The real close still finalizes exactly once: the snapshots did not
+        // trip the `finalized` latch.
+        c.observe(&turn(None));
+        let m = c
+            .finalize(born, &zero_price())
+            .expect("finalize still works");
+        assert_eq!(m.model_turns, 3, "finalize sees all three turns");
+        assert!(
+            c.finalize(born, &zero_price()).is_err(),
+            "finalize remains exactly-once after snapshots"
+        );
+    }
+
+    #[test]
+    fn snapshot_matches_finalize_projection() {
+        // The snapshot and a finalize over the SAME accumulator state produce
+        // the byte-identical projection (shared `project` derivation).
+        let born = Instant::now();
+        let mut snap_collector = MetricsCollector::new(born);
+        let mut fin_collector = MetricsCollector::new(born);
+        let price = PriceCard {
+            input_per_mtok_micros: 3_000_000,
+            output_per_mtok_micros: 15_000_000,
+            cache_read_per_mtok_micros: 300_000,
+            cache_write_per_mtok_micros: 3_750_000,
+        };
+        let usage = Some(TurnUsage {
+            input: 1_000_000,
+            output: 200_000,
+            cache_read: 2_000_000,
+            cache_write: 400_000,
+        });
+        snap_collector.observe(&turn(usage));
+        fin_collector.observe(&turn(usage));
+
+        let snap = snap_collector.snapshot(born, &price);
+        let fin = fin_collector.finalize(born, &price).unwrap();
+        assert_eq!(snap, fin, "snapshot projection == finalize projection");
     }
 
     #[test]

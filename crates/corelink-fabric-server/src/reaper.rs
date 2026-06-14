@@ -2122,6 +2122,112 @@ mod tests {
         assert_eq!(outcome.metrics.tokens.total, 7_000);
     }
 
+    /// ADR-0004 Phase 2b — the per-turn WRITE trigger end-to-end. Ingesting
+    /// model turns over the §13.2 turn-feed endpoint writes the durable
+    /// checkpoint at each turn boundary; a cross-instance abnormal reap (no
+    /// local hook) then emits the LAST checkpointed partial (tier 2), not a
+    /// `no_capture` marker. Before Phase 2b nothing wrote the checkpoint, so
+    /// this same reap fell through to tier 3.
+    #[tokio::test]
+    async fn phase2b_ingest_writes_checkpoint_consumed_by_cross_instance_reap() {
+        use crate::handlers::envelope::{HookRegistry, ingest};
+        use axum::extract::{Path, State};
+        use axum::{Extension, http::StatusCode};
+        use corelink_runner::envelope::{CaptureHook, EnvelopeConfig, MetricsCollector};
+
+        const LEASE: &str = "lease-phase2b";
+        const CRED: &str = "pat-phase2b";
+
+        // ONE durable ledger shared by two instances (A owns + ingests; B reaps).
+        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
+            Arc::new(Mutex::new(InMemoryLedger::new()));
+        let clock = FixedClock::new(5_000);
+
+        // Instance A: owns the lease + a registered hook reachable from the
+        // HTTP Extension AND from AppState (the app_full shared-instance crux,
+        // mirrored here by registering into state_a.hook_registry and passing
+        // that SAME Arc as the Extension to `ingest`).
+        let mut state_a = AppState::new(
+            Arc::clone(&ledger),
+            Arc::new(StaticPlans::default()),
+            Arc::new(clock.clone()),
+        );
+        let registry_a = Arc::new(HookRegistry::default());
+        state_a.hook_registry = Arc::clone(&registry_a);
+
+        insert_held(&state_a, LEASE, 1_000);
+        let hook = CaptureHook::open(
+            EnvelopeConfig {
+                ack_timeout: std::time::Duration::from_millis(1),
+                buffer_capacity: 16,
+            },
+            CRED,
+            MetricsCollector::new(std::time::Instant::now()),
+        );
+        registry_a.register(LEASE, TenantId::new("acme").unwrap(), hook, CRED);
+
+        // Ingest a 2-turn batch over the real handler (JSON array body).
+        let body = serde_json::json!([
+            { "kind": "model_turn", "bytes_b64": "dHVybi0w", "busy_ms": 3 },
+            { "kind": "model_turn", "bytes_b64": "dHVybi0x", "busy_ms": 4 }
+        ])
+        .to_string();
+        let resp = ingest(
+            State(state_a.clone()),
+            Extension(Arc::clone(&registry_a)),
+            Extension(TenantId::new("acme").unwrap()),
+            Path(LEASE.to_string()),
+            body,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK, "valid ingest must 200");
+
+        // The durable checkpoint now reflects BOTH turns (the WRITE trigger).
+        let ck = state_a
+            .ledger
+            .lock()
+            .unwrap()
+            .get_envelope_checkpoint(LEASE)
+            .unwrap()
+            .expect("a checkpoint must exist after ingesting model turns");
+        let metrics: corelink_runners_contracts::IntentMetrics =
+            serde_json::from_str(&ck).expect("checkpoint is an IntentMetrics blob");
+        assert_eq!(
+            metrics.model_turns, 2,
+            "the per-turn checkpoint reflects both ingested turns"
+        );
+
+        // Instance B: shares the ledger, holds NO hook for this lease.
+        let mut state_b = AppState::new(
+            Arc::clone(&ledger),
+            Arc::new(StaticPlans::default()),
+            Arc::new(clock.clone()),
+        );
+        state_b.provisioner = Arc::new(RecordingProvisioner::new()) as Arc<dyn BoxProvisioner>;
+        assert!(
+            state_b.hook_registry.close_handle_any(LEASE).is_none(),
+            "the reaper instance must not hold the hook"
+        );
+
+        // Tier 1 misses (no hook) → tier 2 reads the checkpoint A wrote.
+        let outcome = flush_partial_envelope(
+            &state_b,
+            LEASE,
+            &TenantId::new("acme").unwrap(),
+            AbnormalKind::Expiry,
+            std::time::Instant::now(),
+        )
+        .expect("the cross-instance reap must emit the partial from the checkpoint");
+        assert!(
+            outcome.capture_incomplete,
+            "the cross-instance partial is capture_incomplete"
+        );
+        assert_eq!(
+            outcome.metrics.model_turns, 2,
+            "the emitted partial carries the 2-turn checkpoint (tier 2, NOT no_capture)"
+        );
+    }
+
     // ── WP-CRASH-SWEEP: surface_crashes behavior tests ───────────────────────
 
     /// Count `Crashed` events for `lease_id` in the slot journal.

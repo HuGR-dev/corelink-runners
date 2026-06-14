@@ -182,10 +182,20 @@ pub(crate) async fn acquire(
         // net_policy, or an unsafe tmp_root (shell-injection guard) → 400
         // `invalid`. Build the spec once here; it is reused by the provision
         // step below. ──
-        let spec = match ContainerSpec::from_lease(&lease, &req.image_digest) {
+        let mut spec = match ContainerSpec::from_lease(&lease, &req.image_digest) {
             Ok(s) => s,
             Err(e) => return error_response(ApiError::Invalid, &format!("lease rejected: {e:#}")),
         };
+
+        // ── §13.2 box injection (WP-TURNFEED): so the in-box agent loop can
+        // reach the trajectory turn-feed INGEST endpoint, inject the lease's
+        // ingest URL + the lease credential into the box env. ADDITIVE — the
+        // hermetic Docker path ignores env, and `NoBoxProvisioner` (default-off)
+        // injects nothing into any box; only the cloud provision path consumes
+        // `spec.env`. The credential is the acquiring tenant's Bearer PAT, the
+        // SAME credential the ingest endpoint's hook-credential gate expects
+        // (Option A, ratified — see the hook-registration note below).
+        crate::envelope_inject::inject_ingest_env(&mut spec, &lease_id, &pat.0);
 
         // ── CONCURRENCY CAP — atomic reserve. Insert this acquire's `Pending`
         // record IFF the tenant is strictly under `max_concurrency`. The count

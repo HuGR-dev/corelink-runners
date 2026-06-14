@@ -129,6 +129,7 @@ fn pinned_spec(name: &str) -> ContainerSpec {
         tmp_root: "/tmp/job".to_string(),
         no_network: true,
         path_set: vec![],
+        env: vec![],
     }
 }
 
@@ -195,6 +196,7 @@ fn spawn_rejects_unpinned_image_before_provider() {
         tmp_root: "/tmp/job".to_string(),
         no_network: true,
         path_set: vec![],
+        env: vec![],
     };
     let result = engine.spawn(&spec);
 
@@ -218,6 +220,7 @@ fn spawn_rejects_non_isolated_spec() {
         tmp_root: "/tmp/job".to_string(),
         no_network: false, // violates isolation floor
         path_set: vec![],
+        env: vec![],
     };
     let result = engine.spawn(&spec);
 

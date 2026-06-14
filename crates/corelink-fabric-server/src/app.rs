@@ -656,6 +656,10 @@ pub fn app_full(
         .route(&capture(paths::LEASE_CLOSE), post(handlers::close::close))
         .route(&capture(paths::ENVELOPE_EVENTS), get(envelope::poll_events))
         .route(&capture(paths::ENVELOPE_META), get(envelope::poll_meta))
+        // ENV3: the §13.2 trajectory turn-feed WRITE side (in-box agent →
+        // hook). Same lease-credential gate as the polls; per-turn durable
+        // checkpoint (ADR-0004 Phase 2b).
+        .route(&capture(paths::ENVELOPE_INGEST), post(envelope::ingest))
         .with_state(state)
         .layer(Extension(registry))
         .layer(middleware::from_fn_with_state(store, auth::require_tenant));

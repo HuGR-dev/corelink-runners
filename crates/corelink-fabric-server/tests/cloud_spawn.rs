@@ -89,6 +89,7 @@ fn pinned_spec(name: &str) -> ContainerSpec {
         tmp_root: "/tmp/job".to_string(),
         no_network: true,
         path_set: vec![],
+        env: vec![],
     }
 }
 

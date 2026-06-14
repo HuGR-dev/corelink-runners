@@ -422,14 +422,27 @@ impl<H: HttpTransport> NorthflankEngine<H> {
     /// it MUST match the name stored on the returned [`RunningContainer`] so all
     /// later `job_url` calls address the same job.
     fn create_job_body(&self, spec: &ContainerSpec, job_name: &str) -> String {
+        let mut deployment = serde_json::json!({
+            "external": { "imagePath": spec.image },
+            "docker": { "configType": "default" },
+            "storage": { "ephemeralStorage": { "storageSize": self.cfg.ephemeral_storage_mb } }
+        });
+        // Additive runtime environment (Northflank `runtimeEnvironment` map):
+        // emitted ONLY when the spec carries env (the §13.2 envelope ingest URL
+        // + lease credential injected by the cloud provision path). An empty
+        // `spec.env` leaves the body byte-identical to before — DEFAULT-OFF.
+        if !spec.env.is_empty() {
+            let env_map: serde_json::Map<String, serde_json::Value> = spec
+                .env
+                .iter()
+                .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                .collect();
+            deployment["runtimeEnvironment"] = serde_json::Value::Object(env_map);
+        }
         serde_json::json!({
             "name": job_name,
             "billing": { "deploymentPlan": self.cfg.deployment_plan },
-            "deployment": {
-                "external": { "imagePath": spec.image },
-                "docker": { "configType": "default" },
-                "storage": { "ephemeralStorage": { "storageSize": self.cfg.ephemeral_storage_mb } }
-            },
+            "deployment": deployment,
             "runOnCreate": false,
             "backoffLimit": 0,
             "activeDeadlineSeconds": self.cfg.active_deadline_secs
@@ -689,6 +702,59 @@ mod tests {
         assert!(
             es.contains("REDACTED"),
             "NorthflankEngine Debug missing REDACTED placeholder: {es}"
+        );
+    }
+
+    /// A pinned spec helper for body-shape tests.
+    fn spec(env: Vec<(String, String)>) -> ContainerSpec {
+        ContainerSpec {
+            name: "hugit-job-x".to_string(),
+            image: "alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
+                .to_string(),
+            tmp_root: "/tmp/job".to_string(),
+            no_network: true,
+            path_set: vec![],
+            env,
+        }
+    }
+
+    #[test]
+    fn create_job_body_omits_runtime_environment_when_env_empty() {
+        // DEFAULT-OFF: an empty `spec.env` leaves the body free of
+        // runtimeEnvironment (byte-for-byte the prior shape).
+        let engine = NorthflankEngine::new(StubTransport, NorthflankConfig::new("proj", "tok"));
+        let body = engine.create_job_body(&spec(vec![]), "job-1");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(
+            v["deployment"].get("runtimeEnvironment").is_none(),
+            "no env ⇒ no runtimeEnvironment key"
+        );
+    }
+
+    #[test]
+    fn create_job_body_injects_runtime_environment_when_env_present() {
+        // The §13.2 ingest vars surface as the Northflank runtimeEnvironment map.
+        let engine = NorthflankEngine::new(StubTransport, NorthflankConfig::new("proj", "tok"));
+        let env = vec![
+            (
+                "CORELINK_ENVELOPE_INGEST_URL".to_string(),
+                "https://f/v1/leases/l/envelope/ingest".to_string(),
+            ),
+            (
+                "CORELINK_ENVELOPE_INGEST_CREDENTIAL".to_string(),
+                "pat-xyz".to_string(),
+            ),
+        ];
+        let body = engine.create_job_body(&spec(env), "job-1");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let re = &v["deployment"]["runtimeEnvironment"];
+        assert_eq!(
+            re["CORELINK_ENVELOPE_INGEST_URL"].as_str().unwrap(),
+            "https://f/v1/leases/l/envelope/ingest"
+        );
+        assert_eq!(
+            re["CORELINK_ENVELOPE_INGEST_CREDENTIAL"].as_str().unwrap(),
+            "pat-xyz"
         );
     }
 

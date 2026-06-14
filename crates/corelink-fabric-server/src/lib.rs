@@ -21,6 +21,7 @@ pub mod auth;
 pub mod cloud_exec;
 pub mod corelink_auth;
 pub mod corelink_plans;
+pub mod envelope_inject;
 pub mod exec;
 pub mod handlers;
 pub mod reaper;
