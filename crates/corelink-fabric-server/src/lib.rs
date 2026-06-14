@@ -40,7 +40,8 @@ pub use cloud_exec::{
     ProbeStatus, cloud_backend_from_env, cloud_executor_from_env,
 };
 pub use corelink_auth::{
-    CoreLinkAuthConfig, CoreLinkTokenStore, IntrospectHttp, IntrospectResponse, UreqIntrospect,
+    CoreLinkAuthConfig, CoreLinkTokenStore, IntrospectBody, IntrospectHttp, IntrospectResponse,
+    UreqIntrospect,
 };
 pub use corelink_plans::CoreLinkPlanStore;
 pub use exec::{

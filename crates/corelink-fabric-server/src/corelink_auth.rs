@@ -39,6 +39,7 @@
 use std::time::Duration;
 
 use corelink_fabric::TenantId;
+use serde::{Deserialize, Serialize};
 
 use crate::auth::{TokenStore, TokenStoreError};
 
@@ -51,6 +52,41 @@ use crate::auth::{TokenStore, TokenStoreError};
 pub struct IntrospectResponse {
     pub status: u16,
     pub body: String,
+}
+
+// ── Typed wire shape (drift tripwire) ──────────────────────────────────────────
+
+/// Typed view of one CoreLink introspection 200-body — the auth/billing seam's
+/// drift tripwire, mirroring the `RunnerLease`/`FenceManifest`/`IntentMetrics`
+/// `deny_unknown_fields` + byte-exact golden discipline.
+///
+/// The **production** parse path ([`CoreLinkTokenStore::tenant_of`]) reads the
+/// body leniently via `serde_json::Value` and is INTENTIONALLY tolerant of
+/// additive fields (the fail-closed mapping only needs `valid` + `tenant_id`):
+/// a future `max_concurrency`/new field must NOT lock out a live tenant. This
+/// type is the SEPARATE, strict conformance lens: the ratified
+/// `conformance/corelink-introspect.json` vector must parse under
+/// `deny_unknown_fields` and re-serialize byte-identically, so any drift in
+/// corelink-server's frozen shape breaks the golden alongside the hugit-side
+/// vectors. It is the tripwire, not the runtime parser.
+///
+/// `#[serde(deny_unknown_fields)]` makes an unexpected field a HARD parse
+/// error here; `skip_serializing_if = "Option::is_none"` keeps the absent-field
+/// cases (solo/enterprise/`valid:false`) byte-exact under `to_string_pretty`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IntrospectBody {
+    /// Authoritative validity of the presented token.
+    pub valid: bool,
+    /// Resolved tenant id (present iff `valid`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant_id: Option<String>,
+    /// Plan label (informational; the cap rides `max_concurrency` at M2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+    /// Per-tenant concurrency cap (additive at M2; absent until then).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrency: Option<u32>,
 }
 
 /// The transport seam: POST to the introspection endpoint.

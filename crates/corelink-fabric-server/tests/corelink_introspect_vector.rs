@@ -26,7 +26,7 @@ use std::time::Duration;
 use corelink_fabric_server::app::{PlanSource, PlanSourceError};
 use corelink_fabric_server::auth::{TokenStore, TokenStoreError};
 use corelink_fabric_server::corelink_auth::{
-    CoreLinkAuthConfig, CoreLinkTokenStore, IntrospectHttp, IntrospectResponse,
+    CoreLinkAuthConfig, CoreLinkTokenStore, IntrospectBody, IntrospectHttp, IntrospectResponse,
 };
 use corelink_fabric_server::corelink_plans::CoreLinkPlanStore;
 
@@ -188,4 +188,58 @@ fn case_4_invalid_resolves_no_tenant_no_cap() {
     // so the placeholder passed here is never consulted.
     let cap = resolve_cap(case, "11111111-1111-4111-8111-111111111111").expect("reachable");
     assert_eq!(cap, None, "valid:false → Ok(None) plan");
+}
+
+// ── Typed drift tripwire ───────────────────────────────────────────────────────
+
+/// The ratified `corelink-introspect.json` vector parses under the strict
+/// typed lens ([`IntrospectBody`] + `deny_unknown_fields`) AND re-serializes
+/// byte-identically — the same drift tripwire the hugit-side
+/// `RunnerLease`/`FenceManifest`/`IntentMetrics` goldens carry, now around the
+/// corelink-server auth/billing seam vector. A field added or renamed in
+/// corelink-server's frozen shape breaks `deny_unknown_fields` here; any
+/// whitespace/order drift breaks the byte-exact compare. The vector's BYTES
+/// (and its frozen sha) are unchanged — this only adds the typed wall.
+#[test]
+fn introspect_vector_typed_strict_and_byte_exact() {
+    // Byte-exact whole-array round-trip: parse the committed file through the
+    // typed array, re-serialize pretty with the committed trailing newline,
+    // compare WITHOUT trim so any drift breaks here.
+    let raw = std::fs::read_to_string(vector_path("corelink-introspect.json"))
+        .expect("cannot read corelink-introspect.json conformance vector");
+    let parsed: Vec<IntrospectBody> = serde_json::from_str(&raw)
+        .expect("ratified introspect vector must parse under deny_unknown_fields");
+    assert_eq!(parsed.len(), 4, "vector carries exactly 4 cases");
+    let re = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&parsed).expect("typed introspect array must re-serialize")
+    );
+    assert_eq!(
+        raw, re,
+        "corelink-introspect.json typed round-trip is not byte-exact"
+    );
+
+    // Per-case shape pins (the strict lens preserves the honest optionals).
+    assert!(parsed[0].valid);
+    assert_eq!(
+        parsed[0].tenant_id.as_deref(),
+        Some("11111111-1111-4111-8111-111111111111")
+    );
+    assert_eq!(parsed[0].max_concurrency, Some(40), "pro case pins the cap");
+    assert_eq!(parsed[1].max_concurrency, None, "solo: no cap field");
+    assert_eq!(parsed[2].max_concurrency, None, "enterprise: no cap field");
+    assert!(!parsed[3].valid);
+    assert_eq!(parsed[3].tenant_id, None, "valid:false carries only `valid`");
+
+    // An UNKNOWN field is a hard parse error under deny_unknown_fields.
+    let mut tampered: serde_json::Value =
+        serde_json::from_str(&raw).expect("vector re-parses as Value");
+    tampered[0]
+        .as_object_mut()
+        .expect("case 0 is an object")
+        .insert("surprise".to_string(), serde_json::json!(1));
+    assert!(
+        serde_json::from_value::<Vec<IntrospectBody>>(tampered).is_err(),
+        "an unknown introspect field must fail the typed tripwire"
+    );
 }

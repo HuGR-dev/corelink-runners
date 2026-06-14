@@ -141,9 +141,20 @@ pub struct AppState {
     /// Clock seam (deterministic under test).
     pub clock: Arc<dyn Clock>,
     /// Per-tenant wait statistics (CP4 non-interference surface). The
-    /// composition root feeds it from the CP3 scheduler's
-    /// `TickReport::waits_ms`; the metrics endpoint serves each tenant ITS
-    /// OWN snapshot, never anyone else's.
+    /// metrics endpoint serves each tenant ITS OWN snapshot, never anyone
+    /// else's — the tenant-scoping is real and pinned.
+    ///
+    /// TODO(CP4): wire this to the real `TickReport::waits_ms` feed. The
+    /// `CoreLink::interference::TenantWaitStats::{record,observe_tick}` sink
+    /// exists and the `FairScheduler` produces `TickReport`s, but the live
+    /// server has NO scheduler loop driving `FairScheduler::tick` (acquire is
+    /// immediate-or-reject, not queued), so nothing calls `observe_tick`
+    /// today. Until the production scheduler loop lands, `wait_stats` stays
+    /// empty and `GET /v1/metrics/tenant` honestly returns `count:0` for
+    /// every tenant. The endpoint shape + strict tenant-scoping are frozen
+    /// now so the day the feed lands it is a pure data-plane change, no wire
+    /// break. (Deliberately NOT faked to a non-zero — an empty meter is the
+    /// honest state, never a fabricated sample.)
     pub wait_stats: Arc<Mutex<TenantWaitStats>>,
     /// Per-tenant sliding 60s acquire-attempt windows (CP2 rate ceiling).
     pub(crate) rate_windows: Arc<Mutex<HashMap<TenantId, RateWindow>>>,

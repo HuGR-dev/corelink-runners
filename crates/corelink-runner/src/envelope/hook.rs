@@ -265,13 +265,26 @@ impl CaptureHook {
 
         let timestamp_ms = u64::try_from(inner.opened_at.elapsed().as_millis()).unwrap_or(u64::MAX);
         let turn_index = inner.next_turn_index;
-        inner.next_turn_index += 1;
+        // Saturating: the turn index is monotone and must never wrap (a wrapped
+        // index would collide a later turn with an earlier one). Theoretical at
+        // u64 scale, but the write path must never panic on a debug build.
+        inner.next_turn_index = inner.next_turn_index.saturating_add(1);
 
         // Honest optionals: tool only for a ToolCall; tokens only when the
         // event carried usage (derived total of the four classes).
         let (bytes, tool, tokens) = match ev {
             TranscriptEvent::ModelTurn { bytes, usage, .. } => {
-                let tokens = usage.map(|u| u.input + u.output + u.cache_read + u.cache_write);
+                // Saturating: per-turn usage is UNTRUSTED job input; a malicious
+                // or huge value must CAP the derived TurnMeta token total, never
+                // wrap it (release) or panic the write path (debug). Mirrors the
+                // collector's saturating posture — INTERNAL only; the frozen
+                // IntentMetrics wire shape is unaffected (this is TurnMeta).
+                let tokens = usage.map(|u| {
+                    u.input
+                        .saturating_add(u.output)
+                        .saturating_add(u.cache_read)
+                        .saturating_add(u.cache_write)
+                });
                 (bytes, None, tokens)
             }
             TranscriptEvent::ToolCall { tool, bytes, .. } => (bytes, Some(tool), None),
