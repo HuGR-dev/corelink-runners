@@ -429,7 +429,12 @@ mod pg_runs {
 
     /// Connect a `PgLedger` against `url` on `rt`.
     fn connect(rt: &tokio::runtime::Runtime, url: &str) -> PgLedger {
-        rt.block_on(async { PgLedger::connect(url, 4).await.expect("PgLedger::connect") })
+        rt.block_on(async {
+            // Local conformance DB is plaintext → Disable (the default TLS mode).
+            PgLedger::connect(url, 4, crate::pg_ledger::PgTlsMode::Disable)
+                .await
+                .expect("PgLedger::connect")
+        })
     }
 
     /// A `LedgerFactory` (`fn`, so no captures) that TRUNCATEs the shared table
@@ -548,5 +553,190 @@ mod pg_runs {
     fn led_active_count(rt: &tokio::runtime::Runtime, url: &str, t: &TenantId) -> usize {
         let led = connect(rt, url);
         led.by_tenant(t).unwrap().len()
+    }
+
+    /// Spawn an OS thread that owns its OWN `PgLedger` (own pool + own runtime,
+    /// i.e. a distinct control-plane *instance*), waits on `barrier` so every
+    /// instance fires its DB call SIMULTANEOUSLY (real contention, not a
+    /// sequential loop), runs `body`, and returns the body's result. The
+    /// per-thread runtime is built and dropped INSIDE the thread.
+    fn instance_thread<T, F>(
+        url: String,
+        barrier: Arc<std::sync::Barrier>,
+        body: F,
+    ) -> std::thread::JoinHandle<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut PgLedger) -> T + Send + 'static,
+    {
+        std::thread::spawn(move || {
+            // Each thread is its own runtime + ledger = an independent instance.
+            let rt = rt();
+            let mut led = connect(&rt, &url);
+            // Release the runtime's worker context before blocking on the
+            // barrier so threads truly rendezvous, then fire the body together.
+            barrier.wait();
+            body(&mut led)
+        })
+    }
+
+    /// LOCKS IN invariant #1 (cross-instance cap-exactness). N concurrent
+    /// `try_admit` calls for ONE tenant — SPLIT across TWO independent
+    /// `PgLedger` instances (separate pools, separate runtimes, one database) —
+    /// admit EXACTLY `cap`, never more. WHY it matters for multi-instance: an
+    /// in-memory per-instance counter would let each container admit up to `cap`
+    /// (2x over-admit at cap on two boxes); only the per-tenant
+    /// `pg_advisory_xact_lock` in `try_admit` serializes admission across
+    /// instances, so the shared DB count is the single source of truth.
+    #[test]
+    fn cross_instance_concurrent_admit_respects_cap_exactly() {
+        let Some(url) = db_url() else {
+            eprintln!(
+                "cross_instance_concurrent_admit...: TEST_DATABASE_URL unset — \
+                 skipping (expected on CI)"
+            );
+            return;
+        };
+        let _serial = PG_TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+
+        // The shared `leases` table is TRUNCATEd at the start of every Pg test
+        // (mutex-serialized) so the cross-instance count starts from empty.
+        {
+            let rt = rt();
+            let led = connect(&rt, &url);
+            led.truncate_for_test().expect("truncate at start");
+        }
+
+        const CAP: u32 = 3;
+        const N: usize = 25; // 25 contenders, far over the cap of 3.
+
+        // Unique tenant + lease-id nonce per run so parallel test processes (and
+        // repeat runs) never collide on the PRIMARY KEY — the cap is the ONLY
+        // gate under test.
+        let nonce = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let t = tenant(&format!("xcap-{nonce}"));
+
+        // All N contenders rendezvous on the barrier, then hit the DB at once.
+        let barrier = Arc::new(std::sync::Barrier::new(N));
+        let handles: Vec<_> = (0..N)
+            .map(|i| {
+                let url = url.clone();
+                let barrier = Arc::clone(&barrier);
+                let t = t.clone();
+                let id = format!("cap-{nonce}-{i}");
+                // SPLIT across two instances: each thread is a fresh instance,
+                // so the N admits are served by N independent pools — exactly
+                // the "two control-plane containers, one DB" shape, generalized.
+                instance_thread(url, barrier, move |led| {
+                    led.try_admit(pending(&id, &t), CAP)
+                        .expect("try_admit must not error (distinct ids, real cap)")
+                })
+            })
+            .collect();
+
+        let admitted = handles
+            .into_iter()
+            .map(|h| h.join().expect("admit thread must not panic"))
+            .filter(|ok| *ok)
+            .count();
+
+        assert_eq!(
+            admitted, CAP as usize,
+            "cross-instance concurrent admission must admit EXACTLY the cap \
+             (got {admitted}, cap {CAP}); over-cap calls must return Ok(false). \
+             A higher count means the advisory lock did not serialize and an \
+             instance over-admitted."
+        );
+
+        // The DB itself holds exactly `cap` rows for the tenant — the count the
+        // next admit (on any instance) would read.
+        let rt = rt();
+        let active = led_active_count(&rt, &url, &t);
+        assert_eq!(
+            active, CAP as usize,
+            "the shared ledger must hold exactly `cap` admitted leases"
+        );
+    }
+
+    /// LOCKS IN invariant #2 (terminal-transition CAS-dedup). One `Held` lease;
+    /// TWO independent instances concurrently `transition(id, Expired, now)`.
+    /// EXACTLY ONE returns `Ok`, the other `Err`. WHY it matters for
+    /// multi-instance: the reaper runs on every instance, so two reapers can
+    /// race to expire the same lease; the conditional `UPDATE ... WHERE
+    /// state='held'` matches 0 rows on the loser (CAS), so only ONE instance
+    /// gets the `Ok` that authorizes the GC/flush — no double-free, no
+    /// double-billing-close.
+    #[test]
+    fn cross_instance_concurrent_terminal_transition_is_cas_deduped() {
+        let Some(url) = db_url() else {
+            eprintln!(
+                "cross_instance_concurrent_terminal_transition...: \
+                 TEST_DATABASE_URL unset — skipping (expected on CI)"
+            );
+            return;
+        };
+        let _serial = PG_TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Truncate, then seed exactly one Held lease the two reapers will race on.
+        let nonce = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let t = tenant(&format!("xcas-{nonce}"));
+        let lease_id = format!("cas-{nonce}");
+        {
+            let rt = rt();
+            let mut led = connect(&rt, &url);
+            led.truncate_for_test().expect("truncate at start");
+            led.put(held(&lease_id, &t)).expect("seed one Held lease");
+        }
+
+        // Two instances rendezvous, then both attempt the SAME terminal CAS.
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let now_ms = 9_999;
+        let mk = || {
+            let url = url.clone();
+            let barrier = Arc::clone(&barrier);
+            let id = lease_id.clone();
+            instance_thread(url, barrier, move |led| {
+                led.transition(&id, RunnerState::Expired, now_ms).is_ok()
+            })
+        };
+        let h_a = mk();
+        let h_b = mk();
+        let a_ok = h_a.join().expect("transition thread A must not panic");
+        let b_ok = h_b.join().expect("transition thread B must not panic");
+
+        assert!(
+            a_ok ^ b_ok,
+            "concurrent terminal transition must be CAS-deduped: EXACTLY ONE \
+             instance gets Ok (the winner GCs), the other gets Err — got \
+             a_ok={a_ok}, b_ok={b_ok}. Both-Ok means the conditional UPDATE \
+             matched twice (double-free); both-Err means the lease vanished."
+        );
+
+        // The lease ended up Expired exactly once, owned by one instance.
+        let rt = rt();
+        let led = connect(&rt, &url);
+        let rec = led
+            .get(&lease_id)
+            .expect("get must not error")
+            .expect("lease must still exist");
+        assert_eq!(
+            rec.state,
+            LeaseState::Wire(RunnerState::Expired),
+            "the winning instance moved the lease to Expired"
+        );
     }
 }

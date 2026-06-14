@@ -60,15 +60,24 @@ async fn main() -> anyhow::Result<()> {
     }
     // Report which lease ledger the wiring actually resolved (WP-4).  Never
     // print database_url — it may carry a password.
+    use corelink_fabric::PgTlsMode;
     use corelink_fabric_server::server::LedgerBackend;
     match cfg.ledger_backend {
         LedgerBackend::Memory => {
             eprintln!("ledger backend: in-memory (leases reset on restart; single-instance only)")
         }
-        LedgerBackend::Postgres => eprintln!(
-            "ledger backend: Postgres (persistent, multi-instance cap-safe; pool={})",
-            cfg.ledger_pool_size
-        ),
+        LedgerBackend::Postgres => {
+            // WP-B: report the resolved transport so an operator can confirm at a
+            // glance whether the managed-PG connection is encrypted.
+            let tls = match cfg.pg_tls {
+                PgTlsMode::Disable => "tls=disable (plaintext NoTls)",
+                PgTlsMode::Require => "tls=require (verify-full rustls, public-CA)",
+            };
+            eprintln!(
+                "ledger backend: Postgres (persistent, multi-instance cap-safe; pool={}; {tls})",
+                cfg.ledger_pool_size
+            )
+        }
     }
     eprintln!("reaper: started (interval={}s)", reaper_interval.as_secs());
     match &crash_sweep_handle {

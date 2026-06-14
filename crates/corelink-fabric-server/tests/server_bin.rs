@@ -320,6 +320,40 @@ fn ledger_default_is_memory() {
     assert_eq!(cfg.ledger_backend, LedgerBackend::Memory);
     assert_eq!(cfg.database_url, None);
     assert_eq!(cfg.ledger_pool_size, 8);
+    // WP-B: FABRIC_PG_TLS absent → Disable (default; plaintext NoTls unchanged).
+    assert_eq!(cfg.pg_tls, corelink_fabric::PgTlsMode::Disable);
+}
+
+/// WP-B: FABRIC_PG_TLS=require resolves through config_from_env into the pg cfg.
+#[test]
+fn config_pg_tls_require_resolves() {
+    let cfg = config_from_env(|k| match k {
+        "FABRIC_SIGNING_KEY" => Some(b64_key(&[6u8; 32])),
+        "FABRIC_PAT" => Some("p".to_string()),
+        "FABRIC_TENANT" => Some("acme".to_string()),
+        "FABRIC_TENANT_MAX_CONCURRENCY" => Some("4".to_string()),
+        "FABRIC_LEDGER_BACKEND" => Some("pg".to_string()),
+        "DATABASE_URL" => Some("postgres://localhost/db".to_string()),
+        "FABRIC_PG_TLS" => Some("require".to_string()),
+        _ => None,
+    })
+    .expect("pg + require must succeed");
+    assert_eq!(cfg.pg_tls, corelink_fabric::PgTlsMode::Require);
+}
+
+/// WP-B FAIL-CLOSED: a garbage FABRIC_PG_TLS value aborts config resolution
+/// (never a silent transport downgrade).
+#[test]
+fn config_pg_tls_garbage_errs() {
+    let result = config_from_env(|k| match k {
+        "FABRIC_SIGNING_KEY" => Some(b64_key(&[6u8; 32])),
+        "FABRIC_PAT" => Some("p".to_string()),
+        "FABRIC_TENANT" => Some("acme".to_string()),
+        "FABRIC_TENANT_MAX_CONCURRENCY" => Some("4".to_string()),
+        "FABRIC_PG_TLS" => Some("verify-full".to_string()),
+        _ => None,
+    });
+    assert!(result.is_err(), "garbage FABRIC_PG_TLS must fail-closed");
 }
 
 /// FABRIC_LEDGER_BACKEND=pg + DATABASE_URL → Postgres with the url captured.
