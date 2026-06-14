@@ -773,18 +773,22 @@ pub fn app_full(
     // concurrency limit. The §13.2 ingest route (scoped-token auth, mounted
     // outside `require_tenant`) is a real work route → behind the limiter.
     let max_inflight = max_inflight.max(1);
-    let work = Router::new().merge(internal).merge(ingest).merge(authenticated).layer(
-        tower::ServiceBuilder::new()
-            .layer(axum::error_handling::HandleErrorLayer::new(
-                |_err: axum::BoxError| async move {
-                    // The only error the stack below produces is load-shed's
-                    // `Overloaded`; map it to the frozen fail-closed status.
-                    axum::http::StatusCode::SERVICE_UNAVAILABLE
-                },
-            ))
-            .layer(tower::load_shed::LoadShedLayer::new())
-            .layer(tower::limit::GlobalConcurrencyLimitLayer::new(max_inflight)),
-    );
+    let work = Router::new()
+        .merge(internal)
+        .merge(ingest)
+        .merge(authenticated)
+        .layer(
+            tower::ServiceBuilder::new()
+                .layer(axum::error_handling::HandleErrorLayer::new(
+                    |_err: axum::BoxError| async move {
+                        // The only error the stack below produces is load-shed's
+                        // `Overloaded`; map it to the frozen fail-closed status.
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE
+                    },
+                ))
+                .layer(tower::load_shed::LoadShedLayer::new())
+                .layer(tower::limit::GlobalConcurrencyLimitLayer::new(max_inflight)),
+        );
 
     Router::new()
         // Health rides OUTSIDE the limiter so it answers under saturation.
