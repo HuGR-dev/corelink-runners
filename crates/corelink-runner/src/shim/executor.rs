@@ -207,16 +207,24 @@ impl ShimExecutor {
     }
 
     fn execute_step(&self, step: &Step, job_env: &HashMap<String, String>) -> StepOutcome {
-        // Check if:condition
+        // Check if:condition.
+        //
+        // fail-CLOSED: only conditions the shim RECOGNISES as true (`always()`,
+        // `true`) run the step. `false` skips. Anything else is
+        // UNRECOGNISED/unparseable in v0 — and an injected/garbage condition
+        // must NOT force-run a step (fail-OPEN). The safe outcome is to SKIP:
+        // a step whose gate we cannot prove true does not execute.
         if let Some(ref cond) = step.if_condition {
-            if cond.contains("always()") || cond == "true" {
-                // proceed
-            } else if cond == "false" {
+            let trimmed = cond.trim();
+            if trimmed.contains("always()") || trimmed == "true" {
+                // recognised-true → proceed
+            } else {
+                // `false` AND every unrecognised/unparseable condition → skip
+                // (fail-CLOSED: do not execute a step we cannot prove is gated on).
                 return StepOutcome::Skipped {
                     step_name: step.name.clone(),
                 };
             }
-            // For other conditions in v0, proceed conservatively
         }
 
         // Check out-of-contract uses:
@@ -278,8 +286,21 @@ impl ShimExecutor {
             let secret_refs = extract_secret_refs(v);
             for secret_name in &secret_refs {
                 match self.broker.resolve_secret(secret_name, &self.manifest) {
-                    Ok(_) => {} // token injected
-                    Err(BrokerError::SecretDenied {
+                    Ok(SecretResolution::Resolved {
+                        injection_token, ..
+                    }) => {
+                        // Inject opaque token — never the raw value. (Was
+                        // dropped on the fail-OPEN path; now injected like run:.)
+                        merged_env.insert(format!("__SHIM_SECRET_{secret_name}"), injection_token);
+                    }
+                    // fail-CLOSED: a broker-DENIED secret (`Ok(Denied)`) must
+                    // REFUSE the step, never proceed without it. Previously
+                    // `Ok(_) => {}` swallowed `Ok(Denied)` and ran the step
+                    // (fail-OPEN). Mirror the run: branch exactly.
+                    Ok(SecretResolution::Denied {
+                        secret_name: sn, ..
+                    })
+                    | Err(BrokerError::SecretDenied {
                         secret_name: sn, ..
                     }) => {
                         return StepOutcome::SecretDenied {
@@ -569,6 +590,53 @@ mod tests {
             result.step_outcomes.last().unwrap(),
             StepOutcome::SecretDenied { secret_name, .. } if secret_name == "MY_TOKEN"
         ));
+    }
+
+    #[test]
+    fn executor_fails_closed_on_denied_secret_in_env_value() {
+        // Regression: a secret referenced in an `env:` value that the broker
+        // DENIES must REFUSE the step (fail-CLOSED), never run it without the
+        // secret. NullBroker denies everything → the step must NOT execute.
+        let yaml = "on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - name: Deploy\n        env:\n          API_KEY: ${{ secrets.MY_TOKEN }}\n        run: echo deploying\n";
+        let wf = parse_workflow(yaml).unwrap();
+        let exec = null_executor();
+        let result = exec.execute(&wf);
+        assert!(!result.job_success, "job must fail closed");
+        // The step must be refused (SecretDenied), NOT executed (Success).
+        let last = result.step_outcomes.last().unwrap();
+        assert!(
+            matches!(last, StepOutcome::SecretDenied { secret_name, .. } if secret_name == "MY_TOKEN"),
+            "denied env: secret must refuse the step, got {last:?}"
+        );
+        // Prove the step did NOT run: no Success outcome anywhere.
+        assert!(
+            !result
+                .step_outcomes
+                .iter()
+                .any(|o| matches!(o, StepOutcome::Success { .. })),
+            "step must NOT have executed on the denied path"
+        );
+    }
+
+    #[test]
+    fn executor_fails_closed_on_unrecognized_if_condition() {
+        // Regression: an UNRECOGNISED/unparseable `if:` condition must NOT
+        // force-run the step (fail-OPEN). It must be skipped (fail-CLOSED).
+        let yaml = "on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - name: Injected\n        if: ${{ garbage || hax(1==1) }}\n        run: echo should-not-run\n";
+        let wf = parse_workflow(yaml).unwrap();
+        let exec = null_executor();
+        let result = exec.execute(&wf);
+        assert_eq!(result.step_outcomes.len(), 1);
+        let outcome = &result.step_outcomes[0];
+        // The step must be Skipped, NOT executed.
+        assert!(
+            matches!(outcome, StepOutcome::Skipped { .. }),
+            "unrecognised if: condition must skip the step, got {outcome:?}"
+        );
+        assert!(
+            !matches!(outcome, StepOutcome::Success { .. }),
+            "step must NOT have executed on the unrecognised if: path"
+        );
     }
 
     #[test]
