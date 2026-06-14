@@ -21,6 +21,19 @@ async fn main() -> anyhow::Result<()> {
         corelink_fabric_server::server::maybe_spawn_crash_sweep_from_env(state.clone(), |k| {
             std::env::var(k).ok()
         })?;
+    // ── CP4 queued fair admission (ADR-0005) — DEFAULT-OFF. The admission loop
+    // is spawned ONLY under `FABRIC_ADMISSION_MODE=queue`, over a clone of the
+    // SAME shared `AppState` (so it ticks the queue the handlers enqueue into).
+    // Cloned BEFORE the reaper consumes `state`; absent/`reject` → None.
+    let admission_handle = match cfg.admission_mode {
+        corelink_fabric_server::admission::AdmissionMode::Queue => {
+            Some(corelink_fabric_server::admission::spawn_admission_loop(
+                state.clone(),
+                cfg.admission_tick_interval,
+            ))
+        }
+        corelink_fabric_server::admission::AdmissionMode::Reject => None,
+    };
     let pending_max_age =
         corelink_fabric_server::reaper::pending_max_age_from_env(|k| std::env::var(k).ok())?;
     let reaper_handle = corelink_fabric_server::reaper::spawn_reaper_with_pending_age(
@@ -90,6 +103,12 @@ async fn main() -> anyhow::Result<()> {
         Some(_) => eprintln!("crash-sweep: started (FABRIC_CRASH_PROBE_INTERVAL_SECS set)"),
         None => eprintln!("crash-sweep: OFF (set FABRIC_CRASH_PROBE_INTERVAL_SECS to enable)"),
     }
+    match &admission_handle {
+        Some(_) => eprintln!(
+            "admission: QUEUE mode (FABRIC_ADMISSION_MODE=queue; fair-queued over-cap acquires)"
+        ),
+        None => eprintln!("admission: reject mode (default; immediate-or-reject)"),
+    }
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
@@ -98,6 +117,10 @@ async fn main() -> anyhow::Result<()> {
     // Shutdown: abort the background sweeps so they do not outlive the server.
     reaper_handle.abort();
     if let Some(h) = crash_sweep_handle {
+        h.abort();
+    }
+    // CP4 (ADR-0005): abort the admission loop too (only set under queue mode).
+    if let Some(h) = admission_handle {
         h.abort();
     }
     Ok(())

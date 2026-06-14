@@ -179,6 +179,18 @@ pub struct ServerConfig {
     ///
     /// [`DEFAULT_MAX_INFLIGHT_REQUESTS`]: crate::app::DEFAULT_MAX_INFLIGHT_REQUESTS
     pub max_inflight_requests: usize,
+    // ── CP4 queued fair admission (ADR-0005) — DEFAULT-OFF ───────────────────
+    /// Admission discipline. From `FABRIC_ADMISSION_MODE` (default
+    /// [`AdmissionMode::Reject`] — today's immediate-or-reject, ZERO change).
+    pub admission_mode: crate::admission::AdmissionMode,
+    /// Bounded wait a queued acquire blocks before 503. From
+    /// `FABRIC_ADMISSION_QUEUE_WAIT_MS`. Unused under `reject`.
+    pub admission_queue_wait: std::time::Duration,
+    /// Admission-loop tick interval. From `FABRIC_ADMISSION_TICK_MS`.
+    pub admission_tick_interval: std::time::Duration,
+    /// Admission-loop per-tick dispatch budget. From
+    /// `FABRIC_ADMISSION_TICK_SLOTS`.
+    pub admission_tick_slots: u32,
 }
 
 impl std::fmt::Debug for ServerConfig {
@@ -205,6 +217,10 @@ impl std::fmt::Debug for ServerConfig {
             .field("pg_tls", &self.pg_tls)
             .field("close_ack_max_inflight", &self.close_ack_max_inflight)
             .field("max_inflight_requests", &self.max_inflight_requests)
+            .field("admission_mode", &self.admission_mode)
+            .field("admission_queue_wait", &self.admission_queue_wait)
+            .field("admission_tick_interval", &self.admission_tick_interval)
+            .field("admission_tick_slots", &self.admission_tick_slots)
             .finish()
     }
 }
@@ -537,6 +553,14 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
         crate::app::DEFAULT_MAX_INFLIGHT_REQUESTS,
     )?;
 
+    // ── CP4 queued fair admission (ADR-0005) — DEFAULT-OFF ───────────────────
+    // FABRIC_ADMISSION_MODE default `reject`; unknown → Err (fail-closed). The
+    // wait/tick knobs are read unconditionally (cheap; only used under `queue`).
+    let admission_mode = crate::admission::admission_mode_from_env(&get)?;
+    let admission_queue_wait = crate::admission::queue_wait_from_env(&get)?;
+    let admission_tick_interval = crate::admission::tick_interval_from_env(&get)?;
+    let admission_tick_slots = crate::admission::tick_slots_from_env(&get)?;
+
     Ok(ServerConfig {
         bind_addr,
         signing_key,
@@ -553,6 +577,10 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
         pg_tls,
         close_ack_max_inflight,
         max_inflight_requests,
+        admission_mode,
+        admission_queue_wait,
+        admission_tick_interval,
+        admission_tick_slots,
     })
 }
 
@@ -723,6 +751,18 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
     let state = state
         .with_close_ack_max_inflight(cfg.close_ack_max_inflight)
         .with_max_inflight_requests(cfg.max_inflight_requests);
+
+    // ── CP4 queued fair admission (ADR-0005) — DEFAULT-OFF. Only under
+    // `FABRIC_ADMISSION_MODE=queue` do we wire the AdmissionQueue; the loop is
+    // spawned by main.rs over the SAME shared AppState (so it ticks the very
+    // queue the handlers enqueue into). Under `reject` the state keeps the
+    // immediate-or-reject default — byte-for-byte unchanged.
+    let state = match cfg.admission_mode {
+        crate::admission::AdmissionMode::Reject => state,
+        crate::admission::AdmissionMode::Queue => {
+            state.with_admission_queue(cfg.admission_tick_slots, cfg.admission_queue_wait)
+        }
+    };
 
     let router = app_full(store, state.clone(), Arc::new(HookRegistry::default()));
     Ok((router, state))

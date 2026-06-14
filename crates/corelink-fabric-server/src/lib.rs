@@ -15,6 +15,7 @@
 //! (`token_store_down_fails_closed_503_never_open`); the same refusal
 //! governs an unreadable ledger or a tenant with no plan on file.
 
+pub mod admission;
 pub mod app;
 pub mod attestation;
 pub mod auth;
@@ -27,6 +28,10 @@ pub mod handlers;
 pub mod reaper;
 pub mod server;
 
+pub use admission::{
+    AdmissionMode, AdmissionQueue, admission_mode_from_env, queue_wait_from_env,
+    run_admission_tick, spawn_admission_loop, tick_interval_from_env, tick_slots_from_env,
+};
 pub use app::{
     AppState, Clock, PlanSource, PlanSourceError, StaticPlans, SystemClock, app, app_full,
     app_with_registry,

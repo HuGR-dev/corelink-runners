@@ -20,6 +20,7 @@ use corelink_fabric_api::{TriggerResponse, paths};
 
 use corelink_runner::attest::FabricSigner;
 
+use crate::admission::{AdmissionMode, AdmissionQueue, DEFAULT_QUEUE_WAIT_MS};
 use crate::auth::{self, TokenStore};
 use crate::exec::{LeasedExec, NoBoxExec};
 use crate::handlers;
@@ -144,18 +145,27 @@ pub struct AppState {
     /// metrics endpoint serves each tenant ITS OWN snapshot, never anyone
     /// else's — the tenant-scoping is real and pinned.
     ///
-    /// TODO(CP4): wire this to the real `TickReport::waits_ms` feed. The
-    /// `CoreLink::interference::TenantWaitStats::{record,observe_tick}` sink
-    /// exists and the `FairScheduler` produces `TickReport`s, but the live
-    /// server has NO scheduler loop driving `FairScheduler::tick` (acquire is
-    /// immediate-or-reject, not queued), so nothing calls `observe_tick`
-    /// today. Until the production scheduler loop lands, `wait_stats` stays
-    /// empty and `GET /v1/metrics/tenant` honestly returns `count:0` for
-    /// every tenant. The endpoint shape + strict tenant-scoping are frozen
-    /// now so the day the feed lands it is a pure data-plane change, no wire
-    /// break. (Deliberately NOT faked to a non-zero — an empty meter is the
-    /// honest state, never a fabricated sample.)
+    /// Fed by the queued-admission loop (ADR-0005,
+    /// `crate::admission::run_admission_tick`): each tick forwards its
+    /// `TickReport::waits_ms` here via `TenantWaitStats::observe_tick`, so
+    /// under `FABRIC_ADMISSION_MODE=queue` `GET /v1/metrics/tenant` lights up
+    /// with real per-tenant wait counts. Under the DEFAULT `reject` mode the
+    /// live server runs no admission loop (acquire is immediate-or-reject), so
+    /// nothing calls `observe_tick` and the endpoint honestly returns
+    /// `count:0` — never a fabricated sample. The endpoint shape + strict
+    /// tenant-scoping are identical in both modes (a pure data-plane change).
     pub wait_stats: Arc<Mutex<TenantWaitStats>>,
+    /// CP4 admission discipline (ADR-0005). DEFAULT [`AdmissionMode::Reject`]
+    /// (today's immediate-or-reject — ZERO behavior change). From
+    /// `FABRIC_ADMISSION_MODE`.
+    pub(crate) admission_mode: AdmissionMode,
+    /// Queued-admission state (ADR-0005): `Some` ONLY under
+    /// [`AdmissionMode::Queue`] (wired by the composition root). `None` under
+    /// the default `reject` mode — the queue path is never reached.
+    pub(crate) admission_queue: Option<Arc<AdmissionQueue>>,
+    /// Bounded wait a queued acquire blocks before 503 fail-closed (ADR-0005).
+    /// From `FABRIC_ADMISSION_QUEUE_WAIT_MS`. Unused under `reject`.
+    pub(crate) queue_wait_timeout: std::time::Duration,
     /// Per-tenant sliding 60s acquire-attempt windows (CP2 rate ceiling).
     pub(crate) rate_windows: Arc<Mutex<HashMap<TenantId, RateWindow>>>,
     /// The execution port (WP-API3): "run argv inside the box serving a
@@ -269,6 +279,13 @@ impl AppState {
             plans,
             clock,
             wait_stats: Arc::new(Mutex::new(TenantWaitStats::new())),
+            // CP4 admission DEFAULT-OFF: reject (immediate-or-reject, today's
+            // behavior). The composition root opts into queue via
+            // `with_admission_queue`; tests use the reject default unless they
+            // explicitly enable the queue.
+            admission_mode: AdmissionMode::Reject,
+            admission_queue: None,
+            queue_wait_timeout: std::time::Duration::from_millis(DEFAULT_QUEUE_WAIT_MS),
             rate_windows: Arc::new(Mutex::new(HashMap::new())),
             exec: Arc::new(NoBoxExec),
             provisioner: Arc::new(crate::cloud_exec::NoBoxProvisioner),
@@ -311,6 +328,27 @@ impl AppState {
     #[must_use]
     pub fn with_max_inflight_requests(mut self, max_inflight: usize) -> Self {
         self.max_inflight_requests = max_inflight.max(1);
+        self
+    }
+
+    /// Enable queued fair admission (ADR-0005): set the mode to
+    /// [`AdmissionMode::Queue`], wire a shared [`AdmissionQueue`] with the given
+    /// per-tick dispatch budget, and set the bounded queued-acquire wait.
+    ///
+    /// DEFAULT-OFF: the composition root calls this ONLY when
+    /// `FABRIC_ADMISSION_MODE=queue`. Without it the state keeps
+    /// [`AdmissionMode::Reject`] (no queue, no loop — today's behavior). Returns
+    /// the wired `Arc<AdmissionQueue>` so the caller can spawn the admission loop
+    /// over the SAME shared instance the handlers enqueue into.
+    #[must_use]
+    pub(crate) fn with_admission_queue(
+        mut self,
+        tick_slots: u32,
+        wait_timeout: std::time::Duration,
+    ) -> Self {
+        self.admission_mode = AdmissionMode::Queue;
+        self.admission_queue = Some(Arc::new(AdmissionQueue::new(tick_slots)));
+        self.queue_wait_timeout = wait_timeout;
         self
     }
 

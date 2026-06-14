@@ -44,9 +44,23 @@ use corelink_runner::envelope::{CaptureHook, EnvelopeConfig, MetricsCollector};
 use corelink_runner::lease::ContainerSpec;
 use corelink_runners_contracts::{RunnerLease, RunnerState};
 
+use crate::admission::AdmissionMode;
 use crate::app::AppState;
 use crate::auth::{BearerPat, error_response};
 use crate::handlers::envelope::HookRegistry;
+
+/// A minted-and-validated lease ready to RESERVE then finalize: the lease id,
+/// the wire `RunnerLease`, and the validated `ContainerSpec`. Bundled so the
+/// finalize core and the queued-admission path pass ONE value, not three (and
+/// so neither function trips the argument-count lint — a root fix, no suppress).
+pub(crate) struct MintedLease {
+    /// The minted lease id (`lease-<uuid>`).
+    pub lease_id: String,
+    /// The wire-shape `RunnerLease` returned to the caller.
+    pub lease: RunnerLease,
+    /// The validated container spec (image-pinned, net-policy-checked).
+    pub spec: ContainerSpec,
+}
 
 /// 404 with the frozen body — used identically for "does not exist" and
 /// "exists for another tenant", so the response is never an existence oracle.
@@ -131,7 +145,16 @@ pub(crate) async fn acquire(
     // bookkeeping the `CapGate` performed, split out here so its
     // `window.push(now_ms)`-on-every-attempt behavior is byte-identical to
     // before. Rate is checked FIRST; a rate reject does NOT reserve a slot. ──
-    let (lease_id, lease, spec) = {
+    // Outcome of the synchronous reserve block: either the slot was atomically
+    // reserved (immediate path), or the tenant is over-cap and queue mode wants
+    // to enqueue it. The block holds the ledger guard; the `.await` (queue path
+    // OR finalize) happens AFTER it, so NO MutexGuard is ever live across an
+    // await (the handler future stays `Send`).
+    enum Reserved {
+        Admitted(MintedLease),
+        Queue(MintedLease),
+    }
+    let reserved = {
         let Ok(mut ledger) = state.ledger.lock() else {
             return fail_closed("lease ledger lock poisoned");
         };
@@ -216,21 +239,78 @@ pub(crate) async fn acquire(
             deadline_ms: Some(lease.expiry),
         };
         match ledger.try_admit(pending, plan.max_concurrency) {
-            Ok(true) => {} // reserved — Pending is now in the ledger.
+            Ok(true) => Reserved::Admitted(MintedLease {
+                lease_id,
+                lease,
+                spec,
+            }), // Pending now in ledger.
             Ok(false) => {
-                return error_response(
-                    ApiError::OverCap,
-                    "concurrency cap reached: rejected preventively, before any box/VM",
-                );
+                // ── CP4 admission mode fork (ADR-0005). DEFAULT-OFF.
+                // `reject` (the default): byte-for-byte the prior immediate
+                // over-cap 429 — ZERO behavior change. `queue`: defer to the
+                // queued fair-admission path AFTER this block (no guard live
+                // across the await).
+                match state.admission_mode {
+                    AdmissionMode::Reject => {
+                        return error_response(
+                            ApiError::OverCap,
+                            "concurrency cap reached: rejected preventively, before any box/VM",
+                        );
+                    }
+                    AdmissionMode::Queue => Reserved::Queue(MintedLease {
+                        lease_id,
+                        lease,
+                        spec,
+                    }),
+                }
             }
             Err(_) => return fail_closed("lease ledger refused the admission reserve"),
         }
-
-        // Ledger lock drops here — provision runs outside the lock, but the
-        // slot is already RESERVED (Pending in the ledger).
-        drop(ledger);
-        (lease_id, lease, spec)
+        // Ledger lock (`ledger`) drops here at end of block — BEFORE any await.
     };
+
+    match reserved {
+        // The slot is RESERVED (Pending in the ledger). Provision + finalize to
+        // Held, register the §13 hook, and build the wire response — the SAME
+        // core the queued admission loop runs after IT reserves a slot.
+        Reserved::Admitted(minted) => {
+            finalize_admitted_lease(&state, &registry, &tenant, &pat, minted, &req).await
+        }
+        // Over-cap under queue mode: enqueue into the per-tenant FairScheduler
+        // and WAIT (bounded) for the admission loop to dispatch — no slot is
+        // reserved here; the loop's own `try_admit` is the atomic cap gate.
+        Reserved::Queue(minted) => {
+            crate::admission::acquire_queued(&state, tenant, pat, req, minted, now_ms).await
+        }
+    }
+}
+
+/// Provision the box for an already-RESERVED lease (a `Pending` row is in the
+/// ledger), transition it `Pending → Held`, emit the `Acquired` slot event,
+/// record the pinned image, register the §13 capture hook, and build the
+/// wire-conformant [`AcquireResponse`].
+///
+/// This is the shared finalize core: BOTH the immediate acquire path AND the
+/// queued admission loop (ADR-0005) call it after they win a `try_admit`
+/// reservation, so the post-reserve lifecycle is identical on both paths and
+/// the wire shape is byte-for-byte the same (no `AcquireResponse` divergence).
+///
+/// On ANY failure it rolls back the reserved `Pending` (teardown + ledger
+/// `remove`) and returns a fail-closed `503` — a reserved slot is never leaked.
+pub(crate) async fn finalize_admitted_lease(
+    state: &AppState,
+    registry: &Arc<HookRegistry>,
+    tenant: &TenantId,
+    pat: &BearerPat,
+    minted: MintedLease,
+    req: &AcquireRequest,
+) -> Response {
+    let MintedLease {
+        lease_id,
+        lease,
+        spec,
+    } = minted;
+    let now_ms = state.clock.now_ms();
 
     // ── 3b. Provision the container. The slot is ALREADY reserved (Pending in
     // the ledger). A provision failure here means NO Held lease is ever handed
@@ -293,7 +373,7 @@ pub(crate) async fn acquire(
                 } else {
                     // Held is committed. Emit Acquired BEFORE the lock drops so
                     // it strictly precedes any possible reclaim event.
-                    state.record_slot(&lease_id, &tenant, SlotEventKind::Acquired);
+                    state.record_slot(&lease_id, tenant, SlotEventKind::Acquired);
                     None // success — guard drops here at end of block
                 }
                 // `ledger` (MutexGuard) is dropped here in every path
