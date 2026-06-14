@@ -163,7 +163,16 @@ fn provision_binds_container() {
     let resolved = reg
         .resolve("lease-1")
         .expect("provision must bind the container");
-    assert_eq!(resolved.name, "box1", "bound container name == spec.name");
+    // The bound container carries the engine-DERIVED Northflank job name, not the
+    // raw spec name (P2 injectivity fix in corelink-cloud-engine): distinct leases
+    // can no longer collide onto one Northflank job. The binding is keyed by
+    // lease_id and the stored name is what teardown/probe pass back to the engine,
+    // so it must be the derived, Northflank-legal name.
+    assert!(
+        resolved.name.starts_with("nf-"),
+        "bound container name should be the derived nf- job name, got: {}",
+        resolved.name
+    );
 }
 
 /// `provision` with a create-job 500 → `Err`; registry stays empty.

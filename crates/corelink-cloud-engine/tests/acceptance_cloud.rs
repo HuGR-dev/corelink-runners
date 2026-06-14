@@ -162,7 +162,25 @@ fn spawn_creates_job_with_pinned_image() {
         body.contains(PINNED),
         "body should contain the pinned image, got: {body}"
     );
-    assert_eq!(result.name, spec.name, "RunningContainer.name == spec.name");
+
+    // The Northflank job name is derived from the spec name via an injective,
+    // Northflank-legal transform (P2 fix) — NOT the raw spec name verbatim. The
+    // load-bearing invariant is that the name in the create-job body and the
+    // name on the returned RunningContainer AGREE, so every later job_url()
+    // addresses exactly this job. (Distinct leases can never collide onto one
+    // Northflank job — see northflank::tests::job_name_is_injective_*.)
+    let parsed: serde_json::Value =
+        serde_json::from_str(&body).expect("create-job body should be JSON");
+    let body_name = parsed["name"].as_str().expect("body should carry a name");
+    assert_eq!(
+        result.name, body_name,
+        "RunningContainer.name MUST equal the name in the create-job body"
+    );
+    assert!(
+        result.name.starts_with("nf-"),
+        "derived job name should carry the nf- prefix, got: {}",
+        result.name
+    );
 }
 
 // ── Test 2: spawn_rejects_unpinned_image_before_provider ─────────────────────

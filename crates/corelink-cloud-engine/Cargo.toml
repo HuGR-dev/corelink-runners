@@ -14,6 +14,9 @@ corelink-runner = { path = "../corelink-runner" }
 anyhow     = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
+# SHA-256 — the collision-free suffix that makes the Northflank job-name
+# derivation injective on the full spec name (workspace-pinned hash dep).
+sha2       = { workspace = true }
 # Outbound HTTP — used in EXACTLY one place (`UreqTransport`); the engine logic
 # and the whole test suite talk to the `HttpTransport` trait, never to ureq.
 ureq       = { workspace = true }
