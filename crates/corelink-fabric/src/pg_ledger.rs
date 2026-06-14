@@ -136,6 +136,11 @@ DO $$ BEGIN CREATE TYPE lease_state AS ENUM ('pending','held','released','expire
 CREATE TABLE IF NOT EXISTS leases (
   lease_id text PRIMARY KEY, tenant text NOT NULL, state lease_state NOT NULL,
   box_ref text NOT NULL, created_at_ms bigint NOT NULL, updated_at_ms bigint NOT NULL);
+-- ADR-0003 Decision-1: the durable lease-expiry deadline (epoch ms, nullable =
+-- never-overdue). ADDITIVE + IDEMPOTENT so a fresh DB and an already-populated
+-- one both apply cleanly; existing rows get NULL (never-overdue), preserving
+-- the pre-ADR-0003 fail-safe until the next acquire writes a deadline.
+ALTER TABLE leases ADD COLUMN IF NOT EXISTS deadline_ms bigint;
 CREATE INDEX IF NOT EXISTS leases_tenant_active_idx ON leases (tenant) WHERE state IN ('pending','held');
 CREATE INDEX IF NOT EXISTS leases_held_idx ON leases (lease_id) WHERE state = 'held';
 ";
@@ -187,6 +192,9 @@ fn record_from_row(row: &tokio_postgres::Row) -> anyhow::Result<LeaseRecord> {
     let created: i64 = row.get("created_at_ms");
     let updated: i64 = row.get("updated_at_ms");
     let tenant_raw: String = row.get("tenant");
+    // ADR-0003 Decision-1: nullable `bigint` ↔ `Option<u64>` (NULL → None =
+    // never-overdue), same `as u64` epoch-ms mapping as the other time fields.
+    let deadline: Option<i64> = row.get("deadline_ms");
     Ok(LeaseRecord {
         lease_id: row.get("lease_id"),
         tenant: TenantId::new(tenant_raw)?,
@@ -194,6 +202,7 @@ fn record_from_row(row: &tokio_postgres::Row) -> anyhow::Result<LeaseRecord> {
         box_ref: row.get("box_ref"),
         created_at_ms: created as u64,
         updated_at_ms: updated as u64,
+        deadline_ms: deadline.map(|d| d as u64),
     })
 }
 
@@ -317,8 +326,9 @@ impl LeaseLedger for PgLedger {
             let rows = client
                 .query(
                     "INSERT INTO leases \
-                       (lease_id, tenant, state, box_ref, created_at_ms, updated_at_ms) \
-                     VALUES ($1, $2, $3::text::lease_state, $4, $5, $6) \
+                       (lease_id, tenant, state, box_ref, created_at_ms, updated_at_ms, \
+                        deadline_ms) \
+                     VALUES ($1, $2, $3::text::lease_state, $4, $5, $6, $7) \
                      ON CONFLICT (lease_id) DO NOTHING \
                      RETURNING lease_id",
                     &[
@@ -328,6 +338,8 @@ impl LeaseLedger for PgLedger {
                         &rec.box_ref,
                         &(rec.created_at_ms as i64),
                         &(rec.updated_at_ms as i64),
+                        // ADR-0003: Option<u64> → nullable bigint (None → NULL).
+                        &rec.deadline_ms.map(|d| d as i64),
                     ],
                 )
                 .await?;
@@ -347,7 +359,7 @@ impl LeaseLedger for PgLedger {
             let row = client
                 .query_opt(
                     "SELECT lease_id, tenant, state::text AS state, box_ref, \
-                            created_at_ms, updated_at_ms \
+                            created_at_ms, updated_at_ms, deadline_ms \
                      FROM leases WHERE lease_id = $1",
                     &[&lease_id],
                 )
@@ -378,11 +390,14 @@ impl LeaseLedger for PgLedger {
             let client = self.pool.get().await?;
             let row = client
                 .query_opt(
+                    // ADR-0003: the SET clause must NOT touch deadline_ms — a
+                    // state change never alters the durable deadline; it is only
+                    // RETURNed so the updated record carries it back unchanged.
                     "UPDATE leases \
                      SET state = $1::text::lease_state, updated_at_ms = $2 \
                      WHERE lease_id = $3 AND state = $4::text::lease_state \
                      RETURNING lease_id, tenant, state::text AS state, box_ref, \
-                               created_at_ms, updated_at_ms",
+                               created_at_ms, updated_at_ms, deadline_ms",
                     &[&to_label, &(now_ms as i64), &lease_id, &legal_from],
                 )
                 .await?;
@@ -416,7 +431,7 @@ impl LeaseLedger for PgLedger {
             let rows = client
                 .query(
                     "SELECT lease_id, tenant, state::text AS state, box_ref, \
-                            created_at_ms, updated_at_ms \
+                            created_at_ms, updated_at_ms, deadline_ms \
                      FROM leases WHERE tenant = $1 ORDER BY lease_id",
                     &[&t.as_str()],
                 )
@@ -431,7 +446,7 @@ impl LeaseLedger for PgLedger {
             let rows = client
                 .query(
                     "SELECT lease_id, tenant, state::text AS state, box_ref, \
-                            created_at_ms, updated_at_ms \
+                            created_at_ms, updated_at_ms, deadline_ms \
                      FROM leases WHERE state = 'held' ORDER BY lease_id",
                     &[],
                 )
@@ -473,8 +488,9 @@ impl LeaseLedger for PgLedger {
             let res = txn
                 .query(
                     "INSERT INTO leases \
-                       (lease_id, tenant, state, box_ref, created_at_ms, updated_at_ms) \
-                     SELECT $1, $2, $3::text::lease_state, $4, $5, $5 \
+                       (lease_id, tenant, state, box_ref, created_at_ms, updated_at_ms, \
+                        deadline_ms) \
+                     SELECT $1, $2, $3::text::lease_state, $4, $5, $5, $7 \
                      WHERE (SELECT count(*) FROM leases \
                             WHERE tenant = $2 AND state IN ('pending','held')) < $6 \
                      RETURNING lease_id",
@@ -485,6 +501,8 @@ impl LeaseLedger for PgLedger {
                         &rec.box_ref,
                         &(rec.created_at_ms as i64),
                         &(max_concurrency as i64),
+                        // ADR-0003: Option<u64> → nullable bigint (None → NULL).
+                        &rec.deadline_ms.map(|d| d as i64),
                     ],
                 )
                 .await;

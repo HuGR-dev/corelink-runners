@@ -150,6 +150,7 @@ mod tests {
             box_ref: box_ref.to_string(),
             created_at_ms: 1_000,
             updated_at_ms: 1_000,
+            deadline_ms: None,
         }
     }
 

@@ -99,7 +99,11 @@ pub(crate) async fn trigger(
     // ── 1+2. Tenant-scoped lookup + Held-only gate — the exec path's gates,
     // verbatim. NO cap check here: capping happened at acquire (module
     // docs); an over-cap tenant has no lease for this 404 to miss.
-    let box_ref = {
+    // The durable deadline (ADR-0003: it lives on the ledger record, the single
+    // source of truth) is read in the SAME critical section as the Held gate —
+    // same pattern as the exec path — so a trigger landing on a DIFFERENT
+    // instance than acquire still sees it.
+    let (box_ref, deadline_ms) = {
         let Ok(ledger) = state.ledger.lock() else {
             return error_response(ApiError::FailClosed, "lease ledger lock poisoned");
         };
@@ -124,12 +128,12 @@ pub(crate) async fn trigger(
                 );
             }
         }
-        record.box_ref
+        (record.box_ref, record.deadline_ms)
     };
 
     // ── 3. Expired-at-exec-time, BEFORE any execution (same law as exec:
     // an expired job performs zero work and stores nothing, ever).
-    let Some(deadline_ms) = state.deadline_of(&req.lease_id) else {
+    let Some(deadline_ms) = deadline_ms else {
         return error_response(
             ApiError::FailClosed,
             "held lease has no deadline on file: refusing to execute; failing closed",

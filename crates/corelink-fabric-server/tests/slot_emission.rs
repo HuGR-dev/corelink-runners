@@ -185,9 +185,10 @@ async fn close_emits_released_slot() {
 
 // ── Test 3: reaper_expiry_emits_expired_slot ─────────────────────────────────
 //
-// This test drives `reap_once` directly and needs to call `record_deadline`,
-// which is `pub(crate)`.  It therefore lives as an in-crate `#[cfg(test)]`
-// block in `reaper.rs` (see `reaper_expiry_emits_expired_slot` there).
+// This test drives `reap_once` directly and uses `pub(crate)` test helpers
+// (slot-meter inspection, durable `deadline_ms` insertion).  It therefore lives
+// as an in-crate `#[cfg(test)]` block in `reaper.rs` (see
+// `reaper_expiry_emits_expired_slot` there).
 
 // ── Test 4: failed_acquire_emits_no_slot ─────────────────────────────────────
 
