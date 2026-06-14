@@ -178,6 +178,30 @@ pub trait LeaseLedger {
     /// in-memory RateWindow (it is admission bookkeeping, not ledger state).
     fn try_admit(&mut self, rec: LeaseRecord, max_concurrency: u32) -> anyhow::Result<bool>;
 
+    /// Overwrite the lease's durable **envelope checkpoint** — an OPAQUE JSON
+    /// blob (ADR-0004 Decision-2; the §13 Item-3 durable-hook SLA).
+    ///
+    /// The ledger treats the blob as opaque (it NEVER parses it): the
+    /// abnormal-reap flush serializes a redacted `IntentMetrics` summary into it
+    /// at turn boundaries, and reads it back on a reap where the local hook is
+    /// absent. Persisting it on the lease row lets ANY instance — not just the
+    /// one that served the acquire — emit the forensic envelope, so it is never
+    /// silently dropped.
+    ///
+    /// Fail-closed: `Err` if the lease does not exist (like every other
+    /// mutation — never write a checkpoint for a lease we don't hold). An
+    /// idempotent overwrite otherwise (the freshest summary wins).
+    fn set_envelope_checkpoint(
+        &mut self,
+        lease_id: &str,
+        checkpoint_json: &str,
+    ) -> anyhow::Result<()>;
+
+    /// The lease's durable envelope checkpoint blob, or `None` if the lease has
+    /// none (absent lease, or never-written checkpoint). The blob is returned
+    /// verbatim — the ledger never parses it (ADR-0004 Decision-2).
+    fn get_envelope_checkpoint(&self, lease_id: &str) -> anyhow::Result<Option<String>>;
+
     /// Remove a record from the ledger, freeing the cap/occupancy it held.
     /// Returns `Ok(true)` if a record was removed, `Ok(false)` if the lease
     /// was already absent.
@@ -199,6 +223,10 @@ pub trait LeaseLedger {
 #[derive(Debug, Default)]
 pub struct InMemoryLedger {
     records: HashMap<String, LeaseRecord>,
+    /// ADR-0004 Decision-2: the durable envelope-checkpoint blob per lease
+    /// (opaque JSON, never parsed by the ledger). A side map keeps the frozen
+    /// [`LeaseRecord`] shape — and the journal/wire it round-trips — untouched.
+    checkpoints: HashMap<String, String>,
 }
 
 impl InMemoryLedger {
@@ -280,7 +308,31 @@ impl LeaseLedger for InMemoryLedger {
         }
     }
 
+    fn set_envelope_checkpoint(
+        &mut self,
+        lease_id: &str,
+        checkpoint_json: &str,
+    ) -> anyhow::Result<()> {
+        // Fail-closed: the lease must exist (never checkpoint a lease we don't
+        // hold). Idempotent overwrite — the freshest summary wins.
+        if !self.records.contains_key(lease_id) {
+            anyhow::bail!(
+                "lease {lease_id} does not exist: cannot set envelope checkpoint (fail-closed)"
+            );
+        }
+        self.checkpoints
+            .insert(lease_id.to_string(), checkpoint_json.to_string());
+        Ok(())
+    }
+
+    fn get_envelope_checkpoint(&self, lease_id: &str) -> anyhow::Result<Option<String>> {
+        Ok(self.checkpoints.get(lease_id).cloned())
+    }
+
     fn remove(&mut self, lease_id: &str) -> anyhow::Result<bool> {
+        // The checkpoint (if any) goes with the record — a rolled-back lease
+        // leaves no checkpoint residue.
+        self.checkpoints.remove(lease_id);
         Ok(self.records.remove(lease_id).is_some())
     }
 }
@@ -316,6 +368,13 @@ enum JournalLine {
     Record(LeaseRecord),
     /// An admission-rollback tombstone: the lease id is removed on replay.
     Tombstone { lease_id: String },
+    /// ADR-0004 Decision-2: an envelope-checkpoint write (opaque JSON blob).
+    /// Replay overwrites the lease's checkpoint (last write wins); a tombstone
+    /// for the same lease erases it.
+    Checkpoint {
+        lease_id: String,
+        checkpoint: String,
+    },
 }
 
 impl FileLedger {
@@ -345,6 +404,14 @@ impl FileLedger {
                     }
                     JournalLine::Tombstone { lease_id } => {
                         index.records.remove(&lease_id);
+                        index.checkpoints.remove(&lease_id);
+                    }
+                    JournalLine::Checkpoint {
+                        lease_id,
+                        checkpoint,
+                    } => {
+                        // Last checkpoint write per lease wins (append-only).
+                        index.checkpoints.insert(lease_id, checkpoint);
                     }
                 }
             }
@@ -436,6 +503,33 @@ impl LeaseLedger for FileLedger {
         }
     }
 
+    fn set_envelope_checkpoint(
+        &mut self,
+        lease_id: &str,
+        checkpoint_json: &str,
+    ) -> anyhow::Result<()> {
+        // Fail-closed against the replayed index, exactly like InMemory.
+        if !self.index.records.contains_key(lease_id) {
+            anyhow::bail!(
+                "lease {lease_id} does not exist: cannot set envelope checkpoint (fail-closed)"
+            );
+        }
+        // Durable first: append (flushed) before the in-memory index updates, so
+        // a crash between the two replays to the same checkpoint state.
+        self.append_line(&JournalLine::Checkpoint {
+            lease_id: lease_id.to_string(),
+            checkpoint: checkpoint_json.to_string(),
+        })?;
+        self.index
+            .checkpoints
+            .insert(lease_id.to_string(), checkpoint_json.to_string());
+        Ok(())
+    }
+
+    fn get_envelope_checkpoint(&self, lease_id: &str) -> anyhow::Result<Option<String>> {
+        self.index.get_envelope_checkpoint(lease_id)
+    }
+
     fn remove(&mut self, lease_id: &str) -> anyhow::Result<bool> {
         // Nothing to do (and nothing to journal) if the lease is absent.
         if !self.index.records.contains_key(lease_id) {
@@ -448,6 +542,9 @@ impl LeaseLedger for FileLedger {
             lease_id: lease_id.to_string(),
         })?;
         self.index.records.remove(lease_id);
+        // The tombstone also erases the checkpoint on replay; mirror that in the
+        // live index so no checkpoint residue outlives the lease.
+        self.index.checkpoints.remove(lease_id);
         Ok(true)
     }
 }

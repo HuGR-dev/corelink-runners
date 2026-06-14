@@ -129,11 +129,13 @@ redundant reaping harmless, so no leader election is needed.
 
 ## 5. Known limitations — per-instance side-table locality (multi-instance)
 
-> Both limitations below share ONE root cause — reap-critical per-lease state
-> (`deadlines`, the `CaptureHook` registry, the `slot_meter`) lives **in-memory per
+> Both limitations below shared ONE root cause — reap-critical per-lease state
+> (`deadlines`, the `CaptureHook` registry, the `slot_meter`) lived **in-memory per
 > instance**, not in the durable ledger. The **durable-reap-state work-package**
-> (move deadline + hook into the `leases` table so any instance can reap/flush)
-> closes both. Cap-safety is unaffected — the cap is DB-global (§3.1).
+> (ADR-0004) moved the deadline (§5a, Phase 1) and the envelope checkpoint (§5b, Phase
+> 2a) into the `leases` table so any instance can reap/flush — both are now **✅
+> RESOLVED**. The `slot_meter` (D3-P2, observability only) is out of scope and tracked
+> separately. Cap-safety was unaffected throughout — the cap is DB-global (§3.1).
 
 ### 5a. Deadline-reaper locality — ✅ RESOLVED (ADR-0004 Phase 1, PR #43)
 
@@ -146,22 +148,35 @@ overdue lease** — a true cross-instance backstop. Proven by
 `durable_deadline_survives_instance_boundary_and_is_reapable_cross_instance`
 (green against real Postgres). No cap-slot leak on instance death.
 
-### 5b. §13.5 partial-envelope hook-locality
+### 5b. §13.5 partial-envelope hook-locality — ✅ RESOLVED (ADR-0004 Phase 2a)
 
-The `CaptureHook` registry is **in-memory, per instance** — a lease's hook lives on
-whichever instance served its exec. The §13.5 partial-envelope flush
-(`flush_partial_envelope`) only fires on the reaper instance that *wins* the
-terminal-transition CAS (§3.2). Under multi-instance, the winning instance is not
-guaranteed to be the one holding the hook → on a mismatch, the partial **forensic**
-envelope for an abnormally-closed (expired/crashed) lease is silently dropped.
+*(Was the §13 Item-3 durable-hook SLA gap.)* The `CaptureHook` registry is in-memory
+per instance, so the reaper that wins the terminal-transition CAS (§3.2) is not
+guaranteed to be the instance holding the hook — under multi-instance, the partial
+**forensic** envelope for an abnormally-closed (expired/crashed) lease *used to be
+silently dropped* on a mismatch. **Fixed:** `flush_partial_envelope` is now a **3-tier
+abnormal flush** (ADR-0004 Decision-2):
 
-- **Billing impact: none.** hugit prices flat; the envelope is forensic provenance,
-  not a billing input. A dropped partial envelope costs a forensic record, never money.
-- **Severity: M1-acceptable.** §13.5 is explicitly best-effort at M1, and the M1
-  flush is a forensic *log line* — the real transport to hugit is the P2 work-package.
-- **Real fix (P2):** either persist hooks alongside the lease, or route the
-  abnormal-close flush to the lease's owning instance. Tracked as a P2 item; do not
-  rely on partial-envelope forensics being complete while running N>1.
+1. **local hook** present → full fidelity via `close_abnormal` (`source=local-hook`);
+2. **no hook, durable checkpoint** present (a redacted `IntentMetrics` summary on the
+   lease's `envelope_checkpoint` column) → a PARTIAL envelope from the checkpoint
+   (`source=durable-checkpoint`, `capture_incomplete=true`) — emittable by ANY
+   instance, so it survives owner death;
+3. **no hook, no checkpoint** → an explicit `no_capture` marker (zero metrics,
+   `no_capture=true`) — the loss is **recorded, never silent** (owner-ratified
+   Decision-3b).
+
+So at-least-once delivery is now guaranteed (hugit dedups by `lease_id`); the abnormal
+forensic envelope is **never silently dropped**, regardless of which instance reaps.
+Proven by `durable_checkpoint_survives_instance_boundary_cross_instance` (real
+Postgres) and the in-crate tier-1/2/3 + cross-instance reaper tests.
+
+- **Phase-2b residue (not a limitation, a follow-up):** the per-turn checkpoint WRITE
+  is not wired into production yet — there is no agent-trajectory turn-feed at M1, so
+  tier 2 fires only once that feed lands (ADR-0004 Phase 2b). Until then a non-owning
+  reaper emits tier 3 (`no_capture`) rather than tier 2; the envelope is still emitted,
+  never dropped. The durable storage + read-on-reap path is in place and tested now.
+- **Billing impact: none.** hugit prices flat; the envelope is forensic provenance.
 
 A normal close (client calls `POST /v1/leases/{id}/close`) is unaffected — it is
 served by, and finalizes on, the instance the client is talking to, and the

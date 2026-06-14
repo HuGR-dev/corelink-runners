@@ -1,6 +1,8 @@
 # ADR-0004 — Durable per-lease reap state (deadline + envelope checkpoint)
 
-**Status:** PROPOSED (one owner/hugit ratification point — §Decision-3) ·
+**Status:** ACCEPTED — Decision-1 shipped (Phase 1, PR #43); Decision-2/3 shipped
+(Phase 2a); Decision-3 owner-ratified (3a per-turn, 3b `no_capture` accepted); Phase 2b
+(per-turn checkpoint write) deferred to the agent-trajectory turn-feed WP ·
 **Date:** 2026-06-14 · **Supersedes:** the per-instance in-memory side-table posture ·
 **Drivers:** post-go-live brutal audit finding **D3-P1** (deadline-locality cap-slot
 leak) + the hugit techlead ruling on **§13 Item 3** (durable-hook forensic SLA,
@@ -80,25 +82,40 @@ reaper (any instance):
   retained until drained or the 24h TTL (hugit Q2c) — the durable row makes
   "retain until drained" possible.
 
-### Decision-3 — checkpoint cadence + `no_capture` acceptability ⚠️ (RATIFY)
+### Decision-3 — checkpoint cadence + `no_capture` acceptability ✅ (RATIFIED)
 
-Two sub-points need owner/hugit sign-off before build:
-- **(3a) Cadence:** checkpoint **per-turn** (freshest summary, one extra DB write per
-  model turn) vs **on a timer** (bounded write rate, summary may lag by the interval).
-  *Recommendation: per-turn* — turns are not high-frequency, the write is tiny, and
-  it maximizes forensic fidelity on an abrupt death.
-- **(3b)** Is the **`no_capture` marker** (step 3) an acceptable "not silently
-  dropped" for a lease that died before any turn? *Recommendation: yes* — there is
-  genuinely nothing captured; the explicit marker is the honest record. If hugit
-  requires more, the only alternative is checkpointing an empty summary at acquire
-  (one extra write per lease) — deferred unless required.
+Both sub-points are **owner-ratified** (2026-06-14):
+- **(3a) Cadence: per-turn** — checkpoint on every model turn (freshest summary, one
+  tiny extra DB write per turn). Turns are not high-frequency and the write is a
+  handful of scalars, so per-turn maximizes forensic fidelity on an abrupt death. The
+  per-turn WRITE call site rides the future agent-trajectory turn-feed (Phase 2b); the
+  durable storage + `set_envelope_checkpoint` method it writes through landed in
+  Phase 2a.
+- **(3b) `no_capture` marker accepted** — for a lease that died before any turn, the
+  explicit `no_capture` marker envelope (zero metrics, `capture_incomplete=true`,
+  `no_capture=true`) IS the accepted "not silently dropped" record. There is genuinely
+  nothing captured; the marker is the honest forensic record.
 
 ## Phasing
 
 - **Phase 1 — durable deadline (Decision-1).** Self-contained, independently
   shippable, closes a live cap-slot leak (P1). Smaller blast radius; lands first.
-- **Phase 2 — durable checkpoint (Decision-2/3).** Builds on the Phase-1 column
-  plumbing; gated on the Decision-3 ratification.
+- **Phase 2a — durable checkpoint storage + read-on-reap 3-tier (Decision-2/3). ✅ DONE.**
+  The ledger gains `set_envelope_checkpoint`/`get_envelope_checkpoint` (opaque JSON
+  blob, never parsed — implemented for `InMemoryLedger`, `FileLedger`, `PgLedger` via
+  an additive idempotent `envelope_checkpoint text` column), and the reaper's
+  `flush_partial_envelope` becomes the **3-tier abnormal flush**: tier 1 local hook
+  (full fidelity) → tier 2 durable checkpoint (partial, `source=durable-checkpoint`) →
+  tier 3 explicit `no_capture` marker (zero metrics, `source=no-capture`). All three
+  tiers route through one `emit_forensic` line. The cross-instance SLA is proven by
+  `durable_checkpoint_survives_instance_boundary_cross_instance` (real Postgres) and
+  the in-crate `cross_instance_reaper_without_hook_emits_durable_checkpoint`. The
+  frozen `corelink-runner` envelope mechanism is UNTOUCHED.
+- **Phase 2b — per-turn checkpoint WRITE (Decision-3a). DEFERRED.** Nothing calls the
+  per-turn `set_envelope_checkpoint` in production yet; the write rides the future
+  agent-trajectory→hook turn-feed WP (which also adds the non-destructive summary
+  snapshot to the runner envelope crate). Phase 2a's storage + read path is ready for
+  it.
 
 ## Consequences
 
@@ -109,8 +126,10 @@ Two sub-points need owner/hugit sign-off before build:
 - The multi-instance regression suite (`mod pg_runs`) extends: instance B reaps a
   lease instance A acquired (cross-instance deadline backstop); a non-owning instance
   emits the durable-checkpoint envelope.
-- RUNBOOK §5a/§5b known-limitations are **closed** when both phases land; update them
-  from "limitation" to "resolved (durable-reap-state, ADR-0004)".
+- RUNBOOK §5a (Phase 1) and §5b (Phase 2a) known-limitations are now both **closed**
+  ("resolved — durable-reap-state, ADR-0004"). The abnormal envelope is durably emitted
+  from any instance (never silently dropped); the only residue is the Phase-2b per-turn
+  WRITE feed.
 - The `slot_meter` N>1 reconciliation (D3-P2) is **not** addressed here — if global
   occupancy/peak is ever needed for billing it derives from the DB, tracked separately.
 
