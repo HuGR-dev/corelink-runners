@@ -500,10 +500,26 @@ mod tests {
     const PINNED: &str =
         "alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc";
 
-    /// The first `lease_id` that `AppState::new(...).mint_lease_id()` produces.
-    /// The counter starts at 1 and `fetch_add` returns the prior value (1),
-    /// so the first mint is always `"lease-0000000000000001"`.
-    const FIRST_MINT: &str = "lease-0000000000000001";
+    /// True iff `id` has the WP-FIX-LEASE-ID-UUID mint shape: `lease-<uuid-v4>`
+    /// (the `lease-` prefix + a 36-char hyphenated UUID). Used by the tests that
+    /// no longer assume a deterministic counter id.
+    fn is_lease_uuid(id: &str) -> bool {
+        let Some(rest) = id.strip_prefix("lease-") else {
+            return false;
+        };
+        uuid::Uuid::parse_str(rest).is_ok()
+    }
+
+    /// Drain a response body into the `lease_id` of its `AcquireResponse`.
+    /// The mint is now a UUID, so tests can no longer hardcode the id — they
+    /// read it back from the acquire response.
+    async fn acquired_lease_id(resp: axum::response::Response) -> String {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let acq: corelink_fabric_api::AcquireResponse = serde_json::from_slice(&bytes).unwrap();
+        acq.lease.lease_id
+    }
 
     /// A `BoxProvisioner` whose `provision` ALWAYS FAILS, recording each
     /// `teardown(lease_id)` in a shared log. Used to drive the provision-failure
@@ -622,11 +638,8 @@ mod tests {
         );
 
         // No record left for the lease — the reserved Pending was removed.
-        assert!(
-            ledger.lock().unwrap().get(FIRST_MINT).unwrap().is_none(),
-            "provision failure must leave NO record (Pending removed)"
-        );
-        // Cap freed: tenant has zero active leases.
+        // The mint is a UUID (unknowable up front), so we prove "no record"
+        // via the tenant index being empty (the cap/occupancy source of truth).
         assert!(
             ledger
                 .lock()
@@ -634,7 +647,7 @@ mod tests {
                 .by_tenant(&acme())
                 .unwrap()
                 .is_empty(),
-            "tenant must have no active leases after cleanup"
+            "tenant must have no active leases after cleanup (Pending removed)"
         );
         // Slot meter back to 0 — Acquired was never emitted (Held never reached).
         assert_eq!(
@@ -646,13 +659,14 @@ mod tests {
             state.slot_meter.lock().unwrap().journal().is_empty(),
             "no slot event may be journaled for a failed acquire"
         );
-        // Teardown was attempted for the orphaned box.
+        // Teardown was attempted for the orphaned box — exactly once, for a
+        // `lease-<uuid>`-shaped id (the minted lease).
+        let torn = teardown_log.lock().unwrap();
+        assert_eq!(torn.len(), 1, "teardown must be attempted exactly once");
         assert!(
-            teardown_log
-                .lock()
-                .unwrap()
-                .contains(&FIRST_MINT.to_string()),
-            "teardown_lease must be attempted on provision failure"
+            is_lease_uuid(&torn[0]),
+            "teardown_lease must be attempted on provision failure for the minted lease id, got {:?}",
+            torn[0]
         );
     }
 
@@ -761,6 +775,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+        let lease_id = acquired_lease_id(resp).await;
+        assert!(
+            is_lease_uuid(&lease_id),
+            "acquire must return a lease-<uuid> id, got {lease_id:?}"
+        );
 
         let meter = state.slot_meter.lock().unwrap();
         assert_eq!(
@@ -778,7 +797,7 @@ mod tests {
             ledger
                 .lock()
                 .unwrap()
-                .get(FIRST_MINT)
+                .get(&lease_id)
                 .unwrap()
                 .unwrap()
                 .state,
@@ -824,9 +843,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+        let lease_id = acquired_lease_id(resp).await;
 
         // Cancel.
-        let cancel_path = paths::LEASE_CANCEL.replace("{lease_id}", FIRST_MINT);
+        let cancel_path = paths::LEASE_CANCEL.replace("{lease_id}", &lease_id);
         let cancel_req = Request::builder()
             .method("POST")
             .uri(&cancel_path)
@@ -838,10 +858,7 @@ mod tests {
 
         // The box was torn down.
         assert!(
-            teardown_log
-                .lock()
-                .unwrap()
-                .contains(&FIRST_MINT.to_string()),
+            teardown_log.lock().unwrap().contains(&lease_id),
             "cancel must tear down the box (mirror close.rs)"
         );
         // Released emitted exactly once; slot freed.
@@ -857,5 +874,51 @@ mod tests {
             .filter(|e| matches!(e.kind, SlotEventKind::Released))
             .count();
         assert_eq!(released, 1, "exactly one Released event");
+    }
+
+    // ── Test: WP-FIX-LEASE-ID-UUID — minted ids are UUID-shaped + distinct ─────
+
+    /// The acquire handler mints `lease_id` from a UUID v4 (no per-process
+    /// counter). Two sequential acquires must therefore return TWO distinct
+    /// `lease-<uuid>`-shaped ids — the property the persistent PgLedger needs so
+    /// no pre/post-restart or cross-instance mint collides on the PRIMARY KEY.
+    #[tokio::test]
+    async fn acquire_mints_distinct_uuid_lease_ids() {
+        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
+            Arc::new(Mutex::new(InMemoryLedger::new()));
+        let state = AppState::new(
+            Arc::clone(&ledger),
+            Arc::new(plans(5)),
+            Arc::new(FixedClock(1_717_000_000_000)),
+        );
+        let router = crate::app::app(acme_token_store(), state);
+
+        let resp1 = router
+            .clone()
+            .oneshot(acquire_request(paths::LEASES, &body()))
+            .await
+            .unwrap();
+        assert_eq!(resp1.status(), StatusCode::OK);
+        let id1 = acquired_lease_id(resp1).await;
+
+        let resp2 = router
+            .oneshot(acquire_request(paths::LEASES, &body()))
+            .await
+            .unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
+        let id2 = acquired_lease_id(resp2).await;
+
+        assert!(
+            is_lease_uuid(&id1),
+            "first acquire must mint a lease-<uuid>, got {id1:?}"
+        );
+        assert!(
+            is_lease_uuid(&id2),
+            "second acquire must mint a lease-<uuid>, got {id2:?}"
+        );
+        assert_ne!(
+            id1, id2,
+            "two acquires must mint DISTINCT ids (no counter assumption)"
+        );
     }
 }

@@ -29,6 +29,10 @@ base64     = { workspace = true }
 # blocks for up to the runner-configured ack window — it runs on a blocking
 # thread (`tokio::task::spawn_blocking`), never on the async workers.
 tokio      = { workspace = true }
+# WP-FIX-LEASE-ID-UUID: the acquire handler mints `lease_id` from a UUID v4 so
+# the persistent PgLedger PRIMARY KEY can never collide across restarts or
+# instances (the in-memory monotonic counter could).
+uuid       = { workspace = true }
 # Same-workspace path deps (house law allows these; the crates.io-only rule in
 # deny.toml governs EXTERNAL deps): the FROZEN API vocabulary (paths, DTOs,
 # error semantics), the control-plane core types (TenantId), the frozen
