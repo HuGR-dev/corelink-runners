@@ -9,11 +9,14 @@
 > `docs/whitepaper/corelink-runners-v1.md` (M1 bar) · ADR-0003 (egress posture).
 
 Deployed ≠ shipped to paying customers. The **cloud-execution fabric is LIVE on
-Northflank** (2026-06-13, end-to-end acquire→provision→real microVM→exec exit 0→
-signed attestation→teardown, provider verified clean; deploy gotchas in
-`deploy/RUNBOOK.md §8`). It runs **single-instance on an in-memory ledger** — the
-persistent (Postgres) ledger that unlocks multi-instance is IN FLIGHT, not done.
-What remains is the persistent ledger, the cross-repo billing seam, and M2 GA.
+Northflank** and, as of **2026-06-14, MULTI-INSTANCE on a persistent Postgres
+ledger** (cross-instance cap-safety proven live: 2 containers, advisory-lock
+serialized admission, no over-admit). End-to-end acquire→provision→real
+microVM→exec→signed attestation→teardown proven; deploy ops in
+`deploy/northflank-postgres-runbook.md`. The execution core is now **exhaustively
+audited** (2026-06-14 comprehensive audit, 28 findings closed incl. a P0
+attestation-forgery) and **zero open P0/P1**. What remains is the cross-repo
+billing/auth flip, the live envelope turn-feed (§13.2 WRITE side), and M2 GA.
 This file tracks the distance; one line per item, struck through when closed.
 
 ## P0 — seed hardening (CLOSED 2026-06-12)
@@ -132,6 +135,60 @@ came back CLEAN, cold-verified) drove a multi-bundle hardening + persistence wav
       for a lease terminalized mid-exec (re-assert Held after `run_check`; trigger
       path guarded before memoization).
 
+## Multi-instance + durable-state + exhaustive-audit campaign (2026-06-14)
+
+The seed went from single-instance-in-memory to multi-instance-on-Postgres,
+durable per-lease reap state, and a full adversarial audit. PRs #38–#47:
+
+- [x] **Persistent ledger DEPLOYED + multi-instance PROVEN LIVE** — Northflank
+      PostgreSQL addon `corelink-ledger`; `FABRIC_LEDGER_BACKEND=pg`. Persistence
+      proven (lease survived restart); **cross-instance cap-safety proven at
+      `instances=2`** (25 acquires → cap held at 20, advisory-lock serialized;
+      per-instance caps would have admitted ~40). Live-only bug fixed: `lease_id`
+      was an in-mem `AtomicU64` (collided cross-instance/restart) → **UUID minting
+      (#39)**.
+- [x] **Opt-in PG TLS** (#40) — `FABRIC_PG_TLS=disable|require` (default `disable`
+      = unchanged `NoTls`); `require` = verify-full rustls vs webpki-roots. + the
+      multi-instance PgLedger regression suite (cap-exactness + CAS-dedup, gated on
+      `TEST_DATABASE_URL`).
+- [x] **ADR-0004 durable-reap-state** — **Phase 1 durable deadline** (#43): the
+      lease deadline moved from a per-instance in-mem map into the `leases` row, so
+      the reaper is a true cross-instance backstop (closed the audit D3-P1 cap-slot
+      leak on instance death). **Phase 2a durable envelope checkpoint** (#45): a
+      durable `envelope_checkpoint` + a 3-tier abnormal flush (local hook → durable
+      checkpoint → explicit `no_capture` marker), closing the hugit §13 Item-3 SLA
+      (an abnormal reap on ANY instance always emits a forensic record, never
+      silently dropped) + RUNBOOK §5b. Owner-ratified Decision-3 (per-turn,
+      no_capture).
+- [x] **🔬 Comprehensive adversarial audit + 2-wave remediation** (#46/#47) — a
+      16-dimension workflow (96 agents, each finding double-verified): **40 raw → 28
+      confirmed** (1 P0, 10 P1, 11 P2, 6 INFO), ALL closed. **P0: `result_binding_sig`
+      did not bind `CheckResult.exit`/`.artifacts` → a forgeable pass/fail verdict on
+      an otherwise-valid attestation** → fixed with `result_binding_sig_v2` (full
+      outcome, backward-compat, no flag-day). Plus: memo_key validation before
+      attest, ed25519 verify_strict, cloud-engine classify fail-closed + injective
+      names, FileLedger fsync + torn-journal tolerance, forensic re-scan fail-closed,
+      batch-teardown leak surfacing, stale-Pending cap-slot sweep, close ack-window +
+      global concurrency-limit/load-shed, saturating token sum, introspect tripwire,
+      X4 oracle single-sourced to production, real red-team escape vectors. Lead
+      cold-verify caught a committed-disabled supply-chain gate + a spawn-in-acquire
+      invariant break before they shipped.
+
+## In flight (2026-06-14)
+
+- [~] **§13.2 turn-feed (the WRITE side)** — a lease-authenticated `POST
+      /v1/leases/{id}/envelope/ingest` so the in-box agent loop streams trajectory
+      events into the `CaptureHook` (today only tests feed it). Activates **ADR-0004
+      Phase 2b** (per-turn durable checkpoint via a non-destructive collector
+      snapshot). The contract §13.2 delegates the channel mechanism to the runner;
+      fabric build in progress + a proposal routed to hugit (their agent adopts the
+      endpoint): `docs/handoff/2026-06-14-hugit-turnfeed-ingest-proposal.md`.
+- [~] **ADR-0005 queued fair admission (CP4)** — wire the unused `FairScheduler`
+      behind `FABRIC_ADMISSION_MODE=reject|queue` (default `reject` = unchanged).
+      Under `queue`, over-cap acquires enqueue + dispatch fairly + light up
+      `/v1/metrics/tenant`. **Owner ratification pending:** queue (fair wait) vs
+      reject (fast fail) as the over-cap product semantics (ADR-0005 §Decision).
+
 ## Remaining work — owner-gated or cross-repo
 
 Items that cannot close without owner input or a hugit-side move:
@@ -152,34 +209,48 @@ Items that cannot close without owner input or a hugit-side move:
       fail-closed: only `200 valid:true` admits, 401/5xx/transport → 503, never a
       false 401). `FABRIC_AUTH_BACKEND=corelink` (default `static`). Slot metering
       already emits (`SlotMeter`).
-- [~] **CoreLink slot billing (M2)** _(our side BUILT 2026-06-13, #32; awaits corelink-server field)_ —
-      `CoreLinkPlanStore` (`corelink_plans.rs`) derives the per-tenant cap from the
-      introspect `max_concurrency` (fail-closed: `Err(Unreachable)`→503, no-cap→reject;
-      wired behind `FABRIC_AUTH_BACKEND=corelink`). The field shape is **PROVISIONAL**
-      (corelink-server named `max_concurrency`; not yet ratified/conformance-pinned) —
-      tolerant parsing is forward-safe. The $ ladder is **ratified** (`pricing.md §2`);
-      ratification-confirm routed in `docs/handoff/2026-06-13-corelink-pricing-ratified.md`.
-      **Last move:** corelink-server ships `max_concurrency` on the introspect 200 body
-      → then freeze a conformance vector for the field. Until then a corelink-backed
-      acquire is uncapped→reject (honest M1 state).
+- [~] **CoreLink slot billing flip (M2)** _(our side READY; corelink building the
+      entitlement lookup)_ — `CoreLinkPlanStore` (#32) derives the per-tenant cap from
+      the introspect `max_concurrency` (fail-closed: `Err(Unreachable)`→503,
+      no-cap→reject). The `max_concurrency` shape is now **conformance-pinned**
+      (`conformance/corelink-introspect.json`, sha256 `bfb38e28…`, mirrored byte-
+      identical both repos + a typed `deny_unknown_fields` tripwire our side). §B
+      ratified = Option B (Runners cap from a SEPARATE Runners entitlement axis, not
+      the Cache tier). **corelink-server status:** the shape is decoupled (`c6073909`);
+      they are building the real D1 `runners_entitlement` lookup (empty table = all
+      tenants cap-absent, so the flip validates the 3 arms immediately even with
+      nothing sold). **Remaining:** (a) corelink ships the lookup + mints a real tenant
+      PAT → I flip `FABRIC_AUTH_BACKEND=corelink`; (b) **OWNER decision: which dogfood
+      tenant gets the 1st `runners_entitlement` row** (so a tenant can actually use
+      Runners). `FABRIC_INTROSPECT_AUTH_KEY` received (out-of-repo, set at flip).
 - [x] **`IntentMetrics` §13.4 conformance vector** _(RESOLVED 2026-06-13, #5)_ —
       hugit landed their twin (`02584d4`); our `conformance/IntentMetrics.json` is
       byte-identical (sha256 `2d8d2215…`, manifest membership pinned). #5 rebased,
       gates green, merged. The drift tripwire is now live on both sides.
-- [~] **Persistent (Postgres) ledger** _(BUILT 2026-06-13, #36/#37; deploy owner-gated)_ —
-      `PgLedger` (`pg_ledger.rs`, #36) impl `LeaseLedger` over `tokio-postgres`+
-      `deadpool-postgres`; **cross-instance cap-safe** via `pg_advisory_xact_lock`
-      + atomic count-and-insert (verified against real Postgres incl. the
-      concurrent-admit proof). WP-4 (#37) wires the backend selector
-      (`FABRIC_LEDGER_BACKEND=memory|pg` + `DATABASE_URL`, fail-closed). **Remaining
-      = deploy only:** provision a Postgres + set the env vars + restart → then
-      `instances>1` is safe. Until deployed, the LIVE fabric still runs
-      `InMemoryLedger` (`instances` MUST stay `1`).
+- [x] **Persistent (Postgres) ledger** _(DEPLOYED + MULTI-INSTANCE LIVE 2026-06-14)_ —
+      `PgLedger` over `tokio-postgres`+`deadpool-postgres`, cross-instance cap-safe
+      (`pg_advisory_xact_lock` + atomic count-and-insert). Deployed on the Northflank
+      `corelink-ledger` addon; `instances=2` proven cap-safe live. Durable deadline +
+      envelope checkpoint added (ADR-0004). The single-instance-in-memory constraint
+      is RETIRED.
+- [ ] **Redeploy the live fabric to current `main`** _(owner action)_ — the live
+      Northflank service is several PRs behind (it predates the audit P0 fix + the
+      hardening). A NEW BUILD of `main` deploys the `result_binding_sig_v2` P0 fix +
+      all Wave-1/2 hardening (new env vars all have safe defaults). Not an emergency
+      (internal seed) but a shipped security fix should not sit undeployed.
+- [ ] **hugit adds the attestation `result_binding_sig_v2` verifier** _(cross-repo,
+      SECURITY)_ — the P0 fix is backward-compat (v1 still emitted), so the
+      verdict-forgery window stays open on hugit's v1-only path until they verify v2.
+      Handoff: `docs/handoff/2026-06-14-SECURITY-hugit-attestation-binding-v2.md`
+      (§7.1 amendment, contract v1.4.0, pending ratification).
 - [ ] **`hugit-c9-` container-prefix rename decision** — ops-visible seam change;
       not a local cleanup.
 - [ ] **ATT3 secrets seam** — awaits the hugit payload contract (decision #7).
-- [ ] **Full §13 exec-time intent emission** — wiring `IntentMetrics` collection
-      into the live exec path at M1 scale; depends on §13.4 vector landing first.
+- [~] **Full §13 exec-time intent emission** — the §13.4 vector landed (#5); the
+      live capture path is now the **§13.2 turn-feed (in flight, above)** — the
+      ingest endpoint that streams in-box agent trajectory into the `CaptureHook`.
+      Phase 2b (per-turn durable checkpoint) rides it. Hugit's agent adopting the
+      ingest endpoint is the last mile.
 
 ## Firecracker / own-metal (deferred — off critical path)
 

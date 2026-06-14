@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-06-14 — multi-instance, durable state, exhaustive audit
+
+- **feat(fabric): persistent Postgres ledger DEPLOYED + multi-instance proven
+  live.** `PgLedger` cross-instance cap-safe (`pg_advisory_xact_lock` + atomic
+  count-and-insert); deployed on the Northflank `corelink-ledger` addon;
+  `instances=2` proven cap-safe (25 acquires → cap held at 20, advisory-lock
+  serialized). Live-only `lease_id` collision fixed via UUID minting (#39).
+  Opt-in PG TLS `FABRIC_PG_TLS=disable|require` (#40, default unchanged).
+- **feat(fabric): ADR-0004 durable-reap-state.** Phase 1 durable lease deadline
+  in the `leases` row → the reaper is a true cross-instance backstop (#43, closed
+  the cap-slot leak on instance death). Phase 2a durable envelope checkpoint +
+  3-tier abnormal flush (local hook → durable checkpoint → `no_capture` marker)
+  → an abnormal reap on any instance always emits a forensic record, never
+  silently dropped (#45, closes hugit §13 Item-3 SLA). Owner-ratified Decision-3
+  (per-turn cadence, `no_capture` marker).
+- **fix(security): comprehensive adversarial audit — P0 attestation forgery +
+  27 more, all closed (#46/#47).** 16-dimension workflow (96 agents, each finding
+  double-verified): 40 raw → 28 confirmed (1 P0, 10 P1, 11 P2, 6 INFO). **P0:
+  `result_binding_sig` did not bind `CheckResult.exit`/`.artifacts`** → a
+  forgeable pass/fail verdict on an otherwise-valid attestation under untrusted
+  compute → fixed with **`result_binding_sig_v2`** binding the full outcome
+  (backward-compat, no flag-day; hugit must add the v2 verifier — §7.1 amendment
+  v1.4.0). Plus: memo_key validation before attest, ed25519 `verify_strict`,
+  cloud-engine `classify_run_status` fail-closed + injective container names,
+  FileLedger `fsync` + torn-journal tolerance, forensic re-scan fail-closed,
+  batch-teardown leak surfacing, stale-`Pending` cap-slot sweep, close
+  ack-window + global concurrency-limit/load-shed, saturating token sum,
+  introspect-vector `deny_unknown_fields` tripwire, X4 oracle single-sourced to
+  the production path, real fence red-team escape vectors. Lead cold-verify
+  caught a committed-disabled supply-chain gate + a spawn-in-acquire invariant
+  break before they shipped.
+- **docs: ADR-0004 (durable-reap-state) · ADR-0005 (queued fair admission,
+  proposed) · the Northflank+Postgres multi-instance RUNBOOK · the comprehensive
+  audit findings tracker · SECURITY + turn-feed handoffs to hugit.**
+
 ## [0.1.0-seed] — 2026-06-12
 
 The seed milestone: the proven ephemeral-runner execution core, shipped to
