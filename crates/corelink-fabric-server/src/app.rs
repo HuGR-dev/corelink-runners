@@ -449,7 +449,7 @@ impl AppState {
     /// no longer needed — prevents unbounded growth for long-running processes.
     /// The close handler's own `registry.unregister` covers normal close;
     /// this covers the reaper/orphan teardown path. The deadline is NOT a side
-    /// table anymore (ADR-0003: it rides the `LeaseRecord` in the ledger), so
+    /// table anymore (ADR-0004: it rides the `LeaseRecord` in the ledger), so
     /// there is nothing to clear there — the terminal `transition` already
     /// removes the lease from the `held()` reap set.
     pub(crate) fn forget_lease(&self, lease_id: &str) {

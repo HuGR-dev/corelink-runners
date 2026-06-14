@@ -56,7 +56,7 @@ pub(crate) fn run_all(make: LedgerFactory) {
     deadline_roundtrips_and_transition_preserves_it(make);
 }
 
-/// ADR-0003 Decision-1: `deadline_ms` round-trips through `put`/`try_admit` →
+/// ADR-0004 Decision-1: `deadline_ms` round-trips through `put`/`try_admit` →
 /// `get`/`held`/`by_tenant`, a terminal `transition` PRESERVES it unchanged,
 /// and `None` round-trips as `None` (the never-overdue fail-safe). Every
 /// backend — InMemory, File, and Postgres (nullable `bigint`) — proves this.
@@ -87,7 +87,7 @@ fn deadline_roundtrips_and_transition_preserves_it(make: LedgerFactory) {
             "held() must carry deadline_ms (the reaper dates leases from it)"
         );
         // A terminal transition must PRESERVE the deadline (a state change never
-        // alters it — ADR-0003).
+        // alters it — ADR-0004).
         let after = led.transition("dl-1", RunnerState::Expired, 9_000).unwrap();
         assert_eq!(
             after.deadline_ms,
@@ -640,7 +640,7 @@ mod pg_runs {
         led.by_tenant(t).unwrap().len()
     }
 
-    /// THE P1 REGRESSION GUARD (ADR-0003 Decision-1, audit finding D3-P1).
+    /// THE P1 REGRESSION GUARD (ADR-0004 Decision-1, audit finding D3-P1).
     ///
     /// The durable deadline must survive INSTANCE boundaries. One `PgLedger`
     /// handle (instance A — simulating the instance that served the acquire)
@@ -720,7 +720,7 @@ mod pg_runs {
         assert_eq!(
             after.deadline_ms,
             Some(past_deadline),
-            "the terminal transition preserves the durable deadline (ADR-0003)"
+            "the terminal transition preserves the durable deadline (ADR-0004)"
         );
     }
 

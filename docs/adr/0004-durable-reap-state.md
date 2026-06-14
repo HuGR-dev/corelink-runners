@@ -1,4 +1,4 @@
-# ADR-0003 — Durable per-lease reap state (deadline + envelope checkpoint)
+# ADR-0004 — Durable per-lease reap state (deadline + envelope checkpoint)
 
 **Status:** PROPOSED (one owner/hugit ratification point — §Decision-3) ·
 **Date:** 2026-06-14 · **Supersedes:** the per-instance in-memory side-table posture ·
@@ -110,7 +110,7 @@ Two sub-points need owner/hugit sign-off before build:
   lease instance A acquired (cross-instance deadline backstop); a non-owning instance
   emits the durable-checkpoint envelope.
 - RUNBOOK §5a/§5b known-limitations are **closed** when both phases land; update them
-  from "limitation" to "resolved (durable-reap-state, ADR-0003)".
+  from "limitation" to "resolved (durable-reap-state, ADR-0004)".
 - The `slot_meter` N>1 reconciliation (D3-P2) is **not** addressed here — if global
   occupancy/peak is ever needed for billing it derives from the DB, tracked separately.
 
