@@ -111,6 +111,27 @@ use corelink_runners_contracts::RunnerState;
 /// the lease, so it can NEVER block or break reclamation: a flush failure is
 /// logged and the sweep moves on.
 ///
+/// # 3-tier abnormal flush (ADR-0004 Decision-2; hugit §13 Item-3 SLA)
+/// The `CaptureHook` registry is in-memory PER INSTANCE, so the reaper that wins
+/// the terminal CAS may not be the one holding the hook. Rather than silently
+/// drop the forensic envelope, the flush falls back through three tiers:
+/// 1. **local hook present** (`source=local-hook`): full fidelity via
+///    `close_abnormal` — unchanged behavior.
+/// 2. **no local hook, durable checkpoint exists** (`source=durable-checkpoint`):
+///    deserialize the ledger's opaque [`IntentMetrics`] checkpoint blob and emit a
+///    PARTIAL envelope from it (`capture_incomplete=true`). This is the
+///    cross-instance SLA: any instance can emit, so the envelope survives owner
+///    death.
+/// 3. **no hook AND no checkpoint** (`source=no-capture`): the lease died before
+///    anything was captured → an explicit `no_capture` marker (zero metrics,
+///    `capture_incomplete=true`, `no_capture=true`) — the owner-ratified "never
+///    silently dropped" record (Decision-3b).
+///
+/// Tiers 2/3 fire ONLY when there is no local hook, so they can never double-emit
+/// against tier 1. Tier 1's already-closed (exactly-once) `Err` is logged and
+/// skipped with no fall-through — the hook DID exist, so emitting a checkpoint /
+/// no_capture record would be a second envelope for the same lease.
+///
 /// # Wire shape (§13.5)
 /// The EXISTING envelope payload plus two close-metadata markers, both
 /// WRAPPER-level (never inside the frozen §13.4 `IntentMetrics` vector):
@@ -146,59 +167,172 @@ fn flush_partial_envelope(
     kind: AbnormalKind,
     died: Instant,
 ) -> Option<corelink_runner::envelope::CloseOutcome> {
+    let close_reason = CloseReason::from(kind);
+
+    // ── TIER 1 — local hook present (the common case: the owning instance is
+    // alive and is often the reaper). Full-fidelity: finalize through the SAME
+    // finalize/redaction path as a normal close (no exemption — "an exemption is
+    // a hole"), which stamps `capture_incomplete: true` + the close reason.
+    //
     // Dedup: close_handle_any returns a CLONE of the hook (the registry entry
     // stays; exactly-once rides the shared close-latch on the hook state, NOT
-    // registry removal). No hook → a non-agent lease (nothing captured): nothing
-    // to flush.
-    let (hook, price) = state.hook_registry.close_handle_any(lease_id)?;
-
-    // Drive the FROZEN mechanism: it finalizes the partial envelope through the
-    // SAME finalize/redaction path as a normal close (no exemption — "an
-    // exemption is a hole") and stamps `capture_incomplete: true` +
-    // `close_reason: expired|crashed`.
-    let outcome =
+    // registry removal).
+    if let Some((hook, price)) = state.hook_registry.close_handle_any(lease_id) {
         match corelink_runner::envelope::JobClose::new(&hook).close_abnormal(kind, died, &price) {
-            Ok(outcome) => outcome,
+            Ok(outcome) => {
+                // source = local-hook; metrics are the FINALIZED (redacted)
+                // projection, capture_incomplete carried from the outcome.
+                emit_forensic(
+                    lease_id,
+                    tenant,
+                    &outcome.metrics,
+                    outcome.close_reason,
+                    outcome.capture_incomplete,
+                    false,
+                    "local-hook",
+                );
+                return Some(outcome);
+            }
             Err(e) => {
-                // Already-closed (exactly-once): a normal close consumed this hook
-                // before the sweep. Do NOT fail the sweep — log and move on; there
-                // is NO second envelope (exactly-once is enforced on the shared hook
-                // state, not on the registry entry).
+                // Already-closed (exactly-once): a normal close consumed this
+                // hook before the sweep. Do NOT fail the sweep and do NOT fall
+                // through to tiers 2/3 — the local hook DID exist and its
+                // exactly-once latch already fired; a checkpoint/no_capture
+                // record here would be a SECOND envelope for the same lease.
                 eprintln!(
                     "envelope-flush: skipped partial flush for lease {lease_id} \
-                 (close already fired, exactly-once): {e:#}"
+                     (close already fired, exactly-once): {e:#}"
                 );
                 return None;
             }
-        };
+        }
+    }
 
-    // Forensic emit (M1): a structured log line. The metrics come from the
-    // FINALIZED (already-redacted) outcome — a SUMMARY of the IntentMetrics
-    // scalars, never raw trajectory bytes. The real push to hugit is P2.
-    let m = &outcome.metrics;
-    let reason = match outcome.close_reason {
+    // ── TIER 2 — no local hook, but a durable checkpoint exists (ADR-0004
+    // Decision-2): the lease ran on an instance that is now gone/elsewhere and
+    // left a redacted summary on its ledger row. Emit a PARTIAL forensic
+    // envelope from it (the §13 Item-3 cross-instance SLA: never silently
+    // dropped). source = durable-checkpoint.
+    let checkpoint = {
+        let ledger = state.ledger.lock().unwrap_or_else(|e| e.into_inner());
+        // A read failure must NOT break reclamation (post-teardown,
+        // fire-and-forget) — degrade to None and fall through to tier 3.
+        ledger.get_envelope_checkpoint(lease_id).unwrap_or(None)
+    };
+    if let Some(json) = checkpoint {
+        match serde_json::from_str::<corelink_runners_contracts::IntentMetrics>(&json) {
+            Ok(metrics) => {
+                // capture_incomplete = true: a checkpoint is by definition a
+                // mid-flight summary, never the finalized close.
+                emit_forensic(
+                    lease_id,
+                    tenant,
+                    &metrics,
+                    close_reason,
+                    true,
+                    false,
+                    "durable-checkpoint",
+                );
+                return Some(corelink_runner::envelope::CloseOutcome {
+                    status: corelink_runner::envelope::JobStatus::Killed,
+                    metrics,
+                    capture_incomplete: true,
+                    close_reason,
+                });
+            }
+            Err(e) => {
+                // A corrupt checkpoint must not silently vanish: fall through to
+                // the tier-3 no_capture marker so the loss is still RECORDED.
+                eprintln!(
+                    "envelope-flush: lease {lease_id} durable checkpoint failed to deserialize \
+                     ({e:#}) — falling through to no_capture marker"
+                );
+            }
+        }
+    }
+
+    // ── TIER 3 — no hook AND no (usable) checkpoint: the lease died before
+    // anything was captured. Emit an EXPLICIT `no_capture` marker (zero
+    // metrics) — the owner-ratified "never silently dropped" record. source =
+    // no-capture.
+    let zero = zero_intent_metrics();
+    emit_forensic(
+        lease_id,
+        tenant,
+        &zero,
+        close_reason,
+        true,
+        true,
+        "no-capture",
+    );
+    Some(corelink_runner::envelope::CloseOutcome {
+        status: corelink_runner::envelope::JobStatus::Killed,
+        metrics: zero,
+        capture_incomplete: true,
+        close_reason,
+    })
+}
+
+/// The all-zero [`IntentMetrics`] for the tier-3 `no_capture` marker.
+///
+/// The frozen contracts type does NOT derive `Default` (and we must NOT add a
+/// derive to it — its wire shape, sha256 `2d8d2215…`, is frozen), so the zero
+/// value is built as an explicit literal. This constructs a VALUE; it does not
+/// alter the type.
+fn zero_intent_metrics() -> corelink_runners_contracts::IntentMetrics {
+    use corelink_runners_contracts::{IntentMetrics, TokenCounts};
+    IntentMetrics {
+        tokens: TokenCounts {
+            input: 0,
+            output: 0,
+            cache_read: 0,
+            cache_write: 0,
+            total: 0,
+        },
+        wall_ms: 0,
+        active_ms: 0,
+        tool_calls: 0,
+        tool_breakdown: Vec::new(),
+        model_turns: 0,
+        cost_usd_micros: 0,
+    }
+}
+
+/// Emit ONE consistent structured forensic line — the M1 forensic record for an
+/// abnormal-close envelope (the P2 transport pushes it to hugit). All three
+/// flush tiers route through here so the record shape is identical regardless of
+/// whether the metrics came from a live hook (tier 1), a durable checkpoint
+/// (tier 2), or the `no_capture` zero floor (tier 3); `source` names which.
+///
+/// The metrics are always a SUMMARY of the `IntentMetrics` scalars — never raw
+/// trajectory bytes (redaction is preserved on every path).
+fn emit_forensic(
+    lease_id: &str,
+    tenant: &corelink_fabric::TenantId,
+    metrics: &corelink_runners_contracts::IntentMetrics,
+    close_reason: CloseReason,
+    capture_incomplete: bool,
+    no_capture: bool,
+    source: &str,
+) {
+    let reason = match close_reason {
         CloseReason::Expired => "expired",
         CloseReason::Crashed => "crashed",
         CloseReason::Normal => "normal",
     };
     eprintln!(
         "envelope-flush: partial envelope FINALIZED (M1 forensic record; P2 pushes to hugit) \
-         lease_id={lease_id} tenant={tenant} close_reason={reason} \
-         capture_incomplete={} tokens_total={} tool_calls={} cost_usd_micros={} \
+         lease_id={lease_id} tenant={tenant} close_reason={reason} source={source} \
+         capture_incomplete={capture_incomplete} no_capture={no_capture} \
+         tokens_total={} tool_calls={} cost_usd_micros={} \
          wall_ms={} active_ms={} model_turns={}",
-        outcome.capture_incomplete,
-        m.tokens.total,
-        m.tool_calls,
-        m.cost_usd_micros,
-        m.wall_ms,
-        m.active_ms,
-        m.model_turns,
+        metrics.tokens.total,
+        metrics.tool_calls,
+        metrics.cost_usd_micros,
+        metrics.wall_ms,
+        metrics.active_ms,
+        metrics.model_turns,
     );
-
-    // Returned for the in-crate tests to assert the finalized markers; the
-    // call sites IGNORE it (fire-and-forget — the side-effect is the forensic
-    // log line above).
-    Some(outcome)
 }
 
 /// Configuration for the background reaper.
@@ -1265,9 +1399,11 @@ mod tests {
         let _ = prov; // teardown recorder; the sweep below exercises it.
     }
 
-    /// A reaped Expired lease with NO hook → reaped normally, NO flush, no
-    /// panic: `flush_partial_envelope` is a silent no-op and `reap_once`
-    /// still returns 1.
+    /// A reaped Expired lease with NO hook (and NO durable checkpoint) → reaped
+    /// normally, no panic, `reap_once` still returns 1. Under ADR-0004 the flush
+    /// emits a tier-3 `no_capture` marker rather than a silent no-op (asserted
+    /// directly in `tier3_no_capture_marker_when_no_hook_no_checkpoint`); here we
+    /// only prove the in-sweep flush never breaks reclamation.
     #[tokio::test]
     async fn expired_no_hook_reaps_without_flush() {
         let (state, _clock, _prov) = build_state(2_000);
@@ -1304,17 +1440,25 @@ mod tests {
             let rec = ledger.get("lease-e2e-exp").unwrap().unwrap();
             assert_eq!(rec.state, LeaseState::Wire(RunnerState::Expired));
         }
-        // Hook consumed by the in-sweep flush — a follow-up flush is a no-op.
-        assert!(
-            flush_partial_envelope(
-                &state,
-                "lease-e2e-exp",
-                &TenantId::new("acme").unwrap(),
-                AbnormalKind::Expiry,
-                std::time::Instant::now(),
-            )
-            .is_none(),
-            "reap_once already drove the flush and consumed the hook"
+        // Hook consumed AND unregistered by the in-sweep flush + forget_lease.
+        // A follow-up flush therefore finds NO hook and NO checkpoint → it falls
+        // to the tier-3 `no_capture` marker (zero metrics), NOT the live hook's
+        // finalized outcome. This proves tier 1 was consumed once: a second
+        // tier-1 flush is impossible (the hook is gone), and the never-silently-
+        // dropped floor (tier 3) is what answers a re-flush. In production the
+        // sweep flushes exactly once (one reaper wins the terminal CAS), so this
+        // re-flush is test-only — there is no double tier-1 emit.
+        let refl = flush_partial_envelope(
+            &state,
+            "lease-e2e-exp",
+            &TenantId::new("acme").unwrap(),
+            AbnormalKind::Expiry,
+            std::time::Instant::now(),
+        )
+        .expect("a re-flush yields the tier-3 no_capture marker, not the live hook");
+        assert_eq!(
+            refl.metrics.model_turns, 0,
+            "the re-flush is the zero-metric tier-3 marker (the hook was consumed + forgotten)"
         );
     }
 
@@ -1360,16 +1504,20 @@ mod tests {
             let rec = ledger.get("lease-crash-e2e").unwrap().unwrap();
             assert_eq!(rec.state, LeaseState::Wire(RunnerState::Crashed));
         }
-        assert!(
-            flush_partial_envelope(
-                &state,
-                "lease-crash-e2e",
-                &TenantId::new("acme").unwrap(),
-                AbnormalKind::Crash,
-                std::time::Instant::now(),
-            )
-            .is_none(),
-            "surface_crashes already drove the flush and consumed the hook"
+        // As in the expired E2E: surface_crashes consumed + forgot the hook, so
+        // a re-flush falls to the tier-3 `no_capture` marker (zero metrics), not
+        // a second live-hook outcome. The sweep flushes exactly once in prod.
+        let refl = flush_partial_envelope(
+            &state,
+            "lease-crash-e2e",
+            &TenantId::new("acme").unwrap(),
+            AbnormalKind::Crash,
+            std::time::Instant::now(),
+        )
+        .expect("a re-flush yields the tier-3 no_capture marker, not the live hook");
+        assert_eq!(
+            refl.metrics.model_turns, 0,
+            "the re-flush is the zero-metric tier-3 marker (the hook was consumed + forgotten)"
         );
     }
 
@@ -1436,6 +1584,229 @@ mod tests {
         // The sweep still reclaims the lease cleanly despite the skipped flush.
         let reaped = reap_once(&state).await;
         assert_eq!(reaped, 1, "reclamation is unaffected by a skipped flush");
+    }
+
+    // ── ADR-0004 Phase 2a: durable-checkpoint 3-tier abnormal flush ──────────
+
+    /// A non-trivial redacted checkpoint summary serialized as the opaque blob
+    /// the ledger stores (exactly what the future per-turn write feed produces).
+    fn checkpoint_json(model_turns: u64, tokens_total: u64) -> String {
+        use corelink_runners_contracts::{IntentMetrics, TokenCounts};
+        serde_json::to_string(&IntentMetrics {
+            tokens: TokenCounts {
+                input: tokens_total,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                total: tokens_total,
+            },
+            wall_ms: 42,
+            active_ms: 7,
+            tool_calls: 3,
+            tool_breakdown: Vec::new(),
+            model_turns,
+            cost_usd_micros: 1234,
+        })
+        .unwrap()
+    }
+
+    /// TIER 2 — no local hook, but a durable checkpoint exists: the flush emits a
+    /// PARTIAL envelope from the checkpoint metrics (`capture_incomplete`, the
+    /// checkpoint's scalars), source=durable-checkpoint, and returns the outcome.
+    /// This is the §13 Item-3 cross-instance SLA in microcosm: the hook lived on
+    /// a now-gone instance; the durable checkpoint carries the forensic summary.
+    #[tokio::test]
+    async fn tier2_durable_checkpoint_emits_partial_when_no_hook() {
+        use corelink_runner::envelope::CloseReason;
+
+        let (state, _clock, _prov) = build_state(2_000);
+        insert_held(&state, "lease-tier2", 1_000);
+        // NO register_hook — the local hook is absent (the whole point).
+        // Write the durable checkpoint the "owning" instance would have left.
+        state
+            .ledger
+            .lock()
+            .unwrap()
+            .set_envelope_checkpoint("lease-tier2", &checkpoint_json(4, 999))
+            .expect("checkpoint write on an existing lease must succeed");
+
+        let outcome = flush_partial_envelope(
+            &state,
+            "lease-tier2",
+            &TenantId::new("acme").unwrap(),
+            AbnormalKind::Expiry,
+            std::time::Instant::now(),
+        )
+        .expect("a durable checkpoint must produce a partial outcome (NOT a silent drop)");
+
+        assert_eq!(
+            outcome.close_reason,
+            CloseReason::Expired,
+            "tier 2 must carry the abnormal close reason"
+        );
+        assert!(
+            outcome.capture_incomplete,
+            "a checkpoint is a mid-flight summary → always capture_incomplete"
+        );
+        // The metrics are the CHECKPOINT's, not a zero floor.
+        assert_eq!(
+            outcome.metrics.model_turns, 4,
+            "tier 2 metrics must come from the durable checkpoint"
+        );
+        assert_eq!(outcome.metrics.tokens.total, 999);
+        assert_eq!(outcome.metrics.cost_usd_micros, 1234);
+    }
+
+    /// TIER 3 — no hook AND no checkpoint: the flush emits the explicit
+    /// `no_capture` marker (zero metrics, `capture_incomplete`), NOT a silent
+    /// no-op. The lease died before anything was captured; the marker is the
+    /// owner-ratified "never silently dropped" record (Decision-3b).
+    #[tokio::test]
+    async fn tier3_no_capture_marker_when_no_hook_no_checkpoint() {
+        use corelink_runner::envelope::CloseReason;
+
+        let (state, _clock, _prov) = build_state(2_000);
+        insert_held(&state, "lease-tier3", 1_000);
+        // NO hook, NO checkpoint.
+
+        let outcome = flush_partial_envelope(
+            &state,
+            "lease-tier3",
+            &TenantId::new("acme").unwrap(),
+            AbnormalKind::Crash,
+            std::time::Instant::now(),
+        )
+        .expect("tier 3 must emit a no_capture marker (NOT None / silent drop)");
+
+        assert_eq!(outcome.close_reason, CloseReason::Crashed);
+        assert!(
+            outcome.capture_incomplete,
+            "the no_capture marker is capture_incomplete"
+        );
+        // Zero metrics — there was genuinely nothing captured.
+        assert_eq!(outcome.metrics.model_turns, 0);
+        assert_eq!(outcome.metrics.tokens.total, 0);
+        assert_eq!(outcome.metrics.tool_calls, 0);
+        assert_eq!(outcome.metrics.cost_usd_micros, 0);
+        assert!(
+            outcome.metrics.tool_breakdown.is_empty(),
+            "the zero IntentMetrics has an empty tool breakdown"
+        );
+    }
+
+    /// TIER 1 STILL WINS — a lease WITH a local hook uses the hook (full
+    /// fidelity) and IGNORES any durable checkpoint. Even when a (stale)
+    /// checkpoint is present, the live hook's finalized metrics are emitted, not
+    /// the checkpoint's.
+    #[tokio::test]
+    async fn tier1_local_hook_wins_over_checkpoint() {
+        let (state, _clock, _prov) = build_state(2_000);
+        insert_held(&state, "lease-tier1", 1_000);
+        // BOTH a live hook (one observed turn → model_turns == 1) AND a stale
+        // checkpoint (model_turns == 99) are present.
+        register_hook(&state, "lease-tier1");
+        state
+            .ledger
+            .lock()
+            .unwrap()
+            .set_envelope_checkpoint("lease-tier1", &checkpoint_json(99, 55_555))
+            .unwrap();
+
+        let outcome = flush_partial_envelope(
+            &state,
+            "lease-tier1",
+            &TenantId::new("acme").unwrap(),
+            AbnormalKind::Expiry,
+            std::time::Instant::now(),
+        )
+        .expect("the local hook must produce a finalized outcome");
+
+        // The HOOK's finalized projection (1 turn), never the checkpoint's 99.
+        assert_eq!(
+            outcome.metrics.model_turns, 1,
+            "tier 1 must use the live hook, not the durable checkpoint"
+        );
+        assert_ne!(
+            outcome.metrics.tokens.total, 55_555,
+            "the stale checkpoint's metrics must NOT leak into the tier-1 outcome"
+        );
+    }
+
+    /// THE §13 Item-3 SLA PROOF (cross-instance, single-DB shape). A lease is
+    /// reaped by an instance that does NOT hold the hook but DOES see the durable
+    /// checkpoint → the partial (tier 2) is emitted, never dropped.
+    ///
+    /// Modeled with a SHARED ledger behind two `AppState`s: the "owning" state
+    /// admits + checkpoints the lease; the "reaper" state shares the SAME ledger
+    /// `Arc` but has an EMPTY hook registry (its own in-memory map — exactly the
+    /// hook-locality gap). The reaper flush reads the checkpoint from the shared
+    /// durable ledger and emits the forensic envelope.
+    #[tokio::test]
+    async fn cross_instance_reaper_without_hook_emits_durable_checkpoint() {
+        // `InMemoryLedger` / `LeaseLedger` are in scope from the module-top use;
+        // `StaticPlans` from `crate::app`; `Arc`/`Mutex` from the test prelude.
+        // ONE durable ledger, shared by two instances.
+        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
+            Arc::new(Mutex::new(InMemoryLedger::new()));
+        let clock = FixedClock::new(2_000);
+
+        // Instance A (owning): registers the hook + writes the checkpoint.
+        let mut state_a = AppState::new(
+            Arc::clone(&ledger),
+            Arc::new(StaticPlans::default()),
+            Arc::new(clock.clone()),
+        );
+        state_a.provisioner = Arc::new(RecordingProvisioner::new()) as Arc<dyn BoxProvisioner>;
+
+        // Instance B (reaper): SHARES the ledger, but has its OWN (empty) hook
+        // registry — it never served the acquire, so it holds no hook.
+        let mut state_b = AppState::new(
+            Arc::clone(&ledger),
+            Arc::new(StaticPlans::default()),
+            Arc::new(clock.clone()),
+        );
+        state_b.provisioner = Arc::new(RecordingProvisioner::new()) as Arc<dyn BoxProvisioner>;
+
+        // A holds the lease + a registered hook + a durable checkpoint.
+        insert_held(&state_a, "lease-xinst", 1_000);
+        register_hook(&state_a, "lease-xinst");
+        state_a
+            .ledger
+            .lock()
+            .unwrap()
+            .set_envelope_checkpoint("lease-xinst", &checkpoint_json(6, 7_000))
+            .expect("instance A writes the durable checkpoint");
+
+        // Sanity: instance B holds NO local hook for this lease.
+        assert!(
+            state_b
+                .hook_registry
+                .close_handle_any("lease-xinst")
+                .is_none(),
+            "the reaper instance must not hold the hook (hook-locality gap)"
+        );
+
+        // Instance B reaps: tier 1 misses (no hook) → tier 2 reads the SHARED
+        // durable checkpoint and emits the partial. Before ADR-0004 this was a
+        // SILENT DROP.
+        let outcome = flush_partial_envelope(
+            &state_b,
+            "lease-xinst",
+            &TenantId::new("acme").unwrap(),
+            AbnormalKind::Expiry,
+            std::time::Instant::now(),
+        )
+        .expect("the non-owning reaper must emit the partial from the durable checkpoint");
+
+        assert!(
+            outcome.capture_incomplete,
+            "the cross-instance partial is capture_incomplete"
+        );
+        assert_eq!(
+            outcome.metrics.model_turns, 6,
+            "the emitted metrics are the durable checkpoint's (instance A's summary)"
+        );
+        assert_eq!(outcome.metrics.tokens.total, 7_000);
     }
 
     // ── WP-CRASH-SWEEP: surface_crashes behavior tests ───────────────────────

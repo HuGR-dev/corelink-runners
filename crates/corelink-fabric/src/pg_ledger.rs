@@ -141,6 +141,11 @@ CREATE TABLE IF NOT EXISTS leases (
 -- one both apply cleanly; existing rows get NULL (never-overdue), preserving
 -- the pre-ADR-0004 fail-safe until the next acquire writes a deadline.
 ALTER TABLE leases ADD COLUMN IF NOT EXISTS deadline_ms bigint;
+-- ADR-0004 Decision-2: the durable envelope checkpoint — an OPAQUE redacted
+-- IntentMetrics summary (the ledger never parses it). ADDITIVE + IDEMPOTENT,
+-- nullable = never-written. Lets ANY instance emit the abnormal forensic
+-- envelope (§13 Item-3 SLA), not just the one holding the in-memory hook.
+ALTER TABLE leases ADD COLUMN IF NOT EXISTS envelope_checkpoint text;
 CREATE INDEX IF NOT EXISTS leases_tenant_active_idx ON leases (tenant) WHERE state IN ('pending','held');
 CREATE INDEX IF NOT EXISTS leases_held_idx ON leases (lease_id) WHERE state = 'held';
 ";
@@ -408,6 +413,46 @@ impl LeaseLedger for PgLedger {
                      (no row in the required source state; contract §1 fail-closed)"
                 ),
             }
+        })
+    }
+
+    fn set_envelope_checkpoint(
+        &mut self,
+        lease_id: &str,
+        checkpoint_json: &str,
+    ) -> anyhow::Result<()> {
+        // ADR-0004 Decision-2: overwrite the lease's opaque checkpoint blob.
+        // Fail-closed: rowcount 0 (unknown lease) → Err, like every other
+        // mutation. Idempotent overwrite for an existing lease.
+        self.block_on(async {
+            let client = self.pool.get().await?;
+            let n = client
+                .execute(
+                    "UPDATE leases SET envelope_checkpoint = $2 WHERE lease_id = $1",
+                    &[&lease_id, &checkpoint_json],
+                )
+                .await?;
+            if n == 0 {
+                anyhow::bail!(
+                    "lease {lease_id} does not exist: cannot set envelope checkpoint (fail-closed)"
+                );
+            }
+            Ok(())
+        })
+    }
+
+    fn get_envelope_checkpoint(&self, lease_id: &str) -> anyhow::Result<Option<String>> {
+        // The stored blob (opaque text), or None for an absent lease / NULL
+        // (never-written) checkpoint — both collapse to None.
+        self.block_on(async {
+            let client = self.pool.get().await?;
+            let row = client
+                .query_opt(
+                    "SELECT envelope_checkpoint FROM leases WHERE lease_id = $1",
+                    &[&lease_id],
+                )
+                .await?;
+            Ok(row.and_then(|r| r.get::<_, Option<String>>("envelope_checkpoint")))
         })
     }
 

@@ -54,6 +54,58 @@ pub(crate) fn run_all(make: LedgerFactory) {
     try_admit_atomic_cap(make);
     remove_frees_cap_and_get(make);
     deadline_roundtrips_and_transition_preserves_it(make);
+    envelope_checkpoint_set_get_roundtrip(make);
+}
+
+/// ADR-0004 Decision-2: the durable envelope checkpoint. `set` → `get` returns
+/// the exact opaque blob; `get` on a never-set lease → `None`; `set` on an
+/// ABSENT lease → `Err` (fail-closed). The blob is opaque — the ledger stores
+/// and returns it verbatim, never parsing it. Every backend proves this.
+fn envelope_checkpoint_set_get_roundtrip(make: LedgerFactory) {
+    let t = tenant("acme");
+
+    // `get` on a never-set checkpoint → None (lease exists, no checkpoint).
+    {
+        let mut led = make();
+        led.put(held("ck-1", &t)).unwrap();
+        assert_eq!(
+            led.get_envelope_checkpoint("ck-1").unwrap(),
+            None,
+            "a lease with no checkpoint must read None"
+        );
+
+        // `set` → `get` round-trips the exact blob (opaque JSON, never parsed).
+        let blob = r#"{"tokens":{"input":1,"output":2,"cache_read":0,"cache_write":0,"total":3},"wall_ms":9,"active_ms":4,"tool_calls":5,"tool_breakdown":[],"model_turns":2,"cost_usd_micros":77}"#;
+        led.set_envelope_checkpoint("ck-1", blob).unwrap();
+        assert_eq!(
+            led.get_envelope_checkpoint("ck-1").unwrap().as_deref(),
+            Some(blob),
+            "set → get must return the exact opaque blob"
+        );
+
+        // Idempotent overwrite — the freshest summary wins.
+        let blob2 = r#"{"second":"write"}"#;
+        led.set_envelope_checkpoint("ck-1", blob2).unwrap();
+        assert_eq!(
+            led.get_envelope_checkpoint("ck-1").unwrap().as_deref(),
+            Some(blob2),
+            "a second set overwrites (freshest wins)"
+        );
+    }
+
+    // `get` on an absent lease → None; `set` on an absent lease → Err.
+    {
+        let mut led = make();
+        assert_eq!(
+            led.get_envelope_checkpoint("ghost").unwrap(),
+            None,
+            "get on an absent lease must be None"
+        );
+        assert!(
+            led.set_envelope_checkpoint("ghost", "{}").is_err(),
+            "set on an absent lease must Err (fail-closed — never checkpoint a lease we don't hold)"
+        );
+    }
 }
 
 /// ADR-0004 Decision-1: `deadline_ms` round-trips through `put`/`try_admit` →
@@ -721,6 +773,71 @@ mod pg_runs {
             after.deadline_ms,
             Some(past_deadline),
             "the terminal transition preserves the durable deadline (ADR-0004)"
+        );
+    }
+
+    /// THE §13 Item-3 CROSS-INSTANCE PROOF (ADR-0004 Decision-2, Phase 2a).
+    ///
+    /// The durable envelope checkpoint must survive INSTANCE boundaries. One
+    /// `PgLedger` handle (instance A — the instance that served the acquire and
+    /// holds the in-memory hook) writes a `Held` lease and a checkpoint blob. A
+    /// SEPARATE `PgLedger` handle (instance B — which never held the hook) then
+    /// `get_envelope_checkpoint`-reads the SAME blob. This is exactly the
+    /// hook-locality gap: instance B wins the terminal CAS but holds no hook, so
+    /// without the durable checkpoint the forensic envelope would be silently
+    /// dropped. This proves the checkpoint is read from the ledger, cross-instance.
+    #[test]
+    fn durable_checkpoint_survives_instance_boundary_cross_instance() {
+        let Some(url) = db_url() else {
+            eprintln!(
+                "durable_checkpoint_survives_instance_boundary...: \
+                 TEST_DATABASE_URL unset — skipping (expected on CI)"
+            );
+            return;
+        };
+        let _serial = PG_TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+
+        let rt = rt();
+        let nonce = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let t = tenant(&format!("xck-{nonce}"));
+        let lease_id = format!("ck-{nonce}");
+        let blob = r#"{"tokens":{"input":10,"output":20,"cache_read":0,"cache_write":0,"total":30},"wall_ms":42,"active_ms":7,"tool_calls":3,"tool_breakdown":[],"model_turns":6,"cost_usd_micros":1234}"#;
+
+        // ── Instance A: write the Held lease, then its durable checkpoint.
+        {
+            let mut led_a = connect(&rt, &url);
+            led_a.truncate_for_test().expect("truncate at start");
+            led_a
+                .put(held(&lease_id, &t))
+                .expect("instance A puts lease");
+            led_a
+                .set_envelope_checkpoint(&lease_id, blob)
+                .expect("instance A writes the durable checkpoint");
+        }
+
+        // ── Instance B: a SEPARATE handle reads the SAME checkpoint back.
+        let led_b = connect(&rt, &url);
+        assert_eq!(
+            led_b.get_envelope_checkpoint(&lease_id).unwrap().as_deref(),
+            Some(blob),
+            "instance B must read the SAME durable checkpoint instance A wrote \
+             (the cross-instance §13 Item-3 SLA — never silently dropped)"
+        );
+
+        // A `set` on an absent lease still fails closed against the real DB.
+        let mut led_b = led_b;
+        assert!(
+            led_b
+                .set_envelope_checkpoint(&format!("absent-{nonce}"), blob)
+                .is_err(),
+            "set on an absent lease must Err against Postgres too (rowcount 0)"
         );
     }
 
