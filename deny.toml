@@ -58,6 +58,14 @@ skip = [
     # 0.2 line. Same irreducibility as the crypto split above.
     { crate = "wasi@0.14.7+wasi-0.2.4", reason = "wasm-only (getrandom 0.4 ← postgres-protocol 0.6.12); never built on our targets. OWNER-GATED, WP-3-PGLEDGER." },
     { crate = "wit-bindgen@0.57.1",     reason = "wasm-only (← wasi 0.14 ← getrandom 0.4 ← postgres-protocol 0.6.12); never built on our targets. OWNER-GATED, WP-3-PGLEDGER." },
+    # WP-B (opt-in pg TLS): `tokio-postgres-rustls 0.13` pulls `x509-cert 0.2 ←
+    # spki 0.7 ← der 0.7`, which pins `const-oid 0.9.6` for channel-binding cert
+    # parsing. The workspace's OTHER copy is `const-oid 0.10.2` (← digest 0.11 ←
+    # hmac 0.13 ← postgres-protocol 0.6.12, the SCRAM stack already gated above).
+    # The two majors are pinned by upstreams we do not control (der 0.7 vs digest
+    # 0.11), so the split is irreducible without an upstream bump. Scoped to the
+    # exact 0.9.6 so any NEW/unexpected const-oid dup still trips the gate.
+    { crate = "const-oid@0.9.6",        reason = "← der 0.7 ← x509-cert 0.2 (tokio-postgres-rustls 0.13, WP-B pg TLS); other copy is const-oid 0.10 (postgres-protocol SCRAM). Irreducible upstream pin." },
 ]
 
 [sources]

@@ -44,7 +44,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::Context as _;
 use axum::Router;
 use base64::Engine as _;
-use corelink_fabric::{InMemoryLedger, LeaseLedger, TenantId, TenantPlan};
+use corelink_fabric::{InMemoryLedger, LeaseLedger, PgTlsMode, TenantId, TenantPlan};
 
 use crate::corelink_auth::{CoreLinkAuthConfig, CoreLinkTokenStore, UreqIntrospect};
 use crate::corelink_plans::CoreLinkPlanStore;
@@ -159,6 +159,11 @@ pub struct ServerConfig {
     /// Postgres connection-pool size.  From `FABRIC_LEDGER_POOL_SIZE` (default
     /// 8, must be ≥ 1).  Ignored by the `Memory` backend.
     pub ledger_pool_size: usize,
+    /// Postgres transport-security mode (WP-B).  From `FABRIC_PG_TLS` (default
+    /// [`PgTlsMode::Disable`] → plaintext `NoTls`, unchanged).  `require` selects
+    /// verify-full rustls against the bundled public-CA set.  Ignored by the
+    /// `Memory` backend.
+    pub pg_tls: PgTlsMode,
 }
 
 impl std::fmt::Debug for ServerConfig {
@@ -182,6 +187,7 @@ impl std::fmt::Debug for ServerConfig {
                 &self.database_url.as_ref().map(|_| "***REDACTED***"),
             )
             .field("ledger_pool_size", &self.ledger_pool_size)
+            .field("pg_tls", &self.pg_tls)
             .finish()
     }
 }
@@ -491,6 +497,12 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
         }
     };
 
+    // FABRIC_PG_TLS (WP-B): opt-in TLS for the pg connection. Default `disable`
+    // (plaintext NoTls, unchanged); `require` → verify-full rustls; any other
+    // value → Err. Resolved by the contracts-crate resolver so the parse rule is
+    // unit-tested in one place. Read unconditionally (cheap; ignored by Memory).
+    let pg_tls = corelink_fabric::pg_tls_mode_from_env(&get)?;
+
     Ok(ServerConfig {
         bind_addr,
         signing_key,
@@ -504,6 +516,7 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
         ledger_backend,
         database_url,
         ledger_pool_size,
+        pg_tls,
     })
 }
 
@@ -563,6 +576,7 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
                         .as_deref()
                         .expect("config_from_env guarantees Some(database_url) for the pg backend"),
                     cfg.ledger_pool_size,
+                    cfg.pg_tls,
                 ))
             })?;
             Arc::new(Mutex::new(pg))

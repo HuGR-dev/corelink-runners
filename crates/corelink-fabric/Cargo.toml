@@ -22,3 +22,10 @@ deadpool-postgres = { workspace = true }
 postgres-types    = { workspace = true }
 postgres-protocol = { workspace = true }
 tokio = { workspace = true }
+# Opt-in TLS for the Postgres connection (WP-B) — pure-Rust, hermetic. rustls
+# (ring provider) + webpki-roots (bundled Mozilla CA set) + the tokio-postgres
+# bridge. Used ONLY on the `FABRIC_PG_TLS=require` path; the default `disable`
+# path stays `NoTls`, byte-for-byte unchanged. No OpenSSL / no OS trust store.
+rustls = { workspace = true }
+webpki-roots = { workspace = true }
+tokio-postgres-rustls = { workspace = true }

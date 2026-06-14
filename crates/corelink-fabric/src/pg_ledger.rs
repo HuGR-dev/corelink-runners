@@ -34,6 +34,24 @@
 //! [`state_to_db`] / [`state_from_db`]. `u64` epoch-ms ↔ `bigint` is `as i64` /
 //! `as u64`; epoch-ms fits in an `i64` for ~292 million years, so the round-trip
 //! is lossless in practice.
+//!
+//! ## Transport security (WP-B — opt-in TLS)
+//!
+//! The DB connection is **plaintext by default** ([`PgTlsMode::Disable`] →
+//! `NoTls`), preserving the original behavior for the live private-network
+//! deployment. Setting `FABRIC_PG_TLS=require` ([`PgTlsMode::Require`]) wraps the
+//! pool in a **verify-full** rustls transport so a TLS-required managed Postgres
+//! (Neon / Supabase / RDS) can be used. "verify-full" means the full server
+//! certificate chain is validated AND the SNI hostname from the URL is checked —
+//! there is no certificate-verification bypass anywhere on this path (a TLS that
+//! does not verify is worse than no TLS).
+//!
+//! The trust anchors are **[`webpki_roots`] — the bundled Mozilla public-CA
+//! set**, NOT the OS trust store. This keeps the build hermetic and fully
+//! deterministic (no system dependency, no OpenSSL). The deliberate consequence:
+//! only servers with a certificate chaining to a **public** CA are trusted. A
+//! Postgres fronted by a **private / internal CA is out of scope for M1** —
+//! documented non-goal, not an oversight. The resolver is [`pg_tls_mode_from_env`].
 
 use corelink_runners_contracts::RunnerState;
 use deadpool_postgres::{Config, Pool, Runtime};
@@ -42,6 +60,73 @@ use tokio_postgres::NoTls;
 
 use crate::ledger::{LeaseLedger, LeaseRecord, LeaseState};
 use crate::tenant::TenantId;
+
+/// Transport-security mode for the Postgres ledger connection (WP-B).
+///
+/// Opt-in via the `FABRIC_PG_TLS` env var; **default [`PgTlsMode::Disable`]**.
+/// Resolve from the environment with [`pg_tls_mode_from_env`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PgTlsMode {
+    /// Plaintext connection (`NoTls`). The original, default behavior — the
+    /// live private-network deployment is unaffected.
+    Disable,
+    /// TLS with **verify-full** posture: the server certificate chain is
+    /// validated against the [`webpki_roots`] public-CA set and the SNI
+    /// hostname (from the connection URL) is verified. No verification bypass.
+    Require,
+}
+
+/// Resolve the [`PgTlsMode`] from an environment accessor (WP-B).
+///
+/// Unit-testable WITHOUT a live DB — pass any `Fn(&str) -> Option<String>`
+/// (mirrors `reaper_config_from_env`'s closure pattern). Reads `FABRIC_PG_TLS`:
+///
+/// - absent / empty / `"disable"` → [`PgTlsMode::Disable`] (the default —
+///   preserves today's exact `NoTls` behavior).
+/// - `"require"` → [`PgTlsMode::Require`] (verify-full rustls; public-CA only).
+/// - any other value → `Err` (fail-closed, like the other env parsers here — a
+///   typo never silently downgrades transport security).
+///
+/// The value is trimmed and lowercased before matching (secret/env mounts often
+/// append whitespace; the token vocabulary is case-insensitive).
+pub fn pg_tls_mode_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<PgTlsMode> {
+    match get("FABRIC_PG_TLS")
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+    {
+        None => Ok(PgTlsMode::Disable),
+        Some(v) => match v.as_str() {
+            "disable" => Ok(PgTlsMode::Disable),
+            "require" => Ok(PgTlsMode::Require),
+            other => anyhow::bail!(
+                "FABRIC_PG_TLS must be \"disable\" or \"require\" (got {other:?}); \
+                 fail-closed — a typo never silently downgrades transport security"
+            ),
+        },
+    }
+}
+
+/// Build a **verify-full** rustls client config for the `require` path (WP-B).
+///
+/// Trust anchors are the bundled [`webpki_roots`] Mozilla **public-CA** set
+/// (hermetic — no OS trust store, no OpenSSL). Hostname/SNI verification stays
+/// ON: this uses the safe default `with_root_certificates(..).with_no_client_auth()`
+/// builder — there is NO `dangerous()` call and NO custom certificate verifier,
+/// so a server presenting an untrusted or hostname-mismatched cert is rejected.
+/// A Postgres behind a private CA will (correctly) fail to verify — that is the
+/// documented M1 non-goal, not a bug.
+fn rustls_verify_full_config() -> rustls::ClientConfig {
+    let root_store = rustls::RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    };
+    // Pin the `ring` crypto provider explicitly so config construction does not
+    // depend on an ambient process-default provider being installed.
+    rustls::ClientConfig::builder_with_provider(rustls::crypto::ring::default_provider().into())
+        .with_safe_default_protocol_versions()
+        .expect("ring provider supports the safe-default protocol versions")
+        .with_root_certificates(root_store)
+        .with_no_client_auth()
+}
 
 /// Idempotent schema. Safe to run on every [`PgLedger::connect`] — the enum
 /// create swallows `duplicate_object`, the table/indexes are `IF NOT EXISTS`.
@@ -134,15 +219,34 @@ impl PgLedger {
     /// idempotent DDL once. Fail-closed: a connection or DDL error → `Err`
     /// (never a half-open ledger).
     ///
+    /// `tls` selects the transport (WP-B): [`PgTlsMode::Disable`] keeps the
+    /// original plaintext `NoTls` pool (default; the live private-network
+    /// deployment is unaffected), [`PgTlsMode::Require`] builds a verify-full
+    /// rustls pool against the [`webpki_roots`] public-CA set. Resolve the mode
+    /// from the environment with [`pg_tls_mode_from_env`].
+    ///
     /// Must be called from inside a Tokio `rt-multi-thread` runtime (the sync
     /// trait methods later rely on `block_in_place` on that runtime).
-    pub async fn connect(database_url: &str, pool_size: usize) -> anyhow::Result<Self> {
+    pub async fn connect(
+        database_url: &str,
+        pool_size: usize,
+        tls: PgTlsMode,
+    ) -> anyhow::Result<Self> {
         let mut cfg = Config::new();
         cfg.url = Some(database_url.to_string());
         cfg.pool = Some(deadpool_postgres::PoolConfig::new(pool_size));
-        let pool = cfg
-            .create_pool(Some(Runtime::Tokio1), NoTls)
-            .map_err(|e| anyhow::anyhow!("PgLedger: cannot build pool: {e}"))?;
+        // TLS branch (WP-B). `Disable` is the original `NoTls` path, byte-for-
+        // byte unchanged. `Require` wraps the same pool builder in a verify-full
+        // rustls connector (public-CA trust anchors, hostname verification on).
+        let pool = match tls {
+            PgTlsMode::Disable => cfg.create_pool(Some(Runtime::Tokio1), NoTls),
+            PgTlsMode::Require => {
+                let connector =
+                    tokio_postgres_rustls::MakeRustlsConnect::new(rustls_verify_full_config());
+                cfg.create_pool(Some(Runtime::Tokio1), connector)
+            }
+        }
+        .map_err(|e| anyhow::anyhow!("PgLedger: cannot build pool: {e}"))?;
 
         // Apply DDL once, fail-closed. `batch_execute` runs the whole script;
         // wrapping it keeps the enum-create + tables + indexes atomic.
@@ -393,5 +497,97 @@ impl LeaseLedger for PgLedger {
                 }
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tls_mode_tests {
+    //! `pg_tls_mode_from_env` resolution (WP-B). No live DB needed — these drive
+    //! the resolver with a closure, exactly like `reaper_config_from_env`'s tests.
+    use super::{PgTlsMode, pg_tls_mode_from_env};
+
+    /// Env accessor that returns `val` for `FABRIC_PG_TLS` and `None` otherwise.
+    fn only_pg_tls(val: Option<&str>) -> impl Fn(&str) -> Option<String> + '_ {
+        move |k: &str| {
+            if k == "FABRIC_PG_TLS" {
+                val.map(str::to_string)
+            } else {
+                None
+            }
+        }
+    }
+
+    /// Absent → the default, `Disable` (preserves today's `NoTls` behavior).
+    #[test]
+    fn absent_is_disable() {
+        let mode = pg_tls_mode_from_env(only_pg_tls(None)).unwrap();
+        assert_eq!(mode, PgTlsMode::Disable);
+    }
+
+    /// Empty string (and whitespace-only) → `Disable` (treated as absent).
+    #[test]
+    fn empty_is_disable() {
+        assert_eq!(
+            pg_tls_mode_from_env(only_pg_tls(Some(""))).unwrap(),
+            PgTlsMode::Disable
+        );
+        assert_eq!(
+            pg_tls_mode_from_env(only_pg_tls(Some("   "))).unwrap(),
+            PgTlsMode::Disable
+        );
+    }
+
+    /// `"disable"` → `Disable` (case/whitespace-insensitive).
+    #[test]
+    fn disable_is_disable() {
+        assert_eq!(
+            pg_tls_mode_from_env(only_pg_tls(Some("disable"))).unwrap(),
+            PgTlsMode::Disable
+        );
+        assert_eq!(
+            pg_tls_mode_from_env(only_pg_tls(Some("  DISABLE\n"))).unwrap(),
+            PgTlsMode::Disable
+        );
+    }
+
+    /// `"require"` → `Require` (case/whitespace-insensitive).
+    #[test]
+    fn require_is_require() {
+        assert_eq!(
+            pg_tls_mode_from_env(only_pg_tls(Some("require"))).unwrap(),
+            PgTlsMode::Require
+        );
+        assert_eq!(
+            pg_tls_mode_from_env(only_pg_tls(Some(" Require "))).unwrap(),
+            PgTlsMode::Require
+        );
+    }
+
+    /// Any other value → `Err` (fail-closed; never a silent downgrade).
+    #[test]
+    fn garbage_is_err() {
+        for bad in ["verify-full", "true", "1", "on", "tls", "prefer"] {
+            assert!(
+                pg_tls_mode_from_env(only_pg_tls(Some(bad))).is_err(),
+                "FABRIC_PG_TLS={bad:?} must be rejected (fail-closed)"
+            );
+        }
+    }
+
+    /// The `require` path builds a verify-full config without panicking (the
+    /// ring provider supports the safe-default protocol versions). This also
+    /// exercises the webpki-roots trust-anchor load.
+    #[test]
+    fn verify_full_config_builds() {
+        let cfg = super::rustls_verify_full_config();
+        // Sanity: at least one ALPN-free default; the builder did not install a
+        // dangerous (verification-bypassing) verifier — there is no API to assert
+        // that directly, so we assert the config constructed and the root set is
+        // non-empty, which is the load-bearing invariant.
+        let _ = cfg;
+        assert!(
+            !webpki_roots::TLS_SERVER_ROOTS.is_empty(),
+            "webpki-roots public-CA set must be non-empty"
+        );
     }
 }

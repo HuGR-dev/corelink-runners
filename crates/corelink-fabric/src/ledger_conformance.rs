@@ -429,7 +429,12 @@ mod pg_runs {
 
     /// Connect a `PgLedger` against `url` on `rt`.
     fn connect(rt: &tokio::runtime::Runtime, url: &str) -> PgLedger {
-        rt.block_on(async { PgLedger::connect(url, 4).await.expect("PgLedger::connect") })
+        rt.block_on(async {
+            // Local conformance DB is plaintext → Disable (the default TLS mode).
+            PgLedger::connect(url, 4, crate::pg_ledger::PgTlsMode::Disable)
+                .await
+                .expect("PgLedger::connect")
+        })
     }
 
     /// A `LedgerFactory` (`fn`, so no captures) that TRUNCATEs the shared table
