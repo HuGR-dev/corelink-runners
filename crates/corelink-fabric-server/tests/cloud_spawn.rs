@@ -457,15 +457,14 @@ async fn acquire_fails_closed_when_provision_fails() {
         "acquire with failing provision must return 503"
     );
 
-    // The ledger must have NO record for the first-minted lease id
-    // (the mint counter starts at 1 → "lease-0000000000000001").
-    // The fail-closed ordering guarantee: a spawn failure means NO Held lease
-    // is ever put into the ledger.
+    // The ledger must have NO record for the tenant. The mint is a UUID
+    // (WP-FIX-LEASE-ID-UUID, unknowable up front), so we assert via the tenant
+    // index rather than a predicted id. The fail-closed ordering guarantee:
+    // a spawn failure means NO Held lease is ever put into the ledger.
     let guard = ledger.lock().unwrap();
-    let first_id = "lease-0000000000000001";
-    let record = guard.get(first_id).unwrap_or(None);
+    let tenant = TenantId::new("acme").unwrap();
     assert!(
-        record.is_none(),
+        guard.by_tenant(&tenant).unwrap().is_empty(),
         "no lease record must exist in the ledger when provision fails (fail-closed ordering)"
     );
 }
@@ -952,15 +951,13 @@ async fn http_split_registry_exec_503() {
 
 /// H4 — HTTP regression for the WP-2 orphan-teardown fix.
 ///
-/// Pre-seed the ledger with the deterministic first mint id
-/// (`"lease-0000000000000001"`) so that `ledger.put` fails after provision.
-/// Acquire → assert 503 AND that `RecordingProvisioner` recorded a `teardown`
-/// call for that lease id (proves the box was reclaimed, not orphaned).
-/// Adds HTTP-stack coverage on top of the existing unit test in leases.rs.
+/// Script `provision` to FAIL so the post-reserve cleanup path runs. Acquire →
+/// assert 503 AND that `RecordingProvisioner` recorded a `teardown` call for the
+/// minted (`lease-<uuid>`) lease id (proves the box was reclaimed, not
+/// orphaned), AND that the reserved Pending was removed. Adds HTTP-stack
+/// coverage on top of the existing unit test in leases.rs.
 #[tokio::test]
 async fn http_orphan_teardown_on_post_provision_failure() {
-    const FIRST_MINT: &str = "lease-0000000000000001";
-
     // WP-FIX-ACQUIRE-CANCEL: the slot is now RESERVED (Pending) atomically
     // BEFORE provisioning. So the orphan-teardown guard fires on a PROVISION
     // FAILURE: the handler must tear down any partial box AND remove the
@@ -1016,17 +1013,35 @@ async fn http_orphan_teardown_on_post_provision_failure() {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     // The (partially) provisioned box MUST have been torn down — not orphaned.
+    // The mint is a UUID (WP-FIX-LEASE-ID-UUID), so the lease id is read back
+    // from the teardown call the provisioner recorded, then shape-checked.
     let calls = rec.teardown_calls();
+    assert_eq!(
+        calls.len(),
+        1,
+        "teardown must be called exactly once; calls={calls:?}"
+    );
+    let torn_id = &calls[0];
     assert!(
-        calls.contains(&FIRST_MINT.to_string()),
-        "teardown must be called for the lease whose provision failed (orphan guard); \
-         calls={calls:?}"
+        torn_id
+            .strip_prefix("lease-")
+            .is_some_and(|u| uuid::Uuid::parse_str(u).is_ok()),
+        "teardown must be called for the minted lease-<uuid> id (orphan guard); calls={calls:?}"
     );
 
-    // The reserved Pending MUST be removed — no dangling slot held.
+    // The reserved Pending MUST be removed — no dangling slot held. Assert via
+    // the tenant index (id is a UUID) AND the specific torn-down id.
+    let guard = ledger.lock().unwrap();
     assert!(
-        ledger.lock().unwrap().get(FIRST_MINT).unwrap().is_none(),
+        guard.get(torn_id).unwrap().is_none(),
         "the reserved Pending must be removed on provision failure (cap freed)"
+    );
+    assert!(
+        guard
+            .by_tenant(&TenantId::new("acme").unwrap())
+            .unwrap()
+            .is_empty(),
+        "no lease record may remain after provision-failure cleanup"
     );
 }
 

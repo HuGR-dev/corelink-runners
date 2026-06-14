@@ -8,7 +8,6 @@
 //! exactly as `paths.rs` documents.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::routing::{get, post};
@@ -185,8 +184,6 @@ pub struct AppState {
     /// reads (WP-ATT1 scope note: FC2/FC3 pending, the acquire-pinned
     /// digest IS the image identity at M1).
     pub(crate) images: Arc<Mutex<HashMap<String, String>>>,
-    /// Monotonic mint counter for lease ids.
-    lease_seq: Arc<AtomicU64>,
     /// The §13 capture-hook registry: registered at acquire, unregistered
     /// at close or reap. Shared instance: `app_full` layers this onto the
     /// HTTP Extension stack so both the handlers AND the reaper reference
@@ -239,7 +236,6 @@ impl AppState {
             trigger_dedup: Arc::new(Mutex::new(HashMap::new())),
             signer: Arc::new(FabricSigner::new_from_bytes(&DEV_FABRIC_KEY_SEED)),
             images: Arc::new(Mutex::new(HashMap::new())),
-            lease_seq: Arc::new(AtomicU64::new(1)),
             hook_registry: Arc::new(HookRegistry::default()),
             slot_meter: Arc::new(Mutex::new(SlotMeter::new())),
             // Default-off: no observability key → the occupancy route 404s.
@@ -388,14 +384,18 @@ impl AppState {
             .cloned()
     }
 
-    /// Mint a unique lease id (`lease-<16-hex>`, monotonic per process).
-    /// Uniqueness across restarts is the ledger's duplicate-`put` guard;
-    /// a globally-unique mint (UUID) can swap in later without API change.
+    /// Mint a globally-unique lease id (`lease-<uuid-v4>`).
+    ///
+    /// WP-FIX-LEASE-ID-UUID: a UUID v4 is globally unique WITHOUT coordination,
+    /// so no two instances and no pre/post-restart mint can ever collide on the
+    /// ledger PRIMARY KEY. This is what makes the persistent `PgLedger` safe for
+    /// `instances > 1`: the prior monotonic counter reset to 1 on restart (→
+    /// collision with surviving records) and started independently from 1 per
+    /// instance (→ cross-instance collision). The id is an opaque string; the
+    /// hyphenated UUID form is fine. (Cap-safety was already cross-instance via
+    /// `pg_advisory_xact_lock`; this closes the id-minting axis.)
     pub(crate) fn mint_lease_id(&self) -> String {
-        format!(
-            "lease-{:016x}",
-            self.lease_seq.fetch_add(1, Ordering::Relaxed)
-        )
+        format!("lease-{}", uuid::Uuid::new_v4())
     }
 
     /// Run the provisioner for `lease_id` / `spec` on a blocking thread and
