@@ -45,6 +45,14 @@ pub const ENVELOPE_EVENTS: &str = "/v1/leases/{lease_id}/envelope/events";
 /// (ENV1 amendment to the CF0 freeze, lead-ratified.)
 pub const ENVELOPE_META: &str = "/v1/leases/{lease_id}/envelope/meta";
 
+/// Envelope trajectory turn-feed INGEST (the WRITE side, §13.2): `POST` from
+/// the in-box agent loop forwards one `TranscriptEvent` (or an NDJSON/array
+/// batch) into the lease's §13.2 capture hook. Same lease-credential gate as
+/// the `events`/`meta` polls; in-flight forward ONLY (never persisted, §13.3 —
+/// the hook's bounded FIFO + overflow flag handle backpressure). ENV3.
+/// (ENV3 amendment to the CF0 freeze, lead-ratified.)
+pub const ENVELOPE_INGEST: &str = "/v1/leases/{lease_id}/envelope/ingest";
+
 /// The published well-known fabric attestation key: `GET` returns the
 /// fabric's ed25519 public key (standard base64) — the key every
 /// `AttestationChain.sig` and `result_binding_sig` emitted by this fabric

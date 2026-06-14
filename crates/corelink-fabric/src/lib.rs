@@ -61,5 +61,7 @@ pub use lifecycle::{BoxProbe, LeaseLifecycle};
 pub use meter::{CogsCounters, SlotEventKind, SlotOccupancyEvent};
 pub use pg_ledger::{PgLedger, PgTlsMode, pg_tls_mode_from_env};
 pub use plans::{PlanRegistry, PlanTier, plan_for};
-pub use scheduler::{FairScheduler, TenantQueues, TickReport, WorkItem};
+pub use scheduler::{
+    FairScheduler, MAX_TENANT_QUEUE_DEPTH, TenantQueues, TickReport, WAIT_RING_CAPACITY, WorkItem,
+};
 pub use tenant::{TenantId, TenantPlan};

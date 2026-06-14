@@ -598,4 +598,361 @@ mod tests {
         // v2 sig under the v1 verifier: fails too.
         assert!(!verify_execution(&att, &sig_v2, &result, &pk).unwrap());
     }
+
+    // ----------------------------------------------------------------------
+    // Property / fuzz hardening (deterministic in-test PRNG — NO new dep).
+    //
+    // A fixed-seed xorshift64* generator drives thousands of randomized cases
+    // per test so the suite is fully reproducible (the same seed → the same
+    // run, every time). These tests assert the SECURITY property
+    // (unforgeability / injectivity / domain-separation), not merely `is_ok`.
+    // ----------------------------------------------------------------------
+
+    /// Deterministic xorshift64* PRNG. Seeded by a fixed constant so every
+    /// run is byte-identical — no `rand` dependency, fully reproducible.
+    struct Rng(u64);
+
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            // Avoid the zero fixed-point of xorshift; seed is a fixed const.
+            Rng(seed ^ 0x9E37_79B9_7F4A_7C15)
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+
+        fn below(&mut self, n: u32) -> u32 {
+            if n == 0 {
+                0
+            } else {
+                (self.next_u64() % u64::from(n)) as u32
+            }
+        }
+
+        /// A short random string from a tiny alphabet — including `""`, the
+        /// boundary case that makes length-prefix framing load-bearing.
+        fn token(&mut self) -> String {
+            const ALPHABET: &[u8] = b"ab0:/-";
+            let len = self.below(6); // 0..=5, so "" is sampled often
+            (0..len)
+                .map(|_| ALPHABET[self.below(ALPHABET.len() as u32) as usize] as char)
+                .collect()
+        }
+
+        /// A random `CheckResult` with random exit and a random artifact list.
+        fn check_result(&mut self) -> CheckResult {
+            let n = self.below(4); // 0..=3 artifacts
+            let artifacts = (0..n)
+                .map(|_| Artifact {
+                    path: self.token(),
+                    digest: self.token(),
+                })
+                .collect();
+            CheckResult {
+                memo_key: self.token(),
+                tree_hash: self.token(),
+                def_digest: self.token(),
+                toolchain_digest: self.token(),
+                // Full i32 range, biased toward the forgery-relevant 0/1.
+                exit: match self.below(4) {
+                    0 => 0,
+                    1 => 1,
+                    _ => self.next_u64() as i32,
+                },
+                artifacts,
+                stdout_ref: self.token(),
+                stderr_ref: self.token(),
+                duration_ms: self.next_u64(),
+                runner_ref: self.token(),
+                produced_at: self.next_u64(),
+            }
+        }
+    }
+
+    /// Which fields a mutation touched — drives the per-version expected
+    /// verdict (v1 covers memo_key/stdout/stderr; v2 covers those PLUS
+    /// exit/artifacts).
+    #[derive(Default, Clone, Copy)]
+    struct Touched {
+        v1_field: bool,          // memo_key / stdout_ref / stderr_ref
+        exit_or_artifacts: bool, // exit / artifacts (v2-only coverage)
+    }
+
+    /// Apply one random mutation to `r`, returning what it touched and whether
+    /// it actually changed the relevant bytes (a mutation can be a no-op,
+    /// e.g. re-rolling a token to the same value or reordering a 1-elem vec).
+    fn mutate(rng: &mut Rng, r: &mut CheckResult) -> Touched {
+        let mut t = Touched::default();
+        match rng.below(8) {
+            0 => {
+                // Flip exit to a DIFFERENT value (the classic verdict forgery).
+                let old = r.exit;
+                r.exit = if old == 0 { 1 } else { 0 };
+                t.exit_or_artifacts = true;
+            }
+            1 => {
+                // Edit an existing artifact's digest (rewrite an output hash).
+                if let Some(a) = r.artifacts.first_mut() {
+                    a.digest.push('!'); // guaranteed-different (alphabet excludes '!')
+                    t.exit_or_artifacts = true;
+                }
+            }
+            2 => {
+                // Edit an existing artifact's path.
+                if let Some(a) = r.artifacts.first_mut() {
+                    a.path.push('!');
+                    t.exit_or_artifacts = true;
+                }
+            }
+            3 => {
+                // Add an artifact.
+                r.artifacts.push(Artifact {
+                    path: format!("added-{}", rng.below(1000)),
+                    digest: format!("dig-{}", rng.below(1000)),
+                });
+                t.exit_or_artifacts = true;
+            }
+            4 => {
+                // Remove an artifact.
+                if !r.artifacts.is_empty() {
+                    r.artifacts.remove(0);
+                    t.exit_or_artifacts = true;
+                }
+            }
+            5 => {
+                // Reorder artifacts (only a real change with >= 2 distinct).
+                if r.artifacts.len() >= 2 {
+                    r.artifacts.swap(0, 1);
+                    // Distinctness check: a swap of equal elements is a no-op.
+                    t.exit_or_artifacts = r.artifacts[0] != r.artifacts[1];
+                }
+            }
+            6 => {
+                // Mutate a v1-covered field (stdout/stderr/memo) — guaranteed-
+                // different via the '!' suffix.
+                match rng.below(3) {
+                    0 => r.memo_key.push('!'),
+                    1 => r.stdout_ref.push('!'),
+                    _ => r.stderr_ref.push('!'),
+                }
+                t.v1_field = true;
+            }
+            _ => {
+                // Mutate a NON-bound field (duration / runner_ref / produced_at /
+                // tree_hash / def_digest / toolchain_digest). These are bound by
+                // NEITHER binding (the bindings cover only the documented
+                // frames) — both versions must still accept. Touched stays all-
+                // false.
+                match rng.below(3) {
+                    0 => r.duration_ms = r.duration_ms.wrapping_add(1),
+                    1 => r.runner_ref.push('!'),
+                    _ => r.produced_at = r.produced_at.wrapping_add(1),
+                }
+            }
+        }
+        t
+    }
+
+    /// PROPERTY 1 — binding-v2 unforgeability (the P0 guarantee), randomized.
+    ///
+    /// Over thousands of random results × random mutations:
+    ///  - a mutation that changes exit/artifacts ⇒ v2 verify = FALSE, while the
+    ///    SAME mutation ⇒ v1 verify = TRUE (v1 is blind to the verdict — the
+    ///    documented reason v2 exists);
+    ///  - a mutation of a v1-covered field (memo/stdout/stderr) ⇒ BOTH reject;
+    ///  - an UNmutated result ⇒ BOTH accept.
+    ///
+    /// The headline assertion: NO exit/artifact mutation EVER survives v2.
+    #[test]
+    fn prop_v2_unforgeable_v1_blind() {
+        // 1024 deterministic cases: a forgery/framing bug fails on its first
+        // adversarial input, so this is ample coverage while keeping debug-mode
+        // ed25519 (slow, unoptimized) fast enough for the gate/CI.
+        const ITERS: u32 = 1_024;
+        let signer = FabricSigner::new_from_bytes(&SEED);
+        let pk = signer.public_key_b64();
+        let mut rng = Rng::new(0xC0DE_F00D_1234_5678);
+
+        let mut survived_v2 = 0u32; // must remain 0 — the security invariant
+        let mut exit_artifact_cases = 0u32;
+
+        for _ in 0..ITERS {
+            let result = rng.check_result();
+            let att = build_attestation(
+                &signer,
+                "alpine@sha256:d9e8",
+                &result.tree_hash,
+                &sample_def(),
+                &result,
+                vec!["tenant:acme".to_string()],
+            );
+            let sig_v1 = sign_result_binding(&signer, &result);
+            let sig_v2 = sign_result_binding_v2(&signer, &result);
+
+            // Unmutated: both accept.
+            assert!(
+                verify_execution(&att, &sig_v1, &result, &pk).unwrap(),
+                "honest result must pass v1"
+            );
+            assert!(
+                verify_execution_v2(&att, &sig_v2, &result, &pk).unwrap(),
+                "honest result must pass v2"
+            );
+
+            let mut forged = result.clone();
+            let touched = mutate(&mut rng, &mut forged);
+
+            let v1_ok = verify_execution(&att, &sig_v1, &forged, &pk).unwrap();
+            let v2_ok = verify_execution_v2(&att, &sig_v2, &forged, &pk).unwrap();
+
+            if touched.exit_or_artifacts {
+                exit_artifact_cases += 1;
+                // THE P0 INVARIANT: every exit/artifact change breaks v2.
+                if v2_ok {
+                    survived_v2 += 1;
+                }
+                assert!(
+                    !v2_ok,
+                    "FORGERY SURVIVED v2: an exit/artifact mutation passed the \
+                     full-outcome binding — forged={forged:?}"
+                );
+                // And v1 is documented-blind to exactly these — it still accepts.
+                assert!(
+                    v1_ok,
+                    "v1 must be blind to exit/artifacts (the documented gap v2 \
+                     closes) — forged={forged:?}"
+                );
+            } else if touched.v1_field {
+                // memo/stdout/stderr are covered by BOTH versions.
+                assert!(!v1_ok, "v1 must reject a v1-field mutation");
+                assert!(!v2_ok, "v2 must reject a v1-field mutation");
+            } else {
+                // A non-bound field (or a no-op mutation): both still accept —
+                // the bindings cover only the documented frames.
+                assert!(v1_ok, "v1 must accept a non-bound-field change");
+                assert!(v2_ok, "v2 must accept a non-bound-field change");
+            }
+        }
+
+        assert_eq!(
+            survived_v2, 0,
+            "{survived_v2} forgeries survived v2 — the P0 unforgeability \
+             guarantee is BROKEN"
+        );
+        // Sanity: the fuzz actually exercised the verdict-forgery path.
+        assert!(
+            exit_artifact_cases > 500,
+            "too few exit/artifact mutations sampled ({exit_artifact_cases}) — \
+             the fuzz did not meaningfully exercise the P0 path"
+        );
+    }
+
+    /// PROPERTY 2 — LP framing injectivity.
+    ///
+    /// `LP(s) = u32_be(len) ‖ utf8(s)`. Over thousands of random field tuples,
+    /// the concatenated framing `LP(a)‖LP(b)‖LP(c)…` is INJECTIVE: distinct
+    /// tuples never produce the same byte string (the classic length-prefix
+    /// anti-collision guarantee — e.g. `("ab","")` ≠ `("a","b")`). This
+    /// underpins memo_key AND both bindings.
+    #[test]
+    fn prop_lp_framing_is_injective() {
+        const ITERS: u32 = 10_000;
+        let mut rng = Rng::new(0x0BAD_F00D_DEAD_BEEF);
+
+        // Re-derive LP via the production `lp` over a random-arity tuple.
+        fn frame(fields: &[String]) -> Vec<u8> {
+            let mut out = Vec::new();
+            for f in fields {
+                lp(&mut out, f);
+            }
+            out
+        }
+
+        use std::collections::HashMap;
+        let mut seen: HashMap<Vec<u8>, Vec<String>> = HashMap::new();
+
+        // The canonical hand-built witness: ("ab","") and ("a","b") MUST differ.
+        assert_ne!(
+            frame(&["ab".to_string(), String::new()]),
+            frame(&["a".to_string(), "b".to_string()]),
+            "LP framing collided on the textbook ('ab','') vs ('a','b') case"
+        );
+
+        for _ in 0..ITERS {
+            // Random arity 1..=4 to also probe cross-arity collisions
+            // (e.g. boundary shifts only matter once framing is in play).
+            let arity = 1 + rng.below(4);
+            let tuple: Vec<String> = (0..arity).map(|_| rng.token()).collect();
+            let bytes = frame(&tuple);
+            match seen.get(&bytes) {
+                Some(prev) if *prev != tuple => {
+                    panic!(
+                        "LP INJECTIVITY VIOLATED: distinct tuples {prev:?} and \
+                         {tuple:?} produced the same framing"
+                    );
+                }
+                _ => {
+                    seen.entry(bytes).or_insert(tuple);
+                }
+            }
+        }
+        // Reaching here = no collision was found across ITERS iterations (the
+        // panic in the match arm is the injectivity assertion).
+    }
+
+    /// PROPERTY 4 — v1/v2 domain separation, randomized.
+    ///
+    /// Over random inputs: a v1 signature NEVER validates under the v2 verifier
+    /// and a v2 signature NEVER validates under the v1 verifier (no cross-
+    /// version confusion). The exception is the degenerate result whose v2
+    /// pre-image equals its v1 pre-image — impossible here, because v2 always
+    /// appends `i32_be(exit) ‖ u32_be(len)` (≥ 8 extra bytes), so the messages
+    /// are always distinct and ed25519 binds the message.
+    #[test]
+    fn prop_v1_v2_domain_separation() {
+        // 1024 deterministic cases: a forgery/framing bug fails on its first
+        // adversarial input, so this is ample coverage while keeping debug-mode
+        // ed25519 (slow, unoptimized) fast enough for the gate/CI.
+        const ITERS: u32 = 1_024;
+        let signer = FabricSigner::new_from_bytes(&SEED);
+        let pk = signer.public_key_b64();
+        let mut rng = Rng::new(0xFACE_B00C_1357_9BDF);
+
+        for _ in 0..ITERS {
+            let result = rng.check_result();
+            let att = build_attestation(
+                &signer,
+                "alpine@sha256:d9e8",
+                &result.tree_hash,
+                &sample_def(),
+                &result,
+                vec!["tenant:acme".to_string()],
+            );
+            let sig_v1 = sign_result_binding(&signer, &result);
+            let sig_v2 = sign_result_binding_v2(&signer, &result);
+
+            // The pre-images must themselves be distinct (the structural reason
+            // domain separation holds — v2 strictly extends v1's message).
+            let pre_v1 =
+                result_binding_preimage(&result.memo_key, &result.stdout_ref, &result.stderr_ref);
+            let pre_v2 = result_binding_preimage_v2(&result);
+            assert_ne!(pre_v1, pre_v2, "v1 and v2 pre-images must differ");
+
+            // No cross-version validation, either direction.
+            assert!(
+                !verify_execution_v2(&att, &sig_v1, &result, &pk).unwrap(),
+                "a v1 signature must NOT validate under the v2 verifier"
+            );
+            assert!(
+                !verify_execution(&att, &sig_v2, &result, &pk).unwrap(),
+                "a v2 signature must NOT validate under the v1 verifier"
+            );
+        }
+    }
 }

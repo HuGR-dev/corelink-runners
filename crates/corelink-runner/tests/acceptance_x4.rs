@@ -185,6 +185,7 @@ fn spec_literal(name: &str, image: &str) -> ContainerSpec {
         tmp_root: "/hugit/tmp".to_string(),
         no_network: true,
         path_set: vec!["src/".to_string()],
+        env: vec![],
     }
 }
 

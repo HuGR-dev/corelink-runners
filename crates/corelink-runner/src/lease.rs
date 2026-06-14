@@ -43,6 +43,15 @@ pub struct ContainerSpec {
     /// Paths the lease scopes the materialized view to (informational in C2a;
     /// fence enforcement is C5a).
     pub path_set: Vec<String>,
+    /// Additional environment variables injected into the box at provision
+    /// (`(name, value)` pairs, applied in order). EMPTY by default — the
+    /// hermetic on-box path (`--network none` Docker) injects nothing, and
+    /// `from_lease` never populates it. The cloud provision path (Northflank)
+    /// uses it to deliver the §13.2 envelope ingest URL + the lease credential
+    /// so the in-box agent loop can reach the fabric's trajectory turn-feed
+    /// endpoint (`CORELINK_ENVELOPE_INGEST_URL`). Never carries box secrets
+    /// beyond that brokered credential.
+    pub env: Vec<(String, String)>,
 }
 
 impl ContainerSpec {
@@ -84,6 +93,10 @@ impl ContainerSpec {
             tmp_root: lease.tmp_root.clone(),
             no_network: true,
             path_set: lease.path_set.clone(),
+            // No env at spec-build time: the cloud provision path adds the
+            // §13.2 envelope ingest vars additively after `from_lease` (the
+            // hermetic Docker path stays env-free).
+            env: Vec::new(),
         })
     }
 }

@@ -274,4 +274,142 @@ mod tests {
                 .is_err()
         );
     }
+
+    // ----------------------------------------------------------------------
+    // Property hardening (deterministic in-test PRNG — NO new dependency).
+    //
+    // A fixed-seed xorshift64* generator drives thousands of randomized axis
+    // triples so the suite is fully reproducible. The test asserts the SECURITY
+    // property (formula equivalence against an INDEPENDENT reference, plus
+    // injectivity of distinct triples → distinct keys), not just `is_ok`.
+    // ----------------------------------------------------------------------
+
+    /// Deterministic xorshift64* PRNG, fixed-seed (reproducible, no dep).
+    struct Rng(u64);
+
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            Rng(seed ^ 0x9E37_79B9_7F4A_7C15)
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+
+        fn below(&mut self, n: u32) -> u32 {
+            if n == 0 {
+                0
+            } else {
+                (self.next_u64() % u64::from(n)) as u32
+            }
+        }
+
+        /// A short token from a tiny alphabet, INCLUDING `""` — the boundary
+        /// case that makes length-prefix framing load-bearing for injectivity.
+        fn token(&mut self) -> String {
+            const ALPHABET: &[u8] = b"ab0:/-";
+            let len = self.below(6); // 0..=5; "" sampled often
+            (0..len)
+                .map(|_| ALPHABET[self.below(ALPHABET.len() as u32) as usize] as char)
+                .collect()
+        }
+    }
+
+    /// An INDEPENDENT reference memo-key, re-derived from first principles via
+    /// a DIFFERENT code path than `compute_memo_key`: build the full LP
+    /// pre-image as one `Vec<u8>` (rather than streaming into the hasher), hash
+    /// it once, and hex-encode with a different formatter. If this agrees with
+    /// the production formula over thousands of cases, the production formula
+    /// is the documented `lower_hex(SHA-256(LP(tree)‖LP(def)‖LP(toolchain)))`.
+    fn reference_memo_key(tree: &str, def: &str, toolchain: &str) -> String {
+        fn lp_into(out: &mut Vec<u8>, s: &str) {
+            let len = u32::try_from(s.len()).expect("axis exceeds u32::MAX");
+            out.extend_from_slice(&len.to_be_bytes());
+            out.extend_from_slice(s.as_bytes());
+        }
+        let mut pre = Vec::new();
+        lp_into(&mut pre, tree);
+        lp_into(&mut pre, def);
+        lp_into(&mut pre, toolchain);
+        let digest = Sha256::digest(&pre);
+        // Different hex path: a lookup table, not `write!("{:02x}")`.
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut s = String::with_capacity(64);
+        for b in digest {
+            s.push(HEX[(b >> 4) as usize] as char);
+            s.push(HEX[(b & 0x0f) as usize] as char);
+        }
+        s
+    }
+
+    /// PROPERTY 3 — memo_key formula equivalence + injectivity, randomized.
+    ///
+    /// Over thousands of random axis triples:
+    ///  - the production `compute_memo_key` equals the INDEPENDENT
+    ///    `reference_memo_key` (re-derived via a different code path) — proving
+    ///    the production formula is exactly
+    ///    `lower_hex(SHA-256(LP(tree)‖LP(def)‖LP(toolchain)))`;
+    ///  - the output is always 64 lowercase-hex chars;
+    ///  - distinct triples yield distinct keys (collision-resistance modulo
+    ///    SHA-256) — no LP boundary-shift collision (`("ab","","cd")` vs
+    ///    `("a","b","cd")`) ever slips through.
+    #[test]
+    fn prop_memo_key_equiv_and_injective() {
+        const ITERS: u32 = 10_000;
+        let mut rng = Rng::new(0x5EED_1234_ABCD_0F0F);
+
+        // The textbook boundary-shift witness must already differ.
+        assert_ne!(
+            compute_memo_key("ab", "", "cd"),
+            compute_memo_key("a", "b", "cd"),
+            "LP boundary-shift must change the key"
+        );
+
+        use std::collections::HashMap;
+        let mut seen: HashMap<String, (String, String, String)> = HashMap::new();
+
+        for _ in 0..ITERS {
+            let tree = rng.token();
+            let def = rng.token();
+            let tc = rng.token();
+
+            let key = compute_memo_key(&tree, &def, &tc);
+
+            // Equivalence: production == independent reference.
+            assert_eq!(
+                key,
+                reference_memo_key(&tree, &def, &tc),
+                "compute_memo_key diverged from the first-principles reference \
+                 for ({tree:?},{def:?},{tc:?})"
+            );
+            // Shape: 64 lowercase-hex chars.
+            assert_eq!(key.len(), 64, "memo_key must be 64 hex chars");
+            assert!(
+                key.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                "memo_key must be lowercase hex"
+            );
+
+            // Injectivity: distinct triples → distinct keys.
+            let triple = (tree, def, tc);
+            match seen.get(&key) {
+                Some(prev) if *prev != triple => {
+                    panic!(
+                        "MEMO_KEY COLLISION on distinct triples {prev:?} and \
+                         {triple:?} — LP framing failed to separate the axes"
+                    );
+                }
+                _ => {
+                    seen.entry(key).or_insert(triple);
+                }
+            }
+        }
+        // Reaching here = no collision across ITERS iterations (the panic in the
+        // match arm is the memo_key injectivity assertion).
+    }
 }

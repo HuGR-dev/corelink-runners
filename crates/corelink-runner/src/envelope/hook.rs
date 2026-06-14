@@ -334,6 +334,26 @@ impl CaptureHook {
         })
     }
 
+    /// Non-destructive projection of the hook's current metrics collector to
+    /// the §13.1 [`IntentMetrics`] shape — the **turn-boundary checkpoint**
+    /// read (ADR-0004 Phase 2b, Decision-3a per-turn cadence).
+    ///
+    /// Delegates to [`MetricsCollector::snapshot`](super::collector::MetricsCollector::snapshot):
+    /// it reads the accumulated totals as they currently stand WITHOUT
+    /// consuming or closing the collector (the once-only `finalize` latch is
+    /// untouched), so a later normal/abnormal close still finalizes exactly
+    /// once. `now` is the projection instant for `wall_ms`. This is an
+    /// INTERNAL read of the *current totals*; the frozen `IntentMetrics` wire
+    /// shape (sha256 `2d8d2215…`) is unchanged.
+    #[must_use]
+    pub fn snapshot_metrics(
+        &self,
+        now: std::time::Instant,
+        price: &super::event::PriceCard,
+    ) -> corelink_runners_contracts::IntentMetrics {
+        self.shared.lock().collector.snapshot(now, price)
+    }
+
     /// Shared-state handle for the close state machine (crate-internal seam
     /// to [`super::close::JobClose`]).
     pub(super) fn shared(&self) -> Arc<Shared> {

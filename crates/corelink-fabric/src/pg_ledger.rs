@@ -470,6 +470,28 @@ impl LeaseLedger for PgLedger {
         })
     }
 
+    fn remove_if_pending(&mut self, lease_id: &str) -> anyhow::Result<bool> {
+        // GUARDED admission-rollback for the stale-Pending sweep: the predicate
+        // `state = 'pending'` is evaluated ATOMICALLY inside the DELETE, so a
+        // lease that raced `Pending → Held` in the sweep window (between the
+        // snapshot and this reclaim) is NOT deleted — the rowcount is 0 and the
+        // sweep no-ops, leaving the now-`Held` live lease untouched. `Ok(true)`
+        // iff a still-`Pending` row was removed; `Ok(false)` if absent OR no
+        // longer Pending. This is the DB-atomic counterpart of the default
+        // check-then-remove (the InMemory/File guard holds the same lock the
+        // sweep does; the DB holds it in the single statement).
+        self.block_on(async {
+            let client = self.pool.get().await?;
+            let n = client
+                .execute(
+                    "DELETE FROM leases WHERE lease_id = $1 AND state = 'pending'",
+                    &[&lease_id],
+                )
+                .await?;
+            Ok(n == 1)
+        })
+    }
+
     fn by_tenant(&self, t: &TenantId) -> anyhow::Result<Vec<LeaseRecord>> {
         self.block_on(async {
             let client = self.pool.get().await?;

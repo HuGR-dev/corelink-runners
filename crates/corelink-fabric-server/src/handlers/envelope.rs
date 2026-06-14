@@ -29,16 +29,18 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use axum::extract::Path;
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use corelink_fabric::TenantId;
 use corelink_fabric_api::ApiError;
-use corelink_runner::envelope::{CaptureHook, PriceCard, TurnMeta};
-use serde::Serialize;
+use corelink_runner::envelope::{CaptureHook, PriceCard, TranscriptEvent, TurnMeta, TurnUsage};
+use serde::{Deserialize, Serialize};
 
+use crate::AppState;
 use crate::auth::error_response;
 
 /// One registered hook: the owning tenant, the live [`CaptureHook`] handle,
@@ -142,6 +144,22 @@ impl HookRegistry {
         (entry.tenant == *tenant).then(|| (entry.hook.clone(), entry.price))
     }
 
+    /// Tenant-matched INGEST lookup (ENV3): the hook handle, its subscribe
+    /// credential, AND the fabric-side price card (needed for the turn-boundary
+    /// snapshot's `cost_usd_micros` projection). Same no-existence-oracle rule
+    /// as [`lookup`](Self::lookup): a miss and a cross-tenant hit are
+    /// indistinguishable (`None` both ways).
+    fn ingest_handle(
+        &self,
+        lease_id: &str,
+        tenant: &TenantId,
+    ) -> Option<(CaptureHook, String, PriceCard)> {
+        let entries = self.lock();
+        let entry = entries.get(lease_id)?;
+        (entry.tenant == *tenant)
+            .then(|| (entry.hook.clone(), entry.credential.clone(), entry.price))
+    }
+
     /// Trusted (composition-root) close-path lookup by lease id alone —
     /// the abnormal path: the lifecycle sweeps already hold the ledger
     /// record, so there is no tenant boundary to re-prove here. Never
@@ -240,6 +258,234 @@ pub async fn poll_meta(
             Json(MetaBatch { meta }).into_response()
         }
         Err((err, message)) => error_response(err, message),
+    }
+}
+
+/// Wire shape of one ingested transcript event (§13.2 turn-feed WRITE side,
+/// ENV3). The in-box agent loop POSTs one of these per event, or an array /
+/// NDJSON batch of them. `bytes_b64` is the raw transcript bytes (standard
+/// base64); they are forwarded VERBATIM into the hook — never scrubbed,
+/// inspected, or persisted (§13.3 in-flight forwarding only).
+#[derive(Deserialize)]
+struct IngestEvent {
+    /// Event discriminator: `model_turn` | `tool_call` | `tool_result` |
+    /// `prompt`.
+    kind: String,
+    /// Raw transcript bytes, standard-alphabet base64.
+    bytes_b64: String,
+    /// Tool name (required for `tool_call` / `tool_result`).
+    #[serde(default)]
+    tool: Option<String>,
+    /// Per-turn usage (only meaningful for `model_turn`; `null`/absent = the
+    /// API reported no usage — the collector accumulates nothing, never a
+    /// fabricated zero).
+    #[serde(default)]
+    usage: Option<IngestUsage>,
+    /// Model/tool busy span in ms (`model_turn` / `tool_call`); defaults to 0.
+    #[serde(default)]
+    busy_ms: u64,
+}
+
+/// Wire mirror of [`TurnUsage`] — the four §13.1 token classes (no `total`;
+/// totals are derived at finalize, never supplied).
+#[derive(Deserialize)]
+struct IngestUsage {
+    /// Input (non-cached) tokens.
+    input: u64,
+    /// Output tokens.
+    output: u64,
+    /// Tokens read from prompt cache.
+    cache_read: u64,
+    /// Tokens written to prompt cache.
+    cache_write: u64,
+}
+
+/// The POST body: ONE event, or a batch (JSON array) of events. An NDJSON
+/// body (one JSON object per line) is normalized to the array form by the
+/// handler before deserialization, so all three carriers map here.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum IngestBody {
+    /// A single event.
+    One(Box<IngestEvent>),
+    /// A batch of events (JSON array).
+    Many(Vec<IngestEvent>),
+}
+
+impl IngestBody {
+    /// Flatten to the ordered list of events.
+    fn into_events(self) -> Vec<IngestEvent> {
+        match self {
+            IngestBody::One(e) => vec![*e],
+            IngestBody::Many(v) => v,
+        }
+    }
+}
+
+impl IngestEvent {
+    /// Map this wire event to the mechanism's [`TranscriptEvent`], decoding
+    /// `bytes_b64`. Returns `Err` on an unknown `kind`, malformed base64, or a
+    /// `tool_call`/`tool_result` missing its `tool` — a malformed event is
+    /// rejected (400), never silently dropped.
+    fn into_transcript_event(self) -> Result<TranscriptEvent, &'static str> {
+        let bytes = BASE64
+            .decode(self.bytes_b64.as_bytes())
+            .map_err(|_| "bytes_b64 is not valid base64")?;
+        let usage = self.usage.map(|u| TurnUsage {
+            input: u.input,
+            output: u.output,
+            cache_read: u.cache_read,
+            cache_write: u.cache_write,
+        });
+        match self.kind.as_str() {
+            "model_turn" => Ok(TranscriptEvent::ModelTurn {
+                bytes,
+                usage,
+                busy_ms: self.busy_ms,
+            }),
+            "tool_call" => Ok(TranscriptEvent::ToolCall {
+                tool: self.tool.ok_or("tool_call requires `tool`")?,
+                bytes,
+                busy_ms: self.busy_ms,
+            }),
+            "tool_result" => Ok(TranscriptEvent::ToolResult {
+                tool: self.tool.ok_or("tool_result requires `tool`")?,
+                bytes,
+            }),
+            "prompt" => Ok(TranscriptEvent::SystemPrompt { bytes }),
+            _ => Err("unknown event kind"),
+        }
+    }
+}
+
+/// `POST` [`ENVELOPE_INGEST`](corelink_fabric_api::paths::ENVELOPE_INGEST):
+/// the §13.2 trajectory turn-feed WRITE side (ENV3). The in-box agent loop
+/// forwards its transcript events here; the handler writes each into the
+/// lease's capture hook (in-flight forward ONLY — never persisted, §13.3).
+///
+/// Auth + scope mirror the polls EXACTLY: a tenant-matched registry miss and a
+/// cross-tenant hit are the SAME 404 (no existence oracle), and the hook's own
+/// credential seam is then exercised — a wrong/missing credential on a
+/// registered hook fails closed (503), never accepts.
+///
+/// On each ingested `model_turn` (the turn boundary), a NON-destructive
+/// snapshot of the collector's current `IntentMetrics` is serialized and
+/// written to the lease's durable envelope checkpoint (ADR-0004 Phase 2b) so
+/// an abnormal cross-instance reap can still emit the accumulated partial. The
+/// checkpoint write is BEST-EFFORT: a failure is logged, never breaks ingest.
+pub async fn ingest(
+    State(state): State<AppState>,
+    Extension(registry): Extension<Arc<HookRegistry>>,
+    Extension(tenant): Extension<TenantId>,
+    Path(lease_id): Path<String>,
+    body: String,
+) -> Response {
+    // ── Scope: tenant-matched hook lookup. Miss == cross-tenant == 404 (no
+    // existence oracle), identical to the poll endpoints.
+    let Some((hook, credential, price)) = registry.ingest_handle(&lease_id, &tenant) else {
+        return error_response(ApiError::NotFound, "lease not found");
+    };
+    // ── Auth: exercise the hook's OWN credential seam. A registered hook that
+    // refuses its registered credential is an internal inconsistency — answered
+    // fail-closed (503), never open (same posture as `subscribe`).
+    if hook.subscribe(&credential).is_err() {
+        return error_response(
+            ApiError::FailClosed,
+            "envelope hook refused the registered credential; failing closed",
+        );
+    }
+
+    // ── Parse: accept ONE object, a JSON array, OR an NDJSON body (one JSON
+    // object per line). NDJSON is normalized to the array form first.
+    let parsed: Result<IngestBody, _> = serde_json::from_str(&body);
+    let events = match parsed {
+        Ok(b) => b.into_events(),
+        Err(_) => match parse_ndjson(&body) {
+            Ok(evs) => evs,
+            Err(msg) => return error_response(ApiError::Invalid, msg),
+        },
+    };
+    if events.is_empty() {
+        return error_response(ApiError::Invalid, "no events in ingest body");
+    }
+
+    // ── Forward each event into the hook, in order. A model_turn additionally
+    // triggers the durable checkpoint write (Phase 2b).
+    let mut wrote_turn = false;
+    for ev in events {
+        let te = match ev.into_transcript_event() {
+            Ok(te) => te,
+            Err(msg) => return error_response(ApiError::Invalid, msg),
+        };
+        let is_turn = matches!(te, TranscriptEvent::ModelTurn { .. });
+        if let Err(e) = hook.write(te) {
+            // The hook refused (closed / not-yet-open): the lease is no longer
+            // accepting events. Fail-closed rather than silently dropping.
+            return error_response(
+                ApiError::FailClosed,
+                &format!("capture hook refused the event: {e:#}"),
+            );
+        }
+        wrote_turn |= is_turn;
+    }
+
+    // ── Phase 2b — per-turn durable checkpoint (ADR-0004 Decision-3a). After
+    // the writes, if any model_turn landed, project the collector's CURRENT
+    // accumulated metrics (NON-destructive snapshot — the finalize latch is
+    // untouched) and persist them to the lease row. Best-effort: a failure is
+    // logged, never breaks ingest.
+    if wrote_turn {
+        checkpoint_turn(&state, &lease_id, &hook, &price);
+    }
+
+    StatusCode::OK.into_response()
+}
+
+/// Parse an NDJSON body (one JSON [`IngestEvent`] per non-blank line) to an
+/// ordered event list. Used only when the body is neither a single JSON object
+/// nor a JSON array.
+fn parse_ndjson(body: &str) -> Result<Vec<IngestEvent>, &'static str> {
+    let mut out = Vec::new();
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let ev: IngestEvent =
+            serde_json::from_str(line).map_err(|_| "malformed NDJSON event line")?;
+        out.push(ev);
+    }
+    if out.is_empty() {
+        return Err("ingest body is not a valid event, array, or NDJSON batch");
+    }
+    Ok(out)
+}
+
+/// Write the per-turn durable envelope checkpoint (ADR-0004 Phase 2b).
+///
+/// Takes a NON-destructive snapshot of the hook's collector (`now` = the
+/// fabric clock), serializes the resulting frozen `IntentMetrics` to JSON, and
+/// stores it on the lease row via `LeaseLedger::set_envelope_checkpoint`. The
+/// blob shape is EXACTLY what the reaper's tier-2 read deserializes back
+/// (`IntentMetrics`), so the cross-instance abnormal flush emits the last
+/// checkpointed partial. BEST-EFFORT: every failure path here only logs.
+fn checkpoint_turn(state: &AppState, lease_id: &str, hook: &CaptureHook, price: &PriceCard) {
+    let metrics = hook.snapshot_metrics(std::time::Instant::now(), price);
+    let json = match serde_json::to_string(&metrics) {
+        Ok(j) => j,
+        Err(e) => {
+            eprintln!("envelope-ingest: lease {lease_id} checkpoint serialize failed: {e:#}");
+            return;
+        }
+    };
+    let mut ledger = match state.ledger.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    if let Err(e) = ledger.set_envelope_checkpoint(lease_id, &json) {
+        // A checkpoint write failure (e.g. the lease already terminalized) must
+        // NOT break the in-flight forward — it only costs a forensic refresh.
+        eprintln!("envelope-ingest: lease {lease_id} checkpoint write failed: {e:#}");
     }
 }
 

@@ -307,6 +307,12 @@ fn paths_are_v1_stable() {
         "/v1/leases/{lease_id}/envelope/events"
     );
     assert_eq!(paths::ENVELOPE_META, "/v1/leases/{lease_id}/envelope/meta");
+    // ENV3 amendment to the CF0 freeze (lead-ratified): the §13.2 trajectory
+    // turn-feed INGEST (the write side). Frozen from here on like the rest of /v1.
+    assert_eq!(
+        paths::ENVELOPE_INGEST,
+        "/v1/leases/{lease_id}/envelope/ingest"
+    );
     // ENV2 amendment to the CF0 freeze (lead-ratified): the §13.2 item-3
     // job-close path. Frozen from here on like the rest of /v1.
     assert_eq!(paths::LEASE_CLOSE, "/v1/leases/{lease_id}/close");

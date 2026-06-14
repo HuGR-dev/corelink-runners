@@ -152,6 +152,24 @@ enum SpawnEntry {
     Failed,
 }
 
+/// Default ceiling on the number of live dedup slots before the oldest are
+/// reclaimed. The dedup map is a short-lived coalescing cache, not a registry,
+/// so a small bound is ample; without it the map grows unbounded as distinct
+/// `workspace_id`s arrive and `Failed`/expired slots are never reclaimed
+/// (memory growth / DoS). See [`DedupSpawner::with_max_entries`].
+pub const DEFAULT_MAX_DEDUP_ENTRIES: usize = 1024;
+
+/// A teardown hook: tears down the container backing an evicted slot.
+///
+/// `evict` removes the in-memory slot, but the *container* it named still runs
+/// on the box — clearing the slot without tearing the box down leaks it. The
+/// hook is the seam through which `evict` reaches the box transport
+/// ([`teardown`](crate::teardown::teardown) needs a [`BoxExec`] the spawner does
+/// not itself hold). Production wiring installs a real hook via
+/// [`DedupSpawner::with_teardown`]; it returns `Err` to surface a teardown
+/// failure (a leaked box is never swallowed silently).
+pub type TeardownHook = Arc<dyn Fn(&RunningContainer) -> Result<()> + Send + Sync>;
+
 /// Deduplicating workspace spawner.
 ///
 /// Concurrent identical spawns (same `workspace_id`) are coalesced to ONE
@@ -161,12 +179,24 @@ enum SpawnEntry {
 /// only to *claim/observe* a slot, never across the `docker run` itself, so a
 /// spawn for workspace A never serializes an unrelated spawn for workspace B.
 ///
+/// # Identity binding (isolation — fail-closed)
+/// The dedup identity is bound to `lease.lease_id`: every `spawn_or_join`
+/// asserts that the presented `workspace_id` names the SAME container as the
+/// lease (`c9_container_name(workspace_id) == c9_container_name(&lease.lease_id)`)
+/// and bails otherwise, and on a cache HIT it re-verifies that the presenting
+/// lease+fence match the cached handle's before handing the container back.
+/// This closes the cross-lease / cross-tenant hole: caller B can never receive
+/// caller A's container by presenting a different lease under a colliding
+/// `workspace_id`.
+///
 /// A cached handle is liveness-probed before reuse: if its container has since
 /// died/been reaped, the corpse is discarded and a fresh spawn is performed
 /// (no dead-container handle is ever handed back).
 ///
 /// After the window expires the entry is evicted so future spawns create a
-/// fresh container.
+/// fresh container. The slot map is bounded ([`DedupSpawner::with_max_entries`])
+/// and swept of expired/`Failed` slots so it cannot grow without bound.
+#[derive(Clone)]
 pub struct DedupSpawner {
     /// In-progress/recent spawns, keyed by workspace id, guarded for the
     /// claim/observe critical section only (never across a spawn).
@@ -175,10 +205,17 @@ pub struct DedupSpawner {
     ready: Arc<Condvar>,
     /// How long a completed spawn is held for deduplication.
     dedup_window: Duration,
+    /// Hard cap on live slots; the oldest are evicted past this. Bounds memory.
+    max_entries: usize,
+    /// Optional container-teardown hook used by [`evict`](Self::evict) so a
+    /// cleared slot does not leak its backing container. `None` = no box wired
+    /// (the slot is still removed; nothing to tear down in-process).
+    teardown: Option<TeardownHook>,
 }
 
 impl DedupSpawner {
-    /// Construct with a deduplication window.
+    /// Construct with a deduplication window and the default entry cap
+    /// ([`DEFAULT_MAX_DEDUP_ENTRIES`]).
     ///
     /// A window of at least 1s is enough to coalesce any realistic burst of
     /// concurrent spawns for the same workspace. The acceptance test uses a
@@ -188,7 +225,30 @@ impl DedupSpawner {
             entries: Arc::new(Mutex::new(HashMap::new())),
             ready: Arc::new(Condvar::new()),
             dedup_window,
+            max_entries: DEFAULT_MAX_DEDUP_ENTRIES,
+            teardown: None,
         }
+    }
+
+    /// Override the maximum number of live dedup slots (cap). Builder-style.
+    ///
+    /// Past this cap, claiming a fresh slot first sweeps expired/`Failed` slots
+    /// and, if still at the cap, evicts the oldest `Ready` slot — so the map is
+    /// bounded regardless of how many distinct `workspace_id`s arrive. A cap of
+    /// 0 is clamped to 1 (the in-flight claim must always have room).
+    #[must_use]
+    pub fn with_max_entries(mut self, max_entries: usize) -> Self {
+        self.max_entries = max_entries.max(1);
+        self
+    }
+
+    /// Install the container-teardown hook used by [`evict`](Self::evict).
+    /// Builder-style. Without it, `evict` removes the slot but has no box to
+    /// tear the container down on (in-process tests / no transport wired).
+    #[must_use]
+    pub fn with_teardown(mut self, teardown: TeardownHook) -> Self {
+        self.teardown = Some(teardown);
+        self
     }
 
     /// Spawn or return an existing workspace for `workspace_id`.
@@ -213,13 +273,48 @@ impl DedupSpawner {
     where
         E: Engine,
     {
+        // ── Identity binding (fail-CLOSED) ────────────────────────────────────
+        // The materialization names the container ONLY from `lease.lease_id`
+        // (spawn_workspace → c9_container_name(&lease.lease_id)); the caller-
+        // supplied `workspace_id` never names the box. So the dedup slot MUST be
+        // keyed by the lease's container identity, not by `workspace_id` — else
+        // two callers presenting different leases under a colliding
+        // `workspace_id` would share one container (cross-lease / cross-tenant
+        // break), and two callers presenting one lease under different
+        // `workspace_id`s would silently spawn onto one name. Keying on the
+        // lease's container name binds the slot identity to the box identity:
+        // same lease ⇒ same key ⇒ same container; different lease ⇒ different
+        // key ⇒ never shared. (`workspace_id` remains the public param for
+        // callers, but is NOT the trust boundary.)
+        let key = c9_container_name(&lease.lease_id);
+        let key = key.as_str();
+
         // ── Phase 1: claim or observe the slot (lock held briefly) ────────────
         {
             // poison recovery: the entries map is internally consistent
             let mut map = self.entries.lock().unwrap_or_else(|p| p.into_inner());
+            // Reclaim dead weight before we (possibly) add a fresh slot so the
+            // map cannot grow without bound across distinct leases.
+            self.reap_locked(&mut map, key);
             loop {
-                match map.get(workspace_id) {
+                match map.get(key) {
                     Some(SpawnEntry::Ready { handle, at }) if at.elapsed() < self.dedup_window => {
+                        // Cache HIT. Before reuse, re-verify the presenting lease
+                        // matches the cached handle's: identical lease (lease_id +
+                        // principal_chain + the rest) AND identical fence. The key
+                        // already pins lease_id; this ALSO catches a forged
+                        // principal_chain / fence presented under the same
+                        // lease_id — never hand one lease's container to another;
+                        // fail CLOSED.
+                        if handle.lease != *lease || handle.fence != *fence {
+                            return Err(anyhow!(
+                                "dedup cache reuse refused for lease {:?} (workspace_id \
+                                 {workspace_id:?}): presenting lease/fence does not match the \
+                                 cached handle's — refusing to share a container across leases \
+                                 (fail CLOSED)",
+                                lease.lease_id
+                            ));
+                        }
                         // Liveness-probe the cached container BEFORE reuse so a
                         // dead/reaped corpse is never handed back.
                         let handle = (**handle).clone();
@@ -231,8 +326,8 @@ impl DedupSpawner {
                                 // fresh claim below.
                                 let mut m = self.entries.lock().unwrap_or_else(|p| p.into_inner());
                                 // Only remove if it is still the same dead entry.
-                                if matches!(m.get(workspace_id), Some(SpawnEntry::Ready { .. })) {
-                                    m.remove(workspace_id);
+                                if matches!(m.get(key), Some(SpawnEntry::Ready { .. })) {
+                                    m.remove(key);
                                 }
                                 map = m;
                                 continue;
@@ -248,22 +343,22 @@ impl DedupSpawner {
                     }
                     Some(SpawnEntry::Ready { .. }) => {
                         // Stale: evict and claim fresh.
-                        map.remove(workspace_id);
-                        map.insert(workspace_id.to_string(), SpawnEntry::Pending);
+                        map.remove(key);
+                        map.insert(key.to_string(), SpawnEntry::Pending);
                         break;
                     }
                     Some(SpawnEntry::Pending) => {
-                        // Another thread is materializing this id — wait for it.
+                        // Another thread is materializing this lease — wait for it.
                         map = self.ready.wait(map).unwrap_or_else(|p| p.into_inner());
                         continue;
                     }
                     Some(SpawnEntry::Failed) => {
                         // A prior attempt failed; take over the claim and retry.
-                        map.insert(workspace_id.to_string(), SpawnEntry::Pending);
+                        map.insert(key.to_string(), SpawnEntry::Pending);
                         break;
                     }
                     None => {
-                        map.insert(workspace_id.to_string(), SpawnEntry::Pending);
+                        map.insert(key.to_string(), SpawnEntry::Pending);
                         break;
                     }
                 }
@@ -278,7 +373,7 @@ impl DedupSpawner {
         match result {
             Ok(handle) => {
                 map.insert(
-                    workspace_id.to_string(),
+                    key.to_string(),
                     SpawnEntry::Ready {
                         handle: Box::new(handle.clone()),
                         at: Instant::now(),
@@ -288,20 +383,114 @@ impl DedupSpawner {
                 Ok(handle)
             }
             Err(e) => {
-                map.insert(workspace_id.to_string(), SpawnEntry::Failed);
+                map.insert(key.to_string(), SpawnEntry::Failed);
                 self.ready.notify_all();
                 Err(anyhow!("workspace spawn for {workspace_id:?} failed: {e}"))
             }
         }
     }
 
-    /// Evict the entry for `workspace_id` (e.g. after teardown).
+    /// Reclaim dead weight from the slot map (called under the lock).
+    ///
+    /// 1. Drops every `Failed` slot and every expired `Ready` slot (past the
+    ///    dedup window) — these are never reused, so they are pure leak.
+    /// 2. If the map is STILL at/over the cap (excluding `keep`, the id we are
+    ///    about to claim), evicts the oldest `Ready` slots until it fits.
+    ///
+    /// `keep` is never reaped: it is the slot the caller is mid-claim on, so
+    /// removing it here would lose a `Pending` marker other waiters rely on.
+    fn reap_locked(&self, map: &mut HashMap<String, SpawnEntry>, keep: &str) {
+        // (1) sweep Failed + expired Ready.
+        map.retain(|id, e| {
+            id == keep
+                || match e {
+                    SpawnEntry::Failed => false,
+                    SpawnEntry::Ready { at, .. } => at.elapsed() < self.dedup_window,
+                    SpawnEntry::Pending => true,
+                }
+        });
+
+        // (2) enforce the cap by evicting the oldest Ready slots.
+        while map.len() >= self.max_entries {
+            // Find the oldest Ready slot that is not `keep`.
+            let oldest = map
+                .iter()
+                .filter_map(|(id, e)| match e {
+                    SpawnEntry::Ready { at, .. } if id != keep => Some((id.clone(), *at)),
+                    _ => None,
+                })
+                .min_by_key(|(_, at)| *at)
+                .map(|(id, _)| id);
+            match oldest {
+                Some(id) => {
+                    map.remove(&id);
+                }
+                // Nothing evictable left (all remaining are Pending or `keep`);
+                // never block an in-flight claim for the sake of the cap.
+                None => break,
+            }
+        }
+    }
+
+    /// Evict the entry for `workspace_id` and tear down its backing container,
+    /// loudly reporting (but not propagating) any teardown failure.
+    ///
+    /// Thin compatibility wrapper over [`evict_checked`](Self::evict_checked):
+    /// a teardown failure is surfaced to stderr (it must NOT vanish — a leaked
+    /// box is a real cost) rather than returned. Callers that need to *act* on
+    /// the failure (retry, alert, fail the reclaim) should call
+    /// [`evict_checked`](Self::evict_checked) directly.
     pub fn evict(&self, workspace_id: &str) {
-        self.entries
+        if let Err(e) = self.evict_checked(workspace_id) {
+            // Mirror the concurrency-reclaim idiom: a teardown failure is a
+            // potential box leak and is NEVER swallowed silently.
+            eprintln!("ws::DedupSpawner::evict: teardown failure (possible box leak): {e:#}");
+        }
+    }
+
+    /// Evict the entry for `workspace_id` and tear down its backing container,
+    /// returning any teardown failure.
+    ///
+    /// Removing the slot alone leaks the box: the container the slot named is
+    /// still running. So if the slot was `Ready`, this tears the container down
+    /// via the installed [`TeardownHook`] (best-effort — a teardown failure is
+    /// SURFACED as `Err`, never swallowed into an invisible leak). With no hook
+    /// wired (in-process tests / no transport) the slot is still removed and
+    /// `Ok(())` is returned (there is no box-side container to reap).
+    ///
+    /// The slot is removed regardless of teardown outcome (the in-memory dedup
+    /// state must not pin a corpse), and waiters are woken.
+    ///
+    /// # Errors
+    /// Returns the teardown failure if the hook reports one — the caller MUST
+    /// see that the box may still be leaked.
+    pub fn evict_checked(&self, workspace_id: &str) -> Result<()> {
+        // Slots are keyed by the lease's C9 container identity (see
+        // `spawn_or_join`); `workspace_id` derives the same container name, so
+        // evict must look up by that derived key, not the raw id.
+        let key = c9_container_name(workspace_id);
+        let removed = self
+            .entries
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .remove(workspace_id);
+            .remove(&key);
         self.ready.notify_all();
+
+        // Only a Ready slot has a live container to tear down.
+        let container = match removed {
+            Some(SpawnEntry::Ready { handle, .. }) => Some(handle.container.clone()),
+            _ => None,
+        };
+        if let (Some(c), Some(hook)) = (container, self.teardown.as_ref()) {
+            hook(&c).with_context(|| {
+                format!(
+                    "tearing down container '{}' on evict of workspace {workspace_id:?} \
+                     (slot cleared; box may be LEAKED if this failed)",
+                    c.name
+                )
+            })?;
+        }
+        Ok(())
     }
 }
 
@@ -799,5 +988,293 @@ mod tests {
 
         // And eviction (another lock site) must also not re-panic.
         spawner.evict("ws-poison");
+    }
+
+    /// A lease whose `lease_id` is `id`, principal-chained to `principal`.
+    fn lease_with(id: &str, principal: &str) -> RunnerLease {
+        RunnerLease {
+            lease_id: id.to_string(),
+            principal_chain: vec![principal.to_string()],
+            path_set: vec!["src/".to_string()],
+            expiry: 0,
+            net_policy: "none".to_string(),
+            tmp_root: "/work/tmp".to_string(),
+            state: corelink_runners_contracts::RunnerState::Held,
+        }
+    }
+
+    /// REGRESSION (P0 isolation, fail-CLOSED): on a cache HIT, a caller
+    /// presenting the SAME `workspace_id` but a DIFFERENT lease/principal must
+    /// NOT receive the cached (caller-A) container — it must `Err`.
+    ///
+    /// Before the fix, `spawn_or_join` keyed only on `workspace_id` and returned
+    /// caller A's handle (container/lease/principal_chain/fence) to caller B,
+    /// a cross-lease / cross-tenant isolation break. This test FAILS (returns
+    /// caller A's handle instead of `Err`) if that hole reopens.
+    #[test]
+    fn cache_hit_rejects_mismatched_lease_failclosed() {
+        let engine = StubEngine;
+        let fence = oracle_fence();
+        let spawner = DedupSpawner::new(Duration::from_secs(60));
+
+        // Caller A materializes the slot under lease_id "shared-ws".
+        let lease_a = lease_with("shared-ws", "agent:A");
+        let h_a = spawner
+            .spawn_or_join("shared-ws", &engine, &lease_a, &fence, TEST_PIN)
+            .expect("caller A spawns");
+        assert_eq!(h_a.lease.principal_chain, vec!["agent:A".to_string()]);
+
+        // Caller B presents the SAME workspace_id + lease_id but a DIFFERENT
+        // principal_chain. The dedup key collides; the lease/principal does not.
+        let lease_b = lease_with("shared-ws", "agent:B");
+        let err = spawner
+            .spawn_or_join("shared-ws", &engine, &lease_b, &fence, TEST_PIN)
+            .expect_err("caller B MUST be refused on the cache HIT, not handed A's container");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("does not match the cached handle"),
+            "must fail CLOSED on lease/principal mismatch, got: {msg}"
+        );
+    }
+
+    /// REGRESSION (P0 isolation): the dedup slot is keyed by the LEASE's
+    /// container identity, not by the caller-supplied `workspace_id`.
+    ///
+    /// Two consequences are asserted:
+    /// 1. A cache HIT under a colliding lease_id but a DIFFERENT principal is
+    ///    refused (cross-lease share is fail-closed) EVEN when the caller varies
+    ///    the `workspace_id` param — the trust boundary is the lease, not the
+    ///    param.
+    /// 2. Two DIFFERENT `workspace_id` params under the SAME lease coalesce to
+    ///    ONE container (the key is the lease), so the caller-supplied param can
+    ///    never silently mint a second box for one lease.
+    ///
+    /// Before the fix the map keyed on `workspace_id`, so (1) a different lease
+    /// under a colliding param shared one container and (2) different params
+    /// under one lease collided onto one name with no identity check.
+    #[test]
+    fn slot_keyed_by_lease_not_workspace_id() {
+        let engine = StubEngine;
+        let fence = oracle_fence();
+        let spawner = DedupSpawner::new(Duration::from_secs(60));
+
+        // Caller A: lease "lease-X" under param "p1".
+        let lease_a = lease_with("lease-X", "agent:A");
+        let h_a = spawner
+            .spawn_or_join("p1", &engine, &lease_a, &fence, TEST_PIN)
+            .expect("caller A spawns");
+
+        // (1) Caller B: SAME lease_id "lease-X", DIFFERENT principal, even under
+        // a DIFFERENT param "p2" — must be refused (same key, lease mismatch).
+        let lease_b = lease_with("lease-X", "agent:B");
+        let err = spawner
+            .spawn_or_join("p2", &engine, &lease_b, &fence, TEST_PIN)
+            .expect_err("cross-principal reuse under the same lease key MUST be refused");
+        assert!(
+            format!("{err:#}").contains("does not match the cached handle"),
+            "must fail CLOSED on lease mismatch regardless of the workspace_id param"
+        );
+
+        // (2) Caller C: SAME lease as A, DIFFERENT param "p3" — must coalesce to
+        // A's container (one box per lease), never a second spawn.
+        let h_c = spawner
+            .spawn_or_join("p3", &engine, &lease_a, &fence, TEST_PIN)
+            .expect("same lease under a different param must coalesce");
+        assert_eq!(
+            h_a.container.name, h_c.container.name,
+            "two params under one lease must share ONE container (keyed by lease)"
+        );
+    }
+
+    /// REGRESSION (P0 isolation): two DISTINCT workspace_ids backed by leases
+    /// with DISTINCT lease_ids never collide onto one container — each names
+    /// its own C9 container. (The symmetric "two ids share one lease_id"
+    /// collision is structurally impossible now because the key must equal the
+    /// lease_id's container name.)
+    #[test]
+    fn distinct_leases_get_distinct_containers() {
+        let engine = StubEngine;
+        let fence = oracle_fence();
+        let spawner = DedupSpawner::new(Duration::from_secs(60));
+
+        let h1 = spawner
+            .spawn_or_join(
+                "ws-one",
+                &engine,
+                &lease_with("ws-one", "agent:A"),
+                &fence,
+                TEST_PIN,
+            )
+            .expect("ws-one spawns");
+        let h2 = spawner
+            .spawn_or_join(
+                "ws-two",
+                &engine,
+                &lease_with("ws-two", "agent:B"),
+                &fence,
+                TEST_PIN,
+            )
+            .expect("ws-two spawns");
+        assert_ne!(
+            h1.container.name, h2.container.name,
+            "distinct workspace_ids must NOT collide onto one container"
+        );
+    }
+
+    /// REGRESSION (P1 leak): `evict` must tear down the backing container, not
+    /// just clear the in-memory slot. We install a teardown hook that records
+    /// the torn-down container name; evicting a Ready slot must invoke it.
+    #[test]
+    fn evict_tears_down_container() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let torn: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let torn_h = Arc::clone(&torn);
+        let calls_h = Arc::clone(&calls);
+        let hook: TeardownHook = Arc::new(move |c: &RunningContainer| {
+            calls_h.fetch_add(1, Ordering::SeqCst);
+            torn_h.lock().unwrap().push(c.name.clone());
+            Ok(())
+        });
+
+        let engine = StubEngine;
+        let fence = oracle_fence();
+        let spawner = DedupSpawner::new(Duration::from_secs(60)).with_teardown(hook);
+
+        let lease = lease_with("ws-evict", "agent:A");
+        let h = spawner
+            .spawn_or_join("ws-evict", &engine, &lease, &fence, TEST_PIN)
+            .expect("spawn");
+        let expected = h.container.name.clone();
+
+        spawner.evict("ws-evict");
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "evict MUST invoke teardown exactly once for the live slot"
+        );
+        assert_eq!(
+            torn.lock().unwrap().as_slice(),
+            &[expected],
+            "evict must tear down the SAME container the slot named"
+        );
+    }
+
+    /// REGRESSION (P1 leak): a teardown FAILURE on evict is surfaced as `Err`
+    /// from `evict_checked`, never swallowed (the box may be leaked).
+    #[test]
+    fn evict_checked_surfaces_teardown_failure() {
+        let hook: TeardownHook =
+            Arc::new(|_c: &RunningContainer| bail!("simulated docker rm -f failure"));
+        let engine = StubEngine;
+        let fence = oracle_fence();
+        let spawner = DedupSpawner::new(Duration::from_secs(60)).with_teardown(hook);
+        let lease = lease_with("ws-fail", "agent:A");
+        spawner
+            .spawn_or_join("ws-fail", &engine, &lease, &fence, TEST_PIN)
+            .expect("spawn");
+
+        let err = spawner
+            .evict_checked("ws-fail")
+            .expect_err("a teardown failure on evict MUST surface as Err");
+        assert!(
+            format!("{err:#}").contains("box may be LEAKED"),
+            "the surfaced error must flag the potential leak"
+        );
+        // The slot is still gone (in-memory state never pins a corpse).
+        let map = spawner.entries.lock().unwrap_or_else(|p| p.into_inner());
+        assert!(
+            !map.contains_key("ws-fail"),
+            "slot must be removed even on teardown failure"
+        );
+    }
+
+    /// REGRESSION (P1 DoS): the slot map stays BOUNDED under many distinct
+    /// workspace_ids, and expired/`Failed` slots are reclaimed. Without the
+    /// cap + sweep the map grew one entry per distinct id forever.
+    #[test]
+    fn map_stays_bounded_under_many_ids() {
+        let engine = StubEngine;
+        let fence = oracle_fence();
+        let cap = 8;
+        // Window 0 => every Ready slot is immediately expired, so the sweep
+        // alone keeps the map tiny; the cap is the belt to the sweep's braces.
+        let spawner = DedupSpawner::new(Duration::from_secs(60)).with_max_entries(cap);
+
+        for i in 0..200 {
+            let id = format!("ws-{i}");
+            spawner
+                .spawn_or_join(&id, &engine, &lease_with(&id, "agent:A"), &fence, TEST_PIN)
+                .expect("spawn");
+            let len = spawner
+                .entries
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .len();
+            assert!(
+                len <= cap,
+                "dedup map must stay <= cap ({cap}); grew to {len} at i={i}"
+            );
+        }
+    }
+
+    /// REGRESSION (P1 DoS): `Failed` slots are reclaimed by the sweep and never
+    /// accumulate.
+    #[test]
+    fn failed_slots_are_reclaimed() {
+        // An engine whose spawn always fails, to mint Failed slots.
+        struct FailEngine;
+        impl Engine for FailEngine {
+            fn spawn(&self, _spec: &ContainerSpec) -> Result<RunningContainer> {
+                bail!("deliberate spawn failure")
+            }
+            fn probe(
+                &self,
+                _c: &RunningContainer,
+                _spec: &ContainerSpec,
+            ) -> Result<crate::isolation::IsolationProbe> {
+                bail!("n/a")
+            }
+            fn exec(&self, _c: &RunningContainer, _argv: &[&str]) -> Result<Option<i32>> {
+                bail!("n/a")
+            }
+            fn exec_captured(
+                &self,
+                _c: &RunningContainer,
+                _argv: &[&str],
+            ) -> Result<crate::lease::CmdOutput> {
+                bail!("n/a")
+            }
+            fn is_alive(&self, _c: &RunningContainer) -> Result<bool> {
+                Ok(true)
+            }
+        }
+
+        let engine = FailEngine;
+        let fence = oracle_fence();
+        let spawner = DedupSpawner::new(Duration::from_secs(60)).with_max_entries(64);
+
+        for i in 0..50 {
+            let id = format!("fail-{i}");
+            let _ =
+                spawner.spawn_or_join(&id, &engine, &lease_with(&id, "agent:A"), &fence, TEST_PIN);
+        }
+        // The NEXT claim reaps the prior Failed slots before inserting its own.
+        let id = "fail-final";
+        let _ = spawner.spawn_or_join(id, &engine, &lease_with(id, "agent:A"), &fence, TEST_PIN);
+
+        let map = spawner.entries.lock().unwrap_or_else(|p| p.into_inner());
+        // Only the just-published Failed marker for `fail-final` may remain;
+        // all earlier Failed slots were swept.
+        let failed = map
+            .values()
+            .filter(|e| matches!(e, SpawnEntry::Failed))
+            .count();
+        assert!(
+            failed <= 1,
+            "Failed slots must be reclaimed by the sweep; {failed} remain"
+        );
     }
 }

@@ -315,6 +315,7 @@ fn real_docker_engine_verifies_before_run() {
         tmp_root: "/hugit/tmp".to_string(),
         no_network: true,
         path_set: vec![],
+        env: vec![],
     };
 
     // Tampered: pull is attempted, but no `docker run` ever follows.
