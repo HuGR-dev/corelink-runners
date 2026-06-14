@@ -524,9 +524,12 @@ impl LeaseLedger for PgLedger {
 
     fn pending_older_than(&self, now_ms: u64, max_age_ms: u64) -> anyhow::Result<Vec<LeaseRecord>> {
         // cutoff = now - max_age (saturating). A Pending row whose created_at_ms
-        // is at/below the cutoff has outlived any legitimate provision window
-        // and is reclaimable (the stale-Pending sweep). The filter is server-side
-        // so an instance never pulls fresh, mid-provision Pendings.
+        // is STRICTLY BELOW the cutoff has outlived any legitimate provision
+        // window and is reclaimable (the stale-Pending sweep). The comparison is
+        // strict (`<`), matching the trait contract: a row sitting EXACTLY at the
+        // bound has not yet sat LONGER than max_age, so it is not reclaimed
+        // (consistent with InMemory / File). The filter is server-side so an
+        // instance never pulls fresh, mid-provision Pendings.
         let cutoff = now_ms.saturating_sub(max_age_ms);
         self.block_on(async {
             let client = self.pool.get().await?;
@@ -535,7 +538,7 @@ impl LeaseLedger for PgLedger {
                     "SELECT lease_id, tenant, state::text AS state, box_ref, \
                             created_at_ms, updated_at_ms, deadline_ms \
                      FROM leases \
-                     WHERE state = 'pending' AND created_at_ms <= $1 \
+                     WHERE state = 'pending' AND created_at_ms < $1 \
                      ORDER BY lease_id",
                     &[&(cutoff as i64)],
                 )

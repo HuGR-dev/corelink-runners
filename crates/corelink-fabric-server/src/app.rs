@@ -239,11 +239,16 @@ pub struct AppState {
     /// `FABRIC_CLOSE_ACK_MAX_INFLIGHT` (default
     /// [`DEFAULT_CLOSE_ACK_MAX_INFLIGHT`]).
     pub(crate) close_ack_gate: Arc<tokio::sync::Semaphore>,
-    /// AUDIT P2: the global in-flight request cap applied as the OUTERMOST
-    /// router layer in [`app_full`] (a tower `GlobalConcurrencyLimitLayer` +
-    /// `LoadShedLayer`). When more than this many requests are being served at
-    /// once, the excess is SHED with `503 Service Unavailable` rather than
-    /// queued unboundedly — bounding memory + tail latency under load. From
+    /// AUDIT P2: the global in-flight request cap applied in [`app_full`] over
+    /// the WORK routes (a tower `GlobalConcurrencyLimitLayer` + `LoadShedLayer`).
+    /// When more than this many requests are being served at once, the excess is
+    /// SHED with `503 Service Unavailable` rather than queued unboundedly —
+    /// bounding memory + tail latency under load.
+    ///
+    /// RE-AUDIT (LB-liveness): the cap covers the real work routes ONLY —
+    /// `/v1/health` is mounted on a layer-free branch so the liveness probe
+    /// still answers `200` under saturation (a 503 on the probe would make an
+    /// LB mark a busy-but-alive instance DOWN). From
     /// `FABRIC_MAX_INFLIGHT_REQUESTS` (default [`DEFAULT_MAX_INFLIGHT_REQUESTS`]).
     pub(crate) max_inflight_requests: usize,
 }
@@ -702,20 +707,26 @@ pub fn app_full(
         .layer(Extension(registry))
         .layer(middleware::from_fn_with_state(store, auth::require_tenant));
 
-    let router = Router::new()
-        .route(paths::HEALTH, get(health))
-        .merge(internal)
-        .merge(authenticated);
-
-    // AUDIT P2: global in-flight cap + load-shedding, applied as the OUTERMOST
-    // layer so it governs EVERY route (health included — a thundering herd on
-    // the LB liveness probe must not exhaust memory either). `LoadShedLayer`
-    // turns "limit reached" into an immediate `Overloaded` error instead of an
-    // unbounded queue; `HandleErrorLayer` maps that error to a clean
-    // `503 Service Unavailable`. The order in `ServiceBuilder` is top→bottom =
-    // outer→inner, so: handle-error wraps load-shed wraps the concurrency limit.
+    // AUDIT P2 + RE-AUDIT LB-LIVENESS: the global in-flight cap + load-shedding
+    // governs the REAL WORK routes (internal + authenticated), NOT `/v1/health`.
+    //
+    // Health must answer even under saturation: an LB/orchestrator probes
+    // liveness to decide whether the instance is up, and a 503 on the probe
+    // makes it mark a busy-but-ALIVE instance DOWN — pulling it out of rotation
+    // exactly when it is overloaded, the precise opposite of the desired
+    // behavior (it amplifies the overload onto the survivors). So the limiter is
+    // applied to the work branch only, and health is merged on a LAYER-FREE
+    // branch AFTER. The work routes still bound memory + tail latency under a
+    // thundering herd; health is a fixed-cost, auth-free, tenant-data-free
+    // constant-string responder that cannot itself exhaust resources.
+    //
+    // `LoadShedLayer` turns "limit reached" into an immediate `Overloaded` error
+    // instead of an unbounded queue; `HandleErrorLayer` maps that error to a
+    // clean `503 Service Unavailable`. The order in `ServiceBuilder` is
+    // top→bottom = outer→inner, so: handle-error wraps load-shed wraps the
+    // concurrency limit.
     let max_inflight = max_inflight.max(1);
-    router.layer(
+    let work = Router::new().merge(internal).merge(authenticated).layer(
         tower::ServiceBuilder::new()
             .layer(axum::error_handling::HandleErrorLayer::new(
                 |_err: axum::BoxError| async move {
@@ -726,7 +737,12 @@ pub fn app_full(
             ))
             .layer(tower::load_shed::LoadShedLayer::new())
             .layer(tower::limit::GlobalConcurrencyLimitLayer::new(max_inflight)),
-    )
+    );
+
+    Router::new()
+        // Health rides OUTSIDE the limiter so it answers under saturation.
+        .route(paths::HEALTH, get(health))
+        .merge(work)
 }
 
 /// The internal slot-occupancy route (WP-OCCUPANCY-API).  An ops/observability

@@ -167,10 +167,16 @@ pub trait LeaseLedger {
     /// (BIL1: slot occupancy = held leases).
     fn held(&self) -> anyhow::Result<Vec<LeaseRecord>>;
 
-    /// All `Pending` records whose `created_at_ms` is at or before
+    /// All `Pending` records whose `created_at_ms` is STRICTLY BEFORE
     /// `now_ms.saturating_sub(max_age_ms)` — i.e. leases that have sat in the
     /// pre-provision `Pending` reservation for LONGER than `max_age_ms`,
     /// ordered by `lease_id` (deterministic).
+    ///
+    /// The comparison is strict (`created_at_ms < cutoff`): a `Pending` whose
+    /// age is EXACTLY `max_age_ms` (sitting right at the bound) has not yet sat
+    /// LONGER than the bound, so it is NOT returned — only a genuinely
+    /// past-bound reservation is reclaimable. This matches the FAIL-SAFE note
+    /// below and is consistent across InMemory / File / Pg.
     ///
     /// The enumeration seam for the **stale-Pending sweep**
     /// ([`crate::reaper`]). A `Pending` lease reserves a concurrency slot
@@ -339,7 +345,7 @@ impl LeaseLedger for InMemoryLedger {
         let mut out: Vec<LeaseRecord> = self
             .records
             .values()
-            .filter(|r| matches!(r.state, LeaseState::Pending) && r.created_at_ms <= cutoff)
+            .filter(|r| matches!(r.state, LeaseState::Pending) && r.created_at_ms < cutoff)
             .cloned()
             .collect();
         out.sort_by(|a, b| a.lease_id.cmp(&b.lease_id));

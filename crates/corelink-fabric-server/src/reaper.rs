@@ -30,12 +30,38 @@
 //!    so the next sweep retries — no permanent leak from a one-time provider
 //!    hiccup.
 //!
-//! ## Retry posture
+//! ## Retry posture (bounded retry — re-audit decision, 2026-06-14)
 //!
 //! A failed teardown leaves the lease `Held` (NOT transitioned to `Expired`)
 //! so the next sweep finds it again and retries.  This is the key difference
 //! from the old mark-then-kill posture: the terminal `Expired` mark is the
-//! CONSEQUENCE of a successful teardown, not the precondition for it.
+//! CONSEQUENCE of a successful teardown, not the precondition for it.  This
+//! ordering is deliberate and is NOT inverted.
+//!
+//! The re-audit flagged "kill-then-mark with UNBOUNDED retry": a box that can
+//! never be torn down is retried every sweep forever.  DECISION — the retry is
+//! left as-is (re-tried indefinitely) because it is NOT a runaway:
+//! - **Bounded WORK per tick.** Each sweep makes exactly ONE teardown call per
+//!   overdue lease; a permanently-stuck box adds one bounded call per tick, not
+//!   a hot spin.  The reaper does not busy-loop on it.
+//! - **Compute is already bounded by the provider.**  The ultimate backstop is
+//!   `activeDeadlineSeconds` (see the "Problem" section): the provider
+//!   force-kills the box at its hard deadline regardless of whether our
+//!   teardown call ever succeeds, so a box that resists teardown still STOPS
+//!   COSTING MONEY.  The lingering `Held` row is forensic, not a live compute
+//!   leak.
+//! - **It is no longer SILENT.**  A failed teardown now emits a forensic log
+//!   line every sweep (`reaper: teardown FAILED for overdue lease …`), so a
+//!   permanently-stuck box is observable to ops rather than spinning quietly.
+//!
+//! What was deliberately NOT added: a per-lease attempt counter + force-
+//! terminalize-after-N.  Force-marking a lease `Expired` while its box may
+//! still be alive would re-introduce the exact mark-then-kill hazard the
+//! teardown-first posture exists to avoid (a phantom-reclaimed slot whose box
+//! is still running), and it would require cross-instance attempt state for no
+//! reclaim benefit — the deadline already terminalizes the COMPUTE.  If a
+//! future SLA needs an explicit ops escalation, the forensic line is the hook
+//! to alert on.
 //!
 //! ## Side-table GC
 //!
@@ -481,9 +507,30 @@ pub async fn reap_once(state: &crate::AppState) -> usize {
             // else: concurrent close/cancel won the race — their transition
             // already freed the slot; we do NOT emit Expired (would double-free)
             // and do NOT count this as a reaper reclaim.
+        } else {
+            // Teardown FAILED — leave Held, do NOT transition, do NOT GC.
+            // The next sweep finds it again and retries teardown (the
+            // teardown-first posture: the Expired mark is the CONSEQUENCE of a
+            // successful teardown, never its precondition — see the module
+            // "Retry posture / bounded retry" doc). The retry is bounded WORK
+            // (one teardown call per overdue lease per tick, not a hot spin),
+            // and the provider `activeDeadlineSeconds` is the ultimate compute
+            // backstop — a box that can never be torn down still stops costing
+            // money when the provider force-kills it. The remaining concern was
+            // SILENCE; this forensic line surfaces a stuck box to ops on every
+            // sweep so a permanently-failing teardown is observable, never
+            // silent. (Intentionally no per-lease attempt counter: that would
+            // add cross-instance state for no reclaim benefit — the deadline
+            // already terminalizes the COMPUTE; the ledger row's Held status
+            // here is forensic, not a live cap leak, because the box's cost is
+            // already bounded.)
+            eprintln!(
+                "reaper: teardown FAILED for overdue lease (left Held, will retry \
+                 next sweep; compute is bounded by provider activeDeadlineSeconds): \
+                 lease_id={} tenant={}",
+                rec.lease_id, rec.tenant
+            );
         }
-        // else: leave Held — do NOT transition, do NOT GC.
-        // The next sweep finds it again and retries teardown.
     }
 
     reaped
