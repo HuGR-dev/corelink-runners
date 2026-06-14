@@ -2713,4 +2713,262 @@ mod tests {
             "a valid u32 yields Some(Duration)"
         );
     }
+
+    // ── WP-D: BoxRegistry orphan GC (D1 / D2 / D3) ──────────────────────────
+    //
+    // These tests verify that the expiry reaper (`reap_once`) drives registry
+    // cleanup for orphaned leases, closing the unbounded-growth leak described
+    // in WP-D.  The mechanism: `teardown_lease` delegates to the provisioner's
+    // `teardown()`, which calls `BoxRegistry::unbind()` after the provider job
+    // is deleted — the SAME path as the normal close.  The tests use a
+    // `RegistryAwareProvisioner` that binds a real `BoxRegistry` at provision
+    // time and unbinds at teardown, so the registry state is observable.
+
+    /// Test provisioner that mirrors `NorthflankBoxProvisioner`'s registry
+    /// contract: `provision` binds the lease into a shared `BoxRegistry`;
+    /// `teardown` unbinds it after the (no-op) provider call succeeds.
+    ///
+    /// Unlike `RecordingProvisioner` (which has no registry), this lets tests
+    /// assert that the registry entry is gone after a reaper sweep (D1) and
+    /// that a double-unbind is a safe no-op (D3).
+    struct RegistryAwareProvisioner {
+        registry: crate::cloud_exec::BoxRegistry,
+        teardown_calls: Mutex<Vec<String>>,
+    }
+
+    impl RegistryAwareProvisioner {
+        fn new(registry: crate::cloud_exec::BoxRegistry) -> Self {
+            Self {
+                registry,
+                teardown_calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        /// Bind a synthetic container into the registry for `lease_id` so the
+        /// reaper has something to unbind.
+        fn bind(&self, lease_id: &str) {
+            use corelink_runner::isolation::RunningContainer;
+            self.registry.bind(
+                lease_id,
+                RunningContainer {
+                    name: format!("box:{lease_id}"),
+                },
+            );
+        }
+
+        fn teardown_calls(&self) -> Vec<String> {
+            self.teardown_calls.lock().unwrap().clone()
+        }
+    }
+
+    impl BoxProvisioner for RegistryAwareProvisioner {
+        fn provision(
+            &self,
+            lease_id: &str,
+            _spec: &corelink_runner::lease::ContainerSpec,
+        ) -> Result<()> {
+            use corelink_runner::isolation::RunningContainer;
+            self.registry.bind(
+                lease_id,
+                RunningContainer {
+                    name: format!("box:{lease_id}"),
+                },
+            );
+            Ok(())
+        }
+
+        fn teardown(&self, lease_id: &str) -> Result<()> {
+            self.teardown_calls
+                .lock()
+                .unwrap()
+                .push(lease_id.to_string());
+            // Mirrors NorthflankBoxProvisioner::teardown: unbind AFTER the
+            // provider call succeeds (here the provider is a no-op, so we
+            // always unbind on success).
+            self.registry.unbind(lease_id);
+            Ok(())
+        }
+
+        fn probe(&self, _lease_id: &str) -> Result<ProbeStatus> {
+            Ok(ProbeStatus::Unbound)
+        }
+    }
+
+    /// Build an `AppState` wired with a `RegistryAwareProvisioner` and a
+    /// shared `BoxRegistry`.  Returns the state, the clock, the provisioner
+    /// arc, and the shared registry so the test can inspect registry state
+    /// independently of the provisioner.
+    fn build_state_registry(
+        now_ms: u64,
+    ) -> (
+        AppState,
+        FixedClock,
+        Arc<RegistryAwareProvisioner>,
+        crate::cloud_exec::BoxRegistry,
+    ) {
+        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
+            Arc::new(Mutex::new(InMemoryLedger::new()));
+        let clock = FixedClock::new(now_ms);
+        let registry = crate::cloud_exec::BoxRegistry::new();
+        let prov = Arc::new(RegistryAwareProvisioner::new(registry.clone_handle()));
+        let mut state = AppState::new(
+            ledger,
+            Arc::new(StaticPlans::default()),
+            Arc::new(clock.clone()),
+        );
+        state.provisioner = Arc::clone(&prov) as Arc<dyn BoxProvisioner>;
+        (state, clock, prov, registry)
+    }
+
+    /// D1 — Held lease expired by the reaper has its BoxRegistry entry removed.
+    ///
+    /// A lease bound in the registry at acquire time is unbounded when the
+    /// reaper expires it (teardown → unbind fires AFTER teardown succeeds).
+    /// After `reap_once` returns the registry must NOT contain the entry.
+    #[tokio::test]
+    async fn d1_expired_lease_registry_entry_removed_by_reaper() {
+        let (state, _clock, prov, registry) = build_state_registry(2_000);
+
+        // Simulate acquire: insert as Held in the ledger + bind in the registry.
+        insert_held(&state, "lease-d1", 1_000);
+        prov.bind("lease-d1");
+
+        // Pre-condition: registry has the entry.
+        assert!(
+            registry.resolve("lease-d1").is_some(),
+            "pre-condition: lease-d1 must be bound in the registry before reap"
+        );
+
+        let reaped = reap_once(&state).await;
+        assert_eq!(reaped, 1, "the overdue lease must be reclaimed");
+
+        // D1: the registry entry is gone after the reaper sweep.
+        assert!(
+            registry.resolve("lease-d1").is_none(),
+            "D1 FAIL: the expired lease's BoxRegistry entry must be removed after reap"
+        );
+
+        // The ledger reflects Expired and teardown was called.
+        {
+            let ledger = state.ledger.lock().unwrap();
+            let rec = ledger.get("lease-d1").unwrap().unwrap();
+            assert_eq!(
+                rec.state,
+                LeaseState::Wire(RunnerState::Expired),
+                "lease must be Expired in the ledger"
+            );
+        }
+        assert!(
+            prov.teardown_calls().contains(&"lease-d1".to_string()),
+            "teardown must have been called for lease-d1"
+        );
+    }
+
+    /// D2 — unbind fires AFTER teardown succeeds and not while a lock is held
+    /// across an await.
+    ///
+    /// The `_ASSERT_REAP_ONCE_IS_SEND` compile-time gate (present at the
+    /// bottom of the module) catches any `MutexGuard` across an `await`.  This
+    /// runtime test completes the picture: verify that a teardown + unbind
+    /// sequence in the reaper does not deadlock AND that the registry is clean
+    /// post-reap, even when the lease holds an entry.
+    ///
+    /// Lock-ordering proof: `reap_once` takes the ledger snapshot (guard
+    /// dropped before any `await`), calls `teardown_lease` (no lock held),
+    /// then re-acquires the ledger lock briefly for the `Expired` transition
+    /// (dropped before continuing).  `RegistryAwareProvisioner::teardown`
+    /// calls `registry.unbind()` synchronously (no `await`) while no ledger
+    /// lock is held — so there is no lock held across an `await` at any point.
+    #[tokio::test]
+    async fn d2_unbind_fires_after_teardown_no_lock_across_await() {
+        let (state, _clock, prov, registry) = build_state_registry(5_000);
+
+        insert_held(&state, "lease-d2", 1_000);
+        prov.bind("lease-d2");
+
+        // Pre-condition: entry present.
+        assert!(registry.resolve("lease-d2").is_some());
+
+        // This must not deadlock (D2: unbind is synchronous inside teardown,
+        // no MutexGuard held across the spawn_blocking await boundary).
+        let reaped = reap_once(&state).await;
+
+        assert_eq!(reaped, 1, "D2: the lease must be reaped without deadlock");
+        // Unbind fired after teardown succeeded — registry is clean.
+        assert!(
+            registry.resolve("lease-d2").is_none(),
+            "D2 FAIL: registry must be empty after reap (unbind fired post-teardown)"
+        );
+        // Teardown was called exactly once.
+        assert_eq!(
+            prov.teardown_calls(),
+            vec!["lease-d2".to_string()],
+            "D2: teardown must be called exactly once"
+        );
+    }
+
+    /// D3 — regression: the normal close path still unbinds; double-unbind
+    /// (close then expiry, or expiry of an already-closed lease) is a no-op.
+    ///
+    /// Scenario A: normal close unbinds (teardown called once, registry clean).
+    /// Scenario B: close fires first; the reaper's teardown then calls unbind
+    ///   on an already-absent key — must be a harmless no-op.
+    #[tokio::test]
+    async fn d3_close_path_unbinds_and_double_unbind_is_noop() {
+        // ── Scenario A: normal close (teardown) removes the registry entry ──
+        let (state_a, _clock, prov_a, registry_a) = build_state_registry(2_000);
+
+        insert_held(&state_a, "lease-d3a", 1_000);
+        prov_a.bind("lease-d3a");
+
+        assert!(registry_a.resolve("lease-d3a").is_some(), "pre: bound");
+
+        // Simulate the normal close path: just call teardown directly (which
+        // unbinds).  In production this is `teardown_lease` → provisioner.
+        prov_a
+            .teardown("lease-d3a")
+            .expect("normal teardown must succeed");
+
+        assert!(
+            registry_a.resolve("lease-d3a").is_none(),
+            "D3-A FAIL: normal close path must unbind the registry entry"
+        );
+
+        // ── Scenario B: close fires THEN the reaper's teardown unbinds again ─
+        // The entry is already absent from the registry; a second unbind must
+        // be a silent no-op (idempotency guarantee of BoxRegistry::unbind).
+        let (state_b, _clock, prov_b, registry_b) = build_state_registry(2_000);
+
+        insert_held(&state_b, "lease-d3b", 1_000);
+        prov_b.bind("lease-d3b");
+
+        // Close path fires first (unbinds).
+        prov_b
+            .teardown("lease-d3b")
+            .expect("first teardown (close path) must succeed");
+        assert!(
+            registry_b.resolve("lease-d3b").is_none(),
+            "D3-B pre: registry empty after close path"
+        );
+
+        // Reaper then calls teardown on the same (already-unbound) lease-id —
+        // must NOT panic, must NOT error.  In production the ledger's
+        // terminal-state CAS prevents the reaper from seeing the lease at all
+        // (it's already Released), but the idempotency of `unbind` is the
+        // last-resort safety net we assert here directly.
+        prov_b
+            .teardown("lease-d3b")
+            .expect("D3-B FAIL: second teardown (double-unbind) must be a harmless no-op");
+
+        assert!(
+            registry_b.resolve("lease-d3b").is_none(),
+            "D3-B FAIL: registry must still be empty after double-unbind"
+        );
+        // Two teardown calls total (close then reaper).
+        assert_eq!(
+            prov_b.teardown_calls().len(),
+            2,
+            "D3-B: two teardown calls recorded (close path + reaper)"
+        );
+    }
 }

@@ -21,20 +21,22 @@
 //!
 //! ## Leak posture (honest)
 //!
-//! Teardown is wired to the **normal close path** only. A lease that is
-//! acquired but never closed (client crash / orphan) leaves:
-//! - (a) its [`RunningContainer`] entry in the in-memory [`BoxRegistry`] —
-//!   the map does NOT self-shrink for orphans; and
-//! - (b) the Northflank job object in the provider.
+//! Teardown is wired to **both** the normal close path and the background
+//! reaper (WP-D / CF-REAP). A lease that is acquired but never closed (client
+//! crash / orphan) is reclaimed by `reap_once` (expired deadline) or
+//! `surface_crashes` (box probed Dead), each of which calls
+//! [`AppState::teardown_lease`] → [`NorthflankBoxProvisioner::teardown`] →
+//! `registry.unbind()` **after** the provider job is deleted, mirroring the
+//! normal close path.  No orphaned registry entry accumulates indefinitely.
 //!
 //! The **cost** is bounded: a job created with `runOnCreate:false` never
 //! runs until `exec` triggers it (free, scale-to-zero); a run that did start
 //! is killed by Northflank `activeDeadlineSeconds`. No unbounded compute cost.
 //!
-//! The **object / registry-growth** cleanup for orphaned leases is NOT handled
-//! here — it is deferred to a future reaper work-package (CF-REAP), which
-//! should hook teardown into the existing `corelink_fabric::lifecycle` sweep
-//! that already drives `close_abnormal` for Expired / Crashed leases.
+//! The double-unbind case (close path AND reaper both fire for the same lease)
+//! is harmless: `unbind` is idempotent (a missing key is a silent no-op), and
+//! the ledger's terminal-state CAS ensures only one path wins the transition
+//! — the other sees a non-`Held` state and does not call teardown.
 //!
 //! 4. [`cloud_executor_from_env`] — builds only the exec side (legacy; prefer
 //!    [`cloud_backend_from_env`] which wires both exec + provisioner over a
@@ -207,23 +209,24 @@ pub fn cloud_executor_from_env(registry: BoxRegistry) -> Option<Arc<dyn LeasedEx
 /// `provision` spawns the box for a lease and binds the resulting
 /// [`RunningContainer`] into the [`BoxRegistry`] so the exec path
 /// (`EngineLeasedExec`) can resolve it.  `teardown` deletes the provider job
-/// and unbinds the entry on the **normal close path**.
+/// and unbinds the entry on **both** the normal close path and the background
+/// reaper (WP-D / CF-REAP: `reap_once` for Expired leases, `surface_crashes`
+/// for Crashed leases — both call [`AppState::teardown_lease`] which delegates
+/// here after teardown succeeds).
 ///
 /// Both operations are **fail-closed** in the cloud impl:
 /// - a `provision` failure leaves the registry EMPTY for that lease (nothing
 ///   is bound on error), so a subsequent exec fails closed via the empty
 ///   registry — no box is ever handed out from a failed spawn.
-/// - a `teardown` failure propagates `Err`; the caller (close handler) treats
-///   it best-effort and drops the error. On delete failure the registry entry
-///   is intentionally KEPT so a future reaper (CF-REAP) can retry.
+/// - a `teardown` failure propagates `Err`; the caller (close handler or
+///   reaper) treats it best-effort. On delete failure the registry entry is
+///   intentionally KEPT so the next sweep retries — a failed teardown is never
+///   silently discarded (the reaper logs and retries on the next tick).
 ///
-/// **Orphan / crash posture:** teardown is only reachable via the normal close
-/// path. A lease acquired but never closed leaves its [`RunningContainer`]
-/// binding in the [`BoxRegistry`] and the Northflank job object alive.
-/// Compute cost is bounded (jobs are `runOnCreate:false`; runs are bounded by
-/// `activeDeadlineSeconds`). Registry-growth cleanup is deferred to CF-REAP
-/// (future work-package hooking into `corelink_fabric::lifecycle`'s
-/// `close_abnormal` sweep).
+/// **Orphan / crash posture:** teardown is reachable via the normal close
+/// path AND the background reaper (WP-D).  A lease acquired but never closed
+/// is reclaimed by the reaper on its next sweep, which calls teardown and
+/// therefore unbind — preventing unbounded registry growth.
 ///
 /// The default implementation is [`NoBoxProvisioner`] (no-op, DEFAULT-OFF):
 /// `provision` returns `Ok(())` without binding anything, so an exec on such
