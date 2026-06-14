@@ -135,10 +135,21 @@ pub fn teardown<B: BoxExec>(boxx: &B, c: &RunningContainer) -> Result<ForensicRe
     let mounts = boxx.run(&["sh", "-c", &format!("mount | grep -F {name}")])?;
 
     // Surface 4: network — no interface or named netns for the job.
+    //
+    // Fail-closed by construction: a single grep over the COMBINED output of
+    // both `ip` probes, with NO `2>/dev/null` (stderr must reach
+    // `grep_scan_failure`) and NO trailing `;` (which would swallow the first
+    // probe's exit code, masking a broken `ip`). `set -o pipefail` makes a
+    // crashed `ip` propagate as the pipeline's exit code (≥2), and grouping the
+    // probes with `{ … ; }` lets a stderr diagnostic from either one surface.
+    // The grep then yields the load-bearing verdict (0 = residue, 1 = clean,
+    // ≥2 = the network tool failed), routed through `grep_scan_failure` exactly
+    // like the process/mount surfaces — so a failed network scan is never read
+    // as clean.
     let network = boxx.run(&[
         "sh",
         "-c",
-        &format!("ip -o link show 2>/dev/null | grep -F {name}; ip netns list 2>/dev/null | grep -F {name}"),
+        &format!("set -o pipefail; {{ ip -o link show; ip netns list; }} | grep -F {name}"),
     ])?;
 
     // Verdict integrity: a surface scan that FAILED (non-zero exit / killed /
@@ -398,6 +409,37 @@ mod tests {
                 .iter()
                 .any(|f| f.starts_with("network:")),
             "got {:?}",
+            report.scan_failures
+        );
+    }
+
+    /// Stage 4 (network), error-exit variant — the regression for the W2-A
+    /// masking bug. The pre-fix command (`ip … 2>/dev/null | grep …; ip … |
+    /// grep …`) discarded stderr AND let `;` overwrite the pipeline exit code,
+    /// so a broken `ip` (exit ≥2) was read as the clean exit-1 "no match" case,
+    /// masking a real network-escape residue. With the fix the network scan
+    /// surfaces its non-zero exit through `grep_scan_failure`, exactly like the
+    /// process/mount surfaces: a network scan that exits ≥2 is scan-failed /
+    /// not-clean, never clean.
+    #[test]
+    fn stage4_network_error_exit_is_not_clean() {
+        let failing = CmdOutput {
+            code: Some(2),
+            stdout: String::new(),
+            stderr: String::new(),
+        };
+        let boxx = OneFailingSurface::new("network", failing);
+        let report = teardown(&boxx, &container()).expect("teardown");
+        assert!(
+            !report.is_clean(),
+            "a network scan that exited non-zero must be fail-closed, not clean"
+        );
+        assert!(
+            report
+                .scan_failures
+                .iter()
+                .any(|f| f.starts_with("network:")),
+            "the network scan failure must be recorded, got {:?}",
             report.scan_failures
         );
     }
