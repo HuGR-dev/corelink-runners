@@ -369,6 +369,49 @@ The shared vector manifest is the **drift tripwire**: either side's golden suite
 breaks on silent drift, before any integration test is needed. This is the
 AC/CAS pattern applied to the runner seam.
 
+### 13.5 Abnormal-close emission  (best-effort partial flush — Option B)
+
+*(Amendment v1.3.0 — hugit ruling 2026-06-13, owner-ratified. §0–§12 and the
+§13.4 `IntentMetrics` vector are untouched; `close_reason` is wrapper-level, so
+`CONTEXT_ENVELOPE_SCHEMA_VERSION` is unchanged.)*
+
+On **abnormal** lease termination — `Expired` (deadline reaper) or `Crashed`
+(crash sweep) — the fabric MUST flush whatever the `CaptureHook` accumulated as a
+**partial** envelope, explicitly marked incomplete. **Dropping is rejected:**
+incomplete agent provenance (tokens, tool calls, a partial trajectory up to the
+death point) is forensic signal; hugit prices flat, so partial metrics are never
+billed and carry no billing risk. Honesty is preserved by **marking**, not hiding.
+
+**Wire shape.** Reuse the normal-close envelope payload + two wrapper-level
+close-metadata fields (NEVER inside the frozen §13.4 `IntentMetrics` vector, which
+stays `deny_unknown_fields`):
+
+| field | normal | abnormal |
+|---|---|---|
+| `IntentMetrics` | full | partial — as captured at termination (byte-shape identical) |
+| trajectory | full | partial — as captured |
+| `close_reason` (`normal\|expired\|crashed`) | `normal` | `expired` or `crashed` |
+| `capture_incomplete` | `false` | `true` |
+
+**Delivery.** Fire-and-forget, NO exactly-once ack (no live lease to handshake).
+One delivery attempt after teardown→transition→`record_slot`; on failure the
+partial is dropped + logged (forensic, not authoritative — a lost partial is
+acceptable, a blocked teardown is not). **Teardown MUST NOT wait on delivery.**
+
+**Dedup.** At most one terminal envelope per `lease_id`. The ledger transition is
+atomic and mutually exclusive (`Held→Released` vs `Held→Expired|Crashed`), so a
+normal close and an abnormal flush cannot both fire; a `normal` close supersedes a
+partial if they ever race.
+
+**Redaction is identical — no exemption** ("an exemption is a hole"): the partial
+goes through the same write-path redaction as a normal close.
+
+**Scope.** corelink-runners emits the partial on the reaper `Expired`/`Crashed`
+paths (implemented, PR #37). hugit consumes it at P2 when the live envelope
+transport (`interop.md` §2) is wired — at M1 there is no push transport, so the
+flush is a forensic record (a structured log line) pending P2; no hugit code
+change at M1.
+
 ---
 
 ## Amendment log
