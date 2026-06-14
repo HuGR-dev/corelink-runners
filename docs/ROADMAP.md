@@ -174,20 +174,46 @@ durable per-lease reap state, and a full adversarial audit. PRs #38–#47:
       cold-verify caught a committed-disabled supply-chain gate + a spawn-in-acquire
       invariant break before they shipped.
 
-## In flight (2026-06-14)
+## Landed 2026-06-14 (turn-feed + CP4 + recursive-audit hardening)
 
-- [~] **§13.2 turn-feed (the WRITE side)** — a lease-authenticated `POST
+- [x] **§13.2 turn-feed (the WRITE side)** _(#48)_ — a lease-authenticated `POST
       /v1/leases/{id}/envelope/ingest` so the in-box agent loop streams trajectory
-      events into the `CaptureHook` (today only tests feed it). Activates **ADR-0004
-      Phase 2b** (per-turn durable checkpoint via a non-destructive collector
-      snapshot). The contract §13.2 delegates the channel mechanism to the runner;
-      fabric build in progress + a proposal routed to hugit (their agent adopts the
-      endpoint): `docs/handoff/2026-06-14-hugit-turnfeed-ingest-proposal.md`.
-- [~] **ADR-0005 queued fair admission (CP4)** — wire the unused `FairScheduler`
-      behind `FABRIC_ADMISSION_MODE=reject|queue` (default `reject` = unchanged).
-      Under `queue`, over-cap acquires enqueue + dispatch fairly + light up
-      `/v1/metrics/tenant`. **Owner ratification pending:** queue (fair wait) vs
-      reject (fast fail) as the over-cap product semantics (ADR-0005 §Decision).
+      events into the `CaptureHook`. Activates **ADR-0004 Phase 2b** (per-turn
+      durable checkpoint via a non-destructive collector snapshot). The contract
+      §13.2 delegates the channel mechanism to the runner; proposal routed to hugit
+      (their agent adopts the endpoint):
+      `docs/handoff/2026-06-14-hugit-turnfeed-ingest-proposal.md`. **Box auth is a
+      per-lease, write-only, ingest-scoped token** — `HMAC-SHA256(derived_ingest_key,
+      "envelope-ingest:v1:" + lease_id)`, key domain-separated from the attestation
+      key — NOT the tenant PAT (the §5/ADR-0003 fix, below). The fully-§5-pure
+      broker/socket channel (nothing in box env) is the FC-era follow-up.
+- [x] **ADR-0005 queued fair admission (CP4)** _(#48)_ — `FairScheduler` wired
+      behind `FABRIC_ADMISSION_MODE=reject|queue` (default `reject` = unchanged;
+      byte-identical). Under `queue`, over-cap acquires enqueue + dispatch fairly +
+      light up `/v1/metrics/tenant`, with a per-tenant park-cap
+      (`FABRIC_ADMISSION_PARK_CAP`). **Owner ratification still pending:** queue
+      (fair wait) vs reject (fast fail) as the over-cap product semantics
+      (ADR-0005 §Decision).
+- [x] **result_binding_sig_v2** _(#48)_ — attestation binding upgraded to cover the
+      full outcome (memo_key‖stdout_ref‖stderr_ref‖exit‖artifacts[path‖digest]),
+      length-prefixed + domain-separated from v1. hugit-side verifier routed:
+      `docs/handoff/2026-06-14-SECURITY-hugit-attestation-binding-v2.md`.
+
+### Recursive adversarial audit — converged
+
+A recursive "audit → fix → re-audit the fix" sweep (multi-agent, every finding
+double-verified by 2 independent refuters: correctness + exploitability) ran to
+convergence on the post-#48 surface. Trajectory **28 → 15 → 9 → 4** confirmed,
+severity **P0 → P0 → P0 → P2/INFO** — the 4th re-audit found zero P0/P1, the
+convergence criterion. Highlights fixed at root (no waivers, no deferred debt):
+- **P0** — turn-feed injected the tenant master PAT into the untrusted, egress-open
+  box → replaced with the per-lease scoped ingest token (above). Trackers:
+  `docs/review/2026-06-14-{comprehensive-audit-findings,reaudit-findings,reaudit-newest-findings}.md`.
+- Regressions in the audit's OWN earlier fixes (stale-Pending sweep race, network-scan
+  masking, batch scan-failure drop, CP4 admission races, ws dedup key desync) — each
+  caught by re-auditing the fix and closed. The lead's cold-verify (AP-5) additionally
+  caught 4 near-misses (a committed-disabled supply-chain gate, a spawn-in-acquire
+  invariant break, a stray conformance file, a clippy lint).
 
 ## Remaining work — owner-gated or cross-repo
 
