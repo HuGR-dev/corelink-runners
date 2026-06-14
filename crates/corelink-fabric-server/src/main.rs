@@ -21,7 +21,13 @@ async fn main() -> anyhow::Result<()> {
         corelink_fabric_server::server::maybe_spawn_crash_sweep_from_env(state.clone(), |k| {
             std::env::var(k).ok()
         })?;
-    let reaper_handle = corelink_fabric_server::reaper::spawn_reaper(state, reaper_cfg);
+    let pending_max_age =
+        corelink_fabric_server::reaper::pending_max_age_from_env(|k| std::env::var(k).ok())?;
+    let reaper_handle = corelink_fabric_server::reaper::spawn_reaper_with_pending_age(
+        state,
+        reaper_cfg,
+        pending_max_age,
+    );
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind_addr).await?;
 

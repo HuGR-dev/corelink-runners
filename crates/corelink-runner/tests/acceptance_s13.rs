@@ -452,6 +452,40 @@ fn metadata_optional_fields_honest_both_ways() {
     );
 }
 
+/// B25b — the TurnMeta token total is SATURATING, not wrapping/panicking.
+/// `usage` is UNTRUSTED job input; a near-`u64::MAX` value across the four
+/// §13.1 classes must CAP at `u64::MAX` (release: no silent wrap; debug: no
+/// `attempt to add with overflow` panic on the write path). This mirrors the
+/// collector's saturating posture and is an INTERNAL fix — the TurnMeta total
+/// is the side-channel, not the frozen IntentMetrics wire shape.
+#[test]
+fn metadata_token_total_saturates_on_malicious_usage() {
+    let hook = open_hook(500, 64);
+    let sub = hook.subscribe(CRED_A).unwrap();
+
+    // Four near-MAX classes: a plain `+` would overflow (panic in debug, wrap
+    // in release). The honest cap is u64::MAX.
+    hook.write(TranscriptEvent::ModelTurn {
+        bytes: b"malicious-usage".to_vec(),
+        usage: Some(TurnUsage {
+            input: u64::MAX,
+            output: u64::MAX,
+            cache_read: u64::MAX,
+            cache_write: 7,
+        }),
+        busy_ms: 0,
+    })
+    .expect("write must not panic on a near-MAX usage sum");
+
+    let metas = drain_meta(&sub);
+    assert_eq!(metas.len(), 1);
+    assert_eq!(
+        metas[0].tokens,
+        Some(u64::MAX),
+        "untrusted usage sum must saturate at u64::MAX, never wrap or panic"
+    );
+}
+
 // ── B16 ───────────────────────────────────────────────────────────────────────
 
 /// B16 — the metadata side-channel is aligned 1:1 with the raw stream:

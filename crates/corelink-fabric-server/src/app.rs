@@ -141,9 +141,20 @@ pub struct AppState {
     /// Clock seam (deterministic under test).
     pub clock: Arc<dyn Clock>,
     /// Per-tenant wait statistics (CP4 non-interference surface). The
-    /// composition root feeds it from the CP3 scheduler's
-    /// `TickReport::waits_ms`; the metrics endpoint serves each tenant ITS
-    /// OWN snapshot, never anyone else's.
+    /// metrics endpoint serves each tenant ITS OWN snapshot, never anyone
+    /// else's — the tenant-scoping is real and pinned.
+    ///
+    /// TODO(CP4): wire this to the real `TickReport::waits_ms` feed. The
+    /// `CoreLink::interference::TenantWaitStats::{record,observe_tick}` sink
+    /// exists and the `FairScheduler` produces `TickReport`s, but the live
+    /// server has NO scheduler loop driving `FairScheduler::tick` (acquire is
+    /// immediate-or-reject, not queued), so nothing calls `observe_tick`
+    /// today. Until the production scheduler loop lands, `wait_stats` stays
+    /// empty and `GET /v1/metrics/tenant` honestly returns `count:0` for
+    /// every tenant. The endpoint shape + strict tenant-scoping are frozen
+    /// now so the day the feed lands it is a pure data-plane change, no wire
+    /// break. (Deliberately NOT faked to a non-zero — an empty meter is the
+    /// honest state, never a fabricated sample.)
     pub wait_stats: Arc<Mutex<TenantWaitStats>>,
     /// Per-tenant sliding 60s acquire-attempt windows (CP2 rate ceiling).
     pub(crate) rate_windows: Arc<Mutex<HashMap<TenantId, RateWindow>>>,
@@ -204,7 +215,40 @@ pub struct AppState {
     /// [`AppState::with_observability_key`].  Stored as `Arc<str>` (cheap clone);
     /// it must never appear in any error body or log line.
     pub(crate) observability_key: Option<Arc<str>>,
+    /// AUDIT P1: bounds how many `POST /v1/leases/{id}/close` ack windows may
+    /// occupy a blocking-pool thread concurrently. The frozen `JobClose::close`
+    /// ack wait blocks for up to the §13.2 ack window (30s) on a std condvar; it
+    /// runs on `spawn_blocking`, so a burst of N concurrent closes would pin N
+    /// blocking-pool threads for the FULL window and starve the pool (the same
+    /// pool serves provision/teardown/probe). This [`Semaphore`] caps the number
+    /// of in-flight ack waits: a close that finds all permits taken **awaits a
+    /// permit asynchronously** (parking NO thread) before it ever enters
+    /// `spawn_blocking`. Close semantics are byte-unchanged — the permit only
+    /// gates ENTRY to the wait, never the exactly-once close, the fail-closed
+    /// timeout, or the attestation emission. From
+    /// `FABRIC_CLOSE_ACK_MAX_INFLIGHT` (default
+    /// [`DEFAULT_CLOSE_ACK_MAX_INFLIGHT`]).
+    pub(crate) close_ack_gate: Arc<tokio::sync::Semaphore>,
+    /// AUDIT P2: the global in-flight request cap applied as the OUTERMOST
+    /// router layer in [`app_full`] (a tower `GlobalConcurrencyLimitLayer` +
+    /// `LoadShedLayer`). When more than this many requests are being served at
+    /// once, the excess is SHED with `503 Service Unavailable` rather than
+    /// queued unboundedly — bounding memory + tail latency under load. From
+    /// `FABRIC_MAX_INFLIGHT_REQUESTS` (default [`DEFAULT_MAX_INFLIGHT_REQUESTS`]).
+    pub(crate) max_inflight_requests: usize,
 }
+
+/// Default cap on concurrent close ack-window waits (audit P1). Chosen so a
+/// burst of closes can never pin more than this many blocking-pool threads for
+/// the full 30s window — the rest park asynchronously. Overridable via
+/// `FABRIC_CLOSE_ACK_MAX_INFLIGHT`.
+pub const DEFAULT_CLOSE_ACK_MAX_INFLIGHT: usize = 256;
+
+/// Default global in-flight request cap (audit P2). A deliberately generous
+/// ceiling: it is a backstop against unbounded queueing / memory growth under a
+/// thundering herd, NOT a throughput throttle for normal operation. Overridable
+/// via `FABRIC_MAX_INFLIGHT_REQUESTS`.
+pub const DEFAULT_MAX_INFLIGHT_REQUESTS: usize = 1024;
 
 /// Deterministic DEV seed for the default fabric signing key wired by
 /// [`AppState::new`] — tests and local composition only; NEVER a production
@@ -235,7 +279,39 @@ impl AppState {
             slot_meter: Arc::new(Mutex::new(SlotMeter::new())),
             // Default-off: no observability key → the occupancy route 404s.
             observability_key: None,
+            // AUDIT P1: default close ack-window concurrency cap. The production
+            // composition root overrides it from FABRIC_CLOSE_ACK_MAX_INFLIGHT
+            // via `with_close_ack_max_inflight`.
+            close_ack_gate: Arc::new(tokio::sync::Semaphore::new(DEFAULT_CLOSE_ACK_MAX_INFLIGHT)),
+            // AUDIT P2: default global in-flight cap; the composition root
+            // overrides it from FABRIC_MAX_INFLIGHT_REQUESTS.
+            max_inflight_requests: DEFAULT_MAX_INFLIGHT_REQUESTS,
         }
+    }
+
+    /// Override the close ack-window concurrency cap (audit P1).
+    ///
+    /// `max_inflight` is the number of `POST /close` ack waits that may pin a
+    /// blocking-pool thread at once; the rest park asynchronously on the
+    /// semaphore. A value of 0 is coerced to 1 (a zero-permit semaphore would
+    /// deadlock every close); the production composition root validates the env
+    /// value separately and never passes 0.
+    #[must_use]
+    pub fn with_close_ack_max_inflight(mut self, max_inflight: usize) -> Self {
+        self.close_ack_gate = Arc::new(tokio::sync::Semaphore::new(max_inflight.max(1)));
+        self
+    }
+
+    /// Override the global in-flight request cap (audit P2).
+    ///
+    /// Excess requests beyond `max_inflight` are SHED with 503 by the
+    /// `LoadShedLayer` in [`app_full`]. A value of 0 is coerced to 1 (a
+    /// zero-limit layer would shed every request); the composition root
+    /// validates the env value separately.
+    #[must_use]
+    pub fn with_max_inflight_requests(mut self, max_inflight: usize) -> Self {
+        self.max_inflight_requests = max_inflight.max(1);
+        self
     }
 
     /// Arm the internal observability endpoint (`GET /internal/v1/occupancy`)
@@ -360,6 +436,25 @@ impl AppState {
             .unwrap_or_else(|p| p.into_inner())
             .get(lease_id)
             .cloned()
+    }
+
+    /// Resolve a tenant plan OFF the async executor (audit W2-C P2 — introspect
+    /// offload). The production `CoreLinkPlanStore::plan_of_resolving` does a
+    /// synchronous `ureq` introspect round-trip; on an async worker it would pin
+    /// a scarce executor thread under `FABRIC_AUTH_BACKEND=corelink` (every
+    /// acquire starves a worker). It is offloaded to the blocking pool HERE —
+    /// the offload primitive lives on `AppState`, deliberately NOT in the API2
+    /// acquire handler (`leases.rs`), which the source-pinning invariant forbids
+    /// from referencing box/`spawn` machinery (the API2/API3 separation). A
+    /// panicked blocking task surfaces as the `JoinError`, which the caller maps
+    /// to `Unreachable` (503 fail-closed), never a false no-plan reject.
+    pub(crate) async fn resolve_plan_offloaded(
+        &self,
+        tenant: TenantId,
+        pat: String,
+    ) -> Result<Result<Option<TenantPlan>, PlanSourceError>, tokio::task::JoinError> {
+        let plans = Arc::clone(&self.plans);
+        tokio::task::spawn_blocking(move || plans.plan_of_resolving(&tenant, &pat)).await
     }
 
     /// Mint a globally-unique lease id (`lease-<uuid-v4>`).
@@ -535,6 +630,10 @@ pub fn app_full(
     // Extension) operate on the SAME map as the HTTP poll/close handlers.
     state.hook_registry = Arc::clone(&registry);
 
+    // AUDIT P2: capture the global in-flight cap before `state` is moved into
+    // `.with_state(...)` below; the layer is applied at the very end.
+    let max_inflight = state.max_inflight_requests;
+
     // Internal/ops route (WP-OCCUPANCY-API): the slot-occupancy snapshot.
     // Mounted OUTSIDE the Bearer-PAT layer below — it is gated by its own
     // observability secret (the `X-Corelink-Internal-Auth` header), NOT a tenant
@@ -561,10 +660,31 @@ pub fn app_full(
         .layer(Extension(registry))
         .layer(middleware::from_fn_with_state(store, auth::require_tenant));
 
-    Router::new()
+    let router = Router::new()
         .route(paths::HEALTH, get(health))
         .merge(internal)
-        .merge(authenticated)
+        .merge(authenticated);
+
+    // AUDIT P2: global in-flight cap + load-shedding, applied as the OUTERMOST
+    // layer so it governs EVERY route (health included — a thundering herd on
+    // the LB liveness probe must not exhaust memory either). `LoadShedLayer`
+    // turns "limit reached" into an immediate `Overloaded` error instead of an
+    // unbounded queue; `HandleErrorLayer` maps that error to a clean
+    // `503 Service Unavailable`. The order in `ServiceBuilder` is top→bottom =
+    // outer→inner, so: handle-error wraps load-shed wraps the concurrency limit.
+    let max_inflight = max_inflight.max(1);
+    router.layer(
+        tower::ServiceBuilder::new()
+            .layer(axum::error_handling::HandleErrorLayer::new(
+                |_err: axum::BoxError| async move {
+                    // The only error the stack below produces is load-shed's
+                    // `Overloaded`; map it to the frozen fail-closed status.
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE
+                },
+            ))
+            .layer(tower::load_shed::LoadShedLayer::new())
+            .layer(tower::limit::GlobalConcurrencyLimitLayer::new(max_inflight)),
+    )
 }
 
 /// The internal slot-occupancy route (WP-OCCUPANCY-API).  An ops/observability

@@ -164,6 +164,21 @@ pub struct ServerConfig {
     /// verify-full rustls against the bundled public-CA set.  Ignored by the
     /// `Memory` backend.
     pub pg_tls: PgTlsMode,
+    /// AUDIT P1: max concurrent close ack-window waits. From
+    /// `FABRIC_CLOSE_ACK_MAX_INFLIGHT` (default
+    /// [`DEFAULT_CLOSE_ACK_MAX_INFLIGHT`], must be ≥ 1). Bounds how many
+    /// `POST /close` ack waits may pin a blocking-pool thread at once; the rest
+    /// park asynchronously.
+    ///
+    /// [`DEFAULT_CLOSE_ACK_MAX_INFLIGHT`]: crate::app::DEFAULT_CLOSE_ACK_MAX_INFLIGHT
+    pub close_ack_max_inflight: usize,
+    /// AUDIT P2: global in-flight request cap. From
+    /// `FABRIC_MAX_INFLIGHT_REQUESTS` (default
+    /// [`DEFAULT_MAX_INFLIGHT_REQUESTS`], must be ≥ 1). Requests beyond this are
+    /// shed with 503 rather than queued unboundedly.
+    ///
+    /// [`DEFAULT_MAX_INFLIGHT_REQUESTS`]: crate::app::DEFAULT_MAX_INFLIGHT_REQUESTS
+    pub max_inflight_requests: usize,
 }
 
 impl std::fmt::Debug for ServerConfig {
@@ -188,6 +203,8 @@ impl std::fmt::Debug for ServerConfig {
             )
             .field("ledger_pool_size", &self.ledger_pool_size)
             .field("pg_tls", &self.pg_tls)
+            .field("close_ack_max_inflight", &self.close_ack_max_inflight)
+            .field("max_inflight_requests", &self.max_inflight_requests)
             .finish()
     }
 }
@@ -503,6 +520,23 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
     // unit-tested in one place. Read unconditionally (cheap; ignored by Memory).
     let pg_tls = corelink_fabric::pg_tls_mode_from_env(&get)?;
 
+    // ── AUDIT P1: close ack-window concurrency cap ───────────────────────────
+    // Optional, default DEFAULT_CLOSE_ACK_MAX_INFLIGHT; 0/unparseable → error
+    // (0 would deadlock every close; absence is the use-the-default path).
+    let close_ack_max_inflight = parse_positive_usize(
+        &get,
+        "FABRIC_CLOSE_ACK_MAX_INFLIGHT",
+        crate::app::DEFAULT_CLOSE_ACK_MAX_INFLIGHT,
+    )?;
+
+    // ── AUDIT P2: global in-flight request cap ───────────────────────────────
+    // Optional, default DEFAULT_MAX_INFLIGHT_REQUESTS; 0/unparseable → error.
+    let max_inflight_requests = parse_positive_usize(
+        &get,
+        "FABRIC_MAX_INFLIGHT_REQUESTS",
+        crate::app::DEFAULT_MAX_INFLIGHT_REQUESTS,
+    )?;
+
     Ok(ServerConfig {
         bind_addr,
         signing_key,
@@ -517,7 +551,34 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
         database_url,
         ledger_pool_size,
         pg_tls,
+        close_ack_max_inflight,
+        max_inflight_requests,
     })
+}
+
+/// Parse an optional positive-`usize` env var, falling back to `default` when
+/// absent/empty. A present `0` or unparseable value is a hard boot error — a
+/// deployer mistake must fail loudly, never silently use a degenerate limit.
+fn parse_positive_usize(
+    get: impl Fn(&str) -> Option<String>,
+    key: &str,
+    default: usize,
+) -> anyhow::Result<usize> {
+    match get(key)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        None => Ok(default),
+        Some(v) => {
+            let n = v
+                .parse::<usize>()
+                .with_context(|| format!("{key} must be a valid usize"))?;
+            if n == 0 {
+                anyhow::bail!("{key} must be >= 1 (0 is degenerate)");
+            }
+            Ok(n)
+        }
+    }
 }
 
 // ── build_app_and_state ───────────────────────────────────────────────────────
@@ -657,6 +718,11 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
 
     // Arm the internal observability endpoint (default-off: None → 404).
     let state = state.with_observability_key(cfg.observability_key.clone());
+
+    // AUDIT P1+P2: apply the close ack-window cap and the global in-flight cap.
+    let state = state
+        .with_close_ack_max_inflight(cfg.close_ack_max_inflight)
+        .with_max_inflight_requests(cfg.max_inflight_requests);
 
     let router = app_full(store, state.clone(), Arc::new(HookRegistry::default()));
     Ok((router, state))

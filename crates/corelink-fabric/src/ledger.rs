@@ -167,6 +167,24 @@ pub trait LeaseLedger {
     /// (BIL1: slot occupancy = held leases).
     fn held(&self) -> anyhow::Result<Vec<LeaseRecord>>;
 
+    /// All `Pending` records whose `created_at_ms` is at or before
+    /// `now_ms.saturating_sub(max_age_ms)` — i.e. leases that have sat in the
+    /// pre-provision `Pending` reservation for LONGER than `max_age_ms`,
+    /// ordered by `lease_id` (deterministic).
+    ///
+    /// The enumeration seam for the **stale-Pending sweep**
+    /// ([`crate::reaper`]). A `Pending` lease reserves a concurrency slot
+    /// BEFORE provisioning; if the instance dies between the `try_admit`
+    /// reservation and either the `Held` transition or the rollback `remove`,
+    /// the row sits forever counting against the tenant cap — the deadline
+    /// reaper only sweeps `Held`, never `Pending`. This method finds the
+    /// genuinely-stale ones so the sweep can reclaim the leaked slot.
+    ///
+    /// FAIL-SAFE: only records strictly older than the bound are returned; a
+    /// fresh `Pending` that is legitimately mid-provision is NEVER included
+    /// (the bound must be set well past any legitimate provision window).
+    fn pending_older_than(&self, now_ms: u64, max_age_ms: u64) -> anyhow::Result<Vec<LeaseRecord>>;
+
     /// Atomically admit a `Pending` lease IFF the tenant's active (Pending+Held)
     /// count is strictly under `max_concurrency`. Returns Ok(true) on admit (the
     /// record is inserted as Pending), Ok(false) on over-cap (nothing inserted).
@@ -281,6 +299,18 @@ impl LeaseLedger for InMemoryLedger {
             .records
             .values()
             .filter(|r| r.state.is_held())
+            .cloned()
+            .collect();
+        out.sort_by(|a, b| a.lease_id.cmp(&b.lease_id));
+        Ok(out)
+    }
+
+    fn pending_older_than(&self, now_ms: u64, max_age_ms: u64) -> anyhow::Result<Vec<LeaseRecord>> {
+        let cutoff = now_ms.saturating_sub(max_age_ms);
+        let mut out: Vec<LeaseRecord> = self
+            .records
+            .values()
+            .filter(|r| matches!(r.state, LeaseState::Pending) && r.created_at_ms <= cutoff)
             .cloned()
             .collect();
         out.sort_by(|a, b| a.lease_id.cmp(&b.lease_id));
@@ -563,6 +593,10 @@ impl LeaseLedger for FileLedger {
 
     fn held(&self) -> anyhow::Result<Vec<LeaseRecord>> {
         self.index.held()
+    }
+
+    fn pending_older_than(&self, now_ms: u64, max_age_ms: u64) -> anyhow::Result<Vec<LeaseRecord>> {
+        self.index.pending_older_than(now_ms, max_age_ms)
     }
 
     fn try_admit(&mut self, rec: LeaseRecord, max_concurrency: u32) -> anyhow::Result<bool> {

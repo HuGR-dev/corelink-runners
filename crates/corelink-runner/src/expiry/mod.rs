@@ -35,8 +35,15 @@ pub struct ExpiryOutcome {
 ///
 /// Deterministic from [`RunnerLease::expiry`]; `expiry == u64::MAX` is the
 /// "never expires" sentinel the acceptance leases use for non-expiry items.
+/// The sentinel is honoured even at `now_ms == u64::MAX`: a plain
+/// `now_ms >= expiry` would report the never-expiring lease as expired at the
+/// MAX instant (`MAX >= MAX`), so the sentinel is guarded explicitly.
 #[must_use]
 pub fn is_expired(lease: &RunnerLease, now_ms: u64) -> bool {
+    if lease.expiry == u64::MAX {
+        // "Never expires" sentinel: never expired, even when now is also MAX.
+        return false;
+    }
     now_ms >= lease.expiry
 }
 
@@ -127,5 +134,8 @@ mod tests {
     #[test]
     fn never_sentinel_does_not_expire() {
         assert!(!is_expired(&lease(u64::MAX), u64::MAX - 1));
+        // The sentinel holds even at the MAX instant: MAX >= MAX must NOT
+        // expire a "never expires" lease (guarded sentinel, not bare `>=`).
+        assert!(!is_expired(&lease(u64::MAX), u64::MAX));
     }
 }

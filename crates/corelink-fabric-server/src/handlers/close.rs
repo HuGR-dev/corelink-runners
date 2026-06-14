@@ -223,6 +223,26 @@ pub(crate) async fn close(
     // never reached this gate, so the close signal is delivered exactly once.
     let (metrics, capture_incomplete) = match registry.close_handle(&lease_id, &tenant) {
         Some((hook, price)) => {
+            // AUDIT P1: the ack wait below blocks for up to the §13.2 ack window
+            // (30s) on a std condvar, run via `spawn_blocking`. WITHOUT a bound,
+            // N concurrent closes pin N blocking-pool threads for the full
+            // window — exhausting the pool that ALSO serves provision/teardown/
+            // probe, so the ack becomes unreachable over HTTP and the server
+            // stalls. We gate ENTRY to the blocking wait on a bounded async
+            // semaphore: when all permits are taken, this close `.await`s a
+            // permit (parking NO thread) instead of pinning one. The permit is
+            // held only for the duration of the blocking close and dropped the
+            // instant it returns. Close semantics are byte-unchanged — the gate
+            // never touches the exactly-once latch, the fail-closed timeout, or
+            // the attestation emission. `acquire_owned` only errors if the
+            // semaphore is closed, which we never do → fail-closed on that
+            // impossible case.
+            let Ok(_ack_permit) = Arc::clone(&state.close_ack_gate).acquire_owned().await else {
+                return error_response(
+                    ApiError::FailClosed,
+                    "close ack gate unavailable; failing closed",
+                );
+            };
             let job_close = JobClose::new(&hook);
             let outcome = tokio::task::spawn_blocking(move || {
                 job_close.close(status, Instant::now(), &price)

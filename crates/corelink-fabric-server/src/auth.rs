@@ -98,7 +98,23 @@ pub(crate) async fn require_tenant(
     let Some(token_str) = bearer_token(&req).map(str::to_string) else {
         return error_response(ApiError::Unauthorized, "missing Bearer PAT");
     };
-    match store.tenant_of(&token_str) {
+    // AUDIT P2: `tenant_of` may be a BLOCKING introspect call (the production
+    // `CoreLinkTokenStore` does a synchronous `ureq` round-trip). Running it
+    // directly on the async worker would pin a scarce executor thread for the
+    // whole network round-trip → under `FABRIC_AUTH_BACKEND=corelink` every
+    // auth'd request starves a worker. Offload to the blocking pool so the
+    // executor stays free; the fail-closed mapping is unchanged — a panicked
+    // blocking task is treated as `Unreachable` (503), never an admission.
+    let resolved = {
+        let token = token_str.clone();
+        tokio::task::spawn_blocking(move || store.tenant_of(&token)).await
+    };
+    let resolved = match resolved {
+        Ok(r) => r,
+        // The blocking task panicked: fail-closed, never admit on ambiguity.
+        Err(_) => Err(TokenStoreError::Unreachable),
+    };
+    match resolved {
         Ok(Some(tenant)) => {
             req.extensions_mut().insert(BearerPat(token_str));
             req.extensions_mut().insert(tenant);

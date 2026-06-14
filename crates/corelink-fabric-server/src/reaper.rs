@@ -405,7 +405,21 @@ pub async fn reap_once(state: &crate::AppState) -> usize {
     // never served the acquire. There is no in-memory `deadlines` map.
     let held = {
         let ledger = state.ledger.lock().unwrap_or_else(|e| e.into_inner());
-        ledger.held().unwrap_or_default()
+        // A ledger read error must NOT panic (liveness: the reaper must keep
+        // ticking), but it must NOT be SILENT either — `unwrap_or_default()`
+        // would make a persistent ledger fault look like "nothing to reap"
+        // forever. Log it and degrade to an empty sweep this tick; the next
+        // tick retries.
+        match ledger.held() {
+            Ok(records) => records,
+            Err(e) => {
+                eprintln!(
+                    "reaper: ledger held() read failed this tick (skipping expiry sweep, \
+                     will retry next tick): {e:#}"
+                );
+                Vec::new()
+            }
+        }
         // `ledger` (MutexGuard) is dropped here — before any await below.
     };
 
@@ -481,6 +495,21 @@ pub async fn reap_once(state: &crate::AppState) -> usize {
 /// bind the handle and call `.abort()` after the server's graceful-shutdown
 /// future resolves so the task does not outlive the process.
 pub fn spawn_reaper(state: crate::AppState, cfg: ReaperConfig) -> tokio::task::JoinHandle<()> {
+    spawn_reaper_with_pending_age(state, cfg, DEFAULT_PENDING_MAX_AGE)
+}
+
+/// [`spawn_reaper`], with an explicit stale-Pending staleness bound.
+///
+/// The always-on reaper task runs BOTH sweeps each tick: the deadline-expiry
+/// sweep ([`reap_once`]) AND the stale-Pending sweep ([`sweep_stale_pending`]),
+/// because both reclaim leaked tenant cap and neither is opt-in. The
+/// composition root resolves `pending_max_age` from
+/// [`pending_max_age_from_env`].
+pub fn spawn_reaper_with_pending_age(
+    state: crate::AppState,
+    cfg: ReaperConfig,
+    pending_max_age: Duration,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(cfg.interval);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -489,6 +518,12 @@ pub fn spawn_reaper(state: crate::AppState, cfg: ReaperConfig) -> tokio::task::J
             let n = reap_once(&state).await;
             if n > 0 {
                 eprintln!("reaper: expired+reclaimed {n} overdue lease(s)");
+            }
+            // Stale-Pending sweep: reclaim cap slots leaked by a Pending whose
+            // instance died between reserve and the Held transition / rollback.
+            let p = sweep_stale_pending(&state, pending_max_age).await;
+            if p > 0 {
+                eprintln!("reaper: reclaimed {p} stale Pending lease(s) (leaked cap slot)");
             }
         }
     })
@@ -568,7 +603,19 @@ pub async fn surface_crashes(state: &crate::AppState) -> usize {
     // ── 1. Snapshot held leases — guard dropped at end of block, before await.
     let held = {
         let ledger = state.ledger.lock().unwrap_or_else(|e| e.into_inner());
-        ledger.held().unwrap_or_default()
+        // Same liveness-but-not-silent posture as `reap_once`: a ledger read
+        // error is logged and degrades to an empty sweep this tick (never a
+        // panic, never a silent skip).
+        match ledger.held() {
+            Ok(records) => records,
+            Err(e) => {
+                eprintln!(
+                    "crash-sweep: ledger held() read failed this tick (skipping probe sweep, \
+                     will retry next tick): {e:#}"
+                );
+                Vec::new()
+            }
+        }
         // `ledger` (MutexGuard) is dropped here — before any await below.
     };
 
@@ -655,6 +702,149 @@ pub fn spawn_crash_sweep(
     })
 }
 
+// ── Stale-Pending sweep (WP-PENDING-SWEEP) ───────────────────────────────────
+//
+// `try_admit` reserves a `Pending` lease BEFORE provisioning, and that Pending
+// counts against the tenant concurrency cap (the §1 active set is Pending+Held).
+// The normal path moves Pending→Held (acquire success) or `remove`s it (provision
+// failure rollback). But if the instance dies BETWEEN the reserve and either of
+// those — e.g. it crashes mid-provision — the Pending row sits forever counting
+// against the cap. The deadline reaper only sweeps `Held` (a Pending has no
+// `deadline_ms` and is never in `held()`), so nothing reclaims it.
+//
+// This sweep reclaims a GENUINELY-stale Pending: one whose `created_at_ms` is
+// older than a bound well past any legitimate provision window. It tears down
+// any box the dead instance may have half-provisioned (best-effort, mirroring
+// the Held reaper's teardown-first posture) and then `remove`s the Pending row —
+// the §1-honest rollback (a Pending has no legal terminal transition), freeing
+// the leaked cap slot. NO slot-meter event is emitted: the `Acquired` event
+// fires only at Pending→Held (see the acquire handler), so a never-Held Pending
+// never recorded one — there is nothing to balance.
+
+/// Default staleness bound for the [`sweep_stale_pending`] reclaim: a `Pending`
+/// older than this is considered leaked (well past any legitimate provision
+/// window — provisioning a box is an O(seconds) operation, so 5 minutes is a
+/// very conservative floor that can never catch a mid-provision Pending).
+pub const DEFAULT_PENDING_MAX_AGE: Duration = Duration::from_secs(300);
+
+/// Resolve the stale-Pending staleness bound from an environment-variable
+/// accessor.
+///
+/// Reads `FABRIC_PENDING_MAX_AGE_SECS`.
+/// - Absent or empty → [`DEFAULT_PENDING_MAX_AGE`] (300 s).
+/// - Present → parse as `u32`; value `0` or an unparseable string → `Err`
+///   (a zero bound would reap a just-reserved Pending mid-provision — a
+///   deployer mistake, fail-closed rather than silently disable).
+///
+/// `get` is `|k| std::env::var(k).ok()` in production; a map lookup in tests.
+pub fn pending_max_age_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<Duration> {
+    match get("FABRIC_PENDING_MAX_AGE_SECS").filter(|s| !s.is_empty()) {
+        None => Ok(DEFAULT_PENDING_MAX_AGE),
+        Some(val) => {
+            let parsed = val.trim().parse::<u32>().map_err(|_| {
+                anyhow::anyhow!(
+                    "FABRIC_PENDING_MAX_AGE_SECS must be a valid u32 (got {:?})",
+                    val.trim()
+                )
+            })?;
+            if parsed == 0 {
+                anyhow::bail!(
+                    "FABRIC_PENDING_MAX_AGE_SECS must be >= 1 \
+                     (0 would reap a Pending mid-provision)"
+                );
+            }
+            Ok(Duration::from_secs(parsed as u64))
+        }
+    }
+}
+
+/// Run one stale-Pending sweep: reclaim every `Pending` lease older than
+/// `max_age` by tearing down any half-provisioned box (best-effort) and
+/// removing the Pending row, freeing the leaked concurrency slot.
+///
+/// Returns the number of stale Pending leases reclaimed this tick.
+///
+/// # Fail-safe
+///
+/// ONLY a Pending strictly older than `max_age` (per its durable
+/// `created_at_ms`) is touched — a fresh Pending that is legitimately
+/// mid-provision is NEVER reclaimed. The bound is set well past any legitimate
+/// provision window ([`DEFAULT_PENDING_MAX_AGE`]).
+///
+/// # Posture (teardown-first, like [`reap_once`])
+///
+/// Teardown is attempted FIRST (the dead instance may have created the box
+/// before dying). Teardown is best-effort here: unlike the Held path — where a
+/// failed teardown leaves the lease Held to retry on its hard deadline — a
+/// stale Pending has NO deadline and would otherwise leak forever, so the
+/// reclaim proceeds to `remove` regardless. A teardown failure is logged so a
+/// possibly-leaked box is still visible.
+///
+/// # Lock-ordering note
+///
+/// No `MutexGuard` is held across any `await`: the stale-Pending snapshot is
+/// taken in a scoped block (guard dropped before the teardown await), and the
+/// `remove` re-acquires the ledger lock briefly afterwards. The compile-time
+/// [`_ASSERT_SWEEP_STALE_PENDING_IS_SEND`] assertion enforces this.
+pub async fn sweep_stale_pending(state: &crate::AppState, max_age: Duration) -> usize {
+    let now = state.clock.now_ms();
+    let max_age_ms = max_age.as_millis() as u64;
+
+    // ── 1. Snapshot stale Pending leases — guard dropped before any await.
+    let stale = {
+        let ledger = state.ledger.lock().unwrap_or_else(|e| e.into_inner());
+        match ledger.pending_older_than(now, max_age_ms) {
+            Ok(records) => records,
+            Err(e) => {
+                eprintln!(
+                    "pending-sweep: ledger pending_older_than() read failed this tick \
+                     (skipping, will retry next tick): {e:#}"
+                );
+                Vec::new()
+            }
+        }
+        // `ledger` (MutexGuard) dropped here — before any await below.
+    };
+
+    let mut reclaimed = 0usize;
+
+    for rec in stale {
+        // ── 2. TEARDOWN FIRST (best-effort) — no lock held. The dead instance
+        // may have half-provisioned a box before dying; tear it down so it is
+        // not leaked. A failure is logged but does NOT block the reclaim: a
+        // Pending has no deadline, so leaving it would leak the cap slot
+        // forever.
+        let torn = state.teardown_lease(&rec.lease_id).await;
+        if !torn {
+            eprintln!(
+                "pending-sweep: teardown of stale Pending {} failed — box may be LEAKED \
+                 (reclaiming the cap slot anyway; a Pending has no deadline to retry on)",
+                rec.lease_id
+            );
+        }
+
+        // ── 3. Remove the Pending row — the §1-honest rollback (Pending has no
+        // legal terminal transition). Frees the leaked concurrency slot. Only
+        // count it if WE actually removed it (a concurrent rollback/acquire may
+        // have raced us; `remove` then returns Ok(false)).
+        let removed = {
+            let mut ledger = state.ledger.lock().unwrap_or_else(|e| e.into_inner());
+            ledger.remove(&rec.lease_id).unwrap_or(false)
+            // guard dropped here at end of block
+        };
+
+        if removed {
+            // GC any image side-table entry the half-acquire recorded (the slot
+            // meter never got an Acquired event for a never-Held Pending, so
+            // there is nothing to free there).
+            state.forget_lease(&rec.lease_id);
+            reclaimed += 1;
+        }
+    }
+
+    reclaimed
+}
+
 // ── Compile-time Send guard ────────────────────────────────────────────────
 //
 // If `reap_once` ever acquires a `MutexGuard` (or any other `!Send` type)
@@ -677,6 +867,16 @@ const _ASSERT_SURFACE_CRASHES_IS_SEND: () = {
     fn _assert_send_fut<F: std::future::Future + Send>(_: F) {}
     fn _check(state: crate::AppState) {
         _assert_send_fut(surface_crashes(&state));
+    }
+};
+
+// Same guard for `sweep_stale_pending`: a `MutexGuard` held across the teardown
+// `await` would make its future `!Send` and break this assertion at compile time.
+#[allow(dead_code)]
+const _ASSERT_SWEEP_STALE_PENDING_IS_SEND: () = {
+    fn _assert_send_fut<F: std::future::Future + Send>(_: F) {}
+    fn _check(state: crate::AppState) {
+        _assert_send_fut(sweep_stale_pending(&state, DEFAULT_PENDING_MAX_AGE));
     }
 };
 
@@ -994,6 +1194,119 @@ mod tests {
             .get(lease_id)
             .unwrap()
             .and_then(|rec| rec.deadline_ms)
+    }
+
+    /// Insert a `Pending` lease record with the given `created_at_ms` — the
+    /// pre-provision reservation state the stale-Pending sweep reclaims. Stays
+    /// `Pending` (never transitioned to Held), so it is NOT in `held()` and the
+    /// deadline reaper never sees it.
+    fn insert_pending(state: &AppState, lease_id: &str, created_at_ms: u64) {
+        let mut ledger = state.ledger.lock().unwrap();
+        ledger
+            .put(LeaseRecord {
+                lease_id: lease_id.to_string(),
+                tenant: TenantId::new("acme").unwrap(),
+                state: LeaseState::Pending,
+                box_ref: format!("box:{lease_id}"),
+                created_at_ms,
+                updated_at_ms: created_at_ms,
+                deadline_ms: None,
+            })
+            .unwrap();
+    }
+
+    /// `true` iff the lease still exists in the ledger.
+    fn lease_exists(state: &AppState, lease_id: &str) -> bool {
+        state
+            .ledger
+            .lock()
+            .unwrap()
+            .get(lease_id)
+            .unwrap()
+            .is_some()
+    }
+
+    // ── Stale-Pending sweep tests (WP-PENDING-SWEEP) ──────────────────────────
+
+    /// A `Pending` older than the bound is reclaimed (removed → cap freed); a
+    /// FRESH `Pending` is left untouched. The fail-safe core of the sweep.
+    #[tokio::test]
+    async fn sweep_reclaims_stale_pending_leaves_fresh() {
+        // Clock at 1_000_000 ms; bound = 300 s = 300_000 ms → cutoff 700_000.
+        let (state, _clock, prov) = build_state(1_000_000);
+
+        // Stale: created at 100_000 (≪ cutoff) → reclaimed.
+        insert_pending(&state, "pending-stale", 100_000);
+        // Fresh: created at 990_000 (> cutoff) → left (mid-provision, fail-safe).
+        insert_pending(&state, "pending-fresh", 990_000);
+
+        let reclaimed = sweep_stale_pending(&state, Duration::from_secs(300)).await;
+        assert_eq!(reclaimed, 1, "exactly the one stale Pending is reclaimed");
+
+        // Stale gone (cap slot freed); fresh still present.
+        assert!(
+            !lease_exists(&state, "pending-stale"),
+            "the stale Pending must be removed (leaked cap slot reclaimed)"
+        );
+        assert!(
+            lease_exists(&state, "pending-fresh"),
+            "a fresh Pending must be LEFT (never reap one mid-provision)"
+        );
+
+        // Teardown was attempted for the leaked box (best-effort, teardown-first).
+        assert!(
+            prov.teardown_calls().contains(&"pending-stale".to_string()),
+            "teardown must be attempted for the reclaimed Pending's box"
+        );
+        assert!(
+            !prov.teardown_calls().contains(&"pending-fresh".to_string()),
+            "the fresh Pending's box must NOT be torn down"
+        );
+    }
+
+    /// The deadline reaper ([`reap_once`]) NEVER reclaims a Pending (it sweeps
+    /// `Held` only) — proving the stale-Pending sweep is the sole reclaimer and
+    /// the two paths do not overlap.
+    #[tokio::test]
+    async fn reap_once_never_touches_pending() {
+        let (state, _clock, prov) = build_state(1_000_000);
+        insert_pending(&state, "pending-old", 1); // very old
+
+        let reaped = reap_once(&state).await;
+        assert_eq!(reaped, 0, "the deadline reaper must never reap a Pending");
+        assert!(
+            lease_exists(&state, "pending-old"),
+            "the Pending must survive reap_once (only the Pending sweep reclaims it)"
+        );
+        assert!(
+            prov.teardown_calls().is_empty(),
+            "reap_once must not tear down a Pending"
+        );
+    }
+
+    /// `FABRIC_PENDING_MAX_AGE_SECS`: absent → 300 s default; `0` → error;
+    /// `"60"` → 60 s.
+    #[test]
+    fn pending_max_age_config() {
+        assert_eq!(
+            pending_max_age_from_env(|_| None).unwrap(),
+            Duration::from_secs(300),
+            "absent env → 300 s default"
+        );
+        assert!(
+            pending_max_age_from_env(
+                |k| (k == "FABRIC_PENDING_MAX_AGE_SECS").then(|| "0".to_string())
+            )
+            .is_err(),
+            "0 must error (would reap mid-provision)"
+        );
+        assert_eq!(
+            pending_max_age_from_env(
+                |k| (k == "FABRIC_PENDING_MAX_AGE_SECS").then(|| "60".to_string())
+            )
+            .unwrap(),
+            Duration::from_secs(60),
+        );
     }
 
     // ── Config tests ──────────────────────────────────────────────────────────
