@@ -475,7 +475,7 @@ fn item_3_spawn_lt_1s_concurrent_dedup_one_materialization() {
         "dedup: only ONE container '{expected_name}' must exist (not two)"
     );
 
-    spawner.evict(&workspace_id);
+    spawner.evict(&lease_dedup);
     let _ = teardown(&boxx, &h1.container);
 }
 
