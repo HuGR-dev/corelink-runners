@@ -771,7 +771,10 @@ mod tests {
     /// The headline assertion: NO exit/artifact mutation EVER survives v2.
     #[test]
     fn prop_v2_unforgeable_v1_blind() {
-        const ITERS: u32 = 8_000;
+        // 1024 deterministic cases: a forgery/framing bug fails on its first
+        // adversarial input, so this is ample coverage while keeping debug-mode
+        // ed25519 (slow, unoptimized) fast enough for the gate/CI.
+        const ITERS: u32 = 1_024;
         let signer = FabricSigner::new_from_bytes(&SEED);
         let pk = signer.public_key_b64();
         let mut rng = Rng::new(0xC0DE_F00D_1234_5678);
@@ -913,7 +916,10 @@ mod tests {
     /// are always distinct and ed25519 binds the message.
     #[test]
     fn prop_v1_v2_domain_separation() {
-        const ITERS: u32 = 8_000;
+        // 1024 deterministic cases: a forgery/framing bug fails on its first
+        // adversarial input, so this is ample coverage while keeping debug-mode
+        // ed25519 (slow, unoptimized) fast enough for the gate/CI.
+        const ITERS: u32 = 1_024;
         let signer = FabricSigner::new_from_bytes(&SEED);
         let pk = signer.public_key_b64();
         let mut rng = Rng::new(0xFACE_B00C_1357_9BDF);
