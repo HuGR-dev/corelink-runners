@@ -282,9 +282,7 @@ impl AppState {
             // AUDIT P1: default close ack-window concurrency cap. The production
             // composition root overrides it from FABRIC_CLOSE_ACK_MAX_INFLIGHT
             // via `with_close_ack_max_inflight`.
-            close_ack_gate: Arc::new(tokio::sync::Semaphore::new(
-                DEFAULT_CLOSE_ACK_MAX_INFLIGHT,
-            )),
+            close_ack_gate: Arc::new(tokio::sync::Semaphore::new(DEFAULT_CLOSE_ACK_MAX_INFLIGHT)),
             // AUDIT P2: default global in-flight cap; the composition root
             // overrides it from FABRIC_MAX_INFLIGHT_REQUESTS.
             max_inflight_requests: DEFAULT_MAX_INFLIGHT_REQUESTS,
@@ -438,6 +436,25 @@ impl AppState {
             .unwrap_or_else(|p| p.into_inner())
             .get(lease_id)
             .cloned()
+    }
+
+    /// Resolve a tenant plan OFF the async executor (audit W2-C P2 — introspect
+    /// offload). The production `CoreLinkPlanStore::plan_of_resolving` does a
+    /// synchronous `ureq` introspect round-trip; on an async worker it would pin
+    /// a scarce executor thread under `FABRIC_AUTH_BACKEND=corelink` (every
+    /// acquire starves a worker). It is offloaded to the blocking pool HERE —
+    /// the offload primitive lives on `AppState`, deliberately NOT in the API2
+    /// acquire handler (`leases.rs`), which the source-pinning invariant forbids
+    /// from referencing box/`spawn` machinery (the API2/API3 separation). A
+    /// panicked blocking task surfaces as the `JoinError`, which the caller maps
+    /// to `Unreachable` (503 fail-closed), never a false no-plan reject.
+    pub(crate) async fn resolve_plan_offloaded(
+        &self,
+        tenant: TenantId,
+        pat: String,
+    ) -> Result<Result<Option<TenantPlan>, PlanSourceError>, tokio::task::JoinError> {
+        let plans = Arc::clone(&self.plans);
+        tokio::task::spawn_blocking(move || plans.plan_of_resolving(&tenant, &pat)).await
     }
 
     /// Mint a globally-unique lease id (`lease-<uuid-v4>`).

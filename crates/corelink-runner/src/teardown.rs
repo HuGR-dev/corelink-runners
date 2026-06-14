@@ -200,7 +200,7 @@ mod tests {
     /// can inject a failure into exactly one stage and leave the rest clean.
     fn surface_of(argv: &[&str]) -> &'static str {
         let joined = argv.join(" ");
-        if argv.first() == Some(&"docker") && argv.iter().any(|a| *a == "ps") {
+        if argv.first() == Some(&"docker") && argv.contains(&"ps") {
             "containers"
         } else if joined.contains("ps -eo args") {
             "processes"

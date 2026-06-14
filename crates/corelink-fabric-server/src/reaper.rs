@@ -1217,7 +1217,13 @@ mod tests {
 
     /// `true` iff the lease still exists in the ledger.
     fn lease_exists(state: &AppState, lease_id: &str) -> bool {
-        state.ledger.lock().unwrap().get(lease_id).unwrap().is_some()
+        state
+            .ledger
+            .lock()
+            .unwrap()
+            .get(lease_id)
+            .unwrap()
+            .is_some()
     }
 
     // ── Stale-Pending sweep tests (WP-PENDING-SWEEP) ──────────────────────────
@@ -1288,14 +1294,16 @@ mod tests {
             "absent env → 300 s default"
         );
         assert!(
-            pending_max_age_from_env(|k| (k == "FABRIC_PENDING_MAX_AGE_SECS")
-                .then(|| "0".to_string()))
+            pending_max_age_from_env(
+                |k| (k == "FABRIC_PENDING_MAX_AGE_SECS").then(|| "0".to_string())
+            )
             .is_err(),
             "0 must error (would reap mid-provision)"
         );
         assert_eq!(
-            pending_max_age_from_env(|k| (k == "FABRIC_PENDING_MAX_AGE_SECS")
-                .then(|| "60".to_string()))
+            pending_max_age_from_env(
+                |k| (k == "FABRIC_PENDING_MAX_AGE_SECS").then(|| "60".to_string())
+            )
             .unwrap(),
             Duration::from_secs(60),
         );

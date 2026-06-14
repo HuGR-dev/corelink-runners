@@ -229,7 +229,10 @@ fn introspect_vector_typed_strict_and_byte_exact() {
     assert_eq!(parsed[1].max_concurrency, None, "solo: no cap field");
     assert_eq!(parsed[2].max_concurrency, None, "enterprise: no cap field");
     assert!(!parsed[3].valid);
-    assert_eq!(parsed[3].tenant_id, None, "valid:false carries only `valid`");
+    assert_eq!(
+        parsed[3].tenant_id, None,
+        "valid:false carries only `valid`"
+    );
 
     // An UNKNOWN field is a hard parse error under deny_unknown_fields.
     let mut tampered: serde_json::Value =

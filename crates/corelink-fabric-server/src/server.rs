@@ -523,13 +523,19 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
     // ── AUDIT P1: close ack-window concurrency cap ───────────────────────────
     // Optional, default DEFAULT_CLOSE_ACK_MAX_INFLIGHT; 0/unparseable → error
     // (0 would deadlock every close; absence is the use-the-default path).
-    let close_ack_max_inflight =
-        parse_positive_usize(&get, "FABRIC_CLOSE_ACK_MAX_INFLIGHT", crate::app::DEFAULT_CLOSE_ACK_MAX_INFLIGHT)?;
+    let close_ack_max_inflight = parse_positive_usize(
+        &get,
+        "FABRIC_CLOSE_ACK_MAX_INFLIGHT",
+        crate::app::DEFAULT_CLOSE_ACK_MAX_INFLIGHT,
+    )?;
 
     // ── AUDIT P2: global in-flight request cap ───────────────────────────────
     // Optional, default DEFAULT_MAX_INFLIGHT_REQUESTS; 0/unparseable → error.
-    let max_inflight_requests =
-        parse_positive_usize(&get, "FABRIC_MAX_INFLIGHT_REQUESTS", crate::app::DEFAULT_MAX_INFLIGHT_REQUESTS)?;
+    let max_inflight_requests = parse_positive_usize(
+        &get,
+        "FABRIC_MAX_INFLIGHT_REQUESTS",
+        crate::app::DEFAULT_MAX_INFLIGHT_REQUESTS,
+    )?;
 
     Ok(ServerConfig {
         bind_addr,
@@ -558,7 +564,10 @@ fn parse_positive_usize(
     key: &str,
     default: usize,
 ) -> anyhow::Result<usize> {
-    match get(key).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+    match get(key)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
         None => Ok(default),
         Some(v) => {
             let n = v

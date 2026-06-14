@@ -500,11 +500,7 @@ impl LeaseLedger for PgLedger {
         })
     }
 
-    fn pending_older_than(
-        &self,
-        now_ms: u64,
-        max_age_ms: u64,
-    ) -> anyhow::Result<Vec<LeaseRecord>> {
+    fn pending_older_than(&self, now_ms: u64, max_age_ms: u64) -> anyhow::Result<Vec<LeaseRecord>> {
         // cutoff = now - max_age (saturating). A Pending row whose created_at_ms
         // is at/below the cutoff has outlived any legitimate provision window
         // and is reclaimable (the stale-Pending sweep). The filter is server-side

@@ -88,12 +88,14 @@ pub(crate) async fn acquire(
     // the blocking pool; the fail-closed mapping is unchanged — a panicked
     // blocking task maps to `Unreachable` (503 fail-closed), never a false
     // no-plan reject.
-    let plan_resolved = {
-        let plans = Arc::clone(&state.plans);
-        let tenant = tenant.clone();
-        let pat = pat.0.clone();
-        tokio::task::spawn_blocking(move || plans.plan_of_resolving(&tenant, &pat)).await
-    };
+    // The blocking-pool offload of the (possibly synchronous) introspect lives
+    // on `AppState::resolve_plan_offloaded` — NOT in this handler: the API2
+    // acquire path must reference no box-contact machinery (the API2/API3
+    // source-pinning invariant; see the acceptance test). Same fail-closed
+    // mapping: a panicked blocking task → `Err(JoinError)` → `Unreachable` (503).
+    let plan_resolved = state
+        .resolve_plan_offloaded(tenant.clone(), pat.0.clone())
+        .await;
     let plan = match plan_resolved {
         Ok(Ok(Some(p))) => p,
         Ok(Ok(None)) => {

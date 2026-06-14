@@ -183,11 +183,7 @@ pub trait LeaseLedger {
     /// FAIL-SAFE: only records strictly older than the bound are returned; a
     /// fresh `Pending` that is legitimately mid-provision is NEVER included
     /// (the bound must be set well past any legitimate provision window).
-    fn pending_older_than(
-        &self,
-        now_ms: u64,
-        max_age_ms: u64,
-    ) -> anyhow::Result<Vec<LeaseRecord>>;
+    fn pending_older_than(&self, now_ms: u64, max_age_ms: u64) -> anyhow::Result<Vec<LeaseRecord>>;
 
     /// Atomically admit a `Pending` lease IFF the tenant's active (Pending+Held)
     /// count is strictly under `max_concurrency`. Returns Ok(true) on admit (the
@@ -309,11 +305,7 @@ impl LeaseLedger for InMemoryLedger {
         Ok(out)
     }
 
-    fn pending_older_than(
-        &self,
-        now_ms: u64,
-        max_age_ms: u64,
-    ) -> anyhow::Result<Vec<LeaseRecord>> {
+    fn pending_older_than(&self, now_ms: u64, max_age_ms: u64) -> anyhow::Result<Vec<LeaseRecord>> {
         let cutoff = now_ms.saturating_sub(max_age_ms);
         let mut out: Vec<LeaseRecord> = self
             .records
@@ -603,11 +595,7 @@ impl LeaseLedger for FileLedger {
         self.index.held()
     }
 
-    fn pending_older_than(
-        &self,
-        now_ms: u64,
-        max_age_ms: u64,
-    ) -> anyhow::Result<Vec<LeaseRecord>> {
+    fn pending_older_than(&self, now_ms: u64, max_age_ms: u64) -> anyhow::Result<Vec<LeaseRecord>> {
         self.index.pending_older_than(now_ms, max_age_ms)
     }
 
