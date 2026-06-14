@@ -372,7 +372,6 @@ mod tests {
 
         use std::collections::HashMap;
         let mut seen: HashMap<String, (String, String, String)> = HashMap::new();
-        let mut collisions = 0u32;
 
         for _ in 0..ITERS {
             let tree = rng.token();
@@ -391,7 +390,8 @@ mod tests {
             // Shape: 64 lowercase-hex chars.
             assert_eq!(key.len(), 64, "memo_key must be 64 hex chars");
             assert!(
-                key.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                key.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
                 "memo_key must be lowercase hex"
             );
 
@@ -399,7 +399,6 @@ mod tests {
             let triple = (tree, def, tc);
             match seen.get(&key) {
                 Some(prev) if *prev != triple => {
-                    collisions += 1;
                     panic!(
                         "MEMO_KEY COLLISION on distinct triples {prev:?} and \
                          {triple:?} — LP framing failed to separate the axes"
@@ -410,6 +409,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(collisions, 0, "distinct triples collided to one memo_key");
+        // Reaching here = no collision across ITERS iterations (the panic in the
+        // match arm is the memo_key injectivity assertion).
     }
 }

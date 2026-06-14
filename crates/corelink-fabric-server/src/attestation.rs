@@ -635,10 +635,6 @@ mod tests {
             }
         }
 
-        fn bool(&mut self) -> bool {
-            self.next_u64() & 1 == 1
-        }
-
         /// A short random string from a tiny alphabet — including `""`, the
         /// boundary case that makes length-prefix framing load-bearing.
         fn token(&mut self) -> String {
@@ -684,7 +680,7 @@ mod tests {
     /// exit/artifacts).
     #[derive(Default, Clone, Copy)]
     struct Touched {
-        v1_field: bool,        // memo_key / stdout_ref / stderr_ref
+        v1_field: bool,          // memo_key / stdout_ref / stderr_ref
         exit_or_artifacts: bool, // exit / artifacts (v2-only coverage)
     }
 
@@ -885,7 +881,6 @@ mod tests {
             "LP framing collided on the textbook ('ab','') vs ('a','b') case"
         );
 
-        let mut collisions = 0u32;
         for _ in 0..ITERS {
             // Random arity 1..=4 to also probe cross-arity collisions
             // (e.g. boundary shifts only matter once framing is in play).
@@ -894,7 +889,6 @@ mod tests {
             let bytes = frame(&tuple);
             match seen.get(&bytes) {
                 Some(prev) if *prev != tuple => {
-                    collisions += 1;
                     panic!(
                         "LP INJECTIVITY VIOLATED: distinct tuples {prev:?} and \
                          {tuple:?} produced the same framing"
@@ -905,7 +899,8 @@ mod tests {
                 }
             }
         }
-        assert_eq!(collisions, 0, "LP framing is not injective");
+        // Reaching here = no collision was found across ITERS iterations (the
+        // panic in the match arm is the injectivity assertion).
     }
 
     /// PROPERTY 4 — v1/v2 domain separation, randomized.
@@ -938,11 +933,8 @@ mod tests {
 
             // The pre-images must themselves be distinct (the structural reason
             // domain separation holds — v2 strictly extends v1's message).
-            let pre_v1 = result_binding_preimage(
-                &result.memo_key,
-                &result.stdout_ref,
-                &result.stderr_ref,
-            );
+            let pre_v1 =
+                result_binding_preimage(&result.memo_key, &result.stdout_ref, &result.stderr_ref);
             let pre_v2 = result_binding_preimage_v2(&result);
             assert_ne!(pre_v1, pre_v2, "v1 and v2 pre-images must differ");
 
