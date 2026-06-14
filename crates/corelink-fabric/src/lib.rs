@@ -41,6 +41,7 @@
 //! contract type.
 
 pub mod billing;
+pub mod billing_sink;
 pub mod caps;
 pub mod interference;
 pub mod ledger;
@@ -54,6 +55,7 @@ pub mod scheduler;
 pub mod tenant;
 
 pub use billing::SlotMeter;
+pub use billing_sink::{BillingSink, ExportReport, Exporter, MemBillingSink, PgBillingSink};
 pub use caps::{CapDecision, CapGate, RateWindow};
 pub use interference::{TenantWaitStats, WaitSnapshot};
 pub use ledger::{FileLedger, InMemoryLedger, LeaseLedger, LeaseRecord, LeaseState};
