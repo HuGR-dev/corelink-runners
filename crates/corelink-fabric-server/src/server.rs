@@ -191,6 +191,9 @@ pub struct ServerConfig {
     /// Admission-loop per-tick dispatch budget. From
     /// `FABRIC_ADMISSION_TICK_SLOTS`.
     pub admission_tick_slots: u32,
+    /// Per-tenant parked-waiter cap (the P1 cross-tenant load-shed bound). From
+    /// `FABRIC_ADMISSION_PARK_CAP`. Unused under `reject`.
+    pub admission_park_cap: usize,
 }
 
 impl std::fmt::Debug for ServerConfig {
@@ -221,6 +224,7 @@ impl std::fmt::Debug for ServerConfig {
             .field("admission_queue_wait", &self.admission_queue_wait)
             .field("admission_tick_interval", &self.admission_tick_interval)
             .field("admission_tick_slots", &self.admission_tick_slots)
+            .field("admission_park_cap", &self.admission_park_cap)
             .finish()
     }
 }
@@ -560,6 +564,7 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
     let admission_queue_wait = crate::admission::queue_wait_from_env(&get)?;
     let admission_tick_interval = crate::admission::tick_interval_from_env(&get)?;
     let admission_tick_slots = crate::admission::tick_slots_from_env(&get)?;
+    let admission_park_cap = crate::admission::park_cap_from_env(&get)?;
 
     Ok(ServerConfig {
         bind_addr,
@@ -581,6 +586,7 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
         admission_queue_wait,
         admission_tick_interval,
         admission_tick_slots,
+        admission_park_cap,
     })
 }
 
@@ -781,9 +787,11 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
     // immediate-or-reject default — byte-for-byte unchanged.
     let state = match cfg.admission_mode {
         crate::admission::AdmissionMode::Reject => state,
-        crate::admission::AdmissionMode::Queue => {
-            state.with_admission_queue(cfg.admission_tick_slots, cfg.admission_queue_wait)
-        }
+        crate::admission::AdmissionMode::Queue => state.with_admission_queue(
+            cfg.admission_tick_slots,
+            cfg.admission_queue_wait,
+            cfg.admission_park_cap,
+        ),
     };
 
     let router = app_full(store, state.clone(), Arc::new(HookRegistry::default()));
@@ -823,5 +831,88 @@ pub fn maybe_spawn_crash_sweep_from_env(
     match crate::reaper::crash_probe_config_from_env(get)? {
         Some(interval) => Ok(Some(crate::reaper::spawn_crash_sweep(state, interval))),
         None => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod admission_park_cap_wiring_tests {
+    use super::*;
+
+    /// Minimal valid env for the static/Memory composition root, parameterized
+    /// by the admission knobs the wiring test drives.
+    fn env_with(admission_mode: &str, park_cap: Option<&str>) -> impl Fn(&str) -> Option<String> {
+        let admission_mode = admission_mode.to_string();
+        let park_cap = park_cap.map(str::to_string);
+        move |k: &str| match k {
+            // Loopback bind: FABRIC_DEV_UNSAFE refuses a non-loopback address
+            // (the default 0.0.0.0:8080), so pin a loopback one for the test.
+            "FABRIC_BIND_ADDR" => Some("127.0.0.1:8080".to_string()),
+            "FABRIC_DEV_UNSAFE" => Some("1".to_string()),
+            "FABRIC_PAT" => Some("test-pat".to_string()),
+            "FABRIC_TENANT" => Some("acme".to_string()),
+            "FABRIC_TENANT_MAX_CONCURRENCY" => Some("4".to_string()),
+            "FABRIC_ADMISSION_MODE" => Some(admission_mode.clone()),
+            "FABRIC_ADMISSION_PARK_CAP" => park_cap.clone(),
+            _ => None,
+        }
+    }
+
+    /// REGRESSION (P2 dead-knob): `FABRIC_ADMISSION_PARK_CAP=N` must reach the
+    /// LIVE `AdmissionQueue` under queue mode — the composition root threads it
+    /// through `with_admission_queue` so the inner queue's per-tenant park
+    /// semaphores carry exactly N permits, never the silent
+    /// [`DEFAULT_ADMISSION_PARK_CAP`]. Before the fix the knob was read nowhere
+    /// and the queue stuck at the default; this pins the wiring so it cannot
+    /// silently regress.
+    #[test]
+    fn park_cap_env_is_wired_into_the_live_admission_queue() {
+        const N: usize = 3;
+        assert_ne!(
+            N,
+            crate::admission::DEFAULT_ADMISSION_PARK_CAP,
+            "the test value must differ from the default so a regression to the \
+             default is observable"
+        );
+
+        let cfg = config_from_env(env_with("queue", Some("3"))).expect("valid queue config");
+        assert_eq!(
+            cfg.admission_park_cap, N,
+            "config_from_env must read FABRIC_ADMISSION_PARK_CAP"
+        );
+
+        let (_router, state) = build_app_and_state(&cfg).expect("build");
+        let queue = state
+            .admission_queue
+            .as_ref()
+            .expect("queue mode wires an admission queue");
+        assert_eq!(
+            queue.park_cap(),
+            N,
+            "the live AdmissionQueue must carry the env park cap (not the default)"
+        );
+        // And a freshly-materialized per-tenant park semaphore carries exactly N
+        // permits — the bound the cross-tenant load-shed actually enforces.
+        let tenant = corelink_fabric::TenantId::new("acme").unwrap();
+        assert_eq!(
+            queue.park_permits_available(&tenant),
+            N,
+            "each tenant's park semaphore must carry the configured permit count"
+        );
+    }
+
+    /// Under the DEFAULT reject mode the park-cap env is still parsed into the
+    /// config (cheap), but no admission queue is wired — byte-identical behavior.
+    #[test]
+    fn reject_mode_wires_no_queue_even_with_park_cap_env() {
+        let cfg = config_from_env(env_with("reject", Some("3"))).expect("valid reject config");
+        assert_eq!(
+            cfg.admission_park_cap, 3,
+            "the knob is still read under reject"
+        );
+        let (_router, state) = build_app_and_state(&cfg).expect("build");
+        assert!(
+            state.admission_queue.is_none(),
+            "reject mode wires NO admission queue (today's behavior, unchanged)"
+        );
     }
 }

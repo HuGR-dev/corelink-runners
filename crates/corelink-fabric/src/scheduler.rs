@@ -262,7 +262,14 @@ impl FairScheduler {
                         .pop_front(&tenant)
                         .expect("front() just returned Some");
                     let wait = now_ms.saturating_sub(item.enqueued_at_ms);
-                    self.record_wait(&tenant, wait);
+                    // NOTE: `tick` SELECTS only — it no longer feeds the internal
+                    // p95 ring here. The composition root (admission) calls
+                    // [`record_dispatch_wait`] for ONLY the genuinely-dispatched
+                    // waits (a live waiter whose response reached the client), so
+                    // cap-race losers (re-enqueued by the caller) and orphaned/
+                    // timed-out FIFO entries selected here never pollute the ring.
+                    // The raw wait is still surfaced in `report.waits_ms` for the
+                    // caller to filter (the §6 fix consumes the same feed).
                     report.dispatched.push(item.id);
                     report.waits_ms.push((tenant.clone(), wait));
                     // Turn redeemed: the tenant is no longer owed a skip.
@@ -342,8 +349,17 @@ impl FairScheduler {
         order
     }
 
-    /// Push one completed wait into the tenant's bounded ring.
-    fn record_wait(&mut self, tenant: &TenantId, wait_ms: u64) {
+    /// Record one GENUINELY-dispatched wait into the tenant's bounded p95 ring.
+    ///
+    /// `tick` SELECTS dispatch order but no longer records here: the caller
+    /// (admission's `run_admission_tick`) calls this for ONLY the waits that
+    /// reached a live client. Cap-race losers (re-enqueued and retried) and
+    /// orphaned/timed-out FIFO entries the scheduler "dispatched" for draining
+    /// must NOT feed the ring, or they pollute the §6 p95 surface — mirroring
+    /// the `wait_stats` non-interference filter. A genuine dispatch's wait is
+    /// recorded exactly once (when it actually serves a client), never on the
+    /// loser's intermediate selections.
+    pub fn record_dispatch_wait(&mut self, tenant: &TenantId, wait_ms: u64) {
         let ring = self.waits.entry(tenant.clone()).or_default();
         if ring.len() == WAIT_RING_CAPACITY {
             ring.pop_front();
@@ -391,7 +407,13 @@ mod tests {
             ticks += 1;
             assert!(ticks <= 200, "scheduler failed to drain in bounded ticks");
             let now_ms = ticks * 1_000;
-            sched.tick(now_ms, |_| true, |_| true);
+            // `tick` selects only; record the dispatched waits into the p95 ring
+            // exactly as the composition root does for genuine dispatches (here
+            // every selected item dispatches genuinely — `dispatch` is `|_| true`).
+            let report = sched.tick(now_ms, |_| true, |_| true);
+            for (t, w) in &report.waits_ms {
+                sched.record_dispatch_wait(t, *w);
+            }
             if beta_done_tick.is_none() && sched.pending(&beta) == 0 {
                 beta_done_tick = Some(ticks);
             }
@@ -687,7 +709,12 @@ mod tests {
             sched.enqueue(item(&format!("a-{i}"), "a", 0)).unwrap();
         }
         for i in 1..=20u64 {
-            sched.tick(i * 100, |_| true, |_| true);
+            // `tick` selects; record the dispatched waits as genuine (the
+            // composition root's discipline) so the p95 ring is populated.
+            let report = sched.tick(i * 100, |_| true, |_| true);
+            for (t, w) in &report.waits_ms {
+                sched.record_dispatch_wait(t, *w);
+            }
         }
         // nearest-rank p95 of 100..=2000 step 100 is rank 19 → 1900.
         assert_eq!(sched.p95_wait_ms(&a), Some(1_900));

@@ -313,6 +313,36 @@ impl AdmissionQueue {
             .pending(tenant)
     }
 
+    /// The scheduler-internal p95 wait (ms) for one tenant — the percentile the
+    /// P2 fix keeps un-polluted (only genuinely-dispatched waits feed it).
+    /// Test/observability hook.
+    #[cfg(test)]
+    pub(crate) fn scheduler_p95_wait_ms(&self, tenant: &TenantId) -> Option<u64> {
+        self.scheduler
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .p95_wait_ms(tenant)
+    }
+
+    /// The configured per-tenant parked-waiter cap (P1 load-shed bound). Used by
+    /// the composition-root wiring test to prove `FABRIC_ADMISSION_PARK_CAP` is
+    /// threaded through to the live queue's per-tenant park semaphores (each is
+    /// created with exactly this many permits), so the knob can never silently
+    /// regress to [`DEFAULT_ADMISSION_PARK_CAP`].
+    #[cfg(test)]
+    pub(crate) fn park_cap(&self) -> usize {
+        self.park_cap
+    }
+
+    /// Available permits in `tenant`'s park semaphore (lazily created at
+    /// [`park_cap`](Self::park_cap)). Test/observability hook: with no waiter
+    /// parked it equals `park_cap`, so a wiring test can assert the semaphore
+    /// carries the configured permit count rather than the silent default.
+    #[cfg(test)]
+    pub(crate) fn park_permits_available(&self, tenant: &TenantId) -> usize {
+        self.park_semaphore(tenant).available_permits()
+    }
+
     /// Test-only: flood a tenant's scheduler FIFO to exactly the per-tenant
     /// bound (`MAX_TENANT_QUEUE_DEPTH`) with placeholder WorkItems, so the next
     /// real `acquire_queued` enqueue is over the bound and must SHED. Returns how
@@ -676,6 +706,23 @@ pub async fn run_admission_tick(state: &AppState, now_ms: u64) -> usize {
         }
     }
 
+    // ── 3b. (P2, 4th re-audit): feed the scheduler's INTERNAL p95 ring with the
+    // SAME genuine-dispatch filter. `FairScheduler::tick` now SELECTS only (it no
+    // longer auto-records), so cap-race losers (re-enqueued in step 1b) and
+    // orphaned/timed-out FIFO entries the tick "dispatched" to drain never reach
+    // the ring. We record exactly the waits that reached a live client — the
+    // identical predicate the §6 wait_stats use above — so the scheduler-internal
+    // percentile stays as honest as the externally-observable §6 surface. One
+    // scheduler-lock acquisition, taken alone after finalize (no nesting).
+    {
+        let mut sched = queue.scheduler.lock().unwrap_or_else(|e| e.into_inner());
+        for (id, (tenant, wait_ms)) in report.dispatched.iter().zip(report.waits_ms.iter()) {
+            if genuinely_dispatched.contains(id) {
+                sched.record_dispatch_wait(tenant, *wait_ms);
+            }
+        }
+    }
+
     genuinely_dispatched.len()
 }
 
@@ -918,7 +965,7 @@ mod queue_tests {
             Arc::new(plans),
             Arc::new(FixedClock(now_ms)),
         )
-        .with_admission_queue(64, wait);
+        .with_admission_queue(64, wait, DEFAULT_ADMISSION_PARK_CAP);
         (state, ledger)
     }
 
@@ -1325,6 +1372,114 @@ mod queue_tests {
         );
     }
 
+    /// REGRESSION (P2, 4th re-audit): an ORPHANED/timed-out FIFO entry the tick
+    /// "dispatches" to DRAIN must NOT move the scheduler-internal p95 ring — only
+    /// genuinely-dispatched waits (a live waiter that reached a client) feed it.
+    /// We first genuinely dispatch a waiter (wait = 1_500 ms → p95 = 1_500), then
+    /// drain an orphan with a FAR-larger wait (8_000_000 ms) and assert the p95
+    /// is unchanged. Before the fix, `tick` auto-recorded the orphan's wait and
+    /// the p95 jumped to the orphan's value.
+    #[tokio::test]
+    async fn orphan_drain_does_not_move_scheduler_p95() {
+        let now = 8_500_000u64;
+        // cap=1: the holder occupies the slot; the queued acquire parks.
+        let (state, _ledger) = queue_state(1, now, Duration::from_secs(5));
+        let router = crate::app::app(token_store(), state.clone());
+        let queue = Arc::clone(state.admission_queue.as_ref().unwrap());
+
+        // (1) GENUINE dispatch: fill the slot, queue a real acquire, free the
+        // slot, tick at now+1_500 → the waiter dispatches with wait = 1_500.
+        let holder = lease_id_of(
+            router
+                .clone()
+                .oneshot(acquire_req("pat-alpha"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let ra = router.clone();
+        let waiter =
+            tokio::spawn(async move { ra.oneshot(acquire_req("pat-alpha")).await.unwrap() });
+        for _ in 0..100 {
+            if queue.pending(&tid("alpha")) == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let cancel = Request::builder()
+            .method("POST")
+            .uri(paths::LEASE_CANCEL.replace("{lease_id}", &holder))
+            .header(header::AUTHORIZATION, "Bearer pat-alpha")
+            .body(Body::empty())
+            .unwrap();
+        router.clone().oneshot(cancel).await.unwrap();
+        assert_eq!(run_admission_tick(&state, now + 1_500).await, 1);
+        assert_eq!(waiter.await.unwrap().status(), StatusCode::OK);
+        assert_eq!(
+            queue.scheduler_p95_wait_ms(&tid("alpha")),
+            Some(1_500),
+            "the genuine dispatch sets the p95 baseline to its wait"
+        );
+
+        // Free the slot again (cancel the just-dispatched lease) so the orphan we
+        // inject can be SELECTED (under cap) and drained on the next tick.
+        let dispatched = {
+            use corelink_fabric::LeaseState;
+            let ledger = state.ledger.lock().unwrap();
+            ledger
+                .by_tenant(&tid("alpha"))
+                .unwrap()
+                .iter()
+                .find(|r| matches!(r.state, LeaseState::Pending) || r.state.is_held())
+                .map(|r| r.lease_id.clone())
+                .expect("a dispatched lease is active")
+        };
+        let cancel2 = Request::builder()
+            .method("POST")
+            .uri(paths::LEASE_CANCEL.replace("{lease_id}", &dispatched))
+            .header(header::AUTHORIZATION, "Bearer pat-alpha")
+            .body(Body::empty())
+            .unwrap();
+        router.clone().oneshot(cancel2).await.unwrap();
+
+        // (2) Inject an ORPHAN: a queued WorkItem with NO waiter context and a
+        // FAR-LARGER enqueue age (wait ≈ 8_000_000 ms vs the 1_500 ms baseline).
+        // The tick selects it (tenant under cap), finds no waiter → drains it,
+        // reserves nothing. Its huge wait must NOT reach the p95 ring.
+        let orphan_id = "orphan-no-waiter".to_string();
+        // Tick runs at `now + 1_500`; enqueue 8_000_000 ms earlier → wait 8e6.
+        let orphan_enqueued_at = (now + 1_500) - 8_000_000;
+        queue
+            .scheduler
+            .lock()
+            .unwrap()
+            .enqueue(WorkItem {
+                id: orphan_id.clone(),
+                tenant: tid("alpha"),
+                enqueued_at_ms: orphan_enqueued_at,
+            })
+            .unwrap();
+        assert_eq!(queue.pending(&tid("alpha")), 1, "orphan is queued");
+
+        let dispatched_n = run_admission_tick(&state, now + 1_500).await;
+        assert_eq!(
+            dispatched_n, 0,
+            "the orphan reserves nothing (no waiter) — not a genuine dispatch"
+        );
+        assert_eq!(
+            queue.pending(&tid("alpha")),
+            0,
+            "the orphan FIFO entry is drained"
+        );
+        // THE ASSERTION: the p95 is STILL the genuine baseline, not the orphan's
+        // huge wait — the orphan never polluted the internal ring.
+        assert_eq!(
+            queue.scheduler_p95_wait_ms(&tid("alpha")),
+            Some(1_500),
+            "an orphaned/timed-out drain must NOT move the scheduler-internal p95"
+        );
+    }
+
     // ── P1 #1: a parked waiter must not exhaust the global limiter for OTHER
     // tenants ─────────────────────────────────────────────────────────────────
 
@@ -1651,7 +1806,7 @@ mod queue_tests {
             Arc::new(plans),
             Arc::new(FixedClock(now)),
         )
-        .with_admission_queue(64, Duration::from_secs(5));
+        .with_admission_queue(64, Duration::from_secs(5), DEFAULT_ADMISSION_PARK_CAP);
         // Park-cap default is fine here.
         state.admission_queue = Some(Arc::new(AdmissionQueue::new(64)));
         let queue = Arc::clone(state.admission_queue.as_ref().unwrap());

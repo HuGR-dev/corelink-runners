@@ -17,14 +17,27 @@
 //! transport over the same `Subscriber` seam is an M1 polish item — the
 //! poll-drain batch is the smallest honest carrier until then.
 //!
-//! **Auth (contract §13.2 "authenticated hook point"):** both routes sit
-//! behind the Bearer-PAT layer (WP-API1), and the resolved tenant must own
-//! the lease — a valid PAT of another tenant gets `404 not_found`, never
-//! 403 (the frozen no-existence-oracle rule). On a tenant match the handler
-//! still goes through the hook's OWN credential seam
-//! ([`CaptureHook::subscribe`]): the per-hook credential is registered by
-//! the composition root at lease acquire, so the mechanism's gate is
-//! exercised on every poll, never bypassed.
+//! **Auth (contract §13.2 "authenticated hook point") — two DISTINCT seams,
+//! by trust boundary:**
+//!
+//! - **POLL** (`GET` events/meta — hugit's TRUSTED subscriber) sits behind the
+//!   Bearer-PAT layer (WP-API1): the resolved tenant must OWN the lease, and a
+//!   valid PAT of another tenant gets `404 not_found`, never 403 (the frozen
+//!   no-existence-oracle rule). On a tenant match the handler still goes
+//!   through the hook's OWN credential seam ([`CaptureHook::subscribe`]): the
+//!   per-hook credential is registered by the composition root at lease
+//!   acquire, so the mechanism's gate is exercised on every poll, never
+//!   bypassed.
+//! - **INGEST** (`POST` turn-feed — the UNTRUSTED in-box agent, contract §4) is
+//!   mounted OUTSIDE the Bearer-PAT layer and does NOT use the tenant PAT (the
+//!   P0 fix — the box never holds a tenant credential). It authenticates with
+//!   the per-lease, write-only, ingest-SCOPED capability token, which the
+//!   [`ingest`] handler verifies ITSELF: recompute the expected token for
+//!   `{lease_id}` from the dedicated ingest secret and CONSTANT-TIME compare it
+//!   against the presented Bearer. Fail-closed — a missing OR wrong/forged/
+//!   another-lease's token is `401 unauthorized`, never an accept and never an
+//!   existence oracle (a wrong token for a real lease and any token for a
+//!   non-lease are byte-identical 401s).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
