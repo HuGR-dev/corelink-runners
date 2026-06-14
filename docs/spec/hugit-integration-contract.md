@@ -412,6 +412,61 @@ transport (`interop.md` §2) is wired — at M1 there is no push transport, so t
 flush is a forensic record (a structured log line) pending P2; no hugit code
 change at M1.
 
+### 7.1 Result-binding v2 — full-outcome signature  *(Amendment v1.4.0)*
+
+*(Amendment v1.4.0 — corelink-runners audit fix 2026-06-14, proposed to the
+hugit techlead under the §12 change protocol. The frozen `AttestationChain`
+shape and its signature pre-image are **UNTOUCHED**; this amends only the
+fabric's detached result-binding extension first introduced alongside §7. The
+frozen `IntentMetrics` vector — sha256 `2d8d2215…` — is untouched.)*
+
+**The gap.** The §7 attestation `AttestationChain` covers
+`tree/def/runner/model/principal` only. The fabric's existing detached
+result-binding signature (`result_binding_sig`, hereafter **v1**) covers
+`LP(memo_key) ‖ LP(stdout_ref) ‖ LP(stderr_ref)`. **Neither covers
+`CheckResult.exit` (the pass/fail VERDICT) nor `CheckResult.artifacts` (the
+output digests).** A malicious runner or a MITM on the result payload can flip
+`exit: 1 → 0` and rewrite `artifacts`, keeping the three v1-covered fields, and
+a v1 verifier still accepts the forged verdict.
+
+**v2 binding — the full outcome.** The fabric now ALSO emits
+`result_binding_sig_v2`, a detached standard-base64 ed25519 signature (same
+per-region fabric key as v1, published at `GET /v1/attestation/key`) over:
+
+```text
+result_binding_preimage_v2 =
+    LP(memo_key) ‖ LP(stdout_ref) ‖ LP(stderr_ref)          // the 3 v1 fields, unchanged
+  ‖ i32_be(exit)                                            // 4 bytes, big-endian two's-complement
+  ‖ u32_be(artifacts.len)                                  // 4 bytes, big-endian count
+  ‖ for each artifact in CheckResult.artifacts Vec order:   // order is part of the binding
+        LP(path) ‖ LP(digest)
+where LP(s)     = u32_be(byte_len(s)) ‖ utf8_bytes(s)
+      i32_be(n) = the 4 big-endian bytes of n as a two's-complement i32
+      u32_be(n) = the 4 big-endian bytes of n as a u32
+```
+
+**Emission is ADDITIVE — no flag-day.** `result_binding_sig_v2` is a NEW wire
+field on `ExecResponse`, `TriggerResponse`, and `CloseResponse`, emitted
+ALONGSIDE the unchanged v1 `result_binding_sig`. v1's formula is frozen and
+keeps being emitted until hugit confirms v2 adoption. v2 is a strictly longer,
+DISTINCT pre-image (it appends the exit + artifact frames), so a v1 signature
+never validates as v2 and vice versa — no cross-version confusion.
+
+**hugit obligation.** To trust the VERDICT (`exit`) and output digests
+(`artifacts`) cross-repo, hugit MUST add a **v2 verifier** that mirrors the byte
+formula above exactly and verifies `result_binding_sig_v2` against the published
+fabric key. Until hugit confirms v2 adoption, the fabric emits BOTH; hugit may
+continue verifying v1 in the interim (content-identity only). A no-result close
+signs the empty-outcome v2 pre-image (three empty content frames ‖ `i32_be(0)` ‖
+`u32_be(0)`) — the honest "nothing claimed", still signed.
+
+**Companion fix.** The fabric now also validates, before attesting any
+client-supplied `CheckResult` on the close path, that `memo_key ==
+lower_hex(SHA-256(LP(tree_hash) ‖ LP(def_digest) ‖ LP(toolchain_digest)))` (the
+frozen §10/`CheckResult` memo-key formula) and fail-closes (400 `invalid`) on
+mismatch — it never attests a result whose `memo_key` lies about its own input
+axes.
+
 ---
 
 ## Amendment log
@@ -421,5 +476,9 @@ change at M1.
 | v1.0 | 2026-06-09 | hugit techlead | Initial contract; §0–§12; frozen from hugit's side. |
 | v1.1 | 2026-06-10 | hugit techlead (WP-R6 draft) | Added §13: per-job metrics emission consistent with `IntentMetrics` (§13.1); capture hook points for full + compacted transcript blobs — two-transcript imperative (§13.2); no-persistence + forge-side redaction obligation (§13.3); conformance-vector drift tripwire (§13.4). Cross-reference: hugit ADR-0001 (ratified 2026-06-10). |
 | v1.2.0 | 2026-06-11 | hugit techlead (E-DOCS) | §13.1 money field rename: `cost_usd\|f64` → `cost_usd_micros\|u64` (integer micro-USD, 1 USD = 1,000,000 units). Owner-ratified 2026-06-11 as part of hugit WA4 (CHANGELOG). Additive — all other §13.1 fields and §0–§12 unchanged. §13.4 conformance-vector drift tripwire: new vectors must be committed byte-identical in both repos. |
+| v1.4.0 | 2026-06-14 | corelink-runners (audit fix) — pending hugit-techlead ratification | §7.1 result-binding **v2**: a NEW detached signature `result_binding_sig_v2` over the FULL outcome (the 3 v1 fields ‖ `i32_be(exit)` ‖ `u32_be(artifacts.len)` ‖ ∀ artifact `LP(path)‖LP(digest)`), closing the forgeable-verdict gap (v1 covered neither `exit` nor `artifacts`). ADDITIVE — emitted alongside the UNCHANGED v1 `result_binding_sig` on `ExecResponse`/`TriggerResponse`/`CloseResponse`; no flag-day. **hugit must add a v2 verifier** to trust the verdict cross-repo; v1 stays emitted until v2 adoption is confirmed. Frozen `AttestationChain` pre-image and the §13.4 `IntentMetrics` vector (sha256 `2d8d2215…`) UNTOUCHED. Companion: the close path now rejects (400 `invalid`) any `CheckResult` whose `memo_key` ≠ `SHA-256(LP(tree_hash)‖LP(def_digest)‖LP(toolchain_digest))` before attesting it. |
 
-*Change protocol (§12) applies to all future amendments.*
+*Change protocol (§12) applies to all future amendments. v1.4.0 is
+fabric-proposed and additive; it takes effect on the wire immediately (the
+field is purely additional evidence) but requires hugit-techlead ratification
+before hugit relies on it.*

@@ -39,7 +39,7 @@ use corelink_fabric_api::{ApiError, ExecRequest, ExecResponse};
 use corelink_runners_contracts::RunnerState;
 
 use crate::app::AppState;
-use crate::attestation::{build_attestation, sign_result_binding};
+use crate::attestation::{build_attestation, sign_result_binding, sign_result_binding_v2};
 use crate::auth::error_response;
 use crate::exec::run_check;
 
@@ -195,12 +195,14 @@ pub(crate) async fn exec(
                 vec![format!("tenant:{tenant}")],
             );
             let result_binding_sig = sign_result_binding(state.signer.as_ref(), &result);
+            let result_binding_sig_v2 = sign_result_binding_v2(state.signer.as_ref(), &result);
             (
                 StatusCode::OK,
                 Json(ExecResponse {
                     result,
                     attestation,
                     result_binding_sig,
+                    result_binding_sig_v2,
                 }),
             )
                 .into_response()
