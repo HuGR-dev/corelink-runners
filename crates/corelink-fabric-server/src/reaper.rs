@@ -15,18 +15,19 @@
 //! ## Mechanism (expiry-driven, teardown-first)
 //!
 //! Every tick the reaper calls [`reap_once`]:
-//! 1. A snapshot of deadline entries is taken WITHOUT holding the ledger lock
-//!    (no nesting; the snapshot is a cloned map, the guard is dropped
-//!    immediately).
-//! 2. A snapshot of currently `Held` lease records is taken under the ledger
-//!    lock (guard dropped at block end, before any `await`).
-//! 3. Overdue leases (`now_ms >= deadline`) are identified.  A `Held` lease
-//!    with no recorded deadline is treated as **never-overdue** (fail-safe:
-//!    never reap a lease we cannot date).
-//! 4. For each overdue lease, [`AppState::teardown_lease`] is called FIRST.
+//! 1. A snapshot of currently `Held` lease records is taken under the ledger
+//!    lock (guard dropped at block end, before any `await`). Each record
+//!    carries its own durable `deadline_ms` (ADR-0003 Decision-1 — the ledger
+//!    is the single source of truth for the deadline; there is no in-memory
+//!    `deadlines` map). This is what lets ANY instance reap an overdue lease,
+//!    including one that never served the acquire (the D3-P1 cap-slot-leak fix).
+//! 2. Overdue leases (`now_ms >= rec.deadline_ms`) are identified.  A `Held`
+//!    lease with `deadline_ms = None` is treated as **never-overdue**
+//!    (fail-safe: never reap a lease we cannot date).
+//! 3. For each overdue lease, [`AppState::teardown_lease`] is called FIRST.
 //!    Only if teardown SUCCEEDS is the ledger transitioned to `Expired` and
-//!    the side-tables GC'd.  A failed teardown leaves the lease `Held` so
-//!    the next sweep retries — no permanent leak from a one-time provider
+//!    the `images` side-table GC'd.  A failed teardown leaves the lease `Held`
+//!    so the next sweep retries — no permanent leak from a one-time provider
 //!    hiccup.
 //!
 //! ## Retry posture
@@ -38,10 +39,11 @@
 //!
 //! ## Side-table GC
 //!
-//! `deadlines` and `images` entries are removed via [`AppState::forget_lease`]
-//! only AFTER teardown succeeds.  On a retry sweep, the deadline entry must
-//! still be present (otherwise the lease appears as never-overdue and is
-//! silently skipped).
+//! The `images` entry is removed via [`AppState::forget_lease`] only AFTER
+//! teardown succeeds.  The deadline is NO LONGER a side table (ADR-0003: it
+//! rides the `LeaseRecord` in the ledger); on a retry sweep the lease is still
+//! `Held` with its `deadline_ms` intact, so it is re-found and re-dated — the
+//! terminal `Expired` transition is what finally drops it from `held()`.
 //!
 //! ## Crash-surfacing sweep (WP-CRASH-SWEEP, OPT-IN)
 //!
@@ -80,11 +82,11 @@
 //!
 //! ## Lock ordering
 //!
-//! `reap_once` takes the `deadlines` snapshot FIRST (lock taken + released),
-//! then takes the ledger snapshot (lock taken + released), then calls async
-//! teardown.  No lock is held across any `await` point — so this function is
-//! always `Send`-safe on the executor (verified by the compile-time assertion
-//! at the bottom of this file).
+//! `reap_once` takes the ledger snapshot (lock taken + released — the held
+//! records carry their own durable `deadline_ms`, so no separate deadline
+//! snapshot is needed), then calls async teardown.  No lock is held across any
+//! `await` point — so this function is always `Send`-safe on the executor
+//! (verified by the compile-time assertion at the bottom of this file).
 //!
 //! After teardown the ledger lock is re-acquired (briefly) to write the
 //! `Expired` transition.  No other lock is held at that point.
@@ -251,33 +253,34 @@ pub fn reaper_config_from_env(
 ///
 /// # Lock-ordering note
 ///
-/// No `MutexGuard` is held across any `await` point.  The deadlines snapshot
-/// and the ledger snapshot are taken in separate scoped blocks, each guard
-/// dropped before the next async operation.  After teardown, the ledger lock
-/// is briefly re-acquired to write the `Expired` transition — again dropped
+/// No `MutexGuard` is held across any `await` point.  The ledger snapshot is
+/// taken in a scoped block, the guard dropped before the next async operation
+/// (the durable `deadline_ms` rides each held record, so there is no separate
+/// deadline snapshot).  After teardown, the ledger lock is briefly re-acquired
+/// to write the `Expired` transition — again dropped
 /// before continuing.  The compile-time [`_ASSERT_REAP_ONCE_IS_SEND`]
 /// assertion enforces this: if anyone ever adds a guard across an `await`,
 /// compilation fails.
 pub async fn reap_once(state: &crate::AppState) -> usize {
     let now = state.clock.now_ms();
 
-    // ── 1. Snapshot deadlines WITHOUT holding the ledger lock.
-    // The guard is dropped at the end of the expression — no nesting.
-    let deadlines = state.deadlines_snapshot();
-
-    // ── 2. Snapshot held leases — guard dropped at end of block, before any await.
+    // ── 1. Snapshot held leases — guard dropped at end of block, before any await.
+    // Each record now carries its OWN durable `deadline_ms` (ADR-0003
+    // Decision-1: the ledger is the single source of truth for the deadline),
+    // so ANY instance can date and reap an overdue lease — including one that
+    // never served the acquire. There is no in-memory `deadlines` map.
     let held = {
         let ledger = state.ledger.lock().unwrap_or_else(|e| e.into_inner());
         ledger.held().unwrap_or_default()
         // `ledger` (MutexGuard) is dropped here — before any await below.
     };
 
-    // ── 3. Identify overdue records.
-    // A Held lease with no recorded deadline is treated as never-overdue
-    // (fail-safe: we never reap a lease we cannot date).
+    // ── 2. Identify overdue records, dating each purely from its durable
+    // `deadline_ms`. A Held lease with `deadline_ms = None` is treated as
+    // never-overdue (fail-safe: we never reap a lease we cannot date).
     let overdue: Vec<_> = held
         .into_iter()
-        .filter(|rec| now >= deadlines.get(&rec.lease_id).copied().unwrap_or(u64::MAX))
+        .filter(|rec| now >= rec.deadline_ms.unwrap_or(u64::MAX))
         .collect();
 
     let mut reaped = 0usize;
@@ -824,7 +827,9 @@ mod tests {
         );
     }
 
-    /// Insert a `Held` lease record in the ledger with the given deadline.
+    /// Insert a `Held` lease record in the ledger with the given DURABLE
+    /// deadline (ADR-0003: `deadline_ms` rides the record; the terminal
+    /// transition preserves it, so the reaped record still reads its deadline).
     fn insert_held(state: &AppState, lease_id: &str, deadline_ms: u64) {
         {
             let mut ledger = state.ledger.lock().unwrap();
@@ -836,13 +841,25 @@ mod tests {
                     box_ref: format!("box:{lease_id}"),
                     created_at_ms: 0,
                     updated_at_ms: 0,
+                    deadline_ms: Some(deadline_ms),
                 })
                 .unwrap();
             ledger.transition(lease_id, RunnerState::Held, 0).unwrap();
         }
-        // Record the deadline AND a fake image so forget_lease GC is verifiable.
-        state.record_deadline(lease_id, deadline_ms);
+        // A fake image so forget_lease's image GC is verifiable.
         state.record_image(lease_id, "sha256:deadbeef");
+    }
+
+    /// The lease's durable `deadline_ms` as read back from the ledger — the
+    /// reaper's source of truth (ADR-0003). `None` = no deadline / absent.
+    fn ledger_deadline(state: &AppState, lease_id: &str) -> Option<u64> {
+        state
+            .ledger
+            .lock()
+            .unwrap()
+            .get(lease_id)
+            .unwrap()
+            .and_then(|rec| rec.deadline_ms)
     }
 
     // ── Config tests ──────────────────────────────────────────────────────────
@@ -910,14 +927,19 @@ mod tests {
             "teardown must be called for the expired lease; calls={calls:?}"
         );
 
-        // Side-tables must be GC'd.
-        assert!(
-            state.deadline_of("lease-overdue").is_none(),
-            "deadline entry must be removed after successful reclaim"
-        );
+        // The image side-table must be GC'd. The deadline is NOT a side table
+        // anymore (ADR-0003): it rides the record and the terminal transition
+        // PRESERVES it — so it is durably present on the Expired record, not
+        // GC'd. What removes the lease from the reap path is the terminal state
+        // (it is no longer in `held()`), not deletion of the deadline.
         assert!(
             state.image_of("lease-overdue").is_none(),
             "image entry must be removed after successful reclaim"
+        );
+        assert_eq!(
+            ledger_deadline(&state, "lease-overdue"),
+            Some(1_000),
+            "the durable deadline_ms is preserved on the terminal record (ADR-0003)"
         );
     }
 
@@ -949,10 +971,12 @@ mod tests {
             );
         }
 
-        // Deadline entry MUST be retained so the next sweep can date the lease.
-        assert!(
-            state.deadline_of("lease-retry").is_some(),
-            "deadline entry must NOT be GC'd after failed teardown"
+        // The durable deadline MUST still ride the (still-Held) record so the
+        // next sweep can date the lease (ADR-0003: it lives in the ledger).
+        assert_eq!(
+            ledger_deadline(&state, "lease-retry"),
+            Some(1_000),
+            "deadline_ms must ride the still-Held record after a failed teardown"
         );
 
         // Teardown was attempted once.
@@ -979,10 +1003,13 @@ mod tests {
             );
         }
 
-        // Deadline entry GC'd.
-        assert!(
-            state.deadline_of("lease-retry").is_none(),
-            "deadline entry must be GC'd after successful reclaim"
+        // The durable deadline is PRESERVED on the terminal Expired record
+        // (ADR-0003: a transition never alters the deadline); the lease leaves
+        // the reap path by being terminal (out of `held()`), not by deletion.
+        assert_eq!(
+            ledger_deadline(&state, "lease-retry"),
+            Some(1_000),
+            "deadline_ms is preserved on the terminal record (not GC'd)"
         );
 
         // Teardown was called twice total (once fail, once succeed).
@@ -1016,6 +1043,49 @@ mod tests {
         );
     }
 
+    /// FAIL-SAFE (ADR-0003): a `Held` lease with `deadline_ms: None` is treated
+    /// as never-overdue — the deadline path NEVER reaps a lease it cannot date,
+    /// even with the clock far in the future. (The hard backstop for such a
+    /// lease is the crash sweep, not the deadline reaper.)
+    #[tokio::test]
+    async fn reap_once_never_reaps_none_deadline() {
+        // Clock very far in the future (but NOT u64::MAX, which is the
+        // never-overdue sentinel itself); the lease has NO deadline.
+        let (state, _clock, prov) = build_state(u64::MAX - 1);
+        {
+            let mut ledger = state.ledger.lock().unwrap();
+            ledger
+                .put(LeaseRecord {
+                    lease_id: "lease-nodeadline".to_string(),
+                    tenant: TenantId::new("acme").unwrap(),
+                    state: LeaseState::Pending,
+                    box_ref: "box:lease-nodeadline".to_string(),
+                    created_at_ms: 0,
+                    updated_at_ms: 0,
+                    deadline_ms: None, // never-overdue fail-safe
+                })
+                .unwrap();
+            ledger
+                .transition("lease-nodeadline", RunnerState::Held, 0)
+                .unwrap();
+        }
+
+        let count = reap_once(&state).await;
+        assert_eq!(count, 0, "a None-deadline lease must NEVER be reaped");
+
+        let ledger = state.ledger.lock().unwrap();
+        let rec = ledger.get("lease-nodeadline").unwrap().unwrap();
+        assert!(
+            rec.state.is_held(),
+            "a None-deadline lease stays Held (never-overdue fail-safe)"
+        );
+        drop(ledger);
+        assert!(
+            prov.teardown_calls().is_empty(),
+            "teardown must not be called for a None-deadline lease"
+        );
+    }
+
     /// Empty or no-Held ledger → 0 expirations, no teardown.
     #[tokio::test]
     async fn reap_once_no_held_is_noop() {
@@ -1031,7 +1101,7 @@ mod tests {
 
     // ── WP-SLOT-EMIT: reaper_expiry_emits_expired_slot ───────────────────────
     //
-    // Lives here (in-crate) because `record_deadline` is `pub(crate)` and
+    // Lives here (in-crate) because the slot meter / ledger helpers are `pub(crate)` and
     // integration tests in `tests/` cannot call it.
 
     /// Reaper LOST RACE: if a concurrent close/cancel already terminalized the
@@ -1405,9 +1475,13 @@ mod tests {
             "teardown must be called for the dead lease"
         );
         assert_eq!(crashed_events(&state, "lease-dead"), 1, "one Crashed event");
-        assert!(
-            state.deadline_of("lease-dead").is_none(),
-            "deadline entry GC'd after crash reclaim"
+        // The durable deadline is preserved on the terminal Crashed record
+        // (ADR-0003: a transition never alters it); only the image side-table
+        // is GC'd.
+        assert_eq!(
+            ledger_deadline(&state, "lease-dead"),
+            Some(9_999_999),
+            "deadline_ms preserved on the terminal Crashed record (ADR-0003)"
         );
         assert!(
             state.image_of("lease-dead").is_none(),
@@ -1519,9 +1593,10 @@ mod tests {
             0,
             "no Crashed event"
         );
-        assert!(
-            state.deadline_of("lease-tdfail").is_some(),
-            "deadline retained after failed teardown"
+        assert_eq!(
+            ledger_deadline(&state, "lease-tdfail"),
+            Some(9_999_999),
+            "deadline_ms retained on the still-Held record after failed teardown"
         );
     }
 

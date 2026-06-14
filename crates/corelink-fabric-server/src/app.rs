@@ -159,10 +159,6 @@ pub struct AppState {
     /// default. The production composition root wires the real backend via
     /// [`AppState::with_cloud_backend_from_env`].
     pub provisioner: Arc<dyn crate::cloud_exec::BoxProvisioner>,
-    /// `lease_id` → absolute deadline (epoch ms), recorded at acquire —
-    /// the expired-at-exec-time gate reads it BEFORE any execution
-    /// (`expired_job_stores_nothing_ever`).
-    pub(crate) deadlines: Arc<Mutex<HashMap<String, u64>>>,
     /// §9 trigger idempotency map (WP-API4): `(tenant, item_id, tree_hash)`
     /// → the ATTESTED `TriggerResponse` already produced for that delivery
     /// (ATT parity amendment). hugit's landing queue delivers
@@ -232,7 +228,6 @@ impl AppState {
             rate_windows: Arc::new(Mutex::new(HashMap::new())),
             exec: Arc::new(NoBoxExec),
             provisioner: Arc::new(crate::cloud_exec::NoBoxProvisioner),
-            deadlines: Arc::new(Mutex::new(HashMap::new())),
             trigger_dedup: Arc::new(Mutex::new(HashMap::new())),
             signer: Arc::new(FabricSigner::new_from_bytes(&DEV_FABRIC_KEY_SEED)),
             images: Arc::new(Mutex::new(HashMap::new())),
@@ -348,23 +343,6 @@ impl AppState {
         self
     }
 
-    /// Record the lease's absolute deadline at acquire (epoch ms).
-    pub(crate) fn record_deadline(&self, lease_id: &str, deadline_ms: u64) {
-        self.deadlines
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(lease_id.to_string(), deadline_ms);
-    }
-
-    /// The lease's recorded absolute deadline, if one is on file.
-    pub(crate) fn deadline_of(&self, lease_id: &str) -> Option<u64> {
-        self.deadlines
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .get(lease_id)
-            .copied()
-    }
-
     /// Record the lease's pinned image digest at acquire (the validated
     /// `AcquireRequest.image_digest`) — the attestation path's image
     /// identity (WP-ATT1).
@@ -464,29 +442,17 @@ impl AppState {
             .map_err(|_| anyhow::anyhow!("probe task panicked"))?
     }
 
-    /// Snapshot of all recorded deadlines without holding the ledger lock.
-    ///
-    /// Returns a cloned `HashMap` — the guard is released before the caller
-    /// proceeds, so there is no risk of holding `deadlines` across an await.
-    pub(crate) fn deadlines_snapshot(&self) -> std::collections::HashMap<String, u64> {
-        self.deadlines
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone()
-    }
-
-    /// Remove `lease_id` from both side-tables (`deadlines` + `images`) and
-    /// from the hook registry (GC the §13 capture hook, if any).
+    /// Remove `lease_id` from the `images` side-table and from the hook
+    /// registry (GC the §13 capture hook, if any).
     ///
     /// Called by the reaper after a successful teardown to GC entries that are
     /// no longer needed — prevents unbounded growth for long-running processes.
     /// The close handler's own `registry.unregister` covers normal close;
-    /// this covers the reaper/orphan teardown path.
+    /// this covers the reaper/orphan teardown path. The deadline is NOT a side
+    /// table anymore (ADR-0003: it rides the `LeaseRecord` in the ledger), so
+    /// there is nothing to clear there — the terminal `transition` already
+    /// removes the lease from the `held()` reap set.
     pub(crate) fn forget_lease(&self, lease_id: &str) {
-        self.deadlines
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(lease_id);
         self.images
             .lock()
             .unwrap_or_else(|p| p.into_inner())

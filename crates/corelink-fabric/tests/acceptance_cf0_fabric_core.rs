@@ -25,6 +25,7 @@ fn record(lease_id: &str, t: &TenantId, state: LeaseState) -> LeaseRecord {
         box_ref: "box-01".to_string(),
         created_at_ms: 1_000,
         updated_at_ms: 1_000,
+        deadline_ms: None,
     }
 }
 

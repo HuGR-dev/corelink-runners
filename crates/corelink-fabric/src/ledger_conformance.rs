@@ -34,6 +34,7 @@ fn record(lease_id: &str, t: &TenantId, state: LeaseState) -> LeaseRecord {
         box_ref: format!("box-{lease_id}"),
         created_at_ms: 1_000,
         updated_at_ms: 1_000,
+        deadline_ms: None,
     }
 }
 
@@ -52,6 +53,90 @@ pub(crate) fn run_all(make: LedgerFactory) {
     by_tenant_and_held_are_isolated_and_ordered(make);
     try_admit_atomic_cap(make);
     remove_frees_cap_and_get(make);
+    deadline_roundtrips_and_transition_preserves_it(make);
+}
+
+/// ADR-0003 Decision-1: `deadline_ms` round-trips through `put`/`try_admit` →
+/// `get`/`held`/`by_tenant`, a terminal `transition` PRESERVES it unchanged,
+/// and `None` round-trips as `None` (the never-overdue fail-safe). Every
+/// backend — InMemory, File, and Postgres (nullable `bigint`) — proves this.
+fn deadline_roundtrips_and_transition_preserves_it(make: LedgerFactory) {
+    let t = tenant("acme");
+
+    // `put` with a concrete deadline → `get` reads it back.
+    {
+        let mut led = make();
+        let mut rec = held("dl-1", &t);
+        rec.deadline_ms = Some(7_777);
+        led.put(rec).unwrap();
+        assert_eq!(
+            led.get("dl-1").unwrap().unwrap().deadline_ms,
+            Some(7_777),
+            "put → get must round-trip deadline_ms"
+        );
+        // `held()` (the reaper's enumeration seam) also carries it.
+        let held_rec = led
+            .held()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.lease_id == "dl-1")
+            .expect("the Held record must appear in held()");
+        assert_eq!(
+            held_rec.deadline_ms,
+            Some(7_777),
+            "held() must carry deadline_ms (the reaper dates leases from it)"
+        );
+        // A terminal transition must PRESERVE the deadline (a state change never
+        // alters it — ADR-0003).
+        let after = led.transition("dl-1", RunnerState::Expired, 9_000).unwrap();
+        assert_eq!(
+            after.deadline_ms,
+            Some(7_777),
+            "transition must preserve deadline_ms unchanged"
+        );
+        assert_eq!(
+            led.get("dl-1").unwrap().unwrap().deadline_ms,
+            Some(7_777),
+            "the persisted terminal record still carries the original deadline"
+        );
+    }
+
+    // `None` round-trips as `None` (never-overdue fail-safe), through both
+    // `put`/`get` AND `by_tenant`.
+    {
+        let mut led = make();
+        let rec = pending("dl-none", &t); // helper builds deadline_ms: None
+        assert_eq!(rec.deadline_ms, None);
+        led.put(rec).unwrap();
+        assert_eq!(
+            led.get("dl-none").unwrap().unwrap().deadline_ms,
+            None,
+            "a None deadline must round-trip as None (NULL in Postgres)"
+        );
+        let via_tenant = led
+            .by_tenant(&t)
+            .unwrap()
+            .into_iter()
+            .find(|r| r.lease_id == "dl-none")
+            .unwrap();
+        assert_eq!(via_tenant.deadline_ms, None, "by_tenant carries None too");
+    }
+
+    // `try_admit` (the acquire path) persists the deadline it is handed.
+    {
+        let mut led = make();
+        let mut rec = pending("dl-admit", &t);
+        rec.deadline_ms = Some(4_242);
+        assert!(
+            led.try_admit(rec, 5).unwrap(),
+            "admit under cap must succeed"
+        );
+        assert_eq!(
+            led.get("dl-admit").unwrap().unwrap().deadline_ms,
+            Some(4_242),
+            "try_admit must persist deadline_ms (the acquire path writes it)"
+        );
+    }
 }
 
 /// `put` rejects a duplicate `lease_id`; `get` returns None/Some correctly.
@@ -553,6 +638,90 @@ mod pg_runs {
     fn led_active_count(rt: &tokio::runtime::Runtime, url: &str, t: &TenantId) -> usize {
         let led = connect(rt, url);
         led.by_tenant(t).unwrap().len()
+    }
+
+    /// THE P1 REGRESSION GUARD (ADR-0003 Decision-1, audit finding D3-P1).
+    ///
+    /// The durable deadline must survive INSTANCE boundaries. One `PgLedger`
+    /// handle (instance A — simulating the instance that served the acquire)
+    /// writes a `Held` lease with a PAST `deadline_ms`. A SEPARATE `PgLedger`
+    /// handle (instance B — which never called any in-memory `record_deadline`)
+    /// then `held()`-reads the lease and sees the SAME deadline, and the
+    /// reaper-style overdue filter (`now >= rec.deadline_ms`) flags it. Before
+    /// this fix the deadline lived only in instance A's in-memory map, so
+    /// instance B treated the lease as `u64::MAX` (never-overdue) and leaked the
+    /// cap slot forever. This proves the deadline is now read from the ledger,
+    /// not from per-instance memory.
+    #[test]
+    fn durable_deadline_survives_instance_boundary_and_is_reapable_cross_instance() {
+        let Some(url) = db_url() else {
+            eprintln!(
+                "durable_deadline_survives_instance_boundary...: \
+                 TEST_DATABASE_URL unset — skipping (expected on CI)"
+            );
+            return;
+        };
+        let _serial = PG_TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+
+        let rt = rt();
+        let nonce = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let t = tenant(&format!("xdl-{nonce}"));
+        let lease_id = format!("dl-{nonce}");
+        let past_deadline: u64 = 1_000; // far in the past relative to `now` below
+
+        // ── Instance A: write a Held lease carrying a PAST durable deadline.
+        {
+            let mut led_a = connect(&rt, &url);
+            led_a.truncate_for_test().expect("truncate at start");
+            let mut rec = held(&lease_id, &t);
+            rec.deadline_ms = Some(past_deadline);
+            led_a
+                .put(rec)
+                .expect("instance A writes the Held+deadline record");
+        }
+
+        // ── Instance B: a SEPARATE handle that never saw instance A's memory.
+        // It must read the deadline purely from the durable ledger.
+        let led_b = connect(&rt, &url);
+        let held_b = led_b.held().expect("instance B held() read");
+        let rec_b = held_b
+            .into_iter()
+            .find(|r| r.lease_id == lease_id)
+            .expect("instance B must see the Held lease in the durable ledger");
+        assert_eq!(
+            rec_b.deadline_ms,
+            Some(past_deadline),
+            "instance B must read the SAME durable deadline instance A wrote \
+             (the cross-instance D3-P1 fix)"
+        );
+
+        // ── Reaper-style overdue detection on instance B, purely from the
+        // durable deadline (this is exactly `reap_once`'s filter).
+        let now: u64 = 5_000;
+        let overdue = now >= rec_b.deadline_ms.unwrap_or(u64::MAX);
+        assert!(
+            overdue,
+            "instance B must flag the lease overdue from the durable deadline alone"
+        );
+
+        // ── And instance B can drive the terminal transition (the reaper's
+        // reclaim), which PRESERVES the deadline on the terminal record.
+        let mut led_b = led_b;
+        let after = led_b
+            .transition(&lease_id, RunnerState::Expired, now)
+            .expect("instance B reaps the lease it never acquired");
+        assert_eq!(
+            after.deadline_ms,
+            Some(past_deadline),
+            "the terminal transition preserves the durable deadline (ADR-0003)"
+        );
     }
 
     /// Spawn an OS thread that owns its OWN `PgLedger` (own pool + own runtime,

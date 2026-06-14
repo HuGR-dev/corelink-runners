@@ -69,6 +69,18 @@ pub struct LeaseRecord {
     pub created_at_ms: u64,
     /// Unix epoch ms at last state change.
     pub updated_at_ms: u64,
+    /// Absolute lease-expiry deadline, unix epoch ms (ADR-0003 Decision-1).
+    ///
+    /// THE durable source of truth for expiry: the reaper dates an overdue
+    /// lease purely from this field, so any instance — including one that never
+    /// served the acquire — can reap it (fixing the D3-P1 cap-slot leak where
+    /// the deadline lived only in the acquiring instance's in-memory map).
+    ///
+    /// `None` = no deadline = **never-overdue** (the pre-ADR-0003 fail-safe: a
+    /// lease we cannot date is never reaped by the deadline path). A state
+    /// change NEVER alters this field — [`LeaseLedger::transition`] preserves it
+    /// unchanged.
+    pub deadline_ms: Option<u64>,
 }
 
 /// Legal-transition matrix — contract §1, nothing else:
@@ -108,6 +120,9 @@ fn apply_transition(
             rec.state,
         );
     }
+    // A state change touches ONLY `state` + `updated_at_ms`; `deadline_ms`
+    // (and every other field) is preserved unchanged (ADR-0003 Decision-1: a
+    // transition never alters the durable deadline).
     rec.state = LeaseState::Wire(to);
     rec.updated_at_ms = now_ms;
     Ok(rec.clone())

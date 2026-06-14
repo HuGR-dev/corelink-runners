@@ -169,6 +169,10 @@ pub(crate) async fn acquire(
             box_ref: format!("box:{lease_id}"),
             created_at_ms: now_ms,
             updated_at_ms: now_ms,
+            // ADR-0003 Decision-1: the absolute expiry deadline rides the record
+            // into the ledger (the single source of truth), so ANY instance can
+            // date+reap this lease — and the terminal transition preserves it.
+            deadline_ms: Some(lease.expiry),
         };
         match ledger.try_admit(pending, plan.max_concurrency) {
             Ok(true) => {} // reserved — Pending is now in the ledger.
@@ -265,14 +269,14 @@ pub(crate) async fn acquire(
         return fail_closed(msg);
     }
 
-    // ── 5. Contract §1: acquire returns lease id + exec endpoint +
-    // deadline. The endpoint is the frozen template, substituted. The
-    // deadline is also recorded server-side: the API3 expired-at-exec-time
-    // gate refuses execution past it (`expired_job_stores_nothing_ever`),
-    // even before the expiry sweep marks the ledger. ──
-    state.record_deadline(&lease_id, lease.expiry);
-    // The validated pinned image digest is also recorded: it is the image
-    // identity the attestation path (WP-ATT1, contract §7) reads at exec.
+    // ── 5. Contract §1: acquire returns lease id + exec endpoint + deadline.
+    // The endpoint is the frozen template, substituted. The deadline is NOT
+    // recorded in a side-table anymore — it rode the `LeaseRecord` into the
+    // ledger above (`deadline_ms: Some(lease.expiry)`, ADR-0003 Decision-1), so
+    // the API3 expired-at-exec-time gate and the reaper both read it durably
+    // from the ledger on ANY instance. ──
+    // The validated pinned image digest IS recorded server-side: it is the
+    // image identity the attestation path (WP-ATT1, contract §7) reads at exec.
     state.record_image(&lease_id, &req.image_digest);
 
     // ── 5b. §13 hook registration (WP-ENVELOPE-WIRE): open a CaptureHook
