@@ -27,8 +27,16 @@ ureq       = { workspace = true }
 base64     = { workspace = true }
 # WP-ENV2: the close handler drives the frozen JobClose state machine, which
 # blocks for up to the runner-configured ack window — it runs on a blocking
-# thread (`tokio::task::spawn_blocking`), never on the async workers.
+# thread (`tokio::task::spawn_blocking`), never on the async workers. The
+# `sync` feature (Semaphore) bounds how many such waits may pin a blocking
+# thread at once (the close ack-window concurrency gate, audit P1).
 tokio      = { workspace = true }
+# AUDIT P2: the global in-flight concurrency cap + load-shedding (503 when
+# saturated) is a tower `GlobalConcurrencyLimitLayer` + `LoadShedLayer` wired in
+# app_full. tower was previously dev-only (oneshot); promoting it to a normal
+# dep with the `limit`/`load-shed` features adds ZERO crates to Cargo.lock (all
+# its transitive deps were already present from the dev-dep + axum).
+tower      = { workspace = true }
 # WP-FIX-LEASE-ID-UUID: the acquire handler mints `lease_id` from a UUID v4 so
 # the persistent PgLedger PRIMARY KEY can never collide across restarts or
 # instances (the in-memory monotonic counter could).
@@ -53,4 +61,3 @@ corelink-cloud-engine      = { path = "../corelink-cloud-engine" }
 
 [dev-dependencies]
 tokio = { workspace = true }
-tower = { workspace = true }

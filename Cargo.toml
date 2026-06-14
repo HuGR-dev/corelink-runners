@@ -25,10 +25,16 @@ base64        = "=0.22.1"
 ed25519-dalek = "=2.2.0"
 # HTTP server stack — exact-pinned, MINIMAL feature sets (WP-API1; house
 # stack: corelink-server runs axum 0.7 minimal — mirrored, not forked).
-# tower is dev-only today (ServiceExt::oneshot in acceptance tests).
+# tower: `util` (ServiceExt::oneshot in acceptance tests) + `limit`/`load-shed`
+# (the global concurrency cap + 503 shedding layer wired in app_full). All three
+# features reuse crates already in the lock (futures-*, pin-project-lite,
+# sync_wrapper, tower-layer/-service) — ZERO new dependencies.
 axum  = { version = "=0.7.9", default-features = false, features = ["http1", "tokio", "json"] }
-tokio = { version = "=1.52.3", features = ["rt-multi-thread", "macros", "net", "signal", "time"] }
-tower = { version = "=0.5.3", default-features = false, features = ["util"] }
+# `sync` carries Semaphore (the bounded ack-window gate in close.rs) and is
+# already present transitively via `rt-multi-thread` — naming it is explicit, not
+# new (no Cargo.lock change).
+tokio = { version = "=1.52.3", features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync"] }
+tower = { version = "=0.5.3", default-features = false, features = ["util", "limit", "load-shed"] }
 # Outbound HTTP client — exact-pinned (WP-CLOUD1: the CloudSandboxEngine's
 # Northflank adapter). Sync/blocking by design (no tokio contagion into the sync
 # `Engine` seam); quarantined behind the crate's `HttpTransport` trait — ureq is

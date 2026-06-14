@@ -80,16 +80,34 @@ pub(crate) async fn acquire(
     //   - Err(Unreachable) → the cap source could not be consulted: 503
     //     fail-closed, NEVER a false no-plan reject that would 0-slot a
     //     legitimate tenant on a transient backend glitch.
-    let plan = match state.plans.plan_of_resolving(&tenant, &pat.0) {
-        Ok(Some(p)) => p,
-        Ok(None) => {
+    // AUDIT P2: `plan_of_resolving` may be a BLOCKING introspect call (the
+    // production `CoreLinkPlanStore` does a synchronous `ureq` round-trip on the
+    // SAME endpoint as auth). Running it on the async worker would pin a scarce
+    // executor thread for the whole round-trip → under
+    // `FABRIC_AUTH_BACKEND=corelink` every acquire starves a worker. Offload to
+    // the blocking pool; the fail-closed mapping is unchanged — a panicked
+    // blocking task maps to `Unreachable` (503 fail-closed), never a false
+    // no-plan reject.
+    let plan_resolved = {
+        let plans = Arc::clone(&state.plans);
+        let tenant = tenant.clone();
+        let pat = pat.0.clone();
+        tokio::task::spawn_blocking(move || plans.plan_of_resolving(&tenant, &pat)).await
+    };
+    let plan = match plan_resolved {
+        Ok(Ok(Some(p))) => p,
+        Ok(Ok(None)) => {
             return error_response(
                 ApiError::OverCap,
                 "no plan on file for tenant: zero concurrency slots",
             );
         }
-        Err(crate::app::PlanSourceError::Unreachable) => {
+        Ok(Err(crate::app::PlanSourceError::Unreachable)) => {
             return fail_closed("plan source unreachable");
+        }
+        // The blocking task panicked: fail-closed, never a false admission.
+        Err(_) => {
+            return fail_closed("plan source resolution task panicked");
         }
     };
 
