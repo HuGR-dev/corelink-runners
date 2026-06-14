@@ -53,6 +53,7 @@ pub(crate) fn run_all(make: LedgerFactory) {
     by_tenant_and_held_are_isolated_and_ordered(make);
     try_admit_atomic_cap(make);
     remove_frees_cap_and_get(make);
+    remove_if_pending_guards_on_state(make);
     deadline_roundtrips_and_transition_preserves_it(make);
     envelope_checkpoint_set_get_roundtrip(make);
     pending_older_than_filters_by_age_and_state(make);
@@ -535,6 +536,89 @@ fn remove_frees_cap_and_get(make: LedgerFactory) {
         assert!(
             !led.remove("p-1").unwrap(),
             "removing an already-removed lease must be Ok(false)"
+        );
+    }
+}
+
+/// `remove_if_pending` is the GUARDED admission-rollback the stale-Pending
+/// sweep uses: it removes the lease IFF it is still `Pending` at delete time.
+/// Every backend (InMemory, File, Pg) proves the guard:
+/// - a `Pending` row IS removed (`Ok(true)`), freeing the cap;
+/// - a `Held` row is NOT removed (`Ok(false)`) and SURVIVES — the W2-B fix: a
+///   lease that raced `Pending → Held` in the sweep window must never be
+///   deleted out from under its running box;
+/// - a terminal (`Released`/`Expired`/`Crashed`) row is likewise NOT removed;
+/// - an absent lease is a no-op (`Ok(false)`).
+fn remove_if_pending_guards_on_state(make: LedgerFactory) {
+    let t = tenant("acme");
+
+    // Absent → Ok(false), no-op.
+    {
+        let mut led = make();
+        assert!(
+            !led.remove_if_pending("ghost").unwrap(),
+            "remove_if_pending on an absent lease must be Ok(false)"
+        );
+    }
+
+    // Pending → removed (the legitimate stale-Pending reclaim), cap freed.
+    {
+        let mut led = make();
+        assert!(
+            led.try_admit(pending("p-1", &t), 1).unwrap(),
+            "reserve at cap 1"
+        );
+        assert!(
+            led.remove_if_pending("p-1").unwrap(),
+            "a still-Pending lease must be removed (Ok(true))"
+        );
+        assert!(
+            led.get("p-1").unwrap().is_none(),
+            "the reclaimed Pending must read absent"
+        );
+        // The freed slot is re-admittable.
+        assert!(
+            led.try_admit(pending("p-2", &t), 1).unwrap(),
+            "remove_if_pending must free the cap slot"
+        );
+    }
+
+    // Held → NOT removed, and the live lease SURVIVES (the W2-B regression: a
+    // Pending that raced to Held must never be deleted by the guarded reclaim).
+    {
+        let mut led = make();
+        led.put(held("h-1", &t)).unwrap();
+        assert!(
+            !led.remove_if_pending("h-1").unwrap(),
+            "a Held lease must NOT be removed by remove_if_pending (Ok(false))"
+        );
+        let rec = led
+            .get("h-1")
+            .unwrap()
+            .expect("the Held lease must SURVIVE the guarded delete");
+        assert!(
+            rec.state.is_held(),
+            "the surviving lease must remain Held (a live lease)"
+        );
+    }
+
+    // Terminal states → NOT removed either (the guard is `state = Pending` only).
+    for term in [
+        RunnerState::Released,
+        RunnerState::Expired,
+        RunnerState::Crashed,
+    ] {
+        let mut led = make();
+        let id = format!("term-{term:?}");
+        led.put(record(&id, &t, LeaseState::Wire(term.clone())))
+            .unwrap();
+        assert!(
+            !led.remove_if_pending(&id).unwrap(),
+            "a terminal ({term:?}) lease must NOT be removed by remove_if_pending"
+        );
+        assert!(
+            led.get(&id).unwrap().is_some(),
+            "the terminal lease must survive remove_if_pending"
         );
     }
 }

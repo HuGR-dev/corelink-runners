@@ -234,6 +234,35 @@ pub trait LeaseLedger {
     /// running box — callers must restrict its use to rolling back a
     /// just-reserved `Pending` admission they own.
     fn remove(&mut self, lease_id: &str) -> anyhow::Result<bool>;
+
+    /// GUARDED admission-rollback: remove the lease ONLY if it is still
+    /// `Pending` at delete time, evaluated atomically under the ledger lock.
+    /// Returns `Ok(true)` if a `Pending` row was removed, `Ok(false)` if the
+    /// lease was absent OR had already left `Pending` (e.g. raced to `Held`).
+    ///
+    /// This is the state-AWARE counterpart of [`LeaseLedger::remove`] for the
+    /// stale-Pending sweep ([`crate::reaper::sweep_stale_pending`]). The sweep
+    /// snapshots `Pending` rows, `await`s a teardown, then reclaims — and in
+    /// that window a concurrent acquire can complete the provision and
+    /// transition the very same lease `Pending → Held`. A state-BLIND `remove`
+    /// would then DELETE a live `Held` lease out from under a running box
+    /// (over-admit + a leaked box with no ledger record). Conditioning the
+    /// delete on `state = Pending` under the lock makes the reclaim a no-op for
+    /// any lease that won the race to `Held` — mirroring the reaper's
+    /// won-the-race CAS posture (`transition` returns `Err` when the source
+    /// state moved).
+    ///
+    /// Default impl is a check-then-`remove` that is correct ONLY because every
+    /// production impl evaluates it while holding the same exclusive lock the
+    /// sweep holds; the Pg impl overrides it with a single conditional
+    /// `DELETE ... WHERE state = 'pending'` so the guard is atomic in the DB.
+    fn remove_if_pending(&mut self, lease_id: &str) -> anyhow::Result<bool> {
+        match self.get(lease_id)? {
+            Some(rec) if matches!(rec.state, LeaseState::Pending) => self.remove(lease_id),
+            // Absent, or no longer Pending (raced to Held / terminal) → no-op.
+            _ => Ok(false),
+        }
+    }
 }
 
 /// In-memory ledger — dev/test impl; disqualified for production by

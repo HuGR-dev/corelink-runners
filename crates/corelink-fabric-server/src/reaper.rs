@@ -771,20 +771,31 @@ pub fn pending_max_age_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow:
 /// mid-provision is NEVER reclaimed. The bound is set well past any legitimate
 /// provision window ([`DEFAULT_PENDING_MAX_AGE`]).
 ///
-/// # Posture (teardown-first, like [`reap_once`])
+/// # Posture (GUARDED-delete-first, won-the-race CAS like [`reap_once`])
 ///
-/// Teardown is attempted FIRST (the dead instance may have created the box
-/// before dying). Teardown is best-effort here: unlike the Held path — where a
-/// failed teardown leaves the lease Held to retry on its hard deadline — a
-/// stale Pending has NO deadline and would otherwise leak forever, so the
-/// reclaim proceeds to `remove` regardless. A teardown failure is logged so a
-/// possibly-leaked box is still visible.
+/// The reclaim is a CAS on the lease still being `Pending`: between the
+/// snapshot above and this point, the sweep `await`s — and a concurrent acquire
+/// can complete provisioning and transition the SAME lease `Pending → Held`.
+/// So the row is removed via the GUARDED [`LeaseLedger::remove_if_pending`]
+/// (delete iff `state = Pending`, atomic under the ledger lock) — NOT the
+/// state-blind `remove`, which would delete the now-live `Held` lease out from
+/// under its running box (over-admit + a leaked box with no ledger record).
+///
+/// Because the box of a lease that won the race to `Held` MUST survive, the
+/// guarded delete is the GATE: teardown runs only AFTER we win the delete (the
+/// row was genuinely still Pending and is now gone, so any box it
+/// half-provisioned is orphaned and ours to reclaim). A lost CAS
+/// (`Ok(false)` — raced to Held, already rolled back, or already gone) tears
+/// down NOTHING and counts NOTHING. Teardown is still best-effort: a stale
+/// Pending has no deadline to retry on, so a teardown failure is logged (the
+/// box may leak) but the cap slot is already reclaimed by the delete.
 ///
 /// # Lock-ordering note
 ///
 /// No `MutexGuard` is held across any `await`: the stale-Pending snapshot is
-/// taken in a scoped block (guard dropped before the teardown await), and the
-/// `remove` re-acquires the ledger lock briefly afterwards. The compile-time
+/// taken in a scoped block (guard dropped before any await), the guarded
+/// `remove_if_pending` re-acquires the ledger lock briefly (dropped before the
+/// teardown await), and teardown holds no lock. The compile-time
 /// [`_ASSERT_SWEEP_STALE_PENDING_IS_SEND`] assertion enforces this.
 pub async fn sweep_stale_pending(state: &crate::AppState, max_age: Duration) -> usize {
     let now = state.clock.now_ms();
@@ -809,37 +820,45 @@ pub async fn sweep_stale_pending(state: &crate::AppState, max_age: Duration) -> 
     let mut reclaimed = 0usize;
 
     for rec in stale {
-        // ── 2. TEARDOWN FIRST (best-effort) — no lock held. The dead instance
-        // may have half-provisioned a box before dying; tear it down so it is
-        // not leaked. A failure is logged but does NOT block the reclaim: a
-        // Pending has no deadline, so leaving it would leak the cap slot
-        // forever.
+        // ── 2. GUARDED reclaim FIRST — win the CAS atomically under the ledger
+        // lock: remove the row IFF it is STILL `Pending`. In the await window
+        // since the snapshot, a concurrent acquire may have transitioned this
+        // very lease `Pending → Held` (the provision completed). The guarded
+        // delete makes that case a no-op (`Ok(false)`), so we never delete a
+        // live `Held` lease — the W2-B regression. The §1-honest rollback
+        // (Pending has no legal terminal transition) frees the leaked cap slot.
+        let removed = {
+            let mut ledger = state.ledger.lock().unwrap_or_else(|e| e.into_inner());
+            ledger.remove_if_pending(&rec.lease_id).unwrap_or(false)
+            // guard dropped here at end of block
+        };
+
+        if !removed {
+            // Lost the CAS: the lease raced to `Held` (a LIVE lease — leave its
+            // box ALONE), was already rolled back, or is already gone. Tear down
+            // nothing, count nothing.
+            continue;
+        }
+
+        // ── 3. TEARDOWN (best-effort) — no lock held. We won the delete, so the
+        // lease was genuinely still Pending: any box the dead instance
+        // half-provisioned is now orphaned and ours to reclaim. A failure is
+        // logged but does NOT un-reclaim the cap slot (a Pending has no deadline
+        // to retry on); the box may leak but the slot is already freed.
         let torn = state.teardown_lease(&rec.lease_id).await;
         if !torn {
             eprintln!(
-                "pending-sweep: teardown of stale Pending {} failed — box may be LEAKED \
-                 (reclaiming the cap slot anyway; a Pending has no deadline to retry on)",
+                "pending-sweep: teardown of reclaimed stale Pending {} failed — box may be \
+                 LEAKED (the cap slot is already freed; a Pending has no deadline to retry on)",
                 rec.lease_id
             );
         }
 
-        // ── 3. Remove the Pending row — the §1-honest rollback (Pending has no
-        // legal terminal transition). Frees the leaked concurrency slot. Only
-        // count it if WE actually removed it (a concurrent rollback/acquire may
-        // have raced us; `remove` then returns Ok(false)).
-        let removed = {
-            let mut ledger = state.ledger.lock().unwrap_or_else(|e| e.into_inner());
-            ledger.remove(&rec.lease_id).unwrap_or(false)
-            // guard dropped here at end of block
-        };
-
-        if removed {
-            // GC any image side-table entry the half-acquire recorded (the slot
-            // meter never got an Acquired event for a never-Held Pending, so
-            // there is nothing to free there).
-            state.forget_lease(&rec.lease_id);
-            reclaimed += 1;
-        }
+        // GC any image side-table entry the half-acquire recorded (the slot
+        // meter never got an Acquired event for a never-Held Pending, so there
+        // is nothing to free there).
+        state.forget_lease(&rec.lease_id);
+        reclaimed += 1;
     }
 
     reclaimed
@@ -1261,6 +1280,167 @@ mod tests {
         assert!(
             !prov.teardown_calls().contains(&"pending-fresh".to_string()),
             "the fresh Pending's box must NOT be torn down"
+        );
+    }
+
+    // ── W2-B regression: the sweep must NOT delete a Pending that raced to
+    // Held in the sweep window ──────────────────────────────────────────────
+
+    /// Ledger decorator that models a CONCURRENT ACQUIRE winning the race: on the
+    /// FIRST `pending_older_than` call (the sweep's snapshot) it returns the real
+    /// stale set AND THEN transitions the named lease `Pending → Held` — exactly
+    /// the window in which a provision completes after the sweep snapshotted the
+    /// lease as Pending. Every other method delegates to the inner
+    /// [`InMemoryLedger`]; the inner is held in a `RefCell` so the `&self`
+    /// `pending_older_than` can perform the in-window flip (modeling a concurrent
+    /// writer). The sweep's later `remove_if_pending` then sees the lease as
+    /// `Held` and MUST no-op (the W2-B fix); a state-blind `remove` would instead
+    /// delete the live `Held` lease.
+    struct RaceToHeldLedger {
+        inner: std::cell::RefCell<InMemoryLedger>,
+        /// The lease to flip to `Held` right after the first snapshot.
+        race_lease: String,
+        /// Flips false after the first `pending_older_than` so the race fires once.
+        armed: std::cell::Cell<bool>,
+    }
+
+    impl RaceToHeldLedger {
+        fn new(race_lease: &str) -> Self {
+            Self {
+                inner: std::cell::RefCell::new(InMemoryLedger::new()),
+                race_lease: race_lease.to_string(),
+                armed: std::cell::Cell::new(true),
+            }
+        }
+    }
+
+    impl LeaseLedger for RaceToHeldLedger {
+        fn put(&mut self, rec: LeaseRecord) -> Result<()> {
+            self.inner.get_mut().put(rec)
+        }
+        fn get(&self, lease_id: &str) -> Result<Option<LeaseRecord>> {
+            self.inner.borrow().get(lease_id)
+        }
+        fn transition(
+            &mut self,
+            lease_id: &str,
+            to: RunnerState,
+            now_ms: u64,
+        ) -> Result<LeaseRecord> {
+            self.inner.get_mut().transition(lease_id, to, now_ms)
+        }
+        fn by_tenant(&self, t: &TenantId) -> Result<Vec<LeaseRecord>> {
+            self.inner.borrow().by_tenant(t)
+        }
+        fn held(&self) -> Result<Vec<LeaseRecord>> {
+            self.inner.borrow().held()
+        }
+        fn pending_older_than(&self, now_ms: u64, max_age_ms: u64) -> Result<Vec<LeaseRecord>> {
+            // The snapshot the sweep will iterate (the lease is still Pending here).
+            let snapshot = self.inner.borrow().pending_older_than(now_ms, max_age_ms)?;
+            // …then the concurrent acquire wins: flip the raced lease to Held,
+            // ONCE, modeling the provision completing in the sweep window.
+            if self.armed.replace(false) {
+                self.inner
+                    .borrow_mut()
+                    .transition(&self.race_lease, RunnerState::Held, now_ms)
+                    .expect("race-flip Pending→Held must be a legal transition");
+            }
+            Ok(snapshot)
+        }
+        fn try_admit(&mut self, rec: LeaseRecord, max_concurrency: u32) -> Result<bool> {
+            self.inner.get_mut().try_admit(rec, max_concurrency)
+        }
+        fn set_envelope_checkpoint(&mut self, lease_id: &str, checkpoint_json: &str) -> Result<()> {
+            self.inner
+                .get_mut()
+                .set_envelope_checkpoint(lease_id, checkpoint_json)
+        }
+        fn get_envelope_checkpoint(&self, lease_id: &str) -> Result<Option<String>> {
+            self.inner.borrow().get_envelope_checkpoint(lease_id)
+        }
+        fn remove(&mut self, lease_id: &str) -> Result<bool> {
+            self.inner.get_mut().remove(lease_id)
+        }
+        fn remove_if_pending(&mut self, lease_id: &str) -> Result<bool> {
+            // The fix under test: delegate to the inner impl's REAL guarded path
+            // (delete iff still Pending). By now the lease is Held → no-op.
+            self.inner.get_mut().remove_if_pending(lease_id)
+        }
+    }
+
+    /// A genuinely-stale `Pending` that races to `Held` in the sweep window is
+    /// NOT reclaimed: the guarded delete no-ops, the live `Held` lease survives,
+    /// its box is NOT torn down, and the sweep counts 0. This is the W2-B
+    /// regression the fix closes (a state-blind `remove` would have deleted it).
+    #[tokio::test]
+    async fn sweep_does_not_reclaim_pending_that_raced_to_held() {
+        // Build state on a race-injecting ledger that flips the lease to Held
+        // right after the sweep snapshots it as Pending.
+        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
+            Arc::new(Mutex::new(RaceToHeldLedger::new("pending-raced")));
+        let clock = FixedClock::new(1_000_000);
+        let prov = Arc::new(RecordingProvisioner::new());
+        let mut state = AppState::new(
+            ledger,
+            Arc::new(StaticPlans::default()),
+            Arc::new(clock.clone()),
+        );
+        state.provisioner = Arc::clone(&prov) as Arc<dyn BoxProvisioner>;
+
+        // A genuinely-stale Pending (created at 100_000 ≪ cutoff 700_000) that
+        // appears in the sweep's snapshot — then races to Held in the window.
+        insert_pending(&state, "pending-raced", 100_000);
+
+        let reclaimed = sweep_stale_pending(&state, Duration::from_secs(300)).await;
+
+        assert_eq!(
+            reclaimed, 0,
+            "a lease that raced Pending→Held must NOT be reclaimed (guarded delete no-ops)"
+        );
+        // The live lease must still exist AND still be Held — never deleted.
+        let rec = state
+            .ledger
+            .lock()
+            .unwrap()
+            .get("pending-raced")
+            .unwrap()
+            .expect("the raced-to-Held lease must NOT be deleted by the sweep");
+        assert!(
+            rec.state.is_held(),
+            "the raced lease must remain Held (a live lease), not deleted"
+        );
+        // And its box must NOT be torn down (delete-first gate: lost CAS → no teardown).
+        assert!(
+            prov.teardown_calls().is_empty(),
+            "the live Held lease's box must NOT be torn down by the stale-Pending sweep"
+        );
+    }
+
+    /// A genuinely-stale `Pending` that does NOT race (stays Pending through the
+    /// delete) is STILL reclaimed — proving the guard only blocks the raced case,
+    /// never the legitimate leaked-slot reclaim. Box teardown is attempted (we
+    /// won the CAS).
+    #[tokio::test]
+    async fn sweep_still_reclaims_genuinely_stale_pending() {
+        let (state, _clock, prov) = build_state(1_000_000);
+        // Stale, and it stays Pending through the guarded delete.
+        insert_pending(&state, "pending-leaked", 100_000);
+
+        let reclaimed = sweep_stale_pending(&state, Duration::from_secs(300)).await;
+
+        assert_eq!(
+            reclaimed, 1,
+            "the genuinely-stale Pending is still reclaimed"
+        );
+        assert!(
+            !lease_exists(&state, "pending-leaked"),
+            "the genuinely-stale Pending must be removed (leaked cap slot reclaimed)"
+        );
+        assert!(
+            prov.teardown_calls()
+                .contains(&"pending-leaked".to_string()),
+            "teardown must run for the reclaimed (won-the-CAS) Pending's box"
         );
     }
 
