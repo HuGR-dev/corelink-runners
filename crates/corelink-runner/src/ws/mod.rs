@@ -214,6 +214,22 @@ pub struct DedupSpawner {
 }
 
 impl DedupSpawner {
+    /// THE single source of the dedup slot key.
+    ///
+    /// The slot identity is the LEASE's C9 container name — never the caller-
+    /// supplied `workspace_id` (which does not name the box; see
+    /// [`spawn_or_join`](Self::spawn_or_join)'s identity-binding note). EVERY
+    /// keyed operation — `spawn_or_join`'s claim/publish, `reap_locked`'s
+    /// sweep, and `evict`/`evict_checked`'s removal — derives its key HERE, so
+    /// the insert key and the remove key can never desync (the W3-C re-key
+    /// desynchronized them: spawn inserted under the lease key while evict
+    /// removed by the workspace_id key, so evict silently no-op'd and leaked
+    /// the box). One function ⇒ one key ⇒ no desync.
+    #[must_use]
+    fn slot_key(lease: &RunnerLease) -> String {
+        c9_container_name(&lease.lease_id)
+    }
+
     /// Construct with a deduplication window and the default entry cap
     /// ([`DEFAULT_MAX_DEDUP_ENTRIES`]).
     ///
@@ -286,7 +302,10 @@ impl DedupSpawner {
         // same lease ⇒ same key ⇒ same container; different lease ⇒ different
         // key ⇒ never shared. (`workspace_id` remains the public param for
         // callers, but is NOT the trust boundary.)
-        let key = c9_container_name(&lease.lease_id);
+        //
+        // Derived through the SINGLE key source ([`slot_key`]) so the insert key
+        // here can never diverge from the remove key in `evict`/`reap_locked`.
+        let key = Self::slot_key(lease);
         let key = key.as_str();
 
         // ── Phase 1: claim or observe the slot (lock held briefly) ────────────
@@ -399,15 +418,38 @@ impl DedupSpawner {
     ///
     /// `keep` is never reaped: it is the slot the caller is mid-claim on, so
     /// removing it here would lose a `Pending` marker other waiters rely on.
+    ///
+    /// A `Ready` slot evicted by EITHER path (expiry sweep or cap eviction)
+    /// still names a LIVE container on the box; dropping it from the map without
+    /// tearing that container down leaks the box. So every evicted `Ready`
+    /// container is collected and torn down via the installed [`TeardownHook`]
+    /// — the SAME teardown discipline as `evict_checked` (W3-C's cap/expiry
+    /// sweep removed Ready slots without firing the hook → leaked boxes). A
+    /// teardown failure is surfaced to stderr (best-effort, never swallowed
+    /// silently); the sweep itself cannot return `Err` (it runs inside the
+    /// claim critical section).
     fn reap_locked(&self, map: &mut HashMap<String, SpawnEntry>, keep: &str) {
+        // Containers of Ready slots evicted by this sweep, to be torn down so
+        // the box is never leaked (same hook as `evict_checked`).
+        let mut to_teardown: Vec<RunningContainer> = Vec::new();
+
         // (1) sweep Failed + expired Ready.
         map.retain(|id, e| {
-            id == keep
-                || match e {
-                    SpawnEntry::Failed => false,
-                    SpawnEntry::Ready { at, .. } => at.elapsed() < self.dedup_window,
-                    SpawnEntry::Pending => true,
+            if id == keep {
+                return true;
+            }
+            match e {
+                SpawnEntry::Failed => false,
+                SpawnEntry::Ready { at, handle } => {
+                    let live = at.elapsed() < self.dedup_window;
+                    if !live {
+                        // Expired Ready → its container must be torn down.
+                        to_teardown.push(handle.container.clone());
+                    }
+                    live
                 }
+                SpawnEntry::Pending => true,
+            }
         });
 
         // (2) enforce the cap by evicting the oldest Ready slots.
@@ -423,33 +465,58 @@ impl DedupSpawner {
                 .map(|(id, _)| id);
             match oldest {
                 Some(id) => {
-                    map.remove(&id);
+                    if let Some(SpawnEntry::Ready { handle, .. }) = map.remove(&id) {
+                        // Cap-evicted Ready → its container must be torn down.
+                        to_teardown.push(handle.container);
+                    }
                 }
                 // Nothing evictable left (all remaining are Pending or `keep`);
                 // never block an in-flight claim for the sake of the cap.
                 None => break,
             }
         }
+
+        // Tear down every evicted Ready container (best-effort; a failure is a
+        // potential box leak and is surfaced, never swallowed silently).
+        if let Some(hook) = self.teardown.as_ref() {
+            for c in to_teardown {
+                if let Err(e) = hook(&c) {
+                    eprintln!(
+                        "ws::DedupSpawner::reap_locked: teardown of cap/expiry-evicted \
+                         container '{}' failed (possible box leak): {e:#}",
+                        c.name
+                    );
+                }
+            }
+        }
     }
 
-    /// Evict the entry for `workspace_id` and tear down its backing container,
-    /// loudly reporting (but not propagating) any teardown failure.
+    /// Evict the slot for `lease` and tear down its backing container, loudly
+    /// reporting (but not propagating) any teardown failure.
     ///
     /// Thin compatibility wrapper over [`evict_checked`](Self::evict_checked):
     /// a teardown failure is surfaced to stderr (it must NOT vanish — a leaked
     /// box is a real cost) rather than returned. Callers that need to *act* on
     /// the failure (retry, alert, fail the reclaim) should call
     /// [`evict_checked`](Self::evict_checked) directly.
-    pub fn evict(&self, workspace_id: &str) {
-        if let Err(e) = self.evict_checked(workspace_id) {
+    pub fn evict(&self, lease: &RunnerLease) {
+        if let Err(e) = self.evict_checked(lease) {
             // Mirror the concurrency-reclaim idiom: a teardown failure is a
             // potential box leak and is NEVER swallowed silently.
             eprintln!("ws::DedupSpawner::evict: teardown failure (possible box leak): {e:#}");
         }
     }
 
-    /// Evict the entry for `workspace_id` and tear down its backing container,
-    /// returning any teardown failure.
+    /// Evict the slot for `lease` and tear down its backing container, returning
+    /// any teardown failure.
+    ///
+    /// Keyed through the SAME single key source ([`slot_key`](Self::slot_key))
+    /// that `spawn_or_join` inserts under — the LEASE's C9 container identity,
+    /// NOT the caller-supplied `workspace_id`. Keying evict on `workspace_id`
+    /// (as W3-C did) desynchronizes it from the insert key whenever
+    /// `workspace_id != lease_id`, so the remove finds nothing → silent no-op →
+    /// leaked box + stuck slot. Routing both through `slot_key` makes that
+    /// desync structurally impossible.
     ///
     /// Removing the slot alone leaks the box: the container the slot named is
     /// still running. So if the slot was `Ready`, this tears the container down
@@ -464,11 +531,10 @@ impl DedupSpawner {
     /// # Errors
     /// Returns the teardown failure if the hook reports one — the caller MUST
     /// see that the box may still be leaked.
-    pub fn evict_checked(&self, workspace_id: &str) -> Result<()> {
-        // Slots are keyed by the lease's C9 container identity (see
-        // `spawn_or_join`); `workspace_id` derives the same container name, so
-        // evict must look up by that derived key, not the raw id.
-        let key = c9_container_name(workspace_id);
+    pub fn evict_checked(&self, lease: &RunnerLease) -> Result<()> {
+        // SINGLE-SOURCED key: the exact key `spawn_or_join` inserted under, so
+        // evict can never desync from spawn and silently no-op.
+        let key = Self::slot_key(lease);
         let removed = self
             .entries
             .lock()
@@ -484,9 +550,9 @@ impl DedupSpawner {
         if let (Some(c), Some(hook)) = (container, self.teardown.as_ref()) {
             hook(&c).with_context(|| {
                 format!(
-                    "tearing down container '{}' on evict of workspace {workspace_id:?} \
+                    "tearing down container '{}' on evict of lease {:?} \
                      (slot cleared; box may be LEAKED if this failed)",
-                    c.name
+                    c.name, lease.lease_id
                 )
             })?;
         }
@@ -987,7 +1053,7 @@ mod tests {
         assert_eq!(handle.origin, WorkspaceOrigin::Spawned);
 
         // And eviction (another lock site) must also not re-panic.
-        spawner.evict("ws-poison");
+        spawner.evict(&lease);
     }
 
     /// A lease whose `lease_id` is `id`, principal-chained to `principal`.
@@ -1121,9 +1187,18 @@ mod tests {
         );
     }
 
-    /// REGRESSION (P1 leak): `evict` must tear down the backing container, not
-    /// just clear the in-memory slot. We install a teardown hook that records
-    /// the torn-down container name; evicting a Ready slot must invoke it.
+    /// REGRESSION (P1 desync + leak): `evict` must find the slot `spawn_or_join`
+    /// inserted (the SAME single-sourced key) AND tear down its backing
+    /// container — not just clear the in-memory slot, and not silently no-op.
+    ///
+    /// The trap that masked the W3-C desync: every prior test used
+    /// `workspace_id == lease_id`, so the spawn key (`c9(lease_id)`) and the
+    /// old evict key (`c9(workspace_id)`) coincided and the broken evict still
+    /// found the slot. Here `workspace_id` ("param-X") DELIBERATELY differs from
+    /// `lease_id` ("ws-evict") — the real keying path (a param under a lease).
+    /// Under the W3-C desync, evict keyed by `c9("param-X")` would find NOTHING
+    /// → teardown NEVER fires → this test FAILS (`calls == 0`). With evict keyed
+    /// through `slot_key(lease)` it finds the slot and tears the box down.
     #[test]
     fn evict_tears_down_container() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1142,23 +1217,35 @@ mod tests {
         let fence = oracle_fence();
         let spawner = DedupSpawner::new(Duration::from_secs(60)).with_teardown(hook);
 
+        // workspace_id ("param-X") DIFFERS from lease_id ("ws-evict") — the slot
+        // is keyed by the lease, so evict MUST key by the lease too (the bug:
+        // evict keyed by the param would miss this slot entirely).
         let lease = lease_with("ws-evict", "agent:A");
         let h = spawner
-            .spawn_or_join("ws-evict", &engine, &lease, &fence, TEST_PIN)
+            .spawn_or_join("param-X", &engine, &lease, &fence, TEST_PIN)
             .expect("spawn");
         let expected = h.container.name.clone();
+        // The container is named from the LEASE, not the param.
+        assert_eq!(expected, c9_container_name("ws-evict"));
 
-        spawner.evict("ws-evict");
+        spawner.evict(&lease);
 
         assert_eq!(
             calls.load(Ordering::SeqCst),
             1,
-            "evict MUST invoke teardown exactly once for the live slot"
+            "evict MUST find the slot spawn inserted (same key) and invoke teardown \
+             exactly once — a desync'd evict would no-op here (calls == 0)"
         );
         assert_eq!(
             torn.lock().unwrap().as_slice(),
             &[expected],
             "evict must tear down the SAME container the slot named"
+        );
+        // And the slot is actually gone (the box is freed, the slot is freed).
+        let map = spawner.entries.lock().unwrap_or_else(|p| p.into_inner());
+        assert!(
+            map.is_empty(),
+            "evict must remove the slot it found (no stuck slot left behind)"
         );
     }
 
@@ -1171,13 +1258,15 @@ mod tests {
         let engine = StubEngine;
         let fence = oracle_fence();
         let spawner = DedupSpawner::new(Duration::from_secs(60)).with_teardown(hook);
+        // Param ("p-fail") deliberately differs from lease_id ("ws-fail") — the
+        // real keying path — so evict must resolve the slot via the lease.
         let lease = lease_with("ws-fail", "agent:A");
         spawner
-            .spawn_or_join("ws-fail", &engine, &lease, &fence, TEST_PIN)
+            .spawn_or_join("p-fail", &engine, &lease, &fence, TEST_PIN)
             .expect("spawn");
 
         let err = spawner
-            .evict_checked("ws-fail")
+            .evict_checked(&lease)
             .expect_err("a teardown failure on evict MUST surface as Err");
         assert!(
             format!("{err:#}").contains("box may be LEAKED"),
@@ -1186,7 +1275,7 @@ mod tests {
         // The slot is still gone (in-memory state never pins a corpse).
         let map = spawner.entries.lock().unwrap_or_else(|p| p.into_inner());
         assert!(
-            !map.contains_key("ws-fail"),
+            !map.contains_key(&DedupSpawner::slot_key(&lease)),
             "slot must be removed even on teardown failure"
         );
     }
@@ -1218,6 +1307,110 @@ mod tests {
                 "dedup map must stay <= cap ({cap}); grew to {len} at i={i}"
             );
         }
+    }
+
+    /// REGRESSION (P2 leak): a Ready slot evicted by the CAP sweep
+    /// (`reap_locked`'s bounded-map eviction) must have its teardown hook fired
+    /// — the container is still live on the box; removing the slot without
+    /// teardown leaks it (W3-C's cap/expiry sweep removed Ready slots WITHOUT
+    /// firing the hook). We use a generous dedup window so evicted slots are
+    /// Ready (not expired), a tiny cap so each fresh spawn cap-evicts an older
+    /// Ready slot, and assert teardown fired for exactly the cap-evicted boxes.
+    #[test]
+    fn cap_evicted_ready_slot_is_torn_down() {
+        let torn: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let torn_h = Arc::clone(&torn);
+        let hook: TeardownHook = Arc::new(move |c: &RunningContainer| {
+            torn_h.lock().unwrap().push(c.name.clone());
+            Ok(())
+        });
+
+        let engine = StubEngine;
+        let fence = oracle_fence();
+        let cap = 4;
+        // Long window ⇒ slots stay Ready (the EXPIRY path never fires); the only
+        // thing removing them is the CAP eviction, which must tear them down.
+        let spawner = DedupSpawner::new(Duration::from_secs(3600))
+            .with_max_entries(cap)
+            .with_teardown(hook);
+
+        let total = 20;
+        for i in 0..total {
+            let id = format!("cap-{i}");
+            spawner
+                .spawn_or_join(&id, &engine, &lease_with(&id, "agent:A"), &fence, TEST_PIN)
+                .expect("spawn");
+            // The map never exceeds the cap (the sweep evicts the oldest Ready).
+            let len = spawner
+                .entries
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .len();
+            assert!(
+                len <= cap,
+                "map must stay <= cap ({cap}); is {len} at i={i}"
+            );
+        }
+
+        // Every Ready slot pushed out by the cap sweep must have been torn down.
+        // With `total` distinct leases and a cap of `cap`, at least
+        // `total - cap` were cap-evicted; each MUST have fired teardown.
+        let torn = torn.lock().unwrap();
+        assert!(
+            torn.len() >= total - cap,
+            "cap-evicted Ready slots must fire teardown: expected >= {} teardowns, got {}",
+            total - cap,
+            torn.len()
+        );
+        // And every torn-down name is a real C9 container for one of our leases
+        // (never a phantom) — teardown tore down the container the slot named.
+        for name in torn.iter() {
+            assert!(
+                name.starts_with(C9_PREFIX),
+                "torn-down container '{name}' must be a C9 container"
+            );
+        }
+    }
+
+    /// REGRESSION (P2 leak): a Ready slot evicted by the EXPIRY sweep (past the
+    /// dedup window) must also fire teardown — same leak class as the cap path.
+    #[test]
+    fn expiry_evicted_ready_slot_is_torn_down() {
+        let torn: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let torn_h = Arc::clone(&torn);
+        let hook: TeardownHook = Arc::new(move |c: &RunningContainer| {
+            torn_h.lock().unwrap().push(c.name.clone());
+            Ok(())
+        });
+
+        let engine = StubEngine;
+        let fence = oracle_fence();
+        // Zero window ⇒ a published Ready slot is immediately expired, so the
+        // NEXT claim's sweep evicts it via the EXPIRY path (not the cap).
+        let spawner = DedupSpawner::new(Duration::from_millis(0))
+            .with_max_entries(1024)
+            .with_teardown(hook);
+
+        // First lease publishes a Ready slot (then instantly expires).
+        let lease_a = lease_with("expire-A", "agent:A");
+        let expected_a = spawner
+            .spawn_or_join("pa", &engine, &lease_a, &fence, TEST_PIN)
+            .expect("spawn A")
+            .container
+            .name;
+
+        // A second, DIFFERENT lease: its claim runs the sweep, which finds the
+        // now-expired slot A and must tear A's container down before dropping it.
+        let lease_b = lease_with("expire-B", "agent:B");
+        spawner
+            .spawn_or_join("pb", &engine, &lease_b, &fence, TEST_PIN)
+            .expect("spawn B");
+
+        let torn = torn.lock().unwrap();
+        assert!(
+            torn.contains(&expected_a),
+            "expiry-evicted Ready slot A ('{expected_a}') must have fired teardown; torn = {torn:?}"
+        );
     }
 
     /// REGRESSION (P1 DoS): `Failed` slots are reclaimed by the sweep and never

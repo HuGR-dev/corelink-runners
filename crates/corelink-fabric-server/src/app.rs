@@ -25,6 +25,7 @@ use crate::auth::{self, TokenStore};
 use crate::exec::{LeasedExec, NoBoxExec};
 use crate::handlers;
 use crate::handlers::envelope::{self, HookRegistry};
+use crate::ingest_token::IngestSigner;
 
 /// Clock seam: "now" in unix epoch ms. Injected so admission, expiry math,
 /// and ledger timestamps are deterministic under test ([`SystemClock`] in
@@ -195,6 +196,15 @@ pub struct AppState {
     /// production composition root injects the region key via
     /// [`AppState::with_signer`].
     pub signer: Arc<FabricSigner>,
+    /// The dedicated §13.2 ingest-token HMAC secret (WP-INGEST-SCOPE). Mints +
+    /// verifies the per-lease, write-only, ingest-scoped capability token that
+    /// is injected into the UNTRUSTED box env IN PLACE OF the tenant PAT (the
+    /// P0 fix — see [`crate::ingest_token`]). DEDICATED key material, NEVER the
+    /// ed25519 attestation [`signer`](Self::signer): the two domains are
+    /// separated by construction. [`AppState::new`] wires a deterministic DEV
+    /// secret ([`DEV_INGEST_SECRET`]); the production composition root injects
+    /// the per-region secret via [`AppState::with_ingest_signer`].
+    pub ingest_signer: Arc<IngestSigner>,
     /// `lease_id` → pinned image digest, recorded at acquire (the
     /// `AcquireRequest.image_digest` that `ContainerSpec::from_lease`
     /// already validated) — the image-identity axis the attestation path
@@ -239,11 +249,16 @@ pub struct AppState {
     /// `FABRIC_CLOSE_ACK_MAX_INFLIGHT` (default
     /// [`DEFAULT_CLOSE_ACK_MAX_INFLIGHT`]).
     pub(crate) close_ack_gate: Arc<tokio::sync::Semaphore>,
-    /// AUDIT P2: the global in-flight request cap applied as the OUTERMOST
-    /// router layer in [`app_full`] (a tower `GlobalConcurrencyLimitLayer` +
-    /// `LoadShedLayer`). When more than this many requests are being served at
-    /// once, the excess is SHED with `503 Service Unavailable` rather than
-    /// queued unboundedly — bounding memory + tail latency under load. From
+    /// AUDIT P2: the global in-flight request cap applied in [`app_full`] over
+    /// the WORK routes (a tower `GlobalConcurrencyLimitLayer` + `LoadShedLayer`).
+    /// When more than this many requests are being served at once, the excess is
+    /// SHED with `503 Service Unavailable` rather than queued unboundedly —
+    /// bounding memory + tail latency under load.
+    ///
+    /// RE-AUDIT (LB-liveness): the cap covers the real work routes ONLY —
+    /// `/v1/health` is mounted on a layer-free branch so the liveness probe
+    /// still answers `200` under saturation (a 503 on the probe would make an
+    /// LB mark a busy-but-alive instance DOWN). From
     /// `FABRIC_MAX_INFLIGHT_REQUESTS` (default [`DEFAULT_MAX_INFLIGHT_REQUESTS`]).
     pub(crate) max_inflight_requests: usize,
 }
@@ -265,6 +280,14 @@ pub const DEFAULT_MAX_INFLIGHT_REQUESTS: usize = 1024;
 /// key (the production composition root injects the per-region key via
 /// [`AppState::with_signer`], ratified decision #2).
 const DEV_FABRIC_KEY_SEED: [u8; 32] = *b"corelink-runners-DEV-fabric-key!";
+
+/// Deterministic DEV secret for the default §13.2 ingest-token HMAC key wired
+/// by [`AppState::new`] — tests and local composition only; NEVER a production
+/// secret (the production composition root injects the per-region ingest secret
+/// via [`AppState::with_ingest_signer`]). Distinct bytes from
+/// [`DEV_FABRIC_KEY_SEED`]: the ingest secret and the attestation key are
+/// SEPARATE key materials (domain separation by construction).
+const DEV_INGEST_SECRET: &[u8] = b"corelink-runners-DEV-ingest-key!";
 
 impl AppState {
     /// Assemble state over a ledger, a plan source, and a clock.
@@ -291,6 +314,7 @@ impl AppState {
             provisioner: Arc::new(crate::cloud_exec::NoBoxProvisioner),
             trigger_dedup: Arc::new(Mutex::new(HashMap::new())),
             signer: Arc::new(FabricSigner::new_from_bytes(&DEV_FABRIC_KEY_SEED)),
+            ingest_signer: Arc::new(IngestSigner::new(DEV_INGEST_SECRET.to_vec())),
             images: Arc::new(Mutex::new(HashMap::new())),
             hook_registry: Arc::new(HookRegistry::default()),
             slot_meter: Arc::new(Mutex::new(SlotMeter::new())),
@@ -454,6 +478,19 @@ impl AppState {
     #[must_use]
     pub fn with_signer(mut self, signer: Arc<FabricSigner>) -> Self {
         self.signer = signer;
+        self
+    }
+
+    /// Attach the dedicated §13.2 ingest-token HMAC secret (WP-INGEST-SCOPE).
+    /// Without this, the state keeps the deterministic DEV secret
+    /// ([`DEV_INGEST_SECRET`]) — fine for tests, never for production (a leaked
+    /// DEV secret would let an attacker mint a scoped ingest token, though even
+    /// then the blast radius is bounded to one lease's own ingest endpoint —
+    /// no tenant takeover). The production composition root injects the
+    /// per-region secret here.
+    #[must_use]
+    pub fn with_ingest_signer(mut self, ingest_signer: Arc<IngestSigner>) -> Self {
+        self.ingest_signer = ingest_signer;
         self
     }
 
@@ -680,6 +717,19 @@ pub fn app_full(
         .route(OCCUPANCY_PATH, get(handlers::occupancy::occupancy))
         .with_state(state.clone());
 
+    // WP-INGEST-SCOPE: the §13.2 trajectory turn-feed WRITE side (in-box agent
+    // → hook). Mounted OUTSIDE the Bearer-PAT layer below — and deliberately so.
+    // The box (UNTRUSTED, contract §4) holds a per-lease, write-only, ingest-
+    // SCOPED token (NOT the tenant PAT — the P0 fix), presented as the Bearer.
+    // That token is not a tenant PAT, so it would 401 at `require_tenant`; the
+    // ingest handler authenticates it itself (recompute + constant-time compare
+    // against the expected token for {lease_id}, looked up by lease id alone —
+    // the token IS the lease binding). See `crate::ingest_token` + the handler.
+    let ingest = Router::new()
+        .route(&capture(paths::ENVELOPE_INGEST), post(envelope::ingest))
+        .with_state(state.clone())
+        .layer(Extension(Arc::clone(&registry)));
+
     let authenticated = Router::new()
         .route(paths::METRICS_TENANT, get(handlers::metrics::tenant_wait))
         .route(paths::LEASES, post(handlers::leases::acquire))
@@ -692,41 +742,58 @@ pub fn app_full(
         .route(paths::ATTESTATION_KEY, get(crate::attestation::key))
         .route(paths::QUEUE_TRIGGER, post(handlers::queue::trigger))
         .route(&capture(paths::LEASE_CLOSE), post(handlers::close::close))
+        // ENV1/ENV2: the §13 envelope POLL side (hugit's TRUSTED subscriber).
+        // KEEPS the tenant-PAT credential gate — hugit polls with the SAME
+        // tenant PAT that acquired the lease (Option A). This path puts nothing
+        // on the box, so the PAT never reaches untrusted compute.
         .route(&capture(paths::ENVELOPE_EVENTS), get(envelope::poll_events))
         .route(&capture(paths::ENVELOPE_META), get(envelope::poll_meta))
-        // ENV3: the §13.2 trajectory turn-feed WRITE side (in-box agent →
-        // hook). Same lease-credential gate as the polls; per-turn durable
-        // checkpoint (ADR-0004 Phase 2b).
-        .route(&capture(paths::ENVELOPE_INGEST), post(envelope::ingest))
         .with_state(state)
         .layer(Extension(registry))
         .layer(middleware::from_fn_with_state(store, auth::require_tenant));
 
-    let router = Router::new()
-        .route(paths::HEALTH, get(health))
-        .merge(internal)
-        .merge(authenticated);
-
-    // AUDIT P2: global in-flight cap + load-shedding, applied as the OUTERMOST
-    // layer so it governs EVERY route (health included — a thundering herd on
-    // the LB liveness probe must not exhaust memory either). `LoadShedLayer`
-    // turns "limit reached" into an immediate `Overloaded` error instead of an
-    // unbounded queue; `HandleErrorLayer` maps that error to a clean
-    // `503 Service Unavailable`. The order in `ServiceBuilder` is top→bottom =
-    // outer→inner, so: handle-error wraps load-shed wraps the concurrency limit.
+    // AUDIT P2 + RE-AUDIT LB-LIVENESS: the global in-flight cap + load-shedding
+    // governs the REAL WORK routes (internal + ingest + authenticated), NOT
+    // `/v1/health`.
+    //
+    // Health must answer even under saturation: an LB/orchestrator probes
+    // liveness to decide whether the instance is up, and a 503 on the probe
+    // makes it mark a busy-but-ALIVE instance DOWN — pulling it out of rotation
+    // exactly when it is overloaded, the precise opposite of the desired
+    // behavior (it amplifies the overload onto the survivors). So the limiter is
+    // applied to the work branch only, and health is merged on a LAYER-FREE
+    // branch AFTER. The work routes still bound memory + tail latency under a
+    // thundering herd; health is a fixed-cost, auth-free, tenant-data-free
+    // constant-string responder that cannot itself exhaust resources.
+    //
+    // `LoadShedLayer` turns "limit reached" into an immediate `Overloaded` error
+    // instead of an unbounded queue; `HandleErrorLayer` maps that error to a
+    // clean `503 Service Unavailable`. The order in `ServiceBuilder` is
+    // top→bottom = outer→inner, so: handle-error wraps load-shed wraps the
+    // concurrency limit. The §13.2 ingest route (scoped-token auth, mounted
+    // outside `require_tenant`) is a real work route → behind the limiter.
     let max_inflight = max_inflight.max(1);
-    router.layer(
-        tower::ServiceBuilder::new()
-            .layer(axum::error_handling::HandleErrorLayer::new(
-                |_err: axum::BoxError| async move {
-                    // The only error the stack below produces is load-shed's
-                    // `Overloaded`; map it to the frozen fail-closed status.
-                    axum::http::StatusCode::SERVICE_UNAVAILABLE
-                },
-            ))
-            .layer(tower::load_shed::LoadShedLayer::new())
-            .layer(tower::limit::GlobalConcurrencyLimitLayer::new(max_inflight)),
-    )
+    let work = Router::new()
+        .merge(internal)
+        .merge(ingest)
+        .merge(authenticated)
+        .layer(
+            tower::ServiceBuilder::new()
+                .layer(axum::error_handling::HandleErrorLayer::new(
+                    |_err: axum::BoxError| async move {
+                        // The only error the stack below produces is load-shed's
+                        // `Overloaded`; map it to the frozen fail-closed status.
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE
+                    },
+                ))
+                .layer(tower::load_shed::LoadShedLayer::new())
+                .layer(tower::limit::GlobalConcurrencyLimitLayer::new(max_inflight)),
+        );
+
+    Router::new()
+        // Health rides OUTSIDE the limiter so it answers under saturation.
+        .route(paths::HEALTH, get(health))
+        .merge(work)
 }
 
 /// The internal slot-occupancy route (WP-OCCUPANCY-API).  An ops/observability

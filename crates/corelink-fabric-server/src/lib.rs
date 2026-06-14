@@ -25,6 +25,7 @@ pub mod corelink_plans;
 pub mod envelope_inject;
 pub mod exec;
 pub mod handlers;
+pub mod ingest_token;
 pub mod reaper;
 pub mod server;
 
@@ -55,3 +56,4 @@ pub use exec::{
 };
 pub use handlers::close::close_abnormal;
 pub use handlers::envelope::HookRegistry;
+pub use ingest_token::IngestSigner;

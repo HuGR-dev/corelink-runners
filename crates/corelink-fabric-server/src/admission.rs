@@ -39,7 +39,7 @@
 //! production item; no durable queue is added here.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::response::Response;
@@ -47,7 +47,7 @@ use corelink_fabric::{FairScheduler, LeaseRecord, LeaseState, TenantId, WorkItem
 use corelink_fabric_api::{AcquireRequest, ApiError};
 use corelink_runner::lease::ContainerSpec;
 use corelink_runners_contracts::RunnerLease;
-use tokio::sync::oneshot;
+use tokio::sync::{Semaphore, oneshot};
 
 use crate::app::AppState;
 use crate::auth::{BearerPat, error_response};
@@ -83,6 +83,35 @@ pub const DEFAULT_TICK_SLOTS: u32 = 64;
 
 /// Default admission-loop tick interval. From `FABRIC_ADMISSION_TICK_MS`.
 pub const DEFAULT_TICK_MS: u64 = 50;
+
+/// Default PER-TENANT cap on simultaneously-PARKED queued waiters (the P1
+/// cross-tenant load-shed fix). From `FABRIC_ADMISSION_PARK_CAP`.
+///
+/// # Why this bound exists (the cross-tenant wedge)
+///
+/// A queued acquire parks (`.await`) inside its HTTP request future waiting for
+/// the admission loop to free a slot. That request future is STILL the inner
+/// future of the outermost `GlobalConcurrencyLimitLayer` (app.rs), so a parked
+/// waiter holds one global in-flight permit for its whole park — the permit is
+/// owned by the tower layer's response future and is unreachable from the
+/// handler, so it cannot be released mid-park here. Without a bound, a storm of
+/// ONE tenant's queued waiters can pin permits up to the global cap and
+/// load-shed (503) NEW requests from OTHER tenants even though those waiters are
+/// idle-blocked.
+///
+/// This per-tenant cap bounds the blast radius: a single tenant can pin at most
+/// `park_cap` global permits (not the whole limit), so other tenants always keep
+/// headroom in the global limiter AND their own park budget — a storm of one
+/// tenant's queued waiters can never 503 another tenant. A would-be waiter over
+/// its tenant's park budget is SHED FAST (503) instead of parking, so it
+/// releases its global permit immediately rather than holding it for the full
+/// wait. Per-tenant (never global) so one tenant's storm cannot monopolize the
+/// park budget and starve other tenants' queued acquires — mirroring the
+/// per-tenant `MAX_TENANT_QUEUE_DEPTH` FIFO bound. The COMPLETE structural fix
+/// (excluding the queue-wait from the global layer) is an app.rs change owned by
+/// a separate work-package; this is the in-admission mitigation that bounds the
+/// blast radius without it.
+pub const DEFAULT_ADMISSION_PARK_CAP: usize = 8;
 
 /// Resolve [`AdmissionMode`] from an environment-variable accessor.
 ///
@@ -141,6 +170,17 @@ pub fn tick_slots_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Resu
     Ok(n as u32)
 }
 
+/// Resolve the per-tenant parked-waiter cap from `FABRIC_ADMISSION_PARK_CAP`
+/// (the P1 cross-tenant load-shed bound; see [`DEFAULT_ADMISSION_PARK_CAP`]).
+pub fn park_cap_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<usize> {
+    let n = parse_positive_u64(
+        &get,
+        "FABRIC_ADMISSION_PARK_CAP",
+        DEFAULT_ADMISSION_PARK_CAP as u64,
+    )?;
+    Ok(n as usize)
+}
+
 /// Parse an optional positive-`u64` env var, falling back to `default` when
 /// absent/empty. A present `0` or unparseable value is a hard error.
 fn parse_positive_u64(
@@ -193,16 +233,75 @@ pub struct AdmissionQueue {
     /// lease_id → the waiter's deferred context. An entry exists exactly while
     /// the acquire is queued (inserted at enqueue, removed at dispatch).
     waiters: Mutex<HashMap<String, QueuedAcquire>>,
+    /// PER-TENANT park-permit semaphores (the P1 cross-tenant load-shed bound).
+    /// Each tenant gets its own [`Semaphore`] of `park_cap` permits; a queued
+    /// acquire must hold one of ITS tenant's permits for the whole time it is
+    /// parked, so at most `park_cap` of one tenant's waiters can be parked (and
+    /// thus pin a global in-flight permit) at once — one tenant's storm can
+    /// never exhaust the global limiter and 503 another tenant. Lazily created
+    /// per tenant; pruned when a tenant's semaphore is back to full and it has
+    /// no pending work (mirrors the `rate_windows` idle-prune discipline so the
+    /// map stays bounded by ACTIVE tenants, not every tenant ever seen).
+    park_permits: Mutex<HashMap<TenantId, Arc<Semaphore>>>,
+    /// Per-tenant parked-waiter budget ([`DEFAULT_ADMISSION_PARK_CAP`]).
+    park_cap: usize,
 }
 
 impl AdmissionQueue {
     /// New queue with a per-tick dispatch budget of `tick_slots` global slots
     /// (the FairScheduler's per-tick budget; the authoritative cap is always
     /// `try_admit`, so this is only a throughput knob, never a correctness one).
+    ///
+    /// The per-tenant parked-waiter cap defaults to
+    /// [`DEFAULT_ADMISSION_PARK_CAP`]; the composition root overrides it from
+    /// `FABRIC_ADMISSION_PARK_CAP` via [`AdmissionQueue::with_park_cap`].
     pub fn new(tick_slots: u32) -> Self {
         Self {
             scheduler: Mutex::new(FairScheduler::new(tick_slots.max(1))),
             waiters: Mutex::new(HashMap::new()),
+            park_permits: Mutex::new(HashMap::new()),
+            park_cap: DEFAULT_ADMISSION_PARK_CAP,
+        }
+    }
+
+    /// Override the per-tenant parked-waiter cap (P1 cross-tenant load-shed
+    /// bound). A value of 0 is coerced to 1 (a zero-permit semaphore would shed
+    /// every queued acquire). The composition root wires this from
+    /// `FABRIC_ADMISSION_PARK_CAP`; tests use it to drive a tiny bound.
+    #[must_use]
+    pub fn with_park_cap(mut self, park_cap: usize) -> Self {
+        self.park_cap = park_cap.max(1);
+        self
+    }
+
+    /// This tenant's park-permit semaphore (lazily created at `park_cap`
+    /// permits). Cheap `Arc` clone so the caller can `try_acquire_owned` without
+    /// holding the map lock across the park.
+    fn park_semaphore(&self, tenant: &TenantId) -> Arc<Semaphore> {
+        Arc::clone(
+            self.park_permits
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .entry(tenant.clone())
+                .or_insert_with(|| Arc::new(Semaphore::new(self.park_cap))),
+        )
+    }
+
+    /// Prune a tenant's park-permit semaphore once it is back to FULL (no
+    /// waiter parked) and the tenant has no pending FIFO work — so the map stays
+    /// bounded by active tenants, never every tenant ever seen. Cheap to
+    /// rebuild on the tenant's next park. Called after a waiter releases its
+    /// park permit (i.e. after `acquire_queued` returns).
+    fn maybe_prune_park_semaphore(&self, tenant: &TenantId) {
+        if self.pending(tenant) > 0 {
+            return;
+        }
+        let mut permits = self.park_permits.lock().unwrap_or_else(|e| e.into_inner());
+        if permits
+            .get(tenant)
+            .is_some_and(|s| s.available_permits() >= self.park_cap)
+        {
+            permits.remove(tenant);
         }
     }
 
@@ -272,6 +371,29 @@ pub(crate) async fn acquire_queued(
         );
     };
 
+    // ── P1 (cross-tenant load-shed wedge): take a PER-TENANT park permit BEFORE
+    // enqueuing or parking. A parked waiter holds one global in-flight permit
+    // (the outermost GlobalConcurrencyLimitLayer's, unreachable from here) for
+    // its whole wait, so an unbounded storm of one tenant's queued waiters would
+    // exhaust the global limiter and 503 OTHER tenants. This bounds one tenant's
+    // simultaneously-parked waiters to `park_cap`, leaving the global limiter
+    // headroom for everyone else. `try_acquire_owned` is NON-blocking on
+    // purpose: we must never `.await` on the park semaphore (awaiting here would
+    // itself hold the global permit and recreate the wedge). Over budget → SHED
+    // FAST (503) so the global permit is released immediately, never parked.
+    // The permit is held in `_park_permit` across the wait below and dropped on
+    // EVERY return path (success, sender-dropped, timeout) as the frame unwinds.
+    let park_sem = queue.park_semaphore(&tenant);
+    let _park_permit = match Arc::clone(&park_sem).try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return error_response(
+                ApiError::FailClosed,
+                "tenant parked-waiter budget exhausted: shed (try again shortly)",
+            );
+        }
+    };
+
     // Build the Pending record the dispatch loop will hand to try_admit — the
     // SAME shape the immediate path builds (deadline rides the record, ADR-0004).
     let pending = LeaseRecord {
@@ -331,7 +453,7 @@ pub(crate) async fn acquire_queued(
     // timeout fires → 503 fail-closed. On timeout, evict the now-orphaned waiter
     // + its queued WorkItem so a late dispatch can never reserve a slot for a
     // request that already gave up.
-    match tokio::time::timeout(state.queue_wait_timeout, wait_rx).await {
+    let resp = match tokio::time::timeout(state.queue_wait_timeout, wait_rx).await {
         Ok(Ok(resp)) => resp,
         // Sender dropped without sending (loop shutdown / internal drop): 503.
         Ok(Err(_)) => error_response(
@@ -345,7 +467,14 @@ pub(crate) async fn acquire_queued(
                 "queued admission timed out before a slot freed; failing closed",
             )
         }
-    }
+    };
+
+    // P1: release this tenant's park permit NOW (before pruning), then prune the
+    // tenant's park-permit semaphore if it has gone fully idle — keeping the
+    // park-permit map bounded by ACTIVE tenants, not every tenant ever seen.
+    drop(_park_permit);
+    queue.maybe_prune_park_semaphore(&tenant);
+    resp
 }
 
 /// Remove a waiter's context AND its queued WorkItem (best-effort) — called when
@@ -373,65 +502,111 @@ pub async fn run_admission_tick(state: &AppState, now_ms: u64) -> usize {
         return 0;
     };
 
-    // ── 1. Tick the scheduler. `cap_check` is a cheap under-cap pre-filter;
-    // `dispatch` performs the AUTHORITATIVE synchronous try_admit reservation
-    // and collects the reserved ids for async finalize after the tick. No
-    // MutexGuard is held across an await — the whole tick is synchronous.
-    let mut to_finalize: Vec<String> = Vec::new();
+    // ── 1. Tick the scheduler to SELECT the fair dispatch order — but reserve
+    // NOTHING under the scheduler lock. `cap_check` is the cheap under-cap
+    // pre-filter; the `dispatch` closure only SNAPSHOTS each fairly-chosen item
+    // (its deferred `pending` record + WorkItem) into `candidates` and returns
+    // `true` so the scheduler pops it and rotates. The AUTHORITATIVE
+    // `try_admit` reservation runs LATER, OUTSIDE the scheduler lock (§ INFO
+    // fix).
+    //
+    // # Why the reservation moved OUT of the tick
+    //
+    // Under the Pg ledger, `LeaseLedger::try_admit` is a BLOCKING DB network
+    // round-trip. Running it inside the dispatch closure held the `scheduler`
+    // Mutex across that round-trip, serializing/stalling ALL admission across
+    // tenants (every concurrent `acquire_queued` enqueue blocks on the same
+    // scheduler lock) for the duration of the network call. We now mirror the
+    // reaper's lock-drop-before-blocking discipline: decide the order under the
+    // lock, drop it, then reserve. The cap is still authoritative — `try_admit`
+    // is the SAME single atomic gate as the immediate path, only now it never
+    // holds the scheduler lock. An item that LOSES its `try_admit` (the cap
+    // filled between the cheap pre-filter and the reservation) is RE-ENQUEUED
+    // with its ORIGINAL `enqueued_at_ms` (so its wait clock and FIFO membership
+    // are preserved) and retried next tick — never over-admitted, never lost.
+    struct Candidate {
+        item: WorkItem,
+        /// `Some` = a live waiter's deferred Pending to reserve; `None` =
+        /// orphaned FIFO entry (timed-out waiter) → drop it, reserve nothing.
+        pending: Option<LeaseRecord>,
+    }
+    let mut candidates: Vec<Candidate> = Vec::new();
     let report = {
         let mut sched = queue.scheduler.lock().unwrap_or_else(|e| e.into_inner());
 
         let cap_check = |tenant: &TenantId| under_cap(state, tenant);
 
         let dispatch = |item: &WorkItem| -> bool {
-            // Pull the waiter's deferred context. A missing context means the
-            // waiter timed out and evicted itself → treat as dispatched (drop
-            // the FIFO entry) WITHOUT reserving a slot.
-            let pending = {
-                let waiters = queue.waiters.lock().unwrap_or_else(|e| e.into_inner());
-                match waiters.get(&item.id) {
-                    Some(q) => q.pending.clone(),
-                    None => return true, // orphaned: consume the FIFO slot, no reserve
-                }
-            };
-
-            // AUTHORITATIVE atomic reservation — the SAME cap gate as the
-            // immediate path. try_admit counts active (Pending+Held) under the
-            // ledger lock and inserts iff strictly under cap. This is what makes
-            // over-admit impossible even under queue (and cross-instance via the
-            // pg advisory lock).
-            let plan_cap = tenant_cap(state, &item.tenant);
-            let reserved = {
-                let mut ledger = state.ledger.lock().unwrap_or_else(|e| e.into_inner());
-                ledger.try_admit(pending, plan_cap).unwrap_or(false)
-            };
-            if reserved {
-                to_finalize.push(item.id.clone());
-                true
-            } else {
-                // Still over cap: leave the item queued (FIFO head untouched),
-                // park the tenant this tick — retried next tick.
-                false
-            }
+            // Snapshot the waiter's deferred context (if any). A missing context
+            // means the waiter timed out and evicted itself → still pop the FIFO
+            // entry (return true) but mark it orphaned (reserve nothing later).
+            let pending = queue
+                .waiters
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&item.id)
+                .map(|q| q.pending.clone());
+            candidates.push(Candidate {
+                item: item.clone(),
+                pending,
+            });
+            // Always accept: selection only. The cap is enforced authoritatively
+            // by `try_admit` OUTSIDE this lock (losers are re-enqueued).
+            true
         };
 
         sched.tick(now_ms, cap_check, dispatch)
     };
 
-    // ── 2. CP4: feed the per-tenant wait stats from this tick's report. This is
-    // the W2-D wiring — `GET /v1/metrics/tenant` now lights up with real
-    // per-tenant wait counts under queue mode.
-    state
-        .wait_stats
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .observe_tick(&report);
+    // ── 1b. AUTHORITATIVE reservation, OUTSIDE the scheduler lock (§ INFO fix).
+    // For each fairly-selected candidate, run the single atomic `try_admit` cap
+    // gate. Winners go to finalize; a loser (cap filled in the race) is
+    // re-enqueued with its original enqueue time and retried next tick. Orphans
+    // (no waiter context) reserve nothing and are simply dropped.
+    let mut to_finalize: Vec<String> = Vec::new();
+    for cand in candidates {
+        let Some(pending) = cand.pending else {
+            // Orphaned (timed-out waiter): the FIFO entry was popped above;
+            // reserve nothing, drop it.
+            continue;
+        };
+        let plan_cap = tenant_cap(state, &cand.item.tenant);
+        let reserved = {
+            let mut ledger = state.ledger.lock().unwrap_or_else(|e| e.into_inner());
+            ledger.try_admit(pending, plan_cap).unwrap_or(false)
+        };
+        if reserved {
+            to_finalize.push(cand.item.id.clone());
+        } else {
+            // Lost the cap race: re-enqueue with the ORIGINAL enqueued_at_ms so
+            // the wait clock and FIFO membership are preserved, retried next
+            // tick. (Best-effort: an enqueue rejected at the per-tenant bound is
+            // dropped — the waiter's own bounded wait then 503s it, never a
+            // silent over-admit.)
+            let mut sched = queue.scheduler.lock().unwrap_or_else(|e| e.into_inner());
+            let _ = sched.enqueue(cand.item);
+        }
+    }
 
-    // ── 3. Finalize each reserved lease (async: provision → Held → hook) and
+    // ── 2. Finalize each reserved lease (async: provision → Held → hook) and
     // wake its waiter with the response. The reservation already happened in the
     // tick (Pending is in the ledger), so finalize_admitted_lease drives the
     // SAME post-reserve core as the immediate path.
-    let mut dispatched = 0usize;
+    //
+    // `genuinely_dispatched` collects the ids of acquires that ACTUALLY reached
+    // a live client — a reserved lease whose waiter was still present AND whose
+    // `waker.send` succeeded. It excludes:
+    //   - orphaned FIFO entries the scheduler "dispatched" without reserving (a
+    //     timed-out waiter's leftover queue entry — `dispatch` returned true to
+    //     drain it but reserved nothing);
+    //   - reserved leases whose waiter timed out before finalize (rolled back);
+    //   - reserved+finalized leases whose waiter timed out during finalize so
+    //     `waker.send` lost the race (P1 #2 phantom — rolled back below).
+    // It is the input to BOTH the P1 #2 phantom rollback and the P2 wait-stats
+    // filter: a non-genuine "dispatch" must neither leave a Held lease nor
+    // pollute the §6 non-interference metrics.
+    let mut genuinely_dispatched: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
     for lease_id in to_finalize {
         let Some(q) = queue
             .waiters
@@ -440,36 +615,68 @@ pub async fn run_admission_tick(state: &AppState, now_ms: u64) -> usize {
             .remove(&lease_id)
         else {
             // Waiter timed out between reserve and finalize: roll back the
-            // reserved Pending so the slot is not leaked, then move on.
+            // reserved Pending so the slot is not leaked, then move on. NOT a
+            // genuine dispatch — excluded from the wait stats (P2).
             if let Ok(mut ledger) = state.ledger.lock() {
                 let _ = ledger.remove(&lease_id);
             }
             continue;
         };
 
-        let minted = MintedLease {
-            lease_id,
-            lease: q.lease,
-            spec: q.spec,
-        };
-        let resp = finalize_admitted_lease(
-            state,
-            &state.hook_registry,
-            &q.tenant,
-            &q.pat,
-            minted,
-            &q.req,
-        )
-        .await;
+        let (tenant, minted) = (
+            q.tenant.clone(),
+            MintedLease {
+                lease_id: lease_id.clone(),
+                lease: q.lease,
+                spec: q.spec,
+            },
+        );
+        let resp =
+            finalize_admitted_lease(state, &state.hook_registry, &tenant, &q.pat, minted, &q.req)
+                .await;
 
-        // Wake the waiter. If the receiver is gone (timed out), the response is
-        // dropped; the lease is finalized + Held, and the reaper's deadline
-        // sweep reclaims it (it has a durable deadline_ms) — no permanent leak.
-        let _ = q.waker.send(resp);
-        dispatched += 1;
+        // Wake the waiter. `oneshot::Sender::send` hands the response back in
+        // `Err` iff the receiver is gone — i.e. the waiter TIMED OUT exactly as
+        // this dispatch finalized (the dispatch↔timeout race). In that case the
+        // dispatch LOST: there is no client to own the now-Held lease, so it
+        // would leak a billed slot until the deadline reaper (P1 #2 phantom
+        // Held). Roll it back with the SAME teardown+remove the acquire
+        // provision-failure path uses, making dispatch and timeout mutually
+        // exclusive — either the client gets the lease, or NO Held lease remains.
+        match q.waker.send(resp) {
+            Ok(()) => {
+                // The client owns the lease: a genuine dispatch (counts for §6).
+                genuinely_dispatched.insert(lease_id);
+            }
+            Err(_dropped_resp) => {
+                // Waiter already 503'd: undo the Held lease so no slot leaks.
+                state.teardown_lease(&lease_id).await;
+                if let Ok(mut ledger) = state.ledger.lock() {
+                    let _ = ledger.remove(&lease_id);
+                }
+                // NOT genuinely dispatched — excluded from the wait stats (P2).
+            }
+        }
     }
 
-    dispatched
+    // ── 3. CP4 (P2 fix): feed the per-tenant wait stats with ONLY the genuine
+    // dispatches. `report.dispatched` and `report.waits_ms` are parallel (the
+    // scheduler pushes both together), so we zip them to recover each wait's
+    // lease id and forward only the waits whose id reached a live client. A
+    // timed-out/orphaned/rolled-back entry is NOT a dispatch and must not
+    // pollute the §6 `/v1/metrics/tenant` non-interference numbers. This is the
+    // W2-D wiring — under queue mode the endpoint lights up with real, HONEST
+    // per-tenant wait counts.
+    {
+        let mut stats = state.wait_stats.lock().unwrap_or_else(|e| e.into_inner());
+        for (id, (tenant, wait_ms)) in report.dispatched.iter().zip(report.waits_ms.iter()) {
+            if genuinely_dispatched.contains(id) {
+                stats.record(tenant, *wait_ms);
+            }
+        }
+    }
+
+    genuinely_dispatched.len()
 }
 
 /// The tenant's concurrency cap from the plan source (0 when no plan on file —
@@ -611,6 +818,25 @@ mod tests {
             Duration::from_millis(25),
         );
     }
+
+    #[test]
+    fn park_cap_config() {
+        assert_eq!(
+            park_cap_from_env(|_| None).unwrap(),
+            DEFAULT_ADMISSION_PARK_CAP,
+            "absent → default park cap"
+        );
+        assert_eq!(
+            park_cap_from_env(|k| (k == "FABRIC_ADMISSION_PARK_CAP").then(|| "3".to_string()))
+                .unwrap(),
+            3,
+        );
+        assert!(
+            park_cap_from_env(|k| (k == "FABRIC_ADMISSION_PARK_CAP").then(|| "0".to_string()))
+                .is_err(),
+            "0 park cap must error (a zero-permit semaphore sheds every queued acquire)"
+        );
+    }
 }
 
 // ── Queue-mode integration tests (ADR-0005) ─────────────────────────────────
@@ -629,6 +855,7 @@ mod queue_tests {
     use axum::http::{Request, StatusCode, header};
     use corelink_fabric::{InMemoryLedger, LeaseLedger, TenantId, TenantPlan};
     use corelink_fabric_api::{AcquireResponse, paths};
+    use corelink_runners_contracts::RunnerState;
     use tower::ServiceExt;
 
     use super::*;
@@ -692,6 +919,22 @@ mod queue_tests {
             Arc::new(FixedClock(now_ms)),
         )
         .with_admission_queue(64, wait);
+        (state, ledger)
+    }
+
+    /// Like [`queue_state`] but with an explicit PER-TENANT park cap (P1
+    /// cross-tenant load-shed bound). Rebuilds the admission queue with the
+    /// given `park_cap` so the parked-waiter shed can be driven deterministically
+    /// with a tiny bound (the composition root wires `park_cap` from
+    /// `FABRIC_ADMISSION_PARK_CAP` in production).
+    fn queue_state_park_cap(
+        cap: u32,
+        now_ms: u64,
+        wait: Duration,
+        park_cap: usize,
+    ) -> (AppState, Arc<Mutex<dyn LeaseLedger + Send>>) {
+        let (mut state, ledger) = queue_state(cap, now_ms, wait);
+        state.admission_queue = Some(Arc::new(AdmissionQueue::new(64).with_park_cap(park_cap)));
         (state, ledger)
     }
 
@@ -1080,5 +1323,422 @@ mod queue_tests {
             v["count"].as_u64().unwrap() >= 1,
             "wait_stats must be lit under queue mode (count >= 1), got {v}"
         );
+    }
+
+    // ── P1 #1: a parked waiter must not exhaust the global limiter for OTHER
+    // tenants ─────────────────────────────────────────────────────────────────
+
+    /// [P1 regression] A storm of ONE tenant's queued waiters cannot pin
+    /// unbounded global in-flight permits (which would 503 other tenants): with
+    /// `park_cap = 1`, the first over-cap acquire PARKS (holding the only park
+    /// permit), and the SECOND over-cap acquire is SHED FAST (503) instead of
+    /// parking — so it never holds a global in-flight permit for the full wait.
+    /// This bounds one tenant's simultaneously-parked waiters, leaving the global
+    /// limiter headroom for every other tenant.
+    #[tokio::test]
+    async fn parked_waiters_are_bounded_no_global_permit_storm() {
+        let now = 7_000_000u64;
+        // cap=1 (so every extra acquire is over-cap → queue), generous wait (the
+        // first waiter stays parked), park_cap=1 (only ONE parked waiter allowed).
+        let (state, _ledger) = queue_state_park_cap(1, now, Duration::from_secs(5), 1);
+        let router = crate::app::app(token_store(), state.clone());
+
+        // Fill the only slot.
+        let _a1 = router
+            .clone()
+            .oneshot(acquire_req("pat-alpha"))
+            .await
+            .unwrap();
+
+        // First over-cap acquire PARKS, consuming the single park permit.
+        let router2 = router.clone();
+        let parked =
+            tokio::spawn(async move { router2.oneshot(acquire_req("pat-alpha")).await.unwrap() });
+        for _ in 0..100 {
+            if state
+                .admission_queue
+                .as_ref()
+                .unwrap()
+                .pending(&tid("alpha"))
+                == 1
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            state
+                .admission_queue
+                .as_ref()
+                .unwrap()
+                .pending(&tid("alpha")),
+            1,
+            "the first over-cap acquire must be parked (holding the only park permit)"
+        );
+        assert!(!parked.is_finished(), "the first waiter is still parked");
+
+        // SECOND over-cap acquire: park budget exhausted → SHED FAST (503),
+        // WITHOUT parking. If this had instead parked, it would have held a
+        // global in-flight permit for the whole wait (the wedge). It must return
+        // promptly and NOT grow the queue beyond the parked waiter.
+        let shed = router
+            .clone()
+            .oneshot(acquire_req("pat-alpha"))
+            .await
+            .unwrap();
+        assert_eq!(
+            shed.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "over the per-tenant park budget the excess waiter is shed fast (no global-permit park)"
+        );
+        assert_eq!(
+            state
+                .admission_queue
+                .as_ref()
+                .unwrap()
+                .pending(&tid("alpha")),
+            1,
+            "the shed acquire never enqueued — only the one parked waiter remains"
+        );
+
+        // The originally-parked waiter is still healthy: free the slot and tick,
+        // and it dispatches (the bound sheds the EXCESS, never the admitted one).
+        // (Cancel via a fresh router; we just need the slot count to drop — but
+        // the holder lease id is opaque here, so instead prove liveness by giving
+        // the parked waiter its own dispatch: free a slot by reducing active via
+        // a direct tick after removing the holder is not trivial; simplest: the
+        // parked waiter remains parked, which already proves the bound. Drop it.)
+        drop(parked);
+    }
+
+    // ── P1 #2: dispatch winning the race vs the waiter's timeout must not leak a
+    // phantom Held lease ────────────────────────────────────────────────────────
+
+    /// [P1 regression] When `dispatch` finalizes a lease to Held but the waiter
+    /// has ALREADY timed out (its oneshot receiver is gone), the dispatch LOST
+    /// the race: there is no client to own the Held lease. It must be ROLLED BACK
+    /// (teardown + ledger remove), leaving NO orphaned Held lease (no leaked
+    /// billed slot until the deadline reaper). Driven deterministically by
+    /// inserting a waiter whose receiver is already dropped, then ticking.
+    #[tokio::test]
+    async fn phantom_held_rolled_back_when_dispatch_wins_vs_timeout() {
+        let now = 8_000_000u64;
+        let (state, ledger) = queue_state(1, now, Duration::from_secs(5));
+        let queue = state.admission_queue.as_ref().unwrap();
+
+        // Mint a lease + Pending record by hand and enqueue it with a waiter
+        // whose receiver is ALREADY DROPPED (the timed-out waiter). cap=1 with no
+        // holder → the dispatch WILL win try_admit and finalize to Held.
+        let lease_id = state.mint_lease_id();
+        let lease = RunnerLease {
+            lease_id: lease_id.clone(),
+            principal_chain: vec!["tenant:alpha".to_string()],
+            path_set: vec!["/work/tmp".to_string()],
+            expiry: now + 600_000,
+            net_policy: "isolated".to_string(),
+            tmp_root: "/work/tmp".to_string(),
+            state: RunnerState::Held,
+        };
+        let spec =
+            corelink_runner::lease::ContainerSpec::from_lease(&lease, PINNED).expect("valid spec");
+        let pending = LeaseRecord {
+            lease_id: lease_id.clone(),
+            tenant: tid("alpha"),
+            state: LeaseState::Pending,
+            box_ref: format!("box:{lease_id}"),
+            created_at_ms: now,
+            updated_at_ms: now,
+            deadline_ms: Some(lease.expiry),
+        };
+        let (waker, wait_rx) = oneshot::channel::<axum::response::Response>();
+        // Drop the receiver: the waiter has TIMED OUT — any send will fail.
+        drop(wait_rx);
+        queue.waiters.lock().unwrap().insert(
+            lease_id.clone(),
+            QueuedAcquire {
+                tenant: tid("alpha"),
+                pat: crate::auth::BearerPat("pat-alpha".to_string()),
+                req: AcquireRequest {
+                    image_digest: PINNED.to_string(),
+                    net_policy: "isolated".to_string(),
+                    tmp_root: "/work/tmp".to_string(),
+                    expiry_ms: 600_000,
+                },
+                lease,
+                spec,
+                pending,
+                waker,
+            },
+        );
+        queue
+            .scheduler
+            .lock()
+            .unwrap()
+            .enqueue(WorkItem {
+                id: lease_id.clone(),
+                tenant: tid("alpha"),
+                enqueued_at_ms: now,
+            })
+            .unwrap();
+
+        // The tick reserves + finalizes the lease to Held, then waker.send FAILS
+        // (receiver gone) → it MUST roll back. So zero genuine dispatches.
+        let dispatched = run_admission_tick(&state, now).await;
+        assert_eq!(
+            dispatched, 0,
+            "a dispatch whose waiter timed out is not a genuine dispatch"
+        );
+
+        // The crux: NO Held (or Pending) lease leaked — the slot is free.
+        assert_eq!(
+            active_count(&ledger, &tid("alpha")),
+            0,
+            "the phantom Held lease must be rolled back (no leaked billed slot)"
+        );
+        // And the record is gone entirely (rolled back via ledger remove).
+        assert!(
+            ledger.lock().unwrap().get(&lease_id).unwrap().is_none(),
+            "the rolled-back lease must not linger in the ledger"
+        );
+    }
+
+    // ── P2: a timed-out/orphaned FIFO entry must not pollute §6 wait metrics ────
+
+    /// [P2 regression] An orphaned (timed-out) queue entry that the scheduler
+    /// "dispatches" (drains from the FIFO) is NOT a real dispatch — it must NOT
+    /// be counted in the per-tenant wait stats (`/v1/metrics/tenant`
+    /// non-interference numbers). After a waiter times out and its orphaned FIFO
+    /// entry is drained by a tick, the tenant's wait-stat count stays 0.
+    #[tokio::test]
+    async fn orphaned_timed_out_entry_not_counted_in_wait_stats() {
+        let now = 9_000_000u64;
+        // Tiny wait so the waiter times out fast, leaving an orphaned FIFO entry.
+        let (state, _ledger) = queue_state(1, now, Duration::from_millis(40));
+        let router = crate::app::app(token_store(), state.clone());
+
+        // Fill the slot, then an over-cap acquire that enqueues, times out (40ms),
+        // and 503s — leaving an orphaned FIFO entry (its context evicted).
+        let a1 = router
+            .clone()
+            .oneshot(acquire_req("pat-alpha"))
+            .await
+            .unwrap();
+        let timed_out = router
+            .clone()
+            .oneshot(acquire_req("pat-alpha"))
+            .await
+            .unwrap();
+        assert_eq!(timed_out.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        // Free the slot so the tick reaches and drains the orphaned FIFO entry.
+        let holder_id = lease_id_of(a1).await;
+        let c = Request::builder()
+            .method("POST")
+            .uri(paths::LEASE_CANCEL.replace("{lease_id}", &holder_id))
+            .header(header::AUTHORIZATION, "Bearer pat-alpha")
+            .body(Body::empty())
+            .unwrap();
+        router.clone().oneshot(c).await.unwrap();
+
+        // Tick at an ADVANCED clock: were the orphan counted, it would record a
+        // large (now - enqueued) wait sample. It must record NOTHING.
+        let dispatched = run_admission_tick(&state, now + 5_000).await;
+        assert_eq!(dispatched, 0, "the orphan is not a genuine dispatch");
+
+        // The §6 wait stats for alpha stay EMPTY (count 0) — the orphan polluted
+        // nothing.
+        let snap = state.wait_stats.lock().unwrap().snapshot(&tid("alpha"));
+        assert_eq!(
+            snap.count, 0,
+            "an orphaned/timed-out entry must not be counted as a dispatch in the wait stats"
+        );
+    }
+
+    // ── INFO: the admission tick must not hold the scheduler Mutex across the
+    // (blocking) try_admit ──────────────────────────────────────────────────────
+
+    /// [INFO regression] The dispatch tick must run `try_admit` (a blocking DB
+    /// round-trip under the Pg ledger) OUTSIDE the FairScheduler Mutex, so a slow
+    /// reservation never serializes/stalls admission across tenants. We wrap the
+    /// ledger so `try_admit` blocks until released, then prove — from another
+    /// task — that the scheduler lock is FREE during that block (a concurrent
+    /// `queue.pending()` / `enqueue`, both of which lock the scheduler, complete
+    /// promptly). If the lock were held across try_admit, the concurrent
+    /// scheduler op would hang and the test would time out.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn try_admit_runs_outside_scheduler_lock() {
+        use std::sync::mpsc;
+
+        /// A ledger whose `try_admit` signals it has ENTERED, then BLOCKS on a
+        /// channel until the test releases it — everything else delegates to the
+        /// inner `InMemoryLedger`.
+        struct BlockingAdmitLedger {
+            inner: InMemoryLedger,
+            entered: mpsc::Sender<()>,
+            release: Arc<Mutex<mpsc::Receiver<()>>>,
+        }
+        impl LeaseLedger for BlockingAdmitLedger {
+            fn put(&mut self, rec: corelink_fabric::LeaseRecord) -> anyhow::Result<()> {
+                self.inner.put(rec)
+            }
+            fn get(&self, lease_id: &str) -> anyhow::Result<Option<corelink_fabric::LeaseRecord>> {
+                self.inner.get(lease_id)
+            }
+            fn transition(
+                &mut self,
+                lease_id: &str,
+                to: RunnerState,
+                now_ms: u64,
+            ) -> anyhow::Result<corelink_fabric::LeaseRecord> {
+                self.inner.transition(lease_id, to, now_ms)
+            }
+            fn by_tenant(&self, t: &TenantId) -> anyhow::Result<Vec<corelink_fabric::LeaseRecord>> {
+                self.inner.by_tenant(t)
+            }
+            fn held(&self) -> anyhow::Result<Vec<corelink_fabric::LeaseRecord>> {
+                self.inner.held()
+            }
+            fn pending_older_than(
+                &self,
+                now_ms: u64,
+                max_age_ms: u64,
+            ) -> anyhow::Result<Vec<corelink_fabric::LeaseRecord>> {
+                self.inner.pending_older_than(now_ms, max_age_ms)
+            }
+            fn try_admit(
+                &mut self,
+                rec: corelink_fabric::LeaseRecord,
+                max_concurrency: u32,
+            ) -> anyhow::Result<bool> {
+                // Signal we are inside try_admit, then block until released —
+                // simulating the Pg network round-trip.
+                let _ = self.entered.send(());
+                let _ = self.release.lock().unwrap().recv();
+                self.inner.try_admit(rec, max_concurrency)
+            }
+            fn set_envelope_checkpoint(
+                &mut self,
+                lease_id: &str,
+                checkpoint_json: &str,
+            ) -> anyhow::Result<()> {
+                self.inner
+                    .set_envelope_checkpoint(lease_id, checkpoint_json)
+            }
+            fn get_envelope_checkpoint(&self, lease_id: &str) -> anyhow::Result<Option<String>> {
+                self.inner.get_envelope_checkpoint(lease_id)
+            }
+            fn remove(&mut self, lease_id: &str) -> anyhow::Result<bool> {
+                self.inner.remove(lease_id)
+            }
+        }
+
+        let now = 10_000_000u64;
+        let (entered_tx, entered_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
+            Arc::new(Mutex::new(BlockingAdmitLedger {
+                inner: InMemoryLedger::new(),
+                entered: entered_tx,
+                release: Arc::new(Mutex::new(release_rx)),
+            }));
+        let plans = StaticPlans::new([TenantPlan {
+            tenant: tid("alpha"),
+            max_concurrency: 1,
+            rate_ceiling_per_min: 10_000,
+        }]);
+        let mut state = AppState::new(
+            Arc::clone(&ledger),
+            Arc::new(plans),
+            Arc::new(FixedClock(now)),
+        )
+        .with_admission_queue(64, Duration::from_secs(5));
+        // Park-cap default is fine here.
+        state.admission_queue = Some(Arc::new(AdmissionQueue::new(64)));
+        let queue = Arc::clone(state.admission_queue.as_ref().unwrap());
+
+        // Enqueue one candidate with a live waiter context (so the tick will run
+        // try_admit on it).
+        let lease_id = state.mint_lease_id();
+        let lease = RunnerLease {
+            lease_id: lease_id.clone(),
+            principal_chain: vec!["tenant:alpha".to_string()],
+            path_set: vec!["/work/tmp".to_string()],
+            expiry: now + 600_000,
+            net_policy: "isolated".to_string(),
+            tmp_root: "/work/tmp".to_string(),
+            state: RunnerState::Held,
+        };
+        let spec =
+            corelink_runner::lease::ContainerSpec::from_lease(&lease, PINNED).expect("valid spec");
+        let pending = LeaseRecord {
+            lease_id: lease_id.clone(),
+            tenant: tid("alpha"),
+            state: LeaseState::Pending,
+            box_ref: format!("box:{lease_id}"),
+            created_at_ms: now,
+            updated_at_ms: now,
+            deadline_ms: Some(lease.expiry),
+        };
+        let (waker, _wait_rx) = oneshot::channel::<axum::response::Response>();
+        queue.waiters.lock().unwrap().insert(
+            lease_id.clone(),
+            QueuedAcquire {
+                tenant: tid("alpha"),
+                pat: crate::auth::BearerPat("pat-alpha".to_string()),
+                req: AcquireRequest {
+                    image_digest: PINNED.to_string(),
+                    net_policy: "isolated".to_string(),
+                    tmp_root: "/work/tmp".to_string(),
+                    expiry_ms: 600_000,
+                },
+                lease,
+                spec,
+                pending,
+                waker,
+            },
+        );
+        queue
+            .scheduler
+            .lock()
+            .unwrap()
+            .enqueue(WorkItem {
+                id: lease_id.clone(),
+                tenant: tid("alpha"),
+                enqueued_at_ms: now,
+            })
+            .unwrap();
+
+        // Run the tick on a task; it will block inside try_admit (OUTSIDE the
+        // scheduler lock, per the fix).
+        let tick_state = state.clone();
+        let tick = tokio::spawn(async move { run_admission_tick(&tick_state, now).await });
+
+        // Wait until try_admit has been ENTERED (so the reservation is in
+        // progress and blocked).
+        tokio::task::spawn_blocking(move || entered_rx.recv())
+            .await
+            .unwrap()
+            .expect("try_admit entered");
+
+        // THE PROOF: while try_admit is blocked, the scheduler lock must be FREE.
+        // `pending()` locks the scheduler; it must return promptly (not hang). If
+        // the tick held the scheduler lock across the blocking try_admit, this
+        // would deadlock and the test would time out.
+        let probe = {
+            let q = Arc::clone(&queue);
+            tokio::task::spawn_blocking(move || q.pending(&tid("alpha")))
+        };
+        let pending_now = tokio::time::timeout(Duration::from_secs(2), probe)
+            .await
+            .expect("scheduler lock must be free during try_admit (not held across it)")
+            .unwrap();
+        // The candidate was popped from the FIFO under the scheduler lock before
+        // try_admit ran, so pending is 0 — and crucially the probe did not hang.
+        assert_eq!(pending_now, 0);
+
+        // Release try_admit and let the tick complete.
+        release_tx.send(()).unwrap();
+        let dispatched = tick.await.unwrap();
+        assert_eq!(dispatched, 1, "the candidate is reserved + dispatched");
     }
 }

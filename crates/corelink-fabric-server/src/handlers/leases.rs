@@ -210,15 +210,24 @@ pub(crate) async fn acquire(
             Err(e) => return error_response(ApiError::Invalid, &format!("lease rejected: {e:#}")),
         };
 
-        // ── §13.2 box injection (WP-TURNFEED): so the in-box agent loop can
-        // reach the trajectory turn-feed INGEST endpoint, inject the lease's
-        // ingest URL + the lease credential into the box env. ADDITIVE — the
-        // hermetic Docker path ignores env, and `NoBoxProvisioner` (default-off)
-        // injects nothing into any box; only the cloud provision path consumes
-        // `spec.env`. The credential is the acquiring tenant's Bearer PAT, the
-        // SAME credential the ingest endpoint's hook-credential gate expects
-        // (Option A, ratified — see the hook-registration note below).
-        crate::envelope_inject::inject_ingest_env(&mut spec, &lease_id, &pat.0);
+        // ── §13.2 box injection (WP-TURNFEED + WP-INGEST-SCOPE): so the in-box
+        // agent loop can reach the trajectory turn-feed INGEST endpoint, inject
+        // the lease's ingest URL + a per-lease, write-only, ingest-SCOPED token
+        // into the box env. ADDITIVE — the hermetic Docker path ignores env, and
+        // `NoBoxProvisioner` (default-off) injects nothing into any box; only
+        // the cloud provision path consumes `spec.env`.
+        //
+        // P0 FIX: the injected credential is the SCOPED ingest token, NEVER the
+        // tenant PAT. The box runs UNTRUSTED code (contract §4) with open egress
+        // (ADR-0003); injecting the tenant-wide PAT here let a job exfiltrate it
+        // and take over the whole tenant API. The scoped token authorizes ONLY
+        // trajectory-ingest for THIS ONE lease (it folds `lease_id` into its
+        // HMAC pre-image), so an exfiltrated token is harmless beyond this
+        // (soon-dead) lease's own ingest endpoint — no tenant takeover. The
+        // ingest endpoint recomputes + constant-time verifies this same token.
+        // See `crate::ingest_token`.
+        let ingest_token = state.ingest_signer.ingest_token(&lease_id);
+        crate::envelope_inject::inject_ingest_env(&mut spec, &lease_id, &ingest_token);
 
         // ── CONCURRENCY CAP — atomic reserve. Insert this acquire's `Pending`
         // record IFF the tenant is strictly under `max_concurrency`. The count
@@ -405,17 +414,21 @@ pub(crate) async fn finalize_admitted_lease(
     // so the envelope poll endpoints are live immediately for this lease.
     // Registration is on the SUCCESS path only — a failed acquire (any
     // branch above that returns early) never registers a hook.
-    // The credential = the acquiring tenant's Bearer PAT (the contract's
-    // §13.2 authenticated-hook-point seam). CROSS-REPO SEAM — RATIFIED (hugit
-    // techlead, owner-ratified Gustavo, 2026-06-12; Option A "same tenant PAT"):
-    // hugit's envelope subscriber polls as the SAME machine principal with the
-    // SAME tenant PAT that acquired the lease (ADR-0002: one HuGR account, one
-    // machine PAT — acquire and subscribe roles are not separated), so the
-    // wrong-PAT 503 cannot occur. No per-lease (Option C) or out-of-band
-    // (Option B) credential is needed; no AcquireResponse wire change. See
-    // hugit/docs/handoff/2026-06-12-to-corelink-runners-envelope-reply.md.
-    // (If a future family consumer separates the roles, that is a new decision
-    // then — this binding is a one-line change at that point.)
+    //
+    // The hook's subscribe credential = the acquiring tenant's Bearer PAT —
+    // the POLL credential ONLY (the §13.2 authenticated-hook-point seam for the
+    // poll_events/poll_meta drain). CROSS-REPO SEAM — RATIFIED (hugit techlead,
+    // owner-ratified Gustavo, 2026-06-12; Option A "same tenant PAT"): hugit's
+    // envelope subscriber polls as the SAME machine principal with the SAME
+    // tenant PAT that acquired the lease (ADR-0002: one HuGR account, one
+    // machine PAT), so the wrong-PAT 503 cannot occur on the poll path. The
+    // poll path puts NOTHING on the box, so the tenant PAT never reaches
+    // untrusted compute.
+    //
+    // The INGEST path (the box → hook WRITE side) does NOT use this PAT: it
+    // authenticates with the per-lease SCOPED ingest token injected into the
+    // box env (WP-INGEST-SCOPE, the P0 fix above) — never the tenant PAT. So
+    // the hook here carries the POLL credential; the box never holds it.
     let hook = CaptureHook::open(
         EnvelopeConfig {
             ack_timeout: std::time::Duration::from_secs(30),
@@ -676,6 +689,45 @@ mod tests {
         }
     }
 
+    /// Shared log of `(lease_id, env)` captured at provision — one entry per
+    /// provisioned box. Factored out so the type stays simple (clippy).
+    type CapturedEnvLog = Arc<Mutex<Vec<(String, Vec<(String, String)>)>>>;
+
+    /// A `BoxProvisioner` that RECORDS the `ContainerSpec.env` it is handed at
+    /// `provision` (keyed by lease id), so a test can inspect EXACTLY what env
+    /// the acquire path injects into the box. `provision` succeeds. Used by the
+    /// P0 ingest-scope test: it proves the tenant PAT is NEVER injected and the
+    /// per-lease SCOPED token is injected instead.
+    struct EnvRecordingProvisioner {
+        captured: CapturedEnvLog,
+    }
+
+    impl EnvRecordingProvisioner {
+        fn new() -> (Self, CapturedEnvLog) {
+            let cap = Arc::new(Mutex::new(Vec::new()));
+            (
+                Self {
+                    captured: Arc::clone(&cap),
+                },
+                cap,
+            )
+        }
+    }
+
+    impl BoxProvisioner for EnvRecordingProvisioner {
+        fn provision(&self, lease_id: &str, spec: &ContainerSpec) -> Result<()> {
+            self.captured
+                .lock()
+                .unwrap()
+                .push((lease_id.to_string(), spec.env.clone()));
+            Ok(())
+        }
+
+        fn teardown(&self, _lease_id: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
     /// A `BoxProvisioner` that, during `provision`, asserts the lease's
     /// `Pending` reservation is ALREADY in the ledger — proving the slot is
     /// reserved (visible) BEFORE provisioning runs (the over-admission close).
@@ -849,6 +901,71 @@ mod tests {
             "teardown_lease must be attempted on provision failure for the minted lease id, got {:?}",
             torn[0]
         );
+    }
+
+    // ── Test: the box env carries the SCOPED ingest token, NEVER the PAT ───────
+
+    /// **P0 (credential exfiltration) regression.** The acquire path injects the
+    /// §13.2 ingest credential into the box env. It MUST be the per-lease SCOPED
+    /// ingest token (recomputable from the lease id under the fabric's ingest
+    /// secret), NEVER the tenant Bearer PAT. A recording provisioner captures the
+    /// exact `ContainerSpec.env`; we assert the injected
+    /// `CORELINK_ENVELOPE_INGEST_CREDENTIAL` equals the scoped token and does NOT
+    /// equal `pat-acme`. This is the grep-proof in test form: the PAT never
+    /// reaches the untrusted box.
+    #[tokio::test]
+    async fn box_env_carries_scoped_token_never_the_tenant_pat() {
+        use crate::envelope_inject::INGEST_CREDENTIAL_ENV;
+        use crate::ingest_token::IngestSigner;
+
+        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
+            Arc::new(Mutex::new(InMemoryLedger::new()));
+        let (prov, captured) = EnvRecordingProvisioner::new();
+        // A KNOWN ingest secret so the test can recompute the expected token.
+        let ingest_secret: Vec<u8> = b"unit-test-ingest-secret".to_vec();
+        let mut state = AppState::new(
+            Arc::clone(&ledger),
+            Arc::new(plans(5)),
+            Arc::new(FixedClock(1_717_000_000_000)),
+        )
+        .with_ingest_signer(Arc::new(IngestSigner::new(ingest_secret.clone())));
+        state.provisioner = Arc::new(prov);
+        let router = crate::app::app(acme_token_store(), state.clone());
+
+        let resp = router
+            .oneshot(acquire_request(paths::LEASES, &body()))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "acquire must succeed");
+
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 1, "exactly one box provisioned");
+        let (lease_id, env) = &captured[0];
+
+        let injected = env
+            .iter()
+            .find(|(k, _)| k == INGEST_CREDENTIAL_ENV)
+            .map(|(_, v)| v.as_str())
+            .expect("the ingest credential env var must be injected");
+
+        // It is the SCOPED token for THIS lease...
+        let expected = IngestSigner::new(ingest_secret).ingest_token(lease_id);
+        assert_eq!(
+            injected, expected,
+            "the injected credential must be the per-lease scoped ingest token"
+        );
+        // ...and it is NOT the tenant PAT (the P0 invariant).
+        assert_ne!(
+            injected, "pat-acme",
+            "the tenant PAT must NEVER be injected into the box env (P0)"
+        );
+        // Defensive: the raw PAT string must appear NOWHERE in the box env.
+        for (k, v) in env.iter() {
+            assert_ne!(
+                v, "pat-acme",
+                "no box env value may be the tenant PAT (key={k})"
+            );
+        }
     }
 
     // ── Test: atomic reserve closes over-admission ─────────────────────────────

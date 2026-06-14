@@ -379,20 +379,22 @@ async fn gate_is_transparent_to_acked_close() {
     );
 }
 
-/// P2 — the global concurrency cap sheds excess load with 503. With the cap set
-/// to 1 and a slow in-flight close holding the single permit, a CONCURRENT
-/// request is shed (503) rather than queued. The health route (open) is used as
-/// the second request so the assertion is about the load-shed layer, not auth.
+/// P2 — the global concurrency cap sheds excess load on the WORK routes with
+/// 503. With the cap set to 1 and a slow in-flight close holding the single
+/// permit, a CONCURRENT work request is shed (503) rather than queued. The shed
+/// victim is an authenticated WORK route (`GET /v1/leases/{id}`), NOT health —
+/// health rides outside the limiter (see [`health_answers_200_under_saturation`]).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn global_cap_sheds_excess_with_503() {
-    // Cap the WHOLE server to one in-flight request. A long-running close holds
-    // it; a concurrent health probe must be shed.
+    // Cap the work routes to one in-flight request. A long-running close holds
+    // it; a concurrent work request must be shed.
     let h = harness(8, 1, None);
     let lease_id = acquire(&h.app).await;
     register_hook(&h, &lease_id, Duration::from_millis(400));
 
     // Fire a slow close (no acker → it holds its slot for the full 400ms ack
-    // window) and, while it is in flight, a concurrent health request.
+    // window) and, while it is in flight, a concurrent authenticated work
+    // request (lease status) that the cap must shed.
     let app1 = h.app.clone();
     let id = lease_id.clone();
     let slow = tokio::spawn(async move {
@@ -410,6 +412,73 @@ async fn global_cap_sheds_excess_with_503() {
     // Let the close occupy the single permit.
     tokio::time::sleep(Duration::from_millis(80)).await;
 
+    let status_path = paths::LEASE_BY_ID.replace("{lease_id}", &lease_id);
+    let probe = h
+        .app
+        .clone()
+        .oneshot(json_request("GET", &status_path, Vec::new()))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        probe.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "with the work-route cap at 1 and a request in flight, the excess work \
+         request is shed 503"
+    );
+
+    // The in-flight close still completes correctly (the cap shed the EXCESS,
+    // never the request already admitted).
+    let response = slow.await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+/// P2 RE-AUDIT (LB-liveness footgun) — `/v1/health` answers 200 even when the
+/// work-route concurrency cap is fully saturated. The cap is set to 1 and a slow
+/// in-flight close holds the single work permit; a concurrent health probe must
+/// STILL return 200 (it rides on a layer-free branch, outside the limiter). A
+/// 503 here would make an LB mark a busy-but-alive instance DOWN — the exact
+/// footgun this exemption removes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn health_answers_200_under_saturation() {
+    let h = harness(8, 1, None);
+    let lease_id = acquire(&h.app).await;
+    register_hook(&h, &lease_id, Duration::from_millis(400));
+
+    // Saturate the work-route cap with a slow close holding the single permit.
+    let app1 = h.app.clone();
+    let id = lease_id.clone();
+    let slow = tokio::spawn(async move {
+        post_close(
+            &app1,
+            &id,
+            &CloseRequest {
+                status: "succeeded".to_string(),
+                check_result: None,
+            },
+        )
+        .await
+    });
+
+    // Let the close occupy the single work permit.
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    // Sanity: a concurrent WORK request IS shed while the permit is held — the
+    // limiter is genuinely saturated at this instant.
+    let status_path = paths::LEASE_BY_ID.replace("{lease_id}", &lease_id);
+    let work = h
+        .app
+        .clone()
+        .oneshot(json_request("GET", &status_path, Vec::new()))
+        .await
+        .unwrap();
+    assert_eq!(
+        work.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "precondition: the work-route cap is saturated (a work request is shed)"
+    );
+
+    // The health probe, under that SAME saturation, must still answer 200.
     let probe = h
         .app
         .clone()
@@ -422,15 +491,13 @@ async fn global_cap_sheds_excess_with_503() {
         )
         .await
         .unwrap();
-
     assert_eq!(
         probe.status(),
-        StatusCode::SERVICE_UNAVAILABLE,
-        "with the global cap at 1 and a request in flight, the excess is shed 503"
+        StatusCode::OK,
+        "health must answer 200 under work-route saturation (LB liveness must \
+         not be shed — a 503 would pull a busy-but-alive instance out of rotation)"
     );
 
-    // The in-flight close still completes correctly (the cap shed the EXCESS,
-    // never the request already admitted).
     let response = slow.await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 }

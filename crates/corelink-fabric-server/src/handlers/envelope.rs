@@ -30,7 +30,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use base64::Engine as _;
@@ -144,20 +144,19 @@ impl HookRegistry {
         (entry.tenant == *tenant).then(|| (entry.hook.clone(), entry.price))
     }
 
-    /// Tenant-matched INGEST lookup (ENV3): the hook handle, its subscribe
-    /// credential, AND the fabric-side price card (needed for the turn-boundary
-    /// snapshot's `cost_usd_micros` projection). Same no-existence-oracle rule
-    /// as [`lookup`](Self::lookup): a miss and a cross-tenant hit are
-    /// indistinguishable (`None` both ways).
-    fn ingest_handle(
-        &self,
-        lease_id: &str,
-        tenant: &TenantId,
-    ) -> Option<(CaptureHook, String, PriceCard)> {
+    /// INGEST lookup by lease id alone (WP-INGEST-SCOPE): the hook handle + the
+    /// fabric-side price card. The ingest path authenticates with the per-lease
+    /// SCOPED ingest token (NOT a tenant PAT — the box is untrusted and never
+    /// holds a tenant secret), so there is no tenant `Extension` to match here:
+    /// the token IS the lease binding (it folds `lease_id` into its HMAC
+    /// pre-image), and the handler verifies it BEFORE this hook is written.
+    /// `None` means "no such lease / no hook" — still no existence oracle (the
+    /// caller cannot tell a missing lease from a wrong token; both are rejected
+    /// before any side effect).
+    fn ingest_handle_scoped(&self, lease_id: &str) -> Option<(CaptureHook, PriceCard)> {
         let entries = self.lock();
         let entry = entries.get(lease_id)?;
-        (entry.tenant == *tenant)
-            .then(|| (entry.hook.clone(), entry.credential.clone(), entry.price))
+        Some((entry.hook.clone(), entry.price))
     }
 
     /// Trusted (composition-root) close-path lookup by lease id alone —
@@ -363,37 +362,67 @@ impl IngestEvent {
 /// forwards its transcript events here; the handler writes each into the
 /// lease's capture hook (in-flight forward ONLY — never persisted, §13.3).
 ///
-/// Auth + scope mirror the polls EXACTLY: a tenant-matched registry miss and a
-/// cross-tenant hit are the SAME 404 (no existence oracle), and the hook's own
-/// credential seam is then exercised — a wrong/missing credential on a
-/// registered hook fails closed (503), never accepts.
+/// ## Auth: the per-lease SCOPED ingest token — NOT the tenant PAT (P0 fix)
+///
+/// This route sits OUTSIDE the Bearer-PAT middleware (see [`app_full`]). The
+/// box (UNTRUSTED, contract §4, open egress per ADR-0003) holds a per-lease,
+/// write-only, ingest-SCOPED capability token — NEVER the tenant PAT. The
+/// handler authenticates by recomputing the expected token for `{lease_id}`
+/// from the dedicated ingest secret ([`crate::ingest_token::IngestSigner`]) and
+/// constant-time comparing it against the presented `Authorization: Bearer`
+/// token. Accept iff they match; otherwise reject fail-closed (401 absent /
+/// 403 wrong). The token folds `lease_id` into its HMAC pre-image, so lease A's
+/// token can never authorize ingest to lease B (cross-lease isolation is
+/// intrinsic). An exfiltrated token only lets an attacker POST trajectory to
+/// that one (soon-dead) lease's ingest endpoint — no tenant takeover, no other
+/// capability.
+///
+/// The POLL endpoints (`poll_events`/`poll_meta`) are unchanged: they KEEP the
+/// tenant-PAT gate (hugit's TRUSTED subscriber polls with the tenant PAT; that
+/// path puts nothing on the box). Two credentials, by trust boundary.
 ///
 /// On each ingested `model_turn` (the turn boundary), a NON-destructive
 /// snapshot of the collector's current `IntentMetrics` is serialized and
 /// written to the lease's durable envelope checkpoint (ADR-0004 Phase 2b) so
 /// an abnormal cross-instance reap can still emit the accumulated partial. The
 /// checkpoint write is BEST-EFFORT: a failure is logged, never breaks ingest.
+///
+/// [`app_full`]: crate::app::app_full
 pub async fn ingest(
     State(state): State<AppState>,
     Extension(registry): Extension<Arc<HookRegistry>>,
-    Extension(tenant): Extension<TenantId>,
     Path(lease_id): Path<String>,
+    headers: HeaderMap,
     body: String,
 ) -> Response {
-    // ── Scope: tenant-matched hook lookup. Miss == cross-tenant == 404 (no
-    // existence oracle), identical to the poll endpoints.
-    let Some((hook, credential, price)) = registry.ingest_handle(&lease_id, &tenant) else {
-        return error_response(ApiError::NotFound, "lease not found");
+    // ── Auth: the per-lease SCOPED ingest token (NOT the tenant PAT). Extract
+    // the presented Bearer, recompute the expected scoped token for {lease_id},
+    // and constant-time compare. Fail-closed: a missing OR wrong/forged/another-
+    // lease's token is 401 `unauthorized` — never an accept. (The frozen error
+    // vocabulary has NO 403 ON PURPOSE — it would leak existence; a bad
+    // credential is `Unauthorized`, the same posture the PAT layer uses.) This
+    // runs BEFORE the registry lookup, so a wrong token can never probe lease
+    // existence — no existence oracle: a wrong token for a real lease and any
+    // token for a non-lease are byte-identical 401s.
+    let Some(presented) = bearer(&headers) else {
+        return error_response(ApiError::Unauthorized, "missing ingest credential");
     };
-    // ── Auth: exercise the hook's OWN credential seam. A registered hook that
-    // refuses its registered credential is an internal inconsistency — answered
-    // fail-closed (503), never open (same posture as `subscribe`).
-    if hook.subscribe(&credential).is_err() {
+    if !state
+        .ingest_signer
+        .verify_ingest_token(&lease_id, presented)
+    {
         return error_response(
-            ApiError::FailClosed,
-            "envelope hook refused the registered credential; failing closed",
+            ApiError::Unauthorized,
+            "ingest credential does not authorize this lease",
         );
     }
+
+    // ── Scope: lease-id hook lookup (the token already proved the lease
+    // binding). A miss means the lease has no live hook (closed/reaped/never
+    // registered) — fail-closed.
+    let Some((hook, price)) = registry.ingest_handle_scoped(&lease_id) else {
+        return error_response(ApiError::NotFound, "lease not found");
+    };
 
     // ── Parse: accept ONE object, a JSON array, OR an NDJSON body (one JSON
     // object per line). NDJSON is normalized to the array form first.
@@ -439,6 +468,19 @@ pub async fn ingest(
     }
 
     StatusCode::OK.into_response()
+}
+
+/// Extract the presented token from `Authorization: Bearer <token>`; `None` on
+/// a missing header, non-UTF-8 value, wrong scheme, or empty token. (Same
+/// extraction shape as the PAT layer's `auth::bearer_token`, but the ingest
+/// path's Bearer is the per-lease SCOPED token, never a tenant PAT.)
+fn bearer(headers: &HeaderMap) -> Option<&str> {
+    let token = headers
+        .get(header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix("Bearer ")?;
+    (!token.is_empty()).then_some(token)
 }
 
 /// Parse an NDJSON body (one JSON [`IngestEvent`] per non-blank line) to an

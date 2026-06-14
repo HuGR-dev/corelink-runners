@@ -7,9 +7,31 @@
 //! **Additive + DEFAULT-OFF.** The entries land in [`ContainerSpec::env`],
 //! which only the cloud provision path (Northflank `runtimeEnvironment`)
 //! consumes; the hermetic Docker path and [`NoBoxProvisioner`] ignore env, so
-//! the default backend behaviour is unchanged. The credential injected is the
-//! lease's own Bearer PAT — the SAME credential the ingest endpoint's
-//! hook-credential gate expects (Option A, ratified).
+//! the default backend behaviour is unchanged.
+//!
+//! ## What credential is injected — §5 framing (WP-INGEST-SCOPE)
+//!
+//! The credential this module injects as [`INGEST_CREDENTIAL_ENV`] is the
+//! caller's responsibility; the production acquire path
+//! (`handlers::leases::acquire`) passes a per-lease, write-only, ingest-SCOPED
+//! token — NEVER the tenant Bearer PAT. This is the P0 fix: the box runs
+//! UNTRUSTED code (contract §4) with open egress (ADR-0003); injecting the
+//! tenant-wide PAT here let a job exfiltrate it and take over the whole tenant
+//! API. The scoped token authorizes ONLY trajectory-ingest for THAT ONE lease
+//! (see [`crate::ingest_token`]).
+//!
+//! Contract §5's `env=0` credential-scan protects TENANT / PLATFORM secrets:
+//! the tenant PAT is no longer injected and stays off the box. The scoped
+//! ingest token is NOT such a secret — it is a write-only, lease-scoped,
+//! ingest-only CAPABILITY the box legitimately needs to stream its OWN
+//! trajectory, an explicit and bounded exception to env=0 (worst-case
+//! disclosure: one dying lease's ingest endpoint). The fully-§5-pure channel
+//! (a broker / unix-socket with NO credential in env at all) is the FC-era
+//! hardening (follow-up); the scoped token removes the P0 (tenant takeover) now.
+//!
+//! This module is credential-agnostic — it shapes the ingest URL/env and
+//! injects whatever credential string it is handed; the scoping guarantee is
+//! enforced at the call site + the ingest endpoint, not here.
 //!
 //! **Public-URL resolution.** The absolute ingest URL needs the fabric's
 //! public base URL, which the server does not otherwise track (it only knows
@@ -34,8 +56,9 @@ use corelink_runner::lease::ContainerSpec;
 /// known; the relative path otherwise — see [`INGEST_BASE_ENV`]).
 pub const INGEST_URL_ENV: &str = "CORELINK_ENVELOPE_INGEST_URL";
 
-/// Env var carrying the lease credential the in-box agent presents to the
-/// ingest endpoint (the lease's Bearer PAT — Option A).
+/// Env var carrying the credential the in-box agent presents to the ingest
+/// endpoint: the per-lease, write-only, ingest-SCOPED token (WP-INGEST-SCOPE)
+/// — NEVER the tenant Bearer PAT (see the module docs' §5 framing).
 pub const INGEST_CREDENTIAL_ENV: &str = "CORELINK_ENVELOPE_INGEST_CREDENTIAL";
 
 /// Env var carrying the fabric base URL when [`INGEST_URL_ENV`] is RELATIVE
@@ -49,8 +72,11 @@ pub const INGEST_BASE_ENV: &str = "CORELINK_ENVELOPE_INGEST_BASE_URL";
 pub const FABRIC_PUBLIC_BASE_URL: &str = "FABRIC_PUBLIC_BASE_URL";
 
 /// Inject the §13.2 ingest env into `spec` for `lease_id`, using `credential`
-/// as the lease's ingest bearer. Reads the public base URL from the process
-/// environment ([`FABRIC_PUBLIC_BASE_URL`]).
+/// as the lease's ingest bearer. `credential` MUST be the per-lease SCOPED
+/// ingest token (NOT the tenant PAT — module docs' §5 framing); this function
+/// is credential-agnostic but the production call site passes the scoped token.
+/// Reads the public base URL from the process environment
+/// ([`FABRIC_PUBLIC_BASE_URL`]).
 pub fn inject_ingest_env(spec: &mut ContainerSpec, lease_id: &str, credential: &str) {
     inject_ingest_env_with(spec, lease_id, credential, |k| std::env::var(k).ok());
 }

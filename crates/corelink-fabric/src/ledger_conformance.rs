@@ -60,10 +60,12 @@ pub(crate) fn run_all(make: LedgerFactory) {
 }
 
 /// `pending_older_than(now, max_age)` returns ONLY `Pending` rows whose
-/// `created_at_ms <= now - max_age` — the stale-Pending sweep's enumeration
-/// seam. Every backend proves: (a) a stale Pending is returned, (b) a fresh
-/// Pending is NOT, (c) a Held lease (even an old one) is never returned (the
-/// deadline reaper owns Held), ordered by lease_id.
+/// `created_at_ms < now - max_age` (STRICTLY older than the bound) — the
+/// stale-Pending sweep's enumeration seam. Every backend proves: (a) a stale
+/// Pending is returned, (b) a fresh Pending is NOT, (c) a Held lease (even an
+/// old one) is never returned (the deadline reaper owns Held), (d) a Pending
+/// sitting EXACTLY at the bound is NOT returned (the strict-`<` boundary —
+/// consistent across InMemory / File / Pg), ordered by lease_id.
 fn pending_older_than_filters_by_age_and_state(make: LedgerFactory) {
     let t = tenant("acme");
     let mut led = make();
@@ -76,7 +78,7 @@ fn pending_older_than_filters_by_age_and_state(make: LedgerFactory) {
     led.put(held("h-old", &t)).unwrap();
 
     // now = 100_000; max_age = 10_000 → cutoff = 90_000. Both Pendings have
-    // created_at_ms = 1_000 (<= 90_000), so BOTH are stale by this bound; the
+    // created_at_ms = 1_000 (< 90_000), so BOTH are stale by this bound; the
     // Held is excluded purely on state.
     let stale = led.pending_older_than(100_000, 10_000).unwrap();
     let ids: Vec<&str> = stale.iter().map(|r| r.lease_id.as_str()).collect();
@@ -87,9 +89,33 @@ fn pending_older_than_filters_by_age_and_state(make: LedgerFactory) {
          the Held lease is never returned"
     );
 
+    // BOUNDARY (strict-`<`): a Pending sitting EXACTLY at the bound is NOT
+    // reclaimed. created_at_ms = 1_000; pick now/max_age so cutoff == 1_000:
+    // now = 11_000, max_age = 10_000 → cutoff = 1_000. The rows are at the bound
+    // (age == max_age), not LONGER than it, so the strict `<` excludes them.
+    let at_bound = led.pending_older_than(11_000, 10_000).unwrap();
+    assert!(
+        at_bound.is_empty(),
+        "a Pending whose age is EXACTLY max_age (at the bound) must NOT be \
+         returned — the comparison is strict `<`, not `<=`; got {:?}",
+        at_bound.iter().map(|r| &r.lease_id).collect::<Vec<_>>()
+    );
+
+    // One millisecond past the bound, the SAME rows ARE reclaimed (the strict
+    // comparison flips the instant created_at < cutoff): now = 11_001 → cutoff
+    // = 1_001 > 1_000. This pins the boundary as exactly-at-bound, not off-by-one.
+    let past_bound = led.pending_older_than(11_001, 10_000).unwrap();
+    let past_ids: Vec<&str> = past_bound.iter().map(|r| r.lease_id.as_str()).collect();
+    assert_eq!(
+        past_ids,
+        vec!["p-fresh", "p-stale"],
+        "one ms past the bound the Pendings ARE reclaimed (strict `<` flips at \
+         created_at < cutoff)"
+    );
+
     // Tighten the bound so the cutoff falls BEFORE created_at_ms (1_000):
     // now = 1_500, max_age = 10_000 → cutoff = saturating_sub = 0; rows with
-    // created_at_ms = 1_000 are NOT <= 0 → none returned (fail-safe: a
+    // created_at_ms = 1_000 are NOT < 0 → none returned (fail-safe: a
     // not-yet-old-enough Pending is never reclaimed).
     let none = led.pending_older_than(1_500, 10_000).unwrap();
     assert!(
