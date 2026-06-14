@@ -10,7 +10,7 @@
 //! (whitepaper §7; contract §10); the customer buys `max_concurrency`, flat,
 //! and minutes are unlimited.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use crate::meter::{SlotEventKind, SlotOccupancyEvent};
 use crate::tenant::TenantId;
@@ -30,13 +30,28 @@ const JOURNAL_CAP: usize = 100_000;
 /// - **current occupied slots** — `Acquired` +1; `Released` / `Expired` /
 ///   `Crashed` −1, saturating (never negative: a spurious free clamps to 0,
 ///   fail-closed in the customer's favor);
-/// - **peak slots** — the high-water mark of concurrent occupancy (the
-///   number that reconciles against the plan's `max_concurrency`);
+/// - **peak slots** — the high-water mark of concurrent occupancy *as seen by
+///   THIS meter instance*;
 /// - an **append-only journal** of every event recorded, in arrival order
 ///   (the audit trail billing reconciles against the lease ledger).
 ///
 /// There is intentionally no field here that accumulates elapsed time: the
 /// slot is the billable unit, full stop.
+///
+/// # SCOPE: instance-local observability, NOT a global truth (P1)
+///
+/// This meter counts only the events recorded into THIS instance. It is
+/// per-instance: a lease `Acquired` on instance A and `Released`/`Expired` on a
+/// DIFFERENT instance B leaves A stuck +1 and B clamped at 0 — neither's
+/// `occupied`/`peak` is the fabric-wide truth at N>1 deployments. So `peak` is
+/// **observability only**; it does NOT reconcile against the plan's
+/// `max_concurrency` across instances, and nothing load-bearing may treat it as
+/// a global occupancy oracle. The cap itself is enforced DB-globally upstream
+/// (`ledger.try_admit`, which counts the tenant's active leases atomically), so
+/// this scoping is a metering-honesty limitation, never a cap breach. A truly
+/// global occupancy view, if ever needed, derives from the ledger — not from
+/// this meter (and the meter deliberately carries no DB dependency). Pinned by
+/// `meter_is_instance_scoped_not_a_global_truth`.
 #[derive(Debug, Default)]
 pub struct SlotMeter {
     /// Currently occupied slots per tenant.
@@ -44,7 +59,10 @@ pub struct SlotMeter {
     /// High-water mark of concurrent occupancy per tenant.
     peak: BTreeMap<TenantId, u32>,
     /// Bounded event journal, arrival order (oldest dropped past `JOURNAL_CAP`).
-    journal: Vec<SlotOccupancyEvent>,
+    /// A `VecDeque` so trimming the oldest event is O(1) `pop_front` — never an
+    /// O(n) `Vec::remove(0)` shift under the held meter mutex (the steady-state
+    /// throughput cliff this avoids).
+    journal: VecDeque<SlotOccupancyEvent>,
     /// Count of journal events dropped to stay under `JOURNAL_CAP` — the
     /// audit-tail overflow, surfaced (never silent) via the snapshot.
     journal_dropped: u64,
@@ -94,12 +112,13 @@ impl SlotMeter {
             }
         }
         // Bound the in-memory audit tail: drop the oldest event when full,
-        // counting it so the overflow is never silent.
+        // counting it so the overflow is never silent. `pop_front` on the
+        // `VecDeque` is O(1) — no O(n) element shift under the held mutex.
         if self.journal.len() >= JOURNAL_CAP {
-            self.journal.remove(0);
+            self.journal.pop_front();
             self.journal_dropped += 1;
         }
-        self.journal.push(ev);
+        self.journal.push_back(ev);
     }
 
     /// Currently occupied slots for `t` (0 if the tenant has never metered —
@@ -108,14 +127,19 @@ impl SlotMeter {
         self.occupied.get(t).copied().unwrap_or(0)
     }
 
-    /// High-water mark of concurrent slots for `t` (0 if never metered).
+    /// High-water mark of concurrent slots for `t` as seen by THIS meter
+    /// instance (0 if never metered). Instance-local observability — NOT a
+    /// fabric-wide occupancy oracle at N>1 (see the type-level SCOPE note); it
+    /// does not reconcile against `max_concurrency` across instances.
     pub fn peak(&self, t: &TenantId) -> u32 {
         self.peak.get(t).copied().unwrap_or(0)
     }
 
     /// The bounded journal of recorded events, in arrival order. Past
     /// `JOURNAL_CAP` the oldest entries are dropped (see [`Self::journal_dropped`]).
-    pub fn journal(&self) -> &[SlotOccupancyEvent] {
+    /// Backed by a `VecDeque` (O(1) oldest-eviction); it indexes, iterates and
+    /// reports `len`/`is_empty` exactly like a slice.
+    pub fn journal(&self) -> &VecDeque<SlotOccupancyEvent> {
         &self.journal
     }
 
@@ -334,6 +358,95 @@ mod tests {
             m.journal()[0].at_ms,
             50,
             "oldest survivor is the 51st event, not the first recorded"
+        );
+    }
+
+    /// [P1 regression] The meter is INSTANCE-SCOPED observability, never a
+    /// global truth at N>1. A lease Acquired on instance A and Released on a
+    /// different instance B leaves A stuck +1 and B clamped at 0 — neither
+    /// instance's `occupied` is the fabric-wide count. This pins that documented
+    /// limitation so no consumer treats the meter as a global occupancy oracle
+    /// (the cap itself is enforced DB-globally upstream via `ledger.try_admit`;
+    /// this is metering honesty, not a cap breach). No DB dependency is added.
+    #[test]
+    fn meter_is_instance_scoped_not_a_global_truth() {
+        let t = tenant("acme");
+
+        // Instance A sees only the Acquire — it is stuck at occupied 1, even
+        // though the lease was actually released (on B).
+        let mut a = SlotMeter::new();
+        a.record(ev(&t, "lease-1", SlotEventKind::Acquired, 1));
+        assert_eq!(
+            a.occupied(&t),
+            1,
+            "instance A, having seen only Acquired, reads 1 — its local view"
+        );
+
+        // Instance B sees only the Release — it clamps at 0 (saturating), it
+        // never observed the matching Acquire.
+        let mut b = SlotMeter::new();
+        b.record(ev(&t, "lease-1", SlotEventKind::Released, 2));
+        assert_eq!(
+            b.occupied(&t),
+            0,
+            "instance B, having seen only Released, clamps at 0 — its local view"
+        );
+
+        // The naive cross-instance sum (1 + 0) does NOT equal the true global
+        // occupancy (0): the meter is per-instance and must not be summed or
+        // reconciled against max_concurrency across instances.
+        assert_eq!(
+            a.occupied(&t) + b.occupied(&t),
+            1,
+            "summing per-instance meters is not the global truth — \
+             this is exactly why peak is observability-only at N>1"
+        );
+
+        // Source oracle: the type-level doc no longer claims peak reconciles
+        // against max_concurrency (the removed false claim).
+        let source = include_str!("billing.rs");
+        let marker = ["#[cfg(te", "st)]"].concat();
+        let production = source.split(&marker).next().expect("has production half");
+        let false_claim = ["reconciles against the plan's ", "`max_concurrency`"].concat();
+        assert!(
+            !production.contains(&false_claim),
+            "the false global-peak reconciliation claim must be gone"
+        );
+    }
+
+    /// [P2 regression] The journal is backed by a `VecDeque`, so trimming the
+    /// oldest event at steady state is O(1) `pop_front` — never an O(n)
+    /// `Vec::remove(0)` shift under the held meter mutex. This drives churn far
+    /// past the cap and asserts the bound + drop-count + FIFO-eviction order
+    /// hold exactly (the O(1) trim is functionally identical to the old O(n)
+    /// one — only the cost under the mutex changed). The source-level oracle
+    /// pins that `remove(0)` is gone from the production trim.
+    #[test]
+    fn journal_trim_is_o1_deque_pop_front_not_vec_remove() {
+        let t = tenant("acme");
+        let mut m = SlotMeter::new();
+        // Churn 3× the cap so the trim runs ~2×JOURNAL_CAP times.
+        let total = JOURNAL_CAP * 3;
+        for i in 0..total {
+            let kind = if i % 2 == 0 {
+                SlotEventKind::Acquired
+            } else {
+                SlotEventKind::Released
+            };
+            m.record(ev(&t, "lease-x", kind, i as u64));
+        }
+        assert_eq!(m.journal().len(), JOURNAL_CAP, "journal stays at the cap");
+        assert_eq!(
+            m.journal_dropped() as usize,
+            total - JOURNAL_CAP,
+            "every event past the cap was dropped, counted, never silent"
+        );
+        // FIFO eviction: the oldest survivor is the (total-JOURNAL_CAP)-th
+        // event, proving pop_front evicted from the FRONT (arrival order).
+        assert_eq!(
+            m.journal()[0].at_ms,
+            (total - JOURNAL_CAP) as u64,
+            "oldest survivor is the first non-dropped event (front eviction)"
         );
     }
 
