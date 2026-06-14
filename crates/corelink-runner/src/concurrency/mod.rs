@@ -34,23 +34,54 @@ use crate::teardown::{ForensicReport, teardown};
 /// scans and kill-sweeps stay scoped to this WP on the shared box.
 pub const C2B_PREFIX: &str = "hugit-c2b-";
 
-/// Derive a C2b-namespaced container name from a lease id.
+/// Derive a C2b-namespaced container name from a lease id, **injectively**.
 ///
 /// Distinct from C2a's `hugit-job-` naming: the `hugit-c2b-` prefix is what
 /// lets [`Scheduler::running_census`] and crash sweeps target *only* this WP's
 /// containers on the shared box. Docker names must match
-/// `[a-zA-Z0-9][a-zA-Z0-9_.-]*`, so non-conforming chars are mapped to `_`.
+/// `[a-zA-Z0-9][a-zA-Z0-9_.-]*`.
+///
+/// **Collision-free by construction** (mirrors the cloud-engine
+/// `northflank_job_name` fix, #46). A plain char-class sanitization that maps
+/// every non-conforming char to `_` is **non-injective** — `lease/x` and
+/// `lease x` both collapse to `…lease_x`, so two distinct leases would land on
+/// ONE container name. On the shared box that silently merges two leases onto
+/// one container and **undercounts peak concurrency** (the census sees one name
+/// where there are two leases). To prevent that, the human-readable slug is
+/// best-effort (non-`[a-zA-Z0-9_.-]` → `_`) but a fixed-width hex suffix of the
+/// SHA-256 of the *full, original* lease id is always appended. Two distinct
+/// lease ids can share the readable slug but never the hash suffix, so the
+/// mapping is injective on the full input.
 #[must_use]
 pub fn c2b_container_name(lease_id: &str) -> String {
-    let mut s = String::with_capacity(lease_id.len() + C2B_PREFIX.len());
-    s.push_str(C2B_PREFIX);
+    use sha2::{Digest, Sha256};
+
+    // Full-input hash → collision-free suffix (16 hex chars = 64 bits). This is
+    // what carries injectivity; the readable slug below is lossy by design.
+    let digest = Sha256::digest(lease_id.as_bytes());
+    let mut suffix = String::with_capacity(16);
+    for byte in &digest[..8] {
+        use std::fmt::Write as _;
+        let _ = write!(suffix, "{byte:02x}");
+    }
+
+    // Best-effort readable slug of the original id (Docker-legal char class).
+    let mut slug = String::with_capacity(lease_id.len());
     for c in lease_id.chars() {
         if c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-') {
-            s.push(c);
+            slug.push(c);
         } else {
-            s.push('_');
+            slug.push('_');
         }
     }
+
+    // Layout: "hugit-c2b-" + slug + "-" + 16-hex suffix. The prefix is the first
+    // char, so the result always satisfies Docker's `[a-zA-Z0-9]` start rule.
+    let mut s = String::with_capacity(C2B_PREFIX.len() + slug.len() + 1 + suffix.len());
+    s.push_str(C2B_PREFIX);
+    s.push_str(&slug);
+    s.push('-');
+    s.push_str(&suffix);
     s
 }
 
@@ -252,6 +283,15 @@ where
                     residue.processes.extend(r.processes);
                     residue.mounts.extend(r.mounts);
                     residue.network.extend(r.network);
+                    // Verdict integrity (W2-A): a container whose forensic
+                    // re-scan FAILED is fail-CLOSED — its empty stdout proves
+                    // nothing. Dropping `scan_failures` here would let one
+                    // container's crashed `ps`/`mount`/`ip` read as a clean,
+                    // fully-reclaimed batch (a failed scan masked as clean).
+                    // Propagate it so the batch's `residue.is_clean()` (and
+                    // hence the "all clean" verdict) requires zero scan
+                    // failures across EVERY container.
+                    residue.scan_failures.extend(r.scan_failures);
                 }
                 Err(e) => {
                     // Surface, never swallow: log the leak AND record it so the
@@ -340,8 +380,46 @@ mod tests {
 
     #[test]
     fn name_is_c2b_namespaced_and_sanitized() {
-        assert_eq!(c2b_container_name("lease/x y"), "hugit-c2b-lease_x_y");
+        // Prefix + readable slug (non-Docker-legal chars → '_'), then a hex
+        // injectivity suffix. The slug is still visible in the name.
+        let name = c2b_container_name("lease/x y");
+        assert!(name.starts_with("hugit-c2b-lease_x_y-"), "got {name}");
         assert!(c2b_container_name("anything").starts_with(C2B_PREFIX));
+        // Docker name char class: every char is `[a-zA-Z0-9_.-]`.
+        assert!(
+            name.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')),
+            "name must be Docker-legal: {name}"
+        );
+    }
+
+    // ── Injective container naming (P2) ──────────────────────────────────────
+    //
+    // A plain non-injective sanitization (non-conforming char → '_') maps two
+    // distinct lease ids onto ONE container name (`lease/x` and `lease x` both
+    // → `…lease_x`). On the shared box that silently merges two leases and
+    // UNDERCOUNTS peak concurrency. The hash-suffixed derivation must keep
+    // previously-colliding ids on DISTINCT names.
+    #[test]
+    fn name_is_injective_for_previously_colliding_ids() {
+        // Each pair sanitizes to ONE slug under the old char-class mapping.
+        let colliding = [
+            ("lease/x", "lease x"),
+            ("a@b", "a/b"),
+            ("job#1", "job 1"),
+            ("p:q", "p;q"),
+        ];
+        for (a, b) in colliding {
+            let na = c2b_container_name(a);
+            let nb = c2b_container_name(b);
+            assert_ne!(
+                na, nb,
+                "previously-colliding ids {a:?} and {b:?} must map to distinct \
+                 container names; got {na} == {nb}"
+            );
+        }
+        // Determinism: same id → same name (census/teardown must agree).
+        assert_eq!(c2b_container_name("lease/x"), c2b_container_name("lease/x"));
     }
 
     #[test]
@@ -359,7 +437,8 @@ mod tests {
             state: RunnerState::Held,
         };
         let spec = c2b_spec(&l, PIN).unwrap();
-        assert_eq!(spec.name, "hugit-c2b-z1");
+        assert_eq!(spec.name, c2b_container_name("z1"));
+        assert!(spec.name.starts_with("hugit-c2b-z1-"));
         assert!(spec.no_network);
 
         // C2a validation is reused, incl. the supply-chain pin floor.
@@ -529,5 +608,106 @@ mod tests {
     /// scheduler (the scheduler owns the box behind an `Arc`).
     fn sched_box_targets(sched: &Scheduler<PoisonRmBox, OkEngine>) -> Vec<String> {
         sched.boxx.rm_targets()
+    }
+
+    // ── Batch forensic-scan-failure propagation (P1) ─────────────────────────
+    //
+    // A container whose forensic re-scan FAILED (a crashed `ps`/`mount`/`ip`)
+    // is fail-CLOSED at the teardown layer: its per-container `ForensicReport`
+    // carries a `scan_failures` entry and `is_clean()` returns false. But the
+    // batch aggregate USED to extend only containers/processes/mounts/network
+    // and DROP `scan_failures` — so one container's failed scan read as a
+    // clean, fully-reclaimed batch (a failed scan masked as clean). This test
+    // poisons exactly one container's process-scan (exit 2, the grep-error
+    // case) and asserts the batch `residue` is NOT clean and surfaces it.
+
+    /// A box where `docker rm -f` always succeeds (teardown returns `Ok`), but
+    /// the **process forensic scan** (`ps -eo args | grep …`) of one POISONED
+    /// container exits 2 (a real scan error, not the clean exit-1 "no match").
+    /// Every other command is clean. So teardown succeeds yet the poisoned
+    /// container's `ForensicReport.scan_failures` is non-empty.
+    struct ScanFailBox {
+        poison: String,
+    }
+
+    impl ScanFailBox {
+        fn new(poison: &str) -> Self {
+            Self {
+                poison: poison.to_string(),
+            }
+        }
+    }
+
+    impl BoxExec for ScanFailBox {
+        fn run(&self, argv: &[&str]) -> Result<CmdOutput> {
+            let joined = argv.join(" ");
+            // The process scan is `sh -c "ps -eo args | grep -F <name> …"`.
+            // Fail it (exit 2) only for the poisoned container name.
+            if joined.contains("ps -eo args") && joined.contains(&self.poison) {
+                return Ok(CmdOutput {
+                    code: Some(2),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                });
+            }
+            // grep-based scans are clean at exit 1 ("no match"); the container
+            // scan + destroy + census expect exit 0. Empty stdout either way.
+            let code = if joined.contains("grep") {
+                Some(1)
+            } else {
+                Some(0)
+            };
+            Ok(CmdOutput {
+                code,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn run_batch_surfaces_failed_forensic_scan_in_aggregate() {
+        // Three jobs; the SECOND container's forensic process-scan fails.
+        let poison = c2b_container_name("scanfail");
+        let boxx = ScanFailBox::new(&poison);
+        let sched = Scheduler::new(boxx, OkEngine);
+
+        let leases = vec![
+            (held_lease("a"), TEST_PIN.to_string()),
+            (held_lease("scanfail"), TEST_PIN.to_string()),
+            (held_lease("c"), TEST_PIN.to_string()),
+        ];
+
+        let report = sched.run_batch(&leases, &["true"]).expect("batch runs");
+
+        // Teardown itself SUCCEEDED for every container (rm -f was clean), so
+        // the leak channel is empty — this is purely a forensic-scan failure.
+        assert!(
+            report.all_torn_down(),
+            "rm -f succeeded for all; teardown_failures must be empty"
+        );
+
+        // But the batch is NOT clean: one container's forensic scan failed and
+        // that must be propagated into the aggregate (not dropped).
+        assert!(
+            !report.residue.is_clean(),
+            "a container whose forensic scan FAILED must make the batch residue \
+             NOT clean (a failed scan must never read as a clean batch)"
+        );
+        assert!(
+            report
+                .residue
+                .scan_failures
+                .iter()
+                .any(|f| f.starts_with("processes:")),
+            "the batch aggregate must surface the failed process scan; got {:?}",
+            report.residue.scan_failures
+        );
+        assert_eq!(
+            report.residue.scan_failures.len(),
+            1,
+            "exactly the one poisoned container's scan failure is surfaced; got {:?}",
+            report.residue.scan_failures
+        );
     }
 }
