@@ -37,7 +37,7 @@
 //! oracle now drives the surface every real spawn crosses, so a regression in
 //! the production gate goes RED here.
 
-use corelink_runner::isolation::{DockerEngine, Engine, RunningContainer};
+use corelink_runner::isolation::{DockerEngine, Engine};
 use corelink_runner::lease::{BoxExec, CmdOutput, ContainerSpec, SshBox};
 use corelink_runner::teardown::teardown;
 use corelink_runner::x4::pin::PinnedImage;
