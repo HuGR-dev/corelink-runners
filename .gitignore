@@ -1,5 +1,6 @@
 # Rust (once code exists)
 /target
+**/target/
 **/*.rs.bk
 Cargo.lock.orig
 

@@ -357,7 +357,13 @@ impl AppState {
 
     /// Enable queued fair admission (ADR-0005): set the mode to
     /// [`AdmissionMode::Queue`], wire a shared [`AdmissionQueue`] with the given
-    /// per-tick dispatch budget, and set the bounded queued-acquire wait.
+    /// per-tick dispatch budget and per-tenant parked-waiter cap, and set the
+    /// bounded queued-acquire wait.
+    ///
+    /// `park_cap` is the P1 cross-tenant load-shed bound — the composition root
+    /// threads it from `FABRIC_ADMISSION_PARK_CAP` so the inner
+    /// [`AdmissionQueue`]'s per-tenant park semaphores carry exactly that many
+    /// permits (NOT the silent [`AdmissionQueue::new`] default).
     ///
     /// DEFAULT-OFF: the composition root calls this ONLY when
     /// `FABRIC_ADMISSION_MODE=queue`. Without it the state keeps
@@ -369,9 +375,12 @@ impl AppState {
         mut self,
         tick_slots: u32,
         wait_timeout: std::time::Duration,
+        park_cap: usize,
     ) -> Self {
         self.admission_mode = AdmissionMode::Queue;
-        self.admission_queue = Some(Arc::new(AdmissionQueue::new(tick_slots)));
+        self.admission_queue = Some(Arc::new(
+            AdmissionQueue::new(tick_slots).with_park_cap(park_cap),
+        ));
         self.queue_wait_timeout = wait_timeout;
         self
     }

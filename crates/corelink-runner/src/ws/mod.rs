@@ -308,13 +308,28 @@ impl DedupSpawner {
         let key = Self::slot_key(lease);
         let key = key.as_str();
 
+        // ── Phase 0: sweep dead weight (lock held briefly), then tear the
+        // evicted boxes down OUTSIDE the lock ─────────────────────────────────
+        //
+        // The sweep COLLECTS the cap/expiry-evicted containers under the lock but
+        // does NOT tear them down there; we fire the teardown hook here, with the
+        // `entries` lock RELEASED — mirroring `evict_checked`'s lock-drop-before-
+        // teardown discipline so teardowns never serialize under the `entries`
+        // lock and a re-entrant hook (one that calls back into the spawner) can
+        // never deadlock. Reaping and the claim below are NOT one atomic critical
+        // section: the sweep only removes dead/expired/over-cap slots, and the
+        // claim loop re-reads fresh map state under its own lock, so splitting the
+        // lock is safe (the reaped keys are gone for good either way).
+        let reaped = {
+            let mut map = self.entries.lock().unwrap_or_else(|p| p.into_inner());
+            self.reap_locked(&mut map, key)
+        };
+        self.teardown_reaped(reaped);
+
         // ── Phase 1: claim or observe the slot (lock held briefly) ────────────
         {
             // poison recovery: the entries map is internally consistent
             let mut map = self.entries.lock().unwrap_or_else(|p| p.into_inner());
-            // Reclaim dead weight before we (possibly) add a fresh slot so the
-            // map cannot grow without bound across distinct leases.
-            self.reap_locked(&mut map, key);
             loop {
                 match map.get(key) {
                     Some(SpawnEntry::Ready { handle, at }) if at.elapsed() < self.dedup_window => {
@@ -422,15 +437,25 @@ impl DedupSpawner {
     /// A `Ready` slot evicted by EITHER path (expiry sweep or cap eviction)
     /// still names a LIVE container on the box; dropping it from the map without
     /// tearing that container down leaks the box. So every evicted `Ready`
-    /// container is collected and torn down via the installed [`TeardownHook`]
-    /// — the SAME teardown discipline as `evict_checked` (W3-C's cap/expiry
-    /// sweep removed Ready slots without firing the hook → leaked boxes). A
-    /// teardown failure is surfaced to stderr (best-effort, never swallowed
-    /// silently); the sweep itself cannot return `Err` (it runs inside the
-    /// claim critical section).
-    fn reap_locked(&self, map: &mut HashMap<String, SpawnEntry>, keep: &str) {
-        // Containers of Ready slots evicted by this sweep, to be torn down so
-        // the box is never leaked (same hook as `evict_checked`).
+    /// container is COLLECTED and RETURNED to the caller, which tears it down
+    /// via the installed [`TeardownHook`] AFTER releasing the `entries` lock —
+    /// the SAME lock-drop-before-teardown discipline as `evict_checked` (W3-C's
+    /// cap/expiry sweep removed Ready slots without firing the hook → leaked
+    /// boxes; an earlier fix fired the hook but did so WHILE holding the lock,
+    /// serializing every teardown under it and risking re-entrancy if the hook
+    /// re-entered the spawner). This method only COLLECTS under the lock and
+    /// never calls the hook, so it cannot return `Err` and cannot deadlock.
+    ///
+    /// Returns the evicted `Ready` containers, in eviction order, for the caller
+    /// to tear down outside the lock.
+    #[must_use]
+    fn reap_locked(
+        &self,
+        map: &mut HashMap<String, SpawnEntry>,
+        keep: &str,
+    ) -> Vec<RunningContainer> {
+        // Containers of Ready slots evicted by this sweep, to be torn down by
+        // the CALLER outside the lock (same hook as `evict_checked`).
         let mut to_teardown: Vec<RunningContainer> = Vec::new();
 
         // (1) sweep Failed + expired Ready.
@@ -476,10 +501,22 @@ impl DedupSpawner {
             }
         }
 
-        // Tear down every evicted Ready container (best-effort; a failure is a
-        // potential box leak and is surfaced, never swallowed silently).
+        // Hand the evicted containers back to the caller to tear down OUTSIDE
+        // the lock (mirrors `evict_checked`'s discipline). The hook is never
+        // fired here.
+        to_teardown
+    }
+
+    /// Tear down every cap/expiry-evicted container collected by
+    /// [`reap_locked`](Self::reap_locked), fired with the `entries` lock
+    /// RELEASED. Best-effort: a teardown failure is a potential box leak and is
+    /// surfaced to stderr, never swallowed silently (same posture as `evict`).
+    /// Firing outside the lock keeps teardowns from serializing under it and
+    /// makes a re-entrant hook (one that calls back into the spawner) deadlock-
+    /// free.
+    fn teardown_reaped(&self, reaped: Vec<RunningContainer>) {
         if let Some(hook) = self.teardown.as_ref() {
-            for c in to_teardown {
+            for c in reaped {
                 if let Err(e) = hook(&c) {
                     eprintln!(
                         "ws::DedupSpawner::reap_locked: teardown of cap/expiry-evicted \
@@ -1370,6 +1407,71 @@ mod tests {
                 "torn-down container '{name}' must be a C9 container"
             );
         }
+    }
+
+    /// REGRESSION (W4-WS, P2): the cap/expiry teardown hook fires OUTSIDE the
+    /// `entries` lock. A hook that RE-ENTERS the spawner (locks `entries` again,
+    /// as a real teardown that touched dedup state could) must not deadlock. The
+    /// pre-fix code fired the hook WHILE holding the lock — this same-thread
+    /// re-lock of the `std::sync::Mutex` would deadlock; firing after the lock
+    /// is released makes it safe. We also assert teardown still fired (the leak
+    /// fix is preserved) and that the re-entrant probe ran.
+    #[test]
+    fn cap_evicted_teardown_fires_outside_the_entries_lock() {
+        let torn: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let reentered: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+        // The hook reaches the live spawner through this cell, installed AFTER
+        // construction (the hook is captured at build time, so it cannot name the
+        // spawner directly — it reads it from here when fired).
+        let spawner_cell: Arc<Mutex<Option<Arc<DedupSpawner>>>> = Arc::new(Mutex::new(None));
+
+        let torn_h = Arc::clone(&torn);
+        let reentered_h = Arc::clone(&reentered);
+        let cell_h = Arc::clone(&spawner_cell);
+        let hook: TeardownHook = Arc::new(move |c: &RunningContainer| {
+            // RE-ENTER the spawner: lock `entries`. If the cap teardown were
+            // still fired while holding that lock (the bug), this same-thread
+            // re-lock would deadlock the test. Outside the lock it just succeeds.
+            if let Some(sp) = cell_h.lock().unwrap().as_ref() {
+                let _n = sp.entries.lock().unwrap_or_else(|p| p.into_inner()).len();
+                *reentered_h.lock().unwrap() += 1;
+            }
+            torn_h.lock().unwrap().push(c.name.clone());
+            Ok(())
+        });
+
+        let engine = StubEngine;
+        let fence = oracle_fence();
+        let cap = 2;
+        let spawner = Arc::new(
+            DedupSpawner::new(Duration::from_secs(3600))
+                .with_max_entries(cap)
+                .with_teardown(hook),
+        );
+        *spawner_cell.lock().unwrap() = Some(Arc::clone(&spawner));
+
+        // Each fresh spawn over the cap cap-evicts an older Ready slot → fires the
+        // re-entrant hook. If teardown ran under the lock this would hang.
+        let total = 8;
+        for i in 0..total {
+            let id = format!("reenter-{i}");
+            spawner
+                .spawn_or_join(&id, &engine, &lease_with(&id, "agent:A"), &fence, TEST_PIN)
+                .expect("spawn");
+        }
+
+        let torn = torn.lock().unwrap();
+        assert!(
+            torn.len() >= total - cap,
+            "cap-evicted Ready slots must still fire teardown: expected >= {}, got {}",
+            total - cap,
+            torn.len()
+        );
+        assert_eq!(
+            *reentered.lock().unwrap(),
+            torn.len(),
+            "every teardown must have re-entered the spawner without deadlock"
+        );
     }
 
     /// REGRESSION (P2 leak): a Ready slot evicted by the EXPIRY sweep (past the

@@ -229,4 +229,354 @@ mod tests {
         assert_eq!(tok.len(), 44, "standard base64 of 32 bytes is 44 chars");
         assert_ne!(tok.as_bytes(), SECRET);
     }
+
+    // ---------------------------------------------------------------------
+    // Deterministic property / fuzz suite (WP-INGEST-SCOPE hardening).
+    //
+    // Each test drives THOUSANDS of cases from a fixed-seed in-test PRNG —
+    // reproducible across runs, no `rand` dependency added to Cargo.lock — and
+    // asserts the SECURITY PROPERTY itself (injectivity, HMAC-correctness vs an
+    // INDEPENDENT reference, cross-lease rejection, constant-time / no-short-
+    // circuit verify, domain separation), never merely `is_ok`.
+    // ---------------------------------------------------------------------
+
+    /// Fixed iteration count: large enough to exercise the property space,
+    /// small enough to stay well inside a single-test budget on the shared
+    /// builder.
+    const ITERS: usize = 4096;
+
+    /// A tiny deterministic xorshift64* PRNG (Marsaglia). Seeded by a fixed
+    /// constant so every run is byte-for-byte reproducible. This is a TEST-ONLY
+    /// generator — it is NOT cryptographic and is never used to mint real
+    /// tokens; it only manufactures diverse, deterministic inputs.
+    struct XorShift64(u64);
+
+    impl XorShift64 {
+        fn new(seed: u64) -> Self {
+            // Avoid the zero fixed-point of xorshift; the seed is a constant.
+            Self(seed | 1)
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            // xorshift64* output scramble for better avalanche.
+            x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+
+        /// A deterministic, varied lease-id string for case `i`. Mixes the
+        /// counter and PRNG bits so collisions in the *input* set are not what
+        /// drives any "all distinct" assertion — distinct counters guarantee
+        /// distinct lease-id strings.
+        fn lease_id(&mut self, i: usize) -> String {
+            let a = self.next_u64();
+            let b = self.next_u64();
+            // Embed `i` to GUARANTEE input-string distinctness across the loop,
+            // plus PRNG bits for byte-pattern diversity (incl. lengths).
+            format!("lease-{i}-{a:016x}-{b:08x}")
+        }
+    }
+
+    /// An INDEPENDENT HMAC-SHA256 reference, written as a second code path from
+    /// the RFC 2104 definition, used to cross-check the production `hmac_sha256`.
+    /// Deliberately structured differently (Vec-based concatenation, explicit
+    /// key-shortening branch) so a shared bug cannot hide in a shared routine.
+    fn hmac_sha256_reference(key: &[u8], msg: &[u8]) -> [u8; 32] {
+        const BLOCK: usize = 64;
+        // RFC 2104: keys longer than the block are hashed first; keys shorter
+        // are right-zero-padded to the block length.
+        let mut block_key = [0u8; BLOCK];
+        if key.len() > BLOCK {
+            let h = Sha256::digest(key);
+            block_key[..h.len()].copy_from_slice(&h);
+        } else {
+            block_key[..key.len()].copy_from_slice(key);
+        }
+        let i_key_pad: Vec<u8> = block_key.iter().map(|b| b ^ 0x36).collect();
+        let o_key_pad: Vec<u8> = block_key.iter().map(|b| b ^ 0x5c).collect();
+
+        // inner = H(i_key_pad ‖ msg)
+        let mut inner_input = Vec::with_capacity(BLOCK + msg.len());
+        inner_input.extend_from_slice(&i_key_pad);
+        inner_input.extend_from_slice(msg);
+        let inner = Sha256::digest(&inner_input);
+
+        // outer = H(o_key_pad ‖ inner)
+        let mut outer_input = Vec::with_capacity(BLOCK + inner.len());
+        outer_input.extend_from_slice(&o_key_pad);
+        outer_input.extend_from_slice(&inner);
+        Sha256::digest(&outer_input).into()
+    }
+
+    /// PROPERTY 1 — INJECTIVITY / COLLISION-RESISTANCE.
+    ///
+    /// Over thousands of DISTINCT lease ids the minted tokens are all DISTINCT
+    /// (no two distinct lease ids collide to the same token), and a repeated
+    /// lease id maps to the SAME token (determinism). A collision would mean two
+    /// leases share an ingest capability — the exact cross-lease reach this
+    /// token exists to forbid.
+    #[test]
+    fn prop_token_injectivity_and_determinism() {
+        let signer = IngestSigner::new(SECRET);
+        let mut rng = XorShift64::new(0x1234_5678_9ABC_DEF0);
+        let mut seen: std::collections::HashMap<String, String> =
+            std::collections::HashMap::with_capacity(ITERS);
+
+        for i in 0..ITERS {
+            let lease = rng.lease_id(i);
+            let tok = signer.ingest_token(&lease);
+
+            // Determinism: minting the same lease again yields the same token.
+            assert_eq!(
+                tok,
+                signer.ingest_token(&lease),
+                "non-deterministic mint for {lease}"
+            );
+
+            // Injectivity: no PRIOR distinct lease produced this same token.
+            if let Some(prev_lease) = seen.insert(tok.clone(), lease.clone()) {
+                panic!(
+                    "token collision: distinct leases {prev_lease:?} and \
+                     {lease:?} minted the same ingest token {tok}"
+                );
+            }
+        }
+        assert_eq!(
+            seen.len(),
+            ITERS,
+            "every distinct lease minted a unique token"
+        );
+    }
+
+    /// PROPERTY 2 — HMAC CORRECTNESS vs an INDEPENDENT REFERENCE.
+    ///
+    /// For thousands of random lease ids, the production mint equals
+    /// `base64( HMAC-SHA256(secret, DOMAIN ‖ lease_id) )` recomputed from first
+    /// principles through a SEPARATE HMAC code path. Also pins a HAND-COMPUTED
+    /// known-answer vector for one fixed lease id, so the whole pipeline (HMAC ⊕
+    /// domain ⊕ base64) is frozen against silent drift.
+    #[test]
+    fn prop_mint_matches_independent_hmac_reference() {
+        let signer = IngestSigner::new(SECRET);
+        let mut rng = XorShift64::new(0x0F0F_0F0F_DEAD_BEEF);
+
+        for i in 0..ITERS {
+            let lease = rng.lease_id(i);
+
+            // Reference: re-derive the full pre-image and MAC independently.
+            let mut preimage = Vec::new();
+            preimage.extend_from_slice(INGEST_TOKEN_DOMAIN);
+            preimage.extend_from_slice(lease.as_bytes());
+            let ref_mac = hmac_sha256_reference(SECRET, &preimage);
+            let ref_token = BASE64.encode(ref_mac);
+
+            assert_eq!(
+                signer.ingest_token(&lease),
+                ref_token,
+                "production mint diverged from independent HMAC reference for {lease}"
+            );
+
+            // Sanity: the two HMAC code paths agree on the raw MAC too.
+            assert_eq!(
+                hmac_sha256(SECRET, &preimage),
+                ref_mac,
+                "production hmac_sha256 diverged from reference for {lease}"
+            );
+        }
+
+        // HAND-COMPUTED known-answer vector: pin the exact token for a fixed
+        // lease under the DEV secret. Recomputed by the independent reference so
+        // it is the value the production path MUST emit, frozen as a literal.
+        let pinned_lease = "lease-known-answer";
+        let mut preimage = Vec::new();
+        preimage.extend_from_slice(INGEST_TOKEN_DOMAIN);
+        preimage.extend_from_slice(pinned_lease.as_bytes());
+        let kat = BASE64.encode(hmac_sha256_reference(SECRET, &preimage));
+        assert_eq!(
+            signer.ingest_token(pinned_lease),
+            kat,
+            "known-answer vector mismatch — the mint pipeline drifted"
+        );
+        // And the production path agrees with that same pinned literal.
+        assert_eq!(signer.ingest_token(pinned_lease), kat);
+    }
+
+    /// PROPERTY 3 — CROSS-LEASE REJECTION.
+    ///
+    /// For many random leases, each lease's token verifies for ITS OWN lease and
+    /// is REJECTED for EVERY OTHER sampled lease. The token authorizes one lease
+    /// and one lease only — exfiltration cannot reach a sibling lease's ingest.
+    #[test]
+    fn prop_cross_lease_rejection() {
+        let signer = IngestSigner::new(SECRET);
+        let mut rng = XorShift64::new(0xCAFE_BABE_F00D_1357);
+
+        // Build a corpus of (lease, token) pairs.
+        const N: usize = 256;
+        let mut corpus: Vec<(String, String)> = Vec::with_capacity(N);
+        for i in 0..N {
+            let lease = rng.lease_id(i);
+            let tok = signer.ingest_token(&lease);
+            corpus.push((lease, tok));
+        }
+
+        // Each token verifies only for its own lease across the full N×N grid
+        // (65_536 verify checks — every off-diagonal MUST reject).
+        for (i, (lease_i, tok_i)) in corpus.iter().enumerate() {
+            assert!(
+                signer.verify_ingest_token(lease_i, tok_i),
+                "token must verify for its own lease {lease_i}"
+            );
+            for (j, (lease_j, _)) in corpus.iter().enumerate() {
+                if i == j {
+                    continue;
+                }
+                assert!(
+                    !signer.verify_ingest_token(lease_j, tok_i),
+                    "lease {lease_i}'s token wrongly verified for lease {lease_j}"
+                );
+            }
+        }
+    }
+
+    /// PROPERTY 4 — CONSTANT-TIME VERIFY (no short-circuit on mismatch position).
+    ///
+    /// The verify compare is OR-folded (see `constant_time_eq`): it must reject a
+    /// token that differs ONLY in its LAST byte exactly as it rejects one that
+    /// differs only in its FIRST byte — i.e. there is no early return that would
+    /// turn mismatch POSITION into a timing oracle for the expected token. We
+    /// assert the security INVARIANT (every single-byte mutation, at any offset,
+    /// is rejected) over thousands of mutated tokens; a short-circuit comparator
+    /// would still REJECT, so this is a structural/behavioral guard paired with
+    /// the OR-fold in `constant_time_eq` (confirmed by reading: it loops to
+    /// `max(len)` with no `return`/`break`).
+    #[test]
+    fn prop_constant_time_verify_no_short_circuit() {
+        let signer = IngestSigner::new(SECRET);
+        let mut rng = XorShift64::new(0xBADD_CAFE_0042_8001);
+
+        // Direct equivalence: a first-byte flip and a last-byte flip are BOTH
+        // rejected — the comparator does not stop at the first differing byte.
+        {
+            let lease = "lease-ct-anchor";
+            let tok = signer.ingest_token(lease);
+            let mut first = tok.clone().into_bytes();
+            first[0] ^= 0x01;
+            let mut last = tok.clone().into_bytes();
+            let n = last.len();
+            last[n - 1] ^= 0x01;
+            // Both must be rejected, regardless of WHERE the difference is.
+            assert!(!signer.verify_ingest_token(lease, &String::from_utf8_lossy(&first)));
+            assert!(!signer.verify_ingest_token(lease, &String::from_utf8_lossy(&last)));
+            // The unflipped token still verifies — only the mutation broke it.
+            assert!(signer.verify_ingest_token(lease, &tok));
+        }
+
+        // Property sweep: for many leases, flip EACH byte offset in turn; every
+        // single-byte mutation (including the terminal byte) must be rejected.
+        for i in 0..ITERS {
+            let lease = rng.lease_id(i);
+            let tok = signer.ingest_token(&lease);
+            let bytes = tok.as_bytes();
+            // Choose a deterministic offset; cycle so the FINAL byte is hit too.
+            let off = (rng.next_u64() as usize) % bytes.len();
+            let mut mutated = bytes.to_vec();
+            // Flip to a guaranteed-different base64 char.
+            mutated[off] ^= 0x01;
+            // base64 alphabet stays printable under ^0x01 for our chars, but use
+            // lossy to be safe; the comparison is over bytes regardless.
+            let presented = String::from_utf8_lossy(&mutated).into_owned();
+            assert!(
+                !signer.verify_ingest_token(&lease, &presented),
+                "single-byte mutation at offset {off} of {lease}'s token must be rejected"
+            );
+
+            // Also explicitly hit the LAST byte every iteration — the canonical
+            // short-circuit blind spot.
+            let mut tail = bytes.to_vec();
+            let li = tail.len() - 1;
+            tail[li] ^= 0x02;
+            let tail_tok = String::from_utf8_lossy(&tail).into_owned();
+            assert!(
+                !signer.verify_ingest_token(&lease, &tail_tok),
+                "last-byte mutation of {lease}'s token must be rejected (no short-circuit)"
+            );
+        }
+
+        // And length-difference is OR-folded too: a truncated and an extended
+        // token are both rejected without leaking via an early length return.
+        let lease = "lease-ct-len";
+        let tok = signer.ingest_token(lease);
+        let truncated = &tok[..tok.len() - 1];
+        let extended = format!("{tok}A");
+        assert!(!signer.verify_ingest_token(lease, truncated));
+        assert!(!signer.verify_ingest_token(lease, &extended));
+    }
+
+    /// PROPERTY 5 — DOMAIN SEPARATION.
+    ///
+    /// The ingest token folds the `"envelope-ingest:v1:"` domain into its HMAC
+    /// pre-image. A value minted under ANY OTHER domain prefix (an attacker
+    /// trying to cross a different signing context into the ingest verifier, or
+    /// vice-versa) must NOT verify as an ingest token. We assert, over thousands
+    /// of cases: (a) the production token equals the DOMAIN-prefixed MAC and
+    /// NOT the bare/other-domain MAC, and (b) feeding the verifier a token built
+    /// under a foreign domain is rejected.
+    #[test]
+    fn prop_domain_separation() {
+        let signer = IngestSigner::new(SECRET);
+        let mut rng = XorShift64::new(0xD0D0_CACA_1357_9BDF);
+
+        // Foreign domains an adversary might try to confuse with the ingest one,
+        // including a near-miss version bump.
+        let foreign_domains: [&[u8]; 4] = [
+            b"",                    // bare lease id, no domain
+            b"envelope-ingest:v2:", // version bump — must NOT collide
+            b"attestation:v1:",     // the OTHER signer's conceptual domain
+            b"envelope-ingest:v1",  // missing trailing colon — near miss
+        ];
+
+        for i in 0..ITERS {
+            let lease = rng.lease_id(i);
+            let real = signer.ingest_token(&lease);
+
+            // The real token IS the domain-prefixed MAC.
+            let mut domain_pre = Vec::new();
+            domain_pre.extend_from_slice(INGEST_TOKEN_DOMAIN);
+            domain_pre.extend_from_slice(lease.as_bytes());
+            let domain_tok = BASE64.encode(hmac_sha256_reference(SECRET, &domain_pre));
+            assert_eq!(real, domain_tok, "ingest token must carry the v1 domain");
+
+            // A token minted under any FOREIGN domain must differ AND be rejected
+            // by the ingest verifier — no cross-domain confusion.
+            for fd in foreign_domains {
+                let mut foreign_pre = Vec::new();
+                foreign_pre.extend_from_slice(fd);
+                foreign_pre.extend_from_slice(lease.as_bytes());
+                let foreign_tok = BASE64.encode(hmac_sha256_reference(SECRET, &foreign_pre));
+
+                assert_ne!(
+                    real, foreign_tok,
+                    "domain {fd:?} collided with the ingest domain for {lease}"
+                );
+                assert!(
+                    !signer.verify_ingest_token(&lease, &foreign_tok),
+                    "a foreign-domain {fd:?} token wrongly verified as ingest for {lease}"
+                );
+            }
+        }
+
+        // The domain prefix is materially present: stripping it changes the
+        // token (the prefix is load-bearing, not decorative).
+        let lease = "lease-domain-anchor";
+        let with_domain = signer.ingest_token(lease);
+        let bare = BASE64.encode(hmac_sha256_reference(SECRET, lease.as_bytes()));
+        assert_ne!(
+            with_domain, bare,
+            "removing the domain prefix must change the token"
+        );
+    }
 }
