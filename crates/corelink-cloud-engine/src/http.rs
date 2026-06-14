@@ -35,7 +35,11 @@ impl Method {
 /// One outbound request. The bearer token is carried raw; the transport is the
 /// single place that renders it into the `Authorization` header (see
 /// [`auth_header`]) so the wire form is asserted in exactly one unit.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is **hand-written to redact `bearer_token`** (audit D4): the raw
+/// Northflank API token must never reach a log line via `{req:?}`. The derive is
+/// deliberately NOT used so a future `Debug`-print on an error path cannot leak it.
+#[derive(Clone)]
 pub struct HttpRequest {
     pub method: Method,
     pub url: String,
@@ -44,6 +48,17 @@ pub struct HttpRequest {
     /// JSON request body, if any. `Content-Type: application/json` is set iff
     /// this is `Some`.
     pub json_body: Option<String>,
+}
+
+impl std::fmt::Debug for HttpRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpRequest")
+            .field("method", &self.method)
+            .field("url", &self.url)
+            .field("bearer_token", &"***REDACTED***")
+            .field("json_body", &self.json_body)
+            .finish()
+    }
 }
 
 /// A response the engine can branch on. The status is preserved even for 4xx/5xx

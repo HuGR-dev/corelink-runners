@@ -117,10 +117,13 @@ use corelink_runners_contracts::RunnerState;
 ///
 /// # Delivery (M1)
 /// Fire-and-forget, **NO ack** — the lease is torn down, so there is no live
-/// client to ack. Dedup is by `lease_id`: [`HookRegistry::close_handle_any`]
-/// extracts (and removes) the hook exactly once, and the ledger transition is
-/// atomic & exclusive (`Held→Expired|Crashed` vs `Held→Released`), so a normal
-/// close and this abnormal flush can never both fire for one lease.
+/// client to ack. Dedup is NOT by registry removal: [`HookRegistry::close_handle_any`]
+/// returns a CLONE of the hook (the entry stays registered). Exactly-once is
+/// enforced by the **shared close-latch** on the hook's `Arc<Shared>` state — every
+/// clone (the live client's close handle and this reaper clone) observes the same
+/// latch, so the second `close_*` returns the exactly-once `Err`. The ledger
+/// transition is additionally atomic & exclusive (`Held→Expired|Crashed` vs
+/// `Held→Released`), so a normal close and this abnormal flush can never both fire.
 ///
 /// **There is no live push transport at M1** (the envelope is poll-drain;
 /// hugit consumes at P2). So at M1 the flush = FINALIZE the partial envelope
@@ -141,8 +144,10 @@ fn flush_partial_envelope(
     kind: AbnormalKind,
     died: Instant,
 ) -> Option<corelink_runner::envelope::CloseOutcome> {
-    // Dedup: close_handle_any EXTRACTS the hook (removing it from the registry).
-    // No hook → a non-agent lease (nothing was captured): nothing to flush.
+    // Dedup: close_handle_any returns a CLONE of the hook (the registry entry
+    // stays; exactly-once rides the shared close-latch on the hook state, NOT
+    // registry removal). No hook → a non-agent lease (nothing captured): nothing
+    // to flush.
     let (hook, price) = state.hook_registry.close_handle_any(lease_id)?;
 
     // Drive the FROZEN mechanism: it finalizes the partial envelope through the

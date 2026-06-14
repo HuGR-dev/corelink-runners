@@ -110,14 +110,44 @@ the process. This RUNBOOK's §3 is the regression-test target — see the
 
 ## 4. Scaling instances
 
-Scale up/down freely — cap-safety does not depend on the instance count (§3). Each
-instance opens its own `FABRIC_LEDGER_POOL_SIZE` connections, so total DB
-connections ≈ `instances × pool_size`; keep that under the Postgres addon's
-`max_connections`. Every instance independently runs the always-on deadline reaper
-(and the opt-in crash sweep, if `FABRIC_CRASH_PROBE_INTERVAL_SECS` is set); the
-CAS-dedup in §3.2 makes redundant reaping harmless, so no leader election is needed.
+Scale up/down freely — **cap-safety does not depend on the instance count** (§3,
+the load-bearing guarantee). Each instance opens its own `FABRIC_LEDGER_POOL_SIZE`
+connections, so total DB connections ≈ `instances × pool_size`; keep that under the
+Postgres addon's `max_connections`. Every instance runs the always-on deadline
+reaper (and the opt-in crash sweep, if `FABRIC_CRASH_PROBE_INTERVAL_SECS` is set);
+where two instances do race the same overdue lease, the CAS-dedup in §3.2 makes the
+redundant reaping harmless, so no leader election is needed.
 
-## 5. Known limitation — §13.5 partial-envelope hook-locality (multi-instance)
+> ⚠️ **Caveat (deadline reaper is currently instance-local — see §5).** A lease's
+> expiry deadline lives in the **acquiring instance's memory**, not in the DB, so the
+> deadline reaper only reaps leases that instance itself acquired. It is **not** a
+> cross-instance backstop today: if an instance dies/restarts holding `Held` leases,
+> no surviving instance can date-and-reap them, and those cap slots leak until the
+> provider's `activeDeadlineSeconds` kills the box (compute cost stays bounded; the
+> ledger row stays `Held`). The opt-in **crash sweep IS cross-instance** (it iterates
+> the DB and probes boxes), and the durable-deadline fix (§5) closes the gap.
+
+## 5. Known limitations — per-instance side-table locality (multi-instance)
+
+> Both limitations below share ONE root cause — reap-critical per-lease state
+> (`deadlines`, the `CaptureHook` registry, the `slot_meter`) lives **in-memory per
+> instance**, not in the durable ledger. The **durable-reap-state work-package**
+> (move deadline + hook into the `leases` table so any instance can reap/flush)
+> closes both. Cap-safety is unaffected — the cap is DB-global (§3.1).
+
+### 5a. Deadline-reaper locality (cap-slot leak on instance death) — audit D3-P1
+
+A lease's expiry deadline is recorded in the **acquiring instance's** in-memory
+`deadlines` map; the `leases` table has no deadline column. So another instance's
+`reap_once` treats that lease as never-overdue and skips it. As long as the
+acquiring instance is alive it reaps its own leases fine, but if it **dies or
+restarts** (every NEW BUILD restarts instances) its in-flight `Held` leases become
+unreapable by the deadline path and **leak their cap slots** until the provider's
+hard `activeDeadlineSeconds` deadline. Compute cost is bounded; the ledger row is
+not freed. Fix = persist `deadline_ms` on the `leases` row (durable-reap-state WP);
+the opt-in crash sweep already covers it cross-instance for the box itself.
+
+### 5b. §13.5 partial-envelope hook-locality
 
 The `CaptureHook` registry is **in-memory, per instance** — a lease's hook lives on
 whichever instance served its exec. The §13.5 partial-envelope flush
