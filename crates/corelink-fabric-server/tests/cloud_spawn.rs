@@ -1016,7 +1016,11 @@ async fn http_orphan_teardown_on_post_provision_failure() {
     // The mint is a UUID (WP-FIX-LEASE-ID-UUID), so the lease id is read back
     // from the teardown call the provisioner recorded, then shape-checked.
     let calls = rec.teardown_calls();
-    assert_eq!(calls.len(), 1, "teardown must be called exactly once; calls={calls:?}");
+    assert_eq!(
+        calls.len(),
+        1,
+        "teardown must be called exactly once; calls={calls:?}"
+    );
     let torn_id = &calls[0];
     assert!(
         torn_id
