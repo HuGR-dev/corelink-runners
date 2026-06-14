@@ -122,6 +122,17 @@ pub(crate) async fn acquire(
             let Ok(mut windows) = state.rate_windows.lock() else {
                 return fail_closed("rate-window lock poisoned");
             };
+            // PRUNE idle tenants (audit fix: the per-tenant window map was
+            // inserted-on-first-acquire and NEVER removed → unbounded memory).
+            // A window with no acquire attempt within the 60s sliding window is
+            // idle and evicted here; it costs nothing to rebuild on the
+            // tenant's next acquire. This keeps the map bounded by ACTIVE
+            // tenants, not by every tenant ever seen. We never prune the
+            // CURRENT tenant (it is about to push). The retain runs under the
+            // lock already held for the rate check — no extra lock, no new
+            // contention on the close.rs/leases.rs hot path.
+            windows.retain(|t, w| t == &tenant || !w.is_idle_at(now_ms));
+
             let window = windows.entry(tenant.clone()).or_default();
             let over_rate = window.count_within_60s(now_ms) >= plan.rate_ceiling_per_min as usize;
             // Every acquire attempt counts toward the ceiling, admitted or not.
@@ -610,6 +621,62 @@ mod tests {
             tmp_root: "/work/tmp".to_string(),
             expiry_ms: 60_000,
         }
+    }
+
+    /// [P2 regression] The per-tenant `rate_windows` map is PRUNED of idle
+    /// tenants on acquire — it was previously inserted-on-first-acquire and
+    /// never removed (unbounded memory). Seed an idle ghost tenant's window
+    /// (its only attempt slid out of the 60s window) plus a still-active one;
+    /// after an acme acquire at `now`, the idle ghost is evicted while the
+    /// active tenant AND the acquirer remain.
+    #[tokio::test]
+    async fn idle_rate_windows_are_pruned_on_acquire() {
+        use corelink_fabric::RateWindow;
+
+        let base: u64 = 1_717_000_000_000;
+        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
+            Arc::new(Mutex::new(InMemoryLedger::new()));
+        let state = AppState::new(
+            Arc::clone(&ledger),
+            Arc::new(plans(5)),
+            Arc::new(FixedClock(base)),
+        );
+
+        let ghost = TenantId::new("ghost-idle").unwrap();
+        let active = TenantId::new("still-active").unwrap();
+        {
+            let mut windows = state.rate_windows.lock().unwrap();
+            // Ghost's only attempt is 70s old → idle as of `base`, prunable.
+            let mut gw = RateWindow::new();
+            gw.push(base - 70_000);
+            windows.insert(ghost.clone(), gw);
+            // Active tenant attempted 1s ago → still within the window, kept.
+            let mut aw = RateWindow::new();
+            aw.push(base - 1_000);
+            windows.insert(active.clone(), aw);
+            assert_eq!(windows.len(), 2, "two tenants seeded before acquire");
+        }
+
+        let router = crate::app::app(acme_token_store(), state.clone());
+        let resp = router
+            .oneshot(acquire_request(paths::LEASES, &body()))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "acquire must succeed");
+
+        let windows = state.rate_windows.lock().unwrap();
+        assert!(
+            !windows.contains_key(&ghost),
+            "the idle ghost tenant's window must be PRUNED (no unbounded growth)"
+        );
+        assert!(
+            windows.contains_key(&active),
+            "a tenant active within the window must NOT be pruned"
+        );
+        assert!(
+            windows.contains_key(&acme()),
+            "the acquiring tenant's window is present after its push"
+        );
     }
 
     // ── Test: provision failure cleans up (no dangling Pending, slot freed) ─────

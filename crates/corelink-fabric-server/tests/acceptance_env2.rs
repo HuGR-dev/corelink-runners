@@ -25,7 +25,7 @@ use corelink_fabric::{InMemoryLedger, LeaseLedger, LeaseState, TenantId, TenantP
 use corelink_fabric_api::{AcquireRequest, CloseRequest, CloseResponse, paths};
 use corelink_fabric_server::{
     AppState, BoxProvisioner, HookRegistry, ProbeStatus, StaticPlans, StaticTokenStore,
-    SystemClock, app_full, close_abnormal,
+    SystemClock, app_full, close_abnormal, compute_memo_key,
 };
 use corelink_runner::envelope::{
     AbnormalKind, CaptureHook, EnvelopeConfig, JobStatus, MetricsCollector, TranscriptEvent,
@@ -210,11 +210,16 @@ fn ledger_state(ledger: &Arc<Mutex<dyn LeaseLedger + Send>>, lease_id: &str) -> 
 
 /// A frozen-shape `CheckResult` sample (the result the close delivers).
 fn sample_check_result() -> CheckResult {
+    // The memo_key MUST be the frozen function of its own axes — the close
+    // path validates this before attesting (audit P1). Compute it honestly.
+    let tree_hash = "34".repeat(32);
+    let def_digest = "ab".repeat(32);
+    let toolchain_digest = "cd".repeat(32);
     CheckResult {
-        memo_key: "12".repeat(32),
-        tree_hash: "34".repeat(32),
-        def_digest: "ab".repeat(32),
-        toolchain_digest: "cd".repeat(32),
+        memo_key: compute_memo_key(&tree_hash, &def_digest, &toolchain_digest),
+        tree_hash,
+        def_digest,
+        toolchain_digest,
         exit: 0,
         artifacts: vec![Artifact {
             path: "target/report.json".to_string(),

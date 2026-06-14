@@ -197,6 +197,7 @@ fn dtos_roundtrip_and_deny_unknown() {
             result: sample_check_result(),
             attestation: sample_attestation(),
             result_binding_sig: "YmluZGluZw==".to_string(),
+            result_binding_sig_v2: "YmluZGluZ3Yy".to_string(),
         },
         "ExecResponse",
     );
@@ -225,6 +226,7 @@ fn dtos_roundtrip_and_deny_unknown() {
             result: sample_check_result(),
             attestation: sample_attestation(),
             result_binding_sig: "YmluZGluZw==".to_string(),
+            result_binding_sig_v2: "YmluZGluZ3Yy".to_string(),
         },
         "TriggerResponse",
     );
@@ -264,6 +266,7 @@ fn dtos_roundtrip_and_deny_unknown() {
             check_result: Some(sample_check_result()),
             attestation: sample_attestation(),
             result_binding_sig: "YmluZGluZw==".to_string(),
+            result_binding_sig_v2: "YmluZGluZ3Yy".to_string(),
         },
         "CloseResponse",
     );

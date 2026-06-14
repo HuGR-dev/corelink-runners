@@ -20,18 +20,27 @@
 //!
 //! The fail-closed-before-spawn ORDERING (item ③, the load-bearing invariant)
 //! is ALSO proven HERMETICALLY in the bare `cargo test --workspace` gate by
-//! `item_3_fail_closed_before_spawn_hermetic`, which drives the same
-//! `VerifiedSpawn` guard against a FAKE box + FAKE engine (no network, no env).
+//! `item_3_fail_closed_before_spawn_hermetic`, which drives the **production**
+//! [`DockerEngine::spawn`] surface against a FAKE box (no network, no env).
 //! This closes the brutal-review X4 finding: the ordering proof is no longer a
 //! silent no-op when `HUGIT_RUNNER_HOST` is unset — it runs, and FAILS (not
-//! skips) if the guard ever spawns before rejecting a tampered/unpinned image.
+//! skips) if the engine ever issues `docker run` before rejecting a
+//! tampered/unpinned image.
+//!
+//! **Single-source (test-integrity, 2026-06-14):** the oracle exercises the
+//! PRODUCTION supply-chain path — `DockerEngine::spawn` → `crate::pin::
+//! PinnedImageRef::{parse,verify_on_box}` — not the `x4::pin::VerifiedSpawn`
+//! façade. The two were re-transcribed copies that had DRIFTED: production
+//! `verify_on_box` classifies pull failures (transient → bounded retry;
+//! permanent → fail-closed) while the `x4::pin` copy fails closed on ANY
+//! non-ok pull. Proving the façade therefore did not prove what ships. The
+//! oracle now drives the surface every real spawn crosses, so a regression in
+//! the production gate goes RED here.
 
-use std::cell::Cell;
-
-use corelink_runner::isolation::{DockerEngine, Engine, IsolationProbe, RunningContainer};
+use corelink_runner::isolation::{DockerEngine, Engine};
 use corelink_runner::lease::{BoxExec, CmdOutput, ContainerSpec, SshBox};
 use corelink_runner::teardown::teardown;
-use corelink_runner::x4::pin::{GuardedSpawn, PinnedImage, VerifiedSpawn};
+use corelink_runner::x4::pin::PinnedImage;
 use corelink_runners_contracts::{RunnerLease, RunnerState};
 
 /// Tag used only to *resolve* a real content digest from the box; never used as
@@ -54,13 +63,17 @@ fn box_lane_active() -> bool {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// HERMETIC fakes — prove the fail-closed-before-spawn ORDERING in the BARE gate.
+// HERMETIC fake box — prove the fail-closed-before-spawn ORDERING in the BARE
+// gate, driving the PRODUCTION `DockerEngine::spawn` surface (single-sourced).
 //
-// These fakes carry NO network and NO env dependency, so the load-bearing item
-// ③ ordering invariant ("a tampered/unpinned image fails CLOSED with no
-// container spawned") executes inside `cargo test --workspace` — not only on the
-// live-box lane. The fakes are deliberately minimal: just enough of the consumed
-// `BoxExec` / `Engine` surface for `VerifiedSpawn::spawn_verified` to run.
+// This carries NO network and NO env dependency, so the load-bearing item ③
+// ordering invariant ("a tampered/unpinned image fails CLOSED with no `docker
+// run` issued") executes inside `cargo test --workspace`. It records every argv
+// so the oracle can prove a `docker run` (the tenant-work threshold) was NEVER
+// reached for a rejected image, and DID follow the verify (`docker pull`) for a
+// good pin. The fake serves exactly one good content digest; any other digest is
+// refused with a PERMANENT registry signal so production `verify_on_box` fails
+// closed at once (mirroring the content-addressed store).
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// The 64-hex digest of the "good" hermetic pin the fake box will serve.
@@ -72,17 +85,24 @@ const FAKE_GOOD_REF: &str =
 
 /// A fake `BoxExec` that emulates a registry-backed docker daemon WITHOUT any
 /// network: it serves exactly one good content digest. A `docker pull` of any
-/// other reference is "refused" (non-zero), so a tampered digest cannot resolve
-/// — mirroring the content-addressed-store integrity property the real box has.
+/// other reference is "refused" with a PERMANENT signal (`manifest … not
+/// found`), so a tampered digest fails the production integrity check CLOSED —
+/// mirroring the content-addressed-store integrity property the real box has.
+/// Every argv is recorded so ordering ("`docker run` never precedes a passed
+/// verify, and never follows a failed one") is provable.
+#[derive(Clone)]
 struct FakeBox {
     /// The only digest this fake daemon can serve.
     good_digest: String,
+    /// Every `run` argv joined by space, in order — the ordering audit trail.
+    calls: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
 }
 
 impl FakeBox {
     fn new(good_digest: &str) -> Self {
         Self {
             good_digest: good_digest.to_string(),
+            calls: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
         }
     }
 
@@ -106,13 +126,26 @@ impl FakeBox {
     fn serves(&self, reference: &str) -> bool {
         reference.contains(&format!("sha256:{}", self.good_digest))
     }
+
+    /// The recorded argv audit trail (space-joined).
+    fn calls(&self) -> Vec<String> {
+        self.calls.borrow().clone()
+    }
+
+    /// `true` iff any recorded command actually started a container (`docker
+    /// run`) — the threshold past which tenant work could begin.
+    fn ran_a_container(&self) -> bool {
+        self.calls().iter().any(|c| c.starts_with("docker run"))
+    }
 }
 
 impl BoxExec for FakeBox {
     fn run(&self, argv: &[&str]) -> anyhow::Result<CmdOutput> {
+        self.calls.borrow_mut().push(argv.join(" "));
         match argv {
             // `docker pull <ref>` — succeeds ONLY for the servable good digest;
-            // a tampered/unresolvable digest is refused (fail CLOSED upstream).
+            // a tampered/unresolvable digest is refused with a PERMANENT signal
+            // so production `verify_on_box` fails CLOSED at once (no retry).
             ["docker", "pull", reference] => {
                 if self.serves(reference) {
                     Ok(Self::ok("Status: Image is up to date"))
@@ -124,77 +157,27 @@ impl BoxExec for FakeBox {
                 }
             }
             // `docker image inspect <ref> --format {{RepoDigests}}` — echoes the
-            // resolved RepoDigest so the guard can confirm the pin matches.
+            // resolved RepoDigest so the integrity check confirms the pin matches.
             ["docker", "image", "inspect", reference, "--format", _] => {
                 if self.serves(reference) {
                     Ok(Self::ok(&format!("alpine@sha256:{}\n", self.good_digest)))
                 } else {
-                    Ok(Self::fail("no such image"))
+                    Ok(Self::ok(""))
                 }
             }
-            other => Ok(Self::fail(&format!("fake box: unhandled argv {other:?}"))),
+            // `docker run …` — the real engine's spawn surface. Reaching here is
+            // the ordering threshold; succeed quietly so a GOOD pin spawns.
+            ["docker", "run", ..] => Ok(Self::ok("")),
+            _ => Ok(Self::ok("")),
         }
-    }
-}
-
-/// A fake `Engine` that RECORDS whether `spawn` was ever reached. The whole
-/// ordering proof is: for a tampered/unpinned image, `spawned` must stay `false`
-/// (the guard rejected BEFORE delegating to the engine).
-struct FakeEngine {
-    spawned: Cell<bool>,
-}
-
-impl FakeEngine {
-    fn new() -> Self {
-        Self {
-            spawned: Cell::new(false),
-        }
-    }
-}
-
-impl Engine for FakeEngine {
-    fn spawn(&self, spec: &ContainerSpec) -> anyhow::Result<RunningContainer> {
-        // Reaching here at all is the failure mode for a rejected image: it
-        // means tenant work began before verification. Record it so the oracle
-        // can assert it never happened for tampered/unpinned inputs.
-        self.spawned.set(true);
-        Ok(RunningContainer {
-            name: spec.name.clone(),
-        })
-    }
-
-    fn probe(
-        &self,
-        _c: &RunningContainer,
-        _spec: &ContainerSpec,
-    ) -> anyhow::Result<IsolationProbe> {
-        Ok(IsolationProbe {
-            tmp_is_private: true,
-            net_is_isolated: true,
-        })
-    }
-
-    fn exec(&self, _c: &RunningContainer, _argv: &[&str]) -> anyhow::Result<Option<i32>> {
-        Ok(Some(0))
-    }
-
-    fn exec_captured(&self, _c: &RunningContainer, _argv: &[&str]) -> anyhow::Result<CmdOutput> {
-        Ok(CmdOutput {
-            code: Some(0),
-            stdout: String::new(),
-            stderr: String::new(),
-        })
-    }
-
-    fn is_alive(&self, _c: &RunningContainer) -> anyhow::Result<bool> {
-        Ok(true)
     }
 }
 
 /// Build a ContainerSpec by STRUCT LITERAL (bypassing `from_lease`, which now
 /// correctly REJECTS an unpinned image at the supply-chain floor). This lets the
-/// oracle hand the guard a deliberately unpinned/tampered spec and prove the
-/// guard ITSELF rejects it fail-closed — the point of item ③.
+/// oracle hand the PRODUCTION engine a deliberately unpinned/tampered spec and
+/// prove the engine ITSELF (`DockerEngine::spawn`) rejects it fail-closed before
+/// any `docker run` — the point of item ③, on the surface every spawn crosses.
 fn spec_literal(name: &str, image: &str) -> ContainerSpec {
     ContainerSpec {
         name: name.to_string(),
@@ -205,63 +188,72 @@ fn spec_literal(name: &str, image: &str) -> ContainerSpec {
     }
 }
 
-// ── ③ (hermetic) tampered/unpinned image → fail CLOSED BEFORE spawn ──────────
+// ── ③ (hermetic) tampered/unpinned image → fail CLOSED BEFORE `docker run` ───
 // This runs in the BARE `cargo test --workspace` gate (no env, no network). It
-// is the load-bearing ordering proof the brutal review flagged as a CI no-op.
+// is the load-bearing ordering proof, driven through the PRODUCTION
+// `DockerEngine::spawn` → `crate::pin::PinnedImageRef` path (single-sourced):
+// a regression in the shipped supply-chain gate goes RED here.
 #[test]
 fn item_3_fail_closed_before_spawn_hermetic() {
-    let boxx = FakeBox::new(FAKE_GOOD_DIGEST);
-
     // ── attack 1: UNPINNED image (floating tag) via STRUCT LITERAL ───────────
-    // (from_lease now rejects this at the floor; we bypass it to test the guard.)
-    let engine = FakeEngine::new();
-    let guard = VerifiedSpawn::new(&engine, &boxx);
+    // (from_lease rejects this at the floor; we bypass it to prove the engine
+    // is ALSO the floor — a directly-built unpinned spec never reaches run.)
+    let boxx = FakeBox::new(FAKE_GOOD_DIGEST);
+    let engine = DockerEngine::new(boxx.clone());
     let spec_unpinned = spec_literal("hugit-job-hermetic-unpinned", RESOLVE_TAG);
-    let r1 = guard
-        .spawn_verified(&spec_unpinned)
-        .expect("guard must not error on an unpinned image; it must reject CLOSED");
+    let r1 = engine.spawn(&spec_unpinned);
     assert!(
-        r1.rejected_before_spawn(),
-        "unpinned image must be REJECTED before spawn, got: {r1:?}"
+        r1.is_err(),
+        "unpinned image must be REJECTED by the production engine, got: {r1:?}"
     );
     assert!(
-        !engine.spawned.get(),
-        "ORDERING VIOLATION: engine.spawn was reached for an UNPINNED image — \
-         tenant work began before verification (fail-OPEN)"
+        !boxx.ran_a_container(),
+        "ORDERING VIOLATION: `docker run` was issued for an UNPINNED image — \
+         tenant work began before verification (fail-OPEN); calls: {:?}",
+        boxx.calls()
     );
 
     // ── attack 2: TAMPERED image (valid-form digest, content-wrong) ──────────
-    let engine = FakeEngine::new();
-    let guard = VerifiedSpawn::new(&engine, &boxx);
+    let boxx = FakeBox::new(FAKE_GOOD_DIGEST);
+    let engine = DockerEngine::new(boxx.clone());
     let spec_tampered = spec_literal("hugit-job-hermetic-tampered", TAMPERED_REF);
-    let r2 = guard
-        .spawn_verified(&spec_tampered)
-        .expect("guard must not error on a tampered image; it must reject CLOSED");
+    let r2 = engine.spawn(&spec_tampered);
     assert!(
-        r2.rejected_before_spawn(),
-        "tampered image must be REJECTED before spawn, got: {r2:?}"
+        r2.is_err(),
+        "tampered image must be REJECTED by the production engine, got: {r2:?}"
     );
     assert!(
-        !engine.spawned.get(),
-        "ORDERING VIOLATION: engine.spawn was reached for a TAMPERED image — \
-         integrity verification did not gate the spawn (fail-OPEN)"
+        boxx.calls().iter().any(|c| c.starts_with("docker pull")),
+        "the production gate must attempt a content-addressed pull (verify) \
+         for a syntactically-pinned digest; calls: {:?}",
+        boxx.calls()
+    );
+    assert!(
+        !boxx.ran_a_container(),
+        "ORDERING VIOLATION: `docker run` was issued for a TAMPERED image — \
+         integrity verification did not gate the spawn (fail-OPEN); calls: {:?}",
+        boxx.calls()
     );
 
-    // ── positive control: a genuine content pin DOES reach spawn (the guard is
-    //    not vacuously rejecting everything; ordering is real, not a stub). ────
-    let engine = FakeEngine::new();
-    let guard = VerifiedSpawn::new(&engine, &boxx);
+    // ── positive control: a genuine content pin DOES spawn (the gate is not
+    //    vacuously rejecting everything), and the verify (`docker pull`)
+    //    PRECEDES the single `docker run` — ordering is real, not a stub. ─────
+    let boxx = FakeBox::new(FAKE_GOOD_DIGEST);
+    let engine = DockerEngine::new(boxx.clone());
     let spec_ok = spec_literal("hugit-job-hermetic-ok", FAKE_GOOD_REF);
-    let r3 = guard
-        .spawn_verified(&spec_ok)
-        .expect("verified pinned spawn must not error");
+    engine
+        .spawn(&spec_ok)
+        .expect("a genuine, box-verified content pin MUST spawn");
+    let calls = boxx.calls();
+    let pull_idx = calls.iter().position(|c| c.starts_with("docker pull"));
+    let run_idx = calls.iter().position(|c| c.starts_with("docker run"));
     assert!(
-        r3.spawned(),
-        "a genuine, box-verified content pin MUST spawn, got: {r3:?}"
+        pull_idx.is_some() && run_idx.is_some(),
+        "a good pin must be pulled (verified) AND run; calls: {calls:?}"
     );
     assert!(
-        engine.spawned.get(),
-        "engine.spawn must be reached AFTER successful verification for a good pin"
+        pull_idx < run_idx,
+        "verify (`docker pull`) MUST precede `docker run`; calls: {calls:?}"
     );
 }
 
@@ -449,6 +441,10 @@ fn item_2_app_deps_pinned_ci() {
 
 // ── ③ tampered/unpinned image → fail CLOSED before any tenant work ───────────
 // Load-bearing: verify-before-spawn ORDERING. A post-hoc detection is a FAIL.
+// Single-sourced (test-integrity, 2026-06-14): drives the PRODUCTION
+// `DockerEngine::spawn` surface — the path every real spawn crosses — NOT the
+// `x4::pin::VerifiedSpawn` façade. The engine rejection (`Err`) and the
+// box-side "no container by that name" check together prove fail-closed.
 #[test]
 fn item_3_tampered_unpinned_fail_closed() {
     if !box_lane_active() {
@@ -456,25 +452,22 @@ fn item_3_tampered_unpinned_fail_closed() {
     }
     let boxx = live_box();
     let engine = DockerEngine::new(boxx.clone());
-    let guard = VerifiedSpawn::new(&engine, &boxx);
 
     // ── attack 1: UNPINNED image (floating tag). ─────────────────────────────
-    // `ContainerSpec::from_lease` now REJECTS an unpinned image at the
-    // supply-chain floor (the runner remediation), so an unpinned spec can no
-    // longer be derived through it. We construct the unpinned spec via STRUCT
-    // LITERAL to hand the guard a deliberately unpinned input and prove the
-    // GUARD ITSELF rejects it fail-closed before spawn.
+    // `ContainerSpec::from_lease` REJECTS an unpinned image at the supply-chain
+    // floor, so an unpinned spec can no longer be derived through it. We build
+    // the unpinned spec via STRUCT LITERAL to hand the PRODUCTION engine a
+    // deliberately unpinned input and prove the ENGINE ITSELF rejects it
+    // fail-closed before any `docker run`.
     let lease_unpinned = fresh_lease("unpinned");
     let spec_unpinned = spec_literal(
         &format!("hugit-job-{}", lease_unpinned.lease_id),
         RESOLVE_TAG,
     );
-    let r1 = guard
-        .spawn_verified(&spec_unpinned)
-        .expect("guard must not error on an unpinned image; it must reject CLOSED");
+    let r1 = engine.spawn(&spec_unpinned);
     assert!(
-        r1.rejected_before_spawn(),
-        "unpinned image must be REJECTED before spawn, got: {r1:?}"
+        r1.is_err(),
+        "unpinned image must be REJECTED by the production engine, got: {r1:?}"
     );
     // Prove fail-closed ordering: NO container by that name exists on the box.
     assert_no_container(&boxx, &spec_unpinned.name, "unpinned");
@@ -483,37 +476,28 @@ fn item_3_tampered_unpinned_fail_closed() {
     let lease_tampered = fresh_lease("tampered");
     let spec_tampered =
         ContainerSpec::from_lease(&lease_tampered, TAMPERED_REF).expect("derive spec (tampered)");
-    let r2 = guard
-        .spawn_verified(&spec_tampered)
-        .expect("guard must not error on a tampered image; it must reject CLOSED");
+    let r2 = engine.spawn(&spec_tampered);
     assert!(
-        r2.rejected_before_spawn(),
-        "tampered image must be REJECTED before spawn, got: {r2:?}"
+        r2.is_err(),
+        "tampered image must be REJECTED by the production engine, got: {r2:?}"
     );
     assert_no_container(&boxx, &spec_tampered.name, "tampered");
 
-    // ── positive control: a genuine content pin DOES spawn (proving the guard
+    // ── positive control: a genuine content pin DOES spawn (proving the gate
     //    is not vacuously rejecting everything), then is torn down clean. ─────
     let pinned = resolve_pin(&boxx);
     let lease_ok = fresh_lease("pinned-ok");
     let spec_ok =
         ContainerSpec::from_lease(&lease_ok, pinned.reference()).expect("derive spec (pinned)");
-    let r3 = guard
-        .spawn_verified(&spec_ok)
-        .expect("verified pinned spawn");
-    match r3 {
-        GuardedSpawn::Spawned(container) => {
-            // It really ran: tear it down and forensic-clean the box.
-            let report = teardown(&boxx, &container).expect("teardown");
-            assert!(
-                report.is_clean(),
-                "forensic re-scan found residue after teardown: {report:#?}"
-            );
-        }
-        GuardedSpawn::RejectedBeforeSpawn(why) => {
-            panic!("a genuine content pin must spawn, but was rejected: {why}")
-        }
-    }
+    let container = engine
+        .spawn(&spec_ok)
+        .expect("a genuine content pin must spawn through the production engine");
+    // It really ran: tear it down and forensic-clean the box.
+    let report = teardown(&boxx, &container).expect("teardown");
+    assert!(
+        report.is_clean(),
+        "forensic re-scan found residue after teardown: {report:#?}"
+    );
 }
 
 /// Assert no container with `name` exists on the box — proof that a rejected

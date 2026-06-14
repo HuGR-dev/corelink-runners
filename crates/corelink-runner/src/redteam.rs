@@ -7,12 +7,18 @@
 //!
 //! | vector            | attack                                   | containment |
 //! |-------------------|------------------------------------------|-------------|
-//! | [`Traversal`]     | `cat ../../etc/passwd` from the workspace | ENOENT / outside-fence (C5a) — the path is not materialized |
-//! | [`SymlinkEscape`] | `ln -s /etc/shadow` then read the link    | the link target is outside the fence → unreadable / the host secret never crosses |
-//! | [`OutOfFence`]    | write to a sibling lease's workspace root | the path is not in this container's namespace → fails |
+//! | [`Traversal`]     | `..`-climb from the workspace to a REAL host secret planted outside the container | the host file is outside the mount namespace → the planted sentinel never appears in-container |
+//! | [`SymlinkEscape`] | `ln -s <real host secret>` then read the link | the link target really exists on the host but is outside the container's view → the read yields no sentinel |
+//! | [`OutOfFence`]    | overwrite a REAL host secret (absolute + `..`-climb) from inside the container | the container cannot write across the mount namespace → the host file is byte-unchanged afterwards |
 //! | [`ForkBomb`]      | classic `:(){ :|:& };:` fork bomb         | `--pids-limit` caps the process count; the box is never starved |
 //! | [`DiskFill`]      | `dd` 1 GiB into the writable workdir      | the `--tmpfs size=` cap stops the write; the box disk is never filled |
 //! | [`FenceMaterializedEscape`] | materialize a real `FenceManifest`, then read an out-of-fence path **in the same container** | the fence (`classify()` + sparse materialize) — NOT the Docker namespace — is the boundary: the out-of-fence file is ENOENT because it was never materialized |
+//!
+//! The traversal/symlink/out-of-fence vectors each attack a **real** target
+//! planted by [`RedTeamHarness::ensure_host_secret`] (a host file carrying
+//! [`HOST_SECRET_SENTINEL`]) — so a broken boundary genuinely leaks or corrupts
+//! it and the vector reports an ESCAPE. They are no longer vacuous (pointing at
+//! a non-existent target or comparing two never-shared paths).
 //!
 //! The first five lean (correctly) on the Docker mount/pid/tmpfs namespace; the
 //! **sixth is the one where the fence itself is the only control** — it would
@@ -159,12 +165,23 @@ pub struct RedTeamHarness<'b, B: BoxExec> {
     limits: ContainerLimits,
     /// Names spawned by this harness, for scoped teardown.
     spawned: Vec<String>,
+    /// Absolute path of a REAL secret planted on the box **host** filesystem,
+    /// outside every container's mount namespace. The traversal/symlink/
+    /// out-of-fence vectors genuinely attempt to read or write it; containment
+    /// means the planted [`HOST_SECRET_SENTINEL`] content never leaks into a
+    /// container and the host file is never mutated by a container. Lazily
+    /// created on first use and force-removed by `teardown_all`.
+    host_secret: Option<String>,
 }
 
 /// The mandatory namespace prefix for every red-team container.
 pub const REDTEAM_PREFIX: &str = "hugit-c5b-";
 /// In-container writable workspace root (a size-capped tmpfs).
 pub const WORKDIR: &str = "/hugit-c5b-ws";
+/// Unique sentinel content written into the planted host secret. If this exact
+/// string ever appears INSIDE a container, the mount-namespace boundary leaked
+/// (an ESCAPE). It is the marker the traversal/symlink vectors search for.
+pub const HOST_SECRET_SENTINEL: &str = "HUGIT_C5B_HOST_SECRET_LEAKED_ed1f9c2a";
 
 impl<'b, B: BoxExec> RedTeamHarness<'b, B> {
     /// Construct a harness over `boxx`, attacking `image` under `limits`.
@@ -174,7 +191,39 @@ impl<'b, B: BoxExec> RedTeamHarness<'b, B> {
             image: image.into(),
             limits,
             spawned: Vec::new(),
+            host_secret: None,
         }
+    }
+
+    /// Plant (once) a REAL secret file on the box **host** filesystem, outside
+    /// every container, and return its absolute path. The traversal/symlink/
+    /// out-of-fence vectors attack THIS real target — so a broken boundary would
+    /// genuinely leak [`HOST_SECRET_SENTINEL`] (or let a container overwrite the
+    /// file), which is what the containment assertions detect. Idempotent.
+    fn ensure_host_secret(&mut self) -> Result<String> {
+        if let Some(p) = &self.host_secret {
+            return Ok(p.clone());
+        }
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = format!("/tmp/{REDTEAM_PREFIX}host-secret-{nonce}");
+        // Write the sentinel on the HOST (not in any container). This is the
+        // real out-of-fence target every cross-boundary vector now attacks.
+        let out = self.boxx.run(&[
+            "sh",
+            "-c",
+            &format!("printf %s '{HOST_SECRET_SENTINEL}' > '{path}'; chmod 600 '{path}'; echo OK"),
+        ])?;
+        if !(out.ok() && out.stdout.contains("OK")) {
+            bail!(
+                "failed to plant host secret at {path}: {}",
+                out.stderr.trim()
+            );
+        }
+        self.host_secret = Some(path.clone());
+        Ok(path)
     }
 
     /// A unique, prefix-namespaced container name.
@@ -261,79 +310,107 @@ impl<'b, B: BoxExec> RedTeamHarness<'b, B> {
         }
     }
 
-    /// **Traversal:** from the fenced workdir, try to read a host file via `..`.
-    /// Containment = the file is not reachable (the fence never materialized it,
-    /// and the container's mount namespace does not contain the host's
-    /// `/etc/passwd` contents beyond the image's own — we look for the host
-    /// marker we know is *not* in the image).
+    /// **Traversal:** from the fenced workdir, try to `..`-climb to a REAL host
+    /// secret. A genuine target: [`ensure_host_secret`] plants a file with
+    /// [`HOST_SECRET_SENTINEL`] on the box host, OUTSIDE every container mount
+    /// namespace. The attack `cd`s into WORKDIR and reads the secret's absolute
+    /// path through a long `../` chain (which resolves to `/` then down). If the
+    /// container shared the host filesystem, the sentinel would print → BREACH.
+    /// Containment = the sentinel never appears (the host file is unreachable
+    /// across the mount-namespace boundary). NOTE: this can only pass because
+    /// the boundary holds — if it were removed, the real planted secret leaks
+    /// and this vector reports ESCAPE.
     fn attack_traversal(&mut self) -> Result<ContainmentReport> {
+        let host_secret = self.ensure_host_secret()?;
         let c = self.spawn("traversal")?;
-        // Plant a host-only marker is impossible from inside; instead prove the
-        // traversal cannot leave the workdir: `..` from WORKDIR lands in `/`,
-        // and the fence guarantees no workspace file is reachable above WORKDIR.
-        // We attempt to read a path that, in a breached fence, would expose a
-        // sibling-workspace file; in a contained fence it is ENOENT.
+        // `../`×12 from WORKDIR saturates at `/`; appending the host secret's
+        // absolute tail probes whether the host fs bled into the container.
+        let tail = host_secret.trim_start_matches('/');
         let script = format!(
             "cd {WORKDIR} 2>/dev/null || true; \
-             if cat ../../../hugit-c5b-OTHER-LEASE/secret 2>/dev/null; then echo BREACH; \
-             else echo CONTAINED_ENOENT; fi"
+             out=$(cat ../../../../../../../../../../../../{tail} 2>/dev/null); \
+             case \"$out\" in \
+               *{HOST_SECRET_SENTINEL}*) printf BREACH ;; \
+               *) printf CONTAINED_ENOENT ;; \
+             esac"
         );
         let out = self.exec(&c, &script)?;
         let contained = out.contains("CONTAINED_ENOENT") && !out.contains("BREACH");
         Ok(ContainmentReport {
             vector: AttackVector::Traversal,
             outcome: outcome(contained),
-            evidence: format!("traversal observed: {}", out.trim()),
+            evidence: format!("traversal observed: {} (real host target)", out.trim()),
         })
     }
 
-    /// **Symlink escape:** create a symlink to a host secret and try to read
-    /// through it. Containment = the symlink target is outside the container's
-    /// view, so the read fails (the host secret never crosses).
+    /// **Symlink escape:** create a symlink to a REAL host secret and try to
+    /// read through it. The target is the genuine [`HOST_SECRET_SENTINEL`] file
+    /// planted on the box host by [`ensure_host_secret`] — it really exists, so
+    /// a working symlink would yield its content. Containment = the link target
+    /// is outside the container's mount namespace, so reading through it yields
+    /// NO sentinel (the host secret never crosses). The target EXISTS on the
+    /// host, so this is not a vacuous dangling-link pass: only the boundary
+    /// makes the read empty.
     fn attack_symlink(&mut self) -> Result<ContainmentReport> {
+        let host_secret = self.ensure_host_secret()?;
         let c = self.spawn("symlink")?;
-        // /etc/shadow exists on the host but the container only sees the image's
-        // (empty/absent) one. We symlink to an absolute host-style path that is
-        // not present in the image and confirm reading through it does not yield
-        // host secret content.
+        // Symlink the in-workdir link at the REAL absolute host path. If the
+        // container shared the host fs, reading the link returns the sentinel.
         let script = format!(
-            "ln -sf /host-only-secret-xyz {WORKDIR}/link 2>/dev/null; \
-             if content=$(cat {WORKDIR}/link 2>/dev/null) && [ -n \"$content\" ]; then echo BREACH; \
-             else echo CONTAINED_SYMLINK_DEAD; fi"
+            "ln -sf '{host_secret}' {WORKDIR}/link 2>/dev/null; \
+             content=$(cat {WORKDIR}/link 2>/dev/null); \
+             case \"$content\" in \
+               *{HOST_SECRET_SENTINEL}*) printf BREACH ;; \
+               *) printf CONTAINED_SYMLINK_DEAD ;; \
+             esac"
         );
         let out = self.exec(&c, &script)?;
         let contained = out.contains("CONTAINED_SYMLINK_DEAD") && !out.contains("BREACH");
         Ok(ContainmentReport {
             vector: AttackVector::SymlinkEscape,
             outcome: outcome(contained),
-            evidence: format!("symlink observed: {}", out.trim()),
+            evidence: format!("symlink observed: {} (real host target)", out.trim()),
         })
     }
 
-    /// **Out-of-fence write:** spawn a *second* container (a stand-in for a
-    /// sibling lease) and prove the attacker cannot write into it. Containment =
-    /// each container has its own mount namespace, so the attacker's writes are
-    /// invisible to the sibling.
+    /// **Out-of-fence write:** the attacker container tries to MUTATE a REAL
+    /// out-of-fence target — the host secret planted by [`ensure_host_secret`],
+    /// which lives outside its mount namespace. The attack overwrites the link's
+    /// absolute path with attacker bytes; containment = the host file is
+    /// UNCHANGED afterwards (the container could not write across the boundary).
+    /// This genuinely attempts a cross-boundary write to a file that really
+    /// exists — a broken boundary would corrupt it, which the post-check detects.
     fn attack_out_of_fence(&mut self) -> Result<ContainmentReport> {
+        let host_secret = self.ensure_host_secret()?;
         let attacker = self.spawn("attacker")?;
-        let victim = self.spawn("victim")?;
-        let marker = "out-of-fence-write-marker";
-        // Attacker writes a marker into its own workdir...
+        let tamper = "OUT-OF-FENCE-TAMPER-ed1f9c2a";
+        // Attacker attempts to overwrite the REAL host secret via its absolute
+        // path (and via a `..`-climb), then truncate it — every cross-boundary
+        // write must fail. We do not assert the in-container rc (a write to an
+        // unreachable path may "succeed" into a private overlay); the authority
+        // is the HOST-side post-check below.
         let _ = self.exec(
             &attacker,
-            &format!("echo {marker} > {WORKDIR}/m 2>/dev/null; echo done"),
+            &format!(
+                "printf %s '{tamper}' > '{host_secret}' 2>/dev/null; \
+                 printf %s '{tamper}' > ../../../../../../../../../../../..{host_secret} 2>/dev/null; \
+                 echo done"
+            ),
         )?;
-        // ...and the victim must NOT see it: namespaces are disjoint.
-        let seen = self.exec(
-            &victim,
-            &format!("grep -rFl {marker} {WORKDIR} 2>/dev/null | grep -c . || true"),
-        )?;
-        let leaked: u64 = seen.trim().parse().unwrap_or(u64::MAX);
-        let contained = leaked == 0;
+        // HOST-side authority: read the real file back. It must still hold the
+        // original sentinel and NOT the attacker's tamper bytes.
+        let after = self
+            .boxx
+            .run(&["sh", "-c", &format!("cat '{host_secret}' 2>/dev/null")])?;
+        let body = after.stdout;
+        let unchanged = body.contains(HOST_SECRET_SENTINEL) && !body.contains(tamper);
         Ok(ContainmentReport {
             vector: AttackVector::OutOfFence,
-            outcome: outcome(contained),
-            evidence: format!("victim saw {leaked} attacker file(s) (0 = contained)"),
+            outcome: outcome(unchanged),
+            evidence: format!(
+                "host secret intact={unchanged} (sentinel present & tamper absent — \
+                 a cross-boundary write would have replaced it)"
+            ),
         })
     }
 
@@ -543,6 +620,17 @@ impl<'b, B: BoxExec> RedTeamHarness<'b, B> {
             let _ = self.boxx.run(&["docker", "rm", "-f", name]);
         }
         self.spawned.clear();
+        // Remove the planted host secret (prefix-scoped, host-side). Best-effort:
+        // the forensic residue scan below is container-scoped; the host secret
+        // lives under /tmp/hugit-c5b-* and is cleaned here so the box is left
+        // exactly as found.
+        if let Some(path) = self.host_secret.take() {
+            debug_assert!(
+                path.starts_with(&format!("/tmp/{REDTEAM_PREFIX}")),
+                "host secret must be prefix-scoped before removal"
+            );
+            let _ = self.boxx.run(&["rm", "-f", &path]);
+        }
         // Re-scan: no hugit-c5b-* container may remain (running or stopped).
         let scan = self.boxx.run(&[
             "docker",

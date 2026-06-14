@@ -2,8 +2,11 @@
 //!
 //! `GET /internal/v1/occupancy` returns the live [`OccupancySnapshot`] from the
 //! [`SlotMeter`] — per-tenant occupied/peak plus journal length/drop count — so
-//! an operator or billing reconciliation can see metered concurrency vs caps on
-//! the LIVE fabric.
+//! an operator can see this INSTANCE's metered concurrency. The meter is
+//! instance-local observability (see [`SlotMeter`]'s SCOPE note): at N>1 its
+//! occupied/peak is per-instance, NOT a fabric-wide occupancy oracle and NOT a
+//! global reconciliation against `max_concurrency` (the cap is enforced
+//! DB-globally upstream, so this is a metering-honesty scope, never a breach).
 //!
 //! This is an **internal/ops** route, NOT a tenant route: it is mounted OUTSIDE
 //! the Bearer-PAT auth layer (`app_full`) and gated by its own secret header,

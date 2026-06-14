@@ -16,7 +16,7 @@ use anyhow::Context;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use corelink_runners_contracts::AttestationChain;
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 
 /// Append `LP(s) = u32_be(byte_len(s)) ‖ utf8_bytes(s)` to `out`.
 fn lp(out: &mut Vec<u8>, s: &str) {
@@ -137,7 +137,11 @@ pub fn verify_raw(msg: &[u8], sig_b64: &str, pubkey_b64: &str) -> anyhow::Result
         .map_err(|_| anyhow::anyhow!("signature must be 64 bytes, got {}", sig_bytes.len()))?;
     let sig = Signature::from_bytes(&sig);
 
-    Ok(key.verify(msg, &sig).is_ok())
+    // `verify_strict` (audit INFO): rejects the malleability-permissive cases
+    // the non-strict `verify` accepts (small-order / non-canonical R points),
+    // so a signature is canonical or it is no verdict. No nonce added (out of
+    // scope) — strictness only.
+    Ok(key.verify_strict(msg, &sig).is_ok())
 }
 
 /// Verify a chain's detached signature against a standard-base64 ed25519

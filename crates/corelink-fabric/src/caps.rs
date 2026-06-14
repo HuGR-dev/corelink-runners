@@ -61,6 +61,16 @@ impl RateWindow {
             .filter(|&&t| now_ms.saturating_sub(t) < 60_000)
             .count()
     }
+
+    /// Whether this window holds NO acquire attempt within the last 60s as of
+    /// `now_ms` — i.e. the tenant has been idle for a full window. The
+    /// HashMap of per-tenant windows is pruned on this predicate so an idle
+    /// tenant's entry is evicted (its window can be rebuilt on the next
+    /// acquire), keeping per-tenant memory bounded by ACTIVE tenants, not by
+    /// every tenant ever seen.
+    pub fn is_idle_at(&self, now_ms: u64) -> bool {
+        self.count_within_60s(now_ms) == 0
+    }
 }
 
 /// The preventive admission gate (CP2).
@@ -200,6 +210,28 @@ mod tests {
         assert_eq!(
             CapGate.check(&ledger, &plan, 130_001, &window),
             CapDecision::Admit
+        );
+    }
+
+    /// [P2 regression] A window is "idle" once it holds no attempt within the
+    /// 60s sliding window — the predicate the per-tenant window map prunes on,
+    /// so an idle tenant's entry can be evicted (bounding memory by ACTIVE
+    /// tenants). A window with a recent attempt is NOT idle; one whose only
+    /// attempts have all slid out IS.
+    #[test]
+    fn window_reports_idle_after_a_full_quiet_window() {
+        let mut w = RateWindow::new();
+        assert!(w.is_idle_at(0), "an empty window is idle");
+
+        w.push(1_000);
+        assert!(!w.is_idle_at(1_000), "a just-pushed window is not idle");
+        assert!(
+            !w.is_idle_at(60_999),
+            "still within 60s of the attempt: not idle"
+        );
+        assert!(
+            w.is_idle_at(61_000),
+            "the only attempt has slid out (>=60s old): idle, prunable"
         );
     }
 

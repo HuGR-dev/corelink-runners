@@ -29,6 +29,14 @@ use crate::tenant::TenantId;
 /// long-running dispatcher's memory is O(tenants), not O(history).
 pub const WAIT_RING_CAPACITY: usize = 1024;
 
+/// Maximum pending items a single tenant may hold in its FIFO. Admission is
+/// **fail-closed**: an enqueue that would push a tenant strictly over this
+/// bound is rejected and the queue stays at the cap, so one tenant flooding
+/// `enqueue` cannot grow the dispatcher's memory without bound (a DoS lever).
+/// The bound is per-tenant, so a flooder cannot starve other tenants' admission
+/// either. Total queue memory is therefore O(tenants × `MAX_TENANT_QUEUE_DEPTH`).
+pub const MAX_TENANT_QUEUE_DEPTH: usize = 4096;
+
 /// One unit of pending work, queued per tenant until dispatched.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkItem {
@@ -58,12 +66,24 @@ impl TenantQueues {
         Self::default()
     }
 
-    /// Append `item` to the back of its tenant's FIFO.
-    pub fn enqueue(&mut self, item: WorkItem) {
-        self.queues
-            .entry(item.tenant.clone())
-            .or_default()
-            .push_back(item);
+    /// Try to append `item` to the back of its tenant's FIFO.
+    ///
+    /// Fail-closed admission bound: if the tenant already holds
+    /// [`MAX_TENANT_QUEUE_DEPTH`] items, the item is **rejected** (returned in
+    /// `Err`) and the queue is left exactly at the cap — unbounded per-tenant
+    /// growth (a DoS lever) is impossible. Returns `Ok(())` on admission.
+    pub fn try_enqueue(&mut self, item: WorkItem) -> Result<(), WorkItem> {
+        let queue = self.queues.entry(item.tenant.clone()).or_default();
+        if queue.len() >= MAX_TENANT_QUEUE_DEPTH {
+            // Reject over the bound; do not leave an empty entry behind for a
+            // tenant that never had work admitted.
+            if queue.is_empty() {
+                self.queues.remove(&item.tenant);
+            }
+            return Err(item);
+        }
+        queue.push_back(item);
+        Ok(())
     }
 
     /// Pending items for one tenant.
@@ -128,6 +148,13 @@ pub struct FairScheduler {
     /// The tenant that dispatched last — rotation resumes AFTER it. Only a
     /// real dispatch ever moves this cursor (cap skips never do).
     cursor: Option<TenantId>,
+    /// Tenants whose turn was deferred by a cap-skip and not yet redeemed —
+    /// the "owed" set. A tenant skipped over cap in one tick is OWED a turn:
+    /// the moment it is eligible again it dispatches BEFORE the cursor-based
+    /// rotation resumes, so a capped tenant cannot be passed twice by another
+    /// while it waits (the ≥3-tenant fairness fix). Entries are sorted
+    /// (`BTreeSet`) for deterministic redemption order and cleared on dispatch.
+    owed_skip: BTreeSet<TenantId>,
     /// Bounded ring of completed waits per tenant (CP4 surface).
     waits: BTreeMap<TenantId, VecDeque<u64>>,
 }
@@ -139,13 +166,21 @@ impl FairScheduler {
             global_slots,
             queues: TenantQueues::new(),
             cursor: None,
+            owed_skip: BTreeSet::new(),
             waits: BTreeMap::new(),
         }
     }
 
-    /// Submit one work item to its tenant's FIFO.
-    pub fn enqueue(&mut self, item: WorkItem) {
-        self.queues.enqueue(item);
+    /// Submit one work item to its tenant's FIFO under the per-tenant
+    /// admission bound.
+    ///
+    /// Fail-closed: an enqueue that would push the tenant strictly over
+    /// [`MAX_TENANT_QUEUE_DEPTH`] is **rejected** (the item is returned in
+    /// `Err`, the queue stays at the cap), so a tenant flooding `enqueue`
+    /// cannot grow the dispatcher's memory without bound. Returns `Ok(())` on
+    /// admission.
+    pub fn enqueue(&mut self, item: WorkItem) -> Result<(), WorkItem> {
+        self.queues.try_enqueue(item)
     }
 
     /// Pending items for one tenant.
@@ -171,9 +206,12 @@ impl FairScheduler {
     ///    remainder of this tick and counted once in
     ///    [`TickReport::skipped_over_cap`]. The skip does **not** consume the
     ///    tenant's turn: the cursor only advances on a real dispatch, so
-    ///    preventive caps stay upstream (CP2) and a capped tenant resumes at
-    ///    full rotation priority the moment it is eligible again. Its queue
-    ///    is left untouched.
+    ///    preventive caps stay upstream (CP2). It is also recorded as **owed**
+    ///    a turn — the moment it is eligible again it dispatches BEFORE the
+    ///    cursor rotation resumes, so with ≥3 tenants a tenant capped in one
+    ///    tick cannot be passed twice by another while it waits (it resumes at
+    ///    full rotation priority, no double-turn, no starvation). Its queue is
+    ///    left untouched.
     /// 3. **Budget.** Dispatch proceeds until `global_slots` items have been
     ///    handed out or no eligible work remains. `dispatch` returning
     ///    `false` (backpressure) leaves the item at the head of its queue and
@@ -209,6 +247,9 @@ impl FairScheduler {
                 }
                 if !cap_check(&tenant) {
                     report.skipped_over_cap += 1;
+                    // The skip defers this tenant's turn: it is OWED a turn and
+                    // redeems it (rotation priority) the moment it is eligible.
+                    self.owed_skip.insert(tenant.clone());
                     parked.insert(tenant);
                     continue;
                 }
@@ -224,6 +265,8 @@ impl FairScheduler {
                     self.record_wait(&tenant, wait);
                     report.dispatched.push(item.id);
                     report.waits_ms.push((tenant.clone(), wait));
+                    // Turn redeemed: the tenant is no longer owed a skip.
+                    self.owed_skip.remove(&tenant);
                     self.cursor = Some(tenant);
                     remaining -= 1;
                     progressed = true;
@@ -235,6 +278,10 @@ impl FairScheduler {
                 break;
             }
         }
+        // Keep the owed set bounded by tenants with live work: a tenant that
+        // drained (or never had work) can never redeem an owed turn, so it
+        // must not linger in the set. Bound stays O(tenants-with-work).
+        self.owed_skip.retain(|t| self.queues.pending(t) > 0);
         report
     }
 
@@ -253,22 +300,46 @@ impl FairScheduler {
         Some(sorted[rank - 1])
     }
 
-    /// Tenants with work, sorted, rotated to start AFTER the cursor, minus
-    /// the tenants parked this tick.
+    /// Tenants with work, minus the tenants parked this tick, in dispatch
+    /// order: tenants OWED a turn (cap-skipped on an earlier tick) come FIRST
+    /// in sorted order, then the rest cursor-rotated to start AFTER the tenant
+    /// that last dispatched.
+    ///
+    /// The owed-first prefix is the ≥3-tenant fairness fix: a tenant skipped
+    /// over cap is owed a turn, so when it becomes eligible it redeems that
+    /// turn before the normal rotation resumes — another tenant cannot take a
+    /// second turn ahead of it while it waits.
     fn rotation_order(&self, parked: &BTreeSet<TenantId>) -> Vec<TenantId> {
-        let mut tenants: Vec<TenantId> = self
+        let eligible: Vec<TenantId> = self
             .queues
             .tenants_with_work()
             .into_iter()
             .filter(|t| !parked.contains(t))
             .collect();
+
+        // Owed prefix: eligible tenants that are owed a deferred turn, in
+        // sorted (deterministic) order. They redeem ahead of the rotation.
+        let mut order: Vec<TenantId> = eligible
+            .iter()
+            .filter(|t| self.owed_skip.contains(*t))
+            .cloned()
+            .collect();
+
+        // Remainder: the rest, cursor-rotated to resume after the last
+        // dispatch (the unchanged deficit-round-robin rule).
+        let mut rest: Vec<TenantId> = eligible
+            .into_iter()
+            .filter(|t| !self.owed_skip.contains(t))
+            .collect();
         if let Some(cursor) = &self.cursor {
             // First tenant strictly after the cursor (wrapping); the list is
             // sorted, so this is the deterministic resume point.
-            let start = tenants.iter().position(|t| t > cursor).unwrap_or(0);
-            tenants.rotate_left(start);
+            let start = rest.iter().position(|t| t > cursor).unwrap_or(0);
+            rest.rotate_left(start);
         }
-        tenants
+
+        order.extend(rest);
+        order
     }
 
     /// Push one completed wait into the tenant's bounded ring.
@@ -306,10 +377,10 @@ mod tests {
     fn fairness_p95_wait_bounded_under_two_tenant_contention() {
         let mut sched = FairScheduler::new(4);
         for i in 0..100 {
-            sched.enqueue(item(&format!("a-{i}"), "alpha", 0));
+            sched.enqueue(item(&format!("a-{i}"), "alpha", 0)).unwrap();
         }
         for i in 0..5 {
-            sched.enqueue(item(&format!("b-{i}"), "beta", 0));
+            sched.enqueue(item(&format!("b-{i}"), "beta", 0)).unwrap();
         }
 
         let beta = tid("beta");
@@ -349,11 +420,13 @@ mod tests {
     fn no_tenant_starved_under_storm() {
         let mut sched = FairScheduler::new(10);
         for i in 0..100 {
-            sched.enqueue(item(&format!("storm-{i}"), "t0", 0));
+            sched.enqueue(item(&format!("storm-{i}"), "t0", 0)).unwrap();
         }
         for t in 1..10 {
             for i in 0..5 {
-                sched.enqueue(item(&format!("t{t}-{i}"), &format!("t{t}"), 0));
+                sched
+                    .enqueue(item(&format!("t{t}-{i}"), &format!("t{t}"), 0))
+                    .unwrap();
             }
         }
 
@@ -391,7 +464,7 @@ mod tests {
         // Behavioral half: dispatch sees the item; the scheduler holds no
         // execution state of its own.
         let mut sched = FairScheduler::new(1);
-        sched.enqueue(item("w-1", "acme", 0));
+        sched.enqueue(item("w-1", "acme", 0)).unwrap();
         let mut seen: Vec<String> = Vec::new();
         let report = sched.tick(
             500,
@@ -429,7 +502,7 @@ mod tests {
         let mut sched = FairScheduler::new(1);
         for t in ["a", "b", "c"] {
             for i in 0..3 {
-                sched.enqueue(item(&format!("{t}-{i}"), t, 0));
+                sched.enqueue(item(&format!("{t}-{i}"), t, 0)).unwrap();
             }
         }
         let mut order = Vec::new();
@@ -450,7 +523,7 @@ mod tests {
         let mut sched = FairScheduler::new(2);
         for t in ["a", "b", "c"] {
             for i in 0..3 {
-                sched.enqueue(item(&format!("{t}-{i}"), t, 0));
+                sched.enqueue(item(&format!("{t}-{i}"), t, 0)).unwrap();
             }
         }
         let per_tick: Vec<Vec<String>> = (1..=5u64)
@@ -477,7 +550,7 @@ mod tests {
         let mut sched = FairScheduler::new(1);
         for t in ["a", "b"] {
             for i in 0..3 {
-                sched.enqueue(item(&format!("{t}-{i}"), t, 0));
+                sched.enqueue(item(&format!("{t}-{i}"), t, 0)).unwrap();
             }
         }
         let b = tid("b");
@@ -505,6 +578,101 @@ mod tests {
         assert_eq!(r3.skipped_over_cap, 0);
     }
 
+    /// [P2 regression] Per-tenant queue admission bound (DoS): a tenant cannot
+    /// flood the queue without bound. Enqueue past `MAX_TENANT_QUEUE_DEPTH`
+    /// is rejected (the item is handed back), the queue stays exactly at the
+    /// cap, and a SECOND tenant is unaffected (the bound is per-tenant).
+    #[test]
+    fn enqueue_is_bounded_per_tenant_and_sheds_over_the_cap() {
+        let mut sched = FairScheduler::new(1);
+        let flooder = tid("flooder");
+
+        // Fill the flooder's queue exactly to the cap — all admitted.
+        for i in 0..MAX_TENANT_QUEUE_DEPTH {
+            assert!(
+                sched.enqueue(item(&format!("f-{i}"), "flooder", 0)).is_ok(),
+                "item {i} within the bound must be admitted"
+            );
+        }
+        assert_eq!(sched.pending(&flooder), MAX_TENANT_QUEUE_DEPTH);
+
+        // Every further enqueue is rejected and the queue stays bounded — no
+        // unbounded growth from a flooding tenant.
+        for i in 0..1_000 {
+            let over = item(&format!("over-{i}"), "flooder", 0);
+            let rejected = sched.enqueue(over.clone());
+            assert_eq!(rejected, Err(over), "over-bound enqueue must be rejected");
+            assert_eq!(
+                sched.pending(&flooder),
+                MAX_TENANT_QUEUE_DEPTH,
+                "queue must stay at the cap, never grow"
+            );
+        }
+
+        // The bound is PER TENANT: a different tenant still admits freely.
+        let other = tid("other");
+        assert!(sched.enqueue(item("o-0", "other", 0)).is_ok());
+        assert_eq!(sched.pending(&other), 1);
+    }
+
+    /// [P2 regression] ≥3-tenant cap-skip fairness: a tenant capped on one
+    /// tick must resume in the CORRECT rotation position when it clears — it
+    /// is owed its turn and redeems it before any other tenant takes a SECOND
+    /// turn ahead of it. No starvation, no double-turn.
+    #[test]
+    fn capped_tenant_resumes_in_order_with_three_tenants() {
+        // a, b, c each with work; one slot per tick. b is capped for tick 2
+        // only. Without the owed-turn fix, the cursor (at c after tick 1's
+        // a,_,c is impossible with one slot — here we drive it explicitly):
+        // a would take a second turn ahead of the previously-skipped b.
+        let mut sched = FairScheduler::new(1);
+        for t in ["a", "b", "c"] {
+            for i in 0..3 {
+                sched.enqueue(item(&format!("{t}-{i}"), t, 0)).unwrap();
+            }
+        }
+        let b = tid("b");
+        let b_capped = Cell::new(false);
+        let cap_check = |t: &TenantId| !(t == &b && b_capped.get());
+
+        // Tick 1: a (no cursor → sorted start). cursor=a.
+        assert_eq!(sched.tick(100, cap_check, |_| true).dispatched, ["a-0"]);
+
+        // Tick 2: rotation resumes after a → b, but b is capped. b is skipped
+        // (owed a turn); the slot flows to c. cursor=c.
+        b_capped.set(true);
+        let r2 = sched.tick(200, cap_check, |_| true);
+        assert_eq!(r2.dispatched, vec!["c-0".to_string()]);
+        assert_eq!(r2.skipped_over_cap, 1);
+
+        // Tick 3: cap cleared. b is OWED a turn, so it redeems FIRST — NOT a,
+        // even though the cursor (c) would otherwise hand the next turn to a.
+        // This is the bug: a must not take a second turn ahead of the
+        // skipped-then-eligible b.
+        b_capped.set(false);
+        let r3 = sched.tick(300, cap_check, |_| true);
+        assert_eq!(
+            r3.dispatched,
+            vec!["b-0".to_string()],
+            "the previously-capped b must redeem its owed turn before a goes again"
+        );
+
+        // Tick 4: with b's owed turn redeemed, the cursor (now b) resumes
+        // normal rotation → c is next (after b), then a.
+        assert_eq!(sched.tick(400, cap_check, |_| true).dispatched, ["c-1"]);
+        assert_eq!(sched.tick(500, cap_check, |_| true).dispatched, ["a-1"]);
+
+        // Dispatch order across the five ticks was a, c, b, c, a — b redeemed
+        // its owed turn (tick 3) before a took a second turn (tick 5). a and c
+        // served twice (pending 1 each), b once (pending 2): no starvation, no
+        // double-turn ahead of the skipped tenant.
+        let a = tid("a");
+        let c = tid("c");
+        assert_eq!(sched.pending(&a), 1);
+        assert_eq!(sched.pending(&b), 2);
+        assert_eq!(sched.pending(&c), 1);
+    }
+
     /// p95 surface sanity: nearest-rank over the ring, None before any
     /// dispatch, per-tenant scoped.
     #[test]
@@ -516,7 +684,7 @@ mod tests {
 
         // 20 dispatches for a, enqueued so waits are 100, 200, ..., 2000.
         for i in 0..20u64 {
-            sched.enqueue(item(&format!("a-{i}"), "a", 0));
+            sched.enqueue(item(&format!("a-{i}"), "a", 0)).unwrap();
         }
         for i in 1..=20u64 {
             sched.tick(i * 100, |_| true, |_| true);

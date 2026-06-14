@@ -210,31 +210,55 @@ mod golden_tests {
         }
     }
 
+    /// The actual set of conformance vectors present on disk: every `*.json`
+    /// file in the workspace-root `conformance/` directory. This is the GROUND
+    /// TRUTH the manifest must cover — derived, never hardcoded, so adding or
+    /// removing a vector file is caught without editing this test.
+    fn conformance_vectors_on_disk() -> std::collections::BTreeSet<String> {
+        let dir = vector_path("manifest.sha256")
+            .parent()
+            .expect("conformance/ dir")
+            .to_path_buf();
+        std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("cannot read conformance dir {}: {e}", dir.display()))
+            .filter_map(|entry| {
+                let name = entry.ok()?.file_name().to_string_lossy().into_owned();
+                name.ends_with(".json").then_some(name)
+            })
+            .collect()
+    }
+
     #[test]
     fn conformance_manifest_membership_pinned() {
+        // DERIVED (test-integrity, 2026-06-14): the expected set is the actual
+        // `*.json` vectors on disk, NOT a hardcoded list. A drift-blind hardcode
+        // could not catch a conformance vector added to `conformance/` (and so
+        // shipped) that was never listed in `manifest.sha256` — i.e. an UNHASHED
+        // vector with no tamper tripwire. Deriving from the directory closes
+        // that hole: the manifest must list EXACTLY the vectors that exist.
+        //
+        // (`corelink-introspect.json` mirrors corelink-server's
+        // `/internal/v1/auth/introspect` response; the three hugit-side vectors
+        // ride the same SHA-256 tripwire. Membership is now asserted against the
+        // filesystem so any new cross-repo vector is forced into the manifest.)
         let listed: std::collections::BTreeSet<String> =
             parse_manifest(&load_vector("manifest.sha256"))
                 .into_iter()
                 .map(|(_, name)| name)
                 .collect();
-        // `corelink-introspect.json` mirrors **corelink-server** (the
-        // `/internal/v1/auth/introspect` response, ratified 2026-06-13), NOT
-        // hugit — a DIFFERENT cross-repo pair riding the same SHA-256
-        // hash-verify tripwire (`conformance_vectors_hash_verified`). The
-        // three hugit-side vectors are unchanged; this entry adds the
-        // auth/billing seam without touching the hugit-vector coverage.
-        let expected: std::collections::BTreeSet<String> = [
-            "RunnerLease.json",
-            "FenceManifest.json",
-            "IntentMetrics.json",
-            "corelink-introspect.json",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+        let on_disk = conformance_vectors_on_disk();
+        assert!(
+            !on_disk.is_empty(),
+            "conformance/ must contain at least one *.json vector"
+        );
         assert_eq!(
-            listed, expected,
-            "manifest.sha256 membership drifted from the pinned vector set"
+            listed,
+            on_disk,
+            "manifest.sha256 membership drifted from the conformance/ directory: \
+             listed-but-absent={:?}, present-but-unlisted={:?} (an unlisted \
+             vector ships with no SHA-256 tamper tripwire)",
+            listed.difference(&on_disk).collect::<Vec<_>>(),
+            on_disk.difference(&listed).collect::<Vec<_>>(),
         );
     }
 

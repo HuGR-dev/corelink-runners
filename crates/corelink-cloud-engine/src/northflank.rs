@@ -192,26 +192,47 @@ fn json_string_values(v: &serde_json::Value, out: &mut Vec<String>) {
     }
 }
 
-/// Classify a run-status response body defensively via JSON-value exact-match.
+/// The ONE documented Northflank job-run terminal-success status (`status`
+/// field of a job run). Per the Northflank API, a job run's `status` is exactly
+/// one of `SUCCESS` / `RUNNING` / `FAILED`; `SUCCESS` is the only positive
+/// success evidence. Anything else — `SUCCEEDED`, `COMPLETED`, `DONE`, a forged
+/// string, an unknown future status — is NOT success.
+///
+/// Stored upper-cased so the comparison in [`classify_run_status`] is
+/// case-insensitive against the upper-cased string values it collects.
+const SUCCESS_STATUS: &str = "SUCCESS";
+
+/// Explicit, documented FAIL statuses — for *reporting* a terminal failure
+/// promptly (so the poll loop returns `Failed` instead of burning the whole
+/// budget). These are not load-bearing for the fail-CLOSED guarantee: a run
+/// that is neither an exact `SUCCESS` nor an explicit fail is treated as
+/// non-terminal (`Running`) and ultimately ejected as an `Err` by the poll
+/// budget — never fabricated into a success.
+const FAIL_TOKENS: &[&str] = &["FAILED", "FAILURE", "ERROR", "CRASHED", "CANCELLED"];
+
+/// Classify a run-status response body **fail-CLOSED** via JSON-value exact-match.
 ///
 /// Parses the body as JSON, recursively collects every **string value** (not
-/// keys, not numbers), upper-cases each, and compares for **exact equality**
-/// against the documented terminal tokens. This prevents false positives from
-/// numeric fields (e.g. `{"errorCount":0}`) or log/image strings that happen to
-/// contain the substring "error" — a numeric `errorCount` is not a string value
-/// and "errorCount" is a key, so neither matches.
+/// keys, not numbers), upper-cases each, and compares for **exact equality**.
+/// Collecting only string values prevents false positives from numeric fields
+/// (e.g. `{"errorCount":0}`) or key names containing status-adjacent words.
 ///
-/// **Failure precedence:** if any string value exactly matches a FAIL token,
-/// the result is `RunState::Failed` regardless of any SUCCESS token in the same
-/// body (a failed build inside a "COMPLETED" run must never read as success).
+/// **Success requires POSITIVE, unambiguous evidence:** the result is
+/// `RunState::Succeeded` **iff** some string value is exactly the one documented
+/// Northflank success status ([`SUCCESS_STATUS`]). A body that merely *contains*
+/// a success-ish substring, an undocumented token like `COMPLETED`/`SUCCEEDED`,
+/// or no recognised status at all is NEVER classified as success. In an
+/// untrusted-compute setting a failed or forged run must not read as passed.
 ///
-/// If the body does not parse as JSON, returns `RunState::Running` (not a
-/// terminal state) — garbage in the poll response should exhaust the poll budget
-/// and produce an `Err`, never fabricate success or failure.
+/// **Failure precedence:** an exact FAIL token wins over an exact success token
+/// in the same body (a failed build inside an otherwise-"SUCCESS" envelope must
+/// read as `Failed`).
+///
+/// **Everything ambiguous/unknown → `RunState::Running`** (not terminal). A
+/// non-JSON body, an empty body, or a body with no recognised terminal status
+/// is treated as still-running so the poll budget ejects it into a fail-closed
+/// `Err` — the engine never fabricates success OR failure from ambiguity.
 fn classify_run_status(body: &str) -> RunState {
-    const FAIL_TOKENS: &[&str] = &["FAILURE", "FAILED", "ERROR", "CRASHED", "CANCELLED"];
-    const SUCCESS_TOKENS: &[&str] = &["SUCCESS", "SUCCEEDED", "COMPLETED"];
-
     let v = match serde_json::from_str::<serde_json::Value>(body) {
         Ok(v) => v,
         // Non-JSON body: treat as still-running so the poll budget ejects.
@@ -221,19 +242,20 @@ fn classify_run_status(body: &str) -> RunState {
     let mut string_values: Vec<String> = Vec::new();
     json_string_values(&v, &mut string_values);
 
-    // Failure precedence: checked before success.
+    // Failure precedence: an explicit fail wins over any success token.
     if string_values
         .iter()
         .any(|s| FAIL_TOKENS.iter().any(|t| s == *t))
     {
         return RunState::Failed;
     }
-    if string_values
-        .iter()
-        .any(|s| SUCCESS_TOKENS.iter().any(|t| s == *t))
-    {
+    // Success demands the ONE documented success status, exact-match. No
+    // substring, no undocumented synonym, no "completed" — fail CLOSED.
+    if string_values.iter().any(|s| s == SUCCESS_STATUS) {
         return RunState::Succeeded;
     }
+    // Unknown / ambiguous / no terminal status → not terminal. The poll budget
+    // turns persistent ambiguity into an `Err`, never a fabricated success.
     RunState::Running
 }
 
@@ -246,6 +268,75 @@ fn parse_id(body: &str) -> Result<String> {
         .and_then(|id| id.as_str())
         .map(str::to_string)
         .ok_or_else(|| anyhow::anyhow!("northflank response missing data.id: {body}"))
+}
+
+/// Derive a Northflank-safe job name from an arbitrary `spec.name`, **injectively**.
+///
+/// Northflank object names are far stricter than Docker's: lowercase
+/// `[a-z0-9-]`, must start with a letter, length-capped. The upstream
+/// container-name derivations (`hugit-c2b-…`, `hugit-job-…`) sanitize foreign
+/// characters to `_` and apply no length cap, so the *Docker* name they produce
+/// is already **non-injective** (`lease/x` and `lease x` both → `…lease_x`) and
+/// not even Northflank-legal. Passing it verbatim risked two distinct leases
+/// colliding onto one Northflank job — a cross-lease teardown/spawn hazard in
+/// untrusted compute.
+///
+/// This derivation is **collision-free by construction**: the human-readable
+/// part is best-effort (lowercased, non-`[a-z0-9-]` → `-`, truncated to fit),
+/// but a fixed-width hex suffix of the BLAKE-free SHA-256 of the *full, original*
+/// `spec.name` is always appended. Two distinct inputs can share the readable
+/// prefix but never the hash suffix, so the mapping is injective on the full
+/// input. The result always starts with a letter and fits Northflank's 63-char
+/// object-name ceiling.
+fn northflank_job_name(spec_name: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    // Full-input hash → collision-free suffix (16 hex chars = 64 bits).
+    let digest = Sha256::digest(spec_name.as_bytes());
+    let mut suffix = String::with_capacity(16);
+    for byte in &digest[..8] {
+        use std::fmt::Write as _;
+        let _ = write!(suffix, "{byte:02x}");
+    }
+
+    // Readable, Northflank-legal slug of the original name (lossy is fine — the
+    // hash carries injectivity). Lowercase; keep [a-z0-9], everything else → '-'.
+    let mut slug = String::with_capacity(spec_name.len());
+    for c in spec_name.chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+        } else {
+            slug.push('-');
+        }
+    }
+    // Collapse runs of '-' and trim leading/trailing '-' for tidiness.
+    let mut collapsed = String::with_capacity(slug.len());
+    let mut prev_dash = false;
+    for c in slug.chars() {
+        if c == '-' {
+            if !prev_dash {
+                collapsed.push('-');
+            }
+            prev_dash = true;
+        } else {
+            collapsed.push(c);
+            prev_dash = false;
+        }
+    }
+    let readable = collapsed.trim_matches('-');
+
+    // Northflank object names cap at 63 chars and must start with a letter.
+    // Layout: "nf-" (3) + readable + "-" (1) + 16-hex suffix = budget readable
+    // to 63 - 3 - 1 - 16 = 43 chars.
+    const READABLE_BUDGET: usize = 63 - 3 - 1 - 16;
+    let readable: String = readable.chars().take(READABLE_BUDGET).collect();
+    let readable = readable.trim_matches('-');
+
+    if readable.is_empty() {
+        format!("nf-{suffix}")
+    } else {
+        format!("nf-{readable}-{suffix}")
+    }
 }
 
 /// Single-quote each argv element and join — a shell-safe rendering of the job
@@ -326,10 +417,13 @@ impl<H: HttpTransport> NorthflankEngine<H> {
     }
 
     /// The create-job request body for `spec` (command left to the image
-    /// default; `exec` sets the per-run command).
-    fn create_job_body(&self, spec: &ContainerSpec) -> String {
+    /// default; `exec` sets the per-run command). `job_name` is the
+    /// injectively-derived Northflank-legal name (see [`northflank_job_name`]);
+    /// it MUST match the name stored on the returned [`RunningContainer`] so all
+    /// later `job_url` calls address the same job.
+    fn create_job_body(&self, spec: &ContainerSpec, job_name: &str) -> String {
         serde_json::json!({
-            "name": spec.name,
+            "name": job_name,
             "billing": { "deploymentPlan": self.cfg.deployment_plan },
             "deployment": {
                 "external": { "imagePath": spec.image },
@@ -490,15 +584,19 @@ impl<H: HttpTransport> Engine for NorthflankEngine<H> {
             )
         })?;
 
+        // Map the (possibly non-injective, Northflank-illegal) spec name onto an
+        // injective, Northflank-legal job name. Stored on the RunningContainer so
+        // every later job_url() addresses exactly this lease's job — distinct
+        // leases can never collide onto one Northflank job.
+        let job_name = northflank_job_name(&spec.name);
+
         self.send_2xx(
             Method::Post,
             self.jobs_url(),
-            Some(self.create_job_body(spec)),
+            Some(self.create_job_body(spec, &job_name)),
             "create-job",
         )?;
-        Ok(RunningContainer {
-            name: spec.name.clone(),
-        })
+        Ok(RunningContainer { name: job_name })
     }
 
     fn probe(&self, c: &RunningContainer, _spec: &ContainerSpec) -> Result<IsolationProbe> {
@@ -591,6 +689,155 @@ mod tests {
         assert!(
             es.contains("REDACTED"),
             "NorthflankEngine Debug missing REDACTED placeholder: {es}"
+        );
+    }
+
+    // ── [P1] classify_run_status: fail-CLOSED on ambiguity ────────────────────
+
+    #[test]
+    fn classify_exact_success_status_is_success() {
+        // The ONE documented Northflank terminal-success status.
+        assert_eq!(
+            classify_run_status(r#"{"data":{"status":"SUCCESS"}}"#),
+            RunState::Succeeded
+        );
+        // Case-insensitive (values are upper-cased before comparison).
+        assert_eq!(
+            classify_run_status(r#"{"data":{"status":"success"}}"#),
+            RunState::Succeeded
+        );
+    }
+
+    #[test]
+    fn classify_success_substring_but_overall_failed_is_not_success() {
+        // A FAILED run whose status string merely CONTAINS a success token must
+        // never read as success — the core untrusted-compute fail-open.
+        // "SUCCESS_THEN_FAILED" contains "SUCCESS" as a substring but is not the
+        // exact success status, and FAILED is present → Failed.
+        assert_eq!(
+            classify_run_status(r#"{"status":"FAILED","note":"SUCCESS_THEN_FAILED"}"#),
+            RunState::Failed
+        );
+        // A lone substring carrier with NO exact success status and NO fail token
+        // is ambiguous → Running (never Succeeded).
+        assert_eq!(
+            classify_run_status(r#"{"status":"BUILD_SUCCESS_PARTIAL"}"#),
+            RunState::Running
+        );
+    }
+
+    #[test]
+    fn classify_undocumented_success_synonyms_are_not_success() {
+        // `COMPLETED` / `SUCCEEDED` / `DONE` / `OK` are NOT the documented
+        // Northflank success status — fail CLOSED (treated as still-running so
+        // the poll budget ejects to an Err, never fabricates success).
+        for body in [
+            r#"{"status":"COMPLETED"}"#,
+            r#"{"status":"SUCCEEDED"}"#,
+            r#"{"status":"DONE"}"#,
+            r#"{"status":"OK"}"#,
+            r#"{"status":"PASSED"}"#,
+        ] {
+            assert_eq!(
+                classify_run_status(body),
+                RunState::Running,
+                "undocumented success synonym must NOT classify as success: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_unknown_status_is_not_success() {
+        // An unknown / future / forged status string → not terminal-success.
+        assert_eq!(
+            classify_run_status(r#"{"status":"WAT_IS_THIS"}"#),
+            RunState::Running
+        );
+        // Empty object, empty body, non-JSON garbage — none fabricate success.
+        assert_eq!(classify_run_status("{}"), RunState::Running);
+        assert_eq!(classify_run_status(""), RunState::Running);
+        assert_eq!(classify_run_status("not json at all"), RunState::Running);
+    }
+
+    #[test]
+    fn classify_explicit_fail_is_failed() {
+        assert_eq!(
+            classify_run_status(r#"{"status":"FAILED"}"#),
+            RunState::Failed
+        );
+    }
+
+    #[test]
+    fn classify_fail_wins_over_success_in_same_body() {
+        // Failure precedence: an exact FAIL token beats an exact success token.
+        assert_eq!(
+            classify_run_status(r#"{"status":"SUCCESS","build":"FAILED"}"#),
+            RunState::Failed
+        );
+    }
+
+    // ── [P2] northflank_job_name: injective derivation ────────────────────────
+
+    #[test]
+    fn job_name_is_injective_for_previously_colliding_inputs() {
+        // Upstream sanitization maps non-conforming chars → '_' with no length
+        // cap, so distinct lease ids collide to one Docker name. Feeding those
+        // same distinct spec names through the derivation must yield DISTINCT
+        // Northflank job names (collision-free hash suffix).
+        // Each pair upstream-sanitizes to ONE Docker name (non-[alnum_._-] → '_'),
+        // i.e. these collided before this fix.
+        let collide_pairs = [
+            // Both → "hugit-c2b-lease_x_y".
+            ("hugit-c2b-lease/x/y", "hugit-c2b-lease x y"),
+            // Both → "hugit-c2b-a_b".
+            ("hugit-c2b-a:b", "hugit-c2b-a;b"),
+            // Both → "hugit-job-a_b".
+            ("hugit-job-a b", "hugit-job-a/b"),
+        ];
+        for (a, b) in collide_pairs {
+            let na = northflank_job_name(a);
+            let nb = northflank_job_name(b);
+            assert_ne!(
+                na, nb,
+                "distinct spec names {a:?} and {b:?} collided onto one job name {na:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn job_name_is_northflank_legal() {
+        for input in [
+            "hugit-c2b-lease/x y",
+            "HUGIT-JOB-Weird.Name",
+            "////",           // slug collapses to empty
+            &"x".repeat(500), // length stress
+            "hugit-c2b-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ] {
+            let name = northflank_job_name(input);
+            // Starts with a letter, ≤63 chars, only [a-z0-9-].
+            assert!(
+                name.len() <= 63,
+                "name too long ({}) for {input:?}",
+                name.len()
+            );
+            assert!(
+                name.starts_with(|c: char| c.is_ascii_lowercase()),
+                "name {name:?} must start with a letter"
+            );
+            assert!(
+                name.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
+                "name {name:?} has illegal chars"
+            );
+            assert!(!name.is_empty());
+        }
+    }
+
+    #[test]
+    fn job_name_is_deterministic() {
+        assert_eq!(
+            northflank_job_name("hugit-c2b-lease-abc"),
+            northflank_job_name("hugit-c2b-lease-abc")
         );
     }
 }

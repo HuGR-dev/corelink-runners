@@ -119,15 +119,29 @@ pub struct ExecResponse {
     /// (`GET /v1/attestation/key`).
     pub attestation: AttestationChain,
 
-    /// The fabric's result-binding signature — a detached standard-base64
-    /// ed25519 signature over `LP(memo_key) ‖ LP(stdout_ref) ‖
-    /// LP(stderr_ref)` of `result` (same LP framing as the frozen chain
+    /// The fabric's **v1** result-binding signature — a detached
+    /// standard-base64 ed25519 signature over `LP(memo_key) ‖ LP(stdout_ref)
+    /// ‖ LP(stderr_ref)` of `result` (same LP framing as the frozen chain
     /// pre-image). Binds the RESULT CONTENT to the attestation without
     /// touching the frozen `AttestationChain` shape — the fabric's
     /// result-binding extension, flagged for §12 amendment-log discussion
     /// with hugit. Verified by
-    /// `corelink-fabric-server::attestation::verify_execution`.
+    /// `corelink-fabric-server::attestation::verify_execution`. v1 does NOT
+    /// cover `exit` or `artifacts` — see [`Self::result_binding_sig_v2`].
     pub result_binding_sig: String,
+
+    /// The fabric's **v2** result-binding signature — the FULL-outcome
+    /// binding over `LP(memo_key) ‖ LP(stdout_ref) ‖ LP(stderr_ref) ‖
+    /// i32_be(exit) ‖ u32_be(artifacts.len) ‖ ∀ artifact: LP(path) ‖
+    /// LP(digest)` (the exact byte formula hugit must mirror). Unlike v1, v2
+    /// covers the pass/fail VERDICT (`exit`) and the output digests
+    /// (`artifacts`), closing the forgeable-verdict gap. ADDITIVE alongside
+    /// v1 (no flag-day); verified by
+    /// `corelink-fabric-server::attestation::verify_execution_v2`.
+    /// `#[serde(default)]`: an older payload without it deserializes to the
+    /// empty string, keeping the field strictly additive.
+    #[serde(default)]
+    pub result_binding_sig_v2: String,
 }
 
 /// `POST /v1/queue/trigger` request body — hugit's landing queue triggers
@@ -185,11 +199,18 @@ pub struct TriggerResponse {
     /// lead-ratified.)
     pub attestation: AttestationChain,
 
-    /// The fabric's result-binding signature over `result` — same pre-image
-    /// (`LP(memo_key) ‖ LP(stdout_ref) ‖ LP(stderr_ref)`) and verification
-    /// as [`ExecResponse::result_binding_sig`]. (ATT parity amendment,
-    /// lead-ratified.)
+    /// The fabric's **v1** result-binding signature over `result` — same
+    /// pre-image (`LP(memo_key) ‖ LP(stdout_ref) ‖ LP(stderr_ref)`) and
+    /// verification as [`ExecResponse::result_binding_sig`]. (ATT parity
+    /// amendment, lead-ratified.)
     pub result_binding_sig: String,
+
+    /// The fabric's **v2** full-outcome result-binding signature over
+    /// `result` — same pre-image and verification as
+    /// [`ExecResponse::result_binding_sig_v2`] (covers `exit` + ordered
+    /// `artifacts`). ADDITIVE; `#[serde(default)]` for back-compat.
+    #[serde(default)]
+    pub result_binding_sig_v2: String,
 }
 
 /// `POST /v1/leases/{lease_id}/close` request body — drive the §13.2 item-3
@@ -248,11 +269,19 @@ pub struct CloseResponse {
     /// nothing).
     pub attestation: AttestationChain,
 
-    /// The fabric's result-binding signature over the echoed result's
+    /// The fabric's **v1** result-binding signature over the echoed result's
     /// `LP(memo_key) ‖ LP(stdout_ref) ‖ LP(stderr_ref)` (empty frames when
     /// no result is delivered) — REQUIRED; same extension and verification
     /// as on [`ExecResponse`].
     pub result_binding_sig: String,
+
+    /// The fabric's **v2** full-outcome result-binding signature over the
+    /// echoed result (covers `exit` + ordered `artifacts`; empty-outcome
+    /// frames when no result is delivered) — same extension and verification
+    /// as [`ExecResponse::result_binding_sig_v2`]. ADDITIVE;
+    /// `#[serde(default)]` for back-compat.
+    #[serde(default)]
+    pub result_binding_sig_v2: String,
 }
 
 /// `GET /v1/attestation/key` response body — the published well-known

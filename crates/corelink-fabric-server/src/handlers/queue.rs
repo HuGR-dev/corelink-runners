@@ -55,7 +55,7 @@ use corelink_fabric_api::{ApiError, TriggerRequest, TriggerResponse};
 use corelink_runners_contracts::RunnerState;
 
 use crate::app::AppState;
-use crate::attestation::{build_attestation, sign_result_binding};
+use crate::attestation::{build_attestation, sign_result_binding, sign_result_binding_v2};
 use crate::auth::error_response;
 use crate::exec::run_check;
 
@@ -217,11 +217,13 @@ pub(crate) async fn trigger(
                 vec![format!("tenant:{tenant}")],
             );
             let result_binding_sig = sign_result_binding(state.signer.as_ref(), &result);
+            let result_binding_sig_v2 = sign_result_binding_v2(state.signer.as_ref(), &result);
             let response = TriggerResponse {
                 item_id: req.entry.item_id,
                 result,
                 attestation,
                 result_binding_sig,
+                result_binding_sig_v2,
             };
             // Memoize the ATTESTED response for duplicate delivery — under
             // the insertion cap (module docs: at the cap, dedup degrades to

@@ -340,12 +340,18 @@ impl LeaseLedger for InMemoryLedger {
 /// File-backed ledger: append-only JSONL journal + replay-on-open.
 ///
 /// **The restart-survival oracle** for CP1's
-/// `ledger_survives_process_restart`: every `put`/`transition` appends one
-/// JSON line (flushed before returning); `open` replays the journal,
-/// last-record-per-lease wins. A corrupt journal line refuses to open
-/// (fail-closed — never a silently truncated state machine). The production
-/// Postgres impl is a later WP per ratified decision #3; this impl pins the
-/// durability semantics it must match.
+/// `ledger_survives_process_restart`: every `put`/`transition`/`remove`
+/// appends one JSON line and **fsyncs it to disk** ([`File::sync_all`]) before
+/// returning, so durability holds across power-loss — not merely across a
+/// graceful process exit. (`std::fs::File::flush()` is a no-op for a bare
+/// `File`, so a flush alone would NOT be durable; see
+/// [`FileLedger::append_line`].) `open` replays the journal,
+/// last-record-per-lease wins. A torn/un-parseable TRAILING record (a crash
+/// mid-append) is tolerated: the committed prefix is recovered and the torn
+/// tail truncated; an un-parseable record in the MIDDLE (valid records after
+/// it) is real corruption and refuses to open (fail-closed — never a silently
+/// truncated state machine). The production Postgres impl is a later WP per
+/// ratified decision #3; this impl pins the durability semantics it must match.
 #[derive(Debug)]
 pub struct FileLedger {
     path: PathBuf,
@@ -379,23 +385,71 @@ enum JournalLine {
 
 impl FileLedger {
     /// Open (or create) the journal at `path` and replay it.
+    ///
+    /// **Torn trailing record tolerance.** A crash mid-append (or mid-fsync)
+    /// can leave a partial/un-parseable line at the very END of the journal. A
+    /// torn record that is the LAST non-empty line is recoverable: the prefix
+    /// before it is fully committed state, so we replay the prefix, DROP the
+    /// torn tail, and physically truncate the journal to the last good record
+    /// (so the next append starts on a clean line). A parse error on any line
+    /// that is FOLLOWED by a later valid record is real corruption in the
+    /// middle of committed history — that still fail-closes (refusing to open),
+    /// because silently skipping it would lose committed state.
     pub fn open(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         let path = path.as_ref().to_path_buf();
         let mut index = InMemoryLedger::new();
         if path.exists() {
             let raw = std::fs::read_to_string(&path)
                 .map_err(|e| anyhow::anyhow!("cannot read ledger journal {path:?}: {e}"))?;
+
+            // Collect the non-empty journal lines with their byte offsets so we
+            // can both (a) tell a TRAILING parse failure from a MIDDLE one and
+            // (b) truncate at the last good record if the tail is torn.
+            struct PhysLine<'a> {
+                lineno: usize,
+                byte_start: usize,
+                text: &'a str,
+            }
+            let mut phys: Vec<PhysLine> = Vec::new();
+            let mut offset = 0usize;
             for (n, line) in raw.lines().enumerate() {
+                let byte_start = offset;
+                // `lines()` strips the line terminator; advance the offset past
+                // this line and its `\n` (good enough for the LF journal we
+                // write — a trailing line with no `\n` is exactly the torn case).
+                offset += line.len() + 1;
                 if line.trim().is_empty() {
                     continue;
                 }
-                let entry: JournalLine = serde_json::from_str(line).map_err(|e| {
-                    anyhow::anyhow!(
-                        "corrupt ledger journal {path:?} line {}: {e} (fail-closed: refusing \
-                         to open)",
-                        n + 1,
-                    )
-                })?;
+                phys.push(PhysLine {
+                    lineno: n + 1,
+                    byte_start,
+                    text: line,
+                });
+            }
+
+            // Truncation point: byte offset of the torn trailing record, if any.
+            let mut truncate_at: Option<u64> = None;
+            for (i, pl) in phys.iter().enumerate() {
+                let is_last = i + 1 == phys.len();
+                let entry: JournalLine = match serde_json::from_str(pl.text) {
+                    Ok(e) => e,
+                    Err(_) if is_last => {
+                        // Torn TRAILING record: tolerate it — drop the tail and
+                        // mark the journal for truncation to the last good line.
+                        truncate_at = Some(pl.byte_start as u64);
+                        break;
+                    }
+                    Err(e) => {
+                        // Un-parseable record in the MIDDLE (a valid record
+                        // follows it) → real corruption, fail-closed.
+                        return Err(anyhow::anyhow!(
+                            "corrupt ledger journal {path:?} line {}: {e} (un-parseable record \
+                             with valid records after it — fail-closed: refusing to open)",
+                            pl.lineno,
+                        ));
+                    }
+                };
                 // Replay: last write per lease wins (journal is append-only).
                 // A tombstone erases the lease (admission rollback).
                 match entry {
@@ -415,6 +469,22 @@ impl FileLedger {
                     }
                 }
             }
+
+            // Physically drop the torn tail so the next append begins on a
+            // clean line and a second open replays identically.
+            if let Some(len) = truncate_at {
+                let f = OpenOptions::new().write(true).open(&path).map_err(|e| {
+                    anyhow::anyhow!(
+                        "cannot open ledger journal {path:?} to \
+                         truncate torn tail: {e}"
+                    )
+                })?;
+                f.set_len(len).map_err(|e| {
+                    anyhow::anyhow!("cannot truncate torn trailing record in {path:?}: {e}")
+                })?;
+                f.sync_all()
+                    .map_err(|e| anyhow::anyhow!("cannot fsync after truncating {path:?}: {e}"))?;
+            }
         }
         let file = OpenOptions::new()
             .create(true)
@@ -429,13 +499,26 @@ impl FileLedger {
         &self.path
     }
 
+    /// Append one journal line and **fsync it to disk** before returning.
+    ///
+    /// Durability holds across power-loss: `std::fs::File::flush()` is a no-op
+    /// (a bare `File` has no userspace buffer), so it does NOT guarantee the
+    /// bytes reach stable storage — only that they left the process. The
+    /// restart-survival oracle this ledger promises requires the bytes to
+    /// survive a crash, so after the `writeln!` we call
+    /// [`File::sync_all`] to flush both the data and the file metadata to the
+    /// underlying device. One fsync per durable mutation is the correct,
+    /// deliberate cost of a durability oracle; every `put`/`transition`/
+    /// `remove` that returns `Ok` is committed to disk.
     fn append_line(&mut self, entry: &JournalLine) -> anyhow::Result<()> {
         let line = serde_json::to_string(entry)?;
         writeln!(self.file, "{line}")
             .map_err(|e| anyhow::anyhow!("cannot append to ledger journal {:?}: {e}", self.path))?;
+        // fsync: the bytes must reach stable storage before we return Ok, so a
+        // power-loss immediately after a successful mutation still replays it.
         self.file
-            .flush()
-            .map_err(|e| anyhow::anyhow!("cannot flush ledger journal {:?}: {e}", self.path))?;
+            .sync_all()
+            .map_err(|e| anyhow::anyhow!("cannot fsync ledger journal {:?}: {e}", self.path))?;
         Ok(())
     }
 
@@ -546,5 +629,118 @@ impl LeaseLedger for FileLedger {
         // live index so no checkpoint residue outlives the lease.
         self.index.checkpoints.remove(lease_id);
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod torn_journal_tests {
+    // `super::*` already brings `std::io::Write` into scope (module-level
+    // `use std::io::Write as _;`), so `writeln!`/`write!` on a `File` resolve.
+    use super::*;
+
+    /// Unique per-test journal path (mirrors the conformance idiom — no
+    /// tempfile-crate dep in this crate).
+    fn temp_journal(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "corelink-fabric-torn-{tag}-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn held_record(lease_id: &str) -> LeaseRecord {
+        LeaseRecord {
+            lease_id: lease_id.to_string(),
+            tenant: TenantId::new("acme").unwrap(),
+            state: LeaseState::Wire(RunnerState::Held),
+            box_ref: "box-1".to_string(),
+            created_at_ms: 1,
+            updated_at_ms: 1,
+            deadline_ms: Some(1000),
+        }
+    }
+
+    /// One serialized `Record` journal line (without the trailing newline).
+    fn record_line(rec: &LeaseRecord) -> String {
+        serde_json::to_string(&JournalLine::Record(rec.clone())).unwrap()
+    }
+
+    // (a) Valid prefix + torn TRAILING line → opens, recovers the prefix,
+    //     drops the torn tail, and physically truncates the journal.
+    #[test]
+    fn torn_trailing_line_is_tolerated_and_truncated() {
+        let path = temp_journal("trailing");
+        let a = held_record("lease-a");
+        let b = held_record("lease-b");
+
+        // Two good records, then a torn (truncated mid-JSON, no newline) tail.
+        {
+            let mut f = File::create(&path).unwrap();
+            writeln!(f, "{}", record_line(&a)).unwrap();
+            writeln!(f, "{}", record_line(&b)).unwrap();
+            let torn = &record_line(&a)[..10]; // a partial, un-parseable line
+            write!(f, "{torn}").unwrap(); // NB: no newline — the torn case
+            f.sync_all().unwrap();
+        }
+
+        // Opens (does not fail-closed) and recovers exactly the good prefix.
+        let ledger = FileLedger::open(&path).expect("torn trailing tail must be tolerated");
+        assert!(
+            ledger.get("lease-a").unwrap().is_some(),
+            "prefix lease-a recovered"
+        );
+        assert!(
+            ledger.get("lease-b").unwrap().is_some(),
+            "prefix lease-b recovered"
+        );
+
+        // The torn tail was physically truncated: the on-disk journal is now
+        // exactly the two good lines, and a SECOND open replays identically
+        // (no torn record left to trip over).
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        let good_lines: Vec<&str> = on_disk.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(
+            good_lines.len(),
+            2,
+            "torn tail truncated to the 2 good lines"
+        );
+        for l in &good_lines {
+            serde_json::from_str::<JournalLine>(l).expect("every surviving line parses");
+        }
+        let reopened = FileLedger::open(&path).expect("second open after truncation");
+        assert!(reopened.get("lease-a").unwrap().is_some());
+        assert!(reopened.get("lease-b").unwrap().is_some());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // (b) A torn/un-parseable record in the MIDDLE (valid records after it) is
+    //     real corruption → still a hard error (committed state must not be
+    //     silently lost).
+    #[test]
+    fn torn_middle_record_still_hard_errors() {
+        let path = temp_journal("middle");
+        let a = held_record("lease-a");
+        let b = held_record("lease-b");
+
+        {
+            let mut f = File::create(&path).unwrap();
+            writeln!(f, "{}", record_line(&a)).unwrap();
+            writeln!(f, "{{ this is not valid json").unwrap(); // corrupt MIDDLE line
+            writeln!(f, "{}", record_line(&b)).unwrap(); // a valid record FOLLOWS it
+            f.sync_all().unwrap();
+        }
+
+        let err = FileLedger::open(&path).expect_err("mid-journal corruption must fail-closed");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("refusing to open"),
+            "error must be the fail-closed refusal, got: {msg}"
+        );
+
+        let _ = std::fs::remove_file(&path);
     }
 }

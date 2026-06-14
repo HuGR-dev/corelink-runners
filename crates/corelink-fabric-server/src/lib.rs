@@ -31,7 +31,8 @@ pub use app::{
     app_with_registry,
 };
 pub use attestation::{
-    build_attestation, result_binding_preimage, sign_result_binding, verify_execution,
+    build_attestation, result_binding_preimage, result_binding_preimage_v2, sign_result_binding,
+    sign_result_binding_v2, verify_execution, verify_execution_v2,
 };
 pub use auth::{BearerPat, StaticTokenStore, TokenStore, TokenStoreError};
 pub use cloud_exec::{

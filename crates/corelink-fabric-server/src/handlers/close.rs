@@ -83,6 +83,7 @@ use corelink_runners_contracts::{IntentMetrics, RunnerState, TokenCounts};
 use crate::app::AppState;
 use crate::attestation::{attest_close_result, attest_no_result};
 use crate::auth::error_response;
+use crate::exec::compute_memo_key;
 use crate::handlers::envelope::HookRegistry;
 
 /// 404 with the frozen body — identical for "does not exist" and "exists
@@ -165,6 +166,31 @@ pub(crate) async fn close(
             );
         }
     };
+
+    // ── 3b. memo_key integrity (audit P1): if the close delivers a
+    // CheckResult, its `memo_key` MUST be the frozen function of its own input
+    // axes — `lower_hex(SHA-256(LP(tree_hash) ‖ LP(def_digest) ‖
+    // LP(toolchain_digest)))`. The fabric signs (attests) the client-supplied
+    // result downstream; a result whose memo_key LIES about its input axes
+    // would be attested as if honest, poisoning any memo lookup keyed on it.
+    // We never attest such a result: validate against `compute_memo_key`
+    // (the same single-sourced formula the exec path uses) and fail closed on
+    // mismatch BEFORE any side effect (teardown / close machinery / ledger).
+    if let Some(result) = &req.check_result {
+        let expected = compute_memo_key(
+            &result.tree_hash,
+            &result.def_digest,
+            &result.toolchain_digest,
+        );
+        if result.memo_key != expected {
+            return error_response(
+                ApiError::Invalid,
+                "check_result.memo_key does not match its own input axes \
+                 (tree_hash/def_digest/toolchain_digest) under the frozen \
+                 memo-key formula: refusing to attest a result whose memo_key lies",
+            );
+        }
+    }
 
     // ── 4. TEARDOWN FIRST (WP-FIX-CLOSE-LEAK). Delete the provider box and
     // unbind it BEFORE the lease is terminalized — the reaper's proven
@@ -269,7 +295,7 @@ pub(crate) async fn close(
     // none gets the honest all-empty "no result claimed" chain — both
     // REQUIRED fields, so an unattested close is unrepresentable.
     let principal = vec![format!("tenant:{tenant}")];
-    let (attestation, result_binding_sig) = match &req.check_result {
+    let (attestation, result_binding_sig, result_binding_sig_v2) = match &req.check_result {
         Some(result) => attest_close_result(state.signer.as_ref(), result, principal),
         None => attest_no_result(state.signer.as_ref(), principal),
     };
@@ -286,6 +312,7 @@ pub(crate) async fn close(
             check_result: req.check_result,
             attestation,
             result_binding_sig,
+            result_binding_sig_v2,
         }),
     )
         .into_response()
