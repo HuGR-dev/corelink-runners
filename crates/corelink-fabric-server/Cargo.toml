@@ -41,6 +41,12 @@ tower      = { workspace = true }
 # the persistent PgLedger PRIMARY KEY can never collide across restarts or
 # instances (the in-memory monotonic counter could).
 uuid       = { workspace = true }
+# WP-BROKER: RS256 JWT signing for the GitHub-App runner-registration broker
+# (ADR-0007 C1). `ring` is already in Cargo.lock (rustls' crypto provider via
+# ureq's TLS) — naming it here as a direct dep adds ZERO new crates. The crypto
+# is quarantined behind the broker's `AppJwtSigner` trait (only `RingRsaJwtSigner`
+# touches `ring`), so the mint flow tests need no real RSA key.
+ring       = { workspace = true }
 # Same-workspace path deps (house law allows these; the crates.io-only rule in
 # deny.toml governs EXTERNAL deps): the FROZEN API vocabulary (paths, DTOs,
 # error semantics), the control-plane core types (TenantId), the frozen

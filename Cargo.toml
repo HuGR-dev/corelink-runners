@@ -66,3 +66,11 @@ tokio-postgres-rustls = "=0.13.0"
 # cross-instance PRIMARY KEY collision on the mint). MIT/Apache-2.0; v4-only
 # feature set (pulls `getrandom` for the RNG).
 uuid = { version = "=1.23.3", features = ["v4"] }
+# RS256 signing for the GitHub-App runner-registration broker (WP-BROKER,
+# ADR-0007 C1). `ring`'s `RSA_PKCS1_SHA256` IS the RS256 algorithm GitHub App
+# auth requires. `ring` is ALREADY in the lock (rustls's crypto provider, via
+# ureq's TLS) — naming it as a direct dep adds ZERO new crates. The RS256
+# signing is quarantined behind the broker's `AppJwtSigner` trait (named only in
+# `RingRsaJwtSigner`), so the mint FLOW is testable with a mock signer — no real
+# RSA key in any test. MIT/ISC/OpenSSL — crates.io registry, deny.toml-clean.
+ring = "=0.17.14"
