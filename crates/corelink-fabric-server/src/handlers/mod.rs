@@ -15,3 +15,4 @@ pub mod leases;
 pub mod metrics;
 pub mod occupancy;
 pub mod queue;
+pub mod usage;
