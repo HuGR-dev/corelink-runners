@@ -23,12 +23,29 @@
 //! `TenantPlan` through whatever M2+ contract tooling provisions it, never
 //! through this fixed table.
 //!
-//! TODO(owner): the `rate_ceiling_per_min` column is a **derived M1 placeholder
-//! pending product sign-off** — `pricing.md` defines no acquire-rate ceiling
-//! (it bounds compute with a vCPU-h/mo hard ceiling instead, not a per-minute
-//! rate dimension). corelink-server's model likewise has no per-minute rate
-//! dimension, so we keep this field optional/derived on our side: it is set to
-//! `max_concurrency * 10`. Ratify or replace before M2 self-serve GA.
+//! ### `rate_ceiling_per_min` is an ABUSE RAIL, not a price (RATIFIED 2026-06-14)
+//!
+//! `rate_ceiling_per_min` is **NOT a billing dimension** and there is no
+//! per-tier rate table — by design. `pricing.md` is explicit: *"Flat by
+//! concurrency, never per-minute. Minutes unlimited."* The only two tier limits
+//! that price anything are (1) the **concurrency cap** (the `§2` ladder,
+//! transcribed verbatim below) and (2) the **vCPU-h/mo compute ceiling** (the
+//! COGS wall). A per-minute *price* would directly violate the product's
+//! load-bearing inversion of GitHub Actions' per-minute model.
+//!
+//! This field limits acquire-**REQUEST** throughput (how many `POST /acquire`
+//! attempts/min a tenant may fire) — a DoS / hammering guard on the API, never a
+//! charge. It is **derived from purchased concurrency**: `max_concurrency * 10`,
+//! i.e. ~10 acquire-attempts per minute per slot the tenant bought. That is
+//! generous and proportional (a 20-slot Starter gets 200/min), so it is never
+//! the binding limit in honest use — only a runaway client trips it.
+//!
+//! **Decision (tech-lead, ratified 2026-06-14):** keep the `* 10` derivation as
+//! the M1+ abuse rail. There is nothing for product to "sign off" here because
+//! it is not a price; inventing a per-tier rate table would contradict
+//! `pricing.md`. If abuse telemetry ever shows the rail is mis-tuned, it is a
+//! one-line operational adjustment, not a pricing change. (A tenant under
+//! genuine abuse pressure can also be clamped live via `set_plan` — see below.)
 //!
 //! ## No caching layer — deliberate
 //!
@@ -75,9 +92,9 @@ impl PlanTier {
 
 /// The tier → cap table: `(max_concurrency, rate_ceiling_per_min)`.
 ///
-/// Concurrency is the `pricing.md §2` ladder verbatim; the rate ceiling is the
-/// derived M1 placeholder documented at module level (`max_concurrency * 10`,
-/// TODO(owner) before M2 GA).
+/// Concurrency is the `pricing.md §2` ladder verbatim. The rate ceiling is the
+/// ratified acquire-request abuse rail `max_concurrency * 10` — NOT a price (see
+/// module docs: pricing is flat-concurrency, never per-minute).
 pub fn plan_for(tier: PlanTier) -> (u32, u32) {
     match tier {
         PlanTier::Starter => (20, 200),
