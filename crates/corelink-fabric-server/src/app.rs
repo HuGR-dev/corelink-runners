@@ -256,6 +256,26 @@ pub struct AppState {
     /// reads (WP-ATT1 scope note: FC2/FC3 pending, the acquire-pinned
     /// digest IS the image identity at M1).
     pub(crate) images: Arc<Mutex<HashMap<String, String>>>,
+    /// Direct-CI runner-fleet broker (ADR-0007 Stage A). `Some` ONLY when the
+    /// composition root wired a GitHub App broker from `FABRIC_GITHUB_APP_*`
+    /// (via [`with_runner_broker`](Self::with_runner_broker)); `None` (the
+    /// [`AppState::new`] default) means runner mode is OFF — an
+    /// `AcquireRequest.runner = Some(..)` is rejected `400` at admission, and the
+    /// classic hugit check-exec path is byte-for-byte unchanged. Holds a `dyn`
+    /// broker so the mint (a 3-leg GitHub exchange) is injected and mockable.
+    pub(crate) runner_broker: Option<Arc<dyn crate::runner_broker::RunnerRegistrationBroker>>,
+    /// Lease ids provisioned as direct-CI RUNNER leases (ADR-0007). A
+    /// fabric-internal marker table — mirrors [`images`](Self::images) — so the
+    /// frozen `RunnerLease` and the ledger `LeaseRecord` carry NO runner-mode
+    /// field (no wire-contract drift). Recorded at acquire-finalize
+    /// ([`mark_runner_lease`](Self::mark_runner_lease)); read by the exec handler
+    /// to REFUSE `/exec` on a runner lease ([`is_runner_lease`](Self::is_runner_lease)) —
+    /// a runner lease runs its own ephemeral GitHub Actions agent, there is no
+    /// check-exec box to run a `CheckDef` in. GC'd by
+    /// [`forget_lease`](Self::forget_lease) on EVERY terminal path — normal
+    /// close, cancel, and the reaper sweep — so the set stays bounded by active
+    /// runner leases.
+    pub(crate) runner_leases: Arc<Mutex<std::collections::HashSet<String>>>,
     /// The §13 capture-hook registry: registered at acquire, unregistered
     /// at close or reap. Shared instance: `app_full` layers this onto the
     /// HTTP Extension stack so both the handlers AND the reaper reference
@@ -361,6 +381,10 @@ impl AppState {
             signer: Arc::new(FabricSigner::new_from_bytes(&DEV_FABRIC_KEY_SEED)),
             ingest_signer: Arc::new(IngestSigner::new(DEV_INGEST_SECRET.to_vec())),
             images: Arc::new(Mutex::new(HashMap::new())),
+            // Runner mode DEFAULT-OFF: no broker, empty marker set. The
+            // composition root opts in via `with_runner_broker` (ADR-0007).
+            runner_broker: None,
+            runner_leases: Arc::new(Mutex::new(std::collections::HashSet::new())),
             hook_registry: Arc::new(HookRegistry::default()),
             slot_meter: Arc::new(Mutex::new(SlotMeter::new())),
             // Default-off: no observability key → the occupancy route 404s.
@@ -548,6 +572,45 @@ impl AppState {
         self
     }
 
+    /// Wire the direct-CI runner-fleet registration broker (ADR-0007 Stage A),
+    /// enabling runner mode. With a broker present, an `AcquireRequest.runner =
+    /// Some(..)` mints a JIT runner config via this broker, forces the lease's
+    /// `net_policy` to `"egress-runner"`, builds the spec through
+    /// [`ContainerSpec::from_runner_lease`](corelink_runner::lease::ContainerSpec::from_runner_lease),
+    /// and injects the config into the box env. Absent (the [`AppState::new`]
+    /// default) → runner acquires are rejected `400` and the check-exec path is
+    /// unchanged (default-off). The production composition root builds a
+    /// [`GitHubAppBroker`](crate::runner_broker) from `FABRIC_GITHUB_APP_*`; tests
+    /// pass a [`MockBroker`](crate::runner_broker::MockBroker).
+    #[must_use]
+    pub fn with_runner_broker(
+        mut self,
+        broker: Arc<dyn crate::runner_broker::RunnerRegistrationBroker>,
+    ) -> Self {
+        self.runner_broker = Some(broker);
+        self
+    }
+
+    /// Mark `lease_id` as a direct-CI runner lease (ADR-0007). Idempotent; a
+    /// poisoned lock is recovered (the marker is advisory — exec also fails
+    /// closed on a held lease with no image, so a lost marker never opens a
+    /// hole). Recorded at acquire-finalize, after a runner box is provisioned.
+    pub(crate) fn mark_runner_lease(&self, lease_id: &str) {
+        self.runner_leases
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(lease_id.to_string());
+    }
+
+    /// Whether `lease_id` was provisioned as a runner lease — the exec handler
+    /// REFUSES `/exec` on these (a runner lease has no check-exec box).
+    pub(crate) fn is_runner_lease(&self, lease_id: &str) -> bool {
+        self.runner_leases
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains(lease_id)
+    }
+
     /// Record the lease's pinned image digest at acquire (the validated
     /// `AcquireRequest.image_digest`) — the attestation path's image
     /// identity (WP-ATT1).
@@ -678,6 +741,12 @@ impl AppState {
     /// removes the lease from the `held()` reap set.
     pub(crate) fn forget_lease(&self, lease_id: &str) {
         self.images
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(lease_id);
+        // GC the runner-mode marker (ADR-0007) on the same teardown path, so the
+        // marker set stays bounded by active runner leases.
+        self.runner_leases
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(lease_id);
@@ -868,4 +937,63 @@ fn capture(template: &str) -> String {
 /// Liveness: 200 `"ok"`, no auth, no tenant data.
 async fn health() -> &'static str {
     "ok"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use corelink_fabric::InMemoryLedger;
+
+    fn bare_state() -> AppState {
+        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
+            Arc::new(Mutex::new(InMemoryLedger::new()));
+        AppState::new(
+            ledger,
+            Arc::new(StaticPlans::default()),
+            Arc::new(SystemClock),
+        )
+    }
+
+    /// Runner mode is DEFAULT-OFF: a fresh state has no broker and marks nothing.
+    #[test]
+    fn runner_mode_is_default_off() {
+        let state = bare_state();
+        assert!(state.runner_broker.is_none(), "no broker by default");
+        assert!(
+            !state.is_runner_lease("lease-x"),
+            "no lease is a runner lease by default"
+        );
+    }
+
+    /// `forget_lease` GCs the ADR-0007 runner marker AND the image side table —
+    /// the regression lock for the close-path marker leak (adversarial P1).
+    #[test]
+    fn forget_lease_gcs_the_runner_marker_and_image() {
+        let state = bare_state();
+        state.mark_runner_lease("lease-r");
+        state.record_image("lease-r", "alpine@sha256:abc");
+        assert!(state.is_runner_lease("lease-r"), "marked before forget");
+        assert!(state.image_of("lease-r").is_some(), "image before forget");
+
+        state.forget_lease("lease-r");
+
+        assert!(
+            !state.is_runner_lease("lease-r"),
+            "forget_lease must GC the runner marker (no unbounded growth on close)"
+        );
+        assert!(
+            state.image_of("lease-r").is_none(),
+            "forget_lease must GC the image side table"
+        );
+    }
+
+    /// `mark_runner_lease` is idempotent and isolated to the marked id.
+    #[test]
+    fn mark_runner_lease_is_idempotent_and_scoped() {
+        let state = bare_state();
+        state.mark_runner_lease("lease-a");
+        state.mark_runner_lease("lease-a");
+        assert!(state.is_runner_lease("lease-a"));
+        assert!(!state.is_runner_lease("lease-b"), "other ids unaffected");
+    }
 }

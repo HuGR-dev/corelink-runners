@@ -132,6 +132,7 @@ async fn acquire(h: &Harness, bearer: &str) -> String {
         net_policy: "isolated".to_string(),
         tmp_root: "/work/tmp".to_string(),
         expiry_ms: TTL_MS,
+        runner: None,
     };
     let response = h
         .app

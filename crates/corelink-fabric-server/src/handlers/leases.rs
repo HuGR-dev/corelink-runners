@@ -38,7 +38,8 @@ use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use corelink_fabric::{LeaseRecord, LeaseState, SlotEventKind, TenantId};
 use corelink_fabric_api::{
-    AcquireRequest, AcquireResponse, ApiError, CancelResponse, StatusResponse, paths,
+    AcquireRequest, AcquireResponse, ApiError, CancelResponse, RunnerSpec, RunnerTargetDto,
+    StatusResponse, paths,
 };
 use corelink_runner::envelope::{CaptureHook, EnvelopeConfig, MetricsCollector};
 use corelink_runner::lease::ContainerSpec;
@@ -62,6 +63,26 @@ pub(crate) struct MintedLease {
     pub spec: ContainerSpec,
 }
 
+/// Map the wire-DTO runner spec ([`RunnerSpec`]) to the broker's
+/// [`RunnerScope`](crate::runner_broker::RunnerScope) (ADR-0007). The DTO lives
+/// in `corelink-fabric-api` (no dependency on the broker module) and the broker
+/// scope lives in this crate, so the translation happens HERE at the seam — a
+/// pure 1:1 structural map, no policy.
+fn runner_scope_from_dto(runner: &RunnerSpec) -> crate::runner_broker::RunnerScope {
+    use crate::runner_broker::{RunnerScope, RunnerTarget};
+    let target = match &runner.target {
+        RunnerTargetDto::Repo { owner, repo } => RunnerTarget::Repo {
+            owner: owner.clone(),
+            repo: repo.clone(),
+        },
+        RunnerTargetDto::Org { org } => RunnerTarget::Org { org: org.clone() },
+    };
+    RunnerScope {
+        target,
+        labels: runner.labels.clone(),
+    }
+}
+
 /// 404 with the frozen body — used identically for "does not exist" and
 /// "exists for another tenant", so the response is never an existence oracle.
 fn not_found() -> Response {
@@ -82,6 +103,19 @@ pub(crate) async fn acquire(
     Json(req): Json<AcquireRequest>,
 ) -> Response {
     let now_ms = state.clock.now_ms();
+
+    // ── 0. Runner-mode availability (ADR-0007 direct-CI fleet). A runner
+    // acquire (`req.runner == Some`) requires a wired registration broker. If
+    // none is configured, reject `400` HERE — before the cap source is
+    // consulted and before any slot is reserved — so an impossible runner
+    // request never consumes admission or a concurrency slot. Default-off: with
+    // no broker, runner mode is simply unavailable on this fabric. ──
+    if req.runner.is_some() && state.runner_broker.is_none() {
+        return error_response(
+            ApiError::Invalid,
+            "runner mode is not enabled on this fabric (no runner registration broker configured)",
+        );
+    }
 
     // ── 1. CapGate BEFORE anything (contract §6: preventive admission). ──
     // Resolve the plan through the token-aware seam: token-keyed backends
@@ -189,13 +223,26 @@ pub(crate) async fn acquire(
         }
 
         // ── 2. Mint the RunnerLease (the wire shape the caller gets back). ──
+        //
+        // RUNNER MODE (ADR-0007): when `req.runner` is set, the lease's
+        // `net_policy` is FORCED to `"egress-runner"` server-side — the caller's
+        // `net_policy` field is ignored. This is the single source of the egress
+        // grant: it is set HERE on the fabric, never derived from caller input,
+        // and it is the exact sentinel `ContainerSpec::from_runner_lease`
+        // requires (the C2 floor, #69). A check-exec lease keeps the caller's
+        // `net_policy` verbatim (byte-for-byte the prior behaviour).
+        let is_runner = req.runner.is_some();
         let lease_id = state.mint_lease_id();
         let lease = RunnerLease {
             lease_id: lease_id.clone(),
             principal_chain: vec![format!("tenant:{tenant}")],
             path_set: vec![req.tmp_root.clone()],
             expiry: now_ms.saturating_add(req.expiry_ms),
-            net_policy: req.net_policy.clone(),
+            net_policy: if is_runner {
+                "egress-runner".to_string()
+            } else {
+                req.net_policy.clone()
+            },
             tmp_root: req.tmp_root.clone(),
             state: RunnerState::Held,
         };
@@ -204,8 +251,20 @@ pub(crate) async fn acquire(
         // contact AND before reserving the slot: unpinned image, non-allowed
         // net_policy, or an unsafe tmp_root (shell-injection guard) → 400
         // `invalid`. Build the spec once here; it is reused by the provision
-        // step below. ──
-        let mut spec = match ContainerSpec::from_lease(&lease, &req.image_digest) {
+        // step below.
+        //
+        // The constructor is the egress fork: a RUNNER lease is built through
+        // `from_runner_lease` (allow_egress=true, run_on_create=true, requires
+        // the `egress-runner` sentinel), a check-exec lease through `from_lease`
+        // (no_network=true, fail-closed). Egress is granted ONLY by the runner
+        // constructor — never inferred from the `net_policy` string (the C2
+        // red-team invariant). ──
+        let spec_result = if is_runner {
+            ContainerSpec::from_runner_lease(&lease, &req.image_digest)
+        } else {
+            ContainerSpec::from_lease(&lease, &req.image_digest)
+        };
+        let mut spec = match spec_result {
             Ok(s) => s,
             Err(e) => return error_response(ApiError::Invalid, &format!("lease rejected: {e:#}")),
         };
@@ -226,8 +285,15 @@ pub(crate) async fn acquire(
         // (soon-dead) lease's own ingest endpoint — no tenant takeover. The
         // ingest endpoint recomputes + constant-time verifies this same token.
         // See `crate::ingest_token`.
-        let ingest_token = state.ingest_signer.ingest_token(&lease_id);
-        crate::envelope_inject::inject_ingest_env(&mut spec, &lease_id, &ingest_token);
+        // RUNNER MODE (ADR-0007): a runner box runs GitHub Actions, not the
+        // hugit §13 agent loop — it never streams trajectory to our ingest
+        // endpoint, so the §13.2 ingest URL/token is NOT injected (no unused
+        // credential on the box). The runner's JIT config is injected later, in
+        // `finalize_admitted_lease`, after the egress box is provisioned.
+        if !is_runner {
+            let ingest_token = state.ingest_signer.ingest_token(&lease_id);
+            crate::envelope_inject::inject_ingest_env(&mut spec, &lease_id, &ingest_token);
+        }
 
         // ── CONCURRENCY CAP — atomic reserve. Insert this acquire's `Pending`
         // record IFF the tenant is strictly under `max_concurrency`. The count
@@ -317,9 +383,44 @@ pub(crate) async fn finalize_admitted_lease(
     let MintedLease {
         lease_id,
         lease,
-        spec,
+        mut spec,
     } = minted;
     let now_ms = state.clock.now_ms();
+
+    // ── 3a. RUNNER MODE (ADR-0007): mint the ephemeral runner's JIT
+    // registration config and inject it into the box env BEFORE provisioning,
+    // so the runner self-registers one-shot on boot (`run_on_create`). The mint
+    // is a 3-leg GitHub exchange (network I/O) — it runs HERE, in finalize,
+    // outside any ledger lock (the reserve block already dropped its guard). On
+    // mint failure it fails closed exactly like a provision failure: roll back
+    // the reserved `Pending` (no box exists yet, so teardown is a no-op but is
+    // mirrored for uniformity) and return `503` — a runner lease is NEVER handed
+    // out without its registration config. ──
+    if let Some(runner) = req.runner.as_ref() {
+        // A runner acquire only reaches finalize when a broker is wired (guarded
+        // at admission, step 0). Defensive: a missing broker here is an internal
+        // inconsistency → fail closed, never a config-less runner box.
+        let Some(broker) = state.runner_broker.clone() else {
+            state.teardown_lease(&lease_id).await;
+            if let Ok(mut ledger) = state.ledger.lock() {
+                let _ = ledger.remove(&lease_id);
+            }
+            return fail_closed("runner lease reached finalize with no registration broker");
+        };
+        let scope = runner_scope_from_dto(runner);
+        match broker.mint_jit_config(&scope).await {
+            Ok(jitconfig) => {
+                crate::runner_inject::inject_runner_jitconfig(&mut spec, &jitconfig);
+            }
+            Err(e) => {
+                state.teardown_lease(&lease_id).await;
+                if let Ok(mut ledger) = state.ledger.lock() {
+                    let _ = ledger.remove(&lease_id);
+                }
+                return fail_closed(&format!("runner registration mint failed: {e}"));
+            }
+        }
+    }
 
     // ── 3b. Provision the container. The slot is ALREADY reserved (Pending in
     // the ledger). A provision failure here means NO Held lease is ever handed
@@ -408,6 +509,15 @@ pub(crate) async fn finalize_admitted_lease(
     // The validated pinned image digest IS recorded server-side: it is the
     // image identity the attestation path (WP-ATT1, contract §7) reads at exec.
     state.record_image(&lease_id, &req.image_digest);
+
+    // ── 5a. RUNNER MODE marker (ADR-0007): record this lease as a runner lease
+    // so the exec handler REFUSES `/exec` on it (no check-exec box exists). A
+    // fabric-internal marker only — the wire `RunnerLease` carries no runner
+    // field. Recorded AFTER a successful Held transition, GC'd by the reaper's
+    // `forget_lease`.
+    if req.runner.is_some() {
+        state.mark_runner_lease(&lease_id);
+    }
 
     // ── 5b. §13 hook registration (WP-ENVELOPE-WIRE): open a CaptureHook
     // for the newly-Held lease and register it in the shared HookRegistry
@@ -782,6 +892,7 @@ mod tests {
             net_policy: "isolated".to_string(),
             tmp_root: "/work/tmp".to_string(),
             expiry_ms: 60_000,
+            runner: None,
         }
     }
 

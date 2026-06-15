@@ -50,6 +50,7 @@ fn acquire_body(image: &str) -> String {
         net_policy: "isolated".to_string(),
         tmp_root: "/work/tmp".to_string(),
         expiry_ms: 60_000,
+        runner: None,
     })
     .expect("AcquireRequest serializes")
 }
