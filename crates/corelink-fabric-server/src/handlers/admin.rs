@@ -240,7 +240,13 @@ pub async fn onboard_tenant(
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
-    // Validate the tenant id.
+    // Validate the tenant id. Cap the length BEFORE `TenantId::new` (audit P2):
+    // even though this route is operator-key-gated, bound the input so a runaway
+    // value can't allocate / grow the in-memory registry unboundedly. 128 is far
+    // above any real tenant id ([a-z0-9-]).
+    if body.tenant.len() > 128 {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
     let tenant = match TenantId::new(&body.tenant) {
         Ok(t) => t,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),

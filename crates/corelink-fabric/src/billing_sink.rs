@@ -213,6 +213,19 @@ impl PgBillingSink {
 
         let handle = Handle::try_current()
             .map_err(|e| anyhow::anyhow!("PgBillingSink: must be built on a Tokio runtime: {e}"))?;
+        // FAIL-CLOSED flavor check (audit P2): `block_on` bridges sync→async with
+        // `block_in_place`, which PANICS on a current-thread runtime. Today the
+        // server is multi-thread (bare `#[tokio::main]`), but that is a non-local
+        // invariant; assert it HERE at connect (boot) so a misconfiguration is a
+        // clear boot error, never a first-export-tick panic that silently kills
+        // the detached billing loop.
+        if handle.runtime_flavor() != tokio::runtime::RuntimeFlavor::MultiThread {
+            anyhow::bail!(
+                "PgBillingSink requires a multi-thread Tokio runtime (its sync→async \
+                 bridge uses block_in_place); the current runtime flavor is {:?}",
+                handle.runtime_flavor()
+            );
+        }
         Ok(Self { pool, handle })
     }
 
