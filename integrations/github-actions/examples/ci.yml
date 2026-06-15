@@ -1,0 +1,69 @@
+# Example: run a build + test suite on CoreLink fabric
+#
+# Prerequisites:
+#   1. Store your CoreLink PAT as a repository secret named CORELINK_PAT.
+#      (Settings → Secrets and variables → Actions → New repository secret)
+#   2. Until corelink is published to crates.io / has a release artifact, build
+#      the binary in an earlier step (see "Build corelink CLI" below).
+#
+# Pricing: flat concurrency, never per-minute.  You buy N parallel runners
+# and minutes are unlimited.  A re-run whose result is memoized returns from
+# cache in milliseconds — you are never billed as if it re-ran.
+
+name: CI on CoreLink
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    # Run on the standard GitHub runner only to build the CLI itself.
+    # Everything else executes on the CoreLink fabric.
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ------------------------------------------------------------------
+      # TEMPORARY: build the corelink binary until a release artifact exists.
+      # Replace this block with a download step once releases are published.
+      # ------------------------------------------------------------------
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build corelink CLI
+        working-directory: ${{ github.workspace }}
+        run: |
+          cargo build -p corelink-cli --release --locked
+          echo "${{ github.workspace }}/target/release" >> "$GITHUB_PATH"
+      # ------------------------------------------------------------------
+
+      - name: Run tests on CoreLink fabric
+        uses: ./integrations/github-actions   # use humangr-labs/corelink-runners/integrations/github-actions@v0.1.0 in production
+        with:
+          url: ${{ vars.CORELINK_URL }}        # e.g. https://runners.corelink.dev — store as a repo variable
+          pat: ${{ secrets.CORELINK_PAT }}
+          check: "cargo test --workspace --locked"
+          check-id: "cargo-test"
+          # Image MUST include a sha256 digest — unpinned images are rejected
+          # by the fabric (X4 supply-chain floor enforced before box contact).
+          image: "ubuntu@sha256:a6d2b38300ce017add71440577d5b0a90460d0602a9f4920e2cae943d53c8fac"
+          verify: "true"
+
+      - name: Report attestation
+        if: always()
+        run: |
+          echo "lease-id  : ${{ steps.run-tests.outputs.lease-id }}"
+          echo "exit      : ${{ steps.run-tests.outputs.exit }}"
+          echo "verified  : ${{ steps.run-tests.outputs.verified }}"
