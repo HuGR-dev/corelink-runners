@@ -259,6 +259,27 @@ Items that cannot close without owner input or a hugit-side move:
       `corelink-ledger` addon; `instances=2` proven cap-safe live. Durable deadline +
       envelope checkpoint added (ADR-0004). The single-instance-in-memory constraint
       is RETIRED.
+- [x] **Durable billing exporter** _(Wave-6, 2026-06-14)_ — `PgBillingSink` +
+      `billing_export::spawn_export_loop` drain the in-memory `SlotMeter` journal into
+      a durable `billing_events` table (`FABRIC_BILLING_EXPORT_INTERVAL_SECS`,
+      DEFAULT-OFF, requires pg). Exactly-once by DB PRIMARY KEY
+      `(tenant, lease_id, kind, at_ms)` + `ON CONFLICT DO NOTHING` → re-export free,
+      multi-instance-safe (instances converge to the union). Snapshot-under-lock then
+      persist-outside-lock (no lock across the DB write); `journal_dropped` delta is an
+      ops alarm. Raw occupancy ONLY — no minutes/cost math (charter, source-pinned).
+      **This is the producer the CoreLink slot-billing flip consumes.**
+- [x] **Runtime tenant onboarding (control plane)** _(Wave-6, 2026-06-14)_ —
+      `POST /internal/v1/admin/tenants` (`FABRIC_ADMIN_KEY`, DEFAULT-OFF, static mode)
+      registers/updates a tenant's plan in a live `CompositePlanSource` (admin registry
+      OVER the bootstrap source) — a new tenant becomes admittable with NO restart;
+      the bootstrap tenant keeps its arbitrary cap. Constant-time auth, idempotent.
+- [x] **BoxRegistry orphan GC** _(Wave-6, 2026-06-14)_ — the reaper now unbinds the
+      registry entry on expiry (after teardown), closing the unbounded-growth leak on
+      orphaned leases (client crash/drop before close).
+- [ ] **Rate-ceiling tier formula** _(OWNER decision, before M2 GA)_ —
+      `rate_ceiling_per_min` is derived `max_concurrency × 10` pending product sign-off
+      (`plans.rs`). Ratify the formula OR supply a real per-tier table; the cap gate is
+      live and enforces whatever ships, so a wrong value mis-limits paying tenants.
 - [ ] **Redeploy the live fabric to current `main`** _(owner action)_ — the live
       Northflank service is several PRs behind (it predates the audit P0 fix + the
       hardening). A NEW BUILD of `main` deploys the `result_binding_sig_v2` P0 fix +
@@ -272,11 +293,15 @@ Items that cannot close without owner input or a hugit-side move:
 - [ ] **`hugit-c9-` container-prefix rename decision** — ops-visible seam change;
       not a local cleanup.
 - [ ] **ATT3 secrets seam** — awaits the hugit payload contract (decision #7).
-- [~] **Full §13 exec-time intent emission** — the §13.4 vector landed (#5); the
-      live capture path is now the **§13.2 turn-feed (in flight, above)** — the
-      ingest endpoint that streams in-box agent trajectory into the `CaptureHook`.
-      Phase 2b (per-turn durable checkpoint) rides it. Hugit's agent adopting the
-      ingest endpoint is the last mile.
+- [x] **Full §13 exec-time intent emission** _(CONFIRMED COMPLETE 2026-06-14, Wave-6
+      survey)_ — the §13.4 vector landed (#5); the live capture path is the **§13.2
+      turn-feed**: the ingest endpoint streams in-box agent trajectory into the
+      `CaptureHook`, progressive poll drains mid-exec, Phase 2b writes a per-turn
+      durable checkpoint, close finalizes exactly-once, and the 3-tier abnormal flush
+      recovers partial metrics cross-instance. Regression-tested (collector snapshot
+      non-destructiveness + `acceptance_envelope_e2e` acquire→ingest→poll→close).
+      Remaining is purely cross-repo: **hugit's agent adopting the ingest endpoint**
+      (the runner + contract seam are done).
 
 ## Firecracker / own-metal (deferred — off critical path)
 
