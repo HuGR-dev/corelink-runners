@@ -451,6 +451,7 @@ async fn acquire_fails_closed_when_provision_fails() {
         net_policy: "isolated".to_string(),
         tmp_root: "/work/tmp".to_string(),
         expiry_ms: 60_000,
+        runner: None,
     };
     let resp = router
         .oneshot(json_req(
@@ -551,6 +552,7 @@ async fn provision_runs_only_after_admission() {
         net_policy: "isolated".to_string(),
         tmp_root: "/work/tmp".to_string(),
         expiry_ms: 60_000,
+        runner: None,
     };
     let resp = router
         .oneshot(json_req(
@@ -620,6 +622,7 @@ async fn close_invokes_teardown() {
         net_policy: "isolated".to_string(),
         tmp_root: "/work/tmp".to_string(),
         expiry_ms: 60_000,
+        runner: None,
     };
     let acq_resp = router
         .clone()
@@ -765,6 +768,7 @@ async fn http_default_off_acquire_ok_exec_503() {
         net_policy: "isolated".to_string(),
         tmp_root: "/work/tmp".to_string(),
         expiry_ms: 60_000,
+        runner: None,
     };
     let acq_resp = router
         .clone()
@@ -842,6 +846,7 @@ async fn http_exec_on_unbound_lease_503() {
         net_policy: "isolated".to_string(),
         tmp_root: "/work/tmp".to_string(),
         expiry_ms: 60_000,
+        runner: None,
     };
     let acq_resp = router
         .clone()
@@ -921,6 +926,7 @@ async fn http_split_registry_exec_503() {
         net_policy: "isolated".to_string(),
         tmp_root: "/work/tmp".to_string(),
         expiry_ms: 60_000,
+        runner: None,
     };
     let acq_resp = router
         .clone()
@@ -1003,6 +1009,7 @@ async fn http_orphan_teardown_on_post_provision_failure() {
         net_policy: "isolated".to_string(),
         tmp_root: "/work/tmp".to_string(),
         expiry_ms: 60_000,
+        runner: None,
     };
     let resp = router
         .oneshot(json_req(
@@ -1078,6 +1085,7 @@ async fn http_close_teardown_failure_is_fail_closed_and_retryable() {
         net_policy: "isolated".to_string(),
         tmp_root: "/work/tmp".to_string(),
         expiry_ms: 60_000,
+        runner: None,
     };
     let acq_resp = router
         .clone()

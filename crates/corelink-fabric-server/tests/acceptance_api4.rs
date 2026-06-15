@@ -157,6 +157,7 @@ async fn acquire_raw(h: &Harness, bearer: &str) -> Response {
         net_policy: "isolated".to_string(),
         tmp_root: "/work/tmp".to_string(),
         expiry_ms: TTL_MS,
+        runner: None,
     };
     h.app
         .clone()

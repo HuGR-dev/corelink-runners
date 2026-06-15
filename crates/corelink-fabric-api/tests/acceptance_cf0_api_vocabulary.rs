@@ -156,6 +156,7 @@ fn dtos_roundtrip_and_deny_unknown() {
             net_policy: "isolated".to_string(),
             tmp_root: "/tmp/lease-0001".to_string(),
             expiry_ms: 300_000,
+            runner: None,
         },
         "AcquireRequest",
     );

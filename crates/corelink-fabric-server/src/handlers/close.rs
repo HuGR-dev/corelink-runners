@@ -308,6 +308,16 @@ pub(crate) async fn close(
     registry.unregister(&lease_id);
     state.record_slot(&lease_id, &tenant, SlotEventKind::Released);
 
+    // GC the fabric-internal side tables (`images` + the ADR-0007
+    // `runner_leases` marker) for this now-terminal lease. The reaper's
+    // `forget_lease` only ever runs for leases it sweeps from the `held()` set —
+    // a Released lease is NEVER returned there, so without this call a normally
+    // closed lease would leak its side-table entries forever (unbounded growth
+    // on the close hot path). Gated on the winning transition, so a lost race
+    // never double-GCs. `forget_lease`'s own hook-unregister is idempotent with
+    // the `registry.unregister` above (no-op on an already-dropped entry).
+    state.forget_lease(&lease_id);
+
     // ── 7. Attest the close (WP-ATT1+2 / ATT2: the attestation travels
     // with the CheckResult on the SAME atomic close payload as the §13.1
     // metrics). A close that delivers a result gets a chain over that

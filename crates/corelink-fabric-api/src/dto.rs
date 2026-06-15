@@ -38,6 +38,50 @@ pub struct AcquireRequest {
     /// the absolute `RunnerLease.expiry` (Unix epoch ms). Expiry is
     /// fail-closed (contract §1).
     pub expiry_ms: u64,
+
+    /// Direct-CI runner mode (ADR-0007). `Some` → provision an ephemeral
+    /// GitHub Actions runner for this lease (net_policy is forced to
+    /// `"egress-runner"` server-side, ignoring `net_policy` above). `None`
+    /// (the default) → the classic hugit check-exec lease. Additive +
+    /// default-off: omitting it is byte-identical to the prior request.
+    #[serde(default)]
+    pub runner: Option<RunnerSpec>,
+}
+
+/// Direct-CI runner-mode acquire spec (ADR-0007 — the ephemeral GitHub Actions
+/// runner fleet on-ramp). When `AcquireRequest.runner` is `Some`, the fabric
+/// provisions an EPHEMERAL GitHub Actions runner for this lease (the lease's
+/// `net_policy` is forced to `"egress-runner"` server-side and a JIT
+/// registration config is injected into the box) instead of a hermetic
+/// check-exec box. `None` (the default) is the classic hugit check-exec path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerSpec {
+    /// What the runner registers against — a single repo or a whole org.
+    pub target: RunnerTargetDto,
+    /// Labels the runner advertises (routed to by GitHub Actions `runs-on`).
+    /// May be empty; baked into the JIT config server-side at mint time.
+    #[serde(default)]
+    pub labels: Vec<String>,
+}
+
+/// The registration target for a runner-mode lease — externally tagged
+/// (`{"repo":{"owner":"…","repo":"…"}}` or `{"org":{"org":"…"}}`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerTargetDto {
+    /// A single repository: `{owner}/{repo}`.
+    Repo {
+        /// Repository owner (user or org login).
+        owner: String,
+        /// Repository name.
+        repo: String,
+    },
+    /// An organization: any repo in `{org}`.
+    Org {
+        /// Organization login.
+        org: String,
+    },
 }
 
 /// `POST /v1/leases` response body — the granted lease.
@@ -297,4 +341,59 @@ pub struct AttestationKeyResponse {
     /// (RFC 4648 §4, padded) — the wire form `verify_chain`/`verify_raw`
     /// accept.
     pub ed25519_pubkey_b64: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn acquire_request_without_runner_defaults_to_none() {
+        let json = r#"{
+            "image_digest": "sha256:abc",
+            "net_policy": "hermetic",
+            "tmp_root": "/tmp/run",
+            "expiry_ms": 60000
+        }"#;
+        let req: AcquireRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.runner, None);
+    }
+
+    #[test]
+    fn acquire_request_with_repo_runner_roundtrips() {
+        let req = AcquireRequest {
+            image_digest: "sha256:abc".into(),
+            net_policy: "hermetic".into(),
+            tmp_root: "/tmp/run".into(),
+            expiry_ms: 60000,
+            runner: Some(RunnerSpec {
+                target: RunnerTargetDto::Repo {
+                    owner: "humangr-labs".into(),
+                    repo: "corelink-runners".into(),
+                },
+                labels: vec!["corelink".into()],
+            }),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"repo\""), "json: {json}");
+        assert!(json.contains("\"corelink\""), "json: {json}");
+        let back: AcquireRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(req, back);
+    }
+
+    #[test]
+    fn runner_target_org_serializes_externally_tagged() {
+        let target = RunnerTargetDto::Org {
+            org: "humangr-labs".into(),
+        };
+        let json = serde_json::to_string(&target).unwrap();
+        assert_eq!(json, r#"{"org":{"org":"humangr-labs"}}"#);
+    }
+
+    #[test]
+    fn runner_spec_labels_default_to_empty() {
+        let json = r#"{"target":{"repo":{"owner":"o","repo":"r"}}}"#;
+        let spec: RunnerSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(spec.labels, Vec::<String>::new());
+    }
 }

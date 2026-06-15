@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-06-15 — Direct-CI runner-lease lifecycle wired (ADR-0007 Stage A)
+
+- **feat(runner-lease): acquire-time runner-fleet wiring — `AcquireRequest.runner`,
+  broker-gated JIT mint, egress fork, `/exec` refusal.** A runner-mode acquire
+  (`runner: Some`) forces the lease's `net_policy` to `"egress-runner"` server-side,
+  builds the box through `ContainerSpec::from_runner_lease` (the C2 egress floor, #69),
+  mints an ephemeral GitHub Actions JIT registration config via the (default-off)
+  `RunnerRegistrationBroker`, and injects it into the box env as
+  `CORELINK_RUNNER_JITCONFIG`. `/exec` is refused on a runner lease (it runs its own
+  ephemeral agent). The mint runs outside the ledger lock and fails closed — a mint
+  failure frees the reserved slot and never provisions a config-less egress box. Both
+  the immediate and the queued (`FABRIC_ADMISSION_MODE=queue`) admission paths converge
+  on the shared `finalize_admitted_lease`, so the JIT mint covers both.
+- **Default-off, byte-unchanged check path.** With no broker wired (`with_runner_broker`),
+  a runner acquire is rejected `400` before any slot is reserved, and the classic hugit
+  check-exec lease is byte-for-byte unchanged (still hermetic `no_network`, §13.2 ingest
+  token injected, no JIT config). Egress is granted ONLY via the runner constructor,
+  never inferred from a caller `net_policy` string (proven end-to-end in
+  `acceptance_runner_lease`).
+- **Adversarial-review fix:** `forget_lease` now runs on the normal `/close` path, GC'ing
+  the runner-lease marker (and closing a latent `images` side-table leak) — the reaper
+  only sweeps `Held` leases, so a closed lease was never reclaimed.
+- **Deferred (creds-gated):** the production `GitHubAppBroker`-from-env composition wiring
+  (App private key + `ureq` transport) — the lifecycle is fully exercised today via
+  `MockBroker`.
+
 ### 2026-06-14 — M1 last-mile: billing exporter, tenant onboarding, registry GC, CLI, contract v1.4.0
 
 - **feat(fabric): Wave-6 M1 last-mile — durable billing exporter + runtime tenant onboarding +

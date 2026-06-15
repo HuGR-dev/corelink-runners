@@ -93,6 +93,29 @@ pub(crate) async fn exec(
         (record.box_ref, record.deadline_ms)
     };
 
+    // ── 2a. RUNNER MODE refusal (ADR-0007 direct-CI fleet). A runner lease runs
+    // its OWN ephemeral GitHub Actions agent (self-registered via the injected
+    // JIT config, run-on-create); there is no check-exec box to run a `CheckDef`
+    // in, and the legal matrix has no exec transition for it. Refuse `/exec`
+    // with 400 `invalid`. This runs AFTER the tenant-scope 404 + Held gate (so
+    // it never leaks existence and only ever fires for a tenant's own held
+    // lease) and BEFORE the deadline/image machinery. This marker check is the
+    // AUTHORITATIVE refusal, not a redundant nicety: the cloud provisioner DOES
+    // bind the runner box into the `BoxRegistry`, so without this gate
+    // `run_check` could resolve a live container and drive a command against the
+    // GitHub Actions runner box. The marker is always set on the runner-acquire
+    // success path and survives lock poisoning (`is_runner_lease` recovers via
+    // `into_inner`), so it can never silently fail open. The marker is
+    // fabric-internal (`AppState::is_runner_lease`); the wire `RunnerLease`
+    // carries no runner field. ──
+    if state.is_runner_lease(&lease_id) {
+        return error_response(
+            ApiError::Invalid,
+            "this is a direct-CI runner lease: it runs its own ephemeral GitHub Actions agent; \
+             /exec is not available on a runner lease",
+        );
+    }
+
     // ── 3. Expired-at-exec-time, BEFORE any execution: an expired job
     // performs zero work and stores nothing, ever — even if the expiry
     // sweep has not yet marked the ledger.

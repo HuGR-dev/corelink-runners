@@ -29,6 +29,7 @@ pub mod handlers;
 pub mod ingest_token;
 pub mod reaper;
 pub mod runner_broker;
+pub mod runner_inject;
 pub mod server;
 
 pub use admission::{
@@ -59,3 +60,7 @@ pub use exec::{
 pub use handlers::close::close_abnormal;
 pub use handlers::envelope::HookRegistry;
 pub use ingest_token::IngestSigner;
+pub use runner_broker::{
+    BrokerError, JitRunnerConfig, MockBroker, RunnerRegistrationBroker, RunnerScope, RunnerTarget,
+};
+pub use runner_inject::{RUNNER_JITCONFIG_ENV, inject_runner_jitconfig};

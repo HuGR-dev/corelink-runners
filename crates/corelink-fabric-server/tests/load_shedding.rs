@@ -133,6 +133,7 @@ async fn acquire(app: &Router) -> String {
         net_policy: "isolated".to_string(),
         tmp_root: "/work/tmp".to_string(),
         expiry_ms: 600_000,
+        runner: None,
     };
     let response = app
         .clone()
