@@ -1047,7 +1047,7 @@ mod queue_tests {
             tokio::spawn(async move { router2.oneshot(acquire_req("pat-alpha")).await.unwrap() });
 
         // Let the spawned acquire reach the queue, then assert it is parked.
-        for _ in 0..50 {
+        for _ in 0..400 {
             if state
                 .admission_queue
                 .as_ref()
@@ -1057,7 +1057,7 @@ mod queue_tests {
             {
                 break;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(5)).await; // real-time poll: robust under CI scheduling load (was yield_now, which races)
         }
         assert_eq!(
             state
@@ -1140,12 +1140,12 @@ mod queue_tests {
         let (ra, rb) = (router.clone(), router.clone());
         let wa = tokio::spawn(async move { ra.oneshot(acquire_req("pat-alpha")).await.unwrap() });
         let wb = tokio::spawn(async move { rb.oneshot(acquire_req("pat-beta")).await.unwrap() });
-        for _ in 0..100 {
+        for _ in 0..400 {
             let q = state.admission_queue.as_ref().unwrap();
             if q.pending(&tid("alpha")) == 1 && q.pending(&tid("beta")) == 1 {
                 break;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(5)).await; // real-time poll: robust under CI scheduling load (was yield_now, which races)
         }
 
         // Free both slots.
@@ -1330,7 +1330,7 @@ mod queue_tests {
         let ra = router.clone();
         let waiter =
             tokio::spawn(async move { ra.oneshot(acquire_req("pat-alpha")).await.unwrap() });
-        for _ in 0..100 {
+        for _ in 0..400 {
             if state
                 .admission_queue
                 .as_ref()
@@ -1340,7 +1340,7 @@ mod queue_tests {
             {
                 break;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(5)).await; // real-time poll: robust under CI scheduling load (was yield_now, which races)
         }
         // Free the slot and dispatch (now_ms advanced so the wait is > 0).
         let c = Request::builder()
@@ -1400,11 +1400,11 @@ mod queue_tests {
         let ra = router.clone();
         let waiter =
             tokio::spawn(async move { ra.oneshot(acquire_req("pat-alpha")).await.unwrap() });
-        for _ in 0..100 {
+        for _ in 0..400 {
             if queue.pending(&tid("alpha")) == 1 {
                 break;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(5)).await; // real-time poll: robust under CI scheduling load (was yield_now, which races)
         }
         let cancel = Request::builder()
             .method("POST")
@@ -1509,7 +1509,7 @@ mod queue_tests {
         let router2 = router.clone();
         let parked =
             tokio::spawn(async move { router2.oneshot(acquire_req("pat-alpha")).await.unwrap() });
-        for _ in 0..100 {
+        for _ in 0..400 {
             if state
                 .admission_queue
                 .as_ref()
@@ -1519,7 +1519,7 @@ mod queue_tests {
             {
                 break;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(5)).await; // real-time poll: robust under CI scheduling load (was yield_now, which races)
         }
         assert_eq!(
             state
