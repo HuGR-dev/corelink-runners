@@ -4,11 +4,15 @@
 //! [`BillingSink`](corelink_fabric::BillingSink) every interval. The journal is
 //! snapshotted UNDER the meter lock (a cheap clone), then persisted OUTSIDE the
 //! lock — so a slow DB write never blocks the acquire / close / reap paths that
-//! record slot events. The sink's `INSERT … ON CONFLICT DO NOTHING` (keyed on
-//! the natural PK) makes re-exporting the resident journal window free and
-//! multi-instance-safe; a failed tick loses nothing because the journal is
-//! non-destructive (the window is re-tried next tick, as long as it has not aged
-//! out — which is what the `journal_dropped` alarm surfaces).
+//! record slot events. On a SUCCESSFUL persist the window is DRAINED from the
+//! journal (`SlotMeter::drain_through` by the export watermark), so exported
+//! events never occupy the bounded `JOURNAL_CAP` and FIFO-evict a not-yet-
+//! exported event under a burst — closing a silent-revenue-loss path. The sink's
+//! `INSERT … ON CONFLICT DO NOTHING` (keyed on the natural PK) keeps it
+//! idempotent + multi-instance-safe; a FAILED tick drains nothing, so the window
+//! survives and is re-tried next tick (and the idempotent upsert double-counts
+//! nothing). `journal_dropped` still alarms if un-exported events ever age out
+//! under genuine overload (export not keeping up with emission).
 //!
 //! This is the OPT-IN server-side half of WP-A: the sink + the export-once logic
 //! live in `corelink-fabric` (`billing_sink.rs`); the spawn + flag-gating
@@ -56,21 +60,33 @@ pub fn spawn_export_loop(
             //    no lock across an `.await` (the only await is `tick.tick()`
             //    above), so catching here is sound.
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                // Snapshot UNDER the lock (cheap clone), release BEFORE the DB
-                // write — no lock is ever held across the persist I/O.
-                let (events, now_dropped) = {
+                // Snapshot UNDER the lock (cheap clone) + the export watermark,
+                // release BEFORE the DB write — no lock is ever held across the
+                // persist I/O.
+                let (events, watermark, now_dropped) = {
                     let m = meter.lock().unwrap_or_else(|p| p.into_inner());
                     (
                         m.journal().iter().cloned().collect::<Vec<_>>(),
+                        m.export_watermark(),
                         m.journal_dropped(),
                     )
                 };
 
-                // Persist OUTSIDE the lock. A failed tick is logged and retried
-                // next tick (nothing is lost: the journal is non-destructive and
-                // the upsert is idempotent).
-                if let Err(e) = sink.persist(&events, now) {
-                    eprintln!("WARN billing-export: persist failed (retry next tick): {e}");
+                // Persist OUTSIDE the lock. On success, DRAIN the persisted window
+                // from the journal (re-lock briefly — still no lock across I/O) so
+                // exported events cannot occupy `JOURNAL_CAP` slots and FIFO-evict
+                // a not-yet-exported event under a burst (the silent-revenue-loss
+                // fix). On failure, log + retry next tick: nothing is drained, the
+                // window survives (non-destructive on failure), and the upsert is
+                // idempotent so the retry double-counts nothing.
+                match sink.persist(&events, now) {
+                    Ok(_) => {
+                        let mut m = meter.lock().unwrap_or_else(|p| p.into_inner());
+                        m.drain_through(watermark);
+                    }
+                    Err(e) => {
+                        eprintln!("WARN billing-export: persist failed (retry next tick): {e}");
+                    }
                 }
                 now_dropped
             }));
@@ -163,6 +179,20 @@ mod tests {
         // The 3 journal events were persisted exactly once (idempotent across
         // the multiple ticks that ran over the same resident window).
         assert_eq!(sink.len(), 3, "all journal events persisted, no duplicates");
+
+        // REVENUE-LOSS FIX: a successful export DRAINS the persisted window, so
+        // the journal is empty afterwards — exported events no longer occupy the
+        // bounded cap (where they could FIFO-evict a not-yet-exported event). The
+        // monotonic recorded count is unchanged (drain never decrements it).
+        {
+            let m = meter.lock().unwrap();
+            assert_eq!(m.journal().len(), 0, "exported window must be drained");
+            assert_eq!(
+                m.export_watermark(),
+                3,
+                "total recorded is monotonic across drain"
+            );
+        }
     }
 
     /// A sink that PANICS on its first `persist`, then delegates to an inner
