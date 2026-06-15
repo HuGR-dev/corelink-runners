@@ -26,6 +26,25 @@ permissions:
   contents: write   # required to create the GH Release and upload assets
 
 jobs:
+  # Reads the publish secrets in a `run` step (the ONLY place `secrets` is
+  # allowed — NOT in a job/step `if:`) and emits booleans. Publish jobs then gate
+  # on `needs.gate.outputs.*`, which IS valid in `if:`. This is the correct
+  # skip-safe pattern: with no token the publish jobs are genuinely SKIPPED.
+  gate:
+    name: Detect publish secrets
+    runs-on: [self-hosted, corelink-builder]
+    outputs:
+      has_npm: ${{ steps.detect.outputs.has_npm }}
+      has_pypi: ${{ steps.detect.outputs.has_pypi }}
+    steps:
+      - id: detect
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
+        run: |
+          if [ -n "$NPM_TOKEN" ]; then echo "has_npm=true" >> "$GITHUB_OUTPUT"; else echo "has_npm=false" >> "$GITHUB_OUTPUT"; fi
+          if [ -n "$PYPI_TOKEN" ]; then echo "has_pypi=true" >> "$GITHUB_OUTPUT"; else echo "has_pypi=false" >> "$GITHUB_OUTPUT"; fi
+
   binary:
     name: Build + publish binary (aarch64-apple-darwin)
     runs-on: [self-hosted, corelink-builder]
@@ -74,9 +93,10 @@ jobs:
   publish-npm:
     name: Publish @corelink/verify to npm
     runs-on: [self-hosted, corelink-builder]
-    # SAFE NO-OP: job is skipped entirely when NPM_TOKEN secret is absent.
-    # The owner opts in by adding NPM_TOKEN in repo Settings → Secrets.
-    if: ${{ secrets.NPM_TOKEN != '' }}
+    # SAFE NO-OP: skipped entirely when NPM_TOKEN is absent (gate output is
+    # 'false'). The owner opts in by adding NPM_TOKEN in repo Settings → Secrets.
+    needs: gate
+    if: needs.gate.outputs.has_npm == 'true'
     steps:
       - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0  # v6.0.3
 
@@ -100,9 +120,10 @@ jobs:
   publish-pypi:
     name: Publish corelink-verify to PyPI
     runs-on: [self-hosted, corelink-builder]
-    # SAFE NO-OP: job is skipped entirely when PYPI_TOKEN secret is absent.
-    # The owner opts in by adding PYPI_TOKEN in repo Settings → Secrets.
-    if: ${{ secrets.PYPI_TOKEN != '' }}
+    # SAFE NO-OP: skipped entirely when PYPI_TOKEN is absent (gate output is
+    # 'false'). The owner opts in by adding PYPI_TOKEN in repo Settings → Secrets.
+    needs: gate
+    if: needs.gate.outputs.has_pypi == 'true'
     steps:
       - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0  # v6.0.3
 
