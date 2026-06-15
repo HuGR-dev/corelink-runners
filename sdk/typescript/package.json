@@ -29,7 +29,7 @@
     "attestation",
     "verify"
   ],
-  "license": "MIT",
+  "license": "UNLICENSED",
   "repository": {
     "type": "git",
     "url": "https://github.com/humangr-labs/corelink-runners"

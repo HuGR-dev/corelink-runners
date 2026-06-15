@@ -86,6 +86,18 @@ and desired before the first publish.
 organisation-managed PyPI trusted publisher is in place) before the secret
 is added.
 
+### SDK license / distribution rights
+This repo is **private with no `LICENSE` file** — i.e. proprietary, all rights
+reserved. Both SDK packages therefore declare a proprietary license
+(`UNLICENSED` for npm, `Proprietary` for PyPI) as the **safe default**. A
+permissive license (e.g. MIT) would *grant redistribution rights* and must NOT
+be set without the owner's explicit decision.
+
+**Decision:** owner must choose the SDK license before any public publish —
+keep proprietary (private-registry / restricted only), or adopt a permissive
+license and add a top-level `LICENSE` file. Until then the packages stay
+proprietary and publish only to a restricted/private scope.
+
 ---
 
 ## 4. Version sync
