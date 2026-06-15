@@ -1,0 +1,125 @@
+# release.yml — tag-triggered release pipeline
+#
+# Triggered ONLY on tags matching v* (e.g. v0.1.0). NEVER runs on PR or branch push.
+# This means it cannot interfere with normal CI (ci.yml covers PR + main pushes).
+#
+# Jobs:
+#   binary        — builds corelink-cli, creates a GitHub Release, uploads the
+#                   aarch64-apple-darwin binary + sha256 checksum.
+#   publish-npm   — publishes @corelink/verify to npm; SKIPPED (safe no-op) unless
+#                   NPM_TOKEN secret is set by the owner.
+#   publish-pypi  — publishes corelink-verify to PyPI; SKIPPED (safe no-op) unless
+#                   PYPI_TOKEN secret is set by the owner.
+#
+# NOTE: x86_64/Linux binaries are a deliberate follow-up. Cross-compilation from
+# the self-hosted aarch64 mac builder is not attempted in this initial pipeline.
+# Add a linux-binary job targeting an x86_64 Linux self-hosted runner once available.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # required to create the GH Release and upload assets
+
+jobs:
+  binary:
+    name: Build + publish binary (aarch64-apple-darwin)
+    runs-on: [self-hosted, corelink-builder]
+    steps:
+      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0  # v6.0.3
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable (pinned)
+        with:
+          toolchain: "1.96.0"
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+
+      - name: ensure cargo bin on PATH
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Build corelink-cli (release)
+        run: cargo build -p corelink-cli --release --locked
+
+      - name: Compute sha256 checksum
+        run: |
+          shasum -a 256 target/release/corelink | awk '{print $1}' \
+            > target/release/corelink-aarch64-apple-darwin.sha256
+          echo "Checksum:"
+          cat target/release/corelink-aarch64-apple-darwin.sha256
+
+      - name: Create GitHub Release and upload assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          # Create the release (idempotent: --clobber overwrites if re-run)
+          gh release create "${TAG}" \
+            --title "corelink ${TAG}" \
+            --generate-notes \
+            --verify-tag \
+            || true
+          # Upload binary
+          gh release upload "${TAG}" \
+            target/release/corelink#corelink-aarch64-apple-darwin \
+            --clobber
+          # Upload checksum
+          gh release upload "${TAG}" \
+            target/release/corelink-aarch64-apple-darwin.sha256#corelink-aarch64-apple-darwin.sha256 \
+            --clobber
+
+  publish-npm:
+    name: Publish @corelink/verify to npm
+    runs-on: [self-hosted, corelink-builder]
+    # SAFE NO-OP: job is skipped entirely when NPM_TOKEN secret is absent.
+    # The owner opts in by adding NPM_TOKEN in repo Settings → Secrets.
+    if: ${{ secrets.NPM_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0  # v6.0.3
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Publish to npm
+        working-directory: sdk/typescript
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          npm install --ignore-scripts
+          # --access restricted keeps @corelink/verify private-scoped.
+          # Owner decision: change to --access public when @corelink org is
+          # registered on npmjs and public distribution is confirmed.
+          npm publish --access restricted
+
+  publish-pypi:
+    name: Publish corelink-verify to PyPI
+    runs-on: [self-hosted, corelink-builder]
+    # SAFE NO-OP: job is skipped entirely when PYPI_TOKEN secret is absent.
+    # The owner opts in by adding PYPI_TOKEN in repo Settings → Secrets.
+    if: ${{ secrets.PYPI_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0  # v6.0.3
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build sdist + wheel
+        working-directory: sdk/python
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+
+      - name: Upload to PyPI
+        working-directory: sdk/python
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+        run: twine upload dist/*
