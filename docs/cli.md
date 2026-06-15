@@ -24,6 +24,35 @@ cargo build -p corelink-cli --release
 | `CORELINK_URL` | `smoke`, `verify` | fabric base URL (fallback for `--url` / `--pubkey-url`) |
 | `CORELINK_PAT` | `smoke`, `verify --pubkey-url` | the tenant PAT (Bearer); `verify` needs it only when fetching the key via `--pubkey-url` (the key endpoint is authenticated) — not when passing `--pubkey` directly |
 
+## `corelink run` — execute a job (the customer primitive)
+
+The full job lifecycle in one command: **acquire → exec → verify attestation →
+close**. This is what a customer (or a CI step) actually does — run a check on
+the fabric and *trust the verdict* because the result-binding is verified
+client-side before the exit code is believed.
+
+```sh
+CORELINK_PAT=<tenant-pat> corelink run --url https://<fabric> --check 'cargo test'
+```
+
+| Flag | Meaning |
+|---|---|
+| `--check '<cmd>'` | the shell command to run on the box (required) |
+| `--check-id <id>` | a mnemonic for the check (default `run`) |
+| `--image <ref@sha256:…>` | the box image; **must be sha256-pinned** (default = the pinned smoke image) |
+| `--no-verify` | skip the attestation check (still runs + closes) |
+| `--json` | emit exactly one JSON object on stdout (step lines go to stderr) |
+
+An **unpinned** image is rejected with **exit 2 before any box contact** (the X4
+supply-chain floor). On any error after acquire the lease is best-effort
+cancelled — no lease leaks.
+
+**Exit codes:** `0` = ran, attestation verified (or `--no-verify`), check exit
+`0`; `1` = ran + verified but the check itself failed (exit ≠ 0); `2` =
+attestation **failed to verify** / wire/auth error / unpinned image / acquire
+failed. The `--json` `verified` field is `true` **only** when the binding was
+actually verified — `--no-verify` emits `verified:false` (it never overclaims).
+
 ## `corelink smoke` — verify a live deployment
 
 Automates `docs/deploy/post-redeploy-smoke-checklist.md`. The **default** checks

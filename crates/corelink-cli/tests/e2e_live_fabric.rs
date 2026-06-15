@@ -12,7 +12,7 @@
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
-use corelink_cli::{binding, client::Client, smoke};
+use corelink_cli::{binding, client::Client, run, smoke};
 use corelink_fabric::{InMemoryLedger, LeaseLedger, TenantId, TenantPlan};
 use corelink_fabric_server::{
     AppState, MockLeasedExec, StaticPlans, StaticTokenStore, SystemClock, app,
@@ -161,5 +161,65 @@ fn cli_verifies_a_real_exec_attestation() {
     assert!(
         bad_out.map(|o| !o.verified).unwrap_or(true),
         "a wrong/corrupted key must never verify the attestation"
+    );
+}
+
+/// `corelink run` end-to-end: drives the full acquire→exec→verify→close
+/// lifecycle against a real loopback fabric and asserts exit 0 + verified.
+///
+/// The §13 close ack-window has no subscriber in-test — close is best-effort
+/// with a short timeout, so we do NOT block on it. The exec attestation (v2
+/// binding) is what we verify; the close path is covered by `mock_e2e.rs`.
+#[test]
+fn cli_run_executes_and_verifies_against_live_fabric() {
+    let base = spawn_fabric();
+
+    // Drive `cmd_run` via a synthetic args vec.  We deliberately use
+    // `--no-verify` = false (default) so the full acquire→exec→verify→close
+    // path runs end-to-end. CORELINK_PAT is set in the env just for this test.
+    //
+    // Safety: this test is single-threaded at the point of set_var — it spawns
+    // no other threads between set_var and cmd_run.  Rust 1.81+ marks
+    // set_var unsafe; we acknowledge the precondition here.
+    unsafe {
+        std::env::set_var("CORELINK_PAT", PAT);
+        std::env::set_var("CORELINK_URL", &base);
+    }
+
+    let args: Vec<String> = vec![
+        "corelink".to_string(),
+        "run".to_string(),
+        "--url".to_string(),
+        base.clone(),
+        "--check".to_string(),
+        "echo hello".to_string(),
+        "--check-id".to_string(),
+        "e2e-run-test".to_string(),
+        "--image".to_string(),
+        smoke::PINNED_IMAGE.to_string(),
+    ];
+
+    let exit_code = run::cmd_run(&args).expect("cmd_run must not return Err");
+    assert_eq!(
+        exit_code, 0,
+        "corelink run must exit 0 when exec succeeds and attestation verifies \
+         (got exit code {exit_code})"
+    );
+
+    // Sanity: an unpinned image must be rejected before any box contact (exit 2).
+    let args_unpinned: Vec<String> = vec![
+        "corelink".to_string(),
+        "run".to_string(),
+        "--url".to_string(),
+        base.clone(),
+        "--check".to_string(),
+        "echo hello".to_string(),
+        "--image".to_string(),
+        "alpine:latest".to_string(), // deliberately unpinned
+    ];
+    let unpinned_code = run::cmd_run(&args_unpinned).expect("cmd_run must not Err on unpinned");
+    assert_eq!(
+        unpinned_code, 2,
+        "an unpinned image must produce exit 2 fail-closed before any box contact"
     );
 }
