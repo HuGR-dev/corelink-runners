@@ -29,7 +29,7 @@
 
 # ── Stage 1: runner binary download + checksum verification ──────────────────
 # PIN-AT-BUILD: replace @sha256:<PIN-AT-BUILD> with the resolved digest.
-FROM ubuntu:24.04@sha256:<PIN-AT-BUILD> AS runner-download
+FROM ubuntu:24.04@sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae77ff1dc54 AS runner-download
 
 # GitHub Actions runner release to pin.
 # Verify sha256 from: https://github.com/actions/runner/releases/tag/v2.322.0
@@ -52,7 +52,7 @@ RUN curl -fsSL \
 
 # ── Stage 2: final image ─────────────────────────────────────────────────────
 # PIN-AT-BUILD: same digest as Stage 1 — both stages must use the same base.
-FROM ubuntu:24.04@sha256:<PIN-AT-BUILD>
+FROM ubuntu:24.04@sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae77ff1dc54
 
 LABEL org.opencontainers.image.title="CoreLink ephemeral GitHub Actions runner" \
       org.opencontainers.image.description="One-shot ephemeral runner for the CoreLink fabric (ADR-0007 Stage A)" \
