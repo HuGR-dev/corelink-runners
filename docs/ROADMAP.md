@@ -276,10 +276,14 @@ Items that cannot close without owner input or a hugit-side move:
 - [x] **BoxRegistry orphan GC** _(Wave-6, 2026-06-14)_ — the reaper now unbinds the
       registry entry on expiry (after teardown), closing the unbounded-growth leak on
       orphaned leases (client crash/drop before close).
-- [ ] **Rate-ceiling tier formula** _(OWNER decision, before M2 GA)_ —
-      `rate_ceiling_per_min` is derived `max_concurrency × 10` pending product sign-off
-      (`plans.rs`). Ratify the formula OR supply a real per-tier table; the cap gate is
-      live and enforces whatever ships, so a wrong value mis-limits paying tenants.
+- [x] **Rate-ceiling tier formula** _(RATIFIED 2026-06-14, tech-lead)_ —
+      resolved as a NON-issue: `rate_ceiling_per_min` is **not a price** and there is
+      no per-tier rate table by design (`pricing.md`: *flat by concurrency, never
+      per-minute*). It is an acquire-**request** abuse rail derived from purchased
+      concurrency (`max_concurrency × 10`, ~10 attempts/min/slot — never binding in
+      honest use). Kept as-is; the only real tier limits (concurrency cap + vCPU-h
+      ceiling) are already documented + exact. No owner action; a per-tier rate table
+      would contradict the pricing model.
 - [ ] **Redeploy the live fabric to current `main`** _(owner action)_ — the live
       Northflank service is several PRs behind (it predates the audit P0 fix + the
       hardening). A NEW BUILD of `main` deploys the `result_binding_sig_v2` P0 fix +
