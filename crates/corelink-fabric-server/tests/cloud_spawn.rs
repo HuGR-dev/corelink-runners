@@ -178,6 +178,61 @@ fn provision_binds_container() {
     );
 }
 
+/// A RUNNER spec (`run_on_create=true`) must trigger a RUN right after
+/// create-job (ADR-0007): without it the Northflank job is created but never
+/// runs, so the runner agent never launches (observed live). Asserts spawn
+/// issues exactly two calls and the second is the `…/runs` trigger.
+#[test]
+fn provision_runner_triggers_run_on_create() {
+    let (engine, fake) = make_engine(vec![
+        resp(200, r#"{"data":{"id":"box-runner"}}"#), // create-job
+        resp(200, r#"{"data":{"id":"run1"}}"#),       // trigger-run
+    ]);
+    let reg = BoxRegistry::new();
+    let prov = NorthflankBoxProvisioner::new(engine, reg.clone_handle());
+    let mut spec = pinned_spec("box-runner");
+    // Runner posture: egress, run-on-create (mirrors `from_runner_lease`).
+    spec.no_network = false;
+    spec.allow_egress = true;
+    spec.run_on_create = true;
+
+    prov.provision("lease-runner", &spec)
+        .expect("runner provision must succeed");
+
+    let reqs = fake.all_requests();
+    assert_eq!(
+        reqs.len(),
+        2,
+        "runner spawn must issue create-job + trigger-run, got {} calls",
+        reqs.len()
+    );
+    assert!(
+        reqs[1].url.ends_with("/runs"),
+        "the second call must trigger a run (…/runs), got {}",
+        reqs[1].url
+    );
+    assert_eq!(reqs[1].method, Method::Post, "trigger-run is a POST");
+}
+
+/// A CHECK spec (`run_on_create=false`) must NOT trigger a run at spawn — its
+/// run is driven later by `/exec`. Exactly one call (create-job).
+#[test]
+fn provision_check_does_not_trigger_run_at_spawn() {
+    let (engine, fake) = make_engine(vec![resp(200, r#"{"data":{"id":"box-check"}}"#)]);
+    let reg = BoxRegistry::new();
+    let prov = NorthflankBoxProvisioner::new(engine, reg.clone_handle());
+    let spec = pinned_spec("box-check"); // run_on_create=false by default
+
+    prov.provision("lease-check", &spec)
+        .expect("check provision must succeed");
+
+    assert_eq!(
+        fake.all_requests().len(),
+        1,
+        "a check spawn must issue ONLY create-job (no run trigger at spawn)"
+    );
+}
+
 /// `provision` with a create-job 500 → `Err`; registry stays empty.
 #[test]
 fn provision_fail_closed_leaves_registry_empty() {
