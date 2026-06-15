@@ -125,6 +125,51 @@ impl PlanSource for StaticPlans {
     }
 }
 
+/// A two-tier [`PlanSource`] (WP-C wiring): consult `primary` first, fall back
+/// to `secondary`.
+///
+/// The composition root layers the live admin-onboarding registry
+/// (`handlers::admin::LivePlanRegistry`, tier-capped, mutated at runtime by
+/// `POST /internal/v1/admin/tenants`) OVER the static bootstrap source: a tenant
+/// onboarded at runtime resolves from `primary`, while the bootstrap tenant
+/// (its arbitrary `FABRIC_TENANT_MAX_CONCURRENCY` cap, which a tier enum cannot
+/// express) keeps resolving from `secondary`. An EMPTY `primary` is
+/// behaviourally identical to `secondary` alone — `plan_of` is fail-closed
+/// `None`, so it falls straight through. This is why mounting the composite
+/// unconditionally in static mode is a zero-behaviour-change default.
+pub struct CompositePlanSource {
+    primary: Arc<dyn PlanSource>,
+    secondary: Arc<dyn PlanSource>,
+}
+
+impl CompositePlanSource {
+    /// `primary` is consulted first; `secondary` is the fallback.
+    pub fn new(primary: Arc<dyn PlanSource>, secondary: Arc<dyn PlanSource>) -> Self {
+        Self { primary, secondary }
+    }
+}
+
+impl PlanSource for CompositePlanSource {
+    fn plan_of(&self, tenant: &TenantId) -> Option<TenantPlan> {
+        self.primary
+            .plan_of(tenant)
+            .or_else(|| self.secondary.plan_of(tenant))
+    }
+
+    fn plan_of_resolving(
+        &self,
+        tenant: &TenantId,
+        token: &str,
+    ) -> Result<Option<TenantPlan>, PlanSourceError> {
+        // Primary first; a hard Err (e.g. an unreachable backend) propagates —
+        // fail-closed, never a false fall-through to a no-plan reject.
+        match self.primary.plan_of_resolving(tenant, token)? {
+            Some(plan) => Ok(Some(plan)),
+            None => self.secondary.plan_of_resolving(tenant, token),
+        }
+    }
+}
+
 /// Shared state behind the lease handlers (WP-API2).
 ///
 /// The ledger is THE authority (CP1); the cap gate is a pure decision

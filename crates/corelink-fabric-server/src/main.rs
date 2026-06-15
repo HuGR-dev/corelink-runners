@@ -34,6 +34,12 @@ async fn main() -> anyhow::Result<()> {
         }
         corelink_fabric_server::admission::AdmissionMode::Reject => None,
     };
+    // ── WP-A durable billing exporter — DEFAULT-OFF. Spawned ONLY under
+    // `FABRIC_BILLING_EXPORT_INTERVAL_SECS` (which requires the pg ledger).
+    // Borrows `state` (no clone) BEFORE the reaper consumes it; connect is async
+    // (applies the sink DDL) so it propagates a fail-closed boot error.
+    let billing_handle =
+        corelink_fabric_server::server::maybe_spawn_billing_exporter(&state, &cfg).await?;
     let pending_max_age =
         corelink_fabric_server::reaper::pending_max_age_from_env(|k| std::env::var(k).ok())?;
     let reaper_handle = corelink_fabric_server::reaper::spawn_reaper_with_pending_age(
@@ -109,6 +115,29 @@ async fn main() -> anyhow::Result<()> {
         ),
         None => eprintln!("admission: reject mode (default; immediate-or-reject)"),
     }
+    match &billing_handle {
+        Some(_) => eprintln!(
+            "billing-export: started (FABRIC_BILLING_EXPORT_INTERVAL_SECS set; SlotMeter → \
+             durable billing_events table)"
+        ),
+        None => eprintln!(
+            "billing-export: OFF (set FABRIC_BILLING_EXPORT_INTERVAL_SECS, requires pg ledger, to enable)"
+        ),
+    }
+    // WP-C: report whether runtime tenant onboarding is armed (static mode only).
+    match (&cfg.auth_backend, &cfg.admin_key) {
+        (corelink_fabric_server::server::AuthBackend::Static, Some(_)) => {
+            eprintln!(
+                "admin-onboarding: armed (POST /internal/v1/admin/tenants, FABRIC_ADMIN_KEY set)"
+            )
+        }
+        (corelink_fabric_server::server::AuthBackend::Static, None) => eprintln!(
+            "admin-onboarding: OFF (set FABRIC_ADMIN_KEY to arm POST /internal/v1/admin/tenants)"
+        ),
+        _ => eprintln!(
+            "admin-onboarding: n/a (CoreLink auth backend — plans come from introspection)"
+        ),
+    }
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
@@ -121,6 +150,10 @@ async fn main() -> anyhow::Result<()> {
     }
     // CP4 (ADR-0005): abort the admission loop too (only set under queue mode).
     if let Some(h) = admission_handle {
+        h.abort();
+    }
+    // WP-A: abort the billing exporter (only set under FABRIC_BILLING_EXPORT_*).
+    if let Some(h) = billing_handle {
         h.abort();
     }
     Ok(())

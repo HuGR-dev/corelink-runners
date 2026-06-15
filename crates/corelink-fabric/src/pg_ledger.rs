@@ -115,7 +115,12 @@ pub fn pg_tls_mode_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Res
 /// so a server presenting an untrusted or hostname-mismatched cert is rejected.
 /// A Postgres behind a private CA will (correctly) fail to verify — that is the
 /// documented M1 non-goal, not a bug.
-fn rustls_verify_full_config() -> rustls::ClientConfig {
+///
+/// `pub(crate)` so the durable billing sink ([`crate::billing_sink::PgBillingSink`])
+/// reuses the SAME verify-full posture for its `Require` path rather than
+/// duplicating the trust-anchor setup — there is exactly one TLS config builder
+/// in the crate.
+pub(crate) fn rustls_verify_full_config() -> rustls::ClientConfig {
     let root_store = rustls::RootCertStore {
         roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
     };

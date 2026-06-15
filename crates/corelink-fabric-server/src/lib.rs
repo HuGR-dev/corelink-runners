@@ -19,6 +19,7 @@ pub mod admission;
 pub mod app;
 pub mod attestation;
 pub mod auth;
+pub mod billing_export;
 pub mod cloud_exec;
 pub mod corelink_auth;
 pub mod corelink_plans;
