@@ -291,8 +291,22 @@ Items that cannot close without owner input or a hugit-side move:
       (verify `result_binding_sig_v2` against the published key, guarded by the shared
       conformance vector). Reuses the frozen DTOs (no wire drift). Doubles as the
       automated smoke + the static-backend dogfood entry (no CoreLink flip needed to
-      run a real workload). Quickstart: `docs/cli.md`. Follow-up (deliberate): GH-Actions
-      shim + language SDKs transcribe the CLI's `client`/`binding` modules.
+      run a real workload). Quickstart: `docs/cli.md`.
+- [x] **Adoption surface — `corelink run` + GH Action + verify SDKs** _(2026-06-15,
+      #59/#60)_ — the deferred follow-up, shipped. **`corelink run`** (#59) is the
+      customer primitive: full lifecycle acquire→exec→verify→close in one command,
+      verifying `result_binding_sig_v2` client-side before trusting the verdict
+      (unpinned image → exit 2 before box contact; no lease leak on error; honest
+      `--json verified` field). Lead cold-review hardened it: real SHA-256 `def_digest`
+      (was a mislabelled XOR-fold), and `binding.rs` now uses `verify_strict` to match
+      the server/runner `verify_raw` (audit P2 — verifier-consistency). **GitHub Action +
+      Python (`corelink_verify`) + TypeScript (`@corelink/verify`) SDKs** (#60) transcribe
+      the v2 formula, each locked to the shared `conformance/result_binding_v2.json` so
+      none can drift from the fabric signer; each SDK's golden test imports the SHIPPED
+      module (a real tripwire, not a copy). A 6-agent parallel wave (4 builders + 2
+      adversarial audits); the Wave-6 billing/admin audit came back CLEAN (0 P0/P1).
+      Follow-up (deliberate): a Buildkite plugin + publishing the SDKs/binary to public
+      registries (until then the Action locates `corelink` on PATH).
 - [ ] **Redeploy the live fabric to current `main`** _(owner action)_ — the live
       Northflank service is several PRs behind (it predates the audit P0 fix + the
       hardening). A NEW BUILD of `main` deploys the `result_binding_sig_v2` P0 fix +
