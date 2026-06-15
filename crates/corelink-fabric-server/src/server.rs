@@ -856,6 +856,11 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
     // Arm the internal observability endpoint (default-off: None → 404).
     let state = state.with_observability_key(cfg.observability_key.clone());
 
+    // Direct-CI runner fleet (ADR-0007) — default-off: wires a GitHub-App
+    // registration broker ONLY when FABRIC_GITHUB_APP_* are set. Absent → runner
+    // mode stays off and the check-exec path is byte-unchanged.
+    let state = state.with_runner_broker_from_env();
+
     // AUDIT P1+P2: apply the close ack-window cap and the global in-flight cap.
     let state = state
         .with_close_ack_max_inflight(cfg.close_ack_max_inflight)
