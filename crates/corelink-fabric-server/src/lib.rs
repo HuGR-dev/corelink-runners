@@ -28,6 +28,7 @@ pub mod exec;
 pub mod handlers;
 pub mod ingest_token;
 pub mod reaper;
+pub mod runner_broker;
 pub mod server;
 
 pub use admission::{

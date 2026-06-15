@@ -252,6 +252,7 @@ dependencies = [
  "corelink-fabric-api",
  "corelink-runner",
  "corelink-runners-contracts",
+ "ring",
  "serde",
  "serde_json",
  "sha2 0.10.9",
