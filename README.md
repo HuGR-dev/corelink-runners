@@ -143,7 +143,8 @@ free plan + private repo, no branch protection).
 | [`docs/product/product.md`](docs/product/product.md) | Product: vision, market wedge, user stories, positioning, roadmap |
 | [`docs/product/pricing.md`](docs/product/pricing.md) | Pricing model: full rationale, loss-impossible guarantee, competitive position |
 | [`docs/cli.md`](docs/cli.md) | `corelink` CLI reference (`smoke`, `verify`) |
-| [`docs/spec/hugit-integration-contract.md`](docs/spec/hugit-integration-contract.md) | hugit↔Runners wire contract v1.2.0 — frozen from hugit's side |
+| [`docs/api/v1-reference.md`](docs/api/v1-reference.md) | Full `/v1` HTTP API reference — every endpoint, DTO, auth, status code |
+| [`docs/spec/hugit-integration-contract.md`](docs/spec/hugit-integration-contract.md) | hugit↔Runners wire contract v1.4.0 — frozen from hugit's side |
 | [`docs/spec/corelink-fabric-stub.md`](docs/spec/corelink-fabric-stub.md) | CoreLink-side fabric/scheduler/billing stub |
 | [`docs/deploy/fabric-server.md`](docs/deploy/fabric-server.md) | `corelink-fabricd` env vars and Docker deploy |
 | [`docs/deploy/northflank-postgres-runbook.md`](docs/deploy/northflank-postgres-runbook.md) | Northflank + Postgres production deploy runbook |
