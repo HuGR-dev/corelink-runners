@@ -34,7 +34,7 @@ FROM ubuntu:24.04@sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae
 # GitHub Actions runner release to pin.
 # Verify sha256 from: https://github.com/actions/runner/releases/tag/v2.322.0
 ARG RUNNER_VERSION=2.322.0
-ARG RUNNER_SHA256=b9e5ae22cf85b3aefda6be70cbf94e5d5b24c2bc01d40a1d46ab10de5e3b9ca8
+ARG RUNNER_SHA256=b13b784808359f31bc79b08a191f5f83757852957dd8fe3dbfcc38202ccf5768
 
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
