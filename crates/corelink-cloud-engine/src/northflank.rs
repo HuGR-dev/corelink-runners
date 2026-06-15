@@ -9,7 +9,9 @@
 //! REST exec, and we do not need one).
 //!
 //! ## Security floors (parity with [`DockerEngine`](corelink_runner::isolation))
-//! - **Isolation floor:** `spawn` refuses any spec with `no_network == false`.
+//! - **Isolation floor:** `spawn` refuses any spec with `no_network == false`
+//!   UNLESS it carries the explicit egress grant `allow_egress == true` (only a
+//!   runner lease, ADR-0007); a bare `no_network=false` still fails closed.
 //! - **Supply-chain floor (X4):** `spawn` refuses any image that is not
 //!   content-(digest)-pinned, *before* contacting the provider. There is no
 //!   on-box integrity probe (no box exists); instead the provider pulls strictly
@@ -443,7 +445,10 @@ impl<H: HttpTransport> NorthflankEngine<H> {
             "name": job_name,
             "billing": { "deploymentPlan": self.cfg.deployment_plan },
             "deployment": deployment,
-            "runOnCreate": false,
+            // CHECK leases stay `false` (the fabric drives the command per
+            // `/exec`); a RUNNER lease (ADR-0007) runs its agent entrypoint
+            // immediately at create.
+            "runOnCreate": spec.run_on_create,
             "backoffLimit": 0,
             "activeDeadlineSeconds": self.cfg.active_deadline_secs
         })
@@ -583,7 +588,11 @@ impl<H: HttpTransport> NorthflankEngine<H> {
 impl<H: HttpTransport> Engine for NorthflankEngine<H> {
     fn spawn(&self, spec: &ContainerSpec) -> Result<RunningContainer> {
         // ── Isolation floor (parity with DockerEngine) ────────────────────────
-        if !spec.no_network {
+        // A `no_network == false` spec is admitted ONLY when it also carries the
+        // egress grant `allow_egress == true` — which only `from_runner_lease`
+        // sets (ADR-0007). So a bare `no_network=false` (e.g. a hand-built or
+        // forged spec) still fails closed; egress requires the explicit grant.
+        if !spec.no_network && !spec.allow_egress {
             bail!("ContainerSpec.no_network must be true for isolation (fail-closed)");
         }
         // ── Supply-chain floor (X4): reject any non-digest-pinned image BEFORE
@@ -713,6 +722,8 @@ mod tests {
                 .to_string(),
             tmp_root: "/tmp/job".to_string(),
             no_network: true,
+            allow_egress: false,
+            run_on_create: false,
             path_set: vec![],
             env,
         }

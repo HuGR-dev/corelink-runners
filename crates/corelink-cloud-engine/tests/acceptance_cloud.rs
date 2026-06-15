@@ -128,6 +128,8 @@ fn pinned_spec(name: &str) -> ContainerSpec {
         image: PINNED.to_string(),
         tmp_root: "/tmp/job".to_string(),
         no_network: true,
+        allow_egress: false,
+        run_on_create: false,
         path_set: vec![],
         env: vec![],
     }
@@ -195,6 +197,8 @@ fn spawn_rejects_unpinned_image_before_provider() {
         image: UNPINNED.to_string(),
         tmp_root: "/tmp/job".to_string(),
         no_network: true,
+        allow_egress: false,
+        run_on_create: false,
         path_set: vec![],
         env: vec![],
     };
@@ -219,6 +223,8 @@ fn spawn_rejects_non_isolated_spec() {
         image: PINNED.to_string(),
         tmp_root: "/tmp/job".to_string(),
         no_network: false, // violates isolation floor
+        allow_egress: false,
+        run_on_create: false,
         path_set: vec![],
         env: vec![],
     };

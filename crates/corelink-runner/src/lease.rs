@@ -38,8 +38,24 @@ pub struct ContainerSpec {
     /// In-container path mounted as a private tmpfs (the lease's `tmp_root`).
     pub tmp_root: String,
     /// Whether the container runs with **no** network device (`--network
-    /// none`). Always `true` for a C2a-conformant lease.
+    /// none`). `true` for every CHECK lease (the hermetic / hugit / §3 exec
+    /// path) — the C2a isolation floor. `false` ONLY for a runner lease, and
+    /// only in concert with `allow_egress`.
     pub no_network: bool,
+    /// Egress permission. `false` everywhere by default; set `true` ONLY by
+    /// [`ContainerSpec::from_runner_lease`] (ADR-0007), reachable ONLY from the
+    /// trusted runner-acquire path. The engine isolation floor admits a
+    /// `no_network == false` spec **iff** `allow_egress == true`, so the egress
+    /// decision can never be flipped by a caller-supplied `net_policy` string —
+    /// a forged/typo'd policy on a CHECK lease can never leak egress. (ADR-0003
+    /// accepts outbound egress on the managed tier; this gates it to runner
+    /// leases so the hermetic/check posture is unchanged.)
+    pub allow_egress: bool,
+    /// Whether the box's command runs immediately at provision (Northflank
+    /// `runOnCreate: true`). `false` for CHECK leases (the fabric drives the
+    /// command per `/exec`). `true` ONLY for a runner lease, whose image
+    /// entrypoint launches the GitHub Actions runner agent autonomously.
+    pub run_on_create: bool,
     /// Paths the lease scopes the materialized view to (informational in C2a;
     /// fence enforcement is C5a).
     pub path_set: Vec<String>,
@@ -66,6 +82,69 @@ impl ContainerSpec {
     /// the pin against the box happens at [`Engine::spawn`](crate::isolation::Engine::spawn)
     /// time, before `docker run`.
     pub fn from_lease(lease: &RunnerLease, image: &str) -> Result<Self> {
+        Self::validate_lease_image(lease, image)?;
+        // CHECK lease (hermetic / hugit / §3 exec): network-isolated only.
+        if !requires_no_network(&lease.net_policy) {
+            bail!(
+                "net_policy {:?} is not isolated; C2a v0 supports only \
+                 network-isolated leases",
+                lease.net_policy
+            );
+        }
+        Ok(Self {
+            name: container_name(&lease.lease_id),
+            image: image.to_string(),
+            tmp_root: lease.tmp_root.clone(),
+            no_network: true,
+            allow_egress: false,
+            run_on_create: false,
+            path_set: lease.path_set.clone(),
+            // No env at spec-build time: the cloud provision path adds the
+            // §13.2 envelope ingest vars additively after `from_lease` (the
+            // hermetic Docker path stays env-free).
+            env: Vec::new(),
+        })
+    }
+
+    /// Derive a **runner-lease** spec (ADR-0007): an egress-allowed,
+    /// GitHub-driven, run-on-create box whose image entrypoint launches the
+    /// GitHub Actions runner agent. This is the **only** constructor that sets
+    /// `allow_egress = true`; it is reached **only** from the trusted
+    /// runner-acquire path, never from a `net_policy` string, so a CHECK lease
+    /// can never obtain egress through it (a forged `net_policy` on a check
+    /// lease flows through [`from_lease`](Self::from_lease) and is rejected).
+    ///
+    /// # Errors
+    /// Same supply-chain + tmp_root floors as [`from_lease`](Self::from_lease)
+    /// (the runner image MUST still be digest-pinned — X4 is not bypassed),
+    /// plus a defense-in-depth check that the lease's `net_policy` is the
+    /// runner egress policy `"egress-runner"`.
+    pub fn from_runner_lease(lease: &RunnerLease, image: &str) -> Result<Self> {
+        Self::validate_lease_image(lease, image)?;
+        // Defense in depth: a runner lease must carry the explicit egress
+        // policy. (The egress DECISION is this constructor being called from the
+        // runner-acquire path; this string check is a second, independent gate —
+        // never the sole source of the egress grant.)
+        if lease.net_policy != "egress-runner" {
+            bail!(
+                "runner lease requires net_policy=\"egress-runner\", got {:?}",
+                lease.net_policy
+            );
+        }
+        Ok(Self {
+            name: container_name(&lease.lease_id),
+            image: image.to_string(),
+            tmp_root: lease.tmp_root.clone(),
+            no_network: false,
+            allow_egress: true,
+            run_on_create: true,
+            path_set: lease.path_set.clone(),
+            env: Vec::new(),
+        })
+    }
+
+    /// Shared spec-build validation (lease id, tmp_root safety, X4 pin).
+    fn validate_lease_image(lease: &RunnerLease, image: &str) -> Result<()> {
         if lease.lease_id.trim().is_empty() {
             bail!("RunnerLease.lease_id is empty");
         }
@@ -77,27 +156,11 @@ impl ContainerSpec {
         // `"/x' ; touch /pwned ; echo '"`) is a root RCE on the runner box.
         // Restrict to an absolute path over a conservative, shell-inert charset.
         validate_tmp_root(&lease.tmp_root)?;
-        if !requires_no_network(&lease.net_policy) {
-            bail!(
-                "net_policy {:?} is not isolated; C2a v0 supports only \
-                 network-isolated leases",
-                lease.net_policy
-            );
-        }
         // Supply-chain floor: reject any non-content-pinned image at spec-build
-        // time so the unpinned/tag path can never reach `docker run`.
+        // time so the unpinned/tag path can never reach `docker run`. Holds for
+        // runner images too — X4 is never bypassed for runner mode.
         crate::pin::require_pinned(image)?;
-        Ok(Self {
-            name: container_name(&lease.lease_id),
-            image: image.to_string(),
-            tmp_root: lease.tmp_root.clone(),
-            no_network: true,
-            path_set: lease.path_set.clone(),
-            // No env at spec-build time: the cloud provision path adds the
-            // §13.2 envelope ingest vars additively after `from_lease` (the
-            // hermetic Docker path stays env-free).
-            env: Vec::new(),
-        })
+        Ok(())
     }
 }
 
@@ -381,6 +444,76 @@ mod tests {
         let mut l = lease();
         l.net_policy = "egress-allow".to_string();
         assert!(ContainerSpec::from_lease(&l, PIN).is_err());
+    }
+
+    // ── ADR-0007 runner-lease egress gate (the security crux) ─────────────────
+
+    /// A CHECK lease NEVER grants egress: `from_lease` always produces the
+    /// hermetic posture (no_network=true, allow_egress=false, run_on_create=false).
+    #[test]
+    fn check_lease_never_grants_egress() {
+        let spec = ContainerSpec::from_lease(&lease(), PIN).unwrap();
+        assert!(spec.no_network, "check lease must be network-isolated");
+        assert!(
+            !spec.allow_egress,
+            "check lease must NOT carry the egress grant"
+        );
+        assert!(
+            !spec.run_on_create,
+            "check lease is fabric-driven, not run-on-create"
+        );
+    }
+
+    /// RED TEAM: a CHECK lease that smuggles the runner egress policy string is
+    /// REJECTED — the egress grant can never be obtained through `from_lease`,
+    /// so a forged/typo'd `net_policy` on a hugit/check lease cannot leak egress.
+    #[test]
+    fn check_lease_forging_egress_policy_is_rejected_not_granted() {
+        let mut l = lease();
+        l.net_policy = "egress-runner".to_string(); // the runner policy, on a CHECK lease
+        // `from_lease` (the check path) does not admit it → no spec, no egress.
+        assert!(
+            ContainerSpec::from_lease(&l, PIN).is_err(),
+            "a check lease must never be buildable with the runner egress policy"
+        );
+    }
+
+    /// A RUNNER lease grants egress — but ONLY via `from_runner_lease` AND only
+    /// with the explicit egress policy. This is the one path that sets
+    /// allow_egress=true.
+    #[test]
+    fn runner_lease_grants_egress_only_via_runner_constructor() {
+        let mut l = lease();
+        l.net_policy = "egress-runner".to_string();
+        let spec = ContainerSpec::from_runner_lease(&l, PIN).unwrap();
+        assert!(!spec.no_network, "runner lease has a network device");
+        assert!(spec.allow_egress, "runner lease carries the egress grant");
+        assert!(spec.run_on_create, "runner box runs its agent at provision");
+    }
+
+    /// Defense in depth: `from_runner_lease` itself rejects any lease whose
+    /// `net_policy` is not the explicit runner egress policy.
+    #[test]
+    fn runner_constructor_rejects_a_non_egress_policy() {
+        for p in ["none", "isolated", "deny-all", "", "egress-allow"] {
+            let mut l = lease();
+            l.net_policy = p.to_string();
+            assert!(
+                ContainerSpec::from_runner_lease(&l, PIN).is_err(),
+                "from_runner_lease must require net_policy=egress-runner; {p:?} got through"
+            );
+        }
+    }
+
+    /// X4 is NOT bypassed for runner mode: an unpinned runner image is refused
+    /// at spec-build, before any box contact.
+    #[test]
+    fn runner_lease_still_requires_a_pinned_image() {
+        let mut l = lease();
+        l.net_policy = "egress-runner".to_string();
+        assert!(ContainerSpec::from_runner_lease(&l, "alpine:3.20").is_err());
+        assert!(ContainerSpec::from_runner_lease(&l, "alpine").is_err());
+        assert!(ContainerSpec::from_runner_lease(&l, PIN).is_ok());
     }
 
     #[test]
