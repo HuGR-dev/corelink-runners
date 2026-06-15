@@ -22,7 +22,7 @@ cargo build -p corelink-cli --release
 | Var | Used by | Meaning |
 |---|---|---|
 | `CORELINK_URL` | `smoke`, `verify` | fabric base URL (fallback for `--url` / `--pubkey-url`) |
-| `CORELINK_PAT` | `smoke` | the tenant PAT (Bearer) |
+| `CORELINK_PAT` | `smoke`, `verify --pubkey-url` | the tenant PAT (Bearer); `verify` needs it only when fetching the key via `--pubkey-url` (the key endpoint is authenticated) — not when passing `--pubkey` directly |
 
 ## `corelink smoke` — verify a live deployment
 

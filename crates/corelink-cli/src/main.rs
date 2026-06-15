@@ -10,14 +10,11 @@
 //!
 //! Auth/config via env: `CORELINK_URL`, `CORELINK_PAT`.
 
-mod binding;
-mod client;
-mod smoke;
-
 use std::io::Read as _;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
+use corelink_cli::{binding, client, smoke};
 use corelink_fabric_api::dto::AttestationKeyResponse;
 
 const HELP: &str = "\
@@ -91,7 +88,13 @@ fn cmd_verify(args: &[String]) -> Result<bool> {
     } else if let Some(base) =
         flag(args, "--pubkey-url").or_else(|| std::env::var("CORELINK_URL").ok())
     {
-        fetch_key(&base)?
+        // The key endpoint is behind the tenant-auth layer, so fetching it needs
+        // a PAT. (Use --pubkey to verify fully offline with no PAT.)
+        let pat = std::env::var("CORELINK_PAT").context(
+            "fetching the key via --pubkey-url needs CORELINK_PAT (the key endpoint is \
+             authenticated); or pass the key directly with --pubkey <b64> to verify offline",
+        )?;
+        fetch_key(&base, &pat)?
     } else {
         bail!("`verify` needs --pubkey <b64> or --pubkey-url <fabric-url> (or CORELINK_URL)");
     };
@@ -110,8 +113,14 @@ fn cmd_verify(args: &[String]) -> Result<bool> {
 
     let out = binding::verify_response_json(&raw, &pubkey)?;
     if out.verified {
+        // Honest scope (audit F2): this checks the v2 OUTCOME binding (verdict +
+        // outputs) against the fabric key — NOT the separate provenance chain
+        // (tree/def/runner), which carries its own signature this command does
+        // not surface.
         println!(
-            "✓ result_binding_sig_v2 VERIFIED — verdict (exit {}) + {} artifact(s) are authentic",
+            "✓ result_binding_sig_v2 VERIFIED — the outcome (exit {} + {} artifact(s)) is \
+             authentic to this fabric key (checks the v2 outcome binding, not the separate \
+             provenance chain)",
             out.exit, out.artifacts
         );
     } else {
@@ -123,10 +132,11 @@ fn cmd_verify(args: &[String]) -> Result<bool> {
     Ok(out.verified)
 }
 
-/// Fetch the published ed25519 pubkey (std-base64) from `GET /v1/attestation/key`.
-fn fetch_key(base: &str) -> Result<String> {
-    let c = client::Client::new(base, "");
-    let r = c.get("/v1/attestation/key", false)?;
+/// Fetch the published ed25519 pubkey (std-base64) from `GET /v1/attestation/key`
+/// (Bearer-PAT authenticated — the key endpoint sits behind the tenant-auth layer).
+fn fetch_key(base: &str, pat: &str) -> Result<String> {
+    let c = client::Client::new(base, pat);
+    let r = c.get("/v1/attestation/key", true)?;
     if r.status != 200 {
         bail!("GET {base}/v1/attestation/key → {} (want 200)", r.status);
     }

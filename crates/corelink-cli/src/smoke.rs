@@ -16,7 +16,7 @@ use crate::client::Client;
 /// A known-good content-pinned reference (`name@sha256:<64hex>`) — used for the
 /// bad-PAT gate (auth fails before the image is ever pulled) and as the
 /// `--full` acquire default.
-pub(crate) const PINNED_IMAGE: &str =
+pub const PINNED_IMAGE: &str =
     "alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc";
 /// A deliberately UNPINNED reference (a tag, no digest) — must be rejected 400.
 const UNPINNED_IMAGE: &str = "alpine:latest";
@@ -72,8 +72,10 @@ pub fn run(base: &str, pat: &str, full: bool, image: &str) -> Result<bool> {
         Err(e) => t.check("health", false, format!("transport error: {e}")),
     }
 
-    // 2. Published attestation key (no auth) — must be a 32-byte ed25519 pubkey.
-    match c.get("/v1/attestation/key", false) {
+    // 2. Published attestation key (Bearer PAT — the key endpoint is behind the
+    //    tenant-auth layer; any authenticated tenant gets the per-region key).
+    //    Must be a 32-byte ed25519 pubkey.
+    match c.get("/v1/attestation/key", true) {
         Ok(r) if r.status == 200 => match r.json::<AttestationKeyResponse>() {
             Ok(k) => {
                 let ok = B64
