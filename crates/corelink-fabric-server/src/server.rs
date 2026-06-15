@@ -46,8 +46,10 @@ use axum::Router;
 use base64::Engine as _;
 use corelink_fabric::{InMemoryLedger, LeaseLedger, PgTlsMode, TenantId, TenantPlan};
 
+use crate::app::CompositePlanSource;
 use crate::corelink_auth::{CoreLinkAuthConfig, CoreLinkTokenStore, UreqIntrospect};
 use crate::corelink_plans::CoreLinkPlanStore;
+use crate::handlers::admin::{AdminHandlerState, LivePlanRegistry, onboard_tenant};
 use crate::{
     AppState, BoxRegistry, HookRegistry, StaticPlans, StaticTokenStore, SystemClock, app_full,
 };
@@ -194,6 +196,24 @@ pub struct ServerConfig {
     /// Per-tenant parked-waiter cap (the P1 cross-tenant load-shed bound). From
     /// `FABRIC_ADMISSION_PARK_CAP`. Unused under `reject`.
     pub admission_park_cap: usize,
+    // ── WP-C admin tenant onboarding — DEFAULT-OFF ───────────────────────────
+    /// Operator secret gating `POST /internal/v1/admin/tenants` (WP-C), from
+    /// `FABRIC_ADMIN_KEY`.  Optional and **default-off**: absent/empty → `None`
+    /// → the route returns 404.  Independent of [`observability_key`].  Held
+    /// raw; redacted in `Debug`.  Static auth backend only (in CoreLink mode
+    /// plans come from introspection, so the route is not mounted).
+    ///
+    /// [`observability_key`]: ServerConfig::observability_key
+    pub admin_key: Option<String>,
+    // ── WP-A durable billing exporter — DEFAULT-OFF ──────────────────────────
+    /// Billing-exporter tick interval, from `FABRIC_BILLING_EXPORT_INTERVAL_SECS`
+    /// (u64 seconds, ≥ 1).  Absent/`0` → `None` → no exporter is spawned (the
+    /// slot meter stays in-memory only).  When `Some`, the exporter drains the
+    /// `SlotMeter` journal into the durable `billing_events` table every
+    /// interval — which **requires** the Postgres ledger backend (validated in
+    /// [`config_from_env`]: `Some` here with the `Memory` backend is a hard
+    /// boot error, fail-closed — there is nowhere durable to export to).
+    pub billing_export_interval: Option<std::time::Duration>,
 }
 
 impl std::fmt::Debug for ServerConfig {
@@ -225,6 +245,11 @@ impl std::fmt::Debug for ServerConfig {
             .field("admission_tick_interval", &self.admission_tick_interval)
             .field("admission_tick_slots", &self.admission_tick_slots)
             .field("admission_park_cap", &self.admission_park_cap)
+            .field(
+                "admin_key",
+                &self.admin_key.as_ref().map(|_| "***REDACTED***"),
+            )
+            .field("billing_export_interval", &self.billing_export_interval)
             .finish()
     }
 }
@@ -566,6 +591,42 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
     let admission_tick_slots = crate::admission::tick_slots_from_env(&get)?;
     let admission_park_cap = crate::admission::park_cap_from_env(&get)?;
 
+    // ── WP-C admin onboarding key — DEFAULT-OFF ──────────────────────────────
+    // Same shape as the observability key: trimmed, blank → None → the admin
+    // route 404s. Independent secret.
+    let admin_key = get("FABRIC_ADMIN_KEY")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    // ── WP-A billing-exporter interval — DEFAULT-OFF ─────────────────────────
+    // Optional u64 seconds (≥ 1). Absent/0 → None (no exporter). Present →
+    // REQUIRES the pg ledger backend: there is nowhere durable to export to on
+    // the Memory backend, so Some-with-Memory is a hard boot error (fail-closed,
+    // mirrors the DATABASE_URL rule above).
+    let billing_export_interval = match get("FABRIC_BILLING_EXPORT_INTERVAL_SECS")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        None => None,
+        Some(v) => {
+            let secs = v
+                .parse::<u64>()
+                .context("FABRIC_BILLING_EXPORT_INTERVAL_SECS must be a valid u64 (seconds)")?;
+            if secs == 0 {
+                None
+            } else {
+                if ledger_backend != LedgerBackend::Postgres {
+                    anyhow::bail!(
+                        "FABRIC_BILLING_EXPORT_INTERVAL_SECS is set but FABRIC_LEDGER_BACKEND is \
+                         not pg/postgres; the durable billing exporter REQUIRES the Postgres \
+                         ledger backend (there is nowhere durable to export to in memory)"
+                    );
+                }
+                Some(std::time::Duration::from_secs(secs))
+            }
+        }
+    };
+
     Ok(ServerConfig {
         bind_addr,
         signing_key,
@@ -587,6 +648,8 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
         admission_tick_interval,
         admission_tick_slots,
         admission_park_cap,
+        admin_key,
+        billing_export_interval,
     })
 }
 
@@ -709,13 +772,20 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
     // Known M1 inefficiency: this means TWO introspect round-trips per acquire
     // (auth + plan). A future optimization threads one introspect result
     // through request extensions; today they are independent calls.
-    let (store, plans): (
+    // WP-C: the static arm now ALSO yields an `AdminHandlerState` carrying the
+    // live onboarding registry (the third tuple element). CoreLink mode yields
+    // `None` — plans there come from per-acquire introspection, so a local
+    // override is not meaningful and the admin route is not mounted.
+    let (store, plans, admin_state): (
         Arc<dyn crate::auth::TokenStore + Send + Sync>,
         Arc<dyn crate::PlanSource>,
+        Option<AdminHandlerState>,
     ) = match &cfg.auth_backend {
         AuthBackend::Static => {
-            // This is the ONLY path that existed before WP-CORELINK-AUTH.
-            // It is byte-identical to the pre-change code.
+            // Auth + bootstrap plan are byte-identical to the pre-WP-C path; the
+            // only addition is the live registry layered OVER the bootstrap
+            // source via CompositePlanSource (empty live → fall through →
+            // identical behaviour; see CompositePlanSource docs).
             let tenant = TenantId::new(&cfg.bootstrap_tenant)
                 .expect("bootstrap_tenant was validated in config_from_env");
             let static_store = Arc::new(StaticTokenStore::new([(
@@ -727,7 +797,18 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
                 max_concurrency: cfg.max_concurrency,
                 rate_ceiling_per_min: cfg.rate_ceiling_per_min,
             }]));
-            (static_store, static_plans)
+            // The single live registry: shared (via Arc) between the plan-source
+            // (primary arm of the composite) and the admin write-handle, so a
+            // POST takes effect on the very next admission check — no restart.
+            let live = Arc::new(LivePlanRegistry::new());
+            let composite: Arc<dyn crate::PlanSource> =
+                Arc::new(CompositePlanSource::new(live.clone(), static_plans));
+            let admin = AdminHandlerState {
+                // blank/unset → None → the handler 404s (default-off).
+                admin_key: cfg.admin_key.as_deref().map(Arc::from),
+                registry: live,
+            };
+            (static_store, composite, Some(admin))
         }
         AuthBackend::CoreLink(auth_cfg) => {
             // Auth: CoreLinkTokenStore over the real ureq transport (timeout
@@ -752,7 +833,7 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
             };
             let cl_plans = Arc::new(CoreLinkPlanStore::new(plan_transport, plan_store_cfg));
 
-            (cl_store, cl_plans)
+            (cl_store, cl_plans, None)
         }
     };
 
@@ -795,6 +876,23 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
     };
 
     let router = app_full(store, state.clone(), Arc::new(HookRegistry::default()));
+
+    // WP-C: mount the admin onboarding route (static mode only). Like the
+    // occupancy endpoint it lives OUTSIDE the Bearer-PAT layer and is gated by
+    // its OWN secret (`AdminHandlerState.admin_key`); default-off → 404 when the
+    // key is unset, so mounting it unconditionally in static mode is safe.
+    let router = match admin_state {
+        Some(admin) => router.merge(
+            Router::new()
+                .route(
+                    "/internal/v1/admin/tenants",
+                    axum::routing::post(onboard_tenant),
+                )
+                .with_state(admin),
+        ),
+        None => router,
+    };
+
     Ok((router, state))
 }
 
@@ -832,6 +930,47 @@ pub fn maybe_spawn_crash_sweep_from_env(
         Some(interval) => Ok(Some(crate::reaper::spawn_crash_sweep(state, interval))),
         None => Ok(None),
     }
+}
+
+// ── Billing-exporter wiring (WP-A, OPT-IN) ──────────────────────────────────────
+
+/// If `cfg.billing_export_interval` is `Some`, connect the durable Postgres
+/// billing sink and spawn the background exporter over `state`'s slot meter.
+///
+/// **OPT-IN**: spawned ONLY when `FABRIC_BILLING_EXPORT_INTERVAL_SECS` is set —
+/// which [`config_from_env`] already validated to REQUIRE the Postgres ledger
+/// backend, so `cfg.database_url` is `Some` here. Absent → `Ok(None)`.
+///
+/// `connect` is async (it applies the sink's idempotent DDL), so this is an
+/// async fn driven from main.rs's `#[tokio::main]` runtime. The composition root
+/// binds the returned handle and `.abort()`s it on graceful shutdown, exactly
+/// like the reaper / crash-sweep handles. A connect failure propagates (fail-
+/// closed: if billing export is requested but the sink cannot be reached, the
+/// server refuses to boot rather than silently dropping billing data).
+pub async fn maybe_spawn_billing_exporter(
+    state: &crate::AppState,
+    cfg: &ServerConfig,
+) -> anyhow::Result<Option<tokio::task::JoinHandle<()>>> {
+    let Some(interval) = cfg.billing_export_interval else {
+        return Ok(None);
+    };
+    let database_url = cfg.database_url.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "billing exporter requires DATABASE_URL; config_from_env guarantees the pg backend \
+             when FABRIC_BILLING_EXPORT_INTERVAL_SECS is set"
+        )
+    })?;
+    let sink =
+        corelink_fabric::PgBillingSink::connect(database_url, cfg.ledger_pool_size, cfg.pg_tls)
+            .await
+            .context("billing exporter: PgBillingSink::connect failed (fail-closed)")?;
+    let handle = crate::billing_export::spawn_export_loop(
+        state.slot_meter.clone(),
+        state.clock.clone(),
+        Arc::new(sink),
+        interval,
+    );
+    Ok(Some(handle))
 }
 
 #[cfg(test)]

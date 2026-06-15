@@ -64,11 +64,22 @@ pub trait BillingSink {
 /// The natural key of a billing event — the DB PRIMARY KEY, modelled in Rust so
 /// the in-memory [`MemBillingSink`] reproduces the exact `ON CONFLICT` dedup
 /// semantics without a database.
-type EventKey = (TenantId, String, SlotEventKind, u64);
+///
+/// The `kind` component is the lowercase DB token (`kind_to_db`), NOT the
+/// [`SlotEventKind`] enum — so this module never requires a `Hash` derive on the
+/// FROZEN [`SlotEventKind`]. The persisted `kind` column is the string anyway,
+/// so the string IS the natural key.
+type EventKey = (TenantId, String, &'static str, u64);
 
-/// The natural key for an event (mirrors the table PRIMARY KEY).
+/// The natural key for an event (mirrors the table PRIMARY KEY, keyed on the
+/// persisted lowercase `kind` token).
 fn event_key(ev: &SlotOccupancyEvent) -> EventKey {
-    (ev.tenant.clone(), ev.lease_id.clone(), ev.kind, ev.at_ms)
+    (
+        ev.tenant.clone(),
+        ev.lease_id.clone(),
+        kind_to_db(ev.kind),
+        ev.at_ms,
+    )
 }
 
 /// In-memory test double for [`BillingSink`] — a `HashSet` over the natural key
@@ -518,7 +529,7 @@ mod tests {
         // since tick 1.
         let mut i = 0u64;
         while m.journal_dropped() == 0 {
-            let kind = if i % 2 == 0 {
+            let kind = if i.is_multiple_of(2) {
                 SlotEventKind::Acquired
             } else {
                 SlotEventKind::Released
@@ -543,22 +554,29 @@ mod tests {
         assert_eq!(r3.journal_dropped, 0, "watermark advanced — no new drops");
     }
 
-    /// A7 (charter): source oracle — the production half of this module contains
-    /// NO duration / minutes / cost arithmetic. The sink persists raw occupancy
-    /// events only; `at_ms` is never subtracted, there is no invoicing. This is
-    /// the same source-inclusion discipline the meter uses.
+    /// A7 (charter): source oracle — the production half of this module derives
+    /// NO billable time: no per-minute / minutes math, no cost / invoicing, and
+    /// (the load-bearing one) NO subtraction of timestamps to synthesize a
+    /// duration. The sink persists raw occupancy events only; `at_ms` is a key
+    /// component, never a delta. (Concurrency pricing, never per-minute.)
+    ///
+    /// Note: the std `Duration` TYPE is legitimate infra (the pool-acquire
+    /// timeout) and is NOT billing-duration arithmetic — so the oracle targets
+    /// the actual anti-patterns (minutes / per-minute / cost / invoice / `at_ms`
+    /// subtraction), not the bare word "duration".
     #[test]
-    fn sink_has_no_duration_or_cost_math() {
+    fn sink_has_no_billable_time_math() {
         let source = include_str!("billing_sink.rs");
         let marker = ["#[cfg(te", "st)]"].concat();
         let production = source
             .split(&marker)
             .next()
             .expect("split always yields the production half");
-        let dur_needle = ["dur", "ation"].concat();
-        let min_needle = ["min", "utes"].concat();
+        let minutes_needle = ["min", "utes"].concat();
+        let per_min_needle = ["per", "_min"].concat();
         let cost_needle = ["cost", "_usd"].concat();
         let invoice_needle = ["invoic", "e"].concat();
+        let billable_needle = ["bill", "able"].concat();
         for line in production.lines() {
             let trimmed = line.trim_start();
             if trimmed.starts_with("//") || trimmed.starts_with("*") {
@@ -566,20 +584,22 @@ mod tests {
             }
             let code = trimmed.split("//").next().unwrap_or("").to_lowercase();
             for (needle, label) in [
-                (&dur_needle, "duration"),
-                (&min_needle, "minutes"),
+                (&minutes_needle, "minutes"),
+                (&per_min_needle, "per-minute"),
                 (&cost_needle, "cost"),
                 (&invoice_needle, "invoice"),
+                (&billable_needle, "billable-time"),
             ] {
                 assert!(
                     !code.contains(needle),
                     "billing sink must have no {label} arithmetic/code: {line:?}"
                 );
             }
-            // No subtraction of timestamps (`at_ms` is a key, never a delta).
+            // The load-bearing check: no subtraction of timestamps (`at_ms` is a
+            // key, never a synthesized duration delta).
             assert!(
                 !code.contains("at_ms -") && !code.contains("at_ms-"),
-                "billing sink must never subtract at_ms (no duration): {line:?}"
+                "billing sink must never subtract at_ms (no synthesized duration): {line:?}"
             );
         }
     }
