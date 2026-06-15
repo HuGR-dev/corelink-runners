@@ -17,7 +17,7 @@
 //!    observable results; the same pure function either way.
 //!
 //! # Container naming
-//! All C9 workspace containers are prefixed `hugit-c9-` so forensic scans and
+//! All C9 workspace containers are prefixed `corelink-ws-` so forensic scans and
 //! kill-sweeps stay scoped to this WP on the shared box. Scans/cleanups target
 //! ONLY this prefix — no other WP's containers are touched. The prefix value
 //! predates the runner transfer (hugit → corelink-runners, 2026-06-10) and is
@@ -39,19 +39,19 @@ use crate::isolation::{Engine, RunningContainer};
 use crate::lease::{BoxExec, ContainerSpec};
 
 /// Prefix for all C9-owned workspace containers on the shared box.
-pub const C9_PREFIX: &str = "hugit-c9-";
+pub const WS_PREFIX: &str = "corelink-ws-";
 
 // ── container naming ──────────────────────────────────────────────────────────
 
 /// Derive a C9-namespaced container name from a workspace id.
 ///
-/// The `hugit-c9-` prefix is what lets cleanup sweeps target ONLY this WP's
+/// The `corelink-ws-` prefix is what lets cleanup sweeps target ONLY this WP's
 /// containers on the shared box. Docker names must match
 /// `[a-zA-Z0-9][a-zA-Z0-9_.-]*`, so non-conforming chars are mapped to `_`.
 #[must_use]
-pub fn c9_container_name(workspace_id: &str) -> String {
-    let mut s = String::with_capacity(workspace_id.len() + C9_PREFIX.len());
-    s.push_str(C9_PREFIX);
+pub fn ws_container_name(workspace_id: &str) -> String {
+    let mut s = String::with_capacity(workspace_id.len() + WS_PREFIX.len());
+    s.push_str(WS_PREFIX);
     for c in workspace_id.chars() {
         if c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-') {
             s.push(c);
@@ -97,7 +97,7 @@ pub enum WorkspaceOrigin {
 
 /// Spawn a new workspace container under `lease`, enforcing the `fence`.
 ///
-/// The container is named `hugit-c9-<workspace_id>` where `workspace_id` is
+/// The container is named `corelink-ws-<workspace_id>` where `workspace_id` is
 /// derived from `lease.lease_id`. The spawn MUST complete in <1s on a warm box
 /// (`alpine:3.20` cached) — the C9 performance contract.
 ///
@@ -118,7 +118,7 @@ where
     // Derive a C9-namespaced spec from the frozen lease.
     let mut spec = ContainerSpec::from_lease(lease, image)
         .context("deriving C9 workspace container spec from lease")?;
-    spec.name = c9_container_name(&lease.lease_id);
+    spec.name = ws_container_name(&lease.lease_id);
 
     let container = engine
         .spawn(&spec)
@@ -182,7 +182,7 @@ pub type TeardownHook = Arc<dyn Fn(&RunningContainer) -> Result<()> + Send + Syn
 /// # Identity binding (isolation — fail-closed)
 /// The dedup identity is bound to `lease.lease_id`: every `spawn_or_join`
 /// asserts that the presented `workspace_id` names the SAME container as the
-/// lease (`c9_container_name(workspace_id) == c9_container_name(&lease.lease_id)`)
+/// lease (`ws_container_name(workspace_id) == ws_container_name(&lease.lease_id)`)
 /// and bails otherwise, and on a cache HIT it re-verifies that the presenting
 /// lease+fence match the cached handle's before handing the container back.
 /// This closes the cross-lease / cross-tenant hole: caller B can never receive
@@ -227,7 +227,7 @@ impl DedupSpawner {
     /// the box). One function ⇒ one key ⇒ no desync.
     #[must_use]
     fn slot_key(lease: &RunnerLease) -> String {
-        c9_container_name(&lease.lease_id)
+        ws_container_name(&lease.lease_id)
     }
 
     /// Construct with a deduplication window and the default entry cap
@@ -291,7 +291,7 @@ impl DedupSpawner {
     {
         // ── Identity binding (fail-CLOSED) ────────────────────────────────────
         // The materialization names the container ONLY from `lease.lease_id`
-        // (spawn_workspace → c9_container_name(&lease.lease_id)); the caller-
+        // (spawn_workspace → ws_container_name(&lease.lease_id)); the caller-
         // supplied `workspace_id` never names the box. So the dedup slot MUST be
         // keyed by the lease's container identity, not by `workspace_id` — else
         // two callers presenting different leases under a colliding
@@ -616,7 +616,7 @@ pub fn attach_workspace<B: BoxExec>(
     lease: &RunnerLease,
     fence: &FenceManifest,
 ) -> Result<WorkspaceHandle> {
-    let container_name = c9_container_name(workspace_id);
+    let container_name = ws_container_name(workspace_id);
 
     // Probe that the container is live — attach joins an existing container,
     // it does NOT respawn or re-hydrate.
@@ -920,8 +920,8 @@ mod tests {
 
     #[test]
     fn c9_name_is_prefixed_and_sanitized() {
-        assert_eq!(c9_container_name("ws/abc 1"), "hugit-c9-ws_abc_1");
-        assert!(c9_container_name("x").starts_with(C9_PREFIX));
+        assert_eq!(ws_container_name("ws/abc 1"), "corelink-ws-ws_abc_1");
+        assert!(ws_container_name("x").starts_with(WS_PREFIX));
     }
 
     #[test]
@@ -1263,7 +1263,7 @@ mod tests {
             .expect("spawn");
         let expected = h.container.name.clone();
         // The container is named from the LEASE, not the param.
-        assert_eq!(expected, c9_container_name("ws-evict"));
+        assert_eq!(expected, ws_container_name("ws-evict"));
 
         spawner.evict(&lease);
 
@@ -1403,7 +1403,7 @@ mod tests {
         // (never a phantom) — teardown tore down the container the slot named.
         for name in torn.iter() {
             assert!(
-                name.starts_with(C9_PREFIX),
+                name.starts_with(WS_PREFIX),
                 "torn-down container '{name}' must be a C9 container"
             );
         }
