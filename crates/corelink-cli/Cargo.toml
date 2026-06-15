@@ -28,3 +28,10 @@ corelink-runners-contracts = { path = "../corelink-runners-contracts" }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+# Black-box e2e: spawn the REAL fabric router (mock exec backend) on a loopback
+# socket and drive the CLI's client/verify against it. Test-only — never in the
+# shipped binary.
+tokio = { workspace = true }
+axum = { workspace = true }
+corelink-fabric = { path = "../corelink-fabric" }
+corelink-fabric-server = { path = "../corelink-fabric-server" }

@@ -187,12 +187,16 @@ name = "corelink-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "base64",
+ "corelink-fabric",
  "corelink-fabric-api",
+ "corelink-fabric-server",
  "corelink-runners-contracts",
  "ed25519-dalek",
  "serde",
  "serde_json",
+ "tokio",
  "ureq",
 ]
 

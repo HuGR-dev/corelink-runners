@@ -17,10 +17,16 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
 /// `LP(s) = u32_be(byte_len(s)) ‖ utf8_bytes(s)` — the framing shared by the
 /// fabric signer, the conformance vector, and hugit's verifier.
-fn lp(out: &mut Vec<u8>, s: &str) {
-    let len = u32::try_from(s.len()).expect("binding field exceeds u32::MAX bytes");
+///
+/// Returns `Err` (never panics) if a field exceeds `u32::MAX` bytes — this is a
+/// client-side trust tool fed UNTRUSTED JSON, so a hostile/huge field must be a
+/// clean error, not a crash (audit F1).
+fn lp(out: &mut Vec<u8>, s: &str) -> Result<()> {
+    let len =
+        u32::try_from(s.len()).map_err(|_| anyhow!("binding field exceeds u32::MAX bytes"))?;
     out.extend_from_slice(&len.to_be_bytes());
     out.extend_from_slice(s.as_bytes());
+    Ok(())
 }
 
 /// The v2 result-binding pre-image over the FULL outcome:
@@ -29,21 +35,23 @@ fn lp(out: &mut Vec<u8>, s: &str) {
 ///
 /// Byte-identical to the fabric's `result_binding_preimage_v2`; the artifact
 /// order is part of the binding. Guarded by the conformance-vector test below.
-pub fn result_binding_preimage_v2(r: &CheckResult) -> Vec<u8> {
+/// Fallible (never panics) on pathological input — see [`lp`].
+pub fn result_binding_preimage_v2(r: &CheckResult) -> Result<Vec<u8>> {
     let mut out = Vec::new();
-    lp(&mut out, &r.memo_key);
-    lp(&mut out, &r.stdout_ref);
-    lp(&mut out, &r.stderr_ref);
+    lp(&mut out, &r.memo_key)?;
+    lp(&mut out, &r.stdout_ref)?;
+    lp(&mut out, &r.stderr_ref)?;
     // The verdict: 4-byte big-endian two's-complement i32.
     out.extend_from_slice(&r.exit.to_be_bytes());
     // The output digests: 4-byte big-endian count, then each (path, digest).
-    let count = u32::try_from(r.artifacts.len()).expect("artifact count exceeds u32::MAX");
+    let count =
+        u32::try_from(r.artifacts.len()).map_err(|_| anyhow!("artifact count exceeds u32::MAX"))?;
     out.extend_from_slice(&count.to_be_bytes());
     for a in &r.artifacts {
-        lp(&mut out, &a.path);
-        lp(&mut out, &a.digest);
+        lp(&mut out, &a.path)?;
+        lp(&mut out, &a.digest)?;
     }
-    out
+    Ok(out)
 }
 
 /// Verify a detached std-base64 ed25519 `result_binding_sig_v2` over `result`
@@ -71,7 +79,7 @@ pub fn verify_result_binding_v2(
     let sig = Signature::from_slice(&sig_bytes)
         .context("result_binding_sig_v2 is not a valid ed25519 signature")?;
 
-    let preimage = result_binding_preimage_v2(result);
+    let preimage = result_binding_preimage_v2(result)?;
     Ok(vk.verify(&preimage, &sig).is_ok())
 }
 
@@ -174,7 +182,7 @@ mod tests {
         let v: VectorV2 = serde_json::from_str(VECTOR_JSON).expect("vector parses");
         let cr = cr_from(&v.input);
         assert_eq!(
-            lower_hex(&result_binding_preimage_v2(&cr)),
+            lower_hex(&result_binding_preimage_v2(&cr).expect("preimage")),
             v.preimage_hex,
             "CLI v2 pre-image diverged from conformance/result_binding_v2.json"
         );
