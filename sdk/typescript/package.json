@@ -1,0 +1,39 @@
+{
+  "name": "@corelink/verify",
+  "version": "0.1.0",
+  "description": "TypeScript/Node reference verifier for CoreLink fabric result-binding v2 (ed25519, byte-identical to crates/corelink-cli/src/binding.rs)",
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./src/index.ts",
+      "types": "./src/index.ts"
+    }
+  },
+  "files": [
+    "src/",
+    "test/"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test test/conformance.test.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.5"
+  },
+  "keywords": [
+    "corelink",
+    "hugr",
+    "ed25519",
+    "result-binding",
+    "attestation",
+    "verify"
+  ],
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/humangr-labs/corelink-runners"
+  }
+}
