@@ -426,24 +426,12 @@ impl<H: HttpTransport> NorthflankEngine<H> {
     /// it MUST match the name stored on the returned [`RunningContainer`] so all
     /// later `job_url` calls address the same job.
     fn create_job_body(&self, spec: &ContainerSpec, job_name: &str) -> String {
-        let mut deployment = serde_json::json!({
+        let deployment = serde_json::json!({
             "external": { "imagePath": spec.image },
             "docker": { "configType": "default" },
             "storage": { "ephemeralStorage": { "storageSize": self.cfg.ephemeral_storage_mb } }
         });
-        // Additive runtime environment (Northflank `runtimeEnvironment` map):
-        // emitted ONLY when the spec carries env (the §13.2 envelope ingest URL
-        // + lease credential injected by the cloud provision path). An empty
-        // `spec.env` leaves the body byte-identical to before — DEFAULT-OFF.
-        if !spec.env.is_empty() {
-            let env_map: serde_json::Map<String, serde_json::Value> = spec
-                .env
-                .iter()
-                .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
-                .collect();
-            deployment["runtimeEnvironment"] = serde_json::Value::Object(env_map);
-        }
-        serde_json::json!({
+        let mut body = serde_json::json!({
             "name": job_name,
             "billing": { "deploymentPlan": self.cfg.deployment_plan },
             "deployment": deployment,
@@ -457,8 +445,28 @@ impl<H: HttpTransport> NorthflankEngine<H> {
             "runOnCreate": false,
             "backoffLimit": 0,
             "activeDeadlineSeconds": self.cfg.active_deadline_secs
-        })
-        .to_string()
+        });
+        // Additive runtime environment (Northflank `runtimeEnvironment` map):
+        // emitted ONLY when the spec carries env (the §13.2 envelope ingest URL
+        // + lease credential, or the ADR-0007 runner JIT config injected by the
+        // cloud provision path). An empty `spec.env` leaves the body
+        // byte-identical to before — DEFAULT-OFF.
+        //
+        // CRITICAL (Northflank API): `runtimeEnvironment` is a TOP-LEVEL job
+        // field, NOT a member of `deployment`. A copy nested under `deployment`
+        // is an unknown field that Northflank SILENTLY DROPS — the box then
+        // starts with no env and the runner entrypoint exits 1
+        // ("CORELINK_RUNNER_JITCONFIG is not set"), observed live 2026-06-15.
+        // See https://northflank.com/docs/v1/api/jobs/create-job.
+        if !spec.env.is_empty() {
+            let env_map: serde_json::Map<String, serde_json::Value> = spec
+                .env
+                .iter()
+                .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                .collect();
+            body["runtimeEnvironment"] = serde_json::Value::Object(env_map);
+        }
+        body.to_string()
     }
 
     /// Set the job's run command to `argv` (Northflank `customCommand`).
@@ -748,19 +756,25 @@ mod tests {
     #[test]
     fn create_job_body_omits_runtime_environment_when_env_empty() {
         // DEFAULT-OFF: an empty `spec.env` leaves the body free of
-        // runtimeEnvironment (byte-for-byte the prior shape).
+        // runtimeEnvironment (byte-for-byte the prior shape) — at BOTH the
+        // top level and (defensively) under `deployment`.
         let engine = NorthflankEngine::new(StubTransport, NorthflankConfig::new("proj", "tok"));
         let body = engine.create_job_body(&spec(vec![]), "job-1");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert!(
+            v.get("runtimeEnvironment").is_none(),
+            "no env ⇒ no top-level runtimeEnvironment key"
+        );
+        assert!(
             v["deployment"].get("runtimeEnvironment").is_none(),
-            "no env ⇒ no runtimeEnvironment key"
+            "no env ⇒ no runtimeEnvironment nested under deployment either"
         );
     }
 
     #[test]
     fn create_job_body_injects_runtime_environment_when_env_present() {
-        // The §13.2 ingest vars surface as the Northflank runtimeEnvironment map.
+        // The §13.2 ingest vars (and the ADR-0007 runner JIT config) surface as
+        // the Northflank runtimeEnvironment map.
         let engine = NorthflankEngine::new(StubTransport, NorthflankConfig::new("proj", "tok"));
         let env = vec![
             (
@@ -774,7 +788,10 @@ mod tests {
         ];
         let body = engine.create_job_body(&spec(env), "job-1");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        let re = &v["deployment"]["runtimeEnvironment"];
+        // Northflank API: runtimeEnvironment is a TOP-LEVEL job field. A copy
+        // nested under `deployment` is silently dropped (the 2026-06-15 live
+        // failure: box started with no env, runner entrypoint exited 1).
+        let re = &v["runtimeEnvironment"];
         assert_eq!(
             re["CORELINK_ENVELOPE_INGEST_URL"].as_str().unwrap(),
             "https://f/v1/leases/l/envelope/ingest"
@@ -782,6 +799,33 @@ mod tests {
         assert_eq!(
             re["CORELINK_ENVELOPE_INGEST_CREDENTIAL"].as_str().unwrap(),
             "pat-xyz"
+        );
+        // Regression pin: it must NOT live under `deployment` (the bug shape).
+        assert!(
+            v["deployment"].get("runtimeEnvironment").is_none(),
+            "runtimeEnvironment must be top-level, never nested under deployment"
+        );
+    }
+
+    #[test]
+    fn create_job_body_puts_runner_jitconfig_at_top_level() {
+        // ADR-0007 Stage A regression: the runner box reads
+        // CORELINK_RUNNER_JITCONFIG from env. It MUST land in the top-level
+        // runtimeEnvironment so Northflank actually injects it into the run.
+        let engine = NorthflankEngine::new(StubTransport, NorthflankConfig::new("proj", "tok"));
+        let env = vec![(
+            "CORELINK_RUNNER_JITCONFIG".to_string(),
+            "opaque-jit-bytes".to_string(),
+        )];
+        let body = engine.create_job_body(&spec(env), "job-runner");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            v["runtimeEnvironment"]["CORELINK_RUNNER_JITCONFIG"]
+                .as_str()
+                .unwrap(),
+            "opaque-jit-bytes",
+            "jitconfig must be in TOP-LEVEL runtimeEnvironment (else the box \
+             starts with no env and the runner entrypoint exits 1)"
         );
     }
 
