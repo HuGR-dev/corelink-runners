@@ -288,8 +288,8 @@ fn parse_id(body: &str) -> Result<String> {
 /// but a fixed-width hex suffix of the BLAKE-free SHA-256 of the *full, original*
 /// `spec.name` is always appended. Two distinct inputs can share the readable
 /// prefix but never the hash suffix, so the mapping is injective on the full
-/// input. The result always starts with a letter and fits Northflank's 63-char
-/// object-name ceiling.
+/// input. The result always starts with a letter and fits Northflank's 52-char
+/// JOB-name ceiling (the create-job validator's hard limit).
 fn northflank_job_name(spec_name: &str) -> String {
     use sha2::{Digest, Sha256};
 
@@ -327,10 +327,12 @@ fn northflank_job_name(spec_name: &str) -> String {
     }
     let readable = collapsed.trim_matches('-');
 
-    // Northflank object names cap at 63 chars and must start with a letter.
+    // Northflank JOB names cap at 52 chars and must start with a letter (the
+    // create-job payload validator rejects > 52 — observed live on a runner
+    // lease whose `lease-<uuid>` name derived a 62-char job name).
     // Layout: "nf-" (3) + readable + "-" (1) + 16-hex suffix = budget readable
-    // to 63 - 3 - 1 - 16 = 43 chars.
-    const READABLE_BUDGET: usize = 63 - 3 - 1 - 16;
+    // to 52 - 3 - 1 - 16 = 32 chars.
+    const READABLE_BUDGET: usize = 52 - 3 - 1 - 16;
     let readable: String = readable.chars().take(READABLE_BUDGET).collect();
     let readable = readable.trim_matches('-');
 
@@ -889,11 +891,14 @@ mod tests {
             "////",           // slug collapses to empty
             &"x".repeat(500), // length stress
             "hugit-c2b-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            // The live runner-lease shape that triggered the >52 reject:
+            // a "hugit-job-" container name over a full `lease-<uuid>`.
+            "hugit-job-lease-62eda9d1-b10f-40d6-b71a-b7d9eae779faafbf7c5",
         ] {
             let name = northflank_job_name(input);
-            // Starts with a letter, ≤63 chars, only [a-z0-9-].
+            // Starts with a letter, ≤52 chars (Northflank job-name limit), [a-z0-9-].
             assert!(
-                name.len() <= 63,
+                name.len() <= 52,
                 "name too long ({}) for {input:?}",
                 name.len()
             );
