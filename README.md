@@ -1,59 +1,152 @@
 # CoreLink Runners
 
 **Ephemeral, cache-warm CI/build compute — billed by concurrency, not minutes.**
-CoreLink expansion **campaign #1**. Part of the HuGR family:
-**HuGR → CoreLink → { Cache · Runners · Workspaces } → hugit**.
 
-> **Status (2026-06-09): greenfield / specification phase.** No code yet. This
-> repo holds the product design and the two-sided integration contract:
-> what **hugit** (campaign #3, the forge — already built) needs from Runners to
-> execute its memoized CI, and a stub for the **CoreLink techlead** to specify
-> the fabric side. The hugit-side client already exists (the `hugit-runner`
-> crate); Runners is the production fabric it will ride.
-
-> **Workspace status (2026-06-10): code exists.** The repo now carries a Rust
-> workspace (`crates/corelink-runners-contracts`, a placeholder until the R1b
-> contract transcription) with the full HuGR gate from day 1 — fmt · clippy
-> `-D warnings --locked` · test `--locked` · `cargo deny check` · `cargo audit
-> --deny warnings`, CI on the self-hosted fleet, never GitHub-hosted. The
-> campaign-#1 seed (the proven execution core transplanted from hugit's
-> `hugit-runner` crate) is incoming per the runner-transfer plan in hugit
-> (`docs/plan/2026-06-10-runner-transfer-campaign.md`).
-
-## What it is, in one paragraph
-
-GitHub Actions charges per-minute and is about to charge for self-hosted runners
-(Mar 2026). CoreLink Runners is the opposite bet: **flat per-parallel-runner
-pricing, unlimited minutes**, on ephemeral microVMs that **boot cache-warm** off
-CoreLink's CAS/Action-Cache — so a job's inputs are already local and a re-run
-that's already been computed returns from cache in milliseconds instead of
-re-executing. It is the compute substrate beneath CoreLink's cache product and
-beneath hugit's "checks-as-code, memoized, cache-hit ⇒ 0 execution" CI.
-
-## Read first
-
-- **🟡 CoreLink techlead: `docs/handoff/corelink-techlead-onboarding.md`** — your
-  full briefing + exactly what to do. Start there.
-- `docs/whitepaper/corelink-runners-v1.md` — **the canonical product vision** (the
-  "why & what it must be"; source of truth on vision/principle).
-- `docs/product/product.md` — the product: vision, market wedge, user stories,
-  pricing / cost / margin, positioning, roadmap.
-- `docs/spec/hugit-integration-contract.md` — **what hugit needs** from Runners
-  (authored by the hugit techlead; full context, the consumed API surface).
-- `docs/spec/corelink-fabric-stub.md` — **stub for the CoreLink techlead** to
-  fill: the fabric/scheduler/billing/ops side.
-- `CLAUDE.md` — context + house rules for AI agents working in this repo.
-
-## The two-sided contract (why this repo exists)
+CoreLink expansion campaign #1. The compute substrate beneath CoreLink Cache and
+beneath hugit's memoized-CI forge:
 
 ```
-   hugit  (campaign #3, BUILT)                 CoreLink Runners (campaign #1, THIS REPO)
-   ────────────────────────────                ──────────────────────────────────────────
-   hugit-runner crate  ──── lease/exec ───▶     the fabric: schedule, boot cache-warm,
-   (client: leases, fences, cache-warm           isolate untrusted job, attest, return
-    boot orchestration, byte-identity      ◀──── CheckResult bytes; meter for billing
-    expectations, budgets, attestation)          (server side — to be built)
+HuGR (the company / brand)
+ └─ CoreLink (the platform)
+     ├─ Cache        — content-addressed CAS + Action Cache   (live)
+     ├─ Runners      — ephemeral compute on the cache         (THIS REPO)
+     └─ Workspaces   — workspace-as-object                    (campaign #2)
+   hugit (the forge for agent fleets)                         (BUILT)
 ```
 
-hugit consumes Runners as a paying tenant; it does **not** fork or reimplement
-the fabric. This repo locks the seam so both sides build to the same contract.
+## What it is
+
+GitHub Actions charges per-minute and divides your quota by how many jobs run in
+parallel. CoreLink Runners inverts that model: **you buy N parallel runners, flat,
+and minutes are unlimited**. Jobs boot on ephemeral microVMs with CoreLink's
+CAS/Action-Cache pre-warmed — inputs are local before the job starts. A re-run
+whose result is already memoized returns from cache in milliseconds rather than
+re-executing; you are never billed as if it ran again.
+
+The ICP is teams running wide, warm, and often: agent fleets, heavy CI,
+monorepos. Per-minute pricing punishes exactly this workload; flat concurrency
+serves it.
+
+## Pricing
+
+**Flat by concurrency, never per-minute. Minutes unlimited.**
+
+| Tier | $/mo | Concurrency | Hard ceiling (vCPU-h/mo) | Max COGS |
+|---|---|---|---|---|
+| Starter | $8 | 20 | 300 | $5.01 |
+| Pro | $20 | 40 | 720 | $12.02 |
+| Team | $50 | 80 | 1,800 | $30.06 |
+| Scale | $100 | 160 | 3,600 | $60.12 |
+| Max | $200 | 320 | 7,200 | $120.24 |
+
+No free tier. 5-day trial at Team-level capability (card on file; converts or
+downgrades at end). Above Max: Enterprise (custom, governance, BYOC).
+
+Each tier has two hard limits: a **concurrency cap** (bounds peak burn rate) and
+a **vCPU-hour ceiling** (at the ceiling, further jobs queue or require an upgrade
+— no overage). Because the ceiling is hard, the maximum COGS a single tenant can
+incur is strictly below the tier price. **It is structurally impossible to lose
+money on a tenant within the tier limits.** The ceiling is generous enough that a
+real workflow never approaches it; it is a fair-use wall the 99% never see, not a
+visible usage meter. Full model: [`docs/product/pricing.md`](docs/product/pricing.md).
+
+## Architecture
+
+Seven crates in one Cargo workspace (`crates/`):
+
+| Crate | Role |
+|---|---|
+| `corelink-runner` | Execution core: lease lifecycle, isolation, teardown, boot, concurrency/expiry/recovery, Actions-YAML shim, fence enforcement (`materialize`/`enforce`), X4 supply-chain oracle, §13 envelope (derivation collector, CaptureHook, JobClose ack). |
+| `corelink-fabric` | Control-plane core: `LeaseLedger` trait + in-memory and Postgres (`PgLedger`) implementations, `SlotMeter` bounded billing journal, `FairScheduler` (CP4), plan/tier types, `BoxRegistry`, crash/expiry reaper. |
+| `corelink-fabric-server` | HTTP server binary (`corelink-fabricd`): axum router, auth middleware, lease/exec/attestation handlers, tower load-shed, global concurrency limit, admin tenant endpoint, cloud backend wiring. |
+| `corelink-fabric-api` | Frozen wire DTOs: `AcquireRequest`, `ExecRequest`, `CloseResponse`, etc. Shared by the server and the CLI — no drift possible. |
+| `corelink-cloud-engine` | Northflank Job-run adapter behind the `Engine` seam; `HttpTransport` trait quarantines `ureq`; swap-in for Firecracker when bare-metal arrives. |
+| `corelink-cli` | The `corelink` client/ops binary: `smoke` (post-deploy health + fail-closed gate verification) and `verify` (customer-trust primitive: verify `result_binding_sig_v2` against the published ed25519 key). |
+| `corelink-runners-contracts` | Frozen wire-contract types transcribed from hugit-contracts (`RunnerLease`, `RunnerState`, `FenceManifest`, `MaterializedEntry`, `IntentMetrics`). Byte-identical conformance vectors under `conformance/`; golden tests verify SHA-256 + membership + tamper rejection. |
+
+**Wire-contract law:** types are transcribed on each side; `hugit-contracts` is
+frozen and never imported. `deny.toml` enforces crates.io-only external deps (no
+`git`/`path` dep in either direction). The conformance vectors are the drift
+tripwire — either side's golden tests go red on any type divergence.
+
+## Status
+
+**`v0.1.0-seed` shipped 2026-06-12.** The fabric is live on Northflank, proven
+end-to-end (acquire → real microVM → exec → signed attestation → teardown). As
+of 2026-06-14:
+
+- Multi-instance on a persistent Postgres ledger; cross-instance cap-safety
+  proven live (2 containers, advisory-lock serialized admission, no over-admit).
+- Exhaustively audited (28 confirmed findings closed, including a P0
+  attestation-forgery fixed as `result_binding_sig_v2`). Zero open P0/P1.
+- §13 envelope seam fully wired on the fabric side: per-lease `CaptureHook`,
+  per-turn ingest endpoint, durable checkpoint, 3-tier abnormal flush.
+- Control plane: runtime tenant onboarding, durable billing exporter
+  (`PgBillingSink`), `FairScheduler` (CP4), crash-probe sweep, orphan GC.
+- `corelink` CLI shipped.
+
+What remains before paying customers: the CoreLink auth+billing flip
+(`FABRIC_AUTH_BACKEND=corelink`, pending corelink-server `runners_entitlement`),
+hugit adopting `result_binding_sig_v2`, and M2 self-serve onboarding.
+
+See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the full item list.
+
+## Quickstart — local single-tenant fabric
+
+```sh
+# 1. Build
+cargo build --workspace --locked
+
+# 2. Run the fabric (dev key; mock exec — no cloud backend needed)
+FABRIC_DEV_UNSAFE=1 \
+FABRIC_PAT=dev-pat \
+FABRIC_TENANT=dev \
+FABRIC_TENANT_MAX_CONCURRENCY=4 \
+FABRIC_MOCK_EXEC=1 \
+  ./target/debug/corelink-fabricd
+# binds localhost:8080; refuses to start on a non-loopback address with FABRIC_DEV_UNSAFE=1
+
+# 3. Smoke it
+CORELINK_PAT=dev-pat corelink smoke --url http://localhost:8080
+# add --full to do a real acquire → cancel round-trip
+```
+
+`FABRIC_DEV_UNSAFE=1` boots with the insecure well-known dev signing key — local
+use only; attestations are forgeable. `FABRIC_MOCK_EXEC=1` routes all exec calls
+through `MockLeasedExec` (no Northflank credentials needed). The full env-var
+reference is in [`docs/deploy/fabric-server.md`](docs/deploy/fabric-server.md);
+the CLI reference is in [`docs/cli.md`](docs/cli.md).
+
+To run against the live Northflank backend, add `FABRIC_SIGNING_KEY` (32-byte
+random seed, base64) and the `NORTHFLANK_*` vars (see
+[`docs/deploy/northflank-postgres-runbook.md`](docs/deploy/northflank-postgres-runbook.md)).
+
+## Gate (CI)
+
+```
+cargo fmt --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+cargo deny check
+cargo audit --deny warnings
+```
+
+All five pass on CI (`[self-hosted, mac, corelink-builder]`) before merge. Never
+`gh pr merge --auto` — the CI-green-before-merge rule is manual discipline (GitHub
+free plan + private repo, no branch protection).
+
+## Key documents
+
+| Document | What it is |
+|---|---|
+| [`docs/whitepaper/corelink-runners-v1.md`](docs/whitepaper/corelink-runners-v1.md) | Canonical product vision — source of truth on why and what it must be |
+| [`docs/product/product.md`](docs/product/product.md) | Product: vision, market wedge, user stories, positioning, roadmap |
+| [`docs/product/pricing.md`](docs/product/pricing.md) | Pricing model: full rationale, loss-impossible guarantee, competitive position |
+| [`docs/cli.md`](docs/cli.md) | `corelink` CLI reference (`smoke`, `verify`) |
+| [`docs/api/v1-reference.md`](docs/api/v1-reference.md) | Full `/v1` HTTP API reference — every endpoint, DTO, auth, status code |
+| [`docs/spec/hugit-integration-contract.md`](docs/spec/hugit-integration-contract.md) | hugit↔Runners wire contract v1.4.0 — frozen from hugit's side |
+| [`docs/spec/corelink-fabric-stub.md`](docs/spec/corelink-fabric-stub.md) | CoreLink-side fabric/scheduler/billing stub |
+| [`docs/deploy/fabric-server.md`](docs/deploy/fabric-server.md) | `corelink-fabricd` env vars and Docker deploy |
+| [`docs/deploy/northflank-postgres-runbook.md`](docs/deploy/northflank-postgres-runbook.md) | Northflank + Postgres production deploy runbook |
+| [`docs/ROADMAP.md`](docs/ROADMAP.md) | Full item-by-item roadmap: closed, in-flight, remaining |
+| [`CLAUDE.md`](CLAUDE.md) | Context and house rules for AI agents working in this repo |
