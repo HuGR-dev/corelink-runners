@@ -284,6 +284,15 @@ Items that cannot close without owner input or a hugit-side move:
       honest use). Kept as-is; the only real tier limits (concurrency cap + vCPU-h
       ceiling) are already documented + exact. No owner action; a per-tier rate table
       would contradict the pricing model.
+- [x] **`corelink` client/ops CLI** _(2026-06-14)_ — the adoption last-mile: one
+      binary (`crates/corelink-cli`) wrapping the raw `/v1` surface. `smoke` automates
+      the post-redeploy checklist (health · attestation-key · fail-closed gates;
+      `--full` = real acquire→cancel); `verify` is the customer-trust primitive
+      (verify `result_binding_sig_v2` against the published key, guarded by the shared
+      conformance vector). Reuses the frozen DTOs (no wire drift). Doubles as the
+      automated smoke + the static-backend dogfood entry (no CoreLink flip needed to
+      run a real workload). Quickstart: `docs/cli.md`. Follow-up (deliberate): GH-Actions
+      shim + language SDKs transcribe the CLI's `client`/`binding` modules.
 - [ ] **Redeploy the live fabric to current `main`** _(owner action)_ — the live
       Northflank service is several PRs behind (it predates the audit P0 fix + the
       hardening). A NEW BUILD of `main` deploys the `result_binding_sig_v2` P0 fix +

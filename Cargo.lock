@@ -183,6 +183,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
+name = "corelink-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "corelink-fabric-api",
+ "corelink-runners-contracts",
+ "ed25519-dalek",
+ "serde",
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
 name = "corelink-cloud-engine"
 version = "0.1.0"
 dependencies = [
