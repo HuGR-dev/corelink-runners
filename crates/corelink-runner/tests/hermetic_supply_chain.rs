@@ -314,6 +314,8 @@ fn real_docker_engine_verifies_before_run() {
         image: image.to_string(),
         tmp_root: "/hugit/tmp".to_string(),
         no_network: true,
+        allow_egress: false,
+        run_on_create: false,
         path_set: vec![],
         env: vec![],
     };

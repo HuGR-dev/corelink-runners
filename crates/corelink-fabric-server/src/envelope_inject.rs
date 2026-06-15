@@ -123,6 +123,8 @@ mod tests {
                 .to_string(),
             tmp_root: "/tmp/job".to_string(),
             no_network: true,
+            allow_egress: false,
+            run_on_create: false,
             path_set: vec![],
             env: vec![],
         }
