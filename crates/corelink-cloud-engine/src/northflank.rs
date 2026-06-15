@@ -447,10 +447,14 @@ impl<H: HttpTransport> NorthflankEngine<H> {
             "name": job_name,
             "billing": { "deploymentPlan": self.cfg.deployment_plan },
             "deployment": deployment,
-            // CHECK leases stay `false` (the fabric drives the command per
-            // `/exec`); a RUNNER lease (ADR-0007) runs its agent entrypoint
-            // immediately at create.
-            "runOnCreate": spec.run_on_create,
+            // Always `false`: the run is ALWAYS triggered explicitly via
+            // `POST {job}/runs` — a CHECK lease's run is driven by `/exec`, and a
+            // RUNNER lease (ADR-0007) is run in `spawn` right after create (the
+            // `runOnCreate` flag did NOT auto-run a job in practice — observed
+            // live as a created job with "no job runs"). Relying on the explicit
+            // trigger for both makes the run deterministic and avoids a possible
+            // double-run if `runOnCreate` ever fires.
+            "runOnCreate": false,
             "backoffLimit": 0,
             "activeDeadlineSeconds": self.cfg.active_deadline_secs
         })
@@ -620,6 +624,16 @@ impl<H: HttpTransport> Engine for NorthflankEngine<H> {
             Some(self.create_job_body(spec, &job_name)),
             "create-job",
         )?;
+        // A RUNNER box (`run_on_create`) has no `/exec` step to start it: the
+        // check path triggers its run inside `exec`, but a runner must be RUN
+        // here, right after creation, or the container never starts — observed
+        // live as a created job with "no job runs", so the runner agent never
+        // launched and the runner stayed offline. Trigger the run explicitly via
+        // the same proven endpoint the exec path uses.
+        if spec.run_on_create {
+            let runs_url = format!("{}/runs", self.job_url(&job_name));
+            self.send_2xx(Method::Post, runs_url, None, "trigger-run-on-create")?;
+        }
         Ok(RunningContainer { name: job_name })
     }
 
