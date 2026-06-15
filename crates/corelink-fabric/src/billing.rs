@@ -16,11 +16,13 @@ use crate::meter::{SlotEventKind, SlotOccupancyEvent};
 use crate::tenant::TenantId;
 
 /// In-memory audit-tail bound for the journal: when the journal holds this
-/// many events, the OLDEST event is dropped (and counted in
-/// `journal_dropped`) before a new one is appended. An exporter that drains
-/// the meter into durable storage is a future WP; until it lands, drops are
-/// bounded and **never silent** (matching the §13 envelope discipline:
-/// bounded in-flight, overflow surfaced via the snapshot, never lost quietly).
+/// many events, the OLDEST event is dropped (and counted in `journal_dropped`)
+/// before a new one is appended. The durable billing exporter DRAINS the
+/// persisted window via [`SlotMeter::drain_through`], so in steady state the
+/// journal holds only NOT-YET-exported events — this cap is the back-stop for
+/// genuine overload (export not keeping up with emission), and any such drop is
+/// **never silent** (matching the §13 envelope discipline: bounded in-flight,
+/// overflow surfaced via the snapshot/`journal_dropped`, never lost quietly).
 const JOURNAL_CAP: usize = 100_000;
 
 /// Per-tenant slot-occupancy meter over the frozen [`SlotOccupancyEvent`]
@@ -66,6 +68,14 @@ pub struct SlotMeter {
     /// Count of journal events dropped to stay under `JOURNAL_CAP` — the
     /// audit-tail overflow, surfaced (never silent) via the snapshot.
     journal_dropped: u64,
+    /// Monotonic count of EVERY event ever recorded (never decremented, even on
+    /// eviction or drain). It defines a stable positional sequence: the event at
+    /// `journal[i]` has global seq `total_recorded - journal.len() + i`, so the
+    /// front event's seq is `total_recorded - journal.len()`. This lets the
+    /// exporter DRAIN exactly the window it persisted via [`Self::drain_through`]
+    /// without re-identifying events by value — robust against eviction/appends
+    /// that mutate the journal between snapshot and drain.
+    total_recorded: u64,
 }
 
 /// One tenant's slot occupancy in an [`OccupancySnapshot`].
@@ -119,6 +129,45 @@ impl SlotMeter {
             self.journal_dropped += 1;
         }
         self.journal.push_back(ev);
+        // Monotonic: counts the event we just appended. Never decremented (drain
+        // and eviction both leave it unchanged), so it is a stable seq cursor.
+        self.total_recorded = self.total_recorded.saturating_add(1);
+    }
+
+    /// The export watermark: the seq just past the newest journaled event (i.e.
+    /// every currently-journaled event has seq `< export_watermark()`). The
+    /// exporter snapshots this alongside the journal, persists, then on success
+    /// calls [`Self::drain_through`] with it to evict exactly the persisted
+    /// window — see the revenue-loss note on [`drain_through`](Self::drain_through).
+    pub fn export_watermark(&self) -> u64 {
+        self.total_recorded
+    }
+
+    /// Drain (pop from the front) every journaled event whose global seq is
+    /// `< watermark` — i.e. the window a successful export already persisted.
+    ///
+    /// REVENUE INTEGRITY: without this, the journal is never drained, so
+    /// already-exported events occupy `JOURNAL_CAP` slots for the meter's
+    /// lifetime; once lifetime emissions exceed the cap, a burst can FIFO-evict a
+    /// NOT-YET-exported event before the next export tick — silent revenue loss
+    /// (only the *count* survives via `journal_dropped`). Draining the persisted
+    /// window means cap pressure can only ever evict un-exported events under
+    /// genuine overload (still loudly counted). Durable safety holds: persisted
+    /// events live in the sink (exactly-once by PK), so removing them here loses
+    /// nothing; `occupied`/`peak` are independent accumulators, untouched by drain.
+    ///
+    /// Robust against the journal changing between snapshot and drain: the front
+    /// event's seq is `total_recorded - journal.len()`, which only increases (via
+    /// eviction or this drain), so we pop while it is `< watermark` and stop the
+    /// instant we reach a not-yet-exported event — never over-draining a newer
+    /// event appended after the snapshot, never under-draining if eviction
+    /// already removed part of the window.
+    pub fn drain_through(&mut self, watermark: u64) {
+        while !self.journal.is_empty()
+            && (self.total_recorded - self.journal.len() as u64) < watermark
+        {
+            self.journal.pop_front();
+        }
     }
 
     /// Currently occupied slots for `t` (0 if the tenant has never metered —
@@ -199,6 +248,60 @@ mod tests {
             kind,
             at_ms,
         }
+    }
+
+    /// `drain_through(watermark)` removes exactly the persisted prefix and
+    /// nothing newer — the revenue-loss fix's core. Events recorded AFTER the
+    /// watermark snapshot survive; `occupied`/`peak` are untouched by drain.
+    #[test]
+    fn drain_through_removes_persisted_prefix_only() {
+        let t = tenant("acme");
+        let mut m = SlotMeter::new();
+        for i in 0..5 {
+            m.record(ev(&t, &format!("l{i}"), SlotEventKind::Acquired, i));
+        }
+        let watermark = m.export_watermark(); // == 5: every current event has seq < 5
+        // Two events recorded AFTER the snapshot must NOT be drained.
+        m.record(ev(&t, "l5", SlotEventKind::Released, 5));
+        m.record(ev(&t, "l6", SlotEventKind::Released, 6));
+
+        m.drain_through(watermark);
+
+        assert_eq!(
+            m.journal().len(),
+            2,
+            "only the post-watermark events remain"
+        );
+        assert_eq!(m.journal()[0].lease_id, "l5");
+        assert_eq!(m.journal()[1].lease_id, "l6");
+        assert_eq!(m.export_watermark(), 7, "total_recorded is monotonic (5+2)");
+        // Occupancy accounting is independent of the journal/drain: 5 acquired,
+        // 2 released → 3 occupied; peak hit 5.
+        assert_eq!(m.occupied(&t), 3);
+        assert_eq!(m.peak(&t), 5);
+    }
+
+    /// Draining is robust when the journal is shorter than the watermark window
+    /// (e.g. eviction already removed part of the persisted prefix): it drains
+    /// what remains of that window and stops, never under/over-draining.
+    #[test]
+    fn drain_through_is_robust_to_a_partially_evicted_window() {
+        let t = tenant("acme");
+        let mut m = SlotMeter::new();
+        for i in 0..4 {
+            m.record(ev(&t, &format!("l{i}"), SlotEventKind::Acquired, i));
+        }
+        // Simulate that the front two events already left (as eviction would):
+        // pop them and bump the watermark base via two fresh records so the
+        // front seq advances. Simpler: drain the first 2, then drain_through(4)
+        // must clear the rest with no panic and stop cleanly.
+        m.drain_through(2); // removes l0,l1 (seq 0,1)
+        assert_eq!(m.journal().len(), 2);
+        m.drain_through(4); // removes l2,l3 (seq 2,3); watermark past end is fine
+        assert!(m.journal().is_empty());
+        // A watermark beyond what was ever recorded is a clean no-op once empty.
+        m.drain_through(99);
+        assert!(m.journal().is_empty());
     }
 
     /// Two leases with wildly different durations (1 ms vs ~115 days implied

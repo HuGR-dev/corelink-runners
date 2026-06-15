@@ -7,17 +7,21 @@
 //! 0-slot reject (the M1 boundary documented in `corelink_auth.rs`). This
 //! store closes that gap by reading the cap from the introspect response.
 //!
-//! ## ⚠️ PROVISIONAL wire shape (NOT yet ratified by corelink-server)
+//! ## Wire shape — RATIFIED + conformance-pinned
 //!
-//! corelink-server has **not** shipped/frozen the exact M2 response shape; they
-//! NAMED the field `max_concurrency` (integer) in their handoff
-//! (`docs/handoff/2026-06-12-corelink-runners-auth-seam-response.md`). This
-//! store is built against a `200 {"valid":true,"tenant_id":"<uuid>",
-//! "max_concurrency":<int>}` body with `max_concurrency` OPTIONAL. This is
-//! PROVISIONAL pending corelink-server's ratification AND a future conformance
-//! vector (the wire-contract drift tripwire). The tolerant parsing below
-//! (absent/non-u64 `max_concurrency` => `Ok(None)`, never a panic or a 503)
-//! makes it forward-safe: a real cap lights up the moment the field appears.
+//! The introspect response shape is FROZEN and mirrored byte-identical with
+//! corelink-server: `200 {"valid":true,"tenant_id":"<uuid>","plan":"<str>",
+//! "max_concurrency":<u32>}` with `max_concurrency` OPTIONAL. It is pinned by
+//! `conformance/corelink-introspect.json` (sha `bfb38e28…`, hash-listed in
+//! `conformance/manifest.sha256`) — the wire-contract drift tripwire that breaks
+//! a golden test on BOTH sides if either diverges (see
+//! `tests/corelink_introspect_vector.rs`). The runtime parse below is
+//! deliberately TOLERANT (absent/non-u64 `max_concurrency` => `Ok(None)`, never
+//! a panic or a 503) so a future additive field can't lock out a live tenant; a
+//! real cap lights up the moment the field is present. (corelink-server is
+//! building the `runners_entitlement` lookup behind this shape; an empty table
+//! returns `valid:true` with no cap → `Ok(None)` → reject, the fail-closed
+//! direction — never a false admit.)
 //!
 //! ## Fail-closed mapping (exhaustive, no fall-through — mirrors `CoreLinkTokenStore`)
 //!
@@ -124,7 +128,7 @@ impl<H: IntrospectHttp> PlanSource for CoreLinkPlanStore<H> {
                     return Ok(None);
                 }
 
-                // valid:true. The cap is OPTIONAL (provisional shape): absent
+                // valid:true. The cap is OPTIONAL (ratified shape): absent
                 // or non-u64 is the honest M1 state — authenticated but
                 // uncapped → Ok(None) (an over-cap reject), NOT a 503.
                 let Some(max_concurrency) = v
@@ -296,7 +300,7 @@ mod tests {
     }
 
     /// A non-u64 max_concurrency (e.g. a string) is treated as absent → Ok(None),
-    /// not a 503 (tolerant parsing keeps the provisional shape forward-safe).
+    /// not a 503 (tolerant parsing keeps the ratified shape forward-safe).
     #[test]
     fn valid_with_non_u64_cap_is_none() {
         let body = r#"{"valid":true,"max_concurrency":"lots"}"#;
