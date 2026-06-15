@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "corelink-verify"
+version = "0.1.0"
+description = "In-language v2 result-binding verifier for CoreLink fabric responses"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+keywords = ["corelink", "hugr", "ed25519", "attestation", "verify"]
+dependencies = [
+    "cryptography>=41",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["corelink_verify*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
