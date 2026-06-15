@@ -1,27 +1,25 @@
 {
   "name": "@corelink/verify",
   "version": "0.1.0",
-  "description": "TypeScript/Node reference verifier for CoreLink fabric result-binding v2 (ed25519, byte-identical to crates/corelink-cli/src/binding.rs)",
+  "description": "Node reference verifier for CoreLink fabric result-binding v2 (ed25519, byte-identical to crates/corelink-cli/src/binding.rs)",
   "type": "module",
+  "main": "./src/index.mjs",
+  "types": "./src/index.d.ts",
   "exports": {
     ".": {
-      "import": "./src/index.ts",
-      "types": "./src/index.ts"
+      "types": "./src/index.d.ts",
+      "import": "./src/index.mjs"
     }
   },
   "files": [
-    "src/",
-    "test/"
+    "src/index.mjs",
+    "src/index.d.ts"
   ],
   "engines": {
     "node": ">=18"
   },
   "scripts": {
-    "test": "node --test test/conformance.test.mjs",
-    "typecheck": "tsc --noEmit"
-  },
-  "devDependencies": {
-    "typescript": "^5.4.5"
+    "test": "node --test test/conformance.test.mjs"
   },
   "keywords": [
     "corelink",
