@@ -305,9 +305,19 @@ Items that cannot close without owner input or a hugit-side move:
       none can drift from the fabric signer; each SDK's golden test imports the SHIPPED
       module (a real tripwire, not a copy). A 6-agent parallel wave (4 builders + 2
       adversarial audits); the Wave-6 billing/admin audit came back CLEAN (0 P0/P1).
-      Follow-up (deliberate): a Buildkite plugin + publishing the SDKs/binary to public
-      registries (until then the Action locates `corelink` on PATH).
-- [ ] **Redeploy the live fabric to current `main`** _(owner action)_ — the live
+- [x] **Close-out wave — Buildkite plugin + release/publish pipeline + relays** _(2026-06-15)_
+      — **Buildkite plugin** (`integrations/buildkite/`, mirrors the GH Action, fail-closed,
+      validate.sh 8/8) is the second CI front door. **Release pipeline**
+      (`.github/workflows/release.yml`, tag-`v*`-only, inert on normal CI) builds the
+      `corelink` binary + sha256 on a GitHub Release; SDK npm/PyPI publish jobs are
+      DEFAULT-OFF (skipped, not failed, until the owner adds `NPM_TOKEN`/`PYPI_TOKEN`);
+      procedure + open decisions in `docs/release.md`. Lead cold-review reverted an
+      unauthorised SDK MIT-license change → stays proprietary (`UNLICENSED`/`Proprietary`)
+      until the owner decides + adds a `LICENSE`. **Owner-gated items are now each reduced
+      to one action/decision/relay in `docs/handoff/2026-06-15-OWNER-ACTION-BOARD.md`.**
+      Follow-up: wire the Action + plugin to download the released binary (vs PATH-locate).
+- [ ] **Redeploy the live fabric to current `main`** _(owner action — **SAFE, audited
+      zero new required config**: see the board, item A)_ — the live
       Northflank service is several PRs behind (it predates the audit P0 fix + the
       hardening). A NEW BUILD of `main` deploys the `result_binding_sig_v2` P0 fix +
       all Wave-1/2 hardening (new env vars all have safe defaults). Not an emergency
