@@ -46,25 +46,51 @@ pub fn spawn_export_loop(
             tick.tick().await;
             let now = clock.now_ms();
 
-            // ── Snapshot UNDER the lock (cheap clone), release BEFORE the DB
-            //    write — no lock is ever held across the persist I/O.
-            let (events, now_dropped) = {
-                let m = meter.lock().unwrap_or_else(|p| p.into_inner());
-                (
-                    m.journal().iter().cloned().collect::<Vec<_>>(),
-                    m.journal_dropped(),
-                )
+            // ── SUPERVISION (audit MEDIUM, two independent reviewers): the tick
+            //    body is a detached `tokio::spawn` — an UNCAUGHT panic here would
+            //    silently kill billing capture forever on a healthy-looking
+            //    server (the `JoinHandle` is only `.abort()`ed, never awaited, so
+            //    nothing observes the panic). Wrap the synchronous body in
+            //    `catch_unwind` so a single bad tick logs LOUDLY and the loop
+            //    survives — revenue capture never dies in silence. The body holds
+            //    no lock across an `.await` (the only await is `tick.tick()`
+            //    above), so catching here is sound.
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                // Snapshot UNDER the lock (cheap clone), release BEFORE the DB
+                // write — no lock is ever held across the persist I/O.
+                let (events, now_dropped) = {
+                    let m = meter.lock().unwrap_or_else(|p| p.into_inner());
+                    (
+                        m.journal().iter().cloned().collect::<Vec<_>>(),
+                        m.journal_dropped(),
+                    )
+                };
+
+                // Persist OUTSIDE the lock. A failed tick is logged and retried
+                // next tick (nothing is lost: the journal is non-destructive and
+                // the upsert is idempotent).
+                if let Err(e) = sink.persist(&events, now) {
+                    eprintln!("WARN billing-export: persist failed (retry next tick): {e}");
+                }
+                now_dropped
+            }));
+
+            let now_dropped = match outcome {
+                Ok(d) => d,
+                Err(_) => {
+                    // A panicked tick: capture survives (loop continues). The
+                    // watermark is NOT advanced, so the next successful tick
+                    // re-attributes any drops since the last good tick.
+                    eprintln!(
+                        "ERROR billing-export: a tick PANICKED — capture continues (supervised); \
+                         investigate the billing sink / meter immediately"
+                    );
+                    continue;
+                }
             };
 
             let dropped_delta = now_dropped.saturating_sub(prev_dropped);
             prev_dropped = now_dropped;
-
-            // ── Persist OUTSIDE the lock. A failed tick is logged and retried
-            //    next tick (nothing is lost: the journal is non-destructive and
-            //    the upsert is idempotent).
-            if let Err(e) = sink.persist(&events, now) {
-                eprintln!("WARN billing-export: persist failed (retry next tick): {e}");
-            }
 
             // ── Ops alarm: events aged out of the bounded journal before we
             //    could export them — they are NOT recoverable. Surface it so an
@@ -137,5 +163,61 @@ mod tests {
         // The 3 journal events were persisted exactly once (idempotent across
         // the multiple ticks that ran over the same resident window).
         assert_eq!(sink.len(), 3, "all journal events persisted, no duplicates");
+    }
+
+    /// A sink that PANICS on its first `persist`, then delegates to an inner
+    /// `MemBillingSink` — to prove the supervised loop survives a panicking tick.
+    struct PanicOnceSink {
+        panicked: std::sync::atomic::AtomicBool,
+        inner: MemBillingSink,
+    }
+    impl BillingSink for PanicOnceSink {
+        fn persist(
+            &self,
+            events: &[SlotOccupancyEvent],
+            exported_at_ms: u64,
+        ) -> anyhow::Result<usize> {
+            if !self.panicked.swap(true, Ordering::SeqCst) {
+                panic!("induced billing-sink panic on the first tick");
+            }
+            self.inner.persist(events, exported_at_ms)
+        }
+    }
+
+    /// SUPERVISION (audit MEDIUM): a panic inside a tick must NOT kill the export
+    /// loop — capture must survive and persist on a subsequent tick. Without the
+    /// `catch_unwind` the task would die and `sink` would stay empty forever.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn export_loop_survives_a_panicking_tick() {
+        let t = TenantId::new("acme").unwrap();
+        let meter = Arc::new(Mutex::new(SlotMeter::new()));
+        {
+            let mut m = meter.lock().unwrap();
+            m.record(ev(&t, "l1", SlotEventKind::Acquired, 1));
+            m.record(ev(&t, "l1", SlotEventKind::Released, 2));
+        }
+        let sink: Arc<PanicOnceSink> = Arc::new(PanicOnceSink {
+            panicked: std::sync::atomic::AtomicBool::new(false),
+            inner: MemBillingSink::new(),
+        });
+        let clock: Arc<dyn Clock> = Arc::new(FixedClock(AtomicU64::new(1_000)));
+
+        let handle = spawn_export_loop(
+            meter.clone(),
+            clock,
+            sink.clone() as Arc<dyn BillingSink + Send + Sync>,
+            Duration::from_millis(10),
+        );
+
+        // The FIRST tick panics; later ticks must still run and persist.
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        handle.abort();
+
+        assert!(
+            sink.inner.len() >= 2,
+            "loop must survive the panicking tick and persist on a later tick \
+             (got {} rows)",
+            sink.inner.len()
+        );
     }
 }
