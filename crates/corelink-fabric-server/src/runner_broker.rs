@@ -675,8 +675,14 @@ pub mod env {
     pub const APP_ID: &str = "FABRIC_GITHUB_APP_ID";
     /// The installation id the App is installed as on the target repo/org. REQUIRED.
     pub const INSTALLATION_ID: &str = "FABRIC_GITHUB_APP_INSTALLATION_ID";
-    /// The App's PKCS#8 private key, PEM contents (multi-line). REQUIRED.
+    /// The App's PKCS#8 private key, PEM contents (multi-line). REQUIRED unless
+    /// [`PRIVATE_KEY_B64`] is set.
     pub const PRIVATE_KEY: &str = "FABRIC_GITHUB_APP_PRIVATE_KEY";
+    /// The App's PKCS#8 private key as **single-line base64** of the PEM text
+    /// (`base64 < key.pk8.pem | tr -d '\n'`). Preferred over [`PRIVATE_KEY`]:
+    /// a one-line value survives env-var UIs that mangle multi-line input. If
+    /// both are set, this one wins.
+    pub const PRIVATE_KEY_B64: &str = "FABRIC_GITHUB_APP_PRIVATE_KEY_B64";
     /// API base (GHES-friendly). Optional; defaults to `https://api.github.com`.
     pub const API_BASE: &str = "FABRIC_GITHUB_API_BASE";
     /// Runner group id for the JIT config. Optional; defaults to `1`.
@@ -721,11 +727,33 @@ pub fn runner_broker_from_env(
         );
         return None;
     };
-    let Some(pem) = nonempty(env::PRIVATE_KEY) else {
+    // Prefer the single-line base64 form (robust against env-var UIs that mangle
+    // multi-line values); fall back to the raw multi-line PEM.
+    let pem = if let Some(b64) = nonempty(env::PRIVATE_KEY_B64) {
+        let stripped: String = b64.chars().filter(|c| !c.is_whitespace()).collect();
+        use base64::Engine as _;
+        match base64::engine::general_purpose::STANDARD
+            .decode(stripped.as_bytes())
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+        {
+            Some(pem) => pem,
+            None => {
+                eprintln!(
+                    "runner-broker: {} is not valid base64 of a PEM — runner mode DISABLED",
+                    env::PRIVATE_KEY_B64
+                );
+                return None;
+            }
+        }
+    } else if let Some(raw) = nonempty(env::PRIVATE_KEY) {
+        raw
+    } else {
         eprintln!(
-            "runner-broker: {} is set but {} is missing — runner mode DISABLED",
+            "runner-broker: {} is set but neither {} nor {} is present — runner mode DISABLED",
             env::APP_ID,
-            env::PRIVATE_KEY
+            env::PRIVATE_KEY,
+            env::PRIVATE_KEY_B64
         );
         return None;
     };
@@ -733,10 +761,7 @@ pub fn runner_broker_from_env(
         Ok(k) => k,
         Err(e) => {
             // `e` carries NO key material (KeyParseError redacts by construction).
-            eprintln!(
-                "runner-broker: {} invalid ({e}) — runner mode DISABLED",
-                env::PRIVATE_KEY
-            );
+            eprintln!("runner-broker: private key invalid ({e}) — runner mode DISABLED");
             return None;
         }
     };
@@ -869,6 +894,34 @@ mod tests {
         ];
         let broker = runner_broker_from_env(env_of(&pairs));
         assert!(broker.is_some(), "all required vars present → broker wired");
+    }
+
+    #[test]
+    fn from_env_accepts_single_line_base64_key() {
+        use base64::Engine as _;
+        // The robust single-line form: base64 of the PEM text.
+        let b64 = base64::engine::general_purpose::STANDARD.encode(valid_pkcs8_pem().as_bytes());
+        let pairs = [
+            (env::APP_ID, "12345"),
+            (env::INSTALLATION_ID, "987"),
+            (env::PRIVATE_KEY_B64, b64.as_str()),
+        ];
+        let broker = runner_broker_from_env(env_of(&pairs));
+        assert!(
+            broker.is_some(),
+            "the single-line base64 key form must wire the broker"
+        );
+    }
+
+    #[test]
+    fn from_env_base64_key_wins_over_raw_and_rejects_garbage() {
+        // A present-but-garbage base64 disables loudly (returns None).
+        let pairs = [
+            (env::APP_ID, "12345"),
+            (env::INSTALLATION_ID, "987"),
+            (env::PRIVATE_KEY_B64, "!!!not base64!!!"),
+        ];
+        assert!(runner_broker_from_env(env_of(&pairs)).is_none());
     }
 
     // A recording mock transport: scripts a response per call and records what
