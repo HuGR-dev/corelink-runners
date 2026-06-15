@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-06-14 — M1 last-mile: billing exporter, tenant onboarding, registry GC, CLI, contract v1.4.0
+
+- **feat(fabric): Wave-6 M1 last-mile — durable billing exporter + runtime tenant onboarding +
+  BoxRegistry orphan GC (#51).** `SlotMeter` drains into Postgres `billing_events` table with
+  exactly-once upsert by PK; export cadence driven by `FABRIC_BILLING_EXPORT_INTERVAL_SECS`.
+  `POST /internal/v1/admin/tenants` enables runtime tenant provisioning without a redeploy,
+  guarded by `FABRIC_ADMIN_KEY`. BoxRegistry periodic GC reaps orphaned box entries.
+- **docs(plans): rate_ceiling_per_min ratified as an abuse rail, not a price (#53).** Owner-
+  confirmed: the cap is a DoS/runaway-cost guardrail only; it does not appear on the pricing
+  sheet or in any billing calculation. Closes the last owner-gated M1 flag.
+- **feat(conformance): result_binding_v2 cross-repo conformance vector + contract v1.4.0
+  RATIFIED (#52).** Signed drift tripwire committed byte-identical in both repos; hugit-side
+  v2 verifier PR merged. §7.1 amendment (v1.4.0) closes the P0 attestation-forgery fix
+  (binding `CheckResult.exit`/`.artifacts` into `result_binding_sig_v2`). Seams §7/§13 now
+  fully closed on both sides.
+- **feat(cli): `corelink` client/ops CLI — adoption last-mile smoke + verify (#54).** Thin
+  CLI binary in the workspace covering the core operator workflows; smoke tests and a verify
+  suite confirm the happy path end-to-end.
+
 ### 2026-06-14 — multi-instance, durable state, exhaustive audit
 
 - **feat(fabric): persistent Postgres ledger DEPLOYED + multi-instance proven
