@@ -21,6 +21,7 @@ use corelink_fabric_api::dto::{
     AcquireRequest, AcquireResponse, AttestationKeyResponse, ExecResponse,
 };
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 use crate::{binding, client::Client, smoke::PINNED_IMAGE};
 
@@ -44,46 +45,38 @@ fn acquire_body(image: &str, expiry_ms: u64) -> String {
 }
 
 /// Build the exec request body for a shell check.
-/// `check_id` is used as both `def_digest` placeholder and a mnemonic;
-/// `command` is the shell fragment the customer supplied via `--check`.
+/// `command` is the shell fragment the customer supplied via `--check`;
+/// `check_id` is the mnemonic. The `def_digest` is a REAL SHA-256 content
+/// address over the canonical check definition — stable + honest (not a
+/// provenance claim about materialized inputs, but a true digest of the def).
 fn exec_body(command: &str, check_id: &str) -> String {
+    let toolchain_ref = "cli-run-v1";
+    // def_digest = sha256 over the canonical check-def string. A real content
+    // hash: identical (command, check_id, toolchain) → identical digest, so the
+    // one-shot runner is deterministically addressable. The CLI has no workspace
+    // Merkle root, so tree_hash is the zero axis (a command runner, not a
+    // memoized check pipeline).
+    let def_digest = sha256_hex(&format!(
+        "cli-run-v1\0{check_id}\0{command}\0{toolchain_ref}"
+    ));
     serde_json::to_string(&serde_json::json!({
         "check_def": {
-            // A stable synthetic digest derived from the check_id — good enough
-            // for a CLI one-shot (the fabric validates format, not provenance).
-            "def_digest": sha256_hex(check_id),
+            "def_digest": def_digest,
             "command": command,
             "inputs": [],
-            "toolchain_ref": "cli-run-v1",
+            "toolchain_ref": toolchain_ref,
             "env_manifest": format!("sha256:{}", "0".repeat(64)),
             "glob_set": [],
         },
-        // Synthetic tree_hash: all-zeros (the first memo axis; the CLI doesn't
-        // have a real workspace Merkle root — it's a command runner, not a
-        // memoized check pipeline).
         "tree_hash": "0".repeat(64),
     }))
     .expect("ExecRequest serializes")
 }
 
-/// Minimal SHA-256 hex via byte-by-byte via the `sha2` stdlib trick.
-/// We need a stable 64-hex string and already pull `ed25519-dalek` which
-/// transitively brings in `sha2` — but we can't import it directly (not in
-/// Cargo.toml). Instead, derive a deterministic 64-char hex from the input
-/// using a simple fold that produces a plausible-looking hex string.
-/// This is NOT a cryptographic hash — it is used only as a synthetic
-/// `def_digest` placeholder for the CLI's one-shot exec path.
+/// Real SHA-256, lowercase hex. Used for the `def_digest` content address.
 fn sha256_hex(s: &str) -> String {
-    // Produce 32 pseudo-bytes by XOR-folding over the input bytes.
-    let mut state = [0u8; 32];
-    for (i, b) in s.bytes().enumerate() {
-        state[i % 32] ^= b.wrapping_add((i as u8).wrapping_mul(7));
-    }
-    // Mix further to spread bits.
-    for i in 1..32 {
-        state[i] = state[i].wrapping_add(state[i - 1].wrapping_mul(31));
-    }
-    state.iter().fold(String::with_capacity(64), |mut acc, b| {
+    let digest = Sha256::digest(s.as_bytes());
+    digest.iter().fold(String::with_capacity(64), |mut acc, b| {
         acc.push_str(&format!("{b:02x}"));
         acc
     })
@@ -237,9 +230,15 @@ fn run_after_acquire(
     step(json_mode, &format!("exec  ✓  exit={exec_exit}"));
 
     // ── step 3: verify ────────────────────────────────────────────────────────
+    // `verified` means CRYPTOGRAPHICALLY VERIFIED — it is `false` when skipped
+    // (`--no-verify`) so the --json field never overclaims. The exit-code logic
+    // in `cmd_run` guards on `no_verify` separately, so a skip is still exit 0.
     let verified = if no_verify {
-        step(json_mode, "verify    (--no-verify, skipped)");
-        true // treated as verified for exit-code purposes when skipped
+        step(
+            json_mode,
+            "verify    (--no-verify, skipped — emitted as verified=false)",
+        );
+        false // not verified: verification did not happen
     } else {
         // Fetch the fabric's published key (Bearer-PAT authenticated).
         let key_resp = c

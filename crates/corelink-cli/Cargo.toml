@@ -19,6 +19,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 base64 = { workspace = true }
 ed25519-dalek = { workspace = true }
+sha2 = { workspace = true }
 ureq = { workspace = true }
 # Same-workspace path deps (house law: crates.io-only rule governs EXTERNAL deps
 # only). The CLI REUSES the frozen wire DTOs + types — never redefines them, so

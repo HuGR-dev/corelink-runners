@@ -13,7 +13,7 @@ use anyhow::{Context, Result, anyhow};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use corelink_runners_contracts::CheckResult;
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, VerifyingKey};
 
 /// `LP(s) = u32_be(byte_len(s)) ‖ utf8_bytes(s)` — the framing shared by the
 /// fabric signer, the conformance vector, and hugit's verifier.
@@ -80,7 +80,12 @@ pub fn verify_result_binding_v2(
         .context("result_binding_sig_v2 is not a valid ed25519 signature")?;
 
     let preimage = result_binding_preimage_v2(result)?;
-    Ok(vk.verify(&preimage, &sig).is_ok())
+    // `verify_strict` (NOT the malleability-permissive `verify`) to match the
+    // server/runner verifier (`corelink-runner::attest::verify_raw`): the two
+    // trust-primitive verifiers MUST accept the exact same canonical-signature
+    // set, else a non-canonical (malleated) sig the CLI accepts would be
+    // rejected by the fabric/hugit — a verifier-consistency defect.
+    Ok(vk.verify_strict(&preimage, &sig).is_ok())
 }
 
 /// What a `verify` over a response payload concluded.
