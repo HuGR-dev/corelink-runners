@@ -349,7 +349,24 @@ Items that cannot close without owner input or a hugit-side move:
 
 ## M2 — direct GA
 
-- [ ] Identity via the HuGR account (ADR-0002: same Clerk pool; org = tenant).
+> **Drift correction (2026-06-15, ADR-0007):** the direct on-ramp is an **ephemeral
+> GitHub Actions runner fleet** (`runs-on: corelink`), NOT a "shim" step. The
+> `corelink run` CLI + GitHub Action + `result_binding_sig_v2` + verify SDKs shipped
+> earlier this session are re-scoped to the **hugit / campaign-#3 memoized-check path**
+> + a power-user primitive — they were mislabelled as the direct adoption surface.
+
+- [x] **`GET /v1/usage`** _(2026-06-15, #66)_ — tenant-facing live usage (cap · fabric-wide
+      active · instance peak); the console data surface. (Historical billing summary = follow-up.)
+- [ ] **Direct-CI runner fleet (ADR-0007)** — the real direct on-ramp. Staged:
+      - **Stage A (MVP / dogfood):** runner net_policy (C2) · digest-pinned runner image (C3) ·
+        `RunnerRegistrationBroker` GitHub-App JIT-token minter (C1) · runner-lease
+        provision→wait→teardown lifecycle. Enough to point our OWN CI at `runs-on: corelink`
+        and offload the builder Mac.
+      - **Stage B (autoscaler):** `workflow_job` webhook → one runner lease per queued job.
+      - **Stage C (GA):** sizes/labels · App-install UX · customer console (consumes `/v1/usage`) ·
+        per-job billing reconciliation · SLOs.
+- [ ] Identity via the HuGR account (ADR-0002: same Clerk pool; org = tenant) — consumed from
+      CoreLink, not built here (the runner fleet authenticates the App install, not a tenant PAT).
 - [ ] Self-serve onboarding for the direct ICP (infra/CI teams); same fabric,
       second front door — hugit never sees a "Runners" line item.
 

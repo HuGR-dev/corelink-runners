@@ -232,13 +232,20 @@ We don't win on a cheaper minute. We win by changing **what is billed** (concurr
 
 ## 9. Two front doors, one fabric
 
-- **Direct** — concurrency plans for platform / CI engineers; the GitHub-Actions shim is the
-  on-ramp. Their ICP, their value prop.
+- **Direct** — concurrency plans for platform / CI engineers; the on-ramp is an **ephemeral
+  GitHub Actions runner fleet**: the customer installs the CoreLink GitHub App and writes
+  `runs-on: corelink[-<size>]`, and their **unmodified** workflow (checkout, matrix, every step)
+  runs on a cache-warm CoreLink microVM — one ephemeral runner per job, private repos native
+  (GitHub's per-job checkout token), billed flat by concurrency. Their ICP, their value prop.
+  (Architecture + the registration-token broker: **ADR-0007**.)
 - **Via hugit** — the invisible execution substrate beneath hugit's memoized CI. A hugit
   customer **never sees a "Runners" line item**; Runners is COGS under hugit's flat plan,
-  because hugit *is* CoreLink, of HuGR.
+  because hugit *is* CoreLink, of HuGR. This door is a **different execution model** — memoized,
+  attested *check* execution (hugit owns the memo key; the fabric sees only misses), served by
+  `corelink run` / the result-binding attestation, **not** the runner fleet.
 
-Same fabric, two packagings, two buyers. Built once.
+Same fabric, two packagings, two buyers, **two distinct execution models** (GitHub-runner job
+vs memoized attested check). Built once on the shared lease / isolate / cap / teardown spine.
 
 ---
 
@@ -263,7 +270,7 @@ Same fabric, two packagings, two buyers. Built once.
   **Replaces hugit's interim transport** (`hugit-runner-01`, which lights live CI at P2)
   **with the production fabric** — same contract, production grade; the highest-value first
   deliverable, because it makes the forge's execution substrate multi-tenant and sellable.
-- **M2 — Direct GA.** Self-serve concurrency plans, the GitHub-Actions front door, billing meters, dashboards, SLOs.
+- **M2 — Direct GA.** Self-serve concurrency plans, the **ephemeral GitHub Actions runner fleet** (`runs-on: corelink`, ADR-0007), billing meters, dashboards, SLOs.
 - **M3 — Scale.** Multi-region, autoscale + oversubscription within SLO, larger sizes.
 - **M4 — Adjacencies.** GPU runners; agent sandboxes / dev boxes (the Workspaces tie-in).
 
