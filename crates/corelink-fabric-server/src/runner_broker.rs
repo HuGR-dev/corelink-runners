@@ -519,8 +519,13 @@ impl<H: GitHubHttp, S: AppJwtSigner> GitHubAppBroker<H, S> {
         scope: &RunnerScope,
     ) -> Result<JitRunnerConfig, BrokerError> {
         let url = self.jitconfig_url(scope);
+        // UNIQUE name per mint: GitHub rejects `generate-jitconfig` with 409 if a
+        // runner of that name is still registered. An ephemeral runner that never
+        // connects (e.g. a box that failed to boot) leaves a stale offline entry,
+        // and concurrent runners share the configured base name — both would
+        // collide on a fixed name. A random suffix makes every mint's name unique.
         let body = serde_json::json!({
-            "name": self.cfg.runner_name,
+            "name": unique_runner_name(&self.cfg.runner_name),
             "labels": scope.labels,
             "runner_group_id": self.cfg.runner_group_id,
             "work_folder": self.cfg.work_folder,
@@ -664,6 +669,24 @@ pub fn parse_pkcs8_pem(pem: &str) -> Result<AppPrivateKey, KeyParseError> {
         .decode(body.as_bytes())
         .map_err(|_| KeyParseError::Base64)?;
     Ok(AppPrivateKey::from_pkcs8_der(der))
+}
+
+/// A unique, GitHub-legal runner name: `{base}-{16 random hex}`. Ephemeral
+/// runner names must be unique per registration (a stale or concurrent runner of
+/// the same name → 409 on `generate-jitconfig`). 8 random bytes (64 bits) make a
+/// collision astronomically unlikely; the result stays well under GitHub's
+/// 64-char name limit. A failed RNG draw (practically impossible) yields an
+/// all-zero suffix — still valid, and the runner is ephemeral regardless.
+fn unique_runner_name(base: &str) -> String {
+    use ring::rand::{SecureRandom, SystemRandom};
+    let mut bytes = [0u8; 8];
+    let _ = SystemRandom::new().fill(&mut bytes);
+    let mut suffix = String::with_capacity(16);
+    for b in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(suffix, "{b:02x}");
+    }
+    format!("{base}-{suffix}")
 }
 
 // ── Composition-root wiring (FABRIC_GITHUB_APP_* → broker) ────────────────────
@@ -897,6 +920,15 @@ mod tests {
     }
 
     #[test]
+    fn unique_runner_name_is_unique_and_prefixed() {
+        let a = unique_runner_name("corelink-runner");
+        let b = unique_runner_name("corelink-runner");
+        assert!(a.starts_with("corelink-runner-"));
+        assert_ne!(a, b, "two mints must not collide on the runner name");
+        assert!(a.len() <= 64, "must fit GitHub's 64-char runner-name limit");
+    }
+
+    #[test]
     fn from_env_accepts_single_line_base64_key() {
         use base64::Engine as _;
         // The robust single-line form: base64 of the PEM text.
@@ -1061,7 +1093,17 @@ mod tests {
         assert_eq!(auth1, &format!("Bearer {SECRET_INSTALL_TOKEN}"));
         // The JIT-config request carries name + labels + group + work_folder.
         let v: serde_json::Value = serde_json::from_str(body1).unwrap();
-        assert_eq!(v["name"], "corelink-ephemeral-01");
+        // UNIQUE name: the configured base plus a random suffix (no fixed-name
+        // 409 conflicts). It starts with the base and is strictly longer.
+        let name = v["name"].as_str().unwrap();
+        assert!(
+            name.starts_with("corelink-ephemeral-01-"),
+            "runner name must start with the configured base, got {name:?}"
+        );
+        assert!(
+            name.len() > "corelink-ephemeral-01-".len(),
+            "runner name must carry a unique suffix"
+        );
         assert_eq!(v["labels"], serde_json::json!(["self-hosted", "corelink"]));
         assert_eq!(v["runner_group_id"], 1);
         assert_eq!(v["work_folder"], "_work");
