@@ -1,4 +1,4 @@
-# What hugit needs from CoreLink Runners — integration contract v1.2.0
+# What hugit needs from CoreLink Runners — integration contract v1.4.0
 
 > **Version note — WP-R6 draft (2026-06-10):** this file is the WP-R6
 > deliverable: a draft amendment that the hugit lead will review, then apply
@@ -476,9 +476,9 @@ axes.
 | v1.0 | 2026-06-09 | hugit techlead | Initial contract; §0–§12; frozen from hugit's side. |
 | v1.1 | 2026-06-10 | hugit techlead (WP-R6 draft) | Added §13: per-job metrics emission consistent with `IntentMetrics` (§13.1); capture hook points for full + compacted transcript blobs — two-transcript imperative (§13.2); no-persistence + forge-side redaction obligation (§13.3); conformance-vector drift tripwire (§13.4). Cross-reference: hugit ADR-0001 (ratified 2026-06-10). |
 | v1.2.0 | 2026-06-11 | hugit techlead (E-DOCS) | §13.1 money field rename: `cost_usd\|f64` → `cost_usd_micros\|u64` (integer micro-USD, 1 USD = 1,000,000 units). Owner-ratified 2026-06-11 as part of hugit WA4 (CHANGELOG). Additive — all other §13.1 fields and §0–§12 unchanged. §13.4 conformance-vector drift tripwire: new vectors must be committed byte-identical in both repos. |
-| v1.4.0 | 2026-06-14 | corelink-runners (audit fix) — pending hugit-techlead ratification | §7.1 result-binding **v2**: a NEW detached signature `result_binding_sig_v2` over the FULL outcome (the 3 v1 fields ‖ `i32_be(exit)` ‖ `u32_be(artifacts.len)` ‖ ∀ artifact `LP(path)‖LP(digest)`), closing the forgeable-verdict gap (v1 covered neither `exit` nor `artifacts`). ADDITIVE — emitted alongside the UNCHANGED v1 `result_binding_sig` on `ExecResponse`/`TriggerResponse`/`CloseResponse`; no flag-day. **hugit must add a v2 verifier** to trust the verdict cross-repo; v1 stays emitted until v2 adoption is confirmed. Frozen `AttestationChain` pre-image and the §13.4 `IntentMetrics` vector (sha256 `2d8d2215…`) UNTOUCHED. Companion: the close path now rejects (400 `invalid`) any `CheckResult` whose `memo_key` ≠ `SHA-256(LP(tree_hash)‖LP(def_digest)‖LP(toolchain_digest))` before attesting it. |
+| v1.4.0 | 2026-06-14 | corelink-runners (audit fix) — **RATIFIED by hugit techlead 2026-06-14** (ruling of record: hugit `docs/handoff/2026-06-14-reply-corelink-runners-attestation-and-p2-transport.md` §1) | §7.1 result-binding **v2**: a NEW detached signature `result_binding_sig_v2` over the FULL outcome (the 3 v1 fields ‖ `i32_be(exit)` ‖ `u32_be(artifacts.len)` ‖ ∀ artifact `LP(path)‖LP(digest)`), closing the forgeable-verdict gap (v1 covered neither `exit` nor `artifacts`). ADDITIVE — emitted alongside the UNCHANGED v1 `result_binding_sig` on `ExecResponse`/`TriggerResponse`/`CloseResponse`; no flag-day. **Conformance vector landed:** `conformance/result_binding_v2.json` (sha256 `600c99b5…`), byte-identical both repos, under the drift tripwire (`conformance_result_binding_v2.rs`: byte-exact regen + verify-like-hugit + tamper-rejection). **hugit consumes v2 ONLY** (it has no v1 verifier deployed → no v1→v2 migration, no live forgery window on its side yet); its P2 attestation-verify path MUST verify v2 and treat `exit`+`artifacts` as covered only once v2 passes, and its X8 writer tenses the axes as **runner-asserted** (not fabric-observed) until FC3. Frozen `AttestationChain` pre-image and the §13.4 `IntentMetrics` vector (sha256 `2d8d2215…`) UNTOUCHED. Companion: the close path now rejects (400 `invalid`) any `CheckResult` whose `memo_key` ≠ `SHA-256(LP(tree_hash)‖LP(def_digest)‖LP(toolchain_digest))` before attesting it. |
 
-*Change protocol (§12) applies to all future amendments. v1.4.0 is
-fabric-proposed and additive; it takes effect on the wire immediately (the
-field is purely additional evidence) but requires hugit-techlead ratification
-before hugit relies on it.*
+*Change protocol (§12) applies to all future amendments. v1.4.0 is additive and
+**ratified** (hugit ruling 2026-06-14); the v2 signature is on the wire and
+hugit relies on it once its P2 verifier ships. The `result_binding_v2`
+conformance vector is the cross-repo formula pin.*
