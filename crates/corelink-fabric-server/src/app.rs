@@ -785,6 +785,7 @@ pub fn app_full(
         .layer(Extension(Arc::clone(&registry)));
 
     let authenticated = Router::new()
+        .route(paths::USAGE, get(handlers::usage::usage))
         .route(paths::METRICS_TENANT, get(handlers::metrics::tenant_wait))
         .route(paths::LEASES, post(handlers::leases::acquire))
         .route(&capture(paths::LEASE_BY_ID), get(handlers::leases::status))

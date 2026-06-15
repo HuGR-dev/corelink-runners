@@ -68,3 +68,11 @@ pub const ATTESTATION_KEY: &str = "/v1/attestation/key";
 /// `CheckResult` (the §13.1 delivery rule at mechanism level). ENV2.
 /// (ENV2 amendment to the CF0 freeze, lead-ratified.)
 pub const LEASE_CLOSE: &str = "/v1/leases/{lease_id}/close";
+
+/// Tenant-facing live usage vs plan (M2 console data): `GET` returns the
+/// calling tenant's current active-lease count vs their plan cap.
+///
+/// Authenticated (Bearer PAT); the tenant is always the caller's own —
+/// no parameter to query another tenant's usage (cross-tenant reads are
+/// unrepresentable at this surface).
+pub const USAGE: &str = "/v1/usage";
