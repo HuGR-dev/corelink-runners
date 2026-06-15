@@ -22,7 +22,7 @@
 //! (the bare cargo gate lane) the box-dependent body short-circuits.
 //!
 //! # Box-sharing
-//! All C9 containers use the `hugit-c9-` prefix. Scans/sweeps target ONLY that
+//! All C9 containers use the `corelink-ws-` prefix. Scans/sweeps target ONLY that
 //! prefix — no other WP's containers are touched.
 
 use std::sync::Arc;
@@ -33,8 +33,8 @@ use corelink_runner::isolation::DockerEngine;
 use corelink_runner::lease::{BoxExec, SshBox};
 use corelink_runner::teardown::teardown;
 use corelink_runner::ws::{
-    C9_PREFIX, DedupSpawner, WorkspaceOrigin, WorkspaceState, attach_workspace, c9_container_name,
-    resume_workspace, run_local, run_remote, spawn_timed, spawn_workspace,
+    DedupSpawner, WS_PREFIX, WorkspaceOrigin, WorkspaceState, attach_workspace, resume_workspace,
+    run_local, run_remote, spawn_timed, spawn_workspace, ws_container_name,
 };
 use corelink_runners_contracts::{FenceManifest, RunnerLease, RunnerState};
 
@@ -134,12 +134,12 @@ fn pinned_image(boxx: &SshBox) -> String {
         .to_string()
 }
 
-/// Best-effort sweep of C9-prefix containers only. Scoped to `hugit-c9-`.
+/// Best-effort sweep of C9-prefix containers only. Scoped to `corelink-ws-`.
 fn sweep_c9(boxx: &SshBox) {
     let _ = boxx.run(&[
         "sh",
         "-c",
-        &format!("docker ps -aq --filter name={C9_PREFIX} | xargs -r docker rm -f"),
+        &format!("docker ps -aq --filter name={WS_PREFIX} | xargs -r docker rm -f"),
     ]);
 }
 
@@ -176,7 +176,7 @@ fn item_1_attach_joins_live_workspace_no_respawn() {
 
     // Extract the workspace_id from the lease_id (matches the container name).
     let workspace_id = &lease.lease_id;
-    let expected_name = c9_container_name(workspace_id);
+    let expected_name = ws_container_name(workspace_id);
     assert_eq!(spawned.container.name, expected_name);
 
     // Confirm the container is live before attaching.
@@ -222,7 +222,7 @@ fn item_1_attach_joins_live_workspace_no_respawn() {
             "ps",
             "-a",
             "--filter",
-            &format!("name={C9_PREFIX}"),
+            &format!("name={WS_PREFIX}"),
             "--format",
             "{{.Names}}",
         ])
@@ -231,7 +231,7 @@ fn item_1_attach_joins_live_workspace_no_respawn() {
         .stdout
         .lines()
         .map(str::trim)
-        .filter(|l| l.starts_with(C9_PREFIX))
+        .filter(|l| l.starts_with(WS_PREFIX))
         .collect();
     let matching: Vec<&&str> = c9_names.iter().filter(|n| **n == expected_name).collect();
     assert_eq!(
@@ -451,15 +451,15 @@ fn item_3_spawn_lt_1s_concurrent_dedup_one_materialization() {
         "concurrent identical spawns must dedup to ONE materialization (same container name)"
     );
 
-    // Only ONE hugit-c9-* container for this workspace_id on the box.
-    let expected_name = c9_container_name(&workspace_id);
+    // Only ONE corelink-ws-* container for this workspace_id on the box.
+    let expected_name = ws_container_name(&workspace_id);
     let ps = boxx
         .run(&[
             "docker",
             "ps",
             "-a",
             "--filter",
-            &format!("name={C9_PREFIX}"),
+            &format!("name={WS_PREFIX}"),
             "--format",
             "{{.Names}}",
         ])
@@ -485,7 +485,7 @@ fn item_3_spawn_lt_1s_concurrent_dedup_one_materialization() {
 ///
 /// Proof:
 /// - Spawn a workspace container.
-/// - Run a deterministic pure function (`echo hugit-c9-local-eq-remote`) both
+/// - Run a deterministic pure function (`echo corelink-ws-local-eq-remote`) both
 ///   locally (via `run_local`) and remotely (via `run_remote` inside the
 ///   container).
 /// - Assert the exit codes match and the stdout matches.
@@ -510,7 +510,7 @@ fn item_4_local_remote_identical_observable_results() {
 
     // Deterministic pure command: `echo` with a fixed string. Both local and
     // remote must produce identical exit code + stdout.
-    let argv: &[&str] = &["echo", "hugit-c9-local-eq-remote"];
+    let argv: &[&str] = &["echo", "corelink-ws-local-eq-remote"];
 
     // Local execution.
     let local_result = run_local(argv).expect("run_local must not fail");
@@ -538,7 +538,7 @@ fn item_4_local_remote_identical_observable_results() {
     );
     assert_eq!(
         local_result.stdout.trim(),
-        "hugit-c9-local-eq-remote",
+        "corelink-ws-local-eq-remote",
         "echo output must be the fixed token"
     );
 
