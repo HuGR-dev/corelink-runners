@@ -591,6 +591,24 @@ impl AppState {
         self
     }
 
+    /// Conditionally wire the production GitHub-App runner broker from the
+    /// environment (ADR-0007), reading `FABRIC_GITHUB_APP_*` via
+    /// [`runner_broker_from_env`](crate::runner_broker::runner_broker_from_env).
+    ///
+    /// **Default-off, fail-safe:** absent `FABRIC_GITHUB_APP_ID` → keeps runner
+    /// mode OFF (no broker), byte-identical to before. A present-but-misconfigured
+    /// App (missing installation id / malformed key) → stays OFF with a redacted
+    /// stderr diagnostic (never crashes the server, never silently half-wires).
+    #[must_use]
+    pub fn with_runner_broker_from_env(mut self) -> Self {
+        if let Some(broker) =
+            crate::runner_broker::runner_broker_from_env(|k| std::env::var(k).ok())
+        {
+            self.runner_broker = Some(broker);
+        }
+        self
+    }
+
     /// Mark `lease_id` as a direct-CI runner lease (ADR-0007). Idempotent; a
     /// poisoned lock is recovered (the marker is advisory — exec also fails
     /// closed on a held lease with no image, so a lost marker never opens a

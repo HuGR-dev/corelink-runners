@@ -603,6 +603,161 @@ impl GitHubHttp for UreqGitHub {
     }
 }
 
+// ── PEM key parsing (no new crate: base64 is already a dep) ──────────────────
+
+/// Why a config-time key parse failed. Carries NO key material (the bytes never
+/// reach `Debug`/`Display`) — the same secret-hygiene posture as the rest of the
+/// module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyParseError {
+    /// The PEM was empty / whitespace-only.
+    Empty,
+    /// The PEM is PKCS#1 (`BEGIN RSA PRIVATE KEY`); `ring` needs PKCS#8. Convert
+    /// once with: `openssl pkcs8 -topk8 -nocrypt -in app.pem -out app.pk8.pem`.
+    NotPkcs8,
+    /// The PEM body was not valid base64 (corrupt paste / wrong format).
+    Base64,
+}
+
+impl std::fmt::Display for KeyParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => f.write_str("github app private key is empty"),
+            Self::NotPkcs8 => f.write_str(
+                "github app private key is PKCS#1 (BEGIN RSA PRIVATE KEY); convert to PKCS#8 \
+                 with `openssl pkcs8 -topk8 -nocrypt -in app.pem -out app.pk8.pem`",
+            ),
+            Self::Base64 => f.write_str("github app private key PEM body is not valid base64"),
+        }
+    }
+}
+
+impl std::error::Error for KeyParseError {}
+
+/// Parse a PKCS#8 PEM private key into the DER bytes [`AppPrivateKey`] holds.
+///
+/// Pure PEM framing (strip the `-----BEGIN/END PRIVATE KEY-----` armor + all
+/// whitespace, base64-decode the body) — NO crypto, so it adds no dependency.
+/// A PKCS#1 key (`BEGIN RSA PRIVATE KEY`) is rejected with an actionable error
+/// rather than silently mis-parsed. The decoded bytes are validated as a real
+/// RSA key only at the first mint (`ring` `from_pkcs8` → `SigningFailed`), so a
+/// structurally-fine-but-wrong key fails closed at use, never here.
+pub fn parse_pkcs8_pem(pem: &str) -> Result<AppPrivateKey, KeyParseError> {
+    let trimmed = pem.trim();
+    if trimmed.is_empty() {
+        return Err(KeyParseError::Empty);
+    }
+    if trimmed.contains("BEGIN RSA PRIVATE KEY") {
+        return Err(KeyParseError::NotPkcs8);
+    }
+    let body: String = trimmed
+        .lines()
+        .filter(|l| !l.starts_with("-----"))
+        .flat_map(|l| l.chars())
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    if body.is_empty() {
+        return Err(KeyParseError::Empty);
+    }
+    use base64::Engine as _;
+    let der = base64::engine::general_purpose::STANDARD
+        .decode(body.as_bytes())
+        .map_err(|_| KeyParseError::Base64)?;
+    Ok(AppPrivateKey::from_pkcs8_der(der))
+}
+
+// ── Composition-root wiring (FABRIC_GITHUB_APP_* → broker) ────────────────────
+
+/// Env var names the production runner broker reads. Centralized so the docs,
+/// the reader, and the tests cannot drift.
+pub mod env {
+    /// The GitHub App id (the JWT `iss`). REQUIRED to enable runner mode.
+    pub const APP_ID: &str = "FABRIC_GITHUB_APP_ID";
+    /// The installation id the App is installed as on the target repo/org. REQUIRED.
+    pub const INSTALLATION_ID: &str = "FABRIC_GITHUB_APP_INSTALLATION_ID";
+    /// The App's PKCS#8 private key, PEM contents (multi-line). REQUIRED.
+    pub const PRIVATE_KEY: &str = "FABRIC_GITHUB_APP_PRIVATE_KEY";
+    /// API base (GHES-friendly). Optional; defaults to `https://api.github.com`.
+    pub const API_BASE: &str = "FABRIC_GITHUB_API_BASE";
+    /// Runner group id for the JIT config. Optional; defaults to `1`.
+    pub const RUNNER_GROUP_ID: &str = "FABRIC_GITHUB_RUNNER_GROUP_ID";
+    /// Runner name baked into the JIT config. Optional; defaults to `corelink-runner`.
+    pub const RUNNER_NAME: &str = "FABRIC_GITHUB_RUNNER_NAME";
+}
+
+/// Build a production [`GitHubAppBroker`] from the environment, or `None`.
+///
+/// **Default-off contract:**
+/// - If [`env::APP_ID`] is ABSENT → `None`, silently (runner mode is simply not
+///   configured; the classic check-exec path is byte-unchanged).
+/// - If [`env::APP_ID`] is PRESENT but a required companion ([`env::INSTALLATION_ID`]
+///   / [`env::PRIVATE_KEY`]) is missing or the key is malformed → `None`, but a
+///   REDACTED diagnostic is written to stderr: the operator clearly intended
+///   runner mode, so a misconfiguration must be loud, never a silent no-op.
+///
+/// `get` is the env accessor (injected so the wiring is testable without
+/// mutating the process environment). The transport is `ureq` ([`UreqGitHub`])
+/// and the signer is `ring` ([`RingRsaJwtSigner`]).
+#[must_use]
+pub fn runner_broker_from_env(
+    get: impl Fn(&str) -> Option<String>,
+) -> Option<std::sync::Arc<dyn RunnerRegistrationBroker>> {
+    let nonempty = |k: &str| {
+        get(k)
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+
+    // App id absent → runner mode is off (no diagnostic; this is the default).
+    let app_id = nonempty(env::APP_ID)?;
+
+    // From here the operator intends runner mode: a missing/invalid companion is
+    // a LOUD (redacted) misconfiguration that disables the feature, not silence.
+    let Some(installation_id) = nonempty(env::INSTALLATION_ID) else {
+        eprintln!(
+            "runner-broker: {} is set but {} is missing — runner mode DISABLED",
+            env::APP_ID,
+            env::INSTALLATION_ID
+        );
+        return None;
+    };
+    let Some(pem) = nonempty(env::PRIVATE_KEY) else {
+        eprintln!(
+            "runner-broker: {} is set but {} is missing — runner mode DISABLED",
+            env::APP_ID,
+            env::PRIVATE_KEY
+        );
+        return None;
+    };
+    let key = match parse_pkcs8_pem(&pem) {
+        Ok(k) => k,
+        Err(e) => {
+            // `e` carries NO key material (KeyParseError redacts by construction).
+            eprintln!(
+                "runner-broker: {} invalid ({e}) — runner mode DISABLED",
+                env::PRIVATE_KEY
+            );
+            return None;
+        }
+    };
+
+    let cfg = GitHubAppConfig {
+        api_base: nonempty(env::API_BASE).unwrap_or_else(|| "https://api.github.com".to_string()),
+        app_id,
+        installation_id,
+        runner_name: nonempty(env::RUNNER_NAME).unwrap_or_else(|| "corelink-runner".to_string()),
+        runner_group_id: nonempty(env::RUNNER_GROUP_ID)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1),
+        work_folder: "_work".to_string(),
+        jwt_ttl_secs: 600,
+    };
+
+    let http = UreqGitHub::new(std::time::Duration::from_secs(10));
+    let signer = RingRsaJwtSigner::new(key);
+    Some(std::sync::Arc::new(GitHubAppBroker::new(http, signer, cfg)))
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -644,6 +799,76 @@ mod tests {
             work_folder: "_work".into(),
             jwt_ttl_secs: 600,
         }
+    }
+
+    // ── PEM parsing + from-env wiring (ADR-0007 composition root) ─────────────
+
+    fn valid_pkcs8_pem() -> String {
+        use base64::Engine as _;
+        // Arbitrary bytes: `parse_pkcs8_pem` only does PEM framing — the bytes
+        // are validated as a real RSA key at the first MINT, not here.
+        let b64 = base64::engine::general_purpose::STANDARD.encode(b"pkcs8-der-bytes-for-test");
+        format!("-----BEGIN PRIVATE KEY-----\n{b64}\n-----END PRIVATE KEY-----\n")
+    }
+
+    fn env_of<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |k| {
+            pairs
+                .iter()
+                .find(|(kk, _)| *kk == k)
+                .map(|(_, v)| v.to_string())
+        }
+    }
+
+    #[test]
+    fn parse_pkcs8_pem_accepts_a_valid_pkcs8_block() {
+        assert!(parse_pkcs8_pem(&valid_pkcs8_pem()).is_ok());
+    }
+
+    #[test]
+    fn parse_pkcs8_pem_rejects_pkcs1_with_actionable_error() {
+        let pkcs1 = "-----BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----";
+        assert_eq!(parse_pkcs8_pem(pkcs1).unwrap_err(), KeyParseError::NotPkcs8);
+    }
+
+    #[test]
+    fn parse_pkcs8_pem_rejects_empty_and_garbage() {
+        assert_eq!(parse_pkcs8_pem("   ").unwrap_err(), KeyParseError::Empty);
+        let garbage = "-----BEGIN PRIVATE KEY-----\n!!!not base64!!!\n-----END PRIVATE KEY-----";
+        assert_eq!(parse_pkcs8_pem(garbage).unwrap_err(), KeyParseError::Base64);
+    }
+
+    #[test]
+    fn key_parse_error_display_never_leaks_key_material() {
+        // The error path formats only the (key-free) error — never the PEM.
+        let msg = format!("{}", KeyParseError::NotPkcs8);
+        assert!(msg.contains("openssl pkcs8"), "actionable hint present");
+        assert!(!msg.contains("BEGIN PRIVATE KEY"), "no key armor echoed");
+    }
+
+    #[test]
+    fn from_env_absent_app_id_is_off() {
+        // Default-off: no FABRIC_GITHUB_APP_ID → runner mode is simply not wired.
+        assert!(runner_broker_from_env(env_of(&[])).is_none());
+    }
+
+    #[test]
+    fn from_env_partial_config_is_off() {
+        // App id present but installation id missing → disabled (loud misconfig).
+        let broker = runner_broker_from_env(env_of(&[(env::APP_ID, "12345")]));
+        assert!(broker.is_none());
+    }
+
+    #[test]
+    fn from_env_full_config_builds_a_broker() {
+        let pem = valid_pkcs8_pem();
+        let pairs = [
+            (env::APP_ID, "12345"),
+            (env::INSTALLATION_ID, "987"),
+            (env::PRIVATE_KEY, pem.as_str()),
+        ];
+        let broker = runner_broker_from_env(env_of(&pairs));
+        assert!(broker.is_some(), "all required vars present → broker wired");
     }
 
     // A recording mock transport: scripts a response per call and records what
