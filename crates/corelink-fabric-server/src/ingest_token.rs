@@ -114,7 +114,12 @@ impl IngestSigner {
 /// HMAC-SHA256(key, msg) per RFC 2104, built on the workspace `sha2` (no new
 /// crate). Block size for SHA-256 is 64 bytes; a key longer than the block is
 /// first hashed, a shorter key is zero-padded.
-fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
+///
+/// `pub(crate)` so the §13.2 ingest path AND the Stage-B autoscaler webhook
+/// verifier ([`crate::handlers::webhook`]) share ONE HMAC implementation — the
+/// one pinned to the RFC 4231 known-answer vector below. A second copy would be
+/// a second place for a crypto bug to hide.
+pub(crate) fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
     const BLOCK: usize = 64;
     // Normalize the key to one block.
     let mut k0 = [0u8; BLOCK];
@@ -146,7 +151,11 @@ fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
 /// Constant-time byte-slice equality: no early exit on the first mismatch and
 /// the length difference is OR-folded in, so neither value nor length leaks via
 /// timing. (Mirrors the hook's `credential_matches` posture.)
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+///
+/// `pub(crate)` so the autoscaler webhook signature check
+/// ([`crate::handlers::webhook`]) compares the GitHub `X-Hub-Signature-256`
+/// digest in constant time through this same primitive.
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     let mut diff = a.len() ^ b.len();
     let n = a.len().max(b.len());
     for i in 0..n {
