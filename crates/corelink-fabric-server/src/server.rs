@@ -637,16 +637,55 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
     };
 
     // ── WP-F box-vCPU compute ceiling — DEFAULT-OFF ──────────────────────────
-    // Optional u32. Absent/empty/unparseable/0 → None → compute accounting OFF
-    // (the whole ceiling wall stays dormant; acquire passes no ComputeGate).
-    // Mirrors the NORTHFLANK_RUNNER_EPHEMERAL_STORAGE_MB "keep only if > 0, else
-    // None" shape (PR #84): a non-positive value is not an error, it is simply
-    // "off" — distinct from the `parse_positive_*` knobs where 0 is a hard error.
-    let runner_vcpu = get("FABRIC_RUNNER_VCPU")
+    // Optional u32, three-way (FIX-F-2):
+    //   - absent / empty / whitespace-only → None → compute accounting OFF
+    //     (the whole ceiling wall stays dormant; acquire passes no ComputeGate).
+    //     This is the INTENTIONAL-off path.
+    //   - a syntactically-valid `0`           → None (off, explicitly disabled).
+    //   - present-but-UNPARSEABLE (`"4 "` after trim still bad, `"4.0"`, `"four"`)
+    //     → hard boot Err. Before this fix a typo silently mapped to None, so an
+    //     operator who MEANT to enable the ceiling shipped with it OFF. A
+    //     deployer mistake must fail loudly (like `parse_positive_u64`), never
+    //     become a silent-off.
+    let runner_vcpu = match get("FABRIC_RUNNER_VCPU")
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .and_then(|s| s.parse::<u32>().ok())
-        .filter(|&v| v > 0);
+    {
+        None => None,
+        Some(v) => {
+            let n = v.parse::<u32>().with_context(|| {
+                format!(
+                    "FABRIC_RUNNER_VCPU {v:?} is not a valid u32; \
+                     unset/empty disables the compute ceiling, `0` disables it \
+                     explicitly — a non-empty unparseable value is a typo and \
+                     fails closed rather than silently disabling accounting"
+                )
+            })?;
+            // A valid `0` is the explicit-off sentinel (not an error): no gate.
+            (n > 0).then_some(n)
+        }
+    };
+
+    // ── FIX-F-3: durability guard for the vCPU-h compute ceiling ─────────────
+    // Accounting-ON (FABRIC_RUNNER_VCPU set non-zero) REQUIRES a DURABLE ledger
+    // backend. `FABRIC_LEDGER_BACKEND` DEFAULTS to memory (InMemoryLedger), which
+    // loses ALL accrual on restart — so an InMemory + accounting-on deployment
+    // would silently reset the monthly ceiling every restart, voiding the
+    // loss-impossible guarantee across restarts. Fail-closed at boot rather than
+    // arm a guarantee the backend cannot keep. Only `Memory` is non-durable; any
+    // durable backend (Postgres today — file/multi-instance future) is allowed by
+    // the negative match below, so the guard does not need updating when a new
+    // durable backend lands. Default-off (runner_vcpu None) ⇒ this check is inert,
+    // byte-identical to before.
+    if runner_vcpu.is_some() && ledger_backend == LedgerBackend::Memory {
+        anyhow::bail!(
+            "the vCPU-h compute ceiling (FABRIC_RUNNER_VCPU set) requires a durable \
+             ledger backend (file or postgres); InMemoryLedger cannot persist accrual \
+             across restarts, so the monthly ceiling would reset on every restart. \
+             Set FABRIC_LEDGER_BACKEND=pg (a durable backend), or unset \
+             FABRIC_RUNNER_VCPU to disable the ceiling"
+        );
+    }
 
     Ok(ServerConfig {
         bind_addr,
@@ -1163,5 +1202,156 @@ mod admission_park_cap_wiring_tests {
             state.admission_queue.is_none(),
             "reject mode wires NO admission queue (today's behavior, unchanged)"
         );
+    }
+}
+
+#[cfg(test)]
+mod compute_ceiling_config_tests {
+    use super::*;
+
+    /// Minimal valid static/loopback env, parameterized by the two knobs the
+    /// FIX-F-2/F-3 boot-validation tests drive: `FABRIC_RUNNER_VCPU` and
+    /// `FABRIC_LEDGER_BACKEND`. Everything else is the byte-identical default.
+    fn env_with(
+        runner_vcpu: Option<&str>,
+        ledger_backend: Option<&str>,
+    ) -> impl Fn(&str) -> Option<String> {
+        let runner_vcpu = runner_vcpu.map(str::to_string);
+        let ledger_backend = ledger_backend.map(str::to_string);
+        move |k: &str| match k {
+            "FABRIC_BIND_ADDR" => Some("127.0.0.1:8080".to_string()),
+            "FABRIC_DEV_UNSAFE" => Some("1".to_string()),
+            "FABRIC_PAT" => Some("test-pat".to_string()),
+            "FABRIC_TENANT" => Some("acme".to_string()),
+            "FABRIC_TENANT_MAX_CONCURRENCY" => Some("4".to_string()),
+            "FABRIC_RUNNER_VCPU" => runner_vcpu.clone(),
+            "FABRIC_LEDGER_BACKEND" => ledger_backend.clone(),
+            _ => None,
+        }
+    }
+
+    // ── FIX-F-2: FABRIC_RUNNER_VCPU is no longer a silent-off on a typo ───────
+
+    /// A non-empty UNPARSEABLE value is a hard boot Err — an operator who MEANT
+    /// to enable the ceiling can no longer ship with it silently disabled.
+    #[test]
+    fn runner_vcpu_unparseable_is_a_hard_boot_error() {
+        for bad in ["four", "4.0", "4 cpus", "-1", "0x4"] {
+            let err = config_from_env(env_with(Some(bad), None))
+                .expect_err("a non-empty unparseable FABRIC_RUNNER_VCPU must Err");
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("FABRIC_RUNNER_VCPU"),
+                "the error must name the offending var; got {msg:?}"
+            );
+        }
+    }
+
+    /// `"4 "` (a trailing-space typo) trims to `"4"` and parses to `Some(4)` —
+    /// trimming is intentional (secret mounts append whitespace). Paired with a
+    /// durable backend so the F-3 guard passes; config_from_env does not connect.
+    #[test]
+    fn runner_vcpu_trailing_space_trims_and_parses() {
+        let get = |k: &str| match k {
+            "FABRIC_BIND_ADDR" => Some("127.0.0.1:8080".to_string()),
+            "FABRIC_DEV_UNSAFE" => Some("1".to_string()),
+            "FABRIC_PAT" => Some("test-pat".to_string()),
+            "FABRIC_TENANT" => Some("acme".to_string()),
+            "FABRIC_TENANT_MAX_CONCURRENCY" => Some("4".to_string()),
+            "FABRIC_RUNNER_VCPU" => Some("4 ".to_string()), // trailing space
+            "FABRIC_LEDGER_BACKEND" => Some("pg".to_string()),
+            "DATABASE_URL" => Some("postgres://localhost/fabric".to_string()),
+            _ => None,
+        };
+        let cfg = config_from_env(get).expect("`4 ` trims to `4` and parses");
+        assert_eq!(
+            cfg.runner_vcpu,
+            Some(4),
+            "a trailing space is trimmed; the value parses, not a silent-off"
+        );
+    }
+
+    /// Absent → None (intentional off); empty/whitespace → None; a valid `0` →
+    /// None (explicit off). None of these are errors.
+    #[test]
+    fn runner_vcpu_absent_empty_or_zero_is_off_none() {
+        // Absent.
+        let cfg = config_from_env(env_with(None, None)).expect("absent is the off-path");
+        assert!(cfg.runner_vcpu.is_none(), "absent ⇒ None (off)");
+
+        // Empty / whitespace.
+        for blank in ["", "   "] {
+            let cfg = config_from_env(env_with(Some(blank), None)).expect("blank is the off-path");
+            assert!(cfg.runner_vcpu.is_none(), "blank {blank:?} ⇒ None (off)");
+        }
+
+        // Valid 0 → off.
+        let cfg = config_from_env(env_with(Some("0"), None)).expect("`0` is explicit-off");
+        assert!(cfg.runner_vcpu.is_none(), "`0` ⇒ None (explicit off)");
+    }
+
+    // ── FIX-F-3: accounting-on requires a durable ledger backend ─────────────
+
+    /// Accounting-ON (FABRIC_RUNNER_VCPU non-zero) on the default/explicit
+    /// InMemory backend is a hard boot Err — the ceiling cannot survive a
+    /// restart there, so we refuse to arm a guarantee the backend can't keep.
+    #[test]
+    fn accounting_on_with_inmemory_refuses_to_boot() {
+        // Default backend (absent → memory).
+        let err = config_from_env(env_with(Some("4"), None))
+            .expect_err("accounting-on + default(memory) backend must Err");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("durable") && msg.contains("FABRIC_RUNNER_VCPU"),
+            "the error must explain the durability requirement; got {msg:?}"
+        );
+
+        // Explicit memory backend → same refusal.
+        let err = config_from_env(env_with(Some("4"), Some("memory")))
+            .expect_err("accounting-on + explicit memory backend must Err");
+        assert!(
+            format!("{err:#}").contains("durable"),
+            "explicit memory must also be refused"
+        );
+    }
+
+    /// Accounting-ON + the durable Postgres backend passes config validation
+    /// (the F-3 guard allows it). config_from_env does NOT connect — DATABASE_URL
+    /// is validated to be present, so supply it; the actual connect happens later
+    /// in build_app_and_state, which this test does not call.
+    #[test]
+    fn accounting_on_with_postgres_passes_config_validation() {
+        let get = |k: &str| match k {
+            "FABRIC_BIND_ADDR" => Some("127.0.0.1:8080".to_string()),
+            "FABRIC_DEV_UNSAFE" => Some("1".to_string()),
+            "FABRIC_PAT" => Some("test-pat".to_string()),
+            "FABRIC_TENANT" => Some("acme".to_string()),
+            "FABRIC_TENANT_MAX_CONCURRENCY" => Some("4".to_string()),
+            "FABRIC_RUNNER_VCPU" => Some("4".to_string()),
+            "FABRIC_LEDGER_BACKEND" => Some("pg".to_string()),
+            "DATABASE_URL" => Some("postgres://localhost/fabric".to_string()),
+            _ => None,
+        };
+        let cfg = config_from_env(get)
+            .expect("accounting-on + pg + DATABASE_URL must pass config validation");
+        assert_eq!(cfg.runner_vcpu, Some(4), "the ceiling is armed");
+        assert_eq!(cfg.ledger_backend, LedgerBackend::Postgres);
+    }
+
+    /// Accounting-OFF (FABRIC_RUNNER_VCPU absent) + InMemory backend is
+    /// UNCHANGED — the durability guard is inert by default, no new boot
+    /// failure. This pins the default-off byte-identical invariant.
+    #[test]
+    fn accounting_off_with_inmemory_is_unchanged() {
+        let cfg = config_from_env(env_with(None, None))
+            .expect("default-off must build exactly as before");
+        assert!(cfg.runner_vcpu.is_none());
+        assert_eq!(cfg.ledger_backend, LedgerBackend::Memory);
+
+        // Explicit `0` (off) + memory is also fine — the guard keys on Some.
+        let cfg = config_from_env(env_with(Some("0"), Some("memory")))
+            .expect("explicit-off + memory must build");
+        assert!(cfg.runner_vcpu.is_none());
+        assert_eq!(cfg.ledger_backend, LedgerBackend::Memory);
     }
 }

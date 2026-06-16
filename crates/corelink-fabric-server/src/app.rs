@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use axum::routing::{get, post};
 use axum::{Extension, Router, middleware};
+use corelink_fabric::plans::{PlanTier, ceiling_for, plan_for};
 use corelink_fabric::{
     CapGate, InMemoryLedger, LeaseLedger, RateWindow, SlotEventKind, SlotMeter, SlotOccupancyEvent,
     TenantId, TenantPlan, TenantWaitStats,
@@ -145,6 +146,29 @@ impl StaticPlans {
 impl PlanSource for StaticPlans {
     fn plan_of(&self, tenant: &TenantId) -> Option<TenantPlan> {
         self.plans.get(tenant).cloned()
+    }
+
+    /// WP-F / FIX-F-1: surface the per-tier compute ceiling for a provisioned
+    /// tenant on the static path, so the vCPU-h wall actually enforces when
+    /// `FABRIC_RUNNER_VCPU` is set (before this fix the default `0` left the
+    /// ledger SKIPPING the compute check ⇒ accounting silently OFF).
+    ///
+    /// `StaticPlans` carries a bare [`TenantPlan`] (cap + rate, no tier), so the
+    /// tier — and thus the ceiling — is recovered by matching the plan's
+    /// `max_concurrency` against the fixed `plans::plan_for` ladder
+    /// ([`PlanTier::ALL`]). A tenant whose cap matches a real tier resolves
+    /// `plans::ceiling_for(tier)`; an arbitrary bootstrap cap
+    /// (`FABRIC_TENANT_MAX_CONCURRENCY` set to a non-ladder value, which no tier
+    /// enum can express) matches nothing and resolves `0` — the disabled
+    /// sentinel, fail-SAFE-disabled, never reject-all. Unknown tenant → `0`.
+    fn tenant_ceiling_vcpu_ms(&self, tenant: &TenantId) -> u64 {
+        let Some(plan) = self.plans.get(tenant) else {
+            return 0;
+        };
+        PlanTier::ALL
+            .into_iter()
+            .find(|&tier| plan_for(tier).0 == plan.max_concurrency)
+            .map_or(0, ceiling_for)
     }
 }
 
@@ -1113,5 +1137,92 @@ mod tests {
         state.mark_runner_lease("lease-a");
         assert!(state.is_runner_lease("lease-a"));
         assert!(!state.is_runner_lease("lease-b"), "other ids unaffected");
+    }
+
+    // ── FIX-F-1: the static ceiling source resolves a non-zero ceiling ────────
+
+    fn tid(raw: &str) -> TenantId {
+        TenantId::new(raw).unwrap()
+    }
+
+    /// A `StaticPlans` tenant whose cap matches a real tier resolves THAT tier's
+    /// `ceiling_for` — NOT the disabled `0`. This is the fix for the wall being
+    /// unenforced on the static path (the trait default returned 0).
+    #[test]
+    fn static_plans_resolves_per_tier_ceiling_not_zero() {
+        // Pro tier cap is 20040 (plan_for(Pro).0); give the tenant that cap.
+        let (pro_cap, _) = plan_for(PlanTier::Pro);
+        let plans = StaticPlans::new([TenantPlan {
+            tenant: tid("acme"),
+            max_concurrency: pro_cap,
+            rate_ceiling_per_min: 0,
+        }]);
+        let got = plans.tenant_ceiling_vcpu_ms(&tid("acme"));
+        assert_eq!(
+            got,
+            ceiling_for(PlanTier::Pro),
+            "a provisioned tenant on a real tier must resolve its true ceiling"
+        );
+        assert_ne!(got, 0, "the wall must NOT resolve to the disabled sentinel");
+    }
+
+    /// An UNKNOWN `StaticPlans` tenant, and one whose cap is an arbitrary
+    /// non-ladder value (the bootstrap `FABRIC_TENANT_MAX_CONCURRENCY` case),
+    /// both resolve `0` — fail-SAFE-disabled, never reject-all.
+    #[test]
+    fn static_plans_unknown_or_nonladder_cap_resolves_zero() {
+        let plans = StaticPlans::new([TenantPlan {
+            tenant: tid("bootstrap"),
+            max_concurrency: 7, // not on the {20,40,80,160,320} ladder
+            rate_ceiling_per_min: 0,
+        }]);
+        assert_eq!(
+            plans.tenant_ceiling_vcpu_ms(&tid("bootstrap")),
+            0,
+            "an arbitrary non-ladder cap has no tier ⇒ disabled sentinel"
+        );
+        assert_eq!(
+            plans.tenant_ceiling_vcpu_ms(&tid("nobody")),
+            0,
+            "an unknown tenant resolves the disabled sentinel"
+        );
+    }
+
+    /// A tenant onboarded into the LIVE registry resolves its tier ceiling
+    /// THROUGH the `CompositePlanSource` (primary = LivePlanRegistry), and the
+    /// bootstrap tenant resolves THROUGH the static secondary — the exact
+    /// composition the static-mode composition root wires. Before FIX-F-1 the
+    /// primary returned 0 and the whole chain was disabled.
+    #[test]
+    fn live_registry_through_composite_resolves_non_zero_ceiling() {
+        use crate::handlers::admin::LivePlanRegistry;
+
+        let live = Arc::new(LivePlanRegistry::new());
+        live.set_plan(tid("scaleco"), PlanTier::Scale);
+
+        let (boot_cap, _) = plan_for(PlanTier::Starter);
+        let static_plans = Arc::new(StaticPlans::new([TenantPlan {
+            tenant: tid("boot"),
+            max_concurrency: boot_cap,
+            rate_ceiling_per_min: 0,
+        }]));
+
+        let composite = CompositePlanSource::new(live.clone(), static_plans);
+
+        assert_eq!(
+            composite.tenant_ceiling_vcpu_ms(&tid("scaleco")),
+            ceiling_for(PlanTier::Scale),
+            "the live-onboarded tenant resolves its tier ceiling via primary"
+        );
+        assert_eq!(
+            composite.tenant_ceiling_vcpu_ms(&tid("boot")),
+            ceiling_for(PlanTier::Starter),
+            "the bootstrap tenant falls through to the static secondary's ceiling"
+        );
+        assert_eq!(
+            composite.tenant_ceiling_vcpu_ms(&tid("ghost")),
+            0,
+            "an unknown tenant stays at the disabled sentinel from both arms"
+        );
     }
 }
