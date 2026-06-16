@@ -69,10 +69,25 @@ pub struct NorthflankConfig {
     pub project_id: String,
     /// API token (raw; the transport renders the `Bearer ` scheme).
     pub token: String,
-    /// Billing/compute plan id (vCPU/mem class), e.g. `nf-compute-20`.
+    /// Billing/compute plan id (vCPU/mem class), e.g. `nf-compute-20`. Used for
+    /// CHECK-exec boxes (hermetic/hugit/§3) — kept small.
     pub deployment_plan: String,
-    /// Per-job ephemeral disk (MiB).
+    /// Per-job ephemeral disk (MiB) for CHECK-exec boxes.
     pub ephemeral_storage_mb: u32,
+    /// OPTIONAL bigger plan for RUNNER boxes (ADR-0007 direct-CI). A runner box
+    /// runs a real customer CI workload (cold compiles etc.) and needs more
+    /// vCPU/RAM than a hermetic check box. `None` → a runner box uses
+    /// [`deployment_plan`](Self::deployment_plan) like before (zero behaviour
+    /// change). The runner-vs-check distinction is the spec's `allow_egress`
+    /// flag (true ONLY for `from_runner_lease`), so no caller threads a box-type.
+    /// From `NORTHFLANK_RUNNER_DEPLOYMENT_PLAN`.
+    pub runner_deployment_plan: Option<String>,
+    /// OPTIONAL bigger ephemeral disk (MiB) for RUNNER boxes — a CI `target/`
+    /// dwarfs a check box's needs (the default 1 GiB cannot hold a Rust
+    /// workspace build). `None` → runner boxes use
+    /// [`ephemeral_storage_mb`](Self::ephemeral_storage_mb). From
+    /// `NORTHFLANK_RUNNER_EPHEMERAL_STORAGE_MB`.
+    pub runner_ephemeral_storage_mb: Option<u32>,
     /// Hard wall-clock ceiling for a single run (seconds) — the provider kills
     /// the container past it (defense in depth with the lease expiry).
     pub active_deadline_secs: u32,
@@ -92,6 +107,8 @@ impl NorthflankConfig {
             token: token.into(),
             deployment_plan: "nf-compute-20".to_string(),
             ephemeral_storage_mb: 1024,
+            runner_deployment_plan: None,
+            runner_ephemeral_storage_mb: None,
             active_deadline_secs: 3600,
             max_poll_attempts: 600,
             poll_interval_ms: 1000,
@@ -109,7 +126,13 @@ impl NorthflankConfig {
     /// - `NORTHFLANK_BASE_URL` → `base_url` (explicit; takes precedence over all)
     /// - `NORTHFLANK_TEAM_ID` → `base_url = https://api.northflank.com/v1/teams/{team}`
     ///   (required for ORG API tokens, which need team-scoped paths)
-    /// - `NORTHFLANK_DEPLOYMENT_PLAN` → `deployment_plan`
+    /// - `NORTHFLANK_DEPLOYMENT_PLAN` → `deployment_plan` (CHECK boxes)
+    /// - `NORTHFLANK_RUNNER_DEPLOYMENT_PLAN` → `runner_deployment_plan` (ADR-0007:
+    ///   the bigger plan for RUNNER/CI boxes; absent → runner boxes use
+    ///   `deployment_plan`)
+    /// - `NORTHFLANK_RUNNER_EPHEMERAL_STORAGE_MB` → `runner_ephemeral_storage_mb`
+    ///   (bigger disk for a CI `target/`; absent/0 → runner boxes use
+    ///   `ephemeral_storage_mb`)
     ///
     /// **`base_url` precedence:**
     /// 1. `NORTHFLANK_BASE_URL` (non-empty) — verbatim, wins over everything.
@@ -130,6 +153,14 @@ impl NorthflankConfig {
         if let Some(plan) = get("NORTHFLANK_DEPLOYMENT_PLAN").filter(|s| !s.is_empty()) {
             cfg.deployment_plan = plan;
         }
+        // ADR-0007: an optional bigger plan + disk for RUNNER boxes (a real CI
+        // workload), leaving CHECK boxes on the small default. Absent → runner
+        // boxes use the same plan/disk as before (zero behaviour change).
+        cfg.runner_deployment_plan =
+            get("NORTHFLANK_RUNNER_DEPLOYMENT_PLAN").filter(|s| !s.is_empty());
+        cfg.runner_ephemeral_storage_mb = get("NORTHFLANK_RUNNER_EPHEMERAL_STORAGE_MB")
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .filter(|&mb| mb > 0);
 
         Some(cfg)
     }
@@ -157,6 +188,11 @@ impl std::fmt::Debug for NorthflankConfig {
             .field("token", &"***REDACTED***")
             .field("deployment_plan", &self.deployment_plan)
             .field("ephemeral_storage_mb", &self.ephemeral_storage_mb)
+            .field("runner_deployment_plan", &self.runner_deployment_plan)
+            .field(
+                "runner_ephemeral_storage_mb",
+                &self.runner_ephemeral_storage_mb,
+            )
             .field("active_deadline_secs", &self.active_deadline_secs)
             .field("max_poll_attempts", &self.max_poll_attempts)
             .field("poll_interval_ms", &self.poll_interval_ms)
@@ -447,14 +483,35 @@ impl<H: HttpTransport> NorthflankEngine<H> {
     /// it MUST match the name stored on the returned [`RunningContainer`] so all
     /// later `job_url` calls address the same job.
     fn create_job_body(&self, spec: &ContainerSpec, job_name: &str) -> String {
+        // ADR-0007: a RUNNER box (the ONLY box with `allow_egress == true`, set
+        // exclusively by `ContainerSpec::from_runner_lease`) runs a real CI
+        // workload and gets the bigger runner plan + disk when configured; a
+        // CHECK box stays on the small defaults. `allow_egress` is the box-type
+        // signal already on the spec, so nothing extra is threaded through.
+        let is_runner = spec.allow_egress;
+        let plan = if is_runner {
+            self.cfg
+                .runner_deployment_plan
+                .as_deref()
+                .unwrap_or(&self.cfg.deployment_plan)
+        } else {
+            &self.cfg.deployment_plan
+        };
+        let storage_mb = if is_runner {
+            self.cfg
+                .runner_ephemeral_storage_mb
+                .unwrap_or(self.cfg.ephemeral_storage_mb)
+        } else {
+            self.cfg.ephemeral_storage_mb
+        };
         let deployment = serde_json::json!({
             "external": { "imagePath": spec.image },
             "docker": { "configType": "default" },
-            "storage": { "ephemeralStorage": { "storageSize": self.cfg.ephemeral_storage_mb } }
+            "storage": { "ephemeralStorage": { "storageSize": storage_mb } }
         });
         let mut body = serde_json::json!({
             "name": job_name,
-            "billing": { "deploymentPlan": self.cfg.deployment_plan },
+            "billing": { "deploymentPlan": plan },
             "deployment": deployment,
             // Always `false`: the run is ALWAYS triggered explicitly via
             // `POST {job}/runs` — a CHECK lease's run is driven by `/exec`, and a
@@ -847,6 +904,91 @@ mod tests {
             "opaque-jit-bytes",
             "jitconfig must be in TOP-LEVEL runtimeEnvironment (else the box \
              starts with no env and the runner entrypoint exits 1)"
+        );
+    }
+
+    /// A runner spec (`allow_egress == true`).
+    fn runner_spec() -> ContainerSpec {
+        let mut s = spec(vec![]);
+        s.allow_egress = true;
+        s.no_network = false;
+        s.run_on_create = true;
+        s
+    }
+
+    /// ADR-0007 sizing: a RUNNER box uses the bigger runner plan + disk when
+    /// configured, while a CHECK box stays on the small defaults — keyed only on
+    /// `spec.allow_egress`, no caller threading.
+    #[test]
+    fn runner_box_uses_runner_plan_and_disk_check_box_uses_defaults() {
+        let mut cfg = NorthflankConfig::new("proj", "tok");
+        cfg.deployment_plan = "nf-compute-20".to_string();
+        cfg.ephemeral_storage_mb = 1024;
+        cfg.runner_deployment_plan = Some("nf-compute-400-16".to_string());
+        cfg.runner_ephemeral_storage_mb = Some(32768);
+        let engine = NorthflankEngine::new(StubTransport, cfg);
+
+        // RUNNER box → bigger plan + disk.
+        let r: serde_json::Value =
+            serde_json::from_str(&engine.create_job_body(&runner_spec(), "job-r")).unwrap();
+        assert_eq!(r["billing"]["deploymentPlan"], "nf-compute-400-16");
+        assert_eq!(
+            r["deployment"]["storage"]["ephemeralStorage"]["storageSize"],
+            32768
+        );
+
+        // CHECK box → small defaults, untouched.
+        let c: serde_json::Value =
+            serde_json::from_str(&engine.create_job_body(&spec(vec![]), "job-c")).unwrap();
+        assert_eq!(c["billing"]["deploymentPlan"], "nf-compute-20");
+        assert_eq!(
+            c["deployment"]["storage"]["ephemeralStorage"]["storageSize"],
+            1024
+        );
+    }
+
+    /// Absent runner overrides → a runner box falls back to the shared plan/disk
+    /// (zero behaviour change, default-off).
+    #[test]
+    fn runner_box_falls_back_to_defaults_when_unset() {
+        let engine = NorthflankEngine::new(StubTransport, NorthflankConfig::new("proj", "tok"));
+        let r: serde_json::Value =
+            serde_json::from_str(&engine.create_job_body(&runner_spec(), "job-r")).unwrap();
+        assert_eq!(r["billing"]["deploymentPlan"], "nf-compute-20");
+        assert_eq!(
+            r["deployment"]["storage"]["ephemeralStorage"]["storageSize"],
+            1024
+        );
+    }
+
+    /// The env reader wires the runner overrides (and ignores a 0/garbage disk).
+    #[test]
+    fn from_env_reads_runner_overrides() {
+        let env = |k: &str| match k {
+            "NORTHFLANK_API_TOKEN" => Some("tok".to_string()),
+            "NORTHFLANK_PROJECT_ID" => Some("proj".to_string()),
+            "NORTHFLANK_RUNNER_DEPLOYMENT_PLAN" => Some("nf-compute-400-16".to_string()),
+            "NORTHFLANK_RUNNER_EPHEMERAL_STORAGE_MB" => Some("32768".to_string()),
+            _ => None,
+        };
+        let cfg = NorthflankConfig::from_env_with(env).unwrap();
+        assert_eq!(
+            cfg.runner_deployment_plan.as_deref(),
+            Some("nf-compute-400-16")
+        );
+        assert_eq!(cfg.runner_ephemeral_storage_mb, Some(32768));
+        // Garbage/zero disk is ignored (None), never a degenerate 0.
+        let env0 = |k: &str| match k {
+            "NORTHFLANK_API_TOKEN" => Some("tok".to_string()),
+            "NORTHFLANK_PROJECT_ID" => Some("proj".to_string()),
+            "NORTHFLANK_RUNNER_EPHEMERAL_STORAGE_MB" => Some("0".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            NorthflankConfig::from_env_with(env0)
+                .unwrap()
+                .runner_ephemeral_storage_mb,
+            None
         );
     }
 
