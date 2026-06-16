@@ -499,3 +499,48 @@ InMemory AND File both live in `ledger.rs`. Corrected:
 | **G — acceptance** | `tests/` (ceiling-reject · period-roll · in-flight Σ · default-off byte-identical · webhook clamp · 2-instance over-ceiling · pool-exhaustion · once-only) | opus | all |
 
 MERGE ORDER: CONTRACT(done) → {A,B,CD,E parallel} → F → G.
+
+## 14. Implementation + adversarial audit + fixes (2026-06-16)
+
+### Built (all cold-verified by the lead, default-off)
+`compute_meter.rs` `2780a71` · `ledger.rs` contract `1559d59` · WP-A plans `e65dda0`
+· WP-CD mem+file ledgers `72600de` · WP-E pg_ledger `de11054` (DB-proven) · WP-F
+acquire wiring `c5edd8b`. Workspace fmt+clippy+test green; the 6 PgLedger
+ceiling tests (incl. `two_instance_over_ceiling_admits_exactly_one`) green against
+a real Postgres 16.
+
+### Adversarial audit — 7-angle loop-until-dry (run `wf_cfed54fd`)
+4 rounds, **22 confirmed findings** (2 P0 + 11 P1 + 9 P2) after adversarial
+refute-verify, collapsing to ~4 roots. The audit found real holes the build +
+DB tests missed:
+- **ROOT-1 (P0) — queued-admission ceiling BYPASS.** Under `FABRIC_ADMISSION_MODE=queue`
+  (the fleet-autoscaler's normal mode) + accounting on, an at-cap tenant routes to
+  the queue; the dispatch (`admission.rs` run_tick) admitted via bare `try_admit`
+  (no gate) → queued leases invisible to Σ, accrue nothing → ceiling bypassed
+  without bound at the autoscaler's steady state. The InMemory suite masked it
+  (opposite gate order; no queue+compute test).
+- **ROOT-2 (P1×7) — FileLedger non-atomic durable writes.** Record and
+  Reservation/Accrual were separate journal appends; a crash or a terminal-record-
+  without-its-accrual replay lost the accrual or orphaned the reservation.
+- **ROOT-3 (P1×3) — PgLedger:** terminal accrual NOT clamped to the reservation
+  (an overdue-unreaped lease → `actual > reserved` → the §8 monotonicity premise
+  violated → overspend); `LEAST` clamp applied AFTER the bigint add (Postgres
+  RAISEs first); pool-floor asserted not mechanized (advisory-lock starvation).
+- **ROOT-4 (P2) — gate order (compute-before-concurrency) + remove-on-Held undercount.**
+
+### Fixes (each with a regression that FAILS pre-fix, PASSES post-fix)
+- **FIX-A** `admission.rs`+`leases.rs` `31304d4`: shared `build_compute_gate`; the
+  queued dispatch builds+passes the SAME gate; OverCompute rejected-not-queued;
+  period_key recomputed at dispatch. Regression `queue_dispatch_enforces_compute_ceiling`
+  (pre-fix dispatched 1/200; post-fix 0/429).
+- **FIX-B** `ledger.rs` `ee7cf98`: single atomic `JournalLine::AdmitCommit` /
+  `TerminalTransition`; compute-before-concurrency; remove-on-Held fail-closed.
+  +6 regressions incl. crash-truncation (admit + terminal byte-boundary).
+- **FIX-C** `pg_ledger.rs` `9e99391`: terminal accrual clamped to the reservation
+  (§8 `actual ≤ reserved`); overflow clamped before the bigint add; pool semaphore;
+  compute-before-concurrency. All DB-proven (`terminal_accrual_clamps_to_reservation_overdue`,
+  `accrual_upsert_clamps_before_add_no_raise`, `pool_burst_releasing_transition_not_starved`).
+
+Integrated HEAD `8ee9848`; all 3 fixes DB-verified against real Postgres 16
+(97+6 green). **Re-audit (7-angle, run `wf_2debb11b`) running on the fixed code —
+the wall does NOT merge until the loop runs dry (2 consecutive clean rounds).**
