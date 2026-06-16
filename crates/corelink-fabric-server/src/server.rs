@@ -919,6 +919,21 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
     // at build time, default-off, so synchronous `#[test]` callers stay off).
     let router = match webhook::autoscaler_config_from_env(|k| std::env::var(k).ok()) {
         Some((secret, cfg)) => {
+            // AUDIT P1-4: with no repo allowlist, the autoscaler serves ANY repo
+            // the HMAC authenticates (every repo the App is installed on). That is
+            // a real blast-radius/cost surface — make the serve-any posture LOUD
+            // at boot so an operator never enables it unaware.
+            match &cfg.repo_allowlist {
+                Some(list) => eprintln!(
+                    "autoscaler: armed (POST /webhooks/github) — repo allowlist: {} repo(s)",
+                    list.len()
+                ),
+                None => eprintln!(
+                    "autoscaler: armed (POST /webhooks/github) — WARNING: no \
+                     FABRIC_AUTOSCALER_REPO_ALLOWLIST set; it will serve ANY repo the GitHub App \
+                     is installed on. Set the allowlist to bound provisioning to your repos."
+                ),
+            }
             let webhook_state = webhook::WebhookHandlerState {
                 secret: Some(secret),
                 app: state.clone(),
@@ -926,6 +941,9 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
                 registry: Arc::clone(&registry),
                 jobs: Arc::new(std::sync::Mutex::new(webhook::JobLeaseMap::new(
                     cfg.max_tracked_jobs,
+                ))),
+                seen_deliveries: Arc::new(std::sync::Mutex::new(webhook::SeenDeliveries::new(
+                    webhook::DEFAULT_MAX_TRACKED_DELIVERIES,
                 ))),
                 cfg: Arc::new(cfg),
             };

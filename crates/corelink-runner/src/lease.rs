@@ -27,8 +27,18 @@ fn requires_no_network(net_policy: &str) -> bool {
 ///
 /// Engine-agnostic on purpose: the Firecracker upgrade path (see crate docs)
 /// reuses this spec unchanged. It holds no Docker-specific fields beyond the
-/// image name, and no credentials (those never reach the runner — C5b).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// image name.
+///
+/// `Debug` is HAND-WRITTEN to REDACT every `env` value (audit P2-3): at provision
+/// time `env` carries injected per-job CAPABILITIES — the §13.2 ingest credential
+/// (check/envelope path) or the `CORELINK_RUNNER_JITCONFIG` GitHub runner
+/// registration credential (runner path). The derived `Debug` would render those
+/// in full, and this type crosses the `BoxProvisioner` seam — one
+/// `tracing::debug!(?spec)` away from writing a live credential to the fabric log,
+/// on a fabric whose trust model is "no secret ever in a log". The manual impl
+/// prints env KEYS only, mirroring every other secret-holder here (`BearerPat`,
+/// `JitRunnerConfig`, `IngestSigner`, `AutoscalerConfig`).
+#[derive(Clone, PartialEq, Eq)]
 pub struct ContainerSpec {
     /// Stable per-job container name, derived from the lease id. One lease →
     /// one job → one container.
@@ -68,6 +78,30 @@ pub struct ContainerSpec {
     /// endpoint (`CORELINK_ENVELOPE_INGEST_URL`). Never carries box secrets
     /// beyond that brokered credential.
     pub env: Vec<(String, String)>,
+}
+
+/// Redacting `Debug` (audit P2-3): every `env` VALUE is replaced with
+/// `***REDACTED***` so an injected credential (the §13.2 ingest token or the
+/// `CORELINK_RUNNER_JITCONFIG` runner registration) can never reach a log via
+/// `{:?}`. Keys are shown (useful for triage; they are not secret).
+impl std::fmt::Debug for ContainerSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let env_keys: Vec<(&str, &str)> = self
+            .env
+            .iter()
+            .map(|(k, _)| (k.as_str(), "***REDACTED***"))
+            .collect();
+        f.debug_struct("ContainerSpec")
+            .field("name", &self.name)
+            .field("image", &self.image)
+            .field("tmp_root", &self.tmp_root)
+            .field("no_network", &self.no_network)
+            .field("allow_egress", &self.allow_egress)
+            .field("run_on_create", &self.run_on_create)
+            .field("path_set", &self.path_set)
+            .field("env", &env_keys)
+            .finish()
+    }
 }
 
 impl ContainerSpec {
@@ -444,6 +478,31 @@ mod tests {
         let mut l = lease();
         l.net_policy = "egress-allow".to_string();
         assert!(ContainerSpec::from_lease(&l, PIN).is_err());
+    }
+
+    /// AUDIT P2-3: `Debug` must REDACT every env value (a provision-time injected
+    /// credential — the JIT runner config or §13.2 ingest token — must never
+    /// reach a log via `{:?}`), while still showing keys for triage.
+    #[test]
+    fn debug_redacts_env_values_but_shows_keys() {
+        let mut spec = ContainerSpec::from_lease(&lease(), PIN).unwrap();
+        spec.env.push((
+            "CORELINK_RUNNER_JITCONFIG".to_string(),
+            "SUPER-SECRET-jit-registration-token".to_string(),
+        ));
+        let dbg = format!("{spec:?}");
+        assert!(
+            !dbg.contains("SUPER-SECRET"),
+            "the injected credential value must never appear in Debug, got: {dbg}"
+        );
+        assert!(
+            dbg.contains("***REDACTED***"),
+            "env values must be redacted"
+        );
+        assert!(
+            dbg.contains("CORELINK_RUNNER_JITCONFIG"),
+            "env keys remain visible for triage"
+        );
     }
 
     // ── ADR-0007 runner-lease egress gate (the security crux) ─────────────────

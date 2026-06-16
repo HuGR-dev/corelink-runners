@@ -699,7 +699,19 @@ pub(crate) async fn cancel(
         // the cancel response (the provider deadline is the hard backstop).
         // Gated on the SAME real-transition signal as the slot emit, so an
         // idempotent re-cancel never tears down twice.
-        let _ = state.teardown_lease(&id).await;
+        //
+        // AUDIT P2-1: a teardown FAILURE here was silently discarded — on a
+        // transient provider 5xx the egress box keeps running (with a still-live
+        // JIT config) until its provider deadline, invisible to the reaper (which
+        // sweeps Held only, and this lease is now Released). We still don't fail
+        // the cancel (the provider deadline is the hard backstop), but the failure
+        // is now LOUD so ops can reconcile — never a silent live-box leak.
+        if !state.teardown_lease(&id).await {
+            eprintln!(
+                "lease {id}: teardown FAILED on cancel — box relies on the provider deadline; \
+                 reconcile if it persists"
+            );
+        }
         // GC the lease's side-tables + hook entry (mirror the reaper's
         // post-teardown `forget_lease`): the lease is terminal, nothing else
         // will reclaim these.
