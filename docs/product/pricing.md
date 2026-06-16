@@ -1,24 +1,31 @@
 # CoreLink Runners — pricing model
 
-> Owner-decided 2026-06-12. Canonical pricing source; supersedes the indicative
-> ladder in `product.md §pricing`. Numbers marked ⚠️ are owner-tunable; the
-> loss-impossible guarantee (below) is structural, not a number to tweak.
+> Owner-decided 2026-06-12; **COGS-corrected ladder ratified 2026-06-16.**
+> Canonical pricing source; supersedes the indicative ladder in
+> `product.md §pricing`. Numbers marked ⚠️ are owner-tunable; the loss-impossible
+> guarantee (below) is structural, not a number to tweak.
 >
-> **⚠️ AMENDMENT 2026-06-16 — COGS-basis correction (PROPOSED, NOT yet ratified).**
-> The §2 ladder below is the **2026-06-12 ratified** record. A correction is
-> proposed in **§0 (Amendment)** immediately following: the real scale-to-zero
-> compute COGS is **~$0.10/vCPU-h**, not the $0.0167 the ladder was derived at,
-> which breaks the loss-impossible guarantee ~6× at the original ceilings. §0
-> documents the finding, the proposed revised ladder, and the cross-TL +
-> metering work it depends on. Until the owner ratifies §0, §2 stands but its
-> loss-impossible guarantee is KNOWN-BROKEN on the runner box we must use — do
-> not quote §2 economics as live.
+> **✅ AMENDMENT 2026-06-16 — COGS-basis correction (RATIFIED).** The original
+> 2026-06-12 ladder was derived at a $0.0167/vCPU-h basis that does **not** match
+> a box surviving a real cold build (real basis **~$0.10/vCPU-h**), breaking the
+> loss-impossible guarantee ~6× at the original ceilings. The owner ratified the
+> corrected **40/60 ladder** (price ↑ ≈ ×2, ceiling ↓ ≈ ×⅓) on **2026-06-16**.
+> **§2 below is now the corrected ladder** (the live, canonical numbers). §0
+> records the finding, the derivation, and the cross-TL + metering refinements
+> that remain — those can only **soften** the price / **relax** the ceilings
+> (the $0.10 basis is the conservative worst case), never weaken the guarantee.
+> The original 2026-06-12 ladder is preserved in §0's finding table as the record.
 
-## 0. Amendment 2026-06-16 — COGS-basis correction (PROPOSED)
+## 0. Amendment 2026-06-16 — COGS-basis correction (RATIFIED)
 
-> Status: **PROPOSED — pending (a) owner ratification, (b) cross-TL coordination
-> with the CoreLink (cache) TL + the CoreLink Workspaces TL, (c) real-COGS
-> measurement.** Coordination plan: `docs/handoff/2026-06-16-pricing-cogs-coordination.md`.
+> Status: **RATIFIED by owner 2026-06-16.** The corrected 40/60 ladder is now the
+> live §2 ladder, ratified at the **conservative** $0.10/vCPU-h basis (the robust
+> per-CI-minute box). Remaining work is **refinement, not a precondition**: (a)
+> cross-TL coordination with the CoreLink (cache) TL + the CoreLink Workspaces TL,
+> (b) real-COGS measurement + the 2-vCPU right-size test. Both can only **lower**
+> the real $/vCPU-h → soften the price or relax the ceilings; neither can break
+> the guarantee, because $0.10 is the worst case we ratified against.
+> Coordination plan: `docs/handoff/2026-06-16-pricing-cogs-coordination.md`.
 
 ### The finding
 
@@ -46,13 +53,13 @@ the worst case** (ceiling, cold, zero memoization):
 This is anticipated by §4.2 ("the guarantee holds at the current provider rate;
 if it changes, the ceilings are re-derived") — it is a known lever, not a hole.
 
-### The proposed fix — a 40/60 split (price ↑ / ceiling ↓)
+### The ratified fix — a 40/60 split (price ↑ / ceiling ↓)
 
 Margin is a ratio, so closing the 6× gap is multiplicative: `price× × (1/ceiling×) = 6`.
 Splitting the burden **40 % to price, 60 % to the ceiling** (in log) gives
-**price ≈ ×2.05, ceiling ≈ ×0.34**:
+**price ≈ ×2.05, ceiling ≈ ×0.34** — **ratified by owner 2026-06-16**, now the §2 ladder:
 
-| Tier | Price (proposed) | Ceiling (proposed, vCPU-h) | Max COGS @ $0.10 | Margin floor |
+| Tier | Price (ratified) | Ceiling (ratified, vCPU-h) | Max COGS @ $0.10 | Margin floor |
 |---|---|---|---|---|
 | Starter | **$16** | **100** | $10 | ~37 % |
 | Pro | **$40** | **240** | $24 | ~40 % |
@@ -100,23 +107,30 @@ UNMEASURED** (§6) — measure at launch before quoting a number. Cross-tenant d
 is **intra-tenant at GA**; cross-tenant is staged (`CAP-DEDUP-CROSS-TENANT`), not
 live. The thesis is structurally validated; the exact figure is to-measure.
 
-### What must happen before ratifying §0 (sequenced)
+### Refinements remaining (post-ratification — can only improve, never break)
+
+The ladder is ratified at the conservative $0.10/vCPU-h worst case. These refine
+it; none is a precondition for shipping the corrected numbers:
 
 1. **Measure the real $/vCPU-h** of the box we ship (incl. the 2-vCPU right-size
-   test) — owns: **this repo (Runners)**.
+   test) — owns: **this repo (Runners)**. A lower measured rate → relax ceilings
+   or soften the price increase.
 2. **Cross-TL coordination** — owns: **owner + CoreLink TL + Workspaces TL** (the
    cache hit-rate the margins assume; the dedup-staging tense; the shared-fabric
    COGS allocation across Runners/Workspaces). See the coordination doc.
-3. **Owner ratifies** the revised ladder (or a re-tuned point on the curve).
-4. **Wire** the new caps in `crates/corelink-fabric/src/plans.rs` (`plan_for`) +
-   the vCPU-h ceiling enforcement (the ceiling is not yet enforced in code —
-   `plans.rs` carries concurrency caps only; the compute-ceiling wall is a
-   to-build BIL item).
-5. **Metering** confirms the typical margin within weeks of launch (§6) → tune.
+3. **Wire** the ratified caps in `crates/corelink-fabric/src/plans.rs` (`plan_for`)
+   + **build the vCPU-h ceiling enforcement** — the ceiling is not yet enforced in
+   code (`plans.rs` carries concurrency caps only; the compute-ceiling wall is the
+   to-build mechanism, default-off/fail-closed, that the guarantee rests on). Wave
+   plan: `docs/handoff/2026-06-16-vcpu-ceiling-wave-plan.md`. **This build is
+   decoupled from the numbers — it ships the wall; the ratified caps are config.**
+4. **Metering** confirms the typical margin within weeks of launch (§6) → tune ⚠️.
 
 ---
 
-*(The 2026-06-12 ratified model follows unchanged below, as the record.)*
+*(The model below carries the 2026-06-16 corrected ladder. The structure is the
+2026-06-12 ratified design unchanged; only the §2 numbers and the §3 COGS basis
+were updated by the amendment above.)*
 
 ## 1. The model
 
@@ -135,13 +149,15 @@ CoreLink **governance** stack (BYOK, audit chain, residency, SOC 2) is the
 
 ## 2. The ladder
 
+Corrected 2026-06-16 (COGS basis $0.10/vCPU-h, §0). Max COGS = ceiling × $0.10.
+
 | Tier | $/mo ⚠️ | Concurrency cap ⚠️ | Hard ceiling (vCPU-h/mo) ⚠️ | **Max COGS (cannot exceed)** | Margin floor | Typical (memoized) |
 |---|---|---|---|---|---|---|
-| **Starter** | $8 | 20 | 300 | **$5.01** | ~37% | ~95% |
-| **Pro** | $20 | 40 | 720 | **$12.02** | ~40% | ~92% |
-| **Team** | $50 | 80 | 1,800 | **$30.06** | ~40% | ~90% |
-| **Scale** | $100 | 160 | 3,600 | **$60.12** | ~40% | ~88% |
-| **Max** | $200 | 320 | 7,200 | **$120.24** | ~40% | ~85% |
+| **Starter** | $16 | 20 | 100 | **$10** | ~37% | ~95% |
+| **Pro** | $40 | 40 | 240 | **$24** | ~40% | ~92% |
+| **Team** | $100 | 80 | 600 | **$60** | ~40% | ~90% |
+| **Scale** | $200 | 160 | 1,200 | **$120** | ~40% | ~88% |
+| **Max** | $400 | 320 | 2,400 | **$240** | ~40% | ~85% |
 
 No free tier. **5-day trial** at Team-level capability (card on file; converts
 or downgrades at end). Above Max: Enterprise (custom, governance, BYOC).
@@ -154,25 +170,27 @@ Each tier has **two hard limits**:
    jobs **queue / require upgrade; no more compute runs**. No overage that leaks.
 
 Because the ceiling is hard, the **maximum COGS a single user can incur is
-`ceiling × $0.0167`** (current Northflank rate) — the "Max COGS" column. Each is
+`ceiling × $0.10`** (real robust-box rate, §0) — the "Max COGS" column. Each is
 strictly below the tier price, even after Stripe fees. **It is therefore
 impossible to lose money on a user within the tier limits, by construction** —
 not "rare," not "portfolio-absorbed": bounded, hard.
 
 The ceiling is set **generous enough to be invisible to real users**: Starter's
-300 vCPU-h ≈ 120–300 real (warm, incremental) builds/day for a solo dev — a
-real workflow never approaches it. A genuinely heavy user (agent fleet) hits the
+100 vCPU-h ≈ ~17 warm 4-vCPU builds/day for a solo dev (≈2× if right-sized to 2
+vCPU) — a real workflow never approaches it. A genuinely heavy user (agent fleet) hits the
 ceiling and is **sorted up** to the tier whose price matches their COGS. So the
 ceiling does double duty: it guarantees no loss **and** routes heavy users to
 the right tier. The moat ("unlimited for any real workflow, flat, predictable")
 stays intact because the ceiling is a fair-use wall the 99% never see — not a
 visible usage meter.
 
-**COGS basis:** Northflank pay-per-use, $0.0167/vCPU-hour, scale-to-zero (idle =
-$0). Slot size is auto-accounted because the ceiling is in vCPU-hours (a 4-vCPU
-job burns the ceiling 4× faster; same COGS bound). Margin floor is the worst
-case (at ceiling, cold, zero memoization); typical is far higher because real CI
-is bursty, warm, and memoized.
+**COGS basis:** Northflank per-CI-minute, **$0.10/vCPU-hour** (robust box that
+survives a cold workspace build, `nf-compute-400-16`), scale-to-zero (idle =
+$0). This is the conservative basis; right-sizing / own-metal lower it (§0). Slot
+size is auto-accounted because the ceiling is in vCPU-hours (a 4-vCPU job burns
+the ceiling 4× faster; same COGS bound). Margin floor is the worst case (at
+ceiling, cold, zero memoization); typical is far higher because real CI is
+bursty, warm, and memoized.
 
 ## 4. Two residuals to bound for *strict* impossibility
 
@@ -226,10 +244,14 @@ day) is exactly who per-minute punishes and flat-concurrency serves.
 ## 8. Decided vs to-validate
 
 - **Decided (owner, 2026-06-12):** flat-concurrency model; no free tier; 5-day
-  trial; the five price points; the loss-impossible hard-ceiling structure;
-  "$5 max COGS on Starter"; doubled limits.
-- **To-validate (metering):** real memoization hit-rate, blended margin per
-  tier, the ⚠️-tunable concurrency caps / ceilings / exact prices.
+  trial; the loss-impossible hard-ceiling structure; doubled limits.
+- **Decided (owner, 2026-06-16):** the **COGS-corrected 40/60 ladder** (§0/§2) —
+  prices $16/$40/$100/$200/$400, ceilings 100/240/600/1,200/2,400 vCPU-h, at the
+  conservative $0.10/vCPU-h basis. Supersedes the 2026-06-12 price points.
+- **To-validate (metering + measurement):** the real $/vCPU-h (2-vCPU right-size
+  test), real memoization hit-rate, blended margin per tier, the ⚠️-tunable
+  concurrency caps / ceilings / exact prices — all can only relax the ceilings or
+  soften the price, never break the floor.
 - **Owner-gated dependencies:** the CoreLink auth + billing seam (slot SKU) —
   see `docs/handoff/2026-06-12-corelink-auth-billing-integration-request.md`;
   the managed-sandbox execution provider (Northflank/Fly) selection.

@@ -3,7 +3,14 @@
 > **From:** CoreLink Runners TL · **Date:** 2026-06-16 · **Relay-ready** (the
 > session fence forbids writing into sibling repos; relay the relevant sections
 > to the CoreLink TL and the CoreLink Workspaces TL).
-> **Owner decision required.** Detail: `docs/product/pricing.md §0` (amendment).
+>
+> **✅ STATUS UPDATE 2026-06-16 — owner RATIFIED the 40/60 ladder** at the
+> conservative $0.10/vCPU-h basis (`docs/product/pricing.md §0/§2`, now live). The
+> cross-TL items below are **no longer ratification preconditions** — they are
+> post-ratification **refinements**: a measured-lower $/vCPU-h, a real cache
+> hit-rate, or coherent shared-fabric COGS allocation can only **relax the
+> ceilings / soften the price**, never break the guarantee (we ratified the worst
+> case). Relay them as "help us tune down", not "blocking a decision".
 
 ## TL;DR
 
@@ -100,9 +107,12 @@ two of its three pillars are owned by other TLs:
 [Launch] metering confirms typical margin within weeks (§6) → tune ⚠️ numbers
 ```
 
-**Hard predecessors:** the owner cannot ratify a *number* before the real
-$/vCPU-h (Runners) and a hit-rate estimate (CoreLink) exist; the ladder cannot be
-*enforced* before the vCPU-h ceiling wall is built (currently absent).
+**Superseded 2026-06-16:** the owner ratified the ladder at the conservative
+$0.10/vCPU-h worst case **without** waiting on the measurements — ratifying
+against the worst case is safe (refinements only relax). The remaining hard
+predecessor is purely on **enforcement**: the ladder cannot be *enforced* before
+the vCPU-h ceiling wall is built (currently absent — wave plan
+`docs/handoff/2026-06-16-vcpu-ceiling-wave-plan.md`).
 
 ## The single most important non-pricing finding
 
