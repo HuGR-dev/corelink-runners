@@ -477,6 +477,14 @@ impl InMemoryLedger {
             .get(&(rec.tenant.clone(), gate.period_key))
             .copied()
             .unwrap_or(0);
+        // FIX-B B2 — PRECEDENCE: the COMPUTE ceiling is checked BEFORE the
+        // concurrency cap, so a lease that is over BOTH is reported `OverCompute`,
+        // never `OverConcurrency`. This ordering is load-bearing: `OverConcurrency`
+        // routes the caller to a QUEUE (retry when a slot frees), which would
+        // BYPASS the monthly compute wall for an over-ceiling tenant; `OverCompute`
+        // is the hard 429 ("upgrade tier") that must win. Both ledgers share this
+        // single `admit_decision`, so the precedence is identical by construction.
+        //
         // (c) ceiling check — fail-closed: strictly-over the ceiling rejects.
         let projected = accrued
             .saturating_add(sigma)
@@ -484,7 +492,8 @@ impl InMemoryLedger {
         if projected > gate.ceiling_vcpu_ms {
             return (AdmitOutcome::OverCompute, None);
         }
-        // (d) concurrency cap (same definition as `try_admit`).
+        // (d) concurrency cap (same definition as `try_admit`) — checked SECOND,
+        //     only once the compute ceiling has room (see the precedence note).
         let active = self
             .records
             .values()
@@ -713,6 +722,25 @@ impl LeaseLedger for InMemoryLedger {
     }
 
     fn remove(&mut self, lease_id: &str) -> anyhow::Result<bool> {
+        // FIX-B B3 — accounting-on `remove` of a HELD lease is a contract
+        // violation: `remove` is the admission-rollback seam for a just-reserved
+        // PENDING lease only (see the trait doc). Dropping a Held accounting-on
+        // lease here would silently delete its reservation from the rolling Σ
+        // WITHOUT folding a terminal accrual ⇒ the tenant's compute is un-billed
+        // (undercount). A Held lease must leave via `transition` to a terminal
+        // state (which folds the accrual once); fail-closed rather than un-bill.
+        // Default-off (no reservation) is unaffected — byte-identical to before.
+        if let Some(rec) = self.records.get(lease_id)
+            && rec.state.is_held()
+            && self.reservations.contains_key(lease_id)
+        {
+            anyhow::bail!(
+                "lease {lease_id} is Held with a compute reservation: `remove` is the \
+                 admission-rollback seam for Pending only — a Held accounting-on lease \
+                 must terminalize via `transition` so its accrual is folded (fail-closed: \
+                 refusing to drop the reservation un-billed)"
+            );
+        }
         // The checkpoint (if any) goes with the record — a rolled-back lease
         // leaves no checkpoint residue.
         self.checkpoints.remove(lease_id);
@@ -783,6 +811,33 @@ enum JournalLine {
         tenant: TenantId,
         period_key: u32,
         total: u64,
+    },
+    /// vCPU-h ceiling wave (FIX-B B1): a COMBINED accounting-on admit — the lease
+    /// `Record` AND its [`LeaseReservation`] in ONE physical line, so the single
+    /// `writeln!`+`fsync` is atomic by construction. This eliminates the torn
+    /// window of the old "Record line, then a SEPARATE Reservation line" pair: a
+    /// crash could leave a durable Pending Record with NO reservation, invisible
+    /// to the admit Σ → overspend. With one line, replay inserts BOTH or NEITHER.
+    /// ADDITIVE — concurrency-only admits still emit a bare `Record` (default-off
+    /// byte-identical); only a `Some` accounting gate emits this variant.
+    AdmitCommit {
+        record: LeaseRecord,
+        reservation: LeaseReservation,
+    },
+    /// vCPU-h ceiling wave (FIX-B B1): a COMBINED terminal transition — the
+    /// terminal lease `Record`, plus (when this terminal folded an accrual) the
+    /// absolute accrual `total` for `(tenant, period_key)` AND the reservation
+    /// carrying the once-only `accrued_at_ms` latch, all in ONE physical line.
+    /// The single `writeln!`+`fsync` is atomic: replay can NEVER see a terminal
+    /// Record whose accrual/latch was lost (the old "terminal Record, then a
+    /// SEPARATE Accrual line" pair could lose the accrual permanently on a crash
+    /// between them — the §1 matrix forbids re-transitioning to re-derive it).
+    /// `accrual`/`reservation` are `None` for a terminal that folded nothing
+    /// (default-off lease, or no reservation). ADDITIVE.
+    TerminalTransition {
+        record: LeaseRecord,
+        accrual: Option<(TenantId, u32, u64)>,
+        reservation: Option<LeaseReservation>,
     },
 }
 
@@ -889,6 +944,35 @@ impl FileLedger {
                         // Absolute total, last write per (tenant, period) wins.
                         index.accruals.insert((tenant, period_key), total);
                     }
+                    JournalLine::AdmitCommit {
+                        record,
+                        reservation,
+                    } => {
+                        // FIX-B B1: the combined accounting-on admit — the Record
+                        // and its reservation arrived atomically, so replay them
+                        // atomically (both or neither; a torn tail dropped both).
+                        let lease_id = record.lease_id.clone();
+                        index.records.insert(lease_id.clone(), record);
+                        index.reservations.insert(lease_id, reservation);
+                    }
+                    JournalLine::TerminalTransition {
+                        record,
+                        accrual,
+                        reservation,
+                    } => {
+                        // FIX-B B1: the combined terminal — Record + (folded)
+                        // accrual total + latched reservation, all atomic. Replay
+                        // applies them together so a terminal Record can NEVER
+                        // outlive its accrual/latch.
+                        let lease_id = record.lease_id.clone();
+                        index.records.insert(lease_id.clone(), record);
+                        if let Some((tenant, period_key, total)) = accrual {
+                            index.accruals.insert((tenant, period_key), total);
+                        }
+                        if let Some(res) = reservation {
+                            index.reservations.insert(lease_id, res);
+                        }
+                    }
                 }
             }
 
@@ -976,23 +1060,29 @@ impl LeaseLedger for FileLedger {
         // there); journal only legal outcomes (the journal never holds an illegal
         // transition). The captured event tells us what compute state to persist.
         let (updated, accrual) = self.index.transition_capturing(lease_id, to, now_ms)?;
-        self.append(&updated)?;
-        // Durably persist the terminal accrual + the reservation's `accrued_at_ms`
-        // latch so BOTH survive a restart (the once-only latch must be durable, or
-        // a reopen would re-fold). The Accrual line carries the absolute total
-        // (idempotent on replay); the Reservation line carries the latched copy.
-        if let Some(event) = accrual {
-            let reservation = self.index.reservations.get(&event.lease_id).copied();
-            self.append_line(&JournalLine::Accrual {
-                tenant: event.tenant,
-                period_key: event.period_key,
-                total: event.new_accrual_total,
-            })?;
-            if let Some(res) = reservation {
-                self.append_line(&JournalLine::Reservation {
-                    lease_id: event.lease_id,
-                    reservation: res,
+        match accrual {
+            // FIX-B B1 (TERMINAL): a terminal fold MUST be atomic with its Record.
+            // The OLD code wrote the terminal `Record` FIRST and the Accrual/
+            // Reservation as SEPARATE appends — a crash between them lost the
+            // accrual permanently (the §1 matrix forbids re-transitioning a
+            // terminal lease, and replay has no reconcile pass to re-derive it),
+            // or left a terminal Record whose latch never landed (a reopen would
+            // re-fold). One combined `TerminalTransition` line — written by a
+            // single `writeln!`+`fsync` — folds Record + accrual total + latched
+            // reservation atomically: replay sees ALL of it or NONE of it (a torn
+            // tail drops the whole terminal, leaving the prior Held replayable).
+            Some(event) => {
+                let reservation = self.index.reservations.get(&event.lease_id).copied();
+                self.append_line(&JournalLine::TerminalTransition {
+                    record: updated.clone(),
+                    accrual: Some((event.tenant, event.period_key, event.new_accrual_total)),
+                    reservation,
                 })?;
+            }
+            // No accrual folded (concurrency-only lease, or no reservation) ⇒ a
+            // bare `Record` line, byte-identical to the default-off path.
+            None => {
+                self.append(&updated)?;
             }
         }
         Ok(updated)
@@ -1055,14 +1145,27 @@ impl LeaseLedger for FileLedger {
         // Decide over the replayed index (Σ + accrued + cap), then durably apply.
         let (outcome, reservation) = self.index.admit_decision(&rec, max_concurrency, gate);
         if let (AdmitOutcome::Admitted, Some(res)) = (outcome, reservation) {
+            // FIX-B B1 (ADMIT): the Record and its reservation MUST land
+            // atomically. The OLD code journaled the bare `Record` (via `put`)
+            // and the `Reservation` as TWO separate appends — a crash between
+            // them left a durable Pending Record with NO reservation, invisible
+            // to the admit Σ on reopen ⇒ overspend. One combined `AdmitCommit`
+            // line (single `writeln!`+`fsync`) commits both or neither; a torn
+            // tail drops the whole admit (no reservation-less Pending escapes Σ).
+            // Fail-closed on a duplicate lease_id, exactly like `put`, BEFORE any
+            // append (never journal an admit we would have rejected).
+            if self.index.records.contains_key(&rec.lease_id) {
+                anyhow::bail!(
+                    "lease {} already exists: put never overwrites",
+                    rec.lease_id
+                );
+            }
             let lease_id = rec.lease_id.clone();
-            // Durable: `put` journals the Record (fail-closed on duplicate id),
-            // then journal the Reservation so the rolling Σ survives a restart.
-            self.put(rec)?;
-            self.append_line(&JournalLine::Reservation {
-                lease_id: lease_id.clone(),
+            self.append_line(&JournalLine::AdmitCommit {
+                record: rec.clone(),
                 reservation: res,
             })?;
+            self.index.records.insert(lease_id.clone(), rec);
             self.index.reservations.insert(lease_id, res);
         }
         Ok(outcome)
@@ -1103,6 +1206,21 @@ impl LeaseLedger for FileLedger {
         // Nothing to do (and nothing to journal) if the lease is absent.
         if !self.index.records.contains_key(lease_id) {
             return Ok(false);
+        }
+        // FIX-B B3 — same fail-closed guard as InMemory: a Held accounting-on
+        // lease (with a reservation) must NOT be removed (it would drop its Σ
+        // reservation un-billed). Check BEFORE journaling — never write a
+        // tombstone for a remove we are about to reject. Default-off unaffected.
+        if let Some(rec) = self.index.records.get(lease_id)
+            && rec.state.is_held()
+            && self.index.reservations.contains_key(lease_id)
+        {
+            anyhow::bail!(
+                "lease {lease_id} is Held with a compute reservation: `remove` is the \
+                 admission-rollback seam for Pending only — a Held accounting-on lease \
+                 must terminalize via `transition` so its accrual is folded (fail-closed: \
+                 refusing to drop the reservation un-billed)"
+            );
         }
         // Durable first: append the tombstone (flushed) before the in-memory
         // index forgets the lease, so a crash between the two leaves a journal
@@ -1485,6 +1603,214 @@ mod compute_ceiling_tests {
                 "the once-only accrual latch survives restart (no double-accrue)"
             );
         }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // FIX-B B2 — an admit that is over BOTH the compute ceiling AND the
+    // concurrency cap must report `OverCompute` (compute WINS), on BOTH ledgers.
+    // `OverConcurrency` would route to a queue that bypasses the monthly wall.
+    #[test]
+    fn over_both_returns_over_compute_not_concurrency() {
+        on_both("overboth", |led| {
+            let t = tid("acme");
+            // Fill the single concurrency slot with a tiny in-flight reservation.
+            let g_fill = gate(202406, 1_000, 1, 10);
+            assert_eq!(
+                led.try_admit_with_compute(pending("l1", &t, 0), 1, Some(g_fill))
+                    .unwrap(),
+                AdmitOutcome::Admitted
+            );
+            // A 2nd admit is over BOTH: cap is full (max_concurrency = 1, l1 active)
+            // AND the ceiling is blown (accrued 0 + Σ 10 + 2_000 = 2_010 > 1_000).
+            // Compute must WIN ⇒ OverCompute, never OverConcurrency.
+            let g_over = gate(202406, 1_000, 2, 2_000);
+            assert_eq!(
+                led.try_admit_with_compute(pending("l2", &t, 0), 1, Some(g_over))
+                    .unwrap(),
+                AdmitOutcome::OverCompute,
+                "over BOTH ⇒ OverCompute (compute precedes concurrency)"
+            );
+            assert!(
+                led.get("l2").unwrap().is_none(),
+                "rejected admit inserts nothing"
+            );
+        });
+    }
+
+    // FIX-B B3 — `remove` of a HELD accounting-on lease (one with a reservation)
+    // is a contract violation ⇒ Err, on BOTH ledgers. Dropping it silently would
+    // un-bill the reservation (undercount). A Held lease must terminalize.
+    #[test]
+    fn remove_held_accounting_lease_fails_closed() {
+        on_both("removeheld", |led| {
+            let t = tid("acme");
+            let g = gate(202406, 10_000, 2, 100);
+            led.try_admit_with_compute(pending("l1", &t, 0), 100, Some(g))
+                .unwrap();
+            // Pending → remove is legal admission rollback (still allowed).
+            // Move to Held first, THEN remove must fail-closed.
+            led.transition("l1", RunnerState::Held, 0).unwrap();
+            assert!(
+                led.remove("l1").is_err(),
+                "remove of a Held accounting-on lease must fail-closed (un-bill guard)"
+            );
+            // The lease is untouched: still Held, reservation still in Σ.
+            assert!(led.get("l1").unwrap().unwrap().state.is_held());
+        });
+    }
+
+    // FIX-B B3 — the guard is accounting-ONLY: `remove` of a Held lease with NO
+    // reservation (default-off) is still allowed, byte-identical to before.
+    #[test]
+    fn remove_held_default_off_lease_still_allowed() {
+        on_both("removedefoff", |led| {
+            let t = tid("acme");
+            // No compute gate ⇒ no reservation recorded.
+            led.try_admit_with_compute(pending("d1", &t, 0), 100, None)
+                .unwrap();
+            led.transition("d1", RunnerState::Held, 0).unwrap();
+            assert!(
+                led.remove("d1").unwrap(),
+                "default-off Held remove is unaffected by the B3 guard"
+            );
+            assert!(led.get("d1").unwrap().is_none());
+        });
+    }
+
+    // FIX-B B1 (ADMIT, crash-truncation) — admit an accounting-on lease, then
+    // simulate a crash by truncating the journal AT the byte boundary of the
+    // combined admit line (dropping it as a torn tail). On reopen the invariant
+    // holds: NO reservation-less Pending/Held lease that escapes Σ — the whole
+    // admit was dropped atomically (record AND reservation gone together).
+    #[test]
+    fn admit_crash_truncation_never_orphans_a_reservationless_lease() {
+        let path = temp_journal("admit-crash");
+        let t = tid("acme");
+        let g = gate(202406, 10_000, 2, 600);
+        {
+            let mut led = FileLedger::open(&path).unwrap();
+            led.try_admit_with_compute(pending("l1", &t, 0), 100, Some(g))
+                .unwrap();
+        }
+        // The journal is exactly ONE physical line (the combined AdmitCommit).
+        // "Crash" = truncate it to zero bytes at that line's boundary.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(lines.len(), 1, "accounting-on admit is ONE combined line");
+        // Tear the trailing line: keep the first byte only (un-parseable, no LF).
+        let torn = &lines[0][..1];
+        std::fs::write(&path, torn).unwrap();
+
+        // Reopen: the torn tail is dropped → the lease is GONE (record AND
+        // reservation), never a reservation-less row that escapes Σ.
+        let led = FileLedger::open(&path).expect("torn admit tail tolerated");
+        assert!(
+            led.get("l1").unwrap().is_none(),
+            "a half-written admit leaves NO reservation-less lease (dropped atomically)"
+        );
+        // And Σ is clean: a fresh admit up to the full ceiling fits (no phantom Σ).
+        let mut led = led;
+        let g_full = gate(202406, 10_000, 2, 10_000);
+        assert_eq!(
+            led.try_admit_with_compute(pending("l2", &t, 0), 100, Some(g_full))
+                .unwrap(),
+            AdmitOutcome::Admitted,
+            "no phantom reservation survived the torn admit"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // FIX-B B1 (TERMINAL, crash-truncation) — admit→Held→terminal an accounting-on
+    // lease, then truncate the journal at the boundary of the combined terminal
+    // line (dropping it as a torn tail). On reopen the invariant holds: the lease
+    // is back at its last durable state (Held) — a half-written terminal NEVER
+    // loses the accrual silently; it simply replays the prior Held, and the
+    // terminal can be RE-DRIVEN (legal: Held → terminal), folding the accrual then.
+    #[test]
+    fn terminal_crash_truncation_never_loses_accrual() {
+        let path = temp_journal("term-crash");
+        let t = tid("acme");
+        let g = gate(202406, 1_000_000, 4, 100);
+        {
+            let mut led = FileLedger::open(&path).unwrap();
+            led.try_admit_with_compute(pending("l1", &t, 0), 100, Some(g))
+                .unwrap();
+            led.transition("l1", RunnerState::Held, 0).unwrap();
+            led.transition("l1", RunnerState::Released, 1_000).unwrap();
+            assert_eq!(led.compute_accrued(&t, 202406).unwrap(), 4_000);
+        }
+        // Drop the LAST line (the combined TerminalTransition) as a torn tail,
+        // leaving the AdmitCommit + the Held Record committed before it.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert!(lines.len() >= 2, "admit + Held + terminal lines present");
+        // Reassemble all but the last line, then append a torn (partial) copy of
+        // the last line with no LF — exactly the crash-mid-terminal-append case.
+        let mut rebuilt = String::new();
+        for l in &lines[..lines.len() - 1] {
+            rebuilt.push_str(l);
+            rebuilt.push('\n');
+        }
+        let last = lines[lines.len() - 1];
+        rebuilt.push_str(&last[..last.len() / 2]); // torn, no trailing LF
+        std::fs::write(&path, rebuilt).unwrap();
+
+        // Reopen: the torn terminal is dropped → the lease replays at its prior
+        // durable state (Held), and the accrual was NOT folded (no half-state).
+        let mut led = FileLedger::open(&path).expect("torn terminal tail tolerated");
+        let rec = led
+            .get("l1")
+            .unwrap()
+            .expect("lease survives at prior state");
+        assert!(
+            rec.state.is_held(),
+            "half-written terminal replays prior Held"
+        );
+        // The accrual is not lost-and-silently-gone: it was simply never folded,
+        // and the terminal is re-drivable (Held → terminal is legal), folding it.
+        assert_eq!(
+            led.compute_accrued(&t, 202406).unwrap(),
+            0,
+            "no half-folded accrual: the terminal is dropped wholesale, re-drivable"
+        );
+        led.transition("l1", RunnerState::Released, 1_000).unwrap();
+        assert_eq!(
+            led.compute_accrued(&t, 202406).unwrap(),
+            4_000,
+            "re-driving the dropped terminal folds the accrual — never lost"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // FIX-B B1 — terminal accrual SURVIVES a clean reopen (admit→Held→terminal→
+    // reopen → compute_accrued reflects the charge). The combined TerminalTransition
+    // line carries Record + accrual total + latched reservation atomically.
+    #[test]
+    fn terminal_accrual_survives_clean_reopen() {
+        let path = temp_journal("term-clean");
+        let t = tid("acme");
+        let g = gate(202406, 1_000_000, 4, 100);
+        {
+            let mut led = FileLedger::open(&path).unwrap();
+            led.try_admit_with_compute(pending("l1", &t, 0), 100, Some(g))
+                .unwrap();
+            led.transition("l1", RunnerState::Held, 0).unwrap();
+            led.transition("l1", RunnerState::Released, 1_000).unwrap();
+            assert_eq!(led.compute_accrued(&t, 202406).unwrap(), 4_000);
+        }
+        // Clean reopen: the accrual is reconstructed from the combined line.
+        let mut led = FileLedger::open(&path).unwrap();
+        assert_eq!(
+            led.compute_accrued(&t, 202406).unwrap(),
+            4_000,
+            "terminal accrual survives a clean reopen"
+        );
+        // And it cannot double-accrue (the latch survived in the same line).
+        assert!(led.transition("l1", RunnerState::Crashed, 9_999).is_err());
+        assert_eq!(led.compute_accrued(&t, 202406).unwrap(), 4_000);
 
         let _ = std::fs::remove_file(&path);
     }
