@@ -2222,67 +2222,92 @@ mod queue_tests {
             .unwrap()
     }
 
-    /// A clock that returns `t0` until `advance()` is called, then `t1`. Lets a
-    /// test SEPARATE the acquire instant from the later cancel/dispatch instant so
-    /// a cancelled lease accrues REAL consumption (`vcpu × elapsed`) — the durable
-    /// half of the ceiling invariant that survives the reservation's removal.
-    struct SteppingClock {
-        t0: u64,
-        t1: u64,
-        advanced: std::sync::atomic::AtomicBool,
-    }
-    impl SteppingClock {
-        fn new(t0: u64, t1: u64) -> Self {
-            Self {
-                t0,
-                t1,
-                advanced: std::sync::atomic::AtomicBool::new(false),
-            }
+    /// A clock whose wall-clock can be moved forward across MULTIPLE events
+    /// (`set(now)`), so one test can separate the acquire instant from each later
+    /// dispatch/cancel instant. A cancelled lease then accrues REAL consumption
+    /// (`vcpu × elapsed`, §8-clamped to its reservation) — the durable half of the
+    /// ceiling invariant that survives the reservation's removal.
+    struct SettableClock(std::sync::atomic::AtomicU64);
+    impl SettableClock {
+        fn new(now: u64) -> Self {
+            Self(std::sync::atomic::AtomicU64::new(now))
         }
-        fn advance(&self) {
-            self.advanced
-                .store(true, std::sync::atomic::Ordering::SeqCst);
+        fn set(&self, now: u64) {
+            self.0.store(now, std::sync::atomic::Ordering::SeqCst);
         }
     }
-    impl Clock for SteppingClock {
+    impl Clock for SettableClock {
         fn now_ms(&self) -> u64 {
-            if self.advanced.load(std::sync::atomic::Ordering::SeqCst) {
-                self.t1
-            } else {
-                self.t0
-            }
+            self.0.load(std::sync::atomic::Ordering::SeqCst)
         }
     }
 
-    /// **FIX-A P0 regression — the queue path is now ceiling-guarded.**
+    /// **FIX-A P0 regression — a queue-dispatched lease is ACCOUNTED.**
     ///
     /// Before the fix, the queued-admission dispatch reserved each waiter via a
     /// BARE `try_admit` (NO `ComputeGate`): a tenant pinned at its concurrency cap
-    /// drained ALL real consumption through the unguarded queue, the queued
-    /// leases carried NULL compute columns (invisible to the rolling Σ and the
-    /// accrual), and the monthly vCPU-h ceiling was bypassed WITHOUT BOUND.
+    /// drained ALL real consumption through the unguarded queue, the queued leases
+    /// carried NULL compute columns (invisible to the rolling Σ AND to the
+    /// accrual), and the monthly vCPU-h ceiling was bypassed WITHOUT BOUND. FIX-A
+    /// rebuilt the gate at dispatch (`try_admit_with_compute`), so a queue-admitted
+    /// lease's reservation enters Σ and its terminal folds an accrual — exactly
+    /// like the immediate path.
     ///
-    /// Setup (`vcpu = 1` ⇒ `reserved == expiry_ms`, `accrued == elapsed_ms`):
-    /// cap = 2, ceiling = 3000. A (ttl 1000) and B (ttl 1000) admit at `t0` and
-    /// fill BOTH slots (Σ 0→1000→2000). C (ttl 1000) acquires: Σ 2000 +
-    /// reserved_C 1000 = 3000 ≤ 3000 (UNDER the ceiling) but the concurrency cap
-    /// is full → it ENQUEUES (the genuine `OverConcurrency` queue-fork). Time then
-    /// advances to `t1 = t0 + 1500`, and A is cancelled: A ACCRUES `1 × 1500 =
-    /// 1500` durable vCPU·ms and its reservation is released. The tick dispatches
-    /// C with the gate rebuilt from the DISPATCH instant: `accrued(1500) +
-    /// Σ(1000, from B) + reserved_C(1000) = 3500 > 3000` → **OverCompute**. The
-    /// waiter gets the DISTINCT 429 and is NOT re-enqueued. This proves the queue
-    /// path sees the rolling Σ AND the accrual, and cannot exceed the ceiling.
+    /// # Why the old "terminal pushes the tenant over at dispatch" scenario is dead
+    ///
+    /// The previous version of this test cancelled a HELD lease so it accrued
+    /// `vcpu × elapsed` UNCLAMPED, then claimed that accrual could shove a
+    /// legitimately-queued waiter over the ceiling at dispatch (`OverCompute`,
+    /// dispatched == 0). FIX-D closed exactly that: the §8 clamp caps every
+    /// terminal accrual at the reservation (`actual ≤ reserved`, ledger.rs C1).
+    /// With the clamp, `accrued + Σ` is MONOTONE NON-INCREASING at every terminal —
+    /// a lease leaves Σ shedding `reserved` and adds back only `accrual ≤ reserved`
+    /// to `accrued`. So a terminal can NEVER push a tenant over the ceiling, and a
+    /// waiter that was UNDER the ceiling when it ENQUEUED stays admissible at
+    /// dispatch (its headroom only GROWS while it waits). The old assertion
+    /// exploited the very bug FIX-D fixed; the `OverCompute`-at-dispatch arm is now
+    /// UNREACHABLE for a legitimately-queued lease. It is retained in production as
+    /// intentional defense-in-depth, but a regression test cannot drive it without
+    /// re-introducing the §8 violation.
+    ///
+    /// # What this test proves instead — the queue path is ACCOUNTED, and
+    /// # over-ceiling acquires never reach the queue
+    ///
+    /// Setup (`vcpu = 1` ⇒ `reserved == expiry_ms`, `accrued == clamp(elapsed)`):
+    /// cap = 1, ceiling = 3000.
+    ///   (0) over-ceiling acquires are rejected at QUEUE TIME: an acquire whose own
+    ///       reservation already exceeds the ceiling surfaces `OverCompute` BEFORE
+    ///       concurrency (ledger precedence), so it gets the 429 and NEVER enqueues
+    ///       — the queue only ever holds under-ceiling waiters (this is WHY the §8
+    ///       monotonicity above is sufficient).
+    ///   (1) A (ttl 1000) admits at t0 and fills the only slot (Σ 0→1000). B (ttl
+    ///       1000) acquires: Σ 1000 + 1000 = 2000 ≤ 3000 (UNDER the ceiling) but
+    ///       over the cap → it ENQUEUES (genuine `OverConcurrency`). At t0+1000 A is
+    ///       cancelled → A accrues `clamp(1×1000)=1000` and frees the slot. The tick
+    ///       DISPATCHES B (gate `accrued(1000)+Σ(0)+reserved_B(1000)=2000 ≤ 3000`):
+    ///       B is now Held and ACCOUNTED — its 1000 reservation is in Σ.
+    ///   (1, the proof) a SUBSEQUENT acquire D (ttl 1500) hits
+    ///       `accrued(1000)+Σ(1000, from the dispatched B)+reserved_D(1500)=3500 >
+    ///       3000` → `OverCompute`, the distinct 429. Were B unaccounted (the bug —
+    ///       NULL compute columns, invisible to Σ), D would see only
+    ///       `accrued(1000)+Σ(0)+1500=2500 ≤ 3000` → under-ceiling → it would take
+    ///       the `OverConcurrency` queue-fork and PARK. So B's reservation being in
+    ///       Σ is what flips D from "queued" to "rejected": the assertion fails iff
+    ///       the queue stopped reserving.
+    ///   (2) B is then cancelled at t0+1300 → it accrues `clamp(1×300)=300` NON-ZERO
+    ///       vCPU·ms into the period. The bug accrued 0 (the dispatched lease had no
+    ///       reservation to fold), so a non-zero accrual proves the queue-dispatched
+    ///       lease metered its real consumption.
     #[tokio::test]
     async fn queue_dispatch_enforces_compute_ceiling() {
         let t0 = 1_700_000_000_000u64;
-        let t1 = t0 + 1_500; // same calendar month → same period_key.
+        let period = period_key_now(t0); // all instants below share one calendar month.
         let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
             Arc::new(Mutex::new(InMemoryLedger::new()));
-        let clock = Arc::new(SteppingClock::new(t0, t1));
+        let clock = Arc::new(SettableClock::new(t0));
         let plans = CeilingPlans {
             tenant: tid("alpha"),
-            cap: 2,
+            cap: 1,
             ceiling_vcpu_ms: 3_000,
         };
         let state = AppState::new(Arc::clone(&ledger), Arc::new(plans), clock.clone())
@@ -2290,7 +2315,35 @@ mod queue_tests {
             .with_runner_vcpu(Some(1));
         let router = crate::app::app(alpha_token(), state.clone());
 
-        // A and B fill both slots at t0 (each reserves 1000; Σ ends at 2000).
+        // ── (0) An over-ceiling acquire is rejected at QUEUE TIME, never enqueued.
+        // ttl 3001 reserves 3001 > 3000 → OverCompute BEFORE concurrency, so the
+        // queue-fork (under-ceiling OverConcurrency only) is never taken.
+        let over = router
+            .clone()
+            .oneshot(acquire_req_ttl("pat-alpha", 3_001))
+            .await
+            .unwrap();
+        assert_eq!(
+            over.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "an over-ceiling acquire is rejected (distinct 429) at queue time, not enqueued"
+        );
+        assert_eq!(
+            state
+                .admission_queue
+                .as_ref()
+                .unwrap()
+                .pending(&tid("alpha")),
+            0,
+            "an over-ceiling acquire must NEVER enter the queue (a monthly wall does not drain)"
+        );
+        assert_eq!(
+            active_count(&ledger, &tid("alpha")),
+            0,
+            "no lease admitted over the ceiling"
+        );
+
+        // ── (1) A fills the only slot (Σ 0→1000).
         let a = router
             .clone()
             .oneshot(acquire_req_ttl("pat-alpha", 1_000))
@@ -2298,19 +2351,17 @@ mod queue_tests {
             .unwrap();
         assert_eq!(a.status(), StatusCode::OK, "A admits under the ceiling");
         let a_id = lease_id_of(a).await;
-        let b = router
-            .clone()
-            .oneshot(acquire_req_ttl("pat-alpha", 1_000))
-            .await
-            .unwrap();
-        assert_eq!(b.status(), StatusCode::OK, "B admits under the ceiling");
-        assert_eq!(active_count(&ledger, &tid("alpha")), 2, "both slots filled");
+        assert_eq!(
+            active_count(&ledger, &tid("alpha")),
+            1,
+            "the slot is filled"
+        );
 
-        // C (ttl 1000) is UNDER the ceiling (Σ 2000 + 1000 = 3000 ≤ 3000) but over
-        // the CONCURRENCY cap → it takes the genuine OverConcurrency queue-fork.
-        let router_c = router.clone();
+        // B (ttl 1000): Σ 1000 + 1000 = 2000 ≤ 3000 (UNDER the ceiling) but over
+        // the cap → it takes the genuine OverConcurrency queue-fork and PARKS.
+        let router_b = router.clone();
         let waiter = tokio::spawn(async move {
-            router_c
+            router_b
                 .oneshot(acquire_req_ttl("pat-alpha", 1_000))
                 .await
                 .unwrap()
@@ -2334,42 +2385,61 @@ mod queue_tests {
                 .unwrap()
                 .pending(&tid("alpha")),
             1,
-            "C must be parked in the queue (under the ceiling, over the concurrency cap)"
+            "B must be parked (under the ceiling, over the concurrency cap)"
         );
 
-        // Advance time, then cancel A: A accrues 1 × 1500 = 1500 durable vCPU·ms
-        // (which survives the reservation's removal) and frees a concurrency slot.
-        clock.advance();
-        let cancel = Request::builder()
+        // Advance to t0+1000, cancel A: A accrues clamp(1×1000)=1000 and frees the
+        // slot. A's reservation LEAVES Σ; only its accrual (1000) remains.
+        let t_cancel_a = t0 + 1_000;
+        clock.set(t_cancel_a);
+        let cancel_a = Request::builder()
             .method("POST")
             .uri(paths::LEASE_CANCEL.replace("{lease_id}", &a_id))
             .header(header::AUTHORIZATION, "Bearer pat-alpha")
             .body(Body::empty())
             .unwrap();
         assert_eq!(
-            router.oneshot(cancel).await.unwrap().status(),
+            router.clone().oneshot(cancel_a).await.unwrap().status(),
             StatusCode::OK
         );
 
-        // One tick reaches C: a slot is free, so ONLY the ceiling can stop it.
-        // accrued(1500) + Σ(1000, B) + reserved_C(1000) = 3500 > 3000 →
-        // OverCompute. The dispatch must reject (NOT admit, NOT re-queue).
-        let dispatched = run_admission_tick(&state, t1).await;
+        // The tick DISPATCHES B (a slot is free and it is under the ceiling):
+        // accrued(1000) + Σ(0) + reserved_B(1000) = 2000 ≤ 3000 → admit. This is
+        // the §8 guarantee: a waiter under-ceiling at enqueue stays admissible.
+        let dispatched = run_admission_tick(&state, t_cancel_a).await;
         assert_eq!(
-            dispatched, 0,
-            "the over-ceiling queued lease must NOT be dispatched (ceiling-guarded)"
+            dispatched, 1,
+            "the under-ceiling queued waiter must dispatch once a slot frees (§8: headroom only grows)"
+        );
+        let b_resp = waiter.await.unwrap();
+        assert_eq!(
+            b_resp.status(),
+            StatusCode::OK,
+            "B is dispatched from the queue with a real lease"
+        );
+        let b_id = lease_id_of(b_resp).await;
+        assert_eq!(
+            active_count(&ledger, &tid("alpha")),
+            1,
+            "exactly the dispatched B is active (A cancelled)"
         );
 
-        // The waiter received the DISTINCT 429 — the queue path now enforces the
-        // monthly ceiling exactly as the immediate path does.
-        let resp = waiter.await.unwrap();
+        // ── (1, the proof) B's reservation is IN Σ. A SUBSEQUENT acquire D (ttl
+        // 1500) hits accrued(1000) + Σ(1000, B) + reserved_D(1500) = 3500 > 3000 →
+        // OverCompute (the distinct 429), checked BEFORE concurrency. Were B
+        // unaccounted (the bug), D would see Σ=0 → 2500 ≤ 3000 → under the ceiling →
+        // it would take the OverConcurrency queue-fork and PARK. The 429 + empty
+        // queue below FAIL iff the queue path stopped reserving into Σ.
+        let d = router
+            .clone()
+            .oneshot(acquire_req_ttl("pat-alpha", 1_500))
+            .await
+            .unwrap();
         assert_eq!(
-            resp.status(),
+            d.status(),
             StatusCode::TOO_MANY_REQUESTS,
-            "the over-ceiling queued waiter must get the distinct compute-ceiling 429"
+            "D must be rejected OverCompute — proving the dispatched B's reservation is in Σ"
         );
-
-        // NOT re-enqueued (a monthly wall never drains): the queue is empty.
         assert_eq!(
             state
                 .admission_queue
@@ -2377,13 +2447,35 @@ mod queue_tests {
                 .unwrap()
                 .pending(&tid("alpha")),
             0,
-            "an OverCompute waiter must be dropped, never re-enqueued"
+            "D never enqueues (over the ceiling, not merely over the cap) — B IS counted"
         );
-        // No over-ceiling admission: only B remains active (A cancelled, C rejected).
+
+        // ── (2) B's terminal folds a NON-ZERO accrual. Advance to t0+1300 (B was
+        // created at the dispatch instant t0+1000), cancel B: it accrues
+        // clamp(1×300)=300 vCPU·ms. The bug accrued 0 (no reservation to fold).
+        let t_cancel_b = t_cancel_a + 300;
+        clock.set(t_cancel_b);
+        let cancel_b = Request::builder()
+            .method("POST")
+            .uri(paths::LEASE_CANCEL.replace("{lease_id}", &b_id))
+            .header(header::AUTHORIZATION, "Bearer pat-alpha")
+            .body(Body::empty())
+            .unwrap();
         assert_eq!(
-            active_count(&ledger, &tid("alpha")),
-            1,
-            "the ceiling held — the queue admitted no over-ceiling lease"
+            router.oneshot(cancel_b).await.unwrap().status(),
+            StatusCode::OK
+        );
+        let accrued = ledger
+            .lock()
+            .unwrap()
+            .compute_accrued(&tid("alpha"), period)
+            .unwrap();
+        // A folded 1000 (clamped), B folded 300 (clamped) → 1300. The load-bearing
+        // assertion is that B contributed a NON-ZERO accrual (the bug gave 0).
+        assert_eq!(
+            accrued, 1_300,
+            "the queue-dispatched B metered its real consumption (clamp(300)) on top of A's \
+             clamp(1000) — a non-zero accrual the bare-try_admit bug never produced"
         );
     }
 
