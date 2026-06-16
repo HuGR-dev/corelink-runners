@@ -139,6 +139,50 @@ fn apply_transition(
 /// restart-survival oracle). The production Postgres impl is
 /// [`crate::pg_ledger::PgLedger`] (WP-3-PGLEDGER) — cross-instance cap-safe,
 /// verified by the same conformance suite against a real database.
+/// The compute-ceiling gate for an atomic admit (`pricing.md §3`; wave plan §8/§11).
+///
+/// `None` passed to [`LeaseLedger::try_admit_with_compute`] ⇒ concurrency-only
+/// (today's behavior, default-off). `Some` ⇒ the ledger ALSO enforces, in the
+/// SAME atomic admit, the vCPU-h ceiling
+/// `accrued(tenant, period) + Σ_reserved(pending+held, period) + new_reserved ≤ ceiling`,
+/// and records this lease's reservation so the rolling Σ and the terminal accrual
+/// stay consistent. The reservation is the **constant** worst case `vcpu × ttl`
+/// ([`crate::compute_meter::vcpu_ms`]), already i64-guarded by the caller
+/// ([`crate::compute_meter::fits_ledger`]) — never a `now`-dependent remaining.
+///
+/// The compute state lives **inside the ledger** (Pg columns / InMemory+File
+/// side-store), NOT on [`LeaseRecord`] or [`crate::tenant::TenantPlan`]: the
+/// wire-adjacent record and the plan caps are unchanged, so this adds no field
+/// to any construction site and keeps `RunnerLease` frozen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ComputeGate {
+    /// Calendar-month `YYYYMM` (UTC) the admit is attributed to — `period_key(created_at)`.
+    pub period_key: u32,
+    /// The tenant's monthly ceiling in vCPU·ms. `0` ⇒ disabled: the ledger SKIPS
+    /// the compute check entirely (it must NEVER compare against `0`, which would
+    /// reject-all). A `Some` gate with `ceiling_vcpu_ms == 0` is a no-op gate.
+    pub ceiling_vcpu_ms: u64,
+    /// The serving box's vCPU count — recorded at admit, the multiplier for the
+    /// terminal accrual `vcpu × (terminal − created)`.
+    pub box_vcpu_count: u32,
+    /// This lease's worst-case reservation `vcpu × ttl` (vCPU·ms), i64-guarded.
+    pub new_reserved_vcpu_ms: u64,
+}
+
+/// The outcome of an atomic admit attempt ([`LeaseLedger::try_admit_with_compute`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmitOutcome {
+    /// Admitted — the `Pending` row is inserted (and, under a `Some` gate, its
+    /// reservation recorded) atomically.
+    Admitted,
+    /// Rejected: the tenant is at its concurrency cap (the existing over-cap 429).
+    OverConcurrency,
+    /// Rejected: the tenant is at its monthly vCPU-h compute ceiling — a DISTINCT
+    /// 429 ("monthly compute ceiling reached; upgrade tier"), never conflated with
+    /// the concurrency rejection.
+    OverCompute,
+}
+
 pub trait LeaseLedger {
     /// Register a new record. Fails if `lease_id` already exists — state is
     /// mutated only through [`LeaseLedger::transition`], never by overwrite.
@@ -201,6 +245,50 @@ pub trait LeaseLedger {
     /// Concurrency cap ONLY — the per-instance rate ceiling stays in the caller's
     /// in-memory RateWindow (it is admission bookkeeping, not ledger state).
     fn try_admit(&mut self, rec: LeaseRecord, max_concurrency: u32) -> anyhow::Result<bool>;
+
+    /// Atomic admit with an OPTIONAL compute-ceiling gate — the loss-impossible
+    /// enforcement seam (`pricing.md §3`; wave plan §8/§11).
+    ///
+    /// `gate = None` is EXACTLY [`LeaseLedger::try_admit`] (concurrency-only,
+    /// default-off, byte-identical). `Some(gate)` additionally enforces the vCPU-h
+    /// ceiling IN THE SAME atomic admit — the only place check-and-reserve is
+    /// atomic across instances — and records this lease's reservation so the
+    /// rolling Σ and the terminal accrual stay consistent.
+    ///
+    /// The default impl is **fail-closed**: it serves the `None` (concurrency-only)
+    /// path verbatim, but RETURNS `Err` for any `Some` gate, so a ledger that has
+    /// not implemented compute accounting can NEVER silently admit over a ceiling
+    /// (Err ⇒ 503, never a leak). Production ledgers (InMemory/File/Pg) override
+    /// it; the acceptance suite forces every override (ceiling-reached → `OverCompute`).
+    fn try_admit_with_compute(
+        &mut self,
+        rec: LeaseRecord,
+        max_concurrency: u32,
+        gate: Option<ComputeGate>,
+    ) -> anyhow::Result<AdmitOutcome> {
+        if gate.is_some() {
+            anyhow::bail!(
+                "compute-ceiling accounting requested but this ledger does not \
+                 implement try_admit_with_compute (fail-closed: refusing to admit \
+                 without enforcing the ceiling)"
+            );
+        }
+        if self.try_admit(rec, max_concurrency)? {
+            Ok(AdmitOutcome::Admitted)
+        } else {
+            Ok(AdmitOutcome::OverConcurrency)
+        }
+    }
+
+    /// The durable accrued vCPU·ms for `(tenant, period_key)` — `0` when there is
+    /// no accrual (no accounting, or a fresh period). The terminal half of the
+    /// ceiling invariant `compute_accrued + Σ_reserved ≤ ceiling`.
+    ///
+    /// Default `Ok(0)`: a ledger without compute accounting has accrued nothing.
+    /// Production ledgers override (InMemory/File side-store; Pg `compute_accrual`).
+    fn compute_accrued(&self, _tenant: &TenantId, _period_key: u32) -> anyhow::Result<u64> {
+        Ok(0)
+    }
 
     /// Overwrite the lease's durable **envelope checkpoint** — an OPAQUE JSON
     /// blob (ADR-0004 Decision-2; the §13 Item-3 durable-hook SLA).
