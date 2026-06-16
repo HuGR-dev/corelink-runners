@@ -26,7 +26,7 @@ config is the only per-job credential, and it is one-time-use.
 | Component | Version | Notes |
 |---|---|---|
 | Base OS | ubuntu:24.04 | Digest-pinned (`@sha256:…`) — see below |
-| GitHub Actions runner | v2.322.0 | SHA-256 verified at download time |
+| GitHub Actions runner | v2.335.1 | SHA-256 verified at download time; must track a currently-supported release (GitHub deprecates old runners) |
 | Rust toolchain | 1.96.0 | Matches `rust-toolchain.toml` |
 | rustfmt | (toolchain component) | Gate: `cargo fmt --check` |
 | clippy | (toolchain component) | Gate: `cargo clippy -D warnings` |
@@ -108,7 +108,7 @@ echo "$GHCR_PAT" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
 # 3. Build and push:
 export REGISTRY=ghcr.io
 export IMAGE=humangr-labs/corelink-runner
-export TAG=2.322.0-rust1.96.0   # recommended: encode runner + Rust versions
+export TAG=2.335.1-rust1.96.0   # recommended: encode runner + Rust versions
 ./deploy/runner/build-and-push.sh
 ```
 
