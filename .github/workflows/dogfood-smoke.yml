@@ -1,0 +1,36 @@
+# Dogfood smoke — prove a real job executes on a CoreLink ephemeral runner.
+#
+# ADR-0007 Stage A end-to-end proof: an `acquire(runner)` against the live
+# fabric provisions an ephemeral GitHub Actions runner (label `corelink-dogfood`)
+# that picks up THIS workflow's job, runs it, and self-deregisters. Manually
+# dispatched so it only runs when we are deliberately proving the path.
+#
+# The runner advertises exactly the label baked into its JIT config
+# (`corelink-dogfood`) and NOT `self-hosted`, so `runs-on` is the bare label.
+# The persistent self-hosted runners carry `corelink-builder`, never
+# `corelink-dogfood`, so this job can ONLY land on a freshly-provisioned
+# ephemeral box.
+name: dogfood-smoke
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  smoke:
+    runs-on: corelink-dogfood
+    steps:
+      - name: Where am I running
+        run: |
+          echo "=== CoreLink ephemeral runner — ADR-0007 dogfood ==="
+          echo "runner name : ${RUNNER_NAME:-<unset>}"
+          echo "host        : $(uname -a)"
+          echo "user        : $(whoami)"
+      - name: Toolchain is cache-warm in the image
+        run: |
+          cargo --version
+          rustc --version
+          git --version
+      - name: Checkout works (per-job ephemeral token, no stored secret)
+        uses: actions/checkout@v4
+      - name: Proof
+        run: echo "✅ This job ran on a CoreLink Runners ephemeral box on the cloud."
