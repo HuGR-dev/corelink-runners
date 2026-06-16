@@ -18,7 +18,10 @@
 #       | jq -r '.[] | select(.Platform.Architecture=="amd64") | .Digest'
 #
 # RUNNER VERSION:
-#   Pinned to v2.322.0 (latest stable as of 2026-06-15).
+#   Pinned to v2.335.1 (latest stable as of 2026-06-16). GitHub DEPRECATES old
+#   runner versions and refuses to dispatch jobs to them ("Runner version
+#   vX.Y.Z is deprecated and cannot receive messages"), so this must track a
+#   currently-supported release — observed live 2026-06-16 with v2.322.0.
 #   To update: check https://github.com/actions/runner/releases, update
 #   RUNNER_VERSION and RUNNER_SHA256 (from the release page checksums).
 #
@@ -32,9 +35,9 @@
 FROM ubuntu:24.04@sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae77ff1dc54 AS runner-download
 
 # GitHub Actions runner release to pin.
-# Verify sha256 from: https://github.com/actions/runner/releases/tag/v2.322.0
-ARG RUNNER_VERSION=2.322.0
-ARG RUNNER_SHA256=b13b784808359f31bc79b08a191f5f83757852957dd8fe3dbfcc38202ccf5768
+# Verify sha256 from: https://github.com/actions/runner/releases/tag/v2.335.1
+ARG RUNNER_VERSION=2.335.1
+ARG RUNNER_SHA256=4ef2f25285f0ae4477f1fe1e346db76d2f3ebf03824e2ddd1973a2819bf6c8cf
 
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
@@ -57,7 +60,7 @@ FROM ubuntu:24.04@sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae
 LABEL org.opencontainers.image.title="CoreLink ephemeral GitHub Actions runner" \
       org.opencontainers.image.description="One-shot ephemeral runner for the CoreLink fabric (ADR-0007 Stage A)" \
       org.opencontainers.image.vendor="HuGR / CoreLink" \
-      corelink.runner.version="2.322.0" \
+      corelink.runner.version="2.335.1" \
       corelink.rust.toolchain="1.96.0"
 
 # ── System packages ───────────────────────────────────────────────────────────
