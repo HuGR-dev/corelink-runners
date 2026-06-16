@@ -43,10 +43,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::response::Response;
-use corelink_fabric::{FairScheduler, LeaseRecord, LeaseState, TenantId, WorkItem};
+use corelink_fabric::{FairScheduler, LeaseRecord, LeaseState, SlotEventKind, TenantId, WorkItem};
 use corelink_fabric_api::{AcquireRequest, ApiError};
 use corelink_runner::lease::ContainerSpec;
-use corelink_runners_contracts::RunnerLease;
+use corelink_runners_contracts::{RunnerLease, RunnerState};
 use tokio::sync::{Semaphore, oneshot};
 
 use crate::app::AppState;
@@ -535,6 +535,89 @@ fn evict_waiter(queue: &AdmissionQueue, lease_id: &str) {
     // treats a missing waiter context as "already gone" and does not reserve.
 }
 
+/// Roll back a dispatched-but-UNCLAIMED lease so it leaks NOTHING — the seam the
+/// queued-admission rollback arms use whenever a lease that was reserved (and
+/// possibly already finalized to `Held`) must be undone because no client will
+/// ever own it (the dispatch↔timeout race, a teardown/dispatch failure).
+///
+/// # Why a plain `remove` is WRONG here (FIX-E — the phantom-Held leak)
+///
+/// `try_admit_with_compute` reserves a `Pending` row (accounting-on: a compute
+/// reservation is recorded in the rolling Σ). If `finalize_admitted_lease` then
+/// drove the lease `Pending → Held` AND emitted `Acquired(+1)` BEFORE the
+/// rollback fires, the lease is now **Held with a live reservation**. The
+/// `LeaseLedger::remove` seam is FAIL-CLOSED against exactly that state
+/// (`InMemoryLedger::remove` bails; `PgLedger::remove` only deletes a `pending`
+/// row) — so a `let _ = ledger.remove(..)` SILENTLY returns `Err` and leaves a
+/// **phantom Held lease**: the box is torn down, but the Held row + its
+/// reservation survive in the rolling Σ, occupy a concurrency slot, AND leave a
+/// stuck `Acquired(+1)` in the slot meter until the deadline reaper sweeps it.
+///
+/// So this branches on the lease's ACTUAL state at rollback time:
+/// - **Held** (finalize reached it): drive it to the `Crashed` terminal via
+///   `transition` (the honest abnormal-teardown terminal — mirrors the reaper's
+///   crash sweep). That folds the §8 terminal accrual ONCE (clamped to the
+///   reservation), so the reservation honestly leaves Σ AND the active
+///   (Pending+Held) concurrency set; then emit the matching `Crashed` slot event
+///   so the meter balances the `Acquired(+1)` finalize already emitted (no stuck
+///   occupancy). `remove` is NEVER used on a Held accounting-on lease.
+/// - **Pending** (finalize never reached `Held`, e.g. the waiter timed out
+///   between reserve and finalize): `remove` is correct and SUCCEEDS — the
+///   reservation rides a `pending` row, which `remove` legally drops, and no
+///   `Acquired` was ever emitted, so there is no slot event to balance.
+/// - **Already gone / terminal / no row** (finalize itself failed and already
+///   rolled back, or a concurrent path won): a no-op.
+///
+/// Default-OFF (no compute reservation): a `Pending` rollback still goes through
+/// `remove` byte-identically, and a (rare) `Held` default-off lease terminalizes
+/// via `transition` exactly as the reaper would — neither path leaks.
+///
+/// The caller MUST have already `teardown_lease`d the box (this only reconciles
+/// the ledger + slot meter), mirroring the reaper's teardown-first discipline.
+async fn rollback_undispatched_lease(state: &AppState, tenant: &TenantId, lease_id: &str) {
+    // Read the current state WITHOUT holding the lock across the (later) slot
+    // emit — `record_slot` locks the slot_meter and must never nest under the
+    // ledger guard (the AppState lock-discipline invariant).
+    let current = {
+        let ledger = state.ledger.lock().unwrap_or_else(|e| e.into_inner());
+        ledger.get(lease_id).ok().flatten().map(|r| r.state)
+    };
+    match current {
+        // Finalize reached Held: terminalize so the §8 accrual folds once and the
+        // reservation leaves Σ + the concurrency set; balance the slot meter.
+        Some(state_held) if state_held.is_held() => {
+            let now_ms = state.clock.now_ms();
+            let crashed_ok = {
+                let mut ledger = state.ledger.lock().unwrap_or_else(|e| e.into_inner());
+                ledger
+                    .transition(lease_id, RunnerState::Crashed, now_ms)
+                    .is_ok()
+                // guard dropped here at end of block — BEFORE the slot emit below
+            };
+            if crashed_ok {
+                // Mirror the reaper crash sweep: GC side-tables, then emit the
+                // Crashed slot event so the `Acquired(+1)` finalize emitted is
+                // balanced (no stuck occupancy / phantom slot).
+                state.forget_lease(lease_id);
+                state.record_slot(lease_id, tenant, SlotEventKind::Crashed);
+            }
+            // A failed transition means a concurrent path already terminalized it
+            // (e.g. a late close/reaper) — the slot is then already accounted for;
+            // we must NOT double-emit. Nothing more to do.
+        }
+        // Still Pending (or, default-off, any non-Held row `remove` accepts):
+        // `remove` is the correct Pending-rollback seam and succeeds. No Acquired
+        // was emitted, so there is no slot event to balance.
+        Some(_) => {
+            if let Ok(mut ledger) = state.ledger.lock() {
+                let _ = ledger.remove(lease_id);
+            }
+        }
+        // No row: already rolled back / never inserted — a no-op.
+        None => {}
+    }
+}
+
 /// Run ONE admission tick: dispatch queued acquires fairly, reserving each via
 /// the authoritative `try_admit`, then finalize the reserved ones (async
 /// provision → Held → hook) and wake their waiters. Feeds the per-tenant CP4
@@ -762,10 +845,20 @@ pub async fn run_admission_tick(state: &AppState, now_ms: u64) -> usize {
             .remove(&lease_id)
         else {
             // Waiter timed out between reserve and finalize: roll back the
-            // reserved Pending so the slot is not leaked, then move on. NOT a
+            // reserved lease so the slot is not leaked, then move on. NOT a
             // genuine dispatch — excluded from the wait stats (P2).
-            if let Ok(mut ledger) = state.ledger.lock() {
-                let _ = ledger.remove(&lease_id);
+            //
+            // FIX-E: route through `rollback_undispatched_lease`, NOT a bare
+            // `remove`. Here finalize never ran so the lease is still `Pending`
+            // and the helper's `remove` branch fires (no box was provisioned, so
+            // no teardown is owed); but using the shared seam keeps EVERY
+            // undo-path uniform and correct should the state ever be Held.
+            let tenant = {
+                let ledger = state.ledger.lock().unwrap_or_else(|e| e.into_inner());
+                ledger.get(&lease_id).ok().flatten().map(|r| r.tenant)
+            };
+            if let Some(tenant) = tenant {
+                rollback_undispatched_lease(state, &tenant, &lease_id).await;
             }
             continue;
         };
@@ -787,20 +880,31 @@ pub async fn run_admission_tick(state: &AppState, now_ms: u64) -> usize {
         // this dispatch finalized (the dispatch↔timeout race). In that case the
         // dispatch LOST: there is no client to own the now-Held lease, so it
         // would leak a billed slot until the deadline reaper (P1 #2 phantom
-        // Held). Roll it back with the SAME teardown+remove the acquire
-        // provision-failure path uses, making dispatch and timeout mutually
-        // exclusive — either the client gets the lease, or NO Held lease remains.
+        // Held). Roll it back so dispatch and timeout are mutually exclusive —
+        // either the client gets the lease, or NO Held lease remains.
         match q.waker.send(resp) {
             Ok(()) => {
                 // The client owns the lease: a genuine dispatch (counts for §6).
                 genuinely_dispatched.insert(lease_id);
             }
             Err(_dropped_resp) => {
-                // Waiter already 503'd: undo the Held lease so no slot leaks.
+                // Waiter already 503'd: undo the lease so no slot/Σ/meter leaks.
+                //
+                // FIX-E (the phantom-Held leak): when `finalize_admitted_lease`
+                // SUCCEEDED, the lease is now `Held` with a live compute
+                // reservation AND an emitted `Acquired(+1)`. A bare `remove` is
+                // FAIL-CLOSED against that state (it only drops a `pending` row),
+                // so `let _ = remove(..)` would SILENTLY error and leave a phantom
+                // Held lease — reservation stuck in Σ, a concurrency slot pinned,
+                // and an unbalanced `Acquired(+1)` in the slot meter — until the
+                // deadline reaper swept it. Tear the box down first (no lock), then
+                // `rollback_undispatched_lease` terminalizes the Held lease via
+                // `transition(Crashed)` (folding the §8 accrual once, releasing the
+                // reservation + the slot) and emits the balancing `Crashed` slot
+                // event — falling back to `remove` only when finalize left the
+                // lease `Pending` (e.g. it 503'd and already rolled itself back).
                 state.teardown_lease(&lease_id).await;
-                if let Ok(mut ledger) = state.ledger.lock() {
-                    let _ = ledger.remove(&lease_id);
-                }
+                rollback_undispatched_lease(state, &tenant, &lease_id).await;
                 // NOT genuinely dispatched — excluded from the wait stats (P2).
             }
         }
@@ -1769,11 +1873,31 @@ mod queue_tests {
             0,
             "the phantom Held lease must be rolled back (no leaked billed slot)"
         );
-        // And the record is gone entirely (rolled back via ledger remove).
-        assert!(
-            ledger.lock().unwrap().get(&lease_id).unwrap().is_none(),
-            "the rolled-back lease must not linger in the ledger"
-        );
+        // FIX-E: the Held lease is now driven to the `Crashed` TERMINAL (mirroring
+        // the reaper's abnormal-teardown), so its accrual folds once and its
+        // reservation leaves Σ — rather than the old Pending-only `remove` that
+        // is FAIL-CLOSED against a Held accounting-on lease. The row therefore
+        // LINGERS as a terminal `Crashed` (never counted as active), exactly like
+        // a reaper-swept lease; what must NOT remain is any ACTIVE (Pending/Held)
+        // record. Assert the terminal state explicitly.
+        {
+            let rec = ledger
+                .lock()
+                .unwrap()
+                .get(&lease_id)
+                .unwrap()
+                .expect("the rolled-back lease is terminalized, not deleted");
+            assert!(
+                !matches!(rec.state, LeaseState::Pending) && !rec.state.is_held(),
+                "the rolled-back lease must be TERMINAL (Crashed), never active, got {:?}",
+                rec.state
+            );
+            assert_eq!(
+                rec.state,
+                LeaseState::Wire(RunnerState::Crashed),
+                "an undispatched Held lease terminalizes via transition(Crashed)"
+            );
+        }
     }
 
     // ── P2: a timed-out/orphaned FIFO entry must not pollute §6 wait metrics ────
@@ -2301,5 +2425,183 @@ mod queue_tests {
             0,
             "no lease may be admitted over the ceiling"
         );
+    }
+
+    // ── FIX-E: the dispatch↔timeout-lost rollback of a HELD accounting-on lease
+    // must leave NO phantom (slot + Σ + slot-meter all freed) ───────────────────
+
+    /// **FIX-E P1 regression — the phantom-Held leak under accounting-ON.**
+    ///
+    /// In queue mode + accounting-ON, the queued dispatch reserves a `Pending`
+    /// row (compute reservation in Σ), then `finalize_admitted_lease` drives it
+    /// `Pending → Held` and emits `Acquired(+1)`. If the waiter has ALREADY timed
+    /// out (its oneshot receiver is gone), `waker.send` fails — the dispatch LOST
+    /// the race and must roll the lease back.
+    ///
+    /// BEFORE FIX-E the rollback used the Pending-only `remove`, which is
+    /// FAIL-CLOSED against a Held accounting-on lease (`InMemoryLedger::remove`
+    /// bails; `PgLedger::remove` only deletes a `pending` row). The `let _ =
+    /// remove(..)` swallowed the `Err`, leaving a **phantom Held lease**: the box
+    /// torn down, but the Held row + its reservation surviving in the rolling Σ,
+    /// pinning a concurrency slot, with a stuck `Acquired(+1)` in the slot meter —
+    /// until the deadline reaper swept it. The inline invariant ("either the
+    /// client gets the lease, or NO Held lease remains") was FALSE accounting-on.
+    ///
+    /// This drives that exact race deterministically (a dropped-receiver waiter on
+    /// an accounting-ON ledger) and asserts the phantom is gone EVERY way it
+    /// leaked: the lease is TERMINAL (`Crashed`, never active), its reservation has
+    /// LEFT Σ (`compute_accrued` reflects the clamped terminal charge, ~0 here),
+    /// the concurrency slot is FREED, and the slot meter is BALANCED (net
+    /// occupancy 0 — no stuck `Acquired`). Finally a second over-cap acquire for
+    /// the same tenant (cap=1) SUCCEEDS, proving the slot was really freed (not
+    /// merely un-counted). Before the fix the over-cap acquire would queue/leak.
+    #[tokio::test]
+    async fn fix_e_phantom_held_rolled_back_accounting_on() {
+        let now = 11_000_000u64;
+        // cap=1, generous ceiling (so only the concurrency cap is in play),
+        // vcpu=1 ⇒ accounting ON (reservations are recorded in Σ).
+        let (state, ledger) = ceiling_queue_state(1, 1_000_000, 1, now);
+        let queue = state.admission_queue.as_ref().unwrap();
+
+        // Mint a lease + Pending record by hand; enqueue with a waiter whose
+        // receiver is ALREADY DROPPED (the timed-out waiter). cap=1 with no holder
+        // ⇒ the dispatch WINS try_admit_with_compute and finalizes to Held.
+        let lease_id = state.mint_lease_id();
+        let lease = RunnerLease {
+            lease_id: lease_id.clone(),
+            principal_chain: vec!["tenant:alpha".to_string()],
+            path_set: vec!["/work/tmp".to_string()],
+            expiry: now + 600_000,
+            net_policy: "isolated".to_string(),
+            tmp_root: "/work/tmp".to_string(),
+            state: RunnerState::Held,
+        };
+        let spec =
+            corelink_runner::lease::ContainerSpec::from_lease(&lease, PINNED).expect("valid spec");
+        let pending = LeaseRecord {
+            lease_id: lease_id.clone(),
+            tenant: tid("alpha"),
+            state: LeaseState::Pending,
+            box_ref: format!("box:{lease_id}"),
+            created_at_ms: now,
+            updated_at_ms: now,
+            deadline_ms: Some(lease.expiry),
+        };
+        let (waker, wait_rx) = oneshot::channel::<axum::response::Response>();
+        drop(wait_rx); // the waiter has TIMED OUT — any send will fail.
+        queue.waiters.lock().unwrap().insert(
+            lease_id.clone(),
+            QueuedAcquire {
+                tenant: tid("alpha"),
+                pat: crate::auth::BearerPat("pat-alpha".to_string()),
+                req: AcquireRequest {
+                    image_digest: PINNED.to_string(),
+                    net_policy: "isolated".to_string(),
+                    tmp_root: "/work/tmp".to_string(),
+                    expiry_ms: 600_000,
+                    runner: None,
+                },
+                lease,
+                spec,
+                ttl_ms: 600_000,
+                pending,
+                waker,
+            },
+        );
+        queue
+            .scheduler
+            .lock()
+            .unwrap()
+            .enqueue(WorkItem {
+                id: lease_id.clone(),
+                tenant: tid("alpha"),
+                enqueued_at_ms: now,
+            })
+            .unwrap();
+
+        // The tick reserves (Σ += reserved) + finalizes to Held (Acquired+1), then
+        // waker.send FAILS (receiver gone) → it MUST roll back. Zero genuine
+        // dispatches. Under the OLD code the accounting-on `remove` fails-closed
+        // and the phantom survives; the assertions below would all fail.
+        let dispatched = run_admission_tick(&state, now).await;
+        assert_eq!(
+            dispatched, 0,
+            "a dispatch whose waiter timed out is not a genuine dispatch"
+        );
+
+        // (1) SLOT freed: no ACTIVE (Pending/Held) lease remains.
+        assert_eq!(
+            active_count(&ledger, &tid("alpha")),
+            0,
+            "FIX-E: the phantom Held slot must be freed (no leaked billed slot)"
+        );
+
+        // (2) TERMINAL, not deleted: the lease is driven to Crashed (mirroring the
+        // reaper), so the §8 accrual folds once rather than the reservation being
+        // dropped un-billed by a fail-closed `remove`.
+        {
+            let rec = ledger
+                .lock()
+                .unwrap()
+                .get(&lease_id)
+                .unwrap()
+                .expect("the rolled-back Held lease is terminalized, not deleted");
+            assert_eq!(
+                rec.state,
+                LeaseState::Wire(RunnerState::Crashed),
+                "an undispatched Held accounting-on lease terminalizes via transition(Crashed)"
+            );
+        }
+
+        // (3) Σ freed: the reservation has LEFT the rolling Σ. FixedClock ⇒ the
+        // Held lease accrued 0 elapsed ms, so the clamped terminal charge is ~0
+        // and the reservation no longer inflates the period's consumed total.
+        {
+            let ledger = ledger.lock().unwrap();
+            let accrued = ledger
+                .compute_accrued(&tid("alpha"), period_key_now(now))
+                .unwrap();
+            assert_eq!(
+                accrued, 0,
+                "FIX-E: the reservation must leave Σ — the clamped terminal accrual is ~0 \
+                 (0 elapsed ms), never the full un-released reservation"
+            );
+        }
+
+        // (4) Slot METER balanced: the Crashed(-1) event balanced the finalize's
+        // Acquired(+1) — net occupancy 0, no stuck Acquired.
+        assert_eq!(
+            state.slot_meter.lock().unwrap().occupied(&tid("alpha")),
+            0,
+            "FIX-E: the slot meter must be balanced (Crashed balanced Acquired) — \
+             no stuck Acquired(+1)"
+        );
+
+        // (5) The crux PROOF the slot was REALLY freed (not merely un-counted): a
+        // second over-cap acquire for the same tenant (cap=1) now SUCCEEDS. Under
+        // the OLD code the phantom Held pinned the only slot, so this would queue
+        // (and time out) instead of returning 200 immediately.
+        let router = crate::app::app(alpha_token(), state.clone());
+        let resp = router
+            .oneshot(acquire_req_ttl("pat-alpha", 1_000))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "FIX-E: the freed slot must admit a fresh acquire (proving no phantom held it)"
+        );
+        assert_eq!(
+            active_count(&ledger, &tid("alpha")),
+            1,
+            "exactly the one fresh lease is active (the phantom is gone, not double-counted)"
+        );
+    }
+
+    /// The `period_key` (calendar-month bucket) for a wall-clock `now_ms` — the
+    /// SAME key the production gate builder and the ledger accrual use, so the
+    /// FIX-E Σ assertion reads the exact bucket the dispatch reserved into.
+    fn period_key_now(now_ms: u64) -> u32 {
+        corelink_fabric::compute_meter::period_key(now_ms)
     }
 }
