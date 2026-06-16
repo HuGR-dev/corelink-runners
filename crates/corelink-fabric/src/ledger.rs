@@ -565,8 +565,24 @@ impl InMemoryLedger {
             // Already accrued — once-only latch (never double-accrue).
             return None;
         }
+        // C1 (mirror of PgLedger) — CLAMP THE TERMINAL ACCRUAL TO THE RESERVATION
+        // (§8 monotonicity). The loss-impossible proof rests on `actual ≤ reserved`
+        // ALWAYS, so that at each terminal `accrued + Σ` is monotone non-increasing
+        // (the row leaves Σ shedding `reserved`, and adds back `accrual ≤ reserved`
+        // to `accrued`). An overdue-but-unreaped Held lease (now − created > ttl,
+        // i.e. it ran past its ttl before the reaper killed it) yields a raw
+        // `vcpu × (now − created) > reserved` — which, UNCLAMPED, would make
+        // `accrued + Σ` GROW past the sum of reservations and let the gate admit on
+        // false headroom → overspend, AND would diverge this in-memory/File accrual
+        // from PgLedger's (which DOES clamp at pg_ledger.rs C1) for identical inputs.
+        // Clamping to `reserved` (the provider hard-kills at the deadline, so
+        // anything past the reserved ttl is provider-bounded noise) restores
+        // `actual ≤ reserved` unconditionally on InMemory + File. `reserved_vcpu_ms`
+        // is i64-guarded at admit, so the clamped result fits. The clamp can only
+        // ever CAP the charge, never raise it — loss-safe.
         let actual =
-            crate::compute_meter::vcpu_ms(res.box_vcpu_count, now_ms.saturating_sub(created_at_ms));
+            crate::compute_meter::vcpu_ms(res.box_vcpu_count, now_ms.saturating_sub(created_at_ms))
+                .min(res.reserved_vcpu_ms);
         let period = res.accrual_period_key;
         res.accrued_at_ms = Some(now_ms);
         let entry = self.accruals.entry((tenant.clone(), period)).or_insert(0);
@@ -1474,16 +1490,72 @@ mod compute_ceiling_tests {
             led.try_admit_with_compute(pending("l1", &t, 0), 100, Some(g))
                 .unwrap();
             led.transition("l1", RunnerState::Held, 0).unwrap();
-            // Terminalize at now=1000: 4 vCPU × 1000 ms = 4000 vCPU·ms accrued.
+            // Terminalize at now=1000: raw 4 vCPU × 1000 ms = 4000 vCPU·ms, but the
+            // reservation is only 100 (this lease ran past its ttl before reaping).
+            // C1 CLAMPS the terminal accrual to `reserved` (§8 monotonicity:
+            // `actual ≤ reserved` ALWAYS) → 100, NOT the unclamped 4000. This is the
+            // SAME value PgLedger's C1 produces for identical inputs.
             led.transition("l1", RunnerState::Released, 1_000).unwrap();
-            assert_eq!(led.compute_accrued(&t, 202406).unwrap(), 4_000);
+            assert_eq!(led.compute_accrued(&t, 202406).unwrap(), 100);
             // A second terminal transition is ILLEGAL (terminal is absorbing), so
             // it errors and CANNOT double-accrue.
             assert!(led.transition("l1", RunnerState::Crashed, 9_999).is_err());
             assert_eq!(
                 led.compute_accrued(&t, 202406).unwrap(),
-                4_000,
+                100,
                 "accrual is once-only — a 2nd terminalizer never double-accrues"
+            );
+        });
+    }
+
+    // FIX-D (§8 monotonicity, the cross-ledger regression guard) — an OVERDUE
+    // lease (terminalized past its ttl: now − created > ttl) accrues the CLAMPED
+    // `reserved`, NEVER the larger raw `vcpu × elapsed`. This is the invariant the
+    // re-audit found applied to PgLedger ONLY; it now holds on InMemory + File too.
+    // `on_both` asserts BOTH backends, and the clamped value (= reserved when
+    // overdue) is byte-for-byte the SAME value PgLedger's C1 produces for identical
+    // inputs (reserved=100, raw=4×1000=4000) → the §8 invariant `actual ≤ reserved`
+    // holds on EVERY backend, so durable accrual can never diverge between the
+    // FileLedger restart-oracle and production Pg.
+    #[test]
+    fn terminal_accrual_clamps_to_reservation_overdue() {
+        on_both("overdue", |led| {
+            let t = tid("acme");
+            // reserved = vcpu(4) × ttl(25 ms) = 100, accounting-on, ceiling generous.
+            let g = gate(202406, 1_000_000, 4, 100);
+            led.try_admit_with_compute(pending("l1", &t, 0), 100, Some(g))
+                .unwrap();
+            led.transition("l1", RunnerState::Held, 0).unwrap();
+            // Terminalize at now=1000 — WAY past the reserved ttl. Raw would be
+            // 4 × 1000 = 4000, but the clamp caps the charge at reserved = 100.
+            led.transition("l1", RunnerState::Released, 1_000).unwrap();
+            assert_eq!(
+                led.compute_accrued(&t, 202406).unwrap(),
+                100,
+                "overdue terminal accrues CLAMPED reserved (100), never raw actual (4000)"
+            );
+        });
+    }
+
+    // FIX-D companion — a lease terminalized BEFORE its ttl accrues the REAL
+    // (smaller) actual, NOT reserved: the clamp is a ceiling, never a floor, so it
+    // only ever caps an overspend and never inflates an under-ttl charge.
+    #[test]
+    fn within_ttl_accrues_actual() {
+        on_both("withinttl", |led| {
+            let t = tid("acme");
+            // reserved = 4_000 (vcpu 4 × ttl 1000 ms, the worst case).
+            let g = gate(202406, 1_000_000, 4, 4_000);
+            led.try_admit_with_compute(pending("l1", &t, 0), 100, Some(g))
+                .unwrap();
+            led.transition("l1", RunnerState::Held, 0).unwrap();
+            // Terminalize EARLY at now=250: raw 4 × 250 = 1000 < reserved 4000 ⇒
+            // the clamp is a no-op, the REAL 1000 accrues (not the 4000 reservation).
+            led.transition("l1", RunnerState::Released, 250).unwrap();
+            assert_eq!(
+                led.compute_accrued(&t, 202406).unwrap(),
+                1_000,
+                "within ttl accrues the real (smaller) actual, never the reservation"
             );
         });
     }
@@ -1562,7 +1634,9 @@ mod compute_ceiling_tests {
                 .unwrap();
             led.transition("l1", RunnerState::Held, 0).unwrap();
 
-            let g2 = gate(202406, 1_000, 1, 50);
+            // reserved=100 ≥ raw actual (1 vCPU × 100 ms = 100) ⇒ within ttl, the C1
+            // clamp is a no-op and the REAL 100 vCPU·ms accrues (not clamped down).
+            let g2 = gate(202406, 1_000, 1, 100);
             led.try_admit_with_compute(pending("l2", &t, 0), 100, Some(g2))
                 .unwrap();
             led.transition("l2", RunnerState::Held, 0).unwrap();
@@ -1739,7 +1813,8 @@ mod compute_ceiling_tests {
                 .unwrap();
             led.transition("l1", RunnerState::Held, 0).unwrap();
             led.transition("l1", RunnerState::Released, 1_000).unwrap();
-            assert_eq!(led.compute_accrued(&t, 202406).unwrap(), 4_000);
+            // reserved=100, raw=4×1000=4000 → C1-clamped to 100 (§8 `actual ≤ reserved`).
+            assert_eq!(led.compute_accrued(&t, 202406).unwrap(), 100);
         }
         // Drop the LAST line (the combined TerminalTransition) as a torn tail,
         // leaving the AdmitCommit + the Held Record committed before it.
@@ -1778,8 +1853,8 @@ mod compute_ceiling_tests {
         led.transition("l1", RunnerState::Released, 1_000).unwrap();
         assert_eq!(
             led.compute_accrued(&t, 202406).unwrap(),
-            4_000,
-            "re-driving the dropped terminal folds the accrual — never lost"
+            100,
+            "re-driving the dropped terminal folds the (C1-clamped) accrual — never lost"
         );
 
         let _ = std::fs::remove_file(&path);
@@ -1799,18 +1874,19 @@ mod compute_ceiling_tests {
                 .unwrap();
             led.transition("l1", RunnerState::Held, 0).unwrap();
             led.transition("l1", RunnerState::Released, 1_000).unwrap();
-            assert_eq!(led.compute_accrued(&t, 202406).unwrap(), 4_000);
+            // reserved=100, raw=4×1000=4000 → C1-clamped to 100 (§8 `actual ≤ reserved`).
+            assert_eq!(led.compute_accrued(&t, 202406).unwrap(), 100);
         }
         // Clean reopen: the accrual is reconstructed from the combined line.
         let mut led = FileLedger::open(&path).unwrap();
         assert_eq!(
             led.compute_accrued(&t, 202406).unwrap(),
-            4_000,
-            "terminal accrual survives a clean reopen"
+            100,
+            "terminal (C1-clamped) accrual survives a clean reopen"
         );
         // And it cannot double-accrue (the latch survived in the same line).
         assert!(led.transition("l1", RunnerState::Crashed, 9_999).is_err());
-        assert_eq!(led.compute_accrued(&t, 202406).unwrap(), 4_000);
+        assert_eq!(led.compute_accrued(&t, 202406).unwrap(), 100);
 
         let _ = std::fs::remove_file(&path);
     }
