@@ -214,7 +214,15 @@ struct QueuedAcquire {
     req: AcquireRequest,
     lease: RunnerLease,
     spec: ContainerSpec,
-    /// Built `Pending` record handed to `try_admit` in the dispatch closure.
+    /// The lease's ALREADY-F1-CLAMPED TTL (`req.expiry_ms`) — the input the
+    /// dispatch loop rebuilds the [`ComputeGate`] from (`reserved = vcpu × ttl`),
+    /// so the monthly vCPU-h ceiling is enforced on the QUEUE path EXACTLY as on
+    /// the immediate path (the P0 close: an unguarded queue `try_admit` was the
+    /// ceiling bypass). Carried explicitly so it can never drift from the minted
+    /// lease's `expiry`.
+    ttl_ms: u64,
+    /// Built `Pending` record handed to `try_admit_with_compute` in the dispatch
+    /// loop.
     pending: LeaseRecord,
     /// Wakes the HTTP waiter with the finalized `Response` (the `AcquireResponse`
     /// on success, a fail-closed body on a post-reserve failure).
@@ -442,12 +450,18 @@ pub(crate) async fn acquire_queued(
     // waiter context FIRST so the dispatch loop can never observe a queued item
     // with no context; if the enqueue is shed, remove it again.
     {
+        // `req.expiry_ms` is the ALREADY-F1-CLAMPED TTL (the acquire handler
+        // clamps it at the top, before minting and before this enqueue), so the
+        // dispatch-time gate rebuild reserves a bounded `vcpu × ttl`. Read it
+        // before `req` is moved into the context.
+        let ttl_ms = req.expiry_ms;
         let queued = QueuedAcquire {
             tenant: tenant.clone(),
             pat,
             req,
             lease,
             spec,
+            ttl_ms,
             pending,
             waker,
         };
@@ -556,9 +570,11 @@ pub async fn run_admission_tick(state: &AppState, now_ms: u64) -> usize {
     // are preserved) and retried next tick — never over-admitted, never lost.
     struct Candidate {
         item: WorkItem,
-        /// `Some` = a live waiter's deferred Pending to reserve; `None` =
-        /// orphaned FIFO entry (timed-out waiter) → drop it, reserve nothing.
-        pending: Option<LeaseRecord>,
+        /// `Some((pending, ttl_ms))` = a live waiter's deferred Pending to
+        /// reserve, plus the F1-clamped TTL the dispatch rebuilds the
+        /// [`ComputeGate`] from (`reserved = vcpu × ttl`); `None` = orphaned FIFO
+        /// entry (timed-out waiter) → drop it, reserve nothing.
+        pending: Option<(LeaseRecord, u64)>,
     }
     let mut candidates: Vec<Candidate> = Vec::new();
     let report = {
@@ -575,7 +591,7 @@ pub async fn run_admission_tick(state: &AppState, now_ms: u64) -> usize {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .get(&item.id)
-                .map(|q| q.pending.clone());
+                .map(|q| (q.pending.clone(), q.ttl_ms));
             candidates.push(Candidate {
                 item: item.clone(),
                 pending,
@@ -589,25 +605,104 @@ pub async fn run_admission_tick(state: &AppState, now_ms: u64) -> usize {
     };
 
     // ── 1b. AUTHORITATIVE reservation, OUTSIDE the scheduler lock (§ INFO fix).
-    // For each fairly-selected candidate, run the single atomic `try_admit` cap
-    // gate. Winners go to finalize; a loser (cap filled in the race) is
-    // re-enqueued with its original enqueue time and retried next tick. Orphans
-    // (no waiter context) reserve nothing and are simply dropped.
+    // For each fairly-selected candidate, run the single atomic admit cap gate —
+    // `try_admit_with_compute` with the SAME `ComputeGate` the immediate path
+    // builds (the P0 close: the queue path was previously a BARE `try_admit`, so
+    // a tenant pinned at its concurrency cap drained all real consumption through
+    // the unguarded queue and bypassed the monthly vCPU-h ceiling without bound).
+    //
+    // The gate is rebuilt HERE, at dispatch, via the SHARED
+    // `leases::build_compute_gate`:
+    //   - `state.runner_vcpu` is the box vCPU (None ⇒ gate None ⇒ byte-identical
+    //     concurrency-only `try_admit`, the default-off);
+    //   - the ceiling is the tenant's monthly ceiling (plan source);
+    //   - `ttl_ms` is the lease's F1-CLAMPED TTL (carried on the waiter), so
+    //     `reserved = vcpu × ttl` is bounded;
+    //   - `period_key` is recomputed from the DISPATCH `now_ms` — which is also
+    //     the `Pending` row's `created_at_ms` at the insert below (the row is set
+    //     with `now_ms` here, NOT the original enqueue time), so the period the
+    //     reservation is attributed to matches the row.
+    //
+    // Outcomes:
+    //   - `Admitted`       ⇒ winner → finalize (the existing dispatch path);
+    //   - `OverConcurrency`⇒ cap filled in the race → re-enqueue (still-full
+    //     tenant — current behaviour, drains as a slot frees);
+    //   - `OverCompute`    ⇒ the monthly compute wall is reached. A monthly wall
+    //     does NOT drain within the period, so queuing would park the waiter
+    //     until a timeout it can never beat. Wake the waiter with the DISTINCT
+    //     429 ("upgrade tier") and DO NOT re-enqueue — mirroring the immediate
+    //     path's `OverCompute` rejection. This is the dispatch backstop that
+    //     closes the overspend even if an over-ceiling lease was briefly queued.
+    //   - any ledger `Err` (incl. the i64-overflow gate-build) ⇒ fail-closed:
+    //     wake the waiter with 503, reserve nothing, never silently admit.
     let mut to_finalize: Vec<String> = Vec::new();
+    // (lease_id, response) pairs whose waiter must be woken-and-rejected WITHOUT
+    // a reservation (OverCompute 429 / fail-closed 503) — drained after the loop.
+    let mut reject_waiters: Vec<(String, Response)> = Vec::new();
     for cand in candidates {
-        let Some(pending) = cand.pending else {
+        let Some((mut pending, ttl_ms)) = cand.pending else {
             // Orphaned (timed-out waiter): the FIFO entry was popped above;
             // reserve nothing, drop it.
             continue;
         };
+        // Attribute the row + the gate's period to the DISPATCH instant: set the
+        // row's created_at to `now_ms` so `pending_older_than`/accrual and the
+        // `period_key` the gate is built from are consistent.
+        pending.created_at_ms = now_ms;
+        pending.updated_at_ms = now_ms;
         let plan_cap = tenant_cap(state, &cand.item.tenant);
-        let reserved = {
-            let mut ledger = state.ledger.lock().unwrap_or_else(|e| e.into_inner());
-            ledger.try_admit(pending, plan_cap).unwrap_or(false)
+        // Rebuild the compute gate (shared builder) — the P0 close.
+        let gate = match crate::handlers::leases::build_compute_gate(
+            state,
+            &cand.item.tenant,
+            ttl_ms,
+            now_ms,
+        ) {
+            Ok(g) => g,
+            Err(msg) => {
+                // i64-overflow on the reservation: fail-closed, never admit.
+                reject_waiters.push((
+                    cand.item.id.clone(),
+                    error_response(ApiError::FailClosed, &format!("{msg}; failing closed")),
+                ));
+                continue;
+            }
         };
-        if reserved {
-            to_finalize.push(cand.item.id.clone());
-        } else {
+        let outcome = {
+            let mut ledger = state.ledger.lock().unwrap_or_else(|e| e.into_inner());
+            ledger.try_admit_with_compute(pending, plan_cap, gate)
+        };
+        match outcome {
+            Ok(corelink_fabric::ledger::AdmitOutcome::Admitted) => {
+                to_finalize.push(cand.item.id.clone());
+                continue;
+            }
+            // The monthly compute wall — reject the waiter, never re-enqueue.
+            Ok(corelink_fabric::ledger::AdmitOutcome::OverCompute) => {
+                reject_waiters.push((
+                    cand.item.id.clone(),
+                    error_response(
+                        ApiError::OverCap,
+                        "monthly compute ceiling reached; upgrade tier",
+                    ),
+                ));
+                continue;
+            }
+            // Ledger Err: fail-closed (never silently admit over the ceiling).
+            Err(_) => {
+                reject_waiters.push((
+                    cand.item.id.clone(),
+                    error_response(
+                        ApiError::FailClosed,
+                        "lease ledger refused the queued admission reserve; failing closed",
+                    ),
+                ));
+                continue;
+            }
+            // OverConcurrency falls through to the re-enqueue below.
+            Ok(corelink_fabric::ledger::AdmitOutcome::OverConcurrency) => {}
+        }
+        {
             // Lost the cap race: re-enqueue with the ORIGINAL enqueued_at_ms so
             // the wait clock and FIFO membership are preserved, retried next
             // tick. (Best-effort: an enqueue rejected at the per-tenant bound is
@@ -615,6 +710,28 @@ pub async fn run_admission_tick(state: &AppState, now_ms: u64) -> usize {
             // silent over-admit.)
             let mut sched = queue.scheduler.lock().unwrap_or_else(|e| e.into_inner());
             let _ = sched.enqueue(cand.item);
+        }
+    }
+
+    // ── 1c. Wake-and-REJECT the over-ceiling / fail-closed waiters (the P0
+    // close). An `OverCompute` (monthly wall) is NOT transient — re-queuing would
+    // park the waiter until a timeout it can never beat — so we hand its HTTP
+    // request the DISTINCT 429 ("upgrade tier") NOW and DROP it from the queue
+    // (waiter context + any orphaned FIFO entry), exactly mirroring the immediate
+    // path's `OverCompute` rejection. Nothing was reserved for these, so there is
+    // no Pending to roll back. A waiter already gone (timed out) is a no-op send.
+    for (lease_id, resp) in reject_waiters {
+        let waiter = queue
+            .waiters
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&lease_id);
+        // Drop any FIFO leftover so a later tick never re-selects this id.
+        evict_waiter(queue, &lease_id);
+        if let Some(q) = waiter {
+            // Best-effort: if the receiver already 503'd on timeout, the send
+            // returns Err and the response is simply dropped — never re-enqueued.
+            let _ = q.waker.send(resp);
         }
     }
 
@@ -1622,6 +1739,7 @@ mod queue_tests {
                 },
                 lease,
                 spec,
+                ttl_ms: 600_000,
                 pending,
                 waker,
             },
@@ -1850,6 +1968,7 @@ mod queue_tests {
                 },
                 lease,
                 spec,
+                ttl_ms: 600_000,
                 pending,
                 waker,
             },
@@ -1897,5 +2016,290 @@ mod queue_tests {
         release_tx.send(()).unwrap();
         let dispatched = tick.await.unwrap();
         assert_eq!(dispatched, 1, "the candidate is reserved + dispatched");
+    }
+
+    // ── FIX-A: the QUEUE path is ceiling-guarded (the P0 close) ────────────────
+    //
+    // A `PlanSource` with an EXPLICIT per-tenant concurrency cap AND a real
+    // monthly vCPU-h ceiling. `StaticPlans` returns ceiling 0 (disabled), which
+    // would make the compute gate a no-op — the bug could not even be exercised
+    // through it. This surfaces a genuine ceiling so the queued dispatch's
+    // `try_admit_with_compute` actually runs the compute check.
+    struct CeilingPlans {
+        tenant: TenantId,
+        cap: u32,
+        ceiling_vcpu_ms: u64,
+    }
+    impl crate::app::PlanSource for CeilingPlans {
+        fn plan_of(&self, tenant: &TenantId) -> Option<TenantPlan> {
+            (tenant == &self.tenant).then(|| TenantPlan {
+                tenant: self.tenant.clone(),
+                max_concurrency: self.cap,
+                rate_ceiling_per_min: 10_000,
+            })
+        }
+        fn tenant_ceiling_vcpu_ms(&self, tenant: &TenantId) -> u64 {
+            if tenant == &self.tenant {
+                self.ceiling_vcpu_ms
+            } else {
+                0
+            }
+        }
+    }
+
+    fn alpha_token() -> Arc<StaticTokenStore> {
+        Arc::new(StaticTokenStore::new([(
+            "pat-alpha".to_string(),
+            tid("alpha"),
+        )]))
+    }
+
+    /// Queue-mode state with compute accounting ON (`runner_vcpu = Some(vcpu)`),
+    /// a real ceiling, and an explicit concurrency `cap`.
+    fn ceiling_queue_state(
+        cap: u32,
+        ceiling_vcpu_ms: u64,
+        vcpu: u32,
+        now_ms: u64,
+    ) -> (AppState, Arc<Mutex<dyn LeaseLedger + Send>>) {
+        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
+            Arc::new(Mutex::new(InMemoryLedger::new()));
+        let plans = CeilingPlans {
+            tenant: tid("alpha"),
+            cap,
+            ceiling_vcpu_ms,
+        };
+        let state = AppState::new(
+            Arc::clone(&ledger),
+            Arc::new(plans),
+            Arc::new(FixedClock(now_ms)),
+        )
+        .with_admission_queue(64, Duration::from_secs(5), DEFAULT_ADMISSION_PARK_CAP)
+        .with_runner_vcpu(Some(vcpu));
+        (state, ledger)
+    }
+
+    /// An acquire with an explicit `expiry_ms` (so reservations can be sized).
+    /// `vcpu = 1` ⇒ `reserved == expiry_ms` (vCPU·ms), making the arithmetic
+    /// transparent in the assertions below.
+    fn acquire_req_ttl(pat: &str, expiry_ms: u64) -> Request<Body> {
+        let body = serde_json::json!({
+            "image_digest": PINNED,
+            "net_policy": "isolated",
+            "tmp_root": "/work/tmp",
+            "expiry_ms": expiry_ms,
+        });
+        Request::builder()
+            .method("POST")
+            .uri(paths::LEASES)
+            .header(header::AUTHORIZATION, format!("Bearer {pat}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap()
+    }
+
+    /// A clock that returns `t0` until `advance()` is called, then `t1`. Lets a
+    /// test SEPARATE the acquire instant from the later cancel/dispatch instant so
+    /// a cancelled lease accrues REAL consumption (`vcpu × elapsed`) — the durable
+    /// half of the ceiling invariant that survives the reservation's removal.
+    struct SteppingClock {
+        t0: u64,
+        t1: u64,
+        advanced: std::sync::atomic::AtomicBool,
+    }
+    impl SteppingClock {
+        fn new(t0: u64, t1: u64) -> Self {
+            Self {
+                t0,
+                t1,
+                advanced: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+        fn advance(&self) {
+            self.advanced
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    impl Clock for SteppingClock {
+        fn now_ms(&self) -> u64 {
+            if self.advanced.load(std::sync::atomic::Ordering::SeqCst) {
+                self.t1
+            } else {
+                self.t0
+            }
+        }
+    }
+
+    /// **FIX-A P0 regression — the queue path is now ceiling-guarded.**
+    ///
+    /// Before the fix, the queued-admission dispatch reserved each waiter via a
+    /// BARE `try_admit` (NO `ComputeGate`): a tenant pinned at its concurrency cap
+    /// drained ALL real consumption through the unguarded queue, the queued
+    /// leases carried NULL compute columns (invisible to the rolling Σ and the
+    /// accrual), and the monthly vCPU-h ceiling was bypassed WITHOUT BOUND.
+    ///
+    /// Setup (`vcpu = 1` ⇒ `reserved == expiry_ms`, `accrued == elapsed_ms`):
+    /// cap = 2, ceiling = 3000. A (ttl 1000) and B (ttl 1000) admit at `t0` and
+    /// fill BOTH slots (Σ 0→1000→2000). C (ttl 1000) acquires: Σ 2000 +
+    /// reserved_C 1000 = 3000 ≤ 3000 (UNDER the ceiling) but the concurrency cap
+    /// is full → it ENQUEUES (the genuine `OverConcurrency` queue-fork). Time then
+    /// advances to `t1 = t0 + 1500`, and A is cancelled: A ACCRUES `1 × 1500 =
+    /// 1500` durable vCPU·ms and its reservation is released. The tick dispatches
+    /// C with the gate rebuilt from the DISPATCH instant: `accrued(1500) +
+    /// Σ(1000, from B) + reserved_C(1000) = 3500 > 3000` → **OverCompute**. The
+    /// waiter gets the DISTINCT 429 and is NOT re-enqueued. This proves the queue
+    /// path sees the rolling Σ AND the accrual, and cannot exceed the ceiling.
+    #[tokio::test]
+    async fn queue_dispatch_enforces_compute_ceiling() {
+        let t0 = 1_700_000_000_000u64;
+        let t1 = t0 + 1_500; // same calendar month → same period_key.
+        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
+            Arc::new(Mutex::new(InMemoryLedger::new()));
+        let clock = Arc::new(SteppingClock::new(t0, t1));
+        let plans = CeilingPlans {
+            tenant: tid("alpha"),
+            cap: 2,
+            ceiling_vcpu_ms: 3_000,
+        };
+        let state = AppState::new(Arc::clone(&ledger), Arc::new(plans), clock.clone())
+            .with_admission_queue(64, Duration::from_secs(5), DEFAULT_ADMISSION_PARK_CAP)
+            .with_runner_vcpu(Some(1));
+        let router = crate::app::app(alpha_token(), state.clone());
+
+        // A and B fill both slots at t0 (each reserves 1000; Σ ends at 2000).
+        let a = router
+            .clone()
+            .oneshot(acquire_req_ttl("pat-alpha", 1_000))
+            .await
+            .unwrap();
+        assert_eq!(a.status(), StatusCode::OK, "A admits under the ceiling");
+        let a_id = lease_id_of(a).await;
+        let b = router
+            .clone()
+            .oneshot(acquire_req_ttl("pat-alpha", 1_000))
+            .await
+            .unwrap();
+        assert_eq!(b.status(), StatusCode::OK, "B admits under the ceiling");
+        assert_eq!(active_count(&ledger, &tid("alpha")), 2, "both slots filled");
+
+        // C (ttl 1000) is UNDER the ceiling (Σ 2000 + 1000 = 3000 ≤ 3000) but over
+        // the CONCURRENCY cap → it takes the genuine OverConcurrency queue-fork.
+        let router_c = router.clone();
+        let waiter = tokio::spawn(async move {
+            router_c
+                .oneshot(acquire_req_ttl("pat-alpha", 1_000))
+                .await
+                .unwrap()
+        });
+        for _ in 0..400 {
+            if state
+                .admission_queue
+                .as_ref()
+                .unwrap()
+                .pending(&tid("alpha"))
+                == 1
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            state
+                .admission_queue
+                .as_ref()
+                .unwrap()
+                .pending(&tid("alpha")),
+            1,
+            "C must be parked in the queue (under the ceiling, over the concurrency cap)"
+        );
+
+        // Advance time, then cancel A: A accrues 1 × 1500 = 1500 durable vCPU·ms
+        // (which survives the reservation's removal) and frees a concurrency slot.
+        clock.advance();
+        let cancel = Request::builder()
+            .method("POST")
+            .uri(paths::LEASE_CANCEL.replace("{lease_id}", &a_id))
+            .header(header::AUTHORIZATION, "Bearer pat-alpha")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            router.oneshot(cancel).await.unwrap().status(),
+            StatusCode::OK
+        );
+
+        // One tick reaches C: a slot is free, so ONLY the ceiling can stop it.
+        // accrued(1500) + Σ(1000, B) + reserved_C(1000) = 3500 > 3000 →
+        // OverCompute. The dispatch must reject (NOT admit, NOT re-queue).
+        let dispatched = run_admission_tick(&state, t1).await;
+        assert_eq!(
+            dispatched, 0,
+            "the over-ceiling queued lease must NOT be dispatched (ceiling-guarded)"
+        );
+
+        // The waiter received the DISTINCT 429 — the queue path now enforces the
+        // monthly ceiling exactly as the immediate path does.
+        let resp = waiter.await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "the over-ceiling queued waiter must get the distinct compute-ceiling 429"
+        );
+
+        // NOT re-enqueued (a monthly wall never drains): the queue is empty.
+        assert_eq!(
+            state
+                .admission_queue
+                .as_ref()
+                .unwrap()
+                .pending(&tid("alpha")),
+            0,
+            "an OverCompute waiter must be dropped, never re-enqueued"
+        );
+        // No over-ceiling admission: only B remains active (A cancelled, C rejected).
+        assert_eq!(
+            active_count(&ledger, &tid("alpha")),
+            1,
+            "the ceiling held — the queue admitted no over-ceiling lease"
+        );
+    }
+
+    /// **FIX-A regression — an over-ceiling IMMEDIATE acquire under QUEUE mode is
+    /// rejected `OverCompute`, never enqueued.** With the ledger checking compute
+    /// BEFORE concurrency, a single acquire whose own reservation already exceeds
+    /// the ceiling surfaces `OverCompute` and the queue-fork (which only enqueues
+    /// a genuine under-ceiling `OverConcurrency`) is never taken — the request
+    /// gets the distinct 429 and parks NOTHING in the queue.
+    #[tokio::test]
+    async fn over_ceiling_immediate_acquire_rejected_not_queued() {
+        let now = 1_700_000_500_000u64;
+        // cap = 1, ceiling = 1000. A single acquire of ttl 2000 reserves 2000 >
+        // 1000 → OverCompute on the immediate path, in queue mode.
+        let (state, ledger) = ceiling_queue_state(1, 1_000, 1, now);
+        let router = crate::app::app(alpha_token(), state.clone());
+
+        let resp = router
+            .oneshot(acquire_req_ttl("pat-alpha", 2_000))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "an over-ceiling acquire must be rejected (distinct 429), even in queue mode"
+        );
+        // It was REJECTED, not enqueued: nothing parked, nothing reserved.
+        assert_eq!(
+            state
+                .admission_queue
+                .as_ref()
+                .unwrap()
+                .pending(&tid("alpha")),
+            0,
+            "an over-ceiling acquire must NEVER be queued (a monthly wall does not drain)"
+        );
+        assert_eq!(
+            active_count(&ledger, &tid("alpha")),
+            0,
+            "no lease may be admitted over the ceiling"
+        );
     }
 }
