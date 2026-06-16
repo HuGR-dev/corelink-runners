@@ -215,6 +215,13 @@ pub struct ServerConfig {
     /// [`config_from_env`]: `Some` here with the `Memory` backend is a hard
     /// boot error, fail-closed — there is nowhere durable to export to).
     pub billing_export_interval: Option<std::time::Duration>,
+    // ── WP-F box-vCPU compute ceiling — DEFAULT-OFF ──────────────────────────
+    /// The serving box's vCPU count, from `FABRIC_RUNNER_VCPU` (u32). Absent,
+    /// unparseable-as-positive, or `0` → `None` → the vCPU-h compute-accounting
+    /// wall stays DORMANT (`acquire` passes no `ComputeGate`, byte-identical to
+    /// the concurrency-only path). `Some(vcpu > 0)` ACTIVATES the ceiling: each
+    /// acquire reserves `vcpu × ttl` vCPU·ms against the tenant's monthly ceiling.
+    pub runner_vcpu: Option<u32>,
 }
 
 impl std::fmt::Debug for ServerConfig {
@@ -251,6 +258,7 @@ impl std::fmt::Debug for ServerConfig {
                 &self.admin_key.as_ref().map(|_| "***REDACTED***"),
             )
             .field("billing_export_interval", &self.billing_export_interval)
+            .field("runner_vcpu", &self.runner_vcpu)
             .finish()
     }
 }
@@ -628,6 +636,18 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
         }
     };
 
+    // ── WP-F box-vCPU compute ceiling — DEFAULT-OFF ──────────────────────────
+    // Optional u32. Absent/empty/unparseable/0 → None → compute accounting OFF
+    // (the whole ceiling wall stays dormant; acquire passes no ComputeGate).
+    // Mirrors the NORTHFLANK_RUNNER_EPHEMERAL_STORAGE_MB "keep only if > 0, else
+    // None" shape (PR #84): a non-positive value is not an error, it is simply
+    // "off" — distinct from the `parse_positive_*` knobs where 0 is a hard error.
+    let runner_vcpu = get("FABRIC_RUNNER_VCPU")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .and_then(|s| s.parse::<u32>().ok())
+        .filter(|&v| v > 0);
+
     Ok(ServerConfig {
         bind_addr,
         signing_key,
@@ -651,6 +671,7 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
         admission_park_cap,
         admin_key,
         billing_export_interval,
+        runner_vcpu,
     })
 }
 
@@ -840,7 +861,10 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
 
     let state = AppState::new(ledger, plans, Arc::new(SystemClock))
         .with_signer(signer)
-        .with_ingest_signer(ingest_signer);
+        .with_ingest_signer(ingest_signer)
+        // WP-F: activate the vCPU-h compute ceiling iff FABRIC_RUNNER_VCPU > 0
+        // (default None ⇒ accounting OFF, byte-identical to the prior path).
+        .with_runner_vcpu(cfg.runner_vcpu);
 
     // Default-off: when mock_exec is false the existing cloud-backend
     // composition is byte-identical to before this change (NoBoxExec +

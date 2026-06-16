@@ -36,6 +36,8 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
+use corelink_fabric::compute_meter;
+use corelink_fabric::ledger::{AdmitOutcome, ComputeGate};
 use corelink_fabric::{LeaseRecord, LeaseState, SlotEventKind, TenantId};
 use corelink_fabric_api::{
     AcquireRequest, AcquireResponse, ApiError, CancelResponse, RunnerSpec, RunnerTargetDto,
@@ -94,6 +96,17 @@ fn fail_closed(what: &str) -> Response {
     error_response(ApiError::FailClosed, &format!("{what}; failing closed"))
 }
 
+/// F1 (WP-F): the hard ceiling on a lease's requested TTL — 60 minutes, the CI
+/// job ceiling. An acquire's `expiry_ms` is CLAMPED to this at the top of
+/// [`acquire`], BEFORE any use of it (the minted lease's `expiry`, the ledger
+/// deadline, AND the vCPU·ms reservation `vcpu × ttl`). The clamp is the single
+/// choke-point both the HTTP path AND the autoscaler/webhook path flow through
+/// (webhook.rs builds an `AcquireRequest` and calls THIS `acquire`), so an
+/// oversized — or maliciously `u64::MAX` — TTL can never (a) hold a slot past the
+/// CI ceiling, nor (b) reserve an unbounded vCPU·ms block that would starve the
+/// tenant's monthly compute headroom.
+const MAX_EXPIRY_MS: u64 = 3_600_000;
+
 /// `POST /v1/leases` — acquire a lease (contract §1 "Acquire").
 pub(crate) async fn acquire(
     State(state): State<AppState>,
@@ -103,6 +116,17 @@ pub(crate) async fn acquire(
     Json(req): Json<AcquireRequest>,
 ) -> Response {
     let now_ms = state.clock.now_ms();
+
+    // ── F1 clamp (WP-F, P0). Clamp the requested TTL to the 60-min CI ceiling
+    // BEFORE any use of `req.expiry_ms` — the minted `expiry`, the ledger
+    // `deadline_ms`, and the compute reservation all read the CLAMPED value. This
+    // one site covers BOTH the HTTP and the autoscaler/webhook acquire paths
+    // (both call this function). ──
+    let req = {
+        let mut req = req;
+        req.expiry_ms = req.expiry_ms.min(MAX_EXPIRY_MS);
+        req
+    };
 
     // ── 0. Runner-mode availability (ADR-0007 direct-CI fleet). A runner
     // acquire (`req.runner == Some`) requires a wired registration broker. If
@@ -313,13 +337,50 @@ pub(crate) async fn acquire(
             // date+reap this lease — and the terminal transition preserves it.
             deadline_ms: Some(lease.expiry),
         };
-        match ledger.try_admit(pending, plan.max_concurrency) {
-            Ok(true) => Reserved::Admitted(MintedLease {
+        // ── WP-F: build the OPTIONAL compute-ceiling gate. Compute accounting is
+        // ACTIVE iff a box-vCPU count is configured (`state.runner_vcpu`):
+        //   - None  ⇒ gate = None ⇒ the ledger runs today's concurrency-only
+        //     `try_admit` (byte-identical default-off).
+        //   - Some(vcpu) ⇒ reserve the lease's worst-case `vcpu × ttl` vCPU·ms
+        //     against the tenant's monthly ceiling, all inside the SAME atomic
+        //     admit. `ttl` is the ALREADY-CLAMPED `req.expiry_ms` (F1), so the
+        //     reservation can never be unbounded. fail-closed: a reservation that
+        //     overflows the i64 ledger bound returns 503, never a silent admit. ──
+        let gate: Option<ComputeGate> = match state.runner_vcpu {
+            None => None,
+            Some(vcpu) => {
+                let period_key = compute_meter::period_key(now_ms);
+                // Ceiling source: the static / live-onboarding plan registry
+                // surfaces the per-tier ceiling; the CoreLink-introspect backend
+                // returns 0 (the per-tenant `max_vcpu_h` is NOT yet on the
+                // introspect entitlement vector — an owner / CoreLink-TL-gated
+                // wire-contract amendment, DEFERRED, never added unilaterally).
+                // `ceiling_vcpu_ms == 0` makes the ledger SKIP the compute check,
+                // the correct default-off for the deferred path.
+                let ceiling = state.plans.tenant_ceiling_vcpu_ms(&tenant);
+                let ttl = req.expiry_ms; // already F1-clamped above.
+                let reserved = compute_meter::vcpu_ms(vcpu, ttl);
+                // fail-closed: never reserve a value that wraps the signed bigint
+                // ledger column (the `as i64` hazard) — reject at the boundary.
+                if !compute_meter::fits_ledger(reserved) {
+                    return fail_closed("compute reservation exceeds ledger bound");
+                }
+                Some(ComputeGate {
+                    period_key,
+                    ceiling_vcpu_ms: ceiling,
+                    box_vcpu_count: vcpu,
+                    new_reserved_vcpu_ms: reserved,
+                })
+            }
+        };
+
+        match ledger.try_admit_with_compute(pending, plan.max_concurrency, gate) {
+            Ok(AdmitOutcome::Admitted) => Reserved::Admitted(MintedLease {
                 lease_id,
                 lease,
                 spec,
             }), // Pending now in ledger.
-            Ok(false) => {
+            Ok(AdmitOutcome::OverConcurrency) => {
                 // ── CP4 admission mode fork (ADR-0005). DEFAULT-OFF.
                 // `reject` (the default): byte-for-byte the prior immediate
                 // over-cap 429 — ZERO behavior change. `queue`: defer to the
@@ -338,6 +399,19 @@ pub(crate) async fn acquire(
                         spec,
                     }),
                 }
+            }
+            // ── WP-F: monthly vCPU-h compute ceiling reached. A DISTINCT 429
+            // (frozen `over_cap` code — the vocabulary has no compute-specific
+            // variant — but a distinct message that says "upgrade tier"). It is
+            // NEVER queued: a monthly compute wall is not a transient concurrency
+            // cap that drains as leases close within the period; queuing would
+            // park the acquire until a timeout it can never beat. Reject outright,
+            // in BOTH admission modes. ──
+            Ok(AdmitOutcome::OverCompute) => {
+                return error_response(
+                    ApiError::OverCap,
+                    "monthly compute ceiling reached; upgrade tier",
+                );
             }
             Err(_) => return fail_closed("lease ledger refused the admission reserve"),
         }
@@ -745,9 +819,10 @@ mod tests {
     };
     use corelink_fabric_api::{AcquireRequest, paths};
     use corelink_runner::lease::ContainerSpec;
-    use corelink_runners_contracts::RunnerState;
+    use corelink_runners_contracts::{RunnerLease, RunnerState};
     use tower::ServiceExt;
 
+    use super::MAX_EXPIRY_MS;
     use crate::app::{AppState, Clock, StaticPlans};
     use crate::auth::StaticTokenStore;
     use crate::cloud_exec::BoxProvisioner;
@@ -780,11 +855,17 @@ mod tests {
     /// The mint is now a UUID, so tests can no longer hardcode the id — they
     /// read it back from the acquire response.
     async fn acquired_lease_id(resp: axum::response::Response) -> String {
+        acquired_lease(resp).await.lease_id
+    }
+
+    /// Drain a response body into the full minted `RunnerLease` — used by tests
+    /// that assert on wire fields beyond the id (e.g. the F1-clamped `expiry`).
+    async fn acquired_lease(resp: axum::response::Response) -> RunnerLease {
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .unwrap();
         let acq: corelink_fabric_api::AcquireResponse = serde_json::from_slice(&bytes).unwrap();
-        acq.lease.lease_id
+        acq.lease
     }
 
     /// A `BoxProvisioner` whose `provision` ALWAYS FAILS, recording each
@@ -1346,6 +1427,82 @@ mod tests {
         assert_ne!(
             id1, id2,
             "two acquires must mint DISTINCT ids (no counter assumption)"
+        );
+    }
+
+    // ── Test: WP-F F1 — an oversized expiry_ms is clamped to MAX_EXPIRY_MS ──────
+
+    /// **WP-F F1 (P0) regression.** An acquire requesting an absurd TTL (here
+    /// `u64::MAX`) must have its `expiry_ms` CLAMPED to the 60-min CI ceiling
+    /// BEFORE it lands in the minted lease's `expiry`. The clamp sits at the top
+    /// of `acquire` — the single choke-point both the HTTP and webhook paths flow
+    /// through — so the minted `expiry` is exactly `now_ms + MAX_EXPIRY_MS`, never
+    /// the unbounded requested value (which would also reserve an unbounded
+    /// vCPU·ms block once the compute wall is on).
+    #[tokio::test]
+    async fn oversized_expiry_is_clamped_to_max() {
+        let now: u64 = 1_717_000_000_000;
+        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
+            Arc::new(Mutex::new(InMemoryLedger::new()));
+        let state = AppState::new(
+            Arc::clone(&ledger),
+            Arc::new(plans(5)),
+            Arc::new(FixedClock(now)),
+        );
+        let router = crate::app::app(acme_token_store(), state);
+
+        let oversized = AcquireRequest {
+            image_digest: PINNED.to_string(),
+            net_policy: "isolated".to_string(),
+            tmp_root: "/work/tmp".to_string(),
+            expiry_ms: u64::MAX,
+            runner: None,
+        };
+        let resp = router
+            .oneshot(acquire_request(paths::LEASES, &oversized))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "acquire must succeed");
+
+        let lease = acquired_lease(resp).await;
+        assert_eq!(
+            lease.expiry,
+            now + MAX_EXPIRY_MS,
+            "expiry_ms = u64::MAX must clamp to now + MAX_EXPIRY_MS (60-min CI ceiling)"
+        );
+    }
+
+    // ── Test: WP-F default-off — no runner_vcpu ⇒ acquire is byte-identical ─────
+
+    /// **WP-F default-off invariant.** With `runner_vcpu` unset (the
+    /// `AppState::new` default), `acquire` passes `gate = None` to the ledger —
+    /// the concurrency-only path — so an acquire whose `vcpu × ttl` would BLOW a
+    /// tiny ceiling is STILL admitted (the wall is dormant). This pins that the
+    /// compute machinery is genuinely off unless a box-vCPU is configured.
+    #[tokio::test]
+    async fn no_runner_vcpu_admits_regardless_of_ceiling() {
+        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
+            Arc::new(Mutex::new(InMemoryLedger::new()));
+        let state = AppState::new(
+            Arc::clone(&ledger),
+            Arc::new(plans(5)),
+            Arc::new(FixedClock(1_717_000_000_000)),
+        );
+        // runner_vcpu is None by default — assert it, then prove acquire admits.
+        assert!(
+            state.runner_vcpu.is_none(),
+            "compute accounting off by default"
+        );
+        let router = crate::app::app(acme_token_store(), state);
+
+        let resp = router
+            .oneshot(acquire_request(paths::LEASES, &body()))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "with no box-vCPU configured the compute wall is dormant — acquire admits"
         );
     }
 }

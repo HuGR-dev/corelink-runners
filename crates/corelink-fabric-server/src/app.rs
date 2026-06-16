@@ -101,6 +101,29 @@ pub trait PlanSource: Send + Sync {
     ) -> Result<Option<TenantPlan>, PlanSourceError> {
         Ok(self.plan_of(tenant))
     }
+
+    /// The tenant's monthly vCPU-h compute ceiling, in vCPU·ms (WP-F: the
+    /// acquire-path read that builds the [`ComputeGate`](corelink_fabric::ledger::ComputeGate)).
+    ///
+    /// `0` is the **disabled** sentinel: the ledger SKIPS the compute check for a
+    /// `Some` gate whose `ceiling_vcpu_ms == 0` (it must NEVER compare against
+    /// `0`, which would reject-all). The default returns `0` so a backend that
+    /// has not wired the ceiling is fail-SAFE-disabled, never reject-all:
+    ///
+    /// - **CoreLink-introspect backend** (`CoreLinkPlanStore`): keeps the default
+    ///   `0` — the per-tenant `max_vcpu_h` ceiling is NOT yet on the introspect
+    ///   entitlement vector. That is an owner / CoreLink-TL-gated wire-contract
+    ///   amendment (same law as the `IntentMetrics` vector: the other side lands
+    ///   it first), DEFERRED, never added unilaterally. Until it lands, the
+    ///   CoreLink path is compute-disabled (`0`), which is correct default-off.
+    /// - **Static / live-onboarding backend** carries the ceiling LOCALLY: the
+    ///   per-tier ceiling lives in `corelink_fabric::plans::PlanRegistry`
+    ///   (`tenant_ceiling_vcpu_ms`); a backend that wraps it overrides this method
+    ///   to surface the live value. [`CompositePlanSource`] below delegates so the
+    ///   composed value flows through.
+    fn tenant_ceiling_vcpu_ms(&self, _tenant: &TenantId) -> u64 {
+        0
+    }
 }
 
 /// In-memory [`PlanSource`] for tests and local dev — a fixed tenant → plan
@@ -166,6 +189,18 @@ impl PlanSource for CompositePlanSource {
         match self.primary.plan_of_resolving(tenant, token)? {
             Some(plan) => Ok(Some(plan)),
             None => self.secondary.plan_of_resolving(tenant, token),
+        }
+    }
+
+    /// WP-F ceiling: consult `primary` first, fall through to `secondary` only
+    /// when primary returns the disabled sentinel `0` — so a tenant onboarded at
+    /// runtime into the live registry resolves ITS ceiling, while the bootstrap
+    /// tenant resolves from the static source. `0` from both ⇒ disabled (the
+    /// ledger skips the compute check), the correct default-off.
+    fn tenant_ceiling_vcpu_ms(&self, tenant: &TenantId) -> u64 {
+        match self.primary.tenant_ceiling_vcpu_ms(tenant) {
+            0 => self.secondary.tenant_ceiling_vcpu_ms(tenant),
+            c => c,
         }
     }
 }
@@ -326,6 +361,18 @@ pub struct AppState {
     /// LB mark a busy-but-alive instance DOWN). From
     /// `FABRIC_MAX_INFLIGHT_REQUESTS` (default [`DEFAULT_MAX_INFLIGHT_REQUESTS`]).
     pub(crate) max_inflight_requests: usize,
+    /// WP-F: the serving box's vCPU count, gating the vCPU-h compute ceiling.
+    ///
+    /// **Default-off:** `None` (the [`AppState::new`] default) ⇒ the whole
+    /// compute-accounting wall stays DORMANT — `acquire` passes `gate = None` to
+    /// the ledger, which is byte-identical to today's concurrency-only
+    /// `try_admit`. `Some(vcpu)` (wired from `FABRIC_RUNNER_VCPU`, kept only when
+    /// `> 0`) ACTIVATES accounting: `acquire` builds a
+    /// [`ComputeGate`](corelink_fabric::ledger::ComputeGate) reserving
+    /// `vcpu × ttl` vCPU·ms against the tenant's monthly ceiling. The box-vCPU
+    /// count is a single fleet-wide constant at M1 (one box SKU); a future
+    /// per-lease vCPU axis would move this onto the lease spec.
+    pub(crate) runner_vcpu: Option<u32>,
 }
 
 /// Default cap on concurrent close ack-window waits (audit P1). Chosen so a
@@ -396,7 +443,24 @@ impl AppState {
             // AUDIT P2: default global in-flight cap; the composition root
             // overrides it from FABRIC_MAX_INFLIGHT_REQUESTS.
             max_inflight_requests: DEFAULT_MAX_INFLIGHT_REQUESTS,
+            // WP-F: compute accounting DEFAULT-OFF — no box-vCPU configured, so
+            // the acquire path passes `gate = None` (today's behavior exactly).
+            // The composition root opts in via `with_runner_vcpu` from
+            // FABRIC_RUNNER_VCPU.
+            runner_vcpu: None,
         }
+    }
+
+    /// Set the serving box's vCPU count, ACTIVATING the vCPU-h compute ceiling
+    /// (WP-F). `Some(vcpu)` with `vcpu > 0` ⇒ `acquire` builds a `ComputeGate`;
+    /// `None` (the default) keeps compute accounting OFF. A `Some(0)` is coerced
+    /// to `None` — a zero-vCPU box is meaningless and would reserve `0` vCPU·ms,
+    /// silently disabling the wall; the composition root already filters `0`, this
+    /// is defense-in-depth.
+    #[must_use]
+    pub fn with_runner_vcpu(mut self, runner_vcpu: Option<u32>) -> Self {
+        self.runner_vcpu = runner_vcpu.filter(|&v| v > 0);
+        self
     }
 
     /// Override the close ack-window concurrency cap (audit P1).
