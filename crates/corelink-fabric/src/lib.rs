@@ -43,6 +43,7 @@
 pub mod billing;
 pub mod billing_sink;
 pub mod caps;
+pub mod compute_meter;
 pub mod interference;
 pub mod ledger;
 #[cfg(test)]
