@@ -107,6 +107,59 @@ fn fail_closed(what: &str) -> Response {
 /// tenant's monthly compute headroom.
 const MAX_EXPIRY_MS: u64 = 3_600_000;
 
+/// Build the OPTIONAL compute-ceiling [`ComputeGate`] for an atomic admit — the
+/// SINGLE construction site shared by BOTH the immediate acquire path AND the
+/// queued-admission dispatch (admission.rs), so the two are byte-identical and
+/// the monthly vCPU-h ceiling cannot be bypassed by routing consumption through
+/// the queue (the P0 the queue-path fix closes).
+///
+/// Compute accounting is ACTIVE iff a box-vCPU count is configured
+/// (`state.runner_vcpu`):
+///   - `None`  ⇒ `Ok(None)` ⇒ the ledger runs today's concurrency-only
+///     `try_admit` (byte-identical default-off; no compute state recorded).
+///   - `Some(vcpu)` ⇒ reserve the lease's worst-case `vcpu × ttl` vCPU·ms
+///     against the tenant's monthly ceiling, all inside the SAME atomic admit.
+///
+/// `ttl` MUST be the ALREADY-F1-CLAMPED TTL (`req.expiry_ms` after the
+/// [`MAX_EXPIRY_MS`] clamp), so the reservation `vcpu × ttl` can never be
+/// unbounded. `now_ms` is the instant the `Pending` row is attributed to:
+///   - immediate path: the acquire's `now_ms` (the row's `created_at`);
+///   - queued dispatch: the DISPATCH `now_ms` (the row's `created_at` is set at
+///     the dispatch insert), so `period_key` matches the row.
+///
+/// fail-closed: a reservation that would overflow the i64 ledger column returns
+/// `Err` (the caller maps it to 503), never a silent admit over the bound.
+pub(crate) fn build_compute_gate(
+    state: &AppState,
+    tenant: &TenantId,
+    ttl: u64,
+    now_ms: u64,
+) -> Result<Option<ComputeGate>, &'static str> {
+    let Some(vcpu) = state.runner_vcpu else {
+        return Ok(None);
+    };
+    let period_key = compute_meter::period_key(now_ms);
+    // Ceiling source: the static / live-onboarding plan registry surfaces the
+    // per-tier ceiling; the CoreLink-introspect backend returns 0 (the
+    // per-tenant `max_vcpu_h` is NOT yet on the introspect entitlement vector —
+    // an owner / CoreLink-TL-gated wire-contract amendment, DEFERRED, never
+    // added unilaterally). `ceiling_vcpu_ms == 0` makes the ledger SKIP the
+    // compute check, the correct default-off for the deferred path.
+    let ceiling = state.plans.tenant_ceiling_vcpu_ms(tenant);
+    let reserved = compute_meter::vcpu_ms(vcpu, ttl);
+    // fail-closed: never reserve a value that wraps the signed bigint ledger
+    // column (the `as i64` hazard) — reject at the boundary.
+    if !compute_meter::fits_ledger(reserved) {
+        return Err("compute reservation exceeds ledger bound");
+    }
+    Ok(Some(ComputeGate {
+        period_key,
+        ceiling_vcpu_ms: ceiling,
+        box_vcpu_count: vcpu,
+        new_reserved_vcpu_ms: reserved,
+    }))
+}
+
 /// `POST /v1/leases` — acquire a lease (contract §1 "Acquire").
 pub(crate) async fn acquire(
     State(state): State<AppState>,
@@ -337,41 +390,15 @@ pub(crate) async fn acquire(
             // date+reap this lease — and the terminal transition preserves it.
             deadline_ms: Some(lease.expiry),
         };
-        // ── WP-F: build the OPTIONAL compute-ceiling gate. Compute accounting is
-        // ACTIVE iff a box-vCPU count is configured (`state.runner_vcpu`):
-        //   - None  ⇒ gate = None ⇒ the ledger runs today's concurrency-only
-        //     `try_admit` (byte-identical default-off).
-        //   - Some(vcpu) ⇒ reserve the lease's worst-case `vcpu × ttl` vCPU·ms
-        //     against the tenant's monthly ceiling, all inside the SAME atomic
-        //     admit. `ttl` is the ALREADY-CLAMPED `req.expiry_ms` (F1), so the
-        //     reservation can never be unbounded. fail-closed: a reservation that
-        //     overflows the i64 ledger bound returns 503, never a silent admit. ──
-        let gate: Option<ComputeGate> = match state.runner_vcpu {
-            None => None,
-            Some(vcpu) => {
-                let period_key = compute_meter::period_key(now_ms);
-                // Ceiling source: the static / live-onboarding plan registry
-                // surfaces the per-tier ceiling; the CoreLink-introspect backend
-                // returns 0 (the per-tenant `max_vcpu_h` is NOT yet on the
-                // introspect entitlement vector — an owner / CoreLink-TL-gated
-                // wire-contract amendment, DEFERRED, never added unilaterally).
-                // `ceiling_vcpu_ms == 0` makes the ledger SKIP the compute check,
-                // the correct default-off for the deferred path.
-                let ceiling = state.plans.tenant_ceiling_vcpu_ms(&tenant);
-                let ttl = req.expiry_ms; // already F1-clamped above.
-                let reserved = compute_meter::vcpu_ms(vcpu, ttl);
-                // fail-closed: never reserve a value that wraps the signed bigint
-                // ledger column (the `as i64` hazard) — reject at the boundary.
-                if !compute_meter::fits_ledger(reserved) {
-                    return fail_closed("compute reservation exceeds ledger bound");
-                }
-                Some(ComputeGate {
-                    period_key,
-                    ceiling_vcpu_ms: ceiling,
-                    box_vcpu_count: vcpu,
-                    new_reserved_vcpu_ms: reserved,
-                })
-            }
+        // ── WP-F: build the OPTIONAL compute-ceiling gate via the SHARED
+        // builder (the SAME construction the queued-admission dispatch uses, so
+        // the ceiling is enforced byte-identically on both paths). `ttl` is the
+        // ALREADY-CLAMPED `req.expiry_ms` (F1), so the reservation `vcpu × ttl`
+        // can never be unbounded; `now_ms` is the `Pending` row's `created_at`.
+        // A reservation overflowing the i64 ledger bound → 503 (fail-closed). ──
+        let gate = match build_compute_gate(&state, &tenant, req.expiry_ms, now_ms) {
+            Ok(g) => g,
+            Err(msg) => return fail_closed(msg),
         };
 
         match ledger.try_admit_with_compute(pending, plan.max_concurrency, gate) {
