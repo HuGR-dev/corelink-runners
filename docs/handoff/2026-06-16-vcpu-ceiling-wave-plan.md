@@ -448,3 +448,54 @@ clean (techlead-decompose §2), a **3rd confirming cold pass** on this Revision-
 contract runs before CONTRACT-freeze + the impl wave. The math/arithmetic core is
 twice-confirmed sound; this pass targets only whether F1–F5 are fully closed and no
 new landing-gap remains.
+
+## 13. CONTRACT FROZEN — 3rd pass IRONCLAD + the storage-locus refinement
+
+**3rd cold pass verdict: IRONCLAD (dispatchable).** F1–F5 all CLOSED against the
+real seams (F1: `leases::acquire` is the single choke-point both HTTP + webhook
+pass through, no 3rd construction site; F3: `put` has ZERO production admission
+callers — every non-ledger-internal `.put()` is test/conformance; F4: the single
+join is expressible on the existing `leases_tenant_active_idx`). 3 hardest new
+attacks tried, all failed. The loop converged (round 2 found F1–F5; round 3 found
+nothing new) — **the contract is FROZEN.**
+
+### Storage-locus refinement (the lead's architecture decision, supersedes §2)
+The wave plan §2 put the compute columns on **`LeaseRecord`** and the ceiling on
+**`TenantPlan`**. A pre-dispatch codebase scan found this would break **71
+construction sites** (27 `LeaseRecord {…}` across 12 files + 44 `TenantPlan {…}`
+across 26 — mostly tests every WP and the acceptance suite touch): a mechanical-
+churn minefield injecting conflicts into every WP's file.
+
+**Decision: the compute state is LEDGER-INTERNAL, not on the record or the plan.**
+- The admit carries it IN via `ComputeGate`; each ledger STORES it however it
+  needs — Pg as the spec'd nullable columns on `leases`; InMemory/File in a
+  side-store keyed by `lease_id` (the pattern the envelope `checkpoints` side-map
+  already uses). Consumed internally at `transition` (accrual) + the admit Σ. No
+  external reader needs it on `LeaseRecord`.
+- The ceiling value is looked up at admit from the plan tier (plans.rs
+  `ceiling_for(tier)`), parallel to `max_concurrency` — NOT a `TenantPlan` field.
+
+**Strictly better, not just less churn:** the wire-adjacent `LeaseRecord` (journal
+round-trip + `RunnerLease` mirror) and the plan caps stay byte-identical; the
+ceiling machinery cannot leak into the frozen wire surface even by accident.
+
+### Frozen anchor shipped (workspace green: fmt+clippy+test exit 0)
+- `compute_meter.rs` (`2780a71`): `vcpu_ms` · `period_key` (Hinnant + 6-row KAT) ·
+  `ceiling_vcpu_ms`/`fits_ledger`/`MAX_LEDGER_VCPU_MS` (i64 guards).
+- `ledger.rs` (`1559d59`): `ComputeGate` · `AdmitOutcome` · `try_admit_with_compute`
+  (None == today; Some-without-override == fail-closed Err) · `compute_accrued`.
+
+### Re-sliced wave (file-disjoint, conflict-free; supersedes §3/§11 slice)
+The original 3-file `ledger.rs / file_ledger.rs / pg_ledger.rs` split is WRONG —
+InMemory AND File both live in `ledger.rs`. Corrected:
+
+| WP | owns (disjoint files) | model | dep-on |
+|---|---|---|---|
+| **A — plan tiers** | `plans.rs` (`ceiling_for` table: ratified 100/240/600/1200/2400 vCPU-h) | sonnet | CONTRACT |
+| **B — box vCPU** | `cloud-engine/northflank.rs` + server cloud_exec config (box→box_vcpu_count) | sonnet | CONTRACT |
+| **CD — mem+file ledgers** | `ledger.rs` (InMemory + File impls + side-store + accrual map) | opus | CONTRACT |
+| **E — Pg ledger** ⚠️ | `pg_ledger.rs` (single-join gate · conditional-lock txn transition · columns + compute_accrual migration · i64 guards · pool floor) | opus | CONTRACT |
+| **F — acquire wiring** | `handlers/leases.rs` (F1 clamp in shared core · build ComputeGate · OverCompute→429) | opus | CONTRACT,A,B,+ledger |
+| **G — acceptance** | `tests/` (ceiling-reject · period-roll · in-flight Σ · default-off byte-identical · webhook clamp · 2-instance over-ceiling · pool-exhaustion · once-only) | opus | all |
+
+MERGE ORDER: CONTRACT(done) → {A,B,CD,E parallel} → F → G.
