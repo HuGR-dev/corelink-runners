@@ -382,3 +382,69 @@ pool-exhaustion regression, the 3-way-terminalizer once-only, the 2-instance
 over-ceiling. **The wave is still HYBRID (contract → parallel impls → integrate),
 but WP-E should be opus + may itself warrant a sub-decomposition.** A second
 adversarial review pass on the RE-hardened contract is warranted before dispatch.
+
+## 12. Revision 3 — 2nd adversarial pass on the consolidated §11 (1 P0 + 4)
+
+A cold adversarial reviewer (verdict: **NOT-IRONCLAD**) independently **confirmed
+the §8 constant-reservation invariant and the §9 i64 margins are sound** (Max-tier
+worst-case Σ = 1.84e10, ~5e8× under i64::MAX at a 1 h ttl clamp), but found 5
+residual landing-gaps. All are mechanical; folded into the contract here.
+
+**F1 (P0) — the `expiry_ms` clamp MUST live in the shared `leases::acquire` core,
+NOT at the wire-deser boundary.** The autoscaler builds its own `AcquireRequest`
+in-process (webhook.rs:393, from `cfg.expiry_ms` parsed at ~:634 with only a `>0`
+filter), bypassing HTTP deserialize. A clamp at the DTO layer misses the webhook
+path → `FABRIC_AUTOSCALER_EXPIRY_MS=9e18` wraps i64 again (P0-C un-mitigated).
+**Fix:** clamp inside `leases::acquire` after `req` is in hand, before
+`expiry`/`reserved_vcpu_ms` computation — the single choke-point BOTH callers pass
+through. WP-G adds a **webhook-path** clamp test (not just the HTTP path).
+
+**F2 (P1) — contract-classification correction: `SlotOccupancyEvent` is NOT a
+frozen wire type.** It lives in `corelink-fabric/src/meter.rs` (internal), has **no
+conformance vector**, and is consumed only in-process (billing.rs/billing_sink.rs).
+§4's non-negotiable mislabels it. **Correction: `RunnerLease` is the ONLY frozen
+wire contract the ceiling must not touch** (`conformance/RunnerLease.json`). The
+ceiling adds no field to `SlotOccupancyEvent` regardless, but the *rationale* is
+"internal-stability", not "wire-drift" — and a future billing-reconciliation field
+on it (§7.3) is NOT a wire-contract change. Do not over-freeze.
+
+**F3 (P1) — `put()` (pg_ledger.rs:330) is an un-gated, un-locked insert seam.**
+Under accounting-on, a `put` of a Held lease with `box_vcpu Some` is invisible to
+the admit Σ at insert yet accrues at terminal → pushes a tenant over ceiling
+without ever passing the gate. §10 routed remove/remove_if_pending through the
+lock but **omitted `put`**. **Fix (WP-E DoD):** under accounting-on, `put` must
+either **assert `box_vcpu_count IS None`** (put is a recovery/test seam, not an
+admission path) OR route through the same locked gate. The assert is preferred
+(put is never the admission path; admission is `try_admit_with_compute`).
+
+**F4 (P1) — the single-statement join gate (P0-G) is MANDATORY; drop the
+"OR REPEATABLE READ" alternative.** REPEATABLE READ does **not** serialize against
+an unlocked OFF-lease DELETE/UPDATE that committed before the snapshot, so the
+mixed on/off enablement drain (P2-9) still has a Σ-shrink window under it. Only the
+single `SELECT` joining `leases` (Σ over pending+held, period P) and
+`compute_accrual` inside the locked admit closes it. **The contract pins: gate =
+one statement. The isolation-level fallback is retracted.**
+
+**F5 (P2) — `remove()` (unconditional DELETE, pg_ledger.rs:464) can delete a Held
+lease → reservation vanishes from Σ with no terminal accrual → undercount.** This
+is **loss-safe** (charges less, never overspends) but silently un-bills real
+consumption. **Fix:** under accounting-on, `remove` must only ever target Pending
+(the guarded `remove_if_pending` exists for the sweep); a `remove` of a Held
+accounting-on lease is a documented contract violation (assert in WP-E).
+
+### Contract delta (Revision 3, final — supersedes where in conflict)
+- **F1:** `expiry_ms` clamp is located in the shared `leases::acquire` body (one
+  site, both callers); WP-G proves it via the **webhook-path** test. (was: "in the
+  acquire handler", under-pinned)
+- **F2:** §4 non-negotiable reworded — `RunnerLease` is the sole frozen wire type;
+  `SlotOccupancyEvent` is internal (stability, not wire-freeze).
+- **F3:** WP-E DoD += `put` asserts `box_vcpu None` under accounting-on.
+- **F4:** WP-E DoD += gate is a single join statement; REPEATABLE-READ alt removed.
+- **F5:** WP-E DoD += `remove` is Pending-only under accounting-on (assert).
+
+### Gate status
+**NOT dispatching the build.** F1 is a real P0; F2–F5 are folded. Per loop-until-
+clean (techlead-decompose §2), a **3rd confirming cold pass** on this Revision-3
+contract runs before CONTRACT-freeze + the impl wave. The math/arithmetic core is
+twice-confirmed sound; this pass targets only whether F1–F5 are fully closed and no
+new landing-gap remains.
