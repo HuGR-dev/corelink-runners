@@ -681,6 +681,42 @@ impl AppState {
         format!("lease-{}", uuid::Uuid::new_v4())
     }
 
+    /// Mint a runner JIT registration config on the BLOCKING pool (audit re-run
+    /// P1: executor starvation).
+    ///
+    /// The GitHub-App mint ([`RunnerRegistrationBroker::mint_jit_config`]) is a
+    /// synchronous two-leg `ureq` round-trip wrapped in an async-typed future;
+    /// awaiting it directly pins a tokio ASYNC worker for the full GitHub
+    /// round-trip, so a burst of runner acquires (or autoscaler webhooks) under
+    /// GitHub latency starves the executor and stalls every other request. This
+    /// offloads it to the blocking pool — mirroring [`resolve_plan_offloaded`],
+    /// [`provision_lease`], and [`teardown_lease`] — keeping the box/`spawn`
+    /// machinery on `AppState`, never in the API2 handler (the source-pinning
+    /// invariant). The runtime handle is captured HERE (async context) and moved
+    /// into the blocking thread, which drives the sync-bodied future to
+    /// completion. A task panic maps to `Unreachable` (fail-closed) — never a
+    /// false/partial config.
+    ///
+    /// [`resolve_plan_offloaded`]: AppState::resolve_plan_offloaded
+    /// [`provision_lease`]: AppState::provision_lease
+    /// [`teardown_lease`]: AppState::teardown_lease
+    pub(crate) async fn mint_jit_offloaded(
+        &self,
+        scope: crate::runner_broker::RunnerScope,
+    ) -> Result<crate::runner_broker::JitRunnerConfig, crate::runner_broker::BrokerError> {
+        let Some(broker) = self.runner_broker.clone() else {
+            // The caller guards this; defensive fail-closed.
+            return Err(crate::runner_broker::BrokerError::Unreachable);
+        };
+        let handle = tokio::runtime::Handle::current();
+        match tokio::task::spawn_blocking(move || handle.block_on(broker.mint_jit_config(&scope)))
+            .await
+        {
+            Ok(r) => r,
+            Err(_) => Err(crate::runner_broker::BrokerError::Unreachable),
+        }
+    }
+
     /// Run the provisioner for `lease_id` / `spec` on a blocking thread and
     /// await the result.
     ///

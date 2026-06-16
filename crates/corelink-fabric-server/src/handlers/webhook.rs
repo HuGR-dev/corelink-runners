@@ -75,6 +75,8 @@ use crate::handlers::leases;
 const SIGNATURE_HEADER: &str = "x-hub-signature-256";
 /// GitHub's event-type header (`workflow_job`, `ping`, …).
 const EVENT_HEADER: &str = "x-github-event";
+/// GitHub's unique per-delivery GUID header — the replay-guard key (audit P1-3).
+const DELIVERY_HEADER: &str = "x-github-delivery";
 
 /// The default managed label the fabric serves when `FABRIC_AUTOSCALER_LABELS`
 /// is unset. Deliberately NOT `corelink-builder` (the persistent self-hosted
@@ -84,12 +86,20 @@ const DEFAULT_MANAGED_LABEL: &str = "corelink";
 /// the runner agent uses its own `_work` folder, this is the lease tmp_root the
 /// isolation gate validates).
 const DEFAULT_TMP_ROOT: &str = "/tmp/runner";
-/// Default lease TTL: 1h. Generous enough for any single CI job; the reaper is
-/// the backstop if a `completed` webhook is ever missed.
-const DEFAULT_EXPIRY_MS: u64 = 3_600_000;
+/// Default lease TTL: 45 min. This is the LEAK-WINDOW backstop — if a `completed`
+/// webhook is ever missed (e.g. the in-memory job→lease map is reset by a
+/// redeploy, audit P0-1), an orphaned box/slot is reclaimed by the deadline
+/// reaper after at most this long. Kept tight (operators set
+/// `FABRIC_AUTOSCALER_EXPIRY_MS` to just above their CI ceiling) so a redeploy
+/// during sustained CI cannot pin the tenant cap for an hour.
+const DEFAULT_EXPIRY_MS: u64 = 2_700_000;
 /// Default bound on the job→lease tracking map (dedup + cancel). Far above any
-/// realistic in-flight CI fan-out; oldest entries are evicted (never silently).
+/// realistic in-flight CI fan-out; terminal tombstones are evicted first, and a
+/// live binding is only ever evicted with a LOUD warning (audit P2-2).
 const DEFAULT_MAX_TRACKED_JOBS: usize = 4096;
+/// Default bound on the seen-delivery replay-guard set (audit P1-3). One entry
+/// per processed `X-GitHub-Delivery` GUID; oldest evicted FIFO.
+pub const DEFAULT_MAX_TRACKED_DELIVERIES: usize = 8192;
 /// Cap on the acquire-response body we drain to read the lease id (the body is a
 /// tiny `AcquireResponse`; this only bounds a pathological backend).
 const ACQUIRE_BODY_LIMIT: usize = 64 * 1024;
@@ -156,18 +166,67 @@ pub struct WebhookHandlerState {
     pub registry: Arc<HookRegistry>,
     /// Provisioning configuration.
     pub cfg: Arc<AutoscalerConfig>,
-    /// `workflow_job.id` → lease id. Bounded; serves two jobs at once: dedup of
-    /// redelivered `queued` events, and `completed`→cancel of the right lease.
+    /// `workflow_job.id` → tracking state. Bounded; serves dedup of redelivered
+    /// `queued`, the `completed`→cancel binding, AND the completed-vs-provision
+    /// race tombstone (audit P1-1/P1-2/P2-2).
     pub jobs: Arc<Mutex<JobLeaseMap>>,
+    /// Bounded replay-guard over `X-GitHub-Delivery` GUIDs (audit P1-3): a
+    /// captured/duplicated delivery that already verified once is dropped, so a
+    /// replayed `completed` cannot tear down a live job and a replayed `queued`
+    /// cannot burn slots.
+    pub seen_deliveries: Arc<Mutex<SeenDeliveries>>,
 }
 
-/// A bounded `job_id → lease_id` map with FIFO eviction. A placeholder (empty
-/// lease id) claims a job at the START of provisioning so a concurrently
-/// redelivered `queued` cannot double-provision; the real lease id is filled in
-/// on success, or the claim is dropped on failure.
+/// Per-job tracking state — a small state machine that makes the
+/// `completed`-vs-provision interleave safe (audit P1-1/P1-2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum JobState {
+    /// Claim placed; the provision (3-leg mint + box) is in flight, no lease id yet.
+    Provisioning,
+    /// A `completed` arrived WHILE provisioning — cancel the lease the moment
+    /// provision hands it back (so the box never lives to its deadline).
+    CancelRequested,
+    /// Lease recorded, box live; a `completed` cancels it.
+    Held(String),
+    /// Terminal tombstone (completed / cancelled / provision-failed). Kept so a
+    /// REDELIVERED or reordered `queued` for a finished job is deduped, never
+    /// re-provisioned (audit P1-2).
+    Done,
+}
+
+/// What [`JobLeaseMap::claim`] decided.
+enum ClaimOutcome {
+    /// Fresh job — caller should provision.
+    Fresh,
+    /// Already tracked (in-flight, held, or terminal) — caller does nothing.
+    AlreadyTracked,
+}
+
+/// What [`JobLeaseMap::record_lease`] decided after a successful provision.
+enum RecordOutcome {
+    /// Track the live lease normally.
+    Track,
+    /// A `completed` raced the provision (or the claim was evicted) — the caller
+    /// must cancel this just-provisioned lease NOW.
+    CancelNow(String),
+}
+
+/// What [`JobLeaseMap::take`] decided on a `completed`.
+enum TakeOutcome {
+    /// Cancel this live lease now.
+    CancelNow(String),
+    /// Nothing live to cancel (in-flight → tombstoned for the provision path to
+    /// cancel; or already terminal; or completed-before-queued).
+    Noted,
+}
+
+/// A bounded `job_id → `[`JobState`] map with terminal-first eviction. The state
+/// machine closes the completed-vs-provision race and the redelivery
+/// double-provision hole the audit found (P1-1/P1-2); eviction prefers terminal
+/// tombstones and only ever drops a LIVE binding with a loud warning (P2-2).
 #[derive(Debug)]
 pub struct JobLeaseMap {
-    map: HashMap<u64, String>,
+    map: HashMap<u64, JobState>,
     order: VecDeque<u64>,
     cap: usize,
 }
@@ -182,52 +241,154 @@ impl JobLeaseMap {
         }
     }
 
-    /// Claim `job_id` if not already present (insert an empty placeholder).
-    /// Returns `true` if the claim is FRESH (caller should provision), `false`
-    /// if the job was already seen (dedup — caller does nothing). Eviction of
-    /// the oldest entry is logged, never silent.
-    fn claim(&mut self, job_id: u64) -> bool {
+    /// Make room for one new entry: evict the OLDEST terminal (`Done`) tombstone
+    /// if any exists; only if every entry is non-terminal (genuinely that many
+    /// concurrent in-flight jobs) do we evict the oldest live binding — and then
+    /// LOUDLY (audit P2-2: a silently-evicted live binding leaks its box).
+    fn evict_one(&mut self) {
+        if self.map.len() < self.cap {
+            return;
+        }
+        // Prefer the oldest terminal tombstone.
+        if let Some(pos) = self
+            .order
+            .iter()
+            .position(|id| matches!(self.map.get(id), Some(JobState::Done)))
+        {
+            if let Some(id) = self.order.remove(pos) {
+                self.map.remove(&id);
+            }
+            return;
+        }
+        // No tombstone to reclaim: every tracked job is in-flight/held. Evict the
+        // oldest, but never silently — name the lease so ops can reconcile; the
+        // deadline reaper is the backstop.
+        if let Some(id) = self.order.pop_front() {
+            let st = self.map.remove(&id);
+            eprintln!(
+                "autoscaler: job-tracking map saturated at cap {} with NO terminal entries; \
+                 evicted LIVE job {id} state={st:?} — its box now relies on deadline-reaper \
+                 teardown. Raise FABRIC_AUTOSCALER_MAX_TRACKED_JOBS.",
+                self.cap
+            );
+        }
+    }
+
+    /// Claim `job_id` for provisioning iff it is not already tracked in ANY state
+    /// (in-flight, held, or terminal tombstone). A tombstone deduplicates a
+    /// redelivered/reordered `queued` for a finished job (audit P1-2).
+    fn claim(&mut self, job_id: u64) -> ClaimOutcome {
         if self.map.contains_key(&job_id) {
+            return ClaimOutcome::AlreadyTracked;
+        }
+        self.evict_one();
+        self.order.push_back(job_id);
+        self.map.insert(job_id, JobState::Provisioning);
+        ClaimOutcome::Fresh
+    }
+
+    /// Record the provisioned lease. If a `completed` raced in
+    /// (`CancelRequested`), or the claim was evicted mid-provision, the lease is
+    /// orphaned → tell the caller to cancel it NOW (audit P1-1).
+    fn record_lease(&mut self, job_id: u64, lease_id: String) -> RecordOutcome {
+        match self.map.get(&job_id) {
+            Some(JobState::Provisioning) => {
+                self.map.insert(job_id, JobState::Held(lease_id));
+                RecordOutcome::Track
+            }
+            Some(JobState::CancelRequested) => {
+                // completed arrived during provisioning — tombstone + cancel now.
+                self.map.insert(job_id, JobState::Done);
+                RecordOutcome::CancelNow(lease_id)
+            }
+            // Evicted under saturation (no entry) — the binding is gone; cancel
+            // the orphan rather than leak it to the deadline. Do NOT re-insert.
+            None => RecordOutcome::CancelNow(lease_id),
+            // Defensive: a Held/Done here means a double-record; keep the lease
+            // tracked, do not cancel (no known live duplicate to reclaim).
+            Some(_) => RecordOutcome::Track,
+        }
+    }
+
+    /// A provision attempt failed: tombstone the job so a redelivery does not
+    /// re-provision (GitHub never re-emits `queued` for the same job, so there is
+    /// nothing to retry — and a tombstone prevents an at-least-once duplicate
+    /// from spawning a second box).
+    fn provision_failed(&mut self, job_id: u64) {
+        if self.map.contains_key(&job_id) {
+            self.map.insert(job_id, JobState::Done);
+        }
+    }
+
+    /// Handle a `completed` for `job_id`.
+    fn take(&mut self, job_id: u64) -> TakeOutcome {
+        match self.map.get(&job_id).cloned() {
+            Some(JobState::Held(lease_id)) => {
+                self.map.insert(job_id, JobState::Done);
+                TakeOutcome::CancelNow(lease_id)
+            }
+            // Provision still in flight → ask the provision path to cancel on record.
+            Some(JobState::Provisioning) => {
+                self.map.insert(job_id, JobState::CancelRequested);
+                TakeOutcome::Noted
+            }
+            // Already requested / already terminal → idempotent no-op (handles a
+            // replayed or duplicate `completed`).
+            Some(JobState::CancelRequested) | Some(JobState::Done) => TakeOutcome::Noted,
+            // completed before any queued (or after eviction): tombstone so a
+            // later `queued` for this finished job is deduped, not provisioned.
+            None => {
+                self.evict_one();
+                self.order.push_back(job_id);
+                self.map.insert(job_id, JobState::Done);
+                TakeOutcome::Noted
+            }
+        }
+    }
+
+    /// Test helper: the current state of `job_id`, if tracked.
+    #[cfg(test)]
+    fn state_of(&self, job_id: u64) -> Option<JobState> {
+        self.map.get(&job_id).cloned()
+    }
+}
+
+/// A bounded FIFO set of seen `X-GitHub-Delivery` GUIDs — the replay guard
+/// (audit P1-3). A delivery whose GUID is already present is a replay/duplicate
+/// and is dropped before any side effect.
+#[derive(Debug)]
+pub struct SeenDeliveries {
+    set: std::collections::HashSet<String>,
+    order: VecDeque<String>,
+    cap: usize,
+}
+
+impl SeenDeliveries {
+    /// A guard bounded to `cap` GUIDs (coerced to ≥ 1).
+    pub fn new(cap: usize) -> Self {
+        Self {
+            set: std::collections::HashSet::new(),
+            order: VecDeque::new(),
+            cap: cap.max(1),
+        }
+    }
+
+    /// Returns `true` if this GUID is NEW (and records it); `false` if it was
+    /// already seen (a replay/duplicate to drop).
+    fn check_and_record(&mut self, guid: &str) -> bool {
+        if self.set.contains(guid) {
             return false;
         }
         while self.order.len() >= self.cap {
-            match self.order.pop_front() {
-                Some(old) => {
-                    self.map.remove(&old);
-                    eprintln!(
-                        "autoscaler: job-tracking map at cap {}, evicted oldest tracked job {old} \
-                         (its lease, if any, falls back to deadline-reaper teardown)",
-                        self.cap
-                    );
-                }
-                None => break,
+            if let Some(old) = self.order.pop_front() {
+                self.set.remove(&old);
+            } else {
+                break;
             }
         }
-        self.order.push_back(job_id);
-        self.map.insert(job_id, String::new());
+        self.order.push_back(guid.to_string());
+        self.set.insert(guid.to_string());
         true
-    }
-
-    /// Fill in the lease id for a job whose claim is still held.
-    fn record_lease(&mut self, job_id: u64, lease_id: String) {
-        if self.map.contains_key(&job_id) {
-            self.map.insert(job_id, lease_id);
-        }
-    }
-
-    /// Drop a claim (provision failed) so a later redelivery could retry.
-    fn drop_claim(&mut self, job_id: u64) {
-        if self.map.remove(&job_id).is_some() {
-            self.order.retain(|&x| x != job_id);
-        }
-    }
-
-    /// Remove `job_id` and return its lease id if one was recorded (non-empty).
-    /// An empty placeholder (provision in-flight/failed) yields `None`.
-    fn take(&mut self, job_id: u64) -> Option<String> {
-        let lease = self.map.remove(&job_id)?;
-        self.order.retain(|&x| x != job_id);
-        if lease.is_empty() { None } else { Some(lease) }
     }
 }
 
@@ -284,6 +445,22 @@ pub async fn github_webhook(
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
+    // Replay guard (audit P1-3): GitHub deliveries are intentionally replayable
+    // and at-least-once. A GUID we have already processed is a replay/duplicate —
+    // drop it (ack 200) BEFORE any provision/cancel side effect, so a captured
+    // `completed` cannot tear down a live job and a captured `queued` cannot burn
+    // slots. (Absent header — never in practice from GitHub — skips the guard.)
+    if let Some(guid) = header_str(&headers, DELIVERY_HEADER) {
+        let fresh = state
+            .seen_deliveries
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .check_and_record(guid);
+        if !fresh {
+            return ack("ignored: duplicate delivery (replay guard)");
+        }
+    }
+
     // Dispatch on the event type. `ping` (sent when the webhook is created) and
     // any non-`workflow_job` event are acknowledged with 200 and ignored.
     match header_str(&headers, EVENT_HEADER) {
@@ -318,9 +495,19 @@ async fn handle_queued(state: &WebhookHandlerState, event: WorkflowJobEvent) -> 
     let repo = event.repository.name;
     let labels = event.workflow_job.labels;
 
-    // Label gate: only serve jobs that target one of our managed labels.
-    if !labels.iter().any(|l| state.cfg.managed_labels.contains(l)) {
-        return ack("ignored: no managed label on the job");
+    // ── Label SUBSET gate (audit P0-2 — label hijack) ──
+    // Serve a job ONLY if it is non-empty AND EVERY one of its labels is managed.
+    // The previous intersection ("any managed label") let an attacker author
+    // `runs-on: [corelink-dogfood, corelink-builder]` — the job passed the gate
+    // and its FULL label set was forwarded verbatim into the JIT mint, so the
+    // provisioned ephemeral runner advertised `corelink-builder` too and could be
+    // assigned a privileged builder job. With a subset gate, a job carrying ANY
+    // non-managed label is refused here, so the labels we forward to the mint
+    // below are provably all-managed — the attacker can no longer inject a
+    // foreign pool's label, and the runner we mint can only ever match the very
+    // job that requested it.
+    if labels.is_empty() || !labels.iter().all(|l| state.cfg.managed_labels.contains(l)) {
+        return ack("ignored: job labels are not all managed");
     }
 
     // Optional repo allowlist (defense-in-depth on top of the HMAC).
@@ -335,23 +522,40 @@ async fn handle_queued(state: &WebhookHandlerState, event: WorkflowJobEvent) -> 
     }
 
     // Claim the job FIRST (under the lock, no await) so a concurrently
-    // redelivered `queued` for the same job cannot double-provision.
-    if !claim_job(state, job_id) {
-        return ack("deduped: job already claimed");
+    // redelivered `queued` for the same job cannot double-provision, and so a
+    // tombstoned/finished job is not re-provisioned.
+    match claim_job(state, job_id) {
+        ClaimOutcome::AlreadyTracked => return ack("deduped: job already tracked"),
+        ClaimOutcome::Fresh => {}
     }
 
     eprintln!("autoscaler: provisioning runner for queued job {job_id} ({owner}/{repo})");
+    // `labels` is now provably all-managed — safe to forward verbatim (the runner
+    // must advertise exactly the job's labels for GitHub to assign it).
     match provision_runner(state, &owner, &repo, labels).await {
-        Some(lease_id) => {
-            record_lease(state, job_id, lease_id.clone());
-            eprintln!("autoscaler: job {job_id} → runner lease {lease_id}");
-            ack(&format!("provisioned lease {lease_id}"))
-        }
+        Some(lease_id) => match record_lease(state, job_id, lease_id.clone()) {
+            RecordOutcome::Track => {
+                eprintln!("autoscaler: job {job_id} → runner lease {lease_id}");
+                ack(&format!("provisioned lease {lease_id}"))
+            }
+            // A `completed` raced this provision (or the claim was evicted under
+            // saturation): the lease is orphaned — cancel it now, not at the
+            // deadline (audit P1-1).
+            RecordOutcome::CancelNow(lid) => {
+                eprintln!(
+                    "autoscaler: job {job_id} completed during provision → cancelling fresh lease {lid}"
+                );
+                cancel_lease(state, lid).await;
+                ack("provisioned then immediately cancelled (completed raced provision)")
+            }
+        },
         None => {
-            // Provision failed (over-cap, broker off, transient). Drop the claim
-            // so a redelivery could retry. Ack 200 — a non-2xx would only make
-            // GitHub redeliver into the same closed door.
-            drop_claim(state, job_id);
+            // Provision failed (over-cap, broker off, transient). Tombstone the
+            // job (do NOT drop it): GitHub never re-emits `queued` for the same
+            // job, so there is nothing to retry, and a tombstone stops an
+            // at-least-once duplicate delivery from spawning a second box. Ack
+            // 200 — a non-2xx would only make GitHub redeliver into the same door.
+            provision_failed(state, job_id);
             ack("deferred: could not provision (see server log)")
         }
     }
@@ -362,13 +566,16 @@ async fn handle_queued(state: &WebhookHandlerState, event: WorkflowJobEvent) -> 
 /// the lease deadline).
 async fn handle_completed(state: &WebhookHandlerState, event: WorkflowJobEvent) -> Response {
     let job_id = event.workflow_job.id;
-    let Some(lease_id) = take_lease(state, job_id) else {
-        // Not one of ours (or already reclaimed) — nothing to do.
-        return ack("ignored: no tracked lease for this job");
-    };
-    eprintln!("autoscaler: job {job_id} completed → cancelling lease {lease_id}");
-    cancel_lease(state, lease_id).await;
-    ack("cancelled the job's lease")
+    match take_lease(state, job_id) {
+        TakeOutcome::CancelNow(lease_id) => {
+            eprintln!("autoscaler: job {job_id} completed → cancelling lease {lease_id}");
+            cancel_lease(state, lease_id).await;
+            ack("cancelled the job's lease")
+        }
+        // In-flight (now tombstoned cancel-requested → the provision path cancels
+        // it), already terminal, or completed-before-queued. Nothing live here.
+        TakeOutcome::Noted => ack("noted: no live lease to cancel for this job"),
+    }
 }
 
 // ── Provision / cancel via the audited leases core ────────────────────────────
@@ -475,7 +682,7 @@ async fn resolve_tenant(state: &WebhookHandlerState) -> Option<TenantId> {
 
 // ── jobs-map helpers (each takes the lock for a short critical section only) ──
 
-fn claim_job(state: &WebhookHandlerState, job_id: u64) -> bool {
+fn claim_job(state: &WebhookHandlerState, job_id: u64) -> ClaimOutcome {
     state
         .jobs
         .lock()
@@ -483,23 +690,23 @@ fn claim_job(state: &WebhookHandlerState, job_id: u64) -> bool {
         .claim(job_id)
 }
 
-fn record_lease(state: &WebhookHandlerState, job_id: u64, lease_id: String) {
+fn record_lease(state: &WebhookHandlerState, job_id: u64, lease_id: String) -> RecordOutcome {
     state
         .jobs
         .lock()
         .unwrap_or_else(|p| p.into_inner())
-        .record_lease(job_id, lease_id);
+        .record_lease(job_id, lease_id)
 }
 
-fn drop_claim(state: &WebhookHandlerState, job_id: u64) {
+fn provision_failed(state: &WebhookHandlerState, job_id: u64) {
     state
         .jobs
         .lock()
         .unwrap_or_else(|p| p.into_inner())
-        .drop_claim(job_id);
+        .provision_failed(job_id);
 }
 
-fn take_lease(state: &WebhookHandlerState, job_id: u64) -> Option<String> {
+fn take_lease(state: &WebhookHandlerState, job_id: u64) -> TakeOutcome {
     state
         .jobs
         .lock()
@@ -560,12 +767,13 @@ pub mod env {
     pub const PAT: &str = "FABRIC_AUTOSCALER_PAT";
     /// The digest-pinned runner image. REQUIRED.
     pub const RUNNER_IMAGE: &str = "FABRIC_AUTOSCALER_RUNNER_IMAGE";
-    /// CSV of managed labels (default `corelink`). A job is served only if its
-    /// labels intersect this set.
+    /// CSV of managed labels (default `corelink`). A job is served only if ALL
+    /// of its labels are in this set (subset gate — audit P0-2).
     pub const LABELS: &str = "FABRIC_AUTOSCALER_LABELS";
     /// Lease tmp root (default `/tmp/runner`).
     pub const TMP_ROOT: &str = "FABRIC_AUTOSCALER_TMP_ROOT";
-    /// Lease TTL in ms (default 3_600_000 = 1h).
+    /// Lease TTL in ms (default 2_700_000 = 45 min — the orphan leak-window
+    /// backstop; set just above your CI ceiling).
     pub const EXPIRY_MS: &str = "FABRIC_AUTOSCALER_EXPIRY_MS";
     /// Optional CSV owner/repo allowlist (`owner/repo,owner2/repo2`). Unset ⇒
     /// serve any repo the HMAC authenticates.
@@ -764,6 +972,7 @@ mod tests {
             registry: Arc::new(HookRegistry::default()),
             cfg: Arc::new(cfg),
             jobs: Arc::new(Mutex::new(JobLeaseMap::new(4096))),
+            seen_deliveries: Arc::new(Mutex::new(SeenDeliveries::new(8192))),
         };
         (state, provisioned, torn_down)
     }
@@ -902,16 +1111,46 @@ mod tests {
             1,
             "exactly one runner box must be provisioned for the queued job"
         );
-        // The job is tracked with a real (non-empty) lease id.
-        let tracked = state.jobs.lock().unwrap().map.get(&42).cloned();
+        // The job is tracked Held with a real lease id.
+        let tracked = state.jobs.lock().unwrap().state_of(42);
         assert!(
-            matches!(tracked, Some(ref l) if !l.is_empty()),
-            "the job must be tracked with its lease id, got {tracked:?}"
+            matches!(tracked, Some(JobState::Held(ref l)) if !l.is_empty()),
+            "the job must be tracked Held with its lease id, got {tracked:?}"
         );
     }
 
-    /// A queued job whose labels do NOT intersect the managed set is ignored
-    /// (no provision) — e.g. the persistent builder's job, or ubuntu-latest.
+    /// AUDIT P0-2 (label hijack): a job carrying ANY non-managed label — even
+    /// alongside a managed one — is REFUSED, so an attacker can never inject a
+    /// privileged pool's label (`corelink-builder`) into the minted runner.
+    #[tokio::test]
+    async fn mixed_managed_and_foreign_label_is_refused() {
+        let (state, provisioned, _) =
+            webhook_state(Some(SECRET), 5, vec!["corelink-dogfood".into()], None);
+        // The attack: managed label present (passes an intersection gate) PLUS the
+        // privileged builder label injected.
+        let body = queued_body(
+            7,
+            &["corelink-dogfood", "corelink-builder"],
+            "humangr-labs",
+            "corelink-runners",
+        );
+        let resp = router(state)
+            .oneshot(webhook_request(
+                "workflow_job",
+                &body,
+                Some(&sign(SECRET, &body)),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(
+            provisioned.lock().unwrap().is_empty(),
+            "a job with a non-managed label must NOT be provisioned (no label hijack)"
+        );
+    }
+
+    /// A queued job whose labels are not ALL managed is ignored (no provision) —
+    /// e.g. the persistent builder's job, or ubuntu-latest.
     #[tokio::test]
     async fn queued_unmanaged_label_is_ignored() {
         let (state, provisioned, _) =
@@ -961,6 +1200,42 @@ mod tests {
         );
     }
 
+    /// AUDIT P1-3 (HTTP wiring): two deliveries with the SAME `X-GitHub-Delivery`
+    /// GUID — a replay — provision exactly once; the second is dropped before any
+    /// side effect.
+    #[tokio::test]
+    async fn replayed_delivery_guid_is_dropped() {
+        let (state, provisioned, _) =
+            webhook_state(Some(SECRET), 5, vec!["corelink-dogfood".into()], None);
+        let body = queued_body(
+            55,
+            &["corelink-dogfood"],
+            "humangr-labs",
+            "corelink-runners",
+        );
+        let sig = sign(SECRET, &body);
+        let with_guid = || {
+            Request::builder()
+                .method("POST")
+                .uri("/webhooks/github")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(EVENT_HEADER, "workflow_job")
+                .header(SIGNATURE_HEADER, &sig)
+                .header(DELIVERY_HEADER, "delivery-guid-fixed")
+                .body(Body::from(body.clone()))
+                .unwrap()
+        };
+        for _ in 0..3 {
+            let resp = router(state.clone()).oneshot(with_guid()).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+        assert_eq!(
+            provisioned.lock().unwrap().len(),
+            1,
+            "three replays of one delivery GUID must provision exactly once"
+        );
+    }
+
     /// The repo allowlist rejects a job for a repo not on the list (no provision).
     #[tokio::test]
     async fn repo_allowlist_rejects_foreign_repo() {
@@ -1007,7 +1282,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), StatusCode::OK);
-        let lease_id = state.jobs.lock().unwrap().map.get(&123).cloned().unwrap();
+        let lease_id = match state.jobs.lock().unwrap().state_of(123) {
+            Some(JobState::Held(l)) => l,
+            other => panic!("job must be Held after queued, got {other:?}"),
+        };
         assert!(!lease_id.is_empty());
         assert_eq!(provisioned.lock().unwrap().len(), 1);
 
@@ -1022,14 +1300,16 @@ mod tests {
             .unwrap();
         assert_eq!(r.status(), StatusCode::OK);
 
-        // The lease was cancelled (box torn down) and the job untracked.
+        // The lease was cancelled (box torn down) and the job is now a terminal
+        // tombstone (Done) — NOT untracked — so a redelivered queued is deduped.
         assert!(
             torn_down.lock().unwrap().contains(&lease_id),
             "completed must tear down the job's runner box"
         );
-        assert!(
-            !state.jobs.lock().unwrap().map.contains_key(&123),
-            "the job must be untracked after completed"
+        assert_eq!(
+            state.jobs.lock().unwrap().state_of(123),
+            Some(JobState::Done),
+            "completed must tombstone the job (dedup a redelivered queued)"
         );
     }
 
@@ -1051,34 +1331,150 @@ mod tests {
         assert!(torn_down.lock().unwrap().is_empty());
     }
 
-    // ── JobLeaseMap unit + env parsing ────────────────────────────────────────
+    // ── JobLeaseMap state-machine units (audit P1-1/P1-2/P2-2) ────────────────
 
-    /// The tracking map is bounded: at cap, the oldest entry is evicted.
-    #[test]
-    fn job_lease_map_evicts_oldest_at_cap() {
-        let mut m = JobLeaseMap::new(2);
-        assert!(m.claim(1));
-        m.record_lease(1, "lease-1".into());
-        assert!(m.claim(2));
-        m.record_lease(2, "lease-2".into());
-        assert!(m.claim(3)); // evicts job 1
-        m.record_lease(3, "lease-3".into());
-
-        assert!(m.take(1).is_none(), "oldest job 1 was evicted");
-        assert_eq!(m.take(2).as_deref(), Some("lease-2"));
-        assert_eq!(m.take(3).as_deref(), Some("lease-3"));
+    fn is_fresh(o: ClaimOutcome) -> bool {
+        matches!(o, ClaimOutcome::Fresh)
+    }
+    fn cancel_now(o: RecordOutcome) -> Option<String> {
+        match o {
+            RecordOutcome::CancelNow(l) => Some(l),
+            RecordOutcome::Track => None,
+        }
+    }
+    fn take_cancel(o: TakeOutcome) -> Option<String> {
+        match o {
+            TakeOutcome::CancelNow(l) => Some(l),
+            TakeOutcome::Noted => None,
+        }
     }
 
-    /// claim/drop_claim round-trips; a dropped claim is re-claimable.
+    /// AUDIT P1-1: a `completed` arriving WHILE the provision is in flight must
+    /// not silently drop the lease — it tombstones to `CancelRequested`, and when
+    /// the provision records the lease, the map says "cancel it now".
     #[test]
-    fn job_lease_map_claim_drop_reclaim() {
+    fn completed_during_provision_cancels_on_record() {
         let mut m = JobLeaseMap::new(8);
-        assert!(m.claim(1), "fresh claim");
-        assert!(!m.claim(1), "second claim is a dedup");
-        m.drop_claim(1);
-        assert!(m.claim(1), "after drop the job is re-claimable");
-        // An in-flight (placeholder-only) claim yields no lease on take.
-        assert!(m.take(1).is_none());
+        assert!(is_fresh(m.claim(1)));
+        // completed races in before record_lease.
+        assert!(
+            take_cancel(m.take(1)).is_none(),
+            "in-flight take cancels nothing yet"
+        );
+        assert_eq!(m.state_of(1), Some(JobState::CancelRequested));
+        // provision finishes → the lease must be cancelled now, not leaked.
+        assert_eq!(
+            cancel_now(m.record_lease(1, "lease-1".into())).as_deref(),
+            Some("lease-1"),
+            "the raced lease must be cancelled on record (no leaked box)"
+        );
+        assert_eq!(m.state_of(1), Some(JobState::Done));
+    }
+
+    /// AUDIT P1-2: after `completed`, a redelivered/reordered `queued` for the
+    /// same job is DEDUPED (tombstone), never re-provisioned.
+    #[test]
+    fn completed_then_requeue_is_deduped() {
+        let mut m = JobLeaseMap::new(8);
+        assert!(is_fresh(m.claim(1)));
+        assert!(cancel_now(m.record_lease(1, "lease-1".into())).is_none());
+        // completed cancels the live lease and tombstones.
+        assert_eq!(take_cancel(m.take(1)).as_deref(), Some("lease-1"));
+        assert_eq!(m.state_of(1), Some(JobState::Done));
+        // a re-delivered queued must NOT re-provision.
+        assert!(
+            !is_fresh(m.claim(1)),
+            "a queued for an already-completed job must be deduped, not re-provisioned"
+        );
+    }
+
+    /// A double `completed` (replay/duplicate) is idempotent — the second cancels
+    /// nothing.
+    #[test]
+    fn double_completed_is_idempotent() {
+        let mut m = JobLeaseMap::new(8);
+        m.claim(1);
+        m.record_lease(1, "lease-1".into());
+        assert_eq!(take_cancel(m.take(1)).as_deref(), Some("lease-1"));
+        assert!(
+            take_cancel(m.take(1)).is_none(),
+            "second completed cancels nothing"
+        );
+    }
+
+    /// A failed provision tombstones the job (no re-provision on a duplicate
+    /// delivery).
+    #[test]
+    fn provision_failure_tombstones() {
+        let mut m = JobLeaseMap::new(8);
+        assert!(is_fresh(m.claim(1)));
+        m.provision_failed(1);
+        assert_eq!(m.state_of(1), Some(JobState::Done));
+        assert!(
+            !is_fresh(m.claim(1)),
+            "a failed job is not re-provisioned by a redelivery"
+        );
+    }
+
+    /// AUDIT P2-2: eviction reclaims terminal tombstones FIRST and never silently
+    /// drops a live (`Held`) binding while a tombstone exists to reclaim.
+    #[test]
+    fn eviction_prefers_terminal_tombstones() {
+        let mut m = JobLeaseMap::new(2);
+        // job 1: live (Held). job 2: terminal (Done).
+        m.claim(1);
+        m.record_lease(1, "lease-1".into());
+        m.claim(2);
+        m.record_lease(2, "lease-2".into());
+        take_cancel(m.take(2)); // job 2 → Done tombstone
+        // Insert job 3 at cap: the Done tombstone (job 2) is evicted, the LIVE
+        // job 1 survives.
+        m.claim(3);
+        assert!(
+            matches!(m.state_of(1), Some(JobState::Held(_))),
+            "the live binding must survive eviction"
+        );
+        assert_eq!(
+            m.state_of(2),
+            None,
+            "the terminal tombstone is evicted first"
+        );
+        assert!(matches!(m.state_of(3), Some(JobState::Provisioning)));
+    }
+
+    /// A `completed` for a never-seen job tombstones it so a later `queued` for
+    /// that (already-finished) job is deduped.
+    #[test]
+    fn completed_before_queued_tombstones() {
+        let mut m = JobLeaseMap::new(8);
+        assert!(take_cancel(m.take(99)).is_none());
+        assert_eq!(m.state_of(99), Some(JobState::Done));
+        assert!(
+            !is_fresh(m.claim(99)),
+            "queued after a prior completed is deduped"
+        );
+    }
+
+    /// AUDIT P1-3: the delivery replay guard records a GUID once and drops a
+    /// repeat.
+    #[test]
+    fn seen_deliveries_drops_replays() {
+        let mut s = SeenDeliveries::new(4);
+        assert!(s.check_and_record("guid-A"), "first sight is fresh");
+        assert!(
+            !s.check_and_record("guid-A"),
+            "a replay of the same GUID is dropped"
+        );
+        assert!(s.check_and_record("guid-B"));
+        // FIFO bound: overflow evicts the oldest, which then reads as fresh again
+        // (acceptable — the bound is a memory cap, not a forever-set).
+        for i in 0..4 {
+            s.check_and_record(&format!("g{i}"));
+        }
+        assert!(
+            s.check_and_record("guid-A"),
+            "evicted-then-reseen GUID is fresh"
+        );
     }
 
     /// Default-off: no secret ⇒ `None`.

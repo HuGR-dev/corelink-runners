@@ -919,6 +919,21 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
     // at build time, default-off, so synchronous `#[test]` callers stay off).
     let router = match webhook::autoscaler_config_from_env(|k| std::env::var(k).ok()) {
         Some((secret, cfg)) => {
+            // AUDIT P1-4: with no repo allowlist, the autoscaler serves ANY repo
+            // the HMAC authenticates (every repo the App is installed on). That is
+            // a real blast-radius/cost surface — make the serve-any posture LOUD
+            // at boot so an operator never enables it unaware.
+            match &cfg.repo_allowlist {
+                Some(list) => eprintln!(
+                    "autoscaler: armed (POST /webhooks/github) — repo allowlist: {} repo(s)",
+                    list.len()
+                ),
+                None => eprintln!(
+                    "autoscaler: armed (POST /webhooks/github) — WARNING: no \
+                     FABRIC_AUTOSCALER_REPO_ALLOWLIST set; it will serve ANY repo the GitHub App \
+                     is installed on. Set the allowlist to bound provisioning to your repos."
+                ),
+            }
             let webhook_state = webhook::WebhookHandlerState {
                 secret: Some(secret),
                 app: state.clone(),
@@ -927,15 +942,38 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
                 jobs: Arc::new(std::sync::Mutex::new(webhook::JobLeaseMap::new(
                     cfg.max_tracked_jobs,
                 ))),
+                seen_deliveries: Arc::new(std::sync::Mutex::new(webhook::SeenDeliveries::new(
+                    webhook::DEFAULT_MAX_TRACKED_DELIVERIES,
+                ))),
                 cfg: Arc::new(cfg),
             };
+            // AUDIT re-run P1 (DoS): the webhook route is the most
+            // resource-intensive surface (each accepted delivery fans
+            // spawn_blocking work onto the shared pool) yet was mounted with NO
+            // limiter — the global in-flight cap guards only `/v1`. Give it its
+            // OWN concurrency limit + load-shed (excess → 503, never an unbounded
+            // queue on the blocking pool) and a tight 1 MiB body cap (HMAC is
+            // computed over the whole body, so bound it well below axum's 2 MiB
+            // default). GitHub webhook payloads are a few KiB.
+            let max_inflight = state.max_inflight_requests.max(1);
             router.merge(
                 Router::new()
                     .route(
                         "/webhooks/github",
                         axum::routing::post(webhook::github_webhook),
                     )
-                    .with_state(webhook_state),
+                    .with_state(webhook_state)
+                    .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024))
+                    .layer(
+                        tower::ServiceBuilder::new()
+                            .layer(axum::error_handling::HandleErrorLayer::new(
+                                |_err: axum::BoxError| async move {
+                                    axum::http::StatusCode::SERVICE_UNAVAILABLE
+                                },
+                            ))
+                            .layer(tower::load_shed::LoadShedLayer::new())
+                            .layer(tower::limit::GlobalConcurrencyLimitLayer::new(max_inflight)),
+                    ),
             )
         }
         None => router,

@@ -389,6 +389,27 @@ fn shell_join(argv: &[&str]) -> String {
         .join(" ")
 }
 
+/// Bound a provider response body before it is interpolated into an error
+/// (audit INFO-1). The create-job REQUEST carries the injected
+/// `CORELINK_RUNNER_JITCONFIG` / §13.2 ingest credential; if a provider ever
+/// reflected submitted env into a 4xx/5xx body, the raw body flowing into a
+/// `bail!` could reach a `/v1/leases` 503 response or a log line — exactly the
+/// echo this fabric's "no secret in a log" posture forbids. Capping the body to
+/// a short, fixed length keeps errors actionable (status + a snippet) while
+/// bounding any accidental echo to a fragment; the operator reads the full body
+/// in the provider console, never from our error surface.
+fn bounded_provider_body(body: &str) -> String {
+    const CAP: usize = 200;
+    let trimmed = body.trim();
+    if trimmed.len() <= CAP {
+        trimmed.to_string()
+    } else {
+        let mut s: String = trimmed.chars().take(CAP).collect();
+        s.push_str("…[truncated]");
+        s
+    }
+}
+
 /// Northflank-backed [`Engine`], generic over the HTTP transport so the engine
 /// logic is fully unit-testable against a fake.
 #[derive(Clone)]
@@ -450,7 +471,7 @@ impl<H: HttpTransport> NorthflankEngine<H> {
             bail!(
                 "northflank {ctx} failed: HTTP {} — {} (fail-closed)",
                 resp.status,
-                resp.body.trim()
+                bounded_provider_body(&resp.body)
             );
         }
         Ok(resp)
@@ -650,7 +671,7 @@ impl<H: HttpTransport> NorthflankEngine<H> {
                 "northflank delete-job {} failed: HTTP {} — {} (fail-closed)",
                 c.name,
                 resp.status,
-                resp.body.trim()
+                bounded_provider_body(&resp.body)
             );
         }
     }
