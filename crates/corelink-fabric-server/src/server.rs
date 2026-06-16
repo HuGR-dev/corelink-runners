@@ -947,13 +947,33 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
                 ))),
                 cfg: Arc::new(cfg),
             };
+            // AUDIT re-run P1 (DoS): the webhook route is the most
+            // resource-intensive surface (each accepted delivery fans
+            // spawn_blocking work onto the shared pool) yet was mounted with NO
+            // limiter — the global in-flight cap guards only `/v1`. Give it its
+            // OWN concurrency limit + load-shed (excess → 503, never an unbounded
+            // queue on the blocking pool) and a tight 1 MiB body cap (HMAC is
+            // computed over the whole body, so bound it well below axum's 2 MiB
+            // default). GitHub webhook payloads are a few KiB.
+            let max_inflight = state.max_inflight_requests.max(1);
             router.merge(
                 Router::new()
                     .route(
                         "/webhooks/github",
                         axum::routing::post(webhook::github_webhook),
                     )
-                    .with_state(webhook_state),
+                    .with_state(webhook_state)
+                    .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024))
+                    .layer(
+                        tower::ServiceBuilder::new()
+                            .layer(axum::error_handling::HandleErrorLayer::new(
+                                |_err: axum::BoxError| async move {
+                                    axum::http::StatusCode::SERVICE_UNAVAILABLE
+                                },
+                            ))
+                            .layer(tower::load_shed::LoadShedLayer::new())
+                            .layer(tower::limit::GlobalConcurrencyLimitLayer::new(max_inflight)),
+                    ),
             )
         }
         None => router,

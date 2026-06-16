@@ -400,15 +400,21 @@ pub(crate) async fn finalize_admitted_lease(
         // A runner acquire only reaches finalize when a broker is wired (guarded
         // at admission, step 0). Defensive: a missing broker here is an internal
         // inconsistency → fail closed, never a config-less runner box.
-        let Some(broker) = state.runner_broker.clone() else {
+        if state.runner_broker.is_none() {
             state.teardown_lease(&lease_id).await;
             if let Ok(mut ledger) = state.ledger.lock() {
                 let _ = ledger.remove(&lease_id);
             }
             return fail_closed("runner lease reached finalize with no registration broker");
-        };
+        }
         let scope = runner_scope_from_dto(runner);
-        match broker.mint_jit_config(&scope).await {
+        // AUDIT re-run P1: the GitHub-App mint is a SYNCHRONOUS ureq round-trip
+        // (two legs) — it MUST run on the blocking pool, never directly on this
+        // async worker, or a burst of runner acquires starves the executor
+        // fabric-wide. `mint_jit_offloaded` mirrors the resolve/provision/teardown
+        // offloads; the blocking-offload machinery stays on `AppState` (the
+        // API2/API3 source-pinning invariant), never in this handler.
+        match state.mint_jit_offloaded(scope).await {
             Ok(jitconfig) => {
                 crate::runner_inject::inject_runner_jitconfig(&mut spec, &jitconfig);
             }
