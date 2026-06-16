@@ -400,15 +400,21 @@ pub(crate) async fn finalize_admitted_lease(
         // A runner acquire only reaches finalize when a broker is wired (guarded
         // at admission, step 0). Defensive: a missing broker here is an internal
         // inconsistency → fail closed, never a config-less runner box.
-        let Some(broker) = state.runner_broker.clone() else {
+        if state.runner_broker.is_none() {
             state.teardown_lease(&lease_id).await;
             if let Ok(mut ledger) = state.ledger.lock() {
                 let _ = ledger.remove(&lease_id);
             }
             return fail_closed("runner lease reached finalize with no registration broker");
-        };
+        }
         let scope = runner_scope_from_dto(runner);
-        match broker.mint_jit_config(&scope).await {
+        // AUDIT re-run P1: the GitHub-App mint is a SYNCHRONOUS ureq round-trip
+        // (two legs) — it MUST run on the blocking pool, never directly on this
+        // async worker, or a burst of runner acquires starves the executor
+        // fabric-wide. `mint_jit_offloaded` mirrors the resolve/provision/teardown
+        // offloads; the blocking-offload machinery stays on `AppState` (the
+        // API2/API3 source-pinning invariant), never in this handler.
+        match state.mint_jit_offloaded(scope).await {
             Ok(jitconfig) => {
                 crate::runner_inject::inject_runner_jitconfig(&mut spec, &jitconfig);
             }
@@ -699,7 +705,19 @@ pub(crate) async fn cancel(
         // the cancel response (the provider deadline is the hard backstop).
         // Gated on the SAME real-transition signal as the slot emit, so an
         // idempotent re-cancel never tears down twice.
-        let _ = state.teardown_lease(&id).await;
+        //
+        // AUDIT P2-1: a teardown FAILURE here was silently discarded — on a
+        // transient provider 5xx the egress box keeps running (with a still-live
+        // JIT config) until its provider deadline, invisible to the reaper (which
+        // sweeps Held only, and this lease is now Released). We still don't fail
+        // the cancel (the provider deadline is the hard backstop), but the failure
+        // is now LOUD so ops can reconcile — never a silent live-box leak.
+        if !state.teardown_lease(&id).await {
+            eprintln!(
+                "lease {id}: teardown FAILED on cancel — box relies on the provider deadline; \
+                 reconcile if it persists"
+            );
+        }
         // GC the lease's side-tables + hook entry (mirror the reaper's
         // post-teardown `forget_lease`): the lease is terminal, nothing else
         // will reclaim these.
