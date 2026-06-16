@@ -50,6 +50,7 @@ use crate::app::CompositePlanSource;
 use crate::corelink_auth::{CoreLinkAuthConfig, CoreLinkTokenStore, UreqIntrospect};
 use crate::corelink_plans::CoreLinkPlanStore;
 use crate::handlers::admin::{AdminHandlerState, LivePlanRegistry, onboard_tenant};
+use crate::handlers::webhook;
 use crate::{
     AppState, BoxRegistry, HookRegistry, StaticPlans, StaticTokenStore, SystemClock, app_full,
 };
@@ -880,7 +881,14 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
         ),
     };
 
-    let router = app_full(store, state.clone(), Arc::new(HookRegistry::default()));
+    // ONE shared §13 hook registry: app_full layers it onto the HTTP handlers'
+    // state, and we set it on the returned `state` too so the reaper AND the
+    // Stage-B autoscaler (which drives the acquire path out-of-band) all operate
+    // on the SAME map (the shared-instance crux — see `app_full` docs).
+    let registry = Arc::new(HookRegistry::default());
+    let mut state = state;
+    state.hook_registry = Arc::clone(&registry);
+    let router = app_full(Arc::clone(&store), state.clone(), Arc::clone(&registry));
 
     // WP-C: mount the admin onboarding route (static mode only). Like the
     // occupancy endpoint it lives OUTSIDE the Bearer-PAT layer and is gated by
@@ -895,6 +903,41 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
                 )
                 .with_state(admin),
         ),
+        None => router,
+    };
+
+    // ── ADR-0007 Stage B autoscaler — DEFAULT-OFF ────────────────────────────
+    // The `workflow_job` webhook receiver that provisions one ephemeral runner
+    // per queued job (and cancels it on completion). Mounted OUTSIDE the
+    // Bearer-PAT layer (GitHub authenticates by HMAC, not a tenant PAT). Built
+    // and mounted ONLY when `FABRIC_AUTOSCALER_WEBHOOK_SECRET` (+ PAT + image)
+    // are configured; absent → the route is not mounted (404 by absence). It
+    // drives the SAME audited `leases::acquire`/`cancel` path the `/v1` surface
+    // uses — no admission bypass.
+    // Read from the process env directly — mirroring `with_runner_broker_from_env`
+    // above (the autoscaler is the broker's natural companion; both wire from env
+    // at build time, default-off, so synchronous `#[test]` callers stay off).
+    let router = match webhook::autoscaler_config_from_env(|k| std::env::var(k).ok()) {
+        Some((secret, cfg)) => {
+            let webhook_state = webhook::WebhookHandlerState {
+                secret: Some(secret),
+                app: state.clone(),
+                store: Arc::clone(&store),
+                registry: Arc::clone(&registry),
+                jobs: Arc::new(std::sync::Mutex::new(webhook::JobLeaseMap::new(
+                    cfg.max_tracked_jobs,
+                ))),
+                cfg: Arc::new(cfg),
+            };
+            router.merge(
+                Router::new()
+                    .route(
+                        "/webhooks/github",
+                        axum::routing::post(webhook::github_webhook),
+                    )
+                    .with_state(webhook_state),
+            )
+        }
         None => router,
     };
 

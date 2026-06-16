@@ -362,7 +362,12 @@ Items that cannot close without owner input or a hugit-side move:
         `RunnerRegistrationBroker` GitHub-App JIT-token minter (C1) · runner-lease
         provision→wait→teardown lifecycle. Enough to point our OWN CI at `runs-on: corelink`
         and offload the builder Mac.
-      - **Stage B (autoscaler):** `workflow_job` webhook → one runner lease per queued job.
+      - **Stage B (autoscaler) — BUILT (2026-06-15):** `workflow_job` webhook
+        (`POST /webhooks/github`) → one runner lease per queued job, cancelled on
+        completion. HMAC-gated, default-off, no admission bypass (drives the audited
+        `leases::acquire`/`cancel`). Runbook `deploy/autoscaler-stage-b.md`. Remaining:
+        configure the App webhook + fabric env, then prove via `dogfood-smoke` dispatch
+        (auto-provision) and flip `ci.yml` to `runs-on: corelink-dogfood`.
       - **Stage C (GA):** sizes/labels · App-install UX · customer console (consumes `/v1/usage`) ·
         per-job billing reconciliation · SLOs.
 - [ ] Identity via the HuGR account (ADR-0002: same Clerk pool; org = tenant) — consumed from

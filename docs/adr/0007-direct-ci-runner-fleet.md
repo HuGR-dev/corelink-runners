@@ -112,8 +112,13 @@ reaches the box.
 - **Stage A (MVP / dogfood-able):** C2 net_policy + C3 image + C1 broker + the
   runner-lease provision→wait→teardown lifecycle. Enough to point **our own** repos'
   CI at `runs-on: corelink` and offload the builder Mac (the immediate need).
-- **Stage B (autoscaler):** a `workflow_job` webhook receiver → provision one runner
-  lease per queued job (the ARC-style autoscaling pattern).
+- **Stage B (autoscaler) — BUILT (2026-06-15):** a `workflow_job` webhook receiver
+  (`POST /webhooks/github`, `crate::handlers::webhook`) → provision one runner lease
+  per queued job, cancel it on completion (the ARC-style autoscaling pattern).
+  HMAC-authenticated (the App webhook secret), default-off, and **no new authority** —
+  it drives the same audited `leases::acquire`/`cancel` path as the `/v1` surface, as a
+  configured tenant PAT (no admission bypass). Label-scoped (+ optional repo allowlist).
+  Runbook: `deploy/autoscaler-stage-b.md`. This is what makes auto-provisioned CI real.
 - **Stage C (GA):** sizes/labels, the App-install UX, the customer console
   (consumes `/v1/usage`), per-job billing reconciliation, SLOs.
 
