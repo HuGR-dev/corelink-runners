@@ -10,11 +10,11 @@
 //!
 //! | Tier    | $/mo | max_concurrency | vCPU-h/mo ceiling |
 //! |---------|------|-----------------|-------------------|
-//! | Starter | $8   | 20              | 100               |
-//! | Pro     | $20  | 40              | 240               |
-//! | Team    | $50  | 80              | 600               |
-//! | Scale   | $100 | 160             | 1200              |
-//! | Max     | $200 | 320             | 2400              |
+//! | Starter | $16  | 20              | 100               |
+//! | Pro     | $40  | 40              | 240               |
+//! | Team    | $100 | 80              | 600               |
+//! | Scale   | $200 | 160             | 1200              |
+//! | Max     | $400 | 320             | 2400              |
 //!
 //! The vCPU-h/mo ceiling is the COGS wall (pricing.md §2 40/60 ladder,
 //! ratified 2026-06-16). It is expressed internally as vCPU·ms
