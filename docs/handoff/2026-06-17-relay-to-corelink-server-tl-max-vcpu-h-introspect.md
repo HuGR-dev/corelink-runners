@@ -50,12 +50,13 @@ COGS the ladder assumed.
    integer number of vCPU-hours** (e.g. `240`). The runner converts to vCPU·ms internally
    (`tenant_ceiling_vcpu_ms`). If you'd rather emit ms/seconds, say so and we transcribe to match —
    the contract just needs one canonical unit.
-3. **Conformance vector (the frozen-contract step):** this is a wire-contract change, so per the
-   house rule it goes **hugit-side PR first** (the contract is frozen from hugit's side; never added
-   unilaterally), then the runner transcribes byte-identically and updates
-   `conformance/corelink-introspect.json` on both sides (the drift tripwire). So this needs a quick
-   loop with the **hugit TL + owner** — flagging it so you can sequence it, not asking you to do it
-   unilaterally.
+3. **Conformance vector (the drift-tripwire step):** the `corelink-introspect` vector is a
+   **runner↔CoreLink-Server** contract — **hugit does NOT mirror it** (confirmed by the hugit TL
+   2026-06-17; hugit mirrors only IntentMetrics / RunnerLease / FenceManifest / result_binding_v2).
+   So once you confirm the `max_vcpu_h` field shape, the **runner updates
+   `conformance/corelink-introspect.json`** (its drift tripwire with your introspect endpoint) and
+   your side matches it byte-identically — **no hugit-side step**. (An earlier draft mis-stated this
+   as "hugit-side PR first" — corrected: hugit is off the hook for this field.)
 4. **Fail-closed semantics to preserve (confirm):** a `valid:true` tenant with **no** `max_vcpu_h`
    present ⇒ runner treats the ceiling as **disabled (0 = no wall)** — byte-compatible with today's
    behavior — until the field is populated. A present value arms the wall. (We do NOT want "absent ⇒
