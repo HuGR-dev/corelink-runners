@@ -21,8 +21,8 @@
 # PREREQUISITES:
 #   - Docker with buildx enabled (docker buildx version)
 #   - Logged in to the target registry (see AUTHENTICATION above)
-#   - The base image digest placeholder in Dockerfile must be resolved first
-#     (see comments in Dockerfile / deploy/runner/README.md)
+#   - Every FROM in the Dockerfile must be digest-pinned (@sha256:<64-hex>);
+#     the guard below enforces this (X4). See Dockerfile / deploy/runner/README.md.
 set -euo pipefail
 
 # ── Configuration — override via env ─────────────────────────────────────────
@@ -45,17 +45,18 @@ echo "    Platform : ${PLATFORM}"
 echo "    Full ref : ${FULL_IMAGE}"
 echo ""
 
-# ── Sanity: warn if the base digest placeholder has not been resolved ─────────
-if grep -q '<PIN-AT-BUILD>' Dockerfile; then
-  echo "WARNING: Dockerfile still contains <PIN-AT-BUILD> placeholder(s)." >&2
-  echo "         Resolve the ubuntu:24.04 digest first:" >&2
-  echo "           docker buildx imagetools inspect ubuntu:24.04 \\" >&2
-  echo "             --format '{{json .Manifest}}' | jq -r '.digest'" >&2
-  echo "         Replace every occurrence of @sha256:<PIN-AT-BUILD> in Dockerfile." >&2
-  echo "" >&2
-  echo "         Building anyway (will produce an unverifiable base) — in production" >&2
-  echo "         treat an image built from an unpinned base as NON-COMPLIANT (X4)." >&2
-  echo "" >&2
+# ── X4 floor: every FROM must be digest-pinned with a real 64-hex sha256 ──────
+# Checks the FROM lines specifically (NOT comments), so a resolved pin passes
+# cleanly and only a genuinely unpinned/placeholder base fails the build closed.
+if grep -E '^[[:space:]]*FROM[[:space:]]' Dockerfile | grep -qvE '@sha256:[0-9a-f]{64}([[:space:]]|$)'; then
+  echo "ERROR: a FROM line is not digest-pinned with a 64-hex sha256 (X4 floor)." >&2
+  echo "       Offending FROM line(s):" >&2
+  grep -nE '^[[:space:]]*FROM[[:space:]]' Dockerfile >&2
+  echo "       Resolve the ubuntu:24.04 digest and pin BOTH FROM lines:" >&2
+  echo "         docker buildx imagetools inspect ubuntu:24.04 \\" >&2
+  echo "           --format '{{json .Manifest}}' | jq -r '.digest'" >&2
+  echo "       A build from an unpinned base is NON-COMPLIANT under X4 — failing closed." >&2
+  exit 1
 fi
 
 # ── Build and push in one pass (avoids a second pull from the registry) ───────

@@ -259,6 +259,20 @@ pub trait BoxProvisioner: Send + Sync {
     fn probe(&self, _lease_id: &str) -> Result<ProbeStatus> {
         Ok(ProbeStatus::Unbound)
     }
+
+    /// Whether this provisioner actually binds a box (i.e. a real cloud backend
+    /// is wired). The default is `true`; the no-op [`NoBoxProvisioner`] overrides
+    /// it to `false`.
+    ///
+    /// The acquire path uses this to reject a RUNNER lease *at admission*
+    /// (before reserving a slot) when no box backend is configured: a runner box
+    /// that never binds would otherwise admit, return `Held`, and fail LATE —
+    /// the ephemeral GitHub runner never comes up and the job hangs. A CHECK
+    /// lease is unaffected (it still fails closed at exec via the empty
+    /// registry).
+    fn binds_boxes(&self) -> bool {
+        true
+    }
 }
 
 // ── ProbeStatus ───────────────────────────────────────────────────────────────
@@ -309,6 +323,12 @@ impl BoxProvisioner for NoBoxProvisioner {
     fn probe(&self, _lease_id: &str) -> Result<ProbeStatus> {
         // It never holds boxes — nothing to reclaim.
         Ok(ProbeStatus::Unbound)
+    }
+
+    fn binds_boxes(&self) -> bool {
+        // The no-op default-off backend never binds a box. A RUNNER lease must
+        // be rejected at admit when this is the wired provisioner.
+        false
     }
 }
 
@@ -564,6 +584,16 @@ mod tests {
             prov.probe("any-lease").unwrap(),
             ProbeStatus::Unbound,
             "NoBoxProvisioner::probe must always be Unbound"
+        );
+    }
+
+    #[test]
+    fn no_box_provisioner_does_not_bind_boxes() {
+        // The no-op provisioner reports it binds nothing — the signal the acquire
+        // path uses to reject a runner lease at admit (S2 cold-start guard).
+        assert!(
+            !NoBoxProvisioner.binds_boxes(),
+            "NoBoxProvisioner must report binds_boxes() == false"
         );
     }
 }

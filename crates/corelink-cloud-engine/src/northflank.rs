@@ -97,6 +97,16 @@ pub struct NorthflankConfig {
     pub poll_interval_ms: u64,
 }
 
+/// Minimum ephemeral disk (MiB) a RUNNER box may run on. A runner box runs a
+/// real customer CI workload — a cold `cargo build` into `target/` — which the
+/// small CHECK default (`ephemeral_storage_mb`, 1 GiB) cannot hold: it would
+/// ENOSPC mid-build, a BROKEN run (the cold-start north star forbids it).
+/// `spawn` fails CLOSED for a runner box below this floor rather than silently
+/// sizing it too small. This is a FLOOR, not a recommendation — size
+/// `NORTHFLANK_RUNNER_EPHEMERAL_STORAGE_MB` to the workload + the Northflank
+/// disk allowance; the floor only catches an unset or too-small runner disk.
+pub const RUNNER_EPHEMERAL_STORAGE_FLOOR_MB: u32 = 4096;
+
 impl NorthflankConfig {
     /// A config with the documented defaults; supply `project_id` + `token`.
     #[must_use]
@@ -482,6 +492,16 @@ impl<H: HttpTransport> NorthflankEngine<H> {
     /// injectively-derived Northflank-legal name (see [`northflank_job_name`]);
     /// it MUST match the name stored on the returned [`RunningContainer`] so all
     /// later `job_url` calls address the same job.
+    /// The ephemeral disk (MiB) a RUNNER box resolves to: the configured runner
+    /// override (`runner_ephemeral_storage_mb`) when set, else the shared CHECK
+    /// default (`ephemeral_storage_mb`). A CHECK box always uses the latter.
+    /// `spawn` enforces `RUNNER_EPHEMERAL_STORAGE_FLOOR_MB` on this value.
+    fn runner_storage_mb(&self) -> u32 {
+        self.cfg
+            .runner_ephemeral_storage_mb
+            .unwrap_or(self.cfg.ephemeral_storage_mb)
+    }
+
     fn create_job_body(&self, spec: &ContainerSpec, job_name: &str) -> String {
         // ADR-0007: a RUNNER box (the ONLY box with `allow_egress == true`, set
         // exclusively by `ContainerSpec::from_runner_lease`) runs a real CI
@@ -498,9 +518,7 @@ impl<H: HttpTransport> NorthflankEngine<H> {
             &self.cfg.deployment_plan
         };
         let storage_mb = if is_runner {
-            self.cfg
-                .runner_ephemeral_storage_mb
-                .unwrap_or(self.cfg.ephemeral_storage_mb)
+            self.runner_storage_mb()
         } else {
             self.cfg.ephemeral_storage_mb
         };
@@ -697,6 +715,25 @@ impl<H: HttpTransport> Engine for NorthflankEngine<H> {
                 spec.image
             )
         })?;
+
+        // ── Disk floor (cold-start hardening, S3): a RUNNER box runs a real CI
+        // workload — a cold `cargo build` into `target/`. The small CHECK default
+        // disk cannot hold it, and an ENOSPC mid-build is a BROKEN run, not a
+        // slow one — the cold-start north star forbids it. Fail CLOSED here, with
+        // an actionable message, rather than silently sizing a runner box below
+        // the floor and dying disk-full mid-build. A CHECK box is unaffected. ──
+        if spec.allow_egress {
+            let disk_mb = self.runner_storage_mb();
+            if disk_mb < RUNNER_EPHEMERAL_STORAGE_FLOOR_MB {
+                bail!(
+                    "refusing to spawn runner box {}: ephemeral disk {disk_mb} MiB is below \
+                     the {RUNNER_EPHEMERAL_STORAGE_FLOOR_MB} MiB floor a CI build needs — set \
+                     NORTHFLANK_RUNNER_EPHEMERAL_STORAGE_MB (within the Northflank disk \
+                     allowance). Fail CLOSED rather than ENOSPC mid-build.",
+                    spec.name
+                );
+            }
+        }
 
         // Map the (possibly non-injective, Northflank-illegal) spec name onto an
         // injective, Northflank-legal job name. Stored on the RunningContainer so
@@ -947,8 +984,12 @@ mod tests {
         );
     }
 
-    /// Absent runner overrides → a runner box falls back to the shared plan/disk
-    /// (zero behaviour change, default-off).
+    /// `create_job_body` is mechanical: absent runner overrides, a runner box's
+    /// BODY carries the shared plan + disk. NOTE: `spawn` now rejects a runner
+    /// box whose disk is below `RUNNER_EPHEMERAL_STORAGE_FLOOR_MB` (see
+    /// `spawn_rejects_runner_box_below_disk_floor`), so this 1 GiB body is never
+    /// emitted to the provider for a runner — this pins the body-serialization
+    /// (the plan fallback) only.
     #[test]
     fn runner_box_falls_back_to_defaults_when_unset() {
         let engine = NorthflankEngine::new(StubTransport, NorthflankConfig::new("proj", "tok"));
@@ -958,6 +999,43 @@ mod tests {
         assert_eq!(
             r["deployment"]["storage"]["ephemeralStorage"]["storageSize"],
             1024
+        );
+    }
+
+    /// S3 cold-start guard: a RUNNER box whose ephemeral disk would fall below
+    /// the floor (here: unset → it would inherit the 1 GiB check default) is
+    /// REJECTED at `spawn` with an actionable error, before any provider
+    /// contact — never silently sized too small to ENOSPC mid-build.
+    #[test]
+    fn spawn_rejects_runner_box_below_disk_floor() {
+        let engine = NorthflankEngine::new(StubTransport, NorthflankConfig::new("proj", "tok"));
+        let err = engine
+            .spawn(&runner_spec())
+            .expect_err("a runner box below the disk floor must fail closed at spawn");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("disk") && msg.contains("NORTHFLANK_RUNNER_EPHEMERAL_STORAGE_MB"),
+            "error must name the disk floor and the env var to set, got: {msg}"
+        );
+    }
+
+    /// A RUNNER box sized at or above the floor spawns normally; a CHECK box is
+    /// never subject to the runner floor (it keeps the small default disk).
+    #[test]
+    fn spawn_allows_runner_at_floor_and_leaves_check_box_unaffected() {
+        let mut cfg = NorthflankConfig::new("proj", "tok");
+        cfg.runner_ephemeral_storage_mb = Some(RUNNER_EPHEMERAL_STORAGE_FLOOR_MB);
+        let engine = NorthflankEngine::new(StubTransport, cfg);
+        assert!(
+            engine.spawn(&runner_spec()).is_ok(),
+            "a runner box at the disk floor must spawn"
+        );
+        // CHECK box (allow_egress == false) on the 1 GiB default → unaffected.
+        let check_engine =
+            NorthflankEngine::new(StubTransport, NorthflankConfig::new("proj", "tok"));
+        assert!(
+            check_engine.spawn(&spec(vec![])).is_ok(),
+            "a check box keeps the small default disk; the runner floor must not touch it"
         );
     }
 

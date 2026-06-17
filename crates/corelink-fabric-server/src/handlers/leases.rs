@@ -194,6 +194,22 @@ pub(crate) async fn acquire(
         );
     }
 
+    // ── 0b. Runner-mode box backend (S2 cold-start hardening). A runner lease
+    // ALSO requires a provisioner that actually binds a box. Under the no-op
+    // `NoBoxProvisioner` (the default-off backend) a runner acquire would admit,
+    // return `Held`, and fail LATE — no box ever binds, so the ephemeral GitHub
+    // runner never comes up and the job hangs. Reject `400` HERE, symmetric with
+    // the broker guard above: before the cap source is consulted and before any
+    // slot is reserved, never a silently-doomed runner box. A CHECK lease is
+    // unaffected (it fails closed at exec via the empty registry). ──
+    if req.runner.is_some() && !state.provisioner.binds_boxes() {
+        return error_response(
+            ApiError::Invalid,
+            "runner mode requires a cloud box backend, but none is configured \
+             (no-op provisioner). Wire the NORTHFLANK_* environment to enable runner boxes.",
+        );
+    }
+
     // ── 1. CapGate BEFORE anything (contract §6: preventive admission). ──
     // Resolve the plan through the token-aware seam: token-keyed backends
     // (CoreLink introspection) read the cap from the request's bearer PAT;
@@ -844,7 +860,7 @@ mod tests {
     use corelink_fabric::{
         InMemoryLedger, LeaseLedger, LeaseState, SlotEventKind, TenantId, TenantPlan,
     };
-    use corelink_fabric_api::{AcquireRequest, paths};
+    use corelink_fabric_api::{AcquireRequest, RunnerSpec, RunnerTargetDto, paths};
     use corelink_runner::lease::ContainerSpec;
     use corelink_runners_contracts::{RunnerLease, RunnerState};
     use tower::ServiceExt;
@@ -853,6 +869,7 @@ mod tests {
     use crate::app::{AppState, Clock, StaticPlans};
     use crate::auth::StaticTokenStore;
     use crate::cloud_exec::BoxProvisioner;
+    use crate::runner_broker::MockBroker;
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -1020,6 +1037,70 @@ mod tests {
             expiry_ms: 60_000,
             runner: None,
         }
+    }
+
+    /// A RUNNER acquire request (mirrors `body()`, targets a repo runner).
+    fn runner_body() -> AcquireRequest {
+        AcquireRequest {
+            runner: Some(RunnerSpec {
+                target: RunnerTargetDto::Repo {
+                    owner: "humangr-labs".to_string(),
+                    repo: "corelink-runners".to_string(),
+                },
+                labels: vec![],
+            }),
+            ..body()
+        }
+    }
+
+    /// **S2 (cold-start hardening).** A RUNNER acquire requires a provisioner
+    /// that actually binds a box. With a broker wired but only the no-op
+    /// `NoBoxProvisioner` (the default-off backend, `binds_boxes() == false`),
+    /// the lease is rejected at ADMIT (`400`) — symmetric with the no-broker
+    /// guard — never admitted to a `Held` runner box that never binds and fails
+    /// late. A CHECK acquire on the same state is unaffected (it admits `200`).
+    #[tokio::test]
+    async fn runner_acquire_without_box_backend_rejected_at_admit() {
+        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
+            Arc::new(Mutex::new(InMemoryLedger::new()));
+        // Broker wired (passes the broker guard); the provisioner is left at the
+        // default no-op NoBoxProvisioner — so the box-backend guard must fire.
+        let state = AppState::new(
+            Arc::clone(&ledger),
+            Arc::new(plans(5)),
+            Arc::new(FixedClock(1_717_000_000_000)),
+        )
+        .with_runner_broker(Arc::new(MockBroker::new()));
+        let router = crate::app::app(acme_token_store(), state.clone());
+
+        // RUNNER acquire → 400 (no box backend), before any slot is reserved.
+        let resp = router
+            .clone()
+            .oneshot(acquire_request(paths::LEASES, &runner_body()))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "a runner acquire with no box backend must be rejected at admit"
+        );
+        assert_eq!(
+            state.slot_meter.lock().unwrap().occupied(&acme()),
+            0,
+            "a rejected runner acquire must not reserve a concurrency slot"
+        );
+
+        // A CHECK acquire on the SAME state still succeeds — the guard is
+        // runner-only (a check lease fails closed later at exec, not at admit).
+        let resp_check = router
+            .oneshot(acquire_request(paths::LEASES, &body()))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp_check.status(),
+            StatusCode::OK,
+            "a check acquire is unaffected by the runner box-backend guard"
+        );
     }
 
     /// [P2 regression] The per-tenant `rate_windows` map is PRUNED of idle
