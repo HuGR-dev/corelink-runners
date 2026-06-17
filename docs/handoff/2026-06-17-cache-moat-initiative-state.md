@@ -24,6 +24,35 @@
 
 ---
 
+## 0.5 SESSION UPDATE — 2026-06-17 (Phase 2 in progress; `/techlead` pulled)
+
+- **P2.0 (long pole) drafted — OWNER TO FORWARD:**
+  `docs/handoff/2026-06-17-relay-to-corelink-cache-tl-warmboot-seam.md` (CT-Q1 + CT-Q2 — gates all
+  of P3) and `…-relay-to-clw-tl-confirms.md` (4 clw confirms; clw side already pinned).
+- **P2.1 landed on branch `harden/p2.1-cold-start-sclass`** (off `main@9635e31`), **gate GREEN**
+  (fmt · clippy -D warnings · tests for corelink-cloud-engine + corelink-fabric-server, 0
+  failures). **PR/merge PENDING OWNER GO** (committed, not pushed): `aa62e30` (docs) + `c683b2d`
+  (code).
+  - **S1 RECALIBRATED:** the §3.4/§3.5 "CRITICAL `<PIN-AT-BUILD>` placeholder → first box can't
+    spawn" is **STALE** — the ubuntu:24.04 base digest was already pinned by **PR #75**
+    (`sha256:786a8b55…`). Residue was stale comments + a `build-and-push.sh` guard that
+    false-positived on its own comments. **Fixed; not a spawn blocker.**
+  - **S2 (`cloud_exec.rs` + `leases.rs`):** added `BoxProvisioner::binds_boxes()` (default true;
+    `NoBoxProvisioner`→false) + a guard at `leases.rs` (symmetric with the broker guard) that
+    rejects a runner acquire `400` at admit when no box backend is wired — covers BOTH the `/v1`
+    acquire and the webhook autoscaler path (same `leases::acquire`).
+  - **S3 (`northflank.rs`):** `RUNNER_EPHEMERAL_STORAGE_FLOOR_MB = 4096`; `spawn` fails closed for
+    a runner box below it (instead of silently inheriting the 1 GiB check default → ENOSPC).
+    **Does NOT unblock #82** (the Northflank account allowance is an owner billing decision).
+- **ENV FLAG (builder Mac):** the rustup **proxy** is broken — `~/.cargo/bin/*` are dangling
+  symlinks to a missing `rustup`, so `cargo`/`rustc` fail on PATH. Real toolchains are intact
+  under `~/.rustup/toolchains/`; the gate ran via
+  `~/.rustup/toolchains/1.96.0-x86_64-apple-darwin/bin` directly. Worth repairing.
+- **NEXT:** owner forwards the two relays. On **CT-Q1**, P3 (live `BootCas`) unblocks. **P2.2**
+  (Family-E2E spec, test-first) can begin mock-first now (clw side pinned).
+
+---
+
 ## 1. THE NORTH STAR (owner directive, 2026-06-17)
 
 Owner's words (PT): *"vamos com calma. Um passo atrás, primeiro verificar o quão longo foi
