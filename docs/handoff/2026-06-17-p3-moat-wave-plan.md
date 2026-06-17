@@ -26,10 +26,19 @@ Northflank allowance or a prod deploy**. The live flip (§1) is the only allowan
 | A7 | **D-9 mint + revoke** | acquire mints a per-job PAT (`POST /internal/v1/runner/mint`, scope `read-write`, TTL ≤ lease deadline); teardown `POST .../revoke {pat_id}`. Mint failure fails closed (no config-less box), mirroring the JIT-mint rollback. |
 | A8 | **clw drive + exit-transparency** | runner invokes `clw snapshot → hydrate → run`; `clw run` child exit code passes through; non-zero **not cached**; `exit 2` = clw-internal (distinct from a child's 2). |
 | A9 | **auth posture** | every CAS/AC/mint call sends `Bearer <per-job PAT>`, tenant in URL path, **never** `x-corelink-tenant-id`; native CAS digests are **BLAKE3** (not SHA-256/REAPI). |
+| **A3b** | **AC hit ⇒ no slot on the LEDGER** (CRITICAL) | the ledger/meter oracle (not the spawn mock): AC hit ⇒ **0 slots reserved, 0 vCPU-h accrued, `try_admit` never invoked**. "Never charge twice" is an accounting claim, not a call-graph one. |
+| **A10** | **write-back byte-identity — memo-poison guard** (CRITICAL) | two cold runs of the same def+inputs ⇒ identical action-digest AND **byte-identical** stored `ActionResult`; no per-boot nondeterminism is written back (a poisoned store breaks every future hit — whitepaper §5.2 "hardest correctness requirement"). |
+| **A9b** | **digest discipline pinned at the key boundary** | the CAS/AC URL path segment for a known blob == its **BLAKE3** hex (fixed vector); the SHA-256 of the same bytes is NEVER used as a native-CAS key. (Reconciles the existing sha256 stand-in — see §4.) |
+| **A11** | **tenant-echo mismatch ⇒ 403 fail-closed** | a CAS/AC call whose path-`<tenant>` ≠ the PAT's tenant ⇒ 403 ⇒ explicit fail-closed (NOT a miss-and-run); the runner never emits `x-corelink-tenant-id` even under retry. |
+| **A7b** | **revoke on EVERY terminal path + TTL bound** | D-9 revoke fires on **Expired + Crashed** teardown (idempotent), not just `Released`; minted `expires_ms ≤ lease deadline` (no per-job PAT outlives its box). |
+| **A12** | **partial-hydrate then substrate-down mid-stream** | 200 on layers 1–3 then 5xx on layer 4 ⇒ `BootError::SubstrateDown`, **zero write-backs committed**, run aborts fail-closed — no half-warmed box proceeds as if cold. |
+| **A5b** | **AC-unreachable degrade is PINNED (not silent)** | CAS-unreachable mid-hydrate ⇒ **hard** fail-closed; AC-unreachable ⇒ run cold **recorded as a forced-cold, not a hit** (honest accounting). Assert the chosen asymmetry. |
+| **A13** | **public-deps vs private namespace** | a public-dep layer resolves via the `_public` keyspace; a private artifact resolves under the tenant HMAC prefix and is **never** addressed in `_public` (intra-tenant dedup only — tense discipline). |
 
-**Cold-critic gate (techlead-decompose):** before slicing is dispatched, an INDEPENDENT cold reviewer
-confirms A1–A9 cover the demand (whitepaper §10/§11 + `interop.md` + the Cache TL contract). *(Pending —
-run before the build wave launches.)*
+**Cold-critic gate (techlead-decompose) — DONE 2026-06-17.** An independent cold reviewer found 8 gaps
+in the original A1–A9 — 2 CRITICAL (**A3b** ledger-accounting on AC-hit; **A10** write-back byte-identity)
+plus A9b/A11/A7b/A12/A5b/A13 — all incorporated above. The suite now covers the demand (whitepaper
+§5.2/§10/§11 + `interop.md:26-33` + the Cache TL contract).
 
 ---
 
@@ -72,14 +81,37 @@ run before the build wave launches.)*
 
 ---
 
-## 4. Contract anchors to FREEZE before dispatch (código-âncora)
+## 4. FROZEN contract anchors (código-âncora — transcribe, do NOT redesign)
 
-Freeze these signatures so dependent WPs transcribe, not design (exact current sigs pulled at pack-time):
-- **`BootCas` trait** (`boot/mod.rs:155-179`) — WP-2 implements it over HTTP; do NOT change the trait.
-- **CAS/AC client surface** — `get_cas(blake3) / put_cas(blake3,bytes) / get_ac(digest) / put_ac(digest,ActionResult)`, each returning a status-class-typed result (`Hit | Miss | FailClosed(reason)`).
-- **Mint client** — `mint(owner_tenant, job_id) -> {token, pat_id, expires_ms}` + `revoke(pat_id)`.
-- **Inject seam** — mirror `inject_runner_jitconfig(&mut spec, …)` → `inject_clw_env(&mut spec, mint, endpoint, tenant)`.
-- **AC key** — the action digest computed runner-side (same as clw); freeze the derivation.
+Exact current signatures (recon 2026-06-17). Dependent WPs transcribe these.
+
+- **`BootCas` trait** (`crates/corelink-runner/src/boot/mod.rs:155-179`):
+  `fn is_cached(&self, layer_key: &str) -> bool` · `fn fetch_layer(&self, layer_key: &str) -> Result<Vec<u8>, BootError>` · `fn write_layer(&self, layer_key: &str, data: &[u8]) -> Result<(), BootError>`.
+  Drivers: `hydrate<C: BootCas>(cas, plan: &HydrationPlan) -> Result<BootOutcome, BootError>` (:218) · `cold_hydrate(...)` (:260). WP-2 implements the trait over HTTP; do NOT change the trait.
+- **⚠️ DIGEST RECONCILIATION (WP-2 contract decision — recon flagged a real collision):** the existing
+  `layer_key` / `ToolchainLayer.content_key` is **sha256-shaped** (a stand-in: `boot/mod.rs:117-124`;
+  `exec.rs` memo-key), but the decided **native CAS plane is BLAKE3** (CT-Q2, "don't mix digests"). WP-2
+  keys the live native CAS/AC path on **BLAKE3-hex** (URL `/v1/cas/<tenant>/<blake3-hex>`); the sha256
+  stand-in is replaced/mapped, and SHA-256 is NEVER a native-CAS key (A9b enforces). Freeze the live
+  `layer_key` as blake3-hex.
+- **CAS/AC HTTP client (WP-2, new `crates/corelink-runner/src/cas_http.rs`):** `get_cas(blake3)` /
+  `put_cas(blake3, bytes)` / `get_ac(action_digest)` / `put_ac(action_digest, ActionResult)`, each a
+  **status-class** result `Hit(bytes) | Miss | FailClosed(reason)` — 404=Miss, 401/403/5xx/timeout=FailClosed (A5/A5b/A11).
+- **Mint client (WP-3, new `…/runner_cas_mint.rs`)** — mirror `RunnerRegistrationBroker`
+  (`runner_broker.rs:169-177`, async `mint_jit_config`): `mint(owner_tenant, job_id) -> {token_plaintext, pat_id, expires_ms}`
+  (POST `/internal/v1/runner/mint`, header `x-corelink-internal-auth`, scope `read-write`) + `revoke(pat_id)`
+  (POST `/internal/v1/runner/revoke`, idempotent). Ship a `MockMint` (mirror `MockBroker`).
+- **Inject seam (WP-4)** — mirror `inject_runner_jitconfig(&mut ContainerSpec, &JitRunnerConfig)`
+  (`runner_inject.rs:47-52`, additive `spec.env.push`): `inject_clw_env(&mut spec, &MintedPat, endpoint, tenant)`
+  → pushes `CLW_ENDPOINT` / `CLW_TENANT` / `CLW_TOKEN` (the minted PAT, never the tenant PAT — A6) / `CLW_REF_DOMAIN=runner`.
+- **Acquire-path guard (WP-7)** — mirror the pre-lease guards (`leases.rs:190` broker, `:205` binds_boxes);
+  the AC pre-lease lookup short-circuits **before** the atomic slot reserve at `:420` (`try_admit_with_compute`)
+  — so A3b's "0 slots" holds by construction.
+- **Fake-CAS harness (WP-1)** — reuse the `acceptance_c3.rs` `FakeCas` pattern (`warm(keys)` / `cold()` /
+  `with_fault(FaultMode)`, impls `BootCas`; asserts via `BootOutcome.layers_fetched`); add ledger/meter
+  oracles for A3b and a deterministic-bytes fixture for A10.
+- **`ContainerSpec`** (`lease.rs:42-81`): `image, env: Vec<(String,String)>, allow_egress, no_network, run_on_create, path_set`;
+  `from_runner_lease` sets egress/run_on_create, `env` filled by the inject seam.
 
 ---
 
