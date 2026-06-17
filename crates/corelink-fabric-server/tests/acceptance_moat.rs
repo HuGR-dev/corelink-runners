@@ -34,7 +34,7 @@ use corelink_fabric_server::{
 use corelink_runner::cas_http::Blake3Key;
 use corelink_runner::lease::ContainerSpec;
 use corelink_fabric_server::{
-    CasPatMint,
+    CasPatMint, HttpCasPatMint, MintError, MintHttp, MintHttpResponse,
     CLW_ENDPOINT_ENV, CLW_REF_DOMAIN_ENV, CLW_REF_DOMAIN_RUNNER, CLW_TENANT_ENV, CLW_TOKEN_ENV,
     inject_clw_env, MockBroker,
 };
@@ -572,9 +572,58 @@ async fn a7b_minted_pat_ttl_does_not_exceed_lease_deadline() {
         lease_deadline_ms
     );
 
-    // MockMint TTL clamp proven above (GREEN — WP-3 done).
-    // Integration gate: the real D-9 HTTP mint client asserting MintError::TtlExceedsLease
-    // is WP-7 scope (requires the D-9 HTTP client to be wired into AppState).
+    // ── Enforcement proof (WP-3b): HttpCasPatMint with mock transport ────────
+    // MockMint only CLAMPS (can never return TtlExceedsLease). The REAL enforcement
+    // path lives in HttpCasPatMint. Prove it here with a mock transport that
+    // returns expires_ms > deadline, and assert TtlExceedsLease is raised.
+
+    struct TtlViolatingTransport {
+        expires_ms: u64,
+    }
+
+    impl MintHttp for TtlViolatingTransport {
+        fn post(
+            &self,
+            _url: &str,
+            _internal_auth: &str,
+            _json_body: &str,
+        ) -> anyhow::Result<MintHttpResponse> {
+            let body = format!(
+                r#"{{"token":"tok-late","pat_id":"pid-late","expires_ms":{}}}"#,
+                self.expires_ms
+            );
+            Ok(MintHttpResponse { status: 200, body })
+        }
+    }
+
+    let deadline_ms: u64 = 1_000_000;
+    let service_expires_ms: u64 = 2_000_000; // intentionally > deadline
+
+    let http_mint = HttpCasPatMint::new(
+        TtlViolatingTransport { expires_ms: service_expires_ms },
+        "https://d9.internal.example.com",
+        "test-internal-token",
+    );
+
+    let err = http_mint
+        .mint("acme", "job-ttl-enforcement", deadline_ms)
+        .await
+        .expect_err(
+            "A7b (enforcement): HttpCasPatMint must return TtlExceedsLease \
+             when service expires_ms > lease_deadline_ms",
+        );
+
+    assert!(
+        matches!(
+            err,
+            MintError::TtlExceedsLease {
+                expires_ms: e,
+                lease_deadline_ms: d,
+            } if e == service_expires_ms && d == deadline_ms
+        ),
+        "A7b (enforcement): expected TtlExceedsLease{{expires_ms={service_expires_ms}, \
+         lease_deadline_ms={deadline_ms}}}; got {err:?}"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

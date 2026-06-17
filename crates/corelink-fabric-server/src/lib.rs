@@ -69,7 +69,10 @@ pub use ingest_token::IngestSigner;
 pub use runner_broker::{
     BrokerError, JitRunnerConfig, MockBroker, RunnerRegistrationBroker, RunnerScope, RunnerTarget,
 };
-pub use runner_cas_mint::{CasPatMint, MintError, MintedPat, MockMint};
+pub use runner_cas_mint::{
+    CasPatMint, HttpCasPatMint, MintError, MintHttp, MintHttpResponse, MintedPat, MockMint,
+    UreqMint,
+};
 pub use runner_inject::{
     CLW_ENDPOINT_ENV, CLW_REF_DOMAIN_ENV, CLW_REF_DOMAIN_RUNNER, CLW_TENANT_ENV, CLW_TOKEN_ENV,
     RUNNER_JITCONFIG_ENV, inject_clw_env, inject_runner_jitconfig,
