@@ -157,11 +157,17 @@ pub trait BootCas {
     /// local/box cache (no fetch needed on the warm path).
     fn is_cached(&self, layer_key: &str) -> bool;
 
-    /// Fetch the layer bytes for `content_key` from the CAS origin.
+    /// Fetch the layer bytes for `layer_key` from the CAS origin.
     ///
-    /// # Errors
-    /// Returns `BootError::SubstrateDown` if the CAS is unreachable.
-    /// Returns `BootError::LayerUnavailable` if the content is not found.
+    /// # Return convention
+    /// - **CAS hit (200/2xx):** returns `Ok(bytes)` — layer is present, warm path.
+    /// - **CAS miss (404):** returns `Ok(vec![])` — layer is absent; the cold path
+    ///   proceeds (the job/clw produces the layer and calls `write_layer`).
+    ///   A plain miss is NOT an error: "cache absent ⇒ slow, never broken" (A5/A1).
+    ///   `BootError::LayerUnavailable` is NOT returned — that variant does not exist.
+    /// - **CAS unreachable / auth failure (401/403/5xx/transport err):**
+    ///   returns `Err(BootError::SubstrateDown)` — hard fail-closed (A5/A5b/A12).
+    ///   An auth outage or server error is NEVER silently treated as a cold miss.
     fn fetch_layer(&self, layer_key: &str) -> Result<Vec<u8>, BootError>;
 
     /// Write (cache) a fetched layer so future jobs can reuse it without

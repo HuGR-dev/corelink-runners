@@ -158,3 +158,74 @@ impl ClwDrive for MockClwDrive {
         Box::pin(async move { Ok(outcome) })
     }
 }
+
+// ── Policy unit tests ─────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::{ClwDriveOutcome, ClwExitTransparency};
+
+    // ── ClwExitTransparency::is_cacheable ─────────────────────────────────────
+
+    #[test]
+    fn child_exit_0_is_cacheable() {
+        assert!(ClwExitTransparency::Child(0).is_cacheable());
+    }
+
+    #[test]
+    fn child_exit_1_is_not_cacheable() {
+        assert!(!ClwExitTransparency::Child(1).is_cacheable());
+    }
+
+    #[test]
+    fn child_exit_2_is_not_cacheable() {
+        assert!(!ClwExitTransparency::Child(2).is_cacheable());
+    }
+
+    #[test]
+    fn clw_internal_exit_0_is_not_cacheable() {
+        assert!(!ClwExitTransparency::ClwInternal(0).is_cacheable());
+    }
+
+    #[test]
+    fn clw_internal_exit_2_is_not_cacheable() {
+        assert!(!ClwExitTransparency::ClwInternal(2).is_cacheable());
+    }
+
+    // ── ClwExitTransparency::is_child_success ─────────────────────────────────
+
+    #[test]
+    fn child_exit_0_is_child_success() {
+        assert!(ClwExitTransparency::Child(0).is_child_success());
+    }
+
+    #[test]
+    fn child_exit_1_is_not_child_success() {
+        assert!(!ClwExitTransparency::Child(1).is_child_success());
+    }
+
+    #[test]
+    fn clw_internal_exit_0_is_not_child_success() {
+        assert!(!ClwExitTransparency::ClwInternal(0).is_child_success());
+    }
+
+    // ── ClwDriveOutcome::child_exit_code ─────────────────────────────────────
+
+    #[test]
+    fn ran_child_7_child_exit_code_is_some_7() {
+        let outcome = ClwDriveOutcome::Ran {
+            exit: ClwExitTransparency::Child(7),
+            wrote_back: true,
+        };
+        assert_eq!(outcome.child_exit_code(), Some(7));
+    }
+
+    #[test]
+    fn clw_failed_child_exit_code_is_none() {
+        let outcome = ClwDriveOutcome::ClwFailed {
+            clw_exit_code: 2,
+            reason: "clw: substrate unreachable".to_string(),
+        };
+        assert_eq!(outcome.child_exit_code(), None);
+    }
+}
