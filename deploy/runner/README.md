@@ -76,10 +76,12 @@ floor — always pin.
 
 ## X4 supply-chain: digest pinning requirement
 
-All `FROM` lines in the Dockerfile use `@sha256:` pinned digests.
+All `FROM` lines in the Dockerfile are `@sha256:`-digest-pinned (PR #75), and
+`build-and-push.sh` fails closed if any `FROM` is ever left unpinned. A digest
+pin is intentionally frozen — that is the X4 guarantee.
 
-The Dockerfile currently contains `@sha256:<PIN-AT-BUILD>` placeholders.
-**Before building a production image**, resolve the real digest:
+To **refresh** the pinned base (e.g. for a base-image security update),
+re-resolve the current digest:
 
 ```sh
 # Resolve ubuntu:24.04 digest (amd64):
@@ -92,15 +94,15 @@ docker buildx imagetools inspect ubuntu:24.04 \
   --format '{{json .Manifest}}' | jq -r '.digest'
 ```
 
-Replace every `@sha256:<PIN-AT-BUILD>` in `Dockerfile` with that digest, commit
-the change, and record the digest in the build log.
+Replace both `@sha256:` digests in `Dockerfile` with that digest, commit the
+change, and record the new digest in the build log.
 
 ---
 
 ## Building and pushing
 
 ```sh
-# 1. Resolve the base digest (see X4 section above) and update Dockerfile.
+# 1. (Only when refreshing the base) re-resolve the digest — see X4 section.
 
 # 2. Log in to GHCR:
 echo "$GHCR_PAT" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
@@ -153,6 +155,6 @@ script runs.
 - **Ephemeral + self-deregistering.** After one job the runner removes itself
   from the pool; the fabric tears down the microVM.  There is no persistent
   runner state.
-- **Digest-pinned base.** The `<PIN-AT-BUILD>` placeholder must be resolved
-  before production builds; any build from an unpinned base is non-compliant
-  under X4.
+- **Digest-pinned base.** Both `FROM` lines are `@sha256:`-pinned and
+  `build-and-push.sh` fails the build if any `FROM` is unpinned; any build from
+  an unpinned base is non-compliant under X4.

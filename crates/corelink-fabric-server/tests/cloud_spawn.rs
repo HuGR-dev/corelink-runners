@@ -75,6 +75,7 @@ fn resp(status: u16, body: &str) -> HttpResponse {
 fn make_engine(responses: Vec<HttpResponse>) -> (Arc<NorthflankEngine<FakeHttp>>, FakeHttp) {
     let mut cfg = NorthflankConfig::new("proj", "nf_tok_test");
     cfg.poll_interval_ms = 0;
+    cfg.runner_ephemeral_storage_mb = Some(4096);
     let fake = FakeHttp::new(responses);
     let engine = Arc::new(NorthflankEngine::new(fake.clone(), cfg));
     (engine, fake)

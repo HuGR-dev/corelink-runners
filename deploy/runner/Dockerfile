@@ -3,15 +3,19 @@
 #
 # X4 supply-chain floor: every FROM is digest-pinned.
 #
-# BASE DIGEST PLACEHOLDER:
-#   The sha256 below is a placeholder.  Before building in production, resolve
-#   the real digest with:
+# BASE DIGEST (PINNED — X4 supply-chain floor):
+#   Both FROM lines below are digest-pinned to a specific ubuntu:24.04 manifest
+#   (resolved with `docker buildx imagetools inspect`; pinned in PR #75). This is
+#   NOT a placeholder — a digest pin is INTENTIONALLY frozen: the X4 floor
+#   verifies it before spawn, so the base is reproducible and tamper-evident.
+#
+#   To REFRESH the pin (e.g. to pick up a base-image security update), re-resolve
+#   the digest and replace it in BOTH FROM lines (they must stay identical):
 #
 #     docker buildx imagetools inspect ubuntu:24.04 \
 #       --format '{{json .Manifest}}' | jq -r '.digest'
 #
-#   Then replace <PIN-AT-BUILD> with that digest (e.g. sha256:3f85…).
-#   Pin to a specific architecture if you build for one target only:
+#   For a single-arch build, pin the per-arch digest instead:
 #
 #     docker buildx imagetools inspect ubuntu:24.04 \
 #       --format '{{json .Manifest.Manifests}}' \
@@ -31,7 +35,7 @@
 # -----------------------------------------------------------------------------
 
 # ── Stage 1: runner binary download + checksum verification ──────────────────
-# PIN-AT-BUILD: replace @sha256:<PIN-AT-BUILD> with the resolved digest.
+# Base digest PINNED (see header for the refresh procedure).
 FROM ubuntu:24.04@sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae77ff1dc54 AS runner-download
 
 # GitHub Actions runner release to pin.
@@ -54,7 +58,7 @@ RUN curl -fsSL \
     rm /tmp/actions-runner.tar.gz
 
 # ── Stage 2: final image ─────────────────────────────────────────────────────
-# PIN-AT-BUILD: same digest as Stage 1 — both stages must use the same base.
+# Same PINNED digest as Stage 1 — both stages MUST use the identical base.
 FROM ubuntu:24.04@sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae77ff1dc54
 
 LABEL org.opencontainers.image.title="CoreLink ephemeral GitHub Actions runner" \
