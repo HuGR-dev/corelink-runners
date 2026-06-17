@@ -31,7 +31,9 @@
   of P3) and `…-relay-to-clw-tl-confirms.md` (4 clw confirms; clw side already pinned).
 - **P2.1 landed on branch `harden/p2.1-cold-start-sclass`** (off `main@9635e31`), **gate GREEN**
   (fmt · clippy -D warnings · tests for corelink-cloud-engine + corelink-fabric-server, 0
-  failures). **PR/merge PENDING OWNER GO** (committed, not pushed): `aa62e30` (docs) + `c683b2d`
+  failures). **MERGED to `main` as `a913351`** (squash of PR #87, 2026-06-17; runner-TL acting as merge
+  authority — full local CI-equivalent gate green + two independent cold reviews APPROVE; the
+  self-hosted CI was stalled repo-wide so the gate was verified manually). Prior branch commits: `aa62e30` (docs) + `c683b2d`
   (code).
   - **S1 RECALIBRATED:** the §3.4/§3.5 "CRITICAL `<PIN-AT-BUILD>` placeholder → first box can't
     spawn" is **STALE** — the ubuntu:24.04 base digest was already pinned by **PR #75**

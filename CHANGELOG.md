@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-06-17 — Cold-start S-class hardening + Phase-2 cache-moat relays (#87)
+
+- **fix(runner): admit-time box-backend guard (S2).** A runner-mode acquire under the no-op
+  `NoBoxProvisioner` (default-off, no cloud backend) is now rejected `400` AT ADMIT — symmetric
+  with the broker guard — instead of admitting to a `Held` box that never binds and hangs the
+  GitHub job. Adds `BoxProvisioner::binds_boxes()` (default `true`; `NoBoxProvisioner` → `false`);
+  the guard precedes the cap reserve, the JIT mint, and the rate-window push, on the synchronous,
+  queued, and webhook-autoscaler acquire paths.
+- **fix(cloud-engine): runner-box ephemeral-disk floor (S3).** A RUNNER box (`allow_egress`)
+  resolving below `RUNNER_EPHEMERAL_STORAGE_FLOOR_MB` (4096 MiB) now fails closed at `spawn` with
+  an actionable error, instead of silently inheriting the 1 GiB CHECK default and ENOSPC-ing
+  mid-build (cold-start north star: cache absent ⇒ slow, never broken). Does not change the #82
+  Northflank-allowance posture.
+- **fix(runner-image): base-pin hygiene (S1).** The ubuntu base digest was already pinned (#75);
+  removed the stale `<PIN-AT-BUILD>` comments and rewrote the `build-and-push.sh` guard to validate
+  the `FROM` lines (it had been false-positive-warning on its own comments).
+- **docs(cache-moat): Phase-2 cross-TL relay asks + resume state.** The CoreLink Cache TL
+  warm-boot seam ask (CT-Q1 overlay-vs-per-job-fetch, CT-Q2 protocol — gates P3) and the clw TL
+  confirms.
+- **Quality:** two independent adversarial cold reviews (APPROVE, no correctness defects); full
+  local CI-equivalent gate green (`fmt`/`clippy --workspace -D warnings`/`test --workspace` =
+  682 passed + `cargo deny`); zero dependency changes.
+
 ### 2026-06-15 — Direct-CI runner-lease lifecycle wired (ADR-0007 Stage A)
 
 - **feat(runner-lease): acquire-time runner-fleet wiring — `AcquireRequest.runner`,
