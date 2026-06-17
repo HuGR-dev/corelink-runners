@@ -544,3 +544,39 @@ DB tests missed:
 Integrated HEAD `8ee9848`; all 3 fixes DB-verified against real Postgres 16
 (97+6 green). **Re-audit (7-angle, run `wf_2debb11b`) running on the fixed code —
 the wall does NOT merge until the loop runs dry (2 consecutive clean rounds).**
+
+## 15. CONVERGED — the audit loop ran dry (2026-06-16)
+
+The adversarial-audit loop **ran dry** after 4 re-audit rounds. Convergence:
+
+| Round | Confirmed | Fixes |
+|---|---|---|
+| 1 (audit) | 22 (2 P0) | FIX-A queue gate · FIX-B FileLedger atomic journal · FIX-C Pg clamp/overflow/pool |
+| 2 (re-audit, expanded scope) | 34 | FIX-D InMemory/File §8 clamp · FIX-E phantom-Held terminalize · FIX-F ceiling-source/config/durable-guard |
+| 3 (re-audit) | 3 (1 P1) | FIX-G stale-test rewrite · FIX-H explicit `FABRIC_TENANT_MAX_VCPU_H` ceiling + positive `==Postgres` backend guard |
+| 4 (re-audit) | **0** | — (2 consecutive dry rounds) |
+
+8 fix-WPs closed **real** bypasses the build + initial DB tests missed: a P0
+queue-admission ceiling bypass (autoscaler steady-state), FileLedger crash-non-
+atomicity, the §8 `actual ≤ reserved` invariant applied to only one of three
+ledgers, a phantom-Held slot leak, a silently-disabled ceiling for non-ladder
+caps, and a durability-vs-cross-instance guard confusion. Every fix carries a
+regression that FAILS pre-fix and PASSES post-fix.
+
+**Final state (HEAD `b0f7b5a`):**
+- Adversarial audit: **DRY** (22→34→3→0, 7 angles, adversarial refute-verify).
+- Full workspace gate + DB: **817 tests, 0 failed** (fmt + clippy `--workspace
+  -D warnings` + `cargo test --workspace` against real Postgres 16, `--test-threads=1`).
+- DB-proven: `two_instance_over_ceiling_admits_exactly_one`,
+  `terminal_accrual_clamps_to_reservation_overdue`, `accrual_upsert_clamps_before_add`,
+  `pool_burst_releasing_transition_not_starved`, the once-only/idempotency suite.
+- **Default-off byte-identical** (no `FABRIC_RUNNER_VCPU` ⇒ today's behavior).
+- **Fail-loud config:** accounting-on with a non-durable backend, a config typo, or
+  a ceiling that resolves to 0 ⇒ boot refuses (never a silent unlimited grant).
+
+**Ready for merge review.** The wall is built default-off; arming it needs
+`FABRIC_RUNNER_VCPU` + a durable (Postgres) backend + an explicit ceiling
+(`FABRIC_TENANT_MAX_VCPU_H` on the static path, or a ladder tier). Owner-gated
+follow-up (separate, deferred): the CoreLink-introspect ceiling vector (`max_vcpu_h`
+in `conformance/corelink-introspect.json`) for CoreLink-backed tenants — that path
+still resolves to 0 (disabled) until the cross-repo vector amendment is ratified.
