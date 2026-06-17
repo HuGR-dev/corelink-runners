@@ -29,6 +29,8 @@ pub mod handlers;
 pub mod ingest_token;
 pub mod reaper;
 pub mod runner_broker;
+/// WP-3 — D-9 per-job CAS PAT mint + revoke client (moat build).
+pub mod runner_cas_mint;
 pub mod runner_inject;
 pub mod server;
 
@@ -63,4 +65,8 @@ pub use ingest_token::IngestSigner;
 pub use runner_broker::{
     BrokerError, JitRunnerConfig, MockBroker, RunnerRegistrationBroker, RunnerScope, RunnerTarget,
 };
-pub use runner_inject::{RUNNER_JITCONFIG_ENV, inject_runner_jitconfig};
+pub use runner_cas_mint::{CasPatMint, MintError, MintedPat, MockMint};
+pub use runner_inject::{
+    CLW_ENDPOINT_ENV, CLW_REF_DOMAIN_ENV, CLW_REF_DOMAIN_RUNNER, CLW_TENANT_ENV, CLW_TOKEN_ENV,
+    RUNNER_JITCONFIG_ENV, inject_clw_env, inject_runner_jitconfig,
+};
