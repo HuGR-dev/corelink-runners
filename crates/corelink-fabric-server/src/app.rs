@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use axum::routing::{get, post};
 use axum::{Extension, Router, middleware};
+use corelink_fabric::plans::{PlanTier, ceiling_for, plan_for};
 use corelink_fabric::{
     CapGate, InMemoryLedger, LeaseLedger, RateWindow, SlotEventKind, SlotMeter, SlotOccupancyEvent,
     TenantId, TenantPlan, TenantWaitStats,
@@ -101,6 +102,29 @@ pub trait PlanSource: Send + Sync {
     ) -> Result<Option<TenantPlan>, PlanSourceError> {
         Ok(self.plan_of(tenant))
     }
+
+    /// The tenant's monthly vCPU-h compute ceiling, in vCPU·ms (WP-F: the
+    /// acquire-path read that builds the [`ComputeGate`](corelink_fabric::ledger::ComputeGate)).
+    ///
+    /// `0` is the **disabled** sentinel: the ledger SKIPS the compute check for a
+    /// `Some` gate whose `ceiling_vcpu_ms == 0` (it must NEVER compare against
+    /// `0`, which would reject-all). The default returns `0` so a backend that
+    /// has not wired the ceiling is fail-SAFE-disabled, never reject-all:
+    ///
+    /// - **CoreLink-introspect backend** (`CoreLinkPlanStore`): keeps the default
+    ///   `0` — the per-tenant `max_vcpu_h` ceiling is NOT yet on the introspect
+    ///   entitlement vector. That is an owner / CoreLink-TL-gated wire-contract
+    ///   amendment (same law as the `IntentMetrics` vector: the other side lands
+    ///   it first), DEFERRED, never added unilaterally. Until it lands, the
+    ///   CoreLink path is compute-disabled (`0`), which is correct default-off.
+    /// - **Static / live-onboarding backend** carries the ceiling LOCALLY: the
+    ///   per-tier ceiling lives in `corelink_fabric::plans::PlanRegistry`
+    ///   (`tenant_ceiling_vcpu_ms`); a backend that wraps it overrides this method
+    ///   to surface the live value. [`CompositePlanSource`] below delegates so the
+    ///   composed value flows through.
+    fn tenant_ceiling_vcpu_ms(&self, _tenant: &TenantId) -> u64 {
+        0
+    }
 }
 
 /// In-memory [`PlanSource`] for tests and local dev — a fixed tenant → plan
@@ -108,20 +132,84 @@ pub trait PlanSource: Send + Sync {
 #[derive(Debug, Clone, Default)]
 pub struct StaticPlans {
     plans: HashMap<TenantId, TenantPlan>,
+    /// FIX-H-1: the EXPLICIT monthly vCPU-h compute ceiling (vCPU·ms) for every
+    /// tenant this source carries, wired from `FABRIC_TENANT_MAX_VCPU_H`. `0` =
+    /// unset (the disabled sentinel / "infer from cap" fallback below). A
+    /// NON-zero value WINS — it is returned verbatim by
+    /// [`tenant_ceiling_vcpu_ms`](StaticPlans::tenant_ceiling_vcpu_ms), never
+    /// re-derived from the cap. This removes the round-3 overspend bypass:
+    /// before, a non-ladder bootstrap cap (the live-CI path uses
+    /// `FABRIC_TENANT_MAX_CONCURRENCY=4`) matched no tier and silently resolved
+    /// `0` — the wall OFF while the operator believed it armed.
+    ceiling_vcpu_ms: u64,
 }
 
 impl StaticPlans {
-    /// Build a source from a set of plans (keyed by their tenant).
+    /// Build a source from a set of plans (keyed by their tenant). The explicit
+    /// ceiling is `0` (unset) — see [`with_ceiling_vcpu_ms`](Self::with_ceiling_vcpu_ms).
     pub fn new(plans: impl IntoIterator<Item = TenantPlan>) -> Self {
         Self {
             plans: plans.into_iter().map(|p| (p.tenant.clone(), p)).collect(),
+            ceiling_vcpu_ms: 0,
         }
+    }
+
+    /// FIX-H-1: set the EXPLICIT monthly vCPU-h compute ceiling (in vCPU·ms,
+    /// already validated against the i64 ledger bound via
+    /// [`compute_meter::ceiling_vcpu_ms`](corelink_fabric::compute_meter::ceiling_vcpu_ms)).
+    /// A non-zero value is returned verbatim by
+    /// [`tenant_ceiling_vcpu_ms`](Self::tenant_ceiling_vcpu_ms) for any tenant
+    /// this source carries, INSTEAD of the cap-inferred ladder value — so the
+    /// wall arms regardless of whether the bootstrap cap lands on the
+    /// `{20,40,80,160,320}` tier ladder. `0` leaves the cap-inference fallback.
+    #[must_use]
+    pub fn with_ceiling_vcpu_ms(mut self, ceiling_vcpu_ms: u64) -> Self {
+        self.ceiling_vcpu_ms = ceiling_vcpu_ms;
+        self
     }
 }
 
 impl PlanSource for StaticPlans {
     fn plan_of(&self, tenant: &TenantId) -> Option<TenantPlan> {
         self.plans.get(tenant).cloned()
+    }
+
+    /// WP-F / FIX-F-1 / FIX-H-1: surface the compute ceiling for a provisioned
+    /// tenant on the static path, so the vCPU-h wall actually enforces when
+    /// `FABRIC_RUNNER_VCPU` is set (before WP-F the default `0` left the ledger
+    /// SKIPPING the compute check ⇒ accounting silently OFF).
+    ///
+    /// Resolution order:
+    /// 1. **Explicit ceiling (FIX-H-1) WINS.** If this source was built with a
+    ///    non-zero [`ceiling_vcpu_ms`](Self::with_ceiling_vcpu_ms) (from
+    ///    `FABRIC_TENANT_MAX_VCPU_H`), return it for any tenant on file — NOT a
+    ///    value reverse-engineered from the cap. This closes the round-3
+    ///    overspend bypass: a non-ladder bootstrap cap (the live-CI path sets
+    ///    `FABRIC_TENANT_MAX_CONCURRENCY=4`) used to match no tier and silently
+    ///    resolve `0`, leaving the wall OFF while the operator believed it armed.
+    /// 2. **Cap-inference fallback (unset explicit ceiling).** `StaticPlans`
+    ///    carries a bare [`TenantPlan`] (cap + rate, no tier), so the tier —
+    ///    and thus the ceiling — is recovered by matching the plan's
+    ///    `max_concurrency` against the fixed `plans::plan_for` ladder
+    ///    ([`PlanTier::ALL`]). A tenant whose cap matches a real tier resolves
+    ///    `plans::ceiling_for(tier)`; an arbitrary non-ladder cap matches
+    ///    nothing and resolves `0` — fail-SAFE-disabled, never reject-all. (The
+    ///    boot guard in `server.rs` turns that silent `0` into a hard boot error
+    ///    when accounting is armed.)
+    ///
+    /// Unknown tenant → `0` in either case (no plan on file ⇒ nothing to gate).
+    fn tenant_ceiling_vcpu_ms(&self, tenant: &TenantId) -> u64 {
+        let Some(plan) = self.plans.get(tenant) else {
+            return 0;
+        };
+        // FIX-H-1: the explicit, operator-set ceiling wins over cap-inference.
+        if self.ceiling_vcpu_ms != 0 {
+            return self.ceiling_vcpu_ms;
+        }
+        PlanTier::ALL
+            .into_iter()
+            .find(|&tier| plan_for(tier).0 == plan.max_concurrency)
+            .map_or(0, ceiling_for)
     }
 }
 
@@ -166,6 +254,18 @@ impl PlanSource for CompositePlanSource {
         match self.primary.plan_of_resolving(tenant, token)? {
             Some(plan) => Ok(Some(plan)),
             None => self.secondary.plan_of_resolving(tenant, token),
+        }
+    }
+
+    /// WP-F ceiling: consult `primary` first, fall through to `secondary` only
+    /// when primary returns the disabled sentinel `0` — so a tenant onboarded at
+    /// runtime into the live registry resolves ITS ceiling, while the bootstrap
+    /// tenant resolves from the static source. `0` from both ⇒ disabled (the
+    /// ledger skips the compute check), the correct default-off.
+    fn tenant_ceiling_vcpu_ms(&self, tenant: &TenantId) -> u64 {
+        match self.primary.tenant_ceiling_vcpu_ms(tenant) {
+            0 => self.secondary.tenant_ceiling_vcpu_ms(tenant),
+            c => c,
         }
     }
 }
@@ -326,6 +426,18 @@ pub struct AppState {
     /// LB mark a busy-but-alive instance DOWN). From
     /// `FABRIC_MAX_INFLIGHT_REQUESTS` (default [`DEFAULT_MAX_INFLIGHT_REQUESTS`]).
     pub(crate) max_inflight_requests: usize,
+    /// WP-F: the serving box's vCPU count, gating the vCPU-h compute ceiling.
+    ///
+    /// **Default-off:** `None` (the [`AppState::new`] default) ⇒ the whole
+    /// compute-accounting wall stays DORMANT — `acquire` passes `gate = None` to
+    /// the ledger, which is byte-identical to today's concurrency-only
+    /// `try_admit`. `Some(vcpu)` (wired from `FABRIC_RUNNER_VCPU`, kept only when
+    /// `> 0`) ACTIVATES accounting: `acquire` builds a
+    /// [`ComputeGate`](corelink_fabric::ledger::ComputeGate) reserving
+    /// `vcpu × ttl` vCPU·ms against the tenant's monthly ceiling. The box-vCPU
+    /// count is a single fleet-wide constant at M1 (one box SKU); a future
+    /// per-lease vCPU axis would move this onto the lease spec.
+    pub(crate) runner_vcpu: Option<u32>,
 }
 
 /// Default cap on concurrent close ack-window waits (audit P1). Chosen so a
@@ -396,7 +508,24 @@ impl AppState {
             // AUDIT P2: default global in-flight cap; the composition root
             // overrides it from FABRIC_MAX_INFLIGHT_REQUESTS.
             max_inflight_requests: DEFAULT_MAX_INFLIGHT_REQUESTS,
+            // WP-F: compute accounting DEFAULT-OFF — no box-vCPU configured, so
+            // the acquire path passes `gate = None` (today's behavior exactly).
+            // The composition root opts in via `with_runner_vcpu` from
+            // FABRIC_RUNNER_VCPU.
+            runner_vcpu: None,
         }
+    }
+
+    /// Set the serving box's vCPU count, ACTIVATING the vCPU-h compute ceiling
+    /// (WP-F). `Some(vcpu)` with `vcpu > 0` ⇒ `acquire` builds a `ComputeGate`;
+    /// `None` (the default) keeps compute accounting OFF. A `Some(0)` is coerced
+    /// to `None` — a zero-vCPU box is meaningless and would reserve `0` vCPU·ms,
+    /// silently disabling the wall; the composition root already filters `0`, this
+    /// is defense-in-depth.
+    #[must_use]
+    pub fn with_runner_vcpu(mut self, runner_vcpu: Option<u32>) -> Self {
+        self.runner_vcpu = runner_vcpu.filter(|&v| v > 0);
+        self
     }
 
     /// Override the close ack-window concurrency cap (audit P1).
@@ -1049,5 +1178,167 @@ mod tests {
         state.mark_runner_lease("lease-a");
         assert!(state.is_runner_lease("lease-a"));
         assert!(!state.is_runner_lease("lease-b"), "other ids unaffected");
+    }
+
+    // ── FIX-F-1: the static ceiling source resolves a non-zero ceiling ────────
+
+    fn tid(raw: &str) -> TenantId {
+        TenantId::new(raw).unwrap()
+    }
+
+    /// A `StaticPlans` tenant whose cap matches a real tier resolves THAT tier's
+    /// `ceiling_for` — NOT the disabled `0`. This is the fix for the wall being
+    /// unenforced on the static path (the trait default returned 0).
+    #[test]
+    fn static_plans_resolves_per_tier_ceiling_not_zero() {
+        // Pro tier cap is 20040 (plan_for(Pro).0); give the tenant that cap.
+        let (pro_cap, _) = plan_for(PlanTier::Pro);
+        let plans = StaticPlans::new([TenantPlan {
+            tenant: tid("acme"),
+            max_concurrency: pro_cap,
+            rate_ceiling_per_min: 0,
+        }]);
+        let got = plans.tenant_ceiling_vcpu_ms(&tid("acme"));
+        assert_eq!(
+            got,
+            ceiling_for(PlanTier::Pro),
+            "a provisioned tenant on a real tier must resolve its true ceiling"
+        );
+        assert_ne!(got, 0, "the wall must NOT resolve to the disabled sentinel");
+    }
+
+    /// An UNKNOWN `StaticPlans` tenant, and one whose cap is an arbitrary
+    /// non-ladder value (the bootstrap `FABRIC_TENANT_MAX_CONCURRENCY` case),
+    /// both resolve `0` — fail-SAFE-disabled, never reject-all.
+    #[test]
+    fn static_plans_unknown_or_nonladder_cap_resolves_zero() {
+        let plans = StaticPlans::new([TenantPlan {
+            tenant: tid("bootstrap"),
+            max_concurrency: 7, // not on the {20,40,80,160,320} ladder
+            rate_ceiling_per_min: 0,
+        }]);
+        assert_eq!(
+            plans.tenant_ceiling_vcpu_ms(&tid("bootstrap")),
+            0,
+            "an arbitrary non-ladder cap has no tier ⇒ disabled sentinel"
+        );
+        assert_eq!(
+            plans.tenant_ceiling_vcpu_ms(&tid("nobody")),
+            0,
+            "an unknown tenant resolves the disabled sentinel"
+        );
+    }
+
+    /// A tenant onboarded into the LIVE registry resolves its tier ceiling
+    /// THROUGH the `CompositePlanSource` (primary = LivePlanRegistry), and the
+    /// bootstrap tenant resolves THROUGH the static secondary — the exact
+    /// composition the static-mode composition root wires. Before FIX-F-1 the
+    /// primary returned 0 and the whole chain was disabled.
+    #[test]
+    fn live_registry_through_composite_resolves_non_zero_ceiling() {
+        use crate::handlers::admin::LivePlanRegistry;
+
+        let live = Arc::new(LivePlanRegistry::new());
+        live.set_plan(tid("scaleco"), PlanTier::Scale);
+
+        let (boot_cap, _) = plan_for(PlanTier::Starter);
+        let static_plans = Arc::new(StaticPlans::new([TenantPlan {
+            tenant: tid("boot"),
+            max_concurrency: boot_cap,
+            rate_ceiling_per_min: 0,
+        }]));
+
+        let composite = CompositePlanSource::new(live.clone(), static_plans);
+
+        assert_eq!(
+            composite.tenant_ceiling_vcpu_ms(&tid("scaleco")),
+            ceiling_for(PlanTier::Scale),
+            "the live-onboarded tenant resolves its tier ceiling via primary"
+        );
+        assert_eq!(
+            composite.tenant_ceiling_vcpu_ms(&tid("boot")),
+            ceiling_for(PlanTier::Starter),
+            "the bootstrap tenant falls through to the static secondary's ceiling"
+        );
+        assert_eq!(
+            composite.tenant_ceiling_vcpu_ms(&tid("ghost")),
+            0,
+            "an unknown tenant stays at the disabled sentinel from both arms"
+        );
+    }
+
+    // ── FIX-H-1: the EXPLICIT ceiling wins over cap-inference ──────────────────
+
+    /// The round-3 overspend bypass: a NON-ladder bootstrap cap (the live-CI
+    /// path's `FABRIC_TENANT_MAX_CONCURRENCY=4`) used to infer ceiling `0` (wall
+    /// silently OFF). With an explicit `FABRIC_TENANT_MAX_VCPU_H`-derived
+    /// ceiling wired in, the non-ladder tenant now resolves THAT value — the
+    /// wall arms regardless of the cap.
+    #[test]
+    fn static_plans_explicit_ceiling_arms_a_nonladder_cap() {
+        use corelink_fabric::compute_meter::ceiling_vcpu_ms;
+
+        let explicit = ceiling_vcpu_ms(10).unwrap(); // 10 vCPU-h, validated
+        let plans = StaticPlans::new([TenantPlan {
+            tenant: tid("bootstrap"),
+            max_concurrency: 4, // not on the {20,40,80,160,320} ladder
+            rate_ceiling_per_min: 0,
+        }])
+        .with_ceiling_vcpu_ms(explicit);
+
+        assert_ne!(explicit, 0, "10 vCPU-h is a real, non-disabled ceiling");
+        assert_eq!(
+            plans.tenant_ceiling_vcpu_ms(&tid("bootstrap")),
+            explicit,
+            "the explicit ceiling arms the non-ladder cap (no longer the silent 0)"
+        );
+    }
+
+    /// The explicit ceiling WINS even when the cap WOULD match a ladder tier —
+    /// the operator's `FABRIC_TENANT_MAX_VCPU_H` is authoritative, never
+    /// silently overridden by the cap-inferred tier value.
+    #[test]
+    fn static_plans_explicit_ceiling_overrides_ladder_inference() {
+        use corelink_fabric::compute_meter::ceiling_vcpu_ms;
+
+        let (pro_cap, _) = plan_for(PlanTier::Pro);
+        let explicit = ceiling_vcpu_ms(3).unwrap();
+        assert_ne!(
+            explicit,
+            ceiling_for(PlanTier::Pro),
+            "the explicit value must differ from the tier value for this test to bite"
+        );
+        let plans = StaticPlans::new([TenantPlan {
+            tenant: tid("acme"),
+            max_concurrency: pro_cap, // would infer ceiling_for(Pro)
+            rate_ceiling_per_min: 0,
+        }])
+        .with_ceiling_vcpu_ms(explicit);
+
+        assert_eq!(
+            plans.tenant_ceiling_vcpu_ms(&tid("acme")),
+            explicit,
+            "the explicit ceiling wins over the cap-inferred ladder ceiling"
+        );
+    }
+
+    /// An UNSET explicit ceiling (`0`) keeps the FIX-F-1 cap-inference fallback:
+    /// a ladder cap still resolves its tier ceiling, so existing deployments
+    /// that rely on the ladder are unchanged.
+    #[test]
+    fn static_plans_unset_explicit_keeps_ladder_fallback() {
+        let (starter_cap, _) = plan_for(PlanTier::Starter);
+        let plans = StaticPlans::new([TenantPlan {
+            tenant: tid("boot"),
+            max_concurrency: starter_cap,
+            rate_ceiling_per_min: 0,
+        }])
+        .with_ceiling_vcpu_ms(0); // explicitly unset
+
+        assert_eq!(
+            plans.tenant_ceiling_vcpu_ms(&tid("boot")),
+            ceiling_for(PlanTier::Starter),
+            "an unset explicit ceiling falls back to the cap-inferred ladder value"
+        );
     }
 }

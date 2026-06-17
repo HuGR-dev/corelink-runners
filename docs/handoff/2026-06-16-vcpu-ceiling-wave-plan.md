@@ -448,3 +448,135 @@ clean (techlead-decompose §2), a **3rd confirming cold pass** on this Revision-
 contract runs before CONTRACT-freeze + the impl wave. The math/arithmetic core is
 twice-confirmed sound; this pass targets only whether F1–F5 are fully closed and no
 new landing-gap remains.
+
+## 13. CONTRACT FROZEN — 3rd pass IRONCLAD + the storage-locus refinement
+
+**3rd cold pass verdict: IRONCLAD (dispatchable).** F1–F5 all CLOSED against the
+real seams (F1: `leases::acquire` is the single choke-point both HTTP + webhook
+pass through, no 3rd construction site; F3: `put` has ZERO production admission
+callers — every non-ledger-internal `.put()` is test/conformance; F4: the single
+join is expressible on the existing `leases_tenant_active_idx`). 3 hardest new
+attacks tried, all failed. The loop converged (round 2 found F1–F5; round 3 found
+nothing new) — **the contract is FROZEN.**
+
+### Storage-locus refinement (the lead's architecture decision, supersedes §2)
+The wave plan §2 put the compute columns on **`LeaseRecord`** and the ceiling on
+**`TenantPlan`**. A pre-dispatch codebase scan found this would break **71
+construction sites** (27 `LeaseRecord {…}` across 12 files + 44 `TenantPlan {…}`
+across 26 — mostly tests every WP and the acceptance suite touch): a mechanical-
+churn minefield injecting conflicts into every WP's file.
+
+**Decision: the compute state is LEDGER-INTERNAL, not on the record or the plan.**
+- The admit carries it IN via `ComputeGate`; each ledger STORES it however it
+  needs — Pg as the spec'd nullable columns on `leases`; InMemory/File in a
+  side-store keyed by `lease_id` (the pattern the envelope `checkpoints` side-map
+  already uses). Consumed internally at `transition` (accrual) + the admit Σ. No
+  external reader needs it on `LeaseRecord`.
+- The ceiling value is looked up at admit from the plan tier (plans.rs
+  `ceiling_for(tier)`), parallel to `max_concurrency` — NOT a `TenantPlan` field.
+
+**Strictly better, not just less churn:** the wire-adjacent `LeaseRecord` (journal
+round-trip + `RunnerLease` mirror) and the plan caps stay byte-identical; the
+ceiling machinery cannot leak into the frozen wire surface even by accident.
+
+### Frozen anchor shipped (workspace green: fmt+clippy+test exit 0)
+- `compute_meter.rs` (`2780a71`): `vcpu_ms` · `period_key` (Hinnant + 6-row KAT) ·
+  `ceiling_vcpu_ms`/`fits_ledger`/`MAX_LEDGER_VCPU_MS` (i64 guards).
+- `ledger.rs` (`1559d59`): `ComputeGate` · `AdmitOutcome` · `try_admit_with_compute`
+  (None == today; Some-without-override == fail-closed Err) · `compute_accrued`.
+
+### Re-sliced wave (file-disjoint, conflict-free; supersedes §3/§11 slice)
+The original 3-file `ledger.rs / file_ledger.rs / pg_ledger.rs` split is WRONG —
+InMemory AND File both live in `ledger.rs`. Corrected:
+
+| WP | owns (disjoint files) | model | dep-on |
+|---|---|---|---|
+| **A — plan tiers** | `plans.rs` (`ceiling_for` table: ratified 100/240/600/1200/2400 vCPU-h) | sonnet | CONTRACT |
+| **B — box vCPU** | `cloud-engine/northflank.rs` + server cloud_exec config (box→box_vcpu_count) | sonnet | CONTRACT |
+| **CD — mem+file ledgers** | `ledger.rs` (InMemory + File impls + side-store + accrual map) | opus | CONTRACT |
+| **E — Pg ledger** ⚠️ | `pg_ledger.rs` (single-join gate · conditional-lock txn transition · columns + compute_accrual migration · i64 guards · pool floor) | opus | CONTRACT |
+| **F — acquire wiring** | `handlers/leases.rs` (F1 clamp in shared core · build ComputeGate · OverCompute→429) | opus | CONTRACT,A,B,+ledger |
+| **G — acceptance** | `tests/` (ceiling-reject · period-roll · in-flight Σ · default-off byte-identical · webhook clamp · 2-instance over-ceiling · pool-exhaustion · once-only) | opus | all |
+
+MERGE ORDER: CONTRACT(done) → {A,B,CD,E parallel} → F → G.
+
+## 14. Implementation + adversarial audit + fixes (2026-06-16)
+
+### Built (all cold-verified by the lead, default-off)
+`compute_meter.rs` `2780a71` · `ledger.rs` contract `1559d59` · WP-A plans `e65dda0`
+· WP-CD mem+file ledgers `72600de` · WP-E pg_ledger `de11054` (DB-proven) · WP-F
+acquire wiring `c5edd8b`. Workspace fmt+clippy+test green; the 6 PgLedger
+ceiling tests (incl. `two_instance_over_ceiling_admits_exactly_one`) green against
+a real Postgres 16.
+
+### Adversarial audit — 7-angle loop-until-dry (run `wf_cfed54fd`)
+4 rounds, **22 confirmed findings** (2 P0 + 11 P1 + 9 P2) after adversarial
+refute-verify, collapsing to ~4 roots. The audit found real holes the build +
+DB tests missed:
+- **ROOT-1 (P0) — queued-admission ceiling BYPASS.** Under `FABRIC_ADMISSION_MODE=queue`
+  (the fleet-autoscaler's normal mode) + accounting on, an at-cap tenant routes to
+  the queue; the dispatch (`admission.rs` run_tick) admitted via bare `try_admit`
+  (no gate) → queued leases invisible to Σ, accrue nothing → ceiling bypassed
+  without bound at the autoscaler's steady state. The InMemory suite masked it
+  (opposite gate order; no queue+compute test).
+- **ROOT-2 (P1×7) — FileLedger non-atomic durable writes.** Record and
+  Reservation/Accrual were separate journal appends; a crash or a terminal-record-
+  without-its-accrual replay lost the accrual or orphaned the reservation.
+- **ROOT-3 (P1×3) — PgLedger:** terminal accrual NOT clamped to the reservation
+  (an overdue-unreaped lease → `actual > reserved` → the §8 monotonicity premise
+  violated → overspend); `LEAST` clamp applied AFTER the bigint add (Postgres
+  RAISEs first); pool-floor asserted not mechanized (advisory-lock starvation).
+- **ROOT-4 (P2) — gate order (compute-before-concurrency) + remove-on-Held undercount.**
+
+### Fixes (each with a regression that FAILS pre-fix, PASSES post-fix)
+- **FIX-A** `admission.rs`+`leases.rs` `31304d4`: shared `build_compute_gate`; the
+  queued dispatch builds+passes the SAME gate; OverCompute rejected-not-queued;
+  period_key recomputed at dispatch. Regression `queue_dispatch_enforces_compute_ceiling`
+  (pre-fix dispatched 1/200; post-fix 0/429).
+- **FIX-B** `ledger.rs` `ee7cf98`: single atomic `JournalLine::AdmitCommit` /
+  `TerminalTransition`; compute-before-concurrency; remove-on-Held fail-closed.
+  +6 regressions incl. crash-truncation (admit + terminal byte-boundary).
+- **FIX-C** `pg_ledger.rs` `9e99391`: terminal accrual clamped to the reservation
+  (§8 `actual ≤ reserved`); overflow clamped before the bigint add; pool semaphore;
+  compute-before-concurrency. All DB-proven (`terminal_accrual_clamps_to_reservation_overdue`,
+  `accrual_upsert_clamps_before_add_no_raise`, `pool_burst_releasing_transition_not_starved`).
+
+Integrated HEAD `8ee9848`; all 3 fixes DB-verified against real Postgres 16
+(97+6 green). **Re-audit (7-angle, run `wf_2debb11b`) running on the fixed code —
+the wall does NOT merge until the loop runs dry (2 consecutive clean rounds).**
+
+## 15. CONVERGED — the audit loop ran dry (2026-06-16)
+
+The adversarial-audit loop **ran dry** after 4 re-audit rounds. Convergence:
+
+| Round | Confirmed | Fixes |
+|---|---|---|
+| 1 (audit) | 22 (2 P0) | FIX-A queue gate · FIX-B FileLedger atomic journal · FIX-C Pg clamp/overflow/pool |
+| 2 (re-audit, expanded scope) | 34 | FIX-D InMemory/File §8 clamp · FIX-E phantom-Held terminalize · FIX-F ceiling-source/config/durable-guard |
+| 3 (re-audit) | 3 (1 P1) | FIX-G stale-test rewrite · FIX-H explicit `FABRIC_TENANT_MAX_VCPU_H` ceiling + positive `==Postgres` backend guard |
+| 4 (re-audit) | **0** | — (2 consecutive dry rounds) |
+
+8 fix-WPs closed **real** bypasses the build + initial DB tests missed: a P0
+queue-admission ceiling bypass (autoscaler steady-state), FileLedger crash-non-
+atomicity, the §8 `actual ≤ reserved` invariant applied to only one of three
+ledgers, a phantom-Held slot leak, a silently-disabled ceiling for non-ladder
+caps, and a durability-vs-cross-instance guard confusion. Every fix carries a
+regression that FAILS pre-fix and PASSES post-fix.
+
+**Final state (HEAD `b0f7b5a`):**
+- Adversarial audit: **DRY** (22→34→3→0, 7 angles, adversarial refute-verify).
+- Full workspace gate + DB: **817 tests, 0 failed** (fmt + clippy `--workspace
+  -D warnings` + `cargo test --workspace` against real Postgres 16, `--test-threads=1`).
+- DB-proven: `two_instance_over_ceiling_admits_exactly_one`,
+  `terminal_accrual_clamps_to_reservation_overdue`, `accrual_upsert_clamps_before_add`,
+  `pool_burst_releasing_transition_not_starved`, the once-only/idempotency suite.
+- **Default-off byte-identical** (no `FABRIC_RUNNER_VCPU` ⇒ today's behavior).
+- **Fail-loud config:** accounting-on with a non-durable backend, a config typo, or
+  a ceiling that resolves to 0 ⇒ boot refuses (never a silent unlimited grant).
+
+**Ready for merge review.** The wall is built default-off; arming it needs
+`FABRIC_RUNNER_VCPU` + a durable (Postgres) backend + an explicit ceiling
+(`FABRIC_TENANT_MAX_VCPU_H` on the static path, or a ladder tier). Owner-gated
+follow-up (separate, deferred): the CoreLink-introspect ceiling vector (`max_vcpu_h`
+in `conformance/corelink-introspect.json`) for CoreLink-backed tenants — that path
+still resolves to 0 (disabled) until the cross-repo vector amendment is ratified.

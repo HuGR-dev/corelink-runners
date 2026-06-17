@@ -6,15 +6,21 @@
 //! three): the org IS the tenant key, so a plan set here is the same key the
 //! cap gate, fairness, and the Stripe customer all hang off.
 //!
-//! ## The ladder (pricing.md §2, owner-decided 2026-06-12)
+//! ## The ladder (pricing.md §2, RATIFIED 2026-06-16)
 //!
-//! | Tier    | $/mo | max_concurrency |
-//! |---------|------|-----------------|
-//! | Starter | $8   | 20              |
-//! | Pro     | $20  | 40              |
-//! | Team    | $50  | 80              |
-//! | Scale   | $100 | 160             |
-//! | Max     | $200 | 320             |
+//! | Tier    | $/mo | max_concurrency | vCPU-h/mo ceiling |
+//! |---------|------|-----------------|-------------------|
+//! | Starter | $8   | 20              | 100               |
+//! | Pro     | $20  | 40              | 240               |
+//! | Team    | $50  | 80              | 600               |
+//! | Scale   | $100 | 160             | 1200              |
+//! | Max     | $200 | 320             | 2400              |
+//!
+//! The vCPU-h/mo ceiling is the COGS wall (pricing.md §2 40/60 ladder,
+//! ratified 2026-06-16). It is expressed internally as vCPU·ms
+//! (`ceiling_for(tier)`) and enforced by the compute gate (a later WP);
+//! adding it here changes NO runtime behavior — the gate activates only
+//! when the acquire path passes a `ComputeGate`.
 //!
 //! Concurrency caps transcribe the `pricing.md §2` ladder exactly (Starter 20 ·
 //! Pro 40 · Team 80 · Scale 160 · Max 320). Above Max is **Enterprise**
@@ -60,6 +66,7 @@
 
 use std::collections::HashMap;
 
+use crate::compute_meter::MS_PER_VCPU_HOUR;
 use crate::tenant::{TenantId, TenantPlan};
 
 /// Self-serve plan tiers from the `pricing.md §2` ladder (fixed-cap rows only;
@@ -105,6 +112,26 @@ pub fn plan_for(tier: PlanTier) -> (u32, u32) {
     }
 }
 
+/// The per-tier monthly compute ceiling in vCPU·ms (pricing.md §2, RATIFIED 2026-06-16).
+///
+/// Returns `tier_vcpu_h × MS_PER_VCPU_HOUR`. All ratified ceilings (100–2400 vCPU-h)
+/// fit `i64::MAX` with enormous margin (verified by [`compute_meter::fits_ledger`] in
+/// the acceptance suite). `0` is the "disabled" sentinel — never `u64::MAX` (per
+/// `compute_meter::ceiling_vcpu_ms` contract).
+///
+/// **Default-off**: nothing calls this yet; the gate activates when the acquire
+/// path wires a `ComputeGate` (a later WP). Adding this function changes NO
+/// runtime behavior.
+pub fn ceiling_for(tier: PlanTier) -> u64 {
+    match tier {
+        PlanTier::Starter => 100 * MS_PER_VCPU_HOUR,
+        PlanTier::Pro => 240 * MS_PER_VCPU_HOUR,
+        PlanTier::Team => 600 * MS_PER_VCPU_HOUR,
+        PlanTier::Scale => 1200 * MS_PER_VCPU_HOUR,
+        PlanTier::Max => 2400 * MS_PER_VCPU_HOUR,
+    }
+}
+
 /// Org-keyed plan registry — the live cap source of truth CP2 reads.
 ///
 /// Keyed by [`TenantId`] because org = tenant (ADR-0002): the org that signed
@@ -147,6 +174,23 @@ impl PlanRegistry {
             tenant: tenant.clone(),
             max_concurrency,
             rate_ceiling_per_min,
+        }
+    }
+
+    /// The monthly compute ceiling in vCPU·ms for `tenant`'s current tier.
+    ///
+    /// Returns `ceiling_for(tier)` for a provisioned tenant, or `0` (disabled)
+    /// for an unknown one. This is consistent with the fail-closed zero-cap
+    /// contract: an unknown tenant is already rejected by the concurrency cap
+    /// before the compute gate is consulted, so `0` here is never the sole
+    /// guard — it is defense-in-depth.
+    ///
+    /// **Default-off**: nothing calls this yet; the gate activates when the
+    /// acquire path wires a `ComputeGate` (a later WP).
+    pub fn tenant_ceiling_vcpu_ms(&self, tenant: &TenantId) -> u64 {
+        match self.tiers.get(tenant) {
+            Some(&tier) => ceiling_for(tier),
+            None => 0,
         }
     }
 }
@@ -258,6 +302,61 @@ mod tests {
         assert!(
             src.contains("ADR-0002"),
             "plans.rs must cite ADR-0002 (org = tenant) for its registry keying"
+        );
+    }
+
+    #[test]
+    fn ceiling_for_ratified_ladder() {
+        // Table-driven over ALL tiers: ceiling_for must equal the ratified
+        // vCPU-h × MS_PER_VCPU_HOUR (pricing.md §2, RATIFIED 2026-06-16),
+        // and every value must fit the i64 ledger column (fits_ledger).
+        use crate::compute_meter::{MS_PER_VCPU_HOUR, fits_ledger};
+
+        let expected: [(PlanTier, u64); 5] = [
+            (PlanTier::Starter, 100),
+            (PlanTier::Pro, 240),
+            (PlanTier::Team, 600),
+            (PlanTier::Scale, 1200),
+            (PlanTier::Max, 2400),
+        ];
+        assert_eq!(expected.len(), PlanTier::ALL.len());
+
+        for (tier, vcpu_h) in expected {
+            let want = vcpu_h * MS_PER_VCPU_HOUR;
+            let got = ceiling_for(tier);
+            assert_eq!(
+                got, want,
+                "ceiling_for({tier:?}): expected {want}, got {got}"
+            );
+            assert!(
+                fits_ledger(got),
+                "ceiling_for({tier:?}) = {got} overflows i64 ledger"
+            );
+        }
+    }
+
+    #[test]
+    fn tenant_ceiling_vcpu_ms_provisioned_and_unknown() {
+        // Provisioned tenant: returns the correct ceiling for their tier.
+        // Unknown tenant: returns 0 (fail-closed, consistent with zero concurrency cap).
+        use crate::compute_meter::MS_PER_VCPU_HOUR;
+
+        let t = tenant("acme");
+        let mut registry = PlanRegistry::new();
+        registry.set_plan(t.clone(), PlanTier::Pro);
+
+        let want = 240 * MS_PER_VCPU_HOUR;
+        assert_eq!(
+            registry.tenant_ceiling_vcpu_ms(&t),
+            want,
+            "provisioned Pro tenant must return 240 vCPU-h ceiling"
+        );
+
+        let unknown = tenant("nobody-provisioned-me");
+        assert_eq!(
+            registry.tenant_ceiling_vcpu_ms(&unknown),
+            0,
+            "unknown tenant must return 0 (disabled / fail-closed)"
         );
     }
 }

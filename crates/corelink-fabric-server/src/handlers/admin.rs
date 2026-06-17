@@ -140,6 +140,23 @@ impl PlanSource for LivePlanRegistry {
     ) -> Result<Option<TenantPlan>, PlanSourceError> {
         Ok(self.plan_of(tenant))
     }
+
+    /// WP-F / FIX-F-1: surface the live per-tier compute ceiling. Forwards to
+    /// the inner [`PlanRegistry::tenant_ceiling_vcpu_ms`] under the read lock —
+    /// exactly mirroring how [`plan_of`](Self::plan_of) forwards `tenant_plan`.
+    ///
+    /// Before this override the trait DEFAULT returned `0`, so the vCPU-h wall
+    /// was UNENFORCED on the live-onboarding path even with `FABRIC_RUNNER_VCPU`
+    /// set (the ledger SKIPS the compute check for `ceiling_vcpu_ms == 0`). A
+    /// provisioned tenant now resolves `plans::ceiling_for(tier)`; an unknown
+    /// tenant resolves `0` (disabled sentinel, fail-SAFE-disabled, never
+    /// reject-all — and already zero-capped by the concurrency gate first).
+    fn tenant_ceiling_vcpu_ms(&self, tenant: &TenantId) -> u64 {
+        self.inner
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .tenant_ceiling_vcpu_ms(tenant)
+    }
 }
 
 // ── Handler state ─────────────────────────────────────────────────────────────

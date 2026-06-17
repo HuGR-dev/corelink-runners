@@ -215,6 +215,26 @@ pub struct ServerConfig {
     /// [`config_from_env`]: `Some` here with the `Memory` backend is a hard
     /// boot error, fail-closed — there is nowhere durable to export to).
     pub billing_export_interval: Option<std::time::Duration>,
+    // ── WP-F box-vCPU compute ceiling — DEFAULT-OFF ──────────────────────────
+    /// The serving box's vCPU count, from `FABRIC_RUNNER_VCPU` (u32). Absent,
+    /// unparseable-as-positive, or `0` → `None` → the vCPU-h compute-accounting
+    /// wall stays DORMANT (`acquire` passes no `ComputeGate`, byte-identical to
+    /// the concurrency-only path). `Some(vcpu > 0)` ACTIVATES the ceiling: each
+    /// acquire reserves `vcpu × ttl` vCPU·ms against the tenant's monthly ceiling.
+    pub runner_vcpu: Option<u32>,
+    /// FIX-H-1: the EXPLICIT monthly vCPU-h ceiling for the bootstrap tenant on
+    /// the Static path, from `FABRIC_TENANT_MAX_VCPU_H` (positive u64
+    /// vCPU-hours). Absent/empty → `None`. When `Some`, it is converted to
+    /// vCPU·ms via [`compute_meter::ceiling_vcpu_ms`] (which i64-guards) and
+    /// threaded into `StaticPlans` as the AUTHORITATIVE ceiling — replacing the
+    /// old cap-inference that silently resolved `0` (wall OFF) for a non-ladder
+    /// `FABRIC_TENANT_MAX_CONCURRENCY`. With accounting armed
+    /// ([`runner_vcpu`](Self::runner_vcpu) `Some`) on Static, a bootstrap
+    /// ceiling that still resolves `0` is a HARD boot error (see
+    /// [`config_from_env`]).
+    ///
+    /// [`compute_meter::ceiling_vcpu_ms`]: corelink_fabric::compute_meter::ceiling_vcpu_ms
+    pub tenant_max_vcpu_h: Option<u64>,
 }
 
 impl std::fmt::Debug for ServerConfig {
@@ -251,6 +271,8 @@ impl std::fmt::Debug for ServerConfig {
                 &self.admin_key.as_ref().map(|_| "***REDACTED***"),
             )
             .field("billing_export_interval", &self.billing_export_interval)
+            .field("runner_vcpu", &self.runner_vcpu)
+            .field("tenant_max_vcpu_h", &self.tenant_max_vcpu_h)
             .finish()
     }
 }
@@ -628,6 +650,142 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
         }
     };
 
+    // ── WP-F box-vCPU compute ceiling — DEFAULT-OFF ──────────────────────────
+    // Optional u32, three-way (FIX-F-2):
+    //   - absent / empty / whitespace-only → None → compute accounting OFF
+    //     (the whole ceiling wall stays dormant; acquire passes no ComputeGate).
+    //     This is the INTENTIONAL-off path.
+    //   - a syntactically-valid `0`           → None (off, explicitly disabled).
+    //   - present-but-UNPARSEABLE (`"4 "` after trim still bad, `"4.0"`, `"four"`)
+    //     → hard boot Err. Before this fix a typo silently mapped to None, so an
+    //     operator who MEANT to enable the ceiling shipped with it OFF. A
+    //     deployer mistake must fail loudly (like `parse_positive_u64`), never
+    //     become a silent-off.
+    let runner_vcpu = match get("FABRIC_RUNNER_VCPU")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        None => None,
+        Some(v) => {
+            let n = v.parse::<u32>().with_context(|| {
+                format!(
+                    "FABRIC_RUNNER_VCPU {v:?} is not a valid u32; \
+                     unset/empty disables the compute ceiling, `0` disables it \
+                     explicitly — a non-empty unparseable value is a typo and \
+                     fails closed rather than silently disabling accounting"
+                )
+            })?;
+            // A valid `0` is the explicit-off sentinel (not an error): no gate.
+            (n > 0).then_some(n)
+        }
+    };
+
+    // ── FIX-H-1: explicit per-tenant vCPU-h ceiling ──────────────────────────
+    // Optional positive u64 vCPU-HOURS, from FABRIC_TENANT_MAX_VCPU_H. Absent/
+    // empty → None (no explicit ceiling; the StaticPlans cap-inference fallback
+    // applies). A present-but-unparseable or `0` value is a HARD boot error —
+    // a deployer mistake must fail loudly, mirroring FABRIC_RUNNER_VCPU and the
+    // other positive-u64 config — never silently become "no ceiling". The value
+    // is converted to vCPU·ms here so the i64 ledger-column guard
+    // (compute_meter::ceiling_vcpu_ms) fires at boot, not per-acquire.
+    let tenant_max_vcpu_h = match get("FABRIC_TENANT_MAX_VCPU_H")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        None => None,
+        Some(v) => {
+            let n = v.parse::<u64>().with_context(|| {
+                format!(
+                    "FABRIC_TENANT_MAX_VCPU_H {v:?} is not a valid u64 (vCPU-hours); \
+                     unset/empty leaves the bootstrap tenant ceiling to plan inference"
+                )
+            })?;
+            if n == 0 {
+                anyhow::bail!(
+                    "FABRIC_TENANT_MAX_VCPU_H must be >= 1 if present (0 = no ceiling is \
+                     the DISABLED sentinel, which is what leaving it UNSET already means; \
+                     a literal 0 here is almost certainly a mistake) — unset it to leave \
+                     the ceiling to plan inference, or set a positive vCPU-h limit"
+                );
+            }
+            // i64 ledger-column guard fires at boot (not per-acquire).
+            let ceiling_vcpu_ms = corelink_fabric::compute_meter::ceiling_vcpu_ms(n)
+                .context("FABRIC_TENANT_MAX_VCPU_H overflows the i64 vCPU·ms ledger column")?;
+            debug_assert_ne!(
+                ceiling_vcpu_ms, 0,
+                "a positive vCPU-h must arm a non-zero wall"
+            );
+            Some(n)
+        }
+    };
+
+    // ── FIX-H-2: cross-instance cap-safety guard for the vCPU-h ceiling ───────
+    // Accounting-ON (FABRIC_RUNNER_VCPU set non-zero) REQUIRES a CROSS-INSTANCE
+    // CAP-SAFE ledger backend, i.e. Postgres. The admit is a Σ-read THEN reserve;
+    // only PgLedger's `pg_advisory_xact_lock(tenant)` makes that pair ATOMIC
+    // ACROSS INSTANCES. A non-Postgres backend (InMemory today, a hypothetical
+    // single-process File journal tomorrow) CANNOT: two instances on separate
+    // journals each enforce the ceiling over their OWN journal, so a tenant
+    // fanning across both reaches ~2× the ceiling. The requirement is
+    // cross-instance atomicity of the admit (the advisory lock), NOT mere
+    // restart-durability — a future File backend must therefore NOT silently
+    // pass. This is a POSITIVE allow-list (== Postgres), not a negative `!=
+    // Memory`. Default-off (runner_vcpu None) ⇒ inert, byte-identical to before.
+    if runner_vcpu.is_some() && ledger_backend != LedgerBackend::Postgres {
+        anyhow::bail!(
+            "the vCPU-h compute ceiling (FABRIC_RUNNER_VCPU set) requires a cross-instance \
+             cap-safe ledger backend (postgres); {ledger_backend:?} cannot make the admit \
+             Σ-read+reserve atomic across instances (only PgLedger's advisory lock can), so \
+             a tenant fanning across instances would exceed the ceiling. \
+             Set FABRIC_LEDGER_BACKEND=pg, or unset FABRIC_RUNNER_VCPU to disable the ceiling"
+        );
+    }
+
+    // ── FIX-H-1: armed-but-DISABLED bootstrap ceiling is a HARD boot error ────
+    // With accounting armed (runner_vcpu Some) on the STATIC auth path, the
+    // bootstrap tenant's ceiling MUST resolve non-zero. `0` is the ledger's
+    // "skip the compute check" sentinel — an unlimited grant. Before FIX-H-1 a
+    // non-ladder FABRIC_TENANT_MAX_CONCURRENCY silently inferred `0` here, so the
+    // wall ran OFF while the durability guard's pass gave a false "armed" signal.
+    // The explicit FABRIC_TENANT_MAX_VCPU_H is the cure; this guard makes its
+    // ABSENCE (when it is needed) fail LOUD instead of silently unlimited. Only
+    // Static is checked: CoreLink derives the ceiling per-acquire from
+    // introspection (no bootstrap StaticPlans), and CoreLink keeps the documented
+    // default-`0` until the entitlement vector lands.
+    if runner_vcpu.is_some() && matches!(auth_backend, AuthBackend::Static) {
+        // The trait method is needed to resolve the cap-inference fallback.
+        use crate::PlanSource as _;
+        let bootstrap_ceiling = match tenant_max_vcpu_h {
+            // Explicit ceiling set ⇒ StaticPlans returns it verbatim (non-zero,
+            // guaranteed by the >= 1 + overflow checks above).
+            Some(_) => 1,
+            // No explicit ceiling ⇒ StaticPlans falls back to cap-inference;
+            // recompute the SAME resolution the bootstrap StaticPlans will use
+            // (a non-ladder cap ⇒ 0 = DISABLED).
+            None => {
+                let tenant =
+                    TenantId::new(&bootstrap_tenant).expect("bootstrap_tenant was validated above");
+                StaticPlans::new([TenantPlan {
+                    tenant: tenant.clone(),
+                    max_concurrency,
+                    rate_ceiling_per_min,
+                }])
+                .tenant_ceiling_vcpu_ms(&tenant)
+            }
+        };
+        if bootstrap_ceiling == 0 {
+            anyhow::bail!(
+                "FABRIC_RUNNER_VCPU is set (compute ceiling armed) but the bootstrap \
+                 tenant's vCPU-h ceiling resolves to 0 = DISABLED (an unlimited grant): \
+                 the bootstrap concurrency cap (FABRIC_TENANT_MAX_CONCURRENCY={max_concurrency}) \
+                 is not on the pricing ladder so no tier ceiling can be inferred. \
+                 Set FABRIC_TENANT_MAX_VCPU_H to arm the wall for this tenant, or unset \
+                 FABRIC_RUNNER_VCPU to disable the ceiling — the ceiling must never run \
+                 silently unlimited while accounting is on"
+            );
+        }
+    }
+
     Ok(ServerConfig {
         bind_addr,
         signing_key,
@@ -651,6 +809,8 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
         admission_park_cap,
         admin_key,
         billing_export_interval,
+        runner_vcpu,
+        tenant_max_vcpu_h,
     })
 }
 
@@ -793,11 +953,25 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
                 cfg.bootstrap_pat.clone(),
                 tenant.clone(),
             )]));
-            let static_plans = Arc::new(StaticPlans::new([TenantPlan {
-                tenant,
-                max_concurrency: cfg.max_concurrency,
-                rate_ceiling_per_min: cfg.rate_ceiling_per_min,
-            }]));
+            // FIX-H-1: thread the EXPLICIT vCPU-h ceiling (if set) into the
+            // bootstrap StaticPlans, so a non-ladder cap still arms the wall.
+            // `None` ⇒ ceiling 0 ⇒ the cap-inference fallback (unchanged). The
+            // u64 vCPU-h → vCPU·ms conversion is re-validated here (it already
+            // passed in config_from_env; this never fails for a value that
+            // booted), keeping the i64 guard the single source of truth.
+            let ceiling_vcpu_ms = match cfg.tenant_max_vcpu_h {
+                Some(h) => corelink_fabric::compute_meter::ceiling_vcpu_ms(h)
+                    .expect("FABRIC_TENANT_MAX_VCPU_H was validated in config_from_env"),
+                None => 0,
+            };
+            let static_plans = Arc::new(
+                StaticPlans::new([TenantPlan {
+                    tenant,
+                    max_concurrency: cfg.max_concurrency,
+                    rate_ceiling_per_min: cfg.rate_ceiling_per_min,
+                }])
+                .with_ceiling_vcpu_ms(ceiling_vcpu_ms),
+            );
             // The single live registry: shared (via Arc) between the plan-source
             // (primary arm of the composite) and the admin write-handle, so a
             // POST takes effect on the very next admission check — no restart.
@@ -840,7 +1014,10 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
 
     let state = AppState::new(ledger, plans, Arc::new(SystemClock))
         .with_signer(signer)
-        .with_ingest_signer(ingest_signer);
+        .with_ingest_signer(ingest_signer)
+        // WP-F: activate the vCPU-h compute ceiling iff FABRIC_RUNNER_VCPU > 0
+        // (default None ⇒ accounting OFF, byte-identical to the prior path).
+        .with_runner_vcpu(cfg.runner_vcpu);
 
     // Default-off: when mock_exec is false the existing cloud-backend
     // composition is byte-identical to before this change (NoBoxExec +
@@ -1139,5 +1316,307 @@ mod admission_park_cap_wiring_tests {
             state.admission_queue.is_none(),
             "reject mode wires NO admission queue (today's behavior, unchanged)"
         );
+    }
+}
+
+#[cfg(test)]
+mod compute_ceiling_config_tests {
+    use super::*;
+
+    /// Minimal valid static/loopback env, parameterized by the two knobs the
+    /// FIX-F-2/F-3 boot-validation tests drive: `FABRIC_RUNNER_VCPU` and
+    /// `FABRIC_LEDGER_BACKEND`. Everything else is the byte-identical default.
+    ///
+    /// The bootstrap cap is `4` — a NON-ladder value (the live-CI fixture), so
+    /// with accounting armed the FIX-H-1 guard requires `FABRIC_TENANT_MAX_VCPU_H`
+    /// to arm a non-zero ceiling. [`env_armed`] supplies it; this base helper
+    /// does NOT (it is the F-2/F-3 surface, which arms via the durability/typo
+    /// paths that fire BEFORE the ceiling-0 guard or use the off-path).
+    fn env_with(
+        runner_vcpu: Option<&str>,
+        ledger_backend: Option<&str>,
+    ) -> impl Fn(&str) -> Option<String> {
+        env_full(runner_vcpu, ledger_backend, None)
+    }
+
+    /// `env_with` plus the explicit `FABRIC_TENANT_MAX_VCPU_H` knob (FIX-H-1).
+    fn env_full(
+        runner_vcpu: Option<&str>,
+        ledger_backend: Option<&str>,
+        max_vcpu_h: Option<&str>,
+    ) -> impl Fn(&str) -> Option<String> {
+        let runner_vcpu = runner_vcpu.map(str::to_string);
+        let ledger_backend = ledger_backend.map(str::to_string);
+        let max_vcpu_h = max_vcpu_h.map(str::to_string);
+        move |k: &str| match k {
+            "FABRIC_BIND_ADDR" => Some("127.0.0.1:8080".to_string()),
+            "FABRIC_DEV_UNSAFE" => Some("1".to_string()),
+            "FABRIC_PAT" => Some("test-pat".to_string()),
+            "FABRIC_TENANT" => Some("acme".to_string()),
+            "FABRIC_TENANT_MAX_CONCURRENCY" => Some("4".to_string()),
+            "FABRIC_RUNNER_VCPU" => runner_vcpu.clone(),
+            "FABRIC_LEDGER_BACKEND" => ledger_backend.clone(),
+            "FABRIC_TENANT_MAX_VCPU_H" => max_vcpu_h.clone(),
+            _ => None,
+        }
+    }
+
+    // ── FIX-F-2: FABRIC_RUNNER_VCPU is no longer a silent-off on a typo ───────
+
+    /// A non-empty UNPARSEABLE value is a hard boot Err — an operator who MEANT
+    /// to enable the ceiling can no longer ship with it silently disabled.
+    #[test]
+    fn runner_vcpu_unparseable_is_a_hard_boot_error() {
+        for bad in ["four", "4.0", "4 cpus", "-1", "0x4"] {
+            let err = config_from_env(env_with(Some(bad), None))
+                .expect_err("a non-empty unparseable FABRIC_RUNNER_VCPU must Err");
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("FABRIC_RUNNER_VCPU"),
+                "the error must name the offending var; got {msg:?}"
+            );
+        }
+    }
+
+    /// `"4 "` (a trailing-space typo) trims to `"4"` and parses to `Some(4)` —
+    /// trimming is intentional (secret mounts append whitespace). Paired with a
+    /// durable backend so the F-3 guard passes; config_from_env does not connect.
+    #[test]
+    fn runner_vcpu_trailing_space_trims_and_parses() {
+        let get = |k: &str| match k {
+            "FABRIC_BIND_ADDR" => Some("127.0.0.1:8080".to_string()),
+            "FABRIC_DEV_UNSAFE" => Some("1".to_string()),
+            "FABRIC_PAT" => Some("test-pat".to_string()),
+            "FABRIC_TENANT" => Some("acme".to_string()),
+            "FABRIC_TENANT_MAX_CONCURRENCY" => Some("4".to_string()),
+            "FABRIC_RUNNER_VCPU" => Some("4 ".to_string()), // trailing space
+            "FABRIC_LEDGER_BACKEND" => Some("pg".to_string()),
+            "DATABASE_URL" => Some("postgres://localhost/fabric".to_string()),
+            "FABRIC_TENANT_MAX_VCPU_H" => Some("10".to_string()), // FIX-H-1: arm the wall
+            _ => None,
+        };
+        let cfg = config_from_env(get).expect("`4 ` trims to `4` and parses");
+        assert_eq!(
+            cfg.runner_vcpu,
+            Some(4),
+            "a trailing space is trimmed; the value parses, not a silent-off"
+        );
+    }
+
+    /// Absent → None (intentional off); empty/whitespace → None; a valid `0` →
+    /// None (explicit off). None of these are errors.
+    #[test]
+    fn runner_vcpu_absent_empty_or_zero_is_off_none() {
+        // Absent.
+        let cfg = config_from_env(env_with(None, None)).expect("absent is the off-path");
+        assert!(cfg.runner_vcpu.is_none(), "absent ⇒ None (off)");
+
+        // Empty / whitespace.
+        for blank in ["", "   "] {
+            let cfg = config_from_env(env_with(Some(blank), None)).expect("blank is the off-path");
+            assert!(cfg.runner_vcpu.is_none(), "blank {blank:?} ⇒ None (off)");
+        }
+
+        // Valid 0 → off.
+        let cfg = config_from_env(env_with(Some("0"), None)).expect("`0` is explicit-off");
+        assert!(cfg.runner_vcpu.is_none(), "`0` ⇒ None (explicit off)");
+    }
+
+    // ── FIX-F-3 / FIX-H-2: accounting-on requires a CROSS-INSTANCE cap-safe ───
+    //                       (postgres) ledger backend ────────────────────────
+
+    /// Accounting-ON (FABRIC_RUNNER_VCPU non-zero) on the default/explicit
+    /// InMemory backend is a hard boot Err — InMemory cannot make the admit
+    /// Σ-read+reserve atomic across instances, so two instances would each
+    /// enforce the ceiling over their own state (~2× overspend). FIX-H-2 turns
+    /// the old `!= Memory` negative match into a positive `== Postgres`
+    /// allow-list; the error now cites cross-instance cap-safety, not mere
+    /// restart-durability.
+    #[test]
+    fn accounting_on_with_inmemory_refuses_to_boot() {
+        // Default backend (absent → memory).
+        let err = config_from_env(env_with(Some("4"), None))
+            .expect_err("accounting-on + default(memory) backend must Err");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("cross-instance") && msg.contains("FABRIC_RUNNER_VCPU"),
+            "the error must explain the cross-instance cap-safety requirement; got {msg:?}"
+        );
+
+        // Explicit memory backend → same refusal.
+        let err = config_from_env(env_with(Some("4"), Some("memory")))
+            .expect_err("accounting-on + explicit memory backend must Err");
+        assert!(
+            format!("{err:#}").contains("cross-instance"),
+            "explicit memory must also be refused"
+        );
+    }
+
+    /// Accounting-ON + the durable Postgres backend passes config validation
+    /// (the F-3 guard allows it). config_from_env does NOT connect — DATABASE_URL
+    /// is validated to be present, so supply it; the actual connect happens later
+    /// in build_app_and_state, which this test does not call.
+    #[test]
+    fn accounting_on_with_postgres_passes_config_validation() {
+        let get = |k: &str| match k {
+            "FABRIC_BIND_ADDR" => Some("127.0.0.1:8080".to_string()),
+            "FABRIC_DEV_UNSAFE" => Some("1".to_string()),
+            "FABRIC_PAT" => Some("test-pat".to_string()),
+            "FABRIC_TENANT" => Some("acme".to_string()),
+            "FABRIC_TENANT_MAX_CONCURRENCY" => Some("4".to_string()),
+            "FABRIC_RUNNER_VCPU" => Some("4".to_string()),
+            "FABRIC_LEDGER_BACKEND" => Some("pg".to_string()),
+            "DATABASE_URL" => Some("postgres://localhost/fabric".to_string()),
+            "FABRIC_TENANT_MAX_VCPU_H" => Some("10".to_string()), // FIX-H-1: arm the wall
+            _ => None,
+        };
+        let cfg = config_from_env(get)
+            .expect("accounting-on + pg + DATABASE_URL must pass config validation");
+        assert_eq!(cfg.runner_vcpu, Some(4), "the ceiling is armed");
+        assert_eq!(cfg.ledger_backend, LedgerBackend::Postgres);
+    }
+
+    /// Accounting-OFF (FABRIC_RUNNER_VCPU absent) + InMemory backend is
+    /// UNCHANGED — the durability guard is inert by default, no new boot
+    /// failure. This pins the default-off byte-identical invariant.
+    #[test]
+    fn accounting_off_with_inmemory_is_unchanged() {
+        let cfg = config_from_env(env_with(None, None))
+            .expect("default-off must build exactly as before");
+        assert!(cfg.runner_vcpu.is_none());
+        assert_eq!(cfg.ledger_backend, LedgerBackend::Memory);
+
+        // Explicit `0` (off) + memory is also fine — the guard keys on Some.
+        let cfg = config_from_env(env_with(Some("0"), Some("memory")))
+            .expect("explicit-off + memory must build");
+        assert!(cfg.runner_vcpu.is_none());
+        assert_eq!(cfg.ledger_backend, LedgerBackend::Memory);
+    }
+
+    // ── FIX-H-1: armed + Static + non-ladder cap + NO explicit ceiling ────────
+    //            must FAIL LOUD (no silent unlimited grant) ───────────────────
+
+    /// The round-3 overspend bypass, now fail-LOUD: accounting armed
+    /// (FABRIC_RUNNER_VCPU) + Static + a NON-ladder cap (4) + NO
+    /// FABRIC_TENANT_MAX_VCPU_H ⇒ the bootstrap ceiling would silently resolve 0
+    /// (DISABLED = unlimited). That is now a HARD boot error. (pg backend so the
+    /// FIX-H-2 cross-instance guard passes and we reach the H-1 ceiling guard.)
+    #[test]
+    fn armed_static_nonladder_cap_without_explicit_ceiling_refuses_to_boot() {
+        let get = move |k: &str| match k {
+            "DATABASE_URL" => Some("postgres://localhost/fabric".to_string()),
+            other => env_full(Some("4"), Some("pg"), None)(other),
+        };
+        let err = config_from_env(get)
+            .expect_err("armed + Static + non-ladder cap + no explicit ceiling must Err");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("DISABLED") && msg.contains("FABRIC_TENANT_MAX_VCPU_H"),
+            "the error must name the disabled ceiling AND the cure; got {msg:?}"
+        );
+    }
+
+    /// With FABRIC_TENANT_MAX_VCPU_H set, the same armed + Static + non-ladder
+    /// config boots, AND the StaticPlans ceiling resolves to the EXPLICIT value
+    /// × 3_600_000 — NOT 0, NOT cap-inferred.
+    #[test]
+    fn armed_static_with_explicit_ceiling_boots_and_resolves_that_value() {
+        use crate::PlanSource as _;
+        let get = move |k: &str| match k {
+            "DATABASE_URL" => Some("postgres://localhost/fabric".to_string()),
+            other => env_full(Some("4"), Some("pg"), Some("10"))(other),
+        };
+        let cfg = config_from_env(get).expect("explicit ceiling arms the non-ladder cap");
+        assert_eq!(
+            cfg.tenant_max_vcpu_h,
+            Some(10),
+            "the explicit ceiling is parsed"
+        );
+
+        // The bootstrap StaticPlans resolves the EXPLICIT vCPU·ms, not 0/cap-inferred.
+        let want = corelink_fabric::compute_meter::ceiling_vcpu_ms(10).unwrap();
+        assert_eq!(want, 10 * 3_600_000, "10 vCPU-h = 36_000_000 vCPU·ms");
+        let tenant = corelink_fabric::TenantId::new("acme").unwrap();
+        let plans = StaticPlans::new([TenantPlan {
+            tenant: tenant.clone(),
+            max_concurrency: cfg.max_concurrency,
+            rate_ceiling_per_min: cfg.rate_ceiling_per_min,
+        }])
+        .with_ceiling_vcpu_ms(corelink_fabric::compute_meter::ceiling_vcpu_ms(10).unwrap());
+        assert_eq!(
+            plans.tenant_ceiling_vcpu_ms(&tenant),
+            want,
+            "the wall resolves the EXPLICIT ceiling, not the disabled sentinel"
+        );
+    }
+
+    /// A literal `0` for FABRIC_TENANT_MAX_VCPU_H is a deployer mistake (it means
+    /// the same as unset) and fails loudly, never silently disables.
+    #[test]
+    fn explicit_ceiling_zero_is_a_hard_boot_error() {
+        let err = config_from_env(env_full(None, None, Some("0")))
+            .expect_err("a literal 0 vCPU-h must Err");
+        assert!(
+            format!("{err:#}").contains("FABRIC_TENANT_MAX_VCPU_H"),
+            "the error must name the offending var"
+        );
+    }
+
+    /// An unparseable FABRIC_TENANT_MAX_VCPU_H is a hard boot error (fail-loud,
+    /// never a silent no-ceiling).
+    #[test]
+    fn explicit_ceiling_unparseable_is_a_hard_boot_error() {
+        for bad in ["ten", "10h", "-1", "10.0"] {
+            let err = config_from_env(env_full(None, None, Some(bad)))
+                .expect_err("an unparseable FABRIC_TENANT_MAX_VCPU_H must Err");
+            assert!(
+                format!("{err:#}").contains("FABRIC_TENANT_MAX_VCPU_H"),
+                "the error must name the offending var for {bad:?}"
+            );
+        }
+    }
+
+    // ── FIX-H-2: the cross-instance guard is now a POSITIVE == Postgres ───────
+
+    /// Any NON-Postgres backend with accounting armed is refused — the guard is a
+    /// positive allow-list, so a hypothetical future single-process backend does
+    /// NOT silently pass. memory is the only other backend today; assert it
+    /// fails via the cross-instance error path.
+    #[test]
+    fn armed_non_postgres_backend_is_refused_positive_allowlist() {
+        let err = config_from_env(env_with(Some("4"), Some("memory")))
+            .expect_err("armed + non-postgres must Err (positive ==Postgres allow-list)");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("cross-instance") && msg.contains("postgres"),
+            "the error must cite cross-instance cap-safety + name postgres; got {msg:?}"
+        );
+    }
+
+    /// Armed + postgres passes the FIX-H-2 guard (and the H-1 guard, given the
+    /// explicit ceiling) — the only backend that makes the admit atomic across
+    /// instances.
+    #[test]
+    fn armed_postgres_passes_the_cross_instance_guard() {
+        let get = move |k: &str| match k {
+            "DATABASE_URL" => Some("postgres://localhost/fabric".to_string()),
+            other => env_full(Some("4"), Some("pg"), Some("10"))(other),
+        };
+        let cfg = config_from_env(get).expect("armed + pg + explicit ceiling must boot");
+        assert_eq!(cfg.ledger_backend, LedgerBackend::Postgres);
+        assert_eq!(cfg.runner_vcpu, Some(4));
+    }
+
+    /// Default-OFF: FABRIC_RUNNER_VCPU unset ⇒ neither new guard fires, the
+    /// explicit-ceiling config is unused (None), byte-identical to before.
+    #[test]
+    fn default_off_leaves_both_guards_inert() {
+        let cfg = config_from_env(env_with(None, None)).expect("default-off must build");
+        assert!(cfg.runner_vcpu.is_none(), "accounting off");
+        assert!(
+            cfg.tenant_max_vcpu_h.is_none(),
+            "the explicit ceiling is unused when accounting is off"
+        );
+        assert_eq!(cfg.ledger_backend, LedgerBackend::Memory);
     }
 }
