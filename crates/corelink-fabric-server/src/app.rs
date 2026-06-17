@@ -132,14 +132,40 @@ pub trait PlanSource: Send + Sync {
 #[derive(Debug, Clone, Default)]
 pub struct StaticPlans {
     plans: HashMap<TenantId, TenantPlan>,
+    /// FIX-H-1: the EXPLICIT monthly vCPU-h compute ceiling (vCPU·ms) for every
+    /// tenant this source carries, wired from `FABRIC_TENANT_MAX_VCPU_H`. `0` =
+    /// unset (the disabled sentinel / "infer from cap" fallback below). A
+    /// NON-zero value WINS — it is returned verbatim by
+    /// [`tenant_ceiling_vcpu_ms`](StaticPlans::tenant_ceiling_vcpu_ms), never
+    /// re-derived from the cap. This removes the round-3 overspend bypass:
+    /// before, a non-ladder bootstrap cap (the live-CI path uses
+    /// `FABRIC_TENANT_MAX_CONCURRENCY=4`) matched no tier and silently resolved
+    /// `0` — the wall OFF while the operator believed it armed.
+    ceiling_vcpu_ms: u64,
 }
 
 impl StaticPlans {
-    /// Build a source from a set of plans (keyed by their tenant).
+    /// Build a source from a set of plans (keyed by their tenant). The explicit
+    /// ceiling is `0` (unset) — see [`with_ceiling_vcpu_ms`](Self::with_ceiling_vcpu_ms).
     pub fn new(plans: impl IntoIterator<Item = TenantPlan>) -> Self {
         Self {
             plans: plans.into_iter().map(|p| (p.tenant.clone(), p)).collect(),
+            ceiling_vcpu_ms: 0,
         }
+    }
+
+    /// FIX-H-1: set the EXPLICIT monthly vCPU-h compute ceiling (in vCPU·ms,
+    /// already validated against the i64 ledger bound via
+    /// [`compute_meter::ceiling_vcpu_ms`](corelink_fabric::compute_meter::ceiling_vcpu_ms)).
+    /// A non-zero value is returned verbatim by
+    /// [`tenant_ceiling_vcpu_ms`](Self::tenant_ceiling_vcpu_ms) for any tenant
+    /// this source carries, INSTEAD of the cap-inferred ladder value — so the
+    /// wall arms regardless of whether the bootstrap cap lands on the
+    /// `{20,40,80,160,320}` tier ladder. `0` leaves the cap-inference fallback.
+    #[must_use]
+    pub fn with_ceiling_vcpu_ms(mut self, ceiling_vcpu_ms: u64) -> Self {
+        self.ceiling_vcpu_ms = ceiling_vcpu_ms;
+        self
     }
 }
 
@@ -148,23 +174,38 @@ impl PlanSource for StaticPlans {
         self.plans.get(tenant).cloned()
     }
 
-    /// WP-F / FIX-F-1: surface the per-tier compute ceiling for a provisioned
+    /// WP-F / FIX-F-1 / FIX-H-1: surface the compute ceiling for a provisioned
     /// tenant on the static path, so the vCPU-h wall actually enforces when
-    /// `FABRIC_RUNNER_VCPU` is set (before this fix the default `0` left the
-    /// ledger SKIPPING the compute check ⇒ accounting silently OFF).
+    /// `FABRIC_RUNNER_VCPU` is set (before WP-F the default `0` left the ledger
+    /// SKIPPING the compute check ⇒ accounting silently OFF).
     ///
-    /// `StaticPlans` carries a bare [`TenantPlan`] (cap + rate, no tier), so the
-    /// tier — and thus the ceiling — is recovered by matching the plan's
-    /// `max_concurrency` against the fixed `plans::plan_for` ladder
-    /// ([`PlanTier::ALL`]). A tenant whose cap matches a real tier resolves
-    /// `plans::ceiling_for(tier)`; an arbitrary bootstrap cap
-    /// (`FABRIC_TENANT_MAX_CONCURRENCY` set to a non-ladder value, which no tier
-    /// enum can express) matches nothing and resolves `0` — the disabled
-    /// sentinel, fail-SAFE-disabled, never reject-all. Unknown tenant → `0`.
+    /// Resolution order:
+    /// 1. **Explicit ceiling (FIX-H-1) WINS.** If this source was built with a
+    ///    non-zero [`ceiling_vcpu_ms`](Self::with_ceiling_vcpu_ms) (from
+    ///    `FABRIC_TENANT_MAX_VCPU_H`), return it for any tenant on file — NOT a
+    ///    value reverse-engineered from the cap. This closes the round-3
+    ///    overspend bypass: a non-ladder bootstrap cap (the live-CI path sets
+    ///    `FABRIC_TENANT_MAX_CONCURRENCY=4`) used to match no tier and silently
+    ///    resolve `0`, leaving the wall OFF while the operator believed it armed.
+    /// 2. **Cap-inference fallback (unset explicit ceiling).** `StaticPlans`
+    ///    carries a bare [`TenantPlan`] (cap + rate, no tier), so the tier —
+    ///    and thus the ceiling — is recovered by matching the plan's
+    ///    `max_concurrency` against the fixed `plans::plan_for` ladder
+    ///    ([`PlanTier::ALL`]). A tenant whose cap matches a real tier resolves
+    ///    `plans::ceiling_for(tier)`; an arbitrary non-ladder cap matches
+    ///    nothing and resolves `0` — fail-SAFE-disabled, never reject-all. (The
+    ///    boot guard in `server.rs` turns that silent `0` into a hard boot error
+    ///    when accounting is armed.)
+    ///
+    /// Unknown tenant → `0` in either case (no plan on file ⇒ nothing to gate).
     fn tenant_ceiling_vcpu_ms(&self, tenant: &TenantId) -> u64 {
         let Some(plan) = self.plans.get(tenant) else {
             return 0;
         };
+        // FIX-H-1: the explicit, operator-set ceiling wins over cap-inference.
+        if self.ceiling_vcpu_ms != 0 {
+            return self.ceiling_vcpu_ms;
+        }
         PlanTier::ALL
             .into_iter()
             .find(|&tier| plan_for(tier).0 == plan.max_concurrency)
@@ -1223,6 +1264,81 @@ mod tests {
             composite.tenant_ceiling_vcpu_ms(&tid("ghost")),
             0,
             "an unknown tenant stays at the disabled sentinel from both arms"
+        );
+    }
+
+    // ── FIX-H-1: the EXPLICIT ceiling wins over cap-inference ──────────────────
+
+    /// The round-3 overspend bypass: a NON-ladder bootstrap cap (the live-CI
+    /// path's `FABRIC_TENANT_MAX_CONCURRENCY=4`) used to infer ceiling `0` (wall
+    /// silently OFF). With an explicit `FABRIC_TENANT_MAX_VCPU_H`-derived
+    /// ceiling wired in, the non-ladder tenant now resolves THAT value — the
+    /// wall arms regardless of the cap.
+    #[test]
+    fn static_plans_explicit_ceiling_arms_a_nonladder_cap() {
+        use corelink_fabric::compute_meter::ceiling_vcpu_ms;
+
+        let explicit = ceiling_vcpu_ms(10).unwrap(); // 10 vCPU-h, validated
+        let plans = StaticPlans::new([TenantPlan {
+            tenant: tid("bootstrap"),
+            max_concurrency: 4, // not on the {20,40,80,160,320} ladder
+            rate_ceiling_per_min: 0,
+        }])
+        .with_ceiling_vcpu_ms(explicit);
+
+        assert_ne!(explicit, 0, "10 vCPU-h is a real, non-disabled ceiling");
+        assert_eq!(
+            plans.tenant_ceiling_vcpu_ms(&tid("bootstrap")),
+            explicit,
+            "the explicit ceiling arms the non-ladder cap (no longer the silent 0)"
+        );
+    }
+
+    /// The explicit ceiling WINS even when the cap WOULD match a ladder tier —
+    /// the operator's `FABRIC_TENANT_MAX_VCPU_H` is authoritative, never
+    /// silently overridden by the cap-inferred tier value.
+    #[test]
+    fn static_plans_explicit_ceiling_overrides_ladder_inference() {
+        use corelink_fabric::compute_meter::ceiling_vcpu_ms;
+
+        let (pro_cap, _) = plan_for(PlanTier::Pro);
+        let explicit = ceiling_vcpu_ms(3).unwrap();
+        assert_ne!(
+            explicit,
+            ceiling_for(PlanTier::Pro),
+            "the explicit value must differ from the tier value for this test to bite"
+        );
+        let plans = StaticPlans::new([TenantPlan {
+            tenant: tid("acme"),
+            max_concurrency: pro_cap, // would infer ceiling_for(Pro)
+            rate_ceiling_per_min: 0,
+        }])
+        .with_ceiling_vcpu_ms(explicit);
+
+        assert_eq!(
+            plans.tenant_ceiling_vcpu_ms(&tid("acme")),
+            explicit,
+            "the explicit ceiling wins over the cap-inferred ladder ceiling"
+        );
+    }
+
+    /// An UNSET explicit ceiling (`0`) keeps the FIX-F-1 cap-inference fallback:
+    /// a ladder cap still resolves its tier ceiling, so existing deployments
+    /// that rely on the ladder are unchanged.
+    #[test]
+    fn static_plans_unset_explicit_keeps_ladder_fallback() {
+        let (starter_cap, _) = plan_for(PlanTier::Starter);
+        let plans = StaticPlans::new([TenantPlan {
+            tenant: tid("boot"),
+            max_concurrency: starter_cap,
+            rate_ceiling_per_min: 0,
+        }])
+        .with_ceiling_vcpu_ms(0); // explicitly unset
+
+        assert_eq!(
+            plans.tenant_ceiling_vcpu_ms(&tid("boot")),
+            ceiling_for(PlanTier::Starter),
+            "an unset explicit ceiling falls back to the cap-inferred ladder value"
         );
     }
 }
