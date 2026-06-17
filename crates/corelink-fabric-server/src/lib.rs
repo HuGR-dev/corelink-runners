@@ -15,11 +15,15 @@
 //! (`token_store_down_fails_closed_503_never_open`); the same refusal
 //! governs an unreadable ledger or a tenant with no plan on file.
 
+/// WP-7 stub — AC pre-lease lookup hook (moat build).
+pub mod ac_pre_lease;
 pub mod admission;
 pub mod app;
 pub mod attestation;
 pub mod auth;
 pub mod billing_export;
+/// WP-6 stub — clw drive seam (A8: exit-transparency + non-zero-not-cached).
+pub mod clw_drive;
 pub mod cloud_exec;
 pub mod corelink_auth;
 pub mod corelink_plans;
@@ -70,3 +74,5 @@ pub use runner_inject::{
     CLW_ENDPOINT_ENV, CLW_REF_DOMAIN_ENV, CLW_REF_DOMAIN_RUNNER, CLW_TENANT_ENV, CLW_TOKEN_ENV,
     RUNNER_JITCONFIG_ENV, inject_clw_env, inject_runner_jitconfig,
 };
+pub use ac_pre_lease::{AcPreLeaseHook, AcPreLeaseOutcome, MockAcHook, NoOpAcHook};
+pub use clw_drive::{ClwDrive, ClwDriveOutcome, ClwExitTransparency, MockClwDrive};
