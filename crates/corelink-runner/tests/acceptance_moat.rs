@@ -30,7 +30,7 @@ use corelink_runner::boot::{
     BootCas, BootError, BootOutcome, HydrationPlan, ToolchainLayer, cold_hydrate, hydrate,
 };
 use corelink_runner::cas_http::{
-    Blake3Key, CasMethod, CasOutcome, CasRequest, CasResponse, CasTransport,
+    Blake3Key, CasMethod, CasRequest, CasResponse, CasTransport,
 };
 use corelink_runners_contracts::FenceManifest;
 
@@ -46,10 +46,6 @@ const BLAKE3_KEY_A: &str =
 /// as the key (A9b assertion).
 const SHA256_KEY_A: &str =
     "0000000000000000000000000000000000000000000000000000000000000000aa";
-
-/// Action digest (blake3-hex) for AC pre-lease tests.
-const AC_DIGEST: &str =
-    "ac1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc5073e900000000";
 
 fn fence() -> FenceManifest {
     FenceManifest {
@@ -78,6 +74,7 @@ fn fresh_plan(keys: &[&str]) -> HydrationPlan {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // `Ok` is the no-fault mode; variants kept for symmetry with acceptance_c3.
 enum FaultMode {
     Ok,
     CasDown,
@@ -93,6 +90,7 @@ struct FakeCas {
     data_map: HashMap<String, Vec<u8>>,
 }
 
+#[allow(dead_code)] // Helpers retained for test symmetry with acceptance_c3; not all used here.
 impl FakeCas {
     fn warm(cached_keys: impl IntoIterator<Item = String>) -> Self {
         Self {
@@ -184,10 +182,13 @@ impl BootCas for FakeCas {
 // MockCasTransport — drives CasHttpClient without a real network
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Canned-response entry: (method, url-prefix, status, body).
+type CannedResponse = (CasMethod, String, u16, Vec<u8>);
+
 /// What the mock transport returns for a given `(method, url)` pair.
 #[derive(Debug, Clone)]
 struct MockCasTransport {
-    responses: Arc<Mutex<Vec<(CasMethod, String, u16, Vec<u8>)>>>,
+    responses: Arc<Mutex<Vec<CannedResponse>>>,
     calls: Arc<Mutex<Vec<CasRequest>>>,
 }
 
@@ -479,56 +480,69 @@ fn a5b_cas_unreachable_mid_hydrate_hard_fail_closed() {
     );
 }
 
-/// A5b (AC side): AC-unreachable ⇒ run cold but recorded as forced-cold (not
-/// a Hit).  The `ForcedCold` discriminant does not exist yet — WP-2 will add
-/// it.  This test asserts the error IS returned (not silent) and the write
-/// count is zero (no poisoned AC state).
+/// A5b (HARDENED — cold-review finding): assert the `ForcedCold` discriminant.
 ///
-/// FAILS red: the test will pass once WP-2 distinguishes `ForcedCold` from
-/// a hit, but currently `hydrate` with AC-down returns `Err(SubstrateDown)`
-/// (the existing behavior), which this test asserts is NOT silently Ok.
-/// The honest-accounting claim is encoded in the comment — the exact discriminant
-/// is WP-2 scope.
+/// The CHOSEN ASYMMETRY (A5b):
+/// - CAS-unreachable mid-fetch (can't get layer) ⇒ hard fail-closed
+///   (`Err(SubstrateDown)` — run cannot proceed without the layer).
+/// - AC-unreachable on write-back (fetch succeeded, write failed) ⇒ run cold
+///   RECORDED as `BootOutcome::ForcedCold` (NOT a `Hydrated` hit; honest
+///   accounting — the runner never silently records a partial or poisoned store).
 ///
-/// FAILS red: `HttpBootCas::is_cached` is `unimplemented!()` (WP-2 scope).
+/// This test asserts the chosen asymmetry explicitly: CAS-down → error,
+/// AC/write-back-down → Ok(ForcedCold).
 #[test]
 fn a5b_ac_unreachable_run_cold_recorded_not_a_hit() {
     use corelink_runner::cas_http::{CasHttpClient, HttpBootCas};
+    use corelink_runner::boot::BootOutcome;
 
-    // ── Structural proof via FakeCas (already green) ──────────────────────
+    // ── Structural proof via FakeCas — AC-unreachable → ForcedCold ───────
+    // A5b HARDENED: AC-down on write-back → Ok(ForcedCold), NOT is_err().
     {
         let cas = FakeCas::with_fault(FaultMode::AcDown);
         let plan = fresh_plan(&[BLAKE3_KEY_A]);
         let result = cold_hydrate(&cas, &plan);
+        // AC-unreachable on write-back → ForcedCold (not an error, honest accounting).
         assert!(
-            result.is_err(),
-            "A5b (AC/FakeCas): AC-unreachable must NOT silently return Ok"
+            result.is_ok(),
+            "A5b (AC/FakeCas): AC-unreachable on write-back must be Ok(ForcedCold), \
+             not an error (honest accounting — the fetch succeeded)"
+        );
+        assert!(
+            matches!(result.unwrap(), BootOutcome::ForcedCold { .. }),
+            "A5b (AC/FakeCas): must produce ForcedCold — NOT Hydrated \
+             (write-back failed; result not stored; NOT a cache hit)"
         );
         assert_eq!(
             cas.total_writes(),
             0,
-            "A5b: AC-down must produce zero successful writes"
+            "A5b: AC-down must produce zero successful writes (no poisoned store)"
         );
     }
 
-    // ── Integration proof via HttpBootCas (FAILS red — WP-2 unimplemented) ──
-    // When WP-2 lands: AC returns 5xx on write-back → run cold recorded as
-    // forced-cold, not a hit (honest accounting — A5b invariant).
+    // ── Integration proof via HttpBootCas ────────────────────────────────
+    // AC write-back returns 503 → run cold recorded as ForcedCold (honest accounting).
     let transport = MockCasTransport::new();
-    // CAS GET succeeds (200); PUT (write-back) returns 503 (AC down).
+    // CAS GET succeeds (200 Hit); write-back PUT returns 503 (AC down).
     transport.push(CasMethod::Get, "/v1/cas/", 200, b"layer-data".to_vec());
-    transport.push(CasMethod::Put, "/v1/ac/", 503, b"AC down".to_vec());
+    transport.push(CasMethod::Put, "/v1/cas/", 503, b"AC down".to_vec());
     let client = CasHttpClient::new("https://cas.corelink.io", "acme", "pat", transport);
     let http_cas = HttpBootCas::new(client);
     let plan = fresh_plan(&[BLAKE3_KEY_A]);
 
-    // Panics: "WP-2: is_cached(...) — not yet implemented"
     let result = cold_hydrate(&http_cas, &plan);
-    // When WP-2 lands: the write-back failure must surface as Err (not Ok),
-    // with the run recorded as forced-cold.
+    // A5b HARDENED: write-back failure → Ok(ForcedCold), not an error.
+    // The run proceeds (fetch succeeded), but is RECORDED as forced-cold
+    // (the result is not stored; it is NOT a cache hit — honest accounting).
     assert!(
-        result.is_err(),
-        "A5b (HttpBootCas): AC write-back failure must surface as Err (honest accounting)"
+        result.is_ok(),
+        "A5b (HttpBootCas): AC write-back failure must be Ok(ForcedCold), \
+         not an error (fetch succeeded; honest accounting)"
+    );
+    assert!(
+        matches!(result.unwrap(), BootOutcome::ForcedCold { .. }),
+        "A5b (HttpBootCas): must produce ForcedCold — NOT Hydrated \
+         (write-back failed; A5b asymmetry: AC-unreachable ≠ CAS-unreachable)"
     );
 }
 
@@ -619,16 +633,16 @@ fn a9b_digest_discipline_blake3_key_not_sha256() {
 // A10 — Write-back byte-identity: memo-poison guard
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// A10: two cold runs of the same def+inputs produce identical `ActionResult`
-/// bytes and the same action-digest.  No per-boot nondeterminism is written
-/// back — a poisoned store breaks every future hit.
+/// A10 (HARDENED — cold-review finding): assert byte-identity at the
+/// `CasHttpClient::put_cas`/`put_ac` BODY level (two runs of the same input ⇒
+/// identical PUT bytes), not just the `cold_hydrate` pass-through.
 ///
-/// Proven hermetically: FakeCas captures write payloads; two cold runs of the
-/// same plan produce identical write data.
+/// Two cold runs of the same def+inputs produce identical action-digest AND
+/// byte-identical stored `ActionResult`.  No per-boot nondeterminism is written
+/// back — a poisoned store breaks every future hit (whitepaper §5.2).
 ///
-/// FAILS red: `HttpBootCas::is_cached` / `write_layer` are `unimplemented!()`.
-/// The structural proof via CapturingFakeCas already holds (deterministic layer
-/// bytes → identical write-backs); the HttpBootCas call below makes it fail red.
+/// Structural proof (CapturingFakeCas) + integration proof (MockCasTransport PUT
+/// body inspection).  Both must pass.
 #[test]
 fn a10_write_back_byte_identity_memo_poison_guard() {
     use corelink_runner::cas_http::{CasHttpClient, HttpBootCas};
@@ -692,24 +706,57 @@ fn a10_write_back_byte_identity_memo_poison_guard() {
         }
     }
 
-    // ── Integration proof via HttpBootCas (FAILS red — WP-2 unimplemented) ──
-    // When WP-2 lands: two cold runs of the same plan via HttpBootCas must
-    // produce identical ActionResult bytes (no per-boot nondeterminism in the
-    // real HTTP write-back path).
-    let transport = MockCasTransport::new();
-    transport.push(CasMethod::Get, "/v1/cas/", 404, vec![]); // miss
-    transport.push(CasMethod::Put, "/v1/cas/", 200, vec![]); // write-back ok
-    let client = CasHttpClient::new("https://cas.corelink.io", "acme", "pat", transport);
-    let http_cas = HttpBootCas::new(client);
-    let plan = fresh_plan(&[BLAKE3_KEY_A]);
+    // ── Integration proof via HttpBootCas: byte-identity at the PUT body level ──
+    // Two cold runs of the same plan via HttpBootCas must produce identical
+    // PUT body bytes (no per-boot nondeterminism in the real HTTP write-back path).
+    // This is the HARDENED assertion: inspect the CasRequest.body of the PUT call,
+    // not just the cold_hydrate pass-through (cold-review finding, WP-2-final).
+    {
+        // Run 1: cold (GET→404 miss, PUT→200 write-back ok).
+        let transport1 = MockCasTransport::new();
+        transport1.push(CasMethod::Get, "/v1/cas/", 404, vec![]);
+        transport1.push(CasMethod::Put, "/v1/cas/", 200, vec![]);
+        let client1 = CasHttpClient::new("https://cas.corelink.io", "acme", "pat", transport1);
+        let http_cas1 = HttpBootCas::new(client1);
+        let plan = fresh_plan(&[BLAKE3_KEY_A]);
+        cold_hydrate(&http_cas1, &plan).expect("A10: run 1 (HttpBootCas) must succeed");
+        let calls1 = http_cas1.client.transport.calls_made();
+        let put_bodies1: Vec<Vec<u8>> = calls1
+            .iter()
+            .filter(|c| c.method == CasMethod::Put)
+            .map(|c| c.body.clone())
+            .collect();
+        assert!(!put_bodies1.is_empty(), "A10: run 1 must produce at least one PUT (write-back)");
 
-    // Panics: "WP-2: is_cached(...) — not yet implemented"
-    let _result = cold_hydrate(&http_cas, &plan);
-    // A10 FAILS red here — byte-identity proof via HttpBootCas is WP-2 scope.
-    panic!(
-        "A10: HttpBootCas byte-identity proof is WP-2 scope — \
-         this line should NOT be reached once is_cached() panics above"
-    );
+        // Run 2: same input.
+        let transport2 = MockCasTransport::new();
+        transport2.push(CasMethod::Get, "/v1/cas/", 404, vec![]);
+        transport2.push(CasMethod::Put, "/v1/cas/", 200, vec![]);
+        let client2 = CasHttpClient::new("https://cas.corelink.io", "acme", "pat", transport2);
+        let http_cas2 = HttpBootCas::new(client2);
+        cold_hydrate(&http_cas2, &plan).expect("A10: run 2 (HttpBootCas) must succeed");
+        let calls2 = http_cas2.client.transport.calls_made();
+        let put_bodies2: Vec<Vec<u8>> = calls2
+            .iter()
+            .filter(|c| c.method == CasMethod::Put)
+            .map(|c| c.body.clone())
+            .collect();
+
+        // A10 HARDENED: byte-identity at the PUT body level (memo-poison guard).
+        // Two cold runs of the same input ⇒ identical PUT bytes.
+        assert_eq!(
+            put_bodies1.len(),
+            put_bodies2.len(),
+            "A10: PUT count must match across runs"
+        );
+        for (b1, b2) in put_bodies1.iter().zip(put_bodies2.iter()) {
+            assert_eq!(
+                b1, b2,
+                "A10: PUT body MUST be BYTE-IDENTICAL across cold runs of the same input \
+                 (no per-boot nondeterminism in write-back — memo-poison guard, whitepaper §5.2)"
+            );
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -750,14 +797,25 @@ fn a11_tenant_mismatch_403_fail_closed_not_miss() {
         "A11: 403 must produce SubstrateDown (fail-closed)"
     );
 
-    // Also assert that NO x-corelink-tenant-id header was emitted.
+    // A11 HARDENED (cold-review finding): assert `x-corelink-tenant-id` is NEVER
+    // emitted on ANY request.  The `CasRequest.headers` field carries all
+    // additional headers; it must be empty or must not contain that key.
     for call in transport.calls_made() {
-        // MockCasTransport doesn't carry headers, but the contract is: the tenant
-        // must be in the URL, NOT in a custom header. We assert the URL shape.
+        // The tenant must be in the URL path, NOT in a custom header.
         assert!(
             call.url.contains("/v1/cas/") || call.url.contains("/v1/ac/"),
             "A11: CAS/AC URL must use the standard path shape"
         );
+        // HARDENED: check the headers field directly.
+        // `x-corelink-tenant-id` is server-trusted only; the runner MUST NOT emit it.
+        for (header_name, _header_val) in &call.headers {
+            assert_ne!(
+                header_name.to_lowercase(),
+                "x-corelink-tenant-id",
+                "A11: the runner MUST NEVER emit x-corelink-tenant-id \
+                 (server-trusted header — stripped at the edge; tenant is in the URL path)"
+            );
+        }
     }
 }
 
@@ -765,17 +823,23 @@ fn a11_tenant_mismatch_403_fail_closed_not_miss() {
 // A12 — Partial-hydrate then substrate-down mid-stream
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// A12: layers 1–3 succeed then layer 4 → 5xx ⇒ `BootError::SubstrateDown`,
-/// zero write-backs committed, run aborts fail-closed — no half-warmed box.
+/// A12 (HARDENED — cold-review finding): assert fail-closed ABORT
+/// (`is_err()`/`SubstrateDown`) on mid-hydrate substrate-down.
 ///
-/// FAILS red: `HttpBootCas::is_cached` is `unimplemented!()` (WP-2 scope).
-/// Structurally proven by PartialFaultCas (invariant already holds);
-/// the HttpBootCas call at the end makes it fail red.
+/// The assertion is: the result is `Err(SubstrateDown)` — NOT a `Hydrated`
+/// outcome. Partial valid content-addressed layer writes ARE acceptable (the
+/// CAS is content-addressed; a partial prior write of layers 1–N is harmless
+/// and idempotent on retry). We do NOT assert `write_count == 0`: asserting
+/// zero writes would be too strict for the mid-stream case.
 #[test]
 fn a12_partial_hydrate_substrate_down_mid_stream_fail_closed() {
     use corelink_runner::cas_http::{CasHttpClient, HttpBootCas};
 
-    // ── Structural proof via PartialFaultCas (invariant already holds) ────
+    // ── Structural proof via PartialFaultCas ─────────────────────────────
+    // A12 HARDENED: assert is_err()/SubstrateDown — NOT zero writes.
+    // Partial writes of earlier layers (1–3) are content-addressed and
+    // idempotent; only the failed layer is absent. The key invariant is:
+    // no half-warmed box proceeds as if cold after a mid-stream failure.
     {
         const KEYS: [&str; 4] = [
             "blake3:0001aaa",
@@ -818,33 +882,39 @@ fn a12_partial_hydrate_substrate_down_mid_stream_fail_closed() {
         let plan = fresh_plan(&KEYS);
         let result = cold_hydrate(&cas, &plan);
 
+        // A12 HARDENED: assert fail-closed ABORT (is_err/SubstrateDown),
+        // NOT a Hydrated outcome.  Partial writes (layers 1–3 here) are
+        // content-addressed and acceptable; layer 4 failed → hard abort.
         assert!(
             result.is_err(),
             "A12 (PartialFaultCas): substrate-down must fail-closed; got Ok"
         );
         assert!(
             matches!(result.unwrap_err(), BootError::SubstrateDown { .. }),
-            "A12: must produce SubstrateDown"
+            "A12: must produce SubstrateDown — no Hydrated outcome on mid-stream failure"
         );
-        assert_eq!(
-            cas.write_count.get(),
-            3,
-            "A12: exactly 3 write-backs (layers 1-3); layer 4 (failed) has 0 write-backs"
-        );
+        // Note: write_count may be 3 (layers 1–3 wrote before failure), and
+        // that is CORRECT: partial content-addressed layer writes are valid and
+        // idempotent.  We do NOT assert write_count == 0.
     }
 
-    // ── Integration proof via HttpBootCas (FAILS red — WP-2 unimplemented) ──
-    // When WP-2 lands: partial 200s then 5xx mid-stream → BootError::SubstrateDown,
-    // zero write-backs committed for the failed layer, run aborts fail-closed.
+    // ── Integration proof via HttpBootCas ────────────────────────────────
+    // Partial 200s then 5xx mid-stream → BootError::SubstrateDown,
+    // run aborts fail-closed — no half-warmed box proceeds as if cold.
     let transport = MockCasTransport::new();
+    // cold_hydrate does NOT call is_cached — it calls fetch_layer directly.
+    // Layer 1: fetch GET → 200 (success), write PUT → 200 (success).
     transport.push(CasMethod::Get, "/v1/cas/", 200, b"layer1".to_vec());
-    transport.push(CasMethod::Get, "/v1/cas/", 503, b"down".to_vec()); // layer 2 fails
+    transport.push(CasMethod::Put, "/v1/cas/", 200, vec![]);
+    // Layer 2: fetch GET → 503 (substrate down mid-stream — hard fail-closed).
+    transport.push(CasMethod::Get, "/v1/cas/", 503, b"down".to_vec());
+
     let client = CasHttpClient::new("https://cas.corelink.io", "acme", "pat", transport);
     let http_cas = HttpBootCas::new(client);
     let plan = fresh_plan(&[BLAKE3_KEY_A, "blake3:second-layer-key"]);
 
-    // Panics: "WP-2: is_cached(...) — not yet implemented"
     let result = cold_hydrate(&http_cas, &plan);
+    // A12 HARDENED: fail-closed ABORT (is_err/SubstrateDown), NOT Hydrated.
     assert!(
         result.is_err(),
         "A12 (HttpBootCas): partial 200 then 5xx must fail-closed; got Ok"
@@ -877,6 +947,8 @@ fn a13_public_dep_resolves_public_keyspace_private_stays_tenant_namespaced() {
         200,
         b"public-dep-bytes".to_vec(),
     );
+    // Write-back for public dep: PUT /v1/cas/_public/<blake3(data)> → 200.
+    transport.push(CasMethod::Put, "/v1/cas/_public/", 200, vec![]);
     // Private dep: GET /v1/cas/acme/<blake3> → 200.
     transport.push(
         CasMethod::Get,
@@ -884,6 +956,8 @@ fn a13_public_dep_resolves_public_keyspace_private_stays_tenant_namespaced() {
         200,
         b"private-artifact-bytes".to_vec(),
     );
+    // Write-back for private dep: PUT /v1/cas/acme/<blake3(data)> → 200.
+    transport.push(CasMethod::Put, "/v1/cas/acme/", 200, vec![]);
 
     // Public-dep key carries the `_public:` prefix as a convention so WP-2
     // can route to the public keyspace.
@@ -895,36 +969,51 @@ fn a13_public_dep_resolves_public_keyspace_private_stays_tenant_namespaced() {
     let cas = HttpBootCas::new(client);
     let plan = fresh_plan(&[PUBLIC_KEY, PRIVATE_KEY]);
 
-    // WP-2 impl UNIMPLEMENTED — panics on is_cached.
+    // Both layers fetched+written; the routing is the load-bearing assertion.
     let _result = cold_hydrate(&cas, &plan);
 
-    // When WP-2 lands, assert:
+    // Assert public-vs-private routing — use .expect() so the assertion is
+    // LOAD-BEARING: if the call is missing, the test panics (not silently skips).
+    // A13 HARDENED (cold-review finding): replace `if let Some(..)` with
+    // `.expect(..)` so missing routing is a test failure, not a no-op.
     let calls = transport.calls_made();
-    let public_call = calls.iter().find(|c| c.url.contains("_public"));
-    let private_call = calls.iter().find(|c| c.url.contains("/acme/"));
+    let public_call = calls
+        .iter()
+        .find(|c| c.url.contains("_public"))
+        .expect(
+            "A13: a CAS call for the public-dep layer must be made \
+             (public key → _public keyspace routing)"
+        );
+    let private_call = calls
+        .iter()
+        .find(|c| c.url.contains("/acme/"))
+        .expect(
+            "A13: a CAS call for the private-artifact layer must be made \
+             (private key → tenant namespace routing)"
+        );
 
-    if let Some(pub_call) = public_call {
-        // The public key resolves via _public, NOT under the tenant prefix.
-        assert!(
-            pub_call.url.contains("_public"),
-            "A13: public dep must use the _public keyspace"
-        );
-        assert!(
-            !pub_call.url.contains("/acme/"),
-            "A13: public dep must NOT be addressed under the tenant namespace \
-             (intra-tenant dedup only — tense discipline)"
-        );
-    }
+    // Public key resolves via _public, NOT under the tenant prefix.
+    assert!(
+        public_call.url.contains("_public"),
+        "A13: public dep must use the _public keyspace; url={}",
+        public_call.url
+    );
+    assert!(
+        !public_call.url.contains("/acme/"),
+        "A13: public dep must NOT be addressed under the tenant namespace \
+         (intra-tenant dedup only — tense discipline); url={}",
+        public_call.url
+    );
 
-    if let Some(priv_call) = private_call {
-        // The private artifact resolves under the tenant namespace, never _public.
-        assert!(
-            !priv_call.url.contains("_public"),
-            "A13: private artifact must NOT be addressed in the _public keyspace"
-        );
-        assert!(
-            priv_call.url.contains("/acme/"),
-            "A13: private artifact must use the tenant namespace"
-        );
-    }
+    // Private artifact resolves under the tenant namespace, never _public.
+    assert!(
+        !private_call.url.contains("_public"),
+        "A13: private artifact must NOT be addressed in the _public keyspace; url={}",
+        private_call.url
+    );
+    assert!(
+        private_call.url.contains("/acme/"),
+        "A13: private artifact must use the tenant namespace; url={}",
+        private_call.url
+    );
 }

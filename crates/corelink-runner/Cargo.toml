@@ -15,7 +15,10 @@ anyhow = { workspace = true }
 serde = { workspace = true }
 # WP-R4: fence materialization content digests (SHA-256 lowercase hex, the
 # frozen WP-00 scalar convention).
-sha2 = { workspace = true }
+sha2    = { workspace = true }
+# WP-2 (moat build): BLAKE3 is the native CAS/AC content-addressed key type
+# (A9b: SHA-256 MUST NOT be used as a native-CAS key; only BLAKE3 hex).
+blake3  = { workspace = true }
 # WP-ATT1a: attestation sign/verify (ratified decision #2: ed25519, fabric
 # key) + standard-base64 wire encoding of signature/public key.
 base64 = { workspace = true }

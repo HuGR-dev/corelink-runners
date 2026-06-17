@@ -242,6 +242,9 @@ fn item_1_warm_vs_cold_structural_proof() {
                  cause of ≤10s vs ≥60s). Got {layers_fetched} fetch(es)."
             );
         }
+        BootOutcome::ForcedCold { reason, .. } => {
+            panic!("warm hydrate must not produce ForcedCold: {reason}");
+        }
         BootOutcome::Failed { reason } => {
             panic!("warm hydrate must not fail: {reason}");
         }
@@ -268,6 +271,9 @@ fn item_1_warm_vs_cold_structural_proof() {
                 cold_plan.toolchain_layers.len(),
                 "cold path must fetch EXACTLY the number of layers in the plan"
             );
+        }
+        BootOutcome::ForcedCold { reason, .. } => {
+            panic!("cold hydrate must not produce ForcedCold (no write-back faults): {reason}");
         }
         BootOutcome::Failed { reason } => {
             panic!("cold hydrate must not fail: {reason}");
@@ -465,28 +471,38 @@ fn item_3_cas_down_fails_closed_zero_poisoned_writes() {
     // (Already proven above by `result.is_err()`.)
 }
 
-/// AC down mid-job: write path fails closed. Read path (fetch) may succeed if
-/// already cached; the write back to AC is the failure point. No poisoned state.
+/// AC down mid-job: write-back fails → `ForcedCold` (A5b asymmetry, WP-2-final).
+///
+/// The A5b spec distinguishes CAS-down-on-fetch (hard fail-closed, `Err`)
+/// from AC-down-on-write-back (forced-cold: fetch succeeded, write failed;
+/// run proceeds but is recorded as `ForcedCold` — honest accounting).
+///
+/// AC-down on write-back is NOT an error: the fetch succeeded, the layer is
+/// available for this job. The run proceeds but is NOT a hit — result is not
+/// stored, no poisoned write. This is `Ok(ForcedCold)`.
 #[test]
 fn item_3_ac_down_fails_closed_zero_poisoned_writes() {
     let lease = fresh_lease("ac-down");
     let plan = sample_plan(&lease);
     let fault_cas = FakeCas::with_fault(FaultMode::AcDown);
 
-    // With AC down, a cold hydrate will fail on the write-back.
+    // With AC down, cold_hydrate succeeds but returns ForcedCold (A5b asymmetry).
+    // The fetch succeeds; write-back fails; run proceeds but is NOT a hit.
     let result = cold_hydrate(&fault_cas, &plan);
     assert!(
-        result.is_err(),
-        "AC down must fail with a defined error, not a false green; got Ok"
+        result.is_ok(),
+        "AC down on write-back must produce Ok(ForcedCold), not Err (A5b asymmetry — \
+         fetch succeeded, run proceeds, result not stored); got: {result:?}"
     );
-    let err = result.unwrap_err();
+    let outcome = result.unwrap();
     assert!(
-        matches!(err, BootError::SubstrateDown { .. }),
-        "AC down must produce BootError::SubstrateDown (§9 lock 5 — defined error \
-         status); got: {err:?}"
+        matches!(outcome, BootOutcome::ForcedCold { .. }),
+        "AC down on write-back must produce ForcedCold (honest accounting — \
+         NOT a hit; NOT a hard error); got: {outcome:?}"
     );
 
     // ── Zero poisoned writes ────────────────────────────────────────────────
+    // FakeCas::write_layer returns Err on AcDown before incrementing the count.
     assert_eq!(
         fault_cas.total_writes(),
         0,
@@ -495,48 +511,63 @@ fn item_3_ac_down_fails_closed_zero_poisoned_writes() {
     );
 }
 
-/// CAS down mid-job: the failure surfaces as a DEFINED error, never a panic.
-/// This is the "no false green" gate — the caller can distinguish a
-/// `BootError::SubstrateDown` from a successful `BootOutcome::Hydrated`.
+/// Substrate-down mid-job: the outcome depends on WHICH substrate is down (A5b
+/// asymmetry, WP-2-final):
+/// - CAS-down (fetch fails) → `Err(SubstrateDown)` — hard fail-closed; NO false green.
+/// - AC-down (write-back fails) → `Ok(ForcedCold)` — run proceeds; honest accounting.
+///
+/// This is the "no false green" gate — `Hydrated` must NEVER be returned when
+/// either substrate is down. ForcedCold IS the expected outcome for AC-down.
 #[test]
 fn item_3_substrate_down_no_false_green() {
     let lease = fresh_lease("no-false-green");
     let plan = sample_plan(&lease);
 
-    for fault in [FaultMode::CasDown, FaultMode::AcDown] {
-        let fault_cas = FakeCas::with_fault(fault);
-        // cold_hydrate forces a fetch+write cycle, surfacing both CAS and AC faults.
+    // ── CAS-down: hard fail-closed (fetch cannot proceed) ────────────────
+    {
+        let fault_cas = FakeCas::with_fault(FaultMode::CasDown);
         let result = cold_hydrate(&fault_cas, &plan);
         assert!(
             result.is_err(),
-            "substrate {:?} down must produce Err, not Ok (no false green); got Ok",
-            fault
+            "CAS-down must produce Err(SubstrateDown) — hard fail-closed (§9 lock 5); got Ok"
         );
-        // Must NEVER produce BootOutcome::Hydrated (the false-green variant).
         match result {
-            Ok(BootOutcome::Hydrated { .. }) => {
-                panic!(
-                    "substrate {:?} down produced a Hydrated outcome — FALSE GREEN \
-                     (§9 lock 5 violation)",
-                    fault
-                );
+            Ok(BootOutcome::Hydrated { .. }) => panic!("CAS-down: FALSE GREEN (Hydrated)"),
+            Ok(BootOutcome::ForcedCold { .. }) => {
+                panic!("CAS-down: must be Err, not ForcedCold (fetch-path failure is hard)")
             }
-            Ok(BootOutcome::Failed { reason }) => {
-                panic!(
-                    "substrate {:?} down produced a Failed outcome but as Ok (not Err): {reason}",
-                    fault
-                );
-            }
+            Ok(BootOutcome::Failed { reason }) => panic!("CAS-down: Ok(Failed) not Err: {reason}"),
             Err(BootError::SubstrateDown { substrate, reason }) => {
-                // Correct: defined error status, fail-closed.
-                assert!(!substrate.is_empty(), "substrate name must be non-empty");
-                assert!(!reason.is_empty(), "failure reason must be non-empty");
+                assert!(!substrate.is_empty());
+                assert!(!reason.is_empty());
             }
-            Err(other) => {
+            Err(other) => panic!("CAS-down must produce SubstrateDown; got: {other:?}"),
+        }
+    }
+
+    // ── AC-down: ForcedCold (write-back fails; fetch succeeded) ──────────
+    // A5b asymmetry: AC-unreachable on write-back → Ok(ForcedCold) NOT Hydrated.
+    // The run proceeds (fetch succeeded), but the result is NOT stored (honest
+    // accounting). `Hydrated` is NEVER returned — that would be a false green.
+    {
+        let fault_cas = FakeCas::with_fault(FaultMode::AcDown);
+        let result = cold_hydrate(&fault_cas, &plan);
+        assert!(
+            result.is_ok(),
+            "AC-down on write-back must produce Ok(ForcedCold), not Err (A5b); got: {result:?}"
+        );
+        match result.unwrap() {
+            BootOutcome::Hydrated { .. } => {
                 panic!(
-                    "substrate {:?} down must produce SubstrateDown error; got: {other:?}",
-                    fault
-                );
+                    "AC-down produced Hydrated — FALSE GREEN \
+                     (write-back failed; must be ForcedCold, not Hydrated)"
+                )
+            }
+            BootOutcome::ForcedCold { .. } => {
+                // Correct: honest accounting. Run happened, result NOT stored.
+            }
+            BootOutcome::Failed { reason } => {
+                panic!("AC-down produced Failed (unexpected): {reason}")
             }
         }
     }
