@@ -1089,6 +1089,11 @@ mod tests {
             0,
             "a rejected runner acquire must not reserve a concurrency slot"
         );
+        assert!(
+            !state.rate_windows.lock().unwrap().contains_key(&acme()),
+            "a runner acquire rejected at admit must not even touch the rate window \
+             (the guard precedes the rate-window push)"
+        );
 
         // A CHECK acquire on the SAME state still succeeds — the guard is
         // runner-only (a check lease fails closed later at exec, not at admit).

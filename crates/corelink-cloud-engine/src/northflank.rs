@@ -825,6 +825,16 @@ mod tests {
         }
     }
 
+    /// A transport that PANICS if it is ever called — used to prove a code path
+    /// fails BEFORE any provider HTTP contact.
+    struct ExplodingTransport;
+
+    impl HttpTransport for ExplodingTransport {
+        fn send(&self, _req: &HttpRequest) -> anyhow::Result<HttpResponse> {
+            panic!("the provider must NOT be contacted on this path");
+        }
+    }
+
     #[test]
     fn token_is_redacted_in_debug() {
         let cfg = NorthflankConfig::new("proj", "super-secret-token-value");
@@ -1008,7 +1018,11 @@ mod tests {
     /// contact — never silently sized too small to ENOSPC mid-build.
     #[test]
     fn spawn_rejects_runner_box_below_disk_floor() {
-        let engine = NorthflankEngine::new(StubTransport, NorthflankConfig::new("proj", "tok"));
+        // ExplodingTransport panics if contacted — proves the floor guard fails
+        // BEFORE any provider HTTP call (we never even reach Northflank for a
+        // runner box that cannot be sized correctly).
+        let engine =
+            NorthflankEngine::new(ExplodingTransport, NorthflankConfig::new("proj", "tok"));
         let err = engine
             .spawn(&runner_spec())
             .expect_err("a runner box below the disk floor must fail closed at spawn");
