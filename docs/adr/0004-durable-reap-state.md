@@ -2,7 +2,7 @@
 
 **Status:** ACCEPTED — Decision-1 shipped (Phase 1, PR #43); Decision-2/3 shipped
 (Phase 2a); Decision-3 owner-ratified (3a per-turn, 3b `no_capture` accepted); Phase 2b
-(per-turn checkpoint write) deferred to the agent-trajectory turn-feed WP ·
+(per-turn checkpoint write) SHIPPED (PR #48, commit 78182c1) ·
 **Date:** 2026-06-14 · **Supersedes:** the per-instance in-memory side-table posture ·
 **Drivers:** post-go-live brutal audit finding **D3-P1** (deadline-locality cap-slot
 leak) + the hugit techlead ruling on **§13 Item 3** (durable-hook forensic SLA,
@@ -111,11 +111,12 @@ Both sub-points are **owner-ratified** (2026-06-14):
   `durable_checkpoint_survives_instance_boundary_cross_instance` (real Postgres) and
   the in-crate `cross_instance_reaper_without_hook_emits_durable_checkpoint`. The
   frozen `corelink-runner` envelope mechanism is UNTOUCHED.
-- **Phase 2b — per-turn checkpoint WRITE (Decision-3a). DEFERRED.** Nothing calls the
-  per-turn `set_envelope_checkpoint` in production yet; the write rides the future
-  agent-trajectory→hook turn-feed WP (which also adds the non-destructive summary
-  snapshot to the runner envelope crate). Phase 2a's storage + read path is ready for
-  it.
+- **Phase 2b — per-turn checkpoint WRITE (Decision-3a). ✅ SHIPPED (PR #48, commit 78182c1).**
+  The per-turn `set_envelope_checkpoint` IS called in production: `checkpoint_turn` fires from
+  the §13.2 ingest handler on every `model_turn`, and the non-destructive
+  `snapshot()`/`snapshot_metrics()` projection is live in the runner envelope crate.
+  (Verified 2026-06-17: `checkpoint_turn`, `no_capture` Tier-3, and the Pg `envelope_checkpoint`
+  column all present on `main`.)
 
 ## Consequences
 
@@ -128,8 +129,8 @@ Both sub-points are **owner-ratified** (2026-06-14):
   emits the durable-checkpoint envelope.
 - RUNBOOK §5a (Phase 1) and §5b (Phase 2a) known-limitations are now both **closed**
   ("resolved — durable-reap-state, ADR-0004"). The abnormal envelope is durably emitted
-  from any instance (never silently dropped); the only residue is the Phase-2b per-turn
-  WRITE feed.
+  from any instance (never silently dropped). The Phase-2b per-turn WRITE feed is now also
+  shipped (PR #48) — no residue remains.
 - The `slot_meter` N>1 reconciliation (D3-P2) is **not** addressed here — if global
   occupancy/peak is ever needed for billing it derives from the DB, tracked separately.
 
