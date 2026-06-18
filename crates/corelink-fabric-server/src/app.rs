@@ -1139,6 +1139,15 @@ pub fn app_full(
     // `.with_state(...)` below; the layer is applied at the very end.
     let max_inflight = state.max_inflight_requests;
 
+    // ATT-KEY-ROTATION: `GET /v1/attestation/key` is UNAUTHENTICATED — hugit
+    // needs the public key to bootstrap verification without a tenant PAT.
+    // Mirrors the HEALTH pattern: mounted on the bare outer router, outside
+    // `require_tenant` and outside the global concurrency limiter (key lookup
+    // is a fixed-cost, auth-free, tenant-data-free constant-string responder).
+    let key_route = Router::new()
+        .route(paths::ATTESTATION_KEY, get(crate::attestation::key))
+        .with_state(state.clone());
+
     // Internal/ops route (WP-OCCUPANCY-API): the slot-occupancy snapshot.
     // Mounted OUTSIDE the Bearer-PAT layer below — it is gated by its own
     // observability secret (the `X-Corelink-Internal-Auth` header), NOT a tenant
@@ -1170,7 +1179,6 @@ pub fn app_full(
             post(handlers::leases::cancel),
         )
         .route(&capture(paths::EXEC), post(handlers::exec_handler::exec))
-        .route(paths::ATTESTATION_KEY, get(crate::attestation::key))
         .route(paths::QUEUE_TRIGGER, post(handlers::queue::trigger))
         .route(&capture(paths::LEASE_CLOSE), post(handlers::close::close))
         // ENV1/ENV2: the §13 envelope POLL side (hugit's TRUSTED subscriber).
@@ -1224,6 +1232,9 @@ pub fn app_full(
     Router::new()
         // Health rides OUTSIDE the limiter so it answers under saturation.
         .route(paths::HEALTH, get(health))
+        // ATT-KEY-ROTATION: the attestation key-set is UNAUTHENTICATED (module
+        // docs); mirrors health: fixed-cost, no tenant data, no auth gate.
+        .merge(key_route)
         .merge(work)
 }
 

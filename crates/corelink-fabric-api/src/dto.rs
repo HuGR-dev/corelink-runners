@@ -186,6 +186,18 @@ pub struct ExecResponse {
     /// empty string, keeping the field strictly additive.
     #[serde(default)]
     pub result_binding_sig_v2: String,
+
+    /// Key-rotation routing id for the signing key that produced
+    /// `attestation.sig` and `result_binding_sig*` on this response. Derived
+    /// deterministically from the public key bytes as
+    /// `lower_hex(SHA-256(pubkey_bytes))[..16]` (the first 8 bytes of the
+    /// SHA-256 digest, hex-encoded — 16 hex characters). OUTSIDE the v2
+    /// signed pre-image — never enters `result_binding_preimage_v2`. hugit
+    /// can recompute it from `GET /v1/attestation/key`. ADDITIVE;
+    /// `#[serde(default)]` so an older payload without it deserializes to
+    /// the empty string.
+    #[serde(default)]
+    pub fabric_key_id: String,
 }
 
 /// `POST /v1/queue/trigger` request body — hugit's landing queue triggers
@@ -255,6 +267,12 @@ pub struct TriggerResponse {
     /// `artifacts`). ADDITIVE; `#[serde(default)]` for back-compat.
     #[serde(default)]
     pub result_binding_sig_v2: String,
+
+    /// Key-rotation routing id for the signing key that produced the
+    /// attestation on this trigger response — same derivation as
+    /// [`ExecResponse::fabric_key_id`]. ADDITIVE; `#[serde(default)]`.
+    #[serde(default)]
+    pub fabric_key_id: String,
 }
 
 /// `POST /v1/leases/{lease_id}/close` request body — drive the §13.2 item-3
@@ -326,6 +344,53 @@ pub struct CloseResponse {
     /// `#[serde(default)]` for back-compat.
     #[serde(default)]
     pub result_binding_sig_v2: String,
+
+    /// Key-rotation routing id for the signing key that produced the
+    /// attestation on this close response — same derivation as
+    /// [`ExecResponse::fabric_key_id`]. ADDITIVE; `#[serde(default)]`.
+    #[serde(default)]
+    pub fabric_key_id: String,
+}
+
+/// One entry in the `GET /v1/attestation/key` key-set response. Forward-
+/// compatible: the set is currently a 1-element slice (M1: single key, no
+/// rotation machinery), but the shape accommodates future rotation without
+/// a flag-day on hugit's verifier.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeyEntry {
+    /// The deterministic routing id for this key — `lower_hex(SHA-256(pubkey_bytes))[..16]`
+    /// (first 8 bytes of the SHA-256 digest over the raw 32-byte ed25519
+    /// public key, hex-encoded). Matches the `fabric_key_id` fields emitted
+    /// on `ExecResponse`, `TriggerResponse`, and `CloseResponse`.
+    pub key_id: String,
+
+    /// The 32-byte ed25519 public key, standard-base64 encoded (RFC 4648 §4,
+    /// padded) — the wire form `verify_chain`/`verify_raw` accept.
+    pub pubkey_b64: String,
+
+    /// Optional expiry of this key entry (Unix epoch milliseconds). `None`
+    /// means the key is currently active with no announced expiry. Reserved
+    /// for the key-rotation machinery (M1+); always `null` at M1.
+    #[serde(default)]
+    pub expires_ms: Option<u64>,
+}
+
+/// `GET /v1/attestation/key` response body — the published well-known
+/// fabric attestation key set. (ATT2 amendment reshaped to a set for
+/// key-rotation forward-compatibility, lead-ratified.)
+///
+/// At M1 the set is always a 1-element slice (one fabric signing key per
+/// region, no rotation machinery). The set shape is forward-compatible: a
+/// future rotation wave adds entries without a flag-day on hugit's verifier.
+/// Key custody per ratified decision #2: ed25519, one fabric signing key per
+/// region. Every `AttestationChain.sig` and `result_binding_sig*` this fabric
+/// emits verifies against the active key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttestationKeySetResponse {
+    /// The current key set — always exactly 1 entry at M1.
+    pub keys: Vec<KeyEntry>,
 }
 
 /// `GET /v1/attestation/key` response body — the published well-known
@@ -334,6 +399,11 @@ pub struct CloseResponse {
 /// Key custody per ratified decision #2: ed25519, one fabric signing key
 /// per region (M1: single region). Every `AttestationChain.sig` and
 /// `result_binding_sig` this fabric emits verifies against this key.
+///
+/// **Deprecated in favour of [`AttestationKeySetResponse`]** — kept for
+/// back-compat with existing consumers. The handler now serves
+/// `AttestationKeySetResponse`; this type remains exported so tests that
+/// deserialize the old single-key shape can adapt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AttestationKeyResponse {

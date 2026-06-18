@@ -17,6 +17,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use corelink_runners_contracts::AttestationChain;
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+use sha2::{Digest as _, Sha256};
 
 /// Append `LP(s) = u32_be(byte_len(s)) ‖ utf8_bytes(s)` to `out`.
 fn lp(out: &mut Vec<u8>, s: &str) {
@@ -98,6 +99,25 @@ impl FabricSigner {
         BASE64_STANDARD.encode(self.key.verifying_key().as_bytes())
     }
 
+    /// Deterministic key-rotation routing id derived from the public key bytes:
+    /// `lower_hex(SHA-256(pubkey_bytes))[..16]` — the first 8 bytes of the
+    /// SHA-256 digest over the raw 32-byte ed25519 public key, hex-encoded (16
+    /// lowercase hex characters). Stateless and self-verifying: hugit can
+    /// recompute it from the public key fetched at `GET /v1/attestation/key`
+    /// without any out-of-band trust. Uses the `sha2` workspace dep — no new
+    /// dependency.
+    pub fn key_id(&self) -> String {
+        let vk = self.key.verifying_key();
+        let pubkey_bytes = vk.as_bytes();
+        let digest = Sha256::digest(pubkey_bytes);
+        // Encode only the first 8 bytes as lowercase hex → 16 hex chars.
+        let mut s = String::with_capacity(16);
+        for b in &digest[..8] {
+            s.push_str(&format!("{b:02x}"));
+        }
+        s
+    }
+
     /// Detached ed25519 signature over ARBITRARY message bytes, returned as
     /// **standard** base64 (RFC 4648 §4, padded) — verified by [`verify_raw`].
     ///
@@ -168,6 +188,29 @@ mod tests {
 
     /// A fixed 32-byte seed for deterministic test keys.
     const SEED: [u8; 32] = [0x42; 32];
+
+    /// DEV fabric key seed (same constant as `app::DEV_FABRIC_KEY_SEED`).
+    const DEV_FABRIC_KEY_SEED: [u8; 32] = *b"corelink-runners-DEV-fabric-key!";
+
+    /// `key_id` is deterministic and derives the first 8 bytes of SHA-256 over
+    /// the public key bytes, hex-encoded (16 chars). Verify with the dev seed
+    /// so the conformance vector can be regenerated deterministically.
+    #[test]
+    fn key_id_is_deterministic_and_16_chars() {
+        let signer = FabricSigner::new_from_bytes(&DEV_FABRIC_KEY_SEED);
+        let id = signer.key_id();
+        assert_eq!(id.len(), 16, "key_id must be 16 hex chars");
+        // Must be lowercase hex only
+        assert!(
+            id.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
+            "key_id must be lowercase hex: {id}"
+        );
+        // Idempotent: calling twice returns the same value.
+        assert_eq!(id, signer.key_id(), "key_id must be deterministic");
+        // Print so the conformance vector author can copy it.
+        eprintln!("DEV fabric key_id = {id}");
+    }
 
     fn owned(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()

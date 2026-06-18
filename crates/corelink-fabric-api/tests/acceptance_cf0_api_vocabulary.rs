@@ -6,9 +6,9 @@
 //! not a refactor casualty.
 
 use corelink_fabric_api::{
-    AcquireRequest, AcquireResponse, ApiError, AttestationKeyResponse, CancelResponse,
-    CloseRequest, CloseResponse, ErrorBody, ExecRequest, ExecResponse, StatusResponse,
-    TriggerRequest, TriggerResponse, paths,
+    AcquireRequest, AcquireResponse, ApiError, AttestationKeyResponse, AttestationKeySetResponse,
+    CancelResponse, CloseRequest, CloseResponse, ErrorBody, ExecRequest, ExecResponse, KeyEntry,
+    StatusResponse, TriggerRequest, TriggerResponse, paths,
 };
 use corelink_runners_contracts::{
     Artifact, AttestationChain, CheckDef, CheckResult, IntentMetrics, LandableEntry, RunnerLease,
@@ -199,6 +199,7 @@ fn dtos_roundtrip_and_deny_unknown() {
             attestation: sample_attestation(),
             result_binding_sig: "YmluZGluZw==".to_string(),
             result_binding_sig_v2: "YmluZGluZ3Yy".to_string(),
+            fabric_key_id: "2d16e9ef2102df2a".to_string(),
         },
         "ExecResponse",
     );
@@ -228,6 +229,7 @@ fn dtos_roundtrip_and_deny_unknown() {
             attestation: sample_attestation(),
             result_binding_sig: "YmluZGluZw==".to_string(),
             result_binding_sig_v2: "YmluZGluZ3Yy".to_string(),
+            fabric_key_id: "2d16e9ef2102df2a".to_string(),
         },
         "TriggerResponse",
     );
@@ -268,16 +270,28 @@ fn dtos_roundtrip_and_deny_unknown() {
             attestation: sample_attestation(),
             result_binding_sig: "YmluZGluZw==".to_string(),
             result_binding_sig_v2: "YmluZGluZ3Yy".to_string(),
+            fabric_key_id: "2d16e9ef2102df2a".to_string(),
         },
         "CloseResponse",
     );
     // ATT2 amendment (lead-ratified): the published well-known fabric
-    // attestation key.
+    // attestation key (legacy single-key form — kept for back-compat).
     roundtrip_and_deny_unknown(
         &AttestationKeyResponse {
             ed25519_pubkey_b64: "QQ==".to_string(),
         },
         "AttestationKeyResponse",
+    );
+    // ATT-KEY-ROTATION amendment: the key-set response shape.
+    roundtrip_and_deny_unknown(
+        &AttestationKeySetResponse {
+            keys: vec![KeyEntry {
+                key_id: "2d16e9ef2102df2a".to_string(),
+                pubkey_b64: "+X0vGNFOSY5t9jo7OTlJNZsoLZOxE172jw/QURNEYw4=".to_string(),
+                expires_ms: None,
+            }],
+        },
+        "AttestationKeySetResponse",
     );
     roundtrip_and_deny_unknown(
         &ErrorBody {

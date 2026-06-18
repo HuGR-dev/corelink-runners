@@ -18,7 +18,7 @@
 
 use anyhow::{Context, Result, bail};
 use corelink_fabric_api::dto::{
-    AcquireRequest, AcquireResponse, AttestationKeyResponse, ExecResponse,
+    AcquireRequest, AcquireResponse, AttestationKeySetResponse, ExecResponse,
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -251,10 +251,13 @@ fn run_after_acquire(
                 key_resp.status
             );
         }
-        let key: AttestationKeyResponse = key_resp
+        let key_set: AttestationKeySetResponse = key_resp
             .json()
             .context("verify: key response is not the expected shape")?;
-        let pubkey = key.ed25519_pubkey_b64;
+        if key_set.keys.is_empty() {
+            bail!("verify: GET /v1/attestation/key returned an empty key set");
+        }
+        let pubkey = key_set.keys.into_iter().next().unwrap().pubkey_b64;
 
         let outcome = binding::verify_response_json(&exec_resp.body, &pubkey)
             .context("verify: malformed sig or key")?;

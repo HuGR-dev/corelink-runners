@@ -764,7 +764,7 @@ async fn default_off_no_mock_is_noboxexec() {
 #[tokio::test]
 async fn mock_drives_full_lifecycle() {
     use corelink_fabric_api::{
-        AttestationKeyResponse, CloseRequest, CloseResponse, ExecRequest, ExecResponse, paths,
+        AttestationKeySetResponse, CloseRequest, CloseResponse, ExecRequest, ExecResponse, paths,
     };
     use corelink_fabric_server::{MOCK_STDOUT, server::build_app_and_state, verify_execution};
     use corelink_runners_contracts::CheckDef;
@@ -817,9 +817,14 @@ async fn mock_drives_full_lifecycle() {
     let key_bytes = axum::body::to_bytes(key_resp.into_body(), usize::MAX)
         .await
         .unwrap();
-    let key_body: AttestationKeyResponse =
-        serde_json::from_slice(&key_bytes).expect("AttestationKeyResponse shape");
-    let pubkey_b64 = key_body.ed25519_pubkey_b64;
+    let key_body: AttestationKeySetResponse =
+        serde_json::from_slice(&key_bytes).expect("AttestationKeySetResponse shape");
+    assert_eq!(
+        key_body.keys.len(),
+        1,
+        "M1: key set must have exactly 1 entry"
+    );
+    let pubkey_b64 = key_body.keys[0].pubkey_b64.clone();
 
     // ── Exec ─────────────────────────────────────────────────────────────────
     let check_def = CheckDef {

@@ -1,6 +1,7 @@
 {
   "binding_version": 2,
   "fabric_pubkey_b64": "+X0vGNFOSY5t9jo7OTlJNZsoLZOxE172jw/QURNEYw4=",
+  "fabric_key_id": "2d16e9ef2102df2a",
   "input": {
     "memo_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "stdout_ref": "cas:sha256:1111111111111111111111111111111111111111111111111111111111111111",

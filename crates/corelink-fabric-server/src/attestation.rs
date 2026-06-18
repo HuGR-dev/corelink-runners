@@ -84,7 +84,7 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use corelink_fabric_api::AttestationKeyResponse;
+use corelink_fabric_api::{AttestationKeySetResponse, KeyEntry};
 use corelink_runner::attest::{FabricSigner, verify_chain, verify_raw};
 use corelink_runners_contracts::{AttestationChain, CheckDef, CheckResult};
 
@@ -335,15 +335,20 @@ pub fn verify_execution_v2(
 }
 
 /// `GET /v1/attestation/key` — the published well-known fabric attestation
-/// key (ATT2 amendment, lead-ratified). Authenticated like every non-health
-/// route (the API1 rule: health is the ONLY open route); the body is the
-/// region's public key, nothing tenant-scoped.
+/// key set (ATT2 amendment, reshaped to a key-set for rotation
+/// forward-compatibility, lead-ratified). UNAUTHENTICATED: hugit needs to
+/// fetch the public key without a tenant PAT (key rotation bootstrap).
+/// The body is the region's public key(s), nothing tenant-scoped. At M1
+/// the set is always exactly 1 entry (no rotation machinery built).
 pub(crate) async fn key(State(state): State<AppState>) -> Response {
+    let entry = KeyEntry {
+        key_id: state.signer.key_id(),
+        pubkey_b64: state.signer.public_key_b64(),
+        expires_ms: None,
+    };
     (
         StatusCode::OK,
-        Json(AttestationKeyResponse {
-            ed25519_pubkey_b64: state.signer.public_key_b64(),
-        }),
+        Json(AttestationKeySetResponse { keys: vec![entry] }),
     )
         .into_response()
 }

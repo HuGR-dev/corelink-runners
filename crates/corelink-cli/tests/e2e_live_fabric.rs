@@ -136,10 +136,10 @@ fn cli_verifies_a_real_exec_attestation() {
         .expect("exec");
     assert_eq!(exec.status, 200, "exec body: {}", exec.body);
 
-    // fetch the published key from the wire (Bearer-PAT authenticated)
+    // fetch the published key from the wire (unauthenticated — key endpoint is open)
     let key_resp = c.get("/v1/attestation/key", true).expect("key");
     let key: serde_json::Value = key_resp.json().expect("key json");
-    let pubkey = key["ed25519_pubkey_b64"]
+    let pubkey = key["keys"][0]["pubkey_b64"]
         .as_str()
         .expect("pubkey")
         .to_string();

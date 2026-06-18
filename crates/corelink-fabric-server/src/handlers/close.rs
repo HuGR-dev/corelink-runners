@@ -334,6 +334,7 @@ pub(crate) async fn close(
         Some(result) => attest_close_result(state.signer.as_ref(), result, principal),
         None => attest_no_result(state.signer.as_ref(), principal),
     };
+    let fabric_key_id = state.signer.key_id();
 
     // ── 8. ONE atomic body: metrics (required) + flag + echoed CheckResult
     // + attestation — the §13.1 same-step delivery at mechanism level.
@@ -348,6 +349,7 @@ pub(crate) async fn close(
             attestation,
             result_binding_sig,
             result_binding_sig_v2,
+            fabric_key_id,
         }),
     )
         .into_response()

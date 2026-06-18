@@ -44,6 +44,11 @@ struct VectorV2 {
     /// The fabric ed25519 public key (std-base64, 32 bytes) the sig verifies
     /// against — the dev key's public half.
     fabric_pubkey_b64: String,
+    /// The key-rotation routing id derived from `fabric_pubkey_b64`:
+    /// `lower_hex(SHA-256(pubkey_bytes))[..16]`. Documents that this field
+    /// appears on `ExecResponse`/`TriggerResponse`/`CloseResponse` OUTSIDE the
+    /// v2 signed pre-image — never enters `result_binding_preimage_v2`.
+    fabric_key_id: String,
     /// The v2-relevant inputs (preimage order).
     input: BindingInput,
     /// The v2 preimage bytes, lower-hex — a framing cross-check independent of
@@ -107,6 +112,7 @@ fn result_binding_v2_conformance_vector_is_byte_exact() {
     let generated = VectorV2 {
         binding_version: 2,
         fabric_pubkey_b64: signer.public_key_b64(),
+        fabric_key_id: signer.key_id(),
         input: BindingInput {
             memo_key: cr.memo_key.clone(),
             stdout_ref: cr.stdout_ref.clone(),

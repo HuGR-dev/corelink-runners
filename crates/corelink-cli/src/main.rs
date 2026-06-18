@@ -17,7 +17,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
 use corelink_cli::{binding, client, run, smoke};
-use corelink_fabric_api::dto::AttestationKeyResponse;
+use corelink_fabric_api::dto::AttestationKeySetResponse;
 
 const HELP: &str = "\
 corelink — client/ops CLI for a CoreLink Runners fabric
@@ -165,7 +165,13 @@ fn fetch_key(base: &str, pat: &str) -> Result<String> {
     if r.status != 200 {
         bail!("GET {base}/v1/attestation/key → {} (want 200)", r.status);
     }
-    Ok(r.json::<AttestationKeyResponse>()?.ed25519_pubkey_b64)
+    let ks = r
+        .json::<AttestationKeySetResponse>()
+        .context("GET /v1/attestation/key: unexpected response shape")?;
+    if ks.keys.is_empty() {
+        anyhow::bail!("GET /v1/attestation/key returned an empty key set");
+    }
+    Ok(ks.keys.into_iter().next().unwrap().pubkey_b64)
 }
 
 /// `--flag value` → `Some(value)`.

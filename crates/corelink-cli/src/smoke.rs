@@ -9,7 +9,7 @@
 use anyhow::Result;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
-use corelink_fabric_api::dto::{AcquireRequest, AcquireResponse, AttestationKeyResponse};
+use corelink_fabric_api::dto::{AcquireRequest, AcquireResponse, AttestationKeySetResponse};
 
 use crate::client::Client;
 
@@ -77,17 +77,23 @@ pub fn run(base: &str, pat: &str, full: bool, image: &str) -> Result<bool> {
     //    tenant-auth layer; any authenticated tenant gets the per-region key).
     //    Must be a 32-byte ed25519 pubkey.
     match c.get("/v1/attestation/key", true) {
-        Ok(r) if r.status == 200 => match r.json::<AttestationKeyResponse>() {
-            Ok(k) => {
-                let ok = B64
-                    .decode(k.ed25519_pubkey_b64.trim())
-                    .map(|b| b.len() == 32)
+        Ok(r) if r.status == 200 => match r.json::<AttestationKeySetResponse>() {
+            Ok(ks) => {
+                let ok = ks
+                    .keys
+                    .first()
+                    .map(|k| {
+                        B64.decode(k.pubkey_b64.trim())
+                            .map(|b| b.len() == 32)
+                            .unwrap_or(false)
+                    })
                     .unwrap_or(false);
-                t.check(
-                    "attestation-key",
-                    ok,
-                    format!("ed25519 pubkey {}", k.ed25519_pubkey_b64),
-                );
+                let detail = ks
+                    .keys
+                    .first()
+                    .map(|k| format!("ed25519 pubkey {}", k.pubkey_b64))
+                    .unwrap_or_else(|| "empty key set".to_string());
+                t.check("attestation-key", ok, detail);
             }
             Err(e) => t.check("attestation-key", false, format!("bad shape: {e}")),
         },

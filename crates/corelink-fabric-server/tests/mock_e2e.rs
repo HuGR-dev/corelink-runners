@@ -31,8 +31,8 @@ use axum::http::{Request, StatusCode, header};
 use axum::response::Response;
 use corelink_fabric::{InMemoryLedger, LeaseLedger, TenantId, TenantPlan};
 use corelink_fabric_api::{
-    AcquireRequest, AttestationKeyResponse, CloseRequest, CloseResponse, ExecRequest, ExecResponse,
-    paths,
+    AcquireRequest, AttestationKeySetResponse, CloseRequest, CloseResponse, ExecRequest,
+    ExecResponse, paths,
 };
 use corelink_fabric_server::{
     AppState, MOCK_STDOUT, MockLeasedExec, StaticPlans, StaticTokenStore, SystemClock, app,
@@ -173,9 +173,10 @@ async fn published_key(h: &Harness) -> String {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let body: AttestationKeyResponse =
-        serde_json::from_value(body_json(response).await).expect("AttestationKeyResponse shape");
-    body.ed25519_pubkey_b64
+    let body: AttestationKeySetResponse =
+        serde_json::from_value(body_json(response).await).expect("AttestationKeySetResponse shape");
+    assert_eq!(body.keys.len(), 1, "M1: key set must have exactly 1 entry");
+    body.keys[0].pubkey_b64.clone()
 }
 
 /// First-principles `LP(s) = u32_be(byte_len(s)) ‖ utf8_bytes(s)` framing —

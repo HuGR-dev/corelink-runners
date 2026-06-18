@@ -17,8 +17,8 @@ pub mod error;
 pub mod paths;
 
 pub use dto::{
-    AcquireRequest, AcquireResponse, AttestationKeyResponse, CancelResponse, CloseRequest,
-    CloseResponse, ExecRequest, ExecResponse, RunnerSpec, RunnerTargetDto, StatusResponse,
-    TriggerRequest, TriggerResponse,
+    AcquireRequest, AcquireResponse, AttestationKeyResponse, AttestationKeySetResponse,
+    CancelResponse, CloseRequest, CloseResponse, ExecRequest, ExecResponse, KeyEntry, RunnerSpec,
+    RunnerTargetDto, StatusResponse, TriggerRequest, TriggerResponse,
 };
 pub use error::{ApiError, ErrorBody};

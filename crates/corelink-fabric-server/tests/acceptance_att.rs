@@ -19,8 +19,8 @@ use axum::http::{Request, StatusCode, header};
 use axum::response::Response;
 use corelink_fabric::{InMemoryLedger, LeaseLedger, TenantId, TenantPlan};
 use corelink_fabric_api::{
-    AcquireRequest, AttestationKeyResponse, CloseRequest, CloseResponse, ExecRequest, ExecResponse,
-    TriggerRequest, TriggerResponse, paths,
+    AcquireRequest, AttestationKeySetResponse, CloseRequest, CloseResponse, ExecRequest,
+    ExecResponse, TriggerRequest, TriggerResponse, paths,
 };
 use corelink_fabric_server::{
     AppState, FakeLeasedExec, StaticPlans, StaticTokenStore, SystemClock, app, verify_execution,
@@ -159,9 +159,10 @@ async fn published_key(h: &Harness) -> String {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let body: AttestationKeyResponse =
-        serde_json::from_value(body_json(response).await).expect("AttestationKeyResponse shape");
-    body.ed25519_pubkey_b64
+    let body: AttestationKeySetResponse =
+        serde_json::from_value(body_json(response).await).expect("AttestationKeySetResponse shape");
+    assert_eq!(body.keys.len(), 1, "M1: key set must have exactly 1 entry");
+    body.keys[0].pubkey_b64.clone()
 }
 
 /// First-principles `LP(s) = u32_be(byte_len(s)) ‖ utf8_bytes(s)` framing —
@@ -173,6 +174,39 @@ fn lp_frames(fields: &[&str]) -> Vec<u8> {
         out.extend_from_slice(s.as_bytes());
     }
     out
+}
+
+/// `GET /v1/attestation/key` is UNAUTHENTICATED — hugit needs to bootstrap
+/// key verification without a tenant PAT. Confirm it returns 200 WITHOUT
+/// a Bearer token.
+#[tokio::test]
+async fn attestation_key_endpoint_is_unauthenticated() {
+    let h = harness();
+    // No Authorization header — plain GET with no credentials.
+    let request = Request::builder()
+        .method("GET")
+        .uri(paths::ATTESTATION_KEY)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::empty())
+        .unwrap();
+    let response = h.app.clone().oneshot(request).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "GET /v1/attestation/key must be reachable without a Bearer PAT"
+    );
+    let body: AttestationKeySetResponse =
+        serde_json::from_value(body_json(response).await).expect("AttestationKeySetResponse shape");
+    assert_eq!(body.keys.len(), 1, "M1: key set must have exactly 1 entry");
+    assert_eq!(body.keys[0].key_id.len(), 16, "key_id must be 16 hex chars");
+    assert!(
+        !body.keys[0].pubkey_b64.is_empty(),
+        "pubkey_b64 must be non-empty"
+    );
+    assert!(
+        body.keys[0].expires_ms.is_none(),
+        "M1: expires_ms must be None (no rotation)"
+    );
 }
 
 // ───────────────────────────────────────────────────────────────────────────

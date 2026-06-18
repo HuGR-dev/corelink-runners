@@ -49,7 +49,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use corelink_fabric::{InMemoryLedger, LeaseLedger, LeaseState, TenantId, TenantPlan};
 use corelink_fabric_api::{
-    AcquireRequest, AttestationKeyResponse, CloseRequest, CloseResponse, paths,
+    AcquireRequest, AttestationKeySetResponse, CloseRequest, CloseResponse, paths,
 };
 use corelink_fabric_server::{
     AppState, BoxProvisioner, HookRegistry, IngestSigner, StaticPlans, StaticTokenStore,
@@ -235,9 +235,10 @@ async fn published_key(h: &Harness) -> String {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let body: AttestationKeyResponse =
-        serde_json::from_value(body_json(response).await).expect("AttestationKeyResponse shape");
-    body.ed25519_pubkey_b64
+    let body: AttestationKeySetResponse =
+        serde_json::from_value(body_json(response).await).expect("AttestationKeySetResponse shape");
+    assert_eq!(body.keys.len(), 1, "M1: key set must have exactly 1 entry");
+    body.keys[0].pubkey_b64.clone()
 }
 
 /// The §13.2 box-injection invariant: the credential acquire put in the box env

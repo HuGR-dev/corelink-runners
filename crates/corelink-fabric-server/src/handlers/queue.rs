@@ -218,12 +218,14 @@ pub(crate) async fn trigger(
             );
             let result_binding_sig = sign_result_binding(state.signer.as_ref(), &result);
             let result_binding_sig_v2 = sign_result_binding_v2(state.signer.as_ref(), &result);
+            let fabric_key_id = state.signer.key_id();
             let response = TriggerResponse {
                 item_id: req.entry.item_id,
                 result,
                 attestation,
                 result_binding_sig,
                 result_binding_sig_v2,
+                fabric_key_id,
             };
             // Memoize the ATTESTED response for duplicate delivery — under
             // the insertion cap (module docs: at the cap, dedup degrades to
