@@ -60,7 +60,10 @@ pub use cloud_exec::{
 // Re-export the capacity-error type so callers (tests, external provisioners)
 // can construct ProviderCapacityError-carrying errors without depending on
 // corelink-cloud-engine directly.
-pub use clw_drive::{ClwDrive, ClwDriveOutcome, ClwExitTransparency, MockClwDrive};
+pub use clw_drive::{
+    ClwBoxDrive, ClwDrive, ClwDriveOutcome, ClwExitTransparency, ClwRunSpec, MockBoxExec,
+    MockClwDrive,
+};
 pub use corelink_auth::{
     CoreLinkAuthConfig, CoreLinkTokenStore, IntrospectBody, IntrospectHttp, IntrospectResponse,
     UreqIntrospect,

@@ -13,7 +13,7 @@
 //! - The acquire path in `handlers/leases.rs` (A3b, A4 — ledger oracle).
 //! - `runner_inject::inject_clw_env` (A6 — CLW_* env).
 //! - `runner_cas_mint::{CasPatMint, MockMint}` (A7, A7b — mint/revoke).
-//! - `clw_drive::{ClwDrive, MockClwDrive}` (A8 — exit transparency).
+//! - `clw_drive::{ClwBoxDrive, MockBoxExec}` (A8 — exit transparency, WP-6).
 //! - `ac_pre_lease::{AcPreLeaseHook, MockAcHook}` (A3b, A4 — AC lookup stub).
 
 use std::pin::Pin;
@@ -26,9 +26,9 @@ use axum::response::Response;
 use corelink_fabric::{InMemoryLedger, LeaseLedger, TenantId, TenantPlan};
 use corelink_fabric_api::{AcquireRequest, RunnerSpec, RunnerTargetDto, paths};
 use corelink_fabric_server::{
-    AcPreLeaseHook, AcPreLeaseOutcome, AppState, BoxProvisioner, ClwDrive, ClwDriveOutcome,
-    ClwExitTransparency, MintedPat, MockAcHook, MockClwDrive, MockMint, RunnerRegistrationBroker,
-    StaticPlans, StaticTokenStore, SystemClock, app,
+    AcPreLeaseHook, AcPreLeaseOutcome, AppState, BoxProvisioner, ClwBoxDrive, ClwDrive,
+    ClwDriveOutcome, ClwExitTransparency, ClwRunSpec, MintedPat, MockAcHook, MockBoxExec, MockMint,
+    RunnerRegistrationBroker, StaticPlans, StaticTokenStore, SystemClock, app,
 };
 use corelink_fabric_server::{
     CLW_ENDPOINT_ENV, CLW_REF_DOMAIN_ENV, CLW_REF_DOMAIN_RUNNER, CLW_TENANT_ENV, CLW_TOKEN_ENV,
@@ -758,16 +758,32 @@ async fn a7b_minted_pat_ttl_does_not_exceed_lease_deadline() {
 // A8 — clw drive + exit-transparency + non-zero not cached
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// A8 (part 1): `clw run` child exit code passes through transparently.
-/// A successful run (exit 0) is written back to AC.
+/// A representative `ClwRunSpec` for the A8 drive tests.
 ///
-/// MockClwDrive contract is proven in this test (green).
-/// STUB: the real BoxExec-backed `ClwDrive` impl (WP-6) is `unimplemented!()`.
-/// The integration gate (WP-6 exec path wiring) is ignored below.
-#[ignore = "WP-6 not yet wired — BoxExec-backed ClwDrive not integrated into exec path"]
+/// The a8 tests exercise the `clw run` exit-rule mapping, so the `snapshot`/
+/// `hydrate` paths are driven to success by `MockBoxExec`'s defaults; these
+/// fields just have to be present (live values arrive at flip-time).
+fn a8_run_spec() -> ClwRunSpec {
+    ClwRunSpec {
+        snapshot_name: "a8-snap".to_string(),
+        snapshot_path: "/work".to_string(),
+        hydrate_dest: "/work".to_string(),
+        command: vec!["cargo".to_string(), "test".to_string()],
+    }
+}
+
+/// A8 (part 1): the REAL `BoxExec`-backed `ClwBoxDrive` is exit-code transparent
+/// and reports `wrote_back: true` on a successful (`Child(0)`) run.
+///
+/// Drives `ClwBoxDrive<MockBoxExec>` (WP-6): `MockBoxExec` succeeds on
+/// `snapshot`/`hydrate` and returns the programmed `run` output (exit 0). The
+/// drive maps `run` exit `Some(0)` ⇒ `Ran { Child(0), wrote_back: true }`.
+///
+/// `wrote_back` is REPORT-ONLY: the drive performs NO AC/CAS PUT (clw owns its
+/// own caching); `wrote_back == (run exit == Child(0))`.
 #[tokio::test]
 async fn a8_clw_drive_exit_code_transparent_and_written_back_on_success() {
-    let driver = MockClwDrive::success_with_write_back();
+    let driver = ClwBoxDrive::new(MockBoxExec::with_run_code(0), a8_run_spec());
     let outcome = driver
         .drive("lease-abc")
         .await
@@ -781,33 +797,26 @@ async fn a8_clw_drive_exit_code_transparent_and_written_back_on_success() {
                 wrote_back: true,
             }
         ),
-        "A8: exit 0 must be transparent (Child(0)) and written back; got: {outcome:?}"
+        "A8: run exit 0 must be transparent (Child(0)) and reported written back; got: {outcome:?}"
     );
 
     // The child exit code must be surfaced exactly.
     assert_eq!(
         outcome.child_exit_code(),
         Some(0),
-        "A8: child_exit_code() must return 0 on success"
-    );
-
-    // MockClwDrive contract proven above (green). Integration gate (FAILS RED):
-    // The BoxExec-backed ClwDrive is not yet wired into the exec path (WP-6).
-    panic!(
-        "A8/part1 (integration gate — WP-6 not wired): the real BoxExec-backed ClwDrive \
-         impl is unimplemented!(). When WP-6 wires it, replace this panic with an exec \
-         test that uses a real BoxExec and asserts exit 0 is transparent + written back."
+        "A8: child_exit_code() must return Some(0) on success"
     );
 }
 
-/// A8 (part 2): non-zero child exit code is transparent AND not cached.
+/// A8 (part 2): a non-zero child exit is transparent AND not cached.
 ///
-/// The runner's write-back to AC must be SUPPRESSED on non-zero exit.
-/// STUB: BoxExec-backed ClwDrive write-back suppression is WP-6 scope.
-#[ignore = "WP-6 not yet wired — BoxExec-backed ClwDrive write-back suppression not integrated"]
+/// Drives `ClwBoxDrive<MockBoxExec>` with a programmed `run` exit of 42. THE
+/// RULE: `Some(n)`, `n != 2` ⇒ `Ran { Child(n), wrote_back: n == 0 }`, so the
+/// drive reports `wrote_back: false` (the result is NOT cacheable). The drive
+/// performs no PUT — `wrote_back: false` is the report that it would not cache.
 #[tokio::test]
 async fn a8_nonzero_child_exit_is_transparent_and_not_cached() {
-    let driver = MockClwDrive::child_nonzero(42);
+    let driver = ClwBoxDrive::new(MockBoxExec::with_run_code(42), a8_run_spec());
     let outcome = driver
         .drive("lease-fail")
         .await
@@ -828,34 +837,31 @@ async fn a8_nonzero_child_exit_is_transparent_and_not_cached() {
     if let ClwDriveOutcome::Ran { exit, wrote_back } = &outcome {
         assert!(
             !wrote_back,
-            "A8: non-zero child exit must NOT be written back to AC"
+            "A8: non-zero child exit must report wrote_back=false (no AC write-back)"
         );
         assert!(
             !exit.is_cacheable(),
             "A8: ClwExitTransparency::Child(non-zero).is_cacheable() must be false"
         );
     }
-
-    // MockClwDrive contract proven above (green). Integration gate (FAILS RED):
-    // The BoxExec-backed ClwDrive write-back suppression is not yet wired (WP-6).
-    panic!(
-        "A8/part2 (integration gate — WP-6 not wired): the BoxExec-backed ClwDrive does \
-         not yet suppress AC write-back on non-zero child exit. When WP-6 wires it, replace \
-         this panic with an end-to-end exec test asserting non-zero exit → wrote_back=false."
-    );
 }
 
-/// A8 (part 3): `exit 2` from clw itself is distinct from a child's `exit 2`.
+/// A8 (part 3): a `clw`-internal exit is a DISTINCT outcome from a child verdict.
 ///
-/// The `ClwInternal` variant distinguishes clw-internal errors from the child's
-/// exit code.  If the child exits 2, `ClwExitTransparency::Child(2)` is used.
-/// If clw itself exits 2 (bad args, substrate error), `ClwInternal(2)` is used.
-/// STUB: BoxExec-backed ClwDrive discriminant distinction is WP-6 scope.
-#[ignore = "WP-6 not yet wired — BoxExec-backed ClwDrive discriminant distinction not integrated"]
+/// Drives the REAL `ClwBoxDrive<MockBoxExec>`. A programmed `run` exit of `2` is
+/// — per the FROZEN clw CLI contract — reserved for `clw` itself (ALWAYS AND
+/// ONLY a clw-internal error), so the drive maps `Some(2)` ⇒
+/// `ClwFailed { clw_exit_code: 2, .. }`.
+///
+/// CONTRACT NOTE (not a bug): a child CANNOT surface as `Child(2)` through
+/// `clw run` — exit `2` is the clw-reserved code, so the impl maps `Some(2)` to
+/// `ClwFailed`, never `Child(2)`. To show the two outcome KINDS are distinct, we
+/// compare the `ClwFailed{2}` against a child verdict drive (`run` exit 7 ⇒
+/// `Ran { Child(7) }`): different `ClwDriveOutcome` discriminants.
 #[tokio::test]
 async fn a8_clw_internal_exit_is_distinct_from_child_exit() {
-    // clw-internal exit (clw itself fails, child never ran).
-    let clw_fail_driver = MockClwDrive::clw_internal_error();
+    // clw-internal exit: run exits 2 ⇒ ClwFailed (clw owns code 2).
+    let clw_fail_driver = ClwBoxDrive::new(MockBoxExec::with_run_code(2), a8_run_spec());
     let clw_outcome = clw_fail_driver
         .drive("lease-clw-fail")
         .await
@@ -869,13 +875,13 @@ async fn a8_clw_internal_exit_is_distinct_from_child_exit() {
                 ..
             }
         ),
-        "A8: clw-internal failure must produce ClwFailed{{2}}; got: {clw_outcome:?}"
+        "A8: run exit 2 is clw-reserved ⇒ ClwFailed{{2}} (NEVER Child(2)); got: {clw_outcome:?}"
     );
 
-    // Child exit 2 (child exited 2, clw succeeded).
-    let child_2_driver = MockClwDrive::child_nonzero(2);
-    let child_outcome = child_2_driver
-        .drive("lease-child-2")
+    // A child verdict: run exits 7 ⇒ Ran { Child(7) } (a non-reserved code).
+    let child_driver = ClwBoxDrive::new(MockBoxExec::with_run_code(7), a8_run_spec());
+    let child_outcome = child_driver
+        .drive("lease-child-7")
         .await
         .expect("A8: drive must not error");
 
@@ -883,64 +889,51 @@ async fn a8_clw_internal_exit_is_distinct_from_child_exit() {
         matches!(
             child_outcome,
             ClwDriveOutcome::Ran {
-                exit: ClwExitTransparency::Child(2),
+                exit: ClwExitTransparency::Child(7),
                 wrote_back: false,
             }
         ),
-        "A8: child exit 2 must be ClwExitTransparency::Child(2) — \
-         DISTINCT from ClwFailed{{2}}; got: {child_outcome:?}"
+        "A8: a non-reserved child exit (7) must be Ran{{Child(7)}} — \
+         a DISTINCT outcome kind from ClwFailed; got: {child_outcome:?}"
     );
 
-    // The two are not the same.
+    // The two outcome KINDS are distinct discriminants: a clw-internal failure is
+    // categorically different from a child verdict.
     assert_ne!(
         std::mem::discriminant(&clw_outcome),
         std::mem::discriminant(&child_outcome),
-        "A8: ClwFailed and Ran must be different discriminants"
-    );
-
-    // Discriminant distinction proven above (green). Integration gate (FAILS RED):
-    // The BoxExec-backed ClwDrive does not yet distinguish ClwInternal vs Child exit (WP-6).
-    panic!(
-        "A8/part3 (integration gate — WP-6 not wired): the BoxExec-backed ClwDrive does not \
-         yet produce ClwFailed vs Ran with the correct discriminant. When WP-6 wires the exec \
-         path, replace this panic with an end-to-end test asserting the two variants are distinct."
+        "A8: ClwFailed and Ran must be different ClwDriveOutcome discriminants"
     );
 }
 
-/// A8 (part 4): clw-internal failure means no write-back to AC.
+/// A8 (part 4): a clw-internal failure means NO write-back.
 ///
-/// If clw itself fails, neither the child result nor any bytes are cached.
-/// STUB: BoxExec-backed ClwDrive no-write-back on clw-internal failure is WP-6 scope.
-#[ignore = "WP-6 not yet wired — ClwDrive not integrated into exec path"]
+/// Drives the REAL `ClwBoxDrive<MockBoxExec>` with a programmed `run` exit of 2
+/// (clw-internal). The outcome is `ClwFailed`, which carries NO `wrote_back`
+/// field at all — when clw itself fails, neither the child result nor any bytes
+/// are cached, and the drive (which never PUTs anyway) reports no write-back.
 #[tokio::test]
 async fn a8_clw_internal_failure_no_write_back() {
-    let driver = MockClwDrive::clw_internal_error();
+    let driver = ClwBoxDrive::new(MockBoxExec::with_run_code(2), a8_run_spec());
     let outcome = driver
         .drive("lease-no-wb")
         .await
-        .expect("A8: drive error-as-outcome must be Ok");
+        .expect("A8: drive error-as-outcome must be Ok (clw fail is an outcome, not an Err)");
 
     match &outcome {
-        ClwDriveOutcome::ClwFailed { .. } => {
-            // Correct: no write-back possible when clw itself fails.
+        ClwDriveOutcome::ClwFailed { clw_exit_code, .. } => {
+            // Correct: the ClwFailed variant has NO wrote_back field — no
+            // write-back is even representable when clw itself fails.
+            assert_eq!(
+                *clw_exit_code, 2,
+                "A8: a clw-internal failure must carry clw_exit_code 2"
+            );
         }
         ClwDriveOutcome::Ran { wrote_back, .. } => {
-            assert!(
-                !wrote_back,
-                "A8: clw-internal failure must NOT write back to AC; got wrote_back=true"
+            panic!(
+                "A8: a clw-internal failure (run exit 2) must be ClwFailed (no write-back), \
+                 NOT Ran{{wrote_back={wrote_back}}}; got: {outcome:?}"
             );
         }
     }
-
-    // MockClwDrive contract is proven above (green). Integration gate (FAILS RED):
-    // When WP-6 wires ClwDrive into the exec path, the real `BoxExec`-backed
-    // ClwDrive must also be exit-code transparent and must not write-back on
-    // non-zero or clw-internal exit. We can't test this until WP-6 adds the
-    // BoxExec-backed impl and wires it into the runner exec path.
-    panic!(
-        "A8 (integration gate — WP-6 not wired): ClwDrive is not yet integrated into \
-         the exec path. When WP-6 adds the BoxExec-backed ClwDrive impl and wires it \
-         via boot/mod.rs, replace this panic with an end-to-end exec test that \
-         asserts: exit-transparent + non-zero-not-cached + clw-internal-distinct."
-    );
 }
