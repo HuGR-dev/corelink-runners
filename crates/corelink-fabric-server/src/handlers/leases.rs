@@ -210,6 +210,50 @@ pub(crate) async fn acquire(
         );
     }
 
+    // ── WP-7: AC pre-lease short-circuit (moat build) ──────────────────────────
+    // Consult the Action Cache BEFORE any slot is reserved. A `Hit` returns the
+    // stored ActionResult immediately with 0 slots reserved, 0 vCPU-h accrued
+    // (A3b: "never charge twice"). A `Miss` falls through to the normal path (A4).
+    // A `FailClosed` maps to 503 (A5 law).
+    //
+    // WP-7 PLACEHOLDER digest: the real acquire-boundary action/memo-key contract
+    // is UNFROZEN (tree_hash/CheckDef live on ExecRequest, not AcquireRequest).
+    // MockAcHook ignores the digest; the production AcPreLeaseHook + real digest
+    // land when that contract is frozen.
+    {
+        use corelink_runner::cas_http::Blake3Key;
+        let digest = Blake3Key::of(req.image_digest.as_bytes());
+        match state
+            .ac_pre_lease_hook
+            .lookup(tenant.as_str(), &digest)
+            .await
+        {
+            crate::ac_pre_lease::AcPreLeaseOutcome::Hit(result_bytes) => {
+                // AC hit: short-circuit BEFORE try_admit_with_compute reserves any
+                // slot. The exact memoized-result DTO is DEFERRED (finalized with the
+                // memo-key contract, WP-6). Return a minimal valid 200 carrying the
+                // stored bytes. The CRITICAL invariant (A3b): this return PRECEDES
+                // the reserve block, so 0 ledger slots are ever reserved on a hit.
+                return (
+                    axum::http::StatusCode::OK,
+                    axum::Json(serde_json::json!({
+                        "cached": true,
+                        // WP-7 DEFERRED: real memoized-result DTO lands with memo-key contract.
+                        "result_bytes_len": result_bytes.len()
+                    })),
+                )
+                    .into_response();
+            }
+            crate::ac_pre_lease::AcPreLeaseOutcome::Miss => {
+                // AC miss: fall through to the normal acquire path (A4).
+            }
+            crate::ac_pre_lease::AcPreLeaseOutcome::FailClosed(reason) => {
+                return fail_closed(&format!("AC pre-lease lookup failed: {reason}"));
+            }
+        }
+    }
+    // ── end WP-7 AC short-circuit ────────────────────────────────────────────
+
     // ── 1. CapGate BEFORE anything (contract §6: preventive admission). ──
     // Resolve the plan through the token-aware seam: token-keyed backends
     // (CoreLink introspection) read the cap from the request's bearer PAT;
@@ -545,6 +589,47 @@ pub(crate) async fn finalize_admitted_lease(
         }
     }
 
+    // ── 3c. WP-7 CAS PAT mint + inject (moat build) ────────────────────────────
+    // After the runner JIT mint (3a) and BEFORE provisioning (3b): mint a
+    // per-job CAS PAT via the D-9 client (if one is wired) and inject the four
+    // `CLW_*` env vars into the spec.
+    //
+    // cas_pat_mint None ⇒ moat off ⇒ no mint, no inject (cold run, no cache) —
+    // current behavior unchanged. This is the DEFAULT and ensures zero regression
+    // on all existing acquire/lease tests.
+    //
+    // A7 invariant: a CONFIGURED mint that returns `Err` MUST fail closed (no box).
+    if let Some(mint) = state.cas_pat_mint.as_ref() {
+        // Use the lease expiry (already F1-clamped) as the deadline bound (A7b).
+        let lease_deadline_ms = lease.expiry;
+        match mint
+            .mint(tenant.as_str(), &lease_id, lease_deadline_ms)
+            .await
+        {
+            Ok(minted) => {
+                let endpoint = state.clw_endpoint.as_deref().unwrap_or("");
+                crate::runner_inject::inject_clw_env(&mut spec, &minted, endpoint, tenant.as_str());
+                // Record the pat_id for revoke on every terminal teardown path (A7b).
+                state
+                    .pat_ids
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .insert(lease_id.clone(), minted.pat_id.clone());
+            }
+            Err(e) => {
+                // FAIL CLOSED — mirror the JIT-mint error arm exactly: teardown
+                // + ledger remove + fail_closed. No box is ever provisioned
+                // without a minted PAT when a mint client is configured (A7).
+                state.teardown_lease(&lease_id).await;
+                if let Ok(mut ledger) = state.ledger.lock() {
+                    let _ = ledger.remove(&lease_id);
+                }
+                return fail_closed(&format!("CAS PAT mint failed: {e}"));
+            }
+        }
+    }
+    // ── end WP-7 CAS PAT mint ────────────────────────────────────────────────
+
     // ── 3b. Provision the container. The slot is ALREADY reserved (Pending in
     // the ledger). A provision failure here means NO Held lease is ever handed
     // out — AND the reserved Pending MUST be rolled back, or it permanently
@@ -838,6 +923,9 @@ pub(crate) async fn cancel(
         // GC the lease's side-tables + hook entry (mirror the reaper's
         // post-teardown `forget_lease`): the lease is terminal, nothing else
         // will reclaim these.
+        //
+        // WP-7: revoke the CAS PAT before the sync GC (fire-and-forget).
+        state.revoke_pat_for(&id).await;
         state.forget_lease(&id);
     }
 

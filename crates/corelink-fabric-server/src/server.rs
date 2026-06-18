@@ -1039,6 +1039,11 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
     // mode stays off and the check-exec path is byte-unchanged.
     let state = state.with_runner_broker_from_env();
 
+    // WP-7: wire the CLW base URL from the environment (default-off: None ⇒
+    // inject_clw_env uses "" — moat OFF, no cache). The production composition
+    // root sets CLW_ENDPOINT=https://cas.corelink.io.
+    let state = state.with_clw_endpoint(std::env::var("CLW_ENDPOINT").ok());
+
     // AUDIT P1+P2: apply the close ack-window cap and the global in-flight cap.
     let state = state
         .with_close_ack_max_inflight(cfg.close_ack_max_inflight)

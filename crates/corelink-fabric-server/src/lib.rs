@@ -15,12 +15,16 @@
 //! (`token_store_down_fails_closed_503_never_open`); the same refusal
 //! governs an unreadable ledger or a tenant with no plan on file.
 
+/// WP-7 stub — AC pre-lease lookup hook (moat build).
+pub mod ac_pre_lease;
 pub mod admission;
 pub mod app;
 pub mod attestation;
 pub mod auth;
 pub mod billing_export;
 pub mod cloud_exec;
+/// WP-6 stub — clw drive seam (A8: exit-transparency + non-zero-not-cached).
+pub mod clw_drive;
 pub mod corelink_auth;
 pub mod corelink_plans;
 pub mod envelope_inject;
@@ -29,9 +33,12 @@ pub mod handlers;
 pub mod ingest_token;
 pub mod reaper;
 pub mod runner_broker;
+/// WP-3 — D-9 per-job CAS PAT mint + revoke client (moat build).
+pub mod runner_cas_mint;
 pub mod runner_inject;
 pub mod server;
 
+pub use ac_pre_lease::{AcPreLeaseHook, AcPreLeaseOutcome, MockAcHook, NoOpAcHook};
 pub use admission::{
     AdmissionMode, AdmissionQueue, admission_mode_from_env, queue_wait_from_env,
     run_admission_tick, spawn_admission_loop, tick_interval_from_env, tick_slots_from_env,
@@ -49,6 +56,7 @@ pub use cloud_exec::{
     BoxProvisioner, BoxRegistry, EngineLeasedExec, NoBoxProvisioner, NorthflankBoxProvisioner,
     ProbeStatus, cloud_backend_from_env, cloud_executor_from_env,
 };
+pub use clw_drive::{ClwDrive, ClwDriveOutcome, ClwExitTransparency, MockClwDrive};
 pub use corelink_auth::{
     CoreLinkAuthConfig, CoreLinkTokenStore, IntrospectBody, IntrospectHttp, IntrospectResponse,
     UreqIntrospect,
@@ -63,4 +71,11 @@ pub use ingest_token::IngestSigner;
 pub use runner_broker::{
     BrokerError, JitRunnerConfig, MockBroker, RunnerRegistrationBroker, RunnerScope, RunnerTarget,
 };
-pub use runner_inject::{RUNNER_JITCONFIG_ENV, inject_runner_jitconfig};
+pub use runner_cas_mint::{
+    CasPatMint, HttpCasPatMint, MintError, MintHttp, MintHttpResponse, MintedPat, MockMint,
+    UreqMint,
+};
+pub use runner_inject::{
+    CLW_ENDPOINT_ENV, CLW_REF_DOMAIN_ENV, CLW_REF_DOMAIN_RUNNER, CLW_TENANT_ENV, CLW_TOKEN_ENV,
+    RUNNER_JITCONFIG_ENV, inject_clw_env, inject_runner_jitconfig,
+};

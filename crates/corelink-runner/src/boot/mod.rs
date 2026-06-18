@@ -157,11 +157,17 @@ pub trait BootCas {
     /// local/box cache (no fetch needed on the warm path).
     fn is_cached(&self, layer_key: &str) -> bool;
 
-    /// Fetch the layer bytes for `content_key` from the CAS origin.
+    /// Fetch the layer bytes for `layer_key` from the CAS origin.
     ///
-    /// # Errors
-    /// Returns `BootError::SubstrateDown` if the CAS is unreachable.
-    /// Returns `BootError::LayerUnavailable` if the content is not found.
+    /// # Return convention
+    /// - **CAS hit (200/2xx):** returns `Ok(bytes)` — layer is present, warm path.
+    /// - **CAS miss (404):** returns `Ok(vec![])` — layer is absent; the cold path
+    ///   proceeds (the job/clw produces the layer and calls `write_layer`).
+    ///   A plain miss is NOT an error: "cache absent ⇒ slow, never broken" (A5/A1).
+    ///   `BootError::LayerUnavailable` is NOT returned — that variant does not exist.
+    /// - **CAS unreachable / auth failure (401/403/5xx/transport err):**
+    ///   returns `Err(BootError::SubstrateDown)` — hard fail-closed (A5/A5b/A12).
+    ///   An auth outage or server error is NEVER silently treated as a cold miss.
     fn fetch_layer(&self, layer_key: &str) -> Result<Vec<u8>, BootError>;
 
     /// Write (cache) a fetched layer so future jobs can reuse it without
@@ -188,6 +194,18 @@ pub enum BootOutcome {
         /// Number of layers fetched from the CAS origin. `0` on the warm path
         /// (all layers were already cached). Positive on the cold path.
         layers_fetched: usize,
+    },
+    /// Layers were fetched but write-back to the AC/CAS failed (e.g. AC
+    /// temporarily unreachable). The run proceeds but is RECORDED as a
+    /// forced-cold: it is NOT a cache hit, and the result is NOT stored for
+    /// future warm hits. Honest accounting — a poisoned store is never
+    /// written (A5b asymmetry: AC-unreachable ⇒ forced-cold, not a hit;
+    /// CAS-unreachable mid-fetch ⇒ `Err(SubstrateDown)` hard fail-closed).
+    ForcedCold {
+        /// Number of layers fetched (before the write-back failure).
+        layers_fetched: usize,
+        /// Human-readable reason the write-back was skipped.
+        reason: String,
     },
     /// Hydration failed with a defined error status. This variant is for
     /// internal use; callers receive `Err(BootError)` — `Failed` is never
@@ -229,11 +247,20 @@ pub fn hydrate<C: BootCas>(cas: &C, plan: &HydrationPlan) -> Result<BootOutcome,
 
         // Cold miss: fetch from the CAS origin.
         // ORDERING: fetch first (no write on fetch failure — zero poisoned writes).
+        // CAS-unreachable → hard fail-closed (A5b: SubstrateDown propagated).
         let data = cas.fetch_layer(&layer.content_key)?;
 
         // Write (cache) the fetched layer for future jobs.
-        // If AC is down, this fails CLOSED immediately: no partial write, error returned.
-        cas.write_layer(&layer.content_key, &data)?;
+        // AC-unreachable → ForcedCold (A5b asymmetry: see cold_hydrate docs).
+        if let Err(e) = cas.write_layer(&layer.content_key, &data) {
+            return Ok(BootOutcome::ForcedCold {
+                layers_fetched,
+                reason: format!(
+                    "write-back failed after {layers_fetched} layer(s) (AC unreachable — \
+                     forced-cold, not a hit; A5b): {e}"
+                ),
+            });
+        }
 
         layers_fetched += 1;
     }
@@ -250,12 +277,21 @@ pub fn hydrate<C: BootCas>(cas: &C, plan: &HydrationPlan) -> Result<BootOutcome,
 /// `plan.toolchain_layers.len()` CAS fetches — the structural cause of the
 /// ≥60s cold boot.
 ///
-/// # Fail-closed on substrate loss (§9 lock 5)
-/// Same as [`hydrate`]: any [`BootError::SubstrateDown`] from `fetch_layer` or
-/// `write_layer` is propagated immediately. No further fetches or writes.
+/// # Fail-closed on fetch failure (§9 lock 5 — CAS-unreachable)
+/// If `fetch_layer` returns [`BootError::SubstrateDown`] (CAS unreachable, A5b),
+/// the error is propagated immediately. No further fetches or writes are
+/// attempted. This is the hard fail-closed path — no half-hydrated box proceeds.
+///
+/// # Write-back failure → ForcedCold (AC-unreachable asymmetry, A5b)
+/// If `write_layer` returns [`BootError::SubstrateDown`] (AC unreachable), the
+/// run is NOT aborted — the fetch already succeeded and the layer is available
+/// for this job. Instead, the outcome is recorded as
+/// [`BootOutcome::ForcedCold`]: the run proceeds but is NOT a cache hit (the
+/// result is not stored for future warm hits). This is honest accounting: the
+/// runner never silently stores a partial or poisoned write.
 ///
 /// # Errors
-/// Returns `BootError::SubstrateDown` if the CAS or AC is unreachable mid-job.
+/// Returns `BootError::SubstrateDown` if the CAS is unreachable mid-fetch.
 /// Returns `BootError::InvalidPlan` if the plan is invalid.
 pub fn cold_hydrate<C: BootCas>(cas: &C, plan: &HydrationPlan) -> Result<BootOutcome, BootError> {
     validate_plan(plan)?;
@@ -264,10 +300,21 @@ pub fn cold_hydrate<C: BootCas>(cas: &C, plan: &HydrationPlan) -> Result<BootOut
 
     for layer in &plan.toolchain_layers {
         // ORDERING: fetch first (no write on fetch failure — zero poisoned writes).
+        // CAS-unreachable here → hard fail-closed (A5b: SubstrateDown propagated).
         let data = cas.fetch_layer(&layer.content_key)?;
 
         // Write (cache) the fetched layer.
-        cas.write_layer(&layer.content_key, &data)?;
+        // AC-unreachable here → ForcedCold (A5b asymmetry: fetch succeeded, write
+        // failed; run proceeds but is recorded as forced-cold, NOT a hit).
+        if let Err(e) = cas.write_layer(&layer.content_key, &data) {
+            return Ok(BootOutcome::ForcedCold {
+                layers_fetched,
+                reason: format!(
+                    "write-back failed after {layers_fetched} layer(s) (AC unreachable — \
+                     forced-cold, not a hit; A5b): {e}"
+                ),
+            });
+        }
 
         layers_fetched += 1;
     }

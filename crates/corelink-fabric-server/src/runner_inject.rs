@@ -31,6 +31,7 @@
 use corelink_runner::lease::ContainerSpec;
 
 use crate::runner_broker::JitRunnerConfig;
+use crate::runner_cas_mint::MintedPat;
 
 /// Env var the runner entrypoint reads (`deploy/runner/entrypoint.sh`): the
 /// opaque JIT registration config consumed by `./run.sh --jitconfig`. The name
@@ -48,6 +49,57 @@ pub fn inject_runner_jitconfig(spec: &mut ContainerSpec, jitconfig: &JitRunnerCo
     spec.env.push((
         RUNNER_JITCONFIG_ENV.to_string(),
         jitconfig.expose().to_string(),
+    ));
+}
+
+// ── CLW_* injection (WP-4 / moat build) ─────────────────────────────────────
+
+/// `CLW_ENDPOINT` — the CoreLink CAS/AC base URL (e.g. `https://cas.corelink.io`).
+/// Part of the CLW env contract (WP-4); must be kept in lock-step with the
+/// `clw` binary's expected env.
+pub const CLW_ENDPOINT_ENV: &str = "CLW_ENDPOINT";
+
+/// `CLW_TENANT` — the tenant identifier scoping every CAS/AC request path.
+pub const CLW_TENANT_ENV: &str = "CLW_TENANT";
+
+/// `CLW_TOKEN` — the per-job PAT (NEVER the tenant PAT — A6). Supplied as the
+/// minted [`MintedPat::token`] value; expires at or before the lease deadline (A7b).
+pub const CLW_TOKEN_ENV: &str = "CLW_TOKEN";
+
+/// `CLW_REF_DOMAIN` — identifies the reference domain. Fixed to `runner` on the
+/// runner path so `clw` knows which namespace to use for its operations.
+pub const CLW_REF_DOMAIN_ENV: &str = "CLW_REF_DOMAIN";
+
+/// The fixed `CLW_REF_DOMAIN` value for runner-mode boxes.
+pub const CLW_REF_DOMAIN_RUNNER: &str = "runner";
+
+/// Inject the CLW_* environment variables into `spec.env` for a runner-mode box.
+///
+/// Mirrors [`inject_runner_jitconfig`] in structure: additive, cloud-provision-
+/// path only, no secrets beyond the brokered per-job PAT.
+///
+/// Pushed env entries (in order):
+/// - `CLW_ENDPOINT` = `endpoint`
+/// - `CLW_TENANT` = `tenant`
+/// - `CLW_TOKEN` = `minted.token` (per-job PAT, NEVER the tenant PAT — A6)
+/// - `CLW_REF_DOMAIN` = `"runner"` (fixed)
+///
+/// `CLW_TOKEN` is the [`MintedPat::token`] value — a per-job, short-lived,
+/// read-write scoped PAT minted by D-9. It must never be the tenant-level PAT.
+pub fn inject_clw_env(spec: &mut ContainerSpec, minted: &MintedPat, endpoint: &str, tenant: &str) {
+    spec.env
+        .push((CLW_ENDPOINT_ENV.to_string(), endpoint.to_string()));
+    spec.env
+        .push((CLW_TENANT_ENV.to_string(), tenant.to_string()));
+    // `CLW_TOKEN` carries the per-job PAT (the minted credential, never the
+    // tenant PAT — A6 invariant).  `MintedPat::token` is the plaintext; it is
+    // read here — the single grep-auditable seam — and pushed into the box env
+    // without being logged (the spec's `Debug` redacts all env values).
+    spec.env
+        .push((CLW_TOKEN_ENV.to_string(), minted.token.clone()));
+    spec.env.push((
+        CLW_REF_DOMAIN_ENV.to_string(),
+        CLW_REF_DOMAIN_RUNNER.to_string(),
     ));
 }
 

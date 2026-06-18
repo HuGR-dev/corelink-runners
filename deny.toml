@@ -15,6 +15,15 @@ allow = [
     "ISC",
     "CDLA-Permissive-2.0",
     "Zlib",
+    # blake3 (WP-2 BLAKE3 CAS keys) publishes under CC0-1.0 OR Apache-2.0 OR
+    # Apache-2.0 WITH LLVM-exception. cargo-deny requires all OR alternatives to
+    # be listed; Apache-2.0 and WITH LLVM-exception are above. CC0-1.0 is the
+    # public-domain dedication — no restrictions.
+    "CC0-1.0",
+    # arrayref v0.3.9 (transitive dep of blake3, WP-2). BSD-2-Clause is the
+    # two-clause BSD ("Simplified BSD") — a permissive license, FSF/OSI approved,
+    # strictly less restrictive than BSD-3-Clause (already in the allow-set).
+    "BSD-2-Clause",
 ]
 # Our own crates are closed-source / no SPDX license — ignore them.
 private = { ignore = true }
@@ -50,7 +59,7 @@ skip = [
     { crate = "block-buffer@0.12.1",  reason = "← digest 0.11 (postgres-protocol 0.6.12); X4 stack is block-buffer 0.10. OWNER-GATED, WP-3-PGLEDGER." },
     { crate = "crypto-common@0.2.2",  reason = "← digest 0.11 (postgres-protocol 0.6.12); X4 stack is crypto-common 0.1. OWNER-GATED, WP-3-PGLEDGER." },
     { crate = "cpufeatures@0.3.0",    reason = "← chacha20/rand 0.10 (postgres-protocol 0.6.12); other copy is cpufeatures 0.2. OWNER-GATED, WP-3-PGLEDGER." },
-    { crate = "getrandom@0.4.2",      reason = "← rand 0.10 (postgres-protocol 0.6.12); tokio pulls getrandom 0.2. OWNER-GATED, WP-3-PGLEDGER." },
+    { crate = "getrandom@0.4.3",      reason = "← rand 0.10 (postgres-protocol 0.6.12); tokio pulls getrandom 0.2. OWNER-GATED, WP-3-PGLEDGER. Updated 0.4.2→0.4.3 by lock refresh (blake3 dep addition)." },
     # WASM-only tail of the getrandom 0.4 stack (← rand 0.10 ← postgres-protocol
     # 0.6.12). wasi 0.14 / wit-bindgen 0.57 are pulled ONLY on the
     # wasm32-wasi target; never compiled on our mac/Linux build+CI targets. The

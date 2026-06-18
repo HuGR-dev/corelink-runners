@@ -433,9 +433,13 @@ pub fn cloud_backend_from_env(
         RunnerDiskStatus::SubFloor { resolved_mb } => {
             let floor = corelink_cloud_engine::RUNNER_EPHEMERAL_STORAGE_FLOOR_MB;
             eprintln!();
-            eprintln!("WARNING [S3]: NORTHFLANK RUNNER DISK BELOW FLOOR — runners WILL FAIL AT SPAWN");
+            eprintln!(
+                "WARNING [S3]: NORTHFLANK RUNNER DISK BELOW FLOOR — runners WILL FAIL AT SPAWN"
+            );
             eprintln!("  NORTHFLANK_RUNNER_DEPLOYMENT_PLAN is set but the runner ephemeral disk");
-            eprintln!("  resolves to {resolved_mb} MiB — below the {floor} MiB floor a CI build needs.");
+            eprintln!(
+                "  resolves to {resolved_mb} MiB — below the {floor} MiB floor a CI build needs."
+            );
             eprintln!("  Every runner spawn will fail CLOSED (ENOSPC risk, not a slow run).");
             eprintln!("  Fix: set NORTHFLANK_RUNNER_EPHEMERAL_STORAGE_MB >= {floor}");
             eprintln!("  (within the Northflank disk allowance for your plan).");

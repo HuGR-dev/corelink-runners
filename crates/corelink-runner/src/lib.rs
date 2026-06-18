@@ -47,6 +47,8 @@
 /// `verify_chain` (WP-ATT1a; ratified decision #2).
 pub mod attest;
 pub mod boot;
+/// WP-2 — CAS/AC HTTP client + `BootCas`-over-HTTP skeleton (moat build).
+pub mod cas_http;
 pub mod concurrency;
 pub mod enforce;
 /// Context-envelope emission: per-job `IntentMetrics` from observed
@@ -65,6 +67,10 @@ mod util;
 pub mod ws;
 pub mod x4;
 
+pub use cas_http::{
+    Blake3Key, CasHttpClient, CasMethod, CasOutcome, CasRequest, CasResponse, CasTransport,
+    HttpBootCas,
+};
 pub use enforce::{
     FenceVerdict, FenceViolation, check_access, classify, is_admitted, probe_outside_enoent,
 };
