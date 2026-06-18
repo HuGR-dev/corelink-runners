@@ -40,6 +40,18 @@ async fn main() -> anyhow::Result<()> {
     // (applies the sink DDL) so it propagates a fail-closed boot error.
     let billing_handle =
         corelink_fabric_server::server::maybe_spawn_billing_exporter(&state, &cfg).await?;
+    // ── task #11 quota-headroom monitor — DEFAULT-OFF. Spawned ONLY when
+    // `FABRIC_QUOTA_CHECK_INTERVAL_SECS` is set (opt-in). Advisory only —
+    // adjusts nothing; logs structured QUOTA_HEADROOM_WARNING /
+    // QUOTA_HEADROOM_EXCEEDED lines. Cloned BEFORE the reaper consumes `state`.
+    let quota_headroom_handle = {
+        let qcfg = corelink_fabric_server::quota_headroom::quota_check_config_from_env(|k| {
+            std::env::var(k).ok()
+        })?;
+        qcfg.map(|c| {
+            corelink_fabric_server::quota_headroom::spawn_quota_headroom_task(state.clone(), c)
+        })
+    };
     let pending_max_age =
         corelink_fabric_server::reaper::pending_max_age_from_env(|k| std::env::var(k).ok())?;
     let reaper_handle = corelink_fabric_server::reaper::spawn_reaper_with_pending_age(
@@ -124,6 +136,14 @@ async fn main() -> anyhow::Result<()> {
             "billing-export: OFF (set FABRIC_BILLING_EXPORT_INTERVAL_SECS, requires pg ledger, to enable)"
         ),
     }
+    match &quota_headroom_handle {
+        Some(_) => eprintln!(
+            "quota-headroom: started (FABRIC_QUOTA_CHECK_INTERVAL_SECS set; advisory disk-headroom monitor)"
+        ),
+        None => eprintln!(
+            "quota-headroom: OFF (set FABRIC_QUOTA_CHECK_INTERVAL_SECS to enable disk-headroom monitoring)"
+        ),
+    }
     // WP-C: report whether runtime tenant onboarding is armed (static mode only).
     match (&cfg.auth_backend, &cfg.admin_key) {
         (corelink_fabric_server::server::AuthBackend::Static, Some(_)) => {
@@ -154,6 +174,10 @@ async fn main() -> anyhow::Result<()> {
     }
     // WP-A: abort the billing exporter (only set under FABRIC_BILLING_EXPORT_*).
     if let Some(h) = billing_handle {
+        h.abort();
+    }
+    // task #11: abort the quota-headroom monitor (only set under FABRIC_QUOTA_CHECK_INTERVAL_SECS).
+    if let Some(h) = quota_headroom_handle {
         h.abort();
     }
     Ok(())

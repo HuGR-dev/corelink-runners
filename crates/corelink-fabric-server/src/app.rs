@@ -125,6 +125,23 @@ pub trait PlanSource: Send + Sync {
     fn tenant_ceiling_vcpu_ms(&self, _tenant: &TenantId) -> u64 {
         0
     }
+
+    /// Return all tenant plans held by this source (the **entitled set**).
+    ///
+    /// Used by the quota-headroom reconciler (`quota_headroom`) to compute the
+    /// full disk footprint at maximum concurrency without needing a per-tenant
+    /// token.
+    ///
+    /// The default returns an **empty `Vec`** — the correct answer for backends
+    /// (e.g. [`CoreLinkPlanStore`](crate::corelink_plans::CoreLinkPlanStore))
+    /// that can only resolve a plan WITH a bearer token; the reconciler then
+    /// falls back to the active-ledger tenant set and logs the fidelity caveat.
+    ///
+    /// [`StaticPlans`] overrides this to return all plans in its local map.
+    /// [`CompositePlanSource`] delegates to both arms and merges the results.
+    fn all_tenant_plans(&self) -> Vec<TenantPlan> {
+        Vec::new()
+    }
 }
 
 /// In-memory [`PlanSource`] for tests and local dev — a fixed tenant → plan
@@ -172,6 +189,12 @@ impl StaticPlans {
 impl PlanSource for StaticPlans {
     fn plan_of(&self, tenant: &TenantId) -> Option<TenantPlan> {
         self.plans.get(tenant).cloned()
+    }
+
+    /// Return all plans held in the static map — the full entitled set for this
+    /// backend.  Used by the quota-headroom reconciler.
+    fn all_tenant_plans(&self) -> Vec<TenantPlan> {
+        self.plans.values().cloned().collect()
     }
 
     /// WP-F / FIX-F-1 / FIX-H-1: surface the compute ceiling for a provisioned
@@ -267,6 +290,23 @@ impl PlanSource for CompositePlanSource {
             0 => self.secondary.tenant_ceiling_vcpu_ms(tenant),
             c => c,
         }
+    }
+
+    /// Merge the entitled sets from both arms, deduplicating by tenant id.
+    /// Primary wins on conflict (same semantics as `plan_of`).
+    fn all_tenant_plans(&self) -> Vec<TenantPlan> {
+        let mut primary_plans = self.primary.all_tenant_plans();
+        let secondary_plans = self.secondary.all_tenant_plans();
+        // Dedup: build an owned set of tenant ids already in primary to avoid
+        // a borrow conflict when we push into primary_plans below.
+        let primary_tenant_set: std::collections::HashSet<TenantId> =
+            primary_plans.iter().map(|p| p.tenant.clone()).collect();
+        for plan in secondary_plans {
+            if !primary_tenant_set.contains(&plan.tenant) {
+                primary_plans.push(plan);
+            }
+        }
+        primary_plans
     }
 }
 

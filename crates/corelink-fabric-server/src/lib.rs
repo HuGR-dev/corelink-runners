@@ -31,6 +31,7 @@ pub mod envelope_inject;
 pub mod exec;
 pub mod handlers;
 pub mod ingest_token;
+pub mod quota_headroom;
 pub mod reaper;
 pub mod runner_broker;
 /// WP-3 — D-9 per-job CAS PAT mint + revoke client (moat build).
