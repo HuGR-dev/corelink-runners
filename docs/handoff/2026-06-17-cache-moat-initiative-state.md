@@ -53,6 +53,23 @@
 - **NEXT:** owner forwards the two relays. On **CT-Q1**, P3 (live `BootCas`) unblocks. **P2.2**
   (Family-E2E spec, test-first) can begin mock-first now (clw side pinned).
 
+### 0.6 SESSION UPDATE — 2026-06-18 (north-star (c) proven END-TO-END)
+
+- **PR #88 (`e5642fb`) — moat fail-closed posture now proven on the REAL HTTP acquire path**, not
+  just at the trait level. `acceptance_moat::a7c_*` drive a *configured-but-failing* CAS PAT mint
+  (`MintError::Unreachable` / `Unauthorized` / `TtlExceedsLease` — the meaningfully-distinct failure
+  classes, all routing through the same fail-closed arm at `leases.rs:684-693`) through
+  `finalize_admitted_lease` **step 3c** and assert the three invariants: **503 + 0 slots reserved
+  (cap not leaked) + 0 boxes provisioned**. Closes the trait-vs-HTTP gap the old `a7` comment
+  flagged. **Test-only, zero production change, gate green.** This was the highest-value hardening
+  addressable WITHOUT the $50 Northflank upgrade.
+- **State of the addressable deck (all landed on `main`, all DEFAULT-OFF, gate-green):** S1/S2/S3
+  cold-start hardening (PR #87) · graceful infra-capacity degrade (#10) · quota headroom monitor
+  (#11) · north-star (c) HTTP fail-closed proof (#88). **The remaining moat work is genuinely
+  gated:** flip-live (task #17 — owner $50 + HuGR tenant UUID + clw CLI/exit & acquire memo-key
+  cross-TL freezes + D-9 prod-Worker) and `max_vcpu_h` transcription (task #15 — Server lands the
+  introspect field first). Nothing else is addressable runner-side until the gate clears.
+
 ---
 
 ## 1. THE NORTH STAR (owner directive, 2026-06-17)
