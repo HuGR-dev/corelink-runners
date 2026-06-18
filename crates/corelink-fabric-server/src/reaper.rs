@@ -482,6 +482,10 @@ pub async fn reap_once(state: &crate::AppState) -> usize {
             };
 
             if expired_ok {
+                // ── WP-7: revoke the CAS PAT before the sync GC (A7b: all
+                // terminal paths; fire-and-forget, never fails teardown).
+                state.revoke_pat_for(&rec.lease_id).await;
+
                 // ── 6. GC side-tables (deadline + image entries).
                 state.forget_lease(&rec.lease_id);
 
@@ -698,6 +702,10 @@ pub async fn surface_crashes(state: &crate::AppState) -> usize {
         };
 
         if crashed_ok {
+            // ── WP-7: revoke the CAS PAT before the sync GC (A7b: all terminal
+            // paths; fire-and-forget, never fails teardown).
+            state.revoke_pat_for(&rec.lease_id).await;
+
             // ── 5. GC side-tables, then emit the Crashed slot event.
             state.forget_lease(&rec.lease_id);
             state.record_slot(&rec.lease_id, &rec.tenant, SlotEventKind::Crashed);

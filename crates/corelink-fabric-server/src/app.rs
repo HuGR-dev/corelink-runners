@@ -438,6 +438,49 @@ pub struct AppState {
     /// count is a single fleet-wide constant at M1 (one box SKU); a future
     /// per-lease vCPU axis would move this onto the lease spec.
     pub(crate) runner_vcpu: Option<u32>,
+
+    // ── WP-7 moat fields ───────────────────────────────────────────────────────
+
+    /// WP-7: D-9 per-job CAS PAT mint + revoke client.
+    ///
+    /// **Default-off:** `None` (the [`AppState::new`] default) ⇒ no CAS PAT is
+    /// minted at acquire, no `CLW_*` env vars are injected, and no revoke fires
+    /// on teardown (cold run, no cache — moat OFF). `Some(mint)` ACTIVATES the
+    /// moat: `finalize_admitted_lease` mints a per-job PAT, injects `CLW_*`
+    /// into the box env, records the `pat_id` in [`pat_ids`](Self::pat_ids), and
+    /// all four terminal teardown paths revoke it via [`revoke_pat_for`](Self::revoke_pat_for).
+    /// A mint failure fails CLOSED (A7): no box is ever provisioned without a
+    /// minted PAT when a mint client is configured.
+    /// Wired by the production composition root via [`with_cas_pat_mint`](Self::with_cas_pat_mint).
+    pub(crate) cas_pat_mint: Option<Arc<dyn crate::runner_cas_mint::CasPatMint>>,
+
+    /// WP-7: AC pre-lease lookup hook (memoized-exec short-circuit).
+    ///
+    /// Consulted at the TOP of `acquire`, BEFORE `try_admit_with_compute`
+    /// reserves a slot. A `Hit` short-circuits to a `200` response WITHOUT
+    /// reserving any slot or spawning any box (A3b: "never charge twice").
+    /// A `Miss` falls through to the normal slot-reserve + box-spawn path (A4).
+    /// A `FailClosed` maps to a `503` (A5 law).
+    ///
+    /// **Default:** [`NoOpAcHook`](crate::ac_pre_lease::NoOpAcHook) — always
+    /// `Miss`, zero behavior change when the moat is off. Wired via
+    /// [`with_ac_pre_lease_hook`](Self::with_ac_pre_lease_hook).
+    pub(crate) ac_pre_lease_hook: Arc<dyn crate::ac_pre_lease::AcPreLeaseHook>,
+
+    /// WP-7: `lease_id` → `pat_id` side-table, mirrors [`images`](Self::images).
+    ///
+    /// Populated at `finalize_admitted_lease` (after a successful mint) and
+    /// cleared by [`revoke_pat_for`](Self::revoke_pat_for) on every terminal
+    /// teardown path (Released/Expired/Crashed). Bounded by active leases —
+    /// the same GC discipline as `images` and `runner_leases`.
+    pub(crate) pat_ids: Arc<Mutex<HashMap<String, String>>>,
+
+    /// WP-7: CLW base URL injected as `CLW_ENDPOINT` into the box env.
+    ///
+    /// **Default:** `None` (empty string used by `inject_clw_env` — accepted by
+    /// `clw`). The production composition root wires it from `CLW_ENDPOINT` via
+    /// [`with_clw_endpoint`](Self::with_clw_endpoint) / `server.rs`.
+    pub(crate) clw_endpoint: Option<String>,
 }
 
 /// Default cap on concurrent close ack-window waits (audit P1). Chosen so a
@@ -513,6 +556,16 @@ impl AppState {
             // The composition root opts in via `with_runner_vcpu` from
             // FABRIC_RUNNER_VCPU.
             runner_vcpu: None,
+
+            // WP-7 moat DEFAULT-OFF: no mint client, NoOpAcHook (always-Miss),
+            // empty pat_ids side-table, no CLW endpoint — zero behavior change
+            // on the cold path. The production composition root opts in via the
+            // `with_cas_pat_mint` / `with_ac_pre_lease_hook` / `with_clw_endpoint`
+            // builders.
+            cas_pat_mint: None,
+            ac_pre_lease_hook: Arc::new(crate::ac_pre_lease::NoOpAcHook),
+            pat_ids: Arc::new(Mutex::new(HashMap::new())),
+            clw_endpoint: None,
         }
     }
 
@@ -738,6 +791,77 @@ impl AppState {
         self
     }
 
+    // ── WP-7 moat builders ───────────────────────────────────────────────────
+
+    /// Wire the D-9 CAS PAT mint + revoke client (WP-7), ACTIVATING the moat.
+    ///
+    /// With a mint client present, `finalize_admitted_lease` mints a per-job PAT,
+    /// injects `CLW_*` into the box env, and all terminal teardown paths revoke it.
+    /// A mint failure fails closed (A7). Absent (the default) ⇒ moat OFF, cold run.
+    #[must_use]
+    pub fn with_cas_pat_mint(
+        mut self,
+        mint: Arc<dyn crate::runner_cas_mint::CasPatMint>,
+    ) -> Self {
+        self.cas_pat_mint = Some(mint);
+        self
+    }
+
+    /// Wire the AC pre-lease lookup hook (WP-7).
+    ///
+    /// Default: [`NoOpAcHook`](crate::ac_pre_lease::NoOpAcHook) (always-Miss,
+    /// zero behavior change). Supply a [`MockAcHook`](crate::ac_pre_lease::MockAcHook)
+    /// (tests) or the production `CasHttpClient`-backed impl (gated on the
+    /// frozen acquire-boundary action-digest contract — WP-7 deferred).
+    #[must_use]
+    pub fn with_ac_pre_lease_hook(
+        mut self,
+        hook: Arc<dyn crate::ac_pre_lease::AcPreLeaseHook>,
+    ) -> Self {
+        self.ac_pre_lease_hook = hook;
+        self
+    }
+
+    /// Wire the CLW base URL (`CLW_ENDPOINT`) injected into the box env (WP-7).
+    ///
+    /// Default: `None` ⇒ `inject_clw_env` uses `""` (accepted by `clw` in a
+    /// local/test context). The production composition root wires it from
+    /// `CLW_ENDPOINT` env var in `server.rs`.
+    #[must_use]
+    pub fn with_clw_endpoint(mut self, endpoint: Option<String>) -> Self {
+        self.clw_endpoint = endpoint;
+        self
+    }
+
+    // ── WP-7 revoke helper ───────────────────────────────────────────────────
+
+    /// Remove the `pat_id` for `lease_id` from the side-table and revoke it
+    /// via the mint client (if one is wired). Fire-and-forget: revoke `Err` is
+    /// logged but NEVER propagates — teardown must not fail on a revoke error.
+    ///
+    /// Called at EVERY terminal path (Released/Expired/Crashed) adjacent to
+    /// `forget_lease`, which is sync and cannot await. This async fn covers the
+    /// revoke; `forget_lease` covers the sync GC.
+    pub(crate) async fn revoke_pat_for(&self, lease_id: &str) {
+        let pat_id = {
+            let mut pat_ids = self
+                .pat_ids
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            pat_ids.remove(lease_id)
+        };
+        if let (Some(pat_id), Some(mint)) = (pat_id, &self.cas_pat_mint)
+            && let Err(e) = mint.revoke(&pat_id).await
+        {
+            // Log but do NOT fail the teardown — revoke is defense-in-depth;
+            // the PAT is short-lived and self-expires (A7b).
+            eprintln!(
+                "lease {lease_id}: CAS PAT revoke failed for pat_id={pat_id}: {e} \
+                 — teardown proceeds (PAT self-expires at deadline)"
+            );
+        }
+    }
+
     /// Mark `lease_id` as a direct-CI runner lease (ADR-0007). Idempotent; a
     /// poisoned lock is recovered (the marker is advisory — exec also fails
     /// closed on a held lease with no image, so a lost marker never opens a
@@ -934,6 +1058,13 @@ impl AppState {
             .unwrap_or_else(|p| p.into_inner())
             .remove(lease_id);
         self.hook_registry.unregister(lease_id);
+        // WP-7: GC the pat_ids entry (the async revoke fires via `revoke_pat_for`
+        // BEFORE this call on each terminal path; this is a defensive cleanup so
+        // the side-table cannot grow unbounded even if revoke_pat_for was skipped).
+        self.pat_ids
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(lease_id);
     }
 
     /// Emit one slot-occupancy event into the internal meter (BIL1,

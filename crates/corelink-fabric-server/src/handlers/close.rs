@@ -316,6 +316,11 @@ pub(crate) async fn close(
     // on the close hot path). Gated on the winning transition, so a lost race
     // never double-GCs. `forget_lease`'s own hook-unregister is idempotent with
     // the `registry.unregister` above (no-op on an already-dropped entry).
+    //
+    // WP-7: revoke the CAS PAT for this lease (fire-and-forget; never fails
+    // teardown). Must run BEFORE forget_lease (which defensively removes the
+    // pat_ids entry) so the remove+revoke is still atomic-enough.
+    state.revoke_pat_for(&lease_id).await;
     state.forget_lease(&lease_id);
 
     // ── 7. Attest the close (WP-ATT1+2 / ATT2: the attestation travels

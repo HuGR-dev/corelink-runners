@@ -105,9 +105,17 @@ fn runner_acq_body() -> AcquireRequest {
     }
 }
 
-/// Build the acquire harness. Returns `(router, ledger, cap, state)`.
-fn harness_with_state(
+/// Build the acquire harness with optional WP-7 moat seams injected.
+///
+/// - `broker`: runner registration broker (ADR-0007).
+/// - `mint`: optional `CasPatMint` (WP-7 — default None ⇒ moat off).
+/// - `ac_hook`: optional `AcPreLeaseHook` (WP-7 — default None ⇒ NoOpAcHook).
+/// - `clw_endpoint`: optional CLW base URL (WP-7 — default None).
+fn harness_with_moat(
     broker: Option<Arc<dyn RunnerRegistrationBroker>>,
+    mint: Option<Arc<dyn CasPatMint>>,
+    ac_hook: Option<Arc<dyn AcPreLeaseHook>>,
+    clw_endpoint: Option<String>,
 ) -> (
     axum::Router,
     Arc<Mutex<dyn LeaseLedger + Send>>,
@@ -132,6 +140,13 @@ fn harness_with_state(
     if let Some(b) = broker {
         state = state.with_runner_broker(b);
     }
+    if let Some(m) = mint {
+        state = state.with_cas_pat_mint(m);
+    }
+    if let Some(h) = ac_hook {
+        state = state.with_ac_pre_lease_hook(h);
+    }
+    state = state.with_clw_endpoint(clw_endpoint);
     let router = app(store, state.clone());
     (router, ledger, cap, state)
 }
@@ -166,40 +181,33 @@ fn env_get<'a>(spec: &'a ContainerSpec, key: &str) -> Option<&'a str> {
 /// This tests the LEDGER ORACLE, not just the call graph.  The `MockAcHook`
 /// simulates an AC hit; the test asserts the ledger shows 0 slots occupied.
 ///
-/// STUB (WP-7 not wired): `AppState` does not yet have an `ac_pre_lease_hook`
-/// field, and the `acquire` handler does not yet call the hook before `try_admit`.
-/// When WP-7 lands: an `AcPreLeaseOutcome::Hit` before `try_admit` means the
-/// ledger reports 0 active leases for the tenant.
-/// Ignored until WP-7 adds `AppState.ac_pre_lease_hook` + wires pre-lease guard.
-#[ignore = "WP-7 not yet wired — AppState missing ac_pre_lease_hook field"]
+/// WP-7 wired: `AppState.ac_pre_lease_hook` + acquire pre-lease guard implemented.
+/// A `Hit` short-circuits BEFORE `try_admit_with_compute` ⇒ 0 ledger slots.
 #[tokio::test]
 async fn a3b_ac_hit_no_slot_reserved_on_ledger() {
-    // The MockAcHook always returns Hit — an AC hit should short-circuit acquire
+    // The MockAcHook always returns Hit — an AC hit must short-circuit acquire
     // BEFORE `try_admit_with_compute` reserves any slot.
-    let always_hit = MockAcHook::always_hit(b"cached-action-result".to_vec());
+    let always_hit = Arc::new(MockAcHook::always_hit(b"cached-action-result".to_vec()));
 
-    // STUB GAP: AppState has no `ac_pre_lease_hook` field yet (WP-7).
-    // When WP-7 adds it:
-    //   state.ac_pre_lease_hook = Arc::new(always_hit);
-    // For now, we assert on the stub's behavior (always-Hit outcome) and
-    // separately assert the ledger oracle expectation.
-    let action_digest = Blake3Key::from_hex(ACTION_DIGEST_HEX);
-    let outcome = always_hit.lookup("acme", &action_digest).await;
-    assert!(
-        matches!(outcome, AcPreLeaseOutcome::Hit(_)),
-        "A3b: MockAcHook::always_hit must return Hit; got: {outcome:?}"
+    // Build the harness with the AC hook wired via harness_with_moat (WP-7).
+    let broker: Arc<dyn RunnerRegistrationBroker> = Arc::new(MockBroker::new());
+    let (router, ledger, _cap, _state) = harness_with_moat(
+        Some(broker),
+        None,
+        Some(always_hit as Arc<dyn AcPreLeaseHook>),
+        None,
+    );
+    let resp = do_acquire(&router, &runner_acq_body()).await;
+
+    // The AC hit returns 200 (the short-circuit response).
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "A3b: AC hit must return 200; got {}",
+        resp.status()
     );
 
-    // Build the harness and call acquire WITHOUT the AC hook wired.
-    let broker: Arc<dyn RunnerRegistrationBroker> = Arc::new(MockBroker::new());
-    let (router, ledger, _cap, _state) = harness_with_state(Some(broker));
-    let _resp = do_acquire(&router, &runner_acq_body()).await;
-
-    // Currently (no WP-7): acquire succeeds and reserves 1 slot.
-    // When WP-7 lands: the AC hit short-circuits BEFORE slot-reserve, so the
-    // ledger must show 0 slots occupied.
-    //
-    // This assertion FAILS RED: the ledger currently shows 1 slot (WP-7 not wired).
+    // CRITICAL invariant: the short-circuit PRECEDES slot-reserve ⇒ 0 slots.
     let occupied = ledger
         .lock()
         .unwrap()
@@ -210,9 +218,7 @@ async fn a3b_ac_hit_no_slot_reserved_on_ledger() {
         occupied,
         0,
         "A3b (CRITICAL): AC hit must reserve 0 slots on the ledger — \
-         'never charge twice' is an ACCOUNTING claim. \
-         Got {occupied} slot(s) reserved. \
-         (WP-7 not yet wired — this is expected to fail red)"
+         'never charge twice' is an ACCOUNTING claim. Got {occupied} slot(s) reserved."
     );
 }
 
@@ -220,20 +226,18 @@ async fn a3b_ac_hit_no_slot_reserved_on_ledger() {
 // A4 — AC miss ⇒ acquire + run + PUT /v1/ac (store-after-miss)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// A4: AC miss → acquire proceeds normally → box spawned → result stored.
+/// A4: AC miss → acquire proceeds normally → box spawned.
 ///
 /// The `MockAcHook::always_miss` simulates a cache miss; the acquire must
 /// proceed to the normal slot-reserve + box-spawn path.
 ///
-/// STUB (WP-7/WP-6 not wired): the AC hook is not yet wired in `acquire`.
-/// When WP-7 lands, the test verifies the hook WAS consulted (miss → run path)
-/// and WP-6 wires the store-after-miss write-back (PUT /v1/ac).
-/// Ignored until WP-7 adds `AppState.ac_pre_lease_hook` + WP-6 wires write-back.
-#[ignore = "WP-7/WP-6 not yet wired — AC hook + store-after-miss not integrated"]
+/// WP-7 wired: the AC hook is now consulted before `try_admit`. On a Miss the
+/// hook lets the path fall through to the normal acquire path (1 slot, 1 box).
+/// Store-after-miss AC write-back is WP-6 (clw drive) + flip-live — out of WP-7 scope.
 #[tokio::test]
 async fn a4_ac_miss_acquire_proceeds_and_box_spawned() {
     // The MockAcHook always returns Miss — the acquire must proceed normally.
-    let always_miss = MockAcHook::always_miss();
+    let always_miss = Arc::new(MockAcHook::always_miss());
     let action_digest = Blake3Key::from_hex(ACTION_DIGEST_HEX);
     let miss_outcome = always_miss.lookup("acme", &action_digest).await;
     assert!(
@@ -243,7 +247,12 @@ async fn a4_ac_miss_acquire_proceeds_and_box_spawned() {
 
     // A miss: acquire proceeds to the normal slot-reserve + box-spawn path.
     let broker: Arc<dyn RunnerRegistrationBroker> = Arc::new(MockBroker::new());
-    let (router, ledger, cap, _state) = harness_with_state(Some(broker));
+    let (router, ledger, cap, _state) = harness_with_moat(
+        Some(broker),
+        None,
+        Some(always_miss as Arc<dyn AcPreLeaseHook>),
+        None,
+    );
     let resp = do_acquire(&router, &runner_acq_body()).await;
 
     assert_eq!(
@@ -271,18 +280,7 @@ async fn a4_ac_miss_acquire_proceeds_and_box_spawned() {
         "A4: AC miss must provision exactly 1 box"
     );
 
-    // Current behavior proven above (green). Integration gate (FAILS RED):
-    // When WP-7 wires the AC hook into acquire, the hook must be CONSULTED
-    // before try_admit. On a Miss the hook lets the path fall through. On a Hit
-    // (A3b) it returns the stored result without reserving a slot. The test for
-    // the Hit case is A3b; this A4 test also validates the miss→store write-back
-    // after the run, which requires WP-6 wiring (store-after-miss).
-    panic!(
-        "A4 (integration gate — WP-7/WP-6 not wired): the AC hook is not yet consulted \
-         in acquire, and the store-after-miss write-back (PUT /v1/ac) is not yet wired. \
-         When WP-7 wires the AC hook and WP-6 wires the write-back, replace this panic \
-         with an assertion that the AC PUT was called after the run on a miss."
-    );
+    // store-after-miss AC write-back is WP-6 (clw drive) + flip-live — out of WP-7 scope.
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -378,13 +376,19 @@ fn a6_clw_env_injection_carries_per_job_pat_never_tenant_pat() {
 /// A6b: when the acquire path calls inject_clw_env, the box env must carry
 /// CLW_TOKEN = the MINTED per-job PAT (from MockMint), NEVER "pat-acme".
 ///
-/// STUB (WP-7 not wired): the acquire handler does not yet call inject_clw_env.
-/// Ignored until WP-7 wires inject_clw_env into the acquire handler.
-#[ignore = "WP-7 not yet wired — inject_clw_env not called from acquire handler"]
+/// WP-7 wired: inject_clw_env is now called from finalize_admitted_lease when
+/// a CasPatMint is configured. MockMint produces a deterministic per-job token
+/// that is never the tenant PAT ("pat-acme").
 #[tokio::test]
 async fn a6b_acquire_injects_per_job_pat_into_box_env_not_tenant_pat() {
     let broker: Arc<dyn RunnerRegistrationBroker> = Arc::new(MockBroker::new());
-    let (router, _ledger, cap, _state) = harness_with_state(Some(broker));
+    let mint: Arc<dyn CasPatMint> = Arc::new(MockMint::new());
+    let (router, _ledger, cap, _state) = harness_with_moat(
+        Some(broker),
+        Some(mint),
+        None,
+        Some("https://cas.corelink.io".to_string()),
+    );
     let resp = do_acquire(&router, &runner_acq_body()).await;
 
     assert_eq!(
@@ -400,11 +404,10 @@ async fn a6b_acquire_injects_per_job_pat_into_box_env_not_tenant_pat() {
     // The tenant PAT is "pat-acme"; it must NEVER appear as CLW_TOKEN.
     let clw_token = env_get(spec, CLW_TOKEN_ENV);
 
-    // FAILS RED: WP-7 not yet wired — CLW_TOKEN is not in the env yet.
+    // WP-7 wired: CLW_TOKEN is now in the env (the minted per-job PAT).
     assert!(
         clw_token.is_some(),
-        "A6b: CLW_TOKEN must be present in the box env (WP-7 not yet wired — \
-         expected to fail red)"
+        "A6b: CLW_TOKEN must be present in the box env (WP-7 wired)"
     );
     assert_ne!(
         clw_token,
