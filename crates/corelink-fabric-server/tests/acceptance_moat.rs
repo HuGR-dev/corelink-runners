@@ -502,8 +502,142 @@ async fn a7_mint_failure_fails_closed_no_box() {
     );
 
     // Trait-level fail-closed proof is GREEN (WP-3 done).
-    // Integration gate: the HTTP acquire path with a failing mint (503 + 0 slots) is
-    // WP-7 scope (AppState.cas_pat_mint field + acquire-handler wiring).
+    // WP-7 has LANDED: the HTTP acquire path with a configured-but-failing mint
+    // (503 + 0 slots reserved + 0 boxes provisioned) is now proven END-TO-END in
+    // a7c_http_acquire_failing_mint_unreachable_fails_closed_no_box_no_slot,
+    // a7c_http_acquire_failing_mint_unauthorized_fails_closed_no_box_no_slot, and
+    // a7c_http_acquire_failing_mint_ttl_exceeds_lease_fails_closed_no_box_no_slot
+    // below — closing the trait-vs-HTTP gap this comment used to flag.
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// A7c — north-star (c) END-TO-END: configured-but-failing CAS PAT mint ⇒
+//       HTTP acquire fails CLOSED, uniformly across error classes.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A parameterized `CasPatMint` whose `mint` always fails with a configured
+/// [`MintError`], so the a7c suite can drive the REAL HTTP acquire path through
+/// the fail-closed arm of `finalize_admitted_lease` step 3c for each
+/// meaningfully-distinct failure class. `revoke` is a no-op `Ok(())` (mirrors the
+/// inline `FailingMint` in `a7_mint_failure_fails_closed_no_box`).
+///
+/// `MintError` is `Clone`, so the configured error is cloned per call.
+struct ConfiguredFailingMint {
+    err: MintError,
+}
+
+impl CasPatMint for ConfiguredFailingMint {
+    fn mint<'a>(
+        &'a self,
+        _owner_tenant: &'a str,
+        _job_id: &'a str,
+        _lease_deadline_ms: u64,
+    ) -> Pin<
+        Box<
+            dyn std::future::Future<Output = std::result::Result<MintedPat, MintError>> + Send + 'a,
+        >,
+    > {
+        let err = self.err.clone();
+        Box::pin(async move { Err(err) })
+    }
+
+    fn revoke<'a>(
+        &'a self,
+        _pat_id: &'a str,
+    ) -> Pin<Box<dyn std::future::Future<Output = std::result::Result<(), MintError>> + Send + 'a>>
+    {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// Drive a real HTTP runner-acquire with a configured-but-failing CAS PAT mint
+/// and assert the three north-star (c) fail-closed invariants:
+///   1. HTTP status == 503 (the verified `fail_closed` status — `ApiError::FailClosed`).
+///   2. 0 slots reserved on the ledger (the reserved Pending was rolled back — the
+///      CRITICAL cap-safety invariant: a mint failure must NOT leak a concurrency slot).
+///   3. 0 boxes provisioned (the fail-closed arm precedes step 3b provisioning).
+///
+/// A `MockBroker` is wired so the runner acquire reaches step 3c (the JIT mint
+/// succeeds via the mock broker, then the configured CAS-mint failure trips the
+/// fail-closed arm), mirroring the `a6b` success template exactly but inverted.
+async fn assert_http_acquire_fails_closed_no_box_no_slot(err: MintError) {
+    let broker: Arc<dyn RunnerRegistrationBroker> = Arc::new(MockBroker::new());
+    let mint: Arc<dyn CasPatMint> = Arc::new(ConfiguredFailingMint { err: err.clone() });
+    let (router, ledger, cap, _state) = harness_with_moat(
+        Some(broker),
+        Some(mint),
+        None,
+        Some("https://cas.corelink.io".to_string()),
+    );
+    let resp = do_acquire(&router, &runner_acq_body()).await;
+
+    // 1. fail-closed status (VERIFIED: `fail_closed` → `ApiError::FailClosed` → 503).
+    assert_eq!(
+        resp.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "A7c [{err:?}]: a configured-but-failing CAS PAT mint must fail CLOSED with 503; \
+         got {}",
+        resp.status()
+    );
+
+    // 2. CRITICAL cap-safety: the reserved Pending slot was rolled back ⇒ 0 slots.
+    let occupied = ledger.lock().unwrap().by_tenant(&acme()).unwrap().len();
+    assert_eq!(
+        occupied, 0,
+        "A7c [{err:?}] (CRITICAL): a failing mint must roll back the reserved slot — \
+         the concurrency cap must NOT leak. Got {occupied} slot(s) reserved."
+    );
+
+    // 3. No box was ever provisioned (step 3c fail-closed precedes step 3b provision).
+    assert_eq!(
+        cap.captured().len(),
+        0,
+        "A7c [{err:?}]: a failing mint must provision NO box (fail-closed precedes \
+         provisioning). Got {} box(es).",
+        cap.captured().len()
+    );
+}
+
+/// A7c: north-star (c) END-TO-END — the cache-substrate (D-9 CAS PAT mint) is
+/// UNREACHABLE (network/timeout/transport) ⇒ the HTTP acquire fails CLOSED:
+/// 503, 0 slots reserved, 0 boxes provisioned.
+///
+/// Complements the trait-level `a7_mint_failure_fails_closed_no_box` by proving
+/// the invariant on the REAL HTTP acquire path through `finalize_admitted_lease`.
+#[tokio::test]
+async fn a7c_http_acquire_failing_mint_unreachable_fails_closed_no_box_no_slot() {
+    assert_http_acquire_fails_closed_no_box_no_slot(MintError::Unreachable).await;
+}
+
+/// A7c: north-star (c) END-TO-END — the cache-substrate authoritatively REJECTS
+/// the internal auth (401/403 → `MintError::Unauthorized`) ⇒ the HTTP acquire
+/// fails CLOSED: 503, 0 slots reserved, 0 boxes provisioned.
+///
+/// Proves the fail-closed behavior is UNIFORM across error classes — an auth/4xx
+/// rejection fails closed identically to an unreachable substrate, on the real
+/// HTTP acquire path. Complements the trait-level
+/// `a7_mint_failure_fails_closed_no_box`.
+#[tokio::test]
+async fn a7c_http_acquire_failing_mint_unauthorized_fails_closed_no_box_no_slot() {
+    assert_http_acquire_fails_closed_no_box_no_slot(MintError::Unauthorized).await;
+}
+
+/// A7c: north-star (c) END-TO-END — the cache-substrate (D-9 service) returned a
+/// PAT whose TTL EXCEEDS the lease deadline (`MintError::TtlExceedsLease`, the
+/// A7b violation) ⇒ the HTTP acquire fails CLOSED: 503, 0 slots reserved, 0
+/// boxes provisioned.
+///
+/// Proves a too-long-lived per-job PAT is rejected end-to-end on the real HTTP
+/// acquire path (no PAT may outlive its box), failing closed identically to the
+/// other classes. Complements the trait-level
+/// `a7_mint_failure_fails_closed_no_box`.
+#[tokio::test]
+async fn a7c_http_acquire_failing_mint_ttl_exceeds_lease_fails_closed_no_box_no_slot() {
+    assert_http_acquire_fails_closed_no_box_no_slot(MintError::TtlExceedsLease {
+        expires_ms: 9_999_999_999_999,
+        lease_deadline_ms: 1_000,
+    })
+    .await;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
