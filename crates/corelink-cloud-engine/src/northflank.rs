@@ -107,6 +107,50 @@ pub struct NorthflankConfig {
 /// disk allowance; the floor only catches an unset or too-small runner disk.
 pub const RUNNER_EPHEMERAL_STORAGE_FLOOR_MB: u32 = 4096;
 
+/// The outcome of [`NorthflankConfig::validate_runner_disk`] — used to surface
+/// a misconfigured runner disk ONCE at boot-time rather than silently failing
+/// per-acquire after a wasted JIT/CAS mint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunnerDiskStatus {
+    /// The config is runner-capable AND the runner disk meets the floor.
+    /// Boot proceeds normally; the per-spawn guard is the backstop.
+    Ok,
+    /// The config is runner-capable (has a `runner_deployment_plan`) but the
+    /// runner disk resolves below [`RUNNER_EPHEMERAL_STORAGE_FLOOR_MB`].
+    ///
+    /// **Decision (S3):** this is a LOUD WARN at boot, not a hard-fail.
+    ///
+    /// Rationale: not every Northflank fabric runs runner boxes. A fabric
+    /// serving only CHECK-exec jobs correctly has no `runner_deployment_plan`
+    /// and is NOT affected by the runner floor; hard-failing its boot would
+    /// break a valid check-only configuration. A fabric that IS runner-capable
+    /// but has a sub-floor disk is almost certainly a misconfiguration (operator
+    /// set `NORTHFLANK_RUNNER_DEPLOYMENT_PLAN` but forgot
+    /// `NORTHFLANK_RUNNER_EPHEMERAL_STORAGE_MB`, or set it too low). The warn
+    /// fires ONCE at boot — impossible to miss in structured logs — and is
+    /// actionable (names the floor, the current value, and the env var to set).
+    /// The per-spawn `bail!` in `NorthflankEngine::spawn` is the hard backstop:
+    /// the misconfigured runner box is STILL refused at provision time, so a
+    /// customer never receives a box that would ENOSPC mid-build; we only save
+    /// the wasted JIT mint and shorten the operator debug loop.
+    ///
+    /// A CHECK-only fabric (no `runner_deployment_plan`) returns [`CheckOnly`]
+    /// instead, so the caller can skip the warn entirely.
+    ///
+    /// [`CheckOnly`]: RunnerDiskStatus::CheckOnly
+    SubFloor {
+        /// The disk size (MiB) that `runner_storage_mb` would resolve to.
+        resolved_mb: u32,
+    },
+    /// The config has no `runner_deployment_plan` — it is a CHECK-only fabric.
+    ///
+    /// The runner floor is irrelevant: no runner box will ever be spawned with
+    /// this config (the runner-vs-check distinction is `spec.allow_egress`,
+    /// which `from_runner_lease` sets; the CHECK path never triggers the runner
+    /// floor). The per-spawn guard still applies for defence in depth.
+    CheckOnly,
+}
+
 impl NorthflankConfig {
     /// A config with the documented defaults; supply `project_id` + `token`.
     #[must_use]
@@ -184,6 +228,44 @@ impl NorthflankConfig {
     #[must_use]
     pub fn from_env() -> Option<Self> {
         Self::from_env_with(|k| std::env::var(k).ok())
+    }
+
+    /// Check whether the runner-disk configuration meets the floor, for a
+    /// BOOT-TIME diagnostic.
+    ///
+    /// Called by the composition root ([`cloud_backend_from_env`]) immediately
+    /// after the config is built from env, so a misconfigured runner fabric
+    /// fails LOUD at boot (one warn, before any acquire) rather than silently
+    /// failing per-acquire after a wasted JIT/CAS mint.
+    ///
+    /// Returns:
+    /// - [`RunnerDiskStatus::Ok`] — runner-capable + disk at or above the floor.
+    /// - [`RunnerDiskStatus::SubFloor`] — runner-capable + disk below the floor.
+    ///   The caller SHOULD emit a loud `eprintln!` / tracing::warn — see the
+    ///   decision note on [`RunnerDiskStatus::SubFloor`].
+    /// - [`RunnerDiskStatus::CheckOnly`] — no `runner_deployment_plan` set; the
+    ///   floor is irrelevant for this fabric.
+    ///
+    /// The per-spawn `bail!` in `NorthflankEngine::spawn` is the hard backstop
+    /// regardless of the value returned here.
+    ///
+    /// [`cloud_backend_from_env`]: crate::cloud_exec::cloud_backend_from_env
+    #[must_use]
+    pub fn validate_runner_disk(&self) -> RunnerDiskStatus {
+        // Runner-capable = a `runner_deployment_plan` is set. A CHECK-only
+        // fabric (no plan) is unaffected: no runner box will be spawned
+        // with this config, so the floor is irrelevant.
+        if self.runner_deployment_plan.is_none() {
+            return RunnerDiskStatus::CheckOnly;
+        }
+        let resolved_mb = self
+            .runner_ephemeral_storage_mb
+            .unwrap_or(self.ephemeral_storage_mb);
+        if resolved_mb < RUNNER_EPHEMERAL_STORAGE_FLOOR_MB {
+            RunnerDiskStatus::SubFloor { resolved_mb }
+        } else {
+            RunnerDiskStatus::Ok
+        }
     }
 }
 
@@ -1050,6 +1132,70 @@ mod tests {
         assert!(
             check_engine.spawn(&spec(vec![])).is_ok(),
             "a check box keeps the small default disk; the runner floor must not touch it"
+        );
+    }
+
+    // ── [S3] validate_runner_disk: boot-time floor check ─────────────────────
+
+    /// A runner-capable config (runner_deployment_plan set) with a sub-floor
+    /// disk returns `SubFloor` so the caller can warn ONCE at boot instead of
+    /// silently failing per-acquire after a wasted JIT/CAS mint.
+    #[test]
+    fn validate_runner_disk_sub_floor_when_runner_capable_and_disk_too_small() {
+        // runner_deployment_plan set but runner_ephemeral_storage_mb absent
+        // → resolves to the CHECK default (1 GiB) which is below the 4 GiB floor.
+        let mut cfg = NorthflankConfig::new("proj", "tok");
+        cfg.runner_deployment_plan = Some("nf-compute-400-16".to_string());
+        // runner_ephemeral_storage_mb intentionally absent (None).
+        assert_eq!(
+            cfg.validate_runner_disk(),
+            RunnerDiskStatus::SubFloor {
+                resolved_mb: cfg.ephemeral_storage_mb
+            },
+            "runner-capable + sub-floor disk must return SubFloor"
+        );
+
+        // Explicit but still-sub-floor value also returns SubFloor.
+        cfg.runner_ephemeral_storage_mb = Some(RUNNER_EPHEMERAL_STORAGE_FLOOR_MB - 1);
+        assert_eq!(
+            cfg.validate_runner_disk(),
+            RunnerDiskStatus::SubFloor {
+                resolved_mb: RUNNER_EPHEMERAL_STORAGE_FLOOR_MB - 1
+            },
+            "explicit sub-floor value must return SubFloor"
+        );
+    }
+
+    /// A runner-capable config at or above the floor returns `Ok`.
+    #[test]
+    fn validate_runner_disk_ok_when_runner_capable_and_disk_at_floor() {
+        let mut cfg = NorthflankConfig::new("proj", "tok");
+        cfg.runner_deployment_plan = Some("nf-compute-400-16".to_string());
+        cfg.runner_ephemeral_storage_mb = Some(RUNNER_EPHEMERAL_STORAGE_FLOOR_MB);
+        assert_eq!(
+            cfg.validate_runner_disk(),
+            RunnerDiskStatus::Ok,
+            "runner-capable + disk at floor must return Ok"
+        );
+
+        cfg.runner_ephemeral_storage_mb = Some(RUNNER_EPHEMERAL_STORAGE_FLOOR_MB * 2);
+        assert_eq!(
+            cfg.validate_runner_disk(),
+            RunnerDiskStatus::Ok,
+            "runner-capable + disk above floor must return Ok"
+        );
+    }
+
+    /// A CHECK-only fabric (no runner_deployment_plan) returns `CheckOnly`
+    /// regardless of the disk value — the runner floor is irrelevant.
+    #[test]
+    fn validate_runner_disk_check_only_when_no_runner_plan() {
+        // Default config has no runner_deployment_plan.
+        let cfg = NorthflankConfig::new("proj", "tok");
+        assert_eq!(
+            cfg.validate_runner_disk(),
+            RunnerDiskStatus::CheckOnly,
+            "no runner_deployment_plan must return CheckOnly"
         );
     }
 

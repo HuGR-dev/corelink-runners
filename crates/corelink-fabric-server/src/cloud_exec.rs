@@ -70,7 +70,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, bail};
-use corelink_cloud_engine::{NorthflankConfig, NorthflankEngine, UreqTransport};
+use corelink_cloud_engine::{NorthflankConfig, NorthflankEngine, RunnerDiskStatus, UreqTransport};
 use corelink_runner::isolation::{Engine, RunningContainer};
 use corelink_runner::lease::{CmdOutput, ContainerSpec};
 
@@ -422,6 +422,31 @@ pub fn cloud_backend_from_env(
     registry: BoxRegistry,
 ) -> Option<(Arc<dyn LeasedExec>, Arc<dyn BoxProvisioner>)> {
     let cfg = NorthflankConfig::from_env()?;
+
+    // ── S3 boot-time runner-disk validation ──────────────────────────────────
+    // Check ONCE here so a misconfigured runner fabric fails LOUD at boot —
+    // an operator sees the warn in startup logs rather than per-acquire 503s
+    // after a wasted JIT/CAS mint. See `RunnerDiskStatus::SubFloor` for the
+    // decision rationale (warn, not hard-fail: check-only fabrics must boot).
+    // The per-spawn `bail!` in `NorthflankEngine::spawn` is the hard backstop.
+    match cfg.validate_runner_disk() {
+        RunnerDiskStatus::SubFloor { resolved_mb } => {
+            let floor = corelink_cloud_engine::RUNNER_EPHEMERAL_STORAGE_FLOOR_MB;
+            eprintln!();
+            eprintln!("WARNING [S3]: NORTHFLANK RUNNER DISK BELOW FLOOR — runners WILL FAIL AT SPAWN");
+            eprintln!("  NORTHFLANK_RUNNER_DEPLOYMENT_PLAN is set but the runner ephemeral disk");
+            eprintln!("  resolves to {resolved_mb} MiB — below the {floor} MiB floor a CI build needs.");
+            eprintln!("  Every runner spawn will fail CLOSED (ENOSPC risk, not a slow run).");
+            eprintln!("  Fix: set NORTHFLANK_RUNNER_EPHEMERAL_STORAGE_MB >= {floor}");
+            eprintln!("  (within the Northflank disk allowance for your plan).");
+            eprintln!();
+        }
+        // Runner-capable and at/above the floor — nominal path.
+        RunnerDiskStatus::Ok => {}
+        // CHECK-only fabric — runner floor is irrelevant, no warn needed.
+        RunnerDiskStatus::CheckOnly => {}
+    }
+
     let engine = Arc::new(NorthflankEngine::new(UreqTransport::new(), cfg));
     let exec: Arc<dyn LeasedExec> = Arc::new(EngineLeasedExec::new(
         Arc::clone(&engine),
