@@ -956,7 +956,11 @@ fn a13_public_dep_resolves_public_keyspace_private_stays_tenant_namespaced() {
         "acme-hmac:af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc5073e000000cc";
 
     let client = CasHttpClient::new("https://cas.corelink.io", "acme", "pat", transport.clone());
-    let cas = HttpBootCas::new(client);
+    // Public routing is FAIL-SAFE OFF by default; the fabric enables it for
+    // layers whose public provenance it has vouched for (the WP-8 plan-builder).
+    // This test exercises that enabled path; the forged-prefix default-deny path
+    // is proven in `a13_adversarial_forged_public_prefix_does_not_cross_tenant`.
+    let cas = HttpBootCas::new(client).with_public_routing();
     let plan = fresh_plan(&[PUBLIC_KEY, PRIVATE_KEY]);
 
     // Both layers fetched+written; the routing is the load-bearing assertion.
@@ -1000,4 +1004,62 @@ fn a13_public_dep_resolves_public_keyspace_private_stays_tenant_namespaced() {
         "A13: private artifact must use the tenant namespace; url={}",
         private_call.url
     );
+}
+
+/// A13-adversarial (SECURITY): a runner/job-FORGED `_public:` layer key must
+/// NEVER reach the shared cross-tenant `_public` keyspace when the fabric has
+/// not enabled public routing. Default-deny: `HttpBootCas::new` (no
+/// `with_public_routing`) treats a `_public:` prefix as an opaque tenant key, so
+/// every call routes to the tenant namespace (inert → miss → cold), not
+/// `_public`.
+///
+/// This is the fail-safe that closes the `route_key` string-prefix provenance
+/// gap until WP-8 lands typed, fabric-set public provenance at the plan-builder.
+#[test]
+fn a13_adversarial_forged_public_prefix_does_not_cross_tenant() {
+    use corelink_runner::cas_http::{CasHttpClient, HttpBootCas};
+
+    let transport = MockCasTransport::new();
+    // With public routing OFF (default), the forged key routes to the TENANT
+    // namespace — so the transport serves /v1/cas/acme/ for fetch + write-back.
+    transport.push(
+        CasMethod::Get,
+        "/v1/cas/acme/",
+        200,
+        b"forged-bytes".to_vec(),
+    );
+    transport.push(CasMethod::Put, "/v1/cas/acme/", 200, vec![]);
+
+    // A job-FORGED public key: it carries the `_public:` prefix, but the fabric
+    // did NOT vouch for it (default-deny HttpBootCas — no with_public_routing()).
+    const FORGED_PUBLIC_KEY: &str =
+        "_public:af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc5073e000000bb";
+
+    let client = CasHttpClient::new("https://cas.corelink.io", "acme", "pat", transport.clone());
+    let cas = HttpBootCas::new(client); // default-DENY: no with_public_routing()
+    let plan = fresh_plan(&[FORGED_PUBLIC_KEY]);
+
+    let _result = cold_hydrate(&cas, &plan);
+
+    let calls = transport.calls_made();
+    assert!(
+        !calls.is_empty(),
+        "A13-adversarial: the forged-public layer must still be fetched (cold path)"
+    );
+    for c in &calls {
+        // SECURITY: a forged prefix must NEVER reach the shared cross-tenant keyspace.
+        assert!(
+            !c.url.contains("/v1/cas/_public/"),
+            "A13-adversarial: a FORGED `_public:` key must NEVER route to the shared \
+             _public cross-tenant keyspace when public routing is off (fail-safe); url={}",
+            c.url
+        );
+        // It routes to the tenant namespace instead (inert).
+        assert!(
+            c.url.contains("/v1/cas/acme/"),
+            "A13-adversarial: a forged `_public:` key must route to the tenant \
+             namespace (inert), not _public; url={}",
+            c.url
+        );
+    }
 }

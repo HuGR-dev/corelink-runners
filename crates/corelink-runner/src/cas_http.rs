@@ -401,7 +401,11 @@ impl<T: CasTransport> CasHttpClient<T> {
 /// down sequence.
 ///
 /// # Public vs private namespace routing (A13)
-/// - Layer key starts with `_public:` → routes to `/v1/cas/_public/<digest>`.
+/// - Layer key starts with `_public:` → routes to `/v1/cas/_public/<digest>`
+///   ONLY when public routing is explicitly enabled via
+///   [`HttpBootCas::with_public_routing`]; otherwise FAIL-SAFE to the tenant
+///   namespace (a `_public:` prefix is never trusted by default — public
+///   provenance is typed + fabric-set at WP-8, not a forgeable string prefix).
 /// - Layer key starts with `<anything>-hmac:` → routes to `/v1/cas/<tenant>/<rest>`.
 /// - Otherwise → routes to `/v1/cas/<tenant>/<key>` (default tenant namespace).
 pub struct HttpBootCas<T: CasTransport> {
@@ -414,16 +418,41 @@ pub struct HttpBootCas<T: CasTransport> {
     /// controlled by `mark_cached`. In production this maps to a persistent
     /// local layer store.
     cache: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Whether `_public:` layer keys may route to the shared cross-tenant
+    /// `_public` keyspace. FAIL-SAFE OFF by default ([`HttpBootCas::new`]): an
+    /// un-vetted `_public:` prefix must NOT, by itself, grant cross-tenant
+    /// access. The fabric opts in via [`HttpBootCas::with_public_routing`] only
+    /// once it can vouch for a layer's public provenance (WP-8 plan-builder,
+    /// typed — never a forgeable string prefix). Until then a `_public:` key is
+    /// treated as an opaque tenant-namespace key (inert → miss → cold).
+    allow_public: bool,
 }
 
 impl<T: CasTransport> HttpBootCas<T> {
     /// Create a new `HttpBootCas` wrapping the given client.
+    ///
+    /// Public-keyspace routing is FAIL-SAFE OFF — see
+    /// [`with_public_routing`](Self::with_public_routing).
     #[must_use]
     pub fn new(client: CasHttpClient<T>) -> Self {
         HttpBootCas {
             client,
             cache: std::sync::Mutex::new(std::collections::HashSet::new()),
+            allow_public: false,
         }
+    }
+
+    /// Enable `_public` cross-tenant keyspace routing for `_public:`-prefixed
+    /// layer keys.
+    ///
+    /// The fabric calls this ONLY once it can vouch for the public provenance of
+    /// the layers it plans (the WP-8 plan-builder). The default
+    /// ([`new`](Self::new)) is fail-safe OFF: a `_public:` prefix on an un-vetted
+    /// key is inert (routed to the tenant namespace, never the shared keyspace).
+    #[must_use]
+    pub fn with_public_routing(mut self) -> Self {
+        self.allow_public = true;
+        self
     }
 
     /// Mark a layer key as locally cached (used after a successful write-back).
@@ -441,10 +470,20 @@ impl<T: CasTransport> HttpBootCas<T> {
     ///
     /// Returns the effective tenant and digest key to use in the URL.
     fn route_key<'a>(&'a self, layer_key: &'a str) -> (&'a str, &'a str) {
-        if let Some(digest) = layer_key.strip_prefix("_public:") {
+        // FAIL-SAFE: `_public` cross-tenant routing is honored ONLY when the
+        // fabric explicitly enabled it (`allow_public`). A `_public:` prefix on
+        // an un-vetted layer key must NOT, by itself, grant cross-tenant access
+        // — the full typed provenance lands with the WP-8 plan-builder. When
+        // public routing is off, a `_public:` key falls through to the tenant
+        // namespace below (inert: a miss → cold), never the shared keyspace.
+        if let Some(digest) = layer_key
+            .strip_prefix("_public:")
+            .filter(|_| self.allow_public)
+        {
             // Public-dep layer: resolves via the _public keyspace (A13).
-            ("_public", digest)
-        } else if let Some((_prefix, digest)) = layer_key.split_once("-hmac:") {
+            return ("_public", digest);
+        }
+        if let Some((_prefix, digest)) = layer_key.split_once("-hmac:") {
             // Tenant HMAC-prefixed private artifact: resolves under tenant namespace.
             (self.client.tenant.as_str(), digest)
         } else {
