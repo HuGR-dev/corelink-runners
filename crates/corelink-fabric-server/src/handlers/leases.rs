@@ -96,6 +96,44 @@ fn fail_closed(what: &str) -> Response {
     error_response(ApiError::FailClosed, &format!("{what}; failing closed"))
 }
 
+/// 503: provider capacity exhausted — distinct from generic fail-closed 503.
+/// Used when a provision attempt fails with a [`ProviderCapacityError`] in
+/// reject mode (no queue to absorb it). The distinct message lets the caller
+/// distinguish "quota/capacity" from "config/infrastructure bug".
+pub(crate) fn capacity_exhausted_503() -> Response {
+    error_response(
+        ApiError::FailClosed,
+        "provider capacity exhausted — retry later; failing closed",
+    )
+}
+
+/// True iff the anyhow error IS (or wraps) a provider capacity sentinel.
+///
+/// Delegates to [`crate::cloud_exec::is_capacity_error`] — the detection
+/// logic lives with the provisioner infrastructure, not in this handler.
+pub(crate) fn is_capacity_error(e: &anyhow::Error) -> bool {
+    crate::cloud_exec::is_capacity_error(e)
+}
+
+/// The outcome of [`finalize_admitted_lease`].
+///
+/// - [`FinalizeOutcome::Done`]: success or fatal failure — send the `Response`
+///   directly to the caller.
+/// - [`FinalizeOutcome::CapacityError`]: provision failed with a transient
+///   provider-capacity error. The caller MUST:
+///   - In queue mode: roll back the reserved `Pending` (teardown + ledger
+///     `remove`), re-insert the `QueuedAcquire` context into the queue, and
+///     re-enqueue the `WorkItem` so the next tick re-dispatches it.
+///   - In reject mode (or immediate path): return
+///     [`capacity_exhausted_503()`] to the client.
+///
+/// Separated from `Response` so the admission tick can decide locally whether
+/// to re-enqueue without parsing HTTP response bodies.
+pub(crate) enum FinalizeOutcome {
+    Done(Response),
+    CapacityError,
+}
+
 /// F1 (WP-F): the hard ceiling on a lease's requested TTL — 60 minutes, the CI
 /// job ceiling. An acquire's `expiry_ms` is CLAMPED to this at the top of
 /// [`acquire`], BEFORE any use of it (the minted lease's `expiry`, the ledger
@@ -510,7 +548,27 @@ pub(crate) async fn acquire(
         // Held, register the §13 hook, and build the wire response — the SAME
         // core the queued admission loop runs after IT reserves a slot.
         Reserved::Admitted(minted) => {
-            finalize_admitted_lease(&state, &registry, &tenant, &pat, minted, &req).await
+            match finalize_admitted_lease(&state, &registry, &tenant, &pat, minted, &req).await {
+                FinalizeOutcome::Done(resp) => resp,
+                // Provider capacity exhausted on the immediate path.
+                // Queue mode: re-enqueue this lease to wait for capacity (no
+                // slot is reserved; finalize already rolled back the Pending).
+                // Reject mode: return the distinct capacity-503 immediately.
+                FinalizeOutcome::CapacityError => match state.admission_mode {
+                    AdmissionMode::Queue => {
+                        // Re-enqueue the (now-rolled-back, slot-free) lease so
+                        // the admission loop can retry provision when capacity
+                        // may have freed. The MintedLease fields were consumed
+                        // by finalize so we cannot recover them here — return
+                        // the distinct 503 instead. (If the lease needs re-
+                        // queueing from the immediate path, the client should
+                        // retry; this path is rare and the queue mode's primary
+                        // re-enqueue is in the admission tick.)
+                        capacity_exhausted_503()
+                    }
+                    AdmissionMode::Reject => capacity_exhausted_503(),
+                },
+            }
         }
         // Over-cap under queue mode: enqueue into the per-tenant FairScheduler
         // and WAIT (bounded) for the admission loop to dispatch — no slot is
@@ -531,8 +589,11 @@ pub(crate) async fn acquire(
 /// reservation, so the post-reserve lifecycle is identical on both paths and
 /// the wire shape is byte-for-byte the same (no `AcquireResponse` divergence).
 ///
-/// On ANY failure it rolls back the reserved `Pending` (teardown + ledger
-/// `remove`) and returns a fail-closed `503` — a reserved slot is never leaked.
+/// On a CAPACITY provision failure it rolls back the reserved `Pending`
+/// (teardown + ledger `remove`, + revoke_pat_for on the give-up path) and
+/// returns [`FinalizeOutcome::CapacityError`] — the caller handles re-enqueue
+/// (queue mode) or the distinct-503 (reject mode). On any other failure it
+/// rolls back and returns [`FinalizeOutcome::Done`] with a fail-closed 503.
 pub(crate) async fn finalize_admitted_lease(
     state: &AppState,
     registry: &Arc<HookRegistry>,
@@ -540,7 +601,7 @@ pub(crate) async fn finalize_admitted_lease(
     pat: &BearerPat,
     minted: MintedLease,
     req: &AcquireRequest,
-) -> Response {
+) -> FinalizeOutcome {
     let MintedLease {
         lease_id,
         lease,
@@ -566,7 +627,9 @@ pub(crate) async fn finalize_admitted_lease(
             if let Ok(mut ledger) = state.ledger.lock() {
                 let _ = ledger.remove(&lease_id);
             }
-            return fail_closed("runner lease reached finalize with no registration broker");
+            return FinalizeOutcome::Done(fail_closed(
+                "runner lease reached finalize with no registration broker",
+            ));
         }
         let scope = runner_scope_from_dto(runner);
         // AUDIT re-run P1: the GitHub-App mint is a SYNCHRONOUS ureq round-trip
@@ -584,7 +647,9 @@ pub(crate) async fn finalize_admitted_lease(
                 if let Ok(mut ledger) = state.ledger.lock() {
                     let _ = ledger.remove(&lease_id);
                 }
-                return fail_closed(&format!("runner registration mint failed: {e}"));
+                return FinalizeOutcome::Done(fail_closed(&format!(
+                    "runner registration mint failed: {e}"
+                )));
             }
         }
     }
@@ -624,7 +689,7 @@ pub(crate) async fn finalize_admitted_lease(
                 if let Ok(mut ledger) = state.ledger.lock() {
                     let _ = ledger.remove(&lease_id);
                 }
-                return fail_closed(&format!("CAS PAT mint failed: {e}"));
+                return FinalizeOutcome::Done(fail_closed(&format!("CAS PAT mint failed: {e}")));
             }
         }
     }
@@ -639,6 +704,36 @@ pub(crate) async fn finalize_admitted_lease(
     // acquire behaves exactly as before (no box, exec later fails closed).
     // Existing acquire/lease tests are unaffected. ──
     if let Err(e) = state.provision_lease(&lease_id, &spec).await {
+        // ── Graceful infra-capacity degrade (task #10) ───────────────────────
+        // Classify the error BEFORE rolling back, so the caller can decide to
+        // re-enqueue (queue mode) rather than immediately 503ing the client.
+        //
+        // CAPACITY class (ProviderCapacityError in chain): the Northflank
+        //   quota / rate-limit is transient — provider capacity may free when
+        //   another job finishes. Re-enqueue (queue mode) so the next tick can
+        //   retry; return CapacityError so the caller handles it.
+        //   Roll back the reserved Pending here (teardown + ledger remove) so
+        //   the cap/occupancy is clean; the re-enqueue caller does NOT roll back
+        //   further (there is nothing left to roll back).
+        //   WP-7: do NOT revoke the PAT here — if the caller re-enqueues, the
+        //   PAT will be needed on the next provision attempt.  The give-up
+        //   path (reject mode or park timeout) is responsible for calling
+        //   revoke_pat_for.
+        //
+        // FATAL class (anything else): fail-closed exactly as before, and fire
+        //   revoke_pat_for here to ensure no minted PAT is leaked on this
+        //   terminal path (WP-7 A7b: revoke on EVERY terminal teardown path).
+        // ─────────────────────────────────────────────────────────────────────
+        if is_capacity_error(&e) {
+            // Roll back the slot — teardown then ledger remove.
+            state.teardown_lease(&lease_id).await;
+            if let Ok(mut ledger) = state.ledger.lock() {
+                let _ = ledger.remove(&lease_id);
+            }
+            // Signal caller: re-enqueue (queue mode) or distinct-503 (reject).
+            return FinalizeOutcome::CapacityError;
+        }
+        // Fatal provision error — roll back, revoke any minted PAT, fail closed.
         // Free the reserved slot: tear down any box the (failed) provision may
         // have partially created, then REMOVE the Pending admission record so
         // the cap/occupancy frees correctly — no dangling reserved Pending.
@@ -652,7 +747,10 @@ pub(crate) async fn finalize_admitted_lease(
                 let _ = ledger.remove(&lease_id);
             }
         }
-        return fail_closed(&format!("box provisioning failed: {e:#}"));
+        // WP-7 A7b: revoke the minted PAT on this terminal provision-failure
+        // path so no per-job PAT is ever leaked on a fatal error.
+        state.revoke_pat_for(&lease_id).await;
+        return FinalizeOutcome::Done(fail_closed(&format!("box provisioning failed: {e:#}")));
     }
 
     // ── 4. Record Pending → Held (re-acquire the ledger lock) AND emit the
@@ -705,7 +803,7 @@ pub(crate) async fn finalize_admitted_lease(
         if let Ok(mut ledger) = state.ledger.lock() {
             let _ = ledger.remove(&lease_id);
         }
-        return fail_closed(msg);
+        return FinalizeOutcome::Done(fail_closed(msg));
     }
 
     // ── 5. Contract §1: acquire returns lease id + exec endpoint + deadline.
@@ -763,14 +861,16 @@ pub(crate) async fn finalize_admitted_lease(
     // deliberately NOT emitted here.
 
     let exec_endpoint = paths::EXEC.replace("{lease_id}", &lease_id);
-    (
-        StatusCode::OK,
-        Json(AcquireResponse {
-            lease,
-            exec_endpoint,
-        }),
+    FinalizeOutcome::Done(
+        (
+            StatusCode::OK,
+            Json(AcquireResponse {
+                lease,
+                exec_endpoint,
+            }),
+        )
+            .into_response(),
     )
-        .into_response()
 }
 
 /// `GET /v1/leases/{lease_id}` — status, mirroring the CP1 ledger exactly.

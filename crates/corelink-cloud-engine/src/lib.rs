@@ -29,5 +29,6 @@ pub use http::{
     UreqTransport, timeout_from_env_with,
 };
 pub use northflank::{
-    NorthflankConfig, NorthflankEngine, RUNNER_EPHEMERAL_STORAGE_FLOOR_MB, RunnerDiskStatus,
+    NorthflankConfig, NorthflankEngine, ProviderCapacityError, RUNNER_EPHEMERAL_STORAGE_FLOOR_MB,
+    RunnerDiskStatus,
 };

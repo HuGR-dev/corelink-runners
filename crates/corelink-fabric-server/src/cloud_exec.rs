@@ -70,11 +70,30 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, bail};
-use corelink_cloud_engine::{NorthflankConfig, NorthflankEngine, RunnerDiskStatus, UreqTransport};
+use corelink_cloud_engine::{
+    NorthflankConfig, NorthflankEngine, ProviderCapacityError, RunnerDiskStatus, UreqTransport,
+};
 use corelink_runner::isolation::{Engine, RunningContainer};
 use corelink_runner::lease::{CmdOutput, ContainerSpec};
 
 use crate::exec::LeasedExec;
+
+// ── Capacity-error classification ─────────────────────────────────────────────
+
+/// True iff the anyhow error IS (or wraps) a [`ProviderCapacityError`].
+///
+/// Uses `anyhow::Error::downcast_ref::<ProviderCapacityError>()` which works
+/// for both direct errors (`anyhow::Error::new(ProviderCapacityError{...})`)
+/// and context-wrapped errors
+/// (`anyhow!("msg").context(ProviderCapacityError{...})`).
+///
+/// Note: `anyhow::Error::chain()` yields `&dyn std::error::Error` elements
+/// that cannot be downcast via `Any::downcast_ref` on stable Rust (the
+/// concrete type is anyhow's internal wrapper). Use anyhow's own
+/// `downcast_ref` on the `anyhow::Error` root instead.
+pub(crate) fn is_capacity_error(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<ProviderCapacityError>().is_some()
+}
 
 // ── BoxRegistry ───────────────────────────────────────────────────────────────
 

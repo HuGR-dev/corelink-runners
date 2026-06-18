@@ -59,6 +59,44 @@ use corelink_runner::pin::PinnedImageRef;
 
 use crate::http::{HttpRequest, HttpResponse, HttpTransport, Method};
 
+// ── ProviderCapacityError ─────────────────────────────────────────────────────
+
+/// A typed sentinel for provider-quota / rate-limit errors — downcastable via
+/// `err.downcast_ref::<ProviderCapacityError>().is_some()`.
+///
+/// Carried as the source in an `anyhow::Error` chain when `send_2xx` receives
+/// a CAPACITY-class HTTP response:
+///   - HTTP 400 whose body contains "exceeds your project resource allowance"
+///     (the Northflank ephemeral-storage quota message)
+///   - HTTP 429 (rate-limit / quota exceeded)
+///   - HTTP 503 from the provider (service unavailable / over capacity)
+///
+/// Everything else is a Fatal opaque error (the current behavior).
+///
+/// NOTE: the exact Northflank capacity signal is conservative
+/// (body-substring + 429/503) and should be confirmed against the live
+/// Northflank error response once observed in production.  The 400-substring
+/// match is taken from the only known quota message; other 400s remain Fatal.
+#[derive(Debug)]
+pub struct ProviderCapacityError {
+    /// HTTP status that triggered the classification.
+    pub status: u16,
+    /// Bounded provider body (for log context).
+    pub body_excerpt: String,
+}
+
+impl std::fmt::Display for ProviderCapacityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "provider capacity exhausted (HTTP {}): {}",
+            self.status, self.body_excerpt
+        )
+    }
+}
+
+impl std::error::Error for ProviderCapacityError {}
+
 /// Tunables for the Northflank backend. Defaults match the docs' example shapes;
 /// `token`/`project_id` are required.
 #[derive(Clone)]
@@ -502,6 +540,29 @@ fn bounded_provider_body(body: &str) -> String {
     }
 }
 
+/// Classify a non-2xx provider response as a CAPACITY error (graceful degrade)
+/// or a FATAL error (fail-closed).
+///
+/// Capacity class:
+///   - HTTP 429: explicit rate-limit / quota-exceeded signal from Northflank.
+///   - HTTP 503: provider service unavailable / over capacity.
+///   - HTTP 400 whose body contains "exceeds your project resource allowance":
+///     the Northflank ephemeral-storage quota message observed in the field.
+///
+/// Everything else is fatal. The 400-substring check is intentionally narrow:
+/// a 400 on a malformed request is NOT a capacity error and must fail closed.
+///
+/// NOTE: the exact Northflank capacity signal is conservative
+/// (body-substring + 429/503) and should be confirmed against the live
+/// Northflank error response once observed in production.
+fn is_capacity_error(status: u16, body: &str) -> bool {
+    match status {
+        429 | 503 => true,
+        400 => body.contains("exceeds your project resource allowance"),
+        _ => false,
+    }
+}
+
 /// Northflank-backed [`Engine`], generic over the HTTP transport so the engine
 /// logic is fully unit-testable against a fake.
 #[derive(Clone)]
@@ -551,6 +612,12 @@ impl<H: HttpTransport> NorthflankEngine<H> {
 
     /// Send and require a 2xx, mapping anything else to a fail-closed `Err`
     /// (the provider failed; never fabricate a success).
+    ///
+    /// CAPACITY class (HTTP 400 with quota body / 429 / 503): returns an
+    /// `anyhow::Error` whose root is [`ProviderCapacityError`] so the caller
+    /// can detect and degrade gracefully:
+    ///   `err.downcast_ref::<ProviderCapacityError>().is_some()`
+    /// Fatal class (all other non-2xx): opaque anyhow error (current behaviour).
     fn send_2xx(
         &self,
         method: Method,
@@ -560,10 +627,28 @@ impl<H: HttpTransport> NorthflankEngine<H> {
     ) -> Result<HttpResponse> {
         let resp = self.send(method, url, json_body)?;
         if !resp.is_success() {
+            let excerpt = bounded_provider_body(&resp.body);
+            if is_capacity_error(resp.status, &resp.body) {
+                // NORTHFLANK_QUOTA_EXCEEDED — structured capacity signal.
+                // Emit a distinct log line so ops can correlate provider-quota
+                // events separately from fatal provider failures.
+                eprintln!(
+                    "NORTHFLANK_QUOTA_EXCEEDED: {ctx} HTTP {} — {excerpt}",
+                    resp.status
+                );
+                return Err(anyhow::anyhow!(
+                    "northflank {ctx} capacity exhausted: HTTP {} — {excerpt}",
+                    resp.status
+                )
+                .context(ProviderCapacityError {
+                    status: resp.status,
+                    body_excerpt: excerpt,
+                }));
+            }
             bail!(
                 "northflank {ctx} failed: HTTP {} — {} (fail-closed)",
                 resp.status,
-                bounded_provider_body(&resp.body)
+                excerpt
             );
         }
         Ok(resp)

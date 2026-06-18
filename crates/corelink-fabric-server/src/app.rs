@@ -621,7 +621,7 @@ impl AppState {
     /// the wired `Arc<AdmissionQueue>` so the caller can spawn the admission loop
     /// over the SAME shared instance the handlers enqueue into.
     #[must_use]
-    pub(crate) fn with_admission_queue(
+    pub fn with_admission_queue(
         mut self,
         tick_slots: u32,
         wait_timeout: std::time::Duration,

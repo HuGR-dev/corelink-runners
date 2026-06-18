@@ -51,7 +51,9 @@ use tokio::sync::{Semaphore, oneshot};
 
 use crate::app::AppState;
 use crate::auth::{BearerPat, error_response};
-use crate::handlers::leases::{MintedLease, finalize_admitted_lease};
+use crate::handlers::leases::{
+    FinalizeOutcome, MintedLease, capacity_exhausted_503, finalize_admitted_lease,
+};
 
 /// Which admission discipline the acquire path uses when a tenant is over its
 /// concurrency cap. From `FABRIC_ADMISSION_MODE` (default [`Reject`]).
@@ -863,49 +865,110 @@ pub async fn run_admission_tick(state: &AppState, now_ms: u64) -> usize {
             continue;
         };
 
-        let (tenant, minted) = (
-            q.tenant.clone(),
-            MintedLease {
-                lease_id: lease_id.clone(),
-                lease: q.lease,
-                spec: q.spec,
-            },
-        );
-        let resp =
+        let tenant = q.tenant.clone();
+        // Clone lease/spec so `q` remains owned (we may re-insert it on
+        // CapacityError; we need `q.waker` on the Done path).
+        let minted = MintedLease {
+            lease_id: lease_id.clone(),
+            lease: q.lease.clone(),
+            spec: q.spec.clone(),
+        };
+        let outcome =
             finalize_admitted_lease(state, &state.hook_registry, &tenant, &q.pat, minted, &q.req)
                 .await;
 
-        // Wake the waiter. `oneshot::Sender::send` hands the response back in
-        // `Err` iff the receiver is gone — i.e. the waiter TIMED OUT exactly as
-        // this dispatch finalized (the dispatch↔timeout race). In that case the
-        // dispatch LOST: there is no client to own the now-Held lease, so it
-        // would leak a billed slot until the deadline reaper (P1 #2 phantom
-        // Held). Roll it back so dispatch and timeout are mutually exclusive —
-        // either the client gets the lease, or NO Held lease remains.
-        match q.waker.send(resp) {
-            Ok(()) => {
-                // The client owns the lease: a genuine dispatch (counts for §6).
-                genuinely_dispatched.insert(lease_id);
+        match outcome {
+            // ── Task #10: capacity-error re-enqueue ──────────────────────────
+            //
+            // Finalize rolled back the Pending slot (teardown + ledger remove).
+            // The waiter is still parked; re-insert its context and WorkItem so
+            // the next tick can retry provision when capacity may have freed.
+            //
+            // Bounded: the existing `queue_wait_timeout` (armed in
+            // `acquire_queued`) is still running — a persistent capacity error
+            // will eventually fire the timeout → 503 (never an infinite hang).
+            // A scheduler full → shed with distinct capacity-503.
+            //
+            // WP-7: revoke_pat_for fires on the shed / give-up path. The
+            // pat_id is in `pat_ids` so the revoke succeeds on every terminal
+            // path including the timeout arm (evict_waiter + context drop).
+            FinalizeOutcome::CapacityError => {
+                // Preserve the ORIGINAL enqueued_at_ms (carried on `pending`)
+                // so the wait clock and FIFO ordering are not reset.
+                let requeue_item = WorkItem {
+                    id: lease_id.clone(),
+                    tenant: tenant.clone(),
+                    enqueued_at_ms: q.pending.created_at_ms,
+                };
+                // Re-insert context FIRST (dispatch must never see WorkItem
+                // without a context entry).
+                {
+                    queue
+                        .waiters
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(lease_id.clone(), q);
+                }
+                let requeue_ok = {
+                    let mut sched = queue.scheduler.lock().unwrap_or_else(|e| e.into_inner());
+                    sched.enqueue(requeue_item).is_ok()
+                };
+                if !requeue_ok {
+                    // Scheduler full for this tenant: shed fast with a distinct
+                    // capacity-503 so the waiter releases its park permit.
+                    let shed_waiter = queue
+                        .waiters
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&lease_id);
+                    if let Some(shed_q) = shed_waiter {
+                        // WP-7 A7b: revoke the minted PAT on this give-up path.
+                        state.revoke_pat_for(&lease_id).await;
+                        let _ = shed_q.waker.send(capacity_exhausted_503());
+                    }
+                }
+                // NOT a genuine dispatch (no Held lease handed to client).
             }
-            Err(_dropped_resp) => {
-                // Waiter already 503'd: undo the lease so no slot/Σ/meter leaks.
-                //
-                // FIX-E (the phantom-Held leak): when `finalize_admitted_lease`
-                // SUCCEEDED, the lease is now `Held` with a live compute
-                // reservation AND an emitted `Acquired(+1)`. A bare `remove` is
-                // FAIL-CLOSED against that state (it only drops a `pending` row),
-                // so `let _ = remove(..)` would SILENTLY error and leave a phantom
-                // Held lease — reservation stuck in Σ, a concurrency slot pinned,
-                // and an unbalanced `Acquired(+1)` in the slot meter — until the
-                // deadline reaper swept it. Tear the box down first (no lock), then
-                // `rollback_undispatched_lease` terminalizes the Held lease via
-                // `transition(Crashed)` (folding the §8 accrual once, releasing the
-                // reservation + the slot) and emits the balancing `Crashed` slot
-                // event — falling back to `remove` only when finalize left the
-                // lease `Pending` (e.g. it 503'd and already rolled itself back).
-                state.teardown_lease(&lease_id).await;
-                rollback_undispatched_lease(state, &tenant, &lease_id).await;
-                // NOT genuinely dispatched — excluded from the wait stats (P2).
+
+            FinalizeOutcome::Done(resp) => {
+                // Wake the waiter. `oneshot::Sender::send` hands the response
+                // back in `Err` iff the receiver is gone — i.e. the waiter
+                // TIMED OUT exactly as this dispatch finalized (the
+                // dispatch↔timeout race). In that case the dispatch LOST: there
+                // is no client to own the now-Held lease, so it would leak a
+                // billed slot until the deadline reaper (P1 #2 phantom Held).
+                // Roll it back so dispatch and timeout are mutually exclusive —
+                // either the client gets the lease, or NO Held lease remains.
+                match q.waker.send(resp) {
+                    Ok(()) => {
+                        // Client owns the lease: a genuine dispatch (§6).
+                        genuinely_dispatched.insert(lease_id);
+                    }
+                    Err(_dropped_resp) => {
+                        // Waiter already 503'd: undo so no slot/Σ/meter leaks.
+                        //
+                        // FIX-E (the phantom-Held leak): when
+                        // `finalize_admitted_lease` SUCCEEDED, the lease is now
+                        // `Held` with a live compute reservation AND an emitted
+                        // `Acquired(+1)`. A bare `remove` is FAIL-CLOSED against
+                        // that state (it only drops a `pending` row), so
+                        // `let _ = remove(..)` would SILENTLY error and leave a
+                        // phantom Held lease — reservation stuck in Σ, a
+                        // concurrency slot pinned, and an unbalanced
+                        // `Acquired(+1)` in the slot meter — until the deadline
+                        // reaper swept it. Tear the box down first (no lock),
+                        // then `rollback_undispatched_lease` terminalizes the
+                        // Held lease via `transition(Crashed)` (folding the §8
+                        // accrual once, releasing the reservation + the slot)
+                        // and emits the balancing `Crashed` slot event — falling
+                        // back to `remove` only when finalize left the lease
+                        // `Pending` (e.g. it 503'd and already rolled itself
+                        // back).
+                        state.teardown_lease(&lease_id).await;
+                        rollback_undispatched_lease(state, &tenant, &lease_id).await;
+                        // NOT genuinely dispatched — excluded from wait stats.
+                    }
+                }
             }
         }
     }

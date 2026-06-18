@@ -56,11 +56,15 @@ pub use cloud_exec::{
     BoxProvisioner, BoxRegistry, EngineLeasedExec, NoBoxProvisioner, NorthflankBoxProvisioner,
     ProbeStatus, cloud_backend_from_env, cloud_executor_from_env,
 };
+// Re-export the capacity-error type so callers (tests, external provisioners)
+// can construct ProviderCapacityError-carrying errors without depending on
+// corelink-cloud-engine directly.
 pub use clw_drive::{ClwDrive, ClwDriveOutcome, ClwExitTransparency, MockClwDrive};
 pub use corelink_auth::{
     CoreLinkAuthConfig, CoreLinkTokenStore, IntrospectBody, IntrospectHttp, IntrospectResponse,
     UreqIntrospect,
 };
+pub use corelink_cloud_engine::ProviderCapacityError;
 pub use corelink_plans::CoreLinkPlanStore;
 pub use exec::{
     FakeLeasedExec, LeasedExec, MOCK_STDOUT, MockLeasedExec, NoBoxExec, compute_memo_key, run_check,
