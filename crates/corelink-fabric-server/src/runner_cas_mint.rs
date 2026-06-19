@@ -649,6 +649,53 @@ mod tests {
         assert_eq!(parsed["scope"], "read-write");
     }
 
+    // ── mint: P2 security-posture tripwire ───────────────────────────────────
+
+    /// PIN the **accepted-by-design** intra-tenant cache-poisoning posture
+    /// (oracle audit 2026-06-18, P2). The per-job CAS PAT is minted with
+    /// `scope == "read-write"` and is scoped to the job's OWN `owner_tenant`.
+    /// That read-write grant means a job CAN overwrite / poison entries within
+    /// ITS OWN tenant's keyspace — this is deliberately accepted (a tenant
+    /// trusts its own jobs; cross-tenant isolation is enforced separately by CAS
+    /// URL routing — see `cas_http::HttpBootCas::route_key` + the a13 adversarial
+    /// test). This test is the TRIPWIRE: if the mint is ever broadened beyond a
+    /// single `owner_tenant` (e.g. a wildcard/`_public` tenant) or its scope
+    /// changes, the posture is no longer "intra-tenant, accepted" and this must
+    /// be re-reviewed, not silently changed.
+    #[tokio::test]
+    async fn mint_pat_is_tenant_scoped_read_write_intra_tenant_poison_accepted() {
+        let resp_body = r#"{"token":"tok-rw","pat_id":"pid-rw","expires_ms":1234567890000}"#;
+        let c = client(vec![ok_body(resp_body)]);
+
+        c.mint("acme", "job-7", DEADLINE)
+            .await
+            .expect("mint must succeed");
+
+        let calls = c.http.calls();
+        let (_url, _auth, body) = &calls[0];
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+
+        // Scoped to the job's OWN tenant — never a wildcard / cross-tenant / `_public`.
+        assert_eq!(
+            parsed["owner_tenant"], "acme",
+            "PAT must be scoped to the job's own tenant (intra-tenant only)"
+        );
+        assert_ne!(
+            parsed["owner_tenant"], "_public",
+            "PAT must NEVER be minted for the shared cross-tenant keyspace"
+        );
+        assert_ne!(
+            parsed["owner_tenant"], "*",
+            "PAT must NEVER be minted with a wildcard tenant scope"
+        );
+        // Read-write is the accepted posture: a job may poison its OWN tenant's cache.
+        assert_eq!(
+            parsed["scope"], "read-write",
+            "intra-tenant read-write is the accepted-by-design posture; \
+             a change here is a security-posture change, not a refactor"
+        );
+    }
+
     // ── mint: A7b TTL enforcement ────────────────────────────────────────────
 
     #[tokio::test]
