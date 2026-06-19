@@ -1044,6 +1044,16 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
     // root sets CLW_ENDPOINT=https://cas.corelink.io.
     let state = state.with_clw_endpoint(std::env::var("CLW_ENDPOINT").ok());
 
+    // WP-8a: wire the CAS PAT mint from the environment (default-off: both
+    // CORELINK_PAT_MINT_{AUTH_KEY,URL} absent ⇒ None ⇒ moat OFF, byte-identical
+    // to before). Boot fails LOUD (the `?`) on an armed-but-misconfigured mint —
+    // a dev/default sentinel key or a half-configured pair — so an empty/dev
+    // auth key can never silently run in prod.
+    let state = match crate::runner_cas_mint::cas_pat_mint_from_env(|k| std::env::var(k).ok())? {
+        Some(mint) => state.with_cas_pat_mint(mint),
+        None => state,
+    };
+
     // AUDIT P1+P2: apply the close ack-window cap and the global in-flight cap.
     let state = state
         .with_close_ack_max_inflight(cfg.close_ack_max_inflight)

@@ -442,6 +442,101 @@ impl MintHttp for UreqMint {
     }
 }
 
+// ── WP-8a: composition-root wiring (default-off, fail-loud on misconfig) ─────
+
+/// Env var holding the `x-corelink-internal-auth` token value (the D-9 internal
+/// auth key). Absent ⇒ moat OFF (default-off cold path).
+pub const CAS_PAT_MINT_AUTH_KEY_ENV: &str = "CORELINK_PAT_MINT_AUTH_KEY";
+
+/// Env var holding the D-9 mint base URL (no trailing slash; the client POSTs
+/// to `{base_url}/internal/v1/runner/mint`).
+pub const CAS_PAT_MINT_URL_ENV: &str = "CORELINK_PAT_MINT_URL";
+
+/// Per-call timeout for the production `UreqMint` transport. Mirrors the
+/// `UreqGitHub::new(Duration::from_secs(10))` precedent in
+/// [`crate::runner_broker`]'s composition root.
+const CAS_PAT_MINT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Dev/default sentinel auth keys that MUST NEVER reach production. A
+/// case-insensitive match here means the mint is armed-but-misconfigured (a
+/// developer placeholder leaked into a prod box) — boot fails loud rather than
+/// silently mint with a non-secret.
+const DEV_SENTINEL_AUTH_KEYS: &[&str] = &[
+    "dev",
+    "dev-default",
+    "changeme",
+    "test",
+    "placeholder",
+    "todo",
+];
+
+/// Wire the production CAS PAT mint from the environment (WP-8a).
+///
+/// ## Default-off (north star: absent cache/mint ⇒ slow, never broken)
+///
+/// Both vars absent (or present-but-empty after trim, mirroring
+/// `NorthflankConfig::from_env`'s `.filter(|s| !s.is_empty())`) ⇒ `Ok(None)`:
+/// the moat is OFF and the cold path runs unchanged. Absent is NOT an error.
+///
+/// ## Fail-loud (boot refuses on armed-but-misconfigured)
+///
+/// A half-armed or dev-keyed mint is a misconfiguration, never a silent
+/// cold-path fallback. Boot `bail!`s when:
+///   - the auth key is a dev/default sentinel ([`DEV_SENTINEL_AUTH_KEYS`],
+///     case-insensitive) — a dev/empty key must never silently run in prod;
+///   - exactly one of {auth key, url} is present (half-configured).
+///
+/// ## Armed
+///
+/// Both present + valid ⇒ `Ok(Some(Arc::new(HttpCasPatMint::new(UreqMint, url,
+/// key))))`. Values are trimmed before use.
+pub fn cas_pat_mint_from_env(
+    get: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<Option<std::sync::Arc<dyn CasPatMint>>> {
+    // Present-but-empty (after trim) is treated as ABSENT for the both-absent
+    // check, mirroring `NorthflankConfig::from_env`'s `.filter(|s| !s.is_empty())`.
+    let key = get(CAS_PAT_MINT_AUTH_KEY_ENV)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let url = get(CAS_PAT_MINT_URL_ENV)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    match (key, url) {
+        // Both absent ⇒ DEFAULT-OFF. Moat off, cold path runs unchanged.
+        (None, None) => Ok(None),
+
+        // Both present ⇒ armed — but a dev/default sentinel key must never run
+        // in prod (fail loud rather than mint with a non-secret).
+        (Some(key), Some(url)) => {
+            if DEV_SENTINEL_AUTH_KEYS
+                .iter()
+                .any(|s| s.eq_ignore_ascii_case(&key))
+            {
+                anyhow::bail!(
+                    "{CAS_PAT_MINT_AUTH_KEY_ENV} is a dev/default sentinel value; \
+                     production must set a real internal auth key"
+                );
+            }
+            Ok(Some(std::sync::Arc::new(HttpCasPatMint::new(
+                UreqMint::new(CAS_PAT_MINT_TIMEOUT),
+                url,
+                key,
+            ))))
+        }
+
+        // Exactly one present ⇒ half-armed misconfig — never a silent fallback.
+        (Some(_), None) => anyhow::bail!(
+            "{CAS_PAT_MINT_AUTH_KEY_ENV} is set but {CAS_PAT_MINT_URL_ENV} is not; \
+             a half-configured mint is a misconfig (set both, or neither for default-off)"
+        ),
+        (None, Some(_)) => anyhow::bail!(
+            "{CAS_PAT_MINT_URL_ENV} is set but {CAS_PAT_MINT_AUTH_KEY_ENV} is not; \
+             a half-configured mint is a misconfig (set both, or neither for default-off)"
+        ),
+    }
+}
+
 // ── Unit tests (mock transport, no live endpoint) ───────────────────────────
 
 #[cfg(test)]
@@ -685,6 +780,112 @@ mod tests {
             err,
             MintError::Unreachable,
             "revoke transport error must map to Unreachable"
+        );
+    }
+
+    // ── WP-8a: cas_pat_mint_from_env (no real process env touched) ───────────
+
+    /// Build a `get` closure from a fixed set of (var, value) pairs — tests
+    /// canned values only, never the real process environment.
+    fn env_get(pairs: &[(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+        let owned: Vec<(String, String)> = pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        move |k| {
+            owned
+                .iter()
+                .find(|(name, _)| name == k)
+                .map(|(_, v)| v.clone())
+        }
+    }
+
+    /// Assert `cas_pat_mint_from_env` returned `Err` and return its message.
+    ///
+    /// `Option<Arc<dyn CasPatMint>>` is not `Debug` (the trait object isn't),
+    /// so `expect_err` can't be used; this matches explicitly instead.
+    fn expect_mint_err(
+        result: anyhow::Result<Option<std::sync::Arc<dyn CasPatMint>>>,
+        ctx: &str,
+    ) -> String {
+        match result {
+            Ok(_) => panic!("expected Err: {ctx}"),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    #[test]
+    fn cas_pat_mint_from_env_both_absent_is_default_off() {
+        let mint = cas_pat_mint_from_env(env_get(&[])).expect("both absent must be Ok");
+        assert!(mint.is_none(), "both absent ⇒ None (default-off cold path)");
+    }
+
+    #[test]
+    fn cas_pat_mint_from_env_both_empty_is_default_off() {
+        let mint = cas_pat_mint_from_env(env_get(&[
+            (CAS_PAT_MINT_AUTH_KEY_ENV, "   "),
+            (CAS_PAT_MINT_URL_ENV, ""),
+        ]))
+        .expect("present-but-empty both must be Ok");
+        assert!(
+            mint.is_none(),
+            "present-but-empty (after trim) both ⇒ None (treated as absent)"
+        );
+    }
+
+    #[test]
+    fn cas_pat_mint_from_env_valid_pair_is_armed() {
+        let mint = cas_pat_mint_from_env(env_get(&[
+            (CAS_PAT_MINT_AUTH_KEY_ENV, "real-secret-internal-token"),
+            (CAS_PAT_MINT_URL_ENV, "https://d9.internal.example.com"),
+        ]))
+        .expect("valid pair must be Ok");
+        assert!(mint.is_some(), "valid pair ⇒ Some (mint armed)");
+    }
+
+    #[test]
+    fn cas_pat_mint_from_env_dev_sentinel_key_fails_loud() {
+        // Case-insensitive: "DEV" matches the "dev" sentinel.
+        let msg = expect_mint_err(
+            cas_pat_mint_from_env(env_get(&[
+                (CAS_PAT_MINT_AUTH_KEY_ENV, "DEV"),
+                (CAS_PAT_MINT_URL_ENV, "https://d9.internal.example.com"),
+            ])),
+            "dev/default sentinel key must fail loud",
+        );
+        assert!(
+            msg.contains(CAS_PAT_MINT_AUTH_KEY_ENV) && msg.contains("sentinel"),
+            "error must name the auth-key var and flag the sentinel; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn cas_pat_mint_from_env_auth_key_without_url_fails_loud() {
+        let msg = expect_mint_err(
+            cas_pat_mint_from_env(env_get(&[(
+                CAS_PAT_MINT_AUTH_KEY_ENV,
+                "real-secret-internal-token",
+            )])),
+            "half-armed (key without url) must fail loud",
+        );
+        assert!(
+            msg.contains(CAS_PAT_MINT_URL_ENV),
+            "error must name the missing url var; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn cas_pat_mint_from_env_url_without_auth_key_fails_loud() {
+        let msg = expect_mint_err(
+            cas_pat_mint_from_env(env_get(&[(
+                CAS_PAT_MINT_URL_ENV,
+                "https://d9.internal.example.com",
+            )])),
+            "half-armed (url without key) must fail loud",
+        );
+        assert!(
+            msg.contains(CAS_PAT_MINT_AUTH_KEY_ENV),
+            "error must name the missing auth-key var; got: {msg}"
         );
     }
 }
