@@ -292,14 +292,50 @@ impl<B: BoxExec> ClwBoxDrive<B> {
     }
 }
 
-impl<B: BoxExec + Send + Sync> ClwDrive for ClwBoxDrive<B> {
+impl<B: BoxExec + Clone + Send + Sync + 'static> ClwDrive for ClwBoxDrive<B> {
+    /// Drive `clw` for `lease_id` from ANY async context.
+    ///
+    /// `drive_blocking` runs the `clw` sequence over the SYNCHRONOUS [`BoxExec`]
+    /// seam (a snapshot → hydrate → run round-trip). Awaiting it inline would pin
+    /// a tokio ASYNC worker for the whole round-trip, so a burst of concurrent
+    /// leases starves the executor. We offload the blocking call onto
+    /// [`tokio::task::spawn_blocking`] — mirroring [`mint_jit_offloaded`]
+    /// (`app.rs`). The spawned closure must be `'static + Send`, so it cannot
+    /// borrow `&self`: we move OWNED copies of `boxx` (`B: Clone`) and `run`
+    /// (`ClwRunSpec: Clone`) in, reconstruct a throwaway [`ClwBoxDrive`], and
+    /// call `drive_blocking()` on it — keeping that the single source of truth.
+    ///
+    /// Fail-closed on join error: a [`tokio::task::JoinError`] (the blocking task
+    /// panicked or was cancelled) maps to the SAME clw-internal outcome
+    /// `drive_blocking` produces for a clw error — [`ClwDriveOutcome::ClwFailed`]
+    /// (exit-transparency = clw error, NOT a child verdict, NOT cacheable). A
+    /// `JoinError` is NEVER surfaced as a child success or a cacheable result.
+    ///
+    /// [`mint_jit_offloaded`]: crate::app::AppState::mint_jit_offloaded
     fn drive(
         &self,
         _lease_id: &str,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = anyhow::Result<ClwDriveOutcome>> + Send + '_>,
     > {
-        Box::pin(async move { self.drive_blocking() })
+        let boxx = self.boxx.clone();
+        let run = self.run.clone();
+        Box::pin(async move {
+            match tokio::task::spawn_blocking(move || ClwBoxDrive::new(boxx, run).drive_blocking())
+                .await
+            {
+                // The blocking task ran to completion — surface its result
+                // verbatim (the frozen §4 exit-code semantics are unchanged).
+                Ok(result) => result,
+                // The blocking task panicked or was cancelled: fail closed to a
+                // clw-internal failure (NOT a child verdict, NOT cacheable),
+                // exactly as drive_blocking reports a clw error.
+                Err(join_err) => Ok(ClwDriveOutcome::ClwFailed {
+                    clw_exit_code: -1,
+                    reason: format!("clw drive task did not complete: {join_err}"),
+                }),
+            }
+        })
     }
 }
 
@@ -468,6 +504,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn drive_offloaded_child_0_wrote_back_on_spawn_blocking() {
+        // WP-8c: `drive` offloads `drive_blocking` onto `tokio::task::spawn_blocking`
+        // so it is safe in any async context. Exercise that wrapper directly
+        // (multi-thread runtime) and assert the offloaded path still yields the
+        // child-0 / wrote_back outcome — i.e. moving WHERE the work runs did not
+        // change WHAT it returns.
+        let outcome = ClwBoxDrive::new(MockBoxExec::with_run_code(0), spec())
+            .drive("lease-offload")
+            .await
+            .expect("transport must not error");
+        assert_eq!(
+            outcome,
+            ClwDriveOutcome::Ran {
+                exit: ClwExitTransparency::Child(0),
+                wrote_back: true,
+            },
+            "the spawn_blocking-offloaded drive must still report child 0 + wrote_back"
+        );
+    }
+
+    #[tokio::test]
     async fn drive_run_nonzero_is_child_not_wrote_back() {
         let outcome = drive_with(MockBoxExec::with_run_code(42)).await;
         assert_eq!(
@@ -583,6 +640,7 @@ mod tests {
     #[tokio::test]
     async fn drive_transport_err_propagates_as_err() {
         // A BoxExec spawn/transport Err must propagate as Err (NOT Ok(outcome)).
+        #[derive(Clone)]
         struct FailingBox;
         impl BoxExec for FailingBox {
             fn run(&self, _argv: &[&str]) -> anyhow::Result<CmdOutput> {
