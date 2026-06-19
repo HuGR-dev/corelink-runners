@@ -80,8 +80,8 @@ pub use runner_broker::{
     BrokerError, JitRunnerConfig, MockBroker, RunnerRegistrationBroker, RunnerScope, RunnerTarget,
 };
 pub use runner_cas_mint::{
-    CasPatMint, HttpCasPatMint, MintError, MintHttp, MintHttpResponse, MintedPat, MockMint,
-    UreqMint,
+    CAS_PAT_MINT_AUTH_KEY_ENV, CAS_PAT_MINT_URL_ENV, CasPatMint, HttpCasPatMint, MintError,
+    MintHttp, MintHttpResponse, MintedPat, MockMint, UreqMint, cas_pat_mint_from_env,
 };
 pub use runner_inject::{
     CLW_ENDPOINT_ENV, CLW_REF_DOMAIN_ENV, CLW_REF_DOMAIN_RUNNER, CLW_TENANT_ENV, CLW_TOKEN_ENV,
