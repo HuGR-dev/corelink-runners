@@ -8,6 +8,15 @@
   // that hosts the R2 CAS (corelink-chunk-*/corelink-manifest-*), so a runner
   // Container here reads the cache IN-NETWORK (the ADR-0008 moat win).
   "account_id": "6a1fc1c626fc2628823e60b9db01f5cd",
+  // Warm-moat (cache-warm) non-secret config. The per-job CAS PAT is minted via
+  // D-9 only when CORELINK_PAT_MINT_AUTH_KEY (a Worker SECRET, set by the owner
+  // once the Server TL delivers it) is ALSO present — else the runner spawns
+  // COLD (fail-open). CLW_TENANT = the dogfood owner tenant (ee30f7ba).
+  "vars": {
+    "CLW_TENANT": "ee30f7ba-fc25-4d71-939e-ebe130b4c6a3",
+    "CLW_ENDPOINT": "https://corelink-api.humangr.com",
+    "CORELINK_MINT_URL": "https://corelink-api.humangr.com"
+  },
 
   // The Container Durable Object that owns the per-job runner container.
   "durable_objects": {

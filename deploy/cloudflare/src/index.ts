@@ -28,6 +28,16 @@ export interface Env {
   AUTOSCALER_LABEL?: string;
   // Pinned runner image digest asserted on autoscaler spawns (the X4 floor shape).
   AUTOSCALER_RUNNER_IMAGE?: string;
+  // ── Warm moat (cache-warm) — mint a per-job CAS PAT (D-9) + inject CLW_* ──
+  // D-9 internal-auth key (`x-corelink-internal-auth`). Worker secret. Absent ⇒
+  // the runner spawns COLD (no cache-warm) — fail-open, north star.
+  CORELINK_PAT_MINT_AUTH_KEY?: string;
+  // D-9 mint base URL (default the public on-net hostname; Option B).
+  CORELINK_MINT_URL?: string;
+  // The CAS API base URL injected as CLW_ENDPOINT (default same host).
+  CLW_ENDPOINT?: string;
+  // The owner tenant the per-job CAS PAT + CLW_TENANT are scoped to (dogfood ee30f7ba).
+  CLW_TENANT?: string;
 }
 
 // Per-job runner container. One DO instance per spawned runner (keyed by handle).
@@ -139,10 +149,50 @@ async function mintJit(env: Env, repoFullName: string, label: string): Promise<s
 }
 
 // Spawn one runner container with the JIT injected (the shared spawn path).
+// Mint a per-job CAS PAT via D-9 (corelink-server). Scope cas:rw, tenant-scoped
+// (A6: per-job, never the tenant PAT). Throws on any failure — the caller falls
+// open to a COLD spawn (north star: cache absent ⇒ slow, never broken).
+async function mintCasPat(env: Env, jobId: string): Promise<string> {
+  const base = env.CORELINK_MINT_URL ?? "https://corelink-api.humangr.com";
+  const resp = await fetch(`${base}/internal/v1/runner/mint`, {
+    method: "POST",
+    headers: {
+      "x-corelink-internal-auth": env.CORELINK_PAT_MINT_AUTH_KEY ?? "",
+      "content-type": "application/json",
+      "user-agent": "corelink-spawn-worker",
+    },
+    body: JSON.stringify({ owner_tenant: env.CLW_TENANT, job_id: jobId, scope: "cas:rw" }),
+  });
+  if (!resp.ok) throw new Error(`D-9 mint ${resp.status}`);
+  const j = (await resp.json()) as { token?: string };
+  if (!j.token) throw new Error("D-9 mint: no token");
+  return j.token;
+}
+
+// Build the per-job container env: always the JIT; cache-warm CLW_* WHEN the
+// D-9 mint is configured AND succeeds. Any mint failure ⇒ cold env (fail-open).
+async function buildContainerEnv(env: Env, jit: string): Promise<Record<string, string>> {
+  const containerEnv: Record<string, string> = { CORELINK_RUNNER_JITCONFIG: jit };
+  if (env.CORELINK_PAT_MINT_AUTH_KEY && env.CLW_TENANT) {
+    try {
+      const casPat = await mintCasPat(env, crypto.randomUUID());
+      containerEnv.CLW_ENDPOINT = env.CLW_ENDPOINT ?? "https://corelink-api.humangr.com";
+      containerEnv.CLW_TENANT = env.CLW_TENANT;
+      containerEnv.CLW_TOKEN = casPat; // per-job; never logged
+      containerEnv.CLW_REF_DOMAIN = "runner";
+    } catch (e) {
+      // Fail-OPEN: spawn cold (no CLW_*). The entrypoint's cache-warm hook is
+      // also fail-open, so a job ALWAYS runs — slow, never broken.
+      console.log(`warm-mint failed, spawning COLD: ${(e as Error).message}`);
+    }
+  }
+  return containerEnv;
+}
+
 async function spawnRunner(env: Env, jit: string): Promise<string> {
   const handle = crypto.randomUUID();
   const container = getContainer(env.RUNNER_CONTAINER, handle);
-  await container.startWithEnv({ CORELINK_RUNNER_JITCONFIG: jit });
+  await container.startWithEnv(await buildContainerEnv(env, jit));
   return handle;
 }
 
