@@ -26,13 +26,13 @@
   "containers": [
     {
       "class_name": "RunnerContainer",
-      // STAGE A (substrate smoke): a minimal image to prove spawn→status→teardown
-      // on a live Firecracker microVM. Swap to deploy/runner/Dockerfile (the real
-      // GH-Actions runner + clw, digest-pinned) for the CI smoke (Stage B).
-      "image": "./Dockerfile.smoke",
-      // Smoke runs on a small instance (cheap). Production runner = standard-4
-      // (4 vCPU / 12 GiB / 20 GB; clears the runner disk floor).
-      "instance_type": "basic",
+      // STAGE B: the real runner image (GH-Actions agent + clw + Rust toolchain).
+      // Build context = deploy/runner (its entrypoint.sh + Dockerfile). Stage A
+      // used ./Dockerfile.smoke to prove the substrate; this is the real CI image.
+      "image": "../runner/Dockerfile",
+      // standard-4 = 4 vCPU / 12 GiB / 20 GB disk — fits CI, clears the runner
+      // disk floor (RUNNER_EPHEMERAL_STORAGE_FLOOR_MB).
+      "instance_type": "standard-4",
       "max_instances": 2
     }
   ]
