@@ -81,17 +81,16 @@ PASS: sign off for dogfood + early customers once the §6 verify items are confi
 
 ## 6. Conditions for sign-off (verify before first non-dogfood tenant — "bulletproof" items)
 
-- [ ] **Confirm the Firecracker/KVM claim against Cloudflare's own security/compliance docs** (this
+- [x] **Firecracker/KVM claim CONFIRMED (2026-06-20)** against primary Cloudflare docs (developers.cloudflare.com: "Each container instance runs inside its own VM... strong isolation"; blog.cloudflare.com/container-platform-preview — Firecracker VM). Original item: (this
       assessment is based on Cloudflare's public statements + secondary sources — verify the primary
       source; check their SOC 2 / Containers security page).
 - [ ] **Side-channel posture:** confirm Cloudflare's stance on cross-tenant microarchitectural isolation
       for Containers (core scheduling / dedicated-core option for sensitive tenants if offered).
 - [ ] **Egress policy on Cloudflare** matches ADR-0003 (bounded egress; no broader reach than Northflank).
-- [ ] **spawn-Worker auth hardening:** constant-time token compare + rate-limit (the skeleton uses `==`;
-      flagged in the V1 audit + the Worker README).
+- [x] **spawn-Worker auth hardening DONE (2026-06-20):** constant-time `safeEqual` bearer compare deployed + verified live (no-token/wrong-token → 401, right-token → 404). Rate-limit still TODO.
 - [ ] **Tenant isolation at the cache seam** holds over the in-network R2 path (the Server-TL R2
       co-location seam must preserve tenant-in-path scoping — relay pending).
-- [ ] **A live dogfood smoke** proving a real job runs + tears down in its own microVM (the runbook).
+- [x] **Live dogfood smoke DONE (2026-06-20):** a real GH-Actions job ran to SUCCESS on a CF Firecracker microVM (`cf-dogfood-1`, kernel `cloudflare-firecracker`), then self-deregistered. Stage B.
 
 ## 7. Recommendation
 
