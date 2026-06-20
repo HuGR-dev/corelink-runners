@@ -177,6 +177,62 @@ impl CloudflareConfig {
     pub fn from_env() -> Option<Self> {
         Self::from_env_with(|k| std::env::var(k).ok())
     }
+
+    /// Validate an ARMED config for misconfigurations that would otherwise only
+    /// surface at spawn time (or, worse, ENOSPC mid-build) — for a BOOT-TIME
+    /// diagnostic, mirroring [`NorthflankConfig::validate_runner_disk`].
+    ///
+    /// The backend is only constructible when [`from_env`](Self::from_env)
+    /// returned `Some` (both required vars present), so this is never reached for
+    /// a DEFAULT-OFF fabric. When it IS reached, it fails LOUD (returns `Err`)
+    /// rather than letting a misconfigured fabric boot and fail per-spawn after a
+    /// wasted JIT/CAS mint. The per-spawn floor in [`CloudflareEngine::spawn`] is
+    /// the hard backstop; this is the early, actionable boot warning (parity with
+    /// the Northflank S3 pattern).
+    ///
+    /// Fail-loud (`Err`) arms — each names what is wrong and how to fix it:
+    /// - `runner_storage_mb` below [`RUNNER_EPHEMERAL_STORAGE_FLOOR_MB`]: a runner
+    ///   box would ENOSPC mid-build (the cold-start north star forbids it).
+    /// - `spawn_worker_url` is not an `http(s)://` URL: the spawn endpoints would
+    ///   be addressed against a garbage base and every spawn would fail.
+    /// - `auth_token` is empty: the Worker would reject every request (though
+    ///   `from_env` already drops an empty token, a programmatically-built config
+    ///   could carry one — fail closed here too).
+    ///
+    /// `Ok(())` otherwise. The returned `String` is a ready-to-log, actionable
+    /// message (no secret material — the token value is never interpolated).
+    ///
+    /// # Errors
+    /// One of the misconfiguration arms documented above.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.auth_token.is_empty() {
+            return Err(format!(
+                "{CLOUDFLARE_SPAWN_AUTH_TOKEN_ENV} is empty — the spawn-Worker would reject \
+                 every request. Set {CLOUDFLARE_SPAWN_AUTH_TOKEN_ENV} to the Worker bearer token."
+            ));
+        }
+        if !(self.spawn_worker_url.starts_with("http://")
+            || self.spawn_worker_url.starts_with("https://"))
+        {
+            return Err(format!(
+                "{CLOUDFLARE_SPAWN_WORKER_URL_ENV} {:?} is not an http(s):// URL — the /v1/... \
+                 spawn endpoints would be addressed against a garbage base and every spawn would \
+                 fail. Set {CLOUDFLARE_SPAWN_WORKER_URL_ENV} to e.g. https://spawn.example.workers.dev.",
+                self.spawn_worker_url
+            ));
+        }
+        if self.runner_storage_mb < RUNNER_EPHEMERAL_STORAGE_FLOOR_MB {
+            return Err(format!(
+                "{CLOUDFLARE_RUNNER_STORAGE_MB_ENV} resolves to {} MiB — below the \
+                 {RUNNER_EPHEMERAL_STORAGE_FLOOR_MB} MiB floor a CI build needs. Every runner \
+                 spawn will fail CLOSED (ENOSPC risk, not a slow run). Set \
+                 {CLOUDFLARE_RUNNER_STORAGE_MB_ENV} >= {RUNNER_EPHEMERAL_STORAGE_FLOOR_MB} \
+                 (within the Cloudflare instance disk).",
+                self.runner_storage_mb
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Manual `Debug` for [`CloudflareConfig`] — the `auth_token` field is redacted
@@ -846,6 +902,76 @@ mod tests {
         assert_eq!(cfg.labels, vec!["a", "b", "c"]);
         assert_eq!(cfg.expiry_ms, 9000);
         assert_eq!(cfg.runner_storage_mb, 16384);
+    }
+
+    // ── validate: boot-time fail-loud arms ────────────────────────────────────
+
+    #[test]
+    fn validate_ok_for_nominal_armed_config() {
+        // A config built via `new` (default storage clears the floor) + a real
+        // https URL + a non-empty token is valid.
+        assert!(cfg().validate().is_ok(), "a nominal armed config validates");
+    }
+
+    #[test]
+    fn validate_rejects_disk_below_floor() {
+        let mut c = cfg();
+        c.runner_storage_mb = RUNNER_EPHEMERAL_STORAGE_FLOOR_MB - 1;
+        let err = c.validate().expect_err("a sub-floor disk must fail loud");
+        assert!(
+            err.contains(CLOUDFLARE_RUNNER_STORAGE_MB_ENV)
+                && err.contains(&RUNNER_EPHEMERAL_STORAGE_FLOOR_MB.to_string()),
+            "error must name the disk env var and the floor, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_allows_disk_exactly_at_floor() {
+        let mut c = cfg();
+        c.runner_storage_mb = RUNNER_EPHEMERAL_STORAGE_FLOOR_MB;
+        assert!(
+            c.validate().is_ok(),
+            "a disk exactly at the floor must validate"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_non_http_url() {
+        for bad_url in ["spawn.example.dev", "ftp://x.dev", "", "ws://x.dev"] {
+            let mut c = cfg();
+            c.spawn_worker_url = bad_url.to_string();
+            let err = c.validate().expect_err("a non-http(s) URL must fail loud");
+            assert!(
+                err.contains(CLOUDFLARE_SPAWN_WORKER_URL_ENV) && err.contains("http"),
+                "error must name the URL env var, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_accepts_http_and_https_urls() {
+        for ok_url in ["http://x.dev", "https://spawn.example.workers.dev"] {
+            let mut c = cfg();
+            c.spawn_worker_url = ok_url.to_string();
+            assert!(c.validate().is_ok(), "{ok_url} must validate");
+        }
+    }
+
+    #[test]
+    fn validate_rejects_empty_token_without_leaking() {
+        let mut c = cfg();
+        c.auth_token = String::new();
+        let err = c.validate().expect_err("an empty token must fail loud");
+        assert!(
+            err.contains(CLOUDFLARE_SPAWN_AUTH_TOKEN_ENV),
+            "error must name the token env var, got: {err}"
+        );
+        // The validate message must never carry token material (here it is empty,
+        // but the message must not interpolate the secret field).
+        assert!(
+            !err.contains("super-secret-token-value"),
+            "validate must not echo token material: {err}"
+        );
     }
 
     #[test]
