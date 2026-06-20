@@ -4,6 +4,10 @@
   "name": "corelink-spawn-worker",
   "main": "src/index.ts",
   "compatibility_date": "2026-06-01",
+  // CoreLink infra account (gmhelmold@gmail.com's Account) — the same account
+  // that hosts the R2 CAS (corelink-chunk-*/corelink-manifest-*), so a runner
+  // Container here reads the cache IN-NETWORK (the ADR-0008 moat win).
+  "account_id": "6a1fc1c626fc2628823e60b9db01f5cd",
 
   // The Container Durable Object that owns the per-job runner container.
   "durable_objects": {

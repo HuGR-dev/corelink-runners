@@ -22,16 +22,29 @@ export interface Env {
 // Per-job runner container. One DO instance per spawned runner (keyed by handle).
 export class RunnerContainer extends Container<Env> {
   // standard-4; the GH-Actions agent is the image ENTRYPOINT (runner-direct, v0).
-  defaultPort = 0; // no inbound port — the runner dials OUT to GitHub.
-  // Orphan-leak backstop; overridden per-spawn from expiry_ms.
+  // No inbound port — the runner dials OUT to GitHub (the GH-Actions agent is
+  // the image entrypoint; runner-direct, v0). `defaultPort` is left unset.
+  // Orphan-leak backstop; the DO sleeps (and the container stops) after this.
   sleepAfter = "45m";
+  // The runner needs egress (git clone, GH API, CAS hydration). ADR-0003 bounds
+  // it (no-free-tier + scoped short-TTL PAT + ephemeral box).
+  enableInternet = true;
 
-  // UNVERIFIED: confirm the SDK's runtime env-injection API. The per-job
-  // CORELINK_RUNNER_JITCONFIG + CLW_* MUST be injected at start (not baked).
-  async startWithEnv(env: Record<string, string>): Promise<void> {
-    // UNVERIFIED: `this.envVars` then `this.start()` vs `this.ctx.container.start({ env })`.
-    this.envVars = env;
-    await this.start();
+  // Start the per-job container with the JIT config + CLW_* injected at runtime
+  // (@cloudflare/containers 0.3.x: env arrives via `start({ envVars })`, not baked).
+  async startWithEnv(envVars: Record<string, string>): Promise<void> {
+    await this.start({ envVars, enableInternet: true });
+  }
+
+  // Liveness for GET /v1/status: a running container ⇒ alive.
+  async isAlive(): Promise<boolean> {
+    const state = await this.getState();
+    return state.status === "running" || state.status === "healthy";
+  }
+
+  // Idempotent teardown for POST /v1/teardown (SIGKILL via destroy()).
+  async teardown(): Promise<void> {
+    await this.destroy();
   }
 }
 
@@ -82,7 +95,7 @@ export default {
 
       const handle = crypto.randomUUID();
       const container = getContainer(env.RUNNER_CONTAINER, handle);
-      // Inject the per-job env (JIT config + CLW_*) at start. UNVERIFIED API shape.
+      // Inject the per-job env (JIT config + CLW_*) at start (runtime, not baked).
       await container.startWithEnv(body.env);
       return json({ handle }, 201);
     }
@@ -92,8 +105,7 @@ export default {
       const handle = pathname.slice("/v1/status/".length);
       if (!handle) return json({ error: "missing handle" }, 400);
       const container = getContainer(env.RUNNER_CONTAINER, handle);
-      // UNVERIFIED: the liveness probe. Map "container running" → 200, else 404.
-      const alive = await container.isRunning?.();
+      const alive = await container.isAlive();
       return alive
         ? json({ status: "alive" }, 200)
         : json({ status: "gone" }, 404);
@@ -104,8 +116,8 @@ export default {
       const { handle } = (await request.json()) as { handle: string };
       if (!handle) return json({ error: "missing handle" }, 400);
       const container = getContainer(env.RUNNER_CONTAINER, handle);
-      // UNVERIFIED: stop/destroy API. Treat already-gone as success (idempotent).
-      await container.stop?.();
+      // Idempotent SIGKILL teardown; already-gone is success for the caller.
+      await container.teardown();
       return new Response(null, { status: 204 });
     }
 
