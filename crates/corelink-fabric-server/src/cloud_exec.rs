@@ -71,7 +71,8 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, bail};
 use corelink_cloud_engine::{
-    NorthflankConfig, NorthflankEngine, ProviderCapacityError, RunnerDiskStatus, UreqTransport,
+    CloudflareConfig, CloudflareEngine, NorthflankConfig, NorthflankEngine, ProviderCapacityError,
+    RunnerDiskStatus, UreqTransport,
 };
 use corelink_runner::isolation::{Engine, RunningContainer};
 use corelink_runner::lease::{CmdOutput, ContainerSpec};
@@ -479,6 +480,142 @@ pub fn cloud_backend_from_env(
     Some((exec, prov))
 }
 
+// ── CloudflareBoxProvisioner ──────────────────────────────────────────────────
+
+/// Cloud provisioner backed by [`CloudflareEngine`] (ADR-0008: Cloudflare is the
+/// DEFAULT compute substrate).
+///
+/// Mirrors [`NorthflankBoxProvisioner`] EXACTLY — same lease→handle binding
+/// discipline, same fail-closed posture:
+/// - `provision` calls `engine.spawn(spec)` and binds the returned
+///   [`RunningContainer`] into `registry`; a spawn failure propagates `Err`
+///   WITHOUT binding (the registry stays empty for that lease, so a later exec
+///   fails closed via the empty registry — no box from a failed spawn).
+/// - `teardown` resolves the binding, calls `engine.teardown(c)` (delete-first),
+///   then `unbind`s. A delete failure propagates `Err` and KEEPS the registry
+///   entry so the reaper retries — a failed teardown is never silently dropped.
+///   Idempotent: an already-unbound lease returns `Ok(())` without the provider.
+/// - `probe` resolves the binding (no binding → [`ProbeStatus::Unbound`]) and
+///   maps `engine.is_alive`: `Ok(true)`→`Alive`, `Ok(false)`→`Dead`, `Err`
+///   propagates (transient/unreachable is NOT death — fail-safe-alive).
+///
+/// **v0 is runner-direct (ADR-0007):** the spawned container runs the
+/// GitHub-Actions agent via its image entrypoint, so there is no post-spawn
+/// `exec` step. The exec half wired alongside this provisioner is therefore
+/// [`NoBoxExec`](crate::exec::NoBoxExec) — a RUNNER lease never calls exec, and
+/// a CHECK lease correctly fails closed at exec via the empty registry.
+pub struct CloudflareBoxProvisioner<H: corelink_cloud_engine::HttpTransport> {
+    engine: Arc<CloudflareEngine<H>>,
+    registry: BoxRegistry,
+}
+
+impl<H: corelink_cloud_engine::HttpTransport> CloudflareBoxProvisioner<H> {
+    /// Construct over an engine and a (shared) registry.
+    pub fn new(engine: Arc<CloudflareEngine<H>>, registry: BoxRegistry) -> Self {
+        Self { engine, registry }
+    }
+}
+
+impl<H: corelink_cloud_engine::HttpTransport + Send + Sync> BoxProvisioner
+    for CloudflareBoxProvisioner<H>
+{
+    fn provision(&self, lease_id: &str, spec: &ContainerSpec) -> Result<()> {
+        // Fail-closed: if spawn errors, nothing is bound (mirrors Northflank).
+        let container = self.engine.spawn(spec)?;
+        self.registry.bind(lease_id, container);
+        Ok(())
+    }
+
+    fn teardown(&self, lease_id: &str) -> Result<()> {
+        // Idempotent: if the lease is already unbound, skip the engine call.
+        if let Some(c) = self.registry.resolve(lease_id) {
+            // Delete-first, then unbind. If delete fails we propagate Err and
+            // intentionally do NOT call unbind — the registry entry is kept so
+            // a future reaper can retry teardown on the orphaned handle.
+            self.engine.teardown(&c)?;
+            self.registry.unbind(lease_id);
+        }
+        Ok(())
+    }
+
+    fn probe(&self, lease_id: &str) -> Result<ProbeStatus> {
+        // Resolve the binding EXACTLY as teardown does: no binding → Unbound.
+        let Some(c) = self.registry.resolve(lease_id) else {
+            return Ok(ProbeStatus::Unbound);
+        };
+        // FAIL-SAFE: is_alive only returns Ok(false) for an authoritative
+        // dead/terminal status; ambiguous/5xx → Err (propagated, NOT death).
+        match self.engine.is_alive(&c) {
+            Ok(true) => Ok(ProbeStatus::Alive),
+            Ok(false) => Ok(ProbeStatus::Dead),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+// ── cloudflare_backend_from_env ───────────────────────────────────────────────
+
+/// Build the Cloudflare backend from the process environment — or return `None`
+/// if the required `CLOUDFLARE_*` vars are absent (DEFAULT-OFF, fail-closed).
+///
+/// ADR-0008: Cloudflare is the DEFAULT compute substrate. When
+/// [`CloudflareConfig::from_env`] yields a config (both
+/// `CLOUDFLARE_SPAWN_WORKER_URL` and `CLOUDFLARE_SPAWN_AUTH_TOKEN` present),
+/// this returns BOTH halves of the backend:
+/// - exec → [`NoBoxExec`](crate::exec::NoBoxExec): v0 is runner-direct, so a
+///   runner lease NEVER calls exec (the container runs its entrypoint at spawn);
+///   a CHECK lease still fails closed at exec via the empty registry. This is
+///   not a footgun — it is the correct fail-closed posture for v0 runner-only.
+/// - provisioner → [`CloudflareBoxProvisioner`] over the SHARED `registry`.
+///
+/// When this returns `None`, the composition root MUST keep both the
+/// [`NoBoxExec`](crate::exec::NoBoxExec) and [`NoBoxProvisioner`] defaults.
+pub fn cloudflare_backend_from_env(
+    registry: BoxRegistry,
+) -> Option<(Arc<dyn LeasedExec>, Arc<dyn BoxProvisioner>)> {
+    let cfg = CloudflareConfig::from_env()?;
+    let engine = Arc::new(CloudflareEngine::new(UreqTransport::new(), cfg));
+    // Runner-direct: no post-spawn exec. The exec half is NoBoxExec — a runner
+    // lease never calls it; a CHECK lease fails closed at exec (correct for v0).
+    let exec: Arc<dyn LeasedExec> = Arc::new(crate::exec::NoBoxExec);
+    let prov: Arc<dyn BoxProvisioner> = Arc::new(CloudflareBoxProvisioner::new(engine, registry));
+    Some((exec, prov))
+}
+
+// ── backend selection (ADR-0008) ──────────────────────────────────────────────
+
+/// Which compute substrate the composition root selected.
+///
+/// ADR-0008 selection order: **Cloudflare is the DEFAULT** — prefer it when its
+/// env is present; ELSE fall back to Northflank; ELSE neither (NoBox defaults,
+/// DEFAULT-OFF). Exactly one backend wins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectedBackend {
+    /// Cloudflare env present → the Cloudflare backend is wired.
+    Cloudflare,
+    /// No Cloudflare env, Northflank env present → Northflank backend is wired.
+    Northflank,
+    /// Neither present → NoBox defaults (default-off, fail-closed).
+    Off,
+}
+
+/// Pure selection oracle for ADR-0008 (Cloudflare → Northflank → off), factored
+/// out of the composition root so the order is unit-testable without mutating
+/// the process environment. `cf_present` / `nf_present` are the
+/// `*_backend_from_env(...).is_some()` results.
+#[must_use]
+pub fn select_backend(cf_present: bool, nf_present: bool) -> SelectedBackend {
+    if cf_present {
+        // ADR-0008: Cloudflare is the DEFAULT substrate — it wins whenever its
+        // env is present, even if Northflank is ALSO configured.
+        SelectedBackend::Cloudflare
+    } else if nf_present {
+        SelectedBackend::Northflank
+    } else {
+        SelectedBackend::Off
+    }
+}
+
 // ── boot diagnostic ─────────────────────────────────────────────────────────
 
 /// What the cloud-backend wiring will ACTUALLY resolve to — for an honest boot
@@ -542,6 +679,7 @@ const _: fn() = || {
         >,
     >();
     assert_send_sync::<NorthflankBoxProvisioner<corelink_cloud_engine::UreqTransport>>();
+    assert_send_sync::<CloudflareBoxProvisioner<corelink_cloud_engine::UreqTransport>>();
 };
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -642,6 +780,216 @@ mod tests {
         assert!(
             !NoBoxProvisioner.binds_boxes(),
             "NoBoxProvisioner must report binds_boxes() == false"
+        );
+    }
+
+    // ── ADR-0008 backend selection order ──────────────────────────────────────
+
+    #[test]
+    fn select_backend_prefers_cloudflare_when_present() {
+        // Cloudflare is the DEFAULT substrate — it wins even when Northflank is
+        // ALSO configured.
+        assert_eq!(select_backend(true, true), SelectedBackend::Cloudflare);
+        assert_eq!(select_backend(true, false), SelectedBackend::Cloudflare);
+    }
+
+    #[test]
+    fn select_backend_falls_back_to_northflank() {
+        // No Cloudflare env, Northflank present → Northflank.
+        assert_eq!(select_backend(false, true), SelectedBackend::Northflank);
+    }
+
+    #[test]
+    fn select_backend_off_when_neither_present() {
+        // Neither env present ⇒ NoBox defaults (DEFAULT-OFF, fail-closed).
+        assert_eq!(select_backend(false, false), SelectedBackend::Off);
+    }
+
+    // ── CloudflareBoxProvisioner over a fake transport ────────────────────────
+
+    use corelink_cloud_engine::{HttpRequest, HttpResponse, HttpTransport};
+    use std::sync::Mutex as StdMutex;
+
+    /// A fake transport: returns a canned status/body and records the last
+    /// request. Mirrors the `RecordingTransport` pattern from
+    /// `corelink-cloud-engine`'s cloudflare tests — zero network dependency.
+    struct FakeTransport {
+        status: u16,
+        body: String,
+        last: StdMutex<Option<HttpRequest>>,
+    }
+
+    impl FakeTransport {
+        fn new(status: u16, body: &str) -> Self {
+            Self {
+                status,
+                body: body.to_string(),
+                last: StdMutex::new(None),
+            }
+        }
+    }
+
+    impl HttpTransport for FakeTransport {
+        fn send(&self, req: &HttpRequest) -> Result<HttpResponse> {
+            *self.last.lock().unwrap_or_else(|p| p.into_inner()) = Some(req.clone());
+            Ok(HttpResponse {
+                status: self.status,
+                body: self.body.clone(),
+            })
+        }
+    }
+
+    fn cf_cfg() -> CloudflareConfig {
+        CloudflareConfig::new("https://spawn.example.dev", "tok")
+    }
+
+    /// A RUNNER spec (`allow_egress == true`, runner-direct) with a pinned image.
+    fn runner_spec() -> ContainerSpec {
+        ContainerSpec {
+            name: "runner-job".to_string(),
+            image: "alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
+                .to_string(),
+            tmp_root: "/tmp/job".to_string(),
+            no_network: false,
+            allow_egress: true,
+            run_on_create: true,
+            path_set: vec![],
+            env: vec![],
+        }
+    }
+
+    fn cf_provisioner(
+        status: u16,
+        body: &str,
+        registry: BoxRegistry,
+    ) -> CloudflareBoxProvisioner<FakeTransport> {
+        let engine = Arc::new(CloudflareEngine::new(
+            FakeTransport::new(status, body),
+            cf_cfg(),
+        ));
+        CloudflareBoxProvisioner::new(engine, registry)
+    }
+
+    #[test]
+    fn cloudflare_provision_binds_handle_then_probe_alive_then_teardown_unbinds() {
+        let registry = BoxRegistry::new();
+        // spawn returns a handle (200), is_alive 200 = Alive, teardown 200 = Ok.
+        let prov = cf_provisioner(200, r#"{"handle":"cf-1"}"#, registry.clone_handle());
+
+        // provision binds the returned container into the SHARED registry.
+        prov.provision("lease-A", &runner_spec())
+            .expect("provision");
+        assert_eq!(
+            registry.resolve("lease-A").map(|c| c.name),
+            Some("cf-1".to_string()),
+            "provision must bind the spawned handle under the lease id"
+        );
+
+        // probe resolves the binding and maps is_alive → Alive.
+        assert_eq!(prov.probe("lease-A").unwrap(), ProbeStatus::Alive);
+
+        // teardown deletes then unbinds.
+        prov.teardown("lease-A").expect("teardown");
+        assert!(
+            registry.resolve("lease-A").is_none(),
+            "teardown must unbind the lease"
+        );
+    }
+
+    #[test]
+    fn cloudflare_provision_fails_closed_binds_nothing() {
+        // spawn returns 500 → spawn errors → NOTHING is bound (fail-closed).
+        let registry = BoxRegistry::new();
+        let prov = cf_provisioner(500, "boom", registry.clone_handle());
+        assert!(
+            prov.provision("lease-B", &runner_spec()).is_err(),
+            "a non-2xx spawn must propagate Err"
+        );
+        assert!(
+            registry.resolve("lease-B").is_none(),
+            "a failed provision must leave the registry empty for the lease"
+        );
+    }
+
+    #[test]
+    fn cloudflare_teardown_is_idempotent_when_unbound() {
+        // No binding → teardown returns Ok without calling the provider (the
+        // fake transport would 500, but it is never reached).
+        let registry = BoxRegistry::new();
+        let prov = cf_provisioner(500, "boom", registry.clone_handle());
+        assert!(
+            prov.teardown("never-bound").is_ok(),
+            "teardown of an unbound lease is a no-op Ok (idempotent)"
+        );
+    }
+
+    #[test]
+    fn cloudflare_teardown_failure_keeps_binding_for_retry() {
+        // Bind via a 200 provisioner, then a teardown that 500s must propagate
+        // Err and KEEP the binding so the reaper can retry.
+        let registry = BoxRegistry::new();
+        cf_provisioner(200, r#"{"handle":"cf-2"}"#, registry.clone_handle())
+            .provision("lease-C", &runner_spec())
+            .expect("provision");
+
+        let failing = cf_provisioner(500, "boom", registry.clone_handle());
+        assert!(
+            failing.teardown("lease-C").is_err(),
+            "a failing delete must propagate Err"
+        );
+        assert!(
+            registry.resolve("lease-C").is_some(),
+            "a failed teardown must KEEP the binding for a future retry"
+        );
+    }
+
+    #[test]
+    fn cloudflare_probe_unbound_when_no_binding() {
+        let registry = BoxRegistry::new();
+        let prov = cf_provisioner(200, "", registry.clone_handle());
+        assert_eq!(
+            prov.probe("never-bound").unwrap(),
+            ProbeStatus::Unbound,
+            "no binding → Unbound (nothing to reclaim)"
+        );
+    }
+
+    #[test]
+    fn cloudflare_probe_dead_on_404_and_err_on_indeterminate() {
+        // 404 → authoritatively Dead.
+        let registry = BoxRegistry::new();
+        cf_provisioner(200, r#"{"handle":"cf-3"}"#, registry.clone_handle())
+            .provision("lease-D", &runner_spec())
+            .expect("provision");
+        let dead = cf_provisioner(404, "", registry.clone_handle());
+        assert_eq!(dead.probe("lease-D").unwrap(), ProbeStatus::Dead);
+
+        // 503 → indeterminate → is_alive Err propagates (NOT death; fail-safe).
+        let reg2 = BoxRegistry::new();
+        cf_provisioner(200, r#"{"handle":"cf-4"}"#, reg2.clone_handle())
+            .provision("lease-E", &runner_spec())
+            .expect("provision");
+        let indet = cf_provisioner(503, "", reg2.clone_handle());
+        assert!(
+            indet.probe("lease-E").is_err(),
+            "an indeterminate is_alive must propagate Err, never report Dead"
+        );
+    }
+
+    #[test]
+    fn cloudflare_backend_exec_half_is_nobox_runner_direct() {
+        // The exec half wired alongside the Cloudflare provisioner is NoBoxExec:
+        // a CHECK lease (which would call exec) fails closed via the empty
+        // registry. Build the pair directly (env-free) and assert the exec half
+        // refuses every exec.
+        let registry = BoxRegistry::new();
+        let engine = Arc::new(CloudflareEngine::new(FakeTransport::new(200, ""), cf_cfg()));
+        let exec: Arc<dyn LeasedExec> = Arc::new(crate::exec::NoBoxExec);
+        let _prov: Arc<dyn BoxProvisioner> =
+            Arc::new(CloudflareBoxProvisioner::new(engine, registry));
+        assert!(
+            exec.exec_captured_for("any", &["true"]).is_err(),
+            "runner-direct exec half (NoBoxExec) must fail closed for any exec"
         );
     }
 }
