@@ -13,3 +13,6 @@ Cargo.lock.orig
 
 # Agent worktrees / scratch
 /.claude/worktrees/
+
+# wrangler local state
+.wrangler/

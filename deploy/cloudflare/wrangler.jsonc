@@ -4,6 +4,10 @@
   "name": "corelink-spawn-worker",
   "main": "src/index.ts",
   "compatibility_date": "2026-06-01",
+  // CoreLink infra account (gmhelmold@gmail.com's Account) — the same account
+  // that hosts the R2 CAS (corelink-chunk-*/corelink-manifest-*), so a runner
+  // Container here reads the cache IN-NETWORK (the ADR-0008 moat win).
+  "account_id": "6a1fc1c626fc2628823e60b9db01f5cd",
 
   // The Container Durable Object that owns the per-job runner container.
   "durable_objects": {
@@ -22,12 +26,14 @@
   "containers": [
     {
       "class_name": "RunnerContainer",
-      // <FILL-AT-DEPLOY> push deploy/runner image to CF registry, pin by digest:
-      "image": "registry.cloudflare.com/<account>/corelink-runner@sha256:<FILL-AT-DEPLOY>",
-      // standard-4 = 4 vCPU / 12 GiB / 20 GB disk (largest GA; fits CI, 20 GB
-      // clears the runner disk floor). 12 GiB ceiling is a gated validation item.
-      "instance_type": "standard-4",
-      "max_instances": 100
+      // STAGE A (substrate smoke): a minimal image to prove spawn→status→teardown
+      // on a live Firecracker microVM. Swap to deploy/runner/Dockerfile (the real
+      // GH-Actions runner + clw, digest-pinned) for the CI smoke (Stage B).
+      "image": "./Dockerfile.smoke",
+      // Smoke runs on a small instance (cheap). Production runner = standard-4
+      // (4 vCPU / 12 GiB / 20 GB; clears the runner disk floor).
+      "instance_type": "basic",
+      "max_instances": 2
     }
   ]
 
