@@ -274,11 +274,24 @@ fn bounded_provider_body(body: &str) -> String {
 fn parse_handle(body: &str) -> Result<String> {
     let v: serde_json::Value = serde_json::from_str(body)
         .map_err(|e| anyhow::anyhow!("spawn-Worker response is not JSON: {e}"))?;
-    v.get("handle")
+    let handle = v
+        .get("handle")
         .and_then(|h| h.as_str())
         .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .ok_or_else(|| anyhow::anyhow!("spawn-Worker response missing non-empty handle: {body}"))
+        .ok_or_else(|| anyhow::anyhow!("spawn-Worker response missing non-empty handle: {body}"))?;
+    // The handle is interpolated verbatim into the `/v1/status/{handle}` URL
+    // path. Constrain it to a URL-path-safe charset (`[A-Za-z0-9_-]`, the shape
+    // of a UUID/token-id) so a malformed or compromised Worker response can
+    // never inject `/`, `?`, `..`, or control characters that would re-address
+    // a status/probe to a different (or malformed) target — fail CLOSED on a
+    // non-conforming handle rather than mis-address it (V1 audit hardening).
+    if !handle
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        bail!("spawn-Worker handle is not URL-path-safe ([A-Za-z0-9_-]); refusing — fail CLOSED");
+    }
+    Ok(handle.to_string())
 }
 
 /// Cloudflare-spawn-Worker-backed [`Engine`], generic over the HTTP transport so
@@ -653,6 +666,26 @@ mod tests {
         assert_eq!(body["labels"][0], "corelink-runner");
         assert_eq!(body["labels"][1], "prod");
         assert_eq!(body["expiry_ms"], 1234);
+    }
+
+    #[test]
+    fn spawn_rejects_non_url_path_safe_handle_fail_closed() {
+        // V1 audit hardening: a Worker response whose handle contains URL-path
+        // metacharacters (`/`, `..`, etc.) must fail CLOSED — never become a
+        // RunningContainer whose name would re-address `/v1/status/{handle}`.
+        let engine = CloudflareEngine::new(
+            RecordingTransport::new(200, r#"{"handle":"cf/../../evil?x=1"}"#),
+            cfg(),
+        );
+        let mut rs = runner_spec();
+        rs.env = vec![(JITCONFIG_ENV_KEY.to_string(), "jit".to_string())];
+        let err = engine
+            .spawn(&rs)
+            .expect_err("a non-URL-path-safe handle must fail closed");
+        assert!(
+            err.to_string().contains("URL-path-safe"),
+            "expected a fail-closed handle-charset error, got: {err}"
+        );
     }
 
     #[test]
