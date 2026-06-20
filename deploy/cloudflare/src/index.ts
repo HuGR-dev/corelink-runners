@@ -63,12 +63,23 @@ function unauthorized(): Response {
   });
 }
 
+// Constant-time string compare (no early-exit on the first mismatch) so the
+// bearer-token check can't be timing-probed. Length is allowed to leak (the
+// token is fixed-length, high-entropy); the byte loop is constant-time.
+function safeEqual(a: string, b: string): boolean {
+  const ea = new TextEncoder().encode(a);
+  const eb = new TextEncoder().encode(b);
+  if (ea.length !== eb.length) return false;
+  let diff = 0;
+  for (let i = 0; i < ea.length; i++) diff |= ea[i] ^ eb[i];
+  return diff === 0;
+}
+
 function authed(request: Request, env: Env): boolean {
+  const tok = env.CLOUDFLARE_SPAWN_AUTH_TOKEN ?? "";
+  if (tok.length === 0) return false; // fail-closed: no secret configured ⇒ deny
   const h = request.headers.get("authorization") ?? "";
-  const expected = `Bearer ${env.CLOUDFLARE_SPAWN_AUTH_TOKEN}`;
-  // NOTE: a constant-time compare is preferable; the token is high-entropy and
-  // fabric-internal, but harden before production.
-  return env.CLOUDFLARE_SPAWN_AUTH_TOKEN.length > 0 && h === expected;
+  return safeEqual(h, `Bearer ${tok}`);
 }
 
 export default {
