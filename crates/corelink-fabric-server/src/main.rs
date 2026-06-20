@@ -94,6 +94,30 @@ async fn main() -> anyhow::Result<()> {
                 "cloud backend: NONE — no NORTHFLANK_* configured; execs will 503 (fail-closed)"
             ),
         }
+        // ── Cloudflare substrate boot diagnostic (R2) — DEFAULT-OFF ────────────
+        // Mirrors the Northflank disk-validate boot warn (cloud_exec S3): read the
+        // CF config from env; absent ⇒ from_env None ⇒ a one-line "off" (no
+        // behaviour change). When armed, run `validate` and print the resolved
+        // truth, or — like the Northflank S3 diagnostic — a LOUD WARN (does NOT
+        // hard-fail: the per-spawn floor in CloudflareEngine::spawn is the hard
+        // backstop; this only shortens the operator debug loop).
+        match corelink_cloud_engine::CloudflareConfig::from_env() {
+            None => eprintln!("cloudflare substrate: off (no CLOUDFLARE_SPAWN_* configured)"),
+            Some(cf) => match cf.validate() {
+                Ok(()) => eprintln!(
+                    "cloudflare substrate: wired (url={}, disk={} MiB)",
+                    cf.spawn_worker_url, cf.runner_storage_mb
+                ),
+                Err(why) => {
+                    eprintln!();
+                    eprintln!(
+                        "WARNING [R2]: CLOUDFLARE SUBSTRATE MISCONFIGURED — spawns WILL FAIL"
+                    );
+                    eprintln!("  {why}");
+                    eprintln!();
+                }
+            },
+        }
     }
     // Report which lease ledger the wiring actually resolved (WP-4).  Never
     // print database_url — it may carry a password.

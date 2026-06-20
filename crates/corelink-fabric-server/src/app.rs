@@ -770,6 +770,50 @@ impl AppState {
         }
     }
 
+    /// Wire an already-built exec + provisioner pair (both halves of a cloud
+    /// backend) directly. Used by the composition root's ADR-0008 selection,
+    /// which builds the chosen backend once and installs both halves here so the
+    /// env is never read twice. Mirrors the `Some((exec, prov))` arm of
+    /// [`with_cloud_backend_from_env`](AppState::with_cloud_backend_from_env).
+    #[must_use]
+    pub fn with_cloud_backend(
+        mut self,
+        exec: Arc<dyn LeasedExec>,
+        provisioner: Arc<dyn crate::cloud_exec::BoxProvisioner>,
+    ) -> Self {
+        self.exec = exec;
+        self.provisioner = provisioner;
+        self
+    }
+
+    /// ADR-0008 Cloudflare composition entry: read `CLOUDFLARE_*` env vars and
+    /// wire BOTH the exec backend AND the provisioner over a SHARED registry;
+    /// absent env vars → keeps BOTH [`NoBoxExec`] and [`NoBoxProvisioner`]
+    /// defaults (default-off, fail-closed; no partial wiring).
+    ///
+    /// v0 is runner-direct: the exec half is [`NoBoxExec`] (a runner lease never
+    /// calls exec; a CHECK lease fails closed at exec via the empty registry) and
+    /// the provisioner is the Cloudflare spawn/teardown backend over `registry`.
+    /// Mirrors [`with_cloud_backend_from_env`](AppState::with_cloud_backend_from_env).
+    ///
+    /// [`NoBoxExec`]: crate::exec::NoBoxExec
+    /// [`NoBoxProvisioner`]: crate::cloud_exec::NoBoxProvisioner
+    #[must_use]
+    pub fn with_cloudflare_backend_from_env(
+        mut self,
+        registry: crate::cloud_exec::BoxRegistry,
+    ) -> Self {
+        match crate::cloud_exec::cloudflare_backend_from_env(registry) {
+            Some((exec, prov)) => {
+                self.exec = exec;
+                self.provisioner = prov;
+                self
+            }
+            // Keep NoBoxExec + NoBoxProvisioner: default-off, fail-closed.
+            None => self,
+        }
+    }
+
     /// Attach the fabric attestation signing key (WP-ATT1+2; ratified
     /// decision #2: per-region fabric key, M1 single region). Without this,
     /// the state keeps the deterministic DEV key — fine for tests, never

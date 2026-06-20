@@ -1028,7 +1028,20 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
     let state = if cfg.mock_exec {
         state.with_executor(Arc::new(crate::exec::MockLeasedExec))
     } else {
-        state.with_cloud_backend_from_env(registry.clone_handle())
+        // ── ADR-0008 backend selection: Cloudflare → Northflank → off ─────────
+        // Cloudflare is the DEFAULT compute substrate: try it FIRST and, if its
+        // env is present, it wins (even if Northflank is also configured).
+        // ELSE fall back to Northflank. ELSE neither env present ⇒ NoBox
+        // defaults (DEFAULT-OFF, byte-identical to today, S2 fail-closed at
+        // admit). Exactly one backend wins; both halves share ONE registry.
+        //
+        // `with_cloudflare_backend_from_env` is a no-op (keeps NoBox defaults)
+        // when the CLOUDFLARE_* env is absent, so we probe Cloudflare first and
+        // only fall through to Northflank when Cloudflare did NOT wire.
+        match crate::cloud_exec::cloudflare_backend_from_env(registry.clone_handle()) {
+            Some((exec, prov)) => state.with_cloud_backend(exec, prov),
+            None => state.with_cloud_backend_from_env(registry.clone_handle()),
+        }
     };
 
     // Arm the internal observability endpoint (default-off: None → 404).
