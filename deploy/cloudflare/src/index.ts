@@ -17,6 +17,17 @@ export interface Env {
   // The deploy-time pinned image digest (README wrinkle #1): the spawn request's
   // image_digest must equal this, else reject. Wire from wrangler vars.
   PINNED_IMAGE_DIGEST: string;
+  // ── Autoscaler (POST /webhook) — all-Cloudflare, no external fabric ──
+  // GitHub webhook HMAC secret (X-Hub-Signature-256). Absent ⇒ /webhook is
+  // disabled (the route returns 503), so the autoscaler is opt-in.
+  GITHUB_WEBHOOK_SECRET?: string;
+  // A GitHub token with repo Administration:write — used to mint the JIT runner
+  // config (POST generate-jitconfig). Worker secret. Absent ⇒ /webhook 503.
+  GITHUB_MINT_TOKEN?: string;
+  // Label a queued workflow_job must carry to be served (default corelink-dogfood).
+  AUTOSCALER_LABEL?: string;
+  // Pinned runner image digest asserted on autoscaler spawns (the X4 floor shape).
+  AUTOSCALER_RUNNER_IMAGE?: string;
 }
 
 // Per-job runner container. One DO instance per spawned runner (keyed by handle).
@@ -82,12 +93,105 @@ function authed(request: Request, env: Env): boolean {
   return safeEqual(h, `Bearer ${tok}`);
 }
 
+// ── Autoscaler (POST /webhook) — GitHub workflow_job → mint JIT → spawn ──────
+
+// Verify GitHub's X-Hub-Signature-256 (HMAC-SHA256 of the raw body) in
+// constant time. Fail-closed on a missing/short/mismatched signature.
+async function verifyGithubHmac(secret: string, sig: string, body: string): Promise<boolean> {
+  if (!sig.startsWith("sha256=")) return false;
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const mac = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body));
+  const hex = [...new Uint8Array(mac)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return safeEqual(`sha256=${hex}`, sig);
+}
+
+// Mint a one-shot JIT runner config for `repoFullName` via the GitHub API,
+// using GITHUB_MINT_TOKEN (repo Administration:write). Returns the encoded JIT.
+async function mintJit(env: Env, repoFullName: string, label: string): Promise<string> {
+  const name = `cf-runner-${crypto.randomUUID().slice(0, 8)}`;
+  const resp = await fetch(
+    `https://api.github.com/repos/${repoFullName}/actions/runners/generate-jitconfig`,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${env.GITHUB_MINT_TOKEN}`,
+        accept: "application/vnd.github+json",
+        "user-agent": "corelink-spawn-worker",
+      },
+      body: JSON.stringify({
+        name,
+        runner_group_id: 1,
+        labels: [label],
+        work_folder: "_work",
+      }),
+    },
+  );
+  if (!resp.ok) throw new Error(`generate-jitconfig ${resp.status}: ${await resp.text()}`);
+  const j = (await resp.json()) as { encoded_jit_config?: string };
+  if (!j.encoded_jit_config) throw new Error("generate-jitconfig: no encoded_jit_config");
+  return j.encoded_jit_config;
+}
+
+// Spawn one runner container with the JIT injected (the shared spawn path).
+async function spawnRunner(env: Env, jit: string): Promise<string> {
+  const handle = crypto.randomUUID();
+  const container = getContainer(env.RUNNER_CONTAINER, handle);
+  await container.startWithEnv({ CORELINK_RUNNER_JITCONFIG: jit });
+  return handle;
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    if (!authed(request, env)) return unauthorized();
-
     const url = new URL(request.url);
     const { pathname } = url;
+
+    // ── POST /webhook (GitHub autoscaler) — HMAC-authed, NOT bearer ──────────
+    // A queued workflow_job with our label ⇒ mint a JIT + spawn a runner. This
+    // is the all-Cloudflare autoscaler: no external fabric. Opt-in (disabled
+    // unless both the webhook secret and the mint token are configured).
+    if (request.method === "POST" && pathname === "/webhook") {
+      if (!env.GITHUB_WEBHOOK_SECRET || !env.GITHUB_MINT_TOKEN) {
+        return json({ error: "autoscaler not configured" }, 503);
+      }
+      const raw = await request.text();
+      const sig = request.headers.get("x-hub-signature-256") ?? "";
+      if (!(await verifyGithubHmac(env.GITHUB_WEBHOOK_SECRET, sig, raw))) {
+        return unauthorized();
+      }
+      // Only act on workflow_job:queued carrying our managed label.
+      if (request.headers.get("x-github-event") !== "workflow_job") {
+        return json({ ok: true, ignored: "not workflow_job" }, 200);
+      }
+      const evt = JSON.parse(raw) as {
+        action?: string;
+        workflow_job?: { labels?: string[] };
+      };
+      const label = env.AUTOSCALER_LABEL ?? "corelink-dogfood";
+      const labels = evt.workflow_job?.labels ?? [];
+      if (evt.action !== "queued" || !labels.includes(label)) {
+        return json({ ok: true, ignored: "not a queued job for our label" }, 200);
+      }
+      // The repo is the webhook's repository (full_name); fall back to the env.
+      const repo =
+        (JSON.parse(raw) as { repository?: { full_name?: string } }).repository?.full_name ?? "";
+      if (!repo) return json({ error: "no repository in payload" }, 400);
+      try {
+        const jit = await mintJit(env, repo, label);
+        const handle = await spawnRunner(env, jit);
+        return json({ ok: true, handle }, 201);
+      } catch (e) {
+        return json({ error: `autoscale failed: ${(e as Error).message}` }, 502);
+      }
+    }
+
+    // ── /v1/* routes — bearer-authed (the fabric/Engine seam) ────────────────
+    if (!authed(request, env)) return unauthorized();
 
     // POST /v1/spawn
     if (request.method === "POST" && pathname === "/v1/spawn") {
