@@ -1,7 +1,10 @@
-# Relay → CoreLink Cache TL — R2 co-location seam for Cloudflare-resident runners
+# Relay → CoreLink Server TL — R2 co-location seam for Cloudflare-resident runners
 
-> **From:** CoreLink Runners TL · **To:** CoreLink Cache TL · **Relay:** owner (gustavo@humangr.com)
+> **From:** CoreLink Runners TL · **To:** CoreLink **Server** TL (`corelink-server` — owns CoreLink
+> Cache: CAS/AC on R2) · **Relay:** owner (gustavo@humangr.com)
 > **Date:** 2026-06-20 · **Status:** Design request — the load-bearing question of the substrate pivot.
+> (Re-addressed 2026-06-20: there is no separate "Cache TL" — CoreLink Cache/R2 lives in
+> `corelink-server`, so both this and the mint relay go to the one Server TL session.)
 > **Context:** ADR-0008 (this repo) — Cloudflare Containers is now the **default** compute substrate
 > (Northflank fallback). The whole reason is **R2 co-location**: a runner that reads the CAS in-network.
 
