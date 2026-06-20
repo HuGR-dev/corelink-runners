@@ -6,7 +6,8 @@
 > Northflank).
 > Evidence: `docs/handoff/2026-06-10-runner-seed.md` ·
 > `docs/spec/hugit-integration-contract.md` v1.2.0 ·
-> `docs/whitepaper/corelink-runners-v1.md` (M1 bar) · ADR-0003 (egress posture).
+> `docs/whitepaper/corelink-runners-v1.md` (M1 bar) · ADR-0003 (egress posture) ·
+> ADR-0008 (Cloudflare Containers = default compute substrate, Northflank fallback).
 
 Deployed ≠ shipped to paying customers. The **cloud-execution fabric is LIVE on
 Northflank** and, as of **2026-06-14, MULTI-INSTANCE on a persistent Postgres
@@ -214,6 +215,26 @@ convergence criterion. Highlights fixed at root (no waivers, no deferred debt):
   caught by re-auditing the fix and closed. The lead's cold-verify (AP-5) additionally
   caught 4 near-misses (a committed-disabled supply-chain gate, a spawn-in-acquire
   invariant break, a stray conformance file, a clippy lint).
+
+## Substrate pivot — Cloudflare default (ADR-0008, 2026-06-20)
+
+The compute substrate moves from Northflank-only to **Cloudflare Containers as the
+default** (co-located with R2 → in-network, zero-egress cache hydration; the 20 GB
+disk also clears the Northflank 2 GB ephemeral-storage 503 blocker). Northflank is
+demoted to **fallback/interim**. A backend addition behind the frozen `Engine` seam —
+the runner + wire contract are untouched.
+
+- [ ] **Cloudflare default substrate — built default-off** — `CloudflareEngine<H:
+      HttpTransport>` Rust skeleton behind the `Engine` seam (mock-transport unit
+      tests, no live account) + `cloudflare_backend_from_env` composition wiring
+      (default-off, selected before Northflank) + the `deploy/cloudflare/` spawn-Worker
+      + Container DO skeleton (`/spawn`, `/teardown`). The spawn-Worker HTTP contract is
+      the new seam, transcribed each side + conformance-pinned. See ADR-0008.
+- [ ] **Cloudflare live gates** _(owner / cross-TL)_ — Cloudflare account + `wrangler`
+      auth + runner-image push; container-isolation security review for untrusted
+      multi-tenant CI; R2 co-location seam (in-network CAS credentials, Cache-TL
+      coordinated); 12 GiB RAM ceiling validated vs heaviest builds; GH-Actions
+      lifecycle fit proven by a live dogfood smoke. Then flip Cloudflare to primary.
 
 ## Remaining work — owner-gated or cross-repo
 

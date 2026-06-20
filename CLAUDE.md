@@ -100,6 +100,13 @@ truth) · `docs/product/product.md` · `docs/spec/hugit-integration-contract.md`
   v1.2.0 — **frozen from hugit's side**; the fabric must satisfy it.
 - **Is consumed by CoreLink Workspaces** (campaign #2) — agent sandboxes / dev boxes
   are workspace SKUs that run on this fabric.
+- **Compute substrate (ADR-0008):** the default substrate is **Cloudflare Containers**
+  (co-located with R2 → in-network, zero-egress cache hydration — the moat win);
+  **Northflank is the fallback/interim** backend. Both live behind the `Engine` seam,
+  all default-off; the composition root selects Cloudflare when `CLOUDFLARE_SPAWN_*`
+  env is present, else Northflank, else fail-closed. The new seam is the spawn-Worker
+  HTTP contract (`deploy/cloudflare/` Worker + `CloudflareEngine` Rust client,
+  transcribed each side). See `docs/adr/0008-cloudflare-containers-substrate.md`.
 
 ⚠️ Sibling repos under `~/Documents/HuGR/` (`corelink-server`, `hugit`,
 `hugr-wallet`, …) frequently have **other live sessions**. Never assume sole
