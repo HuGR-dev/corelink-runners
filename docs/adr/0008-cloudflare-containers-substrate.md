@@ -35,6 +35,22 @@ backend to validate the product and bring cold CI up while the Cloudflare backen
 hardened. Both live behind the existing `Engine` seam — this is a backend addition, not a
 re-architecture of the runner or the wire contract.
 
+### Selection policy (owner-ratified 2026-06-20): Cloudflare is the DEFAULT, Northflank is the fallback
+
+The owner ratified: **keep Northflank, but Cloudflare is the default.** The composition root selects
+the Engine backend in this order:
+
+1. **Cloudflare** — if `CLOUDFLARE_SPAWN_*` env is present (`CloudflareConfig::from_env` → `Some`), use
+   `CloudflareEngine`. This is the default/preferred substrate.
+2. **Northflank** — else if `NORTHFLANK_*` env is present, fall back to the `NorthflankEngine` backend
+   (the interim / fallback / burst substrate).
+3. **Default-off** — else neither is wired (fail-closed: a runner lease is refused at admit, S2).
+
+So a box configured for both prefers Cloudflare; Northflank serves only when Cloudflare is absent. This
+selection lives in the fabric-server composition root (the next build slice — it must adapt the
+runner-direct `CloudflareEngine` shape, which is spawn-only, onto the lease lifecycle that today
+expects Northflank's provision+exec split).
+
 ### The provisioning-model difference (load-bearing)
 
 Cloudflare Containers do **not** provision via REST like Northflank. A Container class **extends
