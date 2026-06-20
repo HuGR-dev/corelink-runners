@@ -1,0 +1,37 @@
+{
+  // CoreLink spawn-Worker + Container DO (ADR-0008). SKELETON — values marked
+  // <FILL-AT-DEPLOY> are set at the first real deploy against a live account.
+  "name": "corelink-spawn-worker",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-01",
+
+  // The Container Durable Object that owns the per-job runner container.
+  "durable_objects": {
+    "bindings": [
+      { "name": "RUNNER_CONTAINER", "class_name": "RunnerContainer" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["RunnerContainer"] }
+  ],
+
+  // The runner container. IMPORTANT (ADR-0008 / README wrinkle #1): the image is
+  // pinned HERE at deploy time, not per-spawn. Keep this digest identical to the
+  // clw-pinned runner image in deploy/runner/Dockerfile. The Worker asserts the
+  // spawn request's image_digest matches this.
+  "containers": [
+    {
+      "class_name": "RunnerContainer",
+      // <FILL-AT-DEPLOY> push deploy/runner image to CF registry, pin by digest:
+      "image": "registry.cloudflare.com/<account>/corelink-runner@sha256:<FILL-AT-DEPLOY>",
+      // standard-4 = 4 vCPU / 12 GiB / 20 GB disk (largest GA; fits CI, 20 GB
+      // clears the runner disk floor). 12 GiB ceiling is a gated validation item.
+      "instance_type": "standard-4",
+      "max_instances": 100
+    }
+  ]
+
+  // R2 binding (in-network CAS hydration — the moat win) is a Cache-TL
+  // coordination item (ADR-0008 open decision); add the r2_buckets binding here
+  // once the topology + creds are agreed. Intentionally omitted in the skeleton.
+}
