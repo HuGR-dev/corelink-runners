@@ -3,7 +3,8 @@
 //! The runner invokes `clw snapshot → hydrate → run` on the box.  The `clw`
 //! child's exit code passes through transparently (exit-code transparency).
 //! A non-zero exit code must NOT be cached (the AC write-back is suppressed).
-//! `exit 2` from `clw` itself is distinct from a child's `exit 2`.
+//! The reserved code [`CLW_INTERNAL_EXIT_CODE`] (`125`) from `clw` itself is
+//! distinct from a child exiting with that same code.
 //!
 //! This is the MINIMAL COMPILING STUB for the moat acceptance suite (WP-1) to
 //! test A8 against the `ClwDrive` trait interface.  Real logic is WP-6.
@@ -19,13 +20,23 @@
 
 use corelink_runner::lease::{BoxExec, CmdOutput};
 
+/// The reserved `clw`-internal exit code, frozen by the `clw` v0.1.1 CLI
+/// contract (`clw-releases` `CLI-CONTRACT.md` / `CLI-SURFACE-EXIT-FREEZE.md`):
+/// a `clw`-internal failure where the child NEVER ran exits **`125`**. THE RULE
+/// the drive applies to `clw run`: `125 ⇒ ClwFailed` (clw-internal, ALWAYS AND
+/// ONLY); any other code ⇒ the child's verdict `Child(n)`. (Updated from the
+/// earlier interim `2` once `clw` shipped v0.1.1 and froze `125`, docker/shell
+/// convention — a child's `2` is now a normal child verdict, never clw-internal.)
+pub const CLW_INTERNAL_EXIT_CODE: i32 = 125;
+
 // ── ClwExitTransparency ───────────────────────────────────────────────────────
 
 /// Whether an exit code is the child's or `clw`-internal (A8 invariant).
 ///
-/// `exit 2` from `clw` itself (e.g. bad CLI args, substrate unreachable) is
-/// distinct from the child job exiting with code 2.  The runner must surface
-/// both correctly to the outer GitHub Actions runtime and to the billing layer.
+/// The reserved [`CLW_INTERNAL_EXIT_CODE`] (`125`) from `clw` itself (e.g. bad
+/// CLI args, substrate unreachable, child never ran) is distinct from the child
+/// job exiting with code `125`.  The runner must surface both correctly to the
+/// outer GitHub Actions runtime and to the billing layer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClwExitTransparency {
     /// The child process exited with this code (pass-through).
@@ -88,7 +99,7 @@ pub trait ClwDrive: Send + Sync {
     /// Exit transparency: whatever the child exits with is passed through in
     /// `ClwDriveOutcome::Ran { exit: ClwExitTransparency::Child(code) }`.
     /// `clw`-internal errors surface as
-    /// `ClwDriveOutcome::ClwFailed { clw_exit_code: 2, .. }`.
+    /// `ClwDriveOutcome::ClwFailed { clw_exit_code: 125, .. }`.
     ///
     /// Write-back: the AC entry is ONLY stored when
     /// `exit: ClwExitTransparency::Child(0)` — a non-zero child exit MUST NOT
@@ -137,12 +148,12 @@ impl MockClwDrive {
         }
     }
 
-    /// Simulate a `clw`-internal failure (exit 2 from `clw` itself, not the
-    /// child).
+    /// Simulate a `clw`-internal failure (the reserved exit `125` from `clw`
+    /// itself, not the child).
     pub fn clw_internal_error() -> Self {
         Self {
             outcome: ClwDriveOutcome::ClwFailed {
-                clw_exit_code: 2,
+                clw_exit_code: CLW_INTERNAL_EXIT_CODE,
                 reason: "clw: substrate unreachable".to_string(),
             },
         }
@@ -193,10 +204,11 @@ pub struct ClwRunSpec {
 /// Exit-code interpretation follows the FROZEN `clw` CLI contract (§4):
 /// - **snapshot / hydrate** never produce a child verdict — any non-`Some(0)`
 ///   exit is a `clw`-internal error ⇒ [`ClwDriveOutcome::ClwFailed`].
-/// - **run** propagates the wrapped command's exit code, EXCEPT exit `2`, which
-///   is reserved for `clw` itself (ALWAYS AND ONLY a `clw`-internal error):
-///     - `Some(2)`            ⇒ `ClwFailed { clw_exit_code: 2, .. }`.
-///     - `Some(n)`, `n != 2`  ⇒ `Ran { exit: Child(n), wrote_back: n == 0 }`.
+/// - **run** propagates the wrapped command's exit code, EXCEPT the reserved
+///   [`CLW_INTERNAL_EXIT_CODE`] (`125`), which is `clw` itself (ALWAYS AND ONLY
+///   a `clw`-internal error — clw v0.1.1 CLI contract):
+///     - `Some(125)`          ⇒ `ClwFailed { clw_exit_code: 125, .. }`.
+///     - `Some(n)`, `n != 125`⇒ `Ran { exit: Child(n), wrote_back: n == 0 }`.
 ///     - `None` (the `clw` PROCESS itself killed by signal at the transport —
 ///       distinct from a signal-killed CHILD, which `clw` reports as `128+sig`
 ///       i.e. `Some(n)`) ⇒ `ClwFailed { clw_exit_code: -1, .. }`.
@@ -264,16 +276,19 @@ impl<B: BoxExec> ClwBoxDrive<B> {
         argv.extend(self.run.command.iter().map(String::as_str));
         let run = self.boxx.run(&argv)?;
         Ok(match run.code {
-            // exit 2 is reserved for clw itself (ALWAYS AND ONLY a clw error).
-            Some(2) => {
+            // 125 is reserved for clw itself (ALWAYS AND ONLY a clw error,
+            // clw v0.1.1 CLI contract). A child's 125 never reaches here as a
+            // child verdict — by contract clw exits 125 only when it failed
+            // before/around the child.
+            Some(CLW_INTERNAL_EXIT_CODE) => {
                 let stderr = run.stderr.trim();
                 let reason = if stderr.is_empty() {
-                    "clw run: internal error (exit 2)".to_string()
+                    format!("clw run: internal error (exit {CLW_INTERNAL_EXIT_CODE})")
                 } else {
                     stderr.to_string()
                 };
                 ClwDriveOutcome::ClwFailed {
-                    clw_exit_code: 2,
+                    clw_exit_code: CLW_INTERNAL_EXIT_CODE,
                     reason,
                 }
             }
@@ -430,8 +445,8 @@ mod tests {
     }
 
     #[test]
-    fn clw_internal_exit_2_is_not_cacheable() {
-        assert!(!ClwExitTransparency::ClwInternal(2).is_cacheable());
+    fn clw_internal_exit_125_is_not_cacheable() {
+        assert!(!ClwExitTransparency::ClwInternal(125).is_cacheable());
     }
 
     // ── ClwExitTransparency::is_child_success ─────────────────────────────────
@@ -465,7 +480,7 @@ mod tests {
     #[test]
     fn clw_failed_child_exit_code_is_none() {
         let outcome = ClwDriveOutcome::ClwFailed {
-            clw_exit_code: 2,
+            clw_exit_code: 125,
             reason: "clw: substrate unreachable".to_string(),
         };
         assert_eq!(outcome.child_exit_code(), None);
@@ -537,17 +552,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drive_run_exit_2_is_clw_failed_not_child() {
-        let outcome = drive_with(MockBoxExec::with_run_code(2)).await;
+    async fn drive_run_exit_125_is_clw_failed_not_child() {
+        // clw v0.1.1 CLI contract: 125 is reserved for clw itself (child never
+        // ran) ⇒ ClwFailed, never a Child verdict.
+        let outcome = drive_with(MockBoxExec::with_run_code(125)).await;
         assert!(
             matches!(
                 outcome,
                 ClwDriveOutcome::ClwFailed {
-                    clw_exit_code: 2,
+                    clw_exit_code: 125,
                     ..
                 }
             ),
-            "run exit 2 is reserved for clw itself ⇒ ClwFailed, never Child(2); got {outcome:?}"
+            "run exit 125 is reserved for clw itself ⇒ ClwFailed, never Child(125); got {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn drive_run_exit_2_is_child_not_clw_failed() {
+        // REGRESSION GUARD for the 2026-06-19 contract correction: under clw
+        // v0.1.1, a child exit 2 is an ORDINARY child verdict (Child(2),
+        // non-zero ⇒ not cached), NOT a clw-internal failure. Only 125 is
+        // clw-internal. (Pre-v0.1.1 we wrongly treated 2 as the sentinel.)
+        let outcome = drive_with(MockBoxExec::with_run_code(2)).await;
+        assert_eq!(
+            outcome,
+            ClwDriveOutcome::Ran {
+                exit: ClwExitTransparency::Child(2),
+                wrote_back: false,
+            },
+            "child exit 2 must be Child(2) (not cached), never ClwFailed; got {outcome:?}"
         );
     }
 
@@ -579,7 +613,7 @@ mod tests {
         // snapshot exit != 0 ⇒ ClwFailed (snapshot never yields a child verdict).
         let boxx = MockBoxExec {
             snapshot_out: CmdOutput {
-                code: Some(2),
+                code: Some(125),
                 stdout: String::new(),
                 stderr: "clw: cannot snapshot /work".to_string(),
             },
@@ -599,7 +633,7 @@ mod tests {
         assert!(
             matches!(
                 &outcome,
-                ClwDriveOutcome::ClwFailed { clw_exit_code: 2, reason }
+                ClwDriveOutcome::ClwFailed { clw_exit_code: 125, reason }
                     if reason.contains("cannot snapshot")
             ),
             "snapshot failure ⇒ ClwFailed with stderr-derived reason; got {outcome:?}"
@@ -616,7 +650,7 @@ mod tests {
                 stderr: String::new(),
             },
             hydrate_out: CmdOutput {
-                code: Some(2),
+                code: Some(125),
                 stdout: String::new(),
                 stderr: "clw: hydrate target busy".to_string(),
             },
@@ -630,7 +664,7 @@ mod tests {
         assert!(
             matches!(
                 &outcome,
-                ClwDriveOutcome::ClwFailed { clw_exit_code: 2, reason }
+                ClwDriveOutcome::ClwFailed { clw_exit_code: 125, reason }
                     if reason.contains("hydrate target busy")
             ),
             "hydrate failure ⇒ ClwFailed with stderr-derived reason; got {outcome:?}"

@@ -848,20 +848,20 @@ async fn a8_nonzero_child_exit_is_transparent_and_not_cached() {
 
 /// A8 (part 3): a `clw`-internal exit is a DISTINCT outcome from a child verdict.
 ///
-/// Drives the REAL `ClwBoxDrive<MockBoxExec>`. A programmed `run` exit of `2` is
-/// — per the FROZEN clw CLI contract — reserved for `clw` itself (ALWAYS AND
-/// ONLY a clw-internal error), so the drive maps `Some(2)` ⇒
-/// `ClwFailed { clw_exit_code: 2, .. }`.
+/// Drives the REAL `ClwBoxDrive<MockBoxExec>`. A programmed `run` exit of `125`
+/// is — per the clw v0.1.1 CLI contract — reserved for `clw` itself (ALWAYS AND
+/// ONLY a clw-internal error), so the drive maps `Some(125)` ⇒
+/// `ClwFailed { clw_exit_code: 125, .. }`.
 ///
-/// CONTRACT NOTE (not a bug): a child CANNOT surface as `Child(2)` through
-/// `clw run` — exit `2` is the clw-reserved code, so the impl maps `Some(2)` to
-/// `ClwFailed`, never `Child(2)`. To show the two outcome KINDS are distinct, we
-/// compare the `ClwFailed{2}` against a child verdict drive (`run` exit 7 ⇒
-/// `Ran { Child(7) }`): different `ClwDriveOutcome` discriminants.
+/// CONTRACT NOTE (not a bug): a child CANNOT surface as `Child(125)` through
+/// `clw run` — exit `125` is the clw-reserved code, so the impl maps `Some(125)`
+/// to `ClwFailed`, never `Child(125)`. To show the two outcome KINDS are
+/// distinct, we compare the `ClwFailed{125}` against a child verdict drive
+/// (`run` exit 7 ⇒ `Ran { Child(7) }`): different `ClwDriveOutcome` discriminants.
 #[tokio::test]
 async fn a8_clw_internal_exit_is_distinct_from_child_exit() {
-    // clw-internal exit: run exits 2 ⇒ ClwFailed (clw owns code 2).
-    let clw_fail_driver = ClwBoxDrive::new(MockBoxExec::with_run_code(2), a8_run_spec());
+    // clw-internal exit: run exits 125 ⇒ ClwFailed (clw owns code 125).
+    let clw_fail_driver = ClwBoxDrive::new(MockBoxExec::with_run_code(125), a8_run_spec());
     let clw_outcome = clw_fail_driver
         .drive("lease-clw-fail")
         .await
@@ -871,11 +871,11 @@ async fn a8_clw_internal_exit_is_distinct_from_child_exit() {
         matches!(
             clw_outcome,
             ClwDriveOutcome::ClwFailed {
-                clw_exit_code: 2,
+                clw_exit_code: 125,
                 ..
             }
         ),
-        "A8: run exit 2 is clw-reserved ⇒ ClwFailed{{2}} (NEVER Child(2)); got: {clw_outcome:?}"
+        "A8: run exit 125 is clw-reserved ⇒ ClwFailed{{125}} (NEVER Child(125)); got: {clw_outcome:?}"
     );
 
     // A child verdict: run exits 7 ⇒ Ran { Child(7) } (a non-reserved code).
@@ -908,13 +908,14 @@ async fn a8_clw_internal_exit_is_distinct_from_child_exit() {
 
 /// A8 (part 4): a clw-internal failure means NO write-back.
 ///
-/// Drives the REAL `ClwBoxDrive<MockBoxExec>` with a programmed `run` exit of 2
-/// (clw-internal). The outcome is `ClwFailed`, which carries NO `wrote_back`
-/// field at all — when clw itself fails, neither the child result nor any bytes
-/// are cached, and the drive (which never PUTs anyway) reports no write-back.
+/// Drives the REAL `ClwBoxDrive<MockBoxExec>` with a programmed `run` exit of
+/// `125` (clw-internal). The outcome is `ClwFailed`, which carries NO
+/// `wrote_back` field at all — when clw itself fails, neither the child result
+/// nor any bytes are cached, and the drive (which never PUTs anyway) reports no
+/// write-back.
 #[tokio::test]
 async fn a8_clw_internal_failure_no_write_back() {
-    let driver = ClwBoxDrive::new(MockBoxExec::with_run_code(2), a8_run_spec());
+    let driver = ClwBoxDrive::new(MockBoxExec::with_run_code(125), a8_run_spec());
     let outcome = driver
         .drive("lease-no-wb")
         .await
@@ -925,13 +926,13 @@ async fn a8_clw_internal_failure_no_write_back() {
             // Correct: the ClwFailed variant has NO wrote_back field — no
             // write-back is even representable when clw itself fails.
             assert_eq!(
-                *clw_exit_code, 2,
-                "A8: a clw-internal failure must carry clw_exit_code 2"
+                *clw_exit_code, 125,
+                "A8: a clw-internal failure must carry clw_exit_code 125"
             );
         }
         ClwDriveOutcome::Ran { wrote_back, .. } => {
             panic!(
-                "A8: a clw-internal failure (run exit 2) must be ClwFailed (no write-back), \
+                "A8: a clw-internal failure (run exit 125) must be ClwFailed (no write-back), \
                  NOT Ran{{wrote_back={wrote_back}}}; got: {outcome:?}"
             );
         }

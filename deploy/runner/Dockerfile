@@ -32,6 +32,14 @@
 # RUST TOOLCHAIN:
 #   Matches rust-toolchain.toml (1.96.0) + components from CI (rustfmt, clippy).
 #   cargo-deny@0.19.8 and cargo-audit@0.22.2 match .github/workflows/ci.yml.
+#
+# CLW BINARY (the moat drive — snapshot/hydrate/run):
+#   Pinned to clw v0.1.1, digest-verified (X4 floor). The sha256 below is from
+#   the minisign-signed SHA256SUMS of the v0.1.1 GitHub Release
+#   (HumanGuardrail/clw-releases, minisign key id 4B57B8B54A0E396D), so pinning
+#   the digest transitively trusts the signed manifest. To refresh: bump
+#   CLW_VERSION + CLW_SHA256 from the signed SHA256SUMS of the new release.
+#   The runner drives `clw` per the frozen CLI/exit contract (125 = clw-internal).
 # -----------------------------------------------------------------------------
 
 # ── Stage 1: runner binary download + checksum verification ──────────────────
@@ -57,6 +65,31 @@ RUN curl -fsSL \
     tar -xzf /tmp/actions-runner.tar.gz -C /opt/actions-runner && \
     rm /tmp/actions-runner.tar.gz
 
+# ── Stage 1b: clw binary download + checksum verification ────────────────────
+# Same PINNED base digest. clw is a BARE executable (not archived): download,
+# verify the sha256 (X4 floor; sourced from the minisign-signed SHA256SUMS of
+# the v0.1.1 release), chmod +x.
+FROM ubuntu:24.04@sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae77ff1dc54 AS clw-download
+
+# clw release to pin (x86_64-unknown-linux-gnu). Refresh both from the signed
+# SHA256SUMS at https://github.com/HumanGuardrail/clw-releases/releases.
+ARG CLW_VERSION=0.1.1
+ARG CLW_SHA256=be8733781a1d19a96d88528df3fe67c9d50723e7bed95cb35d1e9ab712685610
+
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+
+RUN apt-get update -qq && \
+    apt-get install -y --no-install-recommends curl ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL \
+      "https://github.com/HumanGuardrail/clw-releases/releases/download/v${CLW_VERSION}/clw-${CLW_VERSION}-x86_64-unknown-linux-gnu" \
+      -o /tmp/clw && \
+    echo "${CLW_SHA256}  /tmp/clw" | sha256sum -c - && \
+    install -m 0755 /tmp/clw /usr/local/bin/clw && \
+    rm /tmp/clw && \
+    /usr/local/bin/clw --version
+
 # ── Stage 2: final image ─────────────────────────────────────────────────────
 # Same PINNED digest as Stage 1 — both stages MUST use the identical base.
 FROM ubuntu:24.04@sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae77ff1dc54
@@ -65,7 +98,8 @@ LABEL org.opencontainers.image.title="CoreLink ephemeral GitHub Actions runner" 
       org.opencontainers.image.description="One-shot ephemeral runner for the CoreLink fabric (ADR-0007 Stage A)" \
       org.opencontainers.image.vendor="HuGR / CoreLink" \
       corelink.runner.version="2.335.1" \
-      corelink.rust.toolchain="1.96.0"
+      corelink.rust.toolchain="1.96.0" \
+      corelink.clw.version="0.1.1"
 
 # ── System packages ───────────────────────────────────────────────────────────
 # git is required by most GitHub Actions (actions/checkout etc.)
@@ -99,6 +133,11 @@ RUN useradd -m -s /bin/bash -G sudo runner && \
 
 # ── Copy actions-runner from Stage 1 ─────────────────────────────────────────
 COPY --from=runner-download --chown=runner:runner /opt/actions-runner /opt/actions-runner
+
+# ── Copy the digest-pinned clw binary from Stage 1b ──────────────────────────
+# root-owned, world-executable on PATH — the runner drives `clw snapshot →
+# hydrate → run` (the moat); only used when the fabric injects CLW_* (default-off).
+COPY --from=clw-download /usr/local/bin/clw /usr/local/bin/clw
 
 # Install runner dependencies (requires running as root, inside the container).
 RUN /opt/actions-runner/bin/installdependencies.sh
