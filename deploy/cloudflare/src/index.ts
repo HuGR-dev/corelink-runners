@@ -33,7 +33,7 @@ export interface Env {
   // ── Warm moat (cache-warm) — mint a per-job CAS PAT (D-9) + inject CLW_* ──
   // D-9 internal-auth key (`x-corelink-internal-auth`). Worker secret. Absent ⇒
   // the runner spawns COLD (no cache-warm) — fail-open, north star.
-  CORELINK_PAT_MINT_AUTH_KEY?: string;
+  CORELINK_RUNNER_MINT_AUTH_KEY?: string;
   // D-9 mint base URL (default the public on-net hostname; Option B).
   CORELINK_MINT_URL?: string;
   // The CAS API base URL injected as CLW_ENDPOINT (default same host).

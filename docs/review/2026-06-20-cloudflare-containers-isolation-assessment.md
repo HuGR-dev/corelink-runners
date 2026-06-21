@@ -114,7 +114,7 @@ microVMs, the correct bar and a no-regression vs Northflank. **All §6 verify it
 hardened + rate-limited + unit-tested · cache-seam tenant isolation confirmed by the Server TL · live
 dogfood smoke green). The earlier CONDITIONAL became unconditional once the §6 list closed. The only
 remaining work is operational, not an isolation gap: prod secret rotation (the throwaway dogfood spawn/
-webhook secrets) before onboarding a non-dogfood tenant, and the warm-moat key (`CORELINK_PAT_MINT_AUTH_KEY`).
+webhook secrets) before onboarding a non-dogfood tenant, and the warm-moat key (`CORELINK_RUNNER_MINT_AUTH_KEY`).
 
 ### Sources
 - [Firecracker-powered containers on Cloudflare — Ernest Chiang](https://www.ernestchiang.com/en/posts/2025/firecracker-powered-containers-arrive-on-cloudflare/)
