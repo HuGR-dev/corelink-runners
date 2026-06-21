@@ -17,6 +17,11 @@
     "CLW_ENDPOINT": "https://corelink-api.humangr.com",
     "CORELINK_MINT_URL": "https://corelink-api.humangr.com"
   },
+  // Per-spawn rate limit on /webhook (defense-in-depth vs a leaked webhook
+  // secret): 30 queued+labeled spawns / 60s. Ignored events don't count.
+  "ratelimits": [
+    { "name": "WEBHOOK_LIMITER", "namespace_id": "1001", "simple": { "limit": 30, "period": 60 } }
+  ],
 
   // The Container Durable Object that owns the per-job runner container.
   "durable_objects": {

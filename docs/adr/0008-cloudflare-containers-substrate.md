@@ -75,6 +75,17 @@ The autoscaler flow is unchanged in shape: queued job → acquire → `Engine::s
 provision | Cloudflare: HTTP → spawn-Worker → DO → `container.start`). The seam was built for exactly
 this swap.
 
+> **UPDATE 2026-06-20 (what actually shipped):** the DEPLOYED autoscaler is **all-Cloudflare** — the
+> spawn-Worker gained a `POST /webhook` route that IS the trigger: GitHub `workflow_job:queued` (HMAC
+> verify) → mint JIT (`generate-jitconfig`) → mint per-job CAS PAT (D-9) + inject `CLW_*` → `container.start`.
+> So for the Cloudflare path there is **no Rust fabric in the autoscaler loop** — the Worker owns
+> trigger→mint→spawn end-to-end (proven live: a real CI job autoscaled onto a CF Firecracker microVM,
+> zero manual). The `CloudflareEngine` Rust client + the `/v1/spawn` bearer surface still exist and work
+> (the fabric can still drive spawns through the Engine seam), but the *deployed dogfood autoscaler* is
+> the all-CF `/webhook`. The seam swap above remains valid for the fabric-driven path; the `/webhook` is
+> an additional, simpler trigger that drops Northflank from the runner path entirely. Rate-limited
+> (`WEBHOOK_LIMITER`, 30/60s) as defense-in-depth vs a leaked webhook secret.
+
 ### The spawn-Worker HTTP contract IS the new seam
 
 `deploy/cloudflare/` (Worker) and `corelink-cloud-engine` (Rust client) are TRANSCRIBED against this
