@@ -56,9 +56,14 @@ async function mintCasPat(env: MintEnv, jobId: string): Promise<string> {
     body: JSON.stringify({ owner_tenant: env.CLW_TENANT, job_id: jobId, scope: "cas:rw" }),
   });
   if (!resp.ok) throw new Error(`D-9 mint ${resp.status}`);
-  const j = (await resp.json()) as { token?: string };
-  if (!j.token) throw new Error("D-9 mint: no token");
-  return j.token;
+  // LIVE wire shape (verified 2026-06-21): 200 → {token_plaintext, pat_id, token_id,
+  // principal, tenant, expires_ms}. The PAT value is `token_plaintext` (NOT `token`,
+  // which the relay doc mis-stated). Keys logged on miss so any future drift is loud.
+  const j = (await resp.json()) as { token_plaintext?: string };
+  if (!j.token_plaintext) {
+    throw new Error(`D-9 mint: no token_plaintext (200 keys: ${Object.keys(j).join(",")})`);
+  }
+  return j.token_plaintext;
 }
 
 // Revoke a per-job CAS PAT via D-9 (corelink-server) — keyed by (owner_tenant,
@@ -79,7 +84,7 @@ async function revokeCasPat(env: MintEnv, jobId: string): Promise<void> {
     },
     body: JSON.stringify({ owner_tenant: env.CLW_TENANT, job_id: jobId }),
   });
-  if (!resp.ok) throw new Error(`D-9 revoke ${resp.status}`);
+  if (!resp.ok) throw new Error(`D-9 revoke ${resp.status}: ${await resp.text()}`);
 }
 
 // Best-effort revoke of a completed job's per-job CAS PAT. No-op unless the mint
