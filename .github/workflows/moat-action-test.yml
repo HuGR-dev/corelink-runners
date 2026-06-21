@@ -20,7 +20,10 @@ jobs:
           N=6000
           mkdir -p moatbench/src
           printf 'target/\n' > moatbench/.clwignore
+          # Empty [workspace] table ⇒ standalone crate, NOT part of the checked-out
+          # corelink-runners workspace (this job DOES checkout, unlike moat-benchmark).
           cat > moatbench/Cargo.toml <<'TOML'
+          [workspace]
           [package]
           name = "moatbench"
           version = "0.0.0"
