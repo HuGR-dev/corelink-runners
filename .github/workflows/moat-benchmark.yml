@@ -66,44 +66,67 @@ jobs:
           } > moatbench/src/main.rs
           echo "generated moatbench with N=$N fns ($(wc -l < moatbench/src/main.rs) lines)"
 
-      - name: COLD run (cache MISS — the check actually runs)
+      # Helper note: --json makes clw emit its own machine-readable status (incl.
+      # cache hit/miss) on stdout; the wrapped `cargo build -q` is near-silent so
+      # clw's JSON is readable. We capture clw stdout to a file and print it so the
+      # hit/miss is VISIBLE (no inference). rc is clw's exit (125 = clw-internal).
+      - name: COLD run (cache MISS — the check actually runs + memoizes)
         id: cold
         run: |
-          set +e   # capture clw run's exit code instead of aborting (GH default is -e)
+          set +e
           export CLW_REF_DOMAIN=runner
           t0=$(date +%s%3N)
-          clw run --input moatbench/Cargo.toml --input moatbench/src \
-                  -- bash -c 'cd moatbench && cargo build --release -q'
+          clw run --json --input moatbench/Cargo.toml --input moatbench/src \
+                  -- bash -c 'cd moatbench && cargo build --release -q' >clw-cold.json 2>clw-cold.err
           rc=$?
           t1=$(date +%s%3N)
           echo "rc=$rc  ms=$((t1-t0))"
-          echo "cold_ms=$((t1-t0))" >> "$GITHUB_OUTPUT"
-          echo "cold_rc=$rc" >> "$GITHUB_OUTPUT"
+          echo "--- clw stdout (json) ---"; cat clw-cold.json || true
+          echo "--- clw stderr (tail) ---"; tail -5 clw-cold.err || true
+          echo "cold_ms=$((t1-t0))" >> "$GITHUB_OUTPUT"; echo "cold_rc=$rc" >> "$GITHUB_OUTPUT"
 
-      - name: WARM run (same inputs ⇒ cache HIT ⇒ memoized, no re-run)
+      - name: WARM run #1 (same inputs ⇒ cache HIT ⇒ memoized)
         id: warm
         run: |
-          set +e   # capture clw run's exit code instead of aborting (GH default is -e)
+          set +e
           export CLW_REF_DOMAIN=runner
           t0=$(date +%s%3N)
-          clw run --input moatbench/Cargo.toml --input moatbench/src \
-                  -- bash -c 'cd moatbench && cargo build --release -q'
+          clw run --json --input moatbench/Cargo.toml --input moatbench/src \
+                  -- bash -c 'cd moatbench && cargo build --release -q' >clw-warm.json 2>clw-warm.err
           rc=$?
           t1=$(date +%s%3N)
           echo "rc=$rc  ms=$((t1-t0))"
-          echo "warm_ms=$((t1-t0))" >> "$GITHUB_OUTPUT"
-          echo "warm_rc=$rc" >> "$GITHUB_OUTPUT"
+          echo "--- clw stdout (json) ---"; cat clw-warm.json || true
+          echo "--- clw stderr (tail) ---"; tail -5 clw-warm.err || true
+          echo "warm_ms=$((t1-t0))" >> "$GITHUB_OUTPUT"; echo "warm_rc=$rc" >> "$GITHUB_OUTPUT"
+
+      - name: WARM run #2 (stability — a HIT should match WARM #1, not COLD)
+        id: warm2
+        run: |
+          set +e
+          export CLW_REF_DOMAIN=runner
+          t0=$(date +%s%3N)
+          clw run --json --input moatbench/Cargo.toml --input moatbench/src \
+                  -- bash -c 'cd moatbench && cargo build --release -q' >clw-warm2.json 2>clw-warm2.err
+          rc=$?
+          t1=$(date +%s%3N)
+          echo "rc=$rc  ms=$((t1-t0))"
+          echo "--- clw stdout (json) ---"; cat clw-warm2.json || true
+          echo "warm2_ms=$((t1-t0))" >> "$GITHUB_OUTPUT"; echo "warm2_rc=$rc" >> "$GITHUB_OUTPUT"
 
       - name: Result — COLD vs WARM (the moat delta)
         run: |
-          C="${{ steps.cold.outputs.cold_ms }}"; W="${{ steps.warm.outputs.warm_ms }}"
+          C="${{ steps.cold.outputs.cold_ms }}"; W="${{ steps.warm.outputs.warm_ms }}"; W2="${{ steps.warm2.outputs.warm2_ms }}"
           echo "=============================================="
-          echo " MOAT BENCHMARK (clw run memoization)"
-          echo "  COLD (miss, ran):     ${C} ms  (rc=${{ steps.cold.outputs.cold_rc }})"
-          echo "  WARM (hit, memoized): ${W} ms  (rc=${{ steps.warm.outputs.warm_rc }})"
+          echo " MOAT BENCHMARK (clw run memoization, N=${{ github.event.inputs.fns || '6000' }} fns)"
+          echo "  COLD  (miss, ran):      ${C} ms  (rc=${{ steps.cold.outputs.cold_rc }})"
+          echo "  WARM1 (hit, memoized):  ${W} ms  (rc=${{ steps.warm.outputs.warm_rc }})"
+          echo "  WARM2 (hit, stability): ${W2} ms (rc=${{ steps.warm2.outputs.warm2_rc }})"
           if [ "${W:-0}" -gt 0 ] && [ "${C:-0}" -gt 0 ]; then
-            echo "  speedup: $(awk "BEGIN{printf \"%.1fx\", ${C}/${W}}")  saved: $((C-W)) ms"
+            echo "  speedup: $(awk "BEGIN{printf \"%.1fx\", ${C}/${W}}")  saved: $((C-W)) ms/run"
           fi
           echo "=============================================="
-          echo "NOTE: clw run memoizes the check's verdict+output by input hash."
-          echo "WARM ≈ 0 proves re-runs cost ≈ 0 — the moat earning its keep."
+          echo "Read the per-step 'clw stdout (json)' for the authoritative hit/miss."
+          echo "WARM is NOT zero: a clw run HIT restores the memoized OUTPUT (build"
+          echo "artifacts) from the CAS — you skip the compile, pay the CAS restore."
+          echo "WARM≈WARM2 << COLD confirms a stable HIT (a miss would re-cost ~COLD)."
