@@ -1,8 +1,0 @@
-# Minimal substrate-smoke image (ADR-0008 Stage A): proves the spawn-Worker →
-# Container DO → Firecracker microVM → status → teardown path on the live
-# account, WITHOUT the heavy runner image. Swapped for deploy/runner/Dockerfile
-# (the real GH-Actions runner + clw) once the substrate is proven.
-FROM alpine:3.20
-# Stay alive long enough to observe `running` status, then self-exit (a safety
-# net if teardown is missed — never an orphan past 5 min).
-ENTRYPOINT ["/bin/sh", "-c", "echo 'corelink substrate smoke: container up'; sleep 300"]

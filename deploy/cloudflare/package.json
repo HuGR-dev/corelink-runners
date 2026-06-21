@@ -2,7 +2,7 @@
   "name": "corelink-spawn-worker",
   "version": "0.0.0",
   "private": true,
-  "description": "CoreLink spawn-Worker + Container DO — Cloudflare substrate (ADR-0008). SKELETON, not yet deployed.",
+  "description": "CoreLink spawn-Worker + Container DO — Cloudflare substrate (ADR-0008). LIVE — autoscaler (/webhook) + /v1/* spawn surface deployed.",
   "type": "module",
   "scripts": {
     "deploy": "wrangler deploy",
