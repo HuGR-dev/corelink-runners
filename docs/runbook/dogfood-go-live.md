@@ -96,7 +96,7 @@ Once the smoke is green:
 (required — enables the route), `PAT` (tenant PAT to acquire as), `RUNNER_IMAGE`
 (digest-pinned), `LABELS` (CSV, default `corelink`; must include
 `corelink-dogfood`), `REPO_ALLOWLIST` (optional CSV), `EXPIRY_MS`, `TMP_ROOT`,
-`MAX_TRACKED_JOBS`. Mint (default-off, WP-8a): `CORELINK_PAT_MINT_AUTH_KEY` +
+`MAX_TRACKED_JOBS`. Mint (default-off, WP-8a): `CORELINK_RUNNER_MINT_AUTH_KEY` +
 `CORELINK_PAT_MINT_URL` — leave UNSET for the cold dogfood; set them only when
 D-9 is deployed (flipping the moat on). `CLW_ENDPOINT` likewise (clw drive).
 

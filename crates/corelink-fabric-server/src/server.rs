@@ -1058,7 +1058,7 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
     let state = state.with_clw_endpoint(std::env::var("CLW_ENDPOINT").ok());
 
     // WP-8a: wire the CAS PAT mint from the environment (default-off: both
-    // CORELINK_PAT_MINT_{AUTH_KEY,URL} absent ⇒ None ⇒ moat OFF, byte-identical
+    // CORELINK_RUNNER_MINT_{AUTH_KEY,URL} absent ⇒ None ⇒ moat OFF, byte-identical
     // to before). Boot fails LOUD (the `?`) on an armed-but-misconfigured mint —
     // a dev/default sentinel key or a half-configured pair — so an empty/dev
     // auth key can never silently run in prod.
