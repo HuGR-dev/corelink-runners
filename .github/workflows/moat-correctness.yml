@@ -65,6 +65,34 @@ jobs:
           printf '%s' "$A" > ws/payload.txt
           memo "$A" hit  "4: A again (distinct entry intact)"
 
+          # --- 5. --env folds into the key (so you can SAFELY pin toolchain via --env) ---
+          # Same input + same cmd, only a folded env var changes ⇒ MUST miss (else a
+          # toolchain bump would serve a stale build).
+          printf '%s' "fixed-${RU}" > ws/payload.txt
+          o="$(MOATVAR=1 clw run --input ws/payload.txt --env MOATVAR -- printenv MOATVAR 2>clw.err)"
+          v="$(grep -ho 'cache hit\|cache miss' clw.err | head -1)"
+          echo "[5a env=1] verdict='${v:-?}' out='$o' (expect miss / 1)"
+          [ "$o" = "1" ] && [ "${v:-}" = "cache miss" ] || { echo "::error::[5a] env=1 not a clean first miss"; fail=1; }
+          o="$(MOATVAR=2 clw run --input ws/payload.txt --env MOATVAR -- printenv MOATVAR 2>clw.err)"
+          v="$(grep -ho 'cache hit\|cache miss' clw.err | head -1)"
+          echo "[5b env=2] verdict='${v:-?}' out='$o' (expect MISS / 2 — env MUST bust the key)"
+          [ "$o" = "2" ] && [ "${v:-}" = "cache miss" ] || { echo "::error::[5b] --env did NOT bust the key (stale risk on toolchain change)"; fail=1; }
+
+          # --- 6. .clwignore EXCLUDES from the key (so build artifacts don't false-miss) ---
+          mkdir -p ws2
+          printf 'junk.txt\n' > ws2/.clwignore
+          printf '%s' "keep-${RU}" > ws2/keep.txt
+          printf 'j1' > ws2/junk.txt
+          o="$(clw run --input ws2 -- cat ws2/keep.txt 2>clw.err)"
+          v="$(grep -ho 'cache hit\|cache miss' clw.err | head -1)"
+          echo "[6a ignore] verdict='${v:-?}' out='$o' (expect miss / keep-${RU})"
+          [ "${v:-}" = "cache miss" ] || { echo "::error::[6a] expected first miss"; fail=1; }
+          printf 'j2-CHANGED-MUCH-LONGER' > ws2/junk.txt   # mutate ONLY the ignored file
+          o="$(clw run --input ws2 -- cat ws2/keep.txt 2>clw.err)"
+          v="$(grep -ho 'cache hit\|cache miss' clw.err | head -1)"
+          echo "[6b ignore] verdict='${v:-?}' (expect HIT — an ignored-file change must NOT bust)"
+          [ "${v:-}" = "cache hit" ] || { echo "::error::[6b] .clwignore not respected — ignored file busted the key (moat would false-miss on build artifacts)"; fail=1; }
+
           if [ "$fail" -ne 0 ]; then
             echo "::error::moat correctness FAILED — memoization is NOT sound."
             exit 1
