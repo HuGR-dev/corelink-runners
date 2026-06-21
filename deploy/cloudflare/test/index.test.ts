@@ -79,7 +79,7 @@ describe("buildContainerEnv (warm-mint, FAIL-OPEN to cold)", () => {
   it("WARM when key+tenant present and the D-9 mint succeeds", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => new Response(JSON.stringify({ token: "per-job-pat" }), { status: 200 })),
+      vi.fn(async () => new Response(JSON.stringify({ token_plaintext: "per-job-pat" }), { status: 200 })),
     );
     const env = {
       CORELINK_RUNNER_MINT_AUTH_KEY: "k",
@@ -97,7 +97,7 @@ describe("buildContainerEnv (warm-mint, FAIL-OPEN to cold)", () => {
 
   it("mints under the GH workflow_job.id (so completion can revoke it)", async () => {
     const fetchMock = vi.fn(
-      async () => new Response(JSON.stringify({ token: "per-job-pat" }), { status: 200 }),
+      async () => new Response(JSON.stringify({ token_plaintext: "per-job-pat" }), { status: 200 }),
     );
     vi.stubGlobal("fetch", fetchMock);
     const env = { CORELINK_RUNNER_MINT_AUTH_KEY: "k", CLW_TENANT: "ee30f7ba" } as never;
