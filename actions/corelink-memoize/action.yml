@@ -1,0 +1,60 @@
+name: "CoreLink Memoize"
+description: >-
+  Run a command with CoreLink cache memoization (clw run). On a cache HIT the
+  memoized result is returned WITHOUT re-running (re-runs ≈ 0). FAIL-OPEN: if the
+  CoreLink moat is absent (CLW_* not injected) or clw errors internally, the
+  command runs COLD — a job ALWAYS runs (north star: cache absent ⇒ slow, never
+  broken). Use on a CoreLink ephemeral runner (the autoscaler injects CLW_*).
+
+inputs:
+  run:
+    description: "The command to execute (memoized when the moat is present). Runs via bash -c."
+    required: true
+  inputs:
+    description: >-
+      Paths (files/dirs) that form the cache key — space- or newline-separated,
+      each passed as a repeated `--input`. Dirs respect .gitignore/.clwignore.
+      Default '.' keys on the whole working tree. Keep this to the SOURCE that
+      determines the output (exclude build dirs via .clwignore) so re-runs hit.
+    required: false
+    default: "."
+  env:
+    description: "Env var NAMES (space-separated) to fold into the cache key (repeated `--env`)."
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - shell: bash
+      env:
+        CL_RUN: ${{ inputs.run }}
+        CL_INPUTS: ${{ inputs.inputs }}
+        CL_ENVNAMES: ${{ inputs.env }}
+      run: |
+        set +e   # we manage exit codes explicitly (north-star fail-open)
+
+        # Build repeated --input / --env argument arrays (simple word-split; paths
+        # with spaces are out of scope for v0).
+        input_args=(); for p in $CL_INPUTS; do input_args+=(--input "$p"); done
+        env_args=();   for e in $CL_ENVNAMES; do env_args+=(--env "$e"); done
+
+        run_cold() { bash -c "$CL_RUN"; }
+
+        # Moat present? (CLW_* injected by the CoreLink autoscaler + clw on PATH)
+        if [ -n "${CLW_ENDPOINT:-}" ] && [ -n "${CLW_TOKEN:-}" ] && command -v clw >/dev/null 2>&1; then
+          export CLW_REF_DOMAIN="${CLW_REF_DOMAIN:-runner}"
+          echo "corelink-memoize: moat present — memoizing via clw run"
+          clw run "${input_args[@]}" "${env_args[@]}" -- bash -c "$CL_RUN"
+          rc=$?
+          # clw exit contract: 125 = clw-INTERNAL error (NOT the command's verdict).
+          # Any other code is the wrapped command's real exit (cached or fresh).
+          if [ "$rc" -eq 125 ]; then
+            echo "::warning title=corelink-memoize::clw internal error (125) — falling back to a COLD run (north star)"
+            run_cold; rc=$?
+          fi
+          exit "$rc"
+        else
+          echo "corelink-memoize: moat absent (no CLW_*/clw) — COLD run"
+          run_cold; exit "$?"
+        fi
