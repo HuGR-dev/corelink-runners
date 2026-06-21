@@ -3,7 +3,12 @@
 // Plain vitest (node) — these functions don't need the Workers runtime
 // (crypto.subtle + crypto.randomUUID are on Node 20+).
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { safeEqual, verifyGithubHmac, buildContainerEnv } from "../src/lib";
+import {
+  safeEqual,
+  verifyGithubHmac,
+  buildContainerEnv,
+  maybeRevokeCasPat,
+} from "../src/lib";
 
 describe("safeEqual (constant-time bearer compare)", () => {
   it("true for equal strings", () => expect(safeEqual("abc", "abc")).toBe(true));
@@ -55,10 +60,11 @@ describe("buildContainerEnv (warm-mint, FAIL-OPEN to cold)", () => {
   afterEach(() => vi.unstubAllGlobals());
 
   const JIT = "encoded-jit";
+  const JOB = "987654321"; // GH workflow_job.id
 
   it("COLD when no mint key configured (only the JIT, no CLW_*)", async () => {
     const env = { CLW_TENANT: "t" } as never; // key absent
-    const e = await buildContainerEnv(env, JIT);
+    const e = await buildContainerEnv(env, JIT, JOB);
     expect(e.CORELINK_RUNNER_JITCONFIG).toBe(JIT);
     expect(e.CLW_TOKEN).toBeUndefined();
     expect(e.CLW_ENDPOINT).toBeUndefined();
@@ -66,7 +72,7 @@ describe("buildContainerEnv (warm-mint, FAIL-OPEN to cold)", () => {
 
   it("COLD when no tenant configured", async () => {
     const env = { CORELINK_PAT_MINT_AUTH_KEY: "k" } as never; // tenant absent
-    const e = await buildContainerEnv(env, JIT);
+    const e = await buildContainerEnv(env, JIT, JOB);
     expect(e.CLW_TOKEN).toBeUndefined();
   });
 
@@ -81,7 +87,7 @@ describe("buildContainerEnv (warm-mint, FAIL-OPEN to cold)", () => {
       CLW_ENDPOINT: "https://corelink-api.humangr.com",
       CORELINK_MINT_URL: "https://corelink-api.humangr.com",
     } as never;
-    const e = await buildContainerEnv(env, JIT);
+    const e = await buildContainerEnv(env, JIT, JOB);
     expect(e.CORELINK_RUNNER_JITCONFIG).toBe(JIT);
     expect(e.CLW_TOKEN).toBe("per-job-pat");
     expect(e.CLW_TENANT).toBe("ee30f7ba");
@@ -89,10 +95,22 @@ describe("buildContainerEnv (warm-mint, FAIL-OPEN to cold)", () => {
     expect(e.CLW_REF_DOMAIN).toBe("runner");
   });
 
+  it("mints under the GH workflow_job.id (so completion can revoke it)", async () => {
+    const fetchMock = vi.fn(
+      async () => new Response(JSON.stringify({ token: "per-job-pat" }), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const env = { CORELINK_PAT_MINT_AUTH_KEY: "k", CLW_TENANT: "ee30f7ba" } as never;
+    await buildContainerEnv(env, JIT, JOB);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toContain("/internal/v1/runner/mint");
+    expect(JSON.parse((init as RequestInit).body as string).job_id).toBe(JOB);
+  });
+
   it("FAIL-OPEN to COLD when the D-9 mint returns non-2xx", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 500 })));
     const env = { CORELINK_PAT_MINT_AUTH_KEY: "k", CLW_TENANT: "ee30f7ba" } as never;
-    const e = await buildContainerEnv(env, JIT);
+    const e = await buildContainerEnv(env, JIT, JOB);
     expect(e.CORELINK_RUNNER_JITCONFIG).toBe(JIT); // job still runs
     expect(e.CLW_TOKEN).toBeUndefined(); // but cold — no CLW_*
   });
@@ -100,7 +118,60 @@ describe("buildContainerEnv (warm-mint, FAIL-OPEN to cold)", () => {
   it("FAIL-OPEN to COLD when the mint response has no token", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({}), { status: 200 })));
     const env = { CORELINK_PAT_MINT_AUTH_KEY: "k", CLW_TENANT: "ee30f7ba" } as never;
-    const e = await buildContainerEnv(env, JIT);
+    const e = await buildContainerEnv(env, JIT, JOB);
     expect(e.CLW_TOKEN).toBeUndefined();
+  });
+});
+
+describe("maybeRevokeCasPat (completion hardening, FAIL-OPEN)", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const JOB = "987654321";
+
+  it("no-op (false) when the mint key is absent — nothing was minted", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const env = { CLW_TENANT: "ee30f7ba" } as never; // key absent
+    expect(await maybeRevokeCasPat(env, JOB)).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled(); // never even calls D-9
+  });
+
+  it("no-op (false) when the tenant is absent", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const env = { CORELINK_PAT_MINT_AUTH_KEY: "k" } as never;
+    expect(await maybeRevokeCasPat(env, JOB)).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("revokes by (owner_tenant, job_id) and returns true on 2xx", async () => {
+    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const env = {
+      CORELINK_PAT_MINT_AUTH_KEY: "k",
+      CLW_TENANT: "ee30f7ba",
+      CORELINK_MINT_URL: "https://corelink-api.humangr.com",
+    } as never;
+    expect(await maybeRevokeCasPat(env, JOB)).toBe(true);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toContain("/internal/v1/runner/revoke");
+    const body = JSON.parse((init as RequestInit).body as string);
+    expect(body.owner_tenant).toBe("ee30f7ba");
+    expect(body.job_id).toBe(JOB);
+    expect((init as RequestInit).headers).toMatchObject({ "x-corelink-internal-auth": "k" });
+  });
+
+  it("FAIL-OPEN (false, swallowed) when revoke returns non-2xx", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 500 })));
+    const env = { CORELINK_PAT_MINT_AUTH_KEY: "k", CLW_TENANT: "ee30f7ba" } as never;
+    expect(await maybeRevokeCasPat(env, JOB)).toBe(false); // never throws
+  });
+
+  it("FAIL-OPEN (false, swallowed) when fetch itself throws", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      throw new Error("network down");
+    }));
+    const env = { CORELINK_PAT_MINT_AUTH_KEY: "k", CLW_TENANT: "ee30f7ba" } as never;
+    expect(await maybeRevokeCasPat(env, JOB)).toBe(false);
   });
 });

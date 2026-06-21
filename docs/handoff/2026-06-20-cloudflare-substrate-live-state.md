@@ -42,15 +42,18 @@ Once D-9 is live: inject `CLW_ENDPOINT` (corelink-server's in-network CAS API �
   isolation confirmed by the Server TL. Assessment is now PASS (was CONDITIONAL).
 - **Polish — DONE:** Worker unit tests (14, auth/HMAC/fail-open), docs reconciled, dead code removed.
 
-### Per-job CAS-PAT lifecycle posture (decided, not a loose end)
+### Per-job CAS-PAT lifecycle posture (TTL backstop + explicit revoke — BUILT)
 
-The per-job CAS PAT is **TTL-bounded** (D-9 mints with a 5400s TTL — the Server TL chose this short TTL
-precisely so an ephemeral one-shot box is fire-and-forget). The CF autoscaler therefore relies on **TTL
-expiry**, not an explicit revoke: the box is destroyed in minutes, the PAT is single-tenant `cas:rw`-scoped
-(A6), and it self-expires. Explicit revoke-on-completion (`POST /internal/v1/runner/revoke` with
-`owner_tenant`, on the `workflow_job:completed` webhook) is an **optional future hardening** to shrink the
-post-job window — it needs a `job→pat` map (KV/DO), and is NOT required by the TTL design. Documented here
-so the lifecycle is explicit, not silent.
+The per-job CAS PAT is **TTL-bounded** (D-9 mints with a 5400s TTL) AND now **explicitly revoked on
+completion** (hardening is not optional). The Worker mints the PAT under `job_id = GitHub workflow_job.id`
+(stable across queued→completed), so on `workflow_job:completed` it calls
+`POST {CORELINK_MINT_URL}/internal/v1/runner/revoke` `{owner_tenant, job_id}` — **no `job→pat` KV/DO map
+needed**. Built + unit-tested (`maybeRevokeCasPat`, 5 tests) and shipped; it is **fail-open** (a missing/
+non-2xx revoke is swallowed — TTL expiry remains the backstop), so it never breaks a job. The one
+remaining piece is **server-side**: the `/internal/v1/runner/revoke` endpoint itself, whose contract was
+relayed for freeze: `docs/handoff/2026-06-20-relay-to-server-tl-d9-revoke-contract.md`. Until that endpoint
+is live, revoke is a harmless no-op and the PAT TTL-expires as before; once live, revoke activates with no
+Worker redeploy beyond what's already shipped.
 
 ## Architecture note (reversal, flagged)
 
