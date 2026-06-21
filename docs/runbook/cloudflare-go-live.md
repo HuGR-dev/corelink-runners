@@ -85,10 +85,10 @@ gh workflow run dogfood-smoke.yml --repo HumanGuardrail/corelink-runners   # she
 - **WARM proof (positive):** the job spawns and there is **NO** `warm-mint failed, spawning COLD: …`
   line in the tail (that line is logged only on a mint failure). The mint POST to
   `…/internal/v1/runner/mint` returns `200 {token}` for tenant `ee30f7ba…`.
-- **In-job proof:** the runner container inherits `CLW_*`; the job log shows the entrypoint's
-  `clw hydrate` running (vs the cold path which skips it). (Optional hardening: add a step to
-  `dogfood-smoke.yml` that echoes `CLW_ENDPOINT set? ${CLW_ENDPOINT:+yes}` for an explicit WARM/COLD
-  line — a code/CI change, not done here.)
+- **In-job proof (explicit):** `dogfood-smoke.yml` has a `Cache-warm posture` step that prints
+  `moat=WARM …` (when `CLW_ENDPOINT`+`CLW_TOKEN` were injected) or `moat=COLD …` — an unambiguous
+  WARM/COLD line in the job log (presence-only; never prints the PAT value). WARM here = the per-job
+  CAS PAT minted + injected; the entrypoint's `clw hydrate` then runs (cold skips it).
 - **Revoke proof:** on `workflow_job:completed` the tail shows the revoke POST; a non-2xx logs
   `revoke failed (PAT will TTL-expire): …` and is harmless (TTL backstop).
 
