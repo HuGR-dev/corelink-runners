@@ -58,13 +58,55 @@ async function mintCasPat(env: MintEnv, jobId: string): Promise<string> {
   return j.token;
 }
 
+// Revoke a per-job CAS PAT via D-9 (corelink-server) — keyed by (owner_tenant,
+// job_id), the SAME job_id the PAT was minted under. Mirrors the mint contract
+// (header + base URL). Throws on any failure; the caller swallows it (the PAT is
+// already TTL-bounded, so revoke is best-effort hardening that shrinks the
+// post-job window — its failure is never user-visible). No KV/DO map needed:
+// the job_id is the stable GitHub workflow_job.id, present on both the queued
+// (mint) and completed (revoke) events.
+async function revokeCasPat(env: MintEnv, jobId: string): Promise<void> {
+  const base = env.CORELINK_MINT_URL ?? "https://corelink-api.humangr.com";
+  const resp = await fetch(`${base}/internal/v1/runner/revoke`, {
+    method: "POST",
+    headers: {
+      "x-corelink-internal-auth": env.CORELINK_PAT_MINT_AUTH_KEY ?? "",
+      "content-type": "application/json",
+      "user-agent": "corelink-spawn-worker",
+    },
+    body: JSON.stringify({ owner_tenant: env.CLW_TENANT, job_id: jobId }),
+  });
+  if (!resp.ok) throw new Error(`D-9 revoke ${resp.status}`);
+}
+
+// Best-effort revoke of a completed job's per-job CAS PAT. No-op unless the mint
+// is configured (no key ⇒ nothing was minted ⇒ nothing to revoke). Fail-OPEN:
+// any error is swallowed (TTL expiry is the backstop) — never breaks a job or
+// the webhook response. Returns true iff a revoke was actually issued+ack'd.
+export async function maybeRevokeCasPat(env: MintEnv, jobId: string): Promise<boolean> {
+  if (!env.CORELINK_PAT_MINT_AUTH_KEY || !env.CLW_TENANT) return false;
+  try {
+    await revokeCasPat(env, jobId);
+    return true;
+  } catch (e) {
+    console.log(`revoke failed (PAT will TTL-expire): ${(e as Error).message}`);
+    return false;
+  }
+}
+
 // Build the per-job container env: always the JIT; cache-warm CLW_* WHEN the
 // D-9 mint is configured AND succeeds. Any mint failure ⇒ cold env (fail-open).
-export async function buildContainerEnv(env: MintEnv, jit: string): Promise<Record<string, string>> {
+// `jobId` is the stable GitHub workflow_job.id — the PAT is minted under it so a
+// later workflow_job:completed can revoke the SAME PAT by (owner_tenant, job_id).
+export async function buildContainerEnv(
+  env: MintEnv,
+  jit: string,
+  jobId: string,
+): Promise<Record<string, string>> {
   const containerEnv: Record<string, string> = { CORELINK_RUNNER_JITCONFIG: jit };
   if (env.CORELINK_PAT_MINT_AUTH_KEY && env.CLW_TENANT) {
     try {
-      const casPat = await mintCasPat(env, crypto.randomUUID());
+      const casPat = await mintCasPat(env, jobId);
       containerEnv.CLW_ENDPOINT = env.CLW_ENDPOINT ?? "https://corelink-api.humangr.com";
       containerEnv.CLW_TENANT = env.CLW_TENANT;
       containerEnv.CLW_TOKEN = casPat; // per-job; never logged

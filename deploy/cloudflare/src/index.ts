@@ -8,7 +8,7 @@
 // account before this is trusted. See README.md "Design notes / wrinkles".
 
 import { Container, getContainer } from "@cloudflare/containers";
-import { safeEqual, verifyGithubHmac, buildContainerEnv } from "./lib";
+import { safeEqual, verifyGithubHmac, buildContainerEnv, maybeRevokeCasPat } from "./lib";
 
 export interface Env {
   RUNNER_CONTAINER: DurableObjectNamespace<RunnerContainer>;
@@ -126,11 +126,12 @@ async function mintJit(env: Env, repoFullName: string, label: string): Promise<s
 }
 
 // Spawn one runner container with the JIT injected + cache-warm CLW_* (the
-// shared spawn path). `buildContainerEnv` (./lib) is fail-open to cold.
-async function spawnRunner(env: Env, jit: string): Promise<string> {
+// shared spawn path). `buildContainerEnv` (./lib) is fail-open to cold. `jobId`
+// (GH workflow_job.id) is the mint correlation id so completion can revoke it.
+async function spawnRunner(env: Env, jit: string, jobId: string): Promise<string> {
   const handle = crypto.randomUUID();
   const container = getContainer(env.RUNNER_CONTAINER, handle);
-  await container.startWithEnv(await buildContainerEnv(env, jit));
+  await container.startWithEnv(await buildContainerEnv(env, jit, jobId));
   return handle;
 }
 
@@ -158,12 +159,29 @@ export default {
       }
       const evt = JSON.parse(raw) as {
         action?: string;
-        workflow_job?: { labels?: string[] };
+        workflow_job?: { labels?: string[]; id?: number };
+        repository?: { full_name?: string };
       };
       const label = env.AUTOSCALER_LABEL ?? "corelink-dogfood";
       const labels = evt.workflow_job?.labels ?? [];
-      if (evt.action !== "queued" || !labels.includes(label)) {
-        return json({ ok: true, ignored: "not a queued job for our label" }, 200);
+      if (!labels.includes(label)) {
+        return json({ ok: true, ignored: "not our label" }, 200);
+      }
+      // The stable correlation id across queued→completed for THIS job. The PAT
+      // is minted under it (job_id) so completion can revoke the SAME PAT.
+      const jobId = String(evt.workflow_job?.id ?? "");
+      if (!jobId) return json({ error: "no workflow_job.id in payload" }, 400);
+
+      // ── workflow_job:completed ⇒ revoke the per-job CAS PAT (hardening) ──────
+      // Shrinks the post-job window the PAT is valid (TTL is the backstop).
+      // Best-effort + fail-open: a revoke failure never breaks the webhook.
+      if (evt.action === "completed") {
+        const revoked = await maybeRevokeCasPat(env, jobId);
+        return json({ ok: true, revoked, job_id: jobId }, 200);
+      }
+
+      if (evt.action !== "queued") {
+        return json({ ok: true, ignored: `action ${evt.action}` }, 200);
       }
       // Rate-limit real spawn attempts (defense-in-depth vs a leaked webhook
       // secret). Ignored events above are free; only queued+labeled jobs count.
@@ -171,13 +189,12 @@ export default {
         const { success } = await env.WEBHOOK_LIMITER.limit({ key: "spawn" });
         if (!success) return json({ error: "rate limited" }, 429);
       }
-      // The repo is the webhook's repository (full_name); fall back to the env.
-      const repo =
-        (JSON.parse(raw) as { repository?: { full_name?: string } }).repository?.full_name ?? "";
+      // The repo is the webhook's repository (full_name).
+      const repo = evt.repository?.full_name ?? "";
       if (!repo) return json({ error: "no repository in payload" }, 400);
       try {
         const jit = await mintJit(env, repo, label);
-        const handle = await spawnRunner(env, jit);
+        const handle = await spawnRunner(env, jit, jobId);
         return json({ ok: true, handle }, 201);
       } catch (e) {
         return json({ error: `autoscale failed: ${(e as Error).message}` }, 502);
