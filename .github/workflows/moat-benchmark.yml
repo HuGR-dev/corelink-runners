@@ -1,0 +1,110 @@
+# moat-benchmark — prove the cache-moat EARNS its keep: memoized re-runs ≈ 0.
+#
+# Runs a deterministic "check" (a real `cargo build` of a generated crate) twice
+# through `clw run` on a CoreLink ephemeral runner:
+#   - COLD  (1st): cache MISS → the check actually runs → result memoized to CAS.
+#   - WARM  (2nd): same inputs → cache HIT → clw returns the memoized verdict
+#                  WITHOUT re-running → wall-clock ≈ 0.
+# The COLD→WARM wall-clock delta is the moat's real signal (the #12 pricing proof).
+#
+# Memoization model (verified clw 0.1.1): `clw run --input <paths> -- <cmd>`; the
+# cache key = hash(inputs ‖ named env ‖ cmd). --input is the SOURCE only (NOT
+# target/, else the 2nd run's artifacts would change the key → false miss).
+#
+# North star: this is a benchmark, not the product path. If the moat is COLD
+# (CLW_* not injected) clw run can't memoize — the workflow reports that and the
+# raw build time, never hangs.
+name: moat-benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      fns:
+        description: "generated fn count (tunes the cold build cost; deterministic)"
+        default: "6000"
+
+jobs:
+  bench:
+    runs-on: corelink-dogfood
+    steps:
+      - name: Moat posture
+        run: |
+          if [ -n "${CLW_ENDPOINT:-}" ] && [ -n "${CLW_TOKEN:-}" ]; then
+            echo "moat=WARM — clw run will memoize to the CoreLink CAS"
+          else
+            echo "moat=COLD — CLW_* not injected; clw run cannot memoize (benchmark will show raw time only)"
+          fi
+          command -v clw >/dev/null 2>&1 && clw --version || echo "clw not on PATH"
+
+      - name: Generate a deterministic crate (fixed inputs ⇒ stable cache key)
+        run: |
+          set -euo pipefail
+          N="${{ github.event.inputs.fns }}"; N="${N:-6000}"
+          mkdir -p moatbench/src
+          # .clwignore so --input moatbench excludes build output from the key.
+          printf 'target/\n' > moatbench/.clwignore
+          cat > moatbench/Cargo.toml <<'TOML'
+          [package]
+          name = "moatbench"
+          version = "0.0.0"
+          edition = "2021"
+          [dependencies]
+          [profile.release]
+          opt-level = 2
+          TOML
+          # N dependency-free #[inline(never)] fns ⇒ a real, deterministic, network-free
+          # compile whose cost scales with N. Same N ⇒ byte-identical source ⇒ same key.
+          python3 - "$N" > moatbench/src/main.rs <<'PY'
+          import sys
+          n = int(sys.argv[1])
+          out = []
+          for i in range(n):
+              out.append(f"#[inline(never)] fn f{i}(x:u64)->u64{{x.wrapping_mul({i*2654435761 & 0xffffffff}).wrapping_add({i})}}")
+          out.append("fn main(){let mut a=1u64;")
+          out += [f"a=a.wrapping_add(f{i}(a));" for i in range(n)]
+          out.append('println!("{a}");}')
+          print("\n".join(out))
+          PY
+          echo "generated moatbench with N=$N fns ($(wc -l < moatbench/src/main.rs) lines)"
+
+      - name: COLD run (cache MISS — the check actually runs)
+        id: cold
+        run: |
+          set +e   # capture clw run's exit code instead of aborting (GH default is -e)
+          export CLW_REF_DOMAIN=runner
+          t0=$(date +%s%3N)
+          clw run --input moatbench/Cargo.toml --input moatbench/src \
+                  -- bash -c 'cd moatbench && cargo build --release -q'
+          rc=$?
+          t1=$(date +%s%3N)
+          echo "rc=$rc  ms=$((t1-t0))"
+          echo "cold_ms=$((t1-t0))" >> "$GITHUB_OUTPUT"
+          echo "cold_rc=$rc" >> "$GITHUB_OUTPUT"
+
+      - name: WARM run (same inputs ⇒ cache HIT ⇒ memoized, no re-run)
+        id: warm
+        run: |
+          set +e   # capture clw run's exit code instead of aborting (GH default is -e)
+          export CLW_REF_DOMAIN=runner
+          t0=$(date +%s%3N)
+          clw run --input moatbench/Cargo.toml --input moatbench/src \
+                  -- bash -c 'cd moatbench && cargo build --release -q'
+          rc=$?
+          t1=$(date +%s%3N)
+          echo "rc=$rc  ms=$((t1-t0))"
+          echo "warm_ms=$((t1-t0))" >> "$GITHUB_OUTPUT"
+          echo "warm_rc=$rc" >> "$GITHUB_OUTPUT"
+
+      - name: Result — COLD vs WARM (the moat delta)
+        run: |
+          C="${{ steps.cold.outputs.cold_ms }}"; W="${{ steps.warm.outputs.warm_ms }}"
+          echo "=============================================="
+          echo " MOAT BENCHMARK (clw run memoization)"
+          echo "  COLD (miss, ran):     ${C} ms  (rc=${{ steps.cold.outputs.cold_rc }})"
+          echo "  WARM (hit, memoized): ${W} ms  (rc=${{ steps.warm.outputs.warm_rc }})"
+          if [ "${W:-0}" -gt 0 ] && [ "${C:-0}" -gt 0 ]; then
+            echo "  speedup: $(awk "BEGIN{printf \"%.1fx\", ${C}/${W}}")  saved: $((C-W)) ms"
+          fi
+          echo "=============================================="
+          echo "NOTE: clw run memoizes the check's verdict+output by input hash."
+          echo "WARM ≈ 0 proves re-runs cost ≈ 0 — the moat earning its keep."
