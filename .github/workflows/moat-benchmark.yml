@@ -54,17 +54,16 @@ jobs:
           TOML
           # N dependency-free #[inline(never)] fns ⇒ a real, deterministic, network-free
           # compile whose cost scales with N. Same N ⇒ byte-identical source ⇒ same key.
-          python3 - "$N" > moatbench/src/main.rs <<'PY'
-          import sys
-          n = int(sys.argv[1])
-          out = []
-          for i in range(n):
-              out.append(f"#[inline(never)] fn f{i}(x:u64)->u64{{x.wrapping_mul({i*2654435761 & 0xffffffff}).wrapping_add({i})}}")
-          out.append("fn main(){let mut a=1u64;")
-          out += [f"a=a.wrapping_add(f{i}(a));" for i in range(n)]
-          out.append('println!("{a}");}')
-          print("\n".join(out))
-          PY
+          # Pure bash (the runner image has no python3).
+          {
+            for ((i=0; i<N; i++)); do
+              m=$(( (i * 2654435761) & 0xffffffff ))
+              printf '#[inline(never)] fn f%d(x:u64)->u64{x.wrapping_mul(%d).wrapping_add(%d)}\n' "$i" "$m" "$i"
+            done
+            printf 'fn main(){let mut a=1u64;\n'
+            for ((i=0; i<N; i++)); do printf 'a=a.wrapping_add(f%d(a));\n' "$i"; done
+            printf 'println!("{a}");}\n'
+          } > moatbench/src/main.rs
           echo "generated moatbench with N=$N fns ($(wc -l < moatbench/src/main.rs) lines)"
 
       - name: COLD run (cache MISS — the check actually runs)
