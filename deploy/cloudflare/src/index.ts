@@ -8,7 +8,7 @@
 // account before this is trusted. See README.md "Design notes / wrinkles".
 
 import { Container, getContainer } from "@cloudflare/containers";
-import { safeEqual, verifyGithubHmac, buildContainerEnv, maybeRevokeCasPat } from "./lib";
+import { safeEqual, verifyGithubHmac, buildContainerEnv, revokeCasPatById } from "./lib";
 
 export interface Env {
   RUNNER_CONTAINER: DurableObjectNamespace<RunnerContainer>;
@@ -40,6 +40,10 @@ export interface Env {
   CLW_ENDPOINT?: string;
   // The owner tenant the per-job CAS PAT + CLW_TENANT are scoped to (dogfood ee30f7ba).
   CLW_TENANT?: string;
+  // job_id → pat_id map (written at mint/queued, read+deleted at completion) so
+  // revoke can key on pat_id (the live /revoke contract). Absent ⇒ no revoke
+  // (PAT TTL-expires; fail-open). See wrangler kv_namespaces.
+  RUNNER_JOB_PATS?: KVNamespace;
 }
 
 // Per-job runner container. One DO instance per spawned runner (keyed by handle).
@@ -125,14 +129,44 @@ async function mintJit(env: Env, repoFullName: string, label: string): Promise<s
   return j.encoded_jit_config;
 }
 
+// How long a job_id→pat_id entry lives in KV — a self-cleaning backstop well
+// past the longest CI job (the entry is normally deleted at completion).
+const JOB_PAT_TTL_S = 7200;
+
 // Spawn one runner container with the JIT injected + cache-warm CLW_* (the
-// shared spawn path). `buildContainerEnv` (./lib) is fail-open to cold. `jobId`
-// (GH workflow_job.id) is the mint correlation id so completion can revoke it.
+// shared spawn path). `buildContainerEnv` (./lib) is fail-open to cold. On a warm
+// mint it returns the pat_id, which we stash in KV under jobId so the later
+// workflow_job:completed can revoke that exact PAT (the /revoke contract keys on
+// pat_id, not job_id).
 async function spawnRunner(env: Env, jit: string, jobId: string): Promise<string> {
   const handle = crypto.randomUUID();
   const container = getContainer(env.RUNNER_CONTAINER, handle);
-  await container.startWithEnv(await buildContainerEnv(env, jit, jobId));
+  const { containerEnv, patId } = await buildContainerEnv(env, jit, jobId);
+  await container.startWithEnv(containerEnv);
+  if (patId && env.RUNNER_JOB_PATS) {
+    // Best-effort: if the put fails, the PAT just TTL-expires (fail-open).
+    await env.RUNNER_JOB_PATS.put(jobId, patId, { expirationTtl: JOB_PAT_TTL_S }).catch((e) =>
+      console.log(`KV put job→pat failed (PAT will TTL-expire): ${(e as Error).message}`),
+    );
+  }
   return handle;
+}
+
+// Best-effort revoke of a completed job's per-job CAS PAT, by pat_id (looked up
+// from KV). No-op when the mint isn't configured or no pat_id was stored. Fail-
+// OPEN: any error is swallowed (the PAT TTL-expires) — never breaks the webhook.
+async function revokeCompletedJob(env: Env, jobId: string): Promise<boolean> {
+  if (!env.CORELINK_RUNNER_MINT_AUTH_KEY || !env.CLW_TENANT || !env.RUNNER_JOB_PATS) return false;
+  try {
+    const patId = await env.RUNNER_JOB_PATS.get(jobId);
+    if (!patId) return false; // cold job, or already revoked/expired
+    await revokeCasPatById(env, patId);
+    await env.RUNNER_JOB_PATS.delete(jobId);
+    return true;
+  } catch (e) {
+    console.log(`revoke failed (PAT will TTL-expire): ${(e as Error).message}`);
+    return false;
+  }
 }
 
 export default {
@@ -176,7 +210,7 @@ export default {
       // Shrinks the post-job window the PAT is valid (TTL is the backstop).
       // Best-effort + fail-open: a revoke failure never breaks the webhook.
       if (evt.action === "completed") {
-        const revoked = await maybeRevokeCasPat(env, jobId);
+        const revoked = await revokeCompletedJob(env, jobId);
         return json({ ok: true, revoked, job_id: jobId }, 200);
       }
 

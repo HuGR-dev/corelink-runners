@@ -7,7 +7,7 @@ import {
   safeEqual,
   verifyGithubHmac,
   buildContainerEnv,
-  maybeRevokeCasPat,
+  revokeCasPatById,
 } from "../src/lib";
 
 describe("safeEqual (constant-time bearer compare)", () => {
@@ -62,24 +62,30 @@ describe("buildContainerEnv (warm-mint, FAIL-OPEN to cold)", () => {
   const JIT = "encoded-jit";
   const JOB = "987654321"; // GH workflow_job.id
 
-  it("COLD when no mint key configured (only the JIT, no CLW_*)", async () => {
+  it("COLD when no mint key configured (only the JIT, no CLW_*, no patId)", async () => {
     const env = { CLW_TENANT: "t" } as never; // key absent
-    const e = await buildContainerEnv(env, JIT, JOB);
-    expect(e.CORELINK_RUNNER_JITCONFIG).toBe(JIT);
-    expect(e.CLW_TOKEN).toBeUndefined();
-    expect(e.CLW_ENDPOINT).toBeUndefined();
+    const { containerEnv, patId } = await buildContainerEnv(env, JIT, JOB);
+    expect(containerEnv.CORELINK_RUNNER_JITCONFIG).toBe(JIT);
+    expect(containerEnv.CLW_TOKEN).toBeUndefined();
+    expect(containerEnv.CLW_ENDPOINT).toBeUndefined();
+    expect(patId).toBeUndefined();
   });
 
   it("COLD when no tenant configured", async () => {
     const env = { CORELINK_RUNNER_MINT_AUTH_KEY: "k" } as never; // tenant absent
-    const e = await buildContainerEnv(env, JIT, JOB);
-    expect(e.CLW_TOKEN).toBeUndefined();
+    const { containerEnv, patId } = await buildContainerEnv(env, JIT, JOB);
+    expect(containerEnv.CLW_TOKEN).toBeUndefined();
+    expect(patId).toBeUndefined();
   });
 
-  it("WARM when key+tenant present and the D-9 mint succeeds", async () => {
+  it("WARM when key+tenant present and the D-9 mint succeeds (returns patId)", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => new Response(JSON.stringify({ token_plaintext: "per-job-pat" }), { status: 200 })),
+      vi.fn(async () =>
+        new Response(JSON.stringify({ token_plaintext: "per-job-pat", pat_id: "pat-123" }), {
+          status: 200,
+        }),
+      ),
     );
     const env = {
       CORELINK_RUNNER_MINT_AUTH_KEY: "k",
@@ -87,17 +93,21 @@ describe("buildContainerEnv (warm-mint, FAIL-OPEN to cold)", () => {
       CLW_ENDPOINT: "https://corelink-api.humangr.com",
       CORELINK_MINT_URL: "https://corelink-api.humangr.com",
     } as never;
-    const e = await buildContainerEnv(env, JIT, JOB);
-    expect(e.CORELINK_RUNNER_JITCONFIG).toBe(JIT);
-    expect(e.CLW_TOKEN).toBe("per-job-pat");
-    expect(e.CLW_TENANT).toBe("ee30f7ba");
-    expect(e.CLW_ENDPOINT).toBe("https://corelink-api.humangr.com");
-    expect(e.CLW_REF_DOMAIN).toBe("runner");
+    const { containerEnv, patId } = await buildContainerEnv(env, JIT, JOB);
+    expect(containerEnv.CORELINK_RUNNER_JITCONFIG).toBe(JIT);
+    expect(containerEnv.CLW_TOKEN).toBe("per-job-pat");
+    expect(containerEnv.CLW_TENANT).toBe("ee30f7ba");
+    expect(containerEnv.CLW_ENDPOINT).toBe("https://corelink-api.humangr.com");
+    expect(containerEnv.CLW_REF_DOMAIN).toBe("runner");
+    expect(patId).toBe("pat-123"); // carried out for KV → revoke-by-pat_id
   });
 
-  it("mints under the GH workflow_job.id (so completion can revoke it)", async () => {
+  it("mints under the GH workflow_job.id (correlation id)", async () => {
     const fetchMock = vi.fn(
-      async () => new Response(JSON.stringify({ token_plaintext: "per-job-pat" }), { status: 200 }),
+      async () =>
+        new Response(JSON.stringify({ token_plaintext: "per-job-pat", pat_id: "pat-123" }), {
+          status: 200,
+        }),
     );
     vi.stubGlobal("fetch", fetchMock);
     const env = { CORELINK_RUNNER_MINT_AUTH_KEY: "k", CLW_TENANT: "ee30f7ba" } as never;
@@ -110,41 +120,36 @@ describe("buildContainerEnv (warm-mint, FAIL-OPEN to cold)", () => {
   it("FAIL-OPEN to COLD when the D-9 mint returns non-2xx", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 500 })));
     const env = { CORELINK_RUNNER_MINT_AUTH_KEY: "k", CLW_TENANT: "ee30f7ba" } as never;
-    const e = await buildContainerEnv(env, JIT, JOB);
-    expect(e.CORELINK_RUNNER_JITCONFIG).toBe(JIT); // job still runs
-    expect(e.CLW_TOKEN).toBeUndefined(); // but cold — no CLW_*
+    const { containerEnv, patId } = await buildContainerEnv(env, JIT, JOB);
+    expect(containerEnv.CORELINK_RUNNER_JITCONFIG).toBe(JIT); // job still runs
+    expect(containerEnv.CLW_TOKEN).toBeUndefined(); // but cold — no CLW_*
+    expect(patId).toBeUndefined();
   });
 
-  it("FAIL-OPEN to COLD when the mint response has no token", async () => {
+  it("FAIL-OPEN to COLD when the mint 200 lacks token_plaintext", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({}), { status: 200 })));
     const env = { CORELINK_RUNNER_MINT_AUTH_KEY: "k", CLW_TENANT: "ee30f7ba" } as never;
-    const e = await buildContainerEnv(env, JIT, JOB);
-    expect(e.CLW_TOKEN).toBeUndefined();
+    const { containerEnv, patId } = await buildContainerEnv(env, JIT, JOB);
+    expect(containerEnv.CLW_TOKEN).toBeUndefined();
+    expect(patId).toBeUndefined();
+  });
+
+  it("FAIL-OPEN to COLD when the mint 200 has a token but no pat_id", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ token_plaintext: "x" }), { status: 200 })),
+    );
+    const env = { CORELINK_RUNNER_MINT_AUTH_KEY: "k", CLW_TENANT: "ee30f7ba" } as never;
+    const { containerEnv, patId } = await buildContainerEnv(env, JIT, JOB);
+    expect(containerEnv.CLW_TOKEN).toBeUndefined(); // can't track for revoke ⇒ cold
+    expect(patId).toBeUndefined();
   });
 });
 
-describe("maybeRevokeCasPat (completion hardening, FAIL-OPEN)", () => {
+describe("revokeCasPatById (revoke-by-pat_id, the live /revoke contract)", () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  const JOB = "987654321";
-
-  it("no-op (false) when the mint key is absent — nothing was minted", async () => {
-    const fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
-    const env = { CLW_TENANT: "ee30f7ba" } as never; // key absent
-    expect(await maybeRevokeCasPat(env, JOB)).toBe(false);
-    expect(fetchMock).not.toHaveBeenCalled(); // never even calls D-9
-  });
-
-  it("no-op (false) when the tenant is absent", async () => {
-    const fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
-    const env = { CORELINK_RUNNER_MINT_AUTH_KEY: "k" } as never;
-    expect(await maybeRevokeCasPat(env, JOB)).toBe(false);
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
-
-  it("revokes by (owner_tenant, job_id) and returns true on 2xx", async () => {
+  it("POSTs {pat_id, owner_tenant} to /revoke with the auth header on 2xx", async () => {
     const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetchMock);
     const env = {
@@ -152,26 +157,18 @@ describe("maybeRevokeCasPat (completion hardening, FAIL-OPEN)", () => {
       CLW_TENANT: "ee30f7ba",
       CORELINK_MINT_URL: "https://corelink-api.humangr.com",
     } as never;
-    expect(await maybeRevokeCasPat(env, JOB)).toBe(true);
+    await revokeCasPatById(env, "pat-123");
     const [url, init] = fetchMock.mock.calls[0];
     expect(String(url)).toContain("/internal/v1/runner/revoke");
     const body = JSON.parse((init as RequestInit).body as string);
+    expect(body.pat_id).toBe("pat-123");
     expect(body.owner_tenant).toBe("ee30f7ba");
-    expect(body.job_id).toBe(JOB);
     expect((init as RequestInit).headers).toMatchObject({ "x-corelink-internal-auth": "k" });
   });
 
-  it("FAIL-OPEN (false, swallowed) when revoke returns non-2xx", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 500 })));
+  it("throws on non-2xx (caller swallows — fail-open)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("bad", { status: 400 })));
     const env = { CORELINK_RUNNER_MINT_AUTH_KEY: "k", CLW_TENANT: "ee30f7ba" } as never;
-    expect(await maybeRevokeCasPat(env, JOB)).toBe(false); // never throws
-  });
-
-  it("FAIL-OPEN (false, swallowed) when fetch itself throws", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => {
-      throw new Error("network down");
-    }));
-    const env = { CORELINK_RUNNER_MINT_AUTH_KEY: "k", CLW_TENANT: "ee30f7ba" } as never;
-    expect(await maybeRevokeCasPat(env, JOB)).toBe(false);
+    await expect(revokeCasPatById(env, "pat-123")).rejects.toThrow(/D-9 revoke 400/);
   });
 });
