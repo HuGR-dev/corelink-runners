@@ -25,6 +25,16 @@ jobs:
           echo "runner name : ${RUNNER_NAME:-<unset>}"
           echo "host        : $(uname -a)"
           echo "user        : $(whoami)"
+      - name: Cache-warm posture (WARM iff the per-job CAS PAT was injected)
+        run: |
+          # The autoscaler injects CLW_* into the container env ONLY on a
+          # successful D-9 warm-mint; absent ⇒ COLD (fail-open). Presence-only —
+          # never print CLW_TOKEN's value (it's a per-job CAS PAT).
+          if [ -n "${CLW_ENDPOINT:-}" ] && [ -n "${CLW_TOKEN:-}" ]; then
+            echo "moat=WARM  endpoint=${CLW_ENDPOINT}  tenant=${CLW_TENANT:-<unset>}  ref=${CLW_REF_DOMAIN:-<unset>}  token=present"
+          else
+            echo "moat=COLD  (CLW_* not injected — cold-but-correct, fail-open; north star intact)"
+          fi
       - name: Toolchain is cache-warm in the image
         run: |
           cargo --version
