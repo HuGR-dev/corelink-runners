@@ -29,8 +29,9 @@ jobs:
             Cargo.toml
             Cargo.lock
             src
-          # optional: env var names folded into the key (e.g. toolchain pin)
-          env: RUSTC_VERSION
+          # SAFETY-BY-DEFAULT: auto-fold the toolchain version into the key so a
+          # compiler upgrade correctly busts the cache (no stale build).
+          tool: rust
 ```
 
 A HIT returns the prior verdict+output instantly; a MISS runs the command and
@@ -43,6 +44,7 @@ memoizes it for next time.
 | `run`    | yes      | —       | command to execute (via `bash -c`) |
 | `inputs` | no       | `.`     | space/newline-separated paths forming the cache key (repeated `--input`) |
 | `env`    | no       | `""`    | space-separated env var NAMES folded into the key (repeated `--env`) |
+| `tool`   | no       | `""`    | toolchains whose VERSION is auto-folded into the key (`rust`·`node`·`python`·`go`) so an upgrade busts the cache |
 
 ## Notes
 

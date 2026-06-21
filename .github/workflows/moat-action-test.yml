@@ -65,7 +65,16 @@ jobs:
           run: echo "fail-open passthrough OK" && cd moatbench && cargo build --release -q
           inputs: moatbench/Cargo.toml moatbench/src
 
+      - name: TOOL-FOLD via action (safety-by-default — toolchain folded into key)
+        uses: ./actions/corelink-memoize
+        with:
+          run: cd moatbench && cargo build --release -q
+          inputs: moatbench/Cargo.toml moatbench/src
+          tool: rust
+        # Expect the log line "toolchain folded into key →|rust=rustc 1.96.0…".
+        # Correctness of "a version bump ⇒ MISS" is the proven --env path (moat-correctness #5).
+
       - name: Result
         run: |
-          echo "corelink-memoize action: COLD->WARM (miss->hit) + fail-open passthrough all green."
-          echo "Read each step log for clw's cache hit/miss verdict."
+          echo "corelink-memoize action: COLD->WARM (miss->hit) + fail-open passthrough + tool-fold all green."
+          echo "Read each step log for clw's cache hit/miss verdict and the tool-fold line."
