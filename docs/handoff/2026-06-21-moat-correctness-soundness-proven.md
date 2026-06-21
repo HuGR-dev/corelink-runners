@@ -18,8 +18,18 @@ so step 1 is a guaranteed first miss. Hard assertions fail the job on any violat
  [2: A again]            verdict=cache hit    out=A-<run>    ✅ repeat → HIT, correct output replayed
  [3: B changed]          verdict=cache miss   out=B-<run>    ✅ changed input → key BUSTS (no stale "A")
  [4: A again]            verdict=cache hit    out=A-<run>    ✅ distinct entry intact (no cross-contamination)
+ [5a env=1]              verdict=cache miss   out=1         ✅ first run with a folded env var
+ [5b env=2]              verdict=cache miss   out=2         ✅ --env change BUSTS the key (safe toolchain pin)
+ [6a ignore]             verdict=cache miss   out=keep-<run> ✅ first run, dir input with .clwignore
+ [6b ignore]             verdict=cache hit                  ✅ mutating an IGNORED file does NOT bust the key
  → moat correctness PASSED
 ```
+
+The last two cover the **safety-critical real-usage knobs**:
+- **`--env` folds into the key** → you can SAFELY pin the toolchain/compiler version via `--env` (a bump
+  invalidates the cache; no stale build is ever served).
+- **`.clwignore` excludes from the key** → build artifacts (`target/`, `node_modules/`) in the input tree do
+  NOT bust the key, so the moat won't silently false-miss every run.
 
 ## What this establishes
 - **Input-addressed:** the cache key folds in the input content; changing it produces a MISS, never a stale
