@@ -33,10 +33,20 @@ Once D-9 is live: inject `CLW_ENDPOINT` (corelink-server's in-network CAS API �
 
 ## Remaining (by owner / gate)
 
-- **D-9 mint prod-Worker deploy** (server-side) → unblocks the warm moat. THE lever.
-- **Prod secrets rotation** (`!`): the dogfood spawn token (`dogfood-smoke-…`), webhook secret
-  (`whsec-…`), and `GITHUB_MINT_TOKEN` (currently `gh auth token` — swap for a dedicated fine-grained
-  repo-admin PAT).
+- **Set `CORELINK_PAT_MINT_AUTH_KEY` on the spawn-Worker → unblocks the warm moat. THE lever.**
+  The D-9 mint endpoint is LIVE (server-side); the only missing piece is this Worker secret. Its
+  value is delivered OOB by the Server TL (not in the repo/account — confirmed absent from
+  `wrangler secret list` 2026-06-20). Once set, the `/webhook` mints the per-job PAT + injects
+  `CLW_*` → warm, no redeploy.
+- **Prod secrets rotation — PARTIALLY DONE 2026-06-20/21:**
+  - ✅ `CLOUDFLARE_SPAWN_AUTH_TOKEN` — rotated to a fresh random (off the `dogfood-smoke-…` throwaway).
+  - ✅ `GITHUB_WEBHOOK_SECRET` — rotated on BOTH sides (GitHub hook 644667520 + Worker), verified by a
+    ping delivery returning HTTP 200 (HMAC matches; autoscaler intact). NOTE: hook edits must use the
+    **canonical** repo path `HumanGuardrail/corelink-runners` — `humangr-labs/…` 307-redirects and
+    `gh api -X PATCH` does NOT follow it (silent no-op).
+  - ⏳ `GITHUB_MINT_TOKEN` — still the dogfood `gh auth token`. Swapping for a dedicated fine-grained
+    repo-admin PAT is **UI-only** (GitHub forbids PAT creation via API) → owner action, only needed
+    before a non-dogfood tenant.
 - **§6 isolation — ALL CLEARED 2026-06-20** (PR #121 + the assessment doc): rate-limit on `/webhook`
   (`WEBHOOK_LIMITER`, 30/60s), egress per ADR-0003, side-channel resolved-by-design, cache-seam tenant
   isolation confirmed by the Server TL. Assessment is now PASS (was CONDITIONAL).
