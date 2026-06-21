@@ -23,6 +23,14 @@
     { "name": "WEBHOOK_LIMITER", "namespace_id": "1001", "simple": { "limit": 30, "period": 60 } }
   ],
 
+  // job_id -> pat_id map so workflow_job:completed can revoke the per-job CAS PAT
+  // by pat_id (the live /revoke contract requires pat_id, not job_id). Written at
+  // mint (queued), read+deleted at completion. TTL'd (7200s) as a self-cleaning
+  // backstop; eventual consistency is fine (mint->complete is minutes apart).
+  "kv_namespaces": [
+    { "binding": "RUNNER_JOB_PATS", "id": "4fb7e9c773d64f83ae3415c5a0879d66" }
+  ],
+
   // The Container Durable Object that owns the per-job runner container.
   "durable_objects": {
     "bindings": [
