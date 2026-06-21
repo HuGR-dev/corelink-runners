@@ -8,6 +8,7 @@
 // account before this is trusted. See README.md "Design notes / wrinkles".
 
 import { Container, getContainer } from "@cloudflare/containers";
+import { safeEqual, verifyGithubHmac, buildContainerEnv } from "./lib";
 
 export interface Env {
   RUNNER_CONTAINER: DurableObjectNamespace<RunnerContainer>;
@@ -84,17 +85,8 @@ function unauthorized(): Response {
   });
 }
 
-// Constant-time string compare (no early-exit on the first mismatch) so the
-// bearer-token check can't be timing-probed. Length is allowed to leak (the
-// token is fixed-length, high-entropy); the byte loop is constant-time.
-function safeEqual(a: string, b: string): boolean {
-  const ea = new TextEncoder().encode(a);
-  const eb = new TextEncoder().encode(b);
-  if (ea.length !== eb.length) return false;
-  let diff = 0;
-  for (let i = 0; i < ea.length; i++) diff |= ea[i] ^ eb[i];
-  return diff === 0;
-}
+// safeEqual / verifyGithubHmac / buildContainerEnv (+ the per-job CAS-PAT mint)
+// live in ./lib — pure, runtime-agnostic, unit-tested in test/index.test.ts.
 
 function authed(request: Request, env: Env): boolean {
   const tok = env.CLOUDFLARE_SPAWN_AUTH_TOKEN ?? "";
@@ -104,22 +96,6 @@ function authed(request: Request, env: Env): boolean {
 }
 
 // ── Autoscaler (POST /webhook) — GitHub workflow_job → mint JIT → spawn ──────
-
-// Verify GitHub's X-Hub-Signature-256 (HMAC-SHA256 of the raw body) in
-// constant time. Fail-closed on a missing/short/mismatched signature.
-async function verifyGithubHmac(secret: string, sig: string, body: string): Promise<boolean> {
-  if (!sig.startsWith("sha256=")) return false;
-  const key = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const mac = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body));
-  const hex = [...new Uint8Array(mac)].map((b) => b.toString(16).padStart(2, "0")).join("");
-  return safeEqual(`sha256=${hex}`, sig);
-}
 
 // Mint a one-shot JIT runner config for `repoFullName` via the GitHub API,
 // using GITHUB_MINT_TOKEN (repo Administration:write). Returns the encoded JIT.
@@ -148,47 +124,8 @@ async function mintJit(env: Env, repoFullName: string, label: string): Promise<s
   return j.encoded_jit_config;
 }
 
-// Spawn one runner container with the JIT injected (the shared spawn path).
-// Mint a per-job CAS PAT via D-9 (corelink-server). Scope cas:rw, tenant-scoped
-// (A6: per-job, never the tenant PAT). Throws on any failure — the caller falls
-// open to a COLD spawn (north star: cache absent ⇒ slow, never broken).
-async function mintCasPat(env: Env, jobId: string): Promise<string> {
-  const base = env.CORELINK_MINT_URL ?? "https://corelink-api.humangr.com";
-  const resp = await fetch(`${base}/internal/v1/runner/mint`, {
-    method: "POST",
-    headers: {
-      "x-corelink-internal-auth": env.CORELINK_PAT_MINT_AUTH_KEY ?? "",
-      "content-type": "application/json",
-      "user-agent": "corelink-spawn-worker",
-    },
-    body: JSON.stringify({ owner_tenant: env.CLW_TENANT, job_id: jobId, scope: "cas:rw" }),
-  });
-  if (!resp.ok) throw new Error(`D-9 mint ${resp.status}`);
-  const j = (await resp.json()) as { token?: string };
-  if (!j.token) throw new Error("D-9 mint: no token");
-  return j.token;
-}
-
-// Build the per-job container env: always the JIT; cache-warm CLW_* WHEN the
-// D-9 mint is configured AND succeeds. Any mint failure ⇒ cold env (fail-open).
-async function buildContainerEnv(env: Env, jit: string): Promise<Record<string, string>> {
-  const containerEnv: Record<string, string> = { CORELINK_RUNNER_JITCONFIG: jit };
-  if (env.CORELINK_PAT_MINT_AUTH_KEY && env.CLW_TENANT) {
-    try {
-      const casPat = await mintCasPat(env, crypto.randomUUID());
-      containerEnv.CLW_ENDPOINT = env.CLW_ENDPOINT ?? "https://corelink-api.humangr.com";
-      containerEnv.CLW_TENANT = env.CLW_TENANT;
-      containerEnv.CLW_TOKEN = casPat; // per-job; never logged
-      containerEnv.CLW_REF_DOMAIN = "runner";
-    } catch (e) {
-      // Fail-OPEN: spawn cold (no CLW_*). The entrypoint's cache-warm hook is
-      // also fail-open, so a job ALWAYS runs — slow, never broken.
-      console.log(`warm-mint failed, spawning COLD: ${(e as Error).message}`);
-    }
-  }
-  return containerEnv;
-}
-
+// Spawn one runner container with the JIT injected + cache-warm CLW_* (the
+// shared spawn path). `buildContainerEnv` (./lib) is fail-open to cold.
 async function spawnRunner(env: Env, jit: string): Promise<string> {
   const handle = crypto.randomUUID();
   const container = getContainer(env.RUNNER_CONTAINER, handle);
