@@ -27,8 +27,9 @@ export interface Env {
   GITHUB_MINT_TOKEN?: string;
   // Label a queued workflow_job must carry to be served (default corelink-dogfood).
   AUTOSCALER_LABEL?: string;
-  // Pinned runner image digest asserted on autoscaler spawns (the X4 floor shape).
-  AUTOSCALER_RUNNER_IMAGE?: string;
+  // Per-spawn rate limit (native CF binding) — caps the autoscaler blast radius
+  // if the webhook secret is ever leaked. Enforced when bound (see wrangler).
+  WEBHOOK_LIMITER?: RateLimit;
   // ── Warm moat (cache-warm) — mint a per-job CAS PAT (D-9) + inject CLW_* ──
   // D-9 internal-auth key (`x-corelink-internal-auth`). Worker secret. Absent ⇒
   // the runner spawns COLD (no cache-warm) — fail-open, north star.
@@ -163,6 +164,12 @@ export default {
       const labels = evt.workflow_job?.labels ?? [];
       if (evt.action !== "queued" || !labels.includes(label)) {
         return json({ ok: true, ignored: "not a queued job for our label" }, 200);
+      }
+      // Rate-limit real spawn attempts (defense-in-depth vs a leaked webhook
+      // secret). Ignored events above are free; only queued+labeled jobs count.
+      if (env.WEBHOOK_LIMITER) {
+        const { success } = await env.WEBHOOK_LIMITER.limit({ key: "spawn" });
+        if (!success) return json({ error: "rate limited" }, 429);
       }
       // The repo is the webhook's repository (full_name); fall back to the env.
       const repo =

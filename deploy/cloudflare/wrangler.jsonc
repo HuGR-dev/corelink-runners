@@ -1,6 +1,6 @@
 {
-  // CoreLink spawn-Worker + Container DO (ADR-0008). SKELETON — values marked
-  // <FILL-AT-DEPLOY> are set at the first real deploy against a live account.
+  // CoreLink spawn-Worker + Container DO (ADR-0008). LIVE — deployed to the
+  // gmhelmold CF account; autoscaler (/webhook) + /v1/* spawn surface in prod.
   "name": "corelink-spawn-worker",
   "main": "src/index.ts",
   "compatibility_date": "2026-06-01",
@@ -17,6 +17,11 @@
     "CLW_ENDPOINT": "https://corelink-api.humangr.com",
     "CORELINK_MINT_URL": "https://corelink-api.humangr.com"
   },
+  // Per-spawn rate limit on /webhook (defense-in-depth vs a leaked webhook
+  // secret): 30 queued+labeled spawns / 60s. Ignored events don't count.
+  "ratelimits": [
+    { "name": "WEBHOOK_LIMITER", "namespace_id": "1001", "simple": { "limit": 30, "period": 60 } }
+  ],
 
   // The Container Durable Object that owns the per-job runner container.
   "durable_objects": {
@@ -35,9 +40,8 @@
   "containers": [
     {
       "class_name": "RunnerContainer",
-      // STAGE B: the real runner image (GH-Actions agent + clw + Rust toolchain).
-      // Build context = deploy/runner (its entrypoint.sh + Dockerfile). Stage A
-      // used ./Dockerfile.smoke to prove the substrate; this is the real CI image.
+      // The real runner image (GH-Actions agent + clw + Rust toolchain).
+      // Build context = deploy/runner (its entrypoint.sh + Dockerfile).
       "image": "../runner/Dockerfile",
       // standard-4 = 4 vCPU / 12 GiB / 20 GB disk — fits CI, clears the runner
       // disk floor (RUNNER_EPHEMERAL_STORAGE_FLOOR_MB).

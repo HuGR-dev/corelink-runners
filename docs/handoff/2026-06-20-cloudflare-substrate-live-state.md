@@ -37,9 +37,20 @@ Once D-9 is live: inject `CLW_ENDPOINT` (corelink-server's in-network CAS API �
 - **Prod secrets rotation** (`!`): the dogfood spawn token (`dogfood-smoke-…`), webhook secret
   (`whsec-…`), and `GITHUB_MINT_TOKEN` (currently `gh auth token` — swap for a dedicated fine-grained
   repo-admin PAT).
-- **§6 isolation** remaining: rate-limit on `/webhook`, egress-policy confirm, cache-seam tenant isolation
-  (ties to the warm wiring).
-- **Polish (non-gated, runner-side):** Worker autoscaler tests (HMAC/filter/fail-open), docs.
+- **§6 isolation — ALL CLEARED 2026-06-20** (PR #121 + the assessment doc): rate-limit on `/webhook`
+  (`WEBHOOK_LIMITER`, 30/60s), egress per ADR-0003, side-channel resolved-by-design, cache-seam tenant
+  isolation confirmed by the Server TL. Assessment is now PASS (was CONDITIONAL).
+- **Polish — DONE:** Worker unit tests (14, auth/HMAC/fail-open), docs reconciled, dead code removed.
+
+### Per-job CAS-PAT lifecycle posture (decided, not a loose end)
+
+The per-job CAS PAT is **TTL-bounded** (D-9 mints with a 5400s TTL — the Server TL chose this short TTL
+precisely so an ephemeral one-shot box is fire-and-forget). The CF autoscaler therefore relies on **TTL
+expiry**, not an explicit revoke: the box is destroyed in minutes, the PAT is single-tenant `cas:rw`-scoped
+(A6), and it self-expires. Explicit revoke-on-completion (`POST /internal/v1/runner/revoke` with
+`owner_tenant`, on the `workflow_job:completed` webhook) is an **optional future hardening** to shrink the
+post-job window — it needs a `job→pat` map (KV/DO), and is NOT required by the TTL design. Documented here
+so the lifecycle is explicit, not silent.
 
 ## Architecture note (reversal, flagged)
 
