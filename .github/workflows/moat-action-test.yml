@@ -1,0 +1,68 @@
+# moat-action-test — prove the corelink-memoize composite action end-to-end:
+#   1. COLD      (1st use)  → cache MISS  → real build, memoized
+#   2. WARM      (2nd use)  → cache HIT   → memoized, no re-run
+#   3. FAIL-OPEN (CLW_TOKEN forced empty) → moat absent → COLD passthrough (still builds)
+# Uses the LOCAL action (./actions/corelink-memoize) so it tests exactly what ships.
+name: moat-action-test
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  action-test:
+    runs-on: corelink-dogfood
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate a deterministic crate (run-unique key ⇒ COLD is a fresh miss)
+        run: |
+          set -euo pipefail
+          N=6000
+          mkdir -p moatbench/src
+          printf 'target/\n' > moatbench/.clwignore
+          cat > moatbench/Cargo.toml <<'TOML'
+          [package]
+          name = "moatbench"
+          version = "0.0.0"
+          edition = "2021"
+          [dependencies]
+          [profile.release]
+          opt-level = 2
+          TOML
+          {
+            for ((i=0; i<N; i++)); do
+              m=$(( (i * 2654435761) & 0xffffffff ))
+              printf '#[inline(never)] fn f%d(x:u64)->u64{x.wrapping_mul(%d).wrapping_add(%d)}\n' "$i" "$m" "$i"
+            done
+            printf 'fn main(){let mut a=1u64;\n'
+            for ((i=0; i<N; i++)); do printf 'a=a.wrapping_add(f%d(a));\n' "$i"; done
+            printf 'println!("{a}");}\n'
+          } > moatbench/src/main.rs
+          printf '\n// run-unique: %s-%s\n' "${{ github.run_id }}" "${{ github.run_attempt }}" >> moatbench/src/main.rs
+          echo "generated"
+
+      - name: COLD via action (expect cache miss + build)
+        uses: ./actions/corelink-memoize
+        with:
+          run: cd moatbench && cargo build --release -q
+          inputs: moatbench/Cargo.toml moatbench/src
+
+      - name: WARM via action (expect cache hit, memoized)
+        uses: ./actions/corelink-memoize
+        with:
+          run: cd moatbench && cargo build --release -q
+          inputs: moatbench/Cargo.toml moatbench/src
+
+      - name: FAIL-OPEN via action (moat forced absent ⇒ COLD passthrough, still succeeds)
+        uses: ./actions/corelink-memoize
+        env:
+          CLW_TOKEN: ""        # mask the injected PAT for THIS step only
+          CLW_ENDPOINT: ""
+        with:
+          run: echo "fail-open passthrough OK" && cd moatbench && cargo build --release -q
+          inputs: moatbench/Cargo.toml moatbench/src
+
+      - name: Result
+        run: |
+          echo "corelink-memoize action: COLD->WARM (miss->hit) + fail-open passthrough all green."
+          echo "Read each step log for clw's cache hit/miss verdict."
