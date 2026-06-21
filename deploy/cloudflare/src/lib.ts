@@ -4,7 +4,10 @@
 
 /** The subset of Env the warm-mint path reads. */
 export interface MintEnv {
-  CORELINK_PAT_MINT_AUTH_KEY?: string;
+  // The dedicated `runner_mint` consumer key (Server TL, key-split 2026-06-21): gates
+  // ONLY /internal/v1/runner/{mint,revoke} — never signup-mint, erase, or admin (A6,
+  // one notch tighter than pat_mint). Sent as `x-corelink-internal-auth` on both calls.
+  CORELINK_RUNNER_MINT_AUTH_KEY?: string;
   CORELINK_MINT_URL?: string;
   CLW_ENDPOINT?: string;
   CLW_TENANT?: string;
@@ -46,7 +49,7 @@ async function mintCasPat(env: MintEnv, jobId: string): Promise<string> {
   const resp = await fetch(`${base}/internal/v1/runner/mint`, {
     method: "POST",
     headers: {
-      "x-corelink-internal-auth": env.CORELINK_PAT_MINT_AUTH_KEY ?? "",
+      "x-corelink-internal-auth": env.CORELINK_RUNNER_MINT_AUTH_KEY ?? "",
       "content-type": "application/json",
       "user-agent": "corelink-spawn-worker",
     },
@@ -70,7 +73,7 @@ async function revokeCasPat(env: MintEnv, jobId: string): Promise<void> {
   const resp = await fetch(`${base}/internal/v1/runner/revoke`, {
     method: "POST",
     headers: {
-      "x-corelink-internal-auth": env.CORELINK_PAT_MINT_AUTH_KEY ?? "",
+      "x-corelink-internal-auth": env.CORELINK_RUNNER_MINT_AUTH_KEY ?? "",
       "content-type": "application/json",
       "user-agent": "corelink-spawn-worker",
     },
@@ -84,7 +87,7 @@ async function revokeCasPat(env: MintEnv, jobId: string): Promise<void> {
 // any error is swallowed (TTL expiry is the backstop) — never breaks a job or
 // the webhook response. Returns true iff a revoke was actually issued+ack'd.
 export async function maybeRevokeCasPat(env: MintEnv, jobId: string): Promise<boolean> {
-  if (!env.CORELINK_PAT_MINT_AUTH_KEY || !env.CLW_TENANT) return false;
+  if (!env.CORELINK_RUNNER_MINT_AUTH_KEY || !env.CLW_TENANT) return false;
   try {
     await revokeCasPat(env, jobId);
     return true;
@@ -104,7 +107,7 @@ export async function buildContainerEnv(
   jobId: string,
 ): Promise<Record<string, string>> {
   const containerEnv: Record<string, string> = { CORELINK_RUNNER_JITCONFIG: jit };
-  if (env.CORELINK_PAT_MINT_AUTH_KEY && env.CLW_TENANT) {
+  if (env.CORELINK_RUNNER_MINT_AUTH_KEY && env.CLW_TENANT) {
     try {
       const casPat = await mintCasPat(env, jobId);
       containerEnv.CLW_ENDPOINT = env.CLW_ENDPOINT ?? "https://corelink-api.humangr.com";

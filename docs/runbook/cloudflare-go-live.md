@@ -31,7 +31,7 @@
   ping → HTTP 200).
 
 **THE ONE REMAINING GATE — the WARM moat:**
-- `CORELINK_PAT_MINT_AUTH_KEY` is **NOT set** (confirm: `npx wrangler secret list` shows only the 3 above).
+- `CORELINK_RUNNER_MINT_AUTH_KEY` is **NOT set** (confirm: `npx wrangler secret list` shows only the 3 above).
   Until it is, every spawn is COLD-but-correct. Setting it (§2) is what flips the moat WARM.
 - It is **server-gated** (LOCKED 2026-06-20, not "one paste"): the Server TL must first split the prod
   internal-auth key per-consumer (the shared key also authenticates `admin`+`erase` — must NOT reach an
@@ -46,7 +46,7 @@ GitHub workflow_job:queued (label corelink-dogfood)
         ├─ verify X-Hub-Signature-256 (GITHUB_WEBHOOK_SECRET)
         ├─ rate-limit (WEBHOOK_LIMITER 30/60s)
         ├─ mint JIT (generate-jitconfig, GITHUB_MINT_TOKEN)
-        ├─ buildContainerEnv: IF CORELINK_PAT_MINT_AUTH_KEY+CLW_TENANT present →
+        ├─ buildContainerEnv: IF CORELINK_RUNNER_MINT_AUTH_KEY+CLW_TENANT present →
         │     mint per-job CAS PAT (D-9, job_id = workflow_job.id) → inject CLW_*  [WARM]
         │     ELSE → JIT only                                                      [COLD, fail-open]
         └─ container.start(digest-pinned image, env)  → Firecracker microVM runner
@@ -58,7 +58,7 @@ Non-secret config lives in `deploy/cloudflare/wrangler.jsonc` `vars`
 ## 2. THE WARM FLIP — drop-day procedure (the only step left)
 
 > Trigger: the Server TL pings the owner that signup-worker is migrated and the dedicated
-> **mint-only** `CORELINK_PAT_MINT_AUTH_KEY` is delivered OOB. Total time: ~5 min.
+> **mint-only** `CORELINK_RUNNER_MINT_AUTH_KEY` is delivered OOB. Total time: ~5 min.
 
 ### 2.0 Pre-flight (do NOT skip)
 - [ ] Server TL confirms the delivered key is the **dedicated `pat_mint` consumer key**, NOT the shared
@@ -75,8 +75,8 @@ Non-secret config lives in `deploy/cloudflare/wrangler.jsonc` `vars`
 ```sh
 cd deploy/cloudflare
 # SAFEST — pipe byte-exact from the OOB file (command-sub strips trailing newlines, printf adds none):
-printf '%s' "$(cat ~/Downloads/corelink-mint-key.txt)" | npx wrangler secret put CORELINK_PAT_MINT_AUTH_KEY
-# (Interactive `npx wrangler secret put CORELINK_PAT_MINT_AUTH_KEY` also works, but paste with NO
+printf '%s' "$(cat ~/corelink-runner-mint-key.txt)" | npx wrangler secret put CORELINK_RUNNER_MINT_AUTH_KEY
+# (Interactive `npx wrangler secret put CORELINK_RUNNER_MINT_AUTH_KEY` also works, but paste with NO
 #  trailing newline/space — the piped form removes that risk entirely.)
 npx wrangler secret list                              # confirm 4 secrets now
 ```
@@ -101,7 +101,7 @@ gh workflow run dogfood-smoke.yml --repo HumanGuardrail/corelink-runners   # she
 ### 2.3 Rollback (instant, zero-downtime)
 If anything looks wrong, the moat disarms in one command — back to COLD-but-correct (fail-open):
 ```sh
-npx wrangler secret delete CORELINK_PAT_MINT_AUTH_KEY
+npx wrangler secret delete CORELINK_RUNNER_MINT_AUTH_KEY
 ```
 `buildContainerEnv` no longer mints/injects `CLW_*` → spawns cold. A job still ALWAYS runs. No redeploy.
 
@@ -112,7 +112,7 @@ npx wrangler secret delete CORELINK_PAT_MINT_AUTH_KEY
 | `CLOUDFLARE_SPAWN_AUTH_TOKEN` | bearer for `/v1/*` (fabric path) | set (rotated 2026-06-20) | `openssl rand -hex 32 \| npx wrangler secret put …` |
 | `GITHUB_WEBHOOK_SECRET` | `/webhook` HMAC | set (rotated+ping-verified) | rotate on BOTH sides — Worker + hook 644667520; **use canonical repo `HumanGuardrail/corelink-runners`** (`humangr-labs` 307s and `gh api -X PATCH` silently no-ops) |
 | `GITHUB_MINT_TOKEN` | mint JIT (`generate-jitconfig`) | set (dogfood `gh auth token`) | swap for a dedicated fine-grained PAT (repo Administration:write) — **UI-only**, before non-dogfood |
-| `CORELINK_PAT_MINT_AUTH_KEY` | D-9 mint/revoke (`x-corelink-internal-auth`) | **NOT set** — the warm gate (§2) | a 401 on mint = drift signal → re-`put` the new value (no code change) |
+| `CORELINK_RUNNER_MINT_AUTH_KEY` | D-9 mint/revoke (`x-corelink-internal-auth`) | **NOT set** — the warm gate (§2) | a 401 on mint = drift signal → re-`put` the new value (no code change) |
 
 ## 4. Fail-open guarantee (why the flip is low-risk)
 

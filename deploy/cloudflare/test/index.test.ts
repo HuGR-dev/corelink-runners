@@ -71,7 +71,7 @@ describe("buildContainerEnv (warm-mint, FAIL-OPEN to cold)", () => {
   });
 
   it("COLD when no tenant configured", async () => {
-    const env = { CORELINK_PAT_MINT_AUTH_KEY: "k" } as never; // tenant absent
+    const env = { CORELINK_RUNNER_MINT_AUTH_KEY: "k" } as never; // tenant absent
     const e = await buildContainerEnv(env, JIT, JOB);
     expect(e.CLW_TOKEN).toBeUndefined();
   });
@@ -82,7 +82,7 @@ describe("buildContainerEnv (warm-mint, FAIL-OPEN to cold)", () => {
       vi.fn(async () => new Response(JSON.stringify({ token: "per-job-pat" }), { status: 200 })),
     );
     const env = {
-      CORELINK_PAT_MINT_AUTH_KEY: "k",
+      CORELINK_RUNNER_MINT_AUTH_KEY: "k",
       CLW_TENANT: "ee30f7ba",
       CLW_ENDPOINT: "https://corelink-api.humangr.com",
       CORELINK_MINT_URL: "https://corelink-api.humangr.com",
@@ -100,7 +100,7 @@ describe("buildContainerEnv (warm-mint, FAIL-OPEN to cold)", () => {
       async () => new Response(JSON.stringify({ token: "per-job-pat" }), { status: 200 }),
     );
     vi.stubGlobal("fetch", fetchMock);
-    const env = { CORELINK_PAT_MINT_AUTH_KEY: "k", CLW_TENANT: "ee30f7ba" } as never;
+    const env = { CORELINK_RUNNER_MINT_AUTH_KEY: "k", CLW_TENANT: "ee30f7ba" } as never;
     await buildContainerEnv(env, JIT, JOB);
     const [url, init] = fetchMock.mock.calls[0];
     expect(String(url)).toContain("/internal/v1/runner/mint");
@@ -109,7 +109,7 @@ describe("buildContainerEnv (warm-mint, FAIL-OPEN to cold)", () => {
 
   it("FAIL-OPEN to COLD when the D-9 mint returns non-2xx", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 500 })));
-    const env = { CORELINK_PAT_MINT_AUTH_KEY: "k", CLW_TENANT: "ee30f7ba" } as never;
+    const env = { CORELINK_RUNNER_MINT_AUTH_KEY: "k", CLW_TENANT: "ee30f7ba" } as never;
     const e = await buildContainerEnv(env, JIT, JOB);
     expect(e.CORELINK_RUNNER_JITCONFIG).toBe(JIT); // job still runs
     expect(e.CLW_TOKEN).toBeUndefined(); // but cold — no CLW_*
@@ -117,7 +117,7 @@ describe("buildContainerEnv (warm-mint, FAIL-OPEN to cold)", () => {
 
   it("FAIL-OPEN to COLD when the mint response has no token", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({}), { status: 200 })));
-    const env = { CORELINK_PAT_MINT_AUTH_KEY: "k", CLW_TENANT: "ee30f7ba" } as never;
+    const env = { CORELINK_RUNNER_MINT_AUTH_KEY: "k", CLW_TENANT: "ee30f7ba" } as never;
     const e = await buildContainerEnv(env, JIT, JOB);
     expect(e.CLW_TOKEN).toBeUndefined();
   });
@@ -139,7 +139,7 @@ describe("maybeRevokeCasPat (completion hardening, FAIL-OPEN)", () => {
   it("no-op (false) when the tenant is absent", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
-    const env = { CORELINK_PAT_MINT_AUTH_KEY: "k" } as never;
+    const env = { CORELINK_RUNNER_MINT_AUTH_KEY: "k" } as never;
     expect(await maybeRevokeCasPat(env, JOB)).toBe(false);
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -148,7 +148,7 @@ describe("maybeRevokeCasPat (completion hardening, FAIL-OPEN)", () => {
     const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetchMock);
     const env = {
-      CORELINK_PAT_MINT_AUTH_KEY: "k",
+      CORELINK_RUNNER_MINT_AUTH_KEY: "k",
       CLW_TENANT: "ee30f7ba",
       CORELINK_MINT_URL: "https://corelink-api.humangr.com",
     } as never;
@@ -163,7 +163,7 @@ describe("maybeRevokeCasPat (completion hardening, FAIL-OPEN)", () => {
 
   it("FAIL-OPEN (false, swallowed) when revoke returns non-2xx", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 500 })));
-    const env = { CORELINK_PAT_MINT_AUTH_KEY: "k", CLW_TENANT: "ee30f7ba" } as never;
+    const env = { CORELINK_RUNNER_MINT_AUTH_KEY: "k", CLW_TENANT: "ee30f7ba" } as never;
     expect(await maybeRevokeCasPat(env, JOB)).toBe(false); // never throws
   });
 
@@ -171,7 +171,7 @@ describe("maybeRevokeCasPat (completion hardening, FAIL-OPEN)", () => {
     vi.stubGlobal("fetch", vi.fn(async () => {
       throw new Error("network down");
     }));
-    const env = { CORELINK_PAT_MINT_AUTH_KEY: "k", CLW_TENANT: "ee30f7ba" } as never;
+    const env = { CORELINK_RUNNER_MINT_AUTH_KEY: "k", CLW_TENANT: "ee30f7ba" } as never;
     expect(await maybeRevokeCasPat(env, JOB)).toBe(false);
   });
 });

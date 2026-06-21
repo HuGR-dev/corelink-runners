@@ -9,7 +9,7 @@
   // Container here reads the cache IN-NETWORK (the ADR-0008 moat win).
   "account_id": "6a1fc1c626fc2628823e60b9db01f5cd",
   // Warm-moat (cache-warm) non-secret config. The per-job CAS PAT is minted via
-  // D-9 only when CORELINK_PAT_MINT_AUTH_KEY (a Worker SECRET, set by the owner
+  // D-9 only when CORELINK_RUNNER_MINT_AUTH_KEY (a Worker SECRET, set by the owner
   // once the Server TL delivers it) is ALSO present — else the runner spawns
   // COLD (fail-open). CLW_TENANT = the dogfood owner tenant (ee30f7ba).
   "vars": {
