@@ -69,9 +69,15 @@ Non-secret config lives in `deploy/cloudflare/wrangler.jsonc` `vars`
 - [ ] The key value is on the owner's machine in a chmod-600 file, never in chat/PR/repo.
 
 ### 2.1 Set the secret
+> ⚠️ **NO TRAILING NEWLINE.** A newline (or any whitespace) in an internal-auth key **silently 401s**
+> the mint — the value must be byte-exact (Server TL, learned the hard way). Prefer piping with
+> `printf` from the chmod-600 file; never `echo`/`cat` (both append a newline).
 ```sh
 cd deploy/cloudflare
-npx wrangler secret put CORELINK_PAT_MINT_AUTH_KEY   # paste the OOB value (never echoed)
+# SAFEST — pipe byte-exact from the OOB file (command-sub strips trailing newlines, printf adds none):
+printf '%s' "$(cat ~/Downloads/corelink-mint-key.txt)" | npx wrangler secret put CORELINK_PAT_MINT_AUTH_KEY
+# (Interactive `npx wrangler secret put CORELINK_PAT_MINT_AUTH_KEY` also works, but paste with NO
+#  trailing newline/space — the piped form removes that risk entirely.)
 npx wrangler secret list                              # confirm 4 secrets now
 ```
 No redeploy needed — Worker secrets are read live.
