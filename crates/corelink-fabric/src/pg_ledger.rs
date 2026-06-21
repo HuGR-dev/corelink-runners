@@ -177,6 +177,37 @@ CREATE TABLE IF NOT EXISTS compute_accrual (
   PRIMARY KEY (tenant, period_key));
 ";
 
+// -- M1 WAVE-0 frozen anchor (tenant_plans) ---------------------------------
+// The durable cap source of truth for the M1 multi-tenant control plane
+// (`TenantPlan`, org = tenant per ADR-0002). Declared HERE, alongside the
+// ledger DDL, so the schema lives in one place and the PgTenantPlanRepository
+// impl (WP-PERSIST) applies it the same way `connect` applies `DDL` above —
+// `IF NOT EXISTS`, idempotent, fail-closed. WAVE-0 ONLY freezes the table; it
+// is intentionally NOT applied by `connect` yet (default-off — no behavior
+// change). WP-PERSIST fills `crate::tenant_plan_repo::TenantPlanRepository`
+// against these exact columns.
+//
+//   tenant               — the tenant key (org = tenant); PRIMARY KEY.
+//   tier                 — the plan-tier token (product §5 ladder; flat string,
+//                          same vocabulary as PlanTier — no DB derive on the type).
+//   max_concurrency      — the billable unit: max concurrently-held leases.
+//   rate_ceiling_per_min — acquire-request rate ceiling, enforced before load.
+//   ceiling_vcpu_ms      — the monthly vCPU-h hard ceiling (0 = disabled/unlimited;
+//                          matches the ComputeGate "0 = off" sentinel).
+//   created_at_ms / updated_at_ms — epoch-ms lifecycle stamps.
+#[allow(dead_code)] // M1 WAVE-0 frozen anchor — applied in WP-PERSIST.
+pub const TENANT_PLANS_DDL: &str = "\
+CREATE TABLE IF NOT EXISTS tenant_plans (
+  tenant               text   PRIMARY KEY,
+  tier                 text   NOT NULL,
+  max_concurrency      int    NOT NULL,
+  rate_ceiling_per_min int    NOT NULL,
+  ceiling_vcpu_ms      bigint NOT NULL DEFAULT 0,
+  created_at_ms        bigint NOT NULL,
+  updated_at_ms        bigint NOT NULL
+);
+";
+
 /// The `lease_state` enum label for a [`LeaseState`].
 ///
 /// Five flat tokens — identical vocabulary to the serde `rename_all` on

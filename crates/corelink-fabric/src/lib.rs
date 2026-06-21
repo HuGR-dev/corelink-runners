@@ -42,6 +42,8 @@
 
 pub mod billing;
 pub mod billing_sink;
+// M1 WAVE-0 frozen anchor — the Stripe/vendor billing export-target seam.
+pub mod billing_target;
 pub mod caps;
 pub mod compute_meter;
 pub mod interference;
@@ -51,20 +53,31 @@ mod ledger_conformance;
 pub mod lifecycle;
 pub mod meter;
 pub mod pg_ledger;
+// M1 WAVE-0 frozen anchor — cross-instance fair-admission queue row contract.
+pub mod pg_queue;
 pub mod plans;
 pub mod scheduler;
 pub mod tenant;
+// M1 WAVE-0 frozen anchor — tenant-lifecycle audit row contract.
+pub mod tenant_audit;
+// M1 WAVE-0 frozen anchor — the root tenant-plan persistence seam (WP-PERSIST).
+pub mod tenant_plan_repo;
 
 pub use billing::SlotMeter;
 pub use billing_sink::{BillingSink, ExportReport, Exporter, MemBillingSink, PgBillingSink};
+// M1 WAVE-0 frozen anchors (re-exported alongside their kin).
+pub use billing_target::{BillingExportTarget, NoopBillingTarget};
 pub use caps::{CapDecision, CapGate, RateWindow};
 pub use interference::{TenantWaitStats, WaitSnapshot};
 pub use ledger::{FileLedger, InMemoryLedger, LeaseLedger, LeaseRecord, LeaseState};
 pub use lifecycle::{BoxProbe, LeaseLifecycle};
 pub use meter::{CogsCounters, SlotEventKind, SlotOccupancyEvent};
 pub use pg_ledger::{PgLedger, PgTlsMode, pg_tls_mode_from_env};
+pub use pg_queue::{PG_ADMISSION_QUEUE_DDL, PendingAdmission};
 pub use plans::{PlanRegistry, PlanTier, plan_for};
 pub use scheduler::{
     FairScheduler, MAX_TENANT_QUEUE_DEPTH, TenantQueues, TickReport, WAIT_RING_CAPACITY, WorkItem,
 };
 pub use tenant::{TenantId, TenantPlan};
+pub use tenant_audit::{TENANT_AUDIT_DDL, TenantAuditRow};
+pub use tenant_plan_repo::{InMemTenantPlanRepo, TenantPlanRepository};
