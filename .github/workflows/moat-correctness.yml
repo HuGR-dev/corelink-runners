@@ -1,0 +1,72 @@
+# moat-correctness — prove clw run memoization is SOUND, not just fast.
+#
+# Speed is worthless if a HIT can serve a STALE result. This asserts the cache is
+# correctly INPUT-ADDRESSED:
+#   1. payload=A          → MISS, output "A"        (first run)
+#   2. payload=A (same)   → HIT,  output "A"        (correct reuse)
+#   3. payload=B (changed)→ MISS, output "B"        (NOT a stale "A" — the key bust)
+#   4. payload=A (again)  → HIT,  output "A"        (distinct entry intact)
+# Any stale hit (wrong output, or a HIT where a MISS is required) FAILS the job.
+# The command's stdout IS the payload, so a wrong replay is detectable directly.
+name: moat-correctness
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  correctness:
+    runs-on: corelink-dogfood
+    steps:
+      - name: Moat posture (must be WARM for a meaningful test)
+        run: |
+          if [ -z "${CLW_ENDPOINT:-}" ] || [ -z "${CLW_TOKEN:-}" ]; then
+            echo "::error::moat is COLD — correctness test needs the warm moat (CLW_*). Aborting."
+            exit 1
+          fi
+          clw --version
+
+      - name: Soundness assertions
+        run: |
+          set -uo pipefail
+          export CLW_REF_DOMAIN=runner
+          # run-unique workspace name so prior runs can't pollute these keys.
+          RU="${{ github.run_id }}-${{ github.run_attempt }}"
+          mkdir -p ws
+          fail=0
+
+          # memo <expected_payload> <expected_verdict hit|miss> : write nothing here;
+          # caller sets ws/payload.txt first. Runs `cat` through clw run, captures
+          # the (possibly replayed) stdout + clw's stderr verdict, asserts both.
+          memo() {
+            local exp_out="$1" exp_verdict="$2" label="$3"
+            local out verdict
+            out="$(clw run --input ws/payload.txt -- cat ws/payload.txt 2>clw.err)"
+            verdict="$(grep -ho 'cache hit\|cache miss' clw.err | head -1)"
+            echo "[$label] verdict='${verdict:-?}' out='${out}' (expect verdict=$exp_verdict out=$exp_out)"
+            if [ "$out" != "$exp_out" ]; then
+              echo "::error::[$label] STALE/WRONG OUTPUT: got '$out', expected '$exp_out'"; fail=1
+            fi
+            if [ "${verdict:-}" != "cache $exp_verdict" ]; then
+              echo "::error::[$label] WRONG VERDICT: got '${verdict:-none}', expected 'cache $exp_verdict'"; fail=1
+            fi
+          }
+
+          # The cache key folds in the input file CONTENT. Make A/B globally unique
+          # to this run so step 1 is a guaranteed first MISS.
+          A="A-${RU}"; B="B-${RU}"
+
+          printf '%s' "$A" > ws/payload.txt
+          memo "$A" miss "1: A first"
+          memo "$A" hit  "2: A again (correct reuse)"
+
+          printf '%s' "$B" > ws/payload.txt
+          memo "$B" miss "3: B changed (key MUST bust — no stale A)"
+
+          printf '%s' "$A" > ws/payload.txt
+          memo "$A" hit  "4: A again (distinct entry intact)"
+
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::moat correctness FAILED — memoization is NOT sound."
+            exit 1
+          fi
+          echo "✅ moat correctness PASSED: input-addressed, no stale hits, keys bust on change."
