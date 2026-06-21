@@ -22,6 +22,14 @@ inputs:
     description: "Env var NAMES (space-separated) to fold into the cache key (repeated `--env`)."
     required: false
     default: ""
+  tool:
+    description: >-
+      Toolchains (space-separated) whose VERSION is auto-folded into the cache key
+      so an upgrade correctly busts the cache (no stale build). Supported:
+      rust · node · python · go. SAFETY-BY-DEFAULT: prefer this over hand-folding
+      the compiler version via `env`. Unknown names are warned + ignored.
+    required: false
+    default: ""
 
 runs:
   using: "composite"
@@ -31,6 +39,7 @@ runs:
         CL_RUN: ${{ inputs.run }}
         CL_INPUTS: ${{ inputs.inputs }}
         CL_ENVNAMES: ${{ inputs.env }}
+        CL_TOOLS: ${{ inputs.tool }}
       run: |
         set +e   # we manage exit codes explicitly (north-star fail-open)
 
@@ -38,6 +47,26 @@ runs:
         # with spaces are out of scope for v0).
         input_args=(); for p in $CL_INPUTS; do input_args+=(--input "$p"); done
         env_args=();   for e in $CL_ENVNAMES; do env_args+=(--env "$e"); done
+
+        # Auto-fold toolchain versions into the key (safety-by-default): capture each
+        # tool's version and add it via a folded env var, so a toolchain upgrade busts
+        # the cache. Correctness of "version change ⇒ MISS" is the proven --env path
+        # (moat-correctness #5). A tool that's absent contributes empty (still safe).
+        if [ -n "${CL_TOOLS:-}" ]; then
+          tv=""
+          for t in $CL_TOOLS; do
+            case "$t" in
+              rust)   tv="${tv}|rust=$(rustc --version 2>/dev/null)";;
+              node)   tv="${tv}|node=$(node --version 2>/dev/null)";;
+              python) tv="${tv}|python=$(python3 --version 2>/dev/null)";;
+              go)     tv="${tv}|go=$(go version 2>/dev/null)";;
+              *)      echo "::warning title=corelink-memoize::unknown tool '$t' (ignored)";;
+            esac
+          done
+          export __CL_TOOLVERS="$tv"
+          env_args+=(--env __CL_TOOLVERS)
+          echo "corelink-memoize: toolchain folded into key →$tv"
+        fi
 
         run_cold() { bash -c "$CL_RUN"; }
 
