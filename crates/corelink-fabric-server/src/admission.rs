@@ -43,6 +43,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::response::Response;
+use corelink_fabric::pg_queue::PgAdmissionQueue;
 use corelink_fabric::{FairScheduler, LeaseRecord, LeaseState, SlotEventKind, TenantId, WorkItem};
 use corelink_fabric_api::{AcquireRequest, ApiError};
 use corelink_runner::lease::ContainerSpec;
@@ -255,6 +256,21 @@ pub struct AdmissionQueue {
     park_permits: Mutex<HashMap<TenantId, Arc<Semaphore>>>,
     /// Per-tenant parked-waiter budget ([`DEFAULT_ADMISSION_PARK_CAP`]).
     park_cap: usize,
+    /// DURABLE cross-instance fair queue (WP-CROSS-INSTANCE-QUEUE). **DEFAULT
+    /// `None`** — without it the in-memory [`FairScheduler`] above is the sole
+    /// fair-order source (today's per-instance behavior, BYTE-IDENTICAL). When
+    /// `Some` (the composition root wired a Postgres backend via
+    /// [`AdmissionQueue::with_durable_queue`]), the deficit-ordered fair queue is
+    /// shared across instances in Postgres, so two control planes pull from ONE
+    /// fair queue instead of two independent ones.
+    ///
+    /// The per-instance `scheduler`/`waiters`/`park_permits` are STILL used in
+    /// durable mode: the scheduler holds the local FIFO WorkItems and the waiters
+    /// hold the (inherently per-instance) oneshot wakers + deferred contexts. The
+    /// durable queue governs only the cross-instance fair ORDER + deficit
+    /// accounting; each instance still finalizes only its OWN local waiters
+    /// (see [`PgAdmissionQueue::dequeue_next_local`]).
+    durable: Option<Arc<PgAdmissionQueue>>,
 }
 
 impl AdmissionQueue {
@@ -271,7 +287,20 @@ impl AdmissionQueue {
             waiters: Mutex::new(HashMap::new()),
             park_permits: Mutex::new(HashMap::new()),
             park_cap: DEFAULT_ADMISSION_PARK_CAP,
+            durable: None,
         }
+    }
+
+    /// Attach a DURABLE cross-instance fair queue (WP-CROSS-INSTANCE-QUEUE) —
+    /// the WIRING STUB the composition root calls when a Postgres backend is
+    /// configured. DEFAULT-OFF: never calling this keeps `durable: None` and the
+    /// in-memory [`FairScheduler`] as the sole fair-order source (today's
+    /// per-instance behavior, byte-identical). With it, the deficit-ordered fair
+    /// queue is shared across instances in Postgres.
+    #[must_use]
+    pub fn with_durable_queue(mut self, durable: Arc<PgAdmissionQueue>) -> Self {
+        self.durable = Some(durable);
+        self
     }
 
     /// Override the per-tenant parked-waiter cap (P1 cross-tenant load-shed
@@ -493,6 +522,35 @@ pub(crate) async fn acquire_queued(
                 "admission queue full for tenant: shed (try again shortly)",
             );
         }
+        drop(sched);
+
+        // ── DURABLE cross-instance fair queue (WP-CROSS-INSTANCE-QUEUE).
+        // DEFAULT-OFF: `durable` is `None` unless the composition root wired a
+        // Postgres backend, so this block is skipped entirely and the path above
+        // is byte-identical to today (the in-memory FairScheduler is the sole
+        // fair-order source). When wired, ALSO insert a durable row stamped with
+        // this tenant's GLOBAL deficit — that is what makes the fair order shared
+        // across instances. The local scheduler FIFO + waiter context are still
+        // needed (the oneshot waker is inherently per-instance), but the durable
+        // row is what the tick consults for the cross-instance fair ORDER. A
+        // durable-enqueue failure SHEDS fail-closed (drop the local context +
+        // FIFO entry), never a silent over-admit or unbounded growth.
+        if let Some(durable) = queue.durable.as_ref() {
+            // `now_ms` fits i64 for ~292M years; the durable row carries it as
+            // the FIFO tiebreaker within a deficit tier.
+            if durable.enqueue(&tenant, &lease_id, now_ms as i64).is_err() {
+                queue
+                    .waiters
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&lease_id);
+                evict_waiter(queue, &lease_id);
+                return error_response(
+                    ApiError::FailClosed,
+                    "durable admission queue refused the enqueue: shed (try again shortly)",
+                );
+            }
+        }
     }
 
     // ── Bounded async wait. The loop fulfills `waker` with the response, or the
@@ -535,6 +593,16 @@ fn evict_waiter(queue: &AdmissionQueue, lease_id: &str) {
         .remove(lease_id);
     // The WorkItem may still sit in the scheduler FIFO; the dispatch closure
     // treats a missing waiter context as "already gone" and does not reserve.
+    //
+    // DURABLE (WP-CROSS-INSTANCE-QUEUE): if the waiter timed out / gave up while
+    // its durable row was still PENDING (never selected), drop that row too so a
+    // later tick on ANY instance never claims a fair slot for a request nobody
+    // owns — without advancing the deficit (no win occurred). Default-off: no-op
+    // when `durable` is `None`. Best-effort (a row already consumed at selection
+    // is simply not present → `Ok(false)`).
+    if let Some(durable) = queue.durable.as_ref() {
+        let _ = durable.remove(lease_id);
+    }
 }
 
 /// Roll back a dispatched-but-UNCLAIMED lease so it leaks NOTHING — the seam the
@@ -689,6 +757,61 @@ pub async fn run_admission_tick(state: &AppState, now_ms: u64) -> usize {
         sched.tick(now_ms, cap_check, dispatch)
     };
 
+    // ── 1a. DURABLE cross-instance fair ORDER (WP-CROSS-INSTANCE-QUEUE).
+    // DEFAULT-OFF: `durable` is `None` unless the composition root wired a
+    // Postgres backend, so `candidates` keeps the per-instance scheduler's order
+    // above — BYTE-IDENTICAL to today. When wired, the per-instance scheduler
+    // tick above still drained the local FIFO and built `report` (for the
+    // wait-stats bookkeeping), but the DISPATCH ORDER must be the GLOBAL fair
+    // order, not this instance's local one. We re-derive it from Postgres:
+    // `dequeue_next_local` claims (FOR UPDATE SKIP LOCKED + delete) the fair head
+    // among THIS instance's selected ids, repeatedly, so `candidates` is rebuilt
+    // in the cross-instance `(deficit, enqueued_at_ms)` order. Claiming the
+    // durable row HERE (at selection) also consumes the cross-instance queue slot
+    // exactly once; a candidate whose durable row is NOT claimable (already served
+    // / removed elsewhere / not the fair head among locals this pass) is dropped
+    // from this tick and retried next tick (it stays in the local FIFO via the
+    // re-enqueue path below only if it lost a later cap race — a row already
+    // consumed durably is simply not re-selected). Fail-closed: a durable error
+    // drops the candidate (never a silent over-admit); its waiter's bounded wait
+    // eventually 503s it.
+    let candidates = if let Some(durable) = queue.durable.as_ref() {
+        // Only candidates that carry a live local waiter context can be served by
+        // THIS instance (the oneshot waker is local). Claim them from Postgres in
+        // the global fair order, one per `dequeue_next_local` call.
+        let local_ids: Vec<String> = candidates
+            .iter()
+            .filter(|c| c.pending.is_some())
+            .map(|c| c.item.id.clone())
+            .collect();
+        // Index the scheduler-selected candidates by id so we can rebuild them in
+        // the durable fair order without re-snapshotting the waiters.
+        let mut by_id: HashMap<String, Candidate> = candidates
+            .into_iter()
+            .map(|c| (c.item.id.clone(), c))
+            .collect();
+        let mut fair: Vec<Candidate> = Vec::with_capacity(by_id.len());
+        // Claim at most the per-instance selection size (already ≤ tick_slots).
+        for _ in 0..local_ids.len() {
+            match durable.dequeue_next_local(&local_ids) {
+                Ok(Some(claimed)) => {
+                    if let Some(cand) = by_id.remove(&claimed.lease_request_id) {
+                        fair.push(cand);
+                    }
+                    // A claimed id with no local candidate is impossible (we
+                    // scoped to local_ids), so nothing to do otherwise.
+                }
+                // Queue empty for our locals this pass, or a transient error:
+                // stop claiming. Anything left in `by_id` is simply not dispatched
+                // this tick (its durable row, if any, stays for a later tick).
+                Ok(None) | Err(_) => break,
+            }
+        }
+        fair
+    } else {
+        candidates
+    };
+
     // ── 1b. AUTHORITATIVE reservation, OUTSIDE the scheduler lock (§ INFO fix).
     // For each fairly-selected candidate, run the single atomic admit cap gate —
     // `try_admit_with_compute` with the SAME `ComputeGate` the immediate path
@@ -759,6 +882,17 @@ pub async fn run_admission_tick(state: &AppState, now_ms: u64) -> usize {
         };
         match outcome {
             Ok(corelink_fabric::ledger::AdmitOutcome::Admitted) => {
+                // DURABLE (WP-CROSS-INSTANCE-QUEUE): a genuine WIN advances the
+                // tenant's cross-instance deficit, so its NEXT enqueue is stamped
+                // a higher tier and an owed tenant's rows dequeue ahead of it on
+                // EVERY instance. Default-off: no-op when `durable` is `None`. The
+                // durable row was already claimed/deleted at selection (step 1a),
+                // so this only bumps the counter. Best-effort: a counter-bump
+                // error degrades fairness for one win, never correctness (the cap
+                // is already authoritatively enforced by `try_admit`).
+                if let Some(durable) = queue.durable.as_ref() {
+                    let _ = durable.admit(&cand.item.tenant);
+                }
                 to_finalize.push(cand.item.id.clone());
                 continue;
             }
@@ -793,6 +927,22 @@ pub async fn run_admission_tick(state: &AppState, now_ms: u64) -> usize {
             // tick. (Best-effort: an enqueue rejected at the per-tenant bound is
             // dropped — the waiter's own bounded wait then 503s it, never a
             // silent over-admit.)
+            //
+            // DURABLE (WP-CROSS-INSTANCE-QUEUE): the durable row was claimed (and
+            // DELETED) at selection (step 1a), so a cap-race loser must be
+            // RE-INSERTED durably with its ORIGINAL `enqueued_at_ms` (the WorkItem
+            // carries it) — NOT a fresh stamp — so it keeps its place in the
+            // global fair tier and is re-selected next tick. The deficit is NOT
+            // bumped (it never won). Default-off: no durable side effect when
+            // `durable` is `None`. A re-enqueue error drops it; the waiter's
+            // bounded wait then 503s it (never a silent over-admit).
+            if let Some(durable) = queue.durable.as_ref() {
+                let _ = durable.enqueue(
+                    &cand.item.tenant,
+                    &cand.item.id,
+                    cand.item.enqueued_at_ms as i64,
+                );
+            }
             let mut sched = queue.scheduler.lock().unwrap_or_else(|e| e.into_inner());
             let _ = sched.enqueue(cand.item);
         }
