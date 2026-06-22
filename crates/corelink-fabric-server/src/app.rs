@@ -1256,6 +1256,9 @@ pub fn app_full(
     let authenticated = Router::new()
         .route(paths::USAGE, get(handlers::usage::usage))
         .route(paths::METRICS_TENANT, get(handlers::metrics::tenant_wait))
+        // M1 WAVE-1 self-serve customer dashboard read surface (tenant-scoped via Extension<TenantId>).
+        .route(paths::USAGE_HISTORY, get(handlers::usage_history::handler))
+        .route(paths::LEASES_LIST, get(handlers::lease_list::handler))
         .route(paths::LEASES, post(handlers::leases::acquire))
         .route(&capture(paths::LEASE_BY_ID), get(handlers::leases::status))
         .route(
