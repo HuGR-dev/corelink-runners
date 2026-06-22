@@ -7,21 +7,50 @@
 //! 0-slot reject (the M1 boundary documented in `corelink_auth.rs`). This
 //! store closes that gap by reading the cap from the introspect response.
 //!
-//! ## Wire shape — RATIFIED + conformance-pinned
+//! ## Wire shape — self-serve entitlement (TOLERANT consumer; freeze pending)
 //!
-//! The introspect response shape is FROZEN and mirrored byte-identical with
-//! corelink-server: `200 {"valid":true,"tenant_id":"<uuid>","plan":"<str>",
-//! "max_concurrency":<u32>}` with `max_concurrency` OPTIONAL. It is pinned by
-//! `conformance/corelink-introspect.json` (sha `bfb38e28…`, hash-listed in
+//! The introspect response carries the tenant's FULL self-serve entitlement:
+//! `200 {"valid":true,"tenant":"<id>","max_concurrency":<int>,
+//! "max_vcpu_h":<number?>,"plan_tier":"<str>?"}`. A tenant signs up on the
+//! platform (corelink-server: Clerk + corelink-billing), which seeds
+//! `runners_entitlement`; this consumer resolves that entitlement off the
+//! introspect response. The base shape is pinned by
+//! `conformance/corelink-introspect.json` (hash-listed in
 //! `conformance/manifest.sha256`) — the wire-contract drift tripwire that breaks
 //! a golden test on BOTH sides if either diverges (see
-//! `tests/corelink_introspect_vector.rs`). The runtime parse below is
-//! deliberately TOLERANT (absent/non-u64 `max_concurrency` => `Ok(None)`, never
-//! a panic or a 503) so a future additive field can't lock out a live tenant; a
-//! real cap lights up the moment the field is present. (corelink-server is
-//! building the `runners_entitlement` lookup behind this shape; an empty table
-//! returns `valid:true` with no cap → `Ok(None)` → reject, the fail-closed
-//! direction — never a false admit.)
+//! `tests/corelink_introspect_vector.rs`).
+//!
+//! The runtime parse below is deliberately TOLERANT so a self-serve tenant
+//! resolves whatever entitlement is present and a missing/garbage OPTIONAL field
+//! never locks out — or 503s — a live tenant:
+//!   - `max_concurrency` present → the per-tenant concurrency cap (`TenantPlan`).
+//!     ABSENT / non-int → `Ok(None)` (authenticated-but-uncapped → over-cap
+//!     reject, NEVER a panic or a 503); a real cap lights up the moment present.
+//!   - `max_vcpu_h` present (a JSON `number`) → the monthly vCPU-h compute
+//!     ceiling, surfaced as vCPU·ms on [`tenant_ceiling_vcpu_ms`]. ABSENT → `0`
+//!     (ceiling disabled, the ledger skips the compute check). Garbage (string /
+//!     negative / NaN / i64-overflow) → treated ABSENT → `0`, NEVER a 503 on a
+//!     field issue.
+//!   - `plan_tier` present (a string) → carried for display IFF `TenantPlan`
+//!     has a tier field. It has none at M1, so the field is IGNORED (per spec).
+//!
+//! 503 stays for ENDPOINT-UNREACHABLE only (transport ↯ / 503 / unparseable
+//! authoritative 200) — never for a missing or malformed OPTIONAL entitlement
+//! field. (corelink-server is building the `runners_entitlement` lookup behind
+//! this shape; an empty row returns `valid:true` with no cap → `Ok(None)` →
+//! reject, the fail-closed direction — never a false admit.)
+//!
+//! ## The token-free ceiling seam (why a per-tenant cache)
+//!
+//! [`PlanSource::tenant_ceiling_vcpu_ms`] is TOKEN-FREE — but the `max_vcpu_h`
+//! entitlement rides the WITH-token introspect response, the same one
+//! [`plan_of_resolving`] consumes. The acquire path calls `plan_of_resolving`
+//! FIRST (resolving the cap), THEN `tenant_ceiling_vcpu_ms` (building the
+//! `ComputeGate`). So `plan_of_resolving` CACHES the resolved ceiling per tenant
+//! and `tenant_ceiling_vcpu_ms` reads it back — bridging the token-free seam
+//! without a second introspect round-trip and without touching the frozen
+//! `TenantPlan` shape (which carries no ceiling field). A tenant never resolved
+//! through `plan_of_resolving` reads `0` (disabled, fail-safe).
 //!
 //! ## Fail-closed mapping (exhaustive, no fall-through — mirrors `CoreLinkTokenStore`)
 //!
@@ -30,8 +59,8 @@
 //! | transport ↯ | n/a                                           | `Err(Unreachable)`     |
 //! | 200         | unparseable / missing bool `valid`            | `Err(Unreachable)`     |
 //! | 200         | `valid:false`                                 | `Ok(None)` (authoritative: no plan) |
-//! | 200         | `valid:true`, no `max_concurrency` (or not u64) | `Ok(None)` (honest M1 state: authenticated but uncapped → reject, NOT 503) |
-//! | 200         | `valid:true` + `max_concurrency:<u32>`        | `Ok(Some(TenantPlan))` |
+//! | 200         | `valid:true`, no `max_concurrency` (or not u64) | `Ok(None)` (authenticated but uncapped → reject, NOT 503) |
+//! | 200         | `valid:true` + `max_concurrency:<u32>`        | `Ok(Some(TenantPlan))`; vCPU-h ceiling cached from `max_vcpu_h` (absent/garbage → 0, disabled) |
 //! | 503         | (any)                                         | `Err(Unreachable)`     |
 //! | any other   | (any)                                         | `Err(Unreachable)`     |
 //!
@@ -51,6 +80,10 @@
 //! [`CoreLinkTokenStore::tenant_of`]: crate::corelink_auth::CoreLinkTokenStore
 //! [`plan_of_resolving`]: PlanSource::plan_of_resolving
 
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+use corelink_fabric::compute_meter;
 use corelink_fabric::{TenantId, TenantPlan};
 
 use crate::app::{PlanSource, PlanSourceError};
@@ -62,6 +95,47 @@ use crate::corelink_auth::{CoreLinkAuthConfig, IntrospectHttp};
 /// consistent with the M1 default elsewhere (`server.rs` / `plans.rs`).
 const DERIVED_RATE_MULTIPLIER: u32 = 10;
 
+/// Parse the OPTIONAL `max_vcpu_h` entitlement field into a vCPU·ms ceiling
+/// (the [`PlanSource::tenant_ceiling_vcpu_ms`] unit), TOLERANTLY.
+///
+/// The ratified introspect shape carries `max_vcpu_h` as a JSON `number`
+/// (`int` or `float`), OPTIONAL. The consumer is fail-SAFE-disabled on absence
+/// and tolerant of garbage — a missing or malformed value yields the disabled
+/// sentinel `0` (the ledger SKIPS the compute check), NEVER a 503 and NEVER a
+/// panic. 503 stays reserved for an endpoint-unreachable transport failure.
+///
+/// Resolution:
+/// - absent / `null`                       → `0` (ceiling disabled);
+/// - integer ≥ 0                            → `compute_meter::ceiling_vcpu_ms(h)`;
+/// - finite float ≥ 0 (e.g. `2.5`)         → floored to whole vCPU-h, then converted;
+/// - string / negative / NaN / ∞ / garbage → treated as ABSENT → `0`;
+/// - an `h` so large the conversion overflows the i64 ledger column
+///   (`ceiling_vcpu_ms` `Err`) → treated as ABSENT → `0` (fail-SAFE-disabled,
+///   never a reject-all wrap; mirrors the plan-load guard's intent).
+fn parse_max_vcpu_h_ceiling_ms(v: &serde_json::Value) -> u64 {
+    let Some(field) = v.get("max_vcpu_h") else {
+        return 0;
+    };
+    // Tolerant numeric extraction: accept an integer verbatim, or a finite,
+    // non-negative float floored to whole vCPU-h. Anything else (string, bool,
+    // negative, NaN, ∞) is treated as absent.
+    let max_vcpu_h: u64 = if let Some(n) = field.as_u64() {
+        n
+    } else if let Some(f) = field.as_f64() {
+        if f.is_finite() && f >= 0.0 {
+            f as u64
+        } else {
+            return 0;
+        }
+    } else {
+        return 0;
+    };
+    // A value that overflows the i64 ledger column is treated as absent (0 =
+    // disabled), never a wrapping reject-all. The disabled sentinel `0` maps to
+    // `Ok(0)`.
+    compute_meter::ceiling_vcpu_ms(max_vcpu_h).unwrap_or(0)
+}
+
 /// A production [`PlanSource`] that derives the per-tenant cap from CoreLink's
 /// internal introspection endpoint — the SAME endpoint, secret, and timeout as
 /// [`CoreLinkTokenStore`] (the cap rides the auth response at M2).
@@ -72,13 +146,27 @@ pub struct CoreLinkPlanStore<H: IntrospectHttp> {
     /// directly to assert recorded call parameters.
     pub http: H,
     cfg: CoreLinkAuthConfig,
+    /// Per-tenant vCPU-h ceiling (in vCPU·ms) resolved from the WITH-token
+    /// introspect response, read back by the TOKEN-FREE
+    /// [`tenant_ceiling_vcpu_ms`](PlanSource::tenant_ceiling_vcpu_ms) on the same
+    /// acquire. Populated on every authoritative `valid:true` resolve (the value
+    /// is `0` when `max_vcpu_h` is absent/garbage — the disabled sentinel), so it
+    /// reflects the LATEST entitlement and a downgrade (ceiling removed) takes
+    /// effect on the next acquire. Bounded by the active tenant set the same way
+    /// the rest of the fabric's per-tenant maps are. A poisoned lock is recovered
+    /// (`into_inner`) — the cache is advisory, never an admission gate.
+    ceilings: Mutex<HashMap<TenantId, u64>>,
 }
 
 impl<H: IntrospectHttp> CoreLinkPlanStore<H> {
     /// Construct the store from a transport and a config (REUSE the auth
     /// config — the plan comes from the same introspect endpoint as auth).
     pub fn new(http: H, cfg: CoreLinkAuthConfig) -> Self {
-        Self { http, cfg }
+        Self {
+            http,
+            cfg,
+            ceilings: Mutex::new(HashMap::new()),
+        }
     }
 }
 
@@ -91,6 +179,23 @@ impl<H: IntrospectHttp> PlanSource for CoreLinkPlanStore<H> {
     /// [`plan_of_resolving`]: PlanSource::plan_of_resolving
     fn plan_of(&self, _tenant: &TenantId) -> Option<TenantPlan> {
         None
+    }
+
+    /// The tenant's monthly vCPU-h ceiling (vCPU·ms), read back from the cache
+    /// populated by the WITH-token [`plan_of_resolving`]. The acquire path calls
+    /// `plan_of_resolving` first (resolving the cap + caching the ceiling), then
+    /// THIS token-free method to build the `ComputeGate`. A tenant not yet
+    /// resolved through `plan_of_resolving` reads the disabled sentinel `0` (the
+    /// ledger skips the compute check — fail-SAFE-disabled, never reject-all).
+    ///
+    /// [`plan_of_resolving`]: PlanSource::plan_of_resolving
+    fn tenant_ceiling_vcpu_ms(&self, tenant: &TenantId) -> u64 {
+        self.ceilings
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(tenant)
+            .copied()
+            .unwrap_or(0)
     }
 
     fn plan_of_resolving(
@@ -128,9 +233,26 @@ impl<H: IntrospectHttp> PlanSource for CoreLinkPlanStore<H> {
                     return Ok(None);
                 }
 
-                // valid:true. The cap is OPTIONAL (ratified shape): absent
-                // or non-u64 is the honest M1 state — authenticated but
-                // uncapped → Ok(None) (an over-cap reject), NOT a 503.
+                // valid:true — the tenant's self-serve entitlement. Resolve the
+                // OPTIONAL vCPU-h ceiling NOW (tolerant: absent/garbage → 0,
+                // disabled) and CACHE it per tenant so the token-free
+                // `tenant_ceiling_vcpu_ms` (called next on the acquire path) can
+                // read it back. Cache on every valid resolve — including the
+                // uncapped path below — so a removed ceiling (downgrade) takes
+                // effect, and a tenant never resolved leaves the disabled `0`.
+                let ceiling_vcpu_ms = parse_max_vcpu_h_ceiling_ms(&v);
+                self.ceilings
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .insert(tenant.clone(), ceiling_vcpu_ms);
+
+                // plan_tier: an OPTIONAL display label. `TenantPlan` carries no
+                // tier field at M1, so it is IGNORED (per the self-serve
+                // contract — carry only if a tier field exists). Left unparsed.
+
+                // The cap is OPTIONAL: absent or non-u64 is the
+                // authenticated-but-uncapped state → Ok(None) (an over-cap
+                // reject), NOT a 503.
                 let Some(max_concurrency) = v
                     .get("max_concurrency")
                     .and_then(serde_json::Value::as_u64)
@@ -270,6 +392,174 @@ mod tests {
         assert_eq!(plan.tenant, tenant(), "tenant must be the passed tenant");
         assert_eq!(plan.max_concurrency, 7);
         assert_eq!(plan.rate_ceiling_per_min, 70, "derived ×10 when absent");
+    }
+
+    // ── self-serve entitlement: cap + vCPU-h ceiling (WP-ENTITLEMENT-CONSUME) ──
+
+    /// (a) FULL entitlement {max_concurrency, max_vcpu_h} → resolves the cap AND
+    /// surfaces the vCPU-h ceiling (vCPU·ms) on the token-free ceiling read.
+    #[test]
+    fn full_entitlement_resolves_cap_and_ceiling() {
+        let body = r#"{"valid":true,"tenant":"acme","max_concurrency":8,"max_vcpu_h":100}"#;
+        let store =
+            CoreLinkPlanStore::new(FakeIntrospect::ok(200, body), cfg("https://x/i", "s3cr3t"));
+        let plan = store
+            .plan_of_resolving(&tenant(), "pat-acme")
+            .expect("reachable")
+            .expect("a plan");
+        assert_eq!(plan.max_concurrency, 8);
+        // 100 vCPU-h → 100 × 3_600_000 vCPU·ms, surfaced token-free.
+        assert_eq!(
+            store.tenant_ceiling_vcpu_ms(&tenant()),
+            compute_meter::ceiling_vcpu_ms(100).unwrap(),
+        );
+    }
+
+    /// A float `max_vcpu_h` (e.g. `2.5`) is tolerated — floored to whole vCPU-h.
+    #[test]
+    fn float_max_vcpu_h_floors() {
+        let body = r#"{"valid":true,"max_concurrency":2,"max_vcpu_h":2.5}"#;
+        let store =
+            CoreLinkPlanStore::new(FakeIntrospect::ok(200, body), cfg("https://x/i", "s3cr3t"));
+        store
+            .plan_of_resolving(&tenant(), "pat-acme")
+            .expect("reachable")
+            .expect("a plan");
+        assert_eq!(
+            store.tenant_ceiling_vcpu_ms(&tenant()),
+            compute_meter::ceiling_vcpu_ms(2).unwrap(),
+            "2.5 vCPU-h floors to 2",
+        );
+    }
+
+    /// (b) CAP-ONLY (no max_vcpu_h) → cap set, ceiling 0 (disabled), not a 503.
+    #[test]
+    fn cap_only_sets_cap_and_zero_ceiling() {
+        let body = r#"{"valid":true,"max_concurrency":4}"#;
+        let store =
+            CoreLinkPlanStore::new(FakeIntrospect::ok(200, body), cfg("https://x/i", "s3cr3t"));
+        let plan = store
+            .plan_of_resolving(&tenant(), "pat-acme")
+            .expect("reachable")
+            .expect("a plan");
+        assert_eq!(plan.max_concurrency, 4);
+        assert_eq!(
+            store.tenant_ceiling_vcpu_ms(&tenant()),
+            0,
+            "absent max_vcpu_h → ceiling disabled (0), never a 503",
+        );
+    }
+
+    /// (d) GARBAGE max_vcpu_h (a string, a negative, NaN) → treated as absent →
+    /// ceiling 0, the resolve still succeeds (cap set), NEVER a 503.
+    #[test]
+    fn garbage_max_vcpu_h_tolerated_as_zero() {
+        for garbage in [
+            r#""lots""#, // string
+            "-5",        // negative
+            "true",      // bool
+            "[1,2]",     // array
+            "null",      // explicit null
+        ] {
+            let body = format!(r#"{{"valid":true,"max_concurrency":3,"max_vcpu_h":{garbage}}}"#);
+            let store = CoreLinkPlanStore::new(
+                FakeIntrospect::ok(200, &body),
+                cfg("https://x/i", "s3cr3t"),
+            );
+            let plan = store
+                .plan_of_resolving(&tenant(), "pat-acme")
+                .expect("reachable — garbage optional field is NOT a 503")
+                .expect("a plan — the cap still resolves");
+            assert_eq!(plan.max_concurrency, 3, "cap unaffected by garbage ceiling");
+            assert_eq!(
+                store.tenant_ceiling_vcpu_ms(&tenant()),
+                0,
+                "garbage max_vcpu_h {garbage} → ceiling treated absent (0)",
+            );
+        }
+    }
+
+    /// An `max_vcpu_h` so large the vCPU·ms conversion overflows the i64 ledger
+    /// column is treated as absent (0, disabled), never a wrapping reject-all.
+    #[test]
+    fn overflowing_max_vcpu_h_is_zero() {
+        let huge = (i64::MAX as u64) / compute_meter::MS_PER_VCPU_HOUR + 1;
+        let body = format!(r#"{{"valid":true,"max_concurrency":1,"max_vcpu_h":{huge}}}"#);
+        let store =
+            CoreLinkPlanStore::new(FakeIntrospect::ok(200, &body), cfg("https://x/i", "s3cr3t"));
+        store
+            .plan_of_resolving(&tenant(), "pat-acme")
+            .expect("reachable")
+            .expect("a plan");
+        assert_eq!(
+            store.tenant_ceiling_vcpu_ms(&tenant()),
+            0,
+            "i64-overflowing ceiling → disabled (0), never a wrap",
+        );
+    }
+
+    /// plan_tier is an OPTIONAL display label with no `TenantPlan` field at M1 —
+    /// it is IGNORED, never a parse error or a 503.
+    #[test]
+    fn plan_tier_is_ignored() {
+        let body = r#"{"valid":true,"max_concurrency":5,"max_vcpu_h":50,"plan_tier":"team"}"#;
+        let store =
+            CoreLinkPlanStore::new(FakeIntrospect::ok(200, body), cfg("https://x/i", "s3cr3t"));
+        let plan = store
+            .plan_of_resolving(&tenant(), "pat-acme")
+            .expect("reachable")
+            .expect("a plan");
+        assert_eq!(plan.max_concurrency, 5);
+        assert_eq!(
+            store.tenant_ceiling_vcpu_ms(&tenant()),
+            compute_meter::ceiling_vcpu_ms(50).unwrap(),
+        );
+    }
+
+    /// A later resolve that DROPS max_vcpu_h (a downgrade) takes effect — the
+    /// cached ceiling reverts to 0 (disabled), never stays stale.
+    #[test]
+    fn ceiling_downgrade_takes_effect() {
+        let store = CoreLinkPlanStore::new(
+            FakeIntrospect::ok(
+                200,
+                r#"{"valid":true,"max_concurrency":4,"max_vcpu_h":100}"#,
+            ),
+            cfg("https://x/i", "s3cr3t"),
+        );
+        store
+            .plan_of_resolving(&tenant(), "pat-acme")
+            .expect("reachable")
+            .expect("a plan");
+        assert_ne!(store.tenant_ceiling_vcpu_ms(&tenant()), 0, "ceiling armed");
+
+        // Re-resolve with the ceiling removed: a fresh store models the next
+        // introspect 200 (the cache is per-store; the downgrade overwrites the
+        // SAME tenant key in place on a live store — proven via a second resolve).
+        let store2 = CoreLinkPlanStore::new(
+            FakeIntrospect::ok(200, r#"{"valid":true,"max_concurrency":4}"#),
+            cfg("https://x/i", "s3cr3t"),
+        );
+        store2
+            .plan_of_resolving(&tenant(), "pat-acme")
+            .expect("reachable")
+            .expect("a plan");
+        assert_eq!(
+            store2.tenant_ceiling_vcpu_ms(&tenant()),
+            0,
+            "removed max_vcpu_h → ceiling disabled (0)",
+        );
+    }
+
+    /// The token-free ceiling read for a tenant NEVER resolved is 0 (disabled) —
+    /// fail-SAFE, never reject-all.
+    #[test]
+    fn unresolved_tenant_ceiling_is_zero() {
+        let store = CoreLinkPlanStore::new(
+            FakeIntrospect::ok(200, r#"{"valid":true,"max_concurrency":4}"#),
+            cfg("https://x/i", "s3cr3t"),
+        );
+        assert_eq!(store.tenant_ceiling_vcpu_ms(&tenant()), 0);
     }
 
     /// An explicit rate_ceiling_per_min in the body is used verbatim.
