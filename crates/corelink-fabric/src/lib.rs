@@ -46,6 +46,10 @@ pub mod billing_sink;
 pub mod billing_target;
 pub mod caps;
 pub mod compute_meter;
+// M1 WAVE-2 — grace-to-expiry tier-downgrade admission policy (WP-DOWNGRADE-GRACE).
+pub mod downgrade_grace;
+// M1 WAVE-2 WP-GLOBAL-CAP — tenant-aware global admission ceiling.
+pub mod global_gate;
 pub mod interference;
 pub mod ledger;
 #[cfg(test)]
@@ -68,6 +72,9 @@ pub use billing_sink::{BillingSink, ExportReport, Exporter, MemBillingSink, PgBi
 // M1 WAVE-0 frozen anchors (re-exported alongside their kin).
 pub use billing_target::{BillingExportTarget, NoopBillingTarget};
 pub use caps::{CapDecision, CapGate, RateWindow};
+pub use global_gate::{
+    GlobalAdmit, GlobalAdmitGuard, GlobalGate, GlobalGatePolicy, GlobalMeters, GlobalReject,
+};
 pub use interference::{TenantWaitStats, WaitSnapshot};
 pub use ledger::{FileLedger, InMemoryLedger, LeaseLedger, LeaseRecord, LeaseState};
 pub use lifecycle::{BoxProbe, LeaseLifecycle};
