@@ -521,7 +521,7 @@ mod ordering_tests {
     #[test]
     fn sort_yields_global_fair_order() {
         // A mixed batch sorts into exactly the order dequeue_next pulls them.
-        let mut batch = vec![
+        let mut batch = [
             pa("served", "s2", 50, 2),
             pa("owed", "o1", 999, 0),
             pa("served", "s1", 10, 2),
@@ -540,20 +540,18 @@ mod ordering_tests {
         // Model two admits: each enqueue stamps the tenant's current admit-count
         // as deficit, each admit bumps that count by 1. With A and B alternately
         // enqueuing+winning, the fair order interleaves them — neither starves.
-        let mut a_count = 0i64;
-        let mut b_count = 0i64;
         let mut rows: Vec<PendingAdmission> = Vec::new();
         let mut t = 0i64;
         // A enqueues 3 in a burst, B enqueues 3 in a burst (B later in time).
+        // Each tenant's deficit = how many it has already won across the burst
+        // (0,1,2) — i.e. the per-tenant admit-count, which equals i here.
         for i in 0..3 {
             t += 1;
-            rows.push(pa("a", &format!("a{i}"), t, a_count));
-            a_count += 1; // model: A wins each as it is admitted
+            rows.push(pa("a", &format!("a{i}"), t, i as i64));
         }
         for i in 0..3 {
             t += 1;
-            rows.push(pa("b", &format!("b{i}"), t, b_count));
-            b_count += 1;
+            rows.push(pa("b", &format!("b{i}"), t, i as i64));
         }
         rows.sort_by(fair_order);
         let ids: Vec<&str> = rows.iter().map(|p| p.lease_request_id.as_str()).collect();
