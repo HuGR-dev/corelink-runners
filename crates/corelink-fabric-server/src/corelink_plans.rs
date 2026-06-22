@@ -7,11 +7,15 @@
 //! 0-slot reject (the M1 boundary documented in `corelink_auth.rs`). This
 //! store closes that gap by reading the cap from the introspect response.
 //!
-//! ## Wire shape — self-serve entitlement (TOLERANT consumer; freeze pending)
+//! ## Wire shape — self-serve entitlement (TOLERANT consumer; field names FROZEN 2026-06-22)
 //!
 //! The introspect response carries the tenant's FULL self-serve entitlement:
-//! `200 {"valid":true,"tenant":"<id>","max_concurrency":<int>,
-//! "max_vcpu_h":<number?>,"plan_tier":"<str>?"}`. A tenant signs up on the
+//! `200 {"valid":true,"tenant_id":"<uuid>","max_concurrency":<int>,
+//! "max_vcpu_h":<number?>,"plan":"<str>?"}`. Field names match the SERVER's live
+//! response (Server TL reply 2026-06-22): the tenant key is `tenant_id` (NOT
+//! `tenant`) and the informational cache tier is `plan` (NOT `plan_tier`) — the
+//! other repos (githugr, HuGR-Tools) already consume these names, so they are
+//! authoritative and the conformance vector is frozen to match. A tenant signs up on the
 //! platform (corelink-server: Clerk + corelink-billing), which seeds
 //! `runners_entitlement`; this consumer resolves that entitlement off the
 //! introspect response. The base shape is pinned by
@@ -31,8 +35,9 @@
 //!     (ceiling disabled, the ledger skips the compute check). Garbage (string /
 //!     negative / NaN / i64-overflow) → treated ABSENT → `0`, NEVER a 503 on a
 //!     field issue.
-//!   - `plan_tier` present (a string) → carried for display IFF `TenantPlan`
-//!     has a tier field. It has none at M1, so the field is IGNORED (per spec).
+//!   - `plan` present (a string, the cache tier) → carried for display IFF
+//!     `TenantPlan` has a tier field. It has none at M1, so the field is IGNORED
+//!     (per spec) — the runner never re-parses it for the plan.
 //!
 //! 503 stays for ENDPOINT-UNREACHABLE only (transport ↯ / 503 / unparseable
 //! authoritative 200) — never for a missing or malformed OPTIONAL entitlement
@@ -246,8 +251,8 @@ impl<H: IntrospectHttp> PlanSource for CoreLinkPlanStore<H> {
                     .unwrap_or_else(|p| p.into_inner())
                     .insert(tenant.clone(), ceiling_vcpu_ms);
 
-                // plan_tier: an OPTIONAL display label. `TenantPlan` carries no
-                // tier field at M1, so it is IGNORED (per the self-serve
+                // `plan` (the cache tier): an OPTIONAL display label. `TenantPlan`
+                // carries no tier field at M1, so it is IGNORED (per the self-serve
                 // contract — carry only if a tier field exists). Left unparsed.
 
                 // The cap is OPTIONAL: absent or non-u64 is the
@@ -400,7 +405,7 @@ mod tests {
     /// surfaces the vCPU-h ceiling (vCPU·ms) on the token-free ceiling read.
     #[test]
     fn full_entitlement_resolves_cap_and_ceiling() {
-        let body = r#"{"valid":true,"tenant":"acme","max_concurrency":8,"max_vcpu_h":100}"#;
+        let body = r#"{"valid":true,"tenant_id":"acme","max_concurrency":8,"max_vcpu_h":100}"#;
         let store =
             CoreLinkPlanStore::new(FakeIntrospect::ok(200, body), cfg("https://x/i", "s3cr3t"));
         let plan = store
@@ -498,11 +503,12 @@ mod tests {
         );
     }
 
-    /// plan_tier is an OPTIONAL display label with no `TenantPlan` field at M1 —
-    /// it is IGNORED, never a parse error or a 503.
+    /// `plan` (the cache tier, the SERVER's field name — formerly `plan_tier`)
+    /// is an OPTIONAL display label with no `TenantPlan` field at M1, so it is
+    /// IGNORED, never a parse error or a 503.
     #[test]
-    fn plan_tier_is_ignored() {
-        let body = r#"{"valid":true,"max_concurrency":5,"max_vcpu_h":50,"plan_tier":"team"}"#;
+    fn plan_field_is_ignored() {
+        let body = r#"{"valid":true,"max_concurrency":5,"max_vcpu_h":50,"plan":"team"}"#;
         let store =
             CoreLinkPlanStore::new(FakeIntrospect::ok(200, body), cfg("https://x/i", "s3cr3t"));
         let plan = store
