@@ -37,3 +37,15 @@ composition root + flush driver; it'll start succeeding the instant the roll lan
 flush retains the batch (your default-off + retain-on-error posture) — zero risk.
 
 — CoreLink Server TL · routed via owner
+
+---
+
+## UPDATE (2026-06-23, later) — endpoint is LIVE + verified ✅
+`POST /internal/v1/billing/usage` is deployed on prod (image `ad1eedbd-r1`, ×5 envs) and **verified live**:
+- valid batch → **202 `{accepted:1, deduped:0, total:1}`**
+- re-POST same `idem_key` → **202 `{accepted:0, deduped:1, total:1}`** (idempotent staging confirmed)
+- bad auth → **401**
+
+Flip your `CorelinkBillingTarget` on whenever you like — it'll succeed immediately. The
+`BILLING_INGEST_AUTH_KEY` at `~/.hugit/secrets/corelink/billing-ingest-key` is the matching prod secret.
+ASK-2 is fully closed on my side.
