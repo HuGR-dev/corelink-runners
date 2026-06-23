@@ -161,6 +161,21 @@ pub struct CoreLinkPlanStore<H: IntrospectHttp> {
     /// the rest of the fabric's per-tenant maps are. A poisoned lock is recovered
     /// (`into_inner`) — the cache is advisory, never an admission gate.
     ceilings: Mutex<HashMap<TenantId, u64>>,
+    /// Per-tenant cache of the resolved [`TenantPlan`] (cap + rate), populated by
+    /// the WITH-token [`plan_of_resolving`] and read back by the TOKEN-FREE
+    /// [`plan_of`](PlanSource::plan_of) — the exact mirror of `ceilings`. The
+    /// CoreLink cap can ONLY be resolved with the bearer token, so the token-free
+    /// callers (`/v1/usage` dashboard `plan_cap`; the queue-mode `under_cap`
+    /// pre-filter in `admission.rs`) would otherwise read `None` even for a tenant
+    /// whose cap is live and enforced on the acquire path. Populated on every
+    /// authoritative `valid:true` resolve: a CAPPED resolve INSERTS, an UNCAPPED or
+    /// `valid:false` resolve REMOVES — so a downgrade (cap removed) or revoke takes
+    /// effect on the next resolve, never a stale cap. A tenant never resolved
+    /// through `plan_of_resolving` reads `None` token-free — the SAME fail-closed
+    /// default as before this cache (it only ever turns a false `None` into the
+    /// true cap, never fabricates one). Advisory: the authoritative gate is
+    /// `plan_of_resolving` + `try_admit`, never this map.
+    plans: Mutex<HashMap<TenantId, TenantPlan>>,
 }
 
 impl<H: IntrospectHttp> CoreLinkPlanStore<H> {
@@ -171,19 +186,38 @@ impl<H: IntrospectHttp> CoreLinkPlanStore<H> {
             http,
             cfg,
             ceilings: Mutex::new(HashMap::new()),
+            plans: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Drop any cached plan for `tenant` — called on an uncapped or `valid:false`
+    /// resolve so a downgrade/revoke takes effect on the token-free read (never a
+    /// stale cap). Poisoned lock recovered; the cache is advisory.
+    fn evict_plan(&self, tenant: &TenantId) {
+        self.plans
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(tenant);
     }
 }
 
 impl<H: IntrospectHttp> PlanSource for CoreLinkPlanStore<H> {
-    /// Token-free lookup is unanswerable for this backend — the cap can only be
-    /// resolved WITH the bearer token. Returning `None` is fail-closed: any
-    /// caller on the token-free path gets no plan, which safely rejects (it
-    /// never silently admits). The hot acquire path uses [`plan_of_resolving`].
+    /// Token-free lookup reads back the LAST plan resolved for this tenant by the
+    /// WITH-token [`plan_of_resolving`] (cached in `plans`). A tenant never resolved
+    /// (or whose latest resolve was uncapped / `valid:false`) reads `None` —
+    /// fail-closed: the token-free caller gets no plan and safely rejects, never a
+    /// silent admit and never a stale cap. The hot acquire path still uses
+    /// [`plan_of_resolving`] as the authoritative gate; this serves the token-free
+    /// readers (the `/v1/usage` dashboard cap and the queue-mode `under_cap`
+    /// pre-filter) so a live-capped tenant is no longer shown/treated as uncapped.
     ///
     /// [`plan_of_resolving`]: PlanSource::plan_of_resolving
-    fn plan_of(&self, _tenant: &TenantId) -> Option<TenantPlan> {
-        None
+    fn plan_of(&self, tenant: &TenantId) -> Option<TenantPlan> {
+        self.plans
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(tenant)
+            .cloned()
     }
 
     /// The tenant's monthly vCPU-h ceiling (vCPU·ms), read back from the cache
@@ -234,7 +268,9 @@ impl<H: IntrospectHttp> PlanSource for CoreLinkPlanStore<H> {
                     .ok_or(PlanSourceError::Unreachable)?;
 
                 if !valid {
-                    // Authoritative "no plan" answer.
+                    // Authoritative "no plan" answer — evict any stale cached plan
+                    // (a revoke takes effect on the token-free read).
+                    self.evict_plan(tenant);
                     return Ok(None);
                 }
 
@@ -263,6 +299,9 @@ impl<H: IntrospectHttp> PlanSource for CoreLinkPlanStore<H> {
                     .and_then(serde_json::Value::as_u64)
                     .and_then(|n| u32::try_from(n).ok())
                 else {
+                    // Authenticated-but-uncapped — evict any stale cached plan so a
+                    // downgrade (cap removed) takes effect on the token-free read.
+                    self.evict_plan(tenant);
                     return Ok(None);
                 };
 
@@ -276,11 +315,18 @@ impl<H: IntrospectHttp> PlanSource for CoreLinkPlanStore<H> {
 
                 // Use the PASSED tenant — auth already resolved it
                 // authoritatively; do not re-parse tenant_id for the plan.
-                Ok(Some(TenantPlan {
+                let plan = TenantPlan {
                     tenant: tenant.clone(),
                     max_concurrency,
                     rate_ceiling_per_min,
-                }))
+                };
+                // CACHE the resolved plan so the TOKEN-FREE `plan_of` (dashboard
+                // cap + queue-mode pre-filter) reflects the live cap.
+                self.plans
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .insert(tenant.clone(), plan.clone());
+                Ok(Some(plan))
             }
             // CoreLink signals backend unavailable with 503.
             503 => Err(PlanSourceError::Unreachable),
@@ -369,6 +415,38 @@ mod tests {
         }
     }
 
+    /// A scripted [`IntrospectHttp`] double that returns a DIFFERENT response per
+    /// call (pops a queue) — for testing the per-tenant plan cache across a
+    /// re-resolve (downgrade / revoke).
+    struct SeqIntrospect {
+        responses: Mutex<std::collections::VecDeque<IntrospectResponse>>,
+    }
+
+    impl SeqIntrospect {
+        fn new(bodies: &[(u16, &str)]) -> Self {
+            let q = bodies
+                .iter()
+                .map(|(status, body)| IntrospectResponse {
+                    status: *status,
+                    body: (*body).to_string(),
+                })
+                .collect();
+            Self {
+                responses: Mutex::new(q),
+            }
+        }
+    }
+
+    impl IntrospectHttp for SeqIntrospect {
+        fn post(&self, _: &str, _: &str, _: &str) -> anyhow::Result<IntrospectResponse> {
+            self.responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| anyhow::anyhow!("no more scripted responses"))
+        }
+    }
+
     fn cfg(url: &str, secret: &str) -> CoreLinkAuthConfig {
         CoreLinkAuthConfig {
             introspect_url: url.to_string(),
@@ -397,6 +475,79 @@ mod tests {
         assert_eq!(plan.tenant, tenant(), "tenant must be the passed tenant");
         assert_eq!(plan.max_concurrency, 7);
         assert_eq!(plan.rate_ceiling_per_min, 70, "derived ×10 when absent");
+    }
+
+    // ── token-free plan cache (WP-PLAN-CACHE; live-smoke finding 2026-06-22) ──
+    // (the unresolved → None case is pinned by `plan_of_token_free_is_none_when_unresolved`)
+
+    /// After a WITH-token capped resolve, the TOKEN-FREE `plan_of` reads the cap
+    /// back — the fix for the live-smoke `/v1/usage plan_cap: null` finding (the
+    /// dashboard + queue-mode pre-filter now see the live cap).
+    #[test]
+    fn plan_of_reads_back_cap_after_resolve() {
+        let body = r#"{"valid":true,"max_concurrency":2,"max_vcpu_h":10}"#;
+        let store =
+            CoreLinkPlanStore::new(FakeIntrospect::ok(200, body), cfg("https://x/i", "s3cr3t"));
+        // token-free before resolve → None
+        assert!(store.plan_of(&tenant()).is_none());
+        // WITH-token resolve (the acquire path) caches it
+        let resolved = store
+            .plan_of_resolving(&tenant(), "pat-acme")
+            .expect("reachable")
+            .expect("a plan");
+        assert_eq!(resolved.max_concurrency, 2);
+        // token-free now reflects the live cap
+        let cached = store.plan_of(&tenant()).expect("plan cached after resolve");
+        assert_eq!(
+            cached.max_concurrency, 2,
+            "token-free plan_of reads the cap"
+        );
+        assert_eq!(cached.tenant, tenant());
+    }
+
+    /// A downgrade to UNCAPPED (max_concurrency dropped) evicts the cache → the
+    /// token-free `plan_of` returns to `None`, never a stale cap.
+    #[test]
+    fn plan_of_evicts_on_downgrade_to_uncapped() {
+        let store = CoreLinkPlanStore::new(
+            SeqIntrospect::new(&[
+                (200, r#"{"valid":true,"max_concurrency":2}"#),
+                (200, r#"{"valid":true}"#), // later: cap removed
+            ]),
+            cfg("https://x/i", "s3cr3t"),
+        );
+        assert!(store.plan_of_resolving(&tenant(), "pat").unwrap().is_some());
+        assert!(store.plan_of(&tenant()).is_some(), "cap cached");
+        assert!(
+            store.plan_of_resolving(&tenant(), "pat").unwrap().is_none(),
+            "uncapped resolve → Ok(None)"
+        );
+        assert!(
+            store.plan_of(&tenant()).is_none(),
+            "downgrade evicts the cache — no stale cap"
+        );
+    }
+
+    /// A `valid:false` (revoke) evicts the cache → token-free `plan_of` is `None`.
+    #[test]
+    fn plan_of_evicts_on_valid_false() {
+        let store = CoreLinkPlanStore::new(
+            SeqIntrospect::new(&[
+                (200, r#"{"valid":true,"max_concurrency":2}"#),
+                (200, r#"{"valid":false}"#), // later: revoked
+            ]),
+            cfg("https://x/i", "s3cr3t"),
+        );
+        assert!(store.plan_of_resolving(&tenant(), "pat").unwrap().is_some());
+        assert!(store.plan_of(&tenant()).is_some(), "cap cached");
+        assert!(
+            store.plan_of_resolving(&tenant(), "pat").unwrap().is_none(),
+            "valid:false → Ok(None)"
+        );
+        assert!(
+            store.plan_of(&tenant()).is_none(),
+            "revoke evicts the cache — no stale cap"
+        );
     }
 
     // ── self-serve entitlement: cap + vCPU-h ceiling (WP-ENTITLEMENT-CONSUME) ──
@@ -681,10 +832,12 @@ mod tests {
 
     // ── token-free path ───────────────────────────────────────────────────────
 
-    /// The token-free `plan_of` returns None — fail-closed (the cap can't be
-    /// resolved without the token).
+    /// The token-free `plan_of` returns None for a tenant NEVER resolved with a
+    /// token — fail-closed (the cap can't be resolved without the token, and
+    /// nothing has been cached yet). The capped body here is never consumed
+    /// because `plan_of_resolving` is not called.
     #[test]
-    fn plan_of_token_free_is_none() {
+    fn plan_of_token_free_is_none_when_unresolved() {
         let store = CoreLinkPlanStore::new(
             FakeIntrospect::ok(200, r#"{"valid":true,"max_concurrency":7}"#),
             cfg("https://x/i", "s3cr3t"),
