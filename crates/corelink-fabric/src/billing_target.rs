@@ -33,6 +33,17 @@ use crate::meter::SlotOccupancyEvent;
 pub trait BillingExportTarget {
     /// Export one raw slot-occupancy event to the external billing system.
     fn export(&self, event: &SlotOccupancyEvent) -> anyhow::Result<()>;
+
+    /// Flush any buffered events to the external system. The composition root
+    /// drives this on a periodic timer (and may call it at shutdown). The DEFAULT
+    /// is a no-op success — a target that exports synchronously or buffers nothing
+    /// (like [`NoopBillingTarget`]) needs no flush; a buffering vendor adapter
+    /// (the corelink-billing usage-push) overrides it to POST the pending batch.
+    /// Fail-closed by convention: a transport error is an `Err` (the caller logs +
+    /// retries next tick), never a silent drop.
+    fn flush(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 /// The default-OFF [`BillingExportTarget`]: logs the event and succeeds.

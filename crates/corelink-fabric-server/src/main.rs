@@ -52,6 +52,14 @@ async fn main() -> anyhow::Result<()> {
             corelink_fabric_server::quota_headroom::spawn_quota_headroom_task(state.clone(), c)
         })
     };
+    // ── ASK-2 billing usage-push FLUSH driver — DEFAULT-OFF. Spawned ONLY when
+    // BILLING_INGEST_URL is set (the same gate that wires the real push target).
+    // Borrows `&state` BEFORE the reaper consumes it; drives the buffered target's
+    // batch POST every FABRIC_BILLING_PUSH_INTERVAL_SECS (default 30s).
+    let billing_push_handle =
+        corelink_fabric_server::server::maybe_spawn_billing_push_flush(&state, |k| {
+            std::env::var(k).ok()
+        });
     let pending_max_age =
         corelink_fabric_server::reaper::pending_max_age_from_env(|k| std::env::var(k).ok())?;
     let reaper_handle = corelink_fabric_server::reaper::spawn_reaper_with_pending_age(
@@ -160,6 +168,14 @@ async fn main() -> anyhow::Result<()> {
             "billing-export: OFF (set FABRIC_BILLING_EXPORT_INTERVAL_SECS, requires pg ledger, to enable)"
         ),
     }
+    match &billing_push_handle {
+        Some(_) => eprintln!(
+            "billing-push: started (BILLING_INGEST_URL set; per-lease usage → corelink-billing ingest)"
+        ),
+        None => eprintln!(
+            "billing-push: OFF (set BILLING_INGEST_URL + BILLING_INGEST_AUTH_KEY + 3-char BILLING_REGION to enable)"
+        ),
+    }
     match &quota_headroom_handle {
         Some(_) => eprintln!(
             "quota-headroom: started (FABRIC_QUOTA_CHECK_INTERVAL_SECS set; advisory disk-headroom monitor)"
@@ -202,6 +218,10 @@ async fn main() -> anyhow::Result<()> {
     }
     // task #11: abort the quota-headroom monitor (only set under FABRIC_QUOTA_CHECK_INTERVAL_SECS).
     if let Some(h) = quota_headroom_handle {
+        h.abort();
+    }
+    // ASK-2: abort the billing usage-push flush driver (only set under BILLING_INGEST_URL).
+    if let Some(h) = billing_push_handle {
         h.abort();
     }
     Ok(())

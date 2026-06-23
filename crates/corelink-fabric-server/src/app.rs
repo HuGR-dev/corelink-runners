@@ -14,8 +14,8 @@ use axum::routing::{get, post};
 use axum::{Extension, Router, middleware};
 use corelink_fabric::plans::{PlanTier, ceiling_for, plan_for};
 use corelink_fabric::{
-    CapGate, InMemoryLedger, LeaseLedger, RateWindow, SlotEventKind, SlotMeter, SlotOccupancyEvent,
-    TenantId, TenantPlan, TenantWaitStats,
+    BillingExportTarget, CapGate, InMemoryLedger, LeaseLedger, RateWindow, SlotEventKind,
+    SlotMeter, SlotOccupancyEvent, TenantId, TenantPlan, TenantWaitStats,
 };
 use corelink_fabric_api::{TriggerResponse, paths};
 
@@ -520,6 +520,16 @@ pub struct AppState {
     /// `clw`). The production composition root wires it from `CLW_ENDPOINT` via
     /// [`with_clw_endpoint`](Self::with_clw_endpoint) / `server.rs`.
     pub(crate) clw_endpoint: Option<String>,
+
+    /// ASK-2: the billing usage-push target (corelink-billing). The single
+    /// [`record_slot`](Self::record_slot) choke point taps this AFTER recording
+    /// to the meter — off the admission path (a tap error is logged, never
+    /// propagated). **Default-off:** [`NoopBillingTarget`] (observe + succeed,
+    /// no vendor call). The production composition root swaps in the real
+    /// [`CorelinkBillingTarget`](crate::corelink_billing::CorelinkBillingTarget)
+    /// via [`with_billing_export_target`](Self::with_billing_export_target) when
+    /// `BILLING_INGEST_*` env is present, and drives its periodic `flush`.
+    pub(crate) billing_export_target: Arc<dyn BillingExportTarget + Send + Sync>,
 }
 
 /// Default cap on concurrent close ack-window waits (audit P1). Chosen so a
@@ -605,7 +615,25 @@ impl AppState {
             ac_pre_lease_hook: Arc::new(crate::ac_pre_lease::NoOpAcHook),
             pat_ids: Arc::new(Mutex::new(HashMap::new())),
             clw_endpoint: None,
+            // ASK-2 billing usage-push DEFAULT-OFF: the no-op target (observe +
+            // succeed). The composition root opts in via `with_billing_export_target`.
+            billing_export_target: Arc::new(corelink_fabric::NoopBillingTarget),
         }
+    }
+
+    /// Wire the billing usage-push target (ASK-2). The default is the no-op
+    /// target; the production composition root passes the real
+    /// [`CorelinkBillingTarget`](crate::corelink_billing::CorelinkBillingTarget)
+    /// (and separately drives its periodic `flush`). The same `Arc` should be
+    /// handed to the flush driver so both the per-event tap and the flush loop
+    /// share one buffer.
+    #[must_use]
+    pub fn with_billing_export_target(
+        mut self,
+        target: Arc<dyn BillingExportTarget + Send + Sync>,
+    ) -> Self {
+        self.billing_export_target = target;
+        self
     }
 
     /// Set the serving box's vCPU count, ACTIVATING the vCPU-h compute ceiling
@@ -1163,7 +1191,16 @@ impl AppState {
         self.slot_meter
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .record(ev);
+            .record(ev.clone());
+        // ASK-2: tap the billing usage-push AFTER the meter record. Off the
+        // admission path — a tap error (default-off it cannot fail) is logged,
+        // never propagated; the flush driver owns the actual POST + retry.
+        if let Err(e) = self.billing_export_target.export(&ev) {
+            eprintln!(
+                "billing usage-push tap failed (non-fatal; flush driver will retry): \
+                 lease_id={lease_id} error={e}"
+            );
+        }
     }
 }
 
@@ -1368,6 +1405,51 @@ mod tests {
             !state.is_runner_lease("lease-x"),
             "no lease is a runner lease by default"
         );
+    }
+
+    /// A billing-export target that records every exported event (test double).
+    #[derive(Default)]
+    struct RecordingBillingTarget {
+        exported: Mutex<Vec<SlotOccupancyEvent>>,
+    }
+    impl BillingExportTarget for RecordingBillingTarget {
+        fn export(&self, event: &SlotOccupancyEvent) -> anyhow::Result<()> {
+            self.exported.lock().unwrap().push(event.clone());
+            Ok(())
+        }
+    }
+
+    /// ASK-2: `record_slot` (the SINGLE choke point for acquire/close/reaper) taps
+    /// the billing usage-push target — every slot event is forwarded for billing.
+    #[test]
+    fn record_slot_taps_the_billing_export_target() {
+        let target = Arc::new(RecordingBillingTarget::default());
+        let state = bare_state().with_billing_export_target(target.clone());
+        let t = TenantId::new("acme").unwrap();
+        state.record_slot("lease-1", &t, SlotEventKind::Acquired);
+        state.record_slot("lease-1", &t, SlotEventKind::Released);
+
+        let got = target.exported.lock().unwrap();
+        assert_eq!(
+            got.len(),
+            2,
+            "both slot events tapped to the billing target"
+        );
+        assert_eq!(got[0].kind, SlotEventKind::Acquired);
+        assert_eq!(got[1].kind, SlotEventKind::Released);
+        assert_eq!(got[0].lease_id, "lease-1");
+        assert_eq!(got[0].tenant, t);
+    }
+
+    /// Default-off: a fresh state's billing target is the no-op — `record_slot`
+    /// succeeds and emits nothing to any vendor (zero behaviour change).
+    #[test]
+    fn billing_export_target_defaults_to_noop() {
+        let state = bare_state();
+        let t = TenantId::new("acme").unwrap();
+        // Must not panic and must be a no-op success.
+        state.record_slot("lease-x", &t, SlotEventKind::Acquired);
+        state.record_slot("lease-x", &t, SlotEventKind::Released);
     }
 
     /// `forget_lease` GCs the ADR-0007 runner marker AND the image side table —
