@@ -16,6 +16,10 @@ axum       = { workspace = true }
 # memo-key formula via SHA-256 (sha2 is the workspace-pinned hash dep).
 anyhow     = { workspace = true }
 sha2       = { workspace = true }
+# WP-BILLING-TARGET: idem_key = BLAKE3(lease_id‖period) for the corelink-billing
+# usage-push adapter. blake3 is already in Cargo.lock (corelink-runner uses it),
+# so naming it here as a direct dep adds ZERO new crates.
+blake3     = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
 # WP-CORELINK-AUTH: the CoreLinkTokenStore transport (UreqIntrospect).

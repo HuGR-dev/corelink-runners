@@ -278,6 +278,7 @@ dependencies = [
  "anyhow",
  "axum",
  "base64",
+ "blake3",
  "corelink-cloud-engine",
  "corelink-fabric",
  "corelink-fabric-api",
