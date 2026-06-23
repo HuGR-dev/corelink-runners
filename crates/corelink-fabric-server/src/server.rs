@@ -1067,6 +1067,19 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
         None => state,
     };
 
+    // ASK-2 billing usage-push — DEFAULT-OFF (env-gated). Wired ONLY when
+    // BILLING_INGEST_URL + the dedicated BILLING_INGEST_AUTH_KEY + a 3-char
+    // BILLING_REGION are all present; otherwise the no-op target stays (zero
+    // behaviour change). The per-event tap lives in `AppState::record_slot`; the
+    // flush driver is spawned by `main.rs` over the SAME target Arc.
+    let state = match crate::corelink_billing::CorelinkBillingTarget::from_env(
+        |k| std::env::var(k).ok(),
+        std::time::Duration::from_secs(10),
+    ) {
+        Some(target) => state.with_billing_export_target(std::sync::Arc::new(target)),
+        None => state,
+    };
+
     // AUDIT P1+P2: apply the close ack-window cap and the global in-flight cap.
     let state = state
         .with_close_ack_max_inflight(cfg.close_ack_max_inflight)
@@ -1262,6 +1275,28 @@ pub async fn maybe_spawn_billing_exporter(
         interval,
     );
     Ok(Some(handle))
+}
+
+/// Spawn the ASK-2 billing usage-push FLUSH driver — DEFAULT-OFF. Spawned ONLY
+/// when `BILLING_INGEST_URL` is set (the same gate `CorelinkBillingTarget::from_env`
+/// uses to wire the real target, so the no-op default target is never driven).
+/// Ticks `state.billing_export_target.flush()` every
+/// `FABRIC_BILLING_PUSH_INTERVAL_SECS` (default 30s). The composition root binds
+/// the returned handle and `.abort()`s it on graceful shutdown, exactly like the
+/// reaper / durable-exporter handles. Distinct from
+/// [`maybe_spawn_billing_exporter`]: that drains the meter → durable Postgres
+/// `billing_events`; THIS pushes per-lease usage OUT to corelink-billing.
+pub fn maybe_spawn_billing_push_flush<F: Fn(&str) -> Option<String>>(
+    state: &crate::AppState,
+    get: F,
+) -> Option<tokio::task::JoinHandle<()>> {
+    // Same presence gate as the target's from_env (URL set ⇒ real target wired).
+    get(crate::corelink_billing::BILLING_INGEST_URL_ENV).filter(|s| !s.is_empty())?;
+    let interval = crate::corelink_billing::push_flush_interval_from_env(&get);
+    Some(crate::corelink_billing::spawn_push_flush_loop(
+        state.billing_export_target.clone(),
+        interval,
+    ))
 }
 
 #[cfg(test)]

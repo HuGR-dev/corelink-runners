@@ -37,7 +37,7 @@
 //! blocks admission.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use corelink_fabric::meter::{SlotEventKind, SlotOccupancyEvent};
 use corelink_fabric::{BillingExportTarget, compute_meter};
@@ -225,7 +225,10 @@ impl<P: BillingPoster> CorelinkBillingTarget<P> {
     /// cleared; on a transport / non-2xx error the buffer is RETAINED (the next
     /// tick retries — `idem_key` makes the re-send idempotent) and the error is
     /// returned. A no-op (and `Ok`) when the buffer is empty.
-    pub fn flush(&self) -> anyhow::Result<()> {
+    ///
+    /// Inherent method; the [`BillingExportTarget::flush`] trait method (driven by
+    /// the composition root over `dyn BillingExportTarget`) delegates here.
+    pub fn flush_now(&self) -> anyhow::Result<()> {
         // Snapshot under the lock, but do not hold it across the blocking POST.
         let batch: Vec<UsageEventData> = {
             let buf = self.buffer.lock().unwrap_or_else(|p| p.into_inner());
@@ -269,7 +272,7 @@ impl<P: BillingPoster> CorelinkBillingTarget<P> {
         if full {
             // Best-effort auto-flush to bound memory; a failure is retained for
             // the next tick (never propagated into the admission path).
-            let _ = self.flush();
+            let _ = self.flush_now();
         }
     }
 }
@@ -304,6 +307,61 @@ impl<P: BillingPoster> BillingExportTarget for CorelinkBillingTarget<P> {
         }
         Ok(())
     }
+
+    /// Drive the periodic batch flush (the composition root ticks this over
+    /// `dyn BillingExportTarget`). Delegates to the inherent [`flush_now`].
+    ///
+    /// [`flush_now`]: CorelinkBillingTarget::flush_now
+    fn flush(&self) -> anyhow::Result<()> {
+        self.flush_now()
+    }
+}
+
+/// Default flush cadence; override via `FABRIC_BILLING_PUSH_INTERVAL_SECS`.
+pub const DEFAULT_PUSH_FLUSH_SECS: u64 = 30;
+
+/// Resolve the flush interval from env (default [`DEFAULT_PUSH_FLUSH_SECS`];
+/// a `< 1` or unparseable value falls back to the default).
+pub fn push_flush_interval_from_env<F: Fn(&str) -> Option<String>>(get: F) -> std::time::Duration {
+    let secs = get("FABRIC_BILLING_PUSH_INTERVAL_SECS")
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&s| s >= 1)
+        .unwrap_or(DEFAULT_PUSH_FLUSH_SECS);
+    std::time::Duration::from_secs(secs)
+}
+
+/// Spawn the periodic flush driver over a billing target. Ticks every `interval`,
+/// calling [`BillingExportTarget::flush`] (the buffering target's batch POST). A
+/// failing tick logs and the batch is RETAINED (retried next tick — idempotent by
+/// `idem_key`); a panicking tick is caught so the loop never dies silently. The
+/// blocking POST runs on the blocking pool (`block_in_place`) so it never stalls
+/// an async worker — legal on the multi-thread runtime `main.rs` uses, mirroring
+/// the durable exporter. Returns the [`JoinHandle`](tokio::task::JoinHandle) the
+/// composition root `.abort()`s on graceful shutdown.
+pub fn spawn_push_flush_loop(
+    target: Arc<dyn BillingExportTarget + Send + Sync>,
+    interval: std::time::Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(interval);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tick.tick().await;
+            let t = target.clone();
+            let outcome = tokio::task::block_in_place(|| {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| t.flush()))
+            });
+            match outcome {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    eprintln!("billing usage-push flush failed (batch retained for retry): {e}")
+                }
+                Err(_) => {
+                    eprintln!("billing usage-push flush PANICKED; loop survives, batch retained")
+                }
+            }
+        }
+    })
 }
 
 #[cfg(test)]
