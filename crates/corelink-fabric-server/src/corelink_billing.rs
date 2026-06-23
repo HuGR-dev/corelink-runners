@@ -10,24 +10,27 @@
 //! posture, identical to `FABRIC_INTROSPECT_AUTH_KEY`).
 //!
 //! Per-event shape ([`UsageEventData`]): `{ tenant_id, event_kind, qty,
-//! billing_period:"YYYY-MM", source, time_ms, idem_key }`. The runner sends RAW
-//! per-event records with a stable `idem_key`; the **aggregator** owns the
-//! rollup + hash-chain + dedup, so this adapter computes NO chain hashes.
-//! At-least-once delivery is fine — `idem_key` makes it idempotent.
+//! billing_period:"YYYY-MM", region, source, time_ms, idem_key }`. The runner
+//! sends RAW per-event records with a stable `idem_key`; the **aggregator** owns
+//! the rollup + hash-chain + dedup, so this adapter computes NO chain hashes.
+//! At-least-once delivery is fine — `idem_key` makes it idempotent. The ingest
+//! returns `{accepted, deduped, total}` (auth → 401, bad batch → 400, fault → 503).
 //!
-//! ## Billing model — `RunnerSlotSeconds` (owner, 2026-06-23)
+//! ## Billing model — `runner_slot_seconds` (owner, 2026-06-23)
 //!
 //! Concurrency is a FLAT per-tier SKU ("concurrency priced, minutes unlimited");
 //! usage-push is for dashboard + reconciliation + anti-abuse, NOT metered Stripe
 //! charging. So one event is emitted per TERMINAL lease transition with
 //! `qty = slot·seconds = (terminal_at_ms − acquired_at_ms) / 1000` (one occupied
-//! slot · its lifetime in seconds). `event_kind` is [`RUNNER_SLOT_SECONDS_KIND`]
-//! — the ONE literal still pending the Server TL's final pin (a one-line change).
+//! slot · its lifetime in seconds). `event_kind` is the canonical wire string
+//! [`RUNNER_SLOT_SECONDS_KIND`] (`"runner_slot_seconds"`, Server-TL-pinned). The
+//! `region` is the 3-char Cloudflare colo (default substrate, ADR-0008).
 //!
 //! ## Default-off + off the admission path
 //!
-//! The composition root wires this only when `BILLING_INGEST_URL` + the key are
-//! present (else [`NoopBillingTarget`](corelink_fabric::NoopBillingTarget)). It
+//! The composition root wires this only when [`BILLING_INGEST_URL_ENV`], the
+//! dedicated key, and a 3-char region are all present (else
+//! [`NoopBillingTarget`](corelink_fabric::NoopBillingTarget)). It
 //! BUFFERS events and flushes a batch on [`flush`](CorelinkBillingTarget::flush)
 //! (driven every ~30s / at shutdown by the composition root) — a flush transport
 //! error is returned to the caller (which logs + retries next tick) and NEVER
@@ -40,13 +43,14 @@ use corelink_fabric::meter::{SlotEventKind, SlotOccupancyEvent};
 use corelink_fabric::{BillingExportTarget, compute_meter};
 use serde::{Deserialize, Serialize};
 
-/// The runner billable `event_kind` (owner: `RunnerSlotSeconds`, non-Stripe-
-/// billable). **PENDING:** the Server TL pins the exact literal in the ASK-2
-/// final one-pager; transcribe it here verbatim when it lands. Until then this
-/// is the agreed working value and the adapter stays default-off.
-pub const RUNNER_SLOT_SECONDS_KIND: &str = "RunnerSlotSeconds";
+/// The runner billable `event_kind` — the canonical wire string the Server TL
+/// pinned (ASK-2 final, 2026-06-23): `corelink-billing-emit`'s
+/// `UsageEventKind::RunnerSlotSeconds::as_str()`. Non-Stripe-billable (treated
+/// like `ReplayRequest` — dashboard/reconciliation/anti-abuse), per the
+/// owner-ratified flat-concurrency model ("concurrency priced, minutes unlimited").
+pub const RUNNER_SLOT_SECONDS_KIND: &str = "runner_slot_seconds";
 
-/// CloudEvents `source` for runner-emitted usage (Server TL contract).
+/// `source` for runner-emitted usage (Server TL contract).
 pub const BILLING_SOURCE: &str = "corelink-runners/fabricd";
 
 /// Env var holding the corelink-billing ingest endpoint URL (default-off: absent
@@ -55,6 +59,11 @@ pub const BILLING_INGEST_URL_ENV: &str = "BILLING_INGEST_URL";
 /// Env var holding the dedicated `x-corelink-internal-auth` value for billing
 /// ingest (NEVER the shared internal key).
 pub const BILLING_INGEST_AUTH_KEY_ENV: &str = "BILLING_INGEST_AUTH_KEY";
+/// Env var holding the 3-char region code stamped on every usage event. Since
+/// **Cloudflare is the default substrate (ADR-0008)**, this is the Cloudflare
+/// colo / region (IATA-style 3-letter code, e.g. `iad`); on the Northflank
+/// fallback it is the configured Northflank region, also 3 chars.
+pub const BILLING_REGION_ENV: &str = "BILLING_REGION";
 
 /// Flush the buffer once it reaches this many events (the time-based ~30s flush
 /// is driven by the composition root; this bounds memory between ticks).
@@ -72,6 +81,9 @@ pub struct UsageEventData {
     pub qty: u64,
     /// Calendar month the usage is attributed to, `"YYYY-MM"` (UTC).
     pub billing_period: String,
+    /// 3-char region the usage was produced in (Cloudflare colo by default —
+    /// the default substrate per ADR-0008; the Northflank region on fallback).
+    pub region: String,
     /// Provenance — always [`BILLING_SOURCE`].
     pub source: String,
     /// Unix epoch ms of the terminal lease transition this event bills.
@@ -104,6 +116,59 @@ pub trait BillingPoster: Send + Sync {
     fn post_batch(&self, url: &str, auth: &str, json_body: &str) -> anyhow::Result<u16>;
 }
 
+/// The real `ureq` [`BillingPoster`] (mirrors `UreqIntrospect`): a per-call
+/// agent with a bounded timeout, statuses surfaced as `Ok` (the adapter maps
+/// non-2xx explicitly), `x-corelink-internal-auth` carrying the dedicated key.
+pub struct UreqBillingPoster {
+    timeout: std::time::Duration,
+}
+
+impl UreqBillingPoster {
+    /// New transport with the given request timeout.
+    pub fn new(timeout: std::time::Duration) -> Self {
+        Self { timeout }
+    }
+}
+
+impl BillingPoster for UreqBillingPoster {
+    fn post_batch(&self, url: &str, auth: &str, json_body: &str) -> anyhow::Result<u16> {
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(self.timeout))
+            .http_status_as_error(false)
+            .build()
+            .into();
+        let resp = agent
+            .post(url)
+            .header("x-corelink-internal-auth", auth)
+            .header("Content-Type", "application/json")
+            .send(json_body)?;
+        Ok(resp.status().as_u16())
+    }
+}
+
+impl CorelinkBillingTarget<UreqBillingPoster> {
+    /// Build the production target from env, or `None` (default-off) when the
+    /// billing-ingest env is absent. Requires ALL THREE of [`BILLING_INGEST_URL_ENV`],
+    /// [`BILLING_INGEST_AUTH_KEY_ENV`] (the dedicated key, never the shared one),
+    /// and a 3-char [`BILLING_REGION_ENV`]; a partial/invalid config yields `None`
+    /// (the composition root then wires the no-op target — fail-safe-off, never a
+    /// half-configured push). `get` is `|k| std::env::var(k).ok()` in production.
+    pub fn from_env<F: Fn(&str) -> Option<String>>(
+        get: F,
+        timeout: std::time::Duration,
+    ) -> Option<Self> {
+        let url = get(BILLING_INGEST_URL_ENV).filter(|s| !s.is_empty())?;
+        let auth = get(BILLING_INGEST_AUTH_KEY_ENV).filter(|s| !s.is_empty())?;
+        let region = get(BILLING_REGION_ENV).filter(|s| s.chars().count() == 3)?;
+        Some(Self::new(
+            UreqBillingPoster::new(timeout),
+            url,
+            auth,
+            region,
+        ))
+    }
+}
+
 /// The real corelink-billing usage-push target: buffers per-terminal-lease
 /// `RunnerSlotSeconds` events and flushes them as a batch.
 pub struct CorelinkBillingTarget<P: BillingPoster> {
@@ -111,6 +176,8 @@ pub struct CorelinkBillingTarget<P: BillingPoster> {
     url: String,
     auth: String,
     event_kind: String,
+    /// 3-char region stamped on every event (Cloudflare colo by default).
+    region: String,
     /// `lease_id → acquired_at_ms`, to compute slot·seconds at the terminal event.
     open: Mutex<HashMap<String, u64>>,
     /// Pending events awaiting the next flush.
@@ -118,17 +185,24 @@ pub struct CorelinkBillingTarget<P: BillingPoster> {
 }
 
 impl<P: BillingPoster> CorelinkBillingTarget<P> {
-    /// Construct with the agreed [`RUNNER_SLOT_SECONDS_KIND`].
-    pub fn new(poster: P, url: impl Into<String>, auth: impl Into<String>) -> Self {
-        Self::with_event_kind(poster, url, auth, RUNNER_SLOT_SECONDS_KIND)
+    /// Construct with the canonical [`RUNNER_SLOT_SECONDS_KIND`] and the given
+    /// 3-char `region` (Cloudflare colo by default).
+    pub fn new(
+        poster: P,
+        url: impl Into<String>,
+        auth: impl Into<String>,
+        region: impl Into<String>,
+    ) -> Self {
+        Self::with_event_kind(poster, url, auth, region, RUNNER_SLOT_SECONDS_KIND)
     }
 
-    /// Construct with an explicit `event_kind` literal (used once the Server TL
-    /// pins the final string; keeps the literal in ONE place).
+    /// Construct with an explicit `event_kind` literal (keeps the literal in ONE
+    /// place should the canonical string ever change).
     pub fn with_event_kind(
         poster: P,
         url: impl Into<String>,
         auth: impl Into<String>,
+        region: impl Into<String>,
         event_kind: impl Into<String>,
     ) -> Self {
         Self {
@@ -136,6 +210,7 @@ impl<P: BillingPoster> CorelinkBillingTarget<P> {
             url: url.into(),
             auth: auth.into(),
             event_kind: event_kind.into(),
+            region: region.into(),
             open: Mutex::new(HashMap::new()),
             buffer: Mutex::new(Vec::new()),
         }
@@ -182,6 +257,7 @@ impl<P: BillingPoster> CorelinkBillingTarget<P> {
             event_kind: self.event_kind.clone(),
             qty: slot_seconds,
             billing_period: period.clone(),
+            region: self.region.clone(),
             source: BILLING_SOURCE.to_string(),
             time_ms: ev.at_ms,
             idem_key: idem_key(&ev.lease_id, &period),
@@ -295,7 +371,12 @@ mod tests {
     }
 
     fn target(p: RecordingPoster) -> CorelinkBillingTarget<RecordingPoster> {
-        CorelinkBillingTarget::new(p, "https://x/internal/v1/billing/usage", "billing-secret")
+        CorelinkBillingTarget::new(
+            p,
+            "https://x/internal/v1/billing/usage",
+            "billing-secret",
+            "iad",
+        )
     }
 
     /// Acquire→Released emits ONE event whose qty is the slot's lifetime in
@@ -317,8 +398,10 @@ mod tests {
         assert_eq!(arr.len(), 1);
         let e = &arr[0];
         assert_eq!(e.tenant_id, "acme");
+        assert_eq!(e.event_kind, "runner_slot_seconds", "canonical wire string");
         assert_eq!(e.event_kind, RUNNER_SLOT_SECONDS_KIND);
         assert_eq!(e.qty, 3, "(4000-1000)/1000 = 3 slot·seconds");
+        assert_eq!(e.region, "iad", "3-char region stamped on the event");
         assert_eq!(e.source, BILLING_SOURCE);
         assert_eq!(e.time_ms, 4_000);
         assert_eq!(e.idem_key.len(), 64, "BLAKE3 → 32 bytes → 64 hex chars");
@@ -400,6 +483,52 @@ mod tests {
             .unwrap();
         assert!(t.flush().is_err(), "500 surfaces as Err");
         assert_eq!(t.buffered(), 1, "batch retained on non-2xx");
+    }
+
+    /// `from_env` wires the target only when ALL THREE env vars are present +
+    /// valid; any missing/invalid piece → `None` (fail-safe-off, the composition
+    /// root then uses the no-op target).
+    #[test]
+    fn from_env_requires_url_key_and_3char_region() {
+        let ok = |k: &str| -> Option<String> {
+            match k {
+                BILLING_INGEST_URL_ENV => Some("https://api/internal/v1/billing/usage".into()),
+                BILLING_INGEST_AUTH_KEY_ENV => Some("dedicated-secret".into()),
+                BILLING_REGION_ENV => Some("iad".into()),
+                _ => None,
+            }
+        };
+        assert!(
+            CorelinkBillingTarget::from_env(ok, std::time::Duration::from_secs(5)).is_some(),
+            "all three present + valid → Some"
+        );
+
+        // Each missing piece → None.
+        for drop in [
+            BILLING_INGEST_URL_ENV,
+            BILLING_INGEST_AUTH_KEY_ENV,
+            BILLING_REGION_ENV,
+        ] {
+            let get = |k: &str| if k == drop { None } else { ok(k) };
+            assert!(
+                CorelinkBillingTarget::from_env(get, std::time::Duration::from_secs(5)).is_none(),
+                "missing {drop} → None (default-off)"
+            );
+        }
+
+        // A non-3-char region is rejected (the ingest validates 3-char).
+        let bad_region = |k: &str| {
+            if k == BILLING_REGION_ENV {
+                Some("east".into())
+            } else {
+                ok(k)
+            }
+        };
+        assert!(
+            CorelinkBillingTarget::from_env(bad_region, std::time::Duration::from_secs(5))
+                .is_none(),
+            "4-char region → None"
+        );
     }
 
     /// `idem_key` is deterministic per (lease, period) and differs across leases.
