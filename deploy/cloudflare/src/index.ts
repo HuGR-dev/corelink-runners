@@ -8,7 +8,14 @@
 // account before this is trusted. See README.md "Design notes / wrinkles".
 
 import { Container, getContainer } from "@cloudflare/containers";
-import { safeEqual, verifyGithubHmac, buildContainerEnv, revokeCasPatById } from "./lib";
+import {
+  safeEqual,
+  verifyGithubHmac,
+  buildContainerEnv,
+  revokeCasPatById,
+  buildUsageEvent,
+  pushUsageEvent,
+} from "./lib";
 
 export interface Env {
   RUNNER_CONTAINER: DurableObjectNamespace<RunnerContainer>;
@@ -44,6 +51,15 @@ export interface Env {
   // revoke can key on pat_id (the live /revoke contract). Absent ⇒ no revoke
   // (PAT TTL-expires; fail-open). See wrangler kv_namespaces.
   RUNNER_JOB_PATS?: KVNamespace;
+  // ── Billing usage-push (ASK-2) — per-completed-job runner_slot_seconds ──
+  // corelink-billing ingest endpoint (e.g. .../internal/v1/billing/usage).
+  // Absent ⇒ no usage-push (fail-open; billing simply not captured).
+  BILLING_INGEST_URL?: string;
+  // Dedicated `x-corelink-internal-auth` for billing ingest (NEVER the shared
+  // key, NEVER the runner_mint key). Worker secret. Absent ⇒ no usage-push.
+  BILLING_INGEST_AUTH_KEY?: string;
+  // 3-char region stamped on the event; defaults to the request's CF colo.
+  BILLING_REGION?: string;
 }
 
 // Per-job runner container. One DO instance per spawned runner (keyed by handle).
@@ -169,6 +185,46 @@ async function revokeCompletedJob(env: Env, jobId: string): Promise<boolean> {
   }
 }
 
+// One completed job's workflow_job fields we read for billing.
+interface CompletedJob {
+  started_at?: string;
+  completed_at?: string;
+}
+
+// Push the `runner_slot_seconds` usage event for a completed job to corelink-
+// billing. No-op (returns false) unless billing is configured AND we can compute
+// a slot·seconds duration AND we have a 3-char region. Best-effort + FAIL-OPEN:
+// any error is swallowed (billing never breaks the webhook). `region` defaults to
+// the request's CF colo (the substrate's natural 3-char region, ADR-0008).
+async function maybeBillCompletedJob(
+  env: Env,
+  jobId: string,
+  wj: CompletedJob | undefined,
+  request: Request,
+): Promise<boolean> {
+  if (!env.BILLING_INGEST_URL || !env.BILLING_INGEST_AUTH_KEY || !env.CLW_TENANT) return false;
+  try {
+    const startedMs = wj?.started_at ? Date.parse(wj.started_at) : NaN;
+    const completedMs = wj?.completed_at ? Date.parse(wj.completed_at) : NaN;
+    if (!Number.isFinite(startedMs) || !Number.isFinite(completedMs)) return false;
+    const colo = (request as unknown as { cf?: { colo?: string } }).cf?.colo;
+    const region = env.BILLING_REGION ?? colo ?? "";
+    if (region.length !== 3) return false; // ingest validates 3-char; skip if unknown
+    const ev = await buildUsageEvent({
+      tenantId: env.CLW_TENANT,
+      jobId,
+      startedMs,
+      completedMs,
+      region,
+    });
+    await pushUsageEvent(env, ev);
+    return true;
+  } catch (e) {
+    console.log(`billing usage-push failed (skipped, will reconcile): ${(e as Error).message}`);
+    return false;
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -193,7 +249,12 @@ export default {
       }
       const evt = JSON.parse(raw) as {
         action?: string;
-        workflow_job?: { labels?: string[]; id?: number };
+        workflow_job?: {
+          labels?: string[];
+          id?: number;
+          started_at?: string;
+          completed_at?: string;
+        };
         repository?: { full_name?: string };
       };
       const label = env.AUTOSCALER_LABEL ?? "corelink-dogfood";
@@ -211,7 +272,10 @@ export default {
       // Best-effort + fail-open: a revoke failure never breaks the webhook.
       if (evt.action === "completed") {
         const revoked = await revokeCompletedJob(env, jobId);
-        return json({ ok: true, revoked, job_id: jobId }, 200);
+        // ASK-2: emit the per-job runner_slot_seconds usage event (prod billing
+        // lives here, not the dev-only Rust fabricd). Best-effort, fail-open.
+        const billed = await maybeBillCompletedJob(env, jobId, evt.workflow_job, request);
+        return json({ ok: true, revoked, billed, job_id: jobId }, 200);
       }
 
       if (evt.action !== "queued") {

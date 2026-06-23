@@ -8,6 +8,10 @@ import {
   verifyGithubHmac,
   buildContainerEnv,
   revokeCasPatById,
+  buildUsageEvent,
+  pushUsageEvent,
+  usageIdemKey,
+  billingPeriod,
 } from "../src/lib";
 
 describe("safeEqual (constant-time bearer compare)", () => {
@@ -170,5 +174,84 @@ describe("revokeCasPatById (revoke-by-pat_id, the live /revoke contract)", () =>
     vi.stubGlobal("fetch", vi.fn(async () => new Response("bad", { status: 400 })));
     const env = { CORELINK_RUNNER_MINT_AUTH_KEY: "k", CLW_TENANT: "ee30f7ba" } as never;
     await expect(revokeCasPatById(env, "pat-123")).rejects.toThrow(/D-9 revoke 400/);
+  });
+});
+
+describe("billing usage-push (ASK-2 — runner_slot_seconds)", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("billingPeriod is UTC YYYY-MM", () => {
+    expect(billingPeriod(Date.parse("2026-06-23T11:08:00Z"))).toBe("2026-06");
+    expect(billingPeriod(Date.parse("2026-01-01T00:00:00Z"))).toBe("2026-01");
+  });
+
+  it("usageIdemKey is deterministic 64-hex, scoped to (job, period)", async () => {
+    const a = await usageIdemKey("job-1", "2026-06");
+    expect(a).toMatch(/^[0-9a-f]{64}$/);
+    expect(await usageIdemKey("job-1", "2026-06")).toBe(a); // deterministic
+    expect(await usageIdemKey("job-2", "2026-06")).not.toBe(a); // job-scoped
+    expect(await usageIdemKey("job-1", "2026-07")).not.toBe(a); // period-scoped
+  });
+
+  it("buildUsageEvent computes slot·seconds, the canonical kind, and the full wire", async () => {
+    const started = "2026-06-23T11:00:00Z";
+    const completed = "2026-06-23T11:00:03Z"; // +3s
+    const ev = await buildUsageEvent({
+      tenantId: "3560e213-1e23-4fd0-8871-7033c6052ebd",
+      jobId: "82597479935",
+      startedMs: Date.parse(started),
+      completedMs: Date.parse(completed),
+      region: "iad",
+    });
+    expect(ev.tenant_id).toBe("3560e213-1e23-4fd0-8871-7033c6052ebd");
+    expect(ev.event_kind).toBe("runner_slot_seconds");
+    expect(ev.qty).toBe(3); // (11:00:03 − 11:00:00)/1000
+    expect(ev.region).toBe("iad");
+    expect(ev.source).toBe("corelink-runners/spawn-worker");
+    expect(ev.billing_period).toBe("2026-06");
+    expect(ev.idem_key).toMatch(/^[0-9a-f]{64}$/);
+    expect(ev.time_ms).toBe(Date.parse(completed));
+  });
+
+  it("buildUsageEvent clamps a negative duration (clock skew) to qty 0", async () => {
+    const ev = await buildUsageEvent({
+      tenantId: "t",
+      jobId: "j",
+      startedMs: 5000,
+      completedMs: 1000, // completed before started
+      region: "iad",
+    });
+    expect(ev.qty).toBe(0); // never bills negative
+  });
+
+  it("pushUsageEvent POSTs a one-event batch with the dedicated key on 2xx", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ accepted: 1 }), { status: 202 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const env = {
+      BILLING_INGEST_URL: "https://corelink-api.humangr.com/internal/v1/billing/usage",
+      BILLING_INGEST_AUTH_KEY: "billing-key",
+      CLW_TENANT: "t",
+    };
+    const ev = await buildUsageEvent({
+      tenantId: "t",
+      jobId: "j",
+      startedMs: 0,
+      completedMs: 2000,
+      region: "iad",
+    });
+    await pushUsageEvent(env, ev);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toContain("/internal/v1/billing/usage");
+    const body = JSON.parse((init as RequestInit).body as string);
+    expect(Array.isArray(body)).toBe(true); // a batch
+    expect(body[0].event_kind).toBe("runner_slot_seconds");
+    expect((init as RequestInit).headers).toMatchObject({ "x-corelink-internal-auth": "billing-key" });
+  });
+
+  it("pushUsageEvent throws on non-2xx (caller swallows — fail-open)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("bad", { status: 400 })));
+    const env = { BILLING_INGEST_URL: "https://x/usage", BILLING_INGEST_AUTH_KEY: "k", CLW_TENANT: "t" };
+    const ev = await buildUsageEvent({ tenantId: "t", jobId: "j", startedMs: 0, completedMs: 1000, region: "iad" });
+    await expect(pushUsageEvent(env, ev)).rejects.toThrow(/billing usage-push 400/);
   });
 });
