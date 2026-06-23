@@ -129,3 +129,106 @@ export async function buildContainerEnv(
   }
   return { containerEnv };
 }
+
+// ── Billing usage-push (ASK-2) — per-completed-job runner_slot_seconds ────────
+//
+// The prod (all-Cloudflare) home for billing: the Rust `corelink-fabricd`
+// billing-push is the DEV path; in prod the spawn-Worker IS the runner path, so
+// the usage event is emitted here on `workflow_job:completed`. Wire: a JSON batch
+// of one `UsageEvent` to corelink-billing ingest, dedicated `BILLING_INGEST_AUTH_KEY`
+// (never the shared key). The aggregator owns rollup/chain/dedup — we send raw,
+// at-least-once, idempotent by `idem_key`. FAIL-OPEN: any error is swallowed by the
+// caller (billing never breaks the webhook).
+
+/** The subset of Env the billing usage-push reads. */
+export interface BillingEnv {
+  // corelink-billing ingest endpoint, e.g.
+  // https://corelink-api.humangr.com/internal/v1/billing/usage. Absent ⇒ no push.
+  BILLING_INGEST_URL?: string;
+  // Dedicated `x-corelink-internal-auth` value for billing ingest (NEVER the
+  // shared internal key, nor the runner_mint key). Worker secret. Absent ⇒ no push.
+  BILLING_INGEST_AUTH_KEY?: string;
+  // 3-char region stamped on the event (Cloudflare colo by default — ADR-0008).
+  // Falls back to the request's CF colo when unset.
+  BILLING_REGION?: string;
+  // The owner tenant the job was minted under = the billed tenant_id.
+  CLW_TENANT?: string;
+}
+
+const BILLING_SOURCE = "corelink-runners/spawn-worker";
+// The canonical wire string the Server TL pinned (ASK-2 final, 2026-06-23).
+const RUNNER_SLOT_SECONDS_KIND = "runner_slot_seconds";
+
+/** `"YYYY-MM"` (UTC) for an epoch-ms instant. */
+export function billingPeriod(atMs: number): string {
+  const d = new Date(atMs);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+
+/**
+ * Deterministic 64-hex idempotency key = SHA-256(jobId ‖ period). The ingest
+ * dedups on it opaquely, so any stable 64-hex is valid (the contract says
+ * "e.g. BLAKE3"); SHA-256 is what the Workers runtime provides natively.
+ */
+export async function usageIdemKey(jobId: string, period: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${jobId}|${period}`));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** One raw usage event — the per-event wire shape the aggregator ingests. */
+export interface UsageEvent {
+  tenant_id: string;
+  event_kind: string;
+  qty: number;
+  billing_period: string;
+  region: string;
+  source: string;
+  time_ms: number;
+  idem_key: string;
+}
+
+/**
+ * Pure builder (vitest-testable, no fetch): the `runner_slot_seconds` event for
+ * one completed job. `qty = floor((completedMs − startedMs)/1000)`, clamped ≥ 0
+ * (a clock skew / missing start never bills negative). `idem_key` is per
+ * (job, period) so an at-least-once re-send dedups.
+ */
+export async function buildUsageEvent(opts: {
+  tenantId: string;
+  jobId: string;
+  startedMs: number;
+  completedMs: number;
+  region: string;
+}): Promise<UsageEvent> {
+  const qty = Math.max(0, Math.floor((opts.completedMs - opts.startedMs) / 1000));
+  const period = billingPeriod(opts.completedMs);
+  return {
+    tenant_id: opts.tenantId,
+    event_kind: RUNNER_SLOT_SECONDS_KIND,
+    qty,
+    billing_period: period,
+    region: opts.region,
+    source: BILLING_SOURCE,
+    time_ms: opts.completedMs,
+    idem_key: await usageIdemKey(opts.jobId, period),
+  };
+}
+
+/**
+ * POST a batch of one usage event to corelink-billing ingest with the dedicated
+ * key. Throws on a non-2xx (the caller swallows it — fail-open). The ingest
+ * returns `{accepted, deduped, total}`; we only need the 2xx (the aggregator
+ * reconciles, and idem_key makes a retry safe).
+ */
+export async function pushUsageEvent(env: BillingEnv, ev: UsageEvent): Promise<void> {
+  const resp = await fetch(env.BILLING_INGEST_URL ?? "", {
+    method: "POST",
+    headers: {
+      "x-corelink-internal-auth": env.BILLING_INGEST_AUTH_KEY ?? "",
+      "content-type": "application/json",
+      "user-agent": "corelink-spawn-worker",
+    },
+    body: JSON.stringify([ev]),
+  });
+  if (!resp.ok) throw new Error(`billing usage-push ${resp.status}`);
+}
