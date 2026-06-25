@@ -20,10 +20,12 @@
   "vars": {
     "CORELINK_INTROSPECT_URL": "https://corelink-api.humangr.com/internal/v1/auth/introspect",
     "BILLING_INGEST_URL": "https://corelink-api.humangr.com/internal/v1/billing/usage",
-    "BILLING_REGION": "iad"
-    // CLOUDFLARE_SPAWN_WORKER_URL is added when boxes are wired (checkpoint B+):
-    // checkpoint A (lease API + §13 + attestation) runs with NO box backend
-    // (exec 503, lease/§13/attestation live — proven in the dress-rehearsal).
+    "BILLING_REGION": "iad",
+    // Box backend (ADR-0008): fabricd's CloudflareEngine spawns runner boxes via
+    // the spawn-Worker's /v1/spawn. Paired with the CLOUDFLARE_SPAWN_AUTH_TOKEN
+    // secret (a shared runner-internal token set on BOTH workers). With this set,
+    // exec routes through the CF substrate (verified: "cloudflare substrate: wired").
+    "CLOUDFLARE_SPAWN_WORKER_URL": "https://corelink-spawn-worker.gmhelmold.workers.dev"
   },
 
   // The singleton control-plane container DO. ONE instance: the in-memory lease
