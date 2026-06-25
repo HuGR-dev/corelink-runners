@@ -15,6 +15,8 @@ import {
   revokeCasPatById,
   buildUsageEvent,
   pushUsageEvent,
+  claimSpawn,
+  releaseSpawnClaim,
 } from "./lib";
 
 export interface Env {
@@ -290,11 +292,23 @@ export default {
       // The repo is the webhook's repository (full_name).
       const repo = evt.repository?.full_name ?? "";
       if (!repo) return json({ error: "no repository in payload" }, 400);
+      // ── Spawn idempotency (gap #2): claim this jobId BEFORE the expensive
+      // mint+spawn. A redelivered queued webhook (GitHub at-least-once) for the
+      // same job loses the claim and is a no-op — no double mint+spawn / double
+      // COGS. Fail-open when no KV is bound (dedup is an optimization, never a
+      // gate that refuses a real job).
+      if (!(await claimSpawn(env.RUNNER_JOB_PATS, jobId))) {
+        return json({ ok: true, deduped: true, job_id: jobId }, 200);
+      }
       try {
         const jit = await mintJit(env, repo, label);
         const handle = await spawnRunner(env, jit, jobId);
         return json({ ok: true, handle }, 201);
       } catch (e) {
+        // Mint/spawn failed: RELEASE the claim so a legitimate retry (GitHub
+        // redelivery / re-queue) can claim again and actually spawn — otherwise
+        // a transient failure would block this job until the claim TTL-expires.
+        await releaseSpawnClaim(env.RUNNER_JOB_PATS, jobId);
         return json({ error: `autoscale failed: ${(e as Error).message}` }, 502);
       }
     }

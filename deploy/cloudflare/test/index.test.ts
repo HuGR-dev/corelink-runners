@@ -12,6 +12,9 @@ import {
   pushUsageEvent,
   usageIdemKey,
   billingPeriod,
+  claimSpawn,
+  releaseSpawnClaim,
+  type KvLike,
 } from "../src/lib";
 
 describe("safeEqual (constant-time bearer compare)", () => {
@@ -253,5 +256,74 @@ describe("billing usage-push (ASK-2 — runner_slot_seconds)", () => {
     const env = { BILLING_INGEST_URL: "https://x/usage", BILLING_INGEST_AUTH_KEY: "k", CLW_TENANT: "t" };
     const ev = await buildUsageEvent({ tenantId: "t", jobId: "j", startedMs: 0, completedMs: 1000, region: "iad" });
     await expect(pushUsageEvent(env, ev)).rejects.toThrow(/billing usage-push 400/);
+  });
+});
+
+// ── Spawn idempotency (gap #2) — dedup a redelivered queued webhook ───────────
+
+/** An in-memory KvLike with a `spy` on each op, mirroring the KV subset used. */
+function fakeKv(seed: Record<string, string> = {}): KvLike & { store: Map<string, string> } {
+  const store = new Map<string, string>(Object.entries(seed));
+  return {
+    store,
+    get: vi.fn(async (k: string) => store.get(k) ?? null),
+    put: vi.fn(async (k: string, v: string) => {
+      store.set(k, v);
+    }),
+    delete: vi.fn(async (k: string) => {
+      store.delete(k);
+    }),
+  };
+}
+
+describe("claimSpawn (spawn idempotency)", () => {
+  it("first claim for a jobId WINS (true) and records the claim", async () => {
+    const kv = fakeKv();
+    expect(await claimSpawn(kv, "job-1")).toBe(true);
+    expect(kv.store.get("spawn:job-1")).toBe("1");
+  });
+
+  it("a redelivery for the SAME jobId LOSES the claim (false) — no double spawn", async () => {
+    const kv = fakeKv();
+    expect(await claimSpawn(kv, "job-1")).toBe(true);
+    expect(await claimSpawn(kv, "job-1")).toBe(false);
+  });
+
+  it("distinct jobIds each win their own claim", async () => {
+    const kv = fakeKv();
+    expect(await claimSpawn(kv, "job-a")).toBe(true);
+    expect(await claimSpawn(kv, "job-b")).toBe(true);
+  });
+
+  it("uses the `spawn:` prefix (never collides with the bare jobId pat-map key)", async () => {
+    const kv = fakeKv({ "job-1": "pat-id-xyz" }); // the pat map under the bare key
+    expect(await claimSpawn(kv, "job-1")).toBe(true); // still wins — distinct namespace
+    expect(kv.store.get("job-1")).toBe("pat-id-xyz"); // pat entry untouched
+    expect(kv.store.get("spawn:job-1")).toBe("1");
+  });
+
+  it("FAIL-OPEN with no KV bound: claims succeed (never block a real job)", async () => {
+    expect(await claimSpawn(undefined, "job-1")).toBe(true);
+  });
+
+  it("sets a TTL on the claim (self-cleaning backstop)", async () => {
+    const kv = fakeKv();
+    await claimSpawn(kv, "job-1");
+    expect(kv.put).toHaveBeenCalledWith("spawn:job-1", "1", { expirationTtl: expect.any(Number) });
+  });
+});
+
+describe("releaseSpawnClaim (retry after a failed spawn)", () => {
+  it("deletes the claim so a legitimate retry can re-claim", async () => {
+    const kv = fakeKv();
+    await claimSpawn(kv, "job-1");
+    await releaseSpawnClaim(kv, "job-1");
+    expect(kv.store.has("spawn:job-1")).toBe(false);
+    // The retry now wins again and can spawn.
+    expect(await claimSpawn(kv, "job-1")).toBe(true);
+  });
+
+  it("no-op (no throw) when no KV is bound", async () => {
+    await expect(releaseSpawnClaim(undefined, "job-1")).resolves.toBeUndefined();
   });
 });

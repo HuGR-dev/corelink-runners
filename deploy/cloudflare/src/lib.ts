@@ -13,6 +13,68 @@ export interface MintEnv {
   CLW_TENANT?: string;
 }
 
+// ── Spawn idempotency (gap #2) — dedup a redelivered queued webhook ──────────
+//
+// GitHub redelivers a webhook (retries, at-least-once) — two `queued` deliveries
+// for the SAME workflow_job.id would otherwise mint+spawn TWICE → double COGS
+// (billing dedups on idem_key at completion, but the spawn cost does not). This
+// is a per-jobId CLAIM in KV, set BEFORE the expensive mint+spawn: the first
+// delivery wins the claim and spawns; a redelivery sees the claim and is a no-op.
+//
+// The minimal KV subset used (lib.ts is runtime-agnostic — no `KVNamespace`
+// import). `RUNNER_JOB_PATS` satisfies this; we reuse it with a `spawn:` prefix
+// so NO new wrangler binding is needed (the pat map uses the bare jobId key).
+export interface KvLike {
+  get(key: string): Promise<string | null>;
+  put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void>;
+  delete(key: string): Promise<void>;
+}
+
+// How long a spawn claim lives — past the longest CI job, a self-cleaning
+// backstop (the claim is normally left to TTL-expire; only a FAILED spawn
+// releases it early so a legitimate retry can re-spawn).
+export const SPAWN_CLAIM_TTL_S = 7200;
+
+function spawnClaimKey(jobId: string): string {
+  return `spawn:${jobId}`;
+}
+
+/**
+ * Try to CLAIM the spawn for `jobId`. Returns `true` if THIS caller won the claim
+ * (it must proceed to mint+spawn), `false` if the job was already claimed (a
+ * redelivery → skip, no double spawn).
+ *
+ * FAIL-OPEN by north-star: with no KV bound we cannot dedup, so we return `true`
+ * (spawn) rather than block a job — dedup is an optimization on a correct path,
+ * never a gate that can refuse a real job. Residual race: two EXACTLY-concurrent
+ * deliveries can both read "absent" before either writes (KV has no atomic CAS);
+ * this collapses the common case (retries seconds apart) and is the pragmatic
+ * mitigation short of a Durable Object. Documented, not silently capped.
+ */
+export async function claimSpawn(kv: KvLike | undefined, jobId: string): Promise<boolean> {
+  if (!kv) return true; // no dedup infra ⇒ fail-open to spawn (never block a job)
+  const key = spawnClaimKey(jobId);
+  const existing = await kv.get(key);
+  if (existing) return false; // already claimed ⇒ a redelivery, skip
+  await kv.put(key, "1", { expirationTtl: SPAWN_CLAIM_TTL_S });
+  return true;
+}
+
+/**
+ * Release a spawn claim — called ONLY when mint/spawn FAILED, so GitHub's retry
+ * (or a re-queue) of the same job can claim again and actually spawn. A
+ * successful spawn leaves the claim to TTL-expire (it must keep blocking
+ * redeliveries for the job's lifetime). Best-effort: a delete failure just means
+ * the claim TTL-expires (the job won't re-spawn until then — fail-safe, never a
+ * double spawn).
+ */
+export async function releaseSpawnClaim(kv: KvLike | undefined, jobId: string): Promise<void> {
+  if (!kv) return;
+  await kv.delete(spawnClaimKey(jobId)).catch(() => {
+    /* best-effort: TTL is the backstop */
+  });
+}
+
 // Constant-time string compare (no early-exit on first mismatch) so a bearer/
 // signature check can't be timing-probed. Length may leak (fixed-length,
 // high-entropy tokens); the byte loop is constant-time.
