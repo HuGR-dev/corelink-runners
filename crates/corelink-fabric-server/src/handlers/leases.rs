@@ -177,13 +177,21 @@ pub(crate) fn build_compute_gate(
         return Ok(None);
     };
     let period_key = compute_meter::period_key(now_ms);
-    // Ceiling source: the static / live-onboarding plan registry surfaces the
-    // per-tier ceiling; the CoreLink-introspect backend returns 0 (the
-    // per-tenant `max_vcpu_h` is NOT yet on the introspect entitlement vector —
-    // an owner / CoreLink-TL-gated wire-contract amendment, DEFERRED, never
-    // added unilaterally). `ceiling_vcpu_ms == 0` makes the ledger SKIP the
-    // compute check, the correct default-off for the deferred path.
+    // Ceiling source: the plan registry's per-tenant `max_vcpu_h` ceiling, in
+    // vCPU·ms. The static / live-onboarding registry surfaces the per-tier
+    // ceiling; the CoreLink-introspect backend resolves it from the
+    // `max_vcpu_h` field on the (now-frozen) self-serve entitlement vector —
+    // `CoreLinkPlanStore::plan_of_resolving` parses + caches it on THIS acquire's
+    // plan resolution (which runs before this gate build), and the token-free
+    // `tenant_ceiling_vcpu_ms` reads it back here. `ceiling_vcpu_ms == 0` (the
+    // field absent / a tenant never resolved) makes the ledger SKIP the compute
+    // check — the correct fail-SAFE-disabled default, never a reject-all.
     let ceiling = state.plans.tenant_ceiling_vcpu_ms(tenant);
+    // The reservation is `vcpu × ttl` — the box's ALLOCATED wall-clock window
+    // (the lease's F1-clamped TTL), NOT consumed CPU time. This is deliberate:
+    // Cloudflare bills memory+disk by allocation (instance-up wall-clock), so an
+    // idle-long job (little CPU, long wall-clock) must still be bounded by the
+    // ceiling. Metering the wall on CPU time would leak exactly that margin.
     let reserved = compute_meter::vcpu_ms(vcpu, ttl);
     // fail-closed: never reserve a value that wraps the signed bigint ledger
     // column (the `as i64` hazard) — reject at the boundary.

@@ -144,6 +144,17 @@ fn valid_no_cap() -> String {
     format!(r#"{{"valid":true,"tenant_id":"{TENANT_UUID}"}}"#)
 }
 
+/// A `valid:true` body carrying BOTH the concurrency cap AND the monthly
+/// `max_vcpu_h` compute ceiling — the FULL self-serve entitlement vector. The
+/// ceiling rides the same introspect response the cap does and is consumed by
+/// `CoreLinkPlanStore` (parsed + cached on `plan_of_resolving`, read back by the
+/// token-free `tenant_ceiling_vcpu_ms` on the SAME acquire).
+fn valid_with_cap_and_ceiling(max_concurrency: u32, max_vcpu_h: u64) -> String {
+    format!(
+        r#"{{"valid":true,"tenant_id":"{TENANT_UUID}","max_concurrency":{max_concurrency},"max_vcpu_h":{max_vcpu_h}}}"#
+    )
+}
+
 // ── Harness builders ──────────────────────────────────────────────────────────
 
 /// Build `(router, state)` backed by a `CoreLinkTokenStore` (auth) and a
@@ -190,14 +201,42 @@ fn harness_auth_transport_error() -> (Router, AppState) {
     (router, state)
 }
 
+/// Build `(router, state)` like [`harness_corelink`] but with the box vCPU count
+/// armed (`with_runner_vcpu`), so `build_compute_gate` produces a LIVE
+/// `ComputeGate` and the monthly `max_vcpu_h` ceiling is actually enforced. With
+/// `runner_vcpu == None` (the default harness) the gate is `None` and the ceiling
+/// is a no-op — so a compute-ceiling test MUST arm the vCPU here.
+fn harness_corelink_with_vcpu(auth_body: &str, plan_body: &str, vcpu: u32) -> (Router, AppState) {
+    let auth_store = Arc::new(CoreLinkTokenStore::new(
+        FakeIntrospect::ok(200, auth_body),
+        auth_cfg(),
+    ));
+    let plan_store: Arc<dyn corelink_fabric_server::PlanSource> = Arc::new(CoreLinkPlanStore::new(
+        FakeIntrospect::ok(200, plan_body),
+        auth_cfg(),
+    ));
+    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let state = AppState::new(ledger, plan_store, Arc::new(FixedClock(NOW_MS)))
+        .with_runner_vcpu(Some(vcpu));
+    let router = app(auth_store, state.clone());
+    (router, state)
+}
+
 // ── Request helpers ───────────────────────────────────────────────────────────
 
 fn acquire_req_http() -> Request<Body> {
+    acquire_req_http_ttl(60_000)
+}
+
+/// An acquire request with a caller-chosen TTL (`expiry_ms`). The compute
+/// reservation is `vcpu × ttl` (ALLOCATED wall-clock, never cpuTimeSec), so the
+/// TTL is the knob a compute-ceiling test drives to cross the wall.
+fn acquire_req_http_ttl(expiry_ms: u64) -> Request<Body> {
     let body = AcquireRequest {
         image_digest: PINNED_IMAGE.to_string(),
         net_policy: "isolated".to_string(),
         tmp_root: "/work/tmp".to_string(),
-        expiry_ms: 60_000,
+        expiry_ms,
         runner: None,
     };
     Request::builder()
@@ -425,7 +464,99 @@ async fn corelink_empty_entitlement_day_one_rejects_and_does_not_bill() {
     );
 }
 
-// ── Test 5: SKIPPED — slow introspect / timeout ───────────────────────────────
+// ── Test 5: the monthly vCPU-h compute ceiling FROM introspect, on ALLOCATED ──
+//           wall-clock (Server TL asks 2026-06-23 meter-axis + 2026-06-24 #5) ──
+
+/// The per-tenant **monthly compute ceiling** (`max_vcpu_h`) rides the SAME
+/// introspect entitlement vector as the concurrency cap, is consumed by
+/// `CoreLinkPlanStore`, and is enforced END-TO-END through the real acquire HTTP
+/// path on **allocated wall-clock**, NOT cpuTimeSec.
+///
+/// This is the half of the cap story the existing suite did NOT cover: Test 1
+/// proves the *concurrency* cap (admit N, reject N+1); nothing proved the
+/// *compute* ceiling fed from `max_vcpu_h` actually rejects. It also pins the
+/// metering AXIS the Server TL flagged (2026-06-23): the reservation is
+/// `vcpu × ttl` — the box's ALLOCATED wall-clock window, which is exactly what
+/// Cloudflare bills mem+disk on — so an idle-long job (little CPU, long
+/// wall-clock) is bounded by the ceiling. If the ceiling were ever metered on
+/// CPU time, this test would let the over-ceiling acquire through and FAIL.
+///
+/// Arithmetic (deterministic): `ceiling_vcpu_ms = max_vcpu_h × 3_600_000`.
+/// With `max_vcpu_h = 2` the ceiling is `7_200_000` vCPU·ms. Each acquire
+/// reserves `vcpu × ttl = 2 × 1_800_000 = 3_600_000` vCPU·ms (a 30-min lease on
+/// a 2-vCPU box = 1 vCPU-h). So the ledger invariant
+/// `Σ_reserved + new_reserved ≤ ceiling` admits exactly TWO leases
+/// (`2 × 3_600_000 = 7_200_000 = ceiling`) and rejects the THIRD on compute —
+/// with `max_concurrency = 100`, concurrency can never be the limiter, so the
+/// rejection is unambiguously the compute wall.
+#[tokio::test]
+async fn corelink_compute_ceiling_from_introspect_rejects_on_allocated_wall_clock() {
+    const MAX_CONCURRENCY: u32 = 100; // far above the 3 leases here — never the limiter
+    const MAX_VCPU_H: u64 = 2; // ceiling = 2 × 3_600_000 = 7_200_000 vCPU·ms
+    const BOX_VCPU: u32 = 2;
+    const TTL_MS: u64 = 1_800_000; // 30 min (≤ the 60-min F1 clamp) → reserve = 1 vCPU-h
+
+    let body = valid_with_cap_and_ceiling(MAX_CONCURRENCY, MAX_VCPU_H);
+    let (router, state) = harness_corelink_with_vcpu(&body, &body, BOX_VCPU);
+
+    // Two acquires fit under the ceiling (Σ = 2 × 1 vCPU-h = the 2 vCPU-h wall).
+    for i in 0..2 {
+        let resp = router
+            .clone()
+            .oneshot(acquire_req_http_ttl(TTL_MS))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "acquire #{i} is within the {MAX_VCPU_H} vCPU-h ceiling and must admit"
+        );
+    }
+
+    // The THIRD acquire crosses the monthly compute wall → 429 over_cap with the
+    // DISTINCT "upgrade tier" message (NOT the concurrency-cap message — cap is
+    // 100, so concurrency cannot be the cause).
+    let over = router
+        .clone()
+        .oneshot(acquire_req_http_ttl(TTL_MS))
+        .await
+        .unwrap();
+    assert_eq!(
+        over.status().as_u16(),
+        ApiError::OverCap.http_status(),
+        "the over-ceiling acquire must be 429 over_cap"
+    );
+    let bytes = axum::body::to_bytes(over.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let err: ErrorBody = serde_json::from_slice(&bytes).expect("ErrorBody-shaped JSON");
+    assert_eq!(err.code, ApiError::OverCap.code(), "frozen over_cap code");
+    assert!(
+        err.message.contains("compute ceiling"),
+        "the rejection must be the COMPUTE wall, not the concurrency cap — got {:?}",
+        err.message
+    );
+
+    // Billing integrity: exactly TWO Acquired events (the admitted leases); the
+    // compute-rejected acquire emitted NOTHING.
+    let meter = state.slot_meter.lock().unwrap();
+    let acquired = meter
+        .journal()
+        .iter()
+        .filter(|e| matches!(e.kind, SlotEventKind::Acquired))
+        .count();
+    assert_eq!(
+        acquired, 2,
+        "two admitted leases bill; the over-ceiling reject does not"
+    );
+    assert_eq!(
+        meter.journal().len(),
+        2,
+        "the compute-ceiling reject must NOT emit a slot event"
+    );
+}
+
+// ── Test 6: SKIPPED — slow introspect / timeout ───────────────────────────────
 //
 // Modelling a timeout requires either a real listening socket (network) or a
 // production-side seam (e.g. an injectable sleep before the transport call).
