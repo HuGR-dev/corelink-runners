@@ -31,13 +31,15 @@
 //!   NEVER silently falls back to memory (that would re-introduce
 //!   split-brain / restart-loss invisibly).  `SystemClock` always.
 //!
-//! # Not yet wired
+//! # Envelope / §13 emission — WIRED
 //!
-//! **Envelope / §13 emission** (CF-ENVELOPE-WIRE) — per-lease `CaptureHook`
-//! registration at acquire time is a separate work-package.  The envelope poll
-//! endpoints are mounted by `app_full` (so the routes exist) but always return
-//! 404 until that wiring lands.  This binary serves the lease / exec /
-//! attestation path only.
+//! Per-lease `CaptureHook` registration at acquire time (WP-ENVELOPE-WIRE) has
+//! landed: [`build_app_and_state`] wires ONE shared `HookRegistry` onto both the
+//! HTTP handlers (via `app_full`) and the returned `state`, and the acquire
+//! success path (`finalize_admitted_lease`) opens a `CaptureHook` and registers
+//! it for the newly-Held lease.  So the envelope poll/ingest endpoints
+//! (`/v1/leases/{id}/envelope/{events,meta,ingest}` + the close terminal-observe)
+//! are live for every acquired lease, satisfying integration-contract v1.2.0 §13.
 
 use std::sync::{Arc, Mutex};
 
@@ -865,11 +867,13 @@ fn parse_positive_usize(
 ///   introspection endpoint.  The `UreqIntrospect` transport is configured
 ///   with the resolved timeout.
 ///
-/// # Not yet wired
+/// # Envelope / §13 emission — WIRED
 ///
-/// **Envelope / §13 emission** (CF-ENVELOPE-WIRE) — per-lease `CaptureHook`
-/// registration at acquire time is a separate work-package.  The envelope poll
-/// endpoints are mounted (routes exist) but return 404 until that wiring lands.
+/// One shared `HookRegistry` is layered onto the HTTP handlers (via `app_full`)
+/// AND set on the returned `state`, so the acquire success path
+/// (`finalize_admitted_lease`) registers a per-lease `CaptureHook` and the
+/// envelope poll/ingest endpoints are live for every acquired lease
+/// (integration-contract v1.2.0 §13).
 pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, crate::AppState)> {
     let registry = BoxRegistry::new();
 
