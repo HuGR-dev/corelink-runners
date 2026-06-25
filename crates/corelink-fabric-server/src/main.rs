@@ -86,34 +86,22 @@ async fn main() -> anyhow::Result<()> {
     if cfg.mock_exec {
         eprintln!("cloud backend: MOCK (deterministic stub, offline adapter dev only)");
     } else {
-        // Report the backend the wiring ACTUALLY resolved — the same two-var
-        // condition as `cloud_backend_from_env`, never a token-only guess that
-        // claims "Northflank" while silently running NoBox.
+        // Report the exec/spawn backend the wiring ACTUALLY resolved, in the
+        // SAME precedence as `build_app_and_state` (server.rs): the Cloudflare
+        // substrate is probed FIRST and WINS when its env is present; ELSE
+        // Northflank; ELSE NoBox (every exec 503). Reporting exactly ONE backend
+        // here means the log can never claim "execs will 503" while a substrate
+        // is actually wired (the prior split diagnostic could print both).
         use corelink_fabric_server::cloud_exec::{CloudBackendStatus, cloud_backend_status};
-        match cloud_backend_status(|k| std::env::var(k).ok()) {
-            CloudBackendStatus::Wired => eprintln!(
-                "cloud backend: Northflank (NORTHFLANK_API_TOKEN + NORTHFLANK_PROJECT_ID set)"
-            ),
-            CloudBackendStatus::PartialConfig { present, missing } => eprintln!(
-                "cloud backend: NONE — {present} is set but {missing} is missing/empty; \
-                 cloud exec is OFF and every exec will 503. Set {missing} to enable it."
-            ),
-            CloudBackendStatus::Off => eprintln!(
-                "cloud backend: NONE — no NORTHFLANK_* configured; execs will 503 (fail-closed)"
-            ),
-        }
-        // ── Cloudflare substrate boot diagnostic (R2) — DEFAULT-OFF ────────────
-        // Mirrors the Northflank disk-validate boot warn (cloud_exec S3): read the
-        // CF config from env; absent ⇒ from_env None ⇒ a one-line "off" (no
-        // behaviour change). When armed, run `validate` and print the resolved
-        // truth, or — like the Northflank S3 diagnostic — a LOUD WARN (does NOT
-        // hard-fail: the per-spawn floor in CloudflareEngine::spawn is the hard
-        // backstop; this only shortens the operator debug loop).
         match corelink_cloud_engine::CloudflareConfig::from_env() {
-            None => eprintln!("cloudflare substrate: off (no CLOUDFLARE_SPAWN_* configured)"),
+            // Cloudflare env present ⇒ CF is the selected exec+spawn backend (it
+            // wins even if NORTHFLANK_* is also set, mirroring server.rs). The
+            // `validate` only sharpens the operator debug loop — the per-spawn
+            // floor in CloudflareEngine::spawn is the hard backstop, so a WARN
+            // here does NOT hard-fail.
             Some(cf) => match cf.validate() {
                 Ok(()) => eprintln!(
-                    "cloudflare substrate: wired (url={}, disk={} MiB)",
+                    "exec backend: Cloudflare substrate (url={}, disk={} MiB)",
                     cf.spawn_worker_url, cf.runner_storage_mb
                 ),
                 Err(why) => {
@@ -124,6 +112,21 @@ async fn main() -> anyhow::Result<()> {
                     eprintln!("  {why}");
                     eprintln!();
                 }
+            },
+            // No Cloudflare env ⇒ fall back to Northflank; ELSE NoBox. ONLY here
+            // (both substrates off) can "execs will 503" be true.
+            None => match cloud_backend_status(|k| std::env::var(k).ok()) {
+                CloudBackendStatus::Wired => eprintln!(
+                    "exec backend: Northflank (NORTHFLANK_API_TOKEN + NORTHFLANK_PROJECT_ID set)"
+                ),
+                CloudBackendStatus::PartialConfig { present, missing } => eprintln!(
+                    "exec backend: NONE — {present} is set but {missing} is missing/empty; \
+                     cloud exec is OFF and every exec will 503. Set {missing} to enable it."
+                ),
+                CloudBackendStatus::Off => eprintln!(
+                    "exec backend: NONE — no CLOUDFLARE_SPAWN_* or NORTHFLANK_* configured; \
+                     execs will 503 (fail-closed)"
+                ),
             },
         }
     }
