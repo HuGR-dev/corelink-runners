@@ -1,0 +1,57 @@
+{
+  // corelink-fabricd as a Cloudflare Container (gap-#1 option b, owner 2026-06-25).
+  // The Rust control plane (RunnerLease API + §13 envelope + attestation key) runs
+  // as ONE long-lived singleton container; a thin proxy Worker (src/index.ts) routes
+  // every request to it. The runner BOXES still spawn on the separate
+  // corelink-spawn-worker (ADR-0008 moat); this is only the control-plane host.
+  //
+  // ⚠️ NOT YET DEPLOY-VERIFIED — the container build needs the Docker daemon
+  // running (cargo build --release of the workspace). Once Docker is up:
+  //   npm install && npm run deploy   (then set the secrets — see README.md)
+  "name": "corelink-fabricd",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-01",
+  // Same CoreLink infra account as the spawn-Worker (in-network introspect/billing).
+  "account_id": "6a1fc1c626fc2628823e60b9db01f5cd",
+
+  // Non-secret config. Secrets (FABRIC_SIGNING_KEY, FABRIC_INTROSPECT_AUTH_KEY,
+  // BILLING_INGEST_AUTH_KEY, CLOUDFLARE_SPAWN_AUTH_TOKEN) are set via
+  // `wrangler secret put` — NEVER in this file. See README.md.
+  "vars": {
+    "CORELINK_INTROSPECT_URL": "https://corelink-api.humangr.com/internal/v1/auth/introspect",
+    "BILLING_INGEST_URL": "https://corelink-api.humangr.com/internal/v1/billing/usage",
+    "BILLING_REGION": "iad"
+    // CLOUDFLARE_SPAWN_WORKER_URL is added when boxes are wired (checkpoint B+):
+    // checkpoint A (lease API + §13 + attestation) runs with NO box backend
+    // (exec 503, lease/§13/attestation live — proven in the dress-rehearsal).
+  },
+
+  // The singleton control-plane container DO. ONE instance: the in-memory lease
+  // ledger requires every /v1 request to hit the SAME process (max_instances 1,
+  // a fixed DO id in src/index.ts).
+  "durable_objects": {
+    "bindings": [{ "name": "FABRICD", "class_name": "FabricdContainer" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["FabricdContainer"] }],
+
+  "containers": [
+    {
+      "class_name": "FabricdContainer",
+      // The Rust control-plane image. Build context = repo ROOT so the
+      // Dockerfile's `COPY . .` gets the whole cargo workspace (image_build_context
+      // is required here — the default context would be the Dockerfile's dir).
+      "image": "../../crates/corelink-fabric-server/Dockerfile",
+      "image_build_context": "../../",
+      // Lightweight HTTP control plane (one binary + in-memory ledger): standard-1
+      // is ample for the dogfood. Bump if real multi-tenant load arrives.
+      "instance_type": "standard-1",
+      "max_instances": 1
+    }
+  ],
+
+  // Keep-alive: the proxy Worker's scheduled() pings /v1/health every minute so the
+  // singleton container never sleeps (sleepAfter) — the "24/7" knob on CF. In-memory
+  // lease state survives between requests; only a real restart/redeploy resets it
+  // (acceptable at dogfood; durability later = FABRIC_LEDGER_BACKEND=pg).
+  "triggers": { "crons": ["* * * * *"] }
+}
