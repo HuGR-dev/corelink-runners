@@ -393,6 +393,69 @@ pub struct AttestationKeySetResponse {
     pub keys: Vec<KeyEntry>,
 }
 
+/// Why a key-set selection rejected (the fail-closed reasons a consumer must
+/// honour). The verdict vocabulary is frozen by
+/// `conformance/attestation_keyset_selection.json` so the runner (producer of
+/// the key set) and hugit's verifier (consumer) agree byte-for-byte on which
+/// `(key_id, now_ms)` inputs accept vs reject.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeySelectError {
+    /// No key in the set has the attestation's `key_id` — the signer is unknown
+    /// to the published set, so the signature cannot be trusted. Fail-closed.
+    UnknownKeyId,
+    /// The matching key carries an `expires_ms` that is at/before `now_ms` — the
+    /// key has been retired past its rotation window. Fail-closed.
+    Expired,
+}
+
+impl core::fmt::Display for KeySelectError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            KeySelectError::UnknownKeyId => {
+                f.write_str("attestation key_id not in the published key set")
+            }
+            KeySelectError::Expired => {
+                f.write_str("attestation key has expired (expires_ms <= now)")
+            }
+        }
+    }
+}
+
+impl std::error::Error for KeySelectError {}
+
+/// Reference selector for the rotation-capable attestation key set — the
+/// canonical, transcribe-not-design definition both repos pin against
+/// (`conformance/attestation_keyset_selection.json`). Given the published
+/// `keys`, the attestation's `key_id`, and the current `now_ms`, return the
+/// matching ACTIVE key, or a fail-closed [`KeySelectError`].
+///
+/// Decision order (fail-closed at every edge):
+/// 1. no entry with `key_id` → [`KeySelectError::UnknownKeyId`];
+/// 2. matched entry with `expires_ms = Some(t)` where `t <= now_ms`
+///    → [`KeySelectError::Expired`] (the `<=` makes the expiry instant itself
+///    already-expired — never accept a key at the exact cutover);
+/// 3. otherwise (no expiry, or `expires_ms` strictly in the future) → accept.
+///
+/// The caller then verifies the `AttestationChain` signature against the
+/// returned entry's `pubkey_b64` (the existing single-key crypto path —
+/// unchanged). This function adds ONLY the selection layer above it.
+pub fn select_attestation_key<'a>(
+    keys: &'a [KeyEntry],
+    key_id: &str,
+    now_ms: u64,
+) -> Result<&'a KeyEntry, KeySelectError> {
+    let entry = keys
+        .iter()
+        .find(|k| k.key_id == key_id)
+        .ok_or(KeySelectError::UnknownKeyId)?;
+    if let Some(expires_ms) = entry.expires_ms
+        && expires_ms <= now_ms
+    {
+        return Err(KeySelectError::Expired);
+    }
+    Ok(entry)
+}
+
 /// `GET /v1/attestation/key` response body — the published well-known
 /// fabric attestation key. (ATT2 amendment, lead-ratified.)
 ///
