@@ -45,6 +45,10 @@ export class FabricdContainer extends Container<Env> {
     this.envVars = {
       FABRIC_AUTH_BACKEND: "corelink",
       FABRIC_BIND_ADDR: "0.0.0.0:8080",
+      // REQUIRED at boot (no default) — the bootstrap tenant's cap. In corelink
+      // backend mode the live per-tenant cap comes from introspect; this is the
+      // static fallback, set deliberately high so it never masks the real cap.
+      FABRIC_TENANT_MAX_CONCURRENCY: "100",
       CORELINK_INTROSPECT_URL: env.CORELINK_INTROSPECT_URL,
       FABRIC_INTROSPECT_AUTH_KEY: env.FABRIC_INTROSPECT_AUTH_KEY,
       FABRIC_SIGNING_KEY: env.FABRIC_SIGNING_KEY,
