@@ -20,12 +20,14 @@
   "vars": {
     "CORELINK_INTROSPECT_URL": "https://corelink-api.humangr.com/internal/v1/auth/introspect",
     "BILLING_INGEST_URL": "https://corelink-api.humangr.com/internal/v1/billing/usage",
-    "BILLING_REGION": "iad",
-    // Box backend (ADR-0008): fabricd's CloudflareEngine spawns runner boxes via
-    // the spawn-Worker's /v1/spawn. Paired with the CLOUDFLARE_SPAWN_AUTH_TOKEN
-    // secret (a shared runner-internal token set on BOTH workers). With this set,
-    // exec routes through the CF substrate (verified: "cloudflare substrate: wired").
-    "CLOUDFLARE_SPAWN_WORKER_URL": "https://corelink-spawn-worker.gmhelmold.workers.dev"
+    "BILLING_REGION": "iad"
+    // Box backend (CLOUDFLARE_SPAWN_WORKER_URL) is INTENTIONALLY OFF here: wiring
+    // it made acquire provision a real box at admit, and the spawn-Worker's
+    // /v1/spawn returns HTTP 500 today — which fail-closed the LIVE acquire path
+    // (200 Held → 503). Reverted to restore checkpoint A (lease/§13/attestation
+    // live, exec 503 / NoBox). Re-add the var ONLY after the spawn-Worker /v1/spawn
+    // path is debugged + verified end-to-end (the shared CLOUDFLARE_SPAWN_AUTH_TOKEN
+    // secret stays set on both workers; it's inert without this URL).
   },
 
   // The singleton control-plane container DO. ONE instance: the in-memory lease
