@@ -158,7 +158,27 @@ the reaper retries against the same engine.
 **Selection order (4-way, was CF→NF→off):** both ⇒ Hybrid; CF only ⇒ Cloudflare (runner-only);
 NF only ⇒ Northflank (both kinds); neither ⇒ NoBox (default-off, fail-closed).
 
-**Rota A (deferred end-state).** A native CF CHECK-exec endpoint (new spawn-Worker route + a
-container that runs a `CheckDef` + `CloudflareEngine::exec_captured` impl) is the eventual win —
-it puts checks on the R2-co-located moat too. Rota B unblocks the killer without it; rota A is a
-future additive change behind the same `Engine` seam.
+**Rota A (deferred end-state) — FEASIBILITY RE-ASSESSED 2026-06-26: it is NOT "just implement
+`exec_captured`".** A planning round (4 read-only seam studies) surfaced a hard platform-vs-correctness
+blocker:
+
+- **CF Containers run a DEPLOY-TIME FIXED image, not a per-job image.** `@cloudflare/containers` v0.3.7
+  `start()`/`startAndWaitForPorts()` take only `{envVars, entrypoint, enableInternet, labels}` — **no
+  image/registry/digest field**. The `/v1/spawn` `image_digest` is merely *asserted* against
+  `PINNED_IMAGE_DIGEST` (a supply-chain check), never used to select an image. The container always runs
+  the wrangler-built `../runner/Dockerfile`. Per-job arbitrary images are not a CF Containers capability.
+- **A CHECK requires its arbitrary toolchain image.** `toolchain_digest` (= `CheckDef.toolchain_ref`) is
+  the **third memo-key axis** (`SHA-256(LP(tree_hash)‖LP(def_digest)‖LP(toolchain_digest))`). Running a
+  check in a substituted fixed image breaks the memo identity ⇒ **incorrect** (a cache hit/miss against
+  the wrong toolchain). So a single curated check-base image is NOT a correct general solution.
+- **Post-spawn comms is HTTP-only** (`containerFetch` over an exposed port — no exec/stdin/stdout API), so
+  the check container must run an in-container HTTP exec-server (Model 1). That part is buildable; the
+  image-model blocker is the killer.
+
+**⇒ The only CORRECT native-CF check path is a "toolchain-hydrating check-host": a fixed CF base image
+that materializes the check's real toolchain at start (ideally hydrated from the R2-co-located CAS — the
+cache-warm moat) before running the `CheckDef`.** That is a multi-week, cross-TL subsystem (Cache/clw
+seams for toolchain materialization), NOT a multi-day additive WP. **Until then, rota B (checks on
+Northflank, already shipped + tested) is the correct architecture** — Northflank Jobs DO run the lease's
+arbitrary per-job image, so memo correctness holds there. Rota A is re-classified from "deferred additive"
+to "owner+cross-TL architecture decision" (the toolchain-hydration subsystem).
