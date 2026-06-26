@@ -44,10 +44,40 @@ Then hand `$HOST` to the hugit TL as `HUGIT_RUNNER_HOST` + the spawn/lease PAT
 (`HUGIT_RUNNER_PAT`), per the frozen Seam 1.
 
 ## Boxes (checkpoint B+ — when wiring real per-job metrics)
-Add to `wrangler.jsonc` `vars`: `CLOUDFLARE_SPAWN_WORKER_URL` (the spawn-Worker URL),
-and `npx wrangler secret put CLOUDFLARE_SPAWN_AUTH_TOKEN`. Until then the lease/§13/
-attestation surface is live but `exec` returns 503 (no box backend) — fail-closed,
-exactly as the dress-rehearsal showed.
+
+Until a box backend is wired the lease/§13/attestation surface is live but `exec`
+returns 503 (no box backend) — fail-closed, exactly as the dress-rehearsal showed.
+
+⚠️ **The substrate you wire decides which lease KINDS run — this is the trap that
+broke prod once (#195).** `CloudflareEngine` v0 is **runner-only by design** (ADR-0007:
+the spawn-Worker's only container is the GitHub-Actions runner image). So:
+
+- **Cloudflare ONLY** (`CLOUDFLARE_SPAWN_WORKER_URL` var + `CLOUDFLARE_SPAWN_AUTH_TOKEN`
+  secret) → **runner** leases spawn on Cloudflare, but a **CHECK-exec** lease
+  (`allow_egress=false`) **fails CLOSED at spawn** (#198). The killer (memoized CI /
+  per-PR attested cost) dispatches CHECK-exec leases → **Cloudflare-only does NOT serve
+  the killer.** Wiring CF alone and pointing the killer at it is the #195 regression.
+
+- **Rota B — BOTH substrates** (`CLOUDFLARE_SPAWN_*` **and** `NORTHFLANK_API_TOKEN`
+  + `NORTHFLANK_PROJECT_ID`) → the composition selects the **Hybrid** backend
+  (`select_backend(true,true)`): **runner→Cloudflare** (the R2-co-located moat),
+  **check-exec→Northflank**. This is what the killer needs. Set all four and redeploy.
+
+```bash
+# wrangler.jsonc vars:  CLOUDFLARE_SPAWN_WORKER_URL, NORTHFLANK_PROJECT_ID
+# (+ NORTHFLANK_RUNNER_* tuning as needed; see docs/deploy/fabric-server.md)
+npx wrangler secret put CLOUDFLARE_SPAWN_AUTH_TOKEN   < ~/.hugit/secrets/corelink/cf-spawn-token
+npx wrangler secret put NORTHFLANK_API_TOKEN          < <northflank token, OOB>
+# OPS GOTCHA: a config-only redeploy does NOT restart the singleton container
+# (envVars are read at container start). Force it:
+npx wrangler containers delete <app-id> && npx wrangler deploy
+```
+
+After the env is live, smoke BOTH kinds before handing the host to the killer: a runner
+acquire → 200 Held + a CF `/v1/spawn` fired; a check acquire → 200 Held + provisioned on
+Northflank (not Cloudflare). The `tests/hybrid_flip_e2e.rs` e2e pins this routing offline;
+the live smoke confirms the real backends. **Never claim boxes work off the boot log alone
+— prove an end-to-end spawn of each kind** (the #195 lesson: "substrate wired" ≠ spawn works).
 
 ## Status
 ⚠️ **NOT yet deploy-verified** — authored while the Docker daemon was down, so the
