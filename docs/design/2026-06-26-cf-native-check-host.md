@@ -34,15 +34,23 @@ A new **fixed CF base image** (`deploy/check-host/`) containing: the `clw` binar
 4. **attest + close:** the fabric signs the result (EXISTING `exec_handler` path — engine-agnostic) and
    revokes the CAS PAT on teardown (EXISTING).
 
-## The ONE cross-TL gap (G2) — the toolchain resolver
-`CheckDef.toolchain_ref` is a **pass-through string** (e.g. `"rust@1.96.0"`) used verbatim as the 3rd
-memo-key axis. **There is NO resolver** that maps it to CAS content-keys (confirmed:
-`exec.rs:18-20` "until a resolver maps refs to content digests";
-`docs/handoff/2026-06-13-githugr-fabric-integration-answers.md:244`). The check-host needs, for a given
-`toolchain_ref`, the **ordered list of CAS content-keys** (`ToolchainLayer`s) to hydrate. That requires:
-1. A **toolchain content model** — how a toolchain (Rust 1.96 + cargo-deny + …) is represented as CAS blobs.
-2. A **resolver seam** — `toolchain_ref → Vec<ToolchainLayer>` (content-keys), ideally R2-co-located.
-This is the **Cache/clw TL ask** (relay: `docs/handoff/2026-06-26-ASK-cache-clw-tl-toolchain-resolver-seam.md`).
+## The ONE cross-TL gap (G2) — RESOLVED 2026-06-26 (clw TL: option b)
+`CheckDef.toolchain_ref` is a pass-through string with no in-repo resolver. **clw TL answered (option b,
+verified against the frozen clw contract):** a toolchain in the CAS **IS a `clw snapshot`**, and
+`toolchain_ref` **= the snapshot's manifest `root` digest**. Consequences:
+- **No resolver service to build.** The "resolver" = `CAS GET(toolchain_ref)` → manifest → flatten each
+  File entry's `chunks` → `Vec<ToolchainLayer{content_key=chunk.digest, size_bytes=chunk.size}>` = exactly
+  `HydrationPlan.toolchain_layers`. (`clw-snapshot/src/lib.rs:68`, `clw-types/src/lib.rs:114-160`.)
+- **Materialize via `clw hydrate` — do NOT re-implement manifest→tree** (paths/modes/symlinks/chunk grouping
+  are clw's frozen format; reassembly is clw's). clw delivers **one small additive seam:
+  `clw hydrate --manifest-digest <D> <dest>`** (digest-direct, skips the AC name lookup, reuses the existing
+  materialize path). It plugs into **W6**; clw lands it **on our W6 timeline** (no API ahead of a consumer).
+- **Closes the latent false-cache-hit bug below** (ref IS content → hydrated bytes provably match the memo axis).
+- **Remaining owners:** (i) **producer (githugr/hugit)** must set `CheckDef.toolchain_ref = the snapshot root
+  digest` — the ONE producer behavior change (relay when G1=B); (ii) **Cache TL** confirms the toolchain
+  manifest+chunks live on the **R2-backed CAS** (zero-egress for the CF check-host).
+- Reply: `corelink-workspaces/docs/REPLY-clw-TL-toolchain-resolver-seam-2026-06-26.md` (archived pointer:
+  `docs/handoff/2026-06-26-clw-tl-RESPONSE-toolchain-resolver-option-b.md`).
 
 ## ⚠️ Latent correctness finding (pre-existing, flag now)
 Today the toolchain comes from `AcquireRequest.image_digest`, NOT `toolchain_ref` — and **they can diverge**:
@@ -58,18 +66,22 @@ the check-host. (Not introduced by this design; surfaced by the study.)
 | W2 | The check-host image (`Dockerfile`: base + `clw` + exec-server + hydration entrypoint) | `deploy/check-host/Dockerfile` + entrypoint (greenfield) | W1, contract |
 | W3 | Spawn-Worker `/v1/exec` route + a `CheckHostContainer` DO (`containerFetch` the exec-server) | `deploy/cloudflare/src/index.ts` (+lib.ts) | contract |
 | W4 | `CloudflareEngine::exec_captured` impl (POST `/v1/exec` → `CmdOutput`) + relax the runner-only floor for the check-host path | `crates/corelink-cloud-engine/src/cloudflare.rs` | contract |
-| W5 | Toolchain-hydration composition: build a `HydrationPlan` from the resolver (STUB until G2) + wire it into the check-host provision | `crates/corelink-fabric-server/src/` (cloud_exec/leases) | W4, resolver-stub |
-| W6 | Resolver seam (trait + STUB impl now; real impl when G2 lands) | new module + contract | G2 for real impl |
+| W5 | Toolchain-hydration composition: `CAS GET(toolchain_ref)` → manifest → flatten chunks → `HydrationPlan`; wire into the check-host provision | `crates/corelink-fabric-server/src/` (cloud_exec/leases) | W4 |
+| W6 | Consume `clw hydrate --manifest-digest <toolchain_ref> <dest>` in the check-host entrypoint (clw delivers the flag on this WP's timeline) | `deploy/check-host/` entrypoint + the manifest-read helper | clw flag |
 
-All disjoint files; contract-bound (the `/v1/exec` wire + the in-container exec contract + the resolver
-trait are the frozen anchors). Conflict-free fanout once contracts are frozen.
+All disjoint files; contract-bound (the `/v1/exec` wire + the in-container exec contract + the clw
+`--manifest-digest` flag are the frozen anchors). Conflict-free fanout once contracts are frozen. **G2 is
+resolved (clw option b), so W5/W6 are now concrete — no stub resolver needed; W5 reads the manifest from CAS
+directly, W6 hydrates via the clw flag.**
 
 ## Gates (why we PLAN now but don't BUILD yet)
 - **G1 — hugit A/B:** if hugit's agent executes + feeds §13 (answer A), the check-host is NOT NEEDED. Build
   only on a "B" answer (`docs/handoff/2026-06-26-ASK-hugit-tl-DECISIVE-...`).
-- **G2 — toolchain resolver:** the cross-TL seam (Cache/clw). The mechanism builds against a stub; the real
-  resolver is required for correctness/value.
-- **G3 — owner go** on the scope (it's a real subsystem, even if ~70% reuse).
+- **G2 — toolchain resolver:** ✅ **RESOLVED** (clw option b — `toolchain_ref` = clw manifest digest; clw
+  delivers `--manifest-digest`). Sub-items: producer sets `toolchain_ref = snapshot digest` (relay on G1=B);
+  Cache TL confirms R2 placement. No resolver service to build.
+- **G3 — owner go** on the scope (it's a real subsystem, even if ~70% reuse + G2 resolved).
 
-When G1=B + G3=go, W1–W4 + W6-stub are a clean parallel wave (solo, no further gate); W5/W6-real land when
-G2 resolves. Northflank remains the inert fallback throughout.
+When **G1=B + G3=go**, W1–W6 are a clean parallel wave (solo; clw lands `--manifest-digest` into W6 on our
+timeline). The producer `toolchain_ref=digest` change + Cache R2 confirm are the only remaining cross-TL
+items, both small. Northflank remains the inert fallback throughout.
