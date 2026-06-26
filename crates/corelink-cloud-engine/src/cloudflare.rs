@@ -466,6 +466,31 @@ impl<H: HttpTransport> Engine for CloudflareEngine<H> {
             }
         }
 
+        // ── Runner-only floor (v0 is runner-direct): CloudflareEngine v0 serves
+        // ONLY RUNNER leases (ADR-0007) — the spawn-Worker's single container is
+        // the GitHub-Actions runner image, which runs its agent entrypoint and
+        // REQUIRES a runner lease (egress-granted, JIT-configured). A CHECK-exec
+        // lease (`allow_egress == false`, the runner's convention for a hermetic
+        // check box) is NOT served by v0 (see the module doc; `exec`/`exec_captured`
+        // also fail closed). Without this floor a check-exec spec passes the
+        // isolation/image floors, the Worker spawns the runner image with no JIT,
+        // and that box EXITS 1 — surfacing as an opaque spawn-Worker `HTTP 500`
+        // (`error code: 1101`). Fail CLOSED HERE with an actionable message so a
+        // check-exec lease (mis)routed to the Cloudflare backend fails fast at
+        // admit, never with a confusing downstream 500. The CHECK-exec capability
+        // is a future additive Worker endpoint, not a silent stub.
+        if !spec.allow_egress {
+            bail!(
+                "refusing to spawn {}: CloudflareEngine v0 is runner-direct and serves ONLY \
+                 RUNNER leases (the spawn-Worker's container is the GitHub-Actions runner image). \
+                 This is a CHECK-exec spec (allow_egress=false), which v0 does NOT support — a \
+                 runner box spawned for it exits 1 (opaque HTTP 500). Use a runner-mode lease, or \
+                 a CHECK-exec backend (e.g. Northflank, or a future CF CHECK-exec endpoint). \
+                 Fail CLOSED.",
+                spec.name
+            );
+        }
+
         let resp = self.send_2xx(
             Method::Post,
             self.spawn_url(),
@@ -738,7 +763,7 @@ mod tests {
     }
 
     #[test]
-    fn spawn_allows_runner_at_floor_and_leaves_check_box_unaffected() {
+    fn spawn_allows_runner_at_floor() {
         // RUNNER box sized exactly at the floor spawns.
         let mut c = cfg();
         c.runner_storage_mb = RUNNER_EPHEMERAL_STORAGE_FLOOR_MB;
@@ -747,16 +772,25 @@ mod tests {
             engine.spawn(&runner_spec()).is_ok(),
             "a runner box at the disk floor must spawn"
         );
+    }
 
-        // CHECK box (allow_egress == false) is never subject to the runner floor,
-        // even with a sub-floor configured disk.
-        let mut c2 = cfg();
-        c2.runner_storage_mb = 1; // far below the floor
-        let check_engine =
-            CloudflareEngine::new(RecordingTransport::new(200, r#"{"handle":"h"}"#), c2);
+    #[test]
+    fn spawn_refuses_check_box_runner_only_v0() {
+        // CHECK-exec spec (allow_egress == false) is NOT served by CloudflareEngine
+        // v0 (runner-direct): the spawn-Worker's only container is the runner image,
+        // which exits 1 without a JIT — surfacing live as an opaque HTTP 500. The
+        // runner-only floor fails CLOSED at spawn, BEFORE any Worker contact
+        // (ExplodingTransport panics if reached), with an actionable message. This
+        // pins the real behavior (the prior assertion that a check box "spawns" was
+        // fake-green against a success transport; live it 500s).
+        let engine = CloudflareEngine::new(ExplodingTransport, cfg());
+        let err = engine
+            .spawn(&spec(vec![]))
+            .expect_err("a check-exec spec must fail closed on CloudflareEngine v0");
+        let msg = format!("{err:#}");
         assert!(
-            check_engine.spawn(&spec(vec![])).is_ok(),
-            "a check box is unaffected by the runner disk floor"
+            msg.contains("runner-direct") && msg.contains("CHECK-exec"),
+            "error must name the runner-only limitation, got: {msg}"
         );
     }
 
