@@ -1032,19 +1032,32 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
     let state = if cfg.mock_exec {
         state.with_executor(Arc::new(crate::exec::MockLeasedExec))
     } else {
-        // ── ADR-0008 backend selection: Cloudflare → Northflank → off ─────────
-        // Cloudflare is the DEFAULT compute substrate: try it FIRST and, if its
-        // env is present, it wins (even if Northflank is also configured).
-        // ELSE fall back to Northflank. ELSE neither env present ⇒ NoBox
-        // defaults (DEFAULT-OFF, byte-identical to today, S2 fail-closed at
-        // admit). Exactly one backend wins; both halves share ONE registry.
-        //
-        // `with_cloudflare_backend_from_env` is a no-op (keeps NoBox defaults)
-        // when the CLOUDFLARE_* env is absent, so we probe Cloudflare first and
-        // only fall through to Northflank when Cloudflare did NOT wire.
-        match crate::cloud_exec::cloudflare_backend_from_env(registry.clone_handle()) {
-            Some((exec, prov)) => state.with_cloud_backend(exec, prov),
-            None => state.with_cloud_backend_from_env(registry.clone_handle()),
+        // ── ADR-0008 + rota B backend selection ───────────────────────────────
+        // Probe BOTH substrates; the (cf, nf) presence pair selects the backend:
+        //  - both present  ⇒ HYBRID: runner leases → Cloudflare (the moat),
+        //    check-exec leases → Northflank (CloudflareEngine v0 is runner-only,
+        //    #198). The wired exec is Northflank's (only a check lease ever execs;
+        //    a runner is runner-direct). Both halves share ONE registry.
+        //  - Cloudflare only ⇒ Cloudflare backend (runner-only; a check fails
+        //    closed at spawn).
+        //  - Northflank only ⇒ Northflank backend (both lease kinds).
+        //  - neither        ⇒ NoBox defaults (DEFAULT-OFF, S2 fail-closed at admit).
+        // Each `*_backend_from_env` is a no-op (None) when its env is absent.
+        let cf = crate::cloud_exec::cloudflare_backend_from_env(registry.clone_handle());
+        let nf = crate::cloud_exec::cloud_backend_from_env(registry.clone_handle());
+        match (cf, nf) {
+            // Rota B hybrid: discard CF's NoBox exec half; the exec is Northflank's
+            // (checks only). The runner half (CF) + check half (NF) share the
+            // registry, so the NF exec resolves the check box it spawned.
+            (Some((_cf_exec, cf_prov)), Some((nf_exec, nf_prov))) => {
+                let hybrid = std::sync::Arc::new(crate::cloud_exec::HybridBoxProvisioner::new(
+                    cf_prov, nf_prov,
+                ));
+                state.with_cloud_backend(nf_exec, hybrid)
+            }
+            (Some((cf_exec, cf_prov)), None) => state.with_cloud_backend(cf_exec, cf_prov),
+            (None, Some((nf_exec, nf_prov))) => state.with_cloud_backend(nf_exec, nf_prov),
+            (None, None) => state,
         }
     };
 

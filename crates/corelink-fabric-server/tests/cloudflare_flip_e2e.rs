@@ -30,8 +30,9 @@
 //!    `POST /v1/teardown` for that handle and releases the binding.
 //!  - **Fail-closed:** a non-2xx spawn ⇒ the HTTP acquire fails CLOSED (503),
 //!    0 slots reserved on the ledger, and NO phantom binding in the registry.
-//!  - **Selection:** the `select_backend` oracle (public) confirms the ADR-0008
-//!    CF → NF → off order — the composition-root decision that routes to F1.
+//!  - **Selection:** the `select_backend` oracle (public) confirms the rota B
+//!    order: both ⇒ Hybrid (runner→CF, check→NF); CF only ⇒ Cloudflare; NF only
+//!    ⇒ Northflank; else off — the composition-root decision routing to F1.
 //!
 //! ## What is NOT exercised here (and why)
 //!  - `cloudflare_backend_from_env` is env-driven (reads the REAL process env via
@@ -459,9 +460,10 @@ async fn cloudflare_flip_fail_closed_non_2xx_spawn_no_held_no_slot_no_orphan() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// The composition-root selection oracle (`select_backend`, public) is what
-/// routes to the Cloudflare backend exercised above. Assert the ADR-0008 order:
-/// Cloudflare is the DEFAULT (wins whenever its env is present, even alongside
-/// Northflank); else Northflank; else off (NoBox, fail-closed). This is the
+/// routes to the backend exercised above. Assert the ADR-0008 + rota B order:
+/// BOTH present ⇒ Hybrid (runner→Cloudflare, check-exec→Northflank); Cloudflare
+/// only ⇒ Cloudflare (runner-only — a check fails closed at spawn); Northflank
+/// only ⇒ Northflank (both kinds); else off (NoBox, fail-closed). This is the
 /// flip-path DECISION; the lifecycle cases above are the flip-path BEHAVIOR.
 ///
 /// NOTE: `cloudflare_backend_from_env` itself reads the real process env, so it
@@ -469,23 +471,24 @@ async fn cloudflare_flip_fail_closed_non_2xx_spawn_no_held_no_slot_no_orphan() {
 /// F1 unit-tests it + the `from_env_with` seam. This oracle is the pure,
 /// env-free decision both paths funnel through.
 #[test]
-fn cloudflare_flip_selection_oracle_prefers_cloudflare_then_northflank_then_off() {
-    // Cloudflare present ⇒ Cloudflare, even when Northflank is ALSO configured.
+fn cloudflare_flip_selection_oracle_hybrid_then_cloudflare_then_northflank_then_off() {
+    // Rota B: both substrates present ⇒ Hybrid (runner→CF moat, check→NF).
     assert_eq!(
         select_backend(true, true),
-        SelectedBackend::Cloudflare,
-        "Cloudflare is the DEFAULT substrate — it wins even alongside Northflank"
+        SelectedBackend::Hybrid,
+        "both present ⇒ Hybrid — runner leases on Cloudflare, check-exec on Northflank"
     );
+    // Cloudflare present, Northflank absent ⇒ Cloudflare (runner-only).
     assert_eq!(
         select_backend(true, false),
         SelectedBackend::Cloudflare,
-        "Cloudflare present, Northflank absent ⇒ Cloudflare"
+        "Cloudflare present, Northflank absent ⇒ Cloudflare (runner-only substrate)"
     );
-    // No Cloudflare env, Northflank present ⇒ Northflank (the fallback).
+    // No Cloudflare env, Northflank present ⇒ Northflank (both lease kinds).
     assert_eq!(
         select_backend(false, true),
         SelectedBackend::Northflank,
-        "no Cloudflare, Northflank present ⇒ Northflank fallback"
+        "no Cloudflare, Northflank present ⇒ Northflank"
     );
     // Neither present ⇒ off (NoBox defaults, default-off fail-closed).
     assert_eq!(

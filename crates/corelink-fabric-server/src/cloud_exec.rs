@@ -582,37 +582,181 @@ pub fn cloudflare_backend_from_env(
     Some((exec, prov))
 }
 
-// ── backend selection (ADR-0008) ──────────────────────────────────────────────
+// ── HybridBoxProvisioner (rota B) ─────────────────────────────────────────────
+
+/// Which sub-backend provisioned a given lease — the routing key the hybrid
+/// remembers so `teardown`/`probe` reach the SAME engine that `spawn`ed the box.
+///
+/// [`RunningContainer`] carries only a name (no provider tag), so the hybrid
+/// cannot infer the owning engine from the registry binding alone — it records
+/// the route at `provision` time and replays it on teardown/probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HybridRoute {
+    /// Runner lease (`spec.allow_egress == true`) → the runner sub-provisioner.
+    Runner,
+    /// Check-exec lease (`spec.allow_egress == false`) → the check sub-provisioner.
+    Check,
+}
+
+/// A [`BoxProvisioner`] that routes each lease to one of two sub-backends by the
+/// lease's KIND, decided at `provision` from `spec.allow_egress`:
+///
+/// - **runner** lease (`allow_egress == true`) → `runner` sub-provisioner
+///   (production: [`CloudflareBoxProvisioner`] — the moat substrate, co-located
+///   with R2 for in-network cache hydration);
+/// - **check-exec** lease (`allow_egress == false`) → `check` sub-provisioner
+///   (production: [`NorthflankBoxProvisioner`] — `CloudflareEngine` v0 is
+///   runner-only and fails closed at spawn for a check spec, ADR-0008/#198).
+///
+/// This is **rota B**: the killer's check-exec boxes run on Northflank while
+/// direct-CI runners keep the Cloudflare moat. (Rota A — a native CF check-exec
+/// endpoint — is the deferred end-state; this unblocks the killer without it.)
+///
+/// `allow_egress` is the red-team-blessed discriminator: a runner lease is built
+/// only through `ContainerSpec::from_runner_lease` (egress granted), a check
+/// lease through `ContainerSpec::from_lease` (no_network, fail-closed). Egress is
+/// never inferred from the wire `net_policy` string (the C2 invariant), so the
+/// routing fork is exactly the lease-kind fork — it cannot be spoofed.
+///
+/// **Routing memory & fail-closed posture:** both sub-provisioners bind into the
+/// SAME shared [`BoxRegistry`], so the wired exec ([`EngineLeasedExec`] over the
+/// check engine — only a check lease ever execs) resolves the right box. The
+/// `routes` map records lease→backend at provision; `teardown` replays it and
+/// removes the entry ONLY on success (a failed teardown keeps the route so the
+/// reaper retries against the correct engine — mirrors the registry-keep
+/// discipline). `teardown`/`probe` of a lease the hybrid never provisioned are
+/// idempotent (`Ok(())` / `Unbound`).
+pub struct HybridBoxProvisioner {
+    runner: Arc<dyn BoxProvisioner>,
+    check: Arc<dyn BoxProvisioner>,
+    routes: Mutex<HashMap<String, HybridRoute>>,
+}
+
+impl HybridBoxProvisioner {
+    /// Construct over the runner sub-provisioner (Cloudflare in prod) and the
+    /// check sub-provisioner (Northflank in prod). Both MUST be built over the
+    /// same shared [`BoxRegistry`] as the wired exec.
+    pub fn new(runner: Arc<dyn BoxProvisioner>, check: Arc<dyn BoxProvisioner>) -> Self {
+        Self {
+            runner,
+            check,
+            routes: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Look up the recorded route for a lease (poison-safe).
+    fn route_of(&self, lease_id: &str) -> Option<HybridRoute> {
+        self.routes
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(lease_id)
+            .copied()
+    }
+
+    fn record_route(&self, lease_id: &str, route: HybridRoute) {
+        self.routes
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(lease_id.to_string(), route);
+    }
+
+    fn forget_route(&self, lease_id: &str) {
+        self.routes
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(lease_id);
+    }
+}
+
+impl BoxProvisioner for HybridBoxProvisioner {
+    fn provision(&self, lease_id: &str, spec: &ContainerSpec) -> Result<()> {
+        // The lease-kind fork: egress ⇒ runner (Cloudflare); no egress ⇒ check
+        // (Northflank). Record the route BEFORE delegating so teardown can always
+        // reach the intended engine — even if the spawn fails (its teardown is
+        // idempotent against the empty registry). Fail-closed: a sub-provisioner
+        // error propagates unchanged (nothing bound on a failed spawn).
+        let (route, sub): (HybridRoute, &Arc<dyn BoxProvisioner>) = if spec.allow_egress {
+            (HybridRoute::Runner, &self.runner)
+        } else {
+            (HybridRoute::Check, &self.check)
+        };
+        self.record_route(lease_id, route);
+        sub.provision(lease_id, spec)
+    }
+
+    fn teardown(&self, lease_id: &str) -> Result<()> {
+        // Idempotent: a lease the hybrid never provisioned has no route → nothing
+        // to tear down (mirrors NoBoxProvisioner / an already-unbound lease).
+        let Some(route) = self.route_of(lease_id) else {
+            return Ok(());
+        };
+        let sub = match route {
+            HybridRoute::Runner => &self.runner,
+            HybridRoute::Check => &self.check,
+        };
+        // On success, drop the route. On failure, KEEP it so the reaper retries
+        // teardown against the SAME engine (a failed teardown is never silently
+        // dropped — mirrors the registry-keep-on-failure discipline).
+        sub.teardown(lease_id)?;
+        self.forget_route(lease_id);
+        Ok(())
+    }
+
+    fn probe(&self, lease_id: &str) -> Result<ProbeStatus> {
+        // No recorded route ⇒ the hybrid holds no box for this lease.
+        let Some(route) = self.route_of(lease_id) else {
+            return Ok(ProbeStatus::Unbound);
+        };
+        match route {
+            HybridRoute::Runner => self.runner.probe(lease_id),
+            HybridRoute::Check => self.check.probe(lease_id),
+        }
+    }
+
+    fn binds_boxes(&self) -> bool {
+        // A real cloud backend on both sides binds boxes — a runner lease admits.
+        true
+    }
+}
+
+// ── backend selection (ADR-0008 + rota B) ─────────────────────────────────────
 
 /// Which compute substrate the composition root selected.
 ///
-/// ADR-0008 selection order: **Cloudflare is the DEFAULT** — prefer it when its
-/// env is present; ELSE fall back to Northflank; ELSE neither (NoBox defaults,
-/// DEFAULT-OFF). Exactly one backend wins.
+/// Selection order:
+/// - **both** Cloudflare + Northflank env present → [`Hybrid`](SelectedBackend::Hybrid):
+///   runner leases → Cloudflare (the moat), check-exec leases → Northflank (rota B).
+/// - **only Cloudflare** → [`Cloudflare`](SelectedBackend::Cloudflare): runner-only;
+///   a check lease fails closed at spawn (`CloudflareEngine` v0 is runner-only, #198).
+/// - **only Northflank** → [`Northflank`](SelectedBackend::Northflank): both kinds
+///   on Northflank.
+/// - **neither** → [`Off`](SelectedBackend::Off): NoBox defaults (default-off,
+///   fail-closed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelectedBackend {
-    /// Cloudflare env present → the Cloudflare backend is wired.
+    /// Both env present → runner→Cloudflare, check-exec→Northflank (rota B).
+    Hybrid,
+    /// Cloudflare env present (no Northflank) → Cloudflare backend (runner-only).
     Cloudflare,
-    /// No Cloudflare env, Northflank env present → Northflank backend is wired.
+    /// Northflank env present (no Cloudflare) → Northflank backend (both kinds).
     Northflank,
     /// Neither present → NoBox defaults (default-off, fail-closed).
     Off,
 }
 
-/// Pure selection oracle for ADR-0008 (Cloudflare → Northflank → off), factored
-/// out of the composition root so the order is unit-testable without mutating
-/// the process environment. `cf_present` / `nf_present` are the
+/// Pure selection oracle (both → Hybrid; CF → Cloudflare; NF → Northflank; else
+/// off), factored out of the composition root so the order is unit-testable
+/// without mutating the process environment. `cf_present` / `nf_present` are the
 /// `*_backend_from_env(...).is_some()` results.
 #[must_use]
 pub fn select_backend(cf_present: bool, nf_present: bool) -> SelectedBackend {
-    if cf_present {
-        // ADR-0008: Cloudflare is the DEFAULT substrate — it wins whenever its
-        // env is present, even if Northflank is ALSO configured.
-        SelectedBackend::Cloudflare
-    } else if nf_present {
-        SelectedBackend::Northflank
-    } else {
-        SelectedBackend::Off
+    match (cf_present, nf_present) {
+        // Rota B: both wired ⇒ split by lease kind (runner→CF, check→NF).
+        (true, true) => SelectedBackend::Hybrid,
+        // Cloudflare is the DEFAULT runner substrate (ADR-0008); runner-only.
+        (true, false) => SelectedBackend::Cloudflare,
+        (false, true) => SelectedBackend::Northflank,
+        (false, false) => SelectedBackend::Off,
     }
 }
 
@@ -783,19 +927,24 @@ mod tests {
         );
     }
 
-    // ── ADR-0008 backend selection order ──────────────────────────────────────
+    // ── ADR-0008 + rota B backend selection order ─────────────────────────────
 
     #[test]
-    fn select_backend_prefers_cloudflare_when_present() {
-        // Cloudflare is the DEFAULT substrate — it wins even when Northflank is
-        // ALSO configured.
-        assert_eq!(select_backend(true, true), SelectedBackend::Cloudflare);
+    fn select_backend_hybrid_when_both_present() {
+        // Rota B: both substrates wired ⇒ split by lease kind (runner→Cloudflare,
+        // check-exec→Northflank). This is the killer-box path.
+        assert_eq!(select_backend(true, true), SelectedBackend::Hybrid);
+    }
+
+    #[test]
+    fn select_backend_cloudflare_when_only_cf_present() {
+        // Cloudflare alone ⇒ runner-only substrate (a check fails closed at spawn).
         assert_eq!(select_backend(true, false), SelectedBackend::Cloudflare);
     }
 
     #[test]
-    fn select_backend_falls_back_to_northflank() {
-        // No Cloudflare env, Northflank present → Northflank.
+    fn select_backend_northflank_when_only_nf_present() {
+        // No Cloudflare env, Northflank present → Northflank (both lease kinds).
         assert_eq!(select_backend(false, true), SelectedBackend::Northflank);
     }
 
@@ -803,6 +952,200 @@ mod tests {
     fn select_backend_off_when_neither_present() {
         // Neither env present ⇒ NoBox defaults (DEFAULT-OFF, fail-closed).
         assert_eq!(select_backend(false, false), SelectedBackend::Off);
+    }
+
+    // ── HybridBoxProvisioner (rota B) routing ──────────────────────────────────
+
+    /// A fake sub-provisioner that records every call and returns a configurable
+    /// result, so the hybrid's ROUTING can be asserted without any engine/network.
+    struct SpyProvisioner {
+        tag: &'static str,
+        calls: Arc<Mutex<Vec<String>>>,
+        teardown_ok: bool,
+        probe: ProbeStatus,
+    }
+
+    impl SpyProvisioner {
+        fn new(tag: &'static str, calls: Arc<Mutex<Vec<String>>>) -> Self {
+            Self {
+                tag,
+                calls,
+                teardown_ok: true,
+                probe: ProbeStatus::Alive,
+            }
+        }
+        fn log(&self, op: &str, lease_id: &str) {
+            self.calls
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(format!("{}:{}:{}", self.tag, op, lease_id));
+        }
+    }
+
+    impl BoxProvisioner for SpyProvisioner {
+        fn provision(&self, lease_id: &str, _spec: &ContainerSpec) -> Result<()> {
+            self.log("provision", lease_id);
+            Ok(())
+        }
+        fn teardown(&self, lease_id: &str) -> Result<()> {
+            self.log("teardown", lease_id);
+            if self.teardown_ok {
+                Ok(())
+            } else {
+                bail!("spy {} teardown forced failure", self.tag)
+            }
+        }
+        fn probe(&self, lease_id: &str) -> Result<ProbeStatus> {
+            self.log("probe", lease_id);
+            Ok(self.probe)
+        }
+    }
+
+    /// Build a runner spec (`allow_egress = true`, the runner-acquire fork) and a
+    /// check spec (`allow_egress = false`, `no_network = true`, the hermetic fork)
+    /// — the exact lease-kind fork the hybrid routes on.
+    fn runner_and_check_specs() -> (ContainerSpec, ContainerSpec) {
+        let runner = ContainerSpec {
+            name: "runner-box".to_string(),
+            image: "alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_string(),
+            tmp_root: "/tmp/job".to_string(),
+            no_network: false,
+            allow_egress: true,
+            run_on_create: true,
+            path_set: vec![],
+            env: vec![],
+        };
+        let check = ContainerSpec {
+            name: "check-box".to_string(),
+            image: "alpine@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                .to_string(),
+            tmp_root: "/tmp/job".to_string(),
+            no_network: true,
+            allow_egress: false,
+            run_on_create: false,
+            path_set: vec![],
+            env: vec![],
+        };
+        (runner, check)
+    }
+
+    #[test]
+    fn hybrid_routes_runner_to_runner_sub_and_check_to_check_sub() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runner_sub: Arc<dyn BoxProvisioner> =
+            Arc::new(SpyProvisioner::new("RUNNER", Arc::clone(&calls)));
+        let check_sub: Arc<dyn BoxProvisioner> =
+            Arc::new(SpyProvisioner::new("CHECK", Arc::clone(&calls)));
+        let hybrid = HybridBoxProvisioner::new(runner_sub, check_sub);
+        let (runner_spec, check_spec) = runner_and_check_specs();
+
+        hybrid.provision("lease-r", &runner_spec).unwrap();
+        hybrid.provision("lease-c", &check_spec).unwrap();
+
+        let log = calls.lock().unwrap().clone();
+        // Runner lease → RUNNER sub (Cloudflare in prod); check lease → CHECK sub
+        // (Northflank in prod). The egress fork IS the routing fork.
+        assert!(log.contains(&"RUNNER:provision:lease-r".to_string()));
+        assert!(log.contains(&"CHECK:provision:lease-c".to_string()));
+        assert!(!log.contains(&"CHECK:provision:lease-r".to_string()));
+        assert!(!log.contains(&"RUNNER:provision:lease-c".to_string()));
+    }
+
+    #[test]
+    fn hybrid_teardown_and_probe_replay_the_provision_route() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runner_sub: Arc<dyn BoxProvisioner> =
+            Arc::new(SpyProvisioner::new("RUNNER", Arc::clone(&calls)));
+        let check_sub: Arc<dyn BoxProvisioner> =
+            Arc::new(SpyProvisioner::new("CHECK", Arc::clone(&calls)));
+        let hybrid = HybridBoxProvisioner::new(runner_sub, check_sub);
+        let (runner_spec, check_spec) = runner_and_check_specs();
+
+        hybrid.provision("lease-r", &runner_spec).unwrap();
+        hybrid.provision("lease-c", &check_spec).unwrap();
+
+        // teardown/probe carry no spec — they must replay the recorded route.
+        hybrid.probe("lease-c").unwrap();
+        hybrid.teardown("lease-c").unwrap();
+        hybrid.probe("lease-r").unwrap();
+        hybrid.teardown("lease-r").unwrap();
+
+        let log = calls.lock().unwrap().clone();
+        assert!(log.contains(&"CHECK:probe:lease-c".to_string()));
+        assert!(log.contains(&"CHECK:teardown:lease-c".to_string()));
+        assert!(log.contains(&"RUNNER:probe:lease-r".to_string()));
+        assert!(log.contains(&"RUNNER:teardown:lease-r".to_string()));
+        // No cross-routing of teardown/probe.
+        assert!(!log.contains(&"RUNNER:teardown:lease-c".to_string()));
+        assert!(!log.contains(&"CHECK:teardown:lease-r".to_string()));
+    }
+
+    #[test]
+    fn hybrid_teardown_and_probe_unknown_lease_are_idempotent() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runner_sub: Arc<dyn BoxProvisioner> =
+            Arc::new(SpyProvisioner::new("RUNNER", Arc::clone(&calls)));
+        let check_sub: Arc<dyn BoxProvisioner> =
+            Arc::new(SpyProvisioner::new("CHECK", Arc::clone(&calls)));
+        let hybrid = HybridBoxProvisioner::new(runner_sub, check_sub);
+
+        // A lease the hybrid never provisioned: teardown is Ok(()), probe is
+        // Unbound, and NEITHER sub-provisioner is contacted (no route recorded).
+        assert!(hybrid.teardown("never-provisioned").is_ok());
+        assert_eq!(
+            hybrid.probe("never-provisioned").unwrap(),
+            ProbeStatus::Unbound
+        );
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "no sub-provisioner should be contacted for an unknown lease"
+        );
+    }
+
+    #[test]
+    fn hybrid_keeps_route_when_teardown_fails_so_reaper_retries() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        // The check sub fails teardown → the route MUST be kept so the reaper
+        // retries against the SAME engine (mirrors registry-keep-on-failure).
+        let runner_sub: Arc<dyn BoxProvisioner> =
+            Arc::new(SpyProvisioner::new("RUNNER", Arc::clone(&calls)));
+        let mut failing = SpyProvisioner::new("CHECK", Arc::clone(&calls));
+        failing.teardown_ok = false;
+        let check_sub: Arc<dyn BoxProvisioner> = Arc::new(failing);
+        let hybrid = HybridBoxProvisioner::new(runner_sub, check_sub);
+        let (_runner_spec, check_spec) = runner_and_check_specs();
+
+        hybrid.provision("lease-c", &check_spec).unwrap();
+        // First teardown fails → route kept.
+        assert!(hybrid.teardown("lease-c").is_err());
+        // Second teardown still routes to CHECK (route was NOT forgotten).
+        assert!(hybrid.teardown("lease-c").is_err());
+
+        let teardown_calls = calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.as_str() == "CHECK:teardown:lease-c")
+            .count();
+        assert_eq!(
+            teardown_calls, 2,
+            "a failed teardown must keep the route so the reaper retries"
+        );
+    }
+
+    #[test]
+    fn hybrid_binds_boxes_so_a_runner_lease_admits() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runner_sub: Arc<dyn BoxProvisioner> =
+            Arc::new(SpyProvisioner::new("RUNNER", Arc::clone(&calls)));
+        let check_sub: Arc<dyn BoxProvisioner> =
+            Arc::new(SpyProvisioner::new("CHECK", Arc::clone(&calls)));
+        let hybrid = HybridBoxProvisioner::new(runner_sub, check_sub);
+        assert!(
+            hybrid.binds_boxes(),
+            "the hybrid binds boxes — a runner lease must not be rejected at admit"
+        );
     }
 
     // ── CloudflareBoxProvisioner over a fake transport ────────────────────────
