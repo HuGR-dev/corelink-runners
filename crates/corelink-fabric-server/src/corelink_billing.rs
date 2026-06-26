@@ -65,10 +65,6 @@ pub const BILLING_INGEST_AUTH_KEY_ENV: &str = "BILLING_INGEST_AUTH_KEY";
 /// fallback it is the configured Northflank region, also 3 chars.
 pub const BILLING_REGION_ENV: &str = "BILLING_REGION";
 
-/// Flush the buffer once it reaches this many events (the time-based ~30s flush
-/// is driven by the composition root; this bounds memory between ticks).
-const BATCH_MAX: usize = 256;
-
 /// One raw usage event in the batch — the per-event wire shape the aggregator
 /// ingests. Serialized as-is; the aggregator wraps/rolls-up + chains.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -265,15 +261,21 @@ impl<P: BillingPoster> CorelinkBillingTarget<P> {
             time_ms: ev.at_ms,
             idem_key: idem_key(&ev.lease_id, &period),
         };
-        let mut buf = self.buffer.lock().unwrap_or_else(|p| p.into_inner());
-        buf.push(data);
-        let full = buf.len() >= BATCH_MAX;
-        drop(buf);
-        if full {
-            // Best-effort auto-flush to bound memory; a failure is retained for
-            // the next tick (never propagated into the admission path).
-            let _ = self.flush_now();
-        }
+        self.buffer
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(data);
+        // NO inline flush here. `enqueue_terminal` runs on the async terminal path
+        // (the close handler, the reaper sweep, admission expiry), and `flush_now`
+        // is a SYNCHRONOUS blocking `ureq` POST (up to the HTTP timeout). Calling it
+        // inline would stall that caller's response on the network — and
+        // `block_in_place` cannot rescue it: it only keeps OTHER tasks from starving
+        // (this call still blocks for the full POST) and it PANICS off a multi-thread
+        // runtime (e.g. in the unit tests, which call this synchronously). The
+        // periodic `spawn_push_flush_loop` (block_in_place, ~30s) is the SOLE flush
+        // driver; the buffer is bounded by that cadence — a burst holds at most
+        // ~`rate × interval` small events, drained on the next tick (at-least-once
+        // delivery + `idem_key` dedup keep that safe).
     }
 }
 
@@ -464,6 +466,41 @@ mod tests {
         assert_eq!(e.time_ms, 4_000);
         assert_eq!(e.idem_key.len(), 64, "BLAKE3 → 32 bytes → 64 hex chars");
         assert!(e.billing_period.len() == 7 && e.billing_period.contains('-'));
+    }
+
+    /// REGRESSION (hardening sweep 2026-06-26): a BURST of terminals must NOT
+    /// trigger an inline POST. `enqueue_terminal` runs on the async terminal/close
+    /// path; a synchronous blocking `ureq` POST there would stall the caller's
+    /// response on the network (the bug the sweep found — an auto-flush at 256 with
+    /// no `block_in_place`). The periodic flush loop is the SOLE POST driver; until
+    /// it ticks, events just accumulate in the buffer.
+    #[test]
+    fn burst_of_terminals_does_not_flush_inline() {
+        let t = target(RecordingPoster::ok());
+        // Push far past the old 256 auto-flush threshold.
+        for i in 0..300u64 {
+            let lease = format!("L{i}");
+            t.export(&ev("acme", &lease, SlotEventKind::Acquired, 0))
+                .unwrap();
+            t.export(&ev("acme", &lease, SlotEventKind::Released, 1_000))
+                .unwrap();
+        }
+        assert_eq!(
+            t.buffered(),
+            300,
+            "all 300 terminals buffered, none dropped"
+        );
+        assert!(
+            t.poster.bodies().is_empty(),
+            "NO inline POST: enqueue must never call the blocking poster on the async path"
+        );
+        // Only an explicit flush (what the periodic loop drives) POSTs.
+        t.flush().unwrap();
+        assert_eq!(
+            t.poster.bodies().len(),
+            1,
+            "the periodic flush is the sole POST driver"
+        );
     }
 
     /// `Expired` and `Crashed` are terminal too — they bill the slot's lifetime.
