@@ -87,21 +87,27 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("cloud backend: MOCK (deterministic stub, offline adapter dev only)");
     } else {
         // Report the exec/spawn backend the wiring ACTUALLY resolved, in the
-        // SAME precedence as `build_app_and_state` (server.rs): the Cloudflare
-        // substrate is probed FIRST and WINS when its env is present; ELSE
-        // Northflank; ELSE NoBox (every exec 503). Reporting exactly ONE backend
-        // here means the log can never claim "execs will 503" while a substrate
-        // is actually wired (the prior split diagnostic could print both).
+        // SAME 4-way selection as `build_app_and_state` (server.rs): BOTH present
+        // ⇒ HYBRID (runner→Cloudflare, check-exec→Northflank, rota B); Cloudflare
+        // only ⇒ Cloudflare (runner-only); Northflank only ⇒ Northflank; neither
+        // ⇒ NoBox (every exec 503). Reporting the real selection means the log can
+        // never claim "execs will 503" while a substrate is actually wired.
         use corelink_fabric_server::cloud_exec::{CloudBackendStatus, cloud_backend_status};
+        let nf_status = cloud_backend_status(|k| std::env::var(k).ok());
+        let nf_wired = matches!(nf_status, CloudBackendStatus::Wired);
         match corelink_cloud_engine::CloudflareConfig::from_env() {
-            // Cloudflare env present ⇒ CF is the selected exec+spawn backend (it
-            // wins even if NORTHFLANK_* is also set, mirroring server.rs). The
-            // `validate` only sharpens the operator debug loop — the per-spawn
-            // floor in CloudflareEngine::spawn is the hard backstop, so a WARN
-            // here does NOT hard-fail.
+            // Cloudflare env present. The `validate` only sharpens the operator
+            // debug loop — the per-spawn floor in CloudflareEngine::spawn is the
+            // hard backstop, so a WARN here does NOT hard-fail.
             Some(cf) => match cf.validate() {
+                Ok(()) if nf_wired => eprintln!(
+                    "exec backend: HYBRID (rota B) — runner→Cloudflare (url={}, disk={} MiB), \
+                     check-exec→Northflank",
+                    cf.spawn_worker_url, cf.runner_storage_mb
+                ),
                 Ok(()) => eprintln!(
-                    "exec backend: Cloudflare substrate (url={}, disk={} MiB)",
+                    "exec backend: Cloudflare substrate (url={}, disk={} MiB) — runner-only; \
+                     a check-exec lease fails closed at spawn (set NORTHFLANK_* to serve checks)",
                     cf.spawn_worker_url, cf.runner_storage_mb
                 ),
                 Err(why) => {
@@ -113,9 +119,9 @@ async fn main() -> anyhow::Result<()> {
                     eprintln!();
                 }
             },
-            // No Cloudflare env ⇒ fall back to Northflank; ELSE NoBox. ONLY here
-            // (both substrates off) can "execs will 503" be true.
-            None => match cloud_backend_status(|k| std::env::var(k).ok()) {
+            // No Cloudflare env ⇒ Northflank; ELSE NoBox. ONLY here (both
+            // substrates off) can "execs will 503" be true.
+            None => match nf_status {
                 CloudBackendStatus::Wired => eprintln!(
                     "exec backend: Northflank (NORTHFLANK_API_TOKEN + NORTHFLANK_PROJECT_ID set)"
                 ),

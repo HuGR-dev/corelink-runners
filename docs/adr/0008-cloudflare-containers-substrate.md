@@ -130,3 +130,35 @@ it; a conformance vector keeps them from drifting.
 - **Isolation review owner + bar:** who signs off that Cloudflare's container isolation meets the
   untrusted-CI threat model.
 - **R2 co-location seam:** Cache TL coordination for in-network CAS credentials/topology.
+
+## Addendum 2026-06-26 — rota B: hybrid backend (runner→Cloudflare, check-exec→Northflank)
+
+> Status: **Accepted** (Runners TL, owner-delegated 2026-06-26 — "as decisões são suas
+> como techlead"). Resolves the deferred CHECK-exec-on-Cloudflare question (task #29).
+
+**Decision.** `CloudflareEngine` v0 is **runner-only by design** (ADR-0007): the spawn-Worker's
+only container is the GitHub-Actions runner image, so a CHECK-exec spec (`allow_egress=false`) fails
+CLOSED at spawn (hardened in #198). The killer (githugr/hugit memoized CI) needs CHECK-exec boxes.
+Rather than build a native CF CHECK-exec endpoint now (**rota A** — multi-day, deferred), the fabric
+routes by lease KIND:
+
+- **runner** lease (`allow_egress=true`) → **Cloudflare** (the moat substrate, co-located with R2);
+- **check-exec** lease (`allow_egress=false`) → **Northflank** (the existing exec backend).
+
+**Mechanism.** A `HybridBoxProvisioner` (composition root, `cloud_exec.rs`) selected when BOTH
+`CLOUDFLARE_SPAWN_*` AND `NORTHFLANK_*` env are present (`select_backend(true,true) ⇒ Hybrid`).
+Routing forks on `spec.allow_egress` — the red-team-blessed discriminator (a runner lease is built
+only via `ContainerSpec::from_runner_lease`; egress is never inferred from the wire `net_policy`
+string, the C2 invariant), so the fork cannot be spoofed. The wired exec is Northflank's
+(`EngineLeasedExec`) because only a check lease ever execs (a runner is runner-direct). Both sub-
+provisioners share ONE `BoxRegistry`; the hybrid records lease→backend so teardown/probe replay the
+provision route (`RunningContainer` carries no provider tag), keeping a failed teardown's route so
+the reaper retries against the same engine.
+
+**Selection order (4-way, was CF→NF→off):** both ⇒ Hybrid; CF only ⇒ Cloudflare (runner-only);
+NF only ⇒ Northflank (both kinds); neither ⇒ NoBox (default-off, fail-closed).
+
+**Rota A (deferred end-state).** A native CF CHECK-exec endpoint (new spawn-Worker route + a
+container that runs a `CheckDef` + `CloudflareEngine::exec_captured` impl) is the eventual win —
+it puts checks on the R2-co-located moat too. Rota B unblocks the killer without it; rota A is a
+future additive change behind the same `Engine` seam.
