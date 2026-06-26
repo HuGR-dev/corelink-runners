@@ -7,8 +7,8 @@
 
 use corelink_fabric_api::{
     AcquireRequest, AcquireResponse, ApiError, AttestationKeyResponse, AttestationKeySetResponse,
-    CancelResponse, CloseRequest, CloseResponse, ErrorBody, ExecRequest, ExecResponse, KeyEntry,
-    StatusResponse, TriggerRequest, TriggerResponse, paths,
+    CancelResponse, CloseRequest, CloseResponse, EnvelopeIngest, ErrorBody, ExecRequest,
+    ExecResponse, KeyEntry, StatusResponse, TriggerRequest, TriggerResponse, paths,
 };
 use corelink_runners_contracts::{
     Artifact, AttestationChain, CheckDef, CheckResult, IntentMetrics, LandableEntry, RunnerLease,
@@ -164,6 +164,22 @@ fn dtos_roundtrip_and_deny_unknown() {
         &AcquireResponse {
             lease: sample_lease(),
             exec_endpoint: "/v1/leases/lease-0001/exec".to_string(),
+            // §13.2 off-box ingest credential (cost-killer path "A") — exercise the
+            // present case so the additive field round-trips + denies unknowns.
+            envelope_ingest: Some(EnvelopeIngest {
+                ingest_path: "/v1/leases/lease-0001/envelope/ingest".to_string(),
+                credential: "ingest-scoped-token-abc".to_string(),
+            }),
+        },
+        "AcquireResponse",
+    );
+    // The None case is byte-identical to the pre-additive wire (skipped on
+    // serialize) — a runner-lease response carries no `envelope_ingest`.
+    roundtrip_and_deny_unknown(
+        &AcquireResponse {
+            lease: sample_lease(),
+            exec_endpoint: "/v1/leases/lease-0001/exec".to_string(),
+            envelope_ingest: None,
         },
         "AcquireResponse",
     );

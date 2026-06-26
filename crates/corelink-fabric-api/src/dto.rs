@@ -84,6 +84,27 @@ pub enum RunnerTargetDto {
     },
 }
 
+/// §13.2 ingest credential surfaced to an **off-box** submitter — the cost-killer
+/// path "A". hugit's dispatch client submits its agent loop's §13.1 IntentMetrics
+/// (tokens/model/`cost_usd_micros`) directly, because the metrics originate in
+/// hugit's agent loop, NOT a fabric box. The fabric hosts the lease + signs the
+/// attestation over what hugit submits. This carries the SAME scoped, write-only,
+/// lease-folded token the box receives — returned to the **trusted lease owner**
+/// (authenticated on acquire by the tenant PAT) so an off-box agent can `POST`
+/// trajectory events without a box. NOT a tenant PAT: an exfiltrated token can
+/// only write THIS (soon-dead) lease's envelope, never the tenant API (the P0
+/// scope is preserved; the ingest endpoint's auth is unchanged).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnvelopeIngest {
+    /// Lease-scoped §13.2 ingest path — `POST` trajectory events here. Relative
+    /// to the fabric base (e.g. `/v1/leases/{lease_id}/envelope/ingest`).
+    pub ingest_path: String,
+    /// The scoped, write-only, lease-folded ingest credential (sent as the
+    /// Bearer to `ingest_path`). NOT a tenant PAT.
+    pub credential: String,
+}
+
 /// `POST /v1/leases` response body — the granted lease.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -95,6 +116,13 @@ pub struct AcquireResponse {
     /// The exec endpoint for this lease (contract §1: acquire returns "a
     /// lease id, an exec endpoint, and a deadline").
     pub exec_endpoint: String,
+
+    /// §13.2 off-box ingest credential — see [`EnvelopeIngest`]. Present for
+    /// non-runner leases when §13 is wired; `None` for runner leases (which never
+    /// stream §13) and when §13 is off. **Additive + skipped on the wire when
+    /// absent**, so a runner-lease response is byte-identical to before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub envelope_ingest: Option<EnvelopeIngest>,
 }
 
 /// `GET /v1/leases/{lease_id}` response body — lease status.

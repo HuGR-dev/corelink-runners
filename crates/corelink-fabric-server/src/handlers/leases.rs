@@ -40,8 +40,8 @@ use corelink_fabric::compute_meter;
 use corelink_fabric::ledger::{AdmitOutcome, ComputeGate};
 use corelink_fabric::{LeaseRecord, LeaseState, SlotEventKind, TenantId};
 use corelink_fabric_api::{
-    AcquireRequest, AcquireResponse, ApiError, CancelResponse, RunnerSpec, RunnerTargetDto,
-    StatusResponse, paths,
+    AcquireRequest, AcquireResponse, ApiError, CancelResponse, EnvelopeIngest, RunnerSpec,
+    RunnerTargetDto, StatusResponse, paths,
 };
 use corelink_runner::envelope::{CaptureHook, EnvelopeConfig, MetricsCollector};
 use corelink_runner::lease::ContainerSpec;
@@ -869,12 +869,29 @@ pub(crate) async fn finalize_admitted_lease(
     // deliberately NOT emitted here.
 
     let exec_endpoint = paths::EXEC.replace("{lease_id}", &lease_id);
+    // §13.2 path "A" (the cost killer): surface the OFF-BOX ingest credential to
+    // the trusted lease owner so hugit's dispatch client can SUBMIT its agent
+    // loop's §13.1 IntentMetrics without a fabric box. Mirrors the box-injection
+    // condition + token EXACTLY: only for non-runner leases (a runner box runs GH
+    // Actions, never streams §13), and the SAME scoped, write-only, lease-folded
+    // token the box receives (`ingest_signer.ingest_token(lease_id)`) — safe to
+    // hand the lease OWNER (an exfiltrated token writes only this lease's
+    // envelope, never the tenant API). The ingest endpoint's auth is UNCHANGED.
+    let envelope_ingest = if req.runner.is_none() {
+        Some(EnvelopeIngest {
+            ingest_path: paths::ENVELOPE_INGEST.replace("{lease_id}", &lease_id),
+            credential: state.ingest_signer.ingest_token(&lease_id),
+        })
+    } else {
+        None
+    };
     FinalizeOutcome::Done(
         (
             StatusCode::OK,
             Json(AcquireResponse {
                 lease,
                 exec_endpoint,
+                envelope_ingest,
             }),
         )
             .into_response(),
@@ -1485,6 +1502,64 @@ mod tests {
                 "no box env value may be the tenant PAT (key={k})"
             );
         }
+    }
+
+    // ── Test: the acquire RESPONSE surfaces the off-box ingest credential (A) ──
+
+    /// **Cost-killer path "A".** A non-runner acquire response carries
+    /// `envelope_ingest` so hugit's OFF-BOX dispatch client can submit its agent
+    /// loop's §13.1 IntentMetrics without a fabric box. The surfaced credential
+    /// MUST be the SAME per-lease scoped ingest token the box receives
+    /// (recomputable under the fabric secret), and the path THIS lease's §13.2
+    /// ingest endpoint. The token is lease-scoped + write-only — NOT the tenant
+    /// PAT — so handing it to the trusted lease OWNER is safe (the P0 scope holds).
+    #[tokio::test]
+    async fn acquire_response_surfaces_offbox_ingest_credential_for_check_lease() {
+        use crate::ingest_token::IngestSigner;
+
+        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
+            Arc::new(Mutex::new(InMemoryLedger::new()));
+        let ingest_secret: Vec<u8> = b"unit-test-ingest-secret".to_vec();
+        let state = AppState::new(
+            Arc::clone(&ledger),
+            Arc::new(plans(5)),
+            Arc::new(FixedClock(1_717_000_000_000)),
+        )
+        .with_ingest_signer(Arc::new(IngestSigner::new(ingest_secret.clone())));
+        let router = crate::app::app(acme_token_store(), state.clone());
+
+        // `body()` is a CHECK lease (runner: None) — the §13 path.
+        let resp = router
+            .oneshot(acquire_request(paths::LEASES, &body()))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "check acquire must succeed");
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let acq: corelink_fabric_api::AcquireResponse = serde_json::from_slice(&bytes).unwrap();
+
+        let lease_id = acq.lease.lease_id.clone();
+        let ingest = acq
+            .envelope_ingest
+            .as_ref()
+            .expect("a check (non-runner) lease must surface the off-box ingest credential");
+        // The path is THIS lease's §13.2 ingest endpoint.
+        assert_eq!(
+            ingest.ingest_path,
+            paths::ENVELOPE_INGEST.replace("{lease_id}", &lease_id)
+        );
+        // The credential is the SAME scoped, write-only token the box receives...
+        let expected = IngestSigner::new(ingest_secret).ingest_token(&lease_id);
+        assert_eq!(
+            ingest.credential, expected,
+            "the surfaced credential must equal the box's scoped ingest token"
+        );
+        // ...and it is NOT the tenant PAT.
+        assert_ne!(
+            ingest.credential, "pat-acme",
+            "the off-box credential must be the scoped token, never the tenant PAT"
+        );
     }
 
     // ── Test: atomic reserve closes over-admission ─────────────────────────────

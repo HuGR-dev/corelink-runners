@@ -18,8 +18,8 @@ pub mod paths;
 
 pub use dto::{
     AcquireRequest, AcquireResponse, AttestationKeyResponse, AttestationKeySetResponse,
-    CancelResponse, CloseRequest, CloseResponse, ExecRequest, ExecResponse, KeyEntry,
-    KeySelectError, RunnerSpec, RunnerTargetDto, StatusResponse, TriggerRequest, TriggerResponse,
-    select_attestation_key,
+    CancelResponse, CloseRequest, CloseResponse, EnvelopeIngest, ExecRequest, ExecResponse,
+    KeyEntry, KeySelectError, RunnerSpec, RunnerTargetDto, StatusResponse, TriggerRequest,
+    TriggerResponse, select_attestation_key,
 };
 pub use error::{ApiError, ErrorBody};
