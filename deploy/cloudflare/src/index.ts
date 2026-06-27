@@ -21,6 +21,10 @@ import {
 
 export interface Env {
   RUNNER_CONTAINER: DurableObjectNamespace<RunnerContainer>;
+  // The Container DO for a check-host lease (CF-native check-host, campaign B).
+  // A `mode:"check"` /v1/spawn routes HERE (not RUNNER_CONTAINER); /v1/exec dials
+  // its in-container exec-server on port 8080. See docs/spec/cf-check-host-contract.md.
+  CHECK_HOST_CONTAINER: DurableObjectNamespace<CheckHostContainer>;
   // Worker secret (`wrangler secret put`). Must match the fabric's
   // CLOUDFLARE_SPAWN_AUTH_TOKEN. Missing/mismatch ⇒ 401.
   CLOUDFLARE_SPAWN_AUTH_TOKEN: string;
@@ -93,12 +97,53 @@ export class RunnerContainer extends Container<Env> {
   }
 }
 
+// Per-lease check-host container (CF-native check-host, campaign B). One DO
+// instance per check-host lease (keyed by handle). UNLIKE RunnerContainer, this
+// container exposes an HTTP exec-server on port 8080 (C4) that /v1/exec dials via
+// `containerFetch`; the toolchain is hydrated once at start from the injected
+// TOOLCHAIN_DIGEST (C2/C5). See docs/spec/cf-check-host-contract.md.
+export class CheckHostContainer extends Container<Env> {
+  // The in-container exec-server listens here (C4); `containerFetch(req, 8080)`
+  // and this default both target it.
+  defaultPort = 8080;
+  // Orphan-leak backstop, mirroring RunnerContainer: the DO sleeps (and the
+  // container stops) after this if no exec/teardown arrives.
+  sleepAfter = "45m";
+  // The check-host needs egress to hydrate the toolchain from CAS at start (C2).
+  enableInternet = true;
+
+  // Start the per-lease container with the check env injected at runtime
+  // (TOOLCHAIN_DIGEST + CLW_*), enabling egress for the start-time clw hydrate.
+  async startWithEnv(envVars: Record<string, string>): Promise<void> {
+    await this.start({ envVars, enableInternet: true });
+  }
+
+  // Idempotent teardown (SIGKILL via destroy()), mirroring RunnerContainer.
+  async teardown(): Promise<void> {
+    await this.destroy();
+  }
+}
+
 interface SpawnBody {
   image_digest: string;
   jitconfig: string;
   env: Record<string, string>;
   labels: string[];
   expiry_ms: number;
+  // CF-native check-host (C2): "runner" (default, back-compat) | "check". When
+  // "check" the spawn routes to CHECK_HOST_CONTAINER and toolchain_digest is
+  // required. Absent ⇒ the runner path, byte-unchanged.
+  mode?: "runner" | "check";
+  // The clw snapshot manifest digest of the toolchain to hydrate at start (C2).
+  // Required when mode==="check"; injected as TOOLCHAIN_DIGEST.
+  toolchain_digest?: string;
+}
+
+// POST /v1/exec request (C3): run argv in an already-spawned check-host lease.
+interface ExecBody {
+  handle: string;
+  argv: string[];
+  timeout_ms: number;
 }
 
 function unauthorized(): Response {
@@ -324,6 +369,27 @@ export default {
       if (!body.image_digest.includes("@sha256:")) {
         return json({ error: "image_digest must be content-pinned (@sha256:)" }, 400);
       }
+
+      // ── Check-mode (C2): route to CHECK_HOST_CONTAINER (NOT the runner DO) ──
+      // Additive + back-compat: mode absent OR "runner" ⇒ the unchanged runner
+      // path below. mode==="check" requires toolchain_digest; it is injected as
+      // TOOLCHAIN_DIGEST so the container hydrates the toolchain at start (C2/C5).
+      if (body.mode === "check") {
+        if (!body.toolchain_digest) {
+          return json({ error: "toolchain_digest required when mode==check" }, 400);
+        }
+        const handle = crypto.randomUUID();
+        const container = getContainer(env.CHECK_HOST_CONTAINER, handle);
+        // Inject the lease env + TOOLCHAIN_DIGEST; egress on so clw can hydrate
+        // the toolchain from CAS at start (C2).
+        await container.start({
+          envVars: { ...body.env, TOOLCHAIN_DIGEST: body.toolchain_digest },
+          enableInternet: true,
+        });
+        return json({ handle }, 201);
+      }
+
+      // ── Runner mode (default / absent) — byte-unchanged ────────────────────
       if (env.PINNED_IMAGE_DIGEST && body.image_digest !== env.PINNED_IMAGE_DIGEST) {
         return json(
           { error: "image_digest does not match the deployed pinned image" },
@@ -336,6 +402,44 @@ export default {
       // Inject the per-job env (JIT config + CLW_*) at start (runtime, not baked).
       await container.startWithEnv(body.env);
       return json({ handle }, 201);
+    }
+
+    // ── POST /v1/exec (C3) — run argv in an already-spawned check-host lease ──
+    // Relays the container's exec-server JSON {exit_code, stdout, stderr} back as
+    // 200. A non-2xx from the container is FAIL-CLOSED (502/503; never a
+    // fabricated success) so CloudflareEngine::exec_captured returns Err.
+    if (request.method === "POST" && pathname === "/v1/exec") {
+      const body = (await request.json()) as ExecBody;
+      if (!body.handle) return json({ error: "missing handle" }, 400);
+      const container = getContainer(env.CHECK_HOST_CONTAINER, body.handle);
+      let resp: Response;
+      try {
+        resp = await container.containerFetch(
+          new Request("http://check/exec", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ argv: body.argv, timeout_ms: body.timeout_ms }),
+          }),
+          8080,
+        );
+      } catch (e) {
+        // The container is unreachable (gone / not started / dial failure) ⇒
+        // fail-closed (503), never a fabricated CmdOutput.
+        return json({ error: `check-host unreachable: ${(e as Error).message}` }, 503);
+      }
+      if (!resp.ok) {
+        // The exec-server returned a non-2xx ⇒ fail-closed (502). The fabric must
+        // NOT see a CmdOutput; run_check fails closed.
+        const detail = await resp.text().catch(() => "");
+        return json({ error: `check-host exec failed: ${resp.status} ${detail}` }, 502);
+      }
+      // Relay the byte-faithful {exit_code, stdout, stderr} verbatim as 200 (C3).
+      const out = (await resp.json()) as {
+        exit_code: number | null;
+        stdout: string;
+        stderr: string;
+      };
+      return json(out, 200);
     }
 
     // GET /v1/status/{handle}
