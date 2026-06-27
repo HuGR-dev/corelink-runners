@@ -1,0 +1,260 @@
+// Handler-level tests for the CF-native check-host surface (campaign B):
+//   - /v1/spawn mode:"check"  → spawns the CHECK_HOST_CONTAINER DO (C2)
+//   - /v1/spawn mode:"runner"/absent → the unchanged RUNNER_CONTAINER path
+//   - /v1/exec → relays the container's {exit_code, stdout, stderr} (C3)
+//   - a container non-2xx / unreachable → fail-closed (502/503), never a fake success
+//
+// `@cloudflare/containers` imports `cloudflare:workers` (Workers-only), so we
+// vi.mock the module to a plain test double, exactly so the default fetch handler
+// in src/index.ts is importable + exercisable in node vitest.
+import { describe, it, expect, vi, beforeEach } from "vitest";
+
+// ── Test double for @cloudflare/containers ───────────────────────────────────
+// One shared fake container per `getContainer(ns, handle)` call, recorded so a
+// test can assert WHICH namespace was used and replay the container's behavior.
+interface FakeContainer {
+  ns: unknown;
+  handle: string;
+  start: ReturnType<typeof vi.fn>;
+  startWithEnv: ReturnType<typeof vi.fn>;
+  containerFetch: ReturnType<typeof vi.fn>;
+  isAlive: ReturnType<typeof vi.fn>;
+  teardown: ReturnType<typeof vi.fn>;
+}
+
+let containers: FakeContainer[] = [];
+// What containerFetch should resolve to (or throw) for the NEXT call.
+let nextContainerFetch: () => Promise<Response> = async () =>
+  new Response(JSON.stringify({ exit_code: 0, stdout: "", stderr: "" }), { status: 200 });
+
+vi.mock("@cloudflare/containers", () => {
+  return {
+    // The base class the DOs extend — a no-op stand-in (we never instantiate the
+    // real DO; we only drive the worker's fetch handler via getContainer).
+    Container: class {},
+    getContainer: vi.fn((ns: unknown, handle: string): FakeContainer => {
+      const c: FakeContainer = {
+        ns,
+        handle,
+        start: vi.fn(async () => {}),
+        startWithEnv: vi.fn(async () => {}),
+        containerFetch: vi.fn(async () => nextContainerFetch()),
+        isAlive: vi.fn(async () => true),
+        teardown: vi.fn(async () => {}),
+      };
+      containers.push(c);
+      return c;
+    }),
+  };
+});
+
+// Import AFTER the mock is registered.
+import worker, { type Env } from "../src/index";
+import { getContainer } from "@cloudflare/containers";
+
+const AUTH = "spawn-secret";
+const IMG = "registry/check-host@sha256:" + "a".repeat(64);
+
+// Distinct sentinel objects so a test can assert which DO namespace was selected.
+const RUNNER_NS = { _ns: "runner" };
+const CHECK_NS = { _ns: "check" };
+
+function makeEnv(over: Partial<Env> = {}): Env {
+  return {
+    RUNNER_CONTAINER: RUNNER_NS as never,
+    CHECK_HOST_CONTAINER: CHECK_NS as never,
+    CLOUDFLARE_SPAWN_AUTH_TOKEN: AUTH,
+    PINNED_IMAGE_DIGEST: "",
+    ...over,
+  } as Env;
+}
+
+function post(path: string, body: unknown, auth = AUTH): Request {
+  return new Request(`https://w${path}`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${auth}`, "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+beforeEach(() => {
+  containers = [];
+  nextContainerFetch = async () =>
+    new Response(JSON.stringify({ exit_code: 0, stdout: "", stderr: "" }), { status: 200 });
+  vi.mocked(getContainer).mockClear();
+});
+
+describe("/v1/spawn mode:'check' (C2)", () => {
+  it("routes to CHECK_HOST_CONTAINER and injects TOOLCHAIN_DIGEST + egress, 201 {handle}", async () => {
+    const env = makeEnv();
+    const resp = await worker.fetch(
+      post("/v1/spawn", {
+        image_digest: IMG,
+        mode: "check",
+        toolchain_digest: "sha256:deadbeef",
+        env: { CLW_TENANT: "t", CLW_TOKEN: "x" },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(201);
+    const j = (await resp.json()) as { handle: string };
+    expect(typeof j.handle).toBe("string");
+
+    // Exactly one container, on the CHECK namespace (not the runner DO).
+    expect(containers).toHaveLength(1);
+    expect(containers[0].ns).toBe(CHECK_NS);
+    // .start({ envVars: {...env, TOOLCHAIN_DIGEST}, enableInternet:true }).
+    expect(containers[0].start).toHaveBeenCalledTimes(1);
+    const arg = containers[0].start.mock.calls[0][0];
+    expect(arg.enableInternet).toBe(true);
+    expect(arg.envVars.TOOLCHAIN_DIGEST).toBe("sha256:deadbeef");
+    expect(arg.envVars.CLW_TENANT).toBe("t");
+    expect(arg.envVars.CLW_TOKEN).toBe("x");
+    // The check DO was NOT started via the runner-only startWithEnv path.
+    expect(containers[0].startWithEnv).not.toHaveBeenCalled();
+  });
+
+  it("400 when mode:'check' but toolchain_digest is missing (fail-closed)", async () => {
+    const resp = await worker.fetch(
+      post("/v1/spawn", { image_digest: IMG, mode: "check", env: {} }),
+      makeEnv(),
+    );
+    expect(resp.status).toBe(400);
+    expect(containers).toHaveLength(0); // nothing spawned
+  });
+});
+
+describe("/v1/spawn mode:'runner'/absent — unchanged runner path", () => {
+  it("absent mode ⇒ RUNNER_CONTAINER via startWithEnv, 201 {handle}", async () => {
+    const env = makeEnv();
+    const resp = await worker.fetch(
+      post("/v1/spawn", { image_digest: IMG, env: { CORELINK_RUNNER_JITCONFIG: "j" } }),
+      env,
+    );
+    expect(resp.status).toBe(201);
+    expect(containers).toHaveLength(1);
+    expect(containers[0].ns).toBe(RUNNER_NS); // the runner DO, not the check DO
+    expect(containers[0].startWithEnv).toHaveBeenCalledWith({ CORELINK_RUNNER_JITCONFIG: "j" });
+    expect(containers[0].start).not.toHaveBeenCalled();
+  });
+
+  it("explicit mode:'runner' ⇒ identical runner path", async () => {
+    const env = makeEnv();
+    const resp = await worker.fetch(
+      post("/v1/spawn", { image_digest: IMG, mode: "runner", env: { a: "b" } }),
+      env,
+    );
+    expect(resp.status).toBe(201);
+    expect(containers[0].ns).toBe(RUNNER_NS);
+    expect(containers[0].startWithEnv).toHaveBeenCalledWith({ a: "b" });
+  });
+
+  it("runner path still enforces PINNED_IMAGE_DIGEST (409 on mismatch)", async () => {
+    const env = makeEnv({ PINNED_IMAGE_DIGEST: "other@sha256:" + "b".repeat(64) });
+    const resp = await worker.fetch(post("/v1/spawn", { image_digest: IMG, env: {} }), env);
+    expect(resp.status).toBe(409);
+    expect(containers).toHaveLength(0);
+  });
+
+  it("check path is NOT gated by the runner's PINNED_IMAGE_DIGEST", async () => {
+    const env = makeEnv({ PINNED_IMAGE_DIGEST: "other@sha256:" + "b".repeat(64) });
+    const resp = await worker.fetch(
+      post("/v1/spawn", { image_digest: IMG, mode: "check", toolchain_digest: "d", env: {} }),
+      env,
+    );
+    expect(resp.status).toBe(201);
+    expect(containers[0].ns).toBe(CHECK_NS);
+  });
+});
+
+describe("/v1/exec (C3)", () => {
+  it("relays the container's {exit_code, stdout, stderr} verbatim as 200", async () => {
+    nextContainerFetch = async () =>
+      new Response(
+        JSON.stringify({ exit_code: 0, stdout: "hello\n", stderr: "warn\n" }),
+        { status: 200 },
+      );
+    const env = makeEnv();
+    const resp = await worker.fetch(
+      post("/v1/exec", { handle: "h-1", argv: ["sh", "-lc", "echo hello"], timeout_ms: 5000 }),
+      env,
+    );
+    expect(resp.status).toBe(200);
+    const j = await resp.json();
+    expect(j).toEqual({ exit_code: 0, stdout: "hello\n", stderr: "warn\n" });
+
+    // It dialed the CHECK DO on the named handle and POSTed argv+timeout_ms to
+    // the in-container exec-server on port 8080.
+    expect(containers).toHaveLength(1);
+    expect(containers[0].ns).toBe(CHECK_NS);
+    expect(containers[0].handle).toBe("h-1");
+    const [req, port] = containers[0].containerFetch.mock.calls[0];
+    expect(port).toBe(8080);
+    const sent = JSON.parse(await (req as Request).text());
+    expect(sent).toEqual({ argv: ["sh", "-lc", "echo hello"], timeout_ms: 5000 });
+  });
+
+  it("relays a non-zero exit_code (a failing check is a SUCCESSFUL relay, 200)", async () => {
+    nextContainerFetch = async () =>
+      new Response(JSON.stringify({ exit_code: 1, stdout: "", stderr: "boom" }), { status: 200 });
+    const resp = await worker.fetch(
+      post("/v1/exec", { handle: "h", argv: ["false"], timeout_ms: 1000 }),
+      makeEnv(),
+    );
+    expect(resp.status).toBe(200);
+    expect(await resp.json()).toEqual({ exit_code: 1, stdout: "", stderr: "boom" });
+  });
+
+  it("relays exit_code:null (signal-killed / timeout) as 200", async () => {
+    nextContainerFetch = async () =>
+      new Response(JSON.stringify({ exit_code: null, stdout: "", stderr: "" }), { status: 200 });
+    const resp = await worker.fetch(
+      post("/v1/exec", { handle: "h", argv: ["sleep", "99"], timeout_ms: 10 }),
+      makeEnv(),
+    );
+    expect(resp.status).toBe(200);
+    expect(((await resp.json()) as { exit_code: number | null }).exit_code).toBeNull();
+  });
+
+  it("FAIL-CLOSED: a non-2xx from the container ⇒ 502 (no fabricated success)", async () => {
+    nextContainerFetch = async () => new Response("server boom", { status: 500 });
+    const resp = await worker.fetch(
+      post("/v1/exec", { handle: "h", argv: ["x"], timeout_ms: 1000 }),
+      makeEnv(),
+    );
+    expect(resp.status).toBe(502);
+    const j = (await resp.json()) as { error?: string; exit_code?: unknown };
+    expect(j.error).toBeDefined();
+    expect(j.exit_code).toBeUndefined(); // never a CmdOutput shape
+  });
+
+  it("FAIL-CLOSED: an unreachable container (containerFetch throws) ⇒ 503", async () => {
+    nextContainerFetch = async () => {
+      throw new Error("no instance");
+    };
+    const resp = await worker.fetch(
+      post("/v1/exec", { handle: "h", argv: ["x"], timeout_ms: 1000 }),
+      makeEnv(),
+    );
+    expect(resp.status).toBe(503);
+    expect(((await resp.json()) as { exit_code?: unknown }).exit_code).toBeUndefined();
+  });
+
+  it("400 when handle is missing", async () => {
+    const resp = await worker.fetch(
+      post("/v1/exec", { argv: ["x"], timeout_ms: 1 }),
+      makeEnv(),
+    );
+    expect(resp.status).toBe(400);
+    expect(containers).toHaveLength(0);
+  });
+
+  it("401 without bearer auth (same gate as /v1/spawn)", async () => {
+    const resp = await worker.fetch(
+      post("/v1/exec", { handle: "h", argv: ["x"], timeout_ms: 1 }, "wrong"),
+      makeEnv(),
+    );
+    expect(resp.status).toBe(401);
+    expect(containers).toHaveLength(0);
+  });
+});
