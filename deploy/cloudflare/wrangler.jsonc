@@ -31,14 +31,18 @@
     { "binding": "RUNNER_JOB_PATS", "id": "4fb7e9c773d64f83ae3415c5a0879d66" }
   ],
 
-  // The Container Durable Object that owns the per-job runner container.
+  // The Container Durable Objects: the per-job runner container, and (CF-native
+  // check-host, campaign B) the per-lease check-host container. A mode:"check"
+  // /v1/spawn routes to CHECK_HOST_CONTAINER; /v1/exec dials its exec-server.
   "durable_objects": {
     "bindings": [
-      { "name": "RUNNER_CONTAINER", "class_name": "RunnerContainer" }
+      { "name": "RUNNER_CONTAINER", "class_name": "RunnerContainer" },
+      { "name": "CHECK_HOST_CONTAINER", "class_name": "CheckHostContainer" }
     ]
   },
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["RunnerContainer"] }
+    { "tag": "v1", "new_sqlite_classes": ["RunnerContainer"] },
+    { "tag": "v2", "new_sqlite_classes": ["CheckHostContainer"] }
   ],
 
   // The runner container. IMPORTANT (ADR-0008 / README wrinkle #1): the image is
@@ -53,6 +57,16 @@
       "image": "../runner/Dockerfile",
       // standard-4 = 4 vCPU / 12 GiB / 20 GB disk — fits CI, clears the runner
       // disk floor (RUNNER_EPHEMERAL_STORAGE_FLOOR_MB).
+      "instance_type": "standard-4",
+      "max_instances": 2
+    },
+    {
+      // CF-native check-host (campaign B). Build context = deploy/check-host (its
+      // Dockerfile + entrypoint.sh land in W2; referenced ahead of time per the
+      // contract WP table). Runs the in-container exec-server on port 8080 (C4);
+      // hydrates the toolchain at start from the injected TOOLCHAIN_DIGEST (C5).
+      "class_name": "CheckHostContainer",
+      "image": "../check-host/Dockerfile",
       "instance_type": "standard-4",
       "max_instances": 2
     }
