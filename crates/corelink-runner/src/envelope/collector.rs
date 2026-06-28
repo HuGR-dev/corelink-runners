@@ -16,6 +16,18 @@ use corelink_runners_contracts::{IntentMetrics, TokenCounts, ToolCount};
 
 use super::event::{PriceCard, TranscriptEvent};
 
+/// Cardinality cap on `tool_breakdown` distinct keys (audit r4 DoS bound). A
+/// compromised in-box agent could otherwise stream unique tool names to grow the
+/// per-lease map (and each turn's durable envelope checkpoint) without bound.
+/// Keys beyond this fold into [`TOOL_OVERFLOW_KEY`]; total memory stays O(cap).
+const MAX_DISTINCT_TOOLS: usize = 256;
+/// Per-key tool-name length cap. An over-long name folds into the overflow bucket
+/// (it is treated as abuse, not a real tool) so no single key grows unbounded.
+const MAX_TOOL_NAME_LEN: usize = 128;
+/// The single sentinel bucket that absorbs over-cap / over-long tool names. The
+/// `Σ tool_breakdown == tool_calls` invariant still holds (overflow counts too).
+const TOOL_OVERFLOW_KEY: &str = "<overflow>";
+
 /// Single-writer per-job metrics accumulator.
 ///
 /// Lifecycle: [`new`](Self::new) at job birth → [`observe`](Self::observe)
@@ -96,7 +108,21 @@ impl MetricsCollector {
             }
             TranscriptEvent::ToolCall { tool, busy_ms, .. } => {
                 self.tool_calls += 1;
-                *self.tool_breakdown.entry(tool.clone()).or_insert(0) += 1;
+                // Bound the breakdown against attacker-controlled tool names (audit
+                // r4 DoS): an over-long name, OR a NEW key once the cardinality cap
+                // is reached, folds into a single overflow bucket — per-lease memory
+                // and the durable per-turn checkpoint stay O(MAX_DISTINCT_TOOLS).
+                // Existing keys always increment (so a legit tool set keeps exact
+                // counts); `Σ tool_breakdown == tool_calls` is preserved.
+                let admit = tool.len() <= MAX_TOOL_NAME_LEN
+                    && (self.tool_breakdown.contains_key(tool.as_str())
+                        || self.tool_breakdown.len() < MAX_DISTINCT_TOOLS);
+                let key = if admit {
+                    tool.as_str()
+                } else {
+                    TOOL_OVERFLOW_KEY
+                };
+                *self.tool_breakdown.entry(key.to_string()).or_insert(0) += 1;
                 self.active_ms = self.active_ms.saturating_add(*busy_ms);
             }
             TranscriptEvent::ToolResult { .. } | TranscriptEvent::SystemPrompt { .. } => {}
@@ -312,6 +338,47 @@ mod tests {
             m.tool_breakdown.iter().map(|t| t.count).sum::<u64>(),
             "tool_calls must equal the breakdown sum"
         );
+    }
+
+    /// Audit r4 DoS bound: attacker-controlled tool names (many distinct, or
+    /// over-long) cannot grow the breakdown without bound — they fold into the
+    /// single overflow bucket, and the `Σ == tool_calls` invariant still holds.
+    #[test]
+    fn tool_breakdown_is_bounded_against_attacker_tool_names() {
+        let born = Instant::now();
+        let mut c = MetricsCollector::new(born);
+        c.observe(&turn(None));
+        let extra = 50usize;
+        // (1) cardinality: stream MAX_DISTINCT_TOOLS + extra DISTINCT names.
+        for i in 0..(MAX_DISTINCT_TOOLS + extra) {
+            c.observe(&TranscriptEvent::ToolCall {
+                tool: format!("tool-{i}"),
+                bytes: b"x".to_vec(),
+                busy_ms: 0,
+            });
+        }
+        // (2) an over-long name also folds into overflow.
+        c.observe(&TranscriptEvent::ToolCall {
+            tool: "z".repeat(MAX_TOOL_NAME_LEN + 1),
+            bytes: b"x".to_vec(),
+            busy_ms: 0,
+        });
+        let m = c.finalize(born, &zero_price()).unwrap();
+        assert!(
+            m.tool_breakdown.len() <= MAX_DISTINCT_TOOLS + 1,
+            "cardinality must be bounded to MAX_DISTINCT_TOOLS (+1 overflow); got {}",
+            m.tool_breakdown.len()
+        );
+        assert!(
+            m.tool_breakdown.iter().any(|t| t.tool == TOOL_OVERFLOW_KEY),
+            "over-cap / over-long tool names must fold into the overflow bucket"
+        );
+        assert_eq!(
+            m.tool_calls,
+            m.tool_breakdown.iter().map(|t| t.count).sum::<u64>(),
+            "Σ tool_breakdown == tool_calls must hold even with overflow folding"
+        );
+        assert_eq!(m.tool_calls as usize, MAX_DISTINCT_TOOLS + extra + 1);
     }
 
     #[test]

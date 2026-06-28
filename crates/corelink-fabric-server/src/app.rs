@@ -1288,7 +1288,13 @@ pub fn app_full(
     let ingest = Router::new()
         .route(&capture(paths::ENVELOPE_INGEST), post(envelope::ingest))
         .with_state(state.clone())
-        .layer(Extension(Arc::clone(&registry)));
+        .layer(Extension(Arc::clone(&registry)))
+        // input-validation (audit r4): cap the §13 ingest body. This sub-router is
+        // merged SEPARATELY from `authenticated`, so the 256 KiB cap there did NOT
+        // apply here — ingest fell back to axum's 2 MiB default. A trajectory batch
+        // is bounded; 1 MiB is generous and bounds an oversized/abusive submission
+        // (the per-lease collector cardinality cap is the other half of the bound).
+        .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024));
 
     let authenticated = Router::new()
         .route(paths::USAGE, get(handlers::usage::usage))
