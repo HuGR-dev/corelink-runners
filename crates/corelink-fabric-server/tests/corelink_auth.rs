@@ -424,7 +424,11 @@ fn persistent_transport_error_fails_closed_after_bounded_attempts() {
     let transport = SeqIntrospect::new(vec![None]); // repeats forever
     let store = CoreLinkTokenStore::new(transport, cfg("https://x/introspect", "k"));
     assert_eq!(store.tenant_of("tok"), Err(TokenStoreError::Unreachable));
-    assert_eq!(store.http.calls(), 3, "exactly 3 bounded attempts, then fail-closed");
+    assert_eq!(
+        store.http.calls(),
+        3,
+        "exactly 3 bounded attempts, then fail-closed"
+    );
 }
 
 /// 14. An AUTHORITATIVE 401 is NOT retried — a wrong service secret won't change
@@ -434,7 +438,11 @@ fn authoritative_401_is_not_retried() {
     let transport = SeqIntrospect::new(vec![Some((401, r#"{"error":"unauthorized"}"#))]);
     let store = CoreLinkTokenStore::new(transport, cfg("https://x/introspect", "k"));
     assert_eq!(store.tenant_of("tok"), Err(TokenStoreError::Unreachable));
-    assert_eq!(store.http.calls(), 1, "401 is authoritative — exactly one call, no retry");
+    assert_eq!(
+        store.http.calls(),
+        1,
+        "401 is authoritative — exactly one call, no retry"
+    );
 }
 
 /// 15. An AUTHORITATIVE 200 `valid:false` (unknown token) is NOT retried.
@@ -443,5 +451,9 @@ fn authoritative_valid_false_is_not_retried() {
     let transport = SeqIntrospect::new(vec![Some((200, r#"{"valid":false}"#))]);
     let store = CoreLinkTokenStore::new(transport, cfg("https://x/introspect", "k"));
     assert_eq!(store.tenant_of("tok"), Ok(None));
-    assert_eq!(store.http.calls(), 1, "valid:false is authoritative — one call, no retry");
+    assert_eq!(
+        store.http.calls(),
+        1,
+        "valid:false is authoritative — one call, no retry"
+    );
 }
