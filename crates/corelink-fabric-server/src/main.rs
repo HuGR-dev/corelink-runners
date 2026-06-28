@@ -232,13 +232,20 @@ async fn main() -> anyhow::Result<()> {
     if let Some(h) = quota_headroom_handle {
         h.abort();
     }
-    // ASK-2: abort the billing usage-push flush driver (only set under BILLING_INGEST_URL).
+    // ASK-2: drain the billing usage-push flush driver (only set under BILLING_INGEST_URL).
     if let Some(h) = billing_push_handle {
-        // Final flush BEFORE abort (audit r4 #8): drain terminal-lease usage events
-        // buffered since the last ~30s tick. `flush` is a sync blocking POST →
-        // block_in_place (legal on the multi-thread runtime); bounded by the
-        // target's own HTTP timeout. A failure is logged (idem_key makes the next
-        // retry idempotent) and never blocks shutdown beyond that bound.
+        // ABORT FIRST, then flush (audit r6 fix): aborting the periodic loop BEFORE
+        // the final flush makes the final flush the SOLE flusher. Otherwise the
+        // periodic loop's 30s tick could fire concurrently with the final flush —
+        // two `flush_now` calls snapshot the same batch, and the second drain
+        // (`batch.len().min(buf.len())`) could remove FRONT events newly enqueued
+        // between snapshot and drain that it never sent (silent loss). The target
+        // Arc outlives the aborted task, so the final flush still runs.
+        h.abort();
+        // Final flush (audit r4 #8): drain terminal-lease usage events buffered
+        // since the last tick. `flush` is a sync blocking POST → block_in_place
+        // (legal on the multi-thread runtime); bounded by the target's own HTTP
+        // timeout. A failure is logged (idem_key makes the next retry idempotent).
         if let Some(t) = billing_push_target {
             tokio::task::block_in_place(|| corelink_fabric::BillingExportTarget::flush(&*t))
                 .unwrap_or_else(|e| {
@@ -248,7 +255,6 @@ async fn main() -> anyhow::Result<()> {
                     );
                 });
         }
-        h.abort();
     }
     Ok(())
 }
