@@ -565,6 +565,14 @@ pub(crate) async fn acquire_queued(
             "admission loop dropped the queued acquire; failing closed",
         ),
         Err(_elapsed) => {
+            // A7b: revoke any CAS PAT minted for this lease BEFORE evicting. A
+            // waiter re-enqueued after a provider CapacityError carries its minted
+            // `pat_id` forward (leases.rs intentionally skips revoke on the
+            // re-enqueue path); if that re-enqueued waiter then times out here, the
+            // PAT would otherwise live unrevoked until D-9 self-expiry. `QueuedAcquire`
+            // has no `Drop`, so the revoke must be explicit. No-op (safe) when the
+            // waiter never minted a PAT (first-enqueue timeout).
+            state.revoke_pat_for(&lease_id).await;
             evict_waiter(queue, &lease_id);
             error_response(
                 ApiError::FailClosed,
@@ -1039,9 +1047,12 @@ pub async fn run_admission_tick(state: &AppState, now_ms: u64) -> usize {
             // will eventually fire the timeout → 503 (never an infinite hang).
             // A scheduler full → shed with distinct capacity-503.
             //
-            // WP-7: revoke_pat_for fires on the shed / give-up path. The
-            // pat_id is in `pat_ids` so the revoke succeeds on every terminal
-            // path including the timeout arm (evict_waiter + context drop).
+            // WP-7 (A7b): the minted `pat_id` stays in `pat_ids` across the
+            // re-enqueue (NOT revoked here — the waiter may yet be admitted). It is
+            // revoked EXPLICITLY on every give-up path: the shed sub-path, the
+            // timeout arm (`acquire_queued`), and the dispatch-lost-the-race
+            // rollback — each calls `revoke_pat_for` directly (there is no `Drop`
+            // on `QueuedAcquire`, so the revoke can never be implicit).
             FinalizeOutcome::CapacityError => {
                 // Preserve the ORIGINAL enqueued_at_ms (carried on `pending`)
                 // so the wait clock and FIFO ordering are not reset.
@@ -1115,6 +1126,13 @@ pub async fn run_admission_tick(state: &AppState, now_ms: u64) -> usize {
                         // `Pending` (e.g. it 503'd and already rolled itself
                         // back).
                         state.teardown_lease(&lease_id).await;
+                        // A7b: revoke any CAS PAT minted for this lease BEFORE
+                        // `rollback_undispatched_lease` (which calls `forget_lease`,
+                        // dropping the `pat_id` mapping). Mirrors the reaper's
+                        // revoke-before-forget ordering. Without this, a lease whose
+                        // dispatch lost the dispatch-vs-timeout race keeps its minted
+                        // PAT alive until D-9 self-expiry. No-op when none was minted.
+                        state.revoke_pat_for(&lease_id).await;
                         rollback_undispatched_lease(state, &tenant, &lease_id).await;
                         // NOT genuinely dispatched — excluded from wait stats.
                     }
@@ -2009,10 +2027,78 @@ mod queue_tests {
     /// (teardown + ledger remove), leaving NO orphaned Held lease (no leaked
     /// billed slot until the deadline reaper). Driven deterministically by
     /// inserting a waiter whose receiver is already dropped, then ticking.
+    /// A recording [`crate::runner_cas_mint::CasPatMint`] (test-only): mints a
+    /// deterministic PAT and RECORDS every revoked `pat_id`, so a give-up path's
+    /// A7b revoke can be asserted.
+    #[derive(Clone, Default)]
+    struct RecordingMint {
+        revoked: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+    impl RecordingMint {
+        fn pat_id_for(tenant: &str, job_id: &str) -> String {
+            format!("rec-patid::{tenant}::{job_id}")
+        }
+        fn revoked(&self) -> Vec<String> {
+            self.revoked
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone()
+        }
+    }
+    impl crate::runner_cas_mint::CasPatMint for RecordingMint {
+        fn mint<'a>(
+            &'a self,
+            owner_tenant: &'a str,
+            job_id: &'a str,
+            lease_deadline_ms: u64,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            crate::runner_cas_mint::MintedPat,
+                            crate::runner_cas_mint::MintError,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            let pat_id = Self::pat_id_for(owner_tenant, job_id);
+            let token = format!("rec-pat::{owner_tenant}::{job_id}");
+            Box::pin(async move {
+                Ok(crate::runner_cas_mint::MintedPat {
+                    token,
+                    pat_id,
+                    expires_ms: lease_deadline_ms,
+                })
+            })
+        }
+        fn revoke<'a>(
+            &'a self,
+            pat_id: &'a str,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<(), crate::runner_cas_mint::MintError>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            self.revoked
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(pat_id.to_string());
+            Box::pin(async { Ok(()) })
+        }
+    }
+
     #[tokio::test]
     async fn phantom_held_rolled_back_when_dispatch_wins_vs_timeout() {
         let now = 8_000_000u64;
         let (state, ledger) = queue_state(1, now, Duration::from_secs(5));
+        // A7b regression: wire a recording mint so finalize mints a per-job PAT.
+        // The dispatch-lost-the-race rollback MUST then revoke it (the fix); a
+        // leaked PAT would otherwise live until D-9 self-expiry.
+        let rec_mint = RecordingMint::default();
+        let state = state.with_cas_pat_mint(std::sync::Arc::new(rec_mint.clone()));
         let queue = state.admission_queue.as_ref().unwrap();
 
         // Mint a lease + Pending record by hand and enqueue it with a waiter
@@ -2111,6 +2197,15 @@ mod queue_tests {
                 "an undispatched Held lease terminalizes via transition(Crashed)"
             );
         }
+        // A7b (the fix): the dispatch-lost-the-race rollback revoked the minted
+        // per-job CAS PAT — no credential leaks until D-9 self-expiry.
+        assert!(
+            rec_mint
+                .revoked()
+                .contains(&RecordingMint::pat_id_for("alpha", &lease_id)),
+            "rollback_undispatched_lease must revoke the minted PAT (A7b); revoked={:?}",
+            rec_mint.revoked()
+        );
     }
 
     // ── P2: a timed-out/orphaned FIFO entry must not pollute §6 wait metrics ────

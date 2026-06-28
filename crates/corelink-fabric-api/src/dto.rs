@@ -94,7 +94,7 @@ pub enum RunnerTargetDto {
 /// trajectory events without a box. NOT a tenant PAT: an exfiltrated token can
 /// only write THIS (soon-dead) lease's envelope, never the tenant API (the P0
 /// scope is preserved; the ingest endpoint's auth is unchanged).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnvelopeIngest {
     /// Lease-scoped §13.2 ingest path — `POST` trajectory events here. Relative
@@ -103,6 +103,20 @@ pub struct EnvelopeIngest {
     /// The scoped, write-only, lease-folded ingest credential (sent as the
     /// Bearer to `ingest_path`). NOT a tenant PAT.
     pub credential: String,
+}
+
+/// Manual redacting `Debug` — the `credential` is a (scoped, write-only) secret
+/// and MUST NEVER appear in a log line, panic message, or trace. Mirrors the
+/// codebase precedent (`IngestSigner`, `MintedPat`, `BearerPat`, `HttpRequest`,
+/// the cloud configs). `Serialize`/`Deserialize` are unaffected — the wire shape
+/// is unchanged; only the `{:?}` rendering redacts.
+impl std::fmt::Debug for EnvelopeIngest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EnvelopeIngest")
+            .field("ingest_path", &self.ingest_path)
+            .field("credential", &"***REDACTED***")
+            .finish()
+    }
 }
 
 /// `POST /v1/leases` response body — the granted lease.

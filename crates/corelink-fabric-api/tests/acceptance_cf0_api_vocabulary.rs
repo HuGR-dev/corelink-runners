@@ -351,3 +351,28 @@ fn paths_are_v1_stable() {
     // attestation key. Frozen from here on like the rest of /v1.
     assert_eq!(paths::ATTESTATION_KEY, "/v1/attestation/key");
 }
+
+/// `EnvelopeIngest`'s `Debug` MUST redact the `credential` (a scoped, write-only
+/// secret) — matching every other credential type in the codebase. A leak here
+/// would surface the ingest token in any future log line / tracing middleware.
+/// (`Serialize`/`Deserialize` are unaffected — only the `{:?}` rendering redacts.)
+#[test]
+fn envelope_ingest_debug_redacts_credential() {
+    let e = EnvelopeIngest {
+        ingest_path: "/v1/leases/lease-0001/envelope/ingest".to_string(),
+        credential: "super-secret-scoped-ingest-token".to_string(),
+    };
+    let dbg = format!("{e:?}");
+    assert!(
+        !dbg.contains("super-secret-scoped-ingest-token"),
+        "Debug must NOT leak the credential; got: {dbg}"
+    );
+    assert!(
+        dbg.contains("***REDACTED***"),
+        "Debug must redact the credential; got: {dbg}"
+    );
+    assert!(
+        dbg.contains("/v1/leases/lease-0001/envelope/ingest"),
+        "Debug should still show the non-secret ingest_path; got: {dbg}"
+    );
+}
