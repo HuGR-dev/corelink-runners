@@ -152,7 +152,7 @@ impl BootCas for FakeCas {
         self.cached.contains(layer_key)
     }
 
-    fn fetch_layer(&self, layer_key: &str) -> Result<Vec<u8>, BootError> {
+    fn fetch_layer(&self, layer_key: &str) -> Result<Option<Vec<u8>>, BootError> {
         if self.fault == FaultMode::CasDown {
             return Err(BootError::SubstrateDown {
                 substrate: "CAS".to_string(),
@@ -167,7 +167,7 @@ impl BootCas for FakeCas {
             .entry(layer_key.to_string())
             .or_insert(0) += 1;
         // Return dummy layer bytes keyed to the content hash.
-        Ok(format!("layer-bytes-for-{layer_key}").into_bytes())
+        Ok(Some(format!("layer-bytes-for-{layer_key}").into_bytes()))
     }
 
     fn write_layer(&self, layer_key: &str, _data: &[u8]) -> Result<(), BootError> {

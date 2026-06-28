@@ -537,13 +537,13 @@ impl<T: CasTransport> BootCas for HttpBootCas<T> {
     ///
     /// Builds the CAS GET URL, fires it via the transport, and maps the outcome:
     /// - `Hit(bytes)` → returns the bytes (warm layer present in CAS).
-    /// - `Miss` (404) → returns `Ok(vec![])` — the cold path proceeds: the
-    ///   caller's cold build produces the layer; write-back stores it. A Miss
-    ///   is NOT an error — it is the normal cold-start signal (A5/A1 invariant:
-    ///   miss ≠ unreachable; "cache absent ⇒ slow, never broken").
+    /// - `Miss` (404) → returns `Ok(None)` — DISTINCT from a present-but-empty
+    ///   layer, so the caller never writes a miss-sentinel back (A1 poison) and
+    ///   never marks the key cached. A Miss is NOT an error — it is the cold-start
+    ///   signal (A5/A1: miss ≠ unreachable; "cache absent ⇒ slow, never broken").
     /// - `FailClosed` (401/403/5xx/transport err) → returns
     ///   `Err(BootError::SubstrateDown)` (hard fail-closed, A5/A5b/A12).
-    fn fetch_layer(&self, layer_key: &str) -> Result<Vec<u8>, BootError> {
+    fn fetch_layer(&self, layer_key: &str) -> Result<Option<Vec<u8>>, BootError> {
         let (tenant, digest) = self.route_key(layer_key);
         let url = format!("{}/v1/cas/{}/{}", self.client.endpoint, tenant, digest);
         let req = CasRequest {
@@ -556,12 +556,12 @@ impl<T: CasTransport> BootCas for HttpBootCas<T> {
         };
         match self.client.transport.send(&req) {
             Ok(resp) => match status_to_outcome(resp.status, resp.body) {
-                CasOutcome::Hit(bytes) => Ok(bytes),
-                // 404 Miss → cold path proceeds; return empty bytes as cold-build
-                // placeholder. The write-back stores the actual built content.
-                // This is the A5/A1 invariant: miss ≠ unreachable; the run must
-                // SUCCEED (slowly) even on a completely empty CAS.
-                CasOutcome::Miss => Ok(vec![]),
+                CasOutcome::Hit(bytes) => Ok(Some(bytes)),
+                // 404 Miss → `None` (DISTINCT from a present-but-empty layer): the
+                // caller proceeds cold WITHOUT writing a miss-sentinel back (A1
+                // poison) and WITHOUT marking the key cached. miss ≠ unreachable;
+                // the run SUCCEEDS (slowly) even on a completely empty CAS.
+                CasOutcome::Miss => Ok(None),
                 CasOutcome::FailClosed(reason) => Err(BootError::SubstrateDown {
                     substrate: "CAS".to_string(),
                     reason,
@@ -603,11 +603,20 @@ impl<T: CasTransport> BootCas for HttpBootCas<T> {
         };
         match self.client.transport.send(&req) {
             Ok(resp) => match status_to_outcome(resp.status, resp.body) {
-                CasOutcome::Hit(_) | CasOutcome::Miss => {
-                    // Both Hit (200) and Miss (204 etc.) normalise as success.
+                // Only a real 2xx is a successful write. A PUT that 404s is an
+                // ERROR (unknown tenant/bucket/route — a misconfig), NOT a cache
+                // "miss": fail closed and NEVER mark the key cached (the prior code
+                // treated 404→Miss→success, a silent write-path fail-open).
+                CasOutcome::Hit(_) => {
                     self.mark_cached(layer_key);
                     Ok(())
                 }
+                CasOutcome::Miss => Err(BootError::SubstrateDown {
+                    substrate: "CAS".to_string(),
+                    reason: "CAS write-back returned 404 (PUT target not found — \
+                             unknown tenant/bucket/route); fail-closed"
+                        .to_string(),
+                }),
                 CasOutcome::FailClosed(reason) => Err(BootError::SubstrateDown {
                     substrate: "CAS".to_string(),
                     reason,
