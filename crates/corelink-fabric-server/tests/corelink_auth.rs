@@ -92,6 +92,50 @@ impl IntrospectHttp for FakeIntrospect {
     }
 }
 
+/// A SEQUENCED [`IntrospectHttp`] double for the retry tests: each call pops the
+/// next scripted outcome (`Some((status, body))` = a response, `None` = a
+/// transport error); once only one item remains it is REPEATED (so a persistent
+/// failure can be scripted with a single item). Counts calls so a test can
+/// assert that authoritative responses are NOT retried.
+struct SeqIntrospect {
+    script: Mutex<std::collections::VecDeque<Option<(u16, String)>>>,
+    calls: Mutex<u32>,
+}
+
+impl SeqIntrospect {
+    fn new(items: Vec<Option<(u16, &str)>>) -> Self {
+        let q = items
+            .into_iter()
+            .map(|o| o.map(|(s, b)| (s, b.to_string())))
+            .collect();
+        Self {
+            script: Mutex::new(q),
+            calls: Mutex::new(0),
+        }
+    }
+    fn calls(&self) -> u32 {
+        *self.calls.lock().unwrap()
+    }
+}
+
+impl IntrospectHttp for SeqIntrospect {
+    fn post(&self, _url: &str, _auth: &str, _body: &str) -> anyhow::Result<IntrospectResponse> {
+        *self.calls.lock().unwrap() += 1;
+        let item = {
+            let mut q = self.script.lock().unwrap();
+            if q.len() > 1 {
+                q.pop_front().unwrap()
+            } else {
+                q.front().cloned().unwrap_or(None)
+            }
+        };
+        match item {
+            Some((status, body)) => Ok(IntrospectResponse { status, body }),
+            None => Err(anyhow::anyhow!("simulated transport error")),
+        }
+    }
+}
+
 // ── Helper ────────────────────────────────────────────────────────────────────
 
 fn cfg(url: &str, secret: &str) -> CoreLinkAuthConfig {
@@ -99,6 +143,8 @@ fn cfg(url: &str, secret: &str) -> CoreLinkAuthConfig {
         introspect_url: url.to_string(),
         service_secret: secret.to_string(),
         timeout: Duration::from_secs(2),
+        // ZERO so the retry tests don't actually sleep.
+        retry_backoff: Duration::ZERO,
     }
 }
 
@@ -239,6 +285,7 @@ fn config_redacts_secret_in_debug() {
         introspect_url: "https://example.com".to_string(),
         service_secret: secret.to_string(),
         timeout: Duration::from_secs(2),
+        retry_backoff: Duration::ZERO,
     };
     let debug_str = format!("{cfg:?}");
     assert!(
@@ -342,4 +389,59 @@ fn config_default_is_static() {
         matches!(cfg.auth_backend, AuthBackend::Static),
         "default auth_backend must be Static"
     );
+}
+
+// ── Retry on TRANSIENT failure (the cold-start gate of the cost killer) ─────────
+
+const VALID_BODY: &str = r#"{"valid":true,"tenant_id":"3fa85f64-5717-4562-b3fc-2c963f66afa6"}"#;
+
+/// 11. A cold-egress blip (transport error) on the FIRST call, then a real 200,
+///     RECOVERS — a freshly-woken container must not 503 an otherwise-valid
+///     acquire. The single-shot `pr land --dispatch` depends on this.
+#[test]
+fn transient_transport_then_200_recovers() {
+    let transport = SeqIntrospect::new(vec![None, Some((200, VALID_BODY))]);
+    let store = CoreLinkTokenStore::new(transport, cfg("https://x/introspect", "k"));
+    let tenant = store.tenant_of("tok").expect("must recover").expect("Some");
+    assert_eq!(tenant.as_str(), "3fa85f64-5717-4562-b3fc-2c963f66afa6");
+    assert_eq!(store.http.calls(), 2, "retried once then succeeded");
+}
+
+/// 12. A transient 503, then a real 200, RECOVERS (backend mid-redeploy).
+#[test]
+fn transient_503_then_200_recovers() {
+    let transport = SeqIntrospect::new(vec![Some((503, "")), Some((200, VALID_BODY))]);
+    let store = CoreLinkTokenStore::new(transport, cfg("https://x/introspect", "k"));
+    let tenant = store.tenant_of("tok").expect("must recover").expect("Some");
+    assert_eq!(tenant.as_str(), "3fa85f64-5717-4562-b3fc-2c963f66afa6");
+    assert_eq!(store.http.calls(), 2);
+}
+
+/// 13. A PERSISTENT transport error still fails closed — and only after the
+///     bounded number of attempts (no unbounded retry).
+#[test]
+fn persistent_transport_error_fails_closed_after_bounded_attempts() {
+    let transport = SeqIntrospect::new(vec![None]); // repeats forever
+    let store = CoreLinkTokenStore::new(transport, cfg("https://x/introspect", "k"));
+    assert_eq!(store.tenant_of("tok"), Err(TokenStoreError::Unreachable));
+    assert_eq!(store.http.calls(), 3, "exactly 3 bounded attempts, then fail-closed");
+}
+
+/// 14. An AUTHORITATIVE 401 is NOT retried — a wrong service secret won't change
+///     on retry; retrying would only delay a deterministic fail-closed.
+#[test]
+fn authoritative_401_is_not_retried() {
+    let transport = SeqIntrospect::new(vec![Some((401, r#"{"error":"unauthorized"}"#))]);
+    let store = CoreLinkTokenStore::new(transport, cfg("https://x/introspect", "k"));
+    assert_eq!(store.tenant_of("tok"), Err(TokenStoreError::Unreachable));
+    assert_eq!(store.http.calls(), 1, "401 is authoritative — exactly one call, no retry");
+}
+
+/// 15. An AUTHORITATIVE 200 `valid:false` (unknown token) is NOT retried.
+#[test]
+fn authoritative_valid_false_is_not_retried() {
+    let transport = SeqIntrospect::new(vec![Some((200, r#"{"valid":false}"#))]);
+    let store = CoreLinkTokenStore::new(transport, cfg("https://x/introspect", "k"));
+    assert_eq!(store.tenant_of("tok"), Ok(None));
+    assert_eq!(store.http.calls(), 1, "valid:false is authoritative — one call, no retry");
 }

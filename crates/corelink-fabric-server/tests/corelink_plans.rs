@@ -80,6 +80,7 @@ fn harness(introspect: FakeIntrospect) -> Router {
         introspect_url: "https://example.com/introspect".to_string(),
         service_secret: "s3cr3t".to_string(),
         timeout: Duration::from_secs(2),
+        retry_backoff: Duration::ZERO,
     };
     let plans = Arc::new(CoreLinkPlanStore::new(introspect, cfg));
     let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));

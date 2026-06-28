@@ -129,6 +129,7 @@ fn auth_cfg() -> CoreLinkAuthConfig {
         introspect_url: "https://example.com/introspect".to_string(),
         service_secret: "s3cr3t".to_string(),
         timeout: Duration::from_secs(2),
+        retry_backoff: Duration::ZERO,
     }
 }
 

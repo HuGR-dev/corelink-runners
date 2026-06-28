@@ -436,6 +436,7 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
                 introspect_url,
                 service_secret,
                 timeout,
+                retry_backoff: crate::corelink_auth::DEFAULT_INTROSPECT_RETRY_BACKOFF,
             };
 
             // In corelink mode FABRIC_PAT/FABRIC_TENANT are not required.
@@ -997,6 +998,7 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
                 introspect_url: auth_cfg.introspect_url.clone(),
                 service_secret: auth_cfg.service_secret.clone(),
                 timeout: auth_cfg.timeout,
+                retry_backoff: auth_cfg.retry_backoff,
             };
             let cl_store = Arc::new(CoreLinkTokenStore::new(auth_transport, auth_store_cfg));
 
@@ -1009,6 +1011,7 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
                 introspect_url: auth_cfg.introspect_url.clone(),
                 service_secret: auth_cfg.service_secret.clone(),
                 timeout: auth_cfg.timeout,
+                retry_backoff: auth_cfg.retry_backoff,
             };
             let cl_plans = Arc::new(CoreLinkPlanStore::new(plan_transport, plan_store_cfg));
 

@@ -80,6 +80,7 @@ fn cfg() -> CoreLinkAuthConfig {
         introspect_url: "https://corelink-api.example/internal/v1/auth/introspect".to_string(),
         service_secret: "s3cr3t".to_string(),
         timeout: Duration::from_secs(2),
+        retry_backoff: Duration::ZERO,
     }
 }
 
