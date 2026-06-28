@@ -556,26 +556,26 @@ pub(crate) async fn acquire(
         // Held, register the §13 hook, and build the wire response — the SAME
         // core the queued admission loop runs after IT reserves a slot.
         Reserved::Admitted(minted) => {
+            // A7b (audit r4): capture the lease id BEFORE `finalize` consumes
+            // `minted`, so the give-up CapacityError arm below can revoke the
+            // minted PAT (finalize skips revoke on CapacityError, delegating it to
+            // the give-up path — but this IMMEDIATE acquire path gives up, it does
+            // not re-enqueue).
+            let lease_id = minted.lease_id.clone();
             match finalize_admitted_lease(&state, &registry, &tenant, &pat, minted, &req).await {
                 FinalizeOutcome::Done(resp) => resp,
                 // Provider capacity exhausted on the immediate path.
-                // Queue mode: re-enqueue this lease to wait for capacity (no
-                // slot is reserved; finalize already rolled back the Pending).
-                // Reject mode: return the distinct capacity-503 immediately.
-                FinalizeOutcome::CapacityError => match state.admission_mode {
-                    AdmissionMode::Queue => {
-                        // Re-enqueue the (now-rolled-back, slot-free) lease so
-                        // the admission loop can retry provision when capacity
-                        // may have freed. The MintedLease fields were consumed
-                        // by finalize so we cannot recover them here — return
-                        // the distinct 503 instead. (If the lease needs re-
-                        // queueing from the immediate path, the client should
-                        // retry; this path is rare and the queue mode's primary
-                        // re-enqueue is in the admission tick.)
-                        capacity_exhausted_503()
+                // Both arms GIVE UP here (the immediate path cannot re-enqueue —
+                // finalize consumed the MintedLease; the queue mode's real
+                // re-enqueue is in the admission tick). So both must revoke the
+                // minted PAT (A7b) before returning the distinct capacity-503.
+                FinalizeOutcome::CapacityError => {
+                    state.revoke_pat_for(&lease_id).await;
+                    match state.admission_mode {
+                        AdmissionMode::Queue => capacity_exhausted_503(),
+                        AdmissionMode::Reject => capacity_exhausted_503(),
                     }
-                    AdmissionMode::Reject => capacity_exhausted_503(),
-                },
+                }
             }
         }
         // Over-cap under queue mode: enqueue into the per-tenant FairScheduler
@@ -816,6 +816,12 @@ pub(crate) async fn finalize_admitted_lease(
         if let Ok(mut ledger) = state.ledger.lock() {
             let _ = ledger.remove(&lease_id);
         }
+        // A7b (audit r4): revoke the minted PAT on this terminal Pending→Held
+        // transition-failure path. The ledger row is removed above, so the
+        // stale-Pending reaper sweep never sees this lease — without an explicit
+        // revoke the PAT would live to D-9 self-expiry. Mirrors the
+        // fatal-provision path below.
+        state.revoke_pat_for(&lease_id).await;
         return FinalizeOutcome::Done(fail_closed(msg));
     }
 
