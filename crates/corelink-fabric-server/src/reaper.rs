@@ -486,18 +486,14 @@ pub async fn reap_once(state: &crate::AppState) -> usize {
                 // terminal paths; fire-and-forget, never fails teardown).
                 state.revoke_pat_for(&rec.lease_id).await;
 
-                // ── 6. GC side-tables (deadline + image entries).
-                state.forget_lease(&rec.lease_id);
-
-                // ── BIL1 / WP-SLOT-EMIT: slot expired — ledger lock is dropped
-                // (the transition block above), forget_lease holds no ledger lock.
-                // The symmetric Crashed path now lives in `surface_crashes`
-                // (WP-CRASH-SWEEP, opt-in); this expiry path emits Expired only.
-                state.record_slot(&rec.lease_id, &rec.tenant, SlotEventKind::Expired);
-
-                // ── WP-S13.5: best-effort PARTIAL-envelope flush, fire-and-forget,
-                // AFTER reclamation (never blocks it). Marks close_reason=expired +
-                // capture_incomplete:true; no-op if the lease had no capture hook.
+                // ── WP-S13.5 (audit r5 FIX): best-effort PARTIAL-envelope flush —
+                // MUST run BEFORE `forget_lease`, which unregisters the capture
+                // hook. Previously it ran after, so `close_handle_any` found no
+                // entry and the in-process partial metrics were silently dropped
+                // (the run fell through to tier-3 zero-metrics). Marks
+                // close_reason=expired + capture_incomplete:true; no-op if the
+                // lease had no hook. The hook's close-once latch makes a racing
+                // normal close safe. Sync + fast — does not meaningfully delay GC.
                 flush_partial_envelope(
                     state,
                     &rec.lease_id,
@@ -505,6 +501,15 @@ pub async fn reap_once(state: &crate::AppState) -> usize {
                     AbnormalKind::Expiry,
                     Instant::now(),
                 );
+
+                // ── 6. GC side-tables (deadline + image + hook entries).
+                state.forget_lease(&rec.lease_id);
+
+                // ── BIL1 / WP-SLOT-EMIT: slot expired — ledger lock is dropped
+                // (the transition block above), forget_lease holds no ledger lock.
+                // The symmetric Crashed path now lives in `surface_crashes`
+                // (WP-CRASH-SWEEP, opt-in); this expiry path emits Expired only.
+                state.record_slot(&rec.lease_id, &rec.tenant, SlotEventKind::Expired);
 
                 reaped += 1;
             }
@@ -706,14 +711,11 @@ pub async fn surface_crashes(state: &crate::AppState) -> usize {
             // paths; fire-and-forget, never fails teardown).
             state.revoke_pat_for(&rec.lease_id).await;
 
-            // ── 5. GC side-tables, then emit the Crashed slot event.
-            state.forget_lease(&rec.lease_id);
-            state.record_slot(&rec.lease_id, &rec.tenant, SlotEventKind::Crashed);
-
-            // ── WP-S13.5: best-effort PARTIAL-envelope flush, fire-and-forget,
-            // AFTER reclamation (never blocks it). Symmetric with the Expired
-            // path: marks close_reason=crashed + capture_incomplete:true; no-op
-            // if the lease had no capture hook.
+            // ── WP-S13.5 (audit r5 FIX): PARTIAL-envelope flush MUST run BEFORE
+            // `forget_lease` (which unregisters the hook) — symmetric with the
+            // Expired path. Previously after, so the hook was already gone and the
+            // partial metrics were dropped to tier-3 zero. Marks
+            // close_reason=crashed + capture_incomplete:true; no-op if no hook.
             flush_partial_envelope(
                 state,
                 &rec.lease_id,
@@ -721,6 +723,10 @@ pub async fn surface_crashes(state: &crate::AppState) -> usize {
                 AbnormalKind::Crash,
                 Instant::now(),
             );
+
+            // ── 5. GC side-tables, then emit the Crashed slot event.
+            state.forget_lease(&rec.lease_id);
+            state.record_slot(&rec.lease_id, &rec.tenant, SlotEventKind::Crashed);
 
             reaped += 1;
         }
@@ -2035,6 +2041,16 @@ mod tests {
         .expect("a registered hook must produce a finalized partial outcome");
         assert_eq!(outcome.close_reason, CloseReason::Crashed);
         assert!(outcome.capture_incomplete);
+        // Audit r5 regression: TIER-1 must emit the live hook's FINALIZED partial
+        // metrics, NOT tier-3 zero. `register_hook` feeds a model-turn, so a real
+        // tier-1 flush carries it; a regression to "forget_lease before flush"
+        // (which unregisters the hook) would silently drop to zero metrics.
+        assert!(
+            outcome.metrics.model_turns >= 1,
+            "TIER-1 flush must carry the live hook's partial metrics (≥1 model turn), \
+             not tier-3 zero; got {:?}",
+            outcome.metrics
+        );
 
         // The direct-flush lease above is still `Held` (a direct
         // `flush_partial_envelope` does NOT terminalize the lease — only the
