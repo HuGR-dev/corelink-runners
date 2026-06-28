@@ -137,7 +137,7 @@ impl BootCas for FakeCas {
         self.cached.contains(layer_key)
     }
 
-    fn fetch_layer(&self, layer_key: &str) -> Result<Vec<u8>, BootError> {
+    fn fetch_layer(&self, layer_key: &str) -> Result<Option<Vec<u8>>, BootError> {
         if self.fault == FaultMode::CasDown {
             return Err(BootError::SubstrateDown {
                 substrate: "CAS".to_string(),
@@ -151,9 +151,9 @@ impl BootCas for FakeCas {
             .entry(layer_key.to_string())
             .or_insert(0) += 1;
         if let Some(bytes) = self.data_map.get(layer_key) {
-            return Ok(bytes.clone());
+            return Ok(Some(bytes.clone()));
         }
-        Ok(format!("layer-bytes:{layer_key}").into_bytes())
+        Ok(Some(format!("layer-bytes:{layer_key}").into_bytes()))
     }
 
     fn write_layer(&self, layer_key: &str, _data: &[u8]) -> Result<(), BootError> {
@@ -252,17 +252,28 @@ fn a1_cold_first_run_miss_then_write_back() {
     let cas = HttpBootCas::new(client);
     let plan = fresh_plan(&[BLAKE3_KEY_A]);
 
-    // WP-2 impl UNIMPLEMENTED — this panics with "WP-2: is_cached(...)".
-    // When WP-2 lands:
-    //   - `is_cached` returns false (empty CAS).
-    //   - `fetch_layer` sees 404 → Miss → falls through to cold build.
-    //   - `write_layer` PUTs back to CAS/AC and returns Ok.
-    //   - `cold_hydrate` returns `Ok(Hydrated { layers_fetched: 1 })`.
+    // A1 (post poison-fix): an empty CAS — every GET is a 404 MISS — hydrates
+    // ZERO layers. The run SUCCEEDS (proceeds fully cold; "miss is NOT an error"),
+    // and CRUCIALLY writes NOTHING back: a miss must not poison the CAS with an
+    // empty-bytes sentinel nor false-mark the layer cached. (The old code wrote the
+    // empty miss-bytes back and counted it as a fetched layer — the A1 poison bug.)
     let result = cold_hydrate(&cas, &plan);
     let outcome = result.expect("A1: cold first run must succeed (miss is NOT an error)");
     assert!(
-        matches!(outcome, BootOutcome::Hydrated { layers_fetched } if layers_fetched >= 1),
-        "A1: cold run must fetch at least one layer; got: {outcome:?}"
+        matches!(outcome, BootOutcome::Hydrated { layers_fetched: 0 }),
+        "A1: empty CAS → 0 layers hydrated, run still succeeds; got: {outcome:?}"
+    );
+    // Poison guard: a 404 miss must produce ZERO write-back PUTs.
+    let puts = cas
+        .client
+        .transport
+        .calls_made()
+        .iter()
+        .filter(|c| c.method == CasMethod::Put)
+        .count();
+    assert_eq!(
+        puts, 0,
+        "A1 poison guard: a 404 miss must trigger NO write-back PUT"
     );
 }
 
@@ -654,14 +665,14 @@ fn a10_write_back_byte_identity_memo_poison_guard() {
             fn is_cached(&self, _key: &str) -> bool {
                 false
             }
-            fn fetch_layer(&self, key: &str) -> Result<Vec<u8>, BootError> {
+            fn fetch_layer(&self, key: &str) -> Result<Option<Vec<u8>>, BootError> {
                 *self
                     .fetch_counter
                     .lock()
                     .unwrap()
                     .entry(key.to_string())
                     .or_insert(0) += 1;
-                Ok(format!("deterministic-layer-for:{key}").into_bytes())
+                Ok(Some(format!("deterministic-layer-for:{key}").into_bytes()))
             }
             fn write_layer(&self, key: &str, data: &[u8]) -> Result<(), BootError> {
                 self.writes
@@ -698,9 +709,16 @@ fn a10_write_back_byte_identity_memo_poison_guard() {
     // This is the HARDENED assertion: inspect the CasRequest.body of the PUT call,
     // not just the cold_hydrate pass-through (cold-review finding, WP-2-final).
     {
-        // Run 1: cold (GET→404 miss, PUT→200 write-back ok).
+        // Run 1: cold, CAS HIT (200 + deterministic bytes) → a REAL write-back.
+        // The A10 invariant is byte-identity of the written-back CONTENT, which
+        // only exists on a hit — a 404 miss now writes nothing (the poison fix).
         let transport1 = MockCasTransport::new();
-        transport1.push(CasMethod::Get, "/v1/cas/", 404, vec![]);
+        transport1.push(
+            CasMethod::Get,
+            "/v1/cas/",
+            200,
+            b"toolchain-layer-A-content".to_vec(),
+        );
         transport1.push(CasMethod::Put, "/v1/cas/", 200, vec![]);
         let client1 = CasHttpClient::new("https://cas.corelink.io", "acme", "pat", transport1);
         let http_cas1 = HttpBootCas::new(client1);
@@ -717,9 +735,14 @@ fn a10_write_back_byte_identity_memo_poison_guard() {
             "A10: run 1 must produce at least one PUT (write-back)"
         );
 
-        // Run 2: same input.
+        // Run 2: same input — same HIT bytes → byte-identical write-back.
         let transport2 = MockCasTransport::new();
-        transport2.push(CasMethod::Get, "/v1/cas/", 404, vec![]);
+        transport2.push(
+            CasMethod::Get,
+            "/v1/cas/",
+            200,
+            b"toolchain-layer-A-content".to_vec(),
+        );
         transport2.push(CasMethod::Put, "/v1/cas/", 200, vec![]);
         let client2 = CasHttpClient::new("https://cas.corelink.io", "acme", "pat", transport2);
         let http_cas2 = HttpBootCas::new(client2);
@@ -746,6 +769,41 @@ fn a10_write_back_byte_identity_memo_poison_guard() {
             );
         }
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// A10b — write-path fail-open guard (audit round 2): a PUT-404 is an ERROR
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A write-back PUT that returns 404 is an ERROR (unknown tenant/bucket/route —
+/// a misconfig), NOT a cache "miss": it must NOT be treated as a successful write.
+/// `cold_hydrate` records `ForcedCold` (the write failed → not a hit) and the layer
+/// is NEVER marked cached. (The old code mapped PUT-404 → Miss → success and
+/// false-marked it cached — a silent write-path fail-open.)
+#[test]
+fn a10b_put_404_write_back_is_fail_closed_not_silent_success() {
+    use corelink_runner::cas_http::{CasHttpClient, HttpBootCas};
+
+    let transport = MockCasTransport::new();
+    // GET hit → a write-back is attempted; PUT 404 → the target is not found.
+    transport.push(CasMethod::Get, "/v1/cas/", 200, b"layer-bytes".to_vec());
+    transport.push(CasMethod::Put, "/v1/cas/", 404, vec![]);
+    let client = CasHttpClient::new("https://cas.corelink.io", "acme", "pat", transport);
+    let cas = HttpBootCas::new(client);
+    let plan = fresh_plan(&[BLAKE3_KEY_A]);
+
+    let outcome =
+        cold_hydrate(&cas, &plan).expect("the run proceeds (forced-cold), not a hard error");
+    assert!(
+        matches!(outcome, BootOutcome::ForcedCold { .. }),
+        "a PUT-404 write-back must force-cold (the write FAILED), never silently \
+         succeed; got: {outcome:?}"
+    );
+    // And the layer must NOT be marked cached after a failed write.
+    assert!(
+        !cas.is_cached(BLAKE3_KEY_A),
+        "a failed (404) write-back must NOT mark the layer cached (fail-open guard)"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -846,7 +904,7 @@ fn a12_partial_hydrate_substrate_down_mid_stream_fail_closed() {
             fn is_cached(&self, _key: &str) -> bool {
                 false
             }
-            fn fetch_layer(&self, key: &str) -> Result<Vec<u8>, BootError> {
+            fn fetch_layer(&self, key: &str) -> Result<Option<Vec<u8>>, BootError> {
                 let n = self.fetch_count.get();
                 self.fetch_count.set(n + 1);
                 if n >= self.fail_after {
@@ -855,7 +913,7 @@ fn a12_partial_hydrate_substrate_down_mid_stream_fail_closed() {
                         reason: format!("PartialFaultCas: down after {n} fetches"),
                     });
                 }
-                Ok(format!("layer-bytes:{key}").into_bytes())
+                Ok(Some(format!("layer-bytes:{key}").into_bytes()))
             }
             fn write_layer(&self, _key: &str, _data: &[u8]) -> Result<(), BootError> {
                 self.write_count.set(self.write_count.get() + 1);

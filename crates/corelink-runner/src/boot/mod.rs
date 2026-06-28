@@ -160,15 +160,16 @@ pub trait BootCas {
     /// Fetch the layer bytes for `layer_key` from the CAS origin.
     ///
     /// # Return convention
-    /// - **CAS hit (200/2xx):** returns `Ok(bytes)` — layer is present, warm path.
-    /// - **CAS miss (404):** returns `Ok(vec![])` — layer is absent; the cold path
-    ///   proceeds (the job/clw produces the layer and calls `write_layer`).
-    ///   A plain miss is NOT an error: "cache absent ⇒ slow, never broken" (A5/A1).
-    ///   `BootError::LayerUnavailable` is NOT returned — that variant does not exist.
+    /// - **CAS hit (200/2xx):** returns `Ok(Some(bytes))` — layer is present, warm path.
+    /// - **CAS miss (404):** returns `Ok(None)` — layer is absent; the cold path
+    ///   proceeds. A miss is NOT an error ("cache absent ⇒ slow, never broken",
+    ///   A5/A1) — but it is DISTINCT from a present-but-empty layer, so the caller
+    ///   never writes a miss-sentinel back into the CAS (the A1 poison bug). On a
+    ///   `None` the caller skips the write-back and does NOT mark the key cached.
     /// - **CAS unreachable / auth failure (401/403/5xx/transport err):**
     ///   returns `Err(BootError::SubstrateDown)` — hard fail-closed (A5/A5b/A12).
     ///   An auth outage or server error is NEVER silently treated as a cold miss.
-    fn fetch_layer(&self, layer_key: &str) -> Result<Vec<u8>, BootError>;
+    fn fetch_layer(&self, layer_key: &str) -> Result<Option<Vec<u8>>, BootError>;
 
     /// Write (cache) a fetched layer so future jobs can reuse it without
     /// re-fetching from the origin.
@@ -248,7 +249,12 @@ pub fn hydrate<C: BootCas>(cas: &C, plan: &HydrationPlan) -> Result<BootOutcome,
         // Cold miss: fetch from the CAS origin.
         // ORDERING: fetch first (no write on fetch failure — zero poisoned writes).
         // CAS-unreachable → hard fail-closed (A5b: SubstrateDown propagated).
-        let data = cas.fetch_layer(&layer.content_key)?;
+        // A 404 MISS → `None`: the layer is absent; proceed cold for it WITHOUT
+        // writing a miss-sentinel back (the A1 poison bug) and WITHOUT marking it
+        // cached. "miss ≠ broken" — the run continues, this layer just stays cold.
+        let Some(data) = cas.fetch_layer(&layer.content_key)? else {
+            continue;
+        };
 
         // Write (cache) the fetched layer for future jobs.
         // AC-unreachable → ForcedCold (A5b asymmetry: see cold_hydrate docs).
@@ -301,7 +307,11 @@ pub fn cold_hydrate<C: BootCas>(cas: &C, plan: &HydrationPlan) -> Result<BootOut
     for layer in &plan.toolchain_layers {
         // ORDERING: fetch first (no write on fetch failure — zero poisoned writes).
         // CAS-unreachable here → hard fail-closed (A5b: SubstrateDown propagated).
-        let data = cas.fetch_layer(&layer.content_key)?;
+        // A 404 MISS → `None`: proceed cold for this layer WITHOUT writing a
+        // miss-sentinel back (A1 poison) and WITHOUT marking it cached.
+        let Some(data) = cas.fetch_layer(&layer.content_key)? else {
+            continue;
+        };
 
         // Write (cache) the fetched layer.
         // AC-unreachable here → ForcedCold (A5b asymmetry: fetch succeeded, write
@@ -437,7 +447,7 @@ mod tests {
         fn is_cached(&self, _key: &str) -> bool {
             true
         }
-        fn fetch_layer(&self, key: &str) -> Result<Vec<u8>, BootError> {
+        fn fetch_layer(&self, key: &str) -> Result<Option<Vec<u8>>, BootError> {
             Err(BootError::SubstrateDown {
                 substrate: "CAS".to_string(),
                 reason: format!("AllCachedFake: fetch should never be called for {key:?}"),
@@ -465,8 +475,8 @@ mod tests {
         fn is_cached(&self, _key: &str) -> bool {
             false
         }
-        fn fetch_layer(&self, key: &str) -> Result<Vec<u8>, BootError> {
-            Ok(key.as_bytes().to_vec())
+        fn fetch_layer(&self, key: &str) -> Result<Option<Vec<u8>>, BootError> {
+            Ok(Some(key.as_bytes().to_vec()))
         }
         fn write_layer(&self, _key: &str, _data: &[u8]) -> Result<(), BootError> {
             self.write_count.set(self.write_count.get() + 1);
@@ -560,7 +570,7 @@ mod tests {
             fn is_cached(&self, _key: &str) -> bool {
                 false
             }
-            fn fetch_layer(&self, _key: &str) -> Result<Vec<u8>, BootError> {
+            fn fetch_layer(&self, _key: &str) -> Result<Option<Vec<u8>>, BootError> {
                 Err(BootError::SubstrateDown {
                     substrate: "CAS".to_string(),
                     reason: "test: CAS down".to_string(),
