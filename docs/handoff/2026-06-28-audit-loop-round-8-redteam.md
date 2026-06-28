@@ -1,0 +1,19 @@
+# Autonomous audit loop — Round 8 (RED-TEAM, 2026-06-28, ~08:15 local)
+
+8 attacker GOALS, each chaining ≥2 now-audited surfaces into an EMERGENT exploit a single-surface lens would miss (you hold a valid tenant PAT / a compromised in-box agent). 3 Opus + 5 Sonnet → adversarial verify (every link must hold). **6 confirmed, 18 refuted.**
+
+## The security CORE is proven sound under chained attack
+**All escape-isolation, all poison-moat, and all bypass-fail-closed chains were REFUTED** (18 total). Notable proven-holds: `allow_egress` is set ONLY by `from_runner_lease` (a forged net_policy gets no egress); all three engines reject unpinned images; the sparse-materialize fence is traversal-proof; CAS `is_cached`/hydrate fail closed (no false-hit from a swallowed error); the result-binding + attestation can't be forged; ledger lock-poison fails closed; the AC pre-lease "hit" doesn't skip slot/cap. The cumulative fixes hold under an attacker chaining them.
+
+## Confirmed chains + disposition
+| # | Sev | Goal — chain | Disposition |
+|---|-----|------|-------------|
+| 1 | high | **cross-tenant**: RunnerScope carries no tenant binding → a tenant with a valid PAT + a plan mints a JIT runner on ANY repo the shared GitHub App is installed on (`leases.rs` `runner_scope_from_dto`). | **HANDOFF (already open)** — `2026-06-28-DESIGN-runner-scope-tenant-binding.md`. **Latent**: under corelink-auth a non-entitled tenant 0-slot-rejects; under static-PAT dogfood the attacker is the sole trusted tenant; needs the App installed on the victim repo. Live at M2 multi-tenant → the per-tenant repo-entitlement model is the M2-GA precondition. |
+| 2 | high | **cross-tenant (new facet)**: same RunnerScope chain → the box runs on the victim's repo CI but with `CLW_TENANT`/`CLW_TOKEN` minted for the ATTACKER tenant → victim CI's CAS reads/writes land in the attacker's namespace. | **HANDOFF** — added to the RunnerScope design-handoff as the CAS-tenant-confusion facet (same root + preconditions as #1). |
+| 3 | med | **underpay**: the billing open-lease pairing map is in-memory only (`corelink_billing.rs` `open: Mutex<HashMap>`); a fabricd RESTART loses it → leases open at restart never enqueue a billing event on close. | **HANDOFF** (`2026-06-28-DESIGN-billing-durable-open-map.md`) — needs the acquired-at persisted in the PgLedger (a column + read-back at the terminal transition); a schema/migration change → owner-aware. Flat-tier $-bounded. |
+| 4 | med | **underpay**: `remove_if_pending` (stale-Pending sweep) DELETEs an accounting-ON Pending with no `box_vcpu_count IS NULL` guard (unlike `remove`), freeing reserved ceiling headroom without folding via `transition` (`pg_ledger.rs`). | **HANDOFF** (same doc) — accounting-ON is **default-off**; the fix needs the sweep to `transition`(→terminal) accounting-on Pendings (not bare-delete) so the reservation is released through the accrual path. |
+| 5 | med | **DoS**: the billing buffer has no cap; a persistently-unavailable flush endpoint (which retains the batch on error) grows it without bound (OOM). | **FIXED (this PR)** — `MAX_BILLING_BUFFER=100_000` cap; shed the oldest + log on overflow. +regression. |
+| 6 | low | **DoS**: queue-mode single-tenant park-permit flood partially degrades the cross-tenant global permit pool (`admission.rs`). | **NOTED** — the code already documents the structural fix (release the permit at enqueue, re-acquire on dispatch — `admission.rs:113`); queue-mode is opt-in; partial degradation only. Tracked for the queue-mode wave. |
+
+## Status
+The red-team confirmed the isolation/moat/fail-closed/attestation core is sound; the only confirmed chains are the **latent multi-tenant RunnerScope gap** (already handed off, +CAS facet) and **billing-robustness** mediums (#5 fixed; #3/#4 handed off — durable-open-map + accounting-on-sweep, both owner-aware schema/semantics). No new live-today high/critical.
