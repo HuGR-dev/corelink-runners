@@ -266,10 +266,22 @@ impl<P: BillingPoster> CorelinkBillingTarget<P> {
             time_ms: ev.at_ms,
             idem_key: idem_key(&ev.lease_id, &period),
         };
-        self.buffer
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .push(data);
+        // Audit r8: cap the buffer. `flush_now` RETAINS the batch on a non-2xx /
+        // transport error (for the idem_key retry), so a PERSISTENTLY-unavailable
+        // billing endpoint would otherwise grow this Vec without bound (OOM). On
+        // overflow shed the OLDEST event + log: bounded, logged billing-data loss
+        // beats an unbounded memory leak. Under a healthy endpoint the periodic
+        // flush keeps the buffer at ~`rate × interval`, far below the cap.
+        const MAX_BILLING_BUFFER: usize = 100_000;
+        let mut buf = self.buffer.lock().unwrap_or_else(|p| p.into_inner());
+        if buf.len() >= MAX_BILLING_BUFFER {
+            buf.remove(0);
+            eprintln!(
+                "billing buffer at cap ({MAX_BILLING_BUFFER}) — shedding oldest event; \
+                 the push endpoint is likely persistently unavailable (check the flush loop)"
+            );
+        }
+        buf.push(data);
         // NO inline flush here. `enqueue_terminal` runs on the async terminal path
         // (the close handler, the reaper sweep, admission expiry), and `flush_now`
         // is a SYNCHRONOUS blocking `ureq` POST (up to the HTTP timeout). Calling it
@@ -278,9 +290,8 @@ impl<P: BillingPoster> CorelinkBillingTarget<P> {
         // (this call still blocks for the full POST) and it PANICS off a multi-thread
         // runtime (e.g. in the unit tests, which call this synchronously). The
         // periodic `spawn_push_flush_loop` (block_in_place, ~30s) is the SOLE flush
-        // driver; the buffer is bounded by that cadence — a burst holds at most
-        // ~`rate × interval` small events, drained on the next tick (at-least-once
-        // delivery + `idem_key` dedup keep that safe).
+        // driver; under a healthy endpoint the buffer holds at most ~`rate ×
+        // interval` events (the cap above is the persistent-failure backstop).
     }
 }
 
@@ -505,6 +516,29 @@ mod tests {
             t.poster.bodies().len(),
             1,
             "the periodic flush is the sole POST driver"
+        );
+    }
+
+    /// REGRESSION (audit r8): the buffer is CAPPED. A persistently-unavailable
+    /// flush endpoint RETAINS the batch on error, so without a cap the buffer
+    /// would grow without bound (OOM). Past the cap the oldest event is shed and
+    /// the buffer never exceeds it. (No flush is driven here, so every enqueue
+    /// accumulates — exactly the persistent-failure shape.)
+    #[test]
+    fn buffer_is_capped_under_persistent_flush_failure() {
+        const CAP: usize = 100_000;
+        let t = target(RecordingPoster::ok());
+        for i in 0..(CAP as u64 + 5) {
+            let lease = format!("L{i}");
+            t.export(&ev("acme", &lease, SlotEventKind::Acquired, 0))
+                .unwrap();
+            t.export(&ev("acme", &lease, SlotEventKind::Released, 1_000))
+                .unwrap();
+        }
+        assert_eq!(
+            t.buffered(),
+            CAP,
+            "the buffer must be capped at {CAP}, shedding the oldest events"
         );
     }
 
