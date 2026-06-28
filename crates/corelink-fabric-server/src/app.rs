@@ -1356,8 +1356,14 @@ pub fn app_full(
                 .layer(axum::error_handling::HandleErrorLayer::new(
                     |_err: axum::BoxError| async move {
                         // The only error the stack below produces is load-shed's
-                        // `Overloaded`; map it to the frozen fail-closed status.
-                        axum::http::StatusCode::SERVICE_UNAVAILABLE
+                        // `Overloaded`; map it to the FROZEN fail-closed ErrorBody
+                        // (audit r6: a bare 503 status carries no ErrorBody, so a
+                        // client parsing the frozen vocabulary on a 503 would get an
+                        // empty body and fail to deserialize).
+                        crate::auth::error_response(
+                            corelink_fabric_api::ApiError::FailClosed,
+                            "overloaded; shed — failing closed",
+                        )
                     },
                 ))
                 .layer(tower::load_shed::LoadShedLayer::new())

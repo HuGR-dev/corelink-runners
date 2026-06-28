@@ -673,6 +673,12 @@ pub(crate) async fn finalize_admitted_lease(
     //
     // A7 invariant: a CONFIGURED mint that returns `Err` MUST fail closed (no box).
     if let Some(mint) = state.cas_pat_mint.as_ref() {
+        // A7b (audit r6): finalize re-mints on EVERY provision attempt, so a prior
+        // attempt's PAT (retained across a CapacityError re-enqueue for a retry)
+        // would be OVERWRITTEN in `pat_ids` by the fresh mint below and orphaned
+        // (unrevoked until D-9 self-expiry). Revoke any stale PAT for this lease
+        // BEFORE re-minting. No-op on the first attempt (no entry).
+        state.revoke_pat_for(&lease_id).await;
         // Use the lease expiry (already F1-clamped) as the deadline bound (A7b).
         let lease_deadline_ms = lease.expiry;
         match mint
