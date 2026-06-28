@@ -150,9 +150,17 @@ ENV CARGO_HOME=/home/runner/.cargo
 ENV RUSTUP_HOME=/home/runner/.rustup
 ENV PATH=/home/runner/.cargo/bin:$PATH
 
-# Install rustup (pinned installer checksum — verify at https://sh.rustup.rs).
-# The rustup-init binary is itself a verified bootstrap: the installer is fetched
-# from static.rust-lang.org and its SHA-256 is compared before execution.
+# Install the Rust toolchain via rustup.
+# ⚠️ AUDIT r9 (honest correction): the rustup-init bootstrap below is fetched over
+# TLS from sh.rustup.rs but is NOT checksum-pinned — UNLIKE the runner tarball and
+# clw above, which ARE `sha256sum -c`-verified. (The previous comment here falsely
+# claimed "its SHA-256 is compared before execution"; nothing compared it.) Build-
+# time only (not the untrusted runtime container) + rustup-init verifies the
+# toolchain components it then downloads — but the bootstrap trust-root is unpinned,
+# so the X4 supply-chain floor is not yet met for this one fetch. Pinning it (a
+# versioned rustup-init URL + an operator-supplied RUSTUP_INIT_SHA256 build-arg,
+# mirroring CLW_SHA256 — the SHA must be human-verified, never fabricated) is
+# tracked in docs/handoff/2026-06-28-RELAY-rustup-init-pin.md.
 RUN curl -fsSL https://sh.rustup.rs | \
     sh -s -- -y \
         --default-toolchain 1.96.0 \

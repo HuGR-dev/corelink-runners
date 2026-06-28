@@ -61,12 +61,14 @@ skip = [
     { crate = "cpufeatures@0.3.0",    reason = "← chacha20/rand 0.10 (postgres-protocol 0.6.12); other copy is cpufeatures 0.2. OWNER-GATED, WP-3-PGLEDGER." },
     { crate = "getrandom@0.4.3",      reason = "← rand 0.10 (postgres-protocol 0.6.12); tokio pulls getrandom 0.2. OWNER-GATED, WP-3-PGLEDGER. Updated 0.4.2→0.4.3 by lock refresh (blake3 dep addition)." },
     # WASM-only tail of the getrandom 0.4 stack (← rand 0.10 ← postgres-protocol
-    # 0.6.12). wasi 0.14 / wit-bindgen 0.57 are pulled ONLY on the
-    # wasm32-wasi target; never compiled on our mac/Linux build+CI targets. The
-    # other copies (wasi 0.11, wit-bindgen 0.51) come from the older getrandom
-    # 0.2 line. Same irreducibility as the crypto split above.
+    # 0.6.12). wasi 0.14 is pulled ONLY on the wasm32-wasi target; never compiled
+    # on our mac/Linux build+CI targets. The other wasi copy (wasi 0.11) comes
+    # from the older getrandom 0.2 line. Same irreducibility as the crypto split
+    # above. (audit r9: dropped the stale `wit-bindgen@0.57.1` skip — Cargo.lock
+    # now resolves a SINGLE wit-bindgen, so there is no duplicate to skip; an
+    # unnecessary skip masks a future real duplicate. Re-add scoped only if a
+    # getrandom/wasm bump reintroduces a second wit-bindgen major.)
     { crate = "wasi@0.14.7+wasi-0.2.4", reason = "wasm-only (getrandom 0.4 ← postgres-protocol 0.6.12); never built on our targets. OWNER-GATED, WP-3-PGLEDGER." },
-    { crate = "wit-bindgen@0.57.1",     reason = "wasm-only (← wasi 0.14 ← getrandom 0.4 ← postgres-protocol 0.6.12); never built on our targets. OWNER-GATED, WP-3-PGLEDGER." },
     # WP-B (opt-in pg TLS): `tokio-postgres-rustls 0.13` pulls `x509-cert 0.2 ←
     # spki 0.7 ← der 0.7`, which pins `const-oid 0.9.6` for channel-binding cert
     # parsing. The workspace's OTHER copy is `const-oid 0.10.2` (← digest 0.11 ←
