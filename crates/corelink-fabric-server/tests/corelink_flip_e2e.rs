@@ -239,6 +239,7 @@ fn acquire_req_http_ttl(expiry_ms: u64) -> Request<Body> {
         tmp_root: "/work/tmp".to_string(),
         expiry_ms,
         runner: None,
+        toolchain_digest: None,
     };
     Request::builder()
         .method("POST")

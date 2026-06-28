@@ -111,6 +111,7 @@ async fn acquire(h: &Harness) -> String {
         tmp_root: "/work/tmp".to_string(),
         expiry_ms: 600_000,
         runner: None,
+        toolchain_digest: None,
     };
     let response = h
         .app

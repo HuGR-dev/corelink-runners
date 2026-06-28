@@ -478,6 +478,21 @@ pub(crate) async fn acquire(
             crate::envelope_inject::inject_ingest_env(&mut spec, &lease_id, &ingest_token);
         }
 
+        // ── CHECK-HOST lease (C1/C6): a check-host lease = `runner: None` +
+        // `toolchain_digest: Some(D)`. Inject the toolchain digest into the box
+        // env as the C6 discriminator + hydration axis (the container entrypoint
+        // hydrates exactly this digest at start) and
+        // record it in the server-internal marker map so the exec handler can
+        // ASSERT `CheckDef.toolchain_ref == D` (the false-cache-hit guard,
+        // Lifecycle block). ADDITIVE: the env append is exactly the C6 channel and
+        // never injected for runner leases. When `toolchain_digest` is `None`
+        // (runner + plain-hermetic leases) this block is a no-op — byte-identical
+        // to today.
+        if !is_runner && let Some(d) = req.toolchain_digest.as_ref() {
+            spec.env.push(("TOOLCHAIN_DIGEST".to_string(), d.clone()));
+            state.mark_toolchain_digest(&lease_id, d);
+        }
+
         // ── CONCURRENCY CAP — atomic reserve. Insert this acquire's `Pending`
         // record IFF the tenant is strictly under `max_concurrency`. The count
         // and the insert are one atomic op under this lock (no count→await→put
@@ -1266,6 +1281,7 @@ mod tests {
             tmp_root: "/work/tmp".to_string(),
             expiry_ms: 60_000,
             runner: None,
+            toolchain_digest: None,
         }
     }
 
@@ -1904,6 +1920,7 @@ mod tests {
             tmp_root: "/work/tmp".to_string(),
             expiry_ms: u64::MAX,
             runner: None,
+            toolchain_digest: None,
         };
         let resp = router
             .oneshot(acquire_request(paths::LEASES, &oversized))

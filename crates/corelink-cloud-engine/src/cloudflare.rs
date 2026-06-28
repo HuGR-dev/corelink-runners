@@ -4,21 +4,25 @@
 //! — a Cloudflare Worker + Durable Object that spawns a Cloudflare Container and
 //! returns an opaque handle. This engine talks HTTP to that Worker (it does NOT
 //! call Cloudflare's API directly); the TS Worker on the other side owns the
-//! container plumbing. The seam is three endpoints (`/v1/spawn`, `/v1/status`,
-//! `/v1/teardown`); the contract is frozen in this module's doc + the request
-//! shapes below.
+//! container plumbing. The seam is four endpoints (`/v1/spawn`, `/v1/status`,
+//! `/v1/teardown`, `/v1/exec`); the contract is frozen in this module's doc +
+//! `docs/spec/cf-check-host-contract.md` (C2/C3) + the request shapes below.
 //!
-//! ## v0 is runner-direct
-//! Unlike [`NorthflankEngine`](crate::northflank::NorthflankEngine) — whose CHECK
-//! path drives a per-run `exec`/`exec_captured` against the box — the Cloudflare
-//! backend at v0 only serves RUNNER leases (ADR-0007 direct-CI): the spawned
-//! container runs the GitHub-Actions agent via its **image entrypoint**, so there
-//! is no post-spawn "exec a command" step. Both [`exec`](Engine::exec) and
-//! [`exec_captured`](Engine::exec_captured) therefore fail closed with an explicit
-//! "unsupported on CloudflareEngine v0" error — they are never called on the
-//! runner-lease path (which is `spawn` then teardown), and faking an exec endpoint
-//! would be dishonest. A future CHECK-exec capability is an additive Worker
-//! endpoint, not a silent stub here.
+//! ## Two lease shapes: runner-direct + check-host
+//! Two kinds of lease are served (the discriminator is the env-carried toolchain
+//! digest, [`check_host_toolchain_digest`], C6):
+//! - **Runner lease** (ADR-0007 direct-CI, `allow_egress == true`): the spawned
+//!   container runs the GitHub-Actions agent via its **image entrypoint**, so
+//!   there is no post-spawn exec — `spawn` then teardown. The non-captured
+//!   [`exec`](Engine::exec) stays unsupported (faking it would be dishonest).
+//! - **Check-host lease** (`allow_egress == false` + `TOOLCHAIN_DIGEST` in env):
+//!   `spawn` emits check-mode (C2) so the Worker routes to the check-host
+//!   container, which hydrates the toolchain at start (C5); checks then run via
+//!   [`exec_captured`](Engine::exec_captured) → `POST /v1/exec` (C3), fail-closed
+//!   on any non-2xx (never a fabricated [`CmdOutput`]).
+//!
+//! A plain hermetic check (no `TOOLCHAIN_DIGEST`) is NOT served (it would 500 on
+//! the runner image); it stays rejected at the spawn floor → Northflank/rota-B.
 //!
 //! ## Security floors (parity with [`NorthflankEngine`])
 //! - **Isolation floor:** `spawn` refuses any spec with `no_network == false`
@@ -90,6 +94,32 @@ pub const DEFAULT_RUNNER_STORAGE_MB: u32 = 20_480;
 /// reads it from the environment). Absent ⇒ empty `jitconfig` (the floors above
 /// already gate a runner lease).
 const JITCONFIG_ENV_KEY: &str = "CORELINK_RUNNER_JITCONFIG";
+
+/// The env key that carries the check-host toolchain digest (the clw snapshot
+/// manifest digest, C6 addendum). A spec is a **check-host spec** iff it is NOT
+/// egress-granted AND carries this key — the env-carried discriminator the
+/// fabric injects (C1→C2). For a check-host spawn the value is lifted into the
+/// dedicated top-level `toolchain_digest` field the Worker requires for
+/// `mode=="check"` (C2); it is ALSO left in the `env` map (the container
+/// entrypoint reads `TOOLCHAIN_DIGEST` to drive `clw hydrate`, C5).
+const TOOLCHAIN_DIGEST_ENV_KEY: &str = "TOOLCHAIN_DIGEST";
+
+/// Detect whether `spec` is a **check-host spec** (C6): a non-egress
+/// (`allow_egress == false`) spec that carries `TOOLCHAIN_DIGEST` in its env.
+/// Returns the toolchain digest value when so. A plain hermetic check (no
+/// `TOOLCHAIN_DIGEST`) is NOT a check-host spec (it stays runner-only-floor
+/// rejected → Northflank / rota-B); a runner spec (`allow_egress == true`) is
+/// never a check-host spec regardless of env.
+fn check_host_toolchain_digest(spec: &ContainerSpec) -> Option<&str> {
+    if spec.allow_egress {
+        return None;
+    }
+    spec.env
+        .iter()
+        .find(|(k, _)| k == TOOLCHAIN_DIGEST_ENV_KEY)
+        .map(|(_, v)| v.as_str())
+        .filter(|s| !s.is_empty())
+}
 
 /// Tunables for the Cloudflare spawn-Worker backend. `spawn_worker_url` +
 /// `auth_token` are required (the backend is OFF without both).
@@ -339,6 +369,10 @@ impl<H: HttpTransport> CloudflareEngine<H> {
         format!("{}/v1/teardown", self.cfg.spawn_worker_url)
     }
 
+    fn exec_url(&self) -> String {
+        format!("{}/v1/exec", self.cfg.spawn_worker_url)
+    }
+
     /// Send a request carrying the bearer token; surface transport errors and
     /// preserve the HTTP status for the caller to branch on.
     fn send(&self, method: Method, url: String, json_body: Option<String>) -> Result<HttpResponse> {
@@ -379,6 +413,21 @@ impl<H: HttpTransport> CloudflareEngine<H> {
     /// runtime environment). An absent key yields an empty `jitconfig` string —
     /// the spawn floors already gate a runner lease, so this only affects the
     /// wire shape, never admission.
+    ///
+    /// ## Check-mode (C2)
+    /// When `spec` is a check-host spec (`!allow_egress` + `TOOLCHAIN_DIGEST` in
+    /// env, per [`check_host_toolchain_digest`]) the body gains two additive
+    /// top-level fields: `"mode": "check"` (so the Worker routes to
+    /// `CHECK_HOST_CONTAINER`) and `"toolchain_digest": "<D>"` (the value lifted
+    /// from env, which the Worker requires for `mode=="check"`). The
+    /// `TOOLCHAIN_DIGEST` key remains in the `env` map (C2 shows both; the
+    /// container entrypoint reads it to drive `clw hydrate`, C5).
+    ///
+    /// For a RUNNER spec the body is BYTE-IDENTICAL to the pre-check-host wire —
+    /// `mode` is OMITTED, which the spawn-Worker treats identically to
+    /// `"runner"` (`index.ts`: only `body.mode === "check"` diverts; absent OR
+    /// `"runner"` falls through to the unchanged runner path). DEFAULT-OFF /
+    /// back-comp is thereby preserved on the wire.
     fn spawn_body(&self, spec: &ContainerSpec) -> String {
         let jitconfig = spec
             .env
@@ -391,14 +440,30 @@ impl<H: HttpTransport> CloudflareEngine<H> {
             .iter()
             .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
             .collect();
-        serde_json::json!({
+        let mut body = serde_json::json!({
             "image_digest": spec.image,
             "jitconfig": jitconfig,
             "env": serde_json::Value::Object(env_map),
             "labels": self.cfg.labels,
             "expiry_ms": self.cfg.expiry_ms,
-        })
-        .to_string()
+        });
+        // Additive check-mode fields (C2). For a runner spec these are absent,
+        // keeping the wire byte-identical to today (the Worker defaults absent
+        // `mode` to the runner path).
+        if let Some(toolchain_digest) = check_host_toolchain_digest(spec) {
+            let obj = body
+                .as_object_mut()
+                .expect("spawn_body root is a JSON object");
+            obj.insert(
+                "mode".to_string(),
+                serde_json::Value::String("check".to_string()),
+            );
+            obj.insert(
+                "toolchain_digest".to_string(),
+                serde_json::Value::String(toolchain_digest.to_string()),
+            );
+        }
+        body.to_string()
     }
 
     /// Delete the ephemeral container (teardown). Not part of the [`Engine`] trait
@@ -466,27 +531,25 @@ impl<H: HttpTransport> Engine for CloudflareEngine<H> {
             }
         }
 
-        // ── Runner-only floor (v0 is runner-direct): CloudflareEngine v0 serves
-        // ONLY RUNNER leases (ADR-0007) — the spawn-Worker's single container is
-        // the GitHub-Actions runner image, which runs its agent entrypoint and
-        // REQUIRES a runner lease (egress-granted, JIT-configured). A CHECK-exec
-        // lease (`allow_egress == false`, the runner's convention for a hermetic
-        // check box) is NOT served by v0 (see the module doc; `exec`/`exec_captured`
-        // also fail closed). Without this floor a check-exec spec passes the
-        // isolation/image floors, the Worker spawns the runner image with no JIT,
-        // and that box EXITS 1 — surfacing as an opaque spawn-Worker `HTTP 500`
-        // (`error code: 1101`). Fail CLOSED HERE with an actionable message so a
-        // check-exec lease (mis)routed to the Cloudflare backend fails fast at
-        // admit, never with a confusing downstream 500. The CHECK-exec capability
-        // is a future additive Worker endpoint, not a silent stub.
-        if !spec.allow_egress {
+        // ── Runner-only floor — RELAXED for check-host (C6): CloudflareEngine
+        // serves RUNNER leases (ADR-0007) AND, on the check-host campaign,
+        // CHECK-HOST leases (a non-egress spec carrying TOOLCHAIN_DIGEST). The
+        // discriminator is the env-carried toolchain digest (`check_host_*`):
+        //   • RUNNER (allow_egress == true)              → admitted (runner mode)
+        //   • CHECK-HOST (!egress + TOOLCHAIN_DIGEST)     → admitted (check mode →
+        //       the Worker routes to CHECK_HOST_CONTAINER, which hydrates the
+        //       toolchain at start and serves exec via /v1/exec)
+        //   • PLAIN HERMETIC CHECK (!egress, NO digest)   → STILL fails closed
+        //       (rota-B / Northflank): the spawn-Worker's runner container would
+        //       exit 1 without a JIT — an opaque HTTP 500. Fail CLOSED HERE with
+        //       an actionable message rather than a confusing downstream 500.
+        if !spec.allow_egress && check_host_toolchain_digest(spec).is_none() {
             bail!(
-                "refusing to spawn {}: CloudflareEngine v0 is runner-direct and serves ONLY \
-                 RUNNER leases (the spawn-Worker's container is the GitHub-Actions runner image). \
-                 This is a CHECK-exec spec (allow_egress=false), which v0 does NOT support — a \
-                 runner box spawned for it exits 1 (opaque HTTP 500). Use a runner-mode lease, or \
-                 a CHECK-exec backend (e.g. Northflank, or a future CF CHECK-exec endpoint). \
-                 Fail CLOSED.",
+                "refusing to spawn {}: this is a plain hermetic CHECK spec (allow_egress=false, \
+                 no TOOLCHAIN_DIGEST), which CloudflareEngine does NOT serve — a runner box \
+                 spawned for it exits 1 (opaque HTTP 500). A CHECK-HOST lease must carry \
+                 TOOLCHAIN_DIGEST (check-mode); otherwise use a runner-mode lease or a \
+                 plain-hermetic CHECK backend (e.g. Northflank). Fail CLOSED.",
                 spec.name
             );
         }
@@ -515,21 +578,80 @@ impl<H: HttpTransport> Engine for CloudflareEngine<H> {
     }
 
     fn exec(&self, _c: &RunningContainer, _argv: &[&str]) -> Result<Option<i32>> {
-        // v0 is runner-direct: the container runs its image entrypoint (the
-        // GitHub-Actions agent); there is no post-spawn command to exec for a
-        // runner lease. Fail CLOSED — never fake an endpoint. See the module doc.
+        // The runner-direct path has no post-spawn exec: the container runs its
+        // image entrypoint (the GitHub-Actions agent). The check-host path execs
+        // via `exec_captured` (POST /v1/exec), NOT this non-captured `exec` — so
+        // this stays bailed. Fail CLOSED — never fake an endpoint. See module doc.
         bail!(
-            "exec is unsupported on CloudflareEngine v0 (runner-direct): the container runs its \
-             entrypoint; use spawn for runner leases"
+            "exec (non-captured) is unsupported on CloudflareEngine: runner leases run their \
+             entrypoint; check-host leases exec via exec_captured (/v1/exec)"
         )
     }
 
-    fn exec_captured(&self, _c: &RunningContainer, _argv: &[&str]) -> Result<CmdOutput> {
-        // Same as `exec`: no post-spawn exec on the runner-direct path. Fail CLOSED.
-        bail!(
-            "exec is unsupported on CloudflareEngine v0 (runner-direct): the container runs its \
-             entrypoint; use spawn for runner leases"
-        )
+    fn exec_captured(&self, c: &RunningContainer, argv: &[&str]) -> Result<CmdOutput> {
+        // Check-host exec (C3): POST {handle, argv, timeout_ms} to /v1/exec; the
+        // Worker relays it to the in-container exec-server (port 8080, C4) and
+        // returns 200 {exit_code, stdout, stderr}. A non-2xx is FAIL-CLOSED — we
+        // never fabricate a CmdOutput (a fabricated success would let a check pass
+        // on an unreachable/erroring box). `exit_code: null` ⇒ `code: None`
+        // (signal-killed / timeout) ⇒ run_check fails closed downstream.
+        //
+        // timeout_ms source: the engine has no per-call exec timeout in the frozen
+        // `Engine::exec_captured(c, argv)` seam, so we use the configured
+        // `expiry_ms` (the same per-container hard-kill budget) as the exec ceiling
+        // — a check can never outlive its container's expiry, so this is the
+        // tightest honest bound available here.
+        let body = serde_json::json!({
+            "handle": c.name,
+            "argv": argv,
+            "timeout_ms": self.cfg.expiry_ms,
+        })
+        .to_string();
+        let resp = self.send_2xx(Method::Post, self.exec_url(), Some(body), "exec")?;
+
+        let v: serde_json::Value = serde_json::from_str(&resp.body).map_err(|e| {
+            anyhow::anyhow!(
+                "cloudflare spawn-Worker exec response is not JSON: {e} — {} (fail-closed)",
+                bounded_provider_body(&resp.body)
+            )
+        })?;
+
+        // exit_code: i32 | null. Present-but-non-integer is malformed ⇒ fail
+        // closed (never silently coerce to a success/failure). `null` ⇒ None.
+        let code = match v.get("exit_code") {
+            Some(serde_json::Value::Null) | None => None,
+            Some(serde_json::Value::Number(n)) => {
+                let i = n.as_i64().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "cloudflare spawn-Worker exec exit_code is not an integer: {n} (fail-closed)"
+                    )
+                })?;
+                Some(i32::try_from(i).map_err(|_| {
+                    anyhow::anyhow!(
+                        "cloudflare spawn-Worker exec exit_code {i} out of i32 range (fail-closed)"
+                    )
+                })?)
+            }
+            Some(other) => bail!(
+                "cloudflare spawn-Worker exec exit_code is not an integer|null: {other} \
+                 (fail-closed)"
+            ),
+        };
+        let stdout = v
+            .get("stdout")
+            .and_then(|s| s.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let stderr = v
+            .get("stderr")
+            .and_then(|s| s.as_str())
+            .unwrap_or_default()
+            .to_string();
+        Ok(CmdOutput {
+            code,
+            stdout,
+            stderr,
+        })
     }
 
     fn is_alive(&self, c: &RunningContainer) -> Result<bool> {
@@ -614,6 +736,19 @@ mod tests {
         s.no_network = false;
         s.run_on_create = true;
         s
+    }
+
+    /// A 64-hex clw snapshot manifest digest, the check-host toolchain ref.
+    const TOOLCHAIN_DIGEST_VALUE: &str =
+        "1111111111111111111111111111111111111111111111111111111111111111";
+
+    /// A CHECK-HOST spec (`allow_egress == false`, `no_network == true`) carrying
+    /// `TOOLCHAIN_DIGEST` in env — the env-carried check-host discriminator (C6).
+    fn check_host_spec() -> ContainerSpec {
+        spec(vec![(
+            TOOLCHAIN_DIGEST_ENV_KEY.to_string(),
+            TOOLCHAIN_DIGEST_VALUE.to_string(),
+        )])
     }
 
     fn cfg() -> CloudflareConfig {
@@ -775,22 +910,90 @@ mod tests {
     }
 
     #[test]
-    fn spawn_refuses_check_box_runner_only_v0() {
-        // CHECK-exec spec (allow_egress == false) is NOT served by CloudflareEngine
-        // v0 (runner-direct): the spawn-Worker's only container is the runner image,
-        // which exits 1 without a JIT — surfacing live as an opaque HTTP 500. The
-        // runner-only floor fails CLOSED at spawn, BEFORE any Worker contact
-        // (ExplodingTransport panics if reached), with an actionable message. This
-        // pins the real behavior (the prior assertion that a check box "spawns" was
-        // fake-green against a success transport; live it 500s).
+    fn spawn_still_rejects_plain_hermetic_check_without_toolchain_digest() {
+        // A PLAIN HERMETIC CHECK spec (allow_egress == false, NO TOOLCHAIN_DIGEST)
+        // is NOT served by CloudflareEngine: the spawn-Worker's runner container
+        // exits 1 without a JIT — surfacing live as an opaque HTTP 500. The
+        // runner-only floor (RELAXED only for check-host specs) fails CLOSED at
+        // spawn, BEFORE any Worker contact (ExplodingTransport panics if reached),
+        // with an actionable message → rota-B / Northflank.
         let engine = CloudflareEngine::new(ExplodingTransport, cfg());
         let err = engine
             .spawn(&spec(vec![]))
-            .expect_err("a check-exec spec must fail closed on CloudflareEngine v0");
+            .expect_err("a plain hermetic check spec must fail closed (no TOOLCHAIN_DIGEST)");
         let msg = format!("{err:#}");
         assert!(
-            msg.contains("runner-direct") && msg.contains("CHECK-exec"),
-            "error must name the runner-only limitation, got: {msg}"
+            msg.contains("plain hermetic CHECK") && msg.contains("TOOLCHAIN_DIGEST"),
+            "error must name the missing-toolchain-digest limitation, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn spawn_admits_check_host_spec_with_toolchain_digest_in_env() {
+        // A check-host spec (!allow_egress, no_network=true, TOOLCHAIN_DIGEST in
+        // env) + a pinned image is ADMITTED, and the recorded POST body carries
+        // the additive check-mode fields (C2): mode=="check" + the lifted
+        // toolchain_digest, with TOOLCHAIN_DIGEST still present in env.
+        let engine = CloudflareEngine::new(
+            RecordingTransport::new(201, r#"{"handle":"cf-check-1"}"#),
+            cfg(),
+        );
+        let running = engine
+            .spawn(&check_host_spec())
+            .expect("a check-host spec must spawn");
+        assert_eq!(running.name, "cf-check-1");
+
+        let req = engine.http.last.lock().unwrap().clone().unwrap();
+        assert_eq!(req.method, Method::Post);
+        assert_eq!(req.url, "https://spawn.example.dev/v1/spawn");
+        let body: serde_json::Value =
+            serde_json::from_str(req.json_body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["mode"], "check", "check-host body must set mode=check");
+        assert_eq!(
+            body["toolchain_digest"], TOOLCHAIN_DIGEST_VALUE,
+            "toolchain_digest lifted from env into the top-level field"
+        );
+        // The digest stays in env too (the entrypoint reads it for clw hydrate).
+        assert_eq!(
+            body["env"][TOOLCHAIN_DIGEST_ENV_KEY],
+            TOOLCHAIN_DIGEST_VALUE
+        );
+    }
+
+    #[test]
+    fn spawn_runner_body_omits_mode_byte_identical_back_comp() {
+        // A RUNNER spec's body must NOT carry the additive check-mode fields — the
+        // wire stays byte-identical to pre-check-host (the Worker defaults absent
+        // `mode` to the runner path).
+        let engine =
+            CloudflareEngine::new(RecordingTransport::new(201, r#"{"handle":"h"}"#), cfg());
+        engine.spawn(&runner_spec()).expect("runner spawn ok");
+        let req = engine.http.last.lock().unwrap().clone().unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(req.json_body.as_deref().unwrap()).unwrap();
+        assert!(
+            body.get("mode").is_none(),
+            "runner body must omit `mode` (back-comp), got: {body}"
+        );
+        assert!(
+            body.get("toolchain_digest").is_none(),
+            "runner body must omit `toolchain_digest`, got: {body}"
+        );
+    }
+
+    #[test]
+    fn spawn_check_host_still_enforces_x4_pin() {
+        // The X4 supply-chain floor is NOT bypassed for check-host: an unpinned
+        // image fails closed BEFORE any Worker contact (ExplodingTransport panics).
+        let engine = CloudflareEngine::new(ExplodingTransport, cfg());
+        let mut bad = check_host_spec();
+        bad.image = "alpine:latest".to_string();
+        let err = engine
+            .spawn(&bad)
+            .expect_err("an unpinned check-host image must fail closed");
+        assert!(
+            format!("{err:#}").contains("not content-pinned"),
+            "unexpected error: {err:#}"
         );
     }
 
@@ -874,23 +1077,90 @@ mod tests {
     }
 
     #[test]
-    fn exec_is_unsupported_and_fails_closed() {
-        // v0 runner-direct: exec is never called on the runner-lease path, and a
-        // call must fail closed (never fake an endpoint) — ExplodingTransport
-        // proves no Worker contact occurs.
+    fn exec_non_captured_is_unsupported_and_fails_closed() {
+        // The non-captured `exec` is never called on either path (runner runs its
+        // entrypoint; check-host execs via exec_captured) — a call fails closed,
+        // never faking an endpoint. ExplodingTransport proves no Worker contact.
         let engine = CloudflareEngine::new(ExplodingTransport, cfg());
         let c = RunningContainer {
             name: "h".to_string(),
         };
         let err = engine
             .exec(&c, &["true"])
-            .expect_err("exec must be unsupported");
-        assert!(format!("{err:#}").contains("unsupported on CloudflareEngine v0"));
+            .expect_err("exec (non-captured) must be unsupported");
+        assert!(format!("{err:#}").contains("unsupported on CloudflareEngine"));
+    }
 
+    #[test]
+    fn exec_captured_posts_exact_shape_and_parses_output() {
+        // Happy path (C3): POST {handle, argv, timeout_ms} to /v1/exec with the
+        // bearer; 200 {exit_code, stdout, stderr} → the matching CmdOutput.
+        let mut c = cfg();
+        c.expiry_ms = 4242;
+        let engine = CloudflareEngine::new(
+            RecordingTransport::new(
+                200,
+                r#"{"exit_code":0,"stdout":"hello\n","stderr":"warn\n"}"#,
+            ),
+            c,
+        );
+        let container = RunningContainer {
+            name: "cf-check-1".to_string(),
+        };
+        let out = engine
+            .exec_captured(&container, &["sh", "-lc", "echo hello"])
+            .expect("exec_captured must succeed");
+        assert_eq!(out.code, Some(0));
+        assert_eq!(out.stdout, "hello\n");
+        assert_eq!(out.stderr, "warn\n");
+
+        let req = engine.http.last.lock().unwrap().clone().unwrap();
+        assert_eq!(req.method, Method::Post);
+        assert_eq!(req.url, "https://spawn.example.dev/v1/exec");
+        assert_eq!(req.bearer_token, "super-secret-token-value");
+        let body: serde_json::Value =
+            serde_json::from_str(req.json_body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["handle"], "cf-check-1");
+        assert_eq!(body["argv"][0], "sh");
+        assert_eq!(body["argv"][1], "-lc");
+        assert_eq!(body["argv"][2], "echo hello");
+        // timeout_ms is sourced from the configured expiry (the exec ceiling).
+        assert_eq!(body["timeout_ms"], 4242);
+    }
+
+    #[test]
+    fn exec_captured_null_exit_is_signal_kill() {
+        // exit_code: null ⇒ CmdOutput.code == None (signal-killed / timeout) ⇒
+        // run_check fails closed downstream.
+        let engine = CloudflareEngine::new(
+            RecordingTransport::new(200, r#"{"exit_code":null,"stdout":"","stderr":"killed"}"#),
+            cfg(),
+        );
+        let container = RunningContainer {
+            name: "h".to_string(),
+        };
+        let out = engine
+            .exec_captured(&container, &["sh", "-lc", "sleep 9999"])
+            .expect("a null exit must still parse to a CmdOutput");
+        assert_eq!(out.code, None, "exit_code:null ⇒ code None");
+        assert_eq!(out.stderr, "killed");
+    }
+
+    #[test]
+    fn exec_captured_fails_closed_on_non_2xx() {
+        // A non-2xx (500) ⇒ Err, NEVER a fabricated CmdOutput (a fake success
+        // would let a check pass against an erroring box).
+        let engine = CloudflareEngine::new(RecordingTransport::new(500, "boom"), cfg());
+        let container = RunningContainer {
+            name: "h".to_string(),
+        };
         let err = engine
-            .exec_captured(&c, &["true"])
-            .expect_err("exec_captured must be unsupported");
-        assert!(format!("{err:#}").contains("unsupported on CloudflareEngine v0"));
+            .exec_captured(&container, &["true"])
+            .expect_err("a non-2xx exec must fail closed");
+        assert!(
+            format!("{err:#}").contains("fail-closed"),
+            "unexpected error: {err:#}"
+        );
     }
 
     #[test]

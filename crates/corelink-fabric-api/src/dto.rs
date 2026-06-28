@@ -46,6 +46,12 @@ pub struct AcquireRequest {
     /// default-off: omitting it is byte-identical to the prior request.
     #[serde(default)]
     pub runner: Option<RunnerSpec>,
+
+    /// Check-host lease only: the clw snapshot manifest digest of the toolchain to
+    /// hydrate at spawn (== the CheckDef.toolchain_ref the lease will exec). Absent
+    /// for runner + plain-hermetic leases.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toolchain_digest: Option<String>,
 }
 
 /// Direct-CI runner-mode acquire spec (ADR-0007 — the ephemeral GitHub Actions
@@ -541,6 +547,7 @@ mod tests {
             net_policy: "hermetic".into(),
             tmp_root: "/tmp/run".into(),
             expiry_ms: 60000,
+            toolchain_digest: None,
             runner: Some(RunnerSpec {
                 target: RunnerTargetDto::Repo {
                     owner: "humangr-labs".into(),
