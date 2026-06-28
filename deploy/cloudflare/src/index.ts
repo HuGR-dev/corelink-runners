@@ -118,6 +118,13 @@ export class CheckHostContainer extends Container<Env> {
     await this.start({ envVars, enableInternet: true });
   }
 
+  // Liveness for GET /v1/status?mode=check (audit r4): mirrors RunnerContainer so
+  // the status route can query a check-host handle in its own DO namespace.
+  async isAlive(): Promise<boolean> {
+    const state = await this.getState();
+    return state.status === "running" || state.status === "healthy";
+  }
+
   // Idempotent teardown (SIGKILL via destroy()), mirroring RunnerContainer.
   async teardown(): Promise<void> {
     await this.destroy();
@@ -442,24 +449,49 @@ export default {
       return json(out, 200);
     }
 
-    // GET /v1/status/{handle}
+    // GET /v1/status/{handle}?mode=check|runner
     if (request.method === "GET" && pathname.startsWith("/v1/status/")) {
       const handle = pathname.slice("/v1/status/".length);
       if (!handle) return json({ error: "missing handle" }, 400);
-      const container = getContainer(env.RUNNER_CONTAINER, handle);
+      // Route by mode (audit r4): a check-host handle lives in CHECK_HOST_CONTAINER,
+      // NOT RUNNER_CONTAINER. Querying the wrong DO namespace returns a fresh
+      // never-started stub (isAlive()=false → false 404). Default 'runner' is
+      // back-compat. Mirrors the spawn/exec routing.
+      // Branch the getContainer call (not a `ns` var) — the two DO types differ,
+      // so a union would not typecheck.
+      const checkMode = url.searchParams.get("mode") === "check";
+      const container = checkMode
+        ? getContainer(env.CHECK_HOST_CONTAINER, handle)
+        : getContainer(env.RUNNER_CONTAINER, handle);
       const alive = await container.isAlive();
       return alive
         ? json({ status: "alive" }, 200)
         : json({ status: "gone" }, 404);
     }
 
-    // POST /v1/teardown  (idempotent)
+    // POST /v1/teardown  (idempotent) — body: { handle, mode?: "check"|"runner" }
     if (request.method === "POST" && pathname === "/v1/teardown") {
-      const { handle } = (await request.json()) as { handle: string };
+      const body = (await request.json()) as { handle: string; mode?: string };
+      const handle = body.handle;
       if (!handle) return json({ error: "missing handle" }, 400);
-      const container = getContainer(env.RUNNER_CONTAINER, handle);
-      // Idempotent SIGKILL teardown; already-gone is success for the caller.
-      await container.teardown();
+      // Route by mode (audit r4): without this, a check-host teardown hit
+      // RUNNER_CONTAINER (wrong namespace) → a silent no-op, leaking the live
+      // CheckHostContainer until its 45m sleepAfter backstop. Default 'runner'.
+      const container =
+        body.mode === "check"
+          ? getContainer(env.CHECK_HOST_CONTAINER, handle)
+          : getContainer(env.RUNNER_CONTAINER, handle);
+      // Idempotent SIGKILL teardown; already-gone is success for the caller. A
+      // destroy() throw must NOT 500 — log loud and still return 204 (the
+      // provider deadline is the backstop). Mirrors the /v1/exec error discipline.
+      try {
+        await container.teardown();
+      } catch (e) {
+        console.error(
+          `teardown failed for handle ${handle} (mode=${body.mode ?? "runner"}): ${e}; ` +
+            `relying on the provider deadline backstop`,
+        );
+      }
       return new Response(null, { status: 204 });
     }
 

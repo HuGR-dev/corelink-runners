@@ -258,3 +258,63 @@ describe("/v1/exec (C3)", () => {
     expect(containers).toHaveLength(0);
   });
 });
+
+describe("status/teardown routing by mode (audit r4)", () => {
+  const get = (path: string, auth = AUTH): Request =>
+    new Request(`https://w${path}`, {
+      method: "GET",
+      headers: { authorization: `Bearer ${auth}` },
+    });
+
+  it("GET /v1/status?mode=check → CHECK_HOST_CONTAINER", async () => {
+    const resp = await worker.fetch(get("/v1/status/h1?mode=check"), makeEnv());
+    expect(resp.status).toBe(200);
+    expect(containers).toHaveLength(1);
+    expect(containers[0].ns).toBe(CHECK_NS);
+  });
+
+  it("GET /v1/status (default) → RUNNER_CONTAINER", async () => {
+    const resp = await worker.fetch(get("/v1/status/h1"), makeEnv());
+    expect(resp.status).toBe(200);
+    expect(containers[0].ns).toBe(RUNNER_NS);
+  });
+
+  it("POST /v1/teardown mode:'check' → CHECK_HOST_CONTAINER", async () => {
+    const resp = await worker.fetch(
+      post("/v1/teardown", { handle: "h1", mode: "check" }),
+      makeEnv(),
+    );
+    expect(resp.status).toBe(204);
+    expect(containers[0].ns).toBe(CHECK_NS);
+    expect(containers[0].teardown).toHaveBeenCalled();
+  });
+
+  it("POST /v1/teardown (default) → RUNNER_CONTAINER", async () => {
+    const resp = await worker.fetch(post("/v1/teardown", { handle: "h1" }), makeEnv());
+    expect(resp.status).toBe(204);
+    expect(containers[0].ns).toBe(RUNNER_NS);
+  });
+
+  it("teardown swallows a destroy() throw → still 204 (idempotent, not 500)", async () => {
+    vi.mocked(getContainer).mockImplementationOnce((ns: unknown, handle: string) => {
+      const c: FakeContainer = {
+        ns,
+        handle,
+        start: vi.fn(async () => {}),
+        startWithEnv: vi.fn(async () => {}),
+        containerFetch: vi.fn(async () => nextContainerFetch()),
+        isAlive: vi.fn(async () => true),
+        teardown: vi.fn(async () => {
+          throw new Error("destroy boom");
+        }),
+      };
+      containers.push(c);
+      return c as never;
+    });
+    const resp = await worker.fetch(
+      post("/v1/teardown", { handle: "h1", mode: "check" }),
+      makeEnv(),
+    );
+    expect(resp.status).toBe(204);
+  });
+});
