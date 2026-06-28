@@ -909,6 +909,11 @@ pub async fn sweep_stale_pending(state: &crate::AppState, max_age: Duration) -> 
             );
         }
 
+        // A7b (audit r4): a stale Pending may carry a minted CAS PAT (the mint
+        // happens WHILE the lease is Pending, before provision). Revoke it BEFORE
+        // forget_lease (which drops the pat_ids entry), mirroring reap_once /
+        // surface_crashes — else the PAT lives to D-9 self-expiry with no lease.
+        state.revoke_pat_for(&rec.lease_id).await;
         // GC any image side-table entry the half-acquire recorded (the slot
         // meter never got an Acquired event for a never-Held Pending, so there
         // is nothing to free there).
