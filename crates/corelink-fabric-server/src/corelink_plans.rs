@@ -268,15 +268,43 @@ impl<H: IntrospectHttp> PlanSource for CoreLinkPlanStore<H> {
                 Ok(resp) if resp.status == 503 => {}
                 // ANY other status (401 = wrong service secret, other 4xx/5xx,
                 // unexpected 2xx): authoritative-or-misconfig → fail closed now.
-                Ok(_) => return Err(PlanSourceError::Unreachable),
+                Ok(resp) => {
+                    // OBSERVABILITY (cost-killer pinpoint): the auth introspect
+                    // (`tenant_of`) and this plan introspect send the IDENTICAL
+                    // `{"token":…}` body + secret to the SAME endpoint, so when
+                    // `/readyz` (auth-only) is healthy but `/v1/leases` (auth +
+                    // plan) 503s, the failing call is THIS one — and its status
+                    // is the whole diagnosis (e.g. 401 = secret drift, 400 = body
+                    // rejected by `deny_unknown_fields`). Surface it. The token +
+                    // service-secret are NEVER logged (only the status code).
+                    eprintln!(
+                        "corelink plan introspect: authoritative non-200/503 HTTP {} \
+                         on attempt {}/{INTROSPECT_ATTEMPTS} → fail-closed (plan unreachable)",
+                        resp.status,
+                        attempt + 1
+                    );
+                    return Err(PlanSourceError::Unreachable);
+                }
                 // Transport error (cold egress / DNS-not-ready / refused) → retry.
-                Err(_) => {}
+                // Log the transport-level cause (anyhow chain — header values, and
+                // thus the secret, are never part of a ureq transport error).
+                Err(e) => {
+                    eprintln!(
+                        "corelink plan introspect: transport error on attempt \
+                         {}/{INTROSPECT_ATTEMPTS}: {e:#} → retrying",
+                        attempt + 1
+                    );
+                }
             }
             if attempt + 1 < INTROSPECT_ATTEMPTS && !self.cfg.retry_backoff.is_zero() {
                 std::thread::sleep(self.cfg.retry_backoff);
             }
         }
         // All attempts exhausted on transient failures → fail closed.
+        eprintln!(
+            "corelink plan introspect: exhausted {INTROSPECT_ATTEMPTS} attempts on transient \
+             failures → fail-closed (plan unreachable → 503 on /v1/leases)"
+        );
         Err(PlanSourceError::Unreachable)
     }
 }

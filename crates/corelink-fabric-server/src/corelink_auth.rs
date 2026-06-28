@@ -107,16 +107,37 @@ pub trait IntrospectHttp: Send + Sync {
 /// The real [`IntrospectHttp`] transport using `ureq`.
 ///
 /// This is the ONLY place `ureq` appears in this module.
-/// A per-call agent is built from the configured timeout so a hung
-/// introspect endpoint can never hang lease acquisition indefinitely.
+///
+/// Holds a **persistent** `ureq::Agent` (built once in [`new`](Self::new),
+/// reused on every [`post`](IntrospectHttp::post)). ureq's `Agent` is an
+/// `Arc`-backed handle to a connection pool, so `#[derive(Clone)]` makes
+/// cloning this transport **share that pool**: the composition root builds ONE
+/// transport and hands a clone to BOTH the auth store and the plan store
+/// (`server.rs`), so the plan introspect — the SECOND introspect in an acquire —
+/// reuses the connection the auth introspect just warmed, instead of paying a
+/// fresh cold DNS/TLS handshake. That removes the cold-start
+/// `/readyz`-warm / `/v1/leases`-cold differential (the auth agent was kept warm
+/// by health checks; the separate plan agent was cold on the first acquire).
+/// The `timeout_global` set at build still bounds every call, so a hung
+/// endpoint can never hang lease acquisition — the original per-call-build
+/// intent is preserved WITHOUT discarding the pool on each call.
+#[derive(Clone)]
 pub struct UreqIntrospect {
-    timeout: Duration,
+    agent: ureq::Agent,
 }
 
 impl UreqIntrospect {
-    /// Create a new transport with the given request timeout.
+    /// Create a transport with a persistent agent bounded by `timeout`.
     pub fn new(timeout: Duration) -> Self {
-        Self { timeout }
+        // http_status_as_error(false) keeps 4xx/5xx as Ok(response) so the
+        // store can map every status explicitly (fail-closed logic lives there,
+        // not here in the transport).
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(timeout))
+            .http_status_as_error(false)
+            .build()
+            .into();
+        Self { agent }
     }
 }
 
@@ -127,16 +148,9 @@ impl IntrospectHttp for UreqIntrospect {
         auth_header_value: &str,
         json_body: &str,
     ) -> anyhow::Result<IntrospectResponse> {
-        // http_status_as_error(false) keeps 4xx/5xx as Ok(response) so the
-        // store can map every status explicitly (fail-closed logic lives there,
-        // not here in the transport).
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .timeout_global(Some(self.timeout))
-            .http_status_as_error(false)
-            .build()
-            .into();
-
-        let mut resp = agent
+        // Reuse the persistent (warm) agent — see the type doc.
+        let mut resp = self
+            .agent
             .post(url)
             .header("X-Corelink-Internal-Auth", auth_header_value)
             .header("Content-Type", "application/json")
