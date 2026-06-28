@@ -405,6 +405,7 @@ Gate order (none skippable):
 |-------|------|-------------|
 | `status` | `String` | Terminal job status: `"succeeded"` or `"failed"`. |
 | `check_result` | `CheckResult?` | The job's `CheckResult`, if the close delivers one. Echoed back in the response in the same atomic step as the metrics (§13.1 delivery rule). |
+| `cost_usd_micros` | `u64?` | The **provider-billed** total cost of the lease's work in micro-USD (`1 USD = 1_000_000`), read from the provider's `/usage` by the caller. Additive; `serde(default)`. The fabric **records it verbatim** into `metrics.cost_usd_micros` — it never recomputes or price-cards it (owner 2026-06-27 provider-billed re-decision, #64). Absent ⇒ the honest-zero derived floor stands. Rides the same atomic close payload as the §13.1 token metrics. |
 
 **Response body (200):** `CloseResponse` (`deny_unknown_fields`)
 
@@ -617,7 +618,7 @@ Schema 1.2.0 (transcribed from hugit-contracts @ 443ff1b).
 | `tool_calls` | `u64` | Total tool calls. |
 | `tool_breakdown` | `Vec<ToolCount>` | Per-tool call breakdown. |
 | `model_turns` | `u64` | Number of model turns. |
-| `cost_usd_micros` | `u64` | Derived COGS in integer micro-USD (`1 USD = 1_000_000`). NOT what the customer is billed. Bit-exact integer minor units (WA4 amendment, schema 1.2.0). |
+| `cost_usd_micros` | `u64` | The **provider-billed** cost of the job in integer micro-USD (`1 USD = 1_000_000`), as submitted on `CloseRequest.cost_usd_micros` and recorded verbatim (owner 2026-06-27 provider-billed re-decision, #64) — or the honest-zero floor when none was submitted. NOT a fabric price-card multiply; NOT necessarily what the customer is billed. Bit-exact integer minor units (schema 1.2.0). |
 
 ### `TokenCounts`
 

@@ -90,6 +90,7 @@ fn close_req() -> CloseRequest {
     CloseRequest {
         status: "succeeded".to_string(),
         check_result: None,
+        cost_usd_micros: None,
     }
 }
 

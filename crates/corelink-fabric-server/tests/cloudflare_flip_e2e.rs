@@ -244,6 +244,7 @@ async fn do_close(router: &Router, lease_id: &str) -> Response {
     let close = CloseRequest {
         status: "succeeded".to_string(),
         check_result: None,
+        cost_usd_micros: None,
     };
     router
         .clone()

@@ -701,6 +701,7 @@ async fn close_invokes_teardown() {
     let close_body = CloseRequest {
         status: "succeeded".to_string(),
         check_result: None,
+        cost_usd_micros: None,
     };
     let close_resp = router
         .oneshot(json_req(
@@ -1170,6 +1171,7 @@ async fn http_close_teardown_failure_is_fail_closed_and_retryable() {
     let close_body = CloseRequest {
         status: "succeeded".to_string(),
         check_result: None,
+        cost_usd_micros: None,
     };
     let close_resp = router
         .oneshot(json_req(

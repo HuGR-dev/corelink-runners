@@ -232,6 +232,7 @@ async fn close_burst_is_bounded_and_semantics_preserved() {
                 &CloseRequest {
                     status: "succeeded".to_string(),
                     check_result: None,
+                    cost_usd_micros: None,
                 },
             )
             .await
@@ -314,6 +315,7 @@ async fn teardown_concurrency_not_starved_by_close_burst() {
                 &CloseRequest {
                     status: "succeeded".to_string(),
                     check_result: None,
+                    cost_usd_micros: None,
                 },
             )
             .await
@@ -366,6 +368,7 @@ async fn gate_is_transparent_to_acked_close() {
         &CloseRequest {
             status: "succeeded".to_string(),
             check_result: None,
+            cost_usd_micros: None,
         },
     )
     .await;
@@ -406,6 +409,7 @@ async fn global_cap_sheds_excess_with_503() {
             &CloseRequest {
                 status: "succeeded".to_string(),
                 check_result: None,
+                cost_usd_micros: None,
             },
         )
         .await
@@ -457,6 +461,7 @@ async fn health_answers_200_under_saturation() {
             &CloseRequest {
                 status: "succeeded".to_string(),
                 check_result: None,
+                cost_usd_micros: None,
             },
         )
         .await

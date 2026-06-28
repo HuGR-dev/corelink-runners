@@ -221,7 +221,7 @@ pub(crate) async fn close(
     // lease without a hook closes plain. The exactly-once close fires here, on
     // the attempt whose teardown succeeded; a retry after a failed teardown
     // never reached this gate, so the close signal is delivered exactly once.
-    let (metrics, capture_incomplete) = match registry.close_handle(&lease_id, &tenant) {
+    let (mut metrics, capture_incomplete) = match registry.close_handle(&lease_id, &tenant) {
         Some((hook, price)) => {
             // AUDIT P1: the ack wait below blocks for up to the §13.2 ack window
             // (30s) on a std condvar, run via `spawn_blocking`. WITHOUT a bound,
@@ -269,6 +269,20 @@ pub(crate) async fn close(
         }
         None => (zero_metrics(), false),
     };
+
+    // ── 5b. Provider-billed cost (owner 2026-06-27 re-decision, #64). The cost
+    // axis is the PROVIDER's real billed `cost_usd_micros`, which the caller
+    // reads from the provider's `/usage` and submits at close; the fabric
+    // RECORDS it verbatim into the finalized metrics — no price-card recompute
+    // (that path derives an honest-zero floor; envelope.rs). When the caller
+    // submits a value it OVERRIDES that floor; when absent (older callers /
+    // non-agent jobs) the derived value stands, byte-identical to today. This
+    // rides the same atomic close payload as the §13.1 token metrics, in the
+    // same trust position as those counts (the result-binding signature covers
+    // the CheckResult, not the usage metrics).
+    if let Some(cost) = req.cost_usd_micros {
+        metrics.cost_usd_micros = cost;
+    }
 
     // ── 6. Held → Released ONLY NOW — teardown succeeded (gate 4) and the
     // outcome exists, so the box is reclaimed and the forge had its full ack

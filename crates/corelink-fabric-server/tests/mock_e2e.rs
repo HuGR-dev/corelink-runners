@@ -248,6 +248,7 @@ async fn mock_exec_e2e_pins_consumer_contract() {
     let close_req = CloseRequest {
         status: "succeeded".to_string(),
         check_result: Some(exec_body.result.clone()),
+        cost_usd_micros: None,
     };
     let response = h
         .app

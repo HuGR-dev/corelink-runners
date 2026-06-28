@@ -892,6 +892,7 @@ async fn mock_drives_full_lifecycle() {
     let close_req = CloseRequest {
         status: "succeeded".to_string(),
         check_result: Some(exec_resp.result.clone()),
+        cost_usd_micros: None,
     };
     let req = Request::builder()
         .method("POST")

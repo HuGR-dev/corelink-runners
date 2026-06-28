@@ -241,6 +241,7 @@ async fn every_execution_emits_signed_attestation() {
     let close_req = CloseRequest {
         status: "succeeded".to_string(),
         check_result: Some(exec_body.result.clone()),
+        cost_usd_micros: None,
     };
     let response = h
         .app
@@ -639,6 +640,7 @@ async fn close_rejects_check_result_with_lying_memo_key() {
     let bad = CloseRequest {
         status: "succeeded".to_string(),
         check_result: Some(lying),
+        cost_usd_micros: None,
     };
     let response = h
         .app
@@ -662,6 +664,7 @@ async fn close_rejects_check_result_with_lying_memo_key() {
     let good = CloseRequest {
         status: "succeeded".to_string(),
         check_result: Some(exec_body.result.clone()),
+        cost_usd_micros: None,
     };
     let ok = h
         .app
