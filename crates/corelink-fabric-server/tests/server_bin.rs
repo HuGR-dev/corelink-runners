@@ -51,6 +51,7 @@ fn valid_acquire_body() -> AcquireRequest {
         tmp_root: "/work/tmp".to_string(),
         expiry_ms: 60_000,
         runner: None,
+        toolchain_digest: None,
     }
 }
 
@@ -784,6 +785,7 @@ async fn mock_drives_full_lifecycle() {
         tmp_root: "/work/tmp".to_string(),
         expiry_ms: 600_000,
         runner: None,
+        toolchain_digest: None,
     };
     let req = Request::builder()
         .method("POST")

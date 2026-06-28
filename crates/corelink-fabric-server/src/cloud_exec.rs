@@ -596,6 +596,24 @@ enum HybridRoute {
     Runner,
     /// Check-exec lease (`spec.allow_egress == false`) → the check sub-provisioner.
     Check,
+    /// CHECK-HOST lease (CF-native check-host, C1/C6): `spec.allow_egress == false`
+    /// AND `spec.env` carries the `TOOLCHAIN_DIGEST` discriminator → the SAME CF
+    /// (`runner`) sub-provisioner, which W4's `CloudflareEngine` spawns in
+    /// check-mode (it reads `TOOLCHAIN_DIGEST` from the spec env). A check-host box
+    /// is hermetic (no egress) but lives on the Cloudflare moat substrate, not
+    /// Northflank. Teardown/probe replay against the CF sub-provisioner.
+    CheckHost,
+}
+
+/// The C6 env discriminator: a check-host spec is a hermetic (`!allow_egress`)
+/// spec whose env carries `TOOLCHAIN_DIGEST` (injected at acquire, leases.rs).
+/// This is the SAME marker the exec-time assert keys on — server-internal, never
+/// the wire `net_policy` string (the C2 invariant). Plain-hermetic checks carry
+/// no `TOOLCHAIN_DIGEST`, so this is `false` for them (→ Northflank, rota B).
+const TOOLCHAIN_DIGEST_ENV: &str = "TOOLCHAIN_DIGEST";
+
+fn is_check_host_spec(spec: &ContainerSpec) -> bool {
+    !spec.allow_egress && spec.env.iter().any(|(k, _)| k == TOOLCHAIN_DIGEST_ENV)
 }
 
 /// A [`BoxProvisioner`] that routes each lease to one of two sub-backends by the
@@ -670,13 +688,23 @@ impl HybridBoxProvisioner {
 
 impl BoxProvisioner for HybridBoxProvisioner {
     fn provision(&self, lease_id: &str, spec: &ContainerSpec) -> Result<()> {
-        // The lease-kind fork: egress ⇒ runner (Cloudflare); no egress ⇒ check
-        // (Northflank). Record the route BEFORE delegating so teardown can always
-        // reach the intended engine — even if the spawn fails (its teardown is
-        // idempotent against the empty registry). Fail-closed: a sub-provisioner
-        // error propagates unchanged (nothing bound on a failed spawn).
+        // The lease-kind fork: egress ⇒ runner (Cloudflare); no egress ⇒ check.
+        // The no-egress branch FORKS AGAIN (C1/C6): a CHECK-HOST spec (env carries
+        // `TOOLCHAIN_DIGEST`) routes to the SAME CF (`runner`) sub-provisioner —
+        // W4's CloudflareEngine spawns it in check-mode off the digest in env — so
+        // a hermetic check-host box lives on the Cloudflare moat; a PLAIN-hermetic
+        // check (no `TOOLCHAIN_DIGEST`) stays on Northflank (rota B). DEFAULT-OFF:
+        // leases.rs only injects `TOOLCHAIN_DIGEST` when an acquire carried
+        // `toolchain_digest`, so absent that field this branch is byte-identical to
+        // rota B (→ Check → Northflank). Record the route BEFORE delegating so
+        // teardown can always reach the intended engine — even if the spawn fails
+        // (its teardown is idempotent against the empty registry). Fail-closed: a
+        // sub-provisioner error propagates unchanged (nothing bound on a failed
+        // spawn).
         let (route, sub): (HybridRoute, &Arc<dyn BoxProvisioner>) = if spec.allow_egress {
             (HybridRoute::Runner, &self.runner)
+        } else if is_check_host_spec(spec) {
+            (HybridRoute::CheckHost, &self.runner)
         } else {
             (HybridRoute::Check, &self.check)
         };
@@ -691,7 +719,9 @@ impl BoxProvisioner for HybridBoxProvisioner {
             return Ok(());
         };
         let sub = match route {
-            HybridRoute::Runner => &self.runner,
+            // CheckHost rides the CF (`runner`) sub-provisioner — the same engine
+            // that spawned it (check-mode).
+            HybridRoute::Runner | HybridRoute::CheckHost => &self.runner,
             HybridRoute::Check => &self.check,
         };
         // On success, drop the route. On failure, KEEP it so the reaper retries
@@ -708,7 +738,7 @@ impl BoxProvisioner for HybridBoxProvisioner {
             return Ok(ProbeStatus::Unbound);
         };
         match route {
-            HybridRoute::Runner => self.runner.probe(lease_id),
+            HybridRoute::Runner | HybridRoute::CheckHost => self.runner.probe(lease_id),
             HybridRoute::Check => self.check.probe(lease_id),
         }
     }
@@ -1049,6 +1079,56 @@ mod tests {
         assert!(log.contains(&"RUNNER:provision:lease-r".to_string()));
         assert!(log.contains(&"CHECK:provision:lease-c".to_string()));
         assert!(!log.contains(&"CHECK:provision:lease-r".to_string()));
+        assert!(!log.contains(&"RUNNER:provision:lease-c".to_string()));
+    }
+
+    #[test]
+    fn hybrid_routes_check_host_spec_to_the_cf_runner_sub() {
+        // C1/C6: a hermetic spec whose env carries TOOLCHAIN_DIGEST is a CHECK-HOST
+        // spec → the CF (RUNNER) sub-provisioner (the moat substrate, W4 check-mode),
+        // NOT Northflank. A plain-hermetic check (no TOOLCHAIN_DIGEST) still routes
+        // to the CHECK (Northflank) sub — default-off, byte-identical to rota B.
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runner_sub: Arc<dyn BoxProvisioner> =
+            Arc::new(SpyProvisioner::new("RUNNER", Arc::clone(&calls)));
+        let check_sub: Arc<dyn BoxProvisioner> =
+            Arc::new(SpyProvisioner::new("CHECK", Arc::clone(&calls)));
+        let hybrid = HybridBoxProvisioner::new(runner_sub, check_sub);
+        let (_runner_spec, mut check_host_spec) = runner_and_check_specs();
+        // Inject the C6 discriminator exactly as leases.rs does at acquire.
+        check_host_spec
+            .env
+            .push(("TOOLCHAIN_DIGEST".to_string(), "sha256:tool".to_string()));
+
+        hybrid.provision("lease-ch", &check_host_spec).unwrap();
+        // teardown/probe must replay to the CF (RUNNER) sub, not CHECK.
+        hybrid.probe("lease-ch").unwrap();
+        hybrid.teardown("lease-ch").unwrap();
+
+        let log = calls.lock().unwrap().clone();
+        assert!(log.contains(&"RUNNER:provision:lease-ch".to_string()));
+        assert!(log.contains(&"RUNNER:probe:lease-ch".to_string()));
+        assert!(log.contains(&"RUNNER:teardown:lease-ch".to_string()));
+        assert!(!log.contains(&"CHECK:provision:lease-ch".to_string()));
+    }
+
+    #[test]
+    fn hybrid_routes_plain_hermetic_check_to_northflank_default_off() {
+        // The default-off guarantee: a hermetic check with NO TOOLCHAIN_DIGEST in
+        // env is a plain-hermetic check → the CHECK (Northflank) sub — byte-identical
+        // to rota B. This is the spec produced when an acquire omits `toolchain_digest`.
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runner_sub: Arc<dyn BoxProvisioner> =
+            Arc::new(SpyProvisioner::new("RUNNER", Arc::clone(&calls)));
+        let check_sub: Arc<dyn BoxProvisioner> =
+            Arc::new(SpyProvisioner::new("CHECK", Arc::clone(&calls)));
+        let hybrid = HybridBoxProvisioner::new(runner_sub, check_sub);
+        let (_runner_spec, check_spec) = runner_and_check_specs();
+
+        hybrid.provision("lease-c", &check_spec).unwrap();
+
+        let log = calls.lock().unwrap().clone();
+        assert!(log.contains(&"CHECK:provision:lease-c".to_string()));
         assert!(!log.contains(&"RUNNER:provision:lease-c".to_string()));
     }
 

@@ -78,6 +78,7 @@ async fn acquire_as(app: &axum::Router, bearer: &str) -> (StatusCode, serde_json
         tmp_root: "/work/tmp".to_string(),
         expiry_ms: 600_000,
         runner: None,
+        toolchain_digest: None,
     };
     let req = Request::builder()
         .method("POST")
@@ -255,6 +256,7 @@ async fn reaped_lease_unregisters_hook() {
         tmp_root: "/work/tmp".to_string(),
         expiry_ms: 1, // 1 ms — overdue by the time the reaper runs
         runner: None,
+        toolchain_digest: None,
     };
     let req = Request::builder()
         .method("POST")

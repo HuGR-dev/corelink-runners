@@ -116,6 +116,30 @@ pub(crate) async fn exec(
         );
     }
 
+    // ── 2b. CHECK-HOST false-cache-hit guard (C6 / Lifecycle assert). A
+    // check-host lease was acquired WITH its toolchain (`toolchain_digest = D`),
+    // and the box hydrated exactly D at spawn. The memo key is computed over
+    // `CheckDef.toolchain_ref`, so executing a `CheckDef` whose `toolchain_ref`
+    // differs from the hydrated D would memoize a result under the WRONG toolchain
+    // axis — the latent false-cache-hit. ASSERT `CheckDef.toolchain_ref == D`
+    // here, fail-closed (400 `invalid`) on mismatch. The digest is NOT secret (it
+    // is the public memo axis), so it is safe to name in the error message. A
+    // lease with NO stored digest is a non-check-host lease (plain hermetic /
+    // Northflank) — SKIP the assert entirely, byte-identical to today. ──
+    if let Some(stored) = state.toolchain_digest_of(&lease_id)
+        && req.check_def.toolchain_ref != stored
+    {
+        return error_response(
+            ApiError::Invalid,
+            &format!(
+                "check-host toolchain mismatch: lease hydrated toolchain '{stored}' but the \
+                 CheckDef requests toolchain_ref '{}'; refusing to execute against a different \
+                 toolchain than was hydrated (false-cache-hit guard)",
+                req.check_def.toolchain_ref
+            ),
+        );
+    }
+
     // ── 3. Expired-at-exec-time, BEFORE any execution: an expired job
     // performs zero work and stores nothing, ever — even if the expiry
     // sweep has not yet marked the ledger.
