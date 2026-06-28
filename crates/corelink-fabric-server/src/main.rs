@@ -1,7 +1,7 @@
 //! Production binary (composition root) for the CoreLink Runners fabric server.
 //!
 //! Reads configuration from environment variables (see [`corelink_fabric_server::server`]),
-//! assembles every seam via [`corelink_fabric_server::server::build_app`], and
+//! assembles every seam via [`corelink_fabric_server::server::build_app_and_state`], and
 //! serves the axum router on the configured TCP address.
 
 use corelink_fabric_server::server::{build_app_and_state, config_from_env};

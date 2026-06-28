@@ -96,10 +96,15 @@ fn billing_period(at_ms: u64) -> String {
     format!("{:04}-{:02}", key / 100, key % 100)
 }
 
-/// `BLAKE3(lease_id ‖ billing_period)` as 64-char lowercase hex (32 bytes).
+/// `BLAKE3(lease_id ‖ "|" ‖ billing_period)` as 64-char lowercase hex (32 bytes).
 fn idem_key(lease_id: &str, period: &str) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(lease_id.as_bytes());
+    // Unambiguous separator (audit r7): a `|` between the two fields makes the
+    // concatenation injective regardless of field lengths, and matches the
+    // TypeScript sibling (deploy/cloudflare/src/lib.ts `${jobId}|${period}`) so
+    // the Rust + Worker push paths produce the SAME idem_key for the same lease.
+    hasher.update(b"|");
     hasher.update(period.as_bytes());
     hasher.finalize().to_hex().to_string()
 }
@@ -633,5 +638,8 @@ mod tests {
         assert_ne!(idem_key("L1", "2026-06"), idem_key("L2", "2026-06"));
         assert_ne!(idem_key("L1", "2026-06"), idem_key("L1", "2026-07"));
         assert_eq!(idem_key("L1", "2026-06").len(), 64);
+        // Audit r7: the `|` separator makes the concatenation injective even for
+        // different field-length splits — `a‖bc` must not collide with `ab‖c`.
+        assert_ne!(idem_key("a", "bc"), idem_key("ab", "c"));
     }
 }

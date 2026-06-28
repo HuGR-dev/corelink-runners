@@ -90,9 +90,11 @@
 //!
 //! BOTH abnormal paths now flush a best-effort PARTIAL envelope on reclaim
 //! (Option B, owner-ratified 2026-06-13): `reap_once` (Expired) and
-//! `surface_crashes` (Crashed) each call [`flush_partial_envelope`] AFTER
-//! teardown→transition→`record_slot` — fire-and-forget, so it never blocks or
-//! breaks reclamation. The flush finalizes whatever the `CaptureHook`
+//! `surface_crashes` (Crashed) each call [`flush_partial_envelope`] BEFORE
+//! `forget_lease` (which unregisters the capture hook) and before `record_slot`
+//! — fire-and-forget, so it never blocks or breaks reclamation, but the hook is
+//! still registered so TIER-1 finalizes the live partial metrics (audit r5 fix).
+//! The flush finalizes whatever the `CaptureHook`
 //! accumulated through the SAME finalize/redaction path as a normal close (no
 //! exemption), stamps `close_reason=expired|crashed` + `capture_incomplete:true`
 //! (WRAPPER-level, never inside the frozen §13.4 `IntentMetrics`), and emits it
