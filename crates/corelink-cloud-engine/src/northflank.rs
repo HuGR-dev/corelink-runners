@@ -431,11 +431,24 @@ fn classify_run_status(body: &str) -> RunState {
 fn parse_id(body: &str) -> Result<String> {
     let v: serde_json::Value = serde_json::from_str(body)
         .map_err(|e| anyhow::anyhow!("northflank response is not JSON: {e}"))?;
-    v.get("data")
+    let id = v
+        .get("data")
         .and_then(|d| d.get("id"))
         .and_then(|id| id.as_str())
-        .map(str::to_string)
-        .ok_or_else(|| anyhow::anyhow!("northflank response missing data.id: {body}"))
+        .ok_or_else(|| anyhow::anyhow!("northflank response missing data.id: {body}"))?;
+    // Audit r5: the id is interpolated into the poll/cancel URL (`{runs_url}/{id}`).
+    // Reject a non-URL-path-safe id rather than mis-address a status/cancel to a
+    // different (or malformed) target — fail CLOSED. Mirrors cloudflare::parse_handle.
+    if id.is_empty()
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        anyhow::bail!(
+            "northflank run id is not URL-path-safe ([A-Za-z0-9_-]); refusing — fail CLOSED"
+        );
+    }
+    Ok(id.to_string())
 }
 
 /// Derive a Northflank-safe job name from an arbitrary `spec.name`, **injectively**.
@@ -979,6 +992,28 @@ impl<H: HttpTransport> Engine for NorthflankEngine<H> {
 mod tests {
     use super::*;
     use crate::http::{HttpRequest, HttpResponse, HttpTransport};
+
+    /// Audit r5: `parse_id` accepts a URL-path-safe `data.id` and REJECTS a
+    /// non-safe one (it is interpolated into the poll/cancel URL) — fail-closed,
+    /// mirroring `cloudflare::parse_handle`.
+    #[test]
+    fn parse_id_accepts_safe_rejects_path_unsafe() {
+        assert_eq!(
+            parse_id(r#"{"data":{"id":"run-AbC_123"}}"#).unwrap(),
+            "run-AbC_123"
+        );
+        for bad in [
+            r#"{"data":{"id":"run/../../evil"}}"#,
+            r#"{"data":{"id":"run id"}}"#,
+            r#"{"data":{"id":"run?x=1"}}"#,
+            r#"{"data":{"id":""}}"#,
+        ] {
+            assert!(
+                parse_id(bad).is_err(),
+                "a non-URL-path-safe run id must fail closed: {bad}"
+            );
+        }
+    }
 
     /// Trivial transport stub — always returns 200 with an empty body.
     struct StubTransport;
