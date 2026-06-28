@@ -33,26 +33,33 @@ serves it.
 
 | Tier | $/mo | Concurrency | Hard ceiling (vCPU-h/mo) | Max COGS |
 |---|---|---|---|---|
-| Starter | $8 | 20 | 300 | $5.01 |
-| Pro | $20 | 40 | 720 | $12.02 |
-| Team | $50 | 80 | 1,800 | $30.06 |
-| Scale | $100 | 160 | 3,600 | $60.12 |
-| Max | $200 | 320 | 7,200 | $120.24 |
+| Starter | $16 | 20 | 100 | $10 |
+| Pro | $40 | 40 | 240 | $24 |
+| Team | $100 | 80 | 600 | $60 |
+| Scale | $200 | 160 | 1,200 | $120 |
+| Max | $400 | 320 | 2,400 | $240 |
+
+*Ratified 2026-06-16 at the real $0.10/vCPU-h COGS basis — the canonical ladder
+(`docs/product/pricing.md` §2). The pre-amendment $8/$20/$50/… table was ~6×
+underwater and is superseded.*
 
 No free tier. 5-day trial at Team-level capability (card on file; converts or
 downgrades at end). Above Max: Enterprise (custom, governance, BYOC).
 
-Each tier has two hard limits: a **concurrency cap** (bounds peak burn rate) and
-a **vCPU-hour ceiling** (at the ceiling, further jobs queue or require an upgrade
-— no overage). Because the ceiling is hard, the maximum COGS a single tenant can
-incur is strictly below the tier price. **It is structurally impossible to lose
-money on a tenant within the tier limits.** The ceiling is generous enough that a
-real workflow never approaches it; it is a fair-use wall the 99% never see, not a
-visible usage meter. Full model: [`docs/product/pricing.md`](docs/product/pricing.md).
+Each tier has two hard limits: a **concurrency cap** (always on — bounds peak
+burn rate) and a **vCPU-hour ceiling** (at the ceiling, further jobs queue or
+require an upgrade — no overage). With both limits, the maximum COGS a single
+tenant can incur is strictly below the tier price (Max COGS column above) — so
+**within the tier limits it is structurally impossible to lose money on a
+tenant.** ⚠️ The vCPU-h ceiling is enforced in code but **default-off**: it is
+armed by setting `FABRIC_RUNNER_VCPU > 0` (a deployment step, not a code change);
+until armed, the concurrency cap is the only wall. The ceiling is generous enough
+that a real workflow never approaches it. Full model:
+[`docs/product/pricing.md`](docs/product/pricing.md).
 
 ## Architecture
 
-Seven crates in one Cargo workspace (`crates/`):
+Eight crates in one Cargo workspace (`crates/`):
 
 | Crate | Role |
 |---|---|

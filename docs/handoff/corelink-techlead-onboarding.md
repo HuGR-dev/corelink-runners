@@ -30,7 +30,7 @@ same rigor — so we can converge it, decompose into work-packages, and build.
 ```
 HuGR  ............ the company / brand (humangr).
  └─ CoreLink  ... the platform. Same content-addressed cache underneath everything.
-     ├─ Cache ........... CAS + Action Cache (content-addressed, cross-tenant dedup).  ✅ LIVE (launch)
+     ├─ Cache ........... CAS + Action Cache (content-addressed; intra-tenant dedup at GA, cross-tenant STAGED [CAP-DEDUP-CROSS-TENANT]).  ✅ LIVE (launch)
      ├─ Runners ......... ephemeral compute ON the cache.   ◀── THIS REPO, campaign #1, greenfield
      └─ Workspaces ...... workspace-as-object.              (campaign #2)
    hugit  ............... the git-compatible, LLM-native forge for agent fleets.  ✅ BUILT (campaign #3)

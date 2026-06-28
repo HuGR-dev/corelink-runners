@@ -119,11 +119,12 @@ it; none is a precondition for shipping the corrected numbers:
    cache hit-rate the margins assume; the dedup-staging tense; the shared-fabric
    COGS allocation across Runners/Workspaces). See the coordination doc.
 3. **Wire** the ratified caps in `crates/corelink-fabric/src/plans.rs` (`plan_for`)
-   + **build the vCPU-h ceiling enforcement** — the ceiling is not yet enforced in
-   code (`plans.rs` carries concurrency caps only; the compute-ceiling wall is the
-   to-build mechanism, default-off/fail-closed, that the guarantee rests on). Wave
-   plan: `docs/handoff/2026-06-16-vcpu-ceiling-wave-plan.md`. **This build is
-   decoupled from the numbers — it ships the wall; the ratified caps are config.**
+   — DONE (ratified ladder in `plans.rs`). The vCPU-h ceiling enforcement also
+   **SHIPPED** (audit-update 2026-06-28): the ledger's `ComputeGate` / vCPU·ms wall
+   is implemented, **default-off / fail-closed** — armed by `FABRIC_RUNNER_VCPU > 0`
+   plus the tenant's `max_vcpu_h` entitlement (a deployment step, not a code change).
+   Wave plan: `docs/handoff/2026-06-16-vcpu-ceiling-wave-plan.md`. The build is
+   decoupled from the numbers — it ships the wall; the ratified caps are config.
 4. **Metering** confirms the typical margin within weeks of launch (§6) → tune ⚠️.
 
 ---
@@ -172,7 +173,10 @@ Each tier has **two hard limits**:
 Because the ceiling is hard, the **maximum COGS a single user can incur is
 `ceiling × $0.10`** (real robust-box rate, §0) — the "Max COGS" column. Each is
 strictly below the tier price, even after Stripe fees. **It is therefore
-impossible to lose money on a user within the tier limits, by construction** —
+impossible to lose money on a user within the tier limits, by construction**
+— **once the vCPU-h wall is ARMED** (`FABRIC_RUNNER_VCPU > 0` + the tenant's
+`max_vcpu_h`; the wall is implemented but **default-off**, armed as a deployment
+step — see §0 item 3. Until armed, the concurrency cap is the only limit) —
 not "rare," not "portfolio-absorbed": bounded, hard.
 
 The ceiling is set **generous enough to be invisible to real users**: Starter's
