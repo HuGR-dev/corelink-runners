@@ -65,6 +65,27 @@ Worker's `containerFetch` (not public).
 → exit non-zero (the container dies; spawn → the lease fails closed). clw's `--manifest-digest` flag is
 delivered by the clw TL on this campaign's W6 timeline.
 
+## C6 — the W4↔W5 internal seam (env-carried check-host discriminator) [addendum 2026-06-28]
+`ContainerSpec` (frozen seam in `corelink-runner`, NOT a WP owner-file) is **not** extended. The
+check-host signal + digest ride the EXISTING additive `spec.env` channel — exactly as C2 routes
+`TOOLCHAIN_DIGEST`, and exactly as the §13.2 ingest vars are already injected after `from_lease`:
+
+- **W5 (fabric, acquire):** for a check lease with `AcquireRequest.toolchain_digest == Some(D)`,
+  append `("TOOLCHAIN_DIGEST", D)` to `spec.env` (additive, after the §13.2 inject) AND record the
+  acquire-time digest in a fabric-internal per-lease marker map (`app.rs`,
+  mirror of `runner_leases`: `mark_toolchain_digest`/`toolchain_digest_of`, GC'd in `forget_lease`).
+- **W4 (engine, spawn):** the check-host discriminator is `!spec.allow_egress && spec.env` contains
+  key `TOOLCHAIN_DIGEST`. Such a spec is ADMITTED (bypasses the runner-only floor #198), spawns with
+  top-level `mode:"check"` + `toolchain_digest:<D lifted from env>`. A `!allow_egress` spec WITHOUT
+  `TOOLCHAIN_DIGEST` keeps the v0 runner-only rejection (plain hermetic check → Northflank, rota B).
+- **exec-time assert (W5, `exec_handler`):** `CheckDef.toolchain_ref == toolchain_digest_of(lease)`
+  (mismatch → 400 fail-closed) — the false-cache-hit guard; the marker map is its read source.
+- **W4 and W5 compile independently:** W5 calls NO new W4 symbol (the `Engine` seam is frozen; `spawn`
+  signature unchanged; the existing `CloudflareBoxProvisioner` is reused). Coupling is purely this
+  runtime env-key convention → conflict-free parallel fanout.
+
+DEFAULT-OFF holds: absent `CLOUDFLARE_SPAWN_*` ⇒ no check-host routing ⇒ byte-identical to rota B.
+
 ## WP table (disjoint files; contract-bound; W1→W2 build-dep; rest parallel)
 | WP | Owner-files (disjoint) | Builds against |
 |----|------------------------|----------------|
