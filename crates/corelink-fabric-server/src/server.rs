@@ -991,29 +991,40 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
             (static_store, composite, Some(admin))
         }
         AuthBackend::CoreLink(auth_cfg) => {
-            // Auth: CoreLinkTokenStore over the real ureq transport (timeout
-            // already resolved in config_from_env).
-            let auth_transport = UreqIntrospect::new(auth_cfg.timeout);
+            // ONE persistent ureq transport, SHARED (cloned) into BOTH stores so
+            // the plan introspect reuses the auth introspect's warm connection
+            // pool within a single acquire — closing the cold-start
+            // `/readyz`-warm / `/v1/leases`-cold 503 differential (hugit-TL
+            // FINDING 2026-06-28: the only difference between the working auth
+            // call and the 503ing plan call was a SECOND, cold ureq agent; body +
+            // URL + secret + timeout are identical). The clone shares the
+            // `Arc`-backed pool; `timeout_global` still bounds every call.
+            let introspect_transport = UreqIntrospect::new(auth_cfg.timeout);
+
+            // Auth: CoreLinkTokenStore over the shared transport (timeout already
+            // resolved in config_from_env).
             let auth_store_cfg = CoreLinkAuthConfig {
                 introspect_url: auth_cfg.introspect_url.clone(),
                 service_secret: auth_cfg.service_secret.clone(),
                 timeout: auth_cfg.timeout,
                 retry_backoff: auth_cfg.retry_backoff,
             };
-            let cl_store = Arc::new(CoreLinkTokenStore::new(auth_transport, auth_store_cfg));
+            let cl_store = Arc::new(CoreLinkTokenStore::new(
+                introspect_transport.clone(),
+                auth_store_cfg,
+            ));
 
-            // Cap: CoreLinkPlanStore over a SECOND ureq transport, SAME endpoint
+            // Cap: CoreLinkPlanStore over the SAME shared transport, SAME endpoint
             // + secret + timeout. The cap is read from the introspect response
             // per-acquire — StaticPlans (which had no real tenant in this mode)
             // is no longer used here.
-            let plan_transport = UreqIntrospect::new(auth_cfg.timeout);
             let plan_store_cfg = CoreLinkAuthConfig {
                 introspect_url: auth_cfg.introspect_url.clone(),
                 service_secret: auth_cfg.service_secret.clone(),
                 timeout: auth_cfg.timeout,
                 retry_backoff: auth_cfg.retry_backoff,
             };
-            let cl_plans = Arc::new(CoreLinkPlanStore::new(plan_transport, plan_store_cfg));
+            let cl_plans = Arc::new(CoreLinkPlanStore::new(introspect_transport, plan_store_cfg));
 
             (cl_store, cl_plans, None)
         }
