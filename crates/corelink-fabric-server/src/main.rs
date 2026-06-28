@@ -56,10 +56,13 @@ async fn main() -> anyhow::Result<()> {
     // BILLING_INGEST_URL is set (the same gate that wires the real push target).
     // Borrows `&state` BEFORE the reaper consumes it; drives the buffered target's
     // batch POST every FABRIC_BILLING_PUSH_INTERVAL_SECS (default 30s).
-    let billing_push_handle =
-        corelink_fabric_server::server::maybe_spawn_billing_push_flush(&state, |k| {
+    let (billing_push_handle, billing_push_target) =
+        match corelink_fabric_server::server::maybe_spawn_billing_push_flush(&state, |k| {
             std::env::var(k).ok()
-        });
+        }) {
+            Some((h, t)) => (Some(h), Some(t)),
+            None => (None, None),
+        };
     let pending_max_age =
         corelink_fabric_server::reaper::pending_max_age_from_env(|k| std::env::var(k).ok())?;
     let reaper_handle = corelink_fabric_server::reaper::spawn_reaper_with_pending_age(
@@ -231,6 +234,20 @@ async fn main() -> anyhow::Result<()> {
     }
     // ASK-2: abort the billing usage-push flush driver (only set under BILLING_INGEST_URL).
     if let Some(h) = billing_push_handle {
+        // Final flush BEFORE abort (audit r4 #8): drain terminal-lease usage events
+        // buffered since the last ~30s tick. `flush` is a sync blocking POST →
+        // block_in_place (legal on the multi-thread runtime); bounded by the
+        // target's own HTTP timeout. A failure is logged (idem_key makes the next
+        // retry idempotent) and never blocks shutdown beyond that bound.
+        if let Some(t) = billing_push_target {
+            tokio::task::block_in_place(|| corelink_fabric::BillingExportTarget::flush(&*t))
+                .unwrap_or_else(|e| {
+                    eprintln!(
+                        "final billing usage-push flush failed on shutdown: {e} \
+                         (idem_key makes a retry idempotent)"
+                    );
+                });
+        }
         h.abort();
     }
     Ok(())

@@ -1309,14 +1309,20 @@ pub async fn maybe_spawn_billing_exporter(
 pub fn maybe_spawn_billing_push_flush<F: Fn(&str) -> Option<String>>(
     state: &crate::AppState,
     get: F,
-) -> Option<tokio::task::JoinHandle<()>> {
+) -> Option<(
+    tokio::task::JoinHandle<()>,
+    std::sync::Arc<dyn corelink_fabric::BillingExportTarget + Send + Sync>,
+)> {
     // Same presence gate as the target's from_env (URL set ⇒ real target wired).
     get(crate::corelink_billing::BILLING_INGEST_URL_ENV).filter(|s| !s.is_empty())?;
     let interval = crate::corelink_billing::push_flush_interval_from_env(&get);
-    Some(crate::corelink_billing::spawn_push_flush_loop(
-        state.billing_export_target.clone(),
-        interval,
-    ))
+    // Hand the target back to the caller too (audit r4 #8): the composition root
+    // performs a FINAL flush at graceful shutdown BEFORE aborting the loop —
+    // otherwise terminal-lease events buffered since the last ~30s tick are
+    // silently dropped (the doc's "flush at shutdown" was never wired).
+    let target = state.billing_export_target.clone();
+    let handle = crate::corelink_billing::spawn_push_flush_loop(target.clone(), interval);
+    Some((handle, target))
 }
 
 #[cfg(test)]
