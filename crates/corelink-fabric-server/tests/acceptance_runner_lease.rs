@@ -136,6 +136,7 @@ fn runner_acq_body() -> AcquireRequest {
             },
             labels: vec!["corelink".to_string()],
         }),
+        toolchain_digest: None,
     }
 }
 
@@ -146,6 +147,7 @@ fn check_acq_body(net_policy: &str) -> AcquireRequest {
         tmp_root: "/work/tmp".to_string(),
         expiry_ms: 600_000,
         runner: None,
+        toolchain_digest: None,
     }
 }
 

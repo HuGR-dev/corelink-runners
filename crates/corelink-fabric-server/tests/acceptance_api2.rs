@@ -77,6 +77,7 @@ fn valid_acquire_body() -> AcquireRequest {
         tmp_root: "/work/tmp".to_string(),
         expiry_ms: 60_000,
         runner: None,
+        toolchain_digest: None,
     }
 }
 

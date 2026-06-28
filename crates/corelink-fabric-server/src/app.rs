@@ -416,6 +416,19 @@ pub struct AppState {
     /// close, cancel, and the reaper sweep — so the set stays bounded by active
     /// runner leases.
     pub(crate) runner_leases: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// Lease ids provisioned as CHECK-HOST leases (CF-native check-host, C1/C6),
+    /// mapped to their `toolchain_digest` (the clw snapshot manifest digest the
+    /// box hydrated at spawn). A fabric-internal marker table — mirrors
+    /// [`runner_leases`](Self::runner_leases) — so the frozen `RunnerLease` and
+    /// the ledger carry NO check-host field (no wire-contract drift; the C6
+    /// design is server-internal). Recorded at acquire
+    /// ([`mark_toolchain_digest`](Self::mark_toolchain_digest)); read by the exec
+    /// handler to ASSERT `CheckDef.toolchain_ref == digest` before running the
+    /// check (the false-cache-hit guard, [`toolchain_digest_of`](Self::toolchain_digest_of)).
+    /// GC'd by [`forget_lease`](Self::forget_lease) on EVERY terminal path —
+    /// normal close, cancel, and the reaper sweep — so the map stays bounded by
+    /// active check-host leases.
+    pub(crate) toolchain_digests: Arc<Mutex<std::collections::HashMap<String, String>>>,
     /// The §13 capture-hook registry: registered at acquire, unregistered
     /// at close or reap. Shared instance: `app_full` layers this onto the
     /// HTTP Extension stack so both the handlers AND the reaper reference
@@ -589,6 +602,9 @@ impl AppState {
             // composition root opts in via `with_runner_broker` (ADR-0007).
             runner_broker: None,
             runner_leases: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            // Check-host mode DEFAULT-OFF: empty marker map. Populated only when
+            // an acquire carries `toolchain_digest` (C1/C6).
+            toolchain_digests: Arc::new(Mutex::new(std::collections::HashMap::new())),
             hook_registry: Arc::new(HookRegistry::default()),
             slot_meter: Arc::new(Mutex::new(SlotMeter::new())),
             // Default-off: no observability key → the occupancy route 404s.
@@ -987,6 +1003,32 @@ impl AppState {
             .contains(lease_id)
     }
 
+    /// Mark `lease_id` as a CHECK-HOST lease (C1/C6) with the `toolchain_digest`
+    /// it hydrated at spawn. Mirrors [`mark_runner_lease`](Self::mark_runner_lease):
+    /// idempotent (re-marking the same id overwrites the same digest), a poisoned
+    /// lock is recovered (the marker is advisory — exec also fails closed). The
+    /// digest is NOT secret (it is the public memo axis); only the clw tokens are
+    /// secret and they are never stored here. Recorded at acquire.
+    pub(crate) fn mark_toolchain_digest(&self, lease_id: &str, digest: &str) {
+        self.toolchain_digests
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(lease_id.to_string(), digest.to_string());
+    }
+
+    /// The `toolchain_digest` recorded for `lease_id` at acquire, if it is a
+    /// check-host lease — the exec handler ASSERTS `CheckDef.toolchain_ref` equals
+    /// this before running the check (the false-cache-hit guard). `None` for a
+    /// non-check-host lease (plain hermetic / runner) → the exec handler SKIPS the
+    /// assert, byte-identical to today.
+    pub(crate) fn toolchain_digest_of(&self, lease_id: &str) -> Option<String> {
+        self.toolchain_digests
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(lease_id)
+            .cloned()
+    }
+
     /// Record the lease's pinned image digest at acquire (the validated
     /// `AcquireRequest.image_digest`) — the attestation path's image
     /// identity (WP-ATT1).
@@ -1159,6 +1201,12 @@ impl AppState {
         // GC the runner-mode marker (ADR-0007) on the same teardown path, so the
         // marker set stays bounded by active runner leases.
         self.runner_leases
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(lease_id);
+        // GC the check-host toolchain-digest marker (C1/C6) on the same teardown
+        // path, so the marker map stays bounded by active check-host leases.
+        self.toolchain_digests
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(lease_id);
@@ -1499,6 +1547,43 @@ mod tests {
         state.mark_runner_lease("lease-a");
         assert!(state.is_runner_lease("lease-a"));
         assert!(!state.is_runner_lease("lease-b"), "other ids unaffected");
+    }
+
+    /// `mark_toolchain_digest` is idempotent (re-mark overwrites the same digest)
+    /// and scoped to the marked id — mirrors `mark_runner_lease_is_idempotent_and_scoped`
+    /// (C1/C6 marker map).
+    #[test]
+    fn mark_toolchain_digest_is_idempotent_and_scoped() {
+        let state = bare_state();
+        state.mark_toolchain_digest("lease-c", "sha256:tool");
+        state.mark_toolchain_digest("lease-c", "sha256:tool");
+        assert_eq!(
+            state.toolchain_digest_of("lease-c").as_deref(),
+            Some("sha256:tool")
+        );
+        assert!(
+            state.toolchain_digest_of("lease-d").is_none(),
+            "other ids unaffected"
+        );
+    }
+
+    /// `forget_lease` GCs the check-host toolchain-digest marker (C1/C6) — the
+    /// regression lock for the close-path marker leak, mirroring the runner marker.
+    #[test]
+    fn forget_lease_gcs_the_toolchain_digest_marker() {
+        let state = bare_state();
+        state.mark_toolchain_digest("lease-t", "sha256:tool");
+        assert!(
+            state.toolchain_digest_of("lease-t").is_some(),
+            "marked before forget"
+        );
+
+        state.forget_lease("lease-t");
+
+        assert!(
+            state.toolchain_digest_of("lease-t").is_none(),
+            "forget_lease must GC the toolchain-digest marker (no unbounded growth on close)"
+        );
     }
 
     // ── FIX-F-1: the static ceiling source resolves a non-zero ceiling ────────

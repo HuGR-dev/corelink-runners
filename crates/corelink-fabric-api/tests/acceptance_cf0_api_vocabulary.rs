@@ -157,6 +157,7 @@ fn dtos_roundtrip_and_deny_unknown() {
             tmp_root: "/tmp/lease-0001".to_string(),
             expiry_ms: 300_000,
             runner: None,
+            toolchain_digest: None,
         },
         "AcquireRequest",
     );

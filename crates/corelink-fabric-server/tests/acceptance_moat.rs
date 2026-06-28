@@ -99,6 +99,7 @@ fn runner_acq_body() -> AcquireRequest {
             },
             labels: vec!["corelink".to_string()],
         }),
+        toolchain_digest: None,
     }
 }
 
