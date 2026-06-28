@@ -257,6 +257,7 @@ fn dtos_roundtrip_and_deny_unknown() {
         &CloseRequest {
             status: "succeeded".to_string(),
             check_result: Some(sample_check_result()),
+            cost_usd_micros: None,
         },
         "CloseRequest",
     );

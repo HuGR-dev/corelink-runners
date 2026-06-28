@@ -285,6 +285,7 @@ async fn checkresult_carries_intentmetrics_atomically() {
         &CloseRequest {
             status: "succeeded".to_string(),
             check_result: Some(sample_check_result()),
+            cost_usd_micros: None,
         },
     )
     .await;
@@ -340,6 +341,7 @@ async fn ack_timeout_closes_lease_anyway_with_capture_incomplete_flag() {
         &CloseRequest {
             status: "succeeded".to_string(),
             check_result: None,
+            cost_usd_micros: None,
         },
     )
     .await;
@@ -364,6 +366,70 @@ async fn ack_timeout_closes_lease_anyway_with_capture_incomplete_flag() {
     assert_eq!(
         ledger_state(&h.ledger, &lease_id),
         LeaseState::Wire(RunnerState::Released)
+    );
+}
+
+/// Provider-billed cost (#64): a `CloseRequest.cost_usd_micros` is RECORDED
+/// verbatim into the finalized `metrics.cost_usd_micros` — the fabric never
+/// recomputes/price-cards it (owner 2026-06-27 re-decision). It rides the same
+/// atomic close payload as the token metrics.
+#[tokio::test]
+async fn close_records_submitted_provider_cost_into_metrics() {
+    const ACK_TIMEOUT: Duration = Duration::from_millis(150);
+    // $4.20 == 4_200_000 micro-dollars — a real, non-zero provider bill.
+    const PROVIDER_COST: u64 = 4_200_000;
+    let h = harness();
+    let lease_id = acquire(&h).await;
+    open_and_register(&h, &lease_id, ACK_TIMEOUT);
+
+    let response = post_close(
+        &h,
+        &lease_id,
+        &CloseRequest {
+            status: "succeeded".to_string(),
+            check_result: None,
+            cost_usd_micros: Some(PROVIDER_COST),
+        },
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: CloseResponse =
+        serde_json::from_value(body_json(response).await).expect("CloseResponse-shaped JSON");
+    assert!(body.released);
+    assert_eq!(
+        body.metrics.cost_usd_micros, PROVIDER_COST,
+        "the submitted provider-billed cost is recorded verbatim into the metrics"
+    );
+}
+
+/// Back-compat / honest-zero: a close that submits NO cost keeps the derived
+/// floor (`0`), byte-identical to the pre-#64 behavior — never a fabricated
+/// figure.
+#[tokio::test]
+async fn close_without_submitted_cost_keeps_honest_zero() {
+    const ACK_TIMEOUT: Duration = Duration::from_millis(150);
+    let h = harness();
+    let lease_id = acquire(&h).await;
+    open_and_register(&h, &lease_id, ACK_TIMEOUT);
+
+    let response = post_close(
+        &h,
+        &lease_id,
+        &CloseRequest {
+            status: "succeeded".to_string(),
+            check_result: None,
+            cost_usd_micros: None,
+        },
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: CloseResponse =
+        serde_json::from_value(body_json(response).await).expect("CloseResponse-shaped JSON");
+    assert_eq!(
+        body.metrics.cost_usd_micros, 0,
+        "no submitted cost ⇒ honest-zero derived floor (back-compat)"
     );
 }
 
@@ -459,6 +525,7 @@ async fn cache_token_split_present_for_agent_jobs() {
         &CloseRequest {
             status: "succeeded".to_string(),
             check_result: None,
+            cost_usd_micros: None,
         },
     )
     .await;
@@ -509,6 +576,7 @@ async fn lease_not_released_before_close_signal_published() {
         &CloseRequest {
             status: "succeeded".to_string(),
             check_result: None,
+            cost_usd_micros: None,
         },
     )
     .await;
@@ -565,6 +633,7 @@ async fn close_teardown_failure_is_retryable_not_terminalized() {
         &CloseRequest {
             status: "succeeded".to_string(),
             check_result: None,
+            cost_usd_micros: None,
         },
     )
     .await;
@@ -597,6 +666,7 @@ async fn close_teardown_failure_is_retryable_not_terminalized() {
         &CloseRequest {
             status: "succeeded".to_string(),
             check_result: None,
+            cost_usd_micros: None,
         },
     )
     .await;
@@ -636,6 +706,7 @@ async fn close_teardown_success_path_unchanged() {
         &CloseRequest {
             status: "succeeded".to_string(),
             check_result: None,
+            cost_usd_micros: None,
         },
     )
     .await;
@@ -691,6 +762,7 @@ async fn close_exactly_once_preserved_across_teardown_retry() {
         &CloseRequest {
             status: "succeeded".to_string(),
             check_result: None,
+            cost_usd_micros: None,
         },
     )
     .await;
@@ -710,6 +782,7 @@ async fn close_exactly_once_preserved_across_teardown_retry() {
         &CloseRequest {
             status: "succeeded".to_string(),
             check_result: None,
+            cost_usd_micros: None,
         },
     )
     .await;
@@ -735,6 +808,7 @@ async fn close_exactly_once_preserved_across_teardown_retry() {
         &CloseRequest {
             status: "succeeded".to_string(),
             check_result: None,
+            cost_usd_micros: None,
         },
     )
     .await;

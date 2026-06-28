@@ -338,6 +338,20 @@ pub struct CloseRequest {
     /// back in the SAME [`CloseResponse`] that carries the metrics — the
     /// §13.1 atomic same-step delivery at mechanism level.
     pub check_result: Option<CheckResult>,
+
+    /// The PROVIDER-billed total cost of the lease's work, in USD micro-dollars
+    /// (`u64`; 1_000_000 == $1). The owner's 2026-06-27 re-decision (#64): cost
+    /// is the provider's REAL billed figure (read from the provider's `/usage`
+    /// by the caller), which the fabric **records** verbatim into
+    /// [`CloseResponse::metrics`]`.cost_usd_micros` — it never recomputes or
+    /// price-cards it. Additive + `#[serde(default)]`: absent (older callers /
+    /// non-agent jobs) ⇒ the honest-zero derived floor is kept, byte-identical
+    /// to today. It rides the same atomic close payload as the §13.1 metrics
+    /// (the token counts), in the same trust position as those counts — the
+    /// result-binding signature (`result_binding_sig_v2`) covers the
+    /// `CheckResult`, not the usage metrics.
+    #[serde(default)]
+    pub cost_usd_micros: Option<u64>,
 }
 
 /// `POST /v1/leases/{lease_id}/close` response body (ENV2 amendment to the

@@ -572,6 +572,7 @@ async fn acquire_scoped_ingest_poll_close_attested_envelope_end_to_end() {
     let close_req = CloseRequest {
         status: "succeeded".to_string(),
         check_result: Some(sample_check_result()),
+        cost_usd_micros: None,
     };
     let close_path = lease_path(paths::LEASE_CLOSE, &lease_id);
     let resp = h
@@ -713,6 +714,7 @@ async fn close_without_ack_is_fail_closed_capture_incomplete_metrics_still_refle
             serde_json::to_string(&CloseRequest {
                 status: "succeeded".to_string(),
                 check_result: None,
+                cost_usd_micros: None,
             })
             .unwrap(),
         ))
