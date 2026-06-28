@@ -452,6 +452,7 @@ mod tests {
             introspect_url: url.to_string(),
             service_secret: secret.to_string(),
             timeout: Duration::from_secs(2),
+            retry_backoff: Duration::ZERO,
         }
     }
 

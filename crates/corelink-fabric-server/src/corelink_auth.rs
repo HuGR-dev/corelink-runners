@@ -162,6 +162,13 @@ pub struct CoreLinkAuthConfig {
     pub service_secret: String,
     /// Per-call HTTP timeout.  A hung backend surfaces as `Unreachable`.
     pub timeout: Duration,
+    /// Backoff slept between introspect retries on a TRANSIENT failure (a
+    /// transport error — the classic cold-egress blip on a freshly-woken
+    /// Cloudflare container — or a 503 mid-redeploy). `Duration::ZERO` disables
+    /// the wait (used in tests); production sets a small value so a single
+    /// cold-start blip cannot 503 an otherwise-valid acquire. See
+    /// [`CoreLinkTokenStore::tenant_of`].
+    pub retry_backoff: Duration,
 }
 
 /// Manual redacting Debug — `service_secret` must NEVER appear in log lines,
@@ -173,6 +180,7 @@ impl std::fmt::Debug for CoreLinkAuthConfig {
             .field("introspect_url", &self.introspect_url)
             .field("service_secret", &"***REDACTED***")
             .field("timeout", &self.timeout)
+            .field("retry_backoff", &self.retry_backoff)
             .finish()
     }
 }
@@ -188,10 +196,48 @@ pub struct CoreLinkTokenStore<H: IntrospectHttp> {
     cfg: CoreLinkAuthConfig,
 }
 
+/// Bounded number of introspect attempts on TRANSIENT failure (1 initial + 2
+/// retries). A freshly-woken Cloudflare container's first outbound introspect
+/// can fail on cold egress (DNS/connection not yet ready); the cost-killer's
+/// `pr land --dispatch` is single-shot, so one cold blip must not 503 an
+/// otherwise-valid acquire. Cold-egress fails FAST, so the real recovery is
+/// sub-second; a genuinely-down backend still fails closed within the bound.
+const INTROSPECT_ATTEMPTS: u32 = 3;
+
+/// Production default for [`CoreLinkAuthConfig::retry_backoff`] — the wait slept
+/// between introspect retries on a transient failure. Small (cold egress fails
+/// fast + recovers within a beat), so the worst-case added latency on a cold
+/// start is ~2 × this; warm acquires (the 200-first path) never sleep.
+pub const DEFAULT_INTROSPECT_RETRY_BACKOFF: Duration = Duration::from_millis(250);
+
 impl<H: IntrospectHttp> CoreLinkTokenStore<H> {
     /// Construct the store from a transport and a config.
     pub fn new(http: H, cfg: CoreLinkAuthConfig) -> Self {
         Self { http, cfg }
+    }
+
+    /// Parse an AUTHORITATIVE 200 introspection body into a tenant decision.
+    /// A malformed authoritative 200 is fail-closed (`Unreachable`), never a
+    /// silent `Ok(None)` (which would 401 a legitimate tenant). `valid:false`
+    /// is the authoritative "unknown token" → `Ok(None)`.
+    fn parse_introspect_200(body: &str) -> Result<Option<TenantId>, TokenStoreError> {
+        let v: serde_json::Value =
+            serde_json::from_str(body).map_err(|_| TokenStoreError::Unreachable)?;
+        let valid = v
+            .get("valid")
+            .and_then(|f| f.as_bool())
+            .ok_or(TokenStoreError::Unreachable)?;
+        if !valid {
+            return Ok(None);
+        }
+        let tenant_id_str = v
+            .get("tenant_id")
+            .and_then(|f| f.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or(TokenStoreError::Unreachable)?;
+        TenantId::new(tenant_id_str)
+            .map(Some)
+            .map_err(|_| TokenStoreError::Unreachable)
     }
 }
 
@@ -201,51 +247,36 @@ impl<H: IntrospectHttp> TokenStore for CoreLinkTokenStore<H> {
         // header.  Do NOT include the secret or the token in any error/log path.
         let body = serde_json::json!({ "token": token }).to_string();
 
-        // Transport: a network error is fail-closed Unreachable.
-        let resp = self
-            .http
-            .post(&self.cfg.introspect_url, &self.cfg.service_secret, &body)
-            .map_err(|_| TokenStoreError::Unreachable)?;
-
-        match resp.status {
-            200 => {
-                // Parse the body — a malformed authoritative 200 is fail-closed
-                // (Unreachable), not a silent Ok(None) which would 401 a legitimate
-                // tenant under a transient backend glitch.
-                let v: serde_json::Value =
-                    serde_json::from_str(&resp.body).map_err(|_| TokenStoreError::Unreachable)?;
-
-                // The `valid` field MUST be present and a bool.  Absent or
-                // non-bool → fail-closed (can't determine intent).
-                let valid = v
-                    .get("valid")
-                    .and_then(|f| f.as_bool())
-                    .ok_or(TokenStoreError::Unreachable)?;
-
-                if valid {
-                    // valid:true — tenant_id is REQUIRED.  Missing, empty, or
-                    // ill-shaped → fail-closed.  Never Ok(Some) on doubt.
-                    let tenant_id_str = v
-                        .get("tenant_id")
-                        .and_then(|f| f.as_str())
-                        .filter(|s| !s.is_empty())
-                        .ok_or(TokenStoreError::Unreachable)?;
-
-                    TenantId::new(tenant_id_str)
-                        .map(Some)
-                        .map_err(|_| TokenStoreError::Unreachable)
-                } else {
-                    // valid:false — authoritative "unknown token" response.
-                    Ok(None)
-                }
+        // Bounded retry on TRANSIENT unavailability ONLY. AUTHORITATIVE responses
+        // are returned IMMEDIATELY and NEVER retried: a 200 (a real answer, incl.
+        // `valid:false` = unknown token) and any non-200/non-503 (401 = wrong
+        // service secret, other 4xx/5xx) won't change on retry — retrying them
+        // would only delay a deterministic outcome. Only a transport error
+        // (cold egress) or a 503 (backend signals transient-unavailable) is
+        // retried, since THAT is the cold-start blip that must not fail closed.
+        for attempt in 0..INTROSPECT_ATTEMPTS {
+            match self
+                .http
+                .post(&self.cfg.introspect_url, &self.cfg.service_secret, &body)
+            {
+                // Authoritative 200 — return the parsed decision, no retry.
+                Ok(resp) if resp.status == 200 => return Self::parse_introspect_200(&resp.body),
+                // 503 — transient backend unavailability → retry.
+                Ok(resp) if resp.status == 503 => {}
+                // ANY other status (401/other 4xx/5xx/unexpected 2xx) is
+                // authoritative-or-misconfig → fail closed immediately (no retry).
+                Ok(_) => return Err(TokenStoreError::Unreachable),
+                // Transport error (cold egress / DNS-not-ready / refused) →
+                // transient → retry.
+                Err(_) => {}
             }
-            // CoreLink signals backend unavailable with 503.
-            503 => Err(TokenStoreError::Unreachable),
-            // ANY other status (401 = wrong service secret, other 4xx/5xx,
-            // unexpected 2xx): fail-closed.  A backend glitch must surface as
-            // 503-to-client (Unreachable), NEVER as Ok(None) which would
-            // 401 a legitimate tenant — that is an availability→authz downgrade.
-            _ => Err(TokenStoreError::Unreachable),
+            // Back off between attempts (not after the last). `Duration::ZERO`
+            // (tests) skips the wait. Cold egress recovers within a beat.
+            if attempt + 1 < INTROSPECT_ATTEMPTS && !self.cfg.retry_backoff.is_zero() {
+                std::thread::sleep(self.cfg.retry_backoff);
+            }
         }
+        // All attempts exhausted on transient failures → fail closed.
+        Err(TokenStoreError::Unreachable)
     }
 }
