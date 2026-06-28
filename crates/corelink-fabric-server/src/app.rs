@@ -1313,7 +1313,12 @@ pub fn app_full(
         .route(&capture(paths::ENVELOPE_META), get(envelope::poll_meta))
         .with_state(state)
         .layer(Extension(registry))
-        .layer(middleware::from_fn_with_state(store, auth::require_tenant));
+        .layer(middleware::from_fn_with_state(store, auth::require_tenant))
+        // input-validation (audit r2): an EXPLICIT request-body cap on the
+        // authenticated control-plane routes — small JSON bodies (acquire/exec/
+        // close), never relying on axum's 2 MiB default. Bounds memory on a
+        // malicious oversized body; 256 KiB is generous for argv/env.
+        .layer(axum::extract::DefaultBodyLimit::max(256 * 1024));
 
     // AUDIT P2 + RE-AUDIT LB-LIVENESS: the global in-flight cap + load-shedding
     // governs the REAL WORK routes (internal + ingest + authenticated), NOT

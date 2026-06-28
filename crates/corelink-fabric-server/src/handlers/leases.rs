@@ -758,7 +758,12 @@ pub(crate) async fn finalize_admitted_lease(
         // WP-7 A7b: revoke the minted PAT on this terminal provision-failure
         // path so no per-job PAT is ever leaked on a fatal error.
         state.revoke_pat_for(&lease_id).await;
-        return FinalizeOutcome::Done(fail_closed(&format!("box provisioning failed: {e:#}")));
+        // info-leak (audit r2): the detailed provider error MAY carry a bounded
+        // provider response-body excerpt (e.g. Northflank). Log it server-side, but
+        // the WIRE 503 carries ONLY a generic fail-closed message — never leak
+        // provider/internal detail to the client.
+        eprintln!("lease {lease_id}: box provisioning failed: {e:#}");
+        return FinalizeOutcome::Done(fail_closed("box provisioning failed"));
     }
 
     // ── 4. Record Pending → Held (re-acquire the ledger lock) AND emit the
@@ -1406,6 +1411,22 @@ mod tests {
             "provision failure must 503"
         );
 
+        // info-leak regression (audit r2): the 503 WIRE body carries ONLY the
+        // generic fail-closed message — never the provisioner's internal error
+        // detail (which, for a real provider, may include a response-body excerpt).
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8_lossy(&body);
+        assert!(
+            !body.contains("scripted provision failure"),
+            "503 body must NOT leak the provisioner's internal error; got: {body}"
+        );
+        assert!(
+            body.contains("box provisioning failed"),
+            "503 body must carry the generic fail-closed message; got: {body}"
+        );
+
         // No record left for the lease — the reserved Pending was removed.
         // The mint is a UUID (unknowable up front), so we prove "no record"
         // via the tenant index being empty (the cap/occupancy source of truth).
@@ -1436,6 +1457,36 @@ mod tests {
             is_lease_uuid(&torn[0]),
             "teardown_lease must be attempted on provision failure for the minted lease id, got {:?}",
             torn[0]
+        );
+    }
+
+    /// input-validation (audit r2): an oversized request body on an authenticated
+    /// control-plane route is CAPPED (413), never read unbounded. Guards the
+    /// explicit `DefaultBodyLimit` wiring against accidental removal.
+    #[tokio::test]
+    async fn acquire_oversized_body_is_capped() {
+        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
+            Arc::new(Mutex::new(InMemoryLedger::new()));
+        let state = AppState::new(
+            ledger,
+            Arc::new(plans(5)),
+            Arc::new(FixedClock(1_717_000_000_000)),
+        );
+        let router = crate::app::app(acme_token_store(), state);
+        // Body larger than the 256 KiB cap.
+        let huge = vec![b'x'; 300 * 1024];
+        let req = Request::builder()
+            .method("POST")
+            .uri(paths::LEASES)
+            .header(header::AUTHORIZATION, "Bearer pat-acme")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(huge))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "an oversized body must be capped (413), never read unbounded"
         );
     }
 
