@@ -239,9 +239,14 @@ fn parse_tier(s: &str) -> Option<PlanTier> {
 pub async fn onboard_tenant(
     State(state): State<AdminHandlerState>,
     headers: HeaderMap,
-    Json(body): Json<OnboardTenantRequest>,
+    body: axum::body::Bytes,
 ) -> Response {
-    // Default-off: no key configured → the route is invisible (404).
+    // Default-off: no key configured → the route is invisible (404). This gate +
+    // the auth check below run BEFORE body deserialization (audit r7): a
+    // `Json<T>` extractor rejects a malformed / content-type-less probe with
+    // 415/422 BEFORE this 404, which leaks that the route EXISTS (distinguishable
+    // from an absent route). Taking raw `Bytes` and parsing only AFTER auth keeps
+    // a disarmed route indistinguishable from an unmounted one for ANY probe.
     let Some(key) = state.admin_key.as_deref() else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -256,6 +261,14 @@ pub async fn onboard_tenant(
     if !secret_matches(key.as_bytes(), presented.as_bytes()) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
+
+    // Authorized — only NOW deserialize the body (malformed → 400). Parsing after
+    // the off/auth gates means an unauthorized or disarmed probe never reaches the
+    // extractor, so it can never distinguish off/wrong-key from a 400 parse error.
+    let body: OnboardTenantRequest = match serde_json::from_slice(&body) {
+        Ok(b) => b,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
 
     // Validate the tenant id. Cap the length BEFORE `TenantId::new` (audit P2):
     // even though this route is operator-key-gated, bound the input so a runaway
@@ -385,6 +398,27 @@ mod tests {
             resp.status(),
             StatusCode::NOT_FOUND,
             "no key configured → 404, not 401/403"
+        );
+    }
+
+    /// C2a-probe (audit r7): a DISARMED route is indistinguishable from an absent
+    /// one for ANY probe shape — a content-type-less / malformed-body probe must
+    /// still get 404 (not axum's 415/422 extractor rejection, which would leak
+    /// that the route exists). The off/auth gates now run before deserialization.
+    #[tokio::test]
+    async fn c2a_no_key_disarmed_route_is_404_even_for_malformed_probe() {
+        let (router, _) = make_router(None);
+        // No Content-Type header + a non-JSON body — a hostile probe.
+        let req = Request::builder()
+            .method(http::Method::POST)
+            .uri("/internal/v1/admin/tenants")
+            .body(Body::from("not json at all"))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "a disarmed admin route must 404 for ANY probe — never 415/422 (which leaks route existence)"
         );
     }
 
