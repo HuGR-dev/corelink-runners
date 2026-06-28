@@ -202,7 +202,7 @@ pub struct CoreLinkTokenStore<H: IntrospectHttp> {
 /// `pr land --dispatch` is single-shot, so one cold blip must not 503 an
 /// otherwise-valid acquire. Cold-egress fails FAST, so the real recovery is
 /// sub-second; a genuinely-down backend still fails closed within the bound.
-const INTROSPECT_ATTEMPTS: u32 = 3;
+pub(crate) const INTROSPECT_ATTEMPTS: u32 = 3;
 
 /// Production default for [`CoreLinkAuthConfig::retry_backoff`] — the wait slept
 /// between introspect retries on a transient failure. Small (cold egress fails

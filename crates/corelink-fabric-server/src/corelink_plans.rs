@@ -92,7 +92,7 @@ use corelink_fabric::compute_meter;
 use corelink_fabric::{TenantId, TenantPlan};
 
 use crate::app::{PlanSource, PlanSourceError};
-use crate::corelink_auth::{CoreLinkAuthConfig, IntrospectHttp};
+use crate::corelink_auth::{CoreLinkAuthConfig, INTROSPECT_ATTEMPTS, IntrospectHttp};
 
 /// The per-minute rate multiplier applied to `max_concurrency` when the
 /// introspect body carries no explicit `rate_ceiling_per_min`. corelink-server's
@@ -246,95 +246,124 @@ impl<H: IntrospectHttp> PlanSource for CoreLinkPlanStore<H> {
         // include the secret or the token in any error/log path.
         let body = serde_json::json!({ "token": token }).to_string();
 
-        // Transport: a network error is fail-closed Unreachable.
-        let resp = self
-            .http
-            .post(&self.cfg.introspect_url, &self.cfg.service_secret, &body)
-            .map_err(|_| PlanSourceError::Unreachable)?;
-
-        match resp.status {
-            200 => {
-                // A malformed authoritative 200 is fail-closed (Unreachable),
-                // not a silent Ok(None) — a transient glitch must not 0-slot a
-                // legitimate tenant.
-                let v: serde_json::Value =
-                    serde_json::from_str(&resp.body).map_err(|_| PlanSourceError::Unreachable)?;
-
-                // `valid` MUST be present and a bool — absent/non-bool is a
-                // can't-determine-intent fail-closed.
-                let valid = v
-                    .get("valid")
-                    .and_then(|f| f.as_bool())
-                    .ok_or(PlanSourceError::Unreachable)?;
-
-                if !valid {
-                    // Authoritative "no plan" answer — evict any stale cached plan
-                    // (a revoke takes effect on the token-free read).
-                    self.evict_plan(tenant);
-                    return Ok(None);
-                }
-
-                // valid:true — the tenant's self-serve entitlement. Resolve the
-                // OPTIONAL vCPU-h ceiling NOW (tolerant: absent/garbage → 0,
-                // disabled) and CACHE it per tenant so the token-free
-                // `tenant_ceiling_vcpu_ms` (called next on the acquire path) can
-                // read it back. Cache on every valid resolve — including the
-                // uncapped path below — so a removed ceiling (downgrade) takes
-                // effect, and a tenant never resolved leaves the disabled `0`.
-                let ceiling_vcpu_ms = parse_max_vcpu_h_ceiling_ms(&v);
-                self.ceilings
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .insert(tenant.clone(), ceiling_vcpu_ms);
-
-                // `plan` (the cache tier): an OPTIONAL display label. `TenantPlan`
-                // carries no tier field at M1, so it is IGNORED (per the self-serve
-                // contract — carry only if a tier field exists). Left unparsed.
-
-                // The cap is OPTIONAL: absent or non-u64 is the
-                // authenticated-but-uncapped state → Ok(None) (an over-cap
-                // reject), NOT a 503.
-                let Some(max_concurrency) = v
-                    .get("max_concurrency")
-                    .and_then(serde_json::Value::as_u64)
-                    .and_then(|n| u32::try_from(n).ok())
-                else {
-                    // Authenticated-but-uncapped — evict any stale cached plan so a
-                    // downgrade (cap removed) takes effect on the token-free read.
-                    self.evict_plan(tenant);
-                    return Ok(None);
-                };
-
-                // rate_ceiling_per_min: use the body's value if present + u32;
-                // else derive max_concurrency * 10 (M1 placeholder).
-                let rate_ceiling_per_min = v
-                    .get("rate_ceiling_per_min")
-                    .and_then(serde_json::Value::as_u64)
-                    .and_then(|n| u32::try_from(n).ok())
-                    .unwrap_or_else(|| max_concurrency.saturating_mul(DERIVED_RATE_MULTIPLIER));
-
-                // Use the PASSED tenant — auth already resolved it
-                // authoritatively; do not re-parse tenant_id for the plan.
-                let plan = TenantPlan {
-                    tenant: tenant.clone(),
-                    max_concurrency,
-                    rate_ceiling_per_min,
-                };
-                // CACHE the resolved plan so the TOKEN-FREE `plan_of` (dashboard
-                // cap + queue-mode pre-filter) reflects the live cap.
-                self.plans
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .insert(tenant.clone(), plan.clone());
-                Ok(Some(plan))
+        // Bounded retry on TRANSIENT unavailability ONLY (cold egress / 503),
+        // MIRRORING CoreLinkTokenStore::tenant_of (#204). The acquire path does
+        // BOTH the auth introspect (token store, retried) AND this plan introspect;
+        // without the same retry here, a cold-start egress blip that auth survives
+        // would 503 the acquire on the plan call's single attempt — the
+        // endpoint-specific `/v1/leases` cold 503 (`/readyz`, which only auths,
+        // recovered; `/v1/leases`, which also resolves the plan, did not).
+        // AUTHORITATIVE responses (200, 401/other) return immediately — never
+        // retried — so a wrong secret or a real answer is never delayed and the
+        // fail-closed posture holds (a genuinely-down backend still 503s within
+        // the bound).
+        for attempt in 0..INTROSPECT_ATTEMPTS {
+            match self
+                .http
+                .post(&self.cfg.introspect_url, &self.cfg.service_secret, &body)
+            {
+                // Authoritative 200 — parse + return, no retry.
+                Ok(resp) if resp.status == 200 => return self.parse_plan_200(tenant, &resp.body),
+                // 503 — transient backend unavailability → retry.
+                Ok(resp) if resp.status == 503 => {}
+                // ANY other status (401 = wrong service secret, other 4xx/5xx,
+                // unexpected 2xx): authoritative-or-misconfig → fail closed now.
+                Ok(_) => return Err(PlanSourceError::Unreachable),
+                // Transport error (cold egress / DNS-not-ready / refused) → retry.
+                Err(_) => {}
             }
-            // CoreLink signals backend unavailable with 503.
-            503 => Err(PlanSourceError::Unreachable),
-            // ANY other status (401 = wrong service secret, other 4xx/5xx,
-            // unexpected 2xx): fail-closed. A backend glitch surfaces as 503
-            // (Unreachable), NEVER a false no-plan reject.
-            _ => Err(PlanSourceError::Unreachable),
+            if attempt + 1 < INTROSPECT_ATTEMPTS && !self.cfg.retry_backoff.is_zero() {
+                std::thread::sleep(self.cfg.retry_backoff);
+            }
         }
+        // All attempts exhausted on transient failures → fail closed.
+        Err(PlanSourceError::Unreachable)
+    }
+}
+
+impl<H: IntrospectHttp> CoreLinkPlanStore<H> {
+    /// Parse an authoritative `200` introspect body into a plan decision.
+    /// `Ok(None)` = authenticated-but-uncapped / `valid:false` (an over-cap
+    /// reject, NOT a 503); a malformed 200 is fail-closed `Unreachable` (never a
+    /// silent no-plan that would 0-slot a legitimate tenant).
+    fn parse_plan_200(
+        &self,
+        tenant: &TenantId,
+        body: &str,
+    ) -> Result<Option<TenantPlan>, PlanSourceError> {
+        // A malformed authoritative 200 is fail-closed (Unreachable),
+        // not a silent Ok(None) — a transient glitch must not 0-slot a
+        // legitimate tenant.
+        let v: serde_json::Value =
+            serde_json::from_str(body).map_err(|_| PlanSourceError::Unreachable)?;
+
+        // `valid` MUST be present and a bool — absent/non-bool is a
+        // can't-determine-intent fail-closed.
+        let valid = v
+            .get("valid")
+            .and_then(|f| f.as_bool())
+            .ok_or(PlanSourceError::Unreachable)?;
+
+        if !valid {
+            // Authoritative "no plan" answer — evict any stale cached plan
+            // (a revoke takes effect on the token-free read).
+            self.evict_plan(tenant);
+            return Ok(None);
+        }
+
+        // valid:true — the tenant's self-serve entitlement. Resolve the
+        // OPTIONAL vCPU-h ceiling NOW (tolerant: absent/garbage → 0,
+        // disabled) and CACHE it per tenant so the token-free
+        // `tenant_ceiling_vcpu_ms` (called next on the acquire path) can
+        // read it back. Cache on every valid resolve — including the
+        // uncapped path below — so a removed ceiling (downgrade) takes
+        // effect, and a tenant never resolved leaves the disabled `0`.
+        let ceiling_vcpu_ms = parse_max_vcpu_h_ceiling_ms(&v);
+        self.ceilings
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(tenant.clone(), ceiling_vcpu_ms);
+
+        // `plan` (the cache tier): an OPTIONAL display label. `TenantPlan`
+        // carries no tier field at M1, so it is IGNORED (per the self-serve
+        // contract — carry only if a tier field exists). Left unparsed.
+
+        // The cap is OPTIONAL: absent or non-u64 is the
+        // authenticated-but-uncapped state → Ok(None) (an over-cap
+        // reject), NOT a 503.
+        let Some(max_concurrency) = v
+            .get("max_concurrency")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok())
+        else {
+            // Authenticated-but-uncapped — evict any stale cached plan so a
+            // downgrade (cap removed) takes effect on the token-free read.
+            self.evict_plan(tenant);
+            return Ok(None);
+        };
+
+        // rate_ceiling_per_min: use the body's value if present + u32;
+        // else derive max_concurrency * 10 (M1 placeholder).
+        let rate_ceiling_per_min = v
+            .get("rate_ceiling_per_min")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok())
+            .unwrap_or_else(|| max_concurrency.saturating_mul(DERIVED_RATE_MULTIPLIER));
+
+        // Use the PASSED tenant — auth already resolved it
+        // authoritatively; do not re-parse tenant_id for the plan.
+        let plan = TenantPlan {
+            tenant: tenant.clone(),
+            max_concurrency,
+            rate_ceiling_per_min,
+        };
+        // CACHE the resolved plan so the TOKEN-FREE `plan_of` (dashboard
+        // cap + queue-mode pre-filter) reflects the live cap.
+        self.plans
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(tenant.clone(), plan.clone());
+        Ok(Some(plan))
     }
 }
 
@@ -476,6 +505,41 @@ mod tests {
         assert_eq!(plan.tenant, tenant(), "tenant must be the passed tenant");
         assert_eq!(plan.max_concurrency, 7);
         assert_eq!(plan.rate_ceiling_per_min, 70, "derived ×10 when absent");
+    }
+
+    // ── bounded retry on TRANSIENT plan-introspect failure (#204 parity) ──────
+
+    /// A transient 503 on the plan introspect is RETRIED and recovers to an admit
+    /// — parity with the auth token store's #204 cold-start retry. Without this,
+    /// the acquire's plan call 503'd on a cold-egress blip while `/readyz`'s
+    /// auth-only call recovered (the endpoint-specific `/v1/leases` 503).
+    #[test]
+    fn plan_retries_transient_503_then_admits() {
+        let store = CoreLinkPlanStore::new(
+            SeqIntrospect::new(&[(503, ""), (200, r#"{"valid":true,"max_concurrency":5}"#)]),
+            cfg("https://x/i", "s3cr3t"),
+        );
+        let plan = store
+            .plan_of_resolving(&tenant(), "pat-acme")
+            .expect("a transient 503 must be retried, not fail-closed")
+            .expect("the retry recovers to a capped plan");
+        assert_eq!(plan.max_concurrency, 5);
+    }
+
+    /// An authoritative 401 (wrong service secret) is NEVER retried — it fails
+    /// closed immediately. If it were wrongly retried, the queued 200 would admit;
+    /// asserting `Unreachable` proves the 401 short-circuits the loop.
+    #[test]
+    fn plan_does_not_retry_authoritative_401() {
+        let store = CoreLinkPlanStore::new(
+            SeqIntrospect::new(&[(401, ""), (200, r#"{"valid":true,"max_concurrency":5}"#)]),
+            cfg("https://x/i", "s3cr3t"),
+        );
+        let res = store.plan_of_resolving(&tenant(), "pat-acme");
+        assert!(
+            matches!(res, Err(PlanSourceError::Unreachable)),
+            "a 401 must fail closed immediately (never retried into the queued 200); got {res:?}"
+        );
     }
 
     // ── token-free plan cache (WP-PLAN-CACHE; live-smoke finding 2026-06-22) ──
