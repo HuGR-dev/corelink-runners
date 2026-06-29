@@ -279,10 +279,34 @@ impl<H: IntrospectHttp> TokenStore for CoreLinkTokenStore<H> {
                 Ok(resp) if resp.status == 503 => {}
                 // ANY other status (401/other 4xx/5xx/unexpected 2xx) is
                 // authoritative-or-misconfig → fail closed immediately (no retry).
-                Ok(_) => return Err(TokenStoreError::Unreachable),
+                Ok(resp) => {
+                    // OBSERVABILITY (symmetry with `plan_of_resolving`): `/readyz`
+                    // and `/v1/leases` both run THIS auth introspect; when both
+                    // 503 "token store unreachable" on a deploy whose binary is
+                    // unchanged, the cause is the endpoint/env/store, and this
+                    // status is the diagnosis (401 = wrong/absent service secret,
+                    // 400 = body rejected, other = endpoint misconfig). Surface
+                    // it. The token + service-secret are NEVER logged.
+                    eprintln!(
+                        "corelink AUTH introspect: authoritative non-200/503 HTTP {} \
+                         on attempt {}/{INTROSPECT_ATTEMPTS} → fail-closed (token store unreachable)",
+                        resp.status,
+                        attempt + 1
+                    );
+                    return Err(TokenStoreError::Unreachable);
+                }
                 // Transport error (cold egress / DNS-not-ready / refused) →
-                // transient → retry.
-                Err(_) => {}
+                // transient → retry. Log the cause (anyhow chain — header values,
+                // thus the secret, are never part of a ureq transport error) so a
+                // persistent unreachable endpoint (wrong URL / down store / no
+                // egress) names itself instead of an opaque 503.
+                Err(e) => {
+                    eprintln!(
+                        "corelink AUTH introspect: transport error on attempt \
+                         {}/{INTROSPECT_ATTEMPTS}: {e:#} → retrying",
+                        attempt + 1
+                    );
+                }
             }
             // Back off between attempts (not after the last). `Duration::ZERO`
             // (tests) skips the wait. Cold egress recovers within a beat.
@@ -291,6 +315,10 @@ impl<H: IntrospectHttp> TokenStore for CoreLinkTokenStore<H> {
             }
         }
         // All attempts exhausted on transient failures → fail closed.
+        eprintln!(
+            "corelink AUTH introspect: exhausted {INTROSPECT_ATTEMPTS} attempts on transient \
+             failures → fail-closed (token store unreachable; both /readyz and /v1/leases 503)"
+        );
         Err(TokenStoreError::Unreachable)
     }
 }
