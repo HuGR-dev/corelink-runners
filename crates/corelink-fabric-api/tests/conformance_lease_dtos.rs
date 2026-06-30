@@ -29,6 +29,17 @@
 //! - `CloseResponse` — non-zero `metrics`, a `check_result`, non-empty
 //!   `attestation` + both result-binding sigs + `fabric_key_id`.
 //!
+//! ## Scope: these pin the wire SHAPE, not a verifiable signature
+//!
+//! The `attestation.sig` / `result_binding_sig` / `result_binding_sig_v2` values
+//! in `CloseResponse.json` are **illustrative base64 placeholders** — these
+//! vectors freeze the DTO wire shape (field names, types, nesting, serde
+//! behavior), which is what the lease-client transcribes. They are NOT
+//! cryptographically valid signatures and MUST NOT be verified as such.
+//! Reproducible dev-key signature verification is covered separately by
+//! `conformance/result_binding_v2.json` (the API crate depends only on
+//! `corelink-runners-contracts` + serde — no signer is available here).
+//!
 //! ## Regenerating
 //!
 //! On a mismatch, re-run with `PRINT_VECTORS=1` and copy the printed block into
