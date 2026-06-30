@@ -10,7 +10,7 @@ publish = false
 
 [workspace.dependencies]
 # Error handling — exact-pinned (transplanted runner core; scout dep budget)
-anyhow     = "=1.0.102"
+anyhow     = "=1.0.103"
 # Serialization — exact-pinned matching hugit-contracts (wire-contract conformance)
 serde      = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.150"
