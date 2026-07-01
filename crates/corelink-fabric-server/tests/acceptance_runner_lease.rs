@@ -93,13 +93,26 @@ async fn body_vec(resp: Response) -> Vec<u8> {
 
 /// Build the axum router + ledger + the capturing provisioner. `broker = Some`
 /// arms runner mode; `None` leaves it default-off.
-fn harness(
-    broker: Option<Arc<dyn RunnerRegistrationBroker>>,
-) -> (
+type HarnessOut = (
     axum::Router,
     Arc<Mutex<dyn LeaseLedger + Send>>,
     Arc<CapturingProvisioner>,
-) {
+);
+
+fn harness(broker: Option<Arc<dyn RunnerRegistrationBroker>>) -> HarnessOut {
+    // Track-C C1: the acme tenant is allowlisted for its OWN repo by default, so
+    // the happy-path runner acquires (target humangr-labs/corelink-runners) pass.
+    harness_allow(
+        broker,
+        vec!["repo:humangr-labs/corelink-runners".to_string()],
+    )
+}
+
+/// Track-C C1: the runner harness with an explicit tenant `repo_allowlist`.
+fn harness_allow(
+    broker: Option<Arc<dyn RunnerRegistrationBroker>>,
+    repo_allowlist: Vec<String>,
+) -> HarnessOut {
     let store = Arc::new(StaticTokenStore::new([(
         "pat-acme".to_string(),
         TenantId::new("acme").unwrap(),
@@ -108,6 +121,7 @@ fn harness(
         tenant: TenantId::new("acme").unwrap(),
         max_concurrency: 4,
         rate_ceiling_per_min: 100,
+        repo_allowlist,
     }]);
     let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
     let cap = Arc::new(CapturingProvisioner::default());
@@ -374,5 +388,107 @@ async fn runner_mint_failure_fails_closed_and_frees_the_slot() {
             .unwrap()
             .is_empty(),
         "the reserved slot must be freed on mint failure (no leaked Pending)"
+    );
+}
+
+// ── 3. Track-C C1: RunnerScope → tenant repo_allowlist (fail-closed) ──────────
+
+/// A runner acquire body targeting an arbitrary repo.
+fn runner_acq_body_target(owner: &str, repo: &str) -> AcquireRequest {
+    AcquireRequest {
+        image_digest: PINNED_IMAGE.to_string(),
+        net_policy: "ignored".to_string(),
+        tmp_root: "/work/tmp".to_string(),
+        expiry_ms: 600_000,
+        runner: Some(RunnerSpec {
+            target: RunnerTargetDto::Repo {
+                owner: owner.to_string(),
+                repo: repo.to_string(),
+            },
+            labels: vec!["corelink".to_string()],
+        }),
+        toolchain_digest: None,
+    }
+}
+
+/// C1: a valid-PAT tenant CANNOT mint a runner on a repo outside its allowlist —
+/// the cross-tenant probe is denied 400 and reserves/mints NOTHING.
+#[tokio::test]
+async fn runner_acquire_denied_when_target_not_in_tenant_allowlist() {
+    let broker: Arc<dyn RunnerRegistrationBroker> = Arc::new(MockBroker::new());
+    let (router, ledger, cap) = harness(Some(broker)); // acme allowlisted for its OWN repo only
+    // Target a DIFFERENT tenant's repo — valid PAT + wired broker, but not allowlisted.
+    let resp = acquire(
+        &router,
+        &runner_acq_body_target("victim-org", "victim-repo"),
+    )
+    .await;
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "a runner acquire whose target is not on the tenant allowlist must be denied"
+    );
+    assert!(
+        ledger
+            .lock()
+            .unwrap()
+            .by_tenant(&TenantId::new("acme").unwrap())
+            .unwrap()
+            .is_empty(),
+        "a denied cross-tenant runner acquire must reserve no slot"
+    );
+    assert!(
+        cap.captured().is_empty(),
+        "a denied cross-tenant runner acquire must mint/provision nothing"
+    );
+}
+
+/// C1: an EMPTY allowlist admits NO runner lease at all (the safe default) —
+/// even a well-formed acquire targeting the tenant's own repo, with a wired broker.
+#[tokio::test]
+async fn empty_allowlist_denies_all_runner_acquires() {
+    let broker: Arc<dyn RunnerRegistrationBroker> = Arc::new(MockBroker::new());
+    let (router, ledger, cap) = harness_allow(Some(broker), Vec::new());
+    let resp = acquire(&router, &runner_acq_body()).await;
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "empty allowlist must deny all runner acquires (fail-closed)"
+    );
+    assert!(
+        ledger
+            .lock()
+            .unwrap()
+            .by_tenant(&TenantId::new("acme").unwrap())
+            .unwrap()
+            .is_empty()
+    );
+    assert!(cap.captured().is_empty());
+}
+
+/// C1: the allowlist match is CASE-INSENSITIVE — a mixed-case target that
+/// canonicalizes to an allowlisted entry is permitted (GitHub logins are
+/// case-insensitive), so casing can neither bypass nor falsely block the gate.
+#[tokio::test]
+async fn runner_allowlist_match_is_case_insensitive() {
+    let broker: Arc<dyn RunnerRegistrationBroker> = Arc::new(MockBroker::new());
+    let (router, _ledger, cap) = harness(Some(broker)); // allowlist: repo:humangr-labs/corelink-runners
+    let resp = acquire(
+        &router,
+        &runner_acq_body_target("HumanGR-Labs", "CoreLink-Runners"),
+    )
+    .await;
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a case-variant of an allowlisted target must be permitted"
+    );
+    assert_eq!(
+        cap.captured().len(),
+        1,
+        "the permitted runner acquire provisions exactly one box"
     );
 }

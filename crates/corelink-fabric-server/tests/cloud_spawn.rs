@@ -487,6 +487,7 @@ fn harness_with_provisioner(
         tenant: TenantId::new("acme").unwrap(),
         max_concurrency: 4,
         rate_ceiling_per_min: 100,
+        repo_allowlist: Vec::new(),
     }]);
     let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
     let clock = Arc::new(FixedClock(Arc::new(AtomicU64::new(1_717_000_000_000))));
@@ -885,6 +886,7 @@ async fn http_exec_on_unbound_lease_503() {
         tenant: TenantId::new("acme").unwrap(),
         max_concurrency: 4,
         rate_ceiling_per_min: 100,
+        repo_allowlist: Vec::new(),
     }]);
     let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
     let clock = Arc::new(FixedClock(Arc::new(AtomicU64::new(1_717_000_000_000))));
@@ -959,6 +961,7 @@ async fn http_split_registry_exec_503() {
         tenant: TenantId::new("acme").unwrap(),
         max_concurrency: 4,
         rate_ceiling_per_min: 100,
+        repo_allowlist: Vec::new(),
     }]);
     let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
     let clock = Arc::new(FixedClock(Arc::new(AtomicU64::new(1_717_000_000_000))));
@@ -1061,6 +1064,7 @@ async fn http_orphan_teardown_on_post_provision_failure() {
         tenant: TenantId::new("acme").unwrap(),
         max_concurrency: 4,
         rate_ceiling_per_min: 100,
+        repo_allowlist: Vec::new(),
     }]);
     let clock = Arc::new(FixedClock(Arc::new(AtomicU64::new(1_717_000_000_000))));
     let mut state = AppState::new(ledger.clone(), Arc::new(plans), clock);

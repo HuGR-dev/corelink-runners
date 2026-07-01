@@ -42,6 +42,7 @@ fn harness(cap_acme: Option<u32>, cap_beta: Option<u32>) -> Router {
             tenant: acme(),
             max_concurrency: cap,
             rate_ceiling_per_min: 100,
+            repo_allowlist: Vec::new(),
         });
     }
     if let Some(cap) = cap_beta {
@@ -50,6 +51,7 @@ fn harness(cap_acme: Option<u32>, cap_beta: Option<u32>) -> Router {
             tenant: tid("beta"),
             max_concurrency: cap,
             rate_ceiling_per_min: 100,
+            repo_allowlist: Vec::new(),
         });
     }
     let store = Arc::new(StaticTokenStore::new(pats));

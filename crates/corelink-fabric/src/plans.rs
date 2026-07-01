@@ -174,6 +174,7 @@ impl PlanRegistry {
             tenant: tenant.clone(),
             max_concurrency,
             rate_ceiling_per_min,
+            repo_allowlist: Vec::new(),
         }
     }
 

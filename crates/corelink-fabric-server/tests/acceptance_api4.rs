@@ -66,16 +66,19 @@ fn harness(reply: CmdOutput) -> Harness {
             tenant: TenantId::new("acme").unwrap(),
             max_concurrency: 4,
             rate_ceiling_per_min: 100,
+            repo_allowlist: Vec::new(),
         },
         TenantPlan {
             tenant: TenantId::new("bigco").unwrap(),
             max_concurrency: 4,
             rate_ceiling_per_min: 100,
+            repo_allowlist: Vec::new(),
         },
         TenantPlan {
             tenant: TenantId::new("smallco").unwrap(),
             max_concurrency: 1,
             rate_ceiling_per_min: 100,
+            repo_allowlist: Vec::new(),
         },
     ]);
     let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
@@ -371,6 +374,7 @@ async fn trigger_on_lease_terminalized_mid_exec_is_fail_closed_never_attested() 
         tenant: TenantId::new("acme").unwrap(),
         max_concurrency: 4,
         rate_ceiling_per_min: 100,
+        repo_allowlist: Vec::new(),
     }]);
     let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
     let racing = Arc::new(RacingExec {

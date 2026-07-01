@@ -40,6 +40,7 @@ fn harness(max_concurrency: u32, key: Option<&str>) -> (Router, AppState) {
         tenant: acme(),
         max_concurrency,
         rate_ceiling_per_min: 100,
+        repo_allowlist: Vec::new(),
     }]);
     let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
     let state = AppState::new(

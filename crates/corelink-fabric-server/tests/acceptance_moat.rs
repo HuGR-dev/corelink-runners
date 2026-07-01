@@ -125,6 +125,7 @@ fn harness_with_moat(
         tenant: acme(),
         max_concurrency: 4,
         rate_ceiling_per_min: 100,
+        repo_allowlist: vec!["repo:humangr-labs/corelink-runners".to_string()],
     }]);
     let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
     let cap = Arc::new(CapturingProvisioner::default());

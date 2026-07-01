@@ -344,6 +344,32 @@ pub(crate) async fn acquire(
         }
     };
 
+    // ── 1a. RUNNER TARGET AUTHORIZATION (Track-C C1, fail-closed). A runner
+    // lease mints a JIT GitHub-Actions runner + per-job CAS creds SCOPED TO the
+    // requested repo/org (`finalize_admitted_lease` → `runner_scope_from_dto`).
+    // Without this gate a valid-PAT tenant could target ANY repo the shared
+    // GitHub App is installed on — minting a runner + creds on another tenant's
+    // repo (cross-tenant, ADR-0007). Bind the target to the caller's tenant:
+    // the requested target MUST be on the tenant's `repo_allowlist` (resolved
+    // WITH the plan above). FAIL-CLOSED — an empty allowlist admits NO runner
+    // lease; a target not on it → 400 with a GENERIC message (no existence
+    // oracle: the response is identical whether the repo is another tenant's or
+    // does not exist). Runs BEFORE the slot reserve and BEFORE any mint /
+    // provision, so a denied runner acquire consumes nothing.
+    if let Some(runner) = req.runner.as_ref() {
+        let target = runner_scope_from_dto(runner).target.canonical();
+        let permitted = plan
+            .repo_allowlist
+            .iter()
+            .any(|entry| entry.trim().to_lowercase() == target);
+        if !permitted {
+            return error_response(
+                ApiError::Invalid,
+                "runner target not permitted for this tenant",
+            );
+        }
+    }
+
     // ── 1b. RATE check + ATOMIC concurrency RESERVE under the ledger lock.
     // The lock is released after this block so the (blocking) provision step
     // runs without holding a Mutex guard on the async executor.
@@ -1253,6 +1279,7 @@ mod tests {
             tenant: TenantId::new("acme").unwrap(),
             max_concurrency: cap,
             rate_ceiling_per_min: 100,
+            repo_allowlist: Vec::new(),
         }])
     }
 

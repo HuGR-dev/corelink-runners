@@ -53,6 +53,7 @@ fn plan_1() -> TenantPlan {
         tenant: acme(),
         max_concurrency: 1,
         rate_ceiling_per_min: 10_000,
+        repo_allowlist: Vec::new(),
     }
 }
 

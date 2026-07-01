@@ -54,11 +54,13 @@ fn test_harness() -> (Router, Arc<Mutex<dyn LeaseLedger + Send>>) {
             tenant: TenantId::new("acme").unwrap(),
             max_concurrency: 2,
             rate_ceiling_per_min: 100,
+            repo_allowlist: Vec::new(),
         },
         TenantPlan {
             tenant: TenantId::new("bigco").unwrap(),
             max_concurrency: 2,
             rate_ceiling_per_min: 100,
+            repo_allowlist: Vec::new(),
         },
     ]);
     let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));

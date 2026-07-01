@@ -77,6 +77,7 @@ fn fixture() -> (CaptureHook, axum::Router) {
         tenant: tenant("acme"),
         max_concurrency: 8,
         rate_ceiling_per_min: 100,
+        repo_allowlist: Vec::new(),
     }]);
     let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
     let state = AppState::new(ledger, Arc::new(plans), Arc::new(SystemClock))
@@ -294,6 +295,7 @@ async fn cross_lease_token_is_rejected() {
         tenant: tenant("acme"),
         max_concurrency: 8,
         rate_ceiling_per_min: 100,
+        repo_allowlist: Vec::new(),
     }]);
     let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
     let state = AppState::new(ledger, Arc::new(plans), Arc::new(SystemClock))

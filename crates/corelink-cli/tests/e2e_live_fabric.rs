@@ -32,6 +32,7 @@ fn mock_app() -> axum::Router {
         tenant: TenantId::new("acme").unwrap(),
         max_concurrency: 4,
         rate_ceiling_per_min: 100,
+        repo_allowlist: Vec::new(),
     }]);
     let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
     let state = AppState::new(ledger, Arc::new(plans), Arc::new(SystemClock))

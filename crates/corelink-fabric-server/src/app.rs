@@ -1603,6 +1603,7 @@ mod tests {
             tenant: tid("acme"),
             max_concurrency: pro_cap,
             rate_ceiling_per_min: 0,
+            repo_allowlist: Vec::new(),
         }]);
         let got = plans.tenant_ceiling_vcpu_ms(&tid("acme"));
         assert_eq!(
@@ -1622,6 +1623,7 @@ mod tests {
             tenant: tid("bootstrap"),
             max_concurrency: 7, // not on the {20,40,80,160,320} ladder
             rate_ceiling_per_min: 0,
+            repo_allowlist: Vec::new(),
         }]);
         assert_eq!(
             plans.tenant_ceiling_vcpu_ms(&tid("bootstrap")),
@@ -1652,6 +1654,7 @@ mod tests {
             tenant: tid("boot"),
             max_concurrency: boot_cap,
             rate_ceiling_per_min: 0,
+            repo_allowlist: Vec::new(),
         }]));
 
         let composite = CompositePlanSource::new(live.clone(), static_plans);
@@ -1689,6 +1692,7 @@ mod tests {
             tenant: tid("bootstrap"),
             max_concurrency: 4, // not on the {20,40,80,160,320} ladder
             rate_ceiling_per_min: 0,
+            repo_allowlist: Vec::new(),
         }])
         .with_ceiling_vcpu_ms(explicit);
 
@@ -1718,6 +1722,7 @@ mod tests {
             tenant: tid("acme"),
             max_concurrency: pro_cap, // would infer ceiling_for(Pro)
             rate_ceiling_per_min: 0,
+            repo_allowlist: Vec::new(),
         }])
         .with_ceiling_vcpu_ms(explicit);
 
@@ -1738,6 +1743,7 @@ mod tests {
             tenant: tid("boot"),
             max_concurrency: starter_cap,
             rate_ceiling_per_min: 0,
+            repo_allowlist: Vec::new(),
         }])
         .with_ceiling_vcpu_ms(0); // explicitly unset
 
