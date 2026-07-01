@@ -54,6 +54,7 @@ fn harness(max_concurrency: u32) -> (Router, AppState) {
         tenant: acme(),
         max_concurrency,
         rate_ceiling_per_min: 100,
+        repo_allowlist: Vec::new(),
     }]);
     let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
     let state = AppState::new(ledger, Arc::new(plans), fixed_clock(1_717_000_000_000));
@@ -239,6 +240,7 @@ async fn failed_acquire_via_failing_provisioner_emits_no_slot() {
         tenant: acme(),
         max_concurrency: 2,
         rate_ceiling_per_min: 100,
+        repo_allowlist: Vec::new(),
     }]);
     let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
     let mut state = AppState::new(ledger, Arc::new(plans), fixed_clock(1_717_000_000_000));

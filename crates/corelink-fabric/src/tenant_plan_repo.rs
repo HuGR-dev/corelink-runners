@@ -280,6 +280,7 @@ impl TenantPlanRepository for PgTenantPlanRepository {
                             tenant,
                             max_concurrency,
                             rate_ceiling_per_min,
+                            repo_allowlist: Vec::new(),
                         },
                     ))
                 })
@@ -333,6 +334,7 @@ mod tests {
             tenant: t.clone(),
             max_concurrency,
             rate_ceiling_per_min,
+            repo_allowlist: Vec::new(),
         }
     }
 
@@ -432,6 +434,7 @@ mod tests {
                 tenant: acme.clone(),
                 max_concurrency: 8,
                 rate_ceiling_per_min: 60,
+                repo_allowlist: Vec::new(),
             };
             repo.upsert(&acme, &acme_plan).expect("upsert acme");
 
@@ -449,6 +452,7 @@ mod tests {
                 tenant: acme.clone(),
                 max_concurrency: 16,
                 rate_ceiling_per_min: 120,
+                repo_allowlist: Vec::new(),
             };
             repo.upsert(&acme, &acme_plan_v2).expect("upsert acme v2");
             let reloaded: std::collections::HashMap<TenantId, TenantPlan> =

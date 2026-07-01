@@ -69,6 +69,24 @@ pub enum RunnerTarget {
     },
 }
 
+impl RunnerTarget {
+    /// Canonical, case-normalized string form used for the per-tenant
+    /// `repo_allowlist` membership check (Track-C C1). `Repo{owner,repo}` →
+    /// `"repo:<owner>/<repo>"`; `Org{org}` → `"org:<org>"`. Lowercased because
+    /// GitHub owner/org/repo logins are case-insensitive — so a target
+    /// `Repo{"Owner","Repo"}` can never bypass an allowlist entry
+    /// `"repo:owner/repo"` (or vice-versa).
+    #[must_use]
+    pub fn canonical(&self) -> String {
+        match self {
+            RunnerTarget::Repo { owner, repo } => {
+                format!("repo:{}/{}", owner.to_lowercase(), repo.to_lowercase())
+            }
+            RunnerTarget::Org { org } => format!("org:{}", org.to_lowercase()),
+        }
+    }
+}
+
 // ── Contract C1: the opaque JIT config (redacting) ──────────────────────────
 
 /// The opaque, short-lived JIT registration config the runner agent consumes

@@ -70,6 +70,7 @@ fn harness_with_seed(seed: [u8; 32]) -> Harness {
         tenant: TenantId::new("acme").unwrap(),
         max_concurrency: 4,
         rate_ceiling_per_min: 100,
+        repo_allowlist: Vec::new(),
     }]);
     let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
     // The REAL mock execution backend — the exact one wired under

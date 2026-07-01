@@ -68,6 +68,7 @@ fn harness_with_provisioner(prov: Option<Arc<dyn BoxProvisioner>>) -> Harness {
         tenant: tenant("acme"),
         max_concurrency: 8,
         rate_ceiling_per_min: 100,
+        repo_allowlist: Vec::new(),
     }]);
     let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
     let registry = Arc::new(HookRegistry::default());

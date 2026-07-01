@@ -52,11 +52,13 @@ fn harness() -> Router {
             tenant: acme(),
             max_concurrency: 10,
             rate_ceiling_per_min: 100,
+            repo_allowlist: Vec::new(),
         },
         TenantPlan {
             tenant: tid("beta"),
             max_concurrency: 10,
             rate_ceiling_per_min: 100,
+            repo_allowlist: Vec::new(),
         },
     ];
     let store = Arc::new(StaticTokenStore::new(pats));

@@ -1405,11 +1405,13 @@ mod queue_tests {
                 tenant: tid("alpha"),
                 max_concurrency: cap,
                 rate_ceiling_per_min: 10_000,
+                repo_allowlist: Vec::new(),
             },
             TenantPlan {
                 tenant: tid("beta"),
                 max_concurrency: cap,
                 rate_ceiling_per_min: 10_000,
+                repo_allowlist: Vec::new(),
             },
         ]);
         let state = AppState::new(
@@ -2352,6 +2354,7 @@ mod queue_tests {
             tenant: tid("alpha"),
             max_concurrency: 1,
             rate_ceiling_per_min: 10_000,
+            repo_allowlist: Vec::new(),
         }]);
         let mut state = AppState::new(
             Arc::clone(&ledger),
@@ -2470,6 +2473,7 @@ mod queue_tests {
                 tenant: self.tenant.clone(),
                 max_concurrency: self.cap,
                 rate_ceiling_per_min: 10_000,
+                repo_allowlist: Vec::new(),
             })
         }
         fn tenant_ceiling_vcpu_ms(&self, tenant: &TenantId) -> u64 {

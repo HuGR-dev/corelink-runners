@@ -253,6 +253,7 @@ fn no_plan_admission_decision() -> CapDecision {
         tenant: tenant(),
         max_concurrency: 0,
         rate_ceiling_per_min: 0,
+        repo_allowlist: Vec::new(),
     };
     CapGate.check(
         &InMemoryLedger::new(),

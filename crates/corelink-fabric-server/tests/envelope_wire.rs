@@ -56,11 +56,13 @@ fn two_tenant_harness() -> (
             tenant: TenantId::new("acme").unwrap(),
             max_concurrency: 8,
             rate_ceiling_per_min: 100,
+            repo_allowlist: Vec::new(),
         },
         TenantPlan {
             tenant: TenantId::new("rival").unwrap(),
             max_concurrency: 8,
             rate_ceiling_per_min: 100,
+            repo_allowlist: Vec::new(),
         },
     ]);
     let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
@@ -237,6 +239,7 @@ async fn reaped_lease_unregisters_hook() {
         tenant: TenantId::new("acme").unwrap(),
         max_concurrency: 8,
         rate_ceiling_per_min: 100,
+        repo_allowlist: Vec::new(),
     }]);
     let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
     let registry = Arc::new(HookRegistry::default());

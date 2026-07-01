@@ -384,6 +384,13 @@ impl<H: IntrospectHttp> CoreLinkPlanStore<H> {
             tenant: tenant.clone(),
             max_concurrency,
             rate_ceiling_per_min,
+            // Track-C C1: the CoreLink introspect entitlement does not yet carry a
+            // runner `repo_allowlist` (that lands with the entitlement at C4/M2).
+            // EMPTY here is deliberately FAIL-CLOSED: a CoreLink-authed tenant can
+            // acquire check/hermetic leases but NO runner lease until its
+            // entitlement enumerates the repos/orgs it owns. Never invent an
+            // allow-all default — that would re-open the cross-tenant runner hole.
+            repo_allowlist: Vec::new(),
         };
         // CACHE the resolved plan so the TOKEN-FREE `plan_of` (dashboard
         // cap + queue-mode pre-filter) reflects the live cap.

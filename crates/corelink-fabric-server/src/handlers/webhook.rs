@@ -950,6 +950,11 @@ mod tests {
                 tenant: tenant(),
                 max_concurrency: cap,
                 rate_ceiling_per_min: 1000,
+                // Track-C C1: the dogfood tenant is allowlisted for its own repo so
+                // the webhook-driven runner acquires admit (the `someone-else/their-repo`
+                // rejection test is denied EITHER at the webhook allowlist or, absent
+                // that, by this fail-closed admission gate).
+                repo_allowlist: vec!["repo:humangr-labs/corelink-runners".to_string()],
             }])),
             Arc::new(FixedClock(1_717_000_000_000)),
         )

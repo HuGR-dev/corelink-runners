@@ -101,6 +101,7 @@ fn harness(
         tenant: tenant("acme"),
         max_concurrency: 64,
         rate_ceiling_per_min: 10_000,
+        repo_allowlist: Vec::new(),
     }]);
     let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
     let registry = Arc::new(HookRegistry::default());

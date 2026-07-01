@@ -148,6 +148,7 @@ fn hybrid_harness(worker: Arc<FakeWorker>, check_sub: RecordingProvisioner) -> R
         tenant: acme(),
         max_concurrency: 4,
         rate_ceiling_per_min: 100,
+        repo_allowlist: vec!["repo:humangr-labs/corelink-runners".to_string()],
     }]);
     let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
 

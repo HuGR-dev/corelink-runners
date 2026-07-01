@@ -130,6 +130,12 @@ pub struct ServerConfig {
     /// Acquire-request rate ceiling per minute for the bootstrap tenant.
     /// Defaults to 120 when `FABRIC_TENANT_RATE_PER_MIN` is absent.
     pub rate_ceiling_per_min: u32,
+    /// The bootstrap tenant's runner `repo_allowlist` (Track-C C1), from
+    /// `FABRIC_RUNNER_REPO_ALLOWLIST` (comma-separated canonical targets:
+    /// `repo:<owner>/<repo>` or `org:<org>`). EMPTY (unset) ⇒ the bootstrap
+    /// tenant may run NO runner leases (fail-closed) — set it to enable runner
+    /// dogfood on the repos/orgs the tenant owns.
+    pub repo_allowlist: Vec<String>,
     /// When `true`, the server wires [`MockLeasedExec`] instead of the cloud
     /// backend — every exec returns a deterministic fake `CheckResult`.
     ///
@@ -484,6 +490,20 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
         }
     };
 
+    // ── Runner repo-allowlist (Track-C C1, fail-closed) ──────────────────────
+    // `FABRIC_RUNNER_REPO_ALLOWLIST`: comma-separated canonical targets
+    // (`repo:<owner>/<repo>` or `org:<org>`) the bootstrap tenant may target for
+    // a RUNNER lease. Trimmed + lowercased (canonical form) + empties dropped.
+    // Unset/empty ⇒ NO runner leases for the tenant (the safe default).
+    let repo_allowlist: Vec<String> = get("FABRIC_RUNNER_REPO_ALLOWLIST")
+        .map(|v| {
+            v.split(',')
+                .map(|e| e.trim().to_lowercase())
+                .filter(|e| !e.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
     // ── Mock execution backend ───────────────────────────────────────────────
     // Default-off.  When enabled, a strict three-way AND interlock is
     // enforced here at config time — failure is a hard boot error, never a
@@ -772,6 +792,7 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
                     tenant: tenant.clone(),
                     max_concurrency,
                     rate_ceiling_per_min,
+                    repo_allowlist: repo_allowlist.clone(),
                 }])
                 .tenant_ceiling_vcpu_ms(&tenant)
             }
@@ -797,6 +818,7 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
         auth_backend,
         max_concurrency,
         rate_ceiling_per_min,
+        repo_allowlist,
         mock_exec,
         observability_key,
         ledger_backend,
@@ -974,6 +996,7 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
                     tenant,
                     max_concurrency: cfg.max_concurrency,
                     rate_ceiling_per_min: cfg.rate_ceiling_per_min,
+                    repo_allowlist: cfg.repo_allowlist.clone(),
                 }])
                 .with_ceiling_vcpu_ms(ceiling_vcpu_ms),
             );
@@ -1641,6 +1664,7 @@ mod compute_ceiling_config_tests {
             tenant: tenant.clone(),
             max_concurrency: cfg.max_concurrency,
             rate_ceiling_per_min: cfg.rate_ceiling_per_min,
+            repo_allowlist: Vec::new(),
         }])
         .with_ceiling_vcpu_ms(corelink_fabric::compute_meter::ceiling_vcpu_ms(10).unwrap());
         assert_eq!(

@@ -132,6 +132,7 @@ mod tests {
             tenant: TenantId::new(tenant).unwrap(),
             max_concurrency: cap,
             rate_ceiling_per_min: rate,
+            repo_allowlist: Vec::new(),
         }
     }
 

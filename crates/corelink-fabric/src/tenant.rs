@@ -84,4 +84,14 @@ pub struct TenantPlan {
     pub max_concurrency: u32,
     /// Acquire-request rate ceiling, per minute, enforced before load.
     pub rate_ceiling_per_min: u32,
+    /// The repos/orgs this tenant may target for a RUNNER lease (ADR-0007 /
+    /// Track-C C1 untrusted-safety). Canonical string form:
+    /// `"repo:<owner>/<repo>"` or `"org:<org>"`, lowercased. **FAIL-CLOSED**: a
+    /// runner acquire whose target is not in this list is denied — a valid-PAT
+    /// tenant can never mint a JIT runner + CAS creds on a repo it does not own.
+    /// EMPTY ⇒ the tenant may run NO runner leases (the safe default; e.g.
+    /// CoreLink-resolved plans until the entitlement carries it at C4/M2).
+    /// Non-runner (check/hermetic) leases ignore this field.
+    #[serde(default)]
+    pub repo_allowlist: Vec<String>,
 }
