@@ -32,6 +32,47 @@ const TMPFS_SIZE: &str = "64m";
 /// ceiling; expiry hard-kill (C2b) terminates it earlier via `docker kill`.
 const IDLE_SLEEP_SECS: &str = "3600";
 
+// ── Untrusted-container hardening policy (Track-C C2) ────────────────────────
+// A DockerEngine box runs UNTRUSTED customer/agent code. `spawn` applies these
+// docker-run resource + privilege flags so a hostile job cannot escalate,
+// fork-bomb, or OOM the box. They are a FIXED policy (not caller-supplied), so a
+// forged/hand-built `ContainerSpec` gets them too.
+//
+// APPLIED (security-critical AND build-safe — never breaks a legitimate job):
+//   `--cap-drop ALL`                 — untrusted code needs no Linux capability.
+//   `--security-opt no-new-privileges` — blocks setuid/setcap privilege escalation.
+//   `--pids-limit`                   — bounds a fork bomb (`:(){ :|:& };:`); the
+//                                      value is generous so real parallel builds
+//                                      (`make -j`, cargo) are unaffected.
+//   `--memory` + `--memory-swap` (equal ⇒ no swap escape) — OOM ceiling.
+//
+// DEFERRED, with reason (NOT silently dropped — a naive apply is a regression):
+//   `--read-only` rootfs — a real CI job writes far beyond the tmpfs
+//     (`~/.cargo`, `/tmp`, package caches); read-only rootfs breaks it unless
+//     every writable path is enumerated + tmpfs-mounted. Tracked C2-follow-up.
+//   `--user <uid>` — the runner/check images already set a non-root `USER`
+//     (`deploy/*/Dockerfile`); forcing a second `--user` can break their own
+//     user/home setup. Non-root is enforced at the IMAGE layer instead.
+//   `--cpus` — a per-container CPU cap risks starving a legitimate heavy build;
+//     CPU-hogging is the lowest-severity vector (per-instance-bounded) and is
+//     left to the substrate instance sizing. Tracked C2-follow-up.
+//
+// PROD substrate note: the fabric-server prod path is Cloudflare Containers
+// (`standard-4`, mem/cpu instance-bounded) + Northflank (provider-limited),
+// per-lease ephemeral — NOT this on-box `DockerEngine`. There the mem/cpu ceiling
+// is the instance type and non-root is the image `USER`; the cap-drop/read-only
+// posture is a platform-hardening follow-up on those substrates.
+
+/// Hard memory ceiling for an untrusted job container (Track-C C2). 12 GiB is
+/// the ratified ceiling validated against the heaviest jobs; `--memory-swap` is
+/// pinned equal so a job cannot escape the ceiling into swap.
+const MEMORY_LIMIT: &str = "12g";
+
+/// Process-count ceiling for an untrusted job container (Track-C C2). Bounds a
+/// fork bomb while leaving ample headroom for real parallel builds (which peak
+/// in the hundreds of processes, never thousands).
+const PIDS_LIMIT: &str = "4096";
+
 /// Result of probing a running container's isolation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IsolationProbe {
@@ -135,6 +176,17 @@ impl<B: BoxExec> Engine for DockerEngine<B> {
             &spec.name,
             "--network",
             "none",
+            // ── Untrusted-container hardening (Track-C C2) — fixed policy ──────
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--pids-limit",
+            PIDS_LIMIT,
+            "--memory",
+            MEMORY_LIMIT,
+            "--memory-swap",
+            MEMORY_LIMIT,
             "--tmpfs",
             &tmpfs,
             "--label",

@@ -260,6 +260,38 @@ fn item_3_fail_closed_before_spawn_hermetic() {
     );
 }
 
+/// Track-C C2: the production `DockerEngine::spawn` applies the untrusted-
+/// container hardening flags — a hostile job cannot escalate privileges,
+/// fork-bomb, or OOM the box. Asserted on the REAL `docker run` argv the
+/// production surface emits (single-sourced, not a stub).
+#[test]
+fn item_4_spawn_applies_untrusted_hardening_flags() {
+    let boxx = FakeBox::new(FAKE_GOOD_DIGEST);
+    let engine = DockerEngine::new(boxx.clone());
+    let spec_ok = spec_literal("hugit-job-hardening", FAKE_GOOD_REF);
+    engine.spawn(&spec_ok).expect("a good pin must spawn");
+
+    let run = boxx
+        .calls()
+        .into_iter()
+        .find(|c| c.starts_with("docker run"))
+        .expect("spawn must issue a docker run");
+
+    for needle in [
+        "--cap-drop ALL",                   // no Linux capabilities
+        "--security-opt no-new-privileges", // no setuid/setcap escalation
+        "--pids-limit 4096",                // fork-bomb bound
+        "--memory 12g",                     // OOM ceiling
+        "--memory-swap 12g",                // == memory ⇒ no swap escape
+        "--network none",                   // (pre-existing) isolated netns
+    ] {
+        assert!(
+            run.contains(needle),
+            "docker run must carry the untrusted-hardening flag `{needle}`; got: {run}"
+        );
+    }
+}
+
 /// Connect to the live box; FAIL (panic) if unreachable, per contract. Only
 /// called inside the active box lane.
 fn live_box() -> SshBox {
