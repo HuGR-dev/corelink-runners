@@ -1230,11 +1230,42 @@ impl AppState {
     /// (acquire, close, reaper) invoke it after the relevant ledger guard has
     /// been released.
     pub(crate) fn record_slot(&self, lease_id: &str, tenant: &TenantId, kind: SlotEventKind) {
+        // Non-terminal (and terminal callers that do not carry a durable stamp)
+        // path: no `acquired_at_ms`. The `Acquired` event never carries it; the
+        // billing target remembers the acquire time in its in-memory map.
+        self.record_slot_inner(lease_id, tenant, kind, None);
+    }
+
+    /// TERMINAL slot emit that ALSO carries the lease's durable
+    /// `billing_acquired_at_ms` (revenue-loss fix #3). The close handler and the
+    /// reaper read the [`LeaseRecord`] as they terminalize; passing its stamp
+    /// here lets the billing usage-push compute `slot_seconds` even when a
+    /// fabricd restart dropped the in-memory `Acquired→terminal` pairing (the
+    /// map becomes a cache, not the source of truth). `acquired_at_ms == None`
+    /// (no stamp on the row) degrades to today's behavior for that lease.
+    pub(crate) fn record_slot_terminal(
+        &self,
+        lease_id: &str,
+        tenant: &TenantId,
+        kind: SlotEventKind,
+        acquired_at_ms: Option<u64>,
+    ) {
+        self.record_slot_inner(lease_id, tenant, kind, acquired_at_ms);
+    }
+
+    fn record_slot_inner(
+        &self,
+        lease_id: &str,
+        tenant: &TenantId,
+        kind: SlotEventKind,
+        acquired_at_ms: Option<u64>,
+    ) {
         let ev = SlotOccupancyEvent {
             tenant: tenant.clone(),
             lease_id: lease_id.to_string(),
             kind,
             at_ms: self.clock.now_ms(),
+            acquired_at_ms,
         };
         self.slot_meter
             .lock()

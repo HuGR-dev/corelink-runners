@@ -168,6 +168,7 @@ mod tests {
             created_at_ms: 100,
             updated_at_ms: 200,
             deadline_ms: Some(3_600_100),
+            billing_acquired_at_ms: None,
         };
         state.ledger.lock().unwrap().put(rec).unwrap();
     }
@@ -260,6 +261,7 @@ mod tests {
             created_at_ms: 1,
             updated_at_ms: 1,
             deadline_ms: None,
+            billing_acquired_at_ms: None,
         };
         state.ledger.lock().unwrap().put(rec).unwrap();
 

@@ -536,6 +536,7 @@ pub(crate) async fn acquire(
             // into the ledger (the single source of truth), so ANY instance can
             // date+reap this lease — and the terminal transition preserves it.
             deadline_ms: Some(lease.expiry),
+            billing_acquired_at_ms: None,
         };
         // ── WP-F: build the OPTIONAL compute-ceiling gate via the SHARED
         // builder (the SAME construction the queued-admission dispatch uses, so

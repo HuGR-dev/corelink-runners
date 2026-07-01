@@ -473,6 +473,9 @@ pub(crate) async fn acquire_queued(
         created_at_ms: now_ms,
         updated_at_ms: now_ms,
         deadline_ms: Some(lease.expiry),
+        // #3: stamped later, at the Pending→Held transition (billing starts when
+        // the slot is occupied, not at admission). None on the Pending row.
+        billing_acquired_at_ms: None,
     };
 
     let (waker, wait_rx) = oneshot::channel::<Response>();
@@ -2126,6 +2129,7 @@ mod queue_tests {
             created_at_ms: now,
             updated_at_ms: now,
             deadline_ms: Some(lease.expiry),
+            billing_acquired_at_ms: None,
         };
         let (waker, wait_rx) = oneshot::channel::<axum::response::Response>();
         // Drop the receiver: the waiter has TIMED OUT — any send will fail.
@@ -2388,6 +2392,7 @@ mod queue_tests {
             created_at_ms: now,
             updated_at_ms: now,
             deadline_ms: Some(lease.expiry),
+            billing_acquired_at_ms: None,
         };
         let (waker, _wait_rx) = oneshot::channel::<axum::response::Response>();
         queue.waiters.lock().unwrap().insert(
@@ -2892,6 +2897,7 @@ mod queue_tests {
             created_at_ms: now,
             updated_at_ms: now,
             deadline_ms: Some(lease.expiry),
+            billing_acquired_at_ms: None,
         };
         let (waker, wait_rx) = oneshot::channel::<axum::response::Response>();
         drop(wait_rx); // the waiter has TIMED OUT — any send will fail.

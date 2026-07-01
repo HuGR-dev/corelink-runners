@@ -81,6 +81,16 @@ pub struct LeaseRecord {
     /// change NEVER alters this field — [`LeaseLedger::transition`] preserves it
     /// unchanged.
     pub deadline_ms: Option<u64>,
+    /// Durable billing-acquire stamp: the epoch-ms of the FIRST `Pending → Held`
+    /// transition (the moment a slot is occupied and billing starts). Written
+    /// once at that transition (never overwritten, never cleared by a terminal
+    /// transition), so the `Acquired → terminal` `slot_seconds` pairing survives
+    /// a fabricd restart that drops the billing target's in-memory map (the
+    /// revenue-loss fix, #3). Ledger-INTERNAL — NOT on the frozen wire
+    /// `RunnerLease`; `None` for a never-Held lease or a pre-fix row.
+    /// `#[serde(default)]` so older journaled records deserialize as `None`.
+    #[serde(default)]
+    pub billing_acquired_at_ms: Option<u64>,
 }
 
 /// Legal-transition matrix — contract §1, nothing else:
@@ -125,6 +135,16 @@ fn apply_transition(
     // transition never alters the durable deadline).
     rec.state = LeaseState::Wire(to);
     rec.updated_at_ms = now_ms;
+    // Revenue-loss fix (#3): stamp the durable billing-acquire time at the FIRST
+    // `Pending → Held` transition (billing starts the instant the slot is
+    // occupied). FIRST-held only (`is_none()`), so a terminal transition — which
+    // never targets `Held` — leaves it intact for the terminal billing read, and
+    // no path can ever move it backwards.
+    if matches!(rec.state, LeaseState::Wire(RunnerState::Held))
+        && rec.billing_acquired_at_ms.is_none()
+    {
+        rec.billing_acquired_at_ms = Some(now_ms);
+    }
     Ok(rec.clone())
 }
 
@@ -370,6 +390,21 @@ pub trait LeaseLedger {
     /// production impl evaluates it while holding the same exclusive lock the
     /// sweep holds; the Pg impl overrides it with a single conditional
     /// `DELETE ... WHERE state = 'pending'` so the guard is atomic in the DB.
+    ///
+    /// ## Accounting-ON Pending is bare-deleted DELIBERATELY (audit #4, FALSE)
+    ///
+    /// It is CORRECT — not a leak — that this bare-deletes an accounting-ON
+    /// `Pending` (one carrying `reserved_vcpu_ms`/`accrual_period_key`) without
+    /// routing through `transition`: a never-Held Pending consumed **zero**
+    /// vCPU·ms, and the admit Σ live-sums `reserved_vcpu_ms` over the pending/held
+    /// **rows** (see `admit_decision` / the Pg Σ query), so deleting the row frees
+    /// its reservation from Σ immediately, with nothing to fold into
+    /// `compute_accrual`. `remove`'s refusal above applies ONLY to accounting-ON
+    /// **Held** rows (deleting a live box's row would drop a real accrual); its
+    /// `state = 'pending'` branch permits exactly this Pending delete. Adding a
+    /// `box_vcpu_count IS NULL` guard here would leave accounting-on stale
+    /// Pendings **un-swept** — a regression, not a fix. Pinned by
+    /// `remove_if_pending_frees_reserved_sigma_headroom_for_accounting_on_pending`.
     fn remove_if_pending(&mut self, lease_id: &str) -> anyhow::Result<bool> {
         match self.get(lease_id)? {
             Some(rec) if matches!(rec.state, LeaseState::Pending) => self.remove(lease_id),
@@ -1282,6 +1317,7 @@ mod torn_journal_tests {
             created_at_ms: 1,
             updated_at_ms: 1,
             deadline_ms: Some(1000),
+            billing_acquired_at_ms: None,
         }
     }
 
@@ -1400,6 +1436,7 @@ mod compute_ceiling_tests {
             created_at_ms,
             updated_at_ms: created_at_ms,
             deadline_ms: Some(created_at_ms + 60_000),
+            billing_acquired_at_ms: None,
         }
     }
 
@@ -1889,5 +1926,98 @@ mod compute_ceiling_tests {
         assert_eq!(led.compute_accrued(&t, 202406).unwrap(), 100);
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    // ── Track-C C3 (#3, revenue-loss): the durable billing-acquire stamp ──────
+    /// The FIRST `Pending → Held` transition stamps `billing_acquired_at_ms`, and
+    /// it SURVIVES unchanged through the terminal transition so the terminal
+    /// billing read (close/reaper) recovers the acquire time even after a fabricd
+    /// restart dropped the billing target's in-memory pairing. A Pending row is
+    /// NOT stamped (billing starts when the slot is occupied, not at admission).
+    #[test]
+    fn held_transition_stamps_durable_billing_acquired_at_ms() {
+        on_both("bill-acq", |led| {
+            let t = tid("acme");
+            led.put(pending("l1", &t, 0)).unwrap();
+            // Pending: not yet stamped — billing has not started.
+            assert_eq!(
+                led.get("l1").unwrap().unwrap().billing_acquired_at_ms,
+                None,
+                "a Pending row carries no billing-acquire stamp"
+            );
+            // Pending → Held at t=5_000: billing starts, stamp written.
+            led.transition("l1", RunnerState::Held, 5_000).unwrap();
+            assert_eq!(
+                led.get("l1").unwrap().unwrap().billing_acquired_at_ms,
+                Some(5_000),
+                "the FIRST Held transition stamps billing_acquired_at_ms = now_ms"
+            );
+            // Held → Released at t=9_000: the terminal record STILL carries the
+            // original stamp (never moved by a later transition), so the terminal
+            // billing read yields the correct acquire time.
+            let terminal = led.transition("l1", RunnerState::Released, 9_000).unwrap();
+            assert_eq!(
+                terminal.billing_acquired_at_ms,
+                Some(5_000),
+                "the durable stamp rides the terminal record (restart-safe billing)"
+            );
+            assert_eq!(
+                led.get("l1").unwrap().unwrap().billing_acquired_at_ms,
+                Some(5_000)
+            );
+        });
+    }
+
+    // ── Track-C C3 (#4, DISPOSITIONED-FALSE): remove_if_pending on an
+    //    accounting-ON Pending is CORRECT, not a leak ──────────────────────────
+    /// PIN: sweeping an accounting-ON **Pending** (with `reserved_vcpu_ms` set)
+    /// via `remove_if_pending` FREES its reserved Σ headroom — a subsequent
+    /// compute admit that needed exactly that headroom now succeeds. This proves
+    /// the audit-handoff #4 "leak" concern is FALSE: a never-Held Pending consumed
+    /// ZERO vCPU·ms, `reserved_vcpu_ms` is live-summed into Σ from the pending row,
+    /// so deleting the row releases the reservation with nothing to accrue. NO
+    /// guard/transition-branch was added (that would leave accounting-on Pendings
+    /// un-swept); `remove`'s `state='pending'` branch deliberately allows this.
+    #[test]
+    fn remove_if_pending_frees_reserved_sigma_headroom_for_accounting_on_pending() {
+        on_both("dispose4", |led| {
+            let t = tid("acme");
+            // Ceiling 1000. Admit an accounting-ON Pending reserving 700 (Σ=700).
+            let g1 = gate(202406, 1_000, 2, 700);
+            assert_eq!(
+                led.try_admit_with_compute(pending("p1", &t, 0), 100, Some(g1))
+                    .unwrap(),
+                AdmitOutcome::Admitted
+            );
+            // A second admit reserving 700 would be 700+700=1400 > 1000 → rejected
+            // while p1 (never Held) still holds its reservation in Σ.
+            let g2 = gate(202406, 1_000, 2, 700);
+            assert_eq!(
+                led.try_admit_with_compute(pending("p2", &t, 0), 100, Some(g2))
+                    .unwrap(),
+                AdmitOutcome::OverCompute,
+                "p1's reservation occupies Σ while it is Pending"
+            );
+            // Sweep p1 (still Pending, accounting-ON) via remove_if_pending.
+            assert!(
+                led.remove_if_pending("p1").unwrap(),
+                "an accounting-ON Pending is legally swept (state='pending' branch)"
+            );
+            // Its reservation is now GONE from Σ (never-Held → zero consumed, zero
+            // accrued), so the previously-rejected admit SUCCEEDS.
+            let g3 = gate(202406, 1_000, 2, 700);
+            assert_eq!(
+                led.try_admit_with_compute(pending("p3", &t, 0), 100, Some(g3))
+                    .unwrap(),
+                AdmitOutcome::Admitted,
+                "sweeping the Pending freed its reserved Σ headroom — #4 is FALSE, no leak"
+            );
+            // And nothing was accrued for the never-Held, swept lease.
+            assert_eq!(
+                led.compute_accrued(&t, 202406).unwrap(),
+                0,
+                "a never-Held swept Pending accrues zero (nothing to accrue)"
+            );
+        });
     }
 }
