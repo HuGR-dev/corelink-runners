@@ -4,9 +4,14 @@
 //! (port **8080**). It runs a captured subprocess in the already-hydrated
 //! toolchain directory and returns its exit code + verbatim stdout/stderr.
 //!
-//! Trust model: this server has **no auth**. It is reachable ONLY inside the
-//! container, behind the Worker's `containerFetch`; the container boundary +
-//! the Worker bearer are the gates (§C4). Bind is `0.0.0.0:8080`.
+//! Trust model: reachable ONLY inside the container, behind the Worker's
+//! `containerFetch`; the container boundary + the Worker bearer are the PRIMARY
+//! gates (§C4). Bind is `0.0.0.0:8080`. **Track-C C2b defense-in-depth:** when
+//! [`AUTH_TOKEN_ENV`] (`EXEC_SERVER_AUTH_TOKEN`) is injected at spawn, `/exec`
+//! ADDITIONALLY requires `Authorization: Bearer <token>` (constant-time), and the
+//! spawn-Worker presents the same value on its `containerFetch` — so even a
+//! lateral in-container caller cannot drive `/exec` without it. Unset ⇒ served
+//! without the bearer (back-compat; the container boundary + Worker bearer stand).
 //!
 //! Fail-closed shape mirrors the fabric server: a spawn failure (e.g. empty
 //! `argv`) is a `400`; a timeout kills the whole process group and returns
@@ -16,8 +21,9 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use axum::Router;
-use axum::extract::Json;
-use axum::http::StatusCode;
+use axum::extract::{Json, Request};
+use axum::http::{StatusCode, header::AUTHORIZATION};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use serde::{Deserialize, Serialize};
@@ -30,6 +36,11 @@ pub const TOOLCHAIN_DIR_ENV: &str = "TOOLCHAIN_DIR";
 pub const DEFAULT_TOOLCHAIN_DIR: &str = "/toolchain";
 /// The `defaultPort` the Worker's `containerFetch` targets (§C4).
 pub const DEFAULT_PORT: u16 = 8080;
+/// Track-C C2b: the OPTIONAL bearer token the exec-server requires on `/exec`
+/// (defense-in-depth on top of the container boundary + Worker bearer). Injected
+/// into the container env at spawn; the spawn-Worker presents the SAME value on
+/// its `containerFetch` to `/exec`. Unset ⇒ served without auth (back-compat).
+pub const AUTH_TOKEN_ENV: &str = "EXEC_SERVER_AUTH_TOKEN";
 
 /// Per-stream capture cap. stdout and stderr are each bounded to this many
 /// bytes to keep a runaway command from OOM-ing the container; output past the
@@ -67,10 +78,68 @@ pub fn toolchain_dir() -> String {
     std::env::var(TOOLCHAIN_DIR_ENV).unwrap_or_else(|_| DEFAULT_TOOLCHAIN_DIR.to_string())
 }
 
-/// Build the exec-server router. Pure (no sockets) so tests drive it via
+/// Build the exec-server router, reading the OPTIONAL bearer gate from
+/// [`AUTH_TOKEN_ENV`]. Pure (no sockets) so tests drive it via
 /// `tower::ServiceExt::oneshot`, mirroring `corelink-fabric-server`'s suites.
 pub fn app() -> Router {
-    Router::new().route("/exec", post(exec_handler))
+    app_with_auth(std::env::var(AUTH_TOKEN_ENV).ok().filter(|t| !t.is_empty()))
+}
+
+/// Build the router with an EXPLICIT optional bearer gate (Track-C C2b
+/// defense-in-depth). `Some(token)` ⇒ every `/exec` requires
+/// `Authorization: Bearer <token>` (constant-time compared); anything else is a
+/// `401`. `None` ⇒ served WITHOUT auth (back-compat: the container boundary +
+/// the Worker bearer remain the primary gates) — a loud startup line records it.
+pub fn app_with_auth(token: Option<String>) -> Router {
+    let router = Router::new().route("/exec", post(exec_handler));
+    match token {
+        Some(token) => router.layer(middleware::from_fn(move |req: Request, next: Next| {
+            let expected = token.clone();
+            async move { require_bearer(&expected, req, next).await }
+        })),
+        None => {
+            eprintln!(
+                "check-exec-server: {AUTH_TOKEN_ENV} unset — /exec served WITHOUT auth \
+                 (C2b defense-in-depth OFF; the container boundary + Worker bearer remain the gates)"
+            );
+            router
+        }
+    }
+}
+
+/// Bearer-gate middleware: pass iff `Authorization` equals `Bearer <expected>`
+/// under a CONSTANT-TIME comparison (no early-return timing oracle on the token
+/// bytes); otherwise `401`, never reaching the exec handler.
+async fn require_bearer(expected: &str, req: Request, next: Next) -> Response {
+    let presented = req
+        .headers()
+        .get(AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+    let want = format!("Bearer {expected}");
+    if ct_eq(presented.as_bytes(), want.as_bytes()) {
+        next.run(req).await
+    } else {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "unauthorized" })),
+        )
+            .into_response()
+    }
+}
+
+/// Constant-time byte-equality. Folds the length difference into the accumulator
+/// (a length mismatch can never short-circuit), so the compare leaks neither the
+/// token bytes nor an early match position via timing.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    let mut diff = (a.len() ^ b.len()) as u8;
+    let n = a.len().max(b.len());
+    for i in 0..n {
+        let x = a.get(i).copied().unwrap_or(0);
+        let y = b.get(i).copied().unwrap_or(0);
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 /// `POST /exec` — run `argv` captured in the hydrated toolchain dir.

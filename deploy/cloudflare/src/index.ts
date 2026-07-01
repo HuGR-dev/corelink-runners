@@ -28,6 +28,12 @@ export interface Env {
   // Worker secret (`wrangler secret put`). Must match the fabric's
   // CLOUDFLARE_SPAWN_AUTH_TOKEN. Missing/mismatch ⇒ 401.
   CLOUDFLARE_SPAWN_AUTH_TOKEN: string;
+  // Track-C C2b (OPTIONAL, defense-in-depth): the bearer the in-container
+  // check-host exec-server requires on /exec. Injected into the check-host
+  // container env at spawn and presented on the /v1/exec containerFetch. Absent
+  // ⇒ the exec-server serves without auth (back-compat; the container boundary +
+  // the Worker bearer remain the primary gates). Set via `wrangler secret put`.
+  EXEC_SERVER_AUTH_TOKEN?: string;
   // The deploy-time pinned image digest (README wrinkle #1): the spawn request's
   // image_digest must equal this, else reject. Wire from wrangler vars.
   PINNED_IMAGE_DIGEST: string;
@@ -390,7 +396,16 @@ export default {
         // Inject the lease env + TOOLCHAIN_DIGEST; egress on so clw can hydrate
         // the toolchain from CAS at start (C2).
         await container.start({
-          envVars: { ...body.env, TOOLCHAIN_DIGEST: body.toolchain_digest },
+          envVars: {
+            ...body.env,
+            TOOLCHAIN_DIGEST: body.toolchain_digest,
+            // Track-C C2b: inject the exec-server bearer (defense-in-depth) so the
+            // in-container /exec requires it; the SAME value is presented on the
+            // /v1/exec containerFetch below. Absent secret ⇒ no auth (back-compat).
+            ...(env.EXEC_SERVER_AUTH_TOKEN
+              ? { EXEC_SERVER_AUTH_TOKEN: env.EXEC_SERVER_AUTH_TOKEN }
+              : {}),
+          },
           enableInternet: true,
         });
         return json({ handle }, 201);
@@ -424,7 +439,15 @@ export default {
         resp = await container.containerFetch(
           new Request("http://check/exec", {
             method: "POST",
-            headers: { "content-type": "application/json" },
+            headers: {
+              "content-type": "application/json",
+              // Track-C C2b: present the exec-server bearer (the same value
+              // injected at spawn). Absent secret ⇒ header omitted ⇒ the
+              // exec-server serves without auth (back-compat).
+              ...(env.EXEC_SERVER_AUTH_TOKEN
+                ? { authorization: `Bearer ${env.EXEC_SERVER_AUTH_TOKEN}` }
+                : {}),
+            },
             body: JSON.stringify({ argv: body.argv, timeout_ms: body.timeout_ms }),
           }),
           8080,
