@@ -41,6 +41,15 @@ pub struct SlotOccupancyEvent {
     pub kind: SlotEventKind,
     /// Unix epoch ms of the event.
     pub at_ms: u64,
+    /// The lease's durable billing-acquire stamp (`LeaseRecord.billing_acquired_at_ms`),
+    /// threaded onto a **terminal** event so the billing usage-push can compute
+    /// `slot_seconds` even when the in-memory `Acquired→terminal` pairing was lost
+    /// to a fabricd restart (revenue-loss fix #3). `None` on `Acquired` events and
+    /// whenever the ledger has no stamp; the billing target prefers its in-memory
+    /// pairing and falls back to this only on a miss. `#[serde(default)]` so older
+    /// journaled/wire events (which never carried it) still deserialize as `None`.
+    #[serde(default)]
+    pub acquired_at_ms: Option<u64>,
 }
 
 /// Internal COGS counters — trust/audit vocabulary.

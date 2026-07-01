@@ -35,6 +35,7 @@ fn record(lease_id: &str, t: &TenantId, state: LeaseState) -> LeaseRecord {
         created_at_ms: 1_000,
         updated_at_ms: 1_000,
         deadline_ms: None,
+        billing_acquired_at_ms: None,
     }
 }
 

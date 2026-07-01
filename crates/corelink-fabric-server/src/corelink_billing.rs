@@ -298,10 +298,13 @@ impl<P: BillingPoster> CorelinkBillingTarget<P> {
 impl<P: BillingPoster> BillingExportTarget for CorelinkBillingTarget<P> {
     /// Pair `Acquired` with the next terminal transition (`Released`/`Expired`/
     /// `Crashed`) to emit one `RunnerSlotSeconds` event for the slot's lifetime.
-    /// A terminal with no remembered acquire (e.g. process restart lost the
-    /// in-memory pairing) is skipped — never a fabricated qty. Always `Ok`:
-    /// buffering cannot fail, and a flush error surfaces via [`flush`] off the
-    /// admission path, never here.
+    /// The in-memory `open` map is a CACHE: on a terminal we prefer it, but fall
+    /// back to the event's durable `acquired_at_ms` (the ledger's
+    /// `billing_acquired_at_ms`) so a slot acquired BEFORE a fabricd restart and
+    /// closed AFTER still bills correctly (revenue-loss fix #3). Only a terminal
+    /// with NEITHER a cached nor a durable acquire is skipped — never a fabricated
+    /// qty. Always `Ok`: buffering cannot fail, and a flush error surfaces via
+    /// [`flush`] off the admission path, never here.
     fn export(&self, event: &SlotOccupancyEvent) -> anyhow::Result<()> {
         match event.kind {
             SlotEventKind::Acquired => {
@@ -311,16 +314,23 @@ impl<P: BillingPoster> BillingExportTarget for CorelinkBillingTarget<P> {
                     .insert(event.lease_id.clone(), event.at_ms);
             }
             SlotEventKind::Released | SlotEventKind::Expired | SlotEventKind::Crashed => {
-                let acquired = self
+                let cached = self
                     .open
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
                     .remove(&event.lease_id);
-                if let Some(acquired_at_ms) = acquired {
-                    self.enqueue_terminal(event, acquired_at_ms);
+                // #3 (revenue-loss): the in-memory `open` map is now a CACHE, not
+                // the source of truth. Fast path — the acquire was seen on THIS
+                // process, so the map has it. RESTART-RECOVERY path — a fabricd
+                // restart dropped the map, but the terminal event carries the
+                // lease's durable `billing_acquired_at_ms` from the ledger, so the
+                // slot still bills correctly. Only when NEITHER is present (a
+                // pre-fix / never-stamped lease) do we keep today's honest skip:
+                // no fabricated qty, the aggregator never sees a phantom slot.
+                match cached.or(event.acquired_at_ms) {
+                    Some(acquired_at_ms) => self.enqueue_terminal(event, acquired_at_ms),
+                    None => { /* no acquire, cached or durable → skip (no phantom slot) */ }
                 }
-                // else: no paired acquire on this instance → skip (no fabricated
-                // usage; the aggregator never sees a phantom slot).
             }
         }
         Ok(())
@@ -400,6 +410,7 @@ mod tests {
             lease_id: lease.to_string(),
             kind,
             at_ms,
+            acquired_at_ms: None,
         }
     }
 
@@ -554,14 +565,73 @@ mod tests {
         }
     }
 
-    /// A terminal with no remembered acquire (lost pairing) bills nothing — never
-    /// a fabricated qty.
+    /// A terminal with no remembered acquire AND no durable stamp bills nothing —
+    /// never a fabricated qty (a pre-fix / never-stamped lease).
     #[test]
     fn terminal_without_acquire_is_skipped() {
         let t = target(RecordingPoster::ok());
         t.export(&ev("acme", "orphan", SlotEventKind::Released, 5_000))
             .unwrap();
         assert_eq!(t.buffered(), 0, "no paired acquire → no phantom slot");
+    }
+
+    /// #3 (RESTART-RECOVERY): a fabricd restart drops the in-memory `open` map,
+    /// so a lease acquired BEFORE the restart and closed AFTER has NO cached
+    /// `Acquired`. The terminal event carries the ledger's durable
+    /// `billing_acquired_at_ms`, so the slot STILL bills correctly — the map is a
+    /// cache, not the source of truth. Asserts the exact recovered `slot_seconds`.
+    #[test]
+    fn restart_recovery_bills_from_durable_acquired_at_ms() {
+        let t = target(RecordingPoster::ok());
+        // NO prior Acquired export (the restart lost it). Terminal carries t0.
+        let t0 = 10_000u64;
+        let terminal = SlotOccupancyEvent {
+            tenant: tid("acme"),
+            lease_id: "L-restart".to_string(),
+            kind: SlotEventKind::Released,
+            at_ms: 25_000,
+            acquired_at_ms: Some(t0),
+        };
+        t.export(&terminal).unwrap();
+        assert_eq!(
+            t.buffered(),
+            1,
+            "the durable acquired_at_ms recovers the pairing → one billed event"
+        );
+        t.flush().unwrap();
+        let arr: Vec<UsageEventData> = serde_json::from_str(&t.poster.bodies()[0]).unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(
+            arr[0].qty, 15,
+            "(25000 - 10000)/1000 = 15 slot·seconds, from the durable stamp"
+        );
+        assert_eq!(arr[0].time_ms, 25_000);
+    }
+
+    /// #3: the in-memory `open` map is the FAST PATH and still wins when present —
+    /// a cached `Acquired` is used even if the terminal ALSO carries a (stale)
+    /// durable stamp, so the same-process common case is unchanged.
+    #[test]
+    fn in_map_fast_path_still_used_and_wins_over_event_stamp() {
+        let t = target(RecordingPoster::ok());
+        // Same-process acquire: cached at 1_000.
+        t.export(&ev("acme", "L-fast", SlotEventKind::Acquired, 1_000))
+            .unwrap();
+        // Terminal ALSO carries a durable stamp (7_000) — the cache must win.
+        let terminal = SlotOccupancyEvent {
+            tenant: tid("acme"),
+            lease_id: "L-fast".to_string(),
+            kind: SlotEventKind::Released,
+            at_ms: 4_000,
+            acquired_at_ms: Some(7_000),
+        };
+        t.export(&terminal).unwrap();
+        t.flush().unwrap();
+        let arr: Vec<UsageEventData> = serde_json::from_str(&t.poster.bodies()[0]).unwrap();
+        assert_eq!(
+            arr[0].qty, 3,
+            "(4000 - 1000)/1000 = 3: the cached acquire wins over the event stamp"
+        );
     }
 
     /// `flush` posts the batch and clears the buffer on success.

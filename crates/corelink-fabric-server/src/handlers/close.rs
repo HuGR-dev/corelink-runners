@@ -298,29 +298,39 @@ pub(crate) async fn close(
     // slot, and do NOT re-unregister. The §13 exactly-once latch lives in the
     // shared hook state (not in the registry entry), so the close already
     // fired exactly once regardless of who won the ledger race.
-    let released_won = {
+    // #3 (revenue-loss): bind the transition RESULT (not just `is_ok`) so we can
+    // read the winning record's durable `billing_acquired_at_ms` and thread it to
+    // the terminal slot emit — the usage-push then bills correctly even when a
+    // fabricd restart dropped the billing target's in-memory acquire pairing (the
+    // stamp is preserved across the Held→Released transition).
+    let released_rec = {
         let Ok(mut ledger) = state.ledger.lock() else {
             return error_response(ApiError::FailClosed, "lease ledger lock poisoned");
         };
         ledger
             .transition(&lease_id, RunnerState::Released, state.clock.now_ms())
-            .is_ok()
+            .ok()
     };
 
-    if !released_won {
+    let Some(released_rec) = released_rec else {
         return error_response(
             ApiError::FailClosed,
             "lease ledger refused Held->Released after close (a concurrent \
              cancel/reaper won the race); not double-freeing the slot",
         );
-    }
+    };
 
     // We won the terminal transition: drop the hook entry (the registry doc's
     // unregister-at-close obligation) and emit the single `Released` slot
     // event — both gated on the WINNING transition, so a lost race never
     // double-frees. Ledger lock dropped above; neither call holds it.
     registry.unregister(&lease_id);
-    state.record_slot(&lease_id, &tenant, SlotEventKind::Released);
+    state.record_slot_terminal(
+        &lease_id,
+        &tenant,
+        SlotEventKind::Released,
+        released_rec.billing_acquired_at_ms,
+    );
 
     // GC the fabric-internal side tables (`images` + the ADR-0007
     // `runner_leases` marker) for this now-terminal lease. The reaper's

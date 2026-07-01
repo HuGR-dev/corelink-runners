@@ -26,6 +26,7 @@ fn record(lease_id: &str, t: &TenantId, state: LeaseState) -> LeaseRecord {
         created_at_ms: 1_000,
         updated_at_ms: 1_000,
         deadline_ms: None,
+        billing_acquired_at_ms: None,
     }
 }
 
@@ -248,6 +249,7 @@ fn meter_events_roundtrip_serde() {
         lease_id: "lease-a".to_string(),
         kind: SlotEventKind::Acquired,
         at_ms: 1_717_003_600_000,
+        acquired_at_ms: None,
     };
     let json = serde_json::to_string(&event).unwrap();
     let back: SlotOccupancyEvent = serde_json::from_str(&json).unwrap();

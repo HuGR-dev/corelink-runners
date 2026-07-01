@@ -171,6 +171,7 @@ mod tests {
             lease_id: lease.to_string(),
             kind: SlotEventKind::Acquired,
             at_ms: 0,
+            acquired_at_ms: None,
         });
     }
 
@@ -247,6 +248,7 @@ mod tests {
             created_at_ms: 0,
             updated_at_ms: 0,
             deadline_ms: None,
+            billing_acquired_at_ms: None,
         };
         state.ledger.lock().unwrap().put(rec).unwrap();
 

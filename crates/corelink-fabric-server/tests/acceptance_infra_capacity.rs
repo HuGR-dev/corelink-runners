@@ -255,6 +255,7 @@ async fn queue_mode_re_dispatches_when_capacity_freed() {
             created_at_ms: 1_000,
             updated_at_ms: 1_000,
             deadline_ms: Some(99_999_999_999),
+            billing_acquired_at_ms: None,
         };
         l.try_admit(rec, 10).expect("admit pre-held");
         l.transition("pre-held-1", RunnerState::Held, 1_000)
@@ -346,6 +347,7 @@ async fn queue_mode_bounded_park_timeout_503_not_immediate_hardfail() {
             created_at_ms: 1_000,
             updated_at_ms: 1_000,
             deadline_ms: Some(99_999_999_999),
+            billing_acquired_at_ms: None,
         };
         l.try_admit(rec, 10).expect("admit pre-held");
         l.transition("pre-held-2", RunnerState::Held, 1_000)

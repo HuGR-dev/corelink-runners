@@ -146,6 +146,7 @@ mod tests {
             lease_id: lease.to_string(),
             kind,
             at_ms,
+            acquired_at_ms: None,
         }
     }
 

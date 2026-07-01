@@ -167,6 +167,13 @@ ALTER TABLE leases ADD COLUMN IF NOT EXISTS box_vcpu_count int;
 ALTER TABLE leases ADD COLUMN IF NOT EXISTS accrual_period_key int;
 ALTER TABLE leases ADD COLUMN IF NOT EXISTS reserved_vcpu_ms bigint;
 ALTER TABLE leases ADD COLUMN IF NOT EXISTS accrued_at_ms bigint;
+-- Revenue-loss fix (#3): the durable billing-acquire stamp (epoch ms), written
+-- once at the FIRST Pending→Held transition (billing starts when the slot is
+-- occupied). ADDITIVE + IDEMPOTENT + NULLABLE: pre-fix rows and never-Held
+-- leases keep NULL. Threaded onto the TERMINAL slot event so the usage-push can
+-- pair Acquired→terminal even after a fabricd restart drops the billing target's
+-- in-memory map — the map becomes a cache, this column the source of truth.
+ALTER TABLE leases ADD COLUMN IF NOT EXISTS billing_acquired_at_ms bigint;
 CREATE INDEX IF NOT EXISTS leases_tenant_active_idx ON leases (tenant) WHERE state IN ('pending','held');
 CREATE INDEX IF NOT EXISTS leases_held_idx ON leases (lease_id) WHERE state = 'held';
 -- The durable per-(tenant, period) accrued vCPU·ms — the terminal half of the
@@ -258,6 +265,10 @@ fn record_from_row(row: &tokio_postgres::Row) -> anyhow::Result<LeaseRecord> {
     // ADR-0004 Decision-1: nullable `bigint` ↔ `Option<u64>` (NULL → None =
     // never-overdue), same `as u64` epoch-ms mapping as the other time fields.
     let deadline: Option<i64> = row.get("deadline_ms");
+    // #3: nullable `bigint` ↔ `Option<u64>` (NULL → None = never-stamped /
+    // pre-fix), same `as u64` epoch-ms mapping as the other time fields. Every
+    // SELECT/RETURNING that feeds this reader names `billing_acquired_at_ms`.
+    let billing_acquired: Option<i64> = row.get("billing_acquired_at_ms");
     Ok(LeaseRecord {
         lease_id: row.get("lease_id"),
         tenant: TenantId::new(tenant_raw)?,
@@ -266,6 +277,7 @@ fn record_from_row(row: &tokio_postgres::Row) -> anyhow::Result<LeaseRecord> {
         created_at_ms: created as u64,
         updated_at_ms: updated as u64,
         deadline_ms: deadline.map(|d| d as u64),
+        billing_acquired_at_ms: billing_acquired.map(|d| d as u64),
     })
 }
 
@@ -479,7 +491,8 @@ impl LeaseLedger for PgLedger {
             let row = client
                 .query_opt(
                     "SELECT lease_id, tenant, state::text AS state, box_ref, \
-                            created_at_ms, updated_at_ms, deadline_ms \
+                            created_at_ms, updated_at_ms, deadline_ms, \
+                            billing_acquired_at_ms \
                      FROM leases WHERE lease_id = $1",
                     &[&lease_id],
                 )
@@ -518,6 +531,11 @@ impl LeaseLedger for PgLedger {
             to,
             RunnerState::Released | RunnerState::Expired | RunnerState::Crashed
         );
+        // #3 (revenue-loss): stamp the durable billing-acquire time on the FIRST
+        // Pending→Held transition. Gated `billing_acquired_at_ms IS NULL` in SQL
+        // so it is first-held-only (idempotent, never moved backwards); mirrors
+        // the InMemory `apply_transition` stamp.
+        let is_held = matches!(to, RunnerState::Held);
         let to_label = state_to_db(&LeaseState::Wire(to));
         self.block_on(async {
             let Some(legal_from) = legal_from else {
@@ -546,12 +564,24 @@ impl LeaseLedger for PgLedger {
                         // ADR-0004: the SET clause must NOT touch deadline_ms — a
                         // state change never alters the durable deadline; it is
                         // only RETURNed so the record carries it back unchanged.
+                        // #3: stamp billing_acquired_at_ms on the FIRST Held only
+                        // ($5 = is_held AND currently NULL); other transitions and
+                        // re-stamps leave it unchanged. RETURNed for the reader.
                         "UPDATE leases \
-                         SET state = $1::text::lease_state, updated_at_ms = $2 \
+                         SET state = $1::text::lease_state, updated_at_ms = $2, \
+                             billing_acquired_at_ms = CASE WHEN $5 AND billing_acquired_at_ms IS NULL \
+                                                           THEN $2 ELSE billing_acquired_at_ms END \
                          WHERE lease_id = $3 AND state = $4::text::lease_state \
                          RETURNING lease_id, tenant, state::text AS state, box_ref, \
-                                   created_at_ms, updated_at_ms, deadline_ms",
-                        &[&to_label, &(now_ms as i64), &lease_id, &legal_from],
+                                   created_at_ms, updated_at_ms, deadline_ms, \
+                                   billing_acquired_at_ms",
+                        &[
+                            &to_label,
+                            &(now_ms as i64),
+                            &lease_id,
+                            &legal_from,
+                            &is_held,
+                        ],
                     )
                     .await?;
                 return match row {
@@ -597,10 +627,13 @@ impl LeaseLedger for PgLedger {
                        UPDATE leases \
                           SET state = $1::text::lease_state, updated_at_ms = $2, \
                               accrued_at_ms = CASE WHEN $5 AND accrued_at_ms IS NULL \
-                                                   THEN $2 ELSE accrued_at_ms END \
+                                                   THEN $2 ELSE accrued_at_ms END, \
+                              billing_acquired_at_ms = CASE WHEN $6 AND billing_acquired_at_ms IS NULL \
+                                                            THEN $2 ELSE billing_acquired_at_ms END \
                         WHERE lease_id = $3 AND state = $4::text::lease_state \
                         RETURNING lease_id, tenant, state::text AS state, box_ref, \
                                   created_at_ms, updated_at_ms, deadline_ms, \
+                                  billing_acquired_at_ms, \
                                   box_vcpu_count, reserved_vcpu_ms) \
                      SELECT upd.*, (prev.accrued_at_ms IS NULL) AS was_unaccrued \
                        FROM upd JOIN prev USING (lease_id)",
@@ -610,6 +643,7 @@ impl LeaseLedger for PgLedger {
                         &lease_id,
                         &legal_from,
                         &stamp_terminal,
+                        &is_held,
                     ],
                 )
                 .await?;
@@ -830,7 +864,8 @@ impl LeaseLedger for PgLedger {
             let rows = client
                 .query(
                     "SELECT lease_id, tenant, state::text AS state, box_ref, \
-                            created_at_ms, updated_at_ms, deadline_ms \
+                            created_at_ms, updated_at_ms, deadline_ms, \
+                            billing_acquired_at_ms \
                      FROM leases WHERE tenant = $1 ORDER BY lease_id",
                     &[&t.as_str()],
                 )
@@ -845,7 +880,8 @@ impl LeaseLedger for PgLedger {
             let rows = client
                 .query(
                     "SELECT lease_id, tenant, state::text AS state, box_ref, \
-                            created_at_ms, updated_at_ms, deadline_ms \
+                            created_at_ms, updated_at_ms, deadline_ms, \
+                            billing_acquired_at_ms \
                      FROM leases WHERE state = 'held' ORDER BY lease_id",
                     &[],
                 )
@@ -868,7 +904,8 @@ impl LeaseLedger for PgLedger {
             let rows = client
                 .query(
                     "SELECT lease_id, tenant, state::text AS state, box_ref, \
-                            created_at_ms, updated_at_ms, deadline_ms \
+                            created_at_ms, updated_at_ms, deadline_ms, \
+                            billing_acquired_at_ms \
                      FROM leases \
                      WHERE state = 'pending' AND created_at_ms < $1 \
                      ORDER BY lease_id",
@@ -1311,6 +1348,7 @@ mod compute_ceiling_pg_tests {
             created_at_ms: created_ms,
             updated_at_ms: created_ms,
             deadline_ms: None,
+            billing_acquired_at_ms: None,
         }
     }
 

@@ -107,6 +107,7 @@ fn held(lease_id: &str, t: &TenantId) -> LeaseRecord {
         created_at_ms: NOW_MS,
         updated_at_ms: NOW_MS,
         deadline_ms: None,
+        billing_acquired_at_ms: None,
     }
 }
 

@@ -93,6 +93,7 @@ mod tests {
             lease_id: "lease-1".to_string(),
             kind: SlotEventKind::Acquired,
             at_ms: 1_000,
+            acquired_at_ms: None,
         };
         target.export(&event).expect("noop export succeeds");
     }

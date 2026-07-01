@@ -511,7 +511,15 @@ pub async fn reap_once(state: &crate::AppState) -> usize {
                 // (the transition block above), forget_lease holds no ledger lock.
                 // The symmetric Crashed path now lives in `surface_crashes`
                 // (WP-CRASH-SWEEP, opt-in); this expiry path emits Expired only.
-                state.record_slot(&rec.lease_id, &rec.tenant, SlotEventKind::Expired);
+                // #3: carry the lease's durable billing-acquire stamp so the
+                // usage-push bills correctly even if a restart dropped the
+                // in-memory pairing (the reaper reaps leases held across restarts).
+                state.record_slot_terminal(
+                    &rec.lease_id,
+                    &rec.tenant,
+                    SlotEventKind::Expired,
+                    rec.billing_acquired_at_ms,
+                );
 
                 reaped += 1;
             }
@@ -728,7 +736,13 @@ pub async fn surface_crashes(state: &crate::AppState) -> usize {
 
             // ── 5. GC side-tables, then emit the Crashed slot event.
             state.forget_lease(&rec.lease_id);
-            state.record_slot(&rec.lease_id, &rec.tenant, SlotEventKind::Crashed);
+            // #3: carry the durable billing-acquire stamp (restart-recovery).
+            state.record_slot_terminal(
+                &rec.lease_id,
+                &rec.tenant,
+                SlotEventKind::Crashed,
+                rec.billing_acquired_at_ms,
+            );
 
             reaped += 1;
         }
@@ -1263,6 +1277,7 @@ mod tests {
                     created_at_ms: 0,
                     updated_at_ms: 0,
                     deadline_ms: Some(deadline_ms),
+                    billing_acquired_at_ms: None,
                 })
                 .unwrap();
             ledger.transition(lease_id, RunnerState::Held, 0).unwrap();
@@ -1298,6 +1313,7 @@ mod tests {
                 created_at_ms,
                 updated_at_ms: created_at_ms,
                 deadline_ms: None,
+                billing_acquired_at_ms: None,
             })
             .unwrap();
     }
@@ -1758,6 +1774,7 @@ mod tests {
                     created_at_ms: 0,
                     updated_at_ms: 0,
                     deadline_ms: None, // never-overdue fail-safe
+                    billing_acquired_at_ms: None,
                 })
                 .unwrap();
             ledger
