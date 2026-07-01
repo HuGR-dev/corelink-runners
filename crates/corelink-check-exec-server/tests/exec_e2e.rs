@@ -23,7 +23,7 @@ use axum::body::Body;
 use axum::http::Request;
 use axum::http::{StatusCode, header};
 use axum::response::Response;
-use corelink_check_exec_server::{ExecRequest, ExecResponse, app, run_captured};
+use corelink_check_exec_server::{ExecRequest, ExecResponse, app, app_with_auth, run_captured};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -222,4 +222,77 @@ fn router_empty_argv_is_400() {
             .status()
     });
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+// ─── Track-C C2b: exec-server bearer auth (defense-in-depth) ─────────────────
+
+/// An `/exec` request with an OPTIONAL `Authorization: Bearer <bearer>` header.
+fn exec_request_authed(body: Value, bearer: Option<&str>) -> Request<Body> {
+    let mut b = Request::builder()
+        .method("POST")
+        .uri("/exec")
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(t) = bearer {
+        b = b.header(header::AUTHORIZATION, format!("Bearer {t}"));
+    }
+    b.body(Body::from(serde_json::to_vec(&body).expect("serializable")))
+        .expect("valid request")
+}
+
+fn ok_body() -> Value {
+    json!({ "argv": ["sh", "-lc", "printf 'ok'"], "timeout_ms": 5000u64 })
+}
+
+/// C2b: when a token is configured, `/exec` requires the exact bearer — a
+/// missing or wrong token is `401` and NEVER reaches the exec handler.
+#[test]
+fn configured_token_gates_exec_with_the_bearer() {
+    block_on(|| async {
+        unsafe { std::env::set_var("TOOLCHAIN_DIR", std::env::temp_dir()) };
+        let no_hdr = app_with_auth(Some("s3cr3t-tok".into()))
+            .oneshot(exec_request_authed(ok_body(), None))
+            .await
+            .unwrap();
+        assert_eq!(
+            no_hdr.status(),
+            StatusCode::UNAUTHORIZED,
+            "no bearer with a configured token → 401"
+        );
+        let wrong = app_with_auth(Some("s3cr3t-tok".into()))
+            .oneshot(exec_request_authed(ok_body(), Some("wrong-tok")))
+            .await
+            .unwrap();
+        assert_eq!(
+            wrong.status(),
+            StatusCode::UNAUTHORIZED,
+            "wrong bearer → 401"
+        );
+        let good = app_with_auth(Some("s3cr3t-tok".into()))
+            .oneshot(exec_request_authed(ok_body(), Some("s3cr3t-tok")))
+            .await
+            .unwrap();
+        assert_eq!(
+            good.status(),
+            StatusCode::OK,
+            "the exact bearer reaches the exec handler → 200"
+        );
+    });
+}
+
+/// C2b back-compat: no token configured ⇒ served without auth (the container
+/// boundary + Worker bearer remain the primary gates), byte-identical to today.
+#[test]
+fn unconfigured_token_serves_without_auth() {
+    block_on(|| async {
+        unsafe { std::env::set_var("TOOLCHAIN_DIR", std::env::temp_dir()) };
+        let r = app_with_auth(None)
+            .oneshot(exec_request_authed(ok_body(), None))
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            StatusCode::OK,
+            "no token configured → /exec served without auth (back-compat)"
+        );
+    });
 }
