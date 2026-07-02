@@ -924,6 +924,17 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
     };
     let ingest_signer = Arc::new(crate::ingest_token::IngestSigner::new(ingest_secret));
 
+    // Track-C C2c (DEFAULT-OFF): the cred-ticket signer is built ONLY when
+    // FABRIC_CRED_TICKET_SECRET is set (non-empty). Present ⇒ C2c ON: a runner
+    // lease's per-job CAS PAT is delivered env-0 via a single-use CLW_CRED_TICKET
+    // + /v1/leases/{id}/cas-cred, never in the container env. Absent ⇒ None ⇒ the
+    // CLW_TOKEN-in-env path, byte-identical to today. (Dedicated secret, domain-
+    // separated from the ingest signer + the ed25519 attestation key.)
+    let cred_signer = std::env::var("FABRIC_CRED_TICKET_SECRET")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(|s| crate::cred_ticket::CredTicketSigner::new(s.into_bytes()));
+
     // ── Lease ledger (WP-4) ──────────────────────────────────────────────────
     // Memory: byte-identical to the pre-WP-4 unconditional path; no runtime
     //   requirement, so the sync `#[test]` callers (which never set the pg env)
@@ -1110,6 +1121,7 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
     // inject_clw_env uses "" — moat OFF, no cache). The production composition
     // root sets CLW_ENDPOINT=https://cas.corelink.io.
     let state = state.with_clw_endpoint(std::env::var("CLW_ENDPOINT").ok());
+    let state = state.with_cred_signer(cred_signer);
 
     // WP-8a: wire the CAS PAT mint from the environment (default-off: both
     // CORELINK_RUNNER_MINT_{AUTH_KEY,URL} absent ⇒ None ⇒ moat OFF, byte-identical

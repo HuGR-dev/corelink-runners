@@ -29,6 +29,7 @@ pub mod corelink_auth;
 /// WP-BILLING-TARGET — the corelink-billing usage-push adapter (default-off).
 pub mod corelink_billing;
 pub mod corelink_plans;
+pub mod cred_ticket;
 pub mod envelope_inject;
 pub mod exec;
 pub mod handlers;

@@ -729,7 +729,36 @@ pub(crate) async fn finalize_admitted_lease(
         {
             Ok(minted) => {
                 let endpoint = state.clw_endpoint.as_deref().unwrap_or("");
-                crate::runner_inject::inject_clw_env(&mut spec, &minted, endpoint, tenant.as_str());
+                // Track-C C2c: with a cred-ticket signer configured, deliver the
+                // PAT env-0 — stash it server-side + inject a single-use
+                // `CLW_CRED_TICKET` INSTEAD of `CLW_TOKEN` (the PAT never rides the
+                // untrusted env; clw redeems the ticket once at trusted boot). No
+                // signer ⇒ the `CLW_TOKEN`-in-env path, byte-identical to today.
+                if let Some(signer) = state.cred_signer.as_ref() {
+                    let ticket = signer.ticket(&lease_id);
+                    state.stash_cred(
+                        &lease_id,
+                        crate::cred_ticket::StashedCred {
+                            token: minted.token.clone(),
+                            endpoint: endpoint.to_string(),
+                            tenant: tenant.as_str().to_string(),
+                        },
+                    );
+                    crate::runner_inject::inject_cred_ticket_env(
+                        &mut spec,
+                        &ticket,
+                        &lease_id,
+                        endpoint,
+                        tenant.as_str(),
+                    );
+                } else {
+                    crate::runner_inject::inject_clw_env(
+                        &mut spec,
+                        &minted,
+                        endpoint,
+                        tenant.as_str(),
+                    );
+                }
                 // Record the pat_id for revoke on every terminal teardown path (A7b).
                 state
                     .pat_ids

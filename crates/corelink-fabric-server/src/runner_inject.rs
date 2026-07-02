@@ -103,6 +103,43 @@ pub fn inject_clw_env(spec: &mut ContainerSpec, minted: &MintedPat, endpoint: &s
     ));
 }
 
+/// `CLW_CRED_TICKET` — Track-C C2c: the single-use, lease-bound ticket the
+/// runner's `clw` redeems ONCE at the trusted boot to fetch the per-job PAT.
+/// Injected INSTEAD of `CLW_TOKEN` when C2c is ON (the PAT never rides env).
+pub const CLW_CRED_TICKET_ENV: &str = "CLW_CRED_TICKET";
+
+/// `CLW_LEASE_ID` — Track-C C2c: the lease id `clw` presents when redeeming the
+/// ticket (`POST /v1/leases/{CLW_LEASE_ID}/cas-cred`).
+pub const CLW_LEASE_ID_ENV: &str = "CLW_LEASE_ID";
+
+/// Track-C C2c: inject the CLW_* env for a runner box in the **env-0** posture —
+/// a single-use `CLW_CRED_TICKET` (+ `CLW_LEASE_ID`) INSTEAD of `CLW_TOKEN`. The
+/// per-job PAT is NOT placed in the env; `clw` redeems the ticket once at the
+/// trusted boot at `POST /v1/leases/{lease_id}/cas-cred`. `CLW_ENDPOINT`,
+/// `CLW_TENANT`, `CLW_REF_DOMAIN` are still injected (config, not secrets).
+pub fn inject_cred_ticket_env(
+    spec: &mut ContainerSpec,
+    ticket: &str,
+    lease_id: &str,
+    endpoint: &str,
+    tenant: &str,
+) {
+    spec.env
+        .push((CLW_ENDPOINT_ENV.to_string(), endpoint.to_string()));
+    spec.env
+        .push((CLW_TENANT_ENV.to_string(), tenant.to_string()));
+    // The TICKET, not the PAT: single-use + redeemed-before-untrusted, so an
+    // env read after redemption is worthless. `CLW_TOKEN` is DELIBERATELY absent.
+    spec.env
+        .push((CLW_CRED_TICKET_ENV.to_string(), ticket.to_string()));
+    spec.env
+        .push((CLW_LEASE_ID_ENV.to_string(), lease_id.to_string()));
+    spec.env.push((
+        CLW_REF_DOMAIN_ENV.to_string(),
+        CLW_REF_DOMAIN_RUNNER.to_string(),
+    ));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,5 +209,26 @@ mod tests {
         // Lock-step with deploy/runner/entrypoint.sh — a rename here without a
         // matching image change would silently fail every runner registration.
         assert_eq!(RUNNER_JITCONFIG_ENV, "CORELINK_RUNNER_JITCONFIG");
+    }
+
+    #[test]
+    fn cred_ticket_env_injects_the_ticket_and_never_the_pat() {
+        // Track-C C2c env-0: the ticket + lease id + config go into the env; the
+        // per-job PAT (CLW_TOKEN) MUST be absent — it is fetched via redemption.
+        let mut spec = bare_runner_spec();
+        inject_cred_ticket_env(&mut spec, "the-ticket", "lease-9", "https://cas", "acme");
+        assert_eq!(env_get(&spec, CLW_CRED_TICKET_ENV), Some("the-ticket"));
+        assert_eq!(env_get(&spec, CLW_LEASE_ID_ENV), Some("lease-9"));
+        assert_eq!(env_get(&spec, CLW_ENDPOINT_ENV), Some("https://cas"));
+        assert_eq!(env_get(&spec, CLW_TENANT_ENV), Some("acme"));
+        assert_eq!(
+            env_get(&spec, CLW_REF_DOMAIN_ENV),
+            Some(CLW_REF_DOMAIN_RUNNER)
+        );
+        assert_eq!(
+            env_get(&spec, CLW_TOKEN_ENV),
+            None,
+            "env-0: the per-job CAS PAT must NEVER ride the container env under C2c"
+        );
     }
 }

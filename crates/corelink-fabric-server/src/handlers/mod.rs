@@ -8,6 +8,7 @@
 //! the FROZEN path constants (`corelink_fabric_api::paths`).
 
 pub mod admin;
+pub mod cas_cred;
 pub mod close;
 pub mod envelope;
 pub mod exec_handler;

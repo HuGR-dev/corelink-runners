@@ -69,6 +69,11 @@ pub const ATTESTATION_KEY: &str = "/v1/attestation/key";
 /// (ENV2 amendment to the CF0 freeze, lead-ratified.)
 pub const LEASE_CLOSE: &str = "/v1/leases/{lease_id}/close";
 
+/// Track-C C2c: redeem the single-use `CLW_CRED_TICKET` for the per-job CAS
+/// PAT. Ticket-authed (NOT the tenant PAT) — clw dials this ONCE at the trusted
+/// boot; a second redemption is `410`.
+pub const LEASE_CAS_CRED: &str = "/v1/leases/{lease_id}/cas-cred";
+
 /// Tenant-facing live usage vs plan (M2 console data): `GET` returns the
 /// calling tenant's current active-lease count vs their plan cap.
 ///
