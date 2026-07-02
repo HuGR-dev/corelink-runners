@@ -423,7 +423,7 @@ async fn a7_mint_succeeds_derives_pat_for_tenant_and_job() {
     let lease_deadline_ms = 9_999_999_999_999u64;
 
     let minted = mint
-        .mint("acme", "job-abc-123", lease_deadline_ms)
+        .mint("acme", "job-abc-123", lease_deadline_ms, 0)
         .await
         .expect("A7: MockMint::mint must succeed");
 
@@ -471,6 +471,7 @@ async fn a7_mint_failure_fails_closed_no_box() {
             _owner_tenant: &'a str,
             _job_id: &'a str,
             _lease_deadline_ms: u64,
+            _now_ms: u64,
         ) -> Pin<
             Box<
                 dyn std::future::Future<Output = std::result::Result<MintedPat, MintError>>
@@ -492,7 +493,9 @@ async fn a7_mint_failure_fails_closed_no_box() {
     }
 
     let fail_mint = FailingMint;
-    let result = fail_mint.mint("acme", "job-fail", 9_999_999_999_999).await;
+    let result = fail_mint
+        .mint("acme", "job-fail", 9_999_999_999_999, 0)
+        .await;
 
     assert!(
         result.is_err(),
@@ -534,6 +537,7 @@ impl CasPatMint for ConfiguredFailingMint {
         _owner_tenant: &'a str,
         _job_id: &'a str,
         _lease_deadline_ms: u64,
+        _now_ms: u64,
     ) -> Pin<
         Box<
             dyn std::future::Future<Output = std::result::Result<MintedPat, MintError>> + Send + 'a,
@@ -688,7 +692,7 @@ async fn a7b_minted_pat_ttl_does_not_exceed_lease_deadline() {
     let lease_deadline_ms = 1_800_000u64; // 30 minutes
 
     let minted = mint
-        .mint("acme", "job-ttl-test", lease_deadline_ms)
+        .mint("acme", "job-ttl-test", lease_deadline_ms, 0)
         .await
         .expect("A7b: mint must succeed");
 
@@ -736,7 +740,7 @@ async fn a7b_minted_pat_ttl_does_not_exceed_lease_deadline() {
     );
 
     let err = http_mint
-        .mint("acme", "job-ttl-enforcement", deadline_ms)
+        .mint("acme", "job-ttl-enforcement", deadline_ms, 0)
         .await
         .expect_err(
             "A7b (enforcement): HttpCasPatMint must return TtlExceedsLease \

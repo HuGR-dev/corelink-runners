@@ -737,7 +737,12 @@ pub(crate) async fn finalize_admitted_lease(
         // Use the lease expiry (already F1-clamped) as the deadline bound (A7b).
         let lease_deadline_ms = lease.expiry;
         match mint
-            .mint(tenant.as_str(), &lease_id, lease_deadline_ms)
+            .mint(
+                tenant.as_str(),
+                &lease_id,
+                lease_deadline_ms,
+                state.clock.now_ms(),
+            )
             .await
         {
             Ok(minted) => {

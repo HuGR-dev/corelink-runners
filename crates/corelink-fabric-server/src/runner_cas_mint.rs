@@ -7,7 +7,9 @@
 //! ## Mint flow (POST /internal/v1/runner/mint)
 //!
 //! Request header: `x-corelink-internal-auth: <internal-token>`.
-//! Body: `{"owner_tenant": "<tenant>", "job_id": "<job_id>", "scope": "read-write"}`.
+//! Body: `{"owner_tenant": "<tenant>", "job_id": "<job_id>", "scope": "read-write",
+//! "ttl_seconds": <u64>}`. `ttl_seconds` is the lease's REMAINING time (skew-shrunk)
+//! so the PAT expires WITH the lease (Server-TL C2c contract, 2026-07-02).
 //! Response: `{"token": "<pat-plaintext>", "pat_id": "<id>", "expires_ms": <u64>}`.
 //!
 //! ## Revoke flow (POST /internal/v1/runner/revoke)
@@ -130,13 +132,20 @@ pub trait CasPatMint: Send + Sync {
     /// POSTs to `/internal/v1/runner/mint` with `x-corelink-internal-auth`.
     /// Returns [`MintedPat`] on success; fails closed on any error.
     ///
-    /// `lease_deadline_ms` is the lease expiry (unix ms); the impl asserts
-    /// `minted.expires_ms ≤ lease_deadline_ms` (A7b).
+    /// `lease_deadline_ms` is the absolute lease expiry (unix ms); the impl
+    /// asserts `minted.expires_ms ≤ lease_deadline_ms` (A7b). `now_ms` is the
+    /// caller's current time (the SAME clock that stamped the lease deadline),
+    /// from which the impl derives the requested `ttl_seconds` so the minted PAT
+    /// **expires with the lease** (Server-TL C2c contract, 2026-07-02): the
+    /// credential dies by timeout as well as by revoke-on-teardown. Without this
+    /// the server's default (hardcoded 5400s) outlives any lease shorter than
+    /// 90 min, tripping the strict A7b bound → fail-closed, no provision.
     fn mint<'a>(
         &'a self,
         owner_tenant: &'a str,
         job_id: &'a str,
         lease_deadline_ms: u64,
+        now_ms: u64,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<MintedPat, MintError>> + Send + 'a>,
     >;
@@ -197,6 +206,7 @@ impl CasPatMint for MockMint {
         owner_tenant: &'a str,
         job_id: &'a str,
         lease_deadline_ms: u64,
+        _now_ms: u64,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<MintedPat, MintError>> + Send + 'a>,
     > {
@@ -323,7 +333,26 @@ struct MintRequestBody<'a> {
     owner_tenant: &'a str,
     job_id: &'a str,
     scope: &'a str,
+    /// Requested PAT lifetime in seconds, derived from the lease's REMAINING
+    /// time so the minted credential expires with the lease (Server-TL C2c
+    /// contract, 2026-07-02). The server clamps its stamped `expires_ms` to
+    /// this bound; a lease shorter than the server default (5400s) then no
+    /// longer over-mints past its own deadline. Skew-shrunk (see
+    /// [`MINT_TTL_SKEW_MARGIN_MS`]) so the server-stamped expiry lands at or
+    /// below the deadline even under mint-time + clock skew, keeping the strict
+    /// A7b bound (`expires_ms ≤ lease_deadline_ms`) satisfiable.
+    ttl_seconds: u64,
 }
+
+/// Safety margin subtracted from the lease's remaining time when deriving the
+/// requested `ttl_seconds`. The server stamps `expires_ms = server_now +
+/// ttl_seconds`; because `server_now ≥ our now` (network + clock skew), an
+/// unshrunk `ttl = deadline − now` would land the expiry just PAST the deadline
+/// and trip the strict A7b assertion. Shrinking by this margin keeps the minted
+/// PAT provably ≤ the lease deadline. 30 s dwarfs same-region internal RTT/skew
+/// and is negligible against real lease lengths; if a lease is so short that the
+/// margin drives `ttl` toward 0, fail-closed (no provision) is the safe outcome.
+const MINT_TTL_SKEW_MARGIN_MS: u64 = 30_000;
 
 impl<H: MintHttp> CasPatMint for HttpCasPatMint<H> {
     fn mint<'a>(
@@ -331,15 +360,26 @@ impl<H: MintHttp> CasPatMint for HttpCasPatMint<H> {
         owner_tenant: &'a str,
         job_id: &'a str,
         lease_deadline_ms: u64,
+        now_ms: u64,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<MintedPat, MintError>> + Send + 'a>,
     > {
         Box::pin(async move {
             let url = format!("{}/internal/v1/runner/mint", self.base_url);
+            // Request a PAT that expires WITH the lease: the remaining time,
+            // shrunk by the skew margin so the server-stamped expiry stays ≤ the
+            // deadline (keeps the strict A7b bound below satisfiable). Saturating
+            // arithmetic: an already-past-deadline lease yields ttl 0 → the
+            // server default (or an immediate expiry) trips A7b → fail-closed.
+            let ttl_seconds = lease_deadline_ms
+                .saturating_sub(now_ms)
+                .saturating_sub(MINT_TTL_SKEW_MARGIN_MS)
+                / 1000;
             let body = serde_json::to_string(&MintRequestBody {
                 owner_tenant,
                 job_id,
                 scope: "read-write",
+                ttl_seconds,
             })
             // serde_json serialisation of a plain struct with string fields cannot
             // fail; if it somehow did, we still fail closed.
@@ -609,6 +649,10 @@ mod tests {
     const BASE: &str = "https://d9.internal.example.com";
     const AUTH: &str = "secret-internal-token";
     const DEADLINE: u64 = 9_999_999_999_999; // far future
+    /// A `now` exactly one hour before [`DEADLINE`] ⇒ 3_600_000 ms remaining;
+    /// after the 30 s skew margin the derived `ttl_seconds` is 3570.
+    const NOW: u64 = DEADLINE - 3_600_000;
+    const EXPECTED_TTL_SECONDS: u64 = (3_600_000 - MINT_TTL_SKEW_MARGIN_MS) / 1000; // 3570
 
     fn client(responses: Vec<Result<MintHttpResponse, ()>>) -> HttpCasPatMint<RecordingMint> {
         HttpCasPatMint::new(RecordingMint::with_responses(responses), BASE, AUTH)
@@ -622,7 +666,7 @@ mod tests {
         let c = client(vec![ok_body(resp_body)]);
 
         let pat = c
-            .mint("acme", "job-42", DEADLINE)
+            .mint("acme", "job-42", DEADLINE, NOW)
             .await
             .expect("mint must succeed");
 
@@ -642,11 +686,37 @@ mod tests {
         );
         assert_eq!(auth, AUTH);
 
-        // Request body must carry the three required fields.
+        // Request body must carry the required fields, including the
+        // lease-bound ttl_seconds (remaining time minus the skew margin).
         let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
         assert_eq!(parsed["owner_tenant"], "acme");
         assert_eq!(parsed["job_id"], "job-42");
         assert_eq!(parsed["scope"], "read-write");
+        assert_eq!(
+            parsed["ttl_seconds"], EXPECTED_TTL_SECONDS,
+            "ttl_seconds must be the lease's remaining time (1h) minus the 30s skew margin"
+        );
+    }
+
+    /// A lease with less remaining time than the skew margin derives
+    /// `ttl_seconds == 0`. Saturating arithmetic (never underflows/panics); a
+    /// near-expired lease requesting 0 is the safe direction — the box is about
+    /// to be reaped, and the strict A7b bound stays the ultimate guard.
+    #[tokio::test]
+    async fn mint_near_expired_lease_derives_zero_ttl_saturating() {
+        let resp_body = r#"{"token":"t","pat_id":"p","expires_ms":1}"#;
+        let c = client(vec![ok_body(resp_body)]);
+        // 10 s remaining < 30 s margin ⇒ ttl saturates to 0 (no underflow).
+        let now = DEADLINE - 10_000;
+        c.mint("acme", "job-nearly-expired", DEADLINE, now)
+            .await
+            .expect("mint call itself succeeds; the service response drives the outcome");
+        let body = &c.http.calls()[0].2;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(
+            parsed["ttl_seconds"], 0,
+            "remaining < skew margin must saturate ttl_seconds to 0, never underflow"
+        );
     }
 
     // ── mint: P2 security-posture tripwire ───────────────────────────────────
@@ -667,7 +737,7 @@ mod tests {
         let resp_body = r#"{"token":"tok-rw","pat_id":"pid-rw","expires_ms":1234567890000}"#;
         let c = client(vec![ok_body(resp_body)]);
 
-        c.mint("acme", "job-7", DEADLINE)
+        c.mint("acme", "job-7", DEADLINE, NOW)
             .await
             .expect("mint must succeed");
 
@@ -708,7 +778,7 @@ mod tests {
         let c = client(vec![ok_body(&resp_body)]);
 
         let err = c
-            .mint("acme", "job-late", deadline_ms)
+            .mint("acme", "job-late", deadline_ms, 0)
             .await
             .expect_err("must fail with TtlExceedsLease when expires_ms > deadline");
 
@@ -730,7 +800,7 @@ mod tests {
     async fn mint_401_returns_unauthorized() {
         let c = client(vec![status_resp(401)]);
         let err = c
-            .mint("acme", "job-401", DEADLINE)
+            .mint("acme", "job-401", DEADLINE, NOW)
             .await
             .expect_err("must fail on 401");
         assert_eq!(err, MintError::Unauthorized, "401 must map to Unauthorized");
@@ -742,7 +812,7 @@ mod tests {
     async fn mint_403_returns_unauthorized() {
         let c = client(vec![status_resp(403)]);
         let err = c
-            .mint("acme", "job-403", DEADLINE)
+            .mint("acme", "job-403", DEADLINE, NOW)
             .await
             .expect_err("must fail on 403");
         assert_eq!(err, MintError::Unauthorized, "403 must map to Unauthorized");
@@ -754,7 +824,7 @@ mod tests {
     async fn mint_500_returns_bad_status() {
         let c = client(vec![status_resp(500)]);
         let err = c
-            .mint("acme", "job-500", DEADLINE)
+            .mint("acme", "job-500", DEADLINE, NOW)
             .await
             .expect_err("must fail on 500");
         assert_eq!(
@@ -770,7 +840,7 @@ mod tests {
     async fn mint_malformed_2xx_body_returns_bad_response() {
         let c = client(vec![ok_body(r#"{"not":"the_right_fields"}"#)]);
         let err = c
-            .mint("acme", "job-bad-body", DEADLINE)
+            .mint("acme", "job-bad-body", DEADLINE, NOW)
             .await
             .expect_err("must fail on malformed body");
         assert_eq!(
@@ -786,7 +856,7 @@ mod tests {
     async fn mint_transport_error_returns_unreachable() {
         let c = client(vec![transport_err()]);
         let err = c
-            .mint("acme", "job-transport", DEADLINE)
+            .mint("acme", "job-transport", DEADLINE, NOW)
             .await
             .expect_err("must fail on transport error");
         assert_eq!(
