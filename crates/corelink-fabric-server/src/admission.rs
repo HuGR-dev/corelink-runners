@@ -2056,6 +2056,7 @@ mod queue_tests {
             owner_tenant: &'a str,
             job_id: &'a str,
             lease_deadline_ms: u64,
+            _now_ms: u64,
         ) -> std::pin::Pin<
             Box<
                 dyn std::future::Future<
