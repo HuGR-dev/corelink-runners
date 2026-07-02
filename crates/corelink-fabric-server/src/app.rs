@@ -416,6 +416,20 @@ pub struct AppState {
     /// close, cancel, and the reaper sweep — so the set stays bounded by active
     /// runner leases.
     pub(crate) runner_leases: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// Track-C AUP1 (enforcement primitive): the set of SUSPENDED tenant keys.
+    /// An admin action (`POST /internal/v1/admin/tenants/{tenant}/suspend`) adds
+    /// a tenant here; `acquire` rejects a suspended tenant fail-closed (403)
+    /// BEFORE any admission work, and the suspend action ALSO kills the tenant's
+    /// live held leases. So an abusive/illegal untrusted workload can be stopped:
+    /// no new leases + existing ones torn down. Unbounded only by the operator's
+    /// suspend list (a handful); `unsuspend` removes.
+    pub(crate) suspended_tenants: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// Track-C AUP1: the operator secret gating the enforcement endpoints
+    /// (`.../suspend`, `.../unsuspend`), checked constant-time against the
+    /// `X-Corelink-Internal-Auth` header. `None` ⇒ the enforcement routes are
+    /// DISABLED (404) — no un-authed suspend is ever possible. Wired from
+    /// `FABRIC_ADMIN_KEY` (the same operator secret as the tenant-plan admin).
+    pub(crate) admin_key: Option<Arc<str>>,
     /// Lease ids provisioned as CHECK-HOST leases (CF-native check-host, C1/C6),
     /// mapped to their `toolchain_digest` (the clw snapshot manifest digest the
     /// box hydrated at spawn). A fabric-internal marker table — mirrors
@@ -615,6 +629,8 @@ impl AppState {
             // composition root opts in via `with_runner_broker` (ADR-0007).
             runner_broker: None,
             runner_leases: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            suspended_tenants: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            admin_key: None,
             // Check-host mode DEFAULT-OFF: empty marker map. Populated only when
             // an acquire carries `toolchain_digest` (C1/C6).
             toolchain_digests: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -987,6 +1003,61 @@ impl AppState {
         self
     }
 
+    /// Track-C AUP1: wire the operator secret gating the enforcement endpoints.
+    /// `None` ⇒ the `.../suspend` / `.../unsuspend` routes 404 (disabled).
+    #[must_use]
+    pub fn with_admin_key(mut self, key: Option<Arc<str>>) -> Self {
+        self.admin_key = key;
+        self
+    }
+
+    /// Track-C AUP1: kill every currently-held lease of `tenant` — teardown the
+    /// box + transition the ledger to `Crashed` (the abnormal-terminal state; a
+    /// suspended tenant's live work is forcibly ended, not gracefully closed).
+    /// Returns the number of leases killed. Used by the suspend action so an
+    /// abusive/illegal workload stops immediately, not just on the next acquire.
+    pub(crate) async fn kill_tenant_leases(&self, tenant: &TenantId) -> usize {
+        // Snapshot the tenant's held leases under the lock, then act WITHOUT the
+        // lock held (teardown is async + the transition re-locks).
+        let held: Vec<String> = {
+            let Ok(ledger) = self.ledger.lock() else {
+                return 0;
+            };
+            ledger
+                .by_tenant(tenant)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|r| r.state.is_held())
+                .map(|r| r.lease_id)
+                .collect()
+        };
+        let mut killed = 0usize;
+        for lease_id in held {
+            // Teardown first (reclaim the box), then terminalize — the reaper's
+            // proven order. Revoke the CAS PAT on the way out (A7b).
+            let _ = self.teardown_lease(&lease_id).await;
+            self.revoke_pat_for(&lease_id).await;
+            let transitioned = {
+                let Ok(mut ledger) = self.ledger.lock() else {
+                    continue;
+                };
+                ledger
+                    .transition(
+                        &lease_id,
+                        corelink_runners_contracts::RunnerState::Crashed,
+                        self.clock.now_ms(),
+                    )
+                    .is_ok()
+            };
+            if transitioned {
+                self.record_slot(&lease_id, tenant, SlotEventKind::Crashed);
+                self.forget_lease(&lease_id);
+                killed += 1;
+            }
+        }
+        killed
+    }
+
     /// Track-C C2c: stash the minted per-job CAS credential for `lease_id`,
     /// held server-side until the single ticket redemption. Overwrites any prior
     /// stash for the lease (a re-provision re-mints; the latest wins — mirrors
@@ -1052,6 +1123,35 @@ impl AppState {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .contains(lease_id)
+    }
+
+    /// Track-C AUP1: mark a tenant SUSPENDED (idempotent). A suspended tenant is
+    /// rejected at `acquire` (fail-closed) and its held leases are killed by the
+    /// suspend action. `true` iff the tenant was NOT already suspended (a real
+    /// state change — used to make the forensic line + the lease-kill fire once).
+    pub(crate) fn suspend_tenant(&self, tenant: &TenantId) -> bool {
+        self.suspended_tenants
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(tenant.as_str().to_string())
+    }
+
+    /// Track-C AUP1: lift a tenant's suspension (idempotent). `true` iff the
+    /// tenant WAS suspended (a real state change).
+    pub(crate) fn unsuspend_tenant(&self, tenant: &TenantId) -> bool {
+        self.suspended_tenants
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(tenant.as_str())
+    }
+
+    /// Track-C AUP1: whether `tenant` is currently suspended. Read at the TOP of
+    /// `acquire` — a suspended tenant acquires nothing.
+    pub(crate) fn is_tenant_suspended(&self, tenant: &TenantId) -> bool {
+        self.suspended_tenants
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains(tenant.as_str())
     }
 
     /// Mark `lease_id` as a CHECK-HOST lease (C1/C6) with the `toolchain_digest`
@@ -1412,6 +1512,18 @@ pub fn app_full(
     // PAT. Default-off: 404 until `with_observability_key` arms it.
     let internal = Router::new()
         .route(OCCUPANCY_PATH, get(handlers::occupancy::occupancy))
+        // Track-C AUP1: operator enforcement (suspend/unsuspend a tenant). These
+        // gate on the operator secret INSIDE the handler (state.admin_key,
+        // constant-time; absent ⇒ 404), so they sit on the AppState router that
+        // can suspend + kill leases — not behind the tenant-PAT layer.
+        .route(
+            &capture(paths::TENANT_SUSPEND),
+            post(handlers::enforcement::suspend),
+        )
+        .route(
+            &capture(paths::TENANT_UNSUSPEND),
+            post(handlers::enforcement::unsuspend),
+        )
         .with_state(state.clone());
 
     // WP-INGEST-SCOPE: the §13.2 trajectory turn-feed WRITE side (in-box agent
