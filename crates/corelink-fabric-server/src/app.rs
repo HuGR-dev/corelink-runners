@@ -534,6 +534,19 @@ pub struct AppState {
     /// [`with_clw_endpoint`](Self::with_clw_endpoint) / `server.rs`.
     pub(crate) clw_endpoint: Option<String>,
 
+    /// Track-C C2c: the credential-ticket signer. `Some` ⇒ C2c is ON — a runner
+    /// lease's per-job CAS PAT is stashed server-side ([`pending_cred`]) and a
+    /// single-use `CLW_CRED_TICKET` is injected instead of `CLW_TOKEN`, redeemed
+    /// once at [`crate::handlers::cas_cred`]. `None` (no `FABRIC_CRED_TICKET_SECRET`)
+    /// ⇒ OFF — the `CLW_TOKEN`-in-env path is byte-identical to today.
+    pub(crate) cred_signer: Option<crate::cred_ticket::CredTicketSigner>,
+
+    /// Track-C C2c: per-lease stash of the minted CAS credential, held between
+    /// acquire and the single ticket redemption. The presence of the entry IS
+    /// the single-use latch — [`take_cred`](Self::take_cred) removes it, so a
+    /// second redemption gets `None` → `410`. GC'd in `forget_lease`.
+    pub(crate) pending_cred: Arc<Mutex<HashMap<String, crate::cred_ticket::StashedCred>>>,
+
     /// ASK-2: the billing usage-push target (corelink-billing). The single
     /// [`record_slot`](Self::record_slot) choke point taps this AFTER recording
     /// to the meter — off the admission path (a tap error is logged, never
@@ -631,6 +644,10 @@ impl AppState {
             ac_pre_lease_hook: Arc::new(crate::ac_pre_lease::NoOpAcHook),
             pat_ids: Arc::new(Mutex::new(HashMap::new())),
             clw_endpoint: None,
+            // Track-C C2c DEFAULT-OFF: no cred-ticket signer ⇒ the CLW_TOKEN-in-env
+            // path is unchanged. The composition root opts in via `with_cred_signer`.
+            cred_signer: None,
+            pending_cred: Arc::new(Mutex::new(HashMap::new())),
             // ASK-2 billing usage-push DEFAULT-OFF: the no-op target (observe +
             // succeed). The composition root opts in via `with_billing_export_target`.
             billing_export_target: Arc::new(corelink_fabric::NoopBillingTarget),
@@ -957,6 +974,40 @@ impl AppState {
         self
     }
 
+    /// Track-C C2c: wire the credential-ticket signer. `Some` ⇒ C2c ON (env-0
+    /// PAT delivery via the single-use ticket + `/v1/leases/{id}/cas-cred`);
+    /// `None` ⇒ OFF (the `CLW_TOKEN`-in-env path, byte-identical to today). The
+    /// production composition root builds it from `FABRIC_CRED_TICKET_SECRET`.
+    #[must_use]
+    pub fn with_cred_signer(
+        mut self,
+        signer: Option<crate::cred_ticket::CredTicketSigner>,
+    ) -> Self {
+        self.cred_signer = signer;
+        self
+    }
+
+    /// Track-C C2c: stash the minted per-job CAS credential for `lease_id`,
+    /// held server-side until the single ticket redemption. Overwrites any prior
+    /// stash for the lease (a re-provision re-mints; the latest wins — mirrors
+    /// `pat_ids`).
+    pub(crate) fn stash_cred(&self, lease_id: &str, cred: crate::cred_ticket::StashedCred) {
+        self.pending_cred
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(lease_id.to_string(), cred);
+    }
+
+    /// Track-C C2c: take (remove) the stashed credential for `lease_id` — the
+    /// single-use latch. `Some` on the FIRST redemption; `None` afterwards (→ the
+    /// handler returns `410`).
+    pub(crate) fn take_cred(&self, lease_id: &str) -> Option<crate::cred_ticket::StashedCred> {
+        self.pending_cred
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(lease_id)
+    }
+
     // ── WP-7 revoke helper ───────────────────────────────────────────────────
 
     /// Remove the `pat_id` for `lease_id` from the side-table and revoke it
@@ -1218,6 +1269,13 @@ impl AppState {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(lease_id);
+        // Track-C C2c: GC any un-redeemed cred stash on the same terminal path,
+        // so the stash map stays bounded by active runner leases (a lease that
+        // never redeemed its ticket must not leak its stashed PAT forever).
+        self.pending_cred
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(lease_id);
     }
 
     /// Emit one slot-occupancy event into the internal meter (BIL1,
@@ -1366,6 +1424,14 @@ pub fn app_full(
     // the token IS the lease binding). See `crate::ingest_token` + the handler.
     let ingest = Router::new()
         .route(&capture(paths::ENVELOPE_INGEST), post(envelope::ingest))
+        // Track-C C2c: the cred-ticket redemption is ticket-authed (NOT the
+        // tenant PAT — the in-container clw has only the lease-bound ticket), so
+        // it is mounted HERE, outside `require_tenant`, alongside the §13.2
+        // ingest route. The handler verifies the ticket + Held lease + single-use.
+        .route(
+            &capture(paths::LEASE_CAS_CRED),
+            post(handlers::cas_cred::redeem),
+        )
         .with_state(state.clone())
         .layer(Extension(Arc::clone(&registry)))
         // input-validation (audit r4): cap the §13 ingest body. This sub-router is
