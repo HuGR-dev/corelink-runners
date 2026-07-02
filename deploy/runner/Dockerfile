@@ -151,23 +151,28 @@ ENV RUSTUP_HOME=/home/runner/.rustup
 ENV PATH=/home/runner/.cargo/bin:$PATH
 
 # Install the Rust toolchain via rustup.
-# ⚠️ AUDIT r9 (honest correction): the rustup-init bootstrap below is fetched over
-# TLS from sh.rustup.rs but is NOT checksum-pinned — UNLIKE the runner tarball and
-# clw above, which ARE `sha256sum -c`-verified. (The previous comment here falsely
-# claimed "its SHA-256 is compared before execution"; nothing compared it.) Build-
-# time only (not the untrusted runtime container) + rustup-init verifies the
-# toolchain components it then downloads — but the bootstrap trust-root is unpinned,
-# so the X4 supply-chain floor is not yet met for this one fetch. Pinning it (a
-# versioned rustup-init URL + an operator-supplied RUSTUP_INIT_SHA256 build-arg,
-# mirroring CLW_SHA256 — the SHA must be human-verified, never fabricated) is
-# tracked in docs/handoff/2026-06-28-RELAY-rustup-init-pin.md.
-RUN curl -fsSL https://sh.rustup.rs | \
-    sh -s -- -y \
+# Track-C C2b (X4 supply-chain floor MET): the rustup-init bootstrap is now
+# fetched from a VERSIONED URL and `sha256sum -c`-verified BEFORE execution —
+# mirroring the runner tarball + clw. The SHA below was human-verified by the clw
+# go-live coordinator (downloaded the 20,838,840-byte binary, recomputed
+# `shasum -a 256`, matched Rust's published `${URL}.sha256` sidecar over TLS;
+# `docs/handoff/2026-07-02-REPLY-from-clw-coordinator-...VERIFIED-rustup-pin.md`).
+# Both ARGs are operator-overridable to bump the pinned version+SHA (re-verify
+# the SHA the same way — NEVER fabricate it). This is the rustup-init BOOTSTRAP
+# version (1.29.0), independent of the Rust TOOLCHAIN it installs (1.96.0).
+ARG RUSTUP_INIT_VERSION=1.29.0
+ARG RUSTUP_INIT_SHA256=4acc9acc76d5079515b46346a485974457b5a79893cfb01112423c89aeb5aa10
+RUN curl -fsSL "https://static.rust-lang.org/rustup/archive/${RUSTUP_INIT_VERSION}/x86_64-unknown-linux-gnu/rustup-init" \
+        -o /tmp/rustup-init && \
+    echo "${RUSTUP_INIT_SHA256}  /tmp/rustup-init" | sha256sum -c - && \
+    chmod +x /tmp/rustup-init && \
+    /tmp/rustup-init -y \
         --default-toolchain 1.96.0 \
         --profile minimal \
         --component rustfmt \
         --component clippy \
         --no-modify-path && \
+    rm -f /tmp/rustup-init && \
     rustup show
 
 # cargo-deny and cargo-audit — versions match .github/workflows/ci.yml
