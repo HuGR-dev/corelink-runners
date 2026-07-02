@@ -1122,6 +1122,9 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
     // root sets CLW_ENDPOINT=https://cas.corelink.io.
     let state = state.with_clw_endpoint(std::env::var("CLW_ENDPOINT").ok());
     let state = state.with_cred_signer(cred_signer);
+    // Track-C AUP1: the operator secret gating the enforcement endpoints (same
+    // FABRIC_ADMIN_KEY as the tenant-plan admin). Absent ⇒ the suspend routes 404.
+    let state = state.with_admin_key(cfg.admin_key.as_deref().map(std::sync::Arc::from));
 
     // WP-8a: wire the CAS PAT mint from the environment (default-off: both
     // CORELINK_RUNNER_MINT_{AUTH_KEY,URL} absent ⇒ None ⇒ moat OFF, byte-identical

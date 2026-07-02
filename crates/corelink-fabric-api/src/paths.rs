@@ -74,6 +74,12 @@ pub const LEASE_CLOSE: &str = "/v1/leases/{lease_id}/close";
 /// boot; a second redemption is `410`.
 pub const LEASE_CAS_CRED: &str = "/v1/leases/{lease_id}/cas-cred";
 
+/// Track-C AUP1: operator-authed enforcement — suspend a tenant (block acquires
+/// + kill its live leases).
+pub const TENANT_SUSPEND: &str = "/internal/v1/admin/tenants/{tenant}/suspend";
+/// Track-C AUP1: operator-authed enforcement — lift a tenant's suspension.
+pub const TENANT_UNSUSPEND: &str = "/internal/v1/admin/tenants/{tenant}/unsuspend";
+
 /// Tenant-facing live usage vs plan (M2 console data): `GET` returns the
 /// calling tenant's current active-lease count vs their plan cap.
 ///

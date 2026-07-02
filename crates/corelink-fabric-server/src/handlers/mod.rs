@@ -10,6 +10,7 @@
 pub mod admin;
 pub mod cas_cred;
 pub mod close;
+pub mod enforcement;
 pub mod envelope;
 pub mod exec_handler;
 pub mod lease_list;

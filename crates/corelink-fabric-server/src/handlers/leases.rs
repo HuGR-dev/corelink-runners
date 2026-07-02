@@ -216,6 +216,19 @@ pub(crate) async fn acquire(
 ) -> Response {
     let now_ms = state.clock.now_ms();
 
+    // ── AUP1 (Track-C enforcement). A SUSPENDED tenant acquires NOTHING —
+    // reject fail-closed at the very top, before any TTL clamp, cap resolve, or
+    // slot reserve. Suspension is an operator action against an abusive/illegal
+    // untrusted workload (its live leases are killed by the suspend action; this
+    // gate stops new ones). Same no-oracle 403 shape whether the tenant is
+    // suspended or not — an over-cap-style refusal, never an existence oracle.
+    if state.is_tenant_suspended(&tenant) {
+        return error_response(
+            ApiError::OverCap,
+            "tenant is suspended: acquire is disabled (contact the operator)",
+        );
+    }
+
     // ── F1 clamp (WP-F, P0). Clamp the requested TTL to the 60-min CI ceiling
     // BEFORE any use of `req.expiry_ms` — the minted `expiry`, the ledger
     // `deadline_ms`, and the compute reservation all read the CLAMPED value. This
