@@ -11,10 +11,14 @@ permissions:
 
 jobs:
   gates:
-    # HuGR family CI runs on the self-hosted fleet, never GitHub-hosted
-    # (same labels as corelink-server; ubuntu-latest was a founding mistake
-    # that hit the org's Actions billing wall).
-    runs-on: [self-hosted, corelink-builder]
+    # CI runs on the CoreLink ephemeral runner fleet (ADR-0007 Stage B): the
+    # `workflow_job` autoscaler provisions a cache-warm microVM per queued job
+    # via `POST /webhooks/github`, the job runs, the box self-deregisters.
+    # `corelink-dogfood` is the JIT label the autoscaler serves (NEVER the
+    # persistent `corelink-builder` Mac — that is being retired from CI). The
+    # runner image bakes the full gate toolchain (rust 1.96.0 + rustfmt/clippy +
+    # cargo-deny/cargo-audit), so the gate runs warm. See deploy/autoscaler-stage-b.md.
+    runs-on: corelink-dogfood
     steps:
       - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0  # v6.0.3 (Node 24; v4 is Node 20, forced off runners 2026-06-16)
         with:
