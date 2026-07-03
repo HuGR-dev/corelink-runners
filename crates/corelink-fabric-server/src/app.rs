@@ -1089,6 +1089,18 @@ impl AppState {
     /// `forget_lease`, which is sync and cannot await. This async fn covers the
     /// revoke; `forget_lease` covers the sync GC.
     pub(crate) async fn revoke_pat_for(&self, lease_id: &str) {
+        // Track-C C2c: drop any un-redeemed cred stash on EVERY revoke, not only
+        // via `forget_lease`. Rollback paths (finalize/admission give-up) inline
+        // teardown + ledger-remove + `revoke_pat_for` but skip `forget_lease`, so
+        // a lease that stashed its cred (before provision) then failed to provision
+        // would leak its PAT-bearing `StashedCred` forever (its ledger row is gone,
+        // no reaper reclaims it). `revoke_pat_for` fires on all those paths, so
+        // GC'ing here closes the leak at the root; `forget_lease` still GCs too
+        // (idempotent — a second `remove` is a no-op).
+        self.pending_cred
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(lease_id);
         let pat_id = {
             let mut pat_ids = self.pat_ids.lock().unwrap_or_else(|p| p.into_inner());
             pat_ids.remove(lease_id)
@@ -1678,6 +1690,35 @@ mod tests {
         assert!(
             !state.is_runner_lease("lease-x"),
             "no lease is a runner lease by default"
+        );
+    }
+
+    /// Leak fix: `revoke_pat_for` (which fires on rollback paths that skip
+    /// `forget_lease`) must GC the C2c cred stash, so a lease that stashed its
+    /// PAT then failed to provision does not leak a `StashedCred` forever.
+    #[tokio::test]
+    async fn revoke_pat_for_gcs_the_cred_stash() {
+        let state = bare_state();
+        state.stash_cred(
+            "lease-leak",
+            crate::cred_ticket::StashedCred {
+                token: "pat".into(),
+                endpoint: "https://cas".into(),
+                tenant: "acme".into(),
+            },
+        );
+        assert!(
+            state
+                .pending_cred
+                .lock()
+                .unwrap()
+                .contains_key("lease-leak"),
+            "stash present after stash_cred"
+        );
+        state.revoke_pat_for("lease-leak").await;
+        assert!(
+            state.pending_cred.lock().unwrap().is_empty(),
+            "revoke_pat_for must drop the cred stash (rollback-path leak fix)"
         );
     }
 
