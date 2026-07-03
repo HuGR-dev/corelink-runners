@@ -112,17 +112,47 @@ pub const CLW_CRED_TICKET_ENV: &str = "CLW_CRED_TICKET";
 /// ticket (`POST /v1/leases/{CLW_LEASE_ID}/cas-cred`).
 pub const CLW_LEASE_ID_ENV: &str = "CLW_LEASE_ID";
 
+/// `CLW_FABRIC_ENDPOINT` — Track-C C2c env-0: the corelink-fabricd base URL the
+/// in-box `clw` POSTs the ticket redemption against
+/// (`{CLW_FABRIC_ENDPOINT}/v1/leases/{id}/cas-cred`). This is the fabric's OWN
+/// public base — distinct from `CLW_ENDPOINT` (the CAS/AC base). Sourced from
+/// the process env [`crate::envelope_inject::FABRIC_PUBLIC_BASE_URL`], the SAME
+/// self/public base the fabric already uses to build the absolute §13.2 ingest
+/// URL; the cas-cred route is mounted on that same base (`app.rs` LEASE_CAS_CRED).
+pub const CLW_FABRIC_ENDPOINT_ENV: &str = "CLW_FABRIC_ENDPOINT";
+
 /// Track-C C2c: inject the CLW_* env for a runner box in the **env-0** posture —
 /// a single-use `CLW_CRED_TICKET` (+ `CLW_LEASE_ID`) INSTEAD of `CLW_TOKEN`. The
 /// per-job PAT is NOT placed in the env; `clw` redeems the ticket once at the
 /// trusted boot at `POST /v1/leases/{lease_id}/cas-cred`. `CLW_ENDPOINT`,
 /// `CLW_TENANT`, `CLW_REF_DOMAIN` are still injected (config, not secrets).
+///
+/// `CLW_FABRIC_ENDPOINT` (the fabricd base `clw` redeems the ticket against) is
+/// read from the process env [`crate::envelope_inject::FABRIC_PUBLIC_BASE_URL`]
+/// — the same self/public base the §13.2 ingest injection already uses — so the
+/// redemption target lands on the router that mounts the cas-cred route.
 pub fn inject_cred_ticket_env(
     spec: &mut ContainerSpec,
     ticket: &str,
     lease_id: &str,
     endpoint: &str,
     tenant: &str,
+) {
+    inject_cred_ticket_env_with(spec, ticket, lease_id, endpoint, tenant, |k| {
+        std::env::var(k).ok()
+    });
+}
+
+/// [`inject_cred_ticket_env`] over an injected env accessor (testable without
+/// mutating the process environment). Mirrors
+/// [`crate::envelope_inject::inject_ingest_env_with`].
+pub fn inject_cred_ticket_env_with(
+    spec: &mut ContainerSpec,
+    ticket: &str,
+    lease_id: &str,
+    endpoint: &str,
+    tenant: &str,
+    get: impl Fn(&str) -> Option<String>,
 ) {
     spec.env
         .push((CLW_ENDPOINT_ENV.to_string(), endpoint.to_string()));
@@ -138,6 +168,20 @@ pub fn inject_cred_ticket_env(
         CLW_REF_DOMAIN_ENV.to_string(),
         CLW_REF_DOMAIN_RUNNER.to_string(),
     ));
+    // The fabricd base URL `clw` redeems the ticket against
+    // (`{CLW_FABRIC_ENDPOINT}/v1/leases/{id}/cas-cred`). Read from the SAME
+    // self/public base env the §13.2 ingest injection uses — the cas-cred route
+    // is mounted on that base. Trim exactly one trailing slash so a base with or
+    // without it joins cleanly against the path clw appends. Absent/blank ⇒ not
+    // injected: only ridden when C2c is armed AND the fabric knows its public URL.
+    if let Some(base) = get(crate::envelope_inject::FABRIC_PUBLIC_BASE_URL)
+        .filter(|s| !s.trim().is_empty())
+    {
+        spec.env.push((
+            CLW_FABRIC_ENDPOINT_ENV.to_string(),
+            base.trim_end_matches('/').to_string(),
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -216,7 +260,19 @@ mod tests {
         // Track-C C2c env-0: the ticket + lease id + config go into the env; the
         // per-job PAT (CLW_TOKEN) MUST be absent — it is fetched via redemption.
         let mut spec = bare_runner_spec();
-        inject_cred_ticket_env(&mut spec, "the-ticket", "lease-9", "https://cas", "acme");
+        // Inject the fabric public base via the `_with` accessor (deterministic,
+        // no process-env mutation) — the base the fabricd cas-cred route mounts on.
+        inject_cred_ticket_env_with(
+            &mut spec,
+            "the-ticket",
+            "lease-9",
+            "https://cas",
+            "acme",
+            |k| {
+                (k == crate::envelope_inject::FABRIC_PUBLIC_BASE_URL)
+                    .then(|| "https://fabric.example.com".to_string())
+            },
+        );
         assert_eq!(env_get(&spec, CLW_CRED_TICKET_ENV), Some("the-ticket"));
         assert_eq!(env_get(&spec, CLW_LEASE_ID_ENV), Some("lease-9"));
         assert_eq!(env_get(&spec, CLW_ENDPOINT_ENV), Some("https://cas"));
@@ -225,10 +281,55 @@ mod tests {
             env_get(&spec, CLW_REF_DOMAIN_ENV),
             Some(CLW_REF_DOMAIN_RUNNER)
         );
+        // C2c gap fix: the fabricd base `clw` redeems the ticket against MUST be
+        // injected (it builds `{CLW_FABRIC_ENDPOINT}/v1/leases/{id}/cas-cred`).
+        assert_eq!(
+            env_get(&spec, CLW_FABRIC_ENDPOINT_ENV),
+            Some("https://fabric.example.com"),
+            "C2c: clw needs the fabricd base URL to redeem the cred ticket"
+        );
         assert_eq!(
             env_get(&spec, CLW_TOKEN_ENV),
             None,
             "env-0: the per-job CAS PAT must NEVER ride the container env under C2c"
+        );
+    }
+
+    #[test]
+    fn cred_ticket_env_omits_fabric_endpoint_when_public_base_absent() {
+        // When the fabric does not know its public base URL, CLW_FABRIC_ENDPOINT
+        // is NOT injected (blank/absent ⇒ omitted) — mirrors the ingest injection
+        // fallback. The other C2c env still rides.
+        let mut spec = bare_runner_spec();
+        inject_cred_ticket_env_with(
+            &mut spec,
+            "the-ticket",
+            "lease-9",
+            "https://cas",
+            "acme",
+            |_| None,
+        );
+        assert_eq!(env_get(&spec, CLW_CRED_TICKET_ENV), Some("the-ticket"));
+        assert_eq!(env_get(&spec, CLW_FABRIC_ENDPOINT_ENV), None);
+    }
+
+    #[test]
+    fn cred_ticket_env_trims_trailing_slash_on_fabric_endpoint() {
+        let mut spec = bare_runner_spec();
+        inject_cred_ticket_env_with(
+            &mut spec,
+            "the-ticket",
+            "lease-9",
+            "https://cas",
+            "acme",
+            |k| {
+                (k == crate::envelope_inject::FABRIC_PUBLIC_BASE_URL)
+                    .then(|| "https://fabric.example.com/".to_string())
+            },
+        );
+        assert_eq!(
+            env_get(&spec, CLW_FABRIC_ENDPOINT_ENV),
+            Some("https://fabric.example.com")
         );
     }
 }
