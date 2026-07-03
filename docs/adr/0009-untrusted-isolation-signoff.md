@@ -25,14 +25,23 @@ Our own spawn path enforces the matching invariants: **one container Durable Obj
 
 1. **The boundary already IS a microVM.** It is literally Firecracker under the hood — one VM per job, discarded after. Escape requires a hypervisor breakout, not a shared-kernel bug. That is the bar, met — not a weaker substitute.
 2. **Cloudflare owns the hypervisor hardening, for exactly this threat model.** They build and operate this substrate *for untrusted code*. Their security team hardens the VMM surface far better than we could hand-rolling KVM on bought metal.
-3. **Track-C stacks on top as defense-in-depth on the software boundary** — env-0 creds (PAT never in the untrusted env), lease-bound PAT TTL + revoke-on-teardown, cap-drop / no-new-privileges / pids+memory limits, per-tenant repo allowlist, tenant-suspend enforcement. Result: **CF microVM boundary + our hardened software boundary = layered**, not single-point.
+3. **Track-C stacks on top as defense-in-depth on the software boundary — CF-path status: PARTIAL.** The isolation boundary IS the per-lease Firecracker microVM; Track-C is the additional software boundary layered on top. Its coverage on the CF substrate is honestly **partial** — some controls are deployed, others remain follow-ups (they degrade defense-in-depth, not the microVM boundary):
+   - **Deployed on the CF path:**
+     - **Image pin** — the spawn asserts a content-pinned `@sha256:` digest against the deploy-pinned `PINNED_IMAGE_DIGEST` (`deploy/cloudflare/src/index.ts`).
+     - **Revoke-on-complete** — the per-job CAS PAT is revoked at `workflow_job:completed` (PAT TTL is the backstop).
+     - **`deniedHosts` metadata/IMDS denylist** — the container is blocked from `169.254.169.254` / `metadata.google.internal` / link-local ranges even with `enableInternet: true`, closing G2 (metadata credential exposure), plus an operator egress kill-switch (`/v1/egress-cutoff`).
+     - **Exec-server auth REQUIRED** — a `mode==="check"` spawn fails closed (503) unless `EXEC_SERVER_AUTH_TOKEN` is set (no serve-unauthenticated default).
+     - **App-layer resource caps (ulimit)** — the runner image bounds the untrusted job with `ulimit -u` (fork-bomb) + `ulimit -v` (~12 GiB, near the standard-4 ceiling) and a non-root `USER`, the in-image equivalent of the on-box `--cap-drop`/`--pids-limit`/`--memory`.
+   - **Follow-ups (NOT yet on the CF path):** env-0 cred-ticket rollout (C2c), per-tenant repo allowlist, tenant-suspend enforcement, and the read-only-rootfs / no-new-privileges cap-drop set that the on-box `DockerEngine` applies but the CF substrate does not.
+
+   Result: **CF microVM boundary (the isolation boundary) + a PARTIAL-but-growing hardened software boundary = layered**, not single-point. The microVM is load-bearing; the software boundary is defense-in-depth, and its CF coverage is stated here honestly rather than assumed complete.
 4. **Own-metal Firecracker is strictly worse right now:** the *same* technology (Firecracker), but we operate it worse, we **lose R2 co-location** (zero-egress cache — the moat), and we must buy + run KVM hardware (ratified decision #5 already blocks it on that buy). No security upside over CF's Firecracker; real operational + moat downside.
 
 ### Conditions attached to the sign-off (not a blank check)
 
 1. **One-tenant-per-VM, fresh per lease, destroyed after.** VERIFIED in the spawn path (one DO per job + `destroy()` teardown). Any change that reused a VM across leases/tenants voids this ADR.
 2. **The VM (Firecracker) boundary must hold** — keep the `standard-4` VM instance type; do not move untrusted CI to any lighter shared/co-tenant container mode without re-review.
-3. **Track-C stays ON in production** — the software hardening is mandatory even under a strong sandbox (defense-in-depth), never treated as redundant.
+3. **Track-C stays ON in production — CF coverage is PARTIAL (not accept-with-waiver).** The software hardening is mandatory even under a strong sandbox (defense-in-depth), never treated as redundant. Its CF-path coverage is enumerated honestly in Why-3: **deployed** = image pin, revoke-on-complete, `deniedHosts` metadata/IMDS denylist + egress kill-switch, required exec-server auth, and app-layer ulimit caps; **follow-ups** = env-0 cred-ticket, repo allowlist, tenant-suspend, read-only-rootfs/cap-drop. The isolation boundary remains the per-lease Firecracker microVM regardless of which follow-ups land — the caps/egress/exec fixes are BUILT, so this is a stated-partial posture, not a waiver granted against unbuilt work.
 4. **Re-review trigger:** if we ever co-tenant multiple tenants *inside a single VM* (we do not, and should not). One-lease-one-box keeps cross-tenant escape gated behind a hypervisor break.
 
 ## Residual risk (stated honestly)
