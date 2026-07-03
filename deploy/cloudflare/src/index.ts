@@ -376,54 +376,71 @@ export default {
 
     // POST /v1/spawn
     if (request.method === "POST" && pathname === "/v1/spawn") {
-      const body = (await request.json()) as SpawnBody;
+      let body: SpawnBody;
+      try {
+        body = (await request.json()) as SpawnBody;
+      } catch (e) {
+        return json({ error: `invalid JSON body: ${(e as Error).message}` }, 400);
+      }
 
       // README wrinkle #1: image is wrangler-bound; image_digest is an ASSERTION.
-      if (!body.image_digest.includes("@sha256:")) {
-        return json({ error: "image_digest must be content-pinned (@sha256:)" }, 400);
+      // Guard the type too — an absent/non-string image_digest would throw on
+      // `.includes` and surface as an opaque 500 rather than a clean 400.
+      if (typeof body.image_digest !== "string" || !body.image_digest.includes("@sha256:")) {
+        return json({ error: "image_digest must be a content-pinned string (@sha256:)" }, 400);
       }
 
-      // ── Check-mode (C2): route to CHECK_HOST_CONTAINER (NOT the runner DO) ──
-      // Additive + back-compat: mode absent OR "runner" ⇒ the unchanged runner
-      // path below. mode==="check" requires toolchain_digest; it is injected as
-      // TOOLCHAIN_DIGEST so the container hydrates the toolchain at start (C2/C5).
-      if (body.mode === "check") {
-        if (!body.toolchain_digest) {
-          return json({ error: "toolchain_digest required when mode==check" }, 400);
+      // The container spawn (SDK `start()`) is the failure-prone step: a bad image
+      // build/push or an SDK error would otherwise throw UNCAUGHT and Cloudflare
+      // returns an opaque 500 with no diagnostic. Wrap it so the real cause is
+      // surfaced as a structured 502 (fail-closed — the fabric's CloudflareEngine
+      // sees a diagnosable Err, never a fabricated success). Mirrors the
+      // /webhook + /v1/exec + /v1/teardown error discipline already in this file.
+      try {
+        // ── Check-mode (C2): route to CHECK_HOST_CONTAINER (NOT the runner DO) ──
+        // Additive + back-compat: mode absent OR "runner" ⇒ the unchanged runner
+        // path below. mode==="check" requires toolchain_digest; injected as
+        // TOOLCHAIN_DIGEST so the container hydrates the toolchain at start (C2/C5).
+        if (body.mode === "check") {
+          if (!body.toolchain_digest) {
+            return json({ error: "toolchain_digest required when mode==check" }, 400);
+          }
+          const handle = crypto.randomUUID();
+          const container = getContainer(env.CHECK_HOST_CONTAINER, handle);
+          // Inject the lease env + TOOLCHAIN_DIGEST; egress on so clw can hydrate
+          // the toolchain from CAS at start (C2).
+          await container.start({
+            envVars: {
+              ...body.env,
+              TOOLCHAIN_DIGEST: body.toolchain_digest,
+              // Track-C C2b: inject the exec-server bearer (defense-in-depth) so the
+              // in-container /exec requires it; the SAME value is presented on the
+              // /v1/exec containerFetch below. Absent secret ⇒ no auth (back-compat).
+              ...(env.EXEC_SERVER_AUTH_TOKEN
+                ? { EXEC_SERVER_AUTH_TOKEN: env.EXEC_SERVER_AUTH_TOKEN }
+                : {}),
+            },
+            enableInternet: true,
+          });
+          return json({ handle }, 201);
         }
+
+        // ── Runner mode (default / absent) — byte-unchanged ──────────────────
+        if (env.PINNED_IMAGE_DIGEST && body.image_digest !== env.PINNED_IMAGE_DIGEST) {
+          return json(
+            { error: "image_digest does not match the deployed pinned image" },
+            409,
+          );
+        }
+
         const handle = crypto.randomUUID();
-        const container = getContainer(env.CHECK_HOST_CONTAINER, handle);
-        // Inject the lease env + TOOLCHAIN_DIGEST; egress on so clw can hydrate
-        // the toolchain from CAS at start (C2).
-        await container.start({
-          envVars: {
-            ...body.env,
-            TOOLCHAIN_DIGEST: body.toolchain_digest,
-            // Track-C C2b: inject the exec-server bearer (defense-in-depth) so the
-            // in-container /exec requires it; the SAME value is presented on the
-            // /v1/exec containerFetch below. Absent secret ⇒ no auth (back-compat).
-            ...(env.EXEC_SERVER_AUTH_TOKEN
-              ? { EXEC_SERVER_AUTH_TOKEN: env.EXEC_SERVER_AUTH_TOKEN }
-              : {}),
-          },
-          enableInternet: true,
-        });
+        const container = getContainer(env.RUNNER_CONTAINER, handle);
+        // Inject the per-job env (JIT config + CLW_*) at start (runtime, not baked).
+        await container.startWithEnv(body.env);
         return json({ handle }, 201);
+      } catch (e) {
+        return json({ error: `spawn failed: ${(e as Error).message}` }, 502);
       }
-
-      // ── Runner mode (default / absent) — byte-unchanged ────────────────────
-      if (env.PINNED_IMAGE_DIGEST && body.image_digest !== env.PINNED_IMAGE_DIGEST) {
-        return json(
-          { error: "image_digest does not match the deployed pinned image" },
-          409,
-        );
-      }
-
-      const handle = crypto.randomUUID();
-      const container = getContainer(env.RUNNER_CONTAINER, handle);
-      // Inject the per-job env (JIT config + CLW_*) at start (runtime, not baked).
-      await container.startWithEnv(body.env);
-      return json({ handle }, 201);
     }
 
     // ── POST /v1/exec (C3) — run argv in an already-spawned check-host lease ──
