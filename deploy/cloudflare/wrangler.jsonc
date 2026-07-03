@@ -53,8 +53,18 @@
     {
       "class_name": "RunnerContainer",
       // The real runner image (GH-Actions agent + clw + Rust toolchain).
-      // Build context = deploy/runner (its entrypoint.sh + Dockerfile).
-      "image": "../runner/Dockerfile",
+      // DOCKER-FREE DEPLOY: this now references the PRE-BUILT image in the
+      // Cloudflare managed registry, built + pushed by CI (the
+      // `.github/workflows/build-cf-container-images.yml` workflow), NOT the local
+      // Dockerfile. A local `wrangler deploy` no longer needs a Docker daemon for
+      // THIS container.
+      //
+      // Registry ref format: registry.cloudflare.com/<ACCOUNT_ID>/<IMAGE>:<TAG>
+      // (docs: https://developers.cloudflare.com/containers/platform-details/image-management/).
+      // This is the LIVE runner image confirmed via `wrangler containers info`.
+      // To refresh: run the CI workflow, take the new tag/digest from its job
+      // summary, and update this ref (prefer @sha256:<digest> for an immutable X4 pin).
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-runnercontainer:fdb98123",
       // standard-4 = 4 vCPU / 12 GiB / 20 GB disk — fits CI, clears the runner
       // disk floor (RUNNER_EPHEMERAL_STORAGE_FLOOR_MB).
       "instance_type": "standard-4",
@@ -62,9 +72,22 @@
     },
     {
       // CF-native check-host (campaign B). Build context = deploy/check-host (its
-      // Dockerfile + entrypoint.sh land in W2; referenced ahead of time per the
-      // contract WP table). Runs the in-container exec-server on port 8080 (C4);
-      // hydrates the toolchain at start from the injected TOOLCHAIN_DIGEST (C5).
+      // Dockerfile + entrypoint.sh). Runs the in-container exec-server on port 8080
+      // (C4); hydrates the toolchain at start from the injected TOOLCHAIN_DIGEST (C5).
+      //
+      // DECOUPLED FROM THE RUNNER: unlike RunnerContainer, the check-host image has
+      // NEVER been pushed to the CF managed registry (no
+      // `corelink-spawn-worker-checkhostcontainer` there yet). The
+      // `.github/workflows/build-cf-container-images.yml` CI workflow CREATES it on
+      // its first run. Until that first push exists, pointing this at a non-existent
+      // registry image would BREAK `wrangler deploy`, so check-host stays on its
+      // Dockerfile for now (Docker is still required to deploy THIS container until
+      // the first CI push lands).
+      //
+      // POST-FIRST-PUSH — swap the "image" line below for the registry ref printed
+      // in the CI job summary, e.g. (prefer the @sha256 form for an immutable pin):
+      //   "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-checkhostcontainer:<FILL-AFTER-FIRST-PUSH>",
+      // at which point a local `wrangler deploy` becomes fully Docker-free.
       "class_name": "CheckHostContainer",
       "image": "../check-host/Dockerfile",
       "instance_type": "standard-4",
