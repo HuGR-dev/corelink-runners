@@ -93,6 +93,16 @@ pub enum MintError {
         /// The lease deadline it must not exceed (unix ms).
         lease_deadline_ms: u64,
     },
+    /// The lease has too little time remaining (after the skew margin) to
+    /// request a POSITIVE-`ttl_seconds` PAT. We fail closed WITHOUT calling the
+    /// mint: a `ttl_seconds = 0` request is invalid by contract (the Server
+    /// maps `0 → "no expiry"` and 400s it — 2026-07-02), and a non-expiring
+    /// runner PAT must be impossible to even *request*. Guarding locally makes
+    /// this invariant independent of the Server's validation.
+    LeaseTooShort {
+        /// The lease's remaining time at mint (unix ms) — below the margin.
+        remaining_ms: u64,
+    },
 }
 
 impl std::fmt::Display for MintError {
@@ -109,6 +119,11 @@ impl std::fmt::Display for MintError {
                 f,
                 "minted PAT expires_ms {expires_ms} exceeds lease deadline {lease_deadline_ms} \
                  (A7b violation — fail CLOSED)"
+            ),
+            Self::LeaseTooShort { remaining_ms } => write!(
+                f,
+                "lease has only {remaining_ms}ms remaining — too short to request a \
+                 bounded (positive-ttl) PAT; fail CLOSED rather than request a non-expiring one"
             ),
         }
     }
@@ -369,12 +384,17 @@ impl<H: MintHttp> CasPatMint for HttpCasPatMint<H> {
             // Request a PAT that expires WITH the lease: the remaining time,
             // shrunk by the skew margin so the server-stamped expiry stays ≤ the
             // deadline (keeps the strict A7b bound below satisfiable). Saturating
-            // arithmetic: an already-past-deadline lease yields ttl 0 → the
-            // server default (or an immediate expiry) trips A7b → fail-closed.
-            let ttl_seconds = lease_deadline_ms
-                .saturating_sub(now_ms)
-                .saturating_sub(MINT_TTL_SKEW_MARGIN_MS)
-                / 1000;
+            // arithmetic: a near-expired lease yields ttl 0.
+            let remaining_ms = lease_deadline_ms.saturating_sub(now_ms);
+            let ttl_seconds = remaining_ms.saturating_sub(MINT_TTL_SKEW_MARGIN_MS) / 1000;
+            // Fail closed BEFORE the call on a zero ttl: `ttl_seconds = 0` is
+            // invalid by contract (the Server maps 0 → "no expiry" and 400s it,
+            // 2026-07-02). Guarding here makes "never request a non-expiring
+            // runner PAT" hold independently of the Server's validation — a
+            // near-expired lease simply does not provision (the safe direction).
+            if ttl_seconds == 0 {
+                return Err(MintError::LeaseTooShort { remaining_ms });
+            }
             let body = serde_json::to_string(&MintRequestBody {
                 owner_tenant,
                 job_id,
@@ -699,23 +719,28 @@ mod tests {
     }
 
     /// A lease with less remaining time than the skew margin derives
-    /// `ttl_seconds == 0`. Saturating arithmetic (never underflows/panics); a
-    /// near-expired lease requesting 0 is the safe direction — the box is about
-    /// to be reaped, and the strict A7b bound stays the ultimate guard.
+    /// `ttl_seconds == 0` — which is INVALID by contract (Server maps 0 → "no
+    /// expiry"). The client fails closed BEFORE any HTTP call, returning
+    /// `LeaseTooShort`, so it can never request a non-expiring runner PAT
+    /// regardless of the Server's validation. Saturating arithmetic (no panic).
     #[tokio::test]
-    async fn mint_near_expired_lease_derives_zero_ttl_saturating() {
+    async fn mint_near_expired_lease_fails_closed_without_calling_the_mint() {
+        // A response that WOULD succeed — proving the guard fires before the call.
         let resp_body = r#"{"token":"t","pat_id":"p","expires_ms":1}"#;
         let c = client(vec![ok_body(resp_body)]);
-        // 10 s remaining < 30 s margin ⇒ ttl saturates to 0 (no underflow).
+        // 10 s remaining < 30 s margin ⇒ ttl saturates to 0 ⇒ local fail-closed.
         let now = DEADLINE - 10_000;
-        c.mint("acme", "job-nearly-expired", DEADLINE, now)
+        let err = c
+            .mint("acme", "job-nearly-expired", DEADLINE, now)
             .await
-            .expect("mint call itself succeeds; the service response drives the outcome");
-        let body = &c.http.calls()[0].2;
-        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
-        assert_eq!(
-            parsed["ttl_seconds"], 0,
-            "remaining < skew margin must saturate ttl_seconds to 0, never underflow"
+            .expect_err("a zero-ttl (near-expired) lease must fail closed, never mint");
+        assert!(
+            matches!(err, MintError::LeaseTooShort { remaining_ms } if remaining_ms == 10_000),
+            "expected LeaseTooShort{{remaining_ms=10000}}; got {err:?}"
+        );
+        assert!(
+            c.http.calls().is_empty(),
+            "the mint must NOT be called when ttl_seconds would be 0 (never request a non-expiring PAT)"
         );
     }
 
