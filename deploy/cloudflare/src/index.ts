@@ -209,16 +209,65 @@ async function mintJit(env: Env, repoFullName: string, label: string): Promise<s
 // past the longest CI job (the entry is normally deleted at completion).
 const JOB_PAT_TTL_S = 7200;
 
+// Container-start retry (root-caused 2026-07-03): Cloudflare Container DO
+// `start()` intermittently fails with a TRANSIENT platform error — e.g.
+// "Internal error while starting up Durable Object storage caused object to be
+// reset" — where the SAME call succeeds moments later on a fresh DO (observed:
+// a 201 spawn at 14:40, a 502 on the same path at 16:34). It is a CF blip, not a
+// config error. Retry a bounded number of times, each with a FRESH handle (a new
+// DO, side-stepping a reset one); surface the last error only after exhausting
+// attempts, so a PERSISTENT misconfiguration still fails closed (never a silent
+// non-spawn). Small linear backoff stays well inside the webhook's ~10s budget
+// (a real spawn is ~3s).
+const SPAWN_MAX_ATTEMPTS = 3;
+// A single `start()` attempt is abandoned after this so a HUNG DO start (the
+// transient can hang, not just throw) is retried on a fresh DO instead of
+// stalling forever. Kept short so 3 attempts + backoff fit the background budget.
+const SPAWN_ATTEMPT_TIMEOUT_MS = 8000;
+
+async function startWithRetry(start: (handle: string) => Promise<void>): Promise<string> {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= SPAWN_MAX_ATTEMPTS; attempt++) {
+    const handle = crypto.randomUUID();
+    try {
+      // Race the start against a timeout — a hung start rejects and is retried.
+      await Promise.race([
+        start(handle),
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () => reject(new Error(`start timed out after ${SPAWN_ATTEMPT_TIMEOUT_MS}ms`)),
+            SPAWN_ATTEMPT_TIMEOUT_MS,
+          ),
+        ),
+      ]);
+      return handle;
+    } catch (e) {
+      lastErr = e;
+      console.log(
+        `container start attempt ${attempt}/${SPAWN_MAX_ATTEMPTS} failed (transient?): ` +
+          `${(e as Error).message}`,
+      );
+      if (attempt < SPAWN_MAX_ATTEMPTS) {
+        await new Promise((r) => setTimeout(r, 300 * attempt));
+      }
+    }
+  }
+  throw new Error(
+    `container start failed after ${SPAWN_MAX_ATTEMPTS} attempts: ${(lastErr as Error).message}`,
+  );
+}
+
 // Spawn one runner container with the JIT injected + cache-warm CLW_* (the
 // shared spawn path). `buildContainerEnv` (./lib) is fail-open to cold. On a warm
 // mint it returns the pat_id, which we stash in KV under jobId so the later
 // workflow_job:completed can revoke that exact PAT (the /revoke contract keys on
 // pat_id, not job_id).
 async function spawnRunner(env: Env, jit: string, jobId: string): Promise<string> {
-  const handle = crypto.randomUUID();
-  const container = getContainer(env.RUNNER_CONTAINER, handle);
+  // Mint ONCE (never re-mint on a start retry), then start-with-retry.
   const { containerEnv, patId } = await buildContainerEnv(env, jit, jobId);
-  await container.startWithEnv(containerEnv);
+  const handle = await startWithRetry((h) =>
+    getContainer(env.RUNNER_CONTAINER, h).startWithEnv(containerEnv),
+  );
   if (patId && env.RUNNER_JOB_PATS) {
     // Best-effort: if the put fails, the PAT just TTL-expires (fail-open).
     await env.RUNNER_JOB_PATS.put(jobId, patId, { expirationTtl: JOB_PAT_TTL_S }).catch((e) =>
@@ -286,7 +335,7 @@ async function maybeBillCompletedJob(
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const { pathname } = url;
 
@@ -358,17 +407,24 @@ export default {
       if (!(await claimSpawn(env.RUNNER_JOB_PATS, jobId))) {
         return json({ ok: true, deduped: true, job_id: jobId }, 200);
       }
-      try {
-        const jit = await mintJit(env, repo, label);
-        const handle = await spawnRunner(env, jit, jobId);
-        return json({ ok: true, handle }, 201);
-      } catch (e) {
-        // Mint/spawn failed: RELEASE the claim so a legitimate retry (GitHub
-        // redelivery / re-queue) can claim again and actually spawn — otherwise
-        // a transient failure would block this job until the claim TTL-expires.
-        await releaseSpawnClaim(env.RUNNER_JOB_PATS, jobId);
-        return json({ error: `autoscale failed: ${(e as Error).message}` }, 502);
-      }
+      // Respond to GitHub FAST (202) and do the mint+spawn in the BACKGROUND:
+      // awaiting container.start() inline risks GitHub's 10s webhook timeout →
+      // 504 whenever a DO start HANGS on a transient reset (observed 2026-07-03).
+      // `startWithRetry` (per-attempt timeout + fresh DO) then abandons a hung
+      // start and retries instead of stalling the webhook. On terminal failure we
+      // RELEASE the claim so a GitHub redelivery / re-queue can spawn.
+      ctx.waitUntil(
+        (async () => {
+          try {
+            const jit = await mintJit(env, repo, label);
+            await spawnRunner(env, jit, jobId);
+          } catch (e) {
+            await releaseSpawnClaim(env.RUNNER_JOB_PATS, jobId);
+            console.log(`background autoscale failed for job ${jobId}: ${(e as Error).message}`);
+          }
+        })(),
+      );
+      return json({ ok: true, spawning: true, job_id: jobId }, 202);
     }
 
     // ── /v1/* routes — bearer-authed (the fabric/Engine seam) ────────────────
@@ -376,54 +432,71 @@ export default {
 
     // POST /v1/spawn
     if (request.method === "POST" && pathname === "/v1/spawn") {
-      const body = (await request.json()) as SpawnBody;
+      let body: SpawnBody;
+      try {
+        body = (await request.json()) as SpawnBody;
+      } catch (e) {
+        return json({ error: `invalid JSON body: ${(e as Error).message}` }, 400);
+      }
 
       // README wrinkle #1: image is wrangler-bound; image_digest is an ASSERTION.
-      if (!body.image_digest.includes("@sha256:")) {
-        return json({ error: "image_digest must be content-pinned (@sha256:)" }, 400);
+      // Guard the type too — an absent/non-string image_digest would throw on
+      // `.includes` and surface as an opaque 500 rather than a clean 400.
+      if (typeof body.image_digest !== "string" || !body.image_digest.includes("@sha256:")) {
+        return json({ error: "image_digest must be a content-pinned string (@sha256:)" }, 400);
       }
 
-      // ── Check-mode (C2): route to CHECK_HOST_CONTAINER (NOT the runner DO) ──
-      // Additive + back-compat: mode absent OR "runner" ⇒ the unchanged runner
-      // path below. mode==="check" requires toolchain_digest; it is injected as
-      // TOOLCHAIN_DIGEST so the container hydrates the toolchain at start (C2/C5).
-      if (body.mode === "check") {
-        if (!body.toolchain_digest) {
-          return json({ error: "toolchain_digest required when mode==check" }, 400);
+      // The container spawn (SDK `start()`) is the failure-prone step: a bad image
+      // build/push or an SDK error would otherwise throw UNCAUGHT and Cloudflare
+      // returns an opaque 500 with no diagnostic. Wrap it so the real cause is
+      // surfaced as a structured 502 (fail-closed — the fabric's CloudflareEngine
+      // sees a diagnosable Err, never a fabricated success). Mirrors the
+      // /webhook + /v1/exec + /v1/teardown error discipline already in this file.
+      try {
+        // ── Check-mode (C2): route to CHECK_HOST_CONTAINER (NOT the runner DO) ──
+        // Additive + back-compat: mode absent OR "runner" ⇒ the unchanged runner
+        // path below. mode==="check" requires toolchain_digest; injected as
+        // TOOLCHAIN_DIGEST so the container hydrates the toolchain at start (C2/C5).
+        if (body.mode === "check") {
+          if (!body.toolchain_digest) {
+            return json({ error: "toolchain_digest required when mode==check" }, 400);
+          }
+          // Retry the DO start on a transient CF reset (fresh handle each try).
+          const handle = await startWithRetry((h) =>
+            getContainer(env.CHECK_HOST_CONTAINER, h).start({
+              envVars: {
+                ...body.env,
+                TOOLCHAIN_DIGEST: body.toolchain_digest!,
+                // Track-C C2b: inject the exec-server bearer (defense-in-depth) so the
+                // in-container /exec requires it; the SAME value is presented on the
+                // /v1/exec containerFetch below. Absent secret ⇒ no auth (back-compat).
+                ...(env.EXEC_SERVER_AUTH_TOKEN
+                  ? { EXEC_SERVER_AUTH_TOKEN: env.EXEC_SERVER_AUTH_TOKEN }
+                  : {}),
+              },
+              enableInternet: true,
+            }),
+          );
+          return json({ handle }, 201);
         }
-        const handle = crypto.randomUUID();
-        const container = getContainer(env.CHECK_HOST_CONTAINER, handle);
-        // Inject the lease env + TOOLCHAIN_DIGEST; egress on so clw can hydrate
-        // the toolchain from CAS at start (C2).
-        await container.start({
-          envVars: {
-            ...body.env,
-            TOOLCHAIN_DIGEST: body.toolchain_digest,
-            // Track-C C2b: inject the exec-server bearer (defense-in-depth) so the
-            // in-container /exec requires it; the SAME value is presented on the
-            // /v1/exec containerFetch below. Absent secret ⇒ no auth (back-compat).
-            ...(env.EXEC_SERVER_AUTH_TOKEN
-              ? { EXEC_SERVER_AUTH_TOKEN: env.EXEC_SERVER_AUTH_TOKEN }
-              : {}),
-          },
-          enableInternet: true,
-        });
-        return json({ handle }, 201);
-      }
 
-      // ── Runner mode (default / absent) — byte-unchanged ────────────────────
-      if (env.PINNED_IMAGE_DIGEST && body.image_digest !== env.PINNED_IMAGE_DIGEST) {
-        return json(
-          { error: "image_digest does not match the deployed pinned image" },
-          409,
+        // ── Runner mode (default / absent) — byte-unchanged ──────────────────
+        if (env.PINNED_IMAGE_DIGEST && body.image_digest !== env.PINNED_IMAGE_DIGEST) {
+          return json(
+            { error: "image_digest does not match the deployed pinned image" },
+            409,
+          );
+        }
+
+        // Inject the per-job env (JIT config + CLW_*) at start (runtime, not baked);
+        // retry the DO start on a transient CF reset (fresh handle each attempt).
+        const handle = await startWithRetry((h) =>
+          getContainer(env.RUNNER_CONTAINER, h).startWithEnv(body.env),
         );
+        return json({ handle }, 201);
+      } catch (e) {
+        return json({ error: `spawn failed: ${(e as Error).message}` }, 502);
       }
-
-      const handle = crypto.randomUUID();
-      const container = getContainer(env.RUNNER_CONTAINER, handle);
-      // Inject the per-job env (JIT config + CLW_*) at start (runtime, not baked).
-      await container.startWithEnv(body.env);
-      return json({ handle }, 201);
     }
 
     // ── POST /v1/exec (C3) — run argv in an already-spawned check-host lease ──
