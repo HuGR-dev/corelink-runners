@@ -209,16 +209,52 @@ async function mintJit(env: Env, repoFullName: string, label: string): Promise<s
 // past the longest CI job (the entry is normally deleted at completion).
 const JOB_PAT_TTL_S = 7200;
 
+// Container-start retry (root-caused 2026-07-03): Cloudflare Container DO
+// `start()` intermittently fails with a TRANSIENT platform error — e.g.
+// "Internal error while starting up Durable Object storage caused object to be
+// reset" — where the SAME call succeeds moments later on a fresh DO (observed:
+// a 201 spawn at 14:40, a 502 on the same path at 16:34). It is a CF blip, not a
+// config error. Retry a bounded number of times, each with a FRESH handle (a new
+// DO, side-stepping a reset one); surface the last error only after exhausting
+// attempts, so a PERSISTENT misconfiguration still fails closed (never a silent
+// non-spawn). Small linear backoff stays well inside the webhook's ~10s budget
+// (a real spawn is ~3s).
+const SPAWN_MAX_ATTEMPTS = 3;
+
+async function startWithRetry(start: (handle: string) => Promise<void>): Promise<string> {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= SPAWN_MAX_ATTEMPTS; attempt++) {
+    const handle = crypto.randomUUID();
+    try {
+      await start(handle);
+      return handle;
+    } catch (e) {
+      lastErr = e;
+      console.log(
+        `container start attempt ${attempt}/${SPAWN_MAX_ATTEMPTS} failed (transient?): ` +
+          `${(e as Error).message}`,
+      );
+      if (attempt < SPAWN_MAX_ATTEMPTS) {
+        await new Promise((r) => setTimeout(r, 300 * attempt));
+      }
+    }
+  }
+  throw new Error(
+    `container start failed after ${SPAWN_MAX_ATTEMPTS} attempts: ${(lastErr as Error).message}`,
+  );
+}
+
 // Spawn one runner container with the JIT injected + cache-warm CLW_* (the
 // shared spawn path). `buildContainerEnv` (./lib) is fail-open to cold. On a warm
 // mint it returns the pat_id, which we stash in KV under jobId so the later
 // workflow_job:completed can revoke that exact PAT (the /revoke contract keys on
 // pat_id, not job_id).
 async function spawnRunner(env: Env, jit: string, jobId: string): Promise<string> {
-  const handle = crypto.randomUUID();
-  const container = getContainer(env.RUNNER_CONTAINER, handle);
+  // Mint ONCE (never re-mint on a start retry), then start-with-retry.
   const { containerEnv, patId } = await buildContainerEnv(env, jit, jobId);
-  await container.startWithEnv(containerEnv);
+  const handle = await startWithRetry((h) =>
+    getContainer(env.RUNNER_CONTAINER, h).startWithEnv(containerEnv),
+  );
   if (patId && env.RUNNER_JOB_PATS) {
     // Best-effort: if the put fails, the PAT just TTL-expires (fail-open).
     await env.RUNNER_JOB_PATS.put(jobId, patId, { expirationTtl: JOB_PAT_TTL_S }).catch((e) =>
@@ -405,23 +441,22 @@ export default {
           if (!body.toolchain_digest) {
             return json({ error: "toolchain_digest required when mode==check" }, 400);
           }
-          const handle = crypto.randomUUID();
-          const container = getContainer(env.CHECK_HOST_CONTAINER, handle);
-          // Inject the lease env + TOOLCHAIN_DIGEST; egress on so clw can hydrate
-          // the toolchain from CAS at start (C2).
-          await container.start({
-            envVars: {
-              ...body.env,
-              TOOLCHAIN_DIGEST: body.toolchain_digest,
-              // Track-C C2b: inject the exec-server bearer (defense-in-depth) so the
-              // in-container /exec requires it; the SAME value is presented on the
-              // /v1/exec containerFetch below. Absent secret ⇒ no auth (back-compat).
-              ...(env.EXEC_SERVER_AUTH_TOKEN
-                ? { EXEC_SERVER_AUTH_TOKEN: env.EXEC_SERVER_AUTH_TOKEN }
-                : {}),
-            },
-            enableInternet: true,
-          });
+          // Retry the DO start on a transient CF reset (fresh handle each try).
+          const handle = await startWithRetry((h) =>
+            getContainer(env.CHECK_HOST_CONTAINER, h).start({
+              envVars: {
+                ...body.env,
+                TOOLCHAIN_DIGEST: body.toolchain_digest!,
+                // Track-C C2b: inject the exec-server bearer (defense-in-depth) so the
+                // in-container /exec requires it; the SAME value is presented on the
+                // /v1/exec containerFetch below. Absent secret ⇒ no auth (back-compat).
+                ...(env.EXEC_SERVER_AUTH_TOKEN
+                  ? { EXEC_SERVER_AUTH_TOKEN: env.EXEC_SERVER_AUTH_TOKEN }
+                  : {}),
+              },
+              enableInternet: true,
+            }),
+          );
           return json({ handle }, 201);
         }
 
@@ -433,10 +468,11 @@ export default {
           );
         }
 
-        const handle = crypto.randomUUID();
-        const container = getContainer(env.RUNNER_CONTAINER, handle);
-        // Inject the per-job env (JIT config + CLW_*) at start (runtime, not baked).
-        await container.startWithEnv(body.env);
+        // Inject the per-job env (JIT config + CLW_*) at start (runtime, not baked);
+        // retry the DO start on a transient CF reset (fresh handle each attempt).
+        const handle = await startWithRetry((h) =>
+          getContainer(env.RUNNER_CONTAINER, h).startWithEnv(body.env),
+        );
         return json({ handle }, 201);
       } catch (e) {
         return json({ error: `spawn failed: ${(e as Error).message}` }, 502);
