@@ -124,9 +124,19 @@ RUN apt-get update -qq && \
     rm -rf /var/lib/apt/lists/* && \
     apt-get clean
 
-# ── Non-root runner user ───────────────────────────────────────────────────────
+# ── Non-root runner user (App-layer resource caps — Track-C C2, part 1/2) ──────
 # The runner agent must not run as root; the dedicated user also owns the
 # Rust toolchain so cargo install works without sudo.
+#
+# This is the IN-IMAGE equivalent of the on-box DockerEngine hardening
+# (crates/corelink-runner/src/isolation.rs:179-197). The microVM-alone posture
+# was refused, so the untrusted job is bounded at the app layer on TWO axes:
+#   1. NON-ROOT identity — this USER (the container runs as `runner`, never root;
+#      the final ENTRYPOINT stage below drops to `USER runner`). isolation.rs:53-55
+#      confirms non-root is enforced at the IMAGE layer on the CF substrate rather
+#      than re-imposed with a docker `--user` flag.
+#   2. ULIMIT ceilings (pids + memory) — applied in entrypoint.sh just before the
+#      untrusted job (the CF-substrate stand-in for --pids-limit / --memory).
 RUN useradd -m -s /bin/bash -G sudo runner && \
     echo "runner ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/runner && \
     chmod 0440 /etc/sudoers.d/runner
