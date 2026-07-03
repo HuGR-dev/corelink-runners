@@ -530,6 +530,35 @@ const DEV_SENTINEL_AUTH_KEYS: &[&str] = &[
     "todo",
 ];
 
+/// Minimum length for a production HMAC/auth secret. Shorter than this is a
+/// placeholder, not a real key — 16 chars is a low, forgiving floor.
+pub(crate) const MIN_SECRET_LEN: usize = 16;
+
+/// Reject a dev-sentinel or trivially-short secret at boot rather than arm a
+/// security-critical HMAC with a guessable key. Shared by the mint auth-key
+/// guard and the C2c `FABRIC_CRED_TICKET_SECRET` guard. `name` is the env var
+/// name for the error message. Fail-loud, never silent.
+pub(crate) fn reject_weak_secret(name: &str, value: &str) -> anyhow::Result<()> {
+    let trimmed = value.trim();
+    if DEV_SENTINEL_AUTH_KEYS
+        .iter()
+        .any(|s| s.eq_ignore_ascii_case(trimmed))
+    {
+        anyhow::bail!(
+            "{name} is a dev/default sentinel ({trimmed:?}) — a placeholder must never arm a \
+             production HMAC secret. Set a real high-entropy value, or unset it to disable."
+        );
+    }
+    if trimmed.len() < MIN_SECRET_LEN {
+        anyhow::bail!(
+            "{name} is only {} chars — a production secret must be at least {MIN_SECRET_LEN}. \
+             Set a real high-entropy value, or unset it to disable.",
+            trimmed.len()
+        );
+    }
+    Ok(())
+}
+
 /// Wire the production CAS PAT mint from the environment (WP-8a).
 ///
 /// ## Default-off (north star: absent cache/mint ⇒ slow, never broken)
@@ -1028,6 +1057,32 @@ mod tests {
         assert!(
             msg.contains(CAS_RUNNER_MINT_AUTH_KEY_ENV),
             "error must name the missing auth-key var; got: {msg}"
+        );
+    }
+
+    // ── reject_weak_secret — shared secret-strength guard ────────────────────
+
+    #[test]
+    fn reject_weak_secret_accepts_a_strong_value() {
+        assert!(reject_weak_secret("X", "a-real-high-entropy-secret-0123").is_ok());
+    }
+
+    #[test]
+    fn reject_weak_secret_rejects_dev_sentinels_case_insensitively() {
+        for s in ["dev", "CHANGEME", "Placeholder", "todo"] {
+            let err = reject_weak_secret("FABRIC_CRED_TICKET_SECRET", s)
+                .expect_err("a dev sentinel must fail loud");
+            assert!(format!("{err:#}").contains("sentinel"), "got {err:#}");
+        }
+    }
+
+    #[test]
+    fn reject_weak_secret_rejects_too_short() {
+        let err = reject_weak_secret("FABRIC_CRED_TICKET_SECRET", "short")
+            .expect_err("a sub-min-length secret must fail loud");
+        assert!(
+            format!("{err:#}").contains("at least"),
+            "must name the length floor"
         );
     }
 }

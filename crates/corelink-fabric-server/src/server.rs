@@ -810,6 +810,20 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
         }
     }
 
+    // Dead-knob guard: FABRIC_TENANT_MAX_VCPU_H is consumed ONLY on the Static
+    // auth path (it feeds the bootstrap StaticPlans ceiling). On the CoreLink
+    // path the monthly vCPU-h ceiling comes from the introspect `max_vcpu_h`
+    // entitlement, so this env is silently ignored — an operator who sets it to
+    // "arm the ceiling" on CoreLink gets NO ceiling and no error. Fail loud.
+    if tenant_max_vcpu_h.is_some() && matches!(auth_backend, AuthBackend::CoreLink(_)) {
+        anyhow::bail!(
+            "FABRIC_TENANT_MAX_VCPU_H is set but is IGNORED on the CoreLink auth path \
+             (the per-tenant vCPU-h ceiling is sourced from the introspect `max_vcpu_h` \
+             entitlement, not this env). Unset FABRIC_TENANT_MAX_VCPU_H, or the compute \
+             ceiling you think you armed is not applied."
+        );
+    }
+
     Ok(ServerConfig {
         bind_addr,
         signing_key,
@@ -897,6 +911,41 @@ fn parse_positive_usize(
 /// (`finalize_admitted_lease`) registers a per-lease `CaptureHook` and the
 /// envelope poll/ingest endpoints are live for every acquired lease
 /// (integration-contract v1.2.0 §13).
+/// Pre-arm coupling guard for the C2c / moat-mint. Extracted pure so the arm
+/// invariants are unit-tested directly. The per-job CAS PAT mint MUST NOT arm
+/// without BOTH:
+/// - **the cred-ticket signer** (`FABRIC_CRED_TICKET_SECRET`) — else `finalize`
+///   takes the pre-C2c `else` branch and injects the live PAT into the UNTRUSTED
+///   container env as `CLW_TOKEN`, defeating env-0 (the exact leak C2c closes);
+/// - **a CLW endpoint** (`CLW_ENDPOINT`) — else every lease mints + revokes a real
+///   D-9 PAT but the runner receives an empty CAS endpoint, so the moat silently
+///   hydrates nothing while churning the mint.
+///
+/// Both are silent-when-armed failures (works with the mint OFF, breaks/leaks the
+/// moment it is armed), so they fail loud at boot rather than in production.
+fn validate_mint_arm(
+    mint_armed: bool,
+    cred_signer_armed: bool,
+    clw_endpoint_present: bool,
+) -> anyhow::Result<()> {
+    if mint_armed && !cred_signer_armed {
+        anyhow::bail!(
+            "the CAS PAT mint is armed (CORELINK_RUNNER_MINT_*) but FABRIC_CRED_TICKET_SECRET \
+             is unset — the per-job PAT would be injected into the UNTRUSTED container env as \
+             CLW_TOKEN (the pre-C2c path), defeating env-0. Set FABRIC_CRED_TICKET_SECRET to \
+             deliver the PAT via the single-use cred ticket, or unset the mint."
+        );
+    }
+    if mint_armed && !clw_endpoint_present {
+        anyhow::bail!(
+            "the CAS PAT mint is armed but CLW_ENDPOINT is unset/empty — every lease would \
+             mint + revoke a real CAS PAT while the runner receives no CAS endpoint, so the moat \
+             silently hydrates nothing. Set CLW_ENDPOINT, or unset the mint."
+        );
+    }
+    Ok(())
+}
+
 pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, crate::AppState)> {
     let registry = BoxRegistry::new();
 
@@ -930,10 +979,18 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
     // + /v1/leases/{id}/cas-cred, never in the container env. Absent ⇒ None ⇒ the
     // CLW_TOKEN-in-env path, byte-identical to today. (Dedicated secret, domain-
     // separated from the ingest signer + the ed25519 attestation key.)
-    let cred_signer = std::env::var("FABRIC_CRED_TICKET_SECRET")
+    let cred_signer = match std::env::var("FABRIC_CRED_TICKET_SECRET")
         .ok()
-        .filter(|s| !s.is_empty())
-        .map(|s| crate::cred_ticket::CredTicketSigner::new(s.into_bytes()));
+        .filter(|s| !s.trim().is_empty())
+    {
+        None => None,
+        Some(s) => {
+            // Reject a dev-sentinel / trivially-short secret rather than arm C2c
+            // with a guessable HMAC key (mirrors the mint auth-key guard).
+            crate::runner_cas_mint::reject_weak_secret("FABRIC_CRED_TICKET_SECRET", &s)?;
+            Some(crate::cred_ticket::CredTicketSigner::new(s.into_bytes()))
+        }
+    };
 
     // ── Lease ledger (WP-4) ──────────────────────────────────────────────────
     // Memory: byte-identical to the pre-WP-4 unconditional path; no runtime
@@ -1120,7 +1177,14 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
     // WP-7: wire the CLW base URL from the environment (default-off: None ⇒
     // inject_clw_env uses "" — moat OFF, no cache). The production composition
     // root sets CLW_ENDPOINT=https://cas.corelink.io.
-    let state = state.with_clw_endpoint(std::env::var("CLW_ENDPOINT").ok());
+    // Capture the CLW endpoint presence (empty ⇒ absent) + cred-signer arm state
+    // for the mint-coupling guard below, before both are moved into the state.
+    let clw_endpoint_env = std::env::var("CLW_ENDPOINT")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+    let clw_endpoint_present = clw_endpoint_env.is_some();
+    let state = state.with_clw_endpoint(clw_endpoint_env);
+    let cred_signer_armed = cred_signer.is_some();
     let state = state.with_cred_signer(cred_signer);
     // Track-C AUP1: the operator secret gating the enforcement endpoints (same
     // FABRIC_ADMIN_KEY as the tenant-plan admin). Absent ⇒ the suspend routes 404.
@@ -1131,7 +1195,12 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
     // to before). Boot fails LOUD (the `?`) on an armed-but-misconfigured mint —
     // a dev/default sentinel key or a half-configured pair — so an empty/dev
     // auth key can never silently run in prod.
-    let state = match crate::runner_cas_mint::cas_pat_mint_from_env(|k| std::env::var(k).ok())? {
+    let mint = crate::runner_cas_mint::cas_pat_mint_from_env(|k| std::env::var(k).ok())?;
+    // Pre-arm coupling guard: the mint must never arm without env-0 (cred signer)
+    // or without a CLW endpoint — fail loud rather than silently leak the PAT into
+    // the untrusted env or mint PATs the runner cannot use.
+    validate_mint_arm(mint.is_some(), cred_signer_armed, clw_endpoint_present)?;
+    let state = match mint {
         Some(mint) => state.with_cas_pat_mint(mint),
         None => state,
     };
@@ -1757,5 +1826,61 @@ mod compute_ceiling_config_tests {
             "the explicit ceiling is unused when accounting is off"
         );
         assert_eq!(cfg.ledger_backend, LedgerBackend::Memory);
+    }
+
+    /// Pre-arm dead-knob guard: FABRIC_TENANT_MAX_VCPU_H is consumed ONLY on the
+    /// Static path; setting it on CoreLink (where the ceiling comes from the
+    /// introspect entitlement) is a silent no-op → hard boot error.
+    #[test]
+    fn tenant_max_vcpu_h_with_corelink_is_a_dead_knob_boot_error() {
+        let env = |k: &str| -> Option<String> {
+            match k {
+                "FABRIC_BIND_ADDR" => Some("127.0.0.1:8080".to_string()),
+                "FABRIC_DEV_UNSAFE" => Some("1".to_string()),
+                "FABRIC_AUTH_BACKEND" => Some("corelink".to_string()),
+                "CORELINK_INTROSPECT_URL" => Some("https://introspect.example.com".to_string()),
+                "FABRIC_INTROSPECT_AUTH_KEY" => Some("introspect-secret-key".to_string()),
+                "FABRIC_TENANT_MAX_CONCURRENCY" => Some("4".to_string()),
+                "FABRIC_TENANT_MAX_VCPU_H" => Some("10".to_string()),
+                _ => None,
+            }
+        };
+        let err = config_from_env(env).expect_err("FABRIC_TENANT_MAX_VCPU_H on corelink must Err");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("FABRIC_TENANT_MAX_VCPU_H") && msg.contains("IGNORED"),
+            "error must name the dead knob; got {msg}"
+        );
+    }
+
+    // ── validate_mint_arm — the C2c/moat-mint coupling guard ─────────────────
+
+    #[test]
+    fn mint_arm_ok_when_off_or_fully_configured() {
+        // Mint OFF ⇒ inert regardless of the other flags.
+        assert!(validate_mint_arm(false, false, false).is_ok());
+        // Mint ON with BOTH cred signer + endpoint ⇒ armed correctly.
+        assert!(validate_mint_arm(true, true, true).is_ok());
+    }
+
+    #[test]
+    fn mint_arm_without_cred_signer_is_env0_bypass_error() {
+        let err = validate_mint_arm(true, false, true)
+            .expect_err("mint armed without cred signer must fail closed");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("FABRIC_CRED_TICKET_SECRET") && msg.contains("CLW_TOKEN"),
+            "must name the env-0 bypass; got {msg}"
+        );
+    }
+
+    #[test]
+    fn mint_arm_without_clw_endpoint_is_silent_moat_off_error() {
+        let err = validate_mint_arm(true, true, false)
+            .expect_err("mint armed without CLW_ENDPOINT must fail closed");
+        assert!(
+            format!("{err:#}").contains("CLW_ENDPOINT"),
+            "must name the missing endpoint"
+        );
     }
 }
