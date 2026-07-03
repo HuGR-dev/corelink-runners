@@ -20,14 +20,16 @@
   "vars": {
     "CORELINK_INTROSPECT_URL": "https://corelink-api.humangr.com/internal/v1/auth/introspect",
     "BILLING_INGEST_URL": "https://corelink-api.humangr.com/internal/v1/billing/usage",
-    "BILLING_REGION": "iad"
-    // Box backend (CLOUDFLARE_SPAWN_WORKER_URL) is INTENTIONALLY OFF here: wiring
-    // it made acquire provision a real box at admit, and the spawn-Worker's
-    // /v1/spawn returns HTTP 500 today — which fail-closed the LIVE acquire path
-    // (200 Held → 503). Reverted to restore checkpoint A (lease/§13/attestation
-    // live, exec 503 / NoBox). Re-add the var ONLY after the spawn-Worker /v1/spawn
-    // path is debugged + verified end-to-end (the shared CLOUDFLARE_SPAWN_AUTH_TOKEN
-    // secret stays set on both workers; it's inert without this URL).
+    "BILLING_REGION": "iad",
+    // Box backend ON (2026-07-03): acquire provisions a real box via the
+    // spawn-Worker's POST {url}/v1/spawn (the engine appends /v1/spawn —
+    // cloudflare.rs:361, so this is the BASE URL). Previously OFF because
+    // /v1/spawn intermittently 500/502/504'd — root-caused to TRANSIENT Cloudflare
+    // Durable-Object start errors and fixed in #268 (retry + 202/waitUntil +
+    // per-attempt timeout). The shared CLOUDFLARE_SPAWN_AUTH_TOKEN secret is set on
+    // both workers (inert without this URL). A container RESTART is required to
+    // pick this up (envVars are read at container start).
+    "CLOUDFLARE_SPAWN_WORKER_URL": "https://corelink-spawn-worker.gmhelmold.workers.dev"
   },
 
   // The singleton control-plane container DO. ONE instance: the in-memory lease
@@ -41,11 +43,13 @@
   "containers": [
     {
       "class_name": "FabricdContainer",
-      // The Rust control-plane image. Build context = repo ROOT so the
-      // Dockerfile's `COPY . .` gets the whole cargo workspace (image_build_context
-      // is required here — the default context would be the Dockerfile's dir).
-      "image": "../../crates/corelink-fabric-server/Dockerfile",
-      "image_build_context": "../../",
+      // DOCKER-FREE DEPLOY (2026-07-03): references the PRE-BUILT fabricd image in
+      // the Cloudflare managed registry (the LIVE digest, confirmed via
+      // `wrangler containers info`) instead of building the Dockerfile locally — so
+      // `wrangler deploy` (incl. a container ROLLOUT to apply new envVars) no longer
+      // needs a Docker daemon. To rebuild the control-plane binary: build+push a new
+      // image (CI, or a Docker host) and update this @sha256 digest.
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer@sha256:dfd57a8614d12887ee2f3ce33acf50ea901cfdc217afeaee39d6829979b8bbba",
       // Lightweight HTTP control plane (one binary + in-memory ledger): standard-1
       // is ample for the dogfood. Bump if real multi-tenant load arrives.
       "instance_type": "standard-1",
