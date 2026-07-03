@@ -220,13 +220,26 @@ const JOB_PAT_TTL_S = 7200;
 // non-spawn). Small linear backoff stays well inside the webhook's ~10s budget
 // (a real spawn is ~3s).
 const SPAWN_MAX_ATTEMPTS = 3;
+// A single `start()` attempt is abandoned after this so a HUNG DO start (the
+// transient can hang, not just throw) is retried on a fresh DO instead of
+// stalling forever. Kept short so 3 attempts + backoff fit the background budget.
+const SPAWN_ATTEMPT_TIMEOUT_MS = 8000;
 
 async function startWithRetry(start: (handle: string) => Promise<void>): Promise<string> {
   let lastErr: unknown;
   for (let attempt = 1; attempt <= SPAWN_MAX_ATTEMPTS; attempt++) {
     const handle = crypto.randomUUID();
     try {
-      await start(handle);
+      // Race the start against a timeout — a hung start rejects and is retried.
+      await Promise.race([
+        start(handle),
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () => reject(new Error(`start timed out after ${SPAWN_ATTEMPT_TIMEOUT_MS}ms`)),
+            SPAWN_ATTEMPT_TIMEOUT_MS,
+          ),
+        ),
+      ]);
       return handle;
     } catch (e) {
       lastErr = e;
@@ -322,7 +335,7 @@ async function maybeBillCompletedJob(
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const { pathname } = url;
 
@@ -394,17 +407,24 @@ export default {
       if (!(await claimSpawn(env.RUNNER_JOB_PATS, jobId))) {
         return json({ ok: true, deduped: true, job_id: jobId }, 200);
       }
-      try {
-        const jit = await mintJit(env, repo, label);
-        const handle = await spawnRunner(env, jit, jobId);
-        return json({ ok: true, handle }, 201);
-      } catch (e) {
-        // Mint/spawn failed: RELEASE the claim so a legitimate retry (GitHub
-        // redelivery / re-queue) can claim again and actually spawn — otherwise
-        // a transient failure would block this job until the claim TTL-expires.
-        await releaseSpawnClaim(env.RUNNER_JOB_PATS, jobId);
-        return json({ error: `autoscale failed: ${(e as Error).message}` }, 502);
-      }
+      // Respond to GitHub FAST (202) and do the mint+spawn in the BACKGROUND:
+      // awaiting container.start() inline risks GitHub's 10s webhook timeout →
+      // 504 whenever a DO start HANGS on a transient reset (observed 2026-07-03).
+      // `startWithRetry` (per-attempt timeout + fresh DO) then abandons a hung
+      // start and retries instead of stalling the webhook. On terminal failure we
+      // RELEASE the claim so a GitHub redelivery / re-queue can spawn.
+      ctx.waitUntil(
+        (async () => {
+          try {
+            const jit = await mintJit(env, repo, label);
+            await spawnRunner(env, jit, jobId);
+          } catch (e) {
+            await releaseSpawnClaim(env.RUNNER_JOB_PATS, jobId);
+            console.log(`background autoscale failed for job ${jobId}: ${(e as Error).message}`);
+          }
+        })(),
+      );
+      return json({ ok: true, spawning: true, job_id: jobId }, 202);
     }
 
     // ── /v1/* routes — bearer-authed (the fabric/Engine seam) ────────────────
