@@ -118,11 +118,14 @@ export class RunnerContainer extends Container<Env> {
   // The runner needs egress (git clone, GH API, CAS hydration). ADR-0003 bounds
   // it (no-free-tier + scoped short-TTL PAT + ephemeral box).
   enableInternet = true;
-  // O7 / G2 (best-effort, NOT closed): the EXACT-host metadata entries below are
-  // enforced even with enableInternet=true (container.d.ts:121-123), but only for
-  // proxied egress and only as literal matches — see METADATA_DENYLIST: this does
-  // NOT block the link-local CIDR ranges and does NOT stop raw-socket egress.
-  deniedHosts = METADATA_DENYLIST;
+  // O7 / G2: the `deniedHosts` class-property was REMOVED (2026-07-04, coordinator
+  // root-cause of the #273 registration regression). On @cloudflare/containers
+  // 0.3.x, setting `deniedHosts` AT ALL breaks the container's outbound egress to
+  // GitHub — the runner agent can't reach api.github.com to register. It never
+  // closed G2 anyway (no CIDR match, raw-socket bypass), so removing it costs
+  // nothing on posture. G2 is settled by the metadata probe; a REAL network-layer
+  // control (allowlist) lands only if the probe shows metadata reachable. The
+  // on-demand cutEgress() kill-switch below (setDeniedHosts at runtime) is unaffected.
 
   // Start the per-job container with the JIT config + CLW_* injected at runtime
   // (@cloudflare/containers 0.3.x: env arrives via `start({ envVars })`, not baked).
@@ -166,10 +169,9 @@ export class CheckHostContainer extends Container<Env> {
   sleepAfter = "45m";
   // The check-host needs egress to hydrate the toolchain from CAS at start (C2).
   enableInternet = true;
-  // O7 / G2 (best-effort, NOT closed): same exact-host metadata denylist as
-  // RunnerContainer — same limits apply (literal exact-match, proxied egress
-  // only; no CIDR ranges, no raw-socket coverage — see METADATA_DENYLIST).
-  deniedHosts = METADATA_DENYLIST;
+  // O7 / G2: `deniedHosts` class-property REMOVED — same reason as RunnerContainer
+  // (it broke GitHub egress on @cloudflare/containers 0.3.x; never closed G2). The
+  // on-demand cutEgress() kill-switch is unaffected.
 
   // Start the per-lease container with the check env injected at runtime
   // (TOOLCHAIN_DIGEST + CLW_*), enabling egress for the start-time clw hydrate.
