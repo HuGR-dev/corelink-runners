@@ -25,6 +25,15 @@ export interface Env {
   FABRIC_INTROSPECT_AUTH_KEY: string;
   BILLING_INGEST_AUTH_KEY?: string;
   CLOUDFLARE_SPAWN_AUTH_TOKEN?: string;
+  // Runner-broker (ADR-0007 Stage A): the GitHub App the fabricd uses to mint JIT
+  // runner configs for RUNNER leases (the M1 direct-acquire→box path). All three
+  // present ⇒ runner leases are served; absent ⇒ runner mode is simply not wired
+  // (a `runner:` acquire is rejected, byte-identical to today). Secrets.
+  FABRIC_GITHUB_APP_ID?: string;
+  FABRIC_GITHUB_APP_INSTALLATION_ID?: string;
+  // Base64 of the App's PEM private key (the *_B64 form survives env-var UIs that
+  // mangle multi-line PEM input — runner_broker.rs reads either form).
+  FABRIC_GITHUB_APP_PRIVATE_KEY_B64?: string;
 }
 
 /** The singleton control-plane container. fabricd binds 0.0.0.0:8080. */
@@ -61,6 +70,19 @@ export class FabricdContainer extends Container<Env> {
         : {}),
       ...(env.CLOUDFLARE_SPAWN_AUTH_TOKEN
         ? { CLOUDFLARE_SPAWN_AUTH_TOKEN: env.CLOUDFLARE_SPAWN_AUTH_TOKEN }
+        : {}),
+      // Runner-broker (GitHub App) — passed only when all three are set, so a
+      // partial config never half-wires the broker (runner_broker_from_env also
+      // treats an incomplete set as OFF). Enables the fabricd to mint JITs for
+      // RUNNER leases (the M1 acquire→box path).
+      ...(env.FABRIC_GITHUB_APP_ID &&
+      env.FABRIC_GITHUB_APP_INSTALLATION_ID &&
+      env.FABRIC_GITHUB_APP_PRIVATE_KEY_B64
+        ? {
+            FABRIC_GITHUB_APP_ID: env.FABRIC_GITHUB_APP_ID,
+            FABRIC_GITHUB_APP_INSTALLATION_ID: env.FABRIC_GITHUB_APP_INSTALLATION_ID,
+            FABRIC_GITHUB_APP_PRIVATE_KEY_B64: env.FABRIC_GITHUB_APP_PRIVATE_KEY_B64,
+          }
         : {}),
     };
   }
