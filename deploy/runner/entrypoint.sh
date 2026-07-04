@@ -69,42 +69,48 @@ fi
 
 # ── App-layer resource caps (Track-C C2 in-image equivalent) ──────────────────
 # The microVM (per-lease Firecracker on the CF substrate) is the isolation
-# BOUNDARY, but the microVM-alone posture was REFUSED: a runaway job inside our
-# VM must be BOUNDED at the app layer too (defense-in-depth), mirroring the
-# on-box DockerEngine hardening (crates/corelink-runner/src/isolation.rs:179-197:
-# --cap-drop ALL / --pids-limit / --memory). We cannot pass `docker run` flags on
-# the CF substrate (the container IS the VM), so we apply the equivalent ceilings
-# with `ulimit` in this shell BEFORE dropping into the untrusted job. Because we
-# `exec ./run.sh` below, these limits are inherited by the runner and every job
-# step it spawns.
+# BOUNDARY. We add ONE app-layer bound as defense-in-depth, mirroring the fork
+# bomb cap of the on-box DockerEngine hardening (the `DockerEngine`
+# `Engine::run` impl in crates/corelink-runner/src/isolation.rs, which passes
+# `--cap-drop ALL` / `--pids-limit` (the PIDS_LIMIT const) / `--memory` (the
+# MEMORY_LIMIT const)). We cannot pass `docker run` flags on the CF substrate
+# (the container IS the VM), so we apply the pids ceiling with `ulimit` in this
+# shell BEFORE dropping into the untrusted job. Because we `exec ./run.sh`
+# below, this limit is inherited by the runner and every job step it spawns.
 #
 #   ulimit -u  (max user processes)  → fork-bomb bound. Mirrors PIDS_LIMIT=4096.
-#   ulimit -v  (max virtual memory)  → memory bound set NEAR the standard-4
-#                                      envelope (12 GiB, MEMORY_LIMIT) so a
-#                                      runaway is capped JUST UNDER the VM without
-#                                      breaking a normal heavy build.
 #
-# TUNABLE (flag for the TL): these are grounded to the standard-4 instance
-# (12 GiB RAM / 4 vCPU — the same envelope the on-box MEMORY_LIMIT/PIDS_LIMIT are
-# validated against). If the instance type changes, re-ground both. `ulimit -v`
-# is a per-process ADDRESS-SPACE cap (KiB), not a cgroup total; 12 GiB is the
-# ceiling — set slightly under the VM so the OOM killer inside the VM is the last
-# resort, not the first. Overridable via the two env vars below.
+# MEMORY — there is intentionally NO app-layer per-process RSS cap here, and this
+# is deliberate (an earlier `ulimit -v` 12 GiB line was REMOVED per cold review):
+#   • `ulimit -v` caps per-process VIRTUAL address space, NOT resident memory.
+#     Legitimate JVM / Go / ASAN / heavy-linker jobs RESERVE huge virtual space
+#     far above their real RSS and would be KILLED spuriously — it breaks real
+#     jobs while still NOT containing a true runaway (it is per-process, not
+#     container-total; N processes each just under the cap blow past it).
+#   • `RLIMIT_RSS` (ulimit -m) is a NO-OP on modern Linux kernels — the kernel
+#     ignores it, so it cannot cap real memory either.
+#   • The CF substrate exposes NO per-container cgroup memory knob we can set
+#     from inside the guest.
+# There is therefore NO valid app-layer per-process RSS cap on this substrate.
+# Memory containment lives ENTIRELY at the isolation boundary: each lease is its
+# OWN Firecracker microVM sized to the instance envelope (standard-4: 12 GiB /
+# 4 vCPU), with the in-VM OOM-killer as the backstop. A memory bomb OOMs its OWN
+# VM and dies — the blast radius is that single lease; it cannot reach a
+# neighbor. (`--memory`/MEMORY_LIMIT in isolation.rs is the on-box Docker
+# analogue of that same per-instance envelope, not a per-process cap.)
+#
+# TUNABLE (flag for the TL): the pids bound is grounded to the standard-4
+# instance (12 GiB RAM / 4 vCPU — the same envelope the on-box PIDS_LIMIT is
+# validated against). Overridable via the env var below.
 #
 # Fail-OPEN, matching the moat north-star: a ulimit that the platform refuses to
 # set (e.g. a hard limit already lower) is logged and swallowed — never a broken
-# job. `|| true` guards each set; we lower toward the ceiling, never raise.
+# job. We lower toward the ceiling, never raise.
 RUNNER_ULIMIT_NPROC="${RUNNER_ULIMIT_NPROC:-4096}"        # pids/fork-bomb bound
-RUNNER_ULIMIT_AS_KIB="${RUNNER_ULIMIT_AS_KIB:-12582912}"  # 12 GiB = 12*1024*1024 KiB
 if ulimit -u "$RUNNER_ULIMIT_NPROC" 2>/dev/null; then
   echo "caps: ulimit -u ${RUNNER_ULIMIT_NPROC} (fork-bomb bound) set."
 else
   echo "caps: ulimit -u refused (kept inherited limit) — proceeding (fail-open)." >&2
-fi
-if ulimit -v "$RUNNER_ULIMIT_AS_KIB" 2>/dev/null; then
-  echo "caps: ulimit -v ${RUNNER_ULIMIT_AS_KIB} KiB (~12 GiB memory bound) set."
-else
-  echo "caps: ulimit -v refused (kept inherited limit) — proceeding (fail-open)." >&2
 fi
 
 # ── Launch: ephemeral one-shot JIT mode ───────────────────────────────────────
