@@ -14,6 +14,8 @@ import {
   billingPeriod,
   claimSpawn,
   releaseSpawnClaim,
+  acquireTenantSlot,
+  releaseTenantSlot,
   type KvLike,
 } from "../src/lib";
 
@@ -63,93 +65,140 @@ describe("verifyGithubHmac", () => {
   });
 });
 
-describe("buildContainerEnv (warm-mint, FAIL-OPEN to cold)", () => {
+describe("buildContainerEnv (AUTHORIZE + warm-mint; 403 HARD DENY, 5xx FAIL-OPEN)", () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  const JIT = "encoded-jit";
   const JOB = "987654321"; // GH workflow_job.id
+  const REPO = "owner/repo";
+  const INST = "44556677"; // installation.id (stringified)
+  const PARAMS = { jobId: JOB, repoFullName: REPO, installationId: INST };
 
-  it("COLD when no mint key configured (only the JIT, no CLW_*, no patId)", async () => {
-    const env = { CLW_TENANT: "t" } as never; // key absent
-    const { containerEnv, patId } = await buildContainerEnv(env, JIT, JOB);
-    expect(containerEnv.CORELINK_RUNNER_JITCONFIG).toBe(JIT);
-    expect(containerEnv.CLW_TOKEN).toBeUndefined();
-    expect(containerEnv.CLW_ENDPOINT).toBeUndefined();
-    expect(patId).toBeUndefined();
-  });
-
-  it("COLD when no tenant configured", async () => {
-    const env = { CORELINK_RUNNER_MINT_AUTH_KEY: "k" } as never; // tenant absent
-    const { containerEnv, patId } = await buildContainerEnv(env, JIT, JOB);
-    expect(containerEnv.CLW_TOKEN).toBeUndefined();
-    expect(patId).toBeUndefined();
-  });
-
-  it("WARM when key+tenant present and the D-9 mint succeeds (returns patId)", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        new Response(JSON.stringify({ token_plaintext: "per-job-pat", pat_id: "pat-123" }), {
-          status: 200,
-        }),
-      ),
+  // The full frozen 200 wire body.
+  function ok200(overrides: Record<string, unknown> = {}): Response {
+    return new Response(
+      JSON.stringify({
+        token_plaintext: "per-job-pat",
+        pat_id: "pat-123",
+        token_id: "tok-1",
+        tenant: "srv-derived-tenant",
+        expires_ms: 1234,
+        max_concurrency: 5,
+        ...overrides,
+      }),
+      { status: 200 },
     );
+  }
+
+  it("COLD (authz ok, empty overlay) when no mint key configured", async () => {
+    const env = { CLW_TENANT: "t" } as never; // key absent
+    const r = await buildContainerEnv(env, PARAMS);
+    expect(r.authz).toBe("ok");
+    expect(r.containerEnv).toEqual({}); // overlay is CLW_* only — NO jit here
+    expect(r.patId).toBeUndefined();
+    expect(r.tenant).toBeUndefined();
+  });
+
+  it("COLD when mint configured but installation is missing (can't authorize)", async () => {
+    const env = { CORELINK_RUNNER_MINT_AUTH_KEY: "k" } as never;
+    const r = await buildContainerEnv(env, { jobId: JOB, repoFullName: REPO, installationId: "" });
+    expect(r.authz).toBe("ok");
+    expect(r.containerEnv).toEqual({});
+  });
+
+  it("WARM: injects the SERVER-DERIVED tenant into CLW_TENANT (not env's) + captures max_concurrency", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ok200()));
     const env = {
       CORELINK_RUNNER_MINT_AUTH_KEY: "k",
-      CLW_TENANT: "ee30f7ba",
+      CLW_TENANT: "wrangler-tenant-IGNORED", // must NOT be injected
       CLW_ENDPOINT: "https://corelink-api.humangr.com",
       CORELINK_MINT_URL: "https://corelink-api.humangr.com",
     } as never;
-    const { containerEnv, patId } = await buildContainerEnv(env, JIT, JOB);
-    expect(containerEnv.CORELINK_RUNNER_JITCONFIG).toBe(JIT);
-    expect(containerEnv.CLW_TOKEN).toBe("per-job-pat");
-    expect(containerEnv.CLW_TENANT).toBe("ee30f7ba");
-    expect(containerEnv.CLW_ENDPOINT).toBe("https://corelink-api.humangr.com");
-    expect(containerEnv.CLW_REF_DOMAIN).toBe("runner");
-    expect(patId).toBe("pat-123"); // carried out for KV → revoke-by-pat_id
+    const r = await buildContainerEnv(env, PARAMS);
+    expect(r.authz).toBe("ok");
+    expect(r.containerEnv.CLW_TOKEN).toBe("per-job-pat");
+    expect(r.containerEnv.CLW_TENANT).toBe("srv-derived-tenant"); // DERIVED, not wrangler's
+    expect(r.containerEnv.CLW_ENDPOINT).toBe("https://corelink-api.humangr.com");
+    expect(r.containerEnv.CLW_REF_DOMAIN).toBe("runner");
+    expect(r.containerEnv.CORELINK_RUNNER_JITCONFIG).toBeUndefined(); // JIT merged by caller
+    expect(r.patId).toBe("pat-123");
+    expect(r.tenant).toBe("srv-derived-tenant");
+    expect(r.maxConcurrency).toBe(5);
   });
 
-  it("mints under the GH workflow_job.id (correlation id)", async () => {
-    const fetchMock = vi.fn(
-      async () =>
-        new Response(JSON.stringify({ token_plaintext: "per-job-pat", pat_id: "pat-123" }), {
-          status: 200,
-        }),
-    );
+  it("sends the FROZEN request shape: repo_full_name + installation_id + scope, NO owner_tenant", async () => {
+    const fetchMock = vi.fn(async () => ok200());
     vi.stubGlobal("fetch", fetchMock);
-    const env = { CORELINK_RUNNER_MINT_AUTH_KEY: "k", CLW_TENANT: "ee30f7ba" } as never;
-    await buildContainerEnv(env, JIT, JOB);
+    const env = { CORELINK_RUNNER_MINT_AUTH_KEY: "k" } as never;
+    await buildContainerEnv(env, PARAMS);
     const [url, init] = fetchMock.mock.calls[0];
     expect(String(url)).toContain("/internal/v1/runner/mint");
-    expect(JSON.parse((init as RequestInit).body as string).job_id).toBe(JOB);
+    const body = JSON.parse((init as RequestInit).body as string);
+    expect(body.job_id).toBe(JOB);
+    expect(body.repo_full_name).toBe(REPO);
+    expect(body.installation_id).toBe(INST);
+    expect(body.scope).toBe("read-write"); // default
+    expect(body.owner_tenant).toBeUndefined(); // DROPPED — server derives the tenant
   });
 
-  it("FAIL-OPEN to COLD when the D-9 mint returns non-2xx", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 500 })));
-    const env = { CORELINK_RUNNER_MINT_AUTH_KEY: "k", CLW_TENANT: "ee30f7ba" } as never;
-    const { containerEnv, patId } = await buildContainerEnv(env, JIT, JOB);
-    expect(containerEnv.CORELINK_RUNNER_JITCONFIG).toBe(JIT); // job still runs
-    expect(containerEnv.CLW_TOKEN).toBeUndefined(); // but cold — no CLW_*
-    expect(patId).toBeUndefined();
-  });
-
-  it("FAIL-OPEN to COLD when the mint 200 lacks token_plaintext", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({}), { status: 200 })));
-    const env = { CORELINK_RUNNER_MINT_AUTH_KEY: "k", CLW_TENANT: "ee30f7ba" } as never;
-    const { containerEnv, patId } = await buildContainerEnv(env, JIT, JOB);
-    expect(containerEnv.CLW_TOKEN).toBeUndefined();
-    expect(patId).toBeUndefined();
-  });
-
-  it("FAIL-OPEN to COLD when the mint 200 has a token but no pat_id", async () => {
+  it("403 FORBIDDEN ⇒ HARD DENY (authz 'forbidden', empty overlay, NO patId/tenant) — never cold", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => new Response(JSON.stringify({ token_plaintext: "x" }), { status: 200 })),
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ code: "FORBIDDEN", message: "runner mint unauthorized" }), {
+            status: 403,
+          }),
+      ),
     );
-    const env = { CORELINK_RUNNER_MINT_AUTH_KEY: "k", CLW_TENANT: "ee30f7ba" } as never;
-    const { containerEnv, patId } = await buildContainerEnv(env, JIT, JOB);
-    expect(containerEnv.CLW_TOKEN).toBeUndefined(); // can't track for revoke ⇒ cold
-    expect(patId).toBeUndefined();
+    const env = { CORELINK_RUNNER_MINT_AUTH_KEY: "k" } as never;
+    const r = await buildContainerEnv(env, PARAMS);
+    expect(r.authz).toBe("forbidden"); // caller MUST abort — no JIT, no spawn
+    expect(r.containerEnv).toEqual({});
+    expect(r.patId).toBeUndefined();
+    expect(r.tenant).toBeUndefined();
+  });
+
+  it("500 (D1 'runner mint unavailable') ⇒ FAIL-OPEN to cold (authz ok, empty overlay)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 500 })));
+    const env = { CORELINK_RUNNER_MINT_AUTH_KEY: "k" } as never;
+    const r = await buildContainerEnv(env, PARAMS);
+    expect(r.authz).toBe("ok"); // still spawns (cold), unlike a 403
+    expect(r.containerEnv).toEqual({});
+    expect(r.patId).toBeUndefined();
+  });
+
+  it("network error ⇒ FAIL-OPEN to cold (authz ok)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("ECONNRESET"); }));
+    const env = { CORELINK_RUNNER_MINT_AUTH_KEY: "k" } as never;
+    const r = await buildContainerEnv(env, PARAMS);
+    expect(r.authz).toBe("ok");
+    expect(r.containerEnv).toEqual({});
+  });
+
+  it("FAIL-OPEN to cold when the mint 200 lacks token_plaintext", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ok200({ token_plaintext: undefined })));
+    const env = { CORELINK_RUNNER_MINT_AUTH_KEY: "k" } as never;
+    const r = await buildContainerEnv(env, PARAMS);
+    expect(r.authz).toBe("ok");
+    expect(r.containerEnv).toEqual({});
+  });
+
+  it("FAIL-OPEN to cold when the mint 200 lacks tenant (contract violation)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ok200({ tenant: undefined })));
+    const env = { CORELINK_RUNNER_MINT_AUTH_KEY: "k" } as never;
+    const r = await buildContainerEnv(env, PARAMS);
+    expect(r.authz).toBe("ok"); // malformed 200 is fail-open cold, not a hard deny
+    expect(r.containerEnv).toEqual({});
+    expect(r.tenant).toBeUndefined();
+  });
+
+  it("WARM without max_concurrency (absent ceiling ⇒ undefined, no gate)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ok200({ max_concurrency: undefined })));
+    const env = { CORELINK_RUNNER_MINT_AUTH_KEY: "k" } as never;
+    const r = await buildContainerEnv(env, PARAMS);
+    expect(r.authz).toBe("ok");
+    expect(r.tenant).toBe("srv-derived-tenant");
+    expect(r.maxConcurrency).toBeUndefined();
   });
 });
 
@@ -273,6 +322,9 @@ function fakeKv(seed: Record<string, string> = {}): KvLike & { store: Map<string
     delete: vi.fn(async (k: string) => {
       store.delete(k);
     }),
+    list: vi.fn(async ({ prefix }: { prefix: string }) => ({
+      keys: [...store.keys()].filter((k) => k.startsWith(prefix)).map((name) => ({ name })),
+    })),
   };
 }
 
@@ -325,5 +377,77 @@ describe("releaseSpawnClaim (retry after a failed spawn)", () => {
 
   it("no-op (no throw) when no KV is bound", async () => {
     await expect(releaseSpawnClaim(undefined, "job-1")).resolves.toBeUndefined();
+  });
+});
+
+// ── Per-tenant concurrency ceiling (max_concurrency) — best-effort fairness ───
+
+describe("acquireTenantSlot / releaseTenantSlot (per-tenant max_concurrency)", () => {
+  it("ADMITS (true) when the tenant is under the ceiling, and records the slot", async () => {
+    const kv = fakeKv();
+    expect(await acquireTenantSlot(kv, "tenant-a", "job-1", 2)).toBe(true);
+    expect(kv.store.get("conc:tenant-a:job-1")).toBe("1");
+  });
+
+  it("REFUSES (false) a tenant already AT the ceiling — no slot added", async () => {
+    const kv = fakeKv();
+    expect(await acquireTenantSlot(kv, "t", "job-1", 2)).toBe(true);
+    expect(await acquireTenantSlot(kv, "t", "job-2", 2)).toBe(true);
+    expect(await acquireTenantSlot(kv, "t", "job-3", 2)).toBe(false); // at ceiling ⇒ refuse
+    expect(kv.store.has("conc:t:job-3")).toBe(false);
+  });
+
+  it("counts PER tenant (a busy tenant never gates another)", async () => {
+    const kv = fakeKv();
+    await acquireTenantSlot(kv, "a", "j1", 1);
+    expect(await acquireTenantSlot(kv, "a", "j2", 1)).toBe(false); // a at ceiling
+    expect(await acquireTenantSlot(kv, "b", "j3", 1)).toBe(true); // b unaffected
+  });
+
+  it("release frees a slot so a later job is admitted again", async () => {
+    const kv = fakeKv();
+    await acquireTenantSlot(kv, "t", "j1", 1);
+    expect(await acquireTenantSlot(kv, "t", "j2", 1)).toBe(false);
+    await releaseTenantSlot(kv, "t", "j1");
+    expect(kv.store.has("conc:t:j1")).toBe(false);
+    expect(await acquireTenantSlot(kv, "t", "j3", 1)).toBe(true);
+  });
+
+  it("uses a `conc:` namespace, never colliding with spawn:/jtenant:/pat keys", async () => {
+    const kv = fakeKv({ "job-1": "pat-x", "spawn:job-1": "1", "jtenant:job-1": "t" });
+    expect(await acquireTenantSlot(kv, "t", "job-1", 5)).toBe(true);
+    expect(kv.store.get("conc:t:job-1")).toBe("1");
+    // The other namespaces are untouched, and don't inflate the tenant count.
+    expect(kv.store.get("job-1")).toBe("pat-x");
+    expect(kv.store.get("spawn:job-1")).toBe("1");
+  });
+
+  it("sets a TTL on the slot (self-healing backstop for a missed release)", async () => {
+    const kv = fakeKv();
+    await acquireTenantSlot(kv, "t", "j1", 5);
+    expect(kv.put).toHaveBeenCalledWith("conc:t:j1", "1", { expirationTtl: expect.any(Number) });
+  });
+
+  it("FAIL-OPEN (admit) with no KV bound", async () => {
+    expect(await acquireTenantSlot(undefined, "t", "j1", 1)).toBe(true);
+  });
+
+  it("FAIL-OPEN (admit) when the KV has no `list` (can't count ⇒ never gate)", async () => {
+    const noList: KvLike = {
+      get: vi.fn(async () => null),
+      put: vi.fn(async () => {}),
+      delete: vi.fn(async () => {}),
+    };
+    expect(await acquireTenantSlot(noList, "t", "j1", 1)).toBe(true);
+  });
+
+  it("FAIL-OPEN (admit) when list throws (never block a legitimate job on a KV hiccup)", async () => {
+    const kv = fakeKv();
+    (kv.list as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("kv down"));
+    expect(await acquireTenantSlot(kv, "t", "j1", 1)).toBe(true);
+  });
+
+  it("releaseTenantSlot no-ops (no throw) with no KV bound", async () => {
+    await expect(releaseTenantSlot(undefined, "t", "j1")).resolves.toBeUndefined();
   });
 });

@@ -47,6 +47,9 @@ import {
   pushUsageEvent,
   claimSpawn,
   releaseSpawnClaim,
+  acquireTenantSlot,
+  releaseTenantSlot,
+  type ContainerEnvResult,
 } from "./lib";
 
 export interface Env {
@@ -268,6 +271,14 @@ async function mintJit(env: Env, repoFullName: string, label: string): Promise<s
 // past the longest CI job (the entry is normally deleted at completion).
 const JOB_PAT_TTL_S = 7200;
 
+// job_id → server-DERIVED tenant. Stashed at spawn so completion can (a) release
+// the per-tenant concurrency slot and (b) bill the CORRECT tenant (not wrangler's
+// CLW_TENANT). A distinct `jtenant:` namespace, never colliding with the bare
+// jobId (pat map) or `spawn:`/`conc:` keys.
+function jobTenantKey(jobId: string): string {
+  return `jtenant:${jobId}`;
+}
+
 // Container-start retry (root-caused 2026-07-03): Cloudflare Container DO
 // `start()` intermittently fails with a TRANSIENT platform error — e.g.
 // "Internal error while starting up Durable Object storage caused object to be
@@ -316,22 +327,35 @@ async function startWithRetry(start: (handle: string) => Promise<void>): Promise
   );
 }
 
-// Spawn one runner container with the JIT injected + cache-warm CLW_* (the
-// shared spawn path). `buildContainerEnv` (./lib) is fail-open to cold. On a warm
-// mint it returns the pat_id, which we stash in KV under jobId so the later
-// workflow_job:completed can revoke that exact PAT (the /revoke contract keys on
-// pat_id, not job_id).
-async function spawnRunner(env: Env, jit: string, jobId: string): Promise<string> {
-  // Mint ONCE (never re-mint on a start retry), then start-with-retry.
-  const { containerEnv, patId } = await buildContainerEnv(env, jit, jobId);
+// Spawn one runner container with the JIT injected + the ALREADY-authorized
+// cache-warm CLW_* overlay (`mint`, from buildContainerEnv, computed BEFORE the
+// JIT was minted). On a warm mint we stash job_id→pat_id (revoke keys on pat_id)
+// AND job_id→tenant (completion bills/releases the DERIVED tenant). The overlay's
+// CLW_TENANT is the server-derived tenant, never wrangler's var.
+async function spawnRunner(
+  env: Env,
+  jit: string,
+  jobId: string,
+  mint: ContainerEnvResult,
+): Promise<string> {
+  const containerEnv: Record<string, string> = {
+    CORELINK_RUNNER_JITCONFIG: jit,
+    ...mint.containerEnv, // CLW_* overlay (empty on a cold spawn)
+  };
   const handle = await startWithRetry((h) =>
     getContainer(env.RUNNER_CONTAINER, h).startWithEnv(containerEnv),
   );
-  if (patId && env.RUNNER_JOB_PATS) {
+  if (mint.patId && env.RUNNER_JOB_PATS) {
     // Best-effort: if the put fails, the PAT just TTL-expires (fail-open).
-    await env.RUNNER_JOB_PATS.put(jobId, patId, { expirationTtl: JOB_PAT_TTL_S }).catch((e) =>
+    await env.RUNNER_JOB_PATS.put(jobId, mint.patId, { expirationTtl: JOB_PAT_TTL_S }).catch((e) =>
       console.log(`KV put job→pat failed (PAT will TTL-expire): ${(e as Error).message}`),
     );
+  }
+  if (mint.tenant && env.RUNNER_JOB_PATS) {
+    // Stash the derived tenant for completion (concurrency-slot release + billing).
+    await env.RUNNER_JOB_PATS.put(jobTenantKey(jobId), mint.tenant, {
+      expirationTtl: JOB_PAT_TTL_S,
+    }).catch((e) => console.log(`KV put job→tenant failed: ${(e as Error).message}`));
   }
   return handle;
 }
@@ -339,12 +363,16 @@ async function spawnRunner(env: Env, jit: string, jobId: string): Promise<string
 // Best-effort revoke of a completed job's per-job CAS PAT, by pat_id (looked up
 // from KV). No-op when the mint isn't configured or no pat_id was stored. Fail-
 // OPEN: any error is swallowed (the PAT TTL-expires) — never breaks the webhook.
-async function revokeCompletedJob(env: Env, jobId: string): Promise<boolean> {
-  if (!env.CORELINK_RUNNER_MINT_AUTH_KEY || !env.CLW_TENANT || !env.RUNNER_JOB_PATS) return false;
+async function revokeCompletedJob(
+  env: Env,
+  jobId: string,
+  derivedTenant?: string,
+): Promise<boolean> {
+  if (!env.CORELINK_RUNNER_MINT_AUTH_KEY || !env.RUNNER_JOB_PATS) return false;
   try {
     const patId = await env.RUNNER_JOB_PATS.get(jobId);
     if (!patId) return false; // cold job, or already revoked/expired
-    await revokeCasPatById(env, patId);
+    await revokeCasPatById(env, patId, derivedTenant ?? env.CLW_TENANT);
     await env.RUNNER_JOB_PATS.delete(jobId);
     return true;
   } catch (e) {
@@ -369,8 +397,12 @@ async function maybeBillCompletedJob(
   jobId: string,
   wj: CompletedJob | undefined,
   request: Request,
+  derivedTenant?: string,
 ): Promise<boolean> {
-  if (!env.BILLING_INGEST_URL || !env.BILLING_INGEST_AUTH_KEY || !env.CLW_TENANT) return false;
+  // Bill the SERVER-DERIVED tenant (stashed at spawn); fall back to wrangler's
+  // CLW_TENANT for legacy single-tenant deploys. No tenant ⇒ no push.
+  const billedTenant = derivedTenant ?? env.CLW_TENANT;
+  if (!env.BILLING_INGEST_URL || !env.BILLING_INGEST_AUTH_KEY || !billedTenant) return false;
   try {
     const startedMs = wj?.started_at ? Date.parse(wj.started_at) : NaN;
     const completedMs = wj?.completed_at ? Date.parse(wj.completed_at) : NaN;
@@ -379,7 +411,7 @@ async function maybeBillCompletedJob(
     const region = env.BILLING_REGION ?? colo ?? "";
     if (region.length !== 3) return false; // ingest validates 3-char; skip if unknown
     const ev = await buildUsageEvent({
-      tenantId: env.CLW_TENANT,
+      tenantId: billedTenant,
       jobId,
       startedMs,
       completedMs,
@@ -424,6 +456,9 @@ export default {
           completed_at?: string;
         };
         repository?: { full_name?: string };
+        // GitHub-App delivery: the installation whose id the server maps to a
+        // tenant. Present on App-authed webhooks (required for the runner mint).
+        installation?: { id?: number | string };
       };
       const label = env.AUTOSCALER_LABEL ?? "corelink-dogfood";
       const labels = evt.workflow_job?.labels ?? [];
@@ -439,10 +474,31 @@ export default {
       // Shrinks the post-job window the PAT is valid (TTL is the backstop).
       // Best-effort + fail-open: a revoke failure never breaks the webhook.
       if (evt.action === "completed") {
-        const revoked = await revokeCompletedJob(env, jobId);
+        // Look up the DERIVED tenant stashed at spawn (fallback: wrangler's
+        // CLW_TENANT for legacy/cold jobs). Used for revoke, the concurrency-slot
+        // release, AND billing — so every completion acts on the RIGHT tenant.
+        let derivedTenant: string | undefined;
+        if (env.RUNNER_JOB_PATS) {
+          derivedTenant = (await env.RUNNER_JOB_PATS.get(jobTenantKey(jobId))) ?? undefined;
+        }
+        const revoked = await revokeCompletedJob(env, jobId, derivedTenant);
+        // Release the per-tenant concurrency slot (best-effort; the slot TTL
+        // self-heals a missed release, so this never permanently blocks a tenant).
+        if (derivedTenant && env.RUNNER_JOB_PATS) {
+          await releaseTenantSlot(env.RUNNER_JOB_PATS, derivedTenant, jobId);
+          await env.RUNNER_JOB_PATS.delete(jobTenantKey(jobId)).catch(() => {
+            /* best-effort: TTL is the backstop */
+          });
+        }
         // ASK-2: emit the per-job runner_slot_seconds usage event (prod billing
         // lives here, not the dev-only Rust fabricd). Best-effort, fail-open.
-        const billed = await maybeBillCompletedJob(env, jobId, evt.workflow_job, request);
+        const billed = await maybeBillCompletedJob(
+          env,
+          jobId,
+          evt.workflow_job,
+          request,
+          derivedTenant,
+        );
         return json({ ok: true, revoked, billed, job_id: jobId }, 200);
       }
 
@@ -458,6 +514,17 @@ export default {
       // The repo is the webhook's repository (full_name).
       const repo = evt.repository?.full_name ?? "";
       if (!repo) return json({ error: "no repository in payload" }, 400);
+      // ── Multi-tenant runner-mint authorization inputs ────────────────────────
+      // The server DERIVES the tenant from installation_id + repo_full_name (we no
+      // longer send owner_tenant). These are REQUIRED only when the runner-mint is
+      // configured (multi-tenant mode); legacy cold-spawn mode neither authorizes
+      // nor needs them. A missing installation_id in mint mode is a 400-class abort
+      // (NEVER a cold spawn under an unknown/unauthorized tenant).
+      const installationId =
+        evt.installation?.id != null ? String(evt.installation.id) : "";
+      if (env.CORELINK_RUNNER_MINT_AUTH_KEY && !installationId) {
+        return json({ error: "no installation.id in payload (required for runner mint)" }, 400);
+      }
       // ── Spawn idempotency (gap #2): claim this jobId BEFORE the expensive
       // mint+spawn. A redelivered queued webhook (GitHub at-least-once) for the
       // same job loses the claim and is a no-op — no double mint+spawn / double
@@ -475,8 +542,52 @@ export default {
       ctx.waitUntil(
         (async () => {
           try {
-            const jit = await mintJit(env, repo, label);
-            await spawnRunner(env, jit, jobId);
+            // 1) AUTHORIZE + warm-mint FIRST — BEFORE any GitHub JIT is minted.
+            //    A repo off its tenant's allowlist (or a suspended/unmapped
+            //    tenant, or not runner-entitled) returns 403 ⇒ authz:"forbidden":
+            //    we ABORT here — no JIT, no container. A 5xx/network fails open to
+            //    a cold (uncached) spawn. CLW_TENANT is the SERVER-DERIVED tenant.
+            const mint = await buildContainerEnv(env, {
+              jobId,
+              repoFullName: repo,
+              installationId,
+            });
+            if (mint.authz === "forbidden") {
+              await releaseSpawnClaim(env.RUNNER_JOB_PATS, jobId);
+              console.log(
+                `runner mint FORBIDDEN for job ${jobId} (repo ${repo}): no JIT, no spawn`,
+              );
+              return;
+            }
+            // 2) Per-tenant concurrency ceiling (warm mints only — tenant + ceiling
+            //    known). Best-effort + fail-open: a tenant already AT max_concurrency
+            //    is refused (no spawn); any KV hiccup admits the job.
+            if (mint.tenant && mint.maxConcurrency != null) {
+              const admitted = await acquireTenantSlot(
+                env.RUNNER_JOB_PATS,
+                mint.tenant,
+                jobId,
+                mint.maxConcurrency,
+              );
+              if (!admitted) {
+                await releaseSpawnClaim(env.RUNNER_JOB_PATS, jobId);
+                console.log(
+                  `tenant ${mint.tenant} at max_concurrency ${mint.maxConcurrency}; ` +
+                    `refusing job ${jobId}`,
+                );
+                return;
+              }
+            }
+            // 3) Repo is AUTHORIZED ⇒ NOW mint the GitHub JIT and spawn.
+            try {
+              const jit = await mintJit(env, repo, label);
+              await spawnRunner(env, jit, jobId, mint);
+            } catch (e) {
+              // JIT/spawn failed AFTER acquiring the slot ⇒ release it (the outer
+              // catch releases the spawn claim). Prevents a leaked concurrency slot.
+              if (mint.tenant) await releaseTenantSlot(env.RUNNER_JOB_PATS, mint.tenant, jobId);
+              throw e;
+            }
           } catch (e) {
             await releaseSpawnClaim(env.RUNNER_JOB_PATS, jobId);
             console.log(`background autoscale failed for job ${jobId}: ${(e as Error).message}`);
