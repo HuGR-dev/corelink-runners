@@ -8,6 +8,7 @@
 // account before this is trusted. See README.md "Design notes / wrinkles".
 
 import { Container, getContainer } from "@cloudflare/containers";
+import { DurableObject } from "cloudflare:workers";
 
 // ── G2 metadata-exposure denylist (O7 hardening) — BEST-EFFORT, NOT G2-closing ─
 // Hosts the container is blocked from reaching via the SDK's `deniedHosts`. The
@@ -49,7 +50,11 @@ import {
   releaseSpawnClaim,
   acquireTenantSlot,
   releaseTenantSlot,
+  decideRedeem,
   type ContainerEnvResult,
+  type StashedCred,
+  type StashRecord,
+  type CredStashLike,
 } from "./lib";
 
 export interface Env {
@@ -109,6 +114,53 @@ export interface Env {
   BILLING_INGEST_AUTH_KEY?: string;
   // 3-char region stamped on the event; defaults to the request's CF colo.
   BILLING_REGION?: string;
+  // ── env-0 (cred-ticket) — keep the CAS PAT OUT of the untrusted container env ──
+  // The single-use stash latch (one DO instance per lease_id = GH jobId).
+  CRED_STASH: DurableObjectNamespace<CredStashDO>;
+  // The Worker's OWN public base URL, injected into the container as
+  // CLW_FABRIC_ENDPOINT so clw redeems its cred-ticket here at boot. Its PRESENCE
+  // enables env-0 (a single-use ticket is injected instead of CLW_TOKEN — the raw
+  // PAT never enters the untrusted env). Absent ⇒ legacy CLW_TOKEN (pre-launch
+  // transition only). Set this to arm env-0. wrangler var.
+  SPAWN_WORKER_PUBLIC_URL?: string;
+}
+
+// ── env-0 cred-stash Durable Object — the Worker-native single-use latch ──────
+// One instance per lease_id (= GH jobId). The autoscaler stashes the per-job CAS
+// PAT here and injects only a CLW_CRED_TICKET into the untrusted container; clw
+// redeems it ONCE at boot via POST /v1/leases/{id}/cas-cred. Mirrors fabricd's
+// in-process pending_cred + take_cred latch (crates/corelink-fabric-server), so
+// clw's CredentialSource redeems against the Worker byte-identically. Storage is
+// the DO's own strongly-consistent store — the take is atomic (no CLW_TOKEN race).
+export class CredStashDO extends DurableObject<Env> {
+  // Stash the PAT under a high-entropy ticket, with a self-cleaning TTL alarm.
+  async stash(ticket: string, cred: StashedCred, ttlMs: number): Promise<void> {
+    const expiresMs = Date.now() + ttlMs;
+    await this.ctx.storage.put("rec", { ticket, cred, expiresMs });
+    await this.ctx.storage.setAlarm(expiresMs);
+  }
+
+  // Single-use redeem. `{status, cred?}`: 200 (first valid), 401 (bad ticket),
+  // 410 (already redeemed / expired), 404 (never stashed). The single-use/expiry
+  // decision is the PURE `decideRedeem` (lib, unit-tested); this wrapper applies
+  // the `consume`/`wipe` it returns to strongly-consistent DO storage.
+  async redeem(ticket: string): Promise<{ status: number; cred?: StashedCred }> {
+    const rec = await this.ctx.storage.get<StashRecord>("rec");
+    const consumed = (await this.ctx.storage.get<boolean>("consumed")) ?? false;
+    const d = decideRedeem(rec, consumed, Date.now(), ticket);
+    if (d.wipe) await this.ctx.storage.deleteAll();
+    if (d.consume) {
+      // Drop the secret, leave a tombstone so a 2nd redeem is 410 (not 404).
+      await this.ctx.storage.delete("rec");
+      await this.ctx.storage.put("consumed", true);
+    }
+    return { status: d.status, cred: d.cred };
+  }
+
+  // TTL cleanup — wipe an un-redeemed (or tombstoned) stash at expiry.
+  async alarm(): Promise<void> {
+    await this.ctx.storage.deleteAll();
+  }
 }
 
 // Per-job runner container. One DO instance per spawned runner (keyed by handle).
@@ -549,11 +601,27 @@ export default {
             //    tenant, or not runner-entitled) returns 403 ⇒ authz:"forbidden":
             //    we ABORT here — no JIT, no container. A 5xx/network fails open to
             //    a cold (uncached) spawn. CLW_TENANT is the SERVER-DERIVED tenant.
-            const mint = await buildContainerEnv(env, {
-              jobId,
-              repoFullName: repo,
-              installationId,
-            });
+            // env-0: when the Worker's public URL is configured, stash the PAT in
+            // the CRED_STASH DO and inject a single-use CLW_CRED_TICKET instead of
+            // CLW_TOKEN (the raw PAT never enters the untrusted container env).
+            const env0 = env.SPAWN_WORKER_PUBLIC_URL
+              ? {
+                  stash: {
+                    stash: (leaseId, ticket, cred, ttlMs) =>
+                      env.CRED_STASH.get(env.CRED_STASH.idFromName(leaseId)).stash(
+                        ticket,
+                        cred,
+                        ttlMs,
+                      ),
+                  } satisfies CredStashLike,
+                  fabricEndpoint: env.SPAWN_WORKER_PUBLIC_URL,
+                }
+              : undefined;
+            const mint = await buildContainerEnv(
+              env,
+              { jobId, repoFullName: repo, installationId },
+              env0,
+            );
             if (mint.authz === "forbidden") {
               await releaseSpawnClaim(env.RUNNER_JOB_PATS, jobId);
               console.log(
@@ -597,6 +665,42 @@ export default {
         })(),
       );
       return json({ ok: true, spawning: true, job_id: jobId }, 202);
+    }
+
+    // ── POST /v1/leases/{lease_id}/cas-cred — env-0 cred-ticket redemption ────
+    // TICKET-authed (NOT bearer): clw, inside the untrusted container, redeems its
+    // single-use CLW_CRED_TICKET here for the per-job CAS PAT. Mounted BEFORE the
+    // bearer gate because the ticket IS the credential. Contract is byte-identical
+    // to fabricd's handlers/cas_cred (200 {cas_pat, clw_endpoint, clw_tenant,
+    // clw_ref_domain}; 401 bad ticket; 410 already-redeemed/expired; 404 no lease)
+    // so clw's CredentialSource redeems against the Worker or fabricd identically.
+    {
+      const cred = pathname.match(/^\/v1\/leases\/([^/]+)\/cas-cred$/);
+      if (request.method === "POST" && cred) {
+        const leaseId = decodeURIComponent(cred[1]);
+        let body: { ticket?: string };
+        try {
+          body = (await request.json()) as { ticket?: string };
+        } catch (e) {
+          return json({ error: `invalid JSON body: ${(e as Error).message}` }, 400);
+        }
+        if (!body.ticket) return json({ error: "ticket required" }, 400);
+        const r = await env.CRED_STASH.get(env.CRED_STASH.idFromName(leaseId)).redeem(body.ticket);
+        if (r.status === 200 && r.cred) {
+          return json(
+            {
+              cas_pat: r.cred.token,
+              clw_endpoint: r.cred.endpoint,
+              clw_tenant: r.cred.tenant,
+              clw_ref_domain: "runner",
+            },
+            200,
+          );
+        }
+        if (r.status === 401) return json({ error: "invalid ticket" }, 401);
+        if (r.status === 410) return json({ error: "ticket already redeemed" }, 410);
+        return json({ error: "no such lease" }, 404);
+      }
     }
 
     // ── /v1/* routes — bearer-authed (the fabric/Engine seam) ────────────────
