@@ -28,6 +28,11 @@ export interface KvLike {
   get(key: string): Promise<string | null>;
   put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void>;
   delete(key: string): Promise<void>;
+  // Optional prefix listing (the real KVNamespace has it) — used ONLY by the
+  // best-effort per-tenant concurrency counter. Absent ⇒ the counter fails open
+  // (admits), never a gate. Kept optional so the spawn-claim path (which does not
+  // list) still satisfies this runtime-agnostic subset.
+  list?(options: { prefix: string }): Promise<{ keys: { name: string }[] }>;
 }
 
 // How long a spawn claim lives — past the longest CI job, a self-cleaning
@@ -103,17 +108,43 @@ export async function verifyGithubHmac(secret: string, sig: string, body: string
   return safeEqual(`sha256=${hex}`, sig);
 }
 
-// The per-job CAS PAT mint result: the plaintext token (injected as CLW_TOKEN)
-// + its pat_id (the handle /revoke keys on at completion).
+// The frozen mint-request inputs (server-derived-tenant seam, 2026-07-04). The
+// Worker sends `repo_full_name` + `installation_id`; the SERVER derives the tenant
+// (we no longer send `owner_tenant`). `job_id` is the GH workflow_job.id.
+export interface MintParams {
+  jobId: string;
+  repoFullName: string; // evt.repository.full_name
+  installationId: string; // evt.installation.id (stringified)
+  scope?: string; // default "read-write"
+  ttlSeconds?: number; // optional PAT TTL override
+}
+
+// The per-job CAS PAT mint result. `tenant` is the SERVER-DERIVED, authoritative
+// tenant (injected as CLW_TENANT + used as the billed tenant); `maxConcurrency`
+// is the per-tenant runner ceiling (absent ⇒ no ceiling enforced).
 export interface MintResult {
   token: string;
   patId: string;
+  tenant: string;
+  maxConcurrency?: number;
 }
 
-// Mint a per-job CAS PAT via D-9 (corelink-server). Scope cas:rw, tenant-scoped
-// (A6: per-job, never the tenant PAT). Throws on any failure — the caller falls
-// open to a COLD spawn (north star: cache absent ⇒ slow, never broken).
-async function mintCasPat(env: MintEnv, jobId: string): Promise<MintResult> {
+// A 403 from the mint is a HARD DENY (installation not mapped / tenant suspended /
+// repo not allowlisted / not runner-entitled). It is thrown as a DISTINCT error so
+// the caller ABORTS the spawn — it must NEVER fail-open to a wrong-tenant cold
+// spawn. Any OTHER failure (5xx, network) is a plain Error ⇒ fail-open to cold.
+export class MintForbiddenError extends Error {
+  constructor(message = "runner mint unauthorized") {
+    super(message);
+    this.name = "MintForbiddenError";
+  }
+}
+
+// Mint a per-job CAS PAT via the runner-mint seam (corelink-server). The server
+// DERIVES the tenant from installation_id + repo_full_name (authorization happens
+// HERE): a 403 ⇒ MintForbiddenError (hard deny, abort); a 5xx/network ⇒ plain
+// Error (caller falls open to a COLD spawn — cache absent ⇒ slow, never broken).
+async function mintCasPat(env: MintEnv, params: MintParams): Promise<MintResult> {
   const base = env.CORELINK_MINT_URL ?? "https://corelink-api.humangr.com";
   const resp = await fetch(`${base}/internal/v1/runner/mint`, {
     method: "POST",
@@ -122,20 +153,49 @@ async function mintCasPat(env: MintEnv, jobId: string): Promise<MintResult> {
       "content-type": "application/json",
       "user-agent": "corelink-spawn-worker",
     },
-    body: JSON.stringify({ owner_tenant: env.CLW_TENANT, job_id: jobId, scope: "cas:rw" }),
+    // FROZEN request body: NO owner_tenant (server derives the tenant).
+    body: JSON.stringify({
+      job_id: params.jobId,
+      repo_full_name: params.repoFullName,
+      installation_id: params.installationId,
+      scope: params.scope ?? "read-write",
+      ...(params.ttlSeconds != null ? { ttl_seconds: params.ttlSeconds } : {}),
+    }),
   });
-  if (!resp.ok) throw new Error(`D-9 mint ${resp.status}`);
-  // LIVE wire shape (verified 2026-06-21): 200 → {token_plaintext, pat_id, token_id,
-  // principal, tenant, expires_ms}. The PAT value is `token_plaintext` (NOT `token`,
-  // which the relay doc mis-stated). Keys logged on miss so any future drift is loud.
-  const j = (await resp.json()) as { token_plaintext?: string; pat_id?: string };
+  // 403 FORBIDDEN ⇒ HARD DENY. Propagate a distinct error so the caller aborts
+  // the spawn (no JIT, no container) rather than fail-open to a wrong-tenant cold.
+  if (resp.status === 403) {
+    throw new MintForbiddenError(
+      `runner mint unauthorized (403): ${await resp.text().catch(() => "")}`,
+    );
+  }
+  // Any other non-2xx (5xx D1 error "runner mint unavailable", etc.) ⇒ plain Error
+  // ⇒ the caller MAY fail-open to a cold spawn (unchanged discipline).
+  if (!resp.ok) throw new Error(`runner mint ${resp.status}`);
+  // FROZEN 200 wire: {token_plaintext, pat_id, token_id, tenant (DERIVED,
+  // AUTHORITATIVE), expires_ms, max_concurrency}. Keys logged on a miss so any
+  // future drift is loud. A malformed 200 fails open to cold (not a hard deny).
+  const j = (await resp.json()) as {
+    token_plaintext?: string;
+    pat_id?: string;
+    tenant?: string;
+    max_concurrency?: number;
+  };
   if (!j.token_plaintext) {
-    throw new Error(`D-9 mint: no token_plaintext (200 keys: ${Object.keys(j).join(",")})`);
+    throw new Error(`runner mint: no token_plaintext (200 keys: ${Object.keys(j).join(",")})`);
   }
   if (!j.pat_id) {
-    throw new Error(`D-9 mint: no pat_id (200 keys: ${Object.keys(j).join(",")})`);
+    throw new Error(`runner mint: no pat_id (200 keys: ${Object.keys(j).join(",")})`);
   }
-  return { token: j.token_plaintext, patId: j.pat_id };
+  if (!j.tenant) {
+    throw new Error(`runner mint: no tenant (200 keys: ${Object.keys(j).join(",")})`);
+  }
+  return {
+    token: j.token_plaintext,
+    patId: j.pat_id,
+    tenant: j.tenant,
+    maxConcurrency: typeof j.max_concurrency === "number" ? j.max_concurrency : undefined,
+  };
 }
 
 // Revoke a per-job CAS PAT via D-9 — keyed by `pat_id` (the live /revoke contract:
@@ -143,7 +203,11 @@ async function mintCasPat(env: MintEnv, jobId: string): Promise<MintResult> {
 // response and is carried across the queued→completed gap via the RUNNER_JOB_PATS KV
 // (mint+revoke are separate Worker invocations). Throws on failure; caller swallows
 // it (the PAT is TTL-bounded, so revoke is best-effort window-shrinking hardening).
-export async function revokeCasPatById(env: MintEnv, patId: string): Promise<void> {
+export async function revokeCasPatById(
+  env: MintEnv,
+  patId: string,
+  ownerTenant?: string,
+): Promise<void> {
   const base = env.CORELINK_MINT_URL ?? "https://corelink-api.humangr.com";
   const resp = await fetch(`${base}/internal/v1/runner/revoke`, {
     method: "POST",
@@ -152,44 +216,123 @@ export async function revokeCasPatById(env: MintEnv, patId: string): Promise<voi
       "content-type": "application/json",
       "user-agent": "corelink-spawn-worker",
     },
-    body: JSON.stringify({ pat_id: patId, owner_tenant: env.CLW_TENANT }),
+    // Revoke keys on pat_id; owner_tenant is the SERVER-DERIVED tenant carried from
+    // the mint (fallback: wrangler's CLW_TENANT for legacy single-tenant deploys).
+    body: JSON.stringify({ pat_id: patId, owner_tenant: ownerTenant ?? env.CLW_TENANT }),
   });
   if (!resp.ok) throw new Error(`D-9 revoke ${resp.status}: ${await resp.text()}`);
 }
 
-// The result of building the per-job container env: the env to inject, plus the
-// pat_id (present iff the warm-mint succeeded) so the caller can persist it for
-// revoke-on-completion.
+// The result of the AUTHORIZE + warm-mint step. `authz` is the gate the caller
+// MUST obey BEFORE minting a GitHub JIT:
+//   • "forbidden" ⇒ 403 HARD DENY — abort: no JIT, no container.
+//   • "ok"        ⇒ proceed. `containerEnv` carries the warm CLW_* (empty on a
+//                   cold/fail-open spawn); `tenant`/`patId`/`maxConcurrency` are
+//                   present iff the warm mint succeeded.
+// NOTE: `containerEnv` is the CLW_* OVERLAY only — it does NOT include the JIT.
+// The JIT is minted AFTER authorization and merged by the caller (spawnRunner),
+// so an unauthorized repo never even gets a JIT.
 export interface ContainerEnvResult {
+  authz: "ok" | "forbidden";
   containerEnv: Record<string, string>;
   patId?: string;
+  tenant?: string; // server-DERIVED tenant (billed + CLW_TENANT); warm only
+  maxConcurrency?: number; // per-tenant ceiling; warm only
 }
 
-// Build the per-job container env: always the JIT; cache-warm CLW_* WHEN the
-// D-9 mint is configured AND succeeds. Any mint failure ⇒ cold env (fail-open).
-// Returns the pat_id on a warm mint so the caller can stash job_id→pat_id for
-// revoke-on-completion (the /revoke contract keys on pat_id, not job_id).
+// AUTHORIZE the runner + build the cache-warm CLW_* overlay. Opt-in: only when the
+// runner-mint key is configured AND we have the authz inputs (repo + installation).
+// A 403 ⇒ authz:"forbidden" (HARD DENY — never a wrong-tenant cold spawn). A 5xx/
+// network/malformed-200 ⇒ authz:"ok" with an EMPTY overlay (FAIL-OPEN to cold —
+// the job still runs, uncached). CLW_TENANT is the SERVER-DERIVED tenant, never
+// wrangler's CLW_TENANT var. Returns pat_id/tenant/max_concurrency on a warm mint.
 export async function buildContainerEnv(
   env: MintEnv,
-  jit: string,
-  jobId: string,
+  params: MintParams,
 ): Promise<ContainerEnvResult> {
-  const containerEnv: Record<string, string> = { CORELINK_RUNNER_JITCONFIG: jit };
-  if (env.CORELINK_RUNNER_MINT_AUTH_KEY && env.CLW_TENANT) {
-    try {
-      const { token, patId } = await mintCasPat(env, jobId);
-      containerEnv.CLW_ENDPOINT = env.CLW_ENDPOINT ?? "https://corelink-api.humangr.com";
-      containerEnv.CLW_TENANT = env.CLW_TENANT;
-      containerEnv.CLW_TOKEN = token; // per-job; never logged
-      containerEnv.CLW_REF_DOMAIN = "runner";
-      return { containerEnv, patId };
-    } catch (e) {
-      // Fail-OPEN: spawn cold (no CLW_*). The entrypoint's cache-warm hook is
-      // also fail-open, so a job ALWAYS runs — slow, never broken.
-      console.log(`warm-mint failed, spawning COLD: ${(e as Error).message}`);
-    }
+  // No mint key, or not enough to authorize ⇒ COLD (legacy fail-open). We do NOT
+  // authorize and do NOT warm — the job spawns without CLW_* under no tenant.
+  if (!env.CORELINK_RUNNER_MINT_AUTH_KEY || !params.repoFullName || !params.installationId) {
+    return { authz: "ok", containerEnv: {} };
   }
-  return { containerEnv };
+  try {
+    const m = await mintCasPat(env, params);
+    return {
+      authz: "ok",
+      containerEnv: {
+        CLW_ENDPOINT: env.CLW_ENDPOINT ?? "https://corelink-api.humangr.com",
+        CLW_TENANT: m.tenant, // server-DERIVED, authoritative (NEVER wrangler's var)
+        CLW_TOKEN: m.token, // per-job; never logged
+        CLW_REF_DOMAIN: "runner",
+      },
+      patId: m.patId,
+      tenant: m.tenant,
+      maxConcurrency: m.maxConcurrency,
+    };
+  } catch (e) {
+    if (e instanceof MintForbiddenError) {
+      // 403 HARD DENY ⇒ ABORT. An unauthorized repo must not run at all — never
+      // let a 403 degrade into a (wrong-tenant) cold spawn.
+      console.log(`runner mint FORBIDDEN (aborting spawn): ${(e as Error).message}`);
+      return { authz: "forbidden", containerEnv: {} };
+    }
+    // 5xx ("runner mint unavailable") / network / malformed-200 ⇒ FAIL-OPEN to
+    // cold. The entrypoint's cache-warm hook is also fail-open — slow, never broken.
+    console.log(`warm-mint failed, spawning COLD: ${(e as Error).message}`);
+    return { authz: "ok", containerEnv: {} };
+  }
+}
+
+// ── Per-tenant concurrency ceiling (max_concurrency) — best-effort fairness ────
+//
+// One KV key per in-flight (tenant, job): `conc:<tenant>:<jobId>`, TTL-bounded so
+// a MISSED release SELF-HEALS (the slot expires) — it can never become a permanent
+// gate. The live count is the number of keys under the tenant prefix. Best-effort
+// + FAIL-OPEN by north-star: no KV / no `list` / any error ⇒ ADMIT. Fairness must
+// never refuse a legitimately-under-ceiling job. Residual: two exactly-concurrent
+// admits can both see `< max` (KV has no atomic CAS) ⇒ a transient +1 overshoot
+// that self-heals; the common case (bursts seconds apart) is collapsed.
+export const TENANT_SLOT_TTL_S = 2700; // 45m — matches the container sleepAfter backstop
+
+function tenantSlotKey(tenant: string, jobId: string): string {
+  return `conc:${tenant}:${jobId}`;
+}
+
+/**
+ * Try to ACQUIRE a runner slot for `tenant`. Returns `true` (admit → spawn) if the
+ * tenant is under `max`, `false` (refuse → no spawn) if already at the ceiling.
+ * FAIL-OPEN (admit) with no KV, no `list`, or any KV error.
+ */
+export async function acquireTenantSlot(
+  kv: KvLike | undefined,
+  tenant: string,
+  jobId: string,
+  max: number,
+): Promise<boolean> {
+  if (!kv || !kv.list) return true; // no infra ⇒ fail-open (admit)
+  try {
+    const { keys } = await kv.list({ prefix: `conc:${tenant}:` });
+    if (keys.length >= max) return false; // at ceiling ⇒ refuse (no spawn)
+    await kv.put(tenantSlotKey(tenant, jobId), "1", { expirationTtl: TENANT_SLOT_TTL_S });
+    return true;
+  } catch {
+    return true; // KV error ⇒ fail-open (never block a real job)
+  }
+}
+
+/**
+ * Release a tenant's runner slot (called at job completion, and on a spawn failure
+ * after acquiring). Best-effort: a delete failure just leaves the slot to TTL-expire.
+ */
+export async function releaseTenantSlot(
+  kv: KvLike | undefined,
+  tenant: string,
+  jobId: string,
+): Promise<void> {
+  if (!kv) return;
+  await kv.delete(tenantSlotKey(tenant, jobId)).catch(() => {
+    /* best-effort: the slot TTL-expires */
+  });
 }
 
 // ── Billing usage-push (ASK-2) — per-completed-job runner_slot_seconds ────────
