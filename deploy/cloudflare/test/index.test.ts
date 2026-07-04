@@ -16,7 +16,12 @@ import {
   releaseSpawnClaim,
   acquireTenantSlot,
   releaseTenantSlot,
+  randomTicket,
+  decideRedeem,
   type KvLike,
+  type CredStashLike,
+  type StashedCred,
+  type StashRecord,
 } from "../src/lib";
 
 describe("safeEqual (constant-time bearer compare)", () => {
@@ -199,6 +204,134 @@ describe("buildContainerEnv (AUTHORIZE + warm-mint; 403 HARD DENY, 5xx FAIL-OPEN
     expect(r.authz).toBe("ok");
     expect(r.tenant).toBe("srv-derived-tenant");
     expect(r.maxConcurrency).toBeUndefined();
+  });
+});
+
+describe("env-0 (cred-ticket): buildContainerEnv stashes the PAT, injects a ticket, NEVER CLW_TOKEN", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const JOB = "987654321";
+  const PARAMS = { jobId: JOB, repoFullName: "owner/repo", installationId: "44556677" };
+  function ok200(overrides: Record<string, unknown> = {}): Response {
+    return new Response(
+      JSON.stringify({
+        token_plaintext: "per-job-pat",
+        pat_id: "pat-123",
+        tenant: "srv-derived-tenant",
+        max_concurrency: 5,
+        ...overrides,
+      }),
+      { status: 200 },
+    );
+  }
+  const ENV = {
+    CORELINK_RUNNER_MINT_AUTH_KEY: "k",
+    CLW_ENDPOINT: "https://corelink-api.humangr.com",
+    CORELINK_MINT_URL: "https://corelink-api.humangr.com",
+  } as never;
+
+  it("WARM env-0: injects CLW_CRED_TICKET + CLW_LEASE_ID + CLW_FABRIC_ENDPOINT, and NO CLW_TOKEN", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ok200()));
+    const stashed: { leaseId: string; ticket: string; cred: StashedCred; ttlMs: number }[] = [];
+    const stash: CredStashLike = {
+      stash: async (leaseId, ticket, cred, ttlMs) => {
+        stashed.push({ leaseId, ticket, cred, ttlMs });
+      },
+    };
+    const r = await buildContainerEnv(ENV, PARAMS, {
+      stash,
+      fabricEndpoint: "https://corelink-spawn-worker.example.dev",
+    });
+    expect(r.authz).toBe("ok");
+    // THE load-bearing assertion: the raw PAT is NOT in the container env.
+    expect(r.containerEnv.CLW_TOKEN).toBeUndefined();
+    expect(r.containerEnv.CLW_CRED_TICKET).toMatch(/^[0-9a-f]{64}$/);
+    expect(r.containerEnv.CLW_LEASE_ID).toBe(JOB);
+    expect(r.containerEnv.CLW_FABRIC_ENDPOINT).toBe("https://corelink-spawn-worker.example.dev");
+    expect(r.containerEnv.CLW_TENANT).toBe("srv-derived-tenant");
+    expect(r.containerEnv.CLW_REF_DOMAIN).toBe("runner");
+    // The PAT was stashed server-side, keyed by leaseId, under the SAME ticket.
+    expect(stashed).toHaveLength(1);
+    expect(stashed[0].leaseId).toBe(JOB);
+    expect(stashed[0].ticket).toBe(r.containerEnv.CLW_CRED_TICKET);
+    expect(stashed[0].cred).toEqual({
+      token: "per-job-pat",
+      endpoint: "https://corelink-api.humangr.com",
+      tenant: "srv-derived-tenant",
+    });
+    expect(r.patId).toBe("pat-123");
+    expect(r.maxConcurrency).toBe(5);
+  });
+
+  it("stash FAILURE ⇒ spawn COLD (empty overlay), NEVER falls back to CLW_TOKEN", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ok200()));
+    const stash: CredStashLike = {
+      stash: async () => {
+        throw new Error("DO unavailable");
+      },
+    };
+    const r = await buildContainerEnv(ENV, PARAMS, { stash, fabricEndpoint: "https://x.dev" });
+    expect(r.authz).toBe("ok");
+    expect(r.containerEnv).toEqual({}); // COLD — no ticket AND no token
+    expect(r.containerEnv.CLW_TOKEN).toBeUndefined();
+  });
+
+  it("legacy CLW_TOKEN only when env-0 deps are absent (pre-launch transition)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ok200()));
+    const r = await buildContainerEnv(ENV, PARAMS); // no deps
+    expect(r.containerEnv.CLW_TOKEN).toBe("per-job-pat");
+    expect(r.containerEnv.CLW_CRED_TICKET).toBeUndefined();
+  });
+});
+
+describe("randomTicket / decideRedeem (env-0 single-use latch semantics)", () => {
+  it("randomTicket is 64 hex chars and unique", () => {
+    const a = randomTicket();
+    const b = randomTicket();
+    expect(a).toMatch(/^[0-9a-f]{64}$/);
+    expect(a).not.toBe(b);
+  });
+
+  const CRED: StashedCred = { token: "pat", endpoint: "https://cas", tenant: "t1" };
+  const NOW = 1_000_000;
+  const rec = (over: Partial<StashRecord> = {}): StashRecord => ({
+    ticket: "goodticket",
+    cred: CRED,
+    expiresMs: NOW + 10_000,
+    ...over,
+  });
+
+  it("200 + consume on the FIRST valid redemption", () => {
+    const d = decideRedeem(rec(), false, NOW, "goodticket");
+    expect(d.status).toBe(200);
+    expect(d.cred).toEqual(CRED);
+    expect(d.consume).toBe(true);
+    expect(d.wipe).toBeUndefined();
+  });
+
+  it("410 on a 2nd redemption (record gone, consumed tombstone set)", () => {
+    const d = decideRedeem(undefined, true, NOW, "goodticket");
+    expect(d.status).toBe(410);
+    expect(d.cred).toBeUndefined();
+  });
+
+  it("404 when never stashed (no record, no tombstone)", () => {
+    const d = decideRedeem(undefined, false, NOW, "goodticket");
+    expect(d.status).toBe(404);
+  });
+
+  it("401 on a wrong ticket — does NOT consume the single use", () => {
+    const d = decideRedeem(rec(), false, NOW, "WRONGticket");
+    expect(d.status).toBe(401);
+    expect(d.consume).toBeUndefined();
+    expect(d.cred).toBeUndefined();
+  });
+
+  it("410 + wipe when the stash has expired", () => {
+    const d = decideRedeem(rec({ expiresMs: NOW - 1 }), false, NOW, "goodticket");
+    expect(d.status).toBe(410);
+    expect(d.wipe).toBe(true);
+    expect(d.cred).toBeUndefined();
   });
 });
 

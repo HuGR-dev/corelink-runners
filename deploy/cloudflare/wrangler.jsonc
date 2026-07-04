@@ -16,6 +16,16 @@
     "CLW_TENANT": "ee30f7ba-fc25-4d71-939e-ebe130b4c6a3",
     "CLW_ENDPOINT": "https://corelink-api.humangr.com",
     "CORELINK_MINT_URL": "https://corelink-api.humangr.com"
+    // ── env-0 ARM (BUILT, not yet armed — uncomment to flip on) ──────────────
+    // SPAWN_WORKER_PUBLIC_URL is the Worker's OWN public base, injected as
+    // CLW_FABRIC_ENDPOINT so clw redeems its single-use cred-ticket here at boot.
+    // Its PRESENCE flips the autoscaler from CLW_TOKEN-in-env to ticket-in-env —
+    // the raw CAS PAT never enters the untrusted container. Left UNSET so this
+    // change is INERT (dogfood keeps the legacy CLW_TOKEN path); ARM it as the
+    // launch step AFTER verifying the runner image's clw supports cred-ticket
+    // redemption (CredentialSource, clw PR #165) — the exit test: an env dump
+    // inside a live lease shows NO PAT AND the cache still hydrates. To arm:
+    //   "SPAWN_WORKER_PUBLIC_URL": "https://corelink-spawn-worker.gmhelmold.workers.dev"
   },
   // Per-spawn rate limit on /webhook (defense-in-depth vs a leaked webhook
   // secret): 30 queued+labeled spawns / 60s. Ignored events don't count.
@@ -37,12 +47,17 @@
   "durable_objects": {
     "bindings": [
       { "name": "RUNNER_CONTAINER", "class_name": "RunnerContainer" },
-      { "name": "CHECK_HOST_CONTAINER", "class_name": "CheckHostContainer" }
+      { "name": "CHECK_HOST_CONTAINER", "class_name": "CheckHostContainer" },
+      // env-0 cred-stash: the single-use latch for the per-job CAS PAT (one DO
+      // instance per lease_id = GH jobId). A plain DO (not a Container), so it is
+      // NOT a container-image class — just DO storage.
+      { "name": "CRED_STASH", "class_name": "CredStashDO" }
     ]
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["RunnerContainer"] },
-    { "tag": "v2", "new_sqlite_classes": ["CheckHostContainer"] }
+    { "tag": "v2", "new_sqlite_classes": ["CheckHostContainer"] },
+    { "tag": "v3", "new_sqlite_classes": ["CredStashDO"] }
   ],
 
   // The runner container. IMPORTANT (ADR-0008 / README wrinkle #1): the image is

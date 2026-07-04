@@ -240,15 +240,87 @@ export interface ContainerEnvResult {
   maxConcurrency?: number; // per-tenant ceiling; warm only
 }
 
+// ── env-0 (cred-ticket) — keep the CAS PAT OUT of the untrusted container env ──
+//
+// Instead of injecting CLW_TOKEN (the raw per-job PAT) into the untrusted
+// container, the autoscaler STASHES the PAT server-side (a Durable Object latch)
+// and injects a single-use, lease-bound CLW_CRED_TICKET. clw redeems it ONCE at
+// its trusted boot against POST {CLW_FABRIC_ENDPOINT}/v1/leases/{id}/cas-cred and
+// holds the PAT in-process. An `env` / `/proc/self/environ` dump inside the lease
+// shows NO PAT — only a ticket that is 410/gone after the boot redemption. This
+// mirrors the fabricd env-0 mechanism (crates/corelink-fabric-server/cred_ticket)
+// so clw's already-merged CredentialSource redeems against the Worker identically.
+
+/** The per-job credential stashed server-side, returned once on redemption. */
+export interface StashedCred {
+  token: string; // the per-job CAS PAT plaintext
+  endpoint: string; // CLW_ENDPOINT (CAS/AC base)
+  tenant: string; // the server-DERIVED CLW_TENANT
+}
+
+/**
+ * Runtime-agnostic stash — the DO-backed single-use latch lives in index.ts (this
+ * module stays free of `cloudflare:workers` imports). `stash` inserts the cred
+ * under `ticket`, keyed by `leaseId`, self-cleaning after `ttlMs`.
+ */
+export interface CredStashLike {
+  stash(leaseId: string, ticket: string, cred: StashedCred, ttlMs: number): Promise<void>;
+}
+
+// The cred-ticket + stash live as long as the longest CI job (mirrors the PAT/JIT
+// TTLs); the DO alarm wipes the stash at this bound.
+export const CRED_TICKET_TTL_S = 7200;
+
+/** A 256-bit high-entropy hex ticket — the ticket string IS the secret. */
+export function randomTicket(): string {
+  const b = new Uint8Array(32);
+  crypto.getRandomValues(b);
+  return [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+}
+
+/** The stash record persisted in DO storage (the value under key "rec"). */
+export interface StashRecord {
+  ticket: string;
+  cred: StashedCred;
+  expiresMs: number;
+}
+
+/**
+ * PURE redeem decision (unit-testable without a DO runtime — the DO is a thin
+ * wrapper that applies `consume`/`wipe` to its storage). Mirrors fabricd's
+ * handlers/cas_cred order: 200 first-valid (returns the cred, `consume` the latch),
+ * 401 bad ticket (constant-time), 410 already-redeemed (tombstone) OR expired
+ * (`wipe`), 404 never-stashed. A bad ticket does NOT consume — only a correct one
+ * spends the single use.
+ */
+export function decideRedeem(
+  rec: StashRecord | undefined,
+  consumedTombstone: boolean,
+  nowMs: number,
+  ticket: string,
+): { status: number; cred?: StashedCred; consume?: boolean; wipe?: boolean } {
+  if (!rec) return { status: consumedTombstone ? 410 : 404 };
+  if (nowMs > rec.expiresMs) return { status: 410, wipe: true };
+  if (!safeEqual(ticket, rec.ticket)) return { status: 401 };
+  return { status: 200, cred: rec.cred, consume: true };
+}
+
 // AUTHORIZE the runner + build the cache-warm CLW_* overlay. Opt-in: only when the
 // runner-mint key is configured AND we have the authz inputs (repo + installation).
 // A 403 ⇒ authz:"forbidden" (HARD DENY — never a wrong-tenant cold spawn). A 5xx/
 // network/malformed-200 ⇒ authz:"ok" with an EMPTY overlay (FAIL-OPEN to cold —
 // the job still runs, uncached). CLW_TENANT is the SERVER-DERIVED tenant, never
 // wrangler's CLW_TENANT var. Returns pat_id/tenant/max_concurrency on a warm mint.
+//
+// env-0: when `deps.stash` + `deps.fabricEndpoint` are provided, the PAT is
+// STASHED and a single-use CLW_CRED_TICKET is injected INSTEAD of CLW_TOKEN — the
+// untrusted container never sees the raw PAT. When they're absent (pre-launch
+// transition), the legacy CLW_TOKEN overlay is used. A stash FAILURE never falls
+// back to CLW_TOKEN — it spawns COLD (the whole point is no PAT in the untrusted env).
 export async function buildContainerEnv(
   env: MintEnv,
   params: MintParams,
+  deps?: { stash?: CredStashLike; fabricEndpoint?: string },
 ): Promise<ContainerEnvResult> {
   // No mint key, or not enough to authorize ⇒ COLD (legacy fail-open). We do NOT
   // authorize and do NOT warm — the job spawns without CLW_* under no tenant.
@@ -257,10 +329,44 @@ export async function buildContainerEnv(
   }
   try {
     const m = await mintCasPat(env, params);
+    const endpoint = env.CLW_ENDPOINT ?? "https://corelink-api.humangr.com";
+    // env-0 ON (stash + fabric endpoint configured): stash the PAT, inject a
+    // single-use ticket — NEVER CLW_TOKEN. A stash failure spawns COLD (no leak).
+    if (deps?.stash && deps?.fabricEndpoint) {
+      const ticket = randomTicket();
+      try {
+        await deps.stash.stash(
+          params.jobId,
+          ticket,
+          { token: m.token, endpoint, tenant: m.tenant },
+          CRED_TICKET_TTL_S * 1000,
+        );
+      } catch (e) {
+        // Stash failed ⇒ we CANNOT do env-0. Never fall back to CLW_TOKEN — spawn
+        // COLD (the minted PAT is undelivered and TTL-expires). No PAT ever leaks.
+        console.log(`cred-stash failed, spawning COLD (no token leaked): ${(e as Error).message}`);
+        return { authz: "ok", containerEnv: {} };
+      }
+      return {
+        authz: "ok",
+        containerEnv: {
+          CLW_ENDPOINT: endpoint,
+          CLW_TENANT: m.tenant, // server-DERIVED, authoritative (NEVER wrangler's var)
+          CLW_CRED_TICKET: ticket, // single-use; redeemed once at clw boot
+          CLW_LEASE_ID: params.jobId, // the redemption key (= GH jobId)
+          CLW_FABRIC_ENDPOINT: deps.fabricEndpoint, // where clw redeems the ticket
+          CLW_REF_DOMAIN: "runner",
+        },
+        patId: m.patId,
+        tenant: m.tenant,
+        maxConcurrency: m.maxConcurrency,
+      };
+    }
+    // Legacy (env-0 not configured) — pre-launch transition only: inject CLW_TOKEN.
     return {
       authz: "ok",
       containerEnv: {
-        CLW_ENDPOINT: env.CLW_ENDPOINT ?? "https://corelink-api.humangr.com",
+        CLW_ENDPOINT: endpoint,
         CLW_TENANT: m.tenant, // server-DERIVED, authoritative (NEVER wrangler's var)
         CLW_TOKEN: m.token, // per-job; never logged
         CLW_REF_DOMAIN: "runner",
