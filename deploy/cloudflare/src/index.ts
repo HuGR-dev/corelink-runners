@@ -8,6 +8,36 @@
 // account before this is trusted. See README.md "Design notes / wrinkles".
 
 import { Container, getContainer } from "@cloudflare/containers";
+
+// ── G2 metadata-exposure denylist (O7 hardening) — BEST-EFFORT, NOT G2-closing ─
+// Hosts the container is blocked from reaching via the SDK's `deniedHosts`. The
+// SDK enforces deniedHosts even with `enableInternet: true` (a denied host is
+// blocked "even when enableInternet is true or a catch-all outbound handler is
+// set" — @cloudflare/containers container.d.ts:121-123).
+//
+// ⚠️ IMPORTANT — this does NOT close G2 by itself. The SDK matches deniedHosts
+// with `simpleGlobMatch`: pure literal / `*`-glob string matching, with NO CIDR
+// math. So only EXACT-HOST entries below actually block anything, and only for
+// egress that traverses the SDK's outbound proxy — RAW SOCKETS bypass it. Real
+// IMDS / link-local blocking needs platform-network-layer filtering, not this.
+// See docs/adr/0009 (G2 is tracked as best-effort / not-yet-verified).
+//   • 169.254.169.254            — canonical AWS/GCP/Azure IMDS address (EXACT —
+//                                  matches, proxied egress only).
+//   • metadata.google.internal   — GCP metadata hostname alias (EXACT — matches).
+const METADATA_DENYLIST: string[] = [
+  "169.254.169.254",
+  "metadata.google.internal",
+  // TODO(G2, needs platform-network filtering): the CIDR ranges below are INERT
+  // here — `simpleGlobMatch` does NO CIDR math, so these never match a request
+  // and give false assurance. Left as a documented TODO, NOT enabled:
+  //   "169.254.0.0/16"  — IPv4 link-local range (alternate IMDS IPs)
+  //   "fe80::/10"       — IPv6 link-local
+  //   "fd00::/8"        — IPv6 unique-local
+  // Blocking these ranges requires filtering at the platform network layer
+  // (outside this Worker/SDK). Do NOT re-add them as deniedHosts entries
+  // expecting range-matching — they will silently no-op. A live-account smoke
+  // is still owed even for the exact-host entries above.
+];
 import {
   safeEqual,
   verifyGithubHmac,
@@ -28,11 +58,15 @@ export interface Env {
   // Worker secret (`wrangler secret put`). Must match the fabric's
   // CLOUDFLARE_SPAWN_AUTH_TOKEN. Missing/mismatch ⇒ 401.
   CLOUDFLARE_SPAWN_AUTH_TOKEN: string;
-  // Track-C C2b (OPTIONAL, defense-in-depth): the bearer the in-container
-  // check-host exec-server requires on /exec. Injected into the check-host
-  // container env at spawn and presented on the /v1/exec containerFetch. Absent
-  // ⇒ the exec-server serves without auth (back-compat; the container boundary +
-  // the Worker bearer remain the primary gates). Set via `wrangler secret put`.
+  // Track-C C2b: the bearer the in-container check-host exec-server requires on
+  // /exec. Injected into the check-host container env at spawn and presented on
+  // the /v1/exec containerFetch. Set via `wrangler secret put`.
+  //
+  // O7: now REQUIRED for a mode==="check" spawn — an unset secret FAILS CLOSED
+  // (503), mirroring the CLOUDFLARE_SPAWN_AUTH_TOKEN fail-closed discipline
+  // (authed() returns false when the token is empty). Previously optional
+  // (serve-unauthenticated back-compat); that default is removed so a check-host
+  // exec-server is never spawned without its auth gate.
   EXEC_SERVER_AUTH_TOKEN?: string;
   // The deploy-time pinned image digest (README wrinkle #1): the spawn request's
   // image_digest must equal this, else reject. Wire from wrangler vars.
@@ -84,6 +118,11 @@ export class RunnerContainer extends Container<Env> {
   // The runner needs egress (git clone, GH API, CAS hydration). ADR-0003 bounds
   // it (no-free-tier + scoped short-TTL PAT + ephemeral box).
   enableInternet = true;
+  // O7 / G2 (best-effort, NOT closed): the EXACT-host metadata entries below are
+  // enforced even with enableInternet=true (container.d.ts:121-123), but only for
+  // proxied egress and only as literal matches — see METADATA_DENYLIST: this does
+  // NOT block the link-local CIDR ranges and does NOT stop raw-socket egress.
+  deniedHosts = METADATA_DENYLIST;
 
   // Start the per-job container with the JIT config + CLW_* injected at runtime
   // (@cloudflare/containers 0.3.x: env arrives via `start({ envVars })`, not baked).
@@ -95,6 +134,16 @@ export class RunnerContainer extends Container<Env> {
   async isAlive(): Promise<boolean> {
     const state = await this.getState();
     return state.status === "running" || state.status === "healthy";
+  }
+
+  // O7 egress kill-switch: cut ALL outbound egress at runtime WITHOUT a full
+  // destroy() (operator-reachable via POST /v1/egress-cutoff, admin-authed).
+  // Uses the SDK setter (container.d.ts:120,setDeniedHosts) with a catch-all so
+  // every host is denied — the metadata denylist stays in place and "*" blankets
+  // the rest. Lets an operator sever a misbehaving lease's network while keeping
+  // the container alive for forensics, instead of tearing it down blind.
+  async cutEgress(): Promise<void> {
+    await this.setDeniedHosts([...METADATA_DENYLIST, "*"]);
   }
 
   // Idempotent teardown for POST /v1/teardown (SIGKILL via destroy()).
@@ -117,6 +166,10 @@ export class CheckHostContainer extends Container<Env> {
   sleepAfter = "45m";
   // The check-host needs egress to hydrate the toolchain from CAS at start (C2).
   enableInternet = true;
+  // O7 / G2 (best-effort, NOT closed): same exact-host metadata denylist as
+  // RunnerContainer — same limits apply (literal exact-match, proxied egress
+  // only; no CIDR ranges, no raw-socket coverage — see METADATA_DENYLIST).
+  deniedHosts = METADATA_DENYLIST;
 
   // Start the per-lease container with the check env injected at runtime
   // (TOOLCHAIN_DIGEST + CLW_*), enabling egress for the start-time clw hydrate.
@@ -129,6 +182,12 @@ export class CheckHostContainer extends Container<Env> {
   async isAlive(): Promise<boolean> {
     const state = await this.getState();
     return state.status === "running" || state.status === "healthy";
+  }
+
+  // O7 egress kill-switch, mirroring RunnerContainer.cutEgress: sever outbound
+  // egress at runtime (setDeniedHosts + catch-all) without a full destroy().
+  async cutEgress(): Promise<void> {
+    await this.setDeniedHosts([...METADATA_DENYLIST, "*"]);
   }
 
   // Idempotent teardown (SIGKILL via destroy()), mirroring RunnerContainer.
@@ -461,18 +520,34 @@ export default {
           if (!body.toolchain_digest) {
             return json({ error: "toolchain_digest required when mode==check" }, 400);
           }
+          // O7 (fail-closed): the exec-server bearer is REQUIRED for a check-host
+          // spawn. Without it the exec-server would serve unauthenticated, so we
+          // refuse to spawn one — mirroring authed()'s "no secret ⇒ deny" gate
+          // (index.ts fail-closed on an empty CLOUDFLARE_SPAWN_AUTH_TOKEN). 503:
+          // a config/service-not-ready condition, not the caller's fault.
+          //
+          // ⚠️ DEPLOY-ORDERING (breaking): this secret was the back-compat-unset
+          // default and is now MANDATORY. Provision it BEFORE deploying this
+          // Worker version — `wrangler secret put EXEC_SERVER_AUTH_TOKEN` → then
+          // `wrangler deploy` — or every check-mode spawn 503s until it is set.
+          // See deploy/cloudflare/README.md "Deploy-ordering" note.
+          const execAuthToken = env.EXEC_SERVER_AUTH_TOKEN;
+          if (!execAuthToken) {
+            return json(
+              { error: "EXEC_SERVER_AUTH_TOKEN is not configured; check-host spawn refused" },
+              503,
+            );
+          }
           // Retry the DO start on a transient CF reset (fresh handle each try).
           const handle = await startWithRetry((h) =>
             getContainer(env.CHECK_HOST_CONTAINER, h).start({
               envVars: {
                 ...body.env,
                 TOOLCHAIN_DIGEST: body.toolchain_digest!,
-                // Track-C C2b: inject the exec-server bearer (defense-in-depth) so the
-                // in-container /exec requires it; the SAME value is presented on the
-                // /v1/exec containerFetch below. Absent secret ⇒ no auth (back-compat).
-                ...(env.EXEC_SERVER_AUTH_TOKEN
-                  ? { EXEC_SERVER_AUTH_TOKEN: env.EXEC_SERVER_AUTH_TOKEN }
-                  : {}),
+                // Track-C C2b (now REQUIRED, guaranteed present by the check above):
+                // inject the exec-server bearer so the in-container /exec requires
+                // it; the SAME value is presented on the /v1/exec containerFetch.
+                EXEC_SERVER_AUTH_TOKEN: execAuthToken,
               },
               enableInternet: true,
             }),
@@ -586,6 +661,34 @@ export default {
         console.error(
           `teardown failed for handle ${handle} (mode=${body.mode ?? "runner"}): ${e}; ` +
             `relying on the provider deadline backstop`,
+        );
+      }
+      return new Response(null, { status: 204 });
+    }
+
+    // ── POST /v1/egress-cutoff — O7 operator egress kill-switch ───────────────
+    // body: { handle, mode?: "check"|"runner" }. Sever a live lease's OUTBOUND
+    // egress WITHOUT a full destroy() — the container stays up (for forensics /
+    // an orderly wind-down) while its network is cut. Bearer-authed like the rest
+    // of /v1/* (an operator/admin path, reached through the same fabric bearer).
+    // Routed by mode exactly like /v1/teardown so a check-host handle hits its
+    // own DO namespace. Idempotent + fail-soft: a setter throw is logged and
+    // still returns 204 (teardown remains the hard backstop). Wires the SDK
+    // setDeniedHosts() setter (container.d.ts:120) via each container's cutEgress.
+    if (request.method === "POST" && pathname === "/v1/egress-cutoff") {
+      const body = (await request.json()) as { handle: string; mode?: string };
+      const handle = body.handle;
+      if (!handle) return json({ error: "missing handle" }, 400);
+      const container =
+        body.mode === "check"
+          ? getContainer(env.CHECK_HOST_CONTAINER, handle)
+          : getContainer(env.RUNNER_CONTAINER, handle);
+      try {
+        await container.cutEgress();
+      } catch (e) {
+        console.error(
+          `egress-cutoff failed for handle ${handle} (mode=${body.mode ?? "runner"}): ${e}; ` +
+            `teardown remains the hard backstop`,
         );
       }
       return new Response(null, { status: 204 });

@@ -20,6 +20,7 @@ interface FakeContainer {
   containerFetch: ReturnType<typeof vi.fn>;
   isAlive: ReturnType<typeof vi.fn>;
   teardown: ReturnType<typeof vi.fn>;
+  cutEgress: ReturnType<typeof vi.fn>;
 }
 
 let containers: FakeContainer[] = [];
@@ -41,6 +42,7 @@ vi.mock("@cloudflare/containers", () => {
         containerFetch: vi.fn(async () => nextContainerFetch()),
         isAlive: vi.fn(async () => true),
         teardown: vi.fn(async () => {}),
+        cutEgress: vi.fn(async () => {}),
       };
       containers.push(c);
       return c;
@@ -53,6 +55,7 @@ import worker, { type Env } from "../src/index";
 import { getContainer } from "@cloudflare/containers";
 
 const AUTH = "spawn-secret";
+const EXEC_AUTH = "exec-server-secret";
 const IMG = "registry/check-host@sha256:" + "a".repeat(64);
 
 // Distinct sentinel objects so a test can assert which DO namespace was selected.
@@ -64,6 +67,10 @@ function makeEnv(over: Partial<Env> = {}): Env {
     RUNNER_CONTAINER: RUNNER_NS as never,
     CHECK_HOST_CONTAINER: CHECK_NS as never,
     CLOUDFLARE_SPAWN_AUTH_TOKEN: AUTH,
+    // O7: a check-host spawn now REQUIRES the exec-server bearer (fail-closed
+    // without it). Configured by default so the check-path tests exercise the
+    // happy path; the dedicated fail-closed test overrides it to undefined.
+    EXEC_SERVER_AUTH_TOKEN: EXEC_AUTH,
     PINNED_IMAGE_DIGEST: "",
     ...over,
   } as Env;
@@ -110,6 +117,8 @@ describe("/v1/spawn mode:'check' (C2)", () => {
     expect(arg.envVars.TOOLCHAIN_DIGEST).toBe("sha256:deadbeef");
     expect(arg.envVars.CLW_TENANT).toBe("t");
     expect(arg.envVars.CLW_TOKEN).toBe("x");
+    // O7: the exec-server bearer is injected into the check-host env (required).
+    expect(arg.envVars.EXEC_SERVER_AUTH_TOKEN).toBe(EXEC_AUTH);
     // The check DO was NOT started via the runner-only startWithEnv path.
     expect(containers[0].startWithEnv).not.toHaveBeenCalled();
   });
@@ -121,6 +130,21 @@ describe("/v1/spawn mode:'check' (C2)", () => {
     );
     expect(resp.status).toBe(400);
     expect(containers).toHaveLength(0); // nothing spawned
+  });
+
+  it("O7: 503 fail-closed when EXEC_SERVER_AUTH_TOKEN is unset (no unauthed exec-server)", async () => {
+    const env = makeEnv({ EXEC_SERVER_AUTH_TOKEN: undefined });
+    const resp = await worker.fetch(
+      post("/v1/spawn", {
+        image_digest: IMG,
+        mode: "check",
+        toolchain_digest: "sha256:deadbeef",
+        env: {},
+      }),
+      env,
+    );
+    expect(resp.status).toBe(503);
+    expect(containers).toHaveLength(0); // nothing spawned without the exec-auth gate
   });
 });
 
@@ -307,6 +331,7 @@ describe("status/teardown routing by mode (audit r4)", () => {
         teardown: vi.fn(async () => {
           throw new Error("destroy boom");
         }),
+        cutEgress: vi.fn(async () => {}),
       };
       containers.push(c);
       return c as never;
@@ -316,5 +341,32 @@ describe("status/teardown routing by mode (audit r4)", () => {
       makeEnv(),
     );
     expect(resp.status).toBe(204);
+  });
+
+  it("POST /v1/egress-cutoff (default) → RUNNER_CONTAINER.cutEgress, 204", async () => {
+    const resp = await worker.fetch(post("/v1/egress-cutoff", { handle: "h1" }), makeEnv());
+    expect(resp.status).toBe(204);
+    expect(containers[0].ns).toBe(RUNNER_NS);
+    expect(containers[0].cutEgress).toHaveBeenCalled();
+    expect(containers[0].teardown).not.toHaveBeenCalled(); // egress cut WITHOUT destroy
+  });
+
+  it("POST /v1/egress-cutoff mode:'check' → CHECK_HOST_CONTAINER.cutEgress", async () => {
+    const resp = await worker.fetch(
+      post("/v1/egress-cutoff", { handle: "h1", mode: "check" }),
+      makeEnv(),
+    );
+    expect(resp.status).toBe(204);
+    expect(containers[0].ns).toBe(CHECK_NS);
+    expect(containers[0].cutEgress).toHaveBeenCalled();
+  });
+
+  it("POST /v1/egress-cutoff requires bearer auth (401)", async () => {
+    const resp = await worker.fetch(
+      post("/v1/egress-cutoff", { handle: "h1" }, "wrong"),
+      makeEnv(),
+    );
+    expect(resp.status).toBe(401);
+    expect(containers).toHaveLength(0);
   });
 });

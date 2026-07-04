@@ -62,5 +62,18 @@ cd deploy/cloudflare
 npm install
 # set the pinned runner image digest in wrangler.jsonc (matches deploy/runner/Dockerfile clw pin)
 npx wrangler secret put CLOUDFLARE_SPAWN_AUTH_TOKEN
+# REQUIRED before this Worker version deploys — see deploy-ordering note below.
+# A mode==="check" /v1/spawn now fails CLOSED (503) if EXEC_SERVER_AUTH_TOKEN is
+# unset, so this MUST be provisioned first or every check spawn 503s.
+npx wrangler secret put EXEC_SERVER_AUTH_TOKEN
 npx wrangler deploy
 ```
+
+> **Deploy-ordering (breaking change) — provision `EXEC_SERVER_AUTH_TOKEN` FIRST.**
+> As of this Worker version, `EXEC_SERVER_AUTH_TOKEN` is REQUIRED: a `mode==="check"`
+> `/v1/spawn` fails closed with **503** when the secret is unset (there is no
+> serve-unauthenticated back-compat default anymore). Because Worker secrets are
+> read at request time, deploying this version WITHOUT first setting the secret
+> will 503 **every** check spawn until it is provisioned. Order of operations:
+> `wrangler secret put EXEC_SERVER_AUTH_TOKEN` **→** `wrangler deploy`. (Runner-mode
+> spawns are unaffected — this gate is check-mode only.)
