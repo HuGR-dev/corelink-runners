@@ -15,7 +15,12 @@
   "vars": {
     "CLW_TENANT": "ee30f7ba-fc25-4d71-939e-ebe130b4c6a3",
     "CLW_ENDPOINT": "https://corelink-api.humangr.com",
-    "CORELINK_MINT_URL": "https://corelink-api.humangr.com"
+    "CORELINK_MINT_URL": "https://corelink-api.humangr.com",
+    // Re-drive reconciler allowlist (first-party repos only — a cold re-spawn
+    // skips per-job authz). The scheduled() cron scans these for queued+labeled
+    // jobs orphaned by a transient spawn failure and re-drives them. Dogfood
+    // (this repo) is armed; add product repos only if they are trusted.
+    "RECONCILER_REPOS": "humangr-labs/corelink-runners"
     // ── env-0 ARM (BUILT, not yet armed — uncomment to flip on) ──────────────
     // SPAWN_WORKER_PUBLIC_URL is the Worker's OWN public base, injected as
     // CLW_FABRIC_ENDPOINT so clw redeems its single-use cred-ticket here at boot.
@@ -32,6 +37,11 @@
   "ratelimits": [
     { "name": "WEBHOOK_LIMITER", "namespace_id": "1001", "simple": { "limit": 30, "period": 60 } }
   ],
+
+  // Re-drive reconciler: run scheduled() every minute to recover jobs orphaned by
+  // a transient spawn failure (GitHub fires workflow_job.queued only once). No-op
+  // unless RECONCILER_REPOS is set.
+  "triggers": { "crons": ["* * * * *"] },
 
   // job_id -> pat_id map so workflow_job:completed can revoke the per-job CAS PAT
   // by pat_id (the live /revoke contract requires pat_id, not job_id). Written at

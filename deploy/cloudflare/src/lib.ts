@@ -441,6 +441,95 @@ export async function releaseTenantSlot(
   });
 }
 
+// ── Autoscaler re-drive reconciler — recover jobs orphaned by a failed spawn ───
+//
+// GitHub fires workflow_job.queued ONCE (at-least-once, but no periodic re-drive).
+// If the webhook's spawn transiently fails (a CF DO-start reset, even past the
+// #268 retry+waitUntil), the job sits QUEUED forever — no runner, no re-delivery
+// (observed 2026-07-04: probes/CI stuck queued for hours until a manual dispatch).
+// This scheduled reconciler lists queued+labeled+runnerLESS jobs older than a
+// grace window (so it never races the normal webhook path) and re-drives their
+// spawn. It re-drives COLD (the jobs API carries no installation_id, so no CAS-PAT
+// mint / no per-job authz) — a runner that RUNS beats an orphan — so it is scoped
+// to an explicit first-party allowlist (RECONCILER_REPOS); only trusted repos
+// belong there. The claim-KV dedups it against the webhook + other ticks.
+
+// Grace window: a job younger than this is left to the webhook path (avoid racing
+// a spawn that's still in-flight in ctx.waitUntil). Past it, an un-runnered job is
+// treated as orphaned and re-driven.
+export const RECONCILE_MIN_AGE_MS = 90_000;
+
+/** Parse the comma/space-separated RECONCILER_REPOS allowlist (owner/repo). */
+export function parseReconcilerRepos(csv: string | undefined): string[] {
+  if (!csv) return [];
+  return csv
+    .split(/[,\s]+/)
+    .map((s) => s.trim())
+    .filter((s) => s.includes("/"));
+}
+
+/** The subset of Env the reconciler's GitHub listing reads. */
+export interface ReconcilerEnv {
+  GITHUB_MINT_TOKEN?: string;
+}
+
+interface GhRun {
+  id: number;
+  created_at: string;
+}
+interface GhJob {
+  id: number;
+  status: string;
+  runner_id: number | null;
+  labels: string[];
+}
+
+/**
+ * List queued+labeled jobs with NO runner assigned, older than `minAgeMs`, in
+ * `repo`. Returns their jobIds (stringified — the autoscaler's stable id). Goes
+ * via queued RUNS (which carry created_at) → their jobs. Best-effort: any GitHub
+ * error returns [] (the reconciler is a backstop, never itself a gate).
+ */
+export async function listOrphanRunnerJobs(
+  env: ReconcilerEnv,
+  repo: string,
+  label: string,
+  minAgeMs: number,
+  nowMs: number,
+): Promise<string[]> {
+  const gh = async (path: string): Promise<unknown> => {
+    const r = await fetch(`https://api.github.com${path}`, {
+      headers: {
+        authorization: `Bearer ${env.GITHUB_MINT_TOKEN ?? ""}`,
+        accept: "application/vnd.github+json",
+        "user-agent": "corelink-spawn-worker",
+      },
+    });
+    if (!r.ok) throw new Error(`GH ${path} ${r.status}`);
+    return r.json();
+  };
+  try {
+    const runs = (await gh(`/repos/${repo}/actions/runs?status=queued&per_page=30`)) as {
+      workflow_runs?: GhRun[];
+    };
+    const orphans: string[] = [];
+    for (const run of runs.workflow_runs ?? []) {
+      const age = nowMs - Date.parse(run.created_at);
+      if (!Number.isFinite(age) || age < minAgeMs) continue; // too fresh: leave it to the webhook
+      const jobs = (await gh(`/repos/${repo}/actions/runs/${run.id}/jobs`)) as { jobs?: GhJob[] };
+      for (const j of jobs.jobs ?? []) {
+        if (j.status === "queued" && j.runner_id == null && (j.labels ?? []).includes(label)) {
+          orphans.push(String(j.id));
+        }
+      }
+    }
+    return orphans;
+  } catch (e) {
+    console.log(`reconciler list failed for ${repo} (backstop, skipping): ${(e as Error).message}`);
+    return [];
+  }
+}
+
 // ── Billing usage-push (ASK-2) — per-completed-job runner_slot_seconds ────────
 //
 // The prod (all-Cloudflare) home for billing: the Rust `corelink-fabricd`
