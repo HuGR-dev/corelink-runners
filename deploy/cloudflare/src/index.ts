@@ -9,28 +9,34 @@
 
 import { Container, getContainer } from "@cloudflare/containers";
 
-// ── G2 metadata-exposure denylist (O7 hardening) ─────────────────────────────
-// Hosts the container is BLOCKED from reaching, unconditionally — the SDK
-// enforces `deniedHosts` even with `enableInternet: true` (a denied host is
+// ── G2 metadata-exposure denylist (O7 hardening) — BEST-EFFORT, NOT G2-closing ─
+// Hosts the container is blocked from reaching via the SDK's `deniedHosts`. The
+// SDK enforces deniedHosts even with `enableInternet: true` (a denied host is
 // blocked "even when enableInternet is true or a catch-all outbound handler is
-// set" — @cloudflare/containers container.d.ts:121-123). This closes the G2
-// cloud-metadata / IMDS exposure: untrusted job code inside the microVM must
-// never reach a metadata/link-local endpoint to lift instance credentials.
-//   • 169.254.169.254            — the canonical AWS/GCP/Azure IMDS address.
-//   • metadata.google.internal   — GCP's metadata hostname alias.
-//   • 169.254.0.0/16             — the whole IPv4 link-local range (IMDS lives
-//                                  here; blocks alternate metadata IPs too).
-//   • fe80::/10, fd00::/8        — IPv6 link-local + unique-local (metadata /
-//                                  private-substrate analogues).
-// NOTE (needs a live-account smoke): the SDK's host-matching for bare IP
-// LITERALS / CIDR ranges (vs. hostnames) must be confirmed against a live
-// account — the one thing on this PR that needs the TL + live creds.
+// set" — @cloudflare/containers container.d.ts:121-123).
+//
+// ⚠️ IMPORTANT — this does NOT close G2 by itself. The SDK matches deniedHosts
+// with `simpleGlobMatch`: pure literal / `*`-glob string matching, with NO CIDR
+// math. So only EXACT-HOST entries below actually block anything, and only for
+// egress that traverses the SDK's outbound proxy — RAW SOCKETS bypass it. Real
+// IMDS / link-local blocking needs platform-network-layer filtering, not this.
+// See docs/adr/0009 (G2 is tracked as best-effort / not-yet-verified).
+//   • 169.254.169.254            — canonical AWS/GCP/Azure IMDS address (EXACT —
+//                                  matches, proxied egress only).
+//   • metadata.google.internal   — GCP metadata hostname alias (EXACT — matches).
 const METADATA_DENYLIST: string[] = [
   "169.254.169.254",
   "metadata.google.internal",
-  "169.254.0.0/16",
-  "fe80::/10",
-  "fd00::/8",
+  // TODO(G2, needs platform-network filtering): the CIDR ranges below are INERT
+  // here — `simpleGlobMatch` does NO CIDR math, so these never match a request
+  // and give false assurance. Left as a documented TODO, NOT enabled:
+  //   "169.254.0.0/16"  — IPv4 link-local range (alternate IMDS IPs)
+  //   "fe80::/10"       — IPv6 link-local
+  //   "fd00::/8"        — IPv6 unique-local
+  // Blocking these ranges requires filtering at the platform network layer
+  // (outside this Worker/SDK). Do NOT re-add them as deniedHosts entries
+  // expecting range-matching — they will silently no-op. A live-account smoke
+  // is still owed even for the exact-host entries above.
 ];
 import {
   safeEqual,
@@ -112,9 +118,10 @@ export class RunnerContainer extends Container<Env> {
   // The runner needs egress (git clone, GH API, CAS hydration). ADR-0003 bounds
   // it (no-free-tier + scoped short-TTL PAT + ephemeral box).
   enableInternet = true;
-  // O7 / G2: block metadata + link-local/IMDS ranges unconditionally, even with
-  // enableInternet=true (container.d.ts:121-123). Set as a class field so it is
-  // in effect from container start — the untrusted job can never reach IMDS.
+  // O7 / G2 (best-effort, NOT closed): the EXACT-host metadata entries below are
+  // enforced even with enableInternet=true (container.d.ts:121-123), but only for
+  // proxied egress and only as literal matches — see METADATA_DENYLIST: this does
+  // NOT block the link-local CIDR ranges and does NOT stop raw-socket egress.
   deniedHosts = METADATA_DENYLIST;
 
   // Start the per-job container with the JIT config + CLW_* injected at runtime
@@ -159,8 +166,9 @@ export class CheckHostContainer extends Container<Env> {
   sleepAfter = "45m";
   // The check-host needs egress to hydrate the toolchain from CAS at start (C2).
   enableInternet = true;
-  // O7 / G2: same metadata + link-local/IMDS denylist as RunnerContainer — the
-  // check-host runs untrusted toolchain checks and must never reach IMDS either.
+  // O7 / G2 (best-effort, NOT closed): same exact-host metadata denylist as
+  // RunnerContainer — same limits apply (literal exact-match, proxied egress
+  // only; no CIDR ranges, no raw-socket coverage — see METADATA_DENYLIST).
   deniedHosts = METADATA_DENYLIST;
 
   // Start the per-lease container with the check env injected at runtime
@@ -517,6 +525,12 @@ export default {
           // refuse to spawn one — mirroring authed()'s "no secret ⇒ deny" gate
           // (index.ts fail-closed on an empty CLOUDFLARE_SPAWN_AUTH_TOKEN). 503:
           // a config/service-not-ready condition, not the caller's fault.
+          //
+          // ⚠️ DEPLOY-ORDERING (breaking): this secret was the back-compat-unset
+          // default and is now MANDATORY. Provision it BEFORE deploying this
+          // Worker version — `wrangler secret put EXEC_SERVER_AUTH_TOKEN` → then
+          // `wrangler deploy` — or every check-mode spawn 503s until it is set.
+          // See deploy/cloudflare/README.md "Deploy-ordering" note.
           const execAuthToken = env.EXEC_SERVER_AUTH_TOKEN;
           if (!execAuthToken) {
             return json(
