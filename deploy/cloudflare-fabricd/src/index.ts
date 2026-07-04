@@ -30,6 +30,15 @@ export interface Env {
   // Absent ⇒ fabricd falls back to the FABRIC_GITHUB_APP_* App path. When set it
   // is PREFERRED. Worker secret (`wrangler secret put`).
   FABRIC_GITHUB_MINT_TOKEN?: string;
+  // Durable ledger (R1 — arms the vCPU ceiling). When DATABASE_URL is present the
+  // container runs the PgLedger (durable, survives DO restart) instead of in-memory,
+  // and the vCPU-hour ceiling (FABRIC_RUNNER_VCPU) can arm — the #265 boot guard
+  // fail-closes an armed ceiling on a non-pg backend, so the two are wired together.
+  // Absent ⇒ in-memory ledger, no ceiling (unchanged dogfood behaviour). Secret.
+  DATABASE_URL?: string;
+  // Opt-in pg TLS: `disable` (default) | `require`. A public-internet managed PG
+  // should set `require`; when DATABASE_URL is set we default it to `require`.
+  FABRIC_PG_TLS?: string;
 }
 
 /** The singleton control-plane container. fabricd binds 0.0.0.0:8080. */
@@ -69,6 +78,18 @@ export class FabricdContainer extends Container<Env> {
         : {}),
       ...(env.FABRIC_GITHUB_MINT_TOKEN
         ? { FABRIC_GITHUB_MINT_TOKEN: env.FABRIC_GITHUB_MINT_TOKEN }
+        : {}),
+      // R1 — durable ledger + vCPU ceiling, gated on DATABASE_URL. Present ⇒ pg
+      // backend + FABRIC_RUNNER_VCPU=4 (standard-4 sizing) arm together; the #265
+      // guard requires pg for an armed ceiling, so we never set one without the
+      // other. Absent ⇒ neither key is injected → in-memory, unchanged behaviour.
+      ...(env.DATABASE_URL
+        ? {
+            FABRIC_LEDGER_BACKEND: "pg",
+            DATABASE_URL: env.DATABASE_URL,
+            FABRIC_PG_TLS: env.FABRIC_PG_TLS ?? "require",
+            FABRIC_RUNNER_VCPU: "4",
+          }
         : {}),
     };
   }
