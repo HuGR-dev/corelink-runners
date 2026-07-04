@@ -176,6 +176,18 @@ impl std::fmt::Display for BrokerError {
 
 impl std::error::Error for BrokerError {}
 
+/// Map an authoritative HTTP status to a fail-closed outcome. `Ok(())` only for
+/// 2xx; 401/403 → `Unauthorized`; everything else → `BadStatus`. Shared by the
+/// App broker's mint legs and the [`PatBroker`] jitconfig POST so both map
+/// statuses identically.
+fn check_status(status: u16, leg: MintLeg) -> Result<(), BrokerError> {
+    match status {
+        200..=299 => Ok(()),
+        401 | 403 => Err(BrokerError::Unauthorized),
+        other => Err(BrokerError::BadStatus { leg, status: other }),
+    }
+}
+
 // ── Contract C1: the broker trait ───────────────────────────────────────────
 
 /// The credential minter. Implementors mint a short-lived, scope-bound JIT
@@ -470,16 +482,6 @@ impl<H: GitHubHttp, S: AppJwtSigner> GitHubAppBroker<H, S> {
         }
     }
 
-    /// Map an authoritative HTTP status to a fail-closed outcome. `Ok(())` only
-    /// for 2xx; 401/403 → `Unauthorized`; everything else → `BadStatus`.
-    fn check_status(status: u16, leg: MintLeg) -> Result<(), BrokerError> {
-        match status {
-            200..=299 => Ok(()),
-            401 | 403 => Err(BrokerError::Unauthorized),
-            other => Err(BrokerError::BadStatus { leg, status: other }),
-        }
-    }
-
     /// Leg 1+2: sign the App JWT and exchange it for an installation access token.
     fn installation_token(&self) -> Result<String, BrokerError> {
         let now = (self.now_secs)();
@@ -503,7 +505,7 @@ impl<H: GitHubHttp, S: AppJwtSigner> GitHubAppBroker<H, S> {
             .post(&url, &format!("Bearer {jwt}"), "{}")
             .map_err(|_| BrokerError::Unreachable)?;
 
-        Self::check_status(resp.status, MintLeg::InstallationToken)?;
+        check_status(resp.status, MintLeg::InstallationToken)?;
 
         let body: InstallationTokenBody =
             serde_json::from_str(&resp.body).map_err(|_| BrokerError::BadResponse {
@@ -555,7 +557,7 @@ impl<H: GitHubHttp, S: AppJwtSigner> GitHubAppBroker<H, S> {
             .post(&url, &format!("Bearer {installation_token}"), &body)
             .map_err(|_| BrokerError::Unreachable)?;
 
-        Self::check_status(resp.status, MintLeg::JitConfig)?;
+        check_status(resp.status, MintLeg::JitConfig)?;
 
         let parsed: JitConfigBody =
             serde_json::from_str(&resp.body).map_err(|_| BrokerError::BadResponse {
@@ -582,6 +584,139 @@ impl<H: GitHubHttp, S: AppJwtSigner> RunnerRegistrationBroker for GitHubAppBroke
             // in corelink_auth); the mint chains the legs and fails closed.
             let token = self.installation_token()?;
             self.jit_config(&token, scope)
+        })
+    }
+}
+
+// ── The GitHub mint PAT (redacting) ──────────────────────────────────────────
+
+/// A GitHub Personal Access Token with repo `Administration:write`, used to
+/// authorize `generate-jitconfig` DIRECTLY — no App JWT, no installation-token
+/// exchange. This is the same mechanism the Cloudflare autoscaler uses
+/// (`deploy/cloudflare/src/index.ts` `mintJit()`). Held behind a REDACTING
+/// `Debug`; the token bytes NEVER appear in `{:?}`, logs, or any error string —
+/// the same secret-hygiene posture as [`AppPrivateKey`].
+#[derive(Clone)]
+pub struct MintPat(String);
+
+impl MintPat {
+    /// Wrap a raw PAT string.
+    #[must_use]
+    pub fn new(token: impl Into<String>) -> Self {
+        Self(token.into())
+    }
+
+    /// Expose the token at the single auth-header wiring point. Named `expose`
+    /// so every read site is grep-auditable (mirrors [`JitRunnerConfig::expose`]).
+    fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for MintPat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "MintPat(***REDACTED***)")
+    }
+}
+
+// ── Config ───────────────────────────────────────────────────────────────────
+
+/// Configuration for [`PatBroker`]. Carries no raw secret — the PAT lives in the
+/// (redacting) [`MintPat`]; this is the endpoint + the same runner-provisioning
+/// knobs the App broker's jitconfig leg reads.
+#[derive(Debug, Clone)]
+pub struct PatBrokerConfig {
+    /// API base, e.g. `https://api.github.com` (no trailing slash). GHES-friendly.
+    pub api_base: String,
+    /// The runner name to register (per-job ephemeral name).
+    pub runner_name: String,
+    /// `runner_group_id` for the JIT config (1 = the default group).
+    pub runner_group_id: u64,
+    /// `work_folder` the runner agent uses on the box.
+    pub work_folder: String,
+}
+
+// ── PatBroker (the single-leg PAT mint) ──────────────────────────────────────
+
+/// A PAT-authorized broker: it SKIPS the App broker's JWT-sign + installation-
+/// token legs entirely and just POSTs `generate-jitconfig` with
+/// `Authorization: Bearer <PAT>`. The URL, body, and parse are byte-identical to
+/// the App broker's leg-3 (and to the autoscaler's `mintJit()`), so a runner
+/// minted either way is indistinguishable to GitHub. Fail-closed on every
+/// non-2xx / malformed / empty-config response, exactly like the App broker.
+pub struct PatBroker<H: GitHubHttp> {
+    /// HTTP transport. `pub` so tests can read a recording double's captured calls.
+    pub http: H,
+    pat: MintPat,
+    cfg: PatBrokerConfig,
+}
+
+impl<H: GitHubHttp> std::fmt::Debug for PatBroker<H> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never prints the PAT (the MintPat Debug redacts).
+        f.debug_struct("PatBroker")
+            .field("cfg", &self.cfg)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<H: GitHubHttp> PatBroker<H> {
+    /// Construct the broker from a transport, a PAT, and its config.
+    pub fn new(http: H, pat: MintPat, cfg: PatBrokerConfig) -> Self {
+        Self { http, pat, cfg }
+    }
+
+    /// The `generate-jitconfig` endpoint for the scope's target — identical to
+    /// [`GitHubAppBroker::jitconfig_url`].
+    fn jitconfig_url(&self, scope: &RunnerScope) -> String {
+        let base = self.cfg.api_base.trim_end_matches('/');
+        match &scope.target {
+            RunnerTarget::Repo { owner, repo } => {
+                format!("{base}/repos/{owner}/{repo}/actions/runners/generate-jitconfig")
+            }
+            RunnerTarget::Org { org } => {
+                format!("{base}/orgs/{org}/actions/runners/generate-jitconfig")
+            }
+        }
+    }
+}
+
+impl<H: GitHubHttp> RunnerRegistrationBroker for PatBroker<H> {
+    fn mint_jit_config<'a>(
+        &'a self,
+        scope: &'a RunnerScope,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<JitRunnerConfig, BrokerError>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            let url = self.jitconfig_url(scope);
+            // Same body as the App broker's leg-3 (and the autoscaler): a UNIQUE
+            // per-mint name (avoids the fixed-name 409), labels, group, work_folder.
+            let body = serde_json::json!({
+                "name": unique_runner_name(&self.cfg.runner_name),
+                "labels": scope.labels,
+                "runner_group_id": self.cfg.runner_group_id,
+                "work_folder": self.cfg.work_folder,
+            })
+            .to_string();
+
+            let resp = self
+                .http
+                .post(&url, &format!("Bearer {}", self.pat.expose()), &body)
+                .map_err(|_| BrokerError::Unreachable)?;
+
+            check_status(resp.status, MintLeg::JitConfig)?;
+
+            let parsed: JitConfigBody =
+                serde_json::from_str(&resp.body).map_err(|_| BrokerError::BadResponse {
+                    leg: MintLeg::JitConfig,
+                })?;
+            if parsed.encoded_jit_config.is_empty() {
+                return Err(BrokerError::BadResponse {
+                    leg: MintLeg::JitConfig,
+                });
+            }
+            Ok(JitRunnerConfig::new(parsed.encoded_jit_config))
         })
     }
 }
@@ -730,11 +865,29 @@ pub mod env {
     pub const RUNNER_GROUP_ID: &str = "FABRIC_GITHUB_RUNNER_GROUP_ID";
     /// Runner name baked into the JIT config. Optional; defaults to `corelink-runner`.
     pub const RUNNER_NAME: &str = "FABRIC_GITHUB_RUNNER_NAME";
+    /// A GitHub PAT with repo `Administration:write`, used to authorize
+    /// `generate-jitconfig` DIRECTLY (no App). **PREFERRED** when set: if this is
+    /// present (non-empty) the composition root builds a [`PatBroker`] and the
+    /// `FABRIC_GITHUB_APP_*` path is not consulted. This is the same mechanism the
+    /// Cloudflare autoscaler uses.
+    pub const MINT_TOKEN: &str = "FABRIC_GITHUB_MINT_TOKEN";
 }
 
-/// Build a production [`GitHubAppBroker`] from the environment, or `None`.
+/// Build a production runner broker from the environment, or `None`.
 ///
-/// **Default-off contract:**
+/// **PAT path (PREFERRED):**
+/// - If [`env::MINT_TOKEN`] is PRESENT (non-empty) → build a [`PatBroker`] (with
+///   [`UreqGitHub`]) and RETURN it, without consulting `FABRIC_GITHUB_APP_*`. The
+///   PAT is rejected (→ `None`, loud) if it is a dev/default sentinel or too
+///   short (mirrors the CAS-mint auth-key guard) — a placeholder must never arm
+///   the mint. When both `FABRIC_GITHUB_MINT_TOKEN` and the App vars are set, the
+///   PAT wins.
+///
+/// **App path (fallback):**
+/// - If [`env::MINT_TOKEN`] is absent, fall back to the `FABRIC_GITHUB_APP_*`
+///   3-leg App broker below.
+///
+/// **Default-off contract (App path):**
 /// - If [`env::APP_ID`] is ABSENT → `None`, silently (runner mode is simply not
 ///   configured; the classic check-exec path is byte-unchanged).
 /// - If [`env::APP_ID`] is PRESENT but a required companion ([`env::INSTALLATION_ID`]
@@ -755,6 +908,35 @@ pub fn runner_broker_from_env(
             .filter(|v| !v.is_empty())
     };
 
+    // ── PAT path (PREFERRED) ─────────────────────────────────────────────────
+    // A present (non-empty) mint token wins over any App config: build a
+    // PatBroker and return, skipping the App legs entirely.
+    if let Some(pat) = nonempty(env::MINT_TOKEN) {
+        // A dev/default sentinel or trivially-short PAT is a misconfiguration —
+        // fail LOUD (redacted) and disable, never silently mint with a placeholder.
+        if let Err(e) = crate::runner_cas_mint::reject_weak_secret(env::MINT_TOKEN, &pat) {
+            eprintln!("runner-broker: {e} — runner mode DISABLED");
+            return None;
+        }
+        let cfg = PatBrokerConfig {
+            api_base: nonempty(env::API_BASE)
+                .unwrap_or_else(|| "https://api.github.com".to_string()),
+            runner_name: nonempty(env::RUNNER_NAME)
+                .unwrap_or_else(|| "corelink-runner".to_string()),
+            runner_group_id: nonempty(env::RUNNER_GROUP_ID)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1),
+            work_folder: "_work".to_string(),
+        };
+        let http = UreqGitHub::new(std::time::Duration::from_secs(10));
+        return Some(std::sync::Arc::new(PatBroker::new(
+            http,
+            MintPat::new(pat),
+            cfg,
+        )));
+    }
+
+    // ── App path (fallback) ──────────────────────────────────────────────────
     // App id absent → runner mode is off (no diagnostic; this is the default).
     let app_id = nonempty(env::APP_ID)?;
 
@@ -1401,5 +1583,187 @@ mod tests {
             Err(BrokerError::SigningFailed),
             "a bad/garbage key must fail closed, never panic or emit a partial JWT"
         );
+    }
+
+    // ── PatBroker — single-leg PAT mint (no App JWT, no install token) ─────────
+
+    // A real-looking PAT (past the sentinel + 16-char guard) that redaction
+    // tests must never see leak.
+    const SECRET_PAT: &str = "ghp_TOPSECRETpatVALUE0123456789abcdef";
+
+    fn pat_cfg() -> PatBrokerConfig {
+        PatBrokerConfig {
+            api_base: "https://api.github.test".into(),
+            runner_name: "corelink-ephemeral-01".into(),
+            runner_group_id: 1,
+            work_folder: "_work".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn pat_broker_mints_repo_scope_single_leg() {
+        let http = RecordingHttp::with_responses(vec![ok(&format!(
+            r#"{{"encoded_jit_config":"{SECRET_JITCONFIG}"}}"#
+        ))]);
+        let broker = PatBroker::new(http, MintPat::new(SECRET_PAT), pat_cfg());
+
+        let scope = repo_scope();
+        let got = broker.mint_jit_config(&scope).await.expect("mints");
+        assert_eq!(got.expose(), SECRET_JITCONFIG);
+
+        let calls = broker.http.calls();
+        assert_eq!(
+            calls.len(),
+            1,
+            "the PAT broker is a SINGLE leg — no JWT/token"
+        );
+
+        let (url, auth, body) = &calls[0];
+        // Exact repo generate-jitconfig URL (byte-identical to the App leg-3).
+        assert_eq!(
+            url,
+            "https://api.github.test/repos/humangr-labs/corelink-runners/actions/runners/generate-jitconfig"
+        );
+        // The PAT is sent directly as the Bearer credential.
+        assert_eq!(auth, &format!("Bearer {SECRET_PAT}"));
+        // Same body shape as the App broker + the autoscaler.
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        let name = v["name"].as_str().unwrap();
+        assert!(
+            name.starts_with("corelink-ephemeral-01-"),
+            "runner name must start with the configured base, got {name:?}"
+        );
+        assert!(
+            name.len() > "corelink-ephemeral-01-".len(),
+            "runner name must carry a unique suffix"
+        );
+        assert_eq!(v["labels"], serde_json::json!(["self-hosted", "corelink"]));
+        assert_eq!(v["runner_group_id"], 1);
+        assert_eq!(v["work_folder"], "_work");
+    }
+
+    #[tokio::test]
+    async fn pat_broker_uses_org_endpoint_for_org_scope() {
+        let http = RecordingHttp::with_responses(vec![ok(r#"{"encoded_jit_config":"org-cfg"}"#)]);
+        let broker = PatBroker::new(http, MintPat::new(SECRET_PAT), pat_cfg());
+        broker.mint_jit_config(&org_scope()).await.expect("mints");
+
+        let (url, _, _) = &broker.http.calls()[0];
+        assert_eq!(
+            url, "https://api.github.test/orgs/humangr-labs/actions/runners/generate-jitconfig",
+            "org scope must hit the ORG generate-jitconfig endpoint"
+        );
+    }
+
+    #[tokio::test]
+    async fn pat_broker_non_2xx_fails_closed() {
+        let http = RecordingHttp::with_responses(vec![status(422)]);
+        let broker = PatBroker::new(http, MintPat::new(SECRET_PAT), pat_cfg());
+        assert_eq!(
+            broker.mint_jit_config(&repo_scope()).await.unwrap_err(),
+            BrokerError::BadStatus {
+                leg: MintLeg::JitConfig,
+                status: 422
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn pat_broker_unauthorized_fails_closed() {
+        for code in [401u16, 403] {
+            let http = RecordingHttp::with_responses(vec![status(code)]);
+            let broker = PatBroker::new(http, MintPat::new(SECRET_PAT), pat_cfg());
+            assert_eq!(
+                broker.mint_jit_config(&repo_scope()).await.unwrap_err(),
+                BrokerError::Unauthorized
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn pat_broker_empty_config_fails_closed() {
+        let http = RecordingHttp::with_responses(vec![ok(r#"{"encoded_jit_config":""}"#)]);
+        let broker = PatBroker::new(http, MintPat::new(SECRET_PAT), pat_cfg());
+        assert_eq!(
+            broker.mint_jit_config(&repo_scope()).await.unwrap_err(),
+            BrokerError::BadResponse {
+                leg: MintLeg::JitConfig
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn pat_broker_malformed_body_fails_closed() {
+        let http = RecordingHttp::with_responses(vec![ok(r#"{"wrong_field":"x"}"#)]);
+        let broker = PatBroker::new(http, MintPat::new(SECRET_PAT), pat_cfg());
+        assert_eq!(
+            broker.mint_jit_config(&repo_scope()).await.unwrap_err(),
+            BrokerError::BadResponse {
+                leg: MintLeg::JitConfig
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn pat_broker_transport_error_fails_closed_unreachable() {
+        let http = RecordingHttp::with_responses(vec![Err(())]);
+        let broker = PatBroker::new(http, MintPat::new(SECRET_PAT), pat_cfg());
+        assert_eq!(
+            broker.mint_jit_config(&repo_scope()).await.unwrap_err(),
+            BrokerError::Unreachable
+        );
+    }
+
+    #[test]
+    fn pat_debug_is_redacted() {
+        let pat = MintPat::new(SECRET_PAT);
+        let dbg = format!("{pat:?}");
+        assert_eq!(dbg, "MintPat(***REDACTED***)");
+        assert!(!dbg.contains("SECRET"), "the PAT must not leak via Debug");
+
+        // The broker Debug delegates to the redacting PAT Debug.
+        let broker = PatBroker::new(
+            UreqGitHub::new(std::time::Duration::from_secs(5)),
+            pat,
+            pat_cfg(),
+        );
+        let bdbg = format!("{broker:?}");
+        assert!(
+            !bdbg.contains("SECRET"),
+            "broker Debug must not leak the PAT"
+        );
+    }
+
+    // ── from-env: the PAT path is preferred and guards weak tokens ─────────────
+
+    #[test]
+    fn from_env_mint_token_builds_pat_broker() {
+        let broker = runner_broker_from_env(env_of(&[(env::MINT_TOKEN, SECRET_PAT)]));
+        assert!(
+            broker.is_some(),
+            "FABRIC_GITHUB_MINT_TOKEN present → PAT broker wired (no App vars needed)"
+        );
+    }
+
+    #[test]
+    fn from_env_mint_token_wins_over_app_config() {
+        // Both PAT and full App config present → the PAT path wins (returns Some
+        // even though we don't inspect which broker type; the App path is skipped).
+        let pem = valid_pkcs8_pem();
+        let pairs = [
+            (env::MINT_TOKEN, SECRET_PAT),
+            (env::APP_ID, "12345"),
+            (env::INSTALLATION_ID, "987"),
+            (env::PRIVATE_KEY, pem.as_str()),
+        ];
+        assert!(runner_broker_from_env(env_of(&pairs)).is_some());
+    }
+
+    #[test]
+    fn from_env_weak_mint_token_is_disabled_loudly() {
+        // A dev sentinel → None (the guard rejects it).
+        assert!(runner_broker_from_env(env_of(&[(env::MINT_TOKEN, "dev")])).is_none());
+        // A trivially-short token → None (below the 16-char floor).
+        assert!(runner_broker_from_env(env_of(&[(env::MINT_TOKEN, "ghp_short")])).is_none());
     }
 }

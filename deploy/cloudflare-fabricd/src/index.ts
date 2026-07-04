@@ -25,6 +25,11 @@ export interface Env {
   FABRIC_INTROSPECT_AUTH_KEY: string;
   BILLING_INGEST_AUTH_KEY?: string;
   CLOUDFLARE_SPAWN_AUTH_TOKEN?: string;
+  // A GitHub PAT with repo Administration:write — lets fabricd's PAT broker mint
+  // JIT runner configs WITHOUT a GitHub App (the mechanism the autoscaler uses).
+  // Absent ⇒ fabricd falls back to the FABRIC_GITHUB_APP_* App path. When set it
+  // is PREFERRED. Worker secret (`wrangler secret put`).
+  FABRIC_GITHUB_MINT_TOKEN?: string;
 }
 
 /** The singleton control-plane container. fabricd binds 0.0.0.0:8080. */
@@ -61,6 +66,9 @@ export class FabricdContainer extends Container<Env> {
         : {}),
       ...(env.CLOUDFLARE_SPAWN_AUTH_TOKEN
         ? { CLOUDFLARE_SPAWN_AUTH_TOKEN: env.CLOUDFLARE_SPAWN_AUTH_TOKEN }
+        : {}),
+      ...(env.FABRIC_GITHUB_MINT_TOKEN
+        ? { FABRIC_GITHUB_MINT_TOKEN: env.FABRIC_GITHUB_MINT_TOKEN }
         : {}),
     };
   }

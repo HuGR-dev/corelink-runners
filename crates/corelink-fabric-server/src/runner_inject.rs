@@ -174,8 +174,8 @@ pub fn inject_cred_ticket_env_with(
     // is mounted on that base. Trim exactly one trailing slash so a base with or
     // without it joins cleanly against the path clw appends. Absent/blank ⇒ not
     // injected: only ridden when C2c is armed AND the fabric knows its public URL.
-    if let Some(base) = get(crate::envelope_inject::FABRIC_PUBLIC_BASE_URL)
-        .filter(|s| !s.trim().is_empty())
+    if let Some(base) =
+        get(crate::envelope_inject::FABRIC_PUBLIC_BASE_URL).filter(|s| !s.trim().is_empty())
     {
         spec.env.push((
             CLW_FABRIC_ENDPOINT_ENV.to_string(),
