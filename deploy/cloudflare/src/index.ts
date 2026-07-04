@@ -51,6 +51,9 @@ import {
   acquireTenantSlot,
   releaseTenantSlot,
   decideRedeem,
+  parseReconcilerRepos,
+  listOrphanRunnerJobs,
+  RECONCILE_MIN_AGE_MS,
   type ContainerEnvResult,
   type StashedCred,
   type StashRecord,
@@ -114,6 +117,11 @@ export interface Env {
   BILLING_INGEST_AUTH_KEY?: string;
   // 3-char region stamped on the event; defaults to the request's CF colo.
   BILLING_REGION?: string;
+  // ── Re-drive reconciler (scheduled) — recover spawn-orphaned jobs ──────────
+  // Comma/space-separated first-party allowlist (owner/repo) the cron scans for
+  // queued+labeled+runnerless jobs to re-drive. Absent ⇒ the reconciler is OFF.
+  // Cold re-spawn skips per-job authz, so ONLY trusted repos belong here.
+  RECONCILER_REPOS?: string;
   // ── env-0 (cred-ticket) — keep the CAS PAT OUT of the untrusted container env ──
   // The single-use stash latch (one DO instance per lease_id = GH jobId).
   CRED_STASH: DurableObjectNamespace<CredStashDO>;
@@ -479,6 +487,67 @@ async function maybeBillCompletedJob(
   }
 }
 
+// The spawn drive shared by the webhook path AND the re-drive reconciler:
+// AUTHORIZE + warm-mint (env-0 aware) → per-tenant concurrency → GitHub JIT →
+// spawn. Assumes the caller ALREADY won the spawn claim. Throws on JIT/spawn
+// failure (the guarded wrapper releases the claim). A 403 authz / at-ceiling
+// refusal releases the claim inline and returns (no throw — a definitive no-op).
+async function driveSpawn(
+  env: Env,
+  opts: { jobId: string; repo: string; installationId: string; label: string },
+): Promise<void> {
+  const { jobId, repo, installationId, label } = opts;
+  // env-0: when the Worker's public URL is configured, stash the PAT in the
+  // CRED_STASH DO and inject a single-use ticket instead of CLW_TOKEN.
+  const env0 = env.SPAWN_WORKER_PUBLIC_URL
+    ? {
+        stash: {
+          stash: (leaseId, ticket, cred, ttlMs) =>
+            env.CRED_STASH.get(env.CRED_STASH.idFromName(leaseId)).stash(ticket, cred, ttlMs),
+        } satisfies CredStashLike,
+        fabricEndpoint: env.SPAWN_WORKER_PUBLIC_URL,
+      }
+    : undefined;
+  const mint = await buildContainerEnv(env, { jobId, repoFullName: repo, installationId }, env0);
+  if (mint.authz === "forbidden") {
+    await releaseSpawnClaim(env.RUNNER_JOB_PATS, jobId);
+    console.log(`runner mint FORBIDDEN for job ${jobId} (repo ${repo}): no JIT, no spawn`);
+    return;
+  }
+  // Per-tenant concurrency ceiling (warm mints only). At-ceiling ⇒ no spawn.
+  if (mint.tenant && mint.maxConcurrency != null) {
+    const admitted = await acquireTenantSlot(env.RUNNER_JOB_PATS, mint.tenant, jobId, mint.maxConcurrency);
+    if (!admitted) {
+      await releaseSpawnClaim(env.RUNNER_JOB_PATS, jobId);
+      console.log(`tenant ${mint.tenant} at max_concurrency ${mint.maxConcurrency}; refusing job ${jobId}`);
+      return;
+    }
+  }
+  // Authorized ⇒ mint the GitHub JIT and spawn.
+  try {
+    const jit = await mintJit(env, repo, label);
+    await spawnRunner(env, jit, jobId, mint);
+  } catch (e) {
+    // Release the concurrency slot on a spawn failure (the guard releases the claim).
+    if (mint.tenant) await releaseTenantSlot(env.RUNNER_JOB_PATS, mint.tenant, jobId);
+    throw e;
+  }
+}
+
+// driveSpawn wrapped so ANY failure RELEASES the spawn claim — a GitHub redelivery
+// or a later reconciler tick can then re-drive the job (never a silent orphan).
+async function driveSpawnGuarded(
+  env: Env,
+  opts: { jobId: string; repo: string; installationId: string; label: string },
+): Promise<void> {
+  try {
+    await driveSpawn(env, opts);
+  } catch (e) {
+    await releaseSpawnClaim(env.RUNNER_JOB_PATS, opts.jobId);
+    console.log(`spawn drive failed for job ${opts.jobId}: ${(e as Error).message}`);
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -593,77 +662,12 @@ export default {
       // `startWithRetry` (per-attempt timeout + fresh DO) then abandons a hung
       // start and retries instead of stalling the webhook. On terminal failure we
       // RELEASE the claim so a GitHub redelivery / re-queue can spawn.
-      ctx.waitUntil(
-        (async () => {
-          try {
-            // 1) AUTHORIZE + warm-mint FIRST — BEFORE any GitHub JIT is minted.
-            //    A repo off its tenant's allowlist (or a suspended/unmapped
-            //    tenant, or not runner-entitled) returns 403 ⇒ authz:"forbidden":
-            //    we ABORT here — no JIT, no container. A 5xx/network fails open to
-            //    a cold (uncached) spawn. CLW_TENANT is the SERVER-DERIVED tenant.
-            // env-0: when the Worker's public URL is configured, stash the PAT in
-            // the CRED_STASH DO and inject a single-use CLW_CRED_TICKET instead of
-            // CLW_TOKEN (the raw PAT never enters the untrusted container env).
-            const env0 = env.SPAWN_WORKER_PUBLIC_URL
-              ? {
-                  stash: {
-                    stash: (leaseId, ticket, cred, ttlMs) =>
-                      env.CRED_STASH.get(env.CRED_STASH.idFromName(leaseId)).stash(
-                        ticket,
-                        cred,
-                        ttlMs,
-                      ),
-                  } satisfies CredStashLike,
-                  fabricEndpoint: env.SPAWN_WORKER_PUBLIC_URL,
-                }
-              : undefined;
-            const mint = await buildContainerEnv(
-              env,
-              { jobId, repoFullName: repo, installationId },
-              env0,
-            );
-            if (mint.authz === "forbidden") {
-              await releaseSpawnClaim(env.RUNNER_JOB_PATS, jobId);
-              console.log(
-                `runner mint FORBIDDEN for job ${jobId} (repo ${repo}): no JIT, no spawn`,
-              );
-              return;
-            }
-            // 2) Per-tenant concurrency ceiling (warm mints only — tenant + ceiling
-            //    known). Best-effort + fail-open: a tenant already AT max_concurrency
-            //    is refused (no spawn); any KV hiccup admits the job.
-            if (mint.tenant && mint.maxConcurrency != null) {
-              const admitted = await acquireTenantSlot(
-                env.RUNNER_JOB_PATS,
-                mint.tenant,
-                jobId,
-                mint.maxConcurrency,
-              );
-              if (!admitted) {
-                await releaseSpawnClaim(env.RUNNER_JOB_PATS, jobId);
-                console.log(
-                  `tenant ${mint.tenant} at max_concurrency ${mint.maxConcurrency}; ` +
-                    `refusing job ${jobId}`,
-                );
-                return;
-              }
-            }
-            // 3) Repo is AUTHORIZED ⇒ NOW mint the GitHub JIT and spawn.
-            try {
-              const jit = await mintJit(env, repo, label);
-              await spawnRunner(env, jit, jobId, mint);
-            } catch (e) {
-              // JIT/spawn failed AFTER acquiring the slot ⇒ release it (the outer
-              // catch releases the spawn claim). Prevents a leaked concurrency slot.
-              if (mint.tenant) await releaseTenantSlot(env.RUNNER_JOB_PATS, mint.tenant, jobId);
-              throw e;
-            }
-          } catch (e) {
-            await releaseSpawnClaim(env.RUNNER_JOB_PATS, jobId);
-            console.log(`background autoscale failed for job ${jobId}: ${(e as Error).message}`);
-          }
-        })(),
-      );
+      // Respond FAST (202); AUTHORIZE + warm-mint (env-0) + JIT + spawn run in the
+      // BACKGROUND (driveSpawnGuarded): awaiting start() inline risks GitHub's 10s
+      // webhook timeout when a DO start hangs on a transient reset (2026-07-03).
+      // The guard releases the claim on failure so a redelivery / the scheduled
+      // reconciler can re-drive the job (never a silent orphan).
+      ctx.waitUntil(driveSpawnGuarded(env, { jobId, repo, installationId, label }));
       return json({ ok: true, spawning: true, job_id: jobId }, 202);
     }
 
@@ -912,6 +916,32 @@ export default {
     }
 
     return json({ error: "not found" }, 404);
+  },
+
+  // ── scheduled() — the re-drive reconciler (cron) ──────────────────────────
+  // GitHub fires workflow_job.queued ONCE; a transient spawn failure orphans the
+  // job forever. Each tick lists queued+labeled+runnerless jobs older than the
+  // grace window in the RECONCILER_REPOS allowlist and re-drives their spawn
+  // (COLD — no installation_id from the jobs API; a running runner beats an
+  // orphan). The claim-KV dedups against the webhook + prior ticks. OFF unless
+  // RECONCILER_REPOS is set AND the autoscaler is configured.
+  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    const repos = parseReconcilerRepos(env.RECONCILER_REPOS);
+    if (repos.length === 0) return; // opt-in: no allowlist ⇒ reconciler off
+    if (!env.GITHUB_WEBHOOK_SECRET || !env.GITHUB_MINT_TOKEN) return; // autoscaler not configured
+    const label = env.AUTOSCALER_LABEL ?? "corelink-dogfood";
+    const now = Date.now();
+    for (const repo of repos) {
+      const orphans = await listOrphanRunnerJobs(env, repo, label, RECONCILE_MIN_AGE_MS, now);
+      for (const jobId of orphans) {
+        // Claim (dedups vs the webhook path + other ticks); COLD re-drive (no
+        // installation_id ⇒ buildContainerEnv returns an empty overlay).
+        if (await claimSpawn(env.RUNNER_JOB_PATS, jobId)) {
+          console.log(`reconciler re-driving orphaned job ${jobId} in ${repo}`);
+          ctx.waitUntil(driveSpawnGuarded(env, { jobId, repo, installationId: "", label }));
+        }
+      }
+    }
   },
 };
 

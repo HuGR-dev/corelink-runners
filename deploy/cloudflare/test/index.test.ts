@@ -18,6 +18,8 @@ import {
   releaseTenantSlot,
   randomTicket,
   decideRedeem,
+  parseReconcilerRepos,
+  listOrphanRunnerJobs,
   type KvLike,
   type CredStashLike,
   type StashedCred,
@@ -332,6 +334,68 @@ describe("randomTicket / decideRedeem (env-0 single-use latch semantics)", () =>
     expect(d.status).toBe(410);
     expect(d.wipe).toBe(true);
     expect(d.cred).toBeUndefined();
+  });
+});
+
+describe("re-drive reconciler (parseReconcilerRepos + listOrphanRunnerJobs)", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("parseReconcilerRepos: empty/undefined ⇒ [], filters to owner/repo tokens", () => {
+    expect(parseReconcilerRepos(undefined)).toEqual([]);
+    expect(parseReconcilerRepos("")).toEqual([]);
+    expect(parseReconcilerRepos("a/b, c/d  e/f")).toEqual(["a/b", "c/d", "e/f"]);
+    expect(parseReconcilerRepos("not-a-repo, owner/repo")).toEqual(["owner/repo"]);
+  });
+
+  const LABEL = "corelink-dogfood";
+  const NOW = 10_000_000;
+  const OLD = new Date(NOW - 200_000).toISOString(); // older than the 90s grace
+  const FRESH = new Date(NOW - 10_000).toISOString(); // inside the grace window
+
+  // Mock GH: /runs?status=queued → runs; /runs/{id}/jobs → that run's jobs.
+  function ghMock(runs: { id: number; created_at: string }[], jobsByRun: Record<number, unknown[]>) {
+    return vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes("/actions/runs?status=queued")) {
+        return new Response(JSON.stringify({ workflow_runs: runs }), { status: 200 });
+      }
+      const m = u.match(/\/actions\/runs\/(\d+)\/jobs/);
+      if (m) return new Response(JSON.stringify({ jobs: jobsByRun[Number(m[1])] ?? [] }), { status: 200 });
+      return new Response("nope", { status: 404 });
+    });
+  }
+
+  it("returns queued+labeled+runnerless jobs from runs older than the grace window", async () => {
+    vi.stubGlobal(
+      "fetch",
+      ghMock([{ id: 1, created_at: OLD }], {
+        1: [
+          { id: 111, status: "queued", runner_id: null, labels: [LABEL] }, // ORPHAN ✓
+          { id: 112, status: "queued", runner_id: 5, labels: [LABEL] }, // has a runner ✗
+          { id: 113, status: "in_progress", runner_id: null, labels: [LABEL] }, // not queued ✗
+          { id: 114, status: "queued", runner_id: null, labels: ["other"] }, // wrong label ✗
+        ],
+      }),
+    );
+    const r = await listOrphanRunnerJobs({ GITHUB_MINT_TOKEN: "t" }, "o/r", LABEL, 90_000, NOW);
+    expect(r).toEqual(["111"]);
+  });
+
+  it("skips runs INSIDE the grace window (don't race the webhook)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      ghMock([{ id: 2, created_at: FRESH }], {
+        2: [{ id: 222, status: "queued", runner_id: null, labels: [LABEL] }],
+      }),
+    );
+    const r = await listOrphanRunnerJobs({ GITHUB_MINT_TOKEN: "t" }, "o/r", LABEL, 90_000, NOW);
+    expect(r).toEqual([]);
+  });
+
+  it("best-effort: a GitHub error ⇒ [] (never throws — the reconciler is a backstop)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("boom", { status: 500 })));
+    const r = await listOrphanRunnerJobs({ GITHUB_MINT_TOKEN: "t" }, "o/r", LABEL, 90_000, NOW);
+    expect(r).toEqual([]);
   });
 });
 
