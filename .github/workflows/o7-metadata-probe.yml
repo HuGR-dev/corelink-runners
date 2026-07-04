@@ -1,0 +1,27 @@
+# O7 G2 — the live cloud-metadata probe (clw coordinator P0 #3). Runs INSIDE a
+# real corelink-dogfood runner lease (a CF container box spawned by the
+# autoscaler) and prints the raw reachability of the cloud metadata endpoints.
+# Nothing reachable → O7 GO(CF) closed. Reachable → mitigate at the network layer.
+name: o7-metadata-probe
+on:
+  workflow_dispatch: {}
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: corelink-dogfood
+    timeout-minutes: 10
+    steps:
+      - name: cloud metadata reachability (raw)
+        run: |
+          echo "=== O7 G2 metadata probe — from INSIDE a CF runner lease ==="
+          for url in \
+            "http://169.254.169.254/" \
+            "http://169.254.169.254/latest/meta-data/" \
+            "http://metadata.google.internal/" \
+            "http://169.254.169.254/metadata/instance?api-version=2021-02-01"; do
+            echo "--- GET $url ---"
+            out=$(curl -s -m3 -w $'\nHTTP:%{http_code}' "$url" 2>&1) && echo "$out" | head -30 || echo "curl exit=$? (unreachable/timeout)"
+            echo ""
+          done
+          echo "=== probe done ==="
