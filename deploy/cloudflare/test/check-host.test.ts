@@ -370,3 +370,111 @@ describe("status/teardown routing by mode (audit r4)", () => {
     expect(containers).toHaveLength(0);
   });
 });
+
+// ── workflow_job:completed ⇒ tear down the runner container immediately ───────
+// A finished ephemeral runner's container must NOT linger to sleepAfter (45m):
+// lingering containers hold account container-instance capacity and starve NEW
+// spawns (root cause of the 2026-07-05 dogfood spawn stall). The completed webhook
+// reads the DO handle stashed at spawn (jhandle:<jobId>) and destroys it.
+async function ghSign(secret: string, body: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const mac = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body));
+  const hex = [...new Uint8Array(mac)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return `sha256=${hex}`;
+}
+
+function fakeKv(seed: Record<string, string> = {}) {
+  const store = new Map<string, string>(Object.entries(seed));
+  return {
+    store,
+    get: vi.fn(async (k: string) => store.get(k) ?? null),
+    put: vi.fn(async (k: string, v: string) => {
+      store.set(k, v);
+    }),
+    delete: vi.fn(async (k: string) => {
+      store.delete(k);
+    }),
+  };
+}
+
+async function completedWebhook(env: Env, jobId: string, secret: string): Promise<Response> {
+  const body = JSON.stringify({
+    action: "completed",
+    workflow_job: { id: Number(jobId), labels: ["corelink-dogfood"] },
+    repository: { full_name: "HumanGuardrail/corelink-runners" },
+  });
+  return worker.fetch(
+    new Request("https://w/webhook", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-github-event": "workflow_job",
+        "x-hub-signature-256": await ghSign(secret, body),
+      },
+      body,
+    }),
+    env,
+    {} as never,
+  );
+}
+
+describe("workflow_job:completed ⇒ runner container teardown (capacity leak fix)", () => {
+  const SECRET = "whsec-teardown";
+  function webhookEnv(kv: ReturnType<typeof fakeKv>): Env {
+    return makeEnv({
+      GITHUB_WEBHOOK_SECRET: SECRET,
+      GITHUB_MINT_TOKEN: "ghp-mint",
+      RUNNER_JOB_PATS: kv as never,
+    });
+  }
+
+  it("destroys the stashed DO handle on completion (200, tornDown:true)", async () => {
+    const kv = fakeKv({ "jhandle:12345": "handle-abc" });
+    const resp = await completedWebhook(webhookEnv(kv), "12345", SECRET);
+    expect(resp.status).toBe(200);
+    expect((await resp.json()).tornDown).toBe(true);
+    // getContainer resolved the RUNNER namespace with the stashed handle + torn down.
+    expect(getContainer).toHaveBeenCalledWith(RUNNER_NS, "handle-abc");
+    expect(containers.at(-1)!.teardown).toHaveBeenCalled();
+    // The handle key is dropped so a redelivery doesn't retry a dead handle.
+    expect(kv.store.has("jhandle:12345")).toBe(false);
+  });
+
+  it("no handle on file ⇒ no teardown, still 200 (cold/legacy job; sleepAfter backstop)", async () => {
+    const kv = fakeKv(); // nothing stashed
+    const resp = await completedWebhook(webhookEnv(kv), "67890", SECRET);
+    expect(resp.status).toBe(200);
+    expect((await resp.json()).tornDown).toBe(false);
+    expect(containers).toHaveLength(0); // never resolved a container
+  });
+
+  it("a destroy() throw is swallowed (fail-open) and the handle key is still cleared", async () => {
+    const kv = fakeKv({ "jhandle:55555": "handle-boom" });
+    // Next-resolved container throws on teardown.
+    vi.mocked(getContainer).mockImplementationOnce((ns: unknown, handle: string) => {
+      const c = {
+        ns,
+        handle,
+        start: vi.fn(async () => {}),
+        startWithEnv: vi.fn(async () => {}),
+        containerFetch: vi.fn(async () => nextContainerFetch()),
+        isAlive: vi.fn(async () => true),
+        teardown: vi.fn(async () => {
+          throw new Error("destroy boom");
+        }),
+        cutEgress: vi.fn(async () => {}),
+      };
+      containers.push(c);
+      return c as never;
+    });
+    const resp = await completedWebhook(webhookEnv(kv), "55555", SECRET);
+    expect(resp.status).toBe(200); // never a 500 — teardown is best-effort
+    expect(kv.store.has("jhandle:55555")).toBe(false); // key still dropped
+  });
+});
