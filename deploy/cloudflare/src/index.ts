@@ -991,8 +991,18 @@ export default {
     for (const repo of repos) {
       const orphans = await listOrphanRunnerJobs(env, repo, label, RECONCILE_MIN_AGE_MS, now);
       for (const jobId of orphans) {
-        // Claim (dedups vs the webhook path + other ticks); COLD re-drive (no
-        // installation_id ⇒ buildContainerEnv returns an empty overlay).
+        // `listOrphanRunnerJobs` already proved this job is queued ≥ MIN_AGE,
+        // labeled, and has NO runner — genuinely orphaned. A spawn claim can LEAK
+        // when the background `driveSpawnGuarded` (waitUntil) is killed by the
+        // platform before its catch releases the claim (a slow mint+start
+        // exceeding the waitUntil budget). A leaked claim then blocks the
+        // reconciler FOREVER (`claimSpawn` → false → skip), so the recovery path
+        // never recovers — the exact deadlock observed 2026-07-05 (stuck `spawn:`
+        // claims, jobs queued with no runner, no self-heal). CLEAR any stale claim
+        // first, then re-claim fresh (concurrent ticks still dedup on the fresh
+        // claim). This turns "stuck forever" into "retry each tick until a spawn
+        // succeeds". COLD re-drive (no installation_id ⇒ empty overlay).
+        await releaseSpawnClaim(env.RUNNER_JOB_PATS, jobId);
         if (await claimSpawn(env.RUNNER_JOB_PATS, jobId)) {
           console.log(`reconciler re-driving orphaned job ${jobId} in ${repo}`);
           ctx.waitUntil(driveSpawnGuarded(env, { jobId, repo, installationId: "", label }));
