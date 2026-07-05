@@ -344,6 +344,17 @@ function jobTenantKey(jobId: string): string {
   return `jtenant:${jobId}`;
 }
 
+// job_id → the spawned RunnerContainer DO handle (a random UUID minted at spawn).
+// Stashed so the `workflow_job:completed` webhook can DESTROY the container
+// immediately, instead of leaving it to idle out `sleepAfter` (45m). Without this
+// a finished job's container lingers, consuming account container-instance
+// capacity — which starves NEW spawns (observed 2026-07-05: dogfood jobs queued
+// with no runner while completed-job containers sat in their 45m sleep window).
+// A distinct `jhandle:` namespace, never colliding with the other job keys.
+function jobHandleKey(jobId: string): string {
+  return `jhandle:${jobId}`;
+}
+
 // Container-start retry (root-caused 2026-07-03): Cloudflare Container DO
 // `start()` intermittently fails with a TRANSIENT platform error — e.g.
 // "Internal error while starting up Durable Object storage caused object to be
@@ -422,6 +433,14 @@ async function spawnRunner(
       expirationTtl: JOB_PAT_TTL_S,
     }).catch((e) => console.log(`KV put job→tenant failed: ${(e as Error).message}`));
   }
+  if (env.RUNNER_JOB_PATS) {
+    // Stash the DO handle so `completed` can tear the container down immediately
+    // (vs the 45m sleepAfter idle-out that starves new spawns). Best-effort: a
+    // miss just falls back to sleepAfter (fail-safe, never blocks the spawn).
+    await env.RUNNER_JOB_PATS.put(jobHandleKey(jobId), handle, {
+      expirationTtl: JOB_PAT_TTL_S,
+    }).catch((e) => console.log(`KV put job→handle failed: ${(e as Error).message}`));
+  }
   return handle;
 }
 
@@ -444,6 +463,34 @@ async function revokeCompletedJob(
     console.log(`revoke failed (PAT will TTL-expire): ${(e as Error).message}`);
     return false;
   }
+}
+
+// Tear down a completed job's runner container by the DO handle stashed at spawn.
+// A finished ephemeral runner's container otherwise idles until `sleepAfter` (45m),
+// holding account container-instance capacity and starving new spawns. No-op when
+// no handle is on file (legacy/cold spawn, or the KV entry TTL-expired) — sleepAfter
+// is the backstop. Fail-OPEN: a destroy() throw is swallowed (teardown() is
+// idempotent and the provider deadline is the final backstop), never breaking the
+// webhook. Returns true only when a teardown was actually issued.
+async function teardownCompletedRunner(env: Env, jobId: string): Promise<boolean> {
+  if (!env.RUNNER_JOB_PATS) return false;
+  let handle: string | null = null;
+  try {
+    handle = await env.RUNNER_JOB_PATS.get(jobHandleKey(jobId));
+  } catch {
+    return false; // KV read failed ⇒ sleepAfter is the backstop
+  }
+  if (!handle) return false; // cold/legacy job, or already torn down
+  try {
+    await getContainer(env.RUNNER_CONTAINER, handle).teardown();
+  } catch (e) {
+    console.log(`runner teardown failed for job ${jobId} (sleepAfter backstop): ${(e as Error).message}`);
+    // fall through: still drop the handle key so we don't retry a dead handle
+  }
+  await env.RUNNER_JOB_PATS.delete(jobHandleKey(jobId)).catch(() => {
+    /* best-effort: the key TTL-expires */
+  });
+  return true;
 }
 
 // One completed job's workflow_job fields we read for billing.
@@ -625,7 +672,14 @@ export default {
           request,
           derivedTenant,
         );
-        return json({ ok: true, revoked, billed, job_id: jobId }, 200);
+        // Tear the runner container DOWN immediately (vs the 45m sleepAfter idle-
+        // out). A finished ephemeral runner's container otherwise lingers, holding
+        // account container-instance capacity and starving NEW spawns (root cause
+        // of the 2026-07-05 dogfood spawn stall). Best-effort + fail-open: no handle
+        // on file (legacy/cold job, or a KV miss) ⇒ sleepAfter is the backstop; a
+        // destroy() throw is swallowed (idempotent teardown, deadline backstop).
+        const tornDown = await teardownCompletedRunner(env, jobId);
+        return json({ ok: true, revoked, billed, tornDown, job_id: jobId }, 200);
       }
 
       if (evt.action !== "queued") {
