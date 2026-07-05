@@ -6,6 +6,8 @@
 //! `CheckDef`, `CheckResult`) are the frozen transcriptions in
 //! `corelink-runners-contracts` — wrapped, never redefined.
 
+use std::collections::BTreeMap;
+
 use corelink_runners_contracts::{
     AttestationChain, CheckDef, CheckResult, IntentMetrics, LandableEntry, RunnerLease, RunnerState,
 };
@@ -52,7 +54,25 @@ pub struct AcquireRequest {
     /// for runner + plain-hermetic leases.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub toolchain_digest: Option<String>,
+
+    /// Agent-exec mode (ratified (B) with hugit 2026-07-05). `Some` → provision
+    /// an EGRESS-enabled, NON-memoized box for hugit's off-box §13 agent loop to
+    /// drive via `POST /v1/leases/{id}/agent-exec` (peer to `runner` /
+    /// check-host). Additive + default-off: omitting it is byte-identical to the
+    /// prior request. Mutually exclusive with `runner` (both `Some` → 400).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentSpec>,
 }
+
+/// Agent-mode acquire spec (ratified (B) exec-server-drive with hugit,
+/// 2026-07-05). When `AcquireRequest.agent` is `Some`, the fabric provisions an
+/// EGRESS-enabled, NON-memoized box that hugit's off-box §13 agent loop drives
+/// via `POST /v1/leases/{id}/agent-exec` — the agent's build/test/edit tool-call
+/// sandbox. Currently a marker: egress + no-memoization are the mode's semantics
+/// (no per-acquire params yet), so it serializes to `{}`. Extensible additively.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSpec {}
 
 /// Direct-CI runner-mode acquire spec (ADR-0007 — the ephemeral GitHub Actions
 /// runner fleet on-ramp). When `AcquireRequest.runner` is `Some`, the fabric
@@ -246,6 +266,78 @@ pub struct ExecResponse {
     /// the empty string.
     #[serde(default)]
     pub fabric_key_id: String,
+}
+
+/// `POST /v1/leases/{lease_id}/agent-exec` request body — drive an ARBITRARY
+/// command in an `agent`-mode lease (ratified (B) exec-server-drive with hugit,
+/// 2026-07-05). UNLIKE the check exec (`ExecRequest`/`CheckDef`): egress-enabled
+/// and **NEVER memoized** — no `toolchain_ref`, no memo key, no attestation of a
+/// memo axis. It is the agent's tool-call sandbox; hugit's off-box §13 loop
+/// drives build/test/edit here and reads the captured stdio back via the poll.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentExecRequest {
+    /// The command to run, argv form (no shell-quoting seam). Empty argv is
+    /// 400 `invalid`.
+    pub argv: Vec<String>,
+
+    /// Scoped run environment for THIS exec. Ordered (`BTreeMap`) for
+    /// byte-stable serialization. It MUST NEVER carry a tenant PAT — the §13.2
+    /// ingest credential is a separate, lease-scoped, write-only token.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+
+    /// Working directory for the command (absolute). Empty → the lease's
+    /// `tmp_root`, resolved server-side.
+    #[serde(default)]
+    pub workdir: String,
+
+    /// Per-exec wall-clock bound in milliseconds. Past it the fabric kills the
+    /// command and returns the captured stdio with the conventional timeout
+    /// exit code `124` (GNU `timeout`), never a fabricated success.
+    pub timeout_ms: u64,
+}
+
+/// `POST /v1/leases/{lease_id}/agent-exec` ack — mirrors the check-exec ack→poll
+/// shape. Poll the captured result at
+/// `GET /v1/leases/{lease_id}/agent-exec/{step_id}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentExecAck {
+    /// The lease this exec runs in (echoed).
+    pub lease_id: String,
+
+    /// The step id to poll for the captured result.
+    pub step_id: String,
+
+    /// Whether the exec was accepted for execution. A refusal is an HTTP error
+    /// (400/404/503), never `accepted:false`; the field pins the wire shape.
+    pub accepted: bool,
+}
+
+/// `GET /v1/leases/{lease_id}/agent-exec/{step_id}` response — the captured,
+/// egress-enabled, NON-memoized outcome of one agent-exec step.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentExecResult {
+    /// The step this result answers (echoed).
+    pub step_id: String,
+
+    /// Process exit code, captured verbatim. A timeout kill is the conventional
+    /// `124`; a signal kill surfaces the shell's `128+signal` — never fabricated.
+    pub exit_code: i32,
+
+    /// Captured stdout (possibly truncated — see `truncated`).
+    pub stdout: String,
+
+    /// Captured stderr (possibly truncated — see `truncated`).
+    pub stderr: String,
+
+    /// Wall-clock duration of the exec in milliseconds.
+    pub duration_ms: u64,
+
+    /// Whether captured stdio was truncated at the capture ceiling.
+    pub truncated: bool,
 }
 
 /// `POST /v1/queue/trigger` request body — hugit's landing queue triggers
@@ -562,6 +654,7 @@ mod tests {
             tmp_root: "/tmp/run".into(),
             expiry_ms: 60000,
             toolchain_digest: None,
+            agent: None,
             runner: Some(RunnerSpec {
                 target: RunnerTargetDto::Repo {
                     owner: "humangr-labs".into(),

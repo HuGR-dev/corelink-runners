@@ -162,6 +162,7 @@ async fn acquire(h: &Harness) -> String {
         expiry_ms: 600_000,
         runner: None,
         toolchain_digest: None,
+        agent: None,
     };
     let response = h
         .app

@@ -606,6 +606,7 @@ async fn provision_runner(
             labels,
         }),
         toolchain_digest: None,
+        agent: None,
     };
 
     let resp = leases::acquire(

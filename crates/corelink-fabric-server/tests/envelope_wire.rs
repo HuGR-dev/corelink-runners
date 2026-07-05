@@ -81,6 +81,7 @@ async fn acquire_as(app: &axum::Router, bearer: &str) -> (StatusCode, serde_json
         expiry_ms: 600_000,
         runner: None,
         toolchain_digest: None,
+        agent: None,
     };
     let req = Request::builder()
         .method("POST")
@@ -260,6 +261,7 @@ async fn reaped_lease_unregisters_hook() {
         expiry_ms: 1, // 1 ms — overdue by the time the reaper runs
         runner: None,
         toolchain_digest: None,
+        agent: None,
     };
     let req = Request::builder()
         .method("POST")

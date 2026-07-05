@@ -271,6 +271,7 @@ mod tests {
             expiry_ms: 60_000,
             runner: None,
             toolchain_digest: None,
+            agent: None,
         };
         let resp = crate::handlers::leases::acquire(
             State(state.clone()),

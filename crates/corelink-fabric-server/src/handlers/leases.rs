@@ -1357,6 +1357,7 @@ mod tests {
             expiry_ms: 60_000,
             runner: None,
             toolchain_digest: None,
+            agent: None,
         }
     }
 
@@ -1996,6 +1997,7 @@ mod tests {
             expiry_ms: u64::MAX,
             runner: None,
             toolchain_digest: None,
+            agent: None,
         };
         let resp = router
             .oneshot(acquire_request(paths::LEASES, &oversized))
