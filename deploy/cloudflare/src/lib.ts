@@ -11,6 +11,13 @@ export interface MintEnv {
   CORELINK_MINT_URL?: string;
   CLW_ENDPOINT?: string;
   CLW_TENANT?: string;
+  // Explicit, non-prod ESCAPE HATCH for the pre-env-0 transition ONLY. When env-0
+  // (stash + fabricEndpoint) is NOT wired, the raw per-job PAT (`CLW_TOKEN`) is
+  // injected into the untrusted container ONLY if this is set to "1". Absent/any
+  // other value ⇒ spawn COLD (no PAT in the untrusted env) — fail-closed by
+  // default (clw coordinator env-0 review must-fix #1, 2026-07-05). Never set in
+  // prod: prod arms `SPAWN_WORKER_PUBLIC_URL` (env-0) instead.
+  ALLOW_LEGACY_PAT_ENV?: string;
 }
 
 // ── Spawn idempotency (gap #2) — dedup a redelivered queued webhook ──────────
@@ -314,9 +321,10 @@ export function decideRedeem(
 //
 // env-0: when `deps.stash` + `deps.fabricEndpoint` are provided, the PAT is
 // STASHED and a single-use CLW_CRED_TICKET is injected INSTEAD of CLW_TOKEN — the
-// untrusted container never sees the raw PAT. When they're absent (pre-launch
-// transition), the legacy CLW_TOKEN overlay is used. A stash FAILURE never falls
-// back to CLW_TOKEN — it spawns COLD (the whole point is no PAT in the untrusted env).
+// untrusted container never sees the raw PAT. When they're absent, the default is
+// FAIL-CLOSED (spawn COLD, no PAT) unless `env.ALLOW_LEGACY_PAT_ENV === "1"` is
+// explicitly set (the non-prod pre-env-0 escape hatch). A stash FAILURE also never
+// falls back to CLW_TOKEN — it spawns COLD (the whole point is no PAT in the untrusted env).
 export async function buildContainerEnv(
   env: MintEnv,
   params: MintParams,
@@ -362,7 +370,21 @@ export async function buildContainerEnv(
         maxConcurrency: m.maxConcurrency,
       };
     }
-    // Legacy (env-0 not configured) — pre-launch transition only: inject CLW_TOKEN.
+    // env-0 NOT configured. FAIL-CLOSED by default: never silently inject the raw
+    // PAT (`CLW_TOKEN`) into the untrusted container. The legacy PAT overlay is a
+    // pre-env-0 transition escape hatch, gated behind an EXPLICIT non-prod flag
+    // (`ALLOW_LEGACY_PAT_ENV="1"`) — coordinator env-0 review must-fix #1. Without
+    // it we spawn COLD: the minted PAT is undelivered (TTL-expires), no leak. In
+    // prod, env-0 (`SPAWN_WORKER_PUBLIC_URL`) is armed, so this branch is dead.
+    if (env.ALLOW_LEGACY_PAT_ENV !== "1") {
+      console.log(
+        "env-0 not configured and ALLOW_LEGACY_PAT_ENV not set: spawning COLD " +
+          "(no raw PAT in the untrusted container env)",
+      );
+      return { authz: "ok", containerEnv: {} };
+    }
+    // Legacy (explicit non-prod opt-in) — pre-launch transition only: inject CLW_TOKEN.
+    console.log("ALLOW_LEGACY_PAT_ENV=1: injecting legacy CLW_TOKEN (non-prod transition path)");
     return {
       authz: "ok",
       containerEnv: {

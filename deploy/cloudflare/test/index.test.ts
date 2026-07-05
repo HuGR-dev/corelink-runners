@@ -119,6 +119,7 @@ describe("buildContainerEnv (AUTHORIZE + warm-mint; 403 HARD DENY, 5xx FAIL-OPEN
       CLW_TENANT: "wrangler-tenant-IGNORED", // must NOT be injected
       CLW_ENDPOINT: "https://corelink-api.humangr.com",
       CORELINK_MINT_URL: "https://corelink-api.humangr.com",
+      ALLOW_LEGACY_PAT_ENV: "1", // legacy warm overlay (env-0 not wired in this test)
     } as never;
     const r = await buildContainerEnv(env, PARAMS);
     expect(r.authz).toBe("ok");
@@ -201,7 +202,7 @@ describe("buildContainerEnv (AUTHORIZE + warm-mint; 403 HARD DENY, 5xx FAIL-OPEN
 
   it("WARM without max_concurrency (absent ceiling ⇒ undefined, no gate)", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => ok200({ max_concurrency: undefined })));
-    const env = { CORELINK_RUNNER_MINT_AUTH_KEY: "k" } as never;
+    const env = { CORELINK_RUNNER_MINT_AUTH_KEY: "k", ALLOW_LEGACY_PAT_ENV: "1" } as never;
     const r = await buildContainerEnv(env, PARAMS);
     expect(r.authz).toBe("ok");
     expect(r.tenant).toBe("srv-derived-tenant");
@@ -278,11 +279,29 @@ describe("env-0 (cred-ticket): buildContainerEnv stashes the PAT, injects a tick
     expect(r.containerEnv.CLW_TOKEN).toBeUndefined();
   });
 
-  it("legacy CLW_TOKEN only when env-0 deps are absent (pre-launch transition)", async () => {
+  it("FAIL-CLOSED default: env-0 deps absent AND no ALLOW_LEGACY_PAT_ENV ⇒ spawn COLD, NEVER CLW_TOKEN", async () => {
+    // Coordinator env-0 review must-fix #1: a missing SPAWN_WORKER_PUBLIC_URL must
+    // NOT silently drop the raw PAT into the untrusted env. Default is COLD.
     vi.stubGlobal("fetch", vi.fn(async () => ok200()));
-    const r = await buildContainerEnv(ENV, PARAMS); // no deps
+    const r = await buildContainerEnv(ENV, PARAMS); // no deps, no flag
+    expect(r.authz).toBe("ok");
+    expect(r.containerEnv).toEqual({}); // COLD — no token, no ticket
+    expect(r.containerEnv.CLW_TOKEN).toBeUndefined();
+  });
+
+  it("legacy CLW_TOKEN ONLY behind the explicit ALLOW_LEGACY_PAT_ENV='1' escape hatch (non-prod)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ok200()));
+    const LEGACY_ENV = { ...(ENV as object), ALLOW_LEGACY_PAT_ENV: "1" } as never;
+    const r = await buildContainerEnv(LEGACY_ENV, PARAMS); // no deps, explicit flag
     expect(r.containerEnv.CLW_TOKEN).toBe("per-job-pat");
     expect(r.containerEnv.CLW_CRED_TICKET).toBeUndefined();
+  });
+
+  it("any non-'1' ALLOW_LEGACY_PAT_ENV value stays FAIL-CLOSED (only exact '1' opts in)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ok200()));
+    const LOOSE_ENV = { ...(ENV as object), ALLOW_LEGACY_PAT_ENV: "true" } as never;
+    const r = await buildContainerEnv(LOOSE_ENV, PARAMS);
+    expect(r.containerEnv).toEqual({}); // COLD — "true" !== "1"
   });
 });
 
