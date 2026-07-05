@@ -34,8 +34,8 @@
 #   cargo-deny@0.19.8 and cargo-audit@0.22.2 match .github/workflows/ci.yml.
 #
 # CLW BINARY (the moat drive — snapshot/hydrate/run):
-#   Pinned to clw v0.1.1, digest-verified (X4 floor). The sha256 below is from
-#   the minisign-signed SHA256SUMS of the v0.1.1 GitHub Release
+#   Pinned to clw v0.1.4, digest-verified (X4 floor). The sha256 below is from
+#   the minisign-signed SHA256SUMS of the v0.1.4 GitHub Release
 #   (HumanGuardrail/clw-releases, minisign key id 4B57B8B54A0E396D), so pinning
 #   the digest transitively trusts the signed manifest. To refresh: bump
 #   CLW_VERSION + CLW_SHA256 from the signed SHA256SUMS of the new release.
@@ -68,13 +68,13 @@ RUN curl -fsSL \
 # ── Stage 1b: clw binary download + checksum verification ────────────────────
 # Same PINNED base digest. clw is a BARE executable (not archived): download,
 # verify the sha256 (X4 floor; sourced from the minisign-signed SHA256SUMS of
-# the v0.1.1 release), chmod +x.
+# the v0.1.4 release), chmod +x.
 FROM ubuntu:24.04@sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae77ff1dc54 AS clw-download
 
 # clw release to pin (x86_64-unknown-linux-gnu). Refresh both from the signed
 # SHA256SUMS at https://github.com/HumanGuardrail/clw-releases/releases.
-ARG CLW_VERSION=0.1.1
-ARG CLW_SHA256=be8733781a1d19a96d88528df3fe67c9d50723e7bed95cb35d1e9ab712685610
+ARG CLW_VERSION=0.1.4
+ARG CLW_SHA256=9ec443d173c6088978cb73caf7b15983ac7161879b3c5663059fea7a4fdf5d8c
 
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
@@ -99,7 +99,7 @@ LABEL org.opencontainers.image.title="CoreLink ephemeral GitHub Actions runner" 
       org.opencontainers.image.vendor="HuGR / CoreLink" \
       corelink.runner.version="2.335.1" \
       corelink.rust.toolchain="1.96.0" \
-      corelink.clw.version="0.1.1"
+      corelink.clw.version="0.1.4"
 
 # ── System packages ───────────────────────────────────────────────────────────
 # git is required by most GitHub Actions (actions/checkout etc.)
