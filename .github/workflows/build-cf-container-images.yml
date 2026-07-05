@@ -69,6 +69,15 @@ jobs:
       - name: Sanity — Docker is available (wrangler needs it to BUILD)
         run: docker version
 
+      # The self-hosted Linux builder has Docker but NOT Node/npm on the runner
+      # PATH (`npm: command not found`, 2026-07-05). setup-node provisions a
+      # deterministic Node into the runner tool-cache so `npm ci` (wrangler) works
+      # without a machine-level install.
+      - name: Set up Node (wrangler needs npm)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
       - name: Install deps (wrangler)
         working-directory: deploy/cloudflare
         run: npm ci
