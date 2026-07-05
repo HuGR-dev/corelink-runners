@@ -162,6 +162,7 @@ async fn acquire_raw(h: &Harness, bearer: &str) -> Response {
         expiry_ms: TTL_MS,
         runner: None,
         toolchain_digest: None,
+        agent: None,
     };
     h.app
         .clone()

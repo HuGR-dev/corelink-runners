@@ -72,6 +72,7 @@ fn acq_body() -> AcquireRequest {
         expiry_ms: 60_000,
         runner: None,
         toolchain_digest: None,
+        agent: None,
     }
 }
 

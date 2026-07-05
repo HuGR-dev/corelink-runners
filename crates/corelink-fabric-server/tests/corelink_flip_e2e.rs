@@ -240,6 +240,7 @@ fn acquire_req_http_ttl(expiry_ms: u64) -> Request<Body> {
         expiry_ms,
         runner: None,
         toolchain_digest: None,
+        agent: None,
     };
     Request::builder()
         .method("POST")

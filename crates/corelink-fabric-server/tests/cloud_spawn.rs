@@ -510,6 +510,7 @@ async fn acquire_fails_closed_when_provision_fails() {
         expiry_ms: 60_000,
         runner: None,
         toolchain_digest: None,
+        agent: None,
     };
     let resp = router
         .oneshot(json_req(
@@ -612,6 +613,7 @@ async fn provision_runs_only_after_admission() {
         expiry_ms: 60_000,
         runner: None,
         toolchain_digest: None,
+        agent: None,
     };
     let resp = router
         .oneshot(json_req(
@@ -683,6 +685,7 @@ async fn close_invokes_teardown() {
         expiry_ms: 60_000,
         runner: None,
         toolchain_digest: None,
+        agent: None,
     };
     let acq_resp = router
         .clone()
@@ -831,6 +834,7 @@ async fn http_default_off_acquire_ok_exec_503() {
         expiry_ms: 60_000,
         runner: None,
         toolchain_digest: None,
+        agent: None,
     };
     let acq_resp = router
         .clone()
@@ -911,6 +915,7 @@ async fn http_exec_on_unbound_lease_503() {
         expiry_ms: 60_000,
         runner: None,
         toolchain_digest: None,
+        agent: None,
     };
     let acq_resp = router
         .clone()
@@ -993,6 +998,7 @@ async fn http_split_registry_exec_503() {
         expiry_ms: 60_000,
         runner: None,
         toolchain_digest: None,
+        agent: None,
     };
     let acq_resp = router
         .clone()
@@ -1078,6 +1084,7 @@ async fn http_orphan_teardown_on_post_provision_failure() {
         expiry_ms: 60_000,
         runner: None,
         toolchain_digest: None,
+        agent: None,
     };
     let resp = router
         .oneshot(json_req(
@@ -1155,6 +1162,7 @@ async fn http_close_teardown_failure_is_fail_closed_and_retryable() {
         expiry_ms: 60_000,
         runner: None,
         toolchain_digest: None,
+        agent: None,
     };
     let acq_resp = router
         .clone()

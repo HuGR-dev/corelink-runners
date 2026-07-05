@@ -136,6 +136,7 @@ async fn acquire(h: &Harness, bearer: &str) -> String {
         expiry_ms: TTL_MS,
         runner: None,
         toolchain_digest: None,
+        agent: None,
     };
     let response = h
         .app

@@ -96,6 +96,7 @@ fn acquire_req() -> Request<Body> {
         expiry_ms: 60_000,
         runner: None,
         toolchain_digest: None,
+        agent: None,
     };
     Request::builder()
         .method("POST")

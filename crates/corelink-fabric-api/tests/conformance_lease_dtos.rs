@@ -121,6 +121,9 @@ fn acquire_request_conformance_vector_is_byte_exact() {
         toolchain_digest: Some(
             "blake3:3333333333333333333333333333333333333333333333333333333333333333".to_string(),
         ),
+        // Agent mode is default-off here (this vector exercises runner + toolchain);
+        // omitting it keeps AcquireRequest.json byte-identical (skip_serializing_if).
+        agent: None,
     };
 
     let re = pretty(&generated);

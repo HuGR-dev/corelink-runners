@@ -158,6 +158,7 @@ fn dtos_roundtrip_and_deny_unknown() {
             expiry_ms: 300_000,
             runner: None,
             toolchain_digest: None,
+            agent: None,
         },
         "AcquireRequest",
     );

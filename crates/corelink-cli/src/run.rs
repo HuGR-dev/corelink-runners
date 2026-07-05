@@ -42,6 +42,7 @@ fn acquire_body(image: &str, expiry_ms: u64) -> String {
         expiry_ms,
         runner: None,
         toolchain_digest: None,
+        agent: None,
     })
     .expect("AcquireRequest serializes")
 }

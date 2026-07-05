@@ -151,6 +151,7 @@ fn runner_acq_body() -> AcquireRequest {
             labels: vec!["corelink".to_string()],
         }),
         toolchain_digest: None,
+        agent: None,
     }
 }
 
@@ -162,6 +163,7 @@ fn check_acq_body(net_policy: &str) -> AcquireRequest {
         expiry_ms: 600_000,
         runner: None,
         toolchain_digest: None,
+        agent: None,
     }
 }
 
@@ -408,6 +410,7 @@ fn runner_acq_body_target(owner: &str, repo: &str) -> AcquireRequest {
             labels: vec!["corelink".to_string()],
         }),
         toolchain_digest: None,
+        agent: None,
     }
 }
 
