@@ -73,10 +73,10 @@ jobs:
       # PATH (`npm: command not found`, 2026-07-05). setup-node provisions a
       # deterministic Node into the runner tool-cache so `npm ci` (wrangler) works
       # without a machine-level install.
-      - name: Set up Node (wrangler needs npm)
+      - name: Set up Node (wrangler needs npm; wrangler requires Node >= 22)
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Install deps (wrangler)
         working-directory: deploy/cloudflare
