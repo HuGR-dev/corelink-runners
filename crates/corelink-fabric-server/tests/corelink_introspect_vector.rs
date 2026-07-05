@@ -227,8 +227,15 @@ fn introspect_vector_typed_strict_and_byte_exact() {
         Some("11111111-1111-4111-8111-111111111111")
     );
     assert_eq!(parsed[0].max_concurrency, Some(40), "pro case pins the cap");
+    assert_eq!(
+        parsed[0].max_vcpu_h,
+        Some(240),
+        "pro case pins the vCPU-h ceiling"
+    );
     assert_eq!(parsed[1].max_concurrency, None, "solo: no cap field");
+    assert_eq!(parsed[1].max_vcpu_h, None, "solo: no vCPU-h field");
     assert_eq!(parsed[2].max_concurrency, None, "enterprise: no cap field");
+    assert_eq!(parsed[2].max_vcpu_h, None, "enterprise: no vCPU-h field");
     assert!(!parsed[3].valid);
     assert_eq!(
         parsed[3].tenant_id, None,
