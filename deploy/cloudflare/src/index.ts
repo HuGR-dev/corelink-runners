@@ -128,9 +128,12 @@ export interface Env {
   // The Worker's OWN public base URL, injected into the container as
   // CLW_FABRIC_ENDPOINT so clw redeems its cred-ticket here at boot. Its PRESENCE
   // enables env-0 (a single-use ticket is injected instead of CLW_TOKEN — the raw
-  // PAT never enters the untrusted env). Absent ⇒ legacy CLW_TOKEN (pre-launch
-  // transition only). Set this to arm env-0. wrangler var.
+  // PAT never enters the untrusted env). Absent ⇒ FAIL-CLOSED (spawn COLD, no PAT)
+  // unless ALLOW_LEGACY_PAT_ENV="1" is explicitly set (non-prod escape hatch). Set
+  // this to arm env-0. wrangler var.
   SPAWN_WORKER_PUBLIC_URL?: string;
+  // Explicit non-prod escape hatch — see MintEnv.ALLOW_LEGACY_PAT_ENV. Never in prod.
+  ALLOW_LEGACY_PAT_ENV?: string;
 }
 
 // ── env-0 cred-stash Durable Object — the Worker-native single-use latch ──────
