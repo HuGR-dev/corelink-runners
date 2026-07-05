@@ -87,6 +87,15 @@ pub struct IntrospectBody {
     /// Per-tenant concurrency cap (additive at M2; absent until then).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrency: Option<u32>,
+    /// Per-tenant monthly vCPU-HOUR compute ceiling (server-side `runners_entitlement`
+    /// migration 0072; ASK-2 2026-07-05). A JSON integer in vCPU-hours. Consumed at
+    /// runtime by [`crate::corelink_plans::CoreLinkPlanStore`] (lenient `Value` parse);
+    /// this strict field is the conformance-lens tripwire. ASYMMETRY vs
+    /// `max_concurrency`: server-side an ABSENT `max_vcpu_h` walls-off (fail-closed),
+    /// whereas absent `max_concurrency` rejects/no-plan — the OMITTED-here cases stay
+    /// byte-exact via `skip_serializing_if`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_vcpu_h: Option<u32>,
 }
 
 /// The transport seam: POST to the introspection endpoint.
