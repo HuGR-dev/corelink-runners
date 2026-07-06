@@ -20,7 +20,9 @@
     // skips per-job authz). The scheduled() cron scans these for queued+labeled
     // jobs orphaned by a transient spawn failure and re-drives them. Dogfood
     // (this repo) is armed; add product repos only if they are trusted.
-    "RECONCILER_REPOS": "humangr-labs/corelink-runners",
+    // Canonical org name (matches the webhook payload's repository.full_name AND
+    // the REPO_INSTALLATION_MAP key, so the reconciler's WARM re-drive lookup hits).
+    "RECONCILER_REPOS": "HumanGuardrail/corelink-runners",
     // Inject the known installation_id for first-party repos (the repo webhook has
     // none) so the server-derived mint (#283) runs WARM without an App webhook.
     // dogfood: HumanGuardrail/corelink-runners → installation 144561227 → tenant
