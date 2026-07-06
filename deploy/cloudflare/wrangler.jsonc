@@ -115,21 +115,15 @@
       // Dockerfile + entrypoint.sh). Runs the in-container exec-server on port 8080
       // (C4); hydrates the toolchain at start from the injected TOOLCHAIN_DIGEST (C5).
       //
-      // DECOUPLED FROM THE RUNNER: unlike RunnerContainer, the check-host image has
-      // NEVER been pushed to the CF managed registry (no
-      // `corelink-spawn-worker-checkhostcontainer` there yet). The
-      // `.github/workflows/build-cf-container-images.yml` CI workflow CREATES it on
-      // its first run. Until that first push exists, pointing this at a non-existent
-      // registry image would BREAK `wrangler deploy`, so check-host stays on its
-      // Dockerfile for now (Docker is still required to deploy THIS container until
-      // the first CI push lands).
-      //
-      // POST-FIRST-PUSH — swap the "image" line below for the registry ref printed
-      // in the CI job summary, e.g. (prefer the @sha256 form for an immutable pin):
-      //   "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-checkhostcontainer:<FILL-AFTER-FIRST-PUSH>",
-      // at which point a local `wrangler deploy` becomes fully Docker-free.
+      // FIRST PUSH LANDED (2026-07-06): the check-host image is built + pushed to the
+      // CF managed registry (W6 unblocked — clw v0.1.5 with --manifest-digest, base
+      // ubuntu:24.04 for the GLIBC_2.39 floor, exec-server built musl). Pinned by
+      // immutable @sha256 digest (X4) → `wrangler deploy` is now Docker-free for this
+      // container too. Rebuild + re-pin via the build-cf-container-images workflow.
+      // NOTE: live-flip to prod is still separately gated (real toolchain snapshot +
+      // owner go) — deploying the app just moves it out of the stuck "provisioning".
       "class_name": "CheckHostContainer",
-      "image": "../check-host/Dockerfile",
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-checkhostcontainer@sha256:3b694bc66f57dc910b37d11ddab7a933c65559292a48efa1b8457db8a92bd1ce",
       "instance_type": "standard-4",
       "max_instances": 2
     }
