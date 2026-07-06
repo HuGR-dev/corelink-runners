@@ -52,6 +52,7 @@ import {
   releaseTenantSlot,
   decideRedeem,
   parseReconcilerRepos,
+  installationIdForRepo,
   listOrphanRunnerJobs,
   RECONCILE_MIN_AGE_MS,
   type ContainerEnvResult,
@@ -122,6 +123,13 @@ export interface Env {
   // queued+labeled+runnerless jobs to re-drive. Absent ⇒ the reconciler is OFF.
   // Cold re-spawn skips per-job authz, so ONLY trusted repos belong here.
   RECONCILER_REPOS?: string;
+  // repo_full_name → installation_id JSON map. A plain *repo* webhook payload has
+  // no `installation.id` (only a GitHub *App* webhook does), so the server-derived
+  // mint (#283) can't derive the tenant and the runner spawns COLD. For known
+  // first-party repos we inject the installation_id from this map so the mint runs
+  // WARM (server derives the tenant) without requiring an App webhook. e.g.
+  // {"HumanGuardrail/corelink-runners":"144561227"}. Absent/unmatched ⇒ COLD.
+  REPO_INSTALLATION_MAP?: string;
   // ── env-0 (cred-ticket) — keep the CAS PAT OUT of the untrusted container env ──
   // The single-use stash latch (one DO instance per lease_id = GH jobId).
   CRED_STASH: DurableObjectNamespace<CredStashDO>;
@@ -708,12 +716,19 @@ export default {
       // spawn (the only thing the 400 actually protected against). Server-derived
       // tenant + env-0 cache-warm require the *App* webhook (which carries
       // installation.id); until that's wired, repo-webhook spawns are COLD.
-      const installationId =
-        evt.installation?.id != null ? String(evt.installation.id) : "";
+      // installation.id comes only on App-webhook deliveries. On a repo webhook it
+      // is absent; inject the known installation_id for first-party repos from
+      // REPO_INSTALLATION_MAP so the server-derived mint (#283) runs WARM. If the
+      // repo isn't mapped, installationId stays "" ⇒ the mint is skipped downstream
+      // and the runner spawns COLD (fail-open, north star — never a 400).
+      let installationId = evt.installation?.id != null ? String(evt.installation.id) : "";
+      if (!installationId) {
+        installationId = installationIdForRepo(env.REPO_INSTALLATION_MAP, repo);
+      }
       if (env.CORELINK_RUNNER_MINT_AUTH_KEY && !installationId) {
         console.log(
-          `no installation.id in webhook payload (repo webhook, not App) for job ${jobId}: ` +
-            `spawning COLD (no server-derived tenant / no cache-warm)`,
+          `no installation.id (repo webhook, repo ${repo} not in REPO_INSTALLATION_MAP) for job ` +
+            `${jobId}: spawning COLD (no server-derived tenant / no cache-warm)`,
         );
       }
       // ── Spawn idempotency (gap #2): claim this jobId BEFORE the expensive
