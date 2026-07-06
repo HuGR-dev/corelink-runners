@@ -70,8 +70,13 @@ runs:
 
         run_cold() { bash -c "$CL_RUN"; }
 
-        # Moat present? (CLW_* injected by the CoreLink autoscaler + clw on PATH)
-        if [ -n "${CLW_ENDPOINT:-}" ] && [ -n "${CLW_TOKEN:-}" ] && command -v clw >/dev/null 2>&1; then
+        # Moat present? (CLW_* injected by the CoreLink autoscaler + clw on PATH).
+        # Two credential shapes are accepted:
+        #   • CLW_TOKEN        — the raw CAS PAT (legacy direct injection), OR
+        #   • CLW_CRED_TICKET  — env-0: a single-use ticket that `clw run` redeems
+        #     at run time (CredentialSource, clw >= 0.1.4) for the CAS PAT, so the
+        #     raw PAT never sits in the container env. Either ⇒ the moat is present.
+        if [ -n "${CLW_ENDPOINT:-}" ] && { [ -n "${CLW_TOKEN:-}" ] || [ -n "${CLW_CRED_TICKET:-}" ]; } && command -v clw >/dev/null 2>&1; then
           export CLW_REF_DOMAIN="${CLW_REF_DOMAIN:-runner}"
           echo "corelink-memoize: moat present — memoizing via clw run"
           clw run "${input_args[@]}" "${env_args[@]}" -- bash -c "$CL_RUN"
