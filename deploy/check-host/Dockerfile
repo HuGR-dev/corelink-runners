@@ -10,10 +10,10 @@
 #   docker build -f deploy/check-host/Dockerfile \
 #     -t corelink-check-host:<tag> .
 #
-# X4 supply-chain posture: base image pinned by digest (debian:12-slim).
-# Pin re-verified 2026-07-06 via `docker buildx imagetools inspect debian:12-slim`
-# (the prior 90522eeb… digest was GC'd from the registry → build "not found").
-# Registry: docker.io/library/debian@sha256:...
+# X4 supply-chain posture: base image pinned by digest. Base is ubuntu:24.04
+# (glibc 2.39, same digest the runner image pins) — the clw v0.1.5 glibc build
+# REQUIRES GLIBC_2.39, which debian:12-slim (2.36) lacks (`/clw --version` →
+# 'GLIBC_2.39 not found'), so the check-host runtime must match the runner's base.
 
 # -----------------------------------------------------------------------------
 # Stage: clw-download (W6, 2026-07-06) — fetch + digest-verify clw v0.1.5 (the
@@ -23,7 +23,7 @@
 # end-to-end (minisign + real-binary sha) before pinning. glibc build (linux-gnu),
 # matching the debian:12-slim runtime — NOT musl.
 # -----------------------------------------------------------------------------
-FROM debian:12-slim@sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df AS clw-download
+FROM ubuntu:24.04@sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae77ff1dc54 AS clw-download
 ARG CLW_VERSION=0.1.5
 ARG CLW_SHA256=95a05db35e4e5be50a104acb7c30466ff7ec5f7a154403943aca24279b5d8bf2
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
@@ -39,12 +39,10 @@ RUN curl -fsSL \
 
 # -----------------------------------------------------------------------------
 # Stage: runtime
-# Using debian:12-slim (glibc, sh, ca-certs) — distroless-base was considered
-# but requires sh for the entrypoint; slim is the minimal option that provides
-# a real /bin/sh without a separate shell layer.
-# Pinned by digest for X4 supply-chain posture.
+# Using ubuntu:24.04 (glibc 2.39, sh, apt) — matches the runner image + satisfies
+# the clw v0.1.5 glibc floor (debian:12-slim's 2.36 was too old). Pinned by digest.
 # -----------------------------------------------------------------------------
-FROM debian:12-slim@sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df AS runtime
+FROM ubuntu:24.04@sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae77ff1dc54 AS runtime
 # clw needs TLS roots to reach CAS at runtime (C5 hydrate over HTTPS).
 RUN apt-get update -qq && \
     apt-get install -y --no-install-recommends ca-certificates && \
