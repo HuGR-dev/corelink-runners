@@ -111,14 +111,13 @@ jobs:
       # <dir> as BOTH the Dockerfile location and the context). Compile it for musl
       # (static → runs on debian:12-slim regardless of glibc version) and stage it
       # into the context before building the image.
-      - name: Set up Rust (exec-server, musl target)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-musl
-
       - name: Build corelink-check-exec-server (musl) into the check-host context
         run: |
           set -euo pipefail
+          # Add the musl std to WHICHEVER rustup/cargo is on the builder's PATH
+          # (the self-hosted builder has its own CARGO_HOME; a separate toolchain
+          # action adds the target to a DIFFERENT toolchain → E0463 can't find core).
+          rustup target add x86_64-unknown-linux-musl
           sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends musl-tools || \
             echo "::warning::musl-tools install failed (may already be present); continuing"
           cargo build -p corelink-check-exec-server --release --target x86_64-unknown-linux-musl
