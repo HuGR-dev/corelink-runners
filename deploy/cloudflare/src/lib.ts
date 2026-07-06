@@ -490,6 +490,23 @@ export function parseReconcilerRepos(csv: string | undefined): string[] {
     .filter((s) => s.includes("/"));
 }
 
+/**
+ * Look up a repo's installation_id from the REPO_INSTALLATION_MAP JSON. A repo
+ * webhook carries no `installation.id`; for known first-party repos we inject it
+ * so the server-derived mint (#283) runs WARM. Returns "" when the map is
+ * absent/malformed or the repo isn't listed (⇒ COLD, fail-open — never throws).
+ */
+export function installationIdForRepo(json: string | undefined, repoFullName: string): string {
+  if (!json || !repoFullName) return "";
+  try {
+    const map = JSON.parse(json) as Record<string, unknown>;
+    const v = map[repoFullName];
+    return typeof v === "string" ? v : typeof v === "number" ? String(v) : "";
+  } catch {
+    return "";
+  }
+}
+
 /** The subset of Env the reconciler's GitHub listing reads. */
 export interface ReconcilerEnv {
   GITHUB_MINT_TOKEN?: string;

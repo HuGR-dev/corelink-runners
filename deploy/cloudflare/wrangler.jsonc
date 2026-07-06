@@ -21,16 +21,20 @@
     // jobs orphaned by a transient spawn failure and re-drives them. Dogfood
     // (this repo) is armed; add product repos only if they are trusted.
     "RECONCILER_REPOS": "humangr-labs/corelink-runners",
-    // ── env-0 ARMED (2026-07-05) ─────────────────────────────────────────────
-    // Precondition met: the runner image is now on clw v0.1.4 (#292), which
-    // redeems the cred-ticket (CredentialSource, clw PR #165). SPAWN_WORKER_PUBLIC_URL
-    // is the Worker's OWN public base, injected as CLW_FABRIC_ENDPOINT so clw redeems
-    // its single-use cred-ticket at boot — the raw CAS PAT never enters the untrusted
-    // container. Its PRESENCE flips the autoscaler from CLW_TOKEN-in-env to
-    // ticket-in-env. Exit test: an env dump inside a live lease shows NO PAT AND the
-    // cache still hydrates (clw redeems the ticket once; a replay is 410).
+    // Inject the known installation_id for first-party repos (the repo webhook has
+    // none) so the server-derived mint (#283) runs WARM without an App webhook.
+    // dogfood: HumanGuardrail/corelink-runners → installation 144561227 → tenant
+    // d863fafb (verified read-only by the clw coordinator). Key MUST match the
+    // webhook payload's repository.full_name exactly.
+    "REPO_INSTALLATION_MAP": "{\"HumanGuardrail/corelink-runners\":\"144561227\"}",
+    // ── env-0 ARMED (2026-07-06) — re-armed after the webhook COLD-fallback +
+    // installation_id injection (#297 + REPO_INSTALLATION_MAP) made the mint run
+    // WARM. The autoscaler injects a single-use CLW_CRED_TICKET (clw v0.1.4 redeems
+    // it at boot); the raw CAS PAT never enters the untrusted container.
     "SPAWN_WORKER_PUBLIC_URL": "https://corelink-spawn-worker.gmhelmold.workers.dev"
   },
+  // Worker logs for `wrangler tail` (were invisible during the stall triage).
+  "observability": { "enabled": true },
   // Per-spawn rate limit on /webhook (defense-in-depth vs a leaked webhook
   // secret): 30 queued+labeled spawns / 60s. Ignored events don't count.
   "ratelimits": [
@@ -88,7 +92,12 @@
       // This is the LIVE runner image confirmed via `wrangler containers info`.
       // To refresh: run the CI workflow, take the new tag/digest from its job
       // summary, and update this ref (prefer @sha256:<digest> for an immutable X4 pin).
+      // REVERTED to the known-good v0.1.1 image (2026-07-05 triage): the v0.1.4
+      // image (@sha256:1fdffe…) correlated with dogfood spawns no longer completing
+      // even COLD (env-0 disarmed) — so the image, not env-0, is the regression.
+      // Re-pin the v0.1.4 digest only after a green spawn on a rebuilt image.
       // clw v0.1.4 image (#292 + #295 build), immutable @sha256 digest pin (X4).
+      // (Re-pinned 2026-07-06: the earlier stall was the webhook 400, not this image.)
       "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-runnercontainer@sha256:1fdffeaccbbfdeb9c917181acbc702d034beceb418c0e1d1a28f90e538ae1101",
       // standard-4 = 4 vCPU / 12 GiB / 20 GB disk — fits CI, clears the runner
       // disk floor (RUNNER_EPHEMERAL_STORAGE_FLOOR_MB).

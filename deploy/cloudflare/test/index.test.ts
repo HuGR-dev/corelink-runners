@@ -19,6 +19,7 @@ import {
   randomTicket,
   decideRedeem,
   parseReconcilerRepos,
+  installationIdForRepo,
   listOrphanRunnerJobs,
   type KvLike,
   type CredStashLike,
@@ -666,4 +667,19 @@ describe("acquireTenantSlot / releaseTenantSlot (per-tenant max_concurrency)", (
   it("releaseTenantSlot no-ops (no throw) with no KV bound", async () => {
     await expect(releaseTenantSlot(undefined, "t", "j1")).resolves.toBeUndefined();
   });
+});
+
+describe("installationIdForRepo (inject installation_id on repo webhooks)", () => {
+  const MAP = JSON.stringify({ "HumanGuardrail/corelink-runners": "144561227", "o/num": 999 });
+  it("returns the mapped installation_id for a known repo", () =>
+    expect(installationIdForRepo(MAP, "HumanGuardrail/corelink-runners")).toBe("144561227"));
+  it("coerces a numeric map value to string", () =>
+    expect(installationIdForRepo(MAP, "o/num")).toBe("999"));
+  it("returns '' for an unmapped repo (⇒ COLD)", () =>
+    expect(installationIdForRepo(MAP, "other/repo")).toBe(""));
+  it("returns '' when the map is absent", () =>
+    expect(installationIdForRepo(undefined, "HumanGuardrail/corelink-runners")).toBe(""));
+  it("returns '' (never throws) on malformed JSON", () =>
+    expect(installationIdForRepo("{not json", "HumanGuardrail/corelink-runners")).toBe(""));
+  it("returns '' for an empty repo name", () => expect(installationIdForRepo(MAP, "")).toBe(""));
 });
