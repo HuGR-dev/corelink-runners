@@ -106,6 +106,26 @@ jobs:
           echo "ref=${REF}" >> "${GITHUB_OUTPUT}"
           echo "Runner image pushed: ${REF}"
 
+      # The check-host image COPYs a prebuilt exec-server binary from its build
+      # context (deploy/check-host, since `wrangler containers build <dir>` uses
+      # <dir> as BOTH the Dockerfile location and the context). Compile it for musl
+      # (static → runs on debian:12-slim regardless of glibc version) and stage it
+      # into the context before building the image.
+      - name: Set up Rust (exec-server, musl target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Build corelink-check-exec-server (musl) into the check-host context
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends musl-tools || \
+            echo "::warning::musl-tools install failed (may already be present); continuing"
+          cargo build -p corelink-check-exec-server --release --target x86_64-unknown-linux-musl
+          cp target/x86_64-unknown-linux-musl/release/corelink-check-exec-server \
+             deploy/check-host/corelink-check-exec-server
+          ls -la deploy/check-host/corelink-check-exec-server
+
       - name: Build + push CheckHostContainer image
         id: checkhost
         working-directory: deploy/cloudflare

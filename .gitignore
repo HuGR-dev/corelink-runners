@@ -16,3 +16,4 @@ Cargo.lock.orig
 
 # wrangler local state
 .wrangler/
+deploy/check-host/corelink-check-exec-server
