@@ -29,15 +29,15 @@
     // d863fafb (verified read-only by the clw coordinator). Key MUST match the
     // webhook payload's repository.full_name exactly.
     "REPO_INSTALLATION_MAP": "{\"HumanGuardrail/corelink-runners\":\"144561227\"}",
-    // ── LEGACY warm (2026-07-06) — the shippable, reliable cache-warm path ────
-    // env-0 (SPAWN_WORKER_PUBLIC_URL) is DEFERRED: (1) an env-0 spawn adds a
-    // CRED_STASH write that made spawns less reliable (more waitUntil-killed claim
-    // leaks), and (2) the cred-ticket propagation to `clw run` is unconfirmed (the
-    // diagnostic couldn't catch a clean env-0 spawn — they stalled). Legacy warm
-    // injects CLW_TOKEN directly → reliable `[clw] cache hit`. Re-arm env-0 once
-    // both the spawn reliability and the ticket→clw propagation are resolved:
-    //   "SPAWN_WORKER_PUBLIC_URL": "https://corelink-spawn-worker.gmhelmold.workers.dev"
-    "ALLOW_LEGACY_PAT_ENV": "1"
+    // ── env-0 ARMED (2026-07-06) — no CAS PAT in the untrusted container ──────
+    // The root cause (single-use ticket consumed by the boot `clw hydrate`, starving
+    // the job's `clw run`) is fixed by the MULTI-USE lease-scoped cred-ticket (#307):
+    // both clw processes redeem in-process, so the raw PAT never lands in the env or
+    // on disk. Coordinator ACKed the security envelope (multi-use safe: the cred is a
+    // per-job, tenant-scoped `cas:rw` PAT — no escalation over the job; C2c keyspace-
+    // narrowing rides as an orthogonal Server-TL hardening). SPAWN_WORKER_PUBLIC_URL's
+    // presence flips the autoscaler from CLW_TOKEN-in-env to ticket-in-env.
+    "SPAWN_WORKER_PUBLIC_URL": "https://corelink-spawn-worker.gmhelmold.workers.dev"
   },
   // Worker logs for `wrangler tail` (were invisible during the stall triage).
   "observability": { "enabled": true },
