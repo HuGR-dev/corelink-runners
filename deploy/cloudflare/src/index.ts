@@ -159,24 +159,21 @@ export class CredStashDO extends DurableObject<Env> {
     await this.ctx.storage.setAlarm(expiresMs);
   }
 
-  // Single-use redeem. `{status, cred?}`: 200 (first valid), 401 (bad ticket),
-  // 410 (already redeemed / expired), 404 (never stashed). The single-use/expiry
-  // decision is the PURE `decideRedeem` (lib, unit-tested); this wrapper applies
-  // the `consume`/`wipe` it returns to strongly-consistent DO storage.
+  // MULTI-USE redeem (lease-scoped). `{status, cred?}`: 200 (live + correct ticket,
+  // every time), 401 (bad ticket), 410 (lease expired), 404 (never stashed). The
+  // runner needs the cred for BOTH its boot `clw hydrate` AND the job's `clw run`
+  // (corelink-memoize); a single-use latch was consumed by the first, starving the
+  // second. The cred is served on every redeem until the lease TTL expires; the
+  // decision is the PURE `decideRedeem` (lib, unit-tested), this wrapper only
+  // applies the `wipe` at expiry to strongly-consistent DO storage.
   async redeem(ticket: string): Promise<{ status: number; cred?: StashedCred }> {
     const rec = await this.ctx.storage.get<StashRecord>("rec");
-    const consumed = (await this.ctx.storage.get<boolean>("consumed")) ?? false;
-    const d = decideRedeem(rec, consumed, Date.now(), ticket);
+    const d = decideRedeem(rec, false, Date.now(), ticket);
     if (d.wipe) await this.ctx.storage.deleteAll();
-    if (d.consume) {
-      // Drop the secret, leave a tombstone so a 2nd redeem is 410 (not 404).
-      await this.ctx.storage.delete("rec");
-      await this.ctx.storage.put("consumed", true);
-    }
     return { status: d.status, cred: d.cred };
   }
 
-  // TTL cleanup — wipe an un-redeemed (or tombstoned) stash at expiry.
+  // TTL cleanup — wipe the stash at lease expiry (multi-use until then).
   async alarm(): Promise<void> {
     await this.ctx.storage.deleteAll();
   }
