@@ -10,7 +10,8 @@
 #     -t corelink-check-host:<tag> .
 #
 # X4 supply-chain posture: base image pinned by digest (debian:12-slim).
-# Pin verified 2026-06-28; re-pin on any base update via `docker pull debian:12-slim --platform linux/amd64`.
+# Pin re-verified 2026-07-06 via `docker buildx imagetools inspect debian:12-slim`
+# (the prior 90522eeb… digest was GC'd from the registry → build "not found").
 # Registry: docker.io/library/debian@sha256:...
 
 # -----------------------------------------------------------------------------
@@ -20,7 +21,7 @@
 # a real /bin/sh without a separate shell layer.
 # Pinned by digest for X4 supply-chain posture.
 # -----------------------------------------------------------------------------
-FROM debian:12-slim@sha256:90522eeb7ef8924d8e45f02e6a1e2dae15e36dc0737acaa68f72809cd12bbba3 AS runtime
+FROM debian:12-slim@sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df AS runtime
 
 # Documentary: exec-server listens on port 8080 (C4 defaultPort).
 # The container is reachable ONLY via the Worker's containerFetch (not public).
