@@ -28,14 +28,11 @@
 name: build-cf-container-images
 
 on:
+  # MANUAL-ONLY (2026-07-06): the push-on-paths trigger fired a heavy Docker image
+  # build on every wrangler.jsonc/Dockerfile merge, hammering the self-hosted
+  # builder. The image changes rarely; dispatch it explicitly when the runner
+  # Dockerfile actually changes (`gh workflow run build-cf-container-images.yml`).
   workflow_dispatch: {}
-  push:
-    branches: [main]
-    paths:
-      - 'deploy/runner/**'
-      - 'deploy/check-host/**'
-      - 'deploy/cloudflare/wrangler.jsonc'
-      - '.github/workflows/build-cf-container-images.yml'
 
 permissions:
   contents: read
