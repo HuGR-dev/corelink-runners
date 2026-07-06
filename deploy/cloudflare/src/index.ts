@@ -187,8 +187,14 @@ export class RunnerContainer extends Container<Env> {
   // standard-4; the GH-Actions agent is the image ENTRYPOINT (runner-direct, v0).
   // No inbound port — the runner dials OUT to GitHub (the GH-Actions agent is
   // the image entrypoint; runner-direct, v0). `defaultPort` is left unset.
-  // Orphan-leak backstop; the DO sleeps (and the container stops) after this.
-  sleepAfter = "45m";
+  // Orphan-leak backstop; the DO sleeps (and the container stops) after this
+  // IDLE window. Reduced 45m→15m (2026-07-06): a completed job is torn down
+  // immediately (teardownCompletedRunner), so sleepAfter only governs FAILED/stuck
+  // containers — at 45m those hold account container-instance capacity long enough
+  // to starve new spawns under load. 15m still comfortably exceeds any legit
+  // between-jobs idle (a runner is ephemeral/one-shot) while freeing capacity ~3×
+  // faster. A running job keeps the container active, so this never cuts a live job.
+  sleepAfter = "15m";
   // The runner needs egress (git clone, GH API, CAS hydration). ADR-0003 bounds
   // it (no-free-tier + scoped short-TTL PAT + ephemeral box).
   enableInternet = true;
