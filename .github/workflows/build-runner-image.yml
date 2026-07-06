@@ -7,12 +7,9 @@
 name: build-runner-image
 
 on:
+  # MANUAL-ONLY (2026-07-06): avoid a heavy Docker build on every Dockerfile merge.
+  # Dispatch explicitly when the runner image actually needs rebuilding.
   workflow_dispatch: {}
-  push:
-    branches: [main]
-    paths:
-      - 'deploy/runner/**'
-      - '.github/workflows/build-runner-image.yml'
 
 permissions:
   contents: read

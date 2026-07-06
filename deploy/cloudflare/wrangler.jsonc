@@ -27,11 +27,17 @@
     // d863fafb (verified read-only by the clw coordinator). Key MUST match the
     // webhook payload's repository.full_name exactly.
     "REPO_INSTALLATION_MAP": "{\"HumanGuardrail/corelink-runners\":\"144561227\"}",
-    // ── env-0 ARMED (2026-07-06) — re-armed after the webhook COLD-fallback +
-    // installation_id injection (#297 + REPO_INSTALLATION_MAP) made the mint run
-    // WARM. The autoscaler injects a single-use CLW_CRED_TICKET (clw v0.1.4 redeems
-    // it at boot); the raw CAS PAT never enters the untrusted container.
-    "SPAWN_WORKER_PUBLIC_URL": "https://corelink-spawn-worker.gmhelmold.workers.dev"
+    // ── env-0 vs legacy warm (2026-07-06) ────────────────────────────────────
+    // env-0 (SPAWN_WORKER_PUBLIC_URL) injects a CLW_CRED_TICKET instead of the raw
+    // PAT, but clw v0.1.4's `clw run` does NOT redeem the ticket ("missing token")
+    // → cache-warm falls to COLD. Until clw redeems the ticket, run the LEGACY warm
+    // path for dogfood: the WARM mint injects CLW_TOKEN directly, so `clw run` gets
+    // the cache. ALLOW_LEGACY_PAT_ENV="1" opts into the raw PAT in OUR OWN trusted
+    // dogfood container (acceptable first-party); env-0 (no-PAT) re-arms for
+    // untrusted workloads once clw redeems. env-0 is DISARMED here (SPAWN_WORKER_
+    // PUBLIC_URL commented) so buildContainerEnv takes the legacy branch.
+    //   "SPAWN_WORKER_PUBLIC_URL": "https://corelink-spawn-worker.gmhelmold.workers.dev"
+    "ALLOW_LEGACY_PAT_ENV": "1"
   },
   // Worker logs for `wrangler tail` (were invisible during the stall triage).
   "observability": { "enabled": true },
