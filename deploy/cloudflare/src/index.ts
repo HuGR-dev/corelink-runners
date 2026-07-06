@@ -696,14 +696,25 @@ export default {
       if (!repo) return json({ error: "no repository in payload" }, 400);
       // ── Multi-tenant runner-mint authorization inputs ────────────────────────
       // The server DERIVES the tenant from installation_id + repo_full_name (we no
-      // longer send owner_tenant). These are REQUIRED only when the runner-mint is
-      // configured (multi-tenant mode); legacy cold-spawn mode neither authorizes
-      // nor needs them. A missing installation_id in mint mode is a 400-class abort
-      // (NEVER a cold spawn under an unknown/unauthorized tenant).
+      // longer send owner_tenant). `installation.id` is present ONLY on GitHub
+      // *App* webhook deliveries — a plain *repo* webhook (this repo's autoscaler
+      // hook) NEVER includes it. #283 originally 400-rejected a queued event with
+      // no installation_id when the mint key was armed; on a repo webhook that
+      // rejects EVERY spawn (observed 2026-07-06: workflow_job.queued → 400, jobs
+      // never spawn). FAIL-OPEN TO COLD instead (the north star: slow, never
+      // broken). With installationId == "" the mint is skipped downstream
+      // (`buildContainerEnv` returns an empty overlay), so the runner spawns COLD
+      // — no tenant, no CAS, no cache-warm, and CRUCIALLY no wrong-tenant WARM
+      // spawn (the only thing the 400 actually protected against). Server-derived
+      // tenant + env-0 cache-warm require the *App* webhook (which carries
+      // installation.id); until that's wired, repo-webhook spawns are COLD.
       const installationId =
         evt.installation?.id != null ? String(evt.installation.id) : "";
       if (env.CORELINK_RUNNER_MINT_AUTH_KEY && !installationId) {
-        return json({ error: "no installation.id in payload (required for runner mint)" }, 400);
+        console.log(
+          `no installation.id in webhook payload (repo webhook, not App) for job ${jobId}: ` +
+            `spawning COLD (no server-derived tenant / no cache-warm)`,
+        );
       }
       // ── Spawn idempotency (gap #2): claim this jobId BEFORE the expensive
       // mint+spawn. A redelivered queued webhook (GitHub at-least-once) for the
