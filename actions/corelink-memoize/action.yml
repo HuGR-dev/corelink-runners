@@ -79,6 +79,9 @@ runs:
         if [ -n "${CLW_ENDPOINT:-}" ] && { [ -n "${CLW_TOKEN:-}" ] || [ -n "${CLW_CRED_TICKET:-}" ]; } && command -v clw >/dev/null 2>&1; then
           export CLW_REF_DOMAIN="${CLW_REF_DOMAIN:-runner}"
           echo "corelink-memoize: moat present — memoizing via clw run"
+          # env-0 redeem diagnostic (coordinator ask 2026-07-06): show what clw sees
+          # at its process env — WITHOUT leaking the single-use ticket (length only).
+          echo "corelink-memoize[env-0-check]: CLW_REF_DOMAIN=[${CLW_REF_DOMAIN:-}] CLW_CRED_TICKET_len=[${#CLW_CRED_TICKET}] CLW_LEASE_ID=[${CLW_LEASE_ID:-}] CLW_FABRIC_ENDPOINT_set=[$([ -n "${CLW_FABRIC_ENDPOINT:-}" ] && echo yes || echo no)] CLW_TOKEN_set=[$([ -n "${CLW_TOKEN:-}" ] && echo yes || echo no)]"
           clw run "${input_args[@]}" "${env_args[@]}" -- bash -c "$CL_RUN"
           rc=$?
           # clw exit contract: 125 = clw-INTERNAL error (NOT the command's verdict).
