@@ -306,7 +306,7 @@ describe("env-0 (cred-ticket): buildContainerEnv stashes the PAT, injects a tick
   });
 });
 
-describe("randomTicket / decideRedeem (env-0 single-use latch semantics)", () => {
+describe("randomTicket / decideRedeem (env-0 MULTI-USE lease-scoped semantics)", () => {
   it("randomTicket is 64 hex chars and unique", () => {
     const a = randomTicket();
     const b = randomTicket();
@@ -323,29 +323,31 @@ describe("randomTicket / decideRedeem (env-0 single-use latch semantics)", () =>
     ...over,
   });
 
-  it("200 + consume on the FIRST valid redemption", () => {
+  it("200 + cred on a valid redemption, NO consume (multi-use)", () => {
     const d = decideRedeem(rec(), false, NOW, "goodticket");
     expect(d.status).toBe(200);
     expect(d.cred).toEqual(CRED);
-    expect(d.consume).toBe(true);
     expect(d.wipe).toBeUndefined();
   });
 
-  it("410 on a 2nd redemption (record gone, consumed tombstone set)", () => {
-    const d = decideRedeem(undefined, true, NOW, "goodticket");
-    expect(d.status).toBe(410);
-    expect(d.cred).toBeUndefined();
+  it("200 AGAIN on a 2nd redemption while the lease is live (multi-use — NOT single-use)", () => {
+    // The runner redeems for BOTH the boot `clw hydrate` and the job's `clw run`;
+    // the cred is served every time until expiry.
+    const r = rec();
+    expect(decideRedeem(r, false, NOW, "goodticket").status).toBe(200);
+    const second = decideRedeem(r, false, NOW + 1, "goodticket");
+    expect(second.status).toBe(200);
+    expect(second.cred).toEqual(CRED);
   });
 
-  it("404 when never stashed (no record, no tombstone)", () => {
+  it("404 when never stashed (or already wiped at expiry)", () => {
     const d = decideRedeem(undefined, false, NOW, "goodticket");
     expect(d.status).toBe(404);
   });
 
-  it("401 on a wrong ticket — does NOT consume the single use", () => {
+  it("401 on a wrong ticket — no cred", () => {
     const d = decideRedeem(rec(), false, NOW, "WRONGticket");
     expect(d.status).toBe(401);
-    expect(d.consume).toBeUndefined();
     expect(d.cred).toBeUndefined();
   });
 

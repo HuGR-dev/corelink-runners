@@ -1,13 +1,14 @@
-// Integration tests for the env-0 single-use latch at the DO-wrapper + HTTP-route
+// Integration tests for the env-0 MULTI-USE (lease-scoped) cred stash at the DO-wrapper + HTTP-route
 // level (clw coordinator env-0 review must-fix #2, 2026-07-05). The PURE
 // `decideRedeem` is unit-tested in index.test.ts; here we drive the REAL
 // `CredStashDO.stash/redeem` methods against a strongly-consistent storage stub
-// (so the consume/wipe it applies is exercised end-to-end) AND the actual
+// (so the wipe-at-expiry it applies is exercised end-to-end) AND the actual
 // `POST /v1/leases/{id}/cas-cred` route through the worker fetch handler.
 //
 // The security claims under test:
-//   - 200 → 410 single-use: a stashed cred redeems EXACTLY once; a 2nd redeem is
-//     410 and returns NO cred (the PAT cannot be replayed).
+//   - MULTI-USE: a stashed cred redeems on every call while the lease is live (the
+//     runner needs it for both the boot clw hydrate AND the job clw run); 410 only
+//     once the lease expires. The PAT is never handed to the untrusted env/disk.
 //   - no-PAT-on-wrong-ticket: a wrong ticket is 401 with NO cred, and does NOT
 //     consume the single use (a subsequent correct redeem still succeeds).
 //
@@ -68,24 +69,23 @@ const CRED: StashedCred = {
 const TICKET = "a".repeat(64);
 const TTL_MS = 15 * 60 * 1000;
 
-describe("CredStashDO.redeem — single-use latch (must-fix #2, DO wrapper)", () => {
+describe("CredStashDO.redeem — MULTI-USE lease-scoped (DO wrapper)", () => {
   afterEach(() => vi.useRealTimers());
 
-  it("200 → 410: a stashed cred redeems exactly once, replay is 410 with NO cred", async () => {
+  it("MULTI-USE: a stashed cred redeems on EVERY call while the lease is live", async () => {
     const { doInst } = makeDO();
     await doInst.stash(TICKET, CRED, TTL_MS);
 
-    const first = await doInst.redeem(TICKET);
-    expect(first.status).toBe(200);
-    expect(first.cred).toEqual(CRED);
-
-    // Single-use: the 2nd redeem is a tombstone 410 and leaks NO cred.
-    const second = await doInst.redeem(TICKET);
-    expect(second.status).toBe(410);
-    expect(second.cred).toBeUndefined();
+    // The runner redeems for BOTH the boot `clw hydrate` AND the job's `clw run`
+    // (corelink-memoize); the cred is served every time until expiry.
+    for (let i = 0; i < 3; i++) {
+      const r = await doInst.redeem(TICKET);
+      expect(r.status).toBe(200);
+      expect(r.cred).toEqual(CRED);
+    }
   });
 
-  it("wrong ticket ⇒ 401 with NO cred, and does NOT consume the single use", async () => {
+  it("wrong ticket ⇒ 401 with NO cred; the correct ticket still redeems", async () => {
     const { doInst } = makeDO();
     await doInst.stash(TICKET, CRED, TTL_MS);
 
@@ -93,7 +93,7 @@ describe("CredStashDO.redeem — single-use latch (must-fix #2, DO wrapper)", ()
     expect(wrong.status).toBe(401);
     expect(wrong.cred).toBeUndefined(); // the PAT never leaks on a bad ticket
 
-    // The single use was NOT spent — the correct ticket still redeems.
+    // A bad ticket doesn't touch the record — the correct ticket still redeems.
     const right = await doInst.redeem(TICKET);
     expect(right.status).toBe(200);
     expect(right.cred).toEqual(CRED);
@@ -153,23 +153,24 @@ describe("POST /v1/leases/{id}/cas-cred — route + DO redeem (must-fix #2, rout
     ({ env } = makeEnv());
   });
 
-  it("200 returns the CAS PAT once, then 410 on replay (single-use through the route)", async () => {
+  it("200 returns the CAS PAT on EVERY redeem while the lease is live (multi-use through the route)", async () => {
     // Stash directly on the DO the route will resolve for this lease.
     await env.CRED_STASH.get(env.CRED_STASH.idFromName("job-1")).stash(TICKET, CRED, TTL_MS);
 
-    const ok = await worker.fetch(redeemReq("job-1", { ticket: TICKET }), env, {} as never);
-    expect(ok.status).toBe(200);
-    expect(await ok.json()).toEqual({
+    const expected = {
       cas_pat: "per-job-cas-pat",
       clw_endpoint: "https://corelink-api.humangr.com",
       clw_tenant: "srv-derived-tenant",
       clw_ref_domain: "runner",
-    });
+    };
+    const ok = await worker.fetch(redeemReq("job-1", { ticket: TICKET }), env, {} as never);
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual(expected);
 
-    const replay = await worker.fetch(redeemReq("job-1", { ticket: TICKET }), env, {} as never);
-    expect(replay.status).toBe(410);
-    const replayBody = (await replay.json()) as Record<string, unknown>;
-    expect(replayBody.cas_pat).toBeUndefined(); // no PAT on replay
+    // 2nd redeem (the job's clw run after the boot hydrate) still gets the cred.
+    const again = await worker.fetch(redeemReq("job-1", { ticket: TICKET }), env, {} as never);
+    expect(again.status).toBe(200);
+    expect(await again.json()).toEqual(expected);
   });
 
   it("wrong ticket ⇒ 401 with NO cas_pat, and the correct ticket still redeems", async () => {

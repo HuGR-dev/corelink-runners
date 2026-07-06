@@ -294,22 +294,28 @@ export interface StashRecord {
 
 /**
  * PURE redeem decision (unit-testable without a DO runtime — the DO is a thin
- * wrapper that applies `consume`/`wipe` to its storage). Mirrors fabricd's
- * handlers/cas_cred order: 200 first-valid (returns the cred, `consume` the latch),
- * 401 bad ticket (constant-time), 410 already-redeemed (tombstone) OR expired
- * (`wipe`), 404 never-stashed. A bad ticket does NOT consume — only a correct one
- * spends the single use.
+ * wrapper that applies `wipe` to its storage).
+ *
+ * MULTI-USE within the lease (2026-07-06): a live lease returns its cred on EVERY
+ * redeem — NOT single-use. Root cause it fixes: the runner has TWO clw processes
+ * that each need the cred (the boot `clw hydrate` + the job's `clw run` via
+ * corelink-memoize, the product path); a single-use ticket was consumed by the
+ * boot hydrate, starving the job → "missing token" → COLD. Each clw now redeems
+ * IN-PROCESS (the PAT never persists in the env or on disk — env-0's goal). The
+ * ticket stays lease-bound + short-lived (410 the moment the lease expires).
+ * Order: 200 (live + correct ticket, returns the cred), 401 bad ticket
+ * (constant-time), 410 expired (`wipe`), 404 never-stashed.
  */
 export function decideRedeem(
   rec: StashRecord | undefined,
-  consumedTombstone: boolean,
+  _consumedTombstone: boolean, // unused under multi-use; kept for wrapper compat
   nowMs: number,
   ticket: string,
-): { status: number; cred?: StashedCred; consume?: boolean; wipe?: boolean } {
-  if (!rec) return { status: consumedTombstone ? 410 : 404 };
+): { status: number; cred?: StashedCred; wipe?: boolean } {
+  if (!rec) return { status: 404 };
   if (nowMs > rec.expiresMs) return { status: 410, wipe: true };
   if (!safeEqual(ticket, rec.ticket)) return { status: 401 };
-  return { status: 200, cred: rec.cred, consume: true };
+  return { status: 200, cred: rec.cred }; // MULTI-USE: no consume — cred served until expiry
 }
 
 // AUTHORIZE the runner + build the cache-warm CLW_* overlay. Opt-in: only when the
