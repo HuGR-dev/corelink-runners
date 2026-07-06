@@ -1027,11 +1027,24 @@ export default {
         // claims, jobs queued with no runner, no self-heal). CLEAR any stale claim
         // first, then re-claim fresh (concurrent ticks still dedup on the fresh
         // claim). This turns "stuck forever" into "retry each tick until a spawn
-        // succeeds". COLD re-drive (no installation_id ⇒ empty overlay).
+        // succeeds".
+        //
+        // WARM re-drive (2026-07-06): use the installation_id from
+        // REPO_INSTALLATION_MAP (same as the webhook), so a reconciler-recovered
+        // job is WARM (cache-warm), not COLD — otherwise every job that fell to the
+        // reconciler silently lost cache-warm. RECONCILER_REPOS is a trusted
+        // first-party allowlist, so authorizing the mint on re-drive is safe. An
+        // unmapped repo ⇒ installationId "" ⇒ COLD (unchanged fallback).
+        const reInstallationId = installationIdForRepo(env.REPO_INSTALLATION_MAP, repo);
         await releaseSpawnClaim(env.RUNNER_JOB_PATS, jobId);
         if (await claimSpawn(env.RUNNER_JOB_PATS, jobId)) {
-          console.log(`reconciler re-driving orphaned job ${jobId} in ${repo}`);
-          ctx.waitUntil(driveSpawnGuarded(env, { jobId, repo, installationId: "", label }));
+          console.log(
+            `reconciler re-driving orphaned job ${jobId} in ${repo} ` +
+              `(${reInstallationId ? "WARM" : "COLD"})`,
+          );
+          ctx.waitUntil(
+            driveSpawnGuarded(env, { jobId, repo, installationId: reInstallationId, label }),
+          );
         }
       }
     }
