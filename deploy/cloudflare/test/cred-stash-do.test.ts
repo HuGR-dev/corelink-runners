@@ -196,3 +196,24 @@ describe("POST /v1/leases/{id}/cas-cred — route + DO redeem (must-fix #2, rout
     expect(r.status).toBe(400);
   });
 });
+
+describe("CredStashDO.stash — IDEMPOTENT per lease (spawn-reliability retries)", () => {
+  it("a 2nd stash for a live lease KEEPS + returns the first ticket (retries converge)", async () => {
+    const { doInst, storage } = makeDO();
+    const t1 = "a".repeat(64);
+    const t2 = "b".repeat(64);
+    const eff1 = await doInst.stash(t1, CRED, TTL_MS);
+    expect(eff1).toBe(t1);
+    // A retry (different proposed ticket) must NOT clobber — returns the first.
+    const eff2 = await doInst.stash(t2, { ...CRED, token: "other" }, TTL_MS);
+    expect(eff2).toBe(t1);
+    // The stored record still holds the FIRST ticket + cred (not overwritten).
+    const rec = storage.map.get("rec") as { ticket: string; cred: StashedCred };
+    expect(rec.ticket).toBe(t1);
+    expect(rec.cred).toEqual(CRED);
+    // And the first ticket still redeems.
+    const r = await doInst.redeem(t1);
+    expect(r.status).toBe(200);
+    expect(r.cred).toEqual(CRED);
+  });
+});

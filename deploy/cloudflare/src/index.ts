@@ -153,10 +153,19 @@ export interface Env {
 // the DO's own strongly-consistent store — the take is atomic (no CLW_TOKEN race).
 export class CredStashDO extends DurableObject<Env> {
   // Stash the PAT under a high-entropy ticket, with a self-cleaning TTL alarm.
-  async stash(ticket: string, cred: StashedCred, ttlMs: number): Promise<void> {
-    const expiresMs = Date.now() + ttlMs;
+  // IDEMPOTENT per lease: if a live stash already exists (an earlier/concurrent
+  // spawn attempt for this jobId — the spawn-reliability retries re-run env-0), the
+  // existing ticket is KEPT and returned, not overwritten with a fresh one. Returns
+  // the EFFECTIVE ticket to inject, so whichever container actually registers
+  // redeems a ticket the DO still recognizes.
+  async stash(ticket: string, cred: StashedCred, ttlMs: number): Promise<string> {
+    const existing = await this.ctx.storage.get<StashRecord>("rec");
+    const now = Date.now();
+    if (existing && now <= existing.expiresMs) return existing.ticket; // reuse — don't clobber
+    const expiresMs = now + ttlMs;
     await this.ctx.storage.put("rec", { ticket, cred, expiresMs });
     await this.ctx.storage.setAlarm(expiresMs);
+    return ticket;
   }
 
   // MULTI-USE redeem (lease-scoped). `{status, cred?}`: 200 (live + correct ticket,
