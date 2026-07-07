@@ -16,6 +16,15 @@ if [ -z "${TOOLCHAIN_DIGEST:-}" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# O7 hardening: cap the process count (ulimit -u) so a runaway CheckDef (fork
+# bomb / thread storm) cannot exhaust the container's PID table and starve the
+# exec-server. Inherited by clw hydrate and the exec-server + its children.
+# Best-effort — if the shell can't set it (unprivileged), continue; the microVM
+# boundary is the hard isolation, this is defense-in-depth.
+# ---------------------------------------------------------------------------
+ulimit -u 4096 2>/dev/null || echo "[check-host] warn: could not set ulimit -u (continuing)" >&2
+
+# ---------------------------------------------------------------------------
 # Hydrate the toolchain (C5).
 # clw reads CLW_ENDPOINT, CLW_TENANT, CLW_TOKEN from env (injected by fabric).
 # Do NOT echo any CLW_* or TOOLCHAIN_DIGEST values — they are secrets/digests.

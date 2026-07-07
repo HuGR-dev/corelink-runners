@@ -231,6 +231,10 @@ export class RunnerContainer extends Container<Env> {
   // every host is denied — the metadata denylist stays in place and "*" blankets
   // the rest. Lets an operator sever a misbehaving lease's network while keeping
   // the container alive for forensics, instead of tearing it down blind.
+  // CAVEAT (O7): this operates at the SDK's outbound-proxy layer — it denies
+  // HTTP(S) egress that traverses the proxy, but RAW SOCKETS bypass it (same
+  // limitation as the boot-time denylist above). For a hard sever, teardown()/
+  // destroy() is the fail-closed control; this is the keep-alive soft-cut.
   async cutEgress(): Promise<void> {
     await this.setDeniedHosts([...METADATA_DENYLIST, "*"]);
   }
