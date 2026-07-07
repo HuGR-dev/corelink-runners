@@ -271,7 +271,13 @@ export interface StashedCred {
  * under `ticket`, keyed by `leaseId`, self-cleaning after `ttlMs`.
  */
 export interface CredStashLike {
-  stash(leaseId: string, ticket: string, cred: StashedCred, ttlMs: number): Promise<void>;
+  // Returns the EFFECTIVE ticket: idempotent per lease — if a live stash already
+  // exists for `leaseId` (an earlier/concurrent spawn attempt for the same jobId),
+  // the existing ticket is kept and returned, NOT overwritten. This is what makes
+  // env-0 survive the spawn-reliability retries: every attempt's container is given
+  // the SAME ticket, so whichever container actually registers redeems a ticket the
+  // CRED_STASH DO still recognizes (a fresh ticket per attempt would orphan it).
+  stash(leaseId: string, ticket: string, cred: StashedCred, ttlMs: number): Promise<string>;
 }
 
 // The cred-ticket + stash live as long as the longest CI job (mirrors the PAT/JIT
@@ -347,11 +353,14 @@ export async function buildContainerEnv(
     // env-0 ON (stash + fabric endpoint configured): stash the PAT, inject a
     // single-use ticket — NEVER CLW_TOKEN. A stash failure spawns COLD (no leak).
     if (deps?.stash && deps?.fabricEndpoint) {
-      const ticket = randomTicket();
+      // The stash is idempotent per lease: it returns the EFFECTIVE ticket (the
+      // existing one if a prior spawn attempt for this jobId already stashed, else
+      // the fresh one). Inject whatever it returns so retries converge on one ticket.
+      let ticket: string;
       try {
-        await deps.stash.stash(
+        ticket = await deps.stash.stash(
           params.jobId,
-          ticket,
+          randomTicket(),
           { token: m.token, endpoint, tenant: m.tenant },
           CRED_TICKET_TTL_S * 1000,
         );
@@ -366,7 +375,7 @@ export async function buildContainerEnv(
         containerEnv: {
           CLW_ENDPOINT: endpoint,
           CLW_TENANT: m.tenant, // server-DERIVED, authoritative (NEVER wrangler's var)
-          CLW_CRED_TICKET: ticket, // single-use; redeemed once at clw boot
+          CLW_CRED_TICKET: ticket, // multi-use, lease-scoped; redeemed in-process by each clw
           CLW_LEASE_ID: params.jobId, // the redemption key (= GH jobId)
           CLW_FABRIC_ENDPOINT: deps.fabricEndpoint, // where clw redeems the ticket
           CLW_REF_DOMAIN: "runner",

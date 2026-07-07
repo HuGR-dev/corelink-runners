@@ -240,6 +240,7 @@ describe("env-0 (cred-ticket): buildContainerEnv stashes the PAT, injects a tick
     const stash: CredStashLike = {
       stash: async (leaseId, ticket, cred, ttlMs) => {
         stashed.push({ leaseId, ticket, cred, ttlMs });
+        return ticket; // idempotent stub: echo the effective ticket
       },
     };
     const r = await buildContainerEnv(ENV, PARAMS, {
