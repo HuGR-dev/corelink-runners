@@ -91,10 +91,11 @@ async fn main() -> anyhow::Result<()> {
     } else {
         // Report the exec/spawn backend the wiring ACTUALLY resolved, in the
         // SAME 4-way selection as `build_app_and_state` (server.rs): BOTH present
-        // ⇒ HYBRID (runner→Cloudflare, check-exec→Northflank, rota B); Cloudflare
-        // only ⇒ Cloudflare (runner-only); Northflank only ⇒ Northflank; neither
-        // ⇒ NoBox (every exec 503). Reporting the real selection means the log can
-        // never claim "execs will 503" while a substrate is actually wired.
+        // ⇒ HYBRID (runner + check-host → Cloudflare [rota A], plain-check →
+        // Northflank [rota B]); Cloudflare only ⇒ Cloudflare (runner + check-host);
+        // Northflank only ⇒ Northflank; neither ⇒ NoBox (every exec 503).
+        // Reporting the real selection means the log can never claim "execs will
+        // 503" while a substrate is actually wired.
         use corelink_fabric_server::cloud_exec::{CloudBackendStatus, cloud_backend_status};
         let nf_status = cloud_backend_status(|k| std::env::var(k).ok());
         let nf_wired = matches!(nf_status, CloudBackendStatus::Wired);
@@ -104,13 +105,14 @@ async fn main() -> anyhow::Result<()> {
             // hard backstop, so a WARN here does NOT hard-fail.
             Some(cf) => match cf.validate() {
                 Ok(()) if nf_wired => eprintln!(
-                    "exec backend: HYBRID (rota B) — runner→Cloudflare (url={}, disk={} MiB), \
-                     check-exec→Northflank",
+                    "exec backend: HYBRID (rota A/B) — runner + check-host → Cloudflare \
+                     (url={}, disk={} MiB), plain-check → Northflank",
                     cf.spawn_worker_url, cf.runner_storage_mb
                 ),
                 Ok(()) => eprintln!(
-                    "exec backend: Cloudflare substrate (url={}, disk={} MiB) — runner-only; \
-                     a check-exec lease fails closed at spawn (set NORTHFLANK_* to serve checks)",
+                    "exec backend: Cloudflare substrate (url={}, disk={} MiB) — runner + \
+                     check-host (rota A, check-exec on the moat); a PLAIN hermetic check fails \
+                     closed at spawn (set NORTHFLANK_* to serve plain checks)",
                     cf.spawn_worker_url, cf.runner_storage_mb
                 ),
                 Err(why) => {

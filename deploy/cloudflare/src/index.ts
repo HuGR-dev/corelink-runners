@@ -1,11 +1,16 @@
-// CoreLink spawn-Worker + Container DO (ADR-0008) — SKELETON.
+// CoreLink spawn-Worker + Container DO (ADR-0008).
 //
 // Cloudflare side of the frozen seam (docs/spec/cloudflare-spawn-worker-contract.md).
-// The Rust `CloudflareEngine` (corelink-cloud-engine) calls these three endpoints.
+// The Rust `CloudflareEngine` (corelink-cloud-engine) calls these endpoints:
+// runner spawn (/webhook, /v1/spawn), check-host spawn (/v1/spawn mode:"check"),
+// check-exec (/v1/exec, rota A), status/teardown/egress-cutoff, and the env-0
+// cred-ticket route (/v1/leases/{id}/cas-cred).
 //
-// ⚠️ UNTESTED scaffolding. Lines marked `UNVERIFIED:` depend on exact
-// @cloudflare/containers SDK behavior that must be confirmed against a live
-// account before this is trusted. See README.md "Design notes / wrinkles".
+// Test state: unit-tested against a mocked @cloudflare/containers SDK — the full
+// route surface incl. the native check-exec path (test/check-host.test.ts) and
+// the mint/env-0 surface (test/index.test.ts, test/cred-stash-do.test.ts). The
+// remaining gate is a LIVE-account smoke (SDK behavior against real Containers),
+// owner-gated at deploy — the mocks assert our contract, not Cloudflare's runtime.
 
 import { Container, getContainer } from "@cloudflare/containers";
 import { DurableObject } from "cloudflare:workers";

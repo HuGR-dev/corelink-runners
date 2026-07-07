@@ -17,10 +17,15 @@
 //! ledger oracle, the runner-mode admission guards, and the spawn→bind→teardown
 //! lifecycle are all the REAL fabric code; only the Worker HTTP hop is faked.
 //!
-//! v0 is runner-direct (ADR-0007): the Cloudflare backend's exec half is
-//! `NoBoxExec` (a runner lease never calls exec), so the lifecycle under test is
-//! `acquire → spawn → Held → close → teardown` — no post-spawn exec step. That is
-//! exactly what `cloudflare_backend_from_env` wires in production.
+//! A RUNNER lease is runner-direct (ADR-0007): it never calls exec, so the
+//! lifecycle under test is `acquire → spawn → Held → close → teardown` — no
+//! post-spawn exec step, and this runner-only harness wires a `NoBoxExec`
+//! placeholder for the (never-reached) exec half. In production
+//! `cloudflare_backend_from_env` now wires a CF-native `EngineLeasedExec` over
+//! `CloudflareEngine` (rota A — a check-host lease execs on the moat), but a
+//! RUNNER lease never reaches it, so the runner lifecycle proven here is
+//! identical either way. Check-host exec routing is proven in
+//! `cloud_exec::tests` + `hybrid_flip_e2e`.
 //!
 //! ## What is proven here
 //!  - **Happy path:** a RUNNER acquire over the HTTP API drives a real
@@ -30,9 +35,10 @@
 //!    `POST /v1/teardown` for that handle and releases the binding.
 //!  - **Fail-closed:** a non-2xx spawn ⇒ the HTTP acquire fails CLOSED (503),
 //!    0 slots reserved on the ledger, and NO phantom binding in the registry.
-//!  - **Selection:** the `select_backend` oracle (public) confirms the rota B
-//!    order: both ⇒ Hybrid (runner→CF, check→NF); CF only ⇒ Cloudflare; NF only
-//!    ⇒ Northflank; else off — the composition-root decision routing to F1.
+//!  - **Selection:** the `select_backend` oracle (public) confirms the rota A/B
+//!    order: both ⇒ Hybrid (runner + check-host → CF, plain-check → NF); CF only
+//!    ⇒ Cloudflare; NF only ⇒ Northflank; else off — the composition-root
+//!    decision routing to F1.
 //!
 //! ## What is NOT exercised here (and why)
 //!  - `cloudflare_backend_from_env` is env-driven (reads the REAL process env via

@@ -182,3 +182,43 @@ seams for toolchain materialization), NOT a multi-day additive WP. **Until then,
 Northflank, already shipped + tested) is the correct architecture** — Northflank Jobs DO run the lease's
 arbitrary per-job image, so memo correctness holds there. Rota A is re-classified from "deferred additive"
 to "owner+cross-TL architecture decision" (the toolchain-hydration subsystem).
+
+## Addendum 2026-07-07 — rota A: native CF check-exec is SHIPPED (check-host provisions AND execs on Cloudflare)
+
+> Status: **Accepted / implemented** (Runners TL, owner-delegated campaign "Rota A — native Cloudflare
+> check-exec"). Supersedes the 2026-06-26 "deferred end-state" classification above for the CHECK-HOST
+> case. Rota B (plain checks on Northflank) stays as the fallback for checks that do not carry a
+> toolchain digest.
+
+**What unblocked it.** The 2026-06-26 blocker was image-model + toolchain identity: a CF container runs a
+deploy-time FIXED image, so a check needs its real toolchain **materialized at start**. That
+toolchain-hydrating **check-host** subsystem was subsequently built: a dedicated `CheckHostContainer`
+(spawn-Worker, `deploy/cloudflare/`) that hydrates the toolchain at start (keyed by `TOOLCHAIN_DIGEST`,
+R2-co-located CAS — the moat) and serves an in-container HTTP exec-server (`corelink-check-exec-server`,
+port 8080); `CloudflareEngine` spawns it in **check-mode** (`POST /v1/spawn {mode:"check", toolchain_digest}`)
+and execs it via `CloudflareEngine::exec_captured` (`POST /v1/exec`). All are digest-pinned (X4) and
+fail-closed. **The memo identity is preserved** because the toolchain the check runs against is the one the
+`TOOLCHAIN_DIGEST` names (materialized at start), not a substituted fixed image — the correctness objection
+that forced rota B does not apply to the check-host model.
+
+**The final seam wired (this campaign).** Provisioning already routed a check-host lease
+(`!allow_egress` + `TOOLCHAIN_DIGEST`, `is_check_host_spec`) to the Cloudflare sub-provisioner, but the
+Hybrid composition wired a SINGLE Northflank exec — so a check-host box spawned on CF would have exec'd
+against Northflank (a handle mismatch). Fixed by making the exec fork the SAME way as provisioning:
+
+- `HybridLeasedExec` (`cloud_exec.rs`) dispatches a lease's `exec_captured_for` to the engine that
+  provisioned it, reading the SAME route table `HybridBoxProvisioner` records
+  (`HybridBoxProvisioner::with_paired_exec` wires the pair over one shared route table + one registry):
+  check-host → Cloudflare (`/v1/exec`, the moat), plain-check → Northflank, runner → fail-closed
+  (runner-direct, never execs), no-route → fail-closed.
+- `cloudflare_backend_from_env` now wires a CF-native `EngineLeasedExec` (was `NoBoxExec`), so the
+  **Cloudflare-only** backend also serves check-host leases (a plain hermetic check still fails closed at
+  spawn — no Northflank).
+
+**Invariant restored:** *exec-engine == spawn-engine, per lease.* **DEFAULT-OFF preserved:** absent a
+`toolchain_digest` at acquire, no `TOOLCHAIN_DIGEST` is injected, every check is a plain check → Northflank
+(byte-identical to rota B). Proven by `cloud_exec::tests` (exec dispatch: check-host→CF, plain→NF,
+runner/unknown→fail-closed) + `hybrid_flip_e2e` (check-host acquire routes provisioning to CF, not the
+check sub) + the spawn-Worker suite (`deploy/cloudflare/test/`, 100 tests incl. the full check-exec
+surface). **Remaining gate:** a live-account smoke (SDK behavior against real Containers) — owner-gated at
+deploy.
