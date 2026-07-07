@@ -108,7 +108,14 @@
       // standard-4 = 4 vCPU / 12 GiB / 20 GB disk — fits CI, clears the runner
       // disk floor (RUNNER_EPHEMERAL_STORAGE_FLOOR_MB).
       "instance_type": "standard-4",
-      "max_instances": 2
+      // O7 hardening (2026-07-06): raised 2 → 6. At max_instances=2 the cap
+      // saturated the moment 2 idle-but-healthy warm instances lingered (sleepAfter
+      // not yet reaped) — each job is a distinct DO → distinct container, so a new
+      // spawn needs a fresh instance and the 2-cap blocked it (root cause of the
+      // spawn STALL: health showed active=0/assigned=0/healthy=2). 6 gives spawn
+      // headroom past leaked idle instances and lets per-tenant fairness bind before
+      // the account ceiling. The account has ample room (PAYG, ~4 live total).
+      "max_instances": 6
     },
     {
       // CF-native check-host (campaign B). Build context = deploy/check-host (its
@@ -125,7 +132,9 @@
       "class_name": "CheckHostContainer",
       "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-checkhostcontainer@sha256:3b694bc66f57dc910b37d11ddab7a933c65559292a48efa1b8457db8a92bd1ce",
       "instance_type": "standard-4",
-      "max_instances": 2
+      // O7 hardening: raised 2 → 4 (same leaked-idle saturation risk as the runner
+      // container; check-host is not yet live-flipped, so 4 is ample headroom).
+      "max_instances": 4
     }
   ]
 
