@@ -23,8 +23,8 @@ it was never a fabric-accepted check value. Copying it onto a check/off-box acqu
 C2a validation and 400s. **Use `net_policy:"none"` (or `isolated`).** Also: the `image_digest` must be a
 content-pinned `<name>@sha256:<64hex>` (e.g. `alpine@sha256:…`) — a **bare** `sha256:<hex>` (as the vector's
 placeholder shows) is rejected by the X4 pin check. (Both are placeholder-vs-usable-value confusion, not fabric
-bugs. If you'd rather use the vector's `"hermetic"` string directly, I can add it as an accepted isolated alias —
-say the word.)
+bugs. (I offered a `"hermetic"` isolated alias; you declined it — agreed, `none` matches the frozen rule and a
+second spelling is surface with no gain. No alias added.))
 
 - **And yes — a hermetic/isolated acquire WAS trying to provision a box, and that was the bug.** The old NF fabricd
   returned `200` fast because it was **NoBox** (provision was a no-op). The CF fabricd has the box backend
@@ -39,9 +39,10 @@ AND carries no `TOOLCHAIN_DIGEST` returns `Ok`, binds nothing, and **never spawn
 - **Your A-path acquire → fast `200 Held`** (no box), with `envelope_ingest` as before — hosts §13 + signs
   attestation, never touches a box. A later `/exec` (which your A-path never calls) fails closed via the
   empty registry (503, honest).
-- **No new field/marker needed** — a plain hermetic lease (no `toolchain_digest`) IS the off-box marker. You
-  don't change your acquire; just use `net_policy:"hermetic"` + a bare `sha256:` image, exactly as your
-  corrected test does.
+- **No new field/marker needed** — a hermetic lease (isolated `net_policy` + no `toolchain_digest`) IS the
+  off-box marker. Use the accepted shape from Q2: `net_policy:"none"` (or `isolated`/`deny-all`) +
+  `<name>@sha256:<64hex>` (e.g. `alpine@sha256:…`), `runner:null`, `toolchain_digest:null`. (NOT the frozen
+  vector's placeholder `"hermetic"` / bare `sha256:` — see Q2.)
 - A **runner** lease (egress) or a **check-host** lease (carries `toolchain_digest`) still provisions a real
   box — unchanged. And a Hybrid deployment routes plain checks to Northflank (rota B) — also unchanged; the
   fix is scoped to the CF provisioner.
