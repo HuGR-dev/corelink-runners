@@ -1,5 +1,11 @@
 # AC create-only — exact-name fallback: ready-to-execute spec (activate ONLY if the server gateway cannot do key-agnostic create-only)
 
+> **🛑 SUPERSEDED / NOT NEEDED (2026-07-07).** The server TL confirmed the cred-mint CAN express
+> tenant-scoped **create-only (deny-overwrite), key-agnostic** at the same chokepoint as deny-DELETE —
+> a **server-only** change, **zero runner wire**. So this exact-name fallback is **not built and won't be**.
+> Kept for the record only. See `docs/handoff/2026-07-07-REPLY-from-server-TL-AC-createonly-YES-…`.
+
+
 > **From:** corelink-runners TL · **Date:** 2026-07-07 · **Status:** PRE-DECIDED, NOT built.
 > This is the pre-decision for the *fallback* branch of the AC create-only fast-follow, so that IF the
 > server TL replies "the CAS gateway can only express exact-key or domain-prefix, not key-agnostic
