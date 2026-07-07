@@ -43,6 +43,23 @@ curl -s $HOST/v1/attestation/key              # → key_id faa5b7726ccd2c52 (the
 Then hand `$HOST` to the hugit TL as `HUGIT_RUNNER_HOST` + the spawn/lease PAT
 (`HUGIT_RUNNER_PAT`), per the frozen Seam 1.
 
+## Known limit — single-flight singleton (scaling path: multi-instance)
+
+The control plane runs as ONE container (`max_instances: 1` + a fixed DO id
+`SINGLETON` in `src/index.ts`), so all `/v1` traffic serializes through one
+instance. A **burst of box-provisioning acquires** (runner / check-host — each a
+`POST /v1/spawn` bounded to the engine's 30s HTTP timeout) can therefore slow /
+briefly wedge the plane, including `/v1/health` (the 2026-07-07 acquire-storm
+incident). Mitigations in place: (a) **off-box leases provision no box**
+(`CloudflareBoxProvisioner` admits a plain-hermetic spec NO-BOX — the incident's
+actual trigger), and (b) every provision HTTP call is timeout-bounded (30s), so
+a hang is never indefinite. **Scaling path (not yet done):** the singleton was
+required only by the in-memory ledger; now that the **pg ledger is armed**
+(`DATABASE_URL` present → cross-instance cap-safe via the advisory lock), the
+plane CAN run multiple instances — remove the fixed DO id (route per-request /
+round-robin) + raise `max_instances`. This is a tracked scaling enhancement to do
+**before rota-A carries real check-host bursts**; it is a known limit, not debt.
+
 ## Boxes (checkpoint B+ — when wiring real per-job metrics)
 
 Until a box backend is wired the lease/§13/attestation surface is live but `exec`

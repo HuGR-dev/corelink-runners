@@ -15,12 +15,19 @@ use corelink_runners_contracts::RunnerLease;
 
 /// Network policy semantics understood by the v0 runner.
 ///
-/// C2a's isolation contract requires an **isolated network namespace**. The
-/// only v0 policy that satisfies "leaves nothing / fully isolated" is `none`
-/// (no network device). Any other policy name is rejected as out of scope for
-/// C2a (egress policies are a later, broker-mediated concern).
+/// C2a's isolation contract requires an **isolated network namespace**. These
+/// v0 policy names all denote "leaves nothing / fully isolated" (no network
+/// device): `none` · `isolated` · `deny-all` · `hermetic` · `""`. `hermetic` is
+/// accepted because it is the natural name callers reach for (and the string the
+/// frozen `AcquireRequest.json` example carries) — treating it as an isolated
+/// alias avoids a confusing 400 on a value that plainly means "no network". Any
+/// other policy name is rejected as out of scope for C2a (egress policies are a
+/// later, broker-mediated concern).
 fn requires_no_network(net_policy: &str) -> bool {
-    matches!(net_policy, "none" | "isolated" | "deny-all" | "")
+    matches!(
+        net_policy,
+        "none" | "isolated" | "deny-all" | "hermetic" | ""
+    )
 }
 
 /// An engine-agnostic, per-job container spec derived from a [`RunnerLease`].
@@ -520,6 +527,28 @@ mod tests {
         assert!(
             !spec.run_on_create,
             "check lease is fabric-driven, not run-on-create"
+        );
+    }
+
+    /// The accepted isolated net_policy names all build a hermetic check spec —
+    /// including `hermetic` itself (the natural name + the frozen vector string),
+    /// which must NOT 400 (the 2026-07-07 acquire confusion). `egress-allow` (a
+    /// non-isolated name) is rejected.
+    #[test]
+    fn from_lease_accepts_all_isolated_policy_aliases_incl_hermetic() {
+        for p in ["none", "isolated", "deny-all", "hermetic", ""] {
+            let mut l = lease();
+            l.net_policy = p.to_string();
+            let spec = ContainerSpec::from_lease(&l, PIN)
+                .unwrap_or_else(|e| panic!("net_policy {p:?} must be accepted as isolated: {e}"));
+            assert!(spec.no_network, "net_policy {p:?} must be network-isolated");
+            assert!(!spec.allow_egress, "a check lease never grants egress");
+        }
+        let mut l = lease();
+        l.net_policy = "egress-allow".to_string();
+        assert!(
+            ContainerSpec::from_lease(&l, PIN).is_err(),
+            "a non-isolated policy name must still be rejected"
         );
     }
 
