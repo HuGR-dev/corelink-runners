@@ -522,6 +522,21 @@ impl<H: corelink_cloud_engine::HttpTransport + Send + Sync> BoxProvisioner
     for CloudflareBoxProvisioner<H>
 {
     fn provision(&self, lease_id: &str, spec: &ContainerSpec) -> Result<()> {
+        // OFF-BOX / plain-hermetic lease → admit NO-BOX (bind nothing, no spawn).
+        // A lease that is hermetic (`!allow_egress`) AND carries no `TOOLCHAIN_DIGEST`
+        // has no exec substrate on the CF backend — e.g. hugit's off-box §13 A-path,
+        // which hosts the lease + attestation but NEVER execs (it submits §13 off-box).
+        // CloudflareEngine::spawn fail-closes for such a spec (runner-only floor); on
+        // this CF-only backend that would 503 the acquire and BLOCK the single-flight
+        // control-plane singleton on a box the caller never uses (the 2026-07-07
+        // acquire-storm incident). Admit no-box instead: a later exec fails closed via
+        // the empty registry (503, honest), so nothing runs unattested. A RUNNER lease
+        // (`allow_egress`) or a CHECK-HOST lease (`TOOLCHAIN_DIGEST`) still provisions.
+        // Scoped to CloudflareBoxProvisioner — a Hybrid deployment routes plain checks
+        // to the Northflank sub (rota B), which is unaffected.
+        if !spec.allow_egress && !is_check_host_spec(spec) {
+            return Ok(());
+        }
         // Fail-closed: if spawn errors, nothing is bound (mirrors Northflank).
         let container = self.engine.spawn(spec)?;
         self.registry.bind(lease_id, container);
@@ -1617,6 +1632,63 @@ mod tests {
         assert!(
             registry.resolve("lease-B").is_none(),
             "a failed provision must leave the registry empty for the lease"
+        );
+    }
+
+    #[test]
+    fn cloudflare_provision_off_box_hermetic_admits_no_box() {
+        // The 2026-07-07 acquire-storm fix: a plain-hermetic (off-box) spec —
+        // `!allow_egress` and NO `TOOLCHAIN_DIGEST` — admits NO-BOX: provision
+        // returns Ok, binds nothing, and NEVER calls the engine/spawn-Worker (so
+        // it can't 503 or block the singleton on a box the caller never uses, e.g.
+        // hugit's off-box §13 A-path). The fake transport 500s if reached — proving
+        // spawn is skipped.
+        let registry = BoxRegistry::new();
+        let prov = cf_provisioner(500, "boom", registry.clone_handle());
+        let hermetic = ContainerSpec {
+            name: "offbox-a-path".to_string(),
+            image: "alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
+                .to_string(),
+            tmp_root: "/tmp/job".to_string(),
+            no_network: true,
+            allow_egress: false,
+            run_on_create: false,
+            path_set: vec![],
+            env: vec![], // no TOOLCHAIN_DIGEST → NOT a check-host lease
+        };
+        assert!(
+            prov.provision("lease-offbox", &hermetic).is_ok(),
+            "an off-box hermetic lease must admit no-box (Ok), never spawn/503"
+        );
+        assert!(
+            registry.resolve("lease-offbox").is_none(),
+            "no box is bound for an off-box lease"
+        );
+    }
+
+    #[test]
+    fn cloudflare_provision_check_host_still_spawns() {
+        // A check-host spec (hermetic + TOOLCHAIN_DIGEST) is NOT off-box — it MUST
+        // still spawn (the no-box short-circuit must not swallow it).
+        let registry = BoxRegistry::new();
+        let prov = cf_provisioner(200, r#"{"handle":"cf-ch"}"#, registry.clone_handle());
+        let check_host = ContainerSpec {
+            name: "check-host".to_string(),
+            image: "alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
+                .to_string(),
+            tmp_root: "/tmp/job".to_string(),
+            no_network: true,
+            allow_egress: false,
+            run_on_create: false,
+            path_set: vec![],
+            env: vec![("TOOLCHAIN_DIGEST".to_string(), "sha256:tool".to_string())],
+        };
+        prov.provision("lease-ch", &check_host)
+            .expect("check-host provisions");
+        assert_eq!(
+            registry.resolve("lease-ch").map(|c| c.name),
+            Some("cf-ch".to_string()),
+            "a check-host lease must still spawn + bind (not no-box)"
         );
     }
 

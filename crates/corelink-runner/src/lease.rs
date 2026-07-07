@@ -16,9 +16,11 @@ use corelink_runners_contracts::RunnerLease;
 /// Network policy semantics understood by the v0 runner.
 ///
 /// C2a's isolation contract requires an **isolated network namespace**. The
-/// only v0 policy that satisfies "leaves nothing / fully isolated" is `none`
-/// (no network device). Any other policy name is rejected as out of scope for
-/// C2a (egress policies are a later, broker-mediated concern).
+/// accepted isolated policy names are `none` · `isolated` · `deny-all` · `""`.
+/// (`hermetic` is deliberately NOT an alias — hugit uses `none`, which matches
+/// the frozen rule; a second spelling is surface with no gain, 2026-07-07.) Any
+/// other policy name is rejected as out of scope for C2a (egress policies are a
+/// later, broker-mediated concern).
 fn requires_no_network(net_policy: &str) -> bool {
     matches!(net_policy, "none" | "isolated" | "deny-all" | "")
 }
