@@ -57,13 +57,17 @@ fn acme() -> TenantId {
 /// `/v1/exec` → the scripted captured output, everything else (`/v1/status`,
 /// `/v1/teardown`) → a bare 200. Lets the test assert the CF `/v1/exec` fired.
 struct FakeWorker {
+    /// The status the fake returns for `/v1/exec` — 200 for the happy path, a
+    /// non-2xx (e.g. 502) to exercise the fail-closed law.
+    exec_status: u16,
     exec_body: String,
     requests: Mutex<Vec<String>>,
 }
 
 impl FakeWorker {
-    fn new(exec_body: &str) -> Self {
+    fn new(exec_status: u16, exec_body: &str) -> Self {
         Self {
+            exec_status,
             exec_body: exec_body.to_string(),
             requests: Mutex::new(Vec::new()),
         }
@@ -84,7 +88,7 @@ impl HttpTransport for FakeWorker {
             .unwrap_or_else(|p| p.into_inner())
             .push(req.url.clone());
         let (status, body) = if req.url.ends_with("/v1/exec") {
-            (200, self.exec_body.clone())
+            (self.exec_status, self.exec_body.clone())
         } else if req.url.ends_with("/v1/spawn") {
             (200, r#"{"handle":"cf-check-host-1"}"#.to_string())
         } else {
@@ -141,7 +145,7 @@ struct Harness {
     plain_exec_fired: Arc<AtomicBool>,
 }
 
-fn harness(exec_body: &str) -> Harness {
+fn harness(exec_status: u16, exec_body: &str) -> Harness {
     let store = Arc::new(StaticTokenStore::new([("pat-acme".to_string(), acme())]));
     let plans = StaticPlans::new([TenantPlan {
         tenant: acme(),
@@ -151,7 +155,7 @@ fn harness(exec_body: &str) -> Harness {
     }]);
     let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
 
-    let worker = Arc::new(FakeWorker::new(exec_body));
+    let worker = Arc::new(FakeWorker::new(exec_status, exec_body));
     let registry = BoxRegistry::new();
     let engine = Arc::new(CloudflareEngine::new(
         ArcWorker(Arc::clone(&worker)),
@@ -260,7 +264,7 @@ async fn check_host_exec_runs_on_cloudflare_v1_exec_end_to_end() {
         serde_json::to_string(stdout).unwrap(),
         serde_json::to_string(stderr).unwrap()
     );
-    let h = harness(&exec_body);
+    let h = harness(200, &exec_body);
 
     let lease_id = acquire_check_host(&h).await;
     // Provisioning already drove the CF check-mode spawn.
@@ -320,5 +324,63 @@ async fn check_host_exec_runs_on_cloudflare_v1_exec_end_to_end() {
     assert!(
         !h.plain_exec_fired.load(Ordering::SeqCst),
         "a check-host lease must NOT exec on the plain-check (Northflank) branch"
+    );
+}
+
+#[tokio::test]
+async fn check_host_exec_fails_closed_when_cloudflare_v1_exec_errors() {
+    // The fail-closed law (contract §3): if the CF `/v1/exec` returns a non-2xx,
+    // `CloudflareEngine::exec_captured` errors → `run_check` returns Err → the
+    // handler fails closed (503 `fail_closed`) and NEVER fabricates a CheckResult.
+    // A fabricated success here would let a check "pass" on an unreachable/erroring
+    // box — the exact hazard the law forbids.
+    let h = harness(502, r#"{"error":"exec-server 500"}"#);
+
+    let lease_id = acquire_check_host(&h).await;
+    assert!(
+        h.worker.saw("/v1/spawn"),
+        "check-host must spawn on CF first"
+    );
+
+    let exec_req = ExecRequest {
+        check_def: check_def(),
+        tree_hash: "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90".to_string(),
+    };
+    let resp = h
+        .app
+        .clone()
+        .oneshot(json_req(
+            "POST",
+            &paths::EXEC.replace("{lease_id}", &lease_id),
+            serde_json::to_vec(&exec_req).unwrap(),
+        ))
+        .await
+        .unwrap();
+
+    // 503 fail-closed — the CF exec error propagated, no result was attested.
+    assert_eq!(
+        resp.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "a CF /v1/exec failure must fail closed (503), never fabricate a CheckResult"
+    );
+    let body = body_json(resp).await;
+    assert_eq!(
+        body["code"].as_str(),
+        Some("fail_closed"),
+        "the refusal must carry the frozen fail_closed code"
+    );
+    assert!(
+        body.get("result").is_none(),
+        "no CheckResult may appear on a fail-closed exec"
+    );
+    // The exec was ATTEMPTED on the CF worker (proving the failure came from the
+    // CF path), and the plain-check branch never fired.
+    assert!(
+        h.worker.saw("/v1/exec"),
+        "the CF /v1/exec must have been attempted"
+    );
+    assert!(
+        !h.plain_exec_fired.load(Ordering::SeqCst),
+        "the plain-check branch must never fire for a check-host lease"
     );
 }
