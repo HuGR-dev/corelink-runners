@@ -216,6 +216,9 @@ describe("/v1/exec (C3)", () => {
     expect(port).toBe(8080);
     const sent = JSON.parse(await (req as Request).text());
     expect(sent).toEqual({ argv: ["sh", "-lc", "echo hello"], timeout_ms: 5000 });
+    // Track-C C2b: the relay presents the exec-server bearer (the same secret
+    // injected at spawn) so the in-container exec-server authorizes the call.
+    expect((req as Request).headers.get("authorization")).toBe(`Bearer ${EXEC_AUTH}`);
   });
 
   it("relays a non-zero exit_code (a failing check is a SUCCESSFUL relay, 200)", async () => {

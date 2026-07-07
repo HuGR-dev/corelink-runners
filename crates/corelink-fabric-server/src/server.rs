@@ -1137,28 +1137,38 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
     let state = if cfg.mock_exec {
         state.with_executor(Arc::new(crate::exec::MockLeasedExec))
     } else {
-        // ── ADR-0008 + rota B backend selection ───────────────────────────────
+        // ── ADR-0008 + rota A/B backend selection ─────────────────────────────
         // Probe BOTH substrates; the (cf, nf) presence pair selects the backend:
-        //  - both present  ⇒ HYBRID: runner leases → Cloudflare (the moat),
-        //    check-exec leases → Northflank (CloudflareEngine v0 is runner-only,
-        //    #198). The wired exec is Northflank's (only a check lease ever execs;
-        //    a runner is runner-direct). Both halves share ONE registry.
-        //  - Cloudflare only ⇒ Cloudflare backend (runner-only; a check fails
-        //    closed at spawn).
+        //  - both present  ⇒ HYBRID: runner leases → Cloudflare (the moat);
+        //    CHECK-HOST leases (hermetic + TOOLCHAIN_DIGEST) → Cloudflare too
+        //    (rota A — check-exec on the moat, R2-co-located); PLAIN hermetic
+        //    checks → Northflank (rota B). BOTH halves split by lease kind over
+        //    ONE shared registry + ONE shared route table, so a check-host box
+        //    execs on the SAME CF engine that spawned it (exec-engine ==
+        //    spawn-engine, per lease).
+        //  - Cloudflare only ⇒ Cloudflare backend (runner + check-host on CF; a
+        //    plain hermetic check fails closed at spawn).
         //  - Northflank only ⇒ Northflank backend (both lease kinds).
         //  - neither        ⇒ NoBox defaults (DEFAULT-OFF, S2 fail-closed at admit).
         // Each `*_backend_from_env` is a no-op (None) when its env is absent.
         let cf = crate::cloud_exec::cloudflare_backend_from_env(registry.clone_handle());
         let nf = crate::cloud_exec::cloud_backend_from_env(registry.clone_handle());
         match (cf, nf) {
-            // Rota B hybrid: discard CF's NoBox exec half; the exec is Northflank's
-            // (checks only). The runner half (CF) + check half (NF) share the
-            // registry, so the NF exec resolves the check box it spawned.
-            (Some((_cf_exec, cf_prov)), Some((nf_exec, nf_prov))) => {
-                let hybrid = std::sync::Arc::new(crate::cloud_exec::HybridBoxProvisioner::new(
-                    cf_prov, nf_prov,
-                ));
-                state.with_cloud_backend(nf_exec, hybrid)
+            // Rota A hybrid: split BOTH halves by lease kind. `cf_exec` is the
+            // CF-native EngineLeasedExec (check-host branch); `nf_exec` is
+            // Northflank's (plain-check branch). The provisioner routes
+            // check-host → CF / plain-check → NF and RECORDS the route; the
+            // HybridLeasedExec reads that SAME route table to dispatch exec to
+            // the matching engine. All four share the ONE registry.
+            (Some((cf_exec, cf_prov)), Some((nf_exec, nf_prov))) => {
+                // check_host_exec = cf_exec (CF-native, the moat); check_exec =
+                // nf_exec (Northflank, plain checks). The paired constructor wires
+                // the provisioner + exec over ONE shared route table.
+                let (hybrid_prov, hybrid_exec) =
+                    crate::cloud_exec::HybridBoxProvisioner::with_paired_exec(
+                        cf_prov, nf_prov, cf_exec, nf_exec,
+                    );
+                state.with_cloud_backend(hybrid_exec, hybrid_prov)
             }
             (Some((cf_exec, cf_prov)), None) => state.with_cloud_backend(cf_exec, cf_prov),
             (None, Some((nf_exec, nf_prov))) => state.with_cloud_backend(nf_exec, nf_prov),

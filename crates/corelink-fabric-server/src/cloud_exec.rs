@@ -499,11 +499,13 @@ pub fn cloud_backend_from_env(
 ///   maps `engine.is_alive`: `Ok(true)`→`Alive`, `Ok(false)`→`Dead`, `Err`
 ///   propagates (transient/unreachable is NOT death — fail-safe-alive).
 ///
-/// **v0 is runner-direct (ADR-0007):** the spawned container runs the
-/// GitHub-Actions agent via its image entrypoint, so there is no post-spawn
-/// `exec` step. The exec half wired alongside this provisioner is therefore
-/// [`NoBoxExec`](crate::exec::NoBoxExec) — a RUNNER lease never calls exec, and
-/// a CHECK lease correctly fails closed at exec via the empty registry.
+/// **Runner-direct + check-host (ADR-0007 / rota A):** a RUNNER container runs
+/// the GitHub-Actions agent via its image entrypoint, so there is no post-spawn
+/// `exec` step (a runner lease never execs). A CHECK-HOST lease DOES exec —
+/// [`cloudflare_backend_from_env`] wires the exec half as an
+/// [`EngineLeasedExec`] over the SAME [`CloudflareEngine`], so a check-host box
+/// this provisioner binds execs on Cloudflare (`POST /v1/exec`). A plain
+/// hermetic check never reaches exec — it fails closed at `spawn` here.
 pub struct CloudflareBoxProvisioner<H: corelink_cloud_engine::HttpTransport> {
     engine: Arc<CloudflareEngine<H>>,
     registry: BoxRegistry,
@@ -561,11 +563,17 @@ impl<H: corelink_cloud_engine::HttpTransport + Send + Sync> BoxProvisioner
 /// ADR-0008: Cloudflare is the DEFAULT compute substrate. When
 /// [`CloudflareConfig::from_env`] yields a config (both
 /// `CLOUDFLARE_SPAWN_WORKER_URL` and `CLOUDFLARE_SPAWN_AUTH_TOKEN` present),
-/// this returns BOTH halves of the backend:
-/// - exec → [`NoBoxExec`](crate::exec::NoBoxExec): v0 is runner-direct, so a
-///   runner lease NEVER calls exec (the container runs its entrypoint at spawn);
-///   a CHECK lease still fails closed at exec via the empty registry. This is
-///   not a footgun — it is the correct fail-closed posture for v0 runner-only.
+/// this returns BOTH halves of the backend, over ONE engine + the SHARED
+/// `registry`:
+/// - exec → [`EngineLeasedExec`] over [`CloudflareEngine`] (**rota A**): a
+///   RUNNER lease is runner-direct (its container runs the Actions agent at
+///   spawn) and NEVER calls exec; a CHECK-HOST lease (hermetic + carrying
+///   `TOOLCHAIN_DIGEST`) execs ON Cloudflare via
+///   [`CloudflareEngine::exec_captured`](corelink_cloud_engine::CloudflareEngine)
+///   (`POST /v1/exec`) — R2-co-located, the moat win. A PLAIN hermetic check
+///   (no `TOOLCHAIN_DIGEST`) fails closed at SPAWN inside
+///   [`CloudflareBoxProvisioner`] (`CloudflareEngine` does not serve it), so
+///   exec is never reached for it — no fabricated result.
 /// - provisioner → [`CloudflareBoxProvisioner`] over the SHARED `registry`.
 ///
 /// When this returns `None`, the composition root MUST keep both the
@@ -575,14 +583,19 @@ pub fn cloudflare_backend_from_env(
 ) -> Option<(Arc<dyn LeasedExec>, Arc<dyn BoxProvisioner>)> {
     let cfg = CloudflareConfig::from_env()?;
     let engine = Arc::new(CloudflareEngine::new(UreqTransport::new(), cfg));
-    // Runner-direct: no post-spawn exec. The exec half is NoBoxExec — a runner
-    // lease never calls it; a CHECK lease fails closed at exec (correct for v0).
-    let exec: Arc<dyn LeasedExec> = Arc::new(crate::exec::NoBoxExec);
+    // Rota A: the exec half is a CF-native EngineLeasedExec over the SAME engine
+    // and a SHARED registry handle, so a check-host box the provisioner binds is
+    // the box exec resolves. Runner leases never call it; check-host leases exec
+    // on Cloudflare (the moat). Fail-closed for an unbound lease (empty registry).
+    let exec: Arc<dyn LeasedExec> = Arc::new(EngineLeasedExec::new(
+        Arc::clone(&engine),
+        registry.clone_handle(),
+    ));
     let prov: Arc<dyn BoxProvisioner> = Arc::new(CloudflareBoxProvisioner::new(engine, registry));
     Some((exec, prov))
 }
 
-// ── HybridBoxProvisioner (rota B) ─────────────────────────────────────────────
+// ── HybridBoxProvisioner (rota A/B) ───────────────────────────────────────────
 
 /// Which sub-backend provisioned a given lease — the routing key the hybrid
 /// remembers so `teardown`/`probe` reach the SAME engine that `spawn`ed the box.
@@ -591,7 +604,7 @@ pub fn cloudflare_backend_from_env(
 /// cannot infer the owning engine from the registry binding alone — it records
 /// the route at `provision` time and replays it on teardown/probe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HybridRoute {
+pub(crate) enum HybridRoute {
     /// Runner lease (`spec.allow_egress == true`) → the runner sub-provisioner.
     Runner,
     /// Check-exec lease (`spec.allow_egress == false`) → the check sub-provisioner.
@@ -622,13 +635,20 @@ fn is_check_host_spec(spec: &ContainerSpec) -> bool {
 /// - **runner** lease (`allow_egress == true`) → `runner` sub-provisioner
 ///   (production: [`CloudflareBoxProvisioner`] — the moat substrate, co-located
 ///   with R2 for in-network cache hydration);
-/// - **check-exec** lease (`allow_egress == false`) → `check` sub-provisioner
-///   (production: [`NorthflankBoxProvisioner`] — `CloudflareEngine` v0 is
-///   runner-only and fails closed at spawn for a check spec, ADR-0008/#198).
+/// - **check-host** lease (`allow_egress == false` AND `spec.env` carries
+///   `TOOLCHAIN_DIGEST`, [`is_check_host_spec`]) → the SAME `runner` (Cloudflare)
+///   sub-provisioner, spawned in check-mode — **rota A**: check-exec on the moat;
+/// - **plain hermetic check** (`allow_egress == false`, NO `TOOLCHAIN_DIGEST`) →
+///   `check` sub-provisioner (production: [`NorthflankBoxProvisioner`] —
+///   `CloudflareEngine` does not serve a plain check, ADR-0008/#198).
 ///
-/// This is **rota B**: the killer's check-exec boxes run on Northflank while
-/// direct-CI runners keep the Cloudflare moat. (Rota A — a native CF check-exec
-/// endpoint — is the deferred end-state; this unblocks the killer without it.)
+/// **Rota A (native CF check-exec) is now LIVE**, not deferred: a check-host box
+/// both provisions AND execs on Cloudflare — the exec half is the paired
+/// [`HybridLeasedExec`] ([`with_paired_exec`](HybridBoxProvisioner::with_paired_exec)),
+/// which dispatches a check-host lease's exec to the CF engine. A plain hermetic
+/// check remains on Northflank (**rota B**) until it too carries a toolchain
+/// digest. DEFAULT-OFF: absent `toolchain_digest` at acquire, no `TOOLCHAIN_DIGEST`
+/// is injected, so every check is a plain check (byte-identical to rota B).
 ///
 /// `allow_egress` is the red-team-blessed discriminator: a runner lease is built
 /// only through `ContainerSpec::from_runner_lease` (egress granted), a check
@@ -647,7 +667,14 @@ fn is_check_host_spec(spec: &ContainerSpec) -> bool {
 pub struct HybridBoxProvisioner {
     runner: Arc<dyn BoxProvisioner>,
     check: Arc<dyn BoxProvisioner>,
-    routes: Mutex<HashMap<String, HybridRoute>>,
+    /// Shared with the wired [`HybridLeasedExec`] (rota A): the provisioner
+    /// RECORDS the route at `provision`; the exec READS it to dispatch a
+    /// check-host lease's exec to the CF engine and a plain-check lease's to
+    /// Northflank. Shared behind `Arc` so both halves see the same table over
+    /// the one shared [`BoxRegistry`]. See [`routes_handle`].
+    ///
+    /// [`routes_handle`]: HybridBoxProvisioner::routes_handle
+    routes: Arc<Mutex<HashMap<String, HybridRoute>>>,
 }
 
 impl HybridBoxProvisioner {
@@ -658,8 +685,41 @@ impl HybridBoxProvisioner {
         Self {
             runner,
             check,
-            routes: Mutex::new(HashMap::new()),
+            routes: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// A cloned handle to the shared route table, for building the matching
+    /// [`HybridLeasedExec`] (rota A). The exec reads the same routes this
+    /// provisioner records, so a check-host lease execs on the SAME engine that
+    /// spawned its box. Call AFTER `new`, BEFORE wrapping `self` in an `Arc`.
+    ///
+    /// Internal: the returned type names the private [`HybridRoute`]. External
+    /// callers use [`with_paired_exec`](HybridBoxProvisioner::with_paired_exec),
+    /// which returns type-erased handles.
+    pub(crate) fn routes_handle(&self) -> Arc<Mutex<HashMap<String, HybridRoute>>> {
+        Arc::clone(&self.routes)
+    }
+
+    /// Build the hybrid provisioner AND its matching [`HybridLeasedExec`] over
+    /// ONE shared route table (rota A) — the BLESSED way to wire the pair. The
+    /// provisioner routes `runner`/`check-host` → the runner sub (Cloudflare) and
+    /// `plain-check` → the check sub (Northflank); the returned exec dispatches
+    /// each lease's `exec_captured_for` to the engine that provisioned it
+    /// (`check_host_exec` for a check-host lease, `check_exec` for a plain check).
+    /// Callers never handle the internal route type — the pair is returned
+    /// type-erased and MUST be wired together (same shared registry upstream).
+    pub fn with_paired_exec(
+        runner: Arc<dyn BoxProvisioner>,
+        check: Arc<dyn BoxProvisioner>,
+        check_host_exec: Arc<dyn LeasedExec>,
+        check_exec: Arc<dyn LeasedExec>,
+    ) -> (Arc<dyn BoxProvisioner>, Arc<dyn LeasedExec>) {
+        let prov = Self::new(runner, check);
+        let routes = prov.routes_handle();
+        let exec: Arc<dyn LeasedExec> =
+            Arc::new(HybridLeasedExec::new(check_host_exec, check_exec, routes));
+        (Arc::new(prov) as Arc<dyn BoxProvisioner>, exec)
     }
 
     /// Look up the recorded route for a lease (poison-safe).
@@ -749,7 +809,98 @@ impl BoxProvisioner for HybridBoxProvisioner {
     }
 }
 
-// ── backend selection (ADR-0008 + rota B) ─────────────────────────────────────
+// ── HybridLeasedExec (rota A) ─────────────────────────────────────────────────
+
+/// The exec counterpart to [`HybridBoxProvisioner`]: routes a lease's
+/// `exec_captured_for` to the SAME engine that provisioned its box, using the
+/// route the provisioner recorded (shared table, [`routes_handle`]).
+///
+/// Rota B wired a single Northflank exec for every check — correct only while
+/// every check ran on Northflank. Rota A splits provisioning by lease kind (a
+/// check-host box runs on Cloudflare, the moat), so the exec MUST split the same
+/// way — else a check-host box (spawned on CF) would be exec'd against
+/// Northflank (a handle mismatch, fail-closed at best, wrong at worst). This
+/// type restores the invariant *exec-engine == spawn-engine*, per lease:
+/// - [`HybridRoute::CheckHost`] → `check_host` exec (CF: `POST /v1/exec`, moat);
+/// - [`HybridRoute::Check`]     → `check` exec (Northflank, rota B — unchanged);
+/// - [`HybridRoute::Runner`]    → **fail closed**: a runner lease is
+///   runner-direct and must never exec (reaching here is a wiring bug);
+/// - no recorded route          → **fail closed**: exec before/without provision
+///   (or an unknown lease) never fabricates a result.
+///
+/// Both sub-execs resolve their box from the ONE shared [`BoxRegistry`]; this
+/// type only decides WHICH engine, never touches the registry itself.
+///
+/// [`routes_handle`]: HybridBoxProvisioner::routes_handle
+pub struct HybridLeasedExec {
+    /// Cloudflare exec (`EngineLeasedExec<CloudflareEngine>` in prod) — serves
+    /// check-host leases on the moat.
+    check_host: Arc<dyn LeasedExec>,
+    /// Northflank exec (`EngineLeasedExec<NorthflankEngine>` in prod) — serves
+    /// plain hermetic checks (rota B).
+    check: Arc<dyn LeasedExec>,
+    /// The SAME route table [`HybridBoxProvisioner`] records into.
+    routes: Arc<Mutex<HashMap<String, HybridRoute>>>,
+}
+
+impl HybridLeasedExec {
+    /// Construct over the check-host exec (Cloudflare), the plain-check exec
+    /// (Northflank), and the shared route table obtained from
+    /// [`HybridBoxProvisioner::routes_handle`]. All three MUST come from the
+    /// same hybrid wiring (one shared registry + one shared route table).
+    ///
+    /// Internal: takes the private [`HybridRoute`] table. External callers use
+    /// [`HybridBoxProvisioner::with_paired_exec`], which wires the pair and
+    /// returns type-erased handles.
+    pub(crate) fn new(
+        check_host: Arc<dyn LeasedExec>,
+        check: Arc<dyn LeasedExec>,
+        routes: Arc<Mutex<HashMap<String, HybridRoute>>>,
+    ) -> Self {
+        Self {
+            check_host,
+            check,
+            routes,
+        }
+    }
+
+    /// Look up the recorded route for a lease (poison-safe, mirrors the
+    /// provisioner's accessor).
+    fn route_of(&self, lease_id: &str) -> Option<HybridRoute> {
+        self.routes
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(lease_id)
+            .copied()
+    }
+}
+
+impl LeasedExec for HybridLeasedExec {
+    fn exec_captured_for(&self, lease_id: &str, argv: &[&str]) -> Result<CmdOutput> {
+        match self.route_of(lease_id) {
+            // Check-host → the SAME CF engine that spawned the box (moat exec).
+            Some(HybridRoute::CheckHost) => self.check_host.exec_captured_for(lease_id, argv),
+            // Plain hermetic check → Northflank (rota B, unchanged).
+            Some(HybridRoute::Check) => self.check.exec_captured_for(lease_id, argv),
+            // A runner lease is runner-direct — it must NEVER exec. Reaching here
+            // means a runner lease was routed to the exec path: a wiring bug.
+            // Fail closed rather than dispatch a runner box to a check engine.
+            Some(HybridRoute::Runner) => bail!(
+                "lease {lease_id} is a RUNNER lease (runner-direct) and must never exec: \
+                 failing closed"
+            ),
+            // No route recorded: exec without a preceding provision, or an
+            // unknown lease. Never guess an engine — fail closed (mirrors the
+            // empty-registry posture in EngineLeasedExec).
+            None => bail!(
+                "no hybrid route recorded for lease {lease_id} (exec before provision or \
+                 unknown lease): failing closed"
+            ),
+        }
+    }
+}
+
+// ── backend selection (ADR-0008 + rota A/B) ───────────────────────────────────
 
 /// Which compute substrate the composition root selected.
 ///
@@ -854,6 +1005,10 @@ const _: fn() = || {
     >();
     assert_send_sync::<NorthflankBoxProvisioner<corelink_cloud_engine::UreqTransport>>();
     assert_send_sync::<CloudflareBoxProvisioner<corelink_cloud_engine::UreqTransport>>();
+    // Rota A: the hybrid provisioner + its exec counterpart are wired into the
+    // production composition root — both MUST be thread-safe.
+    assert_send_sync::<HybridBoxProvisioner>();
+    assert_send_sync::<HybridLeasedExec>();
 };
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -1228,6 +1383,137 @@ mod tests {
         );
     }
 
+    // ── HybridLeasedExec (rota A) routing ─────────────────────────────────────
+
+    /// A fake exec that tags its output so a test can assert WHICH sub-exec ran,
+    /// without any engine/registry/network. Records the lease ids it was asked to
+    /// exec for.
+    struct SpyLeasedExec {
+        tag: &'static str,
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl SpyLeasedExec {
+        fn new(tag: &'static str, calls: Arc<Mutex<Vec<String>>>) -> Self {
+            Self { tag, calls }
+        }
+    }
+
+    impl LeasedExec for SpyLeasedExec {
+        fn exec_captured_for(&self, lease_id: &str, _argv: &[&str]) -> Result<CmdOutput> {
+            self.calls
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(format!("{}:{}", self.tag, lease_id));
+            Ok(CmdOutput {
+                code: Some(0),
+                stdout: self.tag.to_string(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    /// Build a `HybridBoxProvisioner` + a matching `HybridLeasedExec` over the
+    /// SAME route table (as the composition root does), plus spy sub-provisioners
+    /// and spy sub-execs sharing one call log. Returns them for a routing assert.
+    fn hybrid_prov_and_exec(
+        calls: Arc<Mutex<Vec<String>>>,
+    ) -> (HybridBoxProvisioner, HybridLeasedExec) {
+        let runner_sub: Arc<dyn BoxProvisioner> =
+            Arc::new(SpyProvisioner::new("RUNNER", Arc::clone(&calls)));
+        let check_sub: Arc<dyn BoxProvisioner> =
+            Arc::new(SpyProvisioner::new("CHECK", Arc::clone(&calls)));
+        let prov = HybridBoxProvisioner::new(runner_sub, check_sub);
+        let routes = prov.routes_handle();
+        // check_host exec = the CF branch (tag CF); check exec = the NF branch.
+        let cf_exec: Arc<dyn LeasedExec> = Arc::new(SpyLeasedExec::new("CF", Arc::clone(&calls)));
+        let nf_exec: Arc<dyn LeasedExec> = Arc::new(SpyLeasedExec::new("NF", Arc::clone(&calls)));
+        let exec = HybridLeasedExec::new(cf_exec, nf_exec, routes);
+        (prov, exec)
+    }
+
+    #[test]
+    fn hybrid_exec_routes_check_host_to_cf_and_plain_check_to_nf() {
+        // The crux of rota A: a check-host lease (provisioned on CF) execs on the
+        // CF engine; a plain hermetic check (provisioned on NF) execs on NF. The
+        // exec follows the SAME route the provisioner recorded — exec-engine ==
+        // spawn-engine, per lease.
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let (prov, exec) = hybrid_prov_and_exec(Arc::clone(&calls));
+        let (_runner_spec, mut check_host_spec) = runner_and_check_specs();
+        let (_r2, plain_check_spec) = runner_and_check_specs();
+        check_host_spec
+            .env
+            .push(("TOOLCHAIN_DIGEST".to_string(), "sha256:tool".to_string()));
+
+        // Provision records the routes the exec reads.
+        prov.provision("lease-ch", &check_host_spec).unwrap();
+        prov.provision("lease-pc", &plain_check_spec).unwrap();
+
+        let out_ch = exec
+            .exec_captured_for("lease-ch", &["sh", "-lc", "true"])
+            .unwrap();
+        let out_pc = exec
+            .exec_captured_for("lease-pc", &["sh", "-lc", "true"])
+            .unwrap();
+
+        // The tag in stdout proves which engine served each lease.
+        assert_eq!(
+            out_ch.stdout, "CF",
+            "check-host lease must exec on Cloudflare"
+        );
+        assert_eq!(
+            out_pc.stdout, "NF",
+            "plain check lease must exec on Northflank"
+        );
+        let log = calls.lock().unwrap().clone();
+        assert!(log.contains(&"CF:lease-ch".to_string()));
+        assert!(log.contains(&"NF:lease-pc".to_string()));
+        assert!(!log.contains(&"NF:lease-ch".to_string()));
+        assert!(!log.contains(&"CF:lease-pc".to_string()));
+    }
+
+    #[test]
+    fn hybrid_exec_runner_lease_fails_closed() {
+        // A runner lease is runner-direct — it must never exec. If one reaches the
+        // exec path, fail closed rather than dispatch a runner box to a check engine.
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let (prov, exec) = hybrid_prov_and_exec(Arc::clone(&calls));
+        let (runner_spec, _check_spec) = runner_and_check_specs();
+        prov.provision("lease-r", &runner_spec).unwrap();
+
+        let err = exec
+            .exec_captured_for("lease-r", &["sh", "-lc", "true"])
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("RUNNER"),
+            "a runner lease exec must fail closed, got: {err}"
+        );
+        // Neither sub-exec was called.
+        let log = calls.lock().unwrap().clone();
+        assert!(
+            !log.iter()
+                .any(|c| c.starts_with("CF:") || c.starts_with("NF:"))
+        );
+    }
+
+    #[test]
+    fn hybrid_exec_unknown_lease_fails_closed() {
+        // No recorded route (exec before provision, or an unknown lease) ⇒ never
+        // guess an engine — fail closed (no fabricated result).
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let (_prov, exec) = hybrid_prov_and_exec(Arc::clone(&calls));
+
+        let err = exec
+            .exec_captured_for("never-provisioned", &["sh", "-lc", "true"])
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("no hybrid route recorded"),
+            "an unrouted lease exec must fail closed, got: {err}"
+        );
+        assert!(calls.lock().unwrap().is_empty());
+    }
+
     // ── CloudflareBoxProvisioner over a fake transport ────────────────────────
 
     use corelink_cloud_engine::{HttpRequest, HttpResponse, HttpTransport};
@@ -1400,19 +1686,44 @@ mod tests {
     }
 
     #[test]
-    fn cloudflare_backend_exec_half_is_nobox_runner_direct() {
-        // The exec half wired alongside the Cloudflare provisioner is NoBoxExec:
-        // a CHECK lease (which would call exec) fails closed via the empty
-        // registry. Build the pair directly (env-free) and assert the exec half
-        // refuses every exec.
+    fn cloudflare_backend_exec_half_is_cf_native_rota_a() {
+        // Rota A: the exec half wired alongside the Cloudflare provisioner is a
+        // CF-native EngineLeasedExec over CloudflareEngine — NOT NoBoxExec. It
+        // (a) fails closed for an UNBOUND lease (empty registry, engine never
+        // dialed), and (b) for a BOUND check-host box, dispatches to the CF
+        // engine's `/v1/exec` and returns the captured output. Build the pair
+        // exactly as `cloudflare_backend_from_env` does (env-free).
         let registry = BoxRegistry::new();
-        let engine = Arc::new(CloudflareEngine::new(FakeTransport::new(200, ""), cf_cfg()));
-        let exec: Arc<dyn LeasedExec> = Arc::new(crate::exec::NoBoxExec);
-        let _prov: Arc<dyn BoxProvisioner> =
-            Arc::new(CloudflareBoxProvisioner::new(engine, registry));
+        let engine = Arc::new(CloudflareEngine::new(
+            FakeTransport::new(200, r#"{"exit_code":0,"stdout":"cf-native","stderr":""}"#),
+            cf_cfg(),
+        ));
+        let exec: Arc<dyn LeasedExec> = Arc::new(EngineLeasedExec::new(
+            Arc::clone(&engine),
+            registry.clone_handle(),
+        ));
+
+        // (a) UNBOUND lease → fail closed (the engine is never called).
         assert!(
-            exec.exec_captured_for("any", &["true"]).is_err(),
-            "runner-direct exec half (NoBoxExec) must fail closed for any exec"
+            exec.exec_captured_for("unbound", &["true"]).is_err(),
+            "an unbound lease must fail closed via the empty registry"
+        );
+
+        // (b) BOUND check-host box → exec dispatches to CF /v1/exec (moat), and
+        // returns the real captured output — a NoBox half could never do this.
+        registry.bind(
+            "lease-ch",
+            RunningContainer {
+                name: "cf-1".to_string(),
+            },
+        );
+        let out = exec
+            .exec_captured_for("lease-ch", &["sh", "-lc", "echo hi"])
+            .expect("bound check-host exec must succeed on the CF engine");
+        assert_eq!(out.code, Some(0));
+        assert_eq!(
+            out.stdout, "cf-native",
+            "the CF-native exec half must relay the /v1/exec captured output"
         );
     }
 }

@@ -1,11 +1,16 @@
-//! Hybrid backend (rota B) e2e — runner→Cloudflare, check-exec→Northflank.
+//! Hybrid backend (rota A/B) e2e — runner + check-host → Cloudflare,
+//! plain-check → Northflank.
 //!
 //! `cloudflare_flip_e2e.rs` proves the CF-only path; this proves the **routing
 //! fork** end-to-end through the REAL acquire handler: when the fabric is wired
-//! with a [`HybridBoxProvisioner`], a RUNNER lease (`allow_egress == true`) must
-//! provision on the runner sub-backend (production: Cloudflare) and a CHECK-exec
-//! lease (`allow_egress == false`) on the check sub-backend (production:
-//! Northflank) — and NEVER the other way around.
+//! with a [`HybridBoxProvisioner`], a RUNNER lease (`allow_egress == true`) and
+//! a CHECK-HOST lease (`allow_egress == false` + `toolchain_digest`, rota A) must
+//! provision on the runner sub-backend (production: Cloudflare, the moat), while
+//! a PLAIN hermetic check (`allow_egress == false`, no toolchain digest) routes
+//! to the check sub-backend (production: Northflank) — and NEVER the other way
+//! around. The harness wires the matching [`HybridLeasedExec`] (as the prod
+//! composition root does) so the test composition is faithful; the exec DISPATCH
+//! itself (check-host → CF engine) is unit-proven in `cloud_exec::tests`.
 //!
 //! The load-bearing integration fact is that `spec.allow_egress`, set by the
 //! lease-kind constructor deep in the acquire handler (`from_runner_lease` vs
@@ -29,7 +34,8 @@ use corelink_cloud_engine::{
 use corelink_fabric::{InMemoryLedger, LeaseLedger, TenantId, TenantPlan};
 use corelink_fabric_api::{AcquireRequest, RunnerSpec, RunnerTargetDto, paths};
 use corelink_fabric_server::cloud_exec::{
-    BoxProvisioner, BoxRegistry, CloudflareBoxProvisioner, HybridBoxProvisioner, ProbeStatus,
+    BoxProvisioner, BoxRegistry, CloudflareBoxProvisioner, EngineLeasedExec, HybridBoxProvisioner,
+    ProbeStatus,
 };
 use corelink_fabric_server::{
     AppState, LeasedExec, MockBroker, NoBoxExec, RunnerRegistrationBroker, StaticPlans,
@@ -158,16 +164,24 @@ fn hybrid_harness(worker: Arc<FakeWorker>, check_sub: RecordingProvisioner) -> R
         CloudflareConfig::new("https://spawn.example.dev", "super-secret-token"),
     ));
     let runner_sub: Arc<dyn BoxProvisioner> = Arc::new(CloudflareBoxProvisioner::new(
-        engine,
+        Arc::clone(&engine),
         registry.clone_handle(),
     ));
     let check_sub: Arc<dyn BoxProvisioner> = Arc::new(check_sub);
 
-    // Rota B: the hybrid routes by spec.allow_egress. The wired exec is NoBoxExec
-    // (the runner is runner-direct; only a check execs — not asserted here).
-    let hybrid: Arc<dyn BoxProvisioner> =
-        Arc::new(HybridBoxProvisioner::new(runner_sub, check_sub));
-    let exec: Arc<dyn LeasedExec> = Arc::new(NoBoxExec);
+    // Rota A: the hybrid routes provisioning by lease kind (runner + check-host →
+    // Cloudflare, plain check → the check sub). The wired exec is the matching
+    // HybridLeasedExec over the SAME route table (as the prod composition root),
+    // so a check-host lease would exec on the CF engine that spawned it. The
+    // check-host exec branch is a CF-native EngineLeasedExec; the plain-check
+    // branch is a NoBox stand-in (this harness has no Northflank engine and never
+    // drives a plain-check exec). Exec DISPATCH is unit-proven in cloud_exec::tests;
+    // these e2e cases assert the PROVISIONING routing through the real handler.
+    let cf_exec: Arc<dyn LeasedExec> =
+        Arc::new(EngineLeasedExec::new(engine, registry.clone_handle()));
+    let plain_check_exec: Arc<dyn LeasedExec> = Arc::new(NoBoxExec);
+    let (hybrid, exec) =
+        HybridBoxProvisioner::with_paired_exec(runner_sub, check_sub, cf_exec, plain_check_exec);
 
     let broker: Arc<dyn RunnerRegistrationBroker> = Arc::new(MockBroker::new());
     let state = AppState::new(ledger, Arc::new(plans), Arc::new(SystemClock))
@@ -303,5 +317,57 @@ async fn hybrid_check_acquire_routes_to_northflank_not_cloudflare() {
     assert!(
         !worker.saw_spawn(),
         "a check lease must NOT reach the Cloudflare spawn-Worker"
+    );
+}
+
+/// A CHECK-HOST acquire (`runner = None`, isolated `net_policy`, `toolchain_digest`
+/// set) → `from_lease` (allow_egress=false, no_network=true) WITH `TOOLCHAIN_DIGEST`
+/// injected into the spec env — the rota-A discriminator.
+fn check_host_acq_body() -> AcquireRequest {
+    AcquireRequest {
+        image_digest: PINNED_IMAGE.to_string(),
+        net_policy: "none".to_string(),
+        tmp_root: "/work/tmp".to_string(),
+        expiry_ms: 600_000,
+        runner: None,
+        toolchain_digest: Some(
+            "sha256:1111111111111111111111111111111111111111111111111111111111111111".to_string(),
+        ),
+        agent: None,
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Case 3 — a CHECK-HOST acquire (rota A) routes to Cloudflare (the moat), NOT the
+// check sub: the hermetic lease carries a toolchain digest, so the acquire handler
+// injects TOOLCHAIN_DIGEST into the spec env and the hybrid routes it to the CF
+// (runner) sub in check-mode — proving check-exec lands on the moat, not Northflank.
+// ─────────────────────────────────────────────────────────────────────────────
+#[tokio::test]
+async fn hybrid_check_host_acquire_routes_to_cloudflare_not_check_sub() {
+    let worker = Arc::new(FakeWorker::new(200, r#"{"handle":"cf-handle-xyz"}"#));
+    let check_sub = RecordingProvisioner::new();
+    let router = hybrid_harness(Arc::clone(&worker), check_sub.clone());
+
+    let resp = do_acquire(&router, &check_host_acq_body()).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "check-host acquire over the hybrid must return 200 Held"
+    );
+    let acq = body_json(resp).await;
+    assert_eq!(acq["lease"]["state"].as_str().unwrap_or_default(), "held");
+
+    // The check-host lease drove a real CF /v1/spawn (routed to the Cloudflare
+    // sub in check-mode) — check-exec on the moat, R2-co-located.
+    assert!(
+        worker.saw_spawn(),
+        "a check-host lease must provision on the Cloudflare sub (POST /v1/spawn, check-mode)"
+    );
+    // …and the plain-check (Northflank) sub was NEVER touched.
+    assert!(
+        check_sub.calls().is_empty(),
+        "a check-host lease must NOT reach the plain-check (Northflank) sub; got {:?}",
+        check_sub.calls()
     );
 }
