@@ -49,7 +49,7 @@
       // `wrangler deploy` (incl. a container ROLLOUT to apply new envVars) no longer
       // needs a Docker daemon. To rebuild the control-plane binary: build+push a new
       // image (CI, or a Docker host) and update this @sha256 digest.
-      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer@sha256:dfd57a8614d12887ee2f3ce33acf50ea901cfdc217afeaee39d6829979b8bbba",
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer@sha256:d26a46c465119a5f585a14cf0672bd74bf4efa11c70664ebe26ad183996bc308",
       // Lightweight HTTP control plane (one binary + in-memory ledger): standard-1
       // is ample for the dogfood. Bump if real multi-tenant load arrives.
       "instance_type": "standard-1",

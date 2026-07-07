@@ -80,7 +80,19 @@ the live smoke confirms the real backends. **Never claim boxes work off the boot
 — prove an end-to-end spawn of each kind** (the #195 lesson: "substrate wired" ≠ spawn works).
 
 ## Status
-⚠️ **NOT yet deploy-verified** — authored while the Docker daemon was down, so the
-container build + the @cloudflare/containers env-injection lifecycle have not been
-run end-to-end. The config mirrors the proven `../cloudflare` spawn-Worker; verify
-on first deploy and adjust the container glue if the 0.3.x API differs.
+✅ **DEPLOY-VERIFIED + LIVE (2026-07-07)** at `https://corelink-fabricd.gmhelmold.workers.dev`.
+The container+Worker+cron glue is confirmed end-to-end: `/v1/health → 200 ok` (stable),
+`/v1/attestation/key → key_id faa5b7726ccd2c52` (the OOB prod key), and a **check-host acquire
+returned 200 Held** — proving the **rota-A** binary (image `@sha256:d26a46c4…`, built from `main`
+via `wrangler containers build`) routes check-exec to Cloudflare (a pre-rota-A runner-only binary
+fails closed). CF-native: introspect auth + CF spawn-Worker box backend, **no Northflank**.
+
+**Not yet cut over:** hugit still points at the Northflank fabricd. Cutover = repoint
+`HUGIT_RUNNER_HOST` + re-pin the pubkey (`b1eba792…` → `faa5b7726…`); PAT unchanged (same introspect).
+See `docs/handoff/2026-07-07-CUTOVER-READY-to-hugit-TL-…`. Trigger is the owner's.
+
+**Ops note:** to rebuild the binary — temp-copy `crates/corelink-fabric-server/Dockerfile` to the repo
+root, `npx wrangler containers build <repo-root> -t corelink-fabricd-fabricdcontainer:<tag> --push`
+(the root `.dockerignore` keeps the context small), pin the returned `@sha256` digest in
+`wrangler.jsonc`, `wrangler deploy` (a NEW digest forces the container rollout; a config-only change
+does not). Docker daemon required for the build only.
