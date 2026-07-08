@@ -15,7 +15,7 @@ description: >
 # the binary automatically using the `version` input.  The placeholder URL
 # pattern is:
 #
-#   https://github.com/humangr-labs/corelink-runners/releases/download/v<version>/corelink-<os>-<arch>
+#   https://github.com/HumanGuardrail/corelink-runners/releases/download/v<version>/corelink-<os>-<arch>
 #
 # Until then, add a build step before this action:
 #
@@ -96,7 +96,7 @@ runs:
       env:
         # version input is captured here for future use in artifact download.
         # When a release exists this step will download:
-        #   https://github.com/humangr-labs/corelink-runners/releases/download/v<version>/corelink-<os>-<arch>
+        #   https://github.com/HumanGuardrail/corelink-runners/releases/download/v<version>/corelink-<os>-<arch>
         CORELINK_VERSION: ${{ inputs.version }}
       run: |
         if command -v corelink &>/dev/null; then

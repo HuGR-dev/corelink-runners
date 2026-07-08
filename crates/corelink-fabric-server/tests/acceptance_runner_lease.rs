@@ -501,3 +501,40 @@ async fn runner_allowlist_match_is_case_insensitive() {
         "the permitted runner acquire provisions exactly one box"
     );
 }
+
+/// C1 / org-rename regression (G5): the DISCONTINUED `humangr-labs` org must be
+/// REJECTED. The allowlist is exact-match on the canonical (lowercased) slug and
+/// GitHub's `humangr-labs → HumanGuardrail` HTTP redirect does NOT apply to a
+/// string compare — so a stale `humangr-labs/corelink-runners` acquire against
+/// the live `HumanGuardrail/corelink-runners` allowlist is `humangr-labs` ≠
+/// `humanguardrail` and MUST be denied 400 (this is the acquire the moat mint
+/// would 403 in prod). Guards a re-introduction of the dead org slug.
+#[tokio::test]
+async fn stale_humangr_labs_org_denied_against_humanguardrail_allowlist() {
+    let broker: Arc<dyn RunnerRegistrationBroker> = Arc::new(MockBroker::new());
+    let (router, ledger, cap) = harness(Some(broker)); // allowlist: repo:HumanGuardrail/corelink-runners
+    let resp = acquire(
+        &router,
+        &runner_acq_body_target("humangr-labs", "corelink-runners"),
+    )
+    .await;
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "the discontinued humangr-labs org must NOT match the HumanGuardrail allowlist (exact-match; redirects don't apply)"
+    );
+    assert!(
+        ledger
+            .lock()
+            .unwrap()
+            .by_tenant(&TenantId::new("acme").unwrap())
+            .unwrap()
+            .is_empty(),
+        "a denied stale-org acquire must reserve no slot"
+    );
+    assert!(
+        cap.captured().is_empty(),
+        "a denied stale-org acquire must mint/provision nothing"
+    );
+}

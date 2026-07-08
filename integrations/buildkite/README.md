@@ -21,7 +21,7 @@ A Buildkite plugin that wraps the `corelink run` CLI so a CI team adds **one
 steps:
   - label: ":corelink: Run tests on CoreLink fabric"
     plugins:
-      - humangr-labs/corelink#v0.1.0:
+      - HumanGuardrail/corelink#v0.1.0:
           url: "https://runners.corelink.dev"
           check: "cargo test --workspace --locked"
           check-id: "cargo-test"
@@ -58,7 +58,7 @@ steps:
   - label: ":corelink: Run on CoreLink fabric"
     depends_on: "build-corelink-cli"
     plugins:
-      - humangr-labs/corelink#v0.1.0:
+      - HumanGuardrail/corelink#v0.1.0:
           check: "cargo test --workspace --locked"
 ```
 
@@ -66,7 +66,7 @@ When a release is published, the plugin will download the binary automatically.
 The release URL pattern will be:
 
 ```
-https://github.com/humangr-labs/corelink-runners/releases/download/v<version>/corelink-<os>-<arch>
+https://github.com/HumanGuardrail/corelink-runners/releases/download/v<version>/corelink-<os>-<arch>
 ```
 
 ---

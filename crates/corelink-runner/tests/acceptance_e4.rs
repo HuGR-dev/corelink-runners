@@ -505,7 +505,7 @@ fn item_4_equivalence_deterministic_fixture() {
     );
     let harness_nd = EquivalenceHarness::new(
         ShimExecutor::new(Box::new(NullBroker), empty_manifest()),
-        Some("humangr-labs/hugit-fleet-syn-1".to_string()),
+        Some("HumanGuardrail/hugit-fleet-syn-1".to_string()),
     );
     let outcome_nd = harness_nd.compare(&wf_nd);
     assert!(
