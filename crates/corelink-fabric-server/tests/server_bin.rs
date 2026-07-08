@@ -46,6 +46,8 @@ fn post_json(path: &str, bearer: &str, body: &AcquireRequest) -> Request<Body> {
 
 fn valid_acquire_body() -> AcquireRequest {
     AcquireRequest {
+        repo_full_name: None,
+        installation_id: None,
         image_digest: PINNED_IMAGE.to_string(),
         net_policy: "isolated".to_string(),
         tmp_root: "/work/tmp".to_string(),
@@ -779,6 +781,8 @@ async fn mock_drives_full_lifecycle() {
 
     // ── Acquire ──────────────────────────────────────────────────────────────
     let acquire_body = AcquireRequest {
+        repo_full_name: None,
+        installation_id: None,
         image_digest:
             "alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
                 .to_string(),

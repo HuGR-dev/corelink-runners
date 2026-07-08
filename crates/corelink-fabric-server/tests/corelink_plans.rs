@@ -90,6 +90,8 @@ fn harness(introspect: FakeIntrospect) -> Router {
 
 fn acquire_req() -> Request<Body> {
     let body = AcquireRequest {
+        repo_full_name: None,
+        installation_id: None,
         image_digest: PINNED_IMAGE.to_string(),
         net_policy: "isolated".to_string(),
         tmp_root: "/work/tmp".to_string(),

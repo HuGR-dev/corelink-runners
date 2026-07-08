@@ -1351,6 +1351,8 @@ mod tests {
 
     fn body() -> AcquireRequest {
         AcquireRequest {
+            repo_full_name: None,
+            installation_id: None,
             image_digest: PINNED.to_string(),
             net_policy: "isolated".to_string(),
             tmp_root: "/work/tmp".to_string(),
@@ -1364,6 +1366,8 @@ mod tests {
     /// A RUNNER acquire request (mirrors `body()`, targets a repo runner).
     fn runner_body() -> AcquireRequest {
         AcquireRequest {
+            repo_full_name: None,
+            installation_id: None,
             runner: Some(RunnerSpec {
                 target: RunnerTargetDto::Repo {
                     owner: "humangr-labs".to_string(),
@@ -1991,6 +1995,8 @@ mod tests {
         let router = crate::app::app(acme_token_store(), state);
 
         let oversized = AcquireRequest {
+            repo_full_name: None,
+            installation_id: None,
             image_digest: PINNED.to_string(),
             net_policy: "isolated".to_string(),
             tmp_root: "/work/tmp".to_string(),

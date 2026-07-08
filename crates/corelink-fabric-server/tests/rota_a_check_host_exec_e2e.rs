@@ -207,6 +207,8 @@ async fn body_json(response: Response) -> serde_json::Value {
 /// hybrid routes it to the CF sub in check-mode. Returns the lease id.
 async fn acquire_check_host(h: &Harness) -> String {
     let body = AcquireRequest {
+        repo_full_name: None,
+        installation_id: None,
         image_digest: PINNED_IMAGE.to_string(),
         net_policy: "none".to_string(),
         tmp_root: "/work/tmp".to_string(),

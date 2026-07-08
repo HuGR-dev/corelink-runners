@@ -62,6 +62,24 @@ pub struct AcquireRequest {
     /// prior request. Mutually exclusive with `runner` (both `Some` → 400).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<AgentSpec>,
+
+    /// The repo the check/job is for (`"owner/repo"`) — threaded into the
+    /// CAS-cred mint (`/internal/v1/runner/mint`), which is repo-allowlist-scoped
+    /// server-side (2026-07-08 contract). Additive + default-off: `None` ⇒ absent
+    /// from the JSON (wire-invisible under `deny_unknown_fields`), and the moat
+    /// mint is SKIPPED for the lease (byte-identical to the pre-moat cold path).
+    /// A hydrating lease (check-host) must carry it (with `installation_id`) for
+    /// the mint to run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_full_name: Option<String>,
+
+    /// The GitHub App installation id (as a STRING) the check is dispatched under
+    /// — the mint's tenant SELECTOR (the server derives `owner_tenant` from it via
+    /// `tenant_gh_installation_map`). Additive + default-off, same wire-invisible
+    /// semantics as [`Self::repo_full_name`]; both are required together for the
+    /// moat mint to run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installation_id: Option<String>,
 }
 
 /// Agent-mode acquire spec (ratified (B) exec-server-drive with hugit,
@@ -666,6 +684,8 @@ mod tests {
     #[test]
     fn acquire_request_with_repo_runner_roundtrips() {
         let req = AcquireRequest {
+            repo_full_name: None,
+            installation_id: None,
             image_digest: "sha256:abc".into(),
             net_policy: "hermetic".into(),
             tmp_root: "/tmp/run".into(),

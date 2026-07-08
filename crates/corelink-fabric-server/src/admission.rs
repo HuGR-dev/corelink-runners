@@ -2141,6 +2141,8 @@ mod queue_tests {
                 tenant: tid("alpha"),
                 pat: crate::auth::BearerPat("pat-alpha".to_string()),
                 req: AcquireRequest {
+                    repo_full_name: None,
+                    installation_id: None,
                     image_digest: PINNED.to_string(),
                     net_policy: "isolated".to_string(),
                     tmp_root: "/work/tmp".to_string(),
@@ -2403,6 +2405,8 @@ mod queue_tests {
                 tenant: tid("alpha"),
                 pat: crate::auth::BearerPat("pat-alpha".to_string()),
                 req: AcquireRequest {
+                    repo_full_name: None,
+                    installation_id: None,
                     image_digest: PINNED.to_string(),
                     net_policy: "isolated".to_string(),
                     tmp_root: "/work/tmp".to_string(),
@@ -2910,6 +2914,8 @@ mod queue_tests {
                 tenant: tid("alpha"),
                 pat: crate::auth::BearerPat("pat-alpha".to_string()),
                 req: AcquireRequest {
+                    repo_full_name: None,
+                    installation_id: None,
                     image_digest: PINNED.to_string(),
                     net_policy: "isolated".to_string(),
                     tmp_root: "/work/tmp".to_string(),

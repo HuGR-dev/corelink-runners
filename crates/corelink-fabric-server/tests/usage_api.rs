@@ -66,6 +66,8 @@ fn harness(cap_acme: Option<u32>, cap_beta: Option<u32>) -> Router {
 
 fn acquire_req() -> AcquireRequest {
     AcquireRequest {
+        repo_full_name: None,
+        installation_id: None,
         image_digest: PINNED_IMAGE.to_string(),
         net_policy: "isolated".to_string(),
         tmp_root: "/work/tmp".to_string(),

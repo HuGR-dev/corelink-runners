@@ -46,6 +46,8 @@ impl Tally {
 
 fn acquire_body(image: &str) -> String {
     serde_json::to_string(&AcquireRequest {
+        repo_full_name: None,
+        installation_id: None,
         image_digest: image.to_string(),
         net_policy: "isolated".to_string(),
         tmp_root: "/work/tmp".to_string(),

@@ -592,6 +592,8 @@ async fn provision_runner(
     let tenant = resolve_tenant(state).await?;
 
     let req = AcquireRequest {
+        repo_full_name: None,
+        installation_id: None,
         image_digest: state.cfg.image_digest.clone(),
         // Ignored for runner mode — `leases::acquire` FORCES "egress-runner"
         // server-side. Sent for shape only.

@@ -263,6 +263,8 @@ mod tests {
         // The gate fires before image/plan/slot work, so the request body is
         // irrelevant — a suspended tenant never gets that far.
         let req = AcquireRequest {
+            repo_full_name: None,
+            installation_id: None,
             image_digest:
                 "repo@sha256:0000000000000000000000000000000000000000000000000000000000000000"
                     .to_string(),

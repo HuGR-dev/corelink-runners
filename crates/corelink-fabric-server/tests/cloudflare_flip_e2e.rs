@@ -220,6 +220,8 @@ async fn body_json(response: Response) -> serde_json::Value {
 /// admission guards and the provision step.
 fn runner_acq_body() -> AcquireRequest {
     AcquireRequest {
+        repo_full_name: None,
+        installation_id: None,
         image_digest: PINNED_IMAGE.to_string(),
         net_policy: "ignored-runner-forces-egress".to_string(),
         tmp_root: "/work/tmp".to_string(),

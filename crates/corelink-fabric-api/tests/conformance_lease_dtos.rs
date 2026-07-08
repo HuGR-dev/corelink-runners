@@ -106,6 +106,8 @@ fn pretty<T: serde::Serialize>(value: &T) -> String {
 fn acquire_request_conformance_vector_is_byte_exact() {
     // Exercises BOTH additive fields: a runner spec AND a toolchain_digest.
     let generated = AcquireRequest {
+        repo_full_name: None,
+        installation_id: None,
         image_digest: "sha256:1111111111111111111111111111111111111111111111111111111111111111"
             .to_string(),
         net_policy: "hermetic".to_string(),

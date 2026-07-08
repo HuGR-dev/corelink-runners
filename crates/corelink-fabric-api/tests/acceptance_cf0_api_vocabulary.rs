@@ -152,6 +152,8 @@ where
 fn dtos_roundtrip_and_deny_unknown() {
     roundtrip_and_deny_unknown(
         &AcquireRequest {
+            repo_full_name: None,
+            installation_id: None,
             image_digest: "sha256:".to_string() + &"de".repeat(32),
             net_policy: "isolated".to_string(),
             tmp_root: "/tmp/lease-0001".to_string(),

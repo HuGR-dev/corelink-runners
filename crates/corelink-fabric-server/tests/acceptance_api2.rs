@@ -74,6 +74,8 @@ fn test_harness() -> (Router, Arc<Mutex<dyn LeaseLedger + Send>>) {
 
 fn valid_acquire_body() -> AcquireRequest {
     AcquireRequest {
+        repo_full_name: None,
+        installation_id: None,
         image_digest: PINNED_IMAGE.to_string(),
         net_policy: "isolated".to_string(),
         tmp_root: "/work/tmp".to_string(),
