@@ -63,20 +63,25 @@ instance. Two failure modes were observed + closed on 2026-07-07/08:
   box**; (b) provision HTTP bounded to 30s; (c) a **`FABRIC_PROVISION_MAX_INFLIGHT`
   semaphore** (default 16) bounds concurrent provisions (excess awaits a permit
   async, not on a thread).
-- **Single slow close** (2026-07-07): ONE off-box close (finalize §13 + sign
-  attestation + **pg-ledger write**) black-holed `/v1/health` on the 1-vCPU box.
-  Root cause: the pg ledger uses `block_in_place` (`pg_ledger.rs`), so a slow pg
-  write runs ON a runtime worker; on 1 vCPU (1 worker), the whole runtime stalls
-  (worsened by CAS/DB 429 retry-spin pegging the single core). Closed by
-  **`standard-2` (2 vCPU / 2 workers)**: a blocking close pins one worker, the
-  other keeps `/v1/health` alive. **Verified 2026-07-08:** health stayed `200`
-  across all 30 polls (0.4–1.0s) through a **32s** close.
+- **Single close wedged the plane** (2026-07-07): ONE off-box close black-holed
+  `/v1/health` on the 1-vCPU box. Root cause: the close's `block_in_place` pg
+  work (`pg_ledger.rs`) runs ON a runtime worker; on 1 vCPU (1 worker) the whole
+  runtime stalls. Closed by **`standard-2` (2 vCPU / 2 workers)**: the blocking
+  work pins one worker, the other keeps `/v1/health` alive. **Verified 2026-07-08:**
+  health stayed `200` across all 30 polls (0.4–1.0s) through a 32s close.
 
-**Residual (tracked, not availability-affecting):** the close itself can be SLOW
-(~32s under DB throttling) — a latency concern, not a wedge (health stays up). The
-principled fix is to move the pg ledger ops OFF the runtime workers (wrap the
-handler ledger sections in `spawn_blocking` instead of `block_in_place`) and/or
-bound the CAS/DB retry-spin; do this before real check-exec throughput.
+**Close latency — diagnosed, NOT a bug (2026-07-08).** A raw close (e.g. `curl`)
+takes ~32s, but that is the **§13.2 JobClose ack window** (`ack_timeout`, hardcoded
+`Duration::from_secs(30)` at `leases.rs:964`): every off-box/agent lease registers
+a §13 CaptureHook at acquire, and the close blocks up to 30s (fail-closed) waiting
+for the client's **JobClose ack**. A non-acking test client waits the full 30s; a
+REAL acking client (hugit's A-path — proven metrics round-trip) collapses the
+window to ~0 and the close returns in **~2.7s** (teardown + attestation + 3 pg
+writes). So the close is fast for real traffic — the "slow close" was a
+non-acking-test artifact, not pg latency. The pg work itself is ~2.7s; no offload
+needed at current scale. The real requirement — the plane staying UP during any
+long ack-wait — is handled (`close_ack_gate` bounds concurrent ack-waits +
+`standard-2` keeps a worker for health; verified).
 
 **Scaling path (not yet done):** the singleton was required only by the in-memory
 ledger; now that the **pg ledger is armed** (`DATABASE_URL` present →
