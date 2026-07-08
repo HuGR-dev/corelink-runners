@@ -6,16 +6,21 @@
 //!
 //! ## Mint flow (POST /internal/v1/runner/mint)
 //!
-//! Request header: `x-corelink-internal-auth: <internal-token>`.
-//! Body: `{"job_id": "<job_id>", "repo_full_name": "<owner/repo>", "installation_id":
-//! "<gh-app-installation-id>", "scope": "read-write", "ttl_seconds": <u64>}`. The
-//! server DERIVES the tenant from `installation_id` (via `tenant_gh_installation_map`)
-//! and scopes the mint by the `(tenant, repo_full_name)` allowlist — the caller never
-//! names the tenant (frozen server contract, 2026-07-08: `owner_tenant` REMOVED, it
-//! was the single-tenant hole this WP closed). `ttl_seconds` is the lease's REMAINING
-//! time (skew-shrunk) so the PAT expires WITH the lease (Server-TL C2c contract,
-//! 2026-07-02). Response: `{"token": "<pat-plaintext>", "pat_id": "<id>",
-//! "expires_ms": <u64>}`.
+//! Request header: `x-corelink-internal-auth: <internal-token>`, plus (on the
+//! fabricd/native path) `Authorization: Bearer <acquiring-pat>`.
+//! Body: `{"job_id": "<job_id>", "repo_full_name": "<owner/repo>",
+//! "installation_id"?: "<gh-app-installation-id>", "scope": "read-write",
+//! "ttl_seconds": <u64>}`. The caller NEVER names the tenant (frozen server
+//! contract, 2026-07-08: `owner_tenant` REMOVED — the single-tenant hole this WP
+//! closed). The server resolves the tenant from one of two unforgeable sources:
+//! `installation_id` (via `tenant_gh_installation_map`) when present — the
+//! CF-worker/webhook caller; else by INTROSPECTING the `Authorization: Bearer`
+//! acquiring PAT — the fabricd/native caller (a native repo has no GitHub App
+//! installation, so no `installation_id` exists). `installation_id` is therefore
+//! OPTIONAL; `repo_full_name` is always required (allowlist-checked against the
+//! resolved tenant). `ttl_seconds` is the lease's REMAINING time (skew-shrunk) so
+//! the PAT expires WITH the lease (Server-TL C2c contract, 2026-07-02). Response:
+//! `{"token": "<pat-plaintext>", "pat_id": "<id>", "expires_ms": <u64>}`.
 //!
 //! ## Revoke flow (POST /internal/v1/runner/revoke)
 //!
@@ -147,13 +152,19 @@ impl std::error::Error for MintError {}
 /// Mint failure fails closed (A7): no box is admitted without a minted PAT.
 /// Revoke is idempotent and fires on EVERY terminal path (A7b).
 pub trait CasPatMint: Send + Sync {
-    /// Mint a per-job CAS PAT for `repo_full_name`/`installation_id`/`job_id`.
+    /// Mint a per-job CAS PAT for `repo_full_name`/`job_id`.
     ///
     /// POSTs to `/internal/v1/runner/mint` with `x-corelink-internal-auth`. The
-    /// server DERIVES the tenant from `installation_id` and authorizes the mint
-    /// against the `(tenant, repo_full_name)` allowlist — the caller never names
-    /// the tenant (frozen server contract, 2026-07-08). Returns [`MintedPat`] on
-    /// success; fails closed on any error.
+    /// server resolves the tenant WITHOUT the caller naming it (frozen contract,
+    /// 2026-07-08): from `installation_id` when `Some` (the CF-worker/webhook
+    /// caller), else by introspecting `acquiring_pat` — the tenant-scoped PAT the
+    /// caller already holds — presented as `Authorization: Bearer` (the
+    /// fabricd/native caller, which has no `installation_id`). `repo_full_name` is
+    /// always allowlist-checked against the resolved tenant. Returns [`MintedPat`]
+    /// on success; fails closed on any error.
+    ///
+    /// `acquiring_pat` is a SENSITIVE bearer credential — presented as a header,
+    /// never placed in the body or logged.
     ///
     /// `lease_deadline_ms` is the absolute lease expiry (unix ms); the impl
     /// asserts `minted.expires_ms ≤ lease_deadline_ms` (A7b). `now_ms` is the
@@ -166,7 +177,8 @@ pub trait CasPatMint: Send + Sync {
     fn mint<'a>(
         &'a self,
         repo_full_name: &'a str,
-        installation_id: &'a str,
+        installation_id: Option<&'a str>,
+        acquiring_pat: &'a str,
         job_id: &'a str,
         lease_deadline_ms: u64,
         now_ms: u64,
@@ -204,22 +216,21 @@ impl MockMint {
         Self
     }
 
-    /// The deterministic PAT token this mock derives for an
-    /// `(installation_id, job_id)`.
+    /// The deterministic PAT token this mock derives for a `job_id`.
     ///
     /// Exposed so tests can assert the exact value without reaching into the
-    /// redacted [`MintedPat`]. Keyed on `installation_id` (the tenant selector
-    /// under the frozen contract, replacing the removed `owner_tenant`).
+    /// redacted [`MintedPat`]. Keyed on `job_id` alone — the per-lease unique id
+    /// — so the mock is independent of the tenant-resolution model (installation
+    /// vs PAT-introspection); it only needs per-lease determinism.
     #[must_use]
-    pub fn derived_token(installation_id: &str, job_id: &str) -> String {
-        format!("mock-pat::{installation_id}::{job_id}")
+    pub fn derived_token(job_id: &str) -> String {
+        format!("mock-pat::{job_id}")
     }
 
-    /// The deterministic `pat_id` this mock derives for an
-    /// `(installation_id, job_id)`.
+    /// The deterministic `pat_id` this mock derives for a `job_id`.
     #[must_use]
-    pub fn derived_pat_id(installation_id: &str, job_id: &str) -> String {
-        format!("mock-patid::{installation_id}::{job_id}")
+    pub fn derived_pat_id(job_id: &str) -> String {
+        format!("mock-patid::{job_id}")
     }
 
     /// A fixed `expires_ms` the mock always returns (year 2100, well beyond
@@ -231,15 +242,16 @@ impl CasPatMint for MockMint {
     fn mint<'a>(
         &'a self,
         _repo_full_name: &'a str,
-        installation_id: &'a str,
+        _installation_id: Option<&'a str>,
+        _acquiring_pat: &'a str,
         job_id: &'a str,
         lease_deadline_ms: u64,
         _now_ms: u64,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<MintedPat, MintError>> + Send + 'a>,
     > {
-        let token = Self::derived_token(installation_id, job_id);
-        let pat_id = Self::derived_pat_id(installation_id, job_id);
+        let token = Self::derived_token(job_id);
+        let pat_id = Self::derived_pat_id(job_id);
         // Clamp to lease_deadline_ms so the mock always satisfies A7b.
         let expires_ms = Self::MOCK_EXPIRES_MS.min(lease_deadline_ms);
         Box::pin(async move {
@@ -284,10 +296,17 @@ pub struct MintHttpResponse {
 /// `ureq` while tests inject a mock transport with no live endpoint.
 pub trait MintHttp: Send + Sync {
     /// POST `json_body` to `url` with the given `x-corelink-internal-auth` value.
+    ///
+    /// `bearer` (when `Some`) is presented as `Authorization: Bearer <bearer>` —
+    /// the ACQUIRING PAT, so the mint can derive the tenant by introspecting it
+    /// server-side when no `installation_id` is sent (frozen 2026-07-08: the
+    /// fabricd/native caller never names a tenant; the tenant is the PAT's, from
+    /// introspection). `None` ⇒ no `Authorization` header (e.g. revoke).
     fn post(
         &self,
         url: &str,
         internal_auth: &str,
+        bearer: Option<&str>,
         json_body: &str,
     ) -> anyhow::Result<MintHttpResponse>;
 }
@@ -357,15 +376,22 @@ struct RevokeRequestBody<'a> {
 
 /// The wire shape for a mint request body.
 ///
-/// Frozen server contract (2026-07-08): `owner_tenant` is REMOVED — the server
-/// derives the tenant from `installation_id` (via `tenant_gh_installation_map`)
-/// and authorizes against the `(tenant, repo_full_name)` allowlist. Naming the
-/// tenant client-side was the single-tenant hole the 283-step-3 WP closed.
+/// Frozen server contract (2026-07-08): the tenant is NEVER a body field —
+/// `owner_tenant` is REMOVED (naming the tenant client-side was the single-tenant
+/// hole the 283-step-3 WP closed). The server resolves the tenant from one of two
+/// unforgeable sources: `installation_id` (via `tenant_gh_installation_map`) when
+/// present — the CF-worker/webhook caller; else by INTROSPECTING the acquiring
+/// PAT presented as `Authorization: Bearer` — the fabricd/native caller (a native
+/// repo has no GitHub App installation, so no `installation_id` exists to send).
+/// `installation_id` is therefore OPTIONAL; `repo_full_name` is always required
+/// (allowlist-checked against the resolved tenant). `skip_serializing_if` keeps
+/// `installation_id` absent from the JSON on the fabricd path.
 #[derive(serde::Serialize)]
 struct MintRequestBody<'a> {
     job_id: &'a str,
     repo_full_name: &'a str,
-    installation_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    installation_id: Option<&'a str>,
     scope: &'a str,
     /// Requested PAT lifetime in seconds, derived from the lease's REMAINING
     /// time so the minted credential expires with the lease (Server-TL C2c
@@ -392,7 +418,8 @@ impl<H: MintHttp> CasPatMint for HttpCasPatMint<H> {
     fn mint<'a>(
         &'a self,
         repo_full_name: &'a str,
-        installation_id: &'a str,
+        installation_id: Option<&'a str>,
+        acquiring_pat: &'a str,
         job_id: &'a str,
         lease_deadline_ms: u64,
         now_ms: u64,
@@ -426,9 +453,14 @@ impl<H: MintHttp> CasPatMint for HttpCasPatMint<H> {
             // fail; if it somehow did, we still fail closed.
             .unwrap_or_default();
 
+            // Present the acquiring PAT as `Authorization: Bearer` so the server
+            // can introspect it → tenant when no `installation_id` is sent (the
+            // fabricd/native path). Sent on every mint (harmless when the server
+            // takes the installation-map path); it is the caller's own PAT, so the
+            // caller still names no tenant.
             let resp = self
                 .http
-                .post(&url, &self.internal_token, &body)
+                .post(&url, &self.internal_token, Some(acquiring_pat), &body)
                 .map_err(|_| MintError::Unreachable)?;
 
             Self::check_status(resp.status)?;
@@ -466,9 +498,11 @@ impl<H: MintHttp> CasPatMint for HttpCasPatMint<H> {
             let url = format!("{}/internal/v1/runner/revoke", self.base_url);
             let body = serde_json::to_string(&RevokeRequestBody { pat_id }).unwrap_or_default();
 
+            // Revoke keys on pat_id server-side (the dispatcher's tenant is already
+            // known there) — no acquiring PAT needed, so no `Authorization` header.
             let resp = self
                 .http
-                .post(&url, &self.internal_token, &body)
+                .post(&url, &self.internal_token, None, &body)
                 .map_err(|_| MintError::Unreachable)?;
 
             // Idempotent: 2xx OR 404 → Ok (the PAT may already be gone).
@@ -502,6 +536,7 @@ impl MintHttp for UreqMint {
         &self,
         url: &str,
         internal_auth: &str,
+        bearer: Option<&str>,
         json_body: &str,
     ) -> anyhow::Result<MintHttpResponse> {
         let agent: ureq::Agent = ureq::Agent::config_builder()
@@ -510,12 +545,18 @@ impl MintHttp for UreqMint {
             .build()
             .into();
 
-        let mut resp = agent
+        let mut req = agent
             .post(url)
             .header("x-corelink-internal-auth", internal_auth)
             .header("Content-Type", "application/json")
-            .header("User-Agent", "corelink-fabric-server")
-            .send(json_body)?;
+            .header("User-Agent", "corelink-fabric-server");
+        // Present the acquiring PAT so the mint can introspect it → tenant when no
+        // installation_id is sent (frozen 2026-07-08). The value is a SENSITIVE
+        // bearer credential — set into the header only, never logged.
+        if let Some(bearer) = bearer {
+            req = req.header("Authorization", &format!("Bearer {bearer}"));
+        }
+        let mut resp = req.send(json_body)?;
 
         let status = resp.status().as_u16();
         let body = resp.body_mut().read_to_string()?;
@@ -658,10 +699,15 @@ mod tests {
 
     /// A scripted mock that records every call and returns queued responses.
     /// Mirrors `RecordingHttp` in `runner_broker` tests.
+    /// One recorded transport call: `(url, internal_auth, bearer, json_body)`.
+    /// `bearer` is the `Authorization: Bearer` value (the acquiring PAT) the
+    /// client presented, or `None` when no bearer was sent (e.g. revoke).
+    type RecordedCall = (String, String, Option<String>, String);
+
     #[derive(Default)]
     struct RecordingMint {
         scripted: Mutex<Vec<Result<MintHttpResponse, ()>>>,
-        calls: Mutex<Vec<(String, String, String)>>,
+        calls: Mutex<Vec<RecordedCall>>,
     }
 
     impl RecordingMint {
@@ -672,7 +718,7 @@ mod tests {
             }
         }
 
-        fn calls(&self) -> Vec<(String, String, String)> {
+        fn calls(&self) -> Vec<RecordedCall> {
             self.calls.lock().unwrap().clone()
         }
     }
@@ -682,11 +728,13 @@ mod tests {
             &self,
             url: &str,
             internal_auth: &str,
+            bearer: Option<&str>,
             json_body: &str,
         ) -> anyhow::Result<MintHttpResponse> {
             self.calls.lock().unwrap().push((
                 url.to_string(),
                 internal_auth.to_string(),
+                bearer.map(str::to_string),
                 json_body.to_string(),
             ));
             let mut q = self.scripted.lock().unwrap();
@@ -735,8 +783,16 @@ mod tests {
         let resp_body = r#"{"token":"tok-abc","pat_id":"pid-xyz","expires_ms":1234567890000}"#;
         let c = client(vec![ok_body(resp_body)]);
 
+        // Installation-PRESENT (CF-worker/webhook) path: installation_id is Some.
         let pat = c
-            .mint("acme/repo", "acme", "job-42", DEADLINE, NOW)
+            .mint(
+                "acme/repo",
+                Some("inst-777"),
+                "pat-acquiring-42",
+                "job-42",
+                DEADLINE,
+                NOW,
+            )
             .await
             .expect("mint must succeed");
 
@@ -746,26 +802,32 @@ mod tests {
         // Token is REDACTED in Debug, but accessible via the field.
         assert_eq!(pat.token, "tok-abc");
 
-        // Exact URL and auth header.
+        // Exact URL, internal-auth header, AND the acquiring PAT presented as the
+        // Authorization: Bearer value (server introspects it → tenant).
         let calls = c.http.calls();
         assert_eq!(calls.len(), 1);
-        let (url, auth, body) = &calls[0];
+        let (url, auth, bearer, body) = &calls[0];
         assert_eq!(
             url,
             "https://d9.internal.example.com/internal/v1/runner/mint"
         );
         assert_eq!(auth, AUTH);
+        assert_eq!(
+            bearer.as_deref(),
+            Some("pat-acquiring-42"),
+            "the acquiring PAT must be presented as Authorization: Bearer"
+        );
 
         // Request body must carry the required fields, including the
         // lease-bound ttl_seconds (remaining time minus the skew margin).
         let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
-        // Frozen contract: repo_full_name + installation_id (the tenant
-        // selector); owner_tenant is REMOVED and must be ABSENT from the wire.
+        // Frozen contract: repo_full_name always; installation_id present here (the
+        // CF-worker path); owner_tenant REMOVED and must be ABSENT from the wire.
         assert_eq!(parsed["repo_full_name"], "acme/repo");
-        assert_eq!(parsed["installation_id"], "acme");
+        assert_eq!(parsed["installation_id"], "inst-777");
         assert!(
             parsed.get("owner_tenant").is_none(),
-            "owner_tenant must NOT be sent — the server derives the tenant from installation_id"
+            "owner_tenant must NOT be sent — the server never lets the caller name the tenant"
         );
         assert_eq!(parsed["job_id"], "job-42");
         assert_eq!(parsed["scope"], "read-write");
@@ -773,6 +835,57 @@ mod tests {
             parsed["ttl_seconds"], EXPECTED_TTL_SECONDS,
             "ttl_seconds must be the lease's remaining time (1h) minus the 30s skew margin"
         );
+    }
+
+    /// The fabricd/NATIVE path (frozen 2026-07-08): no `installation_id`, so the
+    /// field is OMITTED from the JSON entirely (not null, not empty — absent) and
+    /// the tenant is resolved server-side by introspecting the acquiring PAT,
+    /// which is presented as `Authorization: Bearer`. This is the shape hugit's
+    /// check-host acquire produces (a native repo has no GitHub App installation).
+    #[tokio::test]
+    async fn mint_without_installation_id_omits_field_and_presents_bearer_pat() {
+        let resp_body = r#"{"token":"tok-n","pat_id":"pid-n","expires_ms":1234567890000}"#;
+        let c = client(vec![ok_body(resp_body)]);
+
+        c.mint(
+            "acme/repo",
+            None,
+            "pat-acquiring-native",
+            "job-native",
+            DEADLINE,
+            NOW,
+        )
+        .await
+        .expect("mint must succeed on the native path");
+
+        let calls = c.http.calls();
+        let (_url, _auth, bearer, body) = &calls[0];
+
+        // The acquiring PAT rides the Authorization: Bearer header — NOT the body.
+        assert_eq!(
+            bearer.as_deref(),
+            Some("pat-acquiring-native"),
+            "native path must present the acquiring PAT as Authorization: Bearer"
+        );
+
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed["repo_full_name"], "acme/repo");
+        // installation_id ABSENT (skip_serializing_if) — the whole point.
+        assert!(
+            parsed.get("installation_id").is_none(),
+            "installation_id must be ABSENT from the JSON on the native path (not null/empty)"
+        );
+        // The PAT must NEVER leak into the body — it is a header-only credential.
+        assert!(
+            !body.contains("pat-acquiring-native"),
+            "the acquiring PAT must never appear in the request body"
+        );
+        assert!(
+            parsed.get("owner_tenant").is_none(),
+            "owner_tenant must NOT be sent — the caller never names the tenant"
+        );
+        assert_eq!(parsed["job_id"], "job-native");
+        assert_eq!(parsed["scope"], "read-write");
     }
 
     /// A lease with less remaining time than the skew margin derives
@@ -788,7 +901,14 @@ mod tests {
         // 10 s remaining < 30 s margin ⇒ ttl saturates to 0 ⇒ local fail-closed.
         let now = DEADLINE - 10_000;
         let err = c
-            .mint("acme/repo", "acme", "job-nearly-expired", DEADLINE, now)
+            .mint(
+                "acme/repo",
+                None,
+                "pat-acq",
+                "job-nearly-expired",
+                DEADLINE,
+                now,
+            )
             .await
             .expect_err("a zero-ttl (near-expired) lease must fail closed, never mint");
         assert!(
@@ -811,37 +931,45 @@ mod tests {
     /// separately by CAS URL routing — see `cas_http::HttpBootCas::route_key` +
     /// the a13 adversarial test).
     ///
-    /// Under the frozen contract (2026-07-08) the tenant is NO LONGER named on
-    /// the wire — `owner_tenant` is REMOVED; the server DERIVES the tenant from
-    /// `installation_id`. This is a posture UPGRADE: the fabricd literally cannot
-    /// request a wildcard/`_public`/cross-tenant scope, because it never names a
-    /// tenant at all. This test is the TRIPWIRE on two invariants that must
-    /// survive any refactor: (1) `owner_tenant` must NEVER reappear on the wire
-    /// (its return = the single-tenant hole reopening), and (2) the scope stays
-    /// `read-write` (a change is a security-posture change, not a refactor).
+    /// Under the frozen contract (2026-07-08) the tenant is NEVER a body field —
+    /// `owner_tenant` is REMOVED; the server resolves the tenant from
+    /// `installation_id` (when present) or by introspecting the acquiring PAT
+    /// (never from a caller-named string). This is a posture UPGRADE: the fabricd
+    /// literally cannot request a wildcard/`_public`/cross-tenant scope, because
+    /// it never names a tenant at all. This test is the TRIPWIRE on two invariants
+    /// that must survive any refactor: (1) `owner_tenant` must NEVER reappear on
+    /// the wire (its return = the single-tenant hole reopening), and (2) the scope
+    /// stays `read-write` (a change is a security-posture change, not a refactor).
     #[tokio::test]
     async fn mint_pat_is_tenant_scoped_read_write_intra_tenant_poison_accepted() {
         let resp_body = r#"{"token":"tok-rw","pat_id":"pid-rw","expires_ms":1234567890000}"#;
         let c = client(vec![ok_body(resp_body)]);
 
-        c.mint("acme/repo", "acme", "job-7", DEADLINE, NOW)
-            .await
-            .expect("mint must succeed");
+        c.mint(
+            "acme/repo",
+            Some("inst-acme"),
+            "pat-acq-7",
+            "job-7",
+            DEADLINE,
+            NOW,
+        )
+        .await
+        .expect("mint must succeed");
 
         let calls = c.http.calls();
-        let (_url, _auth, body) = &calls[0];
+        let (_url, _auth, _bearer, body) = &calls[0];
         let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
 
         // (1) The tenant is never CLIENT-NAMED: owner_tenant must be ABSENT, and
-        // no wildcard / cross-tenant / `_public` selector may appear anywhere.
+        // the installation_id selector (when present) is never a wildcard/public.
         assert!(
             parsed.get("owner_tenant").is_none(),
-            "owner_tenant must NEVER reappear on the wire — the server derives the \
-             tenant from installation_id; its return is the single-tenant hole reopening"
+            "owner_tenant must NEVER reappear on the wire — the server resolves the \
+             tenant (installation-map or PAT-introspection); its return is the hole reopening"
         );
         assert_eq!(
-            parsed["installation_id"], "acme",
-            "the tenant selector is installation_id (server-derived, never client-named)"
+            parsed["installation_id"], "inst-acme",
+            "the installation_id selector (when present) is server-mapped, never client-named"
         );
         assert_ne!(
             parsed["installation_id"], "_public",
@@ -871,7 +999,7 @@ mod tests {
         let c = client(vec![ok_body(&resp_body)]);
 
         let err = c
-            .mint("acme/repo", "acme", "job-late", deadline_ms, 0)
+            .mint("acme/repo", None, "pat-acq", "job-late", deadline_ms, 0)
             .await
             .expect_err("must fail with TtlExceedsLease when expires_ms > deadline");
 
@@ -893,7 +1021,7 @@ mod tests {
     async fn mint_401_returns_unauthorized() {
         let c = client(vec![status_resp(401)]);
         let err = c
-            .mint("acme/repo", "acme", "job-401", DEADLINE, NOW)
+            .mint("acme/repo", None, "pat-acq", "job-401", DEADLINE, NOW)
             .await
             .expect_err("must fail on 401");
         assert_eq!(err, MintError::Unauthorized, "401 must map to Unauthorized");
@@ -905,7 +1033,7 @@ mod tests {
     async fn mint_403_returns_unauthorized() {
         let c = client(vec![status_resp(403)]);
         let err = c
-            .mint("acme/repo", "acme", "job-403", DEADLINE, NOW)
+            .mint("acme/repo", None, "pat-acq", "job-403", DEADLINE, NOW)
             .await
             .expect_err("must fail on 403");
         assert_eq!(err, MintError::Unauthorized, "403 must map to Unauthorized");
@@ -917,7 +1045,7 @@ mod tests {
     async fn mint_500_returns_bad_status() {
         let c = client(vec![status_resp(500)]);
         let err = c
-            .mint("acme/repo", "acme", "job-500", DEADLINE, NOW)
+            .mint("acme/repo", None, "pat-acq", "job-500", DEADLINE, NOW)
             .await
             .expect_err("must fail on 500");
         assert_eq!(
@@ -933,7 +1061,7 @@ mod tests {
     async fn mint_malformed_2xx_body_returns_bad_response() {
         let c = client(vec![ok_body(r#"{"not":"the_right_fields"}"#)]);
         let err = c
-            .mint("acme/repo", "acme", "job-bad-body", DEADLINE, NOW)
+            .mint("acme/repo", None, "pat-acq", "job-bad-body", DEADLINE, NOW)
             .await
             .expect_err("must fail on malformed body");
         assert_eq!(
@@ -949,7 +1077,7 @@ mod tests {
     async fn mint_transport_error_returns_unreachable() {
         let c = client(vec![transport_err()]);
         let err = c
-            .mint("acme/repo", "acme", "job-transport", DEADLINE, NOW)
+            .mint("acme/repo", None, "pat-acq", "job-transport", DEADLINE, NOW)
             .await
             .expect_err("must fail on transport error");
         assert_eq!(

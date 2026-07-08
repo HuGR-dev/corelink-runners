@@ -728,33 +728,36 @@ pub(crate) async fn finalize_admitted_lease(
     //
     // A7 invariant: a CONFIGURED mint that returns `Err` MUST fail closed (no box).
     if let Some(mint) = state.cas_pat_mint.as_ref() {
-        // ── Frozen mint contract (server TL, 2026-07-08) ──────────────────────
-        // The mint DERIVES the tenant from `installation_id` and authorizes the
-        // grant against the `(tenant, repo_full_name)` allowlist; `owner_tenant`
-        // is no longer sent (naming the tenant client-side was the single-tenant
-        // hole the 283-step-3 WP closed). Both fields are REQUIRED TOGETHER for a
-        // hydrating (moat) lease. Gate on their presence:
-        //   • both present → mint the per-job CAS PAT (below);
-        //   • both absent  → non-hydrating lease → SKIP the mint (cold run — the
-        //                    moat-off default; ZERO regression on every non-moat
-        //                    acquire, which carries neither field);
-        //   • exactly one  → a half-declared hydration intent is MALFORMED → fail
-        //                    closed (never provision a box on a partial moat
-        //                    request), mirroring the mint-Err arm below.
+        // ── Frozen mint contract (server TL, 2026-07-08 + the installation_id-
+        //    OPTIONAL decision) ─────────────────────────────────────────────────
+        // The tenant is NEVER a body field (naming it was the single-tenant hole
+        // the 283-step-3 WP closed). The server resolves it from `installation_id`
+        // (installation-map) when present — the CF-worker/webhook caller — else by
+        // INTROSPECTING the acquiring PAT we present as `Authorization: Bearer` —
+        // the fabricd/native caller, which has no GitHub App installation. So
+        // `repo_full_name` is the load-bearing "hydrate" signal (allowlist-checked
+        // against the resolved tenant); `installation_id` is OPTIONAL. Gate:
+        //   • repo present (installation_id present OR absent) → mint;
+        //   • both absent → non-hydrating lease → SKIP the mint (cold run — the
+        //                   moat-off default; ZERO regression on every non-moat
+        //                   acquire, which carries neither field);
+        //   • installation_id WITHOUT repo → MALFORMED (a tenant selector but no
+        //                   repo to allowlist-check) → fail closed (never provision
+        //                   a box on a partial moat request), mirroring the Err arm.
         let hydration = match (
             req.repo_full_name.as_deref(),
             req.installation_id.as_deref(),
         ) {
-            (Some(repo), Some(inst)) => Some((repo, inst)),
+            (Some(repo), inst_opt) => Some((repo, inst_opt)),
             (None, None) => None,
-            _ => {
+            (None, Some(_)) => {
                 state.teardown_lease(&lease_id).await;
                 if let Ok(mut ledger) = state.ledger.lock() {
                     let _ = ledger.remove(&lease_id);
                 }
                 return FinalizeOutcome::Done(fail_closed(
-                    "acquire declared exactly one of {repo_full_name, installation_id}; both are \
-                     required together for a hydrating (moat) lease — fail closed",
+                    "acquire declared installation_id without repo_full_name; repo_full_name is \
+                     required for a hydrating (moat) lease — fail closed",
                 ));
             }
         };
@@ -771,6 +774,9 @@ pub(crate) async fn finalize_admitted_lease(
                 .mint(
                     repo_full_name,
                     installation_id,
+                    // The acquiring PAT — presented as `Authorization: Bearer` so the
+                    // server introspects it → tenant when no installation_id is sent.
+                    &pat.0,
                     &lease_id,
                     lease_deadline_ms,
                     state.clock.now_ms(),
