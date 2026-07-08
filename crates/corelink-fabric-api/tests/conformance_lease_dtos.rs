@@ -272,6 +272,8 @@ fn close_response_conformance_vector_is_byte_exact() {
         result_binding_sig: "cmVzdWx0LWJpbmRpbmctc2lnLXYxLWJhc2U2NA==".to_string(),
         result_binding_sig_v2: "cmVzdWx0LWJpbmRpbmctc2lnLXYyLWJhc2U2NA==".to_string(),
         fabric_key_id: "2d16e9ef2102df2a".to_string(),
+        // Wire-invisible (skip-if-none) → the byte-exact vector is unchanged.
+        intent_metrics_sig: None,
     };
 
     let re = pretty(&generated);

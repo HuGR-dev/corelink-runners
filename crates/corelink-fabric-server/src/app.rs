@@ -467,6 +467,14 @@ pub struct AppState {
     /// [`AppState::with_observability_key`].  Stored as `Arc<str>` (cheap clone);
     /// it must never appear in any error body or log line.
     pub(crate) observability_key: Option<Arc<str>>,
+    /// Emit the `intent_metrics_sig` (attested-cost binding) on close responses.
+    /// **Default-off** (`false`) → the field is `None` → wire-INVISIBLE, so the
+    /// close response is byte-identical to today. Flipped on via
+    /// `FABRIC_EMIT_INTENT_METRICS_SIG` ONLY after the verifier (hugit) adopts
+    /// the field (it deserializes under `deny_unknown_fields`). The signing
+    /// mechanism (`attestation::sign_intent_metrics`) is always built; this only
+    /// gates whether the signature is placed on the wire.
+    pub(crate) emit_intent_metrics_sig: bool,
     /// AUDIT P1: bounds how many `POST /v1/leases/{id}/close` ack windows may
     /// occupy a blocking-pool thread concurrently. The frozen `JobClose::close`
     /// ack wait blocks for up to the §13.2 ack window (30s) on a std condvar; it
@@ -658,6 +666,10 @@ impl AppState {
             slot_meter: Arc::new(Mutex::new(SlotMeter::new())),
             // Default-off: no observability key → the occupancy route 404s.
             observability_key: None,
+            // Default-off: the attested-cost binding is not placed on the wire
+            // until the verifier adopts the field (composition root overrides
+            // from FABRIC_EMIT_INTENT_METRICS_SIG).
+            emit_intent_metrics_sig: false,
             // AUDIT P1: default close ack-window concurrency cap. The production
             // composition root overrides it from FABRIC_CLOSE_ACK_MAX_INFLIGHT
             // via `with_close_ack_max_inflight`.
@@ -741,6 +753,15 @@ impl AppState {
     #[must_use]
     pub fn with_provision_max_inflight(mut self, max_inflight: usize) -> Self {
         self.provision_gate = Arc::new(tokio::sync::Semaphore::new(max_inflight.max(1)));
+        self
+    }
+
+    /// Enable emitting the `intent_metrics_sig` (attested-cost binding) on close
+    /// responses. Default-off (wire-invisible); flip on only after the verifier
+    /// adopts the field. Wired from `FABRIC_EMIT_INTENT_METRICS_SIG`.
+    #[must_use]
+    pub fn with_emit_intent_metrics_sig(mut self, emit: bool) -> Self {
+        self.emit_intent_metrics_sig = emit;
         self
     }
 

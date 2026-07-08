@@ -290,6 +290,7 @@ fn dtos_roundtrip_and_deny_unknown() {
             result_binding_sig: "YmluZGluZw==".to_string(),
             result_binding_sig_v2: "YmluZGluZ3Yy".to_string(),
             fabric_key_id: "2d16e9ef2102df2a".to_string(),
+            intent_metrics_sig: None,
         },
         "CloseResponse",
     );

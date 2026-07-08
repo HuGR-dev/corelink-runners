@@ -86,7 +86,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use corelink_fabric_api::{AttestationKeySetResponse, KeyEntry};
 use corelink_runner::attest::{FabricSigner, verify_chain, verify_raw};
-use corelink_runners_contracts::{AttestationChain, CheckDef, CheckResult};
+use corelink_runners_contracts::{AttestationChain, CheckDef, CheckResult, IntentMetrics};
 
 use crate::app::AppState;
 
@@ -165,6 +165,75 @@ pub fn sign_result_binding(signer: &FabricSigner, result: &CheckResult) -> Strin
 /// `result_binding_sig_v2` wire field.
 pub fn sign_result_binding_v2(signer: &FabricSigner, result: &CheckResult) -> String {
     signer.sign_raw(&result_binding_preimage_v2(result))
+}
+
+/// The intent-metrics binding pre-image — the fabric's signature over the §13
+/// [`IntentMetrics`] (the attested **cost**), bound to the specific `lease_id`
+/// + `tenant` so a signature can never be replayed onto a different lease or
+/// tenant. This is what makes the OFF-BOX (A-path) cost tamper-evident: the
+/// off-box `result_binding_sig_v2` covers an all-empty `CheckResult` (no box,
+/// no result), so it binds nothing about the cost; the chain binds the tenant
+/// but not the metrics. This binding closes that gap — a verifier recomputes
+/// the pre-image from the reported metrics + lease + tenant and checks the sig
+/// against the published fabric key, proving the fabric recorded exactly these
+/// metrics for exactly this lease.
+///
+/// Byte formula (same LP framing + big-endian integers as the chain/result
+/// pre-images, so hugit mirrors it with the identical primitives):
+///
+/// ```text
+/// LP(lease_id) ‖ LP(tenant)
+///   ‖ u64_be(tokens.input) ‖ u64_be(tokens.output) ‖ u64_be(tokens.cache_read)
+///   ‖ u64_be(tokens.cache_write) ‖ u64_be(tokens.total)
+///   ‖ u64_be(wall_ms) ‖ u64_be(active_ms) ‖ u64_be(tool_calls)
+///   ‖ u32_be(tool_breakdown.len) ‖ for each in Vec order: LP(tool) ‖ u64_be(count)
+///   ‖ u64_be(model_turns) ‖ u64_be(cost_usd_micros)
+/// where LP(s) = u32_be(byte_len(s)) ‖ utf8_bytes(s); all integers big-endian.
+/// ```
+///
+/// `tool_breakdown` is appended in `Vec` order — the order is part of the
+/// binding. This is a wire/seam formula hugit must mirror byte-exactly to
+/// verify. ADDITIVE + independent of the v1/v2 result bindings (a distinct
+/// message; never validates as either).
+pub fn intent_metrics_preimage(lease_id: &str, tenant: &str, m: &IntentMetrics) -> Vec<u8> {
+    let mut out = Vec::new();
+    lp(&mut out, lease_id);
+    lp(&mut out, tenant);
+    for v in [
+        m.tokens.input,
+        m.tokens.output,
+        m.tokens.cache_read,
+        m.tokens.cache_write,
+        m.tokens.total,
+        m.wall_ms,
+        m.active_ms,
+        m.tool_calls,
+    ] {
+        out.extend_from_slice(&v.to_be_bytes());
+    }
+    let count = u32::try_from(m.tool_breakdown.len()).expect("tool_breakdown exceeds u32::MAX");
+    out.extend_from_slice(&count.to_be_bytes());
+    for t in &m.tool_breakdown {
+        lp(&mut out, &t.tool);
+        out.extend_from_slice(&t.count.to_be_bytes());
+    }
+    out.extend_from_slice(&m.model_turns.to_be_bytes());
+    out.extend_from_slice(&m.cost_usd_micros.to_be_bytes());
+    out
+}
+
+/// Sign the intent-metrics pre-image (the attested cost, bound to lease +
+/// tenant) with the fabric key; returns the detached standard-base64 signature
+/// — the `intent_metrics_sig` wire field (emitted only when
+/// `FABRIC_EMIT_INTENT_METRICS_SIG` is on, pending hugit's verifier adopting
+/// the field — additive, so default-off is wire-invisible).
+pub fn sign_intent_metrics(
+    signer: &FabricSigner,
+    lease_id: &str,
+    tenant: &str,
+    m: &IntentMetrics,
+) -> String {
+    signer.sign_raw(&intent_metrics_preimage(lease_id, tenant, m))
 }
 
 /// Build and sign a chain over explicit links (the shared core of the exec
@@ -468,6 +537,70 @@ mod tests {
         assert!(
             verify_raw(&empty_outcome, &binding_v2, &pk).unwrap(),
             "the empty v2 binding must verify the honest empty outcome"
+        );
+    }
+
+    /// The intent-metrics binding (attested cost) verifies over its
+    /// first-principles pre-image and is bound to lease + tenant: the SAME
+    /// signature does NOT verify against a different lease_id or tenant
+    /// (anti-replay), and tampering the cost breaks it.
+    #[test]
+    fn intent_metrics_binding_verifies_and_is_lease_tenant_bound() {
+        use corelink_runners_contracts::{IntentMetrics, TokenCounts, ToolCount};
+        let signer = FabricSigner::new_from_bytes(&SEED);
+        let pk = signer.public_key_b64();
+        let m = IntentMetrics {
+            tokens: TokenCounts {
+                input: 10,
+                output: 5,
+                cache_read: 3,
+                cache_write: 1,
+                total: 15,
+            },
+            wall_ms: 1200,
+            active_ms: 900,
+            tool_calls: 4,
+            tool_breakdown: vec![
+                ToolCount {
+                    tool: "bash".to_string(),
+                    count: 3,
+                },
+                ToolCount {
+                    tool: "read".to_string(),
+                    count: 1,
+                },
+            ],
+            model_turns: 2,
+            cost_usd_micros: 42_000,
+        };
+        let sig = sign_intent_metrics(&signer, "lease-A", "acme", &m);
+
+        // Verifies first-principles over the documented pre-image.
+        assert!(
+            verify_raw(&intent_metrics_preimage("lease-A", "acme", &m), &sig, &pk).unwrap(),
+            "the intent-metrics binding must verify over its pre-image"
+        );
+        // Anti-replay: the SAME signature must not verify under a different
+        // lease_id or tenant.
+        assert!(
+            !verify_raw(&intent_metrics_preimage("lease-B", "acme", &m), &sig, &pk).unwrap(),
+            "lease-bound: a different lease_id must not verify"
+        );
+        assert!(
+            !verify_raw(&intent_metrics_preimage("lease-A", "evil", &m), &sig, &pk).unwrap(),
+            "tenant-bound: a different tenant must not verify"
+        );
+        // Tamper: bumping the cost by one micro-USD breaks the binding.
+        let mut tampered = m.clone();
+        tampered.cost_usd_micros += 1;
+        assert!(
+            !verify_raw(
+                &intent_metrics_preimage("lease-A", "acme", &tampered),
+                &sig,
+                &pk
+            )
+            .unwrap(),
+            "a tampered cost must fail the binding"
         );
     }
 

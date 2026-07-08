@@ -81,7 +81,7 @@ use corelink_runner::envelope::{AbnormalKind, CloseOutcome, JobClose, JobStatus}
 use corelink_runners_contracts::{IntentMetrics, RunnerState, TokenCounts};
 
 use crate::app::AppState;
-use crate::attestation::{attest_close_result, attest_no_result};
+use crate::attestation::{attest_close_result, attest_no_result, sign_intent_metrics};
 use crate::auth::error_response;
 use crate::exec::compute_memo_key;
 use crate::handlers::envelope::HookRegistry;
@@ -360,6 +360,17 @@ pub(crate) async fn close(
     };
     let fabric_key_id = state.signer.key_id();
 
+    // Intent-metrics binding (the attested COST) — ADDITIVE + OPT-IN. Off-box
+    // closes bind no cost through the result-binding sigs (they cover an empty
+    // CheckResult), so this signs the finalized §13 `metrics` against this
+    // lease + tenant, making the off-box cost tamper-evident. Emitted only when
+    // `FABRIC_EMIT_INTENT_METRICS_SIG` is on; `None` is wire-INVISIBLE
+    // (skip-if-none), so the wire is byte-identical until the verifier adopts
+    // the field.
+    let intent_metrics_sig = state
+        .emit_intent_metrics_sig
+        .then(|| sign_intent_metrics(state.signer.as_ref(), &lease_id, tenant.as_str(), &metrics));
+
     // ── 8. ONE atomic body: metrics (required) + flag + echoed CheckResult
     // + attestation — the §13.1 same-step delivery at mechanism level.
     (
@@ -374,6 +385,7 @@ pub(crate) async fn close(
             result_binding_sig,
             result_binding_sig_v2,
             fabric_key_id,
+            intent_metrics_sig,
         }),
     )
         .into_response()
