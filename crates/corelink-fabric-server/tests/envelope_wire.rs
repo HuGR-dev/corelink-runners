@@ -75,6 +75,8 @@ fn two_tenant_harness() -> (
 /// POST /v1/leases with the given PAT and return the response body as JSON.
 async fn acquire_as(app: &axum::Router, bearer: &str) -> (StatusCode, serde_json::Value) {
     let body = AcquireRequest {
+        repo_full_name: None,
+        installation_id: None,
         image_digest: PINNED_IMAGE.to_string(),
         net_policy: "isolated".to_string(),
         tmp_root: "/work/tmp".to_string(),
@@ -255,6 +257,8 @@ async fn reaped_lease_unregisters_hook() {
 
     // Acquire a lease with a 1 ms TTL (expires almost immediately).
     let body = AcquireRequest {
+        repo_full_name: None,
+        installation_id: None,
         image_digest: PINNED_IMAGE.to_string(),
         net_policy: "isolated".to_string(),
         tmp_root: "/work/tmp".to_string(),

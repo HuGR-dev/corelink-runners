@@ -130,6 +130,8 @@ async fn assert_frozen_error(response: Response, err: ApiError) {
 /// Acquire one lease as `bearer` (TTL = [`TTL_MS`]); returns its lease id.
 async fn acquire(h: &Harness, bearer: &str) -> String {
     let body = AcquireRequest {
+        repo_full_name: None,
+        installation_id: None,
         image_digest: PINNED_IMAGE.to_string(),
         net_policy: "isolated".to_string(),
         tmp_root: "/work/tmp".to_string(),

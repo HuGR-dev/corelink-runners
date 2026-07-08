@@ -139,6 +139,8 @@ fn harness_allow(
 /// path forces `"egress-runner"` server-side and must ignore this string.
 fn runner_acq_body() -> AcquireRequest {
     AcquireRequest {
+        repo_full_name: None,
+        installation_id: None,
         image_digest: PINNED_IMAGE.to_string(),
         net_policy: "this-string-must-be-ignored".to_string(),
         tmp_root: "/work/tmp".to_string(),
@@ -157,6 +159,8 @@ fn runner_acq_body() -> AcquireRequest {
 
 fn check_acq_body(net_policy: &str) -> AcquireRequest {
     AcquireRequest {
+        repo_full_name: None,
+        installation_id: None,
         image_digest: PINNED_IMAGE.to_string(),
         net_policy: net_policy.to_string(),
         tmp_root: "/work/tmp".to_string(),
@@ -398,6 +402,8 @@ async fn runner_mint_failure_fails_closed_and_frees_the_slot() {
 /// A runner acquire body targeting an arbitrary repo.
 fn runner_acq_body_target(owner: &str, repo: &str) -> AcquireRequest {
     AcquireRequest {
+        repo_full_name: None,
+        installation_id: None,
         image_digest: PINNED_IMAGE.to_string(),
         net_policy: "ignored".to_string(),
         tmp_root: "/work/tmp".to_string(),

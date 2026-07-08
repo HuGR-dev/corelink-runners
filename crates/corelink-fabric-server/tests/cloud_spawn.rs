@@ -504,6 +504,8 @@ async fn acquire_fails_closed_when_provision_fails() {
     let (router, ledger) = harness_with_provisioner(prov);
 
     let body = AcquireRequest {
+        repo_full_name: None,
+        installation_id: None,
         image_digest: PINNED_IMAGE.to_string(),
         net_policy: "isolated".to_string(),
         tmp_root: "/work/tmp".to_string(),
@@ -607,6 +609,8 @@ async fn provision_runs_only_after_admission() {
     // An UNPINNED image (no @sha256: digest) — rejected at ContainerSpec::from_lease
     // before provision is ever called.
     let body = AcquireRequest {
+        repo_full_name: None,
+        installation_id: None,
         image_digest: "alpine:latest".to_string(), // not pinned, no digest
         net_policy: "isolated".to_string(),
         tmp_root: "/work/tmp".to_string(),
@@ -679,6 +683,8 @@ async fn close_invokes_teardown() {
 
     // Acquire a lease.
     let acq_body = AcquireRequest {
+        repo_full_name: None,
+        installation_id: None,
         image_digest: PINNED_IMAGE.to_string(),
         net_policy: "isolated".to_string(),
         tmp_root: "/work/tmp".to_string(),
@@ -828,6 +834,8 @@ async fn http_default_off_acquire_ok_exec_503() {
 
     // Acquire — NoBoxProvisioner is a no-op Ok → 200.
     let acq_body = AcquireRequest {
+        repo_full_name: None,
+        installation_id: None,
         image_digest: PINNED_IMAGE.to_string(),
         net_policy: "isolated".to_string(),
         tmp_root: "/work/tmp".to_string(),
@@ -909,6 +917,8 @@ async fn http_exec_on_unbound_lease_503() {
 
     // Acquire — provision is no-op → 200.
     let acq_body = AcquireRequest {
+        repo_full_name: None,
+        installation_id: None,
         image_digest: PINNED_IMAGE.to_string(),
         net_policy: "isolated".to_string(),
         tmp_root: "/work/tmp".to_string(),
@@ -992,6 +1002,8 @@ async fn http_split_registry_exec_503() {
 
     // Acquire — NorthflankBoxProvisioner binds into reg_prov → 200.
     let acq_body = AcquireRequest {
+        repo_full_name: None,
+        installation_id: None,
         image_digest: PINNED_IMAGE.to_string(),
         net_policy: "isolated".to_string(),
         tmp_root: "/work/tmp".to_string(),
@@ -1078,6 +1090,8 @@ async fn http_orphan_teardown_on_post_provision_failure() {
     let router = app(store, state);
 
     let acq_body = AcquireRequest {
+        repo_full_name: None,
+        installation_id: None,
         image_digest: PINNED_IMAGE.to_string(),
         net_policy: "isolated".to_string(),
         tmp_root: "/work/tmp".to_string(),
@@ -1156,6 +1170,8 @@ async fn http_close_teardown_failure_is_fail_closed_and_retryable() {
 
     // Acquire.
     let acq_body = AcquireRequest {
+        repo_full_name: None,
+        installation_id: None,
         image_digest: PINNED_IMAGE.to_string(),
         net_policy: "isolated".to_string(),
         tmp_root: "/work/tmp".to_string(),

@@ -210,6 +210,8 @@ async fn body_json(response: Response) -> serde_json::Value {
 /// A RUNNER acquire (`runner = Some(..)`) → `from_runner_lease` (allow_egress=true).
 fn runner_acq_body() -> AcquireRequest {
     AcquireRequest {
+        repo_full_name: None,
+        installation_id: None,
         image_digest: PINNED_IMAGE.to_string(),
         net_policy: "ignored-runner-forces-egress".to_string(),
         tmp_root: "/work/tmp".to_string(),
@@ -230,6 +232,8 @@ fn runner_acq_body() -> AcquireRequest {
 /// (allow_egress=false, no_network=true).
 fn check_acq_body() -> AcquireRequest {
     AcquireRequest {
+        repo_full_name: None,
+        installation_id: None,
         image_digest: PINNED_IMAGE.to_string(),
         net_policy: "none".to_string(),
         tmp_root: "/work/tmp".to_string(),
@@ -325,6 +329,8 @@ async fn hybrid_check_acquire_routes_to_northflank_not_cloudflare() {
 /// injected into the spec env — the rota-A discriminator.
 fn check_host_acq_body() -> AcquireRequest {
     AcquireRequest {
+        repo_full_name: None,
+        installation_id: None,
         image_digest: PINNED_IMAGE.to_string(),
         net_policy: "none".to_string(),
         tmp_root: "/work/tmp".to_string(),

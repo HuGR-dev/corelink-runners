@@ -156,6 +156,8 @@ async fn assert_frozen_error(response: Response, err: ApiError) {
 /// test needs the refusal, not just the happy id).
 async fn acquire_raw(h: &Harness, bearer: &str) -> Response {
     let body = AcquireRequest {
+        repo_full_name: None,
+        installation_id: None,
         image_digest: PINNED_IMAGE.to_string(),
         net_policy: "isolated".to_string(),
         tmp_root: "/work/tmp".to_string(),
