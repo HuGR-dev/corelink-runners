@@ -189,6 +189,10 @@ pub struct ServerConfig {
     /// must be ≥ 1). Bounds how many provisions may pin a blocking-pool thread at
     /// once on the single-flight singleton; the rest await a permit asynchronously.
     pub provision_max_inflight: usize,
+    /// Emit the `intent_metrics_sig` attested-cost binding on close responses.
+    /// From `FABRIC_EMIT_INTENT_METRICS_SIG` (default `false` → wire-invisible;
+    /// flip on only after the verifier adopts the field).
+    pub emit_intent_metrics_sig: bool,
     /// AUDIT P2: global in-flight request cap. From
     /// `FABRIC_MAX_INFLIGHT_REQUESTS` (default
     /// [`DEFAULT_MAX_INFLIGHT_REQUESTS`], must be ≥ 1). Requests beyond this are
@@ -275,6 +279,7 @@ impl std::fmt::Debug for ServerConfig {
             .field("pg_tls", &self.pg_tls)
             .field("close_ack_max_inflight", &self.close_ack_max_inflight)
             .field("provision_max_inflight", &self.provision_max_inflight)
+            .field("emit_intent_metrics_sig", &self.emit_intent_metrics_sig)
             .field("max_inflight_requests", &self.max_inflight_requests)
             .field("admission_mode", &self.admission_mode)
             .field("admission_queue_wait", &self.admission_queue_wait)
@@ -636,6 +641,15 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
         crate::app::DEFAULT_PROVISION_MAX_INFLIGHT,
     )?;
 
+    // ── Attested-cost binding emission (default-off, wire-invisible) ─────────
+    // Truthy = "1" or "true" (case-insensitive); anything else / absent = off.
+    let emit_intent_metrics_sig = get("FABRIC_EMIT_INTENT_METRICS_SIG")
+        .map(|v| {
+            let v = v.trim();
+            v == "1" || v.eq_ignore_ascii_case("true")
+        })
+        .unwrap_or(false);
+
     // ── AUDIT P2: global in-flight request cap ───────────────────────────────
     // Optional, default DEFAULT_MAX_INFLIGHT_REQUESTS; 0/unparseable → error.
     let max_inflight_requests = parse_positive_usize(
@@ -857,6 +871,7 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
         pg_tls,
         close_ack_max_inflight,
         provision_max_inflight,
+        emit_intent_metrics_sig,
         max_inflight_requests,
         admission_mode,
         admission_queue_wait,
@@ -1249,6 +1264,7 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
     let state = state
         .with_close_ack_max_inflight(cfg.close_ack_max_inflight)
         .with_provision_max_inflight(cfg.provision_max_inflight)
+        .with_emit_intent_metrics_sig(cfg.emit_intent_metrics_sig)
         .with_max_inflight_requests(cfg.max_inflight_requests);
 
     // ── CP4 queued fair admission (ADR-0005) — DEFAULT-OFF. Only under

@@ -504,6 +504,23 @@ pub struct CloseResponse {
     /// [`ExecResponse::fabric_key_id`]. ADDITIVE; `#[serde(default)]`.
     #[serde(default)]
     pub fabric_key_id: String,
+
+    /// The fabric's signature over the §13 `metrics` (the attested **cost**),
+    /// bound to `lease_id` + tenant — makes the OFF-BOX (A-path) cost
+    /// tamper-evident (the v1/v2 result-binding sigs cover an all-empty
+    /// `CheckResult` off-box, so they bind no cost; the chain binds the tenant
+    /// but not the metrics). Pre-image formula:
+    /// `attestation::intent_metrics_preimage` (fabric-server).
+    ///
+    /// **ADDITIVE + OPT-IN, wire-INVISIBLE by default.** `Option` +
+    /// `skip_serializing_if = "Option::is_none"` means a `None` is ABSENT from
+    /// the JSON (not `null`), so a peer under `deny_unknown_fields` that has
+    /// not yet transcribed this field is unaffected. The fabric emits `Some`
+    /// only when `FABRIC_EMIT_INTENT_METRICS_SIG` is on — flip it on only AFTER
+    /// the verifier (hugit) adopts the field. Until then the wire is byte-
+    /// identical to today.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent_metrics_sig: Option<String>,
 }
 
 /// One entry in the `GET /v1/attestation/key` key-set response. Forward-
