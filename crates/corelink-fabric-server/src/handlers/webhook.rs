@@ -957,7 +957,7 @@ mod tests {
                 // the webhook-driven runner acquires admit (the `someone-else/their-repo`
                 // rejection test is denied EITHER at the webhook allowlist or, absent
                 // that, by this fail-closed admission gate).
-                repo_allowlist: vec!["repo:humangr-labs/corelink-runners".to_string()],
+                repo_allowlist: vec!["repo:HumanGuardrail/corelink-runners".to_string()],
             }])),
             Arc::new(FixedClock(1_717_000_000_000)),
         )
@@ -1034,7 +1034,12 @@ mod tests {
     #[tokio::test]
     async fn no_secret_configured_is_404() {
         let (state, _, _) = webhook_state(None, 5, vec!["corelink-dogfood".into()], None);
-        let body = queued_body(1, &["corelink-dogfood"], "humangr-labs", "corelink-runners");
+        let body = queued_body(
+            1,
+            &["corelink-dogfood"],
+            "HumanGuardrail",
+            "corelink-runners",
+        );
         let resp = router(state)
             .oneshot(webhook_request(
                 "workflow_job",
@@ -1051,7 +1056,12 @@ mod tests {
     async fn bad_signature_is_401() {
         let (state, provisioned, _) =
             webhook_state(Some(SECRET), 5, vec!["corelink-dogfood".into()], None);
-        let body = queued_body(1, &["corelink-dogfood"], "humangr-labs", "corelink-runners");
+        let body = queued_body(
+            1,
+            &["corelink-dogfood"],
+            "HumanGuardrail",
+            "corelink-runners",
+        );
 
         // Missing header.
         let r1 = router(state.clone())
@@ -1102,7 +1112,7 @@ mod tests {
         let body = queued_body(
             42,
             &["corelink-dogfood"],
-            "humangr-labs",
+            "HumanGuardrail",
             "corelink-runners",
         );
         let resp = router(state.clone())
@@ -1140,7 +1150,7 @@ mod tests {
         let body = queued_body(
             7,
             &["corelink-dogfood", "corelink-builder"],
-            "humangr-labs",
+            "HumanGuardrail",
             "corelink-runners",
         );
         let resp = router(state)
@@ -1165,7 +1175,7 @@ mod tests {
         let (state, provisioned, _) =
             webhook_state(Some(SECRET), 5, vec!["corelink-dogfood".into()], None);
         for labels in [&["corelink-builder"][..], &["ubuntu-latest"][..]] {
-            let body = queued_body(7, labels, "humangr-labs", "corelink-runners");
+            let body = queued_body(7, labels, "HumanGuardrail", "corelink-runners");
             let resp = router(state.clone())
                 .oneshot(webhook_request(
                     "workflow_job",
@@ -1190,7 +1200,7 @@ mod tests {
         let body = queued_body(
             99,
             &["corelink-dogfood"],
-            "humangr-labs",
+            "HumanGuardrail",
             "corelink-runners",
         );
         let sig = sign(SECRET, &body);
@@ -1219,7 +1229,7 @@ mod tests {
         let body = queued_body(
             55,
             &["corelink-dogfood"],
-            "humangr-labs",
+            "HumanGuardrail",
             "corelink-runners",
         );
         let sig = sign(SECRET, &body);
@@ -1248,7 +1258,7 @@ mod tests {
     /// The repo allowlist rejects a job for a repo not on the list (no provision).
     #[tokio::test]
     async fn repo_allowlist_rejects_foreign_repo() {
-        let allow = Some(vec![("humangr-labs".into(), "corelink-runners".into())]);
+        let allow = Some(vec![("HumanGuardrail".into(), "corelink-runners".into())]);
         let (state, provisioned, _) =
             webhook_state(Some(SECRET), 5, vec!["corelink-dogfood".into()], allow);
         let body = queued_body(5, &["corelink-dogfood"], "someone-else", "their-repo");
@@ -1279,7 +1289,7 @@ mod tests {
         let qbody = queued_body(
             123,
             &["corelink-dogfood"],
-            "humangr-labs",
+            "HumanGuardrail",
             "corelink-runners",
         );
         let r = router(state.clone())
@@ -1298,7 +1308,7 @@ mod tests {
         assert!(!lease_id.is_empty());
         assert_eq!(provisioned.lock().unwrap().len(), 1);
 
-        let cbody = completed_body(123, "humangr-labs", "corelink-runners");
+        let cbody = completed_body(123, "HumanGuardrail", "corelink-runners");
         let r = router(state.clone())
             .oneshot(webhook_request(
                 "workflow_job",
@@ -1327,7 +1337,7 @@ mod tests {
     async fn completed_untracked_job_is_noop() {
         let (state, _, torn_down) =
             webhook_state(Some(SECRET), 5, vec!["corelink-dogfood".into()], None);
-        let body = completed_body(404, "humangr-labs", "corelink-runners");
+        let body = completed_body(404, "HumanGuardrail", "corelink-runners");
         let resp = router(state)
             .oneshot(webhook_request(
                 "workflow_job",
@@ -1507,7 +1517,7 @@ mod tests {
             x if x == env::PAT => Some("pat-x".to_string()),
             x if x == env::RUNNER_IMAGE => Some(PINNED.to_string()),
             x if x == env::LABELS => Some("corelink-dogfood, corelink".to_string()),
-            x if x == env::REPO_ALLOWLIST => Some("HumanGR-Labs/CoreLink-Runners".to_string()),
+            x if x == env::REPO_ALLOWLIST => Some("HumanGuardrail/CoreLink-Runners".to_string()),
             _ => None,
         };
         let (secret, cfg) = autoscaler_config_from_env(get).expect("full config wires");
@@ -1517,7 +1527,7 @@ mod tests {
         assert_eq!(cfg.expiry_ms, DEFAULT_EXPIRY_MS, "expiry default");
         assert_eq!(
             cfg.repo_allowlist,
-            Some(vec![("humangr-labs".into(), "corelink-runners".into())]),
+            Some(vec![("humanguardrail".into(), "corelink-runners".into())]),
             "allowlist is lowercased owner/repo pairs"
         );
     }

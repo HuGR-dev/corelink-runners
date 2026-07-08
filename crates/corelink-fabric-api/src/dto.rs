@@ -695,7 +695,7 @@ mod tests {
             agent: None,
             runner: Some(RunnerSpec {
                 target: RunnerTargetDto::Repo {
-                    owner: "humangr-labs".into(),
+                    owner: "HumanGuardrail".into(),
                     repo: "corelink-runners".into(),
                 },
                 labels: vec!["corelink".into()],
@@ -711,10 +711,10 @@ mod tests {
     #[test]
     fn runner_target_org_serializes_externally_tagged() {
         let target = RunnerTargetDto::Org {
-            org: "humangr-labs".into(),
+            org: "HumanGuardrail".into(),
         };
         let json = serde_json::to_string(&target).unwrap();
-        assert_eq!(json, r#"{"org":{"org":"humangr-labs"}}"#);
+        assert_eq!(json, r#"{"org":{"org":"HumanGuardrail"}}"#);
     }
 
     #[test]

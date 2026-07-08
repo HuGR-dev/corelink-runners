@@ -1411,7 +1411,7 @@ mod tests {
             installation_id: None,
             runner: Some(RunnerSpec {
                 target: RunnerTargetDto::Repo {
-                    owner: "humangr-labs".to_string(),
+                    owner: "HumanGuardrail".to_string(),
                     repo: "corelink-runners".to_string(),
                 },
                 labels: vec![],

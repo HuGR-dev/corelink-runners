@@ -40,7 +40,7 @@
     //     both absent → cold run; installation_id without repo → fail closed.
     //   • server half LIVE: #674 (55d4dcd2) — the PAT-introspection fallback.
     // ONE gate left before arming: server "3/3 seeded" for tenant d863fafb —
-    //   runner_repo_allowlist(d863fafb, 'humangr-labs/corelink-runners') + not-offboarded
+    //   runner_repo_allowlist(d863fafb, 'HumanGuardrail/corelink-runners') + not-offboarded
     //   + runners_entitlement (the tenant_gh_installation_map row is NO LONGER needed on
     //   the native path — tenant comes from the PAT). Until seeded, a hydrating acquire
     //   mints → 403 (allowlist miss) → fail closed; a non-hydrating acquire runs cold.
@@ -52,7 +52,7 @@
     //     "CORELINK_RUNNER_MINT_URL": "https://corelink-api.humangr.com"
     //   (client appends /internal/v1/runner/{mint,revoke}). FABRIC_CRED_TICKET_SECRET is
     //   already set (env-0 C2c). Then drive a check-host acquire
-    //   (repo_full_name=humangr-labs/corelink-runners, no installation_id, d863fafb bearer)
+    //   (repo_full_name=HumanGuardrail/corelink-runners, no installation_id, d863fafb bearer)
     //   → mint via live server → CLW inject → hydrate 4e3da22e toolchain → exec = PROVEN.
   },
 

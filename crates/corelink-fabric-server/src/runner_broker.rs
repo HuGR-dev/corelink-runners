@@ -1021,7 +1021,7 @@ mod tests {
     fn repo_scope() -> RunnerScope {
         RunnerScope {
             target: RunnerTarget::Repo {
-                owner: "humangr-labs".into(),
+                owner: "HumanGuardrail".into(),
                 repo: "corelink-runners".into(),
             },
             labels: vec!["self-hosted".into(), "corelink".into()],
@@ -1031,7 +1031,7 @@ mod tests {
     fn org_scope() -> RunnerScope {
         RunnerScope {
             target: RunnerTarget::Org {
-                org: "humangr-labs".into(),
+                org: "HumanGuardrail".into(),
             },
             labels: vec!["self-hosted".into()],
         }
@@ -1288,7 +1288,7 @@ mod tests {
         let (url1, auth1, body1) = &calls[1];
         assert_eq!(
             url1,
-            "https://api.github.test/repos/humangr-labs/corelink-runners/actions/runners/generate-jitconfig"
+            "https://api.github.test/repos/HumanGuardrail/corelink-runners/actions/runners/generate-jitconfig"
         );
         assert_eq!(auth1, &format!("Bearer {SECRET_INSTALL_TOKEN}"));
         // The JIT-config request carries name + labels + group + work_folder.
@@ -1323,7 +1323,7 @@ mod tests {
         let calls = broker.http.calls();
         let (url1, _, _) = &calls[1];
         assert_eq!(
-            url1, "https://api.github.test/orgs/humangr-labs/actions/runners/generate-jitconfig",
+            url1, "https://api.github.test/orgs/HumanGuardrail/actions/runners/generate-jitconfig",
             "org scope must hit the ORG generate-jitconfig endpoint"
         );
     }
@@ -1622,7 +1622,7 @@ mod tests {
         // Exact repo generate-jitconfig URL (byte-identical to the App leg-3).
         assert_eq!(
             url,
-            "https://api.github.test/repos/humangr-labs/corelink-runners/actions/runners/generate-jitconfig"
+            "https://api.github.test/repos/HumanGuardrail/corelink-runners/actions/runners/generate-jitconfig"
         );
         // The PAT is sent directly as the Bearer credential.
         assert_eq!(auth, &format!("Bearer {SECRET_PAT}"));
@@ -1650,7 +1650,7 @@ mod tests {
 
         let (url, _, _) = &broker.http.calls()[0];
         assert_eq!(
-            url, "https://api.github.test/orgs/humangr-labs/actions/runners/generate-jitconfig",
+            url, "https://api.github.test/orgs/HumanGuardrail/actions/runners/generate-jitconfig",
             "org scope must hit the ORG generate-jitconfig endpoint"
         );
     }

@@ -156,7 +156,7 @@ fn cloudflare_harness(
         tenant: acme(),
         max_concurrency: 4,
         rate_ceiling_per_min: 100,
-        repo_allowlist: vec!["repo:humangr-labs/corelink-runners".to_string()],
+        repo_allowlist: vec!["repo:HumanGuardrail/corelink-runners".to_string()],
     }]);
     let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
 
@@ -228,7 +228,7 @@ fn runner_acq_body() -> AcquireRequest {
         expiry_ms: 600_000,
         runner: Some(RunnerSpec {
             target: RunnerTargetDto::Repo {
-                owner: "humangr-labs".to_string(),
+                owner: "HumanGuardrail".to_string(),
                 repo: "corelink-runners".to_string(),
             },
             labels: vec!["corelink".to_string()],
@@ -337,7 +337,7 @@ async fn cloudflare_flip_happy_path_acquire_spawn_held_close_teardown() {
         .as_str()
         .expect("spawn body must carry a jitconfig field");
     assert!(
-        jitconfig.contains("repo:humangr-labs/corelink-runners"),
+        jitconfig.contains("repo:HumanGuardrail/corelink-runners"),
         "jitconfig must carry the broker-minted runner config for the target repo; got {jitconfig:?}"
     );
     assert!(

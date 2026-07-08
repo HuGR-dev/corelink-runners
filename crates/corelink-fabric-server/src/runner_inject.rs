@@ -209,7 +209,7 @@ mod tests {
     fn scope() -> RunnerScope {
         RunnerScope {
             target: RunnerTarget::Repo {
-                owner: "humangr-labs".to_string(),
+                owner: "HumanGuardrail".to_string(),
                 repo: "corelink-runners".to_string(),
             },
             labels: vec!["corelink".to_string()],

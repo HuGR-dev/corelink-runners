@@ -101,10 +101,10 @@ type HarnessOut = (
 
 fn harness(broker: Option<Arc<dyn RunnerRegistrationBroker>>) -> HarnessOut {
     // Track-C C1: the acme tenant is allowlisted for its OWN repo by default, so
-    // the happy-path runner acquires (target humangr-labs/corelink-runners) pass.
+    // the happy-path runner acquires (target HumanGuardrail/corelink-runners) pass.
     harness_allow(
         broker,
-        vec!["repo:humangr-labs/corelink-runners".to_string()],
+        vec!["repo:HumanGuardrail/corelink-runners".to_string()],
     )
 }
 
@@ -147,7 +147,7 @@ fn runner_acq_body() -> AcquireRequest {
         expiry_ms: 600_000,
         runner: Some(RunnerSpec {
             target: RunnerTargetDto::Repo {
-                owner: "humangr-labs".to_string(),
+                owner: "HumanGuardrail".to_string(),
                 repo: "corelink-runners".to_string(),
             },
             labels: vec!["corelink".to_string()],
@@ -254,7 +254,7 @@ async fn runner_acquire_mints_egress_lease_and_injects_jitconfig() {
     // The JIT config env matches exactly what the broker minted for THIS scope.
     let expected = MockBroker::derived_config(&RunnerScope {
         target: corelink_fabric_server::RunnerTarget::Repo {
-            owner: "humangr-labs".to_string(),
+            owner: "HumanGuardrail".to_string(),
             repo: "corelink-runners".to_string(),
         },
         labels: vec!["corelink".to_string()],
@@ -483,10 +483,10 @@ async fn empty_allowlist_denies_all_runner_acquires() {
 #[tokio::test]
 async fn runner_allowlist_match_is_case_insensitive() {
     let broker: Arc<dyn RunnerRegistrationBroker> = Arc::new(MockBroker::new());
-    let (router, _ledger, cap) = harness(Some(broker)); // allowlist: repo:humangr-labs/corelink-runners
+    let (router, _ledger, cap) = harness(Some(broker)); // allowlist: repo:HumanGuardrail/corelink-runners
     let resp = acquire(
         &router,
-        &runner_acq_body_target("HumanGR-Labs", "CoreLink-Runners"),
+        &runner_acq_body_target("HUMANGUARDRAIL", "CoreLink-Runners"),
     )
     .await;
 
