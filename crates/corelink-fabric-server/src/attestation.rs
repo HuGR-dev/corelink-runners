@@ -169,7 +169,7 @@ pub fn sign_result_binding_v2(signer: &FabricSigner, result: &CheckResult) -> St
 
 /// The intent-metrics binding pre-image — the fabric's signature over the §13
 /// [`IntentMetrics`] (the attested **cost**), bound to the specific `lease_id`
-/// + `tenant` so a signature can never be replayed onto a different lease or
+/// and `tenant` so a signature can never be replayed onto a different lease or
 /// tenant. This is what makes the OFF-BOX (A-path) cost tamper-evident: the
 /// off-box `result_binding_sig_v2` covers an all-empty `CheckResult` (no box,
 /// no result), so it binds nothing about the cost; the chain binds the tenant
