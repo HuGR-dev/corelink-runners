@@ -43,27 +43,47 @@ curl -s $HOST/v1/attestation/key              # → key_id faa5b7726ccd2c52 (the
 Then hand `$HOST` to the hugit TL as `HUGIT_RUNNER_HOST` + the spawn/lease PAT
 (`HUGIT_RUNNER_PAT`), per the frozen Seam 1.
 
-## Known limit — single-flight singleton (scaling path: multi-instance)
+## Container health probe (why `/` + `/health` answer 200)
+
+CF Containers probes the default port on `/` to mark an instance **healthy**.
+fabricd originally served only `/v1/*`, so the probe 404'd → the instance stayed
+`healthy:0` → **CF reverted rollouts** (a new image silently rolling back to the
+prior one — observed 2026-07-08). Fix: `app.rs` mounts `/` and `/health` →
+auth-free `200 "ok"` (same as `/v1/health`). Verified: after the fix the instance
+reports **`healthy:1`** and rollouts complete + stick. Keep these routes.
+
+## Single-flight singleton — fragility, mitigations, scaling path
 
 The control plane runs as ONE container (`max_instances: 1` + a fixed DO id
 `SINGLETON` in `src/index.ts`), so all `/v1` traffic serializes through one
-instance. A **burst of box-provisioning acquires** (runner / check-host — each a
-`POST /v1/spawn` bounded to the engine's 30s HTTP timeout) can therefore slow /
-briefly wedge the plane, including `/v1/health` (the 2026-07-07 acquire-storm
-incident). Mitigations in place: (a) **off-box leases provision no box**
-(`CloudflareBoxProvisioner` admits a plain-hermetic spec NO-BOX — the incident's
-actual trigger); (b) every provision HTTP call is timeout-bounded (30s), so a
-hang is never indefinite; (c) **concurrent provisions are gated** — a
-`FABRIC_PROVISION_MAX_INFLIGHT` semaphore (default 16) caps how many provisions
-can pin a blocking-pool thread at once, so a burst awaits a permit asynchronously
-instead of starving the pool health/close/teardown share; (d) the container runs
-**standard-2** (2 vCPU) so a few concurrent provisions can't peg it. **Scaling
-path (not yet done):** the singleton was
-required only by the in-memory ledger; now that the **pg ledger is armed**
-(`DATABASE_URL` present → cross-instance cap-safe via the advisory lock), the
-plane CAN run multiple instances — remove the fixed DO id (route per-request /
-round-robin) + raise `max_instances`. This is a tracked scaling enhancement to do
-**before rota-A carries real check-host bursts**; it is a known limit, not debt.
+instance. Two failure modes were observed + closed on 2026-07-07/08:
+
+- **Box-provision burst** (2026-07-07 acquire-storm): a burst of provisioning
+  acquires pinned the blocking pool. Closed by (a) **off-box leases provision no
+  box**; (b) provision HTTP bounded to 30s; (c) a **`FABRIC_PROVISION_MAX_INFLIGHT`
+  semaphore** (default 16) bounds concurrent provisions (excess awaits a permit
+  async, not on a thread).
+- **Single slow close** (2026-07-07): ONE off-box close (finalize §13 + sign
+  attestation + **pg-ledger write**) black-holed `/v1/health` on the 1-vCPU box.
+  Root cause: the pg ledger uses `block_in_place` (`pg_ledger.rs`), so a slow pg
+  write runs ON a runtime worker; on 1 vCPU (1 worker), the whole runtime stalls
+  (worsened by CAS/DB 429 retry-spin pegging the single core). Closed by
+  **`standard-2` (2 vCPU / 2 workers)**: a blocking close pins one worker, the
+  other keeps `/v1/health` alive. **Verified 2026-07-08:** health stayed `200`
+  across all 30 polls (0.4–1.0s) through a **32s** close.
+
+**Residual (tracked, not availability-affecting):** the close itself can be SLOW
+(~32s under DB throttling) — a latency concern, not a wedge (health stays up). The
+principled fix is to move the pg ledger ops OFF the runtime workers (wrap the
+handler ledger sections in `spawn_blocking` instead of `block_in_place`) and/or
+bound the CAS/DB retry-spin; do this before real check-exec throughput.
+
+**Scaling path (not yet done):** the singleton was required only by the in-memory
+ledger; now that the **pg ledger is armed** (`DATABASE_URL` present →
+cross-instance cap-safe via the advisory lock), the plane CAN run multiple
+instances — remove the fixed DO id (route per-request / round-robin) + raise
+`max_instances`. A tracked scaling enhancement for **before rota-A carries real
+check-host bursts**; a known limit, not debt.
 
 ## Boxes (checkpoint B+ — when wiring real per-job metrics)
 
