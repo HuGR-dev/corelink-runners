@@ -134,3 +134,24 @@ async fn health_is_open_everything_else_is_not() {
         .unwrap();
     assert_frozen_error(response, ApiError::Unauthorized).await;
 }
+
+/// Container-platform health probe (2026-07-08): `/` and `/health` answer 200
+/// "ok" auth-free, so the CF Containers probe marks the fabricd instance HEALTHY
+/// and a rollout completes/sticks (previously the probe 404'd → healthy:0 → CF
+/// reverted the rollout to the prior image). Same fixed-cost, tenant-data-free
+/// body as `/v1/health`.
+#[tokio::test]
+async fn container_health_probe_paths_answer_200() {
+    for path in ["/", "/health"] {
+        let response = test_app(acme_store())
+            .oneshot(get_request(path, None))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "{path} must answer 200 for the container health probe"
+        );
+        assert_eq!(body_bytes(response).await, b"ok");
+    }
+}
