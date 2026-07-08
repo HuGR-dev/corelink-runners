@@ -481,6 +481,14 @@ pub struct AppState {
     /// `FABRIC_CLOSE_ACK_MAX_INFLIGHT` (default
     /// [`DEFAULT_CLOSE_ACK_MAX_INFLIGHT`]).
     pub(crate) close_ack_gate: Arc<tokio::sync::Semaphore>,
+    /// Acquire-storm guard (2026-07-07): bounds concurrent in-flight box
+    /// provisions so a burst can never pin more than this many blocking-pool
+    /// threads at once (the pool the singleton shares with close/teardown/probe).
+    /// A provision that finds all permits taken **awaits a permit asynchronously**
+    /// (parking NO thread) before it enters `spawn_blocking`. Provision semantics
+    /// are byte-unchanged — the permit only gates ENTRY. From
+    /// `FABRIC_PROVISION_MAX_INFLIGHT` (default [`DEFAULT_PROVISION_MAX_INFLIGHT`]).
+    pub(crate) provision_gate: Arc<tokio::sync::Semaphore>,
     /// AUDIT P2: the global in-flight request cap applied in [`app_full`] over
     /// the WORK routes (a tower `GlobalConcurrencyLimitLayer` + `LoadShedLayer`).
     /// When more than this many requests are being served at once, the excess is
@@ -578,6 +586,18 @@ pub struct AppState {
 /// `FABRIC_CLOSE_ACK_MAX_INFLIGHT`.
 pub const DEFAULT_CLOSE_ACK_MAX_INFLIGHT: usize = 256;
 
+/// Default cap on concurrent in-flight box PROVISIONS (`FABRIC_PROVISION_MAX_INFLIGHT`).
+///
+/// A box provision is a blocking-pool op (a synchronous spawn-Worker/Northflank
+/// HTTP round-trip, bounded by the engine's ~30s timeout). On the single-flight
+/// CF-fabricd singleton an UNBOUNDED burst of provisioning acquires would pin
+/// that many blocking-pool threads at once and starve the pool the control plane
+/// shares (health/close/teardown/probe) — the 2026-07-07 acquire-storm failure
+/// mode (close was already gated by [`DEFAULT_CLOSE_ACK_MAX_INFLIGHT`]; provision
+/// was not). This caps concurrent provisions: the excess AWAITS a permit
+/// asynchronously (parking NO thread) before ever entering `spawn_blocking`.
+pub const DEFAULT_PROVISION_MAX_INFLIGHT: usize = 16;
+
 /// Default global in-flight request cap (audit P2). A deliberately generous
 /// ceiling: it is a backstop against unbounded queueing / memory growth under a
 /// thundering herd, NOT a throughput throttle for normal operation. Overridable
@@ -642,6 +662,10 @@ impl AppState {
             // composition root overrides it from FABRIC_CLOSE_ACK_MAX_INFLIGHT
             // via `with_close_ack_max_inflight`.
             close_ack_gate: Arc::new(tokio::sync::Semaphore::new(DEFAULT_CLOSE_ACK_MAX_INFLIGHT)),
+            // Acquire-storm guard: default provision concurrency cap. The
+            // composition root overrides it from FABRIC_PROVISION_MAX_INFLIGHT
+            // via `with_provision_max_inflight`.
+            provision_gate: Arc::new(tokio::sync::Semaphore::new(DEFAULT_PROVISION_MAX_INFLIGHT)),
             // AUDIT P2: default global in-flight cap; the composition root
             // overrides it from FABRIC_MAX_INFLIGHT_REQUESTS.
             max_inflight_requests: DEFAULT_MAX_INFLIGHT_REQUESTS,
@@ -707,6 +731,16 @@ impl AppState {
     #[must_use]
     pub fn with_close_ack_max_inflight(mut self, max_inflight: usize) -> Self {
         self.close_ack_gate = Arc::new(tokio::sync::Semaphore::new(max_inflight.max(1)));
+        self
+    }
+
+    /// Override the concurrent-provision cap (acquire-storm guard). `0` is
+    /// clamped to `1` (a 0-permit gate would deadlock every provision); the
+    /// production composition root validates the env value separately and never
+    /// passes 0.
+    #[must_use]
+    pub fn with_provision_max_inflight(mut self, max_inflight: usize) -> Self {
+        self.provision_gate = Arc::new(tokio::sync::Semaphore::new(max_inflight.max(1)));
         self
     }
 
@@ -1295,6 +1329,17 @@ impl AppState {
         lease_id: &str,
         spec: &corelink_runner::lease::ContainerSpec,
     ) -> anyhow::Result<()> {
+        // Acquire-storm guard: hold a provision permit for the whole blocking
+        // spawn so a burst can never pin more than `provision_gate` blocking-pool
+        // threads at once (the singleton shares that pool with health/close/
+        // teardown/probe). Over-cap provisions AWAIT here asynchronously — parking
+        // NO thread — instead of piling into `spawn_blocking` and starving the
+        // control plane (the 2026-07-07 incident). The gate only bounds ENTRY;
+        // the provision itself is byte-unchanged. `_permit` drops at fn end.
+        let _permit = Arc::clone(&self.provision_gate)
+            .acquire_owned()
+            .await
+            .map_err(|_| anyhow::anyhow!("provision gate closed"))?;
         let prov = Arc::clone(&self.provisioner);
         let lid = lease_id.to_string();
         let s = spec.clone();
@@ -1696,6 +1741,46 @@ mod tests {
     /// Leak fix: `revoke_pat_for` (which fires on rollback paths that skip
     /// `forget_lease`) must GC the C2c cred stash, so a lease that stashed its
     /// PAT then failed to provision does not leak a `StashedCred` forever.
+    /// Acquire-storm guard: the provision gate defaults to a bounded (non-zero)
+    /// permit count, `with_provision_max_inflight(0)` clamps to ≥1 (never a
+    /// deadlocking 0-permit gate), and a provision through the gate still
+    /// completes (the gate only bounds ENTRY — under the default NoBoxProvisioner
+    /// a plain provision is a no-op Ok, unblocked by the permit).
+    #[tokio::test]
+    async fn provision_gate_is_bounded_nonzero_and_does_not_block_provision() {
+        let state = bare_state();
+        assert_eq!(
+            state.provision_gate.available_permits(),
+            crate::app::DEFAULT_PROVISION_MAX_INFLIGHT,
+            "default provision gate must have DEFAULT_PROVISION_MAX_INFLIGHT permits"
+        );
+        // 0 is clamped to 1 — a 0-permit gate would deadlock every provision.
+        let clamped = bare_state().with_provision_max_inflight(0);
+        assert_eq!(clamped.provision_gate.available_permits(), 1);
+        // A provision through the gate completes (NoBoxProvisioner → no-op Ok),
+        // and the permit is released afterward (available count restored).
+        let spec = corelink_runner::lease::ContainerSpec {
+            name: "p".to_string(),
+            image: "alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
+                .to_string(),
+            tmp_root: "/tmp/job".to_string(),
+            no_network: true,
+            allow_egress: false,
+            run_on_create: false,
+            path_set: vec![],
+            env: vec![],
+        };
+        state
+            .provision_lease("lease-p", &spec)
+            .await
+            .expect("provision through the gate must complete");
+        assert_eq!(
+            state.provision_gate.available_permits(),
+            crate::app::DEFAULT_PROVISION_MAX_INFLIGHT,
+            "the provision permit must be released after the provision returns"
+        );
+    }
+
     #[tokio::test]
     async fn revoke_pat_for_gcs_the_cred_stash() {
         let state = bare_state();

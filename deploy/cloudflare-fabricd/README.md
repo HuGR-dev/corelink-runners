@@ -52,8 +52,13 @@ instance. A **burst of box-provisioning acquires** (runner / check-host — each
 briefly wedge the plane, including `/v1/health` (the 2026-07-07 acquire-storm
 incident). Mitigations in place: (a) **off-box leases provision no box**
 (`CloudflareBoxProvisioner` admits a plain-hermetic spec NO-BOX — the incident's
-actual trigger), and (b) every provision HTTP call is timeout-bounded (30s), so
-a hang is never indefinite. **Scaling path (not yet done):** the singleton was
+actual trigger); (b) every provision HTTP call is timeout-bounded (30s), so a
+hang is never indefinite; (c) **concurrent provisions are gated** — a
+`FABRIC_PROVISION_MAX_INFLIGHT` semaphore (default 16) caps how many provisions
+can pin a blocking-pool thread at once, so a burst awaits a permit asynchronously
+instead of starving the pool health/close/teardown share; (d) the container runs
+**standard-2** (2 vCPU) so a few concurrent provisions can't peg it. **Scaling
+path (not yet done):** the singleton was
 required only by the in-memory ledger; now that the **pg ledger is armed**
 (`DATABASE_URL` present → cross-instance cap-safe via the advisory lock), the
 plane CAN run multiple instances — remove the fixed DO id (route per-request /

@@ -50,9 +50,13 @@
       // needs a Docker daemon. To rebuild the control-plane binary: build+push a new
       // image (CI, or a Docker host) and update this @sha256 digest.
       "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer@sha256:8c13d791e585ca12860c4670db22bba1262915a890caeace039947e964202f19",
-      // Lightweight HTTP control plane (one binary + in-memory ledger): standard-1
-      // is ample for the dogfood. Bump if real multi-tenant load arrives.
-      "instance_type": "standard-1",
+      // HTTP control plane. Bumped standard-1 → standard-2 (2026-07-07 acquire-storm
+      // hardening): the single-flight singleton must keep /v1/health + lease ops
+      // responsive under a burst of box provisions; 2 vCPU gives headroom so a few
+      // concurrent provisions can't peg the box (paired with the FABRIC_PROVISION_
+      // MAX_INFLIGHT gate that bounds concurrent provisions). Multi-instance (now
+      // pg-enabled) is the next scaling step — see README "Known limit".
+      "instance_type": "standard-2",
       "max_instances": 1
     }
   ],
