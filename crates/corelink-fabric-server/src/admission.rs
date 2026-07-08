@@ -2040,8 +2040,10 @@ mod queue_tests {
         revoked: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     }
     impl RecordingMint {
-        fn pat_id_for(tenant: &str, job_id: &str) -> String {
-            format!("rec-patid::{tenant}::{job_id}")
+        // Keyed on `installation_id` (the tenant selector under the frozen
+        // contract, 2026-07-08 — replaces the removed `owner_tenant`).
+        fn pat_id_for(installation_id: &str, job_id: &str) -> String {
+            format!("rec-patid::{installation_id}::{job_id}")
         }
         fn revoked(&self) -> Vec<String> {
             self.revoked
@@ -2053,7 +2055,8 @@ mod queue_tests {
     impl crate::runner_cas_mint::CasPatMint for RecordingMint {
         fn mint<'a>(
             &'a self,
-            owner_tenant: &'a str,
+            _repo_full_name: &'a str,
+            installation_id: &'a str,
             job_id: &'a str,
             lease_deadline_ms: u64,
             _now_ms: u64,
@@ -2068,8 +2071,8 @@ mod queue_tests {
                     + 'a,
             >,
         > {
-            let pat_id = Self::pat_id_for(owner_tenant, job_id);
-            let token = format!("rec-pat::{owner_tenant}::{job_id}");
+            let pat_id = Self::pat_id_for(installation_id, job_id);
+            let token = format!("rec-pat::{installation_id}::{job_id}");
             Box::pin(async move {
                 Ok(crate::runner_cas_mint::MintedPat {
                     token,
@@ -2141,8 +2144,8 @@ mod queue_tests {
                 tenant: tid("alpha"),
                 pat: crate::auth::BearerPat("pat-alpha".to_string()),
                 req: AcquireRequest {
-                    repo_full_name: None,
-                    installation_id: None,
+                    repo_full_name: Some("humangr-labs/corelink-runners".to_string()),
+                    installation_id: Some("alpha".to_string()),
                     image_digest: PINNED.to_string(),
                     net_policy: "isolated".to_string(),
                     tmp_root: "/work/tmp".to_string(),

@@ -30,13 +30,20 @@
     // both workers (inert without this URL). A container RESTART is required to
     // pick this up (envVars are read at container start).
     "CLOUDFLARE_SPAWN_WORKER_URL": "https://corelink-spawn-worker.gmhelmold.workers.dev"
-    // MOAT MINT (CLW_ENDPOINT + CORELINK_RUNNER_MINT_URL) is UNSET pending a mint-
-    // client contract fix: the server's /internal/v1/runner/mint now requires
-    // {job_id, repo_full_name, installation_id, scope} (repo-allowlist-based,
-    // 2026-07-07 server contract), but the fabricd client still sends the old
-    // {owner_tenant, job_id, scope, ttl_seconds} (runner_cas_mint.rs:398). Arming the
-    // mint before that fix would fail-close every hydrating (check-host) acquire at the
-    // mint. Re-arm once the client sends repo_full_name + installation_id.
+    // MOAT MINT (CLW_ENDPOINT + CORELINK_RUNNER_MINT_URL) is UNSET. The mint-client
+    // contract DRIFT is now FIXED (PR #319, 2026-07-08): the fabricd sends the frozen
+    // body {job_id, repo_full_name, installation_id, scope, ttl_seconds} (owner_tenant
+    // dropped; server derives the tenant from installation_id), and finalize gates the
+    // mint on both fields being present (both → mint; neither → cold run; exactly one →
+    // fail closed). Two remaining PRE-ARM gates, neither in this repo:
+    //   1. hugit must POPULATE repo_full_name + installation_id on the acquire wire
+    //      (its piece #1) — until then a hydrating acquire arrives with neither field
+    //      and correctly runs cold (no mint), so arming buys nothing yet;
+    //   2. the server must SEED the 4 authz D1 rows for the dogfood tenant (d863fafb):
+    //      tenant_gh_installation_map, NOT-suspended, runner_repo_allowlist,
+    //      runners_entitlement — else every mint 403s (byte-identical on any miss).
+    // Re-arm (set both vars + redeploy) once (1)+(2) land; then the check-host E2E can
+    // be proven live. Arming before then fail-closes nothing new but proves nothing.
   },
 
   // The singleton control-plane container DO. ONE instance: the in-memory lease
