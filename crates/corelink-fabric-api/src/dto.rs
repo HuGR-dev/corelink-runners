@@ -74,8 +74,9 @@ pub struct AcquireRequest {
     pub repo_full_name: Option<String>,
 
     /// The GitHub App installation id (as a STRING) the check is dispatched under
-    /// — the mint's tenant SELECTOR (the server derives `owner_tenant` from it via
-    /// `tenant_gh_installation_map`). Additive + default-off, same wire-invisible
+    /// — the mint's tenant SELECTOR (the server derives the tenant from it via
+    /// `tenant_gh_installation_map`; the caller never names the tenant, which is
+    /// why `owner_tenant` was dropped). Additive + default-off, same wire-invisible
     /// semantics as [`Self::repo_full_name`]; both are required together for the
     /// moat mint to run.
     #[serde(default, skip_serializing_if = "Option::is_none")]

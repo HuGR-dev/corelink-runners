@@ -86,10 +86,14 @@ impl BoxProvisioner for CapturingProvisioner {
 }
 
 /// A runner-mode acquire body.
+///
+/// Carries `repo_full_name` + `installation_id` (both `Some`) so a wired
+/// `CasPatMint` fires under the frozen contract gate (2026-07-08): a hydrating
+/// moat lease MUST declare both. Tests that wire no mint ignore them.
 fn runner_acq_body() -> AcquireRequest {
     AcquireRequest {
-        repo_full_name: None,
-        installation_id: None,
+        repo_full_name: Some("humangr-labs/corelink-runners".to_string()),
+        installation_id: Some("12345".to_string()),
         image_digest: PINNED_IMAGE.to_string(),
         net_policy: "ignored-runner-forces-egress".to_string(),
         tmp_root: "/work/tmp".to_string(),
@@ -426,7 +430,7 @@ async fn a7_mint_succeeds_derives_pat_for_tenant_and_job() {
     let lease_deadline_ms = 9_999_999_999_999u64;
 
     let minted = mint
-        .mint("acme", "job-abc-123", lease_deadline_ms, 0)
+        .mint("acme/repo", "acme", "job-abc-123", lease_deadline_ms, 0)
         .await
         .expect("A7: MockMint::mint must succeed");
 
@@ -471,7 +475,8 @@ async fn a7_mint_failure_fails_closed_no_box() {
     impl CasPatMint for FailingMint {
         fn mint<'a>(
             &'a self,
-            _owner_tenant: &'a str,
+            _repo_full_name: &'a str,
+            _installation_id: &'a str,
             _job_id: &'a str,
             _lease_deadline_ms: u64,
             _now_ms: u64,
@@ -497,7 +502,7 @@ async fn a7_mint_failure_fails_closed_no_box() {
 
     let fail_mint = FailingMint;
     let result = fail_mint
-        .mint("acme", "job-fail", 9_999_999_999_999, 0)
+        .mint("acme/repo", "acme", "job-fail", 9_999_999_999_999, 0)
         .await;
 
     assert!(
@@ -537,7 +542,8 @@ struct ConfiguredFailingMint {
 impl CasPatMint for ConfiguredFailingMint {
     fn mint<'a>(
         &'a self,
-        _owner_tenant: &'a str,
+        _repo_full_name: &'a str,
+        _installation_id: &'a str,
         _job_id: &'a str,
         _lease_deadline_ms: u64,
         _now_ms: u64,
@@ -650,6 +656,68 @@ async fn a7c_http_acquire_failing_mint_ttl_exceeds_lease_fails_closed_no_box_no_
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// A7d — Frozen-contract gate: a HALF-declared hydration intent fails closed
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Drive a real HTTP runner-acquire whose body declares EXACTLY ONE of
+/// {repo_full_name, installation_id} (the other absent), with a SUCCEEDING
+/// `MockMint` wired, and assert the frozen-contract gate (2026-07-08) fails
+/// closed: 503, 0 slots reserved, 0 boxes provisioned.
+///
+/// The mint is a normal `MockMint` that WOULD succeed and provision a box — so a
+/// green 503/0-box outcome proves the gate rejects the malformed request BEFORE
+/// the mint runs (both fields are required TOGETHER for a hydrating lease). This
+/// is the sibling of `assert_http_acquire_fails_closed_no_box_no_slot`, but the
+/// fail-closed trip is the request-shape gate, not a mint error.
+async fn assert_xor_hydration_fails_closed_no_box_no_slot(body: AcquireRequest) {
+    let broker: Arc<dyn RunnerRegistrationBroker> = Arc::new(MockBroker::new());
+    let mint: Arc<dyn CasPatMint> = Arc::new(MockMint::new());
+    let (router, ledger, cap, _state) = harness_with_moat(
+        Some(broker),
+        Some(mint),
+        None,
+        Some("https://cas.corelink.io".to_string()),
+    );
+    let resp = do_acquire(&router, &body).await;
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "A7d: a half-declared hydration intent (exactly one of repo_full_name/installation_id) \
+         must fail CLOSED with 503; got {}",
+        resp.status()
+    );
+    let occupied = ledger.lock().unwrap().by_tenant(&acme()).unwrap().len();
+    assert_eq!(
+        occupied, 0,
+        "A7d (CRITICAL): the malformed acquire must roll back the reserved slot — the \
+         concurrency cap must NOT leak. Got {occupied} slot(s)."
+    );
+    assert_eq!(
+        cap.captured().len(),
+        0,
+        "A7d: the gate must fire BEFORE the (succeeding) mint ⇒ NO box provisioned. Got {} box(es).",
+        cap.captured().len()
+    );
+}
+
+/// A7d: repo_full_name present, installation_id ABSENT ⇒ fail closed.
+#[tokio::test]
+async fn a7d_hydration_repo_without_installation_fails_closed() {
+    let mut body = runner_acq_body();
+    body.installation_id = None; // repo_full_name stays Some
+    assert_xor_hydration_fails_closed_no_box_no_slot(body).await;
+}
+
+/// A7d: installation_id present, repo_full_name ABSENT ⇒ fail closed.
+#[tokio::test]
+async fn a7d_hydration_installation_without_repo_fails_closed() {
+    let mut body = runner_acq_body();
+    body.repo_full_name = None; // installation_id stays Some
+    assert_xor_hydration_fails_closed_no_box_no_slot(body).await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // A7b — Revoke on EVERY terminal path + TTL bound
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -695,7 +763,7 @@ async fn a7b_minted_pat_ttl_does_not_exceed_lease_deadline() {
     let lease_deadline_ms = 1_800_000u64; // 30 minutes
 
     let minted = mint
-        .mint("acme", "job-ttl-test", lease_deadline_ms, 0)
+        .mint("acme/repo", "acme", "job-ttl-test", lease_deadline_ms, 0)
         .await
         .expect("A7b: mint must succeed");
 
@@ -743,7 +811,7 @@ async fn a7b_minted_pat_ttl_does_not_exceed_lease_deadline() {
     );
 
     let err = http_mint
-        .mint("acme", "job-ttl-enforcement", deadline_ms, 0)
+        .mint("acme/repo", "acme", "job-ttl-enforcement", deadline_ms, 0)
         .await
         .expect_err(
             "A7b (enforcement): HttpCasPatMint must return TtlExceedsLease \

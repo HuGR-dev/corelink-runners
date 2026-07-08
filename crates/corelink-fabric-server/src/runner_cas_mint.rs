@@ -7,10 +7,15 @@
 //! ## Mint flow (POST /internal/v1/runner/mint)
 //!
 //! Request header: `x-corelink-internal-auth: <internal-token>`.
-//! Body: `{"owner_tenant": "<tenant>", "job_id": "<job_id>", "scope": "read-write",
-//! "ttl_seconds": <u64>}`. `ttl_seconds` is the lease's REMAINING time (skew-shrunk)
-//! so the PAT expires WITH the lease (Server-TL C2c contract, 2026-07-02).
-//! Response: `{"token": "<pat-plaintext>", "pat_id": "<id>", "expires_ms": <u64>}`.
+//! Body: `{"job_id": "<job_id>", "repo_full_name": "<owner/repo>", "installation_id":
+//! "<gh-app-installation-id>", "scope": "read-write", "ttl_seconds": <u64>}`. The
+//! server DERIVES the tenant from `installation_id` (via `tenant_gh_installation_map`)
+//! and scopes the mint by the `(tenant, repo_full_name)` allowlist — the caller never
+//! names the tenant (frozen server contract, 2026-07-08: `owner_tenant` REMOVED, it
+//! was the single-tenant hole this WP closed). `ttl_seconds` is the lease's REMAINING
+//! time (skew-shrunk) so the PAT expires WITH the lease (Server-TL C2c contract,
+//! 2026-07-02). Response: `{"token": "<pat-plaintext>", "pat_id": "<id>",
+//! "expires_ms": <u64>}`.
 //!
 //! ## Revoke flow (POST /internal/v1/runner/revoke)
 //!
@@ -142,10 +147,13 @@ impl std::error::Error for MintError {}
 /// Mint failure fails closed (A7): no box is admitted without a minted PAT.
 /// Revoke is idempotent and fires on EVERY terminal path (A7b).
 pub trait CasPatMint: Send + Sync {
-    /// Mint a per-job CAS PAT for `owner_tenant`/`job_id`.
+    /// Mint a per-job CAS PAT for `repo_full_name`/`installation_id`/`job_id`.
     ///
-    /// POSTs to `/internal/v1/runner/mint` with `x-corelink-internal-auth`.
-    /// Returns [`MintedPat`] on success; fails closed on any error.
+    /// POSTs to `/internal/v1/runner/mint` with `x-corelink-internal-auth`. The
+    /// server DERIVES the tenant from `installation_id` and authorizes the mint
+    /// against the `(tenant, repo_full_name)` allowlist — the caller never names
+    /// the tenant (frozen server contract, 2026-07-08). Returns [`MintedPat`] on
+    /// success; fails closed on any error.
     ///
     /// `lease_deadline_ms` is the absolute lease expiry (unix ms); the impl
     /// asserts `minted.expires_ms ≤ lease_deadline_ms` (A7b). `now_ms` is the
@@ -157,7 +165,8 @@ pub trait CasPatMint: Send + Sync {
     /// 90 min, tripping the strict A7b bound → fail-closed, no provision.
     fn mint<'a>(
         &'a self,
-        owner_tenant: &'a str,
+        repo_full_name: &'a str,
+        installation_id: &'a str,
         job_id: &'a str,
         lease_deadline_ms: u64,
         now_ms: u64,
@@ -195,19 +204,22 @@ impl MockMint {
         Self
     }
 
-    /// The deterministic PAT token this mock derives for a `(tenant, job_id)`.
+    /// The deterministic PAT token this mock derives for an
+    /// `(installation_id, job_id)`.
     ///
     /// Exposed so tests can assert the exact value without reaching into the
-    /// redacted [`MintedPat`].
+    /// redacted [`MintedPat`]. Keyed on `installation_id` (the tenant selector
+    /// under the frozen contract, replacing the removed `owner_tenant`).
     #[must_use]
-    pub fn derived_token(owner_tenant: &str, job_id: &str) -> String {
-        format!("mock-pat::{owner_tenant}::{job_id}")
+    pub fn derived_token(installation_id: &str, job_id: &str) -> String {
+        format!("mock-pat::{installation_id}::{job_id}")
     }
 
-    /// The deterministic `pat_id` this mock derives for a `(tenant, job_id)`.
+    /// The deterministic `pat_id` this mock derives for an
+    /// `(installation_id, job_id)`.
     #[must_use]
-    pub fn derived_pat_id(owner_tenant: &str, job_id: &str) -> String {
-        format!("mock-patid::{owner_tenant}::{job_id}")
+    pub fn derived_pat_id(installation_id: &str, job_id: &str) -> String {
+        format!("mock-patid::{installation_id}::{job_id}")
     }
 
     /// A fixed `expires_ms` the mock always returns (year 2100, well beyond
@@ -218,15 +230,16 @@ impl MockMint {
 impl CasPatMint for MockMint {
     fn mint<'a>(
         &'a self,
-        owner_tenant: &'a str,
+        _repo_full_name: &'a str,
+        installation_id: &'a str,
         job_id: &'a str,
         lease_deadline_ms: u64,
         _now_ms: u64,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<MintedPat, MintError>> + Send + 'a>,
     > {
-        let token = Self::derived_token(owner_tenant, job_id);
-        let pat_id = Self::derived_pat_id(owner_tenant, job_id);
+        let token = Self::derived_token(installation_id, job_id);
+        let pat_id = Self::derived_pat_id(installation_id, job_id);
         // Clamp to lease_deadline_ms so the mock always satisfies A7b.
         let expires_ms = Self::MOCK_EXPIRES_MS.min(lease_deadline_ms);
         Box::pin(async move {
@@ -343,10 +356,16 @@ struct RevokeRequestBody<'a> {
 }
 
 /// The wire shape for a mint request body.
+///
+/// Frozen server contract (2026-07-08): `owner_tenant` is REMOVED — the server
+/// derives the tenant from `installation_id` (via `tenant_gh_installation_map`)
+/// and authorizes against the `(tenant, repo_full_name)` allowlist. Naming the
+/// tenant client-side was the single-tenant hole the 283-step-3 WP closed.
 #[derive(serde::Serialize)]
 struct MintRequestBody<'a> {
-    owner_tenant: &'a str,
     job_id: &'a str,
+    repo_full_name: &'a str,
+    installation_id: &'a str,
     scope: &'a str,
     /// Requested PAT lifetime in seconds, derived from the lease's REMAINING
     /// time so the minted credential expires with the lease (Server-TL C2c
@@ -372,7 +391,8 @@ const MINT_TTL_SKEW_MARGIN_MS: u64 = 30_000;
 impl<H: MintHttp> CasPatMint for HttpCasPatMint<H> {
     fn mint<'a>(
         &'a self,
-        owner_tenant: &'a str,
+        repo_full_name: &'a str,
+        installation_id: &'a str,
         job_id: &'a str,
         lease_deadline_ms: u64,
         now_ms: u64,
@@ -396,8 +416,9 @@ impl<H: MintHttp> CasPatMint for HttpCasPatMint<H> {
                 return Err(MintError::LeaseTooShort { remaining_ms });
             }
             let body = serde_json::to_string(&MintRequestBody {
-                owner_tenant,
                 job_id,
+                repo_full_name,
+                installation_id,
                 scope: "read-write",
                 ttl_seconds,
             })
@@ -715,7 +736,7 @@ mod tests {
         let c = client(vec![ok_body(resp_body)]);
 
         let pat = c
-            .mint("acme", "job-42", DEADLINE, NOW)
+            .mint("acme/repo", "acme", "job-42", DEADLINE, NOW)
             .await
             .expect("mint must succeed");
 
@@ -738,7 +759,14 @@ mod tests {
         // Request body must carry the required fields, including the
         // lease-bound ttl_seconds (remaining time minus the skew margin).
         let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
-        assert_eq!(parsed["owner_tenant"], "acme");
+        // Frozen contract: repo_full_name + installation_id (the tenant
+        // selector); owner_tenant is REMOVED and must be ABSENT from the wire.
+        assert_eq!(parsed["repo_full_name"], "acme/repo");
+        assert_eq!(parsed["installation_id"], "acme");
+        assert!(
+            parsed.get("owner_tenant").is_none(),
+            "owner_tenant must NOT be sent — the server derives the tenant from installation_id"
+        );
         assert_eq!(parsed["job_id"], "job-42");
         assert_eq!(parsed["scope"], "read-write");
         assert_eq!(
@@ -760,7 +788,7 @@ mod tests {
         // 10 s remaining < 30 s margin ⇒ ttl saturates to 0 ⇒ local fail-closed.
         let now = DEADLINE - 10_000;
         let err = c
-            .mint("acme", "job-nearly-expired", DEADLINE, now)
+            .mint("acme/repo", "acme", "job-nearly-expired", DEADLINE, now)
             .await
             .expect_err("a zero-ttl (near-expired) lease must fail closed, never mint");
         assert!(
@@ -777,21 +805,26 @@ mod tests {
 
     /// PIN the **accepted-by-design** intra-tenant cache-poisoning posture
     /// (oracle audit 2026-06-18, P2). The per-job CAS PAT is minted with
-    /// `scope == "read-write"` and is scoped to the job's OWN `owner_tenant`.
-    /// That read-write grant means a job CAN overwrite / poison entries within
-    /// ITS OWN tenant's keyspace — this is deliberately accepted (a tenant
-    /// trusts its own jobs; cross-tenant isolation is enforced separately by CAS
-    /// URL routing — see `cas_http::HttpBootCas::route_key` + the a13 adversarial
-    /// test). This test is the TRIPWIRE: if the mint is ever broadened beyond a
-    /// single `owner_tenant` (e.g. a wildcard/`_public` tenant) or its scope
-    /// changes, the posture is no longer "intra-tenant, accepted" and this must
-    /// be re-reviewed, not silently changed.
+    /// `scope == "read-write"`; that read-write grant means a job CAN overwrite
+    /// / poison entries within ITS OWN tenant's keyspace — deliberately accepted
+    /// (a tenant trusts its own jobs; cross-tenant isolation is enforced
+    /// separately by CAS URL routing — see `cas_http::HttpBootCas::route_key` +
+    /// the a13 adversarial test).
+    ///
+    /// Under the frozen contract (2026-07-08) the tenant is NO LONGER named on
+    /// the wire — `owner_tenant` is REMOVED; the server DERIVES the tenant from
+    /// `installation_id`. This is a posture UPGRADE: the fabricd literally cannot
+    /// request a wildcard/`_public`/cross-tenant scope, because it never names a
+    /// tenant at all. This test is the TRIPWIRE on two invariants that must
+    /// survive any refactor: (1) `owner_tenant` must NEVER reappear on the wire
+    /// (its return = the single-tenant hole reopening), and (2) the scope stays
+    /// `read-write` (a change is a security-posture change, not a refactor).
     #[tokio::test]
     async fn mint_pat_is_tenant_scoped_read_write_intra_tenant_poison_accepted() {
         let resp_body = r#"{"token":"tok-rw","pat_id":"pid-rw","expires_ms":1234567890000}"#;
         let c = client(vec![ok_body(resp_body)]);
 
-        c.mint("acme", "job-7", DEADLINE, NOW)
+        c.mint("acme/repo", "acme", "job-7", DEADLINE, NOW)
             .await
             .expect("mint must succeed");
 
@@ -799,20 +832,26 @@ mod tests {
         let (_url, _auth, body) = &calls[0];
         let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
 
-        // Scoped to the job's OWN tenant — never a wildcard / cross-tenant / `_public`.
+        // (1) The tenant is never CLIENT-NAMED: owner_tenant must be ABSENT, and
+        // no wildcard / cross-tenant / `_public` selector may appear anywhere.
+        assert!(
+            parsed.get("owner_tenant").is_none(),
+            "owner_tenant must NEVER reappear on the wire — the server derives the \
+             tenant from installation_id; its return is the single-tenant hole reopening"
+        );
         assert_eq!(
-            parsed["owner_tenant"], "acme",
-            "PAT must be scoped to the job's own tenant (intra-tenant only)"
+            parsed["installation_id"], "acme",
+            "the tenant selector is installation_id (server-derived, never client-named)"
         );
         assert_ne!(
-            parsed["owner_tenant"], "_public",
-            "PAT must NEVER be minted for the shared cross-tenant keyspace"
+            parsed["installation_id"], "_public",
+            "the tenant selector must NEVER be the shared cross-tenant keyspace"
         );
         assert_ne!(
-            parsed["owner_tenant"], "*",
-            "PAT must NEVER be minted with a wildcard tenant scope"
+            parsed["installation_id"], "*",
+            "the tenant selector must NEVER be a wildcard scope"
         );
-        // Read-write is the accepted posture: a job may poison its OWN tenant's cache.
+        // (2) Read-write is the accepted posture: a job may poison its OWN tenant's cache.
         assert_eq!(
             parsed["scope"], "read-write",
             "intra-tenant read-write is the accepted-by-design posture; \
@@ -832,7 +871,7 @@ mod tests {
         let c = client(vec![ok_body(&resp_body)]);
 
         let err = c
-            .mint("acme", "job-late", deadline_ms, 0)
+            .mint("acme/repo", "acme", "job-late", deadline_ms, 0)
             .await
             .expect_err("must fail with TtlExceedsLease when expires_ms > deadline");
 
@@ -854,7 +893,7 @@ mod tests {
     async fn mint_401_returns_unauthorized() {
         let c = client(vec![status_resp(401)]);
         let err = c
-            .mint("acme", "job-401", DEADLINE, NOW)
+            .mint("acme/repo", "acme", "job-401", DEADLINE, NOW)
             .await
             .expect_err("must fail on 401");
         assert_eq!(err, MintError::Unauthorized, "401 must map to Unauthorized");
@@ -866,7 +905,7 @@ mod tests {
     async fn mint_403_returns_unauthorized() {
         let c = client(vec![status_resp(403)]);
         let err = c
-            .mint("acme", "job-403", DEADLINE, NOW)
+            .mint("acme/repo", "acme", "job-403", DEADLINE, NOW)
             .await
             .expect_err("must fail on 403");
         assert_eq!(err, MintError::Unauthorized, "403 must map to Unauthorized");
@@ -878,7 +917,7 @@ mod tests {
     async fn mint_500_returns_bad_status() {
         let c = client(vec![status_resp(500)]);
         let err = c
-            .mint("acme", "job-500", DEADLINE, NOW)
+            .mint("acme/repo", "acme", "job-500", DEADLINE, NOW)
             .await
             .expect_err("must fail on 500");
         assert_eq!(
@@ -894,7 +933,7 @@ mod tests {
     async fn mint_malformed_2xx_body_returns_bad_response() {
         let c = client(vec![ok_body(r#"{"not":"the_right_fields"}"#)]);
         let err = c
-            .mint("acme", "job-bad-body", DEADLINE, NOW)
+            .mint("acme/repo", "acme", "job-bad-body", DEADLINE, NOW)
             .await
             .expect_err("must fail on malformed body");
         assert_eq!(
@@ -910,7 +949,7 @@ mod tests {
     async fn mint_transport_error_returns_unreachable() {
         let c = client(vec![transport_err()]);
         let err = c
-            .mint("acme", "job-transport", DEADLINE, NOW)
+            .mint("acme/repo", "acme", "job-transport", DEADLINE, NOW)
             .await
             .expect_err("must fail on transport error");
         assert_eq!(

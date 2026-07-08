@@ -728,71 +728,106 @@ pub(crate) async fn finalize_admitted_lease(
     //
     // A7 invariant: a CONFIGURED mint that returns `Err` MUST fail closed (no box).
     if let Some(mint) = state.cas_pat_mint.as_ref() {
-        // A7b (audit r6): finalize re-mints on EVERY provision attempt, so a prior
-        // attempt's PAT (retained across a CapacityError re-enqueue for a retry)
-        // would be OVERWRITTEN in `pat_ids` by the fresh mint below and orphaned
-        // (unrevoked until D-9 self-expiry). Revoke any stale PAT for this lease
-        // BEFORE re-minting. No-op on the first attempt (no entry).
-        state.revoke_pat_for(&lease_id).await;
-        // Use the lease expiry (already F1-clamped) as the deadline bound (A7b).
-        let lease_deadline_ms = lease.expiry;
-        match mint
-            .mint(
-                tenant.as_str(),
-                &lease_id,
-                lease_deadline_ms,
-                state.clock.now_ms(),
-            )
-            .await
-        {
-            Ok(minted) => {
-                let endpoint = state.clw_endpoint.as_deref().unwrap_or("");
-                // Track-C C2c: with a cred-ticket signer configured, deliver the
-                // PAT env-0 — stash it server-side + inject a single-use
-                // `CLW_CRED_TICKET` INSTEAD of `CLW_TOKEN` (the PAT never rides the
-                // untrusted env; clw redeems the ticket once at trusted boot). No
-                // signer ⇒ the `CLW_TOKEN`-in-env path, byte-identical to today.
-                if let Some(signer) = state.cred_signer.as_ref() {
-                    let ticket = signer.ticket(&lease_id);
-                    state.stash_cred(
-                        &lease_id,
-                        crate::cred_ticket::StashedCred {
-                            token: minted.token.clone(),
-                            endpoint: endpoint.to_string(),
-                            tenant: tenant.as_str().to_string(),
-                        },
-                    );
-                    crate::runner_inject::inject_cred_ticket_env(
-                        &mut spec,
-                        &ticket,
-                        &lease_id,
-                        endpoint,
-                        tenant.as_str(),
-                    );
-                } else {
-                    crate::runner_inject::inject_clw_env(
-                        &mut spec,
-                        &minted,
-                        endpoint,
-                        tenant.as_str(),
-                    );
-                }
-                // Record the pat_id for revoke on every terminal teardown path (A7b).
-                state
-                    .pat_ids
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .insert(lease_id.clone(), minted.pat_id.clone());
-            }
-            Err(e) => {
-                // FAIL CLOSED — mirror the JIT-mint error arm exactly: teardown
-                // + ledger remove + fail_closed. No box is ever provisioned
-                // without a minted PAT when a mint client is configured (A7).
+        // ── Frozen mint contract (server TL, 2026-07-08) ──────────────────────
+        // The mint DERIVES the tenant from `installation_id` and authorizes the
+        // grant against the `(tenant, repo_full_name)` allowlist; `owner_tenant`
+        // is no longer sent (naming the tenant client-side was the single-tenant
+        // hole the 283-step-3 WP closed). Both fields are REQUIRED TOGETHER for a
+        // hydrating (moat) lease. Gate on their presence:
+        //   • both present → mint the per-job CAS PAT (below);
+        //   • both absent  → non-hydrating lease → SKIP the mint (cold run — the
+        //                    moat-off default; ZERO regression on every non-moat
+        //                    acquire, which carries neither field);
+        //   • exactly one  → a half-declared hydration intent is MALFORMED → fail
+        //                    closed (never provision a box on a partial moat
+        //                    request), mirroring the mint-Err arm below.
+        let hydration = match (
+            req.repo_full_name.as_deref(),
+            req.installation_id.as_deref(),
+        ) {
+            (Some(repo), Some(inst)) => Some((repo, inst)),
+            (None, None) => None,
+            _ => {
                 state.teardown_lease(&lease_id).await;
                 if let Ok(mut ledger) = state.ledger.lock() {
                     let _ = ledger.remove(&lease_id);
                 }
-                return FinalizeOutcome::Done(fail_closed(&format!("CAS PAT mint failed: {e}")));
+                return FinalizeOutcome::Done(fail_closed(
+                    "acquire declared exactly one of {repo_full_name, installation_id}; both are \
+                     required together for a hydrating (moat) lease — fail closed",
+                ));
+            }
+        };
+        if let Some((repo_full_name, installation_id)) = hydration {
+            // A7b (audit r6): finalize re-mints on EVERY provision attempt, so a prior
+            // attempt's PAT (retained across a CapacityError re-enqueue for a retry)
+            // would be OVERWRITTEN in `pat_ids` by the fresh mint below and orphaned
+            // (unrevoked until D-9 self-expiry). Revoke any stale PAT for this lease
+            // BEFORE re-minting. No-op on the first attempt (no entry).
+            state.revoke_pat_for(&lease_id).await;
+            // Use the lease expiry (already F1-clamped) as the deadline bound (A7b).
+            let lease_deadline_ms = lease.expiry;
+            match mint
+                .mint(
+                    repo_full_name,
+                    installation_id,
+                    &lease_id,
+                    lease_deadline_ms,
+                    state.clock.now_ms(),
+                )
+                .await
+            {
+                Ok(minted) => {
+                    let endpoint = state.clw_endpoint.as_deref().unwrap_or("");
+                    // Track-C C2c: with a cred-ticket signer configured, deliver the
+                    // PAT env-0 — stash it server-side + inject a single-use
+                    // `CLW_CRED_TICKET` INSTEAD of `CLW_TOKEN` (the PAT never rides the
+                    // untrusted env; clw redeems the ticket once at trusted boot). No
+                    // signer ⇒ the `CLW_TOKEN`-in-env path, byte-identical to today.
+                    if let Some(signer) = state.cred_signer.as_ref() {
+                        let ticket = signer.ticket(&lease_id);
+                        state.stash_cred(
+                            &lease_id,
+                            crate::cred_ticket::StashedCred {
+                                token: minted.token.clone(),
+                                endpoint: endpoint.to_string(),
+                                tenant: tenant.as_str().to_string(),
+                            },
+                        );
+                        crate::runner_inject::inject_cred_ticket_env(
+                            &mut spec,
+                            &ticket,
+                            &lease_id,
+                            endpoint,
+                            tenant.as_str(),
+                        );
+                    } else {
+                        crate::runner_inject::inject_clw_env(
+                            &mut spec,
+                            &minted,
+                            endpoint,
+                            tenant.as_str(),
+                        );
+                    }
+                    // Record the pat_id for revoke on every terminal teardown path (A7b).
+                    state
+                        .pat_ids
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .insert(lease_id.clone(), minted.pat_id.clone());
+                }
+                Err(e) => {
+                    // FAIL CLOSED — mirror the JIT-mint error arm exactly: teardown
+                    // + ledger remove + fail_closed. No box is ever provisioned
+                    // without a minted PAT when a mint client is configured (A7).
+                    state.teardown_lease(&lease_id).await;
+                    if let Ok(mut ledger) = state.ledger.lock() {
+                        let _ = ledger.remove(&lease_id);
+                    }
+                    return FinalizeOutcome::Done(fail_closed(&format!(
+                        "CAS PAT mint failed: {e}"
+                    )));
+                }
             }
         }
     }
