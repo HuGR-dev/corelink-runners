@@ -29,17 +29,14 @@
     // per-attempt timeout). The shared CLOUDFLARE_SPAWN_AUTH_TOKEN secret is set on
     // both workers (inert without this URL). A container RESTART is required to
     // pick this up (envVars are read at container start).
-    "CLOUDFLARE_SPAWN_WORKER_URL": "https://corelink-spawn-worker.gmhelmold.workers.dev",
-    // MOAT FLIP (2026-07-08, owner-authorized): arm the CAS-cred mint + hydrate so
-    // a check-host lease gets a lease-scoped CAS PAT and hydrates its toolchain from
-    // the cache (rota-A goes fully live: check-exec on the moat). CLW_ENDPOINT = the
-    // CAS host the check-host hydrates from; CORELINK_RUNNER_MINT_URL = the BASE (the
-    // client appends /internal/v1/runner/{mint,revoke}, runner_cas_mint.rs:383/445).
-    // The AUTH_KEY (server-scoped `runner_mint`, OOB-delivered 2026-06-21) +
-    // FABRIC_CRED_TICKET_SECRET (env-0/C2c cred signer) are SECRETS, not here.
-    // Interlock (server.rs:965): mint armed REQUIRES CRED_TICKET_SECRET + CLW_ENDPOINT.
-    "CLW_ENDPOINT": "https://corelink-api.humangr.com",
-    "CORELINK_RUNNER_MINT_URL": "https://corelink-api.humangr.com"
+    "CLOUDFLARE_SPAWN_WORKER_URL": "https://corelink-spawn-worker.gmhelmold.workers.dev"
+    // MOAT MINT (CLW_ENDPOINT + CORELINK_RUNNER_MINT_URL) is UNSET pending a mint-
+    // client contract fix: the server's /internal/v1/runner/mint now requires
+    // {job_id, repo_full_name, installation_id, scope} (repo-allowlist-based,
+    // 2026-07-07 server contract), but the fabricd client still sends the old
+    // {owner_tenant, job_id, scope, ttl_seconds} (runner_cas_mint.rs:398). Arming the
+    // mint before that fix would fail-close every hydrating (check-host) acquire at the
+    // mint. Re-arm once the client sends repo_full_name + installation_id.
   },
 
   // The singleton control-plane container DO. ONE instance: the in-memory lease
