@@ -107,13 +107,42 @@ export default {
   },
 
   async scheduled(_event: ScheduledController, env: Env): Promise<void> {
-    // Keep-alive ping so the singleton never sleeps (the 24/7 knob). Best-effort.
+    // Keep-alive ping so the singleton never sleeps (the 24/7 knob) — now ALSO a
+    // liveness watchdog + self-heal (2026-07-08 recurring-hang incident). The
+    // singleton has gone dark on its own (process hung, `/v1/health` timing out)
+    // and needed a MANUAL delete+redeploy each time. The ping is time-bounded
+    // (10s); if the container is genuinely unresponsive we `destroy()` it so the
+    // next request / cron tick brings up a FRESH instance automatically. A
+    // healthy plane answers in <1s, so a 10s timeout means a real hang, not a
+    // transient — the destroy is warranted. Logged every tick (visible via
+    // `wrangler tail`) so a recurrence has a timeline instead of a mystery.
+    const container = getContainer(env.FABRICD, SINGLETON);
+    const t0 = Date.now();
     try {
-      await getContainer(env.FABRICD, SINGLETON).fetch(
-        new Request("http://fabricd/v1/health"),
+      const resp = await container.fetch(
+        new Request("http://fabricd/v1/health", {
+          signal: AbortSignal.timeout(10_000),
+        }),
       );
-    } catch {
-      // warmth is best-effort; a missed ping just risks one cold start
+      if (resp.status === 200) {
+        console.log(`keep-warm: health 200 in ${Date.now() - t0}ms`);
+        return;
+      }
+      console.log(
+        `keep-warm: health ${resp.status} in ${Date.now() - t0}ms — treating as unhealthy`,
+      );
+    } catch (e) {
+      console.log(
+        `keep-warm: health UNREACHABLE in ${Date.now() - t0}ms (${e}) — self-healing`,
+      );
+    }
+    // Health failed / timed out → the singleton is hung. Destroy it so a fresh
+    // instance boots on the next fetch (self-heal; replaces the manual restart).
+    try {
+      await container.destroy();
+      console.log("keep-warm: destroyed hung singleton — fresh instance will boot on next request");
+    } catch (e) {
+      console.log(`keep-warm: destroy() failed: ${e}`);
     }
   },
 };

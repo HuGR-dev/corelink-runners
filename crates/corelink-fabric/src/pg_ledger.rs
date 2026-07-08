@@ -54,7 +54,7 @@
 //! documented non-goal, not an oversight. The resolver is [`pg_tls_mode_from_env`].
 
 use corelink_runners_contracts::RunnerState;
-use deadpool_postgres::{Config, Pool, Runtime};
+use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use tokio::runtime::Handle;
 use tokio_postgres::NoTls;
 
@@ -331,6 +331,24 @@ impl PgLedger {
     ) -> anyhow::Result<Self> {
         let mut cfg = Config::new();
         cfg.url = Some(database_url.to_string());
+        // RESILIENCE (2026-07-08 recurring-hang incident). The default recycling
+        // method is `Fast` — it only checks `is_closed()`, which does NOT detect a
+        // HALF-OPEN connection (the serverless DB, e.g. Neon, scaled to zero while
+        // TCP still believes the socket is alive). A query on such a stale
+        // connection HANGS with no bound, so the sync bridge's `block_in_place`
+        // pins its worker forever; the background reaper (a pg op every 30s) is the
+        // trigger — one hung tick stalls the reap loop, pg keep-warm stops, the DB
+        // idles cold, and successive ops hang on more stale connections until the
+        // runtime can no longer serve even `/v1/health` (observed: the singleton
+        // going dark ~30 min after each restart). Fix: `Verified` recycling runs a
+        // `SELECT 1` liveness check before handing a connection out, and BOTH the
+        // recycle check and new-connection create are time-bounded — so a stale
+        // connection is detected + replaced (never hung), and `pool.get()` always
+        // returns a live connection or a bounded error (fail-closed), never blocks
+        // indefinitely.
+        cfg.manager = Some(ManagerConfig {
+            recycling_method: RecyclingMethod::Verified,
+        });
         // Bound the pool-acquire wait (audit D2-P2). `PoolConfig::new` sets only
         // the max size, leaving deadpool's `timeouts.wait` at the default `None`
         // = wait forever. Under pool exhaustion `pool.get()` would then hang the
@@ -369,6 +387,13 @@ impl PgLedger {
         let admit_permits = std::sync::Arc::new(tokio::sync::Semaphore::new(admit_permit_count));
         let mut pool_cfg = deadpool_postgres::PoolConfig::new(effective_pool_size);
         pool_cfg.timeouts.wait = Some(std::time::Duration::from_secs(5));
+        // Bound the `Verified`-recycle liveness check and new-connection create so
+        // a HALF-OPEN connection (stale serverless DB) can never hang `pool.get()`:
+        // a `SELECT 1` on a dead socket that would otherwise block forever is
+        // aborted after `recycle`, deadpool then creates a fresh connection bounded
+        // by `create`. Both fail-closed (mapped to `Err`) rather than stall.
+        pool_cfg.timeouts.recycle = Some(std::time::Duration::from_secs(5));
+        pool_cfg.timeouts.create = Some(std::time::Duration::from_secs(8));
         cfg.pool = Some(pool_cfg);
         // TLS branch (WP-B). `Disable` is the original `NoTls` path, byte-for-
         // byte unchanged. `Require` wraps the same pool builder in a verify-full
