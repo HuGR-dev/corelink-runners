@@ -1687,6 +1687,15 @@ pub fn app_full(
     Router::new()
         // Health rides OUTSIDE the limiter so it answers under saturation.
         .route(paths::HEALTH, get(health))
+        // Container-platform health probe (2026-07-08): CF Containers probes the
+        // default port on `/` (and some setups `/health`) to mark the instance
+        // HEALTHY. fabricd only served `/v1/*`, so the probe 404'd → the instance
+        // stayed `healthy:0` and CF would REVERT a rollout (a new binary silently
+        // rolling back to the previous image — observed on the fabricd singleton).
+        // Answer the probe paths with the same fixed-cost, auth-free 200 so
+        // rollouts complete + stick. Layer-free (mirrors /v1/health).
+        .route("/", get(health))
+        .route("/health", get(health))
         // ATT-KEY-ROTATION: the attestation key-set is UNAUTHENTICATED (module
         // docs); mirrors health: fixed-cost, no tenant data, no auth gate.
         .merge(key_route)
