@@ -29,7 +29,17 @@
     // per-attempt timeout). The shared CLOUDFLARE_SPAWN_AUTH_TOKEN secret is set on
     // both workers (inert without this URL). A container RESTART is required to
     // pick this up (envVars are read at container start).
-    "CLOUDFLARE_SPAWN_WORKER_URL": "https://corelink-spawn-worker.gmhelmold.workers.dev"
+    "CLOUDFLARE_SPAWN_WORKER_URL": "https://corelink-spawn-worker.gmhelmold.workers.dev",
+    // MOAT FLIP (2026-07-08, owner-authorized): arm the CAS-cred mint + hydrate so
+    // a check-host lease gets a lease-scoped CAS PAT and hydrates its toolchain from
+    // the cache (rota-A goes fully live: check-exec on the moat). CLW_ENDPOINT = the
+    // CAS host the check-host hydrates from; CORELINK_RUNNER_MINT_URL = the BASE (the
+    // client appends /internal/v1/runner/{mint,revoke}, runner_cas_mint.rs:383/445).
+    // The AUTH_KEY (server-scoped `runner_mint`, OOB-delivered 2026-06-21) +
+    // FABRIC_CRED_TICKET_SECRET (env-0/C2c cred signer) are SECRETS, not here.
+    // Interlock (server.rs:965): mint armed REQUIRES CRED_TICKET_SECRET + CLW_ENDPOINT.
+    "CLW_ENDPOINT": "https://corelink-api.humangr.com",
+    "CORELINK_RUNNER_MINT_URL": "https://corelink-api.humangr.com"
   },
 
   // The singleton control-plane container DO. ONE instance: the in-memory lease
@@ -49,7 +59,7 @@
       // `wrangler deploy` (incl. a container ROLLOUT to apply new envVars) no longer
       // needs a Docker daemon. To rebuild the control-plane binary: build+push a new
       // image (CI, or a Docker host) and update this @sha256 digest.
-      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer@sha256:70beb2d2887d8e23837d1f27aa3e158d1061f2b16a6e4e6ca9eded673500d5ed",
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer@sha256:b989000a629af9777931a5e1a96698bfb53d15811ea4f312a957334c93bcaa9e",
       // HTTP control plane. Bumped standard-1 → standard-2 (2026-07-07 acquire-storm
       // hardening): the single-flight singleton must keep /v1/health + lease ops
       // responsive under a burst of box provisions; 2 vCPU gives headroom so a few
