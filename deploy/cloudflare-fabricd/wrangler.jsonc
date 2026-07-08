@@ -29,31 +29,26 @@
     // per-attempt timeout). The shared CLOUDFLARE_SPAWN_AUTH_TOKEN secret is set on
     // both workers (inert without this URL). A container RESTART is required to
     // pick this up (envVars are read at container start).
-    "CLOUDFLARE_SPAWN_WORKER_URL": "https://corelink-spawn-worker.gmhelmold.workers.dev"
-    // ── MOAT MINT — UNSET, ARM-READY (one gate left) ──────────────────────────
-    // Client contract COMPLETE both sides (2026-07-08):
-    //   • #319: frozen body {job_id, repo_full_name, installation_id, scope, ttl_seconds},
-    //     owner_tenant dropped.
-    //   • #321: installation_id OPTIONAL + the acquiring PAT presented as
-    //     `Authorization: Bearer` so the server introspects it → tenant on the native
-    //     path (no GitHub App installation needed). Gate: repo_full_name present → mint;
-    //     both absent → cold run; installation_id without repo → fail closed.
-    //   • server half LIVE: #674 (55d4dcd2) — the PAT-introspection fallback.
-    // ONE gate left before arming: server "3/3 seeded" for tenant d863fafb —
-    //   runner_repo_allowlist(d863fafb, 'HumanGuardrail/corelink-runners') + not-offboarded
-    //   + runners_entitlement (the tenant_gh_installation_map row is NO LONGER needed on
-    //   the native path — tenant comes from the PAT). Until seeded, a hydrating acquire
-    //   mints → 403 (allowlist miss) → fail closed; a non-hydrating acquire runs cold.
-    //   So arming is HELD until "3/3 seeded" (armed+unseeded is strictly worse than cold).
-    // TO ARM (one-shot, on "3/3 seeded"): add the two vars below, then
-    //   `wrangler secret put CORELINK_RUNNER_MINT_AUTH_KEY` (< ~/corelink-runner-mint-key.txt),
-    //   then `npm run deploy` (a config-only change needs a container rollout to take):
-    //     "CLW_ENDPOINT": "https://corelink-api.humangr.com",
-    //     "CORELINK_RUNNER_MINT_URL": "https://corelink-api.humangr.com"
-    //   (client appends /internal/v1/runner/{mint,revoke}). FABRIC_CRED_TICKET_SECRET is
-    //   already set (env-0 C2c). Then drive a check-host acquire
-    //   (repo_full_name=HumanGuardrail/corelink-runners, no installation_id, d863fafb bearer)
-    //   → mint via live server → CLW inject → hydrate 4e3da22e toolchain → exec = PROVEN.
+    "CLOUDFLARE_SPAWN_WORKER_URL": "https://corelink-spawn-worker.gmhelmold.workers.dev",
+    // ── MOAT MINT — ARMED (FLIP-A, 2026-07-08 go-live) ────────────────────────
+    // Client contract complete both sides: #319 (frozen 5-field body, owner_tenant
+    // dropped) + #321 (installation_id OPTIONAL + acquiring PAT via Authorization:
+    // Bearer → server introspects → tenant on the native path). Server half LIVE
+    // (#674). D1 3/3 GREEN for d863fafb with the canonical slug
+    // `HumanGuardrail/corelink-runners` (clw-verified: allowlist + not-offboarded +
+    // entitlement=20 — NO seed needed). CLW_ENDPOINT + CORELINK_RUNNER_MINT_URL are
+    // the CoreLink API BASE (client appends /internal/v1/runner/{mint,revoke} + the
+    // CLW cache path). Secret CORELINK_RUNNER_MINT_AUTH_KEY set via `wrangler secret
+    // put`. FABRIC_CRED_TICKET_SECRET already set (env-0 C2c: PAT never in untrusted
+    // env — a single-use CLW_CRED_TICKET is injected instead, redeemed at trusted boot).
+    "CLW_ENDPOINT": "https://corelink-api.humangr.com",
+    "CORELINK_RUNNER_MINT_URL": "https://corelink-api.humangr.com",
+    // ── ATTESTED COST — ON (FLIP-B) ───────────────────────────────────────────
+    // Emit the signed intent_metrics_sig on CloseResponse (#320). Additive +
+    // wire-invisible when off; ON now so hugit's ✓cas: can render ATTESTED cost
+    // once they pin the conformance vector + consume the field. Signs honest-zero
+    // cost until a provider /usage source (never a derived COGS). Prod key faa5b7726.
+    "FABRIC_EMIT_INTENT_METRICS_SIG": "true"
   },
 
   // The singleton control-plane container DO. ONE instance: the in-memory lease
@@ -73,7 +68,12 @@
       // `wrangler deploy` (incl. a container ROLLOUT to apply new envVars) no longer
       // needs a Docker daemon. To rebuild the control-plane binary: build+push a new
       // image (CI, or a Docker host) and update this @sha256 digest.
-      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer@sha256:b989000a629af9777931a5e1a96698bfb53d15811ea4f312a957334c93bcaa9e",
+      // 2026-07-08 GO-LIVE rebuild from main (b76f2f3): includes the mint seam
+      // #319/#321 (frozen body + installation_id-optional + PAT-introspection),
+      // the org fix #322, and the intent_metrics_sig emit wiring #320. The prior
+      // b989000a PREDATED all of these. Built via `wrangler containers build`
+      // (tag golive-20260708) + pushed to the CF managed registry.
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer@sha256:e845a64e125de3a46fafb8f520e77fbb480f912211999390b008f1c02aa83126",
       // HTTP control plane. Bumped standard-1 → standard-2 (2026-07-07 acquire-storm
       // hardening): the single-flight singleton must keep /v1/health + lease ops
       // responsive under a burst of box provisions; 2 vCPU gives headroom so a few
