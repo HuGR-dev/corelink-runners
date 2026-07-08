@@ -183,6 +183,12 @@ pub struct ServerConfig {
     ///
     /// [`DEFAULT_CLOSE_ACK_MAX_INFLIGHT`]: crate::app::DEFAULT_CLOSE_ACK_MAX_INFLIGHT
     pub close_ack_max_inflight: usize,
+    /// Acquire-storm guard: max concurrent box provisions. From
+    /// `FABRIC_PROVISION_MAX_INFLIGHT` (default
+    /// [`DEFAULT_PROVISION_MAX_INFLIGHT`](crate::app::DEFAULT_PROVISION_MAX_INFLIGHT),
+    /// must be ≥ 1). Bounds how many provisions may pin a blocking-pool thread at
+    /// once on the single-flight singleton; the rest await a permit asynchronously.
+    pub provision_max_inflight: usize,
     /// AUDIT P2: global in-flight request cap. From
     /// `FABRIC_MAX_INFLIGHT_REQUESTS` (default
     /// [`DEFAULT_MAX_INFLIGHT_REQUESTS`], must be ≥ 1). Requests beyond this are
@@ -268,6 +274,7 @@ impl std::fmt::Debug for ServerConfig {
             .field("ledger_pool_size", &self.ledger_pool_size)
             .field("pg_tls", &self.pg_tls)
             .field("close_ack_max_inflight", &self.close_ack_max_inflight)
+            .field("provision_max_inflight", &self.provision_max_inflight)
             .field("max_inflight_requests", &self.max_inflight_requests)
             .field("admission_mode", &self.admission_mode)
             .field("admission_queue_wait", &self.admission_queue_wait)
@@ -620,6 +627,15 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
         crate::app::DEFAULT_CLOSE_ACK_MAX_INFLIGHT,
     )?;
 
+    // ── Acquire-storm guard: concurrent-provision cap ────────────────────────
+    // Optional, default DEFAULT_PROVISION_MAX_INFLIGHT; 0/unparseable → error
+    // (0 would deadlock every provision; absence is the use-the-default path).
+    let provision_max_inflight = parse_positive_usize(
+        &get,
+        "FABRIC_PROVISION_MAX_INFLIGHT",
+        crate::app::DEFAULT_PROVISION_MAX_INFLIGHT,
+    )?;
+
     // ── AUDIT P2: global in-flight request cap ───────────────────────────────
     // Optional, default DEFAULT_MAX_INFLIGHT_REQUESTS; 0/unparseable → error.
     let max_inflight_requests = parse_positive_usize(
@@ -840,6 +856,7 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
         ledger_pool_size,
         pg_tls,
         close_ack_max_inflight,
+        provision_max_inflight,
         max_inflight_requests,
         admission_mode,
         admission_queue_wait,
@@ -1231,6 +1248,7 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
     // AUDIT P1+P2: apply the close ack-window cap and the global in-flight cap.
     let state = state
         .with_close_ack_max_inflight(cfg.close_ack_max_inflight)
+        .with_provision_max_inflight(cfg.provision_max_inflight)
         .with_max_inflight_requests(cfg.max_inflight_requests);
 
     // ── CP4 queued fair admission (ADR-0005) — DEFAULT-OFF. Only under
