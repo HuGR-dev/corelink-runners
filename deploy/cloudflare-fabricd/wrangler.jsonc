@@ -30,20 +30,30 @@
     // both workers (inert without this URL). A container RESTART is required to
     // pick this up (envVars are read at container start).
     "CLOUDFLARE_SPAWN_WORKER_URL": "https://corelink-spawn-worker.gmhelmold.workers.dev"
-    // MOAT MINT (CLW_ENDPOINT + CORELINK_RUNNER_MINT_URL) is UNSET. The mint-client
-    // contract DRIFT is now FIXED (PR #319, 2026-07-08): the fabricd sends the frozen
-    // body {job_id, repo_full_name, installation_id, scope, ttl_seconds} (owner_tenant
-    // dropped; server derives the tenant from installation_id), and finalize gates the
-    // mint on both fields being present (both → mint; neither → cold run; exactly one →
-    // fail closed). Two remaining PRE-ARM gates, neither in this repo:
-    //   1. hugit must POPULATE repo_full_name + installation_id on the acquire wire
-    //      (its piece #1) — until then a hydrating acquire arrives with neither field
-    //      and correctly runs cold (no mint), so arming buys nothing yet;
-    //   2. the server must SEED the 4 authz D1 rows for the dogfood tenant (d863fafb):
-    //      tenant_gh_installation_map, NOT-suspended, runner_repo_allowlist,
-    //      runners_entitlement — else every mint 403s (byte-identical on any miss).
-    // Re-arm (set both vars + redeploy) once (1)+(2) land; then the check-host E2E can
-    // be proven live. Arming before then fail-closes nothing new but proves nothing.
+    // ── MOAT MINT — UNSET, ARM-READY (one gate left) ──────────────────────────
+    // Client contract COMPLETE both sides (2026-07-08):
+    //   • #319: frozen body {job_id, repo_full_name, installation_id, scope, ttl_seconds},
+    //     owner_tenant dropped.
+    //   • #321: installation_id OPTIONAL + the acquiring PAT presented as
+    //     `Authorization: Bearer` so the server introspects it → tenant on the native
+    //     path (no GitHub App installation needed). Gate: repo_full_name present → mint;
+    //     both absent → cold run; installation_id without repo → fail closed.
+    //   • server half LIVE: #674 (55d4dcd2) — the PAT-introspection fallback.
+    // ONE gate left before arming: server "3/3 seeded" for tenant d863fafb —
+    //   runner_repo_allowlist(d863fafb, 'humangr-labs/corelink-runners') + not-offboarded
+    //   + runners_entitlement (the tenant_gh_installation_map row is NO LONGER needed on
+    //   the native path — tenant comes from the PAT). Until seeded, a hydrating acquire
+    //   mints → 403 (allowlist miss) → fail closed; a non-hydrating acquire runs cold.
+    //   So arming is HELD until "3/3 seeded" (armed+unseeded is strictly worse than cold).
+    // TO ARM (one-shot, on "3/3 seeded"): add the two vars below, then
+    //   `wrangler secret put CORELINK_RUNNER_MINT_AUTH_KEY` (< ~/corelink-runner-mint-key.txt),
+    //   then `npm run deploy` (a config-only change needs a container rollout to take):
+    //     "CLW_ENDPOINT": "https://corelink-api.humangr.com",
+    //     "CORELINK_RUNNER_MINT_URL": "https://corelink-api.humangr.com"
+    //   (client appends /internal/v1/runner/{mint,revoke}). FABRIC_CRED_TICKET_SECRET is
+    //   already set (env-0 C2c). Then drive a check-host acquire
+    //   (repo_full_name=humangr-labs/corelink-runners, no installation_id, d863fafb bearer)
+    //   → mint via live server → CLW inject → hydrate 4e3da22e toolchain → exec = PROVEN.
   },
 
   // The singleton control-plane container DO. ONE instance: the in-memory lease
