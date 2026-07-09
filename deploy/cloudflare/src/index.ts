@@ -904,7 +904,14 @@ export default {
     // 200. A non-2xx from the container is FAIL-CLOSED (502/503; never a
     // fabricated success) so CloudflareEngine::exec_captured returns Err.
     if (request.method === "POST" && pathname === "/v1/exec") {
-      const body = (await request.json()) as ExecBody;
+      let body: ExecBody;
+      try {
+        body = (await request.json()) as ExecBody;
+      } catch {
+        // Match /v1/spawn + /cas-cred: a malformed/empty body is a clean 400,
+        // not an opaque 500 (trusted bearer caller, but diagnosable > opaque).
+        return json({ error: "invalid JSON body" }, 400);
+      }
       if (!body.handle) return json({ error: "missing handle" }, 400);
       const container = getContainer(env.CHECK_HOST_CONTAINER, body.handle);
       let resp: Response;

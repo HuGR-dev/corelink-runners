@@ -952,13 +952,20 @@ fn parse_positive_usize(
 /// - **a CLW endpoint** (`CLW_ENDPOINT`) — else every lease mints + revokes a real
 ///   D-9 PAT but the runner receives an empty CAS endpoint, so the moat silently
 ///   hydrates nothing while churning the mint.
+/// - **a public base URL** (`FABRIC_PUBLIC_BASE_URL`) — the C2c cred ticket delivers
+///   NO `CLW_TOKEN`; the box redeems the ticket at
+///   `{CLW_FABRIC_ENDPOINT}/v1/leases/{id}/cas-cred`, and `CLW_FABRIC_ENDPOINT` is
+///   injected only when this is set. Armed-but-unset ⇒ the box gets a ticket with no
+///   redemption target, so it can never obtain the PAT and hydration fails closed —
+///   the mint churns per lease while the moat delivers nothing.
 ///
-/// Both are silent-when-armed failures (works with the mint OFF, breaks/leaks the
+/// All three are silent-when-armed failures (works with the mint OFF, breaks/leaks the
 /// moment it is armed), so they fail loud at boot rather than in production.
 fn validate_mint_arm(
     mint_armed: bool,
     cred_signer_armed: bool,
     clw_endpoint_present: bool,
+    fabric_public_base_url_present: bool,
 ) -> anyhow::Result<()> {
     if mint_armed && !cred_signer_armed {
         anyhow::bail!(
@@ -973,6 +980,16 @@ fn validate_mint_arm(
             "the CAS PAT mint is armed but CLW_ENDPOINT is unset/empty — every lease would \
              mint + revoke a real CAS PAT while the runner receives no CAS endpoint, so the moat \
              silently hydrates nothing. Set CLW_ENDPOINT, or unset the mint."
+        );
+    }
+    if mint_armed && !fabric_public_base_url_present {
+        anyhow::bail!(
+            "the CAS PAT mint is armed (with the C2c cred ticket) but FABRIC_PUBLIC_BASE_URL is \
+             unset/empty — the box is handed a single-use ticket but NO redemption target \
+             (CLW_FABRIC_ENDPOINT is injected only from this base), so it can never redeem the \
+             PAT at <base>/v1/leases/<id>/cas-cred and cache hydration fails closed while the \
+             mint churns per lease. Set FABRIC_PUBLIC_BASE_URL to the fabricd public base URL, \
+             or unset the mint."
         );
     }
     Ok(())
@@ -1238,10 +1255,23 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
     // a dev/default sentinel key or a half-configured pair — so an empty/dev
     // auth key can never silently run in prod.
     let mint = crate::runner_cas_mint::cas_pat_mint_from_env(|k| std::env::var(k).ok())?;
-    // Pre-arm coupling guard: the mint must never arm without env-0 (cred signer)
-    // or without a CLW endpoint — fail loud rather than silently leak the PAT into
-    // the untrusted env or mint PATs the runner cannot use.
-    validate_mint_arm(mint.is_some(), cred_signer_armed, clw_endpoint_present)?;
+    // The C2c cred-ticket redemption base — the box redeems its ticket at
+    // {FABRIC_PUBLIC_BASE_URL}/v1/leases/{id}/cas-cred. Presence is required when the
+    // mint is armed (see the guard below); read it here for that check.
+    let fabric_public_base_url_present =
+        std::env::var(crate::envelope_inject::FABRIC_PUBLIC_BASE_URL)
+            .ok()
+            .is_some_and(|s| !s.trim().is_empty());
+    // Pre-arm coupling guard: the mint must never arm without env-0 (cred signer),
+    // without a CLW endpoint, or without a public base URL for ticket redemption —
+    // fail loud rather than silently leak the PAT into the untrusted env or mint
+    // PATs the runner can neither reach nor redeem.
+    validate_mint_arm(
+        mint.is_some(),
+        cred_signer_armed,
+        clw_endpoint_present,
+        fabric_public_base_url_present,
+    )?;
     let state = match mint {
         Some(mint) => state.with_cas_pat_mint(mint),
         None => state,
@@ -1902,14 +1932,14 @@ mod compute_ceiling_config_tests {
     #[test]
     fn mint_arm_ok_when_off_or_fully_configured() {
         // Mint OFF ⇒ inert regardless of the other flags.
-        assert!(validate_mint_arm(false, false, false).is_ok());
-        // Mint ON with BOTH cred signer + endpoint ⇒ armed correctly.
-        assert!(validate_mint_arm(true, true, true).is_ok());
+        assert!(validate_mint_arm(false, false, false, false).is_ok());
+        // Mint ON with cred signer + CLW endpoint + public base URL ⇒ armed correctly.
+        assert!(validate_mint_arm(true, true, true, true).is_ok());
     }
 
     #[test]
     fn mint_arm_without_cred_signer_is_env0_bypass_error() {
-        let err = validate_mint_arm(true, false, true)
+        let err = validate_mint_arm(true, false, true, true)
             .expect_err("mint armed without cred signer must fail closed");
         let msg = format!("{err:#}");
         assert!(
@@ -1920,11 +1950,25 @@ mod compute_ceiling_config_tests {
 
     #[test]
     fn mint_arm_without_clw_endpoint_is_silent_moat_off_error() {
-        let err = validate_mint_arm(true, true, false)
+        let err = validate_mint_arm(true, true, false, true)
             .expect_err("mint armed without CLW_ENDPOINT must fail closed");
         assert!(
             format!("{err:#}").contains("CLW_ENDPOINT"),
             "must name the missing endpoint"
+        );
+    }
+
+    #[test]
+    fn mint_arm_without_public_base_url_is_unredeemable_ticket_error() {
+        // Mint + cred signer + CLW endpoint armed, but no public base URL: the box
+        // gets a cred ticket with no redemption target → hydration fails closed.
+        // This is the exact silent-when-armed gap the go-live audit caught.
+        let err = validate_mint_arm(true, true, true, false)
+            .expect_err("mint armed without FABRIC_PUBLIC_BASE_URL must fail closed");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("FABRIC_PUBLIC_BASE_URL") && msg.contains("cas-cred"),
+            "must name the missing redemption base; got {msg}"
         );
     }
 }

@@ -5,10 +5,9 @@
 // holds the lease ledger in memory, so all /v1 traffic MUST reach the same
 // instance — enforced by a fixed DO id (SINGLETON) + max_instances:1 (wrangler).
 //
-// ⚠️ NOT YET DEPLOY-VERIFIED (Docker daemon was down at authoring). The
-// envVars-injection + auto-start lifecycle mirror the proven corelink-spawn-worker
-// pattern; confirm on first real deploy and tweak if the @cloudflare/containers
-// 0.3.x API differs.
+// DEPLOY-VERIFIED (2026-07-09): live at https://corelink-fabricd.gmhelmold.workers.dev
+// (/health 200), running the pinned container image; the envVars-injection +
+// auto-start lifecycle mirror the proven corelink-spawn-worker pattern.
 
 import { DurableObject } from "cloudflare:workers";
 import { Container, getContainer } from "@cloudflare/containers";
@@ -25,6 +24,12 @@ export interface Env {
   BILLING_INGEST_URL?: string;
   BILLING_REGION?: string;
   CLOUDFLARE_SPAWN_WORKER_URL?: string;
+  // fabricd's OWN public base URL. REQUIRED when the moat mint is armed: the C2c
+  // cred ticket delivers no CLW_TOKEN, so the box redeems its ticket at
+  // {FABRIC_PUBLIC_BASE_URL}/v1/leases/{id}/cas-cred to obtain the per-job PAT.
+  // The Rust boot guard (validate_mint_arm) fails closed if the mint is armed and
+  // this is unset — the exact silent-when-armed gap the go-live audit caught.
+  FABRIC_PUBLIC_BASE_URL?: string;
   // Secrets (`wrangler secret put`).
   FABRIC_SIGNING_KEY: string;
   FABRIC_INTROSPECT_AUTH_KEY: string;
@@ -134,6 +139,13 @@ export class FabricdContainer extends Container<Env> {
       // #-guard fails boot; absent ⇒ moat OFF. Each forwarded only when present so
       // an unarmed deploy stays byte-identical to the cold path. ──
       ...(env.CLW_ENDPOINT ? { CLW_ENDPOINT: env.CLW_ENDPOINT } : {}),
+      // fabricd's own public base — the box's cred-ticket redemption target
+      // ({base}/v1/leases/{id}/cas-cred). REQUIRED when the mint is armed (the
+      // Rust boot guard fails closed without it); forwarded here so the container
+      // process actually sees it (env.* alone never reaches the container).
+      ...(env.FABRIC_PUBLIC_BASE_URL
+        ? { FABRIC_PUBLIC_BASE_URL: env.FABRIC_PUBLIC_BASE_URL }
+        : {}),
       ...(env.CORELINK_RUNNER_MINT_URL
         ? { CORELINK_RUNNER_MINT_URL: env.CORELINK_RUNNER_MINT_URL }
         : {}),
