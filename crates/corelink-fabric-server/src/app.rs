@@ -1449,8 +1449,22 @@ impl AppState {
         let lid = lease_id.to_string();
         match tokio::task::spawn_blocking(move || prov.teardown(&lid)).await {
             Ok(Ok(())) => true,
-            // Provider error or task panic — caller retries.
-            Ok(Err(_)) | Err(_) => false,
+            // Provider error or task panic — caller retries. OPS (observability):
+            // a persistently-failing teardown is a SILENT live-box leak (billed
+            // compute + untrusted-compute surface that never dies), so surface the
+            // provider error LOUDLY rather than collapsing it to a bare `false`.
+            Ok(Err(e)) => {
+                eprintln!(
+                    "teardown FAILED for lease {lease_id}: {e:#} — box may be leaking, will retry"
+                );
+                false
+            }
+            Err(e) => {
+                eprintln!(
+                    "teardown task PANICKED for lease {lease_id}: {e} — box may be leaking, will retry"
+                );
+                false
+            }
         }
     }
 

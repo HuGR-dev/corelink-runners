@@ -76,12 +76,14 @@
       // `wrangler deploy` (incl. a container ROLLOUT to apply new envVars) no longer
       // needs a Docker daemon. To rebuild the control-plane binary: build+push a new
       // image (CI, or a Docker host) and update this @sha256 digest.
-      // 2026-07-08 GO-LIVE rebuild from main (b76f2f3): includes the mint seam
-      // #319/#321 (frozen body + installation_id-optional + PAT-introspection),
-      // the org fix #322, and the intent_metrics_sig emit wiring #320. The prior
-      // b989000a PREDATED all of these. Built via `wrangler containers build`
-      // (tag golive-20260708) + pushed to the CF managed registry.
-      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer@sha256:e845a64e125de3a46fafb8f520e77fbb480f912211999390b008f1c02aa83126",
+      // 2026-07-09 MOAT-FIX binary. e845a64e (2026-07-08) had the mint seam
+      // #319/#321 but the mint never worked live — two bugs found by the
+      // go-live-readiness audit: (1) index.ts didn't forward the mint vars into the
+      // container (worker fix d6bb32c), (2) MintResponseBody read `token` but the
+      // server sends `token_plaintext` → BadResponse fail-closed on every real mint
+      // (binary fix f7b1ec7). Plus loud logs on the silent critical failure paths.
+      // Built via `wrangler containers build` (tag golive-20260709-mintfix).
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer@sha256:cb6fca460b36a9776efd8485a204134474a1eed5568ee031f18614135e0ab7c3",
       // HTTP control plane. Bumped standard-1 → standard-2 (2026-07-07 acquire-storm
       // hardening): the single-flight singleton must keep /v1/health + lease ops
       // responsive under a burst of box provisions; 2 vCPU gives headroom so a few
