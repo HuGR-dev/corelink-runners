@@ -1,17 +1,25 @@
 #!/usr/bin/env bash
 # build-and-push.sh — build and push the CoreLink ephemeral runner image (ADR-0007)
 #
+# ⚠️ LEGACY MANUAL PATH. Cloudflare-first (ADR-0008): the LIVE runner image is
+# built by `wrangler containers build` (from deploy/runner/Dockerfile) and pushed
+# to the CF managed registry — the runtime image is
+# `registry.cloudflare.com/<account>/corelink-spawn-worker-runnercontainer@sha256:…`
+# (see deploy/cloudflare/wrangler.jsonc). The runner runs on Cloudflare, NOT from
+# ghcr. This script is the pre-CF manual build+push (kept for a self-hosted /
+# non-CF GitHub-Actions on-ramp); its default registry stays a plain OCI registry,
+# and ghcr is just ONE possible `REGISTRY` value, not a live dependency.
+#
 # USAGE:
-#   export REGISTRY=ghcr.io          # default: ghcr.io
-#   export IMAGE=humanguardrail/corelink-runner  # default: humanguardrail/corelink-runner
-#   export TAG=latest                # default: latest
-#   export PLATFORM=linux/amd64     # default: linux/amd64
+#   export REGISTRY=registry.example.com   # your OCI registry (default below)
+#   export IMAGE=corelink-runner           # image name
+#   export TAG=latest                      # default: latest
+#   export PLATFORM=linux/amd64            # default: linux/amd64
 #   ./build-and-push.sh
 #
 # AUTHENTICATION:
 #   You must be logged in to the target registry before running this script.
-#   For GHCR (default):
-#     echo "$GHCR_PAT" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+#   (e.g. for ghcr: `echo "$GHCR_PAT" | docker login ghcr.io -u "$USER" --password-stdin`.)
 #   No credentials are hard-coded in this script or the Dockerfile.
 #
 # OUTPUT:

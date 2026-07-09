@@ -60,7 +60,10 @@ baked into the image).
 
 ```
 RunnerLease {
-  image: "ghcr.io/humanguardrail/corelink-runner@sha256:<digest>",  // X4: pinned
+  // Cloudflare-first: the runtime image lives in the CF managed registry
+  // (registry.cloudflare.com/<account>/corelink-spawn-worker-runnercontainer),
+  // built from this Dockerfile via `wrangler containers build`. NOT ghcr.
+  image: "registry.cloudflare.com/<account>/corelink-spawn-worker-runnercontainer@sha256:<digest>",  // X4: pinned
   env: {
     "CORELINK_RUNNER_JITCONFIG": "<jit-config-token>",            // per-job credential
   },
@@ -101,16 +104,20 @@ change, and record the new digest in the build log.
 
 ## Building and pushing
 
+**Cloudflare-first (live path):** the runner image is built from THIS Dockerfile by
+`wrangler containers build` (in `deploy/cloudflare/`) and pushed to the CF managed
+registry — that CF-registry `@sha256` is what the fabric pins. No ghcr in the loop.
+
+**Legacy manual path** (`build-and-push.sh`) — for a self-hosted / non-CF
+GitHub-Actions on-ramp. `REGISTRY` is any OCI registry you control (ghcr is just
+one option, not required):
+
 ```sh
 # 1. (Only when refreshing the base) re-resolve the digest — see X4 section.
-
-# 2. Log in to GHCR:
-echo "$GHCR_PAT" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-
-# 3. Build and push:
-export REGISTRY=ghcr.io
-export IMAGE=humanguardrail/corelink-runner
-export TAG=2.335.1-rust1.96.0   # recommended: encode runner + Rust versions
+# 2. Log in to your registry, then:
+export REGISTRY=registry.example.com    # your OCI registry
+export IMAGE=corelink-runner
+export TAG=2.335.1-rust1.96.0           # recommended: encode runner + Rust versions
 ./deploy/runner/build-and-push.sh
 ```
 
@@ -121,7 +128,7 @@ in the fabric's runner-lease config.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `REGISTRY` | `ghcr.io` | Container registry host |
+| `REGISTRY` | `ghcr.io` | OCI registry host (legacy default; set to yours — CF-first builds via `wrangler containers build`) |
 | `IMAGE` | `humanguardrail/corelink-runner` | Image name (no tag) |
 | `TAG` | `latest` | Image tag |
 | `PLATFORM` | `linux/amd64` | Build platform |

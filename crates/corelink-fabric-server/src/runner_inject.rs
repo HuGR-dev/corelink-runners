@@ -194,7 +194,13 @@ mod tests {
         // egress allowed, run-on-create, no env yet.
         ContainerSpec {
             name: "corelink-runner-x".to_string(),
-            image: "ghcr.io/humanguardrail/corelink-runner@sha256:\
+            // A placeholder pinned image for the injection test (the value is
+            // irrelevant — this exercises env injection, not image pulls). Uses
+            // the CF managed-registry shape to match reality: the runner runs from
+            // `registry.cloudflare.com/…/corelink-spawn-worker-runnercontainer`
+            // (Cloudflare-first), never from ghcr.
+            image: "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/\
+                    corelink-spawn-worker-runnercontainer@sha256:\
                     d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
                 .to_string(),
             tmp_root: "/tmp/runner".to_string(),
