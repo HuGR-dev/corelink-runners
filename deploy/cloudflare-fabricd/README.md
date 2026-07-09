@@ -127,12 +127,19 @@ the live smoke confirms the real backends. **Never claim boxes work off the boot
 — prove an end-to-end spawn of each kind** (the #195 lesson: "substrate wired" ≠ spawn works).
 
 ## Status
-✅ **DEPLOY-VERIFIED + LIVE (2026-07-07)** at `https://corelink-fabricd.gmhelmold.workers.dev`.
-The container+Worker+cron glue is confirmed end-to-end: `/v1/health → 200 ok` (stable),
-`/v1/attestation/key → key_id faa5b7726ccd2c52` (the OOB prod key), and a **check-host acquire
-returned 200 Held** — proving the **rota-A** binary (image `@sha256:d26a46c4…`, built from `main`
-via `wrangler containers build`) routes check-exec to Cloudflare (a pre-rota-A runner-only binary
-fails closed). CF-native: introspect auth + CF spawn-Worker box backend, **no Northflank**.
+✅ **MOAT LIVE + GENUINELY PROVEN (2026-07-09)** at `https://corelink-fabricd.gmhelmold.workers.dev`.
+The live image is `@sha256:cb6fca46…` (the moat-fix binary — see wrangler.jsonc for the pin + why
+the earlier `e845a64e`/`d26a46c4` never actually minted). `/v1/health → 200 ok`, `/v1/attestation/key
+→ key_id faa5b7726ccd2c52` (prod key). The per-job CAS PAT mint is proven REAL (a hydrating
+check-host acquire went 503→200 across the `token_plaintext` response-parse fix — a mint-armed
+transition a cold-run could never produce), and the attested-cost `intent_metrics_sig` rides the
+close. CF-native: introspect auth + CF spawn-Worker box backend, **no Northflank**.
+
+⚠️ **Two go-live bugs the earlier "proven" reads MISSED** (both fixed): (1) `index.ts` didn't
+forward the mint/cred/emit vars into the CONTAINER (only the Worker saw them) → mint OFF → cold-run
+200 masked it; (2) `MintResponseBody` read `token` but the server sends `token_plaintext` →
+fail-closed on every real mint. Lesson: a 200 on a hydrating acquire does NOT prove a mint — only a
+mint-armed 503→200 transition (or a server-side mint-request log) does.
 
 **Not yet cut over:** hugit still points at the Northflank fabricd. Cutover = repoint
 `HUGIT_RUNNER_HOST` + re-pin the pubkey (`b1eba792…` → `faa5b7726…`); PAT unchanged (same introspect).

@@ -762,6 +762,43 @@ async fn a7d_hydration_installation_without_repo_fails_closed() {
     assert_installation_without_repo_fails_closed_no_box_no_slot(body).await;
 }
 
+/// N>1 CAP-SAFETY (go-live-readiness audit): a proxied acquire declaring
+/// `X-Fabricd-Num-Shards: 2` on the default per-process (in-memory) ledger is
+/// REFUSED fail-closed — otherwise each shard would count only its own leases and
+/// admit up to the FULL cap independently (a tenant gets N× its paid concurrency).
+/// Inert at N=1 (the header defaults to 1 → guard never fires); the real pg
+/// deploy is `is_cross_instance_safe() == true` so it is unaffected.
+#[tokio::test]
+async fn n_gt_1_on_non_cross_instance_ledger_fails_closed() {
+    use tower::ServiceExt;
+    let broker: Arc<dyn RunnerRegistrationBroker> = Arc::new(MockBroker::new());
+    let (router, ledger, cap, _state) = harness_with_moat(Some(broker), None, None, None);
+    let req = Request::builder()
+        .method("POST")
+        .uri(paths::LEASES)
+        .header(header::AUTHORIZATION, "Bearer pat-acme")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("x-fabricd-num-shards", "2")
+        .header("x-fabricd-shard", "0")
+        .body(Body::from(serde_json::to_vec(&runner_acq_body()).unwrap()))
+        .unwrap();
+    let resp = router.oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "N>1 on a per-process ledger must fail closed (no N× over-admission)"
+    );
+    assert_eq!(
+        ledger.lock().unwrap().by_tenant(&acme()).unwrap().len(),
+        0,
+        "the refused acquire must reserve NO slot"
+    );
+    assert!(
+        cap.captured().is_empty(),
+        "the refused acquire must provision NO box"
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // A7b — Revoke on EVERY terminal path + TTL bound
 // ─────────────────────────────────────────────────────────────────────────────

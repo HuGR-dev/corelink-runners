@@ -743,6 +743,17 @@ impl AppState {
         self.this_shard.store(this_shard, Ordering::Relaxed);
     }
 
+    /// Whether the wired ledger enforces the cap SAFELY across instances (pg).
+    /// The acquire path refuses admission when `num_shards > 1` on a non-safe
+    /// (per-process) ledger — else each shard would admit up to the full cap
+    /// independently → N× over-admission on untrusted compute.
+    pub(crate) fn ledger_is_cross_instance_safe(&self) -> bool {
+        self.ledger
+            .lock()
+            .map(|l| l.is_cross_instance_safe())
+            .unwrap_or(false)
+    }
+
     /// This instance's learned `(this_shard, num_shards)`. `this_shard ==
     /// SHARD_UNKNOWN` means the identity is not yet known (pre-first-acquire).
     /// Used by the acquire path to mint a shard-consistent lease-id for internal
@@ -1125,6 +1136,14 @@ impl AppState {
         // lock held (teardown is async + the transition re-locks).
         let held: Vec<String> = {
             let Ok(ledger) = self.ledger.lock() else {
+                // OPS (observability): a poisoned ledger lock here makes the
+                // suspend/kill action a SILENT no-op — the abusive tenant's live
+                // boxes keep running while the operator believes they were killed.
+                // Surface it loudly (the suspend gate still blocks NEW acquires).
+                eprintln!(
+                    "kill_tenant_leases({tenant}): ledger lock POISONED — could not \
+                     enumerate held leases; live boxes NOT killed this call"
+                );
                 return 0;
             };
             ledger
@@ -1246,28 +1265,76 @@ impl AppState {
     /// suspend action. `true` iff the tenant was NOT already suspended (a real
     /// state change — used to make the forensic line + the lease-kill fire once).
     pub(crate) fn suspend_tenant(&self, tenant: &TenantId) -> bool {
-        self.suspended_tenants
+        let changed = self
+            .suspended_tenants
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .insert(tenant.as_str().to_string())
+            .insert(tenant.as_str().to_string());
+        // Durable write-through (multi-instance): a suspend issued on one shard
+        // must reach EVERY shard + survive a restart. No-op on a non-pg ledger
+        // (in-memory is authoritative at N=1). A failure is logged, not fatal —
+        // this instance's cache already blocks the tenant immediately.
+        if let Ok(l) = self.ledger.lock()
+            && let Err(e) = l.set_tenant_suspended(tenant.as_str(), true)
+        {
+            eprintln!(
+                "suspend_tenant({tenant}): durable write FAILED: {e:#} \
+                 — suspension is in-memory-only on this instance until it succeeds"
+            );
+        }
+        changed
     }
 
     /// Track-C AUP1: lift a tenant's suspension (idempotent). `true` iff the
     /// tenant WAS suspended (a real state change).
     pub(crate) fn unsuspend_tenant(&self, tenant: &TenantId) -> bool {
-        self.suspended_tenants
+        let changed = self
+            .suspended_tenants
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .remove(tenant.as_str())
+            .remove(tenant.as_str());
+        if let Ok(l) = self.ledger.lock()
+            && let Err(e) = l.set_tenant_suspended(tenant.as_str(), false)
+        {
+            eprintln!("unsuspend_tenant({tenant}): durable delete FAILED: {e:#}");
+        }
+        changed
     }
 
     /// Track-C AUP1: whether `tenant` is currently suspended. Read at the TOP of
-    /// `acquire` — a suspended tenant acquires nothing.
+    /// `acquire` — a suspended tenant acquires nothing. The in-memory cache is the
+    /// fast path; at N>1 a cache MISS also consults the durable cross-instance
+    /// store (a suspend may have been issued on another shard). Inert at N=1 (the
+    /// cache is authoritative → no pg round-trip on the single-instance hot path).
     pub(crate) fn is_tenant_suspended(&self, tenant: &TenantId) -> bool {
-        self.suspended_tenants
+        if self
+            .suspended_tenants
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .contains(tenant.as_str())
+        {
+            return true;
+        }
+        let (_this, num_shards) = self.observed_shard();
+        if num_shards > 1 {
+            match self
+                .ledger
+                .lock()
+                .map(|l| l.is_tenant_suspended_durable(tenant.as_str()))
+            {
+                Ok(Ok(true)) => return true,
+                Ok(Ok(false)) => {}
+                // Fail OPEN for this check (the cache already said not-suspended)
+                // but log it — the admission pg reserve is the real gate and will
+                // fail closed if pg is genuinely down, so no bypass slips through.
+                Ok(Err(e)) => eprintln!(
+                    "is_tenant_suspended({tenant}): durable read FAILED at N>1: {e:#} \
+                     — treating as not-suspended (cache concurs; admission pg-guards)"
+                ),
+                Err(_) => {}
+            }
+        }
+        false
     }
 
     /// Mark `lease_id` as a CHECK-HOST lease (C1/C6) with the `toolchain_digest`
@@ -1775,6 +1842,14 @@ pub fn app_full(
                         // (audit r6: a bare 503 status carries no ErrorBody, so a
                         // client parsing the frozen vocabulary on a 503 would get an
                         // empty body and fail to deserialize).
+                        // OPS (observability): a silent shed storm reads as "clients
+                        // misbehaving" instead of "the plane is saturated" — log each
+                        // shed so a live overload has a timeline. (Cheap: only fires
+                        // when the global concurrency limit is already exceeded.)
+                        eprintln!(
+                            "load-shed: request SHED at the global concurrency limit \
+                             — failing closed 503 (the plane is saturated)"
+                        );
                         crate::auth::error_response(
                             corelink_fabric_api::ApiError::FailClosed,
                             "overloaded; shed — failing closed",

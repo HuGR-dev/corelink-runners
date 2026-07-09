@@ -156,6 +156,13 @@ function shardDoId(k: number, n: number): string {
 // shardOf — only the initial acquire is placed round-robin.
 let acquireCursor = 0;
 
+// Round-robin cursor for GitHub-webhook autoscaler placement. The webhook drives
+// out-of-band acquires (workflow_job.queued → provision_runner); a fixed shard-0
+// route would concentrate every autoscaler-driven runner on one shard. A second
+// cursor spreads them like ACQUIRE does (the acquire path reads the same
+// X-Fabricd-* headers, so the minted lease-id hashes back to the chosen shard).
+let webhookCursor = 0;
+
 /**
  * Extract the `{lease_id}` from a `/v1/leases/{lease_id}/...` path, or null for
  * the collection endpoint (`/v1/leases`) and any non-lease path.
@@ -247,6 +254,129 @@ async function listLeasesScatterGather(request: Request, env: Env, N: number): P
   });
 }
 
+/**
+ * Wire shape of `GET /v1/metrics/tenant` (matches the Rust
+ * `metrics::TenantMetricsResponse`): the caller's own wait stats — a bounded
+ * 6-bucket histogram plus nearest-rank p50/p95. Each shard computes these over
+ * only ITS OWN in-memory samples, so shard-0 alone is a partial view at N>1.
+ */
+interface TenantMetricsBody {
+  tenant?: unknown;
+  p50_ms?: unknown;
+  p95_ms?: unknown;
+  histogram?: unknown;
+  count?: unknown;
+}
+
+// Representative value (ms) reported for a percentile that falls in each bucket
+// when merging across shards. The buckets are `[<10 · <50 · <250 · <1s · <5s ·
+// >=5s]` (exclusive upper bounds `WAIT_BUCKET_BOUNDS_MS = [10,50,250,1000,5000]`
+// in the Rust `interference` core). From merged bucket COUNTS the raw sample
+// values are gone, so the exact nearest-rank value is unrecoverable; we report
+// each bucket's upper bound (the catch-all `>=5s` bucket has no upper bound → its
+// 5000ms floor). This is an approximation ONLY at N>1; N=1 passes the container's
+// exact percentiles through byte-identically (it never reaches this merge).
+const WAIT_BUCKET_REPR_MS: [number, number, number, number, number, number] = [
+  10, 50, 250, 1_000, 5_000, 5_000,
+];
+
+/**
+ * Nearest-rank percentile over MERGED histogram bucket counts — the same rank
+ * formula as the Rust `interference::nearest_rank`
+ * (`rank = ceil(count * pct / 100)`, clamped to >=1), walked cumulatively across
+ * the buckets to find which one the rank lands in. Returns that bucket's
+ * representative value. `count == 0` ⇒ 0 (matches `WaitSnapshot::default`).
+ *
+ * NOT an average of per-shard percentiles — that would be wrong; percentiles do
+ * not compose. Merging the underlying bucket counts and re-ranking is the correct
+ * (approximate, bucket-resolution) merge given only histograms are exposed.
+ */
+function percentileFromBuckets(buckets: number[], count: number, percentile: number): number {
+  if (count === 0) return 0;
+  // ceil(count * percentile / 100), integer form == Rust's `div_ceil(100)`.
+  const rank = Math.max(1, Math.floor((count * percentile + 99) / 100));
+  let cumulative = 0;
+  for (let i = 0; i < buckets.length; i++) {
+    cumulative += buckets[i];
+    if (cumulative >= rank) return WAIT_BUCKET_REPR_MS[i];
+  }
+  return WAIT_BUCKET_REPR_MS[WAIT_BUCKET_REPR_MS.length - 1];
+}
+
+/**
+ * `GET /v1/metrics/tenant` scatter-gather. Under N>1 each shard reports wait
+ * stats over only its own in-memory samples, so shard-0 alone under-counts. Fan
+ * the (cloned) request out to all N shards, SUM the 6 histogram buckets across
+ * shards, recompute `count` as the total, and recompute p50/p95 by nearest-rank
+ * over the MERGED buckets (never by averaging per-shard percentiles). Best-effort
+ * like the lease-list merge: a down/erroring shard is skipped; only if EVERY shard
+ * fails do we propagate an error. `tenant` is the same on every shard (Bearer-PAT
+ * scoped) — take the first defined.
+ *
+ * N===1 SHORT-CIRCUITS via the caller (this helper is only invoked at N>1); the
+ * N=1 path passes the container's exact snapshot through byte-identically.
+ */
+async function tenantMetricsScatterGather(request: Request, env: Env, N: number): Promise<Response> {
+  const settled = await Promise.allSettled(
+    Array.from({ length: N }, (_unused, k) =>
+      getContainer(env.FABRICD, shardDoId(k, N)).fetch(request.clone()),
+    ),
+  );
+
+  const merged = [0, 0, 0, 0, 0, 0];
+  let tenant: unknown;
+  let contentType = "application/json";
+  let anyOk = false;
+  let firstErrorResponse: Response | null = null;
+
+  for (const outcome of settled) {
+    if (outcome.status !== "fulfilled") continue;
+    const resp = outcome.value;
+    if (resp.status !== 200) {
+      if (firstErrorResponse === null) firstErrorResponse = resp;
+      continue;
+    }
+    anyOk = true;
+    const ct = resp.headers.get("content-type");
+    if (ct) contentType = ct;
+    let body: TenantMetricsBody;
+    try {
+      body = (await resp.json()) as TenantMetricsBody;
+    } catch {
+      continue; // malformed body from a shard — skip it (best-effort)
+    }
+    if (tenant === undefined && body.tenant !== undefined) tenant = body.tenant;
+    if (Array.isArray(body.histogram)) {
+      for (let i = 0; i < 6; i++) {
+        const v = body.histogram[i];
+        if (typeof v === "number" && Number.isFinite(v)) merged[i] += v;
+      }
+    }
+  }
+
+  // Every shard failed → propagate a shard's error (or a 502 if all rejected).
+  if (!anyOk) {
+    if (firstErrorResponse !== null) return firstErrorResponse;
+    return new Response(JSON.stringify({ error: "all fabricd shards unreachable" }), {
+      status: 502,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
+  // count == sum of buckets (the per-shard invariant count == sum(histogram)).
+  const count = merged.reduce((a, b) => a + b, 0);
+  return new Response(
+    JSON.stringify({
+      tenant,
+      p50_ms: percentileFromBuckets(merged, count, 50),
+      p95_ms: percentileFromBuckets(merged, count, 95),
+      histogram: merged,
+      count,
+    }),
+    { status: 200, headers: { "content-type": contentType } },
+  );
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const N = numShards(env);
@@ -268,6 +398,57 @@ export default {
     // merge; N===1 short-circuits to a byte-identical passthrough.
     if (request.method === "GET" && pathname === "/v1/leases") {
       return listLeasesScatterGather(request, env, N);
+    }
+
+    // §9 TRIGGER — POST /v1/queue/trigger carries the lease id in the BODY
+    // (`lease_id`), not the URL, so leaseIdOf can't see it and it would fall to
+    // "everything else → shard 0" — exec fails-closed for any lease NOT on shard
+    // 0 (§13 hook-not-found). At N>1 read+parse the body, route by shardOf(the
+    // body's lease_id), and re-attach the consumed body verbatim to the forwarded
+    // request. Missing/unparseable/no lease_id → shard 0 (the old behaviour). At
+    // N=1 this branch is inert; the request falls through to shard 0 == singleton
+    // untouched (byte-identical — no body read).
+    if (N > 1 && request.method === "POST" && pathname === "/v1/queue/trigger") {
+      const raw = await request.text();
+      let leaseId: string | null = null;
+      try {
+        const parsed = JSON.parse(raw) as { lease_id?: unknown };
+        if (parsed && typeof parsed.lease_id === "string") leaseId = parsed.lease_id;
+      } catch {
+        // Unparseable body → fall back to shard 0 (leaseId stays null).
+      }
+      const k = leaseId !== null ? shardOf(leaseId, N) : 0;
+      // Re-attach the buffered body to a fresh request (same method/headers/bytes).
+      const forwarded = new Request(request.url, {
+        method: request.method,
+        headers: request.headers,
+        body: raw,
+      });
+      return getContainer(env.FABRICD, shardDoId(k, N)).fetch(forwarded);
+    }
+
+    // GITHUB WEBHOOK — POST /webhooks/github drives the autoscaler's out-of-band
+    // acquires. Routed to shard 0 it would pile every autoscaler runner on one
+    // shard, so at N>1 pick a round-robin shard and stamp the frozen X-Fabricd-*
+    // headers (the acquire path honours them so the minted lease-id hashes back to
+    // this shard). The body is HMAC-signed — do NOT read/alter it; `new
+    // Request(request)` carries the raw bytes verbatim while headers stay mutable
+    // (same pattern as ACQUIRE). At N=1 this is inert → falls through to shard 0.
+    if (N > 1 && request.method === "POST" && pathname === "/webhooks/github") {
+      const k = ((webhookCursor++ % N) + N) % N;
+      const modified = new Request(request);
+      modified.headers.set("X-Fabricd-Num-Shards", String(N));
+      modified.headers.set("X-Fabricd-Shard", String(k));
+      return getContainer(env.FABRICD, shardDoId(k, N)).fetch(modified);
+    }
+
+    // TENANT METRICS — GET /v1/metrics/tenant reads per-instance in-memory
+    // wait_stats, so shard-0 alone is a partial view at N>1. Scatter-gather across
+    // all N shards and merge the histograms (sum buckets, recompute count +
+    // nearest-rank percentiles). At N=1 this is inert → falls through to shard 0
+    // == singleton, a byte-identical passthrough of the exact snapshot.
+    if (N > 1 && request.method === "GET" && pathname === "/v1/metrics/tenant") {
+      return tenantMetricsScatterGather(request, env, N);
     }
 
     // LEASE-OP — a request that names a lease id. Route to the shard that owns
