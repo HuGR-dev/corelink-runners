@@ -56,6 +56,7 @@ use crate::handlers::webhook;
 use crate::{
     AppState, BoxRegistry, HookRegistry, StaticPlans, StaticTokenStore, SystemClock, app_full,
 };
+use corelink_fabric_api::paths;
 
 /// The well-known insecure dev seed — activated only when `FABRIC_DEV_UNSAFE=1`
 /// and no `FABRIC_SIGNING_KEY` is set.  Attestations produced with this key are
@@ -1339,10 +1340,7 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
     let router = match admin_state {
         Some(admin) => router.merge(
             Router::new()
-                .route(
-                    "/internal/v1/admin/tenants",
-                    axum::routing::post(onboard_tenant),
-                )
+                .route(paths::ADMIN_TENANTS, axum::routing::post(onboard_tenant))
                 .with_state(admin),
         ),
         None => router,
