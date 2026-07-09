@@ -36,7 +36,9 @@ use crate::app::AppState;
 
 /// The internal-auth header carrying the observability secret.  Mirrors the
 /// CoreLink introspection seam (`corelink_auth`) header name exactly.
-const INTERNAL_AUTH_HEADER: &str = "X-Corelink-Internal-Auth";
+/// `pub(crate)` so sibling internal-observability handlers (status) share the
+/// exact same gate rather than duplicating it.
+pub(crate) const INTERNAL_AUTH_HEADER: &str = "X-Corelink-Internal-Auth";
 
 /// Constant-time secret comparison: no early exit on the first mismatching
 /// byte — the difference is OR-folded across the full `max(len)` walk, with
@@ -46,7 +48,7 @@ const INTERNAL_AUTH_HEADER: &str = "X-Corelink-Internal-Auth";
 ///
 /// The lengths still bound the loop; that is acceptable here — the secret's
 /// length is not itself a recoverable byte of the secret.
-fn secret_matches(expected: &[u8], presented: &[u8]) -> bool {
+pub(crate) fn secret_matches(expected: &[u8], presented: &[u8]) -> bool {
     let mut diff = expected.len() ^ presented.len();
     let n = expected.len().max(presented.len());
     for i in 0..n {

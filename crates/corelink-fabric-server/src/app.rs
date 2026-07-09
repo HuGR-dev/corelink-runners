@@ -327,6 +327,10 @@ pub struct AppState {
     pub plans: Arc<dyn PlanSource>,
     /// Clock seam (deterministic under test).
     pub clock: Arc<dyn Clock>,
+    /// Fabric-clock ms captured at construction — the boot instant, for the
+    /// `/internal/v1/status` uptime aggregate. Wall-clock (not monotonic); an
+    /// ops uptime delta, never a correctness input.
+    pub(crate) boot_at_ms: u64,
     /// This instance's own shard index (multi-instance routing, [`crate::shard`]).
     /// [`Self::SHARD_UNKNOWN`] until the proxy Worker stamps `X-Fabricd-Shard` on a
     /// request (the cron health ping does so for every shard each minute; acquire
@@ -667,11 +671,14 @@ impl AppState {
         plans: Arc<dyn PlanSource>,
         clock: Arc<dyn Clock>,
     ) -> Self {
+        // Capture the boot instant before `clock` is moved into the struct.
+        let boot_at_ms = clock.now_ms();
         Self {
             ledger,
             cap_gate: CapGate,
             plans,
             clock,
+            boot_at_ms,
             wait_stats: Arc::new(Mutex::new(TenantWaitStats::new())),
             // CP4 admission DEFAULT-OFF: reject (immediate-or-reject, today's
             // behavior). The composition root opts into queue via
@@ -1832,6 +1839,9 @@ pub fn app_full(
     // PAT. Default-off: 404 until `with_observability_key` arms it.
     let internal = Router::new()
         .route(OCCUPANCY_PATH, get(handlers::occupancy::occupancy))
+        // Stage-C ops aggregate: build version / uptime / ledger durability /
+        // shard identity. Same observability-key gate as occupancy (reused).
+        .route(handlers::status::STATUS_PATH, get(handlers::status::status))
         // Track-C AUP1: operator enforcement (suspend/unsuspend a tenant). These
         // gate on the operator secret INSIDE the handler (state.admin_key,
         // constant-time; absent ⇒ 404), so they sit on the AppState router that
