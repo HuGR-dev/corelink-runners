@@ -51,10 +51,24 @@ armed does not prove the box can use the cred.**
   **is** in the container env ⇒ `CLW_FABRIC_ENDPOINT` is now injected ⇒ the box can
   redeem its ticket. **The redemption leg is wired.** (#334 pins the live digest.)
 
-**Final confirmation still available:** a real hydrating job (hugit dispatch, or a
-manual check-host acquire) would show the box redeem + a `[clw] cache hit` end-to-end.
-The boot-guard proof establishes the *wiring* conclusively; the end-to-end is the
-belt-and-suspenders on the next real dispatch.
+**External liveness confirmation (added 2026-07-09, no credential needed):** probed
+the LIVE public base from outside and corroborated the wiring from the far side too:
+- `POST /v1/leases/<fake-id>/cas-cred` (bogus ticket) → **`401 {"error":"invalid
+  ticket"}`** — the redemption route is MOUNTED, reachable at `FABRIC_PUBLIC_BASE_URL`,
+  parses the body, and validates the ticket signature (a valid ticket would mint the
+  PAT here). NOT 404/500. This is the redemption leg confirmed from the OUTSIDE.
+- `POST /v1/leases` (no auth) → `401 missing Bearer PAT`; `GET /v1/leases/<id>` →
+  `401` — acquire + status mounted and auth-gated correctly.
+- `GET /v1/attestation/key` → **`200`** serving prod key `faa5b7726ccd2c52` (FLIP-B):
+  the prod attestation key is live ⇒ the prod secret store loaded ⇒ the mint is armed
+  ⇒ (boot guard) `FABRIC_PUBLIC_BASE_URL` is wired. Full chain corroborated externally.
+
+So the redemption leg is now confirmed from **both** sides: boot guard (internal) +
+these external probes. **Final belt-and-suspenders still open:** a real hydrating job
+(hugit dispatch, or a manual check-host acquire with a scoped CoreLink PAT) would show
+the box redeem + a `[clw] cache hit` end-to-end. That requires a CoreLink PAT (owner
+credential) or a real hugit dispatch — not fabricable from this repo (X4 floor). The
+wiring is proven; only live traffic remains, and it fires on the next real dispatch.
 
 ---
 
