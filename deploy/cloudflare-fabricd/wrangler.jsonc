@@ -92,14 +92,17 @@
       // `wrangler deploy` (incl. a container ROLLOUT to apply new envVars) no longer
       // needs a Docker daemon. To rebuild the control-plane binary: build+push a new
       // image (CI, or a Docker host) and update this @sha256 digest.
-      // 2026-07-09 ZERO-GAPS binary (moat-fix + all N>1 gaps closed #329 + observability). e845a64e (2026-07-08) had the mint seam
-      // #319/#321 but the mint never worked live — two bugs found by the
-      // go-live-readiness audit: (1) index.ts didn't forward the mint vars into the
-      // container (worker fix d6bb32c), (2) MintResponseBody read `token` but the
-      // server sends `token_plaintext` → BadResponse fail-closed on every real mint
-      // (binary fix f7b1ec7). Plus loud logs on the silent critical failure paths.
-      // Built via `wrangler containers build` (tag golive-20260709-mintfix).
-      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer@sha256:bce176bdddf2ddc5502b8f1ae0f819141d3d97473c6351adc327b9551dcfe6f3",
+      // 2026-07-09 CRED-REDEMPTION-FIX binary (#332). The prior bce176bd zero-gaps
+      // binary minted a real per-job PAT but the box could never REDEEM it: C2c
+      // injects CLW_CRED_TICKET (no CLW_TOKEN) and the box redeems at
+      // {CLW_FABRIC_ENDPOINT}/v1/leases/{id}/cas-cred, but CLW_FABRIC_ENDPOINT is
+      // gated on FABRIC_PUBLIC_BASE_URL — which was set NOWHERE (go-live audit
+      // wf_63a2b814). This binary adds the validate_mint_arm boot guard that
+      // FAILS CLOSED if the mint is armed without FABRIC_PUBLIC_BASE_URL, so a
+      // healthy boot now PROVES the redemption endpoint is wired. wrangler.jsonc
+      // vars set FABRIC_PUBLIC_BASE_URL (above) + forward it into the container.
+      // Built via `wrangler containers build` (tag golive-20260709-credredemption).
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer@sha256:91f4b7ea8a9e01936951fba534d5b7bcbd52f51093961cf4d883eacf76e2880a",
       // HTTP control plane. Bumped standard-1 → standard-2 (2026-07-07 acquire-storm
       // hardening): the single-flight singleton must keep /v1/health + lease ops
       // responsive under a burst of box provisions; 2 vCPU gives headroom so a few
