@@ -60,6 +60,13 @@
     // env — a single-use CLW_CRED_TICKET is injected instead, redeemed at trusted boot).
     "CLW_ENDPOINT": "https://corelink-api.humangr.com",
     "CORELINK_RUNNER_MINT_URL": "https://corelink-api.humangr.com",
+    // C2c cred-ticket REDEMPTION target — fabricd's OWN public base. The ticket
+    // carries no PAT; the box redeems it at {this}/v1/leases/{id}/cas-cred to get
+    // the per-job PAT. REQUIRED whenever the mint is armed: the Rust boot guard
+    // (validate_mint_arm) fails closed without it. Without this the moat mints a
+    // PAT the box can never redeem → silent cold hydration (go-live audit finding,
+    // 2026-07-09). Must be THIS worker's public URL (the cas-cred route lives here).
+    "FABRIC_PUBLIC_BASE_URL": "https://corelink-fabricd.gmhelmold.workers.dev",
     // ── ATTESTED COST — ON (FLIP-B) ───────────────────────────────────────────
     // Emit the signed intent_metrics_sig on CloseResponse (#320). Additive +
     // wire-invisible when off; ON now so hugit's ✓cas: can render ATTESTED cost
