@@ -1277,6 +1277,18 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
         None => state,
     };
 
+    // Multi-instance: learn the shard COUNT authoritatively from the boot env so
+    // the cap-safety guard fires even for a header-LESS internal acquire (the
+    // autoscaler/webhook) on a freshly-booted instance — closing the pre-shard-
+    // learning over-admit window at N>1. Same FABRIC_NUM_SHARDS the proxy routes
+    // by; inert at N=1 (absent/1 ⇒ count stays 1, byte-identical to today).
+    if let Ok(raw) = std::env::var("FABRIC_NUM_SHARDS")
+        && let Ok(n) = raw.trim().parse::<u32>()
+        && n >= 1
+    {
+        state.set_boot_num_shards(n);
+    }
+
     // ASK-2 billing usage-push — DEFAULT-OFF (env-gated). Wired ONLY when
     // BILLING_INGEST_URL + the dedicated BILLING_INGEST_AUTH_KEY + a 3-char
     // BILLING_REGION are all present; otherwise the no-op target stays (zero
