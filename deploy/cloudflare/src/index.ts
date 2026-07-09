@@ -59,7 +59,9 @@ import {
   parseReconcilerRepos,
   installationIdForRepo,
   listOrphanRunnerJobs,
+  reconcileCompletedJobBilling,
   RECONCILE_MIN_AGE_MS,
+  logEvent,
   type ContainerEnvResult,
   type StashedCred,
   type StashRecord,
@@ -428,10 +430,11 @@ async function startWithRetry(start: (handle: string) => Promise<void>): Promise
       return handle;
     } catch (e) {
       lastErr = e;
-      console.log(
-        `container start attempt ${attempt}/${SPAWN_MAX_ATTEMPTS} failed (transient?): ` +
-          `${(e as Error).message}`,
-      );
+      logEvent("info", "container_start_retry", {
+        attempt,
+        maxAttempts: SPAWN_MAX_ATTEMPTS,
+        error: (e as Error).message,
+      });
       if (attempt < SPAWN_MAX_ATTEMPTS) {
         await new Promise((r) => setTimeout(r, 300 * attempt));
       }
@@ -463,14 +466,14 @@ async function spawnRunner(
   if (mint.patId && env.RUNNER_JOB_PATS) {
     // Best-effort: if the put fails, the PAT just TTL-expires (fail-open).
     await env.RUNNER_JOB_PATS.put(jobId, mint.patId, { expirationTtl: JOB_PAT_TTL_S }).catch((e) =>
-      console.log(`KV put job→pat failed (PAT will TTL-expire): ${(e as Error).message}`),
+      logEvent("error", "kv_put_job_pat_failed", { jobId, error: (e as Error).message }),
     );
   }
   if (mint.tenant && env.RUNNER_JOB_PATS) {
     // Stash the derived tenant for completion (concurrency-slot release + billing).
     await env.RUNNER_JOB_PATS.put(jobTenantKey(jobId), mint.tenant, {
       expirationTtl: JOB_PAT_TTL_S,
-    }).catch((e) => console.log(`KV put job→tenant failed: ${(e as Error).message}`));
+    }).catch((e) => logEvent("error", "kv_put_job_tenant_failed", { jobId, error: (e as Error).message }));
   }
   if (env.RUNNER_JOB_PATS) {
     // Stash the DO handle so `completed` can tear the container down immediately
@@ -478,7 +481,7 @@ async function spawnRunner(
     // miss just falls back to sleepAfter (fail-safe, never blocks the spawn).
     await env.RUNNER_JOB_PATS.put(jobHandleKey(jobId), handle, {
       expirationTtl: JOB_PAT_TTL_S,
-    }).catch((e) => console.log(`KV put job→handle failed: ${(e as Error).message}`));
+    }).catch((e) => logEvent("error", "kv_put_job_handle_failed", { jobId, error: (e as Error).message }));
   }
   return handle;
 }
@@ -499,7 +502,7 @@ async function revokeCompletedJob(
     await env.RUNNER_JOB_PATS.delete(jobId);
     return true;
   } catch (e) {
-    console.log(`revoke failed (PAT will TTL-expire): ${(e as Error).message}`);
+    logEvent("error", "revoke_failed", { jobId, error: (e as Error).message });
     return false;
   }
 }
@@ -523,7 +526,7 @@ async function teardownCompletedRunner(env: Env, jobId: string): Promise<boolean
   try {
     await getContainer(env.RUNNER_CONTAINER, handle).teardown();
   } catch (e) {
-    console.log(`runner teardown failed for job ${jobId} (sleepAfter backstop): ${(e as Error).message}`);
+    logEvent("error", "teardown_failed", { jobId, error: (e as Error).message });
     // fall through: still drop the handle key so we don't retry a dead handle
   }
   await env.RUNNER_JOB_PATS.delete(jobHandleKey(jobId)).catch(() => {
@@ -571,7 +574,7 @@ async function maybeBillCompletedJob(
     await pushUsageEvent(env, ev);
     return true;
   } catch (e) {
-    console.log(`billing usage-push failed (skipped, will reconcile): ${(e as Error).message}`);
+    logEvent("error", "billing_push_failed", { jobId, error: (e as Error).message });
     return false;
   }
 }
@@ -600,7 +603,7 @@ async function driveSpawn(
   const mint = await buildContainerEnv(env, { jobId, repoFullName: repo, installationId }, env0);
   if (mint.authz === "forbidden") {
     await releaseSpawnClaim(env.RUNNER_JOB_PATS, jobId);
-    console.log(`runner mint FORBIDDEN for job ${jobId} (repo ${repo}): no JIT, no spawn`);
+    logEvent("error", "mint_forbidden", { jobId, repo });
     return;
   }
   // Per-tenant concurrency ceiling (warm mints only). At-ceiling ⇒ no spawn.
@@ -608,7 +611,7 @@ async function driveSpawn(
     const admitted = await acquireTenantSlot(env.RUNNER_JOB_PATS, mint.tenant, jobId, mint.maxConcurrency);
     if (!admitted) {
       await releaseSpawnClaim(env.RUNNER_JOB_PATS, jobId);
-      console.log(`tenant ${mint.tenant} at max_concurrency ${mint.maxConcurrency}; refusing job ${jobId}`);
+      logEvent("info", "tenant_at_ceiling", { jobId, tenant: mint.tenant, maxConcurrency: mint.maxConcurrency });
       return;
     }
   }
@@ -633,14 +636,58 @@ async function driveSpawnGuarded(
     await driveSpawn(env, opts);
   } catch (e) {
     await releaseSpawnClaim(env.RUNNER_JOB_PATS, opts.jobId);
-    console.log(`spawn drive failed for job ${opts.jobId}: ${(e as Error).message}`);
+    logEvent("error", "spawn_drive_failed", { jobId: opts.jobId, error: (e as Error).message });
   }
 }
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const url = new URL(request.url);
-    const { pathname } = url;
+    // Top-level guard: every route below already has its OWN try/catch around
+    // its failure-prone step, but there was no backstop for an uncaught throw
+    // outside those (a routing bug, a malformed URL, a future route missing its
+    // own guard) — which would otherwise surface as Cloudflare's raw, un-
+    // structured Workers 500. Wrap the whole routing body so ANY uncaught error
+    // still returns our structured JSON shape (never leaking the message/stack
+    // to the caller) instead of an opaque platform 500.
+    try {
+      return await handleFetch(request, env, ctx);
+    } catch (e) {
+      logEvent("error", "fetch_uncaught", { error: (e as Error).message });
+      return json({ error: "internal error" }, 500);
+    }
+  },
+
+  // ── scheduled() — the re-drive + billing reconcilers (cron) ──────────────
+  // GitHub fires workflow_job.queued/completed ONCE each; a transient failure
+  // (spawn OR the completed-webhook's usage-push) permanently loses that job
+  // (an orphaned queue, or silently-dropped billing) with no re-delivery. Both
+  // reconcilers below re-scan the SAME `RECONCILER_REPOS` allowlist on the ONE
+  // cron trigger (no second trigger added) and re-drive/re-push what the live
+  // webhook path missed; each is independently default-off and wrapped so a
+  // failure in one never blocks or throws out of the other.
+  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    const label = env.AUTOSCALER_LABEL ?? "corelink-dogfood";
+    const now = Date.now();
+    await redriveOrphanedJobs(env, ctx, label, now);
+    try {
+      const pushed = await reconcileCompletedJobBilling(env, label, now);
+      if (pushed > 0) {
+        logEvent("info", "billing_reconcile_pushed", { count: pushed });
+      }
+    } catch (e) {
+      // Never let the billing reconciler throw out of scheduled() — it is a
+      // backstop, not a gate; a failure here just means next tick retries.
+      logEvent("error", "billing_reconcile_failed", { error: (e as Error).message });
+    }
+  },
+};
+
+// The actual route table, factored out of `fetch` so the top-level guard above
+// can wrap it uniformly. Behavior is byte-identical to before the guard was
+// added — only the outer catch is new.
+async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const url = new URL(request.url);
+  const { pathname } = url;
 
     // ── POST /webhook (GitHub autoscaler) — HMAC-authed, NOT bearer ──────────
     // A queued workflow_job with our label ⇒ mint a JIT + spawn a runner. This
@@ -757,10 +804,7 @@ export default {
         installationId = installationIdForRepo(env.REPO_INSTALLATION_MAP, repo);
       }
       if (env.CORELINK_RUNNER_MINT_AUTH_KEY && !installationId) {
-        console.log(
-          `no installation.id (repo webhook, repo ${repo} not in REPO_INSTALLATION_MAP) for job ` +
-            `${jobId}: spawning COLD (no server-derived tenant / no cache-warm)`,
-        );
+        logEvent("info", "installation_id_missing", { jobId, repo });
       }
       // ── Spawn idempotency (gap #2): claim this jobId BEFORE the expensive
       // mint+spawn. A redelivered queued webhook (GitHub at-least-once) for the
@@ -1009,10 +1053,11 @@ export default {
       try {
         await container.teardown();
       } catch (e) {
-        console.error(
-          `teardown failed for handle ${handle} (mode=${body.mode ?? "runner"}): ${e}; ` +
-            `relying on the provider deadline backstop`,
-        );
+        logEvent("error", "teardown_route_failed", {
+          handle,
+          mode: body.mode ?? "runner",
+          error: String(e),
+        });
       }
       return new Response(null, { status: 204 });
     }
@@ -1042,66 +1087,70 @@ export default {
       try {
         await container.cutEgress();
       } catch (e) {
-        console.error(
-          `egress-cutoff failed for handle ${handle} (mode=${body.mode ?? "runner"}): ${e}; ` +
-            `teardown remains the hard backstop`,
-        );
+        logEvent("error", "egress_cutoff_failed", {
+          handle,
+          mode: body.mode ?? "runner",
+          error: String(e),
+        });
       }
       return new Response(null, { status: 204 });
     }
 
     return json({ error: "not found" }, 404);
-  },
+}
 
-  // ── scheduled() — the re-drive reconciler (cron) ──────────────────────────
-  // GitHub fires workflow_job.queued ONCE; a transient spawn failure orphans the
-  // job forever. Each tick lists queued+labeled+runnerless jobs older than the
-  // grace window in the RECONCILER_REPOS allowlist and re-drives their spawn
-  // (COLD — no installation_id from the jobs API; a running runner beats an
-  // orphan). The claim-KV dedups against the webhook + prior ticks. OFF unless
-  // RECONCILER_REPOS is set AND the autoscaler is configured.
-  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
-    const repos = parseReconcilerRepos(env.RECONCILER_REPOS);
-    if (repos.length === 0) return; // opt-in: no allowlist ⇒ reconciler off
-    if (!env.GITHUB_WEBHOOK_SECRET || !env.GITHUB_MINT_TOKEN) return; // autoscaler not configured
-    const label = env.AUTOSCALER_LABEL ?? "corelink-dogfood";
-    const now = Date.now();
-    for (const repo of repos) {
-      const orphans = await listOrphanRunnerJobs(env, repo, label, RECONCILE_MIN_AGE_MS, now);
-      for (const jobId of orphans) {
-        // `listOrphanRunnerJobs` already proved this job is queued ≥ MIN_AGE,
-        // labeled, and has NO runner — genuinely orphaned. A spawn claim can LEAK
-        // when the background `driveSpawnGuarded` (waitUntil) is killed by the
-        // platform before its catch releases the claim (a slow mint+start
-        // exceeding the waitUntil budget). A leaked claim then blocks the
-        // reconciler FOREVER (`claimSpawn` → false → skip), so the recovery path
-        // never recovers — the exact deadlock observed 2026-07-05 (stuck `spawn:`
-        // claims, jobs queued with no runner, no self-heal). CLEAR any stale claim
-        // first, then re-claim fresh (concurrent ticks still dedup on the fresh
-        // claim). This turns "stuck forever" into "retry each tick until a spawn
-        // succeeds".
-        //
-        // WARM re-drive (2026-07-06): use the installation_id from
-        // REPO_INSTALLATION_MAP (same as the webhook), so a reconciler-recovered
-        // job is WARM (cache-warm), not COLD — otherwise every job that fell to the
-        // reconciler silently lost cache-warm. RECONCILER_REPOS is a trusted
-        // first-party allowlist, so authorizing the mint on re-drive is safe. An
-        // unmapped repo ⇒ installationId "" ⇒ COLD (unchanged fallback).
-        const reInstallationId = installationIdForRepo(env.REPO_INSTALLATION_MAP, repo);
-        await releaseSpawnClaim(env.RUNNER_JOB_PATS, jobId);
-        if (await claimSpawn(env.RUNNER_JOB_PATS, jobId)) {
-          console.log(
-            `reconciler re-driving orphaned job ${jobId} in ${repo} ` +
-              `(${reInstallationId ? "WARM" : "COLD"})`,
-          );
-          ctx.waitUntil(
-            driveSpawnGuarded(env, { jobId, repo, installationId: reInstallationId, label }),
-          );
-        }
+// ── the re-drive reconciler (cron, part 1 of 2 — see scheduled() above) ─────
+// GitHub fires workflow_job.queued ONCE; a transient spawn failure orphans the
+// job forever. Each tick lists queued+labeled+runnerless jobs older than the
+// grace window in the RECONCILER_REPOS allowlist and re-drives their spawn
+// (COLD — no installation_id from the jobs API; a running runner beats an
+// orphan). The claim-KV dedups against the webhook + prior ticks. OFF unless
+// RECONCILER_REPOS is set AND the autoscaler is configured.
+async function redriveOrphanedJobs(
+  env: Env,
+  ctx: ExecutionContext,
+  label: string,
+  now: number,
+): Promise<void> {
+  const repos = parseReconcilerRepos(env.RECONCILER_REPOS);
+  if (repos.length === 0) return; // opt-in: no allowlist ⇒ reconciler off
+  if (!env.GITHUB_WEBHOOK_SECRET || !env.GITHUB_MINT_TOKEN) return; // autoscaler not configured
+  for (const repo of repos) {
+    const orphans = await listOrphanRunnerJobs(env, repo, label, RECONCILE_MIN_AGE_MS, now);
+    for (const jobId of orphans) {
+      // `listOrphanRunnerJobs` already proved this job is queued ≥ MIN_AGE,
+      // labeled, and has NO runner — genuinely orphaned. A spawn claim can LEAK
+      // when the background `driveSpawnGuarded` (waitUntil) is killed by the
+      // platform before its catch releases the claim (a slow mint+start
+      // exceeding the waitUntil budget). A leaked claim then blocks the
+      // reconciler FOREVER (`claimSpawn` → false → skip), so the recovery path
+      // never recovers — the exact deadlock observed 2026-07-05 (stuck `spawn:`
+      // claims, jobs queued with no runner, no self-heal). CLEAR any stale claim
+      // first, then re-claim fresh (concurrent ticks still dedup on the fresh
+      // claim). This turns "stuck forever" into "retry each tick until a spawn
+      // succeeds".
+      //
+      // WARM re-drive (2026-07-06): use the installation_id from
+      // REPO_INSTALLATION_MAP (same as the webhook), so a reconciler-recovered
+      // job is WARM (cache-warm), not COLD — otherwise every job that fell to the
+      // reconciler silently lost cache-warm. RECONCILER_REPOS is a trusted
+      // first-party allowlist, so authorizing the mint on re-drive is safe. An
+      // unmapped repo ⇒ installationId "" ⇒ COLD (unchanged fallback).
+      const reInstallationId = installationIdForRepo(env.REPO_INSTALLATION_MAP, repo);
+      await releaseSpawnClaim(env.RUNNER_JOB_PATS, jobId);
+      if (await claimSpawn(env.RUNNER_JOB_PATS, jobId)) {
+        logEvent("info", "reconciler_redrive", {
+          jobId,
+          repo,
+          warm: !!reInstallationId,
+        });
+        ctx.waitUntil(
+          driveSpawnGuarded(env, { jobId, repo, installationId: reInstallationId, label }),
+        );
       }
     }
-  },
-};
+  }
+}
 
 function json(obj: unknown, status: number): Response {
   return new Response(JSON.stringify(obj), {

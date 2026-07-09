@@ -2,6 +2,23 @@
 // `@cloudflare/containers` imports here — so this module is unit-testable in
 // plain vitest (node): only `crypto` + `fetch` (Node 20+ globals) are used.
 
+// ── Structured worker log — single-line JSON, queryable in CF Logs ───────────
+//
+// Swaps the historical bare `console.log`/`console.error` free-text calls for a
+// single-line JSON event so a log query (Logpush/Tail) can filter/aggregate on
+// `event` + fields instead of regexing prose. Same information, just structured.
+// `Date.now()` is fine here (this runs in the Worker at request/scheduled time,
+// not at module-eval / cold-start).
+export function logEvent(
+  level: "info" | "error",
+  event: string,
+  fields?: Record<string, unknown>,
+): void {
+  const line = JSON.stringify({ level, event, ...fields, ts: Date.now() });
+  if (level === "error") console.error(line);
+  else console.log(line);
+}
+
 /** The subset of Env the warm-mint path reads. */
 export interface MintEnv {
   // The dedicated `runner_mint` consumer key (Server TL, key-split 2026-06-21): gates
@@ -685,4 +702,153 @@ export async function pushUsageEvent(env: BillingEnv, ev: UsageEvent): Promise<v
     body: JSON.stringify([ev]),
   });
   if (!resp.ok) throw new Error(`billing usage-push ${resp.status}`);
+}
+
+// ── Billing reconciler — closes the fail-open billing-loss window ────────────
+//
+// `maybeBillCompletedJob` (index.ts) fires ONCE per `workflow_job:completed`
+// webhook delivery and is fail-open: any error (network blip, a transient
+// ingest 5xx, the delivery never arriving at all) silently drops that job's
+// `runner_slot_seconds` — with no backstop. This mirrors the EXISTING orphan
+// re-drive reconciler shape (`listOrphanRunnerJobs` + `RECONCILER_REPOS`,
+// scheduled via the same cron): each tick, list recently-COMPLETED jobs in the
+// trusted allowlist and re-push their usage event through the SAME
+// `buildUsageEvent`/`pushUsageEvent` path the webhook uses. Re-emitting a job
+// already billed is SAFE — the aggregator dedups on `idem_key = SHA-256(jobId
+// | period)` (at-least-once by design), so this only ever *recovers* missed
+// revenue, never double-bills.
+
+// How far back a tick looks for completed jobs — bounds the GitHub API scan
+// (and the dedup-safe re-push cost) to a reasonable recovery window; a job
+// completed longer ago than this is left as a permanent (rare, already-logged)
+// loss rather than re-scanned forever.
+export const BILLING_RECONCILE_LOOKBACK_MS = 6 * 60 * 60 * 1000; // 6h
+
+/** The subset of Env the billing reconciler reads (GH listing + billing push). */
+export interface BillingReconcileEnv extends ReconcilerEnv, BillingEnv {
+  // Reuses the SAME first-party allowlist as the orphan re-drive — no new
+  // binding, no new config surface.
+  RECONCILER_REPOS?: string;
+}
+
+interface GhCompletedJob {
+  id: number;
+  status: string;
+  started_at: string | null;
+  completed_at: string | null;
+  labels: string[];
+}
+
+/**
+ * List completed+labeled jobs in `repo` whose `completed_at` is OLDER than
+ * `settleMs` (so an in-flight `completed` webhook for the same job isn't
+ * double-raced) but no older than `lookbackMs` (bounds the scan). Mirrors
+ * `listOrphanRunnerJobs`'s shape (completed RUNS → their jobs), just over
+ * completed runs instead of queued ones. Best-effort: any GitHub error returns
+ * `[]` for this repo (the reconciler is a backstop, never itself a gate).
+ */
+export async function listCompletedRunnerJobs(
+  env: ReconcilerEnv,
+  repo: string,
+  label: string,
+  lookbackMs: number,
+  settleMs: number,
+  nowMs: number,
+): Promise<{ jobId: string; startedMs: number; completedMs: number }[]> {
+  const gh = async (path: string): Promise<unknown> => {
+    const r = await fetch(`https://api.github.com${path}`, {
+      headers: {
+        authorization: `Bearer ${env.GITHUB_MINT_TOKEN ?? ""}`,
+        accept: "application/vnd.github+json",
+        "user-agent": "corelink-spawn-worker",
+      },
+    });
+    if (!r.ok) throw new Error(`GH ${path} ${r.status}`);
+    return r.json();
+  };
+  try {
+    const runs = (await gh(`/repos/${repo}/actions/runs?status=completed&per_page=30`)) as {
+      workflow_runs?: GhRun[];
+    };
+    const out: { jobId: string; startedMs: number; completedMs: number }[] = [];
+    for (const run of runs.workflow_runs ?? []) {
+      const jobs = (await gh(`/repos/${repo}/actions/runs/${run.id}/jobs`)) as {
+        jobs?: GhCompletedJob[];
+      };
+      for (const j of jobs.jobs ?? []) {
+        if (j.status !== "completed" || !(j.labels ?? []).includes(label)) continue;
+        const completedMs = j.completed_at ? Date.parse(j.completed_at) : NaN;
+        const startedMs = j.started_at ? Date.parse(j.started_at) : NaN;
+        if (!Number.isFinite(completedMs) || !Number.isFinite(startedMs)) continue;
+        const age = nowMs - completedMs;
+        if (age < settleMs || age > lookbackMs) continue; // too fresh (racing the webhook), or too old
+        out.push({ jobId: String(j.id), startedMs, completedMs });
+      }
+    }
+    return out;
+  } catch (e) {
+    console.log(
+      `billing reconciler list failed for ${repo} (backstop, skipping): ${(e as Error).message}`,
+    );
+    return [];
+  }
+}
+
+/**
+ * The scheduled billing reconciler: for each repo in `RECONCILER_REPOS`, list
+ * recently-completed+labeled jobs (settled past the race window, within the
+ * lookback) and re-push their `runner_slot_seconds` usage event. Returns the
+ * count of pushes ATTEMPTED (idem_key dedup makes a redundant push harmless).
+ * Default-off (same discipline as the orphan reconciler): a no-op unless
+ * `RECONCILER_REPOS` + `GITHUB_MINT_TOKEN` + `BILLING_INGEST_URL` +
+ * `BILLING_INGEST_AUTH_KEY` + a billable `CLW_TENANT` + a 3-char
+ * `BILLING_REGION` are ALL configured. Never throws (best-effort backstop).
+ */
+export async function reconcileCompletedJobBilling(
+  env: BillingReconcileEnv,
+  label: string,
+  nowMs: number,
+): Promise<number> {
+  const repos = parseReconcilerRepos(env.RECONCILER_REPOS);
+  if (repos.length === 0) return 0; // opt-in: no allowlist ⇒ off (mirrors the orphan re-drive)
+  if (!env.GITHUB_MINT_TOKEN || !env.BILLING_INGEST_URL || !env.BILLING_INGEST_AUTH_KEY) return 0;
+  // The jobs-list API carries no installation_id, so the reconciler has no
+  // per-job DERIVED tenant to fall back on (unlike maybeBillCompletedJob, which
+  // has the KV-stashed tenant); it bills the configured CLW_TENANT only — the
+  // same legacy single-tenant fallback the live webhook path uses.
+  const billedTenant = env.CLW_TENANT;
+  if (!billedTenant) return 0;
+  const region = env.BILLING_REGION ?? "";
+  if (region.length !== 3) return 0; // ingest validates 3-char; skip if unknown
+  let pushed = 0;
+  for (const repo of repos) {
+    const jobs = await listCompletedRunnerJobs(
+      env,
+      repo,
+      label,
+      BILLING_RECONCILE_LOOKBACK_MS,
+      RECONCILE_MIN_AGE_MS,
+      nowMs,
+    );
+    for (const j of jobs) {
+      try {
+        const ev = await buildUsageEvent({
+          tenantId: billedTenant,
+          jobId: j.jobId,
+          startedMs: j.startedMs,
+          completedMs: j.completedMs,
+          region,
+        });
+        await pushUsageEvent(env, ev);
+        pushed++;
+      } catch (e) {
+        // Best-effort: at-least-once, idem_key dedups a next-tick retry — never a gate.
+        console.log(
+          `billing reconcile push failed for job ${j.jobId} in ${repo} (will retry next tick): ` +
+            `${(e as Error).message}`,
+        );
+      }
+    }
+  }
+  return pushed;
 }

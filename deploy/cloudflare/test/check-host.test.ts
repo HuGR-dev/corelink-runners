@@ -306,6 +306,33 @@ describe("status/teardown routing by mode (audit r4)", () => {
     expect(containers[0].ns).toBe(RUNNER_NS);
   });
 
+  it("top-level guard: an UNCAUGHT throw (no per-route try/catch, e.g. isAlive()) " +
+    "still returns a structured 500, never an opaque platform error", async () => {
+    // GET /v1/status has no try/catch of its own around container.isAlive() —
+    // exactly the gap the top-level fetch() guard exists to backstop.
+    vi.mocked(getContainer).mockImplementationOnce((ns: unknown, handle: string) => {
+      const c: FakeContainer = {
+        ns,
+        handle,
+        start: vi.fn(async () => {}),
+        startWithEnv: vi.fn(async () => {}),
+        containerFetch: vi.fn(async () => new Response(null, { status: 200 })),
+        isAlive: vi.fn(async () => {
+          throw new Error("do storage reset");
+        }),
+        teardown: vi.fn(async () => {}),
+        cutEgress: vi.fn(async () => {}),
+      };
+      containers.push(c);
+      return c;
+    });
+    const resp = await worker.fetch(get("/v1/status/h1"), makeEnv());
+    expect(resp.status).toBe(500);
+    const body = (await resp.json()) as { error: string };
+    // Never leak the underlying message/stack — a fixed, generic error only.
+    expect(body).toEqual({ error: "internal error" });
+  });
+
   it("POST /v1/teardown mode:'check' → CHECK_HOST_CONTAINER", async () => {
     const resp = await worker.fetch(
       post("/v1/teardown", { handle: "h1", mode: "check" }),
