@@ -101,19 +101,20 @@ pub const TENANT_UNSUSPEND: &str = "/internal/v1/admin/tenants/{tenant}/unsuspen
 pub const USAGE: &str = "/v1/usage";
 
 // ── M1 WAVE-0 reserved routes ──────────────────────────────────────────────
-// FROZEN path constants reserved for the M1 multi-tenant control-plane
-// work-packages. Declared NOW so WAVE-1/WAVE-2 handlers do not collide on this
-// file; intentionally NOT mounted yet (the lead integrates the routes when the
-// handlers land). Pinned by `paths_are_v1_stable` along with the rest.
+// FROZEN path constants for the M1 multi-tenant control-plane work-packages.
+// USAGE_HISTORY and LEASES_LIST are now MOUNTED (served) — see app.rs. The
+// admin tenant-lifecycle constants below remain reserved: not yet mounted,
+// pending WP-TENANT-LIFECYCLE-API. Pinned by `paths_are_v1_stable` along with
+// the rest.
 
 /// Tenant-facing usage HISTORY (M2 console data): `GET` returns the calling
 /// tenant's historical slot occupancy. Authenticated; always the caller's own
-/// tenant (no cross-tenant parameter). Reserved — WP (usage-history).
+/// tenant (no cross-tenant parameter). Mounted — WP (usage-history).
 pub const USAGE_HISTORY: &str = "/v1/usage/history";
 
-/// Lease collection alias reserved for the M1 lease-listing surface: `GET` =
-/// list the calling tenant's leases. (`LEASES` above is the `POST` acquire on
-/// the same path; the verb split lands with the handler.) Reserved — WP (leases-list).
+/// Lease collection alias for the M1 lease-listing surface: `GET` = list the
+/// calling tenant's leases. (`LEASES` above is the `POST` acquire on the same
+/// path; the verb split lands with the handler.) Mounted — WP (leases-list).
 pub const LEASES_LIST: &str = "/v1/leases";
 
 /// Admin tenant collection (internal): tenant lifecycle management. The list
