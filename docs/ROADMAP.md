@@ -1,5 +1,17 @@
 # CoreLink Runners — roadmap
 
+> ⚠️ **SUBSTRATE FLIP (2026-07, read first):** the LIVE deploy is now
+> **Cloudflare-first** (ADR-0008): fabricd runs as a CF Container + proxy Worker
+> (`deploy/cloudflare-fabricd/`), boxes spawn on the CF `corelink-spawn-worker`
+> (`deploy/cloudflare/`), and the moat (native check-host exec + per-job CAS-PAT
+> mint + attested cost) is live on Cloudflare. The **Northflank "LIVE" / "MULTI-
+> INSTANCE on Postgres" framing below is HISTORICAL** — the current CF deploy is a
+> **singleton** (`wrangler.jsonc` `FABRIC_NUM_SHARDS=1`, no `DATABASE_URL` var ⇒
+> in-memory ledger; pg + N>1 are the owner-gated RAISE-N flip). Northflank is the
+> ADR-0008 fallback substrate, not the live one. Source of truth for the live
+> deploy = `deploy/cloudflare-fabricd/wrangler.jsonc` + the 2026-07-07..09 CF
+> handoff docs, NOT the Northflank lines below. Those lines are kept for history.
+
 > Owner: HuGR TechLead · baseline: cloud-execution campaign 2026-06-12
 > (post seed + cloud fabric, full gate green on CI: fmt · clippy `-D warnings` ·
 > tests · deny · audit · conformance hashes byte-checked; live E2E proven against
