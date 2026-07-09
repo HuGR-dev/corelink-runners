@@ -616,10 +616,12 @@ async fn provision_runner(
         Extension(tenant),
         Extension(Arc::clone(&state.registry)),
         Extension(BearerPat(state.cfg.pat.clone())),
-        // Autoscaler acquires out-of-band (GitHub webhook), not via the proxy
-        // Worker → no shard headers → inert (0,1) single-instance mint. Correct at
-        // N=1; when N>1 the autoscaler must target its own instance's shard
-        // (tracked with the reaper per-shard follow-up).
+        // Autoscaler acquires out-of-band (GitHub webhook → shard-0-routed), not
+        // via the proxy Worker, so it carries no shard headers. The acquire path
+        // handles this: `acquire_shard_target` falls back to this instance's
+        // OBSERVED shard when headers are absent, so the minted lease-id hashes
+        // back to the instance that created it (shard-consistent at N>1, inert at
+        // N=1). Passing an empty HeaderMap is the correct signal for that fallback.
         axum::http::HeaderMap::new(),
         Json(req),
     )
