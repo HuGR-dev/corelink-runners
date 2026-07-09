@@ -22,9 +22,23 @@
     // The proxy Worker (src/index.ts) fans acquires round-robin across N shard
     // containers and routes every lease-op back to its owning shard via shardOf.
     // "1" is INERT: shardDoId collapses to the singleton id → byte-identical to
-    // the single-instance proxy. ⚠️ N and `max_instances` (containers block below)
-    // MUST be raised TOGETHER — the flip to N>1 is a separate owner-gated step.
-    // Raising N without max_instances (or vice-versa) mis-provisions the fleet.
+    // the single-instance proxy.
+    // ⚠️⚠️ RAISE-N IS NOT YET SAFE — do NOT set N>1 until the tracked gaps land
+    // (go-live-readiness audit wf_ab025b87, docs/handoff/2026-07-09-RAISE-N-*):
+    //   1. DATABASE_URL (pg ledger) MUST be set — with the in-memory ledger each
+    //      shard enforces the concurrency cap PER INSTANCE → a tenant gets N× its
+    //      paid concurrency (cap + rate bypass on untrusted compute). pg is set on
+    //      this deploy, but nothing in the binary boot-guards N (learned at runtime
+    //      from headers), so this is a MANUAL precondition.
+    //   2. Tenant SUSPEND (AUP1) is per-instance + shard-0-only → a suspended tenant
+    //      keeps acquiring on shards 1..N-1 (abuse-control failure). Needs pg-backed
+    //      or fan-out suspend first.
+    //   3. POST /v1/queue/trigger mis-routes (lease_id in body, not path) → exec
+    //      fail-closed for off-shard-0 leases. Needs Worker body-parse or a
+    //      lease-path URL (coord w/ hugit).
+    //   4. GitHub webhook autoscaler pins all runner acquires to shard 0 (no
+    //      distribution) + GET /v1/metrics/tenant only reads shard-0 wait_stats.
+    // N and `max_instances` (containers block below) must be raised TOGETHER.
     "FABRIC_NUM_SHARDS": "1",
     "CORELINK_INTROSPECT_URL": "https://corelink-api.humangr.com/internal/v1/auth/introspect",
     "BILLING_INGEST_URL": "https://corelink-api.humangr.com/internal/v1/billing/usage",
