@@ -21,6 +21,11 @@ import {
   parseReconcilerRepos,
   installationIdForRepo,
   listOrphanRunnerJobs,
+  listCompletedRunnerJobs,
+  reconcileCompletedJobBilling,
+  RECONCILE_MIN_AGE_MS,
+  BILLING_RECONCILE_LOOKBACK_MS,
+  logEvent,
   type KvLike,
   type CredStashLike,
   type StashedCred,
@@ -419,6 +424,173 @@ describe("re-drive reconciler (parseReconcilerRepos + listOrphanRunnerJobs)", ()
     vi.stubGlobal("fetch", vi.fn(async () => new Response("boom", { status: 500 })));
     const r = await listOrphanRunnerJobs({ GITHUB_MINT_TOKEN: "t" }, "o/r", LABEL, 90_000, NOW);
     expect(r).toEqual([]);
+  });
+});
+
+describe("billing reconciler (listCompletedRunnerJobs + reconcileCompletedJobBilling)", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const LABEL = "corelink-dogfood";
+  const NOW = 10_000_000;
+  // Settled: past RECONCILE_MIN_AGE_MS, well within the 6h lookback.
+  const SETTLED = new Date(NOW - RECONCILE_MIN_AGE_MS - 60_000).toISOString();
+  const STARTED = new Date(NOW - RECONCILE_MIN_AGE_MS - 180_000).toISOString();
+  // Too fresh: inside the settle window (an in-flight `completed` webhook may
+  // still be racing it) — must be left alone.
+  const TOO_FRESH = new Date(NOW - 1_000).toISOString();
+  // Too old: past the lookback bound — the scan must not reach back forever.
+  const TOO_OLD = new Date(NOW - BILLING_RECONCILE_LOOKBACK_MS - 60_000).toISOString();
+
+  // Mock GH: /runs?status=completed → runs; /runs/{id}/jobs → that run's jobs.
+  function ghCompletedMock(runs: { id: number }[], jobsByRun: Record<number, unknown[]>) {
+    return vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes("/actions/runs?status=completed")) {
+        return new Response(JSON.stringify({ workflow_runs: runs }), { status: 200 });
+      }
+      const m = u.match(/\/actions\/runs\/(\d+)\/jobs/);
+      if (m) return new Response(JSON.stringify({ jobs: jobsByRun[Number(m[1])] ?? [] }), { status: 200 });
+      return new Response("nope", { status: 404 });
+    });
+  }
+
+  it("returns completed+labeled jobs settled past the race window, within the lookback", async () => {
+    vi.stubGlobal(
+      "fetch",
+      ghCompletedMock([{ id: 1 }], {
+        1: [
+          { id: 111, status: "completed", started_at: STARTED, completed_at: SETTLED, labels: [LABEL] }, // ✓
+          { id: 112, status: "completed", started_at: TOO_FRESH, completed_at: TOO_FRESH, labels: [LABEL] }, // too fresh ✗
+          { id: 113, status: "completed", started_at: TOO_OLD, completed_at: TOO_OLD, labels: [LABEL] }, // too old ✗
+          { id: 114, status: "completed", started_at: STARTED, completed_at: SETTLED, labels: ["other"] }, // wrong label ✗
+          { id: 115, status: "in_progress", started_at: STARTED, completed_at: null, labels: [LABEL] }, // not completed ✗
+        ],
+      }),
+    );
+    const r = await listCompletedRunnerJobs(
+      { GITHUB_MINT_TOKEN: "t" },
+      "o/r",
+      LABEL,
+      BILLING_RECONCILE_LOOKBACK_MS,
+      RECONCILE_MIN_AGE_MS,
+      NOW,
+    );
+    expect(r.map((j) => j.jobId)).toEqual(["111"]);
+  });
+
+  it("best-effort: a GitHub error ⇒ [] (never throws — the reconciler is a backstop)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("boom", { status: 500 })));
+    const r = await listCompletedRunnerJobs(
+      { GITHUB_MINT_TOKEN: "t" },
+      "o/r",
+      LABEL,
+      BILLING_RECONCILE_LOOKBACK_MS,
+      RECONCILE_MIN_AGE_MS,
+      NOW,
+    );
+    expect(r).toEqual([]);
+  });
+
+  const fullEnv = {
+    GITHUB_MINT_TOKEN: "t",
+    RECONCILER_REPOS: "o/r",
+    BILLING_INGEST_URL: "https://corelink-api.humangr.com/internal/v1/billing/usage",
+    BILLING_INGEST_AUTH_KEY: "k",
+    CLW_TENANT: "tenant-1",
+    BILLING_REGION: "iad",
+  };
+
+  it("no-op (0) when RECONCILER_REPOS is unset — default-off, no new binding", async () => {
+    const pushed = await reconcileCompletedJobBilling({ ...fullEnv, RECONCILER_REPOS: undefined }, LABEL, NOW);
+    expect(pushed).toBe(0);
+  });
+
+  it("no-op (0) when billing ingest isn't configured", async () => {
+    const pushed = await reconcileCompletedJobBilling(
+      { ...fullEnv, BILLING_INGEST_URL: undefined },
+      LABEL,
+      NOW,
+    );
+    expect(pushed).toBe(0);
+  });
+
+  it("re-pushes the runner_slot_seconds event for a recovered completed job", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        const u = String(url);
+        if (u.includes("/actions/runs?status=completed")) {
+          return new Response(JSON.stringify({ workflow_runs: [{ id: 1 }] }), { status: 200 });
+        }
+        if (u.includes("/actions/runs/1/jobs")) {
+          return new Response(
+            JSON.stringify({
+              jobs: [
+                { id: 999, status: "completed", started_at: STARTED, completed_at: SETTLED, labels: [LABEL] },
+              ],
+            }),
+            { status: 200 },
+          );
+        }
+        if (u.includes("/internal/v1/billing/usage")) {
+          return new Response(null, { status: 202 });
+        }
+        return new Response("nope", { status: 404 });
+      }),
+    );
+    const pushed = await reconcileCompletedJobBilling(fullEnv, LABEL, NOW);
+    // Idempotent by idem_key at the aggregator — re-emitting an already-billed
+    // job is SAFE, so this only ever recovers a missed push, never double-bills.
+    expect(pushed).toBe(1);
+  });
+
+  it("best-effort per-job: a push failure doesn't abort the rest of the tick", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        const u = String(url);
+        if (u.includes("/actions/runs?status=completed")) {
+          return new Response(JSON.stringify({ workflow_runs: [{ id: 1 }] }), { status: 200 });
+        }
+        if (u.includes("/actions/runs/1/jobs")) {
+          return new Response(
+            JSON.stringify({
+              jobs: [
+                { id: 998, status: "completed", started_at: STARTED, completed_at: SETTLED, labels: [LABEL] },
+              ],
+            }),
+            { status: 200 },
+          );
+        }
+        if (u.includes("/internal/v1/billing/usage")) {
+          return new Response("nope", { status: 500 }); // ingest failure
+        }
+        return new Response("nope", { status: 404 });
+      }),
+    );
+    const pushed = await reconcileCompletedJobBilling(fullEnv, LABEL, NOW);
+    expect(pushed).toBe(0); // the failed push wasn't counted, and nothing threw
+  });
+});
+
+describe("logEvent (structured worker log)", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("emits a single-line JSON via console.log for level='info'", () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    logEvent("info", "test_event", { a: 1 });
+    expect(spy).toHaveBeenCalledTimes(1);
+    const parsed = JSON.parse(spy.mock.calls[0][0] as string);
+    expect(parsed).toMatchObject({ level: "info", event: "test_event", a: 1 });
+    expect(typeof parsed.ts).toBe("number");
+  });
+
+  it("emits via console.error for level='error' (no fields required)", () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    logEvent("error", "test_event_err");
+    expect(spy).toHaveBeenCalledTimes(1);
+    const parsed = JSON.parse(spy.mock.calls[0][0] as string);
+    expect(parsed).toMatchObject({ level: "error", event: "test_event_err" });
   });
 });
 
