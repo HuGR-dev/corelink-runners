@@ -23,6 +23,12 @@
 //!   same source the admission gate consults). `null` when no plan is on file.
 //!   A plan-source error maps to 503 (fail-closed), consistent with admission.
 //!
+//! - `plan_ceiling_vcpu_h` — the tenant's monthly vCPU-h compute ceiling, read
+//!   token-free from [`PlanSource::tenant_ceiling_vcpu_ms`] (the same accessor
+//!   the acquire path consults for the compute gate) and converted vCPU·ms →
+//!   vCPU-h. `0` (the disabled/absent sentinel) surfaces as `null`, mirroring
+//!   `plan_cap`'s "no plan on file" convention.
+//!
 //! ## Deliberate omission
 //!
 //! A historical billing-period usage summary (derived from the durable
@@ -49,6 +55,10 @@ struct UsageResponse {
     /// The tenant's purchased concurrency cap (`max_concurrency` from the
     /// PlanSource), or `null` if no plan is on file.
     plan_cap: Option<u32>,
+    /// The tenant's monthly vCPU-h compute ceiling (from the PlanSource's
+    /// `tenant_ceiling_vcpu_ms`, converted ms → hours), or `null` if the
+    /// ceiling is disabled/absent (`0` vCPU·ms).
+    plan_ceiling_vcpu_h: Option<f64>,
     /// FABRIC-WIDE active leases for this tenant right now: the count of
     /// `Pending` + `Held` records in the authoritative [`LeaseLedger`]
     /// (`by_tenant` — CP1 authority, consistent with the admission gate).
@@ -76,6 +86,17 @@ pub(crate) async fn usage(
     // plan_of_resolving here and map Unreachable to a 503 just as admission
     // does. For now the static/composite sources are infallible.
     let plan_cap = state.plans.plan_of(&tenant).map(|p| p.max_concurrency);
+
+    // ── plan ceiling (vCPU-h) ────────────────────────────────────────────────
+    // Token-free, same accessor the acquire path consults for the compute
+    // gate (see handlers/leases.rs). `0` is the disabled/absent sentinel;
+    // surface it as `null` (mirrors plan_cap's "no plan on file" convention),
+    // never as a literal `0.0` ceiling.
+    let ceiling_vcpu_ms = state.plans.tenant_ceiling_vcpu_ms(&tenant);
+    let plan_ceiling_vcpu_h = match ceiling_vcpu_ms {
+        0 => None,
+        ms => Some(ms as f64 / 3_600_000.0),
+    };
 
     // ── active_now from the LEDGER (fabric-wide, CP1 authority) ─────────────
     // Use by_tenant (all records for this tenant) and count Pending+Held.
@@ -110,6 +131,7 @@ pub(crate) async fn usage(
     Json(UsageResponse {
         tenant: tenant.as_str().to_string(),
         plan_cap,
+        plan_ceiling_vcpu_h,
         active_now,
         peak_this_instance,
     })

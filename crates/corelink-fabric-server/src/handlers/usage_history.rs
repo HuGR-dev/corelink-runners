@@ -57,6 +57,21 @@ use serde::Serialize;
 use crate::app::AppState;
 use crate::auth::error_response;
 
+/// How many calendar months of history `periods` carries, INCLUDING the
+/// current (in-progress) month. A GA console's multi-month series length.
+const HISTORY_MONTHS: u32 = 12;
+
+/// One month's entry in the `periods` series.
+#[derive(Debug, Serialize)]
+struct PeriodEntry {
+    /// The calendar-month key `YYYYMM` (UTC) this entry is attributed to.
+    period_key: u32,
+    /// Period vCPU·ms — the exact integer of record for this period.
+    vcpu_ms: u64,
+    /// The same figure in vCPU-HOURS (`vcpu_ms / 3_600_000`).
+    vcpu_h: f64,
+}
+
 /// Wire shape of `GET /v1/usage/history`.
 #[derive(Debug, Serialize)]
 struct UsageHistoryResponse {
@@ -76,6 +91,26 @@ struct UsageHistoryResponse {
     /// **Labelled "this_instance" deliberately**: at N>1 fabric instances this
     /// reflects only what THIS instance has observed, not the fabric peak.
     peak_this_instance: u32,
+    /// The last [`HISTORY_MONTHS`] months of consumption, NEWEST-FIRST (the
+    /// current period is `periods[0]`, matching the top-level `period_key` /
+    /// `vcpu_ms` / `vcpu_h` fields above exactly, for a GA multi-month
+    /// console view). Additive: existing consumers reading only the
+    /// top-level fields are unaffected.
+    periods: Vec<PeriodEntry>,
+}
+
+/// The previous calendar-month key for `pk` (`YYYYMM`), with correct
+/// month/year wraparound (`MM==1` rolls back to December of `YYYY-1`).
+///
+/// Pure and total over the `YYYYMM` domain; KAT-pinned below.
+fn prev_period(pk: u32) -> u32 {
+    let year = pk / 100;
+    let month = pk % 100;
+    if month <= 1 {
+        (year - 1) * 100 + 12
+    } else {
+        year * 100 + (month - 1)
+    }
 }
 
 /// `GET /v1/usage/history` — the authenticated tenant's period-to-date usage.
@@ -86,22 +121,46 @@ pub(crate) async fn handler(
     // The period the current consumption is attributed to (UTC calendar month).
     let period_key = compute_meter::period_key(state.clock.now_ms());
 
-    // ── period-to-date vCPU·ms from the LEDGER (durable, CP1 authority) ──────
+    // ── period-to-date + historical vCPU·ms from the LEDGER (durable, CP1
+    // authority) ──────────────────────────────────────────────────────────
     // compute_accrued is keyed by THIS tenant + period ONLY — no cross-tenant
     // read is possible. A ledger without compute accounting accrues nothing
-    // (Ok(0)); a genuine read failure fails closed (503).
-    let vcpu_ms: u64 = {
-        let Ok(ledger) = state.ledger.lock() else {
-            return error_response(ApiError::FailClosed, "ledger lock poisoned; failing closed");
-        };
-        match ledger.compute_accrued(&tenant, period_key) {
-            Ok(v) => v,
-            Err(_) => {
-                return error_response(ApiError::FailClosed, "ledger read failed; failing closed");
+    // (Ok(0)); a genuine read failure (current OR any historical period)
+    // fails the WHOLE request closed (503) — never fabricate a 0 for a
+    // period that failed to read, as that could misrepresent billing.
+    let mut periods: Vec<PeriodEntry> = Vec::with_capacity(HISTORY_MONTHS as usize);
+    let mut pk = period_key;
+    for _ in 0..HISTORY_MONTHS {
+        let vcpu_ms: u64 = {
+            let Ok(ledger) = state.ledger.lock() else {
+                return error_response(
+                    ApiError::FailClosed,
+                    "ledger lock poisoned; failing closed",
+                );
+            };
+            match ledger.compute_accrued(&tenant, pk) {
+                Ok(v) => v,
+                Err(_) => {
+                    return error_response(
+                        ApiError::FailClosed,
+                        "ledger read failed; failing closed",
+                    );
+                }
             }
-        }
-    };
-    let vcpu_h = vcpu_ms as f64 / compute_meter::MS_PER_VCPU_HOUR as f64;
+        };
+        let vcpu_h = vcpu_ms as f64 / compute_meter::MS_PER_VCPU_HOUR as f64;
+        periods.push(PeriodEntry {
+            period_key: pk,
+            vcpu_ms,
+            vcpu_h,
+        });
+        pk = prev_period(pk);
+    }
+
+    // Top-level (current-month) fields mirror periods[0] exactly, kept for
+    // back-compat with existing consumers.
+    let vcpu_ms = periods[0].vcpu_ms;
+    let vcpu_h = periods[0].vcpu_h;
 
     // ── peak_this_instance from the SlotMeter (instance-local) ──────────────
     let peak_this_instance: u32 = {
@@ -120,6 +179,7 @@ pub(crate) async fn handler(
         vcpu_ms,
         vcpu_h,
         peak_this_instance,
+        periods,
     })
     .into_response()
 }
@@ -139,7 +199,7 @@ mod tests {
     use corelink_runners_contracts::RunnerState;
     use serde_json::Value;
 
-    use super::handler;
+    use super::{HISTORY_MONTHS, handler, prev_period};
     use crate::app::{AppState, StaticPlans, SystemClock};
 
     fn tid(raw: &str) -> TenantId {
@@ -267,5 +327,49 @@ mod tests {
         let resp = handler(State(state), Extension(tid("acme"))).await;
         let v = body_json(resp).await;
         assert!(v.is_object());
+    }
+
+    /// `prev_period` KAT: month/year wraparound arithmetic on `YYYYMM`.
+    #[test]
+    fn prev_period_kat() {
+        assert_eq!(prev_period(202601), 202512, "Jan rolls back to prior Dec");
+        assert_eq!(prev_period(202512), 202511, "plain month decrement");
+        assert_eq!(prev_period(202603), 202602, "plain month decrement");
+    }
+
+    /// The `periods` series has exactly `HISTORY_MONTHS` entries, newest-first,
+    /// with the current period first and matching the top-level fields
+    /// exactly (back-compat mirror).
+    #[tokio::test]
+    async fn periods_has_history_months_newest_first_matching_top_level() {
+        let state = bare_state();
+        let resp = handler(State(state), Extension(tid("acme"))).await;
+        let v = body_json(resp).await;
+
+        let periods = v["periods"].as_array().expect("periods is an array");
+        assert_eq!(
+            periods.len(),
+            HISTORY_MONTHS as usize,
+            "periods has exactly HISTORY_MONTHS entries"
+        );
+
+        // Newest-first: the first entry's period_key equals the top-level
+        // period_key, and its vcpu_ms mirrors the top-level vcpu_ms exactly.
+        assert_eq!(periods[0]["period_key"], v["period_key"]);
+        assert_eq!(periods[0]["vcpu_ms"], v["vcpu_ms"]);
+        assert_eq!(periods[0]["vcpu_h"], v["vcpu_h"]);
+
+        // Each subsequent entry is the previous month of the one before it —
+        // strictly decreasing, newest-first.
+        for i in 1..periods.len() {
+            let prior = periods[i - 1]["period_key"].as_u64().unwrap() as u32;
+            let this = periods[i]["period_key"].as_u64().unwrap() as u32;
+            assert_eq!(
+                this,
+                prev_period(prior),
+                "periods[{i}] is the calendar month before periods[{}]",
+                i - 1
+            );
+        }
     }
 }
