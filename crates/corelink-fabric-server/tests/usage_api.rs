@@ -6,6 +6,8 @@
 //! Pins:
 //! - 401 without a PAT (auth required);
 //! - `plan_cap` reflects the plan's `max_concurrency` (`null` when none);
+//! - `plan_ceiling_vcpu_h` reflects the plan's tier-inferred vCPU-h ceiling
+//!   (`null` when the ceiling is disabled/absent);
 //! - `active_now` is the LEDGER count (Pending + Held) — fabric-wide truth;
 //! - `peak_this_instance` is the SlotMeter peak, labelled "this_instance";
 //! - cross-tenant isolation: one tenant's usage does not appear in another's.
@@ -145,6 +147,50 @@ async fn usage_plan_cap_null_when_no_plan() {
         body["plan_cap"].is_null(),
         "plan_cap must be null when no plan on file, got: {}",
         body["plan_cap"]
+    );
+}
+
+// ── Test 2b: plan_ceiling_vcpu_h reflects PlanSource ─────────────────────────
+
+/// When the tenant's cap lands on a real tier (Starter, 20), the ceiling is
+/// surfaced as vCPU-h, converted from `tenant_ceiling_vcpu_ms` (100 vCPU-h ==
+/// 100 * 3_600_000 ms, per the pricing.md §2 ladder).
+#[tokio::test]
+async fn usage_plan_ceiling_vcpu_h_reflects_plan_source() {
+    let router = harness(Some(20), None);
+    let (status, body) = get_usage(router, Some("pat-acme")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["tenant"], "acme");
+    assert_eq!(
+        body["plan_ceiling_vcpu_h"], 100.0,
+        "Starter tier (cap 20) must surface a 100 vCPU-h ceiling"
+    );
+}
+
+/// When no plan is on file, `plan_ceiling_vcpu_h` is null (mirrors `plan_cap`).
+#[tokio::test]
+async fn usage_plan_ceiling_vcpu_h_null_when_no_plan() {
+    let router = harness(None, None);
+    let (status, body) = get_usage(router, Some("pat-acme")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body["plan_ceiling_vcpu_h"].is_null(),
+        "plan_ceiling_vcpu_h must be null when no plan on file, got: {}",
+        body["plan_ceiling_vcpu_h"]
+    );
+}
+
+/// A cap that matches no tier (e.g. 5) resolves a disabled (`0`) ceiling,
+/// which must surface as `null`, not `0.0`.
+#[tokio::test]
+async fn usage_plan_ceiling_vcpu_h_null_when_cap_matches_no_tier() {
+    let router = harness(Some(5), None);
+    let (status, body) = get_usage(router, Some("pat-acme")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body["plan_ceiling_vcpu_h"].is_null(),
+        "a non-ladder cap must resolve a null ceiling, got: {}",
+        body["plan_ceiling_vcpu_h"]
     );
 }
 
