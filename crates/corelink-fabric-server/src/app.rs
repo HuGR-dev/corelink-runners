@@ -743,6 +743,20 @@ impl AppState {
         self.this_shard.store(this_shard, Ordering::Relaxed);
     }
 
+    /// Set the authoritative shard COUNT from the boot env (`FABRIC_NUM_SHARDS`),
+    /// BEFORE any proxy header is seen. Without this the count defaults to 1 until
+    /// the first header-stamped acquire teaches it — a window in which a
+    /// header-LESS internal acquire (the autoscaler / webhook path) on a
+    /// freshly-booted instance would read `num_shards == 1`, skip the
+    /// `num_shards > 1` cap-safety guard, and over-admit at N>1. The proxy Worker
+    /// routes by the SAME `FABRIC_NUM_SHARDS`, so boot and headers always agree.
+    /// `this_shard` stays UNKNOWN (only the proxy knows which shard THIS instance
+    /// is — the guard needs only the count). Inert at N=1 (count 1 == the default).
+    pub(crate) fn set_boot_num_shards(&self, num_shards: u32) {
+        self.num_shards
+            .store(num_shards.max(1), std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Whether the wired ledger enforces the cap SAFELY across instances (pg).
     /// The acquire path refuses admission when `num_shards > 1` on a non-safe
     /// (per-process) ledger — else each shard would admit up to the full cap
@@ -1922,6 +1936,37 @@ mod tests {
             !state.is_runner_lease("lease-x"),
             "no lease is a runner lease by default"
         );
+    }
+
+    /// N>1 flip-time cap-safety: the shard COUNT is learned authoritatively at
+    /// boot (from `FABRIC_NUM_SHARDS`) BEFORE any proxy header, so a header-LESS
+    /// internal acquire on a freshly-booted instance no longer reads a stale `1`
+    /// and skips the `num_shards > 1` guard. Inert at N=1.
+    #[test]
+    fn boot_num_shards_is_authoritative_before_any_header() {
+        let state = bare_state();
+        // Fresh state: default count 1, identity unknown (today's behaviour).
+        assert_eq!(state.observed_shard(), (AppState::SHARD_UNKNOWN, 1));
+        // Boot-learn N=4 (as the composition root does from FABRIC_NUM_SHARDS).
+        state.set_boot_num_shards(4);
+        let (this, n) = state.observed_shard();
+        assert_eq!(
+            n, 4,
+            "count is authoritative from boot — the guard sees N>1"
+        );
+        assert_eq!(
+            this,
+            AppState::SHARD_UNKNOWN,
+            "this_shard is still learned via the proxy header, not boot"
+        );
+        // Inert at N=1: boot-learning 1 keeps the singleton default.
+        let s1 = bare_state();
+        s1.set_boot_num_shards(1);
+        assert_eq!(s1.observed_shard(), (AppState::SHARD_UNKNOWN, 1));
+        // Floor: 0 clamps to 1 (never a zero count).
+        let s0 = bare_state();
+        s0.set_boot_num_shards(0);
+        assert_eq!(s0.observed_shard().1, 1);
     }
 
     /// Leak fix: `revoke_pat_for` (which fires on rollback paths that skip

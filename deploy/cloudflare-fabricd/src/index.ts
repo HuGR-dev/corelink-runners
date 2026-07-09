@@ -95,6 +95,11 @@ export class FabricdContainer extends Container<Env> {
       // backend mode the live per-tenant cap comes from introspect; this is the
       // static fallback, set deliberately high so it never masks the real cap.
       FABRIC_TENANT_MAX_CONCURRENCY: "100",
+      // Multi-instance shard COUNT — forwarded so the container learns it at boot
+      // (the cap-safety guard is then authoritative before the first shard header,
+      // closing the header-less-acquire over-admit window at N>1). The proxy above
+      // routes by this SAME value. Absent ⇒ container defaults to 1 (inert).
+      ...(env.FABRIC_NUM_SHARDS ? { FABRIC_NUM_SHARDS: env.FABRIC_NUM_SHARDS } : {}),
       CORELINK_INTROSPECT_URL: env.CORELINK_INTROSPECT_URL,
       FABRIC_INTROSPECT_AUTH_KEY: env.FABRIC_INTROSPECT_AUTH_KEY,
       FABRIC_SIGNING_KEY: env.FABRIC_SIGNING_KEY,
