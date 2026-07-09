@@ -32,7 +32,7 @@ jobs:
         id: build
         run: |
           set -euo pipefail
-          IMAGE="ghcr.io/humangr-labs/corelink-runner"
+          IMAGE="ghcr.io/humanguardrail/corelink-runner"
           docker build \
             -t "${IMAGE}:latest" \
             -t "${IMAGE}:${GITHUB_SHA}" \
