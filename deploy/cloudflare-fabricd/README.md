@@ -33,6 +33,28 @@ The prod signing key was generated 2026-06-25 (32-byte ed25519, fingerprint
 `GET /v1/attestation/key` will serve and what hugit's v2 verifier pins. Setting a
 DIFFERENT key changes that pubkey, so use that exact file.
 
+## Optional arming vars (default-off; now forwarded into the container)
+
+These are all optional — absent, the corresponding surface stays inert/404. The
+Worker **forwards** them into the container (previously it did not, so setting any
+of these was a silent no-op):
+
+- `FABRIC_ADMIN_KEY` (secret) — arms the operator enforcement routes: tenant
+  SUSPEND + admin tenant onboarding (absent ⇒ those routes 404).
+- `FABRIC_OBSERVABILITY_KEY` (secret) — arms the internal observability/occupancy
+  endpoint (absent ⇒ 404).
+- `FABRIC_RUNNER_REPO_ALLOWLIST` (var, CSV `owner/repo,…`) — bounds `runner:`
+  acquires to allowlisted repos (absent ⇒ unbounded).
+- Stage-B autoscaler set (all optional; the route only mounts when
+  `FABRIC_AUTOSCALER_WEBHOOK_SECRET` is set): `FABRIC_AUTOSCALER_WEBHOOK_SECRET`,
+  `FABRIC_AUTOSCALER_PAT`, `FABRIC_AUTOSCALER_RUNNER_IMAGE`,
+  `FABRIC_AUTOSCALER_LABELS`, `FABRIC_AUTOSCALER_TMP_ROOT`,
+  `FABRIC_AUTOSCALER_EXPIRY_MS`, `FABRIC_AUTOSCALER_REPO_ALLOWLIST`,
+  `FABRIC_AUTOSCALER_MAX_TRACKED_JOBS`.
+
+Set secrets via `wrangler secret put <NAME>`; set vars in `wrangler.jsonc`'s `vars`
+block.
+
 ## Smoke (checkpoint A/B/C)
 ```sh
 HOST="https://corelink-fabricd.<account-subdomain>.workers.dev"   # printed by deploy
@@ -84,11 +106,16 @@ long ack-wait — is handled (`close_ack_gate` bounds concurrent ack-waits +
 `standard-2` keeps a worker for health; verified).
 
 **Scaling path (not yet done):** the singleton was required only by the in-memory
-ledger; now that the **pg ledger is armed** (`DATABASE_URL` present →
-cross-instance cap-safe via the advisory lock), the plane CAN run multiple
-instances — remove the fixed DO id (route per-request / round-robin) + raise
-`max_instances`. A tracked scaling enhancement for **before rota-A carries real
-check-host bursts**; a known limit, not debt.
+ledger. The **pg ledger arms conditionally** — only when a `DATABASE_URL` secret is
+set (the Worker's DATABASE_URL-derived block then turns on
+`FABRIC_LEDGER_BACKEND=pg` + `FABRIC_RUNNER_VCPU=4`), giving cross-instance
+cap-safety via the advisory lock. **Absent `DATABASE_URL`, the live deploy runs the
+in-memory ledger** (single-instance, state lost on restart) — the current N=1 pilot
+posture (`wrangler.jsonc` sets `FABRIC_NUM_SHARDS=1` and does not set `DATABASE_URL`
+as a var). Once `DATABASE_URL` is set, the plane CAN run multiple instances — remove
+the fixed DO id (route per-request / round-robin) + raise `max_instances`. A tracked
+scaling enhancement for **before rota-A carries real check-host bursts**; a known
+limit, not debt.
 
 ## Boxes (checkpoint B+ — when wiring real per-job metrics)
 
@@ -128,8 +155,12 @@ the live smoke confirms the real backends. **Never claim boxes work off the boot
 
 ## Status
 ✅ **MOAT LIVE + GENUINELY PROVEN (2026-07-09)** at `https://corelink-fabricd.gmhelmold.workers.dev`.
-The live image is `@sha256:cb6fca46…` (the moat-fix binary — see wrangler.jsonc for the pin + why
-the earlier `e845a64e`/`d26a46c4` never actually minted). `/v1/health → 200 ok`, `/v1/attestation/key
+The live image is `@sha256:91f4b7ea…` (the #332 cred-redemption-fix binary, tag
+`golive-20260709-credredemption` — see wrangler.jsonc for the pin). It adds the
+`validate_mint_arm` boot guard: a healthy boot now PROVES `FABRIC_PUBLIC_BASE_URL` is wired, so
+the moat's per-job PAT can actually be redeemed (the earlier `cb6fca46…` moat-fix binary minted a
+real PAT the box could never redeem — go-live audit wf_63a2b814). `/v1/health → 200 ok`,
+`/v1/attestation/key
 → key_id faa5b7726ccd2c52` (prod key). The per-job CAS PAT mint is proven REAL (a hydrating
 check-host acquire went 503→200 across the `token_plaintext` response-parse fix — a mint-armed
 transition a cold-run could never produce), and the attested-cost `intent_metrics_sig` rides the
