@@ -179,6 +179,48 @@ impl ContainerSpec {
         })
     }
 
+    /// Derive an **agent-lease** spec (agent-exec, ratified (B) exec-server-drive
+    /// with hugit 2026-07-05): an egress-allowed, NON-memoized box that hugit's
+    /// OFF-box §13 agent loop drives via `POST /v1/leases/{id}/agent-exec`. Egress
+    /// like a runner box, but WITHOUT the runner's GitHub-Actions machinery:
+    /// `run_on_create = false` (the box is exec-driven — it waits for agent-exec
+    /// commands, exactly like a check-host box, rather than self-launching an
+    /// agent on create). Reached **only** from the trusted agent-acquire path,
+    /// never from a `net_policy` string, so a CHECK lease can never obtain egress
+    /// through it (a forged `net_policy` on a check lease flows through
+    /// [`from_lease`](Self::from_lease) and is rejected).
+    ///
+    /// # Errors
+    /// Same supply-chain + tmp_root floors as [`from_lease`](Self::from_lease)
+    /// (the agent image MUST still be digest-pinned — X4 is not bypassed), plus a
+    /// defense-in-depth check that the lease's `net_policy` is the agent egress
+    /// policy `"egress-agent"`.
+    pub fn from_agent_lease(lease: &RunnerLease, image: &str) -> Result<Self> {
+        Self::validate_lease_image(lease, image)?;
+        // Defense in depth: an agent lease must carry the explicit egress policy.
+        // (The egress DECISION is this constructor being called from the
+        // agent-acquire path; this string check is a second, independent gate —
+        // never the sole source of the egress grant.)
+        if lease.net_policy != "egress-agent" {
+            bail!(
+                "agent lease requires net_policy=\"egress-agent\", got {:?}",
+                lease.net_policy
+            );
+        }
+        Ok(Self {
+            name: container_name(&lease.lease_id),
+            image: image.to_string(),
+            tmp_root: lease.tmp_root.clone(),
+            no_network: false,
+            allow_egress: true,
+            // Exec-driven, NOT run-on-create: the agent box waits for agent-exec
+            // commands (like a check-host box), it does not self-launch anything.
+            run_on_create: false,
+            path_set: lease.path_set.clone(),
+            env: Vec::new(),
+        })
+    }
+
     /// Shared spec-build validation (lease id, tmp_root safety, X4 pin).
     fn validate_lease_image(lease: &RunnerLease, image: &str) -> Result<()> {
         if lease.lease_id.trim().is_empty() {
@@ -564,6 +606,61 @@ mod tests {
                 "from_runner_lease must require net_policy=egress-runner; {p:?} got through"
             );
         }
+    }
+
+    /// An AGENT lease grants egress — but ONLY via `from_agent_lease` AND only
+    /// with the explicit `egress-agent` policy. Unlike the runner box, the agent
+    /// box is exec-driven (`run_on_create = false`): it waits for /agent-exec
+    /// commands rather than self-launching an agent.
+    #[test]
+    fn agent_lease_grants_egress_only_via_agent_constructor() {
+        let mut l = lease();
+        l.net_policy = "egress-agent".to_string();
+        let spec = ContainerSpec::from_agent_lease(&l, PIN).unwrap();
+        assert!(!spec.no_network, "agent lease has a network device");
+        assert!(spec.allow_egress, "agent lease carries the egress grant");
+        assert!(
+            !spec.run_on_create,
+            "agent box is exec-driven, not run-on-create"
+        );
+    }
+
+    /// Defense in depth: `from_agent_lease` rejects any lease whose `net_policy`
+    /// is not the explicit agent egress policy — including the runner's policy
+    /// (the two egress sentinels never cross constructors).
+    #[test]
+    fn agent_constructor_rejects_a_non_egress_agent_policy() {
+        for p in ["none", "isolated", "egress-runner", "", "egress-agentx"] {
+            let mut l = lease();
+            l.net_policy = p.to_string();
+            assert!(
+                ContainerSpec::from_agent_lease(&l, PIN).is_err(),
+                "from_agent_lease must require net_policy=egress-agent; {p:?} got through"
+            );
+        }
+    }
+
+    /// A CHECK lease forging the agent egress policy is REJECTED by `from_lease`
+    /// — egress can never be obtained through the check path (red-team parity
+    /// with the runner sentinel).
+    #[test]
+    fn check_lease_forging_agent_egress_policy_is_rejected() {
+        let mut l = lease();
+        l.net_policy = "egress-agent".to_string();
+        assert!(
+            ContainerSpec::from_lease(&l, PIN).is_err(),
+            "a check lease must never be buildable with the agent egress policy"
+        );
+    }
+
+    /// X4 is NOT bypassed for agent mode: an unpinned agent image is refused at
+    /// spec-build, before any box contact.
+    #[test]
+    fn agent_lease_still_requires_a_pinned_image() {
+        let mut l = lease();
+        l.net_policy = "egress-agent".to_string();
+        assert!(ContainerSpec::from_agent_lease(&l, "alpine:3.20").is_err());
+        assert!(ContainerSpec::from_agent_lease(&l, PIN).is_ok());
     }
 
     /// X4 is NOT bypassed for runner mode: an unpinned runner image is refused

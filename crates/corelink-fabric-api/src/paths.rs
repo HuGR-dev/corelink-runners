@@ -22,6 +22,18 @@ pub const LEASE_CANCEL: &str = "/v1/leases/{lease_id}/cancel";
 /// out (contract §3 execution + byte-identical determinism). API3.
 pub const EXEC: &str = "/v1/leases/{lease_id}/exec";
 
+/// Drive an ARBITRARY command in an `agent`-mode lease (agent-exec, ratified
+/// (B) exec-server-drive with hugit 2026-07-05): `AgentExecRequest` in,
+/// `AgentExecAck` out. Egress-enabled + NEVER memoized — the agent's tool-call
+/// sandbox. Poll the captured result at [`AGENT_EXEC_POLL`]. AE (agent-exec
+/// slices 2..N).
+pub const AGENT_EXEC: &str = "/v1/leases/{lease_id}/agent-exec";
+
+/// Poll the captured, egress-enabled, non-memoized outcome of one agent-exec
+/// step: `AgentExecResult` out (200 done · 202 still running · 404 unknown).
+/// Peer to [`AGENT_EXEC`]. AE (agent-exec slices 2..N).
+pub const AGENT_EXEC_POLL: &str = "/v1/leases/{lease_id}/agent-exec/{step_id}";
+
 /// The §9 trigger path: hugit's landing queue triggers execution of an
 /// uncached check on demand (contract §9, `QueueApi`; hugit B5 seam). API4.
 pub const QUEUE_TRIGGER: &str = "/v1/queue/trigger";

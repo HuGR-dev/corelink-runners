@@ -425,6 +425,23 @@ pub struct AppState {
     /// close, cancel, and the reaper sweep — so the set stays bounded by active
     /// runner leases.
     pub(crate) runner_leases: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// Lease ids provisioned as AGENT-mode leases (agent-exec, ratified (B)
+    /// 2026-07-05): an egress-enabled, NON-memoized box hugit's off-box §13 loop
+    /// drives via `POST /v1/leases/{id}/agent-exec`. A fabric-internal marker set
+    /// — mirrors [`runner_leases`](Self::runner_leases) — so the frozen
+    /// `RunnerLease` and the ledger carry NO agent-mode field. Recorded at
+    /// acquire-finalize ([`mark_agent_lease`](Self::mark_agent_lease)); read by
+    /// the agent-exec handler to ACCEPT `/agent-exec` and by the check exec
+    /// handler to REFUSE `/exec` ([`is_agent_lease`](Self::is_agent_lease)). GC'd
+    /// by [`forget_lease`](Self::forget_lease) on EVERY terminal path.
+    pub(crate) agent_leases: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// Agent-exec step store: `step_id → (owning lease id + captured state)`.
+    /// Each `POST /agent-exec` registers a `Running` step, its blocking worker
+    /// writes the `Done`/`Failed` outcome, and `GET /agent-exec/{step_id}` reads
+    /// it. GC'd with the owning lease by [`forget_lease`](Self::forget_lease), so
+    /// the store stays bounded by active agent leases' in-flight/recent steps.
+    pub(crate) agent_steps:
+        Arc<Mutex<std::collections::HashMap<String, crate::handlers::agent_exec::AgentStepEntry>>>,
     /// Track-C AUP1 (enforcement primitive): the set of SUSPENDED tenant keys.
     /// An admin action (`POST /internal/v1/admin/tenants/{tenant}/suspend`) adds
     /// a tenant here; `acquire` rejects a suspended tenant fail-closed (403)
@@ -674,6 +691,8 @@ impl AppState {
             // composition root opts in via `with_runner_broker` (ADR-0007).
             runner_broker: None,
             runner_leases: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            agent_leases: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            agent_steps: Arc::new(Mutex::new(std::collections::HashMap::new())),
             suspended_tenants: Arc::new(Mutex::new(std::collections::HashSet::new())),
             admin_key: None,
             // Check-host mode DEFAULT-OFF: empty marker map. Populated only when
@@ -1274,6 +1293,58 @@ impl AppState {
             .contains(lease_id)
     }
 
+    /// Mark `lease_id` as an AGENT-mode lease (agent-exec). Mirrors
+    /// [`mark_runner_lease`](Self::mark_runner_lease); GC'd by `forget_lease`.
+    pub(crate) fn mark_agent_lease(&self, lease_id: &str) {
+        self.agent_leases
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(lease_id.to_string());
+    }
+
+    /// Whether `lease_id` is an agent-mode lease (drives the `/agent-exec`
+    /// accept + the `/exec` refusal). Recovers from a poisoned lock, so it can
+    /// never silently fail open.
+    pub(crate) fn is_agent_lease(&self, lease_id: &str) -> bool {
+        self.agent_leases
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains(lease_id)
+    }
+
+    /// Mint a fresh, unique agent-exec step id (same v4-UUID scheme as
+    /// [`mint_lease_id`](Self::mint_lease_id), `step-` prefixed).
+    pub(crate) fn mint_step_id(&self) -> String {
+        format!("step-{}", uuid::Uuid::new_v4())
+    }
+
+    /// Register a new agent-exec step as `Running`, owned by `lease_id`.
+    pub(crate) fn agent_step_begin(&self, step_id: &str, lease_id: &str) {
+        self.agent_steps
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(
+                step_id.to_string(),
+                crate::handlers::agent_exec::AgentStepEntry {
+                    lease_id: lease_id.to_string(),
+                    state: crate::handlers::agent_exec::AgentStepState::Running,
+                },
+            );
+    }
+
+    /// Read the current state of an agent-exec step (a clone), or `None` if the
+    /// step is unknown / already GC'd with its lease.
+    pub(crate) fn agent_step_get(
+        &self,
+        step_id: &str,
+    ) -> Option<crate::handlers::agent_exec::AgentStepEntry> {
+        self.agent_steps
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(step_id)
+            .cloned()
+    }
+
     /// Track-C AUP1: mark a tenant SUSPENDED (idempotent). A suspended tenant is
     /// rejected at `acquire` (fail-closed) and its held leases are killed by the
     /// suspend action. `true` iff the tenant was NOT already suspended (a real
@@ -1594,6 +1665,16 @@ impl AppState {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(lease_id);
+        // GC the agent-mode marker + every agent-exec step owned by this lease on
+        // the same teardown path, so both stay bounded by active agent leases.
+        self.agent_leases
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(lease_id);
+        self.agent_steps
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retain(|_, entry| entry.lease_id != lease_id);
         // GC the check-host toolchain-digest marker (C1/C6) on the same teardown
         // path, so the marker map stays bounded by active check-host leases.
         self.toolchain_digests
@@ -1805,6 +1886,17 @@ pub fn app_full(
             post(handlers::leases::cancel),
         )
         .route(&capture(paths::EXEC), post(handlers::exec_handler::exec))
+        // Agent-exec (slices 2..N): drive an arbitrary command in an agent-mode
+        // lease (egress + non-memoized) + poll its captured result. Same
+        // tenant-PAT credential gate as /exec (the Extension stack applies it).
+        .route(
+            &capture(paths::AGENT_EXEC),
+            post(handlers::agent_exec::agent_exec),
+        )
+        .route(
+            &capture(paths::AGENT_EXEC_POLL),
+            get(handlers::agent_exec::agent_exec_poll),
+        )
         .route(paths::QUEUE_TRIGGER, post(handlers::queue::trigger))
         .route(&capture(paths::LEASE_CLOSE), post(handlers::close::close))
         // ENV1/ENV2: the §13 envelope POLL side (hugit's TRUSTED subscriber).
@@ -1903,7 +1995,9 @@ const OCCUPANCY_PATH: &str = "/internal/v1/occupancy";
 /// docs assign to the server crate. The FROZEN form stays the template; the
 /// capture form is a router detail and never appears on the wire.
 fn capture(template: &str) -> String {
-    template.replace("{lease_id}", ":lease_id")
+    template
+        .replace("{lease_id}", ":lease_id")
+        .replace("{step_id}", ":step_id")
 }
 
 /// Liveness: 200 `"ok"`, no auth, no tenant data. Deliberately state-free so it
