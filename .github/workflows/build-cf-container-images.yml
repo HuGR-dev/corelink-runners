@@ -20,8 +20,7 @@
 #      a clear message, if the secret is absent).
 #   2. A self-hosted LINUX x64 runner labelled `corelink-builder` WITH DOCKER.
 #      We deliberately do NOT use GitHub-hosted `ubuntu-latest`: the org is on the
-#      free plan and GH-hosted minutes hit a billing wall. This reuses the SAME
-#      label as `.github/workflows/build-runner-image.yml`. CONFIRM that builder
+#      free plan and GH-hosted minutes hit a billing wall. CONFIRM that builder
 #      still exists / is online before the first dispatch — if it was retired,
 #      re-provision a Docker-capable Linux x64 self-hosted runner with this label.
 #      (Wrangler needs a working Docker CLI + daemon to BUILD the images.)
@@ -42,8 +41,8 @@ env:
 
 jobs:
   build-and-push:
-    # Same self-hosted Linux x64 builder as build-runner-image.yml. NOT
-    # GH-hosted (free-plan billing wall). Needs Docker for wrangler to build.
+    # Self-hosted Linux x64 builder (label `corelink-builder`). NOT GH-hosted
+    # (free-plan billing wall). Needs Docker for wrangler to build.
     runs-on: [self-hosted, Linux, X64, corelink-builder]
     timeout-minutes: 120
     steps:

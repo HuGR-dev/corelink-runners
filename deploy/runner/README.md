@@ -105,17 +105,19 @@ change, and record the new digest in the build log.
 ## Building and pushing
 
 **Cloudflare-first (live path):** the runner image is built from THIS Dockerfile by
-`wrangler containers build` (in `deploy/cloudflare/`) and pushed to the CF managed
-registry — that CF-registry `@sha256` is what the fabric pins. No ghcr in the loop.
+`wrangler containers build` (in `deploy/cloudflare/`, CI workflow
+`build-cf-container-images.yml`) and pushed to the CF managed registry — that
+CF-registry `@sha256` is what the fabric pins. No ghcr anywhere in the loop.
 
-**Legacy manual path** (`build-and-push.sh`) — for a self-hosted / non-CF
-GitHub-Actions on-ramp. `REGISTRY` is any OCI registry you control (ghcr is just
-one option, not required):
+**Fallback-substrate manual path** (`build-and-push.sh`) — ONLY for the ADR-0008
+Northflank fallback, which cannot pull from the CF-internal registry and so needs
+a plain public OCI image. The script is registry-neutral: `REGISTRY` is REQUIRED
+(no default host):
 
 ```sh
 # 1. (Only when refreshing the base) re-resolve the digest — see X4 section.
 # 2. Log in to your registry, then:
-export REGISTRY=registry.example.com    # your OCI registry
+export REGISTRY=registry.example.com    # REQUIRED — your OCI registry host
 export IMAGE=corelink-runner
 export TAG=2.335.1-rust1.96.0           # recommended: encode runner + Rust versions
 ./deploy/runner/build-and-push.sh
@@ -128,8 +130,8 @@ in the fabric's runner-lease config.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `REGISTRY` | `ghcr.io` | OCI registry host (legacy default; set to yours — CF-first builds via `wrangler containers build`) |
-| `IMAGE` | `humanguardrail/corelink-runner` | Image name (no tag) |
+| `REGISTRY` | **(required — no default)** | OCI registry host; the script fails closed if unset (CF-first builds go via `wrangler containers build`, not this script) |
+| `IMAGE` | `corelink-runner` | Image name (no tag) |
 | `TAG` | `latest` | Image tag |
 | `PLATFORM` | `linux/amd64` | Build platform |
 

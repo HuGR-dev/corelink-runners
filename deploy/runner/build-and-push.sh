@@ -1,26 +1,28 @@
 #!/usr/bin/env bash
 # build-and-push.sh — build and push the CoreLink ephemeral runner image (ADR-0007)
 #
-# ⚠️ LEGACY MANUAL PATH. Cloudflare-first (ADR-0008): the LIVE runner image is
-# built by `wrangler containers build` (from deploy/runner/Dockerfile) and pushed
-# to the CF managed registry — the runtime image is
+# ⚠️ LEGACY MANUAL PATH — NOT the live build. Cloudflare-first (ADR-0008): the
+# LIVE runner image is built by `wrangler containers build` (from
+# deploy/runner/Dockerfile) and pushed to the CF managed registry — the runtime
+# image is
 # `registry.cloudflare.com/<account>/corelink-spawn-worker-runnercontainer@sha256:…`
-# (see deploy/cloudflare/wrangler.jsonc). The runner runs on Cloudflare, NOT from
-# ghcr. This script is the pre-CF manual build+push (kept for a self-hosted /
-# non-CF GitHub-Actions on-ramp); its default registry stays a plain OCI registry,
-# and ghcr is just ONE possible `REGISTRY` value, not a live dependency.
+# (see deploy/cloudflare/wrangler.jsonc; CI: build-cf-container-images.yml). The
+# runner runs on Cloudflare. This script exists ONLY for the ADR-0008 fallback
+# substrate (Northflank), which cannot pull from the CF-internal registry and so
+# needs a plain public OCI image. It is registry-NEUTRAL: `REGISTRY` is REQUIRED
+# (no default) so nothing is ever pushed to a surprise host.
 #
 # USAGE:
-#   export REGISTRY=registry.example.com   # your OCI registry (default below)
-#   export IMAGE=corelink-runner           # image name
+#   export REGISTRY=registry.example.com   # REQUIRED — your OCI registry host
+#   export IMAGE=corelink-runner           # image name (default below)
 #   export TAG=latest                      # default: latest
 #   export PLATFORM=linux/amd64            # default: linux/amd64
 #   ./build-and-push.sh
 #
 # AUTHENTICATION:
-#   You must be logged in to the target registry before running this script.
-#   (e.g. for ghcr: `echo "$GHCR_PAT" | docker login ghcr.io -u "$USER" --password-stdin`.)
-#   No credentials are hard-coded in this script or the Dockerfile.
+#   You must be logged in to the target registry before running this script
+#   (`docker login <REGISTRY> …`). No credentials are hard-coded in this script
+#   or the Dockerfile.
 #
 # OUTPUT:
 #   Prints the image digest (@sha256:…) after push.
@@ -34,8 +36,9 @@
 set -euo pipefail
 
 # ── Configuration — override via env ─────────────────────────────────────────
-REGISTRY="${REGISTRY:-ghcr.io}"
-IMAGE="${IMAGE:-humanguardrail/corelink-runner}"
+# REGISTRY is REQUIRED (registry-neutral by design — no ghcr/default host).
+REGISTRY="${REGISTRY:?set REGISTRY to your OCI registry host (this script is the ADR-0008 fallback-substrate builder; the LIVE image is built by build-cf-container-images.yml to the CF registry)}"
+IMAGE="${IMAGE:-corelink-runner}"
 TAG="${TAG:-latest}"
 PLATFORM="${PLATFORM:-linux/amd64}"
 
