@@ -130,7 +130,14 @@ fn timeout_kills_the_whole_process_group() {
     let pidfile_for_fut = pidfile_str.clone();
     let out = block_on(move || async move {
         let script = format!("sleep 30 & echo $! > '{pidfile_for_fut}' ; wait");
-        let out = run_captured(req(&["sh", "-lc", &script], 300), &cwd())
+        // 2000ms (not 300ms): the deadline must be comfortably LONGER than the
+        // time for the shell to background `sleep 30` + write the pidfile, or a
+        // slow/loaded runner (the ephemeral fleet container) can kill the group
+        // BEFORE the `echo $! > pidfile` runs → the pidfile is never written →
+        // the read below flakes with NotFound. The test proves the GROUP KILL
+        // (the `sleep 30` descendant outlives ANY short deadline), so a 2s
+        // deadline proves exactly the same thing, reliably.
+        let out = run_captured(req(&["sh", "-lc", &script], 2000), &cwd())
             .await
             .expect("spawns");
         // Give the group kill a beat to propagate before the liveness probe.
