@@ -480,7 +480,10 @@ pub async fn github_webhook(
     };
 
     match event.action.as_str() {
-        "queued" => handle_queued(&state, event).await,
+        // Forward the incoming request headers so the shard the proxy Worker
+        // round-robin-assigned this webhook (X-Fabricd-Shard/-Num-Shards) actually
+        // steers the minted runner lease-id back to this instance at N>1.
+        "queued" => handle_queued(&state, event, &headers).await,
         "completed" => handle_completed(&state, event).await,
         // in_progress and any future action: nothing to do.
         other => ack(&format!("ignored: workflow_job action={other}")),
@@ -489,7 +492,11 @@ pub async fn github_webhook(
 
 /// Handle `workflow_job.queued`: provision one ephemeral runner if the job is
 /// for us (managed label + allowlist) and not already claimed.
-async fn handle_queued(state: &WebhookHandlerState, event: WorkflowJobEvent) -> Response {
+async fn handle_queued(
+    state: &WebhookHandlerState,
+    event: WorkflowJobEvent,
+    headers: &HeaderMap,
+) -> Response {
     let job_id = event.workflow_job.id;
     let owner = event.repository.owner.login;
     let repo = event.repository.name;
@@ -532,7 +539,7 @@ async fn handle_queued(state: &WebhookHandlerState, event: WorkflowJobEvent) -> 
     eprintln!("autoscaler: provisioning runner for queued job {job_id} ({owner}/{repo})");
     // `labels` is now provably all-managed — safe to forward verbatim (the runner
     // must advertise exactly the job's labels for GitHub to assign it).
-    match provision_runner(state, &owner, &repo, labels).await {
+    match provision_runner(state, &owner, &repo, labels, headers).await {
         Some(lease_id) => match record_lease(state, job_id, lease_id.clone()) {
             RecordOutcome::Track => {
                 eprintln!("autoscaler: job {job_id} → runner lease {lease_id}");
@@ -588,6 +595,7 @@ async fn provision_runner(
     owner: &str,
     repo: &str,
     labels: Vec<String>,
+    headers: &HeaderMap,
 ) -> Option<String> {
     let tenant = resolve_tenant(state).await?;
 
@@ -616,13 +624,13 @@ async fn provision_runner(
         Extension(tenant),
         Extension(Arc::clone(&state.registry)),
         Extension(BearerPat(state.cfg.pat.clone())),
-        // Autoscaler acquires out-of-band (GitHub webhook → shard-0-routed), not
-        // via the proxy Worker, so it carries no shard headers. The acquire path
-        // handles this: `acquire_shard_target` falls back to this instance's
-        // OBSERVED shard when headers are absent, so the minted lease-id hashes
-        // back to the instance that created it (shard-consistent at N>1, inert at
-        // N=1). Passing an empty HeaderMap is the correct signal for that fallback.
-        axum::http::HeaderMap::new(),
+        // Forward the webhook's request headers: the proxy Worker round-robins
+        // /webhooks/github across shards and stamps X-Fabricd-Shard/-Num-Shards, so
+        // `acquire_shard_target` mints a lease-id that hashes to the assigned shard
+        // → the runner fleet is DISTRIBUTED across instances at N>1 (not all pinned
+        // to shard 0). Absent headers (N=1 / a direct non-proxied call) fall back to
+        // the observed shard — byte-identical to before.
+        headers.clone(),
         Json(req),
     )
     .await;

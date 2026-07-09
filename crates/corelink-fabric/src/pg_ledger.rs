@@ -182,6 +182,12 @@ CREATE INDEX IF NOT EXISTS leases_held_idx ON leases (lease_id) WHERE state = 'h
 CREATE TABLE IF NOT EXISTS compute_accrual (
   tenant text NOT NULL, period_key int NOT NULL, accrued_vcpu_ms bigint NOT NULL,
   PRIMARY KEY (tenant, period_key));
+-- AUP1 durable suspension (multi-instance): a suspended tenant is blocked on
+-- EVERY shard, not just the one that received the suspend, and the block survives
+-- a shard restart. The fabricd keeps a fast in-memory cache; this is the
+-- cross-instance source of truth read on a cache miss at N>1.
+CREATE TABLE IF NOT EXISTS fabric_suspended_tenants (
+  tenant_id text PRIMARY KEY);
 ";
 
 // -- M1 WAVE-0 frozen anchor (tenant_plans) ---------------------------------
@@ -466,6 +472,50 @@ impl PgLedger {
 }
 
 impl LeaseLedger for PgLedger {
+    /// The pg backend serializes admission across ALL instances via
+    /// `pg_advisory_xact_lock` + atomic count-and-insert, so the concurrency/vCPU
+    /// cap is exact at `instances > 1` — the property that makes N-shard fabricd
+    /// cap-safe. (Proven by the `cross_instance_*` conformance tests.)
+    fn is_cross_instance_safe(&self) -> bool {
+        true
+    }
+
+    fn set_tenant_suspended(&self, tenant: &str, suspended: bool) -> anyhow::Result<()> {
+        self.block_on(async {
+            let client = self.pool.get().await?;
+            if suspended {
+                client
+                    .execute(
+                        "INSERT INTO fabric_suspended_tenants (tenant_id) VALUES ($1) \
+                         ON CONFLICT DO NOTHING",
+                        &[&tenant],
+                    )
+                    .await?;
+            } else {
+                client
+                    .execute(
+                        "DELETE FROM fabric_suspended_tenants WHERE tenant_id = $1",
+                        &[&tenant],
+                    )
+                    .await?;
+            }
+            Ok(())
+        })
+    }
+
+    fn is_tenant_suspended_durable(&self, tenant: &str) -> anyhow::Result<bool> {
+        self.block_on(async {
+            let client = self.pool.get().await?;
+            let row = client
+                .query_opt(
+                    "SELECT 1 FROM fabric_suspended_tenants WHERE tenant_id = $1",
+                    &[&tenant],
+                )
+                .await?;
+            Ok(row.is_some())
+        })
+    }
+
     fn put(&mut self, rec: LeaseRecord) -> anyhow::Result<()> {
         self.block_on(async {
             let client = self.pool.get().await?;

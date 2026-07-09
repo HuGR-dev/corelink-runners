@@ -1,11 +1,12 @@
-# RAISE-N readiness — the tracked gaps before FABRIC_NUM_SHARDS > 1 (owner-gated)
+# RAISE-N readiness — the N>1 gaps (ALL NOW CLOSED, owner-gated flip)
 
-**Status:** the multi-instance ROUTING is built + INERT at N=1 (PRs #325/#326 —
-crate::shard, Worker sharding, GET /v1/leases scatter-gather). The N=1 go-live is
-LIVE + proven. **Raising N>1 is NOT yet a pure config flip** — the go-live-
-readiness audit (wf_ab025b87, 10 agents) found real N>1 gaps I had missed. All are
-INERT at N=1 (single shard); each becomes live the moment N is raised. Do them
-before the raise-N flip.
+**Status (updated 2026-07-09):** the multi-instance ROUTING is built + INERT at
+N=1 (#325/#326). The go-live-readiness audit (wf_ab025b87) found real N>1 gaps I
+had missed — and the "zero gaps" wave then CLOSED every one of them (the fixes
+below). So raising N>1 is now genuinely safe; the ONLY remaining preconditions are
+operational: set DATABASE_URL (pg — the acquire cap-guard fail-closes N>1 without
+it) and raise FABRIC_NUM_SHARDS + max_instances together. Owner-gated on volume.
+Each gap's original description + the fix that closed it is below.
 
 ## The gaps (priority-ordered)
 1. **Cap-safety: N>1 requires the pg ledger.** With `FABRIC_LEDGER_BACKEND=memory`

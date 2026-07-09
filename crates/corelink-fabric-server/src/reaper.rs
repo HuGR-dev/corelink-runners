@@ -244,8 +244,19 @@ fn flush_partial_envelope(
     let checkpoint = {
         let ledger = state.ledger.lock().unwrap_or_else(|e| e.into_inner());
         // A read failure must NOT break reclamation (post-teardown,
-        // fire-and-forget) — degrade to None and fall through to tier 3.
-        ledger.get_envelope_checkpoint(lease_id).unwrap_or(None)
+        // fire-and-forget) — degrade to None and fall through to tier 3. But do
+        // NOT swallow it silently: a pg read error here downgrades a durable-
+        // checkpoint flush to a no_capture marker, which is a real (if benign)
+        // loss of §13 provenance — log it so it is diagnosable, not invisible.
+        ledger
+            .get_envelope_checkpoint(lease_id)
+            .unwrap_or_else(|e| {
+                eprintln!(
+                    "reaper: §13 checkpoint read FAILED for lease {lease_id}: {e:#} \
+                 — degrading to no_capture (durable provenance lost for this lease)"
+                );
+                None
+            })
     };
     if let Some(json) = checkpoint {
         match serde_json::from_str::<corelink_runners_contracts::IntentMetrics>(&json) {

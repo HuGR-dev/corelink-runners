@@ -271,6 +271,23 @@ pub(crate) async fn acquire(
     // N=1 → (0, 1).
     observe_shard_from_headers(&state, &headers);
     let (shard_target, num_shards) = acquire_shard_target(&state, &headers);
+    // Cap-safety at N>1 (go-live-readiness audit): a per-process (non-pg) ledger
+    // counts only THIS shard's leases, so N shards would each admit up to the full
+    // concurrency/vCPU cap → a tenant silently gets N× its paid concurrency (a cap
+    // + fairness bypass on untrusted compute). Refuse fail-closed rather than
+    // over-admit. INERT at N=1 (num_shards == 1 ⇒ never triggers). The pg ledger
+    // is cross-instance cap-safe (advisory lock), so the real N>1 deploy is
+    // unaffected; this only fires on a MISCONFIGURED N>1-without-pg.
+    if num_shards > 1 && !state.ledger_is_cross_instance_safe() {
+        eprintln!(
+            "acquire REFUSED (tenant {tenant}): num_shards={num_shards} but the ledger is not \
+             cross-instance cap-safe — set DATABASE_URL (pg) before raising FABRIC_NUM_SHARDS"
+        );
+        return fail_closed(
+            "multi-instance fabricd (N>1) requires a cross-instance ledger (pg); \
+             acquire is disabled until the durable ledger is configured",
+        );
+    }
 
     // ── AUP1 (Track-C enforcement). A SUSPENDED tenant acquires NOTHING —
     // reject fail-closed at the very top, before any TTL clamp, cap resolve, or
@@ -489,7 +506,17 @@ pub(crate) async fn acquire(
             windows.retain(|t, w| t == &tenant || !w.is_idle_at(now_ms));
 
             let window = windows.entry(tenant.clone()).or_default();
-            let over_rate = window.count_within_60s(now_ms) >= plan.rate_ceiling_per_min as usize;
+            // Multi-instance: `rate_windows` is per-process, so N shards would each
+            // allow the FULL ceiling → up to N× the tenant's per-minute rate. Since
+            // acquires round-robin across shards, give each shard a `ceil(ceiling/N)`
+            // slice: the aggregate across N shards is then ≤ the paid ceiling (a
+            // burst to one shard is capped at ceiling/N). Inert at N=1 (divisor 1).
+            let effective_ceiling = if num_shards > 1 {
+                (plan.rate_ceiling_per_min as usize).div_ceil(num_shards as usize)
+            } else {
+                plan.rate_ceiling_per_min as usize
+            };
+            let over_rate = window.count_within_60s(now_ms) >= effective_ceiling;
             // Every acquire attempt counts toward the ceiling, admitted or not.
             window.push(now_ms);
             if over_rate {

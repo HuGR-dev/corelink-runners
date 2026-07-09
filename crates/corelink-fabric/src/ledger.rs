@@ -224,6 +224,38 @@ struct LeaseReservation {
 }
 
 pub trait LeaseLedger {
+    /// Whether this backend enforces the concurrency/vCPU cap SAFELY across
+    /// MULTIPLE fabricd instances (shards). Only a shared, atomically-serialized
+    /// store qualifies: the [`crate::pg_ledger::PgLedger`] (an advisory-locked
+    /// atomic count-and-insert) returns `true`; the per-process in-memory and
+    /// single-file backends return the default `false`. The acquire path uses this
+    /// to REFUSE admission when `num_shards > 1` on a non-cross-instance ledger,
+    /// since otherwise each shard would count only its own leases and a tenant
+    /// would get up to N× its paid concurrency (a cap and fairness bypass on
+    /// untrusted compute).
+    fn is_cross_instance_safe(&self) -> bool {
+        false
+    }
+
+    /// Durably record a tenant's AUP1 suspension so it survives a shard restart
+    /// AND is visible to OTHER instances. Default: no-op — a single-instance /
+    /// ephemeral backend keeps suspension only in the fabricd's in-memory cache,
+    /// which is correct at N=1. The [`crate::pg_ledger::PgLedger`] overrides it
+    /// with a shared table, which is what makes suspend an effective abuse-control
+    /// at N>1 (a suspended tenant is blocked on EVERY shard, not just the one that
+    /// received the suspend). `&self`: pg writes via its pool; no `&mut` needed.
+    fn set_tenant_suspended(&self, _tenant: &str, _suspended: bool) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// Whether `tenant` is DURABLY suspended (the cross-instance source of truth).
+    /// Default `false` (no durable store — the in-memory cache is authoritative at
+    /// N=1). Pg overrides. Read by the acquire gate ONLY at N>1 (a cache miss),
+    /// so it never adds latency to the single-instance hot path.
+    fn is_tenant_suspended_durable(&self, _tenant: &str) -> anyhow::Result<bool> {
+        Ok(false)
+    }
+
     /// Register a new record. Fails if `lease_id` already exists — state is
     /// mutated only through [`LeaseLedger::transition`], never by overwrite.
     fn put(&mut self, rec: LeaseRecord) -> anyhow::Result<()>;
