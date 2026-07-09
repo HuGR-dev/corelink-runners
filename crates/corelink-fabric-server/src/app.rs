@@ -327,6 +327,15 @@ pub struct AppState {
     pub plans: Arc<dyn PlanSource>,
     /// Clock seam (deterministic under test).
     pub clock: Arc<dyn Clock>,
+    /// This instance's own shard index (multi-instance routing, [`crate::shard`]).
+    /// [`Self::SHARD_UNKNOWN`] until the proxy Worker stamps `X-Fabricd-Shard` on a
+    /// request (the cron health ping does so for every shard each minute; acquire
+    /// carries it too). Set by [`Self::observe_shard`], read by the reaper's
+    /// per-shard filter + the autoscaler-path mint fallback. Inert at N=1.
+    pub(crate) this_shard: Arc<std::sync::atomic::AtomicU32>,
+    /// The shard count `N` the proxy Worker fans out over. `1` (inert) until a
+    /// request carries `X-Fabricd-Num-Shards`.
+    pub(crate) num_shards: Arc<std::sync::atomic::AtomicU32>,
     /// Per-tenant wait statistics (CP4 non-interference surface). The
     /// metrics endpoint serves each tenant ITS OWN snapshot, never anyone
     /// else's — the tenant-scoping is real and pinned.
@@ -711,7 +720,39 @@ impl AppState {
             // ASK-2 billing usage-push DEFAULT-OFF: the no-op target (observe +
             // succeed). The composition root opts in via `with_billing_export_target`.
             billing_export_target: Arc::new(corelink_fabric::NoopBillingTarget),
+            // Multi-instance identity: UNKNOWN until the proxy Worker stamps the
+            // shard headers (inert single-instance until then).
+            this_shard: Arc::new(std::sync::atomic::AtomicU32::new(Self::SHARD_UNKNOWN)),
+            num_shards: Arc::new(std::sync::atomic::AtomicU32::new(1)),
         }
+    }
+
+    /// Sentinel for [`Self::this_shard`]: the instance has not yet learned its
+    /// shard identity (fresh boot, before the first Worker-stamped request).
+    pub(crate) const SHARD_UNKNOWN: u32 = u32::MAX;
+
+    /// Record this instance's shard identity from the proxy Worker's frozen
+    /// `X-Fabricd-{Shard,Num-Shards}` headers. The cron health ping stamps them on
+    /// every shard each minute (so an idle/just-booted instance still learns its
+    /// identity within ~60s), and acquire carries them too. Idempotent, last-write-
+    /// wins. At N=1 the Worker sends `(0, 1)` → the reaper reaps all (today's
+    /// behavior), so this is fully inert until the fan-out is raised.
+    pub(crate) fn observe_shard(&self, this_shard: u32, num_shards: u32) {
+        use std::sync::atomic::Ordering;
+        self.num_shards.store(num_shards.max(1), Ordering::Relaxed);
+        self.this_shard.store(this_shard, Ordering::Relaxed);
+    }
+
+    /// This instance's learned `(this_shard, num_shards)`. `this_shard ==
+    /// SHARD_UNKNOWN` means the identity is not yet known (pre-first-acquire).
+    /// Used by the acquire path to mint a shard-consistent lease-id for internal
+    /// callers (the autoscaler) that carry no proxy headers.
+    pub(crate) fn observed_shard(&self) -> (u32, u32) {
+        use std::sync::atomic::Ordering;
+        (
+            self.this_shard.load(Ordering::Relaxed),
+            self.num_shards.load(Ordering::Relaxed),
+        )
     }
 
     /// Wire the billing usage-push target (ASK-2). The default is the no-op
@@ -1762,7 +1803,8 @@ fn capture(template: &str) -> String {
     template.replace("{lease_id}", ":lease_id")
 }
 
-/// Liveness: 200 `"ok"`, no auth, no tenant data.
+/// Liveness: 200 `"ok"`, no auth, no tenant data. Deliberately state-free so it
+/// answers under saturation (mounted outside the limiter).
 async fn health() -> &'static str {
     "ok"
 }

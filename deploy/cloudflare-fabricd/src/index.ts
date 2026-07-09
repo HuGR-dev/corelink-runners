@@ -135,6 +135,88 @@ function leaseIdOf(pathname: string): string | null {
   return m ? decodeURIComponent(m[1]) : null;
 }
 
+/**
+ * Wire shape of `GET /v1/leases` (matches the Rust `lease_list::LeaseListResponse`
+ * — `{ tenant, leases: [...] }`, NOT a bare array). Each shard is tenant-scoped by
+ * the same Bearer PAT, so every shard returns the SAME `tenant` and its OWN slice
+ * of that tenant's leases.
+ */
+interface LeaseListBody {
+  tenant?: unknown;
+  leases?: Array<{ lease_id: string; [k: string]: unknown }>;
+}
+
+/**
+ * `GET /v1/leases` scatter-gather. Under N>1 each shard holds only its OWN leases
+ * in memory, so shard 0 alone gives an INCOMPLETE list. Fan the (cloned) request
+ * out to all N shards concurrently, merge the per-shard `leases` arrays into one,
+ * dedup by `lease_id` (a lease lives on exactly one shard — dedup is defensive),
+ * and re-key on the shared `tenant`. Best-effort: a down/erroring shard is skipped
+ * so it can't blank the whole list; only if EVERY shard fails do we propagate an
+ * error. Result is ordered by `lease_id` to preserve the single-shard contract's
+ * deterministic ordering.
+ *
+ * N===1 SHORT-CIRCUITS to a plain passthrough (no parse/re-serialize) so the bytes
+ * are byte-identical to the old singleton proxy.
+ */
+async function listLeasesScatterGather(request: Request, env: Env, N: number): Promise<Response> {
+  // N=1: byte-identical passthrough — no clone, no parse, no re-serialize.
+  if (N === 1) {
+    return getContainer(env.FABRICD, shardDoId(0, 1)).fetch(request);
+  }
+
+  const settled = await Promise.allSettled(
+    Array.from({ length: N }, (_unused, k) =>
+      getContainer(env.FABRICD, shardDoId(k, N)).fetch(request.clone()),
+    ),
+  );
+
+  const byId = new Map<string, { lease_id: string; [k: string]: unknown }>();
+  let tenant: unknown;
+  let contentType = "application/json";
+  let anyOk = false;
+  let firstErrorResponse: Response | null = null;
+
+  for (const outcome of settled) {
+    if (outcome.status !== "fulfilled") continue;
+    const resp = outcome.value;
+    if (resp.status !== 200) {
+      if (firstErrorResponse === null) firstErrorResponse = resp;
+      continue;
+    }
+    anyOk = true;
+    const ct = resp.headers.get("content-type");
+    if (ct) contentType = ct;
+    let body: LeaseListBody;
+    try {
+      body = (await resp.json()) as LeaseListBody;
+    } catch {
+      continue; // malformed body from a shard — skip it (best-effort)
+    }
+    if (tenant === undefined && body.tenant !== undefined) tenant = body.tenant;
+    for (const lease of body.leases ?? []) {
+      if (lease && typeof lease.lease_id === "string") byId.set(lease.lease_id, lease);
+    }
+  }
+
+  // Every shard failed → propagate a shard's error (or a 502 if all rejected).
+  if (!anyOk) {
+    if (firstErrorResponse !== null) return firstErrorResponse;
+    return new Response(JSON.stringify({ error: "all fabricd shards unreachable" }), {
+      status: 502,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
+  const leases = Array.from(byId.values()).sort((a, b) =>
+    a.lease_id < b.lease_id ? -1 : a.lease_id > b.lease_id ? 1 : 0,
+  );
+  return new Response(JSON.stringify({ tenant, leases }), {
+    status: 200,
+    headers: { "content-type": contentType },
+  });
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const N = numShards(env);
@@ -149,6 +231,13 @@ export default {
       modified.headers.set("X-Fabricd-Num-Shards", String(N));
       modified.headers.set("X-Fabricd-Shard", String(k));
       return getContainer(env.FABRICD, shardDoId(k, N)).fetch(modified);
+    }
+
+    // LEASE-LIST — GET the collection exactly (NOT /v1/leases/{id}). Each shard
+    // holds only its own leases in memory, so scatter-gather across all N and
+    // merge; N===1 short-circuits to a byte-identical passthrough.
+    if (request.method === "GET" && pathname === "/v1/leases") {
+      return listLeasesScatterGather(request, env, N);
     }
 
     // LEASE-OP — a request that names a lease id. Route to the shard that owns

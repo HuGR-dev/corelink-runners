@@ -454,6 +454,14 @@ pub async fn reap_once(state: &crate::AppState) -> usize {
     // ── 2. Identify overdue records, dating each purely from its durable
     // `deadline_ms`. A Held lease with `deadline_ms = None` is treated as
     // never-overdue (fail-safe: we never reap a lease we cannot date).
+    // Multi-instance note: the sweep is intentionally ANY-INSTANCE — each record
+    // carries its own durable `deadline_ms` and the abnormal-flush consumes the
+    // durable pg checkpoint (proven cross-instance-safe by the `cross_instance_
+    // reaper_*` tests), so ANY shard can correctly reap ANY overdue lease. This is
+    // the ROBUST choice over per-shard filtering: a crashed/absent shard's orphans
+    // are still reclaimed immediately by another shard (no owner-shard-down delay).
+    // The only cost at N>1 is a few redundant (idempotent, already-gone→Ok)
+    // teardown calls per overdue box — bounded and acceptable. Byte-identical at N=1.
     let overdue: Vec<_> = held
         .into_iter()
         .filter(|rec| now >= rec.deadline_ms.unwrap_or(u64::MAX))
