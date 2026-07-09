@@ -12,9 +12,14 @@
 
 import { DurableObject } from "cloudflare:workers";
 import { Container, getContainer } from "@cloudflare/containers";
+import { shardOf } from "./shard";
 
 export interface Env {
   FABRICD: DurableObjectNamespace<FabricdContainer>;
+  // Shard count (multi-instance fabricd, option 3). String in wrangler vars,
+  // parsed to int; absent/invalid ⇒ 1 (inert singleton). MUST be raised in
+  // lockstep with `max_instances` in wrangler.jsonc — see the comment there.
+  FABRIC_NUM_SHARDS?: string;
   // Non-secret vars (wrangler.jsonc).
   CORELINK_INTROSPECT_URL: string;
   BILLING_INGEST_URL?: string;
@@ -96,14 +101,66 @@ export class FabricdContainer extends Container<Env> {
 }
 
 // A FIXED id ⇒ exactly one container instance serves all traffic (the in-memory
-// ledger's single-instance requirement).
+// ledger's single-instance requirement). At N=1 shardDoId returns THIS exact id
+// for every shard, so the multi-instance routing below is byte-identical to the
+// old singleton proxy (the inert-at-N=1 property).
 const SINGLETON = "fabricd-singleton";
+
+/** Shard count N from the wrangler var, parsed to int; default 1. */
+function numShards(env: Env): number {
+  const n = parseInt(env.FABRIC_NUM_SHARDS ?? "", 10);
+  return Number.isFinite(n) && n >= 1 ? n : 1;
+}
+
+/**
+ * The DO id for shard `k` under `n` shards. At n===1 this is the SINGLETON id
+ * for ALL k — byte-identical to today, NO container identity change (the inert
+ * property). At n>1 each shard gets its own stable container id.
+ */
+function shardDoId(k: number, n: number): string {
+  return n === 1 ? SINGLETON : `fabricd-shard-${k}`;
+}
+
+// Round-robin cursor for ACQUIRE placement. A lease's id is minted (Rust side)
+// to hash back to the shard that acquired it, so subsequent lease-ops route via
+// shardOf — only the initial acquire is placed round-robin.
+let acquireCursor = 0;
+
+/**
+ * Extract the `{lease_id}` from a `/v1/leases/{lease_id}/...` path, or null for
+ * the collection endpoint (`/v1/leases`) and any non-lease path.
+ */
+function leaseIdOf(pathname: string): string | null {
+  const m = pathname.match(/^\/v1\/leases\/([^/]+)(?:\/.*)?$/);
+  return m ? decodeURIComponent(m[1]) : null;
+}
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    // Proxy the full /v1 fabric surface (lease/exec/§13-envelope/attestation) to
-    // the singleton control-plane container.
-    return getContainer(env.FABRICD, SINGLETON).fetch(request);
+    const N = numShards(env);
+    const { pathname } = new URL(request.url);
+
+    // ACQUIRE — POST to the collection exactly. Place on a round-robin shard and
+    // stamp the chosen N + shard so the container can mint a lease-id that hashes
+    // back to this shard (X-Fabricd-Shard) under this fan-out (X-Fabricd-Num-Shards).
+    if (request.method === "POST" && pathname === "/v1/leases") {
+      const k = ((acquireCursor++ % N) + N) % N;
+      const modified = new Request(request);
+      modified.headers.set("X-Fabricd-Num-Shards", String(N));
+      modified.headers.set("X-Fabricd-Shard", String(k));
+      return getContainer(env.FABRICD, shardDoId(k, N)).fetch(modified);
+    }
+
+    // LEASE-OP — a request that names a lease id. Route to the shard that owns
+    // the lease (deterministic: same hash the Rust side used to mint the id).
+    const leaseId = leaseIdOf(pathname);
+    if (leaseId !== null) {
+      const k = shardOf(leaseId, N);
+      return getContainer(env.FABRICD, shardDoId(k, N)).fetch(request);
+    }
+
+    // Everything else (/v1/health, /v1/attestation/key, …) → shard 0.
+    return getContainer(env.FABRICD, shardDoId(0, N)).fetch(request);
   },
 
   async scheduled(_event: ScheduledController, env: Env): Promise<void> {
@@ -123,52 +180,66 @@ export default {
     // recovers within seconds. So we probe up to 3× with a gap and destroy ONLY
     // when ALL probes fail (~30s of SUSTAINED unresponsiveness) — this still
     // catches a real hang (it never recovers) while tolerating a busy singleton.
-    const container = getContainer(env.FABRICD, SINGLETON);
+    const N = numShards(env);
 
     const PROBES = 3; // consecutive failures required to declare a real hang
     const PROBE_TIMEOUT_MS = 8_000;
     const GAP_MS = 5_000; // between probes — lets a busy worker free up
 
-    for (let attempt = 1; attempt <= PROBES; attempt++) {
-      const t0 = Date.now();
-      try {
-        const resp = await container.fetch(
-          new Request("http://fabricd/v1/health", {
-            signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
-          }),
-        );
-        if (resp.status === 200) {
-          console.log(
-            `keep-warm: health 200 in ${Date.now() - t0}ms (probe ${attempt}/${PROBES})`,
+    // Probe every shard independently — the same 3-consecutive-failure watchdog
+    // per container. At N=1 this is a single iteration = today's behaviour.
+    for (let k = 0; k < N; k++) {
+      const container = getContainer(env.FABRICD, shardDoId(k, N));
+      let healthy = false;
+
+      for (let attempt = 1; attempt <= PROBES; attempt++) {
+        const t0 = Date.now();
+        try {
+          const resp = await container.fetch(
+            new Request("http://fabricd/v1/health", {
+              signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+              // Stamp the shard so a future shard-aware /v1/health can use it.
+              headers: { "X-Fabricd-Shard": String(k) },
+            }),
           );
-          return; // healthy (possibly recovered from a busy blip) — done
+          if (resp.status === 200) {
+            console.log(
+              `keep-warm[shard ${k}/${N}]: health 200 in ${Date.now() - t0}ms (probe ${attempt}/${PROBES})`,
+            );
+            healthy = true;
+            break; // this shard healthy (possibly recovered from a busy blip)
+          }
+          console.log(
+            `keep-warm[shard ${k}/${N}]: health ${resp.status} in ${Date.now() - t0}ms (probe ${attempt}/${PROBES})`,
+          );
+        } catch (e) {
+          console.log(
+            `keep-warm[shard ${k}/${N}]: health UNREACHABLE in ${Date.now() - t0}ms (probe ${attempt}/${PROBES}: ${e})`,
+          );
         }
+        // Probe failed. If more probes remain, wait a beat and retry — a container
+        // busy with a long close will free a worker and answer the next probe.
+        if (attempt < PROBES) {
+          await new Promise((r) => setTimeout(r, GAP_MS));
+        }
+      }
+
+      if (healthy) continue;
+
+      // ALL probes failed over ~30s → sustained unresponsiveness = a real hang,
+      // not a busy blip. Destroy so a fresh instance boots on the next fetch
+      // (self-heal; preserves the #316 recurring-hang recovery).
+      console.log(
+        `keep-warm[shard ${k}/${N}]: ${PROBES} consecutive health failures (~30s) — destroying hung shard`,
+      );
+      try {
+        await container.destroy();
         console.log(
-          `keep-warm: health ${resp.status} in ${Date.now() - t0}ms (probe ${attempt}/${PROBES})`,
+          `keep-warm[shard ${k}/${N}]: destroyed hung shard — fresh instance will boot on next request`,
         );
       } catch (e) {
-        console.log(
-          `keep-warm: health UNREACHABLE in ${Date.now() - t0}ms (probe ${attempt}/${PROBES}: ${e})`,
-        );
+        console.log(`keep-warm[shard ${k}/${N}]: destroy() failed: ${e}`);
       }
-      // Probe failed. If more probes remain, wait a beat and retry — a container
-      // busy with a long close will free a worker and answer the next probe.
-      if (attempt < PROBES) {
-        await new Promise((r) => setTimeout(r, GAP_MS));
-      }
-    }
-
-    // ALL probes failed over ~30s → sustained unresponsiveness = a real hang, not
-    // a busy blip. Destroy so a fresh instance boots on the next fetch (self-heal;
-    // preserves the #316 recurring-hang recovery).
-    console.log(
-      `keep-warm: ${PROBES} consecutive health failures (~30s) — destroying hung singleton`,
-    );
-    try {
-      await container.destroy();
-      console.log("keep-warm: destroyed hung singleton — fresh instance will boot on next request");
-    } catch (e) {
-      console.log(`keep-warm: destroy() failed: ${e}`);
     }
   },
 };
