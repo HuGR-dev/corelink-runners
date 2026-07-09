@@ -342,6 +342,28 @@ pub(crate) async fn acquire(
         );
     }
 
+    // ── 0d. Agent mode (agent-exec, ratified (B) exec-server-drive 2026-07-05).
+    // `req.agent == Some` provisions an EGRESS-enabled, NON-memoized box hugit's
+    // off-box §13 loop drives via POST /v1/leases/{id}/agent-exec. Two guards,
+    // symmetric with runner mode and BEFORE any cap/slot work:
+    //  (a) Mutually exclusive with runner mode (frozen DTO): both Some → 400.
+    //  (b) Requires a real box backend — the no-op provisioner would admit a
+    //      doomed agent box that never binds, so reject 400 rather than hang.
+    if req.agent.is_some() && req.runner.is_some() {
+        return error_response(
+            ApiError::Invalid,
+            "agent mode and runner mode are mutually exclusive: set at most one of \
+             `agent` / `runner` on an acquire.",
+        );
+    }
+    if req.agent.is_some() && !state.provisioner.binds_boxes() {
+        return error_response(
+            ApiError::Invalid,
+            "agent mode requires a cloud box backend, but none is configured \
+             (no-op provisioner). Configure a cloud box backend to enable agent-exec.",
+        );
+    }
+
     // ── WP-7: AC pre-lease short-circuit (moat build) ──────────────────────────
     // Consult the Action Cache BEFORE any slot is reserved. A `Hit` returns the
     // stored ActionResult immediately with 0 slots reserved, 0 vCPU-h accrued
@@ -537,6 +559,12 @@ pub(crate) async fn acquire(
         // requires (the C2 floor, #69). A check-exec lease keeps the caller's
         // `net_policy` verbatim (byte-for-byte the prior behaviour).
         let is_runner = req.runner.is_some();
+        // AGENT MODE (agent-exec): like runner, `net_policy` is FORCED server-side
+        // to the egress sentinel `"egress-agent"` — the single source of the agent
+        // box's egress grant, never derived from caller input. `ContainerSpec::
+        // from_agent_lease` requires exactly this sentinel (the C2 floor). Mutually
+        // exclusive with runner (guarded at 0d), so the two `if`s never overlap.
+        let is_agent = req.agent.is_some();
         let lease_id = state.mint_lease_id_for(shard_target, num_shards);
         let lease = RunnerLease {
             lease_id: lease_id.clone(),
@@ -545,6 +573,8 @@ pub(crate) async fn acquire(
             expiry: now_ms.saturating_add(req.expiry_ms),
             net_policy: if is_runner {
                 "egress-runner".to_string()
+            } else if is_agent {
+                "egress-agent".to_string()
             } else {
                 req.net_policy.clone()
             },
@@ -566,6 +596,11 @@ pub(crate) async fn acquire(
         // red-team invariant). ──
         let spec_result = if is_runner {
             ContainerSpec::from_runner_lease(&lease, &req.image_digest)
+        } else if is_agent {
+            // Egress like a runner (allow_egress=true), but exec-driven
+            // (run_on_create=false) and WITHOUT the runner's GitHub-Actions
+            // machinery — the agent box waits for /agent-exec commands.
+            ContainerSpec::from_agent_lease(&lease, &req.image_digest)
         } else {
             ContainerSpec::from_lease(&lease, &req.image_digest)
         };
@@ -595,7 +630,12 @@ pub(crate) async fn acquire(
         // endpoint, so the §13.2 ingest URL/token is NOT injected (no unused
         // credential on the box). The runner's JIT config is injected later, in
         // `finalize_admitted_lease`, after the egress box is provisioned.
-        if !is_runner {
+        // AGENT MODE (agent-exec): the §13 loop that drives the agent box is
+        // hugit's OFF-box loop (it calls /agent-exec + polls) — nothing IN the
+        // box streams trajectory to our ingest endpoint, so the §13.2 ingest
+        // URL/token is likewise NOT injected (no unused credential on an
+        // egress box that runs untrusted code).
+        if !is_runner && !is_agent {
             let ingest_token = state.ingest_signer.ingest_token(&lease_id);
             crate::envelope_inject::inject_ingest_env(&mut spec, &lease_id, &ingest_token);
         }
@@ -1082,6 +1122,14 @@ pub(crate) async fn finalize_admitted_lease(
     // `forget_lease`.
     if req.runner.is_some() {
         state.mark_runner_lease(&lease_id);
+    }
+
+    // ── 5a′. AGENT MODE marker (agent-exec): record this lease as an agent lease
+    // so `/agent-exec` accepts it and the check `/exec` handler REFUSES it. A
+    // fabric-internal marker only (mirrors the runner marker), GC'd by
+    // `forget_lease`. Recorded AFTER a successful Held transition.
+    if req.agent.is_some() {
+        state.mark_agent_lease(&lease_id);
     }
 
     // ── 5b. §13 hook registration (WP-ENVELOPE-WIRE): open a CaptureHook

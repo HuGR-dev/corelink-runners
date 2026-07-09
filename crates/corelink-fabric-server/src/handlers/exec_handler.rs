@@ -116,6 +116,21 @@ pub(crate) async fn exec(
         );
     }
 
+    // ── 2a′. AGENT MODE refusal (agent-exec). An agent lease is egress +
+    // NON-memoized — it has no `CheckDef` memo axis, so the memoized `/exec`
+    // (which attests a `CheckResult` under a memo key) must never run on it, or
+    // a false memo could be minted from an egress box. Drive an agent lease via
+    // POST /v1/leases/{id}/agent-exec instead. Same tenant-scoped placement as
+    // the runner refusal (after the 404 + Held gate). The marker recovers from a
+    // poisoned lock, so it can never silently fail open.
+    if state.is_agent_lease(&lease_id) {
+        return error_response(
+            ApiError::Invalid,
+            "this is an agent-exec lease (egress + non-memoized): use \
+             POST /v1/leases/{id}/agent-exec, not /exec",
+        );
+    }
+
     // ── 2b. CHECK-HOST false-cache-hit guard (C6 / Lifecycle assert). A
     // check-host lease was acquired WITH its toolchain (`toolchain_digest = D`),
     // and the box hydrated exactly D at spawn. The memo key is computed over
