@@ -35,6 +35,16 @@ export interface Env {
   // Absent ⇒ fabricd falls back to the FABRIC_GITHUB_APP_* App path. When set it
   // is PREFERRED. Worker secret (`wrangler secret put`).
   FABRIC_GITHUB_MINT_TOKEN?: string;
+  // Runner-broker GitHub App (ADR-0007 Stage A) — the FALLBACK to the PAT above
+  // when FABRIC_GITHUB_MINT_TOKEN is absent. `runner_broker.rs` reads this trio
+  // (env::{APP_ID, INSTALLATION_ID, PRIVATE_KEY_B64}). Forwarded into the
+  // container below; all-absent ⇒ App path not wired (a `runner:` acquire without
+  // either mechanism is rejected, byte-identical to today). Secrets.
+  FABRIC_GITHUB_APP_ID?: string;
+  FABRIC_GITHUB_APP_INSTALLATION_ID?: string;
+  // Base64 of the App's PEM private key (the *_B64 form survives env-var UIs that
+  // mangle multi-line PEM — runner_broker.rs prefers it over the raw PEM form).
+  FABRIC_GITHUB_APP_PRIVATE_KEY_B64?: string;
   // Durable ledger (R1 — arms the vCPU ceiling). When DATABASE_URL is present the
   // container runs the PgLedger (durable, survives DO restart) instead of in-memory,
   // and the vCPU-hour ceiling (FABRIC_RUNNER_VCPU) can arm — the #265 boot guard
@@ -95,6 +105,16 @@ export class FabricdContainer extends Container<Env> {
         : {}),
       ...(env.FABRIC_GITHUB_MINT_TOKEN
         ? { FABRIC_GITHUB_MINT_TOKEN: env.FABRIC_GITHUB_MINT_TOKEN }
+        : {}),
+      // Runner-broker App path (fallback to the PAT above). Forwarded only when
+      // present so an unarmed deploy stays byte-identical; runner_broker.rs treats
+      // the PAT as PREFERRED when both are set.
+      ...(env.FABRIC_GITHUB_APP_ID ? { FABRIC_GITHUB_APP_ID: env.FABRIC_GITHUB_APP_ID } : {}),
+      ...(env.FABRIC_GITHUB_APP_INSTALLATION_ID
+        ? { FABRIC_GITHUB_APP_INSTALLATION_ID: env.FABRIC_GITHUB_APP_INSTALLATION_ID }
+        : {}),
+      ...(env.FABRIC_GITHUB_APP_PRIVATE_KEY_B64
+        ? { FABRIC_GITHUB_APP_PRIVATE_KEY_B64: env.FABRIC_GITHUB_APP_PRIVATE_KEY_B64 }
         : {}),
       // R1 — durable ledger + vCPU ceiling, gated on DATABASE_URL. Present ⇒ pg
       // backend + FABRIC_RUNNER_VCPU=4 (standard-4 sizing) arm together; the #265
