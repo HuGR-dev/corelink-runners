@@ -44,6 +44,18 @@ export interface Env {
   // Opt-in pg TLS: `disable` (default) | `require`. A public-internet managed PG
   // should set `require`; when DATABASE_URL is set we default it to `require`.
   FABRIC_PG_TLS?: string;
+  // ── Moat mint (env-0 C2c) — arms the per-job CAS PAT mint. The fabricd's
+  // `cas_pat_mint_from_env` + `validate_mint_arm` require the mint URL+key, the
+  // cred-ticket secret, and the CLW endpoint to be armed TOGETHER (else boot
+  // fails loud); all-absent ⇒ moat OFF (cold path). These MUST be forwarded into
+  // the container's envVars below — the wrangler `vars`/secrets are visible to the
+  // Worker as `env.*` but the CONTAINER only sees what `this.envVars` sets. ──
+  CLW_ENDPOINT?: string; // var — CoreLink API base for CLW cache hydration
+  CORELINK_RUNNER_MINT_URL?: string; // var — mint base ({url}/internal/v1/runner/{mint,revoke})
+  CORELINK_RUNNER_MINT_AUTH_KEY?: string; // secret — x-corelink-internal-auth for the mint
+  FABRIC_CRED_TICKET_SECRET?: string; // secret — env-0 cred-ticket HMAC (PAT never in untrusted env)
+  // Attested-cost emission (FLIP-B): "true"/"1" ⇒ `intent_metrics_sig` on CloseResponse. Var.
+  FABRIC_EMIT_INTENT_METRICS_SIG?: string;
 }
 
 /** The singleton control-plane container. fabricd binds 0.0.0.0:8080. */
@@ -95,6 +107,24 @@ export class FabricdContainer extends Container<Env> {
             FABRIC_PG_TLS: env.FABRIC_PG_TLS ?? "require",
             FABRIC_RUNNER_VCPU: "4",
           }
+        : {}),
+      // ── Moat mint + env-0 + attested-cost — forward the wrangler vars/secrets
+      // INTO the container (the fabricd binary reads these from its own env). The
+      // mint trio (URL+key, cred-ticket secret, CLW endpoint) arm together or the
+      // #-guard fails boot; absent ⇒ moat OFF. Each forwarded only when present so
+      // an unarmed deploy stays byte-identical to the cold path. ──
+      ...(env.CLW_ENDPOINT ? { CLW_ENDPOINT: env.CLW_ENDPOINT } : {}),
+      ...(env.CORELINK_RUNNER_MINT_URL
+        ? { CORELINK_RUNNER_MINT_URL: env.CORELINK_RUNNER_MINT_URL }
+        : {}),
+      ...(env.CORELINK_RUNNER_MINT_AUTH_KEY
+        ? { CORELINK_RUNNER_MINT_AUTH_KEY: env.CORELINK_RUNNER_MINT_AUTH_KEY }
+        : {}),
+      ...(env.FABRIC_CRED_TICKET_SECRET
+        ? { FABRIC_CRED_TICKET_SECRET: env.FABRIC_CRED_TICKET_SECRET }
+        : {}),
+      ...(env.FABRIC_EMIT_INTENT_METRICS_SIG
+        ? { FABRIC_EMIT_INTENT_METRICS_SIG: env.FABRIC_EMIT_INTENT_METRICS_SIG }
         : {}),
     };
   }
