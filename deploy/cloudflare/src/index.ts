@@ -85,9 +85,19 @@ export interface Env {
   // (serve-unauthenticated back-compat); that default is removed so a check-host
   // exec-server is never spawned without its auth gate.
   EXEC_SERVER_AUTH_TOKEN?: string;
-  // The deploy-time pinned image digest (README wrinkle #1): the spawn request's
-  // image_digest must equal this, else reject. Wire from wrangler vars.
-  PINNED_IMAGE_DIGEST: string;
+  // The deploy-time pinned image digest (README wrinkle #1): a RUNNER-mode spawn
+  // request's image_digest must equal this, else 409. OPTIONAL by construction:
+  // when unset, the runner-mode assertion at the spawn handler is INERT (the
+  // container image is wrangler-bound regardless, so this is defense-in-depth, not
+  // the isolation floor). To ARM it, set PINNED_IMAGE_DIGEST in wrangler `vars` to
+  // the EXACT string fabricd sends as image_digest for a runner spawn (verify the
+  // format — full `registry.cloudflare.com/…@sha256:` ref vs bare digest — against
+  // the fabricd CloudflareEngine payload at runner-path activation; a mismatch here
+  // would 409 every runner spawn). Owner-gated with the runner fleet (autoscaler /
+  // GitHub App), which is not yet active — so the inert guard affects no live path.
+  // The type is OPTIONAL to reflect reality (it was `: string` = required, which
+  // silently lied: it is not set, so the `&&` short-circuited the guard dead).
+  PINNED_IMAGE_DIGEST?: string;
   // ── Autoscaler (POST /webhook) — all-Cloudflare, no external fabric ──
   // GitHub webhook HMAC secret (X-Hub-Signature-256). Absent ⇒ /webhook is
   // disabled (the route returns 503), so the autoscaler is opt-in.
@@ -922,8 +932,12 @@ export default {
             headers: {
               "content-type": "application/json",
               // Track-C C2b: present the exec-server bearer (the same value
-              // injected at spawn). Absent secret ⇒ header omitted ⇒ the
-              // exec-server serves without auth (back-compat).
+              // injected at spawn). Absent secret ⇒ header omitted. NOTE: this
+              // no-auth fallback is now UNREACHABLE for any live check-host — the
+              // O7 change makes check-mode spawn hard-require EXEC_SERVER_AUTH_TOKEN
+              // (fail-closed 503), so no check container can exist without it. The
+              // spread is kept only so the request shape is uniform; it is not a
+              // live fail-open.
               ...(env.EXEC_SERVER_AUTH_TOKEN
                 ? { authorization: `Bearer ${env.EXEC_SERVER_AUTH_TOKEN}` }
                 : {}),
@@ -974,7 +988,12 @@ export default {
 
     // POST /v1/teardown  (idempotent) — body: { handle, mode?: "check"|"runner" }
     if (request.method === "POST" && pathname === "/v1/teardown") {
-      const body = (await request.json()) as { handle: string; mode?: string };
+      let body: { handle: string; mode?: string };
+      try {
+        body = (await request.json()) as { handle: string; mode?: string };
+      } catch (e) {
+        return json({ error: `invalid JSON body: ${(e as Error).message}` }, 400);
+      }
       const handle = body.handle;
       if (!handle) return json({ error: "missing handle" }, 400);
       // Route by mode (audit r4): without this, a check-host teardown hit
@@ -1008,7 +1027,12 @@ export default {
     // still returns 204 (teardown remains the hard backstop). Wires the SDK
     // setDeniedHosts() setter (container.d.ts:120) via each container's cutEgress.
     if (request.method === "POST" && pathname === "/v1/egress-cutoff") {
-      const body = (await request.json()) as { handle: string; mode?: string };
+      let body: { handle: string; mode?: string };
+      try {
+        body = (await request.json()) as { handle: string; mode?: string };
+      } catch (e) {
+        return json({ error: `invalid JSON body: ${(e as Error).message}` }, 400);
+      }
       const handle = body.handle;
       if (!handle) return json({ error: "missing handle" }, 400);
       const container =
