@@ -71,6 +71,20 @@ export interface Env {
   FABRIC_CRED_TICKET_SECRET?: string; // secret — env-0 cred-ticket HMAC (PAT never in untrusted env)
   // Attested-cost emission (FLIP-B): "true"/"1" ⇒ `intent_metrics_sig` on CloseResponse. Var.
   FABRIC_EMIT_INTENT_METRICS_SIG?: string;
+  // Enforcement / observability / safety (optional passthroughs; inert until set)
+  FABRIC_ADMIN_KEY?: string;
+  FABRIC_OBSERVABILITY_KEY?: string;
+  FABRIC_RUNNER_REPO_ALLOWLIST?: string;
+  // ADR-0007 Stage-B autoscaler (default-off; the route only mounts when
+  // FABRIC_AUTOSCALER_WEBHOOK_SECRET is set — inert until then)
+  FABRIC_AUTOSCALER_WEBHOOK_SECRET?: string;
+  FABRIC_AUTOSCALER_PAT?: string;
+  FABRIC_AUTOSCALER_RUNNER_IMAGE?: string;
+  FABRIC_AUTOSCALER_LABELS?: string;
+  FABRIC_AUTOSCALER_TMP_ROOT?: string;
+  FABRIC_AUTOSCALER_EXPIRY_MS?: string;
+  FABRIC_AUTOSCALER_REPO_ALLOWLIST?: string;
+  FABRIC_AUTOSCALER_MAX_TRACKED_JOBS?: string;
 }
 
 /** The singleton control-plane container. fabricd binds 0.0.0.0:8080. */
@@ -162,6 +176,34 @@ export class FabricdContainer extends Container<Env> {
         : {}),
       ...(env.FABRIC_EMIT_INTENT_METRICS_SIG
         ? { FABRIC_EMIT_INTENT_METRICS_SIG: env.FABRIC_EMIT_INTENT_METRICS_SIG }
+        : {}),
+      // Unreachable-in-deploy fix: forward the enforcement/observability/safety
+      // + Stage-B autoscaler passthroughs so a future `wrangler secret put` /
+      // var actually reaches the container (all inert until set).
+      ...(env.FABRIC_ADMIN_KEY ? { FABRIC_ADMIN_KEY: env.FABRIC_ADMIN_KEY } : {}),
+      ...(env.FABRIC_OBSERVABILITY_KEY ? { FABRIC_OBSERVABILITY_KEY: env.FABRIC_OBSERVABILITY_KEY } : {}),
+      ...(env.FABRIC_RUNNER_REPO_ALLOWLIST
+        ? { FABRIC_RUNNER_REPO_ALLOWLIST: env.FABRIC_RUNNER_REPO_ALLOWLIST }
+        : {}),
+      ...(env.FABRIC_AUTOSCALER_WEBHOOK_SECRET
+        ? { FABRIC_AUTOSCALER_WEBHOOK_SECRET: env.FABRIC_AUTOSCALER_WEBHOOK_SECRET }
+        : {}),
+      ...(env.FABRIC_AUTOSCALER_PAT ? { FABRIC_AUTOSCALER_PAT: env.FABRIC_AUTOSCALER_PAT } : {}),
+      ...(env.FABRIC_AUTOSCALER_RUNNER_IMAGE
+        ? { FABRIC_AUTOSCALER_RUNNER_IMAGE: env.FABRIC_AUTOSCALER_RUNNER_IMAGE }
+        : {}),
+      ...(env.FABRIC_AUTOSCALER_LABELS ? { FABRIC_AUTOSCALER_LABELS: env.FABRIC_AUTOSCALER_LABELS } : {}),
+      ...(env.FABRIC_AUTOSCALER_TMP_ROOT
+        ? { FABRIC_AUTOSCALER_TMP_ROOT: env.FABRIC_AUTOSCALER_TMP_ROOT }
+        : {}),
+      ...(env.FABRIC_AUTOSCALER_EXPIRY_MS
+        ? { FABRIC_AUTOSCALER_EXPIRY_MS: env.FABRIC_AUTOSCALER_EXPIRY_MS }
+        : {}),
+      ...(env.FABRIC_AUTOSCALER_REPO_ALLOWLIST
+        ? { FABRIC_AUTOSCALER_REPO_ALLOWLIST: env.FABRIC_AUTOSCALER_REPO_ALLOWLIST }
+        : {}),
+      ...(env.FABRIC_AUTOSCALER_MAX_TRACKED_JOBS
+        ? { FABRIC_AUTOSCALER_MAX_TRACKED_JOBS: env.FABRIC_AUTOSCALER_MAX_TRACKED_JOBS }
         : {}),
     };
   }
