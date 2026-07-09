@@ -616,6 +616,11 @@ async fn provision_runner(
         Extension(tenant),
         Extension(Arc::clone(&state.registry)),
         Extension(BearerPat(state.cfg.pat.clone())),
+        // Autoscaler acquires out-of-band (GitHub webhook), not via the proxy
+        // Worker → no shard headers → inert (0,1) single-instance mint. Correct at
+        // N=1; when N>1 the autoscaler must target its own instance's shard
+        // (tracked with the reaper per-shard follow-up).
+        axum::http::HeaderMap::new(),
         Json(req),
     )
     .await;

@@ -18,6 +18,14 @@
   // BILLING_INGEST_AUTH_KEY, CLOUDFLARE_SPAWN_AUTH_TOKEN) are set via
   // `wrangler secret put` — NEVER in this file. See README.md.
   "vars": {
+    // ── SHARD COUNT (multi-instance fabricd, option 3) ────────────────────────
+    // The proxy Worker (src/index.ts) fans acquires round-robin across N shard
+    // containers and routes every lease-op back to its owning shard via shardOf.
+    // "1" is INERT: shardDoId collapses to the singleton id → byte-identical to
+    // the single-instance proxy. ⚠️ N and `max_instances` (containers block below)
+    // MUST be raised TOGETHER — the flip to N>1 is a separate owner-gated step.
+    // Raising N without max_instances (or vice-versa) mis-provisions the fleet.
+    "FABRIC_NUM_SHARDS": "1",
     "CORELINK_INTROSPECT_URL": "https://corelink-api.humangr.com/internal/v1/auth/introspect",
     "BILLING_INGEST_URL": "https://corelink-api.humangr.com/internal/v1/billing/usage",
     "BILLING_REGION": "iad",
@@ -81,6 +89,8 @@
       // MAX_INFLIGHT gate that bounds concurrent provisions). Multi-instance (now
       // pg-enabled) is the next scaling step — see README "Known limit".
       "instance_type": "standard-2",
+      // ⚠️ Raise in LOCKSTEP with `vars.FABRIC_NUM_SHARDS` — the shard fan-out
+      // needs one container instance per shard. N>1 is a separate owner-gated flip.
       "max_instances": 1
     }
   ],

@@ -280,6 +280,7 @@ mod tests {
             Extension(acme.clone()),
             Extension(Arc::new(HookRegistry::default())),
             Extension(BearerPat("pat".to_string())),
+            axum::http::HeaderMap::new(),
             Json(req),
         )
         .await;

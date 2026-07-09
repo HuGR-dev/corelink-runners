@@ -206,15 +206,43 @@ pub(crate) fn build_compute_gate(
     }))
 }
 
+/// Frozen Worker→instance shard headers (multi-instance routing — see
+/// [`crate::shard`] + `deploy/cloudflare-fabricd/src/index.ts`). Lower-case:
+/// `HeaderMap` lookups are case-insensitive, and these are the canonical forms.
+const HDR_NUM_SHARDS: &str = "x-fabricd-num-shards";
+const HDR_SHARD: &str = "x-fabricd-shard";
+
+/// Extract `(target_shard, num_shards)` from the proxy Worker's shard headers.
+/// Absent or unparseable ⇒ `(0, 1)` — the inert single-instance default, so a
+/// direct (non-proxied) or pre-sharding request mints exactly as before. The
+/// returned `target_shard` is normalized into `0..num_shards`.
+fn shard_target_from_headers(headers: &axum::http::HeaderMap) -> (u32, u32) {
+    let parse = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.trim().parse::<u32>().ok())
+    };
+    let num_shards = parse(HDR_NUM_SHARDS).unwrap_or(1).max(1);
+    let target_shard = parse(HDR_SHARD).unwrap_or(0) % num_shards;
+    (target_shard, num_shards)
+}
+
 /// `POST /v1/leases` — acquire a lease (contract §1 "Acquire").
 pub(crate) async fn acquire(
     State(state): State<AppState>,
     Extension(tenant): Extension<TenantId>,
     Extension(registry): Extension<Arc<HookRegistry>>,
     Extension(pat): Extension<BearerPat>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<AcquireRequest>,
 ) -> Response {
     let now_ms = state.clock.now_ms();
+    // Multi-instance routing: the proxy Worker assigns this acquire a target
+    // shard via the frozen `X-Fabricd-*` headers, so the lease-id we mint hashes
+    // to THIS instance (every later `/v1/leases/{id}/…` request routes back here).
+    // Absent/unparseable ⇒ (0, 1) — inert single-instance default.
+    let (shard_target, num_shards) = shard_target_from_headers(&headers);
 
     // ── AUP1 (Track-C enforcement). A SUSPENDED tenant acquires NOTHING —
     // reject fail-closed at the very top, before any TTL clamp, cap resolve, or
@@ -454,7 +482,7 @@ pub(crate) async fn acquire(
         // requires (the C2 floor, #69). A check-exec lease keeps the caller's
         // `net_policy` verbatim (byte-for-byte the prior behaviour).
         let is_runner = req.runner.is_some();
-        let lease_id = state.mint_lease_id();
+        let lease_id = state.mint_lease_id_for(shard_target, num_shards);
         let lease = RunnerLease {
             lease_id: lease_id.clone(),
             principal_chain: vec![format!("tenant:{tenant}")],
@@ -1205,6 +1233,54 @@ pub(crate) async fn cancel(
 }
 
 // ── Regression tests ─────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod shard_header_tests {
+    use super::{HDR_NUM_SHARDS, HDR_SHARD, shard_target_from_headers};
+    use axum::http::HeaderMap;
+
+    fn hm(pairs: &[(&str, &str)]) -> HeaderMap {
+        use axum::http::HeaderName;
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(
+                HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                v.parse().unwrap(),
+            );
+        }
+        h
+    }
+
+    #[test]
+    fn absent_headers_are_inert_single_instance() {
+        assert_eq!(shard_target_from_headers(&HeaderMap::new()), (0, 1));
+    }
+
+    #[test]
+    fn present_headers_parse() {
+        let h = hm(&[(HDR_NUM_SHARDS, "4"), (HDR_SHARD, "2")]);
+        assert_eq!(shard_target_from_headers(&h), (2, 4));
+    }
+
+    #[test]
+    fn shard_is_normalized_into_range() {
+        // A shard >= num_shards is wrapped (defensive; the Worker sends in-range).
+        let h = hm(&[(HDR_NUM_SHARDS, "3"), (HDR_SHARD, "7")]);
+        assert_eq!(shard_target_from_headers(&h), (1, 3)); // 7 % 3 == 1
+    }
+
+    #[test]
+    fn zero_num_shards_degrades_to_one() {
+        let h = hm(&[(HDR_NUM_SHARDS, "0"), (HDR_SHARD, "0")]);
+        assert_eq!(shard_target_from_headers(&h), (0, 1));
+    }
+
+    #[test]
+    fn garbage_headers_fall_back_to_inert() {
+        let h = hm(&[(HDR_NUM_SHARDS, "not-a-number"), (HDR_SHARD, "xyz")]);
+        assert_eq!(shard_target_from_headers(&h), (0, 1));
+    }
+}
 
 #[cfg(test)]
 mod tests {

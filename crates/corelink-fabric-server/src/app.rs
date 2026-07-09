@@ -612,6 +612,14 @@ pub const DEFAULT_PROVISION_MAX_INFLIGHT: usize = 16;
 /// via `FABRIC_MAX_INFLIGHT_REQUESTS`.
 pub const DEFAULT_MAX_INFLIGHT_REQUESTS: usize = 1024;
 
+/// Max rejection-sampling tries when minting a shard-targeted lease-id
+/// ([`AppState::mint_lease_id_for`]). Each try has a `1/N` hit chance, so expected
+/// tries ≈ N; 64 is astronomically safe for any realistic shard count (and `N=1`
+/// accepts the first, never looping). On exhaustion the mint returns the last id
+/// (fail-open to a valid lease-id; a mis-route is caught by the close/reaper
+/// honesty path, never a hang).
+const SHARD_MINT_MAX_TRIES: u32 = 64;
+
 /// Deterministic DEV seed for the default fabric signing key wired by
 /// [`AppState::new`] — tests and local composition only; NEVER a production
 /// key (the production composition root injects the per-region key via
@@ -1297,6 +1305,23 @@ impl AppState {
     /// `pg_advisory_xact_lock`; this closes the id-minting axis.)
     pub(crate) fn mint_lease_id(&self) -> String {
         format!("lease-{}", uuid::Uuid::new_v4())
+    }
+
+    /// Mint a lease-id that routes to `target_shard` under `num_shards`
+    /// instances (multi-instance routing — [`crate::shard`]). `num_shards <= 1`
+    /// is INERT: byte-identical to [`Self::mint_lease_id`] (accepts the first
+    /// uuid, no rejection loop). The acquiring instance calls this with the shard
+    /// the proxy Worker assigned it (the `X-Fabricd-Shard` header), so every later
+    /// `/v1/leases/{id}/…` request deterministically routes back to this instance
+    /// (`shard_of(id, N) == target_shard`). The frozen `lease-<uuid-v4>` wire
+    /// shape is unchanged — this only SELECTS among freshly-minted uuids.
+    pub(crate) fn mint_lease_id_for(&self, target_shard: u32, num_shards: u32) -> String {
+        crate::shard::mint_lease_id_for_shard(
+            target_shard,
+            num_shards,
+            SHARD_MINT_MAX_TRIES,
+            || self.mint_lease_id(),
+        )
     }
 
     /// Mint a runner JIT registration config on the BLOCKING pool (audit re-run

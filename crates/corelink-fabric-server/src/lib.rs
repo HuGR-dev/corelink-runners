@@ -41,6 +41,9 @@ pub mod runner_broker;
 pub mod runner_cas_mint;
 pub mod runner_inject;
 pub mod server;
+/// Lease-id → shard routing (multi-instance fabricd, option 3). FROZEN
+/// cross-language contract with `deploy/cloudflare-fabricd/src/shard.ts`.
+pub mod shard;
 
 pub use ac_pre_lease::{AcPreLeaseHook, AcPreLeaseOutcome, MockAcHook, NoOpAcHook};
 pub use admission::{
