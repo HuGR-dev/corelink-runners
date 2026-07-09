@@ -107,37 +107,63 @@ export default {
   },
 
   async scheduled(_event: ScheduledController, env: Env): Promise<void> {
-    // Keep-alive ping so the singleton never sleeps (the 24/7 knob) — now ALSO a
-    // liveness watchdog + self-heal (2026-07-08 recurring-hang incident). The
-    // singleton has gone dark on its own (process hung, `/v1/health` timing out)
-    // and needed a MANUAL delete+redeploy each time. The ping is time-bounded
-    // (10s); if the container is genuinely unresponsive we `destroy()` it so the
-    // next request / cron tick brings up a FRESH instance automatically. A
-    // healthy plane answers in <1s, so a 10s timeout means a real hang, not a
-    // transient — the destroy is warranted. Logged every tick (visible via
-    // `wrangler tail`) so a recurrence has a timeline instead of a mystery.
+    // Keep-alive ping so the singleton never sleeps (the 24/7 knob) — AND a
+    // liveness watchdog + self-heal (2026-07-08 recurring-hang incident: the
+    // singleton went dark on its own, `/v1/health` timing out, needing a MANUAL
+    // delete+redeploy each time).
+    //
+    // ⚠️ CONSECUTIVE-FAILURE GATE (2026-07-08 go-live hardening): the watchdog
+    // MUST NOT destroy a container that is merely BUSY. A legitimate §13 close
+    // holds its request up to the 30s JobClose ack window; two concurrent such
+    // closes can transiently saturate the standard-2 workers and make a SINGLE
+    // 10s /v1/health probe miss — which the old single-probe watchdog mistook for
+    // a hang and destroyed, aborting in-flight work and forcing the exact
+    // "Failed to start container" cold-start we hit at go-live. A GENUINE hang
+    // (the #316 dark-container case) stays unresponsive for minutes; a busy blip
+    // recovers within seconds. So we probe up to 3× with a gap and destroy ONLY
+    // when ALL probes fail (~30s of SUSTAINED unresponsiveness) — this still
+    // catches a real hang (it never recovers) while tolerating a busy singleton.
     const container = getContainer(env.FABRICD, SINGLETON);
-    const t0 = Date.now();
-    try {
-      const resp = await container.fetch(
-        new Request("http://fabricd/v1/health", {
-          signal: AbortSignal.timeout(10_000),
-        }),
-      );
-      if (resp.status === 200) {
-        console.log(`keep-warm: health 200 in ${Date.now() - t0}ms`);
-        return;
+
+    const PROBES = 3; // consecutive failures required to declare a real hang
+    const PROBE_TIMEOUT_MS = 8_000;
+    const GAP_MS = 5_000; // between probes — lets a busy worker free up
+
+    for (let attempt = 1; attempt <= PROBES; attempt++) {
+      const t0 = Date.now();
+      try {
+        const resp = await container.fetch(
+          new Request("http://fabricd/v1/health", {
+            signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+          }),
+        );
+        if (resp.status === 200) {
+          console.log(
+            `keep-warm: health 200 in ${Date.now() - t0}ms (probe ${attempt}/${PROBES})`,
+          );
+          return; // healthy (possibly recovered from a busy blip) — done
+        }
+        console.log(
+          `keep-warm: health ${resp.status} in ${Date.now() - t0}ms (probe ${attempt}/${PROBES})`,
+        );
+      } catch (e) {
+        console.log(
+          `keep-warm: health UNREACHABLE in ${Date.now() - t0}ms (probe ${attempt}/${PROBES}: ${e})`,
+        );
       }
-      console.log(
-        `keep-warm: health ${resp.status} in ${Date.now() - t0}ms — treating as unhealthy`,
-      );
-    } catch (e) {
-      console.log(
-        `keep-warm: health UNREACHABLE in ${Date.now() - t0}ms (${e}) — self-healing`,
-      );
+      // Probe failed. If more probes remain, wait a beat and retry — a container
+      // busy with a long close will free a worker and answer the next probe.
+      if (attempt < PROBES) {
+        await new Promise((r) => setTimeout(r, GAP_MS));
+      }
     }
-    // Health failed / timed out → the singleton is hung. Destroy it so a fresh
-    // instance boots on the next fetch (self-heal; replaces the manual restart).
+
+    // ALL probes failed over ~30s → sustained unresponsiveness = a real hang, not
+    // a busy blip. Destroy so a fresh instance boots on the next fetch (self-heal;
+    // preserves the #316 recurring-hang recovery).
+    console.log(
+      `keep-warm: ${PROBES} consecutive health failures (~30s) — destroying hung singleton`,
+    );
     try {
       await container.destroy();
       console.log("keep-warm: destroyed hung singleton — fresh instance will boot on next request");
