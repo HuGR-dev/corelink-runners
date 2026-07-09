@@ -55,7 +55,7 @@ All default-off; absent ⇒ the route is not mounted (404 by absence).
 |---|---|---|
 | `FABRIC_AUTOSCALER_WEBHOOK_SECRET` | ✅ | the secret from step 1 |
 | `FABRIC_AUTOSCALER_PAT` | ✅ | the same value as `FABRIC_PAT` (acquire as the bootstrap tenant) |
-| `FABRIC_AUTOSCALER_RUNNER_IMAGE` | ✅ | the pinned `ghcr.io/humangr-labs/corelink-runner@sha256:…` digest |
+| `FABRIC_AUTOSCALER_RUNNER_IMAGE` | ✅ | the pinned `ghcr.io/humanguardrail/corelink-runner@sha256:…` digest |
 | `FABRIC_AUTOSCALER_LABELS` | ▫️ | `corelink-dogfood` (default: `corelink`) |
 | `FABRIC_AUTOSCALER_REPO_ALLOWLIST` | ▫️ | `HumanGuardrail/corelink-runners` (defense-in-depth) |
 | `FABRIC_AUTOSCALER_EXPIRY_MS` | ▫️ | default `3600000` (1h) |

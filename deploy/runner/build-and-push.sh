@@ -3,7 +3,7 @@
 #
 # USAGE:
 #   export REGISTRY=ghcr.io          # default: ghcr.io
-#   export IMAGE=humangr-labs/corelink-runner  # default: humangr-labs/corelink-runner
+#   export IMAGE=humanguardrail/corelink-runner  # default: humanguardrail/corelink-runner
 #   export TAG=latest                # default: latest
 #   export PLATFORM=linux/amd64     # default: linux/amd64
 #   ./build-and-push.sh
@@ -27,7 +27,7 @@ set -euo pipefail
 
 # ── Configuration — override via env ─────────────────────────────────────────
 REGISTRY="${REGISTRY:-ghcr.io}"
-IMAGE="${IMAGE:-humangr-labs/corelink-runner}"
+IMAGE="${IMAGE:-humanguardrail/corelink-runner}"
 TAG="${TAG:-latest}"
 PLATFORM="${PLATFORM:-linux/amd64}"
 

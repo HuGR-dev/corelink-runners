@@ -60,7 +60,7 @@ baked into the image).
 
 ```
 RunnerLease {
-  image: "ghcr.io/humangr-labs/corelink-runner@sha256:<digest>",  // X4: pinned
+  image: "ghcr.io/humanguardrail/corelink-runner@sha256:<digest>",  // X4: pinned
   env: {
     "CORELINK_RUNNER_JITCONFIG": "<jit-config-token>",            // per-job credential
   },
@@ -109,7 +109,7 @@ echo "$GHCR_PAT" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
 
 # 3. Build and push:
 export REGISTRY=ghcr.io
-export IMAGE=humangr-labs/corelink-runner
+export IMAGE=humanguardrail/corelink-runner
 export TAG=2.335.1-rust1.96.0   # recommended: encode runner + Rust versions
 ./deploy/runner/build-and-push.sh
 ```
@@ -122,7 +122,7 @@ in the fabric's runner-lease config.
 | Variable | Default | Notes |
 |---|---|---|
 | `REGISTRY` | `ghcr.io` | Container registry host |
-| `IMAGE` | `humangr-labs/corelink-runner` | Image name (no tag) |
+| `IMAGE` | `humanguardrail/corelink-runner` | Image name (no tag) |
 | `TAG` | `latest` | Image tag |
 | `PLATFORM` | `linux/amd64` | Build platform |
 
