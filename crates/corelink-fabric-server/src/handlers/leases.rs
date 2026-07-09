@@ -657,7 +657,18 @@ pub(crate) async fn acquire(
                     "monthly compute ceiling reached; upgrade tier",
                 );
             }
-            Err(_) => return fail_closed("lease ledger refused the admission reserve"),
+            Err(e) => {
+                // OPS (observability): the admission reserve is the primary acquire
+                // hot path; a ledger error here is almost always pg unreachable.
+                // Fail closed (never admit without a durable reserve) but LOUDLY —
+                // a silent 503 storm here reads as "clients misbehaving" instead of
+                // "pg is down".
+                eprintln!(
+                    "acquire admission reserve FAILED (tenant {tenant}): {e:#} \
+                     — failing closed (likely ledger/pg unreachable)"
+                );
+                return fail_closed("lease ledger refused the admission reserve");
+            }
         }
         // Ledger lock (`ledger`) drops here at end of block — BEFORE any await.
     };
@@ -882,6 +893,16 @@ pub(crate) async fn finalize_admitted_lease(
                     // FAIL CLOSED — mirror the JIT-mint error arm exactly: teardown
                     // + ledger remove + fail_closed. No box is ever provisioned
                     // without a minted PAT when a mint client is configured (A7).
+                    // OPS (observability): the mint is on the moat's go-live
+                    // critical path — a failing mint must be LOUD server-side (a
+                    // silent fail-closed here hid a live token_plaintext response
+                    // drift for a whole deploy). Log it (no secret in `e`).
+                    eprintln!(
+                        "moat-mint FAILED for lease {lease_id} (tenant {}, repo {:?}): {e} \
+                         — failing closed, no box provisioned",
+                        tenant.as_str(),
+                        req.repo_full_name.as_deref()
+                    );
                     state.teardown_lease(&lease_id).await;
                     if let Ok(mut ledger) = state.ledger.lock() {
                         let _ = ledger.remove(&lease_id);

@@ -20,7 +20,10 @@
 //! OPTIONAL; `repo_full_name` is always required (allowlist-checked against the
 //! resolved tenant). `ttl_seconds` is the lease's REMAINING time (skew-shrunk) so
 //! the PAT expires WITH the lease (Server-TL C2c contract, 2026-07-02). Response:
-//! `{"token": "<pat-plaintext>", "pat_id": "<id>", "expires_ms": <u64>}`.
+//! `{"token_plaintext": "<pat-plaintext>", "pat_id": "<id>", "token_id": "<id>",
+//! "expires_ms": <u64>, "tenant": "<derived>", "max_concurrency": <u32>}` (frozen
+//! server envelope, 2026-07-08; we read `token_plaintext`/`pat_id`/`expires_ms`,
+//! ignore the rest).
 //!
 //! ## Revoke flow (POST /internal/v1/runner/revoke)
 //!
@@ -361,8 +364,17 @@ impl<H: MintHttp> HttpCasPatMint<H> {
 }
 
 /// The wire shape for a successful mint response from the D-9 service.
+///
+/// FROZEN server envelope (2026-07-08): `{ token_plaintext, pat_id, token_id,
+/// expires_ms, tenant, max_concurrency }`. We consume only the three fields we
+/// need — extra fields are ignored (no `deny_unknown_fields`). The PAT plaintext
+/// arrives as **`token_plaintext`** (an earlier client build read `token`, which
+/// silently BadResponse-fail-closed every real mint — the RESPONSE half of the
+/// contract was never reconciled with the request-body freeze); `alias = "token"`
+/// keeps the older shape acceptable too.
 #[derive(serde::Deserialize)]
 struct MintResponseBody {
+    #[serde(rename = "token_plaintext", alias = "token")]
     token: String,
     pat_id: String,
     expires_ms: u64,
@@ -777,6 +789,31 @@ mod tests {
     }
 
     // ── mint: success path ───────────────────────────────────────────────────
+
+    /// The REAL frozen server response envelope (2026-07-08): the PAT plaintext
+    /// arrives as `token_plaintext` (NOT `token`), alongside `token_id`, `tenant`,
+    /// and `max_concurrency` the client ignores. This is the exact shape that made
+    /// every live mint fail-closed `BadResponse` until the field was reconciled —
+    /// this test locks the response-half of the contract so it can't drift again.
+    #[tokio::test]
+    async fn mint_parses_the_frozen_token_plaintext_response_envelope() {
+        let resp_body = r#"{"token_plaintext":"tok-real","pat_id":"pid-real","token_id":"tid-1","expires_ms":1234567890000,"tenant":"d863fafb","max_concurrency":20}"#;
+        let c = client(vec![ok_body(resp_body)]);
+        let pat = c
+            .mint(
+                "acme/repo",
+                Some("inst-1"),
+                "pat-acq",
+                "job-real",
+                DEADLINE,
+                NOW,
+            )
+            .await
+            .expect("the frozen token_plaintext envelope must parse");
+        assert_eq!(pat.token, "tok-real", "token_plaintext must map to the PAT");
+        assert_eq!(pat.pat_id, "pid-real");
+        assert_eq!(pat.expires_ms, 1_234_567_890_000u64);
+    }
 
     #[tokio::test]
     async fn mint_success_exact_url_header_body_and_parsed_pat() {
