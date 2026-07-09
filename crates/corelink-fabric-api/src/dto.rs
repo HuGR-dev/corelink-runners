@@ -196,6 +196,19 @@ pub struct StatusResponse {
 
     /// Current lifecycle state of the lease (the frozen `RunnerState`).
     pub state: RunnerState,
+
+    /// Unix epoch ms at record creation (mirrors the ledger's `LeaseRecord`).
+    pub created_at_ms: u64,
+
+    /// Unix epoch ms at last state change (mirrors the ledger's `LeaseRecord`).
+    pub updated_at_ms: u64,
+
+    /// Absolute lease-expiry deadline, unix epoch ms (`null` = never-overdue).
+    pub deadline_ms: Option<u64>,
+
+    /// Opaque provider box handle bound to this lease (the ledger's `box_ref`
+    /// marker — not a runtime handle, just the box this lease claims).
+    pub box_ref: String,
 }
 
 /// `POST /v1/leases/{lease_id}/cancel` response body.

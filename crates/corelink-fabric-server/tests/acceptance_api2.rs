@@ -286,8 +286,16 @@ async fn status_reflects_ledger_exactly_no_invented_states() {
     let status = body_json(response).await;
     assert_eq!(
         status,
-        serde_json::json!({ "lease_id": lease_id, "state": "held" }),
-        "status mirrors the ledger verbatim — exact body, no invented fields"
+        serde_json::json!({
+            "lease_id": lease_id,
+            "state": "held",
+            "created_at_ms": NOW_MS,
+            "updated_at_ms": NOW_MS,
+            "deadline_ms": NOW_MS + 60_000,
+            "box_ref": format!("box:{lease_id}"),
+        }),
+        "status mirrors the ledger verbatim — exact body, no invented fields \
+         beyond what the LeaseRecord itself carries"
     );
     {
         let ledger = ledger.lock().unwrap();

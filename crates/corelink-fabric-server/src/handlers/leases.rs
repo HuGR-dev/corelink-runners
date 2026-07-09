@@ -1226,6 +1226,10 @@ pub(crate) async fn status(
             Json(StatusResponse {
                 lease_id: record.lease_id,
                 state: wire_state,
+                created_at_ms: record.created_at_ms,
+                updated_at_ms: record.updated_at_ms,
+                deadline_ms: record.deadline_ms,
+                box_ref: record.box_ref,
             }),
         )
             .into_response(),

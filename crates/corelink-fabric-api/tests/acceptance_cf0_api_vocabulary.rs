@@ -191,6 +191,10 @@ fn dtos_roundtrip_and_deny_unknown() {
         &StatusResponse {
             lease_id: "lease-0001".to_string(),
             state: RunnerState::Held,
+            created_at_ms: 1_717_000_000_000,
+            updated_at_ms: 1_717_000_000_000,
+            deadline_ms: Some(1_717_000_060_000),
+            box_ref: "box:lease-0001".to_string(),
         },
         "StatusResponse",
     );

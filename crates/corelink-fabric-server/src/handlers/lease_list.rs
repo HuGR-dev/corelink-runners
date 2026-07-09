@@ -64,6 +64,10 @@ struct LeaseEntry {
     updated_at_ms: u64,
     /// Absolute lease-expiry deadline, unix epoch ms (`null` = never-overdue).
     deadline_ms: Option<u64>,
+    /// Opaque provider box handle bound to this lease (the ledger's `box_ref`
+    /// marker — not a runtime handle, just the box this lease claims). Empty
+    /// string for a pre-wire record that has not bound a box yet.
+    box_ref: String,
 }
 
 impl From<LeaseRecord> for LeaseEntry {
@@ -74,6 +78,7 @@ impl From<LeaseRecord> for LeaseEntry {
             created_at_ms: r.created_at_ms,
             updated_at_ms: r.updated_at_ms,
             deadline_ms: r.deadline_ms,
+            box_ref: r.box_ref,
         }
     }
 }
@@ -207,6 +212,7 @@ mod tests {
         assert_eq!(e["created_at_ms"], 100);
         assert_eq!(e["updated_at_ms"], 200);
         assert_eq!(e["deadline_ms"], 3_600_100u64);
+        assert_eq!(e["box_ref"], "box:lease-1");
     }
 
     /// Tenant scope (the security boundary): the caller sees ONLY its own
