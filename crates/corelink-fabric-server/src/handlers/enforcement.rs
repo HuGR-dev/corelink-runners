@@ -80,6 +80,9 @@ pub(crate) async fn suspend(
         return err(StatusCode::BAD_REQUEST, "invalid tenant id");
     };
     let newly = state.suspend_tenant(&tenant);
+    if newly {
+        state.counters.suspend_actions.incr();
+    }
     // Kill the tenant's live held leases NOW — an abusive workload stops
     // immediately, not just on the next acquire. Idempotent (re-suspend kills
     // whatever is currently held).

@@ -92,6 +92,7 @@ pub(crate) async fn trigger(
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         if let Some(response) = dedup.get(&dedup_key) {
+            state.counters.trigger_dedup_hits.incr();
             return (StatusCode::OK, Json(response.clone())).into_response();
         }
     }

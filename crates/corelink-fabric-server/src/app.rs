@@ -488,6 +488,14 @@ pub struct AppState {
     /// opt-in (`FABRIC_CRASH_PROBE_INTERVAL_SECS`); the always-on deadline
     /// reaper remains the backstop.
     pub slot_meter: Arc<Mutex<SlotMeter>>,
+    /// Golden-signal counters (Stage-C observability, [`crate::observability`]).
+    /// Lock-free, process-lifetime monotonic; incremented at the load-bearing
+    /// seams (admission outcomes, close, mint/revoke, agent-exec, load-shed,
+    /// suspend) and snapshotted onto the obs-key-gated `/internal/v1/status`
+    /// aggregate. Always-on (an `incr()` is a relaxed atomic add — no lock, no
+    /// alloc, no control-flow change); the DATA is only reachable through the
+    /// observability-key gate, exactly like [`slot_meter`](Self::slot_meter).
+    pub counters: Arc<crate::observability::Counters>,
     /// Internal observability secret gating `GET /internal/v1/occupancy`
     /// (WP-OCCUPANCY-API).  **Default-off:** `None` (the [`AppState::new`]
     /// default) makes the route return 404 — occupancy data is NEVER exposed
@@ -707,6 +715,10 @@ impl AppState {
             toolchain_digests: Arc::new(Mutex::new(std::collections::HashMap::new())),
             hook_registry: Arc::new(HookRegistry::default()),
             slot_meter: Arc::new(Mutex::new(SlotMeter::new())),
+            // Always-on golden-signal counters (all zero at boot). The DATA is
+            // gated behind the observability key on `/internal/v1/status`; the
+            // increments themselves are unconditional relaxed atomics.
+            counters: Arc::new(crate::observability::Counters::default()),
             // Default-off: no observability key → the occupancy route 404s.
             observability_key: None,
             // Default-off: the attested-cost binding is not placed on the wire
@@ -1268,15 +1280,17 @@ impl AppState {
             let mut pat_ids = self.pat_ids.lock().unwrap_or_else(|p| p.into_inner());
             pat_ids.remove(lease_id)
         };
-        if let (Some(pat_id), Some(mint)) = (pat_id, &self.cas_pat_mint)
-            && let Err(e) = mint.revoke(&pat_id).await
-        {
-            // Log but do NOT fail the teardown — revoke is defense-in-depth;
-            // the PAT is short-lived and self-expires (A7b).
-            eprintln!(
-                "lease {lease_id}: CAS PAT revoke failed for pat_id={pat_id}: {e} \
-                 — teardown proceeds (PAT self-expires at deadline)"
-            );
+        if let (Some(pat_id), Some(mint)) = (pat_id, &self.cas_pat_mint) {
+            self.counters.revoke_attempts.incr();
+            if let Err(e) = mint.revoke(&pat_id).await {
+                // Log but do NOT fail the teardown — revoke is defense-in-depth;
+                // the PAT is short-lived and self-expires (A7b).
+                self.counters.revoke_failures.incr();
+                eprintln!(
+                    "lease {lease_id}: CAS PAT revoke failed for pat_id={pat_id}: {e} \
+                     — teardown proceeds (PAT self-expires at deadline)"
+                );
+            }
         }
     }
 
@@ -1823,6 +1837,10 @@ pub fn app_full(
     // AUDIT P2: capture the global in-flight cap before `state` is moved into
     // `.with_state(...)` below; the layer is applied at the very end.
     let max_inflight = state.max_inflight_requests;
+    // Golden-signal counter: the load-shed HandleError handler is a `'static`
+    // closure with no `State`, so capture the counters Arc here — BEFORE `state`
+    // is moved into `.with_state(...)` — exactly like `max_inflight` above.
+    let shed_counters = state.counters.clone();
 
     // ATT-KEY-ROTATION: `GET /v1/attestation/key` is UNAUTHENTICATED — hugit
     // needs the public key to bootstrap verification without a tenant PAT.
@@ -1952,24 +1970,28 @@ pub fn app_full(
         .layer(
             tower::ServiceBuilder::new()
                 .layer(axum::error_handling::HandleErrorLayer::new(
-                    |_err: axum::BoxError| async move {
-                        // The only error the stack below produces is load-shed's
-                        // `Overloaded`; map it to the FROZEN fail-closed ErrorBody
-                        // (audit r6: a bare 503 status carries no ErrorBody, so a
-                        // client parsing the frozen vocabulary on a 503 would get an
-                        // empty body and fail to deserialize).
-                        // OPS (observability): a silent shed storm reads as "clients
-                        // misbehaving" instead of "the plane is saturated" — log each
-                        // shed so a live overload has a timeline. (Cheap: only fires
-                        // when the global concurrency limit is already exceeded.)
-                        eprintln!(
-                            "load-shed: request SHED at the global concurrency limit \
+                    move |_err: axum::BoxError| {
+                        let shed_counters = shed_counters.clone();
+                        async move {
+                            shed_counters.load_shed.incr();
+                            // The only error the stack below produces is load-shed's
+                            // `Overloaded`; map it to the FROZEN fail-closed ErrorBody
+                            // (audit r6: a bare 503 status carries no ErrorBody, so a
+                            // client parsing the frozen vocabulary on a 503 would get an
+                            // empty body and fail to deserialize).
+                            // OPS (observability): a silent shed storm reads as "clients
+                            // misbehaving" instead of "the plane is saturated" — log each
+                            // shed so a live overload has a timeline. (Cheap: only fires
+                            // when the global concurrency limit is already exceeded.)
+                            eprintln!(
+                                "load-shed: request SHED at the global concurrency limit \
                              — failing closed 503 (the plane is saturated)"
-                        );
-                        crate::auth::error_response(
-                            corelink_fabric_api::ApiError::FailClosed,
-                            "overloaded; shed — failing closed",
-                        )
+                            );
+                            crate::auth::error_response(
+                                corelink_fabric_api::ApiError::FailClosed,
+                                "overloaded; shed — failing closed",
+                            )
+                        }
                     },
                 ))
                 .layer(tower::load_shed::LoadShedLayer::new())
