@@ -1,9 +1,9 @@
 # Owner runbook — the GitHub App settings pass (generate key + set setup_url)
 
 **Date:** 2026-07-10 · **For:** owner · **From:** runners TL
-**The App:** "CoreLink GitHub App", **App id `4061919`**, owned by org **HumanGuardrail**
+**The App:** "CoreLink GitHub App", **App id `4222041` (slug `corelink-runners`)**, owned by org **HumanGuardrail**
 (installation `144561227` = this App on the org). **You are NOT creating anything** — you're
-opening the App you already own and doing two things: generate a private key, set a setup URL.
+opening the App you already own (settings: https://github.com/organizations/HumanGuardrail/settings/apps/corelink-runners) and doing two things: generate a private key, set a setup URL.
 
 ---
 
@@ -21,7 +21,7 @@ signup-worker's `/install/github/callback` — the server-TL has the worker's do
 1. Go to **github.com** → top-right avatar → **Your organizations** → **HumanGuardrail** →
    **Settings**.
 2. Left sidebar, bottom → **Developer settings** → **GitHub Apps**.
-3. Click the **CoreLink GitHub App** (App id `4061919`) → **Edit**.
+3. Click the **CoreLink GitHub App** (App id `4222041` (slug `corelink-runners`)) → **Edit**.
    (Direct link to try: `https://github.com/organizations/HumanGuardrail/settings/apps`)
 
 You're now on the App's **General** settings tab.
@@ -43,7 +43,7 @@ The dogfood fleet never used the install callback, so this is likely blank today
 2. Click **"Generate a private key"**.
 3. GitHub downloads a **`.pem` file** to your computer — this is `GITHUB_APP_PRIVATE_KEY`.
    **Treat it like a password.** Don't paste its contents into a normal chat message.
-4. Note the **App ID** shown at the top of the General tab — it's `4061919` — this is
+4. Note the **App ID** shown at the top of the General tab — it's `4222041` — this is
    `GITHUB_APP_ID`.
 
 ## Part D — hand off to the server-TL (they bind + enable)
@@ -51,7 +51,7 @@ The dogfood fleet never used the install callback, so this is likely blank today
 Give the server-TL, via a **secure channel** (password manager share / encrypted note — NOT
 plain chat):
 - the **`.pem`** file (→ they bind `GITHUB_APP_PRIVATE_KEY` on the signup-worker),
-- the **App ID `4061919`** (→ `GITHUB_APP_ID`).
+- the **App ID `4222041`** (→ `GITHUB_APP_ID`).
 
 The server-TL then does their side (already coded + tested — a bind/enable, not a build):
 - generates + binds a fresh **`INSTALL_STATE_SIGNING_KEY`** on BOTH the admin-ui and the
@@ -72,7 +72,7 @@ purchase seeds `runners_entitlement` → `runs-on: corelink` acquires. **That's 
 
 | Value | Where it comes from | Who binds it |
 |---|---|---|
-| `GITHUB_APP_ID` = `4061919` | App General tab (top) | server-TL → signup-worker |
+| `GITHUB_APP_ID` = `4222041` | App General tab (top) | server-TL → signup-worker |
 | `GITHUB_APP_PRIVATE_KEY` | you generate the `.pem` (Part C) | server-TL → signup-worker |
 | Setup URL | server-TL gives you the callback URL; **you** paste it into the App (Part B) | you (App settings) |
 | `INSTALL_STATE_SIGNING_KEY` | fresh random | server-TL → admin-ui + signup-worker |
