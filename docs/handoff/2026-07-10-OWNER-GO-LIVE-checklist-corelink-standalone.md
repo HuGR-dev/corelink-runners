@@ -21,21 +21,29 @@ short **operator launch step** + one **product decision**. This is the whole lis
 
 ## 🔧 The launch step — operator, NOT code (server-TL owns the code; you provide the inputs)
 
-This is the ONE thing between here and a cold external signup. Per the server-TL, the GitHub
-App install callback is coded but **inert-503 until three secrets are bound** + the App exists:
+This is the ONE thing between here and a cold external signup.
 
-1. **Create the GitHub App** via the manifest flow (`github_app_manifest.ts`, already routed).
-   This produces the App ID + private key.
-2. **Bind three secrets** on the signup-worker:
-   - `GITHUB_APP_ID`
-   - `GITHUB_APP_PRIVATE_KEY` (PKCS#8 PEM)
-   - `INSTALL_STATE_SIGNING_KEY` (HMAC key that signs the `state=tenant_id` on install)
+**CORRECTION (2026-07-10): the GitHub App ALREADY EXISTS — do NOT create one.** It's live as
+installation **144561227** and already drives the dogfood fleet (the runner-side spawn-worker
+mints JIT runners against it). So the server-TL's "create the App via the manifest flow" step
+is **moot** — skip it. The real residual is binding that **existing** App's credentials into
+the signup-worker's public self-serve install callback (a different credential shape than the
+runner-side `GITHUB_MINT_TOKEN` the dogfood fleet uses — the callback signs App JWTs, so it
+needs the App's ID + private key):
+
+1. ~~Create the GitHub App~~ — **already done** (installation 144561227). Skip.
+2. **Bind three secrets** on the signup-worker, from the EXISTING App's settings:
+   - `GITHUB_APP_ID` — the existing App's ID (GitHub → App settings)
+   - `GITHUB_APP_PRIVATE_KEY` (PKCS#8 PEM) — generate/download from the existing App
+   - `INSTALL_STATE_SIGNING_KEY` (HMAC key that signs `state=tenant_id` on install — a fresh
+     random value, not App-derived)
 3. **Ship the admin-ui "Install" button** (wire it to the mint-state → install redirect).
 
-All three are **server-worker / server-TL territory** — the server-TL is surfacing the exact
-steps to you as the runner-standalone go-live checklist. Your role: authorize + provide the
-App credentials when the App is created. Once done, a stranger can sign up → install → run
-`runs-on: corelink`.
+All three are **server-worker / server-TL territory** — the server-TL executes; your role is to
+authorize + provide the existing App's credentials (ID + a private key) from the App settings.
+**Open question relayed to the server-TL:** confirm the public self-serve install reuses the
+existing App (144561227) rather than expecting a new one. Once the 3 secrets are bound + the
+Install button ships, a stranger can sign up → install → run `runs-on: corelink`.
 
 ## 🧭 The product decision — the size taxonomy (blocks multi-size ONLY, not launch)
 
