@@ -32,7 +32,7 @@ jobs:
   # skip-safe pattern: with no token the publish jobs are genuinely SKIPPED.
   gate:
     name: Detect publish secrets
-    runs-on: [self-hosted, corelink-builder]
+    runs-on: ubuntu-latest
     outputs:
       has_npm: ${{ steps.detect.outputs.has_npm }}
       has_pypi: ${{ steps.detect.outputs.has_pypi }}
@@ -47,7 +47,7 @@ jobs:
 
   binary:
     name: Build + publish binary (aarch64-apple-darwin)
-    runs-on: [self-hosted, corelink-builder]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0  # v6.0.3
 
@@ -92,7 +92,7 @@ jobs:
 
   publish-npm:
     name: Publish @corelink/verify to npm
-    runs-on: [self-hosted, corelink-builder]
+    runs-on: ubuntu-latest
     # SAFE NO-OP: skipped entirely when NPM_TOKEN is absent (gate output is
     # 'false'). The owner opts in by adding NPM_TOKEN in repo Settings → Secrets.
     needs: gate
@@ -119,7 +119,7 @@ jobs:
 
   publish-pypi:
     name: Publish corelink-verify to PyPI
-    runs-on: [self-hosted, corelink-builder]
+    runs-on: ubuntu-latest
     # SAFE NO-OP: skipped entirely when PYPI_TOKEN is absent (gate output is
     # 'false'). The owner opts in by adding PYPI_TOKEN in repo Settings → Secrets.
     needs: gate

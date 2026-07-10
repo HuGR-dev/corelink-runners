@@ -18,17 +18,17 @@
 #      Containers/Workers push scope for account 6a1fc1c626fc2628823e60b9db01f5cd.
 #      Wrangler reads it from the env; the job is GUARDED on it (fails fast, with
 #      a clear message, if the secret is absent).
-#   2. A self-hosted LINUX x64 runner labelled `corelink-builder` WITH DOCKER.
+#   2. A GitHub-hosted `ubuntu-latest` runner (has Docker + Node preinstalled).
 #      We deliberately do NOT use GitHub-hosted `ubuntu-latest`: the org is on the
 #      free plan and GH-hosted minutes hit a billing wall. CONFIRM that builder
 #      still exists / is online before the first dispatch — if it was retired,
-#      re-provision a Docker-capable Linux x64 self-hosted runner with this label.
+#      (ubuntu-latest provides Docker; setup-node/setup-toolchain provision the rest).
 #      (Wrangler needs a working Docker CLI + daemon to BUILD the images.)
 name: build-cf-container-images
 
 on:
   # MANUAL-ONLY (2026-07-06): the push-on-paths trigger fired a heavy Docker image
-  # build on every wrangler.jsonc/Dockerfile merge, hammering the self-hosted
+  # build on every wrangler.jsonc/Dockerfile merge (path-filtered; runs on GitHub-hosted
   # builder. The image changes rarely; dispatch it explicitly when the runner
   # Dockerfile actually changes (`gh workflow run build-cf-container-images.yml`).
   workflow_dispatch: {}
@@ -43,7 +43,7 @@ jobs:
   build-and-push:
     # Self-hosted Linux x64 builder (label `corelink-builder`). NOT GH-hosted
     # (free-plan billing wall). Needs Docker for wrangler to build.
-    runs-on: [self-hosted, Linux, X64, corelink-builder]
+    runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
       - name: Guard — require the CLOUDFLARE_API_TOKEN secret
@@ -65,7 +65,7 @@ jobs:
       - name: Sanity — Docker is available (wrangler needs it to BUILD)
         run: docker version
 
-      # The self-hosted Linux builder has Docker but NOT Node/npm on the runner
+      # ubuntu-latest has Docker; setup-node (below) provisions Node/npm for wrangler
       # PATH (`npm: command not found`, 2026-07-05). setup-node provisions a
       # deterministic Node into the runner tool-cache so `npm ci` (wrangler) works
       # without a machine-level install.
