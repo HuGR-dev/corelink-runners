@@ -101,8 +101,15 @@
       // FAILS CLOSED if the mint is armed without FABRIC_PUBLIC_BASE_URL, so a
       // healthy boot now PROVES the redemption endpoint is wired. wrangler.jsonc
       // vars set FABRIC_PUBLIC_BASE_URL (above) + forward it into the container.
-      // Built via `wrangler containers build` (tag golive-20260709-credredemption).
-      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer@sha256:91f4b7ea8a9e01936951fba534d5b7bcbd52f51093961cf4d883eacf76e2880a",
+      // 2026-07-09 STAGE-C binary (ddad8014): adds the Stage-C fabricd changes —
+      // console read-APIs (/v1/usage plan_ceiling_vcpu_h #346, /v1/usage/history
+      // 12mo periods #346, /v1/leases box_ref #346), the /internal/v1/status ops
+      // aggregate (#347, default-off behind the observability key), and the revoke
+      // dead-404-arm cleanup (#350). All ADDITIVE / default-off — no live behavior
+      // change vs 91f4b7ea until the new surfaces are read/armed. The prior
+      // 91f4b7ea was the cred-redemption-fix binary (#332, validate_mint_arm boot
+      // guard). Built via `wrangler containers build` (tag golive-stagec-20260709).
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer@sha256:ddad80142fe59e0ba233e46c1b07e620b58abf14984e05069eb41e3083d442ef",
       // HTTP control plane. Bumped standard-1 → standard-2 (2026-07-07 acquire-storm
       // hardening): the single-flight singleton must keep /v1/health + lease ops
       // responsive under a burst of box provisions; 2 vCPU gives headroom so a few
