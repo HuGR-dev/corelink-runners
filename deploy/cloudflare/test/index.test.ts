@@ -20,6 +20,7 @@ import {
   decideRedeem,
   parseReconcilerRepos,
   installationIdForRepo,
+  matchManagedLabel,
   listOrphanRunnerJobs,
   listCompletedRunnerJobs,
   reconcileCompletedJobBilling,
@@ -365,6 +366,34 @@ describe("randomTicket / decideRedeem (env-0 MULTI-USE lease-scoped semantics)",
   });
 });
 
+describe("matchManagedLabel (the corelink label family gate)", () => {
+  it("family mode (unset): serves bare corelink + corelink-<suffix>, returns the matched label", () => {
+    expect(matchManagedLabel(["corelink"], undefined)).toBe("corelink");
+    expect(matchManagedLabel(["corelink-standard-4"], undefined)).toBe("corelink-standard-4");
+    expect(matchManagedLabel(["corelink-dogfood"], undefined)).toBe("corelink-dogfood");
+    // First matching family label wins across a multi-label job.
+    expect(matchManagedLabel(["self-hosted", "corelink-standard-8"], undefined)).toBe(
+      "corelink-standard-8",
+    );
+  });
+
+  it("family mode: a non-corelink label is not served", () => {
+    expect(matchManagedLabel(["ubuntu-latest"], undefined)).toBeNull();
+    expect(matchManagedLabel([], undefined)).toBeNull();
+    // `corelinkx` (no separator) is NOT a family member — must be bare or `corelink-`.
+    expect(matchManagedLabel(["corelinkx"], undefined)).toBeNull();
+  });
+
+  it("configured (override): EXACT match only — the operator safety valve", () => {
+    expect(matchManagedLabel(["corelink-dogfood"], "corelink-dogfood")).toBe("corelink-dogfood");
+    // With a pin set, the bare product label is NOT served (exact override).
+    expect(matchManagedLabel(["corelink"], "corelink-dogfood")).toBeNull();
+    expect(matchManagedLabel(["corelink-standard-4"], "corelink-dogfood")).toBeNull();
+    // Whitespace-only pin is treated as unset ⇒ family mode.
+    expect(matchManagedLabel(["corelink"], "   ")).toBe("corelink");
+  });
+});
+
 describe("re-drive reconciler (parseReconcilerRepos + listOrphanRunnerJobs)", () => {
   afterEach(() => vi.unstubAllGlobals());
 
@@ -406,7 +435,27 @@ describe("re-drive reconciler (parseReconcilerRepos + listOrphanRunnerJobs)", ()
       }),
     );
     const r = await listOrphanRunnerJobs({ GITHUB_MINT_TOKEN: "t" }, "o/r", LABEL, 90_000, NOW);
-    expect(r).toEqual(["111"]);
+    expect(r).toEqual([{ jobId: "111", label: LABEL }]);
+  });
+
+  it("family mode (configured undefined): serves bare `corelink` + `corelink-<size>`, carries the matched label", async () => {
+    vi.stubGlobal(
+      "fetch",
+      ghMock([{ id: 3, created_at: OLD }], {
+        3: [
+          { id: 301, status: "queued", runner_id: null, labels: ["corelink"] }, // product ✓
+          { id: 302, status: "queued", runner_id: null, labels: ["corelink-standard-4"] }, // size ✓
+          { id: 303, status: "queued", runner_id: null, labels: ["corelink-dogfood"] }, // dogfood ✓
+          { id: 304, status: "queued", runner_id: null, labels: ["ubuntu-latest"] }, // not ours ✗
+        ],
+      }),
+    );
+    const r = await listOrphanRunnerJobs({ GITHUB_MINT_TOKEN: "t" }, "o/r", undefined, 90_000, NOW);
+    expect(r).toEqual([
+      { jobId: "301", label: "corelink" },
+      { jobId: "302", label: "corelink-standard-4" },
+      { jobId: "303", label: "corelink-dogfood" },
+    ]);
   });
 
   it("skips runs INSIDE the grace window (don't race the webhook)", async () => {
