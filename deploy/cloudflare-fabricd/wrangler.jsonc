@@ -101,6 +101,16 @@
       // FAILS CLOSED if the mint is armed without FABRIC_PUBLIC_BASE_URL, so a
       // healthy boot now PROVES the redemption endpoint is wired. wrangler.jsonc
       // vars set FABRIC_PUBLIC_BASE_URL (above) + forward it into the container.
+      // 2026-07-09 OPS-BOOT-ARM binary (5f1d92db): adds the boot-time ops-surface
+      // arm-state log (#356) — one stderr line at every boot reporting whether
+      // FABRIC_OBSERVABILITY_KEY + FABRIC_ADMIN_KEY are armed (present/absent
+      // only, never the value), so a silently-unset ops key is self-evident in
+      // the container logs. This rollout ALSO activates the obs+admin secrets
+      // (set 2026-07-09) — the singleton container reads env only at boot, so a
+      // new image digest is the mechanism that picks up freshly-set secrets.
+      // Additive stderr line; no behavior change vs 5d0b6b33 (which added the
+      // golden counters #353). Built via `wrangler containers build` (tag
+      // ops-boot-arm-20260709).
       // 2026-07-09 OBSERVABILITY binary (5d0b6b33): adds the golden-signal
       // counters (#353) onto the /internal/v1/status aggregate — admission
       // outcomes + one counter per rejection reason, close, CAS PAT mint/revoke
@@ -113,7 +123,7 @@
       // ddad8014 was the Stage-C binary (console read-APIs #346 + status #347 +
       // revoke cleanup #350). Built via `wrangler containers build` (tag
       // golive-counters-20260709).
-      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer@sha256:5d0b6b333e663f64a7297c0308f58bd76ae2078f424d1ae53e0d66ab15a5c8fb",
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer@sha256:5f1d92db5838a25e9b765b05f9cf44d74b9c81417d27919280c3b1f29be5dc74",
       // HTTP control plane. Bumped standard-1 → standard-2 (2026-07-07 acquire-storm
       // hardening): the single-flight singleton must keep /v1/health + lease ops
       // responsive under a burst of box provisions; 2 vCPU gives headroom so a few
