@@ -517,9 +517,16 @@ impl<H: MintHttp> CasPatMint for HttpCasPatMint<H> {
                 .post(&url, &self.internal_token, None, &body)
                 .map_err(|_| MintError::Unreachable)?;
 
-            // Idempotent: 2xx OR 404 → Ok (the PAT may already be gone).
+            // Idempotent: 2xx → Ok. The server has NO 404 branch on this route
+            // (confirmed server-TL 2026-07-09): a re-revoke, an already-expired
+            // PAT, or an unknown/mismatched pat_id all match zero rows under the
+            // `revoked_at_ms IS NULL` guard and still return 200 — the
+            // idempotency is 200-on-no-op, never a 404. The former `| 404` arm
+            // was dead code; dropped. Anything non-2xx (incl. the STALE server's
+            // transitional 400 `owner_tenant required` until its catch-up PR
+            // lands) is a real failure → Err (loud, not a silent no-revoke).
             match resp.status {
-                200..=299 | 404 => Ok(()),
+                200..=299 => Ok(()),
                 _ => Err(MintError::Unreachable),
             }
         })
@@ -1132,14 +1139,33 @@ mod tests {
         c.revoke("pid-ok").await.expect("revoke 2xx must return Ok");
     }
 
-    // ── revoke: 404 → Ok (idempotent) ────────────────────────────────────────
-
+    // ── revoke: idempotency is 200-on-no-op (a re-revoke / already-gone PAT
+    // still returns 200 with zero rows matched) — NOT a 404. ─────────────────
     #[tokio::test]
-    async fn revoke_404_returns_ok_idempotent() {
-        let c = client(vec![status_resp(404)]);
+    async fn revoke_re_revoke_is_200_ok_idempotent() {
+        // The server matches zero rows under `revoked_at_ms IS NULL` and still
+        // returns 200 (confirmed server-TL 2026-07-09); the client maps it to Ok.
+        let c = client(vec![ok_body(r#"{"pat_id":"pid-gone","revoked":true}"#)]);
         c.revoke("pid-gone")
             .await
-            .expect("revoke 404 must return Ok (idempotent — PAT already gone)");
+            .expect("a re-revoke / already-gone PAT is a 200 no-op → Ok");
+    }
+
+    // ── revoke: a non-2xx (incl. the STALE server's transitional 400) → Err ──
+    #[tokio::test]
+    async fn revoke_non_2xx_is_err_loud_not_silent() {
+        // The former `| 404 → Ok` arm was dropped (the route has no 404 branch).
+        // Any non-2xx — including the stale server's 400 `owner_tenant required`
+        // until its catch-up PR lands — must surface as Err, never a silent
+        // no-revoke.
+        for status in [400_u16, 404, 500] {
+            let c = client(vec![status_resp(status)]);
+            let err = c
+                .revoke("pid-x")
+                .await
+                .expect_err("a non-2xx revoke must be a loud Err");
+            assert_eq!(err, MintError::Unreachable, "status {status} → Err");
+        }
     }
 
     // ── revoke: transport error → Err(Unreachable) ───────────────────────────
