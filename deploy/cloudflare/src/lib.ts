@@ -561,13 +561,47 @@ interface GhJob {
  * via queued RUNS (which carry created_at) → their jobs. Best-effort: any GitHub
  * error returns [] (the reconciler is a backstop, never itself a gate).
  */
+// The managed-label prefix + bare root — the CoreLink runner fleet's label
+// family. A job is served if it carries the bare `corelink` label OR any
+// `corelink-<suffix>` (which covers the internal `corelink-dogfood` AND the
+// product labels `corelink` / `corelink-<size>`). Kept a single source of truth
+// so the webhook gate + both reconciler scans agree on what "our fleet" means.
+export const MANAGED_LABEL_ROOT = "corelink";
+export const MANAGED_LABEL_PREFIX = "corelink-";
+
+/**
+ * The label THIS fleet serves for `jobLabels`, or `null` if none.
+ *
+ * - `configured` set (AUTOSCALER_LABEL) → EXACT match only (an explicit operator
+ *   override / safety valve: pin the fleet to one label). Backward-compatible
+ *   with the prior `labels.includes(AUTOSCALER_LABEL)` behaviour.
+ * - `configured` unset → the `corelink` FAMILY: the first job label that is the
+ *   bare root or `corelink-<suffix>`. This is why a real customer's
+ *   `runs-on: corelink` is served (the prior hard default `corelink-dogfood`
+ *   served ONLY dogfood — a product-label gap).
+ *
+ * Returns the MATCHED label so the caller mints the JIT runner with the exact
+ * label the job requested (so the ephemeral runner picks the job up).
+ */
+export function matchManagedLabel(
+  jobLabels: string[],
+  configured: string | undefined,
+): string | null {
+  const cfg = configured?.trim();
+  if (cfg) return jobLabels.includes(cfg) ? cfg : null;
+  for (const l of jobLabels) {
+    if (l === MANAGED_LABEL_ROOT || l.startsWith(MANAGED_LABEL_PREFIX)) return l;
+  }
+  return null;
+}
+
 export async function listOrphanRunnerJobs(
   env: ReconcilerEnv,
   repo: string,
-  label: string,
+  configured: string | undefined,
   minAgeMs: number,
   nowMs: number,
-): Promise<string[]> {
+): Promise<{ jobId: string; label: string }[]> {
   const gh = async (path: string): Promise<unknown> => {
     const r = await fetch(`https://api.github.com${path}`, {
       headers: {
@@ -583,14 +617,17 @@ export async function listOrphanRunnerJobs(
     const runs = (await gh(`/repos/${repo}/actions/runs?status=queued&per_page=30`)) as {
       workflow_runs?: GhRun[];
     };
-    const orphans: string[] = [];
+    const orphans: { jobId: string; label: string }[] = [];
     for (const run of runs.workflow_runs ?? []) {
       const age = nowMs - Date.parse(run.created_at);
       if (!Number.isFinite(age) || age < minAgeMs) continue; // too fresh: leave it to the webhook
       const jobs = (await gh(`/repos/${repo}/actions/runs/${run.id}/jobs`)) as { jobs?: GhJob[] };
       for (const j of jobs.jobs ?? []) {
-        if (j.status === "queued" && j.runner_id == null && (j.labels ?? []).includes(label)) {
-          orphans.push(String(j.id));
+        const matched = matchManagedLabel(j.labels ?? [], configured);
+        if (j.status === "queued" && j.runner_id == null && matched) {
+          // Carry the MATCHED label so the redrive mints the JIT runner with the
+          // exact label this job requested (family-aware, not a fixed default).
+          orphans.push({ jobId: String(j.id), label: matched });
         }
       }
     }
@@ -750,7 +787,7 @@ interface GhCompletedJob {
 export async function listCompletedRunnerJobs(
   env: ReconcilerEnv,
   repo: string,
-  label: string,
+  configured: string | undefined,
   lookbackMs: number,
   settleMs: number,
   nowMs: number,
@@ -776,7 +813,7 @@ export async function listCompletedRunnerJobs(
         jobs?: GhCompletedJob[];
       };
       for (const j of jobs.jobs ?? []) {
-        if (j.status !== "completed" || !(j.labels ?? []).includes(label)) continue;
+        if (j.status !== "completed" || !matchManagedLabel(j.labels ?? [], configured)) continue;
         const completedMs = j.completed_at ? Date.parse(j.completed_at) : NaN;
         const startedMs = j.started_at ? Date.parse(j.started_at) : NaN;
         if (!Number.isFinite(completedMs) || !Number.isFinite(startedMs)) continue;
@@ -806,7 +843,7 @@ export async function listCompletedRunnerJobs(
  */
 export async function reconcileCompletedJobBilling(
   env: BillingReconcileEnv,
-  label: string,
+  configured: string | undefined,
   nowMs: number,
 ): Promise<number> {
   const repos = parseReconcilerRepos(env.RECONCILER_REPOS);
@@ -825,7 +862,7 @@ export async function reconcileCompletedJobBilling(
     const jobs = await listCompletedRunnerJobs(
       env,
       repo,
-      label,
+      configured,
       BILLING_RECONCILE_LOOKBACK_MS,
       RECONCILE_MIN_AGE_MS,
       nowMs,

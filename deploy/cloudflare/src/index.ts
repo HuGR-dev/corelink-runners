@@ -58,6 +58,7 @@ import {
   decideRedeem,
   parseReconcilerRepos,
   installationIdForRepo,
+  matchManagedLabel,
   listOrphanRunnerJobs,
   reconcileCompletedJobBilling,
   RECONCILE_MIN_AGE_MS,
@@ -685,11 +686,15 @@ export default {
   // webhook path missed; each is independently default-off and wrapped so a
   // failure in one never blocks or throws out of the other.
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
-    const label = env.AUTOSCALER_LABEL ?? "corelink-dogfood";
+    // Family-aware (mirrors the webhook gate): the reconcilers scan for the
+    // `corelink` label family, not a fixed default, so an orphaned/unbilled
+    // `runs-on: corelink` customer job is recovered too. `AUTOSCALER_LABEL`, if
+    // set, pins to the exact label. Passed as the `configured` arg.
+    const configured = env.AUTOSCALER_LABEL;
     const now = Date.now();
-    await redriveOrphanedJobs(env, ctx, label, now);
+    await redriveOrphanedJobs(env, ctx, configured, now);
     try {
-      const pushed = await reconcileCompletedJobBilling(env, label, now);
+      const pushed = await reconcileCompletedJobBilling(env, configured, now);
       if (pushed > 0) {
         logEvent("info", "billing_reconcile_pushed", { count: pushed });
       }
@@ -755,9 +760,15 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         // tenant. Present on App-authed webhooks (required for the runner mint).
         installation?: { id?: number | string };
       };
-      const label = env.AUTOSCALER_LABEL ?? "corelink-dogfood";
+      // Serve the CoreLink managed-label FAMILY (bare `corelink` + `corelink-
+      // <suffix>`), not one hard-coded label. AUTOSCALER_LABEL, when set, pins to
+      // an exact label (operator override). The prior hard default
+      // `corelink-dogfood` served ONLY dogfood — a real customer's
+      // `runs-on: corelink` was dropped as "not our label". Mint with the MATCHED
+      // label so the ephemeral runner carries exactly what the job requested.
       const labels = evt.workflow_job?.labels ?? [];
-      if (!labels.includes(label)) {
+      const label = matchManagedLabel(labels, env.AUTOSCALER_LABEL);
+      if (!label) {
         return json({ ok: true, ignored: "not our label" }, 200);
       }
       // The stable correlation id across queued→completed for THIS job. The PAT
@@ -1157,15 +1168,17 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
 async function redriveOrphanedJobs(
   env: Env,
   ctx: ExecutionContext,
-  label: string,
+  configured: string | undefined,
   now: number,
 ): Promise<void> {
   const repos = parseReconcilerRepos(env.RECONCILER_REPOS);
   if (repos.length === 0) return; // opt-in: no allowlist ⇒ reconciler off
   if (!env.GITHUB_WEBHOOK_SECRET || !env.GITHUB_MINT_TOKEN) return; // autoscaler not configured
   for (const repo of repos) {
-    const orphans = await listOrphanRunnerJobs(env, repo, label, RECONCILE_MIN_AGE_MS, now);
-    for (const jobId of orphans) {
+    const orphans = await listOrphanRunnerJobs(env, repo, configured, RECONCILE_MIN_AGE_MS, now);
+    // Each orphan carries its OWN matched family label so the redrive mints the
+    // JIT with exactly what the job requested (family-aware).
+    for (const { jobId, label } of orphans) {
       // `listOrphanRunnerJobs` already proved this job is queued ≥ MIN_AGE,
       // labeled, and has NO runner — genuinely orphaned. A spawn claim can LEAK
       // when the background `driveSpawnGuarded` (waitUntil) is killed by the
