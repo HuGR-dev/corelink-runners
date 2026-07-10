@@ -80,39 +80,50 @@ describe("MetricsDO.bump / snapshot", () => {
   });
 });
 
-describe("GET /internal/v1/metrics (bearer-gated)", () => {
+describe("GET /internal/v1/metrics (dedicated obs-key gate, fail-closed)", () => {
   const ctx = { waitUntil: () => {}, passThroughOnException: () => {} } as unknown as ExecutionContext;
+  const OBS = "metrics-obs-key-001";
 
   function env(overrides: Partial<Env> = {}): Env {
     return { CLOUDFLARE_SPAWN_AUTH_TOKEN: "spawn-secret-001", ...overrides } as Env;
   }
 
-  it("401 without the bearer token", async () => {
+  function get(headers: Record<string, string> = {}) {
+    return new Request("https://w/internal/v1/metrics", { headers });
+  }
+
+  it("404 when the obs key is unset (invisible, default-off)", async () => {
+    const resp = await worker.fetch(get({ "x-corelink-internal-auth": OBS }), env(), ctx);
+    expect(resp.status).toBe(404);
+  });
+
+  it("401 with a missing header when the key is set", async () => {
+    const resp = await worker.fetch(get(), env({ METRICS_OBSERVABILITY_KEY: OBS }), ctx);
+    expect(resp.status).toBe(401);
+  });
+
+  it("401 with a wrong header", async () => {
     const resp = await worker.fetch(
-      new Request("https://w/internal/v1/metrics"),
-      env(),
+      get({ "x-corelink-internal-auth": "wrong" }),
+      env({ METRICS_OBSERVABILITY_KEY: OBS }),
       ctx,
     );
     expect(resp.status).toBe(401);
   });
 
-  it("401 with a wrong bearer token", async () => {
+  it("does NOT accept the spawn bearer token (separate auth domain)", async () => {
     const resp = await worker.fetch(
-      new Request("https://w/internal/v1/metrics", {
-        headers: { authorization: "Bearer wrong" },
-      }),
-      env(),
+      get({ authorization: "Bearer spawn-secret-001" }),
+      env({ METRICS_OBSERVABILITY_KEY: OBS }),
       ctx,
     );
     expect(resp.status).toBe(401);
   });
 
-  it("200 with the right bearer; METRICS binding absent ⇒ empty counters", async () => {
+  it("200 with the right key; METRICS binding absent ⇒ empty counters", async () => {
     const resp = await worker.fetch(
-      new Request("https://w/internal/v1/metrics", {
-        headers: { authorization: "Bearer spawn-secret-001" },
-      }),
-      env(), // no METRICS binding
+      get({ "x-corelink-internal-auth": OBS }),
+      env({ METRICS_OBSERVABILITY_KEY: OBS }), // no METRICS binding
       ctx,
     );
     expect(resp.status).toBe(200);

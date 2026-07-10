@@ -160,6 +160,10 @@ export interface Env {
   // absent ⇒ bumpMetrics is a no-op + GET /internal/v1/metrics returns {} (the
   // counters are additive/default-safe).
   METRICS?: DurableObjectNamespace<MetricsDO>;
+  // Dedicated observability key gating GET /internal/v1/metrics (X-Corelink-
+  // Internal-Auth). Default-off: unset ⇒ the route 404s. Separate from the
+  // spawn-control CLOUDFLARE_SPAWN_AUTH_TOKEN. `wrangler secret put`.
+  METRICS_OBSERVABILITY_KEY?: string;
   // The Worker's OWN public base URL, injected into the container as
   // CLW_FABRIC_ENDPOINT so clw redeems its cred-ticket here at boot. Its PRESENCE
   // enables env-0 (a single-use ticket is injected instead of CLW_TOKEN — the raw
@@ -705,12 +709,19 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
   const { pathname } = url;
 
     // ── GET /internal/v1/metrics — direct-fleet golden-signal snapshot ───────
-    // Bearer-gated with the SAME CLOUDFLARE_SPAWN_AUTH_TOKEN as the other
-    // internal endpoints (no new secret). Non-tenant, non-secret counts. The
-    // fabricd /internal/v1/status counters cover the check-exec/moat lease path;
-    // THIS covers the autoscaler/direct-fleet path the dogfood product runs on.
+    // Gated by a DEDICATED observability key (X-Corelink-Internal-Auth), mirroring
+    // fabricd's /internal/v1/status — NOT the shared CLOUDFLARE_SPAWN_AUTH_TOKEN
+    // (that's the spawn-CONTROL credential; ops-READ is a separate domain, and a
+    // shared secret can't be rotated for observability without breaking spawn).
+    // Default-off, fail-closed: key unset → 404 (invisible); header mismatch →
+    // 401; match → 200. Non-tenant, non-secret counts. The fabricd counters cover
+    // the check-exec/moat lease path; THIS covers the autoscaler/direct-fleet path
+    // the dogfood product runs on.
     if (request.method === "GET" && pathname === "/internal/v1/metrics") {
-      if (!authed(request, env)) return unauthorized();
+      const key = env.METRICS_OBSERVABILITY_KEY ?? "";
+      if (key.length === 0) return json({ error: "not found" }, 404);
+      const presented = request.headers.get("x-corelink-internal-auth") ?? "";
+      if (!safeEqual(presented, key)) return unauthorized();
       return json({ counters: await snapshotMetrics(env) }, 200);
     }
 
