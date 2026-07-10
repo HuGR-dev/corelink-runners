@@ -101,15 +101,19 @@
       // FAILS CLOSED if the mint is armed without FABRIC_PUBLIC_BASE_URL, so a
       // healthy boot now PROVES the redemption endpoint is wired. wrangler.jsonc
       // vars set FABRIC_PUBLIC_BASE_URL (above) + forward it into the container.
-      // 2026-07-09 STAGE-C binary (ddad8014): adds the Stage-C fabricd changes —
-      // console read-APIs (/v1/usage plan_ceiling_vcpu_h #346, /v1/usage/history
-      // 12mo periods #346, /v1/leases box_ref #346), the /internal/v1/status ops
-      // aggregate (#347, default-off behind the observability key), and the revoke
-      // dead-404-arm cleanup (#350). All ADDITIVE / default-off — no live behavior
-      // change vs 91f4b7ea until the new surfaces are read/armed. The prior
-      // 91f4b7ea was the cred-redemption-fix binary (#332, validate_mint_arm boot
-      // guard). Built via `wrangler containers build` (tag golive-stagec-20260709).
-      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer@sha256:ddad80142fe59e0ba233e46c1b07e620b58abf14984e05069eb41e3083d442ef",
+      // 2026-07-09 OBSERVABILITY binary (5d0b6b33): adds the golden-signal
+      // counters (#353) onto the /internal/v1/status aggregate — admission
+      // outcomes + one counter per rejection reason, close, CAS PAT mint/revoke
+      // attempt+failure, provision capacity-503, agent-exec started/done/failed,
+      // load-shed, trigger dedup, suspend. Each counter is a relaxed AtomicU64
+      // incremented at the seam (no lock, no alloc, no control-flow change); the
+      // DATA rides the SAME obs-key gate as the rest of /internal/v1/status
+      // (404 until FABRIC_OBSERVABILITY_KEY is set — it is, forwarded via #340).
+      // ADDITIVE / default-safe — no live behavior change vs ddad8014. The prior
+      // ddad8014 was the Stage-C binary (console read-APIs #346 + status #347 +
+      // revoke cleanup #350). Built via `wrangler containers build` (tag
+      // golive-counters-20260709).
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer@sha256:5d0b6b333e663f64a7297c0308f58bd76ae2078f424d1ae53e0d66ab15a5c8fb",
       // HTTP control plane. Bumped standard-1 → standard-2 (2026-07-07 acquire-storm
       // hardening): the single-flight singleton must keep /v1/health + lease ops
       // responsive under a burst of box provisions; 2 vCPU gives headroom so a few
