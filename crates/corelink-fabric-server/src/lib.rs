@@ -47,6 +47,9 @@ pub mod server;
 /// Lease-id → shard routing (multi-instance fabricd, option 3). FROZEN
 /// cross-language contract with `deploy/cloudflare-fabricd/src/shard.ts`.
 pub mod shard;
+/// Multi-size runner ladder — the `corelink-<size>` label → box-size resolver.
+/// INERT until activation (ratified design 2026-07-10); pure resolver, unwired.
+pub mod size;
 
 pub use ac_pre_lease::{AcPreLeaseHook, AcPreLeaseOutcome, MockAcHook, NoOpAcHook};
 pub use admission::{
