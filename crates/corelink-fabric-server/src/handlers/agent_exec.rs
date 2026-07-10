@@ -181,11 +181,13 @@ pub(crate) async fn agent_exec(
     // GET /agent-exec/{step_id} for the captured result. ──
     let step_id = state.mint_step_id();
     state.agent_step_begin(&step_id, &lease_id);
+    state.counters.agent_exec_started.incr();
 
     let argv = wrapped_argv(&req);
     let exec = state.exec.clone();
     let clock = state.clock.clone();
     let steps = state.agent_steps.clone();
+    let counters = state.counters.clone();
     let lease_for_task = lease_id.clone();
     let step_for_task = step_id.clone();
 
@@ -219,6 +221,14 @@ pub(crate) async fn agent_exec(
                 AgentStepState::Failed(format!("agent-exec failed; no result fabricated: {e:#}"))
             }
         };
+
+        // Golden-signal terminal counter (done vs failed). `new_state` here is
+        // only ever Done or Failed — Running is the pre-dispatch state.
+        match &new_state {
+            AgentStepState::Done(_) => counters.agent_exec_done.incr(),
+            AgentStepState::Failed(_) => counters.agent_exec_failed.incr(),
+            AgentStepState::Running => {}
+        }
 
         // The lease may have been torn down mid-exec (close/reaper GC'd the step
         // via forget_lease). Only update a step that STILL exists — never

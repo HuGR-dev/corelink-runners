@@ -108,4 +108,19 @@ async fn status_correct_header_is_200_with_report() {
         body["this_shard"].is_null(),
         "this_shard is null until a shard header is observed: {body}"
     );
+    // Golden-signal counters ride the aggregate: a fixed-shape object, all zero
+    // on a fresh harness (no acquire/close/mint has run).
+    let counters = &body["counters"];
+    assert!(counters.is_object(), "counters object present: {body}");
+    assert_eq!(
+        counters["leases_acquired"], 0,
+        "no lease acquired on a fresh harness"
+    );
+    assert_eq!(counters["acquire_rejected_over_cap"], 0);
+    assert_eq!(counters["mint_failures"], 0);
+    assert_eq!(counters["load_shed"], 0);
+    assert!(
+        counters.get("agent_exec_failed").is_some(),
+        "the fixed counter key set is serialized: {body}"
+    );
 }

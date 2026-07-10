@@ -331,6 +331,7 @@ pub(crate) async fn close(
         SlotEventKind::Released,
         released_rec.billing_acquired_at_ms,
     );
+    state.counters.leases_closed.incr();
 
     // GC the fabric-internal side tables (`images` + the ADR-0007
     // `runner_leases` marker) for this now-terminal lease. The reaper's

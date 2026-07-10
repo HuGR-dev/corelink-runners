@@ -34,6 +34,9 @@ pub mod envelope_inject;
 pub mod exec;
 pub mod handlers;
 pub mod ingest_token;
+/// Golden-signal counters (Stage-C observability) — a lock-free, always-on
+/// operational metric surface exposed via `GET /internal/v1/status`.
+pub mod observability;
 pub mod quota_headroom;
 pub mod reaper;
 pub mod runner_broker;

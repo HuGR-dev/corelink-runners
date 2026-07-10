@@ -296,6 +296,7 @@ pub(crate) async fn acquire(
     // gate stops new ones). Same no-oracle 403 shape whether the tenant is
     // suspended or not — an over-cap-style refusal, never an existence oracle.
     if state.is_tenant_suspended(&tenant) {
+        state.counters.acquire_rejected_suspended.incr();
         return error_response(
             ApiError::OverCap,
             "tenant is suspended: acquire is disabled (contact the operator)",
@@ -320,6 +321,7 @@ pub(crate) async fn acquire(
     // request never consumes admission or a concurrency slot. Default-off: with
     // no broker, runner mode is simply unavailable on this fabric. ──
     if req.runner.is_some() && state.runner_broker.is_none() {
+        state.counters.acquire_rejected_bad_request.incr();
         return error_response(
             ApiError::Invalid,
             "runner mode is not enabled on this fabric (no runner registration broker configured)",
@@ -335,6 +337,7 @@ pub(crate) async fn acquire(
     // slot is reserved, never a silently-doomed runner box. A CHECK lease is
     // unaffected (it fails closed at exec via the empty registry). ──
     if req.runner.is_some() && !state.provisioner.binds_boxes() {
+        state.counters.acquire_rejected_bad_request.incr();
         return error_response(
             ApiError::Invalid,
             "runner mode requires a cloud box backend, but none is configured \
@@ -350,6 +353,7 @@ pub(crate) async fn acquire(
     //  (b) Requires a real box backend — the no-op provisioner would admit a
     //      doomed agent box that never binds, so reject 400 rather than hang.
     if req.agent.is_some() && req.runner.is_some() {
+        state.counters.acquire_rejected_bad_request.incr();
         return error_response(
             ApiError::Invalid,
             "agent mode and runner mode are mutually exclusive: set at most one of \
@@ -357,6 +361,7 @@ pub(crate) async fn acquire(
         );
     }
     if req.agent.is_some() && !state.provisioner.binds_boxes() {
+        state.counters.acquire_rejected_bad_request.incr();
         return error_response(
             ApiError::Invalid,
             "agent mode requires a cloud box backend, but none is configured \
@@ -438,6 +443,7 @@ pub(crate) async fn acquire(
     let plan = match plan_resolved {
         Ok(Ok(Some(p))) => p,
         Ok(Ok(None)) => {
+            state.counters.acquire_rejected_over_cap.incr();
             return error_response(
                 ApiError::OverCap,
                 "no plan on file for tenant: zero concurrency slots",
@@ -471,6 +477,7 @@ pub(crate) async fn acquire(
             .iter()
             .any(|entry| entry.trim().to_lowercase() == target);
         if !permitted {
+            state.counters.acquire_rejected_bad_request.incr();
             return error_response(
                 ApiError::Invalid,
                 "runner target not permitted for this tenant",
@@ -542,6 +549,7 @@ pub(crate) async fn acquire(
             // Every acquire attempt counts toward the ceiling, admitted or not.
             window.push(now_ms);
             if over_rate {
+                state.counters.acquire_rejected_rate.incr();
                 return error_response(
                     ApiError::OverCap,
                     "acquire rate ceiling reached: rejected preventively, before any box/VM",
@@ -606,7 +614,10 @@ pub(crate) async fn acquire(
         };
         let mut spec = match spec_result {
             Ok(s) => s,
-            Err(e) => return error_response(ApiError::Invalid, &format!("lease rejected: {e:#}")),
+            Err(e) => {
+                state.counters.acquire_rejected_invalid_image.incr();
+                return error_response(ApiError::Invalid, &format!("lease rejected: {e:#}"));
+            }
         };
 
         // ── §13.2 box injection (WP-TURNFEED + WP-INGEST-SCOPE): so the in-box
@@ -699,6 +710,7 @@ pub(crate) async fn acquire(
                 // across the await).
                 match state.admission_mode {
                     AdmissionMode::Reject => {
+                        state.counters.acquire_rejected_over_cap.incr();
                         return error_response(
                             ApiError::OverCap,
                             "concurrency cap reached: rejected preventively, before any box/VM",
@@ -719,6 +731,7 @@ pub(crate) async fn acquire(
             // park the acquire until a timeout it can never beat. Reject outright,
             // in BOTH admission modes. ──
             Ok(AdmitOutcome::OverCompute) => {
+                state.counters.acquire_rejected_compute_ceiling.incr();
                 return error_response(
                     ApiError::OverCap,
                     "monthly compute ceiling reached; upgrade tier",
@@ -759,6 +772,7 @@ pub(crate) async fn acquire(
                 // re-enqueue is in the admission tick). So both must revoke the
                 // minted PAT (A7b) before returning the distinct capacity-503.
                 FinalizeOutcome::CapacityError => {
+                    state.counters.provision_capacity_503.incr();
                     state.revoke_pat_for(&lease_id).await;
                     match state.admission_mode {
                         AdmissionMode::Queue => capacity_exhausted_503(),
@@ -904,6 +918,7 @@ pub(crate) async fn finalize_admitted_lease(
             state.revoke_pat_for(&lease_id).await;
             // Use the lease expiry (already F1-clamped) as the deadline bound (A7b).
             let lease_deadline_ms = lease.expiry;
+            state.counters.mint_attempts.incr();
             match mint
                 .mint(
                     repo_full_name,
@@ -964,6 +979,7 @@ pub(crate) async fn finalize_admitted_lease(
                     // critical path — a failing mint must be LOUD server-side (a
                     // silent fail-closed here hid a live token_plaintext response
                     // drift for a whole deploy). Log it (no secret in `e`).
+                    state.counters.mint_failures.incr();
                     eprintln!(
                         "moat-mint FAILED for lease {lease_id} (tenant {}, repo {:?}): {e} \
                          — failing closed, no box provisioned",
@@ -1083,6 +1099,7 @@ pub(crate) async fn finalize_admitted_lease(
                     // Held is committed. Emit Acquired BEFORE the lock drops so
                     // it strictly precedes any possible reclaim event.
                     state.record_slot(&lease_id, tenant, SlotEventKind::Acquired);
+                    state.counters.leases_acquired.incr();
                     None // success — guard drops here at end of block
                 }
                 // `ledger` (MutexGuard) is dropped here in every path
@@ -1322,6 +1339,7 @@ pub(crate) async fn cancel(
     // consistent with the reaper's crash-reclamation non-goal.
     if let Some(id) = emit_released {
         state.record_slot(&id, &tenant, SlotEventKind::Released);
+        state.counters.leases_closed.incr();
 
         // ── CANCEL-TEARDOWN (audit fix): a real Held→Released transition must
         // reclaim the box + BoxRegistry entry, exactly as `close.rs` does —

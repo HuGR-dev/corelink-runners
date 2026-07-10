@@ -26,6 +26,7 @@ use serde::Serialize;
 
 use crate::app::AppState;
 use crate::handlers::occupancy::{INTERNAL_AUTH_HEADER, secret_matches};
+use crate::observability::CounterSnapshot;
 
 /// The internal route path — a sibling of `OCCUPANCY_PATH`, same auth gate.
 pub(crate) const STATUS_PATH: &str = "/internal/v1/status";
@@ -51,6 +52,11 @@ pub(crate) struct StatusReport {
     /// The configured shard count this instance believes it is part of
     /// (`1` = the inert singleton).
     num_shards: u32,
+    /// Golden-signal counters since boot (admission outcomes, close,
+    /// mint/revoke, agent-exec, load-shed, suspend). Monotonic; a monitor diffs
+    /// snapshots over time for rates. Reset on restart (like the in-memory
+    /// ledger). See [`crate::observability`].
+    counters: CounterSnapshot,
 }
 
 /// `GET /internal/v1/status` — the readiness/version aggregate. Same
@@ -83,6 +89,7 @@ pub(crate) async fn status(State(state): State<AppState>, headers: HeaderMap) ->
         ledger_cross_instance_safe: state.ledger_is_cross_instance_safe(),
         this_shard,
         num_shards,
+        counters: state.counters.snapshot(),
     })
     .into_response()
 }
