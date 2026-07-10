@@ -31,19 +31,26 @@ the signup-worker's public self-serve install callback (a different credential s
 runner-side `GITHUB_MINT_TOKEN` the dogfood fleet uses — the callback signs App JWTs, so it
 needs the App's ID + private key):
 
-1. ~~Create the GitHub App~~ — **already done** (installation 144561227). Skip.
-2. **Bind three secrets** on the signup-worker, from the EXISTING App's settings:
-   - `GITHUB_APP_ID` — the existing App's ID (GitHub → App settings)
-   - `GITHUB_APP_PRIVATE_KEY` (PKCS#8 PEM) — generate/download from the existing App
-   - `INSTALL_STATE_SIGNING_KEY` (HMAC key that signs `state=tenant_id` on install — a fresh
-     random value, not App-derived)
-3. **Ship the admin-ui "Install" button** (wire it to the mint-state → install redirect).
+**Server-TL CONFIRMED (2026-07-10): reuse App 144561227 — the signup-worker's flow already
+supports any App (it reads `GITHUB_APP_ID`/`GITHUB_APP_PRIVATE_KEY`, no distinct-App
+assumption). Thread closed.** The reconciled operator residual, on the EXISTING App's GitHub
+settings — no App creation, no manifest flow:
 
-All three are **server-worker / server-TL territory** — the server-TL executes; your role is to
-authorize + provide the existing App's credentials (ID + a private key) from the App settings.
-**Open question relayed to the server-TL:** confirm the public self-serve install reuses the
-existing App (144561227) rather than expecting a new one. Once the 3 secrets are bound + the
-Install button ships, a stranger can sign up → install → run `runs-on: corelink`.
+1. ~~Create the GitHub App~~ — **already done** (installation 144561227). Skip.
+2. **Generate a private key** (PKCS#8 PEM) in App 144561227's settings → bind it as
+   `GITHUB_APP_PRIVATE_KEY` + bind its App id as `GITHUB_APP_ID` on the signup-worker.
+3. **Set the App's `setup_url`** → the signup-worker's `/install/github/callback`. This is
+   the ONE App-settings change reuse needs — the dogfood path never used the callback, so
+   `setup_url` is likely unset today. (This is what makes a public install redirect to the
+   callback that verifies `state→tenant` and writes `tenant_gh_installation_map` +
+   `runner_repo_allowlist`.)
+4. **Bind a fresh `INSTALL_STATE_SIGNING_KEY`** on the signup-worker (the admin-ui mint ↔
+   signup-worker verify pair is already coded + tested) **and enable the admin-ui "Install"
+   button** (a ship/enable, not a build).
+
+All server-worker / server-TL territory — the server-TL executes; your role is to **provide
+the existing App's id + a generated private key from its settings, and set its `setup_url`**.
+Once done, a stranger can sign up → install → run `runs-on: corelink`.
 
 ## 🧭 The product decision — the size taxonomy (blocks multi-size ONLY, not launch)
 
