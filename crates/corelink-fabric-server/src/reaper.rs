@@ -539,6 +539,7 @@ pub async fn reap_once(state: &crate::AppState) -> usize {
                     SlotEventKind::Expired,
                     rec.billing_acquired_at_ms,
                 );
+                state.counters.leases_expired.incr();
 
                 reaped += 1;
             }
@@ -762,6 +763,7 @@ pub async fn surface_crashes(state: &crate::AppState) -> usize {
                 SlotEventKind::Crashed,
                 rec.billing_acquired_at_ms,
             );
+            state.counters.leases_crashed.incr();
 
             reaped += 1;
         }

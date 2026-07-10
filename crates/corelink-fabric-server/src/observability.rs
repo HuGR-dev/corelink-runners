@@ -83,6 +83,14 @@ pub struct Counters {
     // ── Lifecycle ────────────────────────────────────────────────────────────
     /// Leases closed / cancelled (Held→Released, box torn down).
     pub leases_closed: Counter,
+    /// Leases the reaper reclaimed at their deadline (Held→Expired) — the client
+    /// never sent close. A rising rate vs `leases_closed` means clients are
+    /// abandoning leases (crash/timeout) instead of closing cleanly.
+    pub leases_expired: Counter,
+    /// Leases reclaimed by the crash sweep (Held→Crashed) — a box probed
+    /// authoritatively-Dead before its deadline. Distinct from the deadline
+    /// backstop (`leases_expired`).
+    pub leases_crashed: Counter,
     /// Provision returned capacity-exhausted → acquire 503 (box backend full).
     pub provision_capacity_503: Counter,
 
@@ -127,6 +135,8 @@ impl Counters {
             acquire_rejected_compute_ceiling: self.acquire_rejected_compute_ceiling.get(),
             acquire_rejected_lease_invalid: self.acquire_rejected_lease_invalid.get(),
             leases_closed: self.leases_closed.get(),
+            leases_expired: self.leases_expired.get(),
+            leases_crashed: self.leases_crashed.get(),
             provision_capacity_503: self.provision_capacity_503.get(),
             mint_attempts: self.mint_attempts.get(),
             mint_failures: self.mint_failures.get(),
@@ -156,6 +166,8 @@ pub struct CounterSnapshot {
     pub acquire_rejected_compute_ceiling: u64,
     pub acquire_rejected_lease_invalid: u64,
     pub leases_closed: u64,
+    pub leases_expired: u64,
+    pub leases_crashed: u64,
     pub provision_capacity_503: u64,
     pub mint_attempts: u64,
     pub mint_failures: u64,
@@ -189,12 +201,15 @@ mod tests {
         counters.acquire_rejected_over_cap.incr();
         counters.acquire_rejected_over_cap.incr();
         counters.mint_failures.incr();
+        counters.leases_expired.incr();
         let snap = counters.snapshot();
         assert_eq!(snap.leases_acquired, 1);
         assert_eq!(snap.acquire_rejected_over_cap, 2);
         assert_eq!(snap.mint_failures, 1);
+        assert_eq!(snap.leases_expired, 1);
         // Untouched counters are zero.
         assert_eq!(snap.leases_closed, 0);
+        assert_eq!(snap.leases_crashed, 0);
         assert_eq!(snap.revoke_failures, 0);
     }
 
