@@ -19,6 +19,17 @@ short **operator launch step** + one **product decision**. This is the whole lis
   `repo_allowlist` from the repos the customer grants. (The empty-allowlist silent-block I
   worried about **cannot happen** on the install path.)
 
+## ✅ UPDATE 2026-07-10 — the credential binding is DONE (verified)
+
+`wrangler secret list --name corelink-signup-worker` (read-only) confirms **all three secrets
+are already bound**: `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `INSTALL_STATE_SIGNING_KEY`
+(+ `GITHUB_APP_SETUP_TOKEN`, `GITHUB_APP_WEBHOOK_SECRET`). An external probe of
+`corelink-signup.humangr.com/install/github/callback` confirms it's **live + verifying state**
+(403 on a forged state, not the inert-503) — so the signup-worker side is ARMED. The owner
+already did this pass. **The steps below are RETAINED for the record but are largely DONE.**
+Remaining to confirm (owner-UI-only, can't be API-probed): the App's `setup_url` points at the
+callback, the admin-ui Install button is enabled, and one real end-to-end test-install.
+
 ## 🔧 The launch step — operator, NOT code (server-TL owns the code; you provide the inputs)
 
 This is the ONE thing between here and a cold external signup.
