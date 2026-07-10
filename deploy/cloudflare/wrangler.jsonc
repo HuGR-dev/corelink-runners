@@ -70,13 +70,18 @@
       // env-0 cred-stash: the single-use latch for the per-job CAS PAT (one DO
       // instance per lease_id = GH jobId). A plain DO (not a Container), so it is
       // NOT a container-image class — just DO storage.
-      { "name": "CRED_STASH", "class_name": "CredStashDO" }
+      { "name": "CRED_STASH", "class_name": "CredStashDO" },
+      // Golden-signal counters for the direct fleet (src/metrics.ts). ONE
+      // singleton DO holds the durable counter map; the autoscaler bumps it at
+      // each lifecycle seam and GET /internal/v1/metrics reads the snapshot.
+      { "name": "METRICS", "class_name": "MetricsDO" }
     ]
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["RunnerContainer"] },
     { "tag": "v2", "new_sqlite_classes": ["CheckHostContainer"] },
-    { "tag": "v3", "new_sqlite_classes": ["CredStashDO"] }
+    { "tag": "v3", "new_sqlite_classes": ["CredStashDO"] },
+    { "tag": "v4", "new_sqlite_classes": ["MetricsDO"] }
   ],
 
   // The runner container. IMPORTANT (ADR-0008 / README wrinkle #1): the image is

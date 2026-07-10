@@ -67,6 +67,12 @@ import {
   type StashRecord,
   type CredStashLike,
 } from "./lib";
+import { bumpMetrics, snapshotMetrics, MetricsDO } from "./metrics";
+
+// Re-export the counter Durable Object so wrangler resolves `MetricsDO` from
+// this main module (its class + migration are in wrangler.jsonc). Defined in
+// ./metrics.ts to keep the counter surface self-contained.
+export { MetricsDO };
 
 export interface Env {
   RUNNER_CONTAINER: DurableObjectNamespace<RunnerContainer>;
@@ -150,6 +156,10 @@ export interface Env {
   // ── env-0 (cred-ticket) — keep the CAS PAT OUT of the untrusted container env ──
   // The single-use stash latch (one DO instance per lease_id = GH jobId).
   CRED_STASH: DurableObjectNamespace<CredStashDO>;
+  // Golden-signal counters for the direct fleet (src/metrics.ts). Optional:
+  // absent ⇒ bumpMetrics is a no-op + GET /internal/v1/metrics returns {} (the
+  // counters are additive/default-safe).
+  METRICS?: DurableObjectNamespace<MetricsDO>;
   // The Worker's OWN public base URL, injected into the container as
   // CLW_FABRIC_ENDPOINT so clw redeems its cred-ticket here at boot. Its PRESENCE
   // enables env-0 (a single-use ticket is injected instead of CLW_TOKEN — the raw
@@ -603,6 +613,7 @@ async function driveSpawn(
   const mint = await buildContainerEnv(env, { jobId, repoFullName: repo, installationId }, env0);
   if (mint.authz === "forbidden") {
     await releaseSpawnClaim(env.RUNNER_JOB_PATS, jobId);
+    await bumpMetrics(env, "spawn_forbidden");
     logEvent("error", "mint_forbidden", { jobId, repo });
     return;
   }
@@ -611,6 +622,7 @@ async function driveSpawn(
     const admitted = await acquireTenantSlot(env.RUNNER_JOB_PATS, mint.tenant, jobId, mint.maxConcurrency);
     if (!admitted) {
       await releaseSpawnClaim(env.RUNNER_JOB_PATS, jobId);
+      await bumpMetrics(env, "spawn_at_ceiling");
       logEvent("info", "tenant_at_ceiling", { jobId, tenant: mint.tenant, maxConcurrency: mint.maxConcurrency });
       return;
     }
@@ -618,7 +630,9 @@ async function driveSpawn(
   // Authorized ⇒ mint the GitHub JIT and spawn.
   try {
     const jit = await mintJit(env, repo, label);
+    await bumpMetrics(env, "jit_minted");
     await spawnRunner(env, jit, jobId, mint);
+    await bumpMetrics(env, "runner_spawned");
   } catch (e) {
     // Release the concurrency slot on a spawn failure (the guard releases the claim).
     if (mint.tenant) await releaseTenantSlot(env.RUNNER_JOB_PATS, mint.tenant, jobId);
@@ -636,6 +650,7 @@ async function driveSpawnGuarded(
     await driveSpawn(env, opts);
   } catch (e) {
     await releaseSpawnClaim(env.RUNNER_JOB_PATS, opts.jobId);
+    await bumpMetrics(env, "spawn_failed");
     logEvent("error", "spawn_drive_failed", { jobId: opts.jobId, error: (e as Error).message });
   }
 }
@@ -688,6 +703,16 @@ export default {
 async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const url = new URL(request.url);
   const { pathname } = url;
+
+    // ── GET /internal/v1/metrics — direct-fleet golden-signal snapshot ───────
+    // Bearer-gated with the SAME CLOUDFLARE_SPAWN_AUTH_TOKEN as the other
+    // internal endpoints (no new secret). Non-tenant, non-secret counts. The
+    // fabricd /internal/v1/status counters cover the check-exec/moat lease path;
+    // THIS covers the autoscaler/direct-fleet path the dogfood product runs on.
+    if (request.method === "GET" && pathname === "/internal/v1/metrics") {
+      if (!authed(request, env)) return unauthorized();
+      return json({ counters: await snapshotMetrics(env) }, 200);
+    }
 
     // ── POST /webhook (GitHub autoscaler) — HMAC-authed, NOT bearer ──────────
     // A queued workflow_job with our label ⇒ mint a JIT + spawn a runner. This
@@ -765,6 +790,13 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         // on file (legacy/cold job, or a KV miss) ⇒ sleepAfter is the backstop; a
         // destroy() throw is swallowed (idempotent teardown, deadline backstop).
         const tornDown = await teardownCompletedRunner(env, jobId);
+        // Golden signals for the completion leg (fire-and-forget; never delays
+        // the GitHub webhook response).
+        const completedSignals = ["webhook_job_completed"];
+        if (revoked) completedSignals.push("cas_pat_revoked");
+        if (billed) completedSignals.push("billing_pushed");
+        if (tornDown) completedSignals.push("runner_torn_down");
+        ctx?.waitUntil?.(bumpMetrics(env, ...completedSignals));
         return json({ ok: true, revoked, billed, tornDown, job_id: jobId }, 200);
       }
 
@@ -775,7 +807,10 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       // secret). Ignored events above are free; only queued+labeled jobs count.
       if (env.WEBHOOK_LIMITER) {
         const { success } = await env.WEBHOOK_LIMITER.limit({ key: "spawn" });
-        if (!success) return json({ error: "rate limited" }, 429);
+        if (!success) {
+          ctx?.waitUntil?.(bumpMetrics(env, "webhook_rate_limited"));
+          return json({ error: "rate limited" }, 429);
+        }
       }
       // The repo is the webhook's repository (full_name).
       const repo = evt.repository?.full_name ?? "";
@@ -812,6 +847,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       // COGS. Fail-open when no KV is bound (dedup is an optimization, never a
       // gate that refuses a real job).
       if (!(await claimSpawn(env.RUNNER_JOB_PATS, jobId))) {
+        ctx?.waitUntil?.(bumpMetrics(env, "webhook_spawn_deduped"));
         return json({ ok: true, deduped: true, job_id: jobId }, 200);
       }
       // Respond to GitHub FAST (202) and do the mint+spawn in the BACKGROUND:
@@ -825,6 +861,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       // webhook timeout when a DO start hangs on a transient reset (2026-07-03).
       // The guard releases the claim on failure so a redelivery / the scheduled
       // reconciler can re-drive the job (never a silent orphan).
+      ctx?.waitUntil?.(bumpMetrics(env, "webhook_spawn_claimed"));
       ctx.waitUntil(driveSpawnGuarded(env, { jobId, repo, installationId, label }));
       return json({ ok: true, spawning: true, job_id: jobId }, 202);
     }
