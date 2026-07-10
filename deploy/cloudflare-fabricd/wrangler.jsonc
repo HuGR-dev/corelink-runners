@@ -101,6 +101,12 @@
       // FAILS CLOSED if the mint is armed without FABRIC_PUBLIC_BASE_URL, so a
       // healthy boot now PROVES the redemption endpoint is wired. wrangler.jsonc
       // vars set FABRIC_PUBLIC_BASE_URL (above) + forward it into the container.
+      // 2026-07-10 REAPER-COVERAGE binary (205494de): adds leases_expired +
+      // leases_crashed golden counters (#359) — the always-on reaper's terminal
+      // reclaims (Held→Expired at deadline, Held→Crashed on dead box) were
+      // uncounted, so an abandon-rate rise was invisible. Additive; no behavior
+      // change vs 5f1d92db. Built via `wrangler containers build` (tag
+      // counters-reaper-20260710).
       // 2026-07-09 OPS-BOOT-ARM binary (5f1d92db): adds the boot-time ops-surface
       // arm-state log (#356) — one stderr line at every boot reporting whether
       // FABRIC_OBSERVABILITY_KEY + FABRIC_ADMIN_KEY are armed (present/absent
@@ -123,7 +129,7 @@
       // ddad8014 was the Stage-C binary (console read-APIs #346 + status #347 +
       // revoke cleanup #350). Built via `wrangler containers build` (tag
       // golive-counters-20260709).
-      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer@sha256:5f1d92db5838a25e9b765b05f9cf44d74b9c81417d27919280c3b1f29be5dc74",
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer@sha256:205494dea70ffd81e4f5b1fa955c15b1cfd12f286de10e766bd6b783f7290b51",
       // HTTP control plane. Bumped standard-1 → standard-2 (2026-07-07 acquire-storm
       // hardening): the single-flight singleton must keep /v1/health + lease ops
       // responsive under a burst of box provisions; 2 vCPU gives headroom so a few
