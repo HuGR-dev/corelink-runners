@@ -1250,6 +1250,23 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
     // FABRIC_ADMIN_KEY as the tenant-plan admin). Absent ⇒ the suspend routes 404.
     let state = state.with_admin_key(cfg.admin_key.as_deref().map(std::sync::Arc::from));
 
+    // OPS boot summary: which operator surfaces are ARMED at this boot. Both are
+    // default-off (absent ⇒ 404), and a "dark" ops surface is invisible to a
+    // probe by design — so a live-verify found both keys silently unset for a
+    // whole deploy. Log the arm state (present/absent ONLY — never the value) at
+    // every boot so the dark-surface condition is self-evident in the container
+    // logs instead of requiring a `wrangler secret list`. Non-secret, non-tenant.
+    eprintln!(
+        "ops-surfaces armed at boot: observability={} (GET /internal/v1/status,/occupancy), \
+         admin={} (POST /internal/v1/admin/tenants/*/suspend)",
+        if cfg.observability_key.is_some() {
+            "ON"
+        } else {
+            "off"
+        },
+        if cfg.admin_key.is_some() { "ON" } else { "off" },
+    );
+
     // WP-8a: wire the CAS PAT mint from the environment (default-off: both
     // CORELINK_RUNNER_MINT_{AUTH_KEY,URL} absent ⇒ None ⇒ moat OFF, byte-identical
     // to before). Boot fails LOUD (the `?`) on an armed-but-misconfigured mint —
