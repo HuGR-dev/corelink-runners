@@ -20,7 +20,7 @@ import {
   decideRedeem,
   parseReconcilerRepos,
   installationIdForRepo,
-  matchManagedLabel,
+  matchManagedLabels,
   listOrphanRunnerJobs,
   listCompletedRunnerJobs,
   reconcileCompletedJobBilling,
@@ -366,31 +366,52 @@ describe("randomTicket / decideRedeem (env-0 MULTI-USE lease-scoped semantics)",
   });
 });
 
-describe("matchManagedLabel (the corelink label family gate)", () => {
-  it("family mode (unset): serves bare corelink + corelink-<suffix>, returns the matched label", () => {
-    expect(matchManagedLabel(["corelink"], undefined)).toBe("corelink");
-    expect(matchManagedLabel(["corelink-standard-4"], undefined)).toBe("corelink-standard-4");
-    expect(matchManagedLabel(["corelink-dogfood"], undefined)).toBe("corelink-dogfood");
-    // First matching family label wins across a multi-label job.
-    expect(matchManagedLabel(["self-hosted", "corelink-standard-8"], undefined)).toBe(
+describe("matchManagedLabels (subset-gated corelink family)", () => {
+  it("family mode (unset): serves bare corelink + corelink-<suffix>, returns the full servable set", () => {
+    expect(matchManagedLabels(["corelink"], undefined)).toEqual(["corelink"]);
+    expect(matchManagedLabels(["corelink-standard-4"], undefined)).toEqual(["corelink-standard-4"]);
+    expect(matchManagedLabels(["corelink-dogfood"], undefined)).toEqual(["corelink-dogfood"]);
+    // `self-hosted` is a passthrough — the job is served, mint only the corelink label.
+    expect(matchManagedLabels(["self-hosted", "corelink-standard-8"], undefined)).toEqual([
       "corelink-standard-8",
-    );
+    ]);
   });
 
-  it("family mode: a non-corelink label is not served", () => {
-    expect(matchManagedLabel(["ubuntu-latest"], undefined)).toBeNull();
-    expect(matchManagedLabel([], undefined)).toBeNull();
+  it("SUBSET gate: a job that ALSO needs a non-corelink label is REFUSED (no thrash)", () => {
+    // `gpu` is a runner we don't provide → refuse (minting a corelink-only runner
+    // would never be assigned, orphaning the job + thrashing the reconciler).
+    expect(matchManagedLabels(["corelink", "gpu"], undefined)).toBeNull();
+    expect(matchManagedLabels(["corelink-standard-4", "windows"], undefined)).toBeNull();
+  });
+
+  it("RESERVED: corelink-builder (persistent pool) is NEVER served — no race, no poach", () => {
+    expect(matchManagedLabels(["corelink-builder"], undefined)).toBeNull();
+    // A job trying to combine the product label with the reserved builder label is
+    // refused entirely (can't mint an ephemeral advertising corelink-builder).
+    expect(matchManagedLabels(["corelink", "corelink-builder"], undefined)).toBeNull();
+  });
+
+  it("non-corelink / empty / near-miss are not served", () => {
+    expect(matchManagedLabels(["ubuntu-latest"], undefined)).toBeNull();
+    expect(matchManagedLabels([], undefined)).toBeNull();
     // `corelinkx` (no separator) is NOT a family member — must be bare or `corelink-`.
-    expect(matchManagedLabel(["corelinkx"], undefined)).toBeNull();
+    expect(matchManagedLabels(["corelinkx"], undefined)).toBeNull();
   });
 
-  it("configured (override): EXACT match only — the operator safety valve", () => {
-    expect(matchManagedLabel(["corelink-dogfood"], "corelink-dogfood")).toBe("corelink-dogfood");
-    // With a pin set, the bare product label is NOT served (exact override).
-    expect(matchManagedLabel(["corelink"], "corelink-dogfood")).toBeNull();
-    expect(matchManagedLabel(["corelink-standard-4"], "corelink-dogfood")).toBeNull();
+  it("configured (override): EXACT pin (+ passthrough) only — the operator safety valve", () => {
+    expect(matchManagedLabels(["corelink-dogfood"], "corelink-dogfood")).toEqual(["corelink-dogfood"]);
+    expect(matchManagedLabels(["self-hosted", "corelink-dogfood"], "corelink-dogfood")).toEqual([
+      "corelink-dogfood",
+    ]);
+    // With a pin set, the bare product label / a different size is NOT served.
+    expect(matchManagedLabels(["corelink"], "corelink-dogfood")).toBeNull();
+    expect(matchManagedLabels(["corelink-standard-4"], "corelink-dogfood")).toBeNull();
+    // A pin + a foreign label is refused (subset).
+    expect(matchManagedLabels(["corelink-dogfood", "gpu"], "corelink-dogfood")).toBeNull();
+    // A pin set to the reserved builder label is refused (can't pin to a reserved pool).
+    expect(matchManagedLabels(["corelink-builder"], "corelink-builder")).toBeNull();
     // Whitespace-only pin is treated as unset ⇒ family mode.
-    expect(matchManagedLabel(["corelink"], "   ")).toBe("corelink");
+    expect(matchManagedLabels(["corelink"], "   ")).toEqual(["corelink"]);
   });
 });
 
@@ -435,7 +456,7 @@ describe("re-drive reconciler (parseReconcilerRepos + listOrphanRunnerJobs)", ()
       }),
     );
     const r = await listOrphanRunnerJobs({ GITHUB_MINT_TOKEN: "t" }, "o/r", LABEL, 90_000, NOW);
-    expect(r).toEqual([{ jobId: "111", label: LABEL }]);
+    expect(r).toEqual([{ jobId: "111", labels: [LABEL] }]);
   });
 
   it("family mode (configured undefined): serves bare `corelink` + `corelink-<size>`, carries the matched label", async () => {
@@ -452,9 +473,9 @@ describe("re-drive reconciler (parseReconcilerRepos + listOrphanRunnerJobs)", ()
     );
     const r = await listOrphanRunnerJobs({ GITHUB_MINT_TOKEN: "t" }, "o/r", undefined, 90_000, NOW);
     expect(r).toEqual([
-      { jobId: "301", label: "corelink" },
-      { jobId: "302", label: "corelink-standard-4" },
-      { jobId: "303", label: "corelink-dogfood" },
+      { jobId: "301", labels: ["corelink"] },
+      { jobId: "302", labels: ["corelink-standard-4"] },
+      { jobId: "303", labels: ["corelink-dogfood"] },
     ]);
   });
 

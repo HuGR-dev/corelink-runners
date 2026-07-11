@@ -563,36 +563,64 @@ interface GhJob {
  */
 // The managed-label prefix + bare root — the CoreLink runner fleet's label
 // family. A job is served if it carries the bare `corelink` label OR any
-// `corelink-<suffix>` (which covers the internal `corelink-dogfood` AND the
-// product labels `corelink` / `corelink-<size>`). Kept a single source of truth
-// so the webhook gate + both reconciler scans agree on what "our fleet" means.
+// `corelink-<suffix>` (covers the internal `corelink-dogfood` AND the product
+// labels `corelink` / `corelink-<size>`). Single source of truth so the webhook
+// gate + both reconciler scans agree on what "our fleet" means.
 export const MANAGED_LABEL_ROOT = "corelink";
 export const MANAGED_LABEL_PREFIX = "corelink-";
 
+// RESERVED labels the autoscaler must NEVER mint an ephemeral runner for, even
+// though they are in the `corelink-*` prefix space. `corelink-builder` is the
+// PERSISTENT self-hosted builder pool — minting an ephemeral runner that
+// advertises it would RACE the always-on builder (and let `runs-on:
+// [corelink, corelink-builder]` be assigned a privileged builder job on our
+// ephemeral box). The sibling Rust webhook gate excludes it for exactly this
+// reason (crates/corelink-fabric-server/src/handlers/webhook.rs:82-83,508-518).
+const RESERVED_LABELS = new Set<string>(["corelink-builder"]);
+
+// Labels a job may carry ALONGSIDE a corelink label without us refusing it —
+// `self-hosted` is the GitHub runner-group label a customer commonly combines
+// with a fleet label; it does not route to a foreign pool. Any OTHER non-corelink
+// label means the job needs a runner we don't provide.
+const PASSTHROUGH_LABELS = new Set<string>(["self-hosted"]);
+
+function isServableCorelinkLabel(l: string): boolean {
+  return (l === MANAGED_LABEL_ROOT || l.startsWith(MANAGED_LABEL_PREFIX)) && !RESERVED_LABELS.has(l);
+}
+
 /**
- * The label THIS fleet serves for `jobLabels`, or `null` if none.
+ * The corelink labels to mint the JIT runner with for `jobLabels`, or `null` to
+ * REFUSE the job. A SUBSET gate mirroring the Rust webhook (webhook.rs:508-518):
  *
- * - `configured` set (AUTOSCALER_LABEL) → EXACT match only (an explicit operator
- *   override / safety valve: pin the fleet to one label). Backward-compatible
- *   with the prior `labels.includes(AUTOSCALER_LABEL)` behaviour.
- * - `configured` unset → the `corelink` FAMILY: the first job label that is the
- *   bare root or `corelink-<suffix>`. This is why a real customer's
- *   `runs-on: corelink` is served (the prior hard default `corelink-dogfood`
- *   served ONLY dogfood — a product-label gap).
+ * - `configured` set (AUTOSCALER_LABEL) → serve iff the job carries EXACTLY that
+ *   pin (plus passthrough labels); returns `[configured]`.
+ * - `configured` unset → the `corelink` FAMILY minus RESERVED: serve iff the job
+ *   has ≥1 servable corelink label AND EVERY other label is a passthrough
+ *   (`self-hosted`). Returns ALL the servable corelink labels so the minted
+ *   runner advertises exactly what the job requested and GitHub can assign it.
  *
- * Returns the MATCHED label so the caller mints the JIT runner with the exact
- * label the job requested (so the ephemeral runner picks the job up).
+ * Refusing (null) when a job also carries a NON-corelink, non-passthrough label
+ * (e.g. `runs-on: [corelink, gpu]`) is deliberate: minting a `corelink`-only
+ * runner for such a job would never be assigned by GitHub → the job hangs and the
+ * orphan reconciler re-spawns it forever. And RESERVED labels (`corelink-builder`)
+ * are never servable, so we can't poach the persistent builder pool.
  */
-export function matchManagedLabel(
+export function matchManagedLabels(
   jobLabels: string[],
   configured: string | undefined,
-): string | null {
+): string[] | null {
+  if (jobLabels.length === 0) return null;
   const cfg = configured?.trim();
-  if (cfg) return jobLabels.includes(cfg) ? cfg : null;
-  for (const l of jobLabels) {
-    if (l === MANAGED_LABEL_ROOT || l.startsWith(MANAGED_LABEL_PREFIX)) return l;
+  if (cfg) {
+    if (RESERVED_LABELS.has(cfg) || !jobLabels.includes(cfg)) return null;
+    return jobLabels.every((l) => l === cfg || PASSTHROUGH_LABELS.has(l)) ? [cfg] : null;
   }
-  return null;
+  const corelink = jobLabels.filter(isServableCorelinkLabel);
+  if (corelink.length === 0) return null;
+  const allServable = jobLabels.every(
+    (l) => isServableCorelinkLabel(l) || PASSTHROUGH_LABELS.has(l),
+  );
+  return allServable ? corelink : null;
 }
 
 export async function listOrphanRunnerJobs(
@@ -601,7 +629,7 @@ export async function listOrphanRunnerJobs(
   configured: string | undefined,
   minAgeMs: number,
   nowMs: number,
-): Promise<{ jobId: string; label: string }[]> {
+): Promise<{ jobId: string; labels: string[] }[]> {
   const gh = async (path: string): Promise<unknown> => {
     const r = await fetch(`https://api.github.com${path}`, {
       headers: {
@@ -617,17 +645,17 @@ export async function listOrphanRunnerJobs(
     const runs = (await gh(`/repos/${repo}/actions/runs?status=queued&per_page=30`)) as {
       workflow_runs?: GhRun[];
     };
-    const orphans: { jobId: string; label: string }[] = [];
+    const orphans: { jobId: string; labels: string[] }[] = [];
     for (const run of runs.workflow_runs ?? []) {
       const age = nowMs - Date.parse(run.created_at);
       if (!Number.isFinite(age) || age < minAgeMs) continue; // too fresh: leave it to the webhook
       const jobs = (await gh(`/repos/${repo}/actions/runs/${run.id}/jobs`)) as { jobs?: GhJob[] };
       for (const j of jobs.jobs ?? []) {
-        const matched = matchManagedLabel(j.labels ?? [], configured);
+        const matched = matchManagedLabels(j.labels ?? [], configured);
         if (j.status === "queued" && j.runner_id == null && matched) {
-          // Carry the MATCHED label so the redrive mints the JIT runner with the
-          // exact label this job requested (family-aware, not a fixed default).
-          orphans.push({ jobId: String(j.id), label: matched });
+          // Carry the MATCHED label set (subset-gated) so the redrive mints the
+          // JIT runner advertising exactly what this job requested.
+          orphans.push({ jobId: String(j.id), labels: matched });
         }
       }
     }
@@ -813,7 +841,7 @@ export async function listCompletedRunnerJobs(
         jobs?: GhCompletedJob[];
       };
       for (const j of jobs.jobs ?? []) {
-        if (j.status !== "completed" || !matchManagedLabel(j.labels ?? [], configured)) continue;
+        if (j.status !== "completed" || !matchManagedLabels(j.labels ?? [], configured)) continue;
         const completedMs = j.completed_at ? Date.parse(j.completed_at) : NaN;
         const startedMs = j.started_at ? Date.parse(j.started_at) : NaN;
         if (!Number.isFinite(completedMs) || !Number.isFinite(startedMs)) continue;

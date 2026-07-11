@@ -58,7 +58,7 @@ import {
   decideRedeem,
   parseReconcilerRepos,
   installationIdForRepo,
-  matchManagedLabel,
+  matchManagedLabels,
   listOrphanRunnerJobs,
   reconcileCompletedJobBilling,
   RECONCILE_MIN_AGE_MS,
@@ -363,7 +363,7 @@ function authed(request: Request, env: Env): boolean {
 
 // Mint a one-shot JIT runner config for `repoFullName` via the GitHub API,
 // using GITHUB_MINT_TOKEN (repo Administration:write). Returns the encoded JIT.
-async function mintJit(env: Env, repoFullName: string, label: string): Promise<string> {
+async function mintJit(env: Env, repoFullName: string, labels: string[]): Promise<string> {
   const name = `cf-runner-${crypto.randomUUID().slice(0, 8)}`;
   const resp = await fetch(
     `https://api.github.com/repos/${repoFullName}/actions/runners/generate-jitconfig`,
@@ -377,7 +377,10 @@ async function mintJit(env: Env, repoFullName: string, label: string): Promise<s
       body: JSON.stringify({
         name,
         runner_group_id: 1,
-        labels: [label],
+        // The FULL subset-gated label set the job requested — the runner must
+        // advertise all of them for GitHub to assign the job (webhook gate proved
+        // every one is a servable corelink label).
+        labels,
         work_folder: "_work",
       }),
     },
@@ -601,9 +604,9 @@ async function maybeBillCompletedJob(
 // refusal releases the claim inline and returns (no throw — a definitive no-op).
 async function driveSpawn(
   env: Env,
-  opts: { jobId: string; repo: string; installationId: string; label: string },
+  opts: { jobId: string; repo: string; installationId: string; labels: string[] },
 ): Promise<void> {
-  const { jobId, repo, installationId, label } = opts;
+  const { jobId, repo, installationId, labels } = opts;
   // env-0: when the Worker's public URL is configured, stash the PAT in the
   // CRED_STASH DO and inject a single-use ticket instead of CLW_TOKEN.
   const env0 = env.SPAWN_WORKER_PUBLIC_URL
@@ -634,7 +637,7 @@ async function driveSpawn(
   }
   // Authorized ⇒ mint the GitHub JIT and spawn.
   try {
-    const jit = await mintJit(env, repo, label);
+    const jit = await mintJit(env, repo, labels);
     await bumpMetrics(env, "jit_minted");
     await spawnRunner(env, jit, jobId, mint);
     await bumpMetrics(env, "runner_spawned");
@@ -649,7 +652,7 @@ async function driveSpawn(
 // or a later reconciler tick can then re-drive the job (never a silent orphan).
 async function driveSpawnGuarded(
   env: Env,
-  opts: { jobId: string; repo: string; installationId: string; label: string },
+  opts: { jobId: string; repo: string; installationId: string; labels: string[] },
 ): Promise<void> {
   try {
     await driveSpawn(env, opts);
@@ -761,14 +764,13 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         installation?: { id?: number | string };
       };
       // Serve the CoreLink managed-label FAMILY (bare `corelink` + `corelink-
-      // <suffix>`), not one hard-coded label. AUTOSCALER_LABEL, when set, pins to
-      // an exact label (operator override). The prior hard default
-      // `corelink-dogfood` served ONLY dogfood — a real customer's
-      // `runs-on: corelink` was dropped as "not our label". Mint with the MATCHED
-      // label so the ephemeral runner carries exactly what the job requested.
-      const labels = evt.workflow_job?.labels ?? [];
-      const label = matchManagedLabel(labels, env.AUTOSCALER_LABEL);
-      if (!label) {
+      // <suffix>`, minus RESERVED like `corelink-builder`), SUBSET-gated: refuse
+      // a job that also needs a label we don't provide. AUTOSCALER_LABEL, when
+      // set, pins to an exact label. `mintLabels` is the servable corelink label
+      // set the runner must advertise so GitHub assigns exactly this job.
+      const jobLabels = evt.workflow_job?.labels ?? [];
+      const mintLabels = matchManagedLabels(jobLabels, env.AUTOSCALER_LABEL);
+      if (!mintLabels) {
         return json({ ok: true, ignored: "not our label" }, 200);
       }
       // The stable correlation id across queued→completed for THIS job. The PAT
@@ -884,7 +886,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       // The guard releases the claim on failure so a redelivery / the scheduled
       // reconciler can re-drive the job (never a silent orphan).
       ctx?.waitUntil?.(bumpMetrics(env, "webhook_spawn_claimed"));
-      ctx.waitUntil(driveSpawnGuarded(env, { jobId, repo, installationId, label }));
+      ctx.waitUntil(driveSpawnGuarded(env, { jobId, repo, installationId, labels: mintLabels }));
       return json({ ok: true, spawning: true, job_id: jobId }, 202);
     }
 
@@ -1178,7 +1180,7 @@ async function redriveOrphanedJobs(
     const orphans = await listOrphanRunnerJobs(env, repo, configured, RECONCILE_MIN_AGE_MS, now);
     // Each orphan carries its OWN matched family label so the redrive mints the
     // JIT with exactly what the job requested (family-aware).
-    for (const { jobId, label } of orphans) {
+    for (const { jobId, labels } of orphans) {
       // `listOrphanRunnerJobs` already proved this job is queued ≥ MIN_AGE,
       // labeled, and has NO runner — genuinely orphaned. A spawn claim can LEAK
       // when the background `driveSpawnGuarded` (waitUntil) is killed by the
@@ -1206,7 +1208,7 @@ async function redriveOrphanedJobs(
           warm: !!reInstallationId,
         });
         ctx.waitUntil(
-          driveSpawnGuarded(env, { jobId, repo, installationId: reInstallationId, label }),
+          driveSpawnGuarded(env, { jobId, repo, installationId: reInstallationId, labels }),
         );
       }
     }
