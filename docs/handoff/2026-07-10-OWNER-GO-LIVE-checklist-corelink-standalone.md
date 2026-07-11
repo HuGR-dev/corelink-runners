@@ -1,9 +1,19 @@
 # Owner go-live checklist — CoreLink standalone (direct runner fleet)
 
 **Date:** 2026-07-10 · **For:** owner · **From:** runners TL
-**Bottom line:** go-live is **no longer blocked on any code**. Both the runner/fabric side
-(mine) and the console/onboarding side (server-TL's) are built + wired. What remains is a
-short **operator launch step** + one **product decision**. This is the whole list.
+> ⚠️ **CORRECTION (2026-07-11, 6-lens audit — this "no longer blocked on code" claim was WRONG
+> for EXTERNAL customers).** The audit found the external `runs-on: corelink` path has **missing
+> code + missing architecture** — see `docs/handoff/2026-07-11-AUDIT-findings-external-customer-path-gap.md`.
+> Two independent breaks: (1) `mintJit` uses a STATIC first-party `GITHUB_MINT_TOKEN` (rights only
+> on HumanGuardrail repos) — there is NO GitHub-App installation-token minting code, so a customer
+> repo's JIT mint 404s; (2) nothing routes an external repo's `workflow_job` webhook to the
+> spawn-worker (the App webhook is bound to the signup-worker). The "proven live" corelink-smoke
+> ran on the dogfood repo — the one place the static token + repo webhook work. So the items below
+> hold for the DOGFOOD/first-party path; the external-customer path needs the build in the audit doc.
+
+**Bottom line (as-written, now CORRECTED above):** go-live is ~~no longer blocked on any code~~
+**blocked on the external-customer build (audit doc)** for a *stranger*; the operator launch step
++ product decision below still apply to the first-party/dogfood path.
 
 ---
 
