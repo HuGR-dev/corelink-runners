@@ -69,6 +69,7 @@ import {
   type CredStashLike,
 } from "./lib";
 import { bumpMetrics, snapshotMetrics, MetricsDO } from "./metrics";
+import { installationToken } from "./github_app";
 
 // Re-export the counter Durable Object so wrangler resolves `MetricsDO` from
 // this main module (its class + migration are in wrangler.jsonc). Defined in
@@ -113,7 +114,19 @@ export interface Env {
   GITHUB_WEBHOOK_SECRET?: string;
   // A GitHub token with repo Administration:write — used to mint the JIT runner
   // config (POST generate-jitconfig). Worker secret. Absent ⇒ /webhook 503.
+  // This is the STATIC first-party dogfood credential: it only has rights on
+  // HumanGuardrail repos. A CUSTOMER repo's mint uses a GitHub-App installation
+  // token instead (GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY below); this stays the
+  // fallback when App creds are absent (byte-identical to the pre-App behaviour).
   GITHUB_MINT_TOKEN?: string;
+  // ── GitHub-App installation-token minting (external customer repos) ──────────
+  // The App's numeric id + PKCS#8 RSA private-key PEM. When BOTH are set AND a
+  // spawn has an installation_id, `mintJit` mints a per-installation access token
+  // (scoped to THAT customer's repo) instead of the first-party GITHUB_MINT_TOKEN.
+  // Absent ⇒ the App path is INERT and every mint uses GITHUB_MINT_TOKEN exactly
+  // as before (default-safe). `wrangler secret put`. See src/github_app.ts.
+  GITHUB_APP_ID?: string;
+  GITHUB_APP_PRIVATE_KEY?: string;
   // Label a queued workflow_job must carry to be served (default corelink-dogfood).
   AUTOSCALER_LABEL?: string;
   // Per-spawn rate limit (native CF binding) — caps the autoscaler blast radius
@@ -361,16 +374,41 @@ function authed(request: Request, env: Env): boolean {
 
 // ── Autoscaler (POST /webhook) — GitHub workflow_job → mint JIT → spawn ──────
 
-// Mint a one-shot JIT runner config for `repoFullName` via the GitHub API,
-// using GITHUB_MINT_TOKEN (repo Administration:write). Returns the encoded JIT.
-async function mintJit(env: Env, repoFullName: string, labels: string[]): Promise<string> {
+// Select the credential `mintJit` presents to `generate-jitconfig`:
+//   • App creds present (GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY) AND an
+//     installationId in hand ⇒ a GitHub-App INSTALLATION token, scoped to THAT
+//     customer's repo (the only credential that can mint a JIT on a foreign repo).
+//     `installationToken` THROWS on failure — the mint then fails (never a silent
+//     fallback to the first-party token for a foreign repo, which would 404 and
+//     mask the real cause). [I4]
+//   • Else ⇒ the static first-party GITHUB_MINT_TOKEN. When App creds are absent
+//     this is the ONLY branch taken, byte-identical to the pre-App behaviour. [I1]
+export async function mintJitAuthToken(env: Env, installationId: string): Promise<string> {
+  if (env.GITHUB_APP_ID && env.GITHUB_APP_PRIVATE_KEY && installationId) {
+    const { token } = await installationToken(env, installationId, Date.now());
+    return token;
+  }
+  return env.GITHUB_MINT_TOKEN ?? "";
+}
+
+// Mint a one-shot JIT runner config for `repoFullName` via the GitHub API. The
+// credential is chosen by `mintJitAuthToken`: a per-installation App token for a
+// customer repo (when App creds + installationId are present), else the static
+// first-party GITHUB_MINT_TOKEN. Returns the encoded JIT.
+async function mintJit(
+  env: Env,
+  repoFullName: string,
+  labels: string[],
+  installationId: string,
+): Promise<string> {
+  const authToken = await mintJitAuthToken(env, installationId);
   const name = `cf-runner-${crypto.randomUUID().slice(0, 8)}`;
   const resp = await fetch(
     `https://api.github.com/repos/${repoFullName}/actions/runners/generate-jitconfig`,
     {
       method: "POST",
       headers: {
-        authorization: `Bearer ${env.GITHUB_MINT_TOKEN}`,
+        authorization: `Bearer ${authToken}`,
         accept: "application/vnd.github+json",
         "user-agent": "corelink-spawn-worker",
       },
@@ -637,7 +675,7 @@ async function driveSpawn(
   }
   // Authorized ⇒ mint the GitHub JIT and spawn.
   try {
-    const jit = await mintJit(env, repo, labels);
+    const jit = await mintJit(env, repo, labels, installationId);
     await bumpMetrics(env, "jit_minted");
     await spawnRunner(env, jit, jobId, mint);
     await bumpMetrics(env, "runner_spawned");
