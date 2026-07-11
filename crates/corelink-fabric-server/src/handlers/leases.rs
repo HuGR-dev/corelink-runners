@@ -743,6 +743,7 @@ pub(crate) async fn acquire(
                 // Fail closed (never admit without a durable reserve) but LOUDLY —
                 // a silent 503 storm here reads as "clients misbehaving" instead of
                 // "pg is down".
+                state.counters.acquire_rejected_lease_invalid.incr();
                 eprintln!(
                     "acquire admission reserve FAILED (tenant {tenant}): {e:#} \
                      — failing closed (likely ledger/pg unreachable)"
@@ -1094,6 +1095,7 @@ pub(crate) async fn finalize_admitted_lease(
                     .transition(&lease_id, RunnerState::Held, now_ms)
                     .is_err()
                 {
+                    state.counters.acquire_rejected_lease_invalid.incr();
                     Some("lease ledger refused Pending->Held")
                 } else {
                     // Held is committed. Emit Acquired BEFORE the lock drops so
