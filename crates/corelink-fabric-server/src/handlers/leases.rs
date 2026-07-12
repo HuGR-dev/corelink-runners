@@ -443,7 +443,13 @@ pub(crate) async fn acquire(
     let plan = match plan_resolved {
         Ok(Ok(Some(p))) => p,
         Ok(Ok(None)) => {
-            state.counters.acquire_rejected_over_cap.incr();
+            // WP-3b de-smear: a tenant with NO plan on file is MIS-PROVISIONED,
+            // not a busy tenant hitting its concurrency cap. Count it on the
+            // dedicated `acquire_rejected_no_plan` (not `acquire_rejected_over_cap`)
+            // so the saturation denominator is not polluted by config gaps. The
+            // wire response is byte-identical to before (same `OverCap` 429 code +
+            // message); only the internal counter label changes.
+            state.counters.acquire_rejected_no_plan.incr();
             return error_response(
                 ApiError::OverCap,
                 "no plan on file for tenant: zero concurrency slots",
