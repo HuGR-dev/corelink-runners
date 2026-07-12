@@ -104,6 +104,50 @@ export async function releaseSpawnClaim(kv: KvLike | undefined, jobId: string): 
   });
 }
 
+// ── Completed-leg dedup (WP-2 2c) — dedup a redelivered `completed` webhook ────
+//
+// GitHub redelivers `workflow_job:completed` too (at-least-once). Without a guard
+// each redelivery re-bumps the `webhook_job_completed` golden signal → an inflated
+// counter (a false "N completions" reading). This is a per-jobId COMPLETION claim
+// in KV, mirroring `claimSpawn`: the FIRST completion wins the claim (counts once);
+// a redelivery sees the claim and is a COUNTER no-op.
+//
+// CRUCIAL: this gates ONLY the metric bump. The SECURITY actions on the completed
+// leg (revoke the per-job PAT, release the concurrency slot, tear the container
+// down) are NOT gated by this — they are each independently idempotent and
+// self-healing, so a redelivery still safely re-runs them (revoke of an already-
+// deleted PAT is a no-op, teardown() is idempotent, slot-release self-heals).
+//
+// Short TTL: a `completed` redelivery lands within GitHub's retry window (minutes),
+// so the claim need only outlive that — NOT the whole job (unlike the spawn claim,
+// which must block redeliveries for the job's entire lifetime). Distinct `done:`
+// prefix, never colliding with the `spawn:`/`conc:`/`jtenant:`/bare-jobId keys.
+export const COMPLETION_CLAIM_TTL_S = 3600; // 1h — spans GitHub's redelivery window
+
+function completionClaimKey(jobId: string): string {
+  return `done:${jobId}`;
+}
+
+/**
+ * Try to CLAIM the completion counter for `jobId`. Returns `true` if THIS is the
+ * FIRST completion (the caller SHOULD bump `webhook_job_completed`), `false` if the
+ * job was already counted (a redelivery → skip the bump so the counter is a no-op).
+ *
+ * FAIL-OPEN by north-star: with no KV bound we cannot dedup, so we return `true`
+ * (count) rather than drop a real completion — the security actions run regardless,
+ * and dedup is an optimization on a correct path, never a gate. Residual race: two
+ * EXACTLY-concurrent redeliveries can both read "absent" (KV has no atomic CAS);
+ * this collapses the common case (retries seconds apart), same as `claimSpawn`.
+ */
+export async function claimCompletion(kv: KvLike | undefined, jobId: string): Promise<boolean> {
+  if (!kv) return true; // no dedup infra ⇒ count (never drop a real completion)
+  const key = completionClaimKey(jobId);
+  const existing = await kv.get(key);
+  if (existing) return false; // already counted ⇒ a redelivery, skip the bump
+  await kv.put(key, "1", { expirationTtl: COMPLETION_CLAIM_TTL_S });
+  return true;
+}
+
 // Constant-time string compare (no early-exit on first mismatch) so a bearer/
 // signature check can't be timing-probed. Length may leak (fixed-length,
 // high-entropy tokens); the byte loop is constant-time.
@@ -860,14 +904,27 @@ export async function listCompletedRunnerJobs(
 }
 
 /**
- * The scheduled billing reconciler: for each repo in `RECONCILER_REPOS`, list
- * recently-completed+labeled jobs (settled past the race window, within the
- * lookback) and re-push their `runner_slot_seconds` usage event. Returns the
- * count of pushes ATTEMPTED (idem_key dedup makes a redundant push harmless).
- * Default-off (same discipline as the orphan reconciler): a no-op unless
+ * The scheduled billing reconciler — TENANT-SAFE backstop (WP-2 2b).
+ *
+ * For each repo in `RECONCILER_REPOS`, it lists recently-completed+labeled jobs
+ * (settled past the race window, within the lookback). It CANNOT bill them: the
+ * GitHub jobs-list API carries NO `installation_id`, so this path has NO per-job
+ * DERIVED tenant (unlike the live webhook's `maybeBillCompletedJob`, which reads
+ * the KV-stashed `jtenant:` mapping). It therefore emits NOTHING — it MUST NOT
+ * bill the wrangler `CLW_TENANT` blindly, which would mis-attribute a customer's
+ * job to the dogfood tenant. Correctness over completeness: SKIP-and-log.
+ *
+ * CONSEQUENCE (intended, documented): with no per-job tenant source this reconciler
+ * is a deliberate NO-OP — it returns 0 and pushes ZERO usage events. It stays wired
+ * (and logs the count of jobs it could NOT attribute) so the gap is observable in
+ * CF Logs; when a durable per-job `jobId → derived-tenant` source that survives to
+ * the reconcile window exists, the push can be restored keyed on the DERIVED tenant.
+ * Until then, recovering a missed push is not worth mis-attributing revenue.
+ *
+ * Still default-off (mirrors the orphan reconciler): short-circuits to 0 unless
  * `RECONCILER_REPOS` + `GITHUB_MINT_TOKEN` + `BILLING_INGEST_URL` +
- * `BILLING_INGEST_AUTH_KEY` + a billable `CLW_TENANT` + a 3-char
- * `BILLING_REGION` are ALL configured. Never throws (best-effort backstop).
+ * `BILLING_INGEST_AUTH_KEY` + a 3-char `BILLING_REGION` are configured (so it never
+ * scans GitHub when billing isn't even wired). Never throws (best-effort backstop).
  */
 export async function reconcileCompletedJobBilling(
   env: BillingReconcileEnv,
@@ -877,15 +934,12 @@ export async function reconcileCompletedJobBilling(
   const repos = parseReconcilerRepos(env.RECONCILER_REPOS);
   if (repos.length === 0) return 0; // opt-in: no allowlist ⇒ off (mirrors the orphan re-drive)
   if (!env.GITHUB_MINT_TOKEN || !env.BILLING_INGEST_URL || !env.BILLING_INGEST_AUTH_KEY) return 0;
-  // The jobs-list API carries no installation_id, so the reconciler has no
-  // per-job DERIVED tenant to fall back on (unlike maybeBillCompletedJob, which
-  // has the KV-stashed tenant); it bills the configured CLW_TENANT only — the
-  // same legacy single-tenant fallback the live webhook path uses.
-  const billedTenant = env.CLW_TENANT;
-  if (!billedTenant) return 0;
   const region = env.BILLING_REGION ?? "";
   if (region.length !== 3) return 0; // ingest validates 3-char; skip if unknown
-  let pushed = 0;
+  // TENANT-SAFETY (I2): no per-job derived tenant ⇒ we do NOT build/push any usage
+  // event. We still LIST so the count of unbillable-but-completed jobs is loud in
+  // logs (the observable that this backstop is a deliberate no-op today).
+  let skipped = 0;
   for (const repo of repos) {
     const jobs = await listCompletedRunnerJobs(
       env,
@@ -895,25 +949,10 @@ export async function reconcileCompletedJobBilling(
       RECONCILE_MIN_AGE_MS,
       nowMs,
     );
-    for (const j of jobs) {
-      try {
-        const ev = await buildUsageEvent({
-          tenantId: billedTenant,
-          jobId: j.jobId,
-          startedMs: j.startedMs,
-          completedMs: j.completedMs,
-          region,
-        });
-        await pushUsageEvent(env, ev);
-        pushed++;
-      } catch (e) {
-        // Best-effort: at-least-once, idem_key dedups a next-tick retry — never a gate.
-        console.log(
-          `billing reconcile push failed for job ${j.jobId} in ${repo} (will retry next tick): ` +
-            `${(e as Error).message}`,
-        );
-      }
-    }
+    skipped += jobs.length; // NOT billed — no true tenant to attribute them to
   }
-  return pushed;
+  if (skipped > 0) {
+    logEvent("info", "billing_reconcile_skipped_no_tenant", { skipped });
+  }
+  return 0; // I2: never emit a usage event attributed to a non-true tenant
 }

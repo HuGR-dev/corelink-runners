@@ -53,6 +53,7 @@ import {
   pushUsageEvent,
   claimSpawn,
   releaseSpawnClaim,
+  claimCompletion,
   acquireTenantSlot,
   releaseTenantSlot,
   decideRedeem,
@@ -852,14 +853,22 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         // on file (legacy/cold job, or a KV miss) ⇒ sleepAfter is the backstop; a
         // destroy() throw is swallowed (idempotent teardown, deadline backstop).
         const tornDown = await teardownCompletedRunner(env, jobId);
+        // 2c completed-leg dedup: GitHub redelivers `completed` (at-least-once).
+        // Claim the completion so the `webhook_job_completed` counter is bumped
+        // EXACTLY once — a redelivery is a counter no-op. This gates ONLY the
+        // metric; the security actions above (revoke / slot-release / teardown)
+        // are NOT gated by it — they already ran and are each independently
+        // idempotent/self-healing, so a redelivery re-runs them safely.
+        const firstCompletion = await claimCompletion(env.RUNNER_JOB_PATS, jobId);
         // Golden signals for the completion leg (fire-and-forget; never delays
         // the GitHub webhook response).
-        const completedSignals = ["webhook_job_completed"];
+        const completedSignals: string[] = [];
+        if (firstCompletion) completedSignals.push("webhook_job_completed");
         if (revoked) completedSignals.push("cas_pat_revoked");
         if (billed) completedSignals.push("billing_pushed");
         if (tornDown) completedSignals.push("runner_torn_down");
-        ctx?.waitUntil?.(bumpMetrics(env, ...completedSignals));
-        return json({ ok: true, revoked, billed, tornDown, job_id: jobId }, 200);
+        if (completedSignals.length > 0) ctx?.waitUntil?.(bumpMetrics(env, ...completedSignals));
+        return json({ ok: true, revoked, billed, tornDown, deduped: !firstCompletion, job_id: jobId }, 200);
       }
 
       if (evt.action !== "queued") {
@@ -867,8 +876,14 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       }
       // Rate-limit real spawn attempts (defense-in-depth vs a leaked webhook
       // secret). Ignored events above are free; only queued+labeled jobs count.
+      // 2a per-tenant key: bucket by the REPO (`spawn:<repoFullName>`) so ONE busy
+      // repo can no longer starve every other tenant's spawns (the global
+      // `key:"spawn"` was a single cross-tenant bucket). The repo is known here
+      // (evt.repository.full_name); when absent we still rate-limit under the
+      // literal `spawn:` bucket — NEVER fail-open to unbounded spawns (I1).
       if (env.WEBHOOK_LIMITER) {
-        const { success } = await env.WEBHOOK_LIMITER.limit({ key: "spawn" });
+        const rateKey = `spawn:${evt.repository?.full_name ?? ""}`;
+        const { success } = await env.WEBHOOK_LIMITER.limit({ key: rateKey });
         if (!success) {
           ctx?.waitUntil?.(bumpMetrics(env, "webhook_rate_limited"));
           return json({ error: "rate limited" }, 429);

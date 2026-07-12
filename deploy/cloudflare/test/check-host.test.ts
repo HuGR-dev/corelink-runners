@@ -508,3 +508,110 @@ describe("workflow_job:completed ⇒ runner container teardown (capacity leak fi
     expect(kv.store.has("jhandle:55555")).toBe(false); // key still dropped
   });
 });
+
+// ── WP-2 2a: per-tenant (per-repo) rate-limit key ─────────────────────────────
+// The webhook limiter keyed a single global `key:"spawn"` bucket — one busy repo
+// could rate-limit EVERY other tenant's spawns. It now keys `spawn:<repoFullName>`.
+async function queuedWebhook(
+  env: Env,
+  jobId: string,
+  repo: string | undefined,
+  secret: string,
+  ctx: unknown,
+): Promise<Response> {
+  const body = JSON.stringify({
+    action: "queued",
+    workflow_job: { id: Number(jobId), labels: ["corelink-dogfood"] },
+    ...(repo !== undefined ? { repository: { full_name: repo } } : {}),
+  });
+  return worker.fetch(
+    new Request("https://w/webhook", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-github-event": "workflow_job",
+        "x-hub-signature-256": await ghSign(secret, body),
+      },
+      body,
+    }),
+    env,
+    ctx as never,
+  );
+}
+
+describe("WP-2 2a: per-repo rate-limit key (WEBHOOK_LIMITER)", () => {
+  const SECRET = "whsec-ratelimit";
+  function limiter() {
+    const keys: string[] = [];
+    return {
+      keys,
+      limit: vi.fn(async ({ key }: { key: string }) => {
+        keys.push(key);
+        return { success: true };
+      }),
+    };
+  }
+  // Seed the spawn claim so claimSpawn short-circuits AFTER the limiter check — the
+  // test isolates the limiter key without triggering a background mint+spawn.
+  function rlEnv(lim: ReturnType<typeof limiter>, seededJobIds: string[]): Env {
+    const seed: Record<string, string> = {};
+    for (const id of seededJobIds) seed[`spawn:${id}`] = "1";
+    return makeEnv({
+      GITHUB_WEBHOOK_SECRET: SECRET,
+      GITHUB_MINT_TOKEN: "ghp-mint",
+      WEBHOOK_LIMITER: lim as never,
+      RUNNER_JOB_PATS: fakeKv(seed) as never,
+    });
+  }
+
+  it("keys the limiter per REPO — two repos get DISTINCT keys (no cross-tenant starvation)", async () => {
+    const lim = limiter();
+    const env = rlEnv(lim, ["101", "202"]);
+    await queuedWebhook(env, "101", "acme/api", SECRET, {});
+    await queuedWebhook(env, "202", "globex/web", SECRET, {});
+    expect(lim.keys).toEqual(["spawn:acme/api", "spawn:globex/web"]); // distinct per-repo buckets
+  });
+
+  it("I1: a payload with NO repository is STILL rate-limited (never fail-open to unbounded)", async () => {
+    const lim = limiter();
+    const env = rlEnv(lim, ["303"]);
+    await queuedWebhook(env, "303", undefined, SECRET, {});
+    expect(lim.limit).toHaveBeenCalledTimes(1); // the limiter WAS consulted
+    expect(lim.keys).toEqual(["spawn:"]); // bounded fallback bucket, never skipped
+  });
+});
+
+// ── WP-2 2c: completed-leg dedup (redelivery is a counter no-op) ───────────────
+describe("WP-2 2c: completed-leg dedup", () => {
+  const SECRET = "whsec-dedup";
+  // No CORELINK_RUNNER_MINT_AUTH_KEY / BILLING_* ⇒ revoke + billing are no-ops (no
+  // network); this isolates the completion-dedup + teardown legs.
+  function dedupEnv(kv: ReturnType<typeof fakeKv>): Env {
+    return makeEnv({
+      GITHUB_WEBHOOK_SECRET: SECRET,
+      GITHUB_MINT_TOKEN: "ghp-mint",
+      RUNNER_JOB_PATS: kv as never,
+    });
+  }
+
+  it("first completion counts (deduped:false) + tears down; a redelivery is deduped:true and self-heals (I3)", async () => {
+    const kv = fakeKv({ "jhandle:22222": "handle-x" });
+    // First delivery: COUNTS the completion (deduped:false) AND tears the container down.
+    const r1 = await completedWebhook(dedupEnv(kv), "22222", SECRET);
+    const b1 = await r1.json();
+    expect(r1.status).toBe(200);
+    expect(b1.deduped).toBe(false); // FIRST completion ⇒ webhook_job_completed bumped
+    expect(b1.tornDown).toBe(true); // the security action ran
+    expect(kv.store.get("done:22222")).toBe("1"); // completion claimed
+    expect(kv.store.has("jhandle:22222")).toBe(false); // handle consumed
+
+    // Redelivery (GitHub at-least-once): the COUNTER is a no-op, but the security
+    // actions are NOT gated by the dedup — they re-run and self-heal (no handle on
+    // file now ⇒ tornDown:false), so revoke/teardown remain idempotent (I3).
+    const r2 = await completedWebhook(dedupEnv(kv), "22222", SECRET);
+    const b2 = await r2.json();
+    expect(r2.status).toBe(200);
+    expect(b2.deduped).toBe(true); // redelivery ⇒ counter NOT bumped again
+    expect(b2.tornDown).toBe(false); // teardown self-healed (idempotent + ungated)
+  });
+});

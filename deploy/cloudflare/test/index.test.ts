@@ -14,6 +14,8 @@ import {
   billingPeriod,
   claimSpawn,
   releaseSpawnClaim,
+  claimCompletion,
+  COMPLETION_CLAIM_TTL_S,
   acquireTenantSlot,
   releaseTenantSlot,
   randomTicket,
@@ -584,11 +586,17 @@ describe("billing reconciler (listCompletedRunnerJobs + reconcileCompletedJobBil
     expect(pushed).toBe(0);
   });
 
-  it("re-pushes the runner_slot_seconds event for a recovered completed job", async () => {
+  // ── WP-2 2b: billing tenant-safety (I2) ─────────────────────────────────────
+  // The reconciler has NO per-job derived tenant (the jobs-list API carries no
+  // installation_id), so it MUST emit NOTHING rather than mis-bill the wrangler
+  // CLW_TENANT (which would attribute a customer's job to the dogfood tenant).
+  it("TENANT-SAFE (I2): finds completed jobs but emits 0 pushes and NEVER calls billing ingest", async () => {
+    const calls: string[] = [];
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string) => {
         const u = String(url);
+        calls.push(u);
         if (u.includes("/actions/runs?status=completed")) {
           return new Response(JSON.stringify({ workflow_runs: [{ id: 1 }] }), { status: 200 });
         }
@@ -609,12 +617,14 @@ describe("billing reconciler (listCompletedRunnerJobs + reconcileCompletedJobBil
       }),
     );
     const pushed = await reconcileCompletedJobBilling(fullEnv, LABEL, NOW);
-    // Idempotent by idem_key at the aggregator — re-emitting an already-billed
-    // job is SAFE, so this only ever recovers a missed push, never double-bills.
-    expect(pushed).toBe(1);
+    expect(pushed).toBe(0); // no per-job derived tenant ⇒ nothing billed
+    // The load-bearing assertion (I2): the billing ingest was NEVER called — no
+    // usage event is ever emitted attributed to the (possibly-wrong) CLW_TENANT.
+    expect(calls.some((u) => u.includes("/internal/v1/billing/usage"))).toBe(false);
   });
 
-  it("best-effort per-job: a push failure doesn't abort the rest of the tick", async () => {
+  it("skip-and-logs the count of unbillable completed jobs (logEvent), still 0 pushes", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string) => {
@@ -626,20 +636,23 @@ describe("billing reconciler (listCompletedRunnerJobs + reconcileCompletedJobBil
           return new Response(
             JSON.stringify({
               jobs: [
-                { id: 998, status: "completed", started_at: STARTED, completed_at: SETTLED, labels: [LABEL] },
+                { id: 997, status: "completed", started_at: STARTED, completed_at: SETTLED, labels: [LABEL] },
               ],
             }),
             { status: 200 },
           );
         }
-        if (u.includes("/internal/v1/billing/usage")) {
-          return new Response("nope", { status: 500 }); // ingest failure
-        }
         return new Response("nope", { status: 404 });
       }),
     );
     const pushed = await reconcileCompletedJobBilling(fullEnv, LABEL, NOW);
-    expect(pushed).toBe(0); // the failed push wasn't counted, and nothing threw
+    expect(pushed).toBe(0);
+    const logged = logSpy.mock.calls
+      .map((c) => String(c[0]))
+      .find((l) => l.includes("billing_reconcile_skipped_no_tenant"));
+    expect(logged).toBeTruthy();
+    expect(JSON.parse(logged as string).skipped).toBe(1); // observable: the unbilled count
+    logSpy.mockRestore();
   });
 });
 
@@ -839,6 +852,47 @@ describe("releaseSpawnClaim (retry after a failed spawn)", () => {
 
   it("no-op (no throw) when no KV is bound", async () => {
     await expect(releaseSpawnClaim(undefined, "job-1")).resolves.toBeUndefined();
+  });
+});
+
+// ── WP-2 2c: completed-leg dedup (claimCompletion) ────────────────────────────
+
+describe("claimCompletion (completed-leg counter dedup)", () => {
+  it("first completion for a jobId COUNTS (true) and records the claim", async () => {
+    const kv = fakeKv();
+    expect(await claimCompletion(kv, "job-1")).toBe(true);
+    expect(kv.store.get("done:job-1")).toBe("1");
+  });
+
+  it("a redelivery for the SAME jobId is a counter NO-OP (false)", async () => {
+    const kv = fakeKv();
+    expect(await claimCompletion(kv, "job-1")).toBe(true);
+    expect(await claimCompletion(kv, "job-1")).toBe(false); // redelivery counts zero
+  });
+
+  it("distinct jobIds each count their own completion", async () => {
+    const kv = fakeKv();
+    expect(await claimCompletion(kv, "job-a")).toBe(true);
+    expect(await claimCompletion(kv, "job-b")).toBe(true);
+  });
+
+  it("uses the `done:` prefix (never collides with spawn:/conc:/jtenant:/pat keys)", async () => {
+    const kv = fakeKv({ "job-1": "pat-id", "spawn:job-1": "1", "jtenant:job-1": "t" });
+    expect(await claimCompletion(kv, "job-1")).toBe(true); // still counts — distinct namespace
+    expect(kv.store.get("done:job-1")).toBe("1");
+    // The other namespaces are untouched.
+    expect(kv.store.get("job-1")).toBe("pat-id");
+    expect(kv.store.get("spawn:job-1")).toBe("1");
+  });
+
+  it("FAIL-OPEN with no KV bound: completions count (never drop a real completion)", async () => {
+    expect(await claimCompletion(undefined, "job-1")).toBe(true);
+  });
+
+  it("sets the short redelivery-window TTL on the claim (self-cleaning)", async () => {
+    const kv = fakeKv();
+    await claimCompletion(kv, "job-1");
+    expect(kv.put).toHaveBeenCalledWith("done:job-1", "1", { expirationTtl: COMPLETION_CLAIM_TTL_S });
   });
 });
 
