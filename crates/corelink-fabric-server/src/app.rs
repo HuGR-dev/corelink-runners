@@ -1281,6 +1281,11 @@ impl AppState {
             pat_ids.remove(lease_id)
         };
         if let (Some(pat_id), Some(mint)) = (pat_id, &self.cas_pat_mint) {
+            // WP-3c: `revoke_attempts` counts ATTEMPTS, not distinct leases — it is
+            // deliberately inflated by stale-PAT-cleanup calls (a lease can hit this
+            // via several give-up paths: finalize CapacityError, admission timeout,
+            // dispatch-lost race). That over-count is INTENDED and honest to the
+            // counter's name ("attempts"); it is NOT a per-lease revoke tally.
             self.counters.revoke_attempts.incr();
             if let Err(e) = mint.revoke(&pat_id).await {
                 // Log but do NOT fail the teardown — revoke is defense-in-depth;

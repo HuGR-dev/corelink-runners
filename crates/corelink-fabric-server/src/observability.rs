@@ -75,6 +75,12 @@ pub struct Counters {
     pub acquire_rejected_rate: Counter,
     /// Acquire rejected: concurrency cap reached (429).
     pub acquire_rejected_over_cap: Counter,
+    /// Acquire rejected: tenant has NO plan on file → zero purchased concurrency
+    /// slots (a mis-provisioned tenant, NOT genuine saturation). Kept DISTINCT
+    /// from [`acquire_rejected_over_cap`](Self::acquire_rejected_over_cap) so a
+    /// config gap (no plan) is never read as a busy tenant hitting its cap — the
+    /// de-smear of the `leases.rs` no-plan site (WP-3b).
+    pub acquire_rejected_no_plan: Counter,
     /// Acquire rejected: monthly vCPU-h compute ceiling (429).
     pub acquire_rejected_compute_ceiling: Counter,
     /// Acquire rejected: ledger declined the lease (invalid state transition).
@@ -132,6 +138,7 @@ impl Counters {
             acquire_rejected_bad_request: self.acquire_rejected_bad_request.get(),
             acquire_rejected_rate: self.acquire_rejected_rate.get(),
             acquire_rejected_over_cap: self.acquire_rejected_over_cap.get(),
+            acquire_rejected_no_plan: self.acquire_rejected_no_plan.get(),
             acquire_rejected_compute_ceiling: self.acquire_rejected_compute_ceiling.get(),
             acquire_rejected_lease_invalid: self.acquire_rejected_lease_invalid.get(),
             leases_closed: self.leases_closed.get(),
@@ -163,6 +170,7 @@ pub struct CounterSnapshot {
     pub acquire_rejected_bad_request: u64,
     pub acquire_rejected_rate: u64,
     pub acquire_rejected_over_cap: u64,
+    pub acquire_rejected_no_plan: u64,
     pub acquire_rejected_compute_ceiling: u64,
     pub acquire_rejected_lease_invalid: u64,
     pub leases_closed: u64,
@@ -200,11 +208,15 @@ mod tests {
         counters.leases_acquired.incr();
         counters.acquire_rejected_over_cap.incr();
         counters.acquire_rejected_over_cap.incr();
+        counters.acquire_rejected_no_plan.incr();
         counters.mint_failures.incr();
         counters.leases_expired.incr();
         let snap = counters.snapshot();
         assert_eq!(snap.leases_acquired, 1);
         assert_eq!(snap.acquire_rejected_over_cap, 2);
+        // WP-3b: the de-smear counter is distinct from over_cap in all three
+        // (Counters → snapshot → CounterSnapshot).
+        assert_eq!(snap.acquire_rejected_no_plan, 1);
         assert_eq!(snap.mint_failures, 1);
         assert_eq!(snap.leases_expired, 1);
         // Untouched counters are zero.

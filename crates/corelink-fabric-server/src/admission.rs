@@ -434,6 +434,9 @@ pub(crate) async fn acquire_queued(
     let Some(queue) = state.admission_queue.as_ref() else {
         // Defensive: queue mode always wires a queue (build_app_and_state); a
         // None here is a composition bug — fail closed, never silently 429.
+        // WP-3a: a fail-closed reject on the queue path mirrors the immediate
+        // path's ledger-Err → `acquire_rejected_lease_invalid` (both are 503s).
+        state.counters.acquire_rejected_lease_invalid.incr();
         return error_response(
             ApiError::FailClosed,
             "queued admission selected but no admission queue is wired; failing closed",
@@ -456,6 +459,11 @@ pub(crate) async fn acquire_queued(
     let _park_permit = match Arc::clone(&park_sem).try_acquire_owned() {
         Ok(permit) => permit,
         Err(_) => {
+            // WP-3a: a load-shed at the tenant park budget is concurrency
+            // saturation (the tenant already has `park_cap` waiters parked over
+            // its cap) → `acquire_rejected_over_cap`, matching the immediate
+            // over-cap 429 semantics.
+            state.counters.acquire_rejected_over_cap.incr();
             return error_response(
                 ApiError::FailClosed,
                 "tenant parked-waiter budget exhausted: shed (try again shortly)",
@@ -520,6 +528,10 @@ pub(crate) async fn acquire_queued(
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(&lease_id);
+            // WP-3a: a queue-full shed is concurrency saturation (the tenant is
+            // over cap AND its queue is at `MAX_TENANT_QUEUE_DEPTH`) →
+            // `acquire_rejected_over_cap`, matching the immediate over-cap 429.
+            state.counters.acquire_rejected_over_cap.incr();
             return error_response(
                 ApiError::FailClosed,
                 "admission queue full for tenant: shed (try again shortly)",
@@ -548,6 +560,10 @@ pub(crate) async fn acquire_queued(
                     .unwrap_or_else(|e| e.into_inner())
                     .remove(&lease_id);
                 evict_waiter(queue, &lease_id);
+                // WP-3a: a durable-queue-full shed is the cross-instance analogue
+                // of the local queue-full shed above → `acquire_rejected_over_cap`
+                // (concurrency saturation), same as the immediate over-cap 429.
+                state.counters.acquire_rejected_over_cap.incr();
                 return error_response(
                     ApiError::FailClosed,
                     "durable admission queue refused the enqueue: shed (try again shortly)",
@@ -561,12 +577,22 @@ pub(crate) async fn acquire_queued(
     // + its queued WorkItem so a late dispatch can never reserve a slot for a
     // request that already gave up.
     let resp = match tokio::time::timeout(state.queue_wait_timeout, wait_rx).await {
+        // A response arrived: EITHER a success (leases_acquired is counted in the
+        // shared finalize) OR a tick-generated rejection whose counter the tick
+        // ALREADY bumped on its successful `waker.send` (see `run_admission_tick`).
+        // Counting anything here would double-count, so this arm is deliberately
+        // count-free (WP-3a, I3).
         Ok(Ok(resp)) => resp,
         // Sender dropped without sending (loop shutdown / internal drop): 503.
-        Ok(Err(_)) => error_response(
-            ApiError::FailClosed,
-            "admission loop dropped the queued acquire; failing closed",
-        ),
+        // WP-3a: fail-closed → `acquire_rejected_lease_invalid` (mirrors the
+        // immediate path's ledger-Err 503).
+        Ok(Err(_)) => {
+            state.counters.acquire_rejected_lease_invalid.incr();
+            error_response(
+                ApiError::FailClosed,
+                "admission loop dropped the queued acquire; failing closed",
+            )
+        }
         Err(_elapsed) => {
             // A7b: revoke any CAS PAT minted for this lease BEFORE evicting. A
             // waiter re-enqueued after a provider CapacityError carries its minted
@@ -577,6 +603,14 @@ pub(crate) async fn acquire_queued(
             // waiter never minted a PAT (first-enqueue timeout).
             state.revoke_pat_for(&lease_id).await;
             evict_waiter(queue, &lease_id);
+            // WP-3a: a queued acquire that times out never won a slot — this is
+            // concurrency saturation (the tenant stayed over cap for the whole
+            // bounded wait) → `acquire_rejected_over_cap`, the same denominator as
+            // the immediate over-cap 429. Counting here (the TERMINAL timeout arm)
+            // is mutually exclusive with the tick's reject counters: the tick only
+            // bumps on a SUCCESSFUL `waker.send`, which cannot occur once this
+            // receiver has been dropped by the timeout (I3, no double-count).
+            state.counters.acquire_rejected_over_cap.incr();
             error_response(
                 ApiError::FailClosed,
                 "queued admission timed out before a slot freed; failing closed",
@@ -697,6 +731,21 @@ async fn rollback_undispatched_lease(state: &AppState, tenant: &TenantId, lease_
         // No row: already rolled back / never inserted — a no-op.
         None => {}
     }
+}
+
+/// Which golden rejection counter a tick-generated waiter rejection maps to
+/// (WP-3a). Carried next to the queued `Response` so the counter is bumped
+/// EXACTLY when the reject reaches a live client (a successful `waker.send`),
+/// never when the waiter already timed out (that path already counted the
+/// queued-timeout as `acquire_rejected_over_cap`), preserving I3 (one rejection,
+/// one counter). These mirror the immediate acquire path's mapping:
+/// `OverCompute` → compute-ceiling, any fail-closed 503 → lease-invalid.
+enum RejectCounter {
+    /// Monthly vCPU-h compute wall reached (429) → `acquire_rejected_compute_ceiling`.
+    ComputeCeiling,
+    /// A fail-closed 503 (gate-build overflow / ledger refused) →
+    /// `acquire_rejected_lease_invalid`.
+    FailClosed,
 }
 
 /// Run ONE admission tick: dispatch queued acquires fairly, reserving each via
@@ -855,9 +904,15 @@ pub async fn run_admission_tick(state: &AppState, now_ms: u64) -> usize {
     //   - any ledger `Err` (incl. the i64-overflow gate-build) ⇒ fail-closed:
     //     wake the waiter with 503, reserve nothing, never silently admit.
     let mut to_finalize: Vec<String> = Vec::new();
-    // (lease_id, response) pairs whose waiter must be woken-and-rejected WITHOUT
-    // a reservation (OverCompute 429 / fail-closed 503) — drained after the loop.
-    let mut reject_waiters: Vec<(String, Response)> = Vec::new();
+    // (lease_id, counter, response) triples whose waiter must be woken-and-rejected
+    // WITHOUT a reservation (OverCompute 429 / fail-closed 503) — drained after the
+    // loop. The `RejectCounter` records WHICH golden counter to bump, and the bump
+    // fires ONLY on a successful `waker.send` in the drain (WP-3a, I3): if the
+    // waiter already timed out, its receiver is gone → the send fails → the counter
+    // is NOT bumped here, because `acquire_queued`'s timeout arm already counted it
+    // as `acquire_rejected_over_cap`. So exactly one rejection counter moves per
+    // request.
+    let mut reject_waiters: Vec<(String, RejectCounter, Response)> = Vec::new();
     for cand in candidates {
         let Some((mut pending, ttl_ms)) = cand.pending else {
             // Orphaned (timed-out waiter): the FIFO entry was popped above;
@@ -882,6 +937,7 @@ pub async fn run_admission_tick(state: &AppState, now_ms: u64) -> usize {
                 // i64-overflow on the reservation: fail-closed, never admit.
                 reject_waiters.push((
                     cand.item.id.clone(),
+                    RejectCounter::FailClosed,
                     error_response(ApiError::FailClosed, &format!("{msg}; failing closed")),
                 ));
                 continue;
@@ -911,6 +967,7 @@ pub async fn run_admission_tick(state: &AppState, now_ms: u64) -> usize {
             Ok(corelink_fabric::ledger::AdmitOutcome::OverCompute) => {
                 reject_waiters.push((
                     cand.item.id.clone(),
+                    RejectCounter::ComputeCeiling,
                     error_response(
                         ApiError::OverCap,
                         "monthly compute ceiling reached; upgrade tier",
@@ -922,6 +979,7 @@ pub async fn run_admission_tick(state: &AppState, now_ms: u64) -> usize {
             Err(_) => {
                 reject_waiters.push((
                     cand.item.id.clone(),
+                    RejectCounter::FailClosed,
                     error_response(
                         ApiError::FailClosed,
                         "lease ledger refused the queued admission reserve; failing closed",
@@ -966,7 +1024,7 @@ pub async fn run_admission_tick(state: &AppState, now_ms: u64) -> usize {
     // (waiter context + any orphaned FIFO entry), exactly mirroring the immediate
     // path's `OverCompute` rejection. Nothing was reserved for these, so there is
     // no Pending to roll back. A waiter already gone (timed out) is a no-op send.
-    for (lease_id, resp) in reject_waiters {
+    for (lease_id, counter, resp) in reject_waiters {
         let waiter = queue
             .waiters
             .lock()
@@ -977,7 +1035,20 @@ pub async fn run_admission_tick(state: &AppState, now_ms: u64) -> usize {
         if let Some(q) = waiter {
             // Best-effort: if the receiver already 503'd on timeout, the send
             // returns Err and the response is simply dropped — never re-enqueued.
-            let _ = q.waker.send(resp);
+            // WP-3a (I3): bump the rejection counter ONLY when the send SUCCEEDS
+            // (the reject reached a live client). A failed send means the waiter
+            // already timed out and `acquire_queued` counted it as
+            // `acquire_rejected_over_cap`, so counting here too would double-count.
+            if q.waker.send(resp).is_ok() {
+                match counter {
+                    RejectCounter::ComputeCeiling => {
+                        state.counters.acquire_rejected_compute_ceiling.incr()
+                    }
+                    RejectCounter::FailClosed => {
+                        state.counters.acquire_rejected_lease_invalid.incr()
+                    }
+                }
+            }
         }
     }
 
@@ -1088,7 +1159,16 @@ pub async fn run_admission_tick(state: &AppState, now_ms: u64) -> usize {
                     if let Some(shed_q) = shed_waiter {
                         // WP-7 A7b: revoke the minted PAT on this give-up path.
                         state.revoke_pat_for(&lease_id).await;
-                        let _ = shed_q.waker.send(capacity_exhausted_503());
+                        // WP-3a: a provider-capacity give-up on the queue path is
+                        // the same signal as the immediate path's finalize
+                        // CapacityError → `provision_capacity_503`. Bump only on a
+                        // SUCCESSFUL send (I3): a failed send means the waiter timed
+                        // out and was already counted as over-cap. Re-enqueue (the
+                        // common CapacityError branch) is a retry, NOT a rejection,
+                        // so it is never counted.
+                        if shed_q.waker.send(capacity_exhausted_503()).is_ok() {
+                            state.counters.provision_capacity_503.incr();
+                        }
                     }
                 }
                 // NOT a genuine dispatch (no Held lease handed to client).
@@ -1764,6 +1844,113 @@ mod queue_tests {
             active_count(&ledger, &tid("alpha")),
             1,
             "shed reserves no slot"
+        );
+    }
+
+    // ── WP-3a/3b: rejection-counter completeness under queue mode ─────────────
+
+    /// WP-3a: a queued acquire that never wins a slot and times out lights the
+    /// `acquire_rejected_over_cap` counter (concurrency saturation) — the queue
+    /// path's rejection denominator was previously DARK (incremented nothing).
+    #[tokio::test]
+    async fn queue_timeout_counts_over_cap() {
+        let now = 6_000_000u64;
+        // Tiny wait so the queued waiter times out fast; the slot is never freed.
+        let (state, _ledger) = queue_state(1, now, Duration::from_millis(40));
+        let router = crate::app::app(token_store(), state.clone());
+
+        // Fill the only slot (held while the queued waiter times out).
+        let _a1 = router
+            .clone()
+            .oneshot(acquire_req("pat-alpha"))
+            .await
+            .unwrap();
+        assert_eq!(
+            state.counters.acquire_rejected_over_cap.get(),
+            0,
+            "counter dark until the queued acquire is rejected"
+        );
+
+        // Over-cap acquire: enqueues, waits 40ms, then 503s (no dispatch ever).
+        let resp = router.oneshot(acquire_req("pat-alpha")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            state.counters.acquire_rejected_over_cap.get(),
+            1,
+            "a queued timeout must light acquire_rejected_over_cap exactly once"
+        );
+        // I3: no other rejection counter moved for this single request.
+        assert_eq!(state.counters.acquire_rejected_lease_invalid.get(), 0);
+        assert_eq!(state.counters.acquire_rejected_compute_ceiling.get(), 0);
+        assert_eq!(state.counters.provision_capacity_503.get(), 0);
+        assert_eq!(state.counters.acquire_rejected_no_plan.get(), 0);
+    }
+
+    /// WP-3a: an enqueue over the per-tenant queue bound is SHED and lights
+    /// `acquire_rejected_over_cap` (a queue-full shed is concurrency saturation),
+    /// mirroring the immediate over-cap 429.
+    #[tokio::test]
+    async fn queue_full_shed_counts_over_cap() {
+        let now = 7_000_000u64;
+        let (state, _ledger) = queue_state(1, now, Duration::from_secs(5));
+        let router = crate::app::app(token_store(), state.clone());
+
+        // Fill the slot (so the next acquire routes to the queue).
+        let _a1 = router
+            .clone()
+            .oneshot(acquire_req("pat-alpha"))
+            .await
+            .unwrap();
+        // Flood alpha's FIFO to the per-tenant bound so the next enqueue sheds.
+        let admitted = state
+            .admission_queue
+            .as_ref()
+            .unwrap()
+            .fill_to_bound(&tid("alpha"), now);
+        assert_eq!(admitted, corelink_fabric::MAX_TENANT_QUEUE_DEPTH);
+        let before = state.counters.acquire_rejected_over_cap.get();
+
+        // The next over-cap acquire enqueue is over the bound → SHED 503.
+        let resp = router.oneshot(acquire_req("pat-alpha")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            state.counters.acquire_rejected_over_cap.get(),
+            before + 1,
+            "a queue-full shed must light acquire_rejected_over_cap"
+        );
+    }
+
+    /// WP-3b: an acquire from a tenant with NO plan on file lights the dedicated
+    /// `acquire_rejected_no_plan` counter — NOT `acquire_rejected_over_cap` (the
+    /// de-smear: a mis-provisioned tenant is not genuine cap saturation). The wire
+    /// response is unchanged (a 429 `over_cap`).
+    #[tokio::test]
+    async fn no_plan_acquire_counts_no_plan_not_over_cap() {
+        let now = 8_000_000u64;
+        let (state, _ledger) = queue_state(1, now, Duration::from_secs(5));
+        // A valid PAT for a tenant that has NO plan in StaticPlans (alpha/beta).
+        let tokens = Arc::new(StaticTokenStore::new([(
+            "pat-gamma".to_string(),
+            tid("gamma"),
+        )]));
+        let router = crate::app::app(tokens, state.clone());
+
+        let resp = router.oneshot(acquire_req("pat-gamma")).await.unwrap();
+        // Wire response byte-identical to before: a 429 over_cap.
+        assert_eq!(
+            resp.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "no-plan reject is still a 429 over_cap on the wire"
+        );
+        assert_eq!(
+            state.counters.acquire_rejected_no_plan.get(),
+            1,
+            "no-plan must light the dedicated no_plan counter"
+        );
+        assert_eq!(
+            state.counters.acquire_rejected_over_cap.get(),
+            0,
+            "no-plan must NOT smear into acquire_rejected_over_cap"
         );
     }
 
