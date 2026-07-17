@@ -16,8 +16,12 @@ import {
   releaseSpawnClaim,
   claimCompletion,
   COMPLETION_CLAIM_TTL_S,
-  acquireTenantSlot,
-  releaseTenantSlot,
+  decideSlotAcquire,
+  releaseSlotByJob,
+  SLOT_TTL_S,
+  FLEET_MAX_CONCURRENCY,
+  COLD_REPO_CAP,
+  type SlotRecord,
   randomTicket,
   decideRedeem,
   parseReconcilerRepos,
@@ -912,75 +916,128 @@ describe("claimCompletion (completed-leg counter dedup)", () => {
   });
 });
 
-// ── Per-tenant concurrency ceiling (max_concurrency) — best-effort fairness ───
+// ── Concurrency slots (W7/F7) — ATOMIC per-key + fleet cap (decideSlotAcquire) ──
 
-describe("acquireTenantSlot / releaseTenantSlot (per-tenant max_concurrency)", () => {
-  it("ADMITS (true) when the tenant is under the ceiling, and records the slot", async () => {
-    const kv = fakeKv();
-    expect(await acquireTenantSlot(kv, "tenant-a", "job-1", 2)).toBe(true);
-    expect(kv.store.get("conc:tenant-a:job-1")).toBe("1");
+describe("decideSlotAcquire (atomic per-key + fleet concurrency cap)", () => {
+  const NOW = 1_000_000;
+  const TTL = SLOT_TTL_S * 1000;
+  // A high fleet cap so the per-key path is exercised in isolation unless noted.
+  const BIG_FLEET = 1000;
+
+  it("ADMITS under the per-key cap and APPENDS the new slot", () => {
+    const d = decideSlotAcquire([], "tenant-a", "job-1", 2, BIG_FLEET, NOW, TTL);
+    expect(d.admitted).toBe(true);
+    expect(d.reason).toBeUndefined();
+    expect(d.slots).toEqual([{ key: "tenant-a", jobId: "job-1", expiresMs: NOW + TTL }]);
   });
 
-  it("REFUSES (false) a tenant already AT the ceiling — no slot added", async () => {
-    const kv = fakeKv();
-    expect(await acquireTenantSlot(kv, "t", "job-1", 2)).toBe(true);
-    expect(await acquireTenantSlot(kv, "t", "job-2", 2)).toBe(true);
-    expect(await acquireTenantSlot(kv, "t", "job-3", 2)).toBe(false); // at ceiling ⇒ refuse
-    expect(kv.store.has("conc:t:job-3")).toBe(false);
+  it("REFUSES at the per-key cap (over_key_cap) — slot list unchanged", () => {
+    const slots: SlotRecord[] = [
+      { key: "t", jobId: "j1", expiresMs: NOW + TTL },
+      { key: "t", jobId: "j2", expiresMs: NOW + TTL },
+    ];
+    const d = decideSlotAcquire(slots, "t", "j3", 2, BIG_FLEET, NOW, TTL);
+    expect(d.admitted).toBe(false);
+    expect(d.reason).toBe("over_key_cap");
+    expect(d.slots).toEqual(slots); // no append
   });
 
-  it("counts PER tenant (a busy tenant never gates another)", async () => {
-    const kv = fakeKv();
-    await acquireTenantSlot(kv, "a", "j1", 1);
-    expect(await acquireTenantSlot(kv, "a", "j2", 1)).toBe(false); // a at ceiling
-    expect(await acquireTenantSlot(kv, "b", "j3", 1)).toBe(true); // b unaffected
+  it("REFUSES at the FLEET cap even when the per-key cap allows (over_fleet_cap)", () => {
+    // 2 live slots under DIFFERENT keys, fleetCap=2: this new key is under its own
+    // per-key cap (0 < 5) but the fleet is full.
+    const slots: SlotRecord[] = [
+      { key: "a", jobId: "j1", expiresMs: NOW + TTL },
+      { key: "b", jobId: "j2", expiresMs: NOW + TTL },
+    ];
+    const d = decideSlotAcquire(slots, "c", "j3", 5, 2, NOW, TTL);
+    expect(d.admitted).toBe(false);
+    expect(d.reason).toBe("over_fleet_cap");
   });
 
-  it("release frees a slot so a later job is admitted again", async () => {
-    const kv = fakeKv();
-    await acquireTenantSlot(kv, "t", "j1", 1);
-    expect(await acquireTenantSlot(kv, "t", "j2", 1)).toBe(false);
-    await releaseTenantSlot(kv, "t", "j1");
-    expect(kv.store.has("conc:t:j1")).toBe(false);
-    expect(await acquireTenantSlot(kv, "t", "j3", 1)).toBe(true);
+  it("per-key cap is enforced BEFORE the fleet cap (a full key reports over_key_cap)", () => {
+    const slots: SlotRecord[] = [
+      { key: "t", jobId: "j1", expiresMs: NOW + TTL },
+      { key: "t", jobId: "j2", expiresMs: NOW + TTL },
+    ];
+    // Both caps are exceeded; the per-key reason wins.
+    const d = decideSlotAcquire(slots, "t", "j3", 2, 2, NOW, TTL);
+    expect(d.admitted).toBe(false);
+    expect(d.reason).toBe("over_key_cap");
   });
 
-  it("uses a `conc:` namespace, never colliding with spawn:/jtenant:/pat keys", async () => {
-    const kv = fakeKv({ "job-1": "pat-x", "spawn:job-1": "1", "jtenant:job-1": "t" });
-    expect(await acquireTenantSlot(kv, "t", "job-1", 5)).toBe(true);
-    expect(kv.store.get("conc:t:job-1")).toBe("1");
-    // The other namespaces are untouched, and don't inflate the tenant count.
-    expect(kv.store.get("job-1")).toBe("pat-x");
-    expect(kv.store.get("spawn:job-1")).toBe("1");
+  it("IDEMPOTENT: a retry for a jobId already holding a live slot re-admits, NEVER double-counts", () => {
+    const slots: SlotRecord[] = [{ key: "t", jobId: "j1", expiresMs: NOW + TTL }];
+    // Even AT the per-key cap of 1, the SAME jobId is re-admitted (a retry).
+    const d = decideSlotAcquire(slots, "t", "j1", 1, BIG_FLEET, NOW, TTL);
+    expect(d.admitted).toBe(true);
+    expect(d.reason).toBeUndefined();
+    expect(d.slots).toEqual(slots); // no duplicate appended
+    expect(d.slots.filter((s) => s.jobId === "j1")).toHaveLength(1);
   });
 
-  it("sets a TTL on the slot (self-healing backstop for a missed release)", async () => {
-    const kv = fakeKv();
-    await acquireTenantSlot(kv, "t", "j1", 5);
-    expect(kv.put).toHaveBeenCalledWith("conc:t:j1", "1", { expirationTtl: expect.any(Number) });
+  it("PRUNES expired slots before deciding (a stale slot self-heals, freeing capacity)", () => {
+    const slots: SlotRecord[] = [
+      { key: "t", jobId: "old", expiresMs: NOW - 1 }, // expired ⇒ pruned
+      { key: "t", jobId: "live", expiresMs: NOW + TTL },
+    ];
+    // perKeyCap=2: with the expired one pruned, only 1 live ⇒ admit.
+    const d = decideSlotAcquire(slots, "t", "j3", 2, BIG_FLEET, NOW, TTL);
+    expect(d.admitted).toBe(true);
+    expect(d.slots.map((s) => s.jobId)).toEqual(["live", "j3"]); // expired dropped
   });
 
-  it("FAIL-OPEN (admit) with no KV bound", async () => {
-    expect(await acquireTenantSlot(undefined, "t", "j1", 1)).toBe(true);
+  it("COLD vs WARM keys are counted separately (a repo key never gates a tenant key)", () => {
+    const slots: SlotRecord[] = [
+      { key: "repo:owner/repo", jobId: "c1", expiresMs: NOW + TTL },
+      { key: "repo:owner/repo", jobId: "c2", expiresMs: NOW + TTL },
+    ];
+    // The repo key is at COLD_REPO_CAP-ish here, but a WARM tenant key is distinct.
+    const cold = decideSlotAcquire(slots, "repo:owner/repo", "c3", 2, BIG_FLEET, NOW, TTL);
+    expect(cold.admitted).toBe(false); // repo key full
+    const warm = decideSlotAcquire(slots, "tenant-x", "w1", 5, BIG_FLEET, NOW, TTL);
+    expect(warm.admitted).toBe(true); // tenant key unaffected by the repo's slots
   });
 
-  it("FAIL-OPEN (admit) when the KV has no `list` (can't count ⇒ never gate)", async () => {
-    const noList: KvLike = {
-      get: vi.fn(async () => null),
-      put: vi.fn(async () => {}),
-      delete: vi.fn(async () => {}),
-    };
-    expect(await acquireTenantSlot(noList, "t", "j1", 1)).toBe(true);
+  it("the exported caps have the frozen values (fleet mirrors max_instances, cold-repo default)", () => {
+    expect(FLEET_MAX_CONCURRENCY).toBe(20);
+    expect(COLD_REPO_CAP).toBe(8);
+    expect(SLOT_TTL_S).toBe(2700);
+  });
+});
+
+describe("releaseSlotByJob (release by jobId, prune expired)", () => {
+  const NOW = 1_000_000;
+  const TTL = SLOT_TTL_S * 1000;
+
+  it("removes the slot for the given jobId (leaves the rest)", () => {
+    const slots: SlotRecord[] = [
+      { key: "t", jobId: "j1", expiresMs: NOW + TTL },
+      { key: "t", jobId: "j2", expiresMs: NOW + TTL },
+    ];
+    expect(releaseSlotByJob(slots, "j1", NOW)).toEqual([
+      { key: "t", jobId: "j2", expiresMs: NOW + TTL },
+    ]);
   });
 
-  it("FAIL-OPEN (admit) when list throws (never block a legitimate job on a KV hiccup)", async () => {
-    const kv = fakeKv();
-    (kv.list as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("kv down"));
-    expect(await acquireTenantSlot(kv, "t", "j1", 1)).toBe(true);
+  it("releasing by jobId works WITHOUT the key (globally-unique jobId)", () => {
+    const slots: SlotRecord[] = [{ key: "any-key-at-all", jobId: "jX", expiresMs: NOW + TTL }];
+    expect(releaseSlotByJob(slots, "jX", NOW)).toEqual([]);
   });
 
-  it("releaseTenantSlot no-ops (no throw) with no KV bound", async () => {
-    await expect(releaseTenantSlot(undefined, "t", "j1")).resolves.toBeUndefined();
+  it("also PRUNES expired slots (self-heal on any release)", () => {
+    const slots: SlotRecord[] = [
+      { key: "t", jobId: "expired", expiresMs: NOW - 1 },
+      { key: "t", jobId: "live", expiresMs: NOW + TTL },
+    ];
+    // Release a DIFFERENT job; the expired one is still pruned.
+    expect(releaseSlotByJob(slots, "nope", NOW)).toEqual([
+      { key: "t", jobId: "live", expiresMs: NOW + TTL },
+    ]);
+  });
+
+  it("releasing an unknown jobId is a safe no-op (still prunes expired)", () => {
+    const slots: SlotRecord[] = [{ key: "t", jobId: "j1", expiresMs: NOW + TTL }];
+    expect(releaseSlotByJob(slots, "unknown", NOW)).toEqual(slots);
   });
 });
 

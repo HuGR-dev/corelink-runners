@@ -57,10 +57,10 @@ export interface KvLike {
   get(key: string): Promise<string | null>;
   put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void>;
   delete(key: string): Promise<void>;
-  // Optional prefix listing (the real KVNamespace has it) — used ONLY by the
-  // best-effort per-tenant concurrency counter. Absent ⇒ the counter fails open
-  // (admits), never a gate. Kept optional so the spawn-claim path (which does not
-  // list) still satisfies this runtime-agnostic subset.
+  // Optional prefix listing (the real KVNamespace has it). No longer consumed by
+  // the spawn-Worker (the per-tenant concurrency counter that used it moved to the
+  // atomic ConcurrencySlotsDO in W7/F7); kept optional for KVNamespace shape
+  // parity so the real binding still satisfies this runtime-agnostic subset.
   list?(options: { prefix: string }): Promise<{ keys: { name: string }[] }>;
 }
 
@@ -507,56 +507,84 @@ export async function buildContainerEnv(
   }
 }
 
-// ── Per-tenant concurrency ceiling (max_concurrency) — best-effort fairness ────
+// ── Concurrency slots (W7/F7) — ATOMIC per-key + fleet cap, DO-backed ─────────
 //
-// One KV key per in-flight (tenant, job): `conc:<tenant>:<jobId>`, TTL-bounded so
-// a MISSED release SELF-HEALS (the slot expires) — it can never become a permanent
-// gate. The live count is the number of keys under the tenant prefix. Best-effort
-// + FAIL-OPEN by north-star: no KV / no `list` / any error ⇒ ADMIT. Fairness must
-// never refuse a legitimately-under-ceiling job. Residual: two exactly-concurrent
-// admits can both see `< max` (KV has no atomic CAS) ⇒ a transient +1 overshoot
-// that self-heals; the common case (bursts seconds apart) is collapsed.
-export const TENANT_SLOT_TTL_S = 2700; // 45m — matches the container sleepAfter backstop
+// Concurrency is the BILLING SKU, so the ceiling must be REAL — not a best-effort
+// KV read-then-write (which was NON-atomic: two concurrent admits both saw
+// `< max` → +1 overshoot; and FAIL-OPEN, so a customer could exceed what they
+// bought). The count now lives in a single `ConcurrencySlotsDO` key; the DO's
+// single-threaded input-gating makes the read-modify-write below ATOMIC (no CAS
+// race). The pure decision lives HERE (runtime-agnostic, unit-testable); the DO
+// (index.ts) is a thin wrapper that persists `decideSlotAcquire(...).slots`.
+//
+// The cap is enforced on BOTH warm mints (per-tenant entitlement) AND cold spawns
+// (per-repo `COLD_REPO_CAP`) — the old KV path skipped cold spawns entirely, so a
+// COLD spawn had NO ceiling → unlimited runners. A fleet cap (`FLEET_MAX_CONCURRENCY`,
+// mirroring the RunnerContainer max_instances) bounds the global physical fleet.
 
-function tenantSlotKey(tenant: string, jobId: string): string {
-  return `conc:${tenant}:${jobId}`;
+// A live slot lives no longer than this even if its release is missed — the TTL is
+// the self-heal backstop (matches the old TENANT_SLOT_TTL_S 45m container backstop).
+export const SLOT_TTL_S = 2700;
+// The physical fleet cap — mirrors the RunnerContainer `max_instances` in
+// wrangler.jsonc. Warm admission clamps the per-tenant entitlement to this, and it
+// is the global ceiling across ALL keys (tenants + cold repos).
+export const FLEET_MAX_CONCURRENCY = 20;
+// The per-repo ceiling for COLD spawns (no derived tenant, so no entitlement).
+export const COLD_REPO_CAP = 8;
+
+export interface SlotRecord {
+  key: string;
+  jobId: string;
+  expiresMs: number;
+}
+export interface SlotAcquireDecision {
+  admitted: boolean;
+  reason?: "over_key_cap" | "over_fleet_cap";
+  slots: SlotRecord[];
 }
 
 /**
- * Try to ACQUIRE a runner slot for `tenant`. Returns `true` (admit → spawn) if the
- * tenant is under `max`, `false` (refuse → no spawn) if already at the ceiling.
- * FAIL-OPEN (admit) with no KV, no `list`, or any KV error.
+ * PURE slot-acquire decision (unit-testable; the DO applies `slots` to storage).
+ * Prunes expired slots first, then decides. IDEMPOTENT per jobId: if this jobId
+ * already holds a LIVE slot (a retry), it is re-admitted WITHOUT double-counting.
+ * Enforces the per-key cap FIRST (a tenant/repo can't exceed its own ceiling),
+ * THEN the fleet cap (the global physical bound). On admit, appends the slot.
  */
-export async function acquireTenantSlot(
-  kv: KvLike | undefined,
-  tenant: string,
+export function decideSlotAcquire(
+  slots: SlotRecord[],
+  key: string,
   jobId: string,
-  max: number,
-): Promise<boolean> {
-  if (!kv || !kv.list) return true; // no infra ⇒ fail-open (admit)
-  try {
-    const { keys } = await kv.list({ prefix: `conc:${tenant}:` });
-    if (keys.length >= max) return false; // at ceiling ⇒ refuse (no spawn)
-    await kv.put(tenantSlotKey(tenant, jobId), "1", { expirationTtl: TENANT_SLOT_TTL_S });
-    return true;
-  } catch {
-    return true; // KV error ⇒ fail-open (never block a real job)
+  perKeyCap: number,
+  fleetCap: number,
+  nowMs: number,
+  ttlMs: number,
+): SlotAcquireDecision {
+  const live = slots.filter((s) => s.expiresMs > nowMs);
+  // Idempotent re-admit: a retry for a jobId already holding a live slot must not
+  // double-count (the DO read-modify-write can be re-driven by a redelivery).
+  if (live.some((s) => s.jobId === jobId)) {
+    return { admitted: true, slots: live };
   }
+  const perKey = live.filter((s) => s.key === key).length;
+  if (perKey >= perKeyCap) return { admitted: false, reason: "over_key_cap", slots: live };
+  if (live.length >= fleetCap) return { admitted: false, reason: "over_fleet_cap", slots: live };
+  return {
+    admitted: true,
+    slots: [...live, { key, jobId, expiresMs: nowMs + ttlMs }],
+  };
 }
 
 /**
- * Release a tenant's runner slot (called at job completion, and on a spawn failure
- * after acquiring). Best-effort: a delete failure just leaves the slot to TTL-expire.
+ * Release a slot by jobId ONLY (jobId is globally unique, so the key is not needed
+ * at release — completion/failure can release without re-deriving the key). Also
+ * prunes expired slots (self-heal, same as the acquire path).
  */
-export async function releaseTenantSlot(
-  kv: KvLike | undefined,
-  tenant: string,
+export function releaseSlotByJob(
+  slots: SlotRecord[],
   jobId: string,
-): Promise<void> {
-  if (!kv) return;
-  await kv.delete(tenantSlotKey(tenant, jobId)).catch(() => {
-    /* best-effort: the slot TTL-expires */
-  });
+  nowMs: number,
+): SlotRecord[] {
+  return slots.filter((s) => s.expiresMs > nowMs && s.jobId !== jobId);
 }
 
 // ── Autoscaler re-drive reconciler — recover jobs orphaned by a failed spawn ───

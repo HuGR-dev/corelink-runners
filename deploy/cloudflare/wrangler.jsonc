@@ -74,14 +74,20 @@
       // Golden-signal counters for the direct fleet (src/metrics.ts). ONE
       // singleton DO holds the durable counter map; the autoscaler bumps it at
       // each lifecycle seam and GET /internal/v1/metrics reads the snapshot.
-      { "name": "METRICS", "class_name": "MetricsDO" }
+      { "name": "METRICS", "class_name": "MetricsDO" },
+      // Concurrency slots (W7/F7): ONE singleton DO (fixed id "global") holds the
+      // authoritative in-flight slot list. Its single-threaded input-gating makes
+      // the per-tenant + fleet concurrency ceiling ATOMIC (replaces the non-atomic,
+      // fail-open KV counter). A plain DO — just DO storage, not a container class.
+      { "name": "CONCURRENCY_SLOTS", "class_name": "ConcurrencySlotsDO" }
     ]
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["RunnerContainer"] },
     { "tag": "v2", "new_sqlite_classes": ["CheckHostContainer"] },
     { "tag": "v3", "new_sqlite_classes": ["CredStashDO"] },
-    { "tag": "v4", "new_sqlite_classes": ["MetricsDO"] }
+    { "tag": "v4", "new_sqlite_classes": ["MetricsDO"] },
+    { "tag": "v5", "new_sqlite_classes": ["ConcurrencySlotsDO"] }
   ],
 
   // The runner container. IMPORTANT (ADR-0008 / README wrinkle #1): the image is

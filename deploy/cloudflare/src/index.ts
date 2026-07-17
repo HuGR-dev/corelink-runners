@@ -54,8 +54,11 @@ import {
   claimSpawn,
   releaseSpawnClaim,
   claimCompletion,
-  acquireTenantSlot,
-  releaseTenantSlot,
+  decideSlotAcquire,
+  releaseSlotByJob,
+  SLOT_TTL_S,
+  FLEET_MAX_CONCURRENCY,
+  COLD_REPO_CAP,
   decideRedeem,
   parseReconcilerRepos,
   installationIdForRepo,
@@ -65,6 +68,7 @@ import {
   RECONCILE_MIN_AGE_MS,
   logEvent,
   type ContainerEnvResult,
+  type SlotRecord,
   type StashedCred,
   type StashRecord,
   type CredStashLike,
@@ -75,6 +79,9 @@ import { installationToken } from "./github_app";
 // Re-export the counter Durable Object so wrangler resolves `MetricsDO` from
 // this main module (its class + migration are in wrangler.jsonc). Defined in
 // ./metrics.ts to keep the counter surface self-contained.
+// (ConcurrencySlotsDO + CredStashDO are declared in THIS module below, so the
+// Worker runtime already resolves them from the main entrypoint — no re-export
+// needed for those.)
 export { MetricsDO };
 
 export interface Env {
@@ -171,6 +178,14 @@ export interface Env {
   // ── env-0 (cred-ticket) — keep the CAS PAT OUT of the untrusted container env ──
   // The single-use stash latch (one DO instance per lease_id = GH jobId).
   CRED_STASH: DurableObjectNamespace<CredStashDO>;
+  // ── Concurrency slots (W7/F7) — the ATOMIC per-key + fleet concurrency cap ──
+  // A SINGLETON DO (always addressed by the fixed id "global") holds the one
+  // authoritative in-flight slot list; its single-threaded input-gating makes the
+  // read-modify-write atomic (no KV race). Warm mints cap on the per-tenant
+  // entitlement (clamped to FLEET), cold spawns on COLD_REPO_CAP per repo; both
+  // under the global FLEET cap. Always present (bound in wrangler); the acquire is
+  // FAIL-OPEN only on a THROWN DO/infra error, never on a clean at-capacity refusal.
+  CONCURRENCY_SLOTS: DurableObjectNamespace<ConcurrencySlotsDO>;
   // Golden-signal counters for the direct fleet (src/metrics.ts). Optional:
   // absent ⇒ bumpMetrics is a no-op + GET /internal/v1/metrics returns {} (the
   // counters are additive/default-safe).
@@ -241,6 +256,39 @@ export class CredStashDO extends DurableObject<Env> {
   async wipe(): Promise<void> {
     await this.ctx.storage.deleteAll();
     await this.ctx.storage.deleteAlarm();
+  }
+}
+
+// ── Concurrency slots DO (W7/F7) — the ATOMIC per-key + fleet concurrency cap ──
+// A SINGLETON (always addressed via idFromName("global")) so every spawn shares
+// ONE global count (same pattern as the singleton MetricsDO). It holds the whole
+// in-flight slot list under a single "slots" key; the DO's single-threaded
+// input-gating serializes the read-modify-write, so — unlike the old KV
+// read-then-write — two concurrent admits can NEVER both see `< cap` and both +1.
+// The DECISION is the pure `decideSlotAcquire`/`releaseSlotByJob` (lib, unit-
+// tested); this wrapper only persists the resulting slot list.
+export class ConcurrencySlotsDO extends DurableObject<Env> {
+  // ATOMIC acquire: prune-expired → decide (per-key cap THEN fleet cap; idempotent
+  // per jobId) → persist. Returns the clean admit/refuse decision — the caller
+  // fail-opens ONLY on a THROWN error (infra hiccup), never on a `{admitted:false}`.
+  async acquire(
+    key: string,
+    jobId: string,
+    perKeyCap: number,
+    fleetCap: number,
+    ttlMs: number,
+  ): Promise<{ admitted: boolean; reason?: string }> {
+    const slots = (await this.ctx.storage.get<SlotRecord[]>("slots")) ?? [];
+    const d = decideSlotAcquire(slots, key, jobId, perKeyCap, fleetCap, Date.now(), ttlMs);
+    await this.ctx.storage.put("slots", d.slots);
+    return { admitted: d.admitted, reason: d.reason };
+  }
+
+  // Release a slot by jobId (globally unique — no key needed). Also prunes expired
+  // slots. Idempotent: releasing an unknown/already-released jobId is a safe no-op.
+  async release(jobId: string): Promise<void> {
+    const slots = (await this.ctx.storage.get<SlotRecord[]>("slots")) ?? [];
+    await this.ctx.storage.put("slots", releaseSlotByJob(slots, jobId, Date.now()));
   }
 }
 
@@ -648,6 +696,65 @@ async function maybeBillCompletedJob(
   }
 }
 
+// The fixed singleton id for the ConcurrencySlotsDO — every spawn shares ONE
+// global count (mirrors the singleton MetricsDO). Kept as a helper so both the
+// acquire and release call sites address the SAME instance.
+function concurrencySlots(env: Env): DurableObjectStub<ConcurrencySlotsDO> {
+  return env.CONCURRENCY_SLOTS.get(env.CONCURRENCY_SLOTS.idFromName("global"));
+}
+
+// Best-effort release of a spawn's concurrency slot (by globally-unique jobId).
+// Fully guarded: swallows BOTH a synchronous throw (an unbound binding in a
+// partial/test env) AND an async DO error — a missed release self-heals at the
+// slot TTL, so a release failure must NEVER break the webhook / spawn-fail path.
+async function releaseConcurrencySlot(env: Env, jobId: string): Promise<void> {
+  try {
+    await concurrencySlots(env).release(jobId);
+  } catch (e) {
+    logEvent("error", "concurrency_slot_release_failed", { jobId, error: (e as Error).message });
+  }
+}
+
+// Atomically acquire a concurrency slot for THIS spawn — warm OR cold:
+//   • warm (server-derived tenant + entitlement): key = the tenant, perKeyCap =
+//     min(entitlement, FLEET) so a tenant never exceeds what it bought NOR the
+//     physical fleet.
+//   • cold (no derived tenant): key = `repo:<repo>`, perKeyCap = COLD_REPO_CAP —
+//     the old KV path skipped cold spawns entirely (unlimited runners); they are
+//     now capped per-repo AND under the same global FLEET cap.
+// FAIL-OPEN ONLY on a THROWN DO/infra error (never block a legit job on an infra
+// hiccup); a clean `{admitted:false}` is a REAL at-capacity refusal and is honored.
+async function acquireConcurrencySlot(
+  env: Env,
+  jobId: string,
+  mint: ContainerEnvResult,
+  repo: string,
+): Promise<{ admitted: boolean; reason?: string }> {
+  const warm = mint.tenant != null && mint.maxConcurrency != null;
+  const key = warm ? (mint.tenant as string) : `repo:${repo}`;
+  const perKeyCap = warm
+    ? Math.min(mint.maxConcurrency as number, FLEET_MAX_CONCURRENCY)
+    : COLD_REPO_CAP;
+  try {
+    return await concurrencySlots(env).acquire(
+      key,
+      jobId,
+      perKeyCap,
+      FLEET_MAX_CONCURRENCY,
+      SLOT_TTL_S * 1000,
+    );
+  } catch (e) {
+    // Infra hiccup ⇒ ADMIT (never block a legitimate job on a DO error). A clean
+    // at-capacity decision above is NOT an error and is honored as a real refusal.
+    logEvent("error", "concurrency_slot_acquire_error_failopen", {
+      jobId,
+      key,
+      error: (e as Error).message,
+    });
+    return { admitted: true };
+  }
+}
+
 // The spawn drive shared by the webhook path AND the re-drive reconciler:
 // AUTHORIZE + warm-mint (env-0 aware) → per-tenant concurrency → GitHub JIT →
 // spawn. Assumes the caller ALREADY won the spawn claim. Throws on JIT/spawn
@@ -686,13 +793,21 @@ async function driveSpawn(
       logEvent("error", "kv_put_job_pat_failed", { jobId, error: (e as Error).message }),
     );
   }
-  // Per-tenant concurrency ceiling (warm mints only). At-ceiling ⇒ no spawn.
-  if (mint.tenant && mint.maxConcurrency != null) {
-    const admitted = await acquireTenantSlot(env.RUNNER_JOB_PATS, mint.tenant, jobId, mint.maxConcurrency);
-    if (!admitted) {
+  // Concurrency ceiling (W7/F7) — ATOMIC, and enforced for BOTH warm AND cold
+  // spawns (the old KV path skipped cold ⇒ unlimited runners). At-capacity ⇒ no
+  // spawn (a clean refusal; fail-open is only on a thrown DO error).
+  {
+    const slot = await acquireConcurrencySlot(env, jobId, mint, repo);
+    if (!slot.admitted) {
       await releaseSpawnClaim(env.RUNNER_JOB_PATS, jobId);
       await bumpMetrics(env, "spawn_at_ceiling");
-      logEvent("info", "tenant_at_ceiling", { jobId, tenant: mint.tenant, maxConcurrency: mint.maxConcurrency });
+      logEvent("info", "spawn_at_ceiling", {
+        jobId,
+        repo,
+        tenant: mint.tenant,
+        maxConcurrency: mint.maxConcurrency,
+        reason: slot.reason,
+      });
       return;
     }
   }
@@ -704,7 +819,9 @@ async function driveSpawn(
     await bumpMetrics(env, "runner_spawned");
   } catch (e) {
     // Release the concurrency slot on a spawn failure (the guard releases the claim).
-    if (mint.tenant) await releaseTenantSlot(env.RUNNER_JOB_PATS, mint.tenant, jobId);
+    // Release by jobId ONLY (globally unique) — works for warm AND cold; best-effort
+    // (a miss self-heals at the slot TTL). Fully guarded: never mask the spawn error.
+    await releaseConcurrencySlot(env, jobId);
     // F2 (W3): the PAT was minted (revoke-key stored above) but the spawn failed —
     // REVOKE it now instead of leaking a live cas:rw PAT to its TTL. revokeCompletedJob
     // reads the jobId->patId stored at mint time, revokes by pat_id, deletes the key,
@@ -856,10 +973,13 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
           derivedTenant = (await env.RUNNER_JOB_PATS.get(jobTenantKey(jobId))) ?? undefined;
         }
         const revoked = await revokeCompletedJob(env, jobId, derivedTenant);
-        // Release the per-tenant concurrency slot (best-effort; the slot TTL
-        // self-heals a missed release, so this never permanently blocks a tenant).
+        // Release the concurrency slot (W7/F7) — by jobId ONLY, so it releases a
+        // warm OR cold spawn's slot without needing the derived tenant. Best-effort
+        // (the slot TTL self-heals a missed release, so this never permanently
+        // blocks a tenant/repo). Fully guarded (never breaks the webhook).
+        await releaseConcurrencySlot(env, jobId);
+        // Drop the derived-tenant stash (still needed for revoke + billing above).
         if (derivedTenant && env.RUNNER_JOB_PATS) {
-          await releaseTenantSlot(env.RUNNER_JOB_PATS, derivedTenant, jobId);
           await env.RUNNER_JOB_PATS.delete(jobTenantKey(jobId)).catch(() => {
             /* best-effort: TTL is the backstop */
           });
