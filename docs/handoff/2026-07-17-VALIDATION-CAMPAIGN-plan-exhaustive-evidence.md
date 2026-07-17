@@ -84,6 +84,19 @@ grade; (3) cites the artifact per cell; (4) reports every below-grade cell hones
 tautology — a real gap noted beats a green lie); (5) gate stays green (no test weakened to pass). The
 lead COLD-VALIDATES every agent's evidence (re-runs a sample, inspects artifacts) before accepting.
 
+## THE LOOP PROTOCOL (owner mandate 2026-07-17: "iterar no mínimo 4 ou 5x até pegar tudo sem esquecer nada")
+This is NOT a single fan-out. EVERY artifact — the FEATURES inventory, the USE-SCENARIOS/story catalog,
+the scenario catalog, and the per-domain evidence — goes through iterative ROUNDS until DRY:
+- **R1 BUILD** — author the first exhaustive pass.
+- **R2 CRITIC** — a FRESH adversarial "completeness critic" agent whose ONLY job: "what feature / story /
+  persona / journey / combination / failure / edge / config-knob is MISSING or SHALLOW here?" → a gap list.
+- **R3 DEEPEN** — fill every gap the critic found.
+- **R4 CRITIC** again (fresh eyes). **R5 DEEPEN**. … keep looping.
+- **STOP only when a critic round comes back DRY** (nothing new) — and never before ≥4–5 rounds. The lead
+  cold-reads each critic's gap list and the deepened result; a shallow "no gaps" from a critic is itself
+  rejected (re-run with a harder critic). Product docs (FEATURES/USE-SCENARIOS) loop FIRST — they are the
+  map the evidence is measured against; you cannot validate what isn't enumerated.
+
 ## OWNER DECISIONS (block fan-out)
 1. **Chaos on the LIVE dogfood infra?** C-waves cause brief real outages (fabricd kill → ~watchdog
    window) + real spawn cost (load). Dogfood is internal (no paying customers). [rec: YES — it's the

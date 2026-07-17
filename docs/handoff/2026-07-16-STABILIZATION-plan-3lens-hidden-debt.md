@@ -1,8 +1,10 @@
 # Stabilization plan — "100% firm, self-running" + 3-lens hidden-debt ledger
 
 **Date:** 2026-07-16 · **Author:** runners TL · **Trigger:** owner — "como estabilizar de vez +
-3 agents óticas diferentes procurando débitos ocultos." · **Status:** PROPOSED — awaiting owner
-go/scope before fan-out.
+3 agents óticas diferentes procurando débitos ocultos." · **Status:** ✅ EXECUTED + LIVE (all 7
+waves W1–W7 landed + deployed 2026-07-16..17; W2 canary armed + email-proven). This doc is the
+frozen plan of record; the live status is tracked in the `stabilization-wave-2026-07-16` memory +
+git history. (Header corrected 2026-07-17 — was stale "PROPOSED".)
 
 Three adversarial auditors ran code-grounded, read-only (Lens A runtime-fragility/SPOF · Lens B
 security/secret-hygiene · Lens C correctness/coverage). Findings deduped across lenses, ranked by
