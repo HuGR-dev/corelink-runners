@@ -313,6 +313,7 @@ dependencies = [
  "anyhow",
  "base64",
  "blake3",
+ "corelink-runner",
  "corelink-runners-contracts",
  "ed25519-dalek",
  "serde",

@@ -347,6 +347,11 @@ impl ShimExecutor {
 
 /// Simulate a deterministic digest for a run command (for equivalence
 /// comparison). In a live environment this would be the SHA-256 of stdout.
+///
+/// ⚠️ **This is a stand-in, NOT a real execution result.** No process runs;
+/// the digest is derived from the command *string*. It must never feed a
+/// billing/memo/cache decision — see the module-level warning. Real execution
+/// lives in `corelink-check-exec-server` and the GitHub-Actions runner fleet.
 fn simulate_run_digest(cmd: &str) -> String {
     // Deterministic: hash the command string itself (no_nondeterminism).
     // In v0 we use a simple length+content digest to avoid adding sha2 dep.
