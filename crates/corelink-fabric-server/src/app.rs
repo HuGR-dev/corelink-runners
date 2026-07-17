@@ -964,6 +964,18 @@ impl AppState {
         self
     }
 
+    /// Install a pre-built, SHARED [`Counters`](crate::observability::Counters)
+    /// (default is a fresh all-zero set created in [`new`](Self::new)). The
+    /// composition root uses this so the W3 introspect circuit breaker — built
+    /// BEFORE `AppState` and handed the SAME `Arc<Counters>` — increments the
+    /// `introspect_breaker_open` cell that this state's `/internal/v1/status`
+    /// snapshot reads. Call it in the builder chain BEFORE any counter is read.
+    #[must_use]
+    pub fn with_counters(mut self, counters: Arc<crate::observability::Counters>) -> Self {
+        self.counters = counters;
+        self
+    }
+
     /// Enable emitting the `intent_metrics_sig` (attested-cost binding) on close
     /// responses. Default-off (wire-invisible); flip on only after the verifier
     /// adopts the field. Wired from `FABRIC_EMIT_INTENT_METRICS_SIG`.

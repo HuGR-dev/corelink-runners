@@ -199,6 +199,23 @@ pub struct ServerConfig {
     /// no longer starve the 2-vCPU singleton's runtime into a `/v1/health`-000
     /// brownout.
     pub introspect_max_inflight: usize,
+    /// W3 introspect circuit breaker: consecutive TRANSIENT introspect failures
+    /// (transport error / HTTP 503) that trip the breaker OPEN. From
+    /// `FABRIC_INTROSPECT_BREAKER_THRESHOLD` (default
+    /// [`DEFAULT_INTROSPECT_BREAKER_THRESHOLD`], must be ≥ 1). While OPEN, every
+    /// introspect fast-fails 503 WITHOUT an upstream POST or retry — a brownout
+    /// stops pinning the blocking pool. Only used on the CoreLink auth backend.
+    ///
+    /// [`DEFAULT_INTROSPECT_BREAKER_THRESHOLD`]: crate::introspect_breaker::DEFAULT_INTROSPECT_BREAKER_THRESHOLD
+    pub introspect_breaker_threshold: u32,
+    /// W3 introspect circuit breaker: how long the breaker stays OPEN before it
+    /// admits a single HALF-OPEN recovery probe. From
+    /// `FABRIC_INTROSPECT_BREAKER_COOLDOWN_MS` (default
+    /// [`DEFAULT_INTROSPECT_BREAKER_COOLDOWN`], must be ≥ 1ms). Only used on the
+    /// CoreLink auth backend.
+    ///
+    /// [`DEFAULT_INTROSPECT_BREAKER_COOLDOWN`]: crate::introspect_breaker::DEFAULT_INTROSPECT_BREAKER_COOLDOWN
+    pub introspect_breaker_cooldown: std::time::Duration,
     /// Emit the `intent_metrics_sig` attested-cost binding on close responses.
     /// From `FABRIC_EMIT_INTENT_METRICS_SIG` (default `false` → wire-invisible;
     /// flip on only after the verifier adopts the field).
@@ -290,6 +307,14 @@ impl std::fmt::Debug for ServerConfig {
             .field("close_ack_max_inflight", &self.close_ack_max_inflight)
             .field("provision_max_inflight", &self.provision_max_inflight)
             .field("introspect_max_inflight", &self.introspect_max_inflight)
+            .field(
+                "introspect_breaker_threshold",
+                &self.introspect_breaker_threshold,
+            )
+            .field(
+                "introspect_breaker_cooldown",
+                &self.introspect_breaker_cooldown,
+            )
             .field("emit_intent_metrics_sig", &self.emit_intent_metrics_sig)
             .field("max_inflight_requests", &self.max_inflight_requests)
             .field("admission_mode", &self.admission_mode)
@@ -663,6 +688,22 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
         crate::app::DEFAULT_INTROSPECT_MAX_INFLIGHT,
     )?;
 
+    // ── W3 introspect circuit breaker: brownout fast-fail ────────────────────
+    // Optional, default DEFAULT_INTROSPECT_BREAKER_THRESHOLD / _COOLDOWN; a
+    // present 0 / unparseable value is a hard boot error (a 0 threshold or 0ms
+    // cooldown is degenerate). Only consumed on the CoreLink auth backend.
+    let introspect_breaker_threshold = u32::try_from(parse_positive_usize(
+        &get,
+        "FABRIC_INTROSPECT_BREAKER_THRESHOLD",
+        crate::introspect_breaker::DEFAULT_INTROSPECT_BREAKER_THRESHOLD as usize,
+    )?)
+    .context("FABRIC_INTROSPECT_BREAKER_THRESHOLD is too large (max u32)")?;
+    let introspect_breaker_cooldown = std::time::Duration::from_millis(parse_positive_usize(
+        &get,
+        "FABRIC_INTROSPECT_BREAKER_COOLDOWN_MS",
+        crate::introspect_breaker::DEFAULT_INTROSPECT_BREAKER_COOLDOWN.as_millis() as usize,
+    )? as u64);
+
     // ── Attested-cost binding emission (default-off, wire-invisible) ─────────
     // Truthy = "1" or "true" (case-insensitive); anything else / absent = off.
     let emit_intent_metrics_sig = get("FABRIC_EMIT_INTENT_METRICS_SIG")
@@ -894,6 +935,8 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
         close_ack_max_inflight,
         provision_max_inflight,
         introspect_max_inflight,
+        introspect_breaker_threshold,
+        introspect_breaker_cooldown,
         emit_intent_metrics_sig,
         max_inflight_requests,
         admission_mode,
@@ -1104,6 +1147,12 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
     // live onboarding registry (the third tuple element). CoreLink mode yields
     // `None` — plans there come from per-acquire introspection, so a local
     // override is not meaningful and the admin route is not mounted.
+    // The SHARED golden-signal counters: built HERE (before the stores) so the W3
+    // introspect circuit breaker — which increments `introspect_breaker_open` —
+    // and the `/internal/v1/status` snapshot (via `AppState.counters`) read the
+    // SAME `Arc<Counters>`. Threaded into `AppState` below with `.with_counters`.
+    let counters = Arc::new(crate::observability::Counters::default());
+
     let (store, plans, admin_state): (
         Arc<dyn crate::auth::TokenStore + Send + Sync>,
         Arc<dyn crate::PlanSource>,
@@ -1164,6 +1213,19 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
             // `Arc`-backed pool; `timeout_global` still bounds every call.
             let introspect_transport = UreqIntrospect::new(auth_cfg.timeout);
 
+            // W3: ONE circuit breaker, SHARED (cloned) into BOTH stores — a
+            // brownout observed on EITHER introspect leg (auth or plan) trips the
+            // one breaker, so both legs fast-fail 503 during the brownout instead
+            // of pinning the blocking pool `3×` each. It increments the SHARED
+            // `counters.introspect_breaker_open` cell (read by `/internal/v1/status`).
+            let introspect_breaker = Arc::new(crate::introspect_breaker::CircuitBreaker::new(
+                crate::introspect_breaker::BreakerConfig {
+                    threshold: cfg.introspect_breaker_threshold,
+                    cooldown: cfg.introspect_breaker_cooldown,
+                },
+                Arc::clone(&counters),
+            ));
+
             // Auth: CoreLinkTokenStore over the shared transport (timeout already
             // resolved in config_from_env).
             let auth_store_cfg = CoreLinkAuthConfig {
@@ -1172,10 +1234,10 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
                 timeout: auth_cfg.timeout,
                 retry_backoff: auth_cfg.retry_backoff,
             };
-            let cl_store = Arc::new(CoreLinkTokenStore::new(
-                introspect_transport.clone(),
-                auth_store_cfg,
-            ));
+            let cl_store = Arc::new(
+                CoreLinkTokenStore::new(introspect_transport.clone(), auth_store_cfg)
+                    .with_breaker(Arc::clone(&introspect_breaker)),
+            );
 
             // Cap: CoreLinkPlanStore over the SAME shared transport, SAME endpoint
             // + secret + timeout. The cap is read from the introspect response
@@ -1187,13 +1249,17 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
                 timeout: auth_cfg.timeout,
                 retry_backoff: auth_cfg.retry_backoff,
             };
-            let cl_plans = Arc::new(CoreLinkPlanStore::new(introspect_transport, plan_store_cfg));
+            let cl_plans = Arc::new(
+                CoreLinkPlanStore::new(introspect_transport, plan_store_cfg)
+                    .with_breaker(introspect_breaker),
+            );
 
             (cl_store, cl_plans, None)
         }
     };
 
     let state = AppState::new(ledger, plans, Arc::new(SystemClock))
+        .with_counters(counters)
         .with_signer(signer)
         .with_ingest_signer(ingest_signer)
         // WP-F: activate the vCPU-h compute ceiling iff FABRIC_RUNNER_VCPU > 0
