@@ -1,10 +1,18 @@
 # M1 — the production fabric: decomposition DRAFT
 
+> ⚠️ **hugit / campaign #3 is DISCONTINUED (owner-confirmed 2026-07).** This draft was
+> authored when hugit was the intended anchor consumer, so it frames the M1 done-gate and
+> wire seam in "hugit" terms throughout. Read those as HISTORICAL: the mechanisms
+> (RunnerLease/FenceManifest/attestation/§13 envelope/conformance vectors) are the fabric's
+> own and live; the fabric is now direct-to-ICP. The seam is no longer "frozen from an
+> external hugit side" — it is the fabric's own wire/envelope contract.
+>
 > status: PROPOSAL for owner review · author: techlead session 2026-06-12 · not yet critic-reviewed
 >
 > Inputs: `docs/whitepaper/corelink-runners-v1.md` (canonical) · `docs/product/product.md` ·
 > `docs/ROADMAP.md` (M1 epic list, agreed) · `docs/spec/hugit-integration-contract.md` v1.2.0
-> (frozen from hugit's side) · `docs/spec/corelink-fabric-stub.md` · `docs/interop.md` ·
+> (the fabric wire/envelope contract — historical hugit framing; hugit discontinued) ·
+> `docs/spec/corelink-fabric-stub.md` · `docs/interop.md` ·
 > code on `integ/seed-runner` post `v0.1.0-seed`. Decided principles are respected, not
 > reargued: concurrency pricing never per-minute · cache-warm boot · fail-closed isolation ·
 > M1 replaces the transport, not the contract · identity via the HuGR account (ADR-0002) ·
@@ -28,7 +36,8 @@ Roadmap restatement (`docs/ROADMAP.md` M1):
 > fairness, measurable non-interference, byte-determinism, signed attestation. "M1 replaces
 > the transport, not the contract."
 
-**The mechanized done-gate is hugit's own suite** (contract §11, run-not-skip when the
+**The mechanized done-gate is the fabric acceptance suite** (historical hugit framing, hugit
+discontinued; contract §11, run-not-skip when the
 fabric endpoint is set): B2b byte-identity · C3 warm<cold + cache-down fail-closed ·
 C2a/C2b/C9 lease lifecycle/crash/expiry/ws · C5b secrets red-team · X11 mid-op broker fault
 · X6/X10 non-interference within bound. M1 is done when those flip green against this
@@ -423,10 +432,11 @@ and the hugit integration contract itself.
 
 - **Anything priced.** Slot prices, the size ladder, oversubscription aggressiveness,
   free-tier shape — owner decisions (product §9), unchanged by this draft.
-- **The hugit contract.** §1–§13 are frozen from hugit's side; every contract event above
-  (CheckDef/CheckResult/AttestationChain/IntentMetrics-vector transcriptions, prefix
-  rename, secrets seam payload) goes through the §12 protocol — proposed to, never imposed
-  on, hugit.
+- **The wire contract.** §1–§13 carry the historical hugit framing (hugit discontinued);
+  they are the fabric's own wire/envelope contract now, not an external frozen side. The
+  contract events above (CheckDef/CheckResult/AttestationChain/IntentMetrics-vector
+  transcriptions, prefix rename, secrets seam payload) are the fabric's own mechanisms; the
+  §12 coordination protocol is moot with no external counterparty.
 - **M2+ scope.** Self-serve onboarding, the GitHub-Actions front door as a product
   surface, dashboards, SLO publication, multi-region, autoscale/oversubscription, GPU —
   out (whitepaper §11 M2–M4). The Actions-YAML shim code that exists (`shim/`) is an

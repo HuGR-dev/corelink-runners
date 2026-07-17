@@ -1373,10 +1373,14 @@ Full 500-package smoke is ⚪ X4-external.
 
 # P2 — hugit customer (agent-fleet CI, via hugit) — ICP-A / ICP-C
 
-> The invisible-COGS door (whitepaper §9, interop §1). hugit owns the memo key +
-> landing; Runners is the execution substrate. A hugit customer **never sees a
-> "Runners" line item.** Execution model here is **memoized attested check-exec**,
-> not the GH-runner fleet. Contract: `hugit-integration-contract.md` v1.4.0.
+> **hugit (campaign #3) is DISCONTINUED (owner-confirmed 2026-07).** This persona is
+> retained as the historical intended-consumer shape; Runners is now **direct-to-ICP**,
+> and the live mechanisms below (memoized attested check-exec, §13 envelope, attestation)
+> are the fabric's own. The invisible-COGS door (whitepaper §9, interop §1): hugit **was**
+> the intended consumer that would own the memo key + landing; Runners is the execution
+> substrate. A hugit customer would **never see a "Runners" line item.** Execution model
+> here is **memoized attested check-exec**, not the GH-runner fleet. Contract:
+> `hugit-integration-contract.md` v1.4.0 (fabric wire/envelope contract, historical hugit framing).
 
 ## Theme 2.1 — Memoized CI where a re-run is ~free
 
@@ -1487,8 +1491,12 @@ minutes/cost math"); the packaging decision is **owner-gated** (product.md §9.3
 
 ## Theme 2.3 — The agent-exec seam (hugit real-cost gate)
 
+> **hugit (discontinued 2026-07) was the intended consumer of this seam.** Retained as
+> the historical shape; the agent-exec seam is a **live fabric mechanism** now offered
+> direct-to-ICP.
+
 ### S2.3.1 — Agent-driven check execution (agent-exec) 🟡 built-not-proven / ⚪ hugit-dials-it
-**As hugit's forge**, when a job was submitted by an agent fleet, **I want** the runner to execute it under the agent-exec seam and emit real cost, **so that** my real-cost gate is fed.
+**As hugit's forge** (the discontinued intended consumer), when a job was submitted by an agent fleet, **I want** the runner to execute it under the agent-exec seam and emit real cost, **so that** my real-cost gate is fed.
 **Flow:**
 1. hugit dials the agent-exec path (`req.agent` — was a dead field, now wired: `from_agent_lease` egress box + `POST/GET /agent-exec` async step-store, timeout wrap; `/exec` refuses an agent job)
 2. the agent loop runs in a fresh microVM
@@ -1528,8 +1536,12 @@ consumption is hugit adopting the endpoint — ⚪.
 
 ## Theme 2.4 — hugit non-interference (tenant of CoreLink)
 
+> **hugit (discontinued 2026-07) was the intended tenant here.** Retained as the
+> historical shape; the non-interference guarantees are **live fabric mechanisms** that
+> hold for any tenant (the storm story below reads for any agent-fleet tenant, direct-to-ICP).
+
 ### S2.4.1 — A hugit storm must not starve other tenants 🟡 built-not-proven
-**As a** CoreLink operator, **I want** a hugit agent-fleet storm to be structurally bounded, **so that** it can never degrade the cache launch route or another tenant.
+**As a** CoreLink operator, **I want** an agent-fleet storm (hugit was the intended such tenant) to be structurally bounded, **so that** it can never degrade the cache launch route or another tenant.
 **Flow:**
 1. Per-tenant **request-rate ceiling** + **concurrency/budget cap** set *before* load (preventive, X10⑤)
 2. under contention, fair-share (no single tenant starves others, p95-wait bound, C7)
@@ -1549,13 +1561,15 @@ per-tenant wait histogram so non-interference is provable, not assumed.
 
 ## Theme 2.5 — hugit as reseller / partner (the packaging seam)
 
-> hugit is not merely a tenant — it is the **reseller** that fronts Runners as
-> invisible COGS and prices its own flat plan on top (Principle 6, contract §10).
-> These stories are the partner-economics obligations the fabric must satisfy so
-> the reseller relationship is auditable and non-leaky.
+> **hugit (discontinued 2026-07) was the intended reseller.** Retained as the historical
+> intended-consumer shape; Runners is now **direct-to-ICP**. The partner-economics
+> obligations below (raw-occupancy metering, attested wholesale cost, reseller-margin
+> boundary) are **live fabric mechanisms** that apply to any reseller/packaging arrangement.
+> hugit **was** the reseller that would front Runners as invisible COGS and price its own
+> flat plan on top (Principle 6, contract §10).
 
 ### S2.5.1 — hugit resells Runners as invisible COGS under its own plan 🔵 owner-gated (packaging)
-**As hugit (the reseller)**, **I want** to buy fabric capacity wholesale and resell it inside my flat plan, **so that** my customer sees one hugit bill and I keep the margin between my price and my Runners COGS.
+**As hugit (the discontinued intended reseller)**, **I want** to buy fabric capacity wholesale and resell it inside my flat plan, **so that** my customer sees one hugit bill and I keep the margin between my price and my Runners COGS.
 **Flow:**
 1. hugit holds a tenant relationship with the fabric
 2. its customers' checks execute on leases hugit owns
@@ -4003,11 +4017,13 @@ S5.2.2).
 
 # P16 — Contract-drift / conformance-vector seam owner (the CLAUDE.md tripwire)
 
-> The cross-repo seam between hugit and this fabric is **law** (CLAUDE.md wire-contract
-> law): types are **transcribed** on each side (hugit-contracts is **frozen, never
-> imported**), and the shared **conformance vectors** are committed **byte-identical in
-> both repos** — the **drift tripwire**: either side's golden tests break on any type
-> divergence, so a difference is **never silent**. This persona owns that tripwire.
+> **hugit is DISCONTINUED (owner-confirmed 2026-07);** the historical cross-repo seam
+> framing below is retained because the **mechanisms are the fabric's own** and stay LIVE.
+> The wire-contract **law** (CLAUDE.md): types are **transcribed** on the fabric side
+> (hugit-contracts was **frozen, never imported**), and the shared **conformance vectors**
+> were committed **byte-identical in both repos** — the **drift tripwire**: the golden
+> tests break on any type divergence, so a difference is **never silent**. This persona
+> owns that tripwire; the fabric now owns both sides of the vector.
 
 ## Theme 16.1 — The conformance-vector drift tripwire
 
@@ -4060,9 +4076,9 @@ the fabric can't import the contract (by policy — `deny.toml`), so the vector 
 contract's shadow on this side, and the golden test is the proof the transcription matches
 it. A transcription mismatch is caught by the *same* tripwire as a type drift (S16.1) —
 there is no separate "did I transcribe it right" risk, because byte-exactness against the
-shared vector **is** the transcription check. This is why the seam is **frozen from
-hugit's side** (CLAUDE.md): the fabric satisfies the vector, never edits hugit's
-expectations.
+shared vector **is** the transcription check. This is why the seam was historically
+**frozen on the hugit side** (historical hugit framing — hugit discontinued); the fabric
+now **owns these mechanisms** and satisfies the vector as its own contract.
 **Acceptance / evidence:** No git/path dep either direction, crates.io-only (`deny.toml`, CLAUDE.md);
 types transcribed on each side, hugit-contracts frozen/never-imported (CLAUDE.md);
 byte-exact golden proves the transcription (S16.1,
@@ -4086,8 +4102,9 @@ in both repos (CLAUDE.md).
 1. A new shared vector is needed
 2. the protocol (CLAUDE.md open cross-repo seams):
 
-**the hugit-side PR lands first** (the contract is **frozen from hugit's side**; the
-fabric never adds a shared vector unilaterally) → then the fabric transcribes the type +
+**the hugit-side PR lands first** (historically the contract was **frozen on the hugit
+side** — hugit discontinued, so the fabric now owns this contract; the fabric never added
+a shared vector unilaterally) → then the fabric transcribes the type +
 commits the **byte-identical** vector under `conformance/` → both sides' golden tests go
 green against the *same* bytes → the drift tripwire (S16.1) now guards the new type too.
 Concretely: the `IntentMetrics` conformance vector and the `hugit-c9-` container-prefix
@@ -4102,8 +4119,9 @@ relay = a committed handoff doc + the owner as courier), never to edit hugit's
 expectations on this side. Until the hugit-side lands, the fabric does **not** add the
 vector (owner-gated).
 **Acceptance / evidence:** Open cross-repo seams: `IntentMetrics` vector (hugit-side PR first) +
-`hugit-c9-` container-prefix, both owner/hugit-techlead-gated (CLAUDE.md); the seam is
-frozen from hugit's side (CLAUDE.md, `docs/spec/hugit-integration-contract.md`); vectors
+`hugit-c9-` container-prefix, both owner/hugit-techlead-gated (CLAUDE.md); the seam was
+historically frozen on the hugit side (historical hugit framing — hugit discontinued;
+fabric wire/envelope contract at `docs/spec/hugit-integration-contract.md`); vectors
 committed byte-identical both repos (CLAUDE.md). The `intent_metrics_sig` vector
 (`conformance/intent_metrics_sig.json`) + IntentMetrics (`2d8d2215…`) are the live
 examples of a coordinated add (S2.2.1).
@@ -4280,7 +4298,7 @@ fail-closed / fail-open-to-cold / fail-safe-to-queued posture (the north star).
 | Direct on-ramp spawn/teardown | 🟢 LIVE | dogfood fleet, App installation 144561227 |
 | Spawn retry / reconciler / dead-letter | 🟢 LIVE | #293 deadlock fix + reconcilers |
 | Full `[clw] cache hit` smoke | ⚪ X4 | needs a real CoreLink PAT or hugit dispatch |
-| hugit memoized-check consumption | ⚪ X4 | hugit at P2, live transport pending |
+| Memoized-check consumption (hugit was intended, discontinued) | ⚪ X4 | needs a real hugit / equivalent external dispatch |
 | Agent-exec real e2e | ⚪ X4 | when hugit dials it |
 | Live-account Cloudflare Containers SDK smoke | ⚪ X4 | owner-gated at deploy |
 | vCPU-h loss-impossible wall | 🔵 owner-gated | built default-off; arm `FABRIC_RUNNER_VCPU`+`max_vcpu_h` |
@@ -4347,10 +4365,10 @@ Coined terms, used verbatim throughout. (Feature mechanics live in `docs/product
 | Term | Meaning |
 |---|---|
 | **Door A / Direct** | The direct front door: a CI team writes `runs-on: corelink[-<size>]`; an ephemeral GitHub-Actions runner fleet spawns cache-warm microVMs per job (ADR-0007). Live path = the Cloudflare autoscaler Worker (`deploy/cloudflare/src/index.ts`). |
-| **Door B / Via hugit** | The invisible execution substrate under hugit's memoized attested check-exec; the customer never sees a "Runners" line item. Live path = the `/v1` fabric + CF-native check-host exec. |
+| **Door B / Via hugit** | The invisible execution substrate for memoized attested check-exec (hugit was the discontinued intended consumer; now direct-to-ICP); the customer never sees a "Runners" line item. Live path = the `/v1` fabric + CF-native check-host exec. |
 | **The moat** | CoreLink's content-addressed cache (CAS + Action Cache). Runners earn their keep by booting cache-warm on it; the per-job CAS-PAT mint + attested cost is the moat's revenue seam. |
 | **Cache-warm boot** | A runner boots with the CAS/AC pre-warmed and the job's inputs local before the first instruction (`boot/mod.rs`, F-4.3). |
-| **Memoization** | Result content-addressed by `H(inputs ‖ command ‖ toolchain)`; on an Action-Cache hit the result is returned and the job never runs. hugit owns the memo key; the fabric serves misses. |
+| **Memoization** | Result content-addressed by `H(inputs ‖ command ‖ toolchain)`; on an Action-Cache hit the result is returned and the job never runs. hugit (discontinued) was the intended memo-key owner; the fabric serves misses. |
 | **Lease** | One `RunnerLease` = one billable concurrency slot for one job's lifetime (acquire → hold → close/teardown). The spine: **lease · isolate · cap · attest · teardown**. |
 | **env-0 / cred-ticket** | The env-0 credential ticket: a lease-bound, single-use ticket the box redeems for a short-lived CAS PAT — the secret is never stored on the box (F-5.9). |
 | **Fence / FenceManifest** | The per-claim isolation manifest that is materialized + enforced fail-closed; a red-team suite proves escape attempts fail (F-4.2/F-4.4). |

@@ -4,16 +4,24 @@
 > your complete briefing (what this is, why it exists, what already exists, and exactly
 > what to do). Then come back and fill this stub.
 >
-> **To: CoreLink techlead.** hugit's side of the seam is fully specified and frozen
-> in `hugit-integration-contract.md` — please read it first; it is the set of
-> constraints the fabric must satisfy. This document is the **other half**: the
-> production fabric *you* own. It is a deliberate skeleton — fill each `⟨FILL⟩` with
-> what you want/need on your side, with the same rigor. The HuGR techlead designed
-> the product (`docs/product/product.md`) and the consumed contract; you own the
+> **⚠️ hugit / campaign #3 is DISCONTINUED (owner-confirmed 2026-07).** This stub was
+> written when hugit was the intended consumer, so it frames the seam in "hugit" terms.
+> Read those as HISTORICAL: `hugit-integration-contract.md` is now the fabric's **own**
+> wire/envelope contract (historical hugit framing), not an external frozen side, and the
+> `[hugit-required §X]` markers below denote requirements the fabric's own wire contract
+> imposes. The mechanisms are live and direct-to-ICP.
+>
+> **To: CoreLink techlead.** The wire seam is fully specified in
+> `hugit-integration-contract.md` (historical hugit framing; hugit discontinued) — please
+> read it first; it is the set of constraints the fabric must satisfy. This document is the
+> **other half**: the production fabric *you* own. It is a deliberate skeleton — fill each
+> `⟨FILL⟩` with what you want/need on your side, with the same rigor. The HuGR techlead
+> designed the product (`docs/product/product.md`) and the wire contract; you own the
 > metal, the scheduler, and the unit economics underneath.
 >
-> Nothing here is decided yet — these are the decisions to make. Where hugit imposes
-> a hard requirement, it's marked **[hugit-required]** and cross-referenced.
+> Nothing here is decided yet — these are the decisions to make. Where the wire contract
+> imposes a hard requirement, it's marked **[hugit-required]** (historical label) and
+> cross-referenced.
 
 ---
 
@@ -86,13 +94,13 @@
 - **H2.** ⟨FILL⟩ — how agent sandboxes / dev boxes (Workspaces SKUs) ride this fabric.
 
 ## I. Sequencing
-- **I1.** ⟨FILL⟩ — your milestone plan toward **M1 (MVP fabric)** = the point hugit's live
-  CI seam (the P2 runbook) flips green. This is the highest-value first deliverable: it
-  unblocks hugit end-to-end.
+- **I1.** ⟨FILL⟩ — your milestone plan toward **M1 (MVP fabric)** = the point the live
+  CI seam (the P2 runbook) flips green. (Historically this was framed as unblocking hugit
+  end-to-end; hugit is discontinued and the fabric is now direct-to-ICP.)
 
 ---
 
 ### How to use this stub
-Fill the `⟨FILL⟩`s, push back on anything in the hugit contract that's infeasible (via the
-owner / hugit techlead — it's frozen, not unilateral), and we converge this into the
+Fill the `⟨FILL⟩`s, push back on anything in the wire contract that's infeasible (via the
+owner — the contract carries historical hugit framing but is the fabric's own now), and we converge this into the
 buildable fabric spec. When both halves are locked, decompose into work-packages and build.
