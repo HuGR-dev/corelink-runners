@@ -63,6 +63,10 @@ jobs:
         working-directory: deploy/cloudflare
     steps:
       - name: Guard — require the CLOUDFLARE_API_TOKEN secret
+        # Runs BEFORE checkout, so override the job's `deploy/cloudflare` default
+        # working-directory (that path doesn't exist until checkout → "No such file
+        # or directory") to the always-present workspace root.
+        working-directory: ${{ github.workspace }}
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
