@@ -76,6 +76,15 @@ export interface Env {
   // container below. Container reads env at boot ⇒ a rollout is needed to apply.
   FABRIC_CRASH_PROBE_INTERVAL_SECS?: string;
   FABRIC_BILLING_EXPORT_INTERVAL_SECS?: string;
+  // ── ACQUIRE-PATH RESILIENCE (W0/W1) — inbound + introspect backpressure ──────
+  // Global inbound in-flight cap: right-sized for the 2-vCPU singleton so a herd
+  // sheds 503 cleanly instead of browning out. Forwarded into the container (the
+  // set-but-unforwarded trap — a wrangler var alone never reaches the container).
+  FABRIC_MAX_INFLIGHT_REQUESTS?: string;
+  // Introspect admission cap (W1): bounds concurrent auth+plan introspect
+  // round-trips so an acquire burst sheds before starving the blocking pool. The
+  // Rust default (32) is box-appropriate; passthrough here so it stays tunable.
+  FABRIC_INTROSPECT_MAX_INFLIGHT?: string;
   // Enforcement / observability / safety (optional passthroughs; inert until set)
   FABRIC_ADMIN_KEY?: string;
   FABRIC_OBSERVABILITY_KEY?: string;
@@ -197,6 +206,16 @@ export class FabricdContainer extends Container<Env> {
       // unconditionally-when-set so the wrangler var actually reaches the container.
       ...(env.FABRIC_CRASH_PROBE_INTERVAL_SECS
         ? { FABRIC_CRASH_PROBE_INTERVAL_SECS: env.FABRIC_CRASH_PROBE_INTERVAL_SECS }
+        : {}),
+      // Acquire-path resilience (W0/W1): forward the global inbound cap + the
+      // introspect admission cap so they actually reach the container (the
+      // set-but-unforwarded trap — the Rust binary reads these at boot, but a
+      // wrangler var/secret alone is only visible to the Worker as env.*).
+      ...(env.FABRIC_MAX_INFLIGHT_REQUESTS
+        ? { FABRIC_MAX_INFLIGHT_REQUESTS: env.FABRIC_MAX_INFLIGHT_REQUESTS }
+        : {}),
+      ...(env.FABRIC_INTROSPECT_MAX_INFLIGHT
+        ? { FABRIC_INTROSPECT_MAX_INFLIGHT: env.FABRIC_INTROSPECT_MAX_INFLIGHT }
         : {}),
       // Unreachable-in-deploy fix: forward the enforcement/observability/safety
       // + Stage-B autoscaler passthroughs so a future `wrangler secret put` /

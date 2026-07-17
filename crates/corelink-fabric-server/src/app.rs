@@ -80,6 +80,28 @@ impl std::fmt::Display for PlanSourceError {
 
 impl std::error::Error for PlanSourceError {}
 
+/// Outcome of [`AppState::resolve_plan_offloaded`] — the plan-introspect leg of
+/// acquire, now W1-gated. Distinguishes the four cases the handler must map to
+/// distinct responses:
+/// - [`Ok`](PlanResolve::Ok) — the introspect answered (`Some(plan)` admits
+///   through the cap gate; `None` is a no-plan over-cap reject);
+/// - [`Unreachable`](PlanResolve::Unreachable) — the cap source could not be
+///   consulted → 503 fail-closed (never a false no-plan reject);
+/// - [`Shed`](PlanResolve::Shed) — the introspect gate was full → 503
+///   fail-closed shed BEFORE the blocking pool was touched (W1 backpressure);
+/// - [`Panicked`](PlanResolve::Panicked) — the blocking task panicked → 503
+///   fail-closed, never a false admission.
+pub(crate) enum PlanResolve {
+    /// The introspect resolved (`Some` plan, or `None` = no plan on file).
+    Ok(Option<TenantPlan>),
+    /// The cap source was unreachable — 503 fail-closed.
+    Unreachable,
+    /// The introspect gate shed this acquire — 503 fail-closed (W1).
+    Shed,
+    /// The offloaded introspect task panicked — 503 fail-closed.
+    Panicked,
+}
+
 /// Source of per-tenant plan caps — the cap source of truth the [`CapGate`]
 /// reads (BIL2 feeds the production impl; org = tenant per ADR-0002).
 ///
@@ -535,6 +557,17 @@ pub struct AppState {
     /// are byte-unchanged — the permit only gates ENTRY. From
     /// `FABRIC_PROVISION_MAX_INFLIGHT` (default [`DEFAULT_PROVISION_MAX_INFLIGHT`]).
     pub(crate) provision_gate: Arc<tokio::sync::Semaphore>,
+    /// W1 introspect admission gate (2026-07-17 acquire-path resilience). Bounds
+    /// how many INTROSPECT round-trips (auth `tenant_of` + plan
+    /// `plan_of_resolving`) may occupy the blocking pool + fire an upstream POST
+    /// at once. Each is acquired with `try_acquire_owned` BEFORE `spawn_blocking`,
+    /// so a burst past the bound sheds IMMEDIATELY (frozen `FailClosed` 503 +
+    /// `Retry-After`) instead of piling 2N blocking tasks onto the 2-vCPU
+    /// singleton and starving the runtime until `/v1/health` returns 000. The
+    /// SAME `Arc` is threaded into the auth middleware ([`crate::auth::AuthLayerState`])
+    /// so both introspect sites draw from ONE budget. From
+    /// `FABRIC_INTROSPECT_MAX_INFLIGHT` (default [`DEFAULT_INTROSPECT_MAX_INFLIGHT`]).
+    pub(crate) introspect_gate: Arc<tokio::sync::Semaphore>,
     /// AUDIT P2: the global in-flight request cap applied in [`app_full`] over
     /// the WORK routes (a tower `GlobalConcurrencyLimitLayer` + `LoadShedLayer`).
     /// When more than this many requests are being served at once, the excess is
@@ -650,6 +683,28 @@ pub const DEFAULT_PROVISION_MAX_INFLIGHT: usize = 16;
 /// via `FABRIC_MAX_INFLIGHT_REQUESTS`.
 pub const DEFAULT_MAX_INFLIGHT_REQUESTS: usize = 1024;
 
+/// Default cap on concurrent in-flight INTROSPECT round-trips (W1 backpressure,
+/// `FABRIC_INTROSPECT_MAX_INFLIGHT`).
+///
+/// Each `POST /v1/leases` acquire makes up to TWO synchronous introspect
+/// round-trips to corelink-server — auth (`require_tenant` → `tenant_of`) and
+/// plan (`resolve_plan_offloaded` → `plan_of_resolving`) — each offloaded to the
+/// blocking pool. WITHOUT a bound, a burst of N acquires fires up to 2N blocking
+/// tasks + 2N concurrent HTTPS POSTs at once, saturating the 2-vCPU singleton's
+/// blocking pool + CPU until the tokio runtime starves and even unauthenticated
+/// `/v1/health` returns 000 (the acquire-storm brownout). This gate bounds the
+/// concurrent introspect offloads fabric-wide: excess is SHED cleanly (503)
+/// before any blocking-pool thread is touched.
+///
+/// `32` is chosen against the box budget: the blocking pool is 512 threads, but
+/// the CPU is 2 vCPU — the real ceiling is HTTPS round-trips in flight, not pool
+/// slots. 32 concurrent introspects keep the CPU + upstream comfortably busy
+/// (well under the 512 pool) while leaving ample blocking-pool headroom for the
+/// OTHER consumers (provision/teardown/probe/close-ack, themselves separately
+/// gated) — and it is far below `DEFAULT_MAX_INFLIGHT_REQUESTS` so the global
+/// limiter is not the thing that fires first on an introspect storm.
+pub const DEFAULT_INTROSPECT_MAX_INFLIGHT: usize = 32;
+
 /// Max rejection-sampling tries when minting a shard-targeted lease-id
 /// ([`AppState::mint_lease_id_for`]). Each try has a `1/N` hit chance, so expected
 /// tries ≈ N; 64 is astronomically safe for any realistic shard count (and `N=1`
@@ -733,6 +788,9 @@ impl AppState {
             // composition root overrides it from FABRIC_PROVISION_MAX_INFLIGHT
             // via `with_provision_max_inflight`.
             provision_gate: Arc::new(tokio::sync::Semaphore::new(DEFAULT_PROVISION_MAX_INFLIGHT)),
+            // W1 introspect backpressure: default gate; the composition root
+            // overrides it from FABRIC_INTROSPECT_MAX_INFLIGHT.
+            introspect_gate: Arc::new(tokio::sync::Semaphore::new(DEFAULT_INTROSPECT_MAX_INFLIGHT)),
             // AUDIT P2: default global in-flight cap; the composition root
             // overrides it from FABRIC_MAX_INFLIGHT_REQUESTS.
             max_inflight_requests: DEFAULT_MAX_INFLIGHT_REQUESTS,
@@ -865,6 +923,18 @@ impl AppState {
     #[must_use]
     pub fn with_provision_max_inflight(mut self, max_inflight: usize) -> Self {
         self.provision_gate = Arc::new(tokio::sync::Semaphore::new(max_inflight.max(1)));
+        self
+    }
+
+    /// Override the introspect admission cap (W1 backpressure). `max_inflight` is
+    /// the number of concurrent introspect round-trips (auth + plan) that may
+    /// occupy the blocking pool at once; the EXCESS sheds immediately (503) rather
+    /// than queueing. `0` is clamped to `1` (a 0-permit gate would shed every
+    /// acquire — no request could ever authenticate); the composition root
+    /// validates the env value separately and never passes 0.
+    #[must_use]
+    pub fn with_introspect_max_inflight(mut self, max_inflight: usize) -> Self {
+        self.introspect_gate = Arc::new(tokio::sync::Semaphore::new(max_inflight.max(1)));
         self
     }
 
@@ -1507,9 +1577,30 @@ impl AppState {
         &self,
         tenant: TenantId,
         pat: String,
-    ) -> Result<Result<Option<TenantPlan>, PlanSourceError>, tokio::task::JoinError> {
+    ) -> PlanResolve {
+        // W1 BACKPRESSURE: acquire an introspect permit BEFORE `spawn_blocking`,
+        // so an acquire burst can never pile plan-introspect tasks onto the
+        // blocking pool. `try_acquire_owned` sheds IMMEDIATELY (no queueing) when
+        // the gate is full — the excess returns `Shed` → the handler answers the
+        // frozen `FailClosed` 503, mirroring the auth-site shed. This is the SAME
+        // `introspect_gate` the auth middleware draws from, so the two introspect
+        // legs share one fabric-wide budget. Permit held ONLY around the offload.
+        let permit = match Arc::clone(&self.introspect_gate).try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                self.counters.introspect_shed.incr();
+                return PlanResolve::Shed;
+            }
+        };
         let plans = Arc::clone(&self.plans);
-        tokio::task::spawn_blocking(move || plans.plan_of_resolving(&tenant, &pat)).await
+        let out = tokio::task::spawn_blocking(move || plans.plan_of_resolving(&tenant, &pat)).await;
+        drop(permit);
+        match out {
+            Ok(Ok(plan)) => PlanResolve::Ok(plan),
+            Ok(Err(PlanSourceError::Unreachable)) => PlanResolve::Unreachable,
+            // The blocking task panicked: fail-closed, never a false admission.
+            Err(_) => PlanResolve::Panicked,
+        }
     }
 
     /// Mint a globally-unique lease id (`lease-<uuid-v4>`).
@@ -1855,6 +1946,17 @@ pub fn app_full(
     // is moved into `.with_state(...)` — exactly like `max_inflight` above.
     let shed_counters = state.counters.clone();
 
+    // W1 BACKPRESSURE: the auth middleware needs the SAME introspect gate as the
+    // plan-resolve site (`AppState.introspect_gate`) plus the counters, so both
+    // introspect legs shed against ONE fabric-wide budget. Capture them here —
+    // BEFORE `state` is moved into `.with_state(...)` — and thread them as the
+    // middleware's `State` (mirroring `max_inflight`/`shed_counters` above).
+    let auth_layer_state = crate::auth::AuthLayerState {
+        store: Arc::clone(&store),
+        introspect_gate: Arc::clone(&state.introspect_gate),
+        counters: state.counters.clone(),
+    };
+
     // ATT-KEY-ROTATION: `GET /v1/attestation/key` is UNAUTHENTICATED — hugit
     // needs the public key to bootstrap verification without a tenant PAT.
     // Mirrors the HEALTH pattern: mounted on the bare outer router, outside
@@ -1948,7 +2050,10 @@ pub fn app_full(
         .route(&capture(paths::ENVELOPE_META), get(envelope::poll_meta))
         .with_state(state)
         .layer(Extension(registry))
-        .layer(middleware::from_fn_with_state(store, auth::require_tenant))
+        .layer(middleware::from_fn_with_state(
+            auth_layer_state,
+            auth::require_tenant,
+        ))
         // input-validation (audit r2): an EXPLICIT request-body cap on the
         // authenticated control-plane routes — small JSON bodies (acquire/exec/
         // close), never relying on axum's 2 MiB default. Bounds memory on a
