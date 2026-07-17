@@ -352,15 +352,15 @@ Two backends behind the frozen `Engine` trait; the composition root selects 4-wa
 | Completion actions | Revoke per-job PAT by `pat_id` · teardown container immediately (vs sleepAfter) · wipe cred-stash · optional usage-push. | `index.ts:608-701` | LIVE (billing push DEFAULT-OFF) |
 | Re-drive reconciler (GitHub scan) | Cron scans `RECONCILER_REPOS` for queued+labeled+runnerless jobs >90s; clears stale claim, WARM re-drive. | `index.ts:1439-1485`, `lib.ts:718` | DEFAULT-OFF (needs `RECONCILER_REPOS`) |
 | Dead-letter orphan retry | `orphan:<jobId>` records warm-recoverable spawn failures (any repo); cron retries WARM, bounded 3 attempts / 30min. | `index.ts:855-875,1498-1580` | LIVE (when armed) |
-| `MetricsDO` (golden counters) | Singleton DO holds 12 fixed counters; bumped at each seam; `GET /internal/v1/metrics` snapshot, `METRICS_OBSERVABILITY_KEY`-gated (404 unset). | `metrics.ts:24-40,58`; `index.ts:969` | LIVE (default-off if unbound) |
+| `MetricsDO` (golden counters) | Singleton DO holds 12 fixed `COUNTER_NAMES` (see §10 for the list) under one storage key (snapshot = single read, bump = one serialized read-modify-write); bumped at each lifecycle seam; `GET /internal/v1/metrics` snapshot, `METRICS_OBSERVABILITY_KEY`-gated (404 unset). Adding a name + a `bumpMetrics` call at its seam is the whole extension surface. | `metrics.ts:24-40,58`; `index.ts:969` | LIVE (default-off if unbound) |
 | `REPO_INSTALLATION_MAP` inject | Inject the known installation-id for first-party repos (plain webhook has none) ⇒ WARM mint without an App webhook. | `index.ts:1130`, `lib.ts:623` | LIVE (first-party) |
 | Legacy PAT escape hatch | `ALLOW_LEGACY_PAT_ENV=1` injects raw `CLW_TOKEN`; refused in prod (SPAWN_WORKER_PUBLIC_URL set). | `lib.ts:462-495` | DEFAULT-OFF / prod-refused |
 
-**wrangler config:** 5 DOs (`RUNNER_CONTAINER` std-4 max 20, `CHECK_HOST_CONTAINER` std-4 max 4, `CRED_STASH`, `METRICS`, `CONCURRENCY_SLOTS`); KV `RUNNER_JOB_PATS` (multiplexed keyspaces `spawn:`/`done:`/`jtenant:`/`jhandle:`/`orphan:`/`ghtok:`/bare jobId); cron `* * * * *`; `WEBHOOK_LIMITER`. R2 binding intentionally omitted (Cache-TL coordination item).
+**wrangler config:** 5 DOs — 2 Container classes (`RunnerContainer` = `RUNNER_CONTAINER`, std-4 = 4 vCPU/12 GiB/20 GB disk, `max_instances 20` raised to cover a tenant's default entitlement=20, `sleepAfter 15m` idle-out backstop; `CheckHostContainer` = `CHECK_HOST_CONTAINER`, std-4, `max_instances 4`, `sleepAfter 45m`) + 3 plain-storage DOs (`CRED_STASH`, `METRICS`, `CONCURRENCY_SLOTS`); 5 sqlite migrations `v1..v5` (one per DO class in add-order). KV `RUNNER_JOB_PATS` (multiplexed keyspaces `spawn:`/`done:`/`jtenant:`/`jhandle:`/`orphan:`/`ghtok:`/bare jobId; job→pat_id map TTL'd 7200s as a self-cleaning revoke backstop); cron `* * * * *`; ratelimit `WEBHOOK_LIMITER` (`namespace_id 1001`, 30/60s). Both container images pinned by immutable `@sha256` digest in-config at deploy time (not per-spawn — ADR-0008 wrinkle). R2 binding intentionally omitted (Cache-TL coordination item). Container-image builds are Docker-free (CI pushes to the CF managed registry).
 
 ### 7.2 `corelink-fabricd` proxy Worker (`deploy/cloudflare-fabricd/`) — control-plane host. **LIVE / moat proven.**
 
-`FabricdContainer` singleton (std-2, `max_instances 1`) fronted by a proxy Worker. Features: FNV-1a shard routing + inert-at-N=1 singleton collapse (`shard.ts:20,34`; `index.ts:237`); acquire round-robin placement + lease-op hash routing + scatter-gather list/metrics + §9 trigger body-routing + webhook round-robin (all N>1, inert at N=1); per-request 30s proxy timeout (long-lived routes exempt) (`index.ts:510-572`); keep-alive cron + watchdog self-heal (3 fails ~30s → destroy → fresh boot) + boot-grace/reboot-backoff (`index.ts:743-859,587-644`); pg + vCPU-ceiling conditional arming on `DATABASE_URL`; forwards moat mint / cred-ticket / attested-cost / crash-probe / observability / autoscaler envVars into the container. Live image `5608d67d` (W1-resilience). **Status: LIVE singleton; N>1 OWNER-GATED.**
+`FabricdContainer` singleton (std-2 = 2 vCPU, `max_instances 1`, `sleepAfter 1h` — never actually sleeps because the keep-alive cron pings `/v1/health` every minute; in-memory lease state survives between requests, only a restart/redeploy resets it) fronted by a proxy Worker. Features: FNV-1a shard routing + inert-at-N=1 singleton collapse (`shard.ts:20,34`; `index.ts:237`); acquire round-robin placement + lease-op hash routing + scatter-gather list/metrics + §9 trigger body-routing + webhook round-robin (all N>1, inert at N=1); per-request 30s proxy timeout (long-lived routes exempt) (`index.ts:510-572`); keep-alive cron + watchdog self-heal (3 fails ~30s → destroy → fresh boot) + boot-grace/reboot-backoff (`index.ts:743-859,587-644`); pg + vCPU-ceiling conditional arming on `DATABASE_URL`; forwards moat mint / cred-ticket / attested-cost / crash-probe / observability / autoscaler envVars into the container. Live image `5608d67d` (W1-resilience). **Status: LIVE singleton; N>1 OWNER-GATED.**
 
 ### 7.3 `corelink-canary` (`deploy/cloudflare-canary/`) — golden-counter alerting. **BUILT, owner-arm-to-deploy.**
 
@@ -408,8 +408,8 @@ User-facing identity is the **HuGR account** everywhere; underneath is CoreLink 
 
 | Feature | What it does | Evidence | Status |
 |---|---|---|---|
-| Golden counters (fabricd) | Lock-free `Counters` on `/internal/v1/status` — admission outcomes + per-rejection-reason, close, CAS-PAT mint/revoke attempt+failure, provision capacity-503, agent-exec started/done/failed, load-shed, trigger dedup, suspend, `leases_expired`/`leases_crashed`. Obs-key gated. | `observability.rs`; `app.rs:1867` | LIVE (DEFAULT-OFF until `FABRIC_OBSERVABILITY_KEY`) |
-| Golden counters (spawn-worker) | 12 `MetricsDO` counters incl. `webhook_job_completed`, `spawn_failed`, `mint_failures`, `provision_capacity_503`. | `metrics.ts:24` | LIVE |
+| Golden counters (fabricd) | Lock-free `Counters` on `/internal/v1/status` — **23 counters**: `leases_acquired`; **8 named rejection reasons** `acquire_rejected_{suspended, invalid_image, bad_request, rate, over_cap, no_plan, compute_ceiling, lease_invalid}` (each a distinct AtomicU64 so a no-plan mis-provision is never read as genuine over-cap saturation, WP-3b); `leases_closed`/`leases_expired`/`leases_crashed`; `provision_capacity_503`; credential `mint_attempts`/`mint_failures`/`revoke_attempts`/`revoke_failures`; `agent_exec_started`/`_done`/`_failed`; operator `load_shed`/`trigger_dedup_hits`/`suspend_actions`. Relaxed atomics, no lock/alloc/control-flow change. Obs-key gated. | `observability.rs:64-128`; `app.rs:1867` | LIVE (DEFAULT-OFF until `FABRIC_OBSERVABILITY_KEY`) |
+| Golden counters (spawn-worker) | The **12** durable `MetricsDO` `COUNTER_NAMES`: `webhook_spawn_claimed`/`_deduped`/`webhook_rate_limited`/`webhook_job_completed`; `jit_minted`/`runner_spawned`/`spawn_forbidden`/`spawn_at_ceiling`/`spawn_failed`; `runner_torn_down`/`cas_pat_revoked`/`billing_pushed`. (Distinct from fabricd's — `mint_failures`/`provision_capacity_503`/`revoke_failures` live on the fabricd status surface, **not** here; the canary reads both surfaces. Doc-drift corrected R2.) | `metrics.ts:24-40` | LIVE |
 | Boot-time arm-state log | One stderr line per boot naming which ops keys are armed (present/absent only). | `server.rs` (ops-boot-arm #356) | LIVE |
 | Cloud-backend boot diagnostic | Names the missing var on a partial cloud config; never claims a backend while silently `NoBox`. | `cloud_exec.rs` (`cloud_backend_status`) | LIVE |
 | Quota-headroom monitor | Advisory disk-headroom sweep (logs `QUOTA_HEADROOM_WARNING/EXCEEDED`, adjusts nothing). | `quota_headroom.rs`; `FABRIC_QUOTA_CHECK_INTERVAL_SECS` | DEFAULT-OFF |
@@ -426,6 +426,23 @@ User-facing identity is the **HuGR account** everywhere; underneath is CoreLink 
 - **Consumed by hugit** — the execution substrate for memoized CI. Contract frozen from hugit's side (v1.4.0). hugit cutover (`HUGIT_RUNNER_HOST` repoint + pubkey re-pin `b1eba792…`→`faa5b7726…`) is OWNER-GATED.
 - **Consumed by Workspaces** (campaign #2) — agent sandboxes / dev-boxes on the same lease/isolate/attest spine (`ws/mod.rs`).
 - **Drift tripwire** — the shared `conformance/` set is the byte-identical seam law across all consumers.
+
+**Feature → use-story cross-reference** (`docs/product/USE-SCENARIOS.md`, personas P1–P8, story ids `S<theme>.<n>`). Every feature area here is exercised by at least one story; validators trace them together:
+
+| Feature area (this doc) | Exercised by (persona · theme / story ids) |
+|---|---|
+| §1 pricing / ceiling / entitlement | P6 finance buyer (S6.1–S6.3); P1 concurrency+ceiling (Theme 1.3: S1.3.1–S1.3.3) |
+| §2 front doors (direct / hugit / power-user / workspaces) | P1 (Theme 1.2 S1.2.1–5), P2 (Theme 2.1–2.4), P3 (S3.1–S3.2), P8 (S8.1–S8.3) |
+| §3 wire contract & conformance | P7 security auditor (S7.x); P2 attested cost (Theme 2.2) |
+| §4 execution core (isolation/fence/boot/teardown/§13) | P4 the AI agent (S4.1–S4.4); P7 red-team (S7.1–S7.7) |
+| §5.1–5.2 admission / caps / ceiling / suspend | P1 (Theme 1.3), P5 operator capacity (Theme 5.2 S5.2.1–3) |
+| §5.4 attestation / result-binding / attested cost | P2 (Theme 2.2 S2.2.1–2), P8 verify (S8.2–S8.3) |
+| §5.6 billing / metering / GDPR erasure | P5 billing (Theme 5.3 S5.3.1–3), P6 |
+| §5.8–5.9 runner broker / autoscaler / moat mint / cred-ticket | P1 onboarding (Theme 1.1 S1.1.1–4), P5 provisioning (Theme 5.1) |
+| §6–7 substrate / CF deploy / canary | P5 incident & deploy ops (Theme 5.4 S5.4.1–4) |
+| §8 identity & external-customer path | P1 (Theme 1.1), P5 (Theme 5.1) |
+| §9 CLI / SDKs / GH-Action / check-exec-server | P8 power-user (S8.1–S8.3); P2 memoized CI (Theme 2.1); P4 |
+| §2.3 agent-exec seam | P2 (Theme 2.3 S2.3.1–2), P4 |
 
 ---
 
@@ -475,13 +492,15 @@ Grouped by function; **secret** = must be `wrangler secret put` / secret-store, 
 **spawn-worker (Worker secrets):** `CLOUDFLARE_SPAWN_AUTH_TOKEN` · `EXEC_SERVER_AUTH_TOKEN` (check-mode required) · `GITHUB_WEBHOOK_SECRET` · `GITHUB_MINT_TOKEN` · `GITHUB_APP_ID`/`GITHUB_APP_PRIVATE_KEY` · `CORELINK_RUNNER_MINT_AUTH_KEY` · `BILLING_INGEST_AUTH_KEY` · `METRICS_OBSERVABILITY_KEY` · `ALLOW_LEGACY_PAT_ENV`. Vars: `CLW_TENANT`/`CLW_ENDPOINT`/`CORELINK_MINT_URL`/`RECONCILER_REPOS`/`REPO_INSTALLATION_MAP`/`SPAWN_WORKER_PUBLIC_URL`/`PINNED_IMAGE_DIGEST`/`AUTOSCALER_LABEL`.
 **check-exec-server:** `TOOLCHAIN_DIR` · `EXEC_SERVER_AUTH_TOKEN`.
 **CLI:** `CORELINK_URL` · `CORELINK_PAT`. **runner box (SSH interim):** `HUGIT_RUNNER_HOST` · `HUGIT_RUNNER_KNOWN_HOSTS`. **shim:** `HUGIT_GH_TEST_REPO`.
-**canary (secrets):** `FABRIC_OBSERVABILITY_KEY` · `METRICS_OBSERVABILITY_KEY` · `RESEND_API_KEY`. Vars: surface URLs, `ALERT_COOLDOWN_MINUTES`/`STALENESS_HOURS`/`BUSINESS_HOURS_UTC`/`ALERT_EMAIL_TO`/`_FROM`.
+**canary (secrets):** `FABRIC_OBSERVABILITY_KEY` · `METRICS_OBSERVABILITY_KEY` · `RESEND_API_KEY`. Vars: `FABRIC_STATUS_URL`/`FABRIC_HEALTH_URL`/`SPAWN_METRICS_URL`, `ALERT_COOLDOWN_MINUTES`(30)/`STALENESS_HOURS`(0=off)/`BUSINESS_HOURS_UTC`/`ALERT_EMAIL_TO`/`ALERT_EMAIL_FROM`. Bindings: KV `CANARY_KV` (snapshot+cooldown state), **service bindings** `FABRICD_SVC`→corelink-fabricd + `SPAWN_SVC`→corelink-spawn-worker (Worker→Worker direct calls — a public `fetch()` to a sibling `*.workers.dev` on the same account mis-routes to 404, observed live 2026-07-17; the binding routes directly to the gated `/internal/v1/*` surfaces).
+
+**Small config-index footnotes (R2 grep-verify):** `NORTHFLANK_EPHEMERAL_STORAGE_MB` (non-runner) is **not** an env read — only `NORTHFLANK_RUNNER_EPHEMERAL_STORAGE_MB` is; the base workload storage is a code default (1024 MiB), so the index above is complete. `FABRIC_GITHUB_APP_PRIVATE_KEY_B64` (the base64 variant of `_APP_PRIVATE_KEY`) is a real read on the fabricd proxy.
 
 ---
 
 ## 14. Deliberate exclusions & ambiguities (for the validation campaign)
 
-**Excluded (out of Runners' scope by charter, whitepaper §12):** check semantics, the memo key, landing/merge, and provenance (hugit's); the cache itself (CoreLink's); per-minute billing exposure. These are not Runners features and are not inventoried.
+**Excluded (out of Runners' scope by charter, whitepaper §12):** check *semantics* (what a check means / whether it passes), the memo *key* (hugit owns the formula; the fabric only serves misses), landing/merge, and provenance (hugit's); the cache itself (CoreLink's); per-minute billing exposure. These are not Runners features and are not inventoried. **Not to be confused with excluded:** the check-*host* execution box, the in-container `corelink-check-exec-server`, native CF check-exec, and the `agent-exec` seam **ARE** Runners features and are inventoried (§9, §7.1, §5.1, §6, §2.3) — Runners executes the check and mints the attestation; hugit decides what the result means. The line is *execution (ours) vs semantics (hugit's)*, not "check = not ours."
 
 **Not inventoried in exhaustive per-symbol detail (surveyed by symbol + doc-comment, not line-by-line):** internal branch bodies of `corelink_plans.rs`, `quota_headroom.rs` tick math, `global_gate.rs` wiring, and the `pg_ledger`/`pg_queue` SQL — line numbers there point to the primary struct/fn.
 
@@ -490,6 +509,6 @@ Grouped by function; **secret** = must be `wrangler secret put` / secret-store, 
 2. **The moat mint** — proven live on a hydrating check-host acquire; a plain 200 does NOT prove a mint (only a mint-armed 503→200 or a server-side mint log does). Validate the transition, not the status code.
 3. **`PINNED_IMAGE_DIGEST`** — the spawn-worker accepts any `@sha256:` ref today (the assertion is inert); arm at runner-fleet activation.
 4. **TS↔Rust label split-brain** — `matchManagedLabels` (TS family/prefix) vs the Rust webhook subset-gate (explicit list) don't mirror; dormant while the fabricd autoscaler is unarmed, must converge before multi-size.
-5. **Stabilization wave (2026-07-16)** — its W1 (resilience), W3 (credential lifecycle), and W7 (atomic concurrency slot, per-tenant rate key, App-token mint) items appear LANDED in current code (`ConcurrencySlotsDO`, `github_app.ts`, `spawn:<repo>` limiter, `5608d67d` fabricd image); confirm against the deployed versions, as some W-items may still be proposal-only.
+5. **Stabilization wave (2026-07-16)** — **R2 code-verified as LANDED, not proposal-only:** W1 resilience (`FABRIC_CRASH_PROBE_INTERVAL_SECS=20` + pg-gated `FABRIC_BILLING_EXPORT_INTERVAL_SECS=60` now set in `deploy/cloudflare-fabricd/wrangler.jsonc` vars + forwarded into the container; live image `5608d67d`), W3 credential lifecycle, and W7 (`ConcurrencySlotsDO` atomic slot with `FLEET_MAX 20`/`COLD_REPO_CAP 8`/`SLOT_TTL 2700`, `spawn:<repo>` `WEBHOOK_LIMITER`, `github_app.ts` App-token mint) are all present in current source. The `RunnerContainer max_instances` was raised 6→20 (`wrangler.jsonc`) so the physical class cap meets the per-tenant entitlement (was a silent multi-minute spawn-thrash root cause). Residual validator step: confirm the *deployed* worker/image versions match source (source ≠ deployed is the only remaining unknown, resolvable only on live config).
 6. **G2 metadata/link-local egress** — NOT closed on the CF path by the `deniedHosts` mechanism (no CIDR match, raw-socket bypass); needs platform-network-layer filtering.
 7. **`docs/spec/corelink-fabric-stub.md`** is a deliberate `⟨FILL⟩` skeleton (the CoreLink-techlead side), not a feature spec — not inventoried as capabilities.
