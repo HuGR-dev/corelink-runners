@@ -1,6 +1,6 @@
 # CoreLink Runners — Use-Scenario & User-Story Catalog
 
-> **Status:** v1.3 (round-3 deepening) · 2026-07-17 · the exhaustive catalog of
+> **Status:** v1.4 (round-4 deepening) · 2026-07-17 · the exhaustive catalog of
 > *how humans and agents actually use CoreLink Runners end-to-end.* Product
 > use-scenarios and user stories — NOT code branches. The validation campaign maps
 > evidence onto these; a story that is not yet provable is a **tracked gap**.
@@ -29,9 +29,29 @@
 > bake-off vs Depot/Blacksmith/Namespace** (S6.4) · **deeper NEGATIVE security**
 > (compromised App install · webhook-replay window · malicious `net_policy` ·
 > credential-ticket replay · cache-poisoning — S7.8–12) · **enterprise SSO/SAML**
-> (S10.6) · **customer-facing hit-rate / cost-breakdown tracked gap** (S14.6). This
-> is round 3 of an iterative completeness loop — NOT claimed complete; formatting/
-> style harmonization is deferred to the round-4 doc-standard pass.
+> (S10.6) · **customer-facing hit-rate / cost-breakdown tracked gap** (S14.6).
+>
+> **Round-4 additions (this rev):** three NEW personas — **P15** SRE / on-call
+> (reading the canary + golden signals *during* an incident, distinct from P5 who
+> ships the fix — S15.1–5: mint-failure spike · spawn-failed climb · capacity-503/
+> load-shed · fabricd health flap · counter-reset-after-restart) · **P16**
+> contract-drift / conformance-vector seam owner (the CLAUDE.md drift tripwire —
+> S16.1–3: a caught vector diff · a transcription mismatch · adding a new vector) ·
+> **P17** incident-comms / status-page (customer-facing statuspage + comms + the
+> accessibility/i18n of the customer surfaces — S17.1–3). Plus **P8 power-user
+> depth** (S8.4 retries/partial-output/no-lease-leak · S8.5 SDK version drift vs the
+> conformance vector · S8.6 non-zero verdict vs attestation-fail vs a flaky re-run) ·
+> **hugit-door deep negatives** under P7 (S7.13 malicious/oversized envelope-ingest ·
+> S7.14 ingest-token replay across the §13.2 turn-feed · S7.15 queue-trigger
+> dedup-cap exhaustion) · **data-plane scale extremes** (S1.2.7 CAS eviction /
+> cold-tier / aged-out cache / huge hydrate / corrupt entry / R2-at-capacity) ·
+> **the 10k-jobs/day customer** (S1.3.5) · **a brokered external network service**
+> (S1.6.15) · **webhook-secret rotation with jobs in flight** (S5.4.7) · a
+> consolidated **user-visible failure vocabulary** table (exact status/text/latency).
+>
+> This is round 4 of an iterative completeness loop — NOT claimed complete;
+> formatting/style harmonization + the doc-standard architecture pass is deferred to
+> round 5.
 >
 > **Grounded in:** `docs/whitepaper/corelink-runners-v1.md` (canonical vision) ·
 > `docs/product/product.md` · `docs/product/pricing.md` (ratified 40/60 ladder) ·
@@ -86,8 +106,13 @@ compliance / procurement / legal reviewer · **P11** support & debugging user
 cost-optimization / FinOps owner (tuning concurrency + cache to lower COGS) ·
 **P13** account-lifecycle / churn admin (upgrade · downgrade · cancel · offboard ·
 delete/GDPR · re-onboard) · **P14** self-serve customer-facing observability user
-(their OWN usage / job history / live status). Reseller/partner economics (hugit
-as reseller) live under **Theme 2.5**.
+(their OWN usage / job history / live status) · **P15** SRE / on-call engineer
+(reading the canary + golden signals DURING an incident — the runbook-in-anger,
+distinct from P5 who *ships* the fix) · **P16** contract-drift / conformance-vector
+seam owner (watching the hugit↔fabric golden vectors — the CLAUDE.md drift tripwire) ·
+**P17** incident-comms / status-page owner (the customer-facing statuspage + comms +
+accessibility/i18n of the customer surfaces during an outage). Reseller/partner
+economics (hugit as reseller) live under **Theme 2.5**.
 
 ---
 
@@ -427,6 +452,48 @@ matrix proof is ⚪ X4-external (needs a real CoreLink PAT).
   cross-tenant dedup is staged, never claimed live (S1.2.2 tense discipline).
 **Feature.** Per-input partial hydrate · content-address integrity · fail-closed-on-broken-hydrate · R2-bounded residual.
 
+### S1.2.7 — Data-plane scale extremes: eviction / cold-tier / aged-out / corrupt / R2-at-capacity 🟡 built-not-proven / ⚪ hit smoke
+**Story.** As a CI engineer whose cache is huge, cold, evicted between runs, or has a
+corrupt entry, I want the runner to degrade to a *correct, slower* run — never a wrong
+result and never a wedged box — so that cache scale is a performance dimension, not a
+correctness risk.
+**Flow.** The cache-warm boot hits a data-plane extreme: (a) **eviction / it aged out
+between runs** — the memo key or a working-set blob is no longer in CAS (R2 evicted it,
+or it fell to a cold tier) ⇒ the boot **treats it as a miss** (S1.2.2 cold-first-run
+shape) — hydrate what's warm, recompute the rest, re-store the result so the *next* run
+warms again; (b) **a huge hydrate** — content-addressed streaming pulls only what's
+needed, bounded by the per-tier **R2 storage residual** (pricing.md §4: a per-tier
+allowance + throttle beyond it — "unbounded storage is a leak"); (c) **a corrupt /
+poisoned blob** — the blob's identity **is** its content hash, so a flipped byte fails
+its content-address check and is **rejected, never served as the real input** (S1.2.6 /
+S7.12 cache-poisoning); (d) **R2 at capacity** — an eviction under storage pressure is
+just case (a) from the runner's view: a miss, correct-but-cold, never a stale wrong hit.
+**Expected.** Every data-plane extreme collapses to **one of two safe outcomes**: a
+**miss** (correct, slower — the north star: cold is slow, never broken, S1.4.3) or a
+**fail-closed error** (an *unreachable* CAS mid-pull errors explicitly rather than
+running on a half-tree, S1.2.6) — **never** a silently-wrong cached result. Eviction and
+cold-tiering are **CoreLink Cache's** retention/economics (inherited, not forked —
+CLAUDE.md; R2 residual bounded per-tier, pricing.md §4); the runner's obligation is to
+treat any absent/corrupt input as a miss/error, which content-addressing makes automatic
+(a byte cannot lie about its identity, S7.12).
+**Evidence.** Content-addressed CAS = corrupt-blob rejection by construction (S1.2.6,
+whitepaper §2); miss = cold-first-run re-store (S1.2.2); R2 residual bound is a
+per-tier allowance + throttle (pricing.md §4); cache-unreachable = explicit fail-closed
+error (S1.2.1, contract §2). The full evict→re-warm curve is ⚪ X4-external (needs a
+real CoreLink PAT to drive CAS at scale).
+**Variations/edges/failures.**
+- *Aged-out between two runs of the same job* — the second run is a cold miss that
+  re-warms (S1.2.2); no wrong result, just a lost lookup. The hit-rate reflects real
+  retention (honest, S9.4), never inflated (S2.1.1).
+- *Huge working set exceeds the tier's R2 residual* — throttled per pricing.md §4;
+  storage is a bounded per-tier residual, not an unbounded leak (loss-impossible §4).
+- *Corrupt memo *result* (not a blob)* — a `CheckResult` whose `memo_key` doesn't match
+  its axes is rejected at close (S2.1.2, `400 invalid`); a byte-corrupt blob fails its
+  content hash (S1.2.6) — two distinct integrity gates, both structural.
+- *Cold tier adds latency, not error* — a cold-tier fetch is slower but correct; the
+  runner sees bytes-or-nothing, never wrong bytes (content-address).
+**Feature.** Eviction=miss-not-error · content-address corrupt-rejection · R2-residual-bounded huge hydrate · fail-closed-on-unreachable · inherited-cache-retention.
+
 ## Theme 1.3 — Concurrency, scale, and the ceiling (what the user SEES)
 
 ### S1.3.1 — Buying N seats and bursting to N 🟡 built-not-proven
@@ -518,6 +585,48 @@ path (S1.1.4/S1.6.11); the GPU/arch/OS SKU matrix is owner-gated (M4/Stage C).
 - *macOS/Windows* — a fundamentally different substrate (the builder Mac is a *self-
   hosted* reserved label, S1.1.4, not a fleet SKU); cross-OS fleet is out of scope.
 **Feature.** Capability subset-gate · unofferable-kind refusal · GPU/arch SKU (owner-gated M4) · hybrid fallback.
+
+### S1.3.5 — The 10k-jobs/day customer (sustained high throughput) 🟡 built-not-proven / 🔵 N>1
+**Story.** As a platform lead whose org runs ~10,000 CI jobs/day, I want sustained high
+throughput to be flat-priced and structurally bounded, so that heavy *volume* (not just
+a burst) is a supported shape — and I know exactly where the physical limits are.
+**Flow.** ~10k `workflow_job.queued`/day spread over the day → each is a spawn + one
+concurrency slot for its lifetime → the load meets the bounds in order: (1) the tenant's
+**concurrency cap** admits up to `min(entitlement, FLEET_MAX_CONCURRENCY)` at any instant
+(S1.3.2) — 10k/day is a *rate*, the cap is an *instantaneous* limit, so a steady 10k/day
+under a cap of N is fine as long as the arrival rate × job-duration ≤ N; (2) the
+**per-repo spawn rate bucket** (`spawn:<repo>`, S1.4.3) 429s a single hot repo without
+starving others; (3) beyond N, jobs **queue on GitHub** ("Waiting for a runner", S1.3.2),
+never lost; (4) the **vCPU-h ceiling** (once armed, S5.3.2) bounds total daily COGS
+loss-impossibly. **Memoization** is the throughput multiplier: a large fraction of 10k
+repetitive CI jobs are cache hits (~0, S1.2.1), so the *billable* compute is far below
+the job count.
+**Expected.** Sustained volume is bounded by the **same caps** as a burst (S1.3.1) — the
+model doesn't distinguish "10k spread out" from "N at once"; both are governed by the
+instantaneous concurrency cap + the vCPU-h ceiling. The honest ceiling on *this* is the
+**physical fleet** (`FLEET_MAX_CONCURRENCY`) and, at high sustained volume, the
+**singleton fabricd** (today's N=1 deploy, S5.2.2): a genuinely fleet-saturating 10k/day
+customer is the trigger for the **N>1 flip** (Postgres ledger + shards + instances raised
+together, S5.2.2/S5.2.4) — **owner-gated on exactly this kind of volume**. The reconciler
+(S1.4.1) and billing exporter (S5.3.1) are designed to be idempotent + bounded so they
+survive the volume, not buckle under it.
+**Evidence.** Instantaneous cap (`decideSlotAcquire`, S1.3.2); per-repo rate bucket
+(S1.4.3); queue-past-cap (S1.3.2); memoization near-free hits (S1.2.1); durable
+idempotent billing (S5.3.1). N>1 scale is owner-gated on volume (S5.2.2). Full 10k/day
+smoke is ⚪ X4-external.
+**Variations/edges/failures.**
+- *Arrival rate × duration > N* — a persistent backlog builds; the fix is a bigger tier
+  (S13.1) or the N>1 flip (S5.2.2), surfaced by the wait histogram (S14.5). Jobs queue,
+  never drop (S1.3.2).
+- *Reconciler load at 10k/day* — the reconciler is bounded (`MAX_ORPHAN_ATTEMPTS`,
+  loud give-up, S1.4.1); a high volume of orphans is retried-then-dropped-loud, never an
+  unbounded retry storm.
+- *Billing volume* — the exporter drains a **bounded** journal into a durable table with
+  an idempotent PK (S5.3.1); 10k events/day converge exactly-once, no double-bill.
+- *Fleet-wide saturation* — even this tenant is clamped to `FLEET_MAX_CONCURRENCY`
+  (S1.3.2); at real saturation, load-shed keeps health answerable (S5.2.3) and it is the
+  operator's signal to scale the fleet (S5.2.2).
+**Feature.** Rate-vs-instantaneous cap · per-repo rate bucket · queue-past-cap · memoization multiplier · N>1 flip trigger (owner-gated) · idempotent-at-volume billing.
 
 ## Theme 1.4 — Failure & edge stories from the user's view
 
@@ -986,6 +1095,45 @@ exec-after-deadline is a 400 zero-work gate (S1.4.4, api §exec gate 3).
 - *Minutes are unlimited* — a long job is not billed more for wall-time (concurrency
   pricing, S1.1.2); it just holds its one slot longer. vCPU-h ceiling still bounds COGS.
 **Feature.** Idle `sleepAfter` (busy≠idle) · hard lease `deadline_ms` · loud-expiry-not-silent-extension · async-runner-outlives-webhook.
+
+### S1.6.15 — A job legitimately needs an external network service (private registry / license server / VPN host) 🟡 built-not-proven / 🔵 policy-gated
+**Story.** As a CI engineer whose build must reach a **private artifact registry**, a
+**license server**, or a **VPN-reachable internal host**, I want that specific reachable
+service allowed while everything else stays fail-closed, so that a real enterprise
+pipeline runs without opening the box to the whole internet.
+**Flow.** A step needs a named external service (e.g. `registry.internal:443`, a FlexLM
+license server, an internal API) → the reach is shaped by the lease's **`net_policy`**
+(S1.6.4): an **allowed host is proxied out** through the SDK egress proxy, a denied host
+is blocked → the credential for that service (a registry token, a license key) is a
+**brokered secret** (env-0 / GitHub Actions secret, S1.6.5), **never on the box image**.
+**Expected — honest.** "Brokered" here means two distinct, real mechanisms, not a magic
+tunnel: (1) **reachability** is `net_policy`-shaped egress (S1.6.4) — an allow-list host
+is proxied, so a *specific* external service is reachable while the default posture stays
+closed (ADR-0003); (2) the **credential** to authenticate to it is brokered env-0
+(S1.6.5), never persisted. The honest limits: egress is **policy-shaped, not a private
+network** — a host behind a **VPN/private-peering** the fabric doesn't have is a
+**capability gap** (S1.3.4), and the metadata/IMDS denylist is partial with a raw-socket
+bypass (G2, S7.6). There is **no inbound ingress** to the CI runner (outbound-only,
+GitHub-assigned — the inbound case is the Workspaces surface, S3.5, owner-gated). A warm
+CAS **shrinks** the need: a dependency already in the cache never hits the registry at
+all (S1.6.4 egress reduction).
+**Evidence.** `net_policy` egress + SDK allow/deny proxy (S1.6.4, `setDeniedHosts`);
+brokered credential env-0 (S1.6.5, CredStashDO); operator egress-cutoff for a misbehaving
+service reach (S5.4.2). A default allow-list posture for the direct fleet is policy-gated
+(ADR-0003 open posture, S1.6.4).
+**Variations/edges/failures.**
+- *Service behind a real VPN / private peering* — a capability gap (S1.3.4) the fabric
+  does not bridge today; hybrid (S9.2) keeps that job on a self-hosted pool with the
+  network access, corelink serves the rest. Never a silent-fail — a blocked host errors
+  loud (the tool's connection fails, S1.6.4).
+- *Registry credential must not leak to agent code sharing the box* — brokered env-0
+  means the token is never in the env/disk (S7.2, `env=0/proc=0/disk=0`); untrusted code
+  on the box can't read it.
+- *The service is down* — the job fails honestly as it would anywhere (S1.6.4); the
+  runner is not the fault, and a warm dep would have avoided the reach.
+- *Exfiltration via the allowed host* — the operator egress-cutoff severs proxied egress
+  (S5.4.2); a hard sever is teardown (raw-socket caveat, S7.6).
+**Feature.** `net_policy`-shaped reachability · brokered credential (env-0) · no-inbound-on-CI-runner · VPN/private = capability gap (hybrid) · cache-warm egress reduction.
 
 ## Theme 1.7 — Language / ecosystem drop-in (testing the "unmodified workflow" claim harder)
 
@@ -1922,6 +2070,47 @@ the two false-positive incidents are documented (MEMORY: rota-a correction-1/3).
   deterministic.
 **Feature.** Canary on golden signals · boot-guard fail-loud · loud-logs-on-silent-paths · deterministic rollback.
 
+### S5.4.7 — Rotate the GitHub webhook secret with jobs in flight 🟡 built-not-proven
+**Story.** As an operator, I want to rotate the `GITHUB_WEBHOOK_SECRET` (the HMAC that
+authenticates the autoscaler `/webhook`) without breaking spawns for jobs already queued,
+so that a security-hygiene rotation is a safe, fail-soft operation, not a fleet outage.
+**Flow.** The webhook secret is set on **two sides** — GitHub's App config (which signs
+`X-Hub-Signature-256`) and the Worker's `GITHUB_WEBHOOK_SECRET` (which verifies via
+`verifyGithubHmac`, S1.4.3) → rotation updates both. During the **rotation window** a
+webhook signed with the *old* secret hits a Worker expecting the *new* one → **HMAC
+mismatch ⇒ `401 unauthorized`** (S1.4.3) → the Worker **does not spawn** for that event.
+**Expected — honest.** The Worker verifies against a **single** `GITHUB_WEBHOOK_SECRET`
+(there is **no dual-secret overlap window** in the code today — `index.ts:982-987`), so a
+naive rotation has a **brief window where mismatched-secret webhooks 401**. But this is
+**fail-safe, not fail-broken**: a 401'd `queued` webhook means the job simply **stays
+queued on GitHub** ("Waiting for a runner", S1.4.3/S9.3) — GitHub's at-least-once
+redelivery + the reconciler re-drive (S1.4.1) pick it up once both sides agree on the new
+secret. A 401'd `completed` webhook is covered by the **billing reconciler** (S5.3.1,
+re-scan) + the `sleepAfter`/reaper teardown backstop (S1.2.4) — no lost teardown, no lost
+bill. The rotation is therefore **safe by the idempotency + fail-safe-to-queued floor**,
+even without a dual-secret window; the operator should still **update GitHub first, then
+the Worker** (or vice-versa within a tight window) to minimize the 401 window. A
+**dual-secret overlap** (accept old OR new during rotation) is a **tracked hardening**,
+not built.
+**Evidence.** Single `GITHUB_WEBHOOK_SECRET` verified by `verifyGithubHmac`; bad HMAC ⇒
+`401` (`deploy/cloudflare/src/index.ts:982-987`, S1.4.3); fail-safe-to-queued + reconciler
+re-drive (S1.4.1/S9.3); billing reconciler re-scan (S5.3.1); teardown backstop
+(S1.2.4). Obs-read and spawn-control keys rotate independently (S5.2.1/S5.4.4), so a
+webhook-secret rotation never touches the obs or mint surfaces.
+**Variations/edges/failures.**
+- *In-flight running job during rotation* — unaffected: a running box doesn't need a
+  webhook; only *new* `queued`/`completed` deliveries in the window 401, and both are
+  self-healing (reconciler / reaper). A running job never dies from a secret rotation.
+- *`completed` 401'd in the window* — the security teardown (revoke/release/teardown) is
+  delayed to the reaper/`sleepAfter` backstop (S1.2.4); under-bill-then-heal via the
+  billing reconciler (S5.3.1), never a lost slot forever.
+- *Rotate the mint / obs / spawn key instead* — those are **separate keys** (S5.4.4), so
+  a webhook-secret rotation is isolated; rotating the mint key is a different, cache-warm
+  concern (a mismatch there fails-open-to-cold, S1.4.3, not 401).
+- *Leaked webhook URL* — the HMAC is exactly the defense (a forged webhook is 401,
+  S1.4.3); rotation shrinks the value of a leaked *old* secret.
+**Feature.** Single-secret HMAC (no overlap window today) · fail-safe-to-queued rotation · reconciler/reaper self-heal · independent-key isolation · dual-secret overlap (tracked hardening).
+
 ## Theme 5.5 — Multi-region ops (at N>1)
 
 > Today's live deploy is **single-region singleton** (ROADMAP substrate-flip banner);
@@ -2296,6 +2485,119 @@ hypothetical forged result is caught at the client.
   the tenant boundary is the poisoning firewall.
 **Feature.** Content-address integrity · memo-key reject · determinism-sacred · intra-tenant-only firewall · client verify.
 
+### S7.13 — A malicious / oversized envelope-ingest (the §13.2 turn-feed write side) 🟢 LIVE-proven (bounded surfaces) / 🟡 e2e
+**Story.** As a red-teamer controlling the untrusted in-box agent, I want to flood the
+`envelope/ingest` endpoint with an oversized transcript, thousands of distinct tool
+names, over-long names, and malformed events, so that I test whether the turn-feed can
+exhaust runner memory, persist to disk, or corrupt hugit's ledger.
+**Flow.** The in-box agent loop `POST /v1/leases/{id}/envelope/ingest` (per-lease
+write-only ingest token, S2.3.2) with hostile payloads: (a) **a torrent of events** →
+the mechanism's surfaces are **bounded in-memory** and the adapter holds **no buffer of
+its own** (poll-drain: a `GET` drains + releases in one step, `no_durable_write_anywhere
+_on_forward_path`) → on overflow the surface **latches `raw_overflow`/`meta_overflow`**,
+carried to close as **`capture_incomplete: true`** (never a silent drop, §13.3); (b)
+**thousands of distinct tool names** → the collector caps cardinality at
+**`MAX_DISTINCT_TOOLS = 256`**, folding the rest into a single `<overflow>` bucket, so
+per-lease memory stays `O(cap)` and the `Σ tool_breakdown == tool_calls` invariant still
+holds; (c) **an over-long tool name** → capped at **`MAX_TOOL_NAME_LEN = 128`**, folded
+into the overflow bucket (treated as abuse, not a real tool); (d) **a malformed event**
+(bad base64, unknown `kind`, a `tool_call` missing `tool`) → **`400`, rejected, never
+silently dropped** (`into_transcript_event` returns `Err`).
+**Expected.** The turn-feed is **bounded-and-honest by construction**: memory is
+`O(cap)` regardless of the attacker's volume (bounded surfaces + `MAX_DISTINCT_TOOLS` +
+`MAX_TOOL_NAME_LEN`), **nothing is persisted on the runner** (§13.3, the adapter has no
+second queue), overflow is **surfaced not hidden** (`capture_incomplete`), and a
+malformed event is a **loud 400**. The runner **forwards raw bytes**; redaction is
+forge-side (S2.3.2), so the runner can't be tricked into a redaction bypass because it
+does none. A flood buys the attacker a `capture_incomplete` flag on their *own* lease's
+envelope — nothing else.
+**Evidence.** Bounded surfaces + drain-release, no durable spill
+(`crates/corelink-fabric-server/src/handlers/envelope.rs` module docs,
+`no_durable_write_anywhere_on_forward_path`); `MAX_DISTINCT_TOOLS = 256` /
+`MAX_TOOL_NAME_LEN = 128` / `<overflow>` bucket + `Σ == tool_calls`
+(`crates/corelink-runner/src/envelope/collector.rs:22-29`,
+`tool_breakdown_is_bounded_against_attacker_tool_names`); `raw_overflow`/`meta_overflow`
+→ `capture_incomplete` (`envelope/close.rs:172-182`); malformed event → `400`
+(`envelope.rs` `into_transcript_event`). Live hugit consumption is ⚪ X4-external (S2.3.2).
+**Variations/edges/failures.**
+- *Overflow then abnormal close* — an Expired/Crashed close flushes a **partial**
+  envelope marked `capture_incomplete: true` unconditionally (S2.3.2, §13.5 Option B);
+  fire-and-forget, teardown never waits.
+- *Cost-inflation via fake `usage`* — the collector derives `cost_usd_micros` from a
+  **fabric-side `PriceCard`** (never caller-supplied — a forge that could inject the
+  price could fabricate cost); token counts are the agent's but the price is the fabric's.
+- *Integer-overflow on `cost`* — the collector computes over `u128` and cannot overflow
+  `u64` micro-USD (`collector.rs:234`); a hostile huge token count can't wrap the cost.
+**Feature.** Bounded in-memory surfaces · no-persistence · `MAX_DISTINCT_TOOLS`/`MAX_TOOL_NAME_LEN` folding · overflow=`capture_incomplete` · malformed=400 · fabric-side price card.
+
+### S7.14 — Ingest-token replay across the §13.2 turn-feed 🟢 LIVE-proven (lease-scoped HMAC, no oracle)
+**Story.** As a red-teamer who captured a lease's `envelope/ingest` token, I want to
+replay it on a *different* lease's turn-feed (or use it to read the transcript, or probe
+which leases exist), so that I test the ingest capability's scope and isolation.
+**Flow.** Capture the per-lease ingest token → attempt: (a) present it to **lease B's**
+`POST /v1/leases/{B}/envelope/ingest` → the handler **recomputes the expected token for
+`{B}`** from the dedicated ingest secret and **constant-time compares** — the token folds
+`lease_id` into its HMAC pre-image, so lease A's token fails for B ⇒ **`401
+unauthorized`**; (b) use the ingest token to **read** the transcript
+(`GET .../envelope/events`) → the POLL side sits behind the **tenant-PAT** gate (a
+different, trusted seam), so a write-only ingest token can't poll ⇒ rejected; (c) probe
+existence → a **wrong token for a real lease and any token for a non-lease are
+byte-identical `401`s** (auth runs *before* the registry lookup — no existence oracle).
+**Expected.** The ingest token is **per-lease, write-only, and scoped**: bound because
+its HMAC folds `lease_id` (cross-lease replay ⇒ 401), write-only because reads require
+the tenant PAT (the box never holds the PAT — the P0 fix, S2.3.2), and **no existence
+oracle** because the constant-time verify precedes any lease lookup. An exfiltrated
+ingest token lets an attacker POST trajectory to **that one soon-dead lease's** feed
+only — no tenant takeover, no read, no other-lease write, no existence probe.
+**Evidence.** `IngestSigner::verify_ingest_token(lease_id, presented)` constant-time
+compare, HMAC folds `lease_id` (`envelope.rs` `ingest` handler docs +
+`crate::ingest_token::IngestSigner`); POLL keeps the tenant-PAT gate, INGEST mounted
+outside it (`app_full` composition, S2.3.2); wrong-token/non-lease unified 401, auth
+before registry lookup (no oracle — `envelope.rs` ingest docs). This is the P0 fix that
+replaced injecting the tenant PAT into the untrusted box (S2.3.2, ROADMAP recursive-audit).
+**Variations/edges/failures.**
+- *Replay on the SAME lease* — allowed (it authenticates for that lease) but bounded: it
+  only appends more trajectory to that lease's bounded, non-persisted feed (S7.13); no
+  gain beyond what the legitimate box already could do.
+- *Token used after the lease terminalizes* — the lease's hook is gone; ingest to a
+  dead lease has no live surface to write (the close finalized the envelope, S2.3.2).
+- *Forged token* — a constant-time-mismatch is `401`, indistinguishable from a wrong
+  lease (no timing or existence leak).
+**Feature.** Lease-folded HMAC ingest token · write-only (no poll) · no existence oracle · box-holds-no-PAT · one-lease blast radius.
+
+### S7.15 — Queue-trigger dedup-cap exhaustion abuse 🟡 built-not-proven
+**Story.** As a red-teamer, I want to flood `POST /v1/queue/trigger` with many distinct
+`(item_id, tree_hash)` keys to overflow the idempotency map, so that I test whether
+exhausting the dedup cap can force double-execution, double-billing, or unbounded memory.
+**Flow.** Fire many triggers with distinct dedup keys → the in-memory idempotency map is
+**bounded by `TRIGGER_DEDUP_CAP = 4096`** → **once full, new results are served but no
+longer memoized** → a *later* duplicate of an un-memoized key **re-executes** (correct,
+merely wasteful — the at-least-once semantics already permit it). Crucially, the trigger
+**does not consult the `CapGate`**: capping already happened at **acquire** (`POST
+/v1/leases` — the trigger operates on a lease that only exists because acquire admitted
+it), so a trigger on an over-cap tenant's lease is **impossible by construction**.
+**Expected.** The dedup cap is a **bounded-memory-over-perfect-dedup** tradeoff, and it
+is **safe to exhaust**: at the cap the only cost is **re-execution of a duplicate**
+(wasteful, never a *double-bill of new work* — each execution is a real, separately
+metered job the tenant's cap/ceiling already admitted). An attacker cannot **bypass the
+cap** via the trigger (capping is at acquire, not at trigger — `trigger_is_tenant_scoped
+_and_capped`), cannot **exhaust memory** (the map is bounded at 4096, insertion-capped),
+and cannot **double-execute *unbounded*** (each re-exec is itself a capped, metered job).
+The invariant is **bounded memory**; perfect dedup is best-effort.
+**Evidence.** `TRIGGER_DEDUP_CAP = 4096`, insertion-capped, at-cap serve-but-stop-
+memoizing (`crates/corelink-fabric-server/src/handlers/queue.rs:44-64`); dedup key
+`(tenant, entry.item_id, tree_hash)` (`queue.rs:84`); cap enforced at acquire not trigger
+(`queue.rs:13-20`, `trigger_is_tenant_scoped_and_capped`).
+**Variations/edges/failures.**
+- *Re-execution cost* — a re-executed duplicate is a real metered job under the tenant's
+  vCPU-h ceiling (S5.3.2); the loss-impossible ceiling bounds even a dedup-defeating
+  flood — waste is bounded by the ceiling, not unbounded.
+- *Cross-tenant via the trigger* — the trigger is tenant-scoped (dedup key includes
+  `tenant`; the lease is the caller's); another tenant's item is unreachable (S7.4).
+- *Memory growth* — impossible past 4096 entries (bounded map); the attacker degrades
+  their *own* dedup hit-rate, nothing else.
+**Feature.** Bounded dedup map (4096) · cap-at-acquire-not-trigger · at-cap re-exec is capped+metered · tenant-scoped dedup key · bounded-memory invariant.
+
 ---
 
 # P8 — Power-user of the `corelink run` / verify primitive
@@ -2335,6 +2637,114 @@ fail-closed.
 `runs-on: corelink` fleet (ADR-0007 corrects the mislabel). Each SDK is locked to the
 shared `conformance/result_binding_v2.json` so none can drift from the fabric signer.
 **Feature.** GH Action · Buildkite plugin · verify SDKs (TS/Python).
+
+### S8.4 — `corelink run` edge cases: a wire retry, partial output, no lease leak 🟢 LIVE-proven (exit contract) / ⚪ live-fabric
+**Story.** As a power-user scripting `corelink run` in a pipeline, I want the primitive
+to behave predictably on a transient wire error, a partial/truncated output, and any
+mid-flight failure, so that I can trust the exit code and never strand a lease.
+**Flow.** Run `corelink run --url <fabric> --check '<cmd>'` and hit the edges: (a) **a
+transient wire/auth error** (acquire fails, network blip, 5xx) → **exit 2** ("wire/auth
+error / acquire failed") — a distinct, machine-readable code, never a false exit-0; (b)
+**a failure *after* acquire** (exec times out, the box dies mid-run) → the lease is
+**best-effort cancelled — no lease leaks** (cli.md), and the exit reflects the failure,
+not a hang; (c) **partial / truncated output** → the verdict is bound to the
+**`stdout_ref`/`stderr_ref`** content digests in the v2 pre-image (S1.5.1), so a
+truncated output is either a *bound* (verified) truncation or a **verification failure**
+(exit 2) — never a silently-accepted partial result dressed as complete.
+**Expected.** The exit contract is **total and honest**: `0` = ran + verified + check
+passed; `1` = ran + verified + check *failed* (exit ≠ 0); `2` = attestation failed /
+wire/auth error / unpinned image / acquire failed (cli.md). The `--json verified` field
+is `true` **only** when the binding was actually verified — `--no-verify` emits
+`verified:false`, never overclaiming. **No lease leaks on any error path** (best-effort
+cancel after acquire). There is **no automatic silent retry** that could mask a real
+failure — a transient error surfaces as exit 2 for the *caller's* orchestrator to retry
+deliberately (the same backpressure discipline an agent uses, S4.7).
+**Evidence.** Exit-code contract + no-lease-leak + unpinned→exit-2-before-box-contact
+(cli.md §`corelink run`); the v2 pre-image binds `stdout_ref`/`stderr_ref`/`exit`/
+`artifacts` (S1.5.1, `conformance/result_binding_v2.json`). Live-fabric edge behavior is
+⚪ X4-external (needs a real PAT).
+**Variations/edges/failures.**
+- *Unpinned image* — **exit 2 before any box contact** (X4 floor, S7.5); no lease is
+  even acquired, so nothing to leak.
+- *`--no-verify` used* — `verified:false` in JSON; the exit-0 then means "ran + check
+  passed" WITHOUT a trust claim — the field never lies about whether it verified.
+- *Orchestrator retries a transient exit-2* — the caller retries deliberately; each `run`
+  is a fresh acquire→exec→verify→close (no reused box, S1.6.10), idempotent to re-invoke.
+**Feature.** Total exit contract · no-lease-leak · output-bound-to-refs · honest `verified` field · no-silent-retry.
+
+### S8.5 — SDK / CLI version drift vs the conformance vector 🟢 LIVE-proven (locked) / 🟡 SDKs
+**Story.** As a power-user integrating a verify SDK (TS/Python) or a pinned CLI version,
+I want a client that computes the v2 pre-image differently from the fabric signer to be
+**caught, not silently wrong**, so that a version skew can never make me trust a verdict
+the fabric didn't actually bind.
+**Flow.** A client (CLI build, TS/Python SDK) recomputes the `result_binding_sig_v2`
+pre-image (`memo_key ‖ stdout_ref ‖ stderr_ref ‖ exit ‖ artifacts[path‖digest]`,
+S1.5.1) → if the client's formula has **drifted** from the fabric's (a field added,
+reordered, a length-prefix changed), the recomputed pre-image differs → `verify_strict`
+**fails** → **`✗ FAILED`** (or exit 2 on a malformed/pre-v2 payload) → **never a false
+`✓ VERIFIED`**. The defense against drift is structural: **every SDK is locked to the
+shared `conformance/result_binding_v2.json`** (S8.3), the same byte-exact vector the
+fabric's own golden tests pin, so a drifting SDK **fails its own conformance test at
+build time** before it ever ships.
+**Expected.** Version drift is **fail-closed, both at build and at runtime**: at build,
+the shared conformance vector is the transcription anchor (S8.3, S16.x) — an SDK whose
+formula drifts breaks its conformance test; at runtime, a drifted pre-image simply
+doesn't verify (`verify_strict` is exact, S7.3), so the worst case is a **false
+negative** (`✗ FAILED` on a genuine result — a loud, safe failure the user investigates),
+**never a false positive** (trusting a forged/mismatched verdict). A pre-v2 (empty-sig)
+payload from an old fabric is a **loud exit-2**, never a silent pass (cli.md).
+**Evidence.** SDKs locked to `conformance/result_binding_v2.json` (S8.3, cli.md "the
+CLI's `client`/`binding` modules are the reference the SDKs transcribe");
+`verify_strict` exact ed25519 (S7.3); malformed/pre-v2 → loud exit-2 (cli.md,
+`corelink verify`); the vector is the same drift tripwire the fabric golden tests pin
+(S16.1).
+**Variations/edges/failures.**
+- *Old CLI vs new fabric field* — a new bound field the old client doesn't recompute ⇒
+  pre-image mismatch ⇒ `✗ FAILED` (safe false-negative); the fix is to update the client,
+  never to trust the unverified result.
+- *SDK drift caught pre-ship* — the shared conformance vector makes a drifting SDK fail
+  its build-time golden test (S16.1), so drift is caught in CI, not in production.
+- *`--pubkey` mismatch (wrong fabric key)* — verification fails (`✗ FAILED`); the client
+  can also fetch the key from the fabric (`--pubkey-url`) to avoid a stale-key skew.
+**Feature.** Conformance-vector-locked SDKs · fail-closed-to-false-negative · build-time drift catch · exact `verify_strict` · loud pre-v2 handling.
+
+### S8.6 — A non-zero verdict, an attestation failure, and a flaky re-run via the primitive 🟢 LIVE-proven (exit semantics)
+**Story.** As a power-user, I want the primitive to sharply distinguish "the check
+**failed**" from "the verdict **can't be trusted**" from "the check is **flaky**", so
+that my automation reacts correctly to each — a red check is not a security incident, and
+a tamper is not a test failure.
+**Flow.** Run a check that produces each outcome: (a) **the check ran and failed** (a
+real test failure, exit ≠ 0) → `corelink run` returns **exit 1** = "ran + verified but
+the check itself failed" — a legitimate red verdict, cryptographically attested as
+genuine; (b) **the attestation fails to verify** (a MITM flipped `exit:1→0`, or a
+key/sig mismatch) → **exit 2** = "attestation failed" — a *trust* failure, distinct from
+a check failure; (c) **a flaky check** → re-run the primitive: a **deterministic**
+result with identical inputs is a memo hit (~0, S1.2.1), but a **non-deterministic**
+check can flip between runs — and the memo **never stores a non-deterministic result as
+canonical** (S1.6.10, determinism-sacred), so a flaky re-run re-executes honestly rather
+than serving a poisoned "green".
+**Expected.** The three outcomes map to **three distinct exit codes** (1 = check failed,
+2 = trust failed, 0 = passed+verified) — the automation can tell a red build from a
+tampered verdict from a clean pass **without parsing prose**. A **flaky check re-run via
+the primitive** is a first-class use: each `run` is a fresh acquire→exec→verify→close
+(no box reuse, S1.6.10), so re-running to diagnose flakiness is cheap-and-honest — the
+determinism guard means a flake can never be *cached* as a false green (S7.12
+cache-poisoning), so the power-user sees the real non-determinism, not a masked one.
+**Evidence.** Exit 1 vs 2 semantics (cli.md: `1` = ran+verified+check-failed, `2` =
+attestation-failed/wire/auth/unpinned/acquire-failed); determinism-sacred memo, no
+non-deterministic canonization (S1.6.10, whitepaper §5.2); `verify_strict` rejects a
+flipped `exit` (S7.3); fresh-lease-per-run (S1.6.10).
+**Variations/edges/failures.**
+- *A red check that IS trustworthy* — exit 1 with `verified:true`: the failure is real
+  and attested; the automation treats it as a legitimate test failure, not a fabric fault.
+- *A green check that WON'T verify* — exit 2: do **not** trust the green; the trust
+  failure is the incident, escalated with the attested evidence bundle (S11.5).
+- *Flaky check memoized wrongly* — impossible: a result whose bytes don't match its
+  claimed `memo_key` is rejected at close (S2.1.2, `400 invalid`); a flake can't be
+  canonized (S1.6.10).
+- *`--json` for automation* — the `verified` + exit fields give a machine-parseable
+  verdict/trust split (S8.4); no prose parsing required.
+**Feature.** Three-way exit split (fail/trust/pass) · flaky-re-run-is-fresh-lease · determinism-guard-vs-flake-poison · machine-parseable verdict/trust.
 
 ---
 
@@ -3098,6 +3508,457 @@ handler** — the tracked product gap (this story is its home).
 
 ---
 
+# P15 — SRE / on-call engineer (reading the signals DURING an incident)
+
+> Distinct from P5, who *ships the fix*: P15 is the human **holding the pager** at
+> 03:00, reading the canary + golden signals to **triage** — is this real, what's the
+> blast radius, do I roll back or wait. The runbook-in-anger. The fabric's obligation
+> is that every critical path is **loud** (loud logs on the silent paths, a boot guard,
+> a canary on the golden signals — the hard-won lesson of the two false-positive "moat
+> went live" incidents, S5.4.6) and that the diagnostic surfaces answer under load.
+
+### S15.1 — Triage a `mint_failures` spike 🟢 LIVE-proven (counter + loud logs)
+**Story.** As on-call, I'm paged on a `mint_failures` climb and I want to tell a real
+mint outage from noise and bound its blast radius in minutes, so that I roll back the
+right thing instead of guessing.
+**Flow.** The page fires → read the golden counters (`GET /internal/v1/metrics`, obs key,
+S5.2.1): **`mint_failures`** ("CAS/runner PAT mint failures — the silent-cold-hydration
+seam") is climbing while **`mint_attempts`** is flat-or-up → cross-check **`jit_minted`
+vs `runner_spawned`**: if spawns continue but mints fail, jobs are running **cold**
+(fail-open-to-cold, S1.4.3), a *degradation* not an *outage* → read the **loud logs on
+the mint path** (#327/#329, S5.2.1) + the **boot diagnostic** (`cloud_backend_status`,
+S5.4.1) to name the cause (a `token`/`token_plaintext` field-drift 503, an unwired
+`FABRIC_PUBLIC_BASE_URL`, a mint var not forwarded into the container — the **three real
+historical mint-failure root causes**, S5.4.6) → **roll back to the prior pinned digest**
+(S5.4.3) if it's a bad deploy.
+**Expected.** A mint failure is **loud, bounded, and diagnosable**: `mint_failures` is a
+*dedicated counter for exactly the silent-cold seam* that bit the fabric twice
+(S5.4.6) — so the incident that used to be "a human notices jobs are slow" is now a
+**counter + a page**. The blast radius of a total mint outage is **cold runs** (slow,
+not broken — the north star, S1.4.3), never a wrong result, never a security failure
+(cold means no cache-warm, no tenant PAT on the box — still env-0 safe, S7.2).
+**Evidence.** `mint_failures` / `mint_attempts` counters
+(`crates/corelink-fabric-server/src/observability.rs:104-107`, "the silent-cold-hydration
+seam"); loud logs on the mint path (#327/#329, S5.2.1); boot diagnostic (S5.4.1); the
+three historical root causes (S5.4.6, MEMORY: rota-a corrections). CF-side the mint 503
+manifested as the `token_plaintext` regression (S1.2.1).
+**Variations/edges/failures.**
+- *Mints fail, spawns continue* — degradation to cold (S1.4.3); page severity is
+  "slow, not down"; roll back at leisure, jobs still run.
+- *Mints AND spawns fail* — a harder outage (check `spawn_failed`, S15.2); fail-safe-to-
+  queued (S9.3) means jobs wait on GitHub, not break.
+- *A false-positive "it's fine"* — the exact trap S5.4.6 documents (a cold-run 200 masked
+  an OFF mint); the counter + loud logs are why on-call no longer trusts a green surface.
+**Feature.** `mint_failures` dedicated counter · cold-not-broken blast radius · loud-logs diagnosis · rollback decision.
+
+### S15.2 — A `spawn_failed` climb 🟢 LIVE-proven (counter + self-heal)
+**Story.** As on-call paged on `spawn_failed`, I want to know whether the fabric is
+self-healing or genuinely wedged, so that I don't roll back something the reconciler is
+already fixing.
+**Flow.** Read the CF-side counters (S5.2.1): **`spawn_failed`** ("mint/spawn threw —
+claim released for re-drive") is climbing → decide self-heal vs outage: (1) a **transient
+CF reset** self-heals via `startWithRetry` (3× on a fresh handle, S1.4.2) — a brief
+`spawn_failed` blip that recovers is **expected**, not actionable; (2) a **leaked spawn
+claim** is cleared by the reconciler tick + re-driven WARM (S1.4.1, the #293 deadlock
+fix); (3) a **persistent** climb (every spawn fails after 3 retries) is a real outage — a
+bad image, a CF platform incident, a config break → check the **boot diagnostic** (S5.4.1)
++ `container_start_retry` logs (S1.4.2) → roll back (S5.4.3). Watch `orphan_retry_giveup`
+(S1.4.1): a **loud give-up** after `MAX_ORPHAN_ATTEMPTS` means the self-heal exhausted —
+that's the real-outage signal.
+**Expected.** `spawn_failed` is **noisy-but-self-healing by design** — a claim is
+**released for re-drive** on every failure (S1.4.2), so a transient climb is the system
+working, not breaking. On-call's discriminator is **`orphan_retry_giveup`**: while the
+reconciler is retrying, wait; once it gives up loud (S1.4.1), act. Jobs never break during
+a spawn outage — they **stay queued on GitHub** (fail-safe-to-queued, S9.3).
+**Evidence.** `spawn_failed` counter (`deploy/cloudflare/src/metrics.ts:35`, "claim
+released for re-drive"); `startWithRetry` 3× (S1.4.2); reconciler re-drive + dead-letter
+(S1.4.1); `orphan_retry_giveup` loud terminal log (S1.4.1); boot diagnostic (S5.4.1).
+**Variations/edges/failures.**
+- *Blip that recovers* — the retry/reconciler absorbed it; no action (the common case).
+- *`orphan_retry_giveup` firing* — self-heal exhausted; a real outage, roll back /
+  escalate (S15.5).
+- *Reconciler off for the repo* — `RECONCILER_REPOS` opt-in (S1.4.1); a non-first-party
+  repo relies on GitHub redelivery — slower self-heal, still fail-safe.
+**Feature.** `spawn_failed` self-healing counter · retry/reconciler absorbs transients · `orphan_retry_giveup` = real-outage signal · fail-safe-to-queued.
+
+### S15.3 — A capacity-503 / load-shed alert 🟡 built-not-proven (counters) / 🟢 health-answerable
+**Story.** As on-call paged on a capacity-503 / load-shed spike, I want to know whether
+the fabric is shedding load *gracefully* or falling over, so that I can decide to scale,
+throttle, or wait it out.
+**Flow.** Read the counters (S5.2.1): **`provision_capacity_503`** (backend can't
+provision a box) and **`load_shed`** (the global-concurrency-limit 503, S5.2.3) climbing
+→ confirm the fabric is **still alive**: `GET /v1/health` is mounted **outside** the load
+limiter (S5.2.3), so a 200 there means "saturated but up", a timeout means "down" → check
+`acquire_rejected_over_cap` (tenants hitting *their* caps, S1.3.2 — expected under a burst)
+vs `provision_capacity_503`/`load_shed` (the *fleet* saturating — the real capacity
+signal) → decide: scale the fleet / trigger the N>1 flip (S5.2.2), or ride it out if it's
+a transient burst (a nightly cron wave, S1.6.13).
+**Expected.** Saturation **degrades cleanly, not catastrophically**: load-shed sheds
+excess at a global limit while **health stays answerable** (S5.2.3), so an LB/orchestrator
+can always probe liveness — on-call can distinguish "saturated, shedding, still up" (wait
+or scale) from "down" (escalate). Per-tenant `over_cap` (S1.3.2) is a *customer* signal
+(they hit their cap — upgrade), NOT a fleet incident; the fleet signal is
+`provision_capacity_503`/`load_shed`. The honest capacity ceiling today is the
+**singleton fabricd + fleet cap** (S1.3.5/S5.2.2); a sustained capacity page is the N>1
+flip trigger.
+**Evidence.** `provision_capacity_503` / `load_shed` counters (observability.rs:101,123);
+health mounted outside the limiter (S5.2.3, `load_shedding.rs`); `acquire_rejected_over_cap`
+distinct from fleet saturation (observability.rs:77); N>1 flip (S5.2.2).
+**Variations/edges/failures.**
+- *`over_cap` high, `load_shed` low* — tenants at their caps (S1.3.2), the fleet is fine;
+  not a fleet incident — the *customer's* upgrade signal (S12.3).
+- *`load_shed` climbing, health 200* — graceful saturation; scale the fleet (S5.2.2) or
+  wait out the burst; jobs queue, never break (S9.3).
+- *Health timing out* — a real down (not just shed); escalate + roll back (S15.5),
+  within-region resilience is the only mitigation today (single-region, S5.5.1).
+**Feature.** `provision_capacity_503`/`load_shed` counters · always-answerable health · fleet-vs-tenant saturation discriminator · N>1 flip trigger.
+
+### S15.4 — A fabricd health flap 🟡 built-not-proven / 🔵 N>1
+**Story.** As on-call watching fabricd's health flap (up/down/up), I want to know if the
+singleton is crash-looping and what the durability posture is, so that I know whether
+state survives a restart and whether I must escalate the N>1 flip.
+**Flow.** Health flaps → read `GET /internal/v1/status` (obs key, S5.2.1): **`uptime_ms`**
+(a small/resetting value ⇒ crash-loop), **`ledger_cross_instance_safe`** (`false` = the
+**in-memory ledger**, state lost on restart — today's singleton; `true` = the durable pg
+ledger), **`version`** (is this the binary I expect), **`num_shards`/`this_shard`** (1 =
+inert singleton) → the diagnosis: today's deploy is a **single-region singleton with an
+in-memory ledger** (S5.2.2), so a fabricd restart **loses in-memory lease state + resets
+the counters** (S15.5); the **watchdog** (935bc69, S5.2.2) is the interim backstop against
+the singleton fragility → a persistent flap is the **N>1 flip escalation** (durable pg
+ledger + shards, S5.2.2/S5.2.4).
+**Expected — honest.** The status aggregate answers **"is this the binary/config I
+expect, and is it healthy"** in one shot (the question bare `/v1/health` can't, S15.3) —
+crucially **`ledger_cross_instance_safe`** tells on-call whether a restart is *safe* (pg,
+recoverable) or *lossy* (in-memory, today). A flapping singleton is the **known fragility**
+the watchdog mitigates and the N>1 flip resolves (S5.2.2) — on-call escalates the flip
+rather than fighting the singleton. Within-region resilience (spawn retry, reconciler,
+load-shed, S5.5.1) keeps *jobs* fail-safe even while fabricd flaps.
+**Evidence.** `GET /internal/v1/status` → `{version, uptime_ms, ledger_cross_instance_safe,
+this_shard, num_shards, counters}` (`crates/corelink-fabric-server/src/handlers/status.rs`,
+obs-key gated, default-off 404); watchdog (935bc69, S5.2.2); durable pg ledger = the N>1
+prereq (S5.2.2); within-region resilience LIVE (S5.5.1).
+**Variations/edges/failures.**
+- *`ledger_cross_instance_safe: false` + a flap* — restarts lose in-memory lease state;
+  the reaper/`sleepAfter` reclaims orphaned boxes (S1.4.4), billing re-scans (S5.3.1) —
+  under-bill-then-heal, never a lost teardown.
+- *`uptime_ms` resetting repeatedly* — a crash-loop; check `version` (a bad deploy →
+  roll back, S5.4.3) vs a platform incident (escalate, single-region has no failover
+  today, S5.5.1).
+- *Status 404* — the obs key isn't configured (default-off, S5.2.1); on-call must have
+  the key provisioned to read status (an ops-readiness prereq).
+**Feature.** `/internal/v1/status` readiness aggregate · `ledger_cross_instance_safe` restart-safety signal · singleton watchdog · N>1 flip escalation · within-region job resilience.
+
+### S15.5 — Counters reset after a restart (reading the signals honestly) 🟢 LIVE-proven (documented behavior)
+**Story.** As on-call diffing the golden counters during an incident, I want to know that
+a counter drop-to-zero can mean a **restart**, not a *fix*, so that I don't misread a
+fabricd bounce as "the incident resolved".
+**Flow.** Mid-incident the counters (`GET /internal/v1/metrics`, S5.2.1) suddenly read low
+→ **is the incident over, or did fabricd restart?** → the golden counters are **monotonic
+since boot and RESET on restart** (like the in-memory ledger — status.rs docs) → cross-
+check `GET /internal/v1/status` **`uptime_ms`**: a small `uptime_ms` ⇒ a **recent restart
+reset the counters** (S15.4), NOT a resolution → a monitor computes **rates by diffing
+snapshots over time** (status.rs: "a monitor diffs snapshots over time for rates"), so a
+reset is a discontinuity to account for, not a signal.
+**Expected — honest.** The counters are **boot-relative and reset on restart** — this is
+**documented, not a bug** (status.rs: "Reset on restart (like the in-memory ledger)"),
+and it is exactly the kind of thing that fools an on-call reading absolutes. The correct
+read is **rates from diffed snapshots** anchored on `uptime_ms`: a counter that dropped
+because `uptime_ms` reset is a restart artifact; a counter that dropped while `uptime_ms`
+kept climbing is a **real** change (the incident easing). This is the runbook-in-anger
+discipline: **never read a counter absolute across a possible restart** — anchor on
+uptime, diff for rates. (At N>1 with the durable pg ledger, the *ledger* state survives a
+restart even though the *counters* still reset — S15.4 `ledger_cross_instance_safe`.)
+**Evidence.** Counters "Monotonic; a monitor diffs snapshots over time for rates. Reset on
+restart (like the in-memory ledger)" (`status.rs` StatusReport `counters` doc); `uptime_ms`
+is the restart anchor (S15.4); durable pg ledger survives restart (state ≠ counters,
+S5.2.2).
+**Variations/edges/failures.**
+- *Counters low + `uptime_ms` small* — a restart reset them (not a fix); re-baseline the
+  monitor's diff from the new boot.
+- *Counters low + `uptime_ms` large* — a real change (incident easing); trust it.
+- *Ledger state at N=1* — an in-memory ledger loses lease state on the same restart
+  (S15.4); the reaper/billing self-heal (S1.4.4/S5.3.1). At N>1 the pg ledger persists.
+**Feature.** Boot-relative counters · reset-on-restart (documented) · `uptime_ms` restart anchor · rate-from-diff discipline · state≠counters at N>1.
+
+---
+
+# P16 — Contract-drift / conformance-vector seam owner (the CLAUDE.md tripwire)
+
+> The cross-repo seam between hugit and this fabric is **law** (CLAUDE.md wire-contract
+> law): types are **transcribed** on each side (hugit-contracts is **frozen, never
+> imported**), and the shared **conformance vectors** are committed **byte-identical in
+> both repos** — the **drift tripwire**: either side's golden tests break on any type
+> divergence, so a difference is **never silent**. This persona owns that tripwire.
+
+### S16.1 — A vector diff caught (the drift tripwire fires) 🟢 LIVE-proven (golden tests)
+**Story.** As the seam owner, I want any divergence between the fabric's wire types and
+the frozen contract to **break a test loudly**, so that a drift is caught in CI, never
+shipped as a silent incompatibility with hugit.
+**Flow.** Someone edits a wire type on the fabric side (adds a field, reorders, changes a
+tag) → the **golden test** re-serializes the type and compares it **byte-exact** against
+the committed conformance vector (`conformance/*.json` + `conformance/manifest.sha256`) →
+**mismatch ⇒ the golden test FAILS** → CI is red → the drift is **caught before merge**.
+The vectors are **byte-identical in both repos** (CLAUDE.md), so the *same* divergence
+also breaks hugit's golden tests — neither side can drift silently.
+**Expected.** The tripwire is **structural and bilateral**: a byte-exact round-trip
+against a committed vector (e.g. `RunnerLease.json` `ab1744c9…`, `FenceManifest.json`
+`07940b9a…`, `IntentMetrics.json` `2d8d2215…`) means **any** field/shape/order change
+fails the golden test on **whichever side changed** — and because the vectors are
+committed identically in both repos, hugit's tests break too. A drift is therefore
+**never silent**: it is a red build, not a production incompatibility discovered by a
+hugit customer. The seam owner's job is to **treat a golden-test failure as a
+contract-change gate**, not a test to "fix" by regenerating the vector unilaterally.
+**Evidence.** Byte-exact golden round-trip tests
+(`crates/corelink-runners-contracts/tests/acceptance_cf0_transcriptions.rs` "round-trip is
+not byte-exact"; `acceptance_s13_contracts.rs` "IntentMetrics golden round-trip is not
+byte-exact" / "field values drifted from the expected struct literal"); the committed
+vectors + `manifest.sha256` (`conformance/`); CLAUDE.md wire-contract law (transcribed,
+frozen, byte-identical, drift-tripwire).
+**Variations/edges/failures.**
+- *A benign-looking field add* — still breaks the byte-exact vector (correct); a new
+  field is a **contract change** that must be coordinated with hugit (S16.3), not slipped
+  in — the tripwire forces the conversation.
+- *Regenerate the vector to "fix" the red test* — the **anti-pattern**: it hides the
+  drift instead of coordinating it. A vector change is a deliberate, cross-repo,
+  owner/hugit-techlead-gated act (S16.3), never a unilateral green-the-build move.
+- *Money/type mistyping* — the s13 golden also rejects a `cost_usd_micros` float where an
+  integer is required (`float_money`/`int_money` cases, S2.2.1), catching an epsilon-drift
+  class of bug.
+**Feature.** Byte-exact golden vectors · bilateral tripwire · manifest.sha256 · drift-is-a-red-build · vector-change-is-a-gate.
+
+### S16.2 — A transcription mismatch (the two sides disagree) 🟢 LIVE-proven (no-import law)
+**Story.** As the seam owner, I want the *transcribed* type on the fabric side to be
+provably faithful to the frozen contract even though I **never import** hugit-contracts,
+so that "transcribe, don't depend" doesn't become "transcribe, and quietly diverge".
+**Flow.** The fabric **transcribes** the wire types (RunnerLease, FenceManifest,
+MaterializedEntry, IntentMetrics/TokenCounts/ToolCount) rather than importing
+hugit-contracts (which is **frozen, never imported** — `deny.toml` enforces **crates.io
+only**, no git/path dependency either direction) → the faithfulness is proven **not by a
+shared dependency but by the shared conformance vector**: the fabric's transcribed type
+must round-trip **byte-identically** to the same `conformance/*.json` hugit's transcribed
+type round-trips to → a transcription that drifts (a typo, a wrong tag, a missing field)
+**fails its golden test** (S16.1).
+**Expected.** The **no-import law + the shared vector** together make transcription safe:
+the fabric can't import the contract (by policy — `deny.toml`), so the vector **is** the
+contract's shadow on this side, and the golden test is the proof the transcription matches
+it. A transcription mismatch is caught by the *same* tripwire as a type drift (S16.1) —
+there is no separate "did I transcribe it right" risk, because byte-exactness against the
+shared vector **is** the transcription check. This is why the seam is **frozen from
+hugit's side** (CLAUDE.md): the fabric satisfies the vector, never edits hugit's
+expectations.
+**Evidence.** No git/path dep either direction, crates.io-only (`deny.toml`, CLAUDE.md);
+types transcribed on each side, hugit-contracts frozen/never-imported (CLAUDE.md);
+byte-exact golden proves the transcription (S16.1,
+`acceptance_cf0_transcriptions.rs`); the conformance vectors are committed byte-identical
+in both repos (CLAUDE.md).
+**Variations/edges/failures.**
+- *Tempted to import hugit-contracts to "stay in sync"* — **forbidden** (`deny.toml`
+  crates.io-only); the sync mechanism is the vector + golden test, not a shared crate
+  (deliberate: a shared crate would couple release cycles and break the frozen-seam law).
+- *The fabric adds a runner-only field* — allowed if it doesn't change the shared
+  vocabulary; the forge **ignores** extra runner-specific fields (e.g. `cpu_ms`, S2.2.1),
+  so a fabric-only extension isn't a contract break — but a change to a *shared* type is.
+- *Two repos, one vector, out of sync* — impossible to ship silently: the byte-identical
+  commitment means a divergence reds one side's CI (S16.1) before it reaches production.
+**Feature.** No-import law (`deny.toml`) · vector-as-contract-shadow · byte-exact = transcription proof · frozen-from-hugit · runner-only-field tolerance.
+
+### S16.3 — Adding a new conformance vector (a coordinated contract change) 🔵 owner-gated (hugit-side PR first)
+**Story.** As the seam owner, I want to add a new shared type/vector (e.g. a new
+`IntentMetrics` field) **without** unilaterally breaking hugit, so that a contract
+*evolution* is a coordinated, gated act, not a drift.
+**Flow.** A new shared vector is needed → the protocol (CLAUDE.md open cross-repo seams):
+**the hugit-side PR lands first** (the contract is **frozen from hugit's side**; the
+fabric never adds a shared vector unilaterally) → then the fabric transcribes the type +
+commits the **byte-identical** vector under `conformance/` → both sides' golden tests go
+green against the *same* bytes → the drift tripwire (S16.1) now guards the new type too.
+Concretely: the `IntentMetrics` conformance vector and the `hugit-c9-` container-prefix
+decision are **named open seams** that are **owner/hugit-techlead-gated** (CLAUDE.md) —
+added hugit-side-first, never unilaterally.
+**Expected — honest.** A contract change is **owner-gated and ordered**: hugit-side PR
+first (it owns the frozen contract), fabric transcribes second, both commit the vector
+byte-identically. This is the **opposite** of the S16.1 anti-pattern (regenerating a
+vector to green a build): here the vector change is *intentional*, *coordinated*, and
+*gated* — the seam owner's role is to **carry the cross-repo relay** (MEMORY: cross-TL
+relay = a committed handoff doc + the owner as courier), never to edit hugit's
+expectations on this side. Until the hugit-side lands, the fabric does **not** add the
+vector (owner-gated).
+**Evidence.** Open cross-repo seams: `IntentMetrics` vector (hugit-side PR first) +
+`hugit-c9-` container-prefix, both owner/hugit-techlead-gated (CLAUDE.md); the seam is
+frozen from hugit's side (CLAUDE.md, `docs/spec/hugit-integration-contract.md`); vectors
+committed byte-identical both repos (CLAUDE.md). The `intent_metrics_sig` vector
+(`conformance/intent_metrics_sig.json`) + IntentMetrics (`2d8d2215…`) are the live
+examples of a coordinated add (S2.2.1).
+**Variations/edges/failures.**
+- *Fabric adds the vector first* — **forbidden** (unilateral contract change); it would
+  make the fabric's expectation diverge from hugit's frozen contract. Hugit-side first.
+- *The `hugit-c9-` prefix decision* — a named owner-gated cross-repo decision (CLAUDE.md);
+  the fabric doesn't decide it, it consumes the decision once made.
+- *A new runner-only field* — NOT a shared-vector change (S16.2); the forge ignores it,
+  so it needs no hugit coordination — only *shared* vocabulary changes are gated.
+**Feature.** Hugit-side-PR-first ordering · byte-identical add · owner/hugit-techlead-gated · cross-repo relay discipline · named open seams.
+
+---
+
+# P17 — Incident-comms / status-page owner (the customer-facing outage surface)
+
+> When Door A/B degrade, someone owns what the **customer** sees and hears: a
+> statuspage, an incident notice, and the accessibility/i18n of every customer
+> surface. Honest scope: the customer-facing **statuspage + comms process** is an
+> **org/owner deliverable, NOT built in this repo** — but the fabric provides the
+> *substrate* it reports on (golden signals, the fail-safe-to-queued posture, the
+> honest tense discipline), and the customer *surfaces* (GitHub's UI, the `/v1` API,
+> the console) carry their own accessibility/i18n obligations.
+
+### S17.1 — A customer-facing statuspage during an outage 🔵 owner-gated (comms) / 🟢 signal substrate
+**Story.** As the incident-comms owner, I want a statuspage that reflects the *real*
+degradation (cold runs, queued jobs, a region issue) truthfully, so that customers get an
+honest, timely signal instead of discovering the problem themselves.
+**Flow.** An incident degrades a door → the statuspage should reflect it: a **mint
+outage** = "cache-warm degraded, jobs running cold (slower, not failing)" (S15.1, the
+fail-open-to-cold truth); a **spawn outage** = "jobs queuing, will run when capacity
+frees" (S15.2/S9.3, fail-safe-to-queued); a **capacity saturation** = "at fleet capacity,
+jobs queued" (S15.3); a **fabricd flap** = the singleton fragility (S15.4). The **golden
+signals** (S5.2.1) + the **canary** (S5.4.6) are the operator's ground truth the status
+narrative is written from.
+**Expected — honest.** The statuspage itself is an **org/owner deliverable, NOT built in
+this repo** (like the SOC2 report, S10.2, and the support SLA, S11.5) — what **is** built
+is the **truthful signal substrate** it must report from: the golden counters (S5.2.1),
+the honest degradation posture (**cold is slow-not-broken**, **queued is waiting-not-
+lost** — the north star, S1.4.3/S9.3), and the **tense discipline** (never overclaim — a
+degradation is stated honestly, never spun). The comms must inherit the doc's standing
+discipline: **no overclaim** (dedup is intra-tenant, ~10% under GitHub on raw compute —
+the reality summary's tense rules) even under incident pressure.
+**Evidence.** Golden-signal substrate (S5.2.1); canary as incident ground truth (S5.4.6);
+fail-open-to-cold / fail-safe-to-queued honest posture (S1.4.3/S9.3); tense discipline
+(reality summary, CLAUDE.md). Statuspage tooling/process = owner-gated (org deliverable).
+**Variations/edges/failures.**
+- *A degradation that's "slow, not down"* — the hardest to communicate honestly: cold
+  runs (S15.1) are *degraded, not broken* — the statuspage must say "slower", not "down",
+  or it over-alarms; the north-star framing (S1.4.3) is the honest wording.
+- *A false-positive canary alert* — the operator confirms via counters + boot diagnostic
+  (S5.4.6) BEFORE the statuspage says "outage"; a canary blip is not yet a customer incident.
+- *hugit-resold customer* — a hugit-fronted customer sees **hugit's** statuspage, not
+  ours (invisible-COGS, S2.2.2/S2.5.1); the fabric's status feeds hugit as the reseller,
+  hugit owns its customers' comms (the reseller boundary).
+**Feature.** Truthful signal substrate · honest degradation wording (slow-not-down) · tense-discipline-under-pressure · statuspage (owner-gated) · reseller-comms boundary.
+
+### S17.2 — Incident comms / customer notification 🔵 owner-gated (comms process)
+**Story.** As the incident-comms owner, I want to notify affected customers with an
+accurate blast-radius and a clear "what to do", so that a customer's own on-call isn't
+guessing whether their pipeline is at fault.
+**Flow.** Scope the blast radius from the signals (S15.x) → notify with the **honest
+shape**: *who* is affected (a tenant, a region, the whole singleton — bounded by the
+tenancy boundary, S7.4, and single-region reality, S5.5.1), *what* they see (cold /
+queued / at-cap), and *what to do* (usually nothing — jobs self-heal, S1.4.1/S9.3; or
+roll back a label, S9.3, if they want to fall to hosted). The **attested evidence bundle**
+(S11.5) lets a customer independently verify a result *wasn't* corrupted by the incident.
+**Expected — honest.** The comms **process** (channel, SLA, templates) is an **org/owner
+deliverable** (S11.5 support process, not built here); the fabric supplies the
+**blast-radius facts**: tenancy-bounded (a compromised/degraded tenant is *that* tenant,
+S7.8), single-region-scoped (S5.5.1), and **fail-safe** (the honest "what to do" is
+usually "nothing, it self-heals" — S1.4.1/S9.3, or "revert the label to fall to hosted" —
+S9.3). Under incident pressure the comms must keep the **tense discipline** (S17.1) — never
+overstate a fix ("moat went live" was a false positive twice, S5.4.6; the comms lesson is
+the same as the engineering one: don't declare victory on a green surface).
+**Evidence.** Tenancy-bounded blast radius (S7.4/S7.8); single-region scope (S5.5.1);
+self-heal / fail-safe-to-queued "what to do" (S1.4.1/S9.3); attested evidence for "was my
+result affected" (S11.5). Comms process/SLA = owner-gated (S11.5).
+**Variations/edges/failures.**
+- *"Was my result corrupted by the incident?"* — no: `corelink verify` (S11.5/S7.3) proves
+  a verdict wasn't tampered; a cold/queued incident degrades *speed*, never *correctness*
+  (content-address + determinism, S7.12).
+- *Over-notify* — a per-tenant `over_cap` (S1.3.2) is NOT an incident (it's the customer's
+  own cap); notifying on it would cry wolf. The fleet signals (S15.3) are the incident line.
+- *hugit's customers* — notified by hugit (the reseller, S2.5.1), not us; we notify our
+  **direct** tenants and **hugit-the-tenant**.
+**Feature.** Tenancy-bounded blast-radius facts · self-heal "what to do" · attested "was I affected" · tense-discipline comms · reseller-notifies-its-own boundary.
+
+### S17.3 — Accessibility / i18n of the customer surfaces 🔵 owner-gated (surface design) / 🟢 API-is-surface-agnostic
+**Story.** As a product owner, I want the customer-facing surfaces to be accessible and
+internationalizable, so that the console, statuspage, and error text serve every customer
+— not just English-speaking, sighted, mouse users.
+**Flow.** Enumerate the customer surfaces and their a11y/i18n ownership: (a) **Door A =
+GitHub's own UI** (logs, re-run, "Waiting for a runner") — **GitHub owns its
+accessibility** (we deliberately don't reinvent it, S11.4, adoption principle); (b) **the
+`/v1` API** — a **machine surface**: it returns **structured status codes + stable error
+codes** (`over_cap`, `not_found`, `invalid` — S1.3.2/S7.4/S2.1.2), which are **locale-
+agnostic and screen-reader-neutral by construction** (a client renders them in the user's
+language/modality); (c) **the self-serve console** (P14 read surface: usage, history,
+leases, wait) — a **future product surface** whose a11y/i18n is an **owner-gated design
+obligation**; (d) **error *text*** — the user-visible failure vocabulary (see the
+consolidated table) should be clear, actionable, and translatable.
+**Expected — honest.** The fabric's own surfaces are **machine-first** (structured
+codes, not prose), which makes them **inherently i18n/a11y-friendly**: a stable error
+code (`over_cap`) is rendered by the *client* in the user's language and modality, so the
+API imposes no English/visual assumption. The **rendered** surfaces — the console (P14),
+a statuspage (S17.1) — carry the actual a11y (WCAG) + i18n obligations, and those are an
+**owner-gated product-design deliverable, NOT built in this repo**. Door A inherits
+**GitHub's** accessibility (a deliberate non-reinvention, S11.4). The honest position:
+the **API is surface-agnostic and ready**; the **human surfaces are an owner-gated design
+pass**.
+**Evidence.** Stable structured error codes (`over_cap`/`not_found`/`invalid`,
+S1.3.2/S7.4/S2.1.2 — locale/modality-agnostic); Door A = GitHub's accessible UI, not
+reinvented (S11.4); the console/statuspage are future owner-gated surfaces (P14/S17.1);
+the failure vocabulary is enumerated (see the table below).
+**Variations/edges/failures.**
+- *Screen-reader on the console* — a WCAG obligation of the **console design** (owner-
+  gated, P14); the underlying API is already non-visual (structured JSON).
+- *Non-English error surfacing* — the API's stable codes are translated **client-side**;
+  the fabric doesn't hard-code a locale into a status code (only the human-readable
+  *message* string is English, and it's advisory over the code — see the failure
+  vocabulary table).
+- *Door A a11y* — GitHub's; we inherit it by hosting the real Actions agent (S1.1.4/S11.4),
+  a deliberate adoption win (don't reinvent an accessible CI UI).
+**Feature.** Structured locale-agnostic error codes · Door-A-inherits-GitHub-a11y · console/statuspage a11y (owner-gated) · API-surface-agnostic · client-side i18n.
+
+---
+
+# User-visible failure vocabulary (exact status · text · latency · recovery)
+
+> A consolidated map of **what the user actually sees** on each failure — the exact
+> status code / label, the human-readable signal, the rough latency, and the recovery.
+> Grounded in the stories above; the discipline is **loud, never silent** — every
+> failure is a legible signal, never a wrong result dressed as a right one.
+
+| Failure | Door / surface | Exact user-visible signal | Latency | Recovery | Story |
+|---|---|---|---|---|---|
+| At concurrency cap | A (GitHub) | "Waiting for a runner" (job queued) | until a slot frees | auto (slot frees) / upgrade | S1.3.2 |
+| At concurrency cap | B (`/v1`) | `429 over_cap` (preventive, before spawn) | immediate | back off / retry / upgrade | S1.3.2/S4.7 |
+| vCPU-h ceiling hit (armed) | B | acquire refused at ComputeGate | immediate | queue / upgrade tier | S1.6.12 |
+| Typo'd / unknown / reserved label | A | "Waiting for a runner" (200 no-op, never served) | indefinite (visible) | fix the label | S1.6.11 |
+| Extra label the fleet can't serve | A | not served (subset-gate, no partial match) | — | fix labels / hybrid | S1.1.4/S1.3.4 |
+| Cold run (no cache-warm) | A | a normal run, just slower | +boot/hydrate | next run warms; fix config | S11.1 |
+| App webhook lacks `installation.id` | A | cold spawn (fail-open), NOT a 400 | normal | map repo (`REPO_INSTALLATION_MAP`) | S1.4.3 |
+| Autoscaler not configured | A | `503 "autoscaler not configured"` | immediate | configure secrets | S1.4.3 |
+| Bad webhook HMAC | A | `401 unauthorized` | immediate | (defense; rotate secret) | S1.4.3/S5.4.7 |
+| Per-repo spawn rate limit | A | `429 rate limited` (`spawn:<repo>`) | immediate | retry; one repo can't starve others | S1.4.3 |
+| Missing / typo'd secret | A/B | empty value → the tool fails loud (red check) | normal | set the secret | S1.6.5 |
+| Tool not in the image | A | `command not found`, non-zero exit, red check | normal | install step / image matrix | S1.6.3 |
+| Build OOM / crash / TTL | A/B | box dies clean; lease `Crashed`/`Expired`; slot frees | at OOM/deadline | bigger size (owner-gated) / fix | S1.4.4/S11.3 |
+| Cross-tenant / unknown lease | B | `404 not_found` (NEVER 403 — no oracle) | immediate | (correct isolation) | S7.4/S14.4 |
+| Unpinned / mismatched image | B/CLI | `400 invalid` (fabric) / exit 2 before box (CLI) | immediate, pre-spawn | pin `@sha256:` | S7.5/S8.1 |
+| Bad PAT | B | `401` | immediate | fix credential | S8.2 |
+| Attestation fails to verify | CLI | `✗ FAILED … do NOT trust this verdict` / exit 2 | immediate | do not trust; escalate (S11.5) | S1.5.1/S8.6 |
+| Check ran + failed (real red) | CLI | exit 1, `verified:true` | normal | it's a real test failure | S8.6 |
+| Cache unreachable mid-hydrate | A/B | explicit fail-closed error (never silent cold-as-hit) | at hydrate | retry; investigate CAS | S1.2.1/S1.2.6 |
+| Corrupt / poisoned cache blob | A/B | rejected (content-address mismatch) → treated as miss | at hydrate | auto (re-compute) | S1.2.7/S7.12 |
+| Ingest token wrong/forged/cross-lease | box→B | `401 unauthorized` (no existence oracle) | immediate | (correct isolation) | S7.14 |
+| Malformed envelope event | box→B | `400` (rejected, never silently dropped) | immediate | fix the event | S7.13 |
+| Envelope surface overflow | B/close | `capture_incomplete: true` at close (never silent) | at close | (honest lossiness flag) | S7.13/S2.3.2 |
+| Tenant suspended (abuse) | B | `403` acquire rejected (durable suspend) | immediate | reversible un-suspend | S7.7/S5.3.3 |
+| Fleet saturated / load-shed | B | `503` (health still 200 outside the limiter) | immediate | scale fleet / N>1 flip | S5.2.3/S15.3 |
+| Backend can't provision | B | `provision_capacity_503` | immediate | operator scales / rolls back | S15.3 |
+| Internal status/metrics, key unset | internal | `404` (invisible, default-off) | immediate | configure obs key | S5.2.1/S15.4 |
+| Internal status/metrics, wrong key | internal | `401` (constant-time) | immediate | fix obs key | S5.2.1 |
+
+**Standing discipline for this table:** every row is **loud** — a queued job is
+*visible*, a refusal is a *distinct status code*, a cold run is *slower not broken*, a
+corrupt input is *rejected not served*, an overflow is *flagged not dropped*. There is
+**no row where the user gets a silently-wrong result** — that is the whole point of the
+fail-closed / fail-open-to-cold / fail-safe-to-queued posture (the north star).
+
+---
+
 # Cross-cutting reality summary (what a validation campaign must prove)
 
 | Capability | Marker | Where the proof is / the gap |
@@ -3148,6 +4009,16 @@ handler** — the tracked product gap (this story is its home).
 | NEG-security: compromised App · webhook-replay · net_policy · ticket-replay · cache-poison | 🟢 LIVE / 🟡 freshness | S7.8–12; tenant-bounded blast radius; idempotent replay; server-forced net_policy; lease-bound ticket; content-address integrity |
 | Enterprise SSO / SAML / SCIM | 🔵 owner-gated (identity) | S10.6; ADR-0002 HuGR account/Clerk; NO identity code in this repo |
 | Customer-facing hit-rate & cost-breakdown metric | 🟡 raw signal / 🔵 dedicated field | S14.6; honest accounting built (contract §3); dedicated metric = product follow-up |
+| Data-plane scale extremes (eviction · cold-tier · corrupt · R2-cap) | 🟡 built-not-proven | S1.2.7; eviction=miss, content-address rejects corrupt, R2 residual bounded (pricing §4) |
+| The 10k-jobs/day customer (sustained throughput) | 🟡 built / 🔵 N>1 | S1.3.5; rate-vs-instantaneous cap; memoization multiplier; N>1 flip trigger |
+| Brokered external network service (registry/license/VPN) | 🟡 built / 🔵 policy | S1.6.15; `net_policy` reach + env-0 cred; VPN/private = capability gap (hybrid) |
+| Power-user run edge cases (retry · partial · SDK drift · flaky) | 🟢 LIVE (exit contract) / ⚪ live-fabric | S8.4–6; total exit contract, no-lease-leak, conformance-locked SDKs |
+| hugit-door NEG (envelope-flood · ingest-replay · dedup-exhaust) | 🟢 LIVE (bounded/scoped) | S7.13–15; bounded surfaces + `MAX_DISTINCT_TOOLS`, lease-folded HMAC, 4096-cap |
+| Webhook-secret rotation with jobs in flight | 🟡 built-not-proven | S5.4.7; single-secret 401 window fail-safe-to-queued; dual-secret overlap = hardening |
+| SRE runbook-in-anger (mint/spawn/capacity/flap/counter-reset) | 🟢 LIVE (counters+logs) / 🔵 N>1 | P15/S15.1–5; `mint_failures`/`spawn_failed`/`load_shed`/`/internal/v1/status`; counters reset on restart |
+| Conformance-vector drift tripwire (hugit↔fabric seam) | 🟢 LIVE (golden tests) | P16/S16.1–3; byte-exact vectors + `manifest.sha256`; no-import law; hugit-side-PR-first |
+| Incident-comms / statuspage / a11y-i18n | 🔵 owner-gated (surfaces) / 🟢 signal substrate | P17/S17.1–3; truthful signals + fail-safe posture built; statuspage/console/comms = org deliverable |
+| User-visible failure vocabulary (exact status/text/latency) | 🟢 documented | consolidated table; every failure loud, no silently-wrong-result row |
 
 **Standing tense discipline (never overclaim):** dedup is **intra-tenant at GA**;
 cross-tenant is staged (`CAP-DEDUP-CROSS-TENANT`), not live. Runners is **~10% under
