@@ -19,6 +19,14 @@ interface Env {
   // ── KV: snapshot + cooldown state (owner creates the namespace + binds it) ──
   CANARY_KV: KVNamespace;
 
+  // ── Service bindings (Worker→Worker direct). A public fetch() from THIS Worker
+  //    to a sibling *.workers.dev Worker on the SAME account mis-routes to a 404
+  //    (Cloudflare same-zone workers.dev subrequest behavior — observed live
+  //    2026-07-17). Binding by service name routes directly, no edge round-trip.
+  //    Present ⇒ the cycle fetches through them; absent ⇒ falls back to fetch(URL).
+  FABRICD_SVC?: Fetcher;
+  SPAWN_SVC?: Fetcher;
+
   // ── Monitored surfaces (non-secret URLs; overridable as vars) ───────────────
   FABRIC_STATUS_URL?: string; // default: corelink-fabricd .../internal/v1/status
   FABRIC_HEALTH_URL?: string; // default: corelink-fabricd .../v1/health
@@ -52,11 +60,15 @@ const FETCH_TIMEOUT_MS = 6000;
 // ── surface fetchers (each wrapped — a failure becomes an unreachable snapshot) ─
 
 /** Fetch a counter surface. Fetch failure ⇒ `{reachable:false}` (the ALERT). */
-async function fetchSurface(url: string, key: string | undefined): Promise<SurfaceSnapshot> {
+async function fetchSurface(
+  url: string,
+  key: string | undefined,
+  fetcher: typeof fetch = fetch,
+): Promise<SurfaceSnapshot> {
   try {
     const headers: Record<string, string> = {};
     if (key) headers["X-Corelink-Internal-Auth"] = key;
-    const resp = await fetch(url, { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+    const resp = await fetcher(url, { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
     let counters: Record<string, number> = {};
     if (resp.status === 200) {
       // Tolerant parse: unknown/added fields ride through; a bad body ⇒ empty.
@@ -73,9 +85,9 @@ async function fetchSurface(url: string, key: string | undefined): Promise<Surfa
 }
 
 /** Fetch the bare health probe. Fetch failure ⇒ `{reachable:false}`. */
-async function fetchHealth(url: string): Promise<HealthSnapshot> {
+async function fetchHealth(url: string, fetcher: typeof fetch = fetch): Promise<HealthSnapshot> {
   try {
-    const resp = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+    const resp = await fetcher(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
     await resp.text().catch(() => "");
     return { reachable: true, status: resp.status };
   } catch {
@@ -126,17 +138,29 @@ async function runCycle(env: Env, now: number): Promise<string> {
   const fabricHealthUrl = env.FABRIC_HEALTH_URL ?? DEFAULT_FABRIC_HEALTH_URL;
   const spawnMetricsUrl = env.SPAWN_METRICS_URL ?? DEFAULT_SPAWN_METRICS_URL;
 
+  // Prefer the service binding (Worker→Worker, no same-zone 404); else public fetch.
+  const fabricFetch = env.FABRICD_SVC ? env.FABRICD_SVC.fetch.bind(env.FABRICD_SVC) : fetch;
+  const spawnFetch = env.SPAWN_SVC ? env.SPAWN_SVC.fetch.bind(env.SPAWN_SVC) : fetch;
   const [fabric, fabricHealth, spawn] = await Promise.all([
-    fetchSurface(fabricStatusUrl, env.FABRIC_OBSERVABILITY_KEY),
-    fetchHealth(fabricHealthUrl),
-    fetchSurface(spawnMetricsUrl, env.METRICS_OBSERVABILITY_KEY),
+    fetchSurface(fabricStatusUrl, env.FABRIC_OBSERVABILITY_KEY, fabricFetch),
+    fetchHealth(fabricHealthUrl, fabricFetch),
+    fetchSurface(spawnMetricsUrl, env.METRICS_OBSERVABILITY_KEY, spawnFetch),
   ]);
 
   // Load prior state (fail-soft: a KV miss/parse error ⇒ cold start).
   const prev = await readJson<Snapshot>(env.CANARY_KV, SNAPSHOT_KEY);
   const cooldowns = (await readJson<Record<string, number>>(env.CANARY_KV, COOLDOWN_KEY)) ?? {};
 
-  const cur: Snapshot = { at: now, fabric, fabricHealth, spawn };
+  // If the FABRIC obs key isn't bound on THIS canary, the moat status surface is
+  // deliberately not-armed here (a bare request 401s). Coerce it to the 404
+  // "not-armed, silent" sentinel the rules already ignore, so an unbound key
+  // doesn't fire a noise WARN every cycle. Bind FABRIC_OBSERVABILITY_KEY (matching
+  // fabricd's) to actually monitor the moat counters. The direct-fleet surface
+  // (spawn) is armed + monitored regardless — it's the live product.
+  const fabricSnap: SurfaceSnapshot = env.FABRIC_OBSERVABILITY_KEY
+    ? fabric
+    : { reachable: true, status: 404, counters: {} };
+  const cur: Snapshot = { at: now, fabric: fabricSnap, fabricHealth, spawn };
 
   const cfg: RulesConfig = {
     now,

@@ -35,8 +35,8 @@
     "STALENESS_HOURS": "0",
     // Email destination + verified sender. TO can be set now; FROM needs the
     // Resend domain verify first. Left here as vars (not secrets — not sensitive).
-    "ALERT_EMAIL_TO": "",
-    "ALERT_EMAIL_FROM": ""
+    "ALERT_EMAIL_TO": "cachorronarigudo26@gmail.com",
+    "ALERT_EMAIL_FROM": "alerts@humangr.com"
   },
 
   // Snapshot + cooldown state. The canary reads the previous snapshot each tick,
@@ -44,7 +44,17 @@
   // with the real namespace id (see the header note). Without a real binding the
   // deploy fails fast, which is the intended guard.
   "kv_namespaces": [
-    { "binding": "CANARY_KV", "id": "REPLACE_WITH_REAL_KV_NAMESPACE_ID" }
+    { "binding": "CANARY_KV", "id": "ea73d5326736482ebb6a6a2488cb49da" }
+  ],
+
+  // Service bindings — Worker→Worker direct calls to the two monitored Workers.
+  // REQUIRED: a public fetch() to a sibling *.workers.dev Worker on the same
+  // account mis-routes to a 404 (Cloudflare same-zone behavior, observed live
+  // 2026-07-17); the binding routes directly. The canary reads their gated
+  // /internal/v1/* + /v1/health via these.
+  "services": [
+    { "binding": "FABRICD_SVC", "service": "corelink-fabricd" },
+    { "binding": "SPAWN_SVC", "service": "corelink-spawn-worker" }
   ],
 
   // Every 5 minutes: timely enough to catch a mint_failures / spawn_failed rise
