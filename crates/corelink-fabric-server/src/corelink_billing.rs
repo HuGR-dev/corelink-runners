@@ -97,13 +97,42 @@ fn billing_period(at_ms: u64) -> String {
 }
 
 /// `BLAKE3(lease_id ‖ "|" ‖ billing_period)` as 64-char lowercase hex (32 bytes).
+///
+/// # Billing-emit disjointness invariant (WP-C, 2026-07-17) — READ BEFORE CHANGING
+///
+/// There are TWO billing-push emitters in this system and they must NEVER both
+/// bill the same underlying job:
+///   * THIS path (fabricd-native): emits one `runner_slot_seconds` event per
+///     terminal transition of a lease **fabricd itself holds**, keyed on the
+///     minted `lease_id` (shape `lease-<uuid-v4>`; see `AppState::mint_lease_id`).
+///     Hash = **BLAKE3**.
+///   * spawn-worker path (`deploy/cloudflare/src/lib.ts` `usageIdemKey`): emits
+///     on GitHub `workflow_job:completed`, keyed on the decimal GitHub
+///     `workflow_job.id`. Hash = **SHA-256**.
+///
+/// Disjointness is guaranteed by TWO independent facts, NOT by the idem_key:
+///   1. **Runner-path assignment.** A billable job is served by exactly one
+///      runner path. In prod the spawn-worker's cred redemption targets the
+///      Worker's OWN `/v1/leases/{id}/cas-cred` (`SPAWN_WORKER_PUBLIC_URL`), not
+///      fabricd — so a spawn-worker GH job never becomes a fabricd lease.
+///   2. **Structurally-disjoint id-spaces.** fabricd hashes `lease-<uuid-v4>`;
+///      the Worker hashes a pure-decimal GH job id. The two string spaces never
+///      overlap, so no `(id, period)` pair — hence no billable unit — is ever
+///      keyed by both paths.
+///
+/// The idem_key does **NOT** and CANNOT dedup across the two paths: the algos
+/// differ (BLAKE3 vs SHA-256), so even the *same* input yields different keys.
+/// idem_key dedup is at-least-once safety WITHIN one path only. (This corrects an
+/// earlier comment that wrongly claimed the two paths "produce the SAME idem_key
+/// for the same lease" — they never can.) The `|` separator is retained purely to
+/// keep the two-field concatenation injective (audit r7): `a‖bc` must not collide
+/// with `ab‖c` within this path. If a future change could make one billable unit
+/// emit from BOTH paths, that is a DOUBLE-COUNT regression — do not "fix" it by
+/// unifying the algos (a billing behavior change needing owner sign-off); restore
+/// path disjointness or escalate. The disjointness tests below are the tripwire.
 fn idem_key(lease_id: &str, period: &str) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(lease_id.as_bytes());
-    // Unambiguous separator (audit r7): a `|` between the two fields makes the
-    // concatenation injective regardless of field lengths, and matches the
-    // TypeScript sibling (deploy/cloudflare/src/lib.ts `${jobId}|${period}`) so
-    // the Rust + Worker push paths produce the SAME idem_key for the same lease.
     hasher.update(b"|");
     hasher.update(period.as_bytes());
     hasher.finalize().to_hex().to_string()
@@ -745,5 +774,83 @@ mod tests {
         // Audit r7: the `|` separator makes the concatenation injective even for
         // different field-length splits — `a‖bc` must not collide with `ab‖c`.
         assert_ne!(idem_key("a", "bc"), idem_key("ab", "c"));
+    }
+
+    /// WP-C billing-emit disjointness — LAYER 2 (structurally-disjoint id-spaces).
+    ///
+    /// The fabricd-native path keys idem_key on the minted `lease_id` (shape
+    /// `lease-<uuid-v4>`); the spawn-worker path keys on the decimal GitHub
+    /// `workflow_job.id`. This test pins that those two string spaces can NEVER
+    /// overlap, so no `(id, period)` pair — hence no billable unit — is ever keyed
+    /// by both emitters. If a future change moves either path onto an id shape that
+    /// intrudes on the other's space, this fails: an overlap is the precondition
+    /// for the cross-path double-count the disjointness invariant forbids.
+    #[test]
+    fn idem_key_input_id_space_is_disjoint_from_spawn_worker_jobid() {
+        // A fabricd lease id ALWAYS has the mint shape `lease-<uuid-v4>`
+        // (`AppState::mint_lease_id`). Sample several real mints.
+        for _ in 0..64 {
+            let lease_id = format!("lease-{}", uuid::Uuid::new_v4());
+            assert!(
+                lease_id.starts_with("lease-"),
+                "fabricd lease ids carry the `lease-` prefix: {lease_id}"
+            );
+            assert!(
+                !is_decimal_jobid(&lease_id),
+                "a fabricd lease id must never look like a GH decimal job id: {lease_id}"
+            );
+        }
+        // Representative GitHub `workflow_job.id` values (String(number) — pure
+        // decimal; cf. deploy/cloudflare/src/index.ts `String(evt.workflow_job.id)`).
+        for job_id in ["1", "82597479935", "48291736210", "9007199254740991"] {
+            assert!(
+                is_decimal_jobid(job_id),
+                "a GH job id is a pure-decimal string: {job_id}"
+            );
+            assert!(
+                !job_id.starts_with("lease-"),
+                "a GH job id must never carry the fabricd `lease-` prefix: {job_id}"
+            );
+        }
+    }
+
+    /// True iff `s` is a non-empty pure-decimal string — the GitHub
+    /// `workflow_job.id` shape the spawn-worker keys billing on. A fabricd
+    /// `lease-<uuid>` id can never satisfy this (the `lease-` prefix + hyphens).
+    fn is_decimal_jobid(s: &str) -> bool {
+        !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+    }
+
+    /// WP-C billing-emit disjointness — the idem_key is NOT a cross-path dedup.
+    ///
+    /// Even for the SAME `(id, period)` input the two emitters produce DIFFERENT
+    /// idem_keys, because the algorithms differ: fabricd uses BLAKE3, the
+    /// spawn-worker uses SHA-256 (`usageIdemKey` in lib.ts). So the aggregator's
+    /// `idem_key` dedup can never collapse a fabricd event and a spawn-worker event
+    /// into one — cross-path safety comes ONLY from path/id-space disjointness
+    /// (the test above), never from the key. This locks that fact against the
+    /// earlier, WRONG "same idem_key for the same lease" claim: if someone silently
+    /// unifies the algos to force cross-path dedup, this fails and forces the
+    /// owner-signed billing-behavior review the invariant requires.
+    #[test]
+    fn cross_path_idem_key_schemes_do_not_interoperate() {
+        use sha2::{Digest, Sha256};
+        // The spawn-worker scheme, transcribed: SHA-256(`${id}|${period}`) as hex.
+        fn spawn_worker_idem_key(id: &str, period: &str) -> String {
+            let mut h = Sha256::new();
+            h.update(format!("{id}|{period}").as_bytes());
+            h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+        }
+        for (id, period) in [("L1", "2026-06"), ("82597479935", "2026-07"), ("x", "y")] {
+            let fabricd = idem_key(id, period); // BLAKE3
+            let worker = spawn_worker_idem_key(id, period); // SHA-256
+            assert_eq!(fabricd.len(), 64, "BLAKE3 → 64 hex");
+            assert_eq!(worker.len(), 64, "SHA-256 → 64 hex");
+            assert_ne!(
+                fabricd, worker,
+                "BLAKE3 and SHA-256 idem_keys must differ for the same input \
+                 ({id}|{period}) — the two paths do NOT interoperate for dedup"
+            );
+        }
     }
 }

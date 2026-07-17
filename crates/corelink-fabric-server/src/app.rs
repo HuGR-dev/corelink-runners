@@ -1778,6 +1778,14 @@ impl AppState {
         // ASK-2: tap the billing usage-push AFTER the meter record. Off the
         // admission path — a tap error (default-off it cannot fail) is logged,
         // never propagated; the flush driver owns the actual POST + retry.
+        //
+        // WP-C billing-emit disjointness: this is the fabricd-NATIVE emitter — it
+        // bills ONLY leases fabricd itself holds, keyed on `lease_id`
+        // (`lease-<uuid>`). The spawn-worker path (deploy/cloudflare) bills GH jobs
+        // by decimal `workflow_job.id`. The same billable unit never emits from
+        // both (disjoint runner-path + disjoint id-space); the idem_key does NOT
+        // dedup across the two (BLAKE3 vs SHA-256). See `corelink_billing::idem_key`
+        // + its disjointness tests before changing how either path keys events.
         if let Err(e) = self.billing_export_target.export(&ev) {
             eprintln!(
                 "billing usage-push tap failed (non-fatal; flush driver will retry): \

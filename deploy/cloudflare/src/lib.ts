@@ -848,6 +848,21 @@ export function billingPeriod(atMs: number): string {
  * Deterministic 64-hex idempotency key = SHA-256(jobId ‖ period). The ingest
  * dedups on it opaquely, so any stable 64-hex is valid (the contract says
  * "e.g. BLAKE3"); SHA-256 is what the Workers runtime provides natively.
+ *
+ * WP-C billing-emit disjointness invariant — READ BEFORE CHANGING:
+ * The Rust fabricd-native emitter (crates/corelink-fabric-server/corelink_billing.rs)
+ * ALSO pushes `runner_slot_seconds`, but keyed BLAKE3(lease_id ‖ period) on its
+ * OWN `lease-<uuid>` lease ids. This spawn-worker path keys SHA-256(jobId ‖ period)
+ * on the decimal GH `workflow_job.id`. The same billable job never emits from both:
+ *   1. runner-path — a job is served by exactly one path (in prod clw redeems the
+ *      cred at the Worker's own /v1/leases/{id}/cas-cred, not fabricd);
+ *   2. id-space — `lease-<uuid>` and a pure-decimal job id never overlap.
+ * The idem_key does NOT and CANNOT dedup across the two paths (BLAKE3 vs SHA-256 →
+ * different key even for the same input); it is at-least-once safety WITHIN this
+ * path only. If a future change lets one billable unit emit from BOTH paths, that
+ * is a double-count — do NOT unify the algos (an owner-signed billing change);
+ * restore disjointness or escalate. Disjointness tests: `usageIdemKey` /
+ * `buildUsageEvent` describe block in test/index.test.ts.
  */
 export async function usageIdemKey(jobId: string, period: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${jobId}|${period}`));

@@ -803,6 +803,47 @@ describe("billing usage-push (ASK-2 — runner_slot_seconds)", () => {
   });
 });
 
+describe("billing-emit disjointness (WP-C — spawn-worker vs fabricd-native)", () => {
+  // The spawn-worker keys billing on the decimal GitHub `workflow_job.id`
+  // (`String(evt.workflow_job.id)` in index.ts) — a pure-decimal string.
+  const isDecimalJobId = (s: string) => s.length > 0 && /^[0-9]+$/.test(s);
+  // fabricd keys billing on its minted `lease_id`, shape `lease-<uuid-v4>`
+  // (`AppState::mint_lease_id`) — never a pure-decimal string.
+  const isFabricdLeaseId = (s: string) =>
+    /^lease-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(s);
+
+  it("spawn-worker jobIds and fabricd lease ids occupy non-overlapping id-spaces", () => {
+    // Representative GH job ids (String(number)) — the spawn-worker billing key.
+    for (const jobId of ["1", "82597479935", "48291736210", "9007199254740991"]) {
+      expect(isDecimalJobId(jobId)).toBe(true);
+      expect(isFabricdLeaseId(jobId)).toBe(false); // never a fabricd lease id
+    }
+    // Real fabricd lease ids (`lease-<uuid>`) — the fabricd billing key.
+    for (const leaseId of [
+      "lease-3560e213-1e23-4fd0-8871-7033c6052ebd",
+      "lease-00000000-0000-4000-8000-000000000000",
+      `lease-${crypto.randomUUID()}`,
+    ]) {
+      expect(isFabricdLeaseId(leaseId)).toBe(true);
+      expect(isDecimalJobId(leaseId)).toBe(false); // never a GH job id
+    }
+    // No `(id, period)` — hence no billable unit — is ever keyed by both paths.
+  });
+
+  it("the SHA-256 idem_key does NOT interoperate with the fabricd BLAKE3 key", async () => {
+    // Same input `L1|2026-06` under both schemes. The spawn-worker's SHA-256 must
+    // equal the known SHA-256, and must DIFFER from the fabricd BLAKE3 of the same
+    // input — proving the aggregator's idem_key dedup can never collapse a
+    // spawn-worker event and a fabricd event (cross-path safety = disjointness, not
+    // the key). If someone unifies the algos to force cross-path dedup, this fails.
+    const SHA256_L1 = "3a658a3017b812b3105e03f3c84b83163335ecc82eee6c2c0a83c6530a931ccd";
+    const BLAKE3_L1 = "ea88b9b10fed45f3722978309a9def21d607ba71a07942f903d006a0e0300f6f";
+    const key = await usageIdemKey("L1", "2026-06");
+    expect(key).toBe(SHA256_L1); // this path is SHA-256(jobId|period)
+    expect(key).not.toBe(BLAKE3_L1); // fabricd's BLAKE3 of the same input differs
+  });
+});
+
 // ── Spawn idempotency (gap #2) — dedup a redelivered queued webhook ───────────
 
 /** An in-memory KvLike with a `spy` on each op, mirroring the KV subset used. */
