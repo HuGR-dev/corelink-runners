@@ -150,4 +150,3 @@ tokens for every repo the App is installed on.
 - GitHub App mint: [`deploy/cloudflare/src/github_app.ts`](../../deploy/cloudflare/src/github_app.ts).
 - Stabilization / hidden-debt plan:
   `docs/handoff/2026-07-16-STABILIZATION-plan-3lens-hidden-debt.md`.
-</content>

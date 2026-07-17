@@ -380,5 +380,3 @@ If dogfood suddenly spawns COLD, check that map matches
   `docs/handoff/2026-07-09-RAISE-N-readiness-tracked-gaps-multi-instance-fabricd-not-a-pure-config-flip.md`.
 - Stabilization / hidden-debt plan:
   `docs/handoff/2026-07-16-STABILIZATION-plan-3lens-hidden-debt.md`.
-</content>
-</invoke>
