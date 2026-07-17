@@ -520,12 +520,9 @@ async function spawnRunner(
   const handle = await startWithRetry((h) =>
     getContainer(env.RUNNER_CONTAINER, h).startWithEnv(containerEnv),
   );
-  if (mint.patId && env.RUNNER_JOB_PATS) {
-    // Best-effort: if the put fails, the PAT just TTL-expires (fail-open).
-    await env.RUNNER_JOB_PATS.put(jobId, mint.patId, { expirationTtl: JOB_PAT_TTL_S }).catch((e) =>
-      logEvent("error", "kv_put_job_pat_failed", { jobId, error: (e as Error).message }),
-    );
-  }
+  // (The jobId->patId revoke-key is now written at MINT time in driveSpawn, BEFORE
+  // the spawn — F2/W3 — so a start failure can revoke the PAT rather than orphan it.
+  // Intentionally NOT re-written here.)
   if (mint.tenant && env.RUNNER_JOB_PATS) {
     // Stash the derived tenant for completion (concurrency-slot release + billing).
     await env.RUNNER_JOB_PATS.put(jobTenantKey(jobId), mint.tenant, {
@@ -664,6 +661,16 @@ async function driveSpawn(
     logEvent("error", "mint_forbidden", { jobId, repo });
     return;
   }
+  // F2 (W3): register the revoke-key jobId->patId at MINT time — BEFORE the spawn.
+  // Previously it was written only AFTER a successful container start (spawnRunner),
+  // so a start failure orphaned the minted cas:rw PAT to its 2h TTL (and the 60s
+  // reconciler re-minted a fresh orphan each tick — 3-lens audit F2/Lens A). Writing
+  // it here lets the spawn-failure catch below revoke it immediately.
+  if (mint.patId && env.RUNNER_JOB_PATS) {
+    await env.RUNNER_JOB_PATS.put(jobId, mint.patId, { expirationTtl: JOB_PAT_TTL_S }).catch((e) =>
+      logEvent("error", "kv_put_job_pat_failed", { jobId, error: (e as Error).message }),
+    );
+  }
   // Per-tenant concurrency ceiling (warm mints only). At-ceiling ⇒ no spawn.
   if (mint.tenant && mint.maxConcurrency != null) {
     const admitted = await acquireTenantSlot(env.RUNNER_JOB_PATS, mint.tenant, jobId, mint.maxConcurrency);
@@ -683,6 +690,11 @@ async function driveSpawn(
   } catch (e) {
     // Release the concurrency slot on a spawn failure (the guard releases the claim).
     if (mint.tenant) await releaseTenantSlot(env.RUNNER_JOB_PATS, mint.tenant, jobId);
+    // F2 (W3): the PAT was minted (revoke-key stored above) but the spawn failed —
+    // REVOKE it now instead of leaking a live cas:rw PAT to its TTL. revokeCompletedJob
+    // reads the jobId->patId stored at mint time, revokes by pat_id, deletes the key,
+    // and swallows its own errors (fail-open — never masks the original spawn error).
+    await revokeCompletedJob(env, jobId, mint.tenant);
     throw e;
   }
 }
