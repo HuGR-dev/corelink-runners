@@ -51,6 +51,7 @@ import {
   revokeCasPatById,
   buildUsageEvent,
   pushUsageEvent,
+  writeUsageLedger,
   claimSpawn,
   releaseSpawnClaim,
   claimCompletion,
@@ -671,6 +672,49 @@ interface CompletedJob {
   completed_at?: string;
 }
 
+// The 3-char region stamped on a usage event: the configured BILLING_REGION, else
+// the request's CF colo (the substrate's natural 3-char region, ADR-0008), else
+// "". Shared by the live push AND the durable usage-ledger write so both stamp the
+// SAME region (the reconciler later validates it is 3-char).
+function resolveBillingRegion(env: Env, request: Request): string {
+  const colo = (request as unknown as { cf?: { colo?: string } }).cf?.colo;
+  return env.BILLING_REGION ?? colo ?? "";
+}
+
+// WP-F: durably record this completed job's usage (server-derived tenant + timings
+// + region) to the `usage:<jobId>` ledger. Written REGARDLESS of whether the
+// billing push is armed — so with the push OFF the ledger still fills and a LATER-
+// armed push can backfill it tenant-safely (the reconciler reads this record; the
+// GitHub jobs API has no tenant). SKIP when there is no derived tenant (under-bill-
+// NEVER-mis-bill: a tenant-less record could never be safely billed) or the timings
+// aren't finite (nothing billable). Best-effort + fail-open: a write failure logs
+// and never breaks the webhook. MUST run BEFORE the `jtenant:` stash is deleted.
+async function recordCompletedJobUsage(
+  env: Env,
+  jobId: string,
+  wj: CompletedJob | undefined,
+  derivedTenant: string | undefined,
+  region: string,
+): Promise<boolean> {
+  if (!derivedTenant || !env.RUNNER_JOB_PATS) return false;
+  const startedMs = wj?.started_at ? Date.parse(wj.started_at) : NaN;
+  const completedMs = wj?.completed_at ? Date.parse(wj.completed_at) : NaN;
+  if (!Number.isFinite(startedMs) || !Number.isFinite(completedMs)) return false;
+  try {
+    await writeUsageLedger(env.RUNNER_JOB_PATS, {
+      jobId,
+      tenant: derivedTenant,
+      startedMs,
+      completedMs,
+      region,
+    });
+    return true;
+  } catch (e) {
+    logEvent("error", "usage_ledger_write_failed", { jobId, error: (e as Error).message });
+    return false;
+  }
+}
+
 // Push the `runner_slot_seconds` usage event for a completed job to corelink-
 // billing. No-op (returns false) unless billing is configured AND we can compute
 // a slot·seconds duration AND we have a 3-char region. Best-effort + FAIL-OPEN:
@@ -696,8 +740,7 @@ async function maybeBillCompletedJob(
     const startedMs = wj?.started_at ? Date.parse(wj.started_at) : NaN;
     const completedMs = wj?.completed_at ? Date.parse(wj.completed_at) : NaN;
     if (!Number.isFinite(startedMs) || !Number.isFinite(completedMs)) return false;
-    const colo = (request as unknown as { cf?: { colo?: string } }).cf?.colo;
-    const region = env.BILLING_REGION ?? colo ?? "";
+    const region = resolveBillingRegion(env, request);
     if (region.length !== 3) return false; // ingest validates 3-char; skip if unknown
     const ev = await buildUsageEvent({
       tenantId: billedTenant,
@@ -1056,7 +1099,22 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         // (the slot TTL self-heals a missed release, so this never permanently
         // blocks a tenant/repo). Fully guarded (never breaks the webhook).
         await releaseConcurrencySlot(env, jobId);
-        // Drop the derived-tenant stash (still needed for revoke + billing above).
+        // WP-F: durably record this job's usage to the `usage:<jobId>` ledger NOW —
+        // BEFORE the `jtenant:` stash is dropped below and while derivedTenant + the
+        // workflow_job timings are still in hand. Written even when the push is off
+        // (ledger fills ⇒ a later-armed push backfills tenant-safely); skipped when
+        // there's no derived tenant. Independent of the push, so history exists to
+        // backfill (the reconciler reads this record, not the tenant-less GitHub API).
+        const region = resolveBillingRegion(env, request);
+        const ledgered = await recordCompletedJobUsage(
+          env,
+          jobId,
+          evt.workflow_job,
+          derivedTenant,
+          region,
+        );
+        // Drop the derived-tenant stash (still needed for revoke + billing above;
+        // the usage ledger above already captured the tenant durably for backfill).
         if (derivedTenant && env.RUNNER_JOB_PATS) {
           await env.RUNNER_JOB_PATS.delete(jobTenantKey(jobId)).catch(() => {
             /* best-effort: TTL is the backstop */
@@ -1104,7 +1162,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         if (billed) completedSignals.push("billing_pushed");
         if (tornDown) completedSignals.push("runner_torn_down");
         if (completedSignals.length > 0) ctx?.waitUntil?.(bumpMetrics(env, ...completedSignals));
-        return json({ ok: true, revoked, billed, tornDown, deduped: !firstCompletion, job_id: jobId }, 200);
+        return json({ ok: true, revoked, billed, ledgered, tornDown, deduped: !firstCompletion, job_id: jobId }, 200);
       }
 
       if (evt.action !== "queued") {

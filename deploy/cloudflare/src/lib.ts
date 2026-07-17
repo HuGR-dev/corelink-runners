@@ -970,6 +970,70 @@ export async function pushUsageEvent(env: BillingEnv, ev: UsageEvent): Promise<v
   if (!resp.ok) throw new Error(`billing usage-push ${resp.status}`);
 }
 
+// ── Durable per-completed-job usage ledger (WP-F) ────────────────────────────
+//
+// The fail-open billing loss WP-E surfaced: with the push OFF (BILLING_INGEST_URL
+// unset) a completed job's usage was NEVER persisted — `maybeBillCompletedJob`
+// returns before it can compute anything, the `jtenant:` tenant map is TTL'd 2h +
+// deleted at completion, and the reconciler's GitHub source carries no
+// installation_id (→ no tenant). So once a job completed with the push off, its
+// usage was UNRECOVERABLE.
+//
+// This ledger closes that gap: at COMPLETION (index.ts) we durably record the
+// job's usage — tenant (server-derived), timings, region — under `usage:<jobId>`,
+// REGARDLESS of whether the push is armed. It is the tenant-safe backfill source
+// the reconciler reads: the GitHub jobs API has no tenant, but this record DOES.
+// Reuses the existing RUNNER_JOB_PATS binding with a `usage:` prefix (no new
+// wrangler binding = no owner-gated namespace provisioning). TTL 60d — a wide
+// arm-later window so turning billing ON weeks after a job ran still recovers it.
+export const USAGE_LEDGER_TTL_S = 60 * 24 * 3600; // 60d
+
+/** One completed job's durable usage record (the backfill source of truth). */
+export interface UsageLedgerRecord {
+  jobId: string;
+  tenant: string;
+  startedMs: number;
+  completedMs: number;
+  region: string;
+}
+
+function usageLedgerKey(jobId: string): string {
+  return `usage:${jobId}`;
+}
+
+/**
+ * Durably record a completed job's usage under `usage:<jobId>`. No-op when no KV
+ * is bound. The CALLER guarantees a derived tenant + finite timings (under-bill-
+ * never-mis-bill); this only serializes + persists with the 60d TTL.
+ */
+export async function writeUsageLedger(kv: KvLike | undefined, rec: UsageLedgerRecord): Promise<void> {
+  if (!kv) return;
+  await kv.put(usageLedgerKey(rec.jobId), JSON.stringify(rec), { expirationTtl: USAGE_LEDGER_TTL_S });
+}
+
+/**
+ * Read a completed job's durable usage record. Returns null when no KV is bound,
+ * the record is absent (cold/no-tenant job, or pre-ledger), or it fails the
+ * billable-shape invariant (non-empty tenant + finite timings) — so a malformed
+ * or tenant-less record is treated as "not backfillable" rather than mis-billed.
+ */
+export async function readUsageLedger(
+  kv: KvLike | undefined,
+  jobId: string,
+): Promise<UsageLedgerRecord | null> {
+  if (!kv) return null;
+  const raw = await kv.get(usageLedgerKey(jobId));
+  if (!raw) return null;
+  try {
+    const rec = JSON.parse(raw) as UsageLedgerRecord;
+    if (!rec || typeof rec.tenant !== "string" || rec.tenant.length === 0) return null;
+    if (!Number.isFinite(rec.startedMs) || !Number.isFinite(rec.completedMs)) return null;
+    return rec;
+  } catch {
+    return null; // malformed ⇒ not backfillable (never throw out of the backstop)
+  }
+}
+
 // ── Billing reconciler — closes the fail-open billing-loss window ────────────
 //
 // `maybeBillCompletedJob` (index.ts) fires ONCE per `workflow_job:completed`
@@ -995,6 +1059,11 @@ export interface BillingReconcileEnv extends ReconcilerEnv, BillingEnv {
   // Reuses the SAME first-party allowlist as the orphan re-drive — no new
   // binding, no new config surface.
   RECONCILER_REPOS?: string;
+  // WP-F: the durable `usage:<jobId>` ledger lives in the existing RUNNER_JOB_PATS
+  // KV (KvLike subset). This is the tenant-safe backfill source — the reconciler
+  // reads it per completed job to recover the DERIVED tenant the GitHub jobs API
+  // never carries. Optional (absent ⇒ ledger empty ⇒ prior no-op behavior).
+  RUNNER_JOB_PATS?: KvLike;
 }
 
 interface GhCompletedJob {
@@ -1061,27 +1130,28 @@ export async function listCompletedRunnerJobs(
 }
 
 /**
- * The scheduled billing reconciler — TENANT-SAFE backstop (WP-2 2b).
+ * The scheduled billing reconciler — TENANT-SAFE backstop (WP-2 2b, WP-F).
  *
  * For each repo in `RECONCILER_REPOS`, it lists recently-completed+labeled jobs
- * (settled past the race window, within the lookback). It CANNOT bill them: the
- * GitHub jobs-list API carries NO `installation_id`, so this path has NO per-job
- * DERIVED tenant (unlike the live webhook's `maybeBillCompletedJob`, which reads
- * the KV-stashed `jtenant:` mapping). It therefore emits NOTHING — it MUST NOT
- * bill the wrangler `CLW_TENANT` blindly, which would mis-attribute a customer's
- * job to the dogfood tenant. Correctness over completeness: SKIP-and-log.
+ * (settled past the race window, within the lookback). The GitHub jobs-list API
+ * carries NO `installation_id` (→ no tenant), so it can never bill from GitHub
+ * alone. WP-F closes this: each listed job is looked up in the durable
+ * `usage:<jobId>` ledger (written at completion, which HAS the server-derived
+ * tenant + timings + region). When a ledger record exists, we build + push its
+ * usage event keyed on the DERIVED tenant — so a LATER-armed push backfills
+ * tenant-safely. A job with NO ledger record (cold/no-tenant, or pre-ledger) is
+ * SKIPPED-and-counted, exactly as before (never mis-billed to `CLW_TENANT`).
  *
- * CONSEQUENCE (intended, documented): with no per-job tenant source this reconciler
- * is a deliberate NO-OP — it returns 0 and pushes ZERO usage events. It stays wired
- * (and logs the count of jobs it could NOT attribute) so the gap is observable in
- * CF Logs; when a durable per-job `jobId → derived-tenant` source that survives to
- * the reconcile window exists, the push can be restored keyed on the DERIVED tenant.
- * Until then, recovering a missed push is not worth mis-attributing revenue.
+ * Re-push safety: `buildUsageEvent`'s `idem_key = SHA-256(jobId|period)` is
+ * unchanged, so the webhook live-push and this backfill dedup against each other
+ * at the aggregator (at-least-once by design — recovers revenue, never doubles).
  *
  * Still default-off (mirrors the orphan reconciler): short-circuits to 0 unless
  * `RECONCILER_REPOS` + `GITHUB_MINT_TOKEN` + `BILLING_INGEST_URL` +
- * `BILLING_INGEST_AUTH_KEY` + a 3-char `BILLING_REGION` are configured (so it never
- * scans GitHub when billing isn't even wired). Never throws (best-effort backstop).
+ * `BILLING_INGEST_AUTH_KEY` are configured (so it never scans GitHub when billing
+ * isn't wired). Region is resolved PER RECORD (the region the job actually ran in,
+ * stored at completion), falling back to `BILLING_REGION`; a record with no 3-char
+ * region is skipped. Never throws (best-effort backstop).
  */
 export async function reconcileCompletedJobBilling(
   env: BillingReconcileEnv,
@@ -1091,11 +1161,7 @@ export async function reconcileCompletedJobBilling(
   const repos = parseReconcilerRepos(env.RECONCILER_REPOS);
   if (repos.length === 0) return 0; // opt-in: no allowlist ⇒ off (mirrors the orphan re-drive)
   if (!env.GITHUB_MINT_TOKEN || !env.BILLING_INGEST_URL || !env.BILLING_INGEST_AUTH_KEY) return 0;
-  const region = env.BILLING_REGION ?? "";
-  if (region.length !== 3) return 0; // ingest validates 3-char; skip if unknown
-  // TENANT-SAFETY (I2): no per-job derived tenant ⇒ we do NOT build/push any usage
-  // event. We still LIST so the count of unbillable-but-completed jobs is loud in
-  // logs (the observable that this backstop is a deliberate no-op today).
+  let pushed = 0;
   let skipped = 0;
   for (const repo of repos) {
     const jobs = await listCompletedRunnerJobs(
@@ -1106,10 +1172,44 @@ export async function reconcileCompletedJobBilling(
       RECONCILE_MIN_AGE_MS,
       nowMs,
     );
-    skipped += jobs.length; // NOT billed — no true tenant to attribute them to
+    for (const job of jobs) {
+      // The ledger is the tenant-safe source of truth: it carries the DERIVED
+      // tenant the GitHub jobs API never does. No record ⇒ not backfillable
+      // (preserves the prior skip-and-count behavior — never mis-bill).
+      const rec = await readUsageLedger(env.RUNNER_JOB_PATS, job.jobId);
+      if (!rec) {
+        skipped += 1;
+        continue;
+      }
+      // Prefer the region stored at completion (where the job actually ran); fall
+      // back to BILLING_REGION. Ingest validates 3-char — skip if neither is one.
+      const region = rec.region.length === 3 ? rec.region : (env.BILLING_REGION ?? "");
+      if (region.length !== 3) {
+        skipped += 1;
+        continue;
+      }
+      try {
+        const ev = await buildUsageEvent({
+          tenantId: rec.tenant,
+          jobId: rec.jobId,
+          startedMs: rec.startedMs,
+          completedMs: rec.completedMs,
+          region,
+        });
+        await pushUsageEvent(env, ev);
+        pushed += 1;
+      } catch (e) {
+        // Fail-open backstop: a push error just means the next tick retries
+        // (idem_key makes the re-push safe). Never break the scan.
+        logEvent("error", "billing_reconcile_push_failed", {
+          jobId: rec.jobId,
+          error: (e as Error).message,
+        });
+      }
+    }
   }
   if (skipped > 0) {
     logEvent("info", "billing_reconcile_skipped_no_tenant", { skipped });
   }
-  return 0; // I2: never emit a usage event attributed to a non-true tenant
+  return pushed;
 }
