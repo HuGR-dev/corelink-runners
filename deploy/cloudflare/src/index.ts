@@ -62,6 +62,8 @@ import {
   decideRedeem,
   parseReconcilerRepos,
   installationIdForRepo,
+  installationAllowlistArmed,
+  isInstallationAllowlisted,
   matchManagedLabels,
   listOrphanRunnerJobs,
   reconcileCompletedJobBilling,
@@ -179,6 +181,18 @@ export interface Env {
   // WARM (server derives the tenant) without requiring an App webhook. e.g.
   // {"HumanGuardrail/corelink-runners":"144561227"}. Absent/unmatched ⇒ COLD.
   REPO_INSTALLATION_MAP?: string;
+  // ── External-GA installation allowlist (WP-D) — the pre-mint identity gate ────
+  // A comma/whitespace-separated list of GitHub App installation ids permitted to
+  // drive a spawn. OPT-IN + FAIL-CLOSED-WHEN-ARMED: unset/blank ⇒ NOT armed ⇒
+  // today's exact behavior is preserved (never breaks the live deploy). When
+  // armed (≥1 id), a webhook whose resolved installation id is not in the list is
+  // refused at the Worker edge BEFORE any mint / spawn / spawn-claim / COLD_REPO_CAP
+  // slot / dead-letter orphan — closing the hole where a foreign App-installed but
+  // un-entitled repo can churn/DoS the shared FLEET_MAX_CONCURRENCY before the
+  // server's post-cold-spawn 403 ever fires. Arm for GA with:
+  //   INSTALLATION_ALLOWLIST="144561227,<customer-install-id>"
+  // where 144561227 is the dogfood installation (MUST stay served).
+  INSTALLATION_ALLOWLIST?: string;
   // ── env-0 (cred-ticket) — keep the CAS PAT OUT of the untrusted container env ──
   // The single-use stash latch (one DO instance per lease_id = GH jobId).
   CRED_STASH: DurableObjectNamespace<CredStashDO>;
@@ -1139,6 +1153,25 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       }
       if (env.CORELINK_RUNNER_MINT_AUTH_KEY && !installationId) {
         logEvent("info", "installation_id_missing", { jobId, repo });
+      }
+      // ── External-GA installation allowlist gate (WP-D) ───────────────────────
+      // MUST run here — after the installation id is resolved (App id, or the
+      // REPO_INSTALLATION_MAP injection for first-party repo-webhooks) and BEFORE
+      // `claimSpawn` below (the first consumer of a spawn-claim) and therefore
+      // before `driveSpawnGuarded` (mint + COLD_REPO_CAP slot + `recordOrphan`).
+      // OPT-IN: unset/blank INSTALLATION_ALLOWLIST ⇒ not armed ⇒ this is a no-op
+      // (today's exact behavior). Armed + id not in the list ⇒ refuse EARLY with a
+      // clean ack (202, NOT 5xx — a 5xx makes GitHub retry the same rejected id),
+      // having taken NO claim / NO slot / NO orphan.
+      if (installationAllowlistArmed(env.INSTALLATION_ALLOWLIST)) {
+        if (!isInstallationAllowlisted(env.INSTALLATION_ALLOWLIST, installationId)) {
+          logEvent("info", "webhook_installation_not_allowlisted", { jobId, repo, installationId });
+          ctx?.waitUntil?.(bumpMetrics(env, "webhook_installation_not_allowlisted"));
+          return json(
+            { ok: true, ignored: "installation not allowlisted", job_id: jobId },
+            202,
+          );
+        }
       }
       // ── Spawn idempotency (gap #2): claim this jobId BEFORE the expensive
       // mint+spawn. A redelivered queued webhook (GitHub at-least-once) for the
