@@ -5,8 +5,8 @@ CoreLink Runners — the product's canonical capability map, and the baseline th
 campaign's "every feature validated" is measured against.
 
 **Last updated:** 2026-07-17 · **Status:** `v0.1.0-seed` shipped; moat proven LIVE (2026-07-09);
-control plane a CF singleton. **Round:** R3 (architecture + depth) of a 4–5x craft/completeness loop
-— NOT complete; see the Change log and Coverage summary.
+control plane a CF singleton. **Round:** R4 (final dual-critic — completeness + craft) of a 4–5x loop; both
+critics DRY against code. See the Change log and Coverage summary.
 
 ## Legend
 
@@ -775,6 +775,9 @@ composition, not the per-lease router.)* One shared `BoxRegistry`; exec-engine =
 **Where** `docs/spec/cloudflare-spawn-worker-contract.md` + `cf-check-host-contract.md`; conformance
 `cloudflare-spawn.json`; `UreqTransport` (the only real net impl).
 **Status** 🟢 LIVE (Rust side); ⚪ TS golden pending (F-3.3).
+**Details** Four routes — `POST /v1/spawn`, `GET /v1/status/{handle}`, `POST /v1/teardown`, `POST /v1/exec` —
+transcribed byte-identically each side (the `cloudflare-spawn.json` vector, F-3.3); `UreqTransport` is the only
+real net implementation; digest-pinned, fail-closed, redacting Debug (shared posture with F-6.1).
 **Exercised by** S1.2.1, S1.2.2.
 **Validated by** `cloudflare_conformance`, `spawn-conformance.test.ts` (TS golden pending).
 
@@ -819,8 +822,12 @@ reconciles orphans.
 = 4 vCPU/12 GiB/20 GB disk `wrangler.jsonc:119`, `max_instances 20` `:140` raised 6→20 on 2026-07-16 to cover a
 tenant's default entitlement; `CheckHostContainer`=`CHECK_HOST_CONTAINER`, `standard-4`, `max_instances 4`
 `:159`) + 3 plain-storage DOs (`CRED_STASH`, `METRICS`, `CONCURRENCY_SLOTS`); 5 sqlite migrations `v1..v5`.
-**No `sleepAfter` is configured on any container** — the wrangler comment notes idle-reap is "not yet reaped"
-(`:123`); do not cite a 15m/45m sleep window (corrected R3). KV `RUNNER_JOB_PATS` (multiplexed keyspaces
+**Container idle-reap (`sleepAfter`):** each Container subclass sets a `sleepAfter` **idle** backstop as a TS
+class property (NOT a wrangler key) — `RunnerContainer` `sleepAfter = "15m"` (`src/index.ts:311`, reduced 45m→15m
+2026-07-06) and `CheckHostContainer` `sleepAfter = "45m"` (`src/index.ts:367`). It governs only FAILED/stuck
+containers: a completed job is torn down immediately (`teardownCompletedRunner`) and a running job keeps the
+container active, so it never cuts a live job; the `max_instances` comment (`wrangler.jsonc:123`) notes idle
+instances linger up to this window ("not yet reaped"). KV `RUNNER_JOB_PATS` (multiplexed keyspaces
 `spawn:`/`done:`/`jtenant:`/`jhandle:`/`orphan:`/`ghtok:`/bare jobId; job→pat_id map TTL `JOB_PAT_TTL_S=7200`
 `index.ts:497` as a self-cleaning revoke backstop); cron `* * * * *`; ratelimit `WEBHOOK_LIMITER` (30/60s
 `:47`). Both images pinned by immutable `@sha256` in-config at deploy time (not per-spawn — ADR-0008 wrinkle).
@@ -834,10 +841,10 @@ CF managed registry).
 **What** The control-plane host: a singleton `FabricdContainer` fronted by a proxy Worker.
 **Where** `deploy/cloudflare-fabricd/` (`index.ts`, `shard.ts`, `wrangler.jsonc`).
 **Status** 🟢 LIVE singleton (moat proven); N>1 OWNER-GATED (F-5.7).
-**Details** `FabricdContainer` (`standard-2` = 2 vCPU `wrangler.jsonc:165`, `max_instances 1` `:168`). **No
-`sleepAfter` key** — the container is kept awake by a 1-minute keepalive cron (`crons: ["* * * * *"]` `:176`
-pinging `/v1/health`); in-memory lease state survives between requests, only a restart/redeploy resets it (do
-not cite a "1h sleepAfter" — corrected R3). Features: FNV-1a shard routing + inert-at-N=1 singleton collapse
+**Details** `FabricdContainer` (`standard-2` = 2 vCPU `wrangler.jsonc:165`, `max_instances 1` `:168`). It sets
+`sleepAfter = "1h"` (`src/index.ts:100`) but **never actually sleeps** — a 1-minute keepalive cron
+(`crons: ["* * * * *"]` `wrangler.jsonc:176`) pings `/v1/health` every minute (the "24/7" knob), so the 1h idle
+window never elapses; in-memory lease state survives between requests, only a restart/redeploy resets it. Features: FNV-1a shard routing + inert-at-N=1 singleton collapse
 (`shard.ts:20,34`; `index.ts:237`); acquire round-robin placement + lease-op hash routing + scatter-gather
 list/metrics + §9 trigger body-routing + webhook round-robin (all N>1, inert at N=1); per-request 30s proxy
 timeout (long-lived routes exempt) (`index.ts:510-572`); keep-alive cron + watchdog self-heal (3 fails ~30s →
@@ -1085,7 +1092,8 @@ rotation semantics in `docs/deploy/secret-rotation-checklist.md`. Verified again
 **Ops surfaces (secrets → 404 unset):** `FABRIC_OBSERVABILITY_KEY` · `FABRIC_ADMIN_KEY`. Headers:
 `X-Corelink-Internal-Auth`, `X-Fabricd-Shard`, `X-Fabricd-Num-Shards`.
 **Cloud substrate:** `NORTHFLANK_API_TOKEN`(secret)+`NORTHFLANK_PROJECT_ID` · `NORTHFLANK_TEAM_ID`/`_BASE_URL`/
-`_DEPLOYMENT_PLAN`/`_RUNNER_DEPLOYMENT_PLAN`/`_RUNNER_EPHEMERAL_STORAGE_MB`/`_PROJECT_DISK_ALLOWANCE_MIB` ·
+`_DEPLOYMENT_PLAN`/`_RUNNER_DEPLOYMENT_PLAN`/`_RUNNER_EPHEMERAL_STORAGE_MB`/`_EPHEMERAL_STORAGE_MB` (advisory,
+quota-monitor only — see footnote)/`_PROJECT_DISK_ALLOWANCE_MIB` ·
 `NORTHFLANK_HTTP_TIMEOUT_MS` · `CLOUDFLARE_SPAWN_WORKER_URL`+`CLOUDFLARE_SPAWN_AUTH_TOKEN`(secret) ·
 `CLOUDFLARE_RUNNER_LABELS`/`_EXPIRY_MS`/`_RUNNER_STORAGE_MB` · `FABRIC_MOCK_EXEC` (dev-unsafe interlock).
 **Runner fleet (ADR-0007):** `FABRIC_GITHUB_APP_ID`/`_APP_INSTALLATION_ID`/`_APP_PRIVATE_KEY(_B64)`(secret)/
@@ -1107,7 +1115,8 @@ box env `CLW_ENDPOINT`/`_TENANT`/`_TOKEN`/`_REF_DOMAIN`/`_CRED_TICKET`/`_LEASE_I
 required) · `GITHUB_WEBHOOK_SECRET` · `GITHUB_MINT_TOKEN` · `GITHUB_APP_ID`/`GITHUB_APP_PRIVATE_KEY` ·
 `CORELINK_RUNNER_MINT_AUTH_KEY` · `BILLING_INGEST_AUTH_KEY` · `METRICS_OBSERVABILITY_KEY` · `ALLOW_LEGACY_PAT_ENV`.
 Vars: `CLW_TENANT`/`CLW_ENDPOINT`/`CORELINK_MINT_URL`/`RECONCILER_REPOS`/`REPO_INSTALLATION_MAP`/
-`SPAWN_WORKER_PUBLIC_URL`/`PINNED_IMAGE_DIGEST`/`AUTOSCALER_LABEL`.
+`SPAWN_WORKER_PUBLIC_URL`/`PINNED_IMAGE_DIGEST`/`AUTOSCALER_LABEL`/`BILLING_INGEST_URL`/`BILLING_REGION`
+(the usage-push target read at completion).
 **check-exec-server:** `TOOLCHAIN_DIR` · `EXEC_SERVER_AUTH_TOKEN`.
 **CLI:** `CORELINK_URL` · `CORELINK_PAT`.
 **canary (secrets):** `FABRIC_OBSERVABILITY_KEY` · `METRICS_OBSERVABILITY_KEY` · `RESEND_API_KEY`. Vars:
@@ -1117,10 +1126,14 @@ Vars: `CLW_TENANT`/`CLW_ENDPOINT`/`CORELINK_MINT_URL`/`RECONCILER_REPOS`/`REPO_I
 calls — a public `fetch()` to a sibling `*.workers.dev` on the same account mis-routes to 404, observed live
 2026-07-17; the binding routes directly to the gated `/internal/v1/*` surfaces).
 
-**Config-index footnotes (grep-verified R2/R3):** `NORTHFLANK_EPHEMERAL_STORAGE_MB` (non-runner) is **not** an
-env read — only `NORTHFLANK_RUNNER_EPHEMERAL_STORAGE_MB` is; the base workload storage is a code default. The
-per-slot disk floor is `RUNNER_EPHEMERAL_STORAGE_FLOOR_MB=4096` (`northflank.rs:146`), distinct from the
-`standard-4` 20 GB disk. `FABRIC_GITHUB_APP_PRIVATE_KEY_B64` (base64 variant) is a real read on the fabricd proxy.
+**Config-index footnotes (grep-verified R2/R3/R4):** `NORTHFLANK_EPHEMERAL_STORAGE_MB` **is** read — but only by
+the quota-headroom monitor (`quota_headroom.rs:135`, parse-or-bail, per-check-slot storage default 1024 MiB), and
+its value is currently **inert in the math**: the worst-case headroom formula deliberately counts every entitled
+slot at the larger runner floor `RUNNER_EPHEMERAL_STORAGE_FLOOR_MB=4096` and passes the check-slot value as an
+unused `_check_storage_mib` (`quota_headroom.rs:184`; `northflank.rs:146`) — distinct from the `standard-4` 20 GB
+disk. (R3 wrongly claimed it was "not an env read" — corrected R4.) The Northflank job engine itself reads only
+`NORTHFLANK_RUNNER_EPHEMERAL_STORAGE_MB` (`northflank.rs:253`). `FABRIC_GITHUB_APP_PRIVATE_KEY_B64` (base64
+variant) is a real read on the fabricd proxy.
 
 ---
 
@@ -1153,8 +1166,12 @@ Runners features. The line is *execution (ours) vs semantics (hugit's)*, not "ch
    raw-socket bypass); needs platform-network-layer filtering (F-4.2).
 7. **`docs/spec/corelink-fabric-stub.md`** is a deliberate `⟨FILL⟩` skeleton (the CoreLink-techlead side), not a
    feature spec — not inventoried.
-8. **`sleepAfter` (corrected R3)** — no `sleepAfter` key is configured on any container; fabricd is kept awake by
-   a 1-minute keepalive cron (not a 1h sleep). Any doc citing a 15m/45m/1h sleepAfter is stale.
+8. **`sleepAfter` (R3 over-corrected → restored R4)** — `sleepAfter` IS set, as a TS Container-class property
+   (not a wrangler key): `RunnerContainer` `"15m"` (`deploy/cloudflare/src/index.ts:311`), `CheckHostContainer`
+   `"45m"` (`:367`), `FabricdContainer` `"1h"` (`deploy/cloudflare-fabricd/src/index.ts:100`). It is an **idle
+   backstop**, not the primary lifecycle: completed runners are torn down immediately, and fabricd's 1-min
+   keepalive cron means its 1h window never elapses. R3 wrongly deleted these as "fabricated"; R4 restored the
+   real values from code.
 
 ---
 
@@ -1179,6 +1196,7 @@ Every coined term, used verbatim thereafter.
 | **RAISE-N** | Scaling fabricd past the singleton: `DATABASE_URL` + `FABRIC_NUM_SHARDS` + `max_instances` raised in lockstep (F-5.7). |
 | **Reject vs queue mode** | The two over-cap admission semantics: immediate 429 (default) vs fair enqueue (ADR-0005) (F-5.2). |
 | **Rota A / Rota B** | Rota A = native CF check-host exec (F-7.1); Rota B = the Hybrid provisioner routing by posture (F-6.3). |
+| **`sleepAfter` (idle backstop)** | The CF Container-class idle-reap window (a TS class property, not a wrangler key): `RunnerContainer` 15m, `CheckHostContainer` 45m, `FabricdContainer` 1h. A FAILED/stuck-box backstop only — completed boxes are torn down immediately and fabricd's keepalive cron means its window never elapses (F-7.1, F-7.2). |
 | **Sparse materialization** | Hydrating only in-fence paths — the enforcement mechanism of the fence (F-4.4). |
 | **X4** | The supply-chain verify-before-spawn oracle (F-4.5); also the badge for external/oracle-only proof. |
 
@@ -1229,14 +1247,16 @@ Round-by-round; content-completeness and craft are tracked separately (DOC-STAND
 |---|---|---|
 | **R1 — built** | 2026-07-16 | Initial exhaustive Features & Functionality inventory (every subsystem, table-form, evidence-cited). |
 | **R2 — deepened** | 2026-07-17 | Completeness-deepen: counter mis-attribution fix (23 vs 22; spawn-vs-fabricd surface split), counter/knob depth, the §11 cross-ref table, config-index grep-verification footnotes. |
-| **R3 — architecture + depth** | 2026-07-17 | Imposed DOC-STANDARD: front-matter + dual Legend (evidence badge ✕ arm-state qualifier), linked TOC, Summary matrix, every feature converted to an ID'd card (`F-<section>.<n>`) with the identical What/Where/Status/Details/Exercised-by/Validated-by template; added Glossary, Reserved-constants appendix, Change log, Coverage summary. **Depth/corrections:** the fabricated `sleepAfter` 15m/45m/1h values removed (no such key; fabricd stays awake via the 1-min keepalive cron); the in-memory fair scheduler documented as owed-first cursor-rotation (NOT deficit-RR — that is the durable `pg_queue` path) with tick constants `TICK_SLOTS=64`/`TICK_MS=50`/`PARK_CAP=8`; `GlobalGate` reclassified INERT/unwired (zero call sites); `HybridBoxProvisioner::provision` router vs `select_backend` oracle distinguished; reaper 3-tier abnormal flush, `corelink_plans` resolve/no-TTL-cache, `quota_headroom` tick math, `pg_ledger` advisory-lock atomicity, `pg_queue` deficit ordering all spelled out; `ack_timeout=30s` re-cited to `leases.rs:1182`; `ADMIN_TENANT_BY_ID` flagged reserved/unwired. |
+| **R3 — architecture + depth** | 2026-07-17 | Imposed DOC-STANDARD: front-matter + dual Legend (evidence badge ✕ arm-state qualifier), linked TOC, Summary matrix, every feature converted to an ID'd card (`F-<section>.<n>`) with the identical What/Where/Status/Details/Exercised-by/Validated-by template; added Glossary, Reserved-constants appendix, Change log, Coverage summary. **Depth/corrections:** the `sleepAfter` 15m/45m/1h values were removed as "fabricated" — a REGRESSION (they are real TS Container-class properties, `index.ts:311`/`:367`/fabricd `:100`; restored in R4); the in-memory fair scheduler documented as owed-first cursor-rotation (NOT deficit-RR — that is the durable `pg_queue` path) with tick constants `TICK_SLOTS=64`/`TICK_MS=50`/`PARK_CAP=8`; `GlobalGate` reclassified INERT/unwired (zero call sites); `HybridBoxProvisioner::provision` router vs `select_backend` oracle distinguished; reaper 3-tier abnormal flush, `corelink_plans` resolve/no-TTL-cache, `quota_headroom` tick math, `pg_ledger` advisory-lock atomicity, `pg_queue` deficit ordering all spelled out; `ack_timeout=30s` re-cited to `leases.rs:1182`; `ADMIN_TENANT_BY_ID` flagged reserved/unwired. |
+| **R4 — final dual-critic** | 2026-07-17 | Fixed the R3 `sleepAfter` regression — restored the real TS Container-class `sleepAfter` idle backstops (`RunnerContainer` `"15m"` `index.ts:311`, `CheckHostContainer` `"45m"` `:367`, `FabricdContainer` `"1h"` fabricd `index.ts:100`, never sleeps under the 1-min keepalive cron) across F-7.1/F-7.2/§14/Glossary. **Completeness critic:** found + fixed the false footnote claiming `NORTHFLANK_EPHEMERAL_STORAGE_MB` was "not an env read" (it is read at `quota_headroom.rs:135`, validated, but inert in the worst-case math) and added it to the knob index; added `BILLING_INGEST_URL`/`_REGION` to the spawn-worker vars. **Craft critic:** added the missing **Details** field to F-6.5; re-verified counter counts (23 fabricd / 12 spawn), all 21 TOC anchors, 55 unique F-ids, badge vocabulary, and the config-knob index against every env read in crates + workers. Both critics DRY. |
 
 ---
 
 ## Appendix E — Coverage summary
 
 Feature cards by headline evidence grade (a card's grade = its dominant badge; sub-mechanisms may differ, per its
-Details). Counts are of the ~50 feature cards F-1.1 … F-10.5.
+Details). Counts are dominant-badge approximations over the 55 feature cards F-1.1 … F-10.5 (split-badge cards
+mean the column need not sum to exactly 55).
 
 | Grade | Count (approx) | Reading |
 |---|---|---|
@@ -1258,8 +1278,11 @@ Details). Counts are of the ~50 feature cards F-1.1 … F-10.5.
 - **Deployed-vs-source parity** for the CF workers/images is the one gap resolvable only against live config
   (§14 item 5), not from this doc.
 
-**NOT complete — this is R3 of a 4–5x loop.** Still likely thin for R4: a per-card **states** enumeration where a
-card has a real state machine (close/ack, lease lifecycle) beyond the one-line summary; the `pg_*` SQL DDL is
-surveyed by behavior, not schema-line-by-line; the `conformance/` vectors are listed but their per-field
-semantics are not each carded; and the Coverage counts are approximate (a mechanized card→badge tally would make
-them exact).
+**R4 (final dual-critic) — both critics DRY.** The R3 `sleepAfter` regression is fixed, and the completeness and
+craft critics come back clean against code (counter counts, config-knob index vs every env read in crates +
+workers, TOC/anchors, badge vocabulary, and the identical card template all verified). The remaining depth
+boundaries are deliberate, not defects: per-card **states** machines (close/ack, lease lifecycle) are summarized
+rather than exhaustively enumerated; the `pg_*` SQL DDL is surveyed by behavior, not schema-line-by-line;
+`conformance/` per-field semantics live in the vectors themselves; and the Coverage counts are dominant-badge
+approximations by design. The honest residual above is an **external-proof** gap (X4-gated — hugit/live-account
+actors), not a doc gap.
