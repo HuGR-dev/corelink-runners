@@ -803,7 +803,7 @@ describe("SJ-2 cell 6 — warm concurrency acquire is per-tenant, clamped to the
     expect(perKeyCap).toBe(20); // clamped to the fleet cap
   });
 
-  it("AT-CEILING (clean {admitted:false}) ⇒ claim released, no JIT, no spawn, spawn_at_ceiling bumped", async () => {
+  it("AT-CEILING (clean {admitted:false}) ⇒ claim released, no JIT, no spawn, spawn_at_ceiling bumped, minted PAT REVOKED", async () => {
     const kv = fakeKv();
     const metrics = fakeMetrics();
     const cred = makeCredStash();
@@ -820,10 +820,11 @@ describe("SJ-2 cell 6 — warm concurrency acquire is per-tenant, clamped to the
     expect(containers.filter((c) => c.startWithEnv.mock.calls.length > 0)).toHaveLength(0);
     expect(kv.store.has("spawn:2502")).toBe(false); // claim released
     expect(metrics.counts.spawn_at_ceiling).toBe(1);
-    // KNOWN ENVELOPE: the at-ceiling branch leaves the minted PAT to its TTL (it does
-    // NOT revoke) — the revoke-key was written at mint but no revoke fires here.
-    expect(revokeCalls()).toHaveLength(0);
-    expect(kv.store.get("2502")).toBe("pat-1");
+    // FIXED (validation-campaign SJ-2 finding, W3/F2): the at-ceiling refusal now REVOKES the
+    // already-minted CAS PAT (it previously orphaned it to its ~2h TTL) — same discipline as the
+    // spawn-failure paths (7c/7d). The revoke-key was written at mint; the refusal fires the revoke.
+    expect(revokeCalls()).toHaveLength(1); // the minted PAT is revoked, not orphaned
+    expect(kv.store.has("2502")).toBe(false); // revoke-key deleted after the revoke
   });
 });
 

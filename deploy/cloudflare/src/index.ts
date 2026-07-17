@@ -812,6 +812,12 @@ async function driveSpawn(
         maxConcurrency: mint.maxConcurrency,
         reason: slot.reason,
       });
+      // W3/F2 (validation-campaign SJ-2 finding): the CAS PAT was already minted (its revoke-key
+      // was stored at mint time) but we're REFUSING the spawn — revoke it NOW instead of orphaning
+      // it to its ~2h TTL, exactly as the spawn-failure paths do. Fail-open (revokeCompletedJob
+      // swallows its own errors); reads jobId->patId, revokes by pat_id, deletes the key. No-op on
+      // a cold spawn (no patId stored).
+      await revokeCompletedJob(env, jobId, mint.tenant);
       return;
     }
   }
