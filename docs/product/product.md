@@ -20,7 +20,7 @@ memoized — so half your jobs never run and the other half start instantly.**
 Three forces converge:
 
 1. **Per-minute billing is broken for the AI era.** A human pushes ~10× a day; an
-   orchestrated agent fleet (hugit's customer) runs CI **hundreds** of times a day.
+   orchestrated agent fleet (an agent-fleet team) runs CI **hundreds** of times a day.
    Per-minute pricing turns that into a terrifying, unpredictable bill — the exact
    "usage whiplash" the HuGR house principle forbids. The people who most need CI
    are the ones per-minute punishes hardest.
@@ -46,7 +46,7 @@ both price and speed, and the gap widens exactly as fleets scale.
 
 ## 3. Who it's for (ICPs) & user stories
 
-### ICP-A — Agent-fleet teams (via hugit, and direct)
+### ICP-A — Agent-fleet teams (direct)
 - *"I orchestrate 10–50 agents. They run the test suite 200×/day. On GitHub Actions
   that's a four-figure monthly surprise. I want to pay a flat number and stop
   watching the minute-meter."*
@@ -60,11 +60,15 @@ both price and speed, and the gap widens exactly as fleets scale.
 - *"Every job re-downloads the same 1.2 GB of deps. I want runners that already have
   them warm so a build starts in seconds, not minutes."*
 
-### ICP-C — hugit itself (campaign #3, the anchor tenant)
-- *"As hugit's landing queue, when a PR turns red I must execute the affected memoized
+### ICP-C — hugit (campaign #3, DISCONTINUED — retained as the historical anchor-tenant profile)
+> hugit / campaign #3 is discontinued (owner-confirmed 2026-07); this ICP is kept as the
+> historical memoized-check profile the fabric was built to serve. The same shape is now
+> served direct-to-ICP.
+- *"As a landing queue, when a PR turns red I must execute the affected memoized
   checks on demand: cache-warm, deterministic (byte-identical so my content-memo holds),
   isolated, attested — and get the CheckResult bytes back. I do not want to operate
-  metal. Runners is my execution substrate."* (See `docs/spec/hugit-integration-contract.md`.)
+  metal. Runners is my execution substrate."* (See `docs/spec/hugit-integration-contract.md` —
+  the fabric wire/envelope contract, historical hugit framing.)
 
 ### ICP-D — Finance / eng-leadership (the buyer)
 - *"I want one predictable line item, not a usage graph that spikes when the team ships.
@@ -81,8 +85,8 @@ both price and speed, and the gap widens exactly as fleets scale.
 | **Memoized execution** | If `action_digest` is already in the AC ⇒ return the stored result, 0 exec. | The cache turns compute into a lookup. |
 | **Ephemeral microVMs** | Each job in a fresh, isolated, fail-closed sandbox; torn down after. | Untrusted/agent code runs safely; dense packing = margin. |
 | **Secrets broker** | Secrets resolved into the job without ever landing on the box image/disk. | Inherited from hugit's C5b discipline; agent-safe. |
-| **Attestation** | The runner signs *what it ran* (image digest + inputs + result hash). | Feeds hugit's provenance / transparency log. |
-| **REAPI-ish exec contract** | Bazel-class remote-execution semantics on top of the cache. | Slots under existing build tools + hugit. |
+| **Attestation** | The runner signs *what it ran* (image digest + inputs + result hash). | Feeds provenance / transparency-log consumers (attestation is the fabric's own). |
+| **REAPI-ish exec contract** | Bazel-class remote-execution semantics on top of the cache. | Slots under existing build tools. |
 
 ---
 
@@ -139,7 +143,7 @@ behind this in `docs/spec/corelink-fabric-stub.md`.
 | **GitHub Actions (hosted)** | per-minute; cold; self-hosted soon paid | flat concurrency; cache-warm; ~60–70% cheaper; predictable |
 | **Depot / Blacksmith** | fast cache-warm runners, but still per-minute | the pricing inversion + native memoization (cache-hit ⇒ 0) |
 | **Self-hosted (DIY)** | you operate the metal + security | we operate fail-closed isolation + secrets broker; you don't |
-| **Buildkite / CircleCI** | per-minute / per-seat, bring-your-compute | one stack: cache + compute + (via hugit) landing |
+| **Buildkite / CircleCI** | per-minute / per-seat, bring-your-compute | one stack: cache + compute |
 
 The defensibility is **the cache**: a competitor can rent the same metal, but cannot
 boot warm or memoize without a content-addressed CAS/AC at scale — and the staged
@@ -149,13 +153,14 @@ cross-tenant lever only deepens the gap when it lands.
 
 ## 8. Roadmap (campaign #1)
 
-- **M0 — Spec lock (now):** this repo. Freeze the hugit contract; CoreLink techlead fills
-  the fabric stub; agree COGS/pricing with the owner.
+- **M0 — Spec lock (now):** this repo. Freeze the fabric wire contract (historical hugit
+  framing; hugit discontinued); CoreLink techlead fills the fabric stub; agree COGS/pricing
+  with the owner.
 - **M1 — MVP fabric:** single region, 2/4-vCPU ephemeral microVMs, cache-warm boot off
-  CAS/AC, the exec/lease/attestation contract green against hugit's `hugit-runner` client,
-  per-tenant concurrency caps + fairness. **Replaces hugit's interim transport**
-  (`hugit-runner-01`, which lights live CI at P2) **with the production fabric — same
-  contract, production grade, multi-tenant.**
+  CAS/AC, the exec/lease/attestation contract green against the runner client,
+  per-tenant concurrency caps + fairness. **Replaces the interim SSH transport**
+  (`hugit-runner-01`, the historical interim box) **with the production fabric — same
+  `RunnerLease` semantics, production grade, multi-tenant.**
 - **M2 — Direct GA:** self-serve concurrency plans, the GitHub-Actions-shim front door,
   billing meters, dashboards, SLOs. Onboarding via the **HuGR account** (ADR-0002).
 - **M3 — Scale:** multi-region, autoscale/oversubscription within SLO, bigger sizes.
@@ -167,6 +172,7 @@ cross-tenant lever only deepens the gap when it lands.
 
 1. **Slot price + size ladder** (§5) and the GitHub-anchor discount target.
 2. **Oversubscription policy** (§6 lever 3) — how aggressively to resell idle within SLO.
-3. **Direct-vs-via-hugit packaging** — confirmed two front doors, one fabric; sign off the
-   "hugit customer never sees a Runners line item" rule.
+3. **Packaging** — direct-to-ICP front door on one fabric (the via-hugit reseller door is
+   moot: hugit discontinued). The historical "hugit customer never sees a Runners line item"
+   invisible-COGS rule is retained as the reseller-packaging pattern should one recur.
 4. **Free-tier shape** — shared fair-use vs none (abuse surface for untrusted compute).

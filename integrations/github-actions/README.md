@@ -144,5 +144,5 @@ The action always surfaces CLI stderr (fabric diagnostics) in the runner log.
 
 - [`docs/cli.md`](../../docs/cli.md) — full `corelink` CLI reference
 - [`docs/product/pricing.md`](../../docs/product/pricing.md) — pricing model
-- [`docs/spec/hugit-integration-contract.md`](../../docs/spec/hugit-integration-contract.md) — wire contract
+- [`docs/spec/hugit-integration-contract.md`](../../docs/spec/hugit-integration-contract.md) — fabric wire/envelope contract (historical hugit framing; hugit discontinued)
 - [`docs/deploy/fabric-server.md`](../../docs/deploy/fabric-server.md) — self-hosted fabric setup

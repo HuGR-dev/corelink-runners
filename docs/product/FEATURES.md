@@ -17,7 +17,7 @@ critics DRY against code. See the Change log and Coverage summary.
 | 🟢 | **LIVE-proven** — armed and proven on the live path (dogfood/first-party), or a green test proving the exact behavior. |
 | 🟡 | **built-not-proven** — code-complete + gate-green, but not yet proven on the live path (often DEFAULT-OFF, fail-closed until armed). |
 | 🔵 | **owner-gated** — built, blocked on an owner action / product decision / cross-repo move / real volume. |
-| ⚪ | **X4-external / oracle** — proof depends on an external actor (hugit, a live CF account) OR the code is verification-only machinery (red-team, conformance, X4 oracle), not a production code path. |
+| ⚪ | **X4-external / oracle** — proof depends on an external actor (hugit (discontinued)/equivalent external dispatch, a live CF account) OR the code is verification-only machinery (red-team, conformance, X4 oracle), not a production code path. |
 | ⚫ | **INERT / planned** — built-but-unwired into the live composition, or not built (planned / v0-simulated / stub). |
 
 **Arm-state qualifier** (orthogonal; appears verbatim in each card's **Status** line):
@@ -78,7 +78,7 @@ The whole doc at a glance: feature area → headline evidence → where the code
 | # | Feature area | Headline | Where |
 |---|---|---|---|
 | 1 | Value proposition & pricing model | 🟢 principle LIVE; ceiling-enforcement 🟡 | `plans.rs`, `compute_meter.rs`, `pricing.md` |
-| 2 | Two front doors (direct / hugit / power-user / workspaces / agent-exec) | 🟢 dogfood LIVE; external 🔵; workspaces ⚫ | `dto.rs`, `interop.md`, ADR-0007 |
+| 2 | Two front doors (direct / hugit (discont.) / power-user / workspaces / agent-exec) | 🟢 dogfood LIVE; external 🔵; workspaces ⚫ | `dto.rs`, `interop.md`, ADR-0007 |
 | 3 | Frozen wire contract & conformance | 🟢 LIVE (Rust tripwire); TS gap ⚪ | `corelink-runners-contracts/`, `conformance/` |
 | 4 | Execution core (lease/isolate/boot/fence/X4/§13/attest) | 🟢 LIVE (182+ tests) | `crates/corelink-runner/` |
 | 5 | Control plane (API/admission/ledger/attest/reaper/moat) | 🟢 LIVE singleton; pg + N>1 🔵; queue ⚫ | `corelink-fabric-server/`, `corelink-fabric/` |
@@ -117,7 +117,7 @@ of GitHub Actions' per-minute model.
 **Details** Two mechanisms carry it: (a) **Cache-warm by construction** — a runner boots with CAS/AC
 pre-warmed, the job's inputs local before the first instruction (`boot/mod.rs`, F-4.3); (b) **Memoized
 execution** — result content-addressed by `H(inputs ‖ command ‖ toolchain)`; if the AC has the key the
-result is returned and the job never runs (`exec.rs::compute_memo_key`; hugit owns the memo key, the
+result is returned and the job never runs (`exec.rs::compute_memo_key`; the memo key was hugit's (discontinued), the
 fabric serves misses).
 **Exercised by** S1.2.1, S2.1.1, S1.2.5.
 **Validated by** F-4.3 boot suite; memo-key integrity at F-5.4 (`conformance/CheckResult` formula).
@@ -172,7 +172,7 @@ slot-pinning that burns the ceiling on junk) is not yet a heuristic — the rate
 ## 2. Two front doors, one fabric
 
 Same lease/isolate/cap/teardown spine; distinct buyers and execution models (whitepaper §9; `interop.md §4`;
-ADR-0007). Cards F-2.1..F-2.4 are the four front doors; F-2.5 is the agent-exec seam that hugit's real-cost
+ADR-0007). Cards F-2.1..F-2.4 are the four front doors; F-2.5 is the agent-exec seam that hugit's (discontinued) real-cost
 gate rides on.
 
 ### F-2.1 — Direct front door (ephemeral GitHub-Actions fleet)  🟢
@@ -186,13 +186,13 @@ one ephemeral runner per job, producing the customer's own GitHub check status.
 **Exercised by** S1.1.1–S1.1.4, S1.2.1–S1.2.5, S1.4.1–S1.4.5.
 **Validated by** `webhook-route.test.ts`, `github-app.test.ts`, dogfood fleet (App 144561227).
 
-### F-2.2 — hugit front door (memoized, attested check)  🟢
+### F-2.2 — hugit (discontinued) front door (memoized, attested check)  🟢
 
-**What** Memoized, attested *check* execution — hugit owns the memo key, the fabric sees only misses;
-`CheckDef → CheckResult` + `AttestationChain` + `result_binding_sig(_v2)`. A hugit customer never sees a
-"Runners" line item (Runners is COGS under hugit).
+**What** Memoized, attested *check* execution — hugit was the intended consumer (discontinued) and owned the memo
+key, the fabric seeing only misses; `CheckDef → CheckResult` + `AttestationChain` + `result_binding_sig(_v2)`.
+Under that (discontinued) model a hugit customer would never see a "Runners" line item (Runners as COGS under hugit).
 **Where** fabric sets `sh -lc <check.command>` per `/exec` (F-5.1); attestation at F-5.4.
-**Status** 🟢 LIVE (moat proven 2026-07-09); the hugit cutover is 🔵 OWNER-GATED (§11).
+**Status** 🟢 LIVE (moat proven 2026-07-09); the hugit cutover was 🔵 OWNER-GATED (hugit discontinued; §11).
 **Details** ICP-C (the anchor tenant). Result = `CheckResult` + attestation + result-binding signature.
 **Exercised by** S2.1.1–S2.1.3, S2.2.1–S2.2.2, S2.4.1.
 **Validated by** `acceptance_moat`, `cloudflare_flip_e2e`, `conformance_result_binding_v2`.
@@ -217,11 +217,11 @@ one ephemeral runner per job, producing the customer's own GitHub check status.
 
 ### F-2.5 — The agent-exec seam  🟡
 
-**What** hugit's real-cost gate rides a distinct **agent-exec** seam: arbitrary-command drive on an
+**What** hugit's (discontinued) real-cost gate was to ride a distinct **agent-exec** seam: arbitrary-command drive on an
 egress-allowed, exec-driven lease, never memoized, with async step polling.
 **Where** `POST /v1/leases/{id}/agent-exec` + `GET .../{step_id}` (`agent_exec.rs`, F-5.1); egress lease
 `from_agent_lease` (F-4.1).
-**Status** 🟡 built-not-proven — wired both ends; real e2e when hugit dials it (⚪ X4).
+**Status** 🟡 built-not-proven — wired both ends; real e2e when an external consumer dials it (hugit discontinued; ⚪ X4).
 **Details** `req.agent` was a dead field until wired (2026-07-09, PR #338); `/exec` refuses agent specs.
 **Exercised by** S2.3.1, S2.3.2, S4.1.
 **Validated by** `acceptance_agent_exec`, `conformance_agent_exec_dtos`.
@@ -230,7 +230,8 @@ egress-allowed, exec-driven lease, never memoized, with async step polling.
 
 ## 3. The frozen wire contract & conformance
 
-The seam with hugit is **frozen from hugit's side** (`docs/spec/hugit-integration-contract.md` v1.4.0).
+The fabric wire/envelope contract carries the historical hugit framing (hugit discontinued); the fabric now owns
+these mechanisms (`docs/spec/hugit-integration-contract.md` v1.4.0).
 Types are **transcribed** on each side (hugit-contracts is never imported; `deny.toml` forbids git/path
 deps). Drift is caught by shared byte-identical conformance vectors.
 
@@ -590,7 +591,7 @@ suspension via `fabric_suspended_tenants(tenant_id PK)` (`set_tenant_suspended` 
 **What** Every execution result is attested and signed; the close path rejects any result whose memo_key
 doesn't recompute; attested §13 cost rides `CloseResponse`.
 **Where** `attestation.rs`; DTOs at F-3.2.
-**Status** 🟢 LIVE (`intent_metrics_sig` armed on fabricd; hugit consumption pending, ⚪ X4).
+**Status** 🟢 LIVE (`intent_metrics_sig` armed on fabricd; external consumption pending (hugit discontinued), ⚪ X4).
 **Details** — mechanism · what · where:
 
 | Mechanism | What | Where |
@@ -599,7 +600,7 @@ doesn't recompute; attested §13 cost rides `CloseResponse`.
 | `result_binding_sig` (v1) | detached ed25519 over `LP(memo_key)‖LP(stdout_ref)‖LP(stderr_ref)` | `attestation.rs` |
 | `result_binding_sig_v2` | full-outcome binding — adds `i32_be(exit)‖u32_be(artifacts.len)‖∀ LP(path)‖LP(digest)`; closes the forgeable-verdict gap; additive alongside v1 | `attestation.rs`; vector `result_binding_v2.json` |
 | memo-key integrity check | close rejects (400) any `CheckResult` whose `memo_key` ≠ SHA-256 of its input axes before attesting | close gate 4 |
-| `intent_metrics_sig` (FLIP-B) | signs §13 metrics on `CloseResponse` so hugit renders ATTESTED cost; signs honest-zero until a provider `/usage` source | `sign_intent_metrics`, dto `:541`; vector `intent_metrics_sig.json` |
+| `intent_metrics_sig` (FLIP-B) | signs §13 metrics on `CloseResponse` so a consumer renders ATTESTED cost (hugit was the intended consumer, discontinued); signs honest-zero until a provider `/usage` source | `sign_intent_metrics`, dto `:541`; vector `intent_metrics_sig.json` |
 | Keyset rotation | `AttestationKeySetResponse` + fail-closed `select_attestation_key` (UnknownKeyId/Expired); prod key `faa5b7726…` | dto `:581,632`; vector `attestation_keyset_selection.json` |
 | Per-lease scoped ingest token (ADR-0006) | HMAC-SHA256(ingest_secret, lease_id) write-only capability injected in place of the PAT — an exfiltrated token authorizes ingest only to that one dying lease | `ingest_token.rs`; `server.rs:1017` |
 
@@ -1033,8 +1034,9 @@ references pre-built `@sha256` digests.
 - **Consumes CoreLink Cache** — CAS/AC/R2 + tenancy + PAT, as a layer, never forked. Auth Bearer PAT
   (`interop.md §2`). Dedup is **intra-tenant at GA**; cross-tenant is staged (`CAP-DEDUP-CROSS-TENANT`) — the
   tense-discipline rule (`docs/review/2026-06-09-cross-tenant-dedup-claim.md`).
-- **Consumed by hugit** — the execution substrate for memoized CI. Contract frozen from hugit's side (v1.4.0).
-  hugit cutover (`HUGIT_RUNNER_HOST` repoint + pubkey re-pin `b1eba792…`→`faa5b7726…`) is OWNER-GATED.
+- **hugit (discontinued intended consumer)** — was to be the execution substrate for memoized CI. Historical hugit
+  framing (hugit discontinued); the fabric owns these mechanisms (contract v1.4.0). The hugit cutover
+  (`HUGIT_RUNNER_HOST` repoint + pubkey re-pin `b1eba792…`→`faa5b7726…`) no longer applies.
 - **Consumed by Workspaces** (campaign #2) — agent sandboxes / dev-boxes on the same lease/isolate/attest spine
   (`ws/mod.rs`, F-4.8).
 - **Drift tripwire** — the shared `conformance/` set is the byte-identical seam law across all consumers (F-3.3).
@@ -1140,11 +1142,11 @@ variant) is a real read on the fabricd proxy.
 ## 14. Deliberate exclusions & ambiguities
 
 **Excluded (out of Runners' scope by charter, whitepaper §12):** check *semantics* (what a check means / whether
-it passes), the memo *key* (hugit owns the formula; the fabric only serves misses), landing/merge, and
-provenance (hugit's); the cache itself (CoreLink's); per-minute billing exposure. These are not Runners features
+it passes), the memo *key* (hugit owned the formula (discontinued); the fabric only serves misses), landing/merge, and
+provenance (hugit's, discontinued); the cache itself (CoreLink's); per-minute billing exposure. These are not Runners features
 and are not inventoried. **Not to be confused with excluded:** the check-*host* execution box, the in-container
 `corelink-check-exec-server` (F-9.5), native CF check-exec (F-7.1), and the `agent-exec` seam (F-2.5) **ARE**
-Runners features. The line is *execution (ours) vs semantics (hugit's)*, not "check = not ours."
+Runners features. The line is *execution (ours) vs semantics (hugit's, discontinued)*, not "check = not ours."
 
 **Live-vs-inert ambiguities a validator should resolve on live config, not this doc:**
 
@@ -1181,14 +1183,14 @@ Every coined term, used verbatim thereafter.
 
 | Term | Definition |
 |---|---|
-| **Attested cost** | The signed §13 `IntentMetrics` on `CloseResponse` (`intent_metrics_sig`, F-5.4) — a per-job spend hugit can render as tamper-evident. |
+| **Attested cost** | The signed §13 `IntentMetrics` on `CloseResponse` (`intent_metrics_sig`, F-5.4) — a per-job spend a consumer can render as tamper-evident (hugit was the intended consumer, discontinued). |
 | **Cache-warm boot** | Booting a box with the CAS/AC pre-warmed so the job's inputs are local before the first instruction (F-4.3). |
 | **Cred-ticket (C2c)** | A single-use, lease-scoped ticket injected instead of the raw CAS PAT; redeemed at trusted boot (F-5.9). "PAT never on the box." |
 | **Dogfood** | HuGR's own first-party use of the fabric (App installation 144561227) — the live-proven path. |
 | **env-0** | The environment injected into a runner box at spawn (JITCONFIG, cred-ticket, ingest token) — the injection surface (F-5.8). |
 | **Fence** | The set of paths a job may touch; sparse materialization IS the fence (out-of-fence ⇒ ENOENT) (F-4.4). |
 | **FLIP-A / FLIP-B** | The moat go-live transitions: FLIP-A = per-job CAS-PAT mint armed; FLIP-B = `intent_metrics_sig` on the wire (F-5.4, F-5.9). |
-| **Front door** | A buyer-facing entry to the same fabric: direct / hugit / power-user / workspaces (F-2.1–F-2.4). |
+| **Front door** | A buyer-facing entry to the same fabric: direct / hugit (discontinued) / power-user / workspaces (F-2.1–F-2.4). |
 | **Golden counters** | The fixed, lock-free counter set on the status/metrics surfaces (23 fabricd, 12 spawn) (F-10.1, F-10.2). |
 | **Memoized execution** | Returning a content-addressed result without running the job when the AC has the key (F-1.2). |
 | **The moat** | CoreLink's content-addressed cache; Runners is how it earns compute revenue. |
@@ -1264,12 +1266,12 @@ mean the column need not sum to exactly 55).
 | 🟡 built-not-proven | ~11 | Ceiling enforcement, entitlement, queue mode, billing exporters, Northflank, hybrid, canary, quota monitor, anti-abuse. |
 | 🔵 owner-gated | ~6 | pg ledger, N>1 sharding, external-customer activation, check-host live-flip, identity last step. |
 | ⚫ INERT / planned | ~5 | Workspaces SKUs, multi-size resolver, durable queue, `GlobalGate`, Firecracker. |
-| ⚪ X4 / oracle | (crosscut) | The X4 oracle + red-team + TS-side conformance + every hugit-dialed e2e. |
+| ⚪ X4 / oracle | (crosscut) | The X4 oracle + red-team + TS-side conformance + every externally-dialed e2e (hugit discontinued). |
 
 **Honest residual (what is NOT yet at 🟢 with an in-repo test):**
 
 - Whole classes gate on an **external actor** and cannot be proven in-repo: the full `[clw] cache hit` smoke,
-  hugit memoized-check / agent-exec consumption, the live-account CF Containers SDK smoke (all ⚪ X4).
+  external memoized-check / agent-exec consumption (hugit discontinued), the live-account CF Containers SDK smoke (all ⚪ X4).
 - The **loss-impossible vCPU-h wall** (F-1.4/F-5.2) is built but has no *armed-live* proof (DEFAULT-OFF, needs pg).
 - **Billing exporters/push** (F-5.6) and the **quota-headroom monitor** (F-10.4) are DEFAULT-OFF with unit
   coverage only — no armed-live proof.
@@ -1284,5 +1286,5 @@ workers, TOC/anchors, badge vocabulary, and the identical card template all veri
 boundaries are deliberate, not defects: per-card **states** machines (close/ack, lease lifecycle) are summarized
 rather than exhaustively enumerated; the `pg_*` SQL DDL is surveyed by behavior, not schema-line-by-line;
 `conformance/` per-field semantics live in the vectors themselves; and the Coverage counts are dominant-badge
-approximations by design. The honest residual above is an **external-proof** gap (X4-gated — hugit/live-account
+approximations by design. The honest residual above is an **external-proof** gap (X4-gated — external/live-account (hugit discontinued)
 actors), not a doc gap.

@@ -87,7 +87,8 @@ proven end-to-end against the live Northflank provider. PRs #17–#23 + audit:
       the Held path (`handlers/leases.rs`), so the envelope endpoints + close
       machinery are live on the real exec path; gated on a real Held transition,
       never on an early-return. Pinned by `envelope_wire.rs` (9 tests). The
-      `IntentMetrics` §13.4 conformance vector remains owner/hugit-gated (below).
+      `IntentMetrics` §13.4 conformance vector was owner/hugit-gated (below; landed #5;
+      hugit since discontinued).
 - [x] **WP-PLAN-LADDER** — `PlanTier` aligned to the canonical, owner-ratified
       `pricing.md §2` ladder (Starter/Pro/Team/Scale/Max @ 20/40/80/160/320; was the
       stale 1/1/4/12 from a pre-decision draft). corelink-server-requested before M2
@@ -250,7 +251,9 @@ the runner + wire contract are untouched.
 
 ## Remaining work — owner-gated or cross-repo
 
-Items that cannot close without owner input or a hugit-side move:
+Items that cannot close without owner input. (Cross-repo "hugit-side move" items
+below are now moot — hugit / campaign #3 is discontinued (owner-confirmed 2026-07);
+the corresponding mechanisms are live on the fabric's own side.)
 
 - [x] **Real cloud deploy** _(LIVE 2026-06-13)_ — `corelink-fabricd` deployed on
       Northflank end-to-end: org `human-guardrail`, team `humangr`, service
@@ -355,14 +358,15 @@ Items that cannot close without owner input or a hugit-side move:
       hardening). A NEW BUILD of `main` deploys the `result_binding_sig_v2` P0 fix +
       all Wave-1/2 hardening (new env vars all have safe defaults). Not an emergency
       (internal seed) but a shipped security fix should not sit undeployed.
-- [ ] **hugit adds the attestation `result_binding_sig_v2` verifier** _(cross-repo,
-      SECURITY)_ — the P0 fix is backward-compat (v1 still emitted), so the
-      verdict-forgery window stays open on hugit's v1-only path until they verify v2.
-      Handoff: `docs/handoff/2026-06-14-SECURITY-hugit-attestation-binding-v2.md`
-      (§7.1 amendment, contract v1.4.0, pending ratification).
-- [ ] **`hugit-c9-` container-prefix rename decision** — ops-visible seam change;
-      not a local cleanup.
-- [ ] **ATT3 secrets seam** — awaits the hugit payload contract (decision #7).
+- [~] **Attestation `result_binding_sig_v2` verifier** _(cross-repo, SECURITY — MOOT:
+      hugit discontinued)_ — the P0 fix is backward-compat (v1 still emitted). The v2
+      signer is live on the fabric's own side; the intended hugit-side verifier is moot.
+      Historical handoff: `docs/handoff/2026-06-14-SECURITY-hugit-attestation-binding-v2.md`
+      (§7.1 amendment, contract v1.4.0).
+- [~] **`hugit-c9-` container-prefix rename decision** _(MOOT: hugit discontinued)_ —
+      the historical ops-visible seam-prefix decision; no cross-repo party remains.
+- [~] **ATT3 secrets seam** _(MOOT: hugit discontinued)_ — historically awaited the hugit
+      payload contract (decision #7).
 - [x] **Full §13 exec-time intent emission** _(CONFIRMED COMPLETE 2026-06-14, Wave-6
       survey)_ — the §13.4 vector landed (#5); the live capture path is the **§13.2
       turn-feed**: the ingest endpoint streams in-box agent trajectory into the
@@ -370,8 +374,9 @@ Items that cannot close without owner input or a hugit-side move:
       durable checkpoint, close finalizes exactly-once, and the 3-tier abnormal flush
       recovers partial metrics cross-instance. Regression-tested (collector snapshot
       non-destructiveness + `acceptance_envelope_e2e` acquire→ingest→poll→close).
-      Remaining is purely cross-repo: **hugit's agent adopting the ingest endpoint**
-      (the runner + contract seam are done).
+      The remaining leg was purely cross-repo — the intended hugit agent adopting the
+      ingest endpoint — now MOOT (hugit discontinued); the runner + contract seam are
+      done and live on the fabric's own side.
 
 ## Firecracker / own-metal (deferred — off critical path)
 
@@ -385,8 +390,9 @@ Items that cannot close without owner input or a hugit-side move:
 > **Drift correction (2026-06-15, ADR-0007):** the direct on-ramp is an **ephemeral
 > GitHub Actions runner fleet** (`runs-on: corelink`), NOT a "shim" step. The
 > `corelink run` CLI + GitHub Action + `result_binding_sig_v2` + verify SDKs shipped
-> earlier this session are re-scoped to the **hugit / campaign-#3 memoized-check path**
-> + a power-user primitive — they were mislabelled as the direct adoption surface.
+> earlier this session are re-scoped to the **historical memoized-check path** (hugit /
+> campaign #3, now discontinued) + a power-user primitive — they were mislabelled as the
+> direct adoption surface.
 
 - [x] **`GET /v1/usage`** _(2026-06-15, #66)_ — tenant-facing live usage (cap · fabric-wide
       active · instance peak); the console data surface. (Historical billing summary = follow-up.)
@@ -405,11 +411,13 @@ Items that cannot close without owner input or a hugit-side move:
         per-job billing reconciliation · SLOs.
 - [ ] Identity via the HuGR account (ADR-0002: same Clerk pool; org = tenant) — consumed from
       CoreLink, not built here (the runner fleet authenticates the App install, not a tenant PAT).
-- [ ] Self-serve onboarding for the direct ICP (infra/CI teams); same fabric,
-      second front door — hugit never sees a "Runners" line item.
+- [ ] Self-serve onboarding for the direct ICP (infra/CI teams) — now the primary front
+      door (the historical invisible-COGS "hugit never sees a Runners line item" reseller
+      door is moot: hugit discontinued).
 
 ## Standing constraints (do not relitigate without the owner)
 
 Concurrency pricing · never bill the customer's compute twice · cache-warm by
 construction · fail-closed isolation · tense discipline on cache claims ·
-integration contract frozen from hugit's side (§12 protocol).
+the fabric wire/envelope contract (historical hugit framing, §12 protocol; hugit
+discontinued — the mechanisms are the fabric's own).
