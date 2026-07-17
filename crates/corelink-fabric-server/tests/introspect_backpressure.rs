@@ -62,7 +62,10 @@ impl TokenStore for SlowTokenStore {
         self.peak.fetch_max(now, Ordering::SeqCst);
         std::thread::sleep(self.hold);
         self.in_flight.fetch_sub(1, Ordering::SeqCst);
-        if token == "pat-acme" {
+        // Any `pat*` token authenticates to the same tenant. The gate-shed proof
+        // fires DISTINCT tokens (which the W2' coalescer cannot collapse, so the
+        // gate still bounds them) — all resolving to `acme` so the survivors 200.
+        if token.starts_with("pat") {
             Ok(Some(self.tenant.clone()))
         } else {
             Ok(None)
@@ -109,6 +112,16 @@ fn harness(introspect_permits: usize, hold: Duration) -> Harness {
 }
 
 fn acquire_request(app: Router) -> impl std::future::Future<Output = Response> {
+    acquire_request_token(app, "pat-acme")
+}
+
+/// Like [`acquire_request`] but with an explicit bearer token — so the gate-shed
+/// proof can fire DISTINCT tokens (which the W2' single-flight coalescer cannot
+/// collapse; they still contend for the gate) instead of one coalescing token.
+fn acquire_request_token(
+    app: Router,
+    token: &str,
+) -> impl std::future::Future<Output = Response> + use<> {
     let body = AcquireRequest {
         repo_full_name: None,
         installation_id: None,
@@ -123,7 +136,7 @@ fn acquire_request(app: Router) -> impl std::future::Future<Output = Response> {
     let req = Request::builder()
         .method("POST")
         .uri(paths::LEASES)
-        .header(header::AUTHORIZATION, "Bearer pat-acme")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
         .expect("valid request");
@@ -141,6 +154,12 @@ async fn body_json(response: Response) -> serde_json::Value {
 /// `permits` enter the blocking-pool introspect offload; the excess (N - permits)
 /// is shed IMMEDIATELY with the frozen `FailClosed` 503 + `Retry-After`, never
 /// touching the blocking pool, and the `introspect_shed` counter records each.
+///
+/// W2' INTERACTION: this fires **DISTINCT** tokens (`pat-0`..`pat-{N-1}`). The
+/// single-flight coalescer only collapses SAME-token concurrency, so distinct
+/// tokens each contend for the gate exactly as W1 intends — the gate remains the
+/// bound on concurrent DISTINCT introspects. (A same-token burst now coalesces to
+/// ONE call and does NOT shed — that is proven in `introspect_single_flight.rs`.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn introspect_burst_sheds_excess_cleanly_never_touching_blocking_pool() {
     const N: usize = 16;
@@ -152,8 +171,11 @@ async fn introspect_burst_sheds_excess_cleanly_never_touching_blocking_pool() {
     let h = harness(PERMITS, HOLD);
 
     let mut tasks = Vec::with_capacity(N);
-    for _ in 0..N {
-        tasks.push(tokio::spawn(acquire_request(h.app.clone())));
+    for i in 0..N {
+        tasks.push(tokio::spawn(acquire_request_token(
+            h.app.clone(),
+            &format!("pat-{i}"),
+        )));
     }
 
     let mut ok = 0usize;
