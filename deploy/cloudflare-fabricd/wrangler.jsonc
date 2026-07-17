@@ -150,7 +150,12 @@
       // ddad8014 was the Stage-C binary (console read-APIs #346 + status #347 +
       // revoke cleanup #350). Built via `wrangler containers build` (tag
       // golive-counters-20260709).
-      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer@sha256:61fcce2c17091de76e7d99a41a16d0dcf182ded7064a9ed2ddcd8ead02e59ed4",
+      // 2026-07-16 W1-RESILIENCE rollout (5608d67d): SAME Rust binary as 61fcce2c
+      // (no crates/ change this wave) — rebuilt only to force a container rollout so
+      // the proxy's newly-forwarded envVars take effect (the singleton reads env at
+      // boot). Arms FABRIC_CRASH_PROBE_INTERVAL_SECS + (pg-gated)
+      // FABRIC_BILLING_EXPORT_INTERVAL_SECS. SUPERSEDES 61fcce2c.
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer@sha256:5608d67d83f0a33dc78cb4a3753d48d66a205b9cbbffbd69d63c3f1d774436a4",
       // HTTP control plane. Bumped standard-1 → standard-2 (2026-07-07 acquire-storm
       // hardening): the single-flight singleton must keep /v1/health + lease ops
       // responsive under a burst of box provisions; 2 vCPU gives headroom so a few
