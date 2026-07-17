@@ -758,6 +758,57 @@ export async function listOrphanRunnerJobs(
   }
 }
 
+// ── Dead-letter orphan retry (W7/F8) — WARM re-drive of a failed spawn, ANY repo ─
+//
+// GitHub fires workflow_job.queued ONCE. If the webhook's spawn transiently fails
+// AFTER the retry+waitUntil budget, the job sits queued forever. The first-party
+// GitHub scan (`listOrphanRunnerJobs` + RECONCILER_REPOS) only re-drives COLD and
+// only for the trusted allowlist — a CUSTOMER repo's transiently-failed spawn has
+// NO recovery, and a cold re-drive would skip per-job authz/mint anyway.
+//
+// The fix is a DEAD-LETTER: on a spawn failure where an installation_id was in
+// hand (⇒ warm-recoverable), record the failed spawn WITH its installation_id in
+// KV under an `orphan:<jobId>` key. The scheduled reconciler then retries the
+// dead-letter WARM (installation_id present ⇒ buildContainerEnv authorizes+mints),
+// for ANY repo, idempotently (claimSpawn dedups vs the live path) and bounded to
+// MAX_ORPHAN_ATTEMPTS. A cold spawn (no installation_id) is NOT recorded — it
+// can't be warm-retried and stays covered by the first-party GitHub scan.
+
+// Past this the queued job is stale/gone (GitHub won't assign a runner minted so
+// late), so the dead-letter self-expires — the retry never chases a dead job.
+export const ORPHAN_TTL_S = 1800; // 30 min
+// The retry is bounded: after this many attempts the dead-letter is given up
+// (deleted + logged) so it never retries forever.
+export const MAX_ORPHAN_ATTEMPTS = 3;
+
+// The dead-letter record: the failed spawn's inputs, carried so the reconciler can
+// re-drive it WARM (installation_id present ⇒ authorized mint). `attempts` bounds
+// the retry.
+export interface OrphanRecord {
+  repo: string;
+  installationId: string;
+  labels: string[];
+  attempts: number;
+}
+
+/**
+ * PURE dead-letter decision (unit-testable; index.ts applies the KV I/O). Given
+ * the current record and the attempt ceiling, decide the reconciler's branch:
+ *   • null record        ⇒ "missing"  (the key TTL-expired between list and get) — skip.
+ *   • attempts >= max     ⇒ "giveup"  (bounded — delete + log, never retry forever).
+ *   • else                ⇒ "retry"   (bump to nextAttempts, then claim + WARM re-drive).
+ * `nextAttempts` is the attempts value to persist on a retry (attempts + 1), or the
+ * current attempts on giveup (for the log), or 0 when missing.
+ */
+export function orphanRetryStep(
+  rec: OrphanRecord | null,
+  max: number,
+): { action: "giveup" | "retry" | "missing"; nextAttempts: number } {
+  if (!rec) return { action: "missing", nextAttempts: 0 };
+  if (rec.attempts >= max) return { action: "giveup", nextAttempts: rec.attempts };
+  return { action: "retry", nextAttempts: rec.attempts + 1 };
+}
+
 // ── Billing usage-push (ASK-2) — per-completed-job runner_slot_seconds ────────
 //
 // The prod (all-Cloudflare) home for billing: the Rust `corelink-fabricd`

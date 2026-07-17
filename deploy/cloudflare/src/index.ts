@@ -66,12 +66,16 @@ import {
   listOrphanRunnerJobs,
   reconcileCompletedJobBilling,
   RECONCILE_MIN_AGE_MS,
+  orphanRetryStep,
+  ORPHAN_TTL_S,
+  MAX_ORPHAN_ATTEMPTS,
   logEvent,
   type ContainerEnvResult,
   type SlotRecord,
   type StashedCred,
   type StashRecord,
   type CredStashLike,
+  type OrphanRecord,
 } from "./lib";
 import { bumpMetrics, snapshotMetrics, MetricsDO } from "./metrics";
 import { installationToken } from "./github_app";
@@ -831,6 +835,45 @@ async function driveSpawn(
   }
 }
 
+// ── Dead-letter orphan store (W7/F8) — records a WARM-recoverable failed spawn ──
+// A distinct `orphan:` namespace in RUNNER_JOB_PATS, never colliding with the bare
+// jobId (pat map) or `spawn:`/`done:`/`conc:`/`jtenant:`/`jhandle:` keys. The value
+// is a JSON `OrphanRecord`; `retryOrphanedSpawns` (scheduled) re-drives it WARM.
+const ORPHAN_KEY_PREFIX = "orphan:";
+function orphanKey(jobId: string): string {
+  return `${ORPHAN_KEY_PREFIX}${jobId}`;
+}
+
+// Record the FIRST failure of a WARM-recoverable spawn as a dead-letter so the
+// scheduled reconciler retries it WARM (for ANY repo, not just RECONCILER_REPOS).
+// Only records when an installation_id was in hand — a cold spawn (no
+// installation_id) can't be warm-retried and stays covered by the first-party
+// GitHub scan. IDEMPOTENT: records only if no `orphan:<jobId>` already exists (the
+// idempotent record of the FIRST failure; attempts is NOT bumped here — the
+// reconciler owns the attempt count). Best-effort: a KV error is swallowed so this
+// never breaks the spawn path.
+export async function recordOrphan(
+  env: Env,
+  opts: { jobId: string; repo: string; installationId: string; labels: string[] },
+): Promise<void> {
+  if (!env.RUNNER_JOB_PATS || !opts.installationId) return; // cold ⇒ not warm-recoverable
+  try {
+    const key = orphanKey(opts.jobId);
+    if (await env.RUNNER_JOB_PATS.get(key)) return; // FIRST-failure record only (don't clobber/bump)
+    const rec: OrphanRecord = {
+      repo: opts.repo,
+      installationId: opts.installationId,
+      labels: opts.labels,
+      attempts: 1,
+    };
+    await env.RUNNER_JOB_PATS.put(key, JSON.stringify(rec), { expirationTtl: ORPHAN_TTL_S });
+    logEvent("info", "orphan_recorded", { jobId: opts.jobId, repo: opts.repo });
+  } catch (e) {
+    // Best-effort: never break the (already-failed) spawn path on a KV hiccup.
+    logEvent("error", "orphan_record_failed", { jobId: opts.jobId, error: (e as Error).message });
+  }
+}
+
 // driveSpawn wrapped so ANY failure RELEASES the spawn claim — a GitHub redelivery
 // or a later reconciler tick can then re-drive the job (never a silent orphan).
 async function driveSpawnGuarded(
@@ -843,6 +886,11 @@ async function driveSpawnGuarded(
     await releaseSpawnClaim(env.RUNNER_JOB_PATS, opts.jobId);
     await bumpMetrics(env, "spawn_failed");
     logEvent("error", "spawn_drive_failed", { jobId: opts.jobId, error: (e as Error).message });
+    // W7/F8: record the WARM-recoverable failure as a dead-letter so the scheduled
+    // reconciler retries it WARM (for ANY repo). driveSpawnGuarded is the "first
+    // attempt" context (webhook + first-party GitHub scan) — the retry path calls
+    // the THROWING driveSpawn directly, so it never re-enters this recording catch.
+    await recordOrphan(env, opts);
   }
 }
 
@@ -879,6 +927,16 @@ export default {
     const configured = env.AUTOSCALER_LABEL;
     const now = Date.now();
     await redriveOrphanedJobs(env, ctx, configured, now);
+    try {
+      // W7/F8: retry the dead-letter WARM (ANY repo). Runs AFTER the first-party
+      // GitHub scan — the two are complementary (that scan covers first-party
+      // LOST-webhook orphans the dead-letter can't see; the dead-letter covers a
+      // WARM-recoverable spawn FAILURE for any repo). Wrapped so it never throws
+      // out of scheduled().
+      await retryOrphanedSpawns(env, ctx, now);
+    } catch (e) {
+      logEvent("error", "orphan_retry_failed", { error: (e as Error).message });
+    }
     try {
       const pushed = await reconcileCompletedJobBilling(env, configured, now);
       if (pushed > 0) {
@@ -1422,6 +1480,101 @@ async function redriveOrphanedJobs(
           driveSpawnGuarded(env, { jobId, repo, installationId: reInstallationId, labels }),
         );
       }
+    }
+  }
+}
+
+// ── the dead-letter orphan retry (cron, part 3 of 3 — see scheduled() above) ─────
+// W7/F8: retry the WARM-recoverable failed spawns recorded by `recordOrphan` (the
+// `orphan:<jobId>` dead-letter). UNLIKE `redriveOrphanedJobs` (first-party GitHub
+// scan, RECONCILER_REPOS-scoped, cold), this re-drives WARM (the record carries the
+// installation_id ⇒ buildContainerEnv authorizes+mints) and works for ANY repo,
+// including external customers. Bounded (MAX_ORPHAN_ATTEMPTS), idempotent
+// (claimSpawn dedups vs the live path), self-healing (ORPHAN_TTL_S).
+//
+// `drive` is injected (defaults to the THROWING `driveSpawn`, NOT driveSpawnGuarded
+// — so a retry FAILURE does NOT re-enter the recording catch and re-create the
+// dead-letter) so the reconciler is unit-testable with a mocked drive.
+export async function retryOrphanedSpawns(
+  env: Env,
+  _ctx: ExecutionContext,
+  _now: number,
+  drive: (
+    env: Env,
+    opts: { jobId: string; repo: string; installationId: string; labels: string[] },
+  ) => Promise<void> = driveSpawn,
+): Promise<void> {
+  const kv = env.RUNNER_JOB_PATS;
+  if (!kv) return; // no dead-letter store bound ⇒ nothing to retry
+  let listed: { keys: { name: string }[] };
+  try {
+    listed = await kv.list({ prefix: ORPHAN_KEY_PREFIX });
+  } catch (e) {
+    logEvent("error", "orphan_retry_list_failed", { error: (e as Error).message });
+    return;
+  }
+  for (const { name } of listed.keys) {
+    const jobId = name.slice(ORPHAN_KEY_PREFIX.length);
+    // Parse the record (a malformed/absent value ⇒ null ⇒ the "missing" branch).
+    let rec: OrphanRecord | null = null;
+    try {
+      const raw = await kv.get(name);
+      rec = raw ? (JSON.parse(raw) as OrphanRecord) : null;
+    } catch {
+      rec = null;
+    }
+    const step = orphanRetryStep(rec, MAX_ORPHAN_ATTEMPTS);
+    if (step.action === "missing") continue; // TTL-expired between list and get — skip
+    if (step.action === "giveup") {
+      // Bounded: never retry forever. Delete the dead-letter + log loud.
+      await kv.delete(name).catch(() => {
+        /* best-effort: the key TTL-expires */
+      });
+      logEvent("error", "orphan_retry_giveup", {
+        jobId,
+        repo: rec!.repo,
+        attempts: rec!.attempts,
+      });
+      continue;
+    }
+    // retry: bump the attempt count (same TTL), then claim + WARM re-drive.
+    const bumped: OrphanRecord = { ...(rec as OrphanRecord), attempts: step.nextAttempts };
+    await kv
+      .put(name, JSON.stringify(bumped), { expirationTtl: ORPHAN_TTL_S })
+      .catch(() => {
+        /* best-effort: a failed bump just means next tick re-reads the old count */
+      });
+    // Idempotent: if the job is already claimed (a live path / another tick won
+    // it), skip this tick and LEAVE the record for later.
+    if (!(await claimSpawn(kv, jobId))) continue;
+    try {
+      await drive(env, {
+        jobId,
+        repo: bumped.repo,
+        installationId: bumped.installationId,
+        labels: bumped.labels,
+      });
+      // Recovered ⇒ drop the dead-letter (the spawn claim is left to TTL-expire,
+      // blocking redeliveries for the job's lifetime, same as the live path).
+      await kv.delete(name).catch(() => {
+        /* best-effort: the key TTL-expires */
+      });
+      logEvent("info", "orphan_retry_recovered", {
+        jobId,
+        repo: bumped.repo,
+        attempts: bumped.attempts,
+      });
+    } catch (e) {
+      // Retry failed ⇒ release the claim so a later tick (or the live path) can
+      // re-drive, and LEAVE the (bumped) record for the next tick.
+      await releaseSpawnClaim(kv, jobId);
+      await bumpMetrics(env, "spawn_failed");
+      logEvent("error", "orphan_retry_drive_failed", {
+        jobId,
+        repo: bumped.repo,
+        attempts: bumped.attempts,
+        error: (e as Error).message,
+      });
     }
   }
 }
