@@ -103,6 +103,27 @@ pub(crate) struct AuthLayerState {
     pub introspect_gate: Arc<tokio::sync::Semaphore>,
     /// Golden-signal counters — `introspect_shed` increments on a clean shed.
     pub counters: Arc<Counters>,
+    /// W2' single-flight coalescer for the AUTH introspect leg. A concurrent
+    /// burst of same-token auths collapses to ONE `tenant_of` round-trip (and
+    /// ~one gate permit); the followers await the leader's published outcome.
+    /// This is a SEPARATE instance from the plan-leg coalescer
+    /// (`AppState.plan_coalescer`) — the two legs carry different outcome types
+    /// and, being sequential within one acquire, must NOT coalesce together.
+    pub coalescer: Arc<crate::introspect_coalesce::SingleFlight<AuthLeg>>,
+}
+
+/// The cloneable outcome the auth-leg coalescer publishes to every waiter — the
+/// resolved tenant decision, or a W1 gate `Shed`. A panicked/cancelled leader is
+/// folded into `Resolved(Err(Unreachable))` (fail-closed) before publishing, so a
+/// coalesced failure fails EVERY waiter closed, never a hang or a silent admit.
+#[derive(Clone)]
+pub(crate) enum AuthLeg {
+    /// The introspect answered: `Ok(Some)` admits, `Ok(None)` is a 401 unknown
+    /// PAT, `Err(Unreachable)` is a 503 fail-closed (also the panic/cancel fold).
+    Resolved(Result<Option<TenantId>, TokenStoreError>),
+    /// The W1 introspect gate was full → the leader shed BEFORE touching the
+    /// blocking pool. Followers of a shed leader also shed (fail-closed 503).
+    Shed,
 }
 
 /// Axum middleware: authenticate the request or refuse it.
@@ -126,31 +147,55 @@ pub(crate) async fn require_tenant(
     // executor stays free; the fail-closed mapping is unchanged — a panicked
     // blocking task is treated as `Unreachable` (503), never an admission.
     //
-    // W1 BACKPRESSURE: acquire an introspect permit BEFORE `spawn_blocking`, so
-    // excess NEVER enters the blocking pool. `try_acquire_owned` sheds
-    // IMMEDIATELY (never queues) when all permits are taken — a burst past the
-    // gate returns the frozen `FailClosed` 503 with a `Retry-After` hint instead
-    // of piling 2N blocking tasks onto the 2-vCPU singleton and browning it out
-    // to 000 (the acquire-storm failure mode). The permit is held ONLY around the
-    // offloaded introspect and dropped immediately after.
+    // W2' SINGLE-FLIGHT: coalesce a CONCURRENT burst of same-token auths into ONE
+    // upstream introspect. The leader (first caller for `BLAKE3(token)`) runs the
+    // gated offload below; concurrent same-token followers AWAIT its published
+    // outcome WITHOUT re-offloading and WITHOUT taking a permit — so a same-token
+    // storm makes one `tenant_of` round-trip and holds ~one gate permit. NOTHING
+    // is retained after the flight, so there is ZERO revocation/cap staleness
+    // (unlike a TTL cache). Distinct tokens do not coalesce, so W1's gate still
+    // bounds concurrent DISTINCT introspects exactly as before.
+    //
+    // W1 BACKPRESSURE (inside the leader): acquire an introspect permit BEFORE
+    // `spawn_blocking`, so excess NEVER enters the blocking pool.
+    // `try_acquire_owned` sheds IMMEDIATELY (never queues) when all permits are
+    // taken — a burst past the gate returns the frozen `FailClosed` 503 with a
+    // `Retry-After` hint instead of piling blocking tasks onto the 2-vCPU
+    // singleton. The permit is held ONLY around the offloaded introspect.
     let store = Arc::clone(&auth.store);
-    let resolved = {
-        let permit = match Arc::clone(&auth.introspect_gate).try_acquire_owned() {
-            Ok(p) => p,
-            Err(_) => {
-                auth.counters.introspect_shed.incr();
-                return introspect_shed_response();
-            }
-        };
-        let token = token_str.clone();
-        let out = tokio::task::spawn_blocking(move || store.tenant_of(&token)).await;
-        drop(permit);
-        out
-    };
-    let resolved = match resolved {
-        Ok(r) => r,
-        // The blocking task panicked: fail-closed, never admit on ambiguity.
-        Err(_) => Err(TokenStoreError::Unreachable),
+    let gate = Arc::clone(&auth.introspect_gate);
+    let counters = Arc::clone(&auth.counters);
+    let token = token_str.clone();
+    let leg = auth
+        .coalescer
+        .run(
+            &token_str,
+            // Fail-closed sentinel if the leader is dropped/panics before it
+            // publishes (a follower can never hang or silently admit).
+            AuthLeg::Resolved(Err(TokenStoreError::Unreachable)),
+            move || async move {
+                let permit = match gate.try_acquire_owned() {
+                    Ok(p) => p,
+                    Err(_) => {
+                        counters.introspect_shed.incr();
+                        return AuthLeg::Shed;
+                    }
+                };
+                let out = tokio::task::spawn_blocking(move || store.tenant_of(&token)).await;
+                drop(permit);
+                match out {
+                    Ok(r) => AuthLeg::Resolved(r),
+                    // The blocking task panicked: fail-closed, never admit.
+                    Err(_) => AuthLeg::Resolved(Err(TokenStoreError::Unreachable)),
+                }
+            },
+        )
+        .await;
+    let resolved = match leg {
+        AuthLeg::Resolved(r) => r,
+        // The W1 gate shed this (or its coalesced) auth — the counter was already
+        // incremented by the leader; answer the frozen shed 503.
+        AuthLeg::Shed => return introspect_shed_response(),
     };
     match resolved {
         Ok(Some(tenant)) => {

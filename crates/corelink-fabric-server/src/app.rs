@@ -102,6 +102,21 @@ pub(crate) enum PlanResolve {
     Panicked,
 }
 
+/// The cloneable outcome the W2' PLAN-leg coalescer publishes to every waiter —
+/// a clone-friendly mirror of [`PlanResolve`] (which is not `Clone` because the
+/// handler consumes it by value). A dropped/panicked leader is folded into
+/// `Resolved(Err(Unreachable))` (fail-closed) before publishing.
+#[derive(Clone)]
+pub(crate) enum PlanLeg {
+    /// The plan introspect answered: `Ok(Some)` admits, `Ok(None)` is an
+    /// over-cap no-plan reject, `Err(Unreachable)` is a 503 fail-closed.
+    Resolved(Result<Option<TenantPlan>, PlanSourceError>),
+    /// The W1 introspect gate was full → shed before the blocking pool.
+    Shed,
+    /// The offloaded blocking introspect task panicked → 503 fail-closed.
+    Panicked,
+}
+
 /// Source of per-tenant plan caps — the cap source of truth the [`CapGate`]
 /// reads (BIL2 feeds the production impl; org = tenant per ADR-0002).
 ///
@@ -568,6 +583,15 @@ pub struct AppState {
     /// so both introspect sites draw from ONE budget. From
     /// `FABRIC_INTROSPECT_MAX_INFLIGHT` (default [`DEFAULT_INTROSPECT_MAX_INFLIGHT`]).
     pub(crate) introspect_gate: Arc<tokio::sync::Semaphore>,
+    /// W2' single-flight coalescer for the PLAN introspect leg
+    /// (`resolve_plan_offloaded` → `plan_of_resolving`). A concurrent burst of
+    /// same-token plan resolves collapses to ONE upstream round-trip (and ~one
+    /// gate permit); followers await the leader's published outcome. SEPARATE
+    /// from the auth-leg coalescer (`AuthLayerState.coalescer`) — the two legs
+    /// carry distinct outcome types and, being sequential within one acquire, do
+    /// NOT coalesce with each other (that is W4's job, out of scope here). ZERO
+    /// staleness: nothing is retained after a flight completes.
+    pub(crate) plan_coalescer: Arc<crate::introspect_coalesce::SingleFlight<PlanLeg>>,
     /// AUDIT P2: the global in-flight request cap applied in [`app_full`] over
     /// the WORK routes (a tower `GlobalConcurrencyLimitLayer` + `LoadShedLayer`).
     /// When more than this many requests are being served at once, the excess is
@@ -791,6 +815,8 @@ impl AppState {
             // W1 introspect backpressure: default gate; the composition root
             // overrides it from FABRIC_INTROSPECT_MAX_INFLIGHT.
             introspect_gate: Arc::new(tokio::sync::Semaphore::new(DEFAULT_INTROSPECT_MAX_INFLIGHT)),
+            // W2': the plan-leg single-flight coalescer (empty at boot).
+            plan_coalescer: Arc::new(crate::introspect_coalesce::SingleFlight::new()),
             // AUDIT P2: default global in-flight cap; the composition root
             // overrides it from FABRIC_MAX_INFLIGHT_REQUESTS.
             max_inflight_requests: DEFAULT_MAX_INFLIGHT_REQUESTS,
@@ -1578,28 +1604,64 @@ impl AppState {
         tenant: TenantId,
         pat: String,
     ) -> PlanResolve {
-        // W1 BACKPRESSURE: acquire an introspect permit BEFORE `spawn_blocking`,
-        // so an acquire burst can never pile plan-introspect tasks onto the
-        // blocking pool. `try_acquire_owned` sheds IMMEDIATELY (no queueing) when
-        // the gate is full — the excess returns `Shed` → the handler answers the
-        // frozen `FailClosed` 503, mirroring the auth-site shed. This is the SAME
-        // `introspect_gate` the auth middleware draws from, so the two introspect
-        // legs share one fabric-wide budget. Permit held ONLY around the offload.
-        let permit = match Arc::clone(&self.introspect_gate).try_acquire_owned() {
-            Ok(p) => p,
-            Err(_) => {
-                self.counters.introspect_shed.incr();
-                return PlanResolve::Shed;
-            }
-        };
+        // W2' SINGLE-FLIGHT: coalesce a CONCURRENT burst of same-token plan
+        // resolves into ONE upstream introspect. The leader runs the gated
+        // offload below; concurrent same-token followers AWAIT its published
+        // outcome WITHOUT re-offloading and WITHOUT taking a permit — so a
+        // same-token storm makes one `plan_of_resolving` round-trip and holds
+        // ~one gate permit. NOTHING is retained after the flight → ZERO
+        // revocation/cap staleness (unlike a TTL cache). Distinct tokens do not
+        // coalesce, so W1's gate still bounds concurrent DISTINCT plan resolves.
+        //
+        // W1 BACKPRESSURE (inside the leader): acquire an introspect permit
+        // BEFORE `spawn_blocking`, so an acquire burst can never pile
+        // plan-introspect tasks onto the blocking pool. `try_acquire_owned` sheds
+        // IMMEDIATELY (no queueing) when the gate is full — the excess returns
+        // `Shed` → the handler answers the frozen `FailClosed` 503, mirroring the
+        // auth-site shed. This is the SAME `introspect_gate` the auth middleware
+        // draws from, so the two introspect legs share one fabric-wide budget.
+        let gate = Arc::clone(&self.introspect_gate);
+        let counters = Arc::clone(&self.counters);
         let plans = Arc::clone(&self.plans);
-        let out = tokio::task::spawn_blocking(move || plans.plan_of_resolving(&tenant, &pat)).await;
-        drop(permit);
-        match out {
-            Ok(Ok(plan)) => PlanResolve::Ok(plan),
-            Ok(Err(PlanSourceError::Unreachable)) => PlanResolve::Unreachable,
-            // The blocking task panicked: fail-closed, never a false admission.
-            Err(_) => PlanResolve::Panicked,
+        // The coalescer keys on `&pat` (borrowed for the flight); the leader
+        // closure needs its OWN owned copy to hand to the blocking introspect.
+        let pat_for_leader = pat.clone();
+        let leg = self
+            .plan_coalescer
+            .run(
+                &pat,
+                // Fail-closed sentinel if the leader is dropped/panics before it
+                // publishes — a follower never hangs, never falsely admits.
+                PlanLeg::Resolved(Err(PlanSourceError::Unreachable)),
+                move || async move {
+                    let permit = match gate.try_acquire_owned() {
+                        Ok(p) => p,
+                        Err(_) => {
+                            counters.introspect_shed.incr();
+                            return PlanLeg::Shed;
+                        }
+                    };
+                    let out = tokio::task::spawn_blocking(move || {
+                        plans.plan_of_resolving(&tenant, &pat_for_leader)
+                    })
+                    .await;
+                    drop(permit);
+                    match out {
+                        Ok(Ok(plan)) => PlanLeg::Resolved(Ok(plan)),
+                        Ok(Err(PlanSourceError::Unreachable)) => {
+                            PlanLeg::Resolved(Err(PlanSourceError::Unreachable))
+                        }
+                        // The blocking task panicked: fail-closed, never admit.
+                        Err(_) => PlanLeg::Panicked,
+                    }
+                },
+            )
+            .await;
+        match leg {
+            PlanLeg::Resolved(Ok(plan)) => PlanResolve::Ok(plan),
+            PlanLeg::Resolved(Err(PlanSourceError::Unreachable)) => PlanResolve::Unreachable,
+            PlanLeg::Shed => PlanResolve::Shed,
+            PlanLeg::Panicked => PlanResolve::Panicked,
         }
     }
 
@@ -1955,6 +2017,9 @@ pub fn app_full(
         store: Arc::clone(&store),
         introspect_gate: Arc::clone(&state.introspect_gate),
         counters: state.counters.clone(),
+        // W2': the AUTH-leg single-flight coalescer — one instance per router,
+        // separate from the plan-leg coalescer on `AppState`.
+        coalescer: Arc::new(crate::introspect_coalesce::SingleFlight::new()),
     };
 
     // ATT-KEY-ROTATION: `GET /v1/attestation/key` is UNAUTHENTICATED — hugit

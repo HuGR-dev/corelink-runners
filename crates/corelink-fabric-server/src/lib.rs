@@ -34,6 +34,9 @@ pub mod envelope_inject;
 pub mod exec;
 pub mod handlers;
 pub mod ingest_token;
+/// W2' introspect single-flight coalescer — collapse a concurrent same-token
+/// introspect burst into ONE upstream round-trip, with zero cache staleness.
+pub(crate) mod introspect_coalesce;
 /// Golden-signal counters (Stage-C observability) — a lock-free, always-on
 /// operational metric surface exposed via `GET /internal/v1/status`.
 pub mod observability;
