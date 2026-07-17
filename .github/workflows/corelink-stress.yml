@@ -1,0 +1,50 @@
+# Validation campaign — Phase 2 (E4) LIVE concurrency STRESS.
+# Dispatches N concurrent `runs-on: corelink` jobs to prove the atomic concurrency
+# slot + fleet cap hold under real load: the slot admits <= the cap, refuses the
+# overflow (spawn_at_ceiling / rate_limited), the reconciler re-drives the queued
+# overflow as slots free, and ALL jobs eventually complete — no thrash, no deadlock.
+# Evidence = the /internal/v1/metrics counter deltas + every job reaching success.
+# Manual-only; each job holds a runner slot for ~HOLD_SECONDS so concurrency is real.
+name: corelink-stress
+on:
+  workflow_dispatch:
+    inputs:
+      count:
+        description: "number of concurrent corelink jobs to spawn"
+        default: "40"
+      hold_seconds:
+        description: "seconds each job holds its runner slot"
+        default: "25"
+
+permissions:
+  contents: read
+
+jobs:
+  # Generate a [1..count] matrix on a GH-hosted runner (no corelink slot used).
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+    steps:
+      - id: gen
+        run: |
+          set -euo pipefail
+          n="${{ github.event.inputs.count }}"
+          echo "matrix=$(seq 1 "$n" | jq -R . | jq -cs .)" >> "$GITHUB_OUTPUT"
+
+  # The concurrent corelink jobs — each spawns an ephemeral runner + holds its slot.
+  stress:
+    needs: setup
+    strategy:
+      fail-fast: false
+      max-parallel: 100
+      matrix:
+        n: ${{ fromJson(needs.setup.outputs.matrix) }}
+    runs-on: corelink
+    timeout-minutes: 15
+    steps:
+      - name: hold the slot
+        run: |
+          echo "stress job ${{ matrix.n }} on $(hostname) at $(date -u +%FT%TZ)"
+          sleep "${{ github.event.inputs.hold_seconds }}"
+          echo "stress job ${{ matrix.n }} done"
