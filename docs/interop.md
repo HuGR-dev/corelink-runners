@@ -1,12 +1,14 @@
 # CoreLink Runners interop — how this repo talks to the family (microscopic seam map)
 
-> 2026-06-09. Runners is a **layer on the cache, consumed from above**: hugit
-> (anchor tenant) and Workspaces (sandbox/dev-box SKUs) ride it; it rides
-> CoreLink's CAS/AC/tenancy. Status: **spec phase (M0)** — no fabric code; the
-> the intended consumer (hugit's `hugit-runner` client) is **DISCONTINUED (2026-07)** —
-> Runners is direct-to-ICP now. The seam spec `docs/spec/hugit-integration-contract.md`
-> is historical; the mechanisms it defines (§13 envelope, attestation) are the fabric's
-> own and live. The live cross-repo seam is corelink-server (introspect + billing ingest).
+> ⚠️ **HISTORICAL (M0 spec-phase artifact, 2026-06-09).** This seam map predates the
+> built fabric and centers on **serving hugit as the anchor tenant** — but **hugit +
+> githugr (campaign #3) are DISCONTINUED (2026-07)** and the fabric is now **LIVE** on
+> Cloudflare. So the "spec phase / no fabric code" status and the hugit-serving sections
+> (§1, §4 "via hugit", §5 `hugit-runner-01`) are **history**. The live model: Runners is
+> **direct-to-ICP** + Workspaces SKUs on the live fabric, with **corelink-server** as the
+> cross-repo seam (introspect + billing ingest). Current state:
+> `docs/product/FEATURES.md` + `docs/product/USE-SCENARIOS.md`. The mechanisms these
+> sections describe (§13 envelope, attestation, memo-key) are the fabric's own and live.
 
 ```
    hugit (built) ──lease/exec/attest──▶  RUNNERS FABRIC (this repo, to build)
@@ -74,7 +76,8 @@ was written so hugit's client does not change.
 
 ## 6. Change protocol
 
-The hugit contract is frozen from hugit's side — a fabric-side need to change
-any shape or guarantee escalates to the owner / hugit techlead; never assume
-hugit adapts. Family decisions are ADRs, canonical in
-`../hugit/docs/adr/` (this repo carries thin companions).
+hugit is discontinued (2026-07), so the old "frozen from hugit's side / escalate to the
+hugit techlead" protocol is retired. The wire + envelope contract is the fabric's own;
+shape/guarantee changes go through the owner. The live cross-repo seam is corelink-server
+(introspect + billing ingest) — changes there coordinate with the server TL via the
+conformance-vector drift tripwire.
