@@ -312,12 +312,20 @@ export interface ContainerEnvResult {
 //
 // Instead of injecting CLW_TOKEN (the raw per-job PAT) into the untrusted
 // container, the autoscaler STASHES the PAT server-side (a Durable Object latch)
-// and injects a single-use, lease-bound CLW_CRED_TICKET. clw redeems it ONCE at
-// its trusted boot against POST {CLW_FABRIC_ENDPOINT}/v1/leases/{id}/cas-cred and
-// holds the PAT in-process. An `env` / `/proc/self/environ` dump inside the lease
-// shows NO PAT — only a ticket that is 410/gone after the boot redemption. This
-// mirrors the fabricd env-0 mechanism (crates/corelink-fabric-server/cred_ticket)
-// so clw's already-merged CredentialSource redeems against the Worker identically.
+// and injects a lease-bound CLW_CRED_TICKET. clw redeems the ticket against POST
+// {CLW_FABRIC_ENDPOINT}/v1/leases/{id}/cas-cred to obtain the PAT. An `env` /
+// `/proc/self/environ` dump inside the lease shows NO raw PAT — only the ticket.
+//
+// MULTI-USE within the lease (NOT single-use — honest correction, 3-lens audit
+// F2/Lens B flagged the old "410/gone after boot" claim as false): the runner has
+// TWO clw processes that each redeem — the boot `clw hydrate` + the job's `clw run`
+// (corelink-memoize) — so the cred is served on EVERY redeem until the lease TTL
+// wipes the stash (see `decideRedeem` + CredStashDO). This is a DELIBERATE,
+// coordinator-ACKed envelope: the cred is a per-job, tenant-scoped `cas:rw` PAT
+// with no escalation over the job's OWN cache access, so an in-lease redeem grants
+// nothing the job doesn't already hold. The exposure window is further bounded by
+// wiping the stash at job completion (see the workflow_job:completed handler).
+// Mirrors the fabricd env-0 mechanism (crates/corelink-fabric-server/cred_ticket).
 
 /** The per-job credential stashed server-side, returned once on redemption. */
 export interface StashedCred {

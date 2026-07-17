@@ -232,6 +232,16 @@ export class CredStashDO extends DurableObject<Env> {
   async alarm(): Promise<void> {
     await this.ctx.storage.deleteAll();
   }
+
+  // F2-3 (W3): explicit wipe, called at job COMPLETION to close the credential
+  // window immediately instead of waiting for the lease-TTL alarm. After this a
+  // redeem of the ticket returns 404 (no stash), so the per-job cas:rw PAT is no
+  // longer retrievable by in-lease code once the job ends. Idempotent (deleteAll
+  // on an already-empty store is a no-op); also clears the pending TTL alarm.
+  async wipe(): Promise<void> {
+    await this.ctx.storage.deleteAll();
+    await this.ctx.storage.deleteAlarm();
+  }
 }
 
 // Per-job runner container. One DO instance per spawned runner (keyed by handle).
@@ -865,6 +875,17 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         // on file (legacy/cold job, or a KV miss) ⇒ sleepAfter is the backstop; a
         // destroy() throw is swallowed (idempotent teardown, deadline backstop).
         const tornDown = await teardownCompletedRunner(env, jobId);
+        // F2-3 (W3): wipe the env-0 cred-stash so the per-job cas:rw PAT window
+        // closes at COMPLETION, not at the 2h lease-TTL. After this a ticket redeem
+        // by any in-lease code returns 404 (stash gone) — the credential dies with
+        // the job. Security action (NOT dedup-gated); best-effort + fail-open (a
+        // wipe failure just falls back to the TTL alarm). CRED_STASH is keyed by
+        // leaseId == jobId (CLW_LEASE_ID = jobId, lib.ts; + the cas-cred route).
+        if (env.CRED_STASH) {
+          await env.CRED_STASH.get(env.CRED_STASH.idFromName(jobId)).wipe().catch((e) =>
+            logEvent("error", "cred_stash_wipe_failed", { jobId, error: (e as Error).message }),
+          );
+        }
         // 2c completed-leg dedup: GitHub redelivers `completed` (at-least-once).
         // Claim the completion so the `webhook_job_completed` counter is bumped
         // EXACTLY once — a redelivery is a counter no-op. This gates ONLY the
