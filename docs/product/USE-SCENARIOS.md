@@ -476,6 +476,7 @@ actions re-run safely (`index.ts:1025-1087`).
 **Expected:** vCPU-h burn scales with actual work; a 4-vCPU job burns the ceiling
 4× faster than a 1-vCPU job — but the **COGS bound is identical** because the
 ceiling is in vCPU-hours (pricing.md §3).
+**Acceptance / evidence:** Slot metering is shape-agnostic — the `SlotMeter` journals raw slot-seconds per lease (S5.3.1) and the vCPU-h ceiling is enforced against `compute_accrued` (S1.6.12); both scale with actual occupancy/compute, not job shape.
 **Variations & failures:**
 - *Large cache warming* — the working set is content-addressed and shared; storage
   is the R2 residual bounded per-tier (pricing.md §4).
@@ -602,6 +603,7 @@ until armed (`FABRIC_RUNNER_VCPU>0` + `max_vcpu_h`).
 
 **Expected:** Size is auto-accounted in the ceiling (vCPU-h); billing unchanged
 (slots, never minutes). Sizes/labels are **Stage C (GA)** in ADR-0007 — **owner-gated**.
+**Acceptance / evidence:** The label family matcher maps the corelink family + size suffix (S1.1.4/S1.6.11, `matchManagedLabels`); the live box is pinned `standard-4` (ADR-0009 condition 2, S1.2.2). The `corelink-standard-8/16` ladder is ADR-0007 Stage C — owner-gated.
 **Variations & failures:**
 - *Live box size today* — `standard-4` is pinned (ADR-0009 condition 2); other sizes
   are a GA follow-up.
@@ -770,6 +772,7 @@ is the backstop for a stuck container.
 
 **Expected:** Authorization is fail-closed for the WARM path; a forbidden mint never
 spawns a warm (tenant-scoped) runner (`index.ts:784`).
+**Acceptance / evidence:** `buildContainerEnv` derives the tenant server-side and returns `authz=="forbidden"` for an unauthorized `installation_id + repo`, emitting `spawn_forbidden` with no warm spawn (`deploy/cloudflare/src/index.ts:784`); the claim is released for a clean fail-closed refusal.
 **Variations & failures:**
 - *Repo allowlist* — a per-tenant repo allowlist is an ADR-0009 follow-up (not yet
   on the CF path).
@@ -1391,6 +1394,10 @@ contract §3 honest hit-rate).
 **Acceptance / evidence:** hugit-side memo hit path; **the fabric is not even invoked** on a hit,
 so its evidence is *absence of a lease*. Provable only from a real hugit dispatch —
 **⚪ X4-external.**
+**Variations & failures:**
+- *Any lease requested* — impossible on a hit: the fabric only sees **misses** (interop §1 step 0); a hit returns hugit-side with no lease.
+- *Honest accounting* — the fabric never inflates "served from cache" (contract §3, S9.4); a hit is a real hit.
+- *Cache down* — fail-closed explicit error, never a silent cold result dressed as a hit (contract §2, S1.2.1).
 **Feature(s):** F-1.2, F-2.2, F-9.3 — Memoization (hugit-owned key) · honest accounting.
 **Reality:** ⚪ X4-external (hugit-driven).
 
@@ -1430,6 +1437,11 @@ at **P2** pending the live transport (interop §5) — ⚪.
 
 **Expected:** Idempotent under at-least-once; dedup bounded (4096 entries) — at the
 cap, new results serve but later dups re-execute (correct, merely wasteful — api §trigger).
+**Acceptance / evidence:** `TRIGGER_DEDUP_CAP = 4096` insertion-capped dedup on `(tenant, item_id, tree_hash)` (`queue.rs:44-64/84`, S7.15); the trigger executes on a lease acquire already admitted (`trigger_is_tenant_scoped_and_capped`). A real hugit-driven trigger+bisect is ⚪ X4-external.
+**Variations & failures:**
+- *Duplicate delivery* — deduped on `(tenant, item_id, tree_hash)`; the same attested `TriggerResponse` returns byte-identically, no re-execute (idempotent under at-least-once).
+- *Dedup cap exhausted* — past 4096 keys a later dup re-executes (correct, merely wasteful, S7.15); bounded memory over perfect dedup.
+- *Cross-tenant item* — the dedup key includes `tenant` and the lease is the caller's; another tenant's item is unreachable (S7.4).
 **Feature(s):** F-2.2 — `QueueApi` trigger · idempotent dedup · attested trigger.
 **Reality:** ⚪ X4-external (hugit-driven).
 
@@ -1466,6 +1478,10 @@ live FLIP-B deploy** (MEMORY: rota-a), so 🟢 for the flip, arm-gated by defaul
 occupancy (`runner_slot_seconds`), never minutes/cost math to the customer.
 **Acceptance / evidence:** Billing exporter records raw occupancy only (PgBillingSink, "no
 minutes/cost math"); the packaging decision is **owner-gated** (product.md §9.3).
+**Variations & failures:**
+- *Customer asks for a per-minute breakdown* — none exists to expose; the fabric emits only raw `runner_slot_seconds` for COGS (S5.3.1), never a customer-facing minutes meter (Principle 6).
+- *Reseller margin* — hugit prices flat on top; the wholesale attested cost is hugit's to mark up (S2.5.1), invisible to hugit's end customer.
+- *Direct vs via-hugit packaging* — which door bills a workload is the owner-gated packaging call (product.md §9.3).
 **Feature(s):** F-2.2 — Invisible COGS · flat downstream pricing.
 **Reality:** 🔵 owner-gated (packaging).
 
@@ -1480,6 +1496,7 @@ minutes/cost math"); the packaging decision is **owner-gated** (product.md §9.3
 
 **Expected:** Default-off, gate-green (11 acceptance + 5 unit tests — MEMORY:
 agent-exec). Real e2e only when hugit dials it — ⚪.
+**Acceptance / evidence:** `req.agent` is wired — `from_agent_lease` egress box + `POST/GET /agent-exec` async step-store with a timeout wrap, and `/exec` refuses an agent job (MEMORY: agent-exec; 11 acceptance + 5 unit tests, default-off). Real hugit-dialed e2e is ⚪ X4-external.
 **Variations & failures:**
 - *`req.agent` unset* — the ordinary `/exec` check path (non-agent).
 **Feature(s):** F-2.5, F-3.2, F-5.1 — Agent-exec seam · §13 emission on the agent path.
@@ -1523,6 +1540,10 @@ per-tenant wait histogram so non-interference is provable, not assumed.
 **Acceptance / evidence:** `try_admit` reserve-before-provision; the `FairScheduler`
 (`FABRIC_ADMISSION_MODE=queue`) lights up `/v1/metrics/tenant`; **default is `reject`**
 (over-cap = fast 429) — queue vs reject as the product semantics is owner-gated (ADR-0005).
+**Variations & failures:**
+- *Storm hits the tenant's own cap* — refused cleanly at `min(entitlement, FLEET)` (S1.3.2); a hugit storm spends hugit's own N, never another tenant's.
+- *Reject vs queue mode* — default `reject` = fast 429 (S1.3.2); `queue` mode populates the per-tenant wait histogram (S14.5); the semantics are owner-gated (ADR-0005).
+- *Fleet-wide saturation* — even hugit is clamped to `FLEET_MAX_CONCURRENCY`; load-shed keeps health answerable (S5.2.3).
 **Feature(s):** F-2.2, F-5.2 — Preventive caps · fair admission · non-interference surface.
 **Reality:** 🟡 built-not-proven.
 
@@ -1574,6 +1595,10 @@ a hugit-agent workload) — two tenants, two bills, one fabric.
 **Acceptance / evidence:** Two doors share the spine (interop §4); per-tenant caps + fair-share
 (S2.4.1); tenant isolation LIVE (S7.4). Full two-door-same-fabric proof under real
 dual load is ⚪ X4-external.
+**Variations & failures:**
+- *A customer that is both direct AND via-hugit* — two distinct tenants (two PATs), two bills, one fabric; no cross-tenant leak between their own workloads (S7.4).
+- *Direct storm vs hugit tenant* — symmetric non-interference (S2.4.1): each tenant's cap + fair-share bounds it; neither door starves the other.
+- *One door down* — the other is unaffected (independent spawn/exec paths); a Door-A outage never touches Door-B leases (S9.3 fail-open).
 **Feature(s):** F-2.1, F-2.2 — Two front doors · one fabric · tenant-boundary partitioning.
 **Reality:** 🟡 built-not-proven.
 
@@ -1617,6 +1642,11 @@ surface is **owner-gated** (M4 adjacency, campaign #2).
 
 **Expected:** One-lease-one-box, never reused across tenants (ADR-0009 condition 1);
 secrets brokered (env-0); egress bounded (ADR-0003).
+**Acceptance / evidence:** Per-lease microVM + no-box-reuse-across-tenants (ADR-0009 condition 1, S4.2); env-0 secrets broker with `env=0/proc=0/disk=0` (S7.2); egress bounded by `net_policy` (S1.6.4, ADR-0003). The Workspaces sandbox SKU is owner-gated (campaign #2, M4).
+**Variations & failures:**
+- *Untrusted agent code escape attempt* — the microVM boundary + `FenceManifest` hold (S4.2/S7.1); escape needs a hypervisor breakout, not a shared-kernel bug (ADR-0009).
+- *Sandbox reused across sessions* — never across tenants (ADR-0009 cond. 1); a persisted workspace is snapshot/restore, not box reuse (S3.7).
+- *Secret on the box* — none: brokered env-0, `env=0/proc=0/disk=0` (S7.2).
 **Feature(s):** F-2.4, F-4.8 — Ephemeral isolation · secrets broker · Workspaces SKU.
 **Reality:** 🔵 owner-gated.
 
@@ -1830,6 +1860,11 @@ fence red-team (`C5a`/`C5b`) green; the credential-scan attestation proves
 
 **Expected:** The runner never buffers/persists beyond in-flight forwarding (§13.3);
 overflow ⇒ `capture_incomplete`, honest.
+**Acceptance / evidence:** `acceptance_envelope_e2e` (acquire→ingest→poll→close) green; poll-drain with no durable write on the forward path (`envelope.rs`, `no_durable_write_anywhere_on_forward_path`, S7.13); scoped write-only ingest token (S2.3.2). Live hugit consumption is ⚪ X4-external.
+**Variations & failures:**
+- *Overflow* — the surface latches `raw_overflow`/`meta_overflow` → `capture_incomplete: true` at close (never a silent drop, S7.13).
+- *Abnormal close (Expired/Crashed)* — a partial envelope is flushed, marked `capture_incomplete` (§13.5 Option B, S2.3.2); teardown never waits.
+- *Exfiltrated ingest token* — writes to that one soon-dead lease only, no tenant takeover (S7.14).
 **Feature(s):** F-4.9 — §13.2 turn-feed · no-persistence.
 **Reality:** 🟡 built-not-proven.
 
@@ -1838,6 +1873,8 @@ overflow ⇒ `capture_incomplete`, honest.
 **Flow:**
 1. As S2.2.1 — `IntentMetrics` delivered atomically at close, signed.
 
+**Expected:** As S2.2.1 — `IntentMetrics` (token counts with the mandatory cache split, `wall_ms`/`active_ms`, tool breakdown, integer `cost_usd_micros`) is delivered **atomically** with the `CheckResult` + attestation (contract §13.1); the cost is provider-billed, recorded verbatim, never a fabric price-card multiply.
+**Acceptance / evidence:** The `IntentMetrics` conformance vector (sha256 `2d8d2215…`) is byte-identical in both repos; `intent_metrics_sig` proven on the wire in the live FLIP-B deploy, arm-gated by `FABRIC_EMIT_INTENT_METRICS_SIG` (default-off; `close.rs:368`/`app.rs:511` — MEMORY: rota-a).
 **Variations & failures:**
 - *Cache split absent* — a **contract violation** for an agent job (without
   `cache_read`/`cache_write` the memoization economics are not computable, S2.2.1);
@@ -1972,6 +2009,7 @@ upgrade N (S12.3), never to bypass the cap.
 **Expected:** Constant-time auth, idempotent; the bootstrap tenant keeps its cap
 (ROADMAP runtime-onboarding). A tenant can run `corelink smoke --full` immediately
 (cli.md dogfood note).
+**Acceptance / evidence:** `POST /internal/v1/admin/tenants` (`FABRIC_ADMIN_KEY`, default-off) registers a plan in the live `CompositePlanSource` (admin registry over bootstrap) with no restart (ROADMAP runtime-onboarding); the tenant is immediately admittable and can run `corelink smoke --full` (cli.md dogfood note).
 **Variations & failures:**
 - *Admin key unset* — the route is inert (default-off).
 - *CoreLink entitlement flip* — needed only for self-serve multi-tenant billing —
@@ -1987,8 +2025,13 @@ upgrade N (S12.3), never to bypass the cap.
 3. auto-provision a runner
 4. flip `ci.yml` to `runs-on: corelink-dogfood`.
 
+**Expected:** Dogfooding the direct on-ramp (Stage A→B, ADR-0007) — the App mints a JIT runner per queued `dogfood-smoke` job and the builder-Mac load shifts onto the fleet; a one-line `runs-on:` flip on an unmodified workflow (S1.1.4).
 **Acceptance / evidence:** GitHub App live (installation 144561227); dogfood fleet uses it. Full
 cache-hit smoke is ⚪ X4-external.
+**Variations & failures:**
+- *Full cache-hit smoke* — ⚪ X4-external (needs a real CoreLink PAT or hugit dispatch, S1.1.4).
+- *Fall back to the builder Mac* — revert the `runs-on:` label in one line (S9.3); reserved `corelink-builder` is the self-hosted Mac, never a fleet label (S1.1.4).
+- *App creds absent* — the mint path is inert, jobs fall back (S1.1.3 uninstall = fail-safe).
 **Feature(s):** F-7.1 — Autoscaler Stage B · dogfood fleet.
 **Reality:** 🟢 LIVE-proven (App) / ⚪ full smoke.
 
@@ -2005,6 +2048,10 @@ cache-hit smoke is ⚪ X4-external.
 can rotate without breaking spawn — `index.ts:960`).
 **Acceptance / evidence:** Loud logs on the silent critical paths were added post-audit (MEMORY:
 rota-a #327/#329 observability).
+**Variations & failures:**
+- *Obs key unset* — `GET /internal/v1/metrics` returns **404** (invisible, default-off); the surface is opt-in.
+- *Wrong obs key* — **401** (constant-time); obs-read is separate from `CLOUDFLARE_SPAWN_AUTH_TOKEN`, so it rotates without breaking spawn (`index.ts:960`).
+- *Counters reset on restart* — boot-relative + monotonic; a monitor diffs snapshots for rates (S15.5) — a reset is a restart artifact, not a resolution.
 **Feature(s):** F-7.2, F-10.1, F-10.2 — Golden-signal counters · dedicated obs key · fail-closed.
 **Reality:** 🟢 LIVE-proven.
 
@@ -2018,6 +2065,7 @@ rota-a #327/#329 observability).
 (cap-guard `leases.rs:281`, durable `fabric_suspended_tenants`, Worker routing,
 boot-authoritative shard count via #333). RAISE-N needs only those three env changes
 together — **owner-gated on volume** (MEMORY: fabricd-multi-instance-scaling).
+**Acceptance / evidence:** Option-3 FNV-1a shard routing proven identical TS↔Rust; all N>1 gaps closed in code (cap-guard `leases.rs:281`, durable `fabric_suspended_tenants`, Worker routing, boot-authoritative shard count #333); INERT at N=1 (MEMORY: fabricd-multi-instance-scaling). RAISE-N is owner-gated on volume.
 **Variations & failures:**
 - *Flip-time over-admit window* — closed by boot-authoritative `FABRIC_NUM_SHARDS`
   read at boot (#333).
@@ -2030,8 +2078,13 @@ together — **owner-gated on volume** (MEMORY: fabricd-multi-instance-scaling).
 **Flow:**
 1. A global in-flight concurrency limit sheds excess; `GET /v1/health` is mounted **outside** the limiter so an LB/orchestrator can always probe liveness under saturation (api §health).
 
+**Expected:** Saturation degrades cleanly — the global in-flight limit sheds excess with a `503` while `GET /v1/health` (mounted outside the limiter) still answers 200, so an LB/orchestrator can always distinguish "saturated but up" from "down" (S15.3).
 **Acceptance / evidence:** `load_shedding.rs` acceptance; close ack-window + global-limit/load-shed
 (ROADMAP audit fixes).
+**Variations & failures:**
+- *Health under saturation* — always answerable (outside the limiter); a 200 = saturated-but-up, a timeout = down (S15.3).
+- *Shed vs per-tenant cap* — `load_shed`/`provision_capacity_503` is the fleet signal (scale/N>1, S5.2.2); `over_cap` is the customer's own cap (upgrade, S1.3.2).
+- *Sustained shed* — the N>1 flip trigger (S5.2.2/S1.3.5).
 **Feature(s):** F-5.1, F-5.2 — Global concurrency limit · load-shed · always-answerable health.
 **Reality:** 🟡 built-not-proven.
 
@@ -2092,6 +2145,11 @@ CoreLink slot-billing flip consumes.
 **Expected:** Max COGS = ceiling × $0.10/vCPU-h, strictly below price (loss impossible
 *by construction*). **Default-off** today — the concurrency cap is the only live limit
 until armed.
+**Acceptance / evidence:** The `ComputeGate` enforces `compute_accrued + Σ_reserved ≤ max_vcpu_h` against the durable ledger (`usage_history.rs` provenance, S14.2); default-off (`FABRIC_RUNNER_VCPU` unset ⇒ the concurrency cap is the only live limit, S1.3.2). Arming is owner-gated.
+**Variations & failures:**
+- *Wall off (today)* — no vCPU-h refusal; only the concurrency cap bites (S1.3.2). Under-limit, never a wrong bill.
+- *At the ceiling* — the next acquire is refused at the ComputeGate; a Held lease runs to completion (no mid-job kill, S1.6.12).
+- *Heavy user* — sorted up to the tier matching their COGS (S6.2), double-duty with loss-impossibility.
 **Feature(s):** F-1.4, F-5.6 — ComputeGate vCPU-h wall · loss-impossible ceiling.
 **Reality:** 🔵 owner-gated.
 
@@ -2100,6 +2158,8 @@ until armed.
 **Flow:**
 1. `CapGate` + slot metering feed sustained-pin/mining detection within the ceiling (pricing.md §5).
 
+**Expected:** The flat model's **third abuse layer**: the concurrency cap bounds parallel slots (S1.3.2), the vCPU-h ceiling bounds total compute (loss-impossible, S5.3.2), and sustained-pin/mining detection catches a user *within* the ceiling burning slots on junk. Even an undetected miner is loss-impossible — detection is about fairness/abuse, not solvency; a confirmed abuser is durably suspended (S7.7).
+**Acceptance / evidence:** `CapGate` + slot metering feed the sustained-pin/mining signal (pricing.md §5); durable `fabric_suspended_tenants` cuts a confirmed abuser off fabric-wide, reversible by a table delete (S7.7/S5.2.2). The loss-impossible ceiling (S5.3.2) is the economic floor.
 **Variations & failures:**
 - *Three abuse layers* — (1) the concurrency cap bounds parallel slots; (2) the
   vCPU-h ceiling bounds total compute (loss-impossible, S5.3.2); (3) sustained-pin /
@@ -2124,8 +2184,13 @@ until armed.
 1. Boot fabricd
 2. `cloud_backend_status` names the missing var (e.g. one of `NORTHFLANK_*` present, the other absent) and never claims a backend it isn't running. The cred-redemption boot guard **requires** `FABRIC_PUBLIC_BASE_URL` (a box that can't redeem the C2c ticket would be silently cold) — #332.
 
+**Expected:** A partial config fails **loud at boot**, never a silent runtime degrade — `cloud_backend_status` names the missing env var and never claims a backend it isn't running; the cred-redemption boot guard **refuses to boot** without `FABRIC_PUBLIC_BASE_URL` (a box that can't redeem the C2c ticket would run silently cold, #332).
 **Acceptance / evidence:** Redemption leg PROVEN via the boot guard (internal) + external probes
 (401 on cas-cred, 200 on attestation key) — MEMORY: rota-a correction-3.
+**Variations & failures:**
+- *One of a pair set* — the diagnostic names exactly the missing var (e.g. a half-set `NORTHFLANK_*`), never a vague failure.
+- *Redemption env missing* — the boot guard hard-fails (#332), turning the worst silent-cold into a loud boot failure (S11.1).
+- *Backend fail-closed* — no backend configured ⇒ exec returns `NoBox` 503, never a wrong box.
 **Feature(s):** F-6.1, F-6.2, F-6.3, F-6.4, F-7.2, F-10.3, F-10.4, F-10.5 — Boot diagnostic · cred-redemption boot guard · fail-closed config.
 **Reality:** 🟢 LIVE-proven.
 
@@ -2139,6 +2204,11 @@ until armed.
 **Expected:** Idempotent + fail-soft (a setter throw logs + still 204). CAVEAT: raw
 sockets bypass the SDK proxy — for a hard sever, `teardown()`/`destroy()` is the
 fail-closed control (ADR-0009 Why-3, `index.ts:1404`).
+**Acceptance / evidence:** `POST /v1/egress-cutoff` → `cutEgress` (`setDeniedHosts([...METADATA_DENYLIST, "*"])`) denies all proxied HTTP(S) egress, container stays up (`index.ts:1404`); idempotent + fail-soft (a setter throw logs + still 204). Raw sockets bypass the proxy — hard sever is teardown (ADR-0009 Why-3).
+**Variations & failures:**
+- *Forensic keep-alive* — egress severed, container up for investigation (the point of the switch vs teardown).
+- *Setter throws* — logs + still 204 (idempotent, fail-soft).
+- *Raw-socket exfiltration* — bypasses the SDK proxy; a hard sever is `teardown()`/`destroy()` (ADR-0009 Why-3, S7.6).
 **Feature(s):** F-4.2, F-7.2 — Egress kill-switch · forensic keep-alive.
 **Reality:** 🟢 LIVE-proven (route).
 
@@ -2147,7 +2217,12 @@ fail-closed control (ADR-0009 Why-3, `index.ts:1404`).
 **Flow:**
 1. The live image is a pinned digest (e.g. `91f4b7ea` — the cred-redemption binary); a rollback re-pins the prior known-good. The canary surfaces the incident.
 
+**Expected:** Rollback is **deterministic** because the live image is a pinned `@sha256` digest (S7.5) — re-pinning the prior known-good is an exact, unambiguous revert (no mutable-tag drift); the canary (S5.4.6) surfaces the incident to roll back against.
 **Acceptance / evidence:** Live images are pinned + boot-verified (MEMORY: deploy handoffs).
+**Variations & failures:**
+- *Bad deploy* — the canary trips on the golden signals (S5.4.6); roll back to the prior pinned digest.
+- *Canary false alarm* — confirm via golden counters (S5.2.1) + boot diagnostic (S5.4.1) before rolling back.
+- *Owner-gated arm* — the deploy/rollback ops loop is owner-gated (deploy handoffs).
 **Feature(s):** F-7.2, F-7.3, F-10.5 — Pinned live image · rollback · canary alerts.
 **Reality:** 🔵 owner-gated (ops).
 
@@ -2156,6 +2231,12 @@ fail-closed control (ADR-0009 Why-3, `index.ts:1404`).
 **Flow:**
 1. `wrangler secret put` per secret; obs-read and spawn-control are *separate* keys by design (S5.2.1); billing ingest auth is a dedicated key (never the shared or mint key).
 
+**Expected:** Each surface has a **separate secret**, so a rotation never breaks an unrelated one — spawn-control (`CLOUDFLARE_SPAWN_AUTH_TOKEN`), obs-read (`METRICS_OBSERVABILITY_KEY`), the mint key, the billing-ingest key, and the App private key rotate independently (S5.2.1); a webhook-secret rotation is fail-safe-to-queued (S5.4.7).
+**Acceptance / evidence:** Obs-read ≠ spawn-control by design (`index.ts:960`, S5.2.1); billing-ingest auth is a dedicated key (never the shared/mint key); `wrangler secret put` rotates each secret independently.
+**Variations & failures:**
+- *Rotate the webhook secret* — a brief 401 window, fail-safe-to-queued + reconciler self-heal (S5.4.7).
+- *Rotate the mint key* — a mismatch fails-open-to-cold (S1.4.3), not 401; a cache-warm concern, not a spawn break.
+- *Rotate the App private key* — a fabric-level secret (S7.8), independent of any per-customer install.
 **Feature(s):** F-10.4, F-10.5 — Separated secrets · independent rotation.
 **Reality:** 🟡 built-not-proven.
 
@@ -2334,6 +2415,11 @@ on a miss).
 
 **Expected:** No usage whiplash (the house principle it refuses to inflict). The tier
 price is the ceiling of spend within limits.
+**Acceptance / evidence:** `plan_for` returns the ratified flat caps (S1.1.2, pricing.md); a memoized re-run is billed ~0 (S1.2.1); `GET /v1/usage` surfaces `plan_cap`/`plan_ceiling_vcpu_h` so spend is bounded and visible (S14.1). GA self-serve billing is owner-gated (S1.1.2).
+**Variations & failures:**
+- *"Same invoice after shipping 3×"* — the product working (flat); the win is predictability (S12.1).
+- *Approaching the ceiling* — sorted up to the matching tier (S6.2), a right-tier signal not a penalty.
+- *Re-run economics* — computed work costs ~0 and is billed ~0 (Principle 2, S1.2.1).
 **Feature(s):** F-1.1, F-1.3, F-1.5, F-5.6 — Flat concurrency pricing · predictability.
 **Reality:** 🔵 owner-gated (GA).
 
@@ -2342,6 +2428,8 @@ price is the ceiling of spend within limits.
 **Flow:**
 1. The hard vCPU-h ceiling bounds max COGS below price (pricing.md §3); once the wall is armed (S5.3.2), overage cannot leak.
 
+**Expected:** Max COGS = ceiling × $0.10/vCPU-h, strictly below the tier price — **loss impossible by construction** (pricing.md §3); once the wall is armed (S5.3.2) an overage cannot leak, and a heavy user is sorted up to the tier matching their COGS (double duty: no-loss + right-tier routing).
+**Acceptance / evidence:** The vCPU-h `ComputeGate` bounds COGS below price (S5.3.2, pricing.md §3); default-off today (the concurrency cap is the live limit, S1.3.2) — arming the wall is owner-gated.
 **Variations & failures:**
 - *Heavy user auto-sorted up* — the ceiling routes heavy users to the tier matching
   their COGS (double duty: no-loss + right-tier routing).
@@ -2350,11 +2438,17 @@ price is the ceiling of spend within limits.
 
 ### S6.3 — Compare against per-minute incumbents 🔵 owner-gated (positioning)
 **As an** eng-leadership buyer evaluating options, **I want** a clear read of where Runners wins vs GitHub/Blacksmith/Depot, **so that** I buy for the right reason.
+**Flow:** Evaluate the axes head-to-head (a bake-off, S6.4/S9.1): billing model (flat concurrency vs per-minute), recompute cost (memoized ≈0 vs re-run+re-bill), raw speed (~10% under GitHub — we lose this axis), isolation (per-lease microVM + attested verdict), platform (cache-warm + `corelink verify`).
 **Expected:** Win on **concurrency (not minutes)** + **memoization (recompute ≈ 0)** +
 **platform** — **not raw speed** (we're a managed microVM, not bare metal; ~10% under
 GitHub on raw compute; the delta is platform/memoization — competitive-blacksmith.md).
 **Guardrails.** Never claim "faster than Blacksmith," "cross-tenant dedup live," or
 "absurdly cheaper on raw compute." Tense discipline.
+**Acceptance / evidence:** Flat concurrency + memoization are the ratified model (S1.1.2/S1.2.1, LIVE mint); the ~10%-under-GitHub raw-speed honesty is documented (competitive-blacksmith.md); `corelink verify` attestation LIVE (S1.5.1). A published positioning matrix is owner-gated (S6.4).
+**Variations & failures:**
+- *Buyer only cares about raw speed* — honest: a bare-metal competitor may win that axis (S6.3 guardrail); never claim "faster than Blacksmith".
+- *Buyer wants cross-tenant dedup* — intra-tenant at GA only; cross-tenant is staged, never claimed live (S1.2.2).
+- *Buyer runs untrusted/agent code* — the isolation + attestation wedge is the strongest differentiator (S4.2/S7.3).
 **Feature(s):** F-1.1, F-1.3 — Positioning · competitive wedge.
 **Reality:** 🔵 owner-gated (positioning).
 
@@ -2406,7 +2500,12 @@ are built/proven.
 1. A job attempts `..` escape / absolute-path injection / `srcfoo`-vs-`src/` prefix collision
 2. denied.
 
+**Expected:** The per-claim `FenceManifest` bounds every path — a read/write outside the claimed set is **denied**, fail-closed; the escape vectors (`..` traversal, absolute-path injection, `srcfoo`-vs-`src/` prefix collision) are all covered (contract §4).
 **Acceptance / evidence:** `C5a` path-enforcement + redteam suites green (182-test seed); contract §4.
+**Variations & failures:**
+- *`..` traversal* — denied (path normalization, contract §4).
+- *Absolute-path injection* — denied; the fence is the claimed set, not the ambient FS.
+- *Prefix collision (`srcfoo` vs `src/`)* — denied (exact-boundary match, not a string prefix).
 **Feature(s):** F-4.2, F-4.4 — FenceManifest enforcement.
 **Reality:** 🟢 LIVE-proven (suite).
 
@@ -2436,8 +2535,13 @@ are built/proven.
 2. a v1-only verifier accepts (v1 covered neither `exit` nor `artifacts` — the P0 gap)
 3. a **v2** verifier rejects (v2 binds the full outcome).
 
+**Expected:** **v2 binds the full outcome** (`memo_key ‖ stdout_ref ‖ stderr_ref ‖ exit ‖ artifacts[path‖digest]`) — a flipped `exit:1→0` or a rewritten `artifacts` that a v1-only verifier accepted (the P0 gap) is **rejected** by `verify_strict`; a client can independently confirm it (S1.5.1).
 **Acceptance / evidence:** `result_binding_sig_v2` closes the forgeable-verdict gap (ROADMAP P0);
 `conformance_result_binding_v2.rs` tamper-rejection; ed25519 `verify_strict`.
+**Variations & failures:**
+- *Flip `exit:1→0`* — v2 covers `exit`; rejected (v1 didn't — the P0 fix).
+- *Rewrite `artifacts`* — v2 binds `artifacts[path‖digest]`; rejected.
+- *Pre-v2 (empty-sig) payload* — a loud exit-2, never a silent pass (cli.md, S8.5).
 **Feature(s):** F-3.1, F-3.3, F-4.10, F-5.4 — `result_binding_sig_v2` · full-outcome binding.
 **Reality:** 🟢 LIVE-proven (v2).
 
@@ -2447,8 +2551,13 @@ are built/proven.
 1. A valid PAT hits another tenant's `lease_id`
 2. **404 `not_found`**, NEVER 403 (a 403 would confirm the resource exists and leak tenancy — there is no existence oracle; api §tenant isolation).
 
+**Expected:** Cross-tenant, unknown, and another tenant's `Pending` lease all collapse to the **same 404 `not_found`** — never a 403 (a 403 would confirm the resource exists and leak tenancy); there is **no existence oracle** (api §tenant isolation).
 **Acceptance / evidence:** `corelink_auth.rs`; cross-tenant + unknown + `Pending` all collapse to
 the same 404.
+**Variations & failures:**
+- *Another tenant's valid id* — 404, not 403 (no oracle).
+- *Unknown id* — the same 404 (indistinguishable from not-yours).
+- *Own-set list* — a list has no cross-tenant oracle, so `Pending` IS surfaced there (S14.3) — deliberately different from the single-id 404 rule.
 **Feature(s):** F-3.2, F-3.3 — Tenant isolation · no existence oracle · unified 404.
 **Reality:** 🟢 LIVE-proven (no oracle).
 
@@ -2458,6 +2567,7 @@ the same 404.
 1. `POST /v1/leases` (or `/v1/spawn`) with an unpinned `image_digest`
 2. **400 `invalid` before any box contact** (X4 floor); the CF spawn also asserts `@sha256:` and, when armed, matches `PINNED_IMAGE_DIGEST` (409 on mismatch).
 
+**Expected:** An unpinned or digest-mismatched image is rejected **before any box contact** — `400 invalid` on the fabric (the X4 verify-before-spawn floor) and the CF spawn asserts `@sha256:` (409 on a `PINNED_IMAGE_DIGEST` mismatch when armed); a fat-fingered mutable tag can never ship an unverified image.
 **Acceptance / evidence:** X4 supply-chain oracle single-sourced to production; `corelink run`
 rejects unpinned with exit 2 before box contact (cli.md).
 **Variations & failures:**
@@ -2477,6 +2587,11 @@ egress; **CIDR ranges are inert** (no CIDR math in `simpleGlobMatch`) and **raw 
 bypass** the SDK proxy. **G2 is NOT closed** on the CF path by this mechanism — it needs
 platform-network-layer filtering (a follow-up), and even the exact-host entries owe a
 live-account smoke (ADR-0009 Why-3). The per-lease microVM boundary still holds.
+**Acceptance / evidence:** Exact-host denylist in `simpleGlobMatch` (no CIDR math), raw sockets bypass the SDK proxy — G2 is **not closed** on the CF path (ADR-0009 Why-3); the per-lease microVM boundary still contains blast radius (S4.2). Closing G2 needs platform-network-layer filtering (owner-gated follow-up).
+**Variations & failures:**
+- *Exact metadata host* — denied for proxied egress (partial).
+- *Link-local CIDR* — inert (no CIDR math); a tracked gap.
+- *Raw socket* — bypasses the SDK proxy; a hard sever is teardown (S5.4.2); the microVM boundary still holds (S4.2).
 **Feature(s):** F-4.2 — Metadata denylist (partial) · **tracked G2 gap**.
 **Reality:** 🔵 owner-gated (tracked gap).
 
@@ -2486,8 +2601,13 @@ live-account smoke (ADR-0009 Why-3). The per-lease microVM boundary still holds.
 1. A durable `fabric_suspended_tenants` (pg_ledger) marks the tenant
 2. admission refuses.
 
+**Expected:** A confirmed abuser is cut off **fabric-wide + durably** — the `fabric_suspended_tenants` table is consulted at admission across every instance (N>1-safe, S5.2.2); suspension is **reversible** by a table delete (no redeploy, S5.3.3), so a false-flag is restorable.
 **Acceptance / evidence:** Durable suspend landed for N>1 (MEMORY: fabricd-multi-instance); tenant-
 suspend enforcement on the CF path is an ADR-0009 follow-up.
+**Variations & failures:**
+- *False positive* — reversible durable-table delete, no redeploy (S5.3.3).
+- *Undetected abuser* — bounded loss-impossibly by the ceiling anyway (S5.3.2); suspend is fairness, not solvency.
+- *CF-path enforcement* — an ADR-0009 follow-up (the durable table landed for the pg ledger, N>1).
 **Feature(s):** F-1.6 — Durable tenant suspend.
 **Reality:** 🟡 built-not-proven.
 
@@ -2782,6 +2902,11 @@ failed; 2 = attestation failed / wire/auth error / unpinned image / acquire fail
 unpinned image → exit 2 **before box contact**. No lease leaks on error (best-effort
 cancel).
 **Acceptance / evidence:** cli.md; `--json verified` is true only when actually verified.
+**Variations & failures:**
+- *Unpinned image* — exit 2 **before box contact** (X4 floor, S7.5); nothing acquired, nothing to leak.
+- *Mid-flight failure* — the lease is best-effort cancelled, no lease leak (S8.4).
+- *`--no-verify`* — `verified:false` in JSON; exit 0 then means "ran + passed" without a trust claim (S8.4), never overclaiming.
+- *Exit codes* — 0 = passed+verified, 1 = ran+verified+check-failed, 2 = attestation/wire/auth/unpinned/acquire fail (S8.6).
 **Feature(s):** F-2.3, F-9.1 — `corelink run` · client-side v2 verify · no-lease-leak.
 **Reality:** 🟢 LIVE-proven.
 
@@ -2793,6 +2918,12 @@ cancel).
 3. 400 · bad PAT
 4. 401. `--full` adds a real acquire→cancel.
 
+**Expected:** A one-command post-redeploy smoke confirms the fail-closed floor **without provisioning** — health 200, a 32-byte attestation pubkey, an unpinned image rejected 400 (S7.5), a bad PAT 401; `--full` adds a real acquire→cancel (best-effort cancel, no lease leak, S8.4).
+**Acceptance / evidence:** `corelink smoke` probes `GET /v1/health` + `GET /v1/attestation/key` (live key `faa5b7726`, S1.5.1) + the unpinned-400 / bad-PAT-401 fail-closed gates (cli.md); LIVE against the deploy.
+**Variations & failures:**
+- *`--full`* — a real acquire→cancel exercising the lease path (best-effort cancel, no leak, S8.4).
+- *Deploy misconfigured* — the fail-closed gates surface it (health non-200 / attestation-key absent) — the smoke's whole point.
+- *Base probes need no PAT* — health + attestation-key + reject gates need no credential; `--full` needs a PAT (⚪ X4 for a real acquire).
 **Feature(s):** F-2.3, F-3.1, F-4.10, F-5.4, F-9.1, F-9.4 — `corelink smoke` · fail-closed gate probes.
 **Reality:** 🟢 LIVE-proven.
 
@@ -2804,6 +2935,11 @@ cancel).
 **Expected:** These are the **memoized-check power-user** surface, NOT the direct
 `runs-on: corelink` fleet (ADR-0007 corrects the mislabel). Each SDK is locked to the
 shared `conformance/result_binding_v2.json` so none can drift from the fabric signer.
+**Acceptance / evidence:** Each SDK/shim is locked to the shared `conformance/result_binding_v2.json` (S8.5), so a drifting client fails its build-time golden test (S16.1); `corelink run`'s `client`/`binding` modules are the reference the SDKs transcribe (cli.md). The shims are built-not-proven (no live pipeline dispatch yet).
+**Variations & failures:**
+- *SDK drift* — caught at build by the shared conformance vector → `✗ FAILED`, never a false `✓ VERIFIED` (S8.5).
+- *Mislabel as the direct on-ramp* — corrected: these wrap the memoized-check primitive, not the `runs-on: corelink` fleet (ADR-0007).
+- *Fail-closed* — an unpinned image or a wire error is exit 2 (S8.4), propagated by the shim.
 **Feature(s):** F-4.7, F-5.4, F-9.2, F-9.4 — GH Action · Buildkite plugin · verify SDKs (TS/Python).
 **Reality:** 🟡 built-not-proven.
 
