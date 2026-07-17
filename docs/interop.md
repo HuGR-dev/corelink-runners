@@ -3,10 +3,10 @@
 > 2026-06-09. Runners is a **layer on the cache, consumed from above**: hugit
 > (anchor tenant) and Workspaces (sandbox/dev-box SKUs) ride it; it rides
 > CoreLink's CAS/AC/tenancy. Status: **spec phase (M0)** — no fabric code; the
-> consumer side (hugit's `hugit-runner` client) is built and runs today against
-> the interim box `hugit-runner-01` (Hetzner, SSH). Canonical seam:
-> `docs/spec/hugit-integration-contract.md` (frozen from hugit's side — the
-> fabric satisfies it, never edits it).
+> the intended consumer (hugit's `hugit-runner` client) is **DISCONTINUED (2026-07)** —
+> Runners is direct-to-ICP now. The seam spec `docs/spec/hugit-integration-contract.md`
+> is historical; the mechanisms it defines (§13 envelope, attestation) are the fabric's
+> own and live. The live cross-repo seam is corelink-server (introspect + billing ingest).
 
 ```
    hugit (built) ──lease/exec/attest──▶  RUNNERS FABRIC (this repo, to build)

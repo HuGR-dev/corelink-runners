@@ -1,4 +1,12 @@
-# What hugit needs from CoreLink Runners — integration contract v1.4.0
+# Fabric wire + envelope contract (v1.4.0) — historically "what hugit needs"
+
+> ⚠️ **HISTORICAL FRAMING (2026-07).** hugit + githugr (campaign #3) are **DISCONTINUED**.
+> This was the hugit↔Runners integration contract ("frozen from hugit's side"); that
+> consumer is gone, so the "what hugit needs / frozen from hugit's side" framing is **dead**.
+> The mechanisms it specifies, however — §13 envelope emission, attestation/result-binding,
+> `intent_metrics_sig` — are now the **fabric's own and LIVE** (the cache-moat uses them,
+> armed in prod). Kept as the spec for those live mechanisms; read it as the fabric's own
+> wire contract, not a cross-repo obligation. Current status: `docs/product/FEATURES.md`.
 
 > **Version note — WP-R6 draft (2026-06-10):** this file is the WP-R6
 > deliverable: a draft amendment that the hugit lead will review, then apply
