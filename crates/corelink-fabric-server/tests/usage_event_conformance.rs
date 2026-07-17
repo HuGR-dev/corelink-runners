@@ -120,6 +120,22 @@ fn usage_event_vector_value_pins() {
         e.idem_key.chars().all(|c| c.is_ascii_hexdigit()),
         "idem_key is lowercase hex"
     );
+    // tenant_id must be a UUID: the corelink-server ingest validates it as a
+    // `Uuid` (`billing_ingest.rs` `pub tenant_id: Uuid`), so a non-UUID example
+    // (e.g. "acme") is a vector the server's own ingest rejects (422). Pin the
+    // shape our side too so the shared tripwire catches it symmetrically.
+    let t = &e.tenant_id;
+    assert_eq!(t.len(), 36, "tenant_id is a 36-char UUID");
+    assert!(
+        t.chars().enumerate().all(|(i, c)| {
+            if [8, 13, 18, 23].contains(&i) {
+                c == '-'
+            } else {
+                c.is_ascii_hexdigit()
+            }
+        }),
+        "tenant_id is UUID-shaped (hyphens at 8/13/18/23, hex elsewhere)"
+    );
 }
 
 /// Every field is load-bearing: drop any one key and deserialization ERRORS
@@ -153,7 +169,7 @@ fn usage_event_every_field_is_required() {
 #[test]
 fn usage_event_vector_matches_code_emit() {
     let emitted = UsageEventData {
-        tenant_id: "acme".to_string(),
+        tenant_id: "3fa85f64-5717-4562-b3fc-2c963f66afa6".to_string(),
         event_kind: "runner_slot_seconds".to_string(),
         qty: 3,
         billing_period: "2026-06".to_string(),

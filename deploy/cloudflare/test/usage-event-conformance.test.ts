@@ -64,6 +64,12 @@ describe("conformance: UsageEvent ↔ conformance/UsageEvent.json", () => {
     expect(ev.billing_period).toMatch(/^\d{4}-\d{2}$/);
     expect(ev.region).toHaveLength(3);
     expect(ev.idem_key).toMatch(/^[0-9a-f]{64}$/);
+    // tenant_id must be a UUID: the corelink-server ingest validates it as a
+    // `Uuid` (billing_ingest.rs), so a non-UUID example (e.g. "acme") is bytes
+    // the server rejects (422). Pin the shape so our tripwire catches it too.
+    expect(ev.tenant_id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    );
   });
 
   it("buildUsageEvent EMITS exactly the vector's key-set (rename ⇒ this breaks)", async () => {
@@ -72,7 +78,7 @@ describe("conformance: UsageEvent ↔ conformance/UsageEvent.json", () => {
     // changes this set and breaks the assertion. `source` differs by front door
     // (fabricd vs spawn-worker), so we bind the SHAPE, not that value.
     const ev = await buildUsageEvent({
-      tenantId: "acme",
+      tenantId: "3fa85f64-5717-4562-b3fc-2c963f66afa6",
       jobId: "lease-0001-held",
       startedMs: 1_781_524_797_000, // 3s before completion
       completedMs: 1_781_524_800_000, // matches the vector's time_ms
