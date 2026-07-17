@@ -1,0 +1,143 @@
+# Build + push the corelink-fabricd control-plane image to the Cloudflare managed
+# registry — on a GitHub-hosted runner, with NO local Docker daemon.
+#
+# WHY THIS EXISTS: fabricd's image was built with a LOCAL `wrangler containers
+# build ../..` that needs a Docker daemon on the operator's machine. That local
+# step hung once and blocked a go-live. This workflow moves the build onto a
+# GH-hosted `ubuntu-latest` runner (Docker + buildx preinstalled) so no operator
+# laptop is ever in the deploy loop.
+#
+# WHAT IT DOES:
+#   1. `docker buildx build` the fabricd binary image from
+#      `crates/corelink-fabric-server/Dockerfile` with the repo ROOT as context
+#      (the Dockerfile does `COPY . .`; the root `.dockerignore` keeps target/ +
+#      .git out). X4 supply-chain floor: the Dockerfile FROMs are already
+#      @sha256-pinned — this workflow does NOT unpin them.
+#   2. Push the built image to the Cloudflare managed registry via
+#      `wrangler containers push` (wrangler holds the registry credential; it
+#      authenticates from CLOUDFLARE_API_TOKEN — no `docker login` to
+#      registry.cloudflare.com needed).
+#   3. Emit the pushed `@sha256:` digest as a job output AND to the run summary,
+#      with the exact line to pin in wrangler.jsonc.
+#
+# IT DELIBERATELY DOES NOT deploy or auto-commit the digest. Rolling a new
+# control-plane binary is a reviewed, two-step human action (see the summary this
+# emits): (1) pin the digest in deploy/cloudflare-fabricd/wrangler.jsonc
+# containers[].image, (2) `cd deploy/cloudflare-fabricd && npx wrangler deploy`
+# (a NEW digest forces the container rollout; a config-only change does not).
+#
+# ── OWNER DEPENDENCY (to arm) ────────────────────────────────────────────────
+#   GH SECRET `CLOUDFLARE_API_TOKEN` — a Cloudflare API token with
+#   Containers/Workers push scope for account
+#   6a1fc1c626fc2628823e60b9db01f5cd. The job guards on it (fails fast if absent).
+name: build-fabricd-image
+
+on:
+  # Manual-only: the control-plane image changes rarely and a build is heavy;
+  # dispatch it when the fabricd binary / its Dockerfile actually change
+  # (`gh workflow run build-fabricd-image.yml`).
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  CLOUDFLARE_ACCOUNT_ID: 6a1fc1c626fc2628823e60b9db01f5cd
+  # Bare image name — matches the live image's name; wrangler prefixes the
+  # account managed-registry path on push (registry.cloudflare.com/<acct>/<name>).
+  IMAGE_NAME: corelink-fabricd-fabricdcontainer
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      ref: ${{ steps.push.outputs.ref }}
+    steps:
+      - name: Guard — require the CLOUDFLARE_API_TOKEN secret
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
+            echo "::error::Missing GH secret CLOUDFLARE_API_TOKEN — a Cloudflare API" \
+                 "token with Containers/Workers push scope for account" \
+                 "${CLOUDFLARE_ACCOUNT_ID} is required. Set it in repo Settings →" \
+                 "Secrets and variables → Actions, then re-run."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - name: Set up Node (wrangler needs npm; wrangler requires Node >= 22)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install deps (wrangler)
+        working-directory: deploy/cloudflare-fabricd
+        run: npm ci
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Sanity — buildx is available (GH-hosted provides the daemon)
+        run: docker buildx version
+
+      # Build with buildx into the local image store (`--load`). Context = repo
+      # ROOT (COPY . .); Dockerfile = crates/corelink-fabric-server/Dockerfile.
+      # The FROMs are @sha256-pinned in that Dockerfile — X4 floor, left intact.
+      - name: Build fabricd image (docker buildx)
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --file crates/corelink-fabric-server/Dockerfile \
+            --tag "${IMAGE_NAME}:${GITHUB_SHA}" \
+            --load \
+            .
+
+      # Push the locally-built image to the CF managed registry. wrangler reads
+      # CLOUDFLARE_API_TOKEN from the env and mints the registry credential — no
+      # `docker login registry.cloudflare.com` required. Capture the pushed
+      # `@sha256:` reference for pinning.
+      - name: Push to Cloudflare managed registry
+        id: push
+        working-directory: deploy/cloudflare-fabricd
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          OUT="$(npx wrangler containers push "${IMAGE_NAME}:${GITHUB_SHA}" 2>&1 | tee /dev/stderr)"
+          # Extract the pushed registry ref (…@sha256:… — the digest to pin).
+          REF="$(printf '%s\n' "${OUT}" | grep -oE 'registry\.cloudflare\.com/[^ ]+@sha256:[0-9a-f]{64}' | head -n1 || true)"
+          if [ -z "${REF}" ]; then
+            echo "::warning::Could not parse an @sha256 digest from the push output." \
+                 "The image was pushed as the tag below; resolve its digest with" \
+                 "'npx wrangler containers info' before pinning."
+            REF="registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/${IMAGE_NAME}:${GITHUB_SHA}"
+          fi
+          echo "ref=${REF}" >> "${GITHUB_OUTPUT}"
+          echo "fabricd image pushed: ${REF}"
+
+      - name: Summary — how to pin + roll the new fabricd binary
+        run: |
+          {
+            echo "### corelink-fabricd image pushed"
+            echo ""
+            echo "**Pushed ref**"
+            echo '```'
+            echo "${{ steps.push.outputs.ref }}"
+            echo '```'
+            echo ""
+            echo "**Two-step roll (reviewed; NOT automated):**"
+            echo ""
+            echo "1. Pin it in \`deploy/cloudflare-fabricd/wrangler.jsonc\` →" \
+                 "\`containers[].image\`:"
+            echo '```jsonc'
+            echo "\"image\": \"${{ steps.push.outputs.ref }}\","
+            echo '```'
+            echo "2. Roll the container (a NEW digest forces the rollout):"
+            echo '```sh'
+            echo "cd deploy/cloudflare-fabricd && npx wrangler deploy"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"

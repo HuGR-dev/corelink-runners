@@ -1,0 +1,86 @@
+# Continuous synthetic canary — is the LIVE path actually minting runners?
+#
+# Every hour this orchestrator dispatches the existing `corelink-smoke.yml`
+# (a `runs-on: corelink` job that can ONLY land on a freshly-minted ephemeral
+# CoreLink box — the product label) and WATCHES it to a conclusion. If the smoke
+# does not reach `success` within the timeout — because the fabric stopped
+# minting, the spawn-Worker is down, or the box never came up — this workflow
+# goes RED, which fires GitHub's native failed-workflow notification.
+#
+# WHY an ubuntu-latest orchestrator instead of a bare scheduled `runs-on:
+# corelink` job: a scheduled fleet job that never gets a box sits QUEUED and
+# never trips `timeout-minutes` (that clock starts only once a job is RUNNING),
+# so a dead fleet would go UNDETECTED. The orchestrator always starts (GH-hosted),
+# so its wall-clock watch turns "no box ever came" into a real failure.
+#
+# COST NOTE (free-plan minute budget): this is the repo's main GH-hosted-minute
+# consumer (CI itself runs on the self-hosted `corelink-dogfood` fleet). The
+# orchestrator is billed only while it waits for the smoke (typically a few
+# minutes). Cadence is 60 min to stay frugal; widen the cron if minutes get
+# tight. The smoke job itself runs on the fleet and costs no GH-hosted minutes.
+#
+# No owner secret is required to arm this — it uses the automatic GITHUB_TOKEN.
+# It only produces meaningful results once the live fleet serves the `corelink`
+# label; before then it will (correctly) go red, signalling the path is not live.
+name: canary-smoke
+
+on:
+  schedule:
+    # Top of every hour (30–60 min band; 60 keeps GH-hosted minutes low).
+    - cron: '0 * * * *'
+  workflow_dispatch: {}
+
+# `gh workflow run` (dispatch corelink-smoke) + `gh run watch` need actions:write.
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    # Hard wall-clock ceiling: if the smoke never starts or never finishes, the
+    # job times out → red → notification.
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      SMOKE_WORKFLOW: corelink-smoke.yml
+      SMOKE_REF: main
+    steps:
+      - name: Dispatch corelink-smoke and watch it to a conclusion
+        run: |
+          set -euo pipefail
+
+          # Newest existing run id for the smoke workflow BEFORE we dispatch, so
+          # we can detect the NEW run (rather than watch a stale one).
+          BEFORE="$(gh run list --repo "${GITHUB_REPOSITORY}" --workflow "${SMOKE_WORKFLOW}" \
+            --limit 1 --json databaseId --jq '.[0].databaseId // 0')"
+          echo "latest smoke run before dispatch: ${BEFORE}"
+
+          echo "dispatching ${SMOKE_WORKFLOW} on ${SMOKE_REF}…"
+          gh workflow run "${SMOKE_WORKFLOW}" --repo "${GITHUB_REPOSITORY}" --ref "${SMOKE_REF}"
+
+          # Poll for the new run to register (dispatch → run creation is async).
+          RUN_ID=""
+          for _ in $(seq 1 30); do
+            sleep 6
+            CUR="$(gh run list --repo "${GITHUB_REPOSITORY}" --workflow "${SMOKE_WORKFLOW}" \
+              --limit 1 --json databaseId --jq '.[0].databaseId // 0')"
+            if [ "${CUR}" != "${BEFORE}" ] && [ "${CUR}" != "0" ]; then
+              RUN_ID="${CUR}"
+              break
+            fi
+          done
+
+          if [ -z "${RUN_ID}" ]; then
+            echo "::error::canary: ${SMOKE_WORKFLOW} did not register a new run within" \
+                 "~3 min of dispatch — the workflow may be disabled or Actions is degraded."
+            exit 1
+          fi
+
+          echo "watching smoke run ${RUN_ID}…"
+          # --exit-status makes gh exit non-zero if the run concludes as anything
+          # but success; the surrounding `set -e` then fails this step (→ red).
+          # If the run hangs (e.g. no box ever provisions), the job-level
+          # timeout-minutes trips instead.
+          gh run watch "${RUN_ID}" --repo "${GITHUB_REPOSITORY}" --exit-status --interval 15
+          echo "✅ canary: ${SMOKE_WORKFLOW} run ${RUN_ID} reached success — the live minting path is up."
