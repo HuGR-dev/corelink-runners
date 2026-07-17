@@ -617,9 +617,14 @@ async function maybeBillCompletedJob(
   request: Request,
   derivedTenant?: string,
 ): Promise<boolean> {
-  // Bill the SERVER-DERIVED tenant (stashed at spawn); fall back to wrangler's
-  // CLW_TENANT for legacy single-tenant deploys. No tenant ⇒ no push.
-  const billedTenant = derivedTenant ?? env.CLW_TENANT;
+  // F6 (W7): bill ONLY the SERVER-DERIVED tenant (stashed at spawn). The old
+  // `?? env.CLW_TENANT` fallback mis-attributed a customer's runner_slot_seconds to
+  // the wrangler CLW_TENANT (dogfood) on a `jtenant:` KV-miss — exactly what the
+  // reconciler's I2 rule forbids (lib.ts reconcileCompletedJobBilling emits 0, not a
+  // CLW_TENANT bill). No derived tenant ⇒ NO push (under-bill, NEVER mis-bill). Billing
+  // is OFF today (BILLING_INGEST_URL unset); this makes the path correct BEFORE
+  // multi-tenant billing is armed (3-lens audit F6/Lens C).
+  const billedTenant = derivedTenant;
   if (!env.BILLING_INGEST_URL || !env.BILLING_INGEST_AUTH_KEY || !billedTenant) return false;
   try {
     const startedMs = wj?.started_at ? Date.parse(wj.started_at) : NaN;
