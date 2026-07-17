@@ -121,6 +121,14 @@ pub struct Counters {
     // ── Operator / load ──────────────────────────────────────────────────────
     /// Requests shed by the global in-flight cap (503 load-shed).
     pub load_shed: Counter,
+    /// Requests shed by the introspect admission gate (503 fail-closed) BEFORE
+    /// they could enter the blocking pool. Distinct from
+    /// [`load_shed`](Self::load_shed) (the tower global-concurrency limiter): this
+    /// is the precise backpressure on the auth + plan introspect offload — a burst
+    /// of acquires past `FABRIC_INTROSPECT_MAX_INFLIGHT` sheds here CLEANLY (503)
+    /// instead of piling into the blocking pool and browning the singleton out to
+    /// 000. A rising rate means the box is at its introspect-round-trip ceiling.
+    pub introspect_shed: Counter,
     /// §9 trigger idempotency cache hits (a duplicate delivery answered without
     /// re-executing).
     pub trigger_dedup_hits: Counter,
@@ -153,6 +161,7 @@ impl Counters {
             agent_exec_done: self.agent_exec_done.get(),
             agent_exec_failed: self.agent_exec_failed.get(),
             load_shed: self.load_shed.get(),
+            introspect_shed: self.introspect_shed.get(),
             trigger_dedup_hits: self.trigger_dedup_hits.get(),
             suspend_actions: self.suspend_actions.get(),
         }
@@ -185,6 +194,7 @@ pub struct CounterSnapshot {
     pub agent_exec_done: u64,
     pub agent_exec_failed: u64,
     pub load_shed: u64,
+    pub introspect_shed: u64,
     pub trigger_dedup_hits: u64,
     pub suspend_actions: u64,
 }
@@ -293,6 +303,7 @@ mod tests {
             ("agent_exec_done", &counters.agent_exec_done),
             ("agent_exec_failed", &counters.agent_exec_failed),
             ("load_shed", &counters.load_shed),
+            ("introspect_shed", &counters.introspect_shed),
             ("trigger_dedup_hits", &counters.trigger_dedup_hits),
             ("suspend_actions", &counters.suspend_actions),
         ];

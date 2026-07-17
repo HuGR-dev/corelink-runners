@@ -15,11 +15,13 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Request, State};
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use corelink_fabric::TenantId;
 use corelink_fabric_api::ApiError;
+
+use crate::observability::Counters;
 
 /// The raw Bearer PAT injected into request extensions by [`require_tenant`].
 ///
@@ -85,13 +87,31 @@ impl TokenStore for StaticTokenStore {
     }
 }
 
+/// State threaded into the [`require_tenant`] middleware: the token store, the
+/// introspect admission gate, and the golden-signal counters.
+///
+/// The gate is the SAME `Arc<Semaphore>` as `AppState.introspect_gate` (W1
+/// backpressure): the auth introspect and the plan-resolve introspect both draw
+/// permits from it, so the total number of concurrent introspect round-trips —
+/// and thus blocking-pool threads pinned by introspect — is bounded fabric-wide
+/// by one knob (`FABRIC_INTROSPECT_MAX_INFLIGHT`).
+#[derive(Clone)]
+pub(crate) struct AuthLayerState {
+    /// The token → tenant resolver (production: a synchronous introspect POST).
+    pub store: Arc<dyn TokenStore + Send + Sync>,
+    /// W1 introspect admission gate (shared with `AppState.introspect_gate`).
+    pub introspect_gate: Arc<tokio::sync::Semaphore>,
+    /// Golden-signal counters — `introspect_shed` increments on a clean shed.
+    pub counters: Arc<Counters>,
+}
+
 /// Axum middleware: authenticate the request or refuse it.
 ///
 /// Exhaustive over every outcome — there is no fall-through arm, so "store
 /// down" can never degrade into "request admitted" (pinned by
 /// `token_store_down_fails_closed_503_never_open`).
 pub(crate) async fn require_tenant(
-    State(store): State<Arc<dyn TokenStore + Send + Sync>>,
+    State(auth): State<AuthLayerState>,
     mut req: Request,
     next: Next,
 ) -> Response {
@@ -105,9 +125,27 @@ pub(crate) async fn require_tenant(
     // auth'd request starves a worker. Offload to the blocking pool so the
     // executor stays free; the fail-closed mapping is unchanged — a panicked
     // blocking task is treated as `Unreachable` (503), never an admission.
+    //
+    // W1 BACKPRESSURE: acquire an introspect permit BEFORE `spawn_blocking`, so
+    // excess NEVER enters the blocking pool. `try_acquire_owned` sheds
+    // IMMEDIATELY (never queues) when all permits are taken — a burst past the
+    // gate returns the frozen `FailClosed` 503 with a `Retry-After` hint instead
+    // of piling 2N blocking tasks onto the 2-vCPU singleton and browning it out
+    // to 000 (the acquire-storm failure mode). The permit is held ONLY around the
+    // offloaded introspect and dropped immediately after.
+    let store = Arc::clone(&auth.store);
     let resolved = {
+        let permit = match Arc::clone(&auth.introspect_gate).try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                auth.counters.introspect_shed.incr();
+                return introspect_shed_response();
+            }
+        };
         let token = token_str.clone();
-        tokio::task::spawn_blocking(move || store.tenant_of(&token)).await
+        let out = tokio::task::spawn_blocking(move || store.tenant_of(&token)).await;
+        drop(permit);
+        out
     };
     let resolved = match resolved {
         Ok(r) => r,
@@ -146,4 +184,23 @@ pub(crate) fn error_response(err: ApiError, message: &str) -> Response {
     let status = StatusCode::from_u16(err.http_status())
         .expect("frozen vocabulary carries only valid HTTP statuses");
     (status, Json(err.body(message))).into_response()
+}
+
+/// The W1 introspect-gate SHED response: the frozen [`ApiError::FailClosed`]
+/// 503 `ErrorBody` (so a client parsing the frozen vocabulary deserializes it
+/// exactly like any other fail-closed) PLUS a `Retry-After: 1` hint — the box
+/// is momentarily at its introspect ceiling, not down. Shared by the auth
+/// middleware and the plan-resolve site (`AppState::resolve_plan_offloaded`) so
+/// both introspect-gate sheds are byte-identical.
+pub(crate) fn introspect_shed_response() -> Response {
+    let mut resp = error_response(
+        ApiError::FailClosed,
+        "introspect saturated; shed — failing closed",
+    );
+    // A short, fixed Retry-After: the gate frees as soon as an in-flight
+    // introspect returns (sub-second under normal latency); 1s is a safe,
+    // client-friendly floor that never advertises the box as long-down.
+    resp.headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+    resp
 }

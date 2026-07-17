@@ -190,6 +190,15 @@ pub struct ServerConfig {
     /// must be ≥ 1). Bounds how many provisions may pin a blocking-pool thread at
     /// once on the single-flight singleton; the rest await a permit asynchronously.
     pub provision_max_inflight: usize,
+    /// W1 backpressure: max concurrent INTROSPECT round-trips (auth `tenant_of` +
+    /// plan `plan_of_resolving`). From `FABRIC_INTROSPECT_MAX_INFLIGHT` (default
+    /// [`DEFAULT_INTROSPECT_MAX_INFLIGHT`](crate::app::DEFAULT_INTROSPECT_MAX_INFLIGHT),
+    /// must be ≥ 1). Bounds how many introspect offloads may pin a blocking-pool
+    /// thread + fire an upstream POST at once; the excess sheds 503 IMMEDIATELY
+    /// (never queued) before entering the blocking pool — so an acquire burst can
+    /// no longer starve the 2-vCPU singleton's runtime into a `/v1/health`-000
+    /// brownout.
+    pub introspect_max_inflight: usize,
     /// Emit the `intent_metrics_sig` attested-cost binding on close responses.
     /// From `FABRIC_EMIT_INTENT_METRICS_SIG` (default `false` → wire-invisible;
     /// flip on only after the verifier adopts the field).
@@ -280,6 +289,7 @@ impl std::fmt::Debug for ServerConfig {
             .field("pg_tls", &self.pg_tls)
             .field("close_ack_max_inflight", &self.close_ack_max_inflight)
             .field("provision_max_inflight", &self.provision_max_inflight)
+            .field("introspect_max_inflight", &self.introspect_max_inflight)
             .field("emit_intent_metrics_sig", &self.emit_intent_metrics_sig)
             .field("max_inflight_requests", &self.max_inflight_requests)
             .field("admission_mode", &self.admission_mode)
@@ -642,6 +652,17 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
         crate::app::DEFAULT_PROVISION_MAX_INFLIGHT,
     )?;
 
+    // ── W1 backpressure: introspect admission cap ────────────────────────────
+    // Optional, default DEFAULT_INTROSPECT_MAX_INFLIGHT; 0/unparseable → error
+    // (0 would shed every acquire — no request could authenticate; absence is
+    // the use-the-default path). Bounds concurrent auth + plan introspect
+    // round-trips so an acquire burst sheds cleanly instead of browning out.
+    let introspect_max_inflight = parse_positive_usize(
+        &get,
+        "FABRIC_INTROSPECT_MAX_INFLIGHT",
+        crate::app::DEFAULT_INTROSPECT_MAX_INFLIGHT,
+    )?;
+
     // ── Attested-cost binding emission (default-off, wire-invisible) ─────────
     // Truthy = "1" or "true" (case-insensitive); anything else / absent = off.
     let emit_intent_metrics_sig = get("FABRIC_EMIT_INTENT_METRICS_SIG")
@@ -872,6 +893,7 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
         pg_tls,
         close_ack_max_inflight,
         provision_max_inflight,
+        introspect_max_inflight,
         emit_intent_metrics_sig,
         max_inflight_requests,
         admission_mode,
@@ -1324,6 +1346,7 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
     let state = state
         .with_close_ack_max_inflight(cfg.close_ack_max_inflight)
         .with_provision_max_inflight(cfg.provision_max_inflight)
+        .with_introspect_max_inflight(cfg.introspect_max_inflight)
         .with_emit_intent_metrics_sig(cfg.emit_intent_metrics_sig)
         .with_max_inflight_requests(cfg.max_inflight_requests);
 

@@ -437,12 +437,16 @@ pub(crate) async fn acquire(
     // acquire path must reference no box-contact machinery (the API2/API3
     // source-pinning invariant; see the acceptance test). Same fail-closed
     // mapping: a panicked blocking task → `Err(JoinError)` → `Unreachable` (503).
+    // W1 BACKPRESSURE: `resolve_plan_offloaded` acquires the introspect gate
+    // BEFORE the blocking-pool offload; `PlanResolve::Shed` means the gate was
+    // full and this acquire was shed CLEANLY (503) before any thread was pinned —
+    // the same frozen `FailClosed` body + `Retry-After` as the auth-site shed.
     let plan_resolved = state
         .resolve_plan_offloaded(tenant.clone(), pat.0.clone())
         .await;
     let plan = match plan_resolved {
-        Ok(Ok(Some(p))) => p,
-        Ok(Ok(None)) => {
+        crate::app::PlanResolve::Ok(Some(p)) => p,
+        crate::app::PlanResolve::Ok(None) => {
             // WP-3b de-smear: a tenant with NO plan on file is MIS-PROVISIONED,
             // not a busy tenant hitting its concurrency cap. Count it on the
             // dedicated `acquire_rejected_no_plan` (not `acquire_rejected_over_cap`)
@@ -455,11 +459,16 @@ pub(crate) async fn acquire(
                 "no plan on file for tenant: zero concurrency slots",
             );
         }
-        Ok(Err(crate::app::PlanSourceError::Unreachable)) => {
+        crate::app::PlanResolve::Unreachable => {
             return fail_closed("plan source unreachable");
         }
+        // W1: the introspect gate shed this acquire before the blocking pool —
+        // the counter was already incremented at the gate.
+        crate::app::PlanResolve::Shed => {
+            return crate::auth::introspect_shed_response();
+        }
         // The blocking task panicked: fail-closed, never a false admission.
-        Err(_) => {
+        crate::app::PlanResolve::Panicked => {
             return fail_closed("plan source resolution task panicked");
         }
     };

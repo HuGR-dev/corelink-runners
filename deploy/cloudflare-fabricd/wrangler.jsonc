@@ -86,7 +86,19 @@
     // (src/index.ts, inside the DATABASE_URL block). It is therefore INERT on
     // today's in-memory ledger and arms automatically the day pg is enabled. 60s is
     // a sane durable-export cadence (distinct from the always-on 30s corelink push).
-    "FABRIC_BILLING_EXPORT_INTERVAL_SECS": "60"
+    "FABRIC_BILLING_EXPORT_INTERVAL_SECS": "60",
+    // ── ACQUIRE-PATH RESILIENCE (W0) — right-size the global inbound bound ─────
+    // The code DEFAULT (DEFAULT_MAX_INFLIGHT_REQUESTS = 1024) is a thundering-herd
+    // backstop tuned for a big box; on this 2-vCPU singleton it is far above what
+    // the box can serve, so load-shed never fires before the runtime browns out.
+    // 64 is box-appropriate: above the introspect gate (FABRIC_INTROSPECT_MAX_
+    // INFLIGHT default 32, which sheds the acquire storm FIRST) with headroom for
+    // the other concurrent work (health, close-ack, lease-ops), yet low enough to
+    // shed a genuine herd cleanly (503) well below the 512-thread blocking pool.
+    // Forwarded into the container in src/index.ts (the set-but-unforwarded trap:
+    // a wrangler var is visible to the Worker as env.* but the CONTAINER only sees
+    // what this.envVars sets — an unforwarded var is inert).
+    "FABRIC_MAX_INFLIGHT_REQUESTS": "64"
   },
 
   // The singleton control-plane container DO. ONE instance: the in-memory lease
