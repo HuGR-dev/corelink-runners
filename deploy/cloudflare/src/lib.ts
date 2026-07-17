@@ -35,6 +35,11 @@ export interface MintEnv {
   // default (clw coordinator env-0 review must-fix #1, 2026-07-05). Never set in
   // prod: prod arms `SPAWN_WORKER_PUBLIC_URL` (env-0) instead.
   ALLOW_LEGACY_PAT_ENV?: string;
+  // F2-5 (W3): the PROD marker. Its presence means env-0 is armed in this deploy, so
+  // the legacy raw-PAT overlay is refused as defense-in-depth even if
+  // ALLOW_LEGACY_PAT_ENV="1" were mis-set — a raw CLW_TOKEN can NEVER reach an
+  // untrusted container in a prod deploy (3-lens audit F2/Lens B).
+  SPAWN_WORKER_PUBLIC_URL?: string;
 }
 
 // ── Spawn idempotency (gap #2) — dedup a redelivered queued webhook ──────────
@@ -460,10 +465,17 @@ export async function buildContainerEnv(
     // (`ALLOW_LEGACY_PAT_ENV="1"`) — coordinator env-0 review must-fix #1. Without
     // it we spawn COLD: the minted PAT is undelivered (TTL-expires), no leak. In
     // prod, env-0 (`SPAWN_WORKER_PUBLIC_URL`) is armed, so this branch is dead.
-    if (env.ALLOW_LEGACY_PAT_ENV !== "1") {
+    // F2-5 (W3): refuse the legacy raw-PAT overlay whenever the PROD marker
+    // (SPAWN_WORKER_PUBLIC_URL) is present — even if ALLOW_LEGACY_PAT_ENV="1" was
+    // mis-set and the env-0 deps weren't passed. In prod the env-0 branch above
+    // already wins; this closes the residual "deps missing + flag mis-set in prod"
+    // hole so a raw PAT can NEVER reach an untrusted container in a prod deploy.
+    const legacyRefusedInProd = env.ALLOW_LEGACY_PAT_ENV === "1" && !!env.SPAWN_WORKER_PUBLIC_URL;
+    if (env.ALLOW_LEGACY_PAT_ENV !== "1" || legacyRefusedInProd) {
       console.log(
-        "env-0 not configured and ALLOW_LEGACY_PAT_ENV not set: spawning COLD " +
-          "(no raw PAT in the untrusted container env)",
+        legacyRefusedInProd
+          ? "ALLOW_LEGACY_PAT_ENV=1 REFUSED (SPAWN_WORKER_PUBLIC_URL set ⇒ prod env-0 armed): spawning COLD"
+          : "env-0 not configured and ALLOW_LEGACY_PAT_ENV not set: spawning COLD (no raw PAT in the untrusted container env)",
       );
       return { authz: "ok", containerEnv: {} };
     }

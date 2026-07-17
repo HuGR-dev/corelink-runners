@@ -142,6 +142,22 @@ describe("buildContainerEnv (AUTHORIZE + warm-mint; 403 HARD DENY, 5xx FAIL-OPEN
     expect(r.maxConcurrency).toBe(5);
   });
 
+  it("F2-5: legacy ALLOW_LEGACY_PAT_ENV=1 is REFUSED when the prod marker SPAWN_WORKER_PUBLIC_URL is set ⇒ COLD (no raw PAT)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ok200()));
+    const env = {
+      CORELINK_RUNNER_MINT_AUTH_KEY: "k",
+      CLW_ENDPOINT: "https://corelink-api.humangr.com",
+      CORELINK_MINT_URL: "https://corelink-api.humangr.com",
+      ALLOW_LEGACY_PAT_ENV: "1", // mis-set...
+      SPAWN_WORKER_PUBLIC_URL: "https://corelink-spawn-worker.gmhelmold.workers.dev", // ...but PROD marker present
+    } as never;
+    // No env-0 deps passed (the residual "deps missing" hole) — the guard must STILL refuse.
+    const r = await buildContainerEnv(env, PARAMS);
+    expect(r.authz).toBe("ok");
+    expect(r.containerEnv).toEqual({}); // COLD — NO CLW_TOKEN ever reaches the untrusted container
+    expect(r.containerEnv.CLW_TOKEN).toBeUndefined();
+  });
+
   it("sends the FROZEN request shape: repo_full_name + installation_id + scope, NO owner_tenant", async () => {
     const fetchMock = vi.fn(async () => ok200());
     vi.stubGlobal("fetch", fetchMock);
