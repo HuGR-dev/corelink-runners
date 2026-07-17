@@ -631,6 +631,49 @@ export function installationIdForRepo(json: string | undefined, repoFullName: st
   }
 }
 
+// ── External-GA installation allowlist (WP-D) ────────────────────────────────
+//
+// The webhook's ONLY identity-authz today is the server's post-cold-spawn 403
+// (lib mint seam) / JIT-404 — both fire AFTER a cold spawn attempt has already
+// burned a spawn-claim + a COLD_REPO_CAP slot + (on failure) a dead-letter
+// orphan. A foreign repo where the GitHub App is installed but NOT entitled can
+// therefore churn/DoS the shared FLEET_MAX_CONCURRENCY before the server ever
+// says no. This allowlist is the pre-mint gate that stops an un-entitled
+// installation at the Worker edge.
+//
+// OPT-IN, FAIL-CLOSED-WHEN-ARMED: unset/blank ⇒ NOT armed ⇒ preserve today's
+// exact behavior (never breaks the live deploy). When armed (≥1 id parsed), an
+// installation id absent from the list is refused BEFORE any mint/spawn/claim.
+// Comma- OR whitespace-separated ids. e.g. arm with
+// INSTALLATION_ALLOWLIST="144561227,<customer-install-id>" (144561227 = the
+// dogfood installation — it MUST stay served).
+
+/** Parse the comma/whitespace-separated installation-id list. Non-throwing;
+ *  returns the trimmed, non-empty ids (order/dupes irrelevant to membership). */
+export function parseInstallationAllowlist(raw: string | undefined): string[] {
+  if (!raw) return [];
+  return raw
+    .split(/[,\s]+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+/** True iff the allowlist is ARMED — i.e. it parses to ≥1 id. An unset/blank/
+ *  whitespace-only value is NOT armed (fail-safe: today's behavior is preserved). */
+export function installationAllowlistArmed(raw: string | undefined): boolean {
+  return parseInstallationAllowlist(raw).length > 0;
+}
+
+/** True iff `installationId` may proceed under the allowlist. When NOT armed,
+ *  everything proceeds (returns true). When armed, only a non-empty id that is a
+ *  member of the list proceeds (an empty/unknown id is refused). */
+export function isInstallationAllowlisted(raw: string | undefined, installationId: string): boolean {
+  const allow = parseInstallationAllowlist(raw);
+  if (allow.length === 0) return true; // not armed ⇒ preserve current behavior
+  if (!installationId) return false; // armed + unknown/empty id ⇒ refuse
+  return allow.includes(installationId);
+}
+
 /** The subset of Env the reconciler's GitHub listing reads. */
 export interface ReconcilerEnv {
   GITHUB_MINT_TOKEN?: string;
