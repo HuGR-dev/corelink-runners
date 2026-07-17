@@ -1,0 +1,57 @@
+{
+  // corelink-canary — a NEW standalone scheduled Worker (fully disjoint from the
+  // spawn-Worker and the fabricd proxy). It watches the two live golden-counter
+  // surfaces + fabricd health and EMAILS the owner (Resend) on breach, so no one
+  // has to poll dashboards.
+  //
+  // ⚠️ NOT DEPLOYED by this WP. Before `wrangler deploy`, the owner must:
+  //   1. Create the KV namespace and paste its id into `kv_namespaces[0].id`
+  //      below:  wrangler kv namespace create CANARY_KV
+  //   2. Bind the observability keys (so the surfaces return 200, not 404):
+  //        wrangler secret put FABRIC_OBSERVABILITY_KEY     # = fabricd's obs key
+  //        wrangler secret put METRICS_OBSERVABILITY_KEY    # = spawn-worker's obs key
+  //   3. Arm email (until then the canary runs + logs a no-op — default-off):
+  //        wrangler secret put RESEND_API_KEY
+  //      and set ALERT_EMAIL_TO / ALERT_EMAIL_FROM below (FROM must be a
+  //      Resend-VERIFIED humangr.com sender, e.g. alerts@humangr.com).
+  "name": "corelink-canary",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-01",
+  // Same CoreLink infra account as the fabricd + spawn workers.
+  "account_id": "6a1fc1c626fc2628823e60b9db01f5cd",
+
+  // Non-secret config. Secrets (FABRIC_OBSERVABILITY_KEY, METRICS_OBSERVABILITY_KEY,
+  // RESEND_API_KEY) are set via `wrangler secret put` — NEVER in this file.
+  "vars": {
+    // Monitored surfaces (defaults live in src/index.ts; pinned here for clarity).
+    "FABRIC_STATUS_URL": "https://corelink-fabricd.gmhelmold.workers.dev/internal/v1/status",
+    "FABRIC_HEALTH_URL": "https://corelink-fabricd.gmhelmold.workers.dev/v1/health",
+    "SPAWN_METRICS_URL": "https://corelink-spawn-worker.gmhelmold.workers.dev/internal/v1/metrics",
+    // One incident won't email every tick (de-dup cooldown, minutes).
+    "ALERT_COOLDOWN_MINUTES": "30",
+    // Staleness ("no completions in N hours") is OFF by default (0) — dogfood
+    // volume is bursty, so a quiet window is not necessarily a fault. Set a
+    // positive value + optionally BUSINESS_HOURS_UTC="13-23" to arm it.
+    "STALENESS_HOURS": "0",
+    // Email destination + verified sender. TO can be set now; FROM needs the
+    // Resend domain verify first. Left here as vars (not secrets — not sensitive).
+    "ALERT_EMAIL_TO": "",
+    "ALERT_EMAIL_FROM": ""
+  },
+
+  // Snapshot + cooldown state. The canary reads the previous snapshot each tick,
+  // diffs, and writes the new one. ⚠️ id is a PLACEHOLDER — owner replaces it
+  // with the real namespace id (see the header note). Without a real binding the
+  // deploy fails fast, which is the intended guard.
+  "kv_namespaces": [
+    { "binding": "CANARY_KV", "id": "REPLACE_WITH_REAL_KV_NAMESPACE_ID" }
+  ],
+
+  // Every 5 minutes: timely enough to catch a mint_failures / spawn_failed rise
+  // or a health flap, cheap enough (288 runs/day × 3 fetches + 2 KV ops) to sit
+  // well inside the free plan. The counters are low-frequency, so a 5-minute
+  // delta window is meaningful without hammering the surfaces.
+  "triggers": { "crons": ["*/5 * * * *"] },
+
+  "observability": { "enabled": true }
+}
