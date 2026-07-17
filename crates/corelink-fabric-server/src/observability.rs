@@ -236,4 +236,92 @@ mod tests {
         assert!(v.get("acquire_rejected_over_cap").is_some());
         assert!(v.get("agent_exec_failed").is_some());
     }
+
+    /// The full 3-way parity of every counter field: `Counters` → `snapshot()` →
+    /// `CounterSnapshot` → serialized JSON. Each of the 23 counters is
+    /// incremented a DISTINCT number of times (its 1-based index), so any
+    /// copy-paste mis-wiring in `snapshot()` (a field reading the wrong counter)
+    /// surfaces as a wrong value, and a field forgotten in `snapshot()` surfaces
+    /// as a wrong count. This is the drift-tripwire for the counter surface.
+    #[test]
+    fn every_counter_maps_one_to_one_through_snapshot_distinct_values() {
+        // (json key, &Counter, expected count == its distinct 1-based index)
+        let counters = Counters::default();
+        // Increment each counter `idx` times using an explicit, ordered list so
+        // the mapping is auditable. Order MUST match the struct field order for
+        // readability but the assertions are keyed by name, not position.
+        let plan: Vec<(&str, &Counter)> = vec![
+            ("leases_acquired", &counters.leases_acquired),
+            (
+                "acquire_rejected_suspended",
+                &counters.acquire_rejected_suspended,
+            ),
+            (
+                "acquire_rejected_invalid_image",
+                &counters.acquire_rejected_invalid_image,
+            ),
+            (
+                "acquire_rejected_bad_request",
+                &counters.acquire_rejected_bad_request,
+            ),
+            ("acquire_rejected_rate", &counters.acquire_rejected_rate),
+            (
+                "acquire_rejected_over_cap",
+                &counters.acquire_rejected_over_cap,
+            ),
+            (
+                "acquire_rejected_no_plan",
+                &counters.acquire_rejected_no_plan,
+            ),
+            (
+                "acquire_rejected_compute_ceiling",
+                &counters.acquire_rejected_compute_ceiling,
+            ),
+            (
+                "acquire_rejected_lease_invalid",
+                &counters.acquire_rejected_lease_invalid,
+            ),
+            ("leases_closed", &counters.leases_closed),
+            ("leases_expired", &counters.leases_expired),
+            ("leases_crashed", &counters.leases_crashed),
+            ("provision_capacity_503", &counters.provision_capacity_503),
+            ("mint_attempts", &counters.mint_attempts),
+            ("mint_failures", &counters.mint_failures),
+            ("revoke_attempts", &counters.revoke_attempts),
+            ("revoke_failures", &counters.revoke_failures),
+            ("agent_exec_started", &counters.agent_exec_started),
+            ("agent_exec_done", &counters.agent_exec_done),
+            ("agent_exec_failed", &counters.agent_exec_failed),
+            ("load_shed", &counters.load_shed),
+            ("trigger_dedup_hits", &counters.trigger_dedup_hits),
+            ("suspend_actions", &counters.suspend_actions),
+        ];
+        for (idx, (_name, counter)) in plan.iter().enumerate() {
+            for _ in 0..=idx {
+                counter.incr();
+            }
+        }
+        let v = serde_json::to_value(counters.snapshot()).expect("serializes");
+        let obj = v.as_object().expect("snapshot is a JSON object");
+
+        // 1. The serialized key set is EXACTLY the planned set — no field
+        //    forgotten in `snapshot()`, no extra key. This fails the moment a
+        //    new `Counters` field is added but not threaded into the snapshot.
+        assert_eq!(
+            obj.len(),
+            plan.len(),
+            "CounterSnapshot must serialize exactly {} keys (one per Counters field)",
+            plan.len()
+        );
+
+        // 2. Every field carries its own distinct value → no cross-wiring.
+        for (idx, (name, _counter)) in plan.iter().enumerate() {
+            let expected = (idx as u64) + 1;
+            assert_eq!(
+                obj.get(*name).and_then(|x| x.as_u64()),
+                Some(expected),
+                "field `{name}` must map to its own counter (expected {expected})"
+            );
+        }
+    }
 }

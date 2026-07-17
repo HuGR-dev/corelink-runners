@@ -1938,6 +1938,30 @@ mod tests {
         );
     }
 
+    /// The golden-signal counter for expiry is bumped EXACTLY once per reaped
+    /// lease, and ONLY the expiry counter (crash/close untouched). The existing
+    /// expiry tests assert the ledger transition + slot event; this pins the
+    /// observability seam value itself (`counters.leases_expired`).
+    #[tokio::test]
+    async fn reaper_expiry_increments_only_the_expired_counter() {
+        let (state, _clock, _prov) = build_state(2_000);
+        insert_held(&state, "lease-c1", 1_000);
+        insert_held(&state, "lease-c2", 1_000);
+
+        assert_eq!(state.counters.leases_expired.get(), 0, "pre: zero");
+        let reaped = reap_once(&state).await;
+        assert_eq!(reaped, 2, "both overdue leases reaped");
+
+        assert_eq!(
+            state.counters.leases_expired.get(),
+            2,
+            "leases_expired must bump once per reaped lease"
+        );
+        // Cross-signal isolation: expiry must not touch the crash/close counters.
+        assert_eq!(state.counters.leases_crashed.get(), 0);
+        assert_eq!(state.counters.leases_closed.get(), 0);
+    }
+
     // ── WP-S13.5: partial-envelope flush on abnormal close ───────────────────
 
     /// EXPIRED flush: a reaped lease WITH a registered hook drives
@@ -2303,6 +2327,52 @@ mod tests {
         );
     }
 
+    /// TIER 2 → TIER 3 fall-through on a CORRUPT checkpoint: a durable
+    /// checkpoint that does NOT deserialize as `IntentMetrics` (schema drift,
+    /// truncated write, a foreign blob) must NOT be silently dropped and must
+    /// NOT abort the flush — it degrades to the tier-3 `no_capture` marker so
+    /// the abnormal close is STILL recorded (zero metrics, capture_incomplete).
+    /// This is the silent-metric-loss guard on the durable path.
+    #[tokio::test]
+    async fn corrupt_durable_checkpoint_falls_through_to_tier3_marker() {
+        use corelink_runner::envelope::CloseReason;
+
+        let (state, _clock, _prov) = build_state(2_000);
+        insert_held(&state, "lease-corrupt", 1_000);
+        // NO local hook. Store a blob that is valid JSON but NOT an
+        // IntentMetrics shape — the parse in tier-2 must fail and fall through.
+        state
+            .ledger
+            .lock()
+            .unwrap()
+            .set_envelope_checkpoint("lease-corrupt", "{\"not\":\"intent-metrics\"}")
+            .expect("checkpoint write on an existing lease must succeed");
+
+        let outcome = flush_partial_envelope(
+            &state,
+            "lease-corrupt",
+            &TenantId::new("acme").unwrap(),
+            AbnormalKind::Expiry,
+            std::time::Instant::now(),
+        )
+        .expect("a corrupt checkpoint must STILL yield a marker, never a silent None");
+
+        assert_eq!(
+            outcome.close_reason,
+            CloseReason::Expired,
+            "the abnormal reason survives the fall-through"
+        );
+        assert!(outcome.capture_incomplete, "tier-3 marker is incomplete");
+        // Fell through to the zero-metrics no_capture marker — NOT the corrupt
+        // blob's (unparseable) contents, NOT a silent drop.
+        assert_eq!(
+            outcome.metrics.model_turns, 0,
+            "corrupt checkpoint degrades to zero metrics, not garbage"
+        );
+        assert_eq!(outcome.metrics.tokens.total, 0);
+        assert_eq!(outcome.metrics.cost_usd_micros, 0);
+    }
+
     /// TIER 1 STILL WINS — a lease WITH a local hook uses the hook (full
     /// fidelity) and IGNORES any durable checkpoint. Even when a (stale)
     /// checkpoint is present, the live hook's finalized metrics are emitted, not
@@ -2571,6 +2641,15 @@ mod tests {
             "teardown must be called for the dead lease"
         );
         assert_eq!(crashed_events(&state, "lease-dead"), 1, "one Crashed event");
+        // The golden-signal counter is bumped exactly once, and ONLY the crash
+        // counter (expiry/close untouched) — the observability seam value.
+        assert_eq!(
+            state.counters.leases_crashed.get(),
+            1,
+            "leases_crashed must bump once per surfaced crash"
+        );
+        assert_eq!(state.counters.leases_expired.get(), 0);
+        assert_eq!(state.counters.leases_closed.get(), 0);
         // The durable deadline is preserved on the terminal Crashed record
         // (ADR-0004: a transition never alters it); only the image side-table
         // is GC'd.

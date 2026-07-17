@@ -133,6 +133,38 @@ mod tests {
     }
 
     #[test]
+    fn signer_debug_redacts_the_secret_key() {
+        // The secret-hygiene contract: a `CredTicketSigner` must NEVER print its
+        // key bytes in `{:?}` (a logged AppState would leak the fabric secret).
+        let s = CredTicketSigner::new(*b"cred-ticket-dev-secret-32-bytes!");
+        let dbg = format!("{s:?}");
+        assert_eq!(dbg, "CredTicketSigner(***REDACTED***)");
+        assert!(
+            !dbg.contains("cred-ticket-dev-secret"),
+            "the secret key must never appear in Debug output"
+        );
+    }
+
+    #[test]
+    fn stashed_cred_debug_redacts_the_pat_but_shows_routing() {
+        // The stashed PAT plaintext must be redacted; the non-secret routing
+        // fields (endpoint, tenant) stay visible for ops debugging.
+        let c = StashedCred {
+            token: "pat-super-secret-value".to_string(),
+            endpoint: "https://cas.example".to_string(),
+            tenant: "acme".to_string(),
+        };
+        let dbg = format!("{c:?}");
+        assert!(
+            !dbg.contains("pat-super-secret-value"),
+            "the PAT plaintext must never appear in Debug output"
+        );
+        assert!(dbg.contains("***REDACTED***"), "token field is redacted");
+        assert!(dbg.contains("cas.example"), "endpoint stays visible");
+        assert!(dbg.contains("acme"), "tenant stays visible");
+    }
+
+    #[test]
     fn domain_separation_from_ingest_token() {
         // The SAME key bytes wired into both signers must produce DIFFERENT
         // tokens for the same lease — the domain prefix guarantees an ingest

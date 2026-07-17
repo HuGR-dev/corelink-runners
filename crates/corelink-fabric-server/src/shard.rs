@@ -193,4 +193,66 @@ mod tests {
         assert_eq!(id, "lease-first");
         assert_eq!(calls, 1, "N=1 must accept the first id (no rejection loop)");
     }
+
+    #[test]
+    fn mint_exhaustion_fails_open_to_last_id_never_hangs() {
+        // A `gen` that NEVER produces the target shard: it always returns the
+        // same id whose shard is fixed. With `max_tries` bounded, the loop must
+        // terminate and fail-open to *a* valid lease-id (the last minted), never
+        // hang and never panic. This is the defense against a broken generator.
+        let fixed = "lease-fixed".to_string();
+        let fixed_shard = shard_of(&fixed, 4);
+        // Pick a target that is deliberately NOT the fixed id's shard.
+        let target = (fixed_shard + 1) % 4;
+        let mut calls = 0;
+        let id = mint_lease_id_for_shard(target, 4, 8, || {
+            calls += 1;
+            fixed.clone()
+        });
+        assert_eq!(id, "lease-fixed", "exhaustion returns the last minted id");
+        assert_eq!(
+            calls, 8,
+            "the loop is bounded by max_tries (1 initial + 7 more)"
+        );
+        // The returned id is a real lease-id even though it mis-routes; the
+        // reaper/close honesty path catches the mis-route, never a hang.
+        assert_ne!(shard_of(&id, 4), target);
+    }
+
+    #[test]
+    fn mint_max_tries_zero_is_clamped_to_one_attempt() {
+        // `max_tries.max(1)` — a caller passing 0 still mints exactly once.
+        let mut calls = 0;
+        let id = mint_lease_id_for_shard(2, 4, 0, || {
+            calls += 1;
+            "lease-only".to_string()
+        });
+        assert_eq!(id, "lease-only");
+        assert_eq!(calls, 1, "max_tries=0 clamps to a single mint, no hang");
+    }
+
+    #[test]
+    fn mint_target_shard_is_normalized_modulo_n() {
+        // `target_shard % n` — an out-of-range target normalizes into [0, n).
+        // target 5 under N=3 is shard 2; the minted id must route to shard 2.
+        let ids = [
+            "lease-a".to_string(),
+            "lease-b".to_string(),
+            "lease-c".to_string(),
+            "lease-d".to_string(),
+            "lease-e".to_string(),
+            "lease-f".to_string(),
+        ];
+        let mut i = 0usize;
+        let picked = mint_lease_id_for_shard(5, 3, 64, || {
+            let id = ids[i % ids.len()].clone();
+            i += 1;
+            id
+        });
+        assert_eq!(
+            shard_of(&picked, 3),
+            5 % 3,
+            "an out-of-range target normalizes to target % n"
+        );
+    }
 }

@@ -1093,4 +1093,70 @@ mod tests {
             );
         }
     }
+
+    /// The belt-and-braces tripwire: attesting over an UNPINNED image ref is a
+    /// composition bug (the acquire gate must have refused it). In debug builds
+    /// the `debug_assert!` fires. `cfg(debug_assertions)`-gated so a release
+    /// test build (where the assert is compiled out) does not spuriously fail.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "unpinned image")]
+    fn build_attestation_over_unpinned_image_trips_the_debug_assert() {
+        let signer = FabricSigner::new_from_bytes(&SEED);
+        let result = sample_result();
+        let def = sample_def();
+        // No "sha256:" in the ref → the tripwire must fire.
+        let _ = build_attestation(
+            &signer,
+            "alpine:latest",
+            &result.tree_hash,
+            &def,
+            &result,
+            vec!["tenant:acme".to_string()],
+        );
+    }
+
+    /// `verify_execution` is "never a verdict" on malformed crypto material:
+    /// a bad-base64 / wrong-length public key must return `Err`, NOT `Ok(false)`
+    /// (a silent `false` could be misread as "tampered" when it is really
+    /// "unverifiable"). Covers the malformed-input contract of BOTH verifiers.
+    #[test]
+    fn verify_execution_errors_not_false_on_malformed_key_material() {
+        let signer = FabricSigner::new_from_bytes(&SEED);
+        let result = sample_result();
+        let def = sample_def();
+        let att = build_attestation(
+            &signer,
+            "alpine@sha256:d9e8",
+            &result.tree_hash,
+            &def,
+            &result,
+            vec!["tenant:acme".to_string()],
+        );
+        let binding_v1 = sign_result_binding(&signer, &result);
+        let binding_v2 = sign_result_binding_v2(&signer, &result);
+
+        // Non-base64 public key → Err (never a verdict).
+        assert!(
+            verify_execution(&att, &binding_v1, &result, "!!!not-base64!!!").is_err(),
+            "v1 verifier must Err on a non-base64 public key"
+        );
+        assert!(
+            verify_execution_v2(&att, &binding_v2, &result, "!!!not-base64!!!").is_err(),
+            "v2 verifier must Err on a non-base64 public key"
+        );
+        // Well-formed base64 but wrong length (not 32 bytes) → Err.
+        use base64::Engine as _;
+        let short_key = base64::engine::general_purpose::STANDARD.encode([0u8; 8]);
+        assert!(
+            verify_execution(&att, &binding_v1, &result, &short_key).is_err(),
+            "v1 verifier must Err on a wrong-length public key"
+        );
+        // A malformed BINDING signature (non-base64) also Errs, never verdicts.
+        let pk = signer.public_key_b64();
+        assert!(
+            verify_execution(&att, "@@not-base64@@", &result, &pk).is_err(),
+            "v1 verifier must Err on a non-base64 binding signature"
+        );
+    }
 }

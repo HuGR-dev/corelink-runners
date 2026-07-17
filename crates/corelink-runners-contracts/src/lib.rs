@@ -262,6 +262,63 @@ mod golden_tests {
         );
     }
 
+    // ── deny_unknown_fields is ACTUALLY enforced (not just round-trip) ────────
+    //
+    // The byte-exact round-trips above prove the vectors parse and re-emit, but
+    // they do NOT prove `#[serde(deny_unknown_fields)]` fires — a struct that
+    // silently accepted an extra field would still round-trip. These tests feed
+    // each frozen DTO an unknown key and assert deserialization ERRORS, closing
+    // the "forward-compat leak" hole (an unrecognised field must be rejected,
+    // never ignored) for the three golden-vector types.
+
+    /// Inject a junk top-level key into a JSON object string and return it.
+    fn with_junk_key(raw: &str) -> String {
+        let mut v: serde_json::Value =
+            serde_json::from_str(raw).expect("vector parses as JSON object");
+        v.as_object_mut()
+            .expect("vector top level is a JSON object")
+            .insert(
+                "__unexpected_field__".to_string(),
+                serde_json::Value::Bool(true),
+            );
+        serde_json::to_string(&v).expect("re-serializes")
+    }
+
+    #[test]
+    fn runner_lease_rejects_unknown_field() {
+        let raw = load_vector("RunnerLease.json");
+        // Pre-tamper sanity: the clean vector parses.
+        let _ok: RunnerLease = serde_json::from_str(&raw).expect("clean vector parses");
+        let polluted = with_junk_key(&raw);
+        let err = serde_json::from_str::<RunnerLease>(&polluted);
+        assert!(
+            err.is_err(),
+            "RunnerLease must reject an unknown field (deny_unknown_fields)"
+        );
+    }
+
+    #[test]
+    fn fence_manifest_rejects_unknown_field() {
+        let raw = load_vector("FenceManifest.json");
+        let _ok: FenceManifest = serde_json::from_str(&raw).expect("clean vector parses");
+        let polluted = with_junk_key(&raw);
+        assert!(
+            serde_json::from_str::<FenceManifest>(&polluted).is_err(),
+            "FenceManifest must reject an unknown field (deny_unknown_fields)"
+        );
+    }
+
+    #[test]
+    fn intent_metrics_rejects_unknown_field() {
+        let raw = load_vector("IntentMetrics.json");
+        let _ok: IntentMetrics = serde_json::from_str(&raw).expect("clean vector parses");
+        let polluted = with_junk_key(&raw);
+        assert!(
+            serde_json::from_str::<IntentMetrics>(&polluted).is_err(),
+            "IntentMetrics must reject an unknown field (deny_unknown_fields)"
+        );
+    }
+
     #[test]
     fn conformance_hash_verifier_rejects_tamper() {
         let entries = parse_manifest(&load_vector("manifest.sha256"));

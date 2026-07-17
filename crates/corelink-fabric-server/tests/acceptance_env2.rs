@@ -822,3 +822,105 @@ async fn close_exactly_once_preserved_across_teardown_retry() {
         "a double-close of a Released lease is the idempotent 400 arm"
     );
 }
+
+// ── Close status-vocabulary + terminal-state arms (gap-closing) ───────────────
+// The existing suite only ever closes with `"succeeded"`. These pin the OTHER
+// legal-matrix arms of the close handler's status parse and terminal guard.
+
+/// The `"failed"` status is a VALID close verdict (a job that ran and failed):
+/// the close still succeeds (200), the lease reaches Released, and the metrics
+/// still ride the response. Distinct from an INVALID status string (next test).
+#[tokio::test]
+async fn close_with_failed_status_is_accepted_and_releases() {
+    let h = harness();
+    let lease_id = acquire(&h).await;
+    // No hook registered → the honest zero-metrics close path.
+    let response = post_close(
+        &h,
+        &lease_id,
+        &CloseRequest {
+            status: "failed".to_string(),
+            check_result: None,
+            cost_usd_micros: None,
+        },
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "\"failed\" is a valid verdict — the close is accepted"
+    );
+    let body: CloseResponse =
+        serde_json::from_value(body_json(response).await).expect("CloseResponse-shaped JSON");
+    assert!(body.released, "a failed job still releases its lease");
+    assert_eq!(
+        ledger_state(&h.ledger, &lease_id),
+        LeaseState::Wire(RunnerState::Released)
+    );
+}
+
+/// An UNKNOWN status string is rejected 400 BEFORE any side effect: the lease
+/// stays Held (never torn down, never released) so the client can retry with a
+/// legal verdict. This is the "other → 400" arm of the status parse.
+#[tokio::test]
+async fn close_with_unknown_status_vocab_is_400_and_leaves_lease_held() {
+    let h = harness();
+    let lease_id = acquire(&h).await;
+    let response = post_close(
+        &h,
+        &lease_id,
+        &CloseRequest {
+            status: "kinda-maybe".to_string(),
+            check_result: None,
+            cost_usd_micros: None,
+        },
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "an unrecognised status vocabulary is rejected"
+    );
+    // The pre-side-effect guarantee: the lease is untouched, still Held.
+    assert_eq!(
+        ledger_state(&h.ledger, &lease_id),
+        LeaseState::Wire(RunnerState::Held),
+        "a rejected close must not have released or torn down the lease"
+    );
+}
+
+/// Closing a lease that already reached a TERMINAL state via the reaper
+/// (Expired) is the 400 "not held" arm — symmetric to the double-close of a
+/// Released lease. Drives the ledger to Expired directly (the lifecycle's job),
+/// then asserts the close refuses without a second delivery.
+#[tokio::test]
+async fn close_on_expired_lease_is_400_not_held() {
+    let h = harness();
+    let lease_id = acquire(&h).await;
+    // Simulate the reaper terminalizing the lease at its deadline.
+    h.ledger
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .transition(&lease_id, RunnerState::Expired, 1_000)
+        .expect("Held→Expired transition");
+    let response = post_close(
+        &h,
+        &lease_id,
+        &CloseRequest {
+            status: "succeeded".to_string(),
+            check_result: None,
+            cost_usd_micros: None,
+        },
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "closing an already-Expired lease is the 400 not-held arm"
+    );
+    assert_eq!(
+        ledger_state(&h.ledger, &lease_id),
+        LeaseState::Wire(RunnerState::Expired),
+        "the lease remains Expired — the refused close changed nothing"
+    );
+}
