@@ -61,6 +61,16 @@ pub mod materialize;
 pub mod pin;
 pub mod recovery;
 pub mod redteam;
+// WP-A (defense-in-depth): the Actions-YAML equivalence shim is a
+// NON-PRODUCTION migration/equivalence-verification harness whose
+// step-execution is SIMULATED (see `shim::executor::simulate_run_digest`).
+// It must never compile into a release binary, so the whole module is gated
+// behind `cfg(test)` (unit tests) and the `shim-dev` feature (integration
+// tests, via the self dev-dependency in Cargo.toml). Default-features release
+// builds exclude it entirely. Real execution lives in the
+// `corelink-check-exec-server` (genuine `Command::new().spawn()`) and the
+// GitHub-Actions runner fleet — never here.
+#[cfg(any(test, feature = "shim-dev"))]
 pub mod shim;
 pub mod teardown;
 mod util;

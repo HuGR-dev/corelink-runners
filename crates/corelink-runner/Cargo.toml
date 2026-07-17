@@ -6,6 +6,18 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+# WP-A (defense-in-depth): the Actions-YAML EQUIVALENCE SHIM (`pub mod shim`)
+# is a NON-PRODUCTION migration/equivalence-verification harness whose
+# step-execution is SIMULATED (`simulate_run_digest` — a deterministic
+# stand-in, never a real execution result). It must never compile into a
+# release binary. The module is `#[cfg(any(test, feature = "shim-dev"))]`, so
+# it is present only for unit tests (`cfg(test)`) and when this feature is
+# explicitly requested. The self dev-dependency below turns it on for the
+# integration-test build, which links the lib as a normal (non-`cfg(test)`)
+# dependency and would otherwise not see the module.
+shim-dev = []
+
 [dependencies]
 corelink-runners-contracts = { path = "../corelink-runners-contracts" }
 anyhow = { workspace = true }
@@ -26,3 +38,9 @@ ed25519-dalek = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+# WP-A: enable the `shim-dev` feature for the test build only. Integration
+# tests (`tests/acceptance_e4.rs`) link this crate as a normal dependency
+# (no `cfg(test)` on the lib), so they need the feature turned on to see the
+# gated `shim` module. Dev-dependencies are excluded from `cargo build
+# --release`, so this never pulls the simulated shim into a release binary.
+corelink-runner = { path = ".", features = ["shim-dev"] }

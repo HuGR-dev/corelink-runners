@@ -1,6 +1,22 @@
 // Transplanted from hugit/crates/hugit-runner @ ead800d83d19bfd7f90bf4241ee27b18b09007f1 (runner-transfer campaign R2, 2026-06-10) — wire-contract seam, no git dep.
 //! Actions-YAML compatibility shim v0 (WP-E4).
 //!
+//! ⚠️ **NON-PRODUCTION harness — never a real execution result.** This module
+//! is an equivalence/migration-verification harness only. Its step-execution
+//! is **SIMULATED**: [`executor::simulate_run_digest`] returns a deterministic
+//! stand-in digest (`digest-len-…-cmd-…`) computed from the command *string*,
+//! not from any process output — no live container is ever spawned. That
+//! simulated digest, and every [`StepOutcome`] the shim produces, **must never
+//! feed a billing, memoization, or cache decision**. It exists solely to
+//! compare the shim's observable outcomes against real GitHub Actions.
+//!
+//! Because of this, the whole module is compiled behind
+//! `#[cfg(any(test, feature = "shim-dev"))]` (see the crate root + `Cargo.toml`
+//! `shim-dev` feature): it is physically absent from a default-features release
+//! binary. **Real execution lives elsewhere** — the
+//! `corelink-check-exec-server` (genuine `Command::new().spawn()`) and the
+//! GitHub-Actions runner fleet. Never wire a production path through this shim.
+//!
 //! A migration-lubricant shim that runs a **published supported subset** of
 //! GitHub Actions workflow YAML on hugit's runners. Design invariants:
 //!
