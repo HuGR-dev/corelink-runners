@@ -71,6 +71,11 @@ export interface Env {
   FABRIC_CRED_TICKET_SECRET?: string; // secret — env-0 cred-ticket HMAC (PAT never in untrusted env)
   // Attested-cost emission (FLIP-B): "true"/"1" ⇒ `intent_metrics_sig` on CloseResponse. Var.
   FABRIC_EMIT_INTENT_METRICS_SIG?: string;
+  // Resilience knobs the Rust binary already reads but that were UNSET/unforwarded
+  // (so crash-surfacing + durable billing export were OFF). Forwarded into the
+  // container below. Container reads env at boot ⇒ a rollout is needed to apply.
+  FABRIC_CRASH_PROBE_INTERVAL_SECS?: string;
+  FABRIC_BILLING_EXPORT_INTERVAL_SECS?: string;
   // Enforcement / observability / safety (optional passthroughs; inert until set)
   FABRIC_ADMIN_KEY?: string;
   FABRIC_OBSERVABILITY_KEY?: string;
@@ -150,6 +155,15 @@ export class FabricdContainer extends Container<Env> {
             DATABASE_URL: env.DATABASE_URL,
             FABRIC_PG_TLS: env.FABRIC_PG_TLS ?? "require",
             FABRIC_RUNNER_VCPU: "4",
+            // Durable billing EXPORT (WP-A) — pg-ONLY: server.rs fail-closes boot
+            // if FABRIC_BILLING_EXPORT_INTERVAL_SECS is set without the pg ledger
+            // (nowhere durable to export to in memory). So it lives INSIDE this
+            // DATABASE_URL block and is forwarded only when its var is set — inert
+            // on the in-memory ledger, never a boot break. (Distinct from the
+            // always-on FABRIC_BILLING_PUSH_INTERVAL_SECS corelink push above.)
+            ...(env.FABRIC_BILLING_EXPORT_INTERVAL_SECS
+              ? { FABRIC_BILLING_EXPORT_INTERVAL_SECS: env.FABRIC_BILLING_EXPORT_INTERVAL_SECS }
+              : {}),
           }
         : {}),
       // ── Moat mint + env-0 + attested-cost — forward the wrangler vars/secrets
@@ -176,6 +190,13 @@ export class FabricdContainer extends Container<Env> {
         : {}),
       ...(env.FABRIC_EMIT_INTENT_METRICS_SIG
         ? { FABRIC_EMIT_INTENT_METRICS_SIG: env.FABRIC_EMIT_INTENT_METRICS_SIG }
+        : {}),
+      // Crash-surfacing sweep (WP-CRASH-SWEEP) — OPT-IN, no pg dependency. Present
+      // valid u32≥1 ⇒ the sweep spawns at that cadence and surfaces crashed leases
+      // (the always-on deadline reaper is the backstop when absent). Forwarded
+      // unconditionally-when-set so the wrangler var actually reaches the container.
+      ...(env.FABRIC_CRASH_PROBE_INTERVAL_SECS
+        ? { FABRIC_CRASH_PROBE_INTERVAL_SECS: env.FABRIC_CRASH_PROBE_INTERVAL_SECS }
         : {}),
       // Unreachable-in-deploy fix: forward the enforcement/observability/safety
       // + Stage-B autoscaler passthroughs so a future `wrangler secret put` /
@@ -275,15 +296,24 @@ interface LeaseListBody {
  * N===1 SHORT-CIRCUITS to a plain passthrough (no parse/re-serialize) so the bytes
  * are byte-identical to the old singleton proxy.
  */
-async function listLeasesScatterGather(request: Request, env: Env, N: number): Promise<Response> {
-  // N=1: byte-identical passthrough — no clone, no parse, no re-serialize.
+async function listLeasesScatterGather(
+  request: Request,
+  env: Env,
+  N: number,
+  applyTimeout: boolean,
+): Promise<Response> {
+  // N=1: byte-identical passthrough — no parse, no re-serialize. Still bounded by
+  // the per-request timeout (a wedged singleton fails fast with a 503).
   if (N === 1) {
-    return getContainer(env.FABRICD, shardDoId(0, 1)).fetch(request);
+    return proxyFetch(getContainer(env.FABRICD, shardDoId(0, 1)), request, applyTimeout);
   }
 
   const settled = await Promise.allSettled(
     Array.from({ length: N }, (_unused, k) =>
-      getContainer(env.FABRICD, shardDoId(k, N)).fetch(request.clone()),
+      // Bound each shard fetch so ONE wedged shard can't hang the whole gather:
+      // a timed-out shard rejects → allSettled marks it "rejected" → skipped
+      // (best-effort), exactly like a down shard below.
+      getContainer(env.FABRICD, shardDoId(k, N)).fetch(shardFanRequest(request, applyTimeout)),
     ),
   );
 
@@ -395,10 +425,17 @@ function percentileFromBuckets(buckets: number[], count: number, percentile: num
  * N===1 SHORT-CIRCUITS via the caller (this helper is only invoked at N>1); the
  * N=1 path passes the container's exact snapshot through byte-identically.
  */
-async function tenantMetricsScatterGather(request: Request, env: Env, N: number): Promise<Response> {
+async function tenantMetricsScatterGather(
+  request: Request,
+  env: Env,
+  N: number,
+  applyTimeout: boolean,
+): Promise<Response> {
   const settled = await Promise.allSettled(
     Array.from({ length: N }, (_unused, k) =>
-      getContainer(env.FABRICD, shardDoId(k, N)).fetch(request.clone()),
+      // Bound each shard fetch (see listLeasesScatterGather) — a wedged shard is
+      // skipped best-effort rather than hanging the whole gather.
+      getContainer(env.FABRICD, shardDoId(k, N)).fetch(shardFanRequest(request, applyTimeout)),
     ),
   );
 
@@ -456,10 +493,169 @@ async function tenantMetricsScatterGather(request: Request, env: Env, N: number)
   );
 }
 
+// ── Per-request timeout on the proxied container fetch (W1b) ────────────────
+// Every route below forwards to the singleton (or a shard) container. With NO
+// bound, a WEDGED container makes the client's request hang until the platform's
+// own (much longer, opaque) limit — and concurrent clients pile up on the
+// stalled singleton. We wrap each proxied fetch in an AbortSignal.timeout so a
+// hung upstream fails the client FAST with a clean, structured 503 instead.
+//
+// 30s is chosen deliberately: it sits ABOVE the slowest server-BOUNDED route's
+// legitimate latency (a cold box provision on acquire; the scatter-gather read
+// merges answer in ms) yet still surfaces a genuine hang quickly. The UNBOUNDED
+// routes that run customer/build code or block on the §13 ack window — POST
+// /v1/leases/{id}/exec, POST /v1/leases/{id}/close (up to a 30s ack), and POST
+// /v1/queue/trigger (reuses the same exec engine) — are EXEMPT (isLongLivedRoute):
+// no finite timeout is correct for them, so they forward unbounded as today.
+const PROXY_FETCH_TIMEOUT_MS = 30_000;
+
+/** Minimal shape of a `getContainer(...)` handle — only the `fetch` we call. */
+interface ContainerLike {
+  fetch(request: Request): Promise<Response>;
+}
+
+/** A fired AbortSignal.timeout rejects fetch with a Timeout/Abort-named error. */
+function isAbortLikeError(e: unknown): boolean {
+  return e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError");
+}
+
+/** Structured 503 for a wedged upstream — a generic reason, NO internals leaked. */
+function upstreamTimeout503(): Response {
+  return new Response(JSON.stringify({ error: "fabricd upstream timeout" }), {
+    status: 503,
+    headers: { "content-type": "application/json", "retry-after": "1" },
+  });
+}
+
+/**
+ * True for the routes that legitimately BLOCK for an unbounded / long duration:
+ * they run customer/build code or wait on the §13 ack window, so no finite
+ * per-request timeout is correct — they MUST forward unbounded.
+ *   • POST /v1/queue/trigger      — reuses the exec engine (run_check)
+ *   • POST /v1/leases/{id}/exec   — synchronous box command execution
+ *   • POST /v1/leases/{id}/close  — blocks up to the 30s §13 JobClose ack window
+ * (agent-exec is async: POST returns 202 + step_id immediately and the poll GET
+ *  is non-blocking — both are bounded, so they are NOT exempt.)
+ */
+export function isLongLivedRoute(method: string, pathname: string): boolean {
+  if (method !== "POST") return false;
+  if (pathname === "/v1/queue/trigger") return true;
+  return /^\/v1\/leases\/[^/]+\/(exec|close)$/.test(pathname);
+}
+
+/**
+ * Forward `request` to `container`. When `applyTimeout` (a non-long-lived route),
+ * bound the wait with AbortSignal.timeout and translate a hung upstream into a
+ * structured 503. A long-lived route forwards unbounded + byte-identically. Any
+ * NON-abort error propagates unchanged (best-effort merge helpers rely on this).
+ */
+async function proxyFetch(
+  container: ContainerLike,
+  request: Request,
+  applyTimeout: boolean,
+): Promise<Response> {
+  if (!applyTimeout) return container.fetch(request);
+  const bounded = new Request(request, {
+    signal: AbortSignal.timeout(PROXY_FETCH_TIMEOUT_MS),
+  });
+  try {
+    return await container.fetch(bounded);
+  } catch (e) {
+    if (isAbortLikeError(e)) {
+      console.log(
+        `proxy: upstream fetch to ${new URL(request.url).pathname} exceeded ${PROXY_FETCH_TIMEOUT_MS}ms — failing fast 503`,
+      );
+      return upstreamTimeout503();
+    }
+    throw e;
+  }
+}
+
+/**
+ * A per-shard clone of a scatter-gather request, optionally bounded by the
+ * per-request timeout. The clone is required because one Request body can be
+ * consumed only once, so each of the N concurrent shard fetches needs its own;
+ * the reads are always GETs (leases-list / tenant-metrics) so the clone is cheap.
+ */
+function shardFanRequest(request: Request, applyTimeout: boolean): Request {
+  return new Request(
+    request.clone(),
+    applyTimeout ? { signal: AbortSignal.timeout(PROXY_FETCH_TIMEOUT_MS) } : {},
+  );
+}
+
+// ── Watchdog boot-grace (W1b) ───────────────────────────────────────────────
+// The scheduled() watchdog destroys a container that fails 3 consecutive health
+// probes (~30s of sustained unresponsiveness). But a container that has NEVER
+// yet answered is either (a) genuinely broken OR (b) still COLD-BOOTING — a fresh
+// Rust+pg boot under load can exceed one cron tick's probe budget. Destroying a
+// still-booting container restarts the boot → a boot LOOP. So:
+//   • BOOT-GRACE: a never-yet-healthy container is exempt from destroy until it
+//     has been watched for at least BOOT_GRACE_MS — long enough to finish a cold
+//     boot. A previously-healthy container that goes dark is NOT booting, so it
+//     is destroyed on the first sustained failure (preserves the #316 recovery).
+//   • REBOOT-BACKOFF: after a destroy, do not destroy the SAME container again
+//     within REBOOT_BACKOFF_MS — the replacement needs its own cold-boot budget;
+//     destroying again inside that window would thrash.
+// Both windows cover a cold Rust+pg boot under load (image start + pg pool warm).
+const BOOT_GRACE_MS = 180_000; // 3 min — a never-healthy container is "booting" below this
+const REBOOT_BACKOFF_MS = 180_000; // 3 min — don't re-destroy a just-rebooted container
+
+export interface WatchdogEntry {
+  firstSeenAt: number; // first cron tick this container id was observed
+  firstHealthyAt: number | null; // first successful health probe, ever (null = never up)
+  lastDestroyAt: number | null; // last destroy() issued for this id (null = never)
+}
+
+export type WatchdogAction = "healthy" | "skip-booting" | "skip-backoff" | "destroy";
+
+/**
+ * Pure boot-grace decision for one container tick. `entry` is mutated to record
+ * firstHealthyAt on a healthy probe (the caller persists it across ticks). Given
+ * whether this tick's probes succeeded and `now`, decide:
+ *   • healthy      — answered; nothing to do (firstHealthyAt recorded)
+ *   • skip-backoff — unhealthy, but a destroy was issued < REBOOT_BACKOFF_MS ago
+ *   • skip-booting — unhealthy, NEVER yet healthy, still within BOOT_GRACE_MS
+ *   • destroy      — sustained unresponsiveness that is NOT a cold boot → reboot
+ */
+export function watchdogAction(
+  entry: WatchdogEntry,
+  healthy: boolean,
+  now: number,
+  cfg: { bootGraceMs: number; rebootBackoffMs: number } = {
+    bootGraceMs: BOOT_GRACE_MS,
+    rebootBackoffMs: REBOOT_BACKOFF_MS,
+  },
+): WatchdogAction {
+  if (healthy) {
+    if (entry.firstHealthyAt === null) {
+      entry.firstHealthyAt = now;
+      entry.lastDestroyAt = null; // a successful (re)boot clears the reboot backoff
+    }
+    return "healthy";
+  }
+  if (entry.lastDestroyAt !== null && now - entry.lastDestroyAt < cfg.rebootBackoffMs) {
+    return "skip-backoff";
+  }
+  if (entry.firstHealthyAt === null && now - entry.firstSeenAt < cfg.bootGraceMs) {
+    return "skip-booting";
+  }
+  return "destroy";
+}
+
+// Per-container watchdog state, keyed by DO id. Module scope persists across
+// scheduled() ticks within an isolate (best-effort, same as the round-robin
+// cursors above); a recycled isolate simply re-learns firstSeenAt on the next
+// tick, which only restarts the (safe) boot-grace clock.
+const watchdogState = new Map<string, WatchdogEntry>();
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const N = numShards(env);
     const { pathname } = new URL(request.url);
+    // Non-long-lived routes get the per-request timeout → clean 503 on a wedged
+    // upstream; exec/close/queue-trigger forward unbounded (isLongLivedRoute).
+    const applyTimeout = !isLongLivedRoute(request.method, pathname);
 
     // ACQUIRE — POST to the collection exactly. Place on a round-robin shard and
     // stamp the chosen N + shard so the container can mint a lease-id that hashes
@@ -469,14 +665,14 @@ export default {
       const modified = new Request(request);
       modified.headers.set("X-Fabricd-Num-Shards", String(N));
       modified.headers.set("X-Fabricd-Shard", String(k));
-      return getContainer(env.FABRICD, shardDoId(k, N)).fetch(modified);
+      return proxyFetch(getContainer(env.FABRICD, shardDoId(k, N)), modified, applyTimeout);
     }
 
     // LEASE-LIST — GET the collection exactly (NOT /v1/leases/{id}). Each shard
     // holds only its own leases in memory, so scatter-gather across all N and
     // merge; N===1 short-circuits to a byte-identical passthrough.
     if (request.method === "GET" && pathname === "/v1/leases") {
-      return listLeasesScatterGather(request, env, N);
+      return listLeasesScatterGather(request, env, N, applyTimeout);
     }
 
     // §9 TRIGGER — POST /v1/queue/trigger carries the lease id in the BODY
@@ -503,7 +699,9 @@ export default {
         headers: request.headers,
         body: raw,
       });
-      return getContainer(env.FABRICD, shardDoId(k, N)).fetch(forwarded);
+      // §9 trigger is long-lived (reuses the exec engine) → applyTimeout is false
+      // here, so proxyFetch forwards unbounded + byte-identically.
+      return proxyFetch(getContainer(env.FABRICD, shardDoId(k, N)), forwarded, applyTimeout);
     }
 
     // GITHUB WEBHOOK — POST /webhooks/github drives the autoscaler's out-of-band
@@ -518,7 +716,7 @@ export default {
       const modified = new Request(request);
       modified.headers.set("X-Fabricd-Num-Shards", String(N));
       modified.headers.set("X-Fabricd-Shard", String(k));
-      return getContainer(env.FABRICD, shardDoId(k, N)).fetch(modified);
+      return proxyFetch(getContainer(env.FABRICD, shardDoId(k, N)), modified, applyTimeout);
     }
 
     // TENANT METRICS — GET /v1/metrics/tenant reads per-instance in-memory
@@ -527,7 +725,7 @@ export default {
     // nearest-rank percentiles). At N=1 this is inert → falls through to shard 0
     // == singleton, a byte-identical passthrough of the exact snapshot.
     if (N > 1 && request.method === "GET" && pathname === "/v1/metrics/tenant") {
-      return tenantMetricsScatterGather(request, env, N);
+      return tenantMetricsScatterGather(request, env, N, applyTimeout);
     }
 
     // LEASE-OP — a request that names a lease id. Route to the shard that owns
@@ -535,11 +733,11 @@ export default {
     const leaseId = leaseIdOf(pathname);
     if (leaseId !== null) {
       const k = shardOf(leaseId, N);
-      return getContainer(env.FABRICD, shardDoId(k, N)).fetch(request);
+      return proxyFetch(getContainer(env.FABRICD, shardDoId(k, N)), request, applyTimeout);
     }
 
     // Everything else (/v1/health, /v1/attestation/key, …) → shard 0.
-    return getContainer(env.FABRICD, shardDoId(0, N)).fetch(request);
+    return proxyFetch(getContainer(env.FABRICD, shardDoId(0, N)), request, applyTimeout);
   },
 
   async scheduled(_event: ScheduledController, env: Env): Promise<void> {
@@ -568,7 +766,17 @@ export default {
     // Probe every shard independently — the same 3-consecutive-failure watchdog
     // per container. At N=1 this is a single iteration = today's behaviour.
     for (let k = 0; k < N; k++) {
-      const container = getContainer(env.FABRICD, shardDoId(k, N));
+      const id = shardDoId(k, N);
+      const container = getContainer(env.FABRICD, id);
+
+      // Persisted per-container lifecycle (module scope; see watchdogState). A
+      // never-before-seen id starts its boot-grace clock now.
+      let entry = watchdogState.get(id);
+      if (entry === undefined) {
+        entry = { firstSeenAt: Date.now(), firstHealthyAt: null, lastDestroyAt: null };
+        watchdogState.set(id, entry);
+      }
+
       let healthy = false;
 
       for (let attempt = 1; attempt <= PROBES; attempt++) {
@@ -603,16 +811,44 @@ export default {
         }
       }
 
-      if (healthy) continue;
+      // BOOT-GRACE decision (see watchdogAction): a never-yet-healthy container
+      // within the boot window is COLD-BOOTING, not hung — destroying it would
+      // boot-loop. A previously-healthy container that went dark IS a real hang
+      // and is destroyed on the first sustained failure (#316 recovery). A
+      // just-rebooted container is spared for one backoff window (no thrash).
+      const now = Date.now();
+      const action = watchdogAction(entry, healthy, now);
 
-      // ALL probes failed over ~30s → sustained unresponsiveness = a real hang,
-      // not a busy blip. Destroy so a fresh instance boots on the next fetch
-      // (self-heal; preserves the #316 recurring-hang recovery).
+      if (action === "healthy") continue;
+
+      if (action === "skip-backoff") {
+        console.log(
+          `keep-warm[shard ${k}/${N}]: ${PROBES} health failures but destroyed ${now - (entry.lastDestroyAt ?? now)}ms ago (< ${REBOOT_BACKOFF_MS}ms reboot backoff) — letting the fresh instance boot, NOT re-destroying`,
+        );
+        continue;
+      }
+
+      if (action === "skip-booting") {
+        console.log(
+          `keep-warm[shard ${k}/${N}]: ${PROBES} health failures but never-yet-healthy for only ${now - entry.firstSeenAt}ms (< ${BOOT_GRACE_MS}ms boot-grace) — cold boot in progress, NOT destroying`,
+        );
+        continue;
+      }
+
+      // action === "destroy": sustained unresponsiveness that is NOT a cold boot.
+      // Destroy so a fresh instance boots on the next fetch (self-heal).
       console.log(
-        `keep-warm[shard ${k}/${N}]: ${PROBES} consecutive health failures (~30s) — destroying hung shard`,
+        `keep-warm[shard ${k}/${N}]: ${PROBES} consecutive health failures (~30s) — destroying (${
+          entry.firstHealthyAt === null ? "never healthy past boot-grace" : "was healthy, went dark"
+        })`,
       );
       try {
         await container.destroy();
+        // The replacement is a fresh cold boot: reset the lifecycle so it earns
+        // its OWN boot-grace, and arm the reboot backoff so we don't thrash.
+        entry.firstSeenAt = now;
+        entry.firstHealthyAt = null;
+        entry.lastDestroyAt = now;
         console.log(
           `keep-warm[shard ${k}/${N}]: destroyed hung shard — fresh instance will boot on next request`,
         );

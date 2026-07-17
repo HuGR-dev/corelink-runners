@@ -72,7 +72,21 @@
     // wire-invisible when off; ON now so hugit's ✓cas: can render ATTESTED cost
     // once they pin the conformance vector + consume the field. Signs honest-zero
     // cost until a provider /usage source (never a derived COGS). Prod key faa5b7726.
-    "FABRIC_EMIT_INTENT_METRICS_SIG": "true"
+    "FABRIC_EMIT_INTENT_METRICS_SIG": "true",
+    // ── RESILIENCE KNOBS (W1b) — the Rust binary already READS these; they were
+    // unset/unforwarded, so crash-surfacing + durable billing export were OFF. ──
+    // Crash-surfacing sweep (WP-CRASH-SWEEP): OPT-IN, no pg dependency. 20s is a
+    // brisk-but-cheap cadence — a crashed lease (dead box) is surfaced within ~20s
+    // instead of only at its deadline. Present-valid-u32≥1 ⇒ spawned; 0/unparseable
+    // ⇒ boot Err (absence is the disable path). Forwarded into the container below.
+    "FABRIC_CRASH_PROBE_INTERVAL_SECS": "20",
+    // Durable billing EXPORT (WP-A): pg-ONLY. ⚠️ server.rs FAIL-CLOSES boot if this
+    // is set WITHOUT the pg ledger (FABRIC_LEDGER_BACKEND=pg via DATABASE_URL) — so
+    // the proxy forwards it into the container ONLY when DATABASE_URL is present
+    // (src/index.ts, inside the DATABASE_URL block). It is therefore INERT on
+    // today's in-memory ledger and arms automatically the day pg is enabled. 60s is
+    // a sane durable-export cadence (distinct from the always-on 30s corelink push).
+    "FABRIC_BILLING_EXPORT_INTERVAL_SECS": "60"
   },
 
   // The singleton control-plane container DO. ONE instance: the in-memory lease
