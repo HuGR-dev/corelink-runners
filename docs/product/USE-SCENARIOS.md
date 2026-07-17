@@ -1,6 +1,6 @@
 # CoreLink Runners — Use-Scenario & User-Story Catalog
 
-> **Status:** v1.2 (round-2 deepening) · 2026-07-17 · the exhaustive catalog of
+> **Status:** v1.3 (round-3 deepening) · 2026-07-17 · the exhaustive catalog of
 > *how humans and agents actually use CoreLink Runners end-to-end.* Product
 > use-scenarios and user stories — NOT code branches. The validation campaign maps
 > evidence onto these; a story that is not yet provable is a **tracked gap**.
@@ -11,8 +11,27 @@
 > workflow shapes & misconfigurations — Docker/services/tools/egress/secrets/
 > concurrency-groups/reusable-workflows/matrix-monorepo/artifacts/flaky-re-run/
 > bad-YAML/quota) · **Theme 2.5** (hugit as reseller) · inline **[R2 EXPANSION]**
-> variation matrices on several thin stories. This is round 2 of an iterative
-> completeness loop — NOT claimed complete.
+> variation matrices on several thin stories.
+>
+> **Round-3 additions (this rev):** **billing/onboarding failure modes** (Stripe
+> dunning · trial-expiry-with-running-jobs · card-decline — S1.1.5–7) · **the
+> developer's first five minutes** (S1.1.8) · **GPU / capability-gap fallback**
+> (S1.3.4) · **partial-hydrate data-plane edge** (S1.2.6) · **time/scheduling
+> shapes** (cron/`schedule`/`workflow_dispatch` · TTL-vs-legitimately-long-job —
+> S1.6.13–14) · new **Theme 1.7** (per-ecosystem drop-in: Bazel · Nix · Poetry ·
+> cargo/Go · 500-package monorepo — S1.7.1–5) · **P3 Workspaces depth** (snapshot/
+> restore · long-lived billing · SSH/networking · idle-suspend · outlive-a-session
+> — S3.3–7) · **P4 agent-side depth** (agent-fleet storm from the agent's own side ·
+> multi-agent-in-one-tenant contention · an agent hitting its own concurrency wall
+> — S4.5–7) · **P5 multi-region ops at N>1** (shard rebalancing · region outage ·
+> cross-region billing reconciliation — S5.2.4, Theme 5.5) + **day-2 ops** (runner-
+> image upgrade · a bad deploy caught by the canary — S5.4.5–6) · **P6 competitive
+> bake-off vs Depot/Blacksmith/Namespace** (S6.4) · **deeper NEGATIVE security**
+> (compromised App install · webhook-replay window · malicious `net_policy` ·
+> credential-ticket replay · cache-poisoning — S7.8–12) · **enterprise SSO/SAML**
+> (S10.6) · **customer-facing hit-rate / cost-breakdown tracked gap** (S14.6). This
+> is round 3 of an iterative completeness loop — NOT claimed complete; formatting/
+> style harmonization is deferred to the round-4 doc-standard pass.
 >
 > **Grounded in:** `docs/whitepaper/corelink-runners-v1.md` (canonical vision) ·
 > `docs/product/product.md` · `docs/product/pricing.md` (ratified 40/60 ladder) ·
@@ -171,6 +190,111 @@ this path today (MEMORY: rota-a).
   CoreLink PAT or a real hugit dispatch (MEMORY: rota-a correction-3).
 **Feature.** Direct on-ramp (ADR-0007) · unmodified-workflow shim · label family matcher.
 
+### S1.1.5 — A card declines mid-cycle / Stripe dunning 🔵 owner-gated (GA billing)
+**Story.** As an account admin whose card fails a renewal, I want a clear dunning
+grace period before my runners stop, so that a payment hiccup doesn't instantly
+break my team's CI mid-sprint.
+**Flow.** Stripe attempts the renewal charge → **card declined** → Stripe's dunning
+retries (`invoice.payment_failed` webhook) over a grace window → if it ultimately
+fails, the subscription lapses → the tenant's entitlement (`runners_entitlement`) is
+downgraded/revoked → admission falls to the **no-plan** posture (S14.1: `plan_cap`
+null) → new acquires are refused, **in-flight leases run to completion** (S13.2, no
+mid-job kill).
+**Expected.** A decline is a **graceful degrade over a grace window**, never an
+instant cliff: dunning grace first, then admission-off, never a *destroyed* running
+job. Because billing is CoreLink-server-side (Stripe + `runners_entitlement`), the
+dunning state machine is **owner-gated** (S1.1.2, the slot-billing flip); the fabric
+consumes the entitlement, it does not run Stripe. Until the flip, a dogfood tenant is
+on the static admin backend with **no card at all** (S5.1.1), so this path is
+CoreLink-server's obligation, not the fabric's.
+**Evidence.** `runners_entitlement` lookup is corelink-server-side + owner-gated
+(S1.1.2); the fabric's admission is against whatever cap the `PlanSource` returns
+(S14.1) — a revoked entitlement reads as no-plan, fail-closed to refusal, never a
+fabricated cap.
+**Variations/edges/failures.**
+- *Recovers within grace* — Stripe retry succeeds ⇒ entitlement restored ⇒ admission
+  resumes with **no restart** (the composite plan source updates live, S5.1.1/S13.1).
+- *Lapses fully* — same shape as a downgrade-to-zero (S13.2): running jobs drain,
+  new ones refused; the account is *deactivated*, not *deleted* (data intact, S13.4).
+- *Mid-cycle upgrade proration* — a Stripe concern (owner-gated); the fabric only
+  sees the resulting cap change (S13.1).
+**Feature.** Stripe dunning grace · entitlement-revoke = no-plan refusal · no-mid-job-kill · owner-gated billing.
+
+### S1.1.6 — Trial expiry with jobs still running 🔵 owner-gated (GA billing)
+**Story.** As a trial user on day 5, I want the trial to convert-or-stop cleanly
+without killing an in-flight pipeline, so that evaluating the product never risks a
+broken build at the deadline.
+**Flow.** The **5-day trial at Team capability** (S1.1.2, no free tier) reaches day 5
+→ (a) card on file ⇒ **convert** to the chosen tier, admission continues; (b) no card
+⇒ the trial entitlement lapses → **in-flight leases finish** (S13.2) → new acquires
+refused (no-plan, S14.1) → an upgrade prompt.
+**Expected.** Trial-end is the **downgrade shape** (S13.2), not a kill: whatever was
+Held drains and tears down + bills its slot-seconds (S1.2.4); only the *next* acquire
+sees the lapsed cap. Convert is a **live cap change, no restart** (S13.1).
+**Evidence.** Trial→convert-or-downgrade at day 5 is the ratified pricing posture
+(S1.1.2, pricing.md); admission gates at acquire against the current plan (S13.2). The
+trial state machine is GA billing — **owner-gated** (S1.1.2).
+**Variations/edges/failures.**
+- *Converts mid-run* — the running jobs are untouched; the new cap raises the ceiling
+  for the next acquires (S13.1).
+- *Lapses mid-crunch* — the crunch's already-Held jobs finish; the team sees an
+  upgrade prompt on the next push (S1.3.2 clean refusal shape).
+- *Re-start a trial later* — trial is one-per-tenant (an abuse guard, owner-gated);
+  re-onboard is a paid tier (S13.5).
+**Feature.** Trial convert-or-downgrade · drain-not-kill · live convert · owner-gated.
+
+### S1.1.7 — Trial/plan abuse: many free trials, one actor 🔵 owner-gated (GA billing) / 🟡 suspend built
+**Story.** As the platform, I want a serial trial-abuser (spinning up orgs to farm
+free Team capability) to be structurally bounded, so that the no-free-tier +
+loss-impossible model isn't gamed by churned identities.
+**Flow.** An actor creates org after org to re-trigger the 5-day Team trial → the
+defense stack: (1) the **vCPU-h ceiling** makes even an abused trial **loss-impossible**
+(S5.3.2, max COGS < the trial's notional value); (2) the **concurrency cap** bounds
+parallel burn (S1.3.2); (3) a confirmed abuser is **suspended fabric-wide** via the
+durable `fabric_suspended_tenants` table (S7.7/S5.3.3), enforced at admission.
+**Expected.** The economic floor is the ceiling: an abuser cannot incur a loss even
+undetected (S6.2), so trial-farming is a *fairness/abuse* concern, not a solvency one
+(S5.3.3). Identity-level trial-eligibility (one trial per real actor) is a
+**CoreLink-server / owner** decision (the `runners_entitlement` + org-provisioning
+seam), not a fabric mechanism.
+**Evidence.** Durable suspend landed for N>1 (S7.7, `fabric_suspended_tenants`);
+loss-impossible ceiling (S5.3.2); the trial-eligibility rule is owner-gated (S1.1.2).
+**Variations/edges/failures.**
+- *False-flagged legit trial* — suspension is a reversible durable-table delete (no
+  redeploy, S5.3.3); a wrongly-suspended trial is restored.
+- *Undetected farmer* — bounded by the ceiling to loss-impossible; detection is about
+  fairness, not preventing a loss (S5.3.3 discriminator).
+**Feature.** Loss-impossible trial · concurrency cap · durable suspend · trial-eligibility (owner-gated).
+
+### S1.1.8 — The developer's first five minutes 🟢 LIVE-proven (dogfood) / ⚪ full smoke
+**Story.** As a developer on a team that just enabled corelink (I am *not* the admin
+who installed it), I want my first push after the switch to just work with zero new
+knowledge, so that the migration is invisible to me.
+**Flow.** The admin has installed the App + set `runs-on: corelink` (S1.1.3/S1.1.4) →
+I `git push` a normal PR → my job shows "Waiting for a runner" for a beat → a
+cache-warm runner spawns → my checkout/build/test steps run exactly as before → green
+check → the box tears down. I did **nothing different**; I don't even know the runner
+changed unless I read the runner name in the log.
+**Expected.** The drop-in promise is **developer-invisible** (S1.1.4): no new CLI, no
+config in my PR, no account for me — the org is the tenant (ADR-0002), my identity is
+just my GitHub commit. The only thing I might notice is the runner label in the log
+and (on a warm repo) faster installs (S1.6.3 cache-warm). A cold first run just looks
+like a normal run (S1.2.2).
+**Evidence.** The unmodified-workflow shim runs a real Actions agent (S1.1.4, LIVE
+dogfood); the dev's `GITHUB_TOKEN` is runtime-injected (S1.6.5), so `actions/checkout`
+works with nothing for the dev to configure. Full cache-hit-visible smoke is
+⚪ X4-external (S1.1.4).
+**Variations/edges/failures.**
+- *First job is cold* — expected (S1.2.2); the dev sees a normal run, not a slower
+  "broken" one; the *next* identical run warms.
+- *A step needs a tool the image lacks* — loud-fail (S1.6.3), same as it would fail on
+  GitHub-hosted; the dev's fix is unchanged.
+- *The dev has no HuGR account* — correct: a developer never signs up; only the org
+  admin does (S1.1.1). The dev's first five minutes involve **zero onboarding**.
+- *At-cap on first push* — "Waiting for a runner" (S1.3.2), a capacity signal, not an
+  error; the dev's job runs when a slot frees.
+**Feature.** Developer-invisible adoption · zero-config-for-the-dev · runtime GITHUB_TOKEN · normal-looking first run.
+
 ## Theme 1.2 — The core job journey (push → billed → torn down)
 
 ### S1.2.1 — Warm boot on a cache hit: the job that never runs 🟢 LIVE-proven (mint) / ⚪ hit smoke
@@ -272,6 +396,37 @@ ceiling is in vCPU-hours (pricing.md §3).
   is the R2 residual bounded per-tier (pricing.md §4).
 **Feature.** vCPU-h ceiling · slot billing.
 
+### S1.2.6 — Partial hydrate / a huge cache / a broken hydrate 🟡 built-not-proven / ⚪ hit smoke
+**Story.** As a CI engineer, I want a boot where only *some* of my working set is warm
+(or the hydrate stalls, or the cache is enormous) to still produce a correct run, so
+that a cache edge never fabricates a wrong result or wedges the box.
+**Flow.** At boot `clw hydrate` pulls the working set from CAS by content digest → the
+possible edges: (a) **partial hit** — some inputs are in CAS, some are novel ⇒ hydrate
+the warm ones, compute the novel ones, bill only the novel work (S1.2.1 partial-hit);
+(b) **huge working set** — content-addressed hydrate streams what's needed; storage is
+the per-tier R2 residual (pricing.md §4), not unbounded; (c) **hydrate stalls /
+CAS unreachable mid-pull** — **fail-closed**: the runner errors explicitly rather than
+running on a half-materialized tree (contract §2, whitepaper §12d).
+**Expected.** A partial hydrate is **normal and correct** — memoization is per-input,
+so a warm/novel mix bills only the novel bytes (S1.2.1). A *broken* hydrate is the
+hard case and it is **fail-closed, never a silent cold-dressed-as-warm** — the runner
+never proceeds on an incomplete materialization and calls it a hit (the north-star(c)
+fail-closed proof, MEMORY: cache-moat). Determinism is preserved because the memo key
+binds the exact input digests (S1.2.1) — a missing input can't be silently substituted.
+**Evidence.** Cache-unreachable ⇒ explicit error (contract §2, S1.2.1); the live
+warm-boot is clw-in-CF-container redeeming the cred ticket at boot (S1.2.1, S7.2). The
+fabricd-side `ClwBoxDrive` is a WP-6 stub (S1.2.1) — the full partial/huge-hydrate
+matrix proof is ⚪ X4-external (needs a real CoreLink PAT).
+**Variations/edges/failures.**
+- *Content-digest mismatch on a hydrated blob* — a corrupt/tampered blob fails its
+  content-address check (CAS is content-addressed by construction), so a poisoned byte
+  can't masquerade as the real input (S7.12 cache-poisoning red-team).
+- *Novel-input-heavy run* — mostly-cold, burns vCPU-h; the ceiling (once armed) sorts
+  a heavy consumer up (S6.2). The model gives away *re-verification*, not novel compute.
+- *Cache warm but tenant-scoped* — the shared warm set is **intra-tenant at GA**;
+  cross-tenant dedup is staged, never claimed live (S1.2.2 tense discipline).
+**Feature.** Per-input partial hydrate · content-address integrity · fail-closed-on-broken-hydrate · R2-bounded residual.
+
 ## Theme 1.3 — Concurrency, scale, and the ceiling (what the user SEES)
 
 ### S1.3.1 — Buying N seats and bursting to N 🟡 built-not-proven
@@ -333,6 +488,36 @@ the label, so that I can trade one bigger slot for speed.
 - *Live box size today* — `standard-4` is pinned (ADR-0009 condition 2); other sizes
   are a GA follow-up.
 **Feature.** Size ladder (ADR-0007 Stage C) · vCPU-h accounting.
+
+### S1.3.4 — A job needs a GPU / an arch / a kind the fleet doesn't offer 🔵 owner-gated (capability matrix)
+**Story.** As a CI engineer with an ML/CUDA job (or an `arm64`, or a Windows/macOS,
+or a >12 GiB build), I want a clear signal when the fleet can't serve my capability
+and a clean fallback, so that a capability gap is a visible "not yet", not a
+mis-provisioned wrong box or a silent failure.
+**Flow.** `runs-on: corelink-gpu` (or `corelink-arm64`, `corelink-standard-16`) →
+the **label family matcher** maps the requested capability → **no known
+size/kind ⇒ the matcher refuses to serve** (no partial match, S1.6.11), so GitHub
+never assigns the job a box that can't satisfy it → the job stays queued ("Waiting for
+a runner") or runs on whatever *other* label it also carries (hybrid, S9.2).
+**Expected.** A capability gap is **structurally fail-safe**: the subset-gate
+(S1.1.4) means the fleet only accepts a job whose *entire* label set it can serve, so
+an unofferable capability is never mis-served — it degrades to "queued / falls to a
+hosted or self-hosted pool" (S9.2/S9.5). GPU/arch/OS SKUs are a **capability-matrix**
+decision (GPU is an **M4 adjacency**, S9.5; sizes are ADR-0007 Stage C, S1.3.3) —
+**owner-gated**, not built. Today the offered box is `standard-4` x86 Linux (ADR-0009).
+**Evidence.** The subset-gate + reserved/unknown-label refusal are LIVE on the dogfood
+path (S1.1.4/S1.6.11); the GPU/arch/OS SKU matrix is owner-gated (M4/Stage C).
+**Variations/edges/failures.**
+- *Keep self-hosted for the special capability* — the reverse of decommission (S9.5):
+  the GPU/licensed-tool job stays on a self-hosted pool via its own label; corelink
+  serves the rest (hybrid, S9.2). Migration is never a cliff.
+- *Unknown size in the corelink family* — `corelink-standard-999` maps to no size ⇒
+  refused, not spawned wrong (S1.6.11).
+- *Bigger-memory need under standard-4* — an OOM on the current box (S11.3) wants a
+  size label (S1.3.3), owner-gated; today "the box is already the robust one".
+- *macOS/Windows* — a fundamentally different substrate (the builder Mac is a *self-
+  hosted* reserved label, S1.1.4, not a fleet SKU); cross-OS fleet is out of scope.
+**Feature.** Capability subset-gate · unofferable-kind refusal · GPU/arch SKU (owner-gated M4) · hybrid fallback.
 
 ## Theme 1.4 — Failure & edge stories from the user's view
 
@@ -736,6 +921,209 @@ enforced against (`usage_history.rs` provenance); `GET /v1/usage` exposes
   admitted); the *next* acquire is what's refused. No mid-job kill for quota.
 **Feature.** ComputeGate vCPU-h wall (arm-gated) · preventive refusal · pre-emptive usage visibility.
 
+### S1.6.13 — Scheduled (cron) / `workflow_dispatch` manual / re-run trigger shapes 🟢 LIVE-proven (trigger-agnostic)
+**Story.** As a CI engineer with a nightly `schedule:` cron, a manual
+`workflow_dispatch` button, and push-triggered CI, I want all three to spawn corelink
+runners identically, so that the trigger shape is never a special case.
+**Flow.** GitHub fires `workflow_job.queued` for a labeled job **regardless of what
+triggered the workflow** (push, `pull_request`, `schedule`, `workflow_dispatch`,
+`repository_dispatch`, a manual re-run) → the Worker keys on the `workflow_job` event
++ `matchManagedLabels` (S1.6.7), **agnostic to the trigger** → spawns one runner, one
+slot, torn down.
+**Expected.** The unit of spawn/billing is the **`workflow_job`**, never the trigger
+(S1.6.7/S1.6.11) — so a cron job, a manually-dispatched job, and a push job are the
+same code path. A nightly cron is just a queued job at 02:00; a `workflow_dispatch`
+with inputs is just a queued job whose inputs GitHub already resolved. NOTE: the
+Worker's *own* `scheduled()` cron (`index.ts:914`) is an **operator** reconciler
+(re-drive + billing, S1.4.1/S5.3.1) — unrelated to the *customer's* `schedule:`
+workflows, which are pure `workflow_job` events.
+**Evidence.** `matchManagedLabels` is trigger-blind (`index.ts:1013`); the reconciler
+cron is a separate operator surface (S1.4.1). Full cron-triggered smoke is ⚪ X4.
+**Variations/edges/failures.**
+- *Cron at a fleet-saturated hour* — a nightly wave hits the concurrency cap like any
+  burst (S1.3.2); excess jobs queue until a slot frees, never lost.
+- *`workflow_dispatch` with a bad input* — GitHub validates dispatch inputs before the
+  job queues; the fabric never sees an invalid-input workflow (division of labor,
+  S1.6.11 — YAML/inputs validity is GitHub's).
+- *Scheduled run on a stale default branch* — the run uses the ref GitHub schedules
+  (the default branch head); the fabric is oblivious to ref semantics — it runs the
+  job GitHub assigns.
+- *A cron that never has changes* — every nightly is a mostly-warm cache hit (S1.2.1)
+  if inputs are unchanged — the flat model makes an always-green nightly ~free.
+**Feature.** Trigger-agnostic `workflow_job` spawn · cron/dispatch/re-run parity · operator-cron-is-separate.
+
+### S1.6.14 — A legitimately long job vs the lease TTL / `sleepAfter` / reaper 🟡 built-not-proven
+**Story.** As a CI engineer with a genuinely long job (a 45-minute integration suite,
+a big release build), I want it to run to completion without the idle-teardown or the
+lease reaper killing it mid-run, so that "long" is a supported shape, not a failure.
+**Flow.** A long job holds its runner for its whole duration → the boundary actors:
+(a) the direct door's `sleepAfter` (15m) is an **idle** timer, reset by activity — a
+*busy* box is not idle, so a long-but-active job is not torn down (the idle backstop
+only fires on a *stuck* box, S1.2.4/S1.4.4); (b) the `/v1` door's lease carries an
+**absolute `deadline_ms`** (durable expiry, ADR-0004) — a job that runs past its lease
+TTL is reaped (`Held→Expired`, S1.4.4) and any exec after the deadline returns 400 and
+does zero work (S1.4.4 expiry gate).
+**Expected.** The two mechanisms are **distinct and honest**: `sleepAfter` is an
+*idle* backstop (kills a *stuck* box, never a busy long job); the lease `deadline_ms`
+is a *hard TTL* the caller sets at acquire — a long job must acquire a lease with a TTL
+that covers it, or it will be reaped legitimately. There is **no silent extension**: an
+expired lease fails closed (400, stores nothing, S1.4.4) rather than half-running past
+its deadline. The tension — a job longer than its declared TTL — resolves to a **loud
+expiry**, never a silent wrong result.
+**Evidence.** `sleepAfter` (15m idle) is the direct-door backstop (S1.2.4); the lease
+`deadline_ms` is durable (ADR-0004) and the reaper enforces `Held→Expired` (S1.4.4);
+exec-after-deadline is a 400 zero-work gate (S1.4.4, api §exec gate 3).
+**Variations/edges/failures.**
+- *Job exceeds the lease TTL mid-run* — reaped at the deadline (`Crashed`/`Expired`),
+  slot freed; the fix is to acquire with a TTL that covers the work, never a silent
+  extension. No partial result is stored (contract §1).
+- *Long-poll / webhook budget vs a long job* — the spawn webhook returns fast (the box
+  runs async, S1.4.2 background drive); the job's *duration* is unrelated to the
+  webhook's 8s-per-attempt budget (S1.4.2) — the runner outlives the webhook.
+- *Idle-out on a wedged box* — `sleepAfter`/reaper is exactly the mechanism that frees
+  a hung box's slot (S1.4.4), so a *stuck* long-looking box is reclaimed; a *busy* one
+  is not.
+- *Minutes are unlimited* — a long job is not billed more for wall-time (concurrency
+  pricing, S1.1.2); it just holds its one slot longer. vCPU-h ceiling still bounds COGS.
+**Feature.** Idle `sleepAfter` (busy≠idle) · hard lease `deadline_ms` · loud-expiry-not-silent-extension · async-runner-outlives-webhook.
+
+## Theme 1.7 — Language / ecosystem drop-in (testing the "unmodified workflow" claim harder)
+
+> The adoption promise (S1.1.4) is "your **unmodified** workflow runs." That claim is
+> only as strong as the messiest real ecosystem. This theme stress-tests it across
+> the build systems that push hardest on caching, hermeticity, and remote execution.
+> The through-line: the corelink runner hosts the **real GitHub Actions agent**
+> (ADR-0007), so any tool the workflow declares runs as it would on a hosted runner —
+> the *differentiator* is cache-warm boot + memoization (S1.2.1), the *risk* is a tool
+> the fleet image lacks (S1.6.3 loud-fail). Deep memoization adjacencies (Bazel/Nix
+> remote-cache backed by CAS) are real **wins**, mostly not-yet-built.
+
+### S1.7.1 — Bazel remote-execution / remote-cache 🟡 built-not-proven (agent-native) / 🔵 CAS-backed RE (adjacency)
+**Story.** As a Bazel monorepo engineer, I want `bazel test //...` to run on a
+corelink runner and reuse a warm cache, so that my already-hermetic build gets the
+cache-warm win without a workflow rewrite.
+**Flow.** A step runs `bazel test //...` → Bazel's own action graph + remote-cache
+config runs inside the microVM via the Actions agent → cache-warm boot means Bazel's
+`~/.cache/bazel` / repository cache hydrates from CAS if its bytes are present (S1.6.3
+install-then-memoize) → the build runs.
+**Expected.** Bazel is **already content-addressed and hermetic** — its action digests
+are exactly the kind of memo key CoreLink is built around, so Bazel + corelink is a
+natural fit: the *unmodified* `bazel` invocation runs on the agent (agent-native), and
+the deep win — pointing Bazel's **remote cache / remote execution** at the CAS
+directly (a Runners × Cache adjacency, S1.6.1 BuildKit-cache analogue) — is a
+**tracked adjacency, not built**. Today the win is cache-warm boot of Bazel's local
+caches, not native RE.
+**Evidence.** Agent-native `bazel` run (unmodified-workflow shim, S1.1.4); cache-warm
+boot LIVE on mint (S1.2.1). CAS-backed Bazel RE is an owner-gated adjacency (not built).
+**Variations/edges/failures.**
+- *Bazel wants a specific JDK/toolchain* — declared in the workflow; installs via
+  S1.6.3 (a memo axis), loud-fail if the image can't build it.
+- *Hermetic Bazel + our determinism* — Bazel's hermeticity and CoreLink's
+  determinism-sacred memo (S1.6.10) reinforce each other; a non-hermetic Bazel target
+  won't memoize, honestly.
+- *Huge Bazel cache* — content-addressed hydrate is bounded by the R2 residual
+  (S1.2.6); a giant cache streams what's needed.
+**Feature.** Agent-native Bazel · cache-warm local caches · CAS-backed RE (adjacency, owner-gated).
+
+### S1.7.2 — Nix build (hermetic derivations) 🟡 built-not-proven (agent-native) / 🔵 CAS-backed store (adjacency)
+**Story.** As a Nix user, I want `nix build` / `nix flake check` to run on a corelink
+runner, so that my hermetic derivations get cache-warm boot without changing my flake.
+**Flow.** A step runs `nix build .#foo` → the Nix daemon/store runs inside the microVM
+(image-capability, S1.6.1) → cache-warm boot hydrates the `/nix/store` paths present in
+CAS → the derivation builds; already-built store paths are a lookup.
+**Expected.** Nix derivations are **content-addressed by hash** — the deepest possible
+fit with CoreLink's model: a Nix store path *is* a content address, so a warm CAS that
+carries `/nix/store` paths turns a rebuild into a lookup. The unmodified `nix build`
+runs agent-native; whether the fleet image ships the Nix daemon is the **image-matrix
+decision** (S1.6.1, owner-gated), and a CAS-backed Nix binary cache is an **adjacency,
+not built**. A missing Nix daemon fails **loud** (`nix: command not found`, S1.6.3).
+**Evidence.** Agent-native run (S1.1.4); content-address model aligns with the CAS
+(whitepaper §2). Nix-daemon-in-image + CAS-backed store = owner-gated / adjacency.
+**Variations/edges/failures.**
+- *Nix needs `/nix` + a daemon* — a rootless/single-user Nix works inside the microVM;
+  the microVM boundary makes even a privileged daemon safe (S1.6.1 dind analogue).
+- *Flake determinism* — a pure flake memoizes perfectly (S1.6.10); an impure one
+  (network/time) won't, honestly.
+**Feature.** Agent-native Nix · content-address alignment · image-matrix daemon (owner-gated) · CAS-backed store (adjacency).
+
+### S1.7.3 — Python / Poetry monorepo 🟡 built-not-proven (agent-native)
+**Story.** As a Python engineer with a Poetry (or `uv`/pip) monorepo, I want
+`poetry install && pytest` to run on a corelink runner with a warm dependency cache,
+so that dependency resolution isn't re-downloaded every run.
+**Flow.** `poetry install` resolves + downloads wheels → cache-warm boot hydrates the
+wheel/venv cache from CAS if present (S1.6.3) → `pytest` runs → a re-run with an
+unchanged lockfile is a mostly-warm boot.
+**Expected.** The `poetry.lock` / `requirements.txt` is the natural **memo axis** (the
+resolved dependency set is deterministic given the lock, S1.6.3 toolchain-as-axis) — a
+lockfile change is a new key (correct), an unchanged lock is a warm hydrate. The
+egress to PyPI on a cold miss is the **legit-egress** case (S1.6.4, policy-shaped); a
+warm dep never hits the network (S1.6.4 egress reduction). Runs agent-native, unmodified.
+**Evidence.** Agent-native `poetry`/`pytest` (S1.1.4); lockfile-as-memo-axis (S1.6.3);
+cache-warm dep hydrate (S1.2.1); PyPI egress under `net_policy` (S1.6.4).
+**Variations/edges/failures.**
+- *A C-extension wheel needs a build toolchain* — installs via S1.6.3 (gcc/headers);
+  loud-fail if the image lacks it. Cache-warm makes the repeat build a lookup.
+- *Path-filtered monorepo* — only the touched package's tests run, each on its own
+  runner (S1.6.8), shared deps intra-tenant (never cross-tenant, S1.2.2).
+- *Non-deterministic test (time/network)* — won't memoize (S1.6.10); the flat model
+  still makes the re-run cheap on the warm portion.
+**Feature.** Agent-native Poetry · lockfile-as-memo-axis · warm dep cache · policy-shaped PyPI egress.
+
+### S1.7.4 — Go / Rust cargo cache 🟢 LIVE-proven (dogfood proves the shape) / ⚪ full hit smoke
+**Story.** As a Rust/Go engineer, I want `cargo test --workspace` / `go test ./...` to
+run with a warm build+dependency cache, so that the notoriously slow cold compile is a
+one-time cost, not every run.
+**Flow.** `cargo build` fetches crates + compiles → cache-warm boot hydrates the cargo
+registry + `target/` (or Go's module + build cache) from CAS if present (S1.6.3) → the
+build runs; an unchanged dependency graph + toolchain is a warm hydrate.
+**Expected.** This is **exactly the dogfood workload** — the fabric's own CI is a Rust
+workspace (`cargo test --workspace`, S1.2.2), and the box is pinned `standard-4`
+(12 GiB) **because the small box OOM'd on precisely this** (S1.2.2/S11.3, ADR-0009).
+The cargo registry + `target/` are the memo-warm win; the toolchain (`rustup`/Go
+version) is an explicit memo axis (S1.6.3), so a `rust-toolchain.toml` bump is a new
+key (correct, S1.6.10). Runs agent-native, unmodified.
+**Evidence.** The dogfood CI **is** a cargo workspace on `standard-4` (S1.2.2, LIVE);
+toolchain-as-memo-axis (S1.6.3); the box-sizing lesson is baked into ADR-0009. The
+`[clw] cache hit` on a warm cargo run is ⚪ X4-external (S1.1.4).
+**Variations/edges/failures.**
+- *Cold workspace build OOMs the small box* — historical (`nf-compute-20`); the
+  ratified box is the robust one (S1.2.2). The user's fix today is "already robust";
+  bigger is a size label (S1.3.3).
+- *`cargo` incremental vs clean* — a clean build memoizes cleanly; incremental state
+  is machine-local and not a cross-run memo axis (correct — no false hit).
+- *Go build cache determinism* — Go's build cache is content-keyed; a warm hydrate is
+  a lookup, aligning with the CAS model (whitepaper §2).
+**Feature.** Agent-native cargo/Go · dogfood-proven workload · registry+target warm · toolchain-as-memo-axis.
+
+### S1.7.5 — A monorepo with 500 packages 🟡 built-not-proven
+**Story.** As a platform engineer on a 500-package monorepo, I want a one-package PR to
+build wide-but-cheap and a whole-repo change to run flat, so that monorepo scale
+doesn't multiply my bill or my wait.
+**Flow.** A PR touches 1 of 500 packages → a `paths:`/affected-target gate computes the
+touched set (S1.6.8) → only the affected jobs queue `workflow_job`s → each spawns a
+runner, **cache-warm** hydrates the 499 unchanged packages' deps as a lookup (S1.2.1),
+the 1 changed package recomputes → billed near-0 if memoized. A whole-repo change fans
+out the full matrix, bounded by the **concurrency cap** (S1.2.3), not the 500 width.
+**Expected.** Monorepo scale is the **flagship memoization case**: parallelism is
+capped by the tier N, not the package count (S1.3.2 — width>cap queues, never lost);
+the shared deps are content-addressed **intra-tenant** (never cross-tenant, S1.2.2);
+a leaf change invalidates only its dependents' memo keys (S1.6.8 invalidation
+correctness), so 499 packages stay warm. Flat concurrency means a 500-job wave costs
+the *tier*, not 500× minutes.
+**Evidence.** `workflow_job`-granular matrix (S1.2.3, `ConcurrencySlotsDO`); path-
+filter + memo-key invalidation correctness (S1.6.8); intra-tenant dep sharing (S1.2.2).
+Full 500-package smoke is ⚪ X4-external.
+**Variations/edges/failures.**
+- *Width 500 > cap N* — the matrix queues past the cap and drains as slots free
+  (S1.3.2); a huge fan-out is bounded, not dropped.
+- *A shared base crate changes* — every dependent's memo key invalidates (correct,
+  S1.6.8); the blast radius is the dependency graph, not the whole repo.
+- *A slow affected-target computation* — that's the customer's `paths-filter` job (on a
+  runner or GitHub-hosted); the fabric spawns whatever it queues.
+- *Concurrency-group cancels a superseded wave* — a rapid push sequence cancels the old
+  matrix; slots return on cancel (S1.6.6), not pinned on dead work.
+**Feature.** `workflow_job`-granular 500-way · cap-bounded-not-width-bounded · intra-tenant sharing · invalidation correctness.
+
 ---
 
 # P2 — hugit customer (agent-fleet CI, via hugit) — ICP-A / ICP-C
@@ -970,6 +1358,133 @@ session, so that untrusted agent code runs safely and is destroyed after.
 secrets brokered (env-0); egress bounded (ADR-0003).
 **Feature.** Ephemeral isolation · secrets broker · Workspaces SKU.
 
+### S3.3 — Snapshot / restore a workspace (the materialized object lifecycle) 🔵 owner-gated (Workspaces campaign)
+**Story.** As a developer, I want to snapshot my dev box's state and restore it later
+(or on another box), so that my workspace is a durable object I own, not a box I'm
+tied to.
+**Flow.** `clw snapshot` captures the workspace's materialized state into CAS as a
+content-addressed manifest → later, a fresh lease boots and `clw hydrate <manifest>`
+restores that exact state → the developer resumes where they left off, on a possibly
+different physical box.
+**Expected.** The **workspace *is* the object** (whitepaper §5.1, interop §3): the
+box is disposable, the state is the content-addressed manifest in CAS — snapshot/
+restore is the same `clw snapshot`/`hydrate` spine the CI runner's cache-warm boot
+uses (S1.2.1), pointed at a *named* manifest instead of a memo key. Runners *executes
+beside* the object; Workspaces *sells* it — nothing duplicated. This is the
+**fabric-side obligation** the Workspaces SKU (campaign #2, **not built in this
+repo**) will consume; the lease/hydrate spine is live, the snapshot-as-product surface
+is **owner-gated**.
+**Evidence.** `clw hydrate` is the live cache-warm mechanism (S1.2.1); the fabricd-side
+`ClwBoxDrive` is a WP-6 stub (S1.2.1), so the *fabric-driven* snapshot/restore is
+built-not-wired; the live path is clw-in-container. Workspaces SKU = owner-gated (M4).
+**Variations/edges/failures.**
+- *Restore on a different box* — content-addressed state is box-independent (S1.2.6);
+  the manifest hydrates identically anywhere the CAS is reachable.
+- *Restore a stale manifest* — deterministic by content address; a snapshot is
+  immutable bytes, so a restore is exact, never drifted.
+- *Snapshot storage* — bounded by the per-tier R2 residual (pricing.md §4), same
+  economics as the cache working set (S1.2.6).
+**Feature.** `clw snapshot`/`hydrate` · workspace-as-object · box-independent restore · Workspaces SKU (owner-gated).
+
+### S3.4 — Long-lived dev box: the billing edges 🔵 owner-gated (Workspaces campaign)
+**Story.** As a Workspaces customer, I want a dev box that lives for hours/days to be
+priced clearly against the concurrency model, so that a long-lived box is a predictable
+line, not a per-minute meter I was trying to escape.
+**Flow.** A dev box holds a lease with a **long TTL** (S3.1, vs a CI job's short one) →
+it occupies a concurrency slot for its whole life → the fabric meters raw occupancy
+(`runner_slot_seconds`, S5.3.1) for COGS → the Workspaces SKU prices it (owner-gated).
+**Expected.** A long-lived box is **the same slot accounting** as a CI job, just held
+longer (S3.1) — the concurrency model is TTL-agnostic. The pricing question — is a dev
+box a concurrency SKU, a per-hour SKU, or a flat seat? — is a **Workspaces product
+decision (owner-gated)**, not a fabric one; the fabric's obligation is truthful raw
+occupancy (S2.2.2, no minutes/cost math). The vCPU-h ceiling still bounds a runaway
+long box's COGS (S5.3.2). Idle time on a long box is the **idle-suspend** case (S3.6).
+**Evidence.** Slot metering is TTL-agnostic (`SlotMeter`, S5.3.1); raw occupancy only
+(S2.2.2). Workspaces pricing/SKU = owner-gated (M4, product.md §8).
+**Variations/edges/failures.**
+- *Box idle for hours* — idle-suspend (S3.6) is the margin lever; a suspended box
+  needn't hold a live slot the whole time (owner-gated policy).
+- *Box outlives its lease TTL* — the reaper reclaims it at the deadline (S1.6.14);
+  a persistent box must renew/re-acquire, or snapshot-and-restore (S3.3).
+- *Concurrency vs a per-hour meter* — the house principle is concurrency-not-minutes
+  (S1.1.2); whether Workspaces honors that or uses a per-hour SKU for long boxes is
+  the owner-gated packaging call.
+**Feature.** TTL-agnostic slot metering · long-box occupancy · Workspaces pricing (owner-gated) · idle-suspend lever.
+
+### S3.5 — Dev-box networking / SSH access 🔵 owner-gated (Workspaces campaign)
+**Story.** As a developer, I want to SSH/connect into my dev box and have it reach the
+network I need, so that a cloud dev box is a real working environment — while keeping
+the fail-closed isolation guarantees.
+**Flow.** The developer connects to the box (SSH/a tunnel/an IDE remote) → the box's
+outbound network is shaped by the lease's `net_policy` (S1.6.4) → the operator can
+sever a misbehaving box's egress without teardown (S5.4.2).
+**Expected.** A dev box's **inbound** access (SSH/tunnel) is a **Workspaces-surface
+obligation (owner-gated)** — the fabric today exposes no inbound ingress primitive
+(the CI runner is outbound-only, GitHub-assigned). The box's **outbound** posture is
+the same `net_policy`-shaped egress the CI runner has (S1.6.4), with the same honest
+caveat: the metadata/IMDS denylist is partial (G2, S7.6) and raw sockets bypass the SDK
+proxy (S5.4.2 raw-socket caveat). Isolation is per-lease microVM (S4.2), so a dev box
+is as isolated as a CI runner.
+**Evidence.** `net_policy` egress + operator egress-cutoff LIVE (S1.6.4/S5.4.2);
+per-lease microVM (S4.2). Inbound SSH/ingress is a Workspaces surface = owner-gated.
+**Variations/edges/failures.**
+- *Dev needs a private network* — a capability gap (S1.3.4) the Workspaces SKU must
+  cover (a networking primitive), owner-gated; not a fabric primitive today.
+- *Misbehaving dev box* — egress-cutoff for forensics (S5.4.2), teardown for a hard
+  sever (raw-socket caveat).
+- *Inbound exposure risk* — an ingress primitive is a new attack surface the
+  Workspaces design must fail-close; deliberately not built in this repo.
+**Feature.** `net_policy` outbound (shared) · per-lease microVM · inbound ingress (Workspaces, owner-gated) · egress-cutoff.
+
+### S3.6 — Idle-suspend a dev box 🔵 owner-gated (Workspaces campaign)
+**Story.** As a Workspaces customer, I want my idle dev box to suspend (stop billing a
+live slot) and resume warm, so that an idle box isn't paying for compute it isn't using
+— but resumes fast when I come back.
+**Flow.** A dev box goes idle → (proposed) it snapshots its state (S3.3) + suspends →
+the slot is freed (idle-is-margin, S1.3.1) → on reconnect, `clw hydrate` restores the
+snapshot warm (S3.3) → the developer resumes.
+**Expected.** Idle-suspend is the **workspace analogue of the CI runner's teardown**:
+where a CI job's box dies at completion (S1.2.4), a dev box's idle box *snapshots and
+suspends* (S3.3) — the state persists as a CAS object, the slot returns. This is the
+**Workspaces margin lever** (idle time is HuGR's margin, S1.3.1) and a **product
+obligation (owner-gated)**; the fabric provides the snapshot/hydrate spine (S3.3) and
+the slot-return machinery (S1.3.1), Workspaces provides the suspend policy + resume UX.
+**Evidence.** Snapshot/hydrate spine (S3.3, clw-in-container live; ClwBoxDrive stub);
+slot-return-on-idle (S1.3.1 idle-is-margin). Suspend policy = owner-gated (M4).
+**Variations/edges/failures.**
+- *Resume after suspend* — a warm hydrate (S3.3), a cold-then-warm curve if the CAS
+  aged out (S1.2.6); never a lost workspace (the snapshot is durable).
+- *Suspend vs the concurrency slot* — a suspended box shouldn't count against the
+  tenant's live N (idle-is-margin, S1.3.1); the accounting is the owner-gated policy.
+- *Suspend an active box by mistake* — the idle detector must not suspend a busy box
+  (the `sleepAfter` busy≠idle distinction, S1.6.14).
+**Feature.** Snapshot-then-suspend · slot-return-on-idle · warm resume · suspend policy (owner-gated).
+
+### S3.7 — A workspace that outlives a session (persistence across sessions) 🔵 owner-gated (Workspaces campaign)
+**Story.** As a developer, I want my workspace state to persist across boxes and
+sessions — close my laptop today, resume on a fresh box tomorrow — so that the
+workspace is durable and the box is disposable.
+**Flow.** End a session → the workspace snapshots to CAS (S3.3) → the box tears down
+(no lingering compute, ephemeral-by-teardown, S10.4) → a new session/day → a fresh
+lease + `clw hydrate` restores the snapshot → resume.
+**Expected.** The durability boundary is **the object, never the box**: the box is
+ephemeral (destroyed at teardown like any lease, S1.2.4), the state is the durable
+content-addressed manifest in CAS (S3.3) — so "outliving a session" is snapshot-on-end
++ hydrate-on-resume, not a persistent VM. This inverts the CI model (where the box
+*should* die and *not* persist state, S1.6.10 no-box-reuse) — Workspaces *does* persist
+the object while still never reusing a box across tenants (S3.2, ADR-0009 condition 1).
+**Evidence.** Snapshot/hydrate durability (S3.3); ephemeral-by-teardown box (S10.4,
+S1.2.4); no-box-reuse-across-tenants (S3.2). Cross-session persistence UX = owner-gated.
+**Variations/edges/failures.**
+- *Resume on a different physical box/region* — box-independent restore (S3.3); at N>1
+  multi-region, region affinity is an M3 concern (S10.1).
+- *State erased at churn* — a deleted workspace's CAS object is erased (S13.4 GDPR);
+  resume then is a cold start (correct, erasure was final, S13.5).
+- *Two concurrent sessions on one workspace* — a conflict the Workspaces surface must
+  arbitrate (single-writer, or fork); a fabric-level concern only insofar as each is
+  its own lease/box.
+**Feature.** Object-durable-box-ephemeral · snapshot-on-end/hydrate-on-resume · no-box-reuse · cross-session (owner-gated).
+
 ---
 
 # P4 — The AI agent itself (autonomous build/test on a runner)
@@ -1060,6 +1575,95 @@ auditable.
   runner-only fields; only the IntentMetrics vocabulary is contract (S2.2.1).
 **Feature.** §13.1 metrics · cache split · provider-billed cost · arm-gated sig · integer-cost.
 
+### S4.5 — An agent fleet storms the fabric from its OWN side (runaway parallel spawn) 🟡 built-not-proven
+**Story.** As an agent-fleet operator, I want my *own* runaway fleet — an agent (or a
+bug) that spawns thousands of speculative jobs — to be structurally bounded by the
+fabric, so that my agents can't stampede past what I bought or degrade the platform.
+**Flow.** An agent loop fires N speculative verifications (S4.1) → each is a
+`workflow_job`/lease → admission gates every acquire: (1) the tenant's **concurrency
+cap** admits only up to `min(entitlement, FLEET)` (S1.3.2), the rest queue/429; (2) the
+**vCPU-h ceiling** (once armed) bounds total burn (S5.3.2); (3) the **per-tenant
+request-rate ceiling + fair admission** (S2.4.1) bound the *rate*; (4) a confirmed
+runaway is caught by **sustained-pin/mining detection** (S5.3.3) and can be
+**suspended** (S7.7).
+**Expected.** A fleet storm is bounded **from the fleet's own side** by the same caps
+that protect other tenants (S2.4.1): the agent operator cannot exceed their N even by
+storming, so "verify everything" (Jevons, S4.1) is *induced* by the flat model but
+*bounded* by the tier — loss-impossible (S5.3.2) and non-interfering (S2.4.1). The
+storm is the tenant's *own* concurrency being spent, refused cleanly at the cap
+(S1.3.2), never an unbounded stampede.
+**Evidence.** `decideSlotAcquire`/`try_admit` reserve-before-provision (S1.3.2/S2.4.1);
+vCPU-h ceiling (S5.3.2, arm-gated); mining detection + durable suspend (S5.3.3/S7.7).
+**Variations/edges/failures. [R3]**
+- *Legit heavy fleet vs a bug* — a genuine speculative fleet (S4.1) and a runaway bug
+  look identical at the cap (both bounded); the discriminator is COGS-vs-value
+  (S5.3.3), a legit heavy fleet is **sorted up** (S6.2), a junk-burning one flagged.
+- *Storm hits the fleet-wide cap* — even a warm tenant is clamped to
+  `FLEET_MAX_CONCURRENCY` (S1.3.2), so one fleet can never exceed the physical fleet.
+- *Rate-storm on the spawn webhook* — per-repo `spawn:<repo>` rate bucket (S1.4.3)
+  429s a single busy repo without starving others.
+- *Agent-exec path storm* — the agent-exec seam (S2.3.1) is the same lease/admission
+  spine; a storm there is bounded identically, and each job emits §13 cost (S4.4).
+**Feature.** Self-side storm bounding · concurrency+vCPU-h+rate caps · COGS-vs-value sort · fleet-wide clamp.
+
+### S4.6 — Multiple agents in one tenant contend for the tenant's N 🟡 built-not-proven
+**Story.** As an agent-fleet operator running many agents under one tenant, I want the
+agents to share my N concurrency slots fairly, so that one greedy agent doesn't starve
+the others *within my own account*.
+**Flow.** K agents under one tenant each submit jobs → all draw from the **same
+tenant** concurrency pool (the tenant is the unit of cap/fairness/billing, ADR-0002) →
+the tenant's N slots are shared → beyond N, jobs queue (S1.3.2) or 429.
+**Expected — honest.** The fabric's fairness boundary is the **tenant**, not the agent:
+fair-share and the wait histogram (S2.4.1/S14.5) protect *across tenants*, not *within*
+a tenant. So intra-tenant contention between an operator's own agents is **the
+operator's to schedule** — the fabric admits FIFO/however admission orders within the
+tenant's N, and the operator sees their aggregate `active_now`/`plan_cap` (S14.1) but
+**not** a per-agent breakdown (the fabric has no view of the operator's agent identities
+— the tenant is opaque below its PAT, symmetric with the reseller boundary S2.5.1).
+Sub-tenant fairness (per-agent quotas) is an operator concern, not a fabric primitive.
+**Evidence.** Tenant = the cap/fairness unit (ADR-0002); `active_now` is fabric-wide
+per-tenant (S14.1); cross-tenant fair-share (S2.4.1) is the boundary — intra-tenant
+per-agent quota is **not** a fabric feature (honest boundary).
+**Variations/edges/failures. [R3]**
+- *One agent hogs the tenant's N* — the other agents queue at the tenant cap (S1.3.2);
+  the fix is the operator sizing N (S12.3) or scheduling their own agents, not a fabric
+  per-agent quota.
+- *Operator wants per-agent attribution* — like the reseller's per-customer breakdown
+  (S2.5.1), that's operator-side (they own the agent identities); the fabric attributes
+  to the tenant.
+- *Two agents' jobs are identical* — memoization (S1.2.1) means the second is a ~free
+  hit; identical speculative work across agents dedups intra-tenant (S1.2.2).
+**Feature.** Tenant-is-the-fairness-unit · shared-N contention · no-per-agent-quota (honest boundary) · intra-tenant dedup.
+
+### S4.7 — An agent hits its own concurrency wall (backpressure it must handle) 🟡 built-not-proven
+**Story.** As an autonomous agent submitting work, I want a clean, machine-readable
+signal when I've hit my tenant's cap, so that my orchestrator can back off and retry
+rather than hammer or crash.
+**Flow.** The agent's (cap+1)th acquire → `POST /v1/leases` returns **429 `over_cap`**
+(preventive, before any box spawns, S1.3.2) → the agent's orchestrator reads the 429 →
+backs off / queues locally / retries when a slot frees. On the direct door, the
+(cap+1)th job simply stays "Waiting for a runner" (S1.3.2) until a slot frees.
+**Expected.** The wall is a **clean, preventive 429**, not a crash or a silent drop
+(S1.3.2) — a well-behaved agent treats `over_cap` as backpressure and retries, exactly
+as it would a rate limit. The signal is **machine-actionable**: `429 over_cap` is a
+distinct status (not a generic 500), so the agent can distinguish "you're at capacity,
+retry" from "your request was malformed" (a 400) or "infra blip" (which fails *open* to
+admit, S1.3.2, never blocking a legit job on a blip). The agent's fix is to back off or
+upgrade N (S12.3), never to bypass the cap.
+**Evidence.** `429 over_cap` is the preventive fabric-door refusal (S1.3.2, contract §6);
+`spawn_at_ceiling` is the direct-door analogue; infra-error fails open to admit (S1.3.2).
+**Variations/edges/failures. [R3]**
+- *Agent retries in a tight loop* — the rate ceiling (S2.4.1) + per-repo bucket
+  (S1.4.3) bound a badly-behaved retry storm; a 429-ignoring agent is rate-limited, not
+  allowed to stampede (S4.5).
+- *Agent should pre-check capacity* — `GET /v1/usage` (`active_now` vs `plan_cap`,
+  S14.1) lets a well-behaved orchestrator throttle *before* the wall, not just react to
+  the 429.
+- *Wall vs the vCPU-h ceiling* — the concurrency cap is the always-live wall; the
+  vCPU-h ceiling (S5.3.2, arm-gated) is a *second* wall an agent can also hit (queue /
+  upgrade, S1.6.12). Two distinct backpressure signals, both preventive.
+**Feature.** Preventive `429 over_cap` backpressure · machine-actionable status · pre-check via `/v1/usage` · rate-bounded retry.
+
 ---
 
 # P5 — Platform operator (HuGR)
@@ -1138,6 +1742,34 @@ saturation (api §health).
 **Evidence.** `load_shedding.rs` acceptance; close ack-window + global-limit/load-shed
 (ROADMAP audit fixes).
 **Feature.** Global concurrency limit · load-shed · always-answerable health.
+
+### S5.2.4 — Shard rebalancing / adding an instance at N>1 🔵 owner-gated (N>1 flip)
+**Story.** As an operator scaling the fleet, I want to add an instance (raise the shard
+count) without over-admitting or losing leases during the transition, so that scaling
+out is safe, not a flip-time correctness risk.
+**Flow.** Raise `FABRIC_NUM_SHARDS` + `max_instances` **together** (+ `DATABASE_URL`,
+S5.2.2) → the FNV-1a shard function (proven identical TS↔Rust) re-partitions lease-ops
+across the new instance set → the Worker hash-routes each lease-op to its owning shard
+→ mint rejection-samples to the acquiring instance's shard.
+**Expected.** The one **flip-time hazard** — a header-less acquire during the shard-
+count change over-admitting — is **CLOSED** by the **boot-authoritative shard count**
+(`FABRIC_NUM_SHARDS` read at boot, #333, MEMORY: fabricd-multi-instance): each instance
+agrees on the partition at boot, so there is no split-brain admission window. All other
+N>1 gaps are closed in code (cap-guard `leases.rs:281`, durable
+`fabric_suspended_tenants`, Worker routing, S5.2.2). RAISE-N is therefore **owner-gated
+on volume only** — the correctness work is done. Deferred N>1 follow-ups (per-shard
+reaper, autoscaler/list/queue shard-targeting) are **inert till the flip**.
+**Evidence.** Boot-authoritative shard count (#333); Option-3 routing FNV-1a identical
+TS↔Rust (MEMORY: fabricd-multi-instance-scaling); cap-guard + durable suspend landed.
+**Variations/edges/failures.**
+- *Shard count changes while leases are live* — boot-authoritative read means a live
+  instance keeps its boot partition; a rebalance is a coordinated raise, not a hot
+  re-shard mid-flight (the safe path).
+- *An instance dies at N>1* — the durable pg ledger (S5.2.2) is the shared truth; a
+  lost instance's leases are reaped from the durable state, not lost.
+- *Per-shard reaper not yet wired* — a deferred N>1 follow-up (inert at N=1); tracked
+  before the flip (MEMORY: fabricd-multi-instance).
+**Feature.** Boot-authoritative shard count · FNV-1a routing · flip-time over-admit closed · N>1 follow-ups (deferred).
 
 ## Theme 5.3 — Billing & metering
 
@@ -1232,6 +1864,126 @@ keys by design (S5.2.1); billing ingest auth is a dedicated key (never the share
 mint key).
 **Feature.** Separated secrets · independent rotation.
 
+### S5.4.5 — Upgrade the runner image (day-2, X4-pinned) 🟢 LIVE-proven (image bumps)
+**Story.** As an operator, I want to roll a new runner/check-host image (a security
+patch, a new toolchain, a GLIBC floor bump) safely, so that a day-2 image upgrade is a
+pinned, verify-before-spawn change, not an unbounded supply-chain risk.
+**Flow.** Build the new `clw`/check-host image → **X4-pin** it (`@sha256:` digest,
+S7.5) → wrangler-bind it + (when armed) update `PINNED_IMAGE_DIGEST` → redeploy → the
+next spawn boots the new image; the X4 oracle rejects any unpinned/mismatched image
+**before box contact** (S7.5), so a fat-fingered tag can't ship an unverified image.
+**Expected.** An image upgrade rides the **verify-before-spawn floor** (S7.5): the
+image is content-pinned, so a bump is a *deliberate digest change*, never a mutable-tag
+drift. This is a **live day-2 practice** — the fleet has shipped `clw v0.1.4→v0.1.5`
+(ubuntu:24.04 base for the GLIBC_2.39 floor, musl exec-server), each X4-pinned + boot-
+verified (MEMORY: check-host-image-finished, clw image bumps). A bad image is caught by
+the canary (S5.4.6) and rolled back to the prior pinned digest (S5.4.3).
+**Evidence.** X4 verify-before-spawn LIVE (S7.5); clw v0.1.4/v0.1.5 image bumps
+X4-pinned + boot-verified (MEMORY: golive check-host-image); live images are pinned
+digests (S5.4.3, e.g. `91f4b7ea`/`bce176bd`).
+**Variations/edges/failures.**
+- *New image breaks a real job* — caught by the canary (S5.4.6) / a bake-off (S9.1);
+  roll back to the prior pinned digest (S5.4.3), no mutable-tag ambiguity.
+- *GLIBC/ABI floor change* — a real historical lesson (v0.1.5 ubuntu:24.04 for
+  GLIBC_2.39); the image base is a deliberate, pinned decision.
+- *`PINNED_IMAGE_DIGEST` inert* — until armed, the image is wrangler-bound regardless
+  (defense-in-depth, not the floor, S7.5); arming is owner-gated with the fleet.
+**Feature.** X4-pinned image bump · verify-before-spawn · boot-verify · canary+rollback backstop.
+
+### S5.4.6 — A bad deploy caught by the canary (the incident story) 🟢 LIVE-proven (canary armed)
+**Story.** As an operator, I want a bad deploy to trip an alert *before* it silently
+degrades every job, so that an incident is a page-and-roll-back, not a slow-burn of
+cold/failed runs nobody noticed.
+**Flow.** A deploy ships a regression (e.g. a mint var not forwarded into the container,
+or an unwired redemption leg — the two *real* false-positive incidents, MEMORY: rota-a
+correction-1/3) → the **canary** (email-alerting, service bindings + KV + rotated
+metrics key, HEAD `f945a1f`) watches the golden signals (S5.2.1) → an anomaly
+(mint OFF, redemption 503, spawn failures) fires an alert → the operator rolls back to
+the prior pinned digest (S5.4.3).
+**Expected — honest.** The canary exists because the fabric has been bitten by
+**silent** regressions: the moat "went live" twice as a **false positive** (a cold-run
+200 masked an OFF mint; a `token`/`token_plaintext` field-drift 503'd every real mint;
+an unwired `FABRIC_PUBLIC_BASE_URL` made every box silently cold — MEMORY: rota-a
+corrections). The fix was **loud logs on the silent critical paths** (#327/#329) + a
+**boot guard** that refuses to boot without the redemption env (#332, S5.4.1) + the
+**canary** alerting on the golden signals. The lesson: a green surface can mask a dead
+critical path — so the fabric now **fails loud at boot** and **alerts on the signals**,
+not on a human noticing slow jobs.
+**Evidence.** Canary armed (HEAD `f945a1f`: email-alerting canary — service bindings +
+KV + rotated metrics key); loud logs (#327/#329, S5.2.1); boot guard (#332, S5.4.1);
+the two false-positive incidents are documented (MEMORY: rota-a correction-1/3).
+**Variations/edges/failures.**
+- *Canary false alarm* — an alert on a transient blip; the operator confirms via the
+  golden counters (S5.2.1) + boot diagnostic (S5.4.1) before rolling back.
+- *A regression the canary can't see* — the reason the boot guard (S5.4.1) exists: some
+  failures (unredeemable ticket) are turned into **loud boot failures** rather than
+  relying on a runtime signal — defense-in-depth (S11.1 cold-cause ladder).
+- *Rollback* — re-pin the prior known-good digest (S5.4.3); pinned images make rollback
+  deterministic.
+**Feature.** Canary on golden signals · boot-guard fail-loud · loud-logs-on-silent-paths · deterministic rollback.
+
+## Theme 5.5 — Multi-region ops (at N>1)
+
+> Today's live deploy is **single-region singleton** (ROADMAP substrate-flip banner);
+> multi-region is **M3** (product.md §8, owner-gated). These stories are the
+> multi-region obligations the operator will own once N>1 + M3 land — honest that
+> they are **not built**, grounded in what the single-region primitives imply.
+
+### S5.5.1 — A region outage 🔵 owner-gated (M3 multi-region)
+**Story.** As an operator, I want a region going down to degrade gracefully — jobs
+shift to a healthy region or queue, never silently fail — so that a regional incident
+isn't a fleet outage.
+**Flow.** A region's containers/Worker become unreachable → (today, single-region) the
+whole fabric is that region, so the mitigations are the *within-region* ones: spawn
+retry on a transient reset (S1.4.2), the reconciler re-driving orphaned spawns
+(S1.4.1), the watchdog for the singleton (S5.2.2), load-shed + always-answerable health
+(S5.2.3). (At M3 N>1) a region outage would shift new spawns to a healthy region's
+shard (S5.2.4 routing) and reap the lost region's leases from the durable pg ledger
+(S5.2.2).
+**Expected — honest.** Today there is **no cross-region failover** — the deploy is
+single-region singleton (S10.1), so a region outage *is* a fabric outage, mitigated by
+fail-safe-to-queued (a queued GitHub job waits, never breaks, S1.4.1/S9.3) and the
+watchdog (S5.2.2). True multi-region failover is **M3, owner-gated** — the durable pg
+ledger (S5.2.2) is the prerequisite that makes a lost instance's state recoverable.
+Never overclaim regional HA we don't have.
+**Evidence.** Single-region singleton today (S10.1, ROADMAP); within-region resilience
+LIVE (spawn retry S1.4.2, reconciler S1.4.1, watchdog S5.2.2, load-shed S5.2.3).
+Multi-region failover = M3 owner-gated (durable ledger is the prereq, S5.2.2).
+**Variations/edges/failures.**
+- *Jobs in-flight at outage* — a queued GitHub job stays queued (fail-safe, S9.3); a
+  Held lease is reaped from durable state once the ledger is pg-backed (S5.2.2).
+- *Region-pinned tenant* — an EU-only tenant (S10.1) has no failover region by
+  definition until M3 offers a same-jurisdiction pair; honest tradeoff.
+**Feature.** Within-region resilience (LIVE) · fail-safe-to-queued · multi-region failover (M3, owner-gated).
+
+### S5.5.2 — Cross-region billing reconciliation 🟡 built-not-proven / 🔵 multi-region
+**Story.** As an operator, I want billing to stay exactly-once and consistent when
+jobs run across regions/instances, so that a multi-region fleet never double-bills or
+loses a usage event.
+**Flow.** Each region/instance meters slot-seconds locally → drains to the durable
+`billing_events` table (PK `(tenant, lease_id, kind, at_ms)` + `ON CONFLICT DO
+NOTHING`, S5.3.1) → instances **converge to the union** (re-export is free, a duplicate
+is a no-op) → the usage event carries the **CF colo region** (S5.3.1, ingest validates
+a 3-char region).
+**Expected.** Billing is **multi-instance-safe by construction** (S5.3.1): the durable
+table's PK + `ON CONFLICT DO NOTHING` make every instance's drain idempotent, so N
+regions converging on one `billing_events` table can't double-count — a job billed in
+region A and re-pushed by region B's reconciler is one row. The region tag on each
+event (S5.3.1) is the cross-region attribution. The **billing reconciler** re-scans and
+re-pushes a missed completed-webhook (S5.3.1, I2 rule: emit 0, never a CLW_TENANT bill
+on a miss).
+**Evidence.** `billing_events` PK + `ON CONFLICT DO NOTHING` = convergent union
+(S5.3.1); region-tagged events (S5.3.1); billing reconciler (S5.3.1). Multi-region
+*deployment* proof is owner-gated (M3, single-region today).
+**Variations/edges/failures.**
+- *Same lease billed by two instances* — deduped by the PK (one row); the union is
+  exact, never double.
+- *Missed webhook in one region* — the reconciler re-scans + re-pushes (S5.3.1);
+  under-bill-then-heal, never mis-bill.
+- *Region unknown / not 3-char* — the ingest validation skips it (S5.3.1); a malformed
+  region is dropped, never a wrong attribution.
+**Feature.** Convergent-union billing · idempotent PK drain · region-tagged events · reconciler heal.
+
 ---
 
 # P6 — Finance / eng-leadership buyer (ICP-D)
@@ -1266,6 +2018,45 @@ GitHub on raw compute; the delta is platform/memoization — competitive-blacksm
 **Guardrails.** Never claim "faster than Blacksmith," "cross-tenant dedup live," or
 "absurdly cheaper on raw compute." Tense discipline.
 **Feature.** Positioning · competitive wedge.
+
+### S6.4 — Feature-by-feature bake-off vs Depot / Blacksmith / Namespace 🔵 owner-gated (positioning) / 🟢 mechanism-proven
+**Story.** As an eng-leadership buyer running a POC, I want to compare Runners
+feature-by-feature against Depot, Blacksmith, and Namespace from my seat, so that I
+buy on the real wedge, not marketing.
+**Flow.** Run the same pipeline on each (a bake-off, S9.1) and score the axes that
+matter: **(1) billing model** — Runners is **flat concurrency, minutes unlimited**
+(S1.1.2); the incumbents are largely **per-minute** (faster minutes, but a meter that
+spikes when you ship). **(2) recompute cost** — Runners **memoizes** (a re-run of
+computed work ≈ 0, billed ≈ 0, S1.2.1); the incumbents re-run and re-bill. **(3) raw
+speed** — the incumbents (esp. bare-metal Blacksmith/Namespace) are **faster per raw
+compute-second**; Runners is a managed microVM, **~10% under GitHub on raw compute**
+(S6.3) — we **do not win the raw-speed race**. **(4) isolation** — Runners is
+**per-lease microVM, fail-closed, secrets brokered, attested-verdict** (S4.2/S7.x); a
+buyer weighs that against a shared-kernel runner. **(5) platform** — cache-warm boot +
+attestation (`corelink verify`, S1.5.1) + the two-front-doors fabric (S2.5.2).
+**Expected.** The **honest wedge** is **concurrency-not-minutes + memoization +
+platform**, NOT speed (S6.3). Against a Depot (fast caching), a Blacksmith (fast
+bare-metal minutes), a Namespace (fast, dev-env-flavored) — the buyer should pick
+Runners when their bill *whiplashes with usage* (flat wins), when they *re-run a lot*
+(memoization wins), or when they need *untrusted-code isolation + verifiable verdicts*
+(the platform wins). If raw per-job wall-time is the only axis, an honest bake-off may
+favor bare metal — and we say so (guardrails, S6.3).
+**Evidence.** Flat concurrency + memoization are the ratified model (S1.1.2/S1.2.1,
+LIVE mint); `corelink verify` attestation LIVE (S1.5.1); the ~10%-under-GitHub raw-
+speed honesty is documented (competitive-blacksmith.md, S6.3). A published feature
+matrix is a **positioning deliverable (owner-gated)**; the *mechanisms* it would cite
+are built/proven.
+**Variations/edges/failures.**
+- *Buyer only cares about raw speed* — honest: a bare-metal competitor may win that
+  axis; we change the game (concurrency + memoization + platform), we don't win the
+  raw-speed race (S6.3 guardrail). Never claim "faster than Blacksmith".
+- *Buyer wants cross-tenant dedup* — intra-tenant at GA only; cross-tenant is staged,
+  never claimed live (S1.2.2 tense discipline).
+- *Buyer runs untrusted/agent code* — the isolation + attestation wedge (S4.2/S7.3) is
+  the strongest differentiator vs a shared-kernel incumbent; this is the ICP-A story.
+- *Buyer's workload never re-runs* — memoization wins less; the flat-concurrency +
+  isolation axes carry it, framed honestly (S9.4 low-hit-rate honesty).
+**Feature.** Honest feature-matrix · flat+memo+platform wedge · not-raw-speed · attestation differentiator · positioning (owner-gated).
 
 ---
 
@@ -1352,6 +2143,158 @@ refuses.
 **Evidence.** Durable suspend landed for N>1 (MEMORY: fabricd-multi-instance); tenant-
 suspend enforcement on the CF path is an ADR-0009 follow-up.
 **Feature.** Durable tenant suspend.
+
+### S7.8 — A compromised customer GitHub App install 🟡 built-not-proven (blast-radius bounded)
+**Story.** As a red-teamer, I want to compromise a *customer's* App installation and
+see how far I get, so that I confirm a breached install can't cross the tenant boundary
+or incur unbounded cost.
+**Flow.** An attacker controls a customer's GitHub org (their install) → they can queue
+jobs on repos the install covers → each spawn mints a **per-installation token scoped
+to that customer's repos** (S1.1.3, `installationToken`), and the mint **derives the
+tenant server-side from `installation_id + repo`** (S1.4.5) → the attacker's jobs run
+as **that one tenant**, bounded by that tenant's **concurrency cap** + **vCPU-h
+ceiling** (loss-impossible, S5.3.2).
+**Expected.** The blast radius of a compromised install is **exactly that tenant** —
+never cross-tenant (S7.4, no existence oracle), never the fabric's first-party creds
+(the App private key lives with the fabric, **never on a box**, S1.1.3), never
+unbounded cost (the ceiling caps COGS, S5.3.2). The attacker gets what the *customer*
+already had: their own repos, their own capped concurrency. **Uninstall is the
+fail-safe kill** (S1.1.3): revoking the install makes the mint path inert for that
+tenant. Suspending the tenant (S7.7) cuts it fabric-wide.
+**Evidence.** Per-install token scoping (S1.1.3); server-derived tenant, fail-closed
+authz (S1.4.5); no cross-tenant (S7.4); App key never on a box (S1.1.3); loss-impossible
+ceiling (S5.3.2); durable suspend (S7.7).
+**Variations/edges/failures.**
+- *Attacker tries another tenant's repo* — the mint derives a different (or no) tenant;
+  a forbidden derivation is `spawn_forbidden`, no warm spawn (S1.4.5). No cross-tenant.
+- *Attacker mines on the stolen tenant* — bounded by the ceiling (loss-impossible) +
+  caught by sustained-pin detection (S5.3.3); the tenant is suspended (S7.7).
+- *The FABRIC's App private key is compromised* — a different, platform-level incident:
+  rotate the App private key independently (S5.4.4); this is the fabric's secret, not a
+  per-customer one.
+**Feature.** Per-install token scoping · server-derived tenant · tenant-bounded blast radius · uninstall/suspend kill.
+
+### S7.9 — Webhook replay (a captured signed webhook, replayed) 🟢 LIVE-proven (idempotent) / 🟡 freshness
+**Story.** As a red-teamer, I want to capture a valid signed webhook and replay it, so
+that I test whether a replay can double-spawn, double-bill, or re-run a security action
+maliciously.
+**Flow.** Capture a legit `workflow_job` webhook (it passed the HMAC, S1.4.3) → replay
+it → the outcome: a replayed **`queued`** re-drives spawn but **`claimSpawn` dedups**
+(the `spawn:<job>` claim, S1.4.1) ⇒ no double-spawn; a replayed **`completed`** is a
+**counter no-op via `claimCompletion`** (exactly-once, S1.2.4/S1.4.x) while the
+security actions (revoke/release/teardown) **re-run idempotently** (S1.2.4) ⇒ no harm.
+**Expected — honest.** Replay-safety is achieved by **idempotency, not signature
+freshness**: the HMAC (S1.4.3) has **no timestamp/nonce**, so a captured signed webhook
+*would* pass HMAC on replay — but every downstream action is idempotent
+(`claimSpawn`/`claimCompletion` dedup, S1.4.1/S1.2.4), so a replay is a **no-op**, never
+a double-spawn or double-bill. The honest residual: an attacker who captures a signed
+webhook can *replay* it (it authenticates), but gains **nothing** — the idempotency
+layer is the defense, not signature-freshness. A leaked webhook *URL* is separately
+defended by the HMAC (a forged-but-unsigned webhook is `401`, S1.4.3).
+**Evidence.** `claimSpawn` spawn-dedup (S1.4.1, `index.ts:1140-1144` webhook_spawn_deduped);
+`claimCompletion` exactly-once completed leg (S1.2.4, `index.ts:1078`); security actions
+idempotent + not dedup-gated (S1.2.4, `index.ts:1064`); HMAC on the webhook (S1.4.3).
+**Variations/edges/failures.**
+- *Replay a `completed` to force an early teardown* — the revoke/teardown re-run
+  idempotently (S1.2.4); if the job already completed, it's a no-op; if it's still
+  running, a *legit* completed would tear it down anyway — the attacker can't
+  distinguish or gain beyond what a real completed does. (A replayed completed for a
+  *running* job is the sharpest edge — bounded to that one lease, self-healing.)
+- *Forged (unsigned) webhook* — `401 unauthorized` (S1.4.3), rejected before any action.
+- *Replay storm* — per-repo `spawn:<repo>` rate bucket 429s it (S1.4.3).
+- *Freshness hardening* — a timestamp/nonce on the HMAC is a **tracked hardening**
+  (defense-in-depth over the idempotency floor); not built, honestly noted.
+**Feature.** Idempotent replay-safety · claimSpawn/claimCompletion dedup · HMAC auth · freshness (tracked hardening).
+
+### S7.10 — A malicious `net_policy` request (asking for permissive egress) 🟢 LIVE-proven (forced server-side)
+**Story.** As a red-teamer, I want to request a permissive `net_policy` on my lease to
+widen my egress, so that I test whether a caller can talk their way past isolation.
+**Flow.** `POST /v1/leases` with a hand-crafted permissive `net_policy` (e.g.
+`"open"`/`"*"`) → for the **runner** and **agent-exec** paths, the caller's
+`net_policy` field is **IGNORED and FORCED server-side** (`"egress-runner"` for runner,
+forced for agent; `leases.rs:569-593`) → the box gets the server's policy, not the
+attacker's.
+**Expected.** The isolation posture is **server-authoritative, never caller-inferred**:
+for the untrusted runner/agent paths the wire `net_policy` is overwritten server-side,
+so a malicious request buys nothing (the C2 invariant — isolation is derived from the
+`ContainerSpec` constructor, **never inferred from the wire `net_policy` string**,
+`cloud_exec.rs:639/671`). The only path that honors a caller's `net_policy` verbatim is
+the **plain hugit check-exec** lease — and hugit is a **trusted tenant** setting policy
+on its *own* leases, still isolation-derived-from-the-spec, not from the string. Egress
+is further shaped by the SDK proxy (S1.6.4) with the honest G2 caveat (S7.6).
+**Evidence.** `net_policy` FORCED server-side for runner/agent (`leases.rs:569-593`);
+isolation never inferred from the wire string (C2 invariant, `cloud_exec.rs:639/671`);
+operator egress-cutoff for a misbehaving lease (S5.4.2).
+**Variations/edges/failures.**
+- *Malicious policy on a runner lease* — ignored (forced `egress-runner`); the attacker
+  cannot widen egress by asking.
+- *A misbehaving lease exfiltrating* — operator egress-cutoff severs proxied egress
+  (S5.4.2); raw sockets bypass the proxy (S5.4.2/S7.6 caveat) → hard sever is teardown.
+- *Metadata/IMDS reach* — the partial denylist (G2, S7.6) is the honest tracked gap;
+  the microVM boundary still contains blast radius (S4.2).
+**Feature.** Server-forced `net_policy` · C2 isolation-from-spec-not-string · egress-cutoff · G2 caveat (honest).
+
+### S7.11 — Credential-ticket replay across leases 🟢 LIVE-proven (lease-bound + single-use)
+**Story.** As a red-teamer, I want to steal a `CLW_CRED_TICKET` and redeem it on a
+*different* lease (or replay it on the same lease) to get a CAS PAT I shouldn't have, so
+that I test the env-0 cred-broker's binding.
+**Flow.** Capture a ticket → (a) present it to **another lease's** `POST
+/v1/leases/{B}/cas-cred` → the redeem **verifies the ticket's signature over the
+lease_id** (`signer.verify(&lease_id, &req.ticket)`, `cas_cred.rs:61`) → a ticket signed
+for lease A fails the verify for lease B ⇒ **`401 invalid ticket`**; (b) replay it on
+**the same lease A** after the first redemption → the **single-use latch** already took
+the stash ⇒ **`410 gone` "ticket already redeemed"** (`cas_cred.rs:81-95`).
+**Expected.** The ticket is **lease-bound + single-use**: bound because its signature is
+over the `lease_id` (cross-lease replay ⇒ 401, `cas_cred.rs:59-62`); single-use because
+the first redemption latches the stash (`Some`⇒hand out, `None`⇒`410 gone`,
+`cas_cred.rs:81-95`); the route is mounted **outside** the tenant-PAT gate because the
+in-container clw holds only the ticket (the P0 env-0 fix that never puts a PAT in the
+untrusted box, S7.2). The lease must be **Held** — a ticket redeemed after the lease
+terminalized gets nothing (`cas_cred.rs:64`). NOTE the two impls: the **Rust fabricd**
+handler is strict single-use (`410`); the **CF CredStashDO** serves multi-use *until
+the lease TTL*, then wipes at completion (S7.2, `index.ts` CredStashDO) — both fail
+closed after the lease ends.
+**Evidence.** Lease-bound verify (`cas_cred.rs:61`); single-use latch → 410 gone
+(`cas_cred.rs:81-95`); Held-only (`cas_cred.rs:64`); env-0 route outside the PAT gate
+(S7.2); external probe returns `401 invalid ticket` post-wipe (S1.2.4).
+**Variations/edges/failures.**
+- *Cross-lease replay* — `401 invalid ticket` (signature is over the wrong lease_id).
+- *Same-lease replay after redeem* — `410 gone` (Rust latch) / stash wiped at
+  completion (CF), so a ticket read by untrusted code after boot buys nothing (S7.2).
+- *Redeem after the lease terminalizes* — nothing to hand out (Held-only gate).
+- *The PAT it would yield* — even a stolen live PAT is per-job, soon-dead, revoked at
+  completion (S1.2.4/S7.2); the blast radius is one job.
+**Feature.** Lease-bound ticket · single-use latch (410) · Held-only · env-0 outside-PAT-gate · per-job soon-dead PAT.
+
+### S7.12 — A cache-poisoning attempt (data-plane integrity) 🟢 LIVE-proven (content-address + determinism)
+**Story.** As a red-teamer, I want to poison the cache — plant a wrong result under a
+memo key, or serve a tampered blob — so that a later job trusts a forged "cached truth".
+**Flow.** Attempt: (a) store a wrong `CheckResult` under a memo key → the close path
+**rejects any result whose `memo_key ≠ SHA-256(LP(tree)‖LP(def)‖LP(toolchain))`** before
+attesting (S2.1.2, `400 invalid`); (b) serve a tampered CAS blob → the blob's identity
+**is** its content hash, so a mutated byte fails its content-address check (S1.2.6),
+never masquerades as the real input; (c) store a non-deterministic "green" → the memo
+**never stores a non-deterministic result as canonical** (S1.6.10, determinism sacred,
+whitepaper §5.2).
+**Expected.** Cache integrity is **structural, not trust-based**: content-addressing
+means a byte can't lie about its identity (S1.2.6); the memo-key integrity check means a
+result can't lie about its axes (S2.1.2); determinism-sacred means a flaky result can't
+be canonized (S1.6.10). Cross-tenant poisoning is **impossible** because cross-tenant
+dedup is **staged, not live** — the shared warm set is **intra-tenant at GA** (S1.2.2
+tense discipline), so no attacker can poison another tenant's cache. And a consumer can
+**independently verify** any verdict with `corelink verify` (S1.5.1/S7.3), so even a
+hypothetical forged result is caught at the client.
+**Evidence.** Memo-key integrity reject (S2.1.2, `400 invalid`); content-addressed CAS
+(S1.2.6, whitepaper §2); determinism guard (S1.6.10); intra-tenant-only sharing (S1.2.2);
+`result_binding_sig_v2` client verify (S1.5.1/S7.3).
+**Variations/edges/failures.**
+- *Forge a result + a valid-looking sig* — v2 binds the full outcome
+  (exit+artifacts+refs), `verify_strict` rejects a forgery (S7.3).
+- *Poison via a tampered hydrate blob* — fails the content-address check (S1.2.6);
+  a fail-closed hydrate never runs on a half/tampered tree (S1.2.6).
+- *Cross-tenant poison* — unrepresentable: cross-tenant dedup is not live (S1.2.2);
+  the tenant boundary is the poisoning firewall.
+**Feature.** Content-address integrity · memo-key reject · determinism-sacred · intra-tenant-only firewall · client verify.
 
 ---
 
@@ -1649,6 +2592,34 @@ properties); CoreLink Cache erasure shipped (inherited). Orchestration = owner-g
 - *Auditable proof of erasure* — the `RETURNING` manifest is the evidence the
   orchestrator logs.
 **Feature.** Tenant-prefix-bounded erasure · inherited CAS/AC erasure · retention tension (open) · orchestration (owner-gated).
+
+### S10.6 — Enterprise SSO / SAML onboarding 🔵 owner-gated (identity, ADR-0002)
+**Story.** As an enterprise procurement/IT reviewer, I want my org to onboard via our
+SAML/SSO IdP with SCIM provisioning, so that access is governed by our identity system,
+not a separate password base.
+**Flow.** The enterprise connects its IdP → users authenticate via SSO → the **HuGR
+account** (Clerk pool, ADR-0002) maps the **org → the tenant** (the tenant keys caps/
+fairness/billing) → SAML/SSO + SCIM are Clerk/identity-layer features consumed, **not
+built in this repo**.
+**Expected — honest.** Identity is **decided and consumed, not implemented here**
+(ADR-0002 obligation 4): the fabric **only consumes PAT verification + tenancy from
+CoreLink** — there is **no identity/auth code in this repo** (S1.1.1). SSO/SAML/SCIM
+live in the HuGR account / Clerk layer (the same pool ADR-0002 mandates), so this is
+**owner-gated on the CoreLink self-serve GA (M2)** — the fabric's obligation is that the
+org→tenant mapping resolves a tenant PAT the `/v1` surface accepts (S1.1.1), regardless
+of how the user authenticated (password, SSO, SAML). Enterprise (above-Max, S1.1.2) is
+the tier where SSO/SAML/BYOC governance is the expectation.
+**Evidence.** ADR-0002 (HuGR account, org=tenant, same Clerk pool); no identity code in
+this repo (S1.1.1, ADR-0002 obl. 4); the `/v1` surface accepts the resolved tenant PAT.
+SSO/SAML/SCIM = identity-layer, owner-gated (M2 self-serve GA; Enterprise governance).
+**Variations/edges/failures.**
+- *SCIM deprovisioning* — a removed IdP user loses SSO access; the *tenant* (org) and
+  its running jobs are unaffected (identity ≠ tenancy); an org-level offboard is S13.4.
+- *SSO required for compliance* — an Enterprise governance requirement (S1.1.2 above-Max)
+  the identity layer satisfies; the fabric is agnostic to the auth method.
+- *No identity here to break* — a red-team of "the fabric's login" finds none: the
+  fabric has no user base (S1.1.1), only tenant-PAT verification consumed from CoreLink.
+**Feature.** HuGR-account SSO/SAML (identity layer) · org→tenant mapping · no-identity-code-here · Enterprise governance (owner-gated).
 
 ---
 
@@ -2089,6 +3060,42 @@ owner-gated on the product semantics).
 - *Sizing use* — feeds S12.3 (right-size N) and S13.1/S13.2 (up/downgrade decision).
 **Feature.** Per-tenant wait histogram · non-interference-visible · sizing input · tenant-scoped.
 
+### S14.6 — Customer-facing cache-hit rate & cost breakdown 🟡 built-not-proven (raw signal) / 🔵 dedicated metric (product follow-up)
+**Story.** As a self-serve customer, I want a dashboard showing my cache-hit rate and a
+per-pipeline cost breakdown, so that I can see the memoization ROI and where my COGS
+goes — the number that proves the moat to me.
+**Flow.** (Today) the customer assembles the picture from the honest primitives:
+period-to-date vCPU-h (`GET /v1/usage/history`, S14.2, trending down per unit of work as
+the cache warms, S9.4), live usage vs plan (`GET /v1/usage`, S14.1), and the lease list
+(`GET /v1/leases`, S14.3) for per-job drill-down. (Proposed) a **dedicated hit-rate +
+cost-breakdown surface** would compute and expose the hit-rate and per-pipeline cost
+directly.
+**Expected — honest.** The **raw signal is truthful and built**: the fabric reports
+honest exec-vs-hit accounting (contract §3, **no inflated "served from cache"**, S2.1.1),
+so a hit rate derived from it is un-gamed (S9.4 — a number the vendor **can't inflate**).
+But a **dedicated customer-facing hit-rate metric and cost-breakdown is a tracked
+product follow-up, NOT a shipped field** (flagged in S9.4/S12.4) — today the customer
+*infers* the ROI curve from `usage/history` (S14.2), rather than reading a
+`cache_hit_rate` field. Framing discipline: **hit-rate is unmeasured until launch**
+(S6.3) — the product promises the *mechanism* (memoization), the customer measures the
+*rate* on their own workload; a shipped metric would surface that honest number, never a
+marketing one.
+**Evidence.** Honest hit accounting is contract §3 (S2.1.1); the trend is derivable from
+`usage_history.rs` `compute_accrued` (S14.2); the ⚪ `[clw] cache hit` proof is
+X4-external (S1.1.4). A dedicated `cache_hit_rate` / cost-breakdown field is **not yet a
+handler** — the tracked product gap (this story is its home).
+**Variations/edges/failures.**
+- *Customer wants it now* — assemble it from `usage/history` (S14.2) + honest accounting
+  (S2.1.1); the dedicated metric is the follow-up, the raw truth is available.
+- *Low hit rate on a churning repo* — honestly low (S9.4); the metric would show a real,
+  un-flattering number, never inflated (S2.1.1) — trust is built on a number we can't game.
+- *Per-pipeline cost attribution* — for a hugit-resold customer, per-end-customer
+  attribution is hugit-side (S2.5.1 reseller boundary); for a direct customer it's their
+  own leases (S14.3), the fabric attributes to the tenant.
+- *Cost vs bill* — the breakdown is COGS/usage (raw occupancy, S2.2.2), not a
+  customer-facing minutes meter (Principle 6); the *bill* stays the flat tier (S6.1).
+**Feature.** Honest hit accounting (built) · usage/history-derived ROI · dedicated hit-rate+cost metric (product follow-up) · no-inflation.
+
 ---
 
 # Cross-cutting reality summary (what a validation campaign must prove)
@@ -2129,6 +3136,18 @@ owner-gated on the product semantics).
 | Data residency / region | 🟡 built / 🔵 multi-region | region-tagged billing (S5.3.1); multi-region = M3 |
 | Tier upgrade/downgrade (live cap change) | 🔵 owner-gated | composite plan source no-restart (S5.1.1); Stripe self-serve GA |
 | Reseller / invisible-COGS (hugit) | 🔵 owner-gated | raw occupancy + attested cost; packaging decision (product.md §9.3) |
+| Billing/onboarding failure modes (dunning · trial-expiry) | 🔵 owner-gated | S1.1.5–7; entitlement-revoke = no-plan refusal; CoreLink-server-side Stripe |
+| GPU / capability-gap fallback | 🔵 owner-gated | S1.3.4; subset-gate refuses unofferable kinds; GPU = M4 adjacency |
+| Time/scheduling shapes (cron · dispatch · long-job vs TTL) | 🟢 LIVE (trigger-agnostic) / 🟡 TTL | S1.6.13–14; `workflow_job`-keyed, trigger-blind; hard lease `deadline_ms` |
+| Language/ecosystem drop-in (Bazel/Nix/Poetry/cargo/500-pkg) | 🟡 agent-native / 🔵 CAS-backed RE | Theme 1.7; agent-native today, CAS-backed remote-cache = adjacency |
+| Workspaces depth (snapshot · idle-suspend · SSH · outlive-session) | 🔵 owner-gated | S3.3–7; clw snapshot/hydrate spine (ClwBoxDrive stub); campaign #2 |
+| Agent-side storm / self-concurrency-wall bounding | 🟡 built-not-proven | S4.5–7; same caps that protect other tenants bound the fleet's own side |
+| Multi-region ops (shard rebalance · region outage · billing recon) | 🔵 owner-gated (M3/N>1) | S5.2.4, Theme 5.5; single-region today; boot-authoritative shard count |
+| Day-2 ops (runner-image upgrade · bad-deploy canary) | 🟢 LIVE | S5.4.5–6; X4-pinned image bumps; canary armed (HEAD f945a1f) + boot guard |
+| Competitive bake-off vs Depot/Blacksmith/Namespace | 🔵 owner-gated (positioning) | S6.4; flat+memo+platform wedge, NOT raw speed (S6.3 honesty) |
+| NEG-security: compromised App · webhook-replay · net_policy · ticket-replay · cache-poison | 🟢 LIVE / 🟡 freshness | S7.8–12; tenant-bounded blast radius; idempotent replay; server-forced net_policy; lease-bound ticket; content-address integrity |
+| Enterprise SSO / SAML / SCIM | 🔵 owner-gated (identity) | S10.6; ADR-0002 HuGR account/Clerk; NO identity code in this repo |
+| Customer-facing hit-rate & cost-breakdown metric | 🟡 raw signal / 🔵 dedicated field | S14.6; honest accounting built (contract §3); dedicated metric = product follow-up |
 
 **Standing tense discipline (never overclaim):** dedup is **intra-tenant at GA**;
 cross-tenant is staged (`CAP-DEDUP-CROSS-TENANT`), not live. Runners is **~10% under
