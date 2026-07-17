@@ -120,7 +120,18 @@
       // spawn STALL: health showed active=0/assigned=0/healthy=2). 6 gives spawn
       // headroom past leaked idle instances and lets per-tenant fairness bind before
       // the account ceiling. The account has ample room (PAYG, ~4 live total).
-      "max_instances": 6
+      // STABILIZATION W1/F3 (2026-07-16): raised 6 → 20 to COVER a tenant's default
+      // entitlement (max_concurrency 20). Previously the admission fairness gate
+      // (acquireTenantSlot, entitlement=20) admitted between 7–20 concurrent jobs but
+      // THIS physical class cap (6) rejected the actual container start → retry-
+      // exhaust → claim-release → 60s reconciler re-drive → same wall = a silent
+      // multi-minute spawn thrash (+ orphaned CAS-PAT churn). 20 makes the physical
+      // cap meet the per-tenant ceiling so an admitted job always has a box. The
+      // GLOBAL cross-tenant cap (this class cap is global; per-tenant fairness is
+      // not) is enforced atomically in W7/F7 (DO-backed slot), which also clamps
+      // admission to min(entitlement, fleet_cap). See
+      // docs/handoff/2026-07-16-STABILIZATION-plan-3lens-hidden-debt.md.
+      "max_instances": 20
     },
     {
       // CF-native check-host (campaign B). Build context = deploy/check-host (its
