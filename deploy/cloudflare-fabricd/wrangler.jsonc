@@ -100,6 +100,17 @@
     // a wrangler var is visible to the Worker as env.* but the CONTAINER only sees
     // what this.envVars sets — an unforwarded var is inert).
     "FABRIC_MAX_INFLIGHT_REQUESTS": "64"
+    // ── DEV/TEST cred-ticket mint (POST /v1/test/mint-cred-ticket) — OFF ───────
+    // A SENSITIVE dev/test knob: it mints a real single-use cred-ticket for a
+    // RESTRICTED test tenant (default f0005), out-of-band, so the clw TL can run
+    // their `cred_ticket_redeems_against_the_real_fabric` conformance journey.
+    // OFF by default — the route 404s (inert) unless FABRIC_TEST_MINT_KEY is set.
+    // DELIBERATELY NOT set here: arm it ONLY for a dev/test flip via a SECRET
+    //   `wrangler secret put FABRIC_TEST_MINT_KEY`   (a real high-entropy value;
+    // a dev-sentinel/short value fails boot loud), then a container rollout picks
+    // it up. Optional `FABRIC_TEST_MINT_TENANTS` (comma-separated) overrides the
+    // f0005 allowlist. Forwarded into the container in src/index.ts. Never leave
+    // it armed in a steady prod deploy — remove the secret to disable.
   },
 
   // The singleton control-plane container DO. ONE instance (max_instances 1, a fixed

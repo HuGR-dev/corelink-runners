@@ -729,6 +729,16 @@ pub struct AppState {
     /// via [`with_billing_export_target`](Self::with_billing_export_target) when
     /// `BILLING_INGEST_*` env is present, and drives its periodic `flush`.
     pub(crate) billing_export_target: Arc<dyn BillingExportTarget + Send + Sync>,
+
+    /// DEV/TEST-ONLY out-of-band cred-ticket mint config
+    /// (`POST /v1/test/mint-cred-ticket`, [`crate::handlers::test_mint`]).
+    ///
+    /// `Some` IFF `FABRIC_TEST_MINT_KEY` was set at boot — the single arming
+    /// switch. `None` (the PRODUCTION default) ⇒ the route 404s (inert; no mint
+    /// possible). Sensitive surface: it mints a real single-use cred-ticket +
+    /// stashes a per-job CAS PAT for a restricted TEST tenant, out-of-band. Wired
+    /// via [`with_test_mint`](Self::with_test_mint).
+    pub(crate) test_mint: Option<crate::handlers::test_mint::TestMintConfig>,
 }
 
 /// Default cap on concurrent close ack-window waits (audit P1). Chosen so a
@@ -895,6 +905,10 @@ impl AppState {
             // ASK-2 billing usage-push DEFAULT-OFF: the no-op target (observe +
             // succeed). The composition root opts in via `with_billing_export_target`.
             billing_export_target: Arc::new(corelink_fabric::NoopBillingTarget),
+            // DEV/TEST cred-ticket mint DEFAULT-OFF: no config ⇒ the route 404s
+            // (inert). The composition root opts in via `with_test_mint` ONLY when
+            // FABRIC_TEST_MINT_KEY is set.
+            test_mint: None,
             // Multi-instance identity: UNKNOWN until the proxy Worker stamps the
             // shard headers (inert single-instance until then).
             this_shard: Arc::new(std::sync::atomic::AtomicU32::new(Self::SHARD_UNKNOWN)),
@@ -1344,6 +1358,19 @@ impl AppState {
         signer: Option<crate::cred_ticket::CredTicketSigner>,
     ) -> Self {
         self.cred_signer = signer;
+        self
+    }
+
+    /// DEV/TEST-ONLY: wire the out-of-band cred-ticket mint config. `Some` ⇒ the
+    /// `POST /v1/test/mint-cred-ticket` route is ACTIVE (arming `FABRIC_TEST_MINT_KEY`
+    /// was set); `None` ⇒ the route 404s (inert; the PRODUCTION default). See
+    /// [`crate::handlers::test_mint`] for the security posture.
+    #[must_use]
+    pub(crate) fn with_test_mint(
+        mut self,
+        cfg: Option<crate::handlers::test_mint::TestMintConfig>,
+    ) -> Self {
+        self.test_mint = cfg;
         self
     }
 
@@ -2110,6 +2137,15 @@ pub fn app_full(
         .route(
             &capture(paths::TENANT_UNSUSPEND),
             post(handlers::enforcement::unsuspend),
+        )
+        // DEV/TEST-ONLY out-of-band cred-ticket mint. Gates on its OWN dedicated
+        // key (`FABRIC_TEST_MINT_KEY`) INSIDE the handler (constant-time; absent ⇒
+        // 404 inert — the production default), so like the enforcement routes it
+        // sits on the AppState router, NOT behind the tenant-PAT layer. It is
+        // ALWAYS mounted but the handler is a no-op 404 unless armed.
+        .route(
+            handlers::test_mint::TEST_MINT_CRED_TICKET_PATH,
+            post(handlers::test_mint::mint_cred_ticket),
         )
         .with_state(state.clone());
 

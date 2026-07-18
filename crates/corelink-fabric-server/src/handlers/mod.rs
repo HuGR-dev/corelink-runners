@@ -20,6 +20,7 @@ pub mod metrics;
 pub mod occupancy;
 pub mod queue;
 pub mod status;
+pub mod test_mint;
 pub mod usage;
 pub mod usage_history;
 pub mod webhook;

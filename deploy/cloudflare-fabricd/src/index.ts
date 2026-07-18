@@ -88,6 +88,13 @@ export interface Env {
   // Enforcement / observability / safety (optional passthroughs; inert until set)
   FABRIC_ADMIN_KEY?: string;
   FABRIC_OBSERVABILITY_KEY?: string;
+  // DEV/TEST-ONLY out-of-band cred-ticket mint (POST /v1/test/mint-cred-ticket).
+  // OFF by default: absent ⇒ the route 404s (inert). Arms a SENSITIVE mint surface,
+  // so set it manually (`wrangler secret put`) only for a dev/test flip, never in a
+  // steady prod deploy. FABRIC_TEST_MINT_TENANTS is an optional comma-separated
+  // allowlist (default f0005). Both forwarded into the container below.
+  FABRIC_TEST_MINT_KEY?: string;
+  FABRIC_TEST_MINT_TENANTS?: string;
   FABRIC_RUNNER_REPO_ALLOWLIST?: string;
   // ADR-0007 Stage-B autoscaler (default-off; the route only mounts when
   // FABRIC_AUTOSCALER_WEBHOOK_SECRET is set — inert until then)
@@ -222,6 +229,14 @@ export class FabricdContainer extends Container<Env> {
       // var actually reaches the container (all inert until set).
       ...(env.FABRIC_ADMIN_KEY ? { FABRIC_ADMIN_KEY: env.FABRIC_ADMIN_KEY } : {}),
       ...(env.FABRIC_OBSERVABILITY_KEY ? { FABRIC_OBSERVABILITY_KEY: env.FABRIC_OBSERVABILITY_KEY } : {}),
+      // DEV/TEST-ONLY out-of-band cred-ticket mint — forwarded so a dev/test
+      // `wrangler secret put FABRIC_TEST_MINT_KEY` actually reaches the container
+      // (the set-but-unforwarded trap). Absent ⇒ the route 404s (inert). Never set
+      // in a steady prod deploy — it arms a sensitive mint surface.
+      ...(env.FABRIC_TEST_MINT_KEY ? { FABRIC_TEST_MINT_KEY: env.FABRIC_TEST_MINT_KEY } : {}),
+      ...(env.FABRIC_TEST_MINT_TENANTS
+        ? { FABRIC_TEST_MINT_TENANTS: env.FABRIC_TEST_MINT_TENANTS }
+        : {}),
       ...(env.FABRIC_RUNNER_REPO_ALLOWLIST
         ? { FABRIC_RUNNER_REPO_ALLOWLIST: env.FABRIC_RUNNER_REPO_ALLOWLIST }
         : {}),
