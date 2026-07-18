@@ -528,12 +528,17 @@ pub(crate) async fn acquire(
         Queue(MintedLease),
     }
     let reserved = {
-        let Ok(mut ledger) = state.ledger.lock() else {
-            return fail_closed("lease ledger lock poisoned");
-        };
+        // W-LEDGER-A1: the acquire hot path NO LONGER takes the process `Mutex` on
+        // `state.ledger`. The atomic concurrency/compute reserve is committed via
+        // `state.admit` (the `AdmitLedger` seam, `&self`), whose backing store
+        // enforces cap-safety itself (pg advisory lock / in-memory inner mutex).
+        // Dropping the process `Mutex` here is what stops a same-tenant acquire
+        // burst from parking every tokio worker on the std `.lock()` across the
+        // (for pg, `block_in_place`) blocking admit.
 
-        // RATE ceiling — preserved exactly (same lock order: rate window under
-        // the ledger lock). Every attempt pushes, admitted or not.
+        // RATE ceiling — the per-instance `RateWindow` bookkeeping, now locked
+        // STANDALONE (it was needlessly nested under the ledger guard before).
+        // Every attempt pushes, admitted or not.
         {
             let Ok(mut windows) = state.rate_windows.lock() else {
                 return fail_closed("rate-window lock poisoned");
@@ -711,7 +716,10 @@ pub(crate) async fn acquire(
             Err(msg) => return fail_closed(msg),
         };
 
-        match ledger.try_admit_with_compute(pending, plan.max_concurrency, gate) {
+        match state
+            .admit
+            .try_admit_with_compute(pending, plan.max_concurrency, gate)
+        {
             Ok(AdmitOutcome::Admitted) => Reserved::Admitted(MintedLease {
                 lease_id,
                 lease,
@@ -766,7 +774,10 @@ pub(crate) async fn acquire(
                 return fail_closed("lease ledger refused the admission reserve");
             }
         }
-        // Ledger lock (`ledger`) drops here at end of block — BEFORE any await.
+        // No process `Mutex` is held anywhere in this block (W-LEDGER-A1) — the
+        // reserve went through `state.admit`. The block is fully synchronous; the
+        // `.await` (queue path OR finalize) happens AFTER it, so the handler future
+        // stays `Send` exactly as before.
     };
 
     match reserved {

@@ -1116,8 +1116,22 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
     //   provides exactly that.  We bridge with block_in_place + block_on so this
     //   sync fn can drive the async connect.  A connect Err propagates (fail-
     //   closed: the server refuses to boot without a reachable ledger).
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = match cfg.ledger_backend {
-        LedgerBackend::Memory => Arc::new(Mutex::new(InMemoryLedger::new())),
+    // W-LEDGER-A1: build BOTH the cold `ledger` handle AND the lock-split `admit`
+    // handle from the SAME concrete ledger. The two are CLONES sharing one backing
+    // store (in-memory: the inner mutex; pg: the pool + admit-permits semaphore), so
+    // the reserve committed through `admit` (no process `Mutex`) is authoritatively
+    // visible to close/reaper via `ledger`. The `admit` clone drives the atomic
+    // check-and-reserve without taking the process `Mutex`, so an acquire burst
+    // cannot park the tokio workers on the std `.lock()`.
+    let (ledger, admit): (
+        Arc<Mutex<dyn LeaseLedger + Send>>,
+        Arc<dyn corelink_fabric::AdmitLedger>,
+    ) = match cfg.ledger_backend {
+        LedgerBackend::Memory => {
+            let mem = InMemoryLedger::new();
+            let admit: Arc<dyn corelink_fabric::AdmitLedger> = Arc::new(mem.clone());
+            (Arc::new(Mutex::new(mem)), admit)
+        }
         LedgerBackend::Postgres => {
             let pg = tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(corelink_fabric::PgLedger::connect(
@@ -1128,7 +1142,10 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
                     cfg.pg_tls,
                 ))
             })?;
-            Arc::new(Mutex::new(pg))
+            // CLONE shares the `Arc<Pool>` AND the `Arc<Semaphore>` admit-permits —
+            // the C3 connection-reservation invariant holds across the split.
+            let admit: Arc<dyn corelink_fabric::AdmitLedger> = Arc::new(pg.clone());
+            (Arc::new(Mutex::new(pg)), admit)
         }
     };
 
@@ -1259,6 +1276,7 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
     };
 
     let state = AppState::new(ledger, plans, Arc::new(SystemClock))
+        .with_admit(admit)
         .with_counters(counters)
         .with_signer(signer)
         .with_ingest_signer(ingest_signer)

@@ -943,10 +943,10 @@ pub async fn run_admission_tick(state: &AppState, now_ms: u64) -> usize {
                 continue;
             }
         };
-        let outcome = {
-            let mut ledger = state.ledger.lock().unwrap_or_else(|e| e.into_inner());
-            ledger.try_admit_with_compute(pending, plan_cap, gate)
-        };
+        // W-LEDGER-A1: reserve via the admit seam (`&self`, no process `Mutex`) —
+        // the SAME handle the immediate acquire path uses, so both dispatch paths
+        // share one cap-safe reserve.
+        let outcome = state.admit.try_admit_with_compute(pending, plan_cap, gate);
         match outcome {
             Ok(corelink_fabric::ledger::AdmitOutcome::Admitted) => {
                 // DURABLE (WP-CROSS-INSTANCE-QUEUE): a genuine WIN advances the
