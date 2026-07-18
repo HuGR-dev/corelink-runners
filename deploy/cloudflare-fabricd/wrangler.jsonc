@@ -83,9 +83,10 @@
     // Durable billing EXPORT (WP-A): pg-ONLY. ⚠️ server.rs FAIL-CLOSES boot if this
     // is set WITHOUT the pg ledger (FABRIC_LEDGER_BACKEND=pg via DATABASE_URL) — so
     // the proxy forwards it into the container ONLY when DATABASE_URL is present
-    // (src/index.ts, inside the DATABASE_URL block). It is therefore INERT on
-    // today's in-memory ledger and arms automatically the day pg is enabled. 60s is
-    // a sane durable-export cadence (distinct from the always-on 30s corelink push).
+    // (src/index.ts, inside the DATABASE_URL block). DATABASE_URL IS bound on the
+    // live deploy (a wrangler secret — invisible in this file), so pg is the active
+    // backend and this durable export is ARMED (not inert). 60s is a sane
+    // durable-export cadence (distinct from the always-on 30s corelink push).
     "FABRIC_BILLING_EXPORT_INTERVAL_SECS": "60",
     // ── ACQUIRE-PATH RESILIENCE (W0) — right-size the global inbound bound ─────
     // The code DEFAULT (DEFAULT_MAX_INFLIGHT_REQUESTS = 1024) is a thundering-herd
@@ -101,9 +102,12 @@
     "FABRIC_MAX_INFLIGHT_REQUESTS": "64"
   },
 
-  // The singleton control-plane container DO. ONE instance: the in-memory lease
-  // ledger requires every /v1 request to hit the SAME process (max_instances 1,
-  // a fixed DO id in src/index.ts).
+  // The singleton control-plane container DO. ONE instance (max_instances 1, a fixed
+  // DO id in src/index.ts): DATABASE_URL IS bound → pg-durable ledger, so N>1 is
+  // offline-proven + unblocked (flip = raise FABRIC_NUM_SHARDS + max_instances
+  // together), but kept at N=1 as a deliberate volume choice. (Only the in-memory
+  // fallback — DATABASE_URL absent — would require every /v1 request to hit the SAME
+  // process; pg does not.)
   "durable_objects": {
     "bindings": [{ "name": "FABRICD", "class_name": "FabricdContainer" }]
   },
@@ -182,8 +186,9 @@
   ],
 
   // Keep-alive: the proxy Worker's scheduled() pings /v1/health every minute so the
-  // singleton container never sleeps (sleepAfter) — the "24/7" knob on CF. In-memory
-  // lease state survives between requests; only a real restart/redeploy resets it
-  // (acceptable at dogfood; durability later = FABRIC_LEDGER_BACKEND=pg).
+  // singleton container never sleeps (sleepAfter) — the "24/7" knob on CF. DATABASE_URL
+  // IS bound → the pg-durable ledger (FABRIC_LEDGER_BACKEND=pg) persists lease state
+  // across a restart/redeploy. (Only the in-memory fallback — DATABASE_URL absent —
+  // would lose lease state on restart.)
   "triggers": { "crons": ["* * * * *"] }
 }
