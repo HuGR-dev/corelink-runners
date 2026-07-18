@@ -8,7 +8,7 @@
 //! - key set, right header → 200 with the `StatusReport` JSON (version, uptime,
 //!   ledger durability, shard identity).
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Body;
@@ -34,7 +34,7 @@ fn harness(key: Option<&str>) -> Router {
         rate_ceiling_per_min: 100,
         repo_allowlist: Vec::new(),
     }]);
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
     let state = AppState::new(
         ledger,
         Arc::new(plans),

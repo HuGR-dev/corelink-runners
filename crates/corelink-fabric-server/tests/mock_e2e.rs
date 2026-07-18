@@ -23,7 +23,7 @@
 //!     the result-binding pre-image recomputed here from first principles —
 //!     never by calling the production `result_binding_preimage` on both sides.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Body;
@@ -72,7 +72,7 @@ fn harness_with_seed(seed: [u8; 32]) -> Harness {
         rate_ceiling_per_min: 100,
         repo_allowlist: Vec::new(),
     }]);
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
     // The REAL mock execution backend — the exact one wired under
     // FABRIC_MOCK_EXEC=1 — driven through the production exec/attestation path.
     let exec = Arc::new(MockLeasedExec);

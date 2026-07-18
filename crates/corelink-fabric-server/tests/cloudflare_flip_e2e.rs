@@ -150,7 +150,7 @@ impl HttpTransport for FakeWorker {
 /// binding assertions), and the `Arc<FakeWorker>` (for request assertions).
 fn cloudflare_harness(
     worker: Arc<FakeWorker>,
-) -> (Router, Arc<Mutex<dyn LeaseLedger + Send>>, BoxRegistry) {
+) -> (Router, Arc<dyn LeaseLedger + Send + Sync>, BoxRegistry) {
     let store = Arc::new(StaticTokenStore::new([("pat-acme".to_string(), acme())]));
     let plans = StaticPlans::new([TenantPlan {
         tenant: acme(),
@@ -158,7 +158,7 @@ fn cloudflare_harness(
         rate_ceiling_per_min: 100,
         repo_allowlist: vec!["repo:HumanGuardrail/corelink-runners".to_string()],
     }]);
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
 
     // The Cloudflare backend over the fake transport, sharing ONE registry with
     // the exec half (the provision→teardown lifecycle crux). `CloudflareEngine`
@@ -353,12 +353,7 @@ async fn cloudflare_flip_happy_path_acquire_spawn_held_close_teardown() {
     );
 
     // One slot is reserved on the ledger (a runner box was admitted + provisioned).
-    let occupied = ledger
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .by_tenant(&acme())
-        .expect("ledger query")
-        .len();
+    let occupied = ledger.by_tenant(&acme()).expect("ledger query").len();
     assert_eq!(
         occupied, 1,
         "a Held runner lease must occupy exactly 1 slot"
@@ -426,12 +421,7 @@ async fn cloudflare_flip_fail_closed_non_2xx_spawn_no_held_no_slot_no_orphan() {
     );
 
     // 2. the reserved slot was rolled back ⇒ 0 occupied (the cap must not leak).
-    let occupied = ledger
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .by_tenant(&acme())
-        .expect("ledger query")
-        .len();
+    let occupied = ledger.by_tenant(&acme()).expect("ledger query").len();
     assert_eq!(
         occupied, 0,
         "a failed spawn must roll back the reserved slot — the concurrency cap must NOT leak"

@@ -6,7 +6,7 @@
 //! The meter lives on `AppState::slot_meter` (an `Arc<Mutex<SlotMeter>>`).
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Body;
@@ -56,7 +56,7 @@ fn harness(max_concurrency: u32) -> (Router, AppState) {
         rate_ceiling_per_min: 100,
         repo_allowlist: Vec::new(),
     }]);
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
     let state = AppState::new(ledger, Arc::new(plans), fixed_clock(1_717_000_000_000));
     let router = app(store, state.clone());
     (router, state)
@@ -66,7 +66,7 @@ fn harness(max_concurrency: u32) -> (Router, AppState) {
 /// every acquire is rejected (over-cap, fail-closed).
 fn harness_no_plan() -> (Router, AppState) {
     let store = Arc::new(StaticTokenStore::new([("pat-acme".to_string(), acme())]));
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
     let state = AppState::new(
         ledger,
         Arc::new(StaticPlans::default()), // no plan on file
@@ -245,7 +245,7 @@ async fn failed_acquire_via_failing_provisioner_emits_no_slot() {
         rate_ceiling_per_min: 100,
         repo_allowlist: Vec::new(),
     }]);
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
     let mut state = AppState::new(ledger, Arc::new(plans), fixed_clock(1_717_000_000_000));
     state.provisioner = Arc::new(FailProv);
     let router = app(store, state.clone());

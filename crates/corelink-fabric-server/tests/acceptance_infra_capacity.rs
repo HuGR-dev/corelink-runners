@@ -23,7 +23,7 @@
 //! Tick is driven directly via `run_admission_tick` (no `spawn_admission_loop`).
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -210,7 +210,7 @@ impl BoxProvisioner for FatalProvisioner {
 async fn queue_mode_re_dispatches_when_capacity_freed() {
     // Transient capacity: fail once (tick 1), succeed on retry (tick 2).
     let (prov, attempts) = TransientCapacityProvisioner::new(1);
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
     let mut state = AppState::new(
         Arc::clone(&ledger),
         Arc::new(StaticPlans::new([plan_1()])),
@@ -249,7 +249,7 @@ async fn queue_mode_re_dispatches_when_capacity_freed() {
 
     // Pre-fill: admit + transition a Held lease to occupy the cap (cap=1).
     {
-        let mut l = ledger.lock().unwrap();
+        let l = &*ledger;
         let rec = LeaseRecord {
             lease_id: "pre-held-1".to_string(),
             tenant: acme(),
@@ -286,7 +286,7 @@ async fn queue_mode_re_dispatches_when_capacity_freed() {
 
     // Release the pre-held lease so the tick can admit the waiter.
     {
-        let mut l = ledger.lock().unwrap();
+        let l = &*ledger;
         let _ = l.remove("pre-held-1");
     }
 
@@ -325,7 +325,7 @@ async fn queue_mode_re_dispatches_when_capacity_freed() {
 #[tokio::test]
 async fn queue_mode_bounded_park_timeout_503_not_immediate_hardfail() {
     let (prov, attempts) = CapacityFailingProvisioner::new();
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
     let mut state = AppState::new(
         Arc::clone(&ledger),
         Arc::new(StaticPlans::new([plan_1()])),
@@ -341,7 +341,7 @@ async fn queue_mode_bounded_park_timeout_503_not_immediate_hardfail() {
 
     // Pre-fill the slot so the acquire enqueues.
     {
-        let mut l = ledger.lock().unwrap();
+        let l = &*ledger;
         let rec = LeaseRecord {
             lease_id: "pre-held-2".to_string(),
             tenant: acme(),
@@ -377,7 +377,7 @@ async fn queue_mode_bounded_park_timeout_503_not_immediate_hardfail() {
 
     // Release the slot.
     {
-        let mut l = ledger.lock().unwrap();
+        let l = &*ledger;
         let _ = l.remove("pre-held-2");
     }
 
@@ -415,7 +415,7 @@ async fn queue_mode_bounded_park_timeout_503_not_immediate_hardfail() {
 #[tokio::test]
 async fn reject_mode_distinct_capacity_503() {
     let (prov, _) = CapacityFailingProvisioner::new();
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
     // Reject mode is the default (no with_admission_queue).
     let mut state = AppState::new(
         ledger,
@@ -450,7 +450,7 @@ async fn reject_mode_distinct_capacity_503() {
 /// 503 — no regression on the existing error path.
 #[tokio::test]
 async fn fatal_provision_error_still_hard_fails() {
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
     let mut state = AppState::new(
         ledger,
         Arc::new(StaticPlans::new([plan_1()])),

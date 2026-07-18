@@ -10,7 +10,7 @@
 //! - key set, right hdr: 200 with the `OccupancySnapshot` JSON, reflecting live
 //!   per-tenant occupancy after N acquires.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Body;
@@ -42,7 +42,7 @@ fn harness(max_concurrency: u32, key: Option<&str>) -> (Router, AppState) {
         rate_ceiling_per_min: 100,
         repo_allowlist: Vec::new(),
     }]);
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
     let state = AppState::new(
         ledger,
         Arc::new(plans),

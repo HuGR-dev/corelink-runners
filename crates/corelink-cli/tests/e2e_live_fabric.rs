@@ -10,7 +10,7 @@
 //! goes red. Deterministic; needs no live credentials.
 
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use corelink_cli::{binding, client::Client, run, smoke};
 use corelink_fabric::{InMemoryLedger, LeaseLedger, TenantId, TenantPlan};
@@ -34,7 +34,7 @@ fn mock_app() -> axum::Router {
         rate_ceiling_per_min: 100,
         repo_allowlist: Vec::new(),
     }]);
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
     let state = AppState::new(ledger, Arc::new(plans), Arc::new(SystemClock))
         .with_executor(Arc::new(MockLeasedExec));
     app(store, state)

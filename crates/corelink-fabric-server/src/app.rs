@@ -349,21 +349,19 @@ impl PlanSource for CompositePlanSource {
     }
 }
 
-/// The DEFAULT [`AdmitLedger`] (W-LEDGER-A1): reserve by locking the SAME process
-/// `Mutex` on [`AppState::ledger`] and calling the cold `LeaseLedger` admit — i.e.
-/// byte-identical to the pre-split acquire path. [`AppState::new`] installs this so
-/// EVERY existing caller (all the tests) is unchanged. The production composition
-/// root replaces it with a lock-split handle (a `&self` clone of the concrete
-/// ledger that does NOT take this process `Mutex`) via [`AppState::with_admit`].
-///
-/// Poison-tolerant: a poisoned guard is recovered with `into_inner` (matching the
-/// queued-dispatch site) so one panicked handler never wedges admission fabric-wide.
-pub struct MutexAdmitLedger(pub Arc<Mutex<dyn LeaseLedger + Send>>);
+/// The DEFAULT [`AdmitLedger`] (W-LEDGER-A2): forward the admit straight to the
+/// interior-mutable ([`LeaseLedger`], `&self`) ledger — NO process `Mutex` (A2
+/// removed the outer lock entirely). It shares the SAME `Arc` as [`AppState::ledger`],
+/// so a reserve committed here is authoritatively visible to close/reaper.
+/// [`AppState::new`] installs this so EVERY existing caller (all the tests) is
+/// unchanged. The production composition root may still install a distinct concrete
+/// admit handle via [`AppState::with_admit`] (identical behaviour — both drive the
+/// same `&self` admit); the seam is retained for the A1 injection money-test.
+pub struct LedgerAdmit(pub Arc<dyn LeaseLedger + Send + Sync>);
 
-impl AdmitLedger for MutexAdmitLedger {
+impl AdmitLedger for LedgerAdmit {
     fn try_admit(&self, rec: LeaseRecord, max_concurrency: u32) -> anyhow::Result<bool> {
-        let mut ledger = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        ledger.try_admit(rec, max_concurrency)
+        self.0.try_admit(rec, max_concurrency)
     }
 
     fn try_admit_with_compute(
@@ -372,8 +370,7 @@ impl AdmitLedger for MutexAdmitLedger {
         max_concurrency: u32,
         gate: Option<ComputeGate>,
     ) -> anyhow::Result<AdmitOutcome> {
-        let mut ledger = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        ledger.try_admit_with_compute(rec, max_concurrency, gate)
+        self.0.try_admit_with_compute(rec, max_concurrency, gate)
     }
 }
 
@@ -385,10 +382,14 @@ impl AdmitLedger for MutexAdmitLedger {
 /// admission bookkeeping, not ledger state.
 #[derive(Clone)]
 pub struct AppState {
-    /// The authoritative lease state machine (CP1). The process `Mutex` guards
-    /// the COLD path (`put`/`transition`/close/reaper); the acquire hot path no
-    /// longer takes it (W-LEDGER-A1) — it reserves via [`Self::admit`].
-    pub ledger: Arc<Mutex<dyn LeaseLedger + Send>>,
+    /// The authoritative lease state machine (CP1). W-LEDGER-A2: the outer process
+    /// `Mutex` is GONE — the [`LeaseLedger`] trait is interior-mutable (`&self`), so
+    /// every backend provides its OWN atomicity (pg: advisory-locked txn; InMemory /
+    /// File: an internal `Mutex`). This is what keeps the COLD path
+    /// (`put`/`transition`/close/reaper) off a worker-blocking `.lock()` held across
+    /// the (for pg, `block_in_place`) txn; the acquire hot path reserves via
+    /// [`Self::admit`].
+    pub ledger: Arc<dyn LeaseLedger + Send + Sync>,
     /// The ADMIT seam (W-LEDGER-A1): the acquire hot-path's atomic
     /// check-and-reserve ([`AdmitLedger`], `&self`), driven WITHOUT the process
     /// `Mutex` on [`Self::ledger`]. The backing store provides its own atomicity
@@ -397,13 +398,13 @@ pub struct AppState {
     /// costs no cap-safety while it stops a same-tenant acquire burst from parking
     /// every tokio worker on the std `.lock()`.
     ///
-    /// **Default** ([`AppState::new`]): a [`MutexAdmitLedger`] wrapping the SAME
-    /// `ledger` `Arc` — byte-identical to the pre-split behaviour (admit locks the
-    /// process `Mutex`), so every existing caller is unchanged. The production
-    /// composition root installs a LOCK-SPLIT handle (a `&self` clone of the
-    /// concrete ledger, sharing the pool + admit-permits for pg, or the inner mutex
-    /// for in-memory) via [`AppState::with_admit`]; the queued-admission dispatch
-    /// and the immediate acquire path both reserve through THIS handle.
+    /// **Default** ([`AppState::new`]): a [`LedgerAdmit`] forwarding to the SAME
+    /// interior-mutable `ledger` `Arc` (W-LEDGER-A2 removed the outer `Mutex`
+    /// entirely), so every existing caller is unchanged. The production composition
+    /// root may install a distinct concrete admit handle (sharing the pool +
+    /// admit-permits for pg, or the inner mutex for in-memory) via
+    /// [`AppState::with_admit`]; the queued-admission dispatch and the immediate
+    /// acquire path both reserve through THIS handle.
     pub admit: Arc<dyn AdmitLedger>,
     /// Preventive admission gate (CP2) — consulted BEFORE anything else.
     pub cap_gate: CapGate,
@@ -801,17 +802,16 @@ const DEV_INGEST_SECRET: &[u8] = b"corelink-runners-DEV-ingest-key!";
 impl AppState {
     /// Assemble state over a ledger, a plan source, and a clock.
     pub fn new(
-        ledger: Arc<Mutex<dyn LeaseLedger + Send>>,
+        ledger: Arc<dyn LeaseLedger + Send + Sync>,
         plans: Arc<dyn PlanSource>,
         clock: Arc<dyn Clock>,
     ) -> Self {
         // Capture the boot instant before `clock` is moved into the struct.
         let boot_at_ms = clock.now_ms();
-        // W-LEDGER-A1 DEFAULT admit handle: wrap the SAME `ledger` `Arc` in a
-        // `MutexAdmitLedger`, so the default acquire behaviour is byte-identical to
-        // the pre-split path (admit locks the process `Mutex`). The composition root
-        // swaps in a lock-split handle via `with_admit`.
-        let admit: Arc<dyn AdmitLedger> = Arc::new(MutexAdmitLedger(Arc::clone(&ledger)));
+        // W-LEDGER-A2 DEFAULT admit handle: forward to the SAME interior-mutable
+        // `ledger` `Arc` (`&self`, no process `Mutex`). The composition root may
+        // still install a distinct concrete admit handle via `with_admit`.
+        let admit: Arc<dyn AdmitLedger> = Arc::new(LedgerAdmit(Arc::clone(&ledger)));
         Self {
             ledger,
             admit,
@@ -937,10 +937,7 @@ impl AppState {
     /// (per-process) ledger — else each shard would admit up to the full cap
     /// independently → N× over-admission on untrusted compute.
     pub(crate) fn ledger_is_cross_instance_safe(&self) -> bool {
-        self.ledger
-            .lock()
-            .map(|l| l.is_cross_instance_safe())
-            .unwrap_or(false)
+        self.ledger.is_cross_instance_safe()
     }
 
     /// This instance's learned `(this_shard, num_shards)`. `this_shard ==
@@ -1367,17 +1364,8 @@ impl AppState {
         // Snapshot the tenant's held leases under the lock, then act WITHOUT the
         // lock held (teardown is async + the transition re-locks).
         let held: Vec<String> = {
-            let Ok(ledger) = self.ledger.lock() else {
-                // OPS (observability): a poisoned ledger lock here makes the
-                // suspend/kill action a SILENT no-op — the abusive tenant's live
-                // boxes keep running while the operator believes they were killed.
-                // Surface it loudly (the suspend gate still blocks NEW acquires).
-                eprintln!(
-                    "kill_tenant_leases({tenant}): ledger lock POISONED — could not \
-                     enumerate held leases; live boxes NOT killed this call"
-                );
-                return 0;
-            };
+            // W-LEDGER-A2: `ledger` is interior-mutable (`&self`); no outer lock.
+            let ledger = self.ledger.as_ref();
             ledger
                 .by_tenant(tenant)
                 .unwrap_or_default()
@@ -1392,18 +1380,14 @@ impl AppState {
             // proven order. Revoke the CAS PAT on the way out (A7b).
             let _ = self.teardown_lease(&lease_id).await;
             self.revoke_pat_for(&lease_id).await;
-            let transitioned = {
-                let Ok(mut ledger) = self.ledger.lock() else {
-                    continue;
-                };
-                ledger
-                    .transition(
-                        &lease_id,
-                        corelink_runners_contracts::RunnerState::Crashed,
-                        self.clock.now_ms(),
-                    )
-                    .is_ok()
-            };
+            let transitioned = self
+                .ledger
+                .transition(
+                    &lease_id,
+                    corelink_runners_contracts::RunnerState::Crashed,
+                    self.clock.now_ms(),
+                )
+                .is_ok();
             if transitioned {
                 self.record_slot(&lease_id, tenant, SlotEventKind::Crashed);
                 self.forget_lease(&lease_id);
@@ -1565,9 +1549,7 @@ impl AppState {
         // must reach EVERY shard + survive a restart. No-op on a non-pg ledger
         // (in-memory is authoritative at N=1). A failure is logged, not fatal —
         // this instance's cache already blocks the tenant immediately.
-        if let Ok(l) = self.ledger.lock()
-            && let Err(e) = l.set_tenant_suspended(tenant.as_str(), true)
-        {
+        if let Err(e) = self.ledger.set_tenant_suspended(tenant.as_str(), true) {
             eprintln!(
                 "suspend_tenant({tenant}): durable write FAILED: {e:#} \
                  — suspension is in-memory-only on this instance until it succeeds"
@@ -1584,9 +1566,7 @@ impl AppState {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(tenant.as_str());
-        if let Ok(l) = self.ledger.lock()
-            && let Err(e) = l.set_tenant_suspended(tenant.as_str(), false)
-        {
+        if let Err(e) = self.ledger.set_tenant_suspended(tenant.as_str(), false) {
             eprintln!("unsuspend_tenant({tenant}): durable delete FAILED: {e:#}");
         }
         changed
@@ -1608,21 +1588,16 @@ impl AppState {
         }
         let (_this, num_shards) = self.observed_shard();
         if num_shards > 1 {
-            match self
-                .ledger
-                .lock()
-                .map(|l| l.is_tenant_suspended_durable(tenant.as_str()))
-            {
-                Ok(Ok(true)) => return true,
-                Ok(Ok(false)) => {}
+            match self.ledger.is_tenant_suspended_durable(tenant.as_str()) {
+                Ok(true) => return true,
+                Ok(false) => {}
                 // Fail OPEN for this check (the cache already said not-suspended)
                 // but log it — the admission pg reserve is the real gate and will
                 // fail closed if pg is genuinely down, so no bypass slips through.
-                Ok(Err(e)) => eprintln!(
+                Err(e) => eprintln!(
                     "is_tenant_suspended({tenant}): durable read FAILED at N>1: {e:#} \
                      — treating as not-suspended (cache concurs; admission pg-guards)"
                 ),
-                Err(_) => {}
             }
         }
         false
@@ -2057,7 +2032,7 @@ pub fn app_with_registry(
     registry: Arc<HookRegistry>,
 ) -> Router {
     let state = AppState::new(
-        Arc::new(Mutex::new(InMemoryLedger::new())),
+        Arc::new(InMemoryLedger::new()),
         Arc::new(StaticPlans::default()),
         Arc::new(SystemClock),
     );
@@ -2311,8 +2286,7 @@ mod tests {
     use corelink_fabric::InMemoryLedger;
 
     fn bare_state() -> AppState {
-        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
-            Arc::new(Mutex::new(InMemoryLedger::new()));
+        let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
         AppState::new(
             ledger,
             Arc::new(StaticPlans::default()),

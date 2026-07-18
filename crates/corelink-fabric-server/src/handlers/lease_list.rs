@@ -114,9 +114,7 @@ pub(crate) async fn handler(
     // ledger). No id parameter, no cross-tenant read is representable. A read
     // failure fails closed (503).
     let records = {
-        let Ok(ledger) = state.ledger.lock() else {
-            return error_response(ApiError::FailClosed, "ledger lock poisoned; failing closed");
-        };
+        let ledger = &*state.ledger;
         match ledger.by_tenant(&tenant) {
             Ok(recs) => recs,
             Err(_) => {
@@ -138,7 +136,7 @@ pub(crate) async fn handler(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     use axum::Extension;
     use axum::extract::State;
@@ -154,8 +152,7 @@ mod tests {
     }
 
     fn bare_state() -> AppState {
-        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
-            Arc::new(Mutex::new(InMemoryLedger::new()));
+        let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
         AppState::new(
             ledger,
             Arc::new(StaticPlans::default()),
@@ -175,7 +172,7 @@ mod tests {
             deadline_ms: Some(3_600_100),
             billing_acquired_at_ms: None,
         };
-        state.ledger.lock().unwrap().put(rec).unwrap();
+        state.ledger.put(rec).unwrap();
     }
 
     async fn body_json(resp: axum::response::Response) -> Value {
@@ -269,7 +266,7 @@ mod tests {
             deadline_ms: None,
             billing_acquired_at_ms: None,
         };
-        state.ledger.lock().unwrap().put(rec).unwrap();
+        state.ledger.put(rec).unwrap();
 
         let resp = handler(State(state), Extension(tid("acme"))).await;
         let v = body_json(resp).await;

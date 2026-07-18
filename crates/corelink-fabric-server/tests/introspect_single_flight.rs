@@ -21,7 +21,7 @@
 //! In-process only (`tower::ServiceExt::oneshot`, no sockets).
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
@@ -137,7 +137,7 @@ fn harness(mode: AuthMode, hold: Duration) -> Harness {
         calls: Arc::clone(&plan_calls),
         hold,
     });
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
     let registry = Arc::new(HookRegistry::default());
     // 32 permits (the default): plenty, so the gate never sheds — a same-token
     // burst is bounded by COALESCING (~1 permit), not by the gate.

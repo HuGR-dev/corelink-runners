@@ -124,9 +124,7 @@ pub(crate) async fn agent_exec(
     // ── 2. Tenant-scoped lookup + Held-only gate + durable deadline, under the
     // ledger lock (released before dispatch). Mirrors the check `/exec` handler. ──
     let deadline_ms = {
-        let Ok(ledger) = state.ledger.lock() else {
-            return error_response(ApiError::FailClosed, "lease ledger lock poisoned");
-        };
+        let ledger = &*state.ledger;
         let record = match ledger.get(&lease_id) {
             Ok(Some(record)) => record,
             Ok(None) => return not_found(),
@@ -261,9 +259,7 @@ pub(crate) async fn agent_exec_poll(
     // ── Tenant-scope on the OWNING lease (any state — the result stays readable
     // after close, until forget_lease GCs the lease and its steps together). ──
     {
-        let Ok(ledger) = state.ledger.lock() else {
-            return error_response(ApiError::FailClosed, "lease ledger lock poisoned");
-        };
+        let ledger = &*state.ledger;
         match ledger.get(&lease_id) {
             Ok(Some(record)) if record.tenant == tenant => {}
             Ok(_) => return not_found(),

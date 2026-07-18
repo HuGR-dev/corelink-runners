@@ -17,7 +17,7 @@
 //! the box). Two credentials, by trust boundary. The §13.3 in-flight-only law
 //! lives in the mechanism and its own suite; here we prove the write reaches it.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
@@ -79,7 +79,7 @@ fn fixture() -> (CaptureHook, axum::Router) {
         rate_ceiling_per_min: 100,
         repo_allowlist: Vec::new(),
     }]);
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
     let state = AppState::new(ledger, Arc::new(plans), Arc::new(SystemClock))
         .with_ingest_signer(Arc::new(IngestSigner::new(INGEST_SECRET.to_vec())));
     let router = app_full(store(), state, registry);
@@ -297,7 +297,7 @@ async fn cross_lease_token_is_rejected() {
         rate_ceiling_per_min: 100,
         repo_allowlist: Vec::new(),
     }]);
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
     let state = AppState::new(ledger, Arc::new(plans), Arc::new(SystemClock))
         .with_ingest_signer(Arc::new(IngestSigner::new(INGEST_SECRET.to_vec())));
     let router = app_full(store(), state, registry);

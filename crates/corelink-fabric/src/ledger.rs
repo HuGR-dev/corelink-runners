@@ -259,7 +259,13 @@ pub trait LeaseLedger {
 
     /// Register a new record. Fails if `lease_id` already exists — state is
     /// mutated only through [`LeaseLedger::transition`], never by overwrite.
-    fn put(&mut self, rec: LeaseRecord) -> anyhow::Result<()>;
+    ///
+    /// `&self` (W-LEDGER-A2): the whole trait is INTERIOR-MUTABLE — every backend
+    /// provides its OWN atomicity (pg: the advisory-locked txn; InMemory / File: an
+    /// internal `Mutex`), so `AppState.ledger` no longer needs an OUTER process
+    /// `Mutex`. That is what keeps the cold close/reaper path off a worker-blocking
+    /// `.lock()` held across the (for pg, `block_in_place`) txn.
+    fn put(&self, rec: LeaseRecord) -> anyhow::Result<()>;
 
     /// Look up a record by lease id (`Ok(None)` when absent).
     fn get(&self, lease_id: &str) -> anyhow::Result<Option<LeaseRecord>>;
@@ -268,7 +274,7 @@ pub trait LeaseLedger {
     /// matrix (see [`transition_is_legal`]); returns the updated record.
     /// Unknown lease or illegal pair → `Err` (fail-closed).
     fn transition(
-        &mut self,
+        &self,
         lease_id: &str,
         to: RunnerState,
         now_ms: u64,
@@ -317,7 +323,7 @@ pub trait LeaseLedger {
     ///
     /// Concurrency cap ONLY — the per-instance rate ceiling stays in the caller's
     /// in-memory RateWindow (it is admission bookkeeping, not ledger state).
-    fn try_admit(&mut self, rec: LeaseRecord, max_concurrency: u32) -> anyhow::Result<bool>;
+    fn try_admit(&self, rec: LeaseRecord, max_concurrency: u32) -> anyhow::Result<bool>;
 
     /// Atomic admit with an OPTIONAL compute-ceiling gate — the loss-impossible
     /// enforcement seam (`pricing.md §3`; wave plan §8/§11).
@@ -334,7 +340,7 @@ pub trait LeaseLedger {
     /// (Err ⇒ 503, never a leak). Production ledgers (InMemory/File/Pg) override
     /// it; the acceptance suite forces every override (ceiling-reached → `OverCompute`).
     fn try_admit_with_compute(
-        &mut self,
+        &self,
         rec: LeaseRecord,
         max_concurrency: u32,
         gate: Option<ComputeGate>,
@@ -376,11 +382,7 @@ pub trait LeaseLedger {
     /// Fail-closed: `Err` if the lease does not exist (like every other
     /// mutation — never write a checkpoint for a lease we don't hold). An
     /// idempotent overwrite otherwise (the freshest summary wins).
-    fn set_envelope_checkpoint(
-        &mut self,
-        lease_id: &str,
-        checkpoint_json: &str,
-    ) -> anyhow::Result<()>;
+    fn set_envelope_checkpoint(&self, lease_id: &str, checkpoint_json: &str) -> anyhow::Result<()>;
 
     /// The lease's durable envelope checkpoint blob, or `None` if the lease has
     /// none (absent lease, or never-written checkpoint). The blob is returned
@@ -400,7 +402,7 @@ pub trait LeaseLedger {
     /// rollback. It is NOT a way to delete a `Held` lease out from under a
     /// running box — callers must restrict its use to rolling back a
     /// just-reserved `Pending` admission they own.
-    fn remove(&mut self, lease_id: &str) -> anyhow::Result<bool>;
+    fn remove(&self, lease_id: &str) -> anyhow::Result<bool>;
 
     /// GUARDED admission-rollback: remove the lease ONLY if it is still
     /// `Pending` at delete time, evaluated atomically under the ledger lock.
@@ -438,7 +440,12 @@ pub trait LeaseLedger {
     /// `box_vcpu_count IS NULL` guard here would leave accounting-on stale
     /// Pendings **un-swept** — a regression, not a fix. Pinned by
     /// `remove_if_pending_frees_reserved_sigma_headroom_for_accounting_on_pending`.
-    fn remove_if_pending(&mut self, lease_id: &str) -> anyhow::Result<bool> {
+    ///
+    /// `&self` (W-LEDGER-A2): the default's `get`+`remove` is atomic ONLY because
+    /// every production impl OVERRIDES it to evaluate both under ONE inner lock
+    /// (InMemory / File) or as a single conditional `DELETE` (pg). The default is a
+    /// non-atomic fallback for backends that never race.
+    fn remove_if_pending(&self, lease_id: &str) -> anyhow::Result<bool> {
         match self.get(lease_id)? {
             Some(rec) if matches!(rec.state, LeaseState::Pending) => self.remove(lease_id),
             // Absent, or no longer Pending (raced to Held / terminal) → no-op.
@@ -706,7 +713,23 @@ impl InMemoryInner {
     }
 }
 
-impl LeaseLedger for InMemoryInner {
+/// INHERENT `&mut self` core operations (W-LEDGER-A2): `InMemoryInner` is the raw,
+/// un-synchronized state — it does NOT implement the (now `&self`, interior-mutable)
+/// [`LeaseLedger`] trait. The [`InMemoryLedger`] handle and the [`FileLedger`] both
+/// hold `InMemoryInner` behind their OWN `Mutex` and drive these `&mut` methods
+/// under that lock; the lock provides the atomicity the trait callers rely on.
+impl InMemoryInner {
+    /// Trait-default parity: the in-memory backend has no durable suspension store
+    /// (suspension lives in the fabricd cache at N=1) — a no-op, like the default.
+    fn set_tenant_suspended(&self, _tenant: &str, _suspended: bool) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// Trait-default parity: no durable store ⇒ never durably suspended.
+    fn is_tenant_suspended_durable(&self, _tenant: &str) -> anyhow::Result<bool> {
+        Ok(false)
+    }
+
     fn put(&mut self, rec: LeaseRecord) -> anyhow::Result<()> {
         if self.records.contains_key(&rec.lease_id) {
             anyhow::bail!(
@@ -872,6 +895,16 @@ impl LeaseLedger for InMemoryInner {
         self.reservations.remove(lease_id);
         Ok(self.records.remove(lease_id).is_some())
     }
+
+    /// GUARDED admission-rollback (trait-default parity): remove IFF still Pending.
+    /// The caller holds the inner lock across this whole get+remove, so it is
+    /// atomic — exactly the pre-A2 behaviour under the outer lock.
+    fn remove_if_pending(&mut self, lease_id: &str) -> anyhow::Result<bool> {
+        match self.get(lease_id)? {
+            Some(rec) if matches!(rec.state, LeaseState::Pending) => self.remove(lease_id),
+            _ => Ok(false),
+        }
+    }
 }
 
 /// In-memory ledger — dev/test impl (CP1). A cheap-to-clone HANDLE over a shared
@@ -933,7 +966,7 @@ impl LeaseLedger for InMemoryLedger {
         self.lock()?.is_tenant_suspended_durable(tenant)
     }
 
-    fn put(&mut self, rec: LeaseRecord) -> anyhow::Result<()> {
+    fn put(&self, rec: LeaseRecord) -> anyhow::Result<()> {
         self.lock()?.put(rec)
     }
 
@@ -942,7 +975,7 @@ impl LeaseLedger for InMemoryLedger {
     }
 
     fn transition(
-        &mut self,
+        &self,
         lease_id: &str,
         to: RunnerState,
         now_ms: u64,
@@ -962,12 +995,12 @@ impl LeaseLedger for InMemoryLedger {
         self.lock()?.pending_older_than(now_ms, max_age_ms)
     }
 
-    fn try_admit(&mut self, rec: LeaseRecord, max_concurrency: u32) -> anyhow::Result<bool> {
+    fn try_admit(&self, rec: LeaseRecord, max_concurrency: u32) -> anyhow::Result<bool> {
         self.lock()?.try_admit(rec, max_concurrency)
     }
 
     fn try_admit_with_compute(
-        &mut self,
+        &self,
         rec: LeaseRecord,
         max_concurrency: u32,
         gate: Option<ComputeGate>,
@@ -980,11 +1013,7 @@ impl LeaseLedger for InMemoryLedger {
         self.lock()?.compute_accrued(tenant, period_key)
     }
 
-    fn set_envelope_checkpoint(
-        &mut self,
-        lease_id: &str,
-        checkpoint_json: &str,
-    ) -> anyhow::Result<()> {
+    fn set_envelope_checkpoint(&self, lease_id: &str, checkpoint_json: &str) -> anyhow::Result<()> {
         self.lock()?
             .set_envelope_checkpoint(lease_id, checkpoint_json)
     }
@@ -993,14 +1022,14 @@ impl LeaseLedger for InMemoryLedger {
         self.lock()?.get_envelope_checkpoint(lease_id)
     }
 
-    fn remove(&mut self, lease_id: &str) -> anyhow::Result<bool> {
+    fn remove(&self, lease_id: &str) -> anyhow::Result<bool> {
         self.lock()?.remove(lease_id)
     }
 
-    fn remove_if_pending(&mut self, lease_id: &str) -> anyhow::Result<bool> {
-        // Delegate under ONE guard so the inner default's get+remove stays atomic
-        // (the handle must NOT re-enter its own get()/remove(), which would lock
-        // twice and race a concurrent admit).
+    fn remove_if_pending(&self, lease_id: &str) -> anyhow::Result<bool> {
+        // Delegate under ONE guard so the inner get+remove stays atomic (the handle
+        // must NOT re-enter its own get()/remove(), which would lock twice and race
+        // a concurrent admit).
         self.lock()?.remove_if_pending(lease_id)
     }
 }
@@ -1043,6 +1072,23 @@ impl AdmitLedger for InMemoryLedger {
 /// ratified decision #3; this impl pins the durability semantics it must match.
 #[derive(Debug)]
 pub struct FileLedger {
+    /// Immutable journal path — backs the `path()` accessor (a `&Path` cannot be
+    /// handed out from behind the interior lock).
+    path: PathBuf,
+    /// W-LEDGER-A2: the mutable state (append handle + replay index) behind an
+    /// INTERNAL `Mutex`, so the [`LeaseLedger`] impl is `&self` (interior-mutable)
+    /// and `AppState.ledger` needs no OUTER process `Mutex`. Each trait method
+    /// takes this lock EXACTLY ONCE, so a multi-step op (e.g. `remove_if_pending`'s
+    /// get+remove) stays atomic under one guard — identical to the pre-A2 behaviour
+    /// under the outer lock.
+    inner: Mutex<FileInner>,
+}
+
+/// The mutable core of a [`FileLedger`] — the append handle and the replay index.
+/// Held behind [`FileLedger::inner`]'s `Mutex`; its `&mut self` methods run under
+/// that lock (the lock provides the atomicity the `&self` trait callers rely on).
+#[derive(Debug)]
+struct FileInner {
     path: PathBuf,
     file: File,
     index: InMemoryInner,
@@ -1272,7 +1318,10 @@ impl FileLedger {
             .append(true)
             .open(&path)
             .map_err(|e| anyhow::anyhow!("cannot open ledger journal {path:?} for append: {e}"))?;
-        Ok(Self { path, file, index })
+        Ok(Self {
+            path: path.clone(),
+            inner: Mutex::new(FileInner { path, file, index }),
+        })
     }
 
     /// Journal path this ledger replays from / appends to.
@@ -1280,6 +1329,18 @@ impl FileLedger {
         &self.path
     }
 
+    /// Lock the interior state, mapping a poisoned mutex to a fail-closed `Err`
+    /// (never a silent panic). Every trait method takes this lock EXACTLY ONCE, so
+    /// multi-step operations stay atomic under one guard, identical to the pre-A2
+    /// behaviour under the outer lock.
+    fn lock(&self) -> anyhow::Result<std::sync::MutexGuard<'_, FileInner>> {
+        self.inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("file ledger inner mutex poisoned (fail-closed)"))
+    }
+}
+
+impl FileInner {
     /// Append one journal line and **fsync it to disk** before returning.
     ///
     /// Durability holds across power-loss: `std::fs::File::flush()` is a no-op
@@ -1308,7 +1369,11 @@ impl FileLedger {
     }
 }
 
-impl LeaseLedger for FileLedger {
+/// The `&mut self` core ops of a [`FileLedger`], run under [`FileLedger::inner`]'s
+/// lock. Structurally identical to the pre-A2 `impl LeaseLedger for FileLedger`
+/// bodies — only the receiver moved from the (outer-locked) `FileLedger` to the
+/// (inner-locked) `FileInner`.
+impl FileInner {
     fn put(&mut self, rec: LeaseRecord) -> anyhow::Result<()> {
         if self.index.records.contains_key(&rec.lease_id) {
             anyhow::bail!(
@@ -1510,6 +1575,85 @@ impl LeaseLedger for FileLedger {
         self.index.checkpoints.remove(lease_id);
         self.index.reservations.remove(lease_id);
         Ok(true)
+    }
+
+    /// GUARDED admission-rollback: remove IFF still Pending. Run under the single
+    /// inner lock the trait method holds, so the get+remove is atomic (identical to
+    /// the pre-A2 trait-default under the outer lock). The `remove` journals a
+    /// tombstone, so this must be `FileInner`'s own get+remove (not the index's).
+    fn remove_if_pending(&mut self, lease_id: &str) -> anyhow::Result<bool> {
+        match self.index.get(lease_id)? {
+            Some(rec) if matches!(rec.state, LeaseState::Pending) => self.remove(lease_id),
+            _ => Ok(false),
+        }
+    }
+}
+
+impl LeaseLedger for FileLedger {
+    fn put(&self, rec: LeaseRecord) -> anyhow::Result<()> {
+        self.lock()?.put(rec)
+    }
+
+    fn get(&self, lease_id: &str) -> anyhow::Result<Option<LeaseRecord>> {
+        self.lock()?.get(lease_id)
+    }
+
+    fn transition(
+        &self,
+        lease_id: &str,
+        to: RunnerState,
+        now_ms: u64,
+    ) -> anyhow::Result<LeaseRecord> {
+        self.lock()?.transition(lease_id, to, now_ms)
+    }
+
+    fn by_tenant(&self, t: &TenantId) -> anyhow::Result<Vec<LeaseRecord>> {
+        self.lock()?.by_tenant(t)
+    }
+
+    fn held(&self) -> anyhow::Result<Vec<LeaseRecord>> {
+        self.lock()?.held()
+    }
+
+    fn pending_older_than(&self, now_ms: u64, max_age_ms: u64) -> anyhow::Result<Vec<LeaseRecord>> {
+        self.lock()?.pending_older_than(now_ms, max_age_ms)
+    }
+
+    fn try_admit(&self, rec: LeaseRecord, max_concurrency: u32) -> anyhow::Result<bool> {
+        self.lock()?.try_admit(rec, max_concurrency)
+    }
+
+    fn try_admit_with_compute(
+        &self,
+        rec: LeaseRecord,
+        max_concurrency: u32,
+        gate: Option<ComputeGate>,
+    ) -> anyhow::Result<AdmitOutcome> {
+        self.lock()?
+            .try_admit_with_compute(rec, max_concurrency, gate)
+    }
+
+    fn compute_accrued(&self, tenant: &TenantId, period_key: u32) -> anyhow::Result<u64> {
+        self.lock()?.compute_accrued(tenant, period_key)
+    }
+
+    fn set_envelope_checkpoint(&self, lease_id: &str, checkpoint_json: &str) -> anyhow::Result<()> {
+        self.lock()?
+            .set_envelope_checkpoint(lease_id, checkpoint_json)
+    }
+
+    fn get_envelope_checkpoint(&self, lease_id: &str) -> anyhow::Result<Option<String>> {
+        self.lock()?.get_envelope_checkpoint(lease_id)
+    }
+
+    fn remove(&self, lease_id: &str) -> anyhow::Result<bool> {
+        self.lock()?.remove(lease_id)
+    }
+
+    fn remove_if_pending(&self, lease_id: &str) -> anyhow::Result<bool> {
+        // ONE guard so the get+remove stays atomic (never re-enter the handle's own
+        // get()/remove(), which would lock twice and race a concurrent admit).
+        self.lock()?.remove_if_pending(lease_id)
     }
 }
 
@@ -1890,7 +2034,7 @@ mod compute_ceiling_tests {
         // Process 1: admit l1 (Held, in-flight 600 reservation) + admit-and-
         // terminalize l2 (1 vCPU held 0→100 ms ⇒ accrues 100 vCPU·ms).
         {
-            let mut led = FileLedger::open(&path).unwrap();
+            let led = FileLedger::open(&path).unwrap();
             led.try_admit_with_compute(pending("l1", &t, 0), 100, Some(g))
                 .unwrap();
             led.transition("l1", RunnerState::Held, 0).unwrap();
@@ -1917,7 +2061,7 @@ mod compute_ceiling_tests {
             // l1 is still Held with its 600 reservation; accrued 100 + Σ 600 = 700.
             // A new 400-vCPU·ms admit (100 + 600 + 400 = 1100 > 1000) is rejected ⇒
             // the reservation survived (else 100 + 0 + 400 = 500 ≤ 1000 would admit).
-            let mut led = led;
+            let led = led;
             let g3 = gate(202406, 1_000, 2, 400);
             assert_eq!(
                 led.try_admit_with_compute(pending("l3", &t, 0), 100, Some(g3))
@@ -1930,7 +2074,7 @@ mod compute_ceiling_tests {
         // Process 3: re-terminalizing is impossible (l2 already terminal), so the
         // restart cannot double-accrue — the latch survived too.
         {
-            let mut led = FileLedger::open(&path).unwrap();
+            let led = FileLedger::open(&path).unwrap();
             assert!(led.transition("l2", RunnerState::Crashed, 9_999).is_err());
             assert_eq!(
                 led.compute_accrued(&t, 202406).unwrap(),
@@ -2024,7 +2168,7 @@ mod compute_ceiling_tests {
         let t = tid("acme");
         let g = gate(202406, 10_000, 2, 600);
         {
-            let mut led = FileLedger::open(&path).unwrap();
+            let led = FileLedger::open(&path).unwrap();
             led.try_admit_with_compute(pending("l1", &t, 0), 100, Some(g))
                 .unwrap();
         }
@@ -2045,7 +2189,7 @@ mod compute_ceiling_tests {
             "a half-written admit leaves NO reservation-less lease (dropped atomically)"
         );
         // And Σ is clean: a fresh admit up to the full ceiling fits (no phantom Σ).
-        let mut led = led;
+        let led = led;
         let g_full = gate(202406, 10_000, 2, 10_000);
         assert_eq!(
             led.try_admit_with_compute(pending("l2", &t, 0), 100, Some(g_full))
@@ -2069,7 +2213,7 @@ mod compute_ceiling_tests {
         let t = tid("acme");
         let g = gate(202406, 1_000_000, 4, 100);
         {
-            let mut led = FileLedger::open(&path).unwrap();
+            let led = FileLedger::open(&path).unwrap();
             led.try_admit_with_compute(pending("l1", &t, 0), 100, Some(g))
                 .unwrap();
             led.transition("l1", RunnerState::Held, 0).unwrap();
@@ -2095,7 +2239,7 @@ mod compute_ceiling_tests {
 
         // Reopen: the torn terminal is dropped → the lease replays at its prior
         // durable state (Held), and the accrual was NOT folded (no half-state).
-        let mut led = FileLedger::open(&path).expect("torn terminal tail tolerated");
+        let led = FileLedger::open(&path).expect("torn terminal tail tolerated");
         let rec = led
             .get("l1")
             .unwrap()
@@ -2130,7 +2274,7 @@ mod compute_ceiling_tests {
         let t = tid("acme");
         let g = gate(202406, 1_000_000, 4, 100);
         {
-            let mut led = FileLedger::open(&path).unwrap();
+            let led = FileLedger::open(&path).unwrap();
             led.try_admit_with_compute(pending("l1", &t, 0), 100, Some(g))
                 .unwrap();
             led.transition("l1", RunnerState::Held, 0).unwrap();
@@ -2139,7 +2283,7 @@ mod compute_ceiling_tests {
             assert_eq!(led.compute_accrued(&t, 202406).unwrap(), 100);
         }
         // Clean reopen: the accrual is reconstructed from the combined line.
-        let mut led = FileLedger::open(&path).unwrap();
+        let led = FileLedger::open(&path).unwrap();
         assert_eq!(
             led.compute_accrued(&t, 202406).unwrap(),
             100,

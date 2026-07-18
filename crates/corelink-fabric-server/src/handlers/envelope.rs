@@ -533,11 +533,7 @@ fn checkpoint_turn(state: &AppState, lease_id: &str, hook: &CaptureHook, price: 
             return;
         }
     };
-    let mut ledger = match state.ledger.lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    if let Err(e) = ledger.set_envelope_checkpoint(lease_id, &json) {
+    if let Err(e) = state.ledger.set_envelope_checkpoint(lease_id, &json) {
         // A checkpoint write failure (e.g. the lease already terminalized) must
         // NOT break the in-flight forward — it only costs a forensic refresh.
         eprintln!("envelope-ingest: lease {lease_id} checkpoint write failed: {e:#}");

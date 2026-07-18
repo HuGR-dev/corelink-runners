@@ -17,7 +17,7 @@
 //! In-process only (`tower::ServiceExt::oneshot`, no sockets).
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
@@ -98,7 +98,7 @@ fn harness(introspect_permits: usize, hold: Duration) -> Harness {
         rate_ceiling_per_min: 10_000,
         repo_allowlist: Vec::new(),
     }]);
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
     let registry = Arc::new(HookRegistry::default());
     let state = AppState::new(ledger, Arc::new(plans), Arc::new(SystemClock))
         .with_introspect_max_inflight(introspect_permits);

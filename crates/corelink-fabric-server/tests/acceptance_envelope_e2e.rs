@@ -127,7 +127,7 @@ impl BoxProvisioner for EnvRecordingProvisioner {
 /// forge-side subscriber), and the recording provisioner's capture log.
 struct Harness {
     app: Router,
-    ledger: Arc<Mutex<dyn LeaseLedger + Send>>,
+    ledger: Arc<dyn LeaseLedger + Send + Sync>,
     registry: Arc<HookRegistry>,
     captured_env: CapturedEnvLog,
 }
@@ -146,7 +146,7 @@ fn harness() -> Harness {
         rate_ceiling_per_min: 100,
         repo_allowlist: Vec::new(),
     }]);
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
     let registry = Arc::new(HookRegistry::default());
     let (prov, captured_env) = EnvRecordingProvisioner::new();
 
@@ -756,10 +756,8 @@ async fn close_without_ack_is_fail_closed_capture_incomplete_metrics_still_refle
 }
 
 /// The authoritative ledger state of `lease_id`, read directly.
-fn ledger_state(ledger: &Arc<Mutex<dyn LeaseLedger + Send>>, lease_id: &str) -> LeaseState {
+fn ledger_state(ledger: &Arc<dyn LeaseLedger + Send + Sync>, lease_id: &str) -> LeaseState {
     ledger
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
         .get(lease_id)
         .expect("readable ledger")
         .expect("known lease")

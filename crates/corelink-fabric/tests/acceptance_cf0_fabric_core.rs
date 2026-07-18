@@ -88,7 +88,7 @@ fn ledger_legal_transitions_only() {
     ];
 
     // Full matrix: every (from, to) pair, exactly the four legal cells Ok.
-    let mut ledger = InMemoryLedger::new();
+    let ledger = InMemoryLedger::new();
     let mut checked = 0usize;
     for (i, from) in all_five_states().iter().enumerate() {
         for (j, to) in to_states.iter().enumerate() {
@@ -184,7 +184,7 @@ fn file_ledger_survives_reopen() {
 
     // Write: two tenants, a put + a transition each path.
     let (rec_a_final, rec_b_final) = {
-        let mut ledger = FileLedger::open(&path).expect("fresh journal must open");
+        let ledger = FileLedger::open(&path).expect("fresh journal must open");
         ledger
             .put(record("lease-a", &t_a, LeaseState::Pending))
             .unwrap();
@@ -208,7 +208,7 @@ fn file_ledger_survives_reopen() {
     };
 
     // Reopen: replay must reconstruct the exact same authoritative view.
-    let mut reopened = FileLedger::open(&path).expect("journal must replay on open");
+    let reopened = FileLedger::open(&path).expect("journal must replay on open");
     assert_eq!(
         reopened.get("lease-a").unwrap().as_ref(),
         Some(&rec_a_final)

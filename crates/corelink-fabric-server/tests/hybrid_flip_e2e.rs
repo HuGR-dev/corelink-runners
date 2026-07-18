@@ -156,7 +156,7 @@ fn hybrid_harness(worker: Arc<FakeWorker>, check_sub: RecordingProvisioner) -> R
         rate_ceiling_per_min: 100,
         repo_allowlist: vec!["repo:HumanGuardrail/corelink-runners".to_string()],
     }]);
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
 
     let registry = BoxRegistry::new();
     let engine = Arc::new(CloudflareEngine::new(

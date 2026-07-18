@@ -19,7 +19,7 @@
 //!   `POST /v1/leases` (acquire); this proves the method-routing merge sends GET
 //!   to `lease_list`, not the acquire handler.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Body;
@@ -62,7 +62,7 @@ fn harness() -> Router {
         },
     ];
     let store = Arc::new(StaticTokenStore::new(pats));
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
     let state = AppState::new(
         ledger,
         Arc::new(StaticPlans::new(plans)),

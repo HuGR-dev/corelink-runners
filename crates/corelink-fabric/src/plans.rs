@@ -255,7 +255,7 @@ mod tests {
         // One tenant holds 20 leases; on Starter (cap 20) the next concurrent
         // acquire is rejected — the tier is full.
         let t = tenant("acme");
-        let mut ledger = InMemoryLedger::new();
+        let ledger = InMemoryLedger::new();
         for i in 0..20 {
             ledger.put(held(&format!("l-{i}"), "acme")).unwrap();
         }

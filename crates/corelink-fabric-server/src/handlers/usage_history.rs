@@ -132,12 +132,7 @@ pub(crate) async fn handler(
     let mut pk = period_key;
     for _ in 0..HISTORY_MONTHS {
         let vcpu_ms: u64 = {
-            let Ok(ledger) = state.ledger.lock() else {
-                return error_response(
-                    ApiError::FailClosed,
-                    "ledger lock poisoned; failing closed",
-                );
-            };
+            let ledger = &*state.ledger;
             match ledger.compute_accrued(&tenant, pk) {
                 Ok(v) => v,
                 Err(_) => {
@@ -207,8 +202,7 @@ mod tests {
     }
 
     fn bare_state() -> AppState {
-        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
-            Arc::new(Mutex::new(InMemoryLedger::new()));
+        let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
         AppState::new(
             ledger,
             Arc::new(StaticPlans::default()),
@@ -310,7 +304,7 @@ mod tests {
             deadline_ms: None,
             billing_acquired_at_ms: None,
         };
-        state.ledger.lock().unwrap().put(rec).unwrap();
+        state.ledger.put(rec).unwrap();
 
         // The caller "acme" sees zero — "other"'s record is invisible.
         let resp = handler(State(state), Extension(tid("acme"))).await;

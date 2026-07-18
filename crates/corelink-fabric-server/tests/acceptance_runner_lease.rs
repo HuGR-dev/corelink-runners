@@ -95,7 +95,7 @@ async fn body_vec(resp: Response) -> Vec<u8> {
 /// arms runner mode; `None` leaves it default-off.
 type HarnessOut = (
     axum::Router,
-    Arc<Mutex<dyn LeaseLedger + Send>>,
+    Arc<dyn LeaseLedger + Send + Sync>,
     Arc<CapturingProvisioner>,
 );
 
@@ -123,7 +123,7 @@ fn harness_allow(
         rate_ceiling_per_min: 100,
         repo_allowlist,
     }]);
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
     let cap = Arc::new(CapturingProvisioner::default());
 
     let mut state = AppState::new(ledger.clone(), Arc::new(plans), Arc::new(SystemClock));
@@ -207,8 +207,6 @@ async fn runner_acquire_without_broker_is_rejected_400_and_reserves_no_slot() {
     // Rejected at step 0 — BEFORE any slot reserve or provision.
     assert!(
         ledger
-            .lock()
-            .unwrap()
             .by_tenant(&TenantId::new("acme").unwrap())
             .unwrap()
             .is_empty(),
@@ -388,8 +386,6 @@ async fn runner_mint_failure_fails_closed_and_frees_the_slot() {
     );
     assert!(
         ledger
-            .lock()
-            .unwrap()
             .by_tenant(&TenantId::new("acme").unwrap())
             .unwrap()
             .is_empty(),
@@ -440,8 +436,6 @@ async fn runner_acquire_denied_when_target_not_in_tenant_allowlist() {
     );
     assert!(
         ledger
-            .lock()
-            .unwrap()
             .by_tenant(&TenantId::new("acme").unwrap())
             .unwrap()
             .is_empty(),
@@ -468,8 +462,6 @@ async fn empty_allowlist_denies_all_runner_acquires() {
     );
     assert!(
         ledger
-            .lock()
-            .unwrap()
             .by_tenant(&TenantId::new("acme").unwrap())
             .unwrap()
             .is_empty()
@@ -526,8 +518,6 @@ async fn stale_humangr_labs_org_denied_against_humanguardrail_allowlist() {
     );
     assert!(
         ledger
-            .lock()
-            .unwrap()
             .by_tenant(&TenantId::new("acme").unwrap())
             .unwrap()
             .is_empty(),

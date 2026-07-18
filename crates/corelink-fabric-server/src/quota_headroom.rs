@@ -222,7 +222,7 @@ pub fn collect_tenant_caps(state: &AppState) -> (Vec<(TenantId, u32)>, bool) {
 
     // Fallback: active-ledger tenant set (CoreLink / empty-static edge).
     let active_records = {
-        let ledger = state.ledger.lock().unwrap_or_else(|e| e.into_inner());
+        let ledger = &*state.ledger;
         // Use held() as the enumeration source to discover tenants currently
         // occupying capacity.
         match ledger.held() {

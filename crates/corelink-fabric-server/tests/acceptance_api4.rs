@@ -12,7 +12,6 @@
 //! dedup.
 
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::AtomicU64;
 
 use axum::Router;
@@ -81,7 +80,7 @@ fn harness(reply: CmdOutput) -> Harness {
             repo_allowlist: Vec::new(),
         },
     ]);
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
     let exec = Arc::new(FakeLeasedExec::replying(reply));
     let state = AppState::new(
         ledger,
@@ -346,15 +345,13 @@ async fn trigger_on_lease_terminalized_mid_exec_is_fail_closed_never_attested() 
     /// Mid-exec, transitions the lease to `Released` (a concurrent close that
     /// won the race), then returns a successful output.
     struct RacingExec {
-        ledger: Arc<Mutex<dyn LeaseLedger + Send>>,
+        ledger: Arc<dyn LeaseLedger + Send + Sync>,
         now_ms: u64,
     }
 
     impl corelink_fabric_server::LeasedExec for RacingExec {
         fn exec_captured_for(&self, lease_id: &str, _argv: &[&str]) -> anyhow::Result<CmdOutput> {
             self.ledger
-                .lock()
-                .unwrap()
                 .transition(
                     lease_id,
                     corelink_runners_contracts::RunnerState::Released,
@@ -379,7 +376,7 @@ async fn trigger_on_lease_terminalized_mid_exec_is_fail_closed_never_attested() 
         rate_ceiling_per_min: 100,
         repo_allowlist: Vec::new(),
     }]);
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
     let racing = Arc::new(RacingExec {
         ledger: ledger.clone(),
         now_ms: NOW_MS,

@@ -66,12 +66,7 @@ pub(crate) async fn redeem(
     // already proves lease-binding, and clw has no tenant PAT to present. The
     // no-oracle 404 is identical whether the lease is unknown or not-Held.
     {
-        let Ok(ledger) = state.ledger.lock() else {
-            return err(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "lease ledger lock poisoned",
-            );
-        };
+        let ledger = &*state.ledger;
         match ledger.get(&lease_id) {
             Ok(Some(rec)) if matches!(rec.state, LeaseState::Wire(RunnerState::Held)) => {}
             Ok(_) => return err(StatusCode::NOT_FOUND, "no such held lease"),
@@ -99,7 +94,7 @@ pub(crate) async fn redeem(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     use corelink_fabric::{InMemoryLedger, LeaseLedger, LeaseRecord, LeaseState, TenantId};
 
@@ -111,10 +106,9 @@ mod tests {
 
     /// An AppState with a HELD `lease-1` and the given cred signer wired.
     fn held_state(signer: Option<CredTicketSigner>) -> AppState {
-        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
-            Arc::new(Mutex::new(InMemoryLedger::new()));
+        let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
         {
-            let mut l = ledger.lock().unwrap();
+            let l = &*ledger;
             l.try_admit(
                 LeaseRecord {
                     lease_id: "lease-1".to_string(),

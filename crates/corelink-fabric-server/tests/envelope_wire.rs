@@ -13,7 +13,7 @@
 //! 5. `reaped_lease_unregisters_hook` — acquire (hook registered), then
 //!    drive the reaper, assert the hook is gone from the registry (poll → 404).
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
@@ -38,7 +38,7 @@ fn lease_path(template: &str, lease_id: &str) -> String {
 /// Returns (router, ledger, registry).
 fn two_tenant_harness() -> (
     axum::Router,
-    Arc<Mutex<dyn LeaseLedger + Send>>,
+    Arc<dyn LeaseLedger + Send + Sync>,
     Arc<HookRegistry>,
 ) {
     let store = Arc::new(StaticTokenStore::new([
@@ -65,7 +65,7 @@ fn two_tenant_harness() -> (
             repo_allowlist: Vec::new(),
         },
     ]);
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
     let registry = Arc::new(HookRegistry::default());
     let state = AppState::new(ledger.clone(), Arc::new(plans), Arc::new(SystemClock));
     let app = app_full(store, state, Arc::clone(&registry));
@@ -244,7 +244,7 @@ async fn reaped_lease_unregisters_hook() {
         rate_ceiling_per_min: 100,
         repo_allowlist: Vec::new(),
     }]);
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
     let registry = Arc::new(HookRegistry::default());
 
     // Use SystemClock so `now_ms` is real time for the acquire deadline.
@@ -307,7 +307,7 @@ async fn reaped_lease_unregisters_hook() {
 
     // The ledger must be Expired.
     {
-        let l = ledger.lock().unwrap();
+        let l = &*ledger;
         let rec = l.get(&lease_id).unwrap().unwrap();
         assert_eq!(
             rec.state,

@@ -105,9 +105,7 @@ pub(crate) async fn trigger(
     // same pattern as the exec path — so a trigger landing on a DIFFERENT
     // instance than acquire still sees it.
     let (box_ref, deadline_ms) = {
-        let Ok(ledger) = state.ledger.lock() else {
-            return error_response(ApiError::FailClosed, "lease ledger lock poisoned");
-        };
+        let ledger = &*state.ledger;
         let record = match ledger.get(&req.lease_id) {
             Ok(Some(record)) => record,
             Ok(None) => return not_found(),
@@ -185,9 +183,7 @@ pub(crate) async fn trigger(
             // NO `MutexGuard` is held across an await (the guard drops at the
             // end of this block).
             let still_held = {
-                let Ok(ledger) = state.ledger.lock() else {
-                    return error_response(ApiError::FailClosed, "lease ledger lock poisoned");
-                };
+                let ledger = &*state.ledger;
                 matches!(
                     ledger.get(&req.lease_id),
                     Ok(Some(record))

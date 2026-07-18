@@ -97,7 +97,7 @@ fn pinned_spec(name: &str) -> ContainerSpec {
 }
 
 fn bare_state() -> AppState {
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
     AppState::new(
         ledger,
         Arc::new(StaticPlans::default()),
@@ -476,7 +476,7 @@ impl corelink_fabric_server::Clock for FixedClock {
 
 fn harness_with_provisioner(
     prov: Arc<dyn BoxProvisioner>,
-) -> (axum::Router, Arc<Mutex<dyn LeaseLedger + Send>>) {
+) -> (axum::Router, Arc<dyn LeaseLedger + Send + Sync>) {
     use corelink_fabric_server::app;
 
     let store = Arc::new(StaticTokenStore::new([(
@@ -489,7 +489,7 @@ fn harness_with_provisioner(
         rate_ceiling_per_min: 100,
         repo_allowlist: Vec::new(),
     }]);
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
     let clock = Arc::new(FixedClock(Arc::new(AtomicU64::new(1_717_000_000_000))));
     let mut state = AppState::new(ledger.clone(), Arc::new(plans), clock);
     state.provisioner = prov;
@@ -535,7 +535,7 @@ async fn acquire_fails_closed_when_provision_fails() {
     // (WP-FIX-LEASE-ID-UUID, unknowable up front), so we assert via the tenant
     // index rather than a predicted id. The fail-closed ordering guarantee:
     // a spawn failure means NO Held lease is ever put into the ledger.
-    let guard = ledger.lock().unwrap();
+    let guard = &*ledger;
     let tenant = TenantId::new("acme").unwrap();
     assert!(
         guard.by_tenant(&tenant).unwrap().is_empty(),
@@ -900,7 +900,7 @@ async fn http_exec_on_unbound_lease_503() {
         rate_ceiling_per_min: 100,
         repo_allowlist: Vec::new(),
     }]);
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
     let clock = Arc::new(FixedClock(Arc::new(AtomicU64::new(1_717_000_000_000))));
 
     // EngineLeasedExec over an EMPTY registry — no binding will ever be present.
@@ -978,7 +978,7 @@ async fn http_split_registry_exec_503() {
         rate_ceiling_per_min: 100,
         repo_allowlist: Vec::new(),
     }]);
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
     let clock = Arc::new(FixedClock(Arc::new(AtomicU64::new(1_717_000_000_000))));
 
     // Two DIFFERENT registries — the footgun.
@@ -1066,7 +1066,7 @@ async fn http_orphan_teardown_on_post_provision_failure() {
     // reserved Pending so the cap/occupancy frees. (The old put-after-provision
     // collision can no longer happen — the reserve `put` is the FIRST ledger
     // write, before provision.)
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
 
     let rec = Arc::new(RecordingProvisioner::new());
     // Script the provision to FAIL — the post-reserve cleanup path.
@@ -1139,7 +1139,7 @@ async fn http_orphan_teardown_on_post_provision_failure() {
 
     // The reserved Pending MUST be removed — no dangling slot held. Assert via
     // the tenant index (id is a UUID) AND the specific torn-down id.
-    let guard = ledger.lock().unwrap();
+    let guard = &*ledger;
     assert!(
         guard.get(torn_id).unwrap().is_none(),
         "the reserved Pending must be removed on provision failure (cap freed)"
@@ -1222,7 +1222,7 @@ async fn http_close_teardown_failure_is_fail_closed_and_retryable() {
 
     // The lease must remain Held — NOT Released. Terminalizing it would strand
     // the box with no retry path; staying Held keeps it reclaimable.
-    let guard = ledger.lock().unwrap();
+    let guard = &*ledger;
     let record = guard.get(&lease_id).unwrap().expect("lease must exist");
     assert_eq!(
         record.state,

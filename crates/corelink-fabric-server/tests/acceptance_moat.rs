@@ -123,7 +123,7 @@ fn harness_with_moat(
     clw_endpoint: Option<String>,
 ) -> (
     axum::Router,
-    Arc<Mutex<dyn LeaseLedger + Send>>,
+    Arc<dyn LeaseLedger + Send + Sync>,
     Arc<CapturingProvisioner>,
     AppState,
 ) {
@@ -134,7 +134,7 @@ fn harness_with_moat(
         rate_ceiling_per_min: 100,
         repo_allowlist: vec!["repo:HumanGuardrail/corelink-runners".to_string()],
     }]);
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
     let cap = Arc::new(CapturingProvisioner::default());
 
     let mut state = AppState::new(ledger.clone(), Arc::new(plans), Arc::new(SystemClock));
@@ -210,7 +210,7 @@ async fn a3b_ac_hit_no_slot_reserved_on_ledger() {
     );
 
     // CRITICAL invariant: the short-circuit PRECEDES slot-reserve ⇒ 0 slots.
-    let occupied = ledger.lock().unwrap().by_tenant(&acme()).unwrap().len();
+    let occupied = ledger.by_tenant(&acme()).unwrap().len();
     assert_eq!(
         occupied, 0,
         "A3b (CRITICAL): AC hit must reserve 0 slots on the ledger — \
@@ -258,7 +258,7 @@ async fn a4_ac_miss_acquire_proceeds_and_box_spawned() {
         resp.status()
     );
     // A miss must reserve exactly 1 slot.
-    let occupied = ledger.lock().unwrap().by_tenant(&acme()).unwrap().len();
+    let occupied = ledger.by_tenant(&acme()).unwrap().len();
     assert_eq!(
         occupied, 1,
         "A4: AC miss must reserve exactly 1 slot; got {occupied}"
@@ -612,7 +612,7 @@ async fn assert_http_acquire_fails_closed_no_box_no_slot(err: MintError) {
     );
 
     // 2. CRITICAL cap-safety: the reserved Pending slot was rolled back ⇒ 0 slots.
-    let occupied = ledger.lock().unwrap().by_tenant(&acme()).unwrap().len();
+    let occupied = ledger.by_tenant(&acme()).unwrap().len();
     assert_eq!(
         occupied, 0,
         "A7c [{err:?}] (CRITICAL): a failing mint must roll back the reserved slot — \
@@ -701,7 +701,7 @@ async fn assert_installation_without_repo_fails_closed_no_box_no_slot(body: Acqu
         "A7d: installation_id without repo_full_name must fail CLOSED with 503; got {}",
         resp.status()
     );
-    let occupied = ledger.lock().unwrap().by_tenant(&acme()).unwrap().len();
+    let occupied = ledger.by_tenant(&acme()).unwrap().len();
     assert_eq!(
         occupied, 0,
         "A7d (CRITICAL): the malformed acquire must roll back the reserved slot — the \
@@ -789,7 +789,7 @@ async fn n_gt_1_on_non_cross_instance_ledger_fails_closed() {
         "N>1 on a per-process ledger must fail closed (no N× over-admission)"
     );
     assert_eq!(
-        ledger.lock().unwrap().by_tenant(&acme()).unwrap().len(),
+        ledger.by_tenant(&acme()).unwrap().len(),
         0,
         "the refused acquire must reserve NO slot"
     );

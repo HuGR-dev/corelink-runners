@@ -13,7 +13,7 @@
 //! Auth is held constant (a `StaticTokenStore` resolves the tenant) so the
 //! variable under test is purely the plan source's fail-closed mapping.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
@@ -83,7 +83,7 @@ fn harness(introspect: FakeIntrospect) -> Router {
         retry_backoff: Duration::ZERO,
     };
     let plans = Arc::new(CoreLinkPlanStore::new(introspect, cfg));
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
     let state = AppState::new(ledger, plans, Arc::new(FixedClock(NOW_MS)));
     app(store, state)
 }

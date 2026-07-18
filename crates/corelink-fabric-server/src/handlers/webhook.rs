@@ -957,8 +957,7 @@ mod tests {
         labels: Vec<String>,
         allowlist: Option<Vec<(String, String)>>,
     ) -> (WebhookHandlerState, CallLog, CallLog) {
-        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
-            Arc::new(Mutex::new(InMemoryLedger::new()));
+        let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
         let prov = RecordingProvisioner::default();
         let provisioned = Arc::clone(&prov.provisioned);
         let torn_down = Arc::clone(&prov.torn_down);

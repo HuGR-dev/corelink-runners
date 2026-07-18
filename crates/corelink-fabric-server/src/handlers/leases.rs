@@ -862,9 +862,7 @@ pub(crate) async fn finalize_admitted_lease(
         // inconsistency → fail closed, never a config-less runner box.
         if state.runner_broker.is_none() {
             state.teardown_lease(&lease_id).await;
-            if let Ok(mut ledger) = state.ledger.lock() {
-                let _ = ledger.remove(&lease_id);
-            }
+            let _ = state.ledger.remove(&lease_id);
             return FinalizeOutcome::Done(fail_closed(
                 "runner lease reached finalize with no registration broker",
             ));
@@ -882,9 +880,7 @@ pub(crate) async fn finalize_admitted_lease(
             }
             Err(e) => {
                 state.teardown_lease(&lease_id).await;
-                if let Ok(mut ledger) = state.ledger.lock() {
-                    let _ = ledger.remove(&lease_id);
-                }
+                let _ = state.ledger.remove(&lease_id);
                 return FinalizeOutcome::Done(fail_closed(&format!(
                     "runner registration mint failed: {e}"
                 )));
@@ -927,9 +923,7 @@ pub(crate) async fn finalize_admitted_lease(
             (None, None) => None,
             (None, Some(_)) => {
                 state.teardown_lease(&lease_id).await;
-                if let Ok(mut ledger) = state.ledger.lock() {
-                    let _ = ledger.remove(&lease_id);
-                }
+                let _ = state.ledger.remove(&lease_id);
                 return FinalizeOutcome::Done(fail_closed(
                     "acquire declared installation_id without repo_full_name; repo_full_name is \
                      required for a hydrating (moat) lease — fail closed",
@@ -1014,9 +1008,7 @@ pub(crate) async fn finalize_admitted_lease(
                         req.repo_full_name.as_deref()
                     );
                     state.teardown_lease(&lease_id).await;
-                    if let Ok(mut ledger) = state.ledger.lock() {
-                        let _ = ledger.remove(&lease_id);
-                    }
+                    let _ = state.ledger.remove(&lease_id);
                     return FinalizeOutcome::Done(fail_closed(&format!(
                         "CAS PAT mint failed: {e}"
                     )));
@@ -1058,9 +1050,7 @@ pub(crate) async fn finalize_admitted_lease(
         if is_capacity_error(&e) {
             // Roll back the slot — teardown then ledger remove.
             state.teardown_lease(&lease_id).await;
-            if let Ok(mut ledger) = state.ledger.lock() {
-                let _ = ledger.remove(&lease_id);
-            }
+            let _ = state.ledger.remove(&lease_id);
             // Signal caller: re-enqueue (queue mode) or distinct-503 (reject).
             return FinalizeOutcome::CapacityError;
         }
@@ -1071,13 +1061,9 @@ pub(crate) async fn finalize_admitted_lease(
         // Teardown is async and MUST run outside the ledger lock; the removal
         // takes the lock in its own short critical section after.
         state.teardown_lease(&lease_id).await;
-        {
-            if let Ok(mut ledger) = state.ledger.lock() {
-                // Best-effort rollback: if the ledger is unreachable we still
-                // return 503 below; the reaper's terminal sweep is the backstop.
-                let _ = ledger.remove(&lease_id);
-            }
-        }
+        // Best-effort rollback: if the ledger op errors we still return 503 below;
+        // the reaper's terminal sweep is the backstop.
+        let _ = state.ledger.remove(&lease_id);
         // WP-7 A7b: revoke the minted PAT on this terminal provision-failure
         // path so no per-job PAT is ever leaked on a fatal error.
         state.revoke_pat_for(&lease_id).await;
@@ -1111,36 +1097,34 @@ pub(crate) async fn finalize_admitted_lease(
     // its value — the block drops it before returning — so the subsequent
     // `await` (teardown on the error path) never crosses a live `!Send` guard.
     let ledger_err: Option<&'static str> = {
-        match state.ledger.lock() {
-            Err(_) => {
-                // Poisoned lock: no guard to drop, just signal failure.
-                Some("lease ledger lock poisoned after provision")
-            }
-            Ok(mut ledger) => {
-                if ledger
-                    .transition(&lease_id, RunnerState::Held, now_ms)
-                    .is_err()
-                {
-                    state.counters.acquire_rejected_lease_invalid.incr();
-                    Some("lease ledger refused Pending->Held")
-                } else {
-                    // Held is committed. Emit Acquired BEFORE the lock drops so
-                    // it strictly precedes any possible reclaim event.
-                    state.record_slot(&lease_id, tenant, SlotEventKind::Acquired);
-                    state.counters.leases_acquired.incr();
-                    None // success — guard drops here at end of block
-                }
-                // `ledger` (MutexGuard) is dropped here in every path
-            }
+        // W-LEDGER-A2: the outer ledger `Mutex` is gone (the ledger is
+        // interior-mutable, `&self`). The transition commits atomically inside the
+        // ledger; the `Acquired` slot emit follows on the VERY NEXT line with NO
+        // `.await` between, so it still precedes any reclaim event for this
+        // just-Held lease under all realistic conditions (a reaper crashing a
+        // just-provisioned, fresh-deadline lease in the few-instruction window is
+        // not a real operating condition — the deadline reaper skips fresh
+        // deadlines and the crash sweep skips healthy boxes).
+        if state
+            .ledger
+            .transition(&lease_id, RunnerState::Held, now_ms)
+            .is_err()
+        {
+            state.counters.acquire_rejected_lease_invalid.incr();
+            Some("lease ledger refused Pending->Held")
+        } else {
+            // Held is committed. Emit Acquired IMMEDIATELY so it precedes any
+            // possible reclaim event for this just-Held lease.
+            state.record_slot(&lease_id, tenant, SlotEventKind::Acquired);
+            state.counters.leases_acquired.incr();
+            None
         }
     };
     if let Some(msg) = ledger_err {
         // Guard is long gone; safe to await teardown. Then free the reserved
         // Pending so the cap/occupancy does not leak.
         state.teardown_lease(&lease_id).await;
-        if let Ok(mut ledger) = state.ledger.lock() {
-            let _ = ledger.remove(&lease_id);
-        }
+        let _ = state.ledger.remove(&lease_id);
         // A7b (audit r4): revoke the minted PAT on this terminal Pending→Held
         // transition-failure path. The ledger row is removed above, so the
         // stale-Pending reaper sweep never sees this lease — without an explicit
@@ -1248,9 +1232,7 @@ pub(crate) async fn status(
     Extension(tenant): Extension<TenantId>,
     Path(lease_id): Path<String>,
 ) -> Response {
-    let Ok(ledger) = state.ledger.lock() else {
-        return fail_closed("lease ledger lock poisoned");
-    };
+    let ledger = &*state.ledger;
     let record = match ledger.get(&lease_id) {
         Ok(Some(record)) => record,
         Ok(None) => return not_found(),
@@ -1306,9 +1288,7 @@ pub(crate) async fn cancel(
     // and must emit Released"; None means "idempotent path — no transition,
     // no emit".
     let (response, emit_released): (Response, Option<String>) = {
-        let Ok(mut ledger) = state.ledger.lock() else {
-            return fail_closed("lease ledger lock poisoned");
-        };
+        let ledger = &*state.ledger;
         let record = match ledger.get(&lease_id) {
             Ok(Some(record)) => record,
             Ok(None) => return not_found(),
@@ -1427,9 +1407,9 @@ mod shard_header_tests {
     fn state() -> AppState {
         use crate::{StaticPlans, SystemClock};
         use corelink_fabric::InMemoryLedger;
-        use std::sync::{Arc, Mutex};
+        use std::sync::Arc;
         AppState::new(
-            Arc::new(Mutex::new(InMemoryLedger::new())),
+            Arc::new(InMemoryLedger::new()),
             Arc::new(StaticPlans::new([])),
             Arc::new(SystemClock),
         )
@@ -1634,13 +1614,13 @@ mod tests {
     /// reserved (visible) BEFORE provisioning runs (the over-admission close).
     /// `provision` succeeds; `teardown` records nothing of interest.
     struct ReserveObservingProvisioner {
-        ledger: Arc<Mutex<dyn LeaseLedger + Send>>,
+        ledger: Arc<dyn LeaseLedger + Send + Sync>,
         observed_pending: Arc<Mutex<bool>>,
     }
 
     impl BoxProvisioner for ReserveObservingProvisioner {
         fn provision(&self, lease_id: &str, _spec: &ContainerSpec) -> Result<()> {
-            let rec = self.ledger.lock().unwrap().get(lease_id).unwrap();
+            let rec = self.ledger.get(lease_id).unwrap();
             let is_pending = matches!(rec.map(|r| r.state), Some(LeaseState::Pending));
             *self.observed_pending.lock().unwrap() = is_pending;
             Ok(())
@@ -1716,8 +1696,7 @@ mod tests {
     /// late. A CHECK acquire on the same state is unaffected (it admits `200`).
     #[tokio::test]
     async fn runner_acquire_without_box_backend_rejected_at_admit() {
-        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
-            Arc::new(Mutex::new(InMemoryLedger::new()));
+        let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
         // Broker wired (passes the broker guard); the provisioner is left at the
         // default no-op NoBoxProvisioner — so the box-backend guard must fire.
         let state = AppState::new(
@@ -1774,8 +1753,7 @@ mod tests {
         use corelink_fabric::RateWindow;
 
         let base: u64 = 1_717_000_000_000;
-        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
-            Arc::new(Mutex::new(InMemoryLedger::new()));
+        let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
         let state = AppState::new(
             Arc::clone(&ledger),
             Arc::new(plans(5)),
@@ -1827,8 +1805,7 @@ mod tests {
     /// and (d) leave the slot meter at 0. No dangling reserved Pending.
     #[tokio::test]
     async fn acquire_provision_failure_cleans_up() {
-        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
-            Arc::new(Mutex::new(InMemoryLedger::new()));
+        let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
         let (prov, teardown_log) = FailingProvisioner::new();
         let mut state = AppState::new(
             Arc::clone(&ledger),
@@ -1868,12 +1845,7 @@ mod tests {
         // The mint is a UUID (unknowable up front), so we prove "no record"
         // via the tenant index being empty (the cap/occupancy source of truth).
         assert!(
-            ledger
-                .lock()
-                .unwrap()
-                .by_tenant(&acme())
-                .unwrap()
-                .is_empty(),
+            ledger.by_tenant(&acme()).unwrap().is_empty(),
             "tenant must have no active leases after cleanup (Pending removed)"
         );
         // Slot meter back to 0 — Acquired was never emitted (Held never reached).
@@ -1902,8 +1874,7 @@ mod tests {
     /// explicit `DefaultBodyLimit` wiring against accidental removal.
     #[tokio::test]
     async fn acquire_oversized_body_is_capped() {
-        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
-            Arc::new(Mutex::new(InMemoryLedger::new()));
+        let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
         let state = AppState::new(
             ledger,
             Arc::new(plans(5)),
@@ -1942,8 +1913,7 @@ mod tests {
         use crate::envelope_inject::INGEST_CREDENTIAL_ENV;
         use crate::ingest_token::IngestSigner;
 
-        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
-            Arc::new(Mutex::new(InMemoryLedger::new()));
+        let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
         let (prov, captured) = EnvRecordingProvisioner::new();
         // A KNOWN ingest secret so the test can recompute the expected token.
         let ingest_secret: Vec<u8> = b"unit-test-ingest-secret".to_vec();
@@ -2005,8 +1975,7 @@ mod tests {
     async fn acquire_response_surfaces_offbox_ingest_credential_for_check_lease() {
         use crate::ingest_token::IngestSigner;
 
-        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
-            Arc::new(Mutex::new(InMemoryLedger::new()));
+        let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
         let ingest_secret: Vec<u8> = b"unit-test-ingest-secret".to_vec();
         let state = AppState::new(
             Arc::clone(&ledger),
@@ -2060,8 +2029,7 @@ mod tests {
     /// provisioning), which is the property that closes the race.
     #[tokio::test]
     async fn acquire_atomic_reserve_rejects_second_at_cap() {
-        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
-            Arc::new(Mutex::new(InMemoryLedger::new()));
+        let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
         let state = AppState::new(
             Arc::clone(&ledger),
             Arc::new(plans(1)), // cap of ONE
@@ -2079,7 +2047,7 @@ mod tests {
 
         // The reservation is in the ledger and counts toward the cap.
         assert_eq!(
-            ledger.lock().unwrap().by_tenant(&acme()).unwrap().len(),
+            ledger.by_tenant(&acme()).unwrap().len(),
             1,
             "first acquire's record must be in the ledger"
         );
@@ -2095,7 +2063,7 @@ mod tests {
             "second acquire at cap must be rejected over_cap"
         );
         assert_eq!(
-            ledger.lock().unwrap().by_tenant(&acme()).unwrap().len(),
+            ledger.by_tenant(&acme()).unwrap().len(),
             1,
             "the over-cap acquire must leave no trace"
         );
@@ -2107,8 +2075,7 @@ mod tests {
     /// Pending record while `provision` runs.
     #[tokio::test]
     async fn acquire_reserves_pending_before_provision() {
-        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
-            Arc::new(Mutex::new(InMemoryLedger::new()));
+        let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
         let observed = Arc::new(Mutex::new(false));
         let mut state = AppState::new(
             Arc::clone(&ledger),
@@ -2141,8 +2108,7 @@ mod tests {
     /// strictly precedes any later reclaim event.
     #[tokio::test]
     async fn acquire_emits_acquired_with_held() {
-        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
-            Arc::new(Mutex::new(InMemoryLedger::new()));
+        let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
         let state = AppState::new(
             Arc::clone(&ledger),
             Arc::new(plans(5)),
@@ -2174,13 +2140,7 @@ mod tests {
         );
         // The lease is Held in the ledger — Acquired was emitted alongside it.
         assert_eq!(
-            ledger
-                .lock()
-                .unwrap()
-                .get(&lease_id)
-                .unwrap()
-                .unwrap()
-                .state,
+            ledger.get(&lease_id).unwrap().unwrap().state,
             LeaseState::Wire(RunnerState::Held),
             "the lease must be Held",
         );
@@ -2194,8 +2154,7 @@ mod tests {
     /// only) would otherwise never reclaim them. Released is emitted once.
     #[tokio::test]
     async fn cancel_tears_down_box() {
-        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
-            Arc::new(Mutex::new(InMemoryLedger::new()));
+        let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
         // RecordingProvisioner: provision OK, teardown logs the lease id.
         struct RecordingProvisioner(Arc<Mutex<Vec<String>>>);
         impl BoxProvisioner for RecordingProvisioner {
@@ -2264,8 +2223,7 @@ mod tests {
     /// no pre/post-restart or cross-instance mint collides on the PRIMARY KEY.
     #[tokio::test]
     async fn acquire_mints_distinct_uuid_lease_ids() {
-        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
-            Arc::new(Mutex::new(InMemoryLedger::new()));
+        let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
         let state = AppState::new(
             Arc::clone(&ledger),
             Arc::new(plans(5)),
@@ -2314,8 +2272,7 @@ mod tests {
     #[tokio::test]
     async fn oversized_expiry_is_clamped_to_max() {
         let now: u64 = 1_717_000_000_000;
-        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
-            Arc::new(Mutex::new(InMemoryLedger::new()));
+        let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
         let state = AppState::new(
             Arc::clone(&ledger),
             Arc::new(plans(5)),
@@ -2357,8 +2314,7 @@ mod tests {
     /// compute machinery is genuinely off unless a box-vCPU is configured.
     #[tokio::test]
     async fn no_runner_vcpu_admits_regardless_of_ceiling() {
-        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
-            Arc::new(Mutex::new(InMemoryLedger::new()));
+        let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
         let state = AppState::new(
             Arc::clone(&ledger),
             Arc::new(plans(5)),

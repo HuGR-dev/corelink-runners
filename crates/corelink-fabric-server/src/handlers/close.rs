@@ -128,9 +128,7 @@ pub(crate) async fn close(
     // can last seconds, and the ledger (the authority) must stay readable —
     // a subscriber observing the lease mid-close sees it still Held.
     {
-        let Ok(ledger) = state.ledger.lock() else {
-            return error_response(ApiError::FailClosed, "lease ledger lock poisoned");
-        };
+        let ledger = &*state.ledger;
         let record = match ledger.get(&lease_id) {
             Ok(Some(record)) => record,
             Ok(None) => return not_found(),
@@ -304,9 +302,7 @@ pub(crate) async fn close(
     // fabricd restart dropped the billing target's in-memory acquire pairing (the
     // stamp is preserved across the Held→Released transition).
     let released_rec = {
-        let Ok(mut ledger) = state.ledger.lock() else {
-            return error_response(ApiError::FailClosed, "lease ledger lock poisoned");
-        };
+        let ledger = &*state.ledger;
         ledger
             .transition(&lease_id, RunnerState::Released, state.clock.now_ms())
             .ok()
