@@ -59,7 +59,7 @@ use tokio::runtime::Handle;
 use tokio_postgres::NoTls;
 
 use crate::compute_meter;
-use crate::ledger::{AdmitOutcome, ComputeGate, LeaseLedger, LeaseRecord, LeaseState};
+use crate::ledger::{AdmitLedger, AdmitOutcome, ComputeGate, LeaseLedger, LeaseRecord, LeaseState};
 use crate::tenant::TenantId;
 
 /// Transport-security mode for the Postgres ledger connection (WP-B).
@@ -293,6 +293,14 @@ fn record_from_row(row: &tokio_postgres::Row) -> anyhow::Result<LeaseRecord> {
 /// sync trait method runs its async body via `block_in_place` + `block_on`. Use
 /// [`PgLedger::connect`] to build one (it applies the idempotent DDL once,
 /// fail-closed).
+///
+/// W-LEDGER-A1: `Clone` shares the `Arc`-backed `pool`, the `handle`, AND the
+/// `admit_permits` semaphore. The composition root clones one handle into the
+/// cold `AppState.ledger` (`Arc<Mutex<..>>`) and one into `AppState.admit`
+/// ([`AdmitLedger`], `&self`, no process `Mutex`); because both clones share the
+/// SAME `admit_permits` `Arc`, the C3 connection-reservation invariant is preserved
+/// across the split (the #1 risk if they diverged).
+#[derive(Clone)]
 pub struct PgLedger {
     pool: Pool,
     handle: Handle,
@@ -992,6 +1000,62 @@ impl LeaseLedger for PgLedger {
     }
 
     fn try_admit(&mut self, rec: LeaseRecord, max_concurrency: u32) -> anyhow::Result<bool> {
+        // Delegate to the `&self` impl (W-LEDGER-A1): the body needs no `&mut`
+        // (pool + semaphore + handle are all `Arc`/`Handle`-shared), so the admit
+        // seam can drive it without the process `Mutex`.
+        self.try_admit_impl(rec, max_concurrency)
+    }
+
+    fn try_admit_with_compute(
+        &mut self,
+        rec: LeaseRecord,
+        max_concurrency: u32,
+        gate: Option<ComputeGate>,
+    ) -> anyhow::Result<AdmitOutcome> {
+        self.try_admit_with_compute_impl(rec, max_concurrency, gate)
+    }
+
+    fn compute_accrued(&self, tenant: &TenantId, period_key: u32) -> anyhow::Result<u64> {
+        // The durable accrued vCPU·ms for (tenant, period) — 0 if the row is
+        // absent (no accounting, or a fresh period). Stored ≤ i64::MAX by every
+        // write path, so the `as u64` is exact.
+        self.block_on(async {
+            let client = self.pool.get().await?;
+            let row = client
+                .query_opt(
+                    "SELECT accrued_vcpu_ms FROM compute_accrual \
+                     WHERE tenant = $1 AND period_key = $2",
+                    &[&tenant.as_str(), &(period_key as i32)],
+                )
+                .await?;
+            Ok(row
+                .map(|r| r.get::<_, i64>("accrued_vcpu_ms") as u64)
+                .unwrap_or(0))
+        })
+    }
+}
+
+impl AdmitLedger for PgLedger {
+    fn try_admit(&self, rec: LeaseRecord, max_concurrency: u32) -> anyhow::Result<bool> {
+        self.try_admit_impl(rec, max_concurrency)
+    }
+
+    fn try_admit_with_compute(
+        &self,
+        rec: LeaseRecord,
+        max_concurrency: u32,
+        gate: Option<ComputeGate>,
+    ) -> anyhow::Result<AdmitOutcome> {
+        self.try_admit_with_compute_impl(rec, max_concurrency, gate)
+    }
+}
+
+impl PgLedger {
+    /// The `&self` cross-instance cap-safe admit (shared by the [`LeaseLedger`] and
+    /// [`AdmitLedger`] impls). NO `&mut` is needed — the advisory lock, not any
+    /// process `Mutex`, is the only serialization (proven cap-exact across
+    /// independent instances by the cross-instance conformance test).
+    fn try_admit_impl(&self, rec: LeaseRecord, max_concurrency: u32) -> anyhow::Result<bool> {
         // THE crux: cross-instance cap-safe admission. An EXPLICIT transaction
         // takes a per-tenant advisory lock as its OWN statement FIRST, then the
         // count-and-insert. The lock is held for the whole transaction
@@ -1070,8 +1134,11 @@ impl LeaseLedger for PgLedger {
         })
     }
 
-    fn try_admit_with_compute(
-        &mut self,
+    /// The `&self` compute-gated admit (shared by the [`LeaseLedger`] and
+    /// [`AdmitLedger`] impls). NO `&mut` is needed — the advisory lock is the only
+    /// serialization; the process `Mutex` is not on this path (W-LEDGER-A1).
+    fn try_admit_with_compute_impl(
+        &self,
         rec: LeaseRecord,
         max_concurrency: u32,
         gate: Option<ComputeGate>,
@@ -1084,7 +1151,7 @@ impl LeaseLedger for PgLedger {
         // pure branch.
         let active_gate = gate.filter(|g| g.ceiling_vcpu_ms > 0);
         let Some(g) = active_gate else {
-            return Ok(if self.try_admit(rec, max_concurrency)? {
+            return Ok(if self.try_admit_impl(rec, max_concurrency)? {
                 AdmitOutcome::Admitted
             } else {
                 AdmitOutcome::OverConcurrency
@@ -1234,25 +1301,6 @@ impl LeaseLedger for PgLedger {
                     ))
                 }
             }
-        })
-    }
-
-    fn compute_accrued(&self, tenant: &TenantId, period_key: u32) -> anyhow::Result<u64> {
-        // The durable accrued vCPU·ms for (tenant, period) — 0 if the row is
-        // absent (no accounting, or a fresh period). Stored ≤ i64::MAX by every
-        // write path, so the `as u64` is exact.
-        self.block_on(async {
-            let client = self.pool.get().await?;
-            let row = client
-                .query_opt(
-                    "SELECT accrued_vcpu_ms FROM compute_accrual \
-                     WHERE tenant = $1 AND period_key = $2",
-                    &[&tenant.as_str(), &(period_key as i32)],
-                )
-                .await?;
-            Ok(row
-                .map(|r| r.get::<_, i64>("accrued_vcpu_ms") as u64)
-                .unwrap_or(0))
         })
     }
 }
@@ -1438,7 +1486,7 @@ mod compute_ceiling_pg_tests {
         };
         let _serial = PG_CEILING_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let rt = rt();
-        let mut led = connect(&rt, &url);
+        let led = connect(&rt, &url);
         let t = TenantId::new(nonce("off")).unwrap();
 
         // None gate, cap 1 → first admits, second over-cap.
@@ -1482,7 +1530,7 @@ mod compute_ceiling_pg_tests {
         };
         let _serial = PG_CEILING_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let rt = rt();
-        let mut led = connect(&rt, &url);
+        let led = connect(&rt, &url);
         let t = TenantId::new(nonce("ceil")).unwrap();
         let period = 202406u32;
         // ceiling = 100 vCPU·ms. One lease reserves 60 (fits); a second reserving
@@ -1713,8 +1761,8 @@ mod compute_ceiling_pg_tests {
         let id_a = nonce("xa");
         let id_b = nonce("xb");
 
-        let mut led_a = connect(&rt, &url);
-        let mut led_b = connect(&rt, &url);
+        let led_a = connect(&rt, &url);
+        let led_b = connect(&rt, &url);
 
         let oa = std::sync::Arc::new(std::sync::Mutex::new(None::<AdmitOutcome>));
         let ob = std::sync::Arc::new(std::sync::Mutex::new(None::<AdmitOutcome>));
@@ -2017,7 +2065,7 @@ mod compute_ceiling_pg_tests {
         };
         let _serial = PG_CEILING_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let rt = rt();
-        let mut led = connect(&rt, &url);
+        let led = connect(&rt, &url);
         let t = TenantId::new(nonce("c4both")).unwrap();
         let period = 202406u32;
         // Admit ONE lease at cap 1 reserving 60 of a 100 ceiling.
@@ -2127,7 +2175,7 @@ mod compute_ceiling_pg_tests {
                         .build()
                         .expect("rt");
                     rt_i.block_on(async move {
-                        let mut led_i = PgLedger::connect(&url_i, 4, PgTlsMode::Disable)
+                        let led_i = PgLedger::connect(&url_i, 4, PgTlsMode::Disable)
                             .await
                             .expect("connect");
                         // Same-tenant admit: contends for hashtext(tenant) lock.
@@ -2179,6 +2227,99 @@ mod compute_ceiling_pg_tests {
             led_check.compute_accrued(&t, period).unwrap(),
             50,
             "the released seed accrued its clamped reservation — release path ran"
+        );
+    }
+
+    // ── W-LEDGER-A1: the admit-lock-split invariants on pg ────────────────────
+
+    /// TEST (v) — the shared-`Arc` invariant (the #1 A1 risk). A `PgLedger::clone`
+    /// (the composition-root shape: one clone is the cold `ledger`, the other is
+    /// `AppState.admit`) shares the SAME `admit_permits` `Arc<Semaphore>` AND the
+    /// SAME `Arc`-backed pool. If they diverged, the C3 connection reservation
+    /// would be split and a same-tenant admit burst could starve the releasing
+    /// terminal `transition`. No DB round-trip beyond `connect` — but `connect`
+    /// needs a DB, so gate on `TEST_DATABASE_URL`.
+    #[test]
+    fn admit_and_cold_clone_share_the_admit_permits_semaphore() {
+        let Some(url) = db_url() else {
+            eprintln!(
+                "admit_and_cold_clone_share_the_admit_permits_semaphore: \
+                 TEST_DATABASE_URL unset — skipping"
+            );
+            return;
+        };
+        let _serial = PG_CEILING_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let rt = rt();
+        let cold = connect(&rt, &url);
+        let admit = cold.clone();
+        assert!(
+            std::sync::Arc::ptr_eq(&cold.admit_permits, &admit.admit_permits),
+            "the admit handle and the cold ledger handle MUST share ONE \
+             admit_permits Arc<Semaphore> (the C3 reservation breaks otherwise)"
+        );
+        // The pool is deadpool's `Arc`-backed handle: a clone shares the inner
+        // pool, so its status (max size + slots) is identical across the clones —
+        // the observable proof that the connection pool is shared, not duplicated.
+        assert_eq!(
+            cold.pool.status().max_size,
+            admit.pool.status().max_size,
+            "the clones must share ONE connection pool"
+        );
+    }
+
+    /// TEST (i)-pg — cap-safety UNBROKEN through the `&self` [`AdmitLedger`] seam on
+    /// a SHARED clone (the production shape: `admit` is a clone of the cold ledger,
+    /// NOT an independent instance). A concurrent same-tenant burst of N≫cap through
+    /// `AdmitLedger::try_admit` (no process `Mutex`, only the per-tenant advisory
+    /// lock) admits EXACTLY `cap`. Complements the independent-instance proof in
+    /// `ledger_conformance::cross_instance_concurrent_admit_respects_cap_exactly`.
+    #[test]
+    fn admit_seam_shared_clone_concurrent_burst_respects_cap_exactly() {
+        let Some(url) = db_url() else {
+            eprintln!(
+                "admit_seam_shared_clone_concurrent_burst_respects_cap_exactly: \
+                 TEST_DATABASE_URL unset — skipping"
+            );
+            return;
+        };
+        let _serial = PG_CEILING_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        const CAP: u32 = 3;
+        const N: usize = 24;
+        let rt = rt();
+        // ONE ledger; every thread admits through a CLONE that shares its pool +
+        // advisory-lock keyspace + admit-permits (exactly `AppState.admit`).
+        let base = connect(&rt, &url);
+        let t = TenantId::new(nonce("xseam")).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(N));
+        let handles: Vec<_> = (0..N)
+            .map(|i| {
+                let led = base.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                let t = t.clone();
+                let id = nonce(&format!("seam-{i}"));
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    // The &self AdmitLedger path — the acquire hot path's reserve.
+                    AdmitLedger::try_admit(&led, pending(&id, &t, 1_000), CAP)
+                        .expect("admit must not error (distinct ids, real cap)")
+                })
+            })
+            .collect();
+        let admitted = handles
+            .into_iter()
+            .map(|h| h.join().expect("admit thread must not panic"))
+            .filter(|ok| *ok)
+            .count();
+        assert_eq!(
+            admitted, CAP as usize,
+            "the &self admit seam on a shared clone must admit EXACTLY the cap \
+             (got {admitted}, cap {CAP}) — the advisory lock, not a process Mutex, \
+             is the serialization"
+        );
+        assert_eq!(
+            base.by_tenant(&t).unwrap().len(),
+            CAP as usize,
+            "the shared ledger holds exactly `cap` rows"
         );
     }
 }

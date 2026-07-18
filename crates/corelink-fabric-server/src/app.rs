@@ -12,10 +12,12 @@ use std::sync::{Arc, Mutex};
 
 use axum::routing::{get, post};
 use axum::{Extension, Router, middleware};
+use corelink_fabric::ledger::{AdmitOutcome, ComputeGate};
 use corelink_fabric::plans::{PlanTier, ceiling_for, plan_for};
 use corelink_fabric::{
-    BillingExportTarget, CapGate, InMemoryLedger, LeaseLedger, RateWindow, SlotEventKind,
-    SlotMeter, SlotOccupancyEvent, TenantId, TenantPlan, TenantWaitStats,
+    AdmitLedger, BillingExportTarget, CapGate, InMemoryLedger, LeaseLedger, LeaseRecord,
+    RateWindow, SlotEventKind, SlotMeter, SlotOccupancyEvent, TenantId, TenantPlan,
+    TenantWaitStats,
 };
 use corelink_fabric_api::{TriggerResponse, paths};
 
@@ -347,6 +349,34 @@ impl PlanSource for CompositePlanSource {
     }
 }
 
+/// The DEFAULT [`AdmitLedger`] (W-LEDGER-A1): reserve by locking the SAME process
+/// `Mutex` on [`AppState::ledger`] and calling the cold `LeaseLedger` admit — i.e.
+/// byte-identical to the pre-split acquire path. [`AppState::new`] installs this so
+/// EVERY existing caller (all the tests) is unchanged. The production composition
+/// root replaces it with a lock-split handle (a `&self` clone of the concrete
+/// ledger that does NOT take this process `Mutex`) via [`AppState::with_admit`].
+///
+/// Poison-tolerant: a poisoned guard is recovered with `into_inner` (matching the
+/// queued-dispatch site) so one panicked handler never wedges admission fabric-wide.
+pub struct MutexAdmitLedger(pub Arc<Mutex<dyn LeaseLedger + Send>>);
+
+impl AdmitLedger for MutexAdmitLedger {
+    fn try_admit(&self, rec: LeaseRecord, max_concurrency: u32) -> anyhow::Result<bool> {
+        let mut ledger = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        ledger.try_admit(rec, max_concurrency)
+    }
+
+    fn try_admit_with_compute(
+        &self,
+        rec: LeaseRecord,
+        max_concurrency: u32,
+        gate: Option<ComputeGate>,
+    ) -> anyhow::Result<AdmitOutcome> {
+        let mut ledger = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        ledger.try_admit_with_compute(rec, max_concurrency, gate)
+    }
+}
+
 /// Shared state behind the lease handlers (WP-API2).
 ///
 /// The ledger is THE authority (CP1); the cap gate is a pure decision
@@ -355,9 +385,26 @@ impl PlanSource for CompositePlanSource {
 /// admission bookkeeping, not ledger state.
 #[derive(Clone)]
 pub struct AppState {
-    /// The authoritative lease state machine (CP1). One lock guards the
-    /// whole acquire path, so cap check + Pending→Held are atomic.
+    /// The authoritative lease state machine (CP1). The process `Mutex` guards
+    /// the COLD path (`put`/`transition`/close/reaper); the acquire hot path no
+    /// longer takes it (W-LEDGER-A1) — it reserves via [`Self::admit`].
     pub ledger: Arc<Mutex<dyn LeaseLedger + Send>>,
+    /// The ADMIT seam (W-LEDGER-A1): the acquire hot-path's atomic
+    /// check-and-reserve ([`AdmitLedger`], `&self`), driven WITHOUT the process
+    /// `Mutex` on [`Self::ledger`]. The backing store provides its own atomicity
+    /// (pg: the per-tenant advisory lock; in-memory: an internal mutex it SHARES
+    /// with the cold `ledger` handle), so dropping the process `Mutex` for admit
+    /// costs no cap-safety while it stops a same-tenant acquire burst from parking
+    /// every tokio worker on the std `.lock()`.
+    ///
+    /// **Default** ([`AppState::new`]): a [`MutexAdmitLedger`] wrapping the SAME
+    /// `ledger` `Arc` — byte-identical to the pre-split behaviour (admit locks the
+    /// process `Mutex`), so every existing caller is unchanged. The production
+    /// composition root installs a LOCK-SPLIT handle (a `&self` clone of the
+    /// concrete ledger, sharing the pool + admit-permits for pg, or the inner mutex
+    /// for in-memory) via [`AppState::with_admit`]; the queued-admission dispatch
+    /// and the immediate acquire path both reserve through THIS handle.
+    pub admit: Arc<dyn AdmitLedger>,
     /// Preventive admission gate (CP2) — consulted BEFORE anything else.
     pub cap_gate: CapGate,
     /// Cap source of truth (per-tenant plans).
@@ -760,8 +807,14 @@ impl AppState {
     ) -> Self {
         // Capture the boot instant before `clock` is moved into the struct.
         let boot_at_ms = clock.now_ms();
+        // W-LEDGER-A1 DEFAULT admit handle: wrap the SAME `ledger` `Arc` in a
+        // `MutexAdmitLedger`, so the default acquire behaviour is byte-identical to
+        // the pre-split path (admit locks the process `Mutex`). The composition root
+        // swaps in a lock-split handle via `with_admit`.
+        let admit: Arc<dyn AdmitLedger> = Arc::new(MutexAdmitLedger(Arc::clone(&ledger)));
         Self {
             ledger,
+            admit,
             cap_gate: CapGate,
             plans,
             clock,
@@ -914,6 +967,25 @@ impl AppState {
         target: Arc<dyn BillingExportTarget + Send + Sync>,
     ) -> Self {
         self.billing_export_target = target;
+        self
+    }
+
+    /// Install the LOCK-SPLIT admit handle (W-LEDGER-A1). The composition root
+    /// passes a `&self` [`AdmitLedger`] clone of the concrete ledger that shares
+    /// the SAME backing store as the cold [`Self::ledger`] handle — for pg, a
+    /// `PgLedger::clone` sharing the pool + admit-permits semaphore; for in-memory,
+    /// an `InMemoryLedger::clone` sharing the inner mutex. Admission then reserves
+    /// through THIS handle WITHOUT taking the process `Mutex`, so a same-tenant
+    /// acquire burst never parks the tokio workers on the std `.lock()`.
+    ///
+    /// **Invariant (caller's responsibility):** `admit` MUST share state with
+    /// `ledger` (be a clone of the same concrete ledger). Installing an independent
+    /// ledger here would split the authoritative state — the reserve would not be
+    /// visible to close/reaper. The default ([`AppState::new`]) upholds this by
+    /// wrapping the same `Arc`; the composition root upholds it by cloning.
+    #[must_use]
+    pub fn with_admit(mut self, admit: Arc<dyn AdmitLedger>) -> Self {
+        self.admit = admit;
         self
     }
 

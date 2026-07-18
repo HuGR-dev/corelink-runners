@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use corelink_runners_contracts::RunnerState;
 use serde::{Deserialize, Serialize};
@@ -446,10 +447,49 @@ pub trait LeaseLedger {
     }
 }
 
-/// In-memory ledger — dev/test impl; disqualified for production by
+/// The ADMIT seam (W-LEDGER-A1) — the acquire hot-path's atomic check-and-reserve,
+/// SPLIT OUT of the process-`Mutex`-guarded [`LeaseLedger`] so admission does not
+/// serialize behind the cold close/reaper path.
+///
+/// Both methods take `&self`, NOT `&mut self`: the backing store provides its OWN
+/// atomicity for the count-and-reserve — the [`crate::pg_ledger::PgLedger`] via the
+/// per-tenant `pg_advisory_xact_lock` (proven cap-exact across INDEPENDENT
+/// instances with NO process `Mutex` by
+/// `ledger_conformance::cross_instance_concurrent_admit_respects_cap_exactly`), the
+/// [`InMemoryLedger`] via an INTERNAL `Arc<Mutex<InMemoryInner>>` it shares with its
+/// cold `LeaseLedger` handle. So the OUTER process `Mutex` on `AppState.ledger` adds
+/// nothing to cap-safety on the admit path and is dropped for it — while the
+/// in-memory count-and-reserve stays atomic (the lock is RELOCATED outer→inner, not
+/// removed).
+///
+/// Semantically identical to [`LeaseLedger::try_admit`] /
+/// [`LeaseLedger::try_admit_with_compute`]; only the receiver differs (`&self`) so
+/// the handler can call it WITHOUT holding a process `Mutex` across the (for pg,
+/// `block_in_place`) blocking admit — the fix that stops a same-tenant acquire burst
+/// from parking every tokio worker thread on the std `.lock()`.
+pub trait AdmitLedger: Send + Sync {
+    /// See [`LeaseLedger::try_admit`] — concurrency-only atomic admit, `&self`.
+    fn try_admit(&self, rec: LeaseRecord, max_concurrency: u32) -> anyhow::Result<bool>;
+
+    /// See [`LeaseLedger::try_admit_with_compute`] — atomic admit with an OPTIONAL
+    /// compute-ceiling gate, `&self`. `gate = None` is byte-identical to
+    /// [`AdmitLedger::try_admit`] (concurrency-only, default-off).
+    fn try_admit_with_compute(
+        &self,
+        rec: LeaseRecord,
+        max_concurrency: u32,
+        gate: Option<ComputeGate>,
+    ) -> anyhow::Result<AdmitOutcome>;
+}
+
+/// In-memory ledger state — dev/test backing store; disqualified for production by
 /// `ledger_survives_process_restart` (CP1).
+///
+/// This is the INNER, un-synchronized state. The public [`InMemoryLedger`] handle
+/// wraps it in an `Arc<Mutex<..>>`; [`FileLedger`] embeds it directly as its
+/// replay index (single-threaded behind the outer ledger lock).
 #[derive(Debug, Default)]
-pub struct InMemoryLedger {
+pub(crate) struct InMemoryInner {
     records: HashMap<String, LeaseRecord>,
     /// ADR-0004 Decision-2: the durable envelope-checkpoint blob per lease
     /// (opaque JSON, never parsed by the ledger). A side map keeps the frozen
@@ -468,7 +508,7 @@ pub struct InMemoryLedger {
 
 /// A terminal accrual fold that actually happened — the durable side-effect a
 /// [`FileLedger`] must journal so it survives a restart. Returned by
-/// [`InMemoryLedger::accrue_on_terminal`] when (and only when) a reservation
+/// [`InMemoryInner::accrue_on_terminal`] when (and only when) a reservation
 /// crossed from un-accrued to accrued, so the caller can persist BOTH the
 /// updated accrual total and the reservation's `accrued_at_ms` latch.
 #[derive(Debug, Clone)]
@@ -493,8 +533,8 @@ fn concurrency_only_outcome(admitted: bool) -> AdmitOutcome {
     }
 }
 
-impl InMemoryLedger {
-    /// Empty in-memory ledger.
+impl InMemoryInner {
+    /// Empty in-memory ledger state.
     pub fn new() -> Self {
         Self::default()
     }
@@ -666,7 +706,7 @@ impl InMemoryLedger {
     }
 }
 
-impl LeaseLedger for InMemoryLedger {
+impl LeaseLedger for InMemoryInner {
     fn put(&mut self, rec: LeaseRecord) -> anyhow::Result<()> {
         if self.records.contains_key(&rec.lease_id) {
             anyhow::bail!(
@@ -834,6 +874,158 @@ impl LeaseLedger for InMemoryLedger {
     }
 }
 
+/// In-memory ledger — dev/test impl (CP1). A cheap-to-clone HANDLE over a shared
+/// `Arc<Mutex<InMemoryInner>>`: every clone points at the SAME state.
+///
+/// W-LEDGER-A1: the state is behind an INTERNAL `Mutex` so the acquire hot path
+/// can drive the atomic count-and-reserve through the [`AdmitLedger`] seam (`&self`,
+/// NO process `Mutex`) while the cold [`LeaseLedger`] handle (`put`/`transition`/
+/// reaper) drives the SAME inner state through the outer `AppState.ledger` `Mutex`.
+/// The composition root clones one handle for each side, so admit + cold mutations
+/// still serialize on the inner lock — cap atomicity and compute-reservation
+/// atomicity are byte-identical to the pre-split single-`Mutex` design, just
+/// RELOCATED outer→inner. Nesting order is always outer⊃inner (cold path takes the
+/// outer `AppState.ledger` lock, then this inner lock; admit takes only this inner
+/// lock) — no path takes inner-then-outer, so there is no lock-order inversion.
+#[derive(Debug, Clone, Default)]
+pub struct InMemoryLedger {
+    inner: Arc<Mutex<InMemoryInner>>,
+}
+
+impl InMemoryLedger {
+    /// A fresh, empty in-memory ledger handle (its own inner state).
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(InMemoryInner::new())),
+        }
+    }
+
+    /// Whether `other` is the SAME ledger — i.e. shares this handle's inner
+    /// `Mutex` (a clone, not an independent `new()`). The lock-relocation proof
+    /// asserts the admit handle and the cold `LeaseLedger` handle are shared.
+    #[doc(hidden)]
+    pub fn shares_state_with(&self, other: &InMemoryLedger) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
+    /// Lock the inner state, mapping a poisoned mutex to a fail-closed `Err` (never
+    /// a silent panic on the admit hot path). Every trait method takes this lock
+    /// EXACTLY ONCE, so multi-step operations (e.g. `remove_if_pending`'s get+remove)
+    /// stay atomic under one guard, identical to the pre-split behaviour.
+    fn lock(&self) -> anyhow::Result<std::sync::MutexGuard<'_, InMemoryInner>> {
+        self.inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("in-memory ledger inner mutex poisoned (fail-closed)"))
+    }
+}
+
+impl LeaseLedger for InMemoryLedger {
+    fn is_cross_instance_safe(&self) -> bool {
+        // Per-process state — never cross-instance safe (matches InMemoryInner).
+        false
+    }
+
+    fn set_tenant_suspended(&self, tenant: &str, suspended: bool) -> anyhow::Result<()> {
+        self.lock()?.set_tenant_suspended(tenant, suspended)
+    }
+
+    fn is_tenant_suspended_durable(&self, tenant: &str) -> anyhow::Result<bool> {
+        self.lock()?.is_tenant_suspended_durable(tenant)
+    }
+
+    fn put(&mut self, rec: LeaseRecord) -> anyhow::Result<()> {
+        self.lock()?.put(rec)
+    }
+
+    fn get(&self, lease_id: &str) -> anyhow::Result<Option<LeaseRecord>> {
+        self.lock()?.get(lease_id)
+    }
+
+    fn transition(
+        &mut self,
+        lease_id: &str,
+        to: RunnerState,
+        now_ms: u64,
+    ) -> anyhow::Result<LeaseRecord> {
+        self.lock()?.transition(lease_id, to, now_ms)
+    }
+
+    fn by_tenant(&self, t: &TenantId) -> anyhow::Result<Vec<LeaseRecord>> {
+        self.lock()?.by_tenant(t)
+    }
+
+    fn held(&self) -> anyhow::Result<Vec<LeaseRecord>> {
+        self.lock()?.held()
+    }
+
+    fn pending_older_than(&self, now_ms: u64, max_age_ms: u64) -> anyhow::Result<Vec<LeaseRecord>> {
+        self.lock()?.pending_older_than(now_ms, max_age_ms)
+    }
+
+    fn try_admit(&mut self, rec: LeaseRecord, max_concurrency: u32) -> anyhow::Result<bool> {
+        self.lock()?.try_admit(rec, max_concurrency)
+    }
+
+    fn try_admit_with_compute(
+        &mut self,
+        rec: LeaseRecord,
+        max_concurrency: u32,
+        gate: Option<ComputeGate>,
+    ) -> anyhow::Result<AdmitOutcome> {
+        self.lock()?
+            .try_admit_with_compute(rec, max_concurrency, gate)
+    }
+
+    fn compute_accrued(&self, tenant: &TenantId, period_key: u32) -> anyhow::Result<u64> {
+        self.lock()?.compute_accrued(tenant, period_key)
+    }
+
+    fn set_envelope_checkpoint(
+        &mut self,
+        lease_id: &str,
+        checkpoint_json: &str,
+    ) -> anyhow::Result<()> {
+        self.lock()?
+            .set_envelope_checkpoint(lease_id, checkpoint_json)
+    }
+
+    fn get_envelope_checkpoint(&self, lease_id: &str) -> anyhow::Result<Option<String>> {
+        self.lock()?.get_envelope_checkpoint(lease_id)
+    }
+
+    fn remove(&mut self, lease_id: &str) -> anyhow::Result<bool> {
+        self.lock()?.remove(lease_id)
+    }
+
+    fn remove_if_pending(&mut self, lease_id: &str) -> anyhow::Result<bool> {
+        // Delegate under ONE guard so the inner default's get+remove stays atomic
+        // (the handle must NOT re-enter its own get()/remove(), which would lock
+        // twice and race a concurrent admit).
+        self.lock()?.remove_if_pending(lease_id)
+    }
+}
+
+impl AdmitLedger for InMemoryLedger {
+    fn try_admit(&self, rec: LeaseRecord, max_concurrency: u32) -> anyhow::Result<bool> {
+        // Lock the INNER mutex for the pure-CPU count-and-insert, then release — the
+        // lock is NEVER held across an `.await`/`block_on`. The cold `LeaseLedger`
+        // handle shares this same inner mutex, so admit + cold put/transition still
+        // serialize → cap atomicity is byte-identical, just relocated outer→inner.
+        self.lock()?.try_admit(rec, max_concurrency)
+    }
+
+    fn try_admit_with_compute(
+        &self,
+        rec: LeaseRecord,
+        max_concurrency: u32,
+        gate: Option<ComputeGate>,
+    ) -> anyhow::Result<AdmitOutcome> {
+        // Same inner-lock relocation for the compute Σ read-decide-insert.
+        self.lock()?
+            .try_admit_with_compute(rec, max_concurrency, gate)
+    }
+}
+
 /// File-backed ledger: append-only JSONL journal + replay-on-open.
 ///
 /// **The restart-survival oracle** for CP1's
@@ -853,7 +1045,7 @@ impl LeaseLedger for InMemoryLedger {
 pub struct FileLedger {
     path: PathBuf,
     file: File,
-    index: InMemoryLedger,
+    index: InMemoryInner,
 }
 
 /// One physical line in the [`FileLedger`] journal.
@@ -938,7 +1130,7 @@ impl FileLedger {
     /// because silently skipping it would lose committed state.
     pub fn open(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         let path = path.as_ref().to_path_buf();
-        let mut index = InMemoryLedger::new();
+        let mut index = InMemoryInner::new();
         if path.exists() {
             let raw = std::fs::read_to_string(&path)
                 .map_err(|e| anyhow::anyhow!("cannot read ledger journal {path:?}: {e}"))?;
@@ -2051,5 +2243,155 @@ mod compute_ceiling_tests {
                 "a never-Held swept Pending accrues zero (nothing to accrue)"
             );
         });
+    }
+}
+
+/// W-LEDGER-A1: the in-memory admit-lock-split invariants — the state is now behind
+/// an INTERNAL `Arc<Mutex<InMemoryInner>>` a cloned handle shares, and the `&self`
+/// [`AdmitLedger`] seam drives the atomic count-and-reserve through that inner lock.
+/// These prove the relocation outer→inner preserved (a) cap atomicity and (b)
+/// compute-reservation atomicity under real concurrency, and that a clone shares state.
+#[cfg(test)]
+mod admit_lock_split_tests {
+    use super::*;
+    use std::sync::Barrier;
+
+    fn tid(s: &str) -> TenantId {
+        TenantId::new(s).unwrap()
+    }
+
+    fn pending(id: &str, tenant: &TenantId) -> LeaseRecord {
+        LeaseRecord {
+            lease_id: id.to_string(),
+            tenant: tenant.clone(),
+            state: LeaseState::Pending,
+            box_ref: format!("box:{id}"),
+            created_at_ms: 1_000,
+            updated_at_ms: 1_000,
+            deadline_ms: Some(61_000),
+            billing_acquired_at_ms: None,
+        }
+    }
+
+    /// TEST (i)+(iv) — cap-safety UNBROKEN on in-memory. A concurrent same-tenant
+    /// burst of N≫cap through the `&self` [`AdmitLedger`] seam on ONE SHARED
+    /// `InMemoryLedger` (cloned into every thread — the composition-root shape)
+    /// admits EXACTLY `cap`. The atomicity is the INNER mutex; there is no process
+    /// `Mutex` here at all, and the count-and-insert still cannot over-admit.
+    #[test]
+    fn inmemory_admit_seam_concurrent_burst_respects_cap_exactly() {
+        const CAP: u32 = 3;
+        const N: usize = 64;
+        let ledger = InMemoryLedger::new();
+        let t = tid("acme");
+        let barrier = Arc::new(Barrier::new(N));
+        let handles: Vec<_> = (0..N)
+            .map(|i| {
+                let led = ledger.clone(); // shares the inner Arc<Mutex<..>>
+                let barrier = Arc::clone(&barrier);
+                let t = t.clone();
+                let id = format!("l-{i}");
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    AdmitLedger::try_admit(&led, pending(&id, &t), CAP).unwrap()
+                })
+            })
+            .collect();
+        let admitted = handles
+            .into_iter()
+            .map(|h| h.join().expect("admit thread must not panic"))
+            .filter(|ok| *ok)
+            .count();
+        assert_eq!(
+            admitted, CAP as usize,
+            "the &self admit seam on a shared in-memory ledger admits EXACTLY the \
+             cap (got {admitted}, cap {CAP}); the inner mutex keeps count+insert atomic"
+        );
+        assert_eq!(
+            ledger.by_tenant(&t).unwrap().len(),
+            CAP as usize,
+            "exactly `cap` rows are held after the burst"
+        );
+    }
+
+    /// TEST (ii) — compute-ceiling EXACT under concurrency on in-memory. With the
+    /// ceiling set so exactly ONE reservation fits (Σ starts empty; two would
+    /// overflow), a concurrent same-tenant burst yields EXACTLY one `Admitted`, the
+    /// rest `OverCompute` — the read-decide-insert of the compute Σ is atomic under
+    /// the relocated inner mutex, never a race that double-reserves.
+    #[test]
+    fn inmemory_admit_seam_compute_ceiling_exact_under_concurrency() {
+        const N: usize = 48;
+        let ledger = InMemoryLedger::new();
+        let t = tid("acme");
+        // ceiling 1000; each reservation 600 ⇒ 1st fits (0+600≤1000), a 2nd would be
+        // 600+600=1200>1000. Cap high (100) so CONCURRENCY is never the gate.
+        let gate = ComputeGate {
+            period_key: 202406,
+            ceiling_vcpu_ms: 1_000,
+            box_vcpu_count: 2,
+            new_reserved_vcpu_ms: 600,
+        };
+        let barrier = Arc::new(Barrier::new(N));
+        let handles: Vec<_> = (0..N)
+            .map(|i| {
+                let led = ledger.clone();
+                let barrier = Arc::clone(&barrier);
+                let t = t.clone();
+                let id = format!("c-{i}");
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    AdmitLedger::try_admit_with_compute(&led, pending(&id, &t), 100, Some(gate))
+                        .unwrap()
+                })
+            })
+            .collect();
+        let mut admitted = 0usize;
+        let mut over_compute = 0usize;
+        for h in handles {
+            match h.join().expect("thread must not panic") {
+                AdmitOutcome::Admitted => admitted += 1,
+                AdmitOutcome::OverCompute => over_compute += 1,
+                AdmitOutcome::OverConcurrency => {
+                    panic!("cap is 100 — concurrency must never be the gate here")
+                }
+            }
+        }
+        assert_eq!(
+            admitted, 1,
+            "exactly ONE admit fits under the compute ceiling ({admitted} did)"
+        );
+        assert_eq!(
+            over_compute,
+            N - 1,
+            "every other admit is OverCompute (the Σ read-decide-insert is atomic)"
+        );
+    }
+
+    /// TEST (v)-inmem — the shared-state invariant. Two handles built by CLONE share
+    /// one inner `Mutex` (an independent `new()` does NOT); a reserve committed
+    /// through the admit clone is authoritatively visible through the cold clone —
+    /// the property the composition root relies on so close/reaper see the reserve.
+    #[test]
+    fn inmemory_admit_and_cold_clone_share_state() {
+        let cold = InMemoryLedger::new();
+        let admit = cold.clone();
+        assert!(
+            cold.shares_state_with(&admit),
+            "a clone shares the inner Mutex (same ledger)"
+        );
+        assert!(
+            !cold.shares_state_with(&InMemoryLedger::new()),
+            "an independent new() does NOT share state"
+        );
+        // Reserve through the admit handle (&self, no process Mutex)…
+        let t = tid("acme");
+        assert!(AdmitLedger::try_admit(&admit, pending("shared-1", &t), 5).unwrap());
+        // …and it is visible through the cold LeaseLedger handle.
+        assert!(
+            cold.get("shared-1").unwrap().is_some(),
+            "the admit-committed Pending is visible via the cold ledger handle \
+             (shared authoritative state)"
+        );
     }
 }
