@@ -9,8 +9,8 @@
 //! LP-framing implementation), never by calling the production function on
 //! both sides of the assert.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 
 use axum::Router;
 use axum::body::Body;
@@ -49,7 +49,7 @@ impl Clock for SettableClock {
 /// Harness: two tenants with plans, a scripted executor, a settable clock.
 struct Harness {
     app: Router,
-    ledger: Arc<Mutex<dyn LeaseLedger + Send>>,
+    ledger: Arc<dyn LeaseLedger + Send + Sync>,
     exec: Arc<FakeLeasedExec>,
     clock: Arc<AtomicU64>,
 }
@@ -73,7 +73,7 @@ fn harness(reply: CmdOutput) -> Harness {
             repo_allowlist: Vec::new(),
         },
     ]);
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
     let exec = Arc::new(FakeLeasedExec::replying(reply));
     let clock = Arc::new(AtomicU64::new(NOW_MS));
     let state = AppState::new(
@@ -348,8 +348,6 @@ async fn exec_on_unheld_lease_400() {
     // Crashed (driven in the ledger) → same frozen 400.
     let crashed_id = acquire(&h, "pat-acme").await;
     h.ledger
-        .lock()
-        .unwrap()
         .transition(&crashed_id, RunnerState::Crashed, NOW_MS + 1)
         .unwrap();
     let response = post_exec(&h, &crashed_id, "pat-acme").await;
@@ -421,7 +419,7 @@ async fn exec_on_lease_terminalized_mid_exec_is_fail_closed_never_attested() {
     /// successful `CmdOutput`. `run_check` succeeds; the handler's re-check
     /// then sees a non-`Held` lease.
     struct RacingExec {
-        ledger: Arc<Mutex<dyn LeaseLedger + Send>>,
+        ledger: Arc<dyn LeaseLedger + Send + Sync>,
         now_ms: u64,
     }
 
@@ -430,8 +428,6 @@ async fn exec_on_lease_terminalized_mid_exec_is_fail_closed_never_attested() {
             // Simulate the concurrent close: teardown already happened, now it
             // wins the Held→Released transition while this exec is in-flight.
             self.ledger
-                .lock()
-                .unwrap()
                 .transition(lease_id, RunnerState::Released, self.now_ms)
                 .expect("Held→Released must succeed");
             Ok(CmdOutput {
@@ -452,7 +448,7 @@ async fn exec_on_lease_terminalized_mid_exec_is_fail_closed_never_attested() {
         rate_ceiling_per_min: 100,
         repo_allowlist: Vec::new(),
     }]);
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
     let clock = Arc::new(AtomicU64::new(NOW_MS));
     let racing = Arc::new(RacingExec {
         ledger: ledger.clone(),
@@ -499,7 +495,7 @@ async fn exec_on_lease_terminalized_mid_exec_is_fail_closed_never_attested() {
     );
 
     // The lease stays Released (the exec did not resurrect or re-touch it).
-    let rec = h.ledger.lock().unwrap().get(&lease_id).unwrap().unwrap();
+    let rec = h.ledger.get(&lease_id).unwrap().unwrap();
     assert_eq!(
         rec.state,
         corelink_fabric::LeaseState::Wire(RunnerState::Released),

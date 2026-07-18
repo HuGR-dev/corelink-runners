@@ -45,7 +45,7 @@
 //! listening socket.  This is noted here for the next wave; no production code
 //! was changed.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
@@ -177,7 +177,7 @@ fn harness_corelink(auth_body: &str, plan_body: &str) -> (Router, AppState) {
         auth_cfg(),
     ));
 
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
     let state = AppState::new(ledger, plan_store, Arc::new(FixedClock(NOW_MS)));
     let router = app(auth_store, state.clone());
     (router, state)
@@ -196,7 +196,7 @@ fn harness_auth_transport_error() -> (Router, AppState) {
         FakeIntrospect::ok(200, &valid_with_cap(5)),
         auth_cfg(),
     ));
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
     let state = AppState::new(ledger, plan_store, Arc::new(FixedClock(NOW_MS)));
     let router = app(auth_store, state.clone());
     (router, state)
@@ -216,7 +216,7 @@ fn harness_corelink_with_vcpu(auth_body: &str, plan_body: &str, vcpu: u32) -> (R
         FakeIntrospect::ok(200, plan_body),
         auth_cfg(),
     ));
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
     let state = AppState::new(ledger, plan_store, Arc::new(FixedClock(NOW_MS)))
         .with_runner_vcpu(Some(vcpu));
     let router = app(auth_store, state.clone());

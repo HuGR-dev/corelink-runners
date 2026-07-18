@@ -11,7 +11,7 @@
 //!
 //! In-process only (`tower::ServiceExt::oneshot`), no sockets, no sleeps.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Body;
@@ -37,7 +37,7 @@ fn two_tenant_store() -> Arc<dyn TokenStore + Send + Sync> {
 
 fn fresh_state() -> AppState {
     AppState::new(
-        Arc::new(Mutex::new(InMemoryLedger::new())),
+        Arc::new(InMemoryLedger::new()),
         Arc::new(StaticPlans::new([])),
         Arc::new(SystemClock),
     )

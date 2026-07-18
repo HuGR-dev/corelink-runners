@@ -138,7 +138,7 @@ pub(crate) async fn unsuspend(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     use corelink_fabric::{InMemoryLedger, LeaseLedger, LeaseRecord, LeaseState};
     use corelink_runners_contracts::RunnerState;
@@ -149,10 +149,9 @@ mod tests {
 
     /// AppState with `admin_key` = KEY and a HELD `lease-1` for tenant `acme`.
     fn state_with_held_lease(admin_key: Option<&str>) -> AppState {
-        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
-            Arc::new(Mutex::new(InMemoryLedger::new()));
+        let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
         {
-            let mut l = ledger.lock().unwrap();
+            let l = &*ledger;
             l.try_admit(
                 LeaseRecord {
                     lease_id: "lease-1".to_string(),
@@ -224,7 +223,7 @@ mod tests {
         // The tenant is now suspended (acquire will 429) AND its held lease died.
         assert!(state.is_tenant_suspended(&acme), "tenant must be suspended");
         let held_after = {
-            let l = state.ledger.lock().unwrap();
+            let l = &*state.ledger;
             l.by_tenant(&acme)
                 .unwrap()
                 .into_iter()

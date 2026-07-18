@@ -11,7 +11,7 @@
 //! FIRST principles (a local LP-framing implementation), never by calling
 //! the production `result_binding_preimage` on both sides of an assert.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Body;
@@ -57,7 +57,7 @@ fn harness_with_seed(seed: [u8; 32]) -> Harness {
         rate_ceiling_per_min: 100,
         repo_allowlist: Vec::new(),
     }]);
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
     let exec = Arc::new(FakeLeasedExec::replying(CmdOutput {
         code: Some(0),
         stdout: "attested stdout\n".to_string(),

@@ -83,7 +83,7 @@ fn harness(reply: CmdOutput, binds: bool) -> Harness {
         rate_ceiling_per_min: 100,
         repo_allowlist: Vec::new(),
     }]);
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
     let exec = Arc::new(FakeLeasedExec::replying(reply));
     let cap = Arc::new(CapturingProvisioner::default());
     let mut state = AppState::new(ledger, Arc::new(plans), Arc::new(FixedClock(NOW_MS)))

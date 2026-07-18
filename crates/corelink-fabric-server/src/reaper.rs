@@ -242,7 +242,7 @@ fn flush_partial_envelope(
     // envelope from it (the §13 Item-3 cross-instance SLA: never silently
     // dropped). source = durable-checkpoint.
     let checkpoint = {
-        let ledger = state.ledger.lock().unwrap_or_else(|e| e.into_inner());
+        let ledger = &*state.ledger;
         // A read failure must NOT break reclamation (post-teardown,
         // fire-and-forget) — degrade to None and fall through to tier 3. But do
         // NOT swallow it silently: a pg read error here downgrades a durable-
@@ -443,7 +443,7 @@ pub async fn reap_once(state: &crate::AppState) -> usize {
     // so ANY instance can date and reap an overdue lease — including one that
     // never served the acquire. There is no in-memory `deadlines` map.
     let held = {
-        let ledger = state.ledger.lock().unwrap_or_else(|e| e.into_inner());
+        let ledger = &*state.ledger;
         // A ledger read error must NOT panic (liveness: the reaper must keep
         // ticking), but it must NOT be SILENT either — `unwrap_or_default()`
         // would make a persistent ledger fault look like "nothing to reap"
@@ -495,7 +495,7 @@ pub async fn reap_once(state: &crate::AppState) -> usize {
             // already terminalized by someone else — do NOT GC or emit Expired
             // (that would double-free the slot in the journal).
             let expired_ok = {
-                let mut ledger = state.ledger.lock().unwrap_or_else(|e| e.into_inner());
+                let ledger = &*state.ledger;
                 ledger
                     .transition(&rec.lease_id, RunnerState::Expired, now)
                     .is_ok()
@@ -688,7 +688,7 @@ pub async fn surface_crashes(state: &crate::AppState) -> usize {
 
     // ── 1. Snapshot held leases — guard dropped at end of block, before await.
     let held = {
-        let ledger = state.ledger.lock().unwrap_or_else(|e| e.into_inner());
+        let ledger = &*state.ledger;
         // Same liveness-but-not-silent posture as `reap_once`: a ledger read
         // error is logged and degrades to an empty sweep this tick (never a
         // panic, never a silent skip).
@@ -729,7 +729,7 @@ pub async fn surface_crashes(state: &crate::AppState) -> usize {
         // lease to a terminal state between teardown and this lock acquisition;
         // `transition` then returns Err and we must NOT double-free the slot.
         let crashed_ok = {
-            let mut ledger = state.ledger.lock().unwrap_or_else(|e| e.into_inner());
+            let ledger = &*state.ledger;
             ledger
                 .transition(&rec.lease_id, RunnerState::Crashed, now)
                 .is_ok()
@@ -901,7 +901,7 @@ pub async fn sweep_stale_pending(state: &crate::AppState, max_age: Duration) -> 
 
     // ── 1. Snapshot stale Pending leases — guard dropped before any await.
     let stale = {
-        let ledger = state.ledger.lock().unwrap_or_else(|e| e.into_inner());
+        let ledger = &*state.ledger;
         match ledger.pending_older_than(now, max_age_ms) {
             Ok(records) => records,
             Err(e) => {
@@ -926,7 +926,7 @@ pub async fn sweep_stale_pending(state: &crate::AppState, max_age: Duration) -> 
         // live `Held` lease — the W2-B regression. The §1-honest rollback
         // (Pending has no legal terminal transition) frees the leaked cap slot.
         let removed = {
-            let mut ledger = state.ledger.lock().unwrap_or_else(|e| e.into_inner());
+            let ledger = &*state.ledger;
             ledger.remove_if_pending(&rec.lease_id).unwrap_or(false)
             // guard dropped here at end of block
         };
@@ -1196,8 +1196,7 @@ mod tests {
         outcome: Scripted,
         teardown_succeed: bool,
     ) -> (AppState, FixedClock, Arc<ScriptedProbeProvisioner>) {
-        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
-            Arc::new(Mutex::new(InMemoryLedger::new()));
+        let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
         let clock = FixedClock::new(now_ms);
         let prov = Arc::new(ScriptedProbeProvisioner::new(outcome, teardown_succeed));
         let mut state = AppState::new(
@@ -1216,8 +1215,7 @@ mod tests {
     /// Returns `(state, clock, provisioner_arc)` so the test can mutate the
     /// clock and inspect teardown calls.
     fn build_state(now_ms: u64) -> (AppState, FixedClock, Arc<RecordingProvisioner>) {
-        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
-            Arc::new(Mutex::new(InMemoryLedger::new()));
+        let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
         let clock = FixedClock::new(now_ms);
         let prov = Arc::new(RecordingProvisioner::new());
         let mut state = AppState::new(
@@ -1239,8 +1237,7 @@ mod tests {
         Arc<TogglesTeardownProvisioner>,
         Arc<AtomicBool>,
     ) {
-        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
-            Arc::new(Mutex::new(InMemoryLedger::new()));
+        let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
         let clock = FixedClock::new(now_ms);
         let (prov, flag) = TogglesTeardownProvisioner::new(initial_succeed);
         let prov = Arc::new(prov);
@@ -1288,7 +1285,7 @@ mod tests {
     /// transition preserves it, so the reaped record still reads its deadline).
     fn insert_held(state: &AppState, lease_id: &str, deadline_ms: u64) {
         {
-            let mut ledger = state.ledger.lock().unwrap();
+            let ledger = &*state.ledger;
             ledger
                 .put(LeaseRecord {
                     lease_id: lease_id.to_string(),
@@ -1312,8 +1309,6 @@ mod tests {
     fn ledger_deadline(state: &AppState, lease_id: &str) -> Option<u64> {
         state
             .ledger
-            .lock()
-            .unwrap()
             .get(lease_id)
             .unwrap()
             .and_then(|rec| rec.deadline_ms)
@@ -1324,7 +1319,7 @@ mod tests {
     /// `Pending` (never transitioned to Held), so it is NOT in `held()` and the
     /// deadline reaper never sees it.
     fn insert_pending(state: &AppState, lease_id: &str, created_at_ms: u64) {
-        let mut ledger = state.ledger.lock().unwrap();
+        let ledger = &*state.ledger;
         ledger
             .put(LeaseRecord {
                 lease_id: lease_id.to_string(),
@@ -1341,13 +1336,7 @@ mod tests {
 
     /// `true` iff the lease still exists in the ledger.
     fn lease_exists(state: &AppState, lease_id: &str) -> bool {
-        state
-            .ledger
-            .lock()
-            .unwrap()
-            .get(lease_id)
-            .unwrap()
-            .is_some()
+        state.ledger.get(lease_id).unwrap().is_some()
     }
 
     // ── Stale-Pending sweep tests (WP-PENDING-SWEEP) ──────────────────────────
@@ -1402,75 +1391,71 @@ mod tests {
     /// `Held` and MUST no-op (the W2-B fix); a state-blind `remove` would instead
     /// delete the live `Held` lease.
     struct RaceToHeldLedger {
-        inner: std::cell::RefCell<InMemoryLedger>,
+        // W-LEDGER-A2: the trait is `&self` + the ledger Arc is `Send + Sync`, so the
+        // interior mutability lives in `InMemoryLedger` (its own `Arc<Mutex<..>>`),
+        // not a `!Sync` `RefCell`.
+        inner: InMemoryLedger,
         /// The lease to flip to `Held` right after the first snapshot.
         race_lease: String,
         /// Flips false after the first `pending_older_than` so the race fires once.
-        armed: std::cell::Cell<bool>,
+        armed: std::sync::atomic::AtomicBool,
     }
 
     impl RaceToHeldLedger {
         fn new(race_lease: &str) -> Self {
             Self {
-                inner: std::cell::RefCell::new(InMemoryLedger::new()),
+                inner: InMemoryLedger::new(),
                 race_lease: race_lease.to_string(),
-                armed: std::cell::Cell::new(true),
+                armed: std::sync::atomic::AtomicBool::new(true),
             }
         }
     }
 
     impl LeaseLedger for RaceToHeldLedger {
-        fn put(&mut self, rec: LeaseRecord) -> Result<()> {
-            self.inner.get_mut().put(rec)
+        fn put(&self, rec: LeaseRecord) -> Result<()> {
+            self.inner.put(rec)
         }
         fn get(&self, lease_id: &str) -> Result<Option<LeaseRecord>> {
-            self.inner.borrow().get(lease_id)
+            self.inner.get(lease_id)
         }
-        fn transition(
-            &mut self,
-            lease_id: &str,
-            to: RunnerState,
-            now_ms: u64,
-        ) -> Result<LeaseRecord> {
-            self.inner.get_mut().transition(lease_id, to, now_ms)
+        fn transition(&self, lease_id: &str, to: RunnerState, now_ms: u64) -> Result<LeaseRecord> {
+            self.inner.transition(lease_id, to, now_ms)
         }
         fn by_tenant(&self, t: &TenantId) -> Result<Vec<LeaseRecord>> {
-            self.inner.borrow().by_tenant(t)
+            self.inner.by_tenant(t)
         }
         fn held(&self) -> Result<Vec<LeaseRecord>> {
-            self.inner.borrow().held()
+            self.inner.held()
         }
         fn pending_older_than(&self, now_ms: u64, max_age_ms: u64) -> Result<Vec<LeaseRecord>> {
             // The snapshot the sweep will iterate (the lease is still Pending here).
-            let snapshot = self.inner.borrow().pending_older_than(now_ms, max_age_ms)?;
+            let snapshot = self.inner.pending_older_than(now_ms, max_age_ms)?;
             // …then the concurrent acquire wins: flip the raced lease to Held,
             // ONCE, modeling the provision completing in the sweep window.
-            if self.armed.replace(false) {
+            if self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
                 self.inner
-                    .borrow_mut()
                     .transition(&self.race_lease, RunnerState::Held, now_ms)
                     .expect("race-flip Pending→Held must be a legal transition");
             }
             Ok(snapshot)
         }
-        fn try_admit(&mut self, rec: LeaseRecord, max_concurrency: u32) -> Result<bool> {
-            self.inner.get_mut().try_admit(rec, max_concurrency)
+        fn try_admit(&self, rec: LeaseRecord, max_concurrency: u32) -> Result<bool> {
+            self.inner.try_admit(rec, max_concurrency)
         }
-        fn set_envelope_checkpoint(&mut self, lease_id: &str, checkpoint_json: &str) -> Result<()> {
+        fn set_envelope_checkpoint(&self, lease_id: &str, checkpoint_json: &str) -> Result<()> {
             self.inner
-                .get_mut()
                 .set_envelope_checkpoint(lease_id, checkpoint_json)
         }
         fn get_envelope_checkpoint(&self, lease_id: &str) -> Result<Option<String>> {
-            self.inner.borrow().get_envelope_checkpoint(lease_id)
+            self.inner.get_envelope_checkpoint(lease_id)
         }
-        fn remove(&mut self, lease_id: &str) -> Result<bool> {
-            self.inner.get_mut().remove(lease_id)
+        fn remove(&self, lease_id: &str) -> Result<bool> {
+            self.inner.remove(lease_id)
         }
-        fn remove_if_pending(&mut self, lease_id: &str) -> Result<bool> {
+        fn remove_if_pending(&self, lease_id: &str) -> Result<bool> {
             // The fix under test: delegate to the inner impl's REAL guarded path
             // (delete iff still Pending). By now the lease is Held → no-op.
-            self.inner.get_mut().remove_if_pending(lease_id)
+            self.inner.remove_if_pending(lease_id)
         }
     }
 
@@ -1482,8 +1467,8 @@ mod tests {
     async fn sweep_does_not_reclaim_pending_that_raced_to_held() {
         // Build state on a race-injecting ledger that flips the lease to Held
         // right after the sweep snapshots it as Pending.
-        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
-            Arc::new(Mutex::new(RaceToHeldLedger::new("pending-raced")));
+        let ledger: Arc<dyn LeaseLedger + Send + Sync> =
+            Arc::new(RaceToHeldLedger::new("pending-raced"));
         let clock = FixedClock::new(1_000_000);
         let prov = Arc::new(RecordingProvisioner::new());
         let mut state = AppState::new(
@@ -1506,8 +1491,6 @@ mod tests {
         // The live lease must still exist AND still be Held — never deleted.
         let rec = state
             .ledger
-            .lock()
-            .unwrap()
             .get("pending-raced")
             .unwrap()
             .expect("the raced-to-Held lease must NOT be deleted by the sweep");
@@ -1643,14 +1626,13 @@ mod tests {
         assert_eq!(count, 1, "exactly one lease should be reclaimed");
 
         // Lease must now be `Expired` in the ledger.
-        let ledger = state.ledger.lock().unwrap();
+        let ledger = &*state.ledger;
         let rec = ledger.get("lease-overdue").unwrap().unwrap();
         assert_eq!(
             rec.state,
             LeaseState::Wire(RunnerState::Expired),
             "lease must be Expired after reap"
         );
-        drop(ledger);
 
         // Provisioner must have seen a teardown call.
         let calls = prov.teardown_calls();
@@ -1694,7 +1676,7 @@ mod tests {
 
         // Lease MUST still be Held — NOT Expired.
         {
-            let ledger = state.ledger.lock().unwrap();
+            let ledger = &*state.ledger;
             let rec = ledger.get("lease-retry").unwrap().unwrap();
             assert!(
                 rec.state.is_held(),
@@ -1726,7 +1708,7 @@ mod tests {
 
         // Lease is now Expired.
         {
-            let ledger = state.ledger.lock().unwrap();
+            let ledger = &*state.ledger;
             let rec = ledger.get("lease-retry").unwrap().unwrap();
             assert_eq!(
                 rec.state,
@@ -1763,10 +1745,9 @@ mod tests {
         assert_eq!(count, 0, "no leases should be expired when all are fresh");
 
         // Lease must still be Held.
-        let ledger = state.ledger.lock().unwrap();
+        let ledger = &*state.ledger;
         let rec = ledger.get("lease-fresh").unwrap().unwrap();
         assert!(rec.state.is_held(), "unexpired lease must remain Held");
-        drop(ledger);
 
         // No teardown calls.
         assert!(
@@ -1785,7 +1766,7 @@ mod tests {
         // never-overdue sentinel itself); the lease has NO deadline.
         let (state, _clock, prov) = build_state(u64::MAX - 1);
         {
-            let mut ledger = state.ledger.lock().unwrap();
+            let ledger = &*state.ledger;
             ledger
                 .put(LeaseRecord {
                     lease_id: "lease-nodeadline".to_string(),
@@ -1806,13 +1787,12 @@ mod tests {
         let count = reap_once(&state).await;
         assert_eq!(count, 0, "a None-deadline lease must NEVER be reaped");
 
-        let ledger = state.ledger.lock().unwrap();
+        let ledger = &*state.ledger;
         let rec = ledger.get("lease-nodeadline").unwrap().unwrap();
         assert!(
             rec.state.is_held(),
             "a None-deadline lease stays Held (never-overdue fail-safe)"
         );
-        drop(ledger);
         assert!(
             prov.teardown_calls().is_empty(),
             "teardown must not be called for a None-deadline lease"
@@ -1857,7 +1837,7 @@ mod tests {
         // Simulate close/cancel winning the race: transition to Released under
         // the ledger lock, then emit Released in the slot meter.
         {
-            let mut ledger = state.ledger.lock().unwrap();
+            let ledger = &*state.ledger;
             ledger
                 .transition("lease-race", RunnerState::Released, 1_500)
                 .expect("Held→Released must succeed");
@@ -2036,7 +2016,7 @@ mod tests {
         let reaped = reap_once(&state).await;
         assert_eq!(reaped, 1, "a hookless lease still reaps normally");
 
-        let ledger = state.ledger.lock().unwrap();
+        let ledger = &*state.ledger;
         let rec = ledger.get("lease-nohook").unwrap().unwrap();
         assert_eq!(
             rec.state,
@@ -2059,7 +2039,7 @@ mod tests {
 
         // Lease Expired.
         {
-            let ledger = state.ledger.lock().unwrap();
+            let ledger = &*state.ledger;
             let rec = ledger.get("lease-e2e-exp").unwrap().unwrap();
             assert_eq!(rec.state, LeaseState::Wire(RunnerState::Expired));
         }
@@ -2120,12 +2100,7 @@ mod tests {
         // `flush_partial_envelope` does NOT terminalize the lease — only the
         // sweep does). Remove it so the E2E sweep below reclaims exactly the
         // one fresh lease and the reclaim count isn't skewed by this residue.
-        state
-            .ledger
-            .lock()
-            .unwrap()
-            .remove("lease-flush-crash")
-            .unwrap();
+        state.ledger.remove("lease-flush-crash").unwrap();
 
         // End-to-end through the crash sweep on a fresh lease + hook.
         insert_held(&state, "lease-crash-e2e", 9_999_999);
@@ -2133,7 +2108,7 @@ mod tests {
         let reaped = surface_crashes(&state).await;
         assert_eq!(reaped, 1, "the dead box must be reclaimed");
         {
-            let ledger = state.ledger.lock().unwrap();
+            let ledger = &*state.ledger;
             let rec = ledger.get("lease-crash-e2e").unwrap().unwrap();
             assert_eq!(rec.state, LeaseState::Wire(RunnerState::Crashed));
         }
@@ -2258,8 +2233,6 @@ mod tests {
         // Write the durable checkpoint the "owning" instance would have left.
         state
             .ledger
-            .lock()
-            .unwrap()
             .set_envelope_checkpoint("lease-tier2", &checkpoint_json(4, 999))
             .expect("checkpoint write on an existing lease must succeed");
 
@@ -2343,8 +2316,6 @@ mod tests {
         // IntentMetrics shape — the parse in tier-2 must fail and fall through.
         state
             .ledger
-            .lock()
-            .unwrap()
             .set_envelope_checkpoint("lease-corrupt", "{\"not\":\"intent-metrics\"}")
             .expect("checkpoint write on an existing lease must succeed");
 
@@ -2386,8 +2357,6 @@ mod tests {
         register_hook(&state, "lease-tier1");
         state
             .ledger
-            .lock()
-            .unwrap()
             .set_envelope_checkpoint("lease-tier1", &checkpoint_json(99, 55_555))
             .unwrap();
 
@@ -2425,8 +2394,7 @@ mod tests {
         // `InMemoryLedger` / `LeaseLedger` are in scope from the module-top use;
         // `StaticPlans` from `crate::app`; `Arc`/`Mutex` from the test prelude.
         // ONE durable ledger, shared by two instances.
-        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
-            Arc::new(Mutex::new(InMemoryLedger::new()));
+        let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
         let clock = FixedClock::new(2_000);
 
         // Instance A (owning): registers the hook + writes the checkpoint.
@@ -2451,8 +2419,6 @@ mod tests {
         register_hook(&state_a, "lease-xinst");
         state_a
             .ledger
-            .lock()
-            .unwrap()
             .set_envelope_checkpoint("lease-xinst", &checkpoint_json(6, 7_000))
             .expect("instance A writes the durable checkpoint");
 
@@ -2506,8 +2472,7 @@ mod tests {
         const CRED: &str = "pat-phase2b";
 
         // ONE durable ledger shared by two instances (A owns + ingests; B reaps).
-        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
-            Arc::new(Mutex::new(InMemoryLedger::new()));
+        let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
         let clock = FixedClock::new(5_000);
 
         // Instance A: owns the lease + a registered hook reachable from the
@@ -2561,8 +2526,6 @@ mod tests {
         // The durable checkpoint now reflects BOTH turns (the WRITE trigger).
         let ck = state_a
             .ledger
-            .lock()
-            .unwrap()
             .get_envelope_checkpoint(LEASE)
             .unwrap()
             .expect("a checkpoint must exist after ingesting model turns");
@@ -2627,14 +2590,13 @@ mod tests {
         let count = surface_crashes(&state).await;
         assert_eq!(count, 1, "a dead box must be reclaimed");
 
-        let ledger = state.ledger.lock().unwrap();
+        let ledger = &*state.ledger;
         let rec = ledger.get("lease-dead").unwrap().unwrap();
         assert_eq!(
             rec.state,
             LeaseState::Wire(RunnerState::Crashed),
             "lease must be Crashed after surface_crashes"
         );
-        drop(ledger);
 
         assert!(
             prov.teardown_calls().contains(&"lease-dead".to_string()),
@@ -2673,10 +2635,9 @@ mod tests {
         let count = surface_crashes(&state).await;
         assert_eq!(count, 0, "an alive box must not be reclaimed");
 
-        let ledger = state.ledger.lock().unwrap();
+        let ledger = &*state.ledger;
         let rec = ledger.get("lease-alive").unwrap().unwrap();
         assert!(rec.state.is_held(), "alive lease must remain Held");
-        drop(ledger);
 
         assert!(
             prov.teardown_calls().is_empty(),
@@ -2694,10 +2655,9 @@ mod tests {
         let count = surface_crashes(&state).await;
         assert_eq!(count, 0, "an unbound lease must not be reclaimed");
 
-        let ledger = state.ledger.lock().unwrap();
+        let ledger = &*state.ledger;
         let rec = ledger.get("lease-unbound").unwrap().unwrap();
         assert!(rec.state.is_held(), "unbound lease must remain Held");
-        drop(ledger);
 
         assert!(
             prov.teardown_calls().is_empty(),
@@ -2723,13 +2683,12 @@ mod tests {
             "a probe Err is NOT death — fail-safe, nothing reclaimed"
         );
 
-        let ledger = state.ledger.lock().unwrap();
+        let ledger = &*state.ledger;
         let rec = ledger.get("lease-err").unwrap().unwrap();
         assert!(
             rec.state.is_held(),
             "lease must remain Held when the probe errors (unreachable != dead)"
         );
-        drop(ledger);
 
         assert!(
             prov.teardown_calls().is_empty(),
@@ -2749,13 +2708,12 @@ mod tests {
         let count = surface_crashes(&state).await;
         assert_eq!(count, 0, "failed teardown: nothing reclaimed");
 
-        let ledger = state.ledger.lock().unwrap();
+        let ledger = &*state.ledger;
         let rec = ledger.get("lease-tdfail").unwrap().unwrap();
         assert!(
             rec.state.is_held(),
             "lease must remain Held after a failed teardown (retry next sweep)"
         );
-        drop(ledger);
 
         // Teardown was ATTEMPTED (and failed), but no Crashed mark/event.
         assert_eq!(
@@ -2788,7 +2746,7 @@ mod tests {
 
         // Simulate close/cancel winning the race: Held → Released, emit Released.
         {
-            let mut ledger = state.ledger.lock().unwrap();
+            let ledger = &*state.ledger;
             ledger
                 .transition("lease-lostrace", RunnerState::Released, 4_000)
                 .expect("Held→Released must succeed");
@@ -2954,8 +2912,7 @@ mod tests {
         Arc<RegistryAwareProvisioner>,
         crate::cloud_exec::BoxRegistry,
     ) {
-        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
-            Arc::new(Mutex::new(InMemoryLedger::new()));
+        let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
         let clock = FixedClock::new(now_ms);
         let registry = crate::cloud_exec::BoxRegistry::new();
         let prov = Arc::new(RegistryAwareProvisioner::new(registry.clone_handle()));
@@ -2998,7 +2955,7 @@ mod tests {
 
         // The ledger reflects Expired and teardown was called.
         {
-            let ledger = state.ledger.lock().unwrap();
+            let ledger = &*state.ledger;
             let rec = ledger.get("lease-d1").unwrap().unwrap();
             assert_eq!(
                 rec.state,

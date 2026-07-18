@@ -579,7 +579,7 @@ mod tests {
         );
 
         // Fill ledger to cap, then upgrade to Pro.
-        let mut filled_ledger = InMemoryLedger::new();
+        let filled_ledger = InMemoryLedger::new();
         for i in 0..20u32 {
             filled_ledger
                 .put(LeaseRecord {

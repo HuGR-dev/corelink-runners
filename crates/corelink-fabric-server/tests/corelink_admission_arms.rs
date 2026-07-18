@@ -178,7 +178,7 @@ fn arm1_valid_with_cap_enforces_boundary_admit_under_n_reject_at_n() {
 
     // Drive the ledger from 0 active up to the cap: every slot strictly under N
     // ADMITS; the very next attempt (ledger holding exactly N) REJECTS over-cap.
-    let mut ledger = InMemoryLedger::new();
+    let ledger = InMemoryLedger::new();
     for i in 0..cap {
         // With `i` active leases (i < N), admission is granted.
         assert_eq!(

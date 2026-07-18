@@ -694,7 +694,7 @@ async fn rollback_undispatched_lease(state: &AppState, tenant: &TenantId, lease_
     // emit — `record_slot` locks the slot_meter and must never nest under the
     // ledger guard (the AppState lock-discipline invariant).
     let current = {
-        let ledger = state.ledger.lock().unwrap_or_else(|e| e.into_inner());
+        let ledger = &*state.ledger;
         ledger.get(lease_id).ok().flatten().map(|r| r.state)
     };
     match current {
@@ -703,7 +703,7 @@ async fn rollback_undispatched_lease(state: &AppState, tenant: &TenantId, lease_
         Some(state_held) if state_held.is_held() => {
             let now_ms = state.clock.now_ms();
             let crashed_ok = {
-                let mut ledger = state.ledger.lock().unwrap_or_else(|e| e.into_inner());
+                let ledger = &*state.ledger;
                 ledger
                     .transition(lease_id, RunnerState::Crashed, now_ms)
                     .is_ok()
@@ -724,9 +724,7 @@ async fn rollback_undispatched_lease(state: &AppState, tenant: &TenantId, lease_
         // `remove` is the correct Pending-rollback seam and succeeds. No Acquired
         // was emitted, so there is no slot event to balance.
         Some(_) => {
-            if let Ok(mut ledger) = state.ledger.lock() {
-                let _ = ledger.remove(lease_id);
-            }
+            let _ = state.ledger.remove(lease_id);
         }
         // No row: already rolled back / never inserted — a no-op.
         None => {}
@@ -1088,7 +1086,7 @@ pub async fn run_admission_tick(state: &AppState, now_ms: u64) -> usize {
             // no teardown is owed); but using the shared seam keeps EVERY
             // undo-path uniform and correct should the state ever be Held.
             let tenant = {
-                let ledger = state.ledger.lock().unwrap_or_else(|e| e.into_inner());
+                let ledger = &*state.ledger;
                 ledger.get(&lease_id).ok().flatten().map(|r| r.tenant)
             };
             if let Some(tenant) = tenant {
@@ -1280,7 +1278,7 @@ fn under_cap(state: &AppState, tenant: &TenantId) -> bool {
     // Terminal records (Released/Expired/Crashed) stay in the ledger but must
     // NOT count, or a cancelled-then-freed slot would look perpetually full.
     let active = {
-        let ledger = state.ledger.lock().unwrap_or_else(|e| e.into_inner());
+        let ledger = &*state.ledger;
         ledger
             .by_tenant(tenant)
             .map(|v| {
@@ -1461,11 +1459,9 @@ mod queue_tests {
     /// Count ACTIVE (Pending+Held) leases for a tenant — the cap-relevant set
     /// (`try_admit`'s definition). Terminal records (Released) linger in the
     /// ledger but never count against the cap.
-    fn active_count(ledger: &Arc<Mutex<dyn LeaseLedger + Send>>, t: &TenantId) -> usize {
+    fn active_count(ledger: &Arc<dyn LeaseLedger + Send + Sync>, t: &TenantId) -> usize {
         use corelink_fabric::LeaseState;
         ledger
-            .lock()
-            .unwrap()
             .by_tenant(t)
             .unwrap()
             .iter()
@@ -1480,9 +1476,8 @@ mod queue_tests {
         cap: u32,
         now_ms: u64,
         wait: Duration,
-    ) -> (AppState, Arc<Mutex<dyn LeaseLedger + Send>>) {
-        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
-            Arc::new(Mutex::new(InMemoryLedger::new()));
+    ) -> (AppState, Arc<dyn LeaseLedger + Send + Sync>) {
+        let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
         let plans = StaticPlans::new([
             TenantPlan {
                 tenant: tid("alpha"),
@@ -1516,7 +1511,7 @@ mod queue_tests {
         now_ms: u64,
         wait: Duration,
         park_cap: usize,
-    ) -> (AppState, Arc<Mutex<dyn LeaseLedger + Send>>) {
+    ) -> (AppState, Arc<dyn LeaseLedger + Send + Sync>) {
         let (mut state, ledger) = queue_state(cap, now_ms, wait);
         state.admission_queue = Some(Arc::new(AdmissionQueue::new(64).with_park_cap(park_cap)));
         (state, ledger)
@@ -2069,7 +2064,7 @@ mod queue_tests {
         // inject can be SELECTED (under cap) and drained on the next tick.
         let dispatched = {
             use corelink_fabric::LeaseState;
-            let ledger = state.ledger.lock().unwrap();
+            let ledger = &*state.ledger;
             ledger
                 .by_tenant(&tid("alpha"))
                 .unwrap()
@@ -2385,8 +2380,6 @@ mod queue_tests {
         // record. Assert the terminal state explicitly.
         {
             let rec = ledger
-                .lock()
-                .unwrap()
                 .get(&lease_id)
                 .unwrap()
                 .expect("the rolled-back lease is terminalized, not deleted");
@@ -2484,18 +2477,20 @@ mod queue_tests {
         /// inner `InMemoryLedger`.
         struct BlockingAdmitLedger {
             inner: InMemoryLedger,
-            entered: mpsc::Sender<()>,
+            // W-LEDGER-A2: the ledger Arc is `Send + Sync` (no outer `Mutex`), and
+            // `mpsc::Sender` is `!Sync`, so it rides behind a `Mutex` here.
+            entered: Mutex<mpsc::Sender<()>>,
             release: Arc<Mutex<mpsc::Receiver<()>>>,
         }
         impl LeaseLedger for BlockingAdmitLedger {
-            fn put(&mut self, rec: corelink_fabric::LeaseRecord) -> anyhow::Result<()> {
+            fn put(&self, rec: corelink_fabric::LeaseRecord) -> anyhow::Result<()> {
                 self.inner.put(rec)
             }
             fn get(&self, lease_id: &str) -> anyhow::Result<Option<corelink_fabric::LeaseRecord>> {
                 self.inner.get(lease_id)
             }
             fn transition(
-                &mut self,
+                &self,
                 lease_id: &str,
                 to: RunnerState,
                 now_ms: u64,
@@ -2516,18 +2511,18 @@ mod queue_tests {
                 self.inner.pending_older_than(now_ms, max_age_ms)
             }
             fn try_admit(
-                &mut self,
+                &self,
                 rec: corelink_fabric::LeaseRecord,
                 max_concurrency: u32,
             ) -> anyhow::Result<bool> {
                 // Signal we are inside try_admit, then block until released —
                 // simulating the Pg network round-trip.
-                let _ = self.entered.send(());
+                let _ = self.entered.lock().unwrap().send(());
                 let _ = self.release.lock().unwrap().recv();
                 self.inner.try_admit(rec, max_concurrency)
             }
             fn set_envelope_checkpoint(
-                &mut self,
+                &self,
                 lease_id: &str,
                 checkpoint_json: &str,
             ) -> anyhow::Result<()> {
@@ -2537,7 +2532,7 @@ mod queue_tests {
             fn get_envelope_checkpoint(&self, lease_id: &str) -> anyhow::Result<Option<String>> {
                 self.inner.get_envelope_checkpoint(lease_id)
             }
-            fn remove(&mut self, lease_id: &str) -> anyhow::Result<bool> {
+            fn remove(&self, lease_id: &str) -> anyhow::Result<bool> {
                 self.inner.remove(lease_id)
             }
         }
@@ -2545,12 +2540,11 @@ mod queue_tests {
         let now = 10_000_000u64;
         let (entered_tx, entered_rx) = mpsc::channel::<()>();
         let (release_tx, release_rx) = mpsc::channel::<()>();
-        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
-            Arc::new(Mutex::new(BlockingAdmitLedger {
-                inner: InMemoryLedger::new(),
-                entered: entered_tx,
-                release: Arc::new(Mutex::new(release_rx)),
-            }));
+        let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(BlockingAdmitLedger {
+            inner: InMemoryLedger::new(),
+            entered: Mutex::new(entered_tx),
+            release: Arc::new(Mutex::new(release_rx)),
+        });
         let plans = StaticPlans::new([TenantPlan {
             tenant: tid("alpha"),
             max_concurrency: 1,
@@ -2704,9 +2698,8 @@ mod queue_tests {
         ceiling_vcpu_ms: u64,
         vcpu: u32,
         now_ms: u64,
-    ) -> (AppState, Arc<Mutex<dyn LeaseLedger + Send>>) {
-        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
-            Arc::new(Mutex::new(InMemoryLedger::new()));
+    ) -> (AppState, Arc<dyn LeaseLedger + Send + Sync>) {
+        let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
         let plans = CeilingPlans {
             tenant: tid("alpha"),
             cap,
@@ -2821,8 +2814,7 @@ mod queue_tests {
     async fn queue_dispatch_enforces_compute_ceiling() {
         let t0 = 1_700_000_000_000u64;
         let period = period_key_now(t0); // all instants below share one calendar month.
-        let ledger: Arc<Mutex<dyn LeaseLedger + Send>> =
-            Arc::new(Mutex::new(InMemoryLedger::new()));
+        let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
         let clock = Arc::new(SettableClock::new(t0));
         let plans = CeilingPlans {
             tenant: tid("alpha"),
@@ -2984,11 +2976,7 @@ mod queue_tests {
             router.oneshot(cancel_b).await.unwrap().status(),
             StatusCode::OK
         );
-        let accrued = ledger
-            .lock()
-            .unwrap()
-            .compute_accrued(&tid("alpha"), period)
-            .unwrap();
+        let accrued = ledger.compute_accrued(&tid("alpha"), period).unwrap();
         // A folded 1000 (clamped), B folded 300 (clamped) → 1300. The load-bearing
         // assertion is that B contributed a NON-ZERO accrual (the bug gave 0).
         assert_eq!(
@@ -3157,8 +3145,6 @@ mod queue_tests {
         // dropped un-billed by a fail-closed `remove`.
         {
             let rec = ledger
-                .lock()
-                .unwrap()
                 .get(&lease_id)
                 .unwrap()
                 .expect("the rolled-back Held lease is terminalized, not deleted");
@@ -3173,7 +3159,7 @@ mod queue_tests {
         // Held lease accrued 0 elapsed ms, so the clamped terminal charge is ~0
         // and the reservation no longer inflates the period's consumed total.
         {
-            let ledger = ledger.lock().unwrap();
+            let ledger = &*ledger;
             let accrued = ledger
                 .compute_accrued(&tid("alpha"), period_key_now(now))
                 .unwrap();

@@ -4,7 +4,7 @@
 //! real sockets. Error bodies are asserted against the FROZEN vocabulary
 //! (`corelink_fabric_api::{ApiError, ErrorBody}`) — status AND machine code.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Body;
@@ -29,7 +29,7 @@ fn acme_store() -> Arc<dyn TokenStore + Send + Sync> {
 /// only; the lease surface has its own suite (`acceptance_api2.rs`).
 fn test_app(store: Arc<dyn TokenStore + Send + Sync>) -> Router {
     let state = AppState::new(
-        Arc::new(Mutex::new(InMemoryLedger::new())),
+        Arc::new(InMemoryLedger::new()),
         Arc::new(StaticPlans::new([])),
         Arc::new(SystemClock),
     );

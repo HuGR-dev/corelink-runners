@@ -41,7 +41,7 @@
 //! (`/v1/leases/{id}/envelope/{events,meta,ingest}` + the close terminal-observe)
 //! are live for every acquired lease, satisfying integration-contract v1.2.0 §13.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use anyhow::Context as _;
 use axum::Router;
@@ -1124,13 +1124,13 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
     // check-and-reserve without taking the process `Mutex`, so an acquire burst
     // cannot park the tokio workers on the std `.lock()`.
     let (ledger, admit): (
-        Arc<Mutex<dyn LeaseLedger + Send>>,
+        Arc<dyn LeaseLedger + Send + Sync>,
         Arc<dyn corelink_fabric::AdmitLedger>,
     ) = match cfg.ledger_backend {
         LedgerBackend::Memory => {
             let mem = InMemoryLedger::new();
             let admit: Arc<dyn corelink_fabric::AdmitLedger> = Arc::new(mem.clone());
-            (Arc::new(Mutex::new(mem)), admit)
+            (Arc::new(mem), admit)
         }
         LedgerBackend::Postgres => {
             let pg = tokio::task::block_in_place(|| {
@@ -1145,7 +1145,7 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
             // CLONE shares the `Arc<Pool>` AND the `Arc<Semaphore>` admit-permits —
             // the C3 connection-reservation invariant holds across the split.
             let admit: Arc<dyn corelink_fabric::AdmitLedger> = Arc::new(pg.clone());
-            (Arc::new(Mutex::new(pg)), admit)
+            (Arc::new(pg), admit)
         }
     };
 

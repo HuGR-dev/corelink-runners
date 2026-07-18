@@ -103,9 +103,7 @@ pub(crate) async fn usage(
     // This is the same population try_admit guards against; the count is
     // taken under the ledger lock, which is the correct serialisation point.
     let active_now: u32 = {
-        let Ok(ledger) = state.ledger.lock() else {
-            return error_response(ApiError::FailClosed, "ledger lock poisoned; failing closed");
-        };
+        let ledger = &*state.ledger;
         match ledger.by_tenant(&tenant) {
             Err(_) => {
                 return error_response(ApiError::FailClosed, "ledger read failed; failing closed");

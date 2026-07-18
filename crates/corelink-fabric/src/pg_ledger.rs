@@ -11,7 +11,7 @@
 //!
 //! ## Sync trait over an async client
 //!
-//! The [`LeaseLedger`] trait is SYNC (`&mut self`) — it threads through ~15
+//! The [`LeaseLedger`] trait is SYNC (`&self`) — it threads through ~15
 //! call sites and `std::sync::Mutex` guards; making it async was rejected. The
 //! Postgres clients (`tokio-postgres` / `deadpool-postgres`) are async, so each
 //! method bridges with [`tokio::task::block_in_place`] +
@@ -524,7 +524,7 @@ impl LeaseLedger for PgLedger {
         })
     }
 
-    fn put(&mut self, rec: LeaseRecord) -> anyhow::Result<()> {
+    fn put(&self, rec: LeaseRecord) -> anyhow::Result<()> {
         self.block_on(async {
             let client = self.pool.get().await?;
             // ON CONFLICT DO NOTHING + RETURNING: a duplicate lease_id inserts
@@ -588,7 +588,7 @@ impl LeaseLedger for PgLedger {
     }
 
     fn transition(
-        &mut self,
+        &self,
         lease_id: &str,
         to: RunnerState,
         now_ms: u64,
@@ -826,11 +826,7 @@ impl LeaseLedger for PgLedger {
         })
     }
 
-    fn set_envelope_checkpoint(
-        &mut self,
-        lease_id: &str,
-        checkpoint_json: &str,
-    ) -> anyhow::Result<()> {
+    fn set_envelope_checkpoint(&self, lease_id: &str, checkpoint_json: &str) -> anyhow::Result<()> {
         // ADR-0004 Decision-2: overwrite the lease's opaque checkpoint blob.
         // Fail-closed: rowcount 0 (unknown lease) → Err, like every other
         // mutation. Idempotent overwrite for an existing lease.
@@ -866,7 +862,7 @@ impl LeaseLedger for PgLedger {
         })
     }
 
-    fn remove(&mut self, lease_id: &str) -> anyhow::Result<bool> {
+    fn remove(&self, lease_id: &str) -> anyhow::Result<bool> {
         // Admission-rollback seam (the over-admission fix in the acquire path):
         // drop a reserved `Pending` row when provisioning fails so the slot +
         // cap free immediately. Unconditional delete by id — `Ok(true)` if a
@@ -919,7 +915,7 @@ impl LeaseLedger for PgLedger {
         })
     }
 
-    fn remove_if_pending(&mut self, lease_id: &str) -> anyhow::Result<bool> {
+    fn remove_if_pending(&self, lease_id: &str) -> anyhow::Result<bool> {
         // GUARDED admission-rollback for the stale-Pending sweep: the predicate
         // `state = 'pending'` is evaluated ATOMICALLY inside the DELETE, so a
         // lease that raced `Pending → Held` in the sweep window (between the
@@ -999,7 +995,7 @@ impl LeaseLedger for PgLedger {
         })
     }
 
-    fn try_admit(&mut self, rec: LeaseRecord, max_concurrency: u32) -> anyhow::Result<bool> {
+    fn try_admit(&self, rec: LeaseRecord, max_concurrency: u32) -> anyhow::Result<bool> {
         // Delegate to the `&self` impl (W-LEDGER-A1): the body needs no `&mut`
         // (pool + semaphore + handle are all `Arc`/`Handle`-shared), so the admit
         // seam can drive it without the process `Mutex`.
@@ -1007,7 +1003,7 @@ impl LeaseLedger for PgLedger {
     }
 
     fn try_admit_with_compute(
-        &mut self,
+        &self,
         rec: LeaseRecord,
         max_concurrency: u32,
         gate: Option<ComputeGate>,
@@ -1493,13 +1489,11 @@ mod compute_ceiling_pg_tests {
         let id1 = nonce("l1");
         let id2 = nonce("l2");
         assert_eq!(
-            led.try_admit_with_compute(pending(&id1, &t, 1_000), 1, None)
-                .unwrap(),
+            LeaseLedger::try_admit_with_compute(&led, pending(&id1, &t, 1_000), 1, None).unwrap(),
             AdmitOutcome::Admitted
         );
         assert_eq!(
-            led.try_admit_with_compute(pending(&id2, &t, 1_000), 1, None)
-                .unwrap(),
+            LeaseLedger::try_admit_with_compute(&led, pending(&id2, &t, 1_000), 1, None).unwrap(),
             AdmitOutcome::OverConcurrency
         );
 
@@ -1513,8 +1507,13 @@ mod compute_ceiling_pg_tests {
             new_reserved_vcpu_ms: u64::MAX, // would defeat any real ceiling — proven ignored
         };
         assert_eq!(
-            led.try_admit_with_compute(pending(&id3, &t0, 1_000), 5, Some(zero_gate))
-                .unwrap(),
+            LeaseLedger::try_admit_with_compute(
+                &led,
+                pending(&id3, &t0, 1_000),
+                5,
+                Some(zero_gate)
+            )
+            .unwrap(),
             AdmitOutcome::Admitted
         );
         // No accrual key was written (ceiling-0 path = NULL columns ⇒ no accounting).
@@ -1543,7 +1542,7 @@ mod compute_ceiling_pg_tests {
         };
         let id1 = nonce("c1");
         assert_eq!(
-            led.try_admit_with_compute(pending(&id1, &t, 1_000), 100, Some(g1))
+            LeaseLedger::try_admit_with_compute(&led, pending(&id1, &t, 1_000), 100, Some(g1))
                 .unwrap(),
             AdmitOutcome::Admitted
         );
@@ -1553,7 +1552,7 @@ mod compute_ceiling_pg_tests {
         };
         let id2 = nonce("c2");
         assert_eq!(
-            led.try_admit_with_compute(pending(&id2, &t, 1_000), 100, Some(g2))
+            LeaseLedger::try_admit_with_compute(&led, pending(&id2, &t, 1_000), 100, Some(g2))
                 .unwrap(),
             AdmitOutcome::OverCompute
         );
@@ -1567,7 +1566,7 @@ mod compute_ceiling_pg_tests {
         };
         let id3 = nonce("c3");
         assert_eq!(
-            led.try_admit_with_compute(pending(&id3, &t, 1_000), 100, Some(g3))
+            LeaseLedger::try_admit_with_compute(&led, pending(&id3, &t, 1_000), 100, Some(g3))
                 .unwrap(),
             AdmitOutcome::Admitted
         );
@@ -1584,7 +1583,7 @@ mod compute_ceiling_pg_tests {
         };
         let _serial = PG_CEILING_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let rt = rt();
-        let mut led = connect(&rt, &url);
+        let led = connect(&rt, &url);
         let t = TenantId::new(nonce("sig")).unwrap();
         let period = 202406u32;
         // ceiling 1000; box 4 vCPU; reserve 400 each (ttl 100 ms ⇒ 4*100=400).
@@ -1597,18 +1596,18 @@ mod compute_ceiling_pg_tests {
         let (id1, id2, id3) = (nonce("s1"), nonce("s2"), nonce("s3"));
         // created at t=1000, ttl 100 ⇒ reserved 400.
         assert_eq!(
-            led.try_admit_with_compute(pending(&id1, &t, 1_000), 100, Some(mk(400)))
+            LeaseLedger::try_admit_with_compute(&led, pending(&id1, &t, 1_000), 100, Some(mk(400)))
                 .unwrap(),
             AdmitOutcome::Admitted
         );
         assert_eq!(
-            led.try_admit_with_compute(pending(&id2, &t, 1_000), 100, Some(mk(400)))
+            LeaseLedger::try_admit_with_compute(&led, pending(&id2, &t, 1_000), 100, Some(mk(400)))
                 .unwrap(),
             AdmitOutcome::Admitted
         );
         // Σ is now 800; a 3rd reserving 400 → 1200 > 1000 → OverCompute.
         assert_eq!(
-            led.try_admit_with_compute(pending(&id3, &t, 1_000), 100, Some(mk(400)))
+            LeaseLedger::try_admit_with_compute(&led, pending(&id3, &t, 1_000), 100, Some(mk(400)))
                 .unwrap(),
             AdmitOutcome::OverCompute
         );
@@ -1620,13 +1619,23 @@ mod compute_ceiling_pg_tests {
         // Σ now 400 (lease 2 only) + accrued 240 = 640; a 3rd reserving 400 →
         // 640+400 = 1040 > 1000 → still OverCompute, but reserving 300 fits (940).
         assert_eq!(
-            led.try_admit_with_compute(pending(&nonce("s4"), &t, 1_000), 100, Some(mk(400)))
-                .unwrap(),
+            LeaseLedger::try_admit_with_compute(
+                &led,
+                pending(&nonce("s4"), &t, 1_000),
+                100,
+                Some(mk(400))
+            )
+            .unwrap(),
             AdmitOutcome::OverCompute
         );
         assert_eq!(
-            led.try_admit_with_compute(pending(&nonce("s5"), &t, 1_000), 100, Some(mk(300)))
-                .unwrap(),
+            LeaseLedger::try_admit_with_compute(
+                &led,
+                pending(&nonce("s5"), &t, 1_000),
+                100,
+                Some(mk(300))
+            )
+            .unwrap(),
             AdmitOutcome::Admitted
         );
     }
@@ -1645,7 +1654,7 @@ mod compute_ceiling_pg_tests {
         };
         let _serial = PG_CEILING_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let rt = rt();
-        let mut led = connect(&rt, &url);
+        let led = connect(&rt, &url);
         let t = TenantId::new(nonce("once")).unwrap();
         let period = 202406u32;
         let g = ComputeGate {
@@ -1655,8 +1664,7 @@ mod compute_ceiling_pg_tests {
             new_reserved_vcpu_ms: 1_000,
         };
         let id = nonce("o1");
-        led.try_admit_with_compute(pending(&id, &t, 1_000), 100, Some(g))
-            .unwrap();
+        LeaseLedger::try_admit_with_compute(&led, pending(&id, &t, 1_000), 100, Some(g)).unwrap();
         led.transition(&id, RunnerState::Held, 1_010).unwrap();
         led.transition(&id, RunnerState::Expired, 1_100).unwrap();
         // 2 vCPU × (1100−1000) = 200.
@@ -1684,7 +1692,7 @@ mod compute_ceiling_pg_tests {
         };
         let _serial = PG_CEILING_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let rt = rt();
-        let mut led = connect(&rt, &url);
+        let led = connect(&rt, &url);
 
         // (c) over-i64 reservation → fail-closed Err (the `as i64` would wrap
         // negative and defeat the ceiling).
@@ -1696,8 +1704,13 @@ mod compute_ceiling_pg_tests {
             new_reserved_vcpu_ms: MAX_LEDGER_VCPU_MS + 1,
         };
         assert!(
-            led.try_admit_with_compute(pending(&nonce("b1"), &t_bad, 1_000), 100, Some(over))
-                .is_err(),
+            LeaseLedger::try_admit_with_compute(
+                &led,
+                pending(&nonce("b1"), &t_bad, 1_000),
+                100,
+                Some(over)
+            )
+            .is_err(),
             "an over-i64 reservation must be rejected fail-closed"
         );
 
@@ -1716,7 +1729,7 @@ mod compute_ceiling_pg_tests {
         };
         let id = nonce("big1");
         assert_eq!(
-            led.try_admit_with_compute(pending(&id, &t_big, 0), 100, Some(g))
+            LeaseLedger::try_admit_with_compute(&led, pending(&id, &t_big, 0), 100, Some(g))
                 .unwrap(),
             AdmitOutcome::Admitted
         );
@@ -1771,15 +1784,23 @@ mod compute_ceiling_pg_tests {
 
         rt.block_on(async {
             let ha = tokio::task::spawn_blocking(move || {
-                let r = led_a
-                    .try_admit_with_compute(pending(&id_a, &ta, 1_000), 100, Some(gate))
-                    .unwrap();
+                let r = LeaseLedger::try_admit_with_compute(
+                    &led_a,
+                    pending(&id_a, &ta, 1_000),
+                    100,
+                    Some(gate),
+                )
+                .unwrap();
                 *oa2.lock().unwrap() = Some(r);
             });
             let hb = tokio::task::spawn_blocking(move || {
-                let r = led_b
-                    .try_admit_with_compute(pending(&id_b, &tb, 1_000), 100, Some(gate))
-                    .unwrap();
+                let r = LeaseLedger::try_admit_with_compute(
+                    &led_b,
+                    pending(&id_b, &tb, 1_000),
+                    100,
+                    Some(gate),
+                )
+                .unwrap();
                 *ob2.lock().unwrap() = Some(r);
             });
             ha.await.unwrap();
@@ -1823,7 +1844,7 @@ mod compute_ceiling_pg_tests {
         };
         let _serial = PG_CEILING_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let rt = rt();
-        let mut led = connect(&rt, &url);
+        let led = connect(&rt, &url);
         let t = TenantId::new(nonce("c1clamp")).unwrap();
         let period = 202406u32;
         // box 4 vCPU, ttl 100 ms ⇒ reserved = 4 × 100 = 400 vCPU·ms.
@@ -1837,7 +1858,7 @@ mod compute_ceiling_pg_tests {
         let id = nonce("c1l");
         // created at t=1000.
         assert_eq!(
-            led.try_admit_with_compute(pending(&id, &t, 1_000), 100, Some(g))
+            LeaseLedger::try_admit_with_compute(&led, pending(&id, &t, 1_000), 100, Some(g))
                 .unwrap(),
             AdmitOutcome::Admitted
         );
@@ -1859,8 +1880,13 @@ mod compute_ceiling_pg_tests {
             ..g
         };
         assert_eq!(
-            led.try_admit_with_compute(pending(&nonce("c1l2"), &t, 1_000), 100, Some(g2))
-                .unwrap(),
+            LeaseLedger::try_admit_with_compute(
+                &led,
+                pending(&nonce("c1l2"), &t, 1_000),
+                100,
+                Some(g2)
+            )
+            .unwrap(),
             AdmitOutcome::Admitted,
             "exactly the reservation was charged — headroom is reserved−actual = 0, \
              so 400 accrued leaves room for 99_600 (proves no over-charge)"
@@ -1878,7 +1904,7 @@ mod compute_ceiling_pg_tests {
         };
         let _serial = PG_CEILING_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let rt = rt();
-        let mut led = connect(&rt, &url);
+        let led = connect(&rt, &url);
         let t = TenantId::new(nonce("c1ctrl")).unwrap();
         let period = 202406u32;
         let g = ComputeGate {
@@ -1888,8 +1914,7 @@ mod compute_ceiling_pg_tests {
             new_reserved_vcpu_ms: 400,
         };
         let id = nonce("c1c");
-        led.try_admit_with_compute(pending(&id, &t, 1_000), 100, Some(g))
-            .unwrap();
+        LeaseLedger::try_admit_with_compute(&led, pending(&id, &t, 1_000), 100, Some(g)).unwrap();
         led.transition(&id, RunnerState::Held, 1_010).unwrap();
         // run = 1060 − 1000 = 60 ms ⇒ actual = 4 × 60 = 240 (≤ reserved 400).
         led.transition(&id, RunnerState::Released, 1_060).unwrap();
@@ -1916,7 +1941,7 @@ mod compute_ceiling_pg_tests {
         };
         let _serial = PG_CEILING_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let rt = rt();
-        let mut led = connect(&rt, &url);
+        let led = connect(&rt, &url);
         let t = TenantId::new(nonce("c2add")).unwrap();
         let period = 202406u32;
         // Lease 1: box u32::MAX, run huge ⇒ raw actual saturates ≫ i64::MAX; but
@@ -1929,8 +1954,7 @@ mod compute_ceiling_pg_tests {
         };
         let id1 = nonce("c2a");
         assert_eq!(
-            led.try_admit_with_compute(pending(&id1, &t, 0), 100, Some(g1))
-                .unwrap(),
+            LeaseLedger::try_admit_with_compute(&led, pending(&id1, &t, 0), 100, Some(g1)).unwrap(),
             AdmitOutcome::Admitted
         );
         led.transition(&id1, RunnerState::Held, 1).unwrap();
@@ -1972,8 +1996,7 @@ mod compute_ceiling_pg_tests {
         // the clamped accrued is honored) AND that compute_accrued is unchanged —
         // i.e. NO raise occurred anywhere on this path.
         assert_eq!(
-            led.try_admit_with_compute(pending(&id2, &t, 0), 100, Some(g2))
-                .unwrap(),
+            LeaseLedger::try_admit_with_compute(&led, pending(&id2, &t, 0), 100, Some(g2)).unwrap(),
             AdmitOutcome::OverCompute,
             "a tenant already at MAX accrued is over the ceiling — and the gate \
              read of the MAX-pinned accrued did not RAISE"
@@ -2000,7 +2023,7 @@ mod compute_ceiling_pg_tests {
         };
         let _serial = PG_CEILING_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let rt = rt();
-        let mut led = connect(&rt, &url);
+        let led = connect(&rt, &url);
         let t = TenantId::new(nonce("c2two")).unwrap();
         let period = 202407u32;
         // Two leases, each reserving half-of-MAX + a bit, both terminalize OVER
@@ -2021,7 +2044,7 @@ mod compute_ceiling_pg_tests {
         // min(actual, half) = half (actual saturates ≫ half).
         let ida = nonce("c2x");
         assert_eq!(
-            led.try_admit_with_compute(pending(&ida, &t, 0), 100, Some(mk(half)))
+            LeaseLedger::try_admit_with_compute(&led, pending(&ida, &t, 0), 100, Some(mk(half)))
                 .unwrap(),
             AdmitOutcome::Admitted
         );
@@ -2035,7 +2058,7 @@ mod compute_ceiling_pg_tests {
         // reservation onto accrued = half ⇒ half + LEAST(half, MAX − half) = MAX.
         let idb = nonce("c2y");
         assert_eq!(
-            led.try_admit_with_compute(pending(&idb, &t, 0), 100, Some(mk(half)))
+            LeaseLedger::try_admit_with_compute(&led, pending(&idb, &t, 0), 100, Some(mk(half)))
                 .unwrap(),
             AdmitOutcome::Admitted
         );
@@ -2076,8 +2099,13 @@ mod compute_ceiling_pg_tests {
             new_reserved_vcpu_ms: 60,
         };
         assert_eq!(
-            led.try_admit_with_compute(pending(&nonce("c4a"), &t, 1_000), 1, Some(g1))
-                .unwrap(),
+            LeaseLedger::try_admit_with_compute(
+                &led,
+                pending(&nonce("c4a"), &t, 1_000),
+                1,
+                Some(g1)
+            )
+            .unwrap(),
             AdmitOutcome::Admitted
         );
         // A second admit is over BOTH: cap is 1 (cnt=1 ≥ 1) AND reserving 60 more
@@ -2087,8 +2115,13 @@ mod compute_ceiling_pg_tests {
             ..g1
         };
         assert_eq!(
-            led.try_admit_with_compute(pending(&nonce("c4b"), &t, 1_000), 1, Some(g2))
-                .unwrap(),
+            LeaseLedger::try_admit_with_compute(
+                &led,
+                pending(&nonce("c4b"), &t, 1_000),
+                1,
+                Some(g2)
+            )
+            .unwrap(),
             AdmitOutcome::OverCompute,
             "over BOTH ceiling and cap ⇒ OverCompute (compute evaluated first)"
         );
@@ -2099,8 +2132,13 @@ mod compute_ceiling_pg_tests {
             ..g1
         };
         assert_eq!(
-            led.try_admit_with_compute(pending(&nonce("c4c"), &t, 1_000), 1, Some(g3))
-                .unwrap(),
+            LeaseLedger::try_admit_with_compute(
+                &led,
+                pending(&nonce("c4c"), &t, 1_000),
+                1,
+                Some(g3)
+            )
+            .unwrap(),
             AdmitOutcome::OverConcurrency,
             "over the cap but UNDER the ceiling ⇒ OverConcurrency (control)"
         );
@@ -2141,16 +2179,21 @@ mod compute_ceiling_pg_tests {
         // Seed ONE accounting-on lease, bring it to Held so it can terminalize.
         let seed = nonce("c3seed");
         {
-            let mut g = led.lock().unwrap();
+            let g = led.lock().unwrap();
             assert_eq!(
-                g.try_admit_with_compute(pending(&seed, &t, 0), 10_000, Some(mk_gate(50)))
-                    .unwrap(),
+                LeaseLedger::try_admit_with_compute(
+                    &*g,
+                    pending(&seed, &t, 0),
+                    10_000,
+                    Some(mk_gate(50))
+                )
+                .unwrap(),
                 AdmitOutcome::Admitted
             );
             g.transition(&seed, RunnerState::Held, 1).unwrap();
         }
 
-        // NOTE: the sync `LeaseLedger` is `&mut self`, so a single `PgLedger` is
+        // NOTE: the sync `LeaseLedger` is `&self`, so a single `PgLedger` is
         // serialized behind its Mutex — true in-flight contention on ONE handle is
         // not expressible at the trait level. We therefore drive contention with
         // INDEPENDENT handles on the SAME database+pool semantics: each task builds
@@ -2180,7 +2223,8 @@ mod compute_ceiling_pg_tests {
                             .expect("connect");
                         // Same-tenant admit: contends for hashtext(tenant) lock.
                         // Outcome ignored — the point is lock+pool contention.
-                        let _ = led_i.try_admit_with_compute(
+                        let _ = LeaseLedger::try_admit_with_compute(
+                            &led_i,
                             pending(&id_i, &t_i, 0),
                             10_000,
                             Some(ComputeGate {
@@ -2201,7 +2245,7 @@ mod compute_ceiling_pg_tests {
                     .build()
                     .expect("rt");
                 rt_r.block_on(async move {
-                    let mut led_r = PgLedger::connect(&url_rel, 4, PgTlsMode::Disable)
+                    let led_r = PgLedger::connect(&url_rel, 4, PgTlsMode::Disable)
                         .await
                         .expect("connect");
                     led_r

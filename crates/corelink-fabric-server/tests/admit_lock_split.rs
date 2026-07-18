@@ -22,8 +22,8 @@
 //! std thread (a bounded `recv_timeout`), so a starved runtime is measured, not
 //! joined.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::Router;
@@ -140,7 +140,7 @@ fn health_prompt_under_admit_burst(mode: Mode) -> bool {
 
     // The cold `ledger` and the admit `inner` are CLONES sharing one inner state.
     let shared = InMemoryLedger::new();
-    let cold: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(shared.clone()));
+    let cold: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(shared.clone());
     let slow = SlowAdmit {
         inner: shared.clone(),
         released: Arc::clone(&released),

@@ -16,8 +16,8 @@
 //!   (`AppState::with_max_inflight_requests`) sheds excess load with 503 rather
 //!   than queueing unboundedly.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -83,7 +83,7 @@ impl BoxProvisioner for PeakProvisioner {
 
 struct Harness {
     app: Router,
-    ledger: Arc<Mutex<dyn LeaseLedger + Send>>,
+    ledger: Arc<dyn LeaseLedger + Send + Sync>,
     registry: Arc<HookRegistry>,
 }
 
@@ -103,7 +103,7 @@ fn harness(
         rate_ceiling_per_min: 10_000,
         repo_allowlist: Vec::new(),
     }]);
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
     let registry = Arc::new(HookRegistry::default());
     let mut state = AppState::new(ledger.clone(), Arc::new(plans), Arc::new(SystemClock))
         .with_close_ack_max_inflight(close_ack_max_inflight)
@@ -187,10 +187,8 @@ async fn body_json(response: Response) -> serde_json::Value {
     serde_json::from_slice(&bytes).expect("JSON body")
 }
 
-fn ledger_state(ledger: &Arc<Mutex<dyn LeaseLedger + Send>>, lease_id: &str) -> LeaseState {
+fn ledger_state(ledger: &Arc<dyn LeaseLedger + Send + Sync>, lease_id: &str) -> LeaseState {
     ledger
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
         .get(lease_id)
         .expect("readable ledger")
         .expect("known lease")

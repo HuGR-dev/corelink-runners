@@ -12,8 +12,8 @@
 //! property — the ledger never reaching `Released` before the close
 //! machinery produced its outcome.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -46,7 +46,7 @@ const HOOK_CRED: &str = "hookcred-env2";
 /// the hook registry the close path consults.
 struct Harness {
     app: Router,
-    ledger: Arc<Mutex<dyn LeaseLedger + Send>>,
+    ledger: Arc<dyn LeaseLedger + Send + Sync>,
     registry: Arc<HookRegistry>,
 }
 
@@ -70,7 +70,7 @@ fn harness_with_provisioner(prov: Option<Arc<dyn BoxProvisioner>>) -> Harness {
         rate_ceiling_per_min: 100,
         repo_allowlist: Vec::new(),
     }]);
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
     let registry = Arc::new(HookRegistry::default());
     let mut state = AppState::new(ledger.clone(), Arc::new(plans), Arc::new(SystemClock));
     if let Some(prov) = prov {
@@ -204,10 +204,8 @@ async fn body_json(response: Response) -> serde_json::Value {
 }
 
 /// The authoritative ledger state of `lease_id`, read directly.
-fn ledger_state(ledger: &Arc<Mutex<dyn LeaseLedger + Send>>, lease_id: &str) -> LeaseState {
+fn ledger_state(ledger: &Arc<dyn LeaseLedger + Send + Sync>, lease_id: &str) -> LeaseState {
     ledger
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
         .get(lease_id)
         .expect("readable ledger")
         .expect("known lease")
@@ -899,8 +897,6 @@ async fn close_on_expired_lease_is_400_not_held() {
     let lease_id = acquire(&h).await;
     // Simulate the reaper terminalizing the lease at its deadline.
     h.ledger
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
         .transition(&lease_id, RunnerState::Expired, 1_000)
         .expect("Held→Expired transition");
     let response = post_close(

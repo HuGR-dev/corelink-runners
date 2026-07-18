@@ -155,7 +155,7 @@ mod tests {
 
     #[test]
     fn acquire_over_cap_rejected_before_any_spawn() {
-        let mut ledger = InMemoryLedger::new();
+        let ledger = InMemoryLedger::new();
         ledger.put(held("l-1", "acme")).unwrap();
         ledger.put(held("l-2", "acme")).unwrap();
         let plan = plan("acme", 2, 100);
@@ -164,7 +164,7 @@ mod tests {
         assert_eq!(decision, CapDecision::RejectOverCap);
 
         // Pending counts as active too: 1 Held + 1 Pending also fills cap 2.
-        let mut ledger2 = InMemoryLedger::new();
+        let ledger2 = InMemoryLedger::new();
         ledger2.put(held("l-1", "acme")).unwrap();
         ledger2
             .put(record("l-2", "acme", LeaseState::Pending))
@@ -252,11 +252,11 @@ mod tests {
         // A burst of checks against the SAME snapshot: the decision is a pure
         // function of (ledger, plan, now, window) — deterministic across the
         // whole burst, no interleaved state mutation needed to stay correct.
-        let mut full = InMemoryLedger::new();
+        let full = InMemoryLedger::new();
         full.put(held("l-1", "acme")).unwrap();
         let at_cap = plan("acme", 1, 1_000);
 
-        let mut under = InMemoryLedger::new();
+        let under = InMemoryLedger::new();
         under.put(held("l-1", "bigco")).unwrap();
         let under_cap = plan("bigco", 8, 1_000);
 
@@ -276,7 +276,7 @@ mod tests {
     #[test]
     fn caps_are_per_tenant_not_global() {
         // One shared ledger: tenant A at cap must not consume tenant B's slots.
-        let mut ledger = InMemoryLedger::new();
+        let ledger = InMemoryLedger::new();
         ledger.put(held("a-1", "acme")).unwrap();
         ledger.put(held("a-2", "acme")).unwrap();
 

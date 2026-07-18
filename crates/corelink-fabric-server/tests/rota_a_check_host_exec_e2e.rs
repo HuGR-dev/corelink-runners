@@ -153,7 +153,7 @@ fn harness(exec_status: u16, exec_body: &str) -> Harness {
         rate_ceiling_per_min: 100,
         repo_allowlist: Vec::new(),
     }]);
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
 
     let worker = Arc::new(FakeWorker::new(exec_status, exec_body));
     let registry = BoxRegistry::new();

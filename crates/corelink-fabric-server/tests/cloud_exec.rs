@@ -283,7 +283,7 @@ fn unconfigured_keeps_noboxexec() {
 // ── Helper: minimal AppState (no plans, empty ledger, system clock) ────────────
 
 fn bare_state() -> AppState {
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
     AppState::new(
         ledger,
         Arc::new(StaticPlans::default()),

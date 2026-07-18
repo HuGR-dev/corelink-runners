@@ -69,7 +69,7 @@ pub(crate) fn run_all(make: LedgerFactory) {
 /// consistent across InMemory / File / Pg), ordered by lease_id.
 fn pending_older_than_filters_by_age_and_state(make: LedgerFactory) {
     let t = tenant("acme");
-    let mut led = make();
+    let led = make();
 
     // created_at_ms = 1_000 for every `record(..)` helper row.
     // Stale Pending (old), fresh Pending (we make it fresh by putting it then
@@ -135,7 +135,7 @@ fn envelope_checkpoint_set_get_roundtrip(make: LedgerFactory) {
 
     // `get` on a never-set checkpoint → None (lease exists, no checkpoint).
     {
-        let mut led = make();
+        let led = make();
         led.put(held("ck-1", &t)).unwrap();
         assert_eq!(
             led.get_envelope_checkpoint("ck-1").unwrap(),
@@ -164,7 +164,7 @@ fn envelope_checkpoint_set_get_roundtrip(make: LedgerFactory) {
 
     // `get` on an absent lease → None; `set` on an absent lease → Err.
     {
-        let mut led = make();
+        let led = make();
         assert_eq!(
             led.get_envelope_checkpoint("ghost").unwrap(),
             None,
@@ -186,7 +186,7 @@ fn deadline_roundtrips_and_transition_preserves_it(make: LedgerFactory) {
 
     // `put` with a concrete deadline → `get` reads it back.
     {
-        let mut led = make();
+        let led = make();
         let mut rec = held("dl-1", &t);
         rec.deadline_ms = Some(7_777);
         led.put(rec).unwrap();
@@ -225,7 +225,7 @@ fn deadline_roundtrips_and_transition_preserves_it(make: LedgerFactory) {
     // `None` round-trips as `None` (never-overdue fail-safe), through both
     // `put`/`get` AND `by_tenant`.
     {
-        let mut led = make();
+        let led = make();
         let rec = pending("dl-none", &t); // helper builds deadline_ms: None
         assert_eq!(rec.deadline_ms, None);
         led.put(rec).unwrap();
@@ -245,7 +245,7 @@ fn deadline_roundtrips_and_transition_preserves_it(make: LedgerFactory) {
 
     // `try_admit` (the acquire path) persists the deadline it is handed.
     {
-        let mut led = make();
+        let led = make();
         let mut rec = pending("dl-admit", &t);
         rec.deadline_ms = Some(4_242);
         assert!(
@@ -262,7 +262,7 @@ fn deadline_roundtrips_and_transition_preserves_it(make: LedgerFactory) {
 
 /// `put` rejects a duplicate `lease_id`; `get` returns None/Some correctly.
 fn put_rejects_duplicate_and_get_resolves(make: LedgerFactory) {
-    let mut led = make();
+    let led = make();
     let t = tenant("acme");
 
     assert!(
@@ -316,7 +316,7 @@ fn transition_matrix_legal_and_illegal(make: LedgerFactory) {
     let t = tenant("acme");
     for (i, from) in from_states.iter().enumerate() {
         for (j, to) in to_states.iter().enumerate() {
-            let mut led = make();
+            let led = make();
             let id = format!("lease-{i}-{j}");
             led.put(record(&id, &t, from.clone())).unwrap();
             let result = led.transition(&id, to.clone(), 2_000);
@@ -342,7 +342,7 @@ fn transition_matrix_legal_and_illegal(make: LedgerFactory) {
     }
 
     // Unknown lease -> Err (fail-closed).
-    let mut led = make();
+    let led = make();
     assert!(
         led.transition("no-such-lease", RunnerState::Held, 3_000)
             .is_err(),
@@ -353,7 +353,7 @@ fn transition_matrix_legal_and_illegal(make: LedgerFactory) {
 /// `by_tenant` and `held` return the right sets, tenant-isolated, and ordered
 /// by `lease_id` (deterministic).
 fn by_tenant_and_held_are_isolated_and_ordered(make: LedgerFactory) {
-    let mut led = make();
+    let led = make();
     let acme = tenant("acme");
     let globex = tenant("globex");
 
@@ -407,7 +407,7 @@ fn try_admit_atomic_cap(make: LedgerFactory) {
 
     // Zero cap admits nothing, and inserts nothing.
     {
-        let mut led = make();
+        let led = make();
         assert!(
             !led.try_admit(pending("z-1", &acme), 0).unwrap(),
             "max_concurrency 0 must admit nothing"
@@ -420,7 +420,7 @@ fn try_admit_atomic_cap(make: LedgerFactory) {
 
     // Admit under cap; reject exactly at cap.
     {
-        let mut led = make();
+        let led = make();
         assert!(
             led.try_admit(pending("l-1", &acme), 2).unwrap(),
             "1st admit (0 < 2) must succeed"
@@ -459,7 +459,7 @@ fn try_admit_atomic_cap(make: LedgerFactory) {
 
     // Pending AND Held both count toward the cap.
     {
-        let mut led = make();
+        let led = make();
         led.put(held("h-1", &acme)).unwrap();
         led.put(pending("p-1", &acme)).unwrap();
         // 2 active (1 Held + 1 Pending), cap 2 -> at cap, reject.
@@ -483,7 +483,7 @@ fn try_admit_atomic_cap(make: LedgerFactory) {
 
     // Terminal-state records do NOT count toward the cap.
     {
-        let mut led = make();
+        let led = make();
         led.put(record(
             "t-rel",
             &acme,
@@ -510,7 +510,7 @@ fn try_admit_atomic_cap(make: LedgerFactory) {
 
     // A duplicate lease_id still errors through the admit path (fail-closed).
     {
-        let mut led = make();
+        let led = make();
         assert!(led.try_admit(pending("dup", &acme), 5).unwrap());
         assert!(
             led.try_admit(pending("dup", &acme), 5).is_err(),
@@ -528,7 +528,7 @@ fn remove_frees_cap_and_get(make: LedgerFactory) {
 
     // Removing an absent lease is Ok(false), idempotent.
     {
-        let mut led = make();
+        let led = make();
         assert!(
             !led.remove("ghost").unwrap(),
             "removing an absent lease must be Ok(false)"
@@ -538,7 +538,7 @@ fn remove_frees_cap_and_get(make: LedgerFactory) {
     // Reserve a Pending at cap 1 (slot full), remove it, then re-admit: the
     // removal must have freed the cap, and get must read absent.
     {
-        let mut led = make();
+        let led = make();
         assert!(
             led.try_admit(pending("p-1", &acme), 1).unwrap(),
             "first reserve at cap 1 must admit"
@@ -581,7 +581,7 @@ fn remove_if_pending_guards_on_state(make: LedgerFactory) {
 
     // Absent → Ok(false), no-op.
     {
-        let mut led = make();
+        let led = make();
         assert!(
             !led.remove_if_pending("ghost").unwrap(),
             "remove_if_pending on an absent lease must be Ok(false)"
@@ -590,7 +590,7 @@ fn remove_if_pending_guards_on_state(make: LedgerFactory) {
 
     // Pending → removed (the legitimate stale-Pending reclaim), cap freed.
     {
-        let mut led = make();
+        let led = make();
         assert!(
             led.try_admit(pending("p-1", &t), 1).unwrap(),
             "reserve at cap 1"
@@ -613,7 +613,7 @@ fn remove_if_pending_guards_on_state(make: LedgerFactory) {
     // Held → NOT removed, and the live lease SURVIVES (the W2-B regression: a
     // Pending that raced to Held must never be deleted by the guarded reclaim).
     {
-        let mut led = make();
+        let led = make();
         led.put(held("h-1", &t)).unwrap();
         assert!(
             !led.remove_if_pending("h-1").unwrap(),
@@ -635,7 +635,7 @@ fn remove_if_pending_guards_on_state(make: LedgerFactory) {
         RunnerState::Expired,
         RunnerState::Crashed,
     ] {
-        let mut led = make();
+        let led = make();
         let id = format!("term-{term:?}");
         led.put(record(&id, &t, LeaseState::Wire(term.clone())))
             .unwrap();
@@ -798,8 +798,8 @@ mod pg_runs {
         }
 
         // Two independent handles = two "instances" of the control plane.
-        let mut led_a = connect(&rt, &url);
-        let mut led_b = connect(&rt, &url);
+        let led_a = connect(&rt, &url);
+        let led_b = connect(&rt, &url);
 
         // Both race to admit into the same tenant at cap 1. Run the two admits on
         // two OS threads; each enters the runtime via `block_on` in `try_admit`.
@@ -882,7 +882,7 @@ mod pg_runs {
 
         // ── Instance A: write a Held lease carrying a PAST durable deadline.
         {
-            let mut led_a = connect(&rt, &url);
+            let led_a = connect(&rt, &url);
             led_a.truncate_for_test().expect("truncate at start");
             let mut rec = held(&lease_id, &t);
             rec.deadline_ms = Some(past_deadline);
@@ -917,7 +917,7 @@ mod pg_runs {
 
         // ── And instance B can drive the terminal transition (the reaper's
         // reclaim), which PRESERVES the deadline on the terminal record.
-        let mut led_b = led_b;
+        let led_b = led_b;
         let after = led_b
             .transition(&lease_id, RunnerState::Expired, now)
             .expect("instance B reaps the lease it never acquired");
@@ -964,7 +964,7 @@ mod pg_runs {
 
         // ── Instance A: write the Held lease, then its durable checkpoint.
         {
-            let mut led_a = connect(&rt, &url);
+            let led_a = connect(&rt, &url);
             led_a.truncate_for_test().expect("truncate at start");
             led_a
                 .put(held(&lease_id, &t))
@@ -984,7 +984,7 @@ mod pg_runs {
         );
 
         // A `set` on an absent lease still fails closed against the real DB.
-        let mut led_b = led_b;
+        let led_b = led_b;
         assert!(
             led_b
                 .set_envelope_checkpoint(&format!("absent-{nonce}"), blob)
@@ -1135,7 +1135,7 @@ mod pg_runs {
         let lease_id = format!("cas-{nonce}");
         {
             let rt = rt();
-            let mut led = connect(&rt, &url);
+            let led = connect(&rt, &url);
             led.truncate_for_test().expect("truncate at start");
             led.put(held(&lease_id, &t)).expect("seed one Held lease");
         }

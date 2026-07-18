@@ -65,9 +65,7 @@ pub(crate) async fn exec(
     // DIFFERENT instance than acquire still sees it). `None` → internal
     // inconsistency, handled by the fail-closed gate below.
     let (box_ref, deadline_ms) = {
-        let Ok(ledger) = state.ledger.lock() else {
-            return error_response(ApiError::FailClosed, "lease ledger lock poisoned");
-        };
+        let ledger = &*state.ledger;
         let record = match ledger.get(&lease_id) {
             Ok(Some(record)) => record,
             Ok(None) => return not_found(),
@@ -224,9 +222,7 @@ pub(crate) async fn exec(
         // guard is dropped at the end of this block, before attestation.
         Ok(result) => {
             let still_held = {
-                let Ok(ledger) = state.ledger.lock() else {
-                    return error_response(ApiError::FailClosed, "lease ledger lock poisoned");
-                };
+                let ledger = &*state.ledger;
                 matches!(
                     ledger.get(&lease_id),
                     Ok(Some(record))

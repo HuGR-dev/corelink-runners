@@ -12,7 +12,7 @@
 //! - `peak_this_instance` is the SlotMeter peak, labelled "this_instance";
 //! - cross-tenant isolation: one tenant's usage does not appear in another's.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Body;
@@ -57,7 +57,7 @@ fn harness(cap_acme: Option<u32>, cap_beta: Option<u32>) -> Router {
         });
     }
     let store = Arc::new(StaticTokenStore::new(pats));
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
     let state = AppState::new(
         ledger,
         Arc::new(StaticPlans::new(plans)),

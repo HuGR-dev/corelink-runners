@@ -7,7 +7,7 @@
 //! against the FROZEN vocabulary (status AND machine code).
 
 use std::collections::BTreeSet;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Body;
@@ -38,7 +38,7 @@ impl Clock for FixedClock {
 const NOW_MS: u64 = 1_717_000_000_000;
 
 /// Two tenants, two PATs, plans on file for both (acme: 2 slots).
-fn test_harness() -> (Router, Arc<Mutex<dyn LeaseLedger + Send>>) {
+fn test_harness() -> (Router, Arc<dyn LeaseLedger + Send + Sync>) {
     let store = Arc::new(StaticTokenStore::new([
         (
             "pat-acme".to_string(),
@@ -63,7 +63,7 @@ fn test_harness() -> (Router, Arc<Mutex<dyn LeaseLedger + Send>>) {
             repo_allowlist: Vec::new(),
         },
     ]);
-    let ledger: Arc<Mutex<dyn LeaseLedger + Send>> = Arc::new(Mutex::new(InMemoryLedger::new()));
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
     let state = AppState::new(
         ledger.clone(),
         Arc::new(plans),
@@ -238,8 +238,6 @@ async fn acquire_unpinned_image_rejected_400_before_box_contact() {
     // ever reached the ledger, let alone a box…
     assert!(
         ledger
-            .lock()
-            .unwrap()
             .by_tenant(&TenantId::new("acme").unwrap())
             .unwrap()
             .is_empty(),
@@ -290,7 +288,7 @@ async fn status_reflects_ledger_exactly_no_invented_states() {
         "status mirrors the ledger verbatim — exact body, no invented fields"
     );
     {
-        let ledger = ledger.lock().unwrap();
+        let ledger = &*ledger;
         let rec = ledger.get(&lease_id).unwrap().unwrap();
         assert_eq!(rec.state, LeaseState::Wire(RunnerState::Held));
     }
@@ -299,8 +297,6 @@ async fn status_reflects_ledger_exactly_no_invented_states() {
     // status must mirror the new state verbatim — never a stale or invented
     // intermediate.
     ledger
-        .lock()
-        .unwrap()
         .transition(&lease_id, RunnerState::Expired, NOW_MS + 99_000)
         .unwrap();
     let response = app
@@ -354,13 +350,7 @@ async fn cancel_releases_via_legal_matrix() {
         })
     );
     assert_eq!(
-        ledger
-            .lock()
-            .unwrap()
-            .get(&lease_id)
-            .unwrap()
-            .unwrap()
-            .state,
+        ledger.get(&lease_id).unwrap().unwrap().state,
         LeaseState::Wire(RunnerState::Released),
         "the ledger reached Released through the legal matrix"
     );
@@ -384,8 +374,6 @@ async fn cancel_releases_via_legal_matrix() {
     let body = acquire_ok(&app, "pat-acme").await;
     let expired_id = body["lease"]["lease_id"].as_str().unwrap().to_string();
     ledger
-        .lock()
-        .unwrap()
         .transition(&expired_id, RunnerState::Expired, NOW_MS + 99_000)
         .unwrap();
     let response = app
@@ -398,13 +386,7 @@ async fn cancel_releases_via_legal_matrix() {
         .unwrap();
     assert_frozen_error(response, ApiError::Invalid).await;
     assert_eq!(
-        ledger
-            .lock()
-            .unwrap()
-            .get(&expired_id)
-            .unwrap()
-            .unwrap()
-            .state,
+        ledger.get(&expired_id).unwrap().unwrap().state,
         LeaseState::Wire(RunnerState::Expired),
         "terminal state untouched — the matrix was never bypassed"
     );
@@ -431,8 +413,6 @@ async fn acquire_over_cap_429_preventive() {
     // any kind (and a fortiori no box/VM was ever involved).
     assert_eq!(
         ledger
-            .lock()
-            .unwrap()
             .by_tenant(&TenantId::new("acme").unwrap())
             .unwrap()
             .len(),
