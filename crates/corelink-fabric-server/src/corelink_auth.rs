@@ -36,12 +36,14 @@
 //! Everything else is `Err(Unreachable)` — never silently admit or silently
 //! deny on ambiguity.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use corelink_fabric::TenantId;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::{TokenStore, TokenStoreError};
+use crate::introspect_breaker::{CircuitBreaker, IntrospectOutcome, run_introspect};
 
 // ── Transport seam ────────────────────────────────────────────────────────────
 
@@ -217,6 +219,11 @@ pub struct CoreLinkTokenStore<H: IntrospectHttp> {
     /// directly to assert recorded call parameters.
     pub http: H,
     cfg: CoreLinkAuthConfig,
+    /// W3 introspect circuit breaker. Defaults to a standalone breaker from
+    /// [`new`](Self::new); the composition root injects the SHARED breaker (the
+    /// SAME `Arc` given to the plan store) via [`with_breaker`](Self::with_breaker)
+    /// so a brownout observed on either introspect leg trips the one breaker.
+    breaker: Arc<CircuitBreaker>,
 }
 
 /// Bounded number of introspect attempts on TRANSIENT failure (1 initial + 2
@@ -234,9 +241,23 @@ pub(crate) const INTROSPECT_ATTEMPTS: u32 = 3;
 pub const DEFAULT_INTROSPECT_RETRY_BACKOFF: Duration = Duration::from_millis(250);
 
 impl<H: IntrospectHttp> CoreLinkTokenStore<H> {
-    /// Construct the store from a transport and a config.
+    /// Construct the store from a transport and a config, with a STANDALONE
+    /// default circuit breaker. The composition root replaces it with the SHARED
+    /// breaker via [`with_breaker`](Self::with_breaker).
     pub fn new(http: H, cfg: CoreLinkAuthConfig) -> Self {
-        Self { http, cfg }
+        Self {
+            http,
+            cfg,
+            breaker: Arc::new(CircuitBreaker::standalone()),
+        }
+    }
+
+    /// Inject the SHARED circuit breaker (the SAME `Arc` handed to the plan store
+    /// in `server.rs`), so a brownout observed on either introspect leg trips the
+    /// one breaker and fast-fails BOTH legs.
+    pub fn with_breaker(mut self, breaker: Arc<CircuitBreaker>) -> Self {
+        self.breaker = breaker;
+        self
     }
 
     /// Parse an AUTHORITATIVE 200 introspection body into a tenant decision.
@@ -270,64 +291,16 @@ impl<H: IntrospectHttp> TokenStore for CoreLinkTokenStore<H> {
         // header.  Do NOT include the secret or the token in any error/log path.
         let body = serde_json::json!({ "token": token }).to_string();
 
-        // Bounded retry on TRANSIENT unavailability ONLY. AUTHORITATIVE responses
-        // are returned IMMEDIATELY and NEVER retried: a 200 (a real answer, incl.
-        // `valid:false` = unknown token) and any non-200/non-503 (401 = wrong
-        // service secret, other 4xx/5xx) won't change on retry — retrying them
-        // would only delay a deterministic outcome. Only a transport error
-        // (cold egress) or a 503 (backend signals transient-unavailable) is
-        // retried, since THAT is the cold-start blip that must not fail closed.
-        for attempt in 0..INTROSPECT_ATTEMPTS {
-            match self
-                .http
-                .post(&self.cfg.introspect_url, &self.cfg.service_secret, &body)
-            {
-                // Authoritative 200 — return the parsed decision, no retry.
-                Ok(resp) if resp.status == 200 => return Self::parse_introspect_200(&resp.body),
-                // 503 — transient backend unavailability → retry.
-                Ok(resp) if resp.status == 503 => {}
-                // ANY other status (401/other 4xx/5xx/unexpected 2xx) is
-                // authoritative-or-misconfig → fail closed immediately (no retry).
-                Ok(resp) => {
-                    // OBSERVABILITY (symmetry with `plan_of_resolving`): `/readyz`
-                    // and `/v1/leases` both run THIS auth introspect; when both
-                    // 503 "token store unreachable" on a deploy whose binary is
-                    // unchanged, the cause is the endpoint/env/store, and this
-                    // status is the diagnosis (401 = wrong/absent service secret,
-                    // 400 = body rejected, other = endpoint misconfig). Surface
-                    // it. The token + service-secret are NEVER logged.
-                    eprintln!(
-                        "corelink AUTH introspect: authoritative non-200/503 HTTP {} \
-                         on attempt {}/{INTROSPECT_ATTEMPTS} → fail-closed (token store unreachable)",
-                        resp.status,
-                        attempt + 1
-                    );
-                    return Err(TokenStoreError::Unreachable);
-                }
-                // Transport error (cold egress / DNS-not-ready / refused) →
-                // transient → retry. Log the cause (anyhow chain — header values,
-                // thus the secret, are never part of a ureq transport error) so a
-                // persistent unreachable endpoint (wrong URL / down store / no
-                // egress) names itself instead of an opaque 503.
-                Err(e) => {
-                    eprintln!(
-                        "corelink AUTH introspect: transport error on attempt \
-                         {}/{INTROSPECT_ATTEMPTS}: {e:#} → retrying",
-                        attempt + 1
-                    );
-                }
-            }
-            // Back off between attempts (not after the last). `Duration::ZERO`
-            // (tests) skips the wait. Cold egress recovers within a beat.
-            if attempt + 1 < INTROSPECT_ATTEMPTS && !self.cfg.retry_backoff.is_zero() {
-                std::thread::sleep(self.cfg.retry_backoff);
-            }
+        // The breaker-gated retry loop (W3) is the SHARED choke point that also
+        // serves the plan store. AUTHORITATIVE responses (200, or 401/other) are
+        // returned IMMEDIATELY and never retried; only a transport error / 503 is
+        // retried; and while the breaker is OPEN it fast-fails here WITHOUT any
+        // upstream POST or retry (freeing the blocking pool during a brownout).
+        match run_introspect(&self.http, &self.breaker, &self.cfg, &body, "auth") {
+            IntrospectOutcome::Body200(body) => Self::parse_introspect_200(&body),
+            // Every non-200 path (breaker OPEN, transient-exhausted, authoritative
+            // non-200/503) is fail-closed → 503, never a silent admit.
+            IntrospectOutcome::FailClosed => Err(TokenStoreError::Unreachable),
         }
-        // All attempts exhausted on transient failures → fail closed.
-        eprintln!(
-            "corelink AUTH introspect: exhausted {INTROSPECT_ATTEMPTS} attempts on transient \
-             failures → fail-closed (token store unreachable; both /readyz and /v1/leases 503)"
-        );
-        Err(TokenStoreError::Unreachable)
     }
 }

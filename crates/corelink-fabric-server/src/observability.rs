@@ -129,6 +129,14 @@ pub struct Counters {
     /// instead of piling into the blocking pool and browning the singleton out to
     /// 000. A rising rate means the box is at its introspect-round-trip ceiling.
     pub introspect_shed: Counter,
+    /// W3 introspect circuit-breaker OPEN transitions — the count of times a
+    /// sustained corelink-server introspect brownout tripped (or re-tripped) the
+    /// breaker OPEN, converting the per-acquire retry storm into an instant
+    /// fail-closed. Shared as an `Arc` with the breaker (`introspect_breaker.rs`),
+    /// so the breaker increments and this snapshot reads the SAME cell. A rising
+    /// rate means the introspect endpoint is in brownout and the fabric is
+    /// fast-failing acquires (503) rather than pinning the blocking pool.
+    pub introspect_breaker_open: Counter,
     /// §9 trigger idempotency cache hits (a duplicate delivery answered without
     /// re-executing).
     pub trigger_dedup_hits: Counter,
@@ -162,6 +170,7 @@ impl Counters {
             agent_exec_failed: self.agent_exec_failed.get(),
             load_shed: self.load_shed.get(),
             introspect_shed: self.introspect_shed.get(),
+            introspect_breaker_open: self.introspect_breaker_open.get(),
             trigger_dedup_hits: self.trigger_dedup_hits.get(),
             suspend_actions: self.suspend_actions.get(),
         }
@@ -195,6 +204,7 @@ pub struct CounterSnapshot {
     pub agent_exec_failed: u64,
     pub load_shed: u64,
     pub introspect_shed: u64,
+    pub introspect_breaker_open: u64,
     pub trigger_dedup_hits: u64,
     pub suspend_actions: u64,
 }
@@ -304,6 +314,7 @@ mod tests {
             ("agent_exec_failed", &counters.agent_exec_failed),
             ("load_shed", &counters.load_shed),
             ("introspect_shed", &counters.introspect_shed),
+            ("introspect_breaker_open", &counters.introspect_breaker_open),
             ("trigger_dedup_hits", &counters.trigger_dedup_hits),
             ("suspend_actions", &counters.suspend_actions),
         ];

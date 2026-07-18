@@ -34,6 +34,10 @@ pub mod envelope_inject;
 pub mod exec;
 pub mod handlers;
 pub mod ingest_token;
+/// W3 introspect circuit breaker — turn a sustained corelink-server introspect
+/// BROWNOUT into an INSTANT fail-closed (free the blocking pool) instead of a
+/// per-acquire retry storm. Composes with W1 (gate) + W2' (single-flight).
+pub mod introspect_breaker;
 /// W2' introspect single-flight coalescer — collapse a concurrent same-token
 /// introspect burst into ONE upstream round-trip, with zero cache staleness.
 pub(crate) mod introspect_coalesce;
@@ -91,6 +95,10 @@ pub use exec::{
 pub use handlers::close::close_abnormal;
 pub use handlers::envelope::HookRegistry;
 pub use ingest_token::IngestSigner;
+pub use introspect_breaker::{
+    BreakerConfig, CircuitBreaker, DEFAULT_INTROSPECT_BREAKER_COOLDOWN,
+    DEFAULT_INTROSPECT_BREAKER_THRESHOLD,
+};
 pub use runner_broker::{
     BrokerError, JitRunnerConfig, MockBroker, RunnerRegistrationBroker, RunnerScope, RunnerTarget,
 };

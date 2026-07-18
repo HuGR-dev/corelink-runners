@@ -86,13 +86,14 @@
 //! [`plan_of_resolving`]: PlanSource::plan_of_resolving
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use corelink_fabric::compute_meter;
 use corelink_fabric::{TenantId, TenantPlan};
 
 use crate::app::{PlanSource, PlanSourceError};
-use crate::corelink_auth::{CoreLinkAuthConfig, INTROSPECT_ATTEMPTS, IntrospectHttp};
+use crate::corelink_auth::{CoreLinkAuthConfig, IntrospectHttp};
+use crate::introspect_breaker::{CircuitBreaker, IntrospectOutcome, run_introspect};
 
 /// The per-minute rate multiplier applied to `max_concurrency` when the
 /// introspect body carries no explicit `rate_ceiling_per_min`. corelink-server's
@@ -151,6 +152,11 @@ pub struct CoreLinkPlanStore<H: IntrospectHttp> {
     /// directly to assert recorded call parameters.
     pub http: H,
     cfg: CoreLinkAuthConfig,
+    /// W3 introspect circuit breaker. Defaults to a standalone breaker from
+    /// [`new`](Self::new); the composition root injects the SHARED breaker (the
+    /// SAME `Arc` given to the auth token store) via
+    /// [`with_breaker`](Self::with_breaker).
+    breaker: Arc<CircuitBreaker>,
     /// Per-tenant vCPU-h ceiling (in vCPU·ms) resolved from the WITH-token
     /// introspect response, read back by the TOKEN-FREE
     /// [`tenant_ceiling_vcpu_ms`](PlanSource::tenant_ceiling_vcpu_ms) on the same
@@ -185,9 +191,18 @@ impl<H: IntrospectHttp> CoreLinkPlanStore<H> {
         Self {
             http,
             cfg,
+            breaker: Arc::new(CircuitBreaker::standalone()),
             ceilings: Mutex::new(HashMap::new()),
             plans: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Inject the SHARED circuit breaker (the SAME `Arc` handed to the auth token
+    /// store in `server.rs`), so a brownout observed on either introspect leg
+    /// trips the one breaker and fast-fails BOTH legs.
+    pub fn with_breaker(mut self, breaker: Arc<CircuitBreaker>) -> Self {
+        self.breaker = breaker;
+        self
     }
 
     /// Drop any cached plan for `tenant` — called on an uncapped or `valid:false`
@@ -246,66 +261,18 @@ impl<H: IntrospectHttp> PlanSource for CoreLinkPlanStore<H> {
         // include the secret or the token in any error/log path.
         let body = serde_json::json!({ "token": token }).to_string();
 
-        // Bounded retry on TRANSIENT unavailability ONLY (cold egress / 503),
-        // MIRRORING CoreLinkTokenStore::tenant_of (#204). The acquire path does
-        // BOTH the auth introspect (token store, retried) AND this plan introspect;
-        // without the same retry here, a cold-start egress blip that auth survives
-        // would 503 the acquire on the plan call's single attempt — the
-        // endpoint-specific `/v1/leases` cold 503 (`/readyz`, which only auths,
-        // recovered; `/v1/leases`, which also resolves the plan, did not).
-        // AUTHORITATIVE responses (200, 401/other) return immediately — never
-        // retried — so a wrong secret or a real answer is never delayed and the
-        // fail-closed posture holds (a genuinely-down backend still 503s within
-        // the bound).
-        for attempt in 0..INTROSPECT_ATTEMPTS {
-            match self
-                .http
-                .post(&self.cfg.introspect_url, &self.cfg.service_secret, &body)
-            {
-                // Authoritative 200 — parse + return, no retry.
-                Ok(resp) if resp.status == 200 => return self.parse_plan_200(tenant, &resp.body),
-                // 503 — transient backend unavailability → retry.
-                Ok(resp) if resp.status == 503 => {}
-                // ANY other status (401 = wrong service secret, other 4xx/5xx,
-                // unexpected 2xx): authoritative-or-misconfig → fail closed now.
-                Ok(resp) => {
-                    // OBSERVABILITY (cost-killer pinpoint): the auth introspect
-                    // (`tenant_of`) and this plan introspect send the IDENTICAL
-                    // `{"token":…}` body + secret to the SAME endpoint, so when
-                    // `/readyz` (auth-only) is healthy but `/v1/leases` (auth +
-                    // plan) 503s, the failing call is THIS one — and its status
-                    // is the whole diagnosis (e.g. 401 = secret drift, 400 = body
-                    // rejected by `deny_unknown_fields`). Surface it. The token +
-                    // service-secret are NEVER logged (only the status code).
-                    eprintln!(
-                        "corelink plan introspect: authoritative non-200/503 HTTP {} \
-                         on attempt {}/{INTROSPECT_ATTEMPTS} → fail-closed (plan unreachable)",
-                        resp.status,
-                        attempt + 1
-                    );
-                    return Err(PlanSourceError::Unreachable);
-                }
-                // Transport error (cold egress / DNS-not-ready / refused) → retry.
-                // Log the transport-level cause (anyhow chain — header values, and
-                // thus the secret, are never part of a ureq transport error).
-                Err(e) => {
-                    eprintln!(
-                        "corelink plan introspect: transport error on attempt \
-                         {}/{INTROSPECT_ATTEMPTS}: {e:#} → retrying",
-                        attempt + 1
-                    );
-                }
-            }
-            if attempt + 1 < INTROSPECT_ATTEMPTS && !self.cfg.retry_backoff.is_zero() {
-                std::thread::sleep(self.cfg.retry_backoff);
-            }
+        // The breaker-gated retry loop (W3) — the SHARED choke point that also
+        // serves the auth token store. It preserves the #204 cold-start retry
+        // (transient 503 / transport error retried; AUTHORITATIVE 200 or 401/other
+        // returned immediately) AND adds the circuit breaker: while OPEN it
+        // fast-fails here WITHOUT any upstream POST or retry, so a sustained
+        // introspect brownout no longer pins the blocking pool `3×` per plan leg.
+        match run_introspect(&self.http, &self.breaker, &self.cfg, &body, "plan") {
+            IntrospectOutcome::Body200(body) => self.parse_plan_200(tenant, &body),
+            // Breaker OPEN / transient-exhausted / authoritative non-200/503 →
+            // fail closed → 503, never a false 0-slot admit.
+            IntrospectOutcome::FailClosed => Err(PlanSourceError::Unreachable),
         }
-        // All attempts exhausted on transient failures → fail closed.
-        eprintln!(
-            "corelink plan introspect: exhausted {INTROSPECT_ATTEMPTS} attempts on transient \
-             failures → fail-closed (plan unreachable → 503 on /v1/leases)"
-        );
-        Err(PlanSourceError::Unreachable)
     }
 }
 
