@@ -22,8 +22,8 @@
 //! std thread (a bounded `recv_timeout`), so a starved runtime is measured, not
 //! joined.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use axum::Router;

@@ -5,8 +5,8 @@
 //! Internal metering only: no wire-contract change, no billing model change.
 //! The meter lives on `AppState::slot_meter` (an `Arc<Mutex<SlotMeter>>`).
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::Router;
 use axum::body::Body;

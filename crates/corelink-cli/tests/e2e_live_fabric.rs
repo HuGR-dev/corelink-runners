@@ -9,8 +9,8 @@
 //! headers, status mapping, or v2 verification ever drift from the server, this
 //! goes red. Deterministic; needs no live credentials.
 
-use std::sync::mpsc;
 use std::sync::Arc;
+use std::sync::mpsc;
 
 use corelink_cli::{binding, client::Client, run, smoke};
 use corelink_fabric::{InMemoryLedger, LeaseLedger, TenantId, TenantPlan};

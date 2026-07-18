@@ -16,8 +16,8 @@
 //!   (`AppState::with_max_inflight_requests`) sheds excess load with 503 rather
 //!   than queueing unboundedly.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;

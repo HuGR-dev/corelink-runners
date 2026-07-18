@@ -9,8 +9,8 @@
 //! LP-framing implementation), never by calling the production function on
 //! both sides of the assert.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::Router;
 use axum::body::Body;

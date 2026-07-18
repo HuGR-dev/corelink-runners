@@ -22,8 +22,8 @@
 //! All tests are hermetic: no network, no process-environment mutation.
 //! Tick is driven directly via `run_admission_tick` (no `spawn_admission_loop`).
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
