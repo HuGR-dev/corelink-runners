@@ -37,6 +37,48 @@ impl std::fmt::Debug for BearerPat {
     }
 }
 
+/// W4: the auth introspect's captured 200 body, stashed in the request
+/// extensions by [`require_tenant`] so the acquire plan-resolution leg can
+/// RE-PARSE it instead of firing a SECOND introspect round-trip to the same
+/// endpoint with the same token. This collapses the two synchronous introspects
+/// per acquire (auth `tenant_of` + plan `plan_of_resolving`, each ~1.9s live)
+/// into ONE — halving acquire latency.
+///
+/// **Per-request only.** It is an axum [`Extension`](axum::Extension) value on
+/// ONE request; there is NO cross-request cache and thus NO added staleness — the
+/// plan leg reads the auth call's FRESH result from the SAME request (W4 reduces
+/// staleness vs. the two-call path, which could observe a revoke between the two
+/// calls). ABSENT (static-auth mode, or any token store that captures no body) ⇒
+/// the plan leg FALLS BACK to its own introspect — never fail-open.
+///
+/// `Arc<str>` so the coalescer + extension clones are cheap. `Debug` is
+/// intentionally NOT derived — the introspect body may carry entitlement data;
+/// the redacting impl keeps it out of `{:?}` output (same audit-lesson discipline
+/// as [`BearerPat`]).
+#[derive(Clone)]
+pub struct CachedIntrospect {
+    /// The raw introspect 200 body the auth leg parsed a valid tenant from.
+    body: Arc<str>,
+}
+
+impl CachedIntrospect {
+    /// Capture a raw introspect 200 body.
+    pub(crate) fn new(body: impl Into<Arc<str>>) -> Self {
+        Self { body: body.into() }
+    }
+
+    /// The captured raw introspect body, for the plan leg to re-parse.
+    pub(crate) fn body(&self) -> &str {
+        &self.body
+    }
+}
+
+impl std::fmt::Debug for CachedIntrospect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CachedIntrospect(***REDACTED***)")
+    }
+}
+
 /// Failure of the token-store seam itself (distinct from "token unknown",
 /// which is `Ok(None)` and a 401).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +105,26 @@ impl std::error::Error for TokenStoreError {}
 pub trait TokenStore {
     /// Resolve `token` to the tenant it authenticates, if any.
     fn tenant_of(&self, token: &str) -> Result<Option<TenantId>, TokenStoreError>;
+
+    /// W4: resolve `token` to its tenant AND capture the raw introspect 200 body,
+    /// so the acquire plan leg can re-parse it WITHOUT a second round-trip to the
+    /// same endpoint with the same token. Returns `(tenant, Some(body))` when the
+    /// backend captured a body (the token-keyed CoreLink store), `(tenant, None)`
+    /// when it captured nothing (static/in-memory — the plan leg falls back to its
+    /// own resolve). `Ok(None)` is still "valid lookup, unknown token" (401);
+    /// `Err(Unreachable)` is still 503 fail-closed.
+    ///
+    /// The DEFAULT delegates to [`tenant_of`](TokenStore::tenant_of) and captures
+    /// NOTHING (`None`), so a backend that does not override is byte-unchanged —
+    /// the plan leg simply takes the fallback introspect path. A backend that CAN
+    /// serve the entitlement off the auth response (`CoreLinkTokenStore`) overrides
+    /// this to capture the body.
+    fn tenant_of_capturing(
+        &self,
+        token: &str,
+    ) -> Result<Option<(TenantId, Option<CachedIntrospect>)>, TokenStoreError> {
+        Ok(self.tenant_of(token)?.map(|tenant| (tenant, None)))
+    }
 }
 
 /// In-memory [`TokenStore`] for tests and local dev — a fixed PAT → tenant
@@ -118,9 +180,11 @@ pub(crate) struct AuthLayerState {
 /// coalesced failure fails EVERY waiter closed, never a hang or a silent admit.
 #[derive(Clone)]
 pub(crate) enum AuthLeg {
-    /// The introspect answered: `Ok(Some)` admits, `Ok(None)` is a 401 unknown
-    /// PAT, `Err(Unreachable)` is a 503 fail-closed (also the panic/cancel fold).
-    Resolved(Result<Option<TenantId>, TokenStoreError>),
+    /// The introspect answered: `Ok(Some((tenant, cached)))` admits (carrying the
+    /// W4-captured introspect body, if any, so the plan leg skips its round-trip),
+    /// `Ok(None)` is a 401 unknown PAT, `Err(Unreachable)` is a 503 fail-closed
+    /// (also the panic/cancel fold).
+    Resolved(Result<Option<(TenantId, Option<CachedIntrospect>)>, TokenStoreError>),
     /// The W1 introspect gate was full → the leader shed BEFORE touching the
     /// blocking pool. Followers of a shed leader also shed (fail-closed 503).
     Shed,
@@ -181,7 +245,12 @@ pub(crate) async fn require_tenant(
                         return AuthLeg::Shed;
                     }
                 };
-                let out = tokio::task::spawn_blocking(move || store.tenant_of(&token)).await;
+                // W4: capture the auth introspect's 200 body so the plan leg can
+                // re-parse it in-request instead of a SECOND round-trip. The
+                // default `tenant_of_capturing` captures nothing (static backend)
+                // → the plan leg falls back; the CoreLink store captures the body.
+                let out =
+                    tokio::task::spawn_blocking(move || store.tenant_of_capturing(&token)).await;
                 drop(permit);
                 match out {
                     Ok(r) => AuthLeg::Resolved(r),
@@ -198,9 +267,16 @@ pub(crate) async fn require_tenant(
         AuthLeg::Shed => return introspect_shed_response(),
     };
     match resolved {
-        Ok(Some(tenant)) => {
+        Ok(Some((tenant, cached))) => {
             req.extensions_mut().insert(BearerPat(token_str));
             req.extensions_mut().insert(tenant);
+            // W4: stash the captured introspect body (if any) so the acquire plan
+            // leg reads the entitlement back from THIS request instead of a second
+            // introspect. Per-request only — dropped with the request; no
+            // cross-request cache, no added staleness.
+            if let Some(cached) = cached {
+                req.extensions_mut().insert(cached);
+            }
             next.run(req).await
         }
         Ok(None) => error_response(ApiError::Unauthorized, "unknown PAT"),

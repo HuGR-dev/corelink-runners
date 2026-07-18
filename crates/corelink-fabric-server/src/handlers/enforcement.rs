@@ -282,6 +282,8 @@ mod tests {
             Extension(acme.clone()),
             Extension(Arc::new(HookRegistry::default())),
             Extension(BearerPat("pat".to_string())),
+            // W4: no auth middleware here → no captured introspect body.
+            None,
             axum::http::HeaderMap::new(),
             Json(req),
         )

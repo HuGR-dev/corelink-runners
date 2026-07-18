@@ -624,6 +624,10 @@ async fn provision_runner(
         Extension(tenant),
         Extension(Arc::clone(&state.registry)),
         Extension(BearerPat(state.cfg.pat.clone())),
+        // W4: the internal autoscaler/webhook path runs no auth middleware, so it
+        // captured no introspect body — `None` ⇒ the plan leg takes its own
+        // introspect (the fallback path, byte-identical to before W4).
+        None,
         // Forward the webhook's request headers: the proxy Worker round-robins
         // /webhooks/github across shards and stamps X-Fabricd-Shard/-Num-Shards, so
         // `acquire_shard_target` mints a lease-id that hashes to the assigned shard
