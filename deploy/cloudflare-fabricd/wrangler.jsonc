@@ -171,7 +171,7 @@
       // the proxy's newly-forwarded envVars take effect (the singleton reads env at
       // boot). Arms FABRIC_CRASH_PROBE_INTERVAL_SECS + (pg-gated)
       // FABRIC_BILLING_EXPORT_INTERVAL_SECS. SUPERSEDES 61fcce2c.
-      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer@sha256:5608d67d83f0a33dc78cb4a3753d48d66a205b9cbbffbd69d63c3f1d774436a4",
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer@sha256:f4ee528fe1c413227e9e74e4316dcbcb4019e6a188505a956070a71713cff5d3",
       // HTTP control plane. Bumped standard-1 → standard-2 (2026-07-07 acquire-storm
       // hardening): the single-flight singleton must keep /v1/health + lease ops
       // responsive under a burst of box provisions; 2 vCPU gives headroom so a few
