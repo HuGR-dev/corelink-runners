@@ -74,12 +74,20 @@
 //! Everything else is `Err(Unreachable)` — never silently admit, and never let
 //! a backend glitch downgrade availability into a false 0-slot reject.
 //!
-//! ## Known M1 inefficiency
+//! ## W4: ONE introspect per acquire (was two)
 //!
-//! A `corelink`-backed acquire now makes TWO introspect round-trips: one for
+//! A `corelink`-backed acquire used to make TWO introspect round-trips: one for
 //! auth ([`CoreLinkTokenStore::tenant_of`]) and one for the cap (this store's
-//! [`plan_of_resolving`]). A future optimization threads ONE introspect result
-//! through request extensions; until then the two calls are independent.
+//! [`plan_of_resolving`]), both POSTing the SAME `{token}` to the SAME endpoint.
+//! W4 collapses them: the auth leg captures its 200 body into the request
+//! extensions ([`crate::auth::CachedIntrospect`]) and the acquire path calls
+//! [`plan_of_resolving_cached`](PlanSource::plan_of_resolving_cached) to RE-PARSE
+//! that body — NO second round-trip. `parse_plan_200` runs identically, so the
+//! cap + ceiling + caches are byte-identical to the two-call path. An acquire
+//! whose auth leg captured no body (static-auth mode / an internal caller) FALLS
+//! BACK to `plan_of_resolving` (its own round-trip) — never fail-open.
+//!
+//! [`plan_of_resolving_cached`]: PlanSource::plan_of_resolving_cached
 //!
 //! [`CoreLinkTokenStore`]: crate::corelink_auth::CoreLinkTokenStore
 //! [`CoreLinkTokenStore::tenant_of`]: crate::corelink_auth::CoreLinkTokenStore
@@ -272,6 +280,26 @@ impl<H: IntrospectHttp> PlanSource for CoreLinkPlanStore<H> {
             // Breaker OPEN / transient-exhausted / authoritative non-200/503 →
             // fail closed → 503, never a false 0-slot admit.
             IntrospectOutcome::FailClosed => Err(PlanSourceError::Unreachable),
+        }
+    }
+
+    /// W4: when the auth leg already fetched the introspect 200 from the SAME
+    /// endpoint with the SAME token, RE-PARSE that captured body instead of a
+    /// second round-trip. `parse_plan_200` populates the ceiling + plan caches
+    /// IDENTICALLY to the HTTP path, so the token-free `tenant_ceiling_vcpu_ms` +
+    /// `plan_of` read back the SAME values and the admit is byte-identical — but
+    /// with ONE introspect per acquire, not two. ABSENT (`None`) ⇒ fall back to the
+    /// normal `plan_of_resolving` round-trip (an internal/non-CoreLink caller, or a
+    /// path that captured no body) — never fail-open.
+    fn plan_of_resolving_cached(
+        &self,
+        tenant: &TenantId,
+        token: &str,
+        cached: Option<&crate::auth::CachedIntrospect>,
+    ) -> Result<Option<TenantPlan>, PlanSourceError> {
+        match cached {
+            Some(c) => self.parse_plan_200(tenant, c.body()),
+            None => self.plan_of_resolving(tenant, token),
         }
     }
 }

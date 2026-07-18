@@ -142,6 +142,29 @@ pub trait PlanSource: Send + Sync {
         Ok(self.plan_of(tenant))
     }
 
+    /// W4: resolve the plan PREFERRING a pre-fetched introspect body captured by
+    /// the auth leg of THIS request, so a token-keyed backend makes NO second
+    /// introspect round-trip. `cached` is `Some` iff the auth middleware captured
+    /// the introspect 200 for this same token (CoreLink mode); a token-keyed
+    /// backend re-parses it — populating its per-tenant caches (cap, rate,
+    /// vCPU-h ceiling) IDENTICALLY to the round-trip path, so `plan_of` +
+    /// [`tenant_ceiling_vcpu_ms`](PlanSource::tenant_ceiling_vcpu_ms) read back the
+    /// SAME values and the admit decision is byte-identical. `None` (static
+    /// backend, internal caller, or no captured body) ⇒ FALL BACK to
+    /// [`plan_of_resolving`](PlanSource::plan_of_resolving) (a fresh introspect /
+    /// local lookup) — never fail-open, never a false no-plan reject.
+    ///
+    /// The DEFAULT ignores `cached` and delegates to `plan_of_resolving`, so a
+    /// backend that does not override is byte-unchanged (the fallback path).
+    fn plan_of_resolving_cached(
+        &self,
+        tenant: &TenantId,
+        token: &str,
+        _cached: Option<&crate::auth::CachedIntrospect>,
+    ) -> Result<Option<TenantPlan>, PlanSourceError> {
+        self.plan_of_resolving(tenant, token)
+    }
+
     /// The tenant's monthly vCPU-h compute ceiling, in vCPU·ms (WP-F: the
     /// acquire-path read that builds the [`ComputeGate`](corelink_fabric::ledger::ComputeGate)).
     ///
@@ -316,6 +339,29 @@ impl PlanSource for CompositePlanSource {
         match self.primary.plan_of_resolving(tenant, token)? {
             Some(plan) => Ok(Some(plan)),
             None => self.secondary.plan_of_resolving(tenant, token),
+        }
+    }
+
+    /// W4: identical primary-then-secondary layering as
+    /// [`plan_of_resolving`](PlanSource::plan_of_resolving), but each arm is given
+    /// the auth-captured introspect body so whichever arm is a token-keyed backend
+    /// (CoreLink) skips its second round-trip. The primary (the live onboarding
+    /// registry) resolves token-free/local, so `cached` is inert there; the
+    /// secondary benefits. Fall-through semantics are byte-identical.
+    fn plan_of_resolving_cached(
+        &self,
+        tenant: &TenantId,
+        token: &str,
+        cached: Option<&crate::auth::CachedIntrospect>,
+    ) -> Result<Option<TenantPlan>, PlanSourceError> {
+        match self
+            .primary
+            .plan_of_resolving_cached(tenant, token, cached)?
+        {
+            Some(plan) => Ok(Some(plan)),
+            None => self
+                .secondary
+                .plan_of_resolving_cached(tenant, token, cached),
         }
     }
 
@@ -1689,7 +1735,35 @@ impl AppState {
         &self,
         tenant: TenantId,
         pat: String,
+        cached: Option<crate::auth::CachedIntrospect>,
     ) -> PlanResolve {
+        // W4: the auth leg (this same request) already fetched the introspect 200
+        // from the SAME endpoint with the SAME token and stashed the body. Re-parse
+        // it INLINE — a pure-CPU JSON parse, NO round-trip. This is the whole point
+        // of W4: ONE introspect per acquire, not two. It deliberately takes NO
+        // introspect-gate permit and does NOT coalesce/offload: there is nothing to
+        // bound (zero upstream calls) and the parse is microseconds, so it must not
+        // be shed by W1's gate under load nor pay a blocking-pool hop. The plan
+        // store populates its caches identically to the round-trip path, so the
+        // admit decision + the token-free ceiling read are byte-identical. A
+        // captured body is an already-validated `valid:true` 200 (auth parsed a
+        // tenant from it), so the parse cannot be `Unreachable`; the fail-closed
+        // arm is retained for total safety.
+        if let Some(cached) = cached.as_ref() {
+            return match self
+                .plans
+                .plan_of_resolving_cached(&tenant, &pat, Some(cached))
+            {
+                Ok(plan) => PlanResolve::Ok(plan),
+                Err(PlanSourceError::Unreachable) => PlanResolve::Unreachable,
+            };
+        }
+
+        // FALLBACK (no captured body — static-auth mode, an internal caller with no
+        // auth middleware, or a token store that captures nothing): the original
+        // gated + coalesced + blocking-offloaded introspect. Byte-identical to the
+        // pre-W4 path.
+        //
         // W2' SINGLE-FLIGHT: coalesce a CONCURRENT burst of same-token plan
         // resolves into ONE upstream introspect. The leader runs the gated
         // offload below; concurrent same-token followers AWAIT its published

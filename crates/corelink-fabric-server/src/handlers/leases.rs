@@ -49,7 +49,7 @@ use corelink_runners_contracts::{RunnerLease, RunnerState};
 
 use crate::admission::AdmissionMode;
 use crate::app::AppState;
-use crate::auth::{BearerPat, error_response};
+use crate::auth::{BearerPat, CachedIntrospect, error_response};
 use crate::handlers::envelope::HookRegistry;
 
 /// A minted-and-validated lease ready to RESERVE then finalize: the lease id,
@@ -259,6 +259,13 @@ pub(crate) async fn acquire(
     Extension(tenant): Extension<TenantId>,
     Extension(registry): Extension<Arc<HookRegistry>>,
     Extension(pat): Extension<BearerPat>,
+    // W4: the auth middleware stashes the introspect 200 body here when a
+    // token-keyed backend captured it (CoreLink mode). Present ⇒ the plan leg
+    // re-parses it (ONE introspect per acquire); absent (`None` — static-auth
+    // mode, an internal caller with no auth middleware) ⇒ the plan leg falls back
+    // to its own introspect. Extracted as `Option<Extension<..>>` so a missing
+    // extension is `None`, never a 500.
+    cached_introspect: Option<Extension<CachedIntrospect>>,
     headers: axum::http::HeaderMap,
     Json(req): Json<AcquireRequest>,
 ) -> Response {
@@ -441,8 +448,12 @@ pub(crate) async fn acquire(
     // BEFORE the blocking-pool offload; `PlanResolve::Shed` means the gate was
     // full and this acquire was shed CLEANLY (503) before any thread was pinned —
     // the same frozen `FailClosed` body + `Retry-After` as the auth-site shed.
+    // W4: thread the auth-captured introspect body (if any) into the plan leg so a
+    // CoreLink-mode acquire makes ONE introspect, not two. `None` ⇒ the fallback
+    // introspect (byte-identical to the pre-W4 path).
+    let cached_introspect = cached_introspect.map(|Extension(c)| c);
     let plan_resolved = state
-        .resolve_plan_offloaded(tenant.clone(), pat.0.clone())
+        .resolve_plan_offloaded(tenant.clone(), pat.0.clone(), cached_introspect)
         .await;
     let plan = match plan_resolved {
         crate::app::PlanResolve::Ok(Some(p)) => p,

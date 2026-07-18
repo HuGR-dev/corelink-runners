@@ -42,7 +42,7 @@ use std::time::Duration;
 use corelink_fabric::TenantId;
 use serde::{Deserialize, Serialize};
 
-use crate::auth::{TokenStore, TokenStoreError};
+use crate::auth::{CachedIntrospect, TokenStore, TokenStoreError};
 use crate::introspect_breaker::{CircuitBreaker, IntrospectOutcome, run_introspect};
 
 // ── Transport seam ────────────────────────────────────────────────────────────
@@ -287,6 +287,21 @@ impl<H: IntrospectHttp> CoreLinkTokenStore<H> {
 
 impl<H: IntrospectHttp> TokenStore for CoreLinkTokenStore<H> {
     fn tenant_of(&self, token: &str) -> Result<Option<TenantId>, TokenStoreError> {
+        // Delegate to the capturing path (the single introspect implementation)
+        // and discard the captured body — the auth-only callers (`/readyz`, etc.)
+        // need just the tenant.
+        Ok(self.tenant_of_capturing(token)?.map(|(tenant, _)| tenant))
+    }
+
+    /// W4: run the introspect ONCE and, on a valid `200`, capture the raw body so
+    /// the acquire plan leg re-parses the SAME entitlement (cap + ceiling) without
+    /// a second round-trip. In production the auth store and the plan store hit the
+    /// SAME endpoint + secret with the SAME token (composition root, `server.rs`),
+    /// so the auth response IS what the plan introspect would fetch.
+    fn tenant_of_capturing(
+        &self,
+        token: &str,
+    ) -> Result<Option<(TenantId, Option<CachedIntrospect>)>, TokenStoreError> {
         // Build the request body — only the PAT goes in; the secret is in the
         // header.  Do NOT include the secret or the token in any error/log path.
         let body = serde_json::json!({ "token": token }).to_string();
@@ -297,7 +312,15 @@ impl<H: IntrospectHttp> TokenStore for CoreLinkTokenStore<H> {
         // retried; and while the breaker is OPEN it fast-fails here WITHOUT any
         // upstream POST or retry (freeing the blocking pool during a brownout).
         match run_introspect(&self.http, &self.breaker, &self.cfg, &body, "auth") {
-            IntrospectOutcome::Body200(body) => Self::parse_introspect_200(&body),
+            IntrospectOutcome::Body200(resp_body) => {
+                // Parse the tenant; only a VALID (`valid:true` + tenant) 200 both
+                // admits AND yields a body worth threading to the plan leg. A
+                // `valid:false` is `Ok(None)` (401, nothing to capture).
+                match Self::parse_introspect_200(&resp_body)? {
+                    Some(tenant) => Ok(Some((tenant, Some(CachedIntrospect::new(resp_body))))),
+                    None => Ok(None),
+                }
+            }
             // Every non-200 path (breaker OPEN, transient-exhausted, authoritative
             // non-200/503) is fail-closed → 503, never a silent admit.
             IntrospectOutcome::FailClosed => Err(TokenStoreError::Unreachable),

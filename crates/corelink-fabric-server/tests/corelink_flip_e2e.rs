@@ -443,12 +443,19 @@ async fn corelink_auth_unreachable_at_http_boundary_is_503() {
 ///
 /// This proves the corelink path is fail-closed for the day-one state rather
 /// than silently admitting (which would be a billing miss AND a cap violation).
+///
+/// W4 NOTE: production has ONE introspect endpoint, so the auth leg and the plan
+/// leg read the SAME body (the plan leg re-parses the auth-captured body — no
+/// second round-trip). The day-one no-entitlement state is therefore `valid:true`
+/// + `tenant_id` (the tenant AUTHENTICATES) but NO `max_concurrency` (no runners
+/// plan) on that ONE body. Both stores are scripted with `valid_no_cap()`
+/// accordingly; the tenant still authenticates (valid + tenant_id), then the plan
+/// resolution yields no cap → 429 over_cap.
 #[tokio::test]
 async fn corelink_empty_entitlement_day_one_rejects_and_does_not_bill() {
-    // Auth: valid tenant.  Plan: valid:true but no max_concurrency.
-    let auth_body = valid_with_cap(5); // auth returns full valid response
-    let plan_body = valid_no_cap(); // plan: no runners entitlement
-    let (router, state) = harness_corelink(&auth_body, &plan_body);
+    // One endpoint → one body: valid:true + tenant_id, but no max_concurrency.
+    let body = valid_no_cap();
+    let (router, state) = harness_corelink(&body, &body);
 
     let resp = router.oneshot(acquire_req_http()).await.unwrap();
 

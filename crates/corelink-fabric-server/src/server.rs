@@ -1157,9 +1157,12 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
     //   derived per-acquire from the introspect response's (provisional)
     //   `max_concurrency` field (WP-CORELINK-PLANSTORE).
     //
-    // Known M1 inefficiency: this means TWO introspect round-trips per acquire
-    // (auth + plan). A future optimization threads one introspect result
-    // through request extensions; today they are independent calls.
+    // W4: the auth leg captures its introspect 200 body into the request
+    // extensions and the plan leg RE-PARSES it (no second round-trip), so a
+    // CoreLink-mode acquire now makes ONE introspect, not two. Both stores are
+    // still wired to the SAME endpoint + secret: the plan store serves the
+    // fallback path (an internal caller with no auth middleware) + the token-free
+    // reads, and is the single source of the cap-parse `parse_plan_200` W4 reuses.
     // WP-C: the static arm now ALSO yields an `AdminHandlerState` carrying the
     // live onboarding registry (the third tuple element). CoreLink mode yields
     // `None` — plans there come from per-acquire introspection, so a local

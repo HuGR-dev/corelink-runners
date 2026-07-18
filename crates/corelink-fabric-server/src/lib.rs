@@ -71,7 +71,7 @@ pub use attestation::{
     build_attestation, result_binding_preimage, result_binding_preimage_v2, sign_result_binding,
     sign_result_binding_v2, verify_execution, verify_execution_v2,
 };
-pub use auth::{BearerPat, StaticTokenStore, TokenStore, TokenStoreError};
+pub use auth::{BearerPat, CachedIntrospect, StaticTokenStore, TokenStore, TokenStoreError};
 pub use cloud_exec::{
     BoxProvisioner, BoxRegistry, EngineLeasedExec, NoBoxProvisioner, NorthflankBoxProvisioner,
     ProbeStatus, cloud_backend_from_env, cloud_executor_from_env,
