@@ -1356,6 +1356,17 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
     // FABRIC_ADMIN_KEY as the tenant-plan admin). Absent ⇒ the suspend routes 404.
     let state = state.with_admin_key(cfg.admin_key.as_deref().map(std::sync::Arc::from));
 
+    // DEV/TEST-ONLY out-of-band cred-ticket mint (POST /v1/test/mint-cred-ticket).
+    // DEFAULT-OFF: `TestMintConfig::from_env` returns None unless FABRIC_TEST_MINT_KEY
+    // is set (non-empty), in which case the route 404s (inert — the prod default).
+    // Boot fails LOUD (the `?`) on a dev-sentinel / too-short key. Never gated on
+    // FABRIC_ADMIN_KEY — a distinct, dedicated arming secret. The FABRIC_PUBLIC_BASE_URL
+    // (returned to the caller as `fabric_endpoint`) is read inside `from_env`.
+    let test_mint =
+        crate::handlers::test_mint::TestMintConfig::from_env(|k| std::env::var(k).ok())?;
+    let test_mint_armed = test_mint.is_some();
+    let state = state.with_test_mint(test_mint);
+
     // OPS boot summary: which operator surfaces are ARMED at this boot. Both are
     // default-off (absent ⇒ 404), and a "dark" ops surface is invisible to a
     // probe by design — so a live-verify found both keys silently unset for a
@@ -1364,13 +1375,15 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
     // logs instead of requiring a `wrangler secret list`. Non-secret, non-tenant.
     eprintln!(
         "ops-surfaces armed at boot: observability={} (GET /internal/v1/status,/occupancy), \
-         admin={} (POST /internal/v1/admin/tenants/*/suspend)",
+         admin={} (POST /internal/v1/admin/tenants/*/suspend), \
+         test-mint={} (DEV/TEST POST /v1/test/mint-cred-ticket)",
         if cfg.observability_key.is_some() {
             "ON"
         } else {
             "off"
         },
         if cfg.admin_key.is_some() { "ON" } else { "off" },
+        if test_mint_armed { "ON" } else { "off" },
     );
 
     // WP-8a: wire the CAS PAT mint from the environment (default-off: both
