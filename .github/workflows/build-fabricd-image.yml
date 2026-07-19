@@ -107,14 +107,29 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           set -euo pipefail
+          IMG="registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/${IMAGE_NAME}"
           OUT="$(npx wrangler containers push "${IMAGE_NAME}:${GITHUB_SHA}" 2>&1 | tee /dev/stderr)"
-          # Extract the pushed registry ref (…@sha256:… — the digest to pin).
+          # Resolve the pushed image's @sha256 DIGEST for an immutable X4 pin, in
+          # order of preference; each step is best-effort and the next covers it.
+          # 1. The push output may already carry the …@sha256:… ref.
           REF="$(printf '%s\n' "${OUT}" | grep -oE 'registry\.cloudflare\.com/[^ ]+@sha256:[0-9a-f]{64}' | head -n1 || true)"
+          # 2. Resolve the just-pushed tag's manifest digest from the registry.
+          #    `wrangler containers push` authenticates docker to the managed
+          #    registry, so `imagetools inspect` can read the manifest here even
+          #    though a cold shell cannot. Any failure ⇒ empty ⇒ fall through.
           if [ -z "${REF}" ]; then
-            echo "::warning::Could not parse an @sha256 digest from the push output." \
-                 "The image was pushed as the tag below; resolve its digest with" \
-                 "'npx wrangler containers info' before pinning."
-            REF="registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/${IMAGE_NAME}:${GITHUB_SHA}"
+            DIGEST="$(docker buildx imagetools inspect "${IMG}:${GITHUB_SHA}" --format '{{ .Manifest.Digest }}' 2>/dev/null || true)"
+            if printf '%s' "${DIGEST}" | grep -qE '^sha256:[0-9a-f]{64}$'; then
+              REF="${IMG}@${DIGEST}"
+              echo "resolved @sha256 digest via imagetools: ${REF}"
+            fi
+          fi
+          # 3. Last resort: pin the immutable git-SHA TAG (CI-pushed, content-derived
+          #    name ⇒ stable) — functional, but re-pin @sha256 once resolvable.
+          if [ -z "${REF}" ]; then
+            echo "::warning::Could not resolve an @sha256 digest (push output + imagetools both empty)." \
+                 "Pinning the git-SHA tag; re-pin @sha256 when resolvable."
+            REF="${IMG}:${GITHUB_SHA}"
           fi
           echo "ref=${REF}" >> "${GITHUB_OUTPUT}"
           echo "fabricd image pushed: ${REF}"
