@@ -1,0 +1,17 @@
+{
+  "cell": "TS5-error-vocab-malformed",
+  "atoms": [
+    "F-3.2"
+  ],
+  "direction": "edge",
+  "grade": "E2",
+  "suite": "TS-2/TS-5·live-probes",
+  "stimulus": "POST https://corelink-fabricd.gmhelmold.workers.dev/v1/leases (authed, malformed JSON body)",
+  "assertion": "malformed input yields a clean 4xx from the DTO layer, never a 5xx or a stack leak",
+  "pass": true,
+  "artifact": {
+    "status": 400,
+    "body": "Failed to parse the request body as JSON: key must be a string at line 1 column 2"
+  },
+  "ts": "2026-07-19T16:28:33.288Z"
+}

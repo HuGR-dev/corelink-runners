@@ -1,0 +1,89 @@
+{
+  "suite": "TS-2/TS-5·live-probes",
+  "runId": "20260719-162828",
+  "ts": "2026-07-19T16:28:33.301Z",
+  "cells": 7,
+  "passed": 7,
+  "records": [
+    {
+      "cell": "TS2-substrate-health",
+      "atoms": [
+        "F-10.3",
+        "F-7.2",
+        "F-6.4"
+      ],
+      "direction": "happy",
+      "grade": "E2",
+      "pass": true,
+      "assertion": "substrate answers 200 (control-plane singleton live)"
+    },
+    {
+      "cell": "TS2-attestation-key",
+      "atoms": [
+        "F-4.10",
+        "F-5.4"
+      ],
+      "direction": "happy",
+      "grade": "E2",
+      "pass": true,
+      "assertion": "200 and serves ed25519 public-key material (result-binding verifiable client-side)"
+    },
+    {
+      "cell": "TS5-auth-fail-closed-nopat",
+      "atoms": [
+        "F-5.1",
+        "F-4.2",
+        "S7.4"
+      ],
+      "direction": "adversarial",
+      "grade": "E2",
+      "pass": true,
+      "assertion": "unauthenticated acquire is rejected 401 (fail-closed), no lease created, no leak"
+    },
+    {
+      "cell": "TS5-auth-fail-closed-badpat",
+      "atoms": [
+        "F-5.1",
+        "F-4.2"
+      ],
+      "direction": "adversarial",
+      "grade": "E2",
+      "pass": true,
+      "assertion": "an invalid bearer is rejected 401 — introspect says no, fail-closed"
+    },
+    {
+      "cell": "TS2-authed-acquire-validation",
+      "atoms": [
+        "F-5.1",
+        "F-8.2",
+        "F-4.1",
+        "F-4.5"
+      ],
+      "direction": "happy",
+      "grade": "E2",
+      "pass": true,
+      "assertion": "authenticated (400 not 401) and server-side image validation rejects the bad digest — no box spawned"
+    },
+    {
+      "cell": "TS5-error-vocab-malformed",
+      "atoms": [
+        "F-3.2"
+      ],
+      "direction": "edge",
+      "grade": "E2",
+      "pass": true,
+      "assertion": "malformed input yields a clean 4xx from the DTO layer, never a 5xx or a stack leak"
+    },
+    {
+      "cell": "TS5-nonleak-sweep",
+      "atoms": [
+        "S7.2",
+        "F-4.2"
+      ],
+      "direction": "adversarial",
+      "grade": "E2",
+      "pass": true,
+      "assertion": "no response body contains a bearer/PAT/private-key/api-key shaped token"
+    }
+  ]
+}
