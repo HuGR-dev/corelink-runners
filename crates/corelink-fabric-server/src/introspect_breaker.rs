@@ -35,12 +35,14 @@
 //!
 //! ## Transient-ONLY (the security invariant — never DoS good tenants)
 //!
-//! ONLY a transport error or an HTTP `503` counts toward the breaker (they are
-//! the brownout signal). An authoritative `401` (wrong service secret) or a `200`
-//! with `valid:false` (a bad/revoked PAT) means the endpoint RESPONDED — it is
-//! NOT in brownout — so it RESETS the breaker, never trips it. A flood of bad
-//! PATs (all `200 valid:false` or `401`) therefore keeps the breaker CLOSED, so
-//! it can never be weaponised to fail-close good tenants.
+//! ONLY a transport error or an HTTP `5xx` (500/502/503/504 + Cloudflare's
+//! 521-524 origin-error codes) counts toward the breaker — a 5xx is a server-side
+//! failure, i.e. the brownout signal, never an auth verdict. An authoritative
+//! `401` (wrong service secret) or a `200` with `valid:false` (a bad/revoked PAT)
+//! means the endpoint RESPONDED with a `< 500` verdict — it is NOT in brownout —
+//! so it RESETS the breaker, never trips it. A flood of bad PATs (all
+//! `200 valid:false` or `401`) therefore keeps the breaker CLOSED, so it can never
+//! be weaponised to fail-close good tenants (they are `< 500`, always authoritative).
 //!
 //! ## Fail-closed preserved
 //!
@@ -76,7 +78,7 @@ pub const DEFAULT_INTROSPECT_BREAKER_COOLDOWN: Duration = Duration::from_millis(
 /// Breaker tuning — both env-configurable with safe defaults.
 #[derive(Debug, Clone, Copy)]
 pub struct BreakerConfig {
-    /// Consecutive TRANSIENT failures (transport error / HTTP 503) that trip the
+    /// Consecutive TRANSIENT failures (transport error / HTTP 5xx) that trip the
     /// breaker OPEN. `0` is coerced to `1` in [`CircuitBreaker::with_clock`] (a
     /// threshold of 0 would open on the first success-adjacent call — degenerate).
     pub threshold: u32,
@@ -212,7 +214,7 @@ impl CircuitBreaker {
     }
 
     /// Record that an introspect CALL exhausted its retries on TRANSIENT failures
-    /// (transport error / 503). Trips the breaker OPEN on the `threshold`-th
+    /// (transport error / HTTP 5xx). Trips the breaker OPEN on the `threshold`-th
     /// consecutive such failure, or re-opens a failed probe.
     pub(crate) fn on_transient_failure(&self) {
         let now = self.now();
@@ -289,8 +291,8 @@ pub(crate) fn run_introspect<H: IntrospectHttp>(
     }
 
     // ── Bounded retry on TRANSIENT unavailability ONLY (unchanged semantics) ──
-    // Authoritative responses (200, or 401/other) return immediately and are
-    // never retried; only a transport error or a 503 is retried.
+    // Authoritative responses (200, or a < 500 verdict like 401) return
+    // immediately and are never retried; a transport error or ANY 5xx is retried.
     for attempt in 0..INTROSPECT_ATTEMPTS {
         match http.post(&cfg.introspect_url, &cfg.service_secret, body) {
             // Authoritative 200 — the endpoint responded → reset the breaker, and
@@ -299,12 +301,19 @@ pub(crate) fn run_introspect<H: IntrospectHttp>(
                 breaker.on_endpoint_responded();
                 return IntrospectOutcome::Body200(resp.body);
             }
-            // 503 — transient backend unavailability → retry.
-            Ok(resp) if resp.status == 503 => {}
-            // Any other status (401 = wrong service secret, other 4xx/5xx,
-            // unexpected 2xx): authoritative-or-misconfig. The endpoint RESPONDED,
-            // so it is NOT in brownout → reset the breaker (a flood of 401s must
-            // never trip it), but fail closed NOW (no retry).
+            // Any 5xx — transient backend unavailability → retry + count toward the
+            // breaker. NOT just 503: `corelink-api` is CF-fronted, so a real
+            // origin brownout / mid-redeploy surfaces 500/502/504 and Cloudflare's
+            // own 521-524 origin-error codes, not a graceful 503. A 5xx is NEVER an
+            // authoritative auth answer (that is a 200-with-verdict or a 4xx), so
+            // treating it as transient is correct — and it lets a sustained non-503
+            // brownout actually trip the breaker instead of resetting it forever.
+            Ok(resp) if resp.status >= 500 => {}
+            // Any other status (401 = wrong service secret, other 4xx, unexpected
+            // 2xx/3xx): authoritative-or-misconfig. The endpoint RESPONDED with a
+            // client-side/auth verdict (< 500), so it is NOT in brownout → reset the
+            // breaker (a flood of 401s / 200-valid:false must never trip it — the
+            // security invariant), but fail closed NOW (no retry).
             Ok(resp) => {
                 breaker.on_endpoint_responded();
                 eprintln!(
@@ -466,5 +475,99 @@ mod tests {
             Gate::Reject,
             "one failure opens a floored-to-1"
         );
+    }
+
+    // ── run_introspect status classification ─────────────────────────────────
+    // The load-bearing fix: a 5xx is transient (retried + trips the breaker), a
+    // < 500 verdict is authoritative (single call, resets the breaker).
+
+    /// A scripted transport that always returns `status`, counting POSTs so a test
+    /// can assert whether the retry loop ran.
+    struct StatusMock {
+        status: u16,
+        calls: AtomicU64,
+    }
+    impl IntrospectHttp for StatusMock {
+        fn post(
+            &self,
+            _url: &str,
+            _secret: &str,
+            _body: &str,
+        ) -> anyhow::Result<crate::corelink_auth::IntrospectResponse> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(crate::corelink_auth::IntrospectResponse {
+                status: self.status,
+                body: String::new(),
+            })
+        }
+    }
+
+    fn auth_cfg_no_backoff() -> CoreLinkAuthConfig {
+        CoreLinkAuthConfig {
+            introspect_url: "http://unused.test/introspect".to_string(),
+            service_secret: "unused-service-secret".to_string(),
+            timeout: Duration::from_millis(10),
+            // ZERO ⇒ the retry loop never sleeps (deterministic, fast test).
+            retry_backoff: Duration::ZERO,
+        }
+    }
+
+    /// Every 5xx (503 AND the CF-brownout codes 500/502/504/521-524) is TRANSIENT:
+    /// it is RETRIED to exhaustion and then trips the breaker. This is the fix — a
+    /// non-503 brownout must not be mistaken for an authoritative answer.
+    #[test]
+    fn fivexx_is_transient_retried_and_trips_the_breaker() {
+        for status in [500u16, 502, 503, 504, 521, 523, 524] {
+            let (cb, _c, _o) = breaker(1, 5000); // threshold 1 → one exhausted call opens
+            let http = StatusMock {
+                status,
+                calls: AtomicU64::new(0),
+            };
+            let out = run_introspect(&http, &cb, &auth_cfg_no_backoff(), "{}", "test");
+            assert!(
+                matches!(out, IntrospectOutcome::FailClosed),
+                "5xx must fail closed (status {status})"
+            );
+            assert_eq!(
+                http.calls.load(Ordering::Relaxed),
+                INTROSPECT_ATTEMPTS as u64,
+                "a 5xx must be RETRIED to exhaustion (status {status})"
+            );
+            assert!(
+                cb.snapshot().0,
+                "sustained 5xx must TRIP the breaker OPEN (status {status})"
+            );
+        }
+    }
+
+    /// A `< 500` response (401 wrong secret, 400, 404) is AUTHORITATIVE: a single
+    /// call, NO retry, and it RESETS the breaker (the security invariant — a flood
+    /// of these can never trip it, so it can't be weaponised against good tenants).
+    #[test]
+    fn sub_500_is_authoritative_not_retried_and_resets() {
+        for status in [400u16, 401, 404, 302] {
+            let (cb, _c, _o) = breaker(3, 5000);
+            cb.on_transient_failure();
+            cb.on_transient_failure(); // consecutive = 2 (one short of the trip)
+            let http = StatusMock {
+                status,
+                calls: AtomicU64::new(0),
+            };
+            let out = run_introspect(&http, &cb, &auth_cfg_no_backoff(), "{}", "test");
+            assert!(
+                matches!(out, IntrospectOutcome::FailClosed),
+                "a non-200 authoritative response fails closed (status {status})"
+            );
+            assert_eq!(
+                http.calls.load(Ordering::Relaxed),
+                1,
+                "a < 500 verdict must NOT be retried (status {status})"
+            );
+            assert_eq!(
+                cb.snapshot(),
+                (false, 0),
+                "an authoritative response RESETS the breaker (status {status})"
+            );
+        }
     }
 }
