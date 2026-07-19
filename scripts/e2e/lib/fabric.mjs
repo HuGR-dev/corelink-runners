@@ -41,7 +41,7 @@ export function tenantPats() {
 }
 
 // A single request. Returns {status, text, json, headers} — the caller asserts BEHAVIOR.
-export async function req(method, path, { pat, body, headers = {} } = {}) {
+export async function req(method, path, { pat, body, headers = {}, timeoutMs = 15000 } = {}) {
   const h = { ...headers };
   if (pat) h.authorization = `Bearer ${pat}`;
   if (body !== undefined) h['content-type'] = 'application/json';
@@ -49,7 +49,7 @@ export async function req(method, path, { pat, body, headers = {} } = {}) {
     method,
     headers: h,
     body: body === undefined ? undefined : JSON.stringify(body),
-    signal: AbortSignal.timeout(15000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   const text = await res.text();
   let json;
@@ -67,6 +67,35 @@ export const DUMMY_ACQUIRE = {
   tmp_root: '/tmp/e2e-probe',
   expiry_ms: 60000,
 };
+
+// A REAL content-pinned image (repo@sha256:<64hex>) that passes the supply-chain floor, so an
+// acquire actually creates a HELD lease — the real-user path. Journeys close what they open.
+export const VALID_IMAGE = 'alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc';
+
+// ── Real-user lease actions (the verbs a user performs) ────────────────────────────────────
+export async function acquire(pat, { image = VALID_IMAGE, netPolicy = 'deny-all', tmpRoot = '/tmp/e2e-journey', expiryMs = 60000 } = {}) {
+  const r = await req('POST', '/v1/leases', { pat, body: { image_digest: image, net_policy: netPolicy, tmp_root: tmpRoot, expiry_ms: expiryMs } });
+  return { status: r.status, leaseId: r.json?.lease?.lease_id ?? null, state: r.json?.lease?.state ?? null, json: r.json, text: r.text };
+}
+export async function getLease(pat, id) {
+  const r = await req('GET', `/v1/leases/${id}`, { pat });
+  return { status: r.status, state: r.json?.state ?? r.json?.lease?.state ?? null, json: r.json, text: r.text };
+}
+export async function listLeases(pat) {
+  const r = await req('GET', '/v1/leases', { pat });
+  return { status: r.status, tenant: r.json?.tenant ?? null, leases: r.json?.leases ?? [], json: r.json };
+}
+export async function closeLease(pat, id, status = 'succeeded') {
+  // The close route expects CloseRequest { status, check_result?, cost_usd_micros? } — a real
+  // client reports the job outcome. A bare POST is 415; a body missing `status` is 422.
+  // Closing a HELD lease runs real teardown (box reclaim) → allow a longer timeout.
+  const r = await req('POST', `/v1/leases/${id}/close`, { pat, body: { status }, timeoutMs: 90000 });
+  return { status: r.status, json: r.json, text: r.text };
+}
+export async function usage(pat) {
+  const r = await req('GET', '/v1/usage', { pat });
+  return { status: r.status, tenant: r.json?.tenant ?? null, cap: r.json?.plan_cap ?? null, activeNow: r.json?.active_now ?? null, json: r.json };
+}
 
 // Assert a captured body carries NO secret-shaped material (G2 non-leak invariant).
 // The `corelink_` alternative is load-bearing: this fabric's real PATs are `corelink_<...>`
