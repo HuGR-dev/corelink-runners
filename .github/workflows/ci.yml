@@ -24,6 +24,17 @@ jobs:
         with:
           fetch-depth: 0
 
+      # G1 · e2e completeness-critic — proves EVERY product atom (55 features + 155
+      # scenarios, parsed live from the ledger) is bound to a validation cell. Zero-dep
+      # `node --test`; placed first so a coverage regression fails in seconds, before the
+      # heavy Rust build. Adding an F-id/S-id to the ledger without a cell turns this red.
+      - uses: actions/setup-node@v4  # node for the critic (matches build-cf-container-images.yml)
+        with:
+          node-version: '22'
+
+      - name: e2e completeness-critic (G1)
+        run: node --test scripts/e2e/completeness.test.mjs
+
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable (pinned)
         with:
           toolchain: "1.96.0"
