@@ -51,6 +51,9 @@ case "$what" in
   journeys)
     echo "── STORY JOURNEYS · real user narratives (create + close REAL leases) ─"
     load_live_env; export E2E_RUN_ID=journeys
+    # Warm the per-tenant plan cache first so cap-asserting journeys are deterministic on a
+    # freshly-rolled container (the cold-cache pre-condition — see the findings doc).
+    node "$here/warm-tenants.mjs"
     node --test "$here"/journeys/*.test.mjs ;;
   ts1|ts3)
     echo "Suite '$what' cells not yet authored (scaffold in place; build wave next)." >&2; exit 3 ;;
