@@ -32,7 +32,10 @@ case "$what" in
   ts2)
     echo "── TS-2 · live-journey (no-spawn behavioral probes) ────────"
     E2E_LIVE=1 node --test "$here/journey/live-probes.test.mjs" ;;
-  ts1|ts3|ts5)
+  ts5)
+    echo "── TS-5 · security-adversarial (gate probes) ───────────────"
+    E2E_LIVE=1 node --test "$here/security/gates.test.mjs" ;;
+  ts1|ts3)
     echo "Suite '$what' cells not yet authored (scaffold in place; build wave next)." >&2; exit 3 ;;
   all)
     run_critic

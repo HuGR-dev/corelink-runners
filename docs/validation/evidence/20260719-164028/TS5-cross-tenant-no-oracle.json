@@ -1,0 +1,18 @@
+{
+  "cell": "TS5-cross-tenant-no-oracle",
+  "atoms": [
+    "F-4.2",
+    "S7.4"
+  ],
+  "direction": "adversarial",
+  "grade": "E2",
+  "suite": "TS-5·security-gates",
+  "stimulus": "GET https://corelink-fabricd.gmhelmold.workers.dev/v1/leases/{foreign-uuid} (f0005 PAT)",
+  "assertion": "reading a lease id outside my tenant is 404 — no cross-tenant existence oracle, isolation holds",
+  "pass": true,
+  "artifact": {
+    "status": 404,
+    "body": "{\"code\":\"not_found\",\"message\":\"no such lease for this tenant\"}"
+  },
+  "ts": "2026-07-19T16:40:31.225Z"
+}
