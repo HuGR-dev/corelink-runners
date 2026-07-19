@@ -23,11 +23,20 @@
 //! 2. The caller MUST present that key — `Authorization: Bearer <key>` OR
 //!    `X-Fabric-Test-Mint-Key` — CONSTANT-TIME compared (reuses the one pinned
 //!    [`constant_time_eq`]); wrong/absent ⇒ `401`.
-//! 3. The lease is minted ONLY for an allowlisted TEST tenant
-//!    (`FABRIC_TEST_MINT_TENANTS`, default [`DEFAULT_TEST_MINT_TENANT`] = the full
-//!    f0005 UUID);
-//!    any other tenant ⇒ `400`. This bounds the blast radius — the endpoint can
-//!    NEVER mint for a real customer tenant.
+//! 3. The CLAIMED tenant must be on the allowlist (`FABRIC_TEST_MINT_TENANTS`,
+//!    default [`DEFAULT_TEST_MINT_TENANT`] = the full f0005 UUID); any other ⇒
+//!    `400`. NOTE the precise scope of this bound: the allowlist gates the
+//!    caller-CLAIMED `tenant` (used for the ledger record + the stashed
+//!    `clw_tenant` LABEL). The ACTUAL scope of the minted CAS PAT is resolved
+//!    SERVER-side from the `installation_id` / `acquiring_pat` the caller supplies
+//!    (`runner_cas_mint`), NOT from the claimed tenant — and `MintedPat` does not
+//!    return the resolved tenant, so this endpoint cannot cross-check them. In
+//!    correct use the acquiring_pat resolves to the claimed (allowlisted) tenant,
+//!    so the stash label is accurate. A caller who supplies a mismatched
+//!    acquiring_pat (a real tenant they ALREADY hold) would get a PAT scoped to
+//!    that real tenant under an f0005 LABEL — no privilege gain (they already held
+//!    it), but the label would mislabel the scope (clw's list_refs would then 401).
+//!    So: the allowlist bounds the LABEL/lease, not provably the PAT's real scope.
 //!
 //! ## Reuses the production mint VERBATIM
 //! The ONLY new thing is this gated entry point + returning the trio to the authed
@@ -303,6 +312,19 @@ pub(crate) async fn mint_cred_ticket(
     };
 
     let now_ms = state.clock.now_ms();
+    // N=1 ASSUMPTION (tracked N>1-flip follow-up). This mints a shard-AGNOSTIC id
+    // (`mint_lease_id`), NOT the shard-targeted `mint_lease_id_for(shard, N)` the
+    // acquire path uses. The stashed cred lives in THIS instance's memory, but the
+    // ledger is shared (pg); at N>1 the Worker hash-routes the redeem
+    // (`/v1/leases/{id}/cas-cred`) by `shard_of(id, N)`, which — for a shard-agnostic
+    // id — can land on a DIFFERENT instance that has the lease Held in pg but no
+    // stash → a spurious 410 on the first legit redemption. This is correct at N=1
+    // (today's singleton, where every shard resolves to the one instance) and is
+    // INERT until the owner-gated RAISE-N flip; at that flip this endpoint must
+    // shard-target its lease id (and the Worker must stamp `X-Fabricd-Shard` on this
+    // route) exactly like acquire, or be treated as N=1-only. Dev/test surface,
+    // off-by-default, so this rides the same N>1 follow-up list as the reaper/list
+    // shard-targeting — not a live-path gap.
     let lease_id = state.mint_lease_id();
     let deadline_ms = now_ms.saturating_add(TEST_MINT_LEASE_TTL_MS);
 
