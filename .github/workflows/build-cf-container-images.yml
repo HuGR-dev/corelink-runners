@@ -99,6 +99,16 @@ jobs:
             --push 2>&1 | tee /dev/stderr)"
           # Extract the pushed registry ref (…@sha256:… if present, else the tag).
           REF="$(printf '%s\n' "${OUT}" | grep -oE 'registry\.cloudflare\.com/[^ ]+@sha256:[0-9a-f]{64}' | head -n1 || true)"
+          # Resolve the pushed tag's @sha256 manifest digest for an immutable X4 pin.
+          # `wrangler containers build --push` authenticates docker to the managed
+          # registry, so `imagetools inspect` can read the manifest here. Best-effort;
+          # falls through to the git-SHA tag exactly as before (never regresses).
+          if [ -z "${REF}" ]; then
+            DIGEST="$(docker buildx imagetools inspect "registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/${IMAGE}:${TAG}" --format '{{ .Manifest.Digest }}' 2>/dev/null || true)"
+            if printf '%s' "${DIGEST}" | grep -qE '^sha256:[0-9a-f]{64}$'; then
+              REF="registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/${IMAGE}@${DIGEST}"
+            fi
+          fi
           if [ -z "${REF}" ]; then
             REF="registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/${IMAGE}:${TAG}"
           fi
@@ -143,6 +153,16 @@ jobs:
             --tag "${IMAGE}:${TAG}" \
             --push 2>&1 | tee /dev/stderr)"
           REF="$(printf '%s\n' "${OUT}" | grep -oE 'registry\.cloudflare\.com/[^ ]+@sha256:[0-9a-f]{64}' | head -n1 || true)"
+          # Resolve the pushed tag's @sha256 manifest digest for an immutable X4 pin.
+          # `wrangler containers build --push` authenticates docker to the managed
+          # registry, so `imagetools inspect` can read the manifest here. Best-effort;
+          # falls through to the git-SHA tag exactly as before (never regresses).
+          if [ -z "${REF}" ]; then
+            DIGEST="$(docker buildx imagetools inspect "registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/${IMAGE}:${TAG}" --format '{{ .Manifest.Digest }}' 2>/dev/null || true)"
+            if printf '%s' "${DIGEST}" | grep -qE '^sha256:[0-9a-f]{64}$'; then
+              REF="registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/${IMAGE}@${DIGEST}"
+            fi
+          fi
           if [ -z "${REF}" ]; then
             REF="registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/${IMAGE}:${TAG}"
           fi
