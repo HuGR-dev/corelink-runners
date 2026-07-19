@@ -1,0 +1,12 @@
+{
+  "cell": "TS2-door-a-spawn",
+  "atoms": ["F-2.1", "F-7.1", "F-5.8", "F-4.3", "F-5.9", "F-6.1", "F-4.1", "F-5.5"],
+  "direction": "happy",
+  "grade": "E3",
+  "suite": "TS-2·door-a",
+  "stimulus": "gh workflow run corelink-smoke.yml (a real runs-on: corelink job)",
+  "assertion": "a corelink-labelled job lands only on a freshly-minted ephemeral cache-warm box; SUCCESS proves webhook -> admit -> spawn -> register -> execute -> teardown end-to-end",
+  "pass": true,
+  "artifact": { "runId": "29696076686", "status": "completed", "conclusion": "success", "url": "https://github.com/HumanGuardrail/corelink-runners/actions/runs/29696076686" },
+  "ts": "2026-07-19T17:04:41Z"
+}
