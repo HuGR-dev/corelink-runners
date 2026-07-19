@@ -166,7 +166,12 @@ impl TestMintConfig {
 /// contract (allowlist-checked server-side against the resolved tenant);
 /// `installation_id` / `acquiring_pat` are the two unforgeable tenant-resolution
 /// inputs the CoreLink runner-mint accepts (installation-map vs PAT introspection).
+// `Serialize` is derived ONLY under `cfg(test)` so the unit tests can build a
+// request body as bytes; production NEVER serializes this input type (it is only
+// ever deserialized off the wire), so the sensitive `acquiring_pat` field can
+// never be serialized out of a prod build.
 #[derive(Clone, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 pub struct TestMintRequest {
     /// The test tenant to mint for (must be on the allowlist). Default: `f0005`.
     #[serde(default)]
@@ -236,21 +241,38 @@ fn presented_key(headers: &HeaderMap) -> String {
 pub(crate) async fn mint_cred_ticket(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<TestMintRequest>,
+    // Raw bytes — NOT `Json<TestMintRequest>`. A `Json` extractor parses the body
+    // BEFORE this handler runs, so a malformed body returns 422 straight from the
+    // extractor — before the arm gate below. That 422 (vs a 404 on a truly
+    // non-existent path) is a weak enumeration oracle: it reveals the route is
+    // registered even when disarmed. `Bytes` never rejects, so steps 1–2 own EVERY
+    // disarmed/unauthed response and the body is parsed only in step 3.
+    body: axum::body::Bytes,
 ) -> Response {
     // 1. GATE: the route is inert unless FABRIC_TEST_MINT_KEY armed the config.
-    //    Absent ⇒ 404, indistinguishable from a non-existent route (no oracle).
+    //    Absent ⇒ 404, indistinguishable from a non-existent route (no oracle) —
+    //    for ANY body, well-formed or not, because this runs before the parse.
     let Some(cfg) = state.test_mint.as_ref() else {
         return err(StatusCode::NOT_FOUND, "no such route");
     };
 
-    // 2. AUTH: constant-time compare the presented key. Wrong/absent ⇒ 401.
+    // 2. AUTH: constant-time compare the presented key. Wrong/absent ⇒ 401 — also
+    //    before the parse, so an unauthenticated caller learns nothing from the
+    //    body-validation path either (no 400/422 body-shape signal pre-auth).
     let presented = presented_key(&headers);
     if !constant_time_eq(cfg.key.as_bytes(), presented.as_bytes()) {
         return err(StatusCode::UNAUTHORIZED, "invalid test-mint key");
     }
 
-    // 3. TENANT ALLOWLIST (blast-radius bound): mint ONLY for an allowlisted test
+    // 3. PARSE the body — reached ONLY on an armed route by an authed caller, so a
+    //    malformed body (400) is never an enumeration/auth oracle for the inert
+    //    surface (steps 1–2 already returned 404/401 for it).
+    let req: TestMintRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(_) => return err(StatusCode::BAD_REQUEST, "invalid request body"),
+    };
+
+    // 4. TENANT ALLOWLIST (blast-radius bound): mint ONLY for an allowlisted test
     //    tenant. Default f0005. Any other tenant ⇒ 400 refuse.
     let tenant_str = req
         .tenant
@@ -446,7 +468,16 @@ mod tests {
     }
 
     async fn call(state: &AppState, headers: HeaderMap, req: TestMintRequest) -> Response {
-        mint_cred_ticket(State(state.clone()), headers, Json(req)).await
+        let body = axum::body::Bytes::from(serde_json::to_vec(&req).unwrap());
+        mint_cred_ticket(State(state.clone()), headers, body).await
+    }
+
+    /// Drive the handler with a RAW body (possibly not valid JSON) — for the
+    /// enumeration-oracle tests that a malformed body must not distinguish the
+    /// disarmed/unauthed surface from a non-existent route.
+    async fn call_raw(state: &AppState, headers: HeaderMap, raw: &[u8]) -> Response {
+        let body = axum::body::Bytes::copy_from_slice(raw);
+        mint_cred_ticket(State(state.clone()), headers, body).await
     }
 
     #[tokio::test]
@@ -480,6 +511,53 @@ mod tests {
         // A real-looking customer tenant is refused — the blast-radius bound.
         assert_eq!(
             call(&state, hdrs(Some(KEY), None), body("acme"))
+                .await
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn disarmed_route_is_404_even_for_a_malformed_body() {
+        // The enumeration-oracle fix: on the DISARMED route the arm gate runs BEFORE
+        // the body is parsed, so a malformed/garbage body is 404 (indistinguishable
+        // from a non-existent path) — NOT a 400/422 that reveals the route exists.
+        let state = armed_state(None, vec![]);
+        // Not even JSON, no key presented.
+        assert_eq!(
+            call_raw(&state, hdrs(None, None), b"}{ not json at all")
+                .await
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        // Empty body, WITH a would-be key — still 404 (disarmed owns every response).
+        assert_eq!(
+            call_raw(&state, hdrs(Some(KEY), None), b"").await.status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn armed_wrong_key_is_401_even_for_a_malformed_body() {
+        // Auth also runs before the parse: a wrong-key caller always gets 401 and
+        // never a body-shape signal (400/422), so the body-validation path is not an
+        // oracle for an unauthenticated prober on the armed route either.
+        let state = armed_state(Some(KEY), vec![F0005.to_string()]);
+        assert_eq!(
+            call_raw(&state, hdrs(Some("wrong"), None), b"}{ not json")
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn armed_correct_key_malformed_body_is_400() {
+        // Only an armed route + an authed caller ever reaches body validation, where
+        // a malformed body is a plain 400 (no longer a pre-gate 422 from the extractor).
+        let state = armed_state(Some(KEY), vec![F0005.to_string()]);
+        assert_eq!(
+            call_raw(&state, hdrs(Some(KEY), None), b"}{ not json")
                 .await
                 .status(),
             StatusCode::BAD_REQUEST
