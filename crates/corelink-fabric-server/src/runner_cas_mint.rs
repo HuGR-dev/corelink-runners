@@ -676,18 +676,16 @@ pub fn cas_pat_mint_from_env(
         // Both absent ⇒ DEFAULT-OFF. Moat off, cold path runs unchanged.
         (None, None) => Ok(None),
 
-        // Both present ⇒ armed — but a dev/default sentinel key must never run
-        // in prod (fail loud rather than mint with a non-secret).
+        // Both present ⇒ armed — but reject a dev/default sentinel OR a trivially
+        // short key with the SAME strength floor every other sensitive secret here
+        // enforces (`reject_weak_secret`: sentinel list + `MIN_SECRET_LEN` = 16 —
+        // the C2c cred secret + the test-mint key both use it). Previously only the
+        // sentinel list was checked inline, so a short non-sentinel key (e.g. a
+        // 3-char value) silently armed the `x-corelink-internal-auth` header that
+        // guards real per-job CAS-PAT minting. Fail loud rather than mint with a
+        // brute-forceable secret.
         (Some(key), Some(url)) => {
-            if DEV_SENTINEL_AUTH_KEYS
-                .iter()
-                .any(|s| s.eq_ignore_ascii_case(&key))
-            {
-                anyhow::bail!(
-                    "{CAS_RUNNER_MINT_AUTH_KEY_ENV} is a dev/default sentinel value; \
-                     production must set a real internal auth key"
-                );
-            }
+            reject_weak_secret(CAS_RUNNER_MINT_AUTH_KEY_ENV, &key)?;
             Ok(Some(std::sync::Arc::new(HttpCasPatMint::new(
                 UreqMint::new(CAS_PAT_MINT_TIMEOUT),
                 url,
@@ -1257,6 +1255,25 @@ mod tests {
         assert!(
             msg.contains(CAS_RUNNER_MINT_AUTH_KEY_ENV) && msg.contains("sentinel"),
             "error must name the auth-key var and flag the sentinel; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn cas_pat_mint_from_env_too_short_key_fails_loud() {
+        // A short NON-sentinel key (not in DEV_SENTINEL_AUTH_KEYS) must ALSO fail
+        // loud now — the mint arm applies the shared `reject_weak_secret` floor
+        // (MIN_SECRET_LEN = 16), so a brute-forceable internal-auth key can never
+        // silently arm the per-job CAS-PAT mint header.
+        let msg = expect_mint_err(
+            cas_pat_mint_from_env(env_get(&[
+                (CAS_RUNNER_MINT_AUTH_KEY_ENV, "x7q"), // 3 chars, not a sentinel
+                (CAS_RUNNER_MINT_URL_ENV, "https://d9.internal.example.com"),
+            ])),
+            "a trivially short internal auth key must fail loud",
+        );
+        assert!(
+            msg.contains(CAS_RUNNER_MINT_AUTH_KEY_ENV) && msg.contains("chars"),
+            "error must name the auth-key var and flag the length; got: {msg}"
         );
     }
 
