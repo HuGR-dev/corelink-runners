@@ -4,11 +4,19 @@
 //! assembles every seam via [`corelink_fabric_server::server::build_app_and_state`], and
 //! serves the axum router on the configured TCP address.
 
-use corelink_fabric_server::server::{build_app_and_state, config_from_env};
+use corelink_fabric_server::server::{
+    boot_introspect_selfcheck, build_app_and_state, config_from_env,
+};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cfg = config_from_env(|k| std::env::var(k).ok())?;
+
+    // BOOT SELF-CHECK (2026-07-19 key-drift hardening): validate the introspect KEY against the
+    // endpoint before we serve. A rejected key ABORTS boot (loud crash-loop) instead of silently
+    // fail-closing every authenticated request. No-op for the static backend; a transient upstream
+    // only warns. See `server::boot_introspect_selfcheck`.
+    boot_introspect_selfcheck(&cfg)?;
 
     let (app, state) = build_app_and_state(&cfg)?;
     let reaper_cfg =

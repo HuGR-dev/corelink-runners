@@ -1061,6 +1061,143 @@ fn validate_mint_arm(
     Ok(())
 }
 
+/// Outcome of the boot-time introspect self-check.
+#[derive(Debug, PartialEq, Eq)]
+enum BootCheck {
+    /// The key was accepted (HTTP 2xx — even `{"valid":false}` for a dummy token). Proceed.
+    KeyOk,
+    /// A 5xx or a transport error — a TRANSIENT upstream brownout, NOT a key verdict. Warn +
+    /// proceed (the breaker + per-request fail-closed handle it; never boot-loop on a transient).
+    Transient,
+    /// A `<500` non-2xx (e.g. 401/403) — the service key is rejected or the URL is wrong.
+    KeyRejected(u16),
+}
+
+/// Pure classifier for the boot introspect probe. `None` = transport error (DNS/connect/timeout).
+/// Mirrors the breaker's split: 5xx = transient (brownout), `<500` non-2xx = authoritative.
+fn classify_introspect_bootcheck(status: Option<u16>) -> BootCheck {
+    match status {
+        Some(code) if (200..300).contains(&code) => BootCheck::KeyOk,
+        Some(code) if code >= 500 => BootCheck::Transient,
+        Some(code) => BootCheck::KeyRejected(code),
+        None => BootCheck::Transient,
+    }
+}
+
+/// BOOT SELF-CHECK — turn the silent key-drift outage (2026-07-19) into a LOUD boot failure.
+///
+/// The incident: `FABRIC_INTROSPECT_AUTH_KEY` drifted stale, so introspect 401'd and the fabric
+/// fail-closed ALL auth — SILENTLY (`/health` stayed 200). This validates the introspect KEY at
+/// boot and refuses to serve with a known-broken key, so a drifted secret is an obvious boot crash,
+/// not a 30-minute misdiagnosis.
+///
+/// Per the server-TL refinement: the gate is the KEY (`X-Corelink-Internal-Auth`); a token's
+/// validity is only the response body. So a DUMMY token suffices — 200 (even `{"valid":false}`) ⇒
+/// key accepted; a `<500` non-2xx ⇒ key rejected. No sentinel PAT to keep alive. A 5xx/transport
+/// error is a transient upstream brownout (NOT a key problem) → warn + proceed (never boot-loop).
+///
+/// Default: a rejected key ABORTS boot. `FABRIC_INTROSPECT_BOOTCHECK=warn` downgrades to log-only.
+/// No-op under `FABRIC_AUTH_BACKEND=static` (no introspect to check).
+pub fn boot_introspect_selfcheck(cfg: &ServerConfig) -> anyhow::Result<()> {
+    let AuthBackend::CoreLink(auth) = &cfg.auth_backend else {
+        return Ok(());
+    };
+    use crate::corelink_auth::{IntrospectHttp, UreqIntrospect};
+    let warn_only = std::env::var("FABRIC_INTROSPECT_BOOTCHECK")
+        .map(|v| v.trim().eq_ignore_ascii_case("warn"))
+        .unwrap_or(false);
+    let probe = UreqIntrospect::new(auth.timeout);
+    let dummy = serde_json::json!({ "token": "boot-selfcheck-not-a-real-pat" }).to_string();
+    let status = match probe.post(&auth.introspect_url, &auth.service_secret, &dummy) {
+        Ok(resp) => Some(resp.status),
+        Err(_) => None, // transport error → transient
+    };
+    match classify_introspect_bootcheck(status) {
+        BootCheck::KeyOk => {
+            eprintln!(
+                "[boot] introspect key VALIDATED (HTTP 200) at {} — auth path ready",
+                auth.introspect_url
+            );
+            Ok(())
+        }
+        BootCheck::Transient => {
+            let what =
+                status.map_or_else(|| "transport error".to_string(), |c| format!("HTTP {c}"));
+            eprintln!(
+                "[boot] WARN: introspect upstream transient at boot ({what} at {}) — starting anyway; \
+                 the breaker guards it and auth fail-closes per-request until it recovers",
+                auth.introspect_url
+            );
+            Ok(())
+        }
+        BootCheck::KeyRejected(code) => {
+            if warn_only {
+                eprintln!(
+                    "[boot] WARN (FABRIC_INTROSPECT_BOOTCHECK=warn): introspect probe returned HTTP {code} \
+                     (expected 200) at {} — FABRIC_INTROSPECT_AUTH_KEY rejected or CORELINK_INTROSPECT_URL \
+                     wrong. Proceeding anyway; auth will fail-closed.",
+                    auth.introspect_url
+                );
+                Ok(())
+            } else {
+                eprintln!(
+                    "[boot] FATAL: introspect probe returned HTTP {code} (expected 200) at {} — \
+                     FABRIC_INTROSPECT_AUTH_KEY is rejected or CORELINK_INTROSPECT_URL is wrong (the \
+                     2026-07-19 key-drift class); every authenticated request would silently fail-closed. \
+                     Refusing to boot. Re-set the correct secret and roll, or set \
+                     FABRIC_INTROSPECT_BOOTCHECK=warn to override.",
+                    auth.introspect_url
+                );
+                anyhow::bail!(
+                    "introspect key rejected at boot (HTTP {code}) — refusing to serve broken auth"
+                )
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod boot_selfcheck_tests {
+    use super::{BootCheck, classify_introspect_bootcheck};
+
+    #[test]
+    fn key_ok_on_2xx() {
+        // A dummy token past the KEY gate returns 200 {"valid":false} — key accepted.
+        assert_eq!(classify_introspect_bootcheck(Some(200)), BootCheck::KeyOk);
+        assert_eq!(classify_introspect_bootcheck(Some(204)), BootCheck::KeyOk);
+    }
+
+    #[test]
+    fn key_rejected_on_sub_500_non_2xx() {
+        // 401 is EXACTLY the key-drift signal; 403/404 are also authoritative misconfig.
+        assert_eq!(
+            classify_introspect_bootcheck(Some(401)),
+            BootCheck::KeyRejected(401)
+        );
+        assert_eq!(
+            classify_introspect_bootcheck(Some(403)),
+            BootCheck::KeyRejected(403)
+        );
+        assert_eq!(
+            classify_introspect_bootcheck(Some(404)),
+            BootCheck::KeyRejected(404)
+        );
+    }
+
+    #[test]
+    fn transient_on_5xx_and_transport_error_never_boot_loops() {
+        // A brownout is NOT a key verdict — must not crash boot.
+        for c in [500u16, 502, 503, 504, 521, 523, 524] {
+            assert_eq!(
+                classify_introspect_bootcheck(Some(c)),
+                BootCheck::Transient,
+                "HTTP {c}"
+            );
+        }
+        assert_eq!(classify_introspect_bootcheck(None), BootCheck::Transient); // transport error
+    }
+}
+
 pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, crate::AppState)> {
     let registry = BoxRegistry::new();
 
