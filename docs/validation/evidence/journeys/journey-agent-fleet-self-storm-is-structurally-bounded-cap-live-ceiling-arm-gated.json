@@ -1,0 +1,61 @@
+{
+  "journey": "Agent fleet self-storm is structurally bounded (cap LIVE, ceiling arm-gated)",
+  "sid": [
+    "S4.5"
+  ],
+  "persona": "P4 agent-fleet operator",
+  "atoms": [
+    "F-1.6",
+    "F-5.2"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 5,
+  "narrative": [
+    {
+      "step": "read the fleet tenant's cap live",
+      "ok": true,
+      "assertion": "fleet tenant cap=2, active=0",
+      "artifact": {
+        "cap": 2,
+        "activeNow": 0
+      }
+    },
+    {
+      "step": "the runaway fleet fills every slot up to the cap",
+      "ok": true,
+      "assertion": "filled 2/2 slots to the cap (the fleet spends its OWN N)",
+      "artifact": {
+        "held": 2,
+        "want": 2
+      }
+    },
+    {
+      "step": "the NEXT spawn — the runaway (cap+1)th — is refused 429, no box (bounded from its own side)",
+      "ok": true,
+      "assertion": "(cap+1)th spawn → 429 over_cap, no lease (reserve-before-provision; loss-impossible)",
+      "artifact": {
+        "status": 429
+      }
+    },
+    {
+      "step": "releasing one slot lets the fleet acquire again (the wall is dynamic, not a lockout)",
+      "ok": true,
+      "assertion": "freed a slot (200) → next spawn admits lease-79ad86aa-4256-47e8-95a1-74ad1f57bad5 (slot recycled)",
+      "artifact": {
+        "closeStatus": 200,
+        "acquireStatus": 200
+      }
+    },
+    {
+      "step": "records the honest gap — the vCPU-h ceiling + mining-detection/suspend are arm-gated",
+      "ok": true,
+      "assertion": "the concurrency cap bounds the storm LIVE; the vCPU-h burn ceiling (S5.3.2) + sustained-pin/mining detection + durable suspend (S7.7) are arm-gated (owner-configured)",
+      "artifact": {
+        "ceiling": "arm-gated (owner)",
+        "mining": "arm-gated"
+      }
+    }
+  ],
+  "ts": "2026-07-19T22:42:40.164Z"
+}

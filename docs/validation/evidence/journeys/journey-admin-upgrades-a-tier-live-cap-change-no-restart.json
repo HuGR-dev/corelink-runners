@@ -1,0 +1,51 @@
+{
+  "journey": "Admin upgrades a tier (live cap change, no restart)",
+  "sid": [
+    "S13.1"
+  ],
+  "persona": "P13 account admin",
+  "atoms": [
+    "F-1.5",
+    "F-5.11"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 4,
+  "narrative": [
+    {
+      "step": "the \"before\" tier is a real, live plan (Pro = 10 lanes)",
+      "ok": true,
+      "assertion": "before: Pro plan_cap=10 lanes (live)",
+      "artifact": {
+        "cap": 10
+      }
+    },
+    {
+      "step": "the \"after\" tier is ALSO a real, live plan with bigger numbers (Enterprise = 100 lanes)",
+      "ok": true,
+      "assertion": "after: Enterprise plan_cap=100 > Pro 10 — same fabric, bigger caps",
+      "artifact": {
+        "after": 100,
+        "before": 10
+      }
+    },
+    {
+      "step": "an in-flight lease keeps running (an upgrade is a cap change, not a box migration)",
+      "ok": true,
+      "assertion": "in-flight lease lease-53fb3b26-0c22-45ec-9377-73ee52c47f75 stays HELD (no re-provision on a cap change)",
+      "artifact": {
+        "status": 200,
+        "state": "held"
+      }
+    },
+    {
+      "step": "records the residual: the Stripe self-serve tier FLIP is owner-gated",
+      "ok": true,
+      "assertion": "both tiers are live plans; MOVING a tenant between them (self-serve) is owner-gated",
+      "artifact": {
+        "tierFlip": "GA owner-gated (Stripe); admin-registry live-update proven server-side (S5.1.1)"
+      }
+    }
+  ],
+  "ts": "2026-07-19T22:30:11.460Z"
+}

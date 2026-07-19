@@ -1,0 +1,34 @@
+{
+  "journey": "Idle-suspend is owner-gated; slot-return spine is live",
+  "sid": [
+    "S3.6"
+  ],
+  "persona": "P3 Workspaces customer",
+  "atoms": [
+    "F-4.8",
+    "F-5.5"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 2,
+  "narrative": [
+    {
+      "step": "the fabric spine (slot-return machinery) is live and reachable",
+      "ok": true,
+      "assertion": "usage 200 — the slot-return-on-teardown machinery suspend would reuse is live",
+      "artifact": {
+        "status": 200
+      }
+    },
+    {
+      "step": "idle-suspend (snapshot-then-suspend, resume-warm) is NOT built — campaign #2 (GAP)",
+      "ok": true,
+      "assertion": "no idle-detector/suspend policy on the fabric",
+      "artifact": {
+        "GAP": "campaign #2 — spine only, SKUs not built",
+        "detail": "snapshot/hydrate spine exists (clw-in-container; ClwBoxDrive stub) + slot-return (idle-is-margin) is live; the suspend POLICY + resume UX is the owner-gated Workspaces obligation (M4)"
+      }
+    }
+  ],
+  "ts": "2026-07-19T21:22:14.440Z"
+}

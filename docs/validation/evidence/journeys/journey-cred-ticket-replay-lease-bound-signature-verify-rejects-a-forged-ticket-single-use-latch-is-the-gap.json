@@ -1,0 +1,46 @@
+{
+  "journey": "Cred-ticket replay — lease-bound signature verify rejects a forged ticket; single-use latch is the gap",
+  "sid": [
+    "S7.11"
+  ],
+  "persona": "P7 attacker",
+  "atoms": [
+    "F-4.2",
+    "F-5.9"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 3,
+  "narrative": [
+    {
+      "step": "POSITIVE CONTROL — a real HELD lease exists (the cred route is genuinely reachable)",
+      "ok": true,
+      "assertion": "lease lease-709b2031-eeae-4524-b385-d06967127fd3 HELD",
+      "artifact": {
+        "status": 200,
+        "leaseId": "lease-709b2031-eeae-4524-b385-d06967127fd3"
+      }
+    },
+    {
+      "step": "ATTACK — a forged ticket presented to the real lease → 401 invalid ticket (signature over lease_id fails)",
+      "ok": true,
+      "assertion": "forged ticket on real lease → 401 (must be 401 — the ticket is bound to the lease_id)",
+      "artifact": {
+        "status": 401,
+        "body": "{\"error\":\"invalid ticket\"}"
+      }
+    },
+    {
+      "step": "ATTACK — the same forged ticket on an UNKNOWN lease → the same 401 (verify precedes lookup: no oracle)",
+      "ok": true,
+      "assertion": "unknown lease → 401; identical to the real-lease 401 → true (no existence oracle)",
+      "artifact": {
+        "status": 401,
+        "identical": true,
+        "gap": "The single-use latch → 410 gone (Some⇒hand-out, None⇒410) fires only AFTER a first legitimate redemption of a REALLY-minted ticket; a forged ticket never reaches the latch.",
+        "reachableFrom": "in-box only — needs the fabric-minted CLW_CRED_TICKET the box redeems once at boot."
+      }
+    }
+  ],
+  "ts": "2026-07-19T21:41:25.195Z"
+}

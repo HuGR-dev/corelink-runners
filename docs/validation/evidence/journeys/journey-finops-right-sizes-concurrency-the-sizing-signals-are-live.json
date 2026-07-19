@@ -1,0 +1,50 @@
+{
+  "journey": "FinOps right-sizes concurrency (the sizing signals are live)",
+  "sid": [
+    "S12.3"
+  ],
+  "persona": "P12 FinOps owner",
+  "atoms": [
+    "F-5.2",
+    "F-5.6"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 3,
+  "narrative": [
+    {
+      "step": "reads headroom — active_now well under plan_cap means N is not the bottleneck",
+      "ok": true,
+      "assertion": "headroom: active_now=0 / plan_cap=10 (sizing signal live)",
+      "artifact": {
+        "active": 0,
+        "cap": 10
+      }
+    },
+    {
+      "step": "reads the wait histogram — the queue-wait signal that distinguishes bursty from steady",
+      "ok": true,
+      "assertion": "/v1/metrics/tenant → p50=0ms p95=0ms count=0 histogram=[0,0,0,0,0,0] (6 buckets)",
+      "artifact": {
+        "status": 200,
+        "histogram": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "step": "records the residual: the tier change itself (up/downgrade) is GA self-serve, owner-gated",
+      "ok": true,
+      "assertion": "the sizing SIGNALS are self-serve + live; acting on them (tier change) is owner-gated",
+      "artifact": {
+        "tierChange": "GA owner-gated (Stripe self-serve, S13.1/S13.2)"
+      }
+    }
+  ],
+  "ts": "2026-07-19T22:29:30.827Z"
+}

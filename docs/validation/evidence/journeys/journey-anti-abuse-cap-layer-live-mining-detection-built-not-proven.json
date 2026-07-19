@@ -1,0 +1,35 @@
+{
+  "journey": "Anti-abuse — cap layer live, mining detection built-not-proven",
+  "sid": [
+    "S5.3.3"
+  ],
+  "persona": "P5 operator",
+  "atoms": [
+    "F-1.6",
+    "F-5.6"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 2,
+  "narrative": [
+    {
+      "step": "the concurrency cap (abuse layer #1) is a real, surfaced bound",
+      "ok": true,
+      "assertion": "plan_cap=10 bounds parallel slots (layer #1 of the flat-model defense)",
+      "artifact": {
+        "status": 200,
+        "cap": 10
+      }
+    },
+    {
+      "step": "record the residual: the vCPU-h ceiling + mining detection are the deeper layers",
+      "ok": true,
+      "assertion": "cap bounds parallel burn; the ceiling + sustained-pin detection are layers #2/#3",
+      "artifact": {
+        "miningDetection": "built-not-proven — sustained-pin signal + durable fabric_suspended_tenants not live-exercisable here",
+        "ceiling": "loss-impossible economic floor (S5.3.2, arm-gated)"
+      }
+    }
+  ],
+  "ts": "2026-07-19T21:47:51.706Z"
+}

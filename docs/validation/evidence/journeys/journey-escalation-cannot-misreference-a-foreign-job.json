@@ -1,0 +1,44 @@
+{
+  "journey": "Escalation cannot misreference a foreign job",
+  "sid": [
+    "S11.5",
+    "S7.4"
+  ],
+  "persona": "P11 support (wrong tenant)",
+  "atoms": [
+    "F-4.10",
+    "F-4.2"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 3,
+  "narrative": [
+    {
+      "step": "tenant A runs a real job (the id genuinely exists)",
+      "ok": true,
+      "assertion": "tenant A holds lease-e3169855-3962-4690-8cc1-b62ec5b57349",
+      "artifact": {
+        "leaseId": "lease-e3169855-3962-4690-8cc1-b62ec5b57349"
+      }
+    },
+    {
+      "step": "positive control: tenant A CAN read its own job for escalation (200 held)",
+      "ok": true,
+      "assertion": "owner reads it: 200 held (id is real + live)",
+      "artifact": {
+        "status": 200,
+        "state": "held"
+      }
+    },
+    {
+      "step": "tenant B pastes A's lease_id into an escalation → GET resolves to 404 (no oracle)",
+      "ok": true,
+      "assertion": "foreign lease_id → 404 (must be 404 — an escalation can't reference another tenant's job)",
+      "artifact": {
+        "status": 404,
+        "body": "{\"code\":\"not_found\",\"message\":\"no such lease for this tenant\"}"
+      }
+    }
+  ],
+  "ts": "2026-07-19T22:35:03.716Z"
+}

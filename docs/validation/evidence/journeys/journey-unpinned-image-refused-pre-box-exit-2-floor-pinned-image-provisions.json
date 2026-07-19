@@ -1,0 +1,47 @@
+{
+  "journey": "Unpinned image → refused pre-box (exit-2 floor), pinned image provisions",
+  "sid": [
+    "S8.1",
+    "S8.4"
+  ],
+  "persona": "P8 power-user",
+  "atoms": [
+    "F-2.3",
+    "F-9.1"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 3,
+  "narrative": [
+    {
+      "step": "an unpinned image ref is rejected 400 — no lease, nothing to leak",
+      "ok": true,
+      "assertion": "unpinned acquire → 400, no lease provisioned (exit-2 before box contact)",
+      "artifact": {
+        "status": 400,
+        "leaseId": null,
+        "GAP": {
+          "exitCode": "the CLI maps this 400 to exit 2; the mapping is client-side"
+        }
+      }
+    },
+    {
+      "step": "POSITIVE CONTROL: a properly pinned image DOES provision a real box",
+      "ok": true,
+      "assertion": "pinned image → lease lease-622993d5-9767-4ab2-895d-a30d21326295 HELD (the reject was the image, not the path)",
+      "artifact": {
+        "status": 200,
+        "leaseId": "lease-622993d5-9767-4ab2-895d-a30d21326295"
+      }
+    },
+    {
+      "step": "closes the pinned lease cleanly (no leak on either path)",
+      "ok": true,
+      "assertion": "close → 200; the refused acquire never held a slot",
+      "artifact": {
+        "status": 200
+      }
+    }
+  ],
+  "ts": "2026-07-19T22:46:14.635Z"
+}

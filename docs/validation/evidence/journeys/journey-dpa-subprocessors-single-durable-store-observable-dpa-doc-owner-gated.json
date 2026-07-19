@@ -1,0 +1,34 @@
+{
+  "journey": "DPA/subprocessors: single durable store observable; DPA doc owner-gated",
+  "sid": [
+    "S10.3"
+  ],
+  "persona": "P10 legal reviewer",
+  "atoms": [
+    "F-6.1"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 2,
+  "narrative": [
+    {
+      "step": "the one Runners-owned durable tenant store is the usage/history record — and it resolves",
+      "ok": true,
+      "assertion": "GET /v1/usage/history → 200 (the SINGLE Runners-owned durable store; no hidden data sink beyond billing_events + inherited cache)",
+      "artifact": {
+        "status": 200,
+        "tenant": "00000000-0000-4000-8000-0000000f0004"
+      }
+    },
+    {
+      "step": "records the DPA residual — the subprocessor set is knowable from ADRs; the DPA doc is legal",
+      "ok": true,
+      "assertion": "technical subprocessor set is knowable from the ADRs; the DPA document itself is owner-gated",
+      "artifact": {
+        "dpaDocument": "owner-gated (legal — not built in this repo)",
+        "subprocessors": "ADR-0008 substrate (Cloudflare primary / Northflank fallback) + Stripe (billing) + CoreLink Cache (R2, consumed not forked)"
+      }
+    }
+  ],
+  "ts": "2026-07-19T21:25:09.317Z"
+}

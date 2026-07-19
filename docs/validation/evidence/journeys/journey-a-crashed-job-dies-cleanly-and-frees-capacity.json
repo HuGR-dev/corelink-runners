@@ -1,0 +1,45 @@
+{
+  "journey": "A crashed job dies cleanly and frees capacity",
+  "sid": [
+    "S1.4.4"
+  ],
+  "persona": "P1 Pro dev",
+  "atoms": [
+    "F-2.1",
+    "F-4.6",
+    "F-5.5"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 3,
+  "narrative": [
+    {
+      "step": "a job is running (with a short expiry as the reaper backstop)",
+      "ok": true,
+      "assertion": "lease lease-067cc504-a320-478f-8b7f-88d0b39edfba HELD",
+      "artifact": {
+        "status": 200,
+        "leaseId": "lease-067cc504-a320-478f-8b7f-88d0b39edfba"
+      }
+    },
+    {
+      "step": "it crashes — closing as FAILED tears the box down cleanly",
+      "ok": true,
+      "assertion": "close {status:'failed'} → 200 (a runaway job dies clean, no wedge)",
+      "artifact": {
+        "status": 200
+      }
+    },
+    {
+      "step": "capacity is freed — the crashed seat is not stranded",
+      "ok": true,
+      "assertion": "lease no longer HELD (status=200, state=released); one bad build didn't wedge the fleet",
+      "artifact": {
+        "status": 200,
+        "state": "released",
+        "gap": "real in-VM OOM-kill / TTL-timeout injection (ADR-0009 microVM envelope) is ⚪ X4-external; the reaper Held→Expired|Crashed path is not directly drivable via /v1"
+      }
+    }
+  ],
+  "ts": "2026-07-19T23:05:44.188Z"
+}

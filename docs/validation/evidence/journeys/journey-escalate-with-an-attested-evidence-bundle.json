@@ -1,0 +1,63 @@
+{
+  "journey": "Escalate with an attested evidence bundle",
+  "sid": [
+    "S11.5"
+  ],
+  "persona": "P11 support/CI dev",
+  "atoms": [
+    "F-4.10",
+    "F-9.4"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 5,
+  "narrative": [
+    {
+      "step": "runs the job whose result they will escalate",
+      "ok": true,
+      "assertion": "lease lease-d447341e-6533-4ae1-aad2-981e5e77ee27 held",
+      "artifact": {
+        "leaseId": "lease-d447341e-6533-4ae1-aad2-981e5e77ee27"
+      }
+    },
+    {
+      "step": "bundle part 1: the lease_id is a real, tenant-scoped reference (appears in their list)",
+      "ok": true,
+      "assertion": "lease_id lease-d447341e-6533-4ae1-aad2-981e5e77ee27 is a live reference in GET /v1/leases",
+      "artifact": {
+        "found": true,
+        "count": 178
+      }
+    },
+    {
+      "step": "bundle part 2: the fabric publishes its attestation key (GET /v1/attestation/key)",
+      "ok": true,
+      "assertion": "attestation key published: key_id=faa5b7726ccd2c52 (verifier can check the sigs)",
+      "artifact": {
+        "status": 200,
+        "keyId": "faa5b7726ccd2c52",
+        "pubkeyLen": 44
+      }
+    },
+    {
+      "step": "bundle part 3: closing yields an ATTESTED CloseResponse (attestation.sig + result_binding_sig)",
+      "ok": true,
+      "assertion": "close attested: signed chain + result_binding_sig present (verifiable vs the published key)",
+      "artifact": {
+        "closeStatus": 200,
+        "sigLen": 88,
+        "rbsLen": 88
+      }
+    },
+    {
+      "step": "records the residual GAP: the support process (SLA/channel) is owner-gated",
+      "ok": true,
+      "assertion": "evidence substrate is LIVE + asserted; the support SLA/channel is a GA owner deliverable",
+      "artifact": {
+        "evidenceSubstrate": "attested + asserted",
+        "supportProcess": "owner-gated (GA, not built here)"
+      }
+    }
+  ],
+  "ts": "2026-07-19T22:34:28.625Z"
+}

@@ -1,0 +1,34 @@
+{
+  "journey": "Bad-deploy canary — fail-loud floor live, alert-firing a GAP",
+  "sid": [
+    "S5.4.6"
+  ],
+  "persona": "P5 operator",
+  "atoms": [
+    "F-7.3",
+    "F-10.3"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 2,
+  "narrative": [
+    {
+      "step": "the fabric booted past its guards and serves authed traffic (no silent-cold degrade)",
+      "ok": true,
+      "assertion": "GET /v1/usage → 200 (a silent-cold regression would have failed the boot guard, #332)",
+      "artifact": {
+        "status": 200
+      }
+    },
+    {
+      "step": "record the residual: the canary alert path is not observable from a client probe",
+      "ok": true,
+      "assertion": "the fabric fails LOUD at boot rather than relying on a human noticing slow jobs",
+      "artifact": {
+        "canary": "armed (HEAD f945a1f) — alert-firing not client-observable",
+        "floor": "boot guard #332 + loud-logs #327/#329 turn silent-cold into a loud boot/log failure"
+      }
+    }
+  ],
+  "ts": "2026-07-19T21:48:31.290Z"
+}

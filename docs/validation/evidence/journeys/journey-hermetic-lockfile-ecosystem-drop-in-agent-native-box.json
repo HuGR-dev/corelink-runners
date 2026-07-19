@@ -1,0 +1,29 @@
+{
+  "journey": "hermetic/lockfile ecosystem drop-in (agent-native box)",
+  "sid": [
+    "S1.7.1",
+    "S1.7.2",
+    "S1.7.3"
+  ],
+  "persona": "P1 build-systems dev",
+  "atoms": [
+    "F-4.3",
+    "F-4.7"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 1,
+  "narrative": [
+    {
+      "step": "the unmodified bazel/nix/poetry workflow acquires its box → HELD",
+      "ok": true,
+      "assertion": "lease lease-573f5241-1854-4b60-b3ea-930b17f6eb5b HELD — the unmodified build tool runs on the Actions agent here",
+      "artifact": {
+        "status": 200,
+        "leaseId": "lease-573f5241-1854-4b60-b3ea-930b17f6eb5b",
+        "gap": "the DEEP wins are tracked adjacencies, NOT built: Bazel remote-exec/remote-cache pointed at the CAS; a CAS-backed Nix binary cache hydrating /nix/store paths; a warm poetry wheel/venv cache keyed on poetry.lock. All agent-native + X4-external. A missing daemon/tool fails LOUD (S1.6.3), never memoizes a non-hermetic result"
+      }
+    }
+  ],
+  "ts": "2026-07-19T22:05:04.085Z"
+}

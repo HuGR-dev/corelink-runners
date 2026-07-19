@@ -1,0 +1,35 @@
+{
+  "journey": "Golden-signal counters — fail-closed, obs-key absent",
+  "sid": [
+    "S5.2.1"
+  ],
+  "persona": "P5 operator",
+  "atoms": [
+    "F-7.2",
+    "F-10.1",
+    "F-10.2"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 2,
+  "narrative": [
+    {
+      "step": "our tenant PAT CAN read the public tenant surface (positive control — auth works)",
+      "ok": true,
+      "assertion": "GET /v1/usage → 200 (the PAT authenticates on the public surface)",
+      "artifact": {
+        "status": 200
+      }
+    },
+    {
+      "step": "the SAME PAT cannot read the obs-only counters — separate key, fail-closed",
+      "ok": true,
+      "assertion": "GET /internal/v1/metrics → 404 (obs-read ≠ the tenant PAT; fail-closed)",
+      "artifact": {
+        "status": 404,
+        "internalCounters": "positive-control absent (no internal-auth key)"
+      }
+    }
+  ],
+  "ts": "2026-07-19T21:47:02.984Z"
+}

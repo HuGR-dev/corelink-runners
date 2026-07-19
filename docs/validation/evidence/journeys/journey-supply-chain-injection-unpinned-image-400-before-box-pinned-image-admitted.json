@@ -1,0 +1,34 @@
+{
+  "journey": "Supply-chain injection — unpinned image 400 before box; pinned image admitted",
+  "sid": [
+    "S7.5"
+  ],
+  "persona": "P7 attacker",
+  "atoms": [
+    "F-4.5"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 2,
+  "narrative": [
+    {
+      "step": "POSITIVE CONTROL — a content-pinned image (repo@sha256:…) is admitted → HELD",
+      "ok": true,
+      "assertion": "pinned image → 200 HELD (lease-840002d1-7a41-4fec-81aa-0282fd23eb78)",
+      "artifact": {
+        "status": 200,
+        "leaseId": "lease-840002d1-7a41-4fec-81aa-0282fd23eb78"
+      }
+    },
+    {
+      "step": "ATTACK — an unpinned image (bare sha256, no repo) is rejected 400 BEFORE any spawn",
+      "ok": true,
+      "assertion": "unpinned image → 400 invalid, no box (a fat-fingered tag can never ship unverified)",
+      "artifact": {
+        "status": 400,
+        "leaseId": null
+      }
+    }
+  ],
+  "ts": "2026-07-19T21:37:58.166Z"
+}

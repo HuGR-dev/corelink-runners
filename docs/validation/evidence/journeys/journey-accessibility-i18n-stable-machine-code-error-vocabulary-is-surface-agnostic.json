@@ -1,0 +1,54 @@
+{
+  "journey": "Accessibility/i18n: stable machine-code error vocabulary is surface-agnostic",
+  "sid": [
+    "S17.3"
+  ],
+  "persona": "P10/P17 product owner",
+  "atoms": [
+    "F-3.2"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 4,
+  "narrative": [
+    {
+      "step": "an unauthenticated call returns a STABLE machine code, not English prose (client renders it)",
+      "ok": true,
+      "assertion": "no PAT → 401 {code:\"unauthorized\"} — a stable code the client renders in the user's language/modality",
+      "artifact": {
+        "status": 401,
+        "code": "unauthorized"
+      }
+    },
+    {
+      "step": "an invalid input surfaces the stable \"invalid\" code — same locale-agnostic contract",
+      "ok": true,
+      "assertion": "unpinned image → 400 {code:\"invalid\"}, no lease (machine code, not prose)",
+      "artifact": {
+        "status": 400,
+        "code": "invalid",
+        "leaseId": null
+      }
+    },
+    {
+      "step": "a not-found surfaces the stable \"not_found\" code — the third member of the locale-neutral vocabulary",
+      "ok": true,
+      "assertion": "unknown lease → 404 {code:\"not_found\"} (stable, screen-reader-neutral by construction)",
+      "artifact": {
+        "status": 404,
+        "code": "not_found"
+      }
+    },
+    {
+      "step": "POSITIVE control — an authed valid read returns structured JSON, not an English page",
+      "ok": true,
+      "assertion": "authed GET /v1/usage → 200 structured JSON (machine-first surface — inherently i18n/a11y-friendly); records residual",
+      "artifact": {
+        "status": 200,
+        "consoleA11y": "owner-gated (WCAG surface design for the console/statuspage — P14/S17.1)",
+        "i18n": "rendered client-side from stable codes; API hard-codes no locale"
+      }
+    }
+  ],
+  "ts": "2026-07-19T21:25:17.781Z"
+}

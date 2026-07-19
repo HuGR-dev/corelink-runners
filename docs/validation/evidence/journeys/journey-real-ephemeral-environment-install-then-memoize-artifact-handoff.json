@@ -1,0 +1,36 @@
+{
+  "journey": "real ephemeral environment: install-then-memoize + artifact handoff",
+  "sid": [
+    "S1.6.3",
+    "S1.6.9"
+  ],
+  "persona": "P1 CI engineer",
+  "atoms": [
+    "F-4.3",
+    "F-4.7"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 2,
+  "narrative": [
+    {
+      "step": "the build job acquires a real box with a valid scratch tmp_root → HELD",
+      "ok": true,
+      "assertion": "lease lease-2eb7e074-88d9-4d65-8b11-99f6ef216368 HELD — a real env where setup-*/apt-get install steps run",
+      "artifact": {
+        "status": 200,
+        "leaseId": "lease-2eb7e074-88d9-4d65-8b11-99f6ef216368"
+      }
+    },
+    {
+      "step": "the box tears down (ephemeral) — a downstream job would get its own fresh box",
+      "ok": true,
+      "assertion": "close → 200; the artifact handoff would transit GitHub's store between the two ephemeral runners",
+      "artifact": {
+        "status": 200,
+        "gap": "the install itself + the warm hydrate (a setup-node/rustup fetch already in CAS = a lookup, not a download) is in-box (X4); upload/download-artifact transits the GitHub artifact store (agent-native, zero fabric involvement); loud-fail on a missing tool is agent-native. The fabric own artifacts[path‖digest] is the ATTESTATION binding (S1.5.1), a different mechanism"
+      }
+    }
+  ],
+  "ts": "2026-07-19T22:05:37.338Z"
+}
