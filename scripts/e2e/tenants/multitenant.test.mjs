@@ -22,25 +22,30 @@ async function usage(pat) {
   return { status: r.status, tenant: r.json?.tenant ?? null, cap: r.json?.plan_cap ?? null, raw: r.json };
 }
 
-test('TS6-entitlement-by-tier · plan_cap is resolved per tenant and scales with the tier', { skip: gate }, async () => {
+test('TS6-entitlement-value-by-tier · plan_cap VALUE is surfaced per tenant and scales with tier', { skip: gate }, async () => {
   const [free, pro, ent] = await Promise.all([usage(P.free), usage(P.pro), usage(P.enterprise)]);
   const ok = [free, pro, ent].every((u) => u.status === 200 && Number.isInteger(u.cap) && u.cap > 0)
     && free.cap < pro.cap && pro.cap < ent.cap;
-  ev.record({ cell: 'TS6-entitlement-by-tier', atoms: ['F-1.5', 'F-1.3', 'F-5.2'], direction: 'happy',
+  // Audit F6: this proves the plan_cap VALUE is server-resolved per tenant and monotonic —
+  // it does NOT prove the cap is ENFORCED at admission. Enforcement (acquire cap+1 → reject)
+  // is a separate TS-3 stress cell. Do not conflate "value surfaced" with "entitlement enforced".
+  ev.record({ cell: 'TS6-entitlement-value-by-tier', atoms: ['F-1.5', 'F-1.3', 'F-5.2'], direction: 'happy',
     grade: 'E2', stimulus: `GET ${BASE}/v1/usage under Free/Pro/Enterprise PATs`,
-    assertion: 'entitlement (plan_cap) is server-resolved per tenant from introspect and increases monotonically with the tier',
-    pass: ok, artifact: { free: free.cap, pro: pro.cap, enterprise: ent.cap } });
+    assertion: 'the plan_cap VALUE is server-resolved per tenant from introspect and increases monotonically with tier. ENFORCEMENT at admission is proven separately (TS-3 stress), not here',
+    pass: ok, artifact: { free: free.cap, pro: pro.cap, enterprise: ent.cap, enforcement: 'tested separately in TS-3' } });
   assert.ok(free.cap < pro.cap && pro.cap < ent.cap, `caps not monotonic: ${free.cap} < ${pro.cap} < ${ent.cap}`);
 });
 
-test('TS6-tenant-scoping · each PAT sees ONLY its own tenant (cross-tenant isolation, 2 real tenants)', { skip: gate }, async () => {
+test('TS6-tenant-identity-distinct · A and B PATs resolve to distinct tenants; API has no cross-tenant selector', { skip: gate }, async () => {
   const [a, b] = await Promise.all([usage(P.pro), usage(P.tenantB)]);
-  // Tenant A's PAT resolves to tenant A; tenant B's to tenant B; they are DIFFERENT — no PAT
-  // can read another tenant's usage. Two real tenants, not a random uuid.
+  // Audit F3: distinct tenant ids prove distinct IDENTITY MAPPING, not access-control. The
+  // isolation here is STRUCTURAL: /v1/usage resolves the tenant from the PAT and exposes no
+  // "tenant=" selector, so a PAT cannot even address another tenant's data. (Read-isolation of
+  // an EXISTING foreign resource is the spawn-batch cross-tenant cell.)
   const ok = a.status === 200 && b.status === 200 && a.tenant && b.tenant && a.tenant !== b.tenant;
-  ev.record({ cell: 'TS6-tenant-scoping', atoms: ['S7.4', 'F-4.2', 'S14.4'], direction: 'adversarial',
+  ev.record({ cell: 'TS6-tenant-identity-distinct', atoms: ['S7.4', 'F-4.2', 'S14.4'], direction: 'adversarial',
     grade: 'E2', stimulus: `GET ${BASE}/v1/usage under tenant-A vs tenant-B PATs`,
-    assertion: 'each PAT is scoped to its own tenant; A and B resolve to distinct tenant ids — no cross-tenant read',
+    assertion: 'two real tenant PATs resolve to distinct tenant ids; the read API takes no cross-tenant selector (tenant derived from the PAT). Foreign-resource read-isolation is a separate spawn-batch cell',
     pass: ok, artifact: { tenantA: a.tenant, tenantB: b.tenant, distinct: a.tenant !== b.tenant } });
   assert.notEqual(a.tenant, b.tenant);
 });
@@ -52,11 +57,15 @@ test('TS2-usage-api-reads · usage · leases · metrics/tenant are 200 and tenan
   const t = u.json?.tenant;
   const ok = [u, l, m].every((r) => r.status === 200)
     && l.json?.tenant === t && m.json?.tenant === t && Array.isArray(l.json?.leases);
+  // Audit F7: same PAT → same tenant id is guaranteed by construction, so this is NOT a
+  // leakage proof (and the result sets are empty here). Scoped honestly to: the three read
+  // routes are 200 and each echoes the CALLER'S OWN tenant id. Actual mis-scoping (a route
+  // returning another tenant's rows) needs a tenant with live data — spawn batch.
   ev.record({ cell: 'TS2-usage-api-reads', atoms: ['S14.1', 'S14.3', 'S14.5', 'F-5.1'], direction: 'happy',
     grade: 'E2', stimulus: `GET ${BASE}/v1/{usage,leases,metrics/tenant} (Pro PAT)`,
-    assertion: 'all three read routes are 200 and every body is scoped to the same one tenant (no leakage across routes)',
+    assertion: 'the three read routes each return 200 and echo the caller\'s own tenant id. NOT a cross-route leakage proof (single PAT, empty result sets) — mis-scoping needs live data (spawn batch)',
     pass: ok, artifact: { tenant: t, usageCap: u.json?.plan_cap, leases: l.json?.leases?.length, metricsCount: m.json?.count } });
-  assert.ok(ok, 'usage/leases/metrics must be 200 and same-tenant scoped');
+  assert.ok(ok, 'usage/leases/metrics must be 200 and echo the caller tenant id');
 });
 
 after(() => {

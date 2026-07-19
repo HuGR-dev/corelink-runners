@@ -1,0 +1,66 @@
+{
+  "suite": "TS-5·security-gates",
+  "runId": "live-ts5",
+  "ts": "2026-07-19T17:20:46.362Z",
+  "cells": 5,
+  "passed": 5,
+  "records": [
+    {
+      "cell": "TS5-internal-gate-fail-closed",
+      "atoms": [
+        "F-5.1",
+        "F-4.2",
+        "S7.4"
+      ],
+      "direction": "adversarial",
+      "grade": "E2",
+      "pass": true,
+      "assertion": "a header-less caller to /internal is rejected 401 (fail-closed). GAP: no positive-control cell (with-key → 200) — the internal-auth key is not in this harness"
+    },
+    {
+      "cell": "TS5-v1-namespace-auth-front",
+      "atoms": [
+        "F-3.2",
+        "F-5.1",
+        "S7.4"
+      ],
+      "direction": "adversarial",
+      "grade": "E2",
+      "pass": true,
+      "assertion": "a fake route and a real route both return 401 with a byte-identical body — no route-existence oracle for the unauthenticated"
+    },
+    {
+      "cell": "TS5-cred-cred-bad-ticket",
+      "atoms": [
+        "F-5.9",
+        "S7.11"
+      ],
+      "direction": "adversarial",
+      "grade": "E2",
+      "pass": true,
+      "assertion": "the C2c redemption endpoint validates the ticket — a forged ticket is rejected 401 \"invalid ticket\", no CAS-PAT minted"
+    },
+    {
+      "cell": "TS5-unknown-lease-404",
+      "atoms": [
+        "F-4.2",
+        "S7.4"
+      ],
+      "direction": "adversarial",
+      "grade": "E2",
+      "pass": true,
+      "assertion": "an unknown lease id returns 404. GAP: true cross-tenant no-oracle needs a live FOREIGN lease (spawn batch) — not proven by a random uuid"
+    },
+    {
+      "cell": "TS5-gate-nonleak-sweep",
+      "atoms": [
+        "S7.2",
+        "F-4.2"
+      ],
+      "direction": "adversarial",
+      "grade": "E2",
+      "pass": true,
+      "assertion": "no rejection body contains a corelink_-PAT / bearer / private-key / api-key shaped token; >= 5 bodies swept (non-vacuous)"
+    }
+  ]
+}

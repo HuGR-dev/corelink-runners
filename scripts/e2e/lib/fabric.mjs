@@ -69,7 +69,10 @@ export const DUMMY_ACQUIRE = {
 };
 
 // Assert a captured body carries NO secret-shaped material (G2 non-leak invariant).
-const SECRET_RE = /(bearer\s+[a-z0-9._-]{16,})|(pat_[a-z0-9]{12,})|(-----BEGIN)|(sk-[a-z0-9]{16,})/i;
+// The `corelink_` alternative is load-bearing: this fabric's real PATs are `corelink_<...>`
+// (96 chars) — WITHOUT it the sweep would miss a leaked PAT entirely (audit finding F8).
+// Cred-tickets and CAS-PATs share the family; the generic long-token arm is a backstop.
+const SECRET_RE = /(corelink_[a-z0-9]{16,})|(bearer\s+[a-z0-9._-]{16,})|(pat_[a-z0-9]{12,})|(cas[_-]?pat[_-][a-z0-9]{12,})|(-----BEGIN)|(sk-[a-z0-9]{16,})/i;
 export function bodyLeaksSecret(text) {
   return SECRET_RE.test(text || '');
 }

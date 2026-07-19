@@ -1,0 +1,18 @@
+{
+  "cell": "TS5-gate-nonleak-sweep",
+  "atoms": [
+    "S7.2",
+    "F-4.2"
+  ],
+  "direction": "adversarial",
+  "grade": "E2",
+  "suite": "TS-5·security-gates",
+  "stimulus": "sweep every captured gate-rejection body (corelink_/pat_/bearer/key regex)",
+  "assertion": "no rejection body contains a corelink_-PAT / bearer / private-key / api-key shaped token; >= 5 bodies swept (non-vacuous)",
+  "pass": true,
+  "artifact": {
+    "bodiesSwept": 5,
+    "leaks": 0
+  },
+  "ts": "2026-07-19T17:20:46.361Z"
+}
