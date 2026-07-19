@@ -39,10 +39,17 @@ Probed against the live fabric (`corelink-fabricd.gmhelmold.workers.dev`) at rev
 - **Auth fail-closed:** `POST /v1/leases` with no PAT → `401`.
 - **Real authenticated-user power CONFIRMED:** `POST /v1/leases` with the standing f0005 tenant PAT +
   a deliberately-invalid image → `400` (image validation runs *after* auth) — proves the PAT
-  authenticates live. So authenticated **Door-B is fabricable for one real tenant (f0005)**; a *second*
-  tenant + a *external-org* customer remain X4. (Caveat: a *valid* acquire spawns a real box — real
-  cost/side-effect; and the moat test-mint endpoint is currently **disarmed**, so moat-mint cells either
-  re-arm `FABRIC_TEST_MINT_KEY` or ride the Door-A dogfood path.)
+  authenticates live. (Caveat: a *valid* acquire spawns a real box — real cost/side-effect; and the moat
+  test-mint endpoint is currently **disarmed**, so moat-mint cells either re-arm `FABRIC_TEST_MINT_KEY`
+  or ride the Door-A dogfood path.)
+- **MULTI-TENANT UNLOCK (D2 is no longer X4), 2026-07-19:** the CoreLink e2e env (`~/.hugit/secrets/
+  e2e-prod-env.sh`) carries **multiple real tenant/tier PATs** (Free/Solo/Pro/Enterprise + a **second
+  tenant B**), all introspect-valid → all authenticate against fabricd. Proven live (no spawn):
+  **entitlement scales per-tenant** (`plan_cap` Free=1 · TenantB=2 · Pro=10 · Enterprise=100 — the
+  ratified 10× ladder), and **cross-tenant scoping holds** (each PAT resolves to its own distinct
+  tenant id; no PAT reads another's usage). So **D2 multi-tenant + entitlement + the usage-API reads
+  are fabricable E2**, not X4. Residual X4: multi-tenant **billing attribution under concurrent load**
+  (needs a spawn-bearing run) and the **external-org install click**.
 
 ### Disposition — the honest counts (deterministic, by ledger badge)
 Not an estimate — counted from the H3 badges (55 F + 155 S):

@@ -22,6 +22,24 @@ export function loadPat() {
 // Live cells only run when explicitly asked (E2E_LIVE=1) — never in the pure CI gate.
 export const LIVE = process.env.E2E_LIVE === '1';
 
+// The CoreLink multi-tenant e2e PATs (from e2e-prod-env.sh, sourced by run.sh). Each is a
+// real tenant/tier PAT that introspects valid → authenticates against fabricd. Values never
+// logged. Enables D2 (multi-tenant) + entitlement proofs that were previously marked X4.
+export function tenantPats() {
+  const e = process.env;
+  return {
+    free: e.CORELINK_E2E_PAT_FREE || null,
+    solo: e.CORELINK_E2E_PAT_SOLO || null,
+    pro: e.CORELINK_E2E_PAT_PRO || null,
+    enterprise: e.CORELINK_E2E_PAT_ENTERPRISE || null,
+    ro: e.CORELINK_E2E_PAT_RO || null,
+    rw: e.CORELINK_E2E_PAT_RW || null,
+    admin: e.CORELINK_E2E_PAT_ADMIN || null,
+    tenantB: e.CORELINK_E2E_PAT_TENANT_B || null,
+    tenantBAdmin: e.CORELINK_E2E_PAT_TENANT_B_ADMIN || null,
+  };
+}
+
 // A single request. Returns {status, text, json, headers} — the caller asserts BEHAVIOR.
 export async function req(method, path, { pat, body, headers = {} } = {}) {
   const h = { ...headers };

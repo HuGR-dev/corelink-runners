@@ -20,6 +20,13 @@ run_critic() {
   node --test "$here/completeness.test.mjs"
 }
 
+# Live suites need the real tenant PATs. Source the OOB e2e env if present (never printed).
+load_live_env() {
+  local envf="$HOME/.hugit/secrets/e2e-prod-env.sh"
+  if [ -f "$envf" ]; then set +u; . "$envf" >/dev/null 2>&1; set -u; fi
+  export E2E_LIVE=1
+}
+
 case "$what" in
   critic) run_critic ;;
   ts4)
@@ -31,10 +38,13 @@ case "$what" in
     echo "TS-4 chaos cells not yet authored." >&2; exit 3 ;;
   ts2)
     echo "── TS-2 · live-journey (no-spawn behavioral probes) ────────"
-    E2E_LIVE=1 node --test "$here/journey/live-probes.test.mjs" ;;
+    load_live_env; node --test "$here/journey/live-probes.test.mjs" ;;
   ts5)
     echo "── TS-5 · security-adversarial (gate probes) ───────────────"
-    E2E_LIVE=1 node --test "$here/security/gates.test.mjs" ;;
+    load_live_env; node --test "$here/security/gates.test.mjs" ;;
+  ts6)
+    echo "── TS-6 · multi-tenant + entitlement (2 real tenants) ──────"
+    load_live_env; node --test "$here/tenants/multitenant.test.mjs" ;;
   ts1|ts3)
     echo "Suite '$what' cells not yet authored (scaffold in place; build wave next)." >&2; exit 3 ;;
   all)

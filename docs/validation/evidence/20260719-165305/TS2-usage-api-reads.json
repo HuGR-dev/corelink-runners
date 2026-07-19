@@ -1,0 +1,22 @@
+{
+  "cell": "TS2-usage-api-reads",
+  "atoms": [
+    "S14.1",
+    "S14.3",
+    "S14.5",
+    "F-5.1"
+  ],
+  "direction": "happy",
+  "grade": "E2",
+  "suite": "TS-6·multi-tenant",
+  "stimulus": "GET https://corelink-fabricd.gmhelmold.workers.dev/v1/{usage,leases,metrics/tenant} (Pro PAT)",
+  "assertion": "all three read routes are 200 and every body is scoped to the same one tenant (no leakage across routes)",
+  "pass": true,
+  "artifact": {
+    "tenant": "00000000-0000-4000-8000-0000000f0004",
+    "usageCap": 10,
+    "leases": 0,
+    "metricsCount": 0
+  },
+  "ts": "2026-07-19T16:53:13.325Z"
+}
