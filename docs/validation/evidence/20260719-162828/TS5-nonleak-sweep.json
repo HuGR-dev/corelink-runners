@@ -1,0 +1,18 @@
+{
+  "cell": "TS5-nonleak-sweep",
+  "atoms": [
+    "S7.2",
+    "F-4.2"
+  ],
+  "direction": "adversarial",
+  "grade": "E2",
+  "suite": "TS-2/TS-5·live-probes",
+  "stimulus": "sweep every captured acquire/error response body",
+  "assertion": "no response body contains a bearer/PAT/private-key/api-key shaped token",
+  "pass": true,
+  "artifact": {
+    "bodiesSwept": 4,
+    "leaks": 0
+  },
+  "ts": "2026-07-19T16:28:33.300Z"
+}

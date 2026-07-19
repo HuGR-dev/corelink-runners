@@ -29,7 +29,10 @@ case "$what" in
       exit 2
     fi
     echo "TS-4 chaos cells not yet authored." >&2; exit 3 ;;
-  ts1|ts2|ts3|ts5)
+  ts2)
+    echo "── TS-2 · live-journey (no-spawn behavioral probes) ────────"
+    E2E_LIVE=1 node --test "$here/journey/live-probes.test.mjs" ;;
+  ts1|ts3|ts5)
     echo "Suite '$what' cells not yet authored (scaffold in place; build wave next)." >&2; exit 3 ;;
   all)
     run_critic

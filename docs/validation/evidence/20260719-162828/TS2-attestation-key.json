@@ -1,0 +1,20 @@
+{
+  "cell": "TS2-attestation-key",
+  "atoms": [
+    "F-4.10",
+    "F-5.4"
+  ],
+  "direction": "happy",
+  "grade": "E2",
+  "suite": "TS-2/TS-5·live-probes",
+  "stimulus": "GET https://corelink-fabricd.gmhelmold.workers.dev/v1/attestation/key",
+  "assertion": "200 and serves ed25519 public-key material (result-binding verifiable client-side)",
+  "pass": true,
+  "artifact": {
+    "status": 200,
+    "keyId": null,
+    "alg": null,
+    "len": 118
+  },
+  "ts": "2026-07-19T16:28:29.615Z"
+}
