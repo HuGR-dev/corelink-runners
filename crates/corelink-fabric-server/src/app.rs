@@ -2180,6 +2180,9 @@ pub fn app_full(
         // W2': the AUTH-leg single-flight coalescer — one instance per router,
         // separate from the plan-leg coalescer on `AppState`.
         coalescer: Arc::new(crate::introspect_coalesce::SingleFlight::new()),
+        // Short-TTL success-only introspect cache (default-off via env). Blunts a
+        // SEQUENTIAL same-token burst the coalescer can't; disabled ⇒ no behavior change.
+        cache: Arc::new(crate::introspect_cache::IntrospectCache::from_env()),
     };
 
     // ATT-KEY-ROTATION: `GET /v1/attestation/key` is UNAUTHENTICATED — hugit

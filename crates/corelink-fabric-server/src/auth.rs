@@ -71,6 +71,12 @@ impl CachedIntrospect {
     pub(crate) fn body(&self) -> &str {
         &self.body
     }
+
+    /// The captured body as a cheap `Arc<str>` clone — so the introspect cache can
+    /// stash it and rebuild a `CachedIntrospect` on a hit without re-fetching.
+    pub(crate) fn body_arc(&self) -> Arc<str> {
+        Arc::clone(&self.body)
+    }
 }
 
 impl std::fmt::Debug for CachedIntrospect {
@@ -172,6 +178,10 @@ pub(crate) struct AuthLayerState {
     /// (`AppState.plan_coalescer`) — the two legs carry different outcome types
     /// and, being sequential within one acquire, must NOT coalesce together.
     pub coalescer: Arc<crate::introspect_coalesce::SingleFlight<AuthLeg>>,
+    /// Short-TTL, success-only introspect cache (default-off). Blunts a SEQUENTIAL
+    /// same-token burst that the coalescer (concurrent-only) cannot — the root fix for
+    /// the 2026-07-19 introspect-brownout incident. Disabled (`ttl == 0`) ⇒ no-op.
+    pub cache: Arc<crate::introspect_cache::IntrospectCache>,
 }
 
 /// The cloneable outcome the auth-leg coalescer publishes to every waiter — the
@@ -203,6 +213,20 @@ pub(crate) async fn require_tenant(
     let Some(token_str) = bearer_token(&req).map(str::to_string) else {
         return error_response(ApiError::Unauthorized, "missing Bearer PAT");
     };
+    // INTROSPECT CACHE (default-off): a SEQUENTIAL same-token burst — a tenant's CI
+    // firing job after job — is served here WITHOUT an introspect round-trip, so it
+    // can never brown out corelink-server introspect (the 2026-07-19 incident). The
+    // coalescer below only collapses CONCURRENT bursts. SUCCESS-ONLY + short TTL: a
+    // MISS still fail-closes exactly as before, so the fail-closed law is untouched.
+    if let Some((tenant, body)) = auth.cache.get(&token_str) {
+        auth.counters.introspect_cache_hit.incr();
+        req.extensions_mut().insert(BearerPat(token_str));
+        req.extensions_mut().insert(tenant);
+        if let Some(b) = body {
+            req.extensions_mut().insert(CachedIntrospect::new(b));
+        }
+        return next.run(req).await;
+    }
     // AUDIT P2: `tenant_of` may be a BLOCKING introspect call (the production
     // `CoreLinkTokenStore` does a synchronous `ureq` round-trip). Running it
     // directly on the async worker would pin a scarce executor thread for the
@@ -268,6 +292,14 @@ pub(crate) async fn require_tenant(
     };
     match resolved {
         Ok(Some((tenant, cached))) => {
+            // SUCCESS-ONLY populate: cache this 200-valid resolution (+ its W4 body) so
+            // the next same-token request skips the introspect entirely. No-op when the
+            // cache is disabled. Never reached for 401/Unreachable — those stay uncached.
+            auth.cache.put(
+                &token_str,
+                tenant.clone(),
+                cached.as_ref().map(|c| c.body_arc()),
+            );
             req.extensions_mut().insert(BearerPat(token_str));
             req.extensions_mut().insert(tenant);
             // W4: stash the captured introspect body (if any) so the acquire plan

@@ -137,6 +137,11 @@ pub struct Counters {
     /// rate means the introspect endpoint is in brownout and the fabric is
     /// fast-failing acquires (503) rather than pinning the blocking pool.
     pub introspect_breaker_open: Counter,
+    /// Introspect-cache hits: a same-token auth served from the short-TTL cache
+    /// WITHOUT an introspect round-trip. A high ratio vs. authed requests means the
+    /// cache is absorbing a same-tenant burst (the 2026-07-19 incident's root fix).
+    /// Zero while the cache is default-off (`FABRIC_INTROSPECT_CACHE_TTL_MS` unset).
+    pub introspect_cache_hit: Counter,
     /// §9 trigger idempotency cache hits (a duplicate delivery answered without
     /// re-executing).
     pub trigger_dedup_hits: Counter,
@@ -171,6 +176,7 @@ impl Counters {
             load_shed: self.load_shed.get(),
             introspect_shed: self.introspect_shed.get(),
             introspect_breaker_open: self.introspect_breaker_open.get(),
+            introspect_cache_hit: self.introspect_cache_hit.get(),
             trigger_dedup_hits: self.trigger_dedup_hits.get(),
             suspend_actions: self.suspend_actions.get(),
         }
@@ -205,6 +211,7 @@ pub struct CounterSnapshot {
     pub load_shed: u64,
     pub introspect_shed: u64,
     pub introspect_breaker_open: u64,
+    pub introspect_cache_hit: u64,
     pub trigger_dedup_hits: u64,
     pub suspend_actions: u64,
 }
@@ -315,6 +322,7 @@ mod tests {
             ("load_shed", &counters.load_shed),
             ("introspect_shed", &counters.introspect_shed),
             ("introspect_breaker_open", &counters.introspect_breaker_open),
+            ("introspect_cache_hit", &counters.introspect_cache_hit),
             ("trigger_dedup_hits", &counters.trigger_dedup_hits),
             ("suspend_actions", &counters.suspend_actions),
         ];

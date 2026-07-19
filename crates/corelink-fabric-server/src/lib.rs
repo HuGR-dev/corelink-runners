@@ -40,6 +40,7 @@ pub mod ingest_token;
 pub mod introspect_breaker;
 /// W2' introspect single-flight coalescer — collapse a concurrent same-token
 /// introspect burst into ONE upstream round-trip, with zero cache staleness.
+pub(crate) mod introspect_cache;
 pub(crate) mod introspect_coalesce;
 /// Golden-signal counters (Stage-C observability) — a lock-free, always-on
 /// operational metric surface exposed via `GET /internal/v1/status`.
