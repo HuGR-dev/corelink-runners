@@ -1,19 +1,17 @@
 {
   "cell": "TS2-substrate-health",
   "atoms": [
-    "F-10.3",
-    "F-7.2",
-    "F-6.4"
+    "F-7.2"
   ],
   "direction": "happy",
   "grade": "E2",
   "suite": "TS-2/TS-5·live-probes",
   "stimulus": "GET https://corelink-fabricd.gmhelmold.workers.dev/health",
-  "assertion": "substrate answers 200 (control-plane singleton live)",
+  "assertion": "the HTTP front answers 200 (edge-or-container; container-liveness is proven separately by the authed introspect+ledger cells)",
   "pass": true,
   "artifact": {
     "status": 200,
     "body": "ok"
   },
-  "ts": "2026-07-19T16:28:29.324Z"
+  "ts": "2026-07-19T17:20:38.722Z"
 }

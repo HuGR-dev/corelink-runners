@@ -1,0 +1,20 @@
+{
+  "cell": "TS5-internal-gate-fail-closed",
+  "atoms": [
+    "F-5.1",
+    "F-4.2",
+    "S7.4"
+  ],
+  "direction": "adversarial",
+  "grade": "E2",
+  "suite": "TS-5·security-gates",
+  "stimulus": "GET https://corelink-fabricd.gmhelmold.workers.dev/internal/v1/status (no X-Corelink-Internal-Auth)",
+  "assertion": "a header-less caller to /internal is rejected 401 (fail-closed). GAP: no positive-control cell (with-key → 200) — the internal-auth key is not in this harness",
+  "pass": true,
+  "artifact": {
+    "status": 401,
+    "body": "",
+    "positiveControl": "absent (key unavailable)"
+  },
+  "ts": "2026-07-19T17:20:44.475Z"
+}

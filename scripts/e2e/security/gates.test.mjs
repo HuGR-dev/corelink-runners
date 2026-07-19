@@ -16,26 +16,34 @@ const gate = LIVE ? false : 'set E2E_LIVE=1 to run live probes';
 const gatePat = LIVE ? (PAT ? false : 'no f0005 PAT available') : gate;
 const bodies = [];
 
-test('TS5-internal-gate-fail-closed · /internal is 401 without the internal-auth header', { skip: gate }, async () => {
+test('TS5-internal-gate-fail-closed · /internal rejects header-less callers with 401', { skip: gate }, async () => {
   const r = await req('GET', '/internal/v1/status');
   bodies.push(r.text);
+  // Audit F5: NO positive control here (the internal-auth key is not available to this
+  // harness), so this proves only that a header-less caller is rejected 401 — NOT that the
+  // route is reachable-and-correct with the key. Claim scoped accordingly (no "gated" overclaim).
   ev.record({ cell: 'TS5-internal-gate-fail-closed', atoms: ['F-5.1', 'F-4.2', 'S7.4'], direction: 'adversarial',
     grade: 'E2', stimulus: `GET ${BASE}/internal/v1/status (no X-Corelink-Internal-Auth)`,
-    assertion: 'the privileged /internal surface is unreachable without the internal-auth header — 401, fail-closed',
-    pass: r.status === 401, artifact: { status: r.status, body: r.text.slice(0, 200) } });
+    assertion: 'a header-less caller to /internal is rejected 401 (fail-closed). GAP: no positive-control cell (with-key → 200) — the internal-auth key is not in this harness',
+    pass: r.status === 401, artifact: { status: r.status, body: r.text.slice(0, 200), positiveControl: 'absent (key unavailable)' } });
   assert.equal(r.status, 401);
 });
 
-test('TS5-v1-namespace-auth-front · an unknown /v1 route is 401 (no unauthenticated route oracle)', { skip: gate }, async () => {
-  const r = await req('GET', '/v1/this-route-does-not-exist');
-  bodies.push(r.text);
-  // 401 (not 404) proves auth fronts the whole /v1 namespace: an unauthenticated caller
-  // cannot distinguish a real route from a fake one — no enumeration oracle.
+test('TS5-v1-namespace-auth-front · unknown and REAL /v1 routes give a byte-identical 401 (no oracle)', { skip: gate }, async () => {
+  const fake = await req('GET', '/v1/this-route-does-not-exist');
+  const real = await req('GET', '/v1/usage'); // a known-real route, unauthenticated
+  bodies.push(fake.text, real.text);
+  // Audit F12: indistinguishability requires comparing the fake route to a KNOWN-REAL route
+  // unauthenticated. Both must be 401 with byte-identical bodies — only then is there truly
+  // no route-existence oracle for the unauthenticated caller.
+  const identical = fake.status === 401 && real.status === 401 && fake.text === real.text;
   ev.record({ cell: 'TS5-v1-namespace-auth-front', atoms: ['F-3.2', 'F-5.1', 'S7.4'], direction: 'adversarial',
-    grade: 'E2', stimulus: `GET ${BASE}/v1/this-route-does-not-exist (no PAT)`,
-    assertion: 'auth fronts the entire /v1 namespace — unknown route still 401, no route-existence oracle for the unauthenticated',
-    pass: r.status === 401, artifact: { status: r.status, body: r.text.slice(0, 200) } });
-  assert.equal(r.status, 401);
+    grade: 'E2', stimulus: `GET ${BASE}/v1/{unknown-route, usage} (no PAT)`,
+    assertion: 'a fake route and a real route both return 401 with a byte-identical body — no route-existence oracle for the unauthenticated',
+    pass: identical, artifact: { fakeStatus: fake.status, realStatus: real.status, bodiesIdentical: fake.text === real.text, body: fake.text.slice(0, 120) } });
+  assert.equal(fake.status, 401);
+  assert.equal(real.status, 401);
+  assert.equal(fake.text, real.text, 'fake and real unauthenticated /v1 bodies must be identical');
 });
 
 test('TS5-cred-cred-bad-ticket · redeem with a garbage ticket is 401 invalid ticket', { skip: gate }, async () => {
@@ -50,23 +58,29 @@ test('TS5-cred-cred-bad-ticket · redeem with a garbage ticket is 401 invalid ti
   assert.match(r.text, /invalid ticket/i);
 });
 
-test('TS5-cross-tenant-no-oracle · a foreign lease id is 404 under my PAT (no existence oracle)', { skip: gatePat }, async () => {
+test('TS5-unknown-lease-404 · an unknown lease id is 404 under my PAT', { skip: gatePat }, async () => {
   const r = await req('GET', '/v1/leases/11111111-1111-4111-8111-111111111111', { pat: PAT });
   bodies.push(r.text);
-  // 404 (not 403/200) — the fabric does not confirm whether a lease exists in another tenant.
-  ev.record({ cell: 'TS5-cross-tenant-no-oracle', atoms: ['F-4.2', 'S7.4'], direction: 'adversarial',
-    grade: 'E2', stimulus: `GET ${BASE}/v1/leases/{foreign-uuid} (f0005 PAT)`,
-    assertion: 'reading a lease id outside my tenant is 404 — no cross-tenant existence oracle, isolation holds',
-    pass: r.status === 404, artifact: { status: r.status, body: r.text.slice(0, 200) } });
+  // Audit F2: this UUID exists in NO tenant, so 404 is trivially true — it does NOT prove
+  // cross-tenant isolation (a fabric with zero isolation returns the same 404). The real
+  // no-oracle proof needs a lease that ACTUALLY EXISTS under another tenant, read with this
+  // PAT, asserting 404 (not 200/403) — that requires a spawned foreign lease and is deferred
+  // to the box-spawn batch. Claim scoped honestly to "unknown id → 404".
+  ev.record({ cell: 'TS5-unknown-lease-404', atoms: ['F-4.2', 'S7.4'], direction: 'adversarial',
+    grade: 'E2', stimulus: `GET ${BASE}/v1/leases/{nonexistent-uuid} (f0005 PAT)`,
+    assertion: 'an unknown lease id returns 404. GAP: true cross-tenant no-oracle needs a live FOREIGN lease (spawn batch) — not proven by a random uuid',
+    pass: r.status === 404, artifact: { status: r.status, body: r.text.slice(0, 200), crossTenantOracle: 'not-yet-proven (needs live foreign lease)' } });
   assert.equal(r.status, 404);
 });
 
-test('TS5-gate-nonleak-sweep · no gate-rejection body leaks secret-shaped material', { skip: gate }, () => {
+test('TS5-gate-nonleak-sweep · no gate-rejection body leaks secret-shaped material (>= 5 bodies)', { skip: gate }, () => {
   const leaks = bodies.filter((b) => bodyLeaksSecret(b));
+  // Audit F8: non-vacuous floor + the regex now includes the real corelink_ PAT shape.
   ev.record({ cell: 'TS5-gate-nonleak-sweep', atoms: ['S7.2', 'F-4.2'], direction: 'adversarial',
-    grade: 'E2', stimulus: 'sweep every captured gate-rejection body',
-    assertion: 'no rejection body contains a bearer/PAT/private-key/api-key shaped token',
-    pass: leaks.length === 0, artifact: { bodiesSwept: bodies.length, leaks: leaks.length } });
+    grade: 'E2', stimulus: 'sweep every captured gate-rejection body (corelink_/pat_/bearer/key regex)',
+    assertion: 'no rejection body contains a corelink_-PAT / bearer / private-key / api-key shaped token; >= 5 bodies swept (non-vacuous)',
+    pass: leaks.length === 0 && bodies.length >= 5, artifact: { bodiesSwept: bodies.length, leaks: leaks.length } });
+  assert.ok(bodies.length >= 5, 'sweep must cover >= 5 captured bodies, got ' + bodies.length);
   assert.equal(leaks.length, 0);
 });
 

@@ -45,6 +45,13 @@ case "$what" in
   ts6)
     echo "── TS-6 · multi-tenant + entitlement (2 real tenants) ──────"
     load_live_env; node --test "$here/tenants/multitenant.test.mjs" ;;
+  door-a)
+    echo "── TS-2 · Door-A box-spawn journey (E3, SPAWNS A REAL BOX) ─"
+    bash "$here/journey/door-a-spawn.sh" "${2:-}" ;;
+  journeys)
+    echo "── STORY JOURNEYS · real user narratives (create + close REAL leases) ─"
+    load_live_env; export E2E_RUN_ID=journeys
+    node --test "$here"/journeys/*.test.mjs ;;
   ts1|ts3)
     echo "Suite '$what' cells not yet authored (scaffold in place; build wave next)." >&2; exit 3 ;;
   all)

@@ -8,13 +8,12 @@
   "grade": "E2",
   "suite": "TS-2/TS-5·live-probes",
   "stimulus": "GET https://corelink-fabricd.gmhelmold.workers.dev/v1/attestation/key",
-  "assertion": "200 and serves ed25519 public-key material (result-binding verifiable client-side)",
+  "assertion": "keys[0].pubkey_b64 decodes to exactly 32 bytes (a real ed25519 public key) under a stable key_id — client-side result-binding is verifiable against this key",
   "pass": true,
   "artifact": {
     "status": 200,
-    "keyId": null,
-    "alg": null,
-    "len": 118
+    "keyId": "faa5b7726ccd2c52",
+    "pubkeyBytes": 32
   },
-  "ts": "2026-07-19T16:28:29.615Z"
+  "ts": "2026-07-19T17:20:39.007Z"
 }

@@ -10,7 +10,7 @@
   "grade": "E2",
   "suite": "TS-6·multi-tenant",
   "stimulus": "GET https://corelink-fabricd.gmhelmold.workers.dev/v1/{usage,leases,metrics/tenant} (Pro PAT)",
-  "assertion": "all three read routes are 200 and every body is scoped to the same one tenant (no leakage across routes)",
+  "assertion": "the three read routes each return 200 and echo the caller's own tenant id. NOT a cross-route leakage proof (single PAT, empty result sets) — mis-scoping needs live data (spawn batch)",
   "pass": true,
   "artifact": {
     "tenant": "00000000-0000-4000-8000-0000000f0004",
@@ -18,5 +18,5 @@
     "leases": 0,
     "metricsCount": 0
   },
-  "ts": "2026-07-19T16:53:13.325Z"
+  "ts": "2026-07-19T17:20:53.803Z"
 }
