@@ -1,0 +1,54 @@
+{
+  "journey": "Rollback drains the corelink lease and recovers the slot (no strand)",
+  "sid": [
+    "S9.3"
+  ],
+  "persona": "P9 migration engineer",
+  "atoms": [
+    "F-2.1",
+    "F-8.1"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 4,
+  "narrative": [
+    {
+      "step": "baseline active_now",
+      "ok": true,
+      "assertion": "active_now baseline = 0",
+      "artifact": {
+        "base": 0
+      }
+    },
+    {
+      "step": "a corelink job is running (the state we roll back FROM)",
+      "ok": true,
+      "assertion": "corelink lease lease-cba6e75a-00c9-4e28-91dc-7b27c2d2e1a2 HELD",
+      "artifact": {
+        "status": 200,
+        "leaseId": "lease-cba6e75a-00c9-4e28-91dc-7b27c2d2e1a2"
+      }
+    },
+    {
+      "step": "rollback: drain the corelink lease (the one-line label revert stops NEW spawns; this drains in-flight)",
+      "ok": true,
+      "assertion": "drain → 200",
+      "artifact": {
+        "status": 200
+      }
+    },
+    {
+      "step": "capacity is NOT stranded — active_now recovers and a fresh acquire works",
+      "ok": true,
+      "assertion": "active_now=0 (<= baseline 0) and a fresh acquire → 200 (slot recycled)",
+      "artifact": {
+        "activeNow": 0,
+        "freshAcquire": 200,
+        "GAP": {
+          "labelRevert": "the one-line runs-on: revert + fail-open-to-cold + fail-safe-to-queued are Door-A/Worker, not on the lease surface"
+        }
+      }
+    }
+  ],
+  "ts": "2026-07-19T22:52:06.631Z"
+}

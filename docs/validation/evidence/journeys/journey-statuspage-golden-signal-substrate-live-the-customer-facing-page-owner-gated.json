@@ -1,0 +1,47 @@
+{
+  "journey": "Statuspage: golden-signal substrate live; the customer-facing page owner-gated",
+  "sid": [
+    "S17.1"
+  ],
+  "persona": "P17 incident-comms owner",
+  "atoms": [
+    "F-10.1",
+    "F-10.3"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 3,
+  "narrative": [
+    {
+      "step": "the wait/golden-signal surface — the ground truth a status narrative is written from — resolves",
+      "ok": true,
+      "assertion": "GET /v1/metrics/tenant → 200, {p50_ms=0, p95_ms=0, histogram[6], count=0} — the golden signals",
+      "artifact": {
+        "status": 200,
+        "p50": 0,
+        "p95": 0,
+        "count": 0
+      }
+    },
+    {
+      "step": "the occupancy signal (how many slots are busy vs the cap) also resolves",
+      "ok": true,
+      "assertion": "GET /v1/usage → 200, plan_cap=10, active_now=0 — the saturation signal a \"at capacity\" status is written from",
+      "artifact": {
+        "status": 200,
+        "cap": 10,
+        "activeNow": 0
+      }
+    },
+    {
+      "step": "records the statuspage residual — the signals are live; the page + its wording are owner-gated",
+      "ok": true,
+      "assertion": "the truthful signal substrate (golden + occupancy) is live and honest (cold=slow-not-down, queued=waiting-not-lost)",
+      "artifact": {
+        "statuspage": "owner-gated (comms surface — org deliverable, not built in this repo)",
+        "discipline": "tense discipline: never overclaim a fix under incident pressure"
+      }
+    }
+  ],
+  "ts": "2026-07-19T21:25:12.744Z"
+}

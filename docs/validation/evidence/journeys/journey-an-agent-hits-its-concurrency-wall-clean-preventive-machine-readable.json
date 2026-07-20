@@ -1,0 +1,70 @@
+{
+  "journey": "An agent hits its concurrency wall — clean, preventive, machine-readable",
+  "sid": [
+    "S4.7"
+  ],
+  "persona": "P4 autonomous agent",
+  "atoms": [
+    "F-3.2",
+    "F-5.2"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 6,
+  "narrative": [
+    {
+      "step": "a well-behaved agent PRE-CHECKS capacity via /v1/usage before spawning",
+      "ok": true,
+      "assertion": "pre-check: cap=1, active=0 — headroom for exactly one",
+      "artifact": {
+        "cap": 1,
+        "activeNow": 0
+      }
+    },
+    {
+      "step": "the agent takes its one allowed slot",
+      "ok": true,
+      "assertion": "lease lease-1e73fd90-8dab-4569-a833-2b3c433f2b87 HELD (1/1)",
+      "artifact": {
+        "status": 200,
+        "leaseId": "lease-1e73fd90-8dab-4569-a833-2b3c433f2b87"
+      }
+    },
+    {
+      "step": "the (cap+1)th acquire is a clean, PREVENTIVE 429 over_cap — before any box spawns",
+      "ok": true,
+      "assertion": "wall → 429 over_cap, no box (preventive backpressure, not a crash)",
+      "artifact": {
+        "status": 429,
+        "body": "{\"code\":\"over_cap\",\"message\":\"concurrency cap reached: rejected preventively, before any box/VM\"}"
+      }
+    },
+    {
+      "step": "a MALFORMED acquire is a 400 — a DISTINCT signal the agent can tell apart from the 429",
+      "ok": true,
+      "assertion": "malformed acquire → 400 (≠ 429: over_cap and invalid are machine-distinguishable)",
+      "artifact": {
+        "badStatus": 400
+      }
+    },
+    {
+      "step": "releasing the slot clears the wall — the next acquire is admitted",
+      "ok": true,
+      "assertion": "close 200 → next acquire 200 HELD (back off, retry, admitted)",
+      "artifact": {
+        "closeStatus": 200,
+        "acquireStatus": 200
+      }
+    },
+    {
+      "step": "records the honest note — the direct-door \"Waiting for a runner\" analogue is a GAP",
+      "ok": true,
+      "assertion": "the fabric-door 429 over_cap is LIVE; the direct-door queue analogue (a job stays \"Waiting for a runner\" until a slot frees) is not observable via the API here",
+      "artifact": {
+        "wall": "LIVE (429 over_cap, preventive)",
+        "gap": "direct-door queue analogue"
+      }
+    }
+  ],
+  "ts": "2026-07-19T22:45:00.158Z"
+}

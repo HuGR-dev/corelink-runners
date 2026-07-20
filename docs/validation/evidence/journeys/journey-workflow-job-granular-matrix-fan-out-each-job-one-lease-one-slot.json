@@ -1,0 +1,47 @@
+{
+  "journey": "workflow_job-granular matrix fan-out (each job = one lease + one slot)",
+  "sid": [
+    "S1.6.8",
+    "S1.6.7",
+    "S1.7.5"
+  ],
+  "persona": "P1 monorepo dev",
+  "atoms": [
+    "F-2.1",
+    "F-4.7"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 3,
+  "narrative": [
+    {
+      "step": "records the baseline active count under the Pro cap",
+      "ok": true,
+      "assertion": "cap=10 headroom for a fan-out, base active=0",
+      "artifact": {
+        "cap": 10,
+        "base": 0
+      }
+    },
+    {
+      "step": "two matrix jobs (two affected packages) each acquire their OWN runner",
+      "ok": true,
+      "assertion": "two HELD leases, distinct ids (lease-cb7ea5e7-0345-413f-a5ef-497c681b7d91 ≠ lease-d42ab9cb-90d9-4788-badf-7131f413521a) — granular, not one shared box",
+      "artifact": {
+        "a": "lease-cb7ea5e7-0345-413f-a5ef-497c681b7d91",
+        "b": "lease-d42ab9cb-90d9-4788-badf-7131f413521a"
+      }
+    },
+    {
+      "step": "the fan-out shows up as two slots on the usage counter (not width-collapsed)",
+      "ok": true,
+      "assertion": "active_now=2 (base+2 — each job is a slot)",
+      "artifact": {
+        "activeNow": 2,
+        "base": 0,
+        "gap": "the paths-filter affected-set + memo-key invalidation (499 warm, 1 recomputes) is webhook + CAS, not /v1; width>cap→429 queueing is the same admission gate proven in the S1.3.2 ceiling journey"
+      }
+    }
+  ],
+  "ts": "2026-07-19T21:59:18.991Z"
+}

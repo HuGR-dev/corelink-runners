@@ -1,0 +1,55 @@
+{
+  "journey": "SOC2 audit-evidence: published attestation key is the root of trust",
+  "sid": [
+    "S10.2"
+  ],
+  "persona": "P10 procurement/security reviewer",
+  "atoms": [
+    "F-4.10",
+    "F-5.4"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 4,
+  "narrative": [
+    {
+      "step": "fetches the well-known fabric attestation key — deliberately UNAUTHENTICATED (verification bootstrap)",
+      "ok": true,
+      "assertion": "GET /v1/attestation/key → 200, key_id=faa5b7726ccd2c52, ed25519 pubkey published (len=44)",
+      "artifact": {
+        "status": 200,
+        "keyCount": 1,
+        "keyId": "faa5b7726ccd2c52",
+        "pubkeyLen": 44
+      }
+    },
+    {
+      "step": "the key endpoint carries NO tenant material — it is region-public, not tenant-scoped",
+      "ok": true,
+      "assertion": "key entry shape is {key_id, pubkey_b64, expires_ms=null} — no tenant field (region-public)",
+      "artifact": {
+        "expiresMs": null
+      }
+    },
+    {
+      "step": "CONTRAST control — a tenant DATA surface is NOT public: no PAT → 401 unauthorized",
+      "ok": true,
+      "assertion": "GET /v1/usage (no PAT) → 401 code=unauthorized (data is PAT-gated; the key is not)",
+      "artifact": {
+        "status": 401,
+        "code": "unauthorized"
+      }
+    },
+    {
+      "step": "with a real PAT the evidence surfaces resolve — the substrate the SOC2 report would attest is live",
+      "ok": true,
+      "assertion": "authed GET /v1/usage → 200 (evidence surfaces live); records residual",
+      "artifact": {
+        "status": 200,
+        "soc2Report": "owner-gated (org-level, not built in this repo)",
+        "auditLogExport": "unified customer-facing export = product follow-up"
+      }
+    }
+  ],
+  "ts": "2026-07-19T21:22:58.988Z"
+}

@@ -1,0 +1,57 @@
+{
+  "journey": "Self-serve read surface fails closed without a PAT",
+  "sid": [
+    "S14.1",
+    "S14.2",
+    "S14.3",
+    "S14.5"
+  ],
+  "persona": "P14 attacker (no PAT)",
+  "atoms": [
+    "F-4.2",
+    "F-5.2"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 2,
+  "narrative": [
+    {
+      "step": "every read route with NO Bearer PAT → 401, identical unauthorized body",
+      "ok": true,
+      "assertion": "all 4 read routes → 401 {\"code\":\"unauthorized\"} (fail-closed)",
+      "artifact": {
+        "results": [
+          {
+            "path": "/v1/usage",
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "path": "/v1/usage/history",
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "path": "/v1/leases",
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "path": "/v1/metrics/tenant",
+            "status": 401,
+            "code": "unauthorized"
+          }
+        ]
+      }
+    },
+    {
+      "step": "positive control — WITH the PAT the same surface returns 200 (auth is the discriminator)",
+      "ok": true,
+      "assertion": "authed GET /v1/usage → 200 (the PAT is what flips 401→200)",
+      "artifact": {
+        "status": 200
+      }
+    }
+  ],
+  "ts": "2026-07-19T21:20:28.832Z"
+}

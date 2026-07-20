@@ -1,0 +1,53 @@
+{
+  "journey": "An agent runs the suite without asking permission (model LIVE, loop GAP)",
+  "sid": [
+    "S4.1"
+  ],
+  "persona": "P4 autonomous agent",
+  "atoms": [
+    "F-2.5",
+    "F-4.1"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 4,
+  "narrative": [
+    {
+      "step": "the agent has headroom under its tenant cap (Pro) to fan out",
+      "ok": true,
+      "assertion": "cap=10, active=0 — headroom to verify a speculative branch",
+      "artifact": {
+        "cap": 10,
+        "activeNow": 0
+      }
+    },
+    {
+      "step": "one speculative branch → one runner, on demand, near-instant",
+      "ok": true,
+      "assertion": "speculative lease lease-8cd01a95-b588-43fe-ae27-f4be182dca27 HELD (verification is not a budget line)",
+      "artifact": {
+        "status": 200,
+        "leaseId": "lease-8cd01a95-b588-43fe-ae27-f4be182dca27"
+      }
+    },
+    {
+      "step": "usage reflects the one speculative runner (the flat model induces the demand)",
+      "ok": true,
+      "assertion": "active_now=1 ≥ base+1 (a branch is a lease; the cap will bound the fan-out)",
+      "artifact": {
+        "activeNow": 1,
+        "base": 0
+      }
+    },
+    {
+      "step": "records the honest gap — the full speculative-verification loop needs an agent driver",
+      "ok": true,
+      "assertion": "one branch = one lease is LIVE-proven; an orchestrator fanning ten variants and keeping the green one is emergent product behavior (external driver)",
+      "artifact": {
+        "loop": "GAP — external agent orchestrator",
+        "needs": "a real speculative-fanout driver"
+      }
+    }
+  ],
+  "ts": "2026-07-19T22:40:22.395Z"
+}

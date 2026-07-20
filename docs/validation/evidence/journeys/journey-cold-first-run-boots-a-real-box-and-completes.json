@@ -1,0 +1,38 @@
+{
+  "journey": "Cold first-run boots a real box and completes",
+  "sid": [
+    "S1.2.2"
+  ],
+  "persona": "P1 Pro dev",
+  "atoms": [
+    "F-4.1",
+    "F-6.1",
+    "F-6.2",
+    "F-7.1"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 2,
+  "narrative": [
+    {
+      "step": "a novel (cold) job acquires a real standard-4 box",
+      "ok": true,
+      "assertion": "lease lease-dcbcd7f0-240c-4184-bde0-8bfd8b073300 HELD — cold boots fast, not a full re-download",
+      "artifact": {
+        "status": 200,
+        "leaseId": "lease-dcbcd7f0-240c-4184-bde0-8bfd8b073300"
+      }
+    },
+    {
+      "step": "the cold run completes and tears down (its result would re-warm the cache)",
+      "ok": true,
+      "assertion": "close succeeded → 200; lease no longer HELD (state=released)",
+      "artifact": {
+        "close": 200,
+        "after": "released",
+        "gap": "byte-identical re-store + next-run-becomes-a-hit (determinism) is ⚪ X4-external (needs a full build smoke on a real CoreLink PAT)"
+      }
+    }
+  ],
+  "ts": "2026-07-19T22:57:37.175Z"
+}

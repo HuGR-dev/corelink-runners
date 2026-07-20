@@ -1,0 +1,57 @@
+{
+  "journey": "A matrix fans out into distinct parallel slots",
+  "sid": [
+    "S1.2.3"
+  ],
+  "persona": "P1 Pro dev",
+  "atoms": [
+    "F-2.1",
+    "F-4.6",
+    "F-5.1"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 4,
+  "narrative": [
+    {
+      "step": "start from a clean account",
+      "ok": true,
+      "assertion": "cap=10 ≥ matrix width 3, active_now=0",
+      "artifact": {
+        "cap": 10,
+        "activeNow": 0
+      }
+    },
+    {
+      "step": "fan out 3 parallel jobs → 3 DISTINCT held boxes",
+      "ok": true,
+      "assertion": "3/3 HELD, all distinct lease ids (one slot each)",
+      "artifact": {
+        "leases": 3,
+        "distinct": true
+      }
+    },
+    {
+      "step": "the account reflects the full parallel width (minutes flat, only slots count)",
+      "ok": true,
+      "assertion": "active_now=3 ≥ base+3 (parallel width occupies parallel slots)",
+      "artifact": {
+        "activeNow": 3,
+        "expected": 3
+      }
+    },
+    {
+      "step": "each job tears down independently",
+      "ok": true,
+      "assertion": "all 3 closed 2xx (independent teardown)",
+      "artifact": {
+        "closes": [
+          200,
+          200,
+          200
+        ]
+      }
+    }
+  ],
+  "ts": "2026-07-19T22:58:16.774Z"
+}

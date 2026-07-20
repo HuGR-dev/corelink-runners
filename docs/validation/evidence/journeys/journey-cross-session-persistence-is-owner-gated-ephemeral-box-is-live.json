@@ -1,0 +1,34 @@
+{
+  "journey": "Cross-session persistence is owner-gated; ephemeral box is live",
+  "sid": [
+    "S3.7"
+  ],
+  "persona": "P3 Workspaces user",
+  "atoms": [
+    "F-4.8",
+    "F-5.5"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 2,
+  "narrative": [
+    {
+      "step": "the box is ephemeral-by-teardown (a lease dies at close — the live half of the model)",
+      "ok": true,
+      "assertion": "box acquired then torn down (state=released) — the box is disposable",
+      "artifact": {
+        "closeStatus": 200
+      }
+    },
+    {
+      "step": "the durable OBJECT that would outlive the session is not a live fabric surface — GAP",
+      "ok": true,
+      "assertion": "\"outliving a session\" = snapshot-on-end + hydrate-on-resume, which is the ClwBoxDrive stub",
+      "artifact": {
+        "GAP": "campaign #2 — spine only, SKUs not built",
+        "detail": "ephemeral-by-teardown box is LIVE (proven above); the durable content-addressed workspace object + cross-session persistence UX is owner-gated (depends on the S3.3 snapshot stub)"
+      }
+    }
+  ],
+  "ts": "2026-07-19T21:22:48.806Z"
+}

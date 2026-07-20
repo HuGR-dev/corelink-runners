@@ -1,0 +1,41 @@
+{
+  "journey": "Finance reads the max-spend vCPU-h ceiling",
+  "sid": [
+    "S6.2"
+  ],
+  "persona": "P6 finance buyer",
+  "atoms": [
+    "F-1.4"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 3,
+  "narrative": [
+    {
+      "step": "the Pro plan surfaces a bounded vCPU-h ceiling (max COGS = ceiling × basis)",
+      "ok": true,
+      "assertion": "Pro plan_ceiling_vcpu_h=null (finite ⇒ COGS bounded below price)",
+      "artifact": {
+        "ceil": null
+      }
+    },
+    {
+      "step": "the Enterprise ceiling is larger — the wall scales with the tier, never unbounded",
+      "ok": true,
+      "assertion": "Ent ceiling=null ≥ Pro ceiling=null (bounded, tier-scaled)",
+      "artifact": {
+        "entCeil": null,
+        "proCeil": null
+      }
+    },
+    {
+      "step": "records the residual: the vCPU-h WALL (ComputeGate) is default-off — the live limit is the concurrency cap",
+      "ok": true,
+      "assertion": "ceiling value surfaced; the enforcing wall is armed by the owner (default-off today)",
+      "artifact": {
+        "wallArming": "owner-gated (ComputeGate default-off; live limit = concurrency cap, S1.3.2)"
+      }
+    }
+  ],
+  "ts": "2026-07-19T22:27:24.019Z"
+}

@@ -1,0 +1,39 @@
+{
+  "journey": "Concurrency cannot be borrowed without identity",
+  "sid": [
+    "S1.4.5"
+  ],
+  "persona": "P1 Pro dev",
+  "atoms": [
+    "F-2.1",
+    "F-3.2",
+    "F-5.8",
+    "F-8.1"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 2,
+  "narrative": [
+    {
+      "step": "an acquire with NO identity is refused — no seat is borrowable anonymously",
+      "ok": true,
+      "assertion": "no-PAT acquire → 401 unauthorized, no lease (concurrency is not borrowable)",
+      "artifact": {
+        "status": 401,
+        "code": "unauthorized",
+        "leaked": null
+      }
+    },
+    {
+      "step": "the legitimate owner IS served (positive control — the refusal is identity-scoped, not blanket)",
+      "ok": true,
+      "assertion": "owner acquire → HELD lease-a4caad4f-82eb-48b2-97a5-c1977c7fd1ed (only a valid identity gets a seat)",
+      "artifact": {
+        "status": 200,
+        "leaseId": "lease-a4caad4f-82eb-48b2-97a5-c1977c7fd1ed",
+        "gap": "the warm-mint authz that derives the tenant from installation_id+repo and returns `forbidden` for an unowned repo (spawn_forbidden) is on the webhook spawn path — ⚪ X4-external to drive here"
+      }
+    }
+  ],
+  "ts": "2026-07-19T23:06:17.837Z"
+}

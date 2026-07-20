@@ -1,0 +1,36 @@
+{
+  "journey": "Delete account + GDPR erasure (owner-gated)",
+  "sid": [
+    "S13.4"
+  ],
+  "persona": "P13 account admin",
+  "atoms": [
+    "F-5.6",
+    "F-5.11"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 2,
+  "narrative": [
+    {
+      "step": "pre-deletion: the tenant has real, scoped account data (the subject of a future erasure)",
+      "ok": true,
+      "assertion": "tenant 00000000-0000-4000-8000-0000000f0004 has live account state (plan_cap=10) — the erasure subject",
+      "artifact": {
+        "tenant": "00000000-0000-4000-8000-0000000f0004",
+        "cap": 10
+      }
+    },
+    {
+      "step": "records the GAP: no tenant-facing delete verb; deactivation buildable, erasure owner-gated on an SLA",
+      "ok": true,
+      "assertion": "no destructive verb exposed to a tenant PAT — recorded as owner-gated GAP",
+      "artifact": {
+        "gdprErasure": "owner-gated orchestration (org-wide erasure on an SLA clock, S10.5)",
+        "deactivation": "buildable from suspend/plan-remove machinery (S7.7/S5.1.1)",
+        "retentionTension": "billing rows may be pseudonymized, not deleted (tax/VAT law, S10.4/S10.5)"
+      }
+    }
+  ],
+  "ts": "2026-07-19T22:31:26.259Z"
+}

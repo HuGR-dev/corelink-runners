@@ -1,0 +1,57 @@
+{
+  "journey": "Verdict/trust split: red is attested, killed is 400, re-run is a fresh box",
+  "sid": [
+    "S8.6"
+  ],
+  "persona": "P8 power-user",
+  "atoms": [
+    "F-2.3",
+    "F-4.10"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 4,
+  "narrative": [
+    {
+      "step": "run #1 acquires a runner",
+      "ok": true,
+      "assertion": "run #1 lease lease-e9af08ea-521f-448e-ab13-44f48c47f6b4 HELD",
+      "artifact": {
+        "status": 200,
+        "leaseId": "lease-e9af08ea-521f-448e-ab13-44f48c47f6b4"
+      }
+    },
+    {
+      "step": "a caller CANNOT claim the fabric-only \"killed\" verdict → 400, lease stays HELD",
+      "ok": true,
+      "assertion": "close{status:killed} → 400 invalid; lease still HELD (killed is the fabric's own verdict)",
+      "artifact": {
+        "closeStatus": 400,
+        "leaseState": "held"
+      }
+    },
+    {
+      "step": "a RED check closes status=failed → 2xx AND is ATTESTED (a real, signed failure)",
+      "ok": true,
+      "assertion": "red verdict close → 200, attested (key faa5b7726ccd2c52) — a failed check is not a fabric fault",
+      "artifact": {
+        "status": 200,
+        "attested": true
+      }
+    },
+    {
+      "step": "the FLAKY re-run is a fresh lease — a DISTINCT box, never reused",
+      "ok": true,
+      "assertion": "re-run lease lease-13e5f000-a61e-4047-b0bc-42fb8ab29f6a !== #1 lease-e9af08ea-521f-448e-ab13-44f48c47f6b4 (fresh-lease-per-run; no poisoned green)",
+      "artifact": {
+        "leaseId": "lease-13e5f000-a61e-4047-b0bc-42fb8ab29f6a",
+        "distinct": true,
+        "GAP": {
+          "attestFailExit2": "a MITM exit:1→0 flip is caught by CLIENT verify_strict → exit 2; not fabricable here",
+          "memoPoison": "the determinism-guard vs flake canonization needs a real exec + memo path"
+        }
+      }
+    }
+  ],
+  "ts": "2026-07-19T22:49:46.118Z"
+}

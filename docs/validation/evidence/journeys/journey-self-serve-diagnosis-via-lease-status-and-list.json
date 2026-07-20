@@ -1,0 +1,74 @@
+{
+  "journey": "Self-serve diagnosis via lease status and list",
+  "sid": [
+    "S11.4",
+    "S11.2"
+  ],
+  "persona": "P11 support/CI dev",
+  "atoms": [
+    "F-5.1",
+    "F-9.1"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 6,
+  "narrative": [
+    {
+      "step": "opens a runner to have a live job to diagnose",
+      "ok": true,
+      "assertion": "lease lease-dcb134bf-1f6f-4204-83f5-6f06918b2217 is HELD (a job to diagnose)",
+      "artifact": {
+        "status": 200,
+        "leaseId": "lease-dcb134bf-1f6f-4204-83f5-6f06918b2217",
+        "state": "held"
+      }
+    },
+    {
+      "step": "reads the single job's status — GET /v1/leases/{id} returns its lifecycle state",
+      "ok": true,
+      "assertion": "status surface answers: 200, state=held (self-serve, no ticket)",
+      "artifact": {
+        "status": 200,
+        "state": "held"
+      }
+    },
+    {
+      "step": "lists all their jobs — the lease appears in GET /v1/leases (tenant-scoped)",
+      "ok": true,
+      "assertion": "list surface shows the job (175 lease(s), mine present)",
+      "artifact": {
+        "count": 175,
+        "found": true
+      }
+    },
+    {
+      "step": "cross-checks the account — /v1/usage reflects the running job",
+      "ok": true,
+      "assertion": "account shows active_now=1 (>=1 while held)",
+      "artifact": {
+        "activeNow": 1,
+        "cap": 10
+      }
+    },
+    {
+      "step": "resolves it themselves — closes the job, status surface confirms it is no longer HELD",
+      "ok": true,
+      "assertion": "closed (200) and status now not-HELD (status=200, state=released)",
+      "artifact": {
+        "closeStatus": 200,
+        "getStatus": 200,
+        "state": "released"
+      }
+    },
+    {
+      "step": "records the residual GAP: Door-A (GitHub Actions) logs are not harness-observable",
+      "ok": true,
+      "assertion": "Door-A run-log + native re-run = GitHub UI (deliberately not reinvented, S11.4) — GAP here",
+      "artifact": {
+        "doorALogs": "GitHub Actions UI — not harness-observable",
+        "fabricStatus": "lease status/list asserted above"
+      }
+    }
+  ],
+  "ts": "2026-07-19T22:32:46.473Z"
+}

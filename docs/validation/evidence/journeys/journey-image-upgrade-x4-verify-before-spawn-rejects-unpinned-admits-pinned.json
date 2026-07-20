@@ -1,0 +1,36 @@
+{
+  "journey": "Image upgrade — X4 verify-before-spawn rejects unpinned, admits pinned",
+  "sid": [
+    "S5.4.5"
+  ],
+  "persona": "P5 operator",
+  "atoms": [
+    "F-4.5",
+    "F-10.5"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 2,
+  "narrative": [
+    {
+      "step": "an UNPINNED image (bare sha256, no repo) is refused at the supply-chain floor — no spawn",
+      "ok": true,
+      "assertion": "unpinned image → 400, no lease (X4 rejects before box contact)",
+      "artifact": {
+        "status": 400,
+        "leaseId": null
+      }
+    },
+    {
+      "step": "a VALID content-pinned image (positive control) IS admitted to a HELD lease",
+      "ok": true,
+      "assertion": "pinned image → 200 HELD (the floor discriminates, not a blanket reject)",
+      "artifact": {
+        "status": 200,
+        "leaseId": "lease-68d2b238-6e95-4835-b2c4-1498acf47d47",
+        "imageUpgrade": "X4 verify-before-spawn LIVE; PINNED_IMAGE_DIGEST arm is owner-gated"
+      }
+    }
+  ],
+  "ts": "2026-07-19T21:48:30.070Z"
+}

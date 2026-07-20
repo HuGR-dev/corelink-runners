@@ -1,0 +1,47 @@
+{
+  "journey": "Boot-honest diagnostic — bootable fabric = redemption env wired",
+  "sid": [
+    "S5.4.1"
+  ],
+  "persona": "P5 operator",
+  "atoms": [
+    "F-6.1",
+    "F-6.2",
+    "F-6.3",
+    "F-6.4",
+    "F-10.3"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 3,
+  "narrative": [
+    {
+      "step": "the HTTP front answers (edge-or-container liveness)",
+      "ok": true,
+      "assertion": "GET /health → 200",
+      "artifact": {
+        "status": 200
+      }
+    },
+    {
+      "step": "an AUTHED read traverses the container — proves fabricd itself is live, not just the edge",
+      "ok": true,
+      "assertion": "GET /v1/usage → 200 for 00000000-0000-4000-8000-0000000f0004 (container-traversing; the boot guard passed)",
+      "artifact": {
+        "status": 200,
+        "tenant": "00000000-0000-4000-8000-0000000f0004",
+        "bootGuard": "redemption-env boot guard live (#332) — a bootable fabric proves FABRIC_PUBLIC_BASE_URL is set (else it would fail loud at boot)"
+      }
+    },
+    {
+      "step": "the attestation key is served — the boot completed with a real signing key",
+      "ok": true,
+      "assertion": "attestation key faa5b7726ccd2c52 served (boot reached the key-serving stage)",
+      "artifact": {
+        "status": 200,
+        "keyId": "faa5b7726ccd2c52"
+      }
+    }
+  ],
+  "ts": "2026-07-19T21:47:53.451Z"
+}

@@ -1,0 +1,44 @@
+{
+  "journey": "Retry is a fresh warm lease",
+  "sid": [
+    "S11.4"
+  ],
+  "persona": "P11 support/CI dev",
+  "atoms": [
+    "F-5.1"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 3,
+  "narrative": [
+    {
+      "step": "runs a job, then closes it (the first attempt is done)",
+      "ok": true,
+      "assertion": "first attempt lease-70eda774-8b81-43ad-b7f0-6a3e0ca63000 ran and closed (200)",
+      "artifact": {
+        "leaseId": "lease-70eda774-8b81-43ad-b7f0-6a3e0ca63000",
+        "closeStatus": 200
+      }
+    },
+    {
+      "step": "the old lease is not reusable — it reads not-HELD",
+      "ok": true,
+      "assertion": "old lease is retired (status=200, state=released) — no stale-box reuse",
+      "artifact": {
+        "status": 200,
+        "state": "released"
+      }
+    },
+    {
+      "step": "retries — a fresh acquire yields a DISTINCT new lease id (a new warm box)",
+      "ok": true,
+      "assertion": "retry got a fresh lease lease-885c4190-6a1e-4d95-b639-0eb47ac2dcd0 !== old lease-70eda774-8b81-43ad-b7f0-6a3e0ca63000 (never a reused box)",
+      "artifact": {
+        "newLease": "lease-885c4190-6a1e-4d95-b639-0eb47ac2dcd0",
+        "oldLease": "lease-70eda774-8b81-43ad-b7f0-6a3e0ca63000",
+        "state": "held"
+      }
+    }
+  ],
+  "ts": "2026-07-19T22:33:53.981Z"
+}

@@ -1,0 +1,44 @@
+{
+  "journey": "Data residency: region-tagged single-region substrate live; multi-region owner-gated",
+  "sid": [
+    "S10.1"
+  ],
+  "persona": "P10 compliance reviewer",
+  "atoms": [
+    "F-5.6",
+    "F-6.1"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 3,
+  "narrative": [
+    {
+      "step": "the billing/usage substrate (where records land) resolves for the tenant",
+      "ok": true,
+      "assertion": "GET /v1/usage → 200 for tenant=00000000-0000-4000-8000-0000000f0004 — the record-landing substrate is live (single-region singleton)",
+      "artifact": {
+        "status": 200,
+        "tenant": "00000000-0000-4000-8000-0000000f0004"
+      }
+    },
+    {
+      "step": "the usage-history record — the billing event that carries the CF-colo region tag — exists",
+      "ok": true,
+      "assertion": "GET /v1/usage/history → 200 (the region-tagged billing record substrate; region = CF colo, ADR-0008)",
+      "artifact": {
+        "status": 200
+      }
+    },
+    {
+      "step": "records the residency residual — single-region today; region-pinning is M3",
+      "ok": true,
+      "assertion": "today's honest answer: single-region, region-tagged, NOT yet pinnable",
+      "artifact": {
+        "residency": "owner-gated (M3 multi-region + region affinity, product.md §8)",
+        "today": "single-region singleton, billing region = CF colo",
+        "byoc": "above-Max Enterprise path for a hard residency mandate — owner-gated"
+      }
+    }
+  ],
+  "ts": "2026-07-19T21:25:05.458Z"
+}
