@@ -10,16 +10,20 @@ import { test, expect } from "../fixtures/auth.js";
  * its selectors are not frozen, so we discover them live rather than guess.
  */
 
+// CORRECTED 2026-07-19 (server-TL): the real authed app lives under the locale +
+// the (authenticated) route group → `/corelink/en/customer/*`. The bare
+// `/corelink/keys` etc. have no route and fall through to the marketing SPA (200,
+// so they LOOK like pages) — that was my false-negative. Probe the real paths.
 const RUNNER_ROUTES = [
-  "/corelink/dashboard",
+  "/corelink/en/customer",
+  "/corelink/en/customer/keys",
+  "/corelink/en/customer/connect",
+  "/corelink/en/customer/runners",
+  "/corelink/en/customer/usage",
+  "/corelink/en/customer/plan",
+  // keep two bare paths to DOCUMENT the SPA-fallthrough trap in the same run:
   "/corelink/keys",
-  "/corelink/settings/keys",
-  "/corelink/api-keys",
-  "/corelink/tokens",
-  "/corelink/usage",
-  "/corelink/runners",
-  "/corelink/pricing",
-  "/corelink/upgrade",
+  "/corelink/dashboard",
 ];
 
 test("discover the runner console surface (authed, fresh tenant)", async ({ authedPage: page }) => {
