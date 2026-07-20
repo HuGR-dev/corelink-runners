@@ -189,7 +189,19 @@
       // (#400) instead of falling back to the git-SHA tag. Deployed + verified LIVE:
       // a malformed disarmed test-mint body → 404 (was 422 on the prior fa6b1c3b
       // binary); acquire auth/introspect healthy on the new binary.
-      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer@sha256:0114c4f2fb85f6ff467a2741ed0f63cc54c32f3610ffcec28ea6c2b015171a9f",
+      // 2026-07-19 KEY-DRIFT-HARDENING binary (6f899a7a): fabricd carrying #407
+      // (introspect success-only short-TTL cache, DEFAULT-OFF via
+      // FABRIC_INTROSPECT_CACHE_TTL_MS=0) + #408 (boot introspect self-check —
+      // classify_introspect_bootcheck: 2xx→KeyOk, 5xx/None→Transient, <500 non-2xx→
+      // KeyRejected; FATAL-on-rejected by default, FABRIC_INTROSPECT_BOOTCHECK=warn
+      // escape hatch). Built after the 2026-07-19 key-drift incident (a stale
+      // FABRIC_INTROSPECT_AUTH_KEY after a container recycle fail-closed ALL auth as
+      // "token store unreachable"; root-caused with the server TL to KEY drift, NOT
+      // URL/load). The boot self-check makes that failure LOUD at boot instead of
+      // silent-on-first-request: with the (now-correct) key set, boot validates the
+      // key against live introspect and passes. @sha256 DIGEST-PINNED (X4), built by
+      // build-fabricd-image.yml (run 29707484133). SUPERSEDES 0114c4f2.
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer@sha256:6f899a7a4feb0ed3b57333f42890f44006b2eb32d5b7fc97f58a5284c833c03d",
       // HTTP control plane. Bumped standard-1 → standard-2 (2026-07-07 acquire-storm
       // hardening): the single-flight singleton must keep /v1/health + lease ops
       // responsive under a burst of box provisions; 2 vCPU gives headroom so a few
