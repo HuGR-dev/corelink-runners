@@ -24,48 +24,58 @@ import { acquire, closeLease, usage, VALID_IMAGE } from "../../lib/fabric.mjs";
 
 const CORELINK_PAT_RE = /corelink_[A-Za-z0-9_-]{16,}/;
 
-/** Best-effort in-console PAT mint. Returns the token or null (→ honest BLOCKED). */
-async function mintPatInConsole(page: Page): Promise<string | null> {
-  const routes = ["/corelink/keys", "/corelink/settings/keys", "/corelink/api-keys", "/corelink/tokens"];
-  for (const route of routes) {
-    const resp = await page.goto(route, { waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => null);
-    if (!resp || page.url().includes("/sign-in")) continue;
-    await page.waitForLoadState("networkidle").catch(() => {});
+/**
+ * Mint a PAT in the REAL console — `/corelink/en/customer/keys` (server-TL
+ * confirmed 2026-07-19; verified live by 00-discover: "Create token" button,
+ * `keys-create-name` input, `keys-scope-*` checkboxes, `keys-new-token` reveal).
+ * Returns the token or null (→ honest finding). Value never logged by the caller.
+ */
+interface MintResult {
+  pat: string | null;
+  createStatuses: number[];
+  createBody: string;
+}
 
-    // A token may already be scannable, or a create affordance may need a click.
-    let scan = await page.content();
-    let m = scan.match(CORELINK_PAT_RE);
-    if (m) return m[0];
-
-    const createBtn = page
-      .getByRole("button", { name: /create|new|generate|add.*(key|token)/i })
-      .or(page.locator('[data-testid*="create"],[data-testid*="new-key"],[data-testid*="generate"]'))
-      .first();
-    if (await createBtn.isVisible().catch(() => false)) {
-      await createBtn.click().catch(() => {});
-      // A name field + confirm may follow.
-      const nameField = page.getByLabel(/name|label/i).or(page.locator('input[name*="name"]')).first();
-      if (await nameField.isVisible().catch(() => false)) {
-        await nameField.fill(`e2e-undercover-${Date.now()}`).catch(() => {});
-        const confirm = page.getByRole("button", { name: /create|generate|save|confirm/i }).first();
-        await confirm.click().catch(() => {});
-      }
-      await page.waitForTimeout(2500);
-      scan = await page.content();
-      m = scan.match(CORELINK_PAT_RE);
-      if (m) return m[0];
-      // Some UIs reveal the token in an input value, not the DOM text.
-      const inputVal = await page
-        .locator("input,textarea,code,pre")
-        .evaluateAll((els) =>
-          els.map((e) => (e as HTMLInputElement).value || e.textContent || "").join("\n"),
-        )
-        .catch(() => "");
-      const m2 = inputVal.match(CORELINK_PAT_RE);
-      if (m2) return m2[0];
+async function mintPatInConsole(page: Page): Promise<MintResult> {
+  const createStatuses: number[] = [];
+  let createBody = "";
+  page.on("response", async (r) => {
+    if (r.url().includes("/v1/customer/keys") && r.request().method() === "POST") {
+      createStatuses.push(r.status());
+      if (r.status() >= 400 && !createBody) createBody = (await r.text().catch(() => "")).slice(0, 200);
     }
-  }
-  return null;
+  });
+
+  const resp = await page.goto("/corelink/en/customer/keys", { waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => null);
+  if (!resp || page.url().includes("/sign-in")) return { pat: null, createStatuses, createBody };
+  await page.waitForLoadState("networkidle").catch(() => {});
+
+  // Name the token + grant at least one scope (cache:r) so it is usable.
+  const name = page.locator('[data-testid="keys-create-name"], input[name="keys-create-name"], #keys-create-name').first();
+  await name.fill(`e2e-undercover-${Date.now()}`).catch(() => {});
+  const scope = page.locator('[data-testid="keys-scope-cache:r"], input[name="keys-scope-cache:r"]').first();
+  if (await scope.isVisible().catch(() => false)) await scope.check().catch(() => {});
+
+  const createBtn = page.getByRole("button", { name: /^create token$/i }).first();
+  await createBtn.click().catch(() => {});
+  await page.waitForTimeout(2500);
+
+  // The plaintext token is revealed once, in `keys-new-token`.
+  const reveal = await page
+    .locator('[data-testid="keys-new-token"], [data-testid*="new-token"]')
+    .first()
+    .evaluate((el) => (el as HTMLInputElement).value || el.textContent || "")
+    .catch(() => "");
+  let m = reveal.match(CORELINK_PAT_RE);
+  if (m) return { pat: m[0], createStatuses, createBody };
+
+  // Fallbacks: any input value or the page text.
+  const inputVal = await page
+    .locator("input,textarea,code,pre")
+    .evaluateAll((els) => els.map((e) => (e as HTMLInputElement).value || e.textContent || "").join("\n"))
+    .catch(() => "");
+  m = inputVal.match(CORELINK_PAT_RE) || (await page.content()).match(CORELINK_PAT_RE);
+  return { pat: m ? m[0] : null, createStatuses, createBody };
 }
 
 // ── PART 1: the undercover SIGNUP capability — PROVEN GREEN ──────────────────
@@ -98,24 +108,33 @@ test("undercover: a fresh stranger mints a runner PAT and the fabric treats them
   const note = (s: string) => console.log(`[undercover] ${s}`);
   note(`fresh tenant: ${user.email}`);
 
-  // Mint a runner PAT the way a real user would — in the console.
-  const pat = await mintPatInConsole(page);
+  // Mint a runner PAT the way a real user would — in the REAL console
+  // (/corelink/en/customer/keys — server-TL confirmed, 00-discover verified).
+  const { pat, createStatuses, createBody } = await mintPatInConsole(page);
   if (!pat) {
-    note("FINDING (product gap): no in-console PAT-mint surface exists for a fresh tenant.");
-    note("00-discover proved every /corelink/* app route renders the marketing SPA — the");
-    note("self-serve runner console (keys/usage) is not built in prod yet (server/console-owned).");
-    note("So the cold-signup → runner-PAT → job chain cannot complete. Signup itself is PROVEN");
-    note("(see Part 1). This test flips GREEN the day a console PAT-mint surface ships.");
+    // The console + form are correct (00-discover proved "Create token" +
+    // keys-create-name + keys-scope-*). The create POST failed — two modes seen,
+    // HONESTLY classified (do not overclaim a server outage):
+    //  - 503 CONTAINER_UNAVAILABLE (container_start_threw): unambiguously server-side.
+    //  - 401 unauthorized: AMBIGUOUS — likely this harness mints the Clerk user via
+    //    the Backend API and POSTs before the Clerk→signup-worker webhook has
+    //    provisioned the tenant (a provisioning race), NOT necessarily a server bug.
+    //    The server's own tests/e2e-browser/05-keys-console reportedly mints OK.
+    note(`FINDING: could not mint a PAT — POST /v1/customer/keys statuses=${JSON.stringify(createStatuses)} body=${createBody}`);
+    note("The console renders + the create form submits correctly; the create endpoint failed in-run.");
+    note("Seen: 503 container_start_threw (server-side) AND 401 unauthorized (likely a fresh-user");
+    note("tenant-provisioning race in THIS harness). Open q for server-TL: what provisions the tenant");
+    note("for a Backend-API-minted user, so the undercover flow can wait for it? (See relay.)");
     test.info().annotations.push({
-      type: "product-gap",
-      description: "no self-serve runner console / PAT-mint surface in prod (server-owned) — cold signup cannot reach a runner PAT",
+      type: "blocked",
+      description: `PAT-mint create failed in-run (statuses ${createStatuses.join(",")}) — 503 server-side + 401 likely provisioning race`,
     });
     throw new Error(
-      "FINDING (product gap): no self-serve PAT-mint surface — a fresh tenant cannot obtain a runner PAT; the console is not built (server-owned).",
+      `BLOCKED: PAT-mint create failed (statuses ${createStatuses.join(",")}; ${createBody}) — 503 is server-side; 401 likely a fresh-user provisioning race (see relay).`,
     );
   }
   expect(pat).toMatch(CORELINK_PAT_RE);
-  note(`minted a runner PAT in-console (len=${pat.length}, prefix=corelink_…) — value never logged`);
+  note(`minted a runner PAT in-console (len=${pat.length}, prefix=corelink_…, create=${createStatuses.join(",")}) — value never logged`);
 
   // 3) Hit the REAL fabric /v1 with the fresh PAT — public Bearer surface only.
   const u = await usage(pat);
@@ -127,9 +146,12 @@ test("undercover: a fresh stranger mints a runner PAT and the fabric treats them
   note(`POST /v1/leases → ${a.status} state=${a.state ?? "-"} lease=${a.leaseId ?? "-"}`);
 
   if (a.status === 401 || a.status === 403) {
-    // OUTCOME B — correct fail-closed gate for an unentitled fresh tenant.
-    note("OUTCOME-B: fresh tenant is NOT runner-entitled yet → acquire fail-closes (correct gate).");
-    note("PROVEN: organic signup + prod session + in-console PAT all real; runner access correctly gates on entitlement.");
+    // OUTCOME B — correct fail-closed gate. Per server-TL Q2, a fresh tenant with
+    // no GitHub App install has an EMPTY repo_allowlist → C1 authz fail-closes.
+    // The unblock is the App install ("Connect a tool"), not a code change.
+    note("OUTCOME-B: acquire fail-closes (401/403) — the correct gate for an empty repo_allowlist.");
+    note("PROVEN: organic signup + prod session + REAL in-console PAT mint all work; the last gate");
+    note("to a running job is the GitHub App install (populates repo_allowlist) — server-TL Q2.");
     expect([401, 403]).toContain(a.status);
     return;
   }
