@@ -50,7 +50,17 @@ needs the repo in `REPO_INSTALLATION_MAP` (repo → installation_id). On YOUR si
 (`github_provision.ts`) populates `repo_allowlist` + the installation→tenant mapping. **Question:** for
 this Clerk-user tenant (no org), what's the flow to associate a GitHub App installation with it — does
 the console "Connect a tool" bind the current tenant, or does it require an org? Tell me the exact
-sequence and what you need from me (I'll supply the test repo full_name once we pick it).
+sequence and what you need from me.
+
+**Repo is READY (my-side mechanical prep done):** `HumanGuardrail/corelink-cold-organic-e2e` — a
+self-contained repo with a `runs-on: corelink` COLD→WARM workflow (`.github/workflows/
+cold-organic-cache-hit.yml`) + the vendored `corelink-memoize` action. To make its jobs resolve to the
+COLD tenant `3c7d77b1-…` (not the dogfood tenant), we need: (a) the CoreLink App installed on this repo
+(or org-wide install 144561227 already covers it), and (b) YOUR server to derive tenant `3c7d77b1` from
+`(installation_id, repo_full_name=HumanGuardrail/corelink-cold-organic-e2e)` — per-repo tenant
+derivation, since installation 144561227 currently maps to the dogfood tenant. On my side I'll add the
+repo → installation to `REPO_INSTALLATION_MAP` once you confirm the installation + derivation approach
+(held now to avoid a half-wired dogfood-mapped run). Then I dispatch → real box → `[clw] cache hit`.
 
 ## What I do on each
 - Ask 1 granted → I prove the admission gate opens (cold tenant `acquire`: 429 → admitted), cite the
