@@ -11,14 +11,19 @@ permissions:
 
 jobs:
   gates:
-    # CI runs on the CoreLink ephemeral runner fleet (ADR-0007 Stage B): the
-    # `workflow_job` autoscaler provisions a cache-warm microVM per queued job
-    # via `POST /webhooks/github`, the job runs, the box self-deregisters.
-    # `corelink-dogfood` is the JIT label the autoscaler serves (NEVER the
-    # persistent `corelink-builder` Mac — that is being retired from CI). The
-    # runner image bakes the full gate toolchain (rust 1.96.0 + rustfmt/clippy +
-    # cargo-deny/cargo-audit), so the gate runs warm. See deploy/autoscaler-stage-b.md.
-    runs-on: corelink-dogfood
+    # The correctness gate (fmt/clippy/test/deny/audit) runs on GitHub-HOSTED
+    # `ubuntu-latest`, NOT a self-hosted runner. Rationale (2026-07-19): the
+    # self-hosted dogfood/builder-Mac runner is a single point of failure — a
+    # GitHub Actions pipeline-service brownout reset its long-poll and inflated
+    # its reconnect backoff to ~3h, so the gate queued indefinitely while
+    # GitHub-hosted jobs on sibling repos ran fine. A pure correctness gate has
+    # no reason to run on the product fleet, so it moves to the managed runner:
+    # zero self-hosted infra to babysit, GitHub-managed reliability. The gate's
+    # whole toolchain is set up in-job by pinned actions below (rust-toolchain +
+    # rust-cache + install-action), so it runs identically on a clean box.
+    # (The dogfood/moat/`runs-on: corelink` PRODUCT-label workflows deliberately
+    # STAY on the ephemeral fleet — they exist to prove the product itself.)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0  # v6.0.3 (Node 24; v4 is Node 20, forced off runners 2026-06-16)
         with:
@@ -49,12 +54,10 @@ jobs:
           # vendored manifest and a re-published cargo-deny release asset.
           tool: cargo-audit@0.22.2,cargo-deny@0.19.8
 
-      # Self-hosted builder hardening: a concurrent rustup churn + disk pressure
-      # has intermittently dropped CARGO_HOME/bin (the rustup proxy AND the
-      # pinned cargo-deny/cargo-audit) from the run-step PATH — surfacing as
-      # exit 127 on cargo/cargo-deny/cargo-audit even though the binaries are
-      # present in ~/.cargo/bin. Prepending it to GITHUB_PATH here makes every
-      # gate step below resilient to that flake in one place.
+      # Ensure ~/.cargo/bin is on PATH for every gate step below: rust-toolchain
+      # and install-action both install into CARGO_HOME/bin, and prepending it
+      # once here guarantees cargo / cargo-deny / cargo-audit resolve (guards the
+      # exit-127 "binary present but not on PATH" class in one place).
       - name: ensure cargo bin on PATH
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
