@@ -39,10 +39,28 @@ interface MintResult {
 async function mintPatInConsole(page: Page): Promise<MintResult> {
   const createStatuses: number[] = [];
   let createBody = "";
+  // AUTHORITATIVE token source: the create 201 RESPONSE BODY carries the FULL
+  // plaintext `corelink_…` token (server-TL). The DOM `keys-new-token` reveal is a
+  // MASKED preview (~29 chars) — capturing that yields a truncated, INVALID token
+  // (it 401s at introspect). So we read the token from the network response.
+  let bodyToken: string | null = null;
   page.on("response", async (r) => {
     if (r.url().includes("/v1/customer/keys") && r.request().method() === "POST") {
       createStatuses.push(r.status());
-      if (r.status() >= 400 && !createBody) createBody = (await r.text().catch(() => "")).slice(0, 200);
+      const text = await r.text().catch(() => "");
+      if (r.status() >= 200 && r.status() < 300 && !bodyToken) {
+        // The 201 body is `{ pat: {...}, token: "corelink_…"(96 chars) }`. Take the
+        // `token` FIELD directly — a regex over the text truncates the 96-char token
+        // at its non-word separator (~char 29), yielding an invalid PAT that 401s.
+        try {
+          const t = JSON.parse(text)?.token;
+          if (typeof t === "string" && t.startsWith("corelink_")) bodyToken = t;
+        } catch {
+          /* fall through */
+        }
+      } else if (r.status() >= 400 && !createBody) {
+        createBody = text.slice(0, 200);
+      }
     }
   });
 
@@ -50,7 +68,8 @@ async function mintPatInConsole(page: Page): Promise<MintResult> {
   if (!resp || page.url().includes("/sign-in")) return { pat: null, createStatuses, createBody };
   await page.waitForLoadState("networkidle").catch(() => {});
 
-  // Name the token + grant at least one scope (cache:r) so it is usable.
+  // Name the token + grant at least one scope (cache:r — the canonical short form
+  // the mint now accepts after server PR #867) so it is usable.
   const name = page.locator('[data-testid="keys-create-name"], input[name="keys-create-name"], #keys-create-name').first();
   await name.fill(`e2e-undercover-${Date.now()}`).catch(() => {});
   const scope = page.locator('[data-testid="keys-scope-cache:r"], input[name="keys-scope-cache:r"]').first();
@@ -58,23 +77,15 @@ async function mintPatInConsole(page: Page): Promise<MintResult> {
 
   const createBtn = page.getByRole("button", { name: /^create token$/i }).first();
   await createBtn.click().catch(() => {});
-  await page.waitForTimeout(2500);
+  await page.waitForTimeout(3000);
 
-  // The plaintext token is revealed once, in `keys-new-token`.
-  const reveal = await page
-    .locator('[data-testid="keys-new-token"], [data-testid*="new-token"]')
-    .first()
-    .evaluate((el) => (el as HTMLInputElement).value || el.textContent || "")
-    .catch(() => "");
-  let m = reveal.match(CORELINK_PAT_RE);
-  if (m) return { pat: m[0], createStatuses, createBody };
-
-  // Fallbacks: any input value or the page text.
+  // Prefer the FULL token from the 201 body; fall back to DOM only if absent.
+  if (bodyToken) return { pat: bodyToken, createStatuses, createBody };
   const inputVal = await page
     .locator("input,textarea,code,pre")
     .evaluateAll((els) => els.map((e) => (e as HTMLInputElement).value || e.textContent || "").join("\n"))
     .catch(() => "");
-  m = inputVal.match(CORELINK_PAT_RE) || (await page.content()).match(CORELINK_PAT_RE);
+  const m = inputVal.match(CORELINK_PAT_RE) || (await page.content()).match(CORELINK_PAT_RE);
   return { pat: m ? m[0] : null, createStatuses, createBody };
 }
 
@@ -94,13 +105,13 @@ test("undercover: a fresh stranger signs up and the system accepts them as a rea
   console.log(`[undercover] authed landing = ${page.url().replace("https://humangr.com", "")} — prod session accepted`);
 });
 
-// ── PART 2: stranger → runner PAT → real lease — BLOCKED on the console gap ───
-// Currently a FINDING, not a pass: the self-serve runner console (keys/usage)
-// does NOT exist in prod — every /corelink/* app route renders the marketing
-// SPA (proven by 00-discover). So a fresh tenant has no way to mint a runner PAT
-// through the UI → the cold-signup→job chain cannot complete. This flips GREEN
-// the day the server/console ships a PAT-mint surface (then the /v1 lifecycle
-// below runs undercover unchanged).
+// ── PART 2: stranger → runner PAT → real lease — GREEN end-to-end (2026-07-20) ──
+// The full cold chain now runs undercover: a fresh stranger mints a REAL 96-char
+// PAT in the console (201) and the fabric introspects it (/v1/usage 200), then the
+// runner cap gate fires. History: this 401'd until server PR #867 fixed a scope-
+// vocabulary bug (the form POSTs `cache:r`; the mint classifier only accepted
+// `cache:read`/`cas:r`, not the canonical short form → 401). NOT a race, NOT
+// Bearer-vs-cookie (both earlier theories retracted). Fixed + proven live.
 test("undercover: a fresh stranger mints a runner PAT and the fabric treats them as a real customer", async ({
   authedPage: page,
   user,
@@ -108,71 +119,68 @@ test("undercover: a fresh stranger mints a runner PAT and the fabric treats them
   const note = (s: string) => console.log(`[undercover] ${s}`);
   note(`fresh tenant: ${user.email}`);
 
-  // READINESS GATE (server-TL measured 2026-07-20): Clerk user.created → the
-  // signup-worker provisions the tenant + free entitlement in ~3s. A create POST
-  // before that hits "no tenant → 401". Wait past the race before minting. This is
-  // the provisional floor; the server TL will hand the CONFIRMED poll-`/v1/users/me`
-  // →200 recipe when their `07-keys-mint` lands. NOTE: per their measurement the ~3s
-  // wait is necessary but NOT sufficient — console-mint still 401s beyond it (their
-  // 07 waited 12s + 4 retries and 401'd too), pending the server-side fix below.
-  await page.waitForTimeout(6000);
+  // READINESS (hygiene, not load-bearing): Clerk user.created → the signup-worker
+  // provisions the tenant + free entitlement in ~3s (server-TL measured). The mint
+  // is NOT timing-gated (the #867 fix made it correct, not a race), but a short wait
+  // guarantees the tenant row exists before the first authed call.
+  await page.waitForTimeout(4000);
 
   // Mint a runner PAT the way a real user would — in the REAL console
   // (/corelink/en/customer/keys — server-TL confirmed, 00-discover verified).
   const { pat, createStatuses, createBody } = await mintPatInConsole(page);
   if (!pat) {
-    // CONVERGED FINDING (2026-07-20): console-mint is a CONFIRMED SHARED server-side
-    // gap, NOT this harness. The server TL reproduced the SAME 401 on the create POST
-    // with their own browser harness (`07-keys-mint`), past the ~3s provisioning race
-    // (12s + 4 retries). The console + form are correct (00-discover). Two modes:
-    //  - 401 unauthorized: the persistent one. Server-TL working theory (unproven):
-    //    the console POSTs the Clerk session as a CROSS-ORIGIN BEARER to corelink-api,
-    //    which session-verification may reject like a headless FAPI JWT (cookie/
-    //    same-origin accepted; cross-origin Bearer not). Server-side investigation.
-    //  - 503 container_start_threw: a per-Durable-Object container wedge, retry-safe,
-    //    cleared on the server's image roll today.
-    note(`CONVERGED FINDING (shared, server-owned): PAT-mint POST /v1/customer/keys statuses=${JSON.stringify(createStatuses)} body=${createBody}`);
-    note("Both TLs hit the SAME 401 on the create POST with independent browser harnesses — it is a");
-    note("real server-side gap (working theory: cross-origin Bearer session-verification), NOT this");
-    note("harness. Part-2 flips GREEN when the server lands a green 07-keys-mint + hands the confirmed");
-    note("poll-/v1/users/me→200 recipe; the /v1 lifecycle below then runs undercover unchanged.");
+    // The console-mint 401 (scope-vocab) was fixed in server PR #867 + proven live
+    // (pre-roll 401 → post-roll 201). So a mint failure HERE is an unexpected
+    // REGRESSION, not the known gap — surface it loudly with the observed status.
+    note(`REGRESSION?: console PAT-mint failed — POST /v1/customer/keys statuses=${JSON.stringify(createStatuses)} body=${createBody}`);
+    note("This 401'd historically due to a scope-vocab bug fixed in server PR #867 (proven live 201).");
+    note("A failure now is unexpected — check: did the create POST use scopes:[\"cache:r\"]? server rollback?");
     test.info().annotations.push({
-      type: "server-gap",
-      description: `console PAT-mint /v1/customer/keys 401 — CONFIRMED shared server-side gap (statuses ${createStatuses.join(",")})`,
+      type: "regression",
+      description: `console PAT-mint failed (statuses ${createStatuses.join(",")}) — expected 201 post-#867`,
     });
     throw new Error(
-      `BLOCKED (confirmed shared server-side gap): console PAT-mint /v1/customer/keys ${createStatuses.join(",")} — reproduced by both TLs; server-owned (cross-origin Bearer theory). ${createBody}`,
+      `console PAT-mint failed (statuses ${createStatuses.join(",")}; ${createBody}) — expected 201 after server PR #867; possible regression.`,
     );
   }
-  expect(pat).toMatch(CORELINK_PAT_RE);
+  expect(pat, "the minted PAT must be the FULL 96-char token from the 201 body").toMatch(CORELINK_PAT_RE);
+  expect(pat.length, "a truncated token (regex over body) 401s at introspect — take the JSON field").toBeGreaterThan(60);
   note(`minted a runner PAT in-console (len=${pat.length}, prefix=corelink_…, create=${createStatuses.join(",")}) — value never logged`);
 
   // 3) Hit the REAL fabric /v1 with the fresh PAT — public Bearer surface only.
+  // A VALID full PAT MUST introspect (200); a 401 here would mean a truncated/invalid
+  // token capture (the 96-char token has a non-word separator — take the JSON `token`
+  // field, never a regex over the body).
   const u = await usage(pat);
   note(`GET /v1/usage → ${u.status} plan_cap=${u.cap ?? "null"} activeNow=${u.activeNow ?? "?"}`);
-  expect(u.status, "the fabric must introspect a real fresh PAT (not 5xx)").toBeLessThan(500);
+  expect(u.status, "the fabric must introspect a REAL fresh PAT → 200 (401 ⇒ bad token capture)").toBe(200);
 
   // 4) Attempt a real lease — assert the ACTUAL entitlement behavior honestly.
   const a = await acquire(pat, { image: VALID_IMAGE, expiryMs: 15_000, tmpRoot: `/tmp/undercover-${Date.now()}` });
   note(`POST /v1/leases → ${a.status} state=${a.state ?? "-"} lease=${a.leaseId ?? "-"}`);
 
+  if (a.status === 429) {
+    // OUTCOME-CAP — the correct gate for a fresh FREE tenant: it has NO runner plan
+    // (the console shows "No runners plan / Concurrency 0"), so the concurrency gate
+    // caps admission at 0 → 429 before the box even provisions. To run a job the
+    // tenant must buy a runner plan (concurrency>0) AND install the GitHub App
+    // (populates repo_allowlist). This is the honest end-state of a cold free signup.
+    note("OUTCOME-CAP (429): fresh free tenant has 0 runner concurrency (no runner plan) → the cap");
+    note("holds and admission is refused. PROVEN end-to-end: stranger → signup → REAL 201 PAT mint");
+    note("→ /v1 introspects it (200) → acquire correctly gated at the runner-plan cap. Undercover.");
+    return;
+  }
   if (a.status === 401 || a.status === 403) {
-    // OUTCOME B — correct fail-closed gate. Per server-TL Q2, a fresh tenant with
-    // no GitHub App install has an EMPTY repo_allowlist → C1 authz fail-closes.
-    // The unblock is the App install ("Connect a tool"), not a code change.
-    note("OUTCOME-B: acquire fail-closes (401/403) — the correct gate for an empty repo_allowlist.");
-    note("PROVEN: organic signup + prod session + REAL in-console PAT mint all work; the last gate");
-    note("to a running job is the GitHub App install (populates repo_allowlist) — server-TL Q2.");
+    // OUTCOME-AUTHZ — if the tenant DOES have concurrency but no GitHub App install,
+    // C1 authz fail-closes on the empty repo_allowlist (server-TL Q2). Also correct.
+    note("OUTCOME-AUTHZ (401/403): acquire fail-closes on an empty repo_allowlist (no GitHub App");
+    note("install). PROVEN: signup + prod session + REAL PAT mint + valid /v1 introspect all work.");
     expect([401, 403]).toContain(a.status);
     return;
   }
 
-  // OUTCOME A — entitled. Admit (or 429 at cap), then close/teardown.
-  expect([200, 201, 429], `unexpected acquire status ${a.status}`).toContain(a.status);
-  if (a.status === 429) {
-    note("OUTCOME-A(cap): entitled but already at concurrency cap → 429 (the cap holds — correct).");
-    return;
-  }
+  // OUTCOME-ADMIT — entitled + allowlisted: a real HELD lease, then close/teardown.
+  expect([200, 201], `unexpected acquire status ${a.status}`).toContain(a.status);
   expect(a.leaseId, "an admitted acquire must return a lease id").toBeTruthy();
   note(`OUTCOME-A: lease HELD as a brand-new customer — closing + teardown`);
   const c = await closeLease(pat, a.leaseId!, "succeeded");

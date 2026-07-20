@@ -13,6 +13,16 @@ headless FAPI token is 401'd by prod, only a real browser session is accepted).
 > self-serve console exists." **That was WRONG — a false negative from probing the wrong URLs.**
 > The server TL corrected it and I re-verified live. Recorded honestly per the skeptic rule.
 
+> **✅ RESOLVED 2026-07-20 — the cold chain is PROVEN END-TO-END, undercover, against live prod.**
+> A fresh stranger: signs up (prod session) → mints a **REAL 96-char PAT** in the console (`201`) →
+> the fabric **introspects it (`GET /v1/usage` → `200`)** → `POST /v1/leases` → **`429`**, the correct
+> gate (a free tenant has **0 runner concurrency** / no runner plan). Both Playwright tests GREEN.
+> The mint `401` that blocked this was a **scope-vocabulary bug** (server PR #867: the form POSTs
+> `cache:r`; the classifier only accepted `cache:read`/`cas:r`) — NOT a race, NOT Bearer-vs-cookie
+> (both earlier theories retracted). Two harness bugs of my own also fixed: probing bare paths (use
+> `/corelink/en/customer/keys`) and regex-truncating the 96-char token (take the JSON `token` field —
+> a truncated PAT 401s at introspect and masquerades as an entitlement gate).
+
 ## ✅ PROVEN: undercover signup works
 Fresh Clerk user `…@corelink-e2e.dev` → authed `/corelink/dashboard`, not bounced → **prod session
 accepted**. The identity layer is real and undercover. Throwaway user DSR-deleted on teardown.
@@ -65,7 +75,8 @@ shared server-side gap) — the `/v1` lifecycle below it did not run this sessio
 | Identity / signup (prod session) | ✅ live + undercover-proven here |
 | Self-serve console (`/corelink/en/customer/*`) | ✅ EXISTS (my earlier "missing" was wrong) |
 | Money path (upgrade → DPA → Stripe) | ✅ live (server TL also fixed a checkout basePath 405 + archived-price 502 this date) |
-| PAT-mint create (`POST /v1/customer/keys`) | ⚠️ **CONFIRMED shared server-side gap** — 401 reproduced by both TLs past the ~3s race (cross-origin Bearer theory); server-owned, under investigation. 503 was a per-DO wedge (cleared) |
+| PAT-mint create (`POST /v1/customer/keys`) | ✅ **FIXED + PROVEN** (server PR #867 — scope-vocab): fresh tenant mints a real 96-char PAT (`201`); the fabric introspects it (`/v1/usage` `200`) |
+| Runner acquire on a fresh free tenant | ✅ correct gate: `429` (0 runner concurrency — no runner plan). To run a job: buy a runner plan (concurrency>0) **and** install the GitHub App (allowlist) |
 | `repo_allowlist` (per server TL) | populated by the GitHub App install callback ("Connect a tool") — empty ⇒ acquire correctly fail-closes |
 | Free/trial entitlement (per server TL) | free tier seeds `runners_entitlement('free')` at signup, pre-payment |
 | Fabric `/v1` (acquire/cap/lease/close) | ✅ live + undercover-proven (142-journey suite) |
