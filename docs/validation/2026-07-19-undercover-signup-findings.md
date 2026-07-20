@@ -36,14 +36,28 @@ across 4 runs — two modes, classified without overclaiming:
 - **`503 CONTAINER_UNAVAILABLE` (`container_start_threw`, request_id fb60175f…)** — unambiguously
   **server-side** (a backing container failed to start). Real: a customer hitting "Create token" at
   that moment saw "customer api error (503)".
-- **`401 unauthorized`** (repeated) — **ambiguous**. Most likely a race in *this harness*: it mints
-  the Clerk user via the Backend API and POSTs before the Clerk→signup-worker webhook has provisioned
-  the tenant. The server's own `tests/e2e-browser/05-keys-console` reportedly mints OK, so this is
-  probably NOT a server bug. **Open question relayed to the server TL** (what provisions the tenant
-  for a Backend-API-minted user, so the undercover flow can wait for it).
+- **`401 unauthorized`** (repeated) — first hedged as "likely my harness race."
 
-So the harness reaches signup ✅ + the real console ✅, and stops at the PAT-mint create — the token
-was never captured, so the `/v1` lifecycle below it did not run this session.
+### UPDATE 2026-07-20 — CONVERGED: the 401 is a CONFIRMED shared server-side gap (not my harness)
+The server TL investigated with their own browser harness and **reproduced the SAME 401** on the
+create POST (`07-keys-mint`), **past the provisioning race** (12s + 4 retries). So:
+- **Tenant provisioning is ~3s** (measured: fresh Backend-API user → tenant row `active` at t+3s). My
+  race hypothesis was real but **necessary-not-sufficient** — the 401 persists beyond it.
+- **Root cause (server-TL working theory, unproven):** the console POSTs the Clerk session token as a
+  **cross-origin Bearer** to `corelink-api`; session-verification may reject it like a headless FAPI
+  JWT (cookie/same-origin path accepted, cross-origin Bearer not). The 503 was the lucky auth-accepted
+  case. **Server-side investigation; server TL owns the fix.**
+- **The 503 `container_start_threw`** = a per-Durable-Object container wedge (retry-safe, cleared on
+  their image roll today) — distinct from the 401.
+- Also corrected: their `05-keys-console` only asserts the page renders, does **not** mint — so
+  "mint works for them" was never proven either. **Console-mint is green on neither side yet.**
+
+**My side:** wired the readiness gate (≥6s floor per the ~3s measurement) into Part-2 as prep. Part-2
+flips GREEN when the server lands a green `07-keys-mint` + hands the confirmed poll-`/v1/users/me`→200
+recipe. My `/v1` fabric accepts a real Bearer PAT fine (introspect) — the block is strictly upstream.
+
+So the harness reaches signup ✅ + the real console ✅, and stops at the PAT-mint create (a confirmed
+shared server-side gap) — the `/v1` lifecycle below it did not run this session.
 
 ## Corrected go-live picture
 | Layer | State |
@@ -51,7 +65,7 @@ was never captured, so the `/v1` lifecycle below it did not run this session.
 | Identity / signup (prod session) | ✅ live + undercover-proven here |
 | Self-serve console (`/corelink/en/customer/*`) | ✅ EXISTS (my earlier "missing" was wrong) |
 | Money path (upgrade → DPA → Stripe) | ✅ live (server TL also fixed a checkout basePath 405 + archived-price 502 this date) |
-| PAT-mint create (`POST /v1/customer/keys`) | ⚠️ failed in-run (503 server-side once; 401 likely a harness provisioning race) — under confirmation |
+| PAT-mint create (`POST /v1/customer/keys`) | ⚠️ **CONFIRMED shared server-side gap** — 401 reproduced by both TLs past the ~3s race (cross-origin Bearer theory); server-owned, under investigation. 503 was a per-DO wedge (cleared) |
 | `repo_allowlist` (per server TL) | populated by the GitHub App install callback ("Connect a tool") — empty ⇒ acquire correctly fail-closes |
 | Free/trial entitlement (per server TL) | free tier seeds `runners_entitlement('free')` at signup, pre-payment |
 | Fabric `/v1` (acquire/cap/lease/close) | ✅ live + undercover-proven (142-journey suite) |
