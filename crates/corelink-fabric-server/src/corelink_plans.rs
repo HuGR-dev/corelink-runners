@@ -600,6 +600,39 @@ mod tests {
         assert_eq!(cached.tenant, tenant());
     }
 
+    /// REGRESSION (2026-07-20): `/v1/usage` shows the live cap for a tenant that has
+    /// an entitlement but has NEVER run an acquire, so the token-free `plan_of` cache
+    /// is still cold. The usage handler now resolves via `plan_of_resolving_cached`
+    /// with THIS request's captured introspect body — a pure re-parse that yields the
+    /// cap even though `plan_of` is `None`. Before, `/v1/usage` read the cold cache and
+    /// returned `plan_cap: null` (cold tenant granted concurrency=2, acquire admitted,
+    /// but a `/v1/usage` call before any acquire still read null).
+    #[test]
+    fn resolving_cached_yields_cap_when_plan_of_is_cold() {
+        let body = r#"{"valid":true,"max_concurrency":2,"max_vcpu_h":10}"#;
+        // A store whose HTTP would ERROR (500) if hit — proving the cached path does
+        // NO round-trip; it re-parses the captured body only.
+        let store = CoreLinkPlanStore::new(
+            FakeIntrospect::ok(500, "boom"),
+            cfg("https://x/i", "s3cr3t"),
+        );
+        // Token-free, never resolved → cold `None` (the OLD `/v1/usage` value).
+        assert!(
+            store.plan_of(&tenant()).is_none(),
+            "token-free cache is cold"
+        );
+        // The usage path: resolve with the request's captured introspect body.
+        let cached = crate::auth::CachedIntrospect::new(body);
+        let plan = store
+            .plan_of_resolving_cached(&tenant(), "pat-acme", Some(&cached))
+            .expect("cached parse is reachable")
+            .expect("a plan");
+        assert_eq!(
+            plan.max_concurrency, 2,
+            "usage sees the live cap via the cached resolve, not null"
+        );
+    }
+
     /// A downgrade to UNCAPPED (max_concurrency dropped) evicts the cache → the
     /// token-free `plan_of` returns to `None`, never a stale cap.
     #[test]

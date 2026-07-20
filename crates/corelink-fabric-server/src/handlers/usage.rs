@@ -19,15 +19,18 @@
 //!   profiling but MUST NOT be presented as the fabric-wide peak to the
 //!   customer.
 //!
-//! - `plan_cap` — the tenant's `max_concurrency` from the [`PlanSource`] (the
-//!   same source the admission gate consults). `null` when no plan is on file.
-//!   A plan-source error maps to 503 (fail-closed), consistent with admission.
+//! - `plan_cap` — the tenant's `max_concurrency`, RESOLVED FRESH per request via
+//!   the same `resolve_plan_offloaded` the admission gate uses (a pure re-parse of
+//!   this request's already-captured introspect body — no extra round-trip). `null`
+//!   only when no plan is genuinely on file. A plan-source error maps to 503
+//!   (fail-closed), consistent with admission. NOT the token-free `plan_of` cache,
+//!   which reads `null` for a tenant that has an entitlement but hasn't run a job yet.
 //!
-//! - `plan_ceiling_vcpu_h` — the tenant's monthly vCPU-h compute ceiling, read
-//!   token-free from [`PlanSource::tenant_ceiling_vcpu_ms`] (the same accessor
-//!   the acquire path consults for the compute gate) and converted vCPU·ms →
-//!   vCPU-h. `0` (the disabled/absent sentinel) surfaces as `null`, mirroring
-//!   `plan_cap`'s "no plan on file" convention.
+//! - `plan_ceiling_vcpu_h` — the tenant's monthly vCPU-h compute ceiling, read from
+//!   [`PlanSource::tenant_ceiling_vcpu_ms`] (the same accessor the acquire path
+//!   consults for the compute gate), WARMED by the `plan_cap` resolve above, then
+//!   converted vCPU·ms → vCPU-h. `0` (the disabled/absent sentinel) surfaces as
+//!   `null`, mirroring `plan_cap`'s "no plan on file" convention.
 //!
 //! ## Deliberate omission
 //!
@@ -44,8 +47,8 @@ use corelink_fabric::{LeaseState, TenantId};
 use corelink_fabric_api::ApiError;
 use serde::Serialize;
 
-use crate::app::AppState;
-use crate::auth::error_response;
+use crate::app::{AppState, PlanResolve};
+use crate::auth::{BearerPat, CachedIntrospect, error_response};
 
 /// Wire shape of `GET /v1/usage`.
 #[derive(Debug, Serialize)]
@@ -76,16 +79,37 @@ struct UsageResponse {
 pub(crate) async fn usage(
     State(state): State<AppState>,
     Extension(tenant): Extension<TenantId>,
+    Extension(pat): Extension<BearerPat>,
+    cached_introspect: Option<Extension<CachedIntrospect>>,
 ) -> Response {
-    // ── plan cap ────────────────────────────────────────────────────────────
-    // Mirror the admission path: plan_of returns None for "no plan on file"
-    // (which admission treats as 0-slot, but here we surface as null — the
-    // customer needs to know their cap is unknown, not pretend it is 0).
-    // plan_of never returns Err (the sync PlanSource API does not surface
-    // backend errors); if a future async backend needs error propagation, add
-    // plan_of_resolving here and map Unreachable to a 503 just as admission
-    // does. For now the static/composite sources are infallible.
-    let plan_cap = state.plans.plan_of(&tenant).map(|p| p.max_concurrency);
+    // ── plan cap (+ ceiling) — RESOLVED FRESH, exactly like the admission path ──
+    // Resolve the tenant's plan from THIS request's introspect. The auth middleware
+    // already fetched + stashed the 200 body, so `resolve_plan_offloaded` with the
+    // captured body is a PURE re-parse — NO extra round-trip (W4). We do NOT read the
+    // token-free `plan_of` cache: it returns None for any tenant not yet resolved by a
+    // prior acquire, which wrongly showed `plan_cap: null` for a tenant with a live
+    // entitlement that simply hasn't run a job yet (observed 2026-07-20: cold tenant
+    // granted concurrency=2, `acquire` admitted, but `/v1/usage` still read null).
+    // Resolving here also WARMS the vCPU-h ceiling cache read below, so both fields
+    // reflect the same introspect the acquire path consults.
+    let cached = cached_introspect.map(|Extension(c)| c);
+    let plan_cap = match state
+        .resolve_plan_offloaded(tenant.clone(), pat.0.clone(), cached)
+        .await
+    {
+        PlanResolve::Ok(plan) => plan.map(|p| p.max_concurrency),
+        // Fail-closed on a plan-source error, consistent with admission + this
+        // module's documented contract. A real customer request always carries the
+        // auth-captured introspect ⇒ the cached pure-parse path ⇒ always `Ok`; these
+        // arms are the no-captured-body fallback (static-auth / internal callers) only.
+        PlanResolve::Unreachable => {
+            return error_response(ApiError::FailClosed, "plan source unreachable");
+        }
+        PlanResolve::Shed => return crate::auth::introspect_shed_response(),
+        PlanResolve::Panicked => {
+            return error_response(ApiError::FailClosed, "plan source resolution task panicked");
+        }
+    };
 
     // ── plan ceiling (vCPU-h) ────────────────────────────────────────────────
     // Token-free, same accessor the acquire path consults for the compute
