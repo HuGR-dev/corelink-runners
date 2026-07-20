@@ -470,7 +470,8 @@ describe("re-drive reconciler (parseReconcilerRepos + listOrphanRunnerJobs)", ()
       "fetch",
       ghMock([{ id: 1, created_at: OLD }], {
         1: [
-          { id: 111, status: "queued", runner_id: null, labels: [LABEL] }, // ORPHAN ✓
+          { id: 111, status: "queued", runner_id: null, labels: [LABEL] }, // ORPHAN ✓ (null)
+          { id: 115, status: "queued", runner_id: 0, labels: [LABEL] }, // ORPHAN ✓ (GitHub's live shape: 0, not null)
           { id: 112, status: "queued", runner_id: 5, labels: [LABEL] }, // has a runner ✗
           { id: 113, status: "in_progress", runner_id: null, labels: [LABEL] }, // not queued ✗
           { id: 114, status: "queued", runner_id: null, labels: ["other"] }, // wrong label ✗
@@ -478,7 +479,24 @@ describe("re-drive reconciler (parseReconcilerRepos + listOrphanRunnerJobs)", ()
       }),
     );
     const r = await listOrphanRunnerJobs({ GITHUB_MINT_TOKEN: "t" }, "o/r", LABEL, 90_000, NOW);
-    expect(r).toEqual([{ jobId: "111", labels: [LABEL] }]);
+    expect(r).toEqual([
+      { jobId: "111", labels: [LABEL] },
+      { jobId: "115", labels: [LABEL] },
+    ]);
+  });
+
+  it("REGRESSION (2026-07-20 prod stall): a queued job GitHub reports as runner_id:0 is an orphan, not skipped", async () => {
+    // GitHub's Actions jobs API returns `runner_id: 0` (not null) for an unassigned
+    // queued job. The original `== null` filter skipped these, so the reconciler
+    // never recovered spawn-orphaned jobs and they sat `queued` forever.
+    vi.stubGlobal(
+      "fetch",
+      ghMock([{ id: 9, created_at: OLD }], {
+        9: [{ id: 915, status: "queued", runner_id: 0, labels: [LABEL] }],
+      }),
+    );
+    const r = await listOrphanRunnerJobs({ GITHUB_MINT_TOKEN: "t" }, "o/r", LABEL, 90_000, NOW);
+    expect(r).toEqual([{ jobId: "915", labels: [LABEL] }]);
   });
 
   it("family mode (configured undefined): serves bare `corelink` + `corelink-<size>`, carries the matched label", async () => {

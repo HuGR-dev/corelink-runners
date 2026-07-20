@@ -787,7 +787,14 @@ export async function listOrphanRunnerJobs(
       const jobs = (await gh(`/repos/${repo}/actions/runs/${run.id}/jobs`)) as { jobs?: GhJob[] };
       for (const j of jobs.jobs ?? []) {
         const matched = matchManagedLabels(j.labels ?? [], configured);
-        if (j.status === "queued" && j.runner_id == null && matched) {
+        // "runnerless" = no runner assigned. GitHub's Actions jobs API reports an
+        // unassigned queued job as `runner_id: 0` (observed live 2026-07-20 — NOT
+        // the `null` we originally assumed); a real assignment is a positive id.
+        // Treat BOTH 0 and null as unassigned, else EVERY orphan is silently skipped
+        // and the re-drive reconciler never recovers a spawn-orphaned job (jobs sit
+        // `queued` forever — the exact prod stall observed 2026-07-20 ~18:00Z).
+        const runnerless = j.runner_id == null || j.runner_id === 0;
+        if (j.status === "queued" && runnerless && matched) {
           // Carry the MATCHED label set (subset-gated) so the redrive mints the
           // JIT runner advertising exactly what this job requested.
           orphans.push({ jobId: String(j.id), labels: matched });
