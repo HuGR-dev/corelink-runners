@@ -69,6 +69,26 @@ export async function signInFreshUser(page: Page): Promise<AuthedUser> {
   return { userId, email };
 }
 
+/** Sign `page` into an EXISTING Clerk user by id — re-enter a persistent tenant
+ * (mints a fresh one-time ticket for that user; does NOT create a new user). */
+export async function signInExistingUser(page: Page, userId: string): Promise<void> {
+  const ticket = (await clerkPost("/sign_in_tokens", { user_id: userId })).token as string;
+  await setupClerkTestingToken({ page });
+  await page.goto("/corelink/sign-in");
+  await page.waitForFunction(() => (window as any).Clerk !== undefined, { timeout: 30_000 });
+  await page.evaluate(async () => {
+    await (window as any).Clerk.load();
+  });
+  const res = await page.evaluate(async (t: string) => {
+    const clerk = (window as any).Clerk;
+    const r = await clerk.client.signIn.create({ strategy: "ticket", ticket: t });
+    if (r.status !== "complete") return { ok: false, status: r.status };
+    await clerk.setActive({ session: r.createdSessionId });
+    return { ok: true, status: r.status };
+  }, ticket);
+  expect(res.ok, `sign-in status=${res.status}`).toBeTruthy();
+}
+
 /** Base test extended with an `authedPage` + the `user` it belongs to. */
 export const test = base.extend<{ authedPage: Page; user: AuthedUser }>({
   user: async ({ page }, use) => {
