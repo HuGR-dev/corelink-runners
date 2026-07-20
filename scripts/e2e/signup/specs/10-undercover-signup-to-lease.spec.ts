@@ -108,29 +108,40 @@ test("undercover: a fresh stranger mints a runner PAT and the fabric treats them
   const note = (s: string) => console.log(`[undercover] ${s}`);
   note(`fresh tenant: ${user.email}`);
 
+  // READINESS GATE (server-TL measured 2026-07-20): Clerk user.created → the
+  // signup-worker provisions the tenant + free entitlement in ~3s. A create POST
+  // before that hits "no tenant → 401". Wait past the race before minting. This is
+  // the provisional floor; the server TL will hand the CONFIRMED poll-`/v1/users/me`
+  // →200 recipe when their `07-keys-mint` lands. NOTE: per their measurement the ~3s
+  // wait is necessary but NOT sufficient — console-mint still 401s beyond it (their
+  // 07 waited 12s + 4 retries and 401'd too), pending the server-side fix below.
+  await page.waitForTimeout(6000);
+
   // Mint a runner PAT the way a real user would — in the REAL console
   // (/corelink/en/customer/keys — server-TL confirmed, 00-discover verified).
   const { pat, createStatuses, createBody } = await mintPatInConsole(page);
   if (!pat) {
-    // The console + form are correct (00-discover proved "Create token" +
-    // keys-create-name + keys-scope-*). The create POST failed — two modes seen,
-    // HONESTLY classified (do not overclaim a server outage):
-    //  - 503 CONTAINER_UNAVAILABLE (container_start_threw): unambiguously server-side.
-    //  - 401 unauthorized: AMBIGUOUS — likely this harness mints the Clerk user via
-    //    the Backend API and POSTs before the Clerk→signup-worker webhook has
-    //    provisioned the tenant (a provisioning race), NOT necessarily a server bug.
-    //    The server's own tests/e2e-browser/05-keys-console reportedly mints OK.
-    note(`FINDING: could not mint a PAT — POST /v1/customer/keys statuses=${JSON.stringify(createStatuses)} body=${createBody}`);
-    note("The console renders + the create form submits correctly; the create endpoint failed in-run.");
-    note("Seen: 503 container_start_threw (server-side) AND 401 unauthorized (likely a fresh-user");
-    note("tenant-provisioning race in THIS harness). Open q for server-TL: what provisions the tenant");
-    note("for a Backend-API-minted user, so the undercover flow can wait for it? (See relay.)");
+    // CONVERGED FINDING (2026-07-20): console-mint is a CONFIRMED SHARED server-side
+    // gap, NOT this harness. The server TL reproduced the SAME 401 on the create POST
+    // with their own browser harness (`07-keys-mint`), past the ~3s provisioning race
+    // (12s + 4 retries). The console + form are correct (00-discover). Two modes:
+    //  - 401 unauthorized: the persistent one. Server-TL working theory (unproven):
+    //    the console POSTs the Clerk session as a CROSS-ORIGIN BEARER to corelink-api,
+    //    which session-verification may reject like a headless FAPI JWT (cookie/
+    //    same-origin accepted; cross-origin Bearer not). Server-side investigation.
+    //  - 503 container_start_threw: a per-Durable-Object container wedge, retry-safe,
+    //    cleared on the server's image roll today.
+    note(`CONVERGED FINDING (shared, server-owned): PAT-mint POST /v1/customer/keys statuses=${JSON.stringify(createStatuses)} body=${createBody}`);
+    note("Both TLs hit the SAME 401 on the create POST with independent browser harnesses — it is a");
+    note("real server-side gap (working theory: cross-origin Bearer session-verification), NOT this");
+    note("harness. Part-2 flips GREEN when the server lands a green 07-keys-mint + hands the confirmed");
+    note("poll-/v1/users/me→200 recipe; the /v1 lifecycle below then runs undercover unchanged.");
     test.info().annotations.push({
-      type: "blocked",
-      description: `PAT-mint create failed in-run (statuses ${createStatuses.join(",")}) — 503 server-side + 401 likely provisioning race`,
+      type: "server-gap",
+      description: `console PAT-mint /v1/customer/keys 401 — CONFIRMED shared server-side gap (statuses ${createStatuses.join(",")})`,
     });
     throw new Error(
-      `BLOCKED: PAT-mint create failed (statuses ${createStatuses.join(",")}; ${createBody}) — 503 is server-side; 401 likely a fresh-user provisioning race (see relay).`,
+      `BLOCKED (confirmed shared server-side gap): console PAT-mint /v1/customer/keys ${createStatuses.join(",")} — reproduced by both TLs; server-owned (cross-origin Bearer theory). ${createBody}`,
     );
   }
   expect(pat).toMatch(CORELINK_PAT_RE);
