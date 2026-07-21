@@ -190,6 +190,14 @@ export interface MintParams {
   installationId: string; // evt.installation.id (stringified)
   scope?: string; // default "read-write"
   ttlSeconds?: number; // optional PAT TTL override
+  // Option-C (per-tenant-PAT dispatch, server confirmed live 2026-07-21): when set,
+  // the mint resolves the tenant by INTROSPECTING this acquiring PAT instead of
+  // deriving it from installation_id. Presented as `Authorization: Bearer <pat>`
+  // ALONGSIDE the dispatcher's `x-corelink-internal-auth` (both required — the
+  // internal-auth is still the trust boundary; the PAT only names the tenant), and
+  // `installation_id` is OMITTED from the body (server rejects a null/"" as
+  // malformed → 400). Used for repos in REPO_TENANT_PAT_MAP; empty map ⇒ never set.
+  acquiringPat?: string;
 }
 
 // The per-job CAS PAT mint result. `tenant` is the SERVER-DERIVED, authoritative
@@ -219,19 +227,29 @@ export class MintForbiddenError extends Error {
 // Error (caller falls open to a COLD spawn — cache absent ⇒ slow, never broken).
 async function mintCasPat(env: MintEnv, params: MintParams): Promise<MintResult> {
   const base = env.CORELINK_MINT_URL ?? "https://corelink-api.humangr.com";
+  // Option-C (per-tenant-PAT dispatch): resolve the tenant by introspecting the
+  // acquiring PAT. The dispatcher trust boundary (x-corelink-internal-auth) is
+  // UNCHANGED — the Bearer PAT is additive and only names the tenant (server
+  // runner_mint.ts:407-427). `installation_id` MUST be omitted entirely (a null/""
+  // is rejected as malformed → 400); server-confirmed scope for this path is cas:rw.
+  const optionC = !!params.acquiringPat;
+  const headers: Record<string, string> = {
+    "x-corelink-internal-auth": env.CORELINK_RUNNER_MINT_AUTH_KEY ?? "",
+    "content-type": "application/json",
+    "user-agent": "corelink-spawn-worker",
+  };
+  if (optionC) headers["authorization"] = `Bearer ${params.acquiringPat}`;
   const resp = await fetch(`${base}/internal/v1/runner/mint`, {
     method: "POST",
-    headers: {
-      "x-corelink-internal-auth": env.CORELINK_RUNNER_MINT_AUTH_KEY ?? "",
-      "content-type": "application/json",
-      "user-agent": "corelink-spawn-worker",
-    },
-    // FROZEN request body: NO owner_tenant (server derives the tenant).
+    headers,
+    // FROZEN request body: NO owner_tenant (server derives the tenant). Option-C
+    // OMITS installation_id (tenant comes from PAT introspection) and pins scope
+    // cas:rw; the default installation-derived path is byte-identical to before.
     body: JSON.stringify({
       job_id: params.jobId,
       repo_full_name: params.repoFullName,
-      installation_id: params.installationId,
-      scope: params.scope ?? "read-write",
+      ...(optionC ? {} : { installation_id: params.installationId }),
+      scope: params.scope ?? (optionC ? "cas:rw" : "read-write"),
       ...(params.ttlSeconds != null ? { ttl_seconds: params.ttlSeconds } : {}),
     }),
   });
@@ -418,7 +436,13 @@ export async function buildContainerEnv(
 ): Promise<ContainerEnvResult> {
   // No mint key, or not enough to authorize ⇒ COLD (legacy fail-open). We do NOT
   // authorize and do NOT warm — the job spawns without CLW_* under no tenant.
-  if (!env.CORELINK_RUNNER_MINT_AUTH_KEY || !params.repoFullName || !params.installationId) {
+  // Authorizable when we have EITHER an installation_id (tenant derived from it) OR
+  // an acquiring PAT (Option-C: tenant derived by introspection).
+  if (
+    !env.CORELINK_RUNNER_MINT_AUTH_KEY ||
+    !params.repoFullName ||
+    (!params.installationId && !params.acquiringPat)
+  ) {
     return { authz: "ok", containerEnv: {} };
   }
   try {
@@ -626,6 +650,27 @@ export function installationIdForRepo(json: string | undefined, repoFullName: st
     const map = JSON.parse(json) as Record<string, unknown>;
     const v = map[repoFullName];
     return typeof v === "string" ? v : typeof v === "number" ? String(v) : "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Option-C per-tenant-PAT dispatch (server-confirmed live 2026-07-21). Look up a
+ * repo in REPO_TENANT_PAT_MAP — a JSON `{ "<owner/repo>": "<SECRET_ENV_NAME>" }`
+ * that maps a repo to the NAME of the secret binding holding that tenant's
+ * acquiring PAT (the raw PAT is a Worker secret, never in this var). Returns the
+ * secret NAME, or "" when the map is absent/malformed or the repo isn't listed
+ * (⇒ default installation-derived mint). Never throws. The caller reads
+ * `env[<name>]` to get the PAT, so a mapped-but-unbound secret still falls back to
+ * the default path (no PAT ⇒ no Option-C).
+ */
+export function tenantPatSecretForRepo(json: string | undefined, repoFullName: string): string {
+  if (!json || !repoFullName) return "";
+  try {
+    const map = JSON.parse(json) as Record<string, unknown>;
+    const v = map[repoFullName];
+    return typeof v === "string" ? v : "";
   } catch {
     return "";
   }
