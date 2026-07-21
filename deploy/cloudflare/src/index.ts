@@ -63,6 +63,7 @@ import {
   decideRedeem,
   parseReconcilerRepos,
   installationIdForRepo,
+  tenantPatSecretForRepo,
   installationAllowlistArmed,
   isInstallationAllowlisted,
   matchManagedLabels,
@@ -182,6 +183,18 @@ export interface Env {
   // WARM (server derives the tenant) without requiring an App webhook. e.g.
   // {"HumanGuardrail/corelink-runners":"144561227"}. Absent/unmatched ⇒ COLD.
   REPO_INSTALLATION_MAP?: string;
+  // ── Option-C per-tenant-PAT dispatch (server-confirmed live 2026-07-21) ───────
+  // JSON `{ "<owner/repo>": "<SECRET_ENV_NAME>" }` mapping a repo to the NAME of the
+  // secret binding holding that tenant's acquiring PAT. When a workflow_job repo
+  // matches AND that secret is bound, the mint resolves the tenant by INTROSPECTING
+  // the PAT (installation_id omitted) instead of deriving it from the installation.
+  // The GitHub JIT/box still registers via the installation — only the CAS-tenant
+  // changes. Absent/unmatched/unbound ⇒ default installation-derived mint (no-op).
+  // e.g. {"HumanGuardrail/corelink-cold-organic-e2e":"COLD_ORGANIC_TENANT_PAT"}.
+  REPO_TENANT_PAT_MAP?: string;
+  // The acquiring PAT secret(s) referenced by REPO_TENANT_PAT_MAP (bound via
+  // `wrangler secret put`; never in wrangler.jsonc). Indexed by name at runtime.
+  COLD_ORGANIC_TENANT_PAT?: string;
   // ── External-GA installation allowlist (WP-D) — the pre-mint identity gate ────
   // A comma/whitespace-separated list of GitHub App installation ids permitted to
   // drive a spawn. OPT-IN + FAIL-CLOSED-WHEN-ARMED: unset/blank ⇒ NOT armed ⇒
@@ -837,7 +850,23 @@ async function driveSpawn(
         fabricEndpoint: env.SPAWN_WORKER_PUBLIC_URL,
       }
     : undefined;
-  const mint = await buildContainerEnv(env, { jobId, repoFullName: repo, installationId }, env0);
+  // Option-C: if this repo is mapped to a tenant-PAT secret AND that secret is
+  // bound, present the PAT so the mint resolves the tenant by introspection
+  // (installation_id omitted). Unmapped/unbound ⇒ acquiringPat undefined ⇒ the
+  // default installation-derived mint (unchanged). The installationId still flows
+  // for the GitHub JIT/box registration below — only the CAS-tenant changes.
+  const patSecretName = tenantPatSecretForRepo(env.REPO_TENANT_PAT_MAP, repo);
+  const acquiringPat = patSecretName
+    ? (env as unknown as Record<string, string | undefined>)[patSecretName]
+    : undefined;
+  if (patSecretName && acquiringPat) {
+    logEvent("info", "mint_option_c_pat_dispatch", { jobId, repo, patSecret: patSecretName });
+  }
+  const mint = await buildContainerEnv(
+    env,
+    { jobId, repoFullName: repo, installationId, acquiringPat },
+    env0,
+  );
   if (mint.authz === "forbidden") {
     await releaseSpawnClaim(env.RUNNER_JOB_PATS, jobId);
     await bumpMetrics(env, "spawn_forbidden");
