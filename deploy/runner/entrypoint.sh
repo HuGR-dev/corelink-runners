@@ -119,7 +119,21 @@ fi
 # Ephemeral + self-deregistering: the runner exits cleanly after one job and
 # removes itself from the runner pool.  The fabric tears down the box on exit.
 #
-# We exec (replace shell) so signals pass cleanly to the runner process.
-# The value of CORELINK_RUNNER_JITCONFIG is passed as an argument — it is
-# NEVER echoed, logged, or expanded into a visible string here.
-exec ./run.sh --jitconfig "$CORELINK_RUNNER_JITCONFIG"
+# Diagnostic-capable launch: run under `tee` (not `exec`) so a non-zero exit —
+# e.g. a JIT registration failure, which is otherwise INVISIBLE (the container has
+# only CF-internal egress + no `wrangler containers logs`) — can be surfaced. On
+# failure we POST the tail of run.sh's output to the Worker's /runner-diag sink
+# (reachable via CLW_FABRIC_ENDPOINT, the same host the cred-ticket redeems against),
+# which `logEvent`s it into `wrangler tail`. run.sh NEVER echoes the jitconfig value,
+# so the captured output carries no secret. The value is still passed as an argument
+# only — never expanded into a visible string here.
+set +e
+./run.sh --jitconfig "$CORELINK_RUNNER_JITCONFIG" 2>&1 | tee /tmp/runsh.out
+rc=${PIPESTATUS[0]}
+if [[ "$rc" -ne 0 && -n "${CLW_FABRIC_ENDPOINT:-}" && -n "${CLW_LEASE_ID:-}" ]]; then
+  echo "runner: ./run.sh exited ${rc} — POSTing diagnostic tail to the fabric." >&2
+  tail -c 3000 /tmp/runsh.out 2>/dev/null | curl -s -m 10 -X POST \
+    "${CLW_FABRIC_ENDPOINT}/v1/leases/${CLW_LEASE_ID}/runner-diag" \
+    -H "content-type: text/plain" --data-binary @- >/dev/null 2>&1 || true
+fi
+exit "$rc"
