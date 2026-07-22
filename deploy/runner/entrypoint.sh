@@ -52,14 +52,23 @@ cd "$(dirname "$0")"
 # This container runs exactly one such clw process (the hydrate below) before the
 # untrusted job; the job itself must not be handed a live redeemable ticket.
 if [[ -n "${CLW_ENDPOINT:-}" && ( -n "${CLW_CRED_TICKET:-}" || -n "${CLW_TOKEN:-}" ) ]]; then
-  echo "cache-warm: CLW_* injected — hydrating build cache from the CoreLink CAS (in-network)…"
+  echo "cache-warm: CLW_* injected — pre-warming build cache from the CoreLink CAS (in-network, background)…"
   if command -v clw >/dev/null 2>&1; then
-    if clw hydrate "${CLW_CACHE_DEST:-$HOME/.cache/corelink}" \
-         --name "${CLW_CACHE_KEY:-runner-cache}"; then
-      echo "cache-warm: hydrate OK — warm run."
-    else
-      echo "cache-warm: hydrate failed — proceeding COLD (north-star: slow, never broken)." >&2
-    fi
+    # Run the BOOT pre-warm in the BACKGROUND. It is a best-effort pre-warm; the WARM
+    # job step's OWN `clw run` is the AUTHORITATIVE memoize (the `[clw] cache hit`
+    # capstone). Two failure modes forced this (both root-caused 2026-07-21):
+    #   1. A slow/retrying FOREGROUND hydrate (3× redemptions, ~18s) starved the GH
+    #      runner's registration+claim window → the box was reaped before claiming the
+    #      job → the job never ran.
+    #   2. A `timeout` cap was WORSE: SIGKILL mid-op leaked clw's per-container lock and
+    #      the job's own `clw run` then hung on it (COLD step stuck → job failure).
+    # Backgrounding fixes both: `./run.sh` starts AT ONCE (fast, reliable registration),
+    # and the pre-warm completes + releases the lock on its OWN — the job's `clw run`
+    # serialises behind it, never leaked, never killed. Fail-OPEN (north star).
+    ( clw hydrate "${CLW_CACHE_DEST:-$HOME/.cache/corelink}" \
+        --name "${CLW_CACHE_KEY:-runner-cache}" \
+      && echo "cache-warm: background hydrate OK." \
+      || echo "cache-warm: background hydrate failed — COLD (harmless, north star)." >&2 ) &
   else
     echo "cache-warm: clw not found in image — proceeding COLD." >&2
   fi
@@ -130,9 +139,13 @@ fi
 set +e
 ./run.sh --jitconfig "$CORELINK_RUNNER_JITCONFIG" 2>&1 | tee /tmp/runsh.out
 rc=${PIPESTATUS[0]}
+# Keepable observability: on a NON-ZERO runner exit (e.g. a JIT registration failure)
+# POST the output tail to the Worker's /runner-diag sink so it surfaces in `wrangler
+# tail` — the container has no external log path (this is exactly how the 2026-07-21
+# box-registration root-cause was found). Carries no secret (run.sh never echoes the
+# jitconfig). No-op on success or when the env-0 vars are absent.
 if [[ "$rc" -ne 0 && -n "${CLW_FABRIC_ENDPOINT:-}" && -n "${CLW_LEASE_ID:-}" ]]; then
-  echo "runner: ./run.sh exited ${rc} — POSTing diagnostic tail to the fabric." >&2
-  tail -c 3000 /tmp/runsh.out 2>/dev/null | curl -s -m 10 -X POST \
+  { printf 'run.sh exit=%s\n---output tail---\n' "${rc}"; tail -c 2800 /tmp/runsh.out 2>/dev/null; } | curl -s -m 10 -X POST \
     "${CLW_FABRIC_ENDPOINT}/v1/leases/${CLW_LEASE_ID}/runner-diag" \
     -H "content-type: text/plain" --data-binary @- >/dev/null 2>&1 || true
 fi
