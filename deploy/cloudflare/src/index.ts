@@ -1321,6 +1321,23 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       }
     }
 
+    // ── POST /v1/leases/{lease_id}/runner-diag — box→Worker diagnostic sink ────
+    // The runner container has only CF-internal egress + no `wrangler containers
+    // logs`, so a `./run.sh --jitconfig` registration FAILURE inside the box is
+    // otherwise invisible. entrypoint.sh POSTs the tail of run.sh's output here on a
+    // non-zero exit; we `logEvent` it so it surfaces in `wrangler tail`. Ticket-less
+    // (the box holds no bearer), capped, and it carries NO secret (run.sh never
+    // echoes the jitconfig). Keyed by leaseId==jobId for correlation.
+    {
+      const diag = pathname.match(/^\/v1\/leases\/([^/]+)\/runner-diag$/);
+      if (request.method === "POST" && diag) {
+        const jobId = decodeURIComponent(diag[1]);
+        const raw = await request.text().catch(() => "");
+        logEvent("error", "runner_diag", { jobId, output: raw.slice(0, 3000) });
+        return json({ ok: true }, 200);
+      }
+    }
+
     // ── /v1/* routes — bearer-authed (the fabric/Engine seam) ────────────────
     if (!authed(request, env)) return unauthorized();
 
