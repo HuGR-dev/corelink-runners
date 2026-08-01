@@ -17,7 +17,7 @@ key. **HIT** (byte-identical inputs) → returns the memoized output WITHOUT re-
 → full **MISS → full rebuild**. All-or-nothing per input set. Great for "identical re-run = free"
 (CI retries, matrix legs, unchanged PR re-checks, cross-job dedup) — NOT for partial/incremental reuse.
 
-- **PROVEN empirically** (run 29850459289, `moat-incremental-test`, `HumanGuardrail/corelink-cold-organic-e2e`):
+- **PROVEN empirically** (run 29850459289, `moat-incremental-test`, `HuGR-Labs/corelink-cold-organic-e2e`):
   v1 build **61s** (miss) · v1-again **8s** (`[clw] cache hit`) · change ONE function + `cargo clean` →
   v2 **53s full rebuild** (`[clw] cache miss`). A 1-file change rebuilt everything. So **clw run does NOT
   rebuild-only-changed.**
@@ -53,4 +53,4 @@ Server crates: `corelink-reapi` (REAPI v2 wire), `corelink-ac` (ActionCache), `c
 ## Runner-box plumbing to run any of this on a real box
 See the `moat-benchmark` skill for the workflow-dispatch method, and
 `docs/handoff/2026-07-21-*optionC*` for Option-C (per-tenant-PAT mint via spawn-worker `REPO_TENANT_PAT_MAP`)
-so a job on `HumanGuardrail/corelink-cold-organic-e2e` mints the cold tenant `3c7d77b1`'s `cas:rw`.
+so a job on `HuGR-Labs/corelink-cold-organic-e2e` mints the cold tenant `3c7d77b1`'s `cas:rw`.

@@ -115,7 +115,7 @@ fn acquire_request_conformance_vector_is_byte_exact() {
         expiry_ms: 60_000,
         runner: Some(RunnerSpec {
             target: RunnerTargetDto::Repo {
-                owner: "HumanGuardrail".to_string(),
+                owner: "HuGR-Labs".to_string(),
                 repo: "corelink-runners".to_string(),
             },
             labels: vec!["corelink".to_string(), "linux-x64".to_string()],

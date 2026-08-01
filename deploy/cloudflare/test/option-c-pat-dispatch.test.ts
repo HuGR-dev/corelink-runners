@@ -13,7 +13,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { buildContainerEnv, tenantPatSecretForRepo, type MintEnv } from "../src/lib";
 
 const COLD_PAT = "corelink_pat_FRRBJ4DG0HGFJG5P.aaa.bbb";
-const REPO = "HumanGuardrail/corelink-cold-organic-e2e";
+const REPO = "HuGR-Labs/corelink-cold-organic-e2e";
 
 // Capture the single /internal/v1/runner/mint request and return a fake 200.
 function mockMint(capture: { req?: { headers: Headers; body: unknown } }) {

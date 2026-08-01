@@ -190,7 +190,7 @@ export interface Env {
   // the PAT (installation_id omitted) instead of deriving it from the installation.
   // The GitHub JIT/box still registers via the installation — only the CAS-tenant
   // changes. Absent/unmatched/unbound ⇒ default installation-derived mint (no-op).
-  // e.g. {"HumanGuardrail/corelink-cold-organic-e2e":"COLD_ORGANIC_TENANT_PAT"}.
+  // e.g. {"HuGR-Labs/corelink-cold-organic-e2e":"COLD_ORGANIC_TENANT_PAT"}.
   REPO_TENANT_PAT_MAP?: string;
   // The acquiring PAT secret(s) referenced by REPO_TENANT_PAT_MAP (bound via
   // `wrangler secret put`; never in wrangler.jsonc). Indexed by name at runtime.

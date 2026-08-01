@@ -6,7 +6,7 @@
   "runner": {
     "target": {
       "repo": {
-        "owner": "HumanGuardrail",
+        "owner": "HuGR-Labs",
         "repo": "corelink-runners"
       }
     },

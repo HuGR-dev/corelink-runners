@@ -23,11 +23,15 @@ acquiring PAT. When matched, the mint presents `Authorization: Bearer <pat>` **A
 `x-corelink-internal-auth`, and **OMITS installation_id entirely** (null/"" → 400) → server resolves the
 tenant by introspecting the PAT (`runner_mint.ts` ~407-427); scope `cas:rw`. The JIT/box still registers
 via the org install — only the CAS-tenant changes. Live example:
-`REPO_TENANT_PAT_MAP={"HumanGuardrail/corelink-cold-organic-e2e":"COLD_ORGANIC_TENANT_PAT"}`. Confirm on
+`REPO_TENANT_PAT_MAP={"HuGR-Labs/corelink-cold-organic-e2e":"COLD_ORGANIC_TENANT_PAT"}`. Confirm on
 the tail: `mint_option_c_pat_dispatch`. Gated default-off (empty map). Server confirms the wire live in
 `docs/handoff/2026-07-21-reply-server-TL-optionC-CONFIRMED-live-allowlist-seeded-go-C1.md`.
 
 ## Deploy / observe
+- ⚠️ **`wrangler deploy` REPLACES every plain-text `var` with whatever `wrangler.jsonc` says**
+  (secrets survive, vars do not). A var that is committed as `"{}"` while prod runs a real value is a
+  silent disarm — `REPO_TENANT_PAT_MAP` was exactly that until 2026-08-01. Before any deploy, diff the
+  committed `vars` against the live ones (`npx wrangler deployments status` / the CF dashboard).
 - Deploy: `cd deploy/cloudflare && npx wrangler deploy`. Secrets: `npx wrangler secret put <NAME> --name
   corelink-spawn-worker < /tmp/val` (write the value via node, no echo; `printf '%s'` — trailing \n breaks it).
 - Tail: `npx wrangler tail corelink-spawn-worker --format=pretty` (App only emits `workflow_job`, NOT
@@ -58,5 +62,5 @@ suspend/entitlement) → wasted deploy, so ask them to seed BOTH. Tenant must be
 
 ## Key tenant / repos (2026-07)
 - Cold-organic tenant `3c7d77b1-0a50-4f87-893f-36ac785670df` (entitled 20/100), PAT in scratch
-  `cold-tenant.json`. Proof repo `HumanGuardrail/corelink-cold-organic-e2e` (Option-C). Dogfood install
+  `cold-tenant.json`. Proof repo `HuGR-Labs/corelink-cold-organic-e2e` (Option-C). Dogfood install
   150584374 → `d863fafb`. See `moat-benchmark` + `corelink-moat` skills.
