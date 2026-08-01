@@ -36,10 +36,10 @@ steps:
       - chmod +x target/release/corelink
       - export PATH="$PWD/target/release:$PATH"
     plugins:
-      # Use HumanGuardrail/corelink#v0.1.0 from the Buildkite Plugin Registry
+      # Use HuGR-Labs/corelink#v0.1.0 from the Buildkite Plugin Registry
       # once the plugin is published.  For local/dev use, reference the repo
       # directory directly.
-      - HumanGuardrail/corelink#v0.1.0:
+      - HuGR-Labs/corelink#v0.1.0:
           # url is read from CORELINK_URL env var if not specified here.
           url: "https://runners.corelink.dev"
           check: "cargo test --workspace --locked"
@@ -62,7 +62,7 @@ steps:
       - chmod +x target/release/corelink
       - export PATH="$PWD/target/release:$PATH"
     plugins:
-      - HumanGuardrail/corelink#v0.1.0:
+      - HuGR-Labs/corelink#v0.1.0:
           check: "cargo clippy --workspace --all-targets --locked -- -D warnings"
           check-id: "cargo-clippy"
           image: "ubuntu@sha256:a6d2b38300ce017add71440577d5b0a90460d0602a9f4920e2cae943d53c8fac"

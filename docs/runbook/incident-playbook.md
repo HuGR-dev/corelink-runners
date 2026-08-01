@@ -249,7 +249,7 @@ Walk it in this order:
    presence per [`secret-inventory.md`](./secret-inventory.md).
 4. **Right label + allowlisted repo?** The job must carry the managed label
    (default `corelink-dogfood`) and, for the reconciler re-drive, its repo must be
-   in `RECONCILER_REPOS` (`HumanGuardrail/corelink-runners`). A stranger repo's
+   in `RECONCILER_REPOS` (`HuGR-Labs/corelink-runners`). A stranger repo's
    job with no App installation mints **COLD** or not at all.
 5. **At ceiling?** §3d.
 
@@ -274,7 +274,7 @@ Walk it in this order:
 ### 4a. Where the mint lives
 
 - **First-party (dogfood) JIT mint** uses a static token `GITHUB_MINT_TOKEN`
-  (repo `Administration:write`), only valid on `HumanGuardrail` repos.
+  (repo `Administration:write`), only valid on `HuGR-Labs` repos.
 - **Customer-repo JIT mint** uses a **GitHub-App installation token**, built in
   [`deploy/cloudflare/src/github_app.ts`](../../deploy/cloudflare/src/github_app.ts):
   1. `appJwt(appId, privateKeyPem, now)` — a short-lived RS256 App JWT
@@ -284,8 +284,8 @@ Walk it in this order:
   2. `installationToken(...)` — exchanges the JWT for a per-installation token via
      `POST /app/installations/{id}/access_tokens`, cached in KV at
      `ghtok:<installationId>`.
-- The live GitHub App is installation **144561227** (dogfood
-  `HumanGuardrail/corelink-runners`). The App already exists — reuse it, do not
+- The live GitHub App is installation **150584374** (dogfood
+  `HuGR-Labs/corelink-runners`). The App already exists — reuse it, do not
   create a new one.
 
 ### 4b. Verify the App credential is healthy (App-JWT → installation-token probe)
@@ -310,7 +310,7 @@ curl -s -H "Authorization: Bearer $JWT" -H "Accept: application/vnd.github+json"
 
 # Installation-token probe (the exact mint path github_app.ts runs).
 curl -s -X POST -H "Authorization: Bearer $JWT" -H "Accept: application/vnd.github+json" \
-  https://api.github.com/app/installations/144561227/access_tokens | jq 'keys'
+  https://api.github.com/app/installations/150584374/access_tokens | jq 'keys'
 ```
 
 A 201 with a `token` field = the App credential is healthy. A 401 = the private
@@ -345,7 +345,7 @@ curl -s -X PATCH -H "Authorization: Bearer $JWT" -H "Accept: application/vnd.git
 
 **Known good-path detail:** a plain *repo* webhook payload has no
 `installation.id`, so first-party repos are given one via the
-`REPO_INSTALLATION_MAP` var (`{"HumanGuardrail/corelink-runners":"144561227"}`)
+`REPO_INSTALLATION_MAP` var (`{"HuGR-Labs/corelink-runners":"150584374"}`)
 so the server-derived mint runs **WARM** (cache-warm) without an App webhook.
 If dogfood suddenly spawns COLD, check that map matches
 `repository.full_name` exactly.

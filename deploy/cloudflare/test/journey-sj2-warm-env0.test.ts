@@ -515,7 +515,7 @@ describe("SJ-2 cell 1 — warm env-0 injects a CLW_CRED_TICKET overlay, never th
     const metrics = fakeMetrics();
     const cred = makeCredStash();
     const env = warmEnv(kv, metrics, cred, {
-      REPO_INSTALLATION_MAP: JSON.stringify({ "acme/api": "144561227" }),
+      REPO_INSTALLATION_MAP: JSON.stringify({ "acme/api": "150584374" }),
     });
     const ctx = makeCtx();
 
@@ -525,7 +525,7 @@ describe("SJ-2 cell 1 — warm env-0 injects a CLW_CRED_TICKET overlay, never th
 
     // The mint WAS consulted with the mapped installation_id ⇒ warm overlay present.
     expect(mintCalls()).toHaveLength(1);
-    expect(mintBodies[0]).toMatchObject({ repo_full_name: "acme/api", installation_id: "144561227" });
+    expect(mintBodies[0]).toMatchObject({ repo_full_name: "acme/api", installation_id: "150584374" });
     const e = runnerEnv();
     expect(typeof e.CLW_CRED_TICKET).toBe("string");
     expect(e.CLW_TOKEN).toBeUndefined();

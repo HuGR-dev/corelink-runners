@@ -48,7 +48,7 @@ pass=$([ "$conclusion" = "success" ] && [ "$ephemeral" = true ] && [ "$cf_machin
 run_id="${E2E_RUN_ID:-door-a-$rid}"
 dir="$repo/docs/validation/evidence/$run_id"
 mkdir -p "$dir"
-url="https://github.com/HumanGuardrail/corelink-runners/actions/runs/$rid"
+url="https://github.com/HuGR-Labs/corelink-runners/actions/runs/$rid"
 cat > "$dir/TS2-door-a-spawn.json" <<JSON
 {
   "cell": "TS2-door-a-spawn",

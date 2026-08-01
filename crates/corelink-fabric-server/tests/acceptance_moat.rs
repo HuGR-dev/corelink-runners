@@ -92,7 +92,7 @@ impl BoxProvisioner for CapturingProvisioner {
 /// moat lease MUST declare both. Tests that wire no mint ignore them.
 fn runner_acq_body() -> AcquireRequest {
     AcquireRequest {
-        repo_full_name: Some("HumanGuardrail/corelink-runners".to_string()),
+        repo_full_name: Some("HuGR-Labs/corelink-runners".to_string()),
         installation_id: Some("12345".to_string()),
         image_digest: PINNED_IMAGE.to_string(),
         net_policy: "ignored-runner-forces-egress".to_string(),
@@ -100,7 +100,7 @@ fn runner_acq_body() -> AcquireRequest {
         expiry_ms: 600_000,
         runner: Some(RunnerSpec {
             target: RunnerTargetDto::Repo {
-                owner: "HumanGuardrail".to_string(),
+                owner: "HuGR-Labs".to_string(),
                 repo: "corelink-runners".to_string(),
             },
             labels: vec!["corelink".to_string()],
@@ -132,7 +132,7 @@ fn harness_with_moat(
         tenant: acme(),
         max_concurrency: 4,
         rate_ceiling_per_min: 100,
-        repo_allowlist: vec!["repo:HumanGuardrail/corelink-runners".to_string()],
+        repo_allowlist: vec!["repo:HuGR-Labs/corelink-runners".to_string()],
     }]);
     let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
     let cap = Arc::new(CapturingProvisioner::default());

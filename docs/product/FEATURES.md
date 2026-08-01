@@ -180,11 +180,11 @@ gate rides on.
 **What** `runs-on: corelink[-<size>]` — the customer's **unmodified** workflow runs on a cache-warm microVM,
 one ephemeral runner per job, producing the customer's own GitHub check status.
 **Where** the GH runner agent (`config + run --ephemeral --jitconfig`); spawn at F-7.1; broker at F-5.8.
-**Status** 🟢 LIVE for dogfood/first-party (App installation 144561227); the **external** customer path is
+**Status** 🟢 LIVE for dogfood/first-party (App installation 150584374); the **external** customer path is
 🔵 OWNER-GATED (F-8.1).
 **Details** ICP-B (CI/platform teams). Box command = the GH runner agent; result = the customer's GitHub check.
 **Exercised by** S1.1.1–S1.1.4, S1.2.1–S1.2.5, S1.4.1–S1.4.5.
-**Validated by** `webhook-route.test.ts`, `github-app.test.ts`, dogfood fleet (App 144561227).
+**Validated by** `webhook-route.test.ts`, `github-app.test.ts`, dogfood fleet (App 150584374).
 
 ### F-2.2 — hugit (discontinued) front door (memoized, attested check)  🟢
 
@@ -1186,7 +1186,7 @@ Every coined term, used verbatim thereafter.
 | **Attested cost** | The signed §13 `IntentMetrics` on `CloseResponse` (`intent_metrics_sig`, F-5.4) — a per-job spend a consumer can render as tamper-evident (hugit was the intended consumer, discontinued). |
 | **Cache-warm boot** | Booting a box with the CAS/AC pre-warmed so the job's inputs are local before the first instruction (F-4.3). |
 | **Cred-ticket (C2c)** | A single-use, lease-scoped ticket injected instead of the raw CAS PAT; redeemed at trusted boot (F-5.9). "PAT never on the box." |
-| **Dogfood** | HuGR's own first-party use of the fabric (App installation 144561227) — the live-proven path. |
+| **Dogfood** | HuGR's own first-party use of the fabric (App installation 150584374) — the live-proven path. |
 | **env-0** | The environment injected into a runner box at spawn (JITCONFIG, cred-ticket, ingest token) — the injection surface (F-5.8). |
 | **Fence** | The set of paths a job may touch; sparse materialization IS the fence (out-of-fence ⇒ ENOENT) (F-4.4). |
 | **FLIP-A / FLIP-B** | The moat go-live transitions: FLIP-A = per-job CAS-PAT mint armed; FLIP-B = `intent_metrics_sig` on the wire (F-5.4, F-5.9). |

@@ -87,7 +87,7 @@ test('JOURNEY · first job — one PAT provisions a real runner, zero dev onboar
     })
     .step('the runner is visible to its owner exactly as a normal run would be', async (ctx) => {
       const g = await getLease(pat, ctx.lease);
-      return check(g.status === 200 && g.state === 'held', `owner reads the held runner (200 held) — drop-in, developer-invisible`, { status: g.status, state: g.state, gap: 'GitHub-App install (144561227 exists+LIVE) + `runs-on: corelink` webhook spawn + visible `[clw] cache hit` are ⚪ X4-external (need a real App install / CoreLink PAT)' });
+      return check(g.status === 200 && g.state === 'held', `owner reads the held runner (200 held) — drop-in, developer-invisible`, { status: g.status, state: g.state, gap: 'GitHub-App install (150584374 exists+LIVE) + `runs-on: corelink` webhook spawn + visible `[clw] cache hit` are ⚪ X4-external (need a real App install / CoreLink PAT)' });
     })
     .step('the box tears down on release — nothing lingers for the dev to manage', async (ctx) => {
       const c = await closeLease(pat, ctx.lease);

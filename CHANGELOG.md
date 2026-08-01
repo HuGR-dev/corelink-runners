@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-08-01 — GitHub org migration `HumanGuardrail` → `HuGR-Labs` (repo slug + App installation)
+
+- **fix(cloudflare): repin the spawn-Worker to the migrated org + installation.** The CoreLink
+  repos moved to the `HuGR-Labs` org on 2026-08-01 and the `corelink-runners` GitHub App
+  (id 4222041) was transferred + reinstalled, changing the installation id **`144561227` →
+  `150584374`**. `REPO_INSTALLATION_MAP` (`{"HuGR-Labs/corelink-runners":"150584374"}`) and
+  `RECONCILER_REPOS` (`HuGR-Labs/corelink-runners`) in `deploy/cloudflare/wrangler.jsonc` are
+  matched by EXACT string against the webhook payload's `repository.full_name` — GitHub's
+  transfer redirect does NOT apply to a string compare — so both stale values would have
+  produced the silent failure mode `runs-on: corelink` picks up no job (403 / COLD spawn with
+  no tenant derivation). Requires a Worker redeploy to take effect (owner action).
+- **fix(runner-image/check-host): repin the `clw-releases` download origin** to
+  `HuGR-Labs/clw-releases` (the release repo migrated too); minisign key unchanged.
+- **test(fabric): the org-rename regression (G5) now guards BOTH dead slugs.**
+  `stale_org_slugs_denied_against_hugr_labs_allowlist` asserts that `humangr-labs` **and**
+  `HumanGuardrail` acquires are denied `400` against the live `HuGR-Labs` allowlist, reserving
+  no slot and minting nothing. Fixtures across the Rust + Worker suites repinned to the new
+  org/installation.
+- **docs:** runbooks (`incident-playbook`, `cloudflare-go-live`, `dogfood-go-live`,
+  `secret-inventory`), the fabric env reference, the product catalogs, the SDK/integration
+  package metadata, and the agent skills repinned. `docs/handoff/**` and `docs/review/**`
+  are left as-is (dated historical record).
+- **fix(option-c): repin the cold-organic proof repo — it migrated too.**
+  `corelink-cold-organic-e2e` is now `HuGR-Labs/corelink-cold-organic-e2e` (verified
+  2026-08-01 via `gh api repos/HuGR-Labs/corelink-cold-organic-e2e`; an earlier revision of
+  this entry wrongly claimed it had stayed on `HumanGuardrail`). This one is NOT cosmetic:
+  `REPO_TENANT_PAT_MAP` is keyed by the exact `owner/repo` string and consumed by
+  `tenantPatSecretForRepo` (`deploy/cloudflare/src/lib.ts`) against the webhook's
+  `repository.full_name`, so a stale key silently misses → no Option-C dispatch → the
+  cold-organic box mints under the **installation-derived dogfood tenant `d863fafb` instead
+  of `3c7d77b1`**, attributing cache + billing to the wrong tenant with no error. All 10
+  live references repinned (the three agent skills, the `Env` doc-comment in
+  `deploy/cloudflare/src/index.ts`, and the Option-C vitest fixture).
+- **fix(cloudflare): `REPO_TENANT_PAT_MAP` is now pinned to its live value in
+  `wrangler.jsonc`** (`{"HuGR-Labs/corelink-cold-organic-e2e":"COLD_ORGANIC_TENANT_PAT"}`)
+  instead of `"{}"`. The var held `"{}"` while prod ran a non-empty map, so ANY
+  `wrangler deploy` silently DISARMED Option-C — including the redeploy this change
+  requires. The map contains only a secret NAME (the PAT itself stays the
+  `COLD_ORGANIC_TENANT_PAT` secret binding), and a mapped-but-unbound secret still falls
+  back to the default installation-derived mint, so config-as-code here is fail-safe.
+- **`conformance/AcquireRequest.json` repinned** to `"owner": "HuGR-Labs"` (+ its byte-exact
+  golden in `conformance_lease_dtos.rs` and its `conformance/manifest.sha256` digest). This
+  vector is not illustrative: the server TL seeded the production D1 `runner_repo_allowlist`
+  row from it (`docs/handoff/2026-07-08-REPO-SLUG-DEFINED-*`), which is what produced the
+  2026-07-08 slug incident — and the previous org rename repinned it for exactly that reason
+  (`b76f2f3`). The "frozen from hugit's side" constraint is dead: hugit is discontinued.
+
 ### 2026-06-17 — Cold-start S-class hardening + Phase-2 cache-moat relays (#87)
 
 - **fix(runner): admit-time box-backend guard (S2).** A runner-mode acquire under the no-op

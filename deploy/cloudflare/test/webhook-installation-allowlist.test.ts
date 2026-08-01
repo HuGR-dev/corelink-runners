@@ -120,7 +120,7 @@ async function ghSign(secret: string, body: string): Promise<string> {
 }
 
 const SECRET = "whsec-allowlist";
-const DOGFOOD_INSTALL = 144561227;
+const DOGFOOD_INSTALL = 150584374;
 
 async function queuedWebhook(
   env: Env,
@@ -241,7 +241,7 @@ describe("/webhook installation allowlist — SET + KNOWN id ⇒ proceeds", () =
 
     const resp = await queuedWebhook(env, ctx, {
       jobId: "2003",
-      repo: "HumanGuardrail/corelink-runners",
+      repo: "HuGR-Labs/corelink-runners",
       installationId: DOGFOOD_INSTALL,
     });
     expect(resp.status).toBe(202);
@@ -273,12 +273,12 @@ describe("/webhook installation allowlist — SET + KNOWN id ⇒ proceeds", () =
     const env = baseEnv({
       RUNNER_JOB_PATS: kv as never,
       INSTALLATION_ALLOWLIST: `${DOGFOOD_INSTALL}`,
-      REPO_INSTALLATION_MAP: `{"HumanGuardrail/corelink-runners":"${DOGFOOD_INSTALL}"}`,
+      REPO_INSTALLATION_MAP: `{"HuGR-Labs/corelink-runners":"${DOGFOOD_INSTALL}"}`,
     });
     const ctx = makeCtx();
     // No installationId in the payload → the map injection must resolve it to the
     // listed dogfood id, so the armed gate still admits it.
-    const resp = await queuedWebhook(env, ctx, { jobId: "2005", repo: "HumanGuardrail/corelink-runners" });
+    const resp = await queuedWebhook(env, ctx, { jobId: "2005", repo: "HuGR-Labs/corelink-runners" });
     expect(resp.status).toBe(202);
     expect(kv.store.has("spawn:2005")).toBe(true);
     await drain(ctx);

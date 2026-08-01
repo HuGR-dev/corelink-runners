@@ -1,7 +1,7 @@
 // GitHub-App installation-token minting — the CUSTOMER-repo credential path.
 //
 // The dogfood autoscaler mints its JIT runner config with a STATIC first-party
-// token (`GITHUB_MINT_TOKEN`) that only has rights on HumanGuardrail repos. A
+// token (`GITHUB_MINT_TOKEN`) that only has rights on HuGR-Labs repos. A
 // stranger's `runs-on: corelink` job lives on THEIR repo, where that token 404s.
 // To mint a JIT runner on a customer repo the Worker must present an INSTALLATION
 // ACCESS TOKEN for the GitHub App on THAT installation. This module builds it:

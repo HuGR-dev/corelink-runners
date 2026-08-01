@@ -1101,16 +1101,16 @@ describe("releaseSlotByJob (release by jobId, prune expired)", () => {
 });
 
 describe("installationIdForRepo (inject installation_id on repo webhooks)", () => {
-  const MAP = JSON.stringify({ "HumanGuardrail/corelink-runners": "144561227", "o/num": 999 });
+  const MAP = JSON.stringify({ "HuGR-Labs/corelink-runners": "150584374", "o/num": 999 });
   it("returns the mapped installation_id for a known repo", () =>
-    expect(installationIdForRepo(MAP, "HumanGuardrail/corelink-runners")).toBe("144561227"));
+    expect(installationIdForRepo(MAP, "HuGR-Labs/corelink-runners")).toBe("150584374"));
   it("coerces a numeric map value to string", () =>
     expect(installationIdForRepo(MAP, "o/num")).toBe("999"));
   it("returns '' for an unmapped repo (⇒ COLD)", () =>
     expect(installationIdForRepo(MAP, "other/repo")).toBe(""));
   it("returns '' when the map is absent", () =>
-    expect(installationIdForRepo(undefined, "HumanGuardrail/corelink-runners")).toBe(""));
+    expect(installationIdForRepo(undefined, "HuGR-Labs/corelink-runners")).toBe(""));
   it("returns '' (never throws) on malformed JSON", () =>
-    expect(installationIdForRepo("{not json", "HumanGuardrail/corelink-runners")).toBe(""));
+    expect(installationIdForRepo("{not json", "HuGR-Labs/corelink-runners")).toBe(""));
   it("returns '' for an empty repo name", () => expect(installationIdForRepo(MAP, "")).toBe(""));
 });

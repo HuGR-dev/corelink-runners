@@ -437,7 +437,7 @@ async function completedWebhook(env: Env, jobId: string, secret: string): Promis
   const body = JSON.stringify({
     action: "completed",
     workflow_job: { id: Number(jobId), labels: ["corelink-dogfood"] },
-    repository: { full_name: "HumanGuardrail/corelink-runners" },
+    repository: { full_name: "HuGR-Labs/corelink-runners" },
   });
   return worker.fetch(
     new Request("https://w/webhook", {

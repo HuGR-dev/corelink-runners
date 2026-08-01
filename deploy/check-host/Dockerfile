@@ -19,7 +19,7 @@
 # Stage: clw-download (W6, 2026-07-06) — fetch + digest-verify clw v0.1.5 (the
 # release adding `--manifest-digest`). Separate stage so curl never ships in the
 # runtime image. X4 floor: CLW_SHA256 is from the minisign-signed SHA256SUMS of the
-# v0.1.5 release (HumanGuardrail/clw-releases, key 4B57B8B54A0E396D) — verified
+# v0.1.5 release (HuGR-Labs/clw-releases, key 4B57B8B54A0E396D) — verified
 # end-to-end (minisign + real-binary sha) before pinning. glibc build (linux-gnu),
 # matching the debian:12-slim runtime — NOT musl.
 # -----------------------------------------------------------------------------
@@ -31,7 +31,7 @@ RUN apt-get update -qq && \
     apt-get install -y --no-install-recommends curl ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 RUN curl -fsSL \
-      "https://github.com/HumanGuardrail/clw-releases/releases/download/v${CLW_VERSION}/clw-${CLW_VERSION}-x86_64-unknown-linux-gnu" \
+      "https://github.com/HuGR-Labs/clw-releases/releases/download/v${CLW_VERSION}/clw-${CLW_VERSION}-x86_64-unknown-linux-gnu" \
       -o /clw && \
     echo "${CLW_SHA256}  /clw" | sha256sum -c - && \
     chmod +x /clw && \

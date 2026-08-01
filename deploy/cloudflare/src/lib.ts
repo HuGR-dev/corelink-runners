@@ -690,7 +690,7 @@ export function tenantPatSecretForRepo(json: string | undefined, repoFullName: s
 // exact behavior (never breaks the live deploy). When armed (≥1 id parsed), an
 // installation id absent from the list is refused BEFORE any mint/spawn/claim.
 // Comma- OR whitespace-separated ids. e.g. arm with
-// INSTALLATION_ALLOWLIST="144561227,<customer-install-id>" (144561227 = the
+// INSTALLATION_ALLOWLIST="150584374,<customer-install-id>" (150584374 = the
 // dogfood installation — it MUST stay served).
 
 /** Parse the comma/whitespace-separated installation-id list. Non-throwing;

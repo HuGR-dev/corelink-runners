@@ -36,7 +36,7 @@
 # CLW BINARY (the moat drive — snapshot/hydrate/run):
 #   Pinned to clw v0.1.4, digest-verified (X4 floor). The sha256 below is from
 #   the minisign-signed SHA256SUMS of the v0.1.4 GitHub Release
-#   (HumanGuardrail/clw-releases, minisign key id 4B57B8B54A0E396D), so pinning
+#   (HuGR-Labs/clw-releases, minisign key id 4B57B8B54A0E396D), so pinning
 #   the digest transitively trusts the signed manifest. To refresh: bump
 #   CLW_VERSION + CLW_SHA256 from the signed SHA256SUMS of the new release.
 #   The runner drives `clw` per the frozen CLI/exit contract (125 = clw-internal).
@@ -72,7 +72,7 @@ RUN curl -fsSL \
 FROM ubuntu:24.04@sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae77ff1dc54 AS clw-download
 
 # clw release to pin (x86_64-unknown-linux-gnu). Refresh both from the signed
-# SHA256SUMS at https://github.com/HumanGuardrail/clw-releases/releases.
+# SHA256SUMS at https://github.com/HuGR-Labs/clw-releases/releases.
 ARG CLW_VERSION=0.1.4
 ARG CLW_SHA256=9ec443d173c6088978cb73caf7b15983ac7161879b3c5663059fea7a4fdf5d8c
 
@@ -83,7 +83,7 @@ RUN apt-get update -qq && \
     rm -rf /var/lib/apt/lists/*
 
 RUN curl -fsSL \
-      "https://github.com/HumanGuardrail/clw-releases/releases/download/v${CLW_VERSION}/clw-${CLW_VERSION}-x86_64-unknown-linux-gnu" \
+      "https://github.com/HuGR-Labs/clw-releases/releases/download/v${CLW_VERSION}/clw-${CLW_VERSION}-x86_64-unknown-linux-gnu" \
       -o /tmp/clw && \
     echo "${CLW_SHA256}  /tmp/clw" | sha256sum -c - && \
     install -m 0755 /tmp/clw /usr/local/bin/clw && \

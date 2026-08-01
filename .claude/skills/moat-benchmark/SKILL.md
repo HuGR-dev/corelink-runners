@@ -1,21 +1,21 @@
 ---
 name: moat-benchmark
 version: 0.1.0
-description: How to run a CoreLink cache-moat benchmark on a real `runs-on: corelink` box and read honest, citable numbers. Covers both a COLD→WARM whole-build benchmark (clw run / corelink-memoize) and a "rebuild-only-changed" incremental test. Includes the exact dispatch mechanics (push a workflow to HumanGuardrail/corelink-cold-organic-e2e, `gh workflow run`, poll, read `[clw]` verdicts + GH step timestamps), the tenant-attribution proof (Option-C mint on the tail), and the pitfalls that produce fake numbers (non-identical COLD/WARM commands, missing run-unique key, clw skipping the command on a hit, compile errors). Invoke whenever asked to benchmark/measure the moat, prove a speedup, or demonstrate rebuild-only-changed on a box.
+description: How to run a CoreLink cache-moat benchmark on a real `runs-on: corelink` box and read honest, citable numbers. Covers both a COLD→WARM whole-build benchmark (clw run / corelink-memoize) and a "rebuild-only-changed" incremental test. Includes the exact dispatch mechanics (push a workflow to HuGR-Labs/corelink-cold-organic-e2e, `gh workflow run`, poll, read `[clw]` verdicts + GH step timestamps), the tenant-attribution proof (Option-C mint on the tail), and the pitfalls that produce fake numbers (non-identical COLD/WARM commands, missing run-unique key, clw skipping the command on a hit, compile errors). Invoke whenever asked to benchmark/measure the moat, prove a speedup, or demonstrate rebuild-only-changed on a box.
 ---
 
 # moat-benchmark — measure the moat honestly on a real box
 
-Runs on `HumanGuardrail/corelink-cold-organic-e2e` (Option-C maps it to cold tenant `3c7d77b1`; the
+Runs on `HuGR-Labs/corelink-cold-organic-e2e` (Option-C maps it to cold tenant `3c7d77b1`; the
 vendored `./actions/corelink-memoize` is already in the repo). Requires the App-installed org install
-(144561227) for JIT + the spawn-worker deployed with `REPO_TENANT_PAT_MAP` + `COLD_ORGANIC_TENANT_PAT`.
+(150584374) for JIT + the spawn-worker deployed with `REPO_TENANT_PAT_MAP` + `COLD_ORGANIC_TENANT_PAT`.
 
 ## Dispatch mechanics
 1. Write the workflow locally; base64 via node (avoids sandbox `$(...)` issues), PUT it:
-   `gh api -X PUT repos/HumanGuardrail/corelink-cold-organic-e2e/contents/.github/workflows/<name>.yml -f message=… -f "content=$(cat /tmp/x.b64)" [-f "sha=$SHA" to update]`
+   `gh api -X PUT repos/HuGR-Labs/corelink-cold-organic-e2e/contents/.github/workflows/<name>.yml -f message=… -f "content=$(cat /tmp/x.b64)" [-f "sha=$SHA" to update]`
    (gh/git hit a sandbox "failed to change group ID" error → run these Bash calls with
    `dangerouslyDisableSandbox: true`; node `fetch` works fine in-sandbox).
-2. `gh workflow run <name>.yml --repo HumanGuardrail/corelink-cold-organic-e2e --ref main`, then poll
+2. `gh workflow run <name>.yml --repo HuGR-Labs/corelink-cold-organic-e2e --ref main`, then poll
    `gh run view <id> --json status,conclusion` in a background loop until `completed`.
 3. Read verdicts + timing:
    - `[clw] cache miss` / `[clw] cache hit` — grep the job `--log`. These are the ground truth.

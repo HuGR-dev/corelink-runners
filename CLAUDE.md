@@ -16,8 +16,11 @@ HuGR (the company / brand)
    hugit / githugr (agent-fleet forge)                         (campaign #3, DISCONTINUED 2026-07)
 ```
 
-**CURRENT STATE (2026-07-17).** Repo `HumanGuardrail/corelink-runners` (private; org
-renamed from `humangr-labs`), default branch `main`, real CI on the self-hosted runner
+**CURRENT STATE (2026-07-17).** Repo `HuGR-Labs/corelink-runners` (private; migrated
+out of `HumanGuardrail` on 2026-08-01, which had itself been renamed from `humangr-labs`
+— both are DEAD slugs; the GitHub App installation moved `144561227` → `150584374` in the
+same migration, and every match is EXACT-string, redirects do not apply), default branch
+`main`, real CI on the self-hosted runner
 `corelink-runners-builder-01`. The fabric is **LIVE on Cloudflare**: `fabricd` (the Rust
 control plane) runs as a CF Container singleton behind a proxy Worker with a **pg-durable
 ledger** (DATABASE_URL bound → survives restart; vCPU-ceiling gate armed), and the

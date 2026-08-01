@@ -22,35 +22,44 @@
     // (this repo) is armed; add product repos only if they are trusted.
     // Canonical org name (matches the webhook payload's repository.full_name AND
     // the REPO_INSTALLATION_MAP key, so the reconciler's WARM re-drive lookup hits).
-    "RECONCILER_REPOS": "HumanGuardrail/corelink-runners",
+    "RECONCILER_REPOS": "HuGR-Labs/corelink-runners",
     // Inject the known installation_id for first-party repos (the repo webhook has
     // none) so the server-derived mint (#283) runs WARM without an App webhook.
-    // dogfood: HumanGuardrail/corelink-runners → installation 144561227 → tenant
+    // dogfood: HuGR-Labs/corelink-runners → installation 150584374 → tenant
     // d863fafb (verified read-only by the clw coordinator). Key MUST match the
     // webhook payload's repository.full_name exactly.
     // NOTE: the server derivation is installation_id → tenant, 1:1 (runner_mint.ts:395);
     // the repo does NOT redirect the tenant (it's only an allowlist gate WITHIN that
-    // tenant). So a HumanGuardrail repo under install 144561227 ALWAYS resolves to
-    // d863fafb — you cannot map a second HumanGuardrail repo to a different tenant here.
+    // tenant). So a HuGR-Labs repo under install 150584374 ALWAYS resolves to
+    // d863fafb — you cannot map a second HuGR-Labs repo to a different tenant here.
     // A cold-organic tenant's OWN box needs that tenant's OWN GitHub App install
-    // (task #68 self-serve OAuth) — not a REPO_INSTALLATION_MAP entry under 144561227.
-    "REPO_INSTALLATION_MAP": "{\"HumanGuardrail/corelink-runners\":\"144561227\"}",
+    // (task #68 self-serve OAuth) — not a REPO_INSTALLATION_MAP entry under 150584374.
+    "REPO_INSTALLATION_MAP": "{\"HuGR-Labs/corelink-runners\":\"150584374\"}",
     // ── Option-C per-tenant-PAT dispatch (server-confirmed live 2026-07-21) ──────
     // Maps a repo to the NAME of the secret holding that tenant's acquiring PAT. When
     // a workflow_job on this repo fires, the mint resolves the tenant by INTROSPECTING
     // the PAT (installation_id omitted) → the box's CAS runs under THAT tenant, while
-    // the GitHub JIT/runner registration still rides the repo's org install (144561227).
+    // the GitHub JIT/runner registration still rides the repo's org install (150584374).
     // Used to prove the cache moat for the cold-organic tenant 3c7d77b1 without a
     // separate GitHub App install (which is gated on the browser install UI). The raw
     // PAT is the secret COLD_ORGANIC_TENANT_PAT (bound via `wrangler secret put`, never
     // here). Unmapped/unbound ⇒ default installation-derived mint (no-op).
-    "REPO_TENANT_PAT_MAP": "{}",
+    //
+    // ⚠️ THIS VALUE MUST MIRROR PROD. `vars` are declarative: every `wrangler deploy`
+    // REPLACES the live value. This key held `"{}"` while prod ran a non-empty map, so
+    // any deploy silently DISARMED Option-C — the cold-organic box would then fall through
+    // to the installation-derived mint and attribute its CAS + billing to the dogfood
+    // tenant d863fafb instead of 3c7d77b1, with NO error anywhere. Pinning the live value
+    // here is fail-safe: the map holds only the secret NAME, and a mapped-but-unbound
+    // secret still falls back to the default mint (`index.ts` `patSecretName && acquiringPat`).
+    // If you change the map, keep `COLD_ORGANIC_TENANT_PAT` bound (`wrangler secret list`).
+    "REPO_TENANT_PAT_MAP": "{\"HuGR-Labs/corelink-cold-organic-e2e\":\"COLD_ORGANIC_TENANT_PAT\"}",
     // ── External-GA installation allowlist (WP-D) — DELIBERATELY UNSET here ────
     // Leaving INSTALLATION_ALLOWLIST out keeps the gate DISARMED (today's exact
     // behavior — the server's post-cold-spawn 403 is the only identity authz).
     // To arm the pre-mint edge gate for real customers, add it with the dogfood
-    // installation (144561227 — MUST stay served) plus each entitled customer id:
-    //   "INSTALLATION_ALLOWLIST": "144561227,<customer-install-id>",
+    // installation (150584374 — MUST stay served) plus each entitled customer id:
+    //   "INSTALLATION_ALLOWLIST": "150584374,<customer-install-id>",
     // Once set, any webhook whose resolved installation id is not listed is
     // refused BEFORE any mint/spawn/claim/COLD_REPO_CAP-slot/orphan.
     // ── env-0 ARMED (2026-07-06) — no CAS PAT in the untrusted container ──────

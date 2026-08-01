@@ -13,7 +13,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { buildContainerEnv, tenantPatSecretForRepo, type MintEnv } from "../src/lib";
 
 const COLD_PAT = "corelink_pat_FRRBJ4DG0HGFJG5P.aaa.bbb";
-const REPO = "HumanGuardrail/corelink-cold-organic-e2e";
+const REPO = "HuGR-Labs/corelink-cold-organic-e2e";
 
 // Capture the single /internal/v1/runner/mint request and return a fake 200.
 function mockMint(capture: { req?: { headers: Headers; body: unknown } }) {
@@ -72,7 +72,7 @@ describe("mintCasPat Option-C wire (via buildContainerEnv)", () => {
     const r = await buildContainerEnv(baseEnv, {
       jobId: "42",
       repoFullName: REPO,
-      installationId: "144561227", // present (for the JIT), but MUST NOT reach the mint body
+      installationId: "150584374", // present (for the JIT), but MUST NOT reach the mint body
       acquiringPat: COLD_PAT,
     });
     expect(cap.req).toBeDefined();
@@ -93,12 +93,12 @@ describe("mintCasPat Option-C wire (via buildContainerEnv)", () => {
     vi.stubGlobal("fetch", mockMint(cap));
     await buildContainerEnv(baseEnv, {
       jobId: "43",
-      repoFullName: "HumanGuardrail/corelink-runners",
-      installationId: "144561227",
+      repoFullName: "HuGR-Labs/corelink-runners",
+      installationId: "150584374",
     });
     expect(cap.req!.headers.get("authorization")).toBeNull();
     expect(cap.req!.headers.get("x-corelink-internal-auth")).toBe("dispatcher-key");
-    expect(cap.req!.body.installation_id).toBe("144561227");
+    expect(cap.req!.body.installation_id).toBe("150584374");
     expect(cap.req!.body.scope).toBe("read-write");
   });
 
