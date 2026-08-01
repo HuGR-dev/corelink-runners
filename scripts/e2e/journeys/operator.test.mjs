@@ -47,7 +47,7 @@ test('JOURNEY · an onboarded tenant is admittable; the admin registry is fail-c
 });
 
 // S5.1.2 — "Point our own CI at runs-on: corelink-dogfood." The App is live (installation
-// 144561227, owner-gated); full cache-hit smoke is X4-external. Observable: the mint/attest
+// 150584374, owner-gated); full cache-hit smoke is X4-external. Observable: the mint/attest
 // substrate the JIT-runner path depends on is LIVE (attestation key served).
 test('JOURNEY · the dogfood mint/attest substrate is live; App + full smoke are gated', { skip: need('pro') }, async () => {
   await new Journey('Point CI at the fleet — mint substrate live, App owner-gated', { sid: ['S5.1.2'], persona: 'P5 operator', atoms: ['F-7.1'] })
@@ -60,7 +60,7 @@ test('JOURNEY · the dogfood mint/attest substrate is live; App + full smoke are
       return check(r.status === 200 && !!k?.key_id && bytes === 32, `attestation key ${k?.key_id} serves a 32-byte ed25519 pubkey (FLIP-B live)`, { status: r.status, keyId: k?.key_id ?? null, pubkeyBytes: bytes });
     })
     .step('record the residual: the App install and full cache-hit smoke are gated', async (ctx) => {
-      return check(!!ctx.keyId, `substrate live under key ${ctx.keyId}; the on-ramp itself is gated`, { app: 'installation 144561227 — owner-gated (GitHub App live)', fullSmoke: 'X4-external (needs a real CoreLink PAT or hugit dispatch)' });
+      return check(!!ctx.keyId, `substrate live under key ${ctx.keyId}; the on-ramp itself is gated`, { app: 'installation 150584374 — owner-gated (GitHub App live)', fullSmoke: 'X4-external (needs a real CoreLink PAT or hugit dispatch)' });
     })
     .run();
 });

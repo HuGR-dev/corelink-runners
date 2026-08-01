@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-08-01 — GitHub org migration `HumanGuardrail` → `HuGR-Labs` (repo slug + App installation)
+
+- **fix(cloudflare): repin the spawn-Worker to the migrated org + installation.** The CoreLink
+  repos moved to the `HuGR-Labs` org on 2026-08-01 and the `corelink-runners` GitHub App
+  (id 4222041) was transferred + reinstalled, changing the installation id **`144561227` →
+  `150584374`**. `REPO_INSTALLATION_MAP` (`{"HuGR-Labs/corelink-runners":"150584374"}`) and
+  `RECONCILER_REPOS` (`HuGR-Labs/corelink-runners`) in `deploy/cloudflare/wrangler.jsonc` are
+  matched by EXACT string against the webhook payload's `repository.full_name` — GitHub's
+  transfer redirect does NOT apply to a string compare — so both stale values would have
+  produced the silent failure mode `runs-on: corelink` picks up no job (403 / COLD spawn with
+  no tenant derivation). Requires a Worker redeploy to take effect (owner action).
+- **fix(runner-image/check-host): repin the `clw-releases` download origin** to
+  `HuGR-Labs/clw-releases` (the release repo migrated too); minisign key unchanged.
+- **test(fabric): the org-rename regression (G5) now guards BOTH dead slugs.**
+  `stale_org_slugs_denied_against_hugr_labs_allowlist` asserts that `humangr-labs` **and**
+  `HumanGuardrail` acquires are denied `400` against the live `HuGR-Labs` allowlist, reserving
+  no slot and minting nothing. Fixtures across the Rust + Worker suites repinned to the new
+  org/installation.
+- **docs:** runbooks (`incident-playbook`, `cloudflare-go-live`, `dogfood-go-live`,
+  `secret-inventory`), the fabric env reference, the product catalogs, the SDK/integration
+  package metadata, and the agent skills repinned. `HumanGuardrail/corelink-cold-organic-e2e`
+  is DELIBERATELY unchanged — that repo did **not** migrate. `docs/handoff/**`,
+  `docs/review/**` and the frozen `conformance/AcquireRequest.json` vector are left as-is
+  (historical record / cross-repo byte-parity tripwire, respectively).
+
 ### 2026-06-17 — Cold-start S-class hardening + Phase-2 cache-moat relays (#87)
 
 - **fix(runner): admit-time box-backend guard (S2).** A runner-mode acquire under the no-op

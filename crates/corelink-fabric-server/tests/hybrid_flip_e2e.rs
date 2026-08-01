@@ -154,7 +154,7 @@ fn hybrid_harness(worker: Arc<FakeWorker>, check_sub: RecordingProvisioner) -> R
         tenant: acme(),
         max_concurrency: 4,
         rate_ceiling_per_min: 100,
-        repo_allowlist: vec!["repo:HumanGuardrail/corelink-runners".to_string()],
+        repo_allowlist: vec!["repo:HuGR-Labs/corelink-runners".to_string()],
     }]);
     let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
 
@@ -218,7 +218,7 @@ fn runner_acq_body() -> AcquireRequest {
         expiry_ms: 600_000,
         runner: Some(RunnerSpec {
             target: RunnerTargetDto::Repo {
-                owner: "HumanGuardrail".to_string(),
+                owner: "HuGR-Labs".to_string(),
                 repo: "corelink-runners".to_string(),
             },
             labels: vec!["corelink".to_string()],

@@ -131,7 +131,7 @@ export interface Env {
   // A GitHub token with repo Administration:write — used to mint the JIT runner
   // config (POST generate-jitconfig). Worker secret. Absent ⇒ /webhook 503.
   // This is the STATIC first-party dogfood credential: it only has rights on
-  // HumanGuardrail repos. A CUSTOMER repo's mint uses a GitHub-App installation
+  // HuGR-Labs repos. A CUSTOMER repo's mint uses a GitHub-App installation
   // token instead (GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY below); this stays the
   // fallback when App creds are absent (byte-identical to the pre-App behaviour).
   GITHUB_MINT_TOKEN?: string;
@@ -181,7 +181,7 @@ export interface Env {
   // mint (#283) can't derive the tenant and the runner spawns COLD. For known
   // first-party repos we inject the installation_id from this map so the mint runs
   // WARM (server derives the tenant) without requiring an App webhook. e.g.
-  // {"HumanGuardrail/corelink-runners":"144561227"}. Absent/unmatched ⇒ COLD.
+  // {"HuGR-Labs/corelink-runners":"150584374"}. Absent/unmatched ⇒ COLD.
   REPO_INSTALLATION_MAP?: string;
   // ── Option-C per-tenant-PAT dispatch (server-confirmed live 2026-07-21) ───────
   // JSON `{ "<owner/repo>": "<SECRET_ENV_NAME>" }` mapping a repo to the NAME of the
@@ -204,8 +204,8 @@ export interface Env {
   // slot / dead-letter orphan — closing the hole where a foreign App-installed but
   // un-entitled repo can churn/DoS the shared FLEET_MAX_CONCURRENCY before the
   // server's post-cold-spawn 403 ever fires. Arm for GA with:
-  //   INSTALLATION_ALLOWLIST="144561227,<customer-install-id>"
-  // where 144561227 is the dogfood installation (MUST stay served).
+  //   INSTALLATION_ALLOWLIST="150584374,<customer-install-id>"
+  // where 150584374 is the dogfood installation (MUST stay served).
   INSTALLATION_ALLOWLIST?: string;
   // ── env-0 (cred-ticket) — keep the CAS PAT OUT of the untrusted container env ──
   // The single-use stash latch (one DO instance per lease_id = GH jobId).

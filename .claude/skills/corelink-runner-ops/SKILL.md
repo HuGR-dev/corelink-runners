@@ -16,7 +16,7 @@ JIT runner registered via the install → box boots. A 403 = HARD DENY (unmapped
 
 ## Option-C: mint a DIFFERENT tenant than the install derives (per-tenant-PAT dispatch)
 When you can't get a real install for the tenant (e.g. proving the cold tenant `3c7d77b1` on a
-HumanGuardrail-org repo, install 144561227→dogfood), use `REPO_TENANT_PAT_MAP` (spawn-worker, added
+HuGR-Labs-org repo, install 150584374→dogfood), use `REPO_TENANT_PAT_MAP` (spawn-worker, added
 2026-07-21, `deploy/cloudflare/src/lib.ts` `mintCasPat`/`tenantPatSecretForRepo`): a JSON
 `{"<owner/repo>":"<SECRET_ENV_NAME>"}` mapping a repo to the NAME of a bound secret holding that tenant's
 acquiring PAT. When matched, the mint presents `Authorization: Bearer <pat>` **AND** keeps
@@ -34,7 +34,7 @@ the tail: `mint_option_c_pat_dispatch`. Gated default-off (empty map). Server co
   `installation` events — installs won't show on the tail; enumerate via the App JWT below).
 - gh/git in this env hit a sandbox "failed to change group ID" error → use `dangerouslyDisableSandbox: true`.
 
-## GitHub App (corelink-runners, App ID 4222041, owner @HumanGuardrail)
+## GitHub App (corelink-runners, App ID 4222041, owner @HuGR-Labs)
 - Private key pem: `~/Downloads/corelink-runners.2026-07-13.private-key.pem`. Mint an App JWT (RS256,
   `iss=4222041`) via node `crypto` to call `GET /app/installations` (list all installs + account + id) or
   `GET /app`. The App key CANNOT create an install nor toggle public/private — those are web-UI only.
@@ -59,4 +59,4 @@ suspend/entitlement) → wasted deploy, so ask them to seed BOTH. Tenant must be
 ## Key tenant / repos (2026-07)
 - Cold-organic tenant `3c7d77b1-0a50-4f87-893f-36ac785670df` (entitled 20/100), PAT in scratch
   `cold-tenant.json`. Proof repo `HumanGuardrail/corelink-cold-organic-e2e` (Option-C). Dogfood install
-  144561227 → `d863fafb`. See `moat-benchmark` + `corelink-moat` skills.
+  150584374 → `d863fafb`. See `moat-benchmark` + `corelink-moat` skills.

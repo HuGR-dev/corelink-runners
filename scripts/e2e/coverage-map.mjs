@@ -24,7 +24,7 @@ export const CELLS = [
     disposition: 'fabricable',
     atoms: ['F-2.1', 'F-7.1', 'F-5.8', 'F-4.3', 'F-6.1', 'F-6.5', 'F-4.1', 'F-5.1', 'F-10.3'],
     prefixes: ['S1.'], // P1 developer — the primary direct-ICP journey
-    note: 'Door-A: a real runs-on:corelink job on the dogfood App install (144561227).' },
+    note: 'Door-A: a real runs-on:corelink job on the dogfood App install (150584374).' },
 
   { id: 'TS2-doorB-authed', suite: 'TS-2', primary: 'happy', directions: D_ALL, grade: 'E2',
     disposition: 'fabricable',
@@ -119,7 +119,7 @@ export const CELLS = [
     disposition: 'x4',
     atoms: ['F-8.1'],
     prefixes: [], // the external-org install click + real customer path
-    note: 'non-HumanGuardrail install is an OAuth UI click (not headless); repo I can create, click is owner.' },
+    note: 'non-HuGR-Labs install is an OAuth UI click (not headless); repo I can create, click is owner.' },
 
   // ─────────────────────────── campaign #2 · Workspaces (planned) ───────────────────────
   { id: 'C2-workspaces', suite: 'TS-1', primary: 'happy', directions: ['happy'], grade: 'E0',

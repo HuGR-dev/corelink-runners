@@ -251,7 +251,7 @@ async fn agent_and_runner_are_mutually_exclusive() {
     let body = AcquireRequest {
         runner: Some(RunnerSpec {
             target: RunnerTargetDto::Repo {
-                owner: "HumanGuardrail".to_string(),
+                owner: "HuGR-Labs".to_string(),
                 repo: "corelink-runners".to_string(),
             },
             labels: vec![],

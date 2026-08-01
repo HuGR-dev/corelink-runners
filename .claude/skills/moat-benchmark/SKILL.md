@@ -8,7 +8,7 @@ description: How to run a CoreLink cache-moat benchmark on a real `runs-on: core
 
 Runs on `HumanGuardrail/corelink-cold-organic-e2e` (Option-C maps it to cold tenant `3c7d77b1`; the
 vendored `./actions/corelink-memoize` is already in the repo). Requires the App-installed org install
-(144561227) for JIT + the spawn-worker deployed with `REPO_TENANT_PAT_MAP` + `COLD_ORGANIC_TENANT_PAT`.
+(150584374) for JIT + the spawn-worker deployed with `REPO_TENANT_PAT_MAP` + `COLD_ORGANIC_TENANT_PAT`.
 
 ## Dispatch mechanics
 1. Write the workflow locally; base64 via node (avoids sandbox `$(...)` issues), PUT it:

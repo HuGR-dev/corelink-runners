@@ -19,7 +19,7 @@ execution backend (default-off).
 |---|---|---|
 | `FABRIC_BIND_ADDR` | `0.0.0.0:8080` | TCP address to listen on. |
 | `FABRIC_TENANT_RATE_PER_MIN` | `120` | Acquire-request rate ceiling per minute for the bootstrap tenant (u32, ≥ 1). |
-| `FABRIC_RUNNER_REPO_ALLOWLIST` | — (empty) | Comma-separated canonical runner targets the bootstrap tenant may target for a **runner** lease (Track-C C1): `repo:<owner>/<repo>` or `org:<org>` (case-insensitive). **Fail-closed:** unset/empty ⇒ the tenant may run NO runner leases; a runner acquire whose target is not listed is denied 400. Ignored by check/hermetic leases. Example: `repo:humangr-labs/corelink-runners,org:humangr-labs`. |
+| `FABRIC_RUNNER_REPO_ALLOWLIST` | — (empty) | Comma-separated canonical runner targets the bootstrap tenant may target for a **runner** lease (Track-C C1): `repo:<owner>/<repo>` or `org:<org>` (case-insensitive). **Fail-closed:** unset/empty ⇒ the tenant may run NO runner leases; a runner acquire whose target is not listed is denied 400. Ignored by check/hermetic leases. Example: `repo:HuGR-Labs/corelink-runners,org:HuGR-Labs`. |
 | `NORTHFLANK_API_TOKEN` | — | Northflank API token.  When set (with the vars below), the cloud execution backend is activated. |
 | `NORTHFLANK_PROJECT_ID` | — | Northflank project id. |
 | `NORTHFLANK_TEAM_ID` | — | Northflank team/account id. |

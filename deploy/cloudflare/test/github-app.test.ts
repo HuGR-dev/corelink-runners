@@ -104,7 +104,7 @@ describe("installationToken (mint + KV cache by installationId)", () => {
   afterEach(() => vi.unstubAllGlobals());
 
   const NOW = 1_800_000_000_000;
-  const INST = "144561227";
+  const INST = "150584374";
   const baseEnv = (): GithubAppEnv => ({
     GITHUB_APP_ID: "123456",
     GITHUB_APP_PRIVATE_KEY: privateKeyPem,
@@ -199,7 +199,7 @@ describe("mintJitAuthToken (auth-selection: App vs first-party)", () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
     const env = { GITHUB_MINT_TOKEN: "first-party-static" } as unknown as Env;
-    const tok = await mintJitAuthToken(env, "144561227");
+    const tok = await mintJitAuthToken(env, "150584374");
     expect(tok).toBe("first-party-static");
     expect(fetchMock).not.toHaveBeenCalled(); // no App-token exchange
   });
@@ -227,7 +227,7 @@ describe("mintJitAuthToken (auth-selection: App vs first-party)", () => {
       GITHUB_APP_ID: "123456",
       GITHUB_APP_PRIVATE_KEY: privateKeyPem,
     } as unknown as Env;
-    const tok = await mintJitAuthToken(env, "144561227");
+    const tok = await mintJitAuthToken(env, "150584374");
     expect(tok).toBe("ghs_install");
     expect(fetchMock).toHaveBeenCalledOnce();
   });

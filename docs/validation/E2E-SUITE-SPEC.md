@@ -106,11 +106,11 @@ E3 live-smoke · E4 live-stress · E5 chaos · X4 external`.
 | **TS-3 Stress** | burst to fleet-cap **+ a bit over** → atomic slot + fleet cap + zero thrash | a real tenant bursting to N | E4 | `scripts/e2e/stress/*` (new) |
 | **TS-4 Chaos** | kill fabricd mid-flight · inject spawn-fail · deps down · force a real canary breach · rollback | real failures + recovery | E5 | `scripts/e2e/chaos/*` (new, **owner-gated run**) |
 | **TS-5 Security** | auth-fuzz **every** gate · secret non-leak · HMAC replay/timing · fence escape · supply-chain · cross-tenant · net_policy · single-use ticket | an **adversary** with a user's reach | E1/E2 + live | `scripts/e2e/security/*` (new) + red-team suite |
-| **TS-6 External** | non-HumanGuardrail repo install + dispatch · 2nd tenant isolation/billing · real `[clw] cache hit` | a **real external customer** | X4/D | `scripts/e2e/external/*` (spec + gated) |
+| **TS-6 External** | non-HuGR-Labs repo install + dispatch · 2nd tenant isolation/billing · real `[clw] cache hit` | a **real external customer** | X4/D | `scripts/e2e/external/*` (spec + gated) |
 
 **Real-user fidelity (the "mesmos poderes e limitações" law).** TS-2/3/5 drive **only** the surfaces a
 real user can reach — the public `/v1` API with a real PAT, the GitHub App path, the `corelink` CLI —
-using the **live dogfood install** (App installation `144561227`, first-party). The privileged
+using the **live dogfood install** (App installation `150584374`, first-party). The privileged
 `/internal` surface is used **only** to *read evidence* (counters), **never** as a stimulus a user
 couldn't produce. Where a claim needs a real *external* actor (a 2nd org, a 2nd tenant, a real CoreLink
 PAT for full cache-hit), it is **TS-6 / X4** — proven where fabricable, honestly gated where not (the
@@ -166,7 +166,7 @@ promise.
 (stress to cap+bit), TS-4 (chaos on dogfood — **owner run-go pending**), TS-5 (security-adversarial).
 
 **X4-blocked — documented GAP with the exact unblock** (never claimed proven):
-- **Real external customer** (F-8.1, S1.1.1–S1.1.8): a non-HumanGuardrail org must **install the App**
+- **Real external customer** (F-8.1, S1.1.1–S1.1.8): a non-HuGR-Labs org must **install the App**
   — that install is an OAuth **UI click** that cannot be done headless. *Unblock:* 1 owner click, or a
   throwaway repo under a separate account (I can create the repo; the install click remains manual).
 - **2nd real tenant** (D2, S5.2.x multi-tenant billing/fairness): tenant provisioning is **server-side**

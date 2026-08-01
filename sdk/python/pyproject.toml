@@ -27,8 +27,8 @@ dependencies = [
 ]
 
 [project.urls]
-Repository = "https://github.com/HumanGuardrail/corelink-runners"
-Homepage = "https://github.com/HumanGuardrail/corelink-runners"
+Repository = "https://github.com/HuGR-Labs/corelink-runners"
+Homepage = "https://github.com/HuGR-Labs/corelink-runners"
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]

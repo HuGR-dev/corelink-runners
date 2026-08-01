@@ -101,11 +101,8 @@ type HarnessOut = (
 
 fn harness(broker: Option<Arc<dyn RunnerRegistrationBroker>>) -> HarnessOut {
     // Track-C C1: the acme tenant is allowlisted for its OWN repo by default, so
-    // the happy-path runner acquires (target HumanGuardrail/corelink-runners) pass.
-    harness_allow(
-        broker,
-        vec!["repo:HumanGuardrail/corelink-runners".to_string()],
-    )
+    // the happy-path runner acquires (target HuGR-Labs/corelink-runners) pass.
+    harness_allow(broker, vec!["repo:HuGR-Labs/corelink-runners".to_string()])
 }
 
 /// Track-C C1: the runner harness with an explicit tenant `repo_allowlist`.
@@ -147,7 +144,7 @@ fn runner_acq_body() -> AcquireRequest {
         expiry_ms: 600_000,
         runner: Some(RunnerSpec {
             target: RunnerTargetDto::Repo {
-                owner: "HumanGuardrail".to_string(),
+                owner: "HuGR-Labs".to_string(),
                 repo: "corelink-runners".to_string(),
             },
             labels: vec!["corelink".to_string()],
@@ -252,7 +249,7 @@ async fn runner_acquire_mints_egress_lease_and_injects_jitconfig() {
     // The JIT config env matches exactly what the broker minted for THIS scope.
     let expected = MockBroker::derived_config(&RunnerScope {
         target: corelink_fabric_server::RunnerTarget::Repo {
-            owner: "HumanGuardrail".to_string(),
+            owner: "HuGR-Labs".to_string(),
             repo: "corelink-runners".to_string(),
         },
         labels: vec!["corelink".to_string()],
@@ -475,10 +472,10 @@ async fn empty_allowlist_denies_all_runner_acquires() {
 #[tokio::test]
 async fn runner_allowlist_match_is_case_insensitive() {
     let broker: Arc<dyn RunnerRegistrationBroker> = Arc::new(MockBroker::new());
-    let (router, _ledger, cap) = harness(Some(broker)); // allowlist: repo:HumanGuardrail/corelink-runners
+    let (router, _ledger, cap) = harness(Some(broker)); // allowlist: repo:HuGR-Labs/corelink-runners
     let resp = acquire(
         &router,
-        &runner_acq_body_target("HUMANGUARDRAIL", "CoreLink-Runners"),
+        &runner_acq_body_target("HUGR-LABS", "CoreLink-Runners"),
     )
     .await;
 
@@ -494,37 +491,41 @@ async fn runner_allowlist_match_is_case_insensitive() {
     );
 }
 
-/// C1 / org-rename regression (G5): the DISCONTINUED `humangr-labs` org must be
-/// REJECTED. The allowlist is exact-match on the canonical (lowercased) slug and
-/// GitHub's `humangr-labs → HumanGuardrail` HTTP redirect does NOT apply to a
-/// string compare — so a stale `humangr-labs/corelink-runners` acquire against
-/// the live `HumanGuardrail/corelink-runners` allowlist is `humangr-labs` ≠
-/// `humanguardrail` and MUST be denied 400 (this is the acquire the moat mint
-/// would 403 in prod). Guards a re-introduction of the dead org slug.
+/// C1 / org-rename regression (G5): every DISCONTINUED org slug must be
+/// REJECTED. Two are dead now — `humangr-labs` (renamed away 2026-06) and
+/// `HumanGuardrail` (the CoreLink repos were migrated OUT of it to `HuGR-Labs`
+/// on 2026-08-01). The allowlist is exact-match on the canonical (lowercased)
+/// slug and GitHub's `<dead-org> → HuGR-Labs` HTTP redirect does NOT apply to a
+/// string compare — so a stale `HumanGuardrail/corelink-runners` acquire against
+/// the live `HuGR-Labs/corelink-runners` allowlist is `humanguardrail` ≠
+/// `hugr-labs` and MUST be denied 400 (this is the acquire the moat mint
+/// would 403 in prod). Guards a re-introduction of either dead org slug.
 #[tokio::test]
-async fn stale_humangr_labs_org_denied_against_humanguardrail_allowlist() {
-    let broker: Arc<dyn RunnerRegistrationBroker> = Arc::new(MockBroker::new());
-    let (router, ledger, cap) = harness(Some(broker)); // allowlist: repo:HumanGuardrail/corelink-runners
-    let resp = acquire(
-        &router,
-        &runner_acq_body_target("humangr-labs", "corelink-runners"),
-    )
-    .await;
+async fn stale_org_slugs_denied_against_hugr_labs_allowlist() {
+    for stale_org in ["humangr-labs", "HumanGuardrail"] {
+        let broker: Arc<dyn RunnerRegistrationBroker> = Arc::new(MockBroker::new());
+        let (router, ledger, cap) = harness(Some(broker)); // allowlist: repo:HuGR-Labs/corelink-runners
+        let resp = acquire(
+            &router,
+            &runner_acq_body_target(stale_org, "corelink-runners"),
+        )
+        .await;
 
-    assert_eq!(
-        resp.status(),
-        StatusCode::BAD_REQUEST,
-        "the discontinued humangr-labs org must NOT match the HumanGuardrail allowlist (exact-match; redirects don't apply)"
-    );
-    assert!(
-        ledger
-            .by_tenant(&TenantId::new("acme").unwrap())
-            .unwrap()
-            .is_empty(),
-        "a denied stale-org acquire must reserve no slot"
-    );
-    assert!(
-        cap.captured().is_empty(),
-        "a denied stale-org acquire must mint/provision nothing"
-    );
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "the discontinued {stale_org} org must NOT match the HuGR-Labs allowlist (exact-match; redirects don't apply)"
+        );
+        assert!(
+            ledger
+                .by_tenant(&TenantId::new("acme").unwrap())
+                .unwrap()
+                .is_empty(),
+            "a denied stale-org acquire must reserve no slot"
+        );
+        assert!(
+            cap.captured().is_empty(),
+            "a denied stale-org acquire must mint/provision nothing"
+        );
+    }
 }

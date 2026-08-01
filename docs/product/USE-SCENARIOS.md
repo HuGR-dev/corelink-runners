@@ -201,7 +201,7 @@ ratified caps; the tenant's `max_concurrency` is what the fabric admits against.
 (ADR-0007 broker). Per queued job the Worker mints a per-installation token scoped
 to *that* customer's repo (`installationToken`, `github_app.ts`), never the
 first-party token (`mintJitAuthToken`, `index.ts:449`).
-**Acceptance / evidence:** GitHub App installation `144561227` exists and the dogfood fleet
+**Acceptance / evidence:** GitHub App installation `150584374` exists and the dogfood fleet
 uses it (MEMORY: track-C go-live). A customer install issues a distinct
 installation id the Worker maps to a tenant.
 **Variations & failures:**
@@ -2040,7 +2040,7 @@ upgrade N (S12.3), never to bypass the cap.
 4. flip `ci.yml` to `runs-on: corelink-dogfood`.
 
 **Expected:** Dogfooding the direct on-ramp (Stage A→B, ADR-0007) — the App mints a JIT runner per queued `dogfood-smoke` job and the builder-Mac load shifts onto the fleet; a one-line `runs-on:` flip on an unmodified workflow (S1.1.4).
-**Acceptance / evidence:** GitHub App live (installation 144561227); dogfood fleet uses it. Full
+**Acceptance / evidence:** GitHub App live (installation 150584374); dogfood fleet uses it. Full
 cache-hit smoke is ⚪ X4-external.
 **Variations & failures:**
 - *Full cache-hit smoke* — ⚪ X4-external (needs a real CoreLink PAT or hugit dispatch, S1.1.4).
@@ -3186,7 +3186,7 @@ own CI off the builder Mac onto the fleet (S5.1.2). A self-hosted → corelink m
 trades DIY host-root dind risk for hypervisor-isolated microVMs (S1.6.1) at flat
 concurrency pricing.
 **Acceptance / evidence:** The dogfood decommission-the-builder-Mac path is LIVE (S5.1.2, App
-installation 144561227); a *customer* self-hosted decommission at Stage C (sizes,
+installation 150584374); a *customer* self-hosted decommission at Stage C (sizes,
 GA onboarding) is **owner-gated** (ADR-0007 Stage C, S1.3.3).
 **Variations & failures:**
 - *Self-hosted had a special capability* (a GPU, a licensed tool, a private network)
@@ -4295,7 +4295,7 @@ fail-closed / fail-open-to-cold / fail-safe-to-queued posture (the north star).
 | Cred-redemption leg (env-0) | 🟢 LIVE | boot guard + external 401/200 probes |
 | Attestation key served | 🟢 LIVE | `GET /v1/attestation/key` 200 (key faa5b7726) |
 | `result_binding_sig_v2` full-outcome | 🟢 LIVE | conformance tamper-rejection + verify_strict |
-| Direct on-ramp spawn/teardown | 🟢 LIVE | dogfood fleet, App installation 144561227 |
+| Direct on-ramp spawn/teardown | 🟢 LIVE | dogfood fleet, App installation 150584374 |
 | Spawn retry / reconciler / dead-letter | 🟢 LIVE | #293 deadlock fix + reconcilers |
 | Full `[clw] cache hit` smoke | ⚪ X4 | needs a real CoreLink PAT or hugit dispatch |
 | Memoized-check consumption (hugit was intended, discontinued) | ⚪ X4 | needs a real hugit / equivalent external dispatch |

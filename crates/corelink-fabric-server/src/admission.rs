@@ -2329,7 +2329,7 @@ mod queue_tests {
                 req: AcquireRequest {
                     // Native/fabricd path: repo present, NO installation_id — the
                     // mint fires on repo_full_name alone (tenant via PAT introspect).
-                    repo_full_name: Some("HumanGuardrail/corelink-runners".to_string()),
+                    repo_full_name: Some("HuGR-Labs/corelink-runners".to_string()),
                     installation_id: None,
                     image_digest: PINNED.to_string(),
                     net_policy: "isolated".to_string(),

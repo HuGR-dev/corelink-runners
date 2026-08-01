@@ -52,7 +52,7 @@
     // dropped) + #321 (installation_id OPTIONAL + acquiring PAT via Authorization:
     // Bearer → server introspects → tenant on the native path). Server half LIVE
     // (#674). D1 3/3 GREEN for d863fafb with the canonical slug
-    // `HumanGuardrail/corelink-runners` (clw-verified: allowlist + not-offboarded +
+    // `HuGR-Labs/corelink-runners` (clw-verified: allowlist + not-offboarded +
     // entitlement=20 — NO seed needed). CLW_ENDPOINT + CORELINK_RUNNER_MINT_URL are
     // the CoreLink API BASE (client appends /internal/v1/runner/{mint,revoke} + the
     // CLW cache path). Secret CORELINK_RUNNER_MINT_AUTH_KEY set via `wrangler secret

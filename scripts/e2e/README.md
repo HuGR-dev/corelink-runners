@@ -48,7 +48,7 @@ which apply. The critic enforces *atom* coverage; direction coverage is the suit
 ## Real-user fidelity (the "same powers and limits" law)
 
 TS-2/3/5 drive **only** what a real user can reach — the public `/v1` API with a real PAT, the GitHub App
-path, the `corelink` CLI — on the live **dogfood** install (App `144561227`, first-party). The privileged
+path, the `corelink` CLI — on the live **dogfood** install (App `150584374`, first-party). The privileged
 `/internal` surface is read **only for evidence** (counters), never as a stimulus a user couldn't produce.
 A real *external* customer (2nd org install click, 2nd tenant, full `[clw] cache hit`) is **TS-6 / X4** —
 proven where fabricable, honestly gated where not.

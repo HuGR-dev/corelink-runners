@@ -469,7 +469,7 @@ mod tests {
     fn body(tenant: &str) -> TestMintRequest {
         TestMintRequest {
             tenant: Some(tenant.to_string()),
-            repo_full_name: "HumanGuardrail/corelink-runners".to_string(),
+            repo_full_name: "HuGR-Labs/corelink-runners".to_string(),
             installation_id: Some("inst-1".to_string()),
             acquiring_pat: Some("pat-f0005".to_string()),
         }
@@ -654,7 +654,7 @@ mod tests {
         let state = armed_state(Some(KEY), vec![DEFAULT_TEST_MINT_TENANT.to_string()]);
         let req = TestMintRequest {
             tenant: None, // omitted ⇒ defaults to f0005
-            repo_full_name: "HumanGuardrail/corelink-runners".to_string(),
+            repo_full_name: "HuGR-Labs/corelink-runners".to_string(),
             installation_id: None,
             acquiring_pat: None,
         };
