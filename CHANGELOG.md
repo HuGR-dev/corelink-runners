@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-08-02 — every fabric job longer than ~15 minutes was being SIGTERMed
+
+- **fix(cloudflare): `sleepAfter` was a hard cap on job DURATION, not an idle timeout.**
+  In `@cloudflare/containers` 0.3.x, `sleepAfterMs` only moves forward via
+  `renewActivityTimeout()`, and `isActivityExpired()` renews only while
+  `inflightRequests > 0` — a counter incremented **solely** inside `containerFetch`.
+  `RunnerContainer` has no `defaultPort` and is never `containerFetch`ed (the GH Actions
+  agent is the image entrypoint and dials OUT; nothing dials in). So the counter stayed 0
+  forever, the deadline froze at container-start + 900 s, and `alarm()` →
+  `onActivityExpired()` → `stop()` SIGTERMed the box mid-job.
+
+  The in-code note asserting *"A running job keeps the container active, so this never cuts
+  a live job"* was false. Consistent with the longest fabric job that ever succeeded: 864 s
+  (14.4 min). `coverage.yml` (45 m), `perf-nightly.yml` (60 m) and `dr-drill-monthly.yml`
+  (60 m) already target `runs-on: corelink` and would all have been killed.
+
+  The fix supplies the activity signal the SDK cannot observe, which is what its own docs
+  ask for (*"Call this method whenever there is activity on the container"*): the 1-minute
+  cron calls a new `RunnerContainer.keepAlive()` on exactly those boxes that still hold an
+  `rhandle:` binding — i.e. those whose completion webhook has not arrived. On completion,
+  teardown drops the binding, renewals stop, and the box idles out through the normal path.
+
+  **Deliberately not just a bigger number.** Raising `sleepAfter` would have turned every
+  stuck box into a multi-hour hold on `max_instances`, trading a job-killer for a
+  fleet-starver — and starving spawns is what pushes jobs into the ceiling-refusal path
+  fixed earlier the same day. A lost completion webhook stays bounded by the binding's own
+  KV TTL (`JOB_PAT_TTL_S`), after which renewals stop on their own.
+
 ### 2026-08-02 — teardown no longer SIGKILLs a box that is running someone else's job
 
 - **fix(cloudflare): correlate container teardown on `runner_name`, not the spawn-request
