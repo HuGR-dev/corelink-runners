@@ -25,6 +25,8 @@ vi.mock("@cloudflare/containers", () => ({
 import { retryOrphanedSpawns, recordOrphan, type Env } from "../src/index";
 import {
   orphanRetryStep,
+  orphanRefusalStep,
+  SpawnRefusedError,
   ORPHAN_TTL_S,
   MAX_ORPHAN_ATTEMPTS,
   type OrphanRecord,
@@ -117,7 +119,15 @@ describe("recordOrphan (dead-letter record on spawn failure)", () => {
       installationId: "44556677",
       labels: ["corelink"],
       attempts: 1,
+      // Stamped at FIRST record and preserved by every later write-back — it is
+      // what bounds a ceiling-refusal wait to an ABSOLUTE window instead of a TTL
+      // that would reset on each re-put. Asserted as a real, current epoch-ms
+      // rather than pinned to a literal (which would just re-encode Date.now()).
+      firstRecordedMs: expect.any(Number),
     });
+    const stamped = JSON.parse(raw!).firstRecordedMs as number;
+    expect(stamped).toBeGreaterThan(Date.now() - 60_000);
+    expect(stamped).toBeLessThanOrEqual(Date.now());
     // The FIRST-failure record uses the self-healing 30-min TTL.
     expect(kv.put).toHaveBeenCalledWith("orphan:job-1", expect.any(String), {
       expirationTtl: ORPHAN_TTL_S,
@@ -273,5 +283,137 @@ describe("retryOrphanedSpawns (scheduled WARM re-drive)", () => {
     expect(drive).toHaveBeenCalledTimes(2);
     expect(kv.store.has("orphan:job-1")).toBe(false);
     expect(kv.store.has("orphan:job-2")).toBe(false);
+  });
+});
+
+// ── 3. Ceiling REFUSAL — backpressure must not be mistaken for success OR failure
+//
+// The 2026-08-02 incident: ~24 jobs pushed at once, 12 ran, 12 sat `queued`
+// forever. Two defects compounded, and each is pinned below by a test that FAILS
+// against the pre-fix code:
+//
+//   (a) `driveSpawn` RETURNED at the ceiling instead of throwing, so
+//       `driveSpawnGuarded` (which records the dead-letter only from its catch)
+//       never recorded one — and GitHub never redelivers `workflow_job.queued`.
+//   (b) `retryOrphanedSpawns` reads a normal return as recovery and DELETES the
+//       record. So even once a dead-letter existed, the first refused retry tick
+//       would have destroyed it. `refusal must NOT delete` below is exactly that
+//       regression.
+//
+// The third property is the one that makes the fix actually work under a real
+// burst: a refusal must not spend the 3-strike budget, or a burst lasting longer
+// than MAX_ORPHAN_ATTEMPTS ticks still loses every job behind the ceiling.
+
+describe("orphanRefusalStep (PURE — the absolute-window bound on a refusal wait)", () => {
+  const T0 = 1_700_000_000_000;
+
+  it("waits while the window is open, carrying the REMAINING ttl (never extends the deadline)", () => {
+    const rec = REC({ firstRecordedMs: T0 });
+    const step = orphanRefusalStep(rec, T0 + 600_000, ORPHAN_TTL_S); // 10 min in
+    expect(step.action).toBe("wait");
+    expect(step.waitedS).toBe(600);
+    // 30-min window minus the 10 already waited — NOT a fresh ORPHAN_TTL_S.
+    expect(step.ttlS).toBe(ORPHAN_TTL_S - 600);
+    expect(step.ttlS).toBeLessThan(ORPHAN_TTL_S);
+  });
+
+  it("the deadline is ABSOLUTE across repeated refusals — re-putting never resets it", () => {
+    const rec = REC({ firstRecordedMs: T0 });
+    // Ten consecutive refused ticks, one minute apart (the real cron cadence).
+    const ttls = Array.from({ length: 10 }, (_, i) =>
+      orphanRefusalStep(rec, T0 + (i + 1) * 60_000, ORPHAN_TTL_S).ttlS);
+    // Strictly decreasing ⇒ the window really is closing, not being renewed.
+    for (let i = 1; i < ttls.length; i++) expect(ttls[i]).toBeLessThan(ttls[i - 1]);
+    expect(ttls.at(-1)).toBe(ORPHAN_TTL_S - 600);
+  });
+
+  it("gives up once the window is exhausted (a job GitHub will no longer place)", () => {
+    const rec = REC({ firstRecordedMs: T0 });
+    expect(orphanRefusalStep(rec, T0 + ORPHAN_TTL_S * 1000, ORPHAN_TTL_S).action).toBe("giveup");
+    expect(orphanRefusalStep(rec, T0 + ORPHAN_TTL_S * 1000 + 1, ORPHAN_TTL_S).action).toBe("giveup");
+    // One second BEFORE the boundary is still a wait — the bound is not off-by-one.
+    expect(orphanRefusalStep(rec, T0 + (ORPHAN_TTL_S - 1) * 1000, ORPHAN_TTL_S).action).toBe("wait");
+  });
+
+  it("clamps to Cloudflare KV's 60 s minimum TTL near the deadline", () => {
+    const rec = REC({ firstRecordedMs: T0 });
+    const step = orphanRefusalStep(rec, T0 + (ORPHAN_TTL_S - 5) * 1000, ORPHAN_TTL_S);
+    expect(step.action).toBe("wait");
+    expect(step.ttlS).toBe(60); // true remainder is 5 s; KV would reject that
+  });
+
+  it("a legacy record with no firstRecordedMs is treated as FRESH, never as expired", () => {
+    // Records written before the field existed must not be given up instantly —
+    // they stay bounded by their own KV TTL and by the attempt count.
+    const step = orphanRefusalStep(REC(), T0, ORPHAN_TTL_S);
+    expect(step.action).toBe("wait");
+    expect(step.waitedS).toBe(0);
+  });
+});
+
+describe("retryOrphanedSpawns — a REFUSED retry is backpressure, not a failed attempt", () => {
+  const refuse = () => {
+    throw new SpawnRefusedError("over_fleet_cap");
+  };
+
+  it("a refusal LEAVES the dead-letter in place for the next tick", async () => {
+    const kv = fakeKv({ "orphan:job-1": JSON.stringify(REC({ attempts: 1, firstRecordedMs: Date.now() })) });
+    await retryOrphanedSpawns(envWith(kv), CTX, Date.now(), vi.fn(refuse));
+    expect(kv.store.has("orphan:job-1")).toBe(true);
+  });
+  // NOTE — deliberately NOT called a regression pin. This seam injects `drive`,
+  // so it cannot distinguish the pre-fix ceiling RETURN from a throw; written
+  // against the buggy code it passes (verified). The honest pin for that defect
+  // drives the real webhook path: see `cell12-deadletter` in
+  // test/journey-sj5-concurrency-slot.test.ts. What the two tests BELOW pin is
+  // the second defect — refusals spending the attempt budget — and those do go
+  // red against the pre-fix code.
+
+  it("does NOT spend the attempt budget — 5 refused ticks leave attempts at 1", async () => {
+    const now = Date.now();
+    const kv = fakeKv({ "orphan:job-1": JSON.stringify(REC({ attempts: 1, firstRecordedMs: now })) });
+    for (let i = 0; i < 5; i++) {
+      await retryOrphanedSpawns(envWith(kv), CTX, now + i * 60_000, vi.fn(refuse));
+      // The live path releases the claim on refusal; clear it so the next tick can
+      // re-claim, exactly as the 60 s gap between real cron ticks does.
+      kv.store.delete("spawn:job-1");
+    }
+    // MAX_ORPHAN_ATTEMPTS is 3 — under the old accounting this job would have been
+    // given up on tick 3 and never placed, purely because the fleet was busy.
+    expect(kv.store.has("orphan:job-1")).toBe(true);
+    expect(JSON.parse(kv.store.get("orphan:job-1")!).attempts).toBe(1);
+    expect(MAX_ORPHAN_ATTEMPTS).toBeLessThan(5); // the bound this test outlives
+  });
+
+  it("recovers on a later tick once capacity frees up", async () => {
+    const now = Date.now();
+    const kv = fakeKv({ "orphan:job-1": JSON.stringify(REC({ attempts: 1, firstRecordedMs: now })) });
+    await retryOrphanedSpawns(envWith(kv), CTX, now, vi.fn(refuse));
+    kv.store.delete("spawn:job-1");
+    expect(kv.store.has("orphan:job-1")).toBe(true);
+
+    const drive = vi.fn(async () => {});
+    await retryOrphanedSpawns(envWith(kv), CTX, now + 60_000, drive);
+    expect(drive).toHaveBeenCalledTimes(1);
+    expect(kv.store.has("orphan:job-1")).toBe(false); // placed ⇒ dead-letter cleared
+  });
+
+  it("gives up LOUDLY once the absolute window closes (a capacity fault, not routine)", async () => {
+    const now = Date.now();
+    const kv = fakeKv({
+      "orphan:job-1": JSON.stringify(REC({ attempts: 1, firstRecordedMs: now - ORPHAN_TTL_S * 1000 })),
+    });
+    await retryOrphanedSpawns(envWith(kv), CTX, now, vi.fn(refuse));
+    expect(kv.store.has("orphan:job-1")).toBe(false);
+  });
+
+  it("a GENUINE failure still bumps the attempt count (the 3-strike bound is intact)", async () => {
+    const now = Date.now();
+    const kv = fakeKv({ "orphan:job-1": JSON.stringify(REC({ attempts: 1, firstRecordedMs: now })) });
+    await retryOrphanedSpawns(envWith(kv), CTX, now, vi.fn(async () => {
+      throw new Error("JIT mint 500");
+    }));
+    // Refusals are free; real errors are not. Both bounds must coexist.
+    expect(JSON.parse(kv.store.get("orphan:job-1")!).attempts).toBe(2);
   });
 });

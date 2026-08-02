@@ -71,6 +71,8 @@ import {
   reconcileCompletedJobBilling,
   RECONCILE_MIN_AGE_MS,
   orphanRetryStep,
+  orphanRefusalStep,
+  SpawnRefusedError,
   ORPHAN_TTL_S,
   MAX_ORPHAN_ATTEMPTS,
   logEvent,
@@ -904,7 +906,14 @@ async function driveSpawn(
       // swallows its own errors); reads jobId->patId, revokes by pat_id, deletes the key. No-op on
       // a cold spawn (no patId stored).
       await revokeCompletedJob(env, jobId, mint.tenant);
-      return;
+      // THROW, don't return. A bare `return` here dropped the job PERMANENTLY:
+      // `driveSpawnGuarded` records the dead-letter only from its catch, and
+      // `retryOrphanedSpawns` reads a normal return as recovery and deletes the
+      // record. GitHub never redelivers `workflow_job.queued`, so the customer's
+      // job then hangs `queued` forever with nothing reported as failed. Throwing
+      // a TYPED refusal routes it to the dead-letter while keeping it
+      // distinguishable from a genuine failure — see SpawnRefusedError.
+      throw new SpawnRefusedError(slot.reason ?? "unknown");
     }
   }
   // Authorized ⇒ mint the GitHub JIT and spawn.
@@ -957,6 +966,10 @@ export async function recordOrphan(
       installationId: opts.installationId,
       labels: opts.labels,
       attempts: 1,
+      // Stamped once, at first record. Every later write-back preserves it so the
+      // refusal wait is bounded by an ABSOLUTE window (orphanRefusalStep) rather
+      // than by a TTL that would reset on each re-put.
+      firstRecordedMs: Date.now(),
     };
     await env.RUNNER_JOB_PATS.put(key, JSON.stringify(rec), { expirationTtl: ORPHAN_TTL_S });
     logEvent("info", "orphan_recorded", { jobId: opts.jobId, repo: opts.repo });
@@ -976,8 +989,16 @@ async function driveSpawnGuarded(
     await driveSpawn(env, opts);
   } catch (e) {
     await releaseSpawnClaim(env.RUNNER_JOB_PATS, opts.jobId);
-    await bumpMetrics(env, "spawn_failed");
-    logEvent("error", "spawn_drive_failed", { jobId: opts.jobId, error: (e as Error).message });
+    // A ceiling REFUSAL still needs the dead-letter (that is the whole point —
+    // otherwise the job is lost forever), but it is not an error and must not be
+    // counted or logged as one: `spawn_at_ceiling` was already emitted at the
+    // refusal site with the tenant/cap/reason detail, and marking normal
+    // backpressure as `spawn_failed` would make a healthy busy fleet look broken
+    // on the dashboard — and hide real failures in the noise.
+    if (!(e instanceof SpawnRefusedError)) {
+      await bumpMetrics(env, "spawn_failed");
+      logEvent("error", "spawn_drive_failed", { jobId: opts.jobId, error: (e as Error).message });
+    }
     // W7/F8: record the WARM-recoverable failure as a dead-letter so the scheduled
     // reconciler retries it WARM (for ANY repo). driveSpawnGuarded is the "first
     // attempt" context (webhook + first-party GitHub scan) — the retry path calls
@@ -1641,7 +1662,7 @@ async function redriveOrphanedJobs(
 export async function retryOrphanedSpawns(
   env: Env,
   _ctx: ExecutionContext,
-  _now: number,
+  now: number,
   drive: (
     env: Env,
     opts: { jobId: string; repo: string; installationId: string; labels: string[] },
@@ -1708,9 +1729,47 @@ export async function retryOrphanedSpawns(
         attempts: bumped.attempts,
       });
     } catch (e) {
-      // Retry failed ⇒ release the claim so a later tick (or the live path) can
-      // re-drive, and LEAVE the (bumped) record for the next tick.
+      // Release the claim either way so a later tick (or the live path) can re-drive.
       await releaseSpawnClaim(kv, jobId);
+      if (e instanceof SpawnRefusedError) {
+        // BACKPRESSURE, not failure — the fleet was full again this tick. Do NOT
+        // consume the 3-strike budget: that budget bounds genuine errors, and
+        // spending it on refusals would mean any burst lasting more than
+        // MAX_ORPHAN_ATTEMPTS ticks still loses every job behind the ceiling —
+        // exactly the bug this whole change exists to fix. So write the record
+        // back with the ORIGINAL attempt count (un-bump), bounded instead by the
+        // absolute ORPHAN_TTL_S window from firstRecordedMs.
+        const step = orphanRefusalStep(rec as OrphanRecord, now);
+        if (step.action === "giveup") {
+          await kv.delete(name).catch(() => {
+            /* best-effort: the key TTL-expires */
+          });
+          // LOUD: a job we waited the full window for and never placed is a real
+          // capacity fault, not routine backpressure. It is the signal that the
+          // fleet cap is undersized for this tenant's load.
+          logEvent("error", "orphan_refusal_giveup", {
+            jobId,
+            repo: (rec as OrphanRecord).repo,
+            waitedS: step.waitedS,
+            reason: e.reason,
+          });
+          await bumpMetrics(env, "spawn_at_ceiling");
+          continue;
+        }
+        await kv
+          .put(name, JSON.stringify(rec), { expirationTtl: step.ttlS })
+          .catch(() => {
+            /* best-effort: next tick re-reads whatever survived */
+          });
+        logEvent("info", "orphan_refusal_waiting", {
+          jobId,
+          repo: (rec as OrphanRecord).repo,
+          waitedS: step.waitedS,
+          reason: e.reason,
+        });
+        continue;
+      }
+      // Genuine failure ⇒ LEAVE the (bumped) record for the next tick.
       await bumpMetrics(env, "spawn_failed");
       logEvent("error", "orphan_retry_drive_failed", {
         jobId,
