@@ -331,14 +331,49 @@ export class RunnerContainer extends Container<Env> {
   // standard-4; the GH-Actions agent is the image ENTRYPOINT (runner-direct, v0).
   // No inbound port — the runner dials OUT to GitHub (the GH-Actions agent is
   // the image entrypoint; runner-direct, v0). `defaultPort` is left unset.
-  // Orphan-leak backstop; the DO sleeps (and the container stops) after this
-  // IDLE window. Reduced 45m→15m (2026-07-06): a completed job is torn down
-  // immediately (teardownCompletedRunner), so sleepAfter only governs FAILED/stuck
-  // containers — at 45m those hold account container-instance capacity long enough
-  // to starve new spawns under load. 15m still comfortably exceeds any legit
-  // between-jobs idle (a runner is ephemeral/one-shot) while freeing capacity ~3×
-  // faster. A running job keeps the container active, so this never cuts a live job.
+  // Orphan-leak backstop: the DO sleeps (and the container stops) this long after
+  // the last observed ACTIVITY. Reduced 45m→15m (2026-07-06) because a completed
+  // job is torn down immediately, so this only governs FAILED/stuck containers, and
+  // at 45m those hold account container-instance capacity long enough to starve new
+  // spawns under load.
+  //
+  // ⚠️ 2026-08-02: the note that used to sit here — "A running job keeps the
+  // container active, so this never cuts a live job" — was FALSE, and made this a
+  // hard 15-minute cap on job DURATION rather than an idle timeout.
+  //
+  // In @cloudflare/containers 0.3.x, `sleepAfterMs` only moves forward via
+  // `renewActivityTimeout()`, and `isActivityExpired()` renews only while
+  // `inflightRequests > 0` — a counter incremented SOLELY inside `containerFetch`.
+  // This container has no `defaultPort` and is never `containerFetch`ed (the GH
+  // Actions agent is the image entrypoint and dials OUT; nothing dials in). So
+  // `inflightRequests` stayed 0 forever, the deadline froze at container-start +
+  // 900 s, and `alarm()` → `onActivityExpired()` → `stop()` SIGTERMed the box
+  // mid-job. Consistent with the longest fabric job that ever succeeded: 864 s.
+  //
+  // The SDK's own contract for that method is "Call this method whenever there is
+  // activity on the container" — and the spawn-Worker is precisely what knows: a
+  // box with a live `rhandle:` binding has a job on it. So the cron supplies the
+  // activity signal (see `keepAliveLiveRunners`) and this stays a real IDLE window
+  // rather than becoming a lifetime cap. Raising the number instead would have
+  // turned every stuck box into a multi-hour hold on `max_instances` — trading a
+  // job-killer for a fleet-starver.
   sleepAfter = "15m";
+
+  /**
+   * Keep this box's idle window open while its job is still running.
+   *
+   * Called once per cron tick for every container that still has an `rhandle:`
+   * binding, i.e. every box whose completion webhook has not yet torn it down.
+   * When the job finishes, teardown drops that binding, the renewals stop, and the
+   * box idles out through the normal `sleepAfter` path — so a lost completion
+   * webhook is still bounded (by the binding's own KV TTL), and a stuck box is
+   * still reclaimed. The activity signal comes from OUR knowledge of the job, not
+   * from traffic the SDK can see, because there is no inbound traffic to see.
+   */
+  keepAlive(): { ok: true } {
+    this.renewActivityTimeout();
+    return { ok: true };
+  }
   // The runner needs egress (git clone, GH API, CAS hydration). ADR-0003 bounds
   // it (no-free-tier + scoped short-TTL PAT + ephemeral box).
   enableInternet = true;
@@ -569,8 +604,9 @@ function jobHandleKey(jobId: string): string {
 // `runner_name` is minted by us at `generate-jitconfig` and echoed back by GitHub
 // on `workflow_job.in_progress` / `.completed`, so it correlates the box to the
 // job that ACTUALLY ran on it, whichever permutation GitHub chose.
+const RUNNER_HANDLE_PREFIX = "rhandle:";
 function runnerHandleKey(runnerName: string): string {
-  return `rhandle:${runnerName}`;
+  return `${RUNNER_HANDLE_PREFIX}${runnerName}`;
 }
 
 // Container-start retry (root-caused 2026-07-03): Cloudflare Container DO
@@ -1049,6 +1085,64 @@ export async function recordOrphan(
   }
 }
 
+// ── Keep-alive sweep (2026-08-02) ────────────────────────────────────────────
+//
+// Why this exists: `RunnerContainer.sleepAfter` was acting as a hard 15-minute cap
+// on job DURATION, not as an idle timeout — see the long note on the class. The
+// SDK can only see activity that arrives through `containerFetch`, and nothing
+// ever dials INTO a runner box, so it concluded every box was idle from the moment
+// it booted.
+//
+// We know better than the SDK here: a box that still has an `rhandle:` binding is a
+// box whose completion webhook has not arrived, i.e. one with a job on it. So each
+// cron tick we renew exactly those. When the job completes, teardown drops the
+// binding, renewals stop, and the box idles out normally.
+//
+// The bound on a LOST completion webhook is the binding's own KV TTL
+// (JOB_PAT_TTL_S): once it expires the renewals stop and the box idles out, so a
+// leak is capped at roughly that TTL plus one sleepAfter window rather than being
+// unbounded. That property is what makes this safe to do at all — the alternative
+// fix, simply raising sleepAfter, would have turned every stuck box into a
+// multi-hour hold on `max_instances` and starved new spawns.
+//
+// Best-effort throughout: this is a liveness backstop, never a gate. Every failure
+// is swallowed so a KV hiccup or a dead handle can never break the cron (which also
+// drives orphan recovery and billing).
+export async function keepAliveLiveRunners(env: Env): Promise<number> {
+  const kv = env.RUNNER_JOB_PATS;
+  if (!kv) return 0;
+  let listed: { keys: { name: string }[] };
+  try {
+    listed = await kv.list({ prefix: RUNNER_HANDLE_PREFIX });
+  } catch (e) {
+    logEvent("error", "keepalive_list_failed", { error: (e as Error).message });
+    return 0;
+  }
+  let renewed = 0;
+  for (const { name } of listed.keys) {
+    let handle: string | null = null;
+    try {
+      handle = await kv.get(name);
+    } catch {
+      continue; // transient KV read miss — next tick retries
+    }
+    if (!handle) continue; // torn down between list and get
+    try {
+      await getContainer(env.RUNNER_CONTAINER, handle).keepAlive();
+      renewed++;
+    } catch (e) {
+      // A dead/destroyed handle throws here. Not worth alarming on — the binding
+      // will TTL out — but worth seeing if it becomes common.
+      logEvent("info", "keepalive_skipped", {
+        runnerName: name.slice(RUNNER_HANDLE_PREFIX.length),
+        error: (e as Error).message,
+      });
+    }
+  }
+  if (renewed > 0) logEvent("info", "keepalive_renewed", { count: renewed });
+  return renewed;
+}
+
 // driveSpawn wrapped so ANY failure RELEASES the spawn claim — a GitHub redelivery
 // or a later reconciler tick can then re-drive the job (never a silent orphan).
 async function driveSpawnGuarded(
@@ -1109,6 +1203,14 @@ export default {
     // set, pins to the exact label. Passed as the `configured` arg.
     const configured = env.AUTOSCALER_LABEL;
     const now = Date.now();
+    try {
+      // FIRST: a live box being SIGTERMed costs a whole customer job, which
+      // outranks orphan recovery and billing backfill. Guarded so it can never
+      // throw out of scheduled() and take the rest of the tick with it.
+      await keepAliveLiveRunners(env);
+    } catch (e) {
+      logEvent("error", "keepalive_failed", { error: (e as Error).message });
+    }
     await redriveOrphanedJobs(env, ctx, configured, now);
     try {
       // W7/F8: retry the dead-letter WARM (ANY repo). Runs AFTER the first-party
