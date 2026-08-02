@@ -493,7 +493,7 @@ async function mintJit(
   repoFullName: string,
   labels: string[],
   installationId: string,
-): Promise<string> {
+): Promise<{ jit: string; runnerName: string }> {
   const authToken = await mintJitAuthToken(env, installationId);
   const name = `cf-runner-${crypto.randomUUID().slice(0, 8)}`;
   const resp = await fetch(
@@ -519,7 +519,14 @@ async function mintJit(
   if (!resp.ok) throw new Error(`generate-jitconfig ${resp.status}: ${await resp.text()}`);
   const j = (await resp.json()) as { encoded_jit_config?: string };
   if (!j.encoded_jit_config) throw new Error("generate-jitconfig: no encoded_jit_config");
-  return j.encoded_jit_config;
+  // Return the NAME too. `generate-jitconfig` binds the runner to a repo + label
+  // set and to NOTHING ELSE — not to the job whose webhook prompted it. GitHub
+  // then assigns queued jobs to idle runners by LABEL MATCH, so with N identical
+  // jobs and N identical runners the assignment is a PERMUTATION: the box minted
+  // for job A routinely runs job B. The name is the only identifier that survives
+  // that mapping (GitHub reports it back as `workflow_job.runner_name`), so it —
+  // not the spawn-request job id — is the correct key for teardown.
+  return { jit: j.encoded_jit_config, runnerName: name };
 }
 
 // How long a job_id→pat_id entry lives in KV — a self-cleaning backstop well
@@ -543,6 +550,27 @@ function jobTenantKey(jobId: string): string {
 // A distinct `jhandle:` namespace, never colliding with the other job keys.
 function jobHandleKey(jobId: string): string {
   return `jhandle:${jobId}`;
+}
+
+// runner_name → the spawned RunnerContainer DO handle. THE authoritative teardown
+// key (2026-08-02).
+//
+// `jhandle:<jobId>` above records which box we STARTED for a given job's webhook.
+// That is not the same thing as which box RAN that job: GitHub assigns queued jobs
+// to idle ephemeral runners by label match, so with N identical jobs in flight the
+// mapping is a permutation. Tearing down by `jhandle:` therefore SIGKILLed a box
+// that was still executing somebody else's job — observed 2026-08-02: five jobs
+// killed mid-step (one inside `cargo clippy`, one during `Complete job` with its
+// work already finished), each surfacing as GitHub's "The self-hosted runner lost
+// communication with the server" ~600 s later. Zero deaths among 59 SOLO jobs and
+// five among 27 that had at least one other box alive, with NO concurrency
+// threshold — the signature of a correlation bug, not a capacity limit.
+//
+// `runner_name` is minted by us at `generate-jitconfig` and echoed back by GitHub
+// on `workflow_job.in_progress` / `.completed`, so it correlates the box to the
+// job that ACTUALLY ran on it, whichever permutation GitHub chose.
+function runnerHandleKey(runnerName: string): string {
+  return `rhandle:${runnerName}`;
 }
 
 // Container-start retry (root-caused 2026-07-03): Cloudflare Container DO
@@ -604,6 +632,7 @@ async function spawnRunner(
   jit: string,
   jobId: string,
   mint: ContainerEnvResult,
+  runnerName: string,
 ): Promise<string> {
   const containerEnv: Record<string, string> = {
     CORELINK_RUNNER_JITCONFIG: jit,
@@ -628,6 +657,19 @@ async function spawnRunner(
     await env.RUNNER_JOB_PATS.put(jobHandleKey(jobId), handle, {
       expirationTtl: JOB_PAT_TTL_S,
     }).catch((e) => logEvent("error", "kv_put_job_handle_failed", { jobId, error: (e as Error).message }));
+    // …and stash it under the RUNNER NAME, which is what completion tears down by.
+    // This is the binding that survives GitHub's job→runner permutation; the
+    // jobId one above is kept only as a fallback for a payload with no
+    // runner_name (a job that died before assignment).
+    await env.RUNNER_JOB_PATS.put(runnerHandleKey(runnerName), handle, {
+      expirationTtl: JOB_PAT_TTL_S,
+    }).catch((e) =>
+      logEvent("error", "kv_put_runner_handle_failed", {
+        jobId,
+        runnerName,
+        error: (e as Error).message,
+      }),
+    );
   }
   return handle;
 }
@@ -660,20 +702,45 @@ async function revokeCompletedJob(
 // is the backstop. Fail-OPEN: a destroy() throw is swallowed (teardown() is
 // idempotent and the provider deadline is the final backstop), never breaking the
 // webhook. Returns true only when a teardown was actually issued.
-async function teardownCompletedRunner(env: Env, jobId: string): Promise<boolean> {
+async function teardownCompletedRunner(
+  env: Env,
+  jobId: string,
+  runnerName?: string,
+): Promise<boolean> {
   if (!env.RUNNER_JOB_PATS) return false;
+  // Resolve by RUNNER NAME first — that is the box which actually ran this job.
+  // `jhandle:<jobId>` records the box we STARTED for this job's webhook, which
+  // under GitHub's label-match assignment is frequently a DIFFERENT box that is
+  // still busy; destroying it is what killed live jobs on 2026-08-02. The jobId
+  // lookup survives only as a fallback for a completion with no runner_name
+  // (a job cancelled before it was ever assigned to a runner) and for records
+  // written before this change shipped.
   let handle: string | null = null;
+  let resolvedBy: "runner_name" | "job_id" = "runner_name";
   try {
-    handle = await env.RUNNER_JOB_PATS.get(jobHandleKey(jobId));
+    if (runnerName) handle = await env.RUNNER_JOB_PATS.get(runnerHandleKey(runnerName));
+    if (!handle) {
+      resolvedBy = "job_id";
+      handle = await env.RUNNER_JOB_PATS.get(jobHandleKey(jobId));
+    }
   } catch {
     return false; // KV read failed ⇒ sleepAfter is the backstop
   }
   if (!handle) return false; // cold/legacy job, or already torn down
+  logEvent("info", "teardown_resolved", { jobId, runnerName, resolvedBy });
   try {
     await getContainer(env.RUNNER_CONTAINER, handle).teardown();
   } catch (e) {
     logEvent("error", "teardown_failed", { jobId, error: (e as Error).message });
     // fall through: still drop the handle key so we don't retry a dead handle
+  }
+  // Drop BOTH bindings for this box. The runner-name key is the one that was
+  // just consumed; the jobId key is dropped too so the stale (possibly
+  // wrong-box) pointer can never be followed by a redelivered completion.
+  if (runnerName) {
+    await env.RUNNER_JOB_PATS.delete(runnerHandleKey(runnerName)).catch(() => {
+      /* best-effort: the key TTL-expires */
+    });
   }
   await env.RUNNER_JOB_PATS.delete(jobHandleKey(jobId)).catch(() => {
     /* best-effort: the key TTL-expires */
@@ -918,9 +985,12 @@ async function driveSpawn(
   }
   // Authorized ⇒ mint the GitHub JIT and spawn.
   try {
-    const jit = await mintJit(env, repo, labels, installationId);
+    const { jit, runnerName } = await mintJit(env, repo, labels, installationId);
     await bumpMetrics(env, "jit_minted");
-    await spawnRunner(env, jit, jobId, mint);
+    // Recorded so a box killed by the WRONG completion can be traced back to the
+    // job it was minted for — the permutation is invisible without this line.
+    logEvent("info", "runner_minted", { jobId, repo, runnerName });
+    await spawnRunner(env, jit, jobId, mint, runnerName);
     await bumpMetrics(env, "runner_spawned");
   } catch (e) {
     // Release the concurrency slot on a spawn failure (the guard releases the claim).
@@ -1111,6 +1181,9 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
           id?: number;
           started_at?: string;
           completed_at?: string;
+          // Echoed back by GitHub on in_progress/completed: the runner that
+          // ACTUALLY ran this job. The teardown correlation key.
+          runner_name?: string | null;
         };
         repository?: { full_name?: string };
         // GitHub-App delivery: the installation whose id the server maps to a
@@ -1185,7 +1258,11 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         // of the 2026-07-05 dogfood spawn stall). Best-effort + fail-open: no handle
         // on file (legacy/cold job, or a KV miss) ⇒ sleepAfter is the backstop; a
         // destroy() throw is swallowed (idempotent teardown, deadline backstop).
-        const tornDown = await teardownCompletedRunner(env, jobId);
+        const tornDown = await teardownCompletedRunner(
+          env,
+          jobId,
+          evt.workflow_job?.runner_name ?? undefined,
+        );
         // F2-3 (W3): wipe the env-0 cred-stash so the per-job cas:rw PAT window
         // closes at COMPLETION, not at the 2h lease-TTL. After this a ticket redeem
         // by any in-lease code returns 404 (stash gone) — the credential dies with
