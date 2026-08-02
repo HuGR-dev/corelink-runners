@@ -375,6 +375,9 @@ describe("SJ-6 · cell 2 — recordOrphan (dead-letter of the FIRST warm-recover
       installationId: "9090",
       labels: ["corelink"],
       attempts: 1,
+      // Stamped at FIRST record; bounds a ceiling-refusal wait to an ABSOLUTE
+      // window (see cell 11) rather than a TTL that resets on every re-put.
+      firstRecordedMs: expect.any(Number),
     });
     expect(kv.put).toHaveBeenCalledWith("orphan:job-x", expect.any(String), {
       expirationTtl: ORPHAN_TTL_S,

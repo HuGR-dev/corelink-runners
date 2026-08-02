@@ -715,6 +715,69 @@ describe("SJ-5 · acquireConcurrencySlot — selection + fail-open (real worker.
     expect(metrics.counts.runner_spawned).toBeUndefined();
   });
 
+  // ── The 2026-08-02 incident pin ────────────────────────────────────────────
+  // Honoring the ceiling is correct. LOSING the job to it is not — and that is
+  // what happened: ~24 jobs pushed at once, 12 ran, 12 sat `queued` forever with
+  // nothing reported as failed. `driveSpawn` RETURNED at the ceiling, and
+  // `driveSpawnGuarded` writes the dead-letter only from its CATCH, so a refused
+  // spawn left no record for `retryOrphanedSpawns` to find. GitHub sends
+  // `workflow_job.queued` exactly once and never redelivers it, so no record
+  // meant no recovery, ever.
+  //
+  // This drives the REAL webhook path. It has to: the injected-drive seam in
+  // orphan-retry.test.ts cannot observe a return-vs-throw difference, so a test
+  // written there would pass against the bug (verified — it did).
+  it("cell12-deadletter: a WARM refusal RECORDS a dead-letter so the job stays recoverable (2026-08-02)", async () => {
+    const slots = fakeSlots("refuse");
+    const kv = fakeKv();
+    const metrics = fakeMetrics();
+    const env = baseEnv({
+      RUNNER_JOB_PATS: kv as never,
+      METRICS: metrics as never,
+      CONCURRENCY_SLOTS: slots as never,
+    });
+    const ctx = makeCtx();
+    await queuedWebhook(env, ctx, { jobId: "1204", repo: "acme/api", installationId: 4242 });
+    await drain(ctx);
+
+    // Still refused — this changes recoverability, never the cap itself.
+    expect(containers).toHaveLength(0);
+    expect(kv.store.has("spawn:1204")).toBe(false); // claim released for the retry
+
+    // …but the job is no longer lost: the reconciler now has something to find.
+    const raw = kv.store.get("orphan:1204");
+    expect(raw).toBeTruthy();
+    const rec = JSON.parse(raw!);
+    expect(rec.repo).toBe("acme/api");
+    expect(rec.installationId).toBe("4242"); // WARM-recoverable
+    expect(rec.attempts).toBe(1);
+    expect(typeof rec.firstRecordedMs).toBe("number"); // bounds the refusal wait
+
+    // Backpressure must not read as breakage: a busy fleet is `spawn_at_ceiling`,
+    // NOT `spawn_failed` — otherwise a healthy burst buries real failures.
+    expect(metrics.counts.spawn_at_ceiling).toBe(1);
+    expect(metrics.counts.spawn_failed).toBeUndefined();
+  });
+
+  it("cell12-deadletter-cold: a COLD refusal records NOTHING (not warm-recoverable — known, bounded)", async () => {
+    // No installation id ⇒ nothing to re-drive WARM with, so recordOrphan
+    // deliberately skips it (a cold re-drive would bypass per-job authz/mint).
+    // Pinned so the gap stays a DECISION rather than drifting into a surprise:
+    // cold spawns remain covered only by the first-party GitHub scan.
+    const slots = fakeSlots("refuse");
+    const kv = fakeKv();
+    const env = baseEnv({
+      RUNNER_JOB_PATS: kv as never,
+      METRICS: fakeMetrics() as never,
+      CONCURRENCY_SLOTS: slots as never,
+    });
+    const ctx = makeCtx();
+    await queuedWebhook(env, ctx, { jobId: "1205", repo: "acme/api" });
+    await drain(ctx);
+    expect(containers).toHaveLength(0);
+    expect(kv.store.has("orphan:1205")).toBe(false);
+  });
+
   it("cell12-cold-cap-live: a COLD at-capacity refusal blocks the spawn end-to-end (old bug: unlimited)", async () => {
     // The whole point of cell 7: a cold spawn now hits a REAL cap. Drive a refusal
     // on the cold path and prove no container is born.

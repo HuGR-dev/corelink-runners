@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-08-02 — a spawn refused at the ceiling no longer loses the customer's job
+
+- **fix(cloudflare): a ceiling refusal is BACKPRESSURE, not a dropped job.** Found by moving
+  `corelink-server`'s own CI to `runs-on: corelink` and pushing ~24 jobs at once: **12 got
+  boxes and went green; 12 sat `queued` forever** with zero containers running and nothing
+  reported as failed. Two defects compounded:
+
+  1. `driveSpawn` **returned** at the concurrency ceiling. `driveSpawnGuarded` writes the
+     dead-letter only from its `catch`, so a refused spawn recorded nothing — and GitHub
+     sends `workflow_job.queued` exactly once and never redelivers it. No record ⇒ no
+     recovery, ever.
+  2. `retryOrphanedSpawns` drives the **throwing** `driveSpawn` and reads a normal return as
+     recovery. So even once a dead-letter existed, the first refused retry tick would have
+     **deleted** it — the recovery path destroying its own evidence.
+
+  The ceiling now throws a typed `SpawnRefusedError`, which routes the job to the dead-letter
+  while staying distinguishable from a genuine failure. A refusal does **not** consume the
+  `MAX_ORPHAN_ATTEMPTS` (3) budget — that budget bounds real errors, and spending it on
+  backpressure would still lose every job behind a burst lasting more than three cron ticks.
+  Refusals are instead bounded by an **absolute** `ORPHAN_TTL_S` (30 min) window stamped at
+  first record (`OrphanRecord.firstRecordedMs`), so re-putting the record each tick can never
+  extend its deadline; exhausting the window gives up **loudly** (`orphan_refusal_giveup`) as
+  the real capacity fault it is. A busy fleet keeps counting `spawn_at_ceiling`, never
+  `spawn_failed`, so healthy burst load cannot bury real failures.
+
+  Neither the cap nor the refusal itself changed — only whether the job survives one.
+  Unchanged and pinned: a COLD refusal (no `installation_id`) still records nothing, since it
+  cannot be re-driven WARM without bypassing per-job authz/mint.
+
 ### 2026-08-01 — GitHub org migration `HumanGuardrail` → `HuGR-Labs` (repo slug + App installation)
 
 - **fix(cloudflare): repin the spawn-Worker to the migrated org + installation.** The CoreLink

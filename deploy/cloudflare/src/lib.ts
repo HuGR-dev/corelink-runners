@@ -876,6 +876,36 @@ export const ORPHAN_TTL_S = 1800; // 30 min
 // (deleted + logged) so it never retries forever.
 export const MAX_ORPHAN_ATTEMPTS = 3;
 
+// A spawn REFUSED at the concurrency ceiling — thrown, not returned, so it is
+// distinguishable from both success and a genuine failure.
+//
+// WHY THIS EXISTS (2026-08-02: ~24 jobs pushed at once, 12 ran, 12 sat `queued`
+// forever). The ceiling branch used to `return` after logging `spawn_at_ceiling`.
+// Two consequences followed, and together they lost the job permanently:
+//
+//   1. `driveSpawnGuarded` only calls `recordOrphan` from its CATCH. A plain
+//      `return` never entered it, so a refused spawn left NO dead-letter and
+//      `retryOrphanedSpawns` could not see it.
+//   2. Worse, `retryOrphanedSpawns` drives the THROWING `driveSpawn` and reads a
+//      normal return as recovery — so even once a dead-letter existed, the first
+//      retry tick would be refused again, read that as success, and DELETE the
+//      record. The recovery path would have destroyed its own evidence.
+//
+// GitHub sends `workflow_job.queued` exactly once and never redelivers it, so
+// "dropped here" means "the customer's job hangs `queued` forever, and nothing is
+// reported as failed".
+//
+// Refusal is NOT failure — it is BACKPRESSURE, and the expected condition under a
+// burst. That distinction is load-bearing downstream: a refusal must not consume
+// the 3-strike budget meant for genuine errors, or any burst lasting more than
+// three cron ticks would still lose every job behind the ceiling.
+export class SpawnRefusedError extends Error {
+  constructor(public readonly reason: string) {
+    super(`spawn refused at ceiling: ${reason}`);
+    this.name = "SpawnRefusedError";
+  }
+}
+
 // The dead-letter record: the failed spawn's inputs, carried so the reconciler can
 // re-drive it WARM (installation_id present ⇒ authorized mint). `attempts` bounds
 // the retry.
@@ -884,6 +914,43 @@ export interface OrphanRecord {
   installationId: string;
   labels: string[];
   attempts: number;
+  // Wall-clock ms when this dead-letter was FIRST recorded. Bounds the refusal
+  // wait as an ABSOLUTE window (see orphanRefusalStep): without it, re-putting the
+  // record on each refusal would keep resetting ORPHAN_TTL_S, and a permanently
+  // saturated fleet would retry one job forever. Optional — records written before
+  // this field existed fall back to the attempt-count bound.
+  firstRecordedMs?: number;
+}
+
+/**
+ * PURE decision for a dead-letter whose retry was REFUSED at the ceiling
+ * (unit-testable; index.ts applies the KV I/O).
+ *
+ * A refusal does NOT bump `attempts` — a full fleet is not the job's fault, and
+ * counting it would turn a burst longer than MAX_ORPHAN_ATTEMPTS ticks back into
+ * permanent job loss. The bound is instead the ABSOLUTE ORPHAN_TTL_S window from
+ * `firstRecordedMs` — past which GitHub will not usefully assign a runner anyway,
+ * which is the same reasoning that sets the TTL itself.
+ *
+ *   • window exhausted ⇒ "giveup" (delete + log loud; never silently)
+ *   • else             ⇒ "wait", carrying the REMAINING ttl, so re-putting the
+ *     record never extends the original deadline.
+ *
+ * `ttlS` is clamped to Cloudflare KV's 60 s minimum; when the true remainder is
+ * below that the record just expires on its own, which is the same outcome.
+ */
+export function orphanRefusalStep(
+  rec: OrphanRecord,
+  nowMs: number,
+  windowS: number = ORPHAN_TTL_S,
+): { action: "wait" | "giveup"; ttlS: number; waitedS: number } {
+  // A record written before firstRecordedMs existed is treated as fresh rather
+  // than infinitely old — it stays bounded by its own KV TTL and by `attempts`.
+  const startedMs = rec.firstRecordedMs ?? nowMs;
+  const waitedS = Math.max(0, Math.floor((nowMs - startedMs) / 1000));
+  const remainingS = windowS - waitedS;
+  if (remainingS <= 0) return { action: "giveup", ttlS: 0, waitedS };
+  return { action: "wait", ttlS: Math.max(60, remainingS), waitedS };
 }
 
 /**
