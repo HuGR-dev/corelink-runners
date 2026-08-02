@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-08-02 — teardown no longer SIGKILLs a box that is running someone else's job
+
+- **fix(cloudflare): correlate container teardown on `runner_name`, not the spawn-request
+  job id.** `generate-jitconfig` binds a runner to a repo + label set and to **nothing
+  else** — not to the job whose webhook prompted it. GitHub then assigns queued jobs to
+  idle ephemeral runners by **label match**, so with N identical jobs and N identical
+  runners in flight the mapping is a **permutation**: the box minted for job A routinely
+  runs job B. Teardown keyed on `jhandle:<jobId>`, so job A completing destroyed the box
+  minted for A — which was still executing B.
+
+  Observed in production: five jobs killed mid-step (one inside `cargo clippy`, one during
+  `Complete job` with its work already finished), each surfacing ~600 s later as GitHub's
+  *"The self-hosted runner lost communication with the server."* **0 deaths across 59 SOLO
+  jobs, 5 across 27 that had at least one other box alive** (Fisher p≈0.002), with **no
+  concurrency threshold** — deaths at 2, 6, 7, 8 and 9 concurrent boxes with survivors
+  interleaved at the same counts. A correlation bug, not a capacity limit.
+
+  ⚠️ The 600 s figure is **not** a timeout — those workflows set no `timeout-minutes`. It
+  is GitHub's reaper for a runner that went silent, and the "hung step" in the UI is
+  merely the last thing GitHub heard before the SIGKILL. Read the **annotation**, not the
+  duration.
+
+  The runner name we mint at `generate-jitconfig` is echoed back by GitHub as
+  `workflow_job.runner_name`, so it identifies the box that **actually ran** the job
+  whatever permutation GitHub chose. It is now stashed as `rhandle:<runnerName>` at spawn
+  and is the primary teardown key; `jhandle:<jobId>` remains only as a fallback for a
+  completion carrying no `runner_name` (a job cancelled before assignment) and for records
+  written before this shipped. Both bindings are dropped on teardown so no stale pointer
+  survives a redelivered completion. A `runner_minted` log line now records
+  `jobId → runnerName`, without which the permutation is invisible.
+
 ### 2026-08-02 — a spawn refused at the ceiling no longer loses the customer's job
 
 - **fix(cloudflare): a ceiling refusal is BACKPRESSURE, not a dropped job.** Found by moving
