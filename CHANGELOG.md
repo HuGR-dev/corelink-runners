@@ -60,6 +60,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `test/ghost-containers.test.ts` (14 cells): 11 of them fail on the pre-fix code and pass after.
   Suite 351 → 365.
 
+### 2026-08-03 — the compile-cache pilot stops measuring nothing
+
+- **feat(runner-image): bake `sccache` v0.17.0 into the runner box image.** CoreLink
+  server PR #1017 wired the `runs-on: corelink` lane of its `corelink-reapi` gate to send
+  every `rustc` invocation through CoreLink's own `/cargo/<tenant>` WebDAV cache — the
+  cache earning its keep on the compute we sell. It has been **inert since it landed**:
+  the binary is not on the box, so the lane printed `sccache not on the box image — lane
+  compiles cold, nothing breaks` (job `91830316792`) and went green having cached nothing.
+  Fail-open was the right design; it also meant the pilot proved nothing. This installs
+  the client half.
+
+- **Baked at build time, not fetched at job time.** The download happens once on a hosted
+  image builder, so an ephemeral runner needs **no runtime egress to GitHub** to get its
+  cache client — its only required egress stays `corelink-api.humangr.com`, which is what
+  keeps the ADR-0003 egress posture narrow. And emphatically not `cargo install sccache`:
+  compiling the cache client would cost more build time than the cache ever saves.
+
+- **Same X4 shape as every other pinned artifact in that Dockerfile.** A digest-pinned
+  download stage on the identical `ubuntu:24.04@sha256:786a8b…` base, `ARG SCCACHE_VERSION`
+  + `ARG SCCACHE_SHA256`, and `sha256sum -c` **before** extraction — never after. The pin
+  was verified the way the rustup-init pin was: the 9,561,816-byte tarball downloaded over
+  TLS, `shasum -a 256` recomputed locally, matched against upstream's published `.sha256`
+  sidecar. The static musl build needs no runtime deps, and the binary is inert unless a
+  workflow sets `RUSTC_WRAPPER=sccache`.
+
+- **docs(runbook): `docs/runbook/runner-image-rollout.md`** — build → re-pin → deploy →
+  **roll** → verify. The fourth step is the one that gets skipped: a `wrangler deploy` does
+  not reboot a container that is already running, so the roll must be forced through the
+  Cloudflare Containers API (`POST …/containers/applications/<app>/rollouts`), and the
+  verification must read the Containers API rather than trusting a green checkmark. Landing
+  the Dockerfile change does **not** put the binary on the fleet; only that procedure does.
+
 ### 2026-08-03 — a spawn that "succeeded" and placed nothing no longer loses the job
 
 - **fix(cloudflare): confirm placement instead of assuming it.** A burst above the concurrency

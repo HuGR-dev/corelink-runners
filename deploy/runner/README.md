@@ -32,10 +32,35 @@ config is the only per-job credential, and it is one-time-use.
 | clippy | (toolchain component) | Gate: `cargo clippy -D warnings` |
 | cargo-deny | 0.19.8 | Matches CI (`taiki-e/install-action`) |
 | cargo-audit | 0.22.2 | Matches CI (`taiki-e/install-action`) |
+| sccache | 0.17.0 | Static musl binary, SHA-256 verified before extraction; inert unless the workflow sets `RUSTC_WRAPPER=sccache` + `SCCACHE_WEBDAV_*` |
 | git | distro package | Required by `actions/checkout` |
 
 The Rust toolchain is included so that this repo's own CI gate (the dogfood use
 case) runs warm on the first job without downloading the toolchain.
+
+### sccache — the compile cache that dogfoods CoreLink's own cache
+
+`sccache` is baked at `/usr/local/bin/sccache` (root-owned, world-executable, on
+the `runner` user's `PATH`). It is the client half of the `runs-on: corelink`
+compile-cache pilot: a workflow that exports `RUSTC_WRAPPER=sccache` plus
+`SCCACHE_WEBDAV_ENDPOINT` / `SCCACHE_WEBDAV_TOKEN` /
+`SCCACHE_IGNORE_SERVER_IO_ERROR=1` routes every `rustc` invocation through
+CoreLink's own `/cargo/<tenant>` WebDAV cache surface.
+
+Two deliberate choices:
+
+- **Baked, not fetched at job time.** The download happens once at image-build
+  time on a hosted builder, so an ephemeral box needs **no runtime egress to
+  GitHub** to obtain it. Its only required egress stays `corelink-api.humangr.com`
+  — the cache itself (ADR-0003 egress posture).
+- **Never `cargo install sccache`.** Compiling the cache client would cost more
+  build time than the cache it enables saves. The prebuilt musl binary is static:
+  no runtime deps, no glibc floor.
+
+The binary's mere presence changes nothing — without `RUSTC_WRAPPER` it is never
+invoked. Refresh the pin by bumping `SCCACHE_VERSION` + `SCCACHE_SHA256` in the
+`Dockerfile` from the release's published `<artifact>.sha256` sidecar, recomputing
+the digest of the downloaded tarball yourself. Never fabricate the checksum.
 
 ---
 
@@ -97,12 +122,18 @@ docker buildx imagetools inspect ubuntu:24.04 \
   --format '{{json .Manifest}}' | jq -r '.digest'
 ```
 
-Replace both `@sha256:` digests in `Dockerfile` with that digest, commit the
-change, and record the new digest in the build log.
+Replace **every** `@sha256:` base digest in `Dockerfile` with that digest (they must
+all stay identical), commit the change, and record the new digest in the build log.
 
 ---
 
 ## Building and pushing
+
+**Rolling a change to prod is a four-step manual procedure** — build, re-pin,
+deploy, **roll** — and a green deploy does not reboot a running container. The
+exact steps, with the Cloudflare Containers API calls and how to verify the new
+image is actually running, are in
+**[`docs/runbook/runner-image-rollout.md`](../../docs/runbook/runner-image-rollout.md)**.
 
 **Cloudflare-first (live path):** the runner image is built from THIS Dockerfile by
 `wrangler containers build` (in `deploy/cloudflare/`, CI workflow

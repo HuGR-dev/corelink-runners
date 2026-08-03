@@ -4,13 +4,13 @@
 # X4 supply-chain floor: every FROM is digest-pinned.
 #
 # BASE DIGEST (PINNED — X4 supply-chain floor):
-#   Both FROM lines below are digest-pinned to a specific ubuntu:24.04 manifest
+#   EVERY FROM line below is digest-pinned to the same ubuntu:24.04 manifest
 #   (resolved with `docker buildx imagetools inspect`; pinned in PR #75). This is
 #   NOT a placeholder — a digest pin is INTENTIONALLY frozen: the X4 floor
 #   verifies it before spawn, so the base is reproducible and tamper-evident.
 #
 #   To REFRESH the pin (e.g. to pick up a base-image security update), re-resolve
-#   the digest and replace it in BOTH FROM lines (they must stay identical):
+#   the digest and replace it in EVERY FROM line (they must stay identical):
 #
 #     docker buildx imagetools inspect ubuntu:24.04 \
 #       --format '{{json .Manifest}}' | jq -r '.digest'
@@ -40,6 +40,36 @@
 #   the digest transitively trusts the signed manifest. To refresh: bump
 #   CLW_VERSION + CLW_SHA256 from the signed SHA256SUMS of the new release.
 #   The runner drives `clw` per the frozen CLI/exit contract (125 = clw-internal).
+#
+# SCCACHE (the Rust compile-cache client — dogfoods CoreLink's OWN cache):
+#   Pinned to sccache v0.17.0 (x86_64-unknown-linux-musl), digest-verified before
+#   extraction (X4 floor). This is the client half of the `runs-on: corelink`
+#   compile-cache pilot: a workflow that exports RUSTC_WRAPPER=sccache plus
+#   SCCACHE_WEBDAV_ENDPOINT / SCCACHE_WEBDAV_TOKEN / SCCACHE_IGNORE_SERVER_IO_ERROR
+#   sends every rustc invocation through CoreLink's own `/cargo/<tenant>` WebDAV
+#   cache surface — the cache earning its keep on the compute it sells. The v0.17.0
+#   build carries the WebDAV backend (those three env names are present in the
+#   binary itself), and it is a STATIC musl executable: no runtime deps, no glibc
+#   floor, nothing to install alongside it.
+#
+#   It is BAKED, never fetched at job time. The download happens here, once, on a
+#   hosted image builder — so an ephemeral runner box needs NO runtime egress to
+#   GitHub to get it. The box's only required egress stays
+#   `corelink-api.humangr.com` (the cache itself), which is what keeps the egress
+#   posture (ADR-0003) narrow and auditable. It is also why we do NOT
+#   `cargo install sccache`: compiling the cache client would cost far more build
+#   time than the cache it enables ever saves.
+#
+#   Absence is FAIL-OPEN by design on the workflow side (the lane just compiles
+#   cold), so a missing binary breaks nothing — it merely makes the pilot measure
+#   nothing. That is exactly the state this stanza ends.
+#
+#   To refresh: bump SCCACHE_VERSION + SCCACHE_SHA256 from the release's published
+#   `<artifact>.sha256` sidecar at https://github.com/mozilla/sccache/releases.
+#   The pin below was verified the same way the rustup-init pin was — the
+#   9,561,816-byte tarball was downloaded over TLS, `shasum -a 256` recomputed
+#   locally, and the result matched upstream's published `.sha256` sidecar
+#   byte-for-byte. NEVER fabricate this value.
 # -----------------------------------------------------------------------------
 
 # ── Stage 1: runner binary download + checksum verification ──────────────────
@@ -90,8 +120,43 @@ RUN curl -fsSL \
     rm /tmp/clw && \
     /usr/local/bin/clw --version
 
+# ── Stage 1c: sccache binary download + checksum verification ────────────────
+# Same PINNED base digest. sccache ships as a TARBALL (like the runner agent, not
+# like bare clw): download, verify the sha256 BEFORE extracting anything, then
+# extract and install the single static musl binary.
+#
+# The fetch lives HERE, at image-build time on a hosted builder, deliberately:
+# baking it means the ephemeral runner box never has to reach GitHub at job time
+# to get its compile cache client. The box's only required egress remains
+# corelink-api.humangr.com — the cache surface itself.
+FROM ubuntu:24.04@sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae77ff1dc54 AS sccache-download
+
+# sccache release to pin (x86_64-unknown-linux-musl — static, no runtime deps).
+# Refresh both from the release's published `<artifact>.sha256` sidecar at
+# https://github.com/mozilla/sccache/releases (re-verify by recomputing the
+# digest of the downloaded tarball — NEVER fabricate it).
+ARG SCCACHE_VERSION=0.17.0
+ARG SCCACHE_SHA256=67c4a96dd237c1f518f6b36083f270f9976d516f1e57fce891755ea782e50006
+
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+
+RUN apt-get update -qq && \
+    apt-get install -y --no-install-recommends curl ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL \
+      "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+      -o /tmp/sccache.tar.gz && \
+    echo "${SCCACHE_SHA256}  /tmp/sccache.tar.gz" | sha256sum -c - && \
+    tar -xzf /tmp/sccache.tar.gz -C /tmp && \
+    install -m 0755 \
+      "/tmp/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache" \
+      /usr/local/bin/sccache && \
+    rm -rf /tmp/sccache.tar.gz "/tmp/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl" && \
+    /usr/local/bin/sccache --version
+
 # ── Stage 2: final image ─────────────────────────────────────────────────────
-# Same PINNED digest as Stage 1 — both stages MUST use the identical base.
+# Same PINNED digest as every download stage — all stages MUST use the identical base.
 FROM ubuntu:24.04@sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae77ff1dc54
 
 LABEL org.opencontainers.image.title="CoreLink ephemeral GitHub Actions runner" \
@@ -99,7 +164,8 @@ LABEL org.opencontainers.image.title="CoreLink ephemeral GitHub Actions runner" 
       org.opencontainers.image.vendor="HuGR / CoreLink" \
       corelink.runner.version="2.335.1" \
       corelink.rust.toolchain="1.96.0" \
-      corelink.clw.version="0.1.4"
+      corelink.clw.version="0.1.4" \
+      corelink.sccache.version="0.17.0"
 
 # ── System packages ───────────────────────────────────────────────────────────
 # git is required by most GitHub Actions (actions/checkout etc.)
@@ -150,6 +216,15 @@ COPY --from=runner-download --chown=runner:runner /opt/actions-runner /opt/actio
 # root-owned, world-executable on PATH — the runner drives `clw snapshot →
 # hydrate → run` (the moat); only used when the fabric injects CLW_* (default-off).
 COPY --from=clw-download /usr/local/bin/clw /usr/local/bin/clw
+
+# ── Copy the digest-pinned sccache binary from Stage 1c ──────────────────────
+# root-owned, world-executable on PATH (/usr/local/bin is on the default PATH and
+# survives the `ENV PATH=/home/runner/.cargo/bin:$PATH` prepend below), so
+# `command -v sccache` resolves for the unprivileged `runner` user that actually
+# executes the job. Static musl → no runtime deps to install alongside it.
+# Inert unless the workflow sets RUSTC_WRAPPER=sccache + the SCCACHE_WEBDAV_*
+# env; the binary's mere presence changes nothing (default-off, like clw).
+COPY --from=sccache-download /usr/local/bin/sccache /usr/local/bin/sccache
 
 # Install runner dependencies (requires running as root, inside the container).
 RUN /opt/actions-runner/bin/installdependencies.sh
