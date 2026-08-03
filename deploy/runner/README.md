@@ -33,6 +33,9 @@ config is the only per-job credential, and it is one-time-use.
 | cargo-deny | 0.19.8 | Matches CI (`taiki-e/install-action`) |
 | cargo-audit | 0.22.2 | Matches CI (`taiki-e/install-action`) |
 | sccache | 0.17.0 | Static musl binary, SHA-256 verified before extraction; inert unless the workflow sets `RUSTC_WRAPPER=sccache` + `SCCACHE_WEBDAV_*` |
+| Node.js | 22.23.2 | linux-x64, SHA-256 verified against `SHASUMS256.txt`; `include/` headers stripped. Matches `node-version: 22` in corelink-server's workflows |
+| npm / npx / corepack | (bundled with Node) | On `PATH` via `/usr/local/bin` symlinks |
+| pnpm | 10.32.1 | npm-tarball form, SHA-256 verified; must match corelink-server's root `packageManager` exactly |
 | git | distro package | Required by `actions/checkout` |
 
 The Rust toolchain is included so that this repo's own CI gate (the dogfood use
@@ -61,6 +64,46 @@ The binary's mere presence changes nothing — without `RUSTC_WRAPPER` it is nev
 invoked. Refresh the pin by bumping `SCCACHE_VERSION` + `SCCACHE_SHA256` in the
 `Dockerfile` from the release's published `<artifact>.sha256` sidecar, recomputing
 the digest of the downloaded tarball yourself. Never fabricate the checksum.
+
+### Node.js + pnpm — for `run:` steps, not for `uses:` actions
+
+The actions-runner agent already ships its own Node under `externals/node20` /
+`externals/node24`. That is why JS-based `uses:` actions (`actions/checkout`,
+`actions/setup-node`, …) have always worked on this box. **That Node is private
+to the agent and is not on `PATH`** — a workflow `run:` step calling `node`,
+`npm` or `pnpm` saw nothing. The baked toolchain at `/usr/local/node` +
+`/usr/local/pnpm` (symlinked into `/usr/local/bin`) is what makes those steps work.
+
+Scope, stated honestly: this does **not** unblock corelink-server's JS workflows.
+They already carry `actions/setup-node`, and their `setup-pnpm` composite has a
+`pnpm/action-setup` fallback written for exactly this case, so they could move to
+`runs-on: corelink` today and pay a per-run download. Baking buys two things:
+it removes that download from every run (~287 runs / 3 days across the four heavy
+workflows), and it stops the move depending on a fallback branch that has never
+executed. The pnpm version must match corelink-server's root `packageManager`
+**exactly** — the composite compares `pnpm --version` to the pinned string and
+falls back to downloading on any mismatch.
+
+**Cost, measured:** node ≈ 145 MiB on disk (≈ 45 MiB gzipped) after stripping the
+62 MiB of `include/` headers (node-gyp fetches its own); pnpm ≈ 21 MiB (≈ 4.6 MiB
+gzipped). ≈ 166 MiB / ≈ 50 MiB compressed, paid by **every** spawn including Rust
+jobs. Measured spawn latency is 8–10 s — re-measure after the roll.
+
+**Browsers are not baked, deliberately.** Playwright's browser set at the pinned
+1.61.x revisions is ~395 MiB of download / ~1 GiB on disk (chromium ~187 MiB,
+firefox ~105 MiB, webkit ~101 MiB), i.e. 6–8× the whole node+pnpm cost, on every
+spawn, to serve two workflows — and it is version-locked to the `@playwright/test`
+pin (admin-ui 1.61.1 vs apps/docs 1.61.0 are already skewed), so it rots into a
+re-download on the next bump. `playwright install` at job time stays correct; if
+that download becomes the bottleneck the answer is a separate label-selected image
+variant or caching the browsers in CoreLink's own CAS. Same reasoning for Chrome:
+`lighthouse-ci` and docs-ci's axe jobs need a system Chrome and are **not** served
+by this image.
+
+Refresh by bumping `NODE_VERSION` + `NODE_SHA256` (from
+`https://nodejs.org/dist/v<V>/SHASUMS256.txt`) and `PNPM_VERSION` + `PNPM_SHA256`
+(recompute over `https://registry.npmjs.org/pnpm/-/pnpm-<V>.tgz`, cross-checked
+against the registry's published `dist.integrity`). Never fabricate a checksum.
 
 ---
 
