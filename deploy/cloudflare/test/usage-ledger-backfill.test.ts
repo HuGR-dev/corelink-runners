@@ -38,6 +38,7 @@ import {
   USAGE_LEDGER_TTL_S,
   RECONCILE_MIN_AGE_MS,
   type UsageLedgerRecord,
+  RUNNER_BOX_VCPU,
 } from "../src/lib";
 
 // ── A KV double so ledger + jtenant state is observable; captures put TTLs. ──
@@ -259,9 +260,14 @@ describe("WP-F usage ledger — reconciler backfill (read side)", () => {
     expect(pushed).toHaveLength(1);
     const ev = (pushed[0] as Record<string, unknown>[])[0]; // batch of one
     expect(ev.tenant_id).toBe("acme"); // the DERIVED tenant, not CLW_TENANT
-    expect(ev.qty).toBe(120); // floor(120000ms / 1000)
+    // 120 allocated seconds × 4 vCPU = 480 vCPU-seconds. The BACKFILL path must
+    // apply the same multiplier as the live path — a backfill that emitted raw
+    // slot-seconds would under-bill exactly the 60-day window the ledger exists
+    // to recover, and would do it silently because both numbers are "seconds".
+    expect(ev.qty).toBe(120 * RUNNER_BOX_VCPU);
+    expect(ev.qty).toBe(480);
     expect(ev.region).toBe("iad");
-    expect(ev.event_kind).toBe("runner_slot_seconds");
+    expect(ev.event_kind).toBe("runner_vcpu_seconds"); // billable unit (2026-08-02)
     expect(ev.idem_key).toBe(await usageIdemKey(JOB_ID, billingPeriod(COMPLETED_MS)));
   });
 

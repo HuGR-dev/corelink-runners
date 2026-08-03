@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-08-02 — the runner usage meter was in the wrong unit (4× under-bill)
+
+- **feat(cloudflare): emit `runner_vcpu_seconds`, the BILLABLE runner compute unit.** The owner
+  superseded the *"concurrency priced, minutes unlimited"* runner model: minutes above a tier's
+  included `runners_entitlement.max_vcpu_h` are now billed as overage at $0.30/vCPU-h (3× the
+  measured $0.10/vCPU-h COGS).
+
+  `buildUsageEvent` pushed `runner_slot_seconds` — wall-clock seconds a SLOT was held. The
+  entitlement it meters against is denominated in vCPU-**HOURS**. On the current 4-vCPU box those
+  differ by **exactly 4×**, and *both read as "seconds"* — so arming the (already-built) push
+  as-is would have billed a quarter of what it should, and looked entirely reasonable doing it.
+
+  `qty` is now `allocated_seconds × the box's vCPU count`, multiplied HERE — the emitter is the
+  only component that knows the box it just tore down. That keeps the wire shape frozen AND makes
+  the unit correct when the fleet stops being one size: an 8-vCPU or high-memory SKU bills right
+  the day it ships. `RUNNER_BOX_VCPU` is a defaulted PARAMETER, not a constant read, precisely so
+  a mixed-size fleet only has to pass the real number.
+
+  ALLOCATED wall-clock, never `cpuTimeSec`: Cloudflare bills memory + disk by allocation
+  (measured 490 allocated-s vs 170 cpu-s on a real run), so CPU-time metering under-counts COGS
+  ~3× and breaks the ladder's loss-proof floor.
+
+- **`conformance/UsageEvent.json` is deliberately UNCHANGED.** It is fabricd's golden and fabricd
+  still emits the CAPACITY kind, so the Rust consumer test is untouched by construction — only
+  TypeScript moved. In the emitter's own conformance test, `event_kind` and `qty` moved off
+  equality-with-the-vector onto the billing ARITHMETIC (`qty === allocatedSeconds × vCPU`, plus
+  `qty === vector.qty × RUNNER_BOX_VCPU` so the two kinds stay reconcilable). That follows the
+  convention the file already used for `source` and `idem_key`, and it is a STRONGER pin, not a
+  weakened one: an equality against one frozen example passed just as happily with the multiplier
+  missing.
+
+- **Proven RED:** removing the multiplier reds 4 tests (`expected 3 to be 12`,
+  `expected 120 to be 480`, `expected 3 to be 48`). New coverage: an explicit `vcpu` override (a
+  16-vCPU box bills 4× a standard-4), and a guard that a nonsense vCPU count (0 / negative / NaN /
+  absent) falls back to the fleet default rather than ZEROING the bill — a zeroed bill is
+  indistinguishable from a job that never ran. 335 tests pass; `tsc --noEmit` clean.
+
+- **Still unarmed:** `BILLING_INGEST_URL` is unset, so nothing is pushed. The 60-day usage ledger
+  (101 records) is the backfill source once it is armed. Server half:
+  HuGR-Labs/corelink-server#972.
+
 ### 2026-08-02 — a spawn refused by the RATE LIMITER no longer strands the job
 
 - **fix(cloudflare): the 429 branch dropped the job permanently — the same defect #437 fixed

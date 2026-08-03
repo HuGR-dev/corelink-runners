@@ -1050,6 +1050,34 @@ const BILLING_SOURCE = "corelink-runners/spawn-worker";
 // The canonical wire string the Server TL pinned (ASK-2 final, 2026-06-23).
 const RUNNER_SLOT_SECONDS_KIND = "runner_slot_seconds";
 
+/**
+ * The BILLABLE runner compute kind (2026-08-02). `qty` is wall-clock ALLOCATED
+ * seconds × the box's vCPU count, because the entitlement it meters against
+ * (`runners_entitlement.max_vcpu_h`) is denominated in vCPU-HOURS.
+ *
+ * A slot-second is NOT a vCPU-second. On the current 4-vCPU runner they differ
+ * by exactly 4×, and both read as "seconds" — so pushing slot-seconds against a
+ * vCPU-hour ceiling under-bills by 4× and looks completely reasonable while
+ * doing it. That is the whole reason this is a separate kind rather than a
+ * redefinition of `runner_slot_seconds`: changing what an existing kind's `qty`
+ * MEANS is invisible to every consumer already reading it.
+ */
+const RUNNER_VCPU_SECONDS_KIND = "runner_vcpu_seconds";
+
+/**
+ * vCPU count of the runner box, and the ONLY place the fleet's shape enters the
+ * billing math. Pinned to `RunnerContainer`'s `instance_type` in wrangler.jsonc
+ * (`standard-4` = 4 vCPU / 12 GiB / 20 GB — which is also this Cloudflare
+ * account's per-deployment ceiling: vcpu_per_deployment = 4).
+ *
+ * ⚠️ If the fleet ever serves MORE THAN ONE box size (an 8-vCPU or high-memory
+ * SKU), this constant becomes wrong for every job that is not standard-4 and
+ * MUST be replaced by a per-job value carried from the spawn — not "adjusted".
+ * A single global multiplier silently under-bills the bigger SKU on the day it
+ * ships, which is the failure this comment exists to prevent.
+ */
+export const RUNNER_BOX_VCPU = 4;
+
 /** `"YYYY-MM"` (UTC) for an epoch-ms instant. */
 export function billingPeriod(atMs: number): string {
   const d = new Date(atMs);
@@ -1105,12 +1133,29 @@ export async function buildUsageEvent(opts: {
   startedMs: number;
   completedMs: number;
   region: string;
+  /**
+   * vCPU count of the box that ran this job. Defaults to the single fleet size
+   * ({@link RUNNER_BOX_VCPU}) but is a PARAMETER, not a constant read, so a
+   * mixed-size fleet only has to pass the real number here — the billing math
+   * above it never changes.
+   */
+  vcpu?: number;
 }): Promise<UsageEvent> {
-  const qty = Math.max(0, Math.floor((opts.completedMs - opts.startedMs) / 1000));
+  const allocatedS = Math.max(0, Math.floor((opts.completedMs - opts.startedMs) / 1000));
+  // Guard the multiplier the same way the duration is guarded: a non-finite or
+  // non-positive vCPU count would silently zero the bill (or negate it), and a
+  // zeroed bill is indistinguishable from a job that never ran.
+  const vcpu = Number.isFinite(opts.vcpu) && (opts.vcpu as number) > 0
+    ? (opts.vcpu as number)
+    : RUNNER_BOX_VCPU;
+  const qty = allocatedS * vcpu;
   const period = billingPeriod(opts.completedMs);
   return {
     tenant_id: opts.tenantId,
-    event_kind: RUNNER_SLOT_SECONDS_KIND,
+    // BILLABLE unit — vCPU-seconds, matching the vCPU-HOUR entitlement. See
+    // RUNNER_VCPU_SECONDS_KIND for why this is a distinct kind and not a
+    // redefinition of runner_slot_seconds.
+    event_kind: RUNNER_VCPU_SECONDS_KIND,
     qty,
     billing_period: period,
     region: opts.region,

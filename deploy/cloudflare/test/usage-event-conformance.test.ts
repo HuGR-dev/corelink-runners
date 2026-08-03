@@ -19,7 +19,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { buildUsageEvent, type UsageEvent } from "../src/lib";
+import { buildUsageEvent, RUNNER_BOX_VCPU, type UsageEvent } from "../src/lib";
 
 // The committed cross-repo vector (repo root: conformance/UsageEvent.json).
 const VECTOR_PATH = fileURLToPath(
@@ -59,7 +59,9 @@ describe("conformance: UsageEvent ↔ conformance/UsageEvent.json", () => {
     expect(typeof ev.time_ms).toBe("number");
     expect(typeof ev.idem_key).toBe("string");
 
-    // Value pins on the canonical instance.
+    // Value pins on the canonical instance. The vector is FABRICD's golden and
+    // fabricd still emits the capacity kind, so this stays `runner_slot_seconds`
+    // here — the spawn-worker's BILLABLE kind is pinned separately below.
     expect(ev.event_kind).toBe("runner_slot_seconds");
     expect(ev.billing_period).toMatch(/^\d{4}-\d{2}$/);
     expect(ev.region).toHaveLength(3);
@@ -87,16 +89,68 @@ describe("conformance: UsageEvent ↔ conformance/UsageEvent.json", () => {
     expect(Object.keys(ev).sort()).toEqual(KNOWN_KEYS);
 
     // The builder reproduces the vector's canonical scalar values, proving the
-    // emitted wire matches the vector. Two fields are intentionally NOT pinned
-    // by equality: `source` differs by front door (fabricd vs spawn-worker), and
-    // `idem_key`'s digest differs by side (Rust BLAKE3 vs TS SHA-256) — the
-    // contract pins that it is SOME stable 64-hex, not which algorithm.
+    // emitted wire matches the vector. FOUR fields are intentionally NOT pinned
+    // by equality, each for a stated reason:
+    //   • `source`   — differs by front door (fabricd vs spawn-worker).
+    //   • `idem_key` — digest differs by side (Rust BLAKE3 vs TS SHA-256); the
+    //                  contract pins that it is SOME stable 64-hex.
+    //   • `event_kind` and `qty` — added to this list 2026-08-02. The vector is
+    //                  FABRICD's golden and fabricd emits the CAPACITY kind
+    //                  (`runner_slot_seconds`, slot-seconds). The spawn-worker
+    //                  now emits the BILLABLE kind (`runner_vcpu_seconds`,
+    //                  slot-seconds × vCPU). They are different quantities in
+    //                  different units by design — see RUNNER_VCPU_SECONDS_KIND.
+    //
+    // Moving those two off equality is NOT a weakening: the assertions below
+    // replace a coincidental "== 3" with the billing ARITHMETIC itself, which is
+    // the thing that actually must not drift. An equality against one frozen
+    // example would have passed just as happily with the multiplier missing.
     expect(ev.tenant_id).toBe(vector.tenant_id);
-    expect(ev.event_kind).toBe(vector.event_kind);
-    expect(ev.qty).toBe(vector.qty);
     expect(ev.billing_period).toBe(vector.billing_period);
     expect(ev.region).toBe(vector.region);
     expect(ev.time_ms).toBe(vector.time_ms);
     expect(ev.idem_key).toMatch(/^[0-9a-f]{64}$/);
+
+    // The billable kind + the exact billing math: 3 allocated seconds on a
+    // 4-vCPU box is 12 vCPU-seconds. If the multiplier is ever dropped this
+    // reads 3 (the vector's value) and fails LOUDLY — which is precisely the
+    // 4×-under-bill this whole change exists to prevent.
+    expect(ev.event_kind).toBe("runner_vcpu_seconds");
+    const allocatedSeconds = (1_781_524_800_000 - 1_781_524_797_000) / 1000;
+    expect(ev.qty).toBe(allocatedSeconds * RUNNER_BOX_VCPU);
+    expect(ev.qty).toBe(12);
+    // And it is a strict MULTIPLE of the vector's slot-second quantity, so the
+    // two kinds stay reconcilable against each other.
+    expect(ev.qty).toBe(vector.qty * RUNNER_BOX_VCPU);
+  });
+
+  it("an explicit vcpu overrides the fleet default — a mixed-size fleet bills each box correctly", async () => {
+    // The guard against the failure mode the constant's comment warns about: a
+    // bigger SKU must bill MORE, not silently bill as if it were standard-4.
+    const big = await buildUsageEvent({
+      tenantId: "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      jobId: "lease-0002-big",
+      startedMs: 1_781_524_797_000,
+      completedMs: 1_781_524_800_000,
+      region: "iad",
+      vcpu: 16,
+    });
+    expect(big.qty).toBe(3 * 16);
+    expect(big.qty).toBeGreaterThan(3 * RUNNER_BOX_VCPU);
+
+    // A nonsense vCPU count must NOT zero the bill — a zeroed bill is
+    // indistinguishable from a job that never ran, so it falls back to the
+    // fleet default rather than silently billing nothing.
+    for (const bad of [0, -4, Number.NaN, undefined]) {
+      const ev = await buildUsageEvent({
+        tenantId: "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+        jobId: `lease-bad-${String(bad)}`,
+        startedMs: 1_781_524_797_000,
+        completedMs: 1_781_524_800_000,
+        region: "iad",
+        vcpu: bad as number | undefined,
+      });
+      expect(ev.qty).toBe(3 * RUNNER_BOX_VCPU);
+    }
   });
 });
