@@ -211,6 +211,21 @@ the binary is absent. Its absence, plus non-zero sccache cache statistics on the
 lane, is the proof. Until a job has run on a rolled box, "sccache is installed"
 is a claim about a Dockerfile, not about production.
 
+For the **Node.js + pnpm** bake the proof is a `run:` step — not a `uses:` step,
+which would pass either way because the runner agent bundles its own private Node
+under `externals/`. On a `runs-on: corelink` job:
+
+```yaml
+- run: node --version && npm --version && pnpm --version
+```
+
+Expect exactly `v22.23.2`, npm's bundled version, and `10.32.1`. The pnpm string
+must match **character for character**: corelink-server's `setup-pnpm` composite
+compares `pnpm --version` to its pinned default and silently falls back to
+downloading pnpm on any mismatch, so a near-miss looks green while buying nothing.
+The image build itself runs the same three `--version` calls (build fails closed if
+a symlink is broken), but that proves the build, not the rolled fleet.
+
 ---
 
 ## Rollback

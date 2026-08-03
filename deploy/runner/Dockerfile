@@ -70,6 +70,83 @@
 #   9,561,816-byte tarball was downloaded over TLS, `shasum -a 256` recomputed
 #   locally, and the result matched upstream's published `.sha256` sidecar
 #   byte-for-byte. NEVER fabricate this value.
+#
+# NODE / PNPM (the JS toolchain — so a workflow `run:` step can call node/pnpm):
+#   Node.js v22.23.2 (linux-x64) + pnpm 10.32.1, both digest-verified before use
+#   (X4 floor). Pinned to what corelink-server actually asks for, never "latest":
+#     - node 22 — `actions/setup-node` uses `node-version: 22` in admin-ui-ci.yml,
+#       admin-ui-e2e.yml and lighthouse-ci.yml (docs-ci.yml still asks for 20;
+#       node 22 also satisfies apps/docs' own `engines.node` ">=22.0.0 <23.0.0",
+#       which its own workflow currently violates). v22.23.2 is the current 22.x
+#       LTS ("Jod", 2026-07-28) — i.e. what `node-version: 22` resolves to today.
+#     - pnpm 10.32.1 — corelink-server's ROOT package.json `packageManager`, and
+#       the default of its `.github/actions/setup-pnpm` composite. It must match
+#       EXACTLY: that composite takes its offline fast path only when
+#       `pnpm --version` equals the pinned string, else it downloads pnpm anyway.
+#
+#   ⚠️ WHAT THIS DOES *NOT* DO — read before repeating the claim. It does not
+#   "unblock" those workflows. The actions-runner agent already bundles its OWN
+#   Node under `externals/node20` / `externals/node24`, which is why JS-based
+#   `uses:` actions (actions/checkout, actions/setup-node, …) already work here.
+#   That Node is private to the agent and is NOT on PATH, so a workflow `run:`
+#   step calling `node`/`npm`/`pnpm` has never worked — THAT is what this fixes.
+#   Those four workflows could move to `runs-on: corelink` without this change,
+#   paying a per-run setup-node + pnpm download. What baking buys is exactly two
+#   things: (a) it removes that download from every run, and (b) it stops the move
+#   depending on the setup-pnpm composite's fallback branch, which was written for
+#   "a future hosted/Linux runner" and has never once executed. Both are real;
+#   neither is "unblocking".
+#
+#   THE PRIZE IT SERVES (measured on HuGR-Labs/corelink-server, 2026-08-01→03):
+#   4429 billed ubuntu-latest minutes in 3 days — admin-ui-e2e 1112 min / $6.67,
+#   admin-ui-ci 811 / $4.87, docs-ci 712 / $4.27, lighthouse-ci 308 / $1.85; 66%
+#   of the bill, every job `runs-on: ubuntu-latest`. A minute on `runs-on:
+#   corelink` is $0 of GitHub billing. The `runs-on:` change lives in THAT repo;
+#   this stanza only makes the box somewhere those jobs can land cheaply.
+#
+#   NOT ALL FOUR FIT. node+pnpm is the entire requirement for admin-ui-ci and for
+#   docs-ci's build / i18n-coverage / reapi-gen-drift jobs. admin-ui-e2e also runs
+#   `playwright install --with-deps` — apt-get and passwordless sudo are both
+#   present here, so it works; it just pays the browser download every run.
+#   lighthouse-ci and docs-ci's axe / a11y-baseline-diff jobs need a SYSTEM CHROME
+#   on PATH (LHCI's chrome-launcher auto-discovery, and an explicit
+#   `command -v google-chrome-stable` that fails the job hard). This image ships
+#   no Chrome, so those stay hosted until that is decided separately. docs-ci also
+#   has a Docker-container action (lychee) and two jobs that `npm install --global`
+#   — the global prefix here is the root-owned /usr/local/node, so that needs
+#   `sudo` (available, NOPASSWD), another reason those jobs are not the first movers.
+#
+#   SIZE / LATENCY — the cost side, paid on every spawn by every job in the fleet,
+#   including the Rust ones that will never call node. Measured on the real
+#   artifacts, not estimated:
+#     node v22.23.2 linux-x64: 31,058,332 B download → 208 MiB extracted, of which
+#       the `include/` C++ headers are 62 MiB. Those are dropped in the stage below
+#       (node-gyp fetches its own per-version headers into ~/.cache/node-gyp and
+#       never reads this directory), leaving ~145 MiB on disk / ~45 MiB gzipped.
+#     pnpm 10.32.1 npm tarball: 4,534,444 B download → ~21 MiB on disk /
+#       ~4.6 MiB gzipped.
+#     TOTAL ≈ 166 MiB uncompressed, ≈ 50 MiB compressed. Measured spawn latency is
+#     8–10 s today. Re-measure it after the roll
+#     (docs/runbook/runner-image-rollout.md) instead of assuming this is free.
+#
+#   ⛔ BROWSERS ARE DELIBERATELY *NOT* BAKED. Measured against the Playwright CDN
+#   at the revisions pinned by @playwright/test 1.61.1: chromium ~187 MiB, firefox
+#   ~105 MiB, webkit ~101 MiB, ffmpeg ~2 MiB — ~395 MiB of download and ~1 GiB on
+#   disk, i.e. 6–8× the entire node+pnpm cost, imposed on every Rust spawn to serve
+#   two workflows. And a baked browser set is version-locked to the Playwright
+#   package (admin-ui pins 1.61.1, apps/docs pins 1.61.0 — already skewed), so it
+#   silently rots into a re-download on the next bump. If the per-run browser
+#   download ever becomes the bottleneck, the answer is a SEPARATE image variant
+#   selected by runner label, or caching the browsers in CoreLink's own CAS — not
+#   fattening the one image every Rust job also pulls.
+#
+#   To refresh: bump NODE_VERSION + NODE_SHA256 from the
+#   `node-v<V>-linux-x64.tar.xz` line of https://nodejs.org/dist/v<V>/SHASUMS256.txt
+#   (the per-release sidecar, additionally GPG-signed as SHASUMS256.txt.asc); and
+#   PNPM_VERSION + PNPM_SHA256 by downloading
+#   https://registry.npmjs.org/pnpm/-/pnpm-<V>.tgz, checking its sha512 against the
+#   registry's published `dist.integrity` for that exact version, then recomputing
+#   `shasum -a 256` over those same bytes. NEVER fabricate either value.
 # -----------------------------------------------------------------------------
 
 # ── Stage 1: runner binary download + checksum verification ──────────────────
@@ -155,6 +232,81 @@ RUN curl -fsSL \
     rm -rf /tmp/sccache.tar.gz "/tmp/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl" && \
     /usr/local/bin/sccache --version
 
+# ── Stage 1d: Node.js download + checksum verification ───────────────────────
+# Same PINNED base digest. Node ships as a TARBALL (like the runner agent and
+# sccache) with a per-release SHASUMS256.txt sidecar, itself GPG-signed as
+# SHASUMS256.txt.asc — verify BEFORE extracting anything.
+#
+# Fetched HERE, at image-build time on a hosted builder, for the same reason as
+# sccache: an ephemeral runner box then needs no runtime egress to nodejs.org (or
+# to GitHub's setup-node tool mirror) just to obtain a JS toolchain.
+FROM ubuntu:24.04@sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae77ff1dc54 AS node-download
+
+# Node.js release to pin (linux-x64). NODE_VERSION tracks what corelink-server's
+# workflows ask `actions/setup-node` for (`node-version: 22`); v22.23.2 is the
+# current 22.x LTS. Refresh NODE_SHA256 from the `node-v${V}-linux-x64.tar.xz`
+# line of https://nodejs.org/dist/v${V}/SHASUMS256.txt, re-verified by recomputing
+# the digest of the downloaded tarball — NEVER fabricate it.
+ARG NODE_VERSION=22.23.2
+ARG NODE_SHA256=d60acfe00a2932254bb0ad20e01b0d74397a0875595de719654b214f4b03f307
+
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+
+RUN apt-get update -qq && \
+    apt-get install -y --no-install-recommends curl ca-certificates xz-utils && \
+    rm -rf /var/lib/apt/lists/*
+
+# The `rm -rf` drops 62 MiB of C++ embedder headers plus release docs. node-gyp
+# does NOT read them — it downloads its own per-version headers into
+# ~/.cache/node-gyp — so native-module builds are unaffected. Every megabyte here
+# is paid on every spawn of every job, including the Rust ones (see header).
+RUN curl -fsSL \
+      "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" \
+      -o /tmp/node.tar.xz && \
+    echo "${NODE_SHA256}  /tmp/node.tar.xz" | sha256sum -c - && \
+    mkdir -p /opt/node && \
+    tar -xJf /tmp/node.tar.xz -C /opt/node --strip-components=1 && \
+    rm -f /tmp/node.tar.xz && \
+    rm -rf /opt/node/include /opt/node/share/doc \
+           /opt/node/CHANGELOG.md /opt/node/README.md && \
+    /opt/node/bin/node --version
+
+# ── Stage 1e: pnpm download + checksum verification ──────────────────────────
+# Same PINNED base digest. FORM CHOICE, deliberately: pnpm's GitHub release
+# publishes standalone binaries but NO checksum sidecar of any kind, so pinning
+# one would mean fabricating its digest — forbidden. The npm registry DOES publish
+# a per-version sidecar (`dist.integrity`, a sha512 over the exact tarball), so the
+# npm tarball is the only form of pnpm with a verifiable published digest. It is
+# also 4.5 MB against the standalone binary's 66 MB, and it is a Node bundle —
+# fine, because Stage 1d bakes the Node it needs.
+FROM ubuntu:24.04@sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae77ff1dc54 AS pnpm-download
+
+# pnpm release to pin. This MUST equal corelink-server's root package.json
+# `packageManager` ("pnpm@10.32.1") and the default of its setup-pnpm composite —
+# that composite compares `pnpm --version` to the pinned string EXACTLY and falls
+# back to downloading pnpm on any mismatch, which would defeat the whole point.
+# PNPM_SHA256 was produced by downloading the 4,534,444-byte tarball over TLS,
+# checking its sha512 against the registry's published `dist.integrity` for
+# 10.32.1, then recomputing `shasum -a 256` over those same bytes. NEVER
+# fabricate it.
+ARG PNPM_VERSION=10.32.1
+ARG PNPM_SHA256=9b943b94bc8f55efb993aad8e44b538e6b091e60a9e4a944dcde869855f233e3
+
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+
+RUN apt-get update -qq && \
+    apt-get install -y --no-install-recommends curl ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL \
+      "https://registry.npmjs.org/pnpm/-/pnpm-${PNPM_VERSION}.tgz" \
+      -o /tmp/pnpm.tgz && \
+    echo "${PNPM_SHA256}  /tmp/pnpm.tgz" | sha256sum -c - && \
+    mkdir -p /opt/pnpm && \
+    tar -xzf /tmp/pnpm.tgz -C /opt/pnpm --strip-components=1 && \
+    rm -f /tmp/pnpm.tgz && \
+    test -x /opt/pnpm/bin/pnpm.cjs && test -x /opt/pnpm/bin/pnpx.cjs
+
 # ── Stage 2: final image ─────────────────────────────────────────────────────
 # Same PINNED digest as every download stage — all stages MUST use the identical base.
 FROM ubuntu:24.04@sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae77ff1dc54
@@ -165,7 +317,9 @@ LABEL org.opencontainers.image.title="CoreLink ephemeral GitHub Actions runner" 
       corelink.runner.version="2.335.1" \
       corelink.rust.toolchain="1.96.0" \
       corelink.clw.version="0.1.4" \
-      corelink.sccache.version="0.17.0"
+      corelink.sccache.version="0.17.0" \
+      corelink.node.version="22.23.2" \
+      corelink.pnpm.version="10.32.1"
 
 # ── System packages ───────────────────────────────────────────────────────────
 # git is required by most GitHub Actions (actions/checkout etc.)
@@ -225,6 +379,36 @@ COPY --from=clw-download /usr/local/bin/clw /usr/local/bin/clw
 # Inert unless the workflow sets RUSTC_WRAPPER=sccache + the SCCACHE_WEBDAV_*
 # env; the binary's mere presence changes nothing (default-off, like clw).
 COPY --from=sccache-download /usr/local/bin/sccache /usr/local/bin/sccache
+
+# ── Copy the digest-pinned Node.js + pnpm from Stages 1d/1e ──────────────────
+# ⚠️ READ THIS BEFORE CONCLUDING "node is already in the image". The
+# actions-runner tree copied above ALREADY ships its own Node under
+# `externals/node20` and `externals/node24` — that is why JS-based `uses:` actions
+# (actions/checkout, actions/setup-node, …) run on this box today. That Node is
+# private to the runner agent and is NOT on PATH. A workflow `run:` step calling
+# `node`, `npm` or `pnpm` sees ONLY what the two COPY lines below install. The two
+# things are not interchangeable; an `externals/` listing proves nothing about
+# `run:` steps.
+#
+# Placement is load-bearing: these land while still root and BEFORE the
+# `USER runner` switch below, root-owned under /usr/local, symlinked onto
+# /usr/local/bin. That directory is on the image's default PATH and SURVIVES the
+# `ENV PATH=/home/runner/.cargo/bin:$PATH` prepend further down (it prepends, it
+# does not replace), so all three resolve for the unprivileged `runner` user that
+# actually executes the job — and for entrypoint.sh, which never rewrites PATH.
+COPY --from=node-download /opt/node /usr/local/node
+COPY --from=pnpm-download /opt/pnpm /usr/local/pnpm
+
+# The final `--version` triple is a BUILD-TIME PROOF that each name resolves on
+# PATH in this image (a broken symlink or a missing interpreter fails the build
+# closed, here, rather than silently on a customer's box).
+RUN ln -sf /usr/local/node/bin/node      /usr/local/bin/node && \
+    ln -sf /usr/local/node/bin/npm       /usr/local/bin/npm && \
+    ln -sf /usr/local/node/bin/npx       /usr/local/bin/npx && \
+    ln -sf /usr/local/node/bin/corepack  /usr/local/bin/corepack && \
+    ln -sf /usr/local/pnpm/bin/pnpm.cjs  /usr/local/bin/pnpm && \
+    ln -sf /usr/local/pnpm/bin/pnpx.cjs  /usr/local/bin/pnpx && \
+    node --version && npm --version && pnpm --version
 
 # Install runner dependencies (requires running as root, inside the container).
 RUN /opt/actions-runner/bin/installdependencies.sh

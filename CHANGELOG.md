@@ -65,6 +65,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Suite: **365 → 390** tests (22 files). Eight cells go red against the pre-fix
   `src/index.ts` and green with it.
 
+### 2026-08-03 — Node.js 22 + pnpm baked, so a `run:` step on the box can call them
+
+- **feat(runner-image): bake Node.js v22.23.2 and pnpm 10.32.1 (digest-verified, X4 floor).**
+  The actions-runner agent already ships its own Node under `externals/node20` / `node24`,
+  which is why JS-based `uses:` actions work on this box today — but that Node is private to
+  the agent and is not on `PATH`, so a workflow `run:` step calling `node`/`npm`/`pnpm` saw
+  nothing. Two new digest-pinned stages (`node-download`, `pnpm-download`) install to
+  `/usr/local/node` + `/usr/local/pnpm`, symlinked onto `/usr/local/bin` while still root and
+  before the `USER runner` switch, so they resolve for the unprivileged user that runs the job.
+  The build ends with `node --version && npm --version && pnpm --version`, so a broken symlink
+  fails the build closed rather than a customer's job.
+
+- **The versions are corelink-server's, not "latest".** node 22 is what its
+  `actions/setup-node` steps ask for (`node-version: 22` in admin-ui-ci, admin-ui-e2e,
+  lighthouse-ci) and v22.23.2 is the current 22.x LTS; pnpm 10.32.1 is its root
+  `package.json` `packageManager` and its `setup-pnpm` composite default. The pnpm pin must
+  match **exactly** — that composite compares `pnpm --version` to the pinned string and falls
+  back to downloading pnpm on any mismatch.
+
+- **Stated honestly: this unblocks nothing.** Those workflows already carry
+  `actions/setup-node`, and the `setup-pnpm` composite has a `pnpm/action-setup` fallback
+  written for "a future hosted/Linux runner", so they could move to `runs-on: corelink` today
+  and pay a per-run download. Baking buys two things: it removes that download from every run
+  (~287 runs / 3 days across the four heaviest JS workflows, 2943 billed `ubuntu-latest`
+  minutes / $17.66), and it stops the move depending on a fallback branch that has never once
+  executed. `lighthouse-ci` and docs-ci's axe / a11y-baseline jobs additionally need a system
+  Chrome and are **not** served by this change.
+
+- **Browsers deliberately not baked, with the numbers.** node+pnpm adds ≈166 MiB uncompressed
+  / ≈50 MiB gzipped (node's 62 MiB of `include/` headers are stripped — node-gyp fetches its
+  own). Playwright's 1.61.x browser set would add ~395 MiB of download / ~1 GiB on disk, 6–8×
+  as much, paid on every spawn by every Rust job, and version-locked to a `@playwright/test`
+  pin that is already skewed between the two apps (1.61.1 vs 1.61.0). `playwright install` at
+  job time stays correct; a fatter shared image does not.
+
+- **Not proven by this change:** the binaries' presence on the built image. That is provable
+  only after a rebuild + roll — `docs/runbook/runner-image-rollout.md` gains the `run:`-step
+  behavioural check (a `uses:` step would pass either way, on the agent's private Node).
+
 ### 2026-08-03 — a retried container start no longer leaves a ghost box holding a fleet slot
 
 - **fix(cloudflare): cancel the superseded start attempt instead of abandoning it.**
