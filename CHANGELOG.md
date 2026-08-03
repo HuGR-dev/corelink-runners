@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-08-03 — a retried container start no longer leaves a ghost box holding a fleet slot
+
+- **fix(cloudflare): cancel the superseded start attempt instead of abandoning it.**
+  `FLEET_MAX_CONCURRENCY` is 20 and `max_instances` is 20, and the fleet behaves like ~7: a
+  24-box fan-out on 2026-08-03 placed 13, peaked at **7 simultaneous**, and left 11 jobs queued
+  for 17 minutes; the Containers API reported `healthy: 7 / active: 0` long after the jobs had
+  finished. `sleepAfter` explains a *finished* box holding its slot for 15 minutes. It does not
+  explain boxes that never ran anything.
+
+  `startWithRetry` did. On a failed or hung start it minted a **fresh DO handle** for the next
+  attempt and dropped the previous one on the floor. Nothing referenced that handle again — no
+  `jhandle:`/`rhandle:` binding is written for an attempt that failed — so no teardown path
+  could reach it and the keep-alive sweep never saw it. And "the start failed" never meant "no
+  container was created": `@cloudflare/containers` 0.3.7 issues `container.start()` and only
+  then polls up to 8 s for the instance (`dist/lib/container.js:1378-1421`), while our own 8 s
+  race rejects a promise the DO-side RPC keeps running to completion regardless. Each failed
+  attempt could therefore leave a **standard-4 (4 vCPU / 12 GiB) instance running with nobody
+  holding its handle**, out of `max_instances: 20`, until `sleepAfter` reaped it 15 minutes
+  later — up to 2 per spawn, and worst exactly during the bursts the fleet exists to absorb.
+
+- **One JIT registration per ATTEMPT, never shared.** The mint moved from `driveSpawn` (once per
+  job) into the retry loop (once per attempt). `generate-jitconfig` registers a **single-use**
+  runner, so booting two boxes with one config meant at most one could ever register — GitHub
+  answers the second with "A session for this runner already exists" — and *which* one won was a
+  race we did not control. When the abandoned box won it, the box we tracked and bound
+  `rhandle:` to was the one that could not work.
+
+- **The cancelled attempt loses its registration first, then its container.** Order is
+  deliberate: deleting the registration (`DELETE /repos/{repo}/actions/runners/{id}`) is the
+  only step that bounds the worst outcome — a late-booting box CLAIMING a customer's job on a
+  container no binding points at, which the keep-alive sweep would never renew and `sleepAfter`
+  would SIGKILL mid-job 15 minutes later. It does not depend on the destroy succeeding.
+
+- **A destroy that races a still-provisioning start is now survivable.** Each cancelled attempt
+  writes a durable `ghost:<handle>` record; `sweepGhostContainers` (1-minute cron, ahead of the
+  re-drive reconcilers so they place into a fleet whose ghosts are already back) re-destroys and
+  **confirms via `isAlive()` before forgetting it**. A box still up after a destroy keeps its
+  record and is logged at ERROR (`ghost_container_still_alive`) rather than dropped.
+
+- **It is counted and named.** New golden signals `container_start_abandoned` (attempts we
+  cancelled) and `ghost_container_reaped` (ghosts the cron has confirmed down), plus
+  `placement_unconfirmed`, which the previous change already bumped but never listed — so it
+  read as absent instead of zero on the snapshot. A container that exists and can never do work
+  is lost fleet capacity; it must be a named event, not an unexplained hole.
+
+- `/v1/spawn` (the fabric contract) cancels its superseded attempts too, in the correct DO
+  namespace for the mode. That path takes its JIT from the caller and cannot re-mint one, so the
+  destroy is not merely capacity hygiene there — it is what stops a late box from consuming the
+  single-use registration the surviving box needs.
+
+- `test/ghost-containers.test.ts` (14 cells): 11 of them fail on the pre-fix code and pass after.
+  Suite 351 → 365.
+
 ### 2026-08-03 — a spawn that "succeeded" and placed nothing no longer loses the job
 
 - **fix(cloudflare): confirm placement instead of assuming it.** A burst above the concurrency
