@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-08-02 — 4 max-size containers were burning idle for a feature that is not live
+
+- **fix(cloudflare): cap `CheckHostContainer` at 1 instance until it is live-flipped (was 4).**
+  A cost audit read the Containers API and found this app at
+  `healthy: 4, active: 0, assigned: 0` — four boxes of **4 vCPU / 12 GiB / 20 GB**, which is
+  this account's per-deployment CEILING (`vcpu_per_deployment=4`,
+  `memory_mib_per_deployment=12288`, `disk_mb_per_deployment=20000`) — held since the app was
+  created on 2026-07-07, doing nothing.
+
+  Cloudflare bills memory and disk by **ALLOCATION**, not by use, so idle boxes at the maximum
+  instance size are the most expensive thing that can be running. The prior headroom was not
+  wrong in principle (it is the same leaked-idle reasoning that sized the runner container) — it
+  was sized for a LIVE service, and check-host is still not live-flipped, so "ample headroom" was
+  headroom for zero traffic.
+
+  1 rather than 0 keeps the app deployable and smoke-testable. Raise it back to 4+ **in the same
+  change that live-flips check-host**, not before.
+
+  ⚠️ Config-only: this takes effect on the next `deploy-spawn-worker.yml` dispatch, which is
+  manual by design. Until then the four boxes stay up.
+
 ### 2026-08-02 — the runner usage meter was in the wrong unit (4× under-bill)
 
 - **feat(cloudflare): emit `runner_vcpu_seconds`, the BILLABLE runner compute unit.** The owner

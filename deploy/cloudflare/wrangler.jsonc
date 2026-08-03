@@ -195,9 +195,23 @@
       "class_name": "CheckHostContainer",
       "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-checkhostcontainer@sha256:3b694bc66f57dc910b37d11ddab7a933c65559292a48efa1b8457db8a92bd1ce",
       "instance_type": "standard-4",
-      // O7 hardening: raised 2 → 4 (same leaked-idle saturation risk as the runner
-      // container; check-host is not yet live-flipped, so 4 is ample headroom).
-      "max_instances": 4
+      // 2026-08-02: lowered 4 → 1. A cost audit found this app sitting at
+      // `healthy: 4, active: 0, assigned: 0` — FOUR boxes of 4 vCPU / 12 GiB /
+      // 20 GB (this account's per-deployment CEILING: vcpu_per_deployment=4,
+      // memory_mib_per_deployment=12288, disk_mb_per_deployment=20000) held
+      // since the app was created 2026-07-07, doing nothing. Cloudflare bills
+      // memory and disk by ALLOCATION, not by use, so idle boxes at the maximum
+      // instance size are the most expensive thing that can be running.
+      //
+      // The prior headroom was not wrong in principle — it is the same
+      // leaked-idle reasoning as the runner container — but it was sized for a
+      // LIVE service. Check-host is still not live-flipped (see the image note
+      // above), so "ample headroom" was headroom for zero traffic.
+      //
+      // 1, not 0: keep the app deployable and smoke-testable. Raise this back to
+      // 4+ IN THE SAME CHANGE that live-flips check-host — not before, and do
+      // not leave it at 1 afterwards.
+      "max_instances": 1
     }
   ]
 
