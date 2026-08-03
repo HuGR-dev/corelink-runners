@@ -37,6 +37,7 @@ import {
   type CredStashLike,
   type StashedCred,
   type StashRecord,
+  RUNNER_BOX_VCPU,
 } from "../src/lib";
 
 describe("safeEqual (constant-time bearer compare)", () => {
@@ -742,7 +743,7 @@ describe("revokeCasPatById (revoke-by-pat_id, the live /revoke contract)", () =>
   });
 });
 
-describe("billing usage-push (ASK-2 — runner_slot_seconds)", () => {
+describe("billing usage-push (ASK-2, billable unit since 2026-08-02 — runner_vcpu_seconds)", () => {
   afterEach(() => vi.unstubAllGlobals());
 
   it("billingPeriod is UTC YYYY-MM", () => {
@@ -758,7 +759,7 @@ describe("billing usage-push (ASK-2 — runner_slot_seconds)", () => {
     expect(await usageIdemKey("job-1", "2026-07")).not.toBe(a); // period-scoped
   });
 
-  it("buildUsageEvent computes slot·seconds, the canonical kind, and the full wire", async () => {
+  it("buildUsageEvent computes vCPU·seconds (allocated × vCPU), the billable kind, and the full wire", async () => {
     const started = "2026-06-23T11:00:00Z";
     const completed = "2026-06-23T11:00:03Z"; // +3s
     const ev = await buildUsageEvent({
@@ -769,8 +770,13 @@ describe("billing usage-push (ASK-2 — runner_slot_seconds)", () => {
       region: "iad",
     });
     expect(ev.tenant_id).toBe("3560e213-1e23-4fd0-8871-7033c6052ebd");
-    expect(ev.event_kind).toBe("runner_slot_seconds");
-    expect(ev.qty).toBe(3); // (11:00:03 − 11:00:00)/1000
+    // BILLABLE kind + unit. `qty` is allocated seconds × the box's vCPU count,
+    // because the entitlement it meters against (max_vcpu_h) is in vCPU-HOURS.
+    // It used to assert `3` (raw slot-seconds) — which is the exact 4×
+    // under-bill this change fixes, and which looked perfectly correct.
+    expect(ev.event_kind).toBe("runner_vcpu_seconds");
+    expect(ev.qty).toBe(3 * RUNNER_BOX_VCPU); // 3 allocated s × 4 vCPU = 12
+    expect(ev.qty).toBe(12);
     expect(ev.region).toBe("iad");
     expect(ev.source).toBe("corelink-runners/spawn-worker");
     expect(ev.billing_period).toBe("2026-06");
@@ -786,7 +792,9 @@ describe("billing usage-push (ASK-2 — runner_slot_seconds)", () => {
       completedMs: 1000, // completed before started
       region: "iad",
     });
-    expect(ev.qty).toBe(0); // never bills negative
+    // Never bills negative — and the vCPU multiplier must not resurrect it
+    // (0 × 4 is still 0, but a sign error times a multiplier is not).
+    expect(ev.qty).toBe(0);
   });
 
   it("pushUsageEvent POSTs a one-event batch with the dedicated key on 2xx", async () => {
@@ -809,7 +817,7 @@ describe("billing usage-push (ASK-2 — runner_slot_seconds)", () => {
     expect(String(url)).toContain("/internal/v1/billing/usage");
     const body = JSON.parse((init as RequestInit).body as string);
     expect(Array.isArray(body)).toBe(true); // a batch
-    expect(body[0].event_kind).toBe("runner_slot_seconds");
+    expect(body[0].event_kind).toBe("runner_vcpu_seconds"); // the BILLABLE kind
     expect((init as RequestInit).headers).toMatchObject({ "x-corelink-internal-auth": "billing-key" });
   });
 
