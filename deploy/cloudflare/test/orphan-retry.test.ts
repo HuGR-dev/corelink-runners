@@ -22,7 +22,7 @@ vi.mock("@cloudflare/containers", () => ({
 }));
 
 // Import AFTER the mock is registered.
-import { retryOrphanedSpawns, recordOrphan, type Env } from "../src/index";
+import { retryOrphanedSpawns, recordOrphan, recordPlacement, type Env } from "../src/index";
 import {
   orphanRetryStep,
   orphanRefusalStep,
@@ -163,9 +163,13 @@ describe("recordOrphan (dead-letter record on spawn failure)", () => {
 // ── 2b. retryOrphanedSpawns (part 2: WARM re-drive of the dead-letter) ─────────
 
 describe("retryOrphanedSpawns (scheduled WARM re-drive)", () => {
-  it("bump → claim → drive → DELETE-on-success (recovered), WARM", async () => {
+  it("bump → claim → drive → record stays PROVISIONAL on success, WARM", async () => {
     const kv = fakeKv({ "orphan:job-1": JSON.stringify(REC({ attempts: 1 })) });
-    const drive = vi.fn(async () => {});
+    // The real `driveSpawn` writes a provisional placement record on success (see
+    // recordPlacement) — the mock does the same so the tick is faithful.
+    const drive = vi.fn(async (e: Env, o: { jobId: string }) => {
+      await recordPlacement(e, { ...REC(), jobId: o.jobId } as never);
+    });
     await retryOrphanedSpawns(envWith(kv), CTX, Date.now(), drive);
 
     // Drove WARM with the recorded installation_id + labels + repo.
@@ -176,8 +180,12 @@ describe("retryOrphanedSpawns (scheduled WARM re-drive)", () => {
     );
     // Claimed the spawn (dedup vs the live path).
     expect(kv.store.get("spawn:job-1")).toBe("1");
-    // Recovered ⇒ the dead-letter is deleted.
-    expect(kv.store.has("orphan:job-1")).toBe(false);
+    // The reconciler no longer DELETES on a successful drive. A returned drive means
+    // "a container started", not "the job is placed" — deleting here would discard
+    // the provisional record and re-open the exact hole this class of bug lives in.
+    const raw = kv.store.get("orphan:job-1");
+    expect(raw).toBeTruthy();
+    expect(JSON.parse(raw!).placedMs).toEqual(expect.any(Number));
   });
 
   it("bumps the attempt count BEFORE driving (so a killed tick still advances)", async () => {
@@ -281,8 +289,10 @@ describe("retryOrphanedSpawns (scheduled WARM re-drive)", () => {
     const drive = vi.fn(async () => {});
     await retryOrphanedSpawns(envWith(kv), CTX, Date.now(), drive);
     expect(drive).toHaveBeenCalledTimes(2);
-    expect(kv.store.has("orphan:job-1")).toBe(false);
-    expect(kv.store.has("orphan:job-2")).toBe(false);
+    // Both were driven and both records survive the tick (the drive, not the
+    // reconciler, now owns clearing/marking them — see the DELETE-on-success test).
+    expect(kv.store.has("orphan:job-1")).toBe(true);
+    expect(kv.store.has("orphan:job-2")).toBe(true);
   });
 });
 
@@ -392,10 +402,16 @@ describe("retryOrphanedSpawns — a REFUSED retry is backpressure, not a failed 
     kv.store.delete("spawn:job-1");
     expect(kv.store.has("orphan:job-1")).toBe(true);
 
-    const drive = vi.fn(async () => {});
+    const drive = vi.fn(async (e: Env, o: { jobId: string }) => {
+      await recordPlacement(e, { ...REC(), jobId: o.jobId } as never);
+    });
     await retryOrphanedSpawns(envWith(kv), CTX, now + 60_000, drive);
     expect(drive).toHaveBeenCalledTimes(1);
-    expect(kv.store.has("orphan:job-1")).toBe(false); // placed ⇒ dead-letter cleared
+    // Placed ⇒ the record becomes PROVISIONAL (placedMs set), not deleted: the box
+    // has started but has not yet been confirmed to have claimed the job.
+    const raw = kv.store.get("orphan:job-1");
+    expect(raw).toBeTruthy();
+    expect(JSON.parse(raw!).placedMs).toEqual(expect.any(Number));
   });
 
   it("gives up LOUDLY once the absolute window closes (a capacity fault, not routine)", async () => {
