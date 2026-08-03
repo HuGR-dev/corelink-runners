@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-08-02 — warn the customer BEFORE the overage, not on the invoice
+
+- **feat(cloudflare): near-ceiling warning on the monthly `max_vcpu_h` allowance.** Overage is
+  priced at $0.30/vCPU-h (3× COGS), so crossing the included allowance is expensive — and for
+  an SMB self-serve buyer a surprise invoice is a **churn event**, not an upgrade conversation.
+
+  The two halves could not see each other: the ALLOWANCE lives in D1
+  (`runners_entitlement.max_vcpu_h`) and the CONSUMPTION only exists in this Worker, the one
+  component that sees every job finish. The mint now forwards the allowance
+  (corelink-server #975); this caches it per tenant at spawn (`vceil:<tenant>` — a property of
+  the subscription, so one refreshed key beats a write per job) and, at completion, accumulates
+  the job's vCPU-seconds into `vused:<tenant>:<period>` and evaluates the thresholds.
+
+- **Warns at 80% and again at 100%, each exactly ONCE per period.** A tenant parked at 85% runs
+  hundreds of jobs; an alert that repeats on every one gets filtered, which is the same as no
+  alert. Marker keys (`vwarn:<tenant>:<period>:<threshold>`) are written BEFORE announcing —
+  a duplicate is worse than a late one here. Only the HIGHEST newly-crossed threshold is
+  reported, so one long job that jumps 0% → 150% says *"you are over"* rather than replaying
+  the history. A new month resets both the counter and the markers, because the allowance is
+  monthly.
+
+- **Deliberately NOT a gate.** Crossing the ceiling never stops a job — the customer keeps
+  building and pays the overage. Stopping someone's CI mid-sprint is a worse outcome than
+  charging them, which is exactly why overage exists instead of a hard block. The warning's
+  only power is to make the bill unsurprising.
+
+- **Absent is not zero.** No ceiling on file ⇒ never warn. Treating absent as 0 would divide by
+  zero and warn every tenant who never bought a metered tier — the loudest possible way to be
+  wrong. Guarded on both sides (server #975 omits 0/negative; this refuses them again).
+
+- **Consistent unit with the bill:** the warning counts ALLOCATED wall-clock × vCPU, the same
+  arithmetic as the billable `runner_vcpu_seconds` event. If those diverged the warning would
+  fire at the wrong moment. The KV counter is a racy read-modify-write and that is ACCEPTED and
+  documented: it drives a human-facing warning, not an invoice — the invoice comes from the
+  per-job idempotent usage ledger.
+
+- **Mutation-tested,** not just covered: flipping `>=` to `>` reds 3, treating an absent ceiling
+  as 0 reds 1, dropping the dedup reds 2, and first-wins instead of highest-wins reds 2.
+  348 tests pass; `tsc --noEmit` clean.
+
 ### 2026-08-02 — 4 max-size containers were burning idle for a feature that is not live
 
 - **fix(cloudflare): cap `CheckHostContainer` at 1 instance until it is live-flipped (was 4).**

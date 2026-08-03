@@ -208,6 +208,8 @@ export interface MintResult {
   patId: string;
   tenant: string;
   maxConcurrency?: number;
+  /** Monthly compute allowance (vCPU-h). Absent ⇒ no metered ceiling on file. */
+  maxVcpuH?: number;
 }
 
 // A 403 from the mint is a HARD DENY (installation not mapped / tenant suspended /
@@ -271,6 +273,10 @@ async function mintCasPat(env: MintEnv, params: MintParams): Promise<MintResult>
     pat_id?: string;
     tenant?: string;
     max_concurrency?: number;
+    // ADDITIVE (server #975): the monthly compute allowance. OMITTED for a tenant
+    // with no metered ceiling, so `undefined` here is the normal case, not a
+    // contract violation — it must never fail the mint.
+    max_vcpu_h?: number;
   };
   if (!j.token_plaintext) {
     throw new Error(`runner mint: no token_plaintext (200 keys: ${Object.keys(j).join(",")})`);
@@ -286,6 +292,7 @@ async function mintCasPat(env: MintEnv, params: MintParams): Promise<MintResult>
     patId: j.pat_id,
     tenant: j.tenant,
     maxConcurrency: typeof j.max_concurrency === "number" ? j.max_concurrency : undefined,
+    maxVcpuH: typeof j.max_vcpu_h === "number" ? j.max_vcpu_h : undefined,
   };
 }
 
@@ -329,6 +336,13 @@ export interface ContainerEnvResult {
   patId?: string;
   tenant?: string; // server-DERIVED tenant (billed + CLW_TENANT); warm only
   maxConcurrency?: number; // per-tenant ceiling; warm only
+  /**
+   * Monthly compute allowance in vCPU-HOURS (server #975). Warm only, and
+   * ABSENT for a tenant with no metered ceiling — absent means "nothing to warn
+   * against", never "zero allowance". ADVISORY: it is not consulted by any
+   * admission decision, only by the near-ceiling warning at completion.
+   */
+  maxVcpuH?: number;
 }
 
 // ── env-0 (cred-ticket) — keep the CAS PAT OUT of the untrusted container env ──
@@ -481,6 +495,7 @@ export async function buildContainerEnv(
         patId: m.patId,
         tenant: m.tenant,
         maxConcurrency: m.maxConcurrency,
+        maxVcpuH: m.maxVcpuH,
       };
     }
     // env-0 NOT configured. FAIL-CLOSED by default: never silently inject the raw
@@ -516,6 +531,7 @@ export async function buildContainerEnv(
       patId: m.patId,
       tenant: m.tenant,
       maxConcurrency: m.maxConcurrency,
+      maxVcpuH: m.maxVcpuH,
     };
   } catch (e) {
     if (e instanceof MintForbiddenError) {
@@ -656,6 +672,87 @@ export const RECONCILE_MIN_AGE_MS = 90_000;
 // cap exists to keep the RECOVERY path proportionate, not to replace either.
 export const RATE_LIMIT_DEADLETTER_MAX = 60;
 export const RATE_LIMIT_DEADLETTER_WINDOW_S = 300;
+
+// ── Near-ceiling warning (2026-08-02) ────────────────────────────────────────
+//
+// Overage above the tier's included `max_vcpu_h` is billed at 3x COGS. That
+// makes crossing the line expensive, and an SMB self-serve customer whose FIRST
+// notice is the invoice churns instead of upgrading. So the fleet warns on the
+// way up.
+//
+// Why here and not on the server: the ALLOWANCE lives in D1 (`runners_entitlement`)
+// but the CONSUMPTION only exists here — this Worker is the one component that
+// sees every job finish. The mint now forwards `max_vcpu_h` precisely so the two
+// halves can meet (corelink-server #975).
+//
+// Deliberately NOT a gate. Crossing the ceiling does not stop a job: the customer
+// keeps building and pays the overage. Stopping someone's CI mid-sprint is a
+// worse outcome than charging them, which is the whole reason overage exists
+// rather than a hard block.
+
+/** Warn once at 80% of the allowance, once more when it is actually crossed. */
+export const VCPU_WARN_THRESHOLDS = [0.8, 1.0] as const;
+
+/** Per-tenant cache of the ceiling last seen on a mint (refreshed every spawn). */
+export function vcpuCeilingKey(tenant: string): string {
+  return `vceil:${tenant}`;
+}
+
+/** Accumulated vCPU-SECONDS for a tenant in a billing period. */
+export function vcpuUsageKey(tenant: string, period: string): string {
+  return `vused:${tenant}:${period}`;
+}
+
+/** Marker proving a given threshold was already announced for this period. */
+export function vcpuWarnedKey(tenant: string, period: string, threshold: number): string {
+  return `vwarn:${tenant}:${period}:${threshold}`;
+}
+
+/** The ceiling cache and the period counters outlive a long billing month. */
+export const VCPU_KEY_TTL_S = 45 * 24 * 3600; // 45d
+
+export interface VcpuWarning {
+  /** Highest threshold newly crossed by this job, or null when none was. */
+  crossed: number | null;
+  /** Fraction of the allowance consumed AFTER this job (1.0 == exactly at it). */
+  fraction: number;
+  consumedVcpuH: number;
+  ceilingVcpuH: number;
+}
+
+/**
+ * PURE threshold decision (the KV I/O lives in index.ts).
+ *
+ * Returns the single HIGHEST threshold newly crossed, never a list: a job big
+ * enough to jump from 0% straight past 100% should produce ONE "you are over"
+ * message, not a burst of "you are at 80%" followed by "you are over". The
+ * customer needs the actionable state, not the history.
+ *
+ * `alreadyWarned` is the set of thresholds already announced this period, so a
+ * tenant sitting at 85% for a thousand jobs is told once — an alert that repeats
+ * every job is an alert that gets filtered, which is the same as no alert.
+ *
+ * A missing/zero/negative ceiling yields `crossed: null`: no allowance on file
+ * means nothing to be near, and inventing one would warn every tenant that never
+ * bought a metered tier.
+ */
+export function vcpuWarningStep(
+  consumedVcpuSeconds: number,
+  ceilingVcpuH: number | null | undefined,
+  alreadyWarned: ReadonlySet<number>,
+): VcpuWarning {
+  const ceiling = typeof ceilingVcpuH === "number" && ceilingVcpuH > 0 ? ceilingVcpuH : 0;
+  const consumedVcpuH = Math.max(0, consumedVcpuSeconds) / 3600;
+  if (ceiling === 0) {
+    return { crossed: null, fraction: 0, consumedVcpuH, ceilingVcpuH: 0 };
+  }
+  const fraction = consumedVcpuH / ceiling;
+  let crossed: number | null = null;
+  for (const t of VCPU_WARN_THRESHOLDS) {
+    if (fraction >= t && !alreadyWarned.has(t)) crossed = t; // keep the highest
+  }
+  return { crossed, fraction, consumedVcpuH, ceilingVcpuH: ceiling };
+}
 
 /** KV key holding the per-repo count of rate-limit refusals dead-lettered. */
 export function rateLimitDeadLetterKey(repo: string): string {

@@ -64,6 +64,14 @@ import {
   parseReconcilerRepos,
   rateLimitDeadLetterKey,
   rateLimitDeadLetterStep,
+  vcpuCeilingKey,
+  vcpuUsageKey,
+  vcpuWarnedKey,
+  vcpuWarningStep,
+  billingPeriod,
+  RUNNER_BOX_VCPU,
+  VCPU_KEY_TTL_S,
+  VCPU_WARN_THRESHOLDS,
   RATE_LIMIT_DEADLETTER_MAX,
   RATE_LIMIT_DEADLETTER_WINDOW_S,
   installationIdForRepo,
@@ -689,6 +697,18 @@ async function spawnRunner(
     await env.RUNNER_JOB_PATS.put(jobTenantKey(jobId), mint.tenant, {
       expirationTtl: JOB_PAT_TTL_S,
     }).catch((e) => logEvent("error", "kv_put_job_tenant_failed", { jobId, error: (e as Error).message }));
+    // Cache the tenant's monthly compute allowance (server #975) so COMPLETION —
+    // a separate Worker invocation that never talks to the mint — can tell how
+    // close this tenant is to it. Keyed per TENANT, not per job: the allowance is
+    // a property of the subscription, so one key refreshed on every spawn beats a
+    // write per job. Absent ⇒ no metered ceiling ⇒ nothing to warn about.
+    if (typeof mint.maxVcpuH === "number" && mint.maxVcpuH > 0) {
+      await env.RUNNER_JOB_PATS.put(vcpuCeilingKey(mint.tenant), String(mint.maxVcpuH), {
+        expirationTtl: VCPU_KEY_TTL_S,
+      }).catch((e) =>
+        logEvent("error", "kv_put_vcpu_ceiling_failed", { jobId, error: (e as Error).message }),
+      );
+    }
   }
   if (env.RUNNER_JOB_PATS) {
     // Stash the DO handle so `completed` can tear the container down immediately
@@ -834,6 +854,87 @@ async function recordCompletedJobUsage(
   } catch (e) {
     logEvent("error", "usage_ledger_write_failed", { jobId, error: (e as Error).message });
     return false;
+  }
+}
+
+// ── Near-ceiling warning (2026-08-02) ────────────────────────────────────────
+//
+// Accumulate this job's vCPU-seconds into the tenant's running period total and,
+// if that crossed a threshold nobody has announced yet, say so LOUDLY and once.
+//
+// Why it belongs at completion: this Worker is the only component that sees a job
+// finish, and the allowance only reached it via the mint (server #975). Neither
+// half can do this alone.
+//
+// Deliberately NOT a gate — crossing the ceiling never stops a job. The customer
+// keeps building and pays the overage; stopping someone's CI mid-sprint is a
+// worse outcome than charging them, which is why overage exists instead of a hard
+// block. This function's only power is to make the bill unsurprising.
+//
+// Best-effort throughout: it runs after the response and every failure is
+// swallowed. A missed warning costs a surprised customer; a thrown one would cost
+// the completion webhook, which also does revoke + teardown + billing.
+async function warnIfNearVcpuCeiling(
+  env: Env,
+  jobId: string,
+  tenant: string | undefined,
+  wj: CompletedJob | undefined,
+): Promise<void> {
+  const kv = env.RUNNER_JOB_PATS;
+  if (!kv || !tenant) return;
+  const startedMs = wj?.started_at ? Date.parse(wj.started_at) : NaN;
+  const completedMs = wj?.completed_at ? Date.parse(wj.completed_at) : NaN;
+  if (!Number.isFinite(startedMs) || !Number.isFinite(completedMs)) return;
+  try {
+    const ceilingRaw = await kv.get(vcpuCeilingKey(tenant));
+    if (!ceilingRaw) return; // no metered allowance on file ⇒ nothing to be near
+    const ceilingVcpuH = Number.parseFloat(ceilingRaw);
+    if (!Number.isFinite(ceilingVcpuH) || ceilingVcpuH <= 0) return;
+
+    // Same unit as the billable event: ALLOCATED wall-clock × the box's vCPU
+    // count. If these two ever diverge the warning fires at the wrong moment,
+    // so they are deliberately computed the same way.
+    const jobVcpuSeconds =
+      Math.max(0, Math.floor((completedMs - startedMs) / 1000)) * RUNNER_BOX_VCPU;
+    const period = billingPeriod(completedMs);
+    const usageKey = vcpuUsageKey(tenant, period);
+    const prior = Number.parseFloat((await kv.get(usageKey)) ?? "0");
+    const total = (Number.isFinite(prior) ? prior : 0) + jobVcpuSeconds;
+    // Read-modify-write on KV is racy under concurrent completions, and that is
+    // ACCEPTED: this counter drives a human-facing warning, not an invoice. The
+    // invoice comes from the usage ledger + billing ingest, which are per-job and
+    // idempotent. A warning that fires a few jobs late is fine; blocking the
+    // completion path on a strongly-consistent counter would not be.
+    await kv.put(usageKey, String(total), { expirationTtl: VCPU_KEY_TTL_S });
+
+    const warned = new Set<number>();
+    for (const t of VCPU_WARN_THRESHOLDS) {
+      if (await kv.get(vcpuWarnedKey(tenant, period, t))) warned.add(t);
+    }
+    const step = vcpuWarningStep(total, ceilingVcpuH, warned);
+    if (step.crossed === null) return;
+
+    // Mark BEFORE announcing: a duplicate announcement is worse than a missed
+    // one here — an alert that repeats on every job is an alert that gets muted.
+    await kv.put(vcpuWarnedKey(tenant, period, step.crossed), "1", {
+      expirationTtl: VCPU_KEY_TTL_S,
+    });
+    const exceeded = step.crossed >= 1;
+    logEvent(exceeded ? "error" : "info", exceeded ? "vcpu_ceiling_exceeded" : "vcpu_ceiling_approaching", {
+      jobId,
+      tenant,
+      period,
+      consumedVcpuH: Math.round(step.consumedVcpuH * 100) / 100,
+      ceilingVcpuH: step.ceilingVcpuH,
+      pct: Math.round(step.fraction * 100),
+      // Spelled out so the log line alone is actionable without the price list.
+      note: exceeded
+        ? "further usage this period bills as overage at $0.30/vCPU-h"
+        : "approaching the included allowance; overage bills at $0.30/vCPU-h",
+    });
+    await bumpMetrics(env, exceeded ? "vcpu_ceiling_exceeded" : "vcpu_ceiling_approaching");
+  } catch (e) {
+    logEvent("error", "vcpu_ceiling_warn_failed", { jobId, error: (e as Error).message });
   }
 }
 
@@ -1406,6 +1507,11 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
           derivedTenant,
           region,
         );
+        // Tell the customer they are nearing the included allowance BEFORE the
+        // invoice does. Runs after the ledger write so the durable record exists
+        // even if this best-effort warning path throws (it swallows its own
+        // errors either way — a missed warning must never cost a completion).
+        await warnIfNearVcpuCeiling(env, jobId, derivedTenant, evt.workflow_job);
         // Drop the derived-tenant stash (still needed for revoke + billing above;
         // the usage ledger above already captured the tenant durably for backfill).
         if (derivedTenant && env.RUNNER_JOB_PATS) {
