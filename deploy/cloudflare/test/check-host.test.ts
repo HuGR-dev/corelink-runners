@@ -52,6 +52,11 @@ vi.mock("@cloudflare/containers", () => {
 
 // Import AFTER the mock is registered.
 import worker, { type Env } from "../src/index";
+import {
+  rateLimitDeadLetterKey,
+  rateLimitDeadLetterStep,
+  RATE_LIMIT_DEADLETTER_MAX,
+} from "../src/lib";
 import { getContainer } from "@cloudflare/containers";
 
 const AUTH = "spawn-secret";
@@ -578,6 +583,121 @@ describe("WP-2 2a: per-repo rate-limit key (WEBHOOK_LIMITER)", () => {
     await queuedWebhook(env, "303", undefined, SECRET, {});
     expect(lim.limit).toHaveBeenCalledTimes(1); // the limiter WAS consulted
     expect(lim.keys).toEqual(["spawn:"]); // bounded fallback bucket, never skipped
+  });
+
+  // ── The refusal must not LOSE the job (2026-08-02) ─────────────────────────
+  // GitHub sends `workflow_job.queued` exactly once and never redelivers a
+  // non-2xx, so a 429 with no record is permanent job loss — the same defect
+  // #437 fixed for the ceiling refusal, surviving in this sibling branch.
+  function refusingLimiter() {
+    const keys: string[] = [];
+    return {
+      keys,
+      limit: vi.fn(async ({ key }: { key: string }) => {
+        keys.push(key);
+        return { success: false }; // AT the limit
+      }),
+    };
+  }
+
+  it("a RATE-LIMITED job is dead-lettered so the reconciler can re-drive it (429 is backpressure, not loss)", async () => {
+    const lim = refusingLimiter();
+    const kv = fakeKv();
+    const waits: Promise<unknown>[] = [];
+    const env = makeEnv({
+      GITHUB_WEBHOOK_SECRET: SECRET,
+      GITHUB_MINT_TOKEN: "ghp-mint",
+      WEBHOOK_LIMITER: lim as never,
+      RUNNER_JOB_PATS: kv as never,
+      // An installation id is required for a WARM re-drive; inject it the way a
+      // first-party repo webhook does.
+      REPO_INSTALLATION_MAP: JSON.stringify({ "acme/api": "999111" }),
+    });
+    const resp = await queuedWebhook(env, "4242", "acme/api", SECRET, {
+      waitUntil: (p: Promise<unknown>) => waits.push(p),
+    });
+    // The 429 itself is UNCHANGED — only whether the job survives it.
+    expect(resp.status).toBe(429);
+    await Promise.all(waits); // the record is written in waitUntil, after the response
+    const raw = kv.store.get("orphan:4242");
+    expect(raw).toBeDefined();
+    const rec = JSON.parse(raw as string) as { repo: string; installationId: string };
+    expect(rec.repo).toBe("acme/api");
+    expect(rec.installationId).toBe("999111"); // WARM-recoverable
+    // And it did NOT take a spawn claim — the reconciler claims when it re-drives.
+    expect(kv.store.has("spawn:4242")).toBe(false);
+  });
+
+  it("dead-lettering is BOUNDED per repo — past the cap the job is dropped LOUDLY, never silently", async () => {
+    // Recording every refusal would make the limiter the AMPLIFIER: driveSpawn
+    // mints the CAS PAT before it checks the concurrency slot, so each reconciler
+    // retry costs a real mint even when the spawn is then refused. So the
+    // dead-lettering is capped, and hitting the cap is an ERROR-level event —
+    // past this point jobs ARE being lost, and that must never be inferred from
+    // an absence of logs.
+    const lim = refusingLimiter();
+    const kv = fakeKv({
+      // Pre-seed the counter AT the cap.
+      "rldl:acme/api": String(RATE_LIMIT_DEADLETTER_MAX),
+    });
+    const waits: Promise<unknown>[] = [];
+    const env = makeEnv({
+      GITHUB_WEBHOOK_SECRET: SECRET,
+      GITHUB_MINT_TOKEN: "ghp-mint",
+      WEBHOOK_LIMITER: lim as never,
+      RUNNER_JOB_PATS: kv as never,
+      REPO_INSTALLATION_MAP: JSON.stringify({ "acme/api": "999111" }),
+    });
+    const resp = await queuedWebhook(env, "5353", "acme/api", SECRET, {
+      waitUntil: (p: Promise<unknown>) => waits.push(p),
+    });
+    expect(resp.status).toBe(429);
+    await Promise.all(waits);
+    expect(kv.store.has("orphan:5353")).toBe(false); // capped ⇒ no record
+    // The counter is NOT advanced past the cap (no unbounded growth).
+    expect(kv.store.get("rldl:acme/api")).toBe(String(RATE_LIMIT_DEADLETTER_MAX));
+  });
+
+  it("a COLD rate-limited job records nothing — the deliberate gap, pinned so it stays deliberate", async () => {
+    // No installation id ⇒ not WARM-recoverable: re-driving it would mean
+    // spawning without the per-job authz/mint. Same gap the ceiling refusal has
+    // (cell12-deadletter-cold). Pinned so a future change has to face it.
+    const lim = refusingLimiter();
+    const kv = fakeKv();
+    const waits: Promise<unknown>[] = [];
+    const env = makeEnv({
+      GITHUB_WEBHOOK_SECRET: SECRET,
+      GITHUB_MINT_TOKEN: "ghp-mint",
+      WEBHOOK_LIMITER: lim as never,
+      RUNNER_JOB_PATS: kv as never,
+      // no REPO_INSTALLATION_MAP ⇒ installationId stays ""
+    });
+    const resp = await queuedWebhook(env, "6464", "cold/repo", SECRET, {
+      waitUntil: (p: Promise<unknown>) => waits.push(p),
+    });
+    expect(resp.status).toBe(429);
+    await Promise.all(waits);
+    expect(kv.store.has("orphan:6464")).toBe(false);
+    // The counter is not touched either — a cold refusal costs nothing.
+    expect(kv.store.has("rldl:cold/repo")).toBe(false);
+  });
+});
+
+describe("rateLimitDeadLetterStep (pure bound)", () => {
+  it("records below the cap and advances the counter", () => {
+    expect(rateLimitDeadLetterStep(0, 3)).toEqual({ record: true, nextCount: 1 });
+    expect(rateLimitDeadLetterStep(2, 3)).toEqual({ record: true, nextCount: 3 });
+  });
+
+  it("refuses AT and ABOVE the cap, and never advances past it", () => {
+    expect(rateLimitDeadLetterStep(3, 3)).toEqual({ record: false, nextCount: 3 });
+    // Above the cap (a concurrent over-count) must not keep growing.
+    expect(rateLimitDeadLetterStep(9, 3)).toEqual({ record: false, nextCount: 9 });
+  });
+
+  it("keys the counter per repo (one repo's flood cannot exhaust another's budget)", () => {
+    expect(rateLimitDeadLetterKey("acme/api")).not.toBe(rateLimitDeadLetterKey("globex/web"));
+    expect(rateLimitDeadLetterKey("acme/api")).toBe("rldl:acme/api");
   });
 });
 

@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-08-02 — a spawn refused by the RATE LIMITER no longer strands the job
+
+- **fix(cloudflare): the 429 branch dropped the job permanently — the same defect #437 fixed
+  for the ceiling refusal, surviving in a sibling branch.** `WEBHOOK_LIMITER` refuses past
+  30 spawns / 60 s per repo and the handler simply `return`ed 429: no claim, no slot, and —
+  because the check ran BEFORE the repo and installation id were even resolved — no
+  dead-letter. GitHub delivers `workflow_job.queued` exactly once and does not redeliver a
+  non-2xx, so the customer's job sat `queued` forever with nothing reported as failed.
+
+  This is the burst shape the product exists to serve: our own dogfood has **24 workflows on
+  `runs-on: corelink`** and the 2026-08-01 burst was ~24 jobs — under the cliff, but not by
+  much. Any customer matrix past 30 concurrent `queued` events lost the overflow silently.
+
+  The limiter now runs AFTER the installation-id resolution (so a refusal knows enough to
+  record the job) and a refused job is dead-lettered for the scheduled reconciler, exactly
+  as a ceiling refusal is. **The 429 itself is unchanged — only whether the job survives it.**
+
+- **The dead-lettering is BOUNDED, and that bound is the load-bearing part.** Recording every
+  refusal would have made the limiter the AMPLIFIER rather than the bound: `driveSpawn` mints
+  the per-job CAS PAT **before** it checks the concurrency slot, so every reconciler retry
+  costs a real HTTP mint against corelink-server even when the spawn is then refused at the
+  ceiling. An unbounded flood of dead-letters would therefore become sustained mint load.
+  `RATE_LIMIT_DEADLETTER_MAX = 60` per repo per 5-minute window sits far above a legitimate
+  CI matrix and far below a flood; past it, jobs are dropped as before but **LOUDLY**
+  (`rate_limit_deadletter_capped` at ERROR + a metric), because "we shed load" and "we lost
+  work" must never look the same in the logs.
+
+  ⚠️ Recorded while reasoning about this: the limiter is **not** an abuse control against a
+  party holding the webhook HMAC secret. Its key is `spawn:<repository.full_name>` — a value
+  that party controls — so varying the repo string sidesteps it by construction. The real
+  containment for a forged repo is server-side (the mint derives the tenant and 403s a repo
+  not allowlisted to it) plus the fleet-wide slot DO. The new cap keeps the RECOVERY path
+  proportionate; it does not replace either.
+
+- **A COLD refusal (no installation id) still records nothing** — it cannot be re-driven WARM
+  without bypassing per-job authz. Same deliberate gap as `cell12-deadletter-cold`, now
+  pinned by its own test and logged (`rate_limit_deadletter_skipped_cold`) rather than left
+  to be inferred from an absence.
+
+- **Regression-locked, and the ordering change caught its own bug.** Moving the limiter below
+  the `!repo` 400 initially let a repo-less flood bypass it entirely — caught immediately by
+  the existing I1 pin ("a payload with NO repository is STILL rate-limited"), so the 400 was
+  deferred to run after the limiter instead. The main pin was proven RED against the pre-fix
+  behaviour (`expected undefined to be defined`). 334 tests pass; `tsc --noEmit` clean.
+
 ### 2026-08-02 — every fabric job longer than ~15 minutes was being SIGTERMed
 
 - **fix(cloudflare): `sleepAfter` was a hard cap on job DURATION, not an idle timeout.**
