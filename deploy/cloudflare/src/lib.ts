@@ -629,6 +629,56 @@ export function releaseSlotByJob(
 // treated as orphaned and re-driven.
 export const RECONCILE_MIN_AGE_MS = 90_000;
 
+// ── Rate-limit dead-letter bound (2026-08-02) ────────────────────────────────
+//
+// The webhook limiter refuses a burst past 30 spawns/60s per repo. That refusal
+// used to drop the job permanently (GitHub sends `workflow_job.queued` once and
+// does not redeliver a non-2xx), which is the same defect #437 fixed for the
+// CEILING refusal — just a different branch. Refused jobs are now dead-lettered
+// so the reconciler re-drives them.
+//
+// But dead-lettering EVERY refusal would be worse than the bug. `driveSpawn`
+// mints the per-job CAS PAT BEFORE it checks the concurrency slot, so each
+// reconciler retry costs a real HTTP mint against corelink-server even when the
+// spawn is then refused at the ceiling. Unbounded dead-lettering therefore turns
+// a flood into sustained mint load — and the limiter, whose whole job is to bound
+// a flood, would have become the thing that amplifies it.
+//
+// So the dead-lettering itself is bounded, per repo, per window. Legitimate CI
+// bursts fit comfortably under the cap (our own dogfood peak is ~24 jobs); a
+// flood does not, and its excess is dropped exactly as before.
+//
+// ⚠️ Note the limiter is NOT an abuse control against a party holding the webhook
+// HMAC secret: its key is `spawn:<repository.full_name>`, a value that party
+// controls, so varying the repo string sidesteps it by construction. The real
+// containment for a forged repo is server-side — the mint derives the tenant and
+// 403s a repo that is not allowlisted for it — plus the fleet-wide slot DO. This
+// cap exists to keep the RECOVERY path proportionate, not to replace either.
+export const RATE_LIMIT_DEADLETTER_MAX = 60;
+export const RATE_LIMIT_DEADLETTER_WINDOW_S = 300;
+
+/** KV key holding the per-repo count of rate-limit refusals dead-lettered. */
+export function rateLimitDeadLetterKey(repo: string): string {
+  return `rldl:${repo}`;
+}
+
+/**
+ * PURE decision for whether a rate-limited job may be dead-lettered (the KV I/O
+ * lives in index.ts). Returns the next counter value so the caller can persist it.
+ *
+ * The count is deliberately best-effort: concurrent webhook invocations can read
+ * the same value and both record, so the real bound is approximate. That is fine
+ * — this is a proportionality guard, not a quota. Being off by a handful under
+ * concurrency changes nothing; being off by 10,000 is what it prevents.
+ */
+export function rateLimitDeadLetterStep(
+  count: number,
+  max: number = RATE_LIMIT_DEADLETTER_MAX,
+): { record: boolean; nextCount: number } {
+  if (count >= max) return { record: false, nextCount: count };
+  return { record: true, nextCount: count + 1 };
+}
+
 /** Parse the comma/space-separated RECONCILER_REPOS allowlist (owner/repo). */
 export function parseReconcilerRepos(csv: string | undefined): string[] {
   if (!csv) return [];

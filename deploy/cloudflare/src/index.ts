@@ -62,6 +62,10 @@ import {
   COLD_REPO_CAP,
   decideRedeem,
   parseReconcilerRepos,
+  rateLimitDeadLetterKey,
+  rateLimitDeadLetterStep,
+  RATE_LIMIT_DEADLETTER_MAX,
+  RATE_LIMIT_DEADLETTER_WINDOW_S,
   installationIdForRepo,
   tenantPatSecretForRepo,
   installationAllowlistArmed,
@@ -1085,6 +1089,70 @@ export async function recordOrphan(
   }
 }
 
+// ── Bounded dead-letter for a RATE-LIMITED spawn (2026-08-02) ────────────────
+//
+// A rate-limit refusal is backpressure, exactly like the ceiling refusal — the
+// job is fine, the ingress is momentarily full. But GitHub delivers
+// `workflow_job.queued` once and never redelivers a non-2xx, so without a record
+// the job is lost forever. This writes that record.
+//
+// It is BOUNDED per repo per window because the retry is not free: `driveSpawn`
+// mints the per-job CAS PAT BEFORE the concurrency-slot check, so every
+// reconciler retry costs a real mint against corelink-server even when the spawn
+// is then refused at the ceiling. Dead-lettering an unbounded flood would make
+// the rate limiter the CAUSE of sustained load rather than the bound on it.
+//
+// Best-effort throughout, and deliberately so: this runs in `waitUntil` after the
+// 429 has already been returned, so nothing here can affect the response. A KV
+// hiccup costs at most one unrecovered job — the same outcome as before the fix,
+// never worse.
+async function deadLetterRateLimited(
+  env: Env,
+  opts: { jobId: string; repo: string; installationId: string; labels: string[] },
+): Promise<void> {
+  const kv = env.RUNNER_JOB_PATS;
+  if (!kv) return;
+  // A COLD spawn (no installation id) cannot be re-driven WARM without bypassing
+  // per-job authz, so `recordOrphan` would no-op anyway. Skip early and SAY SO —
+  // this is a real, deliberate coverage gap and it should be visible in the logs
+  // rather than inferred from an absence.
+  if (!opts.installationId) {
+    logEvent("info", "rate_limit_deadletter_skipped_cold", {
+      jobId: opts.jobId,
+      repo: opts.repo,
+    });
+    return;
+  }
+  try {
+    const key = rateLimitDeadLetterKey(opts.repo);
+    const raw = await kv.get(key);
+    const count = raw ? Number.parseInt(raw, 10) : 0;
+    const step = rateLimitDeadLetterStep(Number.isFinite(count) ? count : 0);
+    if (!step.record) {
+      // LOUD: past this point jobs ARE being dropped again. That is the intended
+      // behaviour under a flood, but it must never be silent — a human reading
+      // the logs has to be able to tell "we shed load" from "we lost work".
+      logEvent("error", "rate_limit_deadletter_capped", {
+        jobId: opts.jobId,
+        repo: opts.repo,
+        count,
+        max: RATE_LIMIT_DEADLETTER_MAX,
+      });
+      await bumpMetrics(env, "rate_limit_deadletter_capped");
+      return;
+    }
+    await kv.put(key, String(step.nextCount), {
+      expirationTtl: RATE_LIMIT_DEADLETTER_WINDOW_S,
+    });
+    await recordOrphan(env, opts);
+  } catch (e) {
+    logEvent("error", "rate_limit_deadletter_failed", {
+      jobId: opts.jobId,
+      error: (e as Error).message,
+    });
+  }
+}
+
 // ── Keep-alive sweep (2026-08-02) ────────────────────────────────────────────
 //
 // Why this exists: `RunnerContainer.sleepAfter` was acting as a hard 15-minute cap
@@ -1397,24 +1465,17 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       if (evt.action !== "queued") {
         return json({ ok: true, ignored: `action ${evt.action}` }, 200);
       }
-      // Rate-limit real spawn attempts (defense-in-depth vs a leaked webhook
-      // secret). Ignored events above are free; only queued+labeled jobs count.
-      // 2a per-tenant key: bucket by the REPO (`spawn:<repoFullName>`) so ONE busy
-      // repo can no longer starve every other tenant's spawns (the global
-      // `key:"spawn"` was a single cross-tenant bucket). The repo is known here
-      // (evt.repository.full_name); when absent we still rate-limit under the
-      // literal `spawn:` bucket — NEVER fail-open to unbounded spawns (I1).
-      if (env.WEBHOOK_LIMITER) {
-        const rateKey = `spawn:${evt.repository?.full_name ?? ""}`;
-        const { success } = await env.WEBHOOK_LIMITER.limit({ key: rateKey });
-        if (!success) {
-          ctx?.waitUntil?.(bumpMetrics(env, "webhook_rate_limited"));
-          return json({ error: "rate limited" }, 429);
-        }
-      }
+      // NOTE: the rate limiter used to run HERE, before the repo and installation
+      // id were resolved. It now runs AFTER them (below), because a refusal has
+      // to dead-letter the job and the dead-letter record needs both.
       // The repo is the webhook's repository (full_name).
       const repo = evt.repository?.full_name ?? "";
-      if (!repo) return json({ error: "no repository in payload" }, 400);
+      // NOTE: the `!repo` 400 is deliberately NOT here. It moved BELOW the rate
+      // limiter, because a queued+labeled job must consult the limiter even when
+      // the payload names no repository (invariant I1: never fail-open to
+      // unbounded). Rejecting first would have let a repo-less flood bypass the
+      // limiter entirely — caught by the I1 regression test when this block was
+      // first reordered.
       // ── Multi-tenant runner-mint authorization inputs ────────────────────────
       // The server DERIVES the tenant from installation_id + repo_full_name (we no
       // longer send owner_tenant). `installation.id` is present ONLY on GitHub
@@ -1441,6 +1502,42 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       if (env.CORELINK_RUNNER_MINT_AUTH_KEY && !installationId) {
         logEvent("info", "installation_id_missing", { jobId, repo });
       }
+      // ── Rate limit (defense-in-depth) — refuse, but do NOT lose the job ─────
+      // Bucketed per REPO (`spawn:<repoFullName>`) so one busy repo cannot starve
+      // another tenant's spawns; when the repo is absent we still limit under the
+      // literal `spawn:` bucket — NEVER fail-open to unbounded spawns (I1).
+      //
+      // Placed AFTER the installation-id resolution and the allowlist gate, and
+      // BEFORE `claimSpawn`, so that: a refusal knows enough to dead-letter the
+      // job, and a non-allowlisted flood is refused for free without spending
+      // limiter budget.
+      //
+      // 2026-08-02: a refusal here used to `return 429` with no record at all.
+      // GitHub sends `workflow_job.queued` exactly ONCE and never redelivers a
+      // non-2xx, so the job hung `queued` forever with nothing reported as
+      // failed — the same defect #437 fixed for the ceiling refusal, surviving in
+      // a sibling branch. A refused job is now dead-lettered so the scheduled
+      // reconciler re-drives it, which is the whole recovery mechanism.
+      //
+      // The dead-lettering is BOUNDED (see RATE_LIMIT_DEADLETTER_MAX): recording
+      // every refusal would convert a flood into sustained mint load, because
+      // `driveSpawn` mints the CAS PAT before it checks the concurrency slot, so
+      // each retry costs a real mint even when the spawn is then refused. The
+      // limiter must not become the amplifier. The 429 itself is unchanged —
+      // only whether the job survives it.
+      if (env.WEBHOOK_LIMITER) {
+        const rateKey = `spawn:${repo}`;
+        const { success } = await env.WEBHOOK_LIMITER.limit({ key: rateKey });
+        if (!success) {
+          ctx?.waitUntil?.(bumpMetrics(env, "webhook_rate_limited"));
+          ctx?.waitUntil?.(deadLetterRateLimited(env, { jobId, repo, installationId, labels: mintLabels }));
+          logEvent("info", "webhook_rate_limited", { jobId, repo });
+          return json({ error: "rate limited" }, 429);
+        }
+      }
+      // Deferred from above: a queued+labeled job with no repository is malformed.
+      // Checked HERE so the limiter above has already counted it (I1).
+      if (!repo) return json({ error: "no repository in payload" }, 400);
       // ── External-GA installation allowlist gate (WP-D) ───────────────────────
       // MUST run here — after the installation id is resolved (App id, or the
       // REPO_INSTALLATION_MAP injection for first-party repo-webhooks) and BEFORE
