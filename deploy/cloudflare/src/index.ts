@@ -534,6 +534,17 @@ export async function mintJitAuthToken(env: Env, installationId: string): Promis
   return env.GITHUB_MINT_TOKEN ?? "";
 }
 
+// One minted JIT registration: the encoded config a box boots with, plus the two
+// identifiers GitHub knows it by — the NAME (echoed back on the job webhooks) and
+// the numeric ID (the only handle that can DELETE the registration again).
+interface MintedJit {
+  jit: string;
+  runnerName: string;
+  // Absent only if GitHub ever omits `runner.id` from the response; every
+  // consumer treats that as "cannot delete", never as an error.
+  runnerId?: number;
+}
+
 // Mint a one-shot JIT runner config for `repoFullName` via the GitHub API. The
 // credential is chosen by `mintJitAuthToken`: a per-installation App token for a
 // customer repo (when App creds + installationId are present), else the static
@@ -543,7 +554,7 @@ async function mintJit(
   repoFullName: string,
   labels: string[],
   installationId: string,
-): Promise<{ jit: string; runnerName: string }> {
+): Promise<MintedJit> {
   const authToken = await mintJitAuthToken(env, installationId);
   const name = `cf-runner-${crypto.randomUUID().slice(0, 8)}`;
   const resp = await fetch(
@@ -567,7 +578,7 @@ async function mintJit(
     },
   );
   if (!resp.ok) throw new Error(`generate-jitconfig ${resp.status}: ${await resp.text()}`);
-  const j = (await resp.json()) as { encoded_jit_config?: string };
+  const j = (await resp.json()) as { encoded_jit_config?: string; runner?: { id?: number } };
   if (!j.encoded_jit_config) throw new Error("generate-jitconfig: no encoded_jit_config");
   // Return the NAME too. `generate-jitconfig` binds the runner to a repo + label
   // set and to NOTHING ELSE — not to the job whose webhook prompted it. GitHub
@@ -576,7 +587,60 @@ async function mintJit(
   // for job A routinely runs job B. The name is the only identifier that survives
   // that mapping (GitHub reports it back as `workflow_job.runner_name`), so it —
   // not the spawn-request job id — is the correct key for teardown.
-  return { jit: j.encoded_jit_config, runnerName: name };
+  return { jit: j.encoded_jit_config, runnerName: name, runnerId: j.runner?.id };
+}
+
+// Delete a runner REGISTRATION we minted but are not going to place a working box
+// on (a superseded container-start attempt — see `startWithRetry`).
+//
+// This is not tidiness. `generate-jitconfig` creates a real runner entity on the
+// repo the moment it is called, and that entity is assignable BY LABEL to any
+// queued job the instant something registers with its config. An abandoned
+// attempt's box that comes up late would therefore be able to CLAIM a customer's
+// job — on a container no `rhandle:`/`jhandle:` binding points at, so the
+// keep-alive sweep never renews it and `sleepAfter` SIGKILLs it mid-job 15 minutes
+// later. Deleting the registration makes that impossible: the box can boot, but it
+// can never be given work. The container destroy that follows is the second half.
+//
+// Best-effort and deliberately so: it runs on an already-failing path, and every
+// outcome (deleted, 404-already-gone, 422-busy, unreachable) leaves us no worse
+// than before. Logged, never thrown.
+async function deleteRunnerRegistration(
+  env: Env,
+  repoFullName: string,
+  runnerId: number | undefined,
+  installationId: string,
+): Promise<boolean> {
+  if (typeof runnerId !== "number") return false;
+  try {
+    const authToken = await mintJitAuthToken(env, installationId);
+    const resp = await fetch(
+      `https://api.github.com/repos/${repoFullName}/actions/runners/${runnerId}`,
+      {
+        method: "DELETE",
+        headers: {
+          authorization: `Bearer ${authToken}`,
+          accept: "application/vnd.github+json",
+          "user-agent": "corelink-spawn-worker",
+        },
+      },
+    );
+    // 404 ⇒ already gone (an ephemeral runner self-deletes) — the desired end state.
+    if (resp.ok || resp.status === 404) return true;
+    logEvent("error", "runner_registration_delete_failed", {
+      repo: repoFullName,
+      runnerId,
+      status: resp.status,
+    });
+    return false;
+  } catch (e) {
+    logEvent("error", "runner_registration_delete_failed", {
+      repo: repoFullName,
+      runnerId,
+      error: (e as Error).message,
+    });
+    return false;
+  }
 }
 
 // How long a job_id→pat_id entry lives in KV — a self-cleaning backstop well
@@ -640,14 +704,207 @@ const SPAWN_MAX_ATTEMPTS = 3;
 // stalling forever. Kept short so 3 attempts + backoff fit the background budget.
 const SPAWN_ATTEMPT_TIMEOUT_MS = 8000;
 
-async function startWithRetry(start: (handle: string) => Promise<void>): Promise<string> {
+// ── Ghost containers (2026-08-03) ────────────────────────────────────────────
+//
+// A retry attempt that fails is not an attempt that did nothing. `Container.start`
+// issues `this.ctx.container.start(...)` and only THEN polls for up to 8 s to see
+// the instance come up (@cloudflare/containers 0.3.7,
+// dist/lib/container.js:1378-1421) — so both failure shapes leave a container
+// behind:
+//
+//   • the SDK throws `NO_CONTAINER_INSTANCE_ERROR` after its own poll window, but
+//     the platform start was already issued and may still be provisioning;
+//   • our `SPAWN_ATTEMPT_TIMEOUT_MS` race rejects while the DO-side RPC keeps
+//     running to completion — Workers does not cancel an RPC because the caller
+//     stopped awaiting it.
+//
+// Before this change the loop then minted a FRESH handle (a different DO, a
+// different container) and simply dropped the old one on the floor. Nothing ever
+// referenced it again: no `jhandle:`/`rhandle:` binding is written for a failed
+// attempt, so no teardown path can reach it and the keep-alive sweep never sees
+// it. Its ONLY reaper was `sleepAfter` — 15 minutes of a standard-4 (4 vCPU /
+// 12 GiB) instance held out of `max_instances: 20`, per failed attempt, up to 2
+// per spawn. That is the mechanism by which a nominal fleet of 20 behaves like ~7
+// under exactly the burst it is sized for.
+//
+// It was worse than a wasted slot. Every attempt shared ONE JIT config, so the
+// abandoned box booted with the SAME single-use registration as its successor: at
+// most one of them could ever register (GitHub: "A session for this runner already
+// exists"), and which one won was a race. The fix is both halves together — a
+// fresh registration per attempt, and the superseded attempt CANCELLED rather than
+// abandoned: its registration deleted so it can never claim work, its container
+// destroyed, and a `ghost:` record left behind so the cron re-destroys it if this
+// destroy raced a still-provisioning start.
+const GHOST_KEY_PREFIX = "ghost:";
+function ghostKey(handle: string): string {
+  return `${GHOST_KEY_PREFIX}${handle}`;
+}
+// How long a ghost record survives if the sweep can never confirm the box is
+// down. Comfortably past `sleepAfter` (15m), which remains the platform backstop,
+// so the record outlives the thing it is tracking rather than the reverse.
+const GHOST_TTL_S = 3600;
+
+// Which DO namespace an abandoned handle lives in. Recorded with the handle
+// because the sweep runs later, from the cron, with only the record to go on —
+// and destroying a check-host handle in the runner namespace would silently do
+// nothing at all.
+type GhostNs = "runner" | "check";
+interface GhostRecord {
+  ns: GhostNs;
+  reason: string;
+}
+
+// Durably record an abandoned container handle for `sweepGhostContainers`.
+// Written BEFORE the inline destroy, because the inline destroy is the attempt
+// that can lose a race (destroying a container the platform has not finished
+// creating is a no-op, and it then comes up anyway). Best-effort: without KV the
+// inline destroy still runs and `sleepAfter` is still the backstop.
+async function recordGhostContainer(
+  env: Env,
+  handle: string,
+  ns: GhostNs,
+  reason: string,
+): Promise<void> {
+  if (!env.RUNNER_JOB_PATS) return;
+  await env.RUNNER_JOB_PATS.put(ghostKey(handle), JSON.stringify({ ns, reason } as GhostRecord), {
+    expirationTtl: GHOST_TTL_S,
+  }).catch((e) => logEvent("error", "ghost_record_failed", { handle, error: (e as Error).message }));
+}
+
+// Cancel an abandoned container-start attempt at the CONTAINER level: record it
+// durably, then destroy it. Shared by the autoscaler path (which additionally
+// deletes the GitHub registration first — see `cancelSpawnAttempt`) and the
+// `/v1/spawn` fabric contract, where the JIT is supplied by the caller and there
+// is no registration for us to revoke.
+//
+// Best-effort by contract: this runs on an already-failing path and must never
+// mask the start error that caused it.
+async function abandonContainer(
+  env: Env,
+  handle: string,
+  ns: GhostNs,
+  reason: string,
+): Promise<void> {
+  await recordGhostContainer(env, handle, ns, reason);
+  try {
+    const c =
+      ns === "check"
+        ? getContainer(env.CHECK_HOST_CONTAINER, handle)
+        : getContainer(env.RUNNER_CONTAINER, handle);
+    await c.teardown();
+  } catch (e) {
+    // Expected when the DO never materialised. The `ghost:` record above is what
+    // makes this survivable: the cron re-destroys and confirms.
+    logEvent("info", "abandon_teardown_threw", { handle, error: (e as Error).message });
+  }
+  await bumpMetrics(env, "container_start_abandoned");
+}
+
+/**
+ * Destroy the containers left behind by abandoned start attempts, and CONFIRM
+ * they are down before forgetting them.
+ *
+ * Runs on the 1-minute cron. The inline destroy at abandon time is the fast path;
+ * this is the one that is allowed to be sure. A record is deleted only once the DO
+ * reports the container not alive — a destroy that raced a still-provisioning
+ * start leaves the box running and is retried next tick, which is precisely the
+ * case the inline destroy cannot handle on its own.
+ *
+ * A box that is still alive after a destroy is LOGGED AT ERROR and kept for the
+ * next tick; `ghost_container_reaped` counts only CONFIRMED reclaims, so the
+ * counter can never report capacity we did not actually get back. The whole point
+ * of this sweep is that a container which boots and never does any work is a
+ * named event instead of an unexplained 15-minute hole in the fleet's capacity.
+ *
+ * Best-effort throughout — a backstop, never a gate. It must never throw into the
+ * cron tick that also drives orphan recovery and billing.
+ */
+export async function sweepGhostContainers(env: Env): Promise<number> {
+  const kv = env.RUNNER_JOB_PATS;
+  if (!kv) return 0;
+  let listed: { keys: { name: string }[] };
+  try {
+    listed = await kv.list({ prefix: GHOST_KEY_PREFIX });
+  } catch (e) {
+    logEvent("error", "ghost_sweep_list_failed", { error: (e as Error).message });
+    return 0;
+  }
+  let reaped = 0;
+  for (const { name } of listed.keys) {
+    const handle = name.slice(GHOST_KEY_PREFIX.length);
+    // A record written by an older deploy (or a malformed one) is treated as the
+    // runner namespace — the only one that existed when this was written, and the
+    // only one whose ghosts contend for the fleet's `max_instances`.
+    let ns: GhostNs = "runner";
+    try {
+      const raw = await kv.get(name);
+      if (raw) ns = (JSON.parse(raw) as GhostRecord).ns === "check" ? "check" : "runner";
+    } catch {
+      /* keep the default */
+    }
+    const container =
+      ns === "check"
+        ? getContainer(env.CHECK_HOST_CONTAINER, handle)
+        : getContainer(env.RUNNER_CONTAINER, handle);
+    try {
+      await container.teardown();
+    } catch (e) {
+      // A handle whose DO never materialised throws here; that is a box that is
+      // already down, so fall through to the liveness check rather than retrying.
+      logEvent("info", "ghost_teardown_threw", { handle, error: (e as Error).message });
+    }
+    let alive: boolean;
+    try {
+      alive = await container.isAlive();
+    } catch {
+      alive = false; // unreachable DO ⇒ nothing is running
+    }
+    if (alive) {
+      // Still up after a destroy: keep the record and try again next tick. Loud,
+      // because this is the failure mode that eats the fleet.
+      logEvent("error", "ghost_container_still_alive", { handle });
+      continue;
+    }
+    await kv.delete(name).catch(() => {
+      /* best-effort: the record TTL-expires */
+    });
+    reaped++;
+  }
+  if (reaped > 0) {
+    await bumpMetrics(env, ...Array(reaped).fill("ghost_container_reaped"));
+    logEvent("info", "ghost_containers_reaped", { count: reaped });
+  }
+  return reaped;
+}
+
+/**
+ * Start a container, retrying on the transient CF platform failure, with each
+ * attempt independently provisioned and each SUPERSEDED attempt cancelled.
+ *
+ * @param provision  Per-attempt setup that must not be shared across attempts —
+ *                   for the autoscaler path, minting that attempt's own GitHub JIT
+ *                   registration. Runs BEFORE the start; a throw here propagates
+ *                   immediately (nothing has been started yet, so there is nothing
+ *                   to clean up and no reason to burn the retry budget).
+ * @param start      Issues the container start for this attempt's fresh handle.
+ * @param abandon    Cancels an attempt whose start failed or timed out. Called with
+ *                   the handle AND what `provision` produced, so the caller can
+ *                   revoke the registration as well as destroy the box. Best-effort
+ *                   by contract: it must swallow its own errors.
+ */
+async function startWithRetry<T>(
+  provision: (attempt: number) => Promise<T>,
+  start: (handle: string, provisioned: T) => Promise<void>,
+  abandon: (handle: string, provisioned: T, reason: string) => Promise<void>,
+): Promise<{ handle: string; provisioned: T }> {
   let lastErr: unknown;
   for (let attempt = 1; attempt <= SPAWN_MAX_ATTEMPTS; attempt++) {
+    const provisioned = await provision(attempt);
     const handle = crypto.randomUUID();
     try {
       // Race the start against a timeout — a hung start rejects and is retried.
       await Promise.race([
-        start(handle),
+        start(handle, provisioned),
         new Promise<never>((_, reject) =>
           setTimeout(
             () => reject(new Error(`start timed out after ${SPAWN_ATTEMPT_TIMEOUT_MS}ms`)),
@@ -655,7 +912,7 @@ async function startWithRetry(start: (handle: string) => Promise<void>): Promise
           ),
         ),
       ]);
-      return handle;
+      return { handle, provisioned };
     } catch (e) {
       lastErr = e;
       logEvent("info", "container_start_retry", {
@@ -663,6 +920,10 @@ async function startWithRetry(start: (handle: string) => Promise<void>): Promise
         maxAttempts: SPAWN_MAX_ATTEMPTS,
         error: (e as Error).message,
       });
+      // Cancel it. Losing the race to a timeout does NOT mean nothing started —
+      // see the ghost-container note above. This runs on EVERY failed attempt,
+      // including the last one, so an exhausted spawn leaves no box behind either.
+      await abandon(handle, provisioned, (e as Error).message);
       if (attempt < SPAWN_MAX_ATTEMPTS) {
         await new Promise((r) => setTimeout(r, 300 * attempt));
       }
@@ -673,25 +934,96 @@ async function startWithRetry(start: (handle: string) => Promise<void>): Promise
   );
 }
 
-// Spawn one runner container with the JIT injected + the ALREADY-authorized
-// cache-warm CLW_* overlay (`mint`, from buildContainerEnv, computed BEFORE the
-// JIT was minted). On a warm mint we stash job_id→pat_id (revoke keys on pat_id)
-// AND job_id→tenant (completion bills/releases the DERIVED tenant). The overlay's
-// CLW_TENANT is the server-derived tenant, never wrangler's var.
+// Cancel one abandoned container-start attempt: kill the registration first (so a
+// late boot can never be given a customer's job), then the box, then leave the
+// durable `ghost:` record for the cron to confirm. Order is deliberate — the
+// registration delete is the only step that bounds the WORST outcome (a stray box
+// running real work untracked), so it goes first and does not depend on the
+// destroy succeeding.
+//
+// Fully guarded: it runs inside the retry loop of an already-failing spawn and
+// must never mask the start error that caused it.
+async function cancelSpawnAttempt(
+  env: Env,
+  opts: {
+    jobId: string;
+    repo: string;
+    installationId: string;
+    handle: string;
+    minted?: MintedJit;
+    reason: string;
+  },
+): Promise<void> {
+  const { jobId, repo, installationId, handle, minted, reason } = opts;
+  let registrationDeleted = false;
+  try {
+    if (minted) {
+      registrationDeleted = await deleteRunnerRegistration(
+        env,
+        repo,
+        minted.runnerId,
+        installationId,
+      );
+    }
+    await abandonContainer(env, handle, "runner", reason);
+    logEvent("error", "container_start_abandoned", {
+      jobId,
+      repo,
+      handle,
+      runnerName: minted?.runnerName,
+      registrationDeleted,
+      reason,
+    });
+  } catch (e) {
+    logEvent("error", "abandon_failed", { jobId, handle, error: (e as Error).message });
+  }
+}
+
+// Spawn one runner container with the ALREADY-authorized cache-warm CLW_* overlay
+// (`mint`, from buildContainerEnv, computed BEFORE any JIT is minted). On a warm
+// mint we stash job_id→pat_id (revoke keys on pat_id) AND job_id→tenant
+// (completion bills/releases the DERIVED tenant). The overlay's CLW_TENANT is the
+// server-derived tenant, never wrangler's var.
+//
+// The GitHub JIT is minted HERE, once per container-start ATTEMPT, rather than once
+// per job by the caller. A JIT config registers one single-use runner: two boxes
+// booted with the same one cannot both register, so sharing it across retries meant
+// a superseded attempt could win the registration race and leave the box we
+// actually track unable to work. Each attempt now gets its own registration, and
+// `cancelSpawnAttempt` deletes the registration of every attempt that loses.
+//
+// Returns the surviving attempt's handle AND its runner name — the caller cannot
+// know either in advance, because both belong to the attempt that won.
 async function spawnRunner(
   env: Env,
-  jit: string,
   jobId: string,
   mint: ContainerEnvResult,
-  runnerName: string,
-): Promise<string> {
-  const containerEnv: Record<string, string> = {
-    CORELINK_RUNNER_JITCONFIG: jit,
-    ...mint.containerEnv, // CLW_* overlay (empty on a cold spawn)
-  };
-  const handle = await startWithRetry((h) =>
-    getContainer(env.RUNNER_CONTAINER, h).startWithEnv(containerEnv),
+  opts: { repo: string; installationId: string; labels: string[] },
+): Promise<{ handle: string; runnerName: string }> {
+  const { repo, installationId, labels } = opts;
+  const { handle, provisioned } = await startWithRetry<MintedJit>(
+    async (attempt) => {
+      const minted = await mintJit(env, repo, labels, installationId);
+      await bumpMetrics(env, "jit_minted");
+      // Recorded so a box killed by the WRONG completion can be traced back to the
+      // job it was minted for — the permutation is invisible without this line.
+      logEvent("info", "runner_minted", {
+        jobId,
+        repo,
+        runnerName: minted.runnerName,
+        attempt,
+      });
+      return minted;
+    },
+    (h, minted) =>
+      getContainer(env.RUNNER_CONTAINER, h).startWithEnv({
+        CORELINK_RUNNER_JITCONFIG: minted.jit,
+        ...mint.containerEnv, // CLW_* overlay (empty on a cold spawn)
+      }),
+    (h, minted, reason) =>
+      cancelSpawnAttempt(env, { jobId, repo, installationId, handle: h, minted, reason }),
   );
+  const runnerName = provisioned.runnerName;
   // (The jobId->patId revoke-key is now written at MINT time in driveSpawn, BEFORE
   // the spawn — F2/W3 — so a start failure can revoke the PAT rather than orphan it.
   // Intentionally NOT re-written here.)
@@ -734,7 +1066,7 @@ async function spawnRunner(
       }),
     );
   }
-  return handle;
+  return { handle, runnerName };
 }
 
 // Best-effort revoke of a completed job's per-job CAS PAT, by pat_id (looked up
@@ -1127,14 +1459,12 @@ async function driveSpawn(
       throw new SpawnRefusedError(slot.reason ?? "unknown");
     }
   }
-  // Authorized ⇒ mint the GitHub JIT and spawn.
+  // Authorized ⇒ spawn. The GitHub JIT is minted per container-start ATTEMPT
+  // inside spawnRunner (see the ghost-container note on `startWithRetry`), not
+  // once here — a single-use registration shared across retries is what let a
+  // superseded attempt take the registration the surviving box needed.
   try {
-    const { jit, runnerName } = await mintJit(env, repo, labels, installationId);
-    await bumpMetrics(env, "jit_minted");
-    // Recorded so a box killed by the WRONG completion can be traced back to the
-    // job it was minted for — the permutation is invisible without this line.
-    logEvent("info", "runner_minted", { jobId, repo, runnerName });
-    await spawnRunner(env, jit, jobId, mint, runnerName);
+    await spawnRunner(env, jobId, mint, { repo, installationId, labels });
     await bumpMetrics(env, "runner_spawned");
     // The container started — but a started container is NOT a placed job. Record
     // the placement as PROVISIONAL so the reconciler can notice if this box never
@@ -1474,6 +1804,15 @@ export default {
       await keepAliveLiveRunners(env);
     } catch (e) {
       logEvent("error", "keepalive_failed", { error: (e as Error).message });
+    }
+    try {
+      // SECOND: reclaim the containers left by abandoned start attempts. It runs
+      // before the re-drive reconcilers on purpose — those place NEW boxes, and
+      // they should be placing them into a fleet whose ghosts have already been
+      // returned to it. Guarded: a backstop must never take the tick down.
+      await sweepGhostContainers(env);
+    } catch (e) {
+      logEvent("error", "ghost_sweep_failed", { error: (e as Error).message });
     }
     await redriveOrphanedJobs(env, ctx, configured, now);
     try {
@@ -1893,19 +2232,24 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
               503,
             );
           }
-          // Retry the DO start on a transient CF reset (fresh handle each try).
-          const handle = await startWithRetry((h) =>
-            getContainer(env.CHECK_HOST_CONTAINER, h).start({
-              envVars: {
-                ...body.env,
-                TOOLCHAIN_DIGEST: body.toolchain_digest!,
-                // Track-C C2b (now REQUIRED, guaranteed present by the check above):
-                // inject the exec-server bearer so the in-container /exec requires
-                // it; the SAME value is presented on the /v1/exec containerFetch.
-                EXEC_SERVER_AUTH_TOKEN: execAuthToken,
-              },
-              enableInternet: true,
-            }),
+          // Retry the DO start on a transient CF reset (fresh handle each try) —
+          // and DESTROY each superseded attempt, which otherwise holds a container
+          // instance until `sleepAfter` with nothing referencing it.
+          const { handle } = await startWithRetry<undefined>(
+            async () => undefined,
+            (h) =>
+              getContainer(env.CHECK_HOST_CONTAINER, h).start({
+                envVars: {
+                  ...body.env,
+                  TOOLCHAIN_DIGEST: body.toolchain_digest!,
+                  // Track-C C2b (now REQUIRED, guaranteed present by the check above):
+                  // inject the exec-server bearer so the in-container /exec requires
+                  // it; the SAME value is presented on the /v1/exec containerFetch.
+                  EXEC_SERVER_AUTH_TOKEN: execAuthToken,
+                },
+                enableInternet: true,
+              }),
+            (h, _p, reason) => abandonContainer(env, h, "check", reason),
           );
           return json({ handle }, 201);
         }
@@ -1919,9 +2263,20 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         }
 
         // Inject the per-job env (JIT config + CLW_*) at start (runtime, not baked);
-        // retry the DO start on a transient CF reset (fresh handle each attempt).
-        const handle = await startWithRetry((h) =>
-          getContainer(env.RUNNER_CONTAINER, h).startWithEnv(body.env),
+        // retry the DO start on a transient CF reset (fresh handle each attempt),
+        // and DESTROY each superseded attempt rather than leaving it to hold a
+        // fleet instance until `sleepAfter`.
+        //
+        // ⚠️ On THIS path the JIT arrives in `body.env` from the fabric, so the
+        // Worker cannot mint a fresh one per attempt the way the autoscaler does:
+        // every attempt necessarily boots with the SAME single-use registration.
+        // Destroying the superseded attempt is therefore not just capacity hygiene
+        // here, it is what stops a late box from consuming the registration the
+        // surviving box needs.
+        const { handle } = await startWithRetry<undefined>(
+          async () => undefined,
+          (h) => getContainer(env.RUNNER_CONTAINER, h).startWithEnv(body.env),
+          (h, _p, reason) => abandonContainer(env, h, "runner", reason),
         );
         return json({ handle }, 201);
       } catch (e) {

@@ -33,6 +33,14 @@ export const COUNTER_NAMES = [
   "spawn_forbidden", // mint authorization returned forbidden → no spawn
   "spawn_at_ceiling", // per-tenant concurrency ceiling → no spawn
   "spawn_failed", // mint/spawn threw (claim released for re-drive)
+  "placement_unconfirmed", // a started box never claimed the job (re-driven)
+  // ── Ghost containers (a start we abandoned mid-flight) ───────────────────
+  // Both are fleet-capacity signals, not job signals: a container that exists
+  // and can never do work is indistinguishable from lost capacity until it is
+  // named. `abandoned` counts attempts we cancelled; `reaped` counts the ones
+  // the cron has since CONFIRMED are down.
+  "container_start_abandoned",
+  "ghost_container_reaped",
   // ── Teardown + credential + billing ──────────────────────────────────────
   "runner_torn_down", // container destroyed at completion (vs idle-out)
   "cas_pat_revoked", // per-job CAS PAT revoked at completion
