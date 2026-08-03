@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-08-03 — a spawn that "succeeded" and placed nothing no longer loses the job
+
+- **fix(cloudflare): confirm placement instead of assuming it.** A burst above the concurrency
+  ceiling could still lose jobs — but not for any of the reasons the recovery path was built to
+  handle. In corelink-server run `30826164339` (24-job fan-out, ceiling 20) the Worker drove all
+  24 spawns, refused 8 at the ceiling, hard-failed 3 container starts, and **recovered every one
+  of them**: 9 `orphan_recorded`, 9 `orphan_retry_recovered`, and **zero** `orphan_retry_giveup`
+  / zero `orphan_refusal_giveup`. The 3-strike budget was never approached. 11 jobs were lost
+  anyway, and sat `queued` with no runner for the next 17 minutes while the fleet was idle and
+  the 1-minute cron ticked 17 times.
+
+  They were lost in the one state nothing watched. `recordOrphan` runs from
+  `driveSpawnGuarded`'s CATCH, so the dead-letter only ever sees a spawn that THREW — an error,
+  or the typed ceiling refusal. A spawn that returns normally and still leaves the job unplaced
+  has no branch at all: the Worker logs `runner_spawned` and moves on. But `driveSpawn` returns
+  as soon as the CONTAINER started, and a container that starts is not a job that got placed —
+  the box has still to come online and claim it. When it does not, GitHub simply keeps the job
+  queued, `workflow_job.queued` is never redelivered, and nothing anywhere reports a failure.
+
+- **A successful spawn now writes a PROVISIONAL record.** The same `orphan:<jobId>` dead-letter,
+  carrying `placedMs` — "a box was started; placement unconfirmed". Reusing one record is
+  deliberate: it keeps ONE lifecycle and ONE set of bounds per job, so a job cannot launder
+  itself out of `MAX_ORPHAN_ATTEMPTS` by passing through the success path. `attempts` and
+  `firstRecordedMs` are carried over, so a re-spawn never hands back a fresh budget.
+
+- **Confirmation is a question to GitHub, not a webhook.** Past a 3-minute grace window the
+  reconciler reads that one job (`/actions/jobs/{id}`) and re-drives **only** on an
+  authoritative "still queued, still no runner". Keying this on a `workflow_job.in_progress`
+  delivery was rejected: it would make correctness depend on a delivery we do not control and
+  currently ignore, and getting it wrong re-spawns a HEALTHY job — burning a concurrency slot
+  and real COGS on something that was never in trouble. Every other answer, **including an
+  unreachable API**, leaves the job alone. `workflow_job.completed` clears the record directly,
+  so the common case costs zero API calls.
+
+- **Still fast-fails.** An unconfirmed placement rejoins the ordinary retry path and **bumps**
+  `attempts`, so a box that can never come online (a bad image, a broken registration) dead-
+  letters loudly within `MAX_ORPHAN_ATTEMPTS` ticks instead of respawning forever on our COGS.
+  Ceiling refusals still do not spend that budget — a full fleet is backpressure, not a fault —
+  and stay bounded by the absolute `ORPHAN_TTL_S` window.
+
+- **The reconciler no longer DELETES on a successful drive.** That was correct only while
+  "drive returned" meant "job placed". It does not, and deleting there discarded the provisional
+  record precisely for the jobs already known to be in trouble.
+
+- Behavioural regression (`test/burst-above-ceiling.test.ts`) replays the measured burst through
+  the real reconciler tick by tick: 24 jobs, ceiling 20, 11 boxes that start and never register.
+  Before, exactly `job-14`…`job-24` strand; after, all 24 are placed. Sibling cases assert that a
+  permanently-broken job stops within the 3-strike bound and that a healthy in-flight job is
+  never re-driven.
+
 ### 2026-08-02 — warn the customer BEFORE the overage, not on the invoice
 
 - **feat(cloudflare): near-ceiling warning on the monthly `max_vcpu_h` allowance.** Overage is

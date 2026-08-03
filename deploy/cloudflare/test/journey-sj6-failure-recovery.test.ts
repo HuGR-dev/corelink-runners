@@ -461,7 +461,7 @@ describe("SJ-6 · cell 4 — retryOrphanedSpawns (bump→claim→drive→delete|
     expect(JSON.parse(kv.store.get("orphan:c1")!).attempts).toBe(2); // bumped, but left
   });
 
-  it("retry + drive SUCCESS ⇒ claim, drive WARM, DELETE the dead-letter (recovered)", async () => {
+  it("retry + drive SUCCESS ⇒ claim, drive WARM, KEEP the record (placement unconfirmed)", async () => {
     const kv = fakeKv({ "orphan:r1": JSON.stringify(REC({ attempts: 1 })) });
     const drive = vi.fn(async () => {});
     await retryOrphanedSpawns({ RUNNER_JOB_PATS: kv } as unknown as Env, CTX, Date.now(), drive);
@@ -472,7 +472,10 @@ describe("SJ-6 · cell 4 — retryOrphanedSpawns (bump→claim→drive→delete|
       labels: ["corelink"],
     });
     expect(kv.store.get("spawn:r1")).toBe("1"); // claimed (dedup vs the live path)
-    expect(kv.store.has("orphan:r1")).toBe(false); // recovered ⇒ deleted
+    // A returned drive means a CONTAINER STARTED, not that the job is placed — so
+    // the reconciler no longer deletes here. `driveSpawn` re-stamps the record as a
+    // provisional placement; confirmation (or the grace window) resolves it.
+    expect(kv.store.has("orphan:r1")).toBe(true);
   });
 
   it("retry + drive THROW ⇒ releaseSpawnClaim + spawn_failed + LEAVE the (bumped) record", async () => {
@@ -592,9 +595,13 @@ describe("SJ-6 · cell 7 — the retry re-drives WARM (buildContainerEnv authori
     const mintBody = JSON.parse(mintReq.body!);
     expect(mintBody.installation_id).toBe("6543210");
     expect(mintBody.repo_full_name).toBe("acme/api");
-    // Recovered end-to-end: a container was spawned and the dead-letter deleted.
+    // Recovered end-to-end: a container was spawned. The record is not deleted but
+    // re-stamped PROVISIONAL — the real `driveSpawn` calls `recordPlacement`, so
+    // this asserts the whole seam through the production path.
     expect(containers).toHaveLength(1);
-    expect(kv.store.has("orphan:w2")).toBe(false);
+    const w2 = kv.store.get("orphan:w2");
+    expect(w2).toBeTruthy();
+    expect(JSON.parse(w2!).placedMs).toEqual(expect.any(Number));
   });
 });
 
@@ -715,7 +722,7 @@ describe("SJ-6 · cell 9 — dead-letter + GitHub-scan see the SAME job: no doub
 
 // ── Cell 10 — ordering: fail→bump→recover→delete; vs record→TTL-expire→gone ────
 describe("SJ-6 · cell 10 — retry ordering across ticks", () => {
-  it("record → tick1 retry-FAIL (bump 1→2) → tick2 retry-SUCCESS (delete): recovers on the 2nd tick", async () => {
+  it("record → tick1 retry-FAIL (bump 1→2) → tick2 retry-SUCCESS: recovers on the 2nd tick", async () => {
     const kv = fakeKv({ "orphan:ord": JSON.stringify(REC({ attempts: 1 })) });
     const env = { RUNNER_JOB_PATS: kv } as unknown as Env;
 
@@ -727,12 +734,14 @@ describe("SJ-6 · cell 10 — retry ordering across ticks", () => {
     expect(JSON.parse(kv.store.get("orphan:ord")!).attempts).toBe(2);
     expect(kv.store.has("spawn:ord")).toBe(false); // released for the next tick
 
-    // Tick 2: the drive succeeds ⇒ delete the dead-letter (recovered).
+    // Tick 2: the drive succeeds ⇒ the job is re-driven. The record survives as the
+    // provisional placement (`driveSpawn` re-stamps it) rather than being deleted,
+    // so a box that starts and then never claims the job is still recoverable.
     const okDrive = vi.fn(async () => {});
     await retryOrphanedSpawns(env, CTX, Date.now(), okDrive);
     expect(failDrive).toHaveBeenCalledTimes(1);
     expect(okDrive).toHaveBeenCalledTimes(1);
-    expect(kv.store.has("orphan:ord")).toBe(false); // recovered ⇒ gone
+    expect(kv.store.has("orphan:ord")).toBe(true);
   });
 
   it("record → TTL-expire between list and get ⇒ the phantom key is a no-op (self-heal, no drive)", async () => {

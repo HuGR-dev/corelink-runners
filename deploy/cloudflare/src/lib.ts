@@ -1067,6 +1067,104 @@ export interface OrphanRecord {
   // saturated fleet would retry one job forever. Optional — records written before
   // this field existed fall back to the attempt-count bound.
   firstRecordedMs?: number;
+  // Wall-clock ms when a container was last STARTED for this job. Its presence
+  // means "we believe this job is placed, but nothing has confirmed it yet" — see
+  // the placement-confirmation block below. Absent ⇒ the record is a plain
+  // failure/refusal dead-letter and follows the original retry path.
+  placedMs?: number;
+}
+
+// ── Placement confirmation (2026-08-03) — a spawn that "succeeded" and produced
+// ── nothing was the ONE loss the dead-letter could not see ───────────────────
+//
+// The dead-letter recovers a spawn that FAILED (an error) or was REFUSED (the
+// ceiling). Both are cases where `driveSpawn` throws, which is what routes the job
+// into `recordOrphan`. It has no case for a spawn that RETURNS NORMALLY and still
+// leaves the job unplaced — and that is the one that actually lost work.
+//
+// Measured, corelink-server run 30826164339 (2026-08-03T15:09Z, 24-job fan-out):
+// the Worker minted a JIT and started a container for all 24 jobs, recorded 8
+// ceiling refusals and 3 start failures, and RECOVERED every one of them — 9
+// `orphan_retry_recovered`, ZERO `orphan_retry_giveup`, ZERO `orphan_refusal_giveup`.
+// The retry budget was never even approached. Yet 11 jobs still sat `queued` with
+// no runner until GitHub cancelled them 20 minutes later, because for those 11 the
+// box we started never came online and claimed the job. From the Worker's side that
+// is indistinguishable from success: it logged `runner_spawned` and moved on.
+//
+// So the job was lost in the one state nothing watched: believed-placed. There is
+// no webhook for "the runner you started never showed up" — GitHub simply keeps the
+// job queued, and `workflow_job.queued` is never redelivered.
+//
+// The fix is to stop treating a started container as proof of placement. A
+// successful spawn now writes the SAME dead-letter record carrying `placedMs`, i.e.
+// PROVISIONAL: "a box was started; placement unconfirmed". The record is cleared
+// only by positive evidence that the job is no longer waiting for us.
+//
+// ⚠️ Confirmation is deliberately NOT keyed on a `workflow_job.in_progress`
+// webhook. That would make correctness depend on a delivery we do not control and
+// currently ignore, and getting it wrong re-spawns a HEALTHY running job — burning
+// a concurrency slot and real COGS on a job that was never in trouble. Past the
+// grace window we instead ASK GitHub about that specific job (one cheap
+// `/actions/jobs/{id}` read, and only for a record that is still unconfirmed), and
+// re-drive ONLY on an authoritative "still queued, still no runner". Anything else,
+// including an API error, leaves the job alone.
+
+/**
+ * How long a started container has to come online and claim its job before we
+ * treat the placement as lost.
+ *
+ * Sized off the observed healthy path: in the 30826164339 burst the boxes that DID
+ * work were claimed by GitHub 12–50 s after `runner_minted`. 3 minutes leaves a
+ * wide margin over the slowest healthy boot, so a re-drive means something really
+ * did go wrong — while still leaving ~27 minutes of the 30-minute ORPHAN_TTL_S
+ * window to actually recover the job.
+ */
+export const PLACEMENT_CONFIRM_GRACE_MS = 180_000;
+
+/**
+ * PURE: what the reconciler should do with a record that may be a provisional
+ * placement (the KV and GitHub I/O live in index.ts).
+ *
+ *   • "not_placed"   ⇒ no provisional placement — the original failure/refusal
+ *     retry path applies unchanged.
+ *   • "within_grace" ⇒ a box was started recently; leave it alone entirely. This
+ *     must NOT bump attempts and must NOT re-drive: the overwhelming majority of
+ *     records are healthy in-flight jobs, and a tick that re-drove them would turn
+ *     the reconciler into a spawn amplifier.
+ *   • "verify"       ⇒ the grace window elapsed with no confirmation. Ask GitHub
+ *     whether the job is still waiting before doing anything.
+ */
+export function placementConfirmStep(
+  rec: OrphanRecord,
+  nowMs: number,
+  graceMs: number = PLACEMENT_CONFIRM_GRACE_MS,
+): { action: "not_placed" | "within_grace" | "verify"; waitedMs: number } {
+  if (rec.placedMs == null) return { action: "not_placed", waitedMs: 0 };
+  const waitedMs = Math.max(0, nowMs - rec.placedMs);
+  return { action: waitedMs < graceMs ? "within_grace" : "verify", waitedMs };
+}
+
+/**
+ * PURE: read GitHub's view of one job into a placement verdict.
+ *
+ * Fail-SAFE by construction — every shape that is not an unambiguous "still
+ * queued, still no runner" resolves to `placed` (confirmed, drop the record) or
+ * `unknown` (leave the record, ask again next tick). Only `lost` re-drives, so no
+ * amount of unexpected payload can cause a duplicate spawn of a live job.
+ *
+ * `runner_id` is 0 (NOT null) for an unassigned queued job on the Actions API —
+ * the same live-observed quirk `listOrphanRunnerJobs` documents; both are treated
+ * as unassigned here.
+ */
+export function jobPlacementVerdict(
+  job: { status?: string; runner_id?: number | null } | null,
+): "lost" | "placed" | "unknown" {
+  if (!job || typeof job.status !== "string") return "unknown";
+  // Anything past `queued` means a runner took it (or it is already over).
+  if (job.status !== "queued") return "placed";
+  const runnerless = job.runner_id == null || job.runner_id === 0;
+  // Queued but ALREADY assigned a runner: the box is booting and about to claim it.
+  return runnerless ? "lost" : "placed";
 }
 
 /**

@@ -87,6 +87,9 @@ import {
   SpawnRefusedError,
   ORPHAN_TTL_S,
   MAX_ORPHAN_ATTEMPTS,
+  placementConfirmStep,
+  jobPlacementVerdict,
+  PLACEMENT_CONFIRM_GRACE_MS,
   logEvent,
   type ContainerEnvResult,
   type SlotRecord,
@@ -1133,6 +1136,13 @@ async function driveSpawn(
     logEvent("info", "runner_minted", { jobId, repo, runnerName });
     await spawnRunner(env, jit, jobId, mint, runnerName);
     await bumpMetrics(env, "runner_spawned");
+    // The container started — but a started container is NOT a placed job. Record
+    // the placement as PROVISIONAL so the reconciler can notice if this box never
+    // comes online and claims the job; confirmation clears it. This is the ONLY
+    // thing standing between "the box didn't show up" and a job that hangs `queued`
+    // until GitHub cancels it 24h later, because `workflow_job.queued` is never
+    // redelivered and nothing else reports the failure.
+    await recordPlacement(env, opts);
   } catch (e) {
     // Release the concurrency slot on a spawn failure (the guard releases the claim).
     // Release by jobId ONLY (globally unique) — works for warm AND cold; best-effort
@@ -1187,6 +1197,91 @@ export async function recordOrphan(
   } catch (e) {
     // Best-effort: never break the (already-failed) spawn path on a KV hiccup.
     logEvent("error", "orphan_record_failed", { jobId: opts.jobId, error: (e as Error).message });
+  }
+}
+
+// Record a spawn that SUCCEEDED as provisionally placed: a container was started
+// for this job, but nothing has yet confirmed that a runner came online and claimed
+// it. See the placement-confirmation block in lib.ts for why a started container is
+// not proof of placement (measured: 11 jobs lost in exactly this state).
+//
+// Writes the SAME `orphan:<jobId>` record the failure path uses, plus `placedMs`.
+// Reusing one record is deliberate — it keeps ONE lifecycle and ONE set of bounds
+// per job, so a job that is spawned, comes back unconfirmed, is re-driven and fails
+// again cannot escape `MAX_ORPHAN_ATTEMPTS` by laundering itself through the
+// success path.
+//
+// Preserves `attempts` and `firstRecordedMs` from any existing record: a job that
+// has already burned two attempts does not get a fresh budget by being re-spawned,
+// and the absolute refusal window keeps running from when the trouble STARTED.
+//
+// Best-effort: a KV failure here costs at most one unrecovered job — exactly the
+// behaviour before this change, never worse — so it must not fail the spawn.
+export async function recordPlacement(
+  env: Env,
+  opts: { jobId: string; repo: string; installationId: string; labels: string[] },
+): Promise<void> {
+  // COLD spawn (no installation id) ⇒ a re-drive would have to skip per-job authz,
+  // so there is nothing safe to recover to. Unchanged coverage gap, same as
+  // `recordOrphan`; the first-party GitHub scan still covers RECONCILER_REPOS.
+  if (!env.RUNNER_JOB_PATS || !opts.installationId) return;
+  try {
+    const key = orphanKey(opts.jobId);
+    const raw = await env.RUNNER_JOB_PATS.get(key);
+    const prior = raw ? (JSON.parse(raw) as OrphanRecord) : null;
+    const now = Date.now();
+    const rec: OrphanRecord = {
+      repo: opts.repo,
+      installationId: opts.installationId,
+      labels: opts.labels,
+      attempts: prior?.attempts ?? 0,
+      firstRecordedMs: prior?.firstRecordedMs ?? now,
+      placedMs: now,
+    };
+    await env.RUNNER_JOB_PATS.put(key, JSON.stringify(rec), { expirationTtl: ORPHAN_TTL_S });
+  } catch (e) {
+    logEvent("error", "placement_record_failed", {
+      jobId: opts.jobId,
+      error: (e as Error).message,
+    });
+  }
+}
+
+// Drop the provisional placement record — the job is confirmed no longer waiting on
+// us. Called from `workflow_job.completed` (free confirmation, no API call) and from
+// the reconciler when GitHub reports the job as placed.
+async function clearPlacementRecord(env: Env, jobId: string): Promise<void> {
+  if (!env.RUNNER_JOB_PATS) return;
+  await env.RUNNER_JOB_PATS.delete(orphanKey(jobId)).catch(() => {
+    /* best-effort: the record TTL-expires on its own */
+  });
+}
+
+// Ask GitHub whether ONE job is still waiting for a runner. Used only for a
+// placement that is already past its grace window, so this is normally zero calls
+// per tick — and at most one per genuinely-stuck job.
+//
+// Returns the raw job shape for `jobPlacementVerdict` to judge; `null` on ANY
+// failure, which that function maps to "unknown" ⇒ leave the record alone. Never
+// throws: an unreachable GitHub must not stop the rest of the reconciler tick.
+async function fetchJobPlacement(
+  env: Env,
+  repo: string,
+  jobId: string,
+): Promise<{ status?: string; runner_id?: number | null } | null> {
+  if (!env.GITHUB_MINT_TOKEN) return null;
+  try {
+    const r = await fetch(`https://api.github.com/repos/${repo}/actions/jobs/${jobId}`, {
+      headers: {
+        authorization: `Bearer ${env.GITHUB_MINT_TOKEN}`,
+        accept: "application/vnd.github+json",
+        "user-agent": "corelink-spawn-worker",
+      },
+    });
+    if (!r.ok) return null;
+    return (await r.json()) as { status?: string; runner_id?: number | null };
+  } catch {
+    return null;
   }
 }
 
@@ -1487,6 +1582,11 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         if (env.RUNNER_JOB_PATS) {
           derivedTenant = (await env.RUNNER_JOB_PATS.get(jobTenantKey(jobId))) ?? undefined;
         }
+        // The job is over ⇒ it is definitively not waiting on us. Drop any
+        // provisional placement record so the reconciler never re-drives a job that
+        // already ran (and so the common case costs ZERO GitHub API calls — this
+        // clears the record long before the confirmation window would ask).
+        await clearPlacementRecord(env, jobId);
         const revoked = await revokeCompletedJob(env, jobId, derivedTenant);
         // Release the concurrency slot (W7/F7) — by jobId ONLY, so it releases a
         // warm OR cold spawn's slot without needing the derived tenant. Best-effort
@@ -2049,6 +2149,13 @@ export async function retryOrphanedSpawns(
     env: Env,
     opts: { jobId: string; repo: string; installationId: string; labels: string[] },
   ) => Promise<void> = driveSpawn,
+  // Injected for the same reason as `drive` — so the placement-confirmation
+  // branches are testable without reaching the real GitHub API.
+  verify: (
+    env: Env,
+    repo: string,
+    jobId: string,
+  ) => Promise<{ status?: string; runner_id?: number | null } | null> = fetchJobPlacement,
 ): Promise<void> {
   const kv = env.RUNNER_JOB_PATS;
   if (!kv) return; // no dead-letter store bound ⇒ nothing to retry
@@ -2068,6 +2175,47 @@ export async function retryOrphanedSpawns(
       rec = raw ? (JSON.parse(raw) as OrphanRecord) : null;
     } catch {
       rec = null;
+    }
+    // ── Placement confirmation (2026-08-03) ──────────────────────────────────
+    // A record carrying `placedMs` is a spawn we believe SUCCEEDED. Most of these
+    // are healthy in-flight jobs, so the default action is to do nothing at all.
+    // Only once the grace window has elapsed with no confirmation do we ask GitHub
+    // about that one job — and only an authoritative "still queued, still no
+    // runner" re-drives it. Every other answer (placed, or an unreachable API)
+    // leaves the record untouched for a later tick, so this can never duplicate a
+    // running job.
+    if (rec) {
+      const placement = placementConfirmStep(rec, now, PLACEMENT_CONFIRM_GRACE_MS);
+      if (placement.action === "within_grace") continue; // booting — leave it alone
+      if (placement.action === "verify") {
+        const verdict = jobPlacementVerdict(await verify(env, rec.repo, jobId));
+        if (verdict === "placed") {
+          // The box did come online (or the job is already over) — drop the record.
+          await kv.delete(name).catch(() => {
+            /* best-effort: the key TTL-expires */
+          });
+          continue;
+        }
+        if (verdict === "unknown") {
+          // We could not tell. Do NOT re-drive on ignorance — leave the record and
+          // ask again next tick, bounded by ORPHAN_TTL_S like everything else.
+          logEvent("info", "placement_verify_unknown", { jobId, repo: rec.repo });
+          continue;
+        }
+        // "lost": the container we started never claimed the job. Fall through to
+        // the normal retry path — which BUMPS `attempts`, so a job whose box can
+        // never come online (a bad image, a broken registration) still dead-letters
+        // in MAX_ORPHAN_ATTEMPTS ticks instead of respawning forever on our COGS.
+        // Clearing `placedMs` returns the record to the plain dead-letter lifecycle.
+        logEvent("error", "placement_unconfirmed", {
+          jobId,
+          repo: rec.repo,
+          waitedMs: placement.waitedMs,
+          attempts: rec.attempts,
+        });
+        await bumpMetrics(env, "placement_unconfirmed");
+        rec = { ...rec, placedMs: undefined };
+      }
     }
     const step = orphanRetryStep(rec, MAX_ORPHAN_ATTEMPTS);
     if (step.action === "missing") continue; // TTL-expired between list and get — skip
@@ -2100,11 +2248,20 @@ export async function retryOrphanedSpawns(
         installationId: bumped.installationId,
         labels: bumped.labels,
       });
-      // Recovered ⇒ drop the dead-letter (the spawn claim is left to TTL-expire,
-      // blocking redeliveries for the job's lifetime, same as the live path).
-      await kv.delete(name).catch(() => {
-        /* best-effort: the key TTL-expires */
-      });
+      // Re-driven ⇒ do NOT delete the record here.
+      //
+      // This used to delete it, which was correct only while "drive returned" meant
+      // "the job is placed". It does not: `driveSpawn` returns as soon as the
+      // CONTAINER started, and the whole point of the placement record is that a
+      // started container is not a placed job. Deleting here would throw away the
+      // provisional record `driveSpawn` just wrote — and it would do so precisely
+      // for the jobs already known to be in trouble, which are the likeliest to fail
+      // to come online a second time.
+      //
+      // The record's lifecycle now belongs to `recordPlacement` (written on a
+      // successful spawn) and to the confirmation above / `workflow_job.completed`
+      // (which clear it). The spawn claim is still left to TTL-expire, blocking
+      // redeliveries for the job's lifetime, same as the live path.
       logEvent("info", "orphan_retry_recovered", {
         jobId,
         repo: bumped.repo,
