@@ -1167,6 +1167,113 @@ export function jobPlacementVerdict(
   return runnerless ? "lost" : "placed";
 }
 
+// ── Runner-activity verification (2026-08-03) ────────────────────────────────
+//
+// What the keep-alive sweep stores per live box, and how it reads GitHub's answer
+// about that ONE runner. Both halves are pure so the decision that governs whether
+// a customer's box keeps living can be tested without any network at all.
+//
+// WHY A RECORD AND NOT A BARE HANDLE. `rhandle:<runner_name>` used to hold just the
+// DO handle, which is enough to renew a box but not enough to ask GitHub whether it
+// SHOULD be renewed. The numeric `runner_id` minted alongside the JIT config is the
+// only identifier the runners REST API accepts, and the repo + installation are what
+// authorize the read, so all three travel with the handle now.
+export interface RunnerBinding {
+  /** The RunnerContainer DO handle (what the old bare-string value held). */
+  h: string;
+  /** GitHub's numeric runner id, from the `generate-jitconfig` response. */
+  rid?: number;
+  /** `owner/name` — the repo the registration lives on. */
+  repo?: string;
+  /** Installation id, so the status read uses the same credential as the mint. */
+  inst?: string;
+}
+
+/** One observation of GitHub's view of a single runner. `null` ⇒ the call never
+ *  produced an answer (no credential, network throw, unparseable body). */
+export interface RunnerObservation {
+  httpStatus: number;
+  runner?: { status?: string; busy?: boolean } | null;
+}
+
+export type RunnerActivity = "busy" | "idle" | "unknown";
+
+/**
+ * PURE: encode a runner binding for KV.
+ */
+export function encodeRunnerBinding(b: RunnerBinding): string {
+  return JSON.stringify(b);
+}
+
+/**
+ * PURE: read a `rhandle:` value in EITHER shape.
+ *
+ * Records written before this change are a bare handle string. They parse to a
+ * binding with no `rid`, which every caller must treat as UNVERIFIABLE — i.e. keep
+ * renewing. A deploy must not start reclaiming the boxes that were already in
+ * flight when it landed, because those are exactly the ones we know least about.
+ */
+export function parseRunnerBinding(raw: string | null | undefined): RunnerBinding | null {
+  if (!raw) return null;
+  if (!raw.startsWith("{")) return { h: raw }; // legacy bare handle
+  try {
+    const o = JSON.parse(raw) as Partial<RunnerBinding>;
+    if (typeof o.h !== "string" || o.h.length === 0) return null;
+    return {
+      h: o.h,
+      rid: typeof o.rid === "number" ? o.rid : undefined,
+      repo: typeof o.repo === "string" ? o.repo : undefined,
+      inst: typeof o.inst === "string" ? o.inst : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * PURE: turn one `GET /repos/{owner}/{repo}/actions/runners/{runner_id}` result
+ * into the only three answers the sweep is allowed to act on.
+ *
+ * FAIL-SAFE BY CONSTRUCTION, AND THE DIRECTION MATTERS. Leaking a container slot
+ * is recoverable — `sleepAfter` still reaps it, and the fleet cap is the only thing
+ * that suffers. SIGKILLing a box that is running a customer's job is not: it
+ * surfaces ~10 minutes later as GitHub's "the self-hosted runner lost communication
+ * with the server", with the customer's work lost. So EVERY shape that is not an
+ * unambiguous "GitHub says this specific runner is not working" resolves to
+ * `unknown`, and `unknown` means KEEP RENEWING.
+ *
+ * The mapping, and what GitHub's documentation says about each:
+ *
+ *   • `busy: true`            ⇒ "busy". Checked FIRST and independently of `status`,
+ *     because a runner whose agent has momentarily lost its connection can report
+ *     `status: "offline"` while GitHub still has a job assigned to it.
+ *   • 404                     ⇒ "idle". An ephemeral runner is de-registered by
+ *     GitHub once it has processed its one job, so a runner GitHub no longer knows
+ *     about is a runner with nothing left to do.
+ *   • `status: "offline"`     ⇒ "idle". This is also the state of a registration
+ *     that was created by `generate-jitconfig` and never connected — THE defect
+ *     this function exists for: a box that boots and never registers.
+ *   • `status: "online"` + `busy: false` ⇒ "idle" (GitHub's UI calls this "Idle":
+ *     "The runner is connected to GitHub and is ready to execute jobs.")
+ *   • anything else — a non-404 error, a missing body, a non-boolean `busy`, or a
+ *     `status` string GitHub has not documented — ⇒ "unknown". An undocumented
+ *     status must never be READ as idle; if GitHub adds one, this leaks slots
+ *     (visible on the `keepalive_renewed_unverifiable` counter) rather than
+ *     killing jobs.
+ */
+export function runnerActivityVerdict(obs: RunnerObservation | null): RunnerActivity {
+  if (!obs) return "unknown"; // no credential / network throw / unparseable
+  if (obs.runner && obs.runner.busy === true) return "busy";
+  // GitHub has forgotten this runner ⇒ it cannot be executing anything.
+  if (obs.httpStatus === 404) return "idle";
+  if (obs.httpStatus !== 200 || !obs.runner) return "unknown";
+  if (typeof obs.runner.busy !== "boolean") return "unknown"; // ambiguous body
+  const status = obs.runner.status;
+  if (status === "offline") return "idle"; // never registered, or gone away
+  if (status === "online") return "idle"; // busy was false — connected but unused
+  return "unknown"; // undocumented status ⇒ refuse to conclude
+}
+
 /**
  * PURE decision for a dead-letter whose retry was REFUSED at the ceiling
  * (unit-testable; index.ts applies the KV I/O).

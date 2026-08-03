@@ -77,6 +77,7 @@ vi.mock("@cloudflare/containers", () => {
 });
 
 import worker, { sweepGhostContainers, type Env } from "../src/index";
+import { parseRunnerBinding } from "../src/lib";
 import { getContainer } from "@cloudflare/containers";
 
 const RUNNER_NS = { _ns: "runner" };
@@ -414,8 +415,15 @@ describe("ghost containers · cell 2 — one JIT registration per ATTEMPT, never
     const rkeys = [...kv.store.keys()].filter((k) => k.startsWith("rhandle:"));
     // Exactly ONE runner-name binding, and it resolves to the surviving box —
     // per-attempt names must not leave a binding pointing at a cancelled attempt.
+    // The value is a binding RECORD (handle + the GitHub runner id the keep-alive
+    // sweep verifies against), so read the handle out of it rather than comparing
+    // the raw string.
     expect(rkeys).toHaveLength(1);
-    expect(kv.store.get(rkeys[0])).toBe(survivor);
+    expect(parseRunnerBinding(kv.store.get(rkeys[0])!)!.h).toBe(survivor);
+    // …and it carries the SURVIVING attempt's registration, not the cancelled
+    // one's: verifying the wrong runner id would report the wrong box's state.
+    // The router mints ids as `900 + n`, so the LAST mint's id is 900 + mint count.
+    expect(parseRunnerBinding(kv.store.get(rkeys[0])!)!.rid).toBe(900 + jitCalls().length);
   });
 });
 

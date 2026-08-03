@@ -90,6 +90,11 @@ import {
   placementConfirmStep,
   jobPlacementVerdict,
   PLACEMENT_CONFIRM_GRACE_MS,
+  encodeRunnerBinding,
+  parseRunnerBinding,
+  runnerActivityVerdict,
+  type RunnerBinding,
+  type RunnerObservation,
   logEvent,
   type ContainerEnvResult,
   type SlotRecord,
@@ -366,24 +371,40 @@ export class RunnerContainer extends Container<Env> {
   // mid-job. Consistent with the longest fabric job that ever succeeded: 864 s.
   //
   // The SDK's own contract for that method is "Call this method whenever there is
-  // activity on the container" — and the spawn-Worker is precisely what knows: a
-  // box with a live `rhandle:` binding has a job on it. So the cron supplies the
-  // activity signal (see `keepAliveLiveRunners`) and this stays a real IDLE window
-  // rather than becoming a lifetime cap. Raising the number instead would have
-  // turned every stuck box into a multi-hour hold on `max_instances` — trading a
-  // job-killer for a fleet-starver.
+  // activity on the container", so the cron supplies the activity signal (see
+  // `keepAliveLiveRunners`) and this stays a real IDLE window rather than becoming
+  // a lifetime cap. Raising the number instead would have turned every stuck box
+  // into a multi-hour hold on `max_instances` — trading a job-killer for a
+  // fleet-starver.
+  //
+  // ⚠️ 2026-08-03: the sentence that used to finish that paragraph — "the
+  // spawn-Worker is precisely what knows: a box with a live `rhandle:` binding has
+  // a job on it" — was ALSO false, and it is why the first fix leaked. The binding
+  // is written at SPAWN, before anything has registered with GitHub, and lives
+  // `JOB_PAT_TTL_S` (2 h). A box that booted and never registered therefore never
+  // gets a completion event naming it, so it held a `rhandle:` for two hours and
+  // the sweep renewed it every single minute — defeating this 15-minute window
+  // entirely, on a standard-4 out of `max_instances: 20`. The binding proves a box
+  // was STARTED for a job; only GitHub can say whether that box is working. The
+  // sweep now asks it.
   sleepAfter = "15m";
 
   /**
    * Keep this box's idle window open while its job is still running.
    *
-   * Called once per cron tick for every container that still has an `rhandle:`
-   * binding, i.e. every box whose completion webhook has not yet torn it down.
-   * When the job finishes, teardown drops that binding, the renewals stop, and the
-   * box idles out through the normal `sleepAfter` path — so a lost completion
-   * webhook is still bounded (by the binding's own KV TTL), and a stuck box is
-   * still reclaimed. The activity signal comes from OUR knowledge of the job, not
-   * from traffic the SDK can see, because there is no inbound traffic to see.
+   * Called once per cron tick for every container the sweep has VERIFIED is doing
+   * work — GitHub reports that box's own runner as `busy` — or could not verify at
+   * all (fail-safe: renew). A box GitHub reports as idle, offline or unknown is not
+   * called and falls through to `sleepAfter`.
+   *
+   * Renewing sets the deadline to now + `sleepAfter`, so "stop renewing" is never
+   * "kill now": with a 1-minute cron against a 15-minute window a box has to be
+   * continuously unrenewed for ~14 minutes to actually sleep, and any tick in that
+   * span that finds it busy puts the full window back. That ratio is what makes it
+   * safe to ever stop — not the accuracy of a single observation.
+   *
+   * The activity signal comes from OUR knowledge of the job, not from traffic the
+   * SDK can see, because there is no inbound traffic to see.
    */
   keepAlive(): { ok: true } {
     this.renewActivityTimeout();
@@ -1056,9 +1077,25 @@ async function spawnRunner(
     // This is the binding that survives GitHub's job→runner permutation; the
     // jobId one above is kept only as a fallback for a payload with no
     // runner_name (a job that died before assignment).
-    await env.RUNNER_JOB_PATS.put(runnerHandleKey(runnerName), handle, {
-      expirationTtl: JOB_PAT_TTL_S,
-    }).catch((e) =>
+    //
+    // The value carries the GitHub runner id + repo + installation alongside the
+    // handle, because the keep-alive sweep has to be able to ask GitHub about THIS
+    // box's runner specifically. Written here, at spawn, rather than at
+    // registration: `generate-jitconfig` creates the runner entity and returns its
+    // id immediately, so waiting for a registration that may never happen would
+    // leave the un-registered box — the exact one that leaks — unverifiable.
+    await env.RUNNER_JOB_PATS.put(
+      runnerHandleKey(runnerName),
+      encodeRunnerBinding({
+        h: handle,
+        rid: provisioned.runnerId,
+        repo,
+        inst: installationId,
+      }),
+      {
+        expirationTtl: JOB_PAT_TTL_S,
+      },
+    ).catch((e) =>
       logEvent("error", "kv_put_runner_handle_failed", {
         jobId,
         runnerName,
@@ -1113,9 +1150,14 @@ async function teardownCompletedRunner(
   let handle: string | null = null;
   let resolvedBy: "runner_name" | "job_id" = "runner_name";
   try {
-    if (runnerName) handle = await env.RUNNER_JOB_PATS.get(runnerHandleKey(runnerName));
+    if (runnerName) {
+      // The `rhandle:` value is a binding record (or, for anything written before
+      // that change shipped, a bare handle string) — `parseRunnerBinding` reads both.
+      handle = parseRunnerBinding(await env.RUNNER_JOB_PATS.get(runnerHandleKey(runnerName)))?.h ?? null;
+    }
     if (!handle) {
       resolvedBy = "job_id";
+      // `jhandle:` was never given a record shape; it still holds a bare handle.
       handle = await env.RUNNER_JOB_PATS.get(jobHandleKey(jobId));
     }
   } catch {
@@ -1679,30 +1721,118 @@ async function deadLetterRateLimited(
   }
 }
 
-// ── Keep-alive sweep (2026-08-02) ────────────────────────────────────────────
+// Ask GitHub about ONE runner: `GET /repos/{owner}/{repo}/actions/runners/{id}`.
+//
+// Documented response fields include `status` (required, string) and `busy`
+// (required, boolean) — see docs.github.com/en/rest/actions/self-hosted-runners.
+// `status` is `"online"` / `"offline"`; GitHub's runner UI names the three states
+// Idle ("connected to GitHub and is ready to execute jobs"), Active ("currently
+// executing a job") and Offline ("not connected to GitHub"). `busy` is what
+// separates Idle from Active.
+//
+// AUTH: the SAME credential the JIT was minted with (`mintJitAuthToken` — the
+// per-installation App token, else the first-party GITHUB_MINT_TOKEN). This read
+// is strictly weaker than what we already do on this repo: we CREATE runner
+// registrations (`generate-jitconfig`) and DELETE them with that credential, so a
+// GET of one of them needs no permission we do not already hold. No credential at
+// all ⇒ `null` ⇒ "unknown" ⇒ the box keeps being renewed.
+//
+// Never throws, and every non-200 that is not a 404 is reported as-is for
+// `runnerActivityVerdict` to resolve to "unknown". A rate-limited or unreachable
+// GitHub must make us MORE conservative, not less.
+async function fetchRunnerActivity(
+  env: Env,
+  repo: string,
+  runnerId: number,
+  installationId: string,
+): Promise<RunnerObservation | null> {
+  try {
+    const authToken = await mintJitAuthToken(env, installationId);
+    if (!authToken) return null;
+    const r = await fetch(`https://api.github.com/repos/${repo}/actions/runners/${runnerId}`, {
+      headers: {
+        authorization: `Bearer ${authToken}`,
+        accept: "application/vnd.github+json",
+        "user-agent": "corelink-spawn-worker",
+      },
+    });
+    if (r.status !== 200) return { httpStatus: r.status, runner: null };
+    return {
+      httpStatus: 200,
+      runner: (await r.json()) as { status?: string; busy?: boolean },
+    };
+  } catch {
+    return null; // unreachable / unparseable ⇒ unknown ⇒ keep renewing
+  }
+}
+
+// A hard ceiling on GitHub reads per tick. The fleet cap is `max_instances: 20`,
+// so this never binds in normal operation — it bounds the PATHOLOGICAL case (a KV
+// full of stale bindings) so the sweep can never become the thing that exhausts
+// the installation's REST budget and breaks spawning. Bindings past the cap are
+// treated as unverifiable, i.e. RENEWED: running out of API budget must not start
+// reclaiming boxes we can no longer ask about.
+const KEEPALIVE_MAX_VERIFY_PER_TICK = 40;
+
+// ── Keep-alive sweep (2026-08-02; verified against GitHub 2026-08-03) ────────
 //
 // Why this exists: `RunnerContainer.sleepAfter` was acting as a hard 15-minute cap
 // on job DURATION, not as an idle timeout — see the long note on the class. The
 // SDK can only see activity that arrives through `containerFetch`, and nothing
 // ever dials INTO a runner box, so it concluded every box was idle from the moment
-// it booted.
+// it booted. The cron supplies the activity signal the SDK cannot observe.
 //
-// We know better than the SDK here: a box that still has an `rhandle:` binding is a
-// box whose completion webhook has not arrived, i.e. one with a job on it. So each
-// cron tick we renew exactly those. When the job completes, teardown drops the
-// binding, renewals stop, and the box idles out normally.
+// WHAT THE FIRST VERSION GOT WRONG. It renewed every box that still had an
+// `rhandle:` binding, on the stated theory that such a box "has a job on it". That
+// binding is written at SPAWN and lives `JOB_PAT_TTL_S` (2 h). A box that boots and
+// never registers with GitHub never produces a completion event naming it, so
+// nothing ever drops its binding — and the sweep renewed it once a minute for two
+// hours, holding a standard-4 out of a fleet of 20 and turning the 15-minute idle
+// window into a no-op. Plausibly a larger slot sink than the ghost containers
+// fixed in #446.
 //
-// The bound on a LOST completion webhook is the binding's own KV TTL
-// (JOB_PAT_TTL_S): once it expires the renewals stop and the box idles out, so a
-// leak is capped at roughly that TTL plus one sleepAfter window rather than being
-// unbounded. That property is what makes this safe to do at all — the alternative
-// fix, simply raising sleepAfter, would have turned every stuck box into a
-// multi-hour hold on `max_instances` and starved new spawns.
+// WHAT REPLACES IT. A binding proves a box was STARTED for a job. Only GitHub can
+// say whether that box is WORKING, so we ask it about that box's own runner id.
+// Only `busy` renews.
+//
+// ⛔ WHY IT IS KEYED ON THE RUNNER, NOT THE JOB. "Job A is still queued" does NOT
+// imply "the box we started for A is idle": `generate-jitconfig` binds a runner to
+// a repo + label set and to nothing else, so GitHub assigns queued jobs to idle
+// runners by LABEL MATCH and the job→box mapping is a permutation. Teardown keyed
+// on the spawn's jobId is what SIGKILLed five live customer jobs on 2026-08-02 (see
+// the note above `RUNNER_HANDLE_PREFIX`). This sweep never asks about a job. It
+// asks GitHub about one specific runner id, and it acts only on that runner's own
+// reported state.
+//
+// FAIL SAFE, NOT CLEAN — the deliberate asymmetry. An inconclusive check (no
+// credential, an API error, a rate limit, a body we do not recognise, a legacy
+// binding with no runner id, or a tick that hit the verification cap) KEEPS the box
+// renewed. Leaking a container slot is recoverable — `sleepAfter` still reaps it
+// eventually and only the fleet cap suffers. Killing a running customer job is not.
+// `keepalive_renewed_unverifiable` is the meter on how much we are paying for that
+// choice; if it dominates, the fix is better verification, never a cheaper default.
+//
+// AND STOPPING IS NOT KILLING. Renewing sets the deadline to now + 15m, so a box we
+// stop renewing still has ~14 minutes, and the sweep re-checks it every minute of
+// them: it must be continuously verified-not-busy for the whole window to actually
+// sleep, and one busy observation anywhere in that span restores the full window.
+// A 15:1 ratio between the idle window and the poll interval is what makes acting
+// on a single observation safe.
 //
 // Best-effort throughout: this is a liveness backstop, never a gate. Every failure
 // is swallowed so a KV hiccup or a dead handle can never break the cron (which also
 // drives orphan recovery and billing).
-export async function keepAliveLiveRunners(env: Env): Promise<number> {
+//
+// `verify` is injected so the decision is testable without reaching GitHub.
+export async function keepAliveLiveRunners(
+  env: Env,
+  verify: (
+    env: Env,
+    repo: string,
+    runnerId: number,
+    installationId: string,
+  ) => Promise<RunnerObservation | null> = fetchRunnerActivity,
+): Promise<number> {
   const kv = env.RUNNER_JOB_PATS;
   if (!kv) return 0;
   let listed: { keys: { name: string }[] };
@@ -1713,27 +1843,78 @@ export async function keepAliveLiveRunners(env: Env): Promise<number> {
     return 0;
   }
   let renewed = 0;
+  let busyCount = 0;
+  let idleCount = 0;
+  let unverifiable = 0;
+  let verifications = 0;
   for (const { name } of listed.keys) {
-    let handle: string | null = null;
+    const runnerName = name.slice(RUNNER_HANDLE_PREFIX.length);
+    let binding: RunnerBinding | null = null;
     try {
-      handle = await kv.get(name);
+      binding = parseRunnerBinding(await kv.get(name));
     } catch {
       continue; // transient KV read miss — next tick retries
     }
-    if (!handle) continue; // torn down between list and get
+    if (!binding) continue; // torn down between list and get, or unreadable value
+
+    // Can we ask? A legacy bare-handle binding (written before this change) has no
+    // runner id, and a cold spawn has no installation — both are unverifiable and
+    // therefore renewed. So is anything past the per-tick verification cap.
+    const verifiable =
+      typeof binding.rid === "number" && !!binding.repo && !!binding.inst &&
+      verifications < KEEPALIVE_MAX_VERIFY_PER_TICK;
+
+    let activity: "busy" | "idle" | "unknown" = "unknown";
+    if (verifiable) {
+      verifications++;
+      // `fetchRunnerActivity` swallows its own errors, but this must hold for ANY
+      // verifier: a throw here would otherwise abandon the sweep mid-list and stop
+      // renewing every box after this one — a fail-unsafe hidden inside a loop.
+      // Caught per box, resolved to "unknown", which renews.
+      try {
+        activity = runnerActivityVerdict(
+          await verify(env, binding.repo!, binding.rid!, binding.inst!),
+        );
+      } catch (e) {
+        logEvent("error", "keepalive_verify_threw", { runnerName, error: (e as Error).message });
+      }
+    }
+
+    if (activity === "idle") {
+      // GitHub says this runner is not executing anything (or has forgotten it).
+      // Stop renewing and let `sleepAfter` do its job. Nothing is destroyed here.
+      idleCount++;
+      logEvent("info", "keepalive_stopped_idle", { runnerName, runnerId: binding.rid });
+      continue;
+    }
+    if (activity === "unknown") unverifiable++;
+    else busyCount++;
+
     try {
-      await getContainer(env.RUNNER_CONTAINER, handle).keepAlive();
+      await getContainer(env.RUNNER_CONTAINER, binding.h).keepAlive();
       renewed++;
     } catch (e) {
       // A dead/destroyed handle throws here. Not worth alarming on — the binding
       // will TTL out — but worth seeing if it becomes common.
       logEvent("info", "keepalive_skipped", {
-        runnerName: name.slice(RUNNER_HANDLE_PREFIX.length),
+        runnerName,
         error: (e as Error).message,
       });
     }
   }
-  if (renewed > 0) logEvent("info", "keepalive_renewed", { count: renewed });
+  if (renewed > 0) {
+    logEvent("info", "keepalive_renewed", {
+      count: renewed,
+      busy: busyCount,
+      unverifiable,
+    });
+  }
+  await bumpMetrics(
+    env,
+    ...Array(busyCount).fill("keepalive_renewed_busy"),
+    ...Array(idleCount).fill("keepalive_stopped_idle"),
+    ...Array(unverifiable).fill("keepalive_renewed_unverifiable"),
+  );
   return renewed;
 }
 
@@ -2562,6 +2743,24 @@ export async function retryOrphanedSpawns(
         // never come online (a bad image, a broken registration) still dead-letters
         // in MAX_ORPHAN_ATTEMPTS ticks instead of respawning forever on our COGS.
         // Clearing `placedMs` returns the record to the plain dead-letter lifecycle.
+        //
+        // ⛔ THE RE-DRIVE DELIBERATELY DOES NOT DESTROY THE BOX IT REPLACES.
+        // The only identifier this record carries is the JOB id, and "job A is still
+        // queued" does not mean "the box started for A is idle" — GitHub assigns by
+        // label match, so that box is frequently running somebody ELSE's job. Killing
+        // it on a job-keyed lookup is precisely the correlation that SIGKILLed five
+        // live jobs on 2026-08-02; doing it here would re-open that incident to buy
+        // back a slot.
+        //
+        // It does not need to be bought back that way any more. Whatever that box is,
+        // the keep-alive sweep now decides its fate on ITS OWN runner's reported
+        // state: if it is running the other job it stays renewed (correct — it is
+        // working), and if it is genuinely idle or never registered the sweep stops
+        // renewing it and `sleepAfter` reclaims it within one idle window. That
+        // collapses the leak this branch used to leave from ~2 h (the binding TTL) to
+        // ~15 min, with no new kill path and no new correlation to get wrong.
+        // Explicit teardown here would need a runner-keyed lookup from a job-keyed
+        // record; the ~12 minutes it would save do not justify inventing one.
         logEvent("error", "placement_unconfirmed", {
           jobId,
           repo: rec.repo,

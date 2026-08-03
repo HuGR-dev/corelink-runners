@@ -11,10 +11,20 @@
 // with the longest fabric job that ever succeeded: 864 s (14.4 min).
 //
 // The fix supplies the activity signal the SDK cannot observe: the cron renews
-// exactly those boxes that still have an `rhandle:` binding, i.e. those whose
-// completion webhook has not arrived. These tests pin BOTH halves — that live
-// boxes are renewed, and that finished ones are not (or the renewal would become
-// the leak it was meant to avoid).
+// live boxes each tick. These tests pin BOTH halves — that live boxes are renewed,
+// and that finished ones are not (or the renewal would become the leak it was meant
+// to avoid).
+//
+// ⚠️ 2026-08-03 — WHAT "LIVE" MEANS CHANGED, AND THIS FILE NO LONGER DEFINES IT.
+// The original rule was "a box that still has an `rhandle:` binding", on the theory
+// that such a box has a job on it. That was false for a box that boots and never
+// registers: the binding is written at SPAWN with a 2-hour TTL, so nothing ever
+// dropped it and the sweep renewed a dead box ~120 times. The sweep now verifies
+// each box's own runner against GitHub and renews only the ones reported busy (or
+// unverifiable — fail-safe). The cells below still hold because a binding with no
+// runner id is UNVERIFIABLE and therefore still renewed; that is the legacy/
+// backward-compatibility path, not the contract. The contract lives in
+// test/keepalive-verified-busy.test.ts.
 //
 // WHICH ONE ACTUALLY PINS THE DEFECT (verified by unwiring the sweep and re-running):
 //   • the end-to-end "spawned box is renewed each tick" — goes RED when the cron

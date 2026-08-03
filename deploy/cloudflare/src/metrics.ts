@@ -41,10 +41,31 @@ export const COUNTER_NAMES = [
   // the cron has since CONFIRMED are down.
   "container_start_abandoned",
   "ghost_container_reaped",
+  // ── Keep-alive sweep (does a live box keep its idle window open?) ────────
+  // The sweep renews a box's idle timeout only while GitHub reports that box's
+  // OWN runner as busy. These three partition every binding it looks at, so
+  // `busy + idle + unverifiable` is the live-binding count and the ratio between
+  // them is the health signal: `unverifiable` climbing means we are renewing on
+  // ignorance (a leak, by design — see `runnerActivityVerdict`), and `idle`
+  // climbing means boxes are being held by bindings whose job never started.
+  "keepalive_renewed_busy", // GitHub says this runner is executing a job
+  "keepalive_stopped_idle", // GitHub says it is idle/unknown-to-it ⇒ let it sleep
+  "keepalive_renewed_unverifiable", // could not tell ⇒ renewed anyway (fail-safe)
   // ── Teardown + credential + billing ──────────────────────────────────────
   "runner_torn_down", // container destroyed at completion (vs idle-out)
   "cas_pat_revoked", // per-job CAS PAT revoked at completion
   "billing_pushed", // runner_slot_seconds usage event emitted
+  // ── Registered late (2026-08-03) ─────────────────────────────────────────
+  // These four were BUMPED at their seams but never listed here, so `snapshot()`
+  // 0-filled the fixed set without them and a dashboard reading the documented
+  // shape saw no such signal at all until one happened to fire (the forward-compat
+  // spill-through at the bottom of `snapshot` is what kept them visible, which is
+  // also why nobody noticed). Registering them makes them 0-filled like the rest —
+  // "this never happened" and "this counter does not exist" stop looking alike.
+  "webhook_installation_not_allowlisted", // GA allowlist refused an installation
+  "rate_limit_deadletter_capped", // rate-limit dead-letter budget exhausted
+  "vcpu_ceiling_approaching", // tenant nearing its included vCPU-h
+  "vcpu_ceiling_exceeded", // tenant past its included vCPU-h
 ] as const;
 
 export type CounterName = (typeof COUNTER_NAMES)[number];

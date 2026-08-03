@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-08-03 — the keep-alive sweep renews only boxes GitHub says are working
+
+- **fix(cloudflare): a box that never registered stops being renewed for two hours.**
+  The keep-alive sweep (added 2026-08-02 to stop `sleepAfter = "15m"` acting as a hard cap on
+  job *duration*) renewed the idle timeout of **every** box that still had an `rhandle:`
+  binding. Its own comment justified that — *"a box that still has an `rhandle:` binding is …
+  one with a job on it"*, *"a stuck box is still reclaimed"* — and **both statements were
+  false in one common case.** The binding is written at **spawn** (`index.ts`, `spawnRunner`),
+  not at registration, with `JOB_PAT_TTL_S = 7200`. A box that boots and never registers with
+  GitHub therefore never produces a completion event naming it, nothing ever drops its binding,
+  and the 1-minute cron renewed it ~120 times — defeating the 15-minute idle window entirely and
+  holding a standard-4 (4 vCPU / 12 GiB) out of `max_instances: 20` for two hours. Plausibly a
+  **larger** slot sink than the ghost containers fixed the same day, and a candidate for why a
+  nominal ceiling of 20 behaves like ~7. Both comments are corrected in place: a comment that
+  asserts an invariant the code does not hold is how this survived a review that found it.
+
+- **The binding proves a box was STARTED; only GitHub can say it is WORKING.** `rhandle:` now
+  carries the GitHub runner id + repo + installation alongside the DO handle, and the sweep
+  verifies each box against `GET /repos/{owner}/{repo}/actions/runners/{runner_id}` — documented
+  to return `status` (`"online"`/`"offline"`) and `busy` (boolean). Only `busy: true` renews.
+  The id is recorded at spawn, from the `generate-jitconfig` response, precisely because waiting
+  for a registration that may never happen would leave the leaking box unverifiable. Values
+  written before this change are bare handle strings; they parse as unverifiable and keep being
+  renewed, so a deploy does not start reclaiming the in-flight boxes it knows least about.
+
+- **⛔ Keyed on the RUNNER, never on the job.** `generate-jitconfig` binds a runner to a repo +
+  label set and to nothing else, so GitHub assigns queued jobs to idle runners by label match
+  and the job→box mapping is a permutation: *"job A is still queued"* does **not** imply *"the
+  box we started for A is idle"*. Teardown keyed on the spawn's jobId is what SIGKILLed five
+  live customer jobs on 2026-08-02. The sweep asks about one specific runner id and acts only on
+  that runner's own reported state. The regression guard for that incident is the most important
+  cell in `test/keepalive-verified-busy.test.ts`.
+
+- **Fail SAFE, not clean.** An inconclusive check — no credential, API error, rate limit,
+  unrecognised body, an undocumented `status`, a legacy binding, a cold spawn, or a tick past
+  the per-tick verification cap — **keeps the box renewed**. Leaking a slot is recoverable;
+  killing a running customer job is not. And stopping is not killing: renewing sets the deadline
+  to now + 15 m, so a box must be continuously verified-not-busy across ~14 one-minute ticks to
+  actually sleep, and a single busy observation anywhere in that span restores the full window.
+
+- **Observable.** New registered counters `keepalive_renewed_busy`, `keepalive_stopped_idle`,
+  `keepalive_renewed_unverifiable` — together the live-binding count, with `unverifiable`
+  metering exactly how much the fail-safe default is costing. Auditing `COUNTER_NAMES` while
+  adding them turned up **four** counters bumped at their seams but never registered
+  (`webhook_installation_not_allowlisted`, `rate_limit_deadletter_capped`,
+  `vcpu_ceiling_approaching`, `vcpu_ceiling_exceeded`), so `snapshot()` never 0-filled them and
+  "this never happened" looked identical to "no such signal". Now registered.
+
+- **Not fixed, deliberately: the #444 re-drive still does not destroy the box it replaces.**
+  The only identifier that record carries is the **job** id, and killing a box on a job-keyed
+  lookup is exactly the 2026-08-02 correlation. It no longer needs to: whatever that box is, the
+  sweep now judges it on its own runner's state — still busy with somebody else's job ⇒ renewed
+  (correct), genuinely idle or never registered ⇒ reclaimed by `sleepAfter` within one idle
+  window. The leak that branch left collapses from ~2 h to ~15 min with no new kill path.
+
+- Suite: **365 → 390** tests (22 files). Eight cells go red against the pre-fix
+  `src/index.ts` and green with it.
+
 ### 2026-08-03 — a retried container start no longer leaves a ghost box holding a fleet slot
 
 - **fix(cloudflare): cancel the superseded start attempt instead of abandoning it.**
