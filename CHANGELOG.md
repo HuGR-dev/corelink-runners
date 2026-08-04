@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-08-04 — the recovery net was healthy and pointed at the wrong repo
+
+- **fix(cloudflare): a `HuGR-Labs/corelink-server` job sat QUEUED for 25 minutes with every
+  `corelink` runner offline, and nothing re-drove it.** GitHub fires `workflow_job.queued`
+  exactly ONCE. That event was dropped, so the job stayed queued+labeled+runnerless with no
+  second webhook and no client-side retry. A cancel+rerun got a box **instantly** — which is
+  what proves the spawn was **lost**, not refused for capacity.
+  **The safety net for exactly this was working the whole time.** `redriveOrphanedJobs` runs
+  on the 1-minute cron, lists queued/labeled/runnerless jobs past `RECONCILE_MIN_AGE_MS`,
+  clears any stale spawn claim and re-drives them. It is opt-in on `RECONCILER_REPOS`, and
+  that allowlist held only `HuGR-Labs/corelink-runners` — so `parseReconcilerRepos` returned a
+  list the stranded repo was not in, `redriveOrphanedJobs` skipped it, and **nothing anywhere
+  went red.** A missing allowlist entry fails silently by construction; it only ever surfaces
+  as "CI is stuck again".
+  It became the wrong list on **2026-08-03**, when corelink-server moved its Rust PR-gate and
+  docs-ci lanes onto `runs-on: corelink` (server #1020/#1021/#1026). That made it the fabric's
+  **heaviest consumer** while leaving it the one first-party repo the recovery path did not
+  cover — the gap opened the day the traffic arrived.
+  **Fix:** `RECONCILER_REPOS` now covers both first-party repos.
+  **Deliberately NOT changed:** `REPO_INSTALLATION_MAP`. That map decides TENANT resolution,
+  and nobody has verified installation `150584374` covers corelink-server; guessing it would
+  mis-resolve a tenant. Unmapped ⇒ COLD re-drive, the documented fallback, and precisely the
+  level corelink-server spawns already run at through the webhook path. So this changes
+  recovery and nothing else.
+  **Regression-locked** by `test/reconciler-allowlist.test.ts`, which asserts the *shipped*
+  `wrangler.jsonc` value rather than a literal, and was proven RED two ways: dropping
+  corelink-server fails with the strand explanation, and a `HuGR-Labs corelink-server` typo
+  fails on the silent-drop check (`parseReconcilerRepos` filters on a literal `/`, so a typo
+  would have halved the allowlist with no error). 393/393 tests pass.
+
 ### 2026-08-03 — the keep-alive sweep renews only boxes GitHub says are working
 
 - **fix(cloudflare): a box that never registered stops being renewed for two hours.**

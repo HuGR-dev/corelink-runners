@@ -22,7 +22,26 @@
     // (this repo) is armed; add product repos only if they are trusted.
     // Canonical org name (matches the webhook payload's repository.full_name AND
     // the REPO_INSTALLATION_MAP key, so the reconciler's WARM re-drive lookup hits).
-    "RECONCILER_REPOS": "HuGR-Labs/corelink-runners",
+    //
+    // ⚠️ corelink-server added 2026-08-04, after it stranded a job in prod for 25
+    // minutes. GitHub fires `workflow_job.queued` exactly ONCE; that event was
+    // dropped, so the job sat queued+labeled+runnerless with every `corelink`
+    // runner offline and NOTHING re-drove it. A cancel+rerun got a box instantly,
+    // which is what proves the spawn was LOST rather than refused for capacity.
+    // The safety net for exactly this — `redriveOrphanedJobs`, on the 1-minute
+    // cron — was working the whole time and simply did not scan the repo.
+    //
+    // It became the wrong list on 2026-08-03, when corelink-server moved its Rust
+    // PR-gate and docs-ci lanes onto `runs-on: corelink` (server #1020/#1021/#1026).
+    // That made it the fabric's HEAVIEST consumer while leaving it the one
+    // first-party repo the recovery path did not cover.
+    //
+    // It is deliberately NOT added to REPO_INSTALLATION_MAP below: that map
+    // decides TENANT resolution, and nobody has verified that installation
+    // 150584374 covers corelink-server. Unmapped ⇒ COLD re-drive, which is the
+    // documented fallback and is exactly the level corelink-server spawns run at
+    // today via the webhook path — so this changes recovery, and nothing else.
+    "RECONCILER_REPOS": "HuGR-Labs/corelink-runners HuGR-Labs/corelink-server",
     // Inject the known installation_id for first-party repos (the repo webhook has
     // none) so the server-derived mint (#283) runs WARM without an App webhook.
     // dogfood: HuGR-Labs/corelink-runners → installation 150584374 → tenant
