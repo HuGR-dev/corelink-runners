@@ -156,7 +156,7 @@
       // `timeout` cap leaked clw's lock and hung the job's own `clw run`). + the
       // /runner-diag Worker sink for future registration debugging. PROVEN live
       // (runs 29879581735 + 29879653450: COLD [clw] cache miss → WARM [clw] cache hit).
-      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-runnercontainer@sha256:f7eb9941f7077e432b154ce9d80bf2e1267fdcc17ac1c5da4ca2a933babef343",
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-runnercontainer@sha256:cd920b0a23c250583411b36192716d784cec0ef86253e74050b541a548ae2a24",
       // standard-4 = 4 vCPU / 12 GiB / 20 GB disk — fits CI, clears the runner
       // disk floor (RUNNER_EPHEMERAL_STORAGE_FLOOR_MB).
       "instance_type": "standard-4",
@@ -193,7 +193,7 @@
       // NOTE: live-flip to prod is still separately gated (real toolchain snapshot +
       // owner go) — deploying the app just moves it out of the stuck "provisioning".
       "class_name": "CheckHostContainer",
-      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-checkhostcontainer@sha256:3b694bc66f57dc910b37d11ddab7a933c65559292a48efa1b8457db8a92bd1ce",
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-checkhostcontainer@sha256:4e09fc21ddc437684a921fdeedbf5c98264a7a7db77dbc76dae3a4ea75017851",
       "instance_type": "standard-4",
       // 2026-08-02: lowered 4 → 1. A cost audit found this app sitting at
       // `healthy: 4, active: 0, assigned: 0` — FOUR boxes of 4 vCPU / 12 GiB /
