@@ -342,14 +342,30 @@ RUN apt-get update -qq && \
         unzip \
         build-essential \
         pkg-config \
-        python3 && \
+        python3 \
+        python3-venv \
+        python3-yaml \
+        python3-requests && \
     rm -rf /var/lib/apt/lists/* && \
     apt-get clean
-# python3 (stdlib, no pip): the corelink-server CI gates are overwhelmingly
-# python3 scripts (validate_specs / validate_okf / validate_secrets_matrix /
-# every validate_*), which exit 127 ("python3: command not found") on a box
-# without it. This single package is the dominant unlock for migrating those
-# ~48 hosted gates onto `runs-on: corelink`. Docker is deliberately NOT added:
+# python3 (stdlib): the corelink-server CI gates are overwhelmingly python3
+# scripts (validate_specs / validate_okf / validate_secrets_matrix / every
+# validate_*), which exit 127 ("python3: command not found") on a box without
+# it. This single package is the dominant unlock for migrating those ~48 hosted
+# gates onto `runs-on: corelink`.
+#
+# python3-venv + python3-yaml + python3-requests: the second increment. Ubuntu
+# 24.04 is PEP-668 "externally managed", so a workflow's global `pip install`
+# fails ("externally-managed-environment") — the fix is NOT to add global pip
+# but to (a) ship `python3-venv` so a gate that needs arbitrary deps can build
+# an isolated venv (ensurepip gives it pip), and (b) preinstall, as apt system
+# packages, the two libs the currently-armed hosted crons import at runtime:
+#   - PyYAML  → okf_nightly (`validate_okf.py`), so it no longer needs a
+#     runtime `python3 -m venv && pip install pyyaml`.
+#   - requests → billing-reconcile-daily, so it no longer needs a runtime
+#     global `pip install requests` (which PEP-668 would reject anyway).
+# This keeps the ephemeral runner egress-free for those gates. `gh` (needed only
+# by the weekly compliance-weekly cron) is a later increment. Docker is deliberately NOT added:
 # CF Containers run each lease as a Firecracker microVM with no nested-daemon /
 # privileged path (DinD is infeasible on the substrate), and only 2 gates use
 # docker (both ubuntu-latest image builds, unsuited to ephemeral migration).
