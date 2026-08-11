@@ -317,6 +317,8 @@ LABEL org.opencontainers.image.title="CoreLink ephemeral GitHub Actions runner" 
       corelink.runner.version="2.335.1" \
       corelink.rust.toolchain="1.96.0,1.91.1" \
       corelink.python3="present" \
+      corelink.python3.jsonschema="present" \
+      corelink.gh.version="2.97.0" \
       corelink.clw.version="0.1.4" \
       corelink.sccache.version="0.17.0" \
       corelink.node.version="22.23.2" \
@@ -345,7 +347,8 @@ RUN apt-get update -qq && \
         python3 \
         python3-venv \
         python3-yaml \
-        python3-requests && \
+        python3-requests \
+        python3-jsonschema && \
     rm -rf /var/lib/apt/lists/* && \
     apt-get clean
 # python3 (stdlib): the corelink-server CI gates are overwhelmingly python3
@@ -364,11 +367,39 @@ RUN apt-get update -qq && \
 #     runtime `python3 -m venv && pip install pyyaml`.
 #   - requests → billing-reconcile-daily, so it no longer needs a runtime
 #     global `pip install requests` (which PEP-668 would reject anyway).
-# This keeps the ephemeral runner egress-free for those gates. `gh` (needed only
-# by the weekly compliance-weekly cron) is a later increment. Docker is deliberately NOT added:
+# This keeps the ephemeral runner egress-free for those gates.
+#
+# python3-jsonschema: the THIRD increment. `scripts/validate_specs.py` (the 463/0
+# spec gate, imported transitively by pentest-findings-sync's validate step) does
+# a hard `import jsonschema` + sys.exit if it is absent — so without this package
+# every validate_specs-based gate exits non-zero on an ephemeral box even though
+# PyYAML is already present. apt's python3-jsonschema is used (not a venv) because
+# validate_specs runs as a bare `python3 scripts/…` with no venv wrapper.
+#
+# `gh` (GitHub CLI) is ALSO baked in this third increment — see the verified
+# download below. It is the unlock for the workflows that shell out to
+# `gh pr comment` / `gh api` (lockfile-diff, api-reference-sync) and the weekly
+# compliance-weekly cron. Docker is deliberately NOT added:
 # CF Containers run each lease as a Firecracker microVM with no nested-daemon /
 # privileged path (DinD is infeasible on the substrate), and only 2 gates use
 # docker (both ubuntu-latest image builds, unsuited to ephemeral migration).
+
+# ── GitHub CLI (`gh`) — verified pinned download (X4 supply-chain floor) ───────
+# Same discipline as the node / pnpm / clw / runner / sccache downloads: a
+# VERSIONED URL and a sha256 read from the release's OWN published
+# `gh_2.97.0_checksums.txt` (line `…  gh_2.97.0_linux_amd64.tar.gz`) — NEVER
+# fabricated. gh is a single static Go binary; drop it on PATH, discard the
+# tarball's man/completion trees. Runs as root here, before the USER runner drop.
+ARG GH_VERSION=2.97.0
+ARG GH_SHA256=a2c9b8497e1f85b1ad0dfcb78b5a622e098801b8e461e459e88e1ee12f018112
+RUN curl -fsSL \
+      "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" \
+      -o /tmp/gh.tar.gz && \
+    echo "${GH_SHA256}  /tmp/gh.tar.gz" | sha256sum -c - && \
+    tar -xzf /tmp/gh.tar.gz -C /tmp && \
+    install -m 0755 "/tmp/gh_${GH_VERSION}_linux_amd64/bin/gh" /usr/local/bin/gh && \
+    rm -rf /tmp/gh.tar.gz "/tmp/gh_${GH_VERSION}_linux_amd64" && \
+    gh --version
 
 # ── Non-root runner user (App-layer resource caps — Track-C C2, part 1/2) ──────
 # The runner agent must not run as root; the dedicated user also owns the
