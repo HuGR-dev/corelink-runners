@@ -180,8 +180,12 @@
       // Rust-1.91.1 increment 1 (@1422d82c). Unblocks the pip/venv/PyYAML/requests
       // hosted crons (okf_nightly, billing-reconcile-daily) for `runs-on: corelink`.
       // Verified in the built image: pyyaml 6.0.1, requests 2.31.0, venv+ensurepip.
-      // `gh` (compliance-weekly) is a later increment.
-      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-runnercontainer@sha256:9424057f1e8c97ee64acc714d9414b149818c52b6c455d592c7dbb0b3e4ead06",
+      // 2026-08-11 increment 3 (local `wrangler containers build --push`, tag
+      // `inc3`): adds `gh` 2.97.0 (verified pinned download) + python3-jsonschema
+      // on top of increment 2. Unblocks the `gh pr comment`/`gh api` gates
+      // (lockfile-diff, api-reference-sync), compliance-weekly, and every
+      // validate_specs.py gate (hard `import jsonschema`) for `runs-on: corelink`.
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-runnercontainer@sha256:f6d787b6f4032668fdb5590c5eaaf7da3cb2c869fbc2a89f9ae6d0088ffee6f5",
       // standard-4 = 4 vCPU / 12 GiB / 20 GB disk — fits CI, clears the runner
       // disk floor (RUNNER_EPHEMERAL_STORAGE_FLOOR_MB).
       "instance_type": "standard-4",
