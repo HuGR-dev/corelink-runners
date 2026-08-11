@@ -27,7 +27,7 @@ config is the only per-job credential, and it is one-time-use.
 |---|---|---|
 | Base OS | ubuntu:24.04 | Digest-pinned (`@sha256:…`) — see below |
 | GitHub Actions runner | v2.335.1 | SHA-256 verified at download time; must track a currently-supported release (GitHub deprecates old runners) |
-| Rust toolchain | 1.96.0 | Matches `rust-toolchain.toml` |
+| Rust toolchain | 1.96.0 (default) + 1.91.1 | 1.96.0 = this repo's own dogfood CI (its `rust-toolchain.toml`); 1.91.1 baked alongside for corelink-server (ADR-0015 pin) so its `cargo` resolves warm with zero per-spawn download. Both carry rustfmt+clippy; 1.91.1 also carries rust-src + wasm32/musl targets |
 | rustfmt | (toolchain component) | Gate: `cargo fmt --check` |
 | clippy | (toolchain component) | Gate: `cargo clippy -D warnings` |
 | cargo-deny | 0.19.8 | Matches CI (`taiki-e/install-action`) |
@@ -37,6 +37,7 @@ config is the only per-job credential, and it is one-time-use.
 | npm / npx / corepack | (bundled with Node) | On `PATH` via `/usr/local/bin` symlinks |
 | pnpm | 10.32.1 | npm-tarball form, SHA-256 verified; must match corelink-server's root `packageManager` exactly |
 | git | distro package | Required by `actions/checkout` |
+| python3 | distro package (stdlib, no pip) | Required by corelink-server's ~48 `validate_*` / OKF / secrets-matrix gates (stdlib scripts) — absent → `exit 127`. This is the dominant unlock for migrating those gates to `runs-on: corelink` |
 
 The Rust toolchain is included so that this repo's own CI gate (the dogfood use
 case) runs warm on the first job without downloading the toolchain.
