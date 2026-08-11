@@ -175,7 +175,7 @@
       // `timeout` cap leaked clw's lock and hung the job's own `clw run`). + the
       // /runner-diag Worker sink for future registration debugging. PROVEN live
       // (runs 29879581735 + 29879653450: COLD [clw] cache miss → WARM [clw] cache hit).
-      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-runnercontainer@sha256:cd920b0a23c250583411b36192716d784cec0ef86253e74050b541a548ae2a24",
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-runnercontainer@sha256:1422d82cc5785dec9054299757226147d790a210e1dabf7c447358a50f9d944f",
       // standard-4 = 4 vCPU / 12 GiB / 20 GB disk — fits CI, clears the runner
       // disk floor (RUNNER_EPHEMERAL_STORAGE_FLOOR_MB).
       "instance_type": "standard-4",
