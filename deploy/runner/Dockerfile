@@ -315,7 +315,8 @@ LABEL org.opencontainers.image.title="CoreLink ephemeral GitHub Actions runner" 
       org.opencontainers.image.description="One-shot ephemeral runner for the CoreLink fabric (ADR-0007 Stage A)" \
       org.opencontainers.image.vendor="HuGR / CoreLink" \
       corelink.runner.version="2.335.1" \
-      corelink.rust.toolchain="1.96.0" \
+      corelink.rust.toolchain="1.96.0,1.91.1" \
+      corelink.python3="present" \
       corelink.clw.version="0.1.4" \
       corelink.sccache.version="0.17.0" \
       corelink.node.version="22.23.2" \
@@ -340,9 +341,34 @@ RUN apt-get update -qq && \
         jq \
         unzip \
         build-essential \
-        pkg-config && \
+        pkg-config \
+        python3 \
+        python3-venv \
+        python3-yaml \
+        python3-requests && \
     rm -rf /var/lib/apt/lists/* && \
     apt-get clean
+# python3 (stdlib): the corelink-server CI gates are overwhelmingly python3
+# scripts (validate_specs / validate_okf / validate_secrets_matrix / every
+# validate_*), which exit 127 ("python3: command not found") on a box without
+# it. This single package is the dominant unlock for migrating those ~48 hosted
+# gates onto `runs-on: corelink`.
+#
+# python3-venv + python3-yaml + python3-requests: the second increment. Ubuntu
+# 24.04 is PEP-668 "externally managed", so a workflow's global `pip install`
+# fails ("externally-managed-environment") — the fix is NOT to add global pip
+# but to (a) ship `python3-venv` so a gate that needs arbitrary deps can build
+# an isolated venv (ensurepip gives it pip), and (b) preinstall, as apt system
+# packages, the two libs the currently-armed hosted crons import at runtime:
+#   - PyYAML  → okf_nightly (`validate_okf.py`), so it no longer needs a
+#     runtime `python3 -m venv && pip install pyyaml`.
+#   - requests → billing-reconcile-daily, so it no longer needs a runtime
+#     global `pip install requests` (which PEP-668 would reject anyway).
+# This keeps the ephemeral runner egress-free for those gates. `gh` (needed only
+# by the weekly compliance-weekly cron) is a later increment. Docker is deliberately NOT added:
+# CF Containers run each lease as a Firecracker microVM with no nested-daemon /
+# privileged path (DinD is infeasible on the substrate), and only 2 gates use
+# docker (both ubuntu-latest image builds, unsuited to ephemeral migration).
 
 # ── Non-root runner user (App-layer resource caps — Track-C C2, part 1/2) ──────
 # The runner agent must not run as root; the dedicated user also owns the
@@ -444,7 +470,27 @@ RUN curl -fsSL "https://static.rust-lang.org/rustup/archive/${RUSTUP_INIT_VERSIO
         --component clippy \
         --no-modify-path && \
     rm -f /tmp/rustup-init && \
-    rustup show
+    rustup show && \
+    rustup toolchain install 1.91.1 \
+        --profile minimal \
+        --component rustfmt \
+        --component clippy \
+        --component rust-src && \
+    rustup target add --toolchain 1.91.1 \
+        wasm32-unknown-unknown \
+        x86_64-unknown-linux-musl
+# Two toolchains ON PURPOSE: 1.96.0 stays the DEFAULT (this repo's own CI /
+# rust-toolchain.toml wants it), and 1.91.1 is baked ALONGSIDE it because the
+# corelink-server workspace pins 1.91.1 (ADR-0015, rust-toolchain.toml). The
+# rustup shim auto-honours a checkout's rust-toolchain.toml, so `cargo` inside a
+# corelink-server checkout resolves to the baked 1.91.1 with ZERO per-spawn
+# download (the per-run tax runner-probe.yml's rust-detail job measures). It
+# lands at /home/runner/.rustup/toolchains/1.91.1-x86_64-unknown-linux-gnu,
+# which also satisfies scripts/ci-use-host-toolchain.sh when invoked with
+# HOST_TRIPLE=x86_64-unknown-linux-gnu. rust-src + the wasm32/musl targets match
+# what rust-toolchain.toml requires so target-add is a no-op at CI time.
+# Do NOT swap the default to 1.91.1 — that would make this repo's lanes
+# auto-download 1.96.0 on every spawn.
 
 # cargo-deny and cargo-audit — versions match .github/workflows/ci.yml
 # (taiki-e/install-action pins: cargo-audit@0.22.2, cargo-deny@0.19.8)
