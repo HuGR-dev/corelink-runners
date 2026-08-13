@@ -250,6 +250,22 @@ this path today (MEMORY: rota-a).
   match) so GitHub never assigns a job the runner can't satisfy.
 - *Full cache-warm `[clw] cache hit` smoke* is **⚪ X4-external** — needs a real
   CoreLink PAT or a real hugit dispatch (MEMORY: rota-a correction-3).
+- *Baked toolchain menu (F4.1)* — 🟢 LIVE-proven. ONE `runs-on: corelink` image
+  already serves the common toolchain menu, verified end-to-end on a live lease
+  (run 31743741259): **Rust 1.96** (rustc/cargo/clippy/rustfmt + sccache),
+  **Node 22.23 + pnpm 10.32**, **Python 3.12 + venv** (PEP-668 externally-managed
+  by design — the interface is `python3 -m venv .venv && .venv/bin/pip install …`,
+  NOT a global `pip`; PyYAML/requests/jsonschema preinstalled as apt), **Docker**
+  (nerdctl 2.3.5, the F2 drop-in), **BuildKit** (`buildctl`), **gh** 2.97.
+  Architecture decision — the "managed menu" is ONE universal image, not a
+  per-language image fleet: Cloudflare Containers bind exactly one image per
+  Durable-Object class (no per-instance image override — only env/entrypoint), so
+  N images = N DO classes = N idle-capacity pools (idle-burn is the dominant COGS).
+  A dedicated lean/heavy image class is split out only when a specific customer's
+  boot-time or a toolchain conflict justifies its own pool — not built
+  speculatively. **F4.2 BYO image** (`container:`/`image:`) breaks the X4
+  supply-chain floor + needs a per-tenant `allowed_images` gate → security-review
+  gated, design-doc-first (not yet built).
 **Feature(s):** F-2.1, F-5.8, F-8.1 — Direct on-ramp (ADR-0007) · unmodified-workflow shim · label family matcher.
 **Reality:** 🟢 LIVE-proven (dogfood) / ⚪ full cache-hit smoke.
 
