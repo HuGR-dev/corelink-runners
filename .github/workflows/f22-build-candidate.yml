@@ -1,0 +1,59 @@
+# F2.2 — build the runner image with nerdctl+containerd baked + the docker shim,
+# DAEMONLESS on the corelink fleet (dogfood), and push a candidate tag. Does NOT
+# roll the fleet — produces a digest to validate + repin manually (same flow as
+# WP-F1a). buildkit is baked in the CURRENT fleet image, so no fetch here.
+name: f22-build-candidate
+
+on:
+  push:
+    branches: [feat/f22-nerdctl-docker-dropin]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  CLOUDFLARE_ACCOUNT_ID: 6a1fc1c626fc2628823e60b9db01f5cd
+
+jobs:
+  build:
+    name: buildctl-build the nerdctl runner image + push candidate tag
+    runs-on: corelink
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0  # v6.0.3
+
+      - name: Start buildkitd (baked)
+        run: |
+          set -uo pipefail
+          ADDR="unix://$RUNNER_TEMP/bk.sock"
+          echo "BUILDKIT_ADDR=$ADDR" >> "$GITHUB_ENV"
+          sudo sh -c "buildkitd --addr '$ADDR' --oci-worker-snapshotter=overlayfs --root '$RUNNER_TEMP/bkroot' >'$RUNNER_TEMP/bk.log' 2>&1 &"
+          for i in $(seq 1 40); do sudo buildctl --addr "$ADDR" debug workers >/dev/null 2>&1 && { echo "up ${i}s"; break; }; sleep 1; done
+          sudo buildctl --addr "$ADDR" debug workers >/dev/null 2>&1 || { echo "::error::buildkitd down"; sudo sed -n '1,60p' "$RUNNER_TEMP/bk.log"; exit 1; }
+
+      - name: Build deploy/runner (nerdctl-baked) + push candidate tag
+        id: build
+        run: |
+          set -uo pipefail
+          IMG="corelink-spawn-worker-runnercontainer"
+          TAG="f22-candidate-$(git rev-parse --short HEAD)"
+          REF="registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/${IMG}:${TAG}"
+          CRED="$(npx -y wrangler@4.111.0 containers registries credentials registry.cloudflare.com --push --expiration-minutes 60 --json 2>/dev/null)"
+          U=$(echo "$CRED" | jq -r '.username'); P=$(echo "$CRED" | jq -r '.password')
+          [ -n "$U" ] && [ -n "$P" ] || { echo "::error::cred mint failed"; exit 1; }
+          AUTH=$(printf '%s:%s' "$U" "$P" | base64 | tr -d '\n')
+          CFG="$RUNNER_TEMP/dockercfg"; mkdir -p "$CFG"
+          printf '{"auths":{"registry.cloudflare.com":{"auth":"%s"}}}' "$AUTH" > "$CFG/config.json"
+          echo "Building $REF (context=deploy/runner) …"
+          sudo DOCKER_CONFIG="$CFG" buildctl --addr "$BUILDKIT_ADDR" build \
+            --frontend dockerfile.v0 \
+            --local context=deploy/runner --local dockerfile=deploy/runner \
+            --output type=image,name="$REF",push=true 2>&1 | tee "$RUNNER_TEMP/build.log" | tail -80
+          DIGEST=$(grep -oE 'exporting manifest sha256:[0-9a-f]{64}' "$RUNNER_TEMP/build.log" | grep -oE 'sha256:[0-9a-f]{64}' | tail -1)
+          SIZE=$(grep -oE 'pushing layers .*done' "$RUNNER_TEMP/build.log" | tail -1 || true)
+          echo "════ CANDIDATE ════"
+          echo "  tag ref: $REF"
+          echo "  digest:  ${DIGEST:-<none>}"
+          [ -n "$DIGEST" ] || { echo "::error::no digest exported — build did not push"; exit 1; }

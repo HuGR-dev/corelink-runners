@@ -407,34 +407,36 @@ RUN curl -fsSL \
     rm -rf /tmp/gh.tar.gz "/tmp/gh_${GH_VERSION}_linux_amd64" && \
     gh --version
 
-# ── BuildKit — daemonless container image builds (S1.6.1 F-4.7, X4 floor) ──────
-# CoreLink runners build images WITHOUT a docker daemon: `buildkitd` runs per-job
-# inside the lease (rootful via the runner's passwordless sudo, or rootless) and
-# `buildctl` drives the build + a direct registry push. This is what lets a
-# `docker build`-class job work on `runs-on: corelink`, and lets our own prod
-# image build off GitHub-hosted runners. BuildKit is NOT DinD (no privileged
-# nested daemon); the per-lease Firecracker microVM is the isolation boundary.
+# ── nerdctl-full — container toolchain: `docker build` drop-in + daemonless build
+# (S1.6.1 F-4.7, X4 floor) ─────────────────────────────────────────────────────
+# CoreLink runners run container workloads WITHOUT a customer-facing docker daemon
+# to manage. Two audiences, ONE version-matched toolchain (the nerdctl project's
+# `nerdctl-full` bundle: containerd + buildkit (buildkitd/buildctl) + nerdctl +
+# runc + CNI, all tested together):
+#   1. CUSTOMERS get a literal `docker` drop-in — the `docker-shim.sh` below is
+#      installed as `docker`, exec'ing `nerdctl` (containerd image store) so an
+#      UNMODIFIED `docker build … && docker push …` two-step just works on
+#      `runs-on: corelink`. The shim lazily starts containerd+buildkitd on first
+#      use, so pure non-docker jobs pay nothing.
+#   2. OUR OWN prod image build stays daemonless via `buildctl` directly.
+# This is NOT DinD (no privileged nested daemon a customer manages); the per-lease
+# Firecracker microVM is the isolation boundary, so rootful is safe by construction.
 #
-# Pinned like every other download (X4 floor): a VERSIONED URL + a sha256 computed
-# from the real v0.32.2 linux-amd64 release tarball (92,882,168 bytes) — NEVER
-# fabricated. We install ONLY buildkitd, buildctl, the CNI plugins (build-step
-# networking), and the bundled runc — installed as `runc`, which buildkitd's OCI
-# worker looks for on PATH (the tarball ships it as `buildkit-runc`). The
-# `buildkit-qemu-*` cross-arch emulators in the tarball are deliberately DROPPED:
-# we build native amd64, and keeping them would add ~100 MB for nothing.
-ARG BUILDKIT_VERSION=v0.32.2
-ARG BUILDKIT_SHA256=2975d0f651ad96ba8b80b9992ae1f9a964f4408569af5b6dc36544165c3926af
+# Superseded the standalone BuildKit v0.32.2 bake (WP-F1a): nerdctl-full ships a
+# version-matched buildkit, so mixing two buildkit versions is avoided. Pinned like
+# every other download (X4 floor): a VERSIONED URL + the real sha256 from the
+# containerd/nerdctl v2.3.5 release SHA256SUMS — NEVER fabricated.
+ARG NERDCTL_VERSION=2.3.5
+ARG NERDCTL_FULL_SHA256=b697295c623639734aaab737523c808fd3cc8d3046039fd94fff1744e4c317aa
 RUN curl -fsSL \
-      "https://github.com/moby/buildkit/releases/download/${BUILDKIT_VERSION}/buildkit-${BUILDKIT_VERSION}.linux-amd64.tar.gz" \
-      -o /tmp/buildkit.tar.gz && \
-    echo "${BUILDKIT_SHA256}  /tmp/buildkit.tar.gz" | sha256sum -c - && \
-    tar -xzf /tmp/buildkit.tar.gz -C /tmp && \
-    install -m 0755 /tmp/bin/buildkitd     /usr/local/bin/buildkitd && \
-    install -m 0755 /tmp/bin/buildctl      /usr/local/bin/buildctl && \
-    install -m 0755 /tmp/bin/buildkit-runc /usr/local/bin/runc && \
-    for p in /tmp/bin/buildkit-cni-*; do install -m 0755 "$p" /usr/local/bin/; done && \
-    rm -rf /tmp/buildkit.tar.gz /tmp/bin && \
-    buildkitd --version && buildctl --version && runc --version
+      "https://github.com/containerd/nerdctl/releases/download/v${NERDCTL_VERSION}/nerdctl-full-${NERDCTL_VERSION}-linux-amd64.tar.gz" \
+      -o /tmp/nerdctl-full.tar.gz && \
+    echo "${NERDCTL_FULL_SHA256}  /tmp/nerdctl-full.tar.gz" | sha256sum -c - && \
+    tar -C /usr/local -xzf /tmp/nerdctl-full.tar.gz && \
+    rm -f /tmp/nerdctl-full.tar.gz && \
+    nerdctl --version && containerd --version && buildkitd --version && buildctl --version && runc --version
+COPY docker-shim.sh /usr/local/bin/docker
+RUN chmod 0755 /usr/local/bin/docker && docker --version
 
 # ── Non-root runner user (App-layer resource caps — Track-C C2, part 1/2) ──────
 # The runner agent must not run as root; the dedicated user also owns the
