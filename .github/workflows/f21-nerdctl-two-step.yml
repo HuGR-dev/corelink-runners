@@ -1,0 +1,87 @@
+# F2.1 — prove the DECISIVE drop-in property: two SEPARATE `docker` invocations,
+# `docker build -t X .` then `docker push X`, work on a corelink lease via
+# nerdctl+containerd (docker→nerdctl symlink). This is exactly what the bash
+# docker→buildctl shim CANNOT do (buildctl has no local image store to carry the
+# image between two processes), and is why F2 picks nerdctl. Throwaway probe: it
+# FETCHES nerdctl-full here (not yet baked); the bake is F2.2. Zero bleed — the
+# scratch registry tag is deleted at the end.
+name: f21-nerdctl-two-step
+
+on:
+  push:
+    branches: [proof/f21-nerdctl-two-step]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  CLOUDFLARE_ACCOUNT_ID: 6a1fc1c626fc2628823e60b9db01f5cd
+
+jobs:
+  prove:
+    name: docker build then docker push (separate processes) via nerdctl
+    runs-on: corelink
+    timeout-minutes: 30
+    steps:
+      - name: Fetch nerdctl-full v2.3.5 (pinned + sha256) → docker shim
+        run: |
+          set -euo pipefail
+          VER=2.3.5
+          SHA=b697295c623639734aaab737523c808fd3cc8d3046039fd94fff1744e4c317aa
+          curl -fsSL -o /tmp/nf.tgz "https://github.com/containerd/nerdctl/releases/download/v${VER}/nerdctl-full-${VER}-linux-amd64.tar.gz"
+          echo "${SHA}  /tmp/nf.tgz" | sha256sum -c -
+          # nerdctl-full lays out bin/ libexec/ etc under a prefix; install to /usr/local
+          sudo tar -C /usr/local -xzf /tmp/nf.tgz
+          sudo ln -sf /usr/local/bin/nerdctl /usr/local/bin/docker
+          docker --version && containerd --version && buildkitd --version
+
+      - name: Start containerd + buildkitd (rootful; microVM is the boundary)
+        run: |
+          set -uo pipefail
+          sudo sh -c 'containerd >/tmp/containerd.log 2>&1 &'
+          sudo sh -c 'buildkitd --addr unix:///run/buildkit/buildkitd.sock >/tmp/buildkitd.log 2>&1 &'
+          # wait for both sockets
+          for i in $(seq 1 40); do
+            sudo test -S /run/containerd/containerd.sock && sudo test -S /run/buildkit/buildkitd.sock && { echo "up ${i}s"; break; }
+            sleep 1
+          done
+          sudo test -S /run/containerd/containerd.sock || { echo "::error::containerd down"; sudo tail -40 /tmp/containerd.log; exit 1; }
+          sudo test -S /run/buildkit/buildkitd.sock   || { echo "::error::buildkitd down";  sudo tail -40 /tmp/buildkitd.log;  exit 1; }
+          sudo docker info >/dev/null 2>&1 && echo "nerdctl↔containerd OK"
+
+      - name: Registry cred (wrangler, push+pull) → docker config
+        run: |
+          set -euo pipefail
+          CRED="$(npx -y wrangler@4.111.0 containers registries credentials registry.cloudflare.com --push --pull --expiration-minutes 25 --json 2>/dev/null)"
+          U=$(echo "$CRED" | jq -r '.username'); P=$(echo "$CRED" | jq -r '.password')
+          [ -n "$U" ] && [ -n "$P" ] || { echo "::error::cred mint failed"; exit 1; }
+          AUTH=$(printf '%s:%s' "$U" "$P" | base64 | tr -d '\n')
+          sudo mkdir -p /root/.docker
+          printf '{"auths":{"registry.cloudflare.com":{"auth":"%s"}}}' "$AUTH" | sudo tee /root/.docker/config.json >/dev/null
+          echo "F21_REF=registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/f21-nerdctl-proof:run-${GITHUB_RUN_ID}" >> "$GITHUB_ENV"
+
+      - name: The proof — PROCESS 1 `docker build`, PROCESS 2 `docker push`
+        run: |
+          set -euo pipefail
+          B="$RUNNER_TEMP/ctx"; mkdir -p "$B"
+          cat > "$B/Dockerfile" <<'EOF'
+          FROM ubuntu:24.04
+          RUN echo "built-by-nerdctl-on-corelink" > /marker.txt
+          EOF
+          echo "── PROCESS 1: docker build (image must persist in containerd store) ──"
+          sudo docker build -t "$F21_REF" "$B"
+          echo "── (separate process) docker images shows it survived the build process ──"
+          sudo docker images | grep -E 'f21-nerdctl-proof' || { echo "::error::image not in containerd store after build"; exit 1; }
+          echo "── PROCESS 2: docker push (a DISTINCT invocation) ──"
+          sudo docker push "$F21_REF"
+          echo "✓ two-step build→push succeeded across separate processes (nerdctl+containerd image store)"
+
+      - name: Prove the pushed digest exists, then delete it (zero bleed)
+        if: always()
+        run: |
+          set +e
+          TAG="f21-nerdctl-proof:run-${GITHUB_RUN_ID}"
+          echo "deleting $TAG to confirm it landed + leave no bleed"
+          yes | npx -y wrangler@4.111.0 containers images delete "$TAG" 2>&1 | tail -8
