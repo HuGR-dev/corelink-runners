@@ -6,6 +6,8 @@
 name: f22-prove-docker-dropin
 
 on:
+  push:
+    branches: [proof/f22-prove-dropin]
   workflow_dispatch: {}
 
 permissions:
