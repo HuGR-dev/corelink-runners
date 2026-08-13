@@ -303,7 +303,7 @@ test('JOURNEY · docker-build workload — the microVM box is HELD (daemon is im
       return check(a.status === 200 && a.state === 'held', `lease ${a.leaseId} HELD on the @sha256-pinned image`, {
         status: a.status,
         leaseId: a.leaseId,
-        gap: 'the fleet image now bakes BuildKit (buildkitd+buildctl, X4-pinned) for daemonless image builds + push to the CF managed registry (proven in a live lease, run 31664445243) — an image-layer capability, not a /v1 verb; a literal `docker build`-CLI drop-in (docker→buildkit shim) is the next increment. A job shelling a tool the image lacks fails LOUD (command not found, red check), never a silent pass. The microVM boundary makes even a privileged inner daemon safe by construction',
+        gap: 'the fleet image bakes the nerdctl-full toolchain (containerd + buildkit + nerdctl + runc + CNI, X4-pinned) and installs `docker` as a docker→sudo-nerdctl shim (lazy-starts the daemons on first use): an UNMODIFIED customer `docker build … && docker push …` two-step works on the rolled fleet image (proven bare + non-root in a live lease, run 31736165630) — the literal drop-in, not just an image-layer capability. Our own prod build stays daemonless via buildctl directly. A job shelling a tool the image lacks still fails LOUD (command not found, red check), never a silent pass. The microVM boundary makes the rootful inner daemon safe by construction',
       });
     })
     .onCleanup(async (ctx) => { if (ctx.lease) await closeLease(pat, ctx.lease); })
