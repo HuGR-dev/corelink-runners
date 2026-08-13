@@ -11,19 +11,22 @@ permissions:
 
 jobs:
   gates:
-    # The correctness gate (fmt/clippy/test/deny/audit) runs on GitHub-HOSTED
-    # `ubuntu-latest`, NOT a self-hosted runner. Rationale (2026-07-19): the
-    # self-hosted dogfood/builder-Mac runner is a single point of failure — a
-    # GitHub Actions pipeline-service brownout reset its long-poll and inflated
-    # its reconnect backoff to ~3h, so the gate queued indefinitely while
-    # GitHub-hosted jobs on sibling repos ran fine. A pure correctness gate has
-    # no reason to run on the product fleet, so it moves to the managed runner:
-    # zero self-hosted infra to babysit, GitHub-managed reliability. The gate's
-    # whole toolchain is set up in-job by pinned actions below (rust-toolchain +
-    # rust-cache + install-action), so it runs identically on a clean box.
-    # (The dogfood/moat/`runs-on: corelink` PRODUCT-label workflows deliberately
-    # STAY on the ephemeral fleet — they exist to prove the product itself.)
-    runs-on: ubuntu-latest
+    # The correctness gate (fmt/clippy/test/deny/audit) runs on the self-hosted
+    # `corelink` ephemeral fleet — $0 GitHub billing (zero-hosted mandate).
+    #
+    # Supersedes the 2026-07-19 "keep it on ubuntu-latest" rationale, which was
+    # about the self-hosted *builder-Mac* being a single point of failure (a
+    # pipeline-service brownout inflated its reconnect backoff to ~3h). That risk
+    # does NOT apply to `runs-on: corelink`: this is the ephemeral Firecracker
+    # FLEET (many boxes, the product itself), not the one Mac — and it serves
+    # these jobs live. It also sidesteps the shared-home `cargo install` race
+    # (os-error-2): each lease is a fresh microVM with its own $HOME/$CARGO_HOME,
+    # so the in-job setup actions below install with no cross-job contention. The
+    # gate's whole toolchain is still set up in-job by the pinned actions
+    # (rust-toolchain + rust-cache + install-action), so it runs identically on a
+    # clean lease. Trigger: the GitHub-hosted lanes were also billing-blocked
+    # ("account payments have failed"), which self-hosted runners are exempt from.
+    runs-on: corelink
     steps:
       - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0  # v6.0.3 (Node 24; v4 is Node 20, forced off runners 2026-06-16)
         with:
