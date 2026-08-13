@@ -67,10 +67,12 @@ jobs:
           sudo sh -c "buildkitd --addr '$A' --oci-worker-snapshotter=overlayfs --root '$RUNNER_TEMP/bkA' >'$RUNNER_TEMP/bkA.log' 2>&1 &"
           for i in $(seq 1 40); do sudo buildctl --addr "$A" debug workers >/dev/null 2>&1 && break; sleep 1; done
           echo "── build #1 (cold, expect the RUN to EXECUTE) ──"
+          # No --output: buildctl still solves (runs the steps) and, with
+          # --export-cache, writes the cache. (`cacheonly` is a buildx exporter, not
+          # a buildctl one.)
           sudo DOCKER_CONFIG="$F03_DOCKERCFG" buildctl --addr "$A" build \
             --frontend dockerfile.v0 --local context="$F03_CTX" --local dockerfile="$F03_CTX" \
-            --export-cache type=registry,ref="$F03_CACHEREF",mode=max \
-            --output type=cacheonly 2>&1 | tee "$RUNNER_TEMP/b1.log" | tail -30
+            --export-cache type=registry,ref="$F03_CACHEREF",mode=max 2>&1 | tee "$RUNNER_TEMP/b1.log" | tail -30
           grep -qE '#[0-9]+ DONE' "$RUNNER_TEMP/b1.log" || { echo "::error::build #1 did not complete"; exit 1; }
 
       - name: Build #2 (FRESH buildkit) — IMPORT the remote cache, assert HIT
@@ -84,8 +86,7 @@ jobs:
           echo "── build #2 (fresh daemon + import-cache, expect CACHED) ──"
           sudo DOCKER_CONFIG="$F03_DOCKERCFG" buildctl --addr "$Bd" build \
             --frontend dockerfile.v0 --local context="$F03_CTX" --local dockerfile="$F03_CTX" \
-            --import-cache type=registry,ref="$F03_CACHEREF" \
-            --output type=cacheonly 2>&1 | tee "$RUNNER_TEMP/b2.log" | tail -30
+            --import-cache type=registry,ref="$F03_CACHEREF" 2>&1 | tee "$RUNNER_TEMP/b2.log" | tail -30
           if grep -qE 'CACHED' "$RUNNER_TEMP/b2.log"; then
             echo "✓ F0.3 PROVEN: fresh buildkit imported the remote cache and HIT it (CACHED) — remote-cache round-trip works on an R2-backed store we control."
           else
