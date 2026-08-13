@@ -810,7 +810,7 @@ pass (cli.md).
 > monorepo, artifacts, and they contain typos. This theme is the negative /
 > misconfig matrix the runner must degrade against **loudly, never silently**.
 
-### S1.6.1 — A job needs a Docker daemon / builds a container 🔵 owner-gated (image capability)
+### S1.6.1 — A job needs a Docker daemon / builds a container 🟢 LIVE-proven (docker drop-in)
 **As a** CI engineer, **I want** `docker build` / a `services:`-less container build to work on a corelink runner, **so that** container-producing pipelines migrate without a rewrite.
 **Flow:**
 1. A step runs `docker build .`
@@ -819,15 +819,16 @@ pass (cli.md).
 4. the image is pushed to the customer's registry via the job's own credentials.
 
 **Expected:** Docker-in-microVM is an **image-capability** decision, not a fabric
-one: the box is a fresh Firecracker-class microVM (ADR-0009), so a nested daemon
-is a supported *image build* (rootless buildkit / dind), pinned as `standard-4`
-today. The default fleet image **bakes BuildKit** (`buildkitd`+`buildctl`,
-X4-pinned in `deploy/runner/Dockerfile`) — so once that image is rebuilt and the
-fleet is repinned to it, daemonless container image builds work with no rewrite
-(see the Reality line for the current roll state). A literal `docker build` CLI
-drop-in (a `docker`→buildkit shim) is the next step. A job that shells a tool the
-image lacks still fails **loud** (`command not found`, non-zero exit, red check),
-never a silent pass.
+one: the box is a fresh Firecracker-class microVM (ADR-0009), so a rootful inner
+daemon is safe by construction (hypervisor isolation), pinned as `standard-4`
+today. The default fleet image bakes the **nerdctl-full** toolchain (containerd +
+buildkit + nerdctl + runc + CNI, X4-pinned in `deploy/runner/Dockerfile`) and
+installs `docker` as a `docker`→`sudo nerdctl` shim that lazily starts the daemons
+on first use — so an **UNMODIFIED** customer `docker build … && docker push …`
+two-step works on `runs-on: corelink` with the single change `runs-on:
+ubuntu-latest`→`corelink`, no rewrite. Our own prod image build stays daemonless
+via `buildctl` directly. A job that shells a tool the image lacks still fails
+**loud** (`command not found`, non-zero exit, red check), never a silent pass.
 **Acceptance / evidence:** The image is wrangler-bound + `@sha256`-pinned (S7.5); the daemon is
 an image-layer concern, not a `/v1` obligation.
 **Variations & failures:**
@@ -839,11 +840,15 @@ an image-layer concern, not a `/v1` obligation.
 - *BuildKit cache* — a future win: the layer cache is itself CAS-addressable (a
   Runners×Cache adjacency), not built.
 **Feature(s):** F-4.7, F-6.1 — microVM-hosted BuildKit · image capability matrix · loud-fail-on-missing-tool.
-**Reality:** 🟡 built — BuildKit (`buildkitd`+`buildctl`) baked in the default fleet
-image (this change). Daemonless build + push to the CF managed registry is proven
-end-to-end in a live lease (run 31664445243). Not yet rolled as the fleet default
-(image build+repin is the deliberate roll step); literal `docker build`-CLI drop-in
-(the `docker`→buildkit shim) is the next increment.
+**Reality:** 🟢 LIVE — the fleet default image bakes nerdctl-full + the `docker`
+shim (WP-F2.2) and is **rolled** (spawn-worker repinned, rollout complete). An
+UNMODIFIED bare, non-root `docker build … && docker push …` two-step is proven
+end-to-end on a fresh lease from the rolled image (run 31736165630); the two-step
+carries the image across separate processes via the containerd store (proven run
+31731444897), which a `docker`→`buildctl` shim cannot. Not drop-in (fails loud,
+documented): `docker/build-push-action` (needs `docker buildx` — a buildx remote
+driver is a fast-follow), `docker run`/`services:`/DinD, multi-arch (amd64-only).
+The CAS-addressable layer cache (a Runners×Cache adjacency) is the F3 jaw-drop.
 
 ### S1.6.2 — A job needs a service container (Postgres / Redis) 🔵 owner-gated (Actions services shim)
 **As a** CI engineer whose integration tests need Postgres, **I want** the `services:` block in my workflow to bring up a sidecar, **so that** my DB-backed tests run unmodified.
