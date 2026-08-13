@@ -1,0 +1,93 @@
+# F2.1b — the customer writes `docker build` with NO sudo, as the non-root job
+# user. F2.1 proved the two-step via `sudo docker`; this proves BARE `docker`
+# works for the unprivileged runner user when containerd+buildkitd run as root
+# with their sockets made accessible. That is the real drop-in contract (the
+# customer's unmodified `docker build`/`docker push` steps never say sudo).
+# Rootful + socket-perms (not rootless): rootless containerd needs a systemd user
+# session a CI lease lacks; the per-lease Firecracker microVM already IS the
+# isolation boundary, so rootful is safe by construction here.
+name: f21b-nerdctl-nonroot
+
+on:
+  push:
+    branches: [proof/f21-nerdctl-two-step]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  CLOUDFLARE_ACCOUNT_ID: 6a1fc1c626fc2628823e60b9db01f5cd
+  # nerdctl (as the unprivileged user) must find the root-run daemons:
+  CONTAINERD_ADDRESS: /run/containerd/containerd.sock
+  BUILDKIT_HOST: unix:///run/buildkit/buildkitd.sock
+
+jobs:
+  prove:
+    name: BARE `docker build` then `docker push` as the non-root runner user
+    runs-on: corelink
+    timeout-minutes: 30
+    steps:
+      - name: Confirm we are NOT root
+        run: |
+          set -euo pipefail
+          echo "whoami=$(whoami) uid=$(id -u)"
+          [ "$(id -u)" -ne 0 ] || { echo "::error::job runs as root — this probe is meaningless"; exit 1; }
+
+      - name: Fetch nerdctl-full v2.3.5 (pinned + sha256) → docker shim
+        run: |
+          set -euo pipefail
+          VER=2.3.5
+          SHA=b697295c623639734aaab737523c808fd3cc8d3046039fd94fff1744e4c317aa
+          curl -fsSL -o /tmp/nf.tgz "https://github.com/containerd/nerdctl/releases/download/v${VER}/nerdctl-full-${VER}-linux-amd64.tar.gz"
+          echo "${SHA}  /tmp/nf.tgz" | sha256sum -c -
+          sudo tar -C /usr/local -xzf /tmp/nf.tgz
+          sudo ln -sf /usr/local/bin/nerdctl /usr/local/bin/docker
+          docker --version
+
+      - name: Start containerd + buildkitd as root, open sockets to the user
+        run: |
+          set -uo pipefail
+          sudo sh -c 'containerd >/tmp/containerd.log 2>&1 &'
+          sudo sh -c 'buildkitd --addr unix:///run/buildkit/buildkitd.sock >/tmp/buildkitd.log 2>&1 &'
+          for i in $(seq 1 40); do
+            sudo test -S /run/containerd/containerd.sock && sudo test -S /run/buildkit/buildkitd.sock && { echo "up ${i}s"; break; }
+            sleep 1
+          done
+          # Make the root-owned sockets reachable by the unprivileged user. In the
+          # baked image this is a one-time entrypoint step (chmod, or a shared group).
+          sudo chmod 666 /run/containerd/containerd.sock /run/buildkit/buildkitd.sock
+          # Prove nerdctl talks to containerd WITHOUT sudo:
+          docker info >/dev/null 2>&1 && echo "bare (no-sudo) docker↔containerd OK as $(whoami)" || { echo "::error::bare docker cannot reach containerd"; sudo tail -30 /tmp/containerd.log; exit 1; }
+
+      - name: Registry cred (wrangler, push+pull) → the USER's docker config
+        run: |
+          set -euo pipefail
+          CRED="$(npx -y wrangler@4.111.0 containers registries credentials registry.cloudflare.com --push --pull --expiration-minutes 25 --json 2>/dev/null)"
+          U=$(echo "$CRED" | jq -r '.username'); P=$(echo "$CRED" | jq -r '.password')
+          [ -n "$U" ] && [ -n "$P" ] || { echo "::error::cred mint failed"; exit 1; }
+          AUTH=$(printf '%s:%s' "$U" "$P" | base64 | tr -d '\n')
+          mkdir -p "$HOME/.docker"
+          printf '{"auths":{"registry.cloudflare.com":{"auth":"%s"}}}' "$AUTH" > "$HOME/.docker/config.json"
+          echo "F21_REF=registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/f21b-nonroot-proof:run-${GITHUB_RUN_ID}" >> "$GITHUB_ENV"
+
+      - name: The proof — BARE `docker build` then `docker push` (NO sudo)
+        run: |
+          set -euo pipefail
+          B="$RUNNER_TEMP/ctx"; mkdir -p "$B"
+          cat > "$B/Dockerfile" <<'EOF'
+          FROM ubuntu:24.04
+          RUN echo "bare-nonroot-docker-on-corelink" > /marker.txt
+          EOF
+          echo "── docker build (no sudo, as $(whoami)) ──"
+          docker build -t "$F21_REF" "$B"
+          echo "── docker push (no sudo, separate process) ──"
+          docker push "$F21_REF"
+          echo "✓ BARE docker build→push works for the non-root runner user — true drop-in contract holds"
+
+      - name: Delete the scratch tag (zero bleed)
+        if: always()
+        run: |
+          set +e
+          yes | npx -y wrangler@4.111.0 containers images delete "f21b-nonroot-proof:run-${GITHUB_RUN_ID}" 2>&1 | tail -6
