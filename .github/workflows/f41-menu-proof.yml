@@ -29,7 +29,10 @@ jobs:
           check node --version
           check pnpm --version
           check python3 --version
-          check pip --version
+          # pip ships as pip3 and/or the module form; accept either
+          if v=$( { pip3 --version || python3 -m pip --version; } 2>&1 | head -1); then
+            printf '  ok  %-22s %s\n' "pip" "$v"
+          else printf '  MISSING %s\n' "pip"; fail=1; fi
           check docker --version
           check gh --version
           check buildctl --version
@@ -52,6 +55,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -c 'print("py-"+str(2**5))' | grep -qx py-32 && echo "python ✓"
+          { pip3 --version || python3 -m pip --version; } >/dev/null 2>&1 && echo "pip ✓"
 
       - name: "Docker smoke — bare build (F2 drop-in) on the same lease"
         run: |
