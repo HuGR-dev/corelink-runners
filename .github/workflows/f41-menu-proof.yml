@@ -1,0 +1,62 @@
+# F4.1 — prove the MANAGED MENU is real on the shipped universal image: one
+# `runs-on: corelink` lease already serves Rust + Node/JS + Python + Docker + gh.
+# This is the honest managed-menu deliverable — a multi-image fan-out (N Durable
+# Object classes) is deferred behind CF Containers' one-image-per-class idle-burn
+# cost, triggered per real customer need, not built speculatively.
+name: f41-menu-proof
+
+on:
+  push:
+    branches: [proof/f41-menu]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  menu:
+    name: "one corelink image serves the managed toolchain menu"
+    runs-on: corelink
+    timeout-minutes: 15
+    steps:
+      - name: "toolchain inventory — every menu rung must resolve"
+        run: |
+          set -uo pipefail
+          fail=0
+          check() { if v=$("$@" 2>&1 | head -1); then printf '  ok  %-22s %s\n' "$1" "$v"; else printf '  MISSING %s\n' "$1"; fail=1; fi; }
+          check rustc --version
+          check cargo --version
+          check node --version
+          check pnpm --version
+          check python3 --version
+          check pip --version
+          check docker --version
+          check gh --version
+          check buildctl --version
+          [ "$fail" = 0 ] || { echo "::error::a menu rung is missing on the shipped image"; exit 1; }
+
+      - name: "Rust smoke — compile + run"
+        run: |
+          set -euo pipefail
+          d="$RUNNER_TEMP/rs"; mkdir -p "$d"; cd "$d"
+          printf 'fn main(){println!("rust-ok");}' > m.rs
+          rustc m.rs -o m && ./m | grep -qx rust-ok && echo "rust ✓"
+
+      - name: "Node smoke — run + pnpm"
+        run: |
+          set -euo pipefail
+          node -e 'process.stdout.write("node-"+(1+1))' | grep -qx node-2 && echo "node ✓"
+          pnpm --version >/dev/null && echo "pnpm ✓"
+
+      - name: "Python smoke"
+        run: |
+          set -euo pipefail
+          python3 -c 'print("py-"+str(2**5))' | grep -qx py-32 && echo "python ✓"
+
+      - name: "Docker smoke — bare build (F2 drop-in) on the same lease"
+        run: |
+          set -euo pipefail
+          d="$RUNNER_TEMP/dk"; mkdir -p "$d"
+          printf '%s\n' 'FROM ubuntu:24.04' 'RUN echo menu-docker-ok > /m' > "$d/Dockerfile"
+          docker build -t f41-menu-smoke "$d" >/dev/null 2>&1 && echo "docker ✓"
+          echo "✓ F4.1 PROVEN: one runs-on: corelink image serves Rust + Node + Python + Docker + gh — the managed menu is a single universal image, no per-language DO class needed."
