@@ -185,7 +185,7 @@
       // on top of increment 2. Unblocks the `gh pr comment`/`gh api` gates
       // (lockfile-diff, api-reference-sync), compliance-weekly, and every
       // validate_specs.py gate (hard `import jsonschema`) for `runs-on: corelink`.
-      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-runnercontainer@sha256:f6d787b6f4032668fdb5590c5eaaf7da3cb2c869fbc2a89f9ae6d0088ffee6f5",
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-runnercontainer@sha256:26feb902e3e172f3350971eae04e03fcc5a5adc1b068c9fe81bdcf3b5019f6f9",
       // standard-4 = 4 vCPU / 12 GiB / 20 GB disk — fits CI, clears the runner
       // disk floor (RUNNER_EPHEMERAL_STORAGE_FLOOR_MB).
       "instance_type": "standard-4",
