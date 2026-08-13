@@ -1,0 +1,77 @@
+# F3.1 — buildkit remote-cache round-trip against CoreLink's OWN OCI registry
+# (corelink-api.humangr.com /v2/, routes/oci.rs MoatCache), single-tenant, PAT
+# basic-auth. Build #1 exports cache; a FRESH buildkit daemon (no local state)
+# imports it and MUST show CACHED. Proves the product substrate serves buildkit
+# layer cache — the base of the F3 jaw-drop. Scratch repo deleted after.
+name: f31-oci-cache-roundtrip
+
+on:
+  push:
+    branches: [proof/f31-oci-cache]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  CAS_PAT: ${{ secrets.F3_CAS_PAT }}
+  OCI_HOST: corelink-api.humangr.com
+
+jobs:
+  prove:
+    name: "export cache to CoreLink OCI, fresh daemon imports + HITs"
+    runs-on: corelink
+    timeout-minutes: 25
+    steps:
+      - name: "docker config: basic-auth PAT for the CoreLink OCI host"
+        run: |
+          set -euo pipefail
+          AUTH=$(printf 'x:%s' "$CAS_PAT" | base64 | tr -d '\n')
+          mkdir -p "$HOME/.docker"
+          printf '{"auths":{"%s":{"auth":"%s"}}}' "$OCI_HOST" "$AUTH" > "$HOME/.docker/config.json"
+          CACHEREF="${OCI_HOST}/cache/f31-${GITHUB_RUN_ID}"
+          echo "CACHEREF=$CACHEREF" >> "$GITHUB_ENV"
+          echo "cache ref: $CACHEREF"
+
+      - name: "build #1 — export-cache to CoreLink OCI (mode=max)"
+        run: |
+          set -euo pipefail
+          B="$RUNNER_TEMP/ctx"; mkdir -p "$B"
+          # an expensive, deterministic step whose CACHED status is unambiguous
+          printf '%s\n' \
+            'FROM ubuntu:24.04' \
+            'RUN echo start && sleep 8 && dd if=/dev/zero of=/big bs=1M count=32 && sha256sum /big > /sum && echo f3-expensive-done' \
+            > "$B/Dockerfile"
+          ADDR="unix://$RUNNER_TEMP/bk1.sock"
+          sudo sh -c "buildkitd --addr '$ADDR' --oci-worker-snapshotter=overlayfs --root '$RUNNER_TEMP/bk1' >'$RUNNER_TEMP/bk1.log' 2>&1 &"
+          for i in $(seq 1 40); do sudo buildctl --addr "$ADDR" debug workers >/dev/null 2>&1 && break; sleep 1; done
+          sudo DOCKER_CONFIG="$HOME/.docker" buildctl --addr "$ADDR" build \
+            --frontend dockerfile.v0 --local context="$B" --local dockerfile="$B" \
+            --export-cache type=registry,ref="$CACHEREF",mode=max 2>&1 | tee "$RUNNER_TEMP/b1.log" | tail -25
+          grep -qE 'f3-expensive-done|exporting cache' "$RUNNER_TEMP/b1.log" || { echo "::error::build#1 did not run/export"; exit 1; }
+
+      - name: "build #2 — FRESH daemon, import-cache, expect CACHED"
+        run: |
+          set -euo pipefail
+          B="$RUNNER_TEMP/ctx"
+          ADDR="unix://$RUNNER_TEMP/bk2.sock"
+          # a SEPARATE buildkit root => zero local cache; a CACHED line can ONLY
+          # come from the imported CoreLink-OCI remote cache.
+          sudo sh -c "buildkitd --addr '$ADDR' --oci-worker-snapshotter=overlayfs --root '$RUNNER_TEMP/bk2' >'$RUNNER_TEMP/bk2.log' 2>&1 &"
+          for i in $(seq 1 40); do sudo buildctl --addr "$ADDR" debug workers >/dev/null 2>&1 && break; sleep 1; done
+          sudo DOCKER_CONFIG="$HOME/.docker" buildctl --addr "$ADDR" build \
+            --frontend dockerfile.v0 --local context="$B" --local dockerfile="$B" \
+            --import-cache type=registry,ref="$CACHEREF" 2>&1 | tee "$RUNNER_TEMP/b2.log" | tail -25
+          if grep -qE 'CACHED' "$RUNNER_TEMP/b2.log"; then
+            echo "✓ F3.1 PROVEN: fresh buildkit imported the remote cache from CoreLink's OWN OCI registry and HIT it (CACHED). The product substrate serves buildkit layer cache."
+          else
+            echo "::error::no CACHED in build#2 — CoreLink OCI did not serve the imported cache"; exit 1
+          fi
+
+      - name: "delete scratch cache repo (zero bleed)"
+        if: always()
+        run: |
+          set +e
+          TOK=$(curl -s -u "x:$CAS_PAT" "https://corelink-oci.humangr.com/token?service=corelink-oci&scope=repository:cache/f31-${GITHUB_RUN_ID}:delete,pull" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("token",""))' 2>/dev/null)
+          # best-effort manifest delete; blobs are content-addressed + GC'd
+          curl -s -o /dev/null -w "manifest-del %{http_code}\n" -X DELETE -H "Authorization: Bearer $TOK" "https://${OCI_HOST}/v2/cache/f31-${GITHUB_RUN_ID}/manifests/latest" || true
