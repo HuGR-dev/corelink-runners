@@ -38,7 +38,9 @@ concurrency:
 jobs:
   test:
     name: spawn-Worker typecheck + vitest
-    runs-on: ubuntu-latest
+    # Self-hosted corelink fleet — zero GitHub-hosted spend (the hosted lane was
+    # billing-blocked, silently failing this gate on any deploy/cloudflare/** PR).
+    runs-on: corelink
     timeout-minutes: 15
     defaults:
       run:
