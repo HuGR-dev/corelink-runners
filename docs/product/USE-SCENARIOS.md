@@ -837,8 +837,22 @@ an image-layer concern, not a `/v1` obligation.
   unlike a shared-kernel self-hosted runner where dind is a host-root risk.
 - *Registry push needs a secret* — brokered like any secret (S1.6.5), never on the
   image.
-- *BuildKit cache* — a future win: the layer cache is itself CAS-addressable (a
-  Runners×Cache adjacency), not built.
+- *BuildKit layer cache* — 🟢 LIVE (private, per-tenant). Point BuildKit's remote
+  cache at CoreLink's own OCI registry with your `cas:rw` PAT and layers persist +
+  reuse across CI runs — cache-warm by construction, no daemon to run:
+
+  ```
+  buildctl build --frontend dockerfile.v0 \
+    --local context=. --local dockerfile=. \
+    --export-cache type=registry,ref=corelink-api.humangr.com/cache/<repo>,mode=max \
+    --import-cache type=registry,ref=corelink-api.humangr.com/cache/<repo>
+  ```
+
+  (auth: `~/.docker/config.json` basic-auth `x:<PAT>` for `corelink-api.humangr.com`.)
+  Proven end-to-end on a live lease — a fresh daemon imported the cache and hit
+  `CACHED` (run 31740626538). The blob store is per-tenant HMAC-isolated, so this
+  is your cache only. CROSS-TENANT public sharing of public base layers (the
+  network-effect dedup) is the F3 jaw-drop — security-gated, not yet built.
 **Feature(s):** F-4.7, F-6.1 — microVM-hosted BuildKit · image capability matrix · loud-fail-on-missing-tool.
 **Reality:** 🟢 LIVE — the fleet default image bakes nerdctl-full + the `docker`
 shim (WP-F2.2) and is **rolled** (spawn-worker repinned, rollout complete). An
