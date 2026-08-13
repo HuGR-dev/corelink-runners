@@ -1,0 +1,101 @@
+# F0.3 — prove buildkit's REMOTE cache round-trips through a store WE control, with
+# a MEASURED cache-HIT on rebuild. This is the viability gate for F3 (the CAS layer
+# cache jaw-drop). Minimal + throwaway + ZERO bleed: it pushes a cache tag to the
+# R2-backed CF registry (where the CoreLink CAS also lives), imports it into a FRESH
+# buildkit instance, asserts the expensive step comes back CACHED, then deletes the
+# tag. The CAS-native content-addressed adapter (public cross-tenant / private
+# isolated) is F3 proper; F0.3 only retires "does the remote-cache mechanism even
+# work here, with a real HIT".
+#
+# buildkit is BAKED in the fleet image (WP-F1a) — no fetch. Daemonless throughout.
+name: f03-buildkit-remote-cache
+
+on:
+  push:
+    branches: [proof/f03-buildkit-remote-cache]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  CLOUDFLARE_ACCOUNT_ID: 6a1fc1c626fc2628823e60b9db01f5cd
+
+jobs:
+  prove:
+    name: remote-cache export→import HIT on the R2-backed registry (daemonless)
+    runs-on: corelink
+    timeout-minutes: 30
+    steps:
+      - name: Preflight — buildkit baked (no fetch)
+        run: |
+          set -euo pipefail
+          command -v buildctl && command -v buildkitd && buildctl --version
+
+      - name: Materialise a deterministic, expensive build context
+        run: |
+          set -euo pipefail
+          B="$RUNNER_TEMP/ctx"; mkdir -p "$B"
+          # An expensive-but-deterministic RUN whose ONLY cache key is the base
+          # digest + the RUN string. Same across both builds ⇒ import must HIT it.
+          # Plain tag (NOT a pinned digest) — this is a throwaway cache proof, not a
+          # shipped image, so X4 supply-chain pinning does not apply; the tag resolves
+          # to the same digest for both builds minutes apart within one run.
+          cat > "$B/Dockerfile" <<'EOF'
+          FROM ubuntu:24.04
+          RUN set -e; t=0; for i in $(seq 1 8000000); do t=$((t+i)); done; echo "sum=$t" > /proof.txt
+          EOF
+          echo "F03_CTX=$B" >> "$GITHUB_ENV"
+
+      - name: Mint a push cred + write docker config (F0.2 mechanism)
+        run: |
+          set -euo pipefail
+          CRED="$(npx -y wrangler@4.111.0 containers registries credentials registry.cloudflare.com --push --expiration-minutes 25 --json 2>/dev/null)"
+          U=$(echo "$CRED" | jq -r '.username'); P=$(echo "$CRED" | jq -r '.password')
+          [ -n "$U" ] && [ -n "$P" ] || { echo "::error::cred mint failed"; exit 1; }
+          AUTH=$(printf '%s:%s' "$U" "$P" | base64 | tr -d '\n')
+          CFG="$RUNNER_TEMP/dockercfg"; mkdir -p "$CFG"
+          printf '{"auths":{"registry.cloudflare.com":{"auth":"%s"}}}' "$AUTH" > "$CFG/config.json"
+          echo "F03_DOCKERCFG=$CFG" >> "$GITHUB_ENV"
+          echo "F03_CACHEREF=registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/f03-cache-proof:buildcache-${GITHUB_RUN_ID}" >> "$GITHUB_ENV"
+
+      - name: Build #1 (cold) — populate + EXPORT the remote cache
+        run: |
+          set -uo pipefail
+          A="unix://$RUNNER_TEMP/bkA.sock"
+          sudo sh -c "buildkitd --addr '$A' --oci-worker-snapshotter=overlayfs --root '$RUNNER_TEMP/bkA' >'$RUNNER_TEMP/bkA.log' 2>&1 &"
+          for i in $(seq 1 40); do sudo buildctl --addr "$A" debug workers >/dev/null 2>&1 && break; sleep 1; done
+          echo "── build #1 (cold, expect the RUN to EXECUTE) ──"
+          sudo DOCKER_CONFIG="$F03_DOCKERCFG" buildctl --addr "$A" build \
+            --frontend dockerfile.v0 --local context="$F03_CTX" --local dockerfile="$F03_CTX" \
+            --export-cache type=registry,ref="$F03_CACHEREF",mode=max \
+            --output type=cacheonly 2>&1 | tee "$RUNNER_TEMP/b1.log" | tail -30
+          grep -qE '#[0-9]+ DONE' "$RUNNER_TEMP/b1.log" || { echo "::error::build #1 did not complete"; exit 1; }
+
+      - name: Build #2 (FRESH buildkit) — IMPORT the remote cache, assert HIT
+        run: |
+          set -uo pipefail
+          # A brand-new buildkitd with its OWN empty root ⇒ zero local cache. Any
+          # CACHED line here can ONLY come from the imported remote cache.
+          Bd="unix://$RUNNER_TEMP/bkB.sock"
+          sudo sh -c "buildkitd --addr '$Bd' --oci-worker-snapshotter=overlayfs --root '$RUNNER_TEMP/bkB' >'$RUNNER_TEMP/bkB.log' 2>&1 &"
+          for i in $(seq 1 40); do sudo buildctl --addr "$Bd" debug workers >/dev/null 2>&1 && break; sleep 1; done
+          echo "── build #2 (fresh daemon + import-cache, expect CACHED) ──"
+          sudo DOCKER_CONFIG="$F03_DOCKERCFG" buildctl --addr "$Bd" build \
+            --frontend dockerfile.v0 --local context="$F03_CTX" --local dockerfile="$F03_CTX" \
+            --import-cache type=registry,ref="$F03_CACHEREF" \
+            --output type=cacheonly 2>&1 | tee "$RUNNER_TEMP/b2.log" | tail -30
+          if grep -qE 'CACHED' "$RUNNER_TEMP/b2.log"; then
+            echo "✓ F0.3 PROVEN: fresh buildkit imported the remote cache and HIT it (CACHED) — remote-cache round-trip works on an R2-backed store we control."
+          else
+            echo "::error::no CACHED line in build #2 — remote cache did not import/hit"; exit 1
+          fi
+
+      - name: Cleanup — delete the throwaway cache tag (ZERO bleed)
+        if: always()
+        run: |
+          set +e
+          TAG="f03-cache-proof:buildcache-${GITHUB_RUN_ID}"
+          yes | npx -y wrangler@4.111.0 containers images delete "$TAG" 2>&1 | tail -5
+          echo "cleanup attempted for $TAG"
