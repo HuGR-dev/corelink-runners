@@ -16,13 +16,17 @@
 # the `docker login` -> build -> push credential chain shares one config file.
 set -e
 
+# The daemons run as root and their sockets live in root-only dirs (/run/buildkit,
+# /run/containerd), so the UNPRIVILEGED user cannot stat them — every socket check
+# MUST go through `sudo test -S`, or it false-negatives while the daemon is fine.
+_sock_up() { sudo test -S "$1"; }
 _wait_sock() {
   i=0
-  while [ ! -S "$1" ] && [ "$i" -lt 40 ]; do sleep 0.25; i=$((i + 1)); done
-  [ -S "$1" ]
+  while ! _sock_up "$1" && [ "$i" -lt 120 ]; do sleep 0.5; i=$((i + 1)); done
+  _sock_up "$1"
 }
 
-if [ ! -S /run/containerd/containerd.sock ]; then
+if ! _sock_up /run/containerd/containerd.sock; then
   sudo sh -c 'containerd >/var/log/containerd.log 2>&1 &'
   _wait_sock /run/containerd/containerd.sock || {
     echo "docker-shim: containerd did not start" >&2
@@ -31,7 +35,7 @@ if [ ! -S /run/containerd/containerd.sock ]; then
   }
 fi
 
-if [ ! -S /run/buildkit/buildkitd.sock ]; then
+if ! _sock_up /run/buildkit/buildkitd.sock; then
   sudo sh -c 'buildkitd --addr unix:///run/buildkit/buildkitd.sock --oci-worker-snapshotter=overlayfs >/var/log/buildkitd.log 2>&1 &'
   _wait_sock /run/buildkit/buildkitd.sock || {
     echo "docker-shim: buildkitd did not start" >&2
