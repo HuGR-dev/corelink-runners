@@ -250,13 +250,16 @@ this path today (MEMORY: rota-a).
   match) so GitHub never assigns a job the runner can't satisfy.
 - *Full cache-warm `[clw] cache hit` smoke* is **⚪ X4-external** — needs a real
   CoreLink PAT or a real hugit dispatch (MEMORY: rota-a correction-3).
-- *Baked toolchain menu (F4.1)* — 🟢 LIVE-proven. ONE `runs-on: corelink` image
-  already serves the common toolchain menu, verified end-to-end on a live lease
-  (run 31743741259): **Rust 1.96** (rustc/cargo/clippy/rustfmt + sccache),
-  **Node 22.23 + pnpm 10.32**, **Python 3.12 + venv** (PEP-668 externally-managed
+- *Baked toolchain menu (F4.1)* — 🟢 LIVE. ONE `runs-on: corelink` image serves the
+  common toolchain menu, checked on a live lease (run 31743741259). Precisely what
+  that run tested: **exercised** (compiled/ran real work) — **Rust 1.96** (`rustc m.rs
+  && ./m`), **Python 3.12 + venv** (real `python3 -m venv` + its pip), **Docker**
+  (nerdctl 2.3.5 — a real `docker build`, the F2 drop-in), **Node 22.23** (`node -e`);
+  **present + version-verified only** (not exercised into real work in that run) —
+  **pnpm 10.32**, **BuildKit** `buildctl` (though buildctl IS exercised by the F3.1
+  cache proof), **gh** 2.97. Python note: Ubuntu 24.04 is PEP-668 externally-managed
   by design — the interface is `python3 -m venv .venv && .venv/bin/pip install …`,
-  NOT a global `pip`; PyYAML/requests/jsonschema preinstalled as apt), **Docker**
-  (nerdctl 2.3.5, the F2 drop-in), **BuildKit** (`buildctl`), **gh** 2.97.
+  NOT a global `pip`; PyYAML/requests/jsonschema are preinstalled as apt.
   Architecture decision — the "managed menu" is ONE universal image, not a
   per-language image fleet: Cloudflare Containers bind exactly one image per
   Durable-Object class (no per-instance image override — only env/entrypoint), so
