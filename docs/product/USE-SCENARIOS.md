@@ -821,11 +821,13 @@ pass (cli.md).
 **Expected:** Docker-in-microVM is an **image-capability** decision, not a fabric
 one: the box is a fresh Firecracker-class microVM (ADR-0009), so a nested daemon
 is a supported *image build* (rootless buildkit / dind), pinned as `standard-4`
-today. The default fleet image now **ships BuildKit** (`buildkitd`+`buildctl`,
-baked X4-pinned in `deploy/runner/Dockerfile`) so daemonless container image
-builds work out of the box; a literal `docker build` CLI drop-in (a `docker`→
-buildkit shim) is the next step. A job that shells a tool the image lacks still
-fails **loud** (`command not found`, non-zero exit, red check), never a silent pass.
+today. The default fleet image **bakes BuildKit** (`buildkitd`+`buildctl`,
+X4-pinned in `deploy/runner/Dockerfile`) — so once that image is rebuilt and the
+fleet is repinned to it, daemonless container image builds work with no rewrite
+(see the Reality line for the current roll state). A literal `docker build` CLI
+drop-in (a `docker`→buildkit shim) is the next step. A job that shells a tool the
+image lacks still fails **loud** (`command not found`, non-zero exit, red check),
+never a silent pass.
 **Acceptance / evidence:** The image is wrangler-bound + `@sha256`-pinned (S7.5); the daemon is
 an image-layer concern, not a `/v1` obligation.
 **Variations & failures:**
