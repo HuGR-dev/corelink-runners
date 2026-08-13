@@ -1,12 +1,12 @@
-# F2.1b — the customer writes BARE `docker build` (no sudo) as the non-root job
-# user. F2.1 proved `sudo docker`(nerdctl) works; rootful containerd is NOT
-# reachable by the unprivileged user via socket perms alone (namespace/dir).
-# SOTA-pragmatic drop-in: ship `docker` as a thin wrapper that execs
-# `sudo nerdctl` — the lease has passwordless sudo and the per-lease Firecracker
-# microVM IS the isolation boundary (same root-in-microVM model our own prod
-# build already uses with `sudo buildctl`). The wrapper hides the sudo so the
-# customer's unmodified `docker build`/`docker push` steps never say it, and it
-# forwards DOCKER_CONFIG so `docker login`→build→push share one credential file.
+# F2.1b — the customer writes BARE docker build (no sudo) as the non-root job
+# user. F2.1 proved sudo docker(nerdctl) works; rootful containerd is NOT
+# reachable by the unprivileged user via socket perms alone. SOTA-pragmatic
+# drop-in: ship docker as a thin wrapper that execs sudo nerdctl — the lease has
+# passwordless sudo and the per-lease Firecracker microVM IS the isolation
+# boundary (same root-in-microVM model our own prod build uses with sudo buildctl).
+# The wrapper hides the sudo so the customer's unmodified docker build / docker
+# push steps never say it, and forwards DOCKER_CONFIG so login->build->push share
+# one credential file.
 name: f21b-nerdctl-nonroot
 
 on:
@@ -24,17 +24,17 @@ env:
 
 jobs:
   prove:
-    name: BARE `docker build` then `docker push` via docker→sudo-nerdctl wrapper
+    name: "bare docker build then push via docker->sudo-nerdctl wrapper"
     runs-on: corelink
     timeout-minutes: 30
     steps:
-      - name: Confirm we are NOT root
+      - name: "Confirm we are NOT root"
         run: |
           set -euo pipefail
           echo "whoami=$(whoami) uid=$(id -u)"
-          [ "$(id -u)" -ne 0 ] || { echo "::error::job runs as root — this probe is meaningless"; exit 1; }
+          [ "$(id -u)" -ne 0 ] || { echo "::error::job runs as root — probe meaningless"; exit 1; }
 
-      - name: Fetch nerdctl-full v2.3.5 (pinned) + install the `docker` wrapper
+      - name: "Fetch nerdctl-full 2.3.5 (pinned) + install the docker wrapper"
         run: |
           set -euo pipefail
           VER=2.3.5
@@ -42,19 +42,16 @@ jobs:
           curl -fsSL -o /tmp/nf.tgz "https://github.com/containerd/nerdctl/releases/download/v${VER}/nerdctl-full-${VER}-linux-amd64.tar.gz"
           echo "${SHA}  /tmp/nf.tgz" | sha256sum -c -
           sudo tar -C /usr/local -xzf /tmp/nf.tgz
-          # The drop-in shim: `docker` = sudo nerdctl, forwarding the config + daemon
-          # addresses so the unprivileged user's bare `docker …` just works.
-          sudo tee /usr/local/bin/docker >/dev/null <<'WRAP'
-          #!/bin/sh
-          exec sudo DOCKER_CONFIG="${DOCKER_CONFIG:-/home/runner/.docker}" \
-                    BUILDKIT_HOST="unix:///run/buildkit/buildkitd.sock" \
-                    CONTAINERD_ADDRESS="/run/containerd/containerd.sock" \
-                    /usr/local/bin/nerdctl "$@"
-          WRAP
+          # docker = sudo nerdctl, forwarding config + daemon addresses. Built with
+          # printf (no heredoc) to keep the YAML block scalar clean.
+          printf '%s\n' \
+            '#!/bin/sh' \
+            'exec sudo DOCKER_CONFIG="${DOCKER_CONFIG:-/home/runner/.docker}" BUILDKIT_HOST="unix:///run/buildkit/buildkitd.sock" CONTAINERD_ADDRESS="/run/containerd/containerd.sock" /usr/local/bin/nerdctl "$@"' \
+            | sudo tee /usr/local/bin/docker >/dev/null
           sudo chmod 0755 /usr/local/bin/docker
           docker --version
 
-      - name: Start containerd + buildkitd (root)
+      - name: "Start containerd + buildkitd (root)"
         run: |
           set -uo pipefail
           sudo sh -c 'containerd >/tmp/containerd.log 2>&1 &'
@@ -63,9 +60,9 @@ jobs:
             sudo test -S /run/containerd/containerd.sock && sudo test -S /run/buildkit/buildkitd.sock && { echo "up ${i}s"; break; }
             sleep 1
           done
-          docker info >/dev/null 2>&1 && echo "bare (wrapper) docker↔containerd OK as $(whoami)" || { echo "::error::wrapper docker cannot reach containerd"; sudo tail -30 /tmp/containerd.log; exit 1; }
+          docker info >/dev/null 2>&1 && echo "bare (wrapper) docker to containerd OK as $(whoami)" || { echo "::error::wrapper docker cannot reach containerd"; sudo tail -30 /tmp/containerd.log; exit 1; }
 
-      - name: `docker login`-equivalent — write the USER's docker config
+      - name: "Write the USER docker config (docker login equivalent)"
         run: |
           set -euo pipefail
           CRED="$(npx -y wrangler@4.111.0 containers registries credentials registry.cloudflare.com --push --pull --expiration-minutes 25 --json 2>/dev/null)"
@@ -76,21 +73,18 @@ jobs:
           printf '{"auths":{"registry.cloudflare.com":{"auth":"%s"}}}' "$AUTH" > "$HOME/.docker/config.json"
           echo "F21_REF=registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/f21b-nonroot-proof:run-${GITHUB_RUN_ID}" >> "$GITHUB_ENV"
 
-      - name: The proof — BARE `docker build` then `docker push` (no sudo typed)
+      - name: "The proof — bare docker build then docker push (no sudo typed)"
         run: |
           set -euo pipefail
           B="$RUNNER_TEMP/ctx"; mkdir -p "$B"
-          cat > "$B/Dockerfile" <<'EOF'
-          FROM ubuntu:24.04
-          RUN echo "bare-nonroot-docker-on-corelink" > /marker.txt
-          EOF
-          echo "── docker build (bare, as $(whoami)) ──"
+          printf '%s\n' 'FROM ubuntu:24.04' 'RUN echo bare-nonroot-docker-on-corelink > /marker.txt' > "$B/Dockerfile"
+          echo "-- docker build (bare, as $(whoami)) --"
           docker build -t "$F21_REF" "$B"
-          echo "── docker push (bare, separate process) ──"
+          echo "-- docker push (bare, separate process) --"
           docker push "$F21_REF"
-          echo "✓ BARE docker build→push works for the non-root user via the wrapper — true drop-in contract holds"
+          echo "OK: bare docker build then push works for the non-root user via the wrapper — drop-in holds"
 
-      - name: Delete the scratch tag (zero bleed)
+      - name: "Delete the scratch tag (zero bleed)"
         if: always()
         run: |
           set +e
