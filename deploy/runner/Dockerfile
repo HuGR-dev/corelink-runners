@@ -379,10 +379,16 @@ RUN apt-get update -qq && \
 # `gh` (GitHub CLI) is ALSO baked in this third increment — see the verified
 # download below. It is the unlock for the workflows that shell out to
 # `gh pr comment` / `gh api` (lockfile-diff, api-reference-sync) and the weekly
-# compliance-weekly cron. Docker is deliberately NOT added:
-# CF Containers run each lease as a Firecracker microVM with no nested-daemon /
-# privileged path (DinD is infeasible on the substrate), and only 2 gates use
-# docker (both ubuntu-latest image builds, unsuited to ephemeral migration).
+# compliance-weekly cron.
+#
+# Container image builds ARE supported on this image — via BuildKit, daemonless,
+# NOT via a docker daemon (see the BuildKit block below). This reconciles the
+# product capability S1.6.1 ("a job builds a container image") with the substrate:
+# a classic docker daemon / DinD (a privileged nested daemon) stays infeasible on
+# Firecracker, but BuildKit is not DinD — it is a userspace builder, and the
+# per-lease microVM is itself the isolation boundary. Proven end-to-end (build
+# FROM ubuntu:24.04 + daemonless push to the CF managed registry) in run
+# 31664445243 before this bake.
 
 # ── GitHub CLI (`gh`) — verified pinned download (X4 supply-chain floor) ───────
 # Same discipline as the node / pnpm / clw / runner / sccache downloads: a
@@ -400,6 +406,35 @@ RUN curl -fsSL \
     install -m 0755 "/tmp/gh_${GH_VERSION}_linux_amd64/bin/gh" /usr/local/bin/gh && \
     rm -rf /tmp/gh.tar.gz "/tmp/gh_${GH_VERSION}_linux_amd64" && \
     gh --version
+
+# ── BuildKit — daemonless container image builds (S1.6.1 F-4.7, X4 floor) ──────
+# CoreLink runners build images WITHOUT a docker daemon: `buildkitd` runs per-job
+# inside the lease (rootful via the runner's passwordless sudo, or rootless) and
+# `buildctl` drives the build + a direct registry push. This is what lets a
+# `docker build`-class job work on `runs-on: corelink`, and lets our own prod
+# image build off GitHub-hosted runners. BuildKit is NOT DinD (no privileged
+# nested daemon); the per-lease Firecracker microVM is the isolation boundary.
+#
+# Pinned like every other download (X4 floor): a VERSIONED URL + a sha256 computed
+# from the real v0.32.2 linux-amd64 release tarball (92,882,168 bytes) — NEVER
+# fabricated. We install ONLY buildkitd, buildctl, the CNI plugins (build-step
+# networking), and the bundled runc — installed as `runc`, which buildkitd's OCI
+# worker looks for on PATH (the tarball ships it as `buildkit-runc`). The
+# `buildkit-qemu-*` cross-arch emulators in the tarball are deliberately DROPPED:
+# we build native amd64, and keeping them would add ~100 MB for nothing.
+ARG BUILDKIT_VERSION=v0.32.2
+ARG BUILDKIT_SHA256=2975d0f651ad96ba8b80b9992ae1f9a964f4408569af5b6dc36544165c3926af
+RUN curl -fsSL \
+      "https://github.com/moby/buildkit/releases/download/${BUILDKIT_VERSION}/buildkit-${BUILDKIT_VERSION}.linux-amd64.tar.gz" \
+      -o /tmp/buildkit.tar.gz && \
+    echo "${BUILDKIT_SHA256}  /tmp/buildkit.tar.gz" | sha256sum -c - && \
+    tar -xzf /tmp/buildkit.tar.gz -C /tmp && \
+    install -m 0755 /tmp/bin/buildkitd     /usr/local/bin/buildkitd && \
+    install -m 0755 /tmp/bin/buildctl      /usr/local/bin/buildctl && \
+    install -m 0755 /tmp/bin/buildkit-runc /usr/local/bin/runc && \
+    for p in /tmp/bin/buildkit-cni-*; do install -m 0755 "$p" /usr/local/bin/; done && \
+    rm -rf /tmp/buildkit.tar.gz /tmp/bin && \
+    buildkitd --version && buildctl --version && runc --version
 
 # ── Non-root runner user (App-layer resource caps — Track-C C2, part 1/2) ──────
 # The runner agent must not run as root; the dedicated user also owns the

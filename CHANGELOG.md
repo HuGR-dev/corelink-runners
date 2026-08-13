@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-08-13 — BuildKit baked in the fleet image (daemonless container builds)
+
+- **feat(runner-image): bake BuildKit (`buildkitd`+`buildctl`+runc) into
+  `deploy/runner/Dockerfile`, X4-pinned (v0.32.2, sha256 from the real
+  92,882,168-byte release tarball).** CoreLink runners can now build container
+  images WITHOUT a docker daemon: `buildkitd` runs per-job inside the lease
+  (rootful via the runner's passwordless sudo) and `buildctl` drives the build +
+  a direct push to the CF managed registry. This is the motor for `docker build`-
+  class jobs on `runs-on: corelink` and for building our own prod image off
+  GitHub-hosted runners. BuildKit is **not** DinD — it is a userspace builder,
+  and the per-lease Firecracker microVM is the isolation boundary. Proven
+  end-to-end in a live lease (build FROM ubuntu:24.04 + daemonless registry push,
+  run 31664445243) before this bake. The `buildkit-qemu-*` cross-arch emulators
+  are deliberately dropped (native amd64 only, ~100 MB saved).
+- **docs(S1.6.1): reconcile the design-vs-wired drift.** The Dockerfile no longer
+  claims "Docker is deliberately NOT added / DinD infeasible" while the product
+  scenario promised container builds; S1.6.1 now reads 🟡 built (BuildKit baked,
+  daemonless), with the literal `docker build`-CLI drop-in (a `docker`→buildkit
+  shim) named as the next increment.
+
 ### 2026-08-04 — the recovery net was healthy and pointed at the wrong repo
 
 - **fix(cloudflare): a `HuGR-Labs/corelink-server` job sat QUEUED for 25 minutes with every

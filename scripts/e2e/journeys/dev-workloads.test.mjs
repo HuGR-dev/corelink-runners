@@ -289,7 +289,7 @@ test('JOURNEY · the cred broker rejects a forged cas-cred ticket, hands out not
 });
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-// S1.6.1 — "A job needs a Docker daemon / builds a container." 🔵 owner-gated (image capability).
+// S1.6.1 — "A job needs a Docker daemon / builds a container." 🟡 built (BuildKit baked, daemonless).
 // Docker-in-microVM is an IMAGE-LAYER decision, not a /v1 obligation — the box is a fresh
 // Firecracker-class microVM (safe dind by construction). Observable: the lease on the pinned
 // image is HELD; whether that image ships a daemon is the owner-gated GA image matrix.
@@ -303,7 +303,7 @@ test('JOURNEY · docker-build workload — the microVM box is HELD (daemon is im
       return check(a.status === 200 && a.state === 'held', `lease ${a.leaseId} HELD on the @sha256-pinned image`, {
         status: a.status,
         leaseId: a.leaseId,
-        gap: 'whether the box exposes a working Docker daemon (rootless buildkit / dind) is the OWNER-GATED GA image matrix, an image-layer concern not a /v1 verb; a job shelling `docker` on an image without it fails LOUD (command not found, red check) — never a silent pass. The microVM boundary makes even a privileged inner daemon safe by construction',
+        gap: 'the fleet image now bakes BuildKit (buildkitd+buildctl, X4-pinned) for daemonless image builds + push to the CF managed registry (proven in a live lease, run 31664445243) — an image-layer capability, not a /v1 verb; a literal `docker build`-CLI drop-in (docker→buildkit shim) is the next increment. A job shelling a tool the image lacks fails LOUD (command not found, red check), never a silent pass. The microVM boundary makes even a privileged inner daemon safe by construction',
       });
     })
     .onCleanup(async (ctx) => { if (ctx.lease) await closeLease(pat, ctx.lease); })
