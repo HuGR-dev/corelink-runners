@@ -1,0 +1,66 @@
+# F2.2 exit gate — on a FRESH lease from the rolled fleet image, prove the customer
+# `docker` drop-in end to end: the baked toolchain is present AND an UNMODIFIED
+# bare (no sudo) two-step `docker build` … `docker push` works for the non-root
+# runner user via the shim. If the image did not take, this fails LOUD → rollback
+# the spawn-worker pin to @sha256:26feb902… and redeploy.
+name: f22-prove-docker-dropin
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  CLOUDFLARE_ACCOUNT_ID: 6a1fc1c626fc2628823e60b9db01f5cd
+  DOCKER_CONFIG: /home/runner/.docker
+
+jobs:
+  prove:
+    name: "baked toolchain + bare docker build/push on the rolled image"
+    runs-on: corelink
+    timeout-minutes: 20
+    steps:
+      - name: "Assert the baked toolchain is on PATH (no fetch)"
+        run: |
+          set -euo pipefail
+          fail=0
+          for bin in docker nerdctl containerd buildkitd buildctl runc; do
+            if command -v "$bin" >/dev/null 2>&1; then
+              printf '  ok %-11s %s\n' "$bin" "$(command -v "$bin")"
+            else
+              echo "::error::$bin NOT on PATH — F2.2 image did not take on this lease"; fail=1
+            fi
+          done
+          [ "$fail" = 0 ] || exit 1
+          [ "$(id -u)" -ne 0 ] || { echo "::error::job is root — drop-in proof must be non-root"; exit 1; }
+          echo "whoami=$(whoami) — docker resolves to $(command -v docker)"
+
+      - name: "Registry cred (docker login equivalent)"
+        run: |
+          set -euo pipefail
+          CRED="$(npx -y wrangler@4.111.0 containers registries credentials registry.cloudflare.com --push --pull --expiration-minutes 20 --json 2>/dev/null)"
+          U=$(echo "$CRED" | jq -r '.username'); P=$(echo "$CRED" | jq -r '.password')
+          [ -n "$U" ] && [ -n "$P" ] || { echo "::error::cred mint failed"; exit 1; }
+          AUTH=$(printf '%s:%s' "$U" "$P" | base64 | tr -d '\n')
+          mkdir -p "$HOME/.docker"
+          printf '{"auths":{"registry.cloudflare.com":{"auth":"%s"}}}' "$AUTH" > "$HOME/.docker/config.json"
+          echo "F22_REF=registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/f22-dropin-proof:run-${GITHUB_RUN_ID}" >> "$GITHUB_ENV"
+
+      - name: "The proof — bare docker build then docker push (lazy-start shim)"
+        run: |
+          set -euo pipefail
+          B="$RUNNER_TEMP/ctx"; mkdir -p "$B"
+          printf '%s\n' 'FROM ubuntu:24.04' 'RUN echo dropin-on-rolled-fleet > /marker.txt' > "$B/Dockerfile"
+          echo "-- docker build (bare, first docker call triggers lazy daemon start) --"
+          docker build -t "$F22_REF" "$B"
+          echo "-- docker push (bare, separate process) --"
+          docker push "$F22_REF"
+          echo "OK: F2.2 drop-in PROVEN on the rolled fleet image — unmodified docker build+push works for the customer"
+
+      - name: "Delete the scratch tag (zero bleed)"
+        if: always()
+        run: |
+          set +e
+          yes | npx -y wrangler@4.111.0 containers images delete "f22-dropin-proof:run-${GITHUB_RUN_ID}" 2>&1 | tail -6
