@@ -26,22 +26,36 @@ _wait_sock() {
   _sock_up "$1"
 }
 
-if ! _sock_up /run/containerd/containerd.sock; then
-  sudo sh -c 'containerd >/var/log/containerd.log 2>&1 &'
-  _wait_sock /run/containerd/containerd.sock || {
-    echo "docker-shim: containerd did not start" >&2
-    sudo tail -n 20 /var/log/containerd.log >&2 2>/dev/null || true
-    exit 1
-  }
-fi
+# Serialize the lazy start: two concurrent `docker` calls on a cold lease (e.g.
+# `docker build & docker build & wait`) would otherwise BOTH try to spawn the
+# daemons, and the loser's `containerd`/`buildkitd` fails to bind the fixed socket
+# — harmless (the winner's socket serves both) but noisy. An flock on a per-lease
+# lockfile makes exactly one invocation do the start; the rest wait then find the
+# socket up. The lockfile lives in the single-tenant microVM's /tmp (safe here).
+_ensure_daemons() {
+  if ! _sock_up /run/containerd/containerd.sock; then
+    sudo sh -c 'containerd >/var/log/containerd.log 2>&1 &'
+    _wait_sock /run/containerd/containerd.sock || {
+      echo "docker-shim: containerd did not start" >&2
+      sudo tail -n 20 /var/log/containerd.log >&2 2>/dev/null || true
+      return 1
+    }
+  fi
+  if ! _sock_up /run/buildkit/buildkitd.sock; then
+    sudo sh -c 'buildkitd --addr unix:///run/buildkit/buildkitd.sock --oci-worker-snapshotter=overlayfs >/var/log/buildkitd.log 2>&1 &'
+    _wait_sock /run/buildkit/buildkitd.sock || {
+      echo "docker-shim: buildkitd did not start" >&2
+      sudo tail -n 20 /var/log/buildkitd.log >&2 2>/dev/null || true
+      return 1
+    }
+  fi
+}
 
-if ! _sock_up /run/buildkit/buildkitd.sock; then
-  sudo sh -c 'buildkitd --addr unix:///run/buildkit/buildkitd.sock --oci-worker-snapshotter=overlayfs >/var/log/buildkitd.log 2>&1 &'
-  _wait_sock /run/buildkit/buildkitd.sock || {
-    echo "docker-shim: buildkitd did not start" >&2
-    sudo tail -n 20 /var/log/buildkitd.log >&2 2>/dev/null || true
-    exit 1
-  }
+if command -v flock >/dev/null 2>&1; then
+  # subshell holds the lock only during the start; released before the exec below
+  ( flock -x 9 || exit 1; _ensure_daemons ) 9>/tmp/corelink-docker-shim.lock || exit 1
+else
+  _ensure_daemons || exit 1
 fi
 
 exec sudo \
