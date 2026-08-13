@@ -51,7 +51,9 @@ jobs:
       - name: Mint a push cred + write docker config (F0.2 mechanism)
         run: |
           set -euo pipefail
-          CRED="$(npx -y wrangler@4.111.0 containers registries credentials registry.cloudflare.com --push --expiration-minutes 25 --json 2>/dev/null)"
+          # BOTH scopes: build #1 PUSHes the cache, build #2 (fresh daemon) PULLs it
+          # back via --import-cache. A push-only cred 401s the import blob fetch.
+          CRED="$(npx -y wrangler@4.111.0 containers registries credentials registry.cloudflare.com --push --pull --expiration-minutes 25 --json 2>/dev/null)"
           U=$(echo "$CRED" | jq -r '.username'); P=$(echo "$CRED" | jq -r '.password')
           [ -n "$U" ] && [ -n "$P" ] || { echo "::error::cred mint failed"; exit 1; }
           AUTH=$(printf '%s:%s' "$U" "$P" | base64 | tr -d '\n')
