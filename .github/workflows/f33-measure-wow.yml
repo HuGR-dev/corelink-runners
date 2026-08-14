@@ -65,7 +65,12 @@ jobs:
             --frontend dockerfile.v0 --local context="$B" --local dockerfile="$B" \
             --export-cache type=registry,ref="$CACHEREF",mode=max 2>&1 | tee "$RUNNER_TEMP/b1.log" | tail -30
           T1=$(date +%s.%N)
-          grep -q 'f33-expensive-done' "$RUNNER_TEMP/b1.log" || { echo "::error::cold build did not execute the layer"; exit 1; }
+          # "executed" is a RUNTIME output line: buildkit prefixes real RUN stdout
+          # with "#<step> <elapsed> <text>" (e.g. "#7 12.3 f33-expensive-done").
+          # The command-echo header line ("#7 [2/2] RUN ... f33-expensive-done") is
+          # NOT that shape, so grepping the bare word is ambiguous — match the
+          # elapsed-prefixed runtime line instead.
+          grep -qE '^#[0-9]+ [0-9]+\.[0-9]+ f33-expensive-done' "$RUNNER_TEMP/b1.log" || { echo "::error::cold build did not EXECUTE the layer"; exit 1; }
           grep -q 'CACHED' "$RUNNER_TEMP/b1.log" && { echo "::error::cold build unexpectedly hit a cache (contamination)"; exit 1; }
           COLD=$(python3 -c "print(f'{$T1-$T0:.2f}')")
           echo "COLD_SEC=$COLD" >> "$GITHUB_ENV"
@@ -86,7 +91,10 @@ jobs:
             --import-cache type=registry,ref="$CACHEREF" 2>&1 | tee "$RUNNER_TEMP/b2.log" | tail -30
           T1=$(date +%s.%N)
           grep -q 'CACHED' "$RUNNER_TEMP/b2.log" || { echo "::error::warm build did NOT hit the remote cache"; exit 1; }
-          grep -q 'f33-expensive-done' "$RUNNER_TEMP/b2.log" && { echo "::error::warm build re-executed the layer (no cache benefit)"; exit 1; }
+          # a re-execution would emit the elapsed-prefixed RUNTIME line; its ABSENCE
+          # (with CACHED present) proves the layer was skipped. The command-echo
+          # header carrying the sentinel text does NOT match this pattern.
+          grep -qE '^#[0-9]+ [0-9]+\.[0-9]+ f33-expensive-done' "$RUNNER_TEMP/b2.log" && { echo "::error::warm build re-executed the layer (no cache benefit)"; exit 1; }
           WARM=$(python3 -c "print(f'{$T1-$T0:.2f}')")
           echo "WARM_SEC=$WARM" >> "$GITHUB_ENV"
           echo "🔥 WARM wall-clock: ${WARM}s (layer CACHED, skipped)"
