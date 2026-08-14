@@ -111,9 +111,14 @@ export interface Env {
 /** The singleton control-plane container. fabricd binds 0.0.0.0:8080. */
 export class FabricdContainer extends Container<Env> {
   defaultPort = 8080;
-  // Long warmth; the cron keep-alive (scheduled() below) refreshes it each minute
-  // so it never actually sleeps. In-memory lease state survives between requests.
-  sleepAfter = "1h";
+  // Zero-idle-cost: sleep 5m after the last REAL request. The scheduled() cron no
+  // longer force-keeps it warm — it reads a container-free activity marker first
+  // (see fetch() override + the idle gate in scheduled()) and skips the health
+  // probe once a shard is idle, so an idle fabricd actually sleeps and stops
+  // billing memory. Lease state is pg-durable (DATABASE_URL), so sleeping loses
+  // nothing; a new acquire wakes the container (~2-3s, hidden behind a minutes-long
+  // CI job). While leases are active the box keeps calling in, so it stays warm.
+  sleepAfter = "5m";
   // fabricd dials OUT to CoreLink introspect + billing ingest (+ the spawn-Worker
   // once boxes are wired); it needs egress.
   enableInternet = true;
@@ -261,6 +266,40 @@ export class FabricdContainer extends Container<Env> {
         ? { FABRIC_AUTOSCALER_MAX_TRACKED_JOBS: env.FABRIC_AUTOSCALER_MAX_TRACKED_JOBS }
         : {}),
     };
+  }
+
+  // Zero-idle-cost activity marker. All fabricd traffic funnels through this DO
+  // (the Worker default fetch proxies every route via getContainer(FABRICD).fetch),
+  // so the DO is the authoritative choke point for "is there real activity" —
+  // no pg query, no cross-worker coupling.
+  //
+  // `/__do/idle-status` is answered PURELY from DO storage and MUST NOT delegate to
+  // `super.fetch()` (which would `containerFetch` → start/renew the container and
+  // defeat the whole purpose). The scheduled() idle gate reads it to decide whether
+  // to skip the health probe for a sleeping shard. It is internal-only — the Worker
+  // default fetch 404s any external `/__do/*` (see below).
+  override async fetch(request: Request): Promise<Response> {
+    const { pathname } = new URL(request.url);
+
+    if (pathname === "/__do/idle-status") {
+      const v = await this.ctx.storage.get<number>("lastActivityMs");
+      return new Response(JSON.stringify({ lastActivityMs: v ?? 0 }), {
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    // Record real activity (health probes are NOT activity). Fire-and-forget via
+    // waitUntil so a durable-storage write never adds latency to — or fails — the
+    // lease hot path; a lost write only means a slightly-stale marker (⇒ stays warm
+    // a touch longer ⇒ fail-SAFE). Only the container path renews sleepAfter, so
+    // the marker write itself does not keep the container awake.
+    if (pathname !== "/v1/health") {
+      this.ctx.waitUntil(
+        this.ctx.storage.put("lastActivityMs", Date.now()).catch(() => {}),
+      );
+    }
+
+    return super.fetch(request);
   }
 }
 
@@ -687,6 +726,12 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const N = numShards(env);
     const { pathname } = new URL(request.url);
+    // `/__do/*` is the DO-internal, container-free activity surface (idle-status)
+    // reached ONLY by scheduled() via getContainer(...).fetch(); it must never be
+    // exposed to external callers, so 404 it on the public Worker entry.
+    if (pathname.startsWith("/__do/")) {
+      return new Response("not found", { status: 404 });
+    }
     // Non-long-lived routes get the per-request timeout → clean 503 on a wedged
     // upstream; exec/close/queue-trigger forward unbounded (isLongLivedRoute).
     const applyTimeout = !isLongLivedRoute(request.method, pathname);
@@ -796,12 +841,48 @@ export default {
     const PROBES = 3; // consecutive failures required to declare a real hang
     const PROBE_TIMEOUT_MS = 8_000;
     const GAP_MS = 5_000; // between probes — lets a busy worker free up
+    // Idle threshold, kept just UNDER sleepAfter (5m) so the cron stops probing a
+    // shard before its container would sleep — a probe must never re-wake an
+    // about-to-sleep idle container (that would defeat zero-idle-cost).
+    const IDLE_MS = 4 * 60_000;
 
     // Probe every shard independently — the same 3-consecutive-failure watchdog
     // per container. At N=1 this is a single iteration = today's behaviour.
     for (let k = 0; k < N; k++) {
       const id = shardDoId(k, N);
       const container = getContainer(env.FABRICD, id);
+
+      // ── Zero-idle-cost gate ────────────────────────────────────────────────
+      // Read the container-free activity marker (handled by FabricdContainer.fetch
+      // WITHOUT touching the container). If this shard has had no real request for
+      // > IDLE_MS, it is idle → SKIP the /v1/health probe so the container can
+      // sleep (a probe would wake it). A sleeping container is not "dark": the next
+      // real acquire wakes it, and a genuine hang while a job is active is caught
+      // because the box's own call fails. Fail-CLOSED: any idle-read error runs the
+      // legacy watchdog unchanged.
+      let idleSkip = false;
+      try {
+        const idleRes = await container.fetch(
+          new Request("http://fabricd/__do/idle-status"),
+        );
+        if (idleRes.status === 200) {
+          const body = (await idleRes.json()) as { lastActivityMs?: unknown };
+          const lastActivityMs =
+            typeof body.lastActivityMs === "number" &&
+            Number.isFinite(body.lastActivityMs)
+              ? body.lastActivityMs
+              : 0; // unset/non-numeric ⇒ 0 ⇒ treat as idle
+          idleSkip = Date.now() - lastActivityMs > IDLE_MS;
+        }
+      } catch {
+        idleSkip = false; // fail-closed: run the legacy watchdog
+      }
+      if (idleSkip) {
+        // Clear watchdog lifecycle so the next active period treats a possibly-slept
+        // container as a fresh boot, not a previously-healthy one that "went dark".
+        watchdogState.delete(id);
+        continue;
+      }
 
       // Persisted per-container lifecycle (module scope; see watchdogState). A
       // never-before-seen id starts its boot-grace clock now.
