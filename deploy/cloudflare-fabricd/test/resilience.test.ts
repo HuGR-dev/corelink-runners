@@ -112,6 +112,64 @@ function timeoutError(): Error {
   return Object.assign(new Error("The operation timed out."), { name: "TimeoutError" });
 }
 
+// ─────────────────────── scheduled() zero-idle-cost gate ───────────────────────
+describe("scheduled() — idle gate skips the health probe so an idle fabricd sleeps", () => {
+  // A container mock that records every path it is fetched and answers the
+  // container-free idle-status from `lastActivityMs`, and /v1/health with 200.
+  function mockContainer(lastActivityMs: number, opts: { idleThrows?: boolean } = {}) {
+    const paths: string[] = [];
+    getContainer.mockImplementation(() => ({
+      fetch: (req: Request) => {
+        const { pathname } = new URL(req.url);
+        paths.push(pathname);
+        if (pathname === "/__do/idle-status") {
+          if (opts.idleThrows) return Promise.reject(new Error("boom"));
+          return Promise.resolve(
+            new Response(JSON.stringify({ lastActivityMs }), {
+              headers: { "content-type": "application/json" },
+            }),
+          );
+        }
+        // /v1/health → healthy (200) so the watchdog loop exits on the first probe
+        // (no inter-probe GAP_MS wait ⇒ the test stays fast).
+        return Promise.resolve(new Response("ok", { status: 200 }));
+      },
+    }));
+    return paths;
+  }
+
+  const run = () =>
+    worker.scheduled(
+      {} as unknown as Parameters<typeof worker.scheduled>[0],
+      envWithShards(1),
+    );
+
+  it("idle (last activity > 4m ago) ⇒ reads idle-status but does NOT probe /v1/health", async () => {
+    const paths = mockContainer(Date.now() - 5 * 60_000);
+    await run();
+    expect(paths).toContain("/__do/idle-status");
+    expect(paths).not.toContain("/v1/health");
+  });
+
+  it("unset marker (lastActivityMs=0) ⇒ treated as idle ⇒ no /v1/health probe", async () => {
+    const paths = mockContainer(0);
+    await run();
+    expect(paths).not.toContain("/v1/health");
+  });
+
+  it("recent activity ⇒ runs the watchdog (does probe /v1/health)", async () => {
+    const paths = mockContainer(Date.now());
+    await run();
+    expect(paths).toContain("/v1/health");
+  });
+
+  it("idle-status read failure ⇒ fail-CLOSED to the legacy watchdog (probes /v1/health)", async () => {
+    const paths = mockContainer(0, { idleThrows: true });
+    await run();
+    expect(paths).toContain("/v1/health");
+  });
+});
+
 describe("proxyFetch — wedged upstream → structured 503 (bounded routes only)", () => {
   it("a bounded lease-op (GET /v1/leases/{id}) on a hung upstream → 503 JSON, no internals", async () => {
     getContainer.mockImplementation(() => ({ fetch: () => Promise.reject(timeoutError()) }));
