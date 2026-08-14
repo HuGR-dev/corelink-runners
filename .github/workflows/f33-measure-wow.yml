@@ -1,0 +1,117 @@
+# F3.3 — MEASURE THE WOW: quantify the CoreLink layer-cache speedup (N×).
+# Build #1 (COLD): no cache, executes an expensive deterministic layer, exports
+# the result to CoreLink's OWN OCI registry (F3.1 substrate). Build #2 (WARM):
+# a FRESH buildkit daemon (zero local state) imports that cache — the expensive
+# layer is CACHED and skipped. We wall-clock BOTH end-to-end and report
+# cold / warm / speedup. Honest framing: the RUN layer is a CPU-bound stand-in
+# for a real compile/dep-build step; the point is the cache skips ALL of it while
+# the transferred layer stays tiny. Scratch cache repo deleted after (zero bleed).
+name: f33-measure-wow
+
+on:
+  push:
+    branches: [proof/f33-measure-wow]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  CAS_PAT: ${{ secrets.F3_CAS_PAT }}
+  OCI_HOST: corelink-api.humangr.com
+
+jobs:
+  measure:
+    name: "cold vs warm — CoreLink OCI layer cache speedup"
+    runs-on: corelink
+    timeout-minutes: 30
+    steps:
+      - name: "docker config: basic-auth PAT for the CoreLink OCI host"
+        run: |
+          set -euo pipefail
+          AUTH=$(printf 'x:%s' "$CAS_PAT" | base64 | tr -d '\n')
+          mkdir -p "$HOME/.docker"
+          printf '{"auths":{"%s":{"auth":"%s"}}}' "$OCI_HOST" "$AUTH" > "$HOME/.docker/config.json"
+          CACHEREF="${OCI_HOST}/cache/f33-${GITHUB_RUN_ID}"
+          echo "CACHEREF=$CACHEREF" >> "$GITHUB_ENV"
+          echo "cache ref: $CACHEREF"
+
+      - name: "write the Dockerfile (expensive deterministic layer, tiny artifact)"
+        run: |
+          set -euo pipefail
+          B="$RUNNER_TEMP/ctx"; mkdir -p "$B"
+          # EXPENSIVE, DETERMINISTIC, SMALL-OUTPUT: 250 rounds of hashing 64 MiB of
+          # zeros (CPU-bound; stand-in for a compile/dependency-build step). The
+          # only artifact kept is a ~16 KiB log of hashes, so the cached layer that
+          # crosses the wire on the WARM build is trivially small — the speedup is
+          # real compute skipped, not hidden in a fat transfer.
+          {
+            echo 'FROM ubuntu:24.04'
+            echo 'RUN echo f33-start && \'
+            echo '    for r in $(seq 1 250); do dd if=/dev/zero bs=1M count=64 2>/dev/null | sha256sum; done > /work.log && \'
+            echo '    wc -c /work.log && echo f33-expensive-done'
+          } > "$B/Dockerfile"
+          cat "$B/Dockerfile"
+
+      - name: "build #1 — COLD (execute + export-cache to CoreLink OCI, mode=max)"
+        run: |
+          set -euo pipefail
+          B="$RUNNER_TEMP/ctx"
+          ADDR="unix://$RUNNER_TEMP/bk1.sock"
+          sudo sh -c "buildkitd --addr '$ADDR' --oci-worker-snapshotter=overlayfs --root '$RUNNER_TEMP/bk1' >'$RUNNER_TEMP/bk1d.log' 2>&1 &"
+          for i in $(seq 1 60); do sudo buildctl --addr "$ADDR" debug workers >/dev/null 2>&1 && break; sleep 1; done
+          T0=$(date +%s.%N)
+          sudo DOCKER_CONFIG="$HOME/.docker" buildctl --addr "$ADDR" build \
+            --frontend dockerfile.v0 --local context="$B" --local dockerfile="$B" \
+            --export-cache type=registry,ref="$CACHEREF",mode=max 2>&1 | tee "$RUNNER_TEMP/b1.log" | tail -30
+          T1=$(date +%s.%N)
+          grep -q 'f33-expensive-done' "$RUNNER_TEMP/b1.log" || { echo "::error::cold build did not execute the layer"; exit 1; }
+          grep -q 'CACHED' "$RUNNER_TEMP/b1.log" && { echo "::error::cold build unexpectedly hit a cache (contamination)"; exit 1; }
+          COLD=$(python3 -c "print(f'{$T1-$T0:.2f}')")
+          echo "COLD_SEC=$COLD" >> "$GITHUB_ENV"
+          echo "❄️  COLD wall-clock: ${COLD}s (layer executed + exported)"
+
+      - name: "build #2 — WARM (FRESH daemon, import-cache, expect CACHED)"
+        run: |
+          set -euo pipefail
+          B="$RUNNER_TEMP/ctx"
+          ADDR="unix://$RUNNER_TEMP/bk2.sock"
+          # a SEPARATE buildkit root => zero local cache; a CACHED line can ONLY
+          # come from the imported CoreLink-OCI remote cache.
+          sudo sh -c "buildkitd --addr '$ADDR' --oci-worker-snapshotter=overlayfs --root '$RUNNER_TEMP/bk2' >'$RUNNER_TEMP/bk2d.log' 2>&1 &"
+          for i in $(seq 1 60); do sudo buildctl --addr "$ADDR" debug workers >/dev/null 2>&1 && break; sleep 1; done
+          T0=$(date +%s.%N)
+          sudo DOCKER_CONFIG="$HOME/.docker" buildctl --addr "$ADDR" build \
+            --frontend dockerfile.v0 --local context="$B" --local dockerfile="$B" \
+            --import-cache type=registry,ref="$CACHEREF" 2>&1 | tee "$RUNNER_TEMP/b2.log" | tail -30
+          T1=$(date +%s.%N)
+          grep -q 'CACHED' "$RUNNER_TEMP/b2.log" || { echo "::error::warm build did NOT hit the remote cache"; exit 1; }
+          grep -q 'f33-expensive-done' "$RUNNER_TEMP/b2.log" && { echo "::error::warm build re-executed the layer (no cache benefit)"; exit 1; }
+          WARM=$(python3 -c "print(f'{$T1-$T0:.2f}')")
+          echo "WARM_SEC=$WARM" >> "$GITHUB_ENV"
+          echo "🔥 WARM wall-clock: ${WARM}s (layer CACHED, skipped)"
+
+      - name: "verdict — cold / warm / speedup"
+        run: |
+          set -euo pipefail
+          python3 - <<PY
+          cold=float("${COLD_SEC}"); warm=float("${WARM_SEC}")
+          spd = cold/warm if warm>0 else float('inf')
+          saved = cold-warm
+          print("═══════════ F3.3 — THE WOW ═══════════")
+          print(f"COLD (1st build, no cache):  {cold:6.2f}s")
+          print(f"WARM (2nd build, CoreLink cache HIT): {warm:6.2f}s")
+          print(f"SPEEDUP: {spd:.1f}×   (saved {saved:.2f}s on this one layer)")
+          print("The expensive layer executed cold, then was skipped entirely on the")
+          print("warm build via a remote-cache HIT from CoreLink's OWN OCI registry.")
+          # a real, defensible wow: at least 3× on this CPU-bound layer
+          assert spd >= 3.0, f"speedup {spd:.1f}× below the 3× bar — cache benefit not compelling"
+          print(f"✓ F3.3 PROVEN: {spd:.1f}× speedup, cache served by CoreLink.")
+          PY
+
+      - name: "delete scratch cache repo (zero bleed)"
+        if: always()
+        run: |
+          set +e
+          TOK=$(curl -s -u "x:$CAS_PAT" "https://corelink-oci.humangr.com/token?service=corelink-oci&scope=repository:cache/f33-${GITHUB_RUN_ID}:delete,pull" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("token",""))' 2>/dev/null)
+          curl -s -o /dev/null -w "manifest-del %{http_code}\n" -X DELETE -H "Authorization: Bearer $TOK" "https://${OCI_HOST}/v2/cache/f33-${GITHUB_RUN_ID}/manifests/latest" || true
