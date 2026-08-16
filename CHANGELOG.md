@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-08-16 — release binary was a Linux ELF mislabeled as Apple-Silicon
+
+- **fix(release): `.github/workflows/release.yml`'s `binary` job ran on
+  GitHub-hosted `ubuntu-latest`, built `corelink-cli` with no `--target`
+  (native x86_64 Linux ELF), and uploaded it as the release asset
+  `corelink-aarch64-apple-darwin`.** On the next `v*` tag this would have
+  shipped a Linux binary labeled Apple-Silicon — any macOS-ARM customer
+  running it would hit "Exec format error". Rewritten to build a matrix of
+  targets this repo's self-hosted `corelink` fleet can actually produce
+  correctly — `x86_64-unknown-linux-gnu` (native) plus
+  `aarch64-unknown-linux-gnu` / `x86_64-pc-windows-gnu` (via
+  `cargo-zigbuild`, mirroring the proven pattern in `corelink-server`'s
+  `release-cli.yml` and `corelink-workspaces`' `release.yml`) — with each
+  asset truthfully named after its real target triple. `aarch64-apple-darwin`
+  is intentionally NOT built: this repo has no self-hosted Mac builder (the
+  sibling repos build darwin natively on real Apple hardware; cross-building
+  to an Apple target needs the non-redistributable Apple SDK). `docs/release.md`
+  updated to match. Follow-up: add a darwin leg once a self-hosted Mac
+  builder exists for this repo.
+- **ci(build-cf-container-images): fix a self-contradictory comment.** The
+  job comment claimed "Self-hosted Linux x64 builder (label
+  `corelink-builder`). NOT GH-hosted" while `runs-on: ubuntu-latest` sat one
+  line below it. Corrected to state the truth: it deliberately stays
+  GitHub-hosted because it needs a Docker daemon (`wrangler containers
+  build`) that the self-hosted fleet doesn't run, kept cheap via its
+  existing `workflow_dispatch`-only trigger.
+
 ### 2026-08-13 — BuildKit baked in the fleet image (daemonless container builds)
 
 - **feat(runner-image): bake BuildKit (`buildkitd`+`buildctl`+runc) into

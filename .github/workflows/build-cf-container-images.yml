@@ -18,12 +18,13 @@
 #      Containers/Workers push scope for account 6a1fc1c626fc2628823e60b9db01f5cd.
 #      Wrangler reads it from the env; the job is GUARDED on it (fails fast, with
 #      a clear message, if the secret is absent).
-#   2. A GitHub-hosted `ubuntu-latest` runner (has Docker + Node preinstalled).
-#      We deliberately do NOT use GitHub-hosted `ubuntu-latest`: the org is on the
-#      free plan and GH-hosted minutes hit a billing wall. CONFIRM that builder
-#      still exists / is online before the first dispatch — if it was retired,
-#      (ubuntu-latest provides Docker; setup-node/setup-toolchain provision the rest).
-#      (Wrangler needs a working Docker CLI + daemon to BUILD the images.)
+#   2. This job intentionally runs on GitHub-hosted `ubuntu-latest`, NOT a
+#      self-hosted runner — it needs a working Docker daemon (`wrangler
+#      containers build` shells out to `docker buildx`) and the self-hosted
+#      `corelink-builder` fleet does not carry one. It is `workflow_dispatch`-only
+#      (see below) precisely so this hosted spend stays rare/manual instead of
+#      firing on every push, per the zero-hosted-spend mandate.
+#      (ubuntu-latest ships Docker preinstalled; setup-node below provisions Node.)
 name: build-cf-container-images
 
 on:
@@ -41,8 +42,11 @@ env:
 
 jobs:
   build-and-push:
-    # Self-hosted Linux x64 builder (label `corelink-builder`). NOT GH-hosted
-    # (free-plan billing wall). Needs Docker for wrangler to build.
+    # GitHub-hosted (ubuntu-latest), deliberately — NOT self-hosted. This job
+    # needs a Docker daemon for `wrangler containers build` (docker buildx under
+    # the hood); the self-hosted `corelink-builder` fleet doesn't run one. Kept
+    # cheap via `workflow_dispatch`-only triggering (see header) rather than by
+    # moving it self-hosted.
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:

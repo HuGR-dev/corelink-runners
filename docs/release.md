@@ -18,22 +18,33 @@ git push origin v0.1.0
 ```
 
 That push triggers `.github/workflows/release.yml` on the self-hosted
-`corelink-builder` runner. The `binary` job:
+`corelink` ephemeral fleet (this repo's own product — $0 GitHub billing; there
+is no self-hosted macOS builder for this repo). The `binary` job builds a
+matrix of targets — natively for the fleet's own Linux host triple, and via
+`cargo-zigbuild` (zig cross-toolchain) for the other Linux-family targets —
+then `publish-release` creates the GitHub Release and attaches every binary
+plus its SHA-256 checksum:
 
-1. Checks out the tagged commit.
-2. Runs `cargo build -p corelink-cli --release --locked`.
-3. Computes a SHA-256 checksum of the resulting binary.
-4. Creates a GitHub Release for the tag (with auto-generated notes) and
-   uploads two assets:
-   - `corelink-aarch64-apple-darwin` — the `corelink` CLI binary.
-   - `corelink-aarch64-apple-darwin.sha256` — the SHA-256 checksum.
+- `corelink-x86_64-unknown-linux-gnu` (+ `.sha256`) — native build.
+- `corelink-aarch64-unknown-linux-gnu` (+ `.sha256`) — `cargo zigbuild` cross.
+- `corelink-x86_64-pc-windows-gnu.exe` (+ `.sha256`) — `cargo zigbuild` cross.
 
 The GitHub Release is the concrete artifact that unblocks users of the
 GitHub Action and Buildkite plugin (see §4 below).
 
-**Note:** x86_64/Linux binaries are a deliberate follow-up. The current
-pipeline targets the aarch64 mac builder only. Cross-compilation will be
-added once a Linux self-hosted runner is available.
+**Note (2026-08-16):** `aarch64-apple-darwin` (and any other Apple target) is
+**not** built by this pipeline. Cross-compiling to an Apple target needs the
+(non-redistributable) Apple SDK, and every proven zigbuild pipeline in this
+org (`corelink-server`'s `release-cli.yml`, `corelink-workspaces`' `release.yml`)
+builds darwin **natively**, on a real self-hosted Mac (`corelink-builder`).
+corelink-runners has no such Mac builder today. A previous version of this
+job ran on GitHub-hosted `ubuntu-latest` with no `--target`, producing a
+native Linux ELF, and mislabeled + shipped it as `corelink-aarch64-apple-
+darwin` — an Apple-Silicon user running it would hit "Exec format error".
+That mislabel is fixed by only building targets this fleet can produce
+correctly. Adding a real darwin leg is a follow-up once a self-hosted Mac
+builder exists for this repo (mirror `release-cli.yml` / corelink-workspaces'
+`release.yml`).
 
 ---
 
@@ -123,15 +134,16 @@ The GitHub Action (`integrations/github-action/`) and Buildkite plugin
 (`integrations/buildkite-plugin/`) currently locate `corelink` via `PATH`.
 This works for users who build from source but not for the common case.
 
-Once a GitHub Release exists with the `corelink-aarch64-apple-darwin` asset,
-a follow-up work-package should:
+Once a GitHub Release exists with the `corelink-x86_64-unknown-linux-gnu` /
+`corelink-aarch64-unknown-linux-gnu` / `corelink-x86_64-pc-windows-gnu.exe`
+assets, a follow-up work-package should:
 
 1. Add a `version` input to the GitHub Action and Buildkite plugin.
-2. Have the setup step download `corelink-aarch64-apple-darwin` (and verify
-   the `.sha256`) from the GitHub Release for that version and place it on
-   `PATH`.
-3. Extend the download logic for additional platforms (x86_64-linux) once
-   those binaries are added to the release pipeline.
+2. Have the setup step download the matching asset for the runner's OS/arch
+   (and verify its `.sha256`) from the GitHub Release for that version and
+   place it on `PATH`.
+3. Extend the matrix with a darwin leg once a self-hosted Mac builder exists
+   for this repo (see §1's 2026-08-16 note).
 
 This follow-up is intentionally out of scope for this WP; it requires a
 released binary to exist first.
