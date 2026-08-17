@@ -40,9 +40,6 @@ on:
   # explicitly when the runner/check-host Dockerfile (or a baked pin) changes:
   #   gh workflow run build-cf-container-images.yml
   workflow_dispatch: {}
-  # TEMP (strip before merge): prove the migrated lane end-to-end on the branch.
-  push:
-    branches: [chore/probe-cf-registry-login]
 
 permissions:
   contents: read
