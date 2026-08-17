@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-08-17 — docker-shim: `docker buildx build` compatibility
+
+- **fix(runner): the `docker` shim now translates `docker buildx build …` →
+  `nerdctl build …` (and no-ops `buildx imagetools inspect`).** The shim
+  `exec`s `nerdctl "$@"`, but nerdctl has no `buildx` subcommand, so an
+  unmodified `docker buildx build` died with `unknown shorthand flag: 't' in
+  -t` (verified on a live `runs-on: corelink` lease). This blocked any tooling
+  that shells to buildx — notably `wrangler containers build`, which is why
+  `build-cf-container-images.yml` still has to run on hosted `ubuntu-latest`.
+  Plain `docker build` already worked here (proven F2 + reprobed 2026-08-17), so
+  the shim just drops the `buildx` word for `build` and best-effort-no-ops the
+  `imagetools inspect` metadata query (callers `|| true` and fall back to the
+  tag). `docker login` / `docker push` already passed through, so the full
+  build→login→push chain to `registry.cloudflare.com` now works daemonlessly on
+  a lease. Takes effect on the next runner-image rebuild; unblocks migrating the
+  image-build lane off hosted (zero-hosted mandate). Translation logic unit-tested
+  for all forms (build / imagetools / version / login / push).
+
 ### 2026-08-17 — bake the action-archive cache into the runner image (kills codeload-429)
 
 - **ci(runner): pre-seed `ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE` in the ephemeral
