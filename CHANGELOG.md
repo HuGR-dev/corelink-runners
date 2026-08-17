@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-08-17 — bake the action-archive cache into the runner image (kills codeload-429)
+
+- **ci(runner): pre-seed `ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE` in the ephemeral
+  runner image so a spawned box never cold-downloads `actions/checkout`
+  (+friends) from codeload.github.com.** Every runner egresses through one IP; a
+  broad corelink-server PR fans ~20 gates out at once, each cold-downloading the
+  action archive, and concurrent downloads on one IP trip codeload's per-IP rate
+  limit (`429 Too Many Requests`), failing jobs at "Set up job" with no test run.
+  New `deploy/runner/Dockerfile` stage `action-cache-download` fetches each pin in
+  `deploy/runner/action-archive-pins.txt` (the hot corelink-server actions) to
+  `/opt/action-archive-cache/<owner>_<repo>/<sha>.tar.gz`; the final stage COPYs it
+  and sets `ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE` (+ `_SYMLINK_CACHED_ACTIONS`), so
+  the runner (≥2.335) extracts locally and never hits codeload. Integrity anchor is
+  the git commit SHA (git-archive tarballs are not byte-reproducible, so no tarball
+  sha256 pin); `curl -f` + `gzip -t` fail the build closed on a bad pin. This is the
+  image-baked half of the fix — the persistent Mac builders set the same env + a
+  seed script (corelink-server `scripts/seed-runner-action-cache.sh`), proven by use
+  2026-08-17 (job logs "Found action archive … in cache directory", 0 codeload).
+
 ### 2026-08-16 — release binary was a Linux ELF mislabeled as Apple-Silicon
 
 - **fix(release): `.github/workflows/release.yml`'s `binary` job ran on
