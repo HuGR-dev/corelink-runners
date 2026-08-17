@@ -307,6 +307,58 @@ RUN curl -fsSL \
     rm -f /tmp/pnpm.tgz && \
     test -x /opt/pnpm/bin/pnpm.cjs && test -x /opt/pnpm/bin/pnpx.cjs
 
+# ── Stage 1f: action-archive cache pre-seed ──────────────────────────────────
+# Same PINNED base digest. Pre-seed the runner's READ-ONLY action-archive cache
+# (ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE, honoured by runner >=2.335) so an
+# ephemeral box never cold-downloads actions/checkout (+friends) from
+# codeload.github.com at job time.
+#
+# WHY THIS MATTERS: every runner egresses through ONE IP (the shared fabric
+# host). A broad corelink-server PR fans ~20 gates out at once, each downloading
+# the action archive; concurrent downloads on one IP trip codeload's per-IP rate
+# limit ("429 Too Many Requests … after 3 attempts"), and the job FAILS at "Set
+# up job" having run no test. Baking the archives removes the download entirely:
+# the runner finds `<cache>/<owner>_<repo>/<sha>.tar.gz` locally and extracts it.
+# (This is the image-baked half of the fix; the persistent Mac builders set the
+# same env + a seed script — same mechanism, proven by use 2026-08-17.)
+#
+# INTEGRITY (X4 floor): the pin is a git COMMIT SHA — a cryptographic hash of the
+# action tree — so the SHA IS the supply-chain anchor. A tarball sha256 is
+# deliberately NOT pinned (git-archive tarballs are not byte-reproducible across
+# git versions; the commit SHA already fixes the content). `curl -f` fails the
+# build closed on any 404/HTTP error, so a bad pin cannot ship silently.
+#
+# The pin LIST is deploy/runner/action-archive-pins.txt (tracks corelink-server's
+# hot pins; refresh it on a dependabot bump — a stale entry just costs one cold
+# download for the new SHA, self-limiting).
+FROM ubuntu:24.04@sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae77ff1dc54 AS action-cache-download
+
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+
+RUN apt-get update -qq && \
+    apt-get install -y --no-install-recommends curl ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY action-archive-pins.txt /tmp/action-archive-pins.txt
+
+# Fetch each pinned action's tarball into the cache layout the runner probes:
+#   <cache>/<owner>_<repo>/<sha>.tar.gz
+# Sequential (a handful of small archives); `curl -f` so a broken pin fails HERE,
+# and `gzip -t` proves each archive is intact before it ships.
+RUN mkdir -p /opt/action-archive-cache && \
+    while read -r pin; do \
+      pin="${pin%%#*}"; pin="${pin//[[:space:]]/}"; \
+      [ -n "$pin" ] || continue; \
+      owner_repo="${pin%@*}"; sha="${pin#*@}"; \
+      dir="/opt/action-archive-cache/${owner_repo/\//_}"; \
+      mkdir -p "$dir"; \
+      echo "  + ${owner_repo}@${sha:0:12}"; \
+      curl -fsSL "https://codeload.github.com/${owner_repo}/tar.gz/${sha}" -o "$dir/${sha}.tar.gz"; \
+      gzip -t "$dir/${sha}.tar.gz"; \
+    done < /tmp/action-archive-pins.txt && \
+    rm -f /tmp/action-archive-pins.txt && \
+    echo "baked $(find /opt/action-archive-cache -name '*.tar.gz' | wc -l) action archives"
+
 # ── Stage 2: final image ─────────────────────────────────────────────────────
 # Same PINNED digest as every download stage — all stages MUST use the identical base.
 FROM ubuntu:24.04@sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae77ff1dc54
@@ -459,6 +511,15 @@ RUN useradd -m -s /bin/bash -G sudo runner && \
 
 # ── Copy actions-runner from Stage 1 ─────────────────────────────────────────
 COPY --from=runner-download --chown=runner:runner /opt/actions-runner /opt/actions-runner
+
+# ── Copy the pre-seeded action-archive cache from Stage 1f ────────────────────
+# ENV makes the runner (>=2.335) consult this read-only mirror BEFORE codeload;
+# a hit extracts locally, so an ephemeral box never cold-downloads actions/checkout
+# (+friends) and can never 429 at "Set up job". runner-owned so the unprivileged
+# `runner` user reads it; the runner only READS this dir (never writes back).
+COPY --from=action-cache-download --chown=runner:runner /opt/action-archive-cache /opt/action-archive-cache
+ENV ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE=/opt/action-archive-cache \
+    ACTIONS_RUNNER_SYMLINK_CACHED_ACTIONS=1
 
 # ── Copy the digest-pinned clw binary from Stage 1b ──────────────────────────
 # root-owned, world-executable on PATH — the runner drives `clw snapshot →
