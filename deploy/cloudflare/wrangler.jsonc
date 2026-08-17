@@ -185,7 +185,15 @@
       // on top of increment 2. Unblocks the `gh pr comment`/`gh api` gates
       // (lockfile-diff, api-reference-sync), compliance-weekly, and every
       // validate_specs.py gate (hard `import jsonschema`) for `runs-on: corelink`.
-      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-runnercontainer@sha256:fa052ed7547516d61bc70e71bfa2ebc26929de5ec9fa48fce046eaf43771033d",
+      // 2026-08-17 increment 4 (FIRST build via the migrated self-hosted CI lane
+      // build-cf-container-images.yml on runs-on:corelink — no more hosted spend,
+      // run 32057699111). Adds the baked action-archive cache
+      // (/opt/action-archive-cache + ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE) so a
+      // spawned box never cold-downloads actions/checkout from codeload.github.com
+      // (kills the 429-at-Set-up-job on the ephemeral fleet), plus the docker-shim
+      // `docker buildx build`->`nerdctl build` compat. Rollback = the increment-3
+      // digest @sha256:fa052ed7547516d61bc70e71bfa2ebc26929de5ec9fa48fce046eaf43771033d.
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-runnercontainer@sha256:b7532bae738dfd5b469aa005933dfea1108e79d88fc573c3893ebc7d3283d2db",
       // standard-4 = 4 vCPU / 12 GiB / 20 GB disk — fits CI, clears the runner
       // disk floor (RUNNER_EPHEMERAL_STORAGE_FLOOR_MB).
       "instance_type": "standard-4",
