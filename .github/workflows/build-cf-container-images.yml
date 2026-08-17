@@ -13,25 +13,32 @@
 # wrangler.jsonc's CheckHostContainer be flipped off its Dockerfile (see the
 # comment there).
 #
-# ── OWNER DEPENDENCIES (must be satisfied before this workflow can succeed) ────
-#   1. GH SECRET `CLOUDFLARE_API_TOKEN` — a Cloudflare API token with
-#      Containers/Workers push scope for account 6a1fc1c626fc2628823e60b9db01f5cd.
-#      Wrangler reads it from the env; the job is GUARDED on it (fails fast, with
-#      a clear message, if the secret is absent).
-#   2. This job intentionally runs on GitHub-hosted `ubuntu-latest`, NOT a
-#      self-hosted runner — it needs a working Docker daemon (`wrangler
-#      containers build` shells out to `docker buildx`) and the self-hosted
-#      `corelink-builder` fleet does not carry one. It is `workflow_dispatch`-only
-#      (see below) precisely so this hosted spend stays rare/manual instead of
-#      firing on every push, per the zero-hosted-spend mandate.
-#      (ubuntu-latest ships Docker preinstalled; setup-node below provisions Node.)
+# ── SELF-HOSTED, DAEMONLESS (2026-08-17) ──────────────────────────────────────
+# This job used to run on GitHub-hosted `ubuntu-latest` because `wrangler
+# containers build` shells to `docker buildx`, which the fleet's docker-shim does
+# not support. Under the zero-hosted billing block that lane is DEAD (it fails at
+# "Set up job", so the runner image could never be rebuilt). It now runs on the
+# ephemeral `corelink` fleet, DAEMONLESS, using the proven chain:
+#   1. `docker build`  — the baked docker-shim runs nerdctl/buildkit (containerd
+#      image store). Plain `docker build` works here (proven F2 + reprobed).
+#   2. `wrangler containers push <tag>` — wrangler mints the short-lived CF
+#      registry credential and pushes via the `docker` binary (-> shim -> nerdctl
+#      push). No `docker buildx`, no Docker daemon, no hosted spend. Proven
+#      end-to-end on a live lease 2026-08-17 (a build+push of a probe image
+#      returned `Pushed image: registry.cloudflare.com/.../...`).
+# The manifest digest is parsed from wrangler's push output for an immutable X4
+# pin (falls back to the git-SHA tag if not found — never regresses).
+#
+# ── OWNER DEPENDENCIES ────────────────────────────────────────────────────────
+#   GH SECRET `CLOUDFLARE_API_TOKEN` — a Cloudflare API token with
+#   Containers/Workers push scope for account 6a1fc1c626fc2628823e60b9db01f5cd.
+#   Wrangler reads it from the env; the job is GUARDED on it (fails fast).
 name: build-cf-container-images
 
 on:
-  # MANUAL-ONLY (2026-07-06): the push-on-paths trigger fired a heavy Docker image
-  # build on every wrangler.jsonc/Dockerfile merge (path-filtered; runs on GitHub-hosted
-  # builder. The image changes rarely; dispatch it explicitly when the runner
-  # Dockerfile actually changes (`gh workflow run build-cf-container-images.yml`).
+  # MANUAL-ONLY: a heavy image build should not fire on every merge. Dispatch it
+  # explicitly when the runner/check-host Dockerfile (or a baked pin) changes:
+  #   gh workflow run build-cf-container-images.yml
   workflow_dispatch: {}
 
 permissions:
@@ -42,12 +49,9 @@ env:
 
 jobs:
   build-and-push:
-    # GitHub-hosted (ubuntu-latest), deliberately — NOT self-hosted. This job
-    # needs a Docker daemon for `wrangler containers build` (docker buildx under
-    # the hood); the self-hosted `corelink-builder` fleet doesn't run one. Kept
-    # cheap via `workflow_dispatch`-only triggering (see header) rather than by
-    # moving it self-hosted.
-    runs-on: ubuntu-latest
+    # Ephemeral CoreLink fleet — amd64-native (fast) + baked nerdctl/buildkit +
+    # docker-shim + Node + Rust. Zero GitHub-hosted spend.
+    runs-on: corelink
     timeout-minutes: 120
     steps:
       - name: Guard — require the CLOUDFLARE_API_TOKEN secret
@@ -66,77 +70,39 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Sanity — Docker is available (wrangler needs it to BUILD)
+      - name: Sanity — the docker shim (nerdctl/buildkit) answers
         run: docker version
-
-      # ubuntu-latest has Docker; setup-node (below) provisions Node/npm for wrangler
-      # PATH (`npm: command not found`, 2026-07-05). setup-node provisions a
-      # deterministic Node into the runner tool-cache so `npm ci` (wrangler) works
-      # without a machine-level install.
-      - name: Set up Node (wrangler needs npm; wrangler requires Node >= 22)
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
 
       - name: Install deps (wrangler)
         working-directory: deploy/cloudflare
         run: npm ci
 
-      # `wrangler containers build --push` builds the image from the given
-      # Dockerfile/context and pushes it to the Cloudflare managed registry,
-      # returning the pushed reference. We name each image to match the
-      # DO class it backs (the CF convention <worker>-<classlower>). The tag is
-      # the commit SHA for traceability; wrangler also computes the digest.
+      # RunnerContainer — the image customers' `runs-on: corelink` jobs boot on.
       - name: Build + push RunnerContainer image
         id: runner
-        working-directory: deploy/cloudflare
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           set -euo pipefail
           IMAGE="corelink-spawn-worker-runnercontainer"
           TAG="${GITHUB_SHA}"
-          # <PATH> positional = build context (Dockerfile lives there);
-          # --tag = <name>:<tag>; --push uploads to the CF managed registry.
-          OUT="$(npx wrangler containers build ../runner \
-            --tag "${IMAGE}:${TAG}" \
-            --push 2>&1 | tee /dev/stderr)"
-          # Extract the pushed registry ref (…@sha256:… if present, else the tag).
-          REF="$(printf '%s\n' "${OUT}" | grep -oE 'registry\.cloudflare\.com/[^ ]+@sha256:[0-9a-f]{64}' | head -n1 || true)"
-          # Resolve the pushed tag's @sha256 manifest digest for an immutable X4 pin.
-          # `wrangler containers build --push` authenticates docker to the managed
-          # registry, so `imagetools inspect` can read the manifest here. Best-effort;
-          # falls through to the git-SHA tag exactly as before (never regresses).
-          if [ -z "${REF}" ]; then
-            DIGEST="$(docker buildx imagetools inspect "registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/${IMAGE}:${TAG}" --format '{{ .Manifest.Digest }}' 2>/dev/null || true)"
-            if printf '%s' "${DIGEST}" | grep -qE '^sha256:[0-9a-f]{64}$'; then
-              REF="registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/${IMAGE}@${DIGEST}"
-            fi
-          fi
-          if [ -z "${REF}" ]; then
-            REF="registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/${IMAGE}:${TAG}"
-          fi
+          # Build with plain `docker build` (shim -> nerdctl/buildkit); context =
+          # deploy/runner (Dockerfile + action-archive-pins.txt live there).
+          docker build -t "${IMAGE}:${TAG}" deploy/runner
+          # Push via wrangler (mints the CF registry cred; uses the docker binary).
+          ( cd deploy/cloudflare && npx wrangler containers push "${IMAGE}:${TAG}" 2>&1 | tee /tmp/runner-push.out )
+          REF="$(scripts/ci/resolve-pushed-ref.sh "${IMAGE}" "${TAG}" /tmp/runner-push.out)"
           echo "ref=${REF}" >> "${GITHUB_OUTPUT}"
           echo "Runner image pushed: ${REF}"
 
-      # The check-host image COPYs a prebuilt exec-server binary from its build
-      # context (deploy/check-host, since `wrangler containers build <dir>` uses
-      # <dir> as BOTH the Dockerfile location and the context). Compile it for musl
-      # (static → runs on debian:12-slim regardless of glibc version) and stage it
-      # into the context before building the image.
-      - name: Set up Rust (exec-server, musl target)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-musl
-
+      # CheckHostContainer — COPYs a prebuilt static musl exec-server from its
+      # context. Build it with the image's baked toolchain (musl target baked on
+      # 1.91.1), stage it, then build+push the image the same daemonless way.
       - name: Build corelink-check-exec-server (musl) into the check-host context
         run: |
           set -euo pipefail
-          # dtolnay puts rustup+cargo on PATH; also front the builder's own cargo
-          # home so `rustup target add` lands on the toolchain `cargo` actually uses
-          # (self-hosted builder had E0463 'can't find core' when they diverged).
           export PATH="$HOME/.cargo/bin:$PATH"
-          rustup target add x86_64-unknown-linux-musl
+          rustup target add x86_64-unknown-linux-musl || true
           sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends musl-tools || \
             echo "::warning::musl-tools install failed (may already be present); continuing"
           cargo build -p corelink-check-exec-server --release --target x86_64-unknown-linux-musl
@@ -146,37 +112,22 @@ jobs:
 
       - name: Build + push CheckHostContainer image
         id: checkhost
-        working-directory: deploy/cloudflare
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           set -euo pipefail
           IMAGE="corelink-spawn-worker-checkhostcontainer"
           TAG="${GITHUB_SHA}"
-          OUT="$(npx wrangler containers build ../check-host \
-            --tag "${IMAGE}:${TAG}" \
-            --push 2>&1 | tee /dev/stderr)"
-          REF="$(printf '%s\n' "${OUT}" | grep -oE 'registry\.cloudflare\.com/[^ ]+@sha256:[0-9a-f]{64}' | head -n1 || true)"
-          # Resolve the pushed tag's @sha256 manifest digest for an immutable X4 pin.
-          # `wrangler containers build --push` authenticates docker to the managed
-          # registry, so `imagetools inspect` can read the manifest here. Best-effort;
-          # falls through to the git-SHA tag exactly as before (never regresses).
-          if [ -z "${REF}" ]; then
-            DIGEST="$(docker buildx imagetools inspect "registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/${IMAGE}:${TAG}" --format '{{ .Manifest.Digest }}' 2>/dev/null || true)"
-            if printf '%s' "${DIGEST}" | grep -qE '^sha256:[0-9a-f]{64}$'; then
-              REF="registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/${IMAGE}@${DIGEST}"
-            fi
-          fi
-          if [ -z "${REF}" ]; then
-            REF="registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/${IMAGE}:${TAG}"
-          fi
+          docker build -t "${IMAGE}:${TAG}" deploy/check-host
+          ( cd deploy/cloudflare && npx wrangler containers push "${IMAGE}:${TAG}" 2>&1 | tee /tmp/checkhost-push.out )
+          REF="$(scripts/ci/resolve-pushed-ref.sh "${IMAGE}" "${TAG}" /tmp/checkhost-push.out)"
           echo "ref=${REF}" >> "${GITHUB_OUTPUT}"
           echo "Check-host image pushed: ${REF}"
 
       - name: Summary — pushed image refs to pin in wrangler.jsonc
         run: |
           {
-            echo "### CoreLink CF Container images pushed"
+            echo "### CoreLink CF Container images pushed (self-hosted, daemonless)"
             echo ""
             echo "Pin these in \`deploy/cloudflare/wrangler.jsonc\` (containers[].image):"
             echo ""

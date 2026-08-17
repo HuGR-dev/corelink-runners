@@ -25,6 +25,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   image-build lane off hosted (zero-hosted mandate). Translation logic unit-tested
   for all forms (build / imagetools / version / login / push).
 
+### 2026-08-17 — image-build lane: hosted → self-hosted daemonless (unblocks rebuilds)
+
+- **ci: `build-cf-container-images.yml` now runs on `runs-on: corelink`,
+  daemonless.** It ran on GitHub-hosted `ubuntu-latest` because `wrangler
+  containers build` shells to `docker buildx`, which the shim didn't support —
+  so under the zero-hosted billing block the lane was **dead** (`steps:0` at "Set
+  up job") and the runner image could NOT be rebuilt at all. Replaced with the
+  proven daemonless chain: plain `docker build` (shim → nerdctl/buildkit) +
+  `wrangler containers push <tag>` (wrangler mints the CF registry cred and pushes
+  via the docker binary — no buildx, no daemon, no hosted spend). New
+  `scripts/ci/resolve-pushed-ref.sh` parses the immutable manifest digest from the
+  push transcript for an X4 pin (falls back to the tag). **Proven end-to-end on a
+  live `corelink` lease (2026-08-17):** both images built amd64-native and pushed —
+  RunnerContainer `@sha256:27973ad0…` (carries the baked action-archive cache +
+  buildx-compat shim) and CheckHostContainer `@sha256:3703b5c0…`. Pairs with the
+  docker-shim `buildx build`→`build` fix. Deploying the new image to the fleet is a
+  separate, deliberate repin of `deploy/cloudflare/wrangler.jsonc` (green-spawn
+  verified) — not done here.
+
 ### 2026-08-17 — bake the action-archive cache into the runner image (kills codeload-429)
 
 - **ci(runner): pre-seed `ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE` in the ephemeral
