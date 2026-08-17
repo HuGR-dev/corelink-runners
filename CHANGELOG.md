@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-08-17 — migrate the remaining dead hosted lanes → self-hosted
+
+- **ci: `deploy-spawn-worker.yml` + `build-fabricd-image.yml` now run on
+  `runs-on: corelink`.** Both were GitHub-hosted `ubuntu-latest`, so under the
+  zero-hosted billing block they were **dead** (fail at "Set up job", `steps:0`) —
+  the spawn-Worker could not be deployed and the fabricd control-plane image could
+  not be rebuilt, for any change. Same daemonless treatment as
+  `build-cf-container-images.yml`: dropped `actions/setup-node` (Node 22 is baked +
+  on PATH) and, for fabricd, `docker/setup-buildx-action` + `docker buildx build
+  --load` → plain `docker build` (the shim runs nerdctl/buildkit); it already used
+  `wrangler containers push` for the daemonless registry push. `deploy-spawn-worker`
+  runs `npx wrangler deploy` on the fleet. Completes the zero-hosted sweep of
+  corelink-runners' deploy/build lanes (only the deliberately-hosted `canary-smoke`
+  orchestrator and the separately-owned `release.yml` remain on ubuntu-latest).
+
 ### 2026-08-17 — docker-shim: `docker buildx build` compatibility
 
 - **fix(runner): the `docker` shim now translates `docker buildx build …` →
