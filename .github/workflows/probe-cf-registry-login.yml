@@ -1,6 +1,8 @@
-# TEMPORARY PROBE — delete after use. Finds the `docker login registry.cloudflare.com`
-# credential recipe so the image-build lane can push daemonlessly on runs-on:corelink
-# (login only — NO build, NO push; the token is fed via --password-stdin and never echoed).
+# TEMPORARY PROBE — delete after use. Proves the daemonless build->push chain on a
+# runs-on:corelink lease: plain `docker build` (via the shim -> nerdctl) + `wrangler
+# containers push` (wrangler mints the CF registry cred + pushes via the docker binary).
+# Uses a TINY image (~2 min) to de-risk before rewriting the real 13-min runner-image lane.
+# Pushing a throwaway tag is SAFE — the fleet uses a PINNED digest, unaffected by new tags.
 name: probe-cf-registry-login
 
 on:
@@ -17,33 +19,26 @@ env:
 jobs:
   probe:
     runs-on: corelink
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
-      - name: try docker login schemes against registry.cloudflare.com
-        env:
-          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: tiny build context
         run: |
-          set -u
-          REG="registry.cloudflare.com"
-          if [ -z "${CF_TOKEN:-}" ]; then echo "::error::no CLOUDFLARE_API_TOKEN"; exit 1; fi
-          try() {
-            user="$1"
-            # login via the docker shim (-> nerdctl login); token on stdin, never printed
-            if printf '%s' "$CF_TOKEN" | docker login "$REG" -u "$user" --password-stdin >/tmp/login.out 2>&1; then
-              echo "SUCCESS  user='$user'"
-              return 0
-            else
-              echo "fail     user='$user'  ($(tail -n1 /tmp/login.out 2>/dev/null | tr -d '\r'))"
-              return 1
-            fi
-          }
-          ok=""
-          for u in "$CLOUDFLARE_ACCOUNT_ID" "v1" "token" "oauth2" "00000000-0000-0000-0000-000000000000" "_json_key" "api"; do
-            if try "$u"; then ok="$u"; break; fi
-          done
-          echo "----"
-          if [ -n "$ok" ]; then
-            echo "WINNER: docker login $REG -u '$ok' --password-stdin  <<< \$CLOUDFLARE_API_TOKEN"
-          else
-            echo "NO SCHEME WORKED — CF managed registry likely needs a wrangler-minted short-lived cred, not the raw API token."
-          fi
+          mkdir -p /tmp/tiny
+          printf 'FROM ubuntu:24.04\nRUN echo corelink-push-probe > /tmp/marker\n' > /tmp/tiny/Dockerfile
+      - name: docker build (plain, via shim)
+        run: |
+          set -x
+          docker build -t corelink-push-probe:test /tmp/tiny
+      - name: wrangler deps
+        working-directory: deploy/cloudflare
+        run: npm ci
+      - name: wrangler containers push (mints CF cred + pushes)
+        working-directory: deploy/cloudflare
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -x
+          npx wrangler containers push corelink-push-probe:test 2>&1 | tee /tmp/push.out
+          echo "---- exit ${PIPESTATUS[0]} ----"
