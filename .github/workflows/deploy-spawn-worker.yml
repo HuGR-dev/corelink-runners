@@ -29,21 +29,18 @@ permissions:
 
 jobs:
   # Gate: the spawn-Worker's own test suite must pass before we deploy it.
-  # Runs on GH-hosted ubuntu-latest — self-contained TS, needs no CoreLink fleet
-  # and no secrets.
+  # Self-hosted `corelink` (zero-hosted mandate): the hosted ubuntu-latest lane is
+  # dead under the billing block. Node 22 is baked into the runner image + on PATH,
+  # so no actions/setup-node is needed; checkout resolves from the baked
+  # action-archive cache (0 codeload).
   test:
-    runs-on: ubuntu-latest
+    runs-on: corelink
     timeout-minutes: 15
     defaults:
       run:
         working-directory: deploy/cloudflare
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
 
       - name: Install deps
         run: npm ci
@@ -56,7 +53,7 @@ jobs:
 
   deploy:
     needs: test
-    runs-on: ubuntu-latest
+    runs-on: corelink
     timeout-minutes: 15
     defaults:
       run:
@@ -80,11 +77,6 @@ jobs:
           fi
 
       - uses: actions/checkout@v4
-
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
 
       - name: Install deps (wrangler)
         run: npm ci
