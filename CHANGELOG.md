@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-08-18 — billing emitter canonicalizes an upper/mixed-case region
+
+- **fix(billing): `CorelinkBillingTarget::from_env` lowercase-canonicalizes
+  `BILLING_REGION` and validates it as exactly 3 ASCII letters.** A box
+  misconfigured with `BILLING_REGION="IAD"` (uppercase) passed the old
+  `chars().count() == 3` filter and stamped every usage event with `IAD` — a
+  region the server ingest rejects (`bad_region`). Because `flush_now` RETAINS
+  the batch on any non-2xx and re-POSTs it next tick, that one bad-cased region
+  turned into an infinite ingest flood in which no event in the batch ever
+  staged (silent billing-data loss). `from_env` now maps the value through
+  `to_ascii_lowercase()` and requires `[a-z]{3}`, so `IAD` emits the canonical
+  `iad` the ingest accepts; a non-letter / wrong-length value still yields
+  `None` (no-op target, fail-safe-off). Pairs with the server-side
+  canonicalization + per-record skip in corelink-server. (WP-2B.)
+
 ### 2026-08-17 — migrate the remaining dead hosted lanes → self-hosted
 
 - **ci: `deploy-spawn-worker.yml` + `build-fabricd-image.yml` now run on
