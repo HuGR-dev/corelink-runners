@@ -14,7 +14,9 @@
 //! sends RAW per-event records with a stable `idem_key`; the **aggregator** owns
 //! the rollup + hash-chain + dedup, so this adapter computes NO chain hashes.
 //! At-least-once delivery is fine — `idem_key` makes it idempotent. The ingest
-//! returns `{accepted, deduped, total}` (auth → 401, bad batch → 400, fault → 503).
+//! returns `{accepted, deduped, rejected, total}` (auth → 401, unparseable/empty/
+//! oversized batch → 400, per-record validation failure → skipped+counted in
+//! `rejected`, backend fault → 503).
 //!
 //! ## Billing model — `runner_slot_seconds` (owner, 2026-06-23)
 //!
@@ -180,16 +182,26 @@ impl CorelinkBillingTarget<UreqBillingPoster> {
     /// Build the production target from env, or `None` (default-off) when the
     /// billing-ingest env is absent. Requires ALL THREE of [`BILLING_INGEST_URL_ENV`],
     /// [`BILLING_INGEST_AUTH_KEY_ENV`] (the dedicated key, never the shared one),
-    /// and a 3-char [`BILLING_REGION_ENV`]; a partial/invalid config yields `None`
-    /// (the composition root then wires the no-op target — fail-safe-off, never a
-    /// half-configured push). `get` is `|k| std::env::var(k).ok()` in production.
+    /// and a [`BILLING_REGION_ENV`] that lowercase-canonicalizes to exactly 3
+    /// ASCII letters (so `"IAD"` is accepted as `iad`); a partial/invalid config
+    /// yields `None` (the composition root then wires the no-op target —
+    /// fail-safe-off, never a half-configured push). `get` is
+    /// `|k| std::env::var(k).ok()` in production.
     pub fn from_env<F: Fn(&str) -> Option<String>>(
         get: F,
         timeout: std::time::Duration,
     ) -> Option<Self> {
         let url = get(BILLING_INGEST_URL_ENV).filter(|s| !s.is_empty())?;
         let auth = get(BILLING_INGEST_AUTH_KEY_ENV).filter(|s| !s.is_empty())?;
-        let region = get(BILLING_REGION_ENV).filter(|s| s.chars().count() == 3)?;
+        // Canonical CF colo: exactly 3 ASCII letters, LOWERCASE. Lowercase-
+        // canonicalize the env value so a box misconfigured with an upper/mixed
+        // -case colo (e.g. `BILLING_REGION="IAD"`) emits the canonical `iad` the
+        // ingest accepts — NOT a value the server 400s (which, with the retain-
+        // and-retry flush, becomes an infinite re-POST flood). A non-letter /
+        // wrong-length value stays `None` (unusable → no-op target, fail-safe-off).
+        let region = get(BILLING_REGION_ENV)
+            .map(|s| s.to_ascii_lowercase())
+            .filter(|s| s.len() == 3 && s.bytes().all(|b| b.is_ascii_lowercase()))?;
         Some(Self::new(
             UreqBillingPoster::new(timeout),
             url,
@@ -762,6 +774,42 @@ mod tests {
                 .is_none(),
             "4-char region → None"
         );
+
+        // A region with a non-letter is unusable → None (fail-safe-off).
+        for garbage in ["i2d", "u_s", "12!"] {
+            let g = |k: &str| {
+                if k == BILLING_REGION_ENV {
+                    Some(garbage.to_string())
+                } else {
+                    ok(k)
+                }
+            };
+            assert!(
+                CorelinkBillingTarget::from_env(g, std::time::Duration::from_secs(5)).is_none(),
+                "non-letter region {garbage:?} → None"
+            );
+        }
+    }
+
+    /// A box misconfigured with an UPPER/mixed-case colo must still emit the
+    /// canonical lowercase region the ingest accepts — the fix for the live
+    /// `bad_region` ingest flood (BILLING_REGION="IAD" 400ing every batch).
+    #[test]
+    fn from_env_canonicalizes_uppercase_region_to_lowercase() {
+        for spelling in ["IAD", "Iad", "iAd"] {
+            let get = |k: &str| match k {
+                BILLING_INGEST_URL_ENV => Some("https://api/internal/v1/billing/usage".into()),
+                BILLING_INGEST_AUTH_KEY_ENV => Some("dedicated-secret".into()),
+                BILLING_REGION_ENV => Some(spelling.to_string()),
+                _ => None,
+            };
+            let target = CorelinkBillingTarget::from_env(get, std::time::Duration::from_secs(5))
+                .expect("upper/mixed-case colo must canonicalize + wire, not drop");
+            assert_eq!(
+                target.region, "iad",
+                "region canonicalized from {spelling:?}"
+            );
+        }
     }
 
     /// `idem_key` is deterministic per (lease, period) and differs across leases.
