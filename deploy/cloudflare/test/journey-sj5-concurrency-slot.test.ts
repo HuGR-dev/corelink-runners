@@ -146,8 +146,10 @@ describe("SJ-5 · decideSlotAcquire — admission decision core", () => {
 
   // ── Cell 6 (math) — warm clamp: cap = min(entitlement, FLEET) ──────────────
   it("cell6-math: the warm clamp min(entitlement, FLEET) BINDS when entitlement > FLEET", () => {
-    // Prove the clamp value the wrapper computes: entitlement 100 clamps to FLEET.
-    const entitlement = 100;
+    // Prove the clamp value the wrapper computes: an entitlement ABOVE the fleet cap
+    // clamps down to FLEET. (Uses 500 so the scenario holds after the fleet raise to
+    // 250 — the value only needs to exceed FLEET_MAX_CONCURRENCY.)
+    const entitlement = FLEET_MAX_CONCURRENCY + 250;
     const perKeyCap = Math.min(entitlement, FLEET_MAX_CONCURRENCY);
     expect(perKeyCap).toBe(FLEET_MAX_CONCURRENCY);
     // And fill to exactly that clamp ⇒ the (FLEET+1)-th on the SAME key refuses.
@@ -637,7 +639,7 @@ describe("SJ-5 · acquireConcurrencySlot — selection + fail-open (real worker.
 
   // ── Cell 6 (selection) — WARM spawn ⇒ key=tenant, cap=min(entitlement,FLEET) ─
   it("cell6-select: a WARM spawn selects key=tenant and perKeyCap=min(entitlement, FLEET) — clamp BINDS", async () => {
-    mintConcurrency = 100; // entitlement WAY over FLEET ⇒ the clamp must bind to FLEET
+    mintConcurrency = FLEET_MAX_CONCURRENCY + 250; // entitlement over FLEET ⇒ clamp binds to FLEET
     const slots = fakeSlots("admit");
     const env = baseEnv({
       RUNNER_JOB_PATS: fakeKv() as never,
@@ -652,7 +654,7 @@ describe("SJ-5 · acquireConcurrencySlot — selection + fail-open (real worker.
     expect(slots._stub.acquire).toHaveBeenCalledTimes(1);
     const [key, , perKeyCap] = slots._stub.acquire.mock.calls[0] as unknown[];
     expect(key).toBe("acme"); // the SERVER-DERIVED tenant, not repo:*
-    expect(perKeyCap).toBe(FLEET_MAX_CONCURRENCY); // min(100, 20) = 20 — clamp bound
+    expect(perKeyCap).toBe(FLEET_MAX_CONCURRENCY); // min(entitlement, FLEET) clamps to FLEET
   });
 
   it("cell6-select-b: a WARM spawn with entitlement < FLEET uses the ENTITLEMENT as the cap", async () => {

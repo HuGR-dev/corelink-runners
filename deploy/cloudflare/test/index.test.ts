@@ -1066,8 +1066,10 @@ describe("decideSlotAcquire (atomic per-key + fleet concurrency cap)", () => {
   });
 
   it("the exported caps have the frozen values (fleet mirrors max_instances, cold-repo default)", () => {
-    expect(FLEET_MAX_CONCURRENCY).toBe(20);
-    expect(COLD_REPO_CAP).toBe(8);
+    // 2026-08-19 scale raise: fleet 20→250 (must mirror RunnerContainer max_instances
+    // in wrangler.jsonc), cold-repo 8→40. See the constants in src/lib.ts.
+    expect(FLEET_MAX_CONCURRENCY).toBe(250);
+    expect(COLD_REPO_CAP).toBe(40);
     expect(SLOT_TTL_S).toBe(2700);
   });
 });

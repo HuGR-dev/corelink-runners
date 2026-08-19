@@ -568,9 +568,16 @@ export const SLOT_TTL_S = 2700;
 // The physical fleet cap — mirrors the RunnerContainer `max_instances` in
 // wrangler.jsonc. Warm admission clamps the per-tenant entitlement to this, and it
 // is the global ceiling across ALL keys (tenants + cold repos).
-export const FLEET_MAX_CONCURRENCY = 20;
+// SCALE (2026-08-19): raised 20 → 250 in lockstep with wrangler.jsonc max_instances.
+// The old 20 = one tenant's entitlement, so a single power user saturated the whole
+// fleet. 250 is a real cross-tenant global ceiling. Runners sleepAfter-reap to zero
+// (no idle cost). The HARD ceiling is the account limit (~343 standard-4 runners
+// after the cache fleet's vCPU share); beyond that needs a CF account-limit raise.
+export const FLEET_MAX_CONCURRENCY = 250;
 // The per-repo ceiling for COLD spawns (no derived tenant, so no entitlement).
-export const COLD_REPO_CAP = 8;
+// Raised 8 → 40 (2026-08-19) so a single busy repo's cold CI isn't throttled at 8
+// while the global fleet has room; still well under FLEET_MAX_CONCURRENCY.
+export const COLD_REPO_CAP = 40;
 
 export interface SlotRecord {
   key: string;
