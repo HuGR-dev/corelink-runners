@@ -200,8 +200,9 @@
       // URL/load). The boot self-check makes that failure LOUD at boot instead of
       // silent-on-first-request: with the (now-correct) key set, boot validates the
       // key against live introspect and passes. @sha256 DIGEST-PINNED (X4), built by
-      // build-fabricd-image.yml (run 29707484133). SUPERSEDES 0114c4f2.
-      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer@sha256:5eed854a140666ae765b97757fbaeebb54179232bc7d4955c7098e17f8b59da8",
+      // build-fabricd-image.yml (run 32303677887, git e5f07f8 = Inc-3 CF Access
+      // service-token headers on /internal/v1/*). SUPERSEDES 5eed854a.
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer@sha256:db3b03ef829e21d203e1a5ac003a724fe1319eb271d849bd88178f080b468c3d",
       // HTTP control plane. Bumped standard-1 → standard-2 (2026-07-07 acquire-storm
       // hardening): the single-flight singleton must keep /v1/health + lease ops
       // responsive under a burst of box provisions; 2 vCPU gives headroom so a few
