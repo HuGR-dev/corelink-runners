@@ -90,7 +90,14 @@ _ensure_daemons() {
 # here MUST NOT break the build — on a miss/401/unreachable mirror, buildkit
 # falls back to docker.io. Runs at most once per lease (flag file).
 _arm_mirror_auth() {
-  _flag=/tmp/corelink-mirror-login.done
+  # Per-LEASE guard, NOT a fixed path. /tmp persists across jobs on a warm-reused
+  # RunnerContainer and the cas:rw PAT is lease-scoped (it expires with the lease),
+  # so a fixed /tmp/corelink-mirror-login.done would skip re-login for the NEXT
+  # lease — leaving buildkit with a stale/expired login → the mirror /token 401s →
+  # buildkit silently falls back to docker.io, defeating the cache (proven: a warm
+  # box with the flag already present served the alpine layer from docker.io, not
+  # _public). Keying on CLW_LEASE_ID re-arms every job with its own fresh cred.
+  _flag="/tmp/corelink-mirror-login.${CLW_LEASE_ID:-nolease}.done"
   [ -f "$_flag" ] && return 0
   # Only meaningful when the CoreLink moat is armed for this lease.
   _pat=""
