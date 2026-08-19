@@ -122,9 +122,18 @@ _arm_mirror_auth() {
   return 0
 }
 
-if command -v flock >/dev/null 2>&1; then
+# The lock lives at a FIXED path. On a warm-reused RunnerContainer /tmp persists
+# across jobs, so a lockfile once created root-owned (e.g. by a step that ran the
+# shim under sudo) would leave every later runner-user `docker` unable to open it
+# for the `9>` redirect — "cannot create …: Permission denied" — bricking docker
+# on that box. Guard it: only take the flock when the lockfile is actually
+# openable; otherwise fall back to an UNGUARDED start. Racing two cold starts is
+# harmless (the winner's socket serves both) per _ensure_daemons, so degrading to
+# no-flock is strictly safer than failing the build.
+_lock=/tmp/corelink-docker-shim.lock
+if command -v flock >/dev/null 2>&1 && ( : >>"$_lock" ) 2>/dev/null; then
   # subshell holds the lock only during the start; released before the exec below
-  ( flock -x 9 || exit 1; _ensure_daemons ) 9>/tmp/corelink-docker-shim.lock || exit 1
+  ( flock -x 9 || exit 1; _ensure_daemons ) 9>>"$_lock" || exit 1
 else
   _ensure_daemons || exit 1
 fi
