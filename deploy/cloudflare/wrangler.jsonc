@@ -215,7 +215,17 @@
       // not) is enforced atomically in W7/F7 (DO-backed slot), which also clamps
       // admission to min(entitlement, fleet_cap). See
       // docs/handoff/2026-07-16-STABILIZATION-plan-3lens-hidden-debt.md.
-      "max_instances": 20
+      //
+      // SCALE (2026-08-19): raised 20 → 250. The old 20 was ONE tenant's default
+      // entitlement — i.e. a single power user could saturate the entire global
+      // fleet, blocking every other tenant. 250 is a global cross-tenant ceiling
+      // that supports many concurrent tenants. Runners sleepAfter-reap to zero, so a
+      // high ceiling costs nothing idle. HARD CEILING = the account limits (standard-4
+      // = 4 vCPU / 12 GiB each; account total_vcpu 1500 ⇒ ~375 runners max, shared
+      // with the cache fleet ⇒ ~343 practical). 250 stays safely under that. Going
+      // beyond ~343 needs a Cloudflare account-limit increase (drafted separately).
+      // MUST stay in sync with FLEET_MAX_CONCURRENCY in src/lib.ts.
+      "max_instances": 250
     },
     {
       // CF-native check-host (campaign B). Build context = deploy/check-host (its
