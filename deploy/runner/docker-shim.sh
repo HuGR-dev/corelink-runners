@@ -66,13 +66,60 @@ _ensure_daemons() {
     }
   fi
   if ! _sock_up /run/buildkit/buildkitd.sock; then
-    sudo sh -c 'buildkitd --addr unix:///run/buildkit/buildkitd.sock --oci-worker-snapshotter=overlayfs >/var/log/buildkitd.log 2>&1 &'
+    # F3.2 WP-R: --config routes docker.io base-image layer pulls through the
+    # CoreLink OCI mirror (deploy/runner/buildkitd.toml, baked at /etc/buildkit).
+    # Absent the file (older image) buildkitd ignores the flag's target and runs
+    # unmirrored — so this stays safe if the toml ever fails to bake.
+    _bk_cfg=""
+    if sudo test -f /etc/buildkit/buildkitd.toml; then
+      _bk_cfg="--config /etc/buildkit/buildkitd.toml"
+    fi
+    sudo sh -c "buildkitd --addr unix:///run/buildkit/buildkitd.sock --oci-worker-snapshotter=overlayfs $_bk_cfg >/var/log/buildkitd.log 2>&1 &"
     _wait_sock /run/buildkit/buildkitd.sock || {
       echo "docker-shim: buildkitd did not start" >&2
       sudo tail -n 20 /var/log/buildkitd.log >&2 2>/dev/null || true
       return 1
     }
   fi
+  # F3.2 WP-R: arm the CoreLink OCI mirror credential (best-effort, fail-open).
+  _arm_mirror_auth || true
+}
+
+# _arm_mirror_auth — give buildkit a CoreLink OCI bearer so mirror pulls of
+# allowlisted _public base layers authenticate. STRICTLY fail-open: any failure
+# here MUST NOT break the build — on a miss/401/unreachable mirror, buildkit
+# falls back to docker.io. Runs at most once per lease (flag file).
+_arm_mirror_auth() {
+  _flag=/tmp/corelink-mirror-login.done
+  [ -f "$_flag" ] && return 0
+  # Only meaningful when the CoreLink moat is armed for this lease.
+  _pat=""
+  if [ -n "${CLW_TOKEN:-}" ]; then
+    _pat="$CLW_TOKEN"
+  elif [ -n "${CLW_CRED_TICKET:-}" ] && [ -n "${CLW_LEASE_ID:-}" ] \
+    && { [ -n "${CLW_FABRIC_ENDPOINT:-}" ] || [ -n "${CLW_ENDPOINT:-}" ]; } \
+    && command -v curl >/dev/null 2>&1; then
+    _fe="${CLW_FABRIC_ENDPOINT:-$CLW_ENDPOINT}"
+    _resp="$(curl -sS -m 15 -X POST "$_fe/v1/leases/$CLW_LEASE_ID/cas-cred" \
+      -H 'content-type: application/json' \
+      -d "{\"ticket\":\"$CLW_CRED_TICKET\"}" 2>/dev/null || true)"
+    # Extract .cas_pat without a JSON dep (grep/sed) — best-effort.
+    _pat="$(printf '%s' "$_resp" | sed -n 's/.*"cas_pat"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+  fi
+  if [ -z "$_pat" ]; then
+    # No credential → do NOT touch docker config; unmirrored/anon pulls fall
+    # through to docker.io. Mark done so we don't retry every invocation.
+    : > "$_flag" 2>/dev/null || true
+    return 0
+  fi
+  # Write auth into the SAME DOCKER_CONFIG the build exec uses (below).
+  _dc="${DOCKER_CONFIG:-$HOME/.docker}"
+  printf '%s' "$_pat" | sudo DOCKER_CONFIG="$_dc" nerdctl login corelink-api.humangr.com \
+    -u x --password-stdin >/dev/null 2>&1 \
+    && echo "docker-shim: CoreLink OCI mirror auth armed" >&2 \
+    || echo "docker-shim: CoreLink OCI mirror auth unavailable — builds fall back to docker.io" >&2
+  : > "$_flag" 2>/dev/null || true
+  return 0
 }
 
 if command -v flock >/dev/null 2>&1; then
