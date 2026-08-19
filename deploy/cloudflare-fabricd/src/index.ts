@@ -68,6 +68,12 @@ export interface Env {
   CLW_ENDPOINT?: string; // var — CoreLink API base for CLW cache hydration
   CORELINK_RUNNER_MINT_URL?: string; // var — mint base ({url}/internal/v1/runner/{mint,revoke})
   CORELINK_RUNNER_MINT_AUTH_KEY?: string; // secret — x-corelink-internal-auth for the mint
+  // Inc-3 (2026-08-19): CF Access service token for /internal/v1/* (mint/revoke/
+  // introspect/billing) now that corelink-server gates them behind Cloudflare
+  // Access. Both must be forwarded into the container envVars below (the crate's
+  // `cf_access` reads them). No-op until both are set.
+  CORELINK_CF_ACCESS_CLIENT_ID?: string; // secret — CF Access service-token client id
+  CORELINK_CF_ACCESS_CLIENT_SECRET?: string; // secret — CF Access service-token client secret
   FABRIC_CRED_TICKET_SECRET?: string; // secret — env-0 cred-ticket HMAC (PAT never in untrusted env)
   // Attested-cost emission (FLIP-B): "true"/"1" ⇒ `intent_metrics_sig` on CloseResponse. Var.
   FABRIC_EMIT_INTENT_METRICS_SIG?: string;
@@ -143,6 +149,14 @@ export class FabricdContainer extends Container<Env> {
       CORELINK_INTROSPECT_URL: env.CORELINK_INTROSPECT_URL,
       FABRIC_INTROSPECT_AUTH_KEY: env.FABRIC_INTROSPECT_AUTH_KEY,
       FABRIC_SIGNING_KEY: env.FABRIC_SIGNING_KEY,
+      // Inc-3: CF Access service-token for /internal/v1/* (both must be present
+      // for the crate's cf_access to emit the headers; no-op until bound).
+      ...(env.CORELINK_CF_ACCESS_CLIENT_ID
+        ? { CORELINK_CF_ACCESS_CLIENT_ID: env.CORELINK_CF_ACCESS_CLIENT_ID }
+        : {}),
+      ...(env.CORELINK_CF_ACCESS_CLIENT_SECRET
+        ? { CORELINK_CF_ACCESS_CLIENT_SECRET: env.CORELINK_CF_ACCESS_CLIENT_SECRET }
+        : {}),
       FABRIC_BILLING_PUSH_INTERVAL_SECS: "30",
       ...(env.BILLING_INGEST_URL ? { BILLING_INGEST_URL: env.BILLING_INGEST_URL } : {}),
       ...(env.BILLING_INGEST_AUTH_KEY ? { BILLING_INGEST_AUTH_KEY: env.BILLING_INGEST_AUTH_KEY } : {}),
