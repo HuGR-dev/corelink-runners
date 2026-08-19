@@ -193,7 +193,7 @@
       // (kills the 429-at-Set-up-job on the ephemeral fleet), plus the docker-shim
       // `docker buildx build`->`nerdctl build` compat. Rollback = the increment-3
       // digest @sha256:fa052ed7547516d61bc70e71bfa2ebc26929de5ec9fa48fce046eaf43771033d.
-      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-runnercontainer@sha256:b7532bae738dfd5b469aa005933dfea1108e79d88fc573c3893ebc7d3283d2db",
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-runnercontainer@sha256:4c744ea43d4c973aadcd7841505e61b9f27c828921ed346fb1027c126742e5e3",
       // standard-4 = 4 vCPU / 12 GiB / 20 GB disk — fits CI, clears the runner
       // disk floor (RUNNER_EPHEMERAL_STORAGE_FLOOR_MB).
       "instance_type": "standard-4",
