@@ -70,6 +70,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Unpoison a stale docker-shim lock (warm-box bootstrap)
+        # A warm-reused RunnerContainer can carry a root-owned
+        # /tmp/corelink-docker-shim.lock from a prior job, which bricks the
+        # runner-user shim ("cannot create …: Permission denied"). The baked shim
+        # now degrades gracefully (fix/shim-lock-robust), but THIS build still runs
+        # the OLD baked shim at the sanity step below, so clear the poison first.
+        run: sudo rm -f /tmp/corelink-docker-shim.lock || true
+
       - name: Sanity — the docker shim (nerdctl/buildkit) answers
         run: docker version
 
