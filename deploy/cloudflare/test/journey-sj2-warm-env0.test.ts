@@ -82,6 +82,7 @@ vi.mock("@cloudflare/containers", () => {
 import worker, { CredStashDO, type Env } from "../src/index";
 import { getContainer } from "@cloudflare/containers";
 import type { StashedCred } from "../src/lib";
+import { FLEET_MAX_CONCURRENCY } from "../src/lib";
 
 // Distinct sentinels so a test can assert WHICH DO namespace a spawn used.
 const RUNNER_NS = { _ns: "runner" };
@@ -769,7 +770,7 @@ describe("SJ-2 cell 5 — completion revokes by pat_id, wipes the stash, tears d
 // CELL 6 — per-tenant concurrency: warm acquires min(entitlement,FLEET); at-ceiling refuses.
 // ═══════════════════════════════════════════════════════════════════════════
 describe("SJ-2 cell 6 — warm concurrency acquire is per-tenant, clamped to the fleet cap", () => {
-  it("acquire key = derived tenant, perKeyCap = min(entitlement, FLEET=20)", async () => {
+  it("acquire key = derived tenant, perKeyCap = min(entitlement, FLEET)", async () => {
     const kv = fakeKv();
     const metrics = fakeMetrics();
     const cred = makeCredStash();
@@ -785,8 +786,8 @@ describe("SJ-2 cell 6 — warm concurrency acquire is per-tenant, clamped to the
     const [key, jobId, perKeyCap, fleetCap] = slots.acquireArgs[0] as [string, string, number, number];
     expect(key).toBe("acme"); // the derived tenant, not repo:<repo>
     expect(jobId).toBe("2500");
-    expect(perKeyCap).toBe(5); // min(entitlement 5, FLEET 20)
-    expect(fleetCap).toBe(20);
+    expect(perKeyCap).toBe(5); // min(entitlement 5, FLEET) — 5 is well under the fleet cap
+    expect(fleetCap).toBe(FLEET_MAX_CONCURRENCY);
   });
 
   it("an entitlement ABOVE the fleet cap is clamped to FLEET (min wins)", async () => {
@@ -794,13 +795,13 @@ describe("SJ-2 cell 6 — warm concurrency acquire is per-tenant, clamped to the
     const metrics = fakeMetrics();
     const cred = makeCredStash();
     const slots = fakeSlots(true);
-    mintMaxConcurrency = 50; // above FLEET_MAX_CONCURRENCY (20)
+    mintMaxConcurrency = FLEET_MAX_CONCURRENCY + 50; // above the fleet cap ⇒ min clamps to FLEET
     const env = warmEnv(kv, metrics, cred, { CONCURRENCY_SLOTS: slots as never });
     const ctx = makeCtx();
     await queuedWebhook(env, ctx, { jobId: "2501", repo: "acme/api", installationId: 555 });
     await drain(ctx);
     const [, , perKeyCap] = slots.acquireArgs[0] as [string, string, number, number];
-    expect(perKeyCap).toBe(20); // clamped to the fleet cap
+    expect(perKeyCap).toBe(FLEET_MAX_CONCURRENCY); // clamped to the fleet cap
   });
 
   it("AT-CEILING (clean {admitted:false}) ⇒ claim released, no JIT, no spawn, spawn_at_ceiling bumped, minted PAT REVOKED", async () => {
