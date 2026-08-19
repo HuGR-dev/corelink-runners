@@ -490,6 +490,12 @@ RUN curl -fsSL \
 COPY docker-shim.sh /usr/local/bin/docker
 RUN chmod 0755 /usr/local/bin/docker && docker --version
 
+# F3.2 WP-R — bake the buildkitd registry-mirror config. docker-shim.sh spawns
+# `buildkitd --config /etc/buildkit/buildkitd.toml`, routing docker.io base-image
+# layer pulls through the CoreLink OCI cache (fail-open to docker.io on any miss).
+COPY buildkitd.toml /etc/buildkit/buildkitd.toml
+RUN chmod 0644 /etc/buildkit/buildkitd.toml
+
 # ── Non-root runner user (App-layer resource caps — Track-C C2, part 1/2) ──────
 # The runner agent must not run as root; the dedicated user also owns the
 # Rust toolchain so cargo install works without sudo.
