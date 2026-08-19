@@ -22,6 +22,7 @@ pub mod app;
 pub mod attestation;
 pub mod auth;
 pub mod billing_export;
+pub mod cf_access;
 pub mod cloud_exec;
 /// WP-6 stub — clw drive seam (A8: exit-transparency + non-zero-not-cached).
 pub mod clw_drive;

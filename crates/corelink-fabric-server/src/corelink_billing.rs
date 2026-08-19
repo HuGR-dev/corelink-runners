@@ -169,11 +169,17 @@ impl BillingPoster for UreqBillingPoster {
             .http_status_as_error(false)
             .build()
             .into();
-        let resp = agent
+        let mut req = agent
             .post(url)
             .header("x-corelink-internal-auth", auth)
-            .header("Content-Type", "application/json")
-            .send(json_body)?;
+            .header("Content-Type", "application/json");
+        // Inc-3 (2026-08-19): /internal/v1/billing/usage is behind Cloudflare
+        // Access — attach the service-token headers when configured (no-op until
+        // bound). See [`crate::cf_access`].
+        for (name, value) in crate::cf_access::cf_access_headers() {
+            req = req.header(name, value.as_str());
+        }
+        let resp = req.send(json_body)?;
         Ok(resp.status().as_u16())
     }
 }

@@ -569,6 +569,12 @@ impl MintHttp for UreqMint {
             .header("x-corelink-internal-auth", internal_auth)
             .header("Content-Type", "application/json")
             .header("User-Agent", "corelink-fabric-server");
+        // Inc-3 (2026-08-19): /internal/v1/* is behind Cloudflare Access — attach
+        // the service-token headers when configured (no-op until bound). See
+        // [`crate::cf_access`].
+        for (name, value) in crate::cf_access::cf_access_headers() {
+            req = req.header(name, value.as_str());
+        }
         // Present the acquiring PAT so the mint can introspect it → tenant when no
         // installation_id is sent (frozen 2026-07-08). The value is a SENSITIVE
         // bearer credential — set into the header only, never logged.

@@ -160,12 +160,18 @@ impl IntrospectHttp for UreqIntrospect {
         json_body: &str,
     ) -> anyhow::Result<IntrospectResponse> {
         // Reuse the persistent (warm) agent — see the type doc.
-        let mut resp = self
+        let mut req = self
             .agent
             .post(url)
             .header("X-Corelink-Internal-Auth", auth_header_value)
-            .header("Content-Type", "application/json")
-            .send(json_body)?;
+            .header("Content-Type", "application/json");
+        // Inc-3 (2026-08-19): /internal/v1/auth/introspect is behind Cloudflare
+        // Access — attach the service-token headers when configured (no-op until
+        // bound). See [`crate::cf_access`].
+        for (name, value) in crate::cf_access::cf_access_headers() {
+            req = req.header(name, value.as_str());
+        }
+        let mut resp = req.send(json_body)?;
 
         let status = resp.status().as_u16();
         let body = resp.body_mut().read_to_string()?;
