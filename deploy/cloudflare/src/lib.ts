@@ -20,12 +20,37 @@ export function logEvent(
 }
 
 /** The subset of Env the warm-mint path reads. */
+/**
+ * CF Access (Inc-3) service-token headers for the gated `/internal/v1/*` control
+ * plane (`docs/internal/inc3-cf-access-lockdown.md` in corelink-server). Both
+ * present ⇒ the pair; else `{}` (the app-layer key alone, which 403s at the edge
+ * when the gate is enforcing). Mirrors the fabricd
+ * `crates/corelink-fabric-server/src/cf_access.rs` wiring so BOTH callers of the
+ * runner-mint / billing-usage seam send identical CF Access auth — the
+ * spawn-worker was the caller Inc-3 (#479) missed.
+ */
+export function cfAccessHeaders(env: {
+  CORELINK_CF_ACCESS_CLIENT_ID?: string;
+  CORELINK_CF_ACCESS_CLIENT_SECRET?: string;
+}): Record<string, string> {
+  const id = env.CORELINK_CF_ACCESS_CLIENT_ID;
+  const secret = env.CORELINK_CF_ACCESS_CLIENT_SECRET;
+  return id && secret
+    ? { "CF-Access-Client-Id": id, "CF-Access-Client-Secret": secret }
+    : {};
+}
+
 export interface MintEnv {
   // The dedicated `runner_mint` consumer key (Server TL, key-split 2026-06-21): gates
   // ONLY /internal/v1/runner/{mint,revoke} — never signup-mint, erase, or admin (A6,
   // one notch tighter than pat_mint). Sent as `x-corelink-internal-auth` on both calls.
   CORELINK_RUNNER_MINT_AUTH_KEY?: string;
   CORELINK_MINT_URL?: string;
+  // CF Access (Inc-3) service-token pair for the gated `/internal/v1/*` edge. Set
+  // as Worker secrets on corelink-spawn-worker; WITHOUT them the runner-mint call
+  // 403s at the Cloudflare Access edge (the Inc-3 lockdown strands every spawn).
+  CORELINK_CF_ACCESS_CLIENT_ID?: string;
+  CORELINK_CF_ACCESS_CLIENT_SECRET?: string;
   CLW_ENDPOINT?: string;
   CLW_TENANT?: string;
   // Explicit, non-prod ESCAPE HATCH for the pre-env-0 transition ONLY. When env-0
@@ -236,6 +261,7 @@ async function mintCasPat(env: MintEnv, params: MintParams): Promise<MintResult>
   // is rejected as malformed → 400); server-confirmed scope for this path is cas:rw.
   const optionC = !!params.acquiringPat;
   const headers: Record<string, string> = {
+    ...cfAccessHeaders(env),
     "x-corelink-internal-auth": env.CORELINK_RUNNER_MINT_AUTH_KEY ?? "",
     "content-type": "application/json",
     "user-agent": "corelink-spawn-worker",
@@ -310,6 +336,7 @@ export async function revokeCasPatById(
   const resp = await fetch(`${base}/internal/v1/runner/revoke`, {
     method: "POST",
     headers: {
+      ...cfAccessHeaders(env),
       "x-corelink-internal-auth": env.CORELINK_RUNNER_MINT_AUTH_KEY ?? "",
       "content-type": "application/json",
       "user-agent": "corelink-spawn-worker",
@@ -1353,6 +1380,10 @@ export interface BillingEnv {
   BILLING_REGION?: string;
   // The owner tenant the job was minted under = the billed tenant_id.
   CLW_TENANT?: string;
+  // CF Access (Inc-3) service-token pair for the gated `/internal/v1/billing/usage`
+  // edge — WITHOUT them the usage-push 403s at the Cloudflare Access edge.
+  CORELINK_CF_ACCESS_CLIENT_ID?: string;
+  CORELINK_CF_ACCESS_CLIENT_SECRET?: string;
 }
 
 const BILLING_SOURCE = "corelink-runners/spawn-worker";
@@ -1484,6 +1515,7 @@ export async function pushUsageEvent(env: BillingEnv, ev: UsageEvent): Promise<v
   const resp = await fetch(env.BILLING_INGEST_URL ?? "", {
     method: "POST",
     headers: {
+      ...cfAccessHeaders(env),
       "x-corelink-internal-auth": env.BILLING_INGEST_AUTH_KEY ?? "",
       "content-type": "application/json",
       "user-agent": "corelink-spawn-worker",
