@@ -6,11 +6,24 @@
 > (`deploy/cloudflare/`), and the moat (native check-host exec + per-job CAS-PAT
 > mint + attested cost) is live on Cloudflare. The **Northflank "LIVE" / "MULTI-
 > INSTANCE on Postgres" framing below is HISTORICAL** — the current CF deploy is a
-> **singleton** (`wrangler.jsonc` `FABRIC_NUM_SHARDS=1`, no `DATABASE_URL` var ⇒
-> in-memory ledger; pg + N>1 are the owner-gated RAISE-N flip). Northflank is the
-> ADR-0008 fallback substrate, not the live one. Source of truth for the live
-> deploy = `deploy/cloudflare-fabricd/wrangler.jsonc` + the 2026-07-07..09 CF
-> handoff docs, NOT the Northflank lines below. Those lines are kept for history.
+> **singleton** (`wrangler.jsonc` `FABRIC_NUM_SHARDS=1`, kept at N=1 by deliberate
+> volume choice, not a technical block). **Corrected 2026-08-22:** the earlier
+> "no `DATABASE_URL` var ⇒ in-memory ledger" line here was stale — commit
+> `80df8921` (2026-07-17) fixed the same claim in `wrangler.jsonc`'s own
+> comments, three hours after an earlier commit that same day had introduced
+> it, and nothing since has reverted it (`git log --all -S "DATABASE_URL" --
+> deploy/cloudflare-fabricd/wrangler.jsonc`). `wrangler.jsonc` now states
+> `DATABASE_URL` **is bound** (a wrangler secret, so its value is invisible in
+> the file itself) → the pg-durable ledger (`FABRIC_LEDGER_BACKEND=pg`) is the
+> declared active backend, durable billing export is armed, and N>1 is
+> pg-unblocked (kept at 1 by choice). This is what the repo's config
+> **declares**; verifying the *running* deployment actually has that secret
+> set would require reading it back from Cloudflare, which is write-only (no
+> API read-back of secret values) — so treat this as the declared config, not
+> an independent live-probe. Northflank is the ADR-0008 fallback substrate,
+> not the live one. Source of truth for the live deploy =
+> `deploy/cloudflare-fabricd/wrangler.jsonc` + the 2026-07-07..09 CF handoff
+> docs, NOT the Northflank lines below. Those lines are kept for history.
 
 > Owner: HuGR TechLead · baseline: cloud-execution campaign 2026-06-12
 > (post seed + cloud fabric, full gate green on CI: fmt · clippy `-D warnings` ·
