@@ -28,7 +28,7 @@
 //   • "a mixed fleet renews … only the busy box"                  (renewed 4, want 1)
 //   • "past the per-tick verification cap …"                      (renewed 45, want 5)
 //   • "one box's verification failure does not stop the others"   (renewed 3, want 2)
-//   • "counts renewed-busy, stopped-idle and kept-unverifiable"   (no counter at all)
+//   • "counts renewed-busy, unrenewed-idle and kept-unverifiable" (no counter at all)
 //
 // RED pre-fix for a WEAKER reason, and worth saying so: the BUSY cell also fails
 // against origin/main, but only because the pre-fix sweep read the whole binding
@@ -160,7 +160,14 @@ describe("keepAliveLiveRunners renews only VERIFIED-BUSY boxes", () => {
     expect(await keepAliveLiveRunners(envWith(kv), verify)).toBe(1);
   });
 
-  it("an IDLE runner stops being renewed (it falls through to sleepAfter)", async () => {
+  // NOTE (2026-08-23): this cell asserts a RENEWAL DECISION and nothing more. The
+  // title used to end "(it falls through to sleepAfter)", which read as though the
+  // box then went away. It does not follow — `sleepAfter`'s deadline lives in an
+  // in-memory SDK field that any DO re-instantiation rearms, and its expiry path is
+  // SIGTERM-only. This cell passed green while three boxes ran for 10.5 hours.
+  // What a box actually does is pinned by test/durable-idle-backstop.test.ts and
+  // deploy/runner/test/entrypoint-signal.test.sh, not here.
+  it("an IDLE runner stops being renewed (a decision about renewal, not about the box)", async () => {
     const kv = fakeKv({ "rhandle:cf-runner-idle": binding("h-idle", 903) });
     const verify = verifier({ 903: IDLE });
     expect(await keepAliveLiveRunners(envWith(kv), verify)).toBe(0);
@@ -286,7 +293,7 @@ describe("keepAliveLiveRunners renews only VERIFIED-BUSY boxes", () => {
 
   // ── observability ─────────────────────────────────────────────────────────
 
-  it("counts renewed-busy, stopped-idle and kept-unverifiable separately", async () => {
+  it("counts renewed-busy, unrenewed-idle and kept-unverifiable separately", async () => {
     const kv = fakeKv({
       "rhandle:cf-runner-b1": binding("h-b1", 951),
       "rhandle:cf-runner-b2": binding("h-b2", 952),
@@ -302,7 +309,7 @@ describe("keepAliveLiveRunners renews only VERIFIED-BUSY boxes", () => {
     });
     await keepAliveLiveRunners(envWith(kv, metrics), verify);
     expect(metrics.counts.keepalive_renewed_busy).toBe(2);
-    expect(metrics.counts.keepalive_stopped_idle).toBe(1);
+    expect(metrics.counts.keepalive_unrenewed_idle).toBe(1);
     expect(metrics.counts.keepalive_renewed_unverifiable).toBe(1);
   });
 
@@ -314,7 +321,7 @@ describe("keepAliveLiveRunners renews only VERIFIED-BUSY boxes", () => {
     const { COUNTER_NAMES } = await import("../src/metrics");
     for (const n of [
       "keepalive_renewed_busy",
-      "keepalive_stopped_idle",
+      "keepalive_unrenewed_idle",
       "keepalive_renewed_unverifiable",
     ]) {
       expect(COUNTER_NAMES as readonly string[]).toContain(n);

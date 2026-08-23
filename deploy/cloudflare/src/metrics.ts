@@ -60,7 +60,14 @@ export const COUNTER_NAMES = [
   // ignorance (a leak, by design — see `runnerActivityVerdict`), and `idle`
   // climbing means boxes are being held by bindings whose job never started.
   "keepalive_renewed_busy", // GitHub says this runner is executing a job
-  "keepalive_stopped_idle", // GitHub says it is idle/unknown-to-it ⇒ let it sleep
+  // RENAMED 2026-08-23 from `keepalive_stopped_idle`. The old name asserted an
+  // OUTCOME the sweep has no way to know. It fires the instant the sweep decides
+  // not to renew a box — nothing has stopped at that moment, and during the
+  // 2026-08-23 incident boxes carried this counter while running for 10.5 hours.
+  // Conflating "we stopped tracking it" with "it stopped" is what let three prior
+  // incident investigations close on the wrong conclusion. Historical counts under
+  // the old name are not carried over; they were not measuring what they claimed.
+  "keepalive_unrenewed_idle", // GitHub says it is idle/unknown-to-it ⇒ stop renewing
   "keepalive_renewed_unverifiable", // could not tell ⇒ renewed anyway (fail-safe)
   // ── Teardown + credential + billing ──────────────────────────────────────
   "runner_torn_down", // container destroyed at completion (vs idle-out)
