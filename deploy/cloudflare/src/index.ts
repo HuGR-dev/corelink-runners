@@ -79,6 +79,8 @@ import {
   installationAllowlistArmed,
   isInstallationAllowlisted,
   matchManagedLabels,
+  unservedCapabilityClaims,
+  SERVED_INSTANCE_TYPE,
   listOrphanRunnerJobs,
   reconcileCompletedJobBilling,
   RECONCILE_MIN_AGE_MS,
@@ -2085,6 +2087,24 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       const mintLabels = matchManagedLabels(jobLabels, env.AUTOSCALER_LABEL);
       if (!mintLabels) {
         return json({ ok: true, ignored: "not our label" }, 200);
+      }
+      // The job is ours and WILL be served — but if it asked for hardware we do
+      // not have, say so instead of quietly handing it a standard-4. We do not
+      // refuse: `workflow_job.queued` is one-shot, so a refusal strands the job
+      // forever, which is worse for the caller than a smaller box.
+      const unserved = unservedCapabilityClaims(mintLabels);
+      if (unserved.length > 0) {
+        console.warn(
+          JSON.stringify({
+            event: "capability_claim_unserved",
+            labels: unserved,
+            served_instance_type: SERVED_INSTANCE_TYPE,
+            repo: evt.repository?.full_name ?? "",
+            job_id: String(evt.workflow_job?.id ?? ""),
+            note: "served the standard box; the requested shape does not exist in the fleet",
+          }),
+        );
+        await bumpMetrics(env, "capability_claim_unserved");
       }
       // The stable correlation id across queued→completed for THIS job. The PAT
       // is minted under it (job_id) so completion can revoke the SAME PAT.

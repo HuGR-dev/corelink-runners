@@ -617,12 +617,17 @@ until armed (`FABRIC_RUNNER_VCPU>0` + `max_vcpu_h`).
 **As a** CI engineer with a heavy build, **I want** to pick a bigger runner via the label, **so that** I can trade one bigger slot for speed.
 **Flow:**
 1. `runs-on: corelink-standard-8`
-2. the family matcher maps the size suffix
-3. a bigger microVM spawns.
+2. **today:** the family matcher accepts the label and the job is served by the
+   ONE shape the fleet runs (`standard-4`). There is no size mapping — the
+   suffix is not read as a size anywhere (`deploy/cloudflare/src/lib.ts`,
+   `matchManagedLabels`). The mismatch is counted (`capability_claim_unserved`)
+   and logged, rather than silently swallowed; refusing is NOT an option
+   (`workflow_job.queued` is one-shot, so a refusal strands the job forever).
+3. **when the ladder ships:** a bigger microVM spawns.
 
 **Expected:** Size is auto-accounted in the ceiling (vCPU-h); billing unchanged
 (slots, never minutes). Sizes/labels are **Stage C (GA)** in ADR-0007 — **owner-gated**.
-**Acceptance / evidence:** The label family matcher maps the corelink family + size suffix (S1.1.4/S1.6.11, `matchManagedLabels`); the live box is pinned `standard-4` (ADR-0009 condition 2, S1.2.2). The `corelink-standard-8/16` ladder is ADR-0007 Stage C — owner-gated.
+**Acceptance / evidence:** The label family matcher accepts the corelink family (S1.1.4/S1.6.11, `matchManagedLabels`) — it does **not** map the size suffix to an instance type, and never has; the live box is pinned `standard-4` (ADR-0009 condition 2, S1.2.2). Until the ladder ships, `unservedCapabilityClaims` names any hardware claim the fleet cannot honour and bumps `capability_claim_unserved`, so demand for the ladder is measurable instead of invisible. The `corelink-standard-8/16` ladder is ADR-0007 Stage C — owner-gated.
 **Variations & failures:**
 - *Live box size today* — `standard-4` is pinned (ADR-0009 condition 2); other sizes
   are a GA follow-up.

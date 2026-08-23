@@ -32,6 +32,11 @@ export const COUNTER_NAMES = [
   "runner_spawned", // a RunnerContainer was started with the JIT
   "spawn_forbidden", // mint authorization returned forbidden → no spawn
   "spawn_at_ceiling", // per-tenant concurrency ceiling → no spawn
+  // A job asked for a hardware capability the fleet does not have (e.g.
+  // `corelink-standard-8`) and was SERVED the standard-4 box anyway. Refusing
+  // would strand the job (one-shot `workflow_job.queued`), so the mismatch is
+  // counted instead of hidden. A climbing count is demand for the size ladder.
+  "capability_claim_unserved",
   "spawn_failed", // mint/spawn threw (claim released for re-drive)
   "placement_unconfirmed", // a started box never claimed the job (re-driven)
   // ── Ghost containers (a start we abandoned mid-flight) ───────────────────

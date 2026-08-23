@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-08-23 — a hardware capability the fleet lacks is now counted, not silently downgraded
+
+`runs-on: corelink-standard-8` was accepted and served by a `standard-4` box with
+no signal to anyone. `isServableCorelinkLabel` (`deploy/cloudflare/src/lib.ts`)
+admits ANY `corelink-*` suffix, and nothing downstream reads the suffix as a
+size — there is no size mapping in the Worker and never has been, despite
+`docs/product/USE-SCENARIOS.md` S1.3.3 step 2 asserting "the family matcher maps
+the size suffix". That is exactly the failure S1.3.4 forbids: "a capability gap
+is a visible 'not yet', not a mis-provisioned wrong box or a silent failure". It
+also quietly leans on billing's hard-pinned `standard-4` slot cost being right
+for every box.
+
+`unservedCapabilityClaims()` now names the labels that assert hardware the fleet
+does not have — the size ladder, `gpu`/`cuda`, an architecture, a non-Linux OS —
+and the webhook logs a structured `capability_claim_unserved` event and bumps a
+counter of the same name. ROUTING suffixes (`corelink-dogfood`, a team name) are
+deliberately NOT flagged: they ask WHO, not WHAT, and the standard box is the
+correct answer for them.
+
+**The job is still served.** Refusing is not the fix and is called out in the
+code: `workflow_job.queued` is one-shot, so returning `null` strands the job
+queued forever with no runner and no error the caller can see — strictly worse
+than a smaller box. A test pins that contract
+(`the fleet still SERVES a job carrying an unserved claim — never strand it`).
+
+The counter also turns invisible demand into a number: a climbing
+`capability_claim_unserved` is evidence for building the size ladder (ADR-0007
+Stage C), which today is argued for on intuition alone.
+
+S1.3.3's flow and acceptance lines are corrected to describe what the code does.
+
 ### 2026-08-22 — doc-truth sweep: 3 stale present-tense claims corrected
 
 - **fix(docs): three runbooks described completed work as pending — including one that told an operator to arm a secret that has been live for a month.** `docs/runbook/cloudflare-go-live.md` stated *"Worker secrets set (3 of 4)"* and called `CORELINK_RUNNER_MINT_AUTH_KEY` **NOT set**, framing §2 as "THE ONE REMAINING GATE" to flip the moat WARM. The key has been armed since 2026-07-20 (`3f1f4b4`); verified 2026-08-23 against the CF API — `corelink-spawn-worker` carries 13 bound secrets including that one, so spawns are already WARM. An operator following §2 would have been re-arming a live production key. §2 is now marked as the record of how it was armed, not a to-do. `docs/runbook/rota-a-check-host-prod-flip.md` presented the rota-A flip as pending and named a Northflank host as the live fabric; the flip completed 2026-07-08 (`ee5d245`) and the substrate moved to Cloudflare in the 2026-07 flip (ADR-0008) — it now carries a COMPLETED/HISTORICAL banner pointing at the live runbook. `deploy/RUNBOOK.md` is an ~11 KB step-by-step Northflank deploy procedure with no deprecation notice at all, sitting in `deploy/` where anyone looking for deployment guidance finds it first; it now opens with a SUPERSEDED banner naming `docs/runbook/cloudflare-go-live.md` as the live path. All three files are kept rather than deleted — they are the historical record of how the current state was reached.

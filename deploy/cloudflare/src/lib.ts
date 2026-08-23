@@ -945,6 +945,53 @@ const RESERVED_LABELS = new Set<string>(["corelink-builder"]);
 // label means the job needs a runner we don't provide.
 const PASSTHROUGH_LABELS = new Set<string>(["self-hosted"]);
 
+// ── Capability claims vs routing labels ──────────────────────────────────────
+// The fleet runs exactly ONE box shape: a `standard-4` x86_64 Linux microVM
+// (the image is wrangler-pinned per DO class — deploy/cloudflare/README.md §1,
+// ADR-0008). Every `corelink-<suffix>` is servable, which is right for ROUTING
+// suffixes (`corelink-dogfood`, a team name): the suffix asks WHO, not WHAT, and
+// the standard box is the correct answer.
+//
+// It is NOT right for a suffix that asserts HARDWARE. `runs-on:
+// corelink-standard-8` is served today by a `standard-4` box, silently — the
+// caller asked for a machine we do not have and got a smaller one with no
+// signal. That is precisely the failure USE-SCENARIOS S1.3.4 forbids: "a
+// capability gap is a visible 'not yet', not a mis-provisioned wrong box or a
+// silent failure". It also undermines billing, which hard-pins the slot cost to
+// `standard-4` (see RUNNER_SLOT_VCPU below) on the assumption every box IS one.
+//
+// ⚠️ Refusing the job is NOT the fix and must not be attempted here.
+// `workflow_job.queued` is a one-shot event: returning `null` strands the job
+// queued forever with no runner and no error the caller can see. Serving the
+// standard box is strictly better for the caller than hanging. So the contract
+// is: SERVE, and make the mismatch countable.
+export const SERVED_INSTANCE_TYPE = "standard-4";
+
+// Suffix shapes that assert hardware rather than routing. Kept as explicit
+// patterns (not "anything unknown") so adding a team/routing label never trips
+// a false capability warning.
+const CAPABILITY_CLAIM_PATTERNS: readonly RegExp[] = [
+  /^corelink-(standard|highcpu|highmem)-\d+$/, // size ladder (ADR-0007 Stage C)
+  /^corelink-(gpu|cuda)$/, // accelerator
+  /^corelink-(arm64|aarch64|x86_64|amd64)$/, // architecture
+  /^corelink-(windows|macos|darwin)$/, // operating system
+];
+
+/**
+ * The subset of `labels` that assert a hardware capability the fleet does not
+ * actually provide. Empty when every label is either a routing suffix or the
+ * one shape we really run (`corelink-standard-4`).
+ *
+ * Callers MUST still serve the job — this is a visibility signal, not a gate.
+ */
+export function unservedCapabilityClaims(labels: string[]): string[] {
+  return labels.filter(
+    (l) =>
+      l !== `corelink-${SERVED_INSTANCE_TYPE}` &&
+      CAPABILITY_CLAIM_PATTERNS.some((re) => re.test(l)),
+  );
+}
+
 function isServableCorelinkLabel(l: string): boolean {
   return (l === MANAGED_LABEL_ROOT || l.startsWith(MANAGED_LABEL_PREFIX)) && !RESERVED_LABELS.has(l);
 }
