@@ -706,6 +706,33 @@ function jobHandleKey(jobId: string): string {
 // `runner_name` is minted by us at `generate-jitconfig` and echoed back by GitHub
 // on `workflow_job.in_progress` / `.completed`, so it correlates the box to the
 // job that ACTUALLY ran on it, whichever permutation GitHub chose.
+// ── The stale-box reaper's durable record ────────────────────────────────────
+// `rhandle:` above is the KEEP-ALIVE binding, and it TTLs out with the job PAT
+// (`JOB_PAT_TTL_S`, 2 h). That is correct for its purpose and WRONG as the fleet's
+// only record of a running box: once it expires the sweep can no longer see the
+// box at all — not to renew it, and not to stop it. Termination then rests
+// entirely on the DO's own `sleepAfter` alarm, a single point of failure.
+//
+// Measured 2026-08-23: three `standard-4` boxes were `running` for 10.2 h against
+// a 15-minute idle window, with every `keepalive_*` counter flat — i.e. invisible
+// to the sweep and never stopped by the alarm. ~120 vCPU-hours of nothing.
+//
+// `sbox:` is the second record, deliberately outliving the keep-alive binding, so
+// a box that outlives its own bookkeeping is still FINDABLE and can be actively
+// destroyed instead of waited on.
+const SPAWNED_BOX_PREFIX = "sbox:";
+function spawnedBoxKey(runnerName: string): string {
+  return `${SPAWNED_BOX_PREFIX}${runnerName}`;
+}
+// Long enough that it always outlives the keep-alive binding it backstops; short
+// enough to self-clean if the reaper itself is ever broken.
+const SPAWNED_BOX_TTL_S = 86400; // 24 h
+
+// A box older than this has, by this system's OWN assumption, outlived any
+// legitimate job: `JOB_PAT_TTL_S` is the lifetime the spawn path gives a job's
+// credential, so nothing is expected to still be working past it.
+const STALE_BOX_AGE_MS = JOB_PAT_TTL_S * 1000;
+
 const RUNNER_HANDLE_PREFIX = "rhandle:";
 function runnerHandleKey(runnerName: string): string {
   return `${RUNNER_HANDLE_PREFIX}${runnerName}`;
@@ -1099,6 +1126,26 @@ async function spawnRunner(
       },
     ).catch((e) =>
       logEvent("error", "kv_put_runner_handle_failed", {
+        jobId,
+        runnerName,
+        error: (e as Error).message,
+      }),
+    );
+    // …and the reaper's durable twin, which deliberately OUTLIVES the binding
+    // above. Same facts, longer TTL: this is what lets the sweep find a box that
+    // has outlived its own keep-alive record instead of trusting `sleepAfter`.
+    await env.RUNNER_JOB_PATS.put(
+      spawnedBoxKey(runnerName),
+      JSON.stringify({
+        h: handle,
+        rid: provisioned.runnerId,
+        repo,
+        inst: installationId,
+        t: Date.now(),
+      }),
+      { expirationTtl: SPAWNED_BOX_TTL_S },
+    ).catch((e) =>
+      logEvent("error", "kv_put_spawned_box_failed", {
         jobId,
         runnerName,
         error: (e as Error).message,
@@ -1920,6 +1967,92 @@ export async function keepAliveLiveRunners(
   return renewed;
 }
 
+/**
+ * Destroy boxes that have outlived any job they could plausibly be running.
+ *
+ * The keep-alive sweep can only RENEW; nothing in the fleet actively STOPS a
+ * container, so termination rests entirely on the DO's `sleepAfter` alarm. When
+ * that alarm does not fire — observed in prod 2026-08-23, three boxes `running`
+ * for 10.2 h against a 15-minute window — the box burns until someone notices.
+ * This is the second layer.
+ *
+ * ⚠️ The fail-safe here is the OPPOSITE of `keepAliveLiveRunners`, on purpose.
+ * That sweep renews when it cannot verify, because renewing on ignorance only
+ * wastes money. This one DESTROYS, so it must never act on ignorance: killing a
+ * box that is in fact running a customer's job costs them the job. A box is
+ * reaped ONLY on a definite "GitHub says this runner is not busy". Unverifiable
+ * (missing runner id, missing installation, a GitHub error, a throw) ⇒ left
+ * alone and retried next tick.
+ *
+ * Returns the number of boxes destroyed.
+ */
+export async function reapStaleBoxes(
+  env: Env,
+  nowMs: number,
+  verify: (
+    env: Env,
+    repo: string,
+    runnerId: number,
+    installationId: string,
+  ) => Promise<RunnerObservation | null> = fetchRunnerActivity,
+): Promise<number> {
+  const kv = env.RUNNER_JOB_PATS;
+  if (!kv) return 0;
+  let listed: { keys: { name: string }[] };
+  try {
+    listed = await kv.list({ prefix: SPAWNED_BOX_PREFIX });
+  } catch (e) {
+    logEvent("error", "reap_list_failed", { error: (e as Error).message });
+    return 0;
+  }
+  let reaped = 0;
+  for (const { name } of listed.keys) {
+    const runnerName = name.slice(SPAWNED_BOX_PREFIX.length);
+    let rec: { h?: string; rid?: number; repo?: string; inst?: string; t?: number } | null = null;
+    try {
+      const raw = await kv.get(name);
+      rec = raw ? JSON.parse(raw) : null;
+    } catch {
+      continue; // transient read miss or unparseable — next tick retries
+    }
+    if (!rec || typeof rec.h !== "string" || typeof rec.t !== "number") continue;
+
+    // Too young to judge: it may well be mid-job.
+    if (nowMs - rec.t < STALE_BOX_AGE_MS) continue;
+
+    // Can we get a DEFINITE answer? No id/repo/installation ⇒ no, so leave it.
+    if (typeof rec.rid !== "number" || !rec.repo || !rec.inst) {
+      logEvent("info", "reap_skipped_unverifiable", { runnerName, ageMs: nowMs - rec.t });
+      continue;
+    }
+    let activity: "busy" | "idle" | "unknown" = "unknown";
+    try {
+      activity = runnerActivityVerdict(await verify(env, rec.repo, rec.rid, rec.inst));
+    } catch (e) {
+      logEvent("error", "reap_verify_threw", { runnerName, error: (e as Error).message });
+      continue; // ignorance ⇒ never destroy
+    }
+    if (activity !== "idle") continue; // busy or unknown ⇒ leave it running
+
+    try {
+      await getContainer(env.RUNNER_CONTAINER, rec.h).destroy();
+      reaped++;
+      logEvent("error", "stale_box_reaped", {
+        runnerName,
+        ageMs: nowMs - rec.t,
+        note: "outlived JOB_PAT_TTL_S and GitHub reports its runner idle",
+      });
+      await kv.delete(name).catch(() => {});
+    } catch (e) {
+      // Already gone, or the handle is dead — either way not worth alarming on.
+      logEvent("info", "reap_destroy_skipped", { runnerName, error: (e as Error).message });
+      await kv.delete(name).catch(() => {});
+    }
+  }
+  if (reaped > 0) await bumpMetrics(env, ...Array(reaped).fill("stale_box_reaped"));
+  return reaped;
+}
+
 // driveSpawn wrapped so ANY failure RELEASES the spawn claim — a GitHub redelivery
 // or a later reconciler tick can then re-drive the job (never a silent orphan).
 async function driveSpawnGuarded(
@@ -1996,6 +2129,17 @@ export default {
       await sweepGhostContainers(env);
     } catch (e) {
       logEvent("error", "ghost_sweep_failed", { error: (e as Error).message });
+    }
+    try {
+      // THIRD: destroy boxes that outlived any job they could be running. The
+      // keep-alive sweep above can only RENEW — without this, termination rests
+      // solely on the DO `sleepAfter` alarm, and a box whose alarm does not fire
+      // burns forever. Runs after the ghost sweep and before the re-drives, for
+      // the same reason: hand the placers a fleet whose waste is already back.
+      const reaped = await reapStaleBoxes(env, now);
+      if (reaped > 0) logEvent("error", "stale_boxes_reaped", { count: reaped });
+    } catch (e) {
+      logEvent("error", "stale_box_reap_failed", { error: (e as Error).message });
     }
     await redriveOrphanedJobs(env, ctx, configured, now);
     try {

@@ -46,6 +46,12 @@ export const COUNTER_NAMES = [
   // the cron has since CONFIRMED are down.
   "container_start_abandoned",
   "ghost_container_reaped",
+  // A box that outlived JOB_PAT_TTL_S and that GitHub reports idle, destroyed by
+  // `reapStaleBoxes`. Distinct from `ghost_container_reaped` (a start we
+  // ABANDONED mid-flight): this one started fine, did its job or never got one,
+  // and then was never stopped — the `sleepAfter` alarm did not fire. A non-zero
+  // count is the alarm failing; a CLIMBING count is it failing routinely.
+  "stale_box_reaped",
   // ── Keep-alive sweep (does a live box keep its idle window open?) ────────
   // The sweep renews a box's idle timeout only while GitHub reports that box's
   // OWN runner as busy. These three partition every binding it looks at, so
