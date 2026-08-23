@@ -673,6 +673,28 @@ S1.3.3's flow and acceptance lines are corrected to describe what the code does.
   fixed earlier the same day. A lost completion webhook stays bounded by the binding's own
   KV TTL (`JOB_PAT_TTL_S`), after which renewals stop on their own.
 
+  ⚠️ **2026-08-23 correction: the frozen-deadline diagnosis holds; the SIGTERM consequence
+  above does not.** The `inflightRequests`-never-increments mechanism is verified and
+  unchanged — the deadline really does freeze at container-start + 900 s. What was wrong is
+  what that freeze does downstream. `stop()` (`@cloudflare/containers` 0.3.x) sends the
+  container process **SIGTERM only** and never escalates to SIGKILL. Until `fc74fbd3`
+  (2026-07-21, `corelink-runners`), the entrypoint ran `exec ./run.sh`, making GitHub's own
+  `run.sh` PID 1 — and `run.sh` traps SIGTERM and forwards it, so the platform's SIGTERM had
+  somewhere real to land and a ~900 s cutoff was a coherent mechanism. `fc74fbd3` replaced
+  the `exec` with `./run.sh ... 2>&1 | tee /tmp/runsh.out` (to capture output for the
+  `/runner-diag` sink), which makes PID 1 an un-trapped `bash` on a foreground pipeline —
+  and the kernel does not deliver a default-disposition SIGTERM to PID 1. From that date the
+  same alarm fires and kills nothing; the box just hangs. This is the mechanism behind the
+  2026-08-23 incident (three boxes stuck 10.5 h instead of cut at 900 s), fixed in `#487`
+  with the durable backstop in `#490`. The 864 s figure predates `fc74fbd3` and was produced
+  under the earlier `exec` entrypoint, when SIGTERM still worked — it has **not** been traced
+  to a specific run; an attempt to find the job that produced it came up empty, so its exact
+  source is unexplained even though the mechanism that would produce it is understood.
+  Separately, `coverage.yml`, `perf-nightly.yml` and `dr-drill-monthly.yml` were not on
+  `runs-on: corelink` at the time (`ubuntu-x64-4core`, `[self-hosted, mac,
+  corelink-builder]`, and `ubuntu-latest` respectively) and should not have been cited as
+  exposed to this defect.
+
 ### 2026-08-02 — teardown no longer SIGKILLs a box that is running someone else's job
 
 - **fix(cloudflare): correlate container teardown on `runner_name`, not the spawn-request
