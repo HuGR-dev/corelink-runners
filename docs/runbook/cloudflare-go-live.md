@@ -26,13 +26,15 @@
 - **Warm wiring is code-complete + deployed, fail-open at every layer** (entrypoint `clw hydrate`
   preflight + `buildContainerEnv` warm-mint): when the mint key is present the Worker mints a per-job
   CAS PAT (D-9) and injects `CLW_*`; when absent it spawns **COLD** — a job ALWAYS runs (north star).
-- **Worker secrets set (3 of 4):** `CLOUDFLARE_SPAWN_AUTH_TOKEN`, `GITHUB_WEBHOOK_SECRET`,
+- **Worker secrets set:** `CLOUDFLARE_SPAWN_AUTH_TOKEN`, `GITHUB_WEBHOOK_SECRET`,
   `GITHUB_MINT_TOKEN` (all rotated off the dogfood throwaways 2026-06-20; webhook secret verified by a
   ping → HTTP 200).
 
-**THE ONE REMAINING GATE — the WARM moat:**
-- `CORELINK_RUNNER_MINT_AUTH_KEY` is **NOT set** (confirm: `npx wrangler secret list` shows only the 3 above).
-  Until it is, every spawn is COLD-but-correct. Setting it (§2) is what flips the moat WARM.
+**THE WARM MOAT — DONE, not pending (verified 2026-08-23):**
+- `CORELINK_RUNNER_MINT_AUTH_KEY` **IS set** on `corelink-spawn-worker` (13 secrets bound; confirm with
+  `npx wrangler secret list`, or the CF API `workers/scripts/corelink-spawn-worker/secrets`). It was armed
+  2026-07-20 (`3f1f4b4`), so spawns are WARM. §2 below is the record of HOW it was armed — it is history,
+  not a to-do. Do not re-run it against the live key.
 - It is **server-gated** (LOCKED 2026-06-20, not "one paste"): the Server TL must first split the prod
   internal-auth key per-consumer (the shared key also authenticates `admin`+`erase` — must NOT reach an
   untrusted runner) and migrate signup-worker, THEN deliver the dedicated **mint-only** key OOB. Thread:

@@ -1,5 +1,14 @@
 # RUNBOOK — `corelink-fabricd` on Northflank
 
+> ## ⚠️ SUPERSEDED — Northflank is NOT the live substrate (annotated 2026-08-23)
+>
+> The fabric moved to Cloudflare in the 2026-07 substrate flip (ADR-0008); see
+> `docs/ROADMAP.md` §0 and `deploy/cloudflare-fabricd/`. **The live deploy runbook is
+> `docs/runbook/cloudflare-go-live.md`.**
+>
+> This document is kept as the historical record of the Northflank deployment. Do not
+> follow it to deploy anything today.
+
 Deploy the fabric server as a long-running combined service on Northflank.
 The fabric runs on Northflank **and** spawns its per-job microVMs on the same
 provider — one plane, no cross-provider egress for the hot path.
