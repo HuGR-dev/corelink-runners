@@ -176,6 +176,17 @@ per-application instances endpoint correctly (paginates, filters out
 application in the account. See the script header for the full story on why
 the naive fields lie.
 
+**A running instance cannot currently be traced back to a Durable Object.**
+Measured 2026-08-23: instance names from the Containers API are bare UUIDs,
+while every handle the fabric knows is `cf-runner-<8hex>` — none of the `sbox:`
+or `rhandle:` keys in `RUNNER_JOB_PATS` matched any running instance name. So
+`POST /v1/teardown` with an instance name resolves `idFromName()` to a fresh,
+unrelated stub, destroys nothing, and still returns `204`. **A silent no-op that
+looks like success is the worst possible thing to hand someone mid-incident.**
+Until a mapping exists, the only lever that reliably removes a running box is a
+container image roll — which is also what finally cleared the three boxes leaked
+on 2026-08-23, and which kills in-flight jobs on every other box as a side effect.
+
 **In-memory counters reset on every restart** — `leases_acquired`,
 `mint_attempts`, etc. all go back to 0. That is expected and NOT data loss.
 **Lease STATE persists only if `DATABASE_URL` (pg ledger) is set** — otherwise
