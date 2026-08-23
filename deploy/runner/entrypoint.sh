@@ -84,8 +84,9 @@ fi
 # `--cap-drop ALL` / `--pids-limit` (the PIDS_LIMIT const) / `--memory` (the
 # MEMORY_LIMIT const)). We cannot pass `docker run` flags on the CF substrate
 # (the container IS the VM), so we apply the pids ceiling with `ulimit` in this
-# shell BEFORE dropping into the untrusted job. Because we `exec ./run.sh`
-# below, this limit is inherited by the runner and every job step it spawns.
+# shell BEFORE dropping into the untrusted job. `run.sh` is started as a CHILD of
+# this shell (see the signal-discipline block below), so the limit is inherited by
+# the runner and every job step it spawns.
 #
 #   ulimit -u  (max user processes)  → fork-bomb bound. Mirrors PIDS_LIMIT=4096.
 #
@@ -137,15 +138,78 @@ fi
 # so the captured output carries no secret. The value is still passed as an argument
 # only — never expanded into a visible string here.
 set +e
-./run.sh --jitconfig "$CORELINK_RUNNER_JITCONFIG" 2>&1 | tee /tmp/runsh.out
-rc=${PIPESTATUS[0]}
+
+# ── Signal discipline (2026-08-23 incident) ──────────────────────────────────
+# Three boxes stayed alive 10.5 h against a 15-minute idle window (~126 vCPU-h).
+# The platform's only soft stop is SIGTERM: @cloudflare/containers `stop()` sends
+# SIGTERM and NEVER escalates to SIGKILL (`destroy()` is the SIGKILL path).
+#
+# The mechanism is the PID 1 signal rule, not a blocked shell: the kernel does NOT
+# deliver a signal whose disposition is DEFAULT to PID 1. This script IS PID 1, and
+# before this block it installed ZERO traps — so SIGTERM had no handler, was never
+# delivered, and every stop the platform attempted was discarded in silence. The
+# idle alarm looped roughly 40 times with no effect at all. (Verified: outside a
+# PID namespace the same script DOES die on SIGTERM, which is why this was never
+# reproduced on a developer machine.)
+#
+# The `| tee` compounded it. Even had the shell died, `run.sh` and `tee` were
+# separate processes in a pipeline, so they would have been orphaned and kept
+# running — the box survives either way. Both halves are fixed below: a real trap
+# makes the signal deliverable, and forwarding it makes the runner actually stop.
+#
+# `exec ./run.sh` would fix the signal path but would destroy the diagnostic tee
+# below, which is the ONLY way a JIT-registration failure is ever visible (the
+# container has no external log path). So instead: run both sides in the
+# background over a FIFO, keep the tee, and give PID 1 a real trap.
+# Paths are overridable ONLY so the signal-discipline regression test can run
+# hermetically; the container always uses the /tmp defaults.
+RUNSH_OUT="${RUNSH_OUT:-/tmp/runsh.out}"
+RUNSH_FIFO="${RUNSH_FIFO:-/tmp/runsh.fifo}"
+rm -f "$RUNSH_FIFO"
+mkfifo "$RUNSH_FIFO"
+tee "$RUNSH_OUT" < "$RUNSH_FIFO" &
+TEE_PID=$!
+./run.sh --jitconfig "$CORELINK_RUNNER_JITCONFIG" > "$RUNSH_FIFO" 2>&1 &
+RUNSH_PID=$!
+
+# Forward the signal and let the runner deregister itself. Deliberately does NOT
+# exit from inside the handler: the runner owns its graceful shutdown and exiting
+# here would orphan it — which is precisely the "we stopped tracking it" mistaken
+# for "it stopped" failure this incident was made of. TERMINATED also suppresses
+# the diagnostic POST below, since a signalled teardown is expected, not a defect.
+TERMINATED=0
+term_handler() {
+  TERMINATED=1
+  kill -TERM "$RUNSH_PID" 2>/dev/null || true
+}
+trap term_handler TERM INT
+
+# A trapped signal INTERRUPTS `wait`, which then returns >128 while the child is
+# still alive. Re-wait until the child is genuinely gone, or PID 1 would fall
+# through and exit while run.sh still holds the box.
+while :; do
+  wait "$RUNSH_PID"; rc=$?
+  [[ "$rc" -le 128 ]] && break
+  kill -0 "$RUNSH_PID" 2>/dev/null || break
+done
+
+# Let tee drain, but BOUNDED: a job step that leaked the FIFO write fd would
+# otherwise keep tee open forever and hang PID 1 — reintroducing the very hang
+# this block removes. 5 s is far more than a flush needs.
+for _ in $(seq 1 50); do
+  kill -0 "$TEE_PID" 2>/dev/null || break
+  sleep 0.1
+done
+kill -TERM "$TEE_PID" 2>/dev/null || true
+rm -f "$RUNSH_FIFO"
+
 # Keepable observability: on a NON-ZERO runner exit (e.g. a JIT registration failure)
 # POST the output tail to the Worker's /runner-diag sink so it surfaces in `wrangler
 # tail` — the container has no external log path (this is exactly how the 2026-07-21
 # box-registration root-cause was found). Carries no secret (run.sh never echoes the
-# jitconfig). No-op on success or when the env-0 vars are absent.
-if [[ "$rc" -ne 0 && -n "${CLW_FABRIC_ENDPOINT:-}" && -n "${CLW_LEASE_ID:-}" ]]; then
-  { printf 'run.sh exit=%s\n---output tail---\n' "${rc}"; tail -c 2800 /tmp/runsh.out 2>/dev/null; } | curl -s -m 10 -X POST \
+# jitconfig). No-op on success, on a signalled teardown, or when the env-0 vars are absent.
+if [[ "$rc" -ne 0 && "$TERMINATED" -eq 0 && -n "${CLW_FABRIC_ENDPOINT:-}" && -n "${CLW_LEASE_ID:-}" ]]; then
+  { printf 'run.sh exit=%s\n---output tail---\n' "${rc}"; tail -c 2800 "$RUNSH_OUT" 2>/dev/null; } | curl -s -m 10 -X POST \
     "${CLW_FABRIC_ENDPOINT}/v1/leases/${CLW_LEASE_ID}/runner-diag" \
     -H "content-type: text/plain" --data-binary @- >/dev/null 2>&1 || true
 fi

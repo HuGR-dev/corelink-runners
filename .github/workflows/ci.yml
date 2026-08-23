@@ -32,6 +32,14 @@ jobs:
         with:
           fetch-depth: 0
 
+      # G0 · container entrypoint signal discipline — pinned after the 2026-08-23
+      # leaked-box incident (3 boxes alive 10.5 h against a 15-minute idle window,
+      # ~126 vCPU-h). The platform's only soft stop is SIGTERM and an untrapped
+      # PID 1 discards it, so a regression here is invisible until the bill arrives.
+      # Pure bash, no toolchain, ~6 s — placed first so it fails before anything heavy.
+      - name: entrypoint signal discipline (G0)
+        run: bash deploy/runner/test/entrypoint-signal.test.sh
+
       # G1 · e2e completeness-critic — proves EVERY product atom (55 features + 155
       # scenarios, parsed live from the ledger) is bound to a validation cell. Zero-dep
       # `node --test`; placed first so a coverage regression fails in seconds, before the
