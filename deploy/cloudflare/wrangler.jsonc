@@ -193,7 +193,16 @@
       // (kills the 429-at-Set-up-job on the ephemeral fleet), plus the docker-shim
       // `docker buildx build`->`nerdctl build` compat. Rollback = the increment-3
       // digest @sha256:fa052ed7547516d61bc70e71bfa2ebc26929de5ec9fa48fce046eaf43771033d.
-      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-runnercontainer@sha256:063d80b42d9a2a0e4e1f0c61a7ee506964280bd8862fd9d156822ed733b286ab",
+      // 2026-08-23 increment 5 (CI run 32658670201, tag b06f7270). Carries the
+      // entrypoint SIGTERM fix (#487): PID 1 now installs a TERM/INT trap and
+      // forwards the signal, so the platform's soft stop actually lands. Without
+      // it @cloudflare/containers `stop()` was a no-op against this image — the
+      // kernel does not deliver a default-disposition signal to PID 1 — and three
+      // boxes ran 10.5 h against a 15-minute idle window (~126 vCPU-h). This roll
+      // is ALSO what evicts those three: no token has instance-delete scope, so a
+      // new image is the only lever. Rollback = increment-4 digest
+      // @sha256:063d80b42d9a2a0e4e1f0c61a7ee506964280bd8862fd9d156822ed733b286ab.
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-runnercontainer@sha256:28d1af3959adc53fd3e7a19a79c74d235e740c33bd4569789429381674ac26f9",
       // standard-4 = 4 vCPU / 12 GiB / 20 GB disk — fits CI, clears the runner
       // disk floor (RUNNER_EPHEMERAL_STORAGE_FLOOR_MB).
       "instance_type": "standard-4",
