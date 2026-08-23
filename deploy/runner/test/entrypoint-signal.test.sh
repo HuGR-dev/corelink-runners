@@ -82,6 +82,19 @@ term_and_time() {
   return 1
 }
 
+# `unshare --fork` makes its CHILD the namespace's PID 1 while `unshare` itself
+# stays behind in the parent namespace, and it does not forward signals. Signalling
+# the wrapper therefore tests nothing about PID 1 — it must be the child.
+ns_init_of() {
+  local wrapper="$1" i kid
+  for i in $(seq 1 50); do
+    kid="$(pgrep -P "$wrapper" 2>/dev/null | head -1)"
+    [[ -n "$kid" ]] && { echo "$kid"; return 0; }
+    sleep 0.1
+  done
+  return 1
+}
+
 echo "entrypoint signal discipline"
 
 # ── Cell 1 — SIGTERM to PID 1 terminates the entrypoint ──────────────────────
@@ -199,16 +212,17 @@ if command -v unshare >/dev/null 2>&1 && unshare -r --pid --fork --mount-proc tr
         RUNSH_FIFO="$SANDBOX/fifo6" CORELINK_RUNNER_JITCONFIG="test-jit" \
         bash "$SANDBOX/entrypoint.sh" > /dev/null 2>&1 &
   PID6=$!
-  if wait_for_start "$SANDBOX/runsh6.out"; then
-    took6="$(term_and_time "$PID6" 50)"
+  NSINIT6="$(ns_init_of "$PID6" || echo "")"
+  if [[ -n "$NSINIT6" ]] && wait_for_start "$SANDBOX/runsh6.out"; then
+    took6="$(term_and_time "$NSINIT6" 50)"
     if [[ "$took6" == "alive" ]]; then
       fail "as PID 1 the fixed entrypoint STILL ignores SIGTERM — the incident is not actually fixed"
-      kill -KILL "$PID6" 2>/dev/null
+      kill -KILL "$NSINIT6" "$PID6" 2>/dev/null
     else
       pass "as literal PID 1, the fixed entrypoint exits $((took6))00ms after SIGTERM"
     fi
   else
-    fail "PID-1 cell: stub never started (harness problem)"
+    fail "PID-1 cell: stub never started, or the namespace init could not be resolved (harness problem)"
     kill -KILL "$PID6" 2>/dev/null
   fi
   wait "$PID6" 2>/dev/null
@@ -229,17 +243,18 @@ OLD1
     env STUB_PIDFILE="$SANDBOX/stub7.pid" RUNSH_OUT="$SANDBOX/runsh7.out" \
         bash "$SANDBOX/old_pid1.sh" > /dev/null 2>&1 &
   PID7=$!
-  if wait_for_start "$SANDBOX/runsh7.out"; then
-    took7="$(term_and_time "$PID7" 20)"
+  NSINIT7="$(ns_init_of "$PID7" || echo "")"
+  if [[ -n "$NSINIT7" ]] && wait_for_start "$SANDBOX/runsh7.out"; then
+    took7="$(term_and_time "$NSINIT7" 20)"
     if [[ "$took7" == "alive" ]]; then
       pass "as literal PID 1, the old shape discards SIGTERM (the incident, reproduced)"
     else
       fail "PID-1 negative control DIED — the kernel PID 1 rule is not in force; cell 6 proves nothing"
     fi
   else
-    fail "PID-1 negative control: stub never started (harness problem)"
+    fail "PID-1 negative control: stub never started, or the namespace init could not be resolved (harness problem)"
   fi
-  kill -KILL "$PID7" 2>/dev/null
+  kill -KILL "${NSINIT7:-0}" "$PID7" 2>/dev/null
   wait "$PID7" 2>/dev/null
 else
   # Loud, never silent. A skipped cell must never read as a passing one.
