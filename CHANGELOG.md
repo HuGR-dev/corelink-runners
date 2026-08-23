@@ -26,6 +26,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   collapsed section; the stale `[self-hosted, mac, corelink-builder]` CI
   runner label (workflow has read `runs-on: corelink` since #455) was also
   fixed.
+### 2026-08-22 — pre-merge gate check script (ported from corelink-server)
+
+- **ci: add `scripts/pre-merge-gate-check.sh` + its self-test.** Guards
+  against the "PR with a merge conflict gets ZERO `pull_request` check runs"
+  failure mode — `gh pr checks` then reports nothing failing, which reads as
+  green to a human and a script even though the real gates never ran.
+  Refuses `mergeable != MERGEABLE` (including `UNKNOWN`, which is "ask
+  again", never "fine"), refuses zero checks, and requires this repo's two
+  always-present, paths-filter-free PR gates (`ci.yml` job `gates`,
+  `dco.yml` job `dco`) to actually appear in the check list before trusting
+  any green. `scripts/pre-merge-gate-check.selftest.sh` stubs `gh` and
+  proves all five directions: CONFLICTING refused, UNKNOWN refused, zero
+  checks refused, a missing always-present gate refused, and a healthy PR
+  passes.
 
 ### 2026-08-18 — billing emitter canonicalizes an upper/mixed-case region
 
