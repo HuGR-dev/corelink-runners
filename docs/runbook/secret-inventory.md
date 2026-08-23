@@ -118,6 +118,36 @@ Rotate on a **compromise**, on **staff departure**, or on a **scheduled cadence*
 
 ## Hygiene action — REQUIRED (owner)
 
+> **Audited 2026-08-23.** The item below had been open since 2026-07-16 with no
+> record of whether anyone had acted on it. It had not been acted on. What was
+> actually on disk, verified that day:
+>
+> | file | mode found | mode now |
+> |---|---|---|
+> | `~/Downloads/corelink-app.pk8.pem` | `600` | `600` |
+> | `~/Downloads/corelink-runners-fleet.2026-06-15.private-key.pem` | **`644`** | `600` |
+> | `~/Downloads/corelink-runners.2026-07-13.private-key.pem` | **`644`** | `600` |
+>
+> Two of the three App private keys were **world-readable for ~2 months**, on the
+> machine that also runs the self-hosted CI runners (i.e. the box that executes
+> workflow code). Permissions were tightened to `600` immediately; that removes
+> the ongoing exposure but does **not** undo any read that already happened.
+> `~/Downloads/githugr-clerk-pubkey.pem` is a PUBLIC key and is irrelevant here.
+>
+> **Step 1 confirmed:** `GITHUB_APP_PRIVATE_KEY` IS bound on `corelink-spawn-worker`
+> (checked via the CF API secrets listing), so the running fabric does not read the
+> local files — they are redundant copies and deleting them breaks nothing.
+> ⚠️ But CF secrets are write-only: once the local copy is gone the value cannot be
+> read back, only regenerated.
+>
+> **Step 3 (rotation): the owner decided NOT to rotate** on 2026-08-23, having been
+> shown the `644`/2-month exposure and told plainly that deleting the file does not
+> invalidate the key — anyone who copied it in that window still holds a working
+> credential. Recorded here as a **conscious accepted risk, not an open action.**
+> Revisit if the App's blast radius grows (more repos, more installs).
+>
+> **Step 2 (deletion) remains with the owner** and is the only step left.
+
 **A GitHub-App private key was downloaded to `~/Downloads` and is now bound to the
 running App.** A `.pem` in `~/Downloads` is a root credential sitting in a
 world-readable, backup-synced, easily-leaked location — it can mint installation
