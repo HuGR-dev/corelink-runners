@@ -78,9 +78,24 @@ tripwire — either side's golden tests go red on any type divergence.
 
 ## Status
 
-**`v0.1.0-seed` shipped 2026-06-12.** The fabric is live on Northflank, proven
-end-to-end (acquire → real microVM → exec → signed attestation → teardown). As
-of 2026-06-14:
+**`v0.1.0-seed` shipped 2026-06-12.** ⚠️ **Substrate flip (2026-07, ADR-0008):**
+the live deploy is now **Cloudflare-first** — fabricd runs as a CF Container +
+proxy Worker (`deploy/cloudflare-fabricd/`), boxes spawn on the CF
+`corelink-spawn-worker` (`deploy/cloudflare/`), and the moat (native check-host
+exec + per-job CAS-PAT mint + attested cost) is live on Cloudflare. Per
+`deploy/cloudflare-fabricd/wrangler.jsonc`, the current CF deploy is a
+**singleton** (`FABRIC_NUM_SHARDS=1`) with `DATABASE_URL` **declared bound** (a
+wrangler secret — its value can't be read back from this repo, so this is what
+the config states, not an independently-verified live probe) → the pg-durable
+ledger is the declared active backend; N>1 is kept at 1 by deliberate volume
+choice, not a technical block. See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the
+full, current item list — it is the source of truth over this section.
+
+<details>
+<summary><strong>Historical status (as of 2026-06-14, Northflank substrate)</strong> — preserved for the record, superseded by the flip above</summary>
+
+The fabric was live on Northflank, proven end-to-end (acquire → real microVM →
+exec → signed attestation → teardown):
 
 - Multi-instance on a persistent Postgres ledger; cross-instance cap-safety
   proven live (2 containers, advisory-lock serialized admission, no over-admit).
@@ -92,11 +107,15 @@ of 2026-06-14:
   (`PgBillingSink`), `FairScheduler` (CP4), crash-probe sweep, orphan GC.
 - `corelink` CLI shipped.
 
+Northflank remains the ADR-0008 fallback substrate (not the live one) — see
+`docs/deploy/northflank-postgres-runbook.md` and
+`docs/deploy/corelink-flip-runbook.md` (both now marked superseded-substrate).
+
+</details>
+
 What remains before paying customers: the CoreLink auth+billing flip
 (`FABRIC_AUTH_BACKEND=corelink`, pending corelink-server `runners_entitlement`),
 hugit adopting `result_binding_sig_v2`, and M2 self-serve onboarding.
-
-See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the full item list.
 
 ## Quickstart — local single-tenant fabric
 
@@ -138,7 +157,8 @@ cargo deny check
 cargo audit --deny warnings
 ```
 
-All five pass on CI (`[self-hosted, mac, corelink-builder]`) before merge. Never
+All five pass on CI (`runs-on: corelink` — the self-hosted ephemeral Firecracker
+fleet, per `.github/workflows/ci.yml`) before merge. Never
 `gh pr merge --auto` — the CI-green-before-merge rule is manual discipline (GitHub
 free plan + private repo, no branch protection).
 

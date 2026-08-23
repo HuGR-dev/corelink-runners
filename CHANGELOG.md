@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-08-22 — doc-truth sweep: 3 stale present-tense claims corrected
+
+- **docs(truth): fix three docs asserting present-tense facts that were no
+  longer true.** `docs/ROADMAP.md`'s substrate-flip box claimed the live CF
+  deploy has no `DATABASE_URL` ⇒ in-memory ledger; `wrangler.jsonc`'s own
+  comments were corrected to state the opposite (`DATABASE_URL` bound → pg
+  live) by commit `80df8921`, and the ROADMAP box never followed — corrected,
+  with the write-only-secret caveat spelled out (declared-in-config, not an
+  independent live probe). `docs/architecture/managed-stack.html` marked the
+  dead host `app.corelink.humangr.com` (verified NXDOMAIN) as `em produção`
+  — corrected to state it's dead/retired without inventing a replacement.
+  `docs/deploy/corelink-flip-runbook.md` carries the same dead host in an
+  example and targets the superseded Northflank-UI deploy path — both
+  flagged. `README.md`'s Status section presented the superseded
+  Northflank/Postgres framing as current — rewritten to lead with the
+  Cloudflare/ADR-0008 substrate and the Northflank history preserved in a
+  collapsed section; the stale `[self-hosted, mac, corelink-builder]` CI
+  runner label (workflow has read `runs-on: corelink` since #455) was also
+  fixed.
+
 ### 2026-08-18 — billing emitter canonicalizes an upper/mixed-case region
 
 - **fix(billing): `CorelinkBillingTarget::from_env` lowercase-canonicalizes

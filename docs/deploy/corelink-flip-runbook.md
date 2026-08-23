@@ -1,5 +1,16 @@
 # RUNBOOK — CoreLink auth-backend flip (`static` → `corelink`)
 
+> ⚠️ **SUPERSEDED substrate (added 2026-08-22):** this runbook targets the
+> **Northflank UI** as the deploy surface. Per ADR-0008
+> (`docs/adr/0008-cloudflare-containers-substrate.md`), Cloudflare Containers
+> is now the DEFAULT/live compute substrate and Northflank is the interim
+> fallback — see `docs/ROADMAP.md`'s substrate-flip note. The
+> `Northflank UI → ... → New build` steps below no longer describe the primary
+> deploy path; keep this document for the Northflank-fallback case, not as the
+> current default procedure. It also references a dead hostname below (§2) —
+> left uncorrected because no confirmed-live replacement URL for that exact
+> path is known; see the inline note.
+>
 > Executed the moment the CoreLink TL pings that **items 1 + 3 are live**:
 > the `runners_entitlement` lookup is a real DB query (not a stub), and the
 > real tenant PAT for the fabric is minted. Reference:
@@ -56,8 +67,19 @@ In **Northflank UI → your service → Environment** add or update:
 
 ```
 FABRIC_AUTH_BACKEND        = corelink
-CORELINK_INTROSPECT_URL    = <the CoreLink introspect endpoint URL, e.g.
-                               https://api.corelink.humangr.com/_internal/v1/runners/introspect>
+CORELINK_INTROSPECT_URL    = <the CoreLink introspect endpoint URL — NOTE: the
+                               example previously here, api.corelink.humangr.com,
+                               is a DEAD host (NXDOMAIN, verified 2026-08-22; the
+                               dotted *.corelink.humangr.com scheme is retired
+                               family-wide). The confirmed-live introspect path
+                               at the time of this note is
+                               https://corelink-api.humangr.com/internal/v1/auth/introspect
+                               (per docs/handoff/2026-07-19-server-TL-REPLY-
+                               introspect-is-a-KEY-not-a-URL-migration.md) — but
+                               that path segment differs from this runbook's
+                               original /_internal/v1/runners/introspect, so
+                               confirm the exact path with the CoreLink TL
+                               before using it; do not assume it unchanged.>
 ```
 
 Leave all other env vars unchanged (`FABRIC_SIGNING_KEY`, `DATABASE_URL`,
