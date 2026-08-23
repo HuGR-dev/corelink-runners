@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-08-23 — a trustworthy "how many containers are running" script
+
+An incident was closed using the `applications[].instances` field from the CF
+Containers API — it read 21 while 3 were actually running; it's a health-block
+sum (`active + healthy + stopped + failed + scheduling + starting`), not a
+running count. The account-level `containers/instances` endpoint is also dead
+(returns `{"instances": []}` unconditionally). The only truthful source is the
+per-application instances endpoint, and it has two traps of its own: terminated
+instances are retained as `inactive` tombstones (one app held 3 running against
+350+ inactive), and pagination silently changes shape (`per_page` flips the
+response to cursor pagination with no `total_count`, so an undercount has no
+visible signal).
+
+Added `scripts/container-instances.sh`: enumerates every application in the
+account, walks each one's instances with correct pagination (deduped against
+same-page-window overlap from concurrent churn), filters `inactive` tombstones
+out of the running count, self-checks the paginated walk against an unpaginated
+fetch and fails loudly on disagreement, and supports `--older-than <hours>` as
+a non-zero-exit check for boxes that outlived their idle window.
+
 ### 2026-08-23 — a box that outlives its own bookkeeping is now destroyed, not waited on
 
 Measured in prod: three `standard-4` RunnerContainers were `running` for **10.2 h**
