@@ -198,7 +198,15 @@ total_inactive=0
 older_than_matches=0
 now_epoch="$(date -u +%s)"
 
-printf '%-42s %-8s %-12s %-40s\n' "APPLICATION" "LOCATION" "AGE" "INSTANCE (teardown handle)"
+# The instance name is NOT a teardown handle. Measured 2026-08-23: live instance
+# names are bare UUIDs (e.g. fab330dc-6cf9-…), while every handle the fabric knows
+# is of the form cf-runner-<8hex> — none of the 28 `sbox:` or 2 `rhandle:` keys in
+# RUNNER_JOB_PATS matches any running instance name. Calling POST /v1/teardown with
+# one of these resolves `idFromName()` to a fresh, unrelated Durable Object stub,
+# destroys nothing, and returns 204 — a silent no-op that looks like success. The
+# earlier label here said "teardown handle" and would have walked an operator
+# straight into that during an incident.
+printf '%-42s %-8s %-12s %-40s\n' "APPLICATION" "LOCATION" "AGE" "INSTANCE ID (not a teardown handle)"
 
 for i in "${!APP_IDS[@]}"; do
   app_id="${APP_IDS[$i]}"
