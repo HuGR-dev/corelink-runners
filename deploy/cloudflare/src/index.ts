@@ -748,9 +748,13 @@ async function mintJit(
 // queued job the instant something registers with its config. An abandoned
 // attempt's box that comes up late would therefore be able to CLAIM a customer's
 // job — on a container no `rhandle:`/`jhandle:` binding points at, so the
-// keep-alive sweep never renews it and `sleepAfter` SIGKILLs it mid-job 15 minutes
-// later. Deleting the registration makes that impossible: the box can boot, but it
-// can never be given work. The container destroy that follows is the second half.
+// keep-alive sweep never renews it. What happens NEXT is weaker than this comment
+// used to claim: it said `sleepAfter` "SIGKILLs it mid-job 15 minutes later", and
+// neither half was true. Automatic expiry runs through the SDK's `stop()`, which
+// is SIGTERM-only and never escalates to `destroy()`; and until #487 this image's
+// PID 1 discarded SIGTERM outright. Deleting the registration is therefore the
+// load-bearing half, not a nicety: the box can boot, but it can never be given
+// work. The container destroy that follows is what actually ends it.
 //
 // Best-effort and deliberately so: it runs on an already-failing path, and every
 // outcome (deleted, 404-already-gone, 422-busy, unreachable) leaves us no worse
@@ -917,8 +921,11 @@ function ghostKey(handle: string): string {
   return `${GHOST_KEY_PREFIX}${handle}`;
 }
 // How long a ghost record survives if the sweep can never confirm the box is
-// down. Comfortably past `sleepAfter` (15m), which remains the platform backstop,
-// so the record outlives the thing it is tracking rather than the reverse.
+// down. Comfortably past `sleepAfter` (15m), so the record outlives the thing it
+// is tracking rather than the reverse. NOTE: `sleepAfter` is NOT the reliable
+// backstop this comment used to call it — its deadline lives in an in-memory SDK
+// field that any DO re-instantiation rearms, and its expiry path is SIGTERM-only.
+// The durable idle backstop on `RunnerContainer` is what actually bounds a box.
 const GHOST_TTL_S = 3600;
 
 // Which DO namespace an abandoned handle lives in. Recorded with the handle
@@ -2060,7 +2067,7 @@ export async function keepAliveLiveRunners(
       // GitHub says this runner is not executing anything (or has forgotten it).
       // Stop renewing and let `sleepAfter` do its job. Nothing is destroyed here.
       idleCount++;
-      logEvent("info", "keepalive_stopped_idle", { runnerName, runnerId: binding.rid });
+      logEvent("info", "keepalive_unrenewed_idle", { runnerName, runnerId: binding.rid });
       continue;
     }
     if (activity === "unknown") unverifiable++;
@@ -2088,7 +2095,7 @@ export async function keepAliveLiveRunners(
   await bumpMetrics(
     env,
     ...Array(busyCount).fill("keepalive_renewed_busy"),
-    ...Array(idleCount).fill("keepalive_stopped_idle"),
+    ...Array(idleCount).fill("keepalive_unrenewed_idle"),
     ...Array(unverifiable).fill("keepalive_renewed_unverifiable"),
   );
   return renewed;
