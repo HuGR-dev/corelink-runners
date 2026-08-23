@@ -167,6 +167,15 @@ To confirm the live image / instance after a rollout:
 npx wrangler containers info    # shows the running image digest
 ```
 
+**"How many containers are actually running?"** — don't use the `instances`
+field on `GET .../containers/applications`; it's a health-block sum, not a
+running count, and has read wildly high while the true count was single
+digits. Use `scripts/container-instances.sh` instead — it walks the
+per-application instances endpoint correctly (paginates, filters out
+`inactive` tombstones, self-checks against an unpaginated fetch) across every
+application in the account. See the script header for the full story on why
+the naive fields lie.
+
 **In-memory counters reset on every restart** — `leases_acquired`,
 `mint_attempts`, etc. all go back to 0. That is expected and NOT data loss.
 **Lease STATE persists only if `DATABASE_URL` (pg ledger) is set** — otherwise
