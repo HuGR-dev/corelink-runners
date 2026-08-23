@@ -24,6 +24,12 @@
 #   survives regardless. If this cell ever reports the orphan died, the harness has
 #   stopped discriminating and cells 1-2 prove nothing.
 #
+#   Cells 6 and 7 close that gap where the platform allows it: on Linux with user
+#   namespaces they re-run both the fix and the old shape as LITERAL PID 1 inside a
+#   PID namespace, which is the only place the kernel rule actually applies. They
+#   SKIP loudly (never silently pass) where namespaces are unavailable — notably
+#   macOS, where this file is often run during development.
+#
 # Run: bash deploy/runner/test/entrypoint-signal.test.sh
 set -uo pipefail
 
@@ -174,6 +180,72 @@ if grep -qE '^\s*\./run\.sh .*\| *tee' "$ENTRYPOINT"; then
   fail "entrypoint.sh runs run.sh in a foreground pipeline again (the incident shape)"
 else
   pass "run.sh is not launched as a foreground pipeline"
+fi
+
+# ── Cells 6 & 7 — the real thing: the script running as LITERAL PID 1 ───────
+# Everything above runs the entrypoint as an ordinary child, so it can only prove
+# the signal-handling logic is structurally right. The defect itself lives in the
+# kernel's PID 1 rule: a signal whose disposition is DEFAULT is not delivered to
+# PID 1 at all. `unshare --pid --fork` puts the script in that exact position, so
+# these two cells test the actual production condition. SIGKILL/SIGSTOP are the
+# only signals an ancestor namespace can force on an init process; SIGTERM still
+# obeys the handler rule, which is precisely what makes cell 7 meaningful.
+if command -v unshare >/dev/null 2>&1 && unshare -r --pid --fork --mount-proc true >/dev/null 2>&1; then
+  # Cell 6 — the FIX, as PID 1: must die on SIGTERM.
+  make_stub
+  rm -f "$SANDBOX/stub6.pid"
+  unshare -r --pid --fork --mount-proc \
+    env STUB_PIDFILE="$SANDBOX/stub6.pid" RUNSH_OUT="$SANDBOX/runsh6.out" \
+        RUNSH_FIFO="$SANDBOX/fifo6" CORELINK_RUNNER_JITCONFIG="test-jit" \
+        bash "$SANDBOX/entrypoint.sh" > /dev/null 2>&1 &
+  PID6=$!
+  if wait_for_start "$SANDBOX/runsh6.out"; then
+    took6="$(term_and_time "$PID6" 50)"
+    if [[ "$took6" == "alive" ]]; then
+      fail "as PID 1 the fixed entrypoint STILL ignores SIGTERM — the incident is not actually fixed"
+      kill -KILL "$PID6" 2>/dev/null
+    else
+      pass "as literal PID 1, the fixed entrypoint exits $((took6))00ms after SIGTERM"
+    fi
+  else
+    fail "PID-1 cell: stub never started (harness problem)"
+    kill -KILL "$PID6" 2>/dev/null
+  fi
+  wait "$PID6" 2>/dev/null
+
+  # Cell 7 — the OLD shape, as PID 1: must SURVIVE SIGTERM. This is the incident
+  # reproduced exactly. If it dies, the kernel rule is not in force here and
+  # cell 6 is not testing what it claims to test.
+  make_stub
+  cat > "$SANDBOX/old_pid1.sh" <<'OLD1'
+#!/usr/bin/env bash
+set -uo pipefail
+cd "$(dirname "$0")"
+./run.sh --jitconfig "x" 2>&1 | tee "$RUNSH_OUT"
+exit "${PIPESTATUS[0]}"
+OLD1
+  chmod +x "$SANDBOX/old_pid1.sh"
+  unshare -r --pid --fork --mount-proc \
+    env STUB_PIDFILE="$SANDBOX/stub7.pid" RUNSH_OUT="$SANDBOX/runsh7.out" \
+        bash "$SANDBOX/old_pid1.sh" > /dev/null 2>&1 &
+  PID7=$!
+  if wait_for_start "$SANDBOX/runsh7.out"; then
+    took7="$(term_and_time "$PID7" 20)"
+    if [[ "$took7" == "alive" ]]; then
+      pass "as literal PID 1, the old shape discards SIGTERM (the incident, reproduced)"
+    else
+      fail "PID-1 negative control DIED — the kernel PID 1 rule is not in force; cell 6 proves nothing"
+    fi
+  else
+    fail "PID-1 negative control: stub never started (harness problem)"
+  fi
+  kill -KILL "$PID7" 2>/dev/null
+  wait "$PID7" 2>/dev/null
+else
+  # Loud, never silent. A skipped cell must never read as a passing one.
+  echo "  SKIP  PID-1 cells: no usable PID namespace here (expected on macOS; on the"
+  echo "        Linux CI fleet this SKIP means unshare/userns regressed and the"
+  echo "        strongest cells in this file are not running)"
 fi
 
 echo
