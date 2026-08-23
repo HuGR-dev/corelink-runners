@@ -27,6 +27,7 @@ import {
   parseReconcilerRepos,
   installationIdForRepo,
   matchManagedLabels,
+  unservedCapabilityClaims,
   listOrphanRunnerJobs,
   listCompletedRunnerJobs,
   reconcileCompletedJobBilling,
@@ -1123,4 +1124,41 @@ describe("installationIdForRepo (inject installation_id on repo webhooks)", () =
   it("returns '' (never throws) on malformed JSON", () =>
     expect(installationIdForRepo("{not json", "HuGR-Labs/corelink-runners")).toBe(""));
   it("returns '' for an empty repo name", () => expect(installationIdForRepo(MAP, "")).toBe(""));
+});
+
+describe("unservedCapabilityClaims (hardware claims we cannot honour)", () => {
+  it("flags a size the fleet does not run", () => {
+    expect(unservedCapabilityClaims(["corelink-standard-8"])).toEqual(["corelink-standard-8"]);
+    expect(unservedCapabilityClaims(["corelink-standard-16"])).toEqual(["corelink-standard-16"]);
+  });
+
+  it("does NOT flag the size we actually run", () => {
+    expect(unservedCapabilityClaims(["corelink-standard-4"])).toEqual([]);
+  });
+
+  it("does NOT flag routing suffixes — they ask WHO, not WHAT", () => {
+    expect(unservedCapabilityClaims(["corelink"])).toEqual([]);
+    expect(unservedCapabilityClaims(["corelink-dogfood"])).toEqual([]);
+    expect(unservedCapabilityClaims(["corelink-platform-team"])).toEqual([]);
+  });
+
+  it("flags accelerator, architecture and OS claims", () => {
+    expect(unservedCapabilityClaims(["corelink-gpu"])).toEqual(["corelink-gpu"]);
+    expect(unservedCapabilityClaims(["corelink-arm64"])).toEqual(["corelink-arm64"]);
+    expect(unservedCapabilityClaims(["corelink-windows"])).toEqual(["corelink-windows"]);
+  });
+
+  it("returns only the offending labels from a mixed set", () => {
+    expect(unservedCapabilityClaims(["corelink", "corelink-gpu", "corelink-dogfood"])).toEqual([
+      "corelink-gpu",
+    ]);
+  });
+
+  it("the fleet still SERVES a job carrying an unserved claim — never strand it", () => {
+    // The whole contract: flagging is a visibility signal, not a gate.
+    // `workflow_job.queued` is one-shot, so refusing hangs the job forever.
+    expect(matchManagedLabels(["corelink-standard-8"], undefined)).toEqual([
+      "corelink-standard-8",
+    ]);
+  });
 });
