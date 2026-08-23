@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-08-23 — a box that outlives its own bookkeeping is now destroyed, not waited on
+
+Measured in prod: three `standard-4` RunnerContainers were `running` for **10.2 h**
+against a declared `sleepAfter = "15m"`, with every `keepalive_*` counter flat over
+a 180 s sample — roughly 120 vCPU-hours doing nothing. Two defences had failed at
+once.
+
+1. **The keep-alive binding expires before the box does.** `rhandle:` is written at
+   spawn with `JOB_PAT_TTL_S` (2 h). After that the sweep cannot SEE the box —
+   neither to renew it nor to stop it. It becomes invisible rather than reapable.
+2. **The DO `sleepAfter` alarm, the only remaining terminator, did not fire.** Root
+   cause of that is being investigated separately; this change does NOT claim to
+   fix it, and deliberately stops depending on it.
+
+`reapStaleBoxes` adds the missing layer. A durable `sbox:` record (24 h TTL)
+outlives the keep-alive binding, so an over-age box stays findable; the per-minute
+cron destroys any box older than `JOB_PAT_TTL_S` that GitHub reports idle, and
+bumps a new `stale_box_reaped` counter. A non-zero count means the alarm failed; a
+climbing one means it fails routinely — so the failure this fix works around stays
+visible instead of being papered over.
+
+**The fail-safe direction is inverted on purpose, and it is the load-bearing part.**
+`keepAliveLiveRunners` renews when it cannot verify, because renewing on ignorance
+only wastes money. The reaper DESTROYS, so it must never act on ignorance: killing
+a box that is really running a customer's job costs them the job. It reaps only on
+a definite "GitHub says not busy" — a missing runner id, a missing installation, a
+GitHub error, a throw, or an undocumented status all mean LEAVE IT RUNNING. Four of
+the seven new test cells exist solely to keep that direction from being "simplified"
+later.
+
 ### 2026-08-23 — a hardware capability the fleet lacks is now counted, not silently downgraded
 
 `runs-on: corelink-standard-8` was accepted and served by a `standard-4` box with

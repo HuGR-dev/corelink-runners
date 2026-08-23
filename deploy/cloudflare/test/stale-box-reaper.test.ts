@@ -1,0 +1,126 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// STALE-BOX REAPER — the second layer of container termination.
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Measured in prod 2026-08-23: three `standard-4` RunnerContainers were in state
+// `running` for 10.2 h against a declared `sleepAfter = "15m"`, with every
+// `keepalive_*` counter flat over a 180 s window. Two defences had failed at once:
+//
+//   1. `rhandle:` — the keep-alive binding — TTLs out with the job PAT (2 h), so
+//      after 2 h the sweep cannot SEE the box at all: not to renew it, and not to
+//      stop it.
+//   2. The DO's own `sleepAfter` alarm, the sole remaining terminator, did not
+//      fire. (Root cause of THAT is tracked separately; this file does not claim
+//      to fix it.)
+//
+// `reapStaleBoxes` is the belt for #1: a durable `sbox:` record outlives the
+// keep-alive binding, so an over-age box stays findable and can be actively
+// destroyed rather than waited on.
+//
+// ⚠️ THE LOAD-BEARING CONTRACT IN THIS FILE is the fail-safe DIRECTION, which is
+// deliberately the OPPOSITE of `keepAliveLiveRunners`. That sweep renews when it
+// cannot verify (renewing on ignorance only wastes money). This one DESTROYS, so
+// it must never act on ignorance — destroying a box that is really running a
+// customer's job costs them the job. Reap ONLY on a definite "not busy".
+//
+// If a future change makes an unverifiable box reapable, cells 2-4 must go red.
+
+import { describe, it, expect, vi, beforeEach } from "vitest";
+
+const destroyed: string[] = [];
+vi.mock("@cloudflare/containers", () => ({
+  Container: class {},
+  getContainer: vi.fn((_ns: unknown, handle: string) => ({
+    destroy: vi.fn(async () => {
+      destroyed.push(handle);
+    }),
+  })),
+}));
+
+import { reapStaleBoxes } from "../src/index";
+
+const NOW = 1_800_000_000_000;
+const TWO_H_MS = 7200 * 1000;
+
+function kvWith(records: Record<string, unknown>) {
+  const store = new Map<string, string>();
+  for (const [k, v] of Object.entries(records)) store.set(k, JSON.stringify(v));
+  return {
+    store,
+    list: vi.fn(async () => ({ keys: [...store.keys()].map((name) => ({ name })) })),
+    get: vi.fn(async (k: string) => store.get(k) ?? null),
+    delete: vi.fn(async (k: string) => {
+      store.delete(k);
+    }),
+    put: vi.fn(async () => {}),
+  };
+}
+
+function envWith(kv: ReturnType<typeof kvWith>) {
+  // METRICS absent ⇒ bumpMetrics is a documented no-op, so the reaper is
+  // exercised without a Durable Object stub.
+  return { RUNNER_JOB_PATS: kv, RUNNER_CONTAINER: {} } as never;
+}
+
+const OLD = { h: "rh-old", rid: 7, repo: "o/r", inst: "42", t: NOW - TWO_H_MS - 60_000 };
+
+beforeEach(() => {
+  destroyed.length = 0;
+});
+
+describe("reapStaleBoxes", () => {
+  it("cell 1 — reaps an over-age box GitHub reports IDLE, and clears its record", async () => {
+    const kv = kvWith({ "sbox:runner-1": OLD });
+    const n = await reapStaleBoxes(envWith(kv), NOW, async () => ({ httpStatus: 200, runner: { status: "online", busy: false } }));
+    expect(n).toBe(1);
+    expect(destroyed).toEqual(["rh-old"]);
+    expect(kv.store.has("sbox:runner-1")).toBe(false);
+  });
+
+  it("cell 2 — NEVER reaps when GitHub says the runner is BUSY (it has a job)", async () => {
+    const kv = kvWith({ "sbox:runner-1": OLD });
+    const n = await reapStaleBoxes(envWith(kv), NOW, async () => ({ httpStatus: 200, runner: { status: "online", busy: true } }));
+    expect(n).toBe(0);
+    expect(destroyed).toEqual([]);
+    expect(kv.store.has("sbox:runner-1")).toBe(true);
+  });
+
+  it("cell 3 — NEVER reaps an UNVERIFIABLE box (no runner id ⇒ no definite answer)", async () => {
+    const kv = kvWith({ "sbox:runner-1": { ...OLD, rid: undefined } });
+    const verify = vi.fn();
+    const n = await reapStaleBoxes(envWith(kv), NOW, verify as never);
+    expect(n).toBe(0);
+    expect(destroyed).toEqual([]);
+    expect(verify).not.toHaveBeenCalled();
+  });
+
+  it("cell 4 — NEVER reaps when the verifier THROWS (ignorance is not idleness)", async () => {
+    const kv = kvWith({ "sbox:runner-1": OLD });
+    const n = await reapStaleBoxes(envWith(kv), NOW, async () => {
+      throw new Error("github 500");
+    });
+    expect(n).toBe(0);
+    expect(destroyed).toEqual([]);
+    expect(kv.store.has("sbox:runner-1")).toBe(true);
+  });
+
+  it("cell 5 — NEVER reaps a box younger than JOB_PAT_TTL_S, even when idle", async () => {
+    const kv = kvWith({ "sbox:runner-1": { ...OLD, t: NOW - 60_000 } });
+    const verify = vi.fn();
+    const n = await reapStaleBoxes(envWith(kv), NOW, verify as never);
+    expect(n).toBe(0);
+    expect(destroyed).toEqual([]);
+    expect(verify).not.toHaveBeenCalled();
+  });
+
+  it("cell 6 — an UNKNOWN verdict (null observation) is NOT idle and is left alone", async () => {
+    const kv = kvWith({ "sbox:runner-1": OLD });
+    const n = await reapStaleBoxes(envWith(kv), NOW, async () => null);
+    expect(n).toBe(0);
+    expect(destroyed).toEqual([]);
+  });
+
+  it("cell 7 — no KV binding ⇒ no-op, never throws", async () => {
+    expect(await reapStaleBoxes({} as never, NOW)).toBe(0);
+  });
+});
