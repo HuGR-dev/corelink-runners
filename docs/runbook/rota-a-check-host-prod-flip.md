@@ -1,5 +1,16 @@
 # Runbook — Rota A (native CF check-exec) prod flip
 
+> ## ✅ COMPLETED — HISTORICAL RECORD (annotated 2026-08-23)
+>
+> The rota-A flip described here was **completed 2026-07-08** (`ee5d245`:
+> "deploy(fabricd): FLIP — arm the moat (CAS-cred mint + hydrate), rota-A fully live").
+> Nothing below is pending work.
+>
+> The Northflank host named in the state section is also historical: the fabric moved to
+> Cloudflare in the 2026-07 substrate flip (ADR-0008). The live deploy runbook is
+> `docs/runbook/cloudflare-go-live.md`.
+
+
 **Status 2026-07-07:** engineering DONE + merged (#310 core / #311 e2e / #312 fail-closed) and the CF
 Containers runtime is **live-smoke PROVEN** (isolated worker: check-mode spawn → toolchain hydrate from
 CAS → `/v1/exec` → CheckResult → teardown, all green). The flip is now a **config/deploy operation, not
