@@ -348,6 +348,35 @@ export class ConcurrencySlotsDO extends DurableObject<Env> {
   }
 }
 
+// ── Durable idle backstop (2026-08-23 incident) ──────────────────────────────
+// The SDK's own idle deadline cannot be trusted to expire. `sleepAfterMs` is a
+// bare in-memory field (@cloudflare/containers 0.3.7 container.js:1024) and the
+// Container constructor calls `renewActivityTimeout()` UNCONDITIONALLY inside
+// `blockConcurrencyWhile` (container.js:348-360). So any re-instantiation of the
+// DO — an eviction, a Worker redeploy, or merely a `/v1/status` poll touching a
+// cold stub — silently rearms the full window with zero real activity. The alarm
+// TIME is durable (`ctx.storage.setAlarm`); the DEADLINE is not, so the two can
+// disagree indefinitely. On top of that the SDK's `alarm()` renews the timeout
+// immediately after firing `onActivityExpired()` (container.js:1566-1569), making
+// the idle alarm a self-perpetuating loop that never concludes anything — which
+// is how three boxes reached 10.5 h against a 15-minute window while `stop()` was
+// called about forty times.
+//
+// This is a BACKSTOP, not the primary control. The SDK path plus the keep-alive
+// sweep stay exactly as they are; this only catches the case where they failed.
+// Hence the deliberately generous window: it must never be the thing that ends a
+// legitimate job. A cron outage that stopped renewals would take this long to
+// bite, by which point a stuck box has cost more than a late one.
+const DURABLE_IDLE_BACKSTOP_MS = 45 * 60 * 1000;
+// Key names are namespaced so they cannot collide with SDK-owned storage keys.
+const LAST_ACTIVITY_KEY = "corelink:lastActivityAt";
+const SOFT_STOP_COUNT_KEY = "corelink:softStopCount";
+// After this many consecutive backstop expiries on a container that is STILL
+// running, stop asking politely. `stop()` is SIGTERM-only and never escalates on
+// its own, so without a ceiling here a stop()-defeating bug has no cost bound —
+// exactly the shape of the incident this came from.
+const MAX_SOFT_STOPS_BEFORE_DESTROY = 2;
+
 // Per-job runner container. One DO instance per spawned runner (keyed by handle).
 export class RunnerContainer extends Container<Env> {
   // standard-4; the GH-Actions agent is the image ENTRYPOINT (runner-direct, v0).
@@ -410,7 +439,102 @@ export class RunnerContainer extends Container<Env> {
    */
   keepAlive(): { ok: true } {
     this.renewActivityTimeout();
+    // Also record the activity DURABLY. `renewActivityTimeout()` writes only to
+    // the SDK's in-memory field, which does not survive re-instantiation; this is
+    // what the backstop below reads, and it is deliberately the same call site so
+    // the two can never drift apart.
+    void this.noteActivity();
     return { ok: true };
+  }
+
+  /**
+   * Record that this box was observed doing real work, durably.
+   *
+   * Also clears the soft-stop counter: a box that is working again has not been
+   * ignoring anything, and letting a stale count carry over would eventually
+   * destroy a healthy container.
+   */
+  async noteActivity(): Promise<void> {
+    await this.ctx.storage.put(LAST_ACTIVITY_KEY, Date.now());
+    await this.ctx.storage.delete(SOFT_STOP_COUNT_KEY);
+  }
+
+  /**
+   * The backstop. Runs on every alarm, BEFORE the SDK's own handler.
+   *
+   * Reads the durable last-activity stamp rather than the SDK's in-memory
+   * deadline, so a DO re-instantiation cannot rearm it. Escalates to `destroy()`
+   * once a soft `stop()` has demonstrably failed to end the container.
+   *
+   * Fail-safe in the quiet direction: no stamp yet, an unreadable state, or a
+   * container that is not running ⇒ do nothing. This code can destroy a customer's
+   * running job, so every uncertain branch leaves the box alone and lets the
+   * normal paths handle it.
+   */
+  async enforceDurableIdleBackstop(): Promise<void> {
+    const last = await this.ctx.storage.get<number>(LAST_ACTIVITY_KEY);
+    if (typeof last !== "number") {
+      // First alarm on a box spawned before this shipped, or before any activity
+      // was recorded. Stamp it now and judge from here — never from an assumed
+      // start time, which would make the very first alarm a potential killer.
+      await this.ctx.storage.put(LAST_ACTIVITY_KEY, Date.now());
+      return;
+    }
+    const idleMs = Date.now() - last;
+    if (idleMs < DURABLE_IDLE_BACKSTOP_MS) return;
+
+    let running = false;
+    try {
+      const state = await this.getState();
+      running = state.status === "running" || state.status === "healthy";
+    } catch (e) {
+      // Cannot see the container ⇒ cannot justify killing it.
+      logEvent("error", "idle_backstop_state_unreadable", { error: String(e) });
+      return;
+    }
+    if (!running) return;
+
+    const softStops = (await this.ctx.storage.get<number>(SOFT_STOP_COUNT_KEY)) ?? 0;
+    if (softStops >= MAX_SOFT_STOPS_BEFORE_DESTROY) {
+      logEvent("error", "idle_backstop_destroy", {
+        idle_minutes: String(Math.round(idleMs / 60000)),
+        soft_stops: String(softStops),
+        note: "stop() did not end this container; escalating to destroy()",
+      });
+      await this.destroy();
+      await this.ctx.storage.delete(SOFT_STOP_COUNT_KEY);
+      return;
+    }
+
+    logEvent("error", "idle_backstop_stop", {
+      idle_minutes: String(Math.round(idleMs / 60000)),
+      soft_stops: String(softStops + 1),
+      note: "durable idle window elapsed while the container is still running",
+    });
+    await this.ctx.storage.put(SOFT_STOP_COUNT_KEY, softStops + 1);
+    try {
+      await this.stop();
+    } catch (e) {
+      // A stop() throw must not swallow the alarm; the next tick escalates.
+      logEvent("error", "idle_backstop_stop_threw", { error: String(e) });
+    }
+  }
+
+  /**
+   * Run the backstop first, then hand off to the SDK's alarm.
+   *
+   * Order matters: the SDK's handler renews its own timeout as a side effect, so
+   * anything that needs to observe the pre-renewal state has to run before it.
+   * A throw in the backstop must never prevent the SDK alarm from running, or a
+   * bug here would break container lifecycle management wholesale.
+   */
+  async alarm(alarmProps?: Parameters<Container<Env>["alarm"]>[0]): Promise<void> {
+    try {
+      await this.enforceDurableIdleBackstop();
+    } catch (e) {
+      logEvent("error", "idle_backstop_threw", { error: String(e) });
+    }
+    return super.alarm(alarmProps);
   }
   // The runner needs egress (git clone, GH API, CAS hydration). ADR-0003 bounds
   // it (no-free-tier + scoped short-TTL PAT + ephemeral box).
@@ -428,6 +552,9 @@ export class RunnerContainer extends Container<Env> {
   // (@cloudflare/containers 0.3.x: env arrives via `start({ envVars })`, not baked).
   async startWithEnv(envVars: Record<string, string>): Promise<void> {
     await this.start({ envVars, enableInternet: true });
+    // Stamp the durable clock at boot so the backstop measures from a real event
+    // rather than from whenever the first alarm happened to land.
+    await this.noteActivity();
   }
 
   // Liveness for GET /v1/status: a running container ⇒ alive.
