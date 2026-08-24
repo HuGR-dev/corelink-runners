@@ -29,6 +29,17 @@
 # The manifest digest is parsed from wrangler's push output for an immutable X4
 # pin (falls back to the git-SHA tag if not found — never regresses).
 #
+# ── WHY THERE IS NO BUSY-FLEET GATE HERE ─────────────────────────────────────
+# deploy-spawn-worker.yml refuses to run while fabric runners are executing
+# customer jobs, because `wrangler deploy` rolls the RunnerContainer class. THIS
+# workflow deliberately has no such gate: it only BUILDS and PUSHES images to the
+# registry and prints the refs. It never deploys and never edits the
+# `containers[].image` pin in wrangler.jsonc — that pin is a hand edit, and the
+# rollout happens on the subsequent `wrangler deploy` of the NEW digest (see
+# build-fabricd-image.yml's header: "a NEW digest forces the container rollout; a
+# config-only change does not"). A push on its own rolls nothing, so gating it
+# would only block image builds for no safety gain.
+#
 # ── OWNER DEPENDENCIES ────────────────────────────────────────────────────────
 #   GH SECRET `CLOUDFLARE_API_TOKEN` — a Cloudflare API token with
 #   Containers/Workers push scope for account 6a1fc1c626fc2628823e60b9db01f5cd.

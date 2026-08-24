@@ -40,6 +40,50 @@ releases the concurrency slot and revokes the per-job PAT through the same path
 GitHub reads per tick, and it logs its own skip case rather than reading as a
 quiet tick.
 
+### 2026-08-23 — the roll now refuses to start while the fleet is busy
+
+#495 made PID 1 honour the platform's SIGTERM and bound the window. That fixed
+*how* a box dies, not *whether* it should have been asked to. Cloudflare gives a
+rolling container up to 15 minutes after SIGTERM and then SIGKILLs it, so a
+customer job longer than 15 minutes still died mid-flight — and nothing stopped a
+roll from starting while every box in the fleet was executing work.
+
+`deploy-spawn-worker.yml` now runs `scripts/ci/wait-for-idle-fleet.sh`
+immediately before `wrangler deploy` (same job, so no window opens between the
+verdict and the roll). It asks **GitHub** — never our own KV bookkeeping, which
+is precisely what has been wrong before — how many fabric runners are
+`online` **and** `busy`, paginated over every repo in `RECONCILER_REPOS`, and
+polls until that count reaches zero. Runners are enumerated per **repo**
+(`GET /repos/{owner}/{repo}/actions/runners`) because that is how the fabric
+registers them (`mintJit` → `generate-jitconfig` on the repo); the org endpoint
+would not see them at all. Only boxes advertising the `corelink` label count —
+the persistent macOS builders are not rolled by this deploy — and the gate
+excludes the box it is itself running on, which GitHub correctly reports as busy.
+
+- `poll_interval_secs` (30) and `deadline_secs` (2700 = 45 min) are dispatch
+  inputs; the deploy job's timeout was raised 15 → 60 min to outlast the deadline.
+- On deadline expiry the job **fails**, naming every still-busy runner. Failing is
+  the point: rolling over live customer work is what this exists to prevent.
+- `force: true` skips the wait, but prints a banner naming every runner it is
+  about to kill and records that in the job summary. A silent override is the same
+  defect wearing a different hat.
+- Every run writes busy-count-at-start, polls taken and the verdict to the job
+  summary.
+- An unreadable repo (403/404) or an unparseable response is a **hard failure**,
+  never "idle" — the gate must not be able to succeed by printing nothing.
+- New owner dependency: GH secret `FLEET_RUNNERS_READ_TOKEN` with
+  `administration: read` on the `RECONCILER_REPOS` repos, since the default
+  `GITHUB_TOKEN` cannot see another repo's runners.
+
+This is a **refusal, not a drain**. Nothing drains a busy container. In
+particular `rollout_active_grace_period` is not a drain either: it protects
+instances connected to their Durable Object for *fewer* than N seconds — young-
+instance protection, not busy-instance protection.
+
+`build-cf-container-images.yml` is deliberately **not** gated: it builds and
+pushes images and prints the refs, but never deploys and never edits the
+`containers[].image` pin, so a push on its own rolls nothing.
+
 ### 2026-08-23 — PID 1 now bounds the SIGTERM window instead of trusting it
 
 The SIGTERM fix (#487) made the platform's soft stop deliverable and forwarded it

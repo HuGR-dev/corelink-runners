@@ -13,16 +13,59 @@
 #   - The deploy job FAILS FAST with a clear message if the `CLOUDFLARE_API_TOKEN`
 #     secret is absent, so a dispatch before the owner arms the token cannot
 #     silently no-op.
+#   - The deploy job REFUSES TO ROLL A BUSY FLEET. `wrangler deploy` rolls the
+#     `RunnerContainer` class; Cloudflare then SIGTERMs each container, allows up
+#     to 15 minutes, and SIGKILLs. Since #495 the box honours that signal, but a
+#     customer job longer than 15 minutes still dies mid-flight. So immediately
+#     before `wrangler deploy` this workflow asks GITHUB (never our own KV
+#     bookkeeping, which is what has been wrong before) how many fabric runners
+#     are online+busy, and waits for zero — see the `Gate` step below.
+#     NOTE this is a REFUSAL, not a drain. Nothing drains a busy container, and
+#     `rollout_active_grace_period` is NOT a drain either: it protects instances
+#     connected to their DO for FEWER than N seconds (young-instance protection).
 #
 # ── OWNER DEPENDENCY (to arm) ────────────────────────────────────────────────
 #   GH SECRET `CLOUDFLARE_API_TOKEN` — a Cloudflare API token with Workers deploy
 #   scope for account 6a1fc1c626fc2628823e60b9db01f5cd. Set it in repo
 #   Settings → Secrets and variables → Actions. Until then this workflow's
 #   `test` job runs green but `deploy` fails fast with an explicit message.
+#
+#   GH SECRET `FLEET_RUNNERS_READ_TOKEN` — a token with `administration: read` on
+#   EVERY repo in RECONCILER_REPOS (currently HuGR-Labs/corelink-runners and
+#   HuGR-Labs/corelink-server). The busy-fleet gate needs it: the default
+#   `GITHUB_TOKEN` is scoped to THIS repo only, so it cannot see the runners
+#   registered on corelink-server — and a repo we cannot read is treated as a
+#   hard failure, never as "idle". The gate fails fast with an explicit message
+#   until the secret is armed; `force: true` is the deliberate override.
 name: deploy-spawn-worker
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      poll_interval_secs:
+        description: "Busy-fleet gate: seconds between polls of the GitHub runners API."
+        required: false
+        # 30s. Two repos per poll = 2 REST calls; a full 45-minute wait is ~180
+        # calls against a 5000/h budget, and 30s is far finer than the minutes-long
+        # granularity of a runner job finishing.
+        default: "30"
+      deadline_secs:
+        description: "Busy-fleet gate: give up (and FAIL) after this many seconds."
+        required: false
+        # 2700s = 45 min. A `runs-on: corelink` job here legitimately runs tens of
+        # minutes (the Rust PR gates run 10-30 min; the image builds set
+        # timeout-minutes up to 120), so anything much shorter would fail while
+        # perfectly normal work is still running. 45 min covers the overwhelming
+        # majority without hanging a production deploy for hours — and the failure
+        # is recoverable by simply re-dispatching. MUST stay under the deploy job's
+        # timeout-minutes (60) or GitHub cancels the job before the gate can
+        # report its verdict; the script enforces that bound.
+        default: "2700"
+      force:
+        description: "DANGEROUS: skip the wait and roll over runners that are executing customer jobs."
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -54,7 +97,16 @@ jobs:
   deploy:
     needs: test
     runs-on: corelink
-    timeout-minutes: 15
+    permissions:
+      contents: read
+      # Lets the busy-fleet gate's GITHUB_TOKEN fallback read THIS repo's
+      # self-hosted runners. It is only ever enough on its own if
+      # RECONCILER_REPOS is this repo alone — cross-repo needs
+      # FLEET_RUNNERS_READ_TOKEN (see the header).
+      administration: read
+    # Must outlast `deadline_secs` (default 2700s = 45 min) so a still-busy fleet
+    # produces the gate's explicit verdict rather than a bare "cancelled".
+    timeout-minutes: 60
     defaults:
       run:
         working-directory: deploy/cloudflare
@@ -80,6 +132,26 @@ jobs:
 
       - name: Install deps (wrangler)
         run: npm ci
+
+      # ── Busy-fleet gate — the roll must not start while boxes hold live work ──
+      # Runs HERE, as the last step before the deploy, rather than as a separate
+      # job: a gate that passes and then hands off to another job leaves a window
+      # in which the fleet picks up new work again.
+      - name: Gate — refuse to roll while the fleet is busy
+        working-directory: ${{ github.workspace }}
+        env:
+          # `administration: read` across RECONCILER_REPOS. The default
+          # GITHUB_TOKEN can only see THIS repo's runners, and an unreadable repo
+          # is a hard failure, so the owner secret is what actually arms this.
+          GH_TOKEN: ${{ secrets.FLEET_RUNNERS_READ_TOKEN || secrets.GITHUB_TOKEN }}
+          POLL_INTERVAL_SECS: ${{ inputs.poll_interval_secs }}
+          DEADLINE_SECS: ${{ inputs.deadline_secs }}
+          FORCE: ${{ inputs.force }}
+          # THIS job is itself running on a fabric box, which GitHub correctly
+          # reports as online+busy. Without excluding it the gate waits on itself
+          # until the deadline, every single time.
+          EXCLUDE_RUNNERS: ${{ runner.name }}
+        run: bash scripts/ci/wait-for-idle-fleet.sh
 
       - name: Deploy (wrangler)
         env:
