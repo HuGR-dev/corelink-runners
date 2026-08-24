@@ -21,6 +21,33 @@ if [[ -z "${CORELINK_RUNNER_JITCONFIG:-}" ]]; then
   exit 1
 fi
 
+# ── /dev/shm: Bazel's Linux sandbox cannot start without it ───────────────────
+# The base image ships no /dev/shm and the fabric does not mount one. Bazel's
+# linux-sandbox opens it unconditionally and dies with
+#   I/O exception during sandboxed execution: [unix_jni.cc:382] /dev/shm
+#     (No such file or directory)
+# which reads like a Bazel bug and is really a missing mount. Anything expecting
+# POSIX shared memory hits the same wall (pytest-xdist, Chrome, some JVMs), so it
+# is fixed for the image rather than worked around per example.
+#
+# Prefer a real tmpfs. In this fabric the container usually lacks CAP_SYS_ADMIN,
+# so that mount is expected to fail — fall back to a PLAIN DIRECTORY, not tmpfsectory, which
+# satisfies every caller that only needs the path to exist and be writable. The
+# fallback is LOUD: a job that gets disk instead of shared memory should be able
+# to find out why from its own log.
+# CORELINK_SHM_PATH exists so the regression test can exercise all three
+# branches without root and without touching the real /dev. It is never set in
+# production.
+SHM_PATH="${CORELINK_SHM_PATH:-/dev/shm}"
+if [[ -d "${SHM_PATH}" && -w "${SHM_PATH}" ]]; then
+  echo "[entrypoint] ${SHM_PATH} present and writable."
+elif mount -t tmpfs -o size=512m,mode=1777 tmpfs "${SHM_PATH}" 2>/dev/null; then
+  echo "[entrypoint] ${SHM_PATH} mounted as tmpfs (512m)."
+else
+  mkdir -p "${SHM_PATH}" && chmod 1777 "${SHM_PATH}"
+  echo "[entrypoint] ${SHM_PATH} is a PLAIN DIRECTORY, not tmpfs (no CAP_SYS_ADMIN here). Shared-memory paths work but are disk-backed and slower."
+fi
+
 # ── Safety: ensure we're in the runner directory ──────────────────────────────
 cd "$(dirname "$0")"
 
