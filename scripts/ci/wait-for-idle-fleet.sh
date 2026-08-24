@@ -125,7 +125,7 @@ busy_runners() {
       code="${resp##*$'\n'}"
       body="${resp%$'\n'*}"
       if [ "${code}" != "200" ]; then
-        die "GET /repos/${repo}/actions/runners returned HTTP ${code}. Cannot prove the fleet is idle, so refusing to roll. (Needs a token with 'administration: read' on ${repo}.)"
+        die "GET /repos/${repo}/actions/runners returned HTTP ${code}. Cannot prove the fleet is idle, so refusing to roll. Bind the repo secret FLEET_RUNNERS_READ_TOKEN to a token carrying 'administration: read' on ${repo}, or re-dispatch with force=true to roll over live jobs deliberately."
       fi
       if [ "${total}" -lt 0 ]; then total="$(printf '%s' "${body}" | jq -r '.total_count')"; fi
       local n
