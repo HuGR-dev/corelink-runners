@@ -1,0 +1,84 @@
+# Measure the authed hot path FROM INSIDE the fabric, where customers actually are.
+#
+# Every latency number CoreLink has on record was taken from the founder's laptop
+# in São Paulo against ENAM-pinned tenants (`primary_region = enam`). A Cloudflare
+# Worker executes at the colo nearest the CLIENT, so those numbers measure the
+# GRU→ENAM distance, not the product: on 2026-08-24 the `wdb` phase read 268-287 ms
+# from GRU while the same D1, read from inside the tenant's own Durable Object,
+# answered in 23-50 ms. Distance, not work.
+#
+# This job runs on an ephemeral box on Cloudflare Containers — the same fabric a
+# paying CI customer's jobs land on — so the Worker serving it runs near it. Same
+# tenant, same endpoint, different vantage point. That is the control the record
+# has always been missing.
+#
+# Credentials: NONE are added here. The autoscaler already injects a per-job CAS
+# PAT (`CLW_TOKEN`) plus `CLW_ENDPOINT` / `CLW_TENANT` on a successful warm-mint.
+# The token's value is never printed — presence only.
+#
+# `workflow_dispatch` only. This measures prod state, which changes without a
+# commit, so it may later earn a schedule — but it starts on-demand.
+name: latency-probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      samples:
+        description: 'How many authed requests to time (default 12)'
+        required: false
+        type: string
+        default: '12'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: corelink
+    timeout-minutes: 10
+    steps:
+      - name: Vantage point
+        run: |
+          echo "runner : ${RUNNER_NAME:-<unset>}"
+          echo "host   : $(uname -sm)"
+          # Which colo is this box near? Cloudflare reports it on any zone request.
+          curl -s --max-time 10 https://corelink-api.humangr.com/cdn-cgi/trace \
+            | grep -E '^(colo|loc)=' || echo "trace unavailable (not fatal)"
+
+      - name: Credential posture
+        run: |
+          # Presence only — CLW_TOKEN is a live per-job CAS PAT.
+          if [ -n "${CLW_ENDPOINT:-}" ] && [ -n "${CLW_TOKEN:-}" ] && [ -n "${CLW_TENANT:-}" ]; then
+            echo "mint=OK endpoint=${CLW_ENDPOINT} tenant=${CLW_TENANT} token=present"
+          else
+            echo "::error::CLW_* not injected — the warm-mint failed, so there is no"
+            echo "::error::credential to measure with. This is the D-9 mint path, not the probe."
+            exit 1
+          fi
+
+      - name: Time the authed hot path
+        env:
+          N: ${{ inputs.samples }}
+        run: |
+          set -uo pipefail
+          url="${CLW_ENDPOINT%/}/v1/ac/${CLW_TENANT}?limit=1"
+          # Warm the connection and the caches first: a cold isolate or a cold
+          # container skews the first samples badly and says nothing about steady
+          # state. Discard these.
+          for _ in 1 2 3; do
+            curl -s -o /dev/null -H "Authorization: Bearer ${CLW_TOKEN}" "$url" || true
+          done
+          echo "=== ${N:-12} samples, warm, connection reused"
+          for _ in $(seq 1 "${N:-12}"); do
+            curl -s -o /dev/null -D - -H "Authorization: Bearer ${CLW_TOKEN}" "$url" 2>/dev/null \
+              | tr -d '\r' | grep -i '^server-timing:' | cut -d' ' -f2- || true
+          done
+
+      - name: The comparison this exists to make
+        run: |
+          cat <<'TXT'
+          Baseline from GRU (São Paulo laptop), same tenant, 2026-08-24:
+            wdb 268-287 ms   qbatch 115-124 ms   ohop 160-206 ms   total 579-721 ms
+          Read the `wdb` and `ohop` numbers above against those.
+          If they collapse, the overhead on record was distance, not the product.
+          TXT
