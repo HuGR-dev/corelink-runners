@@ -5,7 +5,7 @@
 #
 # ── Why a check that starts from the PLATFORM and not from our records ───────
 #
-# On 2026-08-23 three `standard-4` boxes ran for 10.2 h against a 15-minute idle
+# On 2026-08-23 three `standard-4` boxes ran for 10.5 h against a 15-minute idle
 # window — ~120 vCPU-hours of nothing. PR #486 shipped a reaper for exactly that
 # class of failure. But the reaper enumerates the durable `sbox:` records written
 # at spawn time, and **the three boxes that leaked had no such record**. A layer

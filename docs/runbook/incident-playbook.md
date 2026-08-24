@@ -186,6 +186,10 @@ looks like success is the worst possible thing to hand someone mid-incident.**
 Until a mapping exists, the only lever that reliably removes a running box is a
 container image roll — which is also what finally cleared the three boxes leaked
 on 2026-08-23, and which kills in-flight jobs on every other box as a side effect.
+The fix for this — enumerable, validatable DO names, so a bogus handle can be
+told apart from a real one — is specified but **not implemented**:
+[ADR-0010](../adr/0010-enumerable-runner-do-names.md), status
+`PROPOSED — NOT IMPLEMENTED`, pending owner sign-off.
 
 **In-memory counters reset on every restart** — `leases_acquired`,
 `mint_attempts`, etc. all go back to 0. That is expected and NOT data loss.

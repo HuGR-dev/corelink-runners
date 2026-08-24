@@ -46,15 +46,18 @@ underwater and is superseded.*
 No free tier. 5-day trial at Team-level capability (card on file; converts or
 downgrades at end). Above Max: Enterprise (custom, governance, BYOC).
 
-Each tier has two hard limits: a **concurrency cap** (always on — bounds peak
-burn rate) and a **vCPU-hour ceiling** (at the ceiling, further jobs queue or
-require an upgrade — no overage). With both limits, the maximum COGS a single
-tenant can incur is strictly below the tier price (Max COGS column above) — so
-**within the tier limits it is structurally impossible to lose money on a
-tenant.** ⚠️ The vCPU-h ceiling is enforced in code but **default-off**: it is
-armed by setting `FABRIC_RUNNER_VCPU > 0` (a deployment step, not a code change);
-until armed, the concurrency cap is the only wall. The ceiling is generous enough
-that a real workflow never approaches it. Full model:
+Each tier has two limits: a **concurrency cap** (always on — bounds peak burn
+rate) and a **vCPU-hour ceiling**. Crossing the ceiling is **deliberately not a
+gate**: the customer's job keeps running, and usage above the tier's included
+`max_vcpu_h` is billed as overage at 3x COGS (`deploy/cloudflare/src/lib.ts:712,722-723`)
+— it ships no queue and no block, only warning thresholds at 80%/100% of the
+ceiling. With both limits, the maximum COGS a single tenant can incur is strictly
+below the tier price (Max COGS column above) — so **within the tier limits it is
+structurally impossible to lose money on a tenant**, and overage past the tier
+limits is billed, not absorbed. ⚠️ The vCPU-h ceiling is enforced in code but
+**default-off**: it is armed by setting `FABRIC_RUNNER_VCPU > 0` (a deployment
+step, not a code change); until armed, the concurrency cap is the only wall. The
+ceiling is generous enough that a real workflow never approaches it. Full model:
 [`docs/product/pricing.md`](docs/product/pricing.md).
 
 ## Architecture

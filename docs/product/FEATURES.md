@@ -348,12 +348,20 @@ on the managed tier, full lockdown is a BYOC upgrade.
 **Exercised by** S4.2, S7.1, S7.2, S7.6.
 **Validated by** `acceptance_redteam` (hermetic no-box proof `:809-865`); `acceptance_c5a`.
 
-### F-4.3 — Cache-warm boot  🟢
+### F-4.3 — Cache-warm boot  ⚫
 
 **What** The seam + drivers that boot a box with the CAS/AC pre-warmed — zero fetches when warm, force-fetch
 when cold, fail-closed when the substrate is down.
-**Where** `boot/mod.rs`, `cas_http.rs`.
-**Status** 🟢 LIVE (namespace public-routing is DEFAULT-OFF).
+**Where** `boot/mod.rs`, `cas_http.rs` (designed mechanism, unwired); the live pre-warm is a shell
+one-liner in `deploy/runner/entrypoint.sh:95-98`.
+**Status** ⚫ INERT / planned — the `boot/mod.rs` seam (`BootCas`/`BoxHydrate`) is built and unit-tested
+but has **zero non-test call sites**: every caller is `crates/corelink-runner/tests/acceptance_c3.rs`
+(`:318`, `:341`, `:360`). It is dead code in production. What actually runs live is a *different*,
+much cruder mechanism: `deploy/runner/entrypoint.sh:95-98` shells out to the external `clw` binary as
+a **best-effort, backgrounded, fail-open** pre-warm — gated on `command -v clw` (`:83`), and if `clw`
+is missing it just proceeds fully cold with a stderr line: "cache-warm: clw not found in image —
+proceeding COLD." (`:100`). `entrypoint.sh:83-84` itself calls this "a best-effort pre-warm." Namespace
+public-routing is a separate, unrelated DEFAULT-OFF knob (`cas_http.rs:465-494`).
 **Details** — mechanism · what · where:
 
 | Mechanism | What | Where |
@@ -362,15 +370,17 @@ when cold, fail-closed when the substrate is down.
 | Warm `hydrate` | skips cached layers — zero fetches when warm (≤10s target) | `boot/mod.rs:237-275` |
 | Cold `cold_hydrate` | force-fetch all layers (≥60s) — the fallback baseline | `boot/mod.rs:302-333` |
 | Fail-closed substrate | `SubstrateDown` propagates; zero poisoned writes; 404-miss never written back; `ForcedCold` on AC write-back failure | `boot/mod.rs:56-108,191-219` |
-| `BoxHydrate` driver | drives `clw hydrate [--cold] <keys>` over `BoxExec` | `boot/mod.rs:347-407` |
+| `BoxHydrate` driver | drives `clw hydrate [--cold] <keys>` over `BoxExec` — **test-only caller**, no production call site | `boot/mod.rs:347-407` (called only from `tests/acceptance_c3.rs:318,341,360`) |
 | `CasHttpClient` | CAS/AC over HTTP `/v1/cas\|ac/{tenant}/{blake3}`, Bearer per-job PAT; tenant in path never a header | `cas_http.rs:249-370` |
 | `Blake3Key` | canonical content-addressed key (byte-identity); SHA-256 is never a CAS key | `cas_http.rs:54-89` |
 | 3-way CAS status guard | 2xx=Hit / 404=Miss(cold) / 401/403/5xx=FailClosed — never a silent miss | `cas_http.rs:99-129,218-236` |
 | `HttpBootCas` | BootCas-over-HTTP; write key = BLAKE3(data); 404-on-PUT = fail-closed | `cas_http.rs:411-631` |
 | Namespace routing (A13) | `_public:` cross-tenant keyspace routing, inert unless `with_public_routing` opts in | `cas_http.rs:465-494` — **DEFAULT-OFF** |
+| **Live pre-warm (actual production path)** | `clw hydrate` backgrounded (`&`), gated on `command -v clw`, fail-open — proceeds COLD with only a stderr line if `clw` is absent | `deploy/runner/entrypoint.sh:83-98` |
 
 **Exercised by** S1.2.1, S1.2.2, S1.2.5.
-**Validated by** `acceptance_c3` (boot); `boot/mod.rs` + `cas_http.rs` unit tests (3-way status, fail-closed).
+**Validated by** `acceptance_c3` (boot, test-only — not a production call site); `boot/mod.rs` +
+`cas_http.rs` unit tests (3-way status, fail-closed).
 
 ### F-4.4 — Fence enforcement  🟢
 

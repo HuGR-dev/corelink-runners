@@ -51,6 +51,18 @@ Stop a container. **Idempotent.**
 ```
 - `200`/`204` ⇒ torn down (or already gone). `404` ⇒ already gone (also success for the caller).
 
+> ⚠️ **Known gap — unvalidated handle, always 204.** `POST /v1/teardown` returns `204`
+> unconditionally (`deploy/cloudflare/src/index.ts:3334`); a `teardown()` throw is only logged
+> (`teardown_route_failed`, `:3327-3328`), never surfaced to the caller. The handle is resolved via
+> `getContainer(env.RUNNER_CONTAINER, handle)` (`:3319-3321`), i.e. `idFromName(handle)` — there is
+> no check that `handle` is one the fabric actually minted (spawn mints it as
+> `crypto.randomUUID()`, `:1101`). An unknown/bogus name therefore mints a fresh, unrelated Durable
+> Object and destroys nothing, while returning the exact same `204` a real teardown would. A caller
+> cannot distinguish "torn down" from "silent no-op" from the response alone. The fix (enumerable,
+> validatable DO names) is specified but **not implemented** — see
+> [ADR-0010](../adr/0010-enumerable-runner-do-names.md), status `PROPOSED — NOT IMPLEMENTED`,
+> pending owner sign-off.
+
 ## Engine-trait mapping (Rust side, `CloudflareEngine impl Engine`)
 | `Engine` method | spawn-Worker call | notes |
 |---|---|---|
