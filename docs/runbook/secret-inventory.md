@@ -40,6 +40,7 @@ block and are not secrets.
 | `CORELINK_RUNNER_MINT_AUTH_KEY` | `x-corelink-internal-auth` for the D-9 per-job CAS PAT mint (cache-warm). | Absent ⇒ runner spawns **COLD** (no cache-warm), fail-open. | Delivered by the Server TL. |
 | `BILLING_INGEST_AUTH_KEY` | `x-corelink-internal-auth` for the billing usage push to corelink-billing. | Absent ⇒ no usage-push (jobs still run). | Dedicated key — never the shared spawn token, never the mint key. |
 | `METRICS_OBSERVABILITY_KEY` | Gates `GET /internal/v1/metrics` (`X-Corelink-Internal-Auth`). | Absent ⇒ the metrics route **404s** (invisible). | Ops-READ key, deliberately separate from the spawn-CONTROL token so it can rotate independently. |
+| `FLEET_BUSY_READ_KEY` | Gates `GET /internal/v1/fleet/busy` (`X-Corelink-Internal-Auth`) — the pre-roll deploy gate's authority on "is a box executing customer work". | Absent ⇒ the route **404s** (invisible) ⇒ `deploy-spawn-worker.yml` refuses to roll unless dispatched with `force: true`. | Ops-READ key, separate from BOTH the spawn-CONTROL token and `METRICS_OBSERVABILITY_KEY`. The **same value** must be bound as the GH Actions secret `FLEET_BUSY_READ_KEY` in `HuGR-Labs/corelink-runners`; rotate both together. |
 
 Non-secret `vars` here (not secrets): `CLW_TENANT`, `CLW_ENDPOINT`,
 `CORELINK_MINT_URL`, `RECONCILER_REPOS`, `REPO_INSTALLATION_MAP`,

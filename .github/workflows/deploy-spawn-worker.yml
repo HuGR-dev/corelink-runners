@@ -17,12 +17,29 @@
 #     `RunnerContainer` class; Cloudflare then SIGTERMs each container, allows up
 #     to 15 minutes, and SIGKILLs. Since #495 the box honours that signal, but a
 #     customer job longer than 15 minutes still dies mid-flight. So immediately
-#     before `wrangler deploy` this workflow asks GITHUB (never our own KV
-#     bookkeeping, which is what has been wrong before) how many fabric runners
-#     are online+busy, and waits for zero — see the `Gate` step below.
+#     before `wrangler deploy` this workflow asks THE SPAWN-WORKER how many
+#     fabric runners are executing customer work, and waits for zero — see the
+#     `Gate` step below.
+#     GITHUB is still the authority (never our own KV bookkeeping, which is what
+#     has been wrong before); the Worker is simply the only party that can ASK.
+#     Reading a repo's self-hosted runners needs `administration: read` across
+#     every repo in RECONCILER_REPOS, which the Actions GITHUB_TOKEN does not
+#     carry and cannot be granted cross-repo, and GitHub exposes no API to mint a
+#     PAT (`POST /user/tokens` and `POST /user/personal-access-tokens` both 404).
+#     The Worker already holds the GitHub App credential and already asks GitHub
+#     per runner (`fleetBusySnapshot` / `keepAliveLiveRunners`), so the gate asks
+#     it instead — needing no GitHub permission at all.
 #     NOTE this is a REFUSAL, not a drain. Nothing drains a busy container, and
 #     `rollout_active_grace_period` is NOT a drain either: it protects instances
 #     connected to their DO for FEWER than N seconds (young-instance protection).
+#
+# ── ⚠️ BOOTSTRAP — THE FIRST DEPLOY CARRYING THE ENDPOINT NEEDS force: true ───
+#   The gate now depends on the Worker it gates. `/internal/v1/fleet/busy` does
+#   not exist in production until the deploy that ships it lands, so THAT one
+#   dispatch must set `force: true`; the gate would otherwise get a 404 and,
+#   correctly, refuse. Under force the read is attempted anyway and the outcome
+#   is stated loudly — it never reports a clean idle verdict it did not get.
+#   Every deploy after the first gates normally.
 #
 # ── OWNER DEPENDENCY (to arm) ────────────────────────────────────────────────
 #   GH SECRET `CLOUDFLARE_API_TOKEN` — a Cloudflare API token with Workers deploy
@@ -30,24 +47,27 @@
 #   Settings → Secrets and variables → Actions. Until then this workflow's
 #   `test` job runs green but `deploy` fails fast with an explicit message.
 #
-#   GH SECRET `FLEET_RUNNERS_READ_TOKEN` — a token with `administration: read` on
-#   EVERY repo in RECONCILER_REPOS (currently HuGR-Labs/corelink-runners and
-#   HuGR-Labs/corelink-server). The busy-fleet gate needs it: the default
-#   `GITHUB_TOKEN` is scoped to THIS repo only, so it cannot see the runners
-#   registered on corelink-server — and a repo we cannot read is treated as a
-#   hard failure, never as "idle". The gate fails fast with an explicit message
-#   until the secret is armed; `force: true` is the deliberate override.
+#   GH SECRET `FLEET_BUSY_READ_KEY` — the spawn-Worker's dedicated ops-READ key,
+#   the SAME value armed on the Worker with
+#   `wrangler secret put FLEET_BUSY_READ_KEY`. It is its own credential on
+#   purpose: ops-READ is a separate domain from spawn-CONTROL, and this one lives
+#   in a GitHub Actions secret — a wider blast radius — so it must be rotatable
+#   without breaking spawn. Unset on the Worker ⇒ the route 404s ⇒ the gate fails
+#   with an explicit message. `force: true` is the deliberate override.
+#   NO GitHub permission is required by the gate any more; the previous
+#   `FLEET_RUNNERS_READ_TOKEN` (`administration: read`) is GONE — it could never
+#   be minted, which is what made every deploy refuse.
 name: deploy-spawn-worker
 
 on:
   workflow_dispatch:
     inputs:
       poll_interval_secs:
-        description: "Busy-fleet gate: seconds between polls of the GitHub runners API."
+        description: "Busy-fleet gate: seconds between polls of the spawn-Worker's fleet-busy endpoint."
         required: false
-        # 30s. Two repos per poll = 2 REST calls; a full 45-minute wait is ~180
-        # calls against a 5000/h budget, and 30s is far finer than the minutes-long
-        # granularity of a runner job finishing.
+        # 30s. Each poll costs the WORKER one GitHub read per live box (capped at
+        # 40), not this job; a full 45-minute wait is ~90 polls, and 30s is far
+        # finer than the minutes-long granularity of a runner job finishing.
         default: "30"
       deadline_secs:
         description: "Busy-fleet gate: give up (and FAIL) after this many seconds."
@@ -62,7 +82,7 @@ on:
         # report its verdict; the script enforces that bound.
         default: "2700"
       force:
-        description: "DANGEROUS: skip the wait and roll over runners that are executing customer jobs."
+        description: "DANGEROUS: skip the wait and roll over runners that are executing customer jobs. REQUIRED for the first deploy that ships /internal/v1/fleet/busy (see BOOTSTRAP in the header)."
         required: false
         type: boolean
         default: false
@@ -98,12 +118,11 @@ jobs:
     needs: test
     runs-on: corelink
     permissions:
+      # `administration: read` used to be here for the busy-fleet gate. It is gone
+      # on purpose: the gate asks the spawn-Worker now, so it needs NO GitHub
+      # permission — and the permission was never sufficient anyway (it is
+      # this-repo-only, while the fleet spans every repo in RECONCILER_REPOS).
       contents: read
-      # Lets the busy-fleet gate's GITHUB_TOKEN fallback read THIS repo's
-      # self-hosted runners. It is only ever enough on its own if
-      # RECONCILER_REPOS is this repo alone — cross-repo needs
-      # FLEET_RUNNERS_READ_TOKEN (see the header).
-      administration: read
     # Must outlast `deadline_secs` (default 2700s = 45 min) so a still-busy fleet
     # produces the gate's explicit verdict rather than a bare "cancelled".
     timeout-minutes: 60
@@ -140,16 +159,16 @@ jobs:
       - name: Gate — refuse to roll while the fleet is busy
         working-directory: ${{ github.workspace }}
         env:
-          # `administration: read` across RECONCILER_REPOS. The default
-          # GITHUB_TOKEN can only see THIS repo's runners, and an unreadable repo
-          # is a hard failure, so the owner secret is what actually arms this.
-          GH_TOKEN: ${{ secrets.FLEET_RUNNERS_READ_TOKEN || secrets.GITHUB_TOKEN }}
+          # The spawn-Worker's dedicated ops-READ key — the gate's ONLY credential.
+          # No GitHub token is involved: see the header. Absent ⇒ the gate fails
+          # fast with an explicit message (unless force: true, the bootstrap).
+          FLEET_BUSY_READ_KEY: ${{ secrets.FLEET_BUSY_READ_KEY }}
           POLL_INTERVAL_SECS: ${{ inputs.poll_interval_secs }}
           DEADLINE_SECS: ${{ inputs.deadline_secs }}
           FORCE: ${{ inputs.force }}
           # THIS job is itself running on a fabric box, which GitHub correctly
-          # reports as online+busy. Without excluding it the gate waits on itself
-          # until the deadline, every single time.
+          # reports as busy. Without excluding it the gate waits on itself until
+          # the deadline, every single time.
           EXCLUDE_RUNNERS: ${{ runner.name }}
         run: bash scripts/ci/wait-for-idle-fleet.sh
 
