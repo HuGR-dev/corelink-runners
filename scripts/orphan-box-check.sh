@@ -100,8 +100,17 @@
 # ── Required env (live mode only) ────────────────────────────────────────────
 #
 #   CLOUDFLARE_ACCOUNT_ID
-#   CLOUDFLARE_CONTAINERS_API_TOKEN   (NOT CLOUDFLARE_API_TOKEN — a different
-#                                      token; only this one has containers read)
+#   CLOUDFLARE_CONTAINERS_API_TOKEN   preferred, or
+#   CLOUDFLARE_API_TOKEN              accepted fallback. Measured 2026-08-24:
+#                                     the plain account token reads the
+#                                     containers endpoints fine (200,
+#                                     success: true), so a second credential
+#                                     does not have to be propagated into every
+#                                     repo that wants to ask. First one set
+#                                     wins; the resolved NAME is printed, the
+#                                     value never is. Neither set, or a token
+#                                     the API rejects (401/403) ⇒ exit 2
+#                                     "cannot check" — NEVER a CLEAN verdict.
 # ─────────────────────────────────────────────────────────────────────────────
 
 set -euo pipefail
@@ -123,6 +132,17 @@ MAX_LEASE_HOURS=3
 ACCOUNTED=""
 INSTANCES_JSON=""
 ONLY_APP=""
+# The ephemeral box classes — the only ones that carry a lease and can therefore
+# be over-age. Everything else on the account (the fabricd singleton, the
+# regional corelinkserver containers) is a long-lived SERVICE and is excluded;
+# including them pages forever on a healthy account (measured: fabricd up 111 h).
+#
+# ⚠️ THIS IS AN ALLOWLIST, SO IT FAILS SILENT, NOT LOUD. A NEW ephemeral box
+# class added under a different application name is INVISIBLE to this check —
+# it will not page, it will simply never be looked at, and a leak in it reads as
+# CLEAN. Whoever adds a spawnable container class must add it here in the same
+# PR. `--app-pattern` overrides it ad hoc; `--app-pattern .` inspects everything
+# (and will fire on the service classes, by design).
 APP_PATTERN='^corelink-spawn-worker-(runnercontainer|checkhostcontainer)$'
 
 while [ $# -gt 0 ]; do
@@ -132,7 +152,7 @@ while [ $# -gt 0 ]; do
     --instances-json)  INSTANCES_JSON="${2:?--instances-json requires a path}";      shift 2 ;;
     --app)             ONLY_APP="${2:?--app requires an application id}";            shift 2 ;;
     --app-pattern)     APP_PATTERN="${2:?--app-pattern requires a regex}";            shift 2 ;;
-    -h|--help)         sed -n '1,105p' "$0" | grep '^#' | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)         sed -n '1,110p' "$0" | grep '^#' | sed 's/^# \{0,1\}//'; exit 0 ;;
     *)                 die "unknown argument: $1" ;;
   esac
 done
@@ -152,14 +172,32 @@ if [ -n "$INSTANCES_JSON" ]; then
   echo "source: fixture ${INSTANCES_JSON}"
 else
   [ -x "$COUNTER" ] || die "counter not executable: ${COUNTER}"
-  : "${CLOUDFLARE_ACCOUNT_ID:?CLOUDFLARE_ACCOUNT_ID must be set}"
-  # Redacted by NAME on purpose — never echo the value.
-  : "${CLOUDFLARE_CONTAINERS_API_TOKEN:?CLOUDFLARE_CONTAINERS_API_TOKEN must be set}"
-  echo "source: Cloudflare Containers API (account ${CLOUDFLARE_ACCOUNT_ID}, token CLOUDFLARE_CONTAINERS_API_TOKEN)"
-  if [ -n "$ONLY_APP" ]; then
-    "$COUNTER" --json --app "$ONLY_APP" > "$RAW" || die "container-instances.sh --json failed"
+  # NOT the `${VAR:?msg}` idiom: under `set -e` that exits 1, which this script
+  # reserves for "a leak was found". A missing account id is exit 2, cannot check.
+  [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ] \
+    || die "CLOUDFLARE_ACCOUNT_ID is not set. Cannot check — refusing to report a clean fleet."
+  # Same precedence as the counter, so behaviour outside CI is identical:
+  # CLOUDFLARE_CONTAINERS_API_TOKEN wins when set, CLOUDFLARE_API_TOKEN is the
+  # accepted fallback (measured 2026-08-24: the plain account token reads the
+  # containers endpoints fine). Reported by NAME; the value is never printed.
+  if [ -n "${CLOUDFLARE_CONTAINERS_API_TOKEN:-}" ]; then
+    token_var="CLOUDFLARE_CONTAINERS_API_TOKEN"
+  elif [ -n "${CLOUDFLARE_API_TOKEN:-}" ]; then
+    token_var="CLOUDFLARE_API_TOKEN"
   else
-    "$COUNTER" --json > "$RAW" || die "container-instances.sh --json failed"
+    die "no Cloudflare API token in the environment. Set CLOUDFLARE_CONTAINERS_API_TOKEN (preferred) or CLOUDFLARE_API_TOKEN. Both are accepted; the first one set wins. Cannot check — refusing to report a clean fleet."
+  fi
+  echo "source: Cloudflare Containers API (account ${CLOUDFLARE_ACCOUNT_ID}, auth \$${token_var} — value never printed)"
+  # `die` here is exit 2 = CANNOT CHECK, never exit 0 = clean. The counter fails
+  # loudly on a rejected token (401/403) and on a page the API truncated — both
+  # are states where we have NOT seen the fleet, and reporting CLEAN from either
+  # is the silent-success defect this whole check exists to end.
+  if [ -n "$ONLY_APP" ]; then
+    "$COUNTER" --json --app "$ONLY_APP" > "$RAW" \
+      || die "container-instances.sh --json failed (rejected token, truncated page, or API error — see its message above). CANNOT CHECK; not reporting a clean fleet."
+  else
+    "$COUNTER" --json > "$RAW" \
+      || die "container-instances.sh --json failed (rejected token, truncated page, or API error — see its message above). CANNOT CHECK; not reporting a clean fleet."
   fi
 fi
 

@@ -34,21 +34,51 @@ it changes how every box on the live spawn path is addressed, is forward-only
 Two things measured live while building this, both of which would have made the
 check page forever on a healthy account and are now excluded: Cloudflare's own
 `_system` platform-pool instances, and long-lived SERVICE classes — the fabricd
-singleton was legitimately up 111 h, carrying no lease at all.
+singleton was legitimately up 111 h, carrying no lease at all. The scope filter
+is an allowlist, so it fails silent: a new spawnable container class added under
+a different application name is invisible to the check until it is added there.
+That caveat now sits next to the default in the script.
+
+The credential is `CLOUDFLARE_CONTAINERS_API_TOKEN` **or** `CLOUDFLARE_API_TOKEN`,
+in that precedence, resolved identically in the script and the workflow. Measured
+2026-08-24, the plain account token reads the containers endpoints fine (200,
+`success: true`) — so a second credential does not have to be propagated into a
+second repo, which would widen the blast radius for no gain. The resolved
+variable NAME is logged; the value never is. Neither present, a rejected token,
+or a truncated page is **exit 2, "cannot check"** — never a CLEAN verdict. (A bad
+token on this endpoint answers **400** with `code: 9106`, not 401/403; matching
+only the obvious statuses would have swallowed the actionable message.)
 
 `container-instances.sh` gains `--json` so this check reuses the one trustworthy
-counter rather than forking a second one. That mode reads the point-in-time
-unpaginated snapshot: measured live, the 17-request paginated walk returned 1640
-records for 483 unique ids and its running count read 6 on one attempt and 20 on
-the next as the cursor window slid under churn, which trips the script's own
-self-check and aborts. Correct for a human reading a number off a table; fatal
-for a detector that must still report on a live fleet. The human table path is
-unchanged.
+counter rather than forking a second one. That mode needs two properties at once.
+ONE INSTANT: measured live, the 17-request paginated walk returned 1640 records
+for 483 unique ids and its running count read 6 on one attempt and 20 on the next
+as the cursor window slid under churn, tripping the script's own self-check and
+aborting — correct for a human reading a number off a table, fatal for a detector
+that must still report on a live fleet. And PROVABLY COMPLETE, which the
+unpaginated form cannot give: it answers `result_info: {}`, no page metadata at
+all, so "it returned everything" would be an inference rather than a fact in the
+payload — and truncation is exactly the failure this check exists to catch, since
+the orphan that matters is the one past the cap.
 
-`scripts/orphan-box-check.selftest.sh` pins all of it: 13 cases, including that
+So `--json` requests a single page larger than the whole record set and requires
+the cursor to be **absent**. Measured on the runner application at 532 records:
+`per_page=100` → 100 records, token PRESENT; `per_page=500` → 500, PRESENT;
+`per_page=1000/2000/5000` → 532, **ABSENT**. `per_page` is honoured, not clamped.
+A `next_page_token` that comes back anyway means the page was capped and the
+fleet was not fully seen: that is a hard failure, never a count and never CLEAN.
+Proven by forcing `CONTAINER_INSTANCES_PER_PAGE=100` against the live 532-record
+application → exit 2. The human table path is unchanged.
+
+`scripts/orphan-box-check.selftest.sh` pins all of it: 17 cases, including that
 the `_system` pool alone stays silent, that unusable input exits 2 rather than
 a false clean, and that widening the app pattern onto a service class *does*
 fire — so the exclusion is provably the pattern and not accidental blindness.
+Four of the cases exist only to prove the exit-2 direction: no token, no account
+id, a rejected token, and a truncated page must every one of them be "cannot
+check" rather than a clean fleet. That is also why the missing-account-id path
+stopped using `${VAR:?msg}` — under `set -e` that exits 1, which this script
+reserves for "a leak was found"; the selftest caught the collision.
 
 ### 2026-08-24 — the weaker gate was in the repo where a bad merge does more damage
 

@@ -75,7 +75,13 @@
 # ── Required env ─────────────────────────────────────────────────────────────
 #
 #   CLOUDFLARE_ACCOUNT_ID
-#   CLOUDFLARE_CONTAINERS_API_TOKEN
+#   CLOUDFLARE_CONTAINERS_API_TOKEN  — preferred, or
+#   CLOUDFLARE_API_TOKEN             — accepted fallback. Measured 2026-08-24:
+#                                      the plain account token reads the
+#                                      containers endpoints fine (200,
+#                                      success: true). Whichever resolves is
+#                                      reported by NAME on stderr; the value is
+#                                      never printed.
 #
 # Get both from corelink-server/.env.local:
 #   cd corelink-server && set -a && . ./.env.local && set +a
@@ -87,13 +93,41 @@ set -euo pipefail
 
 CF_API_BASE="https://api.cloudflare.com/client/v4"
 
+# Single-page size for --json. Must stay comfortably above the account's total
+# instance record count (running + retained tombstones) — see the completeness
+# proof in fetch_app_instances. Overridable so an operator can raise it without
+# an edit when tombstones grow.
+PER_PAGE="${CONTAINER_INSTANCES_PER_PAGE:-2000}"
+
 die() { echo "ERROR: $*" >&2; exit 1; }
 
 command -v curl >/dev/null 2>&1 || die "curl not found."
 command -v jq   >/dev/null 2>&1 || die "jq not found (required to parse the CF API response)."
 
 : "${CLOUDFLARE_ACCOUNT_ID:?CLOUDFLARE_ACCOUNT_ID must be set}"
-: "${CLOUDFLARE_CONTAINERS_API_TOKEN:?CLOUDFLARE_CONTAINERS_API_TOKEN must be set}"
+
+# ── Token resolution — EITHER name, explicit precedence ──────────────────────
+# Measured 2026-08-24: the plain CLOUDFLARE_API_TOKEN reads
+# GET /accounts/<acc>/containers/applications perfectly well (HTTP 200,
+# success: true). A containers-scoped token is preferred when one exists, but
+# requiring it would mean copying a second credential into every repo that wants
+# to ask this question — a wider blast radius for no gain when a token already
+# present does the job.
+#
+# The resolved variable NAME is reported (to stderr, so --json stdout stays pure
+# JSON). The VALUE is never printed, here or anywhere else in this script.
+CF_TOKEN=""
+CF_TOKEN_VAR=""
+if [ -n "${CLOUDFLARE_CONTAINERS_API_TOKEN:-}" ]; then
+  CF_TOKEN="${CLOUDFLARE_CONTAINERS_API_TOKEN}"
+  CF_TOKEN_VAR="CLOUDFLARE_CONTAINERS_API_TOKEN"
+elif [ -n "${CLOUDFLARE_API_TOKEN:-}" ]; then
+  CF_TOKEN="${CLOUDFLARE_API_TOKEN}"
+  CF_TOKEN_VAR="CLOUDFLARE_API_TOKEN"
+else
+  die "no Cloudflare API token in the environment. Set CLOUDFLARE_CONTAINERS_API_TOKEN (preferred) or CLOUDFLARE_API_TOKEN. Both are accepted; the first one set wins."
+fi
+echo "auth: using \$${CF_TOKEN_VAR} (value never printed)" >&2
 
 OLDER_THAN_HOURS=""
 ONLY_APP=""
@@ -132,9 +166,21 @@ cf_get() {
   # partial/failed body to a caller that will then count records out of it.
   local path="$1" out="$2" http_code
   http_code="$(curl -s --max-time 30 \
-    -H "Authorization: Bearer ${CLOUDFLARE_CONTAINERS_API_TOKEN}" \
+    -H "Authorization: Bearer ${CF_TOKEN}" \
     -o "$out" -w '%{http_code}' \
     "${CF_API_BASE}${path}")"
+  # A token that cannot authenticate must NEVER read as "nothing to report".
+  # Call it out by the variable NAME so the fix is obvious, and still die.
+  # Measured 2026-08-24: a bad token on this endpoint comes back **400** with
+  # `code: 9106, "Authentication failed"`, not 401/403. Matching only on the
+  # obvious statuses would have let the actionable message go unprinted, so the
+  # body's error code is checked too. Either way it dies — the status shape is
+  # about the QUALITY of the message, never about whether we fail.
+  if [ "$http_code" = "401" ] || [ "$http_code" = "403" ] \
+     || grep -q '"code":9106' "$out" 2>/dev/null \
+     || grep -qi 'authentication failed' "$out" 2>/dev/null; then
+    die "GET ${path} → HTTP ${http_code}: \$${CF_TOKEN_VAR} was rejected by the Cloudflare API (wrong token, or it lacks containers read). This is NOT an empty fleet — refusing to report anything."
+  fi
   if [ "$http_code" != "200" ]; then
     die "GET ${path} → HTTP ${http_code} (body: $(cat "$out" 2>/dev/null | head -c 500))"
   fi
@@ -169,26 +215,48 @@ fetch_app_instances() {
   local page_dir="${WORKDIR}/${app_id}.pages"
   mkdir -p "$page_dir"
 
-  # ── --json takes the UNPAGINATED snapshot, deliberately ────────────────────
-  # Measured live 2026-08-24 on this account: the paginated walk needs 17
-  # requests over ~a minute and returned 1640 records for 483 unique ids — the
-  # cursor window slides under churn. Its RUNNING count read 6 on one attempt
-  # and 20 on the next, while the point-in-time unpaginated fetch read 17 both
-  # times. The self-check below then aborts the whole script, which is the right
-  # answer for a human reading a number off a table and the WRONG answer for a
-  # detector that must still report on a live, churning fleet.
+  # ── --json takes ONE page big enough to prove it is the whole list ────────
   #
-  # The walk exists to defeat exactly one trap: passing `per_page` flips the
-  # response into cursor mode, so reading page 1 only silently undercounts. That
-  # trap does not apply here, because this branch never passes `per_page` — the
-  # unpaginated form returns every record in one response (486 on this account)
-  # with `result_info: {}` and nothing left behind. It is one request, one
-  # consistent instant, and it is already the view the self-check treats as the
-  # reference. The tombstone filter (`status.state == "running"`) still applies,
-  # and `applications[].instances` is still never read.
+  # Two things had to be true at once here, and the unpaginated form gives only
+  # one of them.
+  #
+  # (a) ONE INSTANT. Measured live 2026-08-24, the paginated walk below needs 17
+  #     requests over ~a minute and returned 1640 records for 483 unique ids —
+  #     the cursor window slides under churn. Its RUNNING count read 6 on one
+  #     attempt and 20 on the next, which trips the self-check and aborts the
+  #     script. Right for a human reading a number off a table; fatal for a
+  #     detector that must still report on a live fleet.
+  #
+  # (b) PROVABLY COMPLETE. This is the half the unpaginated form CANNOT give.
+  #     It answers with `result_info: {}` — no page metadata of any kind — so
+  #     "it returned everything" is an inference, never a fact carried in the
+  #     payload. Truncation is precisely the failure this consumer exists to
+  #     catch: if the response were silently capped, the orphan that matters is
+  #     the one past the cap, and the verdict would read CLEAN.
+  #
+  # So: request a single page LARGER than the whole record set and require the
+  # cursor to be ABSENT. `next_page_token` missing is the API stating there is
+  # nothing after this page — completeness proven BY the payload, in one request,
+  # at one instant. Measured on this account (runner app, 532 records):
+  #
+  #     per_page=100   → 100 records, next_page_token PRESENT
+  #     per_page=500   → 500 records, next_page_token PRESENT
+  #     per_page=1000  → 532 records, next_page_token ABSENT   ← complete
+  #     per_page=2000  → 532 records, next_page_token ABSENT
+  #     per_page=5000  → 532 records, next_page_token ABSENT
+  #
+  # per_page is honoured, not clamped to 100 or 500. 2000 is the default here:
+  # ~4x today's record count, and the fleet cap is 250 live boxes.
+  #
+  # ⛔ If the cursor IS present the page was capped and we have NOT seen the
+  # whole fleet. That must fail — never a count, never a CLEAN verdict. Raise
+  # CONTAINER_INSTANCES_PER_PAGE when tombstones eventually outgrow the default.
   if [ "$EMIT_JSON" -eq 1 ]; then
-    local snap="${page_dir}/unpaginated.json"
-    cf_get "/accounts/${CLOUDFLARE_ACCOUNT_ID}/containers/applications/${app_id}/instances" "$snap"
+    local snap="${page_dir}/single-page.json"
+    cf_get "/accounts/${CLOUDFLARE_ACCOUNT_ID}/containers/applications/${app_id}/instances?per_page=${PER_PAGE}" "$snap"
+    if [ -n "$(jq -r '.result_info.next_page_token // empty' "$snap")" ]; then
+      die "TRUNCATED PAGE for app ${app_id}: asked for per_page=${PER_PAGE} and the API still returned a next_page_token, so this is NOT the whole instance list and an orphan past the cap would read as CLEAN. Refusing to emit a partial fleet. Raise CONTAINER_INSTANCES_PER_PAGE above ${PER_PAGE}."
+    fi
     jq '.result.instances' "$snap" > "$merged"
     echo "$merged"
     return 0

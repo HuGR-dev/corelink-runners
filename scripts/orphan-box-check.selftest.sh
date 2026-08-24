@@ -147,6 +147,57 @@ run_case "long-lived service classes ⇒ no page" 0 "$WORK/services.json"
 run_case "service class, pattern widened ⇒ page" 1 "$WORK/services.json" \
   --app-pattern '.'
 
+# ── Case 11: LIVE-mode token resolution ─────────────────────────────────────
+# These run WITHOUT --instances-json, i.e. down the real credential path, but
+# they are still prod-safe: cases (a) and (b) never reach the network, and (c)
+# only ever issues a GET that the API rejects. Nothing is mutated in any of them.
+#
+# The load-bearing assertion is that every one of these is exit 2 ("cannot
+# check") and NOT exit 0. A sweep that cannot authenticate and then reports
+# nothing is silent success — the defect class this whole check exists to end.
+live_case() {
+  local name="$1" expected="$2"; shift 2
+  local out rc
+  set +e
+  out="$(env "$@" "$TARGET" 2>&1)"
+  rc=$?
+  set -e
+  if [ "$rc" -eq "$expected" ]; then
+    echo "PASS  ${name}  (exit ${rc})"
+    pass_count=$((pass_count + 1))
+  else
+    echo "FAIL  ${name}  (expected exit ${expected}, got ${rc})"
+    echo "$out" | awk '{ print "        " $0 }'
+    fail_count=$((fail_count + 1))
+  fi
+}
+
+live_case "no token at all ⇒ exit 2, not a false clean" 2 \
+  -u CLOUDFLARE_CONTAINERS_API_TOKEN -u CLOUDFLARE_API_TOKEN \
+  CLOUDFLARE_ACCOUNT_ID=0000
+
+live_case "no account id ⇒ exit 2" 2 \
+  -u CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN=irrelevant
+
+# A token the API rejects must be exit 2. Uses a syntactically valid but bogus
+# value against the real endpoint: one GET, 401/403, nothing touched.
+live_case "rejected token ⇒ exit 2, not a false clean" 2 \
+  -u CLOUDFLARE_CONTAINERS_API_TOKEN \
+  CLOUDFLARE_ACCOUNT_ID=6a1fc1c626fc2628823e60b9db01f5cd \
+  CLOUDFLARE_API_TOKEN=deliberately-invalid-token-for-the-selftest
+
+# ── Case 12: a truncated page must be exit 2, never CLEAN ───────────────────
+# Truncation is the one failure that would silently hide the orphan that matters
+# — the one past the cap. Forcing per_page below the account's record count
+# reproduces it exactly, and is still just a GET. Skipped when no credential is
+# available (it needs the real API to produce a real next_page_token).
+if [ -n "${CLOUDFLARE_CONTAINERS_API_TOKEN:-}${CLOUDFLARE_API_TOKEN:-}" ] && [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
+  live_case "truncated page ⇒ exit 2, not a false clean" 2 \
+    CONTAINER_INSTANCES_PER_PAGE=1
+else
+  echo "SKIP  truncated page ⇒ exit 2  (no Cloudflare credential in the environment)"
+fi
+
 echo
 echo "selftest: ${pass_count} passed, ${fail_count} failed"
 [ "$fail_count" -eq 0 ]

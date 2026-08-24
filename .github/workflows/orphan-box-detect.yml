@@ -39,9 +39,16 @@
 #
 # Required repo secrets:
 #   CLOUDFLARE_ACCOUNT_ID
-#   CLOUDFLARE_CONTAINERS_API_TOKEN  — NOT CLOUDFLARE_API_TOKEN. A different
-#                                      token; only this one carries containers
-#                                      read. Never echoed, only referenced.
+#   CLOUDFLARE_API_TOKEN             — or CLOUDFLARE_CONTAINERS_API_TOKEN, which
+#                                      wins when both are set. Measured
+#                                      2026-08-24: the plain account token reads
+#                                      the containers endpoints fine (200,
+#                                      success: true), so this repo does not
+#                                      need a second credential copied into it —
+#                                      that would widen the blast radius for no
+#                                      gain. Neither present, or a token the API
+#                                      rejects, is exit 2 "cannot check" and a
+#                                      RED run; it is never a clean verdict.
 # Optional (enables the second signal; without it only the age signal runs):
 #   FLEET_BUSY_READ_KEY              — the spawn-Worker's ops-READ key, already
 #                                      used by scripts/ci/wait-for-idle-fleet.sh.
@@ -109,7 +116,11 @@ jobs:
       - name: Diff platform truth against the fabric's bookkeeping
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # Both are passed; the script prefers the containers-scoped one and
+          # falls back to the account token. On this repo only the latter is
+          # set, and it works — the empty value simply loses the precedence.
           CLOUDFLARE_CONTAINERS_API_TOKEN: ${{ secrets.CLOUDFLARE_CONTAINERS_API_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           MAX_LEASE_HOURS: ${{ inputs.max_lease_hours || '3' }}
           ACCOUNTED: ${{ steps.accounted.outputs.value }}
         run: |
