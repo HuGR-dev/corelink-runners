@@ -15,7 +15,10 @@ runner image (clw baked, GH-Actions agent as entrypoint):
 
 - `POST /v1/spawn` → start a container with the JIT config + `CLW_*` env → `{ "handle": "<id>" }`
 - `GET  /v1/status/{handle}` → `200` alive / `404` gone
-- `POST /v1/teardown` → stop (idempotent)
+- `POST /v1/teardown` → stop (idempotent) — ⚠️ always returns `204`, even for an unminted/bogus
+  `handle` (mints a fresh, unrelated DO and destroys nothing); see
+  [`docs/spec/cloudflare-spawn-worker-contract.md`](../../docs/spec/cloudflare-spawn-worker-contract.md#post-v1teardown)
+  and [ADR-0010](../../docs/adr/0010-enumerable-runner-do-names.md) (PROPOSED, not implemented)
 
 Auth: `Authorization: Bearer <CLOUDFLARE_SPAWN_AUTH_TOKEN>` (a Worker secret). Fabric-internal.
 
