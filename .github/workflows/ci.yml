@@ -40,6 +40,9 @@ jobs:
       - name: entrypoint signal discipline (G0)
         run: bash deploy/runner/test/entrypoint-signal.test.sh
 
+      - name: entrypoint /dev/shm provisioning
+        run: bash deploy/runner/test/entrypoint-devshm.test.sh
+
       # G1 · e2e completeness-critic — proves EVERY product atom (55 features + 155
       # scenarios, parsed live from the ledger) is bound to a validation cell. Zero-dep
       # `node --test`; placed first so a coverage regression fails in seconds, before the
