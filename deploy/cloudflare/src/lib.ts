@@ -1148,6 +1148,15 @@ export interface OrphanRecord {
   // saturated fleet would retry one job forever. Optional — records written before
   // this field existed fall back to the attempt-count bound.
   firstRecordedMs?: number;
+  // Wall-clock ms at which this job was classified STRANDED: GitHub reported the
+  // job `in_progress` on a runner GitHub itself no longer knows about, i.e. the
+  // box died mid-job. Its presence makes the record TERMINAL — the retry
+  // reconciler must never re-drive it. Re-driving in-flight work is a separate
+  // decision that has not been made; this field exists so the dead-letter can say
+  // "recorded, deliberately not retried" in ONE format rather than two.
+  stranded?: number;
+  // The runner name the stranded classification was made against (diagnostics).
+  strandedRunner?: string;
   // Wall-clock ms when a container was last STARTED for this job. Its presence
   // means "we believe this job is placed, but nothing has confirmed it yet" — see
   // the placement-confirmation block below. Absent ⇒ the record is a plain
@@ -1268,6 +1277,20 @@ export interface RunnerBinding {
   repo?: string;
   /** Installation id, so the status read uses the same credential as the mint. */
   inst?: string;
+  /**
+   * The job this box was STARTED for. Recorded so the stranded-job sweep has a
+   * candidate job to ask GitHub about.
+   *
+   * ⛔ It is a CANDIDATE, never a conclusion. `generate-jitconfig` binds a runner
+   * to a repo + label set and to nothing else, so GitHub assigns queued jobs to
+   * idle runners by LABEL MATCH: the job this box actually ran is frequently NOT
+   * this one. Correlating the two without asking GitHub is exactly what SIGKILLed
+   * five live customer jobs on 2026-08-02. Every consumer MUST require GitHub to
+   * confirm the link (`job.runner_id === rid`) before acting on it.
+   */
+  jid?: string;
+  /** Wall-clock ms when the binding was written (i.e. when the box was started). */
+  t?: number;
 }
 
 /** One observation of GitHub's view of a single runner. `null` ⇒ the call never
@@ -1305,6 +1328,8 @@ export function parseRunnerBinding(raw: string | null | undefined): RunnerBindin
       rid: typeof o.rid === "number" ? o.rid : undefined,
       repo: typeof o.repo === "string" ? o.repo : undefined,
       inst: typeof o.inst === "string" ? o.inst : undefined,
+      jid: typeof o.jid === "string" ? o.jid : undefined,
+      t: typeof o.t === "number" ? o.t : undefined,
     };
   } catch {
     return null;
@@ -1353,6 +1378,94 @@ export function runnerActivityVerdict(obs: RunnerObservation | null): RunnerActi
   if (status === "offline") return "idle"; // never registered, or gone away
   if (status === "online") return "idle"; // busy was false — connected but unused
   return "unknown"; // undocumented status ⇒ refuse to conclude
+}
+
+// ── Stranded in-flight jobs (2026-08-23) ─────────────────────────────────────
+//
+// THE HOLE. `jobPlacementVerdict` above resolves ANYTHING past `queued` to
+// "placed" and the reconciler then DROPS the record — "a runner took it (or it is
+// already over)". True at the instant it is read, and permanently blind after it:
+// a job that was `in_progress` when its box died has no record, no webhook (GitHub
+// only redelivers on completion, which never comes for ~600 s) and no sweep. The
+// only observation today is GitHub's own timeout surfacing as "the self-hosted
+// runner lost communication with the server", ~10 minutes later, to the CUSTOMER.
+//
+// Meanwhile OUR accounting leaks for hours: the `rhandle:`/`jhandle:`/`jtenant:`
+// keys to JOB_PAT_TTL_S (2 h), the concurrency slot to SLOT_TTL_S (45 m), the
+// per-job `cas:rw` PAT to its own TTL because revoke fires only on `completed`.
+//
+// ⛔ THE ONE THING THIS MUST NOT BECOME. On 2026-08-02 a teardown keyed on our own
+// bookkeeping SIGKILLed five live customer boxes. So the sweep built on these two
+// functions OBSERVES ONLY: it never stops, destroys or signals anything, and it
+// may conclude "stranded" ONLY from GitHub's own answers — never from the absence
+// or staleness of one of our KV records. Both functions below are therefore
+// fail-safe in the SAME direction: every shape that is not an unambiguous
+// GitHub-sourced answer is "unknown", and "unknown" means do nothing this tick.
+
+/** One observation of GitHub's view of a single JOB. `null` ⇒ the call never
+ *  produced an answer (no credential, network throw, unparseable body). */
+export interface JobObservation {
+  httpStatus: number;
+  job?: { status?: string; runner_id?: number | null; runner_name?: string | null } | null;
+}
+
+/**
+ * PURE: is the box GONE, from GitHub's point of view?
+ *
+ * THE AUTHORITY, AND WHY IT CANNOT BE A TRANSPORT ERROR. The only signal accepted
+ * is an HTTP **404 on `GET /repos/{owner}/{repo}/actions/runners/{runner_id}`** —
+ * GitHub answering, on the wire, that the registration we created no longer
+ * exists. `fetchRunnerActivity` turns a throw / no-credential / unparseable body
+ * into `null` and every non-200 into its literal status, so a 404 is structurally
+ * distinguishable from a timeout (`null`), a rate limit (403/429) and an outage
+ * (5xx) — none of which are 404, and all of which land in "unknown".
+ *
+ *   • 404 ⇒ "gone".    GitHub has no such runner.
+ *   • 200 ⇒ "present". The registration is alive; nothing to investigate.
+ *   • anything else, including `null` ⇒ "unknown". Ask again next tick.
+ *
+ * NOTE that "gone" alone is NOT evidence of a problem: GitHub de-registers an
+ * ephemeral runner the moment it finishes its one job, so the healthy completion
+ * path produces a 404 too. `strandedJobVerdict` is what separates the two.
+ */
+export function runnerGoneVerdict(obs: RunnerObservation | null): "gone" | "present" | "unknown" {
+  if (!obs) return "unknown";
+  if (obs.httpStatus === 404) return "gone";
+  if (obs.httpStatus === 200) return "present";
+  return "unknown";
+}
+
+/**
+ * PURE: given that the runner is gone, did it take a job down with it?
+ *
+ * `boundRunnerId` is the runner id from OUR binding. GitHub must CONFIRM the link
+ * — `job.runner_id === boundRunnerId` — before this returns "stranded". That check
+ * is the whole defence against the 2026-08-02 correlation error: our binding says
+ * only which job the box was STARTED for, and GitHub assigns by label match, so
+ * the box may well have run somebody else's job. If GitHub reports a different
+ * runner id, the answer is "unknown" and the sweep does nothing.
+ *
+ *   • non-200 / null / no body / non-string status ⇒ "unknown".
+ *   • `completed` ⇒ "not_stranded". Ordinary completion; the webhook owns it.
+ *   • `queued`    ⇒ "not_stranded" for THIS sweep. Never claimed ⇒ nothing was in
+ *     flight to strand, and the placement reconciler already owns that case.
+ *   • `in_progress` + `runner_id === boundRunnerId` ⇒ "stranded". A job GitHub
+ *     believes is running, on a runner GitHub itself has forgotten.
+ *   • `in_progress` on a DIFFERENT runner ⇒ "unknown" (not our box's job).
+ *   • an undocumented status ⇒ "unknown". Never read as stranded.
+ */
+export function strandedJobVerdict(
+  obs: JobObservation | null,
+  boundRunnerId: number,
+): "stranded" | "not_stranded" | "unknown" {
+  if (!obs || obs.httpStatus !== 200 || !obs.job) return "unknown";
+  const status = obs.job.status;
+  if (typeof status !== "string") return "unknown";
+  if (status === "completed" || status === "queued" || status === "waiting") return "not_stranded";
+  if (status !== "in_progress") return "unknown"; // undocumented ⇒ refuse to conclude
+  // GitHub must confirm the job ran on the runner OUR binding names.
+  if (typeof obs.job.runner_id !== "number" || obs.job.runner_id !== boundRunnerId) return "unknown";
+  return "stranded";
 }
 
 /**
