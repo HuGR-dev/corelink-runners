@@ -202,7 +202,7 @@
       // is ALSO what evicts those three: no token has instance-delete scope, so a
       // new image is the only lever. Rollback = increment-4 digest
       // @sha256:063d80b42d9a2a0e4e1f0c61a7ee506964280bd8862fd9d156822ed733b286ab.
-      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-runnercontainer@sha256:28d1af3959adc53fd3e7a19a79c74d235e740c33bd4569789429381674ac26f9",
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-runnercontainer@sha256:2f3dd8a166e890888d026669757c996750b42230a04710fa08f13db56b0cf029",
       // standard-4 = 4 vCPU / 12 GiB / 20 GB disk — fits CI, clears the runner
       // disk floor (RUNNER_EPHEMERAL_STORAGE_FLOOR_MB).
       "instance_type": "standard-4",
