@@ -100,6 +100,7 @@ import {
   runnerActivityVerdict,
   type RunnerBinding,
   type RunnerObservation,
+  type RunnerActivity,
   logEvent,
   type ContainerEnvResult,
   type SlotRecord,
@@ -253,6 +254,16 @@ export interface Env {
   // Internal-Auth). Default-off: unset ⇒ the route 404s. Separate from the
   // spawn-control CLOUDFLARE_SPAWN_AUTH_TOKEN. `wrangler secret put`.
   METRICS_OBSERVABILITY_KEY?: string;
+  // Dedicated ops-READ key gating GET /internal/v1/fleet/busy (X-Corelink-
+  // Internal-Auth) — the pre-roll deploy gate's only authority on "is a box
+  // executing customer work". Deliberately its OWN credential: ops-READ is a
+  // separate domain from spawn-CONTROL (CLOUDFLARE_SPAWN_AUTH_TOKEN) and from
+  // observability (METRICS_OBSERVABILITY_KEY), so it can be rotated — or leaked
+  // and revoked — without breaking spawn or the canary. It is held by a GitHub
+  // Actions secret, which is a wider blast radius than either of those, and that
+  // is precisely why it must not be shared. Default-off: unset ⇒ the route 404s.
+  // `wrangler secret put`.
+  FLEET_BUSY_READ_KEY?: string;
   // The Worker's OWN public base URL, injected into the container as
   // CLW_FABRIC_ENDPOINT so clw redeems its cred-ticket here at boot. Its PRESENCE
   // enables env-0 (a single-use ticket is injected instead of CLW_TOKEN — the raw
@@ -2115,6 +2126,160 @@ export async function keepAliveLiveRunners(
   return renewed;
 }
 
+// The `rhandle:` key list is followed across at most this many `list` pages
+// (1000 keys per page). The fleet cap is 250 boxes, so one page always suffices
+// in reality; the loop exists so a pathological KV can never TRUNCATE the fleet
+// view into a falsely-idle verdict.
+const FLEET_BUSY_MAX_LIST_PAGES = 10;
+
+/**
+ * The GET /internal/v1/fleet/busy body. `busy` is the number of runners GitHub
+ * reports `busy: true`; `runners` names exactly those (name + `owner/repo`, no
+ * other field); `checked` is how many `rhandle:` bindings were examined; and
+ * `unverifiable` is how many produced no authoritative answer.
+ *
+ * ⛔ `unverifiable > 0` does NOT mean idle. See `fleetBusySnapshot`.
+ */
+export interface FleetBusySnapshot {
+  busy: number;
+  runners: { name: string; repo: string }[];
+  checked: number;
+  unverifiable: number;
+}
+
+// ── Fleet busy-read (2026-08-24) — the pre-roll deploy gate's authority ──────
+//
+// WHY THIS EXISTS. `deploy-spawn-worker.yml` refuses to roll the fleet while
+// boxes are executing customer work (#496). It asked GitHub directly, which needs
+// `administration: read` across every RECONCILER_REPOS repo — a permission the
+// Actions `GITHUB_TOKEN` does not have and cannot be granted cross-repo, and
+// GitHub exposes no API to mint a PAT. So the gate could never authenticate and
+// every deploy refused.
+//
+// This Worker already holds the answer. It owns the GitHub App credential and
+// already asks GitHub, per runner, whether that runner is `busy` — that is what
+// `keepAliveLiveRunners` does every minute. Exposing the same question as a read
+// costs the gate no GitHub permission at all.
+//
+// SAME AUTHORITY, SAME ENUMERATION, SAME CAP. This reuses the KV `rhandle:`
+// binding list, `fetchRunnerActivity` (GET /repos/{owner}/{repo}/actions/runners/
+// {id} under the per-installation App token) and `runnerActivityVerdict`. It
+// deliberately does NOT introduce a second per-tick ceiling: bindings past
+// KEEPALIVE_MAX_VERIFY_PER_TICK (40) are not asked about, exactly as in the sweep.
+// `checked` reports how many bindings were examined, so a caller can see when the
+// cap bound (checked > 40 with a matching floor of `unverifiable`).
+//
+// ⛔ THE FAIL-SAFE DIRECTION IS INVERTED RELATIVE TO THE SWEEP, ON PURPOSE.
+// `keepAliveLiveRunners` resolves ignorance to "keep renewing" — leaking a slot is
+// cheaper than killing a job. HERE ignorance must block a ROLL, which would kill
+// exactly those jobs. So every runner whose state cannot be established — no
+// runner id (legacy bare binding), no installation (cold spawn), an API error, a
+// rate limit, an undocumented body, a KV read that failed, a truncated key list,
+// or an unbound KV namespace — increments `unverifiable` and is NEVER counted as
+// idle.
+//
+// THE CALLER'S CONTRACT, which is half of this function: the fleet is provably
+// idle ONLY when `busy === 0 && unverifiable === 0`. `unverifiable > 0` means
+// "cannot prove idle" and MUST be treated exactly like `busy > 0` — do not roll.
+// scripts/ci/wait-for-idle-fleet.sh implements that, and `force=true` is the one
+// deliberate override.
+//
+// WHAT IT MAY DISCLOSE. Runner names and `owner/repo` only. No tokens, no JIT
+// config, no job payloads, no tenant identifiers, no DO handles — the gate needs
+// a specific failure message, nothing more.
+//
+// `verify` is injected so the decision is testable without reaching GitHub.
+export async function fleetBusySnapshot(
+  env: Env,
+  verify: (
+    env: Env,
+    repo: string,
+    runnerId: number,
+    installationId: string,
+  ) => Promise<RunnerObservation | null> = fetchRunnerActivity,
+): Promise<FleetBusySnapshot> {
+  const runners: { name: string; repo: string }[] = [];
+  let checked = 0;
+  let unverifiable = 0;
+  let verifications = 0;
+
+  const kv = env.RUNNER_JOB_PATS;
+  // No binding store ⇒ no way to enumerate the fleet ⇒ we cannot prove anything.
+  // One unverifiable is enough to make the caller refuse; claiming idle here would
+  // roll the fleet on the strength of a missing binding.
+  if (!kv) return { busy: 0, runners, checked: 0, unverifiable: 1 };
+
+  // The sweep reads a single `list` page. A truncated page would UNDER-count here,
+  // which is the fail-unsafe direction, so this follows the cursor. The loop is
+  // bounded; an unfinished list resolves to unverifiable rather than to idle.
+  const keys: string[] = [];
+  let cursor: string | undefined;
+  let complete = false;
+  for (let page = 0; page < FLEET_BUSY_MAX_LIST_PAGES; page++) {
+    let listed: { keys: { name: string }[]; list_complete?: boolean; cursor?: string };
+    try {
+      listed = (await kv.list({ prefix: RUNNER_HANDLE_PREFIX, cursor })) as typeof listed;
+    } catch (e) {
+      logEvent("error", "fleet_busy_list_failed", { error: (e as Error).message });
+      return { busy: 0, runners, checked: 0, unverifiable: 1 };
+    }
+    for (const k of listed.keys) keys.push(k.name);
+    if (listed.list_complete !== false) {
+      complete = true;
+      break;
+    }
+    cursor = listed.cursor;
+    // Truncated AND no cursor to continue from: we cannot finish the list, so we
+    // leave `complete` false. Setting it true here would silently under-count the
+    // fleet into a falsely-idle verdict — the fail-unsafe direction.
+    if (!cursor) break;
+  }
+  if (!complete) unverifiable++; // the list did not finish ⇒ cannot prove idle
+
+  for (const name of keys) {
+    checked++;
+    const runnerName = name.slice(RUNNER_HANDLE_PREFIX.length);
+    let binding: RunnerBinding | null = null;
+    let readFailed = false;
+    try {
+      binding = parseRunnerBinding(await kv.get(name));
+    } catch {
+      readFailed = true;
+    }
+    // A KV read that failed, or a value we cannot parse, is ignorance — and here
+    // ignorance blocks. (The sweep may skip these; it is deciding whether to STOP
+    // renewing, we are deciding whether to KILL.)
+    if (readFailed || !binding) {
+      unverifiable++;
+      continue;
+    }
+
+    const verifiable =
+      typeof binding.rid === "number" &&
+      !!binding.repo &&
+      !!binding.inst &&
+      verifications < KEEPALIVE_MAX_VERIFY_PER_TICK;
+    if (!verifiable) {
+      unverifiable++;
+      continue;
+    }
+
+    verifications++;
+    let activity: RunnerActivity = "unknown";
+    try {
+      activity = runnerActivityVerdict(await verify(env, binding.repo!, binding.rid!, binding.inst!));
+    } catch (e) {
+      // A verifier that throws must not abandon the enumeration mid-list and
+      // silently shrink the busy count — caught per box, resolved to unknown.
+      logEvent("error", "fleet_busy_verify_threw", { runnerName, error: (e as Error).message });
+    }
+    if (activity === "busy") runners.push({ name: runnerName, repo: binding.repo! });
+    else if (activity === "unknown") unverifiable++;
+  }
+
+  return { busy: runners.length, runners, checked, unverifiable };
+}
+
 // Ask GitHub about ONE job: `GET /repos/{owner}/{repo}/actions/jobs/{job_id}`.
 //
 // Distinct from `fetchJobPlacement` on purpose. That one serves the first-party
@@ -2594,6 +2759,30 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       const presented = request.headers.get("x-corelink-internal-auth") ?? "";
       if (!safeEqual(presented, key)) return unauthorized();
       return json({ counters: await snapshotMetrics(env) }, 200);
+    }
+
+    // ── GET /internal/v1/fleet/busy — "is any box executing customer work" ───
+    // The pre-roll gate in deploy-spawn-worker.yml asks THIS, not GitHub: the
+    // question needs `administration: read` across every RECONCILER_REPOS repo,
+    // which the Actions GITHUB_TOKEN does not have and GitHub offers no API to
+    // mint. This Worker already holds the App credential and already asks GitHub
+    // per runner (see `fleetBusySnapshot` / `keepAliveLiveRunners`).
+    //
+    // Gated by its OWN key (X-Corelink-Internal-Auth) — NOT the spawn-CONTROL
+    // token and NOT the metrics key. Default-off, fail-closed: key unset → 404
+    // (the route is invisible); header mismatch → 401; match → 200.
+    //
+    // ⛔ CALLER CONTRACT: idle is `busy === 0 && unverifiable === 0`. A runner
+    // whose state cannot be established is reported as `unverifiable` and MUST be
+    // treated exactly like a busy one — "cannot prove idle", so do not roll.
+    // Reading `unverifiable` as idle would roll the fleet on ignorance, which is
+    // the one outcome this endpoint exists to prevent.
+    if (request.method === "GET" && pathname === "/internal/v1/fleet/busy") {
+      const key = env.FLEET_BUSY_READ_KEY ?? "";
+      if (key.length === 0) return json({ error: "not found" }, 404);
+      const presented = request.headers.get("x-corelink-internal-auth") ?? "";
+      if (!safeEqual(presented, key)) return unauthorized();
+      return json(await fleetBusySnapshot(env), 200);
     }
 
     // ── POST /webhook (GitHub autoscaler) — HMAC-authed, NOT bearer ──────────

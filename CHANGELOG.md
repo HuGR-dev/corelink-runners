@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-08-24 — the busy-fleet gate now asks the Worker, not GitHub
+
+The pre-roll gate added last week (#496) asked GitHub's repo-runners API directly,
+which needs `administration: read` on **every** repo in `RECONCILER_REPOS`. The
+Actions `GITHUB_TOKEN` does not carry that permission and cannot be granted it
+cross-repo, and GitHub exposes no API to mint a PAT — `POST /user/tokens` and
+`POST /user/personal-access-tokens` both 404. So the credential the gate demanded
+could not be created, the gate could not authenticate, and **every deploy of the
+spawn-Worker refused**. A gate nobody can pass is not a safeguard; it is an outage
+with a good explanation.
+
+GitHub is still the authority on "is a box busy" — our own KV bookkeeping is
+exactly what has been wrong before — but the spawn-Worker is the only party that
+can ask it. It already holds the GitHub App credential and already asks GitHub per
+runner, once a minute, in `keepAliveLiveRunners`. So the gate asks the Worker, and
+needs **no GitHub permission at all**.
+
+- New route `GET /internal/v1/fleet/busy` on the spawn-Worker, shaped exactly like
+  the existing `GET /internal/v1/metrics`: gated by its **own** key
+  `FLEET_BUSY_READ_KEY` in `x-corelink-internal-auth`, constant-time compared,
+  default-off and fail-closed — key unset ⇒ **404** (route invisible), header
+  mismatch ⇒ **401**, match ⇒ **200**. Ops-READ is a separate credential domain
+  from spawn-CONTROL, and this key lives in a GitHub Actions secret (a wider blast
+  radius), so it must be rotatable without breaking spawn.
+- Body: `{"busy":N,"runners":[{"name","repo"}],"checked":N,"unverifiable":N}`.
+  Names and repos only — no tokens, no DO handles, no job payloads, no tenant
+  identifiers.
+- It reuses the existing enumeration (`rhandle:` bindings), `fetchRunnerActivity`
+  and `runnerActivityVerdict`, and the keep-alive sweep's ceiling of **40** GitHub
+  reads per call rather than adding a second, contradicting one. `checked` is what
+  surfaces that the cap bound.
+- **The fail-safe direction is inverted relative to the sweep, on purpose.** The
+  sweep resolves ignorance to "keep renewing" — leaking a container slot. Here
+  ignorance would authorise a ROLL, which kills live jobs. So a runner whose state
+  cannot be established (no runner id, a cold spawn, an API error or rate limit, an
+  undocumented body, a failed KV read, a truncated key list, an unbound namespace)
+  is reported as `unverifiable` and is **never** counted as idle. The caller's
+  contract, documented on both sides: idle means `busy == 0 && unverifiable == 0`,
+  and `unverifiable > 0` blocks the roll exactly like `busy > 0`.
+- `scripts/ci/wait-for-idle-fleet.sh` now polls that endpoint. Everything else it
+  did is unchanged — the poll loop, the interval/deadline inputs and their bounds,
+  the self-exclusion of the box the gate runs on, the loud `force` override, the
+  job-summary output, and the hard failure on any non-200, unreachable Worker or
+  unparseable body.
+- `FLEET_RUNNERS_READ_TOKEN` and the deploy job's `administration: read` are
+  **deleted**. Nothing reads them, and leaving them would invite someone to wire a
+  credential that cannot exist.
+- ⚠️ **Bootstrap:** the gate now depends on the Worker it gates, so the first
+  deploy carrying this route must be dispatched with `force: true` — the endpoint
+  does not exist in production until that deploy lands. Under `force` the read is
+  still attempted and the outcome stated loudly (including a "FLEET STATE UNKNOWN"
+  banner when it cannot be read); it never reports a clean idle verdict it did not
+  get.
+- New owner dependency: GH secret `FLEET_BUSY_READ_KEY` in this repo, matching
+  `wrangler secret put FLEET_BUSY_READ_KEY` on the spawn-Worker.
+- Tests: `deploy/cloudflare/test/fleet-busy-read.test.ts` — 404/401/200 gating,
+  the spawn and metrics keys both rejected, a busy runner counted and named, every
+  unverifiable shape counted as `unverifiable` and never as idle, the per-call cap,
+  a truncated key list, and a response asserted to carry no credential material.
+
 ### 2026-08-23 — a box that dies MID-JOB is no longer invisible
 
 A runner box killed after a successful spawn entered no dead letter at all.
@@ -74,6 +134,9 @@ excludes the box it is itself running on, which GitHub correctly reports as busy
 - New owner dependency: GH secret `FLEET_RUNNERS_READ_TOKEN` with
   `administration: read` on the `RECONCILER_REPOS` repos, since the default
   `GITHUB_TOKEN` cannot see another repo's runners.
+  **Superseded the same week — that token could not be minted at all (GitHub has
+  no PAT-creation API), so the gate could never authenticate and every deploy
+  refused. See "the busy-fleet gate now asks the Worker" below.**
 
 This is a **refusal, not a drain**. Nothing drains a busy container. In
 particular `rollout_active_grace_period` is not a drain either: it protects
