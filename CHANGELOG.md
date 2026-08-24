@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-08-24 — the weaker gate was in the repo where a bad merge does more damage
+
+`scripts/pre-merge-gate-check.sh` was 156 lines here against 456 in
+corelink-server. The port (#482) took an earlier revision: it carried the three
+structural defenses (mergeable, always-present gates, zero-checks-is-a-failure)
+but never gained `--merge`, whose whole purpose is that gating and merging stop
+being two commands joined by a shell `&&` — the exact shape that merged
+corelink-server's PR #1049 with four checks still pending, because a pipeline's
+exit status is the last command's and `tail` always succeeds.
+
+That left the weaker gate in the repo where a bad merge rolls a container image
+onto boxes executing customer jobs. The file is now the server's copy verbatim,
+apart from two spots marked REPO-SPECIFIC: the rationale header, and
+`REQUIRED_PRESENT = ["gates", "dco"]` (this repo has no per-PR gitleaks lane).
+That brings with it `--merge`, `--dry-run`, `--admin-reason` gated on the
+verdict kind (a *pending* check is never override-eligible), allowlist-based
+bucket handling so a **cancelled** check can no longer read as a pass, the
+stderr warning about the pipe footgun, and post-merge confirmation read back
+from GitHub rather than from `gh`'s exit code.
+
+
 ### 2026-08-24 — the busy-fleet gate now asks the Worker, not GitHub
 
 The pre-roll gate added last week (#496) asked GitHub's repo-runners API directly,
