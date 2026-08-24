@@ -195,6 +195,73 @@ else
   pass "run.sh is not launched as a foreground pipeline"
 fi
 
+# ── Cell 5b — the SIGTERM receipt is logged ─────────────────────────────────
+# The container has no external log path but stdout. Without this line there is
+# no way to tell "the platform never signalled us" apart from "it signalled us
+# and we ignored it" — which is exactly the ambiguity that let the incident run
+# 10.5 h. It must name the signal, the pid and the elapsed time.
+if grep -qE 'signal: caught SIGTERM pid=[0-9]+ child=[0-9]+ elapsed=[0-9]+s' "$OUT1" 2>/dev/null; then
+  pass "SIGTERM receipt logged to stdout with signal, pid and elapsed"
+else
+  echo "  ---- entrypoint stdout ----"; sed 's/^/  | /' "$OUT1" 2>/dev/null
+  fail "no structured SIGTERM receipt on stdout — a live roll would be unfalsifiable"
+fi
+
+# ── Cell 5c — escalation: a run.sh that IGNORES SIGTERM is killed ───────────
+# Forwarding is not enough. The platform SIGKILLs the whole container 15 min
+# after SIGTERM; if we simply wait we lose the tee drain and the /runner-diag
+# POST with it. PID 1 must escalate on its own, slightly earlier. Grace is
+# forced to 2 s here — the production default is 840 s.
+make_stub_deaf() {
+  cat > "$SANDBOX/run.sh" <<'DEAF'
+#!/usr/bin/env bash
+trap '' TERM
+echo "$$" > "$STUB_PIDFILE"
+echo "stub: started"
+echo "stub: ignoring TERM on purpose"
+for _ in $(seq 1 600); do sleep 0.5; done
+DEAF
+  chmod +x "$SANDBOX/run.sh"
+}
+make_stub_deaf
+OUT8="$SANDBOX/out8"
+rm -f "$SANDBOX/stub8.pid"
+STUB_PIDFILE="$SANDBOX/stub8.pid" RUNSH_OUT="$SANDBOX/runsh8.out" RUNSH_FIFO="$SANDBOX/fifo8" \
+  CORELINK_RUNNER_JITCONFIG="test-jit" RUNNER_TERM_GRACE_SECS=2 \
+  bash "$SANDBOX/entrypoint.sh" > "$OUT8" 2>&1 &
+PID8=$!
+if wait_for_start "$SANDBOX/runsh8.out"; then
+  # Must NOT die at once (that would mean PID 1 abandoned the child), and must
+  # NOT outlive the grace by much (that would mean no escalation at all).
+  took8="$(term_and_time "$PID8" 120)"
+  STUB8="$(cat "$SANDBOX/stub8.pid" 2>/dev/null || echo 0)"
+  if [[ "$took8" == "alive" ]]; then
+    fail "deaf run.sh was never escalated — PID 1 waited past the grace forever"
+    kill -KILL "$PID8" "${STUB8:-0}" 2>/dev/null
+  elif [[ "$took8" -lt 15 ]]; then
+    fail "PID 1 exited after ${took8}00ms — it did not wait out the 2s grace, it abandoned the child"
+    kill -KILL "${STUB8:-0}" 2>/dev/null
+  else
+    pass "deaf run.sh: PID 1 waited the grace then exited at $((took8))00ms"
+  fi
+  if grep -q "escalating to SIGKILL" "$OUT8" 2>/dev/null; then
+    pass "escalation to SIGKILL was logged"
+  else
+    echo "  ---- entrypoint stdout ----"; sed 's/^/  | /' "$OUT8" 2>/dev/null
+    fail "escalation never fired for a run.sh that ignores SIGTERM"
+  fi
+  if [[ "$STUB8" != "0" ]] && kill -0 "$STUB8" 2>/dev/null; then
+    fail "deaf run.sh SURVIVED the escalation — the box would still leak"
+    kill -KILL "$STUB8" 2>/dev/null
+  else
+    pass "deaf run.sh is gone (SIGKILL landed)"
+  fi
+else
+  fail "deaf stub never started (harness problem)"
+  kill -KILL "$PID8" 2>/dev/null
+fi
+wait "$PID8" 2>/dev/null
+
 # ── Cells 6 & 7 — the real thing: the script running as LITERAL PID 1 ───────
 # Everything above runs the entrypoint as an ordinary child, so it can only prove
 # the signal-handling logic is structurally right. The defect itself lives in the
