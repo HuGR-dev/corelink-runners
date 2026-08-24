@@ -60,6 +60,17 @@
 #                           "boxes that outlived their idle window".
 #   --app <app-id>         Restrict to one application instead of every
 #                           application in the account.
+#   --json                 Emit the deduped RUNNING instance list as a JSON
+#                           array on stdout instead of the human table, and
+#                           print nothing else. Every consumer that needs a
+#                           machine-readable fleet view must go through this
+#                           flag rather than re-implementing the pagination +
+#                           tombstone + self-check handling documented above —
+#                           a second counter is a second set of these traps.
+#                           Each element: {app, id, name, location, started_at,
+#                           created_at, image}. `--older-than` is ignored in
+#                           this mode (the consumer applies its own policy);
+#                           exit is 0 whenever the fetch itself succeeded.
 #
 # ── Required env ─────────────────────────────────────────────────────────────
 #
@@ -86,6 +97,7 @@ command -v jq   >/dev/null 2>&1 || die "jq not found (required to parse the CF A
 
 OLDER_THAN_HOURS=""
 ONLY_APP=""
+EMIT_JSON=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -97,8 +109,12 @@ while [ $# -gt 0 ]; do
       ONLY_APP="${2:?--app requires an application id}"
       shift 2
       ;;
+    --json)
+      EMIT_JSON=1
+      shift
+      ;;
     -h|--help)
-      sed -n '1,60p' "$0" | grep '^#' | sed 's/^# \{0,1\}//'
+      sed -n '1,80p' "$0" | grep '^#' | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
@@ -153,6 +169,31 @@ fetch_app_instances() {
   local page_dir="${WORKDIR}/${app_id}.pages"
   mkdir -p "$page_dir"
 
+  # ── --json takes the UNPAGINATED snapshot, deliberately ────────────────────
+  # Measured live 2026-08-24 on this account: the paginated walk needs 17
+  # requests over ~a minute and returned 1640 records for 483 unique ids — the
+  # cursor window slides under churn. Its RUNNING count read 6 on one attempt
+  # and 20 on the next, while the point-in-time unpaginated fetch read 17 both
+  # times. The self-check below then aborts the whole script, which is the right
+  # answer for a human reading a number off a table and the WRONG answer for a
+  # detector that must still report on a live, churning fleet.
+  #
+  # The walk exists to defeat exactly one trap: passing `per_page` flips the
+  # response into cursor mode, so reading page 1 only silently undercounts. That
+  # trap does not apply here, because this branch never passes `per_page` — the
+  # unpaginated form returns every record in one response (486 on this account)
+  # with `result_info: {}` and nothing left behind. It is one request, one
+  # consistent instant, and it is already the view the self-check treats as the
+  # reference. The tombstone filter (`status.state == "running"`) still applies,
+  # and `applications[].instances` is still never read.
+  if [ "$EMIT_JSON" -eq 1 ]; then
+    local snap="${page_dir}/unpaginated.json"
+    cf_get "/accounts/${CLOUDFLARE_ACCOUNT_ID}/containers/applications/${app_id}/instances" "$snap"
+    jq '.result.instances' "$snap" > "$merged"
+    echo "$merged"
+    return 0
+  fi
+
   # Paginated walk: follow next_page_token until absent.
   local token="" page=0 page_file
   echo "[]" > "$merged"
@@ -206,7 +247,13 @@ now_epoch="$(date -u +%s)"
 # destroys nothing, and returns 204 — a silent no-op that looks like success. The
 # earlier label here said "teardown handle" and would have walked an operator
 # straight into that during an incident.
-printf '%-42s %-8s %-12s %-40s\n' "APPLICATION" "LOCATION" "AGE" "INSTANCE ID (not a teardown handle)"
+if [ "$EMIT_JSON" -eq 0 ]; then
+  printf '%-42s %-8s %-12s %-40s\n' "APPLICATION" "LOCATION" "AGE" "INSTANCE ID (not a teardown handle)"
+fi
+
+# --json accumulator: one JSON array of every RUNNING instance across every app.
+json_all="${WORKDIR}/running.json"
+echo "[]" > "$json_all"
 
 for i in "${!APP_IDS[@]}"; do
   app_id="${APP_IDS[$i]}"
@@ -218,6 +265,21 @@ for i in "${!APP_IDS[@]}"; do
   app_inactive="$(jq '[.[] | select(.status.state=="inactive")] | length' "$merged_file")"
   total_running=$((total_running + app_running))
   total_inactive=$((total_inactive + app_inactive))
+
+  if [ "$EMIT_JSON" -eq 1 ]; then
+    jq -s --arg app "$app_name" \
+      '.[0] + [.[1][]
+        | select(.status.state=="running")
+        | {app: $app,
+           id: .id,
+           name: .name,
+           location: (.location.name // null),
+           started_at: (.started_at // null),
+           created_at: (.created_at // null),
+           image: (.image // .configuration.image // null)}]' \
+      "$json_all" "$merged_file" > "${json_all}.tmp" && mv "${json_all}.tmp" "$json_all"
+    continue
+  fi
 
   while IFS=$'\t' read -r loc started name; do
     [ -n "$name" ] || continue
@@ -238,6 +300,11 @@ for i in "${!APP_IDS[@]}"; do
     printf '%-42s %-8s %-12s %-40s\n' "$app_name" "${loc:-?}" "$age_str" "$name"
   done < <(jq -r '.[] | select(.status.state=="running") | [(.location.name // "?"), (.started_at // ""), .name] | @tsv' "$merged_file")
 done
+
+if [ "$EMIT_JSON" -eq 1 ]; then
+  cat "$json_all"
+  exit 0
+fi
 
 echo
 echo "TOTAL running:  ${total_running}"

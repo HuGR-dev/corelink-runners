@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-08-24 — the leak detector had to start from the platform, not from us
+
+`reapStaleBoxes` (#486) destroys boxes that outlive their own bookkeeping by
+enumerating the durable `sbox:` records written at spawn. **The three boxes that
+leaked for 10.2 h had no `sbox:` record.** A layer whose entire job is catching
+bookkeeping loss cannot start from the bookkeeping; it is structurally incapable
+of catching the failure it exists for.
+
+`scripts/orphan-box-check.sh` + `.github/workflows/orphan-box-detect.yml` start
+from the Cloudflare Containers API instead — whatever is running IS running,
+recorded or not. Two signals: a box older than the fabric's own maximum lease
+(`JOB_PAT_TTL_S`, needs no bookkeeping at all, which is the point), and more
+boxes running than the fabric has bindings for. Either one pages.
+
+**Detection only, and not by choice.** There is no path from a CF Containers
+instance back to its Durable Object: `POST /v1/teardown` with an instance name
+resolves `idFromName()` to a fresh unrelated DO, destroys nothing, and returns
+**204** — a silent no-op that reads as success. So an orphan can now be SEEN and
+still not be KILLED. The fix for the kill half — generative, enumerable DO names
+following the existing `shardDoId(k, N)` precedent — is specified in
+`docs/adr/0010-enumerable-runner-do-names.md` as **PROPOSED, not implemented**:
+it changes how every box on the live spawn path is addressed, is forward-only
+(boxes already minted stay unreachable), and needs owner sign-off.
+
+Two things measured live while building this, both of which would have made the
+check page forever on a healthy account and are now excluded: Cloudflare's own
+`_system` platform-pool instances, and long-lived SERVICE classes — the fabricd
+singleton was legitimately up 111 h, carrying no lease at all.
+
+`container-instances.sh` gains `--json` so this check reuses the one trustworthy
+counter rather than forking a second one. That mode reads the point-in-time
+unpaginated snapshot: measured live, the 17-request paginated walk returned 1640
+records for 483 unique ids and its running count read 6 on one attempt and 20 on
+the next as the cursor window slid under churn, which trips the script's own
+self-check and aborts. Correct for a human reading a number off a table; fatal
+for a detector that must still report on a live fleet. The human table path is
+unchanged.
+
+`scripts/orphan-box-check.selftest.sh` pins all of it: 13 cases, including that
+the `_system` pool alone stays silent, that unusable input exits 2 rather than
+a false clean, and that widening the app pattern onto a service class *does*
+fire — so the exclusion is provably the pattern and not accidental blindness.
+
 ### 2026-08-24 — the weaker gate was in the repo where a bad merge does more damage
 
 `scripts/pre-merge-gate-check.sh` was 156 lines here against 456 in
