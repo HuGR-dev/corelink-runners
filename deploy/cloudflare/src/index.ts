@@ -93,6 +93,9 @@ import {
   jobPlacementVerdict,
   PLACEMENT_CONFIRM_GRACE_MS,
   encodeRunnerBinding,
+  runnerGoneVerdict,
+  strandedJobVerdict,
+  type JobObservation,
   parseRunnerBinding,
   runnerActivityVerdict,
   type RunnerBinding,
@@ -1254,6 +1257,10 @@ async function spawnRunner(
         rid: provisioned.runnerId,
         repo,
         inst: installationId,
+        // The job this box was started FOR — a CANDIDATE for the stranded sweep,
+        // never a conclusion (GitHub assigns by label match; see RunnerBinding).
+        jid: jobId,
+        t: Date.now(),
       }),
       {
         expirationTtl: JOB_PAT_TTL_S,
@@ -1957,6 +1964,13 @@ async function fetchRunnerActivity(
 // reclaiming boxes we can no longer ask about.
 const KEEPALIVE_MAX_VERIFY_PER_TICK = 40;
 
+// The same hard ceiling, for the stranded-job sweep, and for the same reason: a
+// KV full of stale bindings must never let a backstop exhaust the installation's
+// REST budget and break SPAWNING, which is the thing customers actually pay for.
+// Bindings past the cap are simply not examined this tick; the sweep runs every
+// minute and the binding lives 2 h, so nothing is lost by deferring one.
+const STRAND_MAX_VERIFY_PER_TICK = 40;
+
 // ── Keep-alive sweep (2026-08-02; verified against GitHub 2026-08-03) ────────
 //
 // Why this exists: `RunnerContainer.sleepAfter` was acting as a hard 15-minute cap
@@ -2099,6 +2113,254 @@ export async function keepAliveLiveRunners(
     ...Array(unverifiable).fill("keepalive_renewed_unverifiable"),
   );
   return renewed;
+}
+
+// Ask GitHub about ONE job: `GET /repos/{owner}/{repo}/actions/jobs/{job_id}`.
+//
+// Distinct from `fetchJobPlacement` on purpose. That one serves the first-party
+// placement reconciler, authenticates with the first-party `GITHUB_MINT_TOKEN`,
+// and collapses every failure to `null`. The stranded sweep runs over CUSTOMER
+// bindings, so it must use the SAME per-installation credential the JIT was minted
+// with, and it must be able to tell a 404/403/429/5xx apart from a transport
+// failure — that distinction is the entire authority argument (see
+// `runnerGoneVerdict`). So it returns the literal status, and `null` ONLY when no
+// answer was produced at all.
+//
+// AUTH: `mintJitAuthToken(env, installationId)` — strictly weaker than what we
+// already hold on that repo (we CREATE and DELETE runner registrations on it).
+// Never throws: an unreachable GitHub must not stop the tick.
+async function fetchJobObservation(
+  env: Env,
+  repo: string,
+  jobId: string,
+  installationId: string,
+): Promise<JobObservation | null> {
+  try {
+    const authToken = await mintJitAuthToken(env, installationId);
+    if (!authToken) return null;
+    const r = await fetch(`https://api.github.com/repos/${repo}/actions/jobs/${jobId}`, {
+      headers: {
+        authorization: `Bearer ${authToken}`,
+        accept: "application/vnd.github+json",
+        "user-agent": "corelink-spawn-worker",
+      },
+    });
+    if (r.status !== 200) return { httpStatus: r.status, job: null };
+    return {
+      httpStatus: 200,
+      job: (await r.json()) as JobObservation["job"],
+    };
+  } catch {
+    return null; // unreachable / unparseable ⇒ unknown ⇒ conclude nothing
+  }
+}
+
+// Write the TERMINAL dead-letter for a stranded job. Same `orphan:<jobId>` record
+// and same `OrphanRecord` shape `recordOrphan` uses — extended, not duplicated,
+// with `stranded`/`strandedRunner`. There is exactly ONE dead-letter format.
+//
+// It deliberately CLOBBERS a prior record for this job (unlike `recordOrphan`,
+// which records only a first failure): a provisional `placedMs` record for a job
+// we now know died in flight must not survive and drive a re-spawn. `attempts` and
+// `firstRecordedMs` are preserved so the record keeps one lifecycle per job.
+//
+// `stranded` makes it terminal — `retryOrphanedSpawns` skips it. Re-driving
+// in-flight work is a separate decision that has not been made.
+async function recordStrandedJob(
+  env: Env,
+  opts: {
+    jobId: string;
+    repo: string;
+    installationId: string;
+    runnerName: string;
+    nowMs: number;
+  },
+): Promise<void> {
+  const kv = env.RUNNER_JOB_PATS;
+  if (!kv) return;
+  try {
+    const key = orphanKey(opts.jobId);
+    const raw = await kv.get(key);
+    const prior = raw ? (JSON.parse(raw) as OrphanRecord) : null;
+    const rec: OrphanRecord = {
+      repo: opts.repo,
+      installationId: opts.installationId,
+      labels: prior?.labels ?? [],
+      attempts: prior?.attempts ?? 0,
+      firstRecordedMs: prior?.firstRecordedMs ?? opts.nowMs,
+      stranded: opts.nowMs,
+      strandedRunner: opts.runnerName,
+      // Explicitly NOT carried over: a job that died in flight is not a job
+      // awaiting placement.
+      placedMs: undefined,
+    };
+    await kv.put(key, JSON.stringify(rec), { expirationTtl: ORPHAN_TTL_S });
+  } catch (e) {
+    logEvent("error", "stranded_record_failed", {
+      jobId: opts.jobId,
+      error: (e as Error).message,
+    });
+  }
+}
+
+// ── Stranded in-flight jobs — the fifth sweep (2026-08-23) ───────────────────
+//
+// THE DEFECT. A runner box that dies MID-JOB is invisible to this Worker. The
+// placement reconciler reads anything past `queued` as "placed" and drops the
+// record; `listOrphanRunnerJobs` selects only `queued`; `recordOrphan` is written
+// only from a SPAWN-time failure. So a box killed after a successful spawn enters
+// no dead letter at all, and the first anyone hears of it is GitHub's own ~600 s
+// timeout telling the CUSTOMER that "the self-hosted runner lost communication
+// with the server". Meanwhile our accounting leaks for hours (the concurrency slot
+// to SLOT_TTL_S, the per-job `cas:rw` PAT to its own TTL, the KV bindings to
+// JOB_PAT_TTL_S) because every release is hung off the `completed` webhook that
+// will never arrive.
+//
+// ⛔ WHAT THIS SWEEP IS NOT ALLOWED TO DO. It never stops, destroys, signals or
+// tears down ANYTHING. There is no `destroy()`, no `stop()`, no teardown call in
+// this function and there must never be one: on 2026-08-02 a teardown keyed on our
+// own bookkeeping SIGKILLed five live customer boxes (see the note above
+// `RUNNER_HANDLE_PREFIX`). Container termination stays where it already is — the
+// idle window, `reapStaleBoxes`, and the DO alarm.
+//
+// WHAT IT MAY CONCLUDE FROM, AND ONLY FROM. GitHub's own answers, twice over:
+//   1. a definitive 404 on the runner (`runnerGoneVerdict`) — the registration we
+//      created no longer exists. A transport failure is `null`, a rate limit is
+//      403/429, an outage is 5xx; none of them are 404 (see `runnerGoneVerdict`).
+//   2. that job reported `in_progress` AND carrying OUR runner id
+//      (`strandedJobVerdict`). GitHub confirming the job→box link is what makes
+//      this different from the 2026-08-02 correlation: our binding names only the
+//      job the box was STARTED for, and GitHub assigns by label match.
+// The absence or staleness of one of our own KV records concludes NOTHING.
+// Anything ambiguous ⇒ do nothing, try again next tick.
+//
+// WHAT IT MUTATES, on a confirmed strand and nothing else:
+//   • a loud `console.error` (`job_stranded`) naming job, repo, runner and age;
+//   • the `orphan:<jobId>` dead-letter, marked terminal (`stranded`) so nothing
+//     re-drives it;
+//   • the concurrency slot, released by jobId (idempotent, and it self-heals at
+//     SLOT_TTL_S anyway — this just returns it ~40 min sooner);
+//   • the per-job `cas:rw` PAT, revoked through the SAME path `completed` uses.
+// All four are OUR bookkeeping. None of them touch the box.
+//
+// Both verifiers are injected so every branch is testable without a network.
+export async function detectStrandedInFlightJobs(
+  env: Env,
+  nowMs: number,
+  verifyRunner: (
+    env: Env,
+    repo: string,
+    runnerId: number,
+    installationId: string,
+  ) => Promise<RunnerObservation | null> = fetchRunnerActivity,
+  verifyJob: (
+    env: Env,
+    repo: string,
+    jobId: string,
+    installationId: string,
+  ) => Promise<JobObservation | null> = fetchJobObservation,
+): Promise<number> {
+  const kv = env.RUNNER_JOB_PATS;
+  if (!kv) {
+    // SAY SO. An unbound credential must not read as a quiet, healthy tick —
+    // that ambiguity is exactly how a dead backstop stays dead for weeks.
+    logEvent("info", "strand_sweep_skipped_unbound", { reason: "RUNNER_JOB_PATS unbound" });
+    return 0;
+  }
+  let listed: { keys: { name: string }[] };
+  try {
+    listed = await kv.list({ prefix: RUNNER_HANDLE_PREFIX });
+  } catch (e) {
+    logEvent("error", "strand_list_failed", { error: (e as Error).message });
+    return 0;
+  }
+  let stranded = 0;
+  let verifications = 0;
+  for (const { name } of listed.keys) {
+    if (verifications >= STRAND_MAX_VERIFY_PER_TICK) break;
+    const runnerName = name.slice(RUNNER_HANDLE_PREFIX.length);
+    let binding: RunnerBinding | null = null;
+    try {
+      binding = parseRunnerBinding(await kv.get(name));
+    } catch {
+      continue; // transient KV read miss — next tick retries
+    }
+    // Unaskable: a legacy bare-handle binding, a cold spawn, or a binding written
+    // before `jid` existed. Nothing to ask GitHub, so nothing to conclude.
+    if (!binding || typeof binding.rid !== "number" || !binding.repo || !binding.inst || !binding.jid) {
+      continue;
+    }
+    const { rid, repo, inst, jid } = binding;
+
+    // Already classified on an earlier tick? Then the side effects below already
+    // ran. Re-running them would be harmless (all idempotent) but would re-log the
+    // alarm every minute for two hours, which trains people to ignore it.
+    try {
+      const priorRaw = await kv.get(orphanKey(jid));
+      if (priorRaw && (JSON.parse(priorRaw) as OrphanRecord).stranded != null) continue;
+    } catch {
+      /* unreadable prior record ⇒ fall through and classify normally */
+    }
+
+    verifications++;
+    // Every verifier call is caught per binding: a throw must not abandon the
+    // sweep mid-list and silently skip every later box.
+    let gone: "gone" | "present" | "unknown" = "unknown";
+    try {
+      gone = runnerGoneVerdict(await verifyRunner(env, repo, rid, inst));
+    } catch (e) {
+      logEvent("error", "strand_runner_verify_threw", { runnerName, error: (e as Error).message });
+      continue;
+    }
+    // "present" ⇒ the registration is alive, the box is fine. "unknown" ⇒ GitHub
+    // was unreachable / rate-limited / ambiguous ⇒ conclude NOTHING.
+    if (gone !== "gone") continue;
+
+    let verdict: "stranded" | "not_stranded" | "unknown" = "unknown";
+    try {
+      verdict = strandedJobVerdict(await verifyJob(env, repo, jid, inst), rid);
+    } catch (e) {
+      logEvent("error", "strand_job_verify_threw", { runnerName, jobId: jid, error: (e as Error).message });
+      continue;
+    }
+    // `not_stranded` is the OVERWHELMINGLY common path: an ephemeral runner is
+    // de-registered by GitHub the instant it finishes its one job, so a completed
+    // job's runner is a 404 too. Ordinary completion — the webhook has it. Let the
+    // binding expire normally; touch nothing.
+    if (verdict !== "stranded") continue;
+
+    // ── CONFIRMED STRANDED ────────────────────────────────────────────────────
+    stranded++;
+    const boundAgoMs = typeof binding.t === "number" ? Math.max(0, nowMs - binding.t) : null;
+    logEvent("error", "job_stranded", {
+      jobId: jid,
+      repo,
+      runnerName,
+      runnerId: rid,
+      boundAgoMs,
+      note: "GitHub reports this job in_progress on a runner GitHub no longer knows about — the box died mid-job. Nothing was torn down; only our own accounting is released.",
+    });
+    await recordStrandedJob(env, {
+      jobId: jid,
+      repo,
+      installationId: inst,
+      runnerName,
+      nowMs,
+    });
+    // Return the concurrency slot (idempotent; self-heals at SLOT_TTL_S anyway).
+    await releaseConcurrencySlot(env, jid);
+    // Revoke the per-job `cas:rw` PAT through the SAME path `workflow_job.completed`
+    // uses — shrinking a live credential's window from its full TTL to now.
+    let derivedTenant: string | undefined;
+    try {
+      derivedTenant = (await kv.get(jobTenantKey(jid))) ?? undefined;
+    } catch {
+      /* best-effort: revokeCompletedJob falls back to CLW_TENANT */
+    }
+    await revokeCompletedJob(env, jid, derivedTenant);
+  }
+  if (stranded > 0) await bumpMetrics(env, ...Array(stranded).fill("job_stranded"));
+  return stranded;
 }
 
 /**
@@ -2275,6 +2537,17 @@ export default {
     } catch (e) {
       logEvent("error", "stale_box_reap_failed", { error: (e as Error).message });
     }
+    // FOURTH: detect jobs whose box died MID-JOB — the one loss nothing watched.
+    // Its own `waitUntil` + its own `.catch()`, so it can neither delay nor take
+    // down the placement work below. OBSERVE-ONLY: it tears nothing down (see the
+    // long note on the function), it releases only OUR accounting.
+    ctx.waitUntil(
+      detectStrandedInFlightJobs(env, now)
+        .then((n) => {
+          if (n > 0) logEvent("error", "stranded_jobs_detected", { count: n });
+        })
+        .catch((e) => logEvent("error", "strand_sweep_failed", { error: (e as Error).message })),
+    );
     await redriveOrphanedJobs(env, ctx, configured, now);
     try {
       // W7/F8: retry the dead-letter WARM (ANY repo). Runs AFTER the first-party
@@ -3010,6 +3283,11 @@ export async function retryOrphanedSpawns(
     } catch {
       rec = null;
     }
+    // ⛔ TERMINAL: this job died IN FLIGHT (the stranded sweep classified it from
+    // GitHub's own answers). Its accounting was already released; the record is
+    // kept for visibility until it TTLs. Re-driving in-flight work is a separate
+    // decision that has not been made, so it is never retried here.
+    if (rec?.stranded != null) continue;
     // ── Placement confirmation (2026-08-03) ──────────────────────────────────
     // A record carrying `placedMs` is a spawn we believe SUCCEEDED. Most of these
     // are healthy in-flight jobs, so the default action is to do nothing at all.

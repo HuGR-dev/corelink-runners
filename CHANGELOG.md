@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-08-23 — a box that dies MID-JOB is no longer invisible
+
+A runner box killed after a successful spawn entered no dead letter at all.
+`jobPlacementVerdict` resolves anything past `queued` to "placed" and the
+reconciler then DROPS the record; `listOrphanRunnerJobs` selects only `queued`;
+`recordOrphan` is written only from a spawn-time failure. So the first anyone
+heard of a job whose box died in flight was GitHub's own ~600 s timeout telling
+the **customer** that "the self-hosted runner lost communication with the
+server" — while our accounting leaked for hours behind a `completed` webhook
+that would never arrive (the concurrency slot to `SLOT_TTL_S`, the per-job
+`cas:rw` PAT to its own TTL, the `rhandle:`/`jhandle:`/`jtenant:` keys to
+`JOB_PAT_TTL_S`).
+
+`detectStrandedInFlightJobs` is a fifth cron sweep that closes that hole. Per
+`rhandle:` binding it asks GitHub two questions and acts only on their answers:
+a definitive **404 on the runner** (the registration we created no longer
+exists — structurally distinct from a transport failure, which is `null`, a rate
+limit, which is 403/429, and an outage, which is 5xx), and then that job's
+status. `in_progress` on a runner GitHub has forgotten, with `job.runner_id`
+matching our binding, is **STRANDED**; anything else concludes nothing and is
+retried next tick. Requiring GitHub to confirm the job→box link is what keeps
+this clear of the label-match permutation.
+
+**It observes only.** There is no `destroy()`, `stop()` or teardown call in the
+sweep and there must never be one — on 2026-08-02 a teardown keyed on our own
+bookkeeping SIGKILLed five live customer boxes. On a confirmed strand it emits a
+loud `job_stranded` line, writes the existing `orphan:` dead-letter marked
+terminal (`stranded`, so `retryOrphanedSpawns` never re-drives in-flight work),
+releases the concurrency slot and revokes the per-job PAT through the same path
+`workflow_job.completed` uses. Bounded at `STRAND_MAX_VERIFY_PER_TICK = 40`
+GitHub reads per tick, and it logs its own skip case rather than reading as a
+quiet tick.
+
 ### 2026-08-23 — PID 1 now bounds the SIGTERM window instead of trusting it
 
 The SIGTERM fix (#487) made the platform's soft stop deliverable and forwarded it
