@@ -932,7 +932,15 @@ S1.3.3's flow and acceptance lines are corrected to describe what the code does.
   deferred to run after the limiter instead. The main pin was proven RED against the pre-fix
   behaviour (`expected undefined to be defined`). 334 tests pass; `tsc --noEmit` clean.
 
-### 2026-08-02 — every fabric job longer than ~15 minutes was being SIGTERMed
+### 2026-08-02 — the container's activity deadline froze at start + 900 s
+
+> **Heading corrected 2026-08-24 (B-003).** It read *"every fabric job longer
+> than ~15 minutes was being SIGTERMed"*. The frozen-deadline diagnosis below is
+> verified and stands; the SIGTERM consequence does not, and had not since
+> `fc74fbd3` (2026-07-21) made PID 1 an un-trapped `bash` that the kernel will not
+> deliver a default-disposition SIGTERM to. The full correction is at the end of
+> this entry; the heading is corrected here because a reader scanning headings
+> would otherwise carry away the refuted claim and never reach the footnote.
 
 - **fix(cloudflare): `sleepAfter` was a hard cap on job DURATION, not an idle timeout.**
   In `@cloudflare/containers` 0.3.x, `sleepAfterMs` only moves forward via
