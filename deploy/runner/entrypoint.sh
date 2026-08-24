@@ -171,18 +171,58 @@ tee "$RUNSH_OUT" < "$RUNSH_FIFO" &
 TEE_PID=$!
 ./run.sh --jitconfig "$CORELINK_RUNNER_JITCONFIG" > "$RUNSH_FIFO" 2>&1 &
 RUNSH_PID=$!
+RUNSH_START="$SECONDS"
+
+# ── Escalation bound ─────────────────────────────────────────────────────────
+# Cloudflare's container platform gives the main process "up to 15 minutes to
+# exit after SIGTERM" and then sends SIGKILL to the container. Forwarding alone
+# is therefore not sufficient: a runner that hangs in its own shutdown would burn
+# the whole window and then be killed WITH us, losing the tee drain and the
+# /runner-diag POST below. 840 s (14 min) escalates one minute early so PID 1
+# still owns the last ~60 s and can report why the box died. Overridable so the
+# regression test can exercise this path in seconds.
+RUNNER_TERM_GRACE_SECS="${RUNNER_TERM_GRACE_SECS:-840}"
 
 # Forward the signal and let the runner deregister itself. Deliberately does NOT
 # exit from inside the handler: the runner owns its graceful shutdown and exiting
 # here would orphan it — which is precisely the "we stopped tracking it" mistaken
 # for "it stopped" failure this incident was made of. TERMINATED also suppresses
 # the diagnostic POST below, since a signalled teardown is expected, not a defect.
+#
+# The handler LOGS, loudly and once. The container has no external log path other
+# than stdout, so this line is the only evidence that will ever tell us whether
+# the platform actually signalled a box — the entire incident was "we cannot see
+# whether the stop landed". Do not make it quieter.
 TERMINATED=0
+TERM_WATCHDOG_PID=""
+# shellcheck disable=SC2329  # invoked indirectly by the `trap` strings below.
 term_handler() {
+  local sig="$1"
+  # Idempotent: a second signal must not stack a second watchdog, nor re-log and
+  # make a single stop look like a storm.
+  [[ "$TERMINATED" -eq 1 ]] && return 0
   TERMINATED=1
+  echo "signal: caught SIG${sig} pid=$$ child=${RUNSH_PID} elapsed=$((SECONDS - RUNSH_START))s — forwarding to run.sh, SIGKILL escalation in ${RUNNER_TERM_GRACE_SECS}s"
   kill -TERM "$RUNSH_PID" 2>/dev/null || true
+  # Bounded wait, armed asynchronously so PID 1 goes straight back to `wait` and
+  # still reaps the child's real status the instant it exits on its own.
+  # Polls in 1 s steps rather than one long `sleep` so it exits on its OWN the
+  # moment the runner shuts down gracefully — the expected case leaves nothing
+  # behind, and the disarm below can never orphan a multi-minute sleep.
+  (
+    for _ in $(seq 1 "$RUNNER_TERM_GRACE_SECS"); do
+      kill -0 "$RUNSH_PID" 2>/dev/null || exit 0
+      sleep 1
+    done
+    if kill -0 "$RUNSH_PID" 2>/dev/null; then
+      echo "signal: run.sh (pid=${RUNSH_PID}) still alive ${RUNNER_TERM_GRACE_SECS}s after SIGTERM — escalating to SIGKILL" >&2
+      kill -KILL "$RUNSH_PID" 2>/dev/null || true
+    fi
+  ) &
+  TERM_WATCHDOG_PID=$!
 }
-trap term_handler TERM INT
+trap 'term_handler TERM' TERM
+trap 'term_handler INT' INT
 
 # A trapped signal INTERRUPTS `wait`, which then returns >128 while the child is
 # still alive. Re-wait until the child is genuinely gone, or PID 1 would fall
@@ -192,6 +232,11 @@ while :; do
   [[ "$rc" -le 128 ]] && break
   kill -0 "$RUNSH_PID" 2>/dev/null || break
 done
+
+# The child is gone; disarm the escalation watchdog so its `sleep` cannot outlive
+# the run and so PID 1 is never held waiting on it.
+[[ -n "$TERM_WATCHDOG_PID" ]] && kill -TERM "$TERM_WATCHDOG_PID" 2>/dev/null
+true
 
 # Let tee drain, but BOUNDED: a job step that leaked the FIFO write fd would
 # otherwise keep tee open forever and hang PID 1 — reintroducing the very hang

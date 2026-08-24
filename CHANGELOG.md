@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-08-23 — PID 1 now bounds the SIGTERM window instead of trusting it
+
+The SIGTERM fix (#487) made the platform's soft stop deliverable and forwarded it
+to `run.sh`, but it then waited on the runner **indefinitely**. Two gaps remained.
+
+1. **No escalation.** Cloudflare's container platform gives the main process up to
+   15 minutes after SIGTERM and then SIGKILLs the container. A runner that hangs
+   in its own shutdown therefore burned the entire window and was killed *together
+   with* PID 1 — losing the bounded `tee` drain and the `/runner-diag` POST, i.e.
+   exactly the evidence needed to explain why the box died. PID 1 now arms a
+   watchdog on receipt of the signal and escalates to `SIGKILL` of `run.sh` after
+   `RUNNER_TERM_GRACE_SECS` (default **840 s = 14 min**), keeping the final minute
+   for its own teardown and diagnostics. The watchdog polls in 1 s steps, so the
+   normal graceful path leaves nothing behind.
+2. **The receipt was silent.** The container has no external log path but stdout,
+   so "the platform never signalled us" and "it signalled us and we ignored it"
+   were indistinguishable — the ambiguity that let three boxes run 10.5 h. PID 1
+   now emits one structured line naming the signal, its pid, the child pid and the
+   elapsed seconds, and a second line if it has to escalate.
+
+The handler is idempotent: a repeated stop cannot stack watchdogs or make one stop
+look like a storm. Exit-code propagation is unchanged and verified in both
+directions (clean child exit 42 → entrypoint 42; trapped teardown → 143).
+
+`deploy/runner/test/entrypoint-signal.test.sh` gains three cells: the structured
+receipt is present, and a `run.sh` that deliberately **ignores** SIGTERM is waited
+out for the full grace and then killed — asserting both that PID 1 does not abandon
+the child early and that it does not wait forever.
+
+Not changed: `deploy/check-host/entrypoint.sh` `exec`s its server, so the exec-server
+is PID 1 and owns its own signals. It never had the pipeline/no-trap shape.
+
+
 ### 2026-08-23 — a trustworthy "how many containers are running" script
 
 An incident was closed using the `applications[].instances` field from the CF
