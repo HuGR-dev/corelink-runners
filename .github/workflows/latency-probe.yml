@@ -157,6 +157,39 @@ jobs:
               | tr -d '\r' | grep -i '^server-timing:' | cut -d' ' -f2- || true
           done
 
+      - name: The one number the D1-transport ADR is blocked on
+        env:
+          ENDPOINT: ${{ inputs.endpoint }}
+        run: |
+          set -uo pipefail
+          # `docs/design/2026-08-25-adr-container-d1-transport.md` turns on ONE
+          # unmeasured number: what a round trip from inside the fabric to our own
+          # Worker edge costs. If that hop is ~40 ms — the order of the `ohop` we
+          # already measure in the other direction — then routing the container's
+          # D1 writes through a Worker endpoint saves nothing (40 + 40 against the
+          # ~100 ms the public REST API costs today) and only the DO-commits-the-row
+          # option is worth building. The ADR deliberately refuses to estimate it.
+          #
+          # `/health` is Worker-only: no DO, no container, no D1. So its wall time
+          # IS the box→edge→box round trip plus the Worker's own trivial work, which
+          # is the closest honest proxy for the hop a container would pay.
+          base="${ENDPOINT%/}"
+          for _ in 1 2 3; do curl -s -o /dev/null "${base}/health" || true; done
+          echo "=== Worker-only /health, wall seconds (box -> our edge -> box)"
+          for _ in 1 2 3 4 5 6 7 8; do
+            curl -s -o /dev/null -w '%{http_code} total=%{time_total} connect=%{time_connect} tls=%{time_appconnect}\n' \
+              "${base}/health" || true
+          done
+          echo "=== for contrast: the SAME box to the public CF API frontend the container uses for D1"
+          # No credential: an unauthenticated 400/401 still completes the same TLS +
+          # HTTP round trip to the same frontend, which is what we are timing. The
+          # response body is discarded and nothing is sent that could carry a secret.
+          for _ in 1 2 3; do curl -s -o /dev/null "https://api.cloudflare.com/client/v4/user/tokens/verify" || true; done
+          for _ in 1 2 3 4 5 6 7 8; do
+            curl -s -o /dev/null -w '%{http_code} total=%{time_total} connect=%{time_connect} tls=%{time_appconnect}\n' \
+              "https://api.cloudflare.com/client/v4/user/tokens/verify" || true
+          done
+
       - name: The comparison this exists to make
         run: |
           cat <<'TXT'
