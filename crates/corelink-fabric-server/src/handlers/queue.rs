@@ -161,15 +161,56 @@ pub(crate) async fn trigger(
     // ── 4. Execute via the SAME mechanism as the exec path — `run_check`
     // over the `LeasedExec` port. Any refusal is 503 `fail_closed`; a
     // `CheckResult` is never fabricated (contract §3 law, inherited).
-    let clock = || state.clock.now_ms();
-    match run_check(
-        state.exec.as_ref(),
-        &req.lease_id,
-        &req.check_def,
-        &req.tree_hash,
-        &clock,
-        &box_ref,
-    ) {
+    //
+    // OFFLOAD (same as the exec path): `run_check` is SYNCHRONOUS
+    // (`crate::exec`) over the sync ureq exec transport, whose timeout is the
+    // lease's own expiry (container default ONE hour) — run INLINE it would
+    // pin a tokio ASYNC worker for that whole window, starving every other
+    // route on the instance including `/v1/health`, whose failure makes the
+    // fabricd watchdog destroy the container mid-job. So the call runs on the
+    // blocking pool (`tokio::task::spawn_blocking`) while THIS handler still
+    // awaits the result — the trigger returns the attested response to its
+    // caller, so nothing here is fire-and-forget. The spawned closure must be
+    // `'static + Send`, so it cannot borrow: owned clones move in
+    // (`Arc<dyn LeasedExec>` / `Arc<dyn Clock>` are `Send + Sync` by trait
+    // bound; `CheckDef` + the String axes are cloned) and the clock closure is
+    // constructed INSIDE the task over the moved `Arc<dyn Clock>` — same two
+    // reads (before/after the exec) as before. A join error (the blocking task
+    // panicked) maps to the SAME fail-closed 503 as an exec refusal — a lost
+    // execution can never fabricate (nor memoize) a result either way.
+    let exec = state.exec.clone();
+    let clock = state.clock.clone();
+    let lease_for_task = req.lease_id.clone();
+    let def_for_task = req.check_def.clone();
+    let tree_hash_for_task = req.tree_hash.clone();
+    let runner_ref_for_task = box_ref.clone();
+    let joined = tokio::task::spawn_blocking(move || {
+        let now_ms = || clock.now_ms();
+        run_check(
+            exec.as_ref(),
+            &lease_for_task,
+            &def_for_task,
+            &tree_hash_for_task,
+            &now_ms,
+            &runner_ref_for_task,
+        )
+    })
+    .await;
+    // Flatten the join: a blocking-task PANIC (or cancellation) is fail-closed
+    // too — a lost execution must never become a fabricated (nor memoized)
+    // result — so it maps onto the SAME 503 shape as an exec refusal and the
+    // arms below stay byte-identical to the inline call they replaced.
+    let outcome = match joined {
+        Ok(outcome) => outcome,
+        Err(_) => {
+            return error_response(
+                ApiError::FailClosed,
+                "execution task did not complete (blocking worker panic); \
+                 failing closed, no result fabricated",
+            );
+        }
+    };
+    match outcome {
         Ok(result) => {
             // ── 4b. RE-ASSERT Held BEFORE attesting (WP-FIX-EXEC-RACE) — the
             // SAME result-integrity guard as the exec path. The Held-gate

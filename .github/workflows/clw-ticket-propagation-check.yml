@@ -34,6 +34,10 @@ jobs:
             echo "PROPAGATION-CHECK-RESULT: BROKER PATH — env trio reaches clw, propagation FINE (#2 rides #1)"
           elif grep -qiE "missing token" /tmp/clwout; then
             echo "PROPAGATION-CHECK-RESULT: MISSING TOKEN — trio NOT reaching clw child, real propagation gap"
+            echo "::error title=clw ticket propagation GAP::'missing token' in clw output — the cred-ticket env trio is NOT reaching the clw run child (a real propagation gap, independent of #1)."
+            exit 1
           else
             echo "PROPAGATION-CHECK-RESULT: UNCLEAR — inspect the clw output above"
+            echo "::error title=clw ticket propagation UNCLEAR::clw output matched neither the broker-path nor the missing-token signature — classify by hand from the output above."
+            exit 1
           fi

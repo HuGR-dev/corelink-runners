@@ -189,15 +189,57 @@ pub(crate) async fn exec(
     // identity, and the memo key must never collapse across trees.
     // `runner_ref` is the ledger's own box_ref — the opaque reference to
     // the box/VM serving this lease.
-    let clock = || state.clock.now_ms();
-    match run_check(
-        state.exec.as_ref(),
-        &lease_id,
-        &req.check_def,
-        &req.tree_hash,
-        &clock,
-        &box_ref,
-    ) {
+    //
+    // OFFLOAD: `run_check` is SYNCHRONOUS (`crate::exec`) and drives the sync
+    // ureq exec transport, whose timeout is the lease's own expiry (container
+    // default ONE hour) — run INLINE it would pin a tokio ASYNC worker for
+    // that whole window, starving every other route on the instance including
+    // `/v1/health`, whose failure makes the fabricd watchdog destroy the
+    // container mid-job. So the call runs on the blocking pool
+    // (`tokio::task::spawn_blocking`, mirroring `agent_exec.rs`'s dispatch of
+    // the same synchronous seam) while THIS handler still awaits the result:
+    // unlike agent-exec's ack→poll shape, `/exec` returns the `CheckResult`
+    // to its caller, so nothing here is fire-and-forget. The spawned closure
+    // must be `'static + Send`, so it cannot borrow: owned clones move in
+    // (`Arc<dyn LeasedExec>` and `Arc<dyn Clock>` are `Send + Sync` by trait
+    // bound; `CheckDef` and the String axes are cloned) and the clock closure
+    // is constructed INSIDE the task over the moved `Arc<dyn Clock>` — same
+    // two reads (before/after the exec) as before. A join error (the blocking
+    // task panicked) maps to the SAME fail-closed 503 as an exec refusal —
+    // a lost execution can never fabricate a result either way.
+    let exec = state.exec.clone();
+    let clock = state.clock.clone();
+    let lease_for_task = lease_id.clone();
+    let def_for_task = req.check_def.clone();
+    let tree_hash_for_task = req.tree_hash.clone();
+    let runner_ref_for_task = box_ref.clone();
+    let joined = tokio::task::spawn_blocking(move || {
+        let now_ms = || clock.now_ms();
+        run_check(
+            exec.as_ref(),
+            &lease_for_task,
+            &def_for_task,
+            &tree_hash_for_task,
+            &now_ms,
+            &runner_ref_for_task,
+        )
+    })
+    .await;
+    // Flatten the join: a blocking-task PANIC (or cancellation) is fail-closed
+    // too — a lost execution must never become a fabricated result — so it
+    // maps onto the SAME 503 shape as an exec refusal and the arms below stay
+    // byte-identical to the inline call they replaced.
+    let outcome = match joined {
+        Ok(outcome) => outcome,
+        Err(_) => {
+            return error_response(
+                ApiError::FailClosed,
+                "execution task did not complete (blocking worker panic); \
+                 failing closed, no result fabricated",
+            );
+        }
+    };
+    match outcome {
         // ── 4b. RE-ASSERT Held BEFORE attesting (WP-FIX-EXEC-RACE). The
         // Held-gate (gate 2) dropped the ledger lock before `run_check`, which
         // can run long. CONCURRENTLY a close/cancel/reaper may have won the

@@ -350,9 +350,10 @@ export class CredStashDO extends DurableObject<Env> {
   // redeem of the ticket returns 404 (no stash), so the per-job cas:rw PAT is no
   // longer retrievable by in-lease code once the job ends. Idempotent (deleteAll
   // on an already-empty store is a no-op); also clears the pending TTL alarm.
+  // The two ops are independent (deleteAlarm consumes nothing from deleteAll),
+  // so they run concurrently — same end state, half the round-trips.
   async wipe(): Promise<void> {
-    await this.ctx.storage.deleteAll();
-    await this.ctx.storage.deleteAlarm();
+    await Promise.all([this.ctx.storage.deleteAll(), this.ctx.storage.deleteAlarm()]);
   }
 }
 
@@ -493,11 +494,15 @@ export class RunnerContainer extends Container<Env> {
    *
    * Also clears the soft-stop counter: a box that is working again has not been
    * ignoring anything, and letting a stale count carry over would eventually
-   * destroy a healthy container.
+   * destroy a healthy container. The two storage ops are independent (the delete
+   * consumes nothing from the put), so they run concurrently — same end state,
+   * half the round-trips.
    */
   async noteActivity(): Promise<void> {
-    await this.ctx.storage.put(LAST_ACTIVITY_KEY, Date.now());
-    await this.ctx.storage.delete(SOFT_STOP_COUNT_KEY);
+    await Promise.all([
+      this.ctx.storage.put(LAST_ACTIVITY_KEY, Date.now()),
+      this.ctx.storage.delete(SOFT_STOP_COUNT_KEY),
+    ]);
   }
 
   /**
@@ -1503,7 +1508,15 @@ async function warnIfNearVcpuCeiling(
       Math.max(0, Math.floor((completedMs - startedMs) / 1000)) * RUNNER_BOX_VCPU;
     const period = billingPeriod(completedMs);
     const usageKey = vcpuUsageKey(tenant, period);
-    const prior = Number.parseFloat((await kv.get(usageKey)) ?? "0");
+    // The usage read and the per-threshold marker reads are independent of each
+    // other (only the ceiling above gates the early-returns), so they are issued
+    // together; the resolved values and the resulting `warned` set are identical
+    // to reading them one at a time.
+    const [usageRaw, warnedRaws] = await Promise.all([
+      kv.get(usageKey),
+      Promise.all(VCPU_WARN_THRESHOLDS.map((t) => kv.get(vcpuWarnedKey(tenant, period, t)))),
+    ]);
+    const prior = Number.parseFloat(usageRaw ?? "0");
     const total = (Number.isFinite(prior) ? prior : 0) + jobVcpuSeconds;
     // Read-modify-write on KV is racy under concurrent completions, and that is
     // ACCEPTED: this counter drives a human-facing warning, not an invoice. The
@@ -1513,8 +1526,8 @@ async function warnIfNearVcpuCeiling(
     await kv.put(usageKey, String(total), { expirationTtl: VCPU_KEY_TTL_S });
 
     const warned = new Set<number>();
-    for (const t of VCPU_WARN_THRESHOLDS) {
-      if (await kv.get(vcpuWarnedKey(tenant, period, t))) warned.add(t);
+    for (let i = 0; i < VCPU_WARN_THRESHOLDS.length; i++) {
+      if (warnedRaws[i]) warned.add(VCPU_WARN_THRESHOLDS[i]);
     }
     const step = vcpuWarningStep(total, ceilingVcpuH, warned);
     if (step.crossed === null) return;
@@ -2632,8 +2645,24 @@ export async function reapStaleBoxes(
       });
       await kv.delete(name).catch(() => {});
     } catch (e) {
-      // Already gone, or the handle is dead — either way not worth alarming on.
+      // A throw from destroy() is NOT proof the box is down — it may be a
+      // transient DO error, and this sweep only runs past the `rhandle:` TTL, so
+      // the `sbox:` record is the last cron-visible handle. Deleting it on a
+      // throw would strand a RUNNING box forever, contradicting the contract
+      // above ("a throw ⇒ left alone and retried next tick"). Same shape as
+      // sweepGhostContainers: probe liveness and only reap on a definite "down".
       logEvent("info", "reap_destroy_skipped", { runnerName, error: (e as Error).message });
+      let alive: boolean;
+      try {
+        alive = await getContainer(env.RUNNER_CONTAINER, rec.h).isAlive();
+      } catch {
+        alive = false; // unreachable DO ⇒ nothing is running
+      }
+      if (alive) {
+        // Still up after a failed destroy: keep the record and retry next tick.
+        logEvent("error", "stale_box_still_alive", { runnerName });
+        continue;
+      }
       await kv.delete(name).catch(() => {});
     }
   }

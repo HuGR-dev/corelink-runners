@@ -1,6 +1,8 @@
 # CoreLink spawn-Worker + Container DO (Cloudflare substrate)
 
-> **Status: SKELETON / scaffolding — NOT deployed, NOT tested against a live account.**
+> **Status: LIVE — deployed to the gmhelmold CF account; autoscaler (/webhook) + /v1/* spawn
+> surface in prod** (per the header declaration in `wrangler.jsonc`, which also carries the
+> live runner-image digest pins and the prod-incident notes behind them).
 > Pioneering (no documented precedent for GitHub-Actions runners on Cloudflare Containers).
 > This is the Cloudflare side of the frozen seam in
 > `docs/spec/cloudflare-spawn-worker-contract.md`; the Rust side (`CloudflareEngine`,
@@ -50,7 +52,9 @@ Auth: `Authorization: Bearer <CLOUDFLARE_SPAWN_AUTH_TOKEN>` (a Worker secret). F
 - [ ] Validate the 12 GiB RAM ceiling against the heaviest builds; confirm `standard-4` (4 vCPU /
       12 GiB / 20 GB disk).
 - [ ] GH-runner lifecycle fit (registration, `git clone` egress, one-shot teardown) — live dogfood smoke.
-- [ ] Conformance vector `conformance/cloudflare-spawn.json` byte-identical with the Rust side.
+- [x] Conformance vector `conformance/cloudflare-spawn.json` byte-identical with the Rust side
+      (committed and pinned in `conformance/manifest.sha256`; enforced byte-exact against the
+      Rust engine by `crates/corelink-cloud-engine/tests/cloudflare_conformance.rs`).
 
 ## Layout
 
