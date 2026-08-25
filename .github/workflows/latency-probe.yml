@@ -236,7 +236,15 @@ jobs:
             printf '{"blobDigests":[%s]}' "$out"
           }
 
-          for n in 5 20 50 100; do
+          # Sizes chosen to READ THE SHAPE, not just the totals. #1328 probes
+          # 16-at-a-time, so if that concurrency is real, n=1 and n=16 cost
+          # about the SAME wall time and the curve steps in plateaus at 16/32/
+          # 48. If instead the curve is a straight line through the origin, the
+          # fan-out is not happening (or is CPU-bound on the 0.25-vCPU instance,
+          # where concurrent TLS handshakes are additive rather than
+          # overlapping). The first measurement after #1328 was dead linear
+          # (~92 ms/digest at every size), so this is the discriminator.
+          for n in 1 2 4 8 16 32 64 100; do
             body_file="$(mktemp)"
             gen_body "$n" > "$body_file"
             echo "=== n=${n} digests, 3 samples"
