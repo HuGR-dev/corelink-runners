@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-08-25 — the platform-truth leak detector, now on the 1-minute tick (B-002)
+
+The 2026-08-24 orphan-box check (below) lives OUTSIDE the Worker — a script + a
+scheduled workflow. `reconcileOrphanBoxes` brings the same platform-first
+question INTO `scheduled()`, so a leaked box is caught on the same 1-minute cron
+that already runs keep-alive, the ghost sweep, and `reapStaleBoxes`, instead of
+only when the workflow fires.
+
+It is the mirror image of `reapStaleBoxes`: that sweep starts from our own
+`sbox:` bookkeeping and is structurally blind to a running box that has **no**
+`sbox:` record — the exact 10.2 h leak it was built for. This one enumerates the
+ACTUAL running instances per-application from the Cloudflare Containers API
+(transcribing `scripts/container-instances.sh` — a Worker cannot shell out: read
+only `.result[].id` from the applications list, never the health-block
+`.instances`; filter `status.state === "running"` to drop tombstones; take one
+page larger than the record set and require the cursor ABSENT as the completeness
+proof), cross-references each running instance name against the `sbox:` handle
+set, and **LOGS** any running instance with no backing record whose platform age
+exceeds **2×`JOB_PAT_TTL_S` (4 h)** — double the reaper's own floor, because a
+legitimate box lacks its `sbox:` record only sub-second (spawn → the KV PUT
+landing), never for hours.
+
+**Ships INERT, and observe-only by construction.** Two independent gates:
+default-off `RECONCILE_ORPHAN_BOXES` **and** the CF creds (`CLOUDFLARE_ACCOUNT_ID`
++ a containers-read token) being bound — absent either, the sweep never even
+enumerates the platform, so it touches no live path on landing. There is **no**
+`.destroy()`/`.stop()`/`teardown()` call anywhere in the function: it only logs
+orphan candidates and bumps the new observe-only `orphan_box_detected` counter.
+Actual teardown is a **separate**, owner-gated flag (`RECONCILE_ORPHAN_TEARDOWN`,
+declared but **not wired** here) and a future landing — its `orphan_box_reaped`
+counter is registered now so dashboards 0-fill it.
+
+**The join key is surfaced, not trusted.** The join is `instance.name` === the DO
+handle stored as `sbox:` `h` (both bare `randomUUID()` UUIDs). That equality is
+asserted by the incident notes but not yet proven against a live instance list in
+this repo, so the dry-run logs BOTH sides (`orphan_reconcile_scan`) every tick: if
+the key is wrong it flags 100 % of boxes — a loud signal — and the teardown flag
+stays off until an operator confirms the join from a real `--json` dump. Every
+uncertain branch (CF API error, truncated page, unreadable KV, missing
+`started_at`) fails closed: log and return 0, touch nothing this tick.
+
 ### 2026-08-24 — the leak detector had to start from the platform, not from us
 
 `reapStaleBoxes` (#486) destroys boxes that outlive their own bookkeeping by

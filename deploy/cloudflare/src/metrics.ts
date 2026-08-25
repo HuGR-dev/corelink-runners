@@ -52,6 +52,25 @@ export const COUNTER_NAMES = [
   // and then was never stopped — the `sleepAfter` alarm did not fire. A non-zero
   // count is the alarm failing; a CLIMBING count is it failing routinely.
   "stale_box_reaped",
+  // ── Orphan-box reconciliation (platform-truth sweep, B-002) ──────────────
+  // `reapStaleBoxes` above starts from OUR `sbox:` bookkeeping — structurally
+  // blind to a running box that has NO `sbox:` record (exactly the 10.2 h leak it
+  // was built for). `reconcileOrphanBoxes` starts from the Cloudflare Containers
+  // API instead: a running instance whose name is in no `sbox:` record and whose
+  // age exceeds 2×JOB_PAT_TTL_S is an ORPHAN — un-accounted platform capacity.
+  //
+  // `orphan_box_detected` is OBSERVE-ONLY and bumped now: the sweep ships INERT
+  // (default-off flag + absent CF creds ⇒ no-op) and, even when enabled, only
+  // LOGS — it never tears anything down at this stage. A non-zero count is a
+  // running box the fabric cannot account for.
+  "orphan_box_detected",
+  // `orphan_box_reaped` is the FUTURE teardown path's counter (behind the
+  // separate, owner-gated `RECONCILE_ORPHAN_TEARDOWN` flag — NOT wired in this
+  // landing). Registered now, 0-filled, so a dashboard reading the documented
+  // shape shows it from day one instead of it popping into existence the moment
+  // teardown is first enabled ("this never happened" vs "this counter does not
+  // exist" must not look alike — the 2026-08-03 lesson).
+  "orphan_box_reaped",
   // ── Keep-alive sweep (does a live box keep its idle window open?) ────────
   // The sweep renews a box's idle timeout only while GitHub reports that box's
   // OWN runner as busy. These three partition every binding it looks at, so

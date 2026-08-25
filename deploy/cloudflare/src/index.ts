@@ -273,6 +273,33 @@ export interface Env {
   SPAWN_WORKER_PUBLIC_URL?: string;
   // Explicit non-prod escape hatch — see MintEnv.ALLOW_LEGACY_PAT_ENV. Never in prod.
   ALLOW_LEGACY_PAT_ENV?: string;
+  // ── Orphan-box reconciliation (platform-truth sweep, B-002) ──────────────────
+  // The ENABLE flag for `reconcileOrphanBoxes`. Default-OFF + FAIL-SAFE: unset/
+  // blank/"0"/"false" ⇒ the sweep is a NO-OP (it does not even enumerate the
+  // platform), so this whole feature lands INERT — no behaviour change on any live
+  // path — mirroring the opt-in `crash_probe_config_from_env` posture. Set to a
+  // truthy value ("1"/"true") to turn on OBSERVE-ONLY reconciliation. Enabling the
+  // reconciler alone NEVER destroys anything; it only logs orphan candidates and
+  // bumps `orphan_box_detected`. `wrangler var` / `wrangler secret put`.
+  RECONCILE_ORPHAN_BOXES?: string;
+  // The SEPARATE, owner-gated teardown flag. Default-OFF ⇒ pure dry-run. Declared
+  // now so the Env shape is stable, but the teardown path itself is NOT wired in
+  // this landing (B-002 is observe-only): flipping it today changes nothing. When
+  // the teardown half lands (like the B-038 audit lease), it will re-read the
+  // `sbox:` set immediately before each destroy (TOCTOU guard) and bump
+  // `orphan_box_reaped`. Never enable before the join key is confirmed live.
+  RECONCILE_ORPHAN_TEARDOWN?: string;
+  // ── Cloudflare Containers API creds — the "platform truth" enumeration ────────
+  // Needed by `reconcileOrphanBoxes` to enumerate the ACTUAL running instances
+  // per-app (the account-level /containers/instances endpoint is dead — it returns
+  // {instances:[]} unconditionally — so enumeration MUST be per-application). BOTH
+  // the account id AND a containers-read token must be bound or the sweep no-ops
+  // (this is what keeps it inert until an owner wires the creds via `wrangler
+  // secret put`). Token precedence mirrors scripts/container-instances.sh:
+  // CLOUDFLARE_CONTAINERS_API_TOKEN preferred, plain CLOUDFLARE_API_TOKEN accepted.
+  CLOUDFLARE_ACCOUNT_ID?: string;
+  CLOUDFLARE_CONTAINERS_API_TOKEN?: string;
+  CLOUDFLARE_API_TOKEN?: string;
 }
 
 // ── env-0 cred-stash Durable Object — the Worker-native single-use latch ──────
@@ -2614,6 +2641,321 @@ export async function reapStaleBoxes(
   return reaped;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ORPHAN-BOX RECONCILIATION (B-002) — reap-keyed on PLATFORM TRUTH, not on us.
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// `reapStaleBoxes` above starts from `kv.list({prefix:"sbox:"})` — OUR
+// bookkeeping. That is the right belt for a box whose keep-alive binding expired,
+// but it is STRUCTURALLY BLIND to the failure it was built for: the three boxes
+// that ran 10.2 h in the 2026-08-23 incident had NO `sbox:` record at all, so a
+// sweep that enumerates `sbox:` can never see them. A detector for bookkeeping
+// LOSS cannot start from the bookkeeping.
+//
+// `reconcileOrphanBoxes` is the mirror image: it starts from the Cloudflare
+// Containers API — whatever is running IS running, recorded or not — and asks the
+// opposite question. It is the in-Worker, cron-driven analogue of the external
+// `scripts/orphan-box-check.sh` CI probe (2026-08-24), so an orphan is caught on
+// the 1-minute tick rather than only when the scheduled workflow runs.
+//
+// ⛔ OBSERVE-ONLY AT THIS STAGE. There is NO `.destroy()`/`.stop()`/`teardown()`
+// call anywhere in this function, and there must not be one: it only LOGS orphan
+// candidates and bumps an observe counter. That is not a stylistic choice — there
+// is (today) no path from a CF Containers instance name back to its Durable
+// Object that would let a teardown land (POST /v1/teardown with an instance name
+// resolves `idFromName()` to a fresh unrelated DO and no-ops with a 204). Actual
+// teardown is a SEPARATE, owner-gated flag (`RECONCILE_ORPHAN_TEARDOWN`) and a
+// future landing, exactly like the B-038 audit lease.
+//
+// ⚠️ UNVERIFIED JOIN KEY, surfaced not trusted. The join is `instance.name` ===
+// the DO handle stored as `sbox:` `h` (both bare `crypto.randomUUID()` UUIDs —
+// `getContainer(ns, h)` addresses the container by `idFromName(h)`). That equality
+// is asserted by the task/CHANGELOG but NOT yet proven against a live instance
+// list in this repo. So the dry-run logs BOTH sides every tick: if the key is
+// wrong it flags EVERY running box as an orphan — a loud 100 % signal — and the
+// teardown flag stays off until an operator confirms the join from a real
+// `scripts/container-instances.sh --json` dump.
+
+// Age floor for an orphan candidate: 2×`STALE_BOX_AGE_MS` (= 2×JOB_PAT_TTL_S = 4 h).
+// `sbox:` is written at spawn COMPLETION, so the only window a live box lacks its
+// record is sub-second (container start → the KV PUT landing) or a logged
+// `kv_put_spawned_box_failed`. No legitimate mid-spawn box is 4 h old, so
+// "no sbox: AND age > 4 h" is genuinely un-accounted, never a record that simply
+// has not landed yet. Deliberately DOUBLE `reapStaleBoxes`' own floor.
+const ORPHAN_MIN_AGE_MS = 2 * STALE_BOX_AGE_MS;
+
+// Single-page size for the platform enumeration. Must stay comfortably above the
+// account's TOTAL instance record count (running + retained tombstones) so the
+// completeness proof below (cursor absent) holds in ONE request. Matches
+// scripts/container-instances.sh's default; overridable there via env, a constant
+// here (raise it if tombstones ever outgrow it — a truncated page fails closed).
+const ORPHAN_SCAN_PER_PAGE = 2000;
+
+// One RUNNING platform instance, as enumerated from the CF Containers API. `name`
+// is the join key (the DO-handle UUID). `started_at` is the platform's own clock
+// — age is computed from IT, never from any KV record.
+interface RunningInstance {
+  app: string;
+  id: string;
+  name: string;
+  started_at: string | null;
+  image: string | null;
+}
+
+// A flag is "enabled" only on an explicit truthy value. Unset/blank/"0"/"false"
+// ⇒ OFF (the default-safe direction for every gate here).
+function flagEnabled(v: string | undefined): boolean {
+  if (!v) return false;
+  const s = v.trim().toLowerCase();
+  return s === "1" || s === "true" || s === "yes" || s === "on";
+}
+
+// Resolve the containers-read token (preferred name first), mirroring the script.
+function containersApiToken(env: Env): string | undefined {
+  return env.CLOUDFLARE_CONTAINERS_API_TOKEN || env.CLOUDFLARE_API_TOKEN || undefined;
+}
+
+// A GET against the CF API that FAILS LOUD on anything that is not a clean 200 +
+// success:true — never hands a partial/failed body back to a caller that would
+// then count records out of it. Throws; the sweep's outer catch turns the throw
+// into "return 0, touch nothing this tick".
+async function cfContainersGet(
+  env: Env,
+  accountId: string,
+  token: string,
+  path: string,
+): Promise<{ result?: unknown; result_info?: { next_page_token?: string } }> {
+  const resp = await fetch(`https://api.cloudflare.com/client/v4${path}`, {
+    headers: {
+      authorization: `Bearer ${token}`,
+      accept: "application/json",
+      "user-agent": "corelink-spawn-worker",
+    },
+  });
+  if (!resp.ok) {
+    // A rejected token must NEVER read as "nothing to report" (a bad token answers
+    // 400 code:9106 on this endpoint, not 401/403). Any non-200 ⇒ throw ⇒ fail-closed.
+    throw new Error(`GET ${path} → HTTP ${resp.status}`);
+  }
+  const body = (await resp.json()) as {
+    success?: boolean;
+    errors?: unknown;
+    result?: unknown;
+    result_info?: { next_page_token?: string };
+  };
+  if (body.success !== true) {
+    throw new Error(`GET ${path} → success=false: ${JSON.stringify(body.errors ?? null)}`);
+  }
+  return body;
+}
+
+// Enumerate the ACTUAL running container instances, per-application, transcribing
+// the proven algorithm in scripts/container-instances.sh (a Worker cannot shell
+// out to it). The three traps that script documents, all handled here:
+//
+//   1. applications[].instances is the health-block SUM (active+healthy+stopped+…),
+//      NOT a running count — it read 22 while 3 ran. We read ONLY `.result[].id`
+//      (+ `.name`) from the applications list, never `.instances`.
+//   2. TOMBSTONES: terminated instances are retained forever with
+//      status.state === "inactive" (one app held 3 running vs 350+ tombstones).
+//      We filter on status.state === "running" explicitly.
+//   3. PAGINATION FLIPS SHAPE + the paginated walk's running count is
+//      NON-DETERMINISTIC under churn (measured 6 then 20 as the cursor window
+//      slid — that is why the script's machine-readable `--json` mode does NOT
+//      walk pages). We take ONE page larger than the whole record set and REQUIRE
+//      the cursor to be ABSENT: `next_page_token` missing is the API stating there
+//      is nothing after this page — completeness proven BY the payload, at one
+//      instant. If the cursor is PRESENT the page was capped and we have NOT seen
+//      the whole fleet ⇒ THROW (never a partial fleet, never a false "clean").
+//      This is the pagination self-check, in the form that suits a live detector.
+//
+// Deduped by instance id. Throws on any API error / truncation ⇒ the caller
+// returns 0 and touches nothing (fail-closed on ignorance).
+async function listRunningInstances(env: Env): Promise<RunningInstance[]> {
+  const accountId = env.CLOUDFLARE_ACCOUNT_ID;
+  const token = containersApiToken(env);
+  if (!accountId || !token) return []; // gate already checked; belt-and-braces
+  const appsBody = await cfContainersGet(
+    env,
+    accountId,
+    token,
+    `/accounts/${accountId}/containers/applications`,
+  );
+  const apps = Array.isArray(appsBody.result)
+    ? (appsBody.result as Array<{ id?: string; name?: string }>)
+    : [];
+  const out: RunningInstance[] = [];
+  const seen = new Set<string>();
+  for (const app of apps) {
+    if (!app.id) continue;
+    const appName = app.name ?? app.id;
+    const body = await cfContainersGet(
+      env,
+      accountId,
+      token,
+      `/accounts/${accountId}/containers/applications/${app.id}/instances?per_page=${ORPHAN_SCAN_PER_PAGE}`,
+    );
+    if (body.result_info?.next_page_token) {
+      // Capped page ⇒ the whole fleet was NOT seen; an orphan past the cap would
+      // read as clean. Fail closed rather than emit a partial fleet.
+      throw new Error(
+        `TRUNCATED PAGE for app ${app.id}: per_page=${ORPHAN_SCAN_PER_PAGE} still returned a next_page_token`,
+      );
+    }
+    const instances = Array.isArray((body.result as { instances?: unknown })?.instances)
+      ? ((body.result as { instances: Array<Record<string, unknown>> }).instances)
+      : [];
+    for (const inst of instances) {
+      const state = (inst.status as { state?: string } | undefined)?.state;
+      if (state !== "running") continue; // drop inactive tombstones + anything not live
+      const id = typeof inst.id === "string" ? inst.id : undefined;
+      const name = typeof inst.name === "string" ? inst.name : undefined;
+      if (!id || !name) continue;
+      if (seen.has(id)) continue; // dedupe by instance id
+      seen.add(id);
+      out.push({
+        app: appName,
+        id,
+        name,
+        started_at: typeof inst.started_at === "string" ? inst.started_at : null,
+        image:
+          typeof inst.image === "string"
+            ? inst.image
+            : typeof (inst.configuration as { image?: string } | undefined)?.image === "string"
+              ? (inst.configuration as { image: string }).image
+              : null,
+      });
+    }
+  }
+  return out;
+}
+
+// Read the durable `sbox:` set and return the Set of KNOWN DO handles (`h`). This
+// is the SAME reference set `reapStaleBoxes` uses (24 h TTL — it outlives the
+// box's own max lifetime, so a >4 h orphan that HAS an sbox record is correctly
+// excluded). Throws on a KV list/read failure so the sweep fails closed: we must
+// never assert "no sbox record" from an unread KV (that would flag live boxes).
+async function listSpawnedBoxHandles(env: Env): Promise<Set<string>> {
+  const kv = env.RUNNER_JOB_PATS;
+  const known = new Set<string>();
+  if (!kv) return known;
+  const listed = await kv.list({ prefix: SPAWNED_BOX_PREFIX });
+  for (const { name } of listed.keys) {
+    const raw = await kv.get(name);
+    if (!raw) continue;
+    try {
+      const rec = JSON.parse(raw) as { h?: unknown };
+      if (typeof rec.h === "string") known.add(rec.h);
+    } catch {
+      /* an unparseable record contributes no handle — next tick retries */
+    }
+  }
+  return known;
+}
+
+/**
+ * Observe-only reconciliation of running platform instances against `sbox:`.
+ *
+ * The mirror image of `reapStaleBoxes`: that one starts from OUR bookkeeping,
+ * this one starts from PLATFORM TRUTH. A running instance whose `name` is in NO
+ * `sbox:` record AND whose platform age exceeds 2×JOB_PAT_TTL_S (4 h) is an
+ * ORPHAN candidate — a box the fabric cannot account for.
+ *
+ * DRY-RUN by construction: it LOGS each candidate + a per-tick join audit (both
+ * sides of the key), bumps `orphan_box_detected`, and returns the count. It
+ * NEVER tears anything down at this stage.
+ *
+ * FAIL-SAFE / FAIL-CLOSED:
+ *   • not enabled (`RECONCILE_ORPHAN_BOXES` falsy) ⇒ return 0, no enumeration;
+ *   • CF creds absent ⇒ return 0 (this is what keeps it inert until owner-wired);
+ *   • any CF API error / truncated page / KV read failure ⇒ log + return 0,
+ *     touch nothing this tick (unknown ⇒ leave everything running).
+ *
+ * `listInstances` and `listSbox` are injected so every branch is testable without
+ * a network or a live KV.
+ */
+export async function reconcileOrphanBoxes(
+  env: Env,
+  nowMs: number,
+  listInstances: (env: Env) => Promise<RunningInstance[]> = listRunningInstances,
+  listSbox: (env: Env) => Promise<Set<string>> = listSpawnedBoxHandles,
+): Promise<number> {
+  // 1) GATE — fail-safe OFF, two independent conditions.
+  if (!flagEnabled(env.RECONCILE_ORPHAN_BOXES)) {
+    return 0; // inert: not even the platform is enumerated
+  }
+  if (!env.CLOUDFLARE_ACCOUNT_ID || !containersApiToken(env)) {
+    logEvent("info", "orphan_reconcile_skipped_no_creds", {
+      reason: "CLOUDFLARE_ACCOUNT_ID and/or a containers-read token unbound",
+    });
+    return 0;
+  }
+
+  // 2) PLATFORM TRUTH — whatever is running IS running. Fail closed on any error.
+  let instances: RunningInstance[];
+  try {
+    instances = await listInstances(env);
+  } catch (e) {
+    logEvent("error", "orphan_reconcile_platform_read_failed", { error: (e as Error).message });
+    return 0;
+  }
+
+  // 3) BOOKKEEPING — the KNOWN handle set. Fail closed: an unread sbox set must
+  // NOT be treated as "nothing is accounted for" (that would flag live boxes).
+  let known: Set<string>;
+  try {
+    known = await listSbox(env);
+  } catch (e) {
+    logEvent("error", "orphan_reconcile_sbox_read_failed", { error: (e as Error).message });
+    return 0;
+  }
+
+  // Per-tick JOIN AUDIT — log BOTH sides so an operator can eyeball-confirm the
+  // (unverified) join key BEFORE any teardown flag is ever flipped. If the key is
+  // wrong this shows every box as an orphan; that mismatch is the whole point of
+  // logging it.
+  logEvent("info", "orphan_reconcile_scan", {
+    scanned: instances.length,
+    sboxKnown: known.size,
+    instanceNames: instances.map((i) => i.name),
+    knownHandles: [...known],
+    teardownArmed: flagEnabled(env.RECONCILE_ORPHAN_TEARDOWN), // false; teardown NOT wired here
+  });
+
+  // 4) ORPHAN PREDICATE + 5) DRY-RUN ACTION.
+  let count = 0;
+  for (const inst of instances) {
+    // (a) DOUBLE-CHECK the sbox absence: name must be in NO sbox record.
+    if (known.has(inst.name)) continue;
+    // (b) age (from the PLATFORM clock) must exceed the 4 h floor. No/unparseable
+    // started_at ⇒ cannot prove it is old ⇒ leave it alone (fail-safe).
+    if (!inst.started_at) continue;
+    const startedMs = Date.parse(inst.started_at);
+    if (Number.isNaN(startedMs)) continue;
+    const ageMs = nowMs - startedMs;
+    if (ageMs <= ORPHAN_MIN_AGE_MS) continue;
+
+    count++;
+    logEvent("error", "orphan_box_detected", {
+      id: inst.id,
+      name: inst.name,
+      app: inst.app,
+      ageMs,
+      started_at: inst.started_at,
+      image: inst.image,
+      note: "running platform instance with NO sbox: record, older than 2×JOB_PAT_TTL_S — un-accounted capacity. DRY-RUN: nothing torn down.",
+    });
+  }
+
+  logEvent(count > 0 ? "error" : "info", "orphan_boxes_detected", {
+    count,
+    scanned: instances.length,
+    sboxKnown: known.size,
+  });
+  if (count > 0) await bumpMetrics(env, ...Array(count).fill("orphan_box_detected"));
+  return count;
+}
+
 // driveSpawn wrapped so ANY failure RELEASES the spawn claim — a GitHub redelivery
 // or a later reconciler tick can then re-drive the job (never a silent orphan).
 async function driveSpawnGuarded(
@@ -2701,6 +3043,19 @@ export default {
       if (reaped > 0) logEvent("error", "stale_boxes_reaped", { count: reaped });
     } catch (e) {
       logEvent("error", "stale_box_reap_failed", { error: (e as Error).message });
+    }
+    try {
+      // THIRD-b (immediately after the reap): the platform-truth MIRROR of it.
+      // `reapStaleBoxes`
+      // starts from OUR `sbox:` bookkeeping and is blind to a box that has no
+      // record — the exact 10.2 h leak. This one starts from the Cloudflare
+      // Containers API and LOGS any running instance the fabric cannot account
+      // for. OBSERVE-ONLY + default-off + inert without CF creds; it tears
+      // NOTHING down. Guarded so it can never throw out of the tick.
+      const orphans = await reconcileOrphanBoxes(env, now);
+      if (orphans > 0) logEvent("error", "orphan_boxes_reconciled", { count: orphans });
+    } catch (e) {
+      logEvent("error", "orphan_reconcile_failed", { error: (e as Error).message });
     }
     // FOURTH: detect jobs whose box died MID-JOB — the one loss nothing watched.
     // Its own `waitUntil` + its own `.catch()`, so it can neither delay nor take
