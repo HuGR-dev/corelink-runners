@@ -259,6 +259,79 @@ jobs:
             rm -f "$body_file"
           done
 
+      - name: Is the fan-out broken, or is the container the wall?
+        env:
+          PROBE_PAT: ${{ secrets.CORELINK_PROBE_PAT }}
+          PROBE_TENANT: ${{ inputs.tenant }}
+          ENDPOINT: ${{ inputs.endpoint }}
+        run: |
+          set -uo pipefail
+          # The size ladder above came back a straight line — ~85 ms per digest
+          # with no plateau at 16, so #1328's 16-way `buffered` fan-out is not
+          # materialising. Two very different causes are still alive:
+          #
+          #   A. OUR fan-out is broken (the futures do not actually overlap).
+          #      Then 16 SEPARATE single-digest requests, fired at once, land on
+          #      the same tenant container as 16 independent tasks and finish in
+          #      roughly ONE probe's time.
+          #   B. the container/R2 path is the wall — CPU-bound TLS on a
+          #      0.25-vCPU instance, or R2 throttling the burst and the SDK
+          #      backing off. Then the 16 parallel requests cost the SAME as one
+          #      16-digest request, because the ceiling is shared.
+          #
+          # Same tenant means the same Durable Object and therefore the same
+          # container instance, which is exactly the comparison we want.
+          if [ "${CRED}" = "probe" ]; then
+            tok="${PROBE_PAT}"; tenant="${PROBE_TENANT}"; base="${ENDPOINT%/}"
+          else
+            tok="${CLW_TOKEN}"; tenant="${CLW_TENANT}"; base="${CLW_ENDPOINT%/}"
+          fi
+          url="${base}/bazel/v2/${tenant}/findMissingBlobs"
+
+          one_digest_body() {
+            h="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+            printf '{"blobDigests":[{"hash":"%s","sizeBytes":1024}]}' "$h"
+          }
+
+          echo "=== 16 SEPARATE n=1 requests, fired concurrently"
+          tmp="$(mktemp -d)"
+          for i in $(seq 1 16); do one_digest_body > "${tmp}/b${i}"; done
+          start="$(date +%s.%N)"
+          for i in $(seq 1 16); do
+            curl -s -o /dev/null -X POST \
+              -H "Authorization: Bearer ${tok}" \
+              -H 'Content-Type: application/json' \
+              --data-binary "@${tmp}/b${i}" \
+              -w "  single http=%{http_code} total=%{time_total}\n" \
+              "$url" &
+          done
+          wait
+          end="$(date +%s.%N)"
+          # awk, not bc: bc is not in the runner image and a missing tool here
+          # would silently print nothing where the decisive number goes.
+          echo "  WALL for all 16 concurrent single-digest requests: $(awk -v a="$start" -v b="$end" 'BEGIN{printf "%.3f", b-a}')"
+          rm -rf "$tmp"
+
+          echo "=== for contrast: ONE n=16 request (same 16 digests' worth of work)"
+          body="$(mktemp)"
+          {
+            printf '{"blobDigests":['
+            for i in $(seq 1 16); do
+              [ "$i" -gt 1 ] && printf ','
+              printf '{"hash":"%s","sizeBytes":1024}' "$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+            done
+            printf ']}'
+          } > "$body"
+          for _ in 1 2 3; do
+            curl -s -o /dev/null -X POST \
+              -H "Authorization: Bearer ${tok}" \
+              -H 'Content-Type: application/json' \
+              --data-binary "@${body}" \
+              -w "  batched-16 http=%{http_code} total=%{time_total}\n" \
+              "$url" || true
+          done
+          rm -f "$body"
+
       - name: The comparison this exists to make
         run: |
           cat <<'TXT'
