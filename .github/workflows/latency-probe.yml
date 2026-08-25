@@ -190,6 +190,67 @@ jobs:
               "https://api.cloudflare.com/client/v4/user/tokens/verify" || true
           done
 
+      - name: findMissingBlobs at the batch sizes Bazel actually sends
+        env:
+          PROBE_PAT: ${{ secrets.CORELINK_PROBE_PAT }}
+          PROBE_TENANT: ${{ inputs.tenant }}
+          ENDPOINT: ${{ inputs.endpoint }}
+        run: |
+          set -uo pipefail
+          # The one endpoint whose cost grows with the SIZE of what the build tool
+          # asks for. Measured from this same fabric on 2026-08-25, BEFORE the
+          # batch seam landed: 2.10 s / 5.74 s / 13.48 s / 26.86 s at n=5/20/50/100
+          # — ~268 ms per digest, dead linear, because each digest paid its own R2
+          # HEAD and its own audit-row INSERT over the public D1 REST API.
+          # corelink-server#1328 collapses both: one JSON1 statement per 256 audit
+          # rows and 16-way concurrent existence probes. This step is what turns
+          # that argued speedup into a measured one. Re-run it after every repin
+          # that touches the CAS or audit path.
+          #
+          # Scope: read ⊇ find-missing (ADR-0071), so the read-only probe PAT is
+          # enough; no write grant is minted for this.
+          if [ "${CRED}" = "probe" ]; then
+            tok="${PROBE_PAT}"; tenant="${PROBE_TENANT}"; base="${ENDPOINT%/}"
+          else
+            tok="${CLW_TOKEN}"; tenant="${CLW_TENANT}"; base="${CLW_ENDPOINT%/}"
+          fi
+          # <instance> IS the tenant id on this route, and the container enforces
+          # caller_tenant == :instance — a mismatch measures the denial path, not
+          # the batch path.
+          url="${base}/bazel/v2/${tenant}/findMissingBlobs"
+
+          # Random 64-hex digests: absent from the CAS by construction, so every
+          # one of them is PROBED (present-or-absent both cost a HEAD) and the
+          # response is the full list back. That is the worst case and the same
+          # shape the pre-#1328 baseline above was taken with. Bodies are built
+          # BEFORE timing starts so digest generation never lands in a sample.
+          gen_body() {
+            n="$1"; out=""
+            i=0
+            while [ "$i" -lt "$n" ]; do
+              h="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+              [ -n "$out" ] && out="${out},"
+              out="${out}{\"hash\":\"${h}\",\"sizeBytes\":1024}"
+              i=$((i + 1))
+            done
+            printf '{"blobDigests":[%s]}' "$out"
+          }
+
+          for n in 5 20 50 100; do
+            body_file="$(mktemp)"
+            gen_body "$n" > "$body_file"
+            echo "=== n=${n} digests, 3 samples"
+            for _ in 1 2 3; do
+              curl -s -o /dev/null -X POST \
+                -H "Authorization: Bearer ${tok}" \
+                -H 'Content-Type: application/json' \
+                --data-binary "@${body_file}" \
+                -w "  n=${n} http=%{http_code} total=%{time_total}\n" \
+                "$url" || true
+            done
+            rm -f "$body_file"
+          done
+
       - name: The comparison this exists to make
         run: |
           cat <<'TXT'
