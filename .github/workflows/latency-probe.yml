@@ -12,9 +12,14 @@
 # tenant, same endpoint, different vantage point. That is the control the record
 # has always been missing.
 #
-# Credentials: NONE are added here. The autoscaler already injects a per-job CAS
-# PAT (`CLW_TOKEN`) plus `CLW_ENDPOINT` / `CLW_TENANT` on a successful warm-mint.
-# The token's value is never printed — presence only.
+# Credentials: measured 2026-08-25, run 32792007702 — the first dispatch of this
+# workflow landed on `cf-runner-1320110b`, colo=IAD (the vantage point we wanted)
+# and then failed on the credential. In prod the spawn worker is env-0, so it
+# injects a single-use `CLW_CRED_TICKET`, never a raw `CLW_TOKEN`, and the trusted
+# boot redeems that ticket before the job starts (a second redemption gets 410).
+# A job therefore cannot authenticate to CoreLink by design. The probe carries its
+# own SHORT-LIVED READ-ONLY PAT in `secrets.CORELINK_PROBE_PAT`; mint it, dispatch,
+# then revoke the PAT and delete the secret. No token value is ever printed.
 #
 # `workflow_dispatch` only. This measures prod state, which changes without a
 # commit, so it may later earn a schedule — but it starts on-demand.
@@ -28,6 +33,16 @@ on:
         required: false
         type: string
         default: '12'
+      tenant:
+        description: 'Tenant UUID the probe PAT is scoped to'
+        required: false
+        type: string
+        default: 'd863fafb-17c3-4ec3-92f6-b5a85c27d7bd'
+      endpoint:
+        description: 'CoreLink API base'
+        required: false
+        type: string
+        default: 'https://corelink-api.humangr.com'
 
 permissions:
   contents: read
@@ -46,31 +61,58 @@ jobs:
             | grep -E '^(colo|loc)=' || echo "trace unavailable (not fatal)"
 
       - name: Credential posture
+        env:
+          PROBE_PAT: ${{ secrets.CORELINK_PROBE_PAT }}
+          PROBE_TENANT: ${{ inputs.tenant }}
         run: |
-          # Presence only — CLW_TOKEN is a live per-job CAS PAT.
-          if [ -n "${CLW_ENDPOINT:-}" ] && [ -n "${CLW_TOKEN:-}" ] && [ -n "${CLW_TENANT:-}" ]; then
-            echo "mint=OK endpoint=${CLW_ENDPOINT} tenant=${CLW_TENANT} token=present"
+          # Presence only — every branch here handles a LIVE credential and never
+          # prints one.
+          #
+          # Why an explicit probe PAT and not the autoscaler's injection: in prod
+          # the spawn worker runs env-0, so it injects CLW_CRED_TICKET, never a raw
+          # CLW_TOKEN (`deploy/cloudflare/src/lib.ts` buildContainerEnv), and that
+          # ticket is SINGLE-USE — the trusted boot in `deploy/runner/entrypoint.sh`
+          # redeems it before the job starts, and a second redemption gets 410 by
+          # design (`handlers/cas_cred.rs`). A job therefore CANNOT authenticate to
+          # CoreLink on its own. That is the security posture working, not a bug, so
+          # this probe carries its own short-lived read-only PAT instead.
+          if [ -n "${PROBE_PAT:-}" ] && [ -n "${PROBE_TENANT:-}" ]; then
+            echo "cred=probe-pat tenant=${PROBE_TENANT} token=present"
+            echo "CRED=probe" >> "$GITHUB_ENV"
+          elif [ -n "${CLW_ENDPOINT:-}" ] && [ -n "${CLW_TOKEN:-}" ] && [ -n "${CLW_TENANT:-}" ]; then
+            # Legacy raw-PAT injection (non-prod ALLOW_LEGACY_PAT_ENV path only).
+            echo "cred=clw-token tenant=${CLW_TENANT} token=present"
+            echo "CRED=clw" >> "$GITHUB_ENV"
           else
-            echo "::error::CLW_* not injected — the warm-mint failed, so there is no"
-            echo "::error::credential to measure with. This is the D-9 mint path, not the probe."
+            echo "::error::No credential to measure with."
+            echo "::error::ticket-present=$([ -n "${CLW_CRED_TICKET:-}" ] && echo yes || echo no) (single-use, consumed at boot — unusable here)"
+            echo "::error::Set the CORELINK_PROBE_PAT secret to a short-lived read-only PAT for the tenant."
             exit 1
           fi
 
       - name: Time the authed hot path
         env:
           N: ${{ inputs.samples }}
+          PROBE_PAT: ${{ secrets.CORELINK_PROBE_PAT }}
+          PROBE_TENANT: ${{ inputs.tenant }}
+          ENDPOINT: ${{ inputs.endpoint }}
         run: |
           set -uo pipefail
-          url="${CLW_ENDPOINT%/}/v1/ac/${CLW_TENANT}?limit=1"
+          if [ "${CRED}" = "probe" ]; then
+            tok="${PROBE_PAT}"; tenant="${PROBE_TENANT}"; base="${ENDPOINT%/}"
+          else
+            tok="${CLW_TOKEN}"; tenant="${CLW_TENANT}"; base="${CLW_ENDPOINT%/}"
+          fi
+          url="${base}/v1/ac/${tenant}?limit=1"
           # Warm the connection and the caches first: a cold isolate or a cold
           # container skews the first samples badly and says nothing about steady
           # state. Discard these.
           for _ in 1 2 3; do
-            curl -s -o /dev/null -H "Authorization: Bearer ${CLW_TOKEN}" "$url" || true
+            curl -s -o /dev/null -H "Authorization: Bearer ${tok}" "$url" || true
           done
           echo "=== ${N:-12} samples, warm, connection reused"
           for _ in $(seq 1 "${N:-12}"); do
-            curl -s -o /dev/null -D - -H "Authorization: Bearer ${CLW_TOKEN}" "$url" 2>/dev/null \
+            curl -s -o /dev/null -D - -H "Authorization: Bearer ${tok}" "$url" 2>/dev/null \
               | tr -d '\r' | grep -i '^server-timing:' | cut -d' ' -f2- || true
           done
 
