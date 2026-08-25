@@ -52,11 +52,14 @@
 //! `capture_incomplete` flag, and the echoed `CheckResult` — the forge
 //! reads result and metrics in the same atomic step (§13.1 delivery rule).
 //!
-//! The abnormal path (expiry hard-kill / crash) is NOT a route: the
-//! lifecycle sweeps (`corelink_fabric::lifecycle`) are fabric-side, and the
-//! composition root drives [`close_abnormal`] for each swept lease that has
-//! a hook — outcome flag unconditionally `true` (the mechanism's rule: an
-//! abnormal end can never claim confirmed capture).
+//! The abnormal path (expiry hard-kill / crash) is NOT a route: the live
+//! sweeps are the server's own `crate::reaper` tasks (`reap_once` deadline
+//! expiry + the opt-in `surface_crashes` crash probe — NOT
+//! `corelink_fabric::lifecycle`, whose `LeaseLifecycle` has no callers
+//! outside its own tests), and each sweep drives the §13 abnormal close
+//! (`reaper::flush_partial_envelope` → `JobClose::close_abnormal`) for every
+//! swept lease that had a hook — outcome flag unconditionally `true` (the
+//! mechanism's rule: an abnormal end can never claim confirmed capture).
 //!
 //! ## §13.5 close-reason (WP-S13.5)
 //!

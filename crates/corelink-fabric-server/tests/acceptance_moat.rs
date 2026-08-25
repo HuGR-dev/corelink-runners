@@ -417,13 +417,12 @@ async fn a6b_acquire_injects_per_job_pat_into_box_env_not_tenant_pat() {
 /// A7: acquire mints a per-job PAT; teardown revokes it.  Mint failure fails
 /// closed (no config-less box).
 ///
-/// Tests the `MockMint` + `CasPatMint` interface directly (not through the
-/// HTTP acquire path, since the mint client is not yet wired into `AppState`).
-///
-/// FAILS red on the "mint failure fails closed" assertion: when WP-3 is wired
-/// into the acquire path, a failing mint must roll back the Pending slot.
-///
-/// STUB FLAGGED: `AppState` missing `cas_pat_mint: Option<Arc<dyn CasPatMint>>`.
+/// Tests the `MockMint` + `CasPatMint` interface directly (the trait contract
+/// in isolation, not through the HTTP acquire path). The mint client IS wired
+/// into `AppState` now: the `cas_pat_mint: Option<Arc<dyn CasPatMint>>` field
+/// exists (`src/app.rs`) and the production composition root arms it from env
+/// (`cas_pat_mint_from_env` → `with_cas_pat_mint`, `src/server.rs`); the
+/// acquire path consults it and fails closed on a mint error when armed.
 #[tokio::test]
 async fn a7_mint_succeeds_derives_pat_for_tenant_and_job() {
     let mint = MockMint::new();

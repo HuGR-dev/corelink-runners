@@ -28,11 +28,21 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const destroyed: string[] = [];
+// Mutable container behaviour, so a cell can drive the two states cells 1-7
+// never reach: a `destroy()` that THROWS, and what the box says afterwards.
+// Same shape as `destroyed` above (a module-scope binding the mock factory
+// closes over), so hoisting behaves identically.
+const ctl = { destroyThrows: false, alive: false as boolean | "throw" };
 vi.mock("@cloudflare/containers", () => ({
   Container: class {},
   getContainer: vi.fn((_ns: unknown, handle: string) => ({
     destroy: vi.fn(async () => {
+      if (ctl.destroyThrows) throw new Error("DO RPC transient");
       destroyed.push(handle);
+    }),
+    isAlive: vi.fn(async () => {
+      if (ctl.alive === "throw") throw new Error("unreachable DO");
+      return ctl.alive;
     }),
   })),
 }));
@@ -66,6 +76,8 @@ const OLD = { h: "rh-old", rid: 7, repo: "o/r", inst: "42", t: NOW - TWO_H_MS - 
 
 beforeEach(() => {
   destroyed.length = 0;
+  ctl.destroyThrows = false;
+  ctl.alive = false;
 });
 
 describe("reapStaleBoxes", () => {
@@ -118,6 +130,39 @@ describe("reapStaleBoxes", () => {
     const n = await reapStaleBoxes(envWith(kv), NOW, async () => null);
     expect(n).toBe(0);
     expect(destroyed).toEqual([]);
+  });
+
+  // ── Cells 8-10: a THROW from destroy() is not proof the box is down. ────────
+  // This sweep runs only past the `rhandle:` TTL, so `sbox:` is the LAST
+  // cron-visible handle for the box. Deleting it on a transient DO error strands
+  // a RUNNING container forever — the exact 10.2 h shape this file was written
+  // over, reintroduced by the code meant to fix it. Before 2026-08-25 the catch
+  // deleted the record unconditionally; cell 8 goes RED against that version.
+  it("cell 8 — destroy() THREW and the box is STILL ALIVE ⇒ keep the record and retry", async () => {
+    ctl.destroyThrows = true;
+    ctl.alive = true;
+    const kv = kvWith({ "sbox:runner-1": OLD });
+    const n = await reapStaleBoxes(envWith(kv), NOW, async () => ({ httpStatus: 200, runner: { status: "online", busy: false } }));
+    expect(n).toBe(0);
+    expect(destroyed).toEqual([]);
+    expect(kv.store.has("sbox:runner-1")).toBe(true);
+  });
+
+  it("cell 9 — destroy() threw but the box is CONFIRMED DOWN ⇒ the record is cleared", async () => {
+    ctl.destroyThrows = true;
+    ctl.alive = false;
+    const kv = kvWith({ "sbox:runner-1": OLD });
+    const n = await reapStaleBoxes(envWith(kv), NOW, async () => ({ httpStatus: 200, runner: { status: "online", busy: false } }));
+    expect(n).toBe(0);
+    expect(kv.store.has("sbox:runner-1")).toBe(false);
+  });
+
+  it("cell 10 — an UNREACHABLE DO (isAlive itself throws) counts as down, not as alive", async () => {
+    ctl.destroyThrows = true;
+    ctl.alive = "throw";
+    const kv = kvWith({ "sbox:runner-1": OLD });
+    await reapStaleBoxes(envWith(kv), NOW, async () => ({ httpStatus: 200, runner: { status: "online", busy: false } }));
+    expect(kv.store.has("sbox:runner-1")).toBe(false);
   });
 
   it("cell 7 — no KV binding ⇒ no-op, never throws", async () => {

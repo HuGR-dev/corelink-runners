@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-08-25 — a reaper that deleted a live box's last handle, and two handlers pinning the async executor
+
+Round 1 of an external audit of this repo. Findings were produced by four
+independent read-only passes; every claim below was re-verified against the
+code before anything was changed, and the two behavioural fixes were each held
+to a regression that goes RED against the old code.
+
+**`reapStaleBoxes` deleted the `sbox:` record when `destroy()` threw.** A throw
+is not proof the box is down — the file itself documents DO RPC instability —
+and this sweep only runs past the `rhandle:` TTL, so `sbox:` is the LAST
+cron-visible handle. Deleting it on a transient error stranded a RUNNING
+container forever: exactly the 2026-08-23 shape (three boxes, 10.2 h) this
+sweep exists to backstop, reintroduced by the code meant to prevent it. It also
+contradicted the function's own stated contract twelve lines above — "a throw ⇒
+left alone and retried next tick". The catch now probes `isAlive()` and reaps
+only on a definite down, the same shape `sweepGhostContainers` already used.
+Pinned by cells 8-10 of `stale-box-reaper.test.ts`; **cell 8 fails against the
+previous code** (`expected false to be true` — the record was gone), and 9/10
+pin the opposite direction so an overcorrection that never deletes also reds.
+
+**`POST /v1/leases/{id}/exec` and `/v1/queue/trigger` ran the synchronous
+`run_check` inline on the async executor.** The exec transport is sync `ureq`
+and its timeout is the container expiry — default ONE HOUR — so every in-flight
+check pinned a tokio async worker for the whole run, queueing every other route
+on the instance behind it, `/v1/health` included; a missed health probe is what
+makes the fabricd watchdog destroy the container mid-job. The convention was
+already established in this crate: `agent_exec.rs` dispatches the same
+synchronous seam with `spawn_blocking`. Both handlers now do the same while
+still awaiting the result — unlike agent-exec's ack→poll shape, these return to
+their caller, so nothing became fire-and-forget. A blocking-task panic maps to
+the crate's fail-closed 503 rather than fabricating a result.
+
+**Three truth corrections, each verified against the code it describes.**
+`deploy/cloudflare/README.md` announced "SKELETON — NOT deployed" while its
+neighbour `wrangler.jsonc` declared the same Worker LIVE in prod; only the
+conformance-vector gate was ticked, because it is the only one provable from
+the tree (`conformance/cloudflare-spawn.json`, pinned at `fa06084e…`, enforced
+by `cloudflare_conformance.rs`). `acceptance_moat.rs` still called the CAS-PAT
+mint unwired, three layers away from the composition root that arms it.
+`close.rs` credited lifecycle sweeps to `corelink_fabric::lifecycle`, whose
+methods have no caller outside their own tests — `crate::reaper` is what runs.
+
+**`clw-ticket-propagation-check.yml` could not fail.** 39 lines, no `exit 1`
+anywhere: the "MISSING TOKEN — real propagation gap" branch printed its verdict
+and finished green. It is `workflow_dispatch`-only, so a human was reading the
+output — the reason this is a fix and not an incident. Both the failing and the
+unclear branch now `::error` + `exit 1`, matching `o7-metadata-probe.yml`.
+
+Also collected while in the file: independent KV reads in
+`warnIfNearVcpuCeiling` and two independent Durable-Object storage pairs
+(`CredStashDO.wipe`, `RunnerContainer.noteActivity`) now issue concurrently.
+`CredStashDO.stash` was deliberately left alone — its `put` and `setAlarm`
+share a value and its read-before-write is order-sensitive.
+
+Gates: `tsc --noEmit` clean, 485 vitest tests pass (482 + the 3 new cells),
+`cargo check`/`cargo test -p corelink-fabric-server` 433 pass, `cargo fmt` and
+`cargo clippy -D warnings` clean.
+
 ### 2026-08-25 — harden the orphan reconciler's two inputs before it is ever armed (B-044 pre-work)
 
 Two FAIL-UNSAFE bugs in the data sources `reconcileOrphanBoxes` feeds a future
