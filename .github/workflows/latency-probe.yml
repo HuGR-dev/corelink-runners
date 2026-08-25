@@ -116,6 +116,47 @@ jobs:
               | tr -d '\r' | grep -i '^server-timing:' | cut -d' ' -f2- || true
           done
 
+      - name: Time the read path a build tool actually hits
+        env:
+          PROBE_PAT: ${{ secrets.CORELINK_PROBE_PAT }}
+          PROBE_TENANT: ${{ inputs.tenant }}
+          ENDPOINT: ${{ inputs.endpoint }}
+        run: |
+          set -uo pipefail
+          # The list endpoint above is the one the latency record was built on,
+          # but it is not what a build tool spends its day doing: a cache client
+          # LOOKS UP an action result. That is a different container path — only
+          # `list` was made concurrent (#1316); `lookup` still runs the audit
+          # write, the BYOK key resolution and the R2 GET strictly serially,
+          # because the byok step sits between the other two. Measure it, so the
+          # next optimization is aimed at what customers pay for rather than at
+          # the endpoint that happened to be easy to probe.
+          if [ "${CRED}" = "probe" ]; then
+            tok="${PROBE_PAT}"; tenant="${PROBE_TENANT}"; base="${ENDPOINT%/}"
+          else
+            tok="${CLW_TOKEN}"; tenant="${CLW_TENANT}"; base="${CLW_ENDPOINT%/}"
+          fi
+          # Take a REAL ref from this tenant's own action cache. No fixture: if
+          # the tenant has no refs, say so and stop, rather than inventing a
+          # digest that would only ever measure the 404 path and report it as if
+          # it were a cache hit. `grep -o` + `sed` rather than `| head` — a
+          # closed pipe under `pipefail` aborts the step (B-040).
+          refs="$(curl -s -H "Authorization: Bearer ${tok}" "${base}/v1/ac/${tenant}?limit=5")"
+          key="$(printf '%s' "$refs" | grep -o '"ref_key":"[^"]*"' | sed -n '1s/.*:"//;1s/"$//p')"
+          if [ -z "${key}" ]; then
+            echo "no refs on this tenant — AC lookup NOT measured (nothing to look up)"
+            exit 0
+          fi
+          echo "=== AC lookup: GET /v1/ac/{tenant}/{ref} — serial audit then byok then R2 GET"
+          url="${base}/v1/ac/${tenant}/${key}"
+          for _ in 1 2 3; do
+            curl -s -o /dev/null -H "Authorization: Bearer ${tok}" "$url" || true
+          done
+          for _ in 1 2 3 4 5 6; do
+            curl -s -o /dev/null -D - -H "Authorization: Bearer ${tok}" "$url" 2>/dev/null \
+              | tr -d '\r' | grep -i '^server-timing:' | cut -d' ' -f2- || true
+          done
+
       - name: The comparison this exists to make
         run: |
           cat <<'TXT'
