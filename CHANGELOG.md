@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-08-25 — harden the orphan reconciler's two inputs before it is ever armed (B-044 pre-work)
+
+Two FAIL-UNSAFE bugs in the data sources `reconcileOrphanBoxes` feeds a future
+teardown decision from — each turns an accounted, LIVE box into a false orphan.
+Fixed now, still inert (both flags stay OFF), as the groundwork B-044 arming
+requires:
+
+- **App scoping.** `listRunningInstances` enumerated EVERY container application in
+  the account — `corelink-prod-*` (five customer-serving servers), `githugr-*`,
+  `corelink-fabricd-*`, and this worker's own checkhost app — none of which write
+  `sbox:` records, so every long-running instance of them satisfied the "no sbox +
+  age>4h" orphan predicate and flooded `orphan_box_detected`. It now scopes to the
+  runner app by its stable app-id (`a03d11a2-…`); a missing runner app logs
+  `orphan_scan_runner_app_missing` and returns empty (fail-quiet on detection,
+  never a fabricated orphan). This is almost certainly why the sweep was never
+  trusted enough to arm. NOTE: this scopes OUT the checkhost app — checkhost
+  orphans are now unmonitored by this detector and need their own (they carry no
+  `sbox:` equivalent).
+- **KV pagination.** `listSpawnedBoxHandles` did a single `kv.list` (caps at 1000
+  keys). With a 24 h `sbox:` TTL and one key per spawn, a CI storm (>1000 spawns/
+  24 h) truncated the known-handle set → accounted live boxes read as orphans. It
+  now follows the list cursor to completion and THROWS if it cannot (fail-closed →
+  the sweep returns 0 that tick), the same discipline `detectStrandedInFlightJobs`
+  already applies.
+
+Teardown itself is NOT armed and NOT built here: a live-instance-delete probe
+found no CF API token carries instance-delete scope (403), and the DO-handle
+teardown path is only proven for boxes we still track — an orphan by definition we
+do not. Arming waits on an observe window proving the join at scale. Both helpers
+now carry direct unit tests (`orphan-reconcile-inputs.test.ts`).
+
 ### 2026-08-25 — the platform-truth leak detector, now on the 1-minute tick (B-002)
 
 The 2026-08-24 orphan-box check (below) lives OUTSIDE the Worker — a script + a

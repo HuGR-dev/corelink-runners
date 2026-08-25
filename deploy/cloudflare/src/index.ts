@@ -2691,6 +2691,22 @@ const ORPHAN_MIN_AGE_MS = 2 * STALE_BOX_AGE_MS;
 // here (raise it if tombstones ever outgrow it — a truncated page fails closed).
 const ORPHAN_SCAN_PER_PAGE = 2000;
 
+// The ONE container application whose instances this sweep may consider. The CF
+// account also hosts `corelink-prod-*` (five customer-serving CoreLink servers),
+// `githugr-*` (a separate product), the `corelink-fabricd-*` app, and this very
+// worker's OWN `corelink-spawn-worker-checkhostcontainer` app — NONE of which
+// write `sbox:` records. Without this filter every long-running instance of every
+// one of them satisfies the "no sbox record + age>4h" orphan predicate and floods
+// `orphan_box_detected` (and, once teardown is armed, would be a destroy target).
+//
+// Match the STABLE app-id; the derived name is asserted only as a secondary
+// signal. This is deliberately NOT a prefix match: `corelink-spawn-worker-*` also
+// matches the checkhost app (a DIFFERENT DO namespace this sweep must not reap via
+// the runner binding), and a bare `corelink` prefix would match the prod servers.
+// The app-id is the guarantee that keeps the sweep off prod and githugr.
+const RUNNER_APP_ID = "a03d11a2-7e03-48a4-96bb-4d2c43892cd4";
+const RUNNER_APP_NAME = "corelink-spawn-worker-runnercontainer";
+
 // One RUNNING platform instance, as enumerated from the CF Containers API. `name`
 // is the join key (the DO-handle UUID). `started_at` is the platform's own clock
 // — age is computed from IT, never from any KV record.
@@ -2771,7 +2787,7 @@ async function cfContainersGet(
 //
 // Deduped by instance id. Throws on any API error / truncation ⇒ the caller
 // returns 0 and touches nothing (fail-closed on ignorance).
-async function listRunningInstances(env: Env): Promise<RunningInstance[]> {
+export async function listRunningInstances(env: Env): Promise<RunningInstance[]> {
   const accountId = env.CLOUDFLARE_ACCOUNT_ID;
   const token = containersApiToken(env);
   if (!accountId || !token) return []; // gate already checked; belt-and-braces
@@ -2784,9 +2800,35 @@ async function listRunningInstances(env: Env): Promise<RunningInstance[]> {
   const apps = Array.isArray(appsBody.result)
     ? (appsBody.result as Array<{ id?: string; name?: string }>)
     : [];
+  // SCOPE TO THE RUNNER APP ONLY (see RUNNER_APP_ID). Every other app in the
+  // account lacks `sbox:` records and would otherwise flood false orphans.
+  const runnerApps = apps.filter((a) => a.id === RUNNER_APP_ID);
+  if (runnerApps.length === 0) {
+    // The runner app was not found (a rename/redeploy changed its id, or the token
+    // cannot see it). Fail-QUIET on detection — never fabricate orphans from an
+    // empty match — but log LOUD so this silent-death is visible, not mistaken for
+    // a genuinely clean fleet.
+    logEvent("error", "orphan_scan_runner_app_missing", {
+      expectedId: RUNNER_APP_ID,
+      expectedName: RUNNER_APP_NAME,
+      appsSeen: apps.map((a) => a.name ?? a.id ?? "?"),
+    });
+    return [];
+  }
+  // Secondary assertion: the pinned id should carry the name we expect. A mismatch
+  // does NOT change behavior (the id is authoritative) but is surfaced.
+  for (const a of runnerApps) {
+    if (a.name && a.name !== RUNNER_APP_NAME) {
+      logEvent("info", "orphan_scan_runner_app_name_drift", {
+        id: a.id,
+        sawName: a.name,
+        expectedName: RUNNER_APP_NAME,
+      });
+    }
+  }
   const out: RunningInstance[] = [];
   const seen = new Set<string>();
-  for (const app of apps) {
+  for (const app of runnerApps) {
     if (!app.id) continue;
     const appName = app.name ?? app.id;
     const body = await cfContainersGet(
@@ -2835,19 +2877,39 @@ async function listRunningInstances(env: Env): Promise<RunningInstance[]> {
 // box's own max lifetime, so a >4 h orphan that HAS an sbox record is correctly
 // excluded). Throws on a KV list/read failure so the sweep fails closed: we must
 // never assert "no sbox record" from an unread KV (that would flag live boxes).
-async function listSpawnedBoxHandles(env: Env): Promise<Set<string>> {
+//
+// PAGINATED, fail-closed. A single `kv.list` caps at 1000 keys. `sbox:` has a 24 h
+// TTL and one key is written per spawn, so a CI storm (>1000 spawns/24 h — well
+// within reach now that corelink-server's Rust gate runs on `runs-on: corelink`)
+// would truncate this set. A truncated known-handle set turns accounted, LIVE
+// boxes into false orphans — the fail-UNSAFE direction, the exact reason
+// `detectStrandedInFlightJobs` follows its own cursor. So we walk the cursor to
+// completion; if the walk cannot complete we THROW, and the caller returns 0 and
+// touches nothing this tick. (`reapStaleBoxes` shares the single-call form but is
+// safe there — its GitHub-idle guard means truncation only MISSES reaps.)
+export async function listSpawnedBoxHandles(env: Env): Promise<Set<string>> {
   const kv = env.RUNNER_JOB_PATS;
   const known = new Set<string>();
   if (!kv) return known;
-  const listed = await kv.list({ prefix: SPAWNED_BOX_PREFIX });
-  for (const { name } of listed.keys) {
-    const raw = await kv.get(name);
-    if (!raw) continue;
-    try {
-      const rec = JSON.parse(raw) as { h?: unknown };
-      if (typeof rec.h === "string") known.add(rec.h);
-    } catch {
-      /* an unparseable record contributes no handle — next tick retries */
+  let cursor: string | undefined;
+  for (;;) {
+    const listed = await kv.list({ prefix: SPAWNED_BOX_PREFIX, cursor });
+    for (const { name } of listed.keys) {
+      const raw = await kv.get(name);
+      if (!raw) continue;
+      try {
+        const rec = JSON.parse(raw) as { h?: unknown };
+        if (typeof rec.h === "string") known.add(rec.h);
+      } catch {
+        /* an unparseable record contributes no handle — next tick retries */
+      }
+    }
+    if (listed.list_complete) break;
+    cursor = listed.cursor;
+    if (!cursor) {
+      // Not complete yet no cursor to continue — completeness is unprovable. Fail
+      // closed rather than return a truncated (fail-unsafe) handle set.
+      throw new Error("sbox: KV list incomplete but returned no cursor");
     }
   }
   return known;
