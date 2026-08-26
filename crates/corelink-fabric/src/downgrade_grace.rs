@@ -1,3 +1,19 @@
+//! **STATUS — NOT WIRED INTO ANY LIVE PATH.** A pure decision module with no
+//! caller: nothing outside this file's `#[cfg(test)]` block calls
+//! [`evaluate_downgrade_admit`] or [`is_downgrade`]. Grace-to-expiry is NOT in
+//! force.
+//!
+//! What happens instead: a downgraded tenant's next acquire still gets the
+//! generic over-cap reject — the live cap path (`CapGate.check` /
+//! `ledger.try_admit` in `corelink-fabric-server/src/handlers/leases.rs`)
+//! answers `held >= new_cap` with the ordinary over-cap outcome, carrying none
+//! of the distinct "retry as leases expire" framing this module provides.
+//!
+//! To take effect it would have to be wired into that same cap decision: call
+//! [`evaluate_downgrade_admit`] where the acquire's over-cap outcome is
+//! produced, using [`is_downgrade`] against the pre-downgrade cap recorded by
+//! [`crate::plans::PlanRegistry::set_plan`] to choose the grace framing.
+//!
 //! Grace-to-expiry tier-downgrade admission policy (WP-DOWNGRADE-GRACE).
 //!
 //! A tier downgrade (e.g. Pro→Starter) via [`crate::plans::PlanRegistry::set_plan`]

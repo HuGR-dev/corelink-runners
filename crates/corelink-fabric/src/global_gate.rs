@@ -1,3 +1,19 @@
+//! **STATUS — NOT WIRED INTO ANY LIVE PATH.** Exported from the crate root,
+//! but nothing outside this file's `#[cfg(test)]` block constructs a
+//! [`GlobalGate`] or calls [`GlobalGate::try_admit_global`]. The fabric-wide
+//! ceiling described below is NOT in force.
+//!
+//! What runs instead: admission is bounded only by the per-tenant
+//! [`crate::caps::CapGate`] (server `handlers/leases.rs` → `ledger.try_admit`)
+//! plus the tenant-blind `tower::limit::GlobalConcurrencyLimitLayer`
+//! (`corelink-fabric-server/app.rs`). Single-tenant global starvation remains
+//! OPEN: one tenant's storm can park every global permit and 503 everyone.
+//!
+//! To take effect it would have to be wired at the server composition root
+//! (`corelink-fabric-server/src/app.rs`, beside `cap_gate: CapGate`): check
+//! [`GlobalGate::try_admit_global`] alongside the per-tenant cap in the
+//! acquire path and hold the [`GlobalAdmitGuard`] for the in-flight duration.
+//!
 //! Tenant-aware GLOBAL admission ceiling (WP-GLOBAL-CAP).
 //!
 //! The per-tenant [`crate::caps::CapGate`] bounds ONE tenant's slots; it knows

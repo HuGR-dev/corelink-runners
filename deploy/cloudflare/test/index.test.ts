@@ -895,7 +895,7 @@ describe("claimSpawn (spawn idempotency)", () => {
   it("first claim for a jobId WINS (true) and records the claim", async () => {
     const kv = fakeKv();
     expect(await claimSpawn(kv, "job-1")).toBe(true);
-    expect(kv.store.get("spawn:job-1")).toBe("1");
+    expect(Number(kv.store.get("spawn:job-1"))).toBeGreaterThan(0);
   });
 
   it("a redelivery for the SAME jobId LOSES the claim (false) — no double spawn", async () => {
@@ -914,7 +914,7 @@ describe("claimSpawn (spawn idempotency)", () => {
     const kv = fakeKv({ "job-1": "pat-id-xyz" }); // the pat map under the bare key
     expect(await claimSpawn(kv, "job-1")).toBe(true); // still wins — distinct namespace
     expect(kv.store.get("job-1")).toBe("pat-id-xyz"); // pat entry untouched
-    expect(kv.store.get("spawn:job-1")).toBe("1");
+    expect(Number(kv.store.get("spawn:job-1"))).toBeGreaterThan(0);
   });
 
   it("FAIL-OPEN with no KV bound: claims succeed (never block a real job)", async () => {
@@ -924,7 +924,9 @@ describe("claimSpawn (spawn idempotency)", () => {
   it("sets a TTL on the claim (self-cleaning backstop)", async () => {
     const kv = fakeKv();
     await claimSpawn(kv, "job-1");
-    expect(kv.put).toHaveBeenCalledWith("spawn:job-1", "1", { expirationTtl: expect.any(Number) });
+    expect(kv.put).toHaveBeenCalledWith("spawn:job-1", expect.stringMatching(/^\d{13}$/), {
+      expirationTtl: expect.any(Number),
+    });
   });
 });
 
@@ -970,7 +972,7 @@ describe("claimCompletion (completed-leg counter dedup)", () => {
     expect(kv.store.get("done:job-1")).toBe("1");
     // The other namespaces are untouched.
     expect(kv.store.get("job-1")).toBe("pat-id");
-    expect(kv.store.get("spawn:job-1")).toBe("1");
+    expect(Number(kv.store.get("spawn:job-1"))).toBeGreaterThan(0);
   });
 
   it("FAIL-OPEN with no KV bound: completions count (never drop a real completion)", async () => {

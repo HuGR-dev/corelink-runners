@@ -54,6 +54,7 @@ import {
   writeUsageLedger,
   claimSpawn,
   releaseSpawnClaim,
+  spawnClaimAgeMs,
   claimCompletion,
   decideSlotAcquire,
   releaseSlotByJob,
@@ -1877,16 +1878,34 @@ async function clearPlacementRecord(env: Env, jobId: string): Promise<void> {
 // Returns the raw job shape for `jobPlacementVerdict` to judge; `null` on ANY
 // failure, which that function maps to "unknown" ⇒ leave the record alone. Never
 // throws: an unreachable GitHub must not stop the rest of the reconciler tick.
+//
+// AUTH (2026-08-24): same discipline as `fetchJobObservation` below — when the
+// caller holds an installation id we mint a PER-INSTALLATION token via
+// `mintJitAuthToken`. The static GITHUB_MINT_TOKEN only has rights on HuGR-Labs
+// repos, so authenticating with it for a CUSTOMER repo 403/404s every call ⇒
+// verdict "unknown" ⇒ the record sits out ORPHAN_TTL_S with the job still queued:
+// the warm dead-letter recovery was dead exactly for the customers it was built
+// for. The first-party token stays as the FALLBACK for records with no
+// installation id (cold spawns), which is the path that works today and needs no
+// App credential.
 async function fetchJobPlacement(
   env: Env,
   repo: string,
   jobId: string,
+  installationId: string,
 ): Promise<{ status?: string; runner_id?: number | null } | null> {
-  if (!env.GITHUB_MINT_TOKEN) return null;
+  if (!installationId && !env.GITHUB_MINT_TOKEN) return null;
+  let authToken = env.GITHUB_MINT_TOKEN ?? "";
+  if (installationId) {
+    // A mint failure here collapses to `null` by the catch below — "unknown",
+    // never an error that stops the tick (same contract as fetchJobObservation).
+    authToken = (await mintJitAuthToken(env, installationId)) || authToken;
+  }
+  if (!authToken) return null;
   try {
     const r = await fetch(`https://api.github.com/repos/${repo}/actions/jobs/${jobId}`, {
       headers: {
-        authorization: `Bearer ${env.GITHUB_MINT_TOKEN}`,
+        authorization: `Bearer ${authToken}`,
         accept: "application/vnd.github+json",
         "user-agent": "corelink-spawn-worker",
       },
@@ -3557,10 +3576,47 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
     // non-zero exit; we `logEvent` it so it surfaces in `wrangler tail`. Ticket-less
     // (the box holds no bearer), capped, and it carries NO secret (run.sh never
     // echoes the jitconfig). Keyed by leaseId==jobId for correlation.
+    //
+    // ⚠️ NOT anonymous (2026-08-24): this route used to answer BEFORE the bearer
+    // gate below, so anyone could write 3000 attacker-chosen characters into the
+    // logs as an error-level `runner_diag` under ANY jobId. A credential is not an
+    // option here — a COLD box holds no CLW_CRED_TICKET at all, and requiring one
+    // would kill diagnostics for precisely the boxes that fail most. The gate
+    // instead requires the named job to be ACTUALLY CLAIMED (a live spawn-claim in
+    // KV): an unknown jobId gets a small uniform response that reveals nothing
+    // about which ids exist.
+    //
+    // ACCEPTED COST, instrumented deliberately: a job running longer than
+    // SPAWN_CLAIM_TTL_S (7200 s) has no claim left, so its diag POST is refused.
+    // That refusal bumps `runner_diag_no_claim` + logs at info level so we can SEE
+    // if it ever bites instead of discovering it as silence.
     {
       const diag = pathname.match(/^\/v1\/leases\/([^/]+)\/runner-diag$/);
       if (request.method === "POST" && diag) {
         const jobId = decodeURIComponent(diag[1]);
+        let claimed = false;
+        try {
+          claimed = !!(await env.RUNNER_JOB_PATS?.get(`spawn:${jobId}`));
+        } catch {
+          /* KV hiccup ⇒ treated as unclaimed below; never 5xx a diagnostic sink */
+        }
+        // A claim proves the job EXISTS; it does not prove the caller is its box.
+        // Job ids are public on a public repo, so a targeted flood against a real
+        // in-flight job stays possible — bound it with the limiter this Worker
+        // already declares (wrangler.jsonc: 30 req / 60 s), keyed per job so one
+        // abused id cannot drown the diagnostics of every other box.
+        if (env.WEBHOOK_LIMITER) {
+          const { success } = await env.WEBHOOK_LIMITER.limit({ key: `diag:${jobId}` });
+          if (!success) {
+            ctx?.waitUntil?.(bumpMetrics(env, "runner_diag_rate_limited"));
+            return json({ ok: true }, 200);
+          }
+        }
+        if (!claimed) {
+          ctx?.waitUntil?.(bumpMetrics(env, "runner_diag_no_claim"));
+          logEvent("info", "runner_diag_refused_unknown_job", { jobId });
+          return json({ ok: true }, 200);
+        }
         const raw = await request.text().catch(() => "");
         logEvent("error", "runner_diag", { jobId, output: raw.slice(0, 3000) });
         return json({ ok: true }, 200);
@@ -3857,6 +3913,29 @@ async function redriveOrphanedJobs(
       // first-party allowlist, so authorizing the mint on re-drive is safe. An
       // unmapped repo ⇒ installationId "" ⇒ COLD (unchanged fallback).
       const reInstallationId = installationIdForRepo(env.REPO_INSTALLATION_MAP, repo);
+      // ── Age-gate the force-release (2026-08-24) ──────────────────────────────
+      // "queued ≥ 90 s with no runner" is ALSO what a healthy-but-slow spawn looks
+      // like: the placement machinery itself waits PLACEMENT_CONFIRM_GRACE_MS
+      // (180 s) before even asking GitHub, calling that the slowest healthy boot.
+      // Force-releasing a claim that young yanks it from a spawn still in flight —
+      // second mint, second JIT registration, second container. So the release now
+      // keys on the CLAIM's age, never on the job's age: only a claim old enough
+      // that no healthy boot could still be driving it may be cleared. A younger
+      // claim means this job is skipped THIS tick and left exactly as found.
+      //
+      // ⚠️ LEGACY VALUES: a claim written before claims were timestamped reads "1"
+      // and carries NO timestamp. That case is deliberately treated as OLD (allow
+      // the force-release), not as young: SPAWN_CLAIM_TTL_S is 7200 s, so treating
+      // an un-aged claim as young would block orphan RECOVERY for up to two hours
+      // during the rollout window — and stranding a real orphan is worse than the
+      // duplicate-spawn race this gate closes. The window is bounded and
+      // self-clearing as pre-change claims TTL out.
+      const rawClaim = await env.RUNNER_JOB_PATS?.get(`spawn:${jobId}`);
+      const claimAgeMs = spawnClaimAgeMs(rawClaim, now);
+      if (claimAgeMs !== null && claimAgeMs < PLACEMENT_CONFIRM_GRACE_MS) {
+        // A live spawn is probably still in flight — leave its claim alone.
+        continue;
+      }
       await releaseSpawnClaim(env.RUNNER_JOB_PATS, jobId);
       if (await claimSpawn(env.RUNNER_JOB_PATS, jobId)) {
         logEvent("info", "reconciler_redrive", {
@@ -3892,11 +3971,13 @@ export async function retryOrphanedSpawns(
     opts: { jobId: string; repo: string; installationId: string; labels: string[] },
   ) => Promise<void> = driveSpawn,
   // Injected for the same reason as `drive` — so the placement-confirmation
-  // branches are testable without reaching the real GitHub API.
+  // branches are testable without reaching the real GitHub API. Takes the
+  // installation id from the record (same seam as `fetchJobObservation`).
   verify: (
     env: Env,
     repo: string,
     jobId: string,
+    installationId: string,
   ) => Promise<{ status?: string; runner_id?: number | null } | null> = fetchJobPlacement,
 ): Promise<void> {
   const kv = env.RUNNER_JOB_PATS;
@@ -3935,7 +4016,11 @@ export async function retryOrphanedSpawns(
       const placement = placementConfirmStep(rec, now, PLACEMENT_CONFIRM_GRACE_MS);
       if (placement.action === "within_grace") continue; // booting — leave it alone
       if (placement.action === "verify") {
-        const verdict = jobPlacementVerdict(await verify(env, rec.repo, jobId));
+        // The record carries the installation id the spawn was WARM-minted with —
+        // pass it so the verification authenticates per-installation (FIX 1).
+        const verdict = jobPlacementVerdict(
+          await verify(env, rec.repo, jobId, rec.installationId),
+        );
         if (verdict === "placed") {
           // The box did come online (or the job is already over) — drop the record.
           await kv.delete(name).catch(() => {

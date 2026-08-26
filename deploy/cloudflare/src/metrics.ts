@@ -24,6 +24,9 @@ import { DurableObject } from "cloudflare:workers";
 export const COUNTER_NAMES = [
   // ── Admission (the /webhook autoscaler) ──────────────────────────────────
   "webhook_spawn_claimed", // queued+labeled job claimed for a mint+spawn
+  // ── runner-diag sink (the box→Worker diagnostic channel) ─────────────────
+  "runner_diag_no_claim", // diag POST for a jobId with no live spawn-claim
+  "runner_diag_rate_limited", // diag POST refused by the per-job rate limiter
   "webhook_spawn_deduped", // redelivered queued webhook, idempotency no-op
   "webhook_rate_limited", // spawn attempt shed by the WEBHOOK_LIMITER (429)
   "webhook_job_completed", // a completed job processed (revoke+bill+teardown)
