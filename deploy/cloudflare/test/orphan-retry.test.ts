@@ -179,7 +179,7 @@ describe("retryOrphanedSpawns (scheduled WARM re-drive)", () => {
       { jobId: "job-1", repo: "octo/external-repo", installationId: "44556677", labels: ["corelink"] },
     );
     // Claimed the spawn (dedup vs the live path).
-    expect(kv.store.get("spawn:job-1")).toBe("1");
+    expect(Number(kv.store.get("spawn:job-1"))).toBeGreaterThan(0);
     // The reconciler no longer DELETES on a successful drive. A returned drive means
     // "a container started", not "the job is placed" — deleting here would discard
     // the provisional record and re-open the exact hole this class of bug lives in.
@@ -276,7 +276,7 @@ describe("retryOrphanedSpawns (scheduled WARM re-drive)", () => {
     await retryOrphanedSpawns(envWith(kv), CTX, Date.now(), vi.fn(async () => {}));
     expect(kv.list).toHaveBeenCalledWith({ prefix: "orphan:" });
     // The unrelated namespaces are untouched.
-    expect(kv.store.get("spawn:other")).toBe("1");
+    expect(Number(kv.store.get("spawn:other"))).toBeGreaterThan(0);
     expect(kv.store.get("done:other")).toBe("1");
     expect(kv.store.get("job-1")).toBe("pat-id");
   });

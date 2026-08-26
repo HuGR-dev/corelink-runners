@@ -1,3 +1,20 @@
+//! **STATUS — NOT WIRED INTO ANY LIVE PATH.** [`LeaseLifecycle`] and the
+//! [`BoxProbe`] port have no caller outside this file's `#[cfg(test)]` block:
+//! neither sweep below runs in any shipped binary.
+//!
+//! What runs instead: `crate::reaper` in `corelink-fabric-server`
+//! reimplements both transitions independently — `reap_once` marks `Expired`
+//! TEARDOWN-FIRST (bounded retry; deliberately NOT the mark-then-kill order
+//! described below) and its own opt-in `surface_crashes` probes boxes dead →
+//! `Crashed`. The two implementations can drift apart silently: edits here
+//! change nothing in production, and edits there leave this file stale.
+//!
+//! To take effect it would have to be wired at the composition root: drive
+//! [`LeaseLifecycle::expire_overdue`] / [`LeaseLifecycle::surface_crashes`]
+//! from the reaper tick in place of (or reconciled with) `reaper::reap_once` /
+//! `reaper::surface_crashes`, adapting `corelink-runner`'s liveness probe to
+//! [`BoxProbe`].
+//!
 //! Lease lifecycle wiring — expiry + crash surfacing over the ledger (WP-CP1b).
 //!
 //! The LIFECYCLE half of CP1: the sweeps that take the authoritative state

@@ -7,6 +7,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-08-25 — the reconciler raced live spawns, and an anonymous route wrote to our logs
+
+Round 2 of the audit. Each behavioural change is pinned by a regression proven
+RED against the previous code; the two deliberate tradeoffs are stated below
+rather than buried.
+
+**The reconciler force-released LIVE spawn claims.** `redriveOrphanedJobs` fired
+on any job queued + runnerless + older than `RECONCILE_MIN_AGE_MS` (90 s), which
+is exactly what a healthy-but-slow spawn looks like — this repo's own placement
+machinery waits `PLACEMENT_CONFIRM_GRACE_MS` (180 s) before it will even ASK
+GitHub, calling that "the slowest healthy boot". It then deleted the claim and
+re-claimed, producing a second mint, a second JIT registration and a second
+container for a job that already had one in flight. The claim could not be aged
+at all: `claimSpawn` stored the literal string `"1"`.
+
+It now stores `String(Date.now())`, and the gate keys on the CLAIM's age, never
+the job's: a claim younger than 180 s means a spawn is probably still running, so
+the job is skipped this tick and its claim left alone. **Deliberate tradeoff:** a
+legacy `"1"` claim carries no timestamp and is treated as OLD, not young —
+`SPAWN_CLAIM_TTL_S` is 7200 s, so treating un-aged claims as young would block
+orphan RECOVERY for two hours during the rollout, and stranding a real orphan is
+worse than the race being closed. The window is bounded and self-clearing.
+
+Only tests ever read the claim's VALUE; production only ever tested that a claim
+exists. Those assertions now assert the contract (a claim exists, and its value
+is a usable timestamp) instead of the sentinel. **`done:` completion claims are a
+different key and still use `"1"` — untouched.**
+
+**`POST /v1/leases/{id}/runner-diag` accepted anonymous writes.** The route
+answered before the bearer gate; verified against production, an anonymous POST
+returned `200 {"ok":true}` while the sibling `/v1/` route returned `401`. Anyone
+could write 3000 attacker-chosen characters into the logs as an error-level
+`runner_diag` under any jobId — unbounded log cost, and forged registration
+diagnostics poisoning the exact channel an operator reads after a failed spawn.
+
+A credential is not available here: a COLD box holds no `CLW_CRED_TICKET` at all,
+so requiring one would blind precisely the boxes that fail most. The route now
+requires the named job to hold a live spawn-claim, and — because job ids are
+PUBLIC on a public repo, so a targeted flood against a real in-flight job stays
+possible — it is also bounded by the per-job rate limiter this Worker already
+declares. **Accepted cost, instrumented rather than hidden:** a job running past
+`SPAWN_CLAIM_TTL_S` has no claim left and its diag is refused; that bumps
+`runner_diag_no_claim` so it shows up as a number instead of as silence. Both new
+counters are registered in `COUNTER_NAMES`, because an unregistered counter makes
+"this never happened" and "this counter does not exist" look identical.
+
+**`fetchJobPlacement` authenticated with the first-party token.** It is the
+verifier behind the provisional-placement dead-letter, and `GITHUB_MINT_TOKEN`
+"only has rights on HuGR-Labs repos". For a CUSTOMER repo every call 403/404'd ⇒
+`null` ⇒ verdict "unknown" ⇒ the record TTL-expired after 30 min with the job
+still queued: neither "placed" nor "lost" could ever fire, so warm dead-letter
+recovery was dead exactly for the customers it was built for. It now mints
+per-installation auth from the id the `OrphanRecord` already carries, mirroring
+`fetchJobObservation`, keeping the static token only as the first-party fallback.
+
+**Three dormant modules now say so.** `global_gate`, `downgrade_grace` and
+`lifecycle` are exported from the crate root as if they were shipped controls but
+have no caller outside their own tests; each now leads with a NOT-WIRED banner
+naming what runs instead. This is labelling, not wiring — deciding whether to
+wire them is tracked separately. Worth recording: the `surface_crashes` hits in
+`corelink-fabric-server` are a NAME COLLISION with `reaper.rs`'s own function,
+not callers; a grep that missed that would have concluded the module was live.
+
+Gates: `tsc --noEmit` clean, **490 vitest pass** (485 + 5 new cells), `cargo fmt`
+and `cargo check` clean.
+
 ### 2026-08-25 — a reaper that deleted a live box's last handle, and two handlers pinning the async executor
 
 Round 1 of an external audit of this repo. Findings were produced by four

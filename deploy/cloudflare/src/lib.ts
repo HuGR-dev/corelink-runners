@@ -115,8 +115,25 @@ export async function claimSpawn(kv: KvLike | undefined, jobId: string): Promise
   const key = spawnClaimKey(jobId);
   const existing = await kv.get(key);
   if (existing) return false; // already claimed ⇒ a redelivery, skip
-  await kv.put(key, "1", { expirationTtl: SPAWN_CLAIM_TTL_S });
+  // The claim VALUE is the wall-clock ms the claim was taken (was the literal "1").
+  // Every reader only tests truthiness — the timestamp adds information without
+  // changing any of those verdicts — and it lets the reconciler tell a LIVE spawn
+  // from a LEAKED one before force-releasing (see `spawnClaimAgeMs`).
+  await kv.put(key, String(Date.now()), { expirationTtl: SPAWN_CLAIM_TTL_S });
   return true;
+}
+
+/**
+ * Age of a raw spawn-claim value in ms, or `null` when it carries no usable
+ * timestamp. Claims written before claims were timestamped store the literal "1"
+ * and are UN-AGED; callers must decide that case deliberately (the reconciler
+ * treats un-aged as OLD — see redriveOrphanedJobs).
+ */
+export function spawnClaimAgeMs(raw: string | null | undefined, nowMs: number): number | null {
+  if (!raw) return null;
+  const takenMs = Number.parseInt(raw, 10);
+  if (!Number.isFinite(takenMs)) return null;
+  return Math.max(0, nowMs - takenMs);
 }
 
 /**

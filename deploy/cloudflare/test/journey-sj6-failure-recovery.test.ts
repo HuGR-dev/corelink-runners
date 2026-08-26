@@ -471,7 +471,9 @@ describe("SJ-6 · cell 4 — retryOrphanedSpawns (bump→claim→drive→delete|
       installationId: "44556677",
       labels: ["corelink"],
     });
-    expect(kv.store.get("spawn:r1")).toBe("1"); // claimed (dedup vs the live path)
+    // The claim VALUE is a timestamp now (the reconciler ages it); what the
+    // contract has always been is that a claim EXISTS.
+    expect(Number(kv.store.get("spawn:r1"))).toBeGreaterThan(0); // claimed (dedup vs the live path)
     // A returned drive means a CONTAINER STARTED, not that the job is placed — so
     // the reconciler no longer deletes here. `driveSpawn` re-stamps the record as a
     // provisional placement; confirmation (or the grace window) resolves it.
@@ -631,7 +633,7 @@ describe("SJ-6 · cell 8 — redriveOrphanedJobs (first-party GitHub scan, via w
     expect(jitCalls()).toHaveLength(1);
     expect(containers).toHaveLength(1);
     expect(containers[0].ns).toBe(RUNNER_NS);
-    expect(kv.store.get("spawn:8001")).toBe("1"); // claimed
+    expect(Number(kv.store.get("spawn:8001"))).toBeGreaterThan(0); // claimed
   });
 
   it("a LEAKED spawn-claim is cleared then re-claimed (the 2026-07-05 deadlock fix) — redrive still spawns", async () => {
@@ -647,7 +649,42 @@ describe("SJ-6 · cell 8 — redriveOrphanedJobs (first-party GitHub scan, via w
     await drain(ctx);
 
     expect(containers).toHaveLength(1); // spawned despite the pre-existing stale claim
-    expect(kv.store.get("spawn:8002")).toBe("1"); // re-claimed fresh
+    expect(Number(kv.store.get("spawn:8002"))).toBeGreaterThan(0); // re-claimed fresh
+  });
+
+  // ── The claim-age guard (2026-08-25). ─────────────────────────────────────
+  // The reconciler used to force-release ANY claim on a job older than
+  // RECONCILE_MIN_AGE_MS (90 s) — which is what a healthy-but-slow spawn looks
+  // like, since this repo's own placement machinery waits
+  // PLACEMENT_CONFIRM_GRACE_MS (180 s) before it will even ASK GitHub, calling
+  // that "the slowest healthy boot". So a live spawn had its claim yanked and
+  // was re-driven: second mint, second JIT, second container. The gate now keys
+  // on the CLAIM's age, never the job's.
+  it("a FRESH claim on an over-age job is LEFT ALONE (no double spawn racing a live drive)", async () => {
+    ghRuns = [{ id: 905, createdMsAgo: 300_000 }]; // job is old...
+    ghJobsByRun[905] = [{ id: 8005, status: "queued", runner_id: null, labels: ["corelink-dogfood"] }];
+    // ...but the claim was written seconds ago: a spawn is still in flight.
+    const kv = fakeKv({ "spawn:8005": String(Date.now() - 5_000) });
+    const claimBefore = kv.store.get("spawn:8005");
+    const ctx = makeCtx();
+
+    await worker.scheduled(EVENT, reconcilerEnv(kv), ctx as never);
+    await drain(ctx);
+
+    expect(containers).toHaveLength(0); // NOT re-driven
+    expect(kv.store.get("spawn:8005")).toBe(claimBefore); // claim untouched
+  });
+
+  it("a claim older than PLACEMENT_CONFIRM_GRACE_MS IS force-released and re-driven", async () => {
+    ghRuns = [{ id: 906, createdMsAgo: 300_000 }];
+    ghJobsByRun[906] = [{ id: 8006, status: "queued", runner_id: null, labels: ["corelink-dogfood"] }];
+    const kv = fakeKv({ "spawn:8006": String(Date.now() - 240_000) }); // 4 min > 180 s
+    const ctx = makeCtx();
+
+    await worker.scheduled(EVENT, reconcilerEnv(kv), ctx as never);
+    await drain(ctx);
+
+    expect(containers).toHaveLength(1); // recovery still works
   });
 
   it("RECONCILER_REPOS empty ⇒ the scan is OFF (no GitHub fetch, no spawn)", async () => {
@@ -713,7 +750,7 @@ describe("SJ-6 · cell 9 — dead-letter + GitHub-scan see the SAME job: no doub
     // redriveOrphanedJobs claims spawn:7001 synchronously BEFORE retryOrphanedSpawns
     // runs, so the dead-letter retry sees the claim and skips ⇒ NO double spawn.
     expect(containers).toHaveLength(1);
-    expect(kv.store.get("spawn:7001")).toBe("1");
+    expect(Number(kv.store.get("spawn:7001"))).toBeGreaterThan(0);
     // No double-record: recordOrphan only fires on a NEW failure; neither recovery
     // path records, so the single original orphan key is all there is.
     expect(orphanKeys(kv)).toHaveLength(1);
