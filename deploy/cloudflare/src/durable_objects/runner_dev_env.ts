@@ -294,11 +294,7 @@ export class RunnerDevEnvDO extends Container<any> {
     const args = [
       "snapshot", dir,
       "--name", name,
-      "--ref-domain", "runner",
       "--concurrency", "8",
-      "--auth-file", "/dev/shm/.clw-auth",
-      "--pack-small-files-threshold-kb", "128",
-      "--generation-id", String(generationId),
       "--json",
     ];
     if (force) args.push("--force");
