@@ -373,15 +373,137 @@ export class RunnerDevEnvDO extends Container<any> {
     }
   }
 
-  // ── WebSocket Proxying & Hibernation ─────────────────────────────
+  // ── HTTP→RPC Router & WebSocket Proxy ──────────────────────────────
+  //
+  // The corelink-server worker forwards requests via the cross-worker
+  // RUNNER_DEVENV_DO binding using `devStub.fetch()`.  This override
+  // maps API paths to the internal RPC methods so the control-plane
+  // endpoints work end-to-end.
+  //
+  // Path matrix (all under /v1/customer/devenv):
+  //   GET  /                     → list / getStatus
+  //   POST /                     → startDevenv
+  //   GET  /status               → getStatus
+  //   POST /stop                 → requestStop
+  //   DELETE /  or DELETE /:id   → requestStop
+  //   POST /snapshot             → snapshot
+  //   POST /resize               → resize
+  //   WS   /vnc | /tty | /code  → WebSocket proxy
 
   override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    const method = request.method.toUpperCase();
 
+    // ── WebSocket upgrades ───────────────────────────────────────
     if (request.headers.get("Upgrade") === "websocket") {
       return this.handleWsUpgrade(request, url);
     }
 
+    // ── Devenv control-plane routing ─────────────────────────────
+    // Strip the /v1/customer/devenv prefix to get the sub-path.
+    const devenvBase = "/v1/customer/devenv";
+    const devenvAlt = "/v1/devenv";
+    let subPath = "";
+    if (url.pathname.startsWith(devenvBase)) {
+      subPath = url.pathname.slice(devenvBase.length);
+    } else if (url.pathname.startsWith(devenvAlt)) {
+      subPath = url.pathname.slice(devenvAlt.length);
+    }
+
+    // Normalise: strip trailing slash, strip leading /:id segment for DELETE
+    const normSub = subPath.replace(/\/+$/, "");
+
+    try {
+      // POST /v1/customer/devenv → startDevenv
+      if (method === "POST" && (normSub === "" || normSub === "/")) {
+        const body = await request.json() as any;
+        const tenantId = request.headers.get("x-corelink-tenant-id") ?? "";
+        const clwToken = body.clw_token ?? "";
+        const result = await this.startDevenv({
+          config: {
+            workspaceName: body.workspace_name ?? "",
+            profileName: body.profile_name ?? "default",
+            tier: body.tier ?? "standard-4",
+            clwEndpoint: "https://corelink-api.humangr.com",
+            clwTenant: tenantId,
+            clwToken,
+          },
+        });
+        return new Response(JSON.stringify(result), {
+          status: 201,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      // GET /v1/customer/devenv → list (wraps getStatus in devenvs array)
+      if (method === "GET" && (normSub === "" || normSub === "/")) {
+        const status = await this.getStatus();
+        return new Response(JSON.stringify({ devenvs: [status] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      // GET /v1/customer/devenv/status → getStatus
+      if (method === "GET" && normSub === "/status") {
+        const status = await this.getStatus();
+        return new Response(JSON.stringify(status), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      // POST /v1/customer/devenv/stop → requestStop
+      if (method === "POST" && normSub === "/stop") {
+        const result = await this.requestStop();
+        return new Response(JSON.stringify(result), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      // DELETE /v1/customer/devenv or DELETE /v1/customer/devenv/:id → requestStop
+      if (method === "DELETE") {
+        const result = await this.requestStop();
+        return new Response(JSON.stringify(result), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      // POST /v1/customer/devenv/snapshot → snapshot
+      if (method === "POST" && normSub === "/snapshot") {
+        const body = (await request.json().catch(() => ({}))) as any;
+        const result = await this.snapshot({ force: body.force ?? false });
+        return new Response(JSON.stringify(result), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      // POST /v1/customer/devenv/resize → resize
+      if (method === "POST" && normSub === "/resize") {
+        const body = await request.json() as any;
+        const result = await this.resize({ width: body.width, height: body.height });
+        return new Response(JSON.stringify(result), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      const status = message.includes("INVALID_STATE_TRANSITION") ? 409
+        : message.includes("CANNOT_SNAPSHOT") ? 409
+        : message.includes("SNAPSHOT_IN_PROGRESS") ? 409
+        : message.includes("RESIZE_FAILED") ? 502
+        : 500;
+      return new Response(JSON.stringify({ error: message }), {
+        status,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    // ── Fallback: proxy to container (code-server, noVNC static, etc.)
     return await this.containerFetch(request, this.defaultPort);
   }
 
