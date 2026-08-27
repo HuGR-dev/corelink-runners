@@ -39,7 +39,23 @@ async fn main() -> anyhow_lite::Result {
         );
     }
 
-    let addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, DEFAULT_PORT));
+    let mut bind_addr_str: Option<String> = None;
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--bind-addr" {
+            bind_addr_str = args.next();
+        }
+    }
+    if bind_addr_str.is_none() {
+        bind_addr_str = std::env::var("BIND_ADDR").ok().filter(|s| !s.is_empty());
+    }
+
+    let addr: SocketAddr = if let Some(s) = bind_addr_str {
+        s.parse().map_err(|e| format!("invalid --bind-addr '{s}': {e}"))?
+    } else {
+        SocketAddr::from((Ipv4Addr::UNSPECIFIED, DEFAULT_PORT))
+    };
+
     eprintln!(
         "corelink-check-exec-server listening on {addr} (cwd for exec = {}, auth = {})",
         toolchain_dir(),

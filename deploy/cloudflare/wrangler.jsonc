@@ -131,7 +131,9 @@
       // authoritative in-flight slot list. Its single-threaded input-gating makes
       // the per-tenant + fleet concurrency ceiling ATOMIC (replaces the non-atomic,
       // fail-open KV counter). A plain DO — just DO storage, not a container class.
-      { "name": "CONCURRENCY_SLOTS", "class_name": "ConcurrencySlotsDO" }
+      { "name": "CONCURRENCY_SLOTS", "class_name": "ConcurrencySlotsDO" },
+      // DevEnv persistent sandbox container Durable Object (WP-01)
+      { "name": "RUNNER_DEVENV_DO", "class_name": "RunnerDevEnvDO" }
     ]
   },
   "migrations": [
@@ -139,7 +141,8 @@
     { "tag": "v2", "new_sqlite_classes": ["CheckHostContainer"] },
     { "tag": "v3", "new_sqlite_classes": ["CredStashDO"] },
     { "tag": "v4", "new_sqlite_classes": ["MetricsDO"] },
-    { "tag": "v5", "new_sqlite_classes": ["ConcurrencySlotsDO"] }
+    { "tag": "v5", "new_sqlite_classes": ["ConcurrencySlotsDO"] },
+    { "tag": "v6", "new_sqlite_classes": ["RunnerDevEnvDO"] }
   ],
 
   // The runner container. IMPORTANT (ADR-0008 / README wrinkle #1): the image is
@@ -268,6 +271,12 @@
       // 4+ IN THE SAME CHANGE that live-flips check-host — not before, and do
       // not leave it at 1 afterwards.
       "max_instances": 1
+    },
+    {
+      "class_name": "RunnerDevEnvDO",
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-runner-devenv:latest",
+      "instance_type": "standard-4",
+      "max_instances": 10
     }
   ]
 

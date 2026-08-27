@@ -1,0 +1,160 @@
+# syntax=docker/dockerfile:1.4
+# deploy/cloudflare/Dockerfile.runner-devenv
+#
+# CoreLink Runner DevEnv Container (Multi-Stage Build)
+#
+# Stage 1 (clw-builder): builds clw + corelink-check-exec-server
+# Stage 2 (bin-downloader): downloads ttyd + code-server
+# Stage 3 (runtime): Debian 12 slim + Chromium + Xvfb + noVNC + non-root user coder
+
+# ══════════════════════════════════════════════════════════════════════
+# STAGE 1: Download verified clw binary (from corelink-workspaces releases)
+# ══════════════════════════════════════════════════════════════════════
+FROM debian:12-slim AS clw-download
+ARG CLW_VERSION=0.1.5
+ARG CLW_SHA256=95a05db35e4e5be50a104acb7c30466ff7ec5f7a154403943aca24279b5d8bf2
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL "https://github.com/HuGR-Labs/clw-releases/releases/download/v${CLW_VERSION}/clw-${CLW_VERSION}-x86_64-unknown-linux-gnu" -o /clw \
+ && echo "${CLW_SHA256}  /clw" | sha256sum -c - \
+ && chmod +x /clw
+
+# ══════════════════════════════════════════════════════════════════════
+# STAGE 1b: Build in-container exec-server from Rust source (musl static)
+# ══════════════════════════════════════════════════════════════════════
+FROM rust:1.82-alpine AS exec-builder
+
+RUN apk add --no-cache musl-dev pkgconfig openssl-dev openssl-libs-static git make perl
+
+WORKDIR /src
+
+# Copy only existing crates in corelink-runners
+COPY Cargo.toml Cargo.lock ./
+COPY crates/corelink-check-exec-server ./crates/corelink-check-exec-server
+COPY crates/corelink-cli ./crates/corelink-cli
+COPY crates/corelink-cloud-engine ./crates/corelink-cloud-engine
+COPY crates/corelink-fabric ./crates/corelink-fabric
+COPY crates/corelink-fabric-api ./crates/corelink-fabric-api
+COPY crates/corelink-fabric-server ./crates/corelink-fabric-server
+COPY crates/corelink-runner ./crates/corelink-runner
+COPY crates/corelink-runners-contracts ./crates/corelink-runners-contracts
+
+RUN cargo build --release -p corelink-check-exec-server --target x86_64-unknown-linux-musl
+
+RUN mkdir -p /out \
+ && cp /src/target/x86_64-unknown-linux-musl/release/corelink-check-exec-server /out/exec-server \
+ && chmod +x /out/exec-server
+
+# ══════════════════════════════════════════════════════════════════════
+# STAGE 2: Download pre-built ttyd + code-server binaries
+# ══════════════════════════════════════════════════════════════════════
+FROM debian:12-slim AS bin-downloader
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    tar \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /out
+
+# ttyd v1.7.7
+ARG TTYD_VERSION=1.7.7
+ARG TTYD_SHA256=174ff46b7a2dce51d9ad0b368731551a37c35bd28ab837fec39e7c53d10cf6e3
+RUN curl -fsSL -o /out/ttyd \
+    "https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}/ttyd.x86_64" \
+ && echo "${TTYD_SHA256}  /out/ttyd" | sha256sum -c - \
+ && chmod +x /out/ttyd
+
+# code-server v4.95.3
+ARG CODE_SERVER_VERSION=4.95.3
+ARG CODE_SERVER_SHA256=d6fe02db2e6dbefcce178d227b686d116238b1f8fb8be9be173428d00922d109
+RUN curl -fsSL -o /tmp/code-server.tar.gz \
+    "https://github.com/coder/code-server/releases/download/v${CODE_SERVER_VERSION}/code-server-${CODE_SERVER_VERSION}-linux-amd64.tar.gz" \
+ && echo "${CODE_SERVER_SHA256}  /tmp/code-server.tar.gz" | sha256sum -c - \
+ && tar -xzf /tmp/code-server.tar.gz -C /out --strip-components=1 \
+ && rm -f /tmp/code-server.tar.gz
+
+# ══════════════════════════════════════════════════════════════════════
+# STAGE 3: Final Runtime Image
+# ══════════════════════════════════════════════════════════════════════
+FROM debian:12-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    xvfb \
+    x11vnc \
+    novnc \
+    websockify \
+    chromium \
+    fonts-liberation \
+    fonts-noto-color-emoji \
+    supervisor \
+    dumb-init \
+    ca-certificates \
+    curl \
+    git \
+    vim-tiny \
+    libnss3 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libcups2 \
+    libdrm2 \
+    libxkbcommon0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxfixes3 \
+    libxrandr2 \
+    libgbm1 \
+    libpango-1.0-0 \
+    libcairo2 \
+    libasound2 \
+    libatspi2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Non-root user coder (uid 1000)
+RUN groupadd --system --gid 1000 coder \
+ && useradd --system --uid 1000 --gid coder --create-home --shell /bin/bash coder
+
+# Binaries from builder stages
+COPY --from=clw-download /clw /usr/local/bin/clw
+COPY --from=exec-builder /out/exec-server /usr/local/bin/exec-server
+COPY --from=bin-downloader /out/ttyd /usr/local/bin/ttyd
+COPY --from=bin-downloader /out/bin/code-server /usr/local/bin/code-server
+
+# Entrypoint & Supervisord configs
+COPY entrypoint.sh /entrypoint.sh
+COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+
+RUN chmod 0755 /usr/local/bin/clw /usr/local/bin/exec-server /usr/local/bin/ttyd /usr/local/bin/code-server \
+ && chmod 0755 /entrypoint.sh
+
+# Data & Runtime directories
+RUN mkdir -p /data/chrome /data/workspace /run /var/log/supervisor /tmp/runtime-coder \
+ && chown -R coder:coder /data /run /var/log/supervisor /tmp/runtime-coder \
+ && chmod 0700 /tmp/runtime-coder
+
+# noVNC index redirect
+RUN ln -sf /usr/share/novnc/vnc_lite.html /usr/share/novnc/index.html
+
+# Healthcheck
+HEALTHCHECK --interval=10s --timeout=3s --start-period=60s --retries=5 \
+  CMD bash -c 'curl -fsS http://localhost:6080/vnc_lite.html >/dev/null && \
+               for p in 7681 8080 9090; do \
+                 timeout 2 bash -c "</dev/tcp/localhost/$p" || exit 1; \
+               done' || exit 1
+
+USER coder
+WORKDIR /data/workspace
+STOPSIGNAL SIGTERM
+
+ENV HOME=/home/coder \
+    CLW_CACHE_DIR=/home/coder/.clw/cache \
+    TERM=xterm-256color \
+    SHELL=/bin/bash
+
+# Exposed port matrix
+EXPOSE 6080/tcp 7681/tcp 8080/tcp 9090/tcp
+
+# INV-01: PID 1 dumb-init for zombie reaping & signal proxying
+ENTRYPOINT ["/usr/bin/dumb-init", "--", "/entrypoint.sh"]
