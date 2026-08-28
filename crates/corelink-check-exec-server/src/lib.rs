@@ -150,8 +150,16 @@ async fn ping_handler() -> Response {
 async fn port_check_handler(axum::extract::Path(port): axum::extract::Path<u16>) -> Response {
     let addr = format!("127.0.0.1:{port}");
     match tokio::net::TcpStream::connect(&addr).await {
-        Ok(_) => (StatusCode::OK, Json(serde_json::json!({ "open": true, "port": port }))).into_response(),
-        Err(_) => (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({ "open": false, "port": port }))).into_response(),
+        Ok(_) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "open": true, "port": port })),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "open": false, "port": port })),
+        )
+            .into_response(),
     }
 }
 
@@ -162,8 +170,16 @@ pub struct MkdirRequest {
 
 async fn mkdir_handler(Json(req): Json<MkdirRequest>) -> Response {
     match std::fs::create_dir_all(&req.path) {
-        Ok(_) => (StatusCode::OK, Json(serde_json::json!({ "ok": true, "path": req.path }))).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
+        Ok(_) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "ok": true, "path": req.path })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
