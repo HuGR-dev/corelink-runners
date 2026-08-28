@@ -5,7 +5,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { execSync } from "node:child_process";
 
-const OPENROUTER_API_KEY = "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";
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+if (!OPENROUTER_API_KEY) {
+  console.error("FATAL: OPENROUTER_API_KEY env var is required. Set it in wrangler.toml as a [secrets] entry or pass via wrangler secret.");
+  process.exit(1);
+}
 const SANDBOX_DIR = path.resolve(process.cwd(), "scratch/agent-live-sandbox");
 
 console.log("================================================================================");
