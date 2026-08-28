@@ -17,3 +17,5 @@ Cargo.lock.orig
 # wrangler local state
 .wrangler/
 deploy/check-host/corelink-check-exec-server
+# wrangler deploy --outdir output
+deploy/cloudflare/dist/
