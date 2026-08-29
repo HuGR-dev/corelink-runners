@@ -51,7 +51,8 @@ async fn main() -> anyhow_lite::Result {
     }
 
     let addr: SocketAddr = if let Some(s) = bind_addr_str {
-        s.parse().map_err(|e| format!("invalid --bind-addr '{s}': {e}"))?
+        s.parse()
+            .map_err(|e| format!("invalid --bind-addr '{s}': {e}"))?
     } else {
         SocketAddr::from((Ipv4Addr::UNSPECIFIED, DEFAULT_PORT))
     };
