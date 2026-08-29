@@ -86,20 +86,25 @@ pub fn app() -> Router {
 }
 
 /// Build the router with an EXPLICIT optional bearer gate (Track-C C2b
-/// defense-in-depth). `Some(token)` ⇒ every `/exec` requires
-/// `Authorization: Bearer <token>` (constant-time compared); anything else is a
-/// `401`. `None` ⇒ served WITHOUT auth (back-compat: the container boundary +
-/// the Worker bearer remain the primary gates) — a loud startup line records it.
+/// defense-in-depth). `Some(token)` ⇒ every `/exec` and `/clw` requires
+/// `Authorization: Bearer <token>` or `X-Exec-Token: <token>`; anything else is a
+/// `401`. `None` ⇒ served WITHOUT auth.
 pub fn app_with_auth(token: Option<String>) -> Router {
-    let router = Router::new().route("/exec", post(exec_handler));
+    let router = Router::new()
+        .route("/exec", post(exec_handler))
+        .route("/clw", post(clw_handler))
+        .route("/ping", axum::routing::get(ping_handler))
+        .route("/port-check/:port", axum::routing::get(port_check_handler))
+        .route("/mkdir", post(mkdir_handler));
+
     match token {
         Some(token) => router.layer(middleware::from_fn(move |req: Request, next: Next| {
             let expected = token.clone();
-            async move { require_bearer(&expected, req, next).await }
+            async move { require_bearer_or_header(&expected, req, next).await }
         })),
         None => {
             eprintln!(
-                "check-exec-server: {AUTH_TOKEN_ENV} unset — /exec served WITHOUT auth \
+                "check-exec-server: {AUTH_TOKEN_ENV} unset — served WITHOUT auth \
                  (C2b defense-in-depth OFF; the container boundary + Worker bearer remain the gates)"
             );
             router
@@ -107,17 +112,23 @@ pub fn app_with_auth(token: Option<String>) -> Router {
     }
 }
 
-/// Bearer-gate middleware: pass iff `Authorization` equals `Bearer <expected>`
-/// under a CONSTANT-TIME comparison (no early-return timing oracle on the token
-/// bytes); otherwise `401`, never reaching the exec handler.
-async fn require_bearer(expected: &str, req: Request, next: Next) -> Response {
-    let presented = req
+/// Bearer or X-Exec-Token gate middleware.
+async fn require_bearer_or_header(expected: &str, req: Request, next: Next) -> Response {
+    let bearer_presented = req
         .headers()
         .get(AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    let want = format!("Bearer {expected}");
-    if ct_eq(presented.as_bytes(), want.as_bytes()) {
+    let want_bearer = format!("Bearer {expected}");
+    let header_presented = req
+        .headers()
+        .get("x-exec-token")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+
+    if ct_eq(bearer_presented.as_bytes(), want_bearer.as_bytes())
+        || ct_eq(header_presented.as_bytes(), expected.as_bytes())
+    {
         next.run(req).await
     } else {
         (
@@ -125,6 +136,68 @@ async fn require_bearer(expected: &str, req: Request, next: Next) -> Response {
             Json(serde_json::json!({ "error": "unauthorized" })),
         )
             .into_response()
+    }
+}
+
+async fn ping_handler() -> Response {
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "status": "ok", "service": "exec-server" })),
+    )
+        .into_response()
+}
+
+async fn port_check_handler(axum::extract::Path(port): axum::extract::Path<u16>) -> Response {
+    let addr = format!("127.0.0.1:{port}");
+    match tokio::net::TcpStream::connect(&addr).await {
+        Ok(_) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "open": true, "port": port })),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "open": false, "port": port })),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MkdirRequest {
+    pub path: String,
+}
+
+async fn mkdir_handler(Json(req): Json<MkdirRequest>) -> Response {
+    match std::fs::create_dir_all(&req.path) {
+        Ok(_) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "ok": true, "path": req.path })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ClwRequest {
+    pub argv: Vec<String>,
+}
+
+async fn clw_handler(Json(req): Json<ClwRequest>) -> Response {
+    let mut full_argv = vec!["/usr/local/bin/clw".to_string()];
+    full_argv.extend(req.argv);
+    let exec_req = ExecRequest {
+        argv: full_argv,
+        timeout_ms: 120_000,
+    };
+    match run_captured(exec_req, &toolchain_dir()).await {
+        Ok(resp) => (StatusCode::OK, Json(resp)).into_response(),
+        Err(msg) => (StatusCode::BAD_REQUEST, msg).into_response(),
     }
 }
 

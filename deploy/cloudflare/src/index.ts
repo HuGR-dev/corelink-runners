@@ -14,6 +14,7 @@
 
 import { Container, getContainer } from "@cloudflare/containers";
 import { DurableObject } from "cloudflare:workers";
+export { RunnerDevEnvDO } from "./durable_objects/runner_dev_env";
 
 // ── G2 metadata-exposure denylist (O7 hardening) — BEST-EFFORT, NOT G2-closing ─
 // Hosts the container is blocked from reaching via the SDK's `deniedHosts`. The
