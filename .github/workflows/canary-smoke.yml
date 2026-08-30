@@ -7,17 +7,46 @@
 # minting, the spawn-Worker is down, or the box never came up — this workflow
 # goes RED, which fires GitHub's native failed-workflow notification.
 #
-# WHY an ubuntu-latest orchestrator instead of a bare scheduled `runs-on:
-# corelink` job: a scheduled fleet job that never gets a box sits QUEUED and
-# never trips `timeout-minutes` (that clock starts only once a job is RUNNING),
-# so a dead fleet would go UNDETECTED. The orchestrator always starts (GH-hosted),
-# so its wall-clock watch turns "no box ever came" into a real failure.
+# WHY a SEPARATE orchestrator instead of a bare scheduled `runs-on: corelink`
+# job: a scheduled fleet job that never gets a box sits QUEUED and never trips
+# `timeout-minutes` (that clock starts only once a job is RUNNING), so a dead
+# fleet would go UNDETECTED. The orchestrator must therefore live in a DIFFERENT
+# failure domain from the fleet it watches, so that "no box ever came" becomes a
+# real wall-clock failure instead of silence. That property is the whole point of
+# this workflow and must survive any change to it.
 #
-# COST NOTE (free-plan minute budget): this is the repo's main GH-hosted-minute
-# consumer (CI itself runs on the self-hosted `corelink-dogfood` fleet). The
-# orchestrator is billed only while it waits for the smoke (typically a few
-# minutes). Cadence is 60 min to stay frugal; widen the cron if minutes get
-# tight. The smoke job itself runs on the fleet and costs no GH-hosted minutes.
+# WHY `corelink-builder` and no longer `ubuntu-latest` (2026-08-29): GH-hosted
+# minutes are billing-blocked on this org, so the orchestrator stopped STARTING
+# on 2026-08-24. It did not go loud — the job failed with zero steps executed,
+# which reads as "canary red" and was written off as noise. Because this
+# workflow is the ONLY dispatcher of `corelink-smoke.yml`, that smoke had not
+# run for five days: the live minting path went completely unverified while the
+# dashboard showed a red nobody trusted. A canary that cannot start is worse
+# than no canary, because it looks like coverage.
+#
+# `corelink-builder` is the PERSISTENT self-hosted Mac — the only persistent
+# runner registered on this repo. It is a genuinely different failure domain
+# from the ephemeral CF boxes the fleet mints, which is the property the
+# orchestrator needs.
+#
+# NOT `corelink-dogfood`, which looks like a CI label and is not: per
+# `dogfood-smoke.yml`'s own header, the persistent runners carry
+# `corelink-builder` and NEVER `corelink-dogfood`, so a `corelink-dogfood` job
+# can only land on a freshly-provisioned EPHEMERAL box. Pointing the canary
+# there would be the same failure domain as the fleet it watches, wearing a
+# different label — the fleet dies, the canary never gets a box, it sits QUEUED,
+# `timeout-minutes` never starts, and the one failure this workflow exists to
+# report is the one it cannot.
+#
+# RESIDUAL LIMITATION, stated rather than hidden: if the MAC itself is down,
+# this canary goes silent the way the hosted one did. That is a real gap and an
+# acceptable one — "the Mac is down" is a different and rarer event than "the
+# CF fabric stopped minting", which is what this watches. Watching the watcher
+# needs a probe outside GitHub entirely; that is not solved here.
+#
+# The Mac hosts one runner, so an hourly canary shares it with CI. The
+# `concurrency` group below drops a queued canary if a newer one is scheduled,
+# so a busy Mac delays this job rather than piling copies of it up.
 #
 # No owner secret is required to arm this — it uses the automatic GITHUB_TOKEN.
 # It only produces meaningful results once the live fleet serves the `corelink`
@@ -35,9 +64,15 @@ permissions:
   contents: read
   actions: write
 
+# One runner on the Mac: never let hourly canaries queue up behind CI. Keep the
+# newest, drop an older queued one — a stale canary answers a stale question.
+concurrency:
+  group: canary-smoke
+  cancel-in-progress: false
+
 jobs:
   canary:
-    runs-on: ubuntu-latest
+    runs-on: corelink-builder
     # Hard wall-clock ceiling: if the smoke never starts or never finishes, the
     # job times out → red → notification.
     timeout-minutes: 15
@@ -46,6 +81,22 @@ jobs:
       SMOKE_WORKFLOW: corelink-smoke.yml
       SMOKE_REF: main
     steps:
+      # Self-hosted runners inherit the launchd service PATH, NOT an interactive
+      # shell's. corelink-server's `okf-autoreconcile` lane died silently for
+      # days at `claude: command not found` / exit 127 for exactly this reason.
+      # Fail LOUD with a named cause instead of repeating that.
+      - name: Preflight — gh must be on the runner PATH
+        run: |
+          set -euo pipefail
+          if ! command -v gh >/dev/null 2>&1; then
+            echo "::error::canary: \`gh\` is not on this runner's PATH." \
+                 "The launchd service PATH differs from an interactive shell's;" \
+                 "install gh for the runner user or add it to the service PATH." \
+                 "Refusing to run so this does not fail as an opaque exit 127."
+            exit 1
+          fi
+          echo "gh: $(command -v gh) ($(gh --version | head -1))"
+
       - name: Dispatch corelink-smoke and watch it to a conclusion
         run: |
           set -euo pipefail
