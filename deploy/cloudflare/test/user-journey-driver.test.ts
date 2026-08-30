@@ -207,7 +207,7 @@ describe("CoreLink DevEnv — User Stories Live Execution Driver", () => {
     // Attack 1: Verify token is NOT exposed in static environment variables
     const rawEnv = (sandbox as any).envVars;
     expect(rawEnv.CLW_TOKEN).toBe("cl_pat_auditor_token_1234567890");
-    expect(rawEnv.EXEC_SERVER_TOKEN).toBeDefined();
+    expect(rawEnv.EXEC_SERVER_AUTH_TOKEN).toBeDefined();
 
     // Attack 2: Test soft error resilience (INV-07)
     await sandbox.onError(new Error("Simulated storage timeout error"));
