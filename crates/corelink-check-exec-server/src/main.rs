@@ -11,33 +11,15 @@
 
 use std::net::{Ipv4Addr, SocketAddr};
 
-use corelink_check_exec_server::{AUTH_TOKEN_ENV, DEFAULT_PORT, app_with_auth, toolchain_dir};
-
-/// Explicit opt-in to run WITHOUT the bearer gate (dev / behind another gate).
-/// Absent ⇒ an unset auth token fails the binary closed rather than serving open.
-const ALLOW_UNAUTH_ENV: &str = "CHECK_EXEC_ALLOW_UNAUTH";
+use corelink_check_exec_server::{DEFAULT_PORT, ExecAuth, app_with_auth, toolchain_dir};
 
 #[tokio::main]
 async fn main() -> anyhow_lite::Result {
-    let token = std::env::var(AUTH_TOKEN_ENV).ok().filter(|t| !t.is_empty());
-    if token.is_none() {
-        let allow_unauth = std::env::var(ALLOW_UNAUTH_ENV)
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-        if !allow_unauth {
-            return Err(format!(
-                "{AUTH_TOKEN_ENV} is unset/empty — refusing to serve an UNAUTHENTICATED /exec \
-                 (argv execution). The spawn Worker injects {AUTH_TOKEN_ENV} on every real \
-                 spawn; if it is missing the box is misconfigured. Set {AUTH_TOKEN_ENV}, or set \
-                 {ALLOW_UNAUTH_ENV}=1 to explicitly opt into the unauthenticated posture."
-            )
-            .into());
-        }
-        eprintln!(
-            "corelink-check-exec-server: {ALLOW_UNAUTH_ENV} set — serving /exec WITHOUT auth \
-             (explicit opt-in; container boundary + Worker bearer remain the gates)"
-        );
-    }
+    // WP-9c: the fail-closed decision now lives in the LIBRARY (`ExecAuth`), so
+    // the binary and every other caller share one gate. Same rule as before:
+    // token set ⇒ authenticated; unset + CHECK_EXEC_ALLOW_UNAUTH ⇒ open with a
+    // warning; unset + no opt-in ⇒ refuse to serve.
+    let auth = ExecAuth::from_env().map_err(|e| e.to_string())?;
 
     let mut bind_addr_str: Option<String> = None;
     let mut args = std::env::args().skip(1);
@@ -60,7 +42,7 @@ async fn main() -> anyhow_lite::Result {
     eprintln!(
         "corelink-check-exec-server listening on {addr} (cwd for exec = {}, auth = {})",
         toolchain_dir(),
-        if token.is_some() {
+        if auth.is_authenticated() {
             "ON"
         } else {
             "OFF (opt-in)"
@@ -69,7 +51,7 @@ async fn main() -> anyhow_lite::Result {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|e| format!("bind {addr}: {e}"))?;
-    axum::serve(listener, app_with_auth(token))
+    axum::serve(listener, app_with_auth(auth))
         .await
         .map_err(|e| format!("serve: {e}"))?;
     Ok(())
