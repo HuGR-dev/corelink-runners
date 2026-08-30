@@ -23,8 +23,14 @@ use axum::body::Body;
 use axum::http::Request;
 use axum::http::{StatusCode, header};
 use axum::response::Response;
-use corelink_check_exec_server::{ExecRequest, ExecResponse, app, app_with_auth, run_captured};
+use corelink_check_exec_server::{
+    ALLOW_UNAUTH_ENV, AUTH_TOKEN_ENV, ExecAuth, ExecAuthError, ExecRequest, ExecResponse, app,
+    app_with_auth, run_captured,
+};
 use serde_json::{Value, json};
+
+/// Serializes the tests that mutate the process-wide auth env vars.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 use tower::ServiceExt;
 
 /// Run `make_fut` to completion on a dedicated thread with an 8 MiB stack (see
@@ -178,11 +184,22 @@ fn empty_argv_is_err() {
 
 // ─── wire contract (via the axum router) ────────────────────────────────────
 
+/// The bearer used by the wire-contract tests. WP-9c: there is no longer an
+/// unauthenticated router to build without the process-wide opt-in, so the wire
+/// tests drive the AUTHENTICATED router and present the token.
+const WIRE_TOK: &str = "wire-contract-tok";
+
+/// The wire-contract router: authenticated, built without touching the env.
+fn wire_app() -> axum::Router {
+    app_with_auth(ExecAuth::bearer(WIRE_TOK).expect("non-empty token"))
+}
+
 fn exec_request(body: Value) -> Request<Body> {
     Request::builder()
         .method("POST")
         .uri("/exec")
         .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, format!("Bearer {WIRE_TOK}"))
         .body(Body::from(serde_json::to_vec(&body).expect("serializable")))
         .expect("valid request")
 }
@@ -201,7 +218,7 @@ fn router_exec_returns_200_response_body() {
     // own thread before its only request; no other test reads this var.
     let out = block_on(|| async {
         unsafe { std::env::set_var("TOOLCHAIN_DIR", std::env::temp_dir()) };
-        let response = app()
+        let response = wire_app()
             .oneshot(exec_request(json!({
                 "argv": ["sh", "-lc", "printf 'router-ok'"],
                 "timeout_ms": 5000u64
@@ -219,7 +236,7 @@ fn router_exec_returns_200_response_body() {
 #[test]
 fn router_empty_argv_is_400() {
     let status = block_on(|| async {
-        app()
+        wire_app()
             .oneshot(exec_request(json!({
                 "argv": [],
                 "timeout_ms": 5000u64
@@ -256,7 +273,7 @@ fn ok_body() -> Value {
 fn configured_token_gates_exec_with_the_bearer() {
     block_on(|| async {
         unsafe { std::env::set_var("TOOLCHAIN_DIR", std::env::temp_dir()) };
-        let no_hdr = app_with_auth(Some("s3cr3t-tok".into()))
+        let no_hdr = app_with_auth(ExecAuth::bearer("s3cr3t-tok").expect("non-empty token"))
             .oneshot(exec_request_authed(ok_body(), None))
             .await
             .unwrap();
@@ -265,7 +282,7 @@ fn configured_token_gates_exec_with_the_bearer() {
             StatusCode::UNAUTHORIZED,
             "no bearer with a configured token → 401"
         );
-        let wrong = app_with_auth(Some("s3cr3t-tok".into()))
+        let wrong = app_with_auth(ExecAuth::bearer("s3cr3t-tok").expect("non-empty token"))
             .oneshot(exec_request_authed(ok_body(), Some("wrong-tok")))
             .await
             .unwrap();
@@ -274,7 +291,7 @@ fn configured_token_gates_exec_with_the_bearer() {
             StatusCode::UNAUTHORIZED,
             "wrong bearer → 401"
         );
-        let good = app_with_auth(Some("s3cr3t-tok".into()))
+        let good = app_with_auth(ExecAuth::bearer("s3cr3t-tok").expect("non-empty token"))
             .oneshot(exec_request_authed(ok_body(), Some("s3cr3t-tok")))
             .await
             .unwrap();
@@ -286,20 +303,70 @@ fn configured_token_gates_exec_with_the_bearer() {
     });
 }
 
-/// C2b back-compat: no token configured ⇒ served without auth (the container
-/// boundary + Worker bearer remain the primary gates), byte-identical to today.
+/// WP-9c — the LIBRARY fails closed, not just the binary.
+///
+/// This is the regression gate for the hardening: it fails if anyone restores
+/// an `app_with_auth(None)`-shaped open router, or drops the
+/// [`ALLOW_UNAUTH_ENV`] opt-in from the unauthenticated constructor.
+///
+/// Serialized on [`ENV_LOCK`] because it mutates the process-wide opt-in var.
 #[test]
-fn unconfigured_token_serves_without_auth() {
-    block_on(|| async {
-        unsafe { std::env::set_var("TOOLCHAIN_DIR", std::env::temp_dir()) };
-        let r = app_with_auth(None)
-            .oneshot(exec_request_authed(ok_body(), None))
-            .await
-            .unwrap();
-        assert_eq!(
-            r.status(),
-            StatusCode::OK,
-            "no token configured → /exec served without auth (back-compat)"
-        );
-    });
+fn library_refuses_an_unauthenticated_router_without_the_explicit_opt_in() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+    // SAFETY: the env mutations below are serialized by ENV_LOCK, and no other
+    // test in this suite reads AUTH_TOKEN_ENV / ALLOW_UNAUTH_ENV.
+    unsafe {
+        std::env::remove_var(ALLOW_UNAUTH_ENV);
+        std::env::remove_var(AUTH_TOKEN_ENV);
+    }
+
+    // 1. No opt-in ⇒ the unauthenticated posture is UNCONSTRUCTIBLE. There is
+    //    no `None` to pass instead: `app_with_auth` takes an `ExecAuth`, so the
+    //    old open-by-omission call no longer compiles.
+    assert_eq!(
+        ExecAuth::unauthenticated_opt_in().unwrap_err(),
+        ExecAuthError::UnauthenticatedNotOptedIn,
+        "no token + no opt-in must refuse, never yield an open /exec"
+    );
+
+    // 2. …and the env-driven entry point refuses for the same reason, so a
+    //    caller cannot reach an open router by going through `app()` either.
+    assert_eq!(
+        app().err(),
+        Some(ExecAuthError::UnauthenticatedNotOptedIn),
+        "app() must fail closed with no token and no opt-in"
+    );
+
+    // 3. An EMPTY token is not a gate and is refused too.
+    assert_eq!(
+        ExecAuth::bearer("").unwrap_err(),
+        ExecAuthError::EmptyToken,
+        "an empty bearer must not be accepted as a gate"
+    );
+
+    // 4. WITH the explicit opt-in the unauthenticated posture is available —
+    //    the escape hatch still exists, it is just no longer the default.
+    unsafe { std::env::set_var(ALLOW_UNAUTH_ENV, "1") };
+    assert!(
+        ExecAuth::unauthenticated_opt_in().is_ok(),
+        "the explicit opt-in must still yield the unauthenticated posture"
+    );
+    assert!(
+        app().is_ok(),
+        "app() must build once the opt-in is explicitly set"
+    );
+
+    // 5. A configured token wins over the opt-in and stays authenticated.
+    unsafe { std::env::set_var(AUTH_TOKEN_ENV, "from-env-tok") };
+    let auth = ExecAuth::from_env().expect("token configured");
+    assert!(
+        auth.is_authenticated(),
+        "a configured token must produce the AUTHENTICATED posture"
+    );
+
+    unsafe {
+        std::env::remove_var(ALLOW_UNAUTH_ENV);
+        std::env::remove_var(AUTH_TOKEN_ENV);
+    }
 }
