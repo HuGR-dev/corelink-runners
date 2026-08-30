@@ -132,7 +132,7 @@ export class RunnerDevEnvDO extends Container<any> {
         CLW_TOKEN: payload.config.clwToken,
         WORKSPACE_NAME: payload.config.workspaceName,
         PROFILE_NAME: payload.config.profileName,
-        EXEC_SERVER_TOKEN: this.execToken,
+        EXEC_SERVER_AUTH_TOKEN: this.execToken,
         SESSION_UUID: sessionUuid,
         BILLING_TENANT_UUID: payload.config.clwTenant,
       };

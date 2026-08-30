@@ -39,7 +39,7 @@ vi.mock("@cloudflare/containers", () => {
         // Simulate exec-server on 9090
         if (port === 9090 || url.port === "9090") {
           const reqHeader = typeof req === "string" ? null : ((req as Request).headers?.get("X-Exec-Token") || (req as Request).headers?.get("x-exec-token"));
-          if (this.envVars.EXEC_SERVER_TOKEN && reqHeader && reqHeader !== this.envVars.EXEC_SERVER_TOKEN) {
+          if (this.envVars.EXEC_SERVER_AUTH_TOKEN && reqHeader && reqHeader !== this.envVars.EXEC_SERVER_AUTH_TOKEN) {
             return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 });
           }
           if (url.pathname === "/clw" || url.pathname === "/exec") {

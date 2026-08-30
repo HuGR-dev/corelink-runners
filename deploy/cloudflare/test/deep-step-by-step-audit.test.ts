@@ -62,11 +62,11 @@ vi.mock("@cloudflare/containers", () => {
           
           recordTrace(7, "RustExecServer:9090", "token_challenge", { 
             headerReceived: reqHeader ? `${reqHeader.substring(0, 8)}...` : null, 
-            expectedToken: this.envVars.EXEC_SERVER_TOKEN ? `${this.envVars.EXEC_SERVER_TOKEN.substring(0, 8)}...` : null,
-            tokenMatch: reqHeader === this.envVars.EXEC_SERVER_TOKEN
+            expectedToken: this.envVars.EXEC_SERVER_AUTH_TOKEN ? `${this.envVars.EXEC_SERVER_AUTH_TOKEN.substring(0, 8)}...` : null,
+            tokenMatch: reqHeader === this.envVars.EXEC_SERVER_AUTH_TOKEN
           }, "INV-04: Strict loopback token authentication challenge");
 
-          if (this.envVars.EXEC_SERVER_TOKEN && reqHeader !== this.envVars.EXEC_SERVER_TOKEN) {
+          if (this.envVars.EXEC_SERVER_AUTH_TOKEN && reqHeader !== this.envVars.EXEC_SERVER_AUTH_TOKEN) {
             return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 });
           }
 
