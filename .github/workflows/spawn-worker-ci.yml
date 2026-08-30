@@ -63,8 +63,13 @@ jobs:
       # `continue-on-error` and deliberately NOT filtered to changed files: the
       # placement logic is one state machine and a change anywhere in it can
       # strand a customer's job somewhere else.
-      - name: Test (vitest)
-        run: npm run test
+      - name: Test (vitest) + coverage floor
+        # `test:coverage` is `vitest run --coverage`. The `--coverage` half is
+        # LOAD-BEARING: vitest evaluates the `coverage.thresholds` block in
+        # vitest.config.ts ONLY when the provider is enabled, so reverting this
+        # to `npm run test` would disarm the floor without failing anything.
+        # Exit code is vitest's own (no pipe, no `|| true`).
+        run: npm run test:coverage
 
       # A suite that silently stops collecting tests would pass vacuously — the
       # exact shape this workflow exists to prevent. Assert the count is in the
