@@ -1,6 +1,6 @@
 # Go-Live Remediation Plan — from the 2026-08-30 ultra audit to a working go-live
 
-**Baseline:** `8631abb` (#522) · **Authored:** 2026-08-30 · **Revision: rev-3**
+**Baseline:** `8631abb` (#522) · **Authored:** 2026-08-30 · **Revision: rev-4**
 **Sources:** the 247-finding ultra audit (`wf_31696fc3-c08`, 53 agents / 17 dimensions, 33/33
 CRITICAL+HIGH adversarially confirmed) **∪** the in-repo 2026-08-25 comprehensive audit
 (`docs/audits/2026-08-25-comprehensive-audit.md`), which contains at least one HIGH-class risk the
@@ -104,14 +104,15 @@ is tracked separately until T0-W1 assigns it.
 
 ---
 
-## 3. The acceptance suite (rev-3 — the completeness anchor)
+## 3. The acceptance suite (the completeness anchor)
 
 Kinds: `test:` (repo runner, red now → green after) · `probe:` (live, recorded artifact under
 `docs/plan/evidence/`) · `judged:` (owner decision, never auto-greened).
 
 rev-2 had 48 items. The cold suite-critic refuted its completeness with 26 gaps and 9 unfalsifiable
-items; all were accepted (§12). **rev-3 has 80.** The rev-2 → rev-3 delta is where the real
-go-live risk was hiding, so it is marked ★.
+items; all were accepted (§12), and rev-4 added 3 more for WPs that owned none. **The suite is 75
+live items** (counted mechanically — see the note under the tables). The rev-2 → rev-3 delta is where
+the real go-live risk was hiding, so it is marked ★.
 
 ### C1 — control plane
 
@@ -222,7 +223,18 @@ go-live risk was hiding, so it is marked ★.
 | ★A7.4 | test | every present-tense capability claim cites a dated artifact id — rev-2's linter only caught claims naming a config key, which is a **minority** of the overclaim class ("the moat is live", "cache-warm boot", benchmark numbers) |
 | ★A7.5 | test | each recorded probe artifact carries the version id/digest it was taken against, and that value matches what is deployed |
 
-**80 items — 76 `test`/`probe`, 4 `judged` (A4.9, A5.1, A7.3, + D-level sign-off).**
+**75 items — 72 `test`/`probe`, 3 `judged` (A4.9, A5.1, A7.3), plus 2 withdrawn rows (A2.2, A5.7).**
+*(rev-3 printed "80 — 76/4". Counted mechanically at rev-4: 74 rows, 72 live, 42 `test` + 26 `probe`
++ 1 `test+probe` + 3 `judged`; rev-4 then adds A0.1, A0.2 and A6.15 → 75 live. An unverified count in
+my own headline is exactly the class of claim this plan forbids elsewhere.)*
+
+### Items added at rev-4 (WPs that had none)
+
+| id | kind | item | owner |
+|---|---|---|---|
+| **A0.1** | test | a union ledger maps **every** 2026-08-25 catalog finding to a 2026-08-30 id or a new id; the check fails if any is unmapped | T0-W1 |
+| **A0.2** | test | the devenv subsystem passes the **full** gate with its tests executing and inside the coverage numerator — the gates #517 bypassed are re-run over the merged code | T9-W0 |
+| **A6.15** | test | every CI lane that runs `vitest` runs it with `--coverage` (the deploy-path job does not) | T6-W1 |
 
 **Freeze order (obligation):** T0-W1 (union reconciliation) → re-run the cold suite-critic on the
 union → **then** freeze the suite → **then** capture the baseline
@@ -264,7 +276,7 @@ WAIVER (human-authorized) — <what is loosened/deferred>
 
 | WP | owns | notes |
 |---|---|---|
-| **T0-W1** union-catalog reconciliation | `hist-20` + the RH-delta | maps every 2026-08-25 finding to a 2026-08-30 id or a **new** id; re-verifies stale citations (RH3). **Blocks the suite freeze.** |
+| **T0-W1** union-catalog reconciliation | **A0.1** (+ `hist-20`, the RH-delta) | maps every 2026-08-25 finding to a 2026-08-30 id or a **new** id; re-verifies stale citations (RH3). **Blocks the suite freeze.** |
 | **T1-W1** fabricd preflight + triage runbook | A1.4 | delivers a *classifier* (boot-FATAL · image-pull · port-bind · Access-403), never a guess |
 | **T2-W1a** devenv build lane (repo half) | A2.1 | authors the third build+push job; the **dispatch** needs CF credentials → **O-DEVENV-PIN** |
 | **T2-W2a** image-pin freshness tripwire | A2.3 | per-image **narrow** source-path lists; report-only until T2-W2b lands, else it is red on every PR |
@@ -272,32 +284,56 @@ WAIVER (human-authorized) — <what is loosened/deferred>
 
 ### Wave 1 — parallel, partitioned by **named file** (32 findings)
 
-`crates/corelink-cloud-engine/**` → T3-W1 (A3.1 A3.7) · `crates/corelink-fabric-server/**` →
-**one** WP T3-W4 (A3.6 **A4.4 A4.5** — rev-2 put these in `corelink-fabric` and would have collided)
-· `crates/corelink-fabric/**` → T4-W3 · `scripts/*.selftest.sh` + `scripts/pre-merge-gate-check.sh`
-+ `ci.yml` + new `selftests.yml` → T6-W1 (A6.1 A6.2) · moat workflows + `actions/corelink-memoize/action.yml`
-→ T6-W2 (A6.3) · new `conformance.yml` + `spawn-worker-ci.yml` path filter + `sdk/**` tests → T6-W3
-(A6.4) · **new** T6-W8 for A6.8 (pg lane — runner + Postgres pre-decided) · new `secret-scan.yml` +
-`corelink-stress.yml` + `cloudflare-canary/**` → T6-W4 (A6.5 A6.9 A6.10) · `docs/onboarding/` +
-`actions/corelink-memoize/README.md` → T5-W1 (A5.3) · **`integrations/**`** → T5-W2 (A5.2 A5.4 A5.5)
-· `ROADMAP.md` + `CHANGELOG.md` → T7-W1 (A7.2) · `docs/**` split by subtree, excluding
-`docs/plan/**`, `docs/handoff|review|audits`, and `deploy/cloudflare-canary/README.md` → T7-W2/W3
-(A7.1 A7.4 A7.5) · **closer** T2-W3 (A2.6, all 10 pins pre-resolved in the packet).
+| WP | owns | exclusive files (the X) | model | budget | dep |
+|---|---|---|---|---|---|
+| **T3-W4** | A3.6 A4.4 A4.5 | `crates/corelink-fabric-server/**` | sonnet | 120K/300K | D1 |
+| **T4-W4** *(serial after T3-W4 — same crate)* | A4.11 A4.13 | `crates/corelink-fabric-server/**` | sonnet | 120K/300K | T3-W4 · D1 · **R1** |
+| **T6-W1** | A6.1 A6.2 A6.15 | `scripts/*.selftest.sh`, `scripts/pre-merge-gate-check.sh`, `.github/workflows/ci.yml`, new `selftests.yml` | sonnet | 120K/300K | — |
+| **T6-W2** | A6.3 | `moat-benchmark.yml`, `moat-action-test.yml`, `actions/corelink-memoize/action.yml` | sonnet | 120K/300K | — |
+| **T6-W3** | A6.4 | new `conformance.yml`, `spawn-worker-ci.yml` (path filter only), `sdk/**` test/CI files | sonnet | 120K/300K | — |
+| **T6-W8** | A6.8 | new `pg-suite.yml` + `crates/corelink-fabric/**` test cfg | sonnet | 120K/300K | — |
+| **T6-W4** | A6.5 A6.9 A6.10 | new `secret-scan.yml`, `corelink-stress.yml`, `deploy/cloudflare-canary/**` (not its README) | sonnet | 120K/300K | — |
+| **T5-W1** | A5.3 | new `docs/onboarding/`, `actions/corelink-memoize/README.md` | sonnet | 120K/300K | — |
+| **T5-W2** | A5.2 A5.4 A5.5 | `integrations/**`, `release.yml`, `sdk/python/pyproject.toml` | sonnet | 120K/300K | D3 · O-PUBLISH |
+| **T7-W1** | A7.2 | `docs/ROADMAP.md`, `CHANGELOG.md` | sonnet | 120K/300K | T0-W1 |
+| **T7-W2** | A7.1 | `docs/**` minus `plan/`,`handoff/`,`review/`,`audits/`; `deploy/**/README.md` minus canary | opus | 300K/800K | — |
+| **T7-W3** | A7.4 A7.5 | new `scripts/ci/claim-artifact-lint.sh` + `docs/plan/evidence/` schema | sonnet | 120K/300K | — |
+| **T9-W0** | A0.2 | `deploy/cloudflare/vitest.config.ts`, `deploy/cloudflare/test/devenv-do.test.ts` | sonnet | 120K/300K | — |
+| **T2-W3** *(closer)* | A2.6 | **every** `.github/workflows/*.yml` | haiku | 40K/100K | all workflow WPs merged |
 
-### Wave 2 — SERIAL on `index.ts`/`lib.ts` (19 findings)
+**T4-W3 is deleted.** rev-3 left it owning `crates/corelink-fabric/**` with **zero items** after
+A4.4/A4.5 correctly moved to `corelink-fabric-server`. A WP with nothing to prove is unfalsifiable;
+`corelink-fabric` work that remains is `fabric-core-06` (owned by T6-W8) and Wave-4 items.
 
-`T4-W1` (A4.1) → `T4-W2` (A4.2 A4.3 A4.6) → `T3-W3` (A3.5 ★A3.11) → `T3-W2` (A3.2 A3.3 A3.4
-★A3.10 ★A3.12) → **★T8-W1** (★A3.14 ★A3.15 ★A3.16 — the RH-class: silent cold-degrade alarm, token
-scoping, admission fail-open) → `T9-W1` devenv quarantine (A3.8 A4.8, **D2**).
+### Wave 2 — SERIAL on `index.ts` / `lib.ts` (19 findings)
 
-`A3.1`/`A3.2` are one coupled wire change and are **re-cut as a single WP** spanning
-`corelink-cloud-engine` + `index.ts`, because rev-2 split them across waves in the wrong order and
-closed the Rust crate first.
+| # | WP | owns | scope |
+|---|---|---|---|
+| 1 | **T4-W1** | A4.1 | `index.ts` |
+| 2 | **T4-W2** | A4.2 A4.3 A4.6 | `index.ts` + `lib.ts` |
+| 3 | **T3-W3** | A3.5 A3.11 | `lib.ts` reconciler + `index.ts` |
+| 4 | **T3-W1** *(re-cut)* | A3.1 A3.2 A3.7 | `crates/corelink-cloud-engine/**` **+** `index.ts` — one coupled wire change; rev-3 split it across waves and closed the Rust side first |
+| 5 | **T3-W2** | A3.3 A3.4 A3.10 A3.12 | `index.ts` + `metrics.ts` + `lib.ts` |
+| 6 | **T8-W1** | A3.14 A3.15 A3.16 | the RH-class: silent cold-degrade alarm · spawn-token scoping · admission fail-open |
+| 7 | **T8-W2** | A3.13 | cross-tenant CAS isolation + per-job credential scope/TTL |
+| 8 | **T9-W1** | A3.8 A4.8 | devenv quarantine — **D2** |
 
 ### Wave 3 — live proof (20 findings)
 
-A1.1 A1.2 A1.3 ★A1.5 ★A1.6 ★A1.7 · A2.4 A2.5 ★A2.7 ★A2.8 ★A2.9 ★A2.10 · ★A3.9 (the moat) ·
-A4.7 ★A4.10 ★A4.12 · A5.6 ★A5.8 ★A5.9 · A6.6 A6.7 A6.11 ★A6.12 ★A6.13 ★A6.14 · ★A7.5.
+| WP | owns | dep |
+|---|---|---|
+| **T1-W2** | A1.1 A1.2 A1.3 A1.5 | O1 |
+| **T1-W3** | A1.6 A1.7 | O1 · T2-W2b |
+| **T2-W2b** | A2.4 A2.5 A2.7 A2.10 | W0 · O1 |
+| **T2-W4** | A2.8 A2.9 | T2-W2b |
+| **T3-W7** | A3.9 *(the moat — COLD miss → WARM hit on a real job)* | O1 · T2-W2b |
+| **T4-W7** | A4.7 A4.10 A4.12 | O-BILLING · R1 · R2 |
+| **T5-W4** | A5.6 A5.8 A5.9 | D3 · D8 · R3 |
+| **T6-W5** | A6.7 | O1 |
+| **T6-W6** | A6.6 A6.13 A6.14 | O-CANARY · canary deploy |
+| **T6-W7** | A6.11 | T2-W2b |
+| **T6-W9** | A6.12 | T6-W6 |
+
 Every `C4-unverified-claim` finding rev-2 had parked in CLEAN (`fabricd-deploy-11`, `spawn-cf-15`,
 `deploy-14`, `fabric-core-16`, `billing-money-path-14`, `fabricd-09`) is now here — calling an
 unverified claim a "positive result" is the exact overclaim the repo's skeptic rule forbids.
@@ -436,3 +472,134 @@ Self-inspection found real defects at both iterations, and the cold reviews then
 self-inspection could not — including three vacuous items and a change that would have broken a
 frozen cross-repo contract. That asymmetry is the argument for running the second round before any
 dispatch.
+
+---
+
+## 13. Invariants (L2 charter — HARD REJECT, never delegated, never relaxed)
+
+rev-3 had none. That is why rev-2's A4.6 nearly shipped a change that would have broken the frozen
+cross-repo region vector: it was caught by a reviewer's attention, not by a structural gate. These
+are the project's non-negotiables, lifted from `CLAUDE.md` and the repo's own discipline. **Each WP's
+dispatch packet names the invariants live for it. A violation is a HARD REJECT, not a FIX-FIRST —
+the work is re-dispatched, never patched forward.**
+
+| id | invariant | mechanized by |
+|---|---|---|
+| **INV-1** | **Wire-contract law.** Types are transcribed on each side; no crate/git/path dependency crosses a repo; `conformance/*.json` + `manifest.sha256` stay byte-identical with corelink-server. Touching a wire type or a vector requires both-sides reconciliation **before** merge. | golden tests both sides · `deny.toml` (crates.io only) |
+| **INV-2** | **X4 immutable-digest floor.** Every container image and every third-party action is pinned by digest/SHA. A mutable tag is never acceptable, not even temporarily. | A2.1 · A2.6 · A2.3 |
+| **INV-3** | **Fail-closed.** No route answers before its auth gate. An absent/unreadable entitlement never resolves to unlimited. A broker failure spawns COLD and never leaks a raw PAT into an untrusted container. | A3.14 · A4.4 · A3.13 · route-order sweep |
+| **INV-4** | **Pricing law.** Flat concurrency, never per-minute. The customer's own compute is never billed twice. | A4.11 · A4.12 |
+| **INV-5** | **Tense discipline.** No production-state claim without a dated artifact that names the version it was taken against. Dedup is intra-tenant at GA — the cross-tenant overclaim is never propagated. | A7.4 · A7.5 |
+| **INV-6** | **Session fence.** No mutation outside this repo. Cross-repo work leaves as a committed handoff artifact, never as an edit. | `.claude/hooks/forbid-sibling-paths.py` |
+| **INV-7** | **No gambiarra.** No `#[allow]`, no `--no-verify`, no skipped test, no bypassed gate, no "fix it later". A failing gate is fixed at the root or the work does not merge. | pre-merge gate · A0.2 · A6.1 |
+| **INV-8** | **Secret hygiene.** Secrets never enter an untrusted container env and never appear in a log, `Debug` rendering, or error string. | A3.7 · A3.15 · A6.5 |
+
+**Standing rule:** the lead never authorizes its own waiver. Only a human does, in the §4 form.
+
+---
+
+## 14. Verification levels and checklists (instantiated for this stack)
+
+rev-3 said "reproduced cold by the lead" once and never defined what is checked. This is the
+definition. Applied at every SEAL, every merge, every deploy.
+
+| L | level | this stack | fail action |
+|---|---|---|---|
+| **L0** | sanity | the SEAL commit exists; HEAD's parent == the pinned baseline; the claimed test count reproduced **cold by the lead** | REJECT — re-dispatch |
+| **L1** | build + lint | `cargo fmt --check` · `clippy --workspace --all-targets --locked -D warnings` · `tsc --noEmit`; no smuggled `#[allow]` / `eslint-disable` | FIX-FIRST |
+| **L2** | **invariants** | §13 — each invariant named in the packet, verified in the diff | **HARD REJECT** |
+| **L3** | security | authz on every new entrypoint; no secret in a log or `Debug`; brokered credential scoped per job | **HARD REJECT** |
+| **L4** | test quality | tests assert behavior and values, never `is_ok()` / no-throw; the owned acceptance items actually go red→green | FIX-FIRST |
+| **L5** | docs | every new public surface documented; an architectural change carries an ADR | FIX-FIRST |
+| **L6** | spec hygiene | `cargo deny check` · `cargo audit --deny warnings` · conformance goldens both sides; migrations additive | FIX-FIRST |
+| **L7** | merge hygiene | DAG order respected; zero conflict markers; green post-merge; test counts preserved | HARD REJECT |
+| **L8** | decision record | merge record written; follow-ups filed with ids; ROADMAP ledger updated (A7.2) | — |
+| **L9** | **risk, before any deploy** | what is mocked? what is human-bound? worst case if this ships with one bug? | **STOP** on data-loss / breach / revenue-loss |
+| **L10** | rolling hygiene | every ~5 merges: prune worktrees, **check disk** (a full disk yields partial builds reported as success — this bit us at rev-4), validator trend | — |
+
+**V1 pre-dispatch** (all binary; one `no` blocks): sized sweet · **zero decisions left to the agent** ·
+disjoint or contract-bound · target marked with the X · (model, budget) assigned · DoD ≤8 bullets ·
+return-shape + exact gate command given · baseline SHA pinned.
+
+**V1 pre-SEAL:** `BASELINE_VERIFIED` echoed · SEAL commit at HEAD · gate reproduced **cold by the
+lead** · every DoD bullet satisfied · **only** the owned files changed · frozen contract matched ·
+no banned construct · docs on every new public surface.
+
+**V2 PR · V3 hygiene:** as in `techlead-verify`, with V3's disk check promoted to mandatory.
+
+---
+
+## 15. The dispatch packet (one per WP — this is what was missing)
+
+No WP is dispatched without this filled in. rev-3 had none, which meant no return-shape (so the lead
+would absorb the agent's dump — anti-pattern AP-2), no per-WP DoD, and no invariant binding.
+
+```
+WP <id> — <one-line intent>            baseline: 8631abb   model: <m>   budget: <in>/<total>
+OWNS (acceptance items) : <ids — these and only these go red→green>
+THE X (exclusive files)  : <exact paths; nothing outside them may change>
+INVARIANTS LIVE          : <INV-ids from §13 — violation is HARD REJECT>
+PRE-DECIDED FORKS        : <every fork the agent would otherwise resolve, decided here>
+DoD (<=8, checkable)     : 1..8
+GATE (run verbatim)      : cargo fmt --check && cargo clippy --workspace --all-targets --locked -- -D warnings
+                           && cargo test --workspace --locked && cargo deny check && cargo audit --deny warnings
+                           [+ npx tsc --noEmit && npx vitest run --coverage  for worker/TS WPs]
+RETURN CARD (exact)      : WP=<id> BASELINE_VERIFIED=<sha> SEAL=<sha>
+                           ITEMS=<id:red-to-green,...> GATE=<pass|fail> FILES=<n changed>
+                           DEVIATIONS=<none|...>
+```
+
+**Per-WP DoD — the bullets that differ from the global gate.** Everything below is *in addition to*
+the global gate in §8; the global gate is never restated per WP.
+
+| WP | invariants live | DoD bullets specific to this WP |
+|---|---|---|
+| **T0-W1** | INV-5, INV-6 | union ledger committed · every 2026-08-25 finding mapped or assigned a new id · RH3's stale citation re-verified at HEAD or marked unreproducible · the check fails on an unmapped finding |
+| **T1-W1** | INV-5 | classifier distinguishes all four failure modes on fixtures · never mutates live state · runbook cites the exact command per mode |
+| **T2-W1a** | INV-2 | devenv build job mirrors the RunnerContainer job · guard test covers **all three** `wrangler.jsonc` files · no mutable tag introduced anywhere |
+| **T2-W2a** | INV-2, INV-5 | per-image source-path list is **narrow** and declared · gate is report-only until T2-W2b · never blocks a PR before the fabricd rebuild |
+| **T3-W4** | INV-1, INV-3 | ceiling parse fails **closed**; sentinel 0 no longer conflates unmetered with unreadable · every terminal path stamps the durable acquire before emitting · no blocking I/O on the async executor |
+| **T4-W4** | INV-3, INV-4 | ceiling enforcement ships behind a default-off flag until R1 lands — **fail-closed with the field absent would refuse every tenant** |
+| **T4-W1/W2** | INV-1, INV-4 | region stays **lowercase 3-char** (the frozen vector) · chunking respects the server batch cap · no path emits an event the ingest rejects |
+| **T3-W1** | INV-1 | `mode` on both teardown and status · the worker's non-2xx teardown and the engine's status branching land in the **same** commit · no request body rendered in any log |
+| **T8-W1** | INV-3, INV-8 | the warm-to-cold degrade emits a counter **and** raises an alarm · spawn authority is scoped per domain and rotatable · admission never admits unboundedly on a DO error |
+| **T9-W1** | INV-7 | quarantine of two HIGH-CONFIRMED findings requires a **waiver entry** before merge · coverage floor re-measured in the same PR (margin is 5.46 points) |
+| **T7-W1/W2/W3** | INV-5 | ledger ids immutable — a finding cannot be greened by renaming or closing it · dated `handoff/review/audits` records excluded by a **stated** policy |
+| **T2-W3** | INV-2 | all 10 SHAs pre-resolved in the packet — the agent never fabricates or looks up a SHA |
+| **all Wave-3 WPs** | INV-5 | every probe artifact carries the deployed version id/digest it was taken against (A7.5) · a probe that cannot be recorded is **not** green |
+
+---
+
+## 16. rev-4 change log
+
+Answering "do all WPs have completeness criteria, invariants, DoDs and quality standards?" — they
+did not. What was missing and is now closed:
+
+1. **Completeness criteria.** T0-W1 and T4-W3 owned zero acceptance items; all 25 Wave-3 items had no
+   WP at all; T7-W2/W3 jointly owned three items (not disjoint). Fixed: A0.1, A0.2, A6.15 authored;
+   Wave 3 given 11 named WPs; T7-W2/W3 split; **T4-W3 deleted** rather than given invented work.
+2. **Invariants.** Did not exist anywhere. Added §13 as an L2 hard-reject gate, bound per WP.
+3. **DoD.** Only the global gate existed (correct, per doctrine) — but no per-WP bullets, no
+   return-shape, no baseline pin, and rev-3 had lost the model/budget column entirely. Added §15.
+4. **Quality standards.** "Reproduced cold by the lead" was asserted once and never defined. Added
+   §14 (L0-L10 instantiated, V1/V2/V3), with V3's disk check promoted to mandatory after a full disk
+   blocked this session's tooling — the exact failure mode where a partial build reports success.
+5. **The item count in my own headline was wrong** (claimed 80/76/4; actual 72 live before rev-4's
+   additions). Corrected and now counted mechanically.
+
+**Mechanized, so it cannot rot back:** `docs/plan/wp-check.py` parses the item ids out of this
+document and blocks unless every live item is owned by exactly one WP (or is `judged` → owner), no WP
+owns zero items, none exceeds the 4-item sweet-spot ceiling, every WP declares at least one
+invariant, and no two **parallel** WPs share an exclusive scope (the Wave-2 serial chain is exempt by
+explicit decision). Current result:
+
+```
+suite rows 77 · live 75 · withdrawn ['A2.2', 'A5.7']
+WPs 37 · items owned 72 · judged->owner ['A4.9', 'A5.1', 'A7.3']
+items per WP: min 1 max 4
+wp-check: PASS — every item owned once, every WP falsifiable
+```
+
+Together with `docs/plan/plan-check.py` (247/247 findings, total and disjoint), the two structural
+claims this plan makes about itself are now machine-checked rather than asserted. What remains
+asserted — and therefore still owed — is §11.
