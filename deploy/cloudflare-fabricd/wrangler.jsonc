@@ -264,7 +264,14 @@
       // concurrent provisions can't peg the box (paired with the FABRIC_PROVISION_
       // MAX_INFLIGHT gate that bounds concurrent provisions). Multi-instance (now
       // pg-enabled) is the next scaling step — see README "Known limit".
-      "instance_type": "standard-2",
+      // ⚠️ 2026-08-30 BISECT — was "standard-2". Every OTHER container app on this
+      // account declares "standard-4" (deploy/cloudflare/wrangler.jsonc:211,256,278)
+      // and all of them are healthy; fabricd was the only "standard-2" app and the
+      // only one that will not boot. With the image, the config, the instance and
+      // the DO placement all excluded, the shape is the last cheap variable. If this
+      // boots, the finding is that standard-2 is unusable on this account/colo — and
+      // the steady value becomes a deliberate cost decision, not a silent bump.
+      "instance_type": "standard-4",
       // ⚠️ Raise in LOCKSTEP with `vars.FABRIC_NUM_SHARDS` — the shard fan-out
       // needs one container instance per shard. N>1 is a separate owner-gated flip.
       "max_instances": 1
