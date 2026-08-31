@@ -28,4 +28,16 @@ COPY --from=builder /build/target/release/corelink-fabricd /usr/local/bin/coreli
 
 EXPOSE 8080
 
-ENTRYPOINT ["corelink-fabricd"]
+# ABSOLUTE path, deliberately (2026-08-31). The exec-form ENTRYPOINT is exec'd
+# directly — there is no shell, so a BARE name relies on the runtime resolving it
+# through the image config's PATH. Both container images that demonstrably start on
+# this account name their entrypoint absolutely
+# (`/entrypoint.sh`, `/opt/actions-runner/entrypoint.sh`); fabricd was the only one
+# using a bare name, and it is the only one whose container never runs: no
+# `onStart`, no exit code recorded (the `exitCode: 0` seen in the Worker is
+# @cloudflare/containers' hardcoded placeholder for "stopped with no code" —
+# dist/lib/container.js:1597 — not a real successful exit), and an empty
+# `health.errors` because nothing ever crashed. A failed exec produces exactly that
+# signature. The binary is copied to this path immediately above, so naming it in
+# full costs nothing and removes the dependency entirely.
+ENTRYPOINT ["/usr/local/bin/corelink-fabricd"]
