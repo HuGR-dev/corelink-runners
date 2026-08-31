@@ -1744,8 +1744,22 @@ async function driveSpawn(
   if (mint.authz === "forbidden") {
     await releaseSpawnClaim(env.RUNNER_JOB_PATS, jobId);
     await bumpMetrics(env, "spawn_forbidden");
-    logEvent("error", "mint_forbidden", { jobId, repo });
+    logEvent("error", "mint_forbidden", { jobId, repo, ...(mint.coldReason ? { coldReason: mint.coldReason } : {}) });
     return;
+  }
+  // ★A3.17 — an operator misconfiguration must not hide inside the ordinary cold
+  // path. `mint_key_unarmed` means OUR key is missing and EVERY job on the fleet is
+  // spawning tenantless and unattributed; `no_installation_or_pat` is the expected
+  // cold spawn for any repo outside REPO_INSTALLATION_MAP and is not a fault. They
+  // used to be the same silent return, so the first was invisible. Only the
+  // misconfiguration is logged at `error`.
+  if (mint.coldReason) {
+    logEvent(
+      mint.coldReason === "mint_key_unarmed" ? "error" : "info",
+      "spawn_cold",
+      { jobId, repo, coldReason: mint.coldReason },
+    );
+    await bumpMetrics(env, `spawn_cold_${mint.coldReason}`);
   }
   // F2 (W3): register the revoke-key jobId->patId at MINT time — BEFORE the spawn.
   // Previously it was written only AFTER a successful container start (spawnRunner),
