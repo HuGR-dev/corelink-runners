@@ -225,7 +225,25 @@
       // key against live introspect and passes. @sha256 DIGEST-PINNED (X4), built by
       // build-fabricd-image.yml (run 32303677887, git e5f07f8 = Inc-3 CF Access
       // service-token headers on /internal/v1/*). SUPERSEDES 5eed854a.
-      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer@sha256:db3b03ef829e21d203e1a5ac003a724fe1319eb271d849bd88178f080b468c3d",
+      // 2026-08-30 OUTAGE REBUILD (8631abb): fabricd carrying #514 (stop reaping a
+      // live box's last handle; unpin the async executor) + #515 (stop the
+      // reconciler racing live spawns; close the anonymous diag sink) — verified to
+      // be the ONLY two crate commits between the previous image's build commit
+      // (e5f07f8) and main. Built + pushed by build-fabricd-image.yml run
+      // 33347304356. Purpose is twofold: land the owed fixes, AND force a real
+      // CONTAINER ROLLOUT — the three Worker deploys of 2026-08-30 all reported
+      // "no changes to be made" for the container, so newly-forwarded envVars were
+      // never provably read by a started process (the singleton reads env at boot).
+      // ⚠️ PINNED BY GIT-SHA TAG, NOT @sha256 — a deliberate, SELF-CORRECTING
+      // deviation from the X4 digest floor. run 33347304356 emitted
+      // "::warning::Could not resolve an @sha256 digest (push output + imagetools
+      // both empty)", i.e. #400's imagetools resolution has REGRESSED. The tag is
+      // content-derived and CI-written-once, so it is deterministic in practice, but
+      // it is NOT the invariant. RE-PIN to @sha256 immediately after this deploy —
+      // `wrangler containers info <app-id>` reports the resolved digest once the
+      // rollout lands. Rollback: the previous pin was
+      // @sha256:db3b03ef829e21d203e1a5ac003a724fe1319eb271d849bd88178f080b468c3d.
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer:8631abb08a022fe2e0eef3b0f41ba784ab5d8287",
       // HTTP control plane. Bumped standard-1 → standard-2 (2026-07-07 acquire-storm
       // hardening): the single-flight singleton must keep /v1/health + lease ops
       // responsive under a burst of box provisions; 2 vCPU gives headroom so a few
