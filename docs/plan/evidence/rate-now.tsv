@@ -1,0 +1,6 @@
+ts	attempt	http	verdict	detail
+04:08:54	1	500	BOOT_FAILED	Failed to start container: The container is not running, consider calling start()
+04:09:14	2	500	BOOT_FAILED	Failed to start container: The container is not running, consider calling start()
+04:09:37	3	500	BOOT_FAILED	Failed to start container: The container is not running, consider calling start()
+04:09:58	4	500	BOOT_FAILED	Failed to start container: There has been an internal error connecting to the port
+04:10:17	5	500	BOOT_FAILED	Failed to start container: There has been an internal error connecting to the port
