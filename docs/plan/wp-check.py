@@ -45,6 +45,7 @@ WP = {
     "T3-W1":  (["A3.1", "A3.2", "A3.7"],     ["INV-1", "INV-8"], "worker(serial)",                2),
     "T3-W2":  (["A3.3", "A3.4", "A3.10", "A3.12"], ["INV-3"],    "worker(serial)",                2),
     "T8-W1":  (["A3.14", "A3.15", "A3.16"],  ["INV-3", "INV-8"], "worker(serial)",                2),
+    "T8-W3":  (["A3.17", "A3.18"],           ["INV-3", "INV-4"], "worker(serial)",                2),
     "T8-W2":  (["A3.13"],                    ["INV-3", "INV-8"], "worker(serial)",                2),
     "T9-W1":  (["A3.8", "A4.8"],             ["INV-7"],          "worker(serial)",                2),
     # wave 3 (live proof)

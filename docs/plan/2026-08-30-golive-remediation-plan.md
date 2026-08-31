@@ -99,8 +99,38 @@ this table is a summary.
 | CLEAN — no action | 21 | verified clean; the audit's genuine positive results |
 | DEFER — needs a waiver | 7 | ships only with a written waiver |
 
-**+ the union delta** (RH1/RH2/RH3 and whatever else T0-W1 surfaces), which has no ultra-audit id and
-is tracked separately until T0-W1 assigns it.
+### 2.3 The union delta — T0-W1 has run (`docs/plan/union-catalog-ledger.md`)
+
+The 2026-08-25 catalog holds **51 findings**. Against the 247:
+
+| disposition | n | meaning |
+|---|---|---|
+| MAPPED | 15 | the same defect, already carrying a 2026-08-30 id |
+| PARTIAL | 5 | covered in part; the uncovered half is named per row |
+| **NEW** | **30** | **no 2026-08-30 id covers it — `union-01` … `union-30`** |
+| CLOSED | 1 | M2, closed in code at `index.ts:3595-3622` (not by a CHANGELOG claim) |
+
+**The ultra audit missed 30 findings, five of them HIGH.** I verified all five in the code myself
+before adopting them, plus two MEDIUMs as a reliability sample — 7/7 confirmed exactly as reported:
+
+| id | HIGH finding | evidence |
+|---|---|---|
+| `union-01` | no mint key ⇒ `authz:"ok"` with an empty overlay: **every job spawns COLD, tenantless, unattributed, silently** | `lib.ts:495-505` |
+| `union-02` | one static bearer authorizes spawn · arbitrary-argv exec · status · teardown · egress-cutoff | `index.ts:709-714` |
+| `union-03` | a Durable-Object error on admission ⇒ `{ admitted: true }` — **fleet cap and paid entitlements both bypassed** | `index.ts:1650-1658` |
+| `union-04` | no boot self-check on the **mint** key (only the introspect key has one) — a wrong key boots "healthy" | `server.rs:1078` |
+| `union-05` | `claimSpawn` is a non-atomic `get`→`put` ⇒ cross-colo **double spawn**; `if (!kv) return true` fails open | `lib.ts:113-124` |
+
+T0-W1 also re-located **16 drifted citations** (the catalog was written five days before HEAD) and
+found no finding unreproducible in substance. RH3 in particular was cited at `index.ts:1608-1617`,
+which is now `releaseConcurrencySlot` — the real defect moved to `:1650-1658` and is still live.
+
+**Suite impact.** `union-02` and `union-03` were already covered — I had authored A3.15/A3.16 from
+the catalog at rev-3. Two new items added: **A3.17** (union-01 + union-04) and **A3.18** (union-05).
+
+**Still owed before the freeze:** the remaining **25 NEW (MEDIUM/LOW) and 5 PARTIAL** need a lead
+triage pass — bucket, wave, and acceptance item each. They are listed with proposed items in the
+ledger; they are *not* yet in the suite, and this plan does not claim otherwise.
 
 ---
 
@@ -160,7 +190,9 @@ the real go-live risk was hiding, so it is marked ★.
 | ★A3.13 | test | a job cannot reach another tenant's CAS namespace with its brokered credential, and that credential's scope/TTL is per-job |
 | ★A3.14 | test | a warm→**cold** degradation (mint 5xx ⇒ `authz:"ok"` empty overlay, `lib.ts:479`) emits a counter and raises an alarm — it is never silent |
 | ★A3.15 | test | spawn-control authority is **scoped per domain and rotatable** — one bearer cannot authorize `/v1/spawn` **and** arbitrary-argv `/v1/exec` **and** teardown (RH2, `index.ts:710`) |
-| ★A3.16 | test | a Durable-Object error on the admission path does **not** admit unboundedly (RH3 — re-verify at HEAD in T0-W1) |
+| ★A3.16 | test | a Durable-Object error on the admission path does **not** admit unboundedly — **RH3 re-located and CONFIRMED at HEAD by T0-W1**: `index.ts:1650-1658` `catch (e) { … return { admitted: true } }` in `acquireConcurrencySlot`, so any DO hiccup bypasses the fleet cap *and* paid entitlements |
+| ★A3.17 | test | the worker **refuses to serve `/webhook`** unless the mint key is armed, and a boot self-check fails loudly on a wrong key — today `!env.CORELINK_RUNNER_MINT_AUTH_KEY ⇒ return { authz: "ok", containerEnv: {} }` (`lib.ts:495-505`) silently spawns every job COLD, tenantless and unattributed, and only the *introspect* key has a boot check (`server.rs:1078`) *(union-01 + union-04)* |
+| ★A3.18 | test | the spawn claim is **atomic** — two concurrent deliveries of the same `workflow_job.queued` produce exactly one spawn; today `claimSpawn` is a non-atomic `get` → `put` (`lib.ts:113-124`) and `if (!kv) return true` fails open *(union-05)* |
 
 ### C4 — money
 
