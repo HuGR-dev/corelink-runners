@@ -398,7 +398,7 @@ export class FabricdContainer extends Container<Env> {
 // forces a new placement; if the container then boots, the cause was placement,
 // not this codebase. Lease state is pg-durable (DATABASE_URL), and this DO's own
 // storage holds only the `lastActivityMs` marker, so a rename loses nothing.
-export const SINGLETON = "fabricd-singleton-r2";
+export const SINGLETON = "fabricd-singleton-enam";
 
 /** Shard count N from the wrangler var, parsed to int; default 1. */
 function numShards(env: Env): number {
@@ -411,6 +411,33 @@ function numShards(env: Env): number {
  * for ALL k — byte-identical to today, NO container identity change (the inert
  * property). At n>1 each shard gets its own stable container id.
  */
+// ── PLACEMENT (2026-08-30 outage fix) ───────────────────────────────────────
+// A container Durable Object runs where the DO lives, and a DO is placed near
+// whoever first touched it. Every fabricd instance since 2026-08-19 landed in
+// `bog04` (traffic originates in South America) and NONE of them ever served —
+// across three images, several genuine container rollouts, a DO rename and a
+// machine-shape change. Meanwhile every HEALTHY container app on this account
+// runs in US colos (`ord02`, `ewr16`) and none in bog04.
+//
+// So the placement is not incidental to the outage; it is the one variable that
+// never changed. `locationHint` is honoured only when the DO is FIRST created,
+// which is why SINGLETON also carries a fresh suffix — an existing DO cannot be
+// relocated. `enam` puts the control plane next to corelink-api (BILLING_REGION
+// is already `iad`), which also shortens every introspect/mint round-trip.
+//
+// The hint is applied by wrapping the namespace rather than by replacing
+// `getContainer`, deliberately: `getContainer` stays the single seam the tests
+// mock, so this changes production placement without touching the test surface.
+const FABRICD_LOCATION_HINT: DurableObjectLocationHint = "enam";
+
+function placed(ns: DurableObjectNamespace<FabricdContainer>): DurableObjectNamespace<FabricdContainer> {
+  return {
+    ...ns,
+    idFromName: (name: string) => ns.idFromName(name),
+    get: (id: DurableObjectId) => ns.get(id, { locationHint: FABRICD_LOCATION_HINT }),
+  } as DurableObjectNamespace<FabricdContainer>;
+}
+
 function shardDoId(k: number, n: number): string {
   return n === 1 ? SINGLETON : `fabricd-shard-${k}`;
 }
@@ -469,7 +496,7 @@ async function listLeasesScatterGather(
   // N=1: byte-identical passthrough — no parse, no re-serialize. Still bounded by
   // the per-request timeout (a wedged singleton fails fast with a 503).
   if (N === 1) {
-    return proxyFetch(getContainer(env.FABRICD, shardDoId(0, 1)), request, applyTimeout);
+    return proxyFetch(getContainer(placed(env.FABRICD), shardDoId(0, 1)), request, applyTimeout);
   }
 
   const settled = await Promise.allSettled(
@@ -477,7 +504,7 @@ async function listLeasesScatterGather(
       // Bound each shard fetch so ONE wedged shard can't hang the whole gather:
       // a timed-out shard rejects → allSettled marks it "rejected" → skipped
       // (best-effort), exactly like a down shard below.
-      getContainer(env.FABRICD, shardDoId(k, N)).fetch(shardFanRequest(request, applyTimeout)),
+      getContainer(placed(env.FABRICD), shardDoId(k, N)).fetch(shardFanRequest(request, applyTimeout)),
     ),
   );
 
@@ -599,7 +626,7 @@ async function tenantMetricsScatterGather(
     Array.from({ length: N }, (_unused, k) =>
       // Bound each shard fetch (see listLeasesScatterGather) — a wedged shard is
       // skipped best-effort rather than hanging the whole gather.
-      getContainer(env.FABRICD, shardDoId(k, N)).fetch(shardFanRequest(request, applyTimeout)),
+      getContainer(placed(env.FABRICD), shardDoId(k, N)).fetch(shardFanRequest(request, applyTimeout)),
     ),
   );
 
@@ -835,7 +862,7 @@ export default {
       const modified = new Request(request);
       modified.headers.set("X-Fabricd-Num-Shards", String(N));
       modified.headers.set("X-Fabricd-Shard", String(k));
-      return proxyFetch(getContainer(env.FABRICD, shardDoId(k, N)), modified, applyTimeout);
+      return proxyFetch(getContainer(placed(env.FABRICD), shardDoId(k, N)), modified, applyTimeout);
     }
 
     // LEASE-LIST — GET the collection exactly (NOT /v1/leases/{id}). Each shard
@@ -871,7 +898,7 @@ export default {
       });
       // §9 trigger is long-lived (reuses the exec engine) → applyTimeout is false
       // here, so proxyFetch forwards unbounded + byte-identically.
-      return proxyFetch(getContainer(env.FABRICD, shardDoId(k, N)), forwarded, applyTimeout);
+      return proxyFetch(getContainer(placed(env.FABRICD), shardDoId(k, N)), forwarded, applyTimeout);
     }
 
     // GITHUB WEBHOOK — POST /webhooks/github drives the autoscaler's out-of-band
@@ -886,7 +913,7 @@ export default {
       const modified = new Request(request);
       modified.headers.set("X-Fabricd-Num-Shards", String(N));
       modified.headers.set("X-Fabricd-Shard", String(k));
-      return proxyFetch(getContainer(env.FABRICD, shardDoId(k, N)), modified, applyTimeout);
+      return proxyFetch(getContainer(placed(env.FABRICD), shardDoId(k, N)), modified, applyTimeout);
     }
 
     // TENANT METRICS — GET /v1/metrics/tenant reads per-instance in-memory
@@ -903,11 +930,11 @@ export default {
     const leaseId = leaseIdOf(pathname);
     if (leaseId !== null) {
       const k = shardOf(leaseId, N);
-      return proxyFetch(getContainer(env.FABRICD, shardDoId(k, N)), request, applyTimeout);
+      return proxyFetch(getContainer(placed(env.FABRICD), shardDoId(k, N)), request, applyTimeout);
     }
 
     // Everything else (/v1/health, /v1/attestation/key, …) → shard 0.
-    return proxyFetch(getContainer(env.FABRICD, shardDoId(0, N)), request, applyTimeout);
+    return proxyFetch(getContainer(placed(env.FABRICD), shardDoId(0, N)), request, applyTimeout);
   },
 
   async scheduled(_event: ScheduledController, env: Env): Promise<void> {
@@ -941,7 +968,7 @@ export default {
     // per container. At N=1 this is a single iteration = today's behaviour.
     for (let k = 0; k < N; k++) {
       const id = shardDoId(k, N);
-      const container = getContainer(env.FABRICD, id);
+      const container = getContainer(placed(env.FABRICD), id);
 
       // ── Zero-idle-cost gate ────────────────────────────────────────────────
       // Read the container-free activity marker (handled by FabricdContainer.fetch
