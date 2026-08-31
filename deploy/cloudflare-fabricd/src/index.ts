@@ -11,6 +11,7 @@
 
 import { DurableObject } from "cloudflare:workers";
 import { Container, getContainer } from "@cloudflare/containers";
+import type { StopParams } from "@cloudflare/containers";
 import { shardOf } from "./shard";
 
 export interface Env {
@@ -56,6 +57,21 @@ export interface Env {
   // fail-closes an armed ceiling on a non-pg backend, so the two are wired together.
   // Absent ⇒ in-memory ledger, no ceiling (unchanged dogfood behaviour). Secret.
   DATABASE_URL?: string;
+  // Kill-switch for the durable ledger, WITHOUT deleting the secret. "1" makes the
+  // DATABASE_URL block below behave as if the secret were absent, so the container
+  // boots on the in-memory ledger and stops dialling the database at all.
+  //
+  // It exists because `PgLedger::connect` fail-closes BEFORE `TcpListener::bind`:
+  // when the database refuses connections the control plane cannot start, the
+  // keep-warm cron retries every minute, and every retry is another connection
+  // attempt against a database that is already refusing. On a scale-to-zero
+  // provider that is worse than useless — a database woken every 60 s never
+  // autosuspends, so the crash loop itself consumes the compute allowance whose
+  // exhaustion caused the refusal in the first place.
+  //
+  // Deleting the secret would also work, but that is a credential this session
+  // cannot restore. A var is reversible by anyone, from the config, in one line.
+  FABRIC_PG_DISABLED?: string;
   // Opt-in pg TLS: `disable` (default) | `require`. A public-internet managed PG
   // should set `require`; when DATABASE_URL is set we default it to `require`.
   FABRIC_PG_TLS?: string;
@@ -112,6 +128,11 @@ export interface Env {
   FABRIC_AUTOSCALER_EXPIRY_MS?: string;
   FABRIC_AUTOSCALER_REPO_ALLOWLIST?: string;
   FABRIC_AUTOSCALER_MAX_TRACKED_JOBS?: string;
+  // Boot-guard override honoured by the fabricd binary: `warn` downgrades the
+  // introspect boot self-check from FATAL to log-only. Forwarded into the
+  // container (see the constructor) — it was previously documented but
+  // unreachable, which made a rejected introspect key unrecoverable.
+  FABRIC_INTROSPECT_BOOTCHECK?: string;
 }
 
 /** The singleton control-plane container. fabricd binds 0.0.0.0:8080. */
@@ -151,12 +172,19 @@ export class FabricdContainer extends Container<Env> {
       FABRIC_SIGNING_KEY: env.FABRIC_SIGNING_KEY,
       // Inc-3: CF Access service-token for /internal/v1/* (both must be present
       // for the crate's cf_access to emit the headers; no-op until bound).
+      // Inc-3 CF Access service token for outbound /internal/v1/* (mint, revoke,
+      // introspect, billing). Restored 2026-08-31 after the outage bisect cleared
+      // it: withholding these two changed nothing, and the real cause was the
+      // base64 App PEM below.
       ...(env.CORELINK_CF_ACCESS_CLIENT_ID
         ? { CORELINK_CF_ACCESS_CLIENT_ID: env.CORELINK_CF_ACCESS_CLIENT_ID }
         : {}),
       ...(env.CORELINK_CF_ACCESS_CLIENT_SECRET
         ? { CORELINK_CF_ACCESS_CLIENT_SECRET: env.CORELINK_CF_ACCESS_CLIENT_SECRET }
         : {}),
+      // ...(env.CORELINK_CF_ACCESS_CLIENT_SECRET
+      //   ? { CORELINK_CF_ACCESS_CLIENT_SECRET: env.CORELINK_CF_ACCESS_CLIENT_SECRET }
+      //   : {}),
       FABRIC_BILLING_PUSH_INTERVAL_SECS: "30",
       ...(env.BILLING_INGEST_URL ? { BILLING_INGEST_URL: env.BILLING_INGEST_URL } : {}),
       ...(env.BILLING_INGEST_AUTH_KEY ? { BILLING_INGEST_AUTH_KEY: env.BILLING_INGEST_AUTH_KEY } : {}),
@@ -177,14 +205,21 @@ export class FabricdContainer extends Container<Env> {
       ...(env.FABRIC_GITHUB_APP_INSTALLATION_ID
         ? { FABRIC_GITHUB_APP_INSTALLATION_ID: env.FABRIC_GITHUB_APP_INSTALLATION_ID }
         : {}),
-      ...(env.FABRIC_GITHUB_APP_PRIVATE_KEY_B64
-        ? { FABRIC_GITHUB_APP_PRIVATE_KEY_B64: env.FABRIC_GITHUB_APP_PRIVATE_KEY_B64 }
-        : {}),
+      // ⚠️ 2026-08-30 ENV BISECT step 2 — the minimal env BOOTED (/health 200),
+      // so the fault is the env. This is the one large value in it (a base64 PEM).
+      // Withheld to test the env-SIZE hypothesis. RESTORE AFTER READING.
+      // ...(env.FABRIC_GITHUB_APP_PRIVATE_KEY_B64
+      //   ? { FABRIC_GITHUB_APP_PRIVATE_KEY_B64: env.FABRIC_GITHUB_APP_PRIVATE_KEY_B64 }
+      //   : {}),
       // R1 — durable ledger + vCPU ceiling, gated on DATABASE_URL. Present ⇒ pg
       // backend + FABRIC_RUNNER_VCPU=4 (standard-4 sizing) arm together; the #265
       // guard requires pg for an armed ceiling, so we never set one without the
       // other. Absent ⇒ neither key is injected → in-memory, unchanged behaviour.
-      ...(env.DATABASE_URL
+      // `FABRIC_PG_DISABLED=1` suppresses this entire block — see the Env field.
+      // Every key here arms together (the pg backend, the vCPU ceiling the #265
+      // guard ties to it, and the pg-only export), so suppressing them together is
+      // the same coherent state as never having set the secret. Nothing half-arms.
+      ...(env.DATABASE_URL && env.FABRIC_PG_DISABLED !== "1"
         ? {
             FABRIC_LEDGER_BACKEND: "pg",
             DATABASE_URL: env.DATABASE_URL,
@@ -279,7 +314,69 @@ export class FabricdContainer extends Container<Env> {
       ...(env.FABRIC_AUTOSCALER_MAX_TRACKED_JOBS
         ? { FABRIC_AUTOSCALER_MAX_TRACKED_JOBS: env.FABRIC_AUTOSCALER_MAX_TRACKED_JOBS }
         : {}),
+      // ── BOOT-GUARD OVERRIDE — the escape hatch the FATAL message itself names.
+      // `boot_introspect_selfcheck` aborts boot on a rejected introspect key and
+      // prints "…or set FABRIC_INTROSPECT_BOOTCHECK=warn to override". That var was
+      // documented in this file's comments but NEVER forwarded, so the override did
+      // nothing and a rejected key was an UNRECOVERABLE outage: the container
+      // crashes before binding, and nothing an operator can set reaches it.
+      // (2026-08-30 outage; the guard is honoured by the deployed image — verified
+      // at `e5f07f8:crates/corelink-fabric-server/src/server.rs:1106`.)
+      ...(env.FABRIC_INTROSPECT_BOOTCHECK
+        ? { FABRIC_INTROSPECT_BOOTCHECK: env.FABRIC_INTROSPECT_BOOTCHECK }
+        : {}),
     };
+  }
+
+  // ── CONTAINER LIFECYCLE OBSERVABILITY ───────────────────────────────────────
+  // Before this, a container that crashed at boot produced exactly one opaque
+  // line at the Worker edge ("Failed to start container") and NOTHING about why:
+  // the fabricd binary prints a precise `[boot] …` diagnostic for each of the
+  // nine fallible steps before `TcpListener::bind`, and none of it was reachable.
+  //
+  // SCOPE, honestly stated: `@cloudflare/containers@0.3.7` exposes NO container
+  // stdout/stderr — `monitor` is private and no type in the SDK carries process
+  // output (checked in `dist/lib/container.d.ts` + `dist/types/index.d.ts`). So
+  // this does NOT surface the `[boot]` lines. What it does surface is the exit
+  // signal — `{ exitCode, reason }` from `StopParams` — which separates a clean
+  // `anyhow` abort from a signal/OOM kill, plus any error the runtime reports.
+  // Full boot-log observability needs a different mechanism and stays open.
+  override onError(error: unknown): unknown {
+    console.error(
+      JSON.stringify({
+        event: "fabricd_container_error",
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+      }),
+    );
+    return super.onError(error);
+  }
+
+  // Did the container ever reach "started"? Separates "never came up" from
+  // "came up and was stopped" — the two have completely different causes and the
+  // exit signal alone cannot tell them apart.
+  override onStart(): void | Promise<void> {
+    console.error(JSON.stringify({ event: "fabricd_container_started" }));
+    return super.onStart();
+  }
+
+  // The SDK's ONLY graceful-stop path (container.js:748 → this.stop()). A clean
+  // exitCode 0 with no `fabricd_container_activity_expired` line preceding it
+  // means the process exited on its OWN, not because we stopped it.
+  override async onActivityExpired(): Promise<void> {
+    console.error(JSON.stringify({ event: "fabricd_container_activity_expired" }));
+    return super.onActivityExpired();
+  }
+
+  override onStop(params: StopParams): void | Promise<void> {
+    console.error(
+      JSON.stringify({
+        event: "fabricd_container_stopped",
+        exitCode: params.exitCode,
+        reason: params.reason,
+      }),
+    );
+    return super.onStop(params);
   }
 
   // Zero-idle-cost activity marker. All fabricd traffic funnels through this DO
@@ -321,7 +418,16 @@ export class FabricdContainer extends Container<Env> {
 // ledger's single-instance requirement). At N=1 shardDoId returns THIS exact id
 // for every shard, so the multi-instance routing below is byte-identical to the
 // old singleton proxy (the inert-at-N=1 property).
-const SINGLETON = "fabricd-singleton";
+// 2026-08-30 OUTAGE: the id is what pins PLACEMENT. Every instance since
+// 2026-08-19 — across three different images (the Inc-3 build, a fresh rebuild
+// from main, and the last verified-live 9191661 binary) and across container
+// rollouts that genuinely recreated the instance — has been placed in the SAME
+// colo (`bog04`) and has never reached `started`. Image-independent,
+// config-independent, instance-independent, colo-constant. Renaming the DO
+// forces a new placement; if the container then boots, the cause was placement,
+// not this codebase. Lease state is pg-durable (DATABASE_URL), and this DO's own
+// storage holds only the `lastActivityMs` marker, so a rename loses nothing.
+export const SINGLETON = "fabricd-singleton-enam";
 
 /** Shard count N from the wrangler var, parsed to int; default 1. */
 function numShards(env: Env): number {
@@ -334,6 +440,33 @@ function numShards(env: Env): number {
  * for ALL k — byte-identical to today, NO container identity change (the inert
  * property). At n>1 each shard gets its own stable container id.
  */
+// ── PLACEMENT (2026-08-30 outage fix) ───────────────────────────────────────
+// A container Durable Object runs where the DO lives, and a DO is placed near
+// whoever first touched it. Every fabricd instance since 2026-08-19 landed in
+// `bog04` (traffic originates in South America) and NONE of them ever served —
+// across three images, several genuine container rollouts, a DO rename and a
+// machine-shape change. Meanwhile every HEALTHY container app on this account
+// runs in US colos (`ord02`, `ewr16`) and none in bog04.
+//
+// So the placement is not incidental to the outage; it is the one variable that
+// never changed. `locationHint` is honoured only when the DO is FIRST created,
+// which is why SINGLETON also carries a fresh suffix — an existing DO cannot be
+// relocated. `enam` puts the control plane next to corelink-api (BILLING_REGION
+// is already `iad`), which also shortens every introspect/mint round-trip.
+//
+// The hint is applied by wrapping the namespace rather than by replacing
+// `getContainer`, deliberately: `getContainer` stays the single seam the tests
+// mock, so this changes production placement without touching the test surface.
+const FABRICD_LOCATION_HINT: DurableObjectLocationHint = "enam";
+
+function placed(ns: DurableObjectNamespace<FabricdContainer>): DurableObjectNamespace<FabricdContainer> {
+  return {
+    ...ns,
+    idFromName: (name: string) => ns.idFromName(name),
+    get: (id: DurableObjectId) => ns.get(id, { locationHint: FABRICD_LOCATION_HINT }),
+  } as DurableObjectNamespace<FabricdContainer>;
+}
+
 function shardDoId(k: number, n: number): string {
   return n === 1 ? SINGLETON : `fabricd-shard-${k}`;
 }
@@ -392,7 +525,7 @@ async function listLeasesScatterGather(
   // N=1: byte-identical passthrough — no parse, no re-serialize. Still bounded by
   // the per-request timeout (a wedged singleton fails fast with a 503).
   if (N === 1) {
-    return proxyFetch(getContainer(env.FABRICD, shardDoId(0, 1)), request, applyTimeout);
+    return proxyFetch(getContainer(placed(env.FABRICD), shardDoId(0, 1)), request, applyTimeout);
   }
 
   const settled = await Promise.allSettled(
@@ -400,7 +533,7 @@ async function listLeasesScatterGather(
       // Bound each shard fetch so ONE wedged shard can't hang the whole gather:
       // a timed-out shard rejects → allSettled marks it "rejected" → skipped
       // (best-effort), exactly like a down shard below.
-      getContainer(env.FABRICD, shardDoId(k, N)).fetch(shardFanRequest(request, applyTimeout)),
+      getContainer(placed(env.FABRICD), shardDoId(k, N)).fetch(shardFanRequest(request, applyTimeout)),
     ),
   );
 
@@ -522,7 +655,7 @@ async function tenantMetricsScatterGather(
     Array.from({ length: N }, (_unused, k) =>
       // Bound each shard fetch (see listLeasesScatterGather) — a wedged shard is
       // skipped best-effort rather than hanging the whole gather.
-      getContainer(env.FABRICD, shardDoId(k, N)).fetch(shardFanRequest(request, applyTimeout)),
+      getContainer(placed(env.FABRICD), shardDoId(k, N)).fetch(shardFanRequest(request, applyTimeout)),
     ),
   );
 
@@ -758,7 +891,7 @@ export default {
       const modified = new Request(request);
       modified.headers.set("X-Fabricd-Num-Shards", String(N));
       modified.headers.set("X-Fabricd-Shard", String(k));
-      return proxyFetch(getContainer(env.FABRICD, shardDoId(k, N)), modified, applyTimeout);
+      return proxyFetch(getContainer(placed(env.FABRICD), shardDoId(k, N)), modified, applyTimeout);
     }
 
     // LEASE-LIST — GET the collection exactly (NOT /v1/leases/{id}). Each shard
@@ -794,7 +927,7 @@ export default {
       });
       // §9 trigger is long-lived (reuses the exec engine) → applyTimeout is false
       // here, so proxyFetch forwards unbounded + byte-identically.
-      return proxyFetch(getContainer(env.FABRICD, shardDoId(k, N)), forwarded, applyTimeout);
+      return proxyFetch(getContainer(placed(env.FABRICD), shardDoId(k, N)), forwarded, applyTimeout);
     }
 
     // GITHUB WEBHOOK — POST /webhooks/github drives the autoscaler's out-of-band
@@ -809,7 +942,7 @@ export default {
       const modified = new Request(request);
       modified.headers.set("X-Fabricd-Num-Shards", String(N));
       modified.headers.set("X-Fabricd-Shard", String(k));
-      return proxyFetch(getContainer(env.FABRICD, shardDoId(k, N)), modified, applyTimeout);
+      return proxyFetch(getContainer(placed(env.FABRICD), shardDoId(k, N)), modified, applyTimeout);
     }
 
     // TENANT METRICS — GET /v1/metrics/tenant reads per-instance in-memory
@@ -826,11 +959,11 @@ export default {
     const leaseId = leaseIdOf(pathname);
     if (leaseId !== null) {
       const k = shardOf(leaseId, N);
-      return proxyFetch(getContainer(env.FABRICD, shardDoId(k, N)), request, applyTimeout);
+      return proxyFetch(getContainer(placed(env.FABRICD), shardDoId(k, N)), request, applyTimeout);
     }
 
     // Everything else (/v1/health, /v1/attestation/key, …) → shard 0.
-    return proxyFetch(getContainer(env.FABRICD, shardDoId(0, N)), request, applyTimeout);
+    return proxyFetch(getContainer(placed(env.FABRICD), shardDoId(0, N)), request, applyTimeout);
   },
 
   async scheduled(_event: ScheduledController, env: Env): Promise<void> {
@@ -864,7 +997,7 @@ export default {
     // per container. At N=1 this is a single iteration = today's behaviour.
     for (let k = 0; k < N; k++) {
       const id = shardDoId(k, N);
-      const container = getContainer(env.FABRICD, id);
+      const container = getContainer(placed(env.FABRICD), id);
 
       // ── Zero-idle-cost gate ────────────────────────────────────────────────
       // Read the container-free activity marker (handled by FabricdContainer.fetch

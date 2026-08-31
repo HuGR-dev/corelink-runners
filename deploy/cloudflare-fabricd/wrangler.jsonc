@@ -14,6 +14,18 @@
   // Same CoreLink infra account as the spawn-Worker (in-network introspect/billing).
   "account_id": "6a1fc1c626fc2628823e60b9db01f5cd",
 
+  // Worker logs AND container stdout/stderr streaming (2026-08-31). The
+  // spawn-Worker has carried this since its own stall triage; fabricd never did,
+  // which is why the 2026-08-19 outage was investigated blind: `wrangler
+  // containers info` reported the container application with NO
+  // `configuration.observability.logs` block, while the healthy
+  // corelink-spawn-worker-runnercontainer reports `logs.enabled: true` — and that
+  // flag comes from THIS top-level key, not from anything under `containers[]`.
+  // Without it the container's own stderr (every fabricd boot line, including the
+  // reason a pre-bind step aborts) is never emitted anywhere, so a container that
+  // dies before binding is indistinguishable from one that never started.
+  "observability": { "enabled": true },
+
   // Non-secret config. Secrets (FABRIC_SIGNING_KEY, FABRIC_INTROSPECT_AUTH_KEY,
   // BILLING_INGEST_AUTH_KEY, CLOUDFLARE_SPAWN_AUTH_TOKEN) are set via
   // `wrangler secret put` — NEVER in this file. See README.md.
@@ -35,6 +47,32 @@
     //   2. Raise this AND `max_instances` (containers block below) TOGETHER.
     // Still owner-gated (do it when real check-host burst volume arrives).
     "FABRIC_NUM_SHARDS": "1",
+    // ⛔ DURABLE LEDGER OFF — 2026-08-31. A DEGRADED state, and one to undo.
+    //
+    // The Neon project behind DATABASE_URL refuses every connection on a plan
+    // quota ("Your account or project has exceeded…"), and `PgLedger::connect`
+    // runs before `TcpListener::bind`, so the control plane could not start at all
+    // — down since 2026-08-19. Worse, the failure fed itself: the keep-warm cron
+    // retries every minute, each retry dials the database, and a scale-to-zero
+    // database woken every 60 s never autosuspends — so the crash loop burns the
+    // very compute allowance whose exhaustion caused the refusal. That is why this
+    // is set now instead of waiting for the quota period to roll: without it the
+    // next allowance is spent the same way, and the outage returns mid-month.
+    //
+    // GIVEN UP while this is "1": lease state does not survive a restart, N>1 stays
+    // refused (the acquire cap-guard fail-closes off pg), the vCPU ceiling disarms
+    // with it, and durable billing export is inert. None of that is readable today
+    // regardless — the database is refusing every connection.
+    //
+    // TO UNDO: restore a database, point DATABASE_URL at it, delete this line,
+    // redeploy. A fresh free project on an equivalent provider is enough —
+    // docs/handoff/2026-07-03-PLAN-postgres-provisioning-and-vcpu-ceiling-arm.md
+    // sanctions Supabase alongside Neon, with the same public-CA TLS that
+    // FABRIC_PG_TLS=require verifies and the same CREATE TYPE/TABLE grant the DDL
+    // needs. Use a DIRECT or SESSION-mode connection, never transaction-mode
+    // pooling: tokio-postgres uses prepared statements and deadpool holds
+    // connections across calls, which transaction pooling breaks.
+    "FABRIC_PG_DISABLED": "1",
     "CORELINK_INTROSPECT_URL": "https://corelink-api.humangr.com/internal/v1/auth/introspect",
     "BILLING_INGEST_URL": "https://corelink-api.humangr.com/internal/v1/billing/usage",
     "BILLING_REGION": "iad",
@@ -87,7 +125,29 @@
     // live deploy (a wrangler secret — invisible in this file), so pg is the active
     // backend and this durable export is ARMED (not inert). 60s is a sane
     // durable-export cadence (distinct from the always-on 30s corelink push).
+    // Disarming this was tried during the 2026-08-31 outage triage and correctly
+    // measured as NO change (0/10 SERVED): the pre-bind Postgres failure is not the
+    // exporter's, it is `PgLedger::connect` inside `build_app_and_state`
+    // (server.rs:1274). Left at the intended value — the proxy only forwards it
+    // inside the DATABASE_URL block, so it is inert whenever the durable ledger is
+    // off, including under FABRIC_PG_DISABLED.
     "FABRIC_BILLING_EXPORT_INTERVAL_SECS": "60",
+    // Boot-guard override. UNSET on purpose: the default (FATAL on a rejected
+    // introspect key) is the intended production behaviour. What the 2026-08-30
+    // outage fixed is that the var is now FORWARDED into the container at all
+    // (src/index.ts) — it was documented here and unreachable, which made a
+    // rejected key an unrecoverable outage. Set it to "warn" only to override a
+    // live boot-abort, and remove it again immediately.
+    // Boot-guard override. UNSET: the default (FATAL on a rejected introspect key)
+    // is the intended production behaviour. MEASURED 2026-08-31: arming it changed
+    // nothing (0/6 SERVED), so it is not masking a rejected key. What the outage
+    // fixed is that this var is now FORWARDED into the container at all.
+    // 2026-08-31 RE-TEST, one variable. The earlier "arming it changed nothing
+    // (0/6)" reading is WITHDRAWN as unsound: the forwarding of this var into the
+    // container (src/index.ts) was authored during the same triage, so the run that
+    // "measured" the override may have executed against a Worker that never passed
+    // it through — an inert knob measured as a null result. Re-measured properly.
+    // "FABRIC_INTROSPECT_BOOTCHECK": "warn",   // unset: the key validates 200
     // ── ACQUIRE-PATH RESILIENCE (W0) — right-size the global inbound bound ─────
     // The code DEFAULT (DEFAULT_MAX_INFLIGHT_REQUESTS = 1024) is a thundering-herd
     // backstop tuned for a big box; on this 2-vCPU singleton it is far above what
@@ -202,16 +262,97 @@
       // key against live introspect and passes. @sha256 DIGEST-PINNED (X4), built by
       // build-fabricd-image.yml (run 32303677887, git e5f07f8 = Inc-3 CF Access
       // service-token headers on /internal/v1/*). SUPERSEDES 5eed854a.
-      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer@sha256:db3b03ef829e21d203e1a5ac003a724fe1319eb271d849bd88178f080b468c3d",
+      // 2026-08-30 OUTAGE REBUILD (8631abb): fabricd carrying #514 (stop reaping a
+      // live box's last handle; unpin the async executor) + #515 (stop the
+      // reconciler racing live spawns; close the anonymous diag sink) — verified to
+      // be the ONLY two crate commits between the previous image's build commit
+      // (e5f07f8) and main. Built + pushed by build-fabricd-image.yml run
+      // 33347304356. Purpose is twofold: land the owed fixes, AND force a real
+      // CONTAINER ROLLOUT — the three Worker deploys of 2026-08-30 all reported
+      // "no changes to be made" for the container, so newly-forwarded envVars were
+      // never provably read by a started process (the singleton reads env at boot).
+      // ⚠️ PINNED BY GIT-SHA TAG, NOT @sha256 — a deliberate, SELF-CORRECTING
+      // deviation from the X4 digest floor. run 33347304356 emitted
+      // "::warning::Could not resolve an @sha256 digest (push output + imagetools
+      // both empty)", i.e. #400's imagetools resolution has REGRESSED. The tag is
+      // content-derived and CI-written-once, so it is deterministic in practice, but
+      // it is NOT the invariant. RE-PIN to @sha256 immediately after this deploy —
+      // `wrangler containers info <app-id>` reports the resolved digest once the
+      // rollout lands. Rollback: the previous pin was
+      // @sha256:db3b03ef829e21d203e1a5ac003a724fe1319eb271d849bd88178f080b468c3d.
+      // ⚠️ 2026-08-30 BISECT — TEMPORARY, NOT THE INTENDED STEADY PIN.
+      // Both the Inc-3 image (db3b03ef @ e5f07f8, 2026-08-19) and a fresh rebuild
+      // from main (8631abb, run 33347304356) fail IDENTICALLY: the container never
+      // reaches `started`, crashes while checking for ports. Same Dockerfile
+      // (unchanged since #185, 2026-06-25) and same digest-pinned bases, and other
+      // container apps on this account are healthy — so the common factor is the
+      // fabricd crate code, not the image recipe or the platform.
+      // 9191661 is the last image with an in-repo "Deployed + verified LIVE" record
+      // (#407 + #408, the key-drift-hardening binary). If THIS boots, the regression
+      // is in crates/ between 9191661 and e5f07f8 and we have a bisect window; if it
+      // does not, the whole crate-regression theory is wrong.
+      // Cost while pinned here: this binary predates #514/#515 and Inc-3's CF Access
+      // service-token headers — introspect calls will be Access-403'd, so auth
+      // fail-closes. That is acceptable ONLY as a diagnostic step.
+      // ⚠️ 2026-08-30 CONTROL EXPERIMENT — NOT a real pin. This is the CHECK-HOST
+      // image, deliberately pointed at the fabricd container class. It is a
+      // DIFFERENT binary that is currently `ready` and serving on this same
+      // account, and it listens on 8080 (deploy/check-host/Dockerfile:53), so it
+      // matches `defaultPort` exactly. Purpose: separate "the fabricd image cannot
+      // run" from "this container application/colo cannot run anything" — the one
+      // question every previous experiment left open.
+      //   boots  ⇒ the application and colo are fine; the fault is the fabricd image
+      //   fails  ⇒ the application cannot run ANY container; the fault is not ours
+      // REVERT IMMEDIATELY AFTER READING THE RESULT. Restore
+      // :8631abb08a022fe2e0eef3b0f41ba784ab5d8287 (the rebuild carrying #514/#515).
+      // 2026-08-31 ABSOLUTE-ENTRYPOINT build (git 3f7afa9, run 33359535914) — the
+      // outage candidate. Identical binary to the 8631abb image; the only change is
+      // that the Dockerfile now names the entrypoint in full
+      // (/usr/local/bin/corelink-fabricd instead of the bare `corelink-fabricd`),
+      // verified in the pushed config. Every other explanation was excluded against
+      // live evidence: the image pulls intact (3 layers, sha256-verified, ~3s),
+      // is amd64 with 8080 exposed and a GLIBC_2.34 ceiling under a 2.36 runtime;
+      // the application executes OTHER images of ours in this same colo and shape;
+      // the account is nowhere near its ceilings (total_vcpu 1500, ~212 live); and
+      // max_instances and the introspect boot-guard override were each re-measured
+      // at 0/10.
+      // Back on an immutable @sha256 pin (X4 / INV-2), resolved directly from the
+      // managed registry's Docker-Content-Digest — the git-SHA-tag deviation that
+      // run 33347304356 fell back to is closed.
+      // ⚠️ 2026-08-31 REGISTRY-PATH CONTROL — TEMPORARY. Same Dockerfile, same
+      // commit, same builder, pushed under a SECOND image name. Everything about the
+      // image content is already exonerated, so this isolates the one remaining
+      // difference from the images that do start: the registry path itself.
+      //   boots ⇒ the fabricdcontainer repository's pull path is the fault
+      //   fails ⇒ the path is fine and the fault is still unlocated
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer@sha256:2e7bcea926f4ce2b38edb1a381f3821fcf4c898377e4f988b763fd3232c0e565",
       // HTTP control plane. Bumped standard-1 → standard-2 (2026-07-07 acquire-storm
       // hardening): the single-flight singleton must keep /v1/health + lease ops
       // responsive under a burst of box provisions; 2 vCPU gives headroom so a few
       // concurrent provisions can't peg the box (paired with the FABRIC_PROVISION_
       // MAX_INFLIGHT gate that bounds concurrent provisions). Multi-instance (now
       // pg-enabled) is the next scaling step — see README "Known limit".
-      "instance_type": "standard-2",
+      // Bumped standard-1 → standard-2 (2026-07-07 acquire-storm hardening).
+      // A 2026-08-30 bisect raised this to standard-4 and PROVED the shape was not
+      // the outage cause, so it is reverted rather than left as an unratified cost.
+      "instance_type": "standard-2",  // MEASURED: standard-4 changed nothing (0/6)
       // ⚠️ Raise in LOCKSTEP with `vars.FABRIC_NUM_SHARDS` — the shard fan-out
       // needs one container instance per shard. N>1 is a separate owner-gated flip.
+      //
+      // 2026-08-31 OUTAGE EXPERIMENT — ONE VARIABLE, everything else untouched.
+      // With container logs finally enabled, the platform's own message is:
+      //   "There is no container instance that can be provided to this Durable
+      //    Object, try again later"
+      // That is a PLACEMENT refusal, not a crash of our process. The account has
+      // ample room (`/containers/me`: total_vcpu 1500 vs ~212 live; per-deployment
+      // ceilings 4 vCPU / 12 GiB / 20 GB, all of which this 1 vCPU / 6 GiB / 12 GB
+      // shape clears), so the binding constraint is THIS APPLICATION's own cap of
+      // one instance — and `wrangler containers instances` lists THREE
+      // FabricdContainer Durable Objects (fabricd-singleton, -r2, -enam) whose
+      // alarms each ask for a container. One slot, three askers, and
+      // `rollout_active_grace_period: 0` leaves no headroom for a replacement to be
+      // placed before the incumbent record clears.
+      // 4 makes the test unambiguous; the steady value is decided from the result.
       "max_instances": 1
     }
   ],

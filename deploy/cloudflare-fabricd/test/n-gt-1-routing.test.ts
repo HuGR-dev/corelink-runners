@@ -26,6 +26,7 @@ vi.mock("@cloudflare/containers", () => ({
 }));
 
 import worker from "../src/index";
+import { SINGLETON } from "../src/index";
 import type { Env } from "../src/index";
 import { shardOf } from "../src/shard";
 
@@ -130,7 +131,7 @@ describe("POST /v1/queue/trigger routes by body.lease_id", () => {
 
   it("N=1 → routes to the singleton (inert; falls through to shard 0)", async () => {
     const hits = stubShards({
-      "fabricd-singleton": () => Promise.resolve(new Response("{}", { status: 200 })),
+      [SINGLETON]: () => Promise.resolve(new Response("{}", { status: 200 })),
     });
     await worker.fetch(
       new Request("http://fabricd/v1/queue/trigger", {
@@ -139,7 +140,7 @@ describe("POST /v1/queue/trigger routes by body.lease_id", () => {
       }),
       envWithShards(1),
     );
-    expect(hits[0].id).toBe("fabricd-singleton");
+    expect(hits[0].id).toBe(SINGLETON);
   });
 });
 
@@ -191,13 +192,13 @@ describe("POST /webhooks/github round-robins across shards", () => {
 
   it("N=1 → routes to the singleton and does NOT inject shard headers (byte-identical)", async () => {
     const hits = stubShards({
-      "fabricd-singleton": () => Promise.resolve(new Response("ok", { status: 200 })),
+      [SINGLETON]: () => Promise.resolve(new Response("ok", { status: 200 })),
     });
     await worker.fetch(
       new Request("http://fabricd/webhooks/github", { method: "POST", body: "x" }),
       envWithShards(1),
     );
-    expect(hits[0].id).toBe("fabricd-singleton");
+    expect(hits[0].id).toBe(SINGLETON);
     expect(hits[0].request.headers.get("X-Fabricd-Num-Shards")).toBeNull();
     expect(hits[0].request.headers.get("X-Fabricd-Shard")).toBeNull();
   });
@@ -209,12 +210,12 @@ describe("GET /v1/metrics/tenant scatter-gather", () => {
 
   it("N=1 → single passthrough to the singleton (called once, same Response)", async () => {
     const passthrough = metricsResponse("acme", [1, 0, 0, 0, 0, 0], 3, 3);
-    const hits = stubShards({ "fabricd-singleton": () => Promise.resolve(passthrough) });
+    const hits = stubShards({ [SINGLETON]: () => Promise.resolve(passthrough) });
 
     const resp = await worker.fetch(GET_METRICS, envWithShards(1));
 
     expect(getContainer).toHaveBeenCalledTimes(1);
-    expect(hits[0].id).toBe("fabricd-singleton");
+    expect(hits[0].id).toBe(SINGLETON);
     expect(resp).toBe(passthrough); // byte-identical passthrough
   });
 

@@ -424,14 +424,25 @@ impl PgLedger {
 
         // Apply DDL once, fail-closed. `batch_execute` runs the whole script;
         // wrapping it keeps the enum-create + tables + indexes atomic.
-        let client = pool
-            .get()
-            .await
-            .map_err(|e| anyhow::anyhow!("PgLedger: cannot acquire connection for DDL: {e}"))?;
+        // `{e}` alone is useless here and cost twelve days of blind triage during the
+        // 2026-08-19 outage: deadpool's Display stops at "Error occurred while
+        // creating a new object: db error", and tokio-postgres' Display for a
+        // server-side failure is the bare string "db error" — the severity, the
+        // SQLSTATE and the server's message all live in the source chain. Since this
+        // error aborts boot before the listener binds, it is often the ONLY thing
+        // anyone ever gets to read, so it has to carry its own cause. `{e:?}` renders
+        // the whole chain (e.g. `DbError { severity: "FATAL", code: SqlState(E53300),
+        // message: "sorry, too many clients already" }`), which is the difference
+        // between "the database rejected us" and knowing why.
+        let client = pool.get().await.map_err(|e| {
+            anyhow::anyhow!("PgLedger: cannot acquire connection for DDL: {e} — cause: {e:?}")
+        })?;
         client
             .batch_execute(&format!("BEGIN; {DDL} COMMIT;"))
             .await
-            .map_err(|e| anyhow::anyhow!("PgLedger: DDL failed (fail-closed): {e}"))?;
+            .map_err(|e| {
+                anyhow::anyhow!("PgLedger: DDL failed (fail-closed): {e} — cause: {e:?}")
+            })?;
 
         let handle = Handle::try_current()
             .map_err(|e| anyhow::anyhow!("PgLedger: must be built on a Tokio runtime: {e}"))?;

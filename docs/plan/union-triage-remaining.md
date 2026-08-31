@@ -1,0 +1,196 @@
+> **LEAD LANDING NOTE (2026-08-31).** This triage was produced against the plan as of `8631abb`,
+> before rev-5 added its own items — so 14 of its proposed ids COLLIDED with ids the plan had already
+> taken. Merging it as returned would have silently overwritten live suite items. Resolved
+> structurally rather than by shuffling numbers: every item proposed here now lives in its own
+> **`AU` namespace** (`AU1.x` … `AU7.x`, capability-grouped), so provenance is visible in the id and
+> a collision with the `A` suite is impossible by construction.
+>
+> **Four structural consequences the agent correctly escalated instead of deciding — lead rulings:**
+> 1. **Wave-2 serial chain grows 8 → 11 links. ACCEPTED.** Money-path correctness still outranks
+>    wall-clock. But the chain is now the plan's dominant schedule risk, which raises the value of
+>    `T7-W6` (`index.ts` modularization); it stays post-GA, and §10 records the trade.
+> 2. **`T5-W2`'s scope narrowed** to `integrations/**` minus `github-actions/action.yml`. ACCEPTED —
+>    otherwise `wp-check`'s parallel-scope rule fails against the new `T5-W3`.
+> 3. **`T3-W10` serialized behind `T3-W4` → `T4-W4`.** ACCEPTED — three WPs now write
+>    `crates/corelink-fabric-server/**`, and that is exactly the AP-1 trap the plan refuses.
+> 4. **Two new gating ids adopted:** owner arming **`O-CFRATE`** (one Cloudflare Containers invoice
+>    line) and relay **`R6`** (two-tenant same-memoize-key CAS read-refusal, which only
+>    corelink-server can assert — `INV-6` forbids asserting it here).
+>
+> **`union-14` was re-scoped, not parked:** the agent checked it at HEAD and found 2 of its 3 claims
+> dead (refusal now throws `SpawnRefusedError`, `index.ts:1744`; no phantom slot). The surviving half
+> — `recordOrphan` returning before writing when `installationId` is absent (`index.ts:1796`), so
+> every COLD at-ceiling refusal is dropped — is what carries forward. That is the ledger being
+> verified rather than trusted, which is the point.
+>
+> **NOT YET MERGED INTO THE SUITE, deliberately.** The plan freezes the suite only after the cold
+> critic converges, and round 2 found 15 gaps — so round 3 is owed. These 30 items are triaged,
+> de-collided and ready; merging them into an unconverged suite would bake in the same mistake twice.
+
+# Union catalog — triage of the remaining 25 NEW (MEDIUM/LOW) + 5 PARTIAL findings
+
+**WP:** T0-W2 · **Authored:** 2026-08-31
+
+**Baseline.** Worktree HEAD `eba6e8a`. The union ledger was written against `8631abb`;
+`git diff --stat 8631abb eba6e8a` touches `deploy/cloudflare-fabricd/**` (the fabricd proxy
+Worker + its wrangler config + two of its tests), `.claude/skills/**` and `docs/plan/**` —
+**no finding triaged here cites any of those paths**, so every citation below is equally a
+citation at the ledger's declared baseline. All `file:line` references were opened by me at
+`eba6e8a`.
+
+**Sources**
+- `docs/plan/union-catalog-ledger.md` — the 51-finding reconciliation and its proposed items.
+- `docs/plan/2026-08-30-golive-remediation-plan.md` rev-4 — §2.2 bucket vocabulary, §3 suite,
+  §4 decisions D1–D10, §5 waves + WP tables, §6 armings, §7 relays, §13 invariants.
+- `docs/plan/plan-check.py` — the authoritative bucket assignment for the 247.
+
+**Scope.** The 25 NEW MEDIUM/LOW (`union-06` … `union-30`) plus the 5 PARTIAL rows
+(`RH5`, `RH9`, `M3`, `M5`, `M19` uncovered halves). Out of scope and untouched:
+`union-01`…`union-05` (already A3.15–A3.18), `union-31`/`32`/`33` (recorded in
+`docs/plan/2026-08-30-O1-fabricd-outage-diagnosis.md`), `union-34` (WITHDRAWN — not resurrected).
+
+**Method.** Every finding was re-opened in the code before placement. One (`union-14`) is
+**partially stale** and is re-scoped to the half that survives; the rest reproduce exactly.
+Nothing is placed in CLEAN-no-action or DEFER-needs-waiver — see §4.
+
+---
+
+## 1. Summary counts
+
+| bucket | n | findings |
+|---|---|---|
+| W0-unblock | 0 | — |
+| W1-parallel | 7 | union-09 · union-10 · union-16 · union-17 · union-18 · union-22 · union-24 |
+| W2-serial-worker | 14 | union-06 · union-07 · union-08 · union-11 · union-12 · union-13 · union-14 · union-21 · union-25 · union-26 · RH5p · RH9p · M3p · M19p |
+| W3-live-proof | 5 | union-15 · union-19 · union-27 · union-28 · union-29 |
+| W4-post-decision | 2 | union-30 · M5p |
+| DECISION | 0 | — |
+| ARMING | 0 | (one new owner ask, **O-CFRATE**, gates `union-28`; the finding itself stays W3) |
+| RELAY | 1 | union-23 (new relay **R6**; its in-repo doc half rides T7-W4) |
+| DOCS-sweep | 1 | union-20 |
+| CLEAN-no-action | 0 | — |
+| DEFER-needs-waiver | 0 | — |
+| **total** | **30** | |
+
+**Acceptance items proposed: 30** (`AU1.8`–`AU1.9`, `AU3.19`–`AU3.28`, `AU4.14`–`AU4.19`,
+`AU5.10`–`AU5.12`, `AU6.16`–`AU6.17`, `AU7.6`–`AU7.12`). Every one is RED at `eba6e8a` — the
+evidence column is the proof of redness, since each item asserts the negation of a behaviour
+I read in the code.
+
+**New WPs named: 9** — T3-W8, T3-W9, T3-W10, T8-W3, T8-W4, T5-W3, T7-W4, T7-W5, T2-W5.
+**Existing WPs extended: 4** — T4-W1 (+1), T8-W1 (+1), T6-W6 (+1), T3-W5 (+2).
+None exceeds the plan's 4-item-per-WP ceiling (`wp-check.py`); see §3 for the counts.
+
+---
+
+## 2. Per-finding placement
+
+Item ids continue the plan's §3 namespace, in the capability the ledger assigned each row.
+
+| id | origin | sev | bucket | wave / WP | INV | dependency | proposed acceptance item | evidence I verified at `eba6e8a` |
+|---|---|---|---|---|---|---|---|---|
+| union-06 | M1 | MEDIUM | W2-serial-worker | W2 · **T8-W3** *(new)* | INV-3, INV-8 | `fabric-core-08` (durable suspension read) must give the worker a suspension signal | **AU4.16 — test:** a tenant suspended mid-job has its per-job `cas:rw` PAT revoked on the suspension edge (within one reaper tick), asserted by driving a suspension against a fake mint and observing a `revokeCasPatById` call — not at the 2 h `JOB_PAT_TTL_S` | `deploy/cloudflare/src/index.ts:1347` `revokeCompletedJob` is the only revoke driver; its five call sites are `:1736`, `:1770`, `:2585`, `:3336` (completion / teardown / stranded-reaper) — `grep -n "suspend" index.ts` returns **zero** hits, so no suspension edge exists |
+| union-07 | M4 | MEDIUM | W2-serial-worker | W2 · **T3-W8** *(new)* | INV-3 | none | **AU3.19 — test:** a job still alive past `SLOT_TTL_S` still holds its concurrency slot (the keepalive renews the slot, not only the container), and the DO's fleet count equals the number of live boxes at T+`SLOT_TTL_S`+1 s | `deploy/cloudflare/src/lib.ts:611` `export const SLOT_TTL_S = 2700`; consumed exactly once, at acquire, `index.ts:1648`. Every other mention (`index.ts:2440,2467,2575`, `lib.ts:610,1411`) is a comment or a release — **no renewal call site exists** |
+| union-08 | M6 | MEDIUM | W2-serial-worker | W2 · **T3-W8** *(new)* | INV-3, INV-8 | none | **AU4.14 — test:** `driveSpawn` acquires the concurrency slot BEFORE minting — a spawn refused at capacity performs zero mint/revoke pairs (assert the fake mint is never called on the refusal path) | `index.ts:1695` `const mint = await buildContainerEnv(...)` precedes `index.ts:1720` `const slot = await acquireConcurrencySlot(env, jobId, mint, repo)`; the refusal branch at `:1736` then revokes the PAT it just minted, in-comment: *"the CAS PAT was already minted … but we're REFUSING the spawn"* |
+| union-09 | M7 | MEDIUM | W1-parallel | W1 · **T8-W4** *(new)* | INV-8 | none | **AU3.26 — probe:** with a job running, `/proc/<run.sh pid>/cmdline` inside the box contains no jitconfig token (the config arrives on stdin or via a 0600 file), recorded under `docs/plan/evidence/` with the image digest it was taken against | `deploy/runner/entrypoint.sh:199` `./run.sh --jitconfig "$CORELINK_RUNNER_JITCONFIG" > "$RUNSH_FIFO" 2>&1 &` — the credential is on argv for the lease's lifetime |
+| union-10 | M8 | MEDIUM | W1-parallel | W1 · **T3-W10** *(new, serial after T4-W4 — same crate)* | INV-3 | T3-W4 → T4-W4 (all three write `crates/corelink-fabric-server/**`) | **AU3.25 — test:** the stale-Pending sweep tears down BEFORE deleting the record; a throwing teardown leaves a retryable tombstone that a later tick re-attempts, and the cap slot is not reclaimed until teardown succeeds | `crates/corelink-fabric-server/src/reaper.rs:941-944` — *"3. TEARDOWN (best-effort) — no lock held. We won the delete"* … *"logged but does NOT un-reclaim the cap slot"*: delete precedes teardown, failure is terminal |
+| union-11 | M9 | MEDIUM | W2-serial-worker | W2 · **T3-W9** *(new)* | INV-3 | none | **AU4.15 — test:** a throwing `RUNNER_JOB_PATS.put` on the spawn path compensates (tears the box down) or writes a durable retry record — a started container never ends with no `sbox:` record | `index.ts:1313-1319` — the `rhandle:` put is `.catch((e) => logEvent("error","kv_put_runner_handle_failed", …))` **after** `container.start()`; the durable twin at `:1323+` is a second unguarded write |
+| union-12 | M10 | MEDIUM | W2-serial-worker | W2 · **T3-W9** *(new)* | INV-3 | **O-APP** (the App's webhook subscription must include `installation` events) | **AU5.10 — test:** an `installation.deleted` delivery purges that installation's tenant-map / allowlist entries, and a subsequent `workflow_job.queued` for one of its repos is refused **before** mint | `index.ts:3268` `if (request.headers.get("x-github-event") !== "workflow_job") return json({ ok: true, ignored: "not workflow_job" }, 200)` — the worker accepts exactly one event type; no `installation.*` handling exists anywhere in the file |
+| union-13 | M11 | MEDIUM | W2-serial-worker | W2 · **T4-W1** *(existing, 1 → 2 items)* | INV-4, INV-5 | W0 deploy unblock (the self-check runs at deploy time); adjacent to **O-ALLOWLIST** | **AU4.18 — test:** a repo carrying both an `installation_id` and a `REPO_TENANT_PAT_MAP` entry resolves exactly one **declared** owner-of-record; **and probe:** a deploy that would empty `REPO_TENANT_PAT_MAP` fails a config self-check instead of silently re-attributing CAS + billing | `deploy/cloudflare/wrangler.jsonc:68-75` records the incident verbatim — *"This key held `\"{}\"` while prod ran a non-empty map … attribute its CAS + billing to the dogfood tenant d863fafb instead of 3c7d77b1, with NO error anywhere"*; the live map is `:75` |
+| union-14 | M12 | MEDIUM | W2-serial-worker | W2 · **T3-W8** *(new)* | INV-3 | none | **AU3.20 — test:** a **COLD** at-ceiling refusal (no `installationId`) writes a terminal, queryable job record and is surfaced — today `recordOrphan` returns before writing anything | **PARTIALLY STALE — re-scoped.** Two of (b)'s three claims no longer hold: the refusal `throw`s a typed `SpawnRefusedError` (`index.ts:1744`) rather than early-returning, and it holds no phantom slot (`slot.admitted === false` means nothing was acquired, `index.ts:1721`). **The surviving half is real and is the item above:** `index.ts:1796` `if (!env.RUNNER_JOB_PATS || !opts.installationId) return; // cold ⇒ not warm-recoverable` — the catch in `driveSpawnGuarded` (`:3094`) calls `recordOrphan`, which drops every cold refusal on the floor |
+| union-15 | M16 | MEDIUM | W3-live-proof | W3 · **T6-W6** *(existing, 3 → 4 items)* | — (C6 capability; no §13 invariant) | **O-CANARY** + the canary deploy (`hist-12`) | **AU6.17 — probe:** the canary runs a synthetic acquire→spawn→release transaction each tick and alerts when the slot count fails to return to 0; the alert is recorded with the deployed canary version id | `deploy/cloudflare-canary/src/index.ts:144-147` — the tick fetches exactly three read-only surfaces (`fetchSurface` ×2, `fetchHealth` ×1) and performs no acquire or spawn |
+| union-16 | M17 | LOW | W1-parallel | W1 · **T3-W10** *(new)* | INV-1 | T3-W4 → T4-W4 (same crate) | **AU7.7 — test:** every error response from `cas_cred` (Rust) deserializes as the frozen `ErrorBody{code,message}`; the Worker twin is asserted in the same suite | `crates/corelink-fabric-server/src/handlers/cas_cred.rs:43` `fn err(status, msg) -> (status, Json(json!({ "error": msg })))` — an ad-hoc shape on a public route; the Worker twin repeats it at `index.ts:3566-3569` |
+| union-17 | M18 | MEDIUM | W1-parallel | W1 · **T5-W3** *(new — see §3 scope note)* | INV-3, INV-8 | none | **AU5.11 — test:** a caller passing `$(id)` / `"; touch pwned; #` as an action input has it forwarded via env indirection and never evaluated by the action's bash (assert on the composite-action source, not on a run) | `integrations/github-actions/action.yml:133-135` `ARGS+=(--url "${{ inputs.url }}")`, `:138` `if [[ -n "${{ inputs.image }}" ]]`, `:143` `if [[ "${{ inputs.verify }}" == "false" ]]` — all inside `shell: bash` steps |
+| union-18 | M20 | LOW | W1-parallel | W1 · **T7-W4** *(new)* | INV-5 | none | **AU7.8 — test:** a CI check diffs the secret names referenced in the three `wrangler.jsonc` files + `.github/workflows/**` against `docs/runbook/secret-inventory.md` and fails on drift; it must fail on today's tree | `docs/runbook/secret-inventory.md` (183 lines) contains **zero** occurrences of `COLD_ORGANIC_TENANT_PAT`, `CORELINK_CF_ACCESS_CLIENT_ID`, `FABRIC_TEST_MINT_KEY`, `PINNED_IMAGE_DIGEST` (`grep -c` = 0 for each); all four are live names elsewhere (e.g. `deploy/cloudflare/wrangler.jsonc:65`, `:76`) |
+| union-19 | M21 | MEDIUM | W3-live-proof | W3 · **T2-W5** *(new)* | INV-2 | **O1** · **T2-W2b** (the deploy path must work before a rotation can be proven) | **AU1.8 — probe:** rotating one fabricd container secret takes effect without minting a new image digest — or the runbook carries a one-command rollout recipe that a fresh operator executes end to end, with the before/after container version ids recorded | `docs/runbook/secret-inventory.md:77-81` — *"reads them **only at boot** … a container rollout (new image digest + `wrangler deploy`) is what makes fabricd pick it up"*; the rollback lineage is narrative prose in `deploy/cloudflare-fabricd/wrangler.jsonc` comments, not a recipe |
+| union-20 | M22 | LOW | DOCS-sweep | W1 · **T7-W4** *(new)* | INV-4, INV-5 | none | **AU7.9 — test:** a unit test asserts `plans.rs`'s per-variant docstring prices and its module ladder table quote the same numbers; it fails on today's tree | `crates/corelink-fabric/src/plans.rs:13-14` module table says `Starter $16` / `Pro $40`; `:77` and `:79` docstrings say *"entry tier ($8/mo)"* and *"growing dev + agents ($20/mo)"* — and `:81` adds a third figure, *"small team / fleet ($50/mo)"* vs the table's `Team $100` |
+| union-21 | L1 | LOW | W2-serial-worker | W2 · **T3-W9** *(new)* | INV-3 | union-05 / A3.18 should land first (the atomic claim is the mechanism this item then bounds) | **AU3.22 — test:** a `workflow_job.queued` delivery replayed after `SPAWN_CLAIM_TTL_S` does not spawn a second box for the same `jobId` (a durable per-job terminal marker outlives the claim) | `deploy/cloudflare/src/lib.ts:113-124` — `claimSpawn` is the only replay guard, and its key is written with `{ expirationTtl: SPAWN_CLAIM_TTL_S }` (`:122`), `SPAWN_CLAIM_TTL_S = 7200` (`:95`). Past 2 h the claim is gone and the delivery re-enters `driveSpawn` |
+| union-22 | L2 | LOW | W1-parallel | W1 · **T8-W4** *(new)* | INV-8 | none | **AU1.9 — test:** the check-exec-server resolves its auth token from a file/secret mount and refuses to start when only the env var is present (or the env path is removed), so a co-resident process cannot read it from `/proc/self/environ` | `crates/corelink-check-exec-server/src/lib.rs:53` `pub const AUTH_TOKEN_ENV: &str = "EXEC_SERVER_AUTH_TOKEN"`, documented at `:49-52` as *"injected into the container env at spawn"* |
+| union-23 | L4 | LOW | **RELAY (new R6)** + DOCS-sweep half | W1 · **T7-W4** *(in-repo half)*; R6 for the assertion | INV-3, INV-5 | **R6** — the isolation itself is asserted at the CAS scoping layer, which lives in `corelink-server`; the session fence forbids editing it from here | **AU7.10 — test:** `actions/corelink-memoize/README.md` states, with a cited corelink-server artifact id, that memoize-key isolation rests **entirely** on CAS-side tenant scoping (the key carries no tenant component); the relay artifact R6 asks corelink-server for the two-tenant same-key read-refusal proof | `actions/corelink-memoize/action.yml` — `grep -i tenant` returns **nothing**; the key inputs are `CL_RUN` / `CL_INPUTS` / `CL_ENVNAMES` / `CL_TOOLS` (`:38-42`), no tenant among them |
+| union-24 | L6 | LOW | W1-parallel | W1 · **T5-W3** *(new — see §3 scope note)* | — | none | **AU5.12 — test:** the action completes on a runner image with no `python3` (assert in CI on a bash-only container, or assert no step declares a non-bash shell) | `integrations/github-actions/action.yml:174` `shell: python3 {0}` — the only non-bash step of the four |
+| union-25 | L7 | LOW | W2-serial-worker | W2 · **T8-W3** *(new)* | INV-4 | none | **AU4.17 — test:** `revokeCompletedJob` with no derived tenant refuses loudly (logs + bumps a registered counter, returns an error) instead of falling back to the wrangler `CLW_TENANT` var | `index.ts:1356` `await revokeCasPatById(env, patId, derivedTenant ?? env.CLW_TENANT)`; the call-site comment at `:2583` concedes *"best-effort: revokeCompletedJob falls back to CLW_TENANT"*. `index.ts:1574` already records that this exact pattern **mis-attributed a customer's `runner_slot_seconds`** on the metering path |
+| union-26 | L8 | LOW | W2-serial-worker | W2 · **T3-W8** *(new)* | — (benign; correctness of an attempt counter) | none | **AU3.21 — test:** two concurrent `recordOrphan` / retry-bump paths for one `jobId` do not lose an attempt count (the count is held by the DO, or the put is a compare-and-set) | `index.ts:1796-1810` — `if (await …get(key)) return;` then `put(...)`, no CAS; the retry loop repeats the pattern near `:4085` |
+| union-27 | P1 | MEDIUM | W3-live-proof | W3 · **T7-W5** *(new)* | INV-5 | **O1** (needs a live, warm fleet before the distribution means anything) | **AU7.11 — probe:** publish a measured queued→RUNNING distribution (p50/p95) from ≥50 real jobs, recorded under `docs/plan/evidence/` with the worker version id, and state the job-size break-even in the pitch docs | No measured distribution exists in-repo: `docs/plan/evidence/` does not exist, and no doc outside the two 2026-08-25 audit files carries a spawn-latency measurement. The start/retry path the claim is about is `container.start()` driven from `driveSpawn` (`index.ts:1752`) |
+| union-28 | E1 | MEDIUM | W3-live-proof | W3 · **T7-W5** *(new)* | INV-4, INV-5 | **O-CFRATE** *(new owner ask: produce one Cloudflare Containers invoice line — vCPU-h and GiB-h — for a named billing period)* | **AU4.19 — probe:** `docs/product/pricing.md` records the real Cloudflare Containers vCPU-h/GiB-h rate with a cited invoice line, and the margin table is re-derived from it | `grep -c Cloudflare docs/product/pricing.md` = **0**. Every margin derives from the Northflank proxy basis: `:10`, `:22`, `:37`, `:42`, `:153`, `:191` (*"COGS basis: Northflank per-CI-minute, $0.10/vCPU-hour"*), `:254` |
+| union-29 | E2 | MEDIUM | W3-live-proof | W3 · **T7-W5** *(new)* | INV-5 | **O1** · **T3-W7** (A3.9 must prove a hit at all before a *rate* is meaningful) | **AU7.12 — probe:** instrument `clw` hit/miss over a real week and report the measured rate; `pricing.md`'s 85–95 % margin claim cites that artifact or is withdrawn | `docs/product/pricing.md:219-222` — *"The typical margin (85–95%) depends on the **memoization hit-rate**, which is high for repetitive CI/agent workloads in theory but **unmeasured**"*; the same 85–95 % carries the tier table at `:157-161` |
+| union-30 | E3 | MEDIUM | W4-post-decision | W4 · **T3-W5** *(existing, named in §4 as D4's WP)* | INV-3 | **D4** (ADR-0005: queue vs reject) | **AU3.27 — test:** `FLEET_MAX_CONCURRENCY` is env-tunable without a recompile, **and** an over-cap spawn returns the D4-adopted signal (queued position, or a typed refusal the customer can see) rather than a silent permanent drop | `deploy/cloudflare/src/lib.ts:620` `export const FLEET_MAX_CONCURRENCY = 250` — a compiled constant, consumed at `index.ts:1640,1647`; `deploy/cloudflare/wrangler.jsonc:239` says it *"MUST stay in sync with FLEET_MAX_CONCURRENCY in src/lib.ts"*, i.e. the coupling is manual. **Note:** the tunability half is D4-independent; if the lead wants it earlier it can be split into T3-W9 without touching D4 |
+| **RH5** *(partial)* | RH5 uncovered half | LOW | W2-serial-worker | W2 · **T8-W1** *(existing, 3 → 4 items)* | INV-5 | none | **AU7.6 — test:** no two statements in `deploy/cloudflare/src/index.ts` assert opposite metadata-probe status; the surviving statement cites the closed probe run by artifact id | **What `gap-16` does NOT cover:** `gap-16` is the egress mechanism (exact-host-only denylist, inert CIDRs, raw-socket bypass). The uncovered half is the **in-file doc contradiction**, both live: `index.ts:46` *"A live-account smoke is still owed even for the exact-host entries above"* vs `index.ts:595` *"G2 is settled by the metadata probe"* |
+| **RH9** *(partial)* | RH9 uncovered half | MEDIUM | W2-serial-worker | W2 · **T3-W9** *(new)* | INV-3 | A3.3 (`COUNTER_NAMES` registration, T3-W2) must land first or the new counter is unregistered by construction | **AU6.16 — test:** a limiter-refused webhook returns 202 with its dead-letter written, and a bad-HMAC `POST /webhook` bumps a **registered** `webhook_auth_failed` counter | **What `hist-12`/`deploy-13` do NOT cover:** they are alert *delivery* (canary undeployed, delivery unarmed). The uncovered half is the two response/counter defects: `index.ts:3487` `return json({ error: "rate limited" }, 429)` (the dead-letter at `:3485` softens it, the 429 to GitHub stands), and `index.ts:3264-3265` `if (!(await verifyGithubHmac(...))) return unauthorized();` with **no** metric bump — `grep -c webhook_auth_failed index.ts metrics.ts` = 0, 0 |
+| **M3** *(partial)* | M3 uncovered half | MEDIUM | W2-serial-worker | W2 · **T8-W3** *(new)* | INV-3, INV-8 | none | **AU3.23 — test:** a throwing revoke on the completed path retries or dead-letters and bumps a registered `revoke_failed` counter; **probe:** no `cas:rw` PAT outlives its job by more than the agreed grace | **What `sec-03` does NOT cover:** `sec-03` is the multi-use redemption window (`lib.ts:455-465`). The uncovered half is the **fail-open revoke**: `index.ts:1345-1346` *"Fail-OPEN: any error is swallowed (the PAT TTL-expires) — never breaks the webhook"*, implemented at `:1359-1362` — `catch` logs `revoke_failed` and returns `false`, with no retry, no dead-letter and no counter |
+| **M5** *(partial)* | M5 uncovered half | MEDIUM | W4-post-decision | W4 · **T3-W5** *(existing)* | INV-3 | **D4** (what a customer is owed at cap is exactly the ADR-0005 question) | **AU3.28 — test:** an orphan record exhausting `MAX_ORPHAN_ATTEMPTS` / `ORPHAN_TTL_S` transitions to a terminal, queryable state surfaced to the customer instead of being deleted | **What `fabric-core-14`/`gap-13` do NOT cover:** they are the inert Rust `pg_queue` and the unratified queued-admission mode. The uncovered half is the **spawn-worker giveup drop**: `index.ts:4078` `logEvent("error","orphan_retry_giveup", …)` inside the `giveup` branch that `kv.delete(name)`s the record — no terminal state, no customer signal. Bounds: `lib.ts:1119` `ORPHAN_TTL_S = 1800`, `:1122` `MAX_ORPHAN_ATTEMPTS = 3` |
+| **M19** *(partial)* | M19 uncovered half | LOW | W2-serial-worker | W2 · **T8-W3** *(new)* | INV-3 | none | **AU3.24 — test:** the Worker's `/v1/leases/{id}/cas-cred` returns one uniform response for a bad ticket, an already-redeemed ticket and an unknown lease (no existence oracle over enumerable lease ids) | **What `fabricd-06` does NOT cover:** it names the defect on the **Rust** handler only. The uncovered half is the Worker's own twin, which makes the identical three-way distinction: `index.ts:3566-3568` — `401 invalid ticket` / `410 ticket already redeemed` / `404 no such lease` |
+
+---
+
+## 3. Structural consequences the lead must action
+
+**New WPs and their item counts** (all ≤ the `wp-check.py` 4-item ceiling):
+
+| WP | wave | owns | exclusive files (the X) |
+|---|---|---|---|
+| **T3-W8** *(new)* — slot & admission accounting | W2 (serial) | AU3.19 AU4.14 AU3.20 AU3.21 | `deploy/cloudflare/src/index.ts` + `lib.ts` |
+| **T3-W9** *(new)* — spawn/webhook path durability | W2 (serial) | AU4.15 AU3.22 AU5.10 AU6.16 | `deploy/cloudflare/src/index.ts` + `lib.ts` |
+| **T8-W3** *(new)* — credential-revocation lifecycle | W2 (serial) | AU4.16 AU3.23 AU4.17 AU3.24 | `deploy/cloudflare/src/index.ts` |
+| **T3-W10** *(new)* — fabric-server reaper + error vocabulary | W1 (serial after T4-W4) | AU3.25 AU7.7 | `crates/corelink-fabric-server/**` |
+| **T8-W4** *(new)* — in-box secret hygiene | W1 | AU3.26 AU1.9 | `deploy/runner/entrypoint.sh`, `crates/corelink-check-exec-server/**` |
+| **T5-W3** *(new)* — GitHub Action shell safety | W1 | AU5.11 AU5.12 | `integrations/github-actions/action.yml` |
+| **T7-W4** *(new)* — inventory + price-string + memoize-dependency truth | W1 | AU7.8 AU7.9 AU7.10 | `docs/runbook/secret-inventory.md`, `crates/corelink-fabric/src/plans.rs`, `actions/corelink-memoize/README.md`, new `scripts/ci/secret-inventory-drift.sh` |
+| **T7-W5** *(new)* — measured-claim probes | W3 | AU7.11 AU4.19 AU7.12 | `docs/product/pricing.md`, `docs/plan/evidence/**` |
+| **T2-W5** *(new)* — fabricd secret-rotation rollout | W3 | AU1.8 | `docs/runbook/**` (rotation playbook) |
+
+**Extensions to existing WPs:** T4-W1 `+AU4.18` (1→2) · T8-W1 `+AU7.6` (3→4) ·
+T6-W6 `+AU6.17` (3→4) · T3-W5 `+AU3.27 +AU3.28` (0→2 — this is the first content T3-W5 owns,
+so D4 landing now has a falsifiable WP behind it).
+
+**Four things the lead must decide or fix before dispatch:**
+
+1. **The Wave-2 serial chain grows from 8 links to 11** (T3-W8, T3-W9, T8-W3 inserted). §9's
+   risk row *"serial Wave-2 chain is the bottleneck"* was accepted at 8. At 11 it should be
+   re-accepted explicitly, or `index.ts` modularization pulled forward from post-GA.
+2. **T5-W2's X must be narrowed.** T5-W2 owns `integrations/**`; T5-W3 needs
+   `integrations/github-actions/action.yml` exclusively. `wp-check.py`'s "no two parallel WPs
+   share an exclusive scope" rule will fail until T5-W2 is restated as `integrations/**` minus
+   that file.
+3. **T3-W10 must be serialized behind T3-W4 → T4-W4** — three WPs now write
+   `crates/corelink-fabric-server/**`. The same exemption the Wave-2 chain carries applies.
+4. **`O-CFRATE` is a new owner arming** not in §6: produce one Cloudflare Containers invoice
+   line (vCPU-h + GiB-h, named billing period). Without it AU4.19 cannot go green, and every
+   margin number in `pricing.md` keeps resting on a Northflank proxy rate.
+   **`R6` is a new relay** not in §7: the two-tenant same-memoize-key CAS read-refusal proof,
+   which only `corelink-server` can assert.
+
+---
+
+## 4. Findings I did NOT place in CLEAN-no-action or DEFER — and why
+
+The brief forbids parking a MEDIUM-or-higher without justification. **I parked none.** The
+one candidate was `union-14` (MEDIUM), whose ledger claim is two-thirds stale at HEAD:
+
+- *"early-return without `installationId`"* — **stale.** The refusal `throw`s
+  `SpawnRefusedError` (`index.ts:1744`), and the in-code comment at `:1737-1743` documents
+  that the bare `return` was the previous bug and was removed.
+- *"holds a phantom slot for 45 min"* — **stale.** The refusal branch is entered on
+  `!slot.admitted`, i.e. no slot was ever acquired (`index.ts:1721`).
+- *"a cold at-ceiling refusal leaves a stranded job with no terminal state"* — **real, and
+  kept.** `recordOrphan` returns before writing when `installationId` is absent
+  (`index.ts:1796`), which is exactly the cold case. AU3.20 is scoped to this half only.
+
+I therefore report `union-14` as **partially stale, re-scoped, still placed** rather than as
+CLEAN. Every other finding reproduced exactly as the ledger describes it.
+
+## 5. Unplaceable
+
+**None.** All 30 findings have a bucket, a wave, a WP and an acceptance item.
+
+Two placements carry a stated caveat rather than uncertainty, recorded here so they are not
+mistaken for confidence:
+
+- **`union-30`** is placed in W4 behind **D4** because its second half (a customer-visible
+  queued/backpressure signal) *is* the ADR-0005 question. Its first half — making
+  `FLEET_MAX_CONCURRENCY` env-tunable — has no decision dependency and could be pulled into
+  T3-W9. I placed the finding whole rather than splitting one finding across two waves; the
+  lead may split it.
+- **`union-23`** is the only row whose assertion cannot be written in this repo at all: CAS
+  tenant scoping lives in `corelink-server` and the session fence (INV-6) forbids reaching it.
+  Its in-repo half (the documented dependency, AU7.10) is placeable and placed; the proof
+  itself leaves as relay **R6**.
