@@ -157,20 +157,16 @@ export class FabricdContainer extends Container<Env> {
       FABRIC_SIGNING_KEY: env.FABRIC_SIGNING_KEY,
       // Inc-3: CF Access service-token for /internal/v1/* (both must be present
       // for the crate's cf_access to emit the headers; no-op until bound).
-      // ⚠️ 2026-08-30 BISECT — TEMPORARILY WITHHELD. RESTORE AFTER READING.
-      // Timeline: these two were ADDED by Inc-3 on 2026-08-19, which is the exact
-      // day the currently-stuck instance was created and the last day fabricd is
-      // known to have served. The control experiment proved the platform runs
-      // containers in this app/colo fine, so the differentiator between fabricd
-      // (fails) and check-host (runs) is not the image — and the other obvious
-      // difference is the ENV: fabricd is handed ~47 vars including a base64 PEM,
-      // check-host a handful. If withholding the Inc-3 pair lets the container
-      // start, the fault is env size or one of these two values, not the binary.
-      // Cost while withheld: outbound /internal/v1/* calls lose their CF Access
-      // service token and will be 403'd — acceptable, the fabric serves nothing today.
-      // ...(env.CORELINK_CF_ACCESS_CLIENT_ID
-      //   ? { CORELINK_CF_ACCESS_CLIENT_ID: env.CORELINK_CF_ACCESS_CLIENT_ID }
-      //   : {}),
+      // Inc-3 CF Access service token for outbound /internal/v1/* (mint, revoke,
+      // introspect, billing). Restored 2026-08-31 after the outage bisect cleared
+      // it: withholding these two changed nothing, and the real cause was the
+      // base64 App PEM below.
+      ...(env.CORELINK_CF_ACCESS_CLIENT_ID
+        ? { CORELINK_CF_ACCESS_CLIENT_ID: env.CORELINK_CF_ACCESS_CLIENT_ID }
+        : {}),
+      ...(env.CORELINK_CF_ACCESS_CLIENT_SECRET
+        ? { CORELINK_CF_ACCESS_CLIENT_SECRET: env.CORELINK_CF_ACCESS_CLIENT_SECRET }
+        : {}),
       // ...(env.CORELINK_CF_ACCESS_CLIENT_SECRET
       //   ? { CORELINK_CF_ACCESS_CLIENT_SECRET: env.CORELINK_CF_ACCESS_CLIENT_SECRET }
       //   : {}),

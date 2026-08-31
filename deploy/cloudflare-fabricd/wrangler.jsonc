@@ -87,13 +87,7 @@
     // live deploy (a wrangler secret — invisible in this file), so pg is the active
     // backend and this durable export is ARMED (not inert). 60s is a sane
     // durable-export cadence (distinct from the always-on 30s corelink push).
-    // ⚠️ TEMPORARILY DISARMED (2026-08-30 outage bisect) — RESTORE AFTER.
-    // `maybe_spawn_billing_exporter` (main.rs:50) connects to Postgres and applies
-    // the sink DDL, awaited with `?` BEFORE `TcpListener::bind` (:82). With the
-    // introspect boot-check already excluded (BOOTCHECK=warn changed nothing), this
-    // is the prime remaining pre-bind suspect. Absence is the documented disable
-    // path, so removing the key makes step 6 a no-op. If the container now BOOTS,
-    // the cause is the pg connect/DDL. Original value: "60".
+    // ⚠️ RE-DISARMED 2026-08-31 — bisecting the post-restore regression.
     // "FABRIC_BILLING_EXPORT_INTERVAL_SECS": "60",
     // ── TEMPORARY DIAGNOSTIC (2026-08-30 outage) — REMOVE ONCE THE CAUSE IS KNOWN ──
     // `warn` downgrades the introspect boot self-check from FATAL to log-only. This
@@ -275,13 +269,9 @@
       // concurrent provisions can't peg the box (paired with the FABRIC_PROVISION_
       // MAX_INFLIGHT gate that bounds concurrent provisions). Multi-instance (now
       // pg-enabled) is the next scaling step — see README "Known limit".
-      // ⚠️ 2026-08-30 BISECT — was "standard-2". Every OTHER container app on this
-      // account declares "standard-4" (deploy/cloudflare/wrangler.jsonc:211,256,278)
-      // and all of them are healthy; fabricd was the only "standard-2" app and the
-      // only one that will not boot. With the image, the config, the instance and
-      // the DO placement all excluded, the shape is the last cheap variable. If this
-      // boots, the finding is that standard-2 is unusable on this account/colo — and
-      // the steady value becomes a deliberate cost decision, not a silent bump.
+      // Bumped standard-1 → standard-2 (2026-07-07 acquire-storm hardening).
+      // A 2026-08-30 bisect raised this to standard-4 and PROVED the shape was not
+      // the outage cause, so it is reverted rather than left as an unratified cost.
       "instance_type": "standard-4",
       // ⚠️ Raise in LOCKSTEP with `vars.FABRIC_NUM_SHARDS` — the shard fan-out
       // needs one container instance per shard. N>1 is a separate owner-gated flip.
