@@ -295,7 +295,7 @@
       // difference from the images that do start: the registry path itself.
       //   boots ⇒ the fabricdcontainer repository's pull path is the fault
       //   fails ⇒ the path is fine and the fault is still unlocated
-      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-bootprobe@sha256:00673033006c44bef7ecf06fbb2598a7f3a3893e1ff290579a3d1bbe81333161",
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-bootprobe@sha256:1482bbd07f9a597d374d88054e1d36df4712076ec48c019b599fb788693c2de7",
       // HTTP control plane. Bumped standard-1 → standard-2 (2026-07-07 acquire-storm
       // hardening): the single-flight singleton must keep /v1/health + lease ops
       // responsive under a burst of box provisions; 2 vCPU gives headroom so a few

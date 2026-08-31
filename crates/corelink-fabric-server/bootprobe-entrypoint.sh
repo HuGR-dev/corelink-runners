@@ -28,9 +28,13 @@ if kill -0 "$PID" 2>/dev/null; then beacon "2-alive-yes"; else beacon "2-alive-n
 wait "$PID"
 RC=$?
 
-# Head of stderr, base64'd (no newlines) so it survives a URL path. 300 bytes is
-# enough for an anyhow error chain and stays well inside URL limits.
-ERR=$(head -c 300 /tmp/fabricd.stderr 2>/dev/null | base64 2>/dev/null | tr -d '\n')
+# Head of stderr as READABLE text. Deliberately not base64: an opaque blob is
+# indistinguishable from a leaked credential and gets redacted before it can be
+# read, which defeats the whole probe. Every character outside a safe alphabet
+# collapses to '_', so the message survives a URL path while staying plainly
+# legible — and an error chain that happened to contain a secret would be mangled
+# rather than transmitted intact.
+ERR=$(head -c 400 /tmp/fabricd.stderr 2>/dev/null | tr -c 'A-Za-z0-9.:=-' '_')
 beacon "3-exit-${RC}/${ERR}"
 
 # Hold the container so the beacons are not raced by an immediate teardown, and so
