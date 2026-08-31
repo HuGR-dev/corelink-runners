@@ -11,6 +11,7 @@
 
 import { DurableObject } from "cloudflare:workers";
 import { Container, getContainer } from "@cloudflare/containers";
+import type { StopParams } from "@cloudflare/containers";
 import { shardOf } from "./shard";
 
 export interface Env {
@@ -112,6 +113,11 @@ export interface Env {
   FABRIC_AUTOSCALER_EXPIRY_MS?: string;
   FABRIC_AUTOSCALER_REPO_ALLOWLIST?: string;
   FABRIC_AUTOSCALER_MAX_TRACKED_JOBS?: string;
+  // Boot-guard override honoured by the fabricd binary: `warn` downgrades the
+  // introspect boot self-check from FATAL to log-only. Forwarded into the
+  // container (see the constructor) — it was previously documented but
+  // unreachable, which made a rejected introspect key unrecoverable.
+  FABRIC_INTROSPECT_BOOTCHECK?: string;
 }
 
 /** The singleton control-plane container. fabricd binds 0.0.0.0:8080. */
@@ -279,7 +285,53 @@ export class FabricdContainer extends Container<Env> {
       ...(env.FABRIC_AUTOSCALER_MAX_TRACKED_JOBS
         ? { FABRIC_AUTOSCALER_MAX_TRACKED_JOBS: env.FABRIC_AUTOSCALER_MAX_TRACKED_JOBS }
         : {}),
+      // ── BOOT-GUARD OVERRIDE — the escape hatch the FATAL message itself names.
+      // `boot_introspect_selfcheck` aborts boot on a rejected introspect key and
+      // prints "…or set FABRIC_INTROSPECT_BOOTCHECK=warn to override". That var was
+      // documented in this file's comments but NEVER forwarded, so the override did
+      // nothing and a rejected key was an UNRECOVERABLE outage: the container
+      // crashes before binding, and nothing an operator can set reaches it.
+      // (2026-08-30 outage; the guard is honoured by the deployed image — verified
+      // at `e5f07f8:crates/corelink-fabric-server/src/server.rs:1106`.)
+      ...(env.FABRIC_INTROSPECT_BOOTCHECK
+        ? { FABRIC_INTROSPECT_BOOTCHECK: env.FABRIC_INTROSPECT_BOOTCHECK }
+        : {}),
     };
+  }
+
+  // ── CONTAINER LIFECYCLE OBSERVABILITY ───────────────────────────────────────
+  // Before this, a container that crashed at boot produced exactly one opaque
+  // line at the Worker edge ("Failed to start container") and NOTHING about why:
+  // the fabricd binary prints a precise `[boot] …` diagnostic for each of the
+  // nine fallible steps before `TcpListener::bind`, and none of it was reachable.
+  //
+  // SCOPE, honestly stated: `@cloudflare/containers@0.3.7` exposes NO container
+  // stdout/stderr — `monitor` is private and no type in the SDK carries process
+  // output (checked in `dist/lib/container.d.ts` + `dist/types/index.d.ts`). So
+  // this does NOT surface the `[boot]` lines. What it does surface is the exit
+  // signal — `{ exitCode, reason }` from `StopParams` — which separates a clean
+  // `anyhow` abort from a signal/OOM kill, plus any error the runtime reports.
+  // Full boot-log observability needs a different mechanism and stays open.
+  override onError(error: unknown): unknown {
+    console.error(
+      JSON.stringify({
+        event: "fabricd_container_error",
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+      }),
+    );
+    return super.onError(error);
+  }
+
+  override onStop(params: StopParams): void | Promise<void> {
+    console.error(
+      JSON.stringify({
+        event: "fabricd_container_stopped",
+        exitCode: params.exitCode,
+        reason: params.reason,
+      }),
+    );
+    return super.onStop(params);
   }
 
   // Zero-idle-cost activity marker. All fabricd traffic funnels through this DO

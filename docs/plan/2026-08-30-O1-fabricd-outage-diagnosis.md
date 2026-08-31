@@ -87,8 +87,18 @@ channel. Combined with 4.1, the system is now: fails closed · says why to nobod
 overridden. That is strictly worse than the silent failure it replaced, and it is why this outage is
 being diagnosed by elimination instead of by reading one line.
 
-*Acceptance item:* **probe:** a forced container boot failure surfaces the container's own final
-stderr line in `wrangler tail` within a stated bound.
+**CORRECTION (made while implementing the fix — the original wording promised more than the platform
+can deliver).** `@cloudflare/containers@0.3.7` exposes **no container stdout/stderr at all**: `monitor`
+is `private` (`dist/lib/container.d.ts:289`) and no type in the SDK carries process output
+(`dist/types/index.d.ts` — `StopParams` is exactly `{ exitCode: number; reason: 'exit' |
+'runtime_signal' }`). So the `[boot]` lines **cannot** be surfaced by overriding a hook. What *is*
+reachable is the exit signal and any runtime error. Full boot-log observability needs a different
+mechanism — most likely the container POSTing its own boot status before the guard aborts — and
+remains **open**, not fixed.
+
+*Acceptance item (corrected):* **probe:** a forced container boot failure emits a structured
+`fabricd_container_stopped` record carrying `exitCode` and `reason` in `wrangler tail`.
+*Separate, still open:* the container's own `[boot]` diagnostic reaches an operator.
 
 ### 4.3 Billing export is a hard pre-bind boot dependency — `union-33` (MEDIUM→HIGH)
 

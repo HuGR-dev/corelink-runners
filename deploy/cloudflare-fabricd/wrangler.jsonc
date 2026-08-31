@@ -88,6 +88,22 @@
     // backend and this durable export is ARMED (not inert). 60s is a sane
     // durable-export cadence (distinct from the always-on 30s corelink push).
     "FABRIC_BILLING_EXPORT_INTERVAL_SECS": "60",
+    // ── TEMPORARY DIAGNOSTIC (2026-08-30 outage) — REMOVE ONCE THE CAUSE IS KNOWN ──
+    // `warn` downgrades the introspect boot self-check from FATAL to log-only. This
+    // is BOTH the fix for an unreachable escape hatch (the var was documented at
+    // :196 and never forwarded, so a rejected key was an UNRECOVERABLE outage) AND
+    // the experiment that discriminates the two live suspects: fabricd currently
+    // CRASHES BEFORE BINDING its port, and `main.rs` has nine fallible steps ahead
+    // of `TcpListener::bind`. If the container now BOOTS, the cause is the
+    // introspect self-check (a rejected key / CF Access service token). If it STILL
+    // crashes, the cause is elsewhere — prime suspect `maybe_spawn_billing_exporter`
+    // (main.rs:50), whose Postgres connect + DDL is awaited with `?` before bind and
+    // which the line above ARMS in prod.
+    // ⚠️ Leaving this at `warn` permanently re-creates the 2026-07-19 silent-outage
+    // class the guard exists to prevent: the fabric would boot "healthy" while every
+    // authenticated request fail-closes. It is armed to LEARN, not to run.
+    // Tracked: docs/plan/2026-08-30-O1-fabricd-outage-diagnosis.md (union-31).
+    "FABRIC_INTROSPECT_BOOTCHECK": "warn",
     // ── ACQUIRE-PATH RESILIENCE (W0) — right-size the global inbound bound ─────
     // The code DEFAULT (DEFAULT_MAX_INFLIGHT_REQUESTS = 1024) is a thundering-herd
     // backstop tuned for a big box; on this 2-vCPU singleton it is far above what
