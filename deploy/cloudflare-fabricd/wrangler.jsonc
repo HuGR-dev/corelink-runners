@@ -72,7 +72,34 @@
     // needs. Use a DIRECT or SESSION-mode connection, never transaction-mode
     // pooling: tokio-postgres uses prepared statements and deadpool holds
     // connections across calls, which transaction pooling breaks.
-    "FABRIC_PG_DISABLED": "1",
+    // FABRIC_PG_DISABLED — SET during the 2026-08-31 outage, REMOVED the same day.
+    //
+    // It was armed because the Neon project refused every connection on a plan
+    // quota and `PgLedger::connect` fail-closes before `TcpListener::bind`, so the
+    // control plane could not start at all. It is removed because the quota came
+    // back AND the thing that was eating it is gone: the crash loop dialled the
+    // database every minute, and a scale-to-zero database woken every 60 s never
+    // autosuspends, so the outage was feeding on the allowance whose exhaustion
+    // caused it. A healthy fabricd sleeps after 5 m idle (see FabricdContainer),
+    // which lets Neon suspend and stops the burn.
+    //
+    // Measured on the durable ledger, two independent samples on a fixed config:
+    // 6/6 and 6/6 SERVED. A 200 here is itself the proof that Postgres accepted the
+    // connection and the DDL applied — with the pg backend armed, boot cannot reach
+    // the listener otherwise. /v1/attestation/key 200, /v1/usage 401 fail-closed.
+    //
+    // TO RE-ARM (emergency only, if the database refuses again): add
+    //   "FABRIC_PG_DISABLED": "1",
+    // and redeploy. It suppresses the whole DATABASE_URL block — pg backend, the
+    // vCPU ceiling the #265 guard ties to it, and the pg-only billing export — which
+    // is the same coherent state as never having set the secret. It costs lease
+    // durability across restarts, N>1, the ceiling and durable billing export, so it
+    // is a bridge, never a destination. If the quota keeps recurring, move the
+    // database rather than living here: docs/handoff/2026-07-03-PLAN-postgres-
+    // provisioning-and-vcpu-ceiling-arm.md sanctions Supabase alongside Neon, and a
+    // free project suffices — direct or SESSION-mode connection only, because
+    // tokio-postgres uses prepared statements and deadpool holds connections across
+    // calls, which transaction-mode pooling breaks.
     "CORELINK_INTROSPECT_URL": "https://corelink-api.humangr.com/internal/v1/auth/introspect",
     "BILLING_INGEST_URL": "https://corelink-api.humangr.com/internal/v1/billing/usage",
     "BILLING_REGION": "iad",
