@@ -257,7 +257,18 @@
       // Cost while pinned here: this binary predates #514/#515 and Inc-3's CF Access
       // service-token headers — introspect calls will be Access-403'd, so auth
       // fail-closes. That is acceptable ONLY as a diagnostic step.
-      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer:9191661f77c85f9ab9fbad3de6f7372925f383c0",
+      // ⚠️ 2026-08-30 CONTROL EXPERIMENT — NOT a real pin. This is the CHECK-HOST
+      // image, deliberately pointed at the fabricd container class. It is a
+      // DIFFERENT binary that is currently `ready` and serving on this same
+      // account, and it listens on 8080 (deploy/check-host/Dockerfile:53), so it
+      // matches `defaultPort` exactly. Purpose: separate "the fabricd image cannot
+      // run" from "this container application/colo cannot run anything" — the one
+      // question every previous experiment left open.
+      //   boots  ⇒ the application and colo are fine; the fault is the fabricd image
+      //   fails  ⇒ the application cannot run ANY container; the fault is not ours
+      // REVERT IMMEDIATELY AFTER READING THE RESULT. Restore
+      // :8631abb08a022fe2e0eef3b0f41ba784ab5d8287 (the rebuild carrying #514/#515).
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer:8631abb08a022fe2e0eef3b0f41ba784ab5d8287",
       // HTTP control plane. Bumped standard-1 → standard-2 (2026-07-07 acquire-storm
       // hardening): the single-flight singleton must keep /v1/health + lease ops
       // responsive under a burst of box provisions; 2 vCPU gives headroom so a few
