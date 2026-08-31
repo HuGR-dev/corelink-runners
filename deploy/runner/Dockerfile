@@ -363,14 +363,23 @@ RUN mkdir -p /opt/action-archive-cache && \
 # Same PINNED digest as every download stage — all stages MUST use the identical base.
 FROM ubuntu:24.04@sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae77ff1dc54
 
+# Declared HERE, before the LABEL that advertises them, so the label and the
+# install below are ONE literal each instead of two that must agree. The first
+# draft of this PR hardcoded the same values in both places; cold review pointed
+# out that nothing reconciles them and nothing consumes the labels either, so a
+# drift would be silent AND undetectable. Single-sourcing removes the drift at
+# the cost of nothing. (The remaining labels follow the file's older pattern of
+# hand-kept literals — pre-existing, not touched here.)
+ARG NIGHTLY_DATE=2026-08-31
+ARG CARGO_FUZZ_VERSION=0.13.2
+
 LABEL org.opencontainers.image.title="CoreLink ephemeral GitHub Actions runner" \
       org.opencontainers.image.description="One-shot ephemeral runner for the CoreLink fabric (ADR-0007 Stage A)" \
       org.opencontainers.image.vendor="HuGR / CoreLink" \
       corelink.runner.version="2.335.1" \
       corelink.rust.toolchain="1.96.0,1.91.1" \
-      corelink.rust.nightly="nightly-2026-08-31" \
-      corelink.rust.llvm_tools="1.91.1" \
-      corelink.cargo_fuzz.version="0.13.2" \
+      corelink.rust.nightly="nightly-${NIGHTLY_DATE}" \
+      corelink.cargo_fuzz.version="${CARGO_FUZZ_VERSION}" \
       corelink.python3="present" \
       corelink.python3.jsonschema="present" \
       corelink.gh.version="2.97.0" \
@@ -671,10 +680,8 @@ RUN curl -fsSL "https://static.rust-lang.org/rustup/archive/${RUSTUP_INIT_VERSIO
 #
 # To bump: pick a new date, and re-run the corelink-server fuzz lanes — a nightly
 # bump can break `cargo fuzz` compilation, which is exactly why this is pinned.
-# ⚠️ Keep in sync with the `corelink.rust.nightly` LABEL near the top of this
-# stage — the label is what the fleet advertises, this ARG is what it installs.
-# They are two literals; nothing enforces the match yet.
-ARG NIGHTLY_DATE=2026-08-31
+# NIGHTLY_DATE is declared once, at the top of this stage, and feeds BOTH the
+# `corelink.rust.nightly` LABEL and the install below. One literal, two uses.
 ENV CORELINK_NIGHTLY=nightly-${NIGHTLY_DATE}
 RUN rustup toolchain install "nightly-${NIGHTLY_DATE}" \
         --profile minimal \
@@ -693,7 +700,16 @@ RUN rustup toolchain install "nightly-${NIGHTLY_DATE}" \
 # and costs 899,208 B (879 KiB). The alternative, `cargo install cargo-fuzz`,
 # COMPILES it: minutes of build time here, or minutes on every ephemeral spawn
 # if left to the workflow. There is no reason to compile a published binary.
-ARG CARGO_FUZZ_VERSION=0.13.2
+#
+# ⚠️ `sudo install`, unlike the six other /usr/local/bin writes in this file.
+# Those all run BEFORE `USER runner` (line 581) and are therefore root; this
+# block runs after it. `/usr/local/bin` is root:root 0755 on ubuntu:24.04 and
+# nothing chowns it (see the "root-owned, world-executable" note above), so a
+# bare `install` here would fail with EACCES and break the `&&` chain — i.e.
+# fail the image build. `runner` has NOPASSWD sudo (line 518).
+# Found by cold review, 2026-08-31: NO workflow builds this image, so this would
+# have shipped green and only exploded for whoever next ran build-and-push.sh.
+# CARGO_FUZZ_VERSION likewise comes from the top of this stage.
 ARG CARGO_FUZZ_SHA256=b5b704018b63e0f151c17a057ac53b5111e1db545d1b9f72fee79f08a545931c
 RUN curl -fsSL \
       "https://github.com/rust-fuzz/cargo-fuzz/releases/download/${CARGO_FUZZ_VERSION}/cargo-fuzz-${CARGO_FUZZ_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
@@ -703,7 +719,7 @@ RUN curl -fsSL \
     tar -xzf /tmp/cargo-fuzz.tar.gz -C /tmp/cargo-fuzz-x && \
     _bin="$(find /tmp/cargo-fuzz-x -type f -name cargo-fuzz -perm -u+x | head -1)" && \
     test -n "${_bin}" && \
-    install -m 0755 "${_bin}" /usr/local/bin/cargo-fuzz && \
+    sudo install -m 0755 "${_bin}" /usr/local/bin/cargo-fuzz && \
     rm -rf /tmp/cargo-fuzz.tar.gz /tmp/cargo-fuzz-x && \
     cargo-fuzz --version
 

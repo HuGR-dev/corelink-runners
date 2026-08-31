@@ -32,10 +32,15 @@ Added, each with its measured cost rather than an estimate:
   the release API's own `assets[].digest`. `cargo install cargo-fuzz` would
   COMPILE it, here or on every spawn.
 
-~156 MiB of download, once, against a per-spawn tax on seven workflows running
-on boxes that are destroyed after each job. The build prints `du -sh` of the
-nightly toolchain: the INSTALLED size is not something anyone has measured, and
-the first build of this image is that measurement.
+**165,400,364 B = 157.74 MiB** of download, once (121.2 + 35.7 + 0.9 MiB),
+against a per-spawn tax on seven workflows running on boxes that are destroyed
+after each job. The build prints `du -sh` of the nightly toolchain: the INSTALLED
+size is not something anyone has measured, and the first build of this image is
+that measurement.
+
+The three components are fetched as root or into `$RUSTUP_HOME` as appropriate;
+the `cargo-fuzz` binary needs `sudo install` because this stage has already
+dropped to `USER runner` and `/usr/local/bin` is root-owned.
 
 ### 2026-08-25 — the reconciler raced live spawns, and an anonymous route wrote to our logs
 
