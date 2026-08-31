@@ -106,6 +106,42 @@ describe("reapStaleBoxes", () => {
     expect(verify).not.toHaveBeenCalled();
   });
 
+  // ── The 2026-08-31 runner leak ─────────────────────────────────────────────
+  // Option-C per-tenant-PAT dispatch writes `inst: ""` on purpose — the tenant is
+  // resolved by introspecting the acquiring PAT, so there is no installation. The
+  // reaper used to require a non-empty `inst` and skipped every such record as
+  // "unverifiable", at `info`, with no age ceiling: 279 distinct runners were
+  // measured in that state, aged 7.4 h to 22.3 h, none of them even registered
+  // with GitHub. An empty installation is a CREDENTIAL CHOICE, not ignorance —
+  // `mintJitAuthToken` falls through to the static mint token, which is the same
+  // credential the spawn itself used — so the verify call must still happen.
+  it("cell 3b — an Option-C box (empty inst) is VERIFIED and reaped when idle", async () => {
+    const kv = kvWith({ "sbox:runner-1": { ...OLD, inst: "" } });
+    const verify = vi.fn(async () => ({ httpStatus: 200, runner: { status: "online", busy: false } }));
+    const n = await reapStaleBoxes(envWith(kv), NOW, verify as never);
+    expect(verify).toHaveBeenCalledTimes(1);
+    // The empty installation is forwarded as-is; it selects the static token.
+    expect(verify.mock.calls[0]?.[3]).toBe("");
+    expect(n).toBe(1);
+    expect(destroyed).toEqual(["rh-old"]);
+  });
+
+  it("cell 3c — an Option-C box that GitHub reports BUSY is still never reaped", async () => {
+    const kv = kvWith({ "sbox:runner-1": { ...OLD, inst: "" } });
+    const n = await reapStaleBoxes(envWith(kv), NOW, async () => ({ httpStatus: 200, runner: { status: "online", busy: true } }));
+    expect(n).toBe(0);
+    expect(destroyed).toEqual([]);
+    expect(kv.store.has("sbox:runner-1")).toBe(true);
+  });
+
+  it("cell 3d — no repo is still unverifiable: there is no URL to ask", async () => {
+    const kv = kvWith({ "sbox:runner-1": { ...OLD, repo: "" } });
+    const verify = vi.fn();
+    const n = await reapStaleBoxes(envWith(kv), NOW, verify as never);
+    expect(n).toBe(0);
+    expect(verify).not.toHaveBeenCalled();
+  });
+
   it("cell 4 — NEVER reaps when the verifier THROWS (ignorance is not idleness)", async () => {
     const kv = kvWith({ "sbox:runner-1": OLD });
     const n = await reapStaleBoxes(envWith(kv), NOW, async () => {

@@ -2641,14 +2641,32 @@ export async function reapStaleBoxes(
     // Too young to judge: it may well be mid-job.
     if (nowMs - rec.t < STALE_BOX_AGE_MS) continue;
 
-    // Can we get a DEFINITE answer? No id/repo/installation ⇒ no, so leave it.
-    if (typeof rec.rid !== "number" || !rec.repo || !rec.inst) {
+    // Can we get a DEFINITE answer? `rid` and `repo` build the GitHub URL, so
+    // without them there is nothing to ask and the box is left alone.
+    //
+    // An EMPTY `inst` is NOT ignorance and must not be treated as such. Option-C
+    // per-tenant-PAT dispatch deliberately omits the installation id (the tenant is
+    // resolved by introspecting the acquiring PAT instead), and `mintJitAuthToken`
+    // already handles exactly that: no App creds or no installation ⇒ it returns the
+    // static `GITHUB_MINT_TOKEN`, the same credential the spawn itself used. So the
+    // verification below works fine without an installation — and if no credential
+    // resolves at all, `fetchRunnerActivity` returns null and the record is
+    // unverifiable through the normal path, fail-safe intact.
+    //
+    // Requiring `inst` here made EVERY Option-C box structurally unreapable: the
+    // record could never reach the verify call, so it was skipped, at `info`, with
+    // no age ceiling and no escalation — every minute until its 24 h TTL expired.
+    // Measured live 2026-08-31: 279 distinct runners in that state, aged 7.4 h to
+    // 22.3 h, none of them registered with GitHub at all.
+    if (typeof rec.rid !== "number" || !rec.repo) {
       logEvent("info", "reap_skipped_unverifiable", { runnerName, ageMs: nowMs - rec.t });
       continue;
     }
     let activity: "busy" | "idle" | "unknown" = "unknown";
     try {
-      activity = runnerActivityVerdict(await verify(env, rec.repo, rec.rid, rec.inst));
+      // `inst ?? ""` is the Option-C shape: an absent installation selects the
+      // static mint token inside `mintJitAuthToken`, never an App token for "".
+      activity = runnerActivityVerdict(await verify(env, rec.repo, rec.rid, rec.inst ?? ""));
     } catch (e) {
       logEvent("error", "reap_verify_threw", { runnerName, error: (e as Error).message });
       continue; // ignorance ⇒ never destroy
