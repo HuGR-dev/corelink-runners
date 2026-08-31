@@ -14,6 +14,18 @@
   // Same CoreLink infra account as the spawn-Worker (in-network introspect/billing).
   "account_id": "6a1fc1c626fc2628823e60b9db01f5cd",
 
+  // Worker logs AND container stdout/stderr streaming (2026-08-31). The
+  // spawn-Worker has carried this since its own stall triage; fabricd never did,
+  // which is why the 2026-08-19 outage was investigated blind: `wrangler
+  // containers info` reported the container application with NO
+  // `configuration.observability.logs` block, while the healthy
+  // corelink-spawn-worker-runnercontainer reports `logs.enabled: true` — and that
+  // flag comes from THIS top-level key, not from anything under `containers[]`.
+  // Without it the container's own stderr (every fabricd boot line, including the
+  // reason a pre-bind step aborts) is never emitted anywhere, so a container that
+  // dies before binding is indistinguishable from one that never started.
+  "observability": { "enabled": true },
+
   // Non-secret config. Secrets (FABRIC_SIGNING_KEY, FABRIC_INTROSPECT_AUTH_KEY,
   // BILLING_INGEST_AUTH_KEY, CLOUDFLARE_SPAWN_AUTH_TOKEN) are set via
   // `wrangler secret put` — NEVER in this file. See README.md.
@@ -100,7 +112,12 @@
     // is the intended production behaviour. MEASURED 2026-08-31: arming it changed
     // nothing (0/6 SERVED), so it is not masking a rejected key. What the outage
     // fixed is that this var is now FORWARDED into the container at all.
-    // "FABRIC_INTROSPECT_BOOTCHECK": "warn",
+    // 2026-08-31 RE-TEST, one variable. The earlier "arming it changed nothing
+    // (0/6)" reading is WITHDRAWN as unsound: the forwarding of this var into the
+    // container (src/index.ts) was authored during the same triage, so the run that
+    // "measured" the override may have executed against a Worker that never passed
+    // it through — an inert knob measured as a null result. Re-measured properly.
+    "FABRIC_INTROSPECT_BOOTCHECK": "warn",
     // ── ACQUIRE-PATH RESILIENCE (W0) — right-size the global inbound bound ─────
     // The code DEFAULT (DEFAULT_MAX_INFLIGHT_REQUESTS = 1024) is a thundering-herd
     // backstop tuned for a big box; on this 2-vCPU singleton it is far above what
@@ -258,7 +275,27 @@
       //   fails  ⇒ the application cannot run ANY container; the fault is not ours
       // REVERT IMMEDIATELY AFTER READING THE RESULT. Restore
       // :8631abb08a022fe2e0eef3b0f41ba784ab5d8287 (the rebuild carrying #514/#515).
-      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer:8631abb08a022fe2e0eef3b0f41ba784ab5d8287",
+      // 2026-08-31 ABSOLUTE-ENTRYPOINT build (git 3f7afa9, run 33359535914) — the
+      // outage candidate. Identical binary to the 8631abb image; the only change is
+      // that the Dockerfile now names the entrypoint in full
+      // (/usr/local/bin/corelink-fabricd instead of the bare `corelink-fabricd`),
+      // verified in the pushed config. Every other explanation was excluded against
+      // live evidence: the image pulls intact (3 layers, sha256-verified, ~3s),
+      // is amd64 with 8080 exposed and a GLIBC_2.34 ceiling under a 2.36 runtime;
+      // the application executes OTHER images of ours in this same colo and shape;
+      // the account is nowhere near its ceilings (total_vcpu 1500, ~212 live); and
+      // max_instances and the introspect boot-guard override were each re-measured
+      // at 0/10.
+      // Back on an immutable @sha256 pin (X4 / INV-2), resolved directly from the
+      // managed registry's Docker-Content-Digest — the git-SHA-tag deviation that
+      // run 33347304356 fell back to is closed.
+      // ⚠️ 2026-08-31 REGISTRY-PATH CONTROL — TEMPORARY. Same Dockerfile, same
+      // commit, same builder, pushed under a SECOND image name. Everything about the
+      // image content is already exonerated, so this isolates the one remaining
+      // difference from the images that do start: the registry path itself.
+      //   boots ⇒ the fabricdcontainer repository's pull path is the fault
+      //   fails ⇒ the path is fine and the fault is still unlocated
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-bootprobe@sha256:00673033006c44bef7ecf06fbb2598a7f3a3893e1ff290579a3d1bbe81333161",
       // HTTP control plane. Bumped standard-1 → standard-2 (2026-07-07 acquire-storm
       // hardening): the single-flight singleton must keep /v1/health + lease ops
       // responsive under a burst of box provisions; 2 vCPU gives headroom so a few
@@ -271,7 +308,22 @@
       "instance_type": "standard-2",  // MEASURED: standard-4 changed nothing (0/6)
       // ⚠️ Raise in LOCKSTEP with `vars.FABRIC_NUM_SHARDS` — the shard fan-out
       // needs one container instance per shard. N>1 is a separate owner-gated flip.
-      "max_instances": 1
+      //
+      // 2026-08-31 OUTAGE EXPERIMENT — ONE VARIABLE, everything else untouched.
+      // With container logs finally enabled, the platform's own message is:
+      //   "There is no container instance that can be provided to this Durable
+      //    Object, try again later"
+      // That is a PLACEMENT refusal, not a crash of our process. The account has
+      // ample room (`/containers/me`: total_vcpu 1500 vs ~212 live; per-deployment
+      // ceilings 4 vCPU / 12 GiB / 20 GB, all of which this 1 vCPU / 6 GiB / 12 GB
+      // shape clears), so the binding constraint is THIS APPLICATION's own cap of
+      // one instance — and `wrangler containers instances` lists THREE
+      // FabricdContainer Durable Objects (fabricd-singleton, -r2, -enam) whose
+      // alarms each ask for a container. One slot, three askers, and
+      // `rollout_active_grace_period: 0` leaves no headroom for a replacement to be
+      // placed before the incumbent record clears.
+      // 4 makes the test unambiguous; the steady value is decided from the result.
+      "max_instances": 4
     }
   ],
 
