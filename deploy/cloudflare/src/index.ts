@@ -2042,6 +2042,32 @@ const KEEPALIVE_MAX_VERIFY_PER_TICK = 40;
 // minute and the binding lives 2 h, so nothing is lost by deferring one.
 const STRAND_MAX_VERIFY_PER_TICK = 40;
 
+// The same hard ceiling, for `reapStaleBoxes`, and now it is LOAD-BEARING in a way
+// it was not before. Until this change the reaper refused to verify any record with
+// an empty `inst`, so the population that reached the verify call was only the WARM
+// spawns. Dropping that requirement (which was wrong — see the note at the guard)
+// widens the population to EVERY `sbox:` record under 24 h, and the 2026-08-31
+// measurement of that population is 279 records. Uncapped, one tick of this sweep
+// would fire 279 GETs at api.github.com in a burst.
+//
+// ⚠️ 40 IS NOT CONSERVATISM — IT IS A REGIME BOUNDARY. The naive arithmetic ("279
+// per minute ≈ 15 000/h vs the 5 000/h budget") uses the right number against the
+// wrong limit: 5 000/h is the CORE bucket, drained over an hour. What a burst meets
+// FIRST is the SECONDARY (concurrency/abuse) limit, which trips on RATE, not on
+// accumulated volume. Measured in this campaign, one call apart:
+//
+//   gh api rate_limit         → remaining=4935/5000
+//   gh api repos/HuGR-Labs/…  → 403 "API rate limit exceeded"
+//
+// 65 calls inside one second were enough. Note also that `/rate_limit` does NOT
+// report the secondary limit, so anyone diagnosing this sees plenty of headroom and
+// goes looking for the cause somewhere else. Removing the ceiling therefore does not
+// raise consumption by 3× — it SWITCHES REGIME, from a bounded drip to a burst that
+// can 403 the whole installation and break SPAWNING, which is the thing customers
+// pay for. Records past the cap are simply not examined this tick (no escalation,
+// nothing destroyed); the sweep runs every minute and the record lives 24 h.
+const REAP_MAX_VERIFY_PER_TICK = 40;
+
 // ── Keep-alive sweep (2026-08-02; verified against GitHub 2026-08-03) ────────
 //
 // Why this exists: `RunnerContainer.sleepAfter` was acting as a hard 15-minute cap
@@ -2602,8 +2628,9 @@ export async function detectStrandedInFlightJobs(
  * wastes money. This one DESTROYS, so it must never act on ignorance: killing a
  * box that is in fact running a customer's job costs them the job. A box is
  * reaped ONLY on a definite "GitHub says this runner is not busy". Unverifiable
- * (missing runner id, missing installation, a GitHub error, a throw) ⇒ left
- * alone and retried next tick.
+ * (missing runner id, missing repo, a GitHub error, a throw) ⇒ left alone and
+ * retried next tick. A MISSING INSTALLATION is explicitly NOT in that list —
+ * see the long note at the guard below.
  *
  * Returns the number of boxes destroyed.
  */
@@ -2627,6 +2654,8 @@ export async function reapStaleBoxes(
     return 0;
   }
   let reaped = 0;
+  let verifications = 0;
+  let deferred = 0;
   for (const { name } of listed.keys) {
     const runnerName = name.slice(SPAWNED_BOX_PREFIX.length);
     let rec: { h?: string; rid?: number; repo?: string; inst?: string; t?: number } | null = null;
@@ -2641,14 +2670,63 @@ export async function reapStaleBoxes(
     // Too young to judge: it may well be mid-job.
     if (nowMs - rec.t < STALE_BOX_AGE_MS) continue;
 
-    // Can we get a DEFINITE answer? No id/repo/installation ⇒ no, so leave it.
-    if (typeof rec.rid !== "number" || !rec.repo || !rec.inst) {
-      logEvent("info", "reap_skipped_unverifiable", { runnerName, ageMs: nowMs - rec.t });
+    // Can we get a DEFINITE answer? `rid` and `repo` build the GitHub URL, so
+    // without them there is nothing to ask and the box is left alone.
+    //
+    // An EMPTY `inst` is NOT ignorance and must not be treated as such.
+    //
+    // ⚠️ WHICH POPULATION THIS IS. It is NOT Option-C. Option-C per-tenant-PAT
+    // dispatch omits the installation id only in the body of the request to OUR
+    // mint (src/lib.ts:296) — `installationId` still flows to the GitHub JIT/box
+    // registration, as the dispatch site itself says (src/index.ts, the Option-C
+    // note: "The installationId still flows for the GitHub JIT/box registration
+    // below — only the CAS-tenant changes"). The records with `inst: ""` are COLD
+    // SPAWNS: a REPO webhook carries no `installation.id`, and REPO_INSTALLATION_MAP
+    // injects one only for mapped repos — of which there is exactly one. So a spawn
+    // for any unmapped repo is COLD and writes `inst: ""`. (The record that anchored
+    // the 2026-08-31 measurement, `repo = 'HuGR-Labs/corelink-server'`, is precisely
+    // that case: wrangler.jsonc keeps it OUT of the map deliberately.)
+    //
+    // The thesis is unchanged and so is the fix: a DELIBERATE EMPTY IS NOT
+    // IGNORANCE. `mintJitAuthToken` already handles exactly that — no App creds or
+    // no installation ⇒ it returns the static `GITHUB_MINT_TOKEN`, the same
+    // credential the spawn itself used. So the verification below works fine without
+    // an installation — and if no credential resolves at all, `fetchRunnerActivity`
+    // returns null and the record is unverifiable through the normal path, fail-safe
+    // intact.
+    //
+    // Requiring `inst` here made EVERY cold-spawn box structurally unreapable: the
+    // record could never reach the verify call, so it was skipped, at `info`, with
+    // no age ceiling and no escalation — every minute until its 24 h TTL expired.
+    // Measured live 2026-08-31: 279 distinct `sbox:` RECORDS in that state, aged
+    // 7.4 h to 22.3 h, none of their runners registered with GitHub at all.
+    //
+    // The skip names WHICH field is missing. Without that it reported 279 records a
+    // minute for hours while saying nothing about the cause, and a hand-read sample
+    // of those records appeared to contradict the log — a skip that does not name
+    // its reason cannot be acted on, only guessed at.
+    if (typeof rec.rid !== "number" || !rec.repo) {
+      logEvent("info", "reap_skipped_unverifiable", {
+        runnerName,
+        ageMs: nowMs - rec.t,
+        reason: typeof rec.rid !== "number" ? `rid:${typeof rec.rid}` : "repo:empty",
+      });
       continue;
     }
+
+    // Past the per-tick ceiling ⇒ not examined this tick. See REAP_MAX_VERIFY_PER_TICK:
+    // this guard is what keeps the widened population a drip instead of a burst.
+    if (verifications >= REAP_MAX_VERIFY_PER_TICK) {
+      deferred++;
+      continue;
+    }
+    verifications++;
+
     let activity: "busy" | "idle" | "unknown" = "unknown";
     try {
-      activity = runnerActivityVerdict(await verify(env, rec.repo, rec.rid, rec.inst));
+      // `inst ?? ""` is the cold-spawn shape: an absent installation selects the
+      // static mint token inside `mintJitAuthToken`, never an App token for "".
+      activity = runnerActivityVerdict(await verify(env, rec.repo, rec.rid, rec.inst ?? ""));
     } catch (e) {
       logEvent("error", "reap_verify_threw", { runnerName, error: (e as Error).message });
       continue; // ignorance ⇒ never destroy
@@ -2685,6 +2763,12 @@ export async function reapStaleBoxes(
       }
       await kv.delete(name).catch(() => {});
     }
+  }
+  if (deferred > 0) {
+    // Not an error: the sweep runs every minute and the record lives 24 h. It IS
+    // worth seeing, because a persistently non-zero `deferred` means the `sbox:`
+    // population is outrunning the sweep and the real defect is upstream.
+    logEvent("info", "reap_deferred_over_cap", { deferred, cap: REAP_MAX_VERIFY_PER_TICK });
   }
   if (reaped > 0) await bumpMetrics(env, ...Array(reaped).fill("stale_box_reaped"));
   return reaped;
