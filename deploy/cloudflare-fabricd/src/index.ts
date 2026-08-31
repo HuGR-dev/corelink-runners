@@ -57,6 +57,21 @@ export interface Env {
   // fail-closes an armed ceiling on a non-pg backend, so the two are wired together.
   // Absent ⇒ in-memory ledger, no ceiling (unchanged dogfood behaviour). Secret.
   DATABASE_URL?: string;
+  // Kill-switch for the durable ledger, WITHOUT deleting the secret. "1" makes the
+  // DATABASE_URL block below behave as if the secret were absent, so the container
+  // boots on the in-memory ledger and stops dialling the database at all.
+  //
+  // It exists because `PgLedger::connect` fail-closes BEFORE `TcpListener::bind`:
+  // when the database refuses connections the control plane cannot start, the
+  // keep-warm cron retries every minute, and every retry is another connection
+  // attempt against a database that is already refusing. On a scale-to-zero
+  // provider that is worse than useless — a database woken every 60 s never
+  // autosuspends, so the crash loop itself consumes the compute allowance whose
+  // exhaustion caused the refusal in the first place.
+  //
+  // Deleting the secret would also work, but that is a credential this session
+  // cannot restore. A var is reversible by anyone, from the config, in one line.
+  FABRIC_PG_DISABLED?: string;
   // Opt-in pg TLS: `disable` (default) | `require`. A public-internet managed PG
   // should set `require`; when DATABASE_URL is set we default it to `require`.
   FABRIC_PG_TLS?: string;
@@ -200,7 +215,11 @@ export class FabricdContainer extends Container<Env> {
       // backend + FABRIC_RUNNER_VCPU=4 (standard-4 sizing) arm together; the #265
       // guard requires pg for an armed ceiling, so we never set one without the
       // other. Absent ⇒ neither key is injected → in-memory, unchanged behaviour.
-      ...(env.DATABASE_URL
+      // `FABRIC_PG_DISABLED=1` suppresses this entire block — see the Env field.
+      // Every key here arms together (the pg backend, the vCPU ceiling the #265
+      // guard ties to it, and the pg-only export), so suppressing them together is
+      // the same coherent state as never having set the secret. Nothing half-arms.
+      ...(env.DATABASE_URL && env.FABRIC_PG_DISABLED !== "1"
         ? {
             FABRIC_LEDGER_BACKEND: "pg",
             DATABASE_URL: env.DATABASE_URL,

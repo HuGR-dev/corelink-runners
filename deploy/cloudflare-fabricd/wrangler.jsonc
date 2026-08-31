@@ -47,6 +47,32 @@
     //   2. Raise this AND `max_instances` (containers block below) TOGETHER.
     // Still owner-gated (do it when real check-host burst volume arrives).
     "FABRIC_NUM_SHARDS": "1",
+    // ⛔ DURABLE LEDGER OFF — 2026-08-31. A DEGRADED state, and one to undo.
+    //
+    // The Neon project behind DATABASE_URL refuses every connection on a plan
+    // quota ("Your account or project has exceeded…"), and `PgLedger::connect`
+    // runs before `TcpListener::bind`, so the control plane could not start at all
+    // — down since 2026-08-19. Worse, the failure fed itself: the keep-warm cron
+    // retries every minute, each retry dials the database, and a scale-to-zero
+    // database woken every 60 s never autosuspends — so the crash loop burns the
+    // very compute allowance whose exhaustion caused the refusal. That is why this
+    // is set now instead of waiting for the quota period to roll: without it the
+    // next allowance is spent the same way, and the outage returns mid-month.
+    //
+    // GIVEN UP while this is "1": lease state does not survive a restart, N>1 stays
+    // refused (the acquire cap-guard fail-closes off pg), the vCPU ceiling disarms
+    // with it, and durable billing export is inert. None of that is readable today
+    // regardless — the database is refusing every connection.
+    //
+    // TO UNDO: restore a database, point DATABASE_URL at it, delete this line,
+    // redeploy. A fresh free project on an equivalent provider is enough —
+    // docs/handoff/2026-07-03-PLAN-postgres-provisioning-and-vcpu-ceiling-arm.md
+    // sanctions Supabase alongside Neon, with the same public-CA TLS that
+    // FABRIC_PG_TLS=require verifies and the same CREATE TYPE/TABLE grant the DDL
+    // needs. Use a DIRECT or SESSION-mode connection, never transaction-mode
+    // pooling: tokio-postgres uses prepared statements and deadpool holds
+    // connections across calls, which transaction pooling breaks.
+    "FABRIC_PG_DISABLED": "1",
     "CORELINK_INTROSPECT_URL": "https://corelink-api.humangr.com/internal/v1/auth/introspect",
     "BILLING_INGEST_URL": "https://corelink-api.humangr.com/internal/v1/billing/usage",
     "BILLING_REGION": "iad",
@@ -99,13 +125,12 @@
     // live deploy (a wrangler secret — invisible in this file), so pg is the active
     // backend and this durable export is ARMED (not inert). 60s is a sane
     // durable-export cadence (distinct from the always-on 30s corelink push).
-    // MEASURED 2026-08-31: disarming this changed nothing (0/6 SERVED), so the
-    // pre-bind pg connect is NOT the boot blocker. Restored to the intended value.
-    // RESTORED. Disarming this was tried on 2026-08-31 and correctly measured as
-    // NO change (0/10): the pre-bind Postgres failure is not the exporter's, it is
-    // `PgLedger::connect` inside `build_app_and_state` (server.rs:1274). The proxy
-    // only forwards this var inside the DATABASE_URL block, so it stays inert on
-    // its own if the durable ledger is ever dropped.
+    // Disarming this was tried during the 2026-08-31 outage triage and correctly
+    // measured as NO change (0/10 SERVED): the pre-bind Postgres failure is not the
+    // exporter's, it is `PgLedger::connect` inside `build_app_and_state`
+    // (server.rs:1274). Left at the intended value — the proxy only forwards it
+    // inside the DATABASE_URL block, so it is inert whenever the durable ledger is
+    // off, including under FABRIC_PG_DISABLED.
     "FABRIC_BILLING_EXPORT_INTERVAL_SECS": "60",
     // Boot-guard override. UNSET on purpose: the default (FATAL on a rejected
     // introspect key) is the intended production behaviour. What the 2026-08-30
