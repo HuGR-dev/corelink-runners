@@ -1,4 +1,42 @@
-# fabricd outage — investigation state, for a clean context
+# fabricd outage — RESOLVED to root cause, 2026-08-31
+
+> **ROOT CAUSE FOUND.** The Neon Postgres project behind `DATABASE_URL` has been
+> refusing every connection since ~2026-08-19 with a plan-quota error. Captured from
+> the container's own stderr:
+>
+> ```
+> [boot] introspect key VALIDATED (HTTP 200) at .../internal/v1/auth/introspect — auth path ready
+> Error: PgLedger: cannot acquire connection for DDL: Error occurred while creating a new object:
+>        db error — cause: Backend(Error { kind: Db, cause: Some(DbError {
+>        severity: "ERROR", code: SqlState(…),
+>        message: "Your account or project has excee[ded …]"
+> ```
+>
+> `PgLedger::connect` runs inside `build_app_and_state` (server.rs:1274), **before**
+> `TcpListener::bind`, and its error is propagated with `?`. So a quota-suspended
+> database does not degrade durability — it aborts the whole control plane before it
+> can serve anything. Nothing about the image, the entrypoint, the colo, the instance
+> cap, the registry path or Cloudflare was ever involved; each was excluded by a
+> measured rate, and the list is kept below because those exclusions are what made
+> the remaining surface small enough to instrument.
+>
+> **The owner's correction was right:** it was never a support issue.
+>
+> **How it was finally read:** every log surface reachable from this session was
+> blind — `onStart` never fires, `health.errors` is empty, the `exitCode: 0` the
+> Worker reports is @cloudflare/containers' hardcoded placeholder for "stopped with
+> no exit code" (`dist/lib/container.js:1597`), and container stdout goes to Workers
+> Logs, which needs a scope this session lacks (`wrangler tail` does NOT carry it —
+> verified with a control image that executed to a real exit 1 and still emitted
+> nothing). So the image was made to report on itself, over the network, to the one
+> readable surface: the Worker's own request log, payload in the URL path.
+> See `crates/corelink-fabric-server/Dockerfile.bootprobe`.
+>
+> **Remediation is the owner's call** — see the two options at the end of this file.
+
+---
+
+# Original investigation state (kept for the record)
 
 **Read this instead of the session transcript.** Written 2026-08-31 by the session that got it
 wrong, to hand a fresh context the facts without the dead ends.
@@ -99,3 +137,35 @@ both harmless and documented in place: lifecycle logging on the Container subcla
 satisfied and then stopped being satisfied — not a static misconfiguration, because a static
 misconfiguration cannot serve. Any hypothesis that cannot explain that window is wrong, including
 every hypothesis this session produced.
+
+---
+
+## 8. Remediation (2026-08-31)
+
+**The blocker is a database plan quota, not code.** Two ways forward:
+
+**A — restore the database (recommended).** Raise the Neon plan or wait out the quota
+period, then confirm with the boot probe. fabricd needs no change: the moment Neon
+accepts connections, `PgLedger::connect` succeeds and the control plane binds. This
+keeps the durable ledger, so lease state and the billing records derived from it stay
+intact. It costs money and only the owner can authorise it.
+
+**B — drop `DATABASE_URL` (emergency only).** Absence of the secret selects the
+in-memory ledger and fabricd boots immediately. It trades away durability: lease state
+does not survive a restart, N>1 stays refused, and the durable billing export is inert.
+The pg data is unreachable either way while the quota holds, so this loses no data that
+is currently readable — but it must be reverted the moment the database is back, and
+anything accrued in memory meanwhile is gone.
+
+### Owed regardless of which is chosen
+
+1. **An optional background task must not be a hard pre-bind dependency.** The durable
+   billing exporter (`maybe_spawn_billing_exporter`) also runs before `bind` and also
+   propagates with `?`. It was not the cause here, but it is the same trap armed and
+   waiting: a database blip would take the control plane down through it too. It should
+   retry in the background and surface its state, not abort boot.
+2. **A dead control plane must be loud.** This ran twelve days. The keep-warm cron saw
+   every failure and logged "cold boot in progress, NOT destroying" each minute without
+   ever escalating.
+3. **Container log streaming stays on.** `observability: { enabled: true }` was missing
+   from this Worker and is now set; it is why the outage was investigated blind.
