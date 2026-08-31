@@ -129,3 +129,86 @@ wrong costs the same one deploy and cannot be wrong.
 
 I did not deploy, did not change a secret, did not restart anything. Everything above is read-only.
 Step 5.1 is a production mutation and needs the owner's explicit go-ahead on that specific change.
+
+---
+
+# ADDENDUM — live instrumentation, and a RETRACTION (2026-08-30, later)
+
+The Worker fix from §5.1 was deployed (versions `a20af070` → `ff1987ae` → `f5e337dc`). What it taught
+changed the diagnosis, including invalidating two of my own conclusions.
+
+## A. RETRACTION — two exclusions I claimed are NOT safe
+
+I reported that `FABRIC_INTROSPECT_BOOTCHECK=warn` changed nothing and therefore **excluded** the
+introspect boot self-check, and later that removing `FABRIC_BILLING_EXPORT_INTERVAL_SECS` changed
+nothing and therefore **excluded** the Postgres connect. **Both exclusions are withdrawn.**
+
+`wrangler containers info` reports the container application's `updated_at` as **2026-08-19**, and
+all three Worker deploys printed `no changes to be made` for the container. This repo documents the
+consequence itself (`wrangler.jsonc:203-204`): a binary is *"rebuilt only to force a container
+rollout so the proxy's newly-forwarded envVars take effect (the singleton reads env at boot)"*.
+Since no container ever reached `started`, there is no evidence either variable was ever read by a
+running process. An experiment whose treatment may never have been applied proves nothing.
+
+## B. What the instrumentation DID establish
+
+- `fabricd_container_started` **never fires** — the container never reaches started; the port never
+  opens.
+- `fabricd_container_activity_expired` **never fires** — nothing in this Worker stopped it; the SDK's
+  only graceful-stop path (`container.js:748 → this.stop()`) did not run.
+- The watchdog is excluded independently: it uses `destroy()` = SIGKILL.
+- `onStop` reports `exitCode: 0, reason: "exit"`. **Not load-bearing:** with the container never
+  started, this may be a synthetic stop rather than a real process exit code. Reading it as
+  "`main()` returned `Ok`" would over-read an SDK field whose meaning in this state is unverified.
+
+## C. The decisive observation — one instance, stuck
+
+```
+wrangler containers instances a0337af9-…
+INSTANCE  260c9faf…  NAME fabricd-singleton  STATE stopped  LOCATION bog04  VERSION 5
+CREATED   2026-08-19T22:58:00Z
+```
+
+A single instance, **`stopped`**, pinned to one colo, unchanged since 2026-08-19. Every request tries
+to start it and fails the port check. So the question is not only *"why did the process fail"* but
+*"why was this instance never replaced"* — and that second question has a complete answer.
+
+## D. `union-34` (HIGH) — the self-heal watchdog is disabled by a TOTAL outage
+
+`scheduled()` runs each minute and, before probing, consults an idle gate
+(`deploy/cloudflare-fabricd/src/index.ts:955-967`):
+
+```js
+idleSkip = Date.now() - lastActivityMs > IDLE_MS;   // IDLE_MS = 4 min
+if (idleSkip) { watchdogState.delete(id); continue; }  // no probe at all
+```
+
+and `watchdogAction` (`:776-798`) refuses to destroy a container that has never been healthy until
+`now - firstSeenAt >= BOOT_GRACE_MS` (**3 min**).
+
+Composed: a lapse in traffic longer than 4 minutes **deletes the lifecycle state**, so when traffic
+resumes the boot-grace clock restarts from zero and the verdict is `skip-booting` again. Destroying
+therefore requires **three continuous minutes of traffic spaced under four minutes apart.**
+
+In a *partial* outage that holds — real traffic continues, the watchdog fires, the box is replaced.
+In a **total** outage it cannot: every request 500s, callers stop, activity lapses, the clock resets,
+and the container is never replaced. **The self-heal is structurally unavailable in exactly the
+failure it exists for**, which is why a stopped instance has survived eleven days.
+
+This is the same shape as the other findings in this session: each guard is individually reasonable,
+and composed they produce a system that fails closed, tells nobody, cannot be overridden, and cannot
+heal itself.
+
+*Acceptance items:* **test:** a container that has never been healthy is destroyed after a bounded
+wall-clock period **regardless of traffic**; the idle gate must not delete watchdog lifecycle state.
+**probe:** a synthetically stopped singleton is replaced without operator action.
+
+## E. Revised recovery
+
+The lever is a **container rollout**, which by this repo's own practice means a new image — and the
+rebuild to ≥ #515 is already owed (`fabricd-deploy-01`, `hist-04`). That single action replaces the
+stuck instance *and* lands the merged fixes. Only after a container has actually started can §3's
+nine-step table be bisected, because only then is a forwarded variable observably applied.
+
+Two temporary settings must be reverted once service is restored: `FABRIC_INTROSPECT_BOOTCHECK=warn`
+and the disarmed `FABRIC_BILLING_EXPORT_INTERVAL_SECS` (original value `"60"`).
