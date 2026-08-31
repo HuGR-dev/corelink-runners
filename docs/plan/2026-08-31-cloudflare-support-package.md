@@ -1,5 +1,12 @@
 # Cloudflare support package — container application will not start
 
+> ⚠️ **HOLD — DO NOT SEND.** Owner ruling 2026-08-31: *"it is not a support issue — you are doing
+> something wrong."* This package concludes a platform fault while several cheap checks were never
+> run (image architecture, the pushed image's manifest, image size vs pull deadline, account
+> instance quota, and a trivial-image control). See
+> `docs/plan/2026-08-31-fabricd-investigation-state.md` §4. Close those first; if they clear, this
+> package is ready and its evidence stands.
+
 **Status: DRAFT. Not submitted.** Submitting it is the owner's call — it is outbound
 communication to a third party, and it needs a Cloudflare dashboard session this session does not
 have. Everything below is evidence gathered read-only from `wrangler` and public HTTP probes.
