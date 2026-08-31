@@ -45,6 +45,11 @@ export interface MintEnv {
   // ONLY /internal/v1/runner/{mint,revoke} — never signup-mint, erase, or admin (A6,
   // one notch tighter than pat_mint). Sent as `x-corelink-internal-auth` on both calls.
   CORELINK_RUNNER_MINT_AUTH_KEY?: string;
+  // "1" ⇒ an unarmed CORELINK_RUNNER_MINT_AUTH_KEY is a HARD DENY instead of a
+  // silent cold spawn (★A3.17). DEFAULT-OFF on purpose — see the guard in
+  // `buildContainerEnv` for why the loud half ships on and the refusing half is
+  // armed deliberately.
+  REQUIRE_MINT_KEY?: string;
   CORELINK_MINT_URL?: string;
   // CF Access (Inc-3) service-token pair for the gated `/internal/v1/*` edge. Set
   // as Worker secrets on corelink-spawn-worker; WITHOUT them the runner-mint call
@@ -374,9 +379,18 @@ export async function revokeCasPatById(
 // NOTE: `containerEnv` is the CLW_* OVERLAY only — it does NOT include the JIT.
 // The JIT is minted AFTER authorization and merged by the caller (spawnRunner),
 // so an unauthorized repo never even gets a JIT.
+/**
+ * Why a spawn came out COLD. Present ONLY on a cold result, and it exists so an
+ * operator misconfiguration cannot hide inside the ordinary cold path — the three
+ * used to be one silent return. See the guard in `buildContainerEnv`.
+ */
+export type ColdReason = "mint_key_unarmed" | "no_repo" | "no_installation_or_pat";
+
 export interface ContainerEnvResult {
   authz: "ok" | "forbidden";
   containerEnv: Record<string, string>;
+  /** Set iff the spawn is COLD; absent on a warm mint. */
+  coldReason?: ColdReason;
   patId?: string;
   tenant?: string; // server-DERIVED tenant (billed + CLW_TENANT); warm only
   maxConcurrency?: number; // per-tenant ceiling; warm only
@@ -492,16 +506,47 @@ export async function buildContainerEnv(
   params: MintParams,
   deps?: { stash?: CredStashLike; fabricEndpoint?: string },
 ): Promise<ContainerEnvResult> {
-  // No mint key, or not enough to authorize ⇒ COLD (legacy fail-open). We do NOT
-  // authorize and do NOT warm — the job spawns without CLW_* under no tenant.
+  // ── Why these are no longer ONE condition (★A3.17 / union-01) ───────────────
+  //
+  // Three unrelated facts used to collapse into a single silent
+  // `{ authz: "ok", containerEnv: {} }`, and the collapse is the defect: an
+  // OPERATOR MISCONFIGURATION was indistinguishable from an ordinary cold spawn.
+  //
+  //   mint_key_unarmed        — OUR deployment is wrong. Every job on the whole
+  //                             fleet spawns COLD, tenantless and unattributed,
+  //                             and nothing anywhere says so. Money silently
+  //                             stops being attributable.
+  //   no_repo                 — a malformed request; nothing to authorize against.
+  //   no_installation_or_pat  — an ORDINARY cold spawn. A repo webhook carries no
+  //                             installation id and REPO_INSTALLATION_MAP covers
+  //                             one repo, so this is the expected path for
+  //                             everything outside the map. It is not a fault.
+  //
+  // Each now names itself in `coldReason`, so the caller can log and count them
+  // apart. The behaviour is otherwise unchanged: all three still spawn COLD.
+  //
+  // ⚠️ ON FAIL-CLOSED. A3.17 asks the worker to REFUSE to serve when the mint key
+  // is unarmed. That is available here — `REQUIRE_MINT_KEY=1` turns the
+  // misconfiguration into a hard deny — but it is deliberately NOT the default,
+  // and the reason is fresh evidence rather than timidity: on 2026-08-31 a
+  // fail-closed guard that ran before the control plane could bind turned a
+  // recoverable dependency fault into a twelve-day total outage. Refusing every
+  // spawn on a config slip trades silent misattribution for a fleet-wide CI stop.
+  // The loud half — which is what makes the failure *findable* — ships on by
+  // default; the refusing half is one deliberate var away. Arming it is the
+  // owner's ratification, not this code's assumption.
+  if (!env.CORELINK_RUNNER_MINT_AUTH_KEY) {
+    return env.REQUIRE_MINT_KEY === "1"
+      ? { authz: "forbidden", containerEnv: {}, coldReason: "mint_key_unarmed" }
+      : { authz: "ok", containerEnv: {}, coldReason: "mint_key_unarmed" };
+  }
+  if (!params.repoFullName) {
+    return { authz: "ok", containerEnv: {}, coldReason: "no_repo" };
+  }
   // Authorizable when we have EITHER an installation_id (tenant derived from it) OR
   // an acquiring PAT (Option-C: tenant derived by introspection).
-  if (
-    !env.CORELINK_RUNNER_MINT_AUTH_KEY ||
-    !params.repoFullName ||
-    (!params.installationId && !params.acquiringPat)
-  ) {
-    return { authz: "ok", containerEnv: {} };
+  if (!params.installationId && !params.acquiringPat) {
+    return { authz: "ok", containerEnv: {}, coldReason: "no_installation_or_pat" };
   }
   try {
     const m = await mintCasPat(env, params);
@@ -618,6 +663,60 @@ export const SLOT_TTL_S = 2700;
 // (no idle cost). The HARD ceiling is the account limit (~343 standard-4 runners
 // after the cache fleet's vCPU share); beyond that needs a CF account-limit raise.
 export const FLEET_MAX_CONCURRENCY = 250;
+// ── Fail-open BUDGET for the admission path (★A3.16 / RH3) ──────────────────
+//
+// `acquireConcurrencySlot` admits when the slot Durable Object THROWS, so an infra
+// hiccup never blocks a legitimate job. That intent is right and is kept. What was
+// wrong is that the fail-open had no bound: while the DO is throwing, NOTHING
+// enforces the per-tenant entitlement or `FLEET_MAX_CONCURRENCY`, so a sustained DO
+// fault admits every arrival — the one shape that turns "flat concurrency with
+// unlimited minutes" into unbounded spend.
+//
+// A budget separates the two cases the old code could not tell apart. A handful of
+// errors is a hiccup: absorb it, admit, stay out of the way. A sustained stream of
+// them is an outage, and during an outage the cap is not being enforced by anyone —
+// so admission must stop rather than run unmetered. Beyond the budget the answer is
+// a refusal with a distinct reason, not a silent yes.
+//
+// ⚠️ APPROXIMATE BY CONSTRUCTION. The counter is a KV read-modify-write, which is
+// not atomic and is eventually consistent, so concurrent fail-opens can undercount
+// and the real admits can exceed the number below. It is a ceiling within a factor,
+// not an exact quota — which is the whole distance from "unbounded" to "bounded",
+// and is worth having even though it is not exact. Do not cite it as an exact bound.
+export const FAILOPEN_WINDOW_S = 60;
+// Deliberately small. Sized for a transient, NOT to keep a fleet running through a
+// DO outage: at this rate a sustained fault admits far fewer boxes than it would
+// have, while a genuine blip (a few requests) is entirely absorbed.
+export const FAILOPEN_MAX_PER_WINDOW = 5;
+
+/** Bucket key for the current fail-open window. Exported for the test to pin it. */
+export function failOpenWindowKey(nowMs: number): string {
+  return `failopen:${Math.floor(nowMs / (FAILOPEN_WINDOW_S * 1000))}`;
+}
+
+/**
+ * The pure decision, runtime-agnostic and unit-testable (same shape as
+ * `decideSlotAcquire`): given how many fail-open admissions this window has already
+ * recorded, may this one be admitted?
+ *
+ * `null` means the count could not be read at all. That is NOT treated as zero: if
+ * both the slot DO and the counter store are unavailable, nothing anywhere is
+ * bounding the fleet, and admitting into that is exactly the unbounded case. Two
+ * independent stores failing at once is an outage, not a hiccup.
+ */
+export function decideFailOpenAdmission(
+  countThisWindow: number | null,
+  max: number = FAILOPEN_MAX_PER_WINDOW,
+): { admitted: boolean; reason?: string } {
+  if (countThisWindow === null) {
+    return { admitted: false, reason: "slot_failopen_budget_unreadable" };
+  }
+  if (countThisWindow >= max) {
+    return { admitted: false, reason: "slot_failopen_budget_exhausted" };
+  }
+  return { admitted: true };
+}
+
 // The per-repo ceiling for COLD spawns (no derived tenant, so no entitlement).
 // Raised 8 → 40 (2026-08-19) so a single busy repo's cold CI isn't throttled at 8
 // while the global fleet has room; still well under FLEET_MAX_CONCURRENCY.

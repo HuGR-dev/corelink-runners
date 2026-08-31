@@ -62,6 +62,9 @@ import {
   SLOT_TTL_S,
   FLEET_MAX_CONCURRENCY,
   COLD_REPO_CAP,
+  FAILOPEN_WINDOW_S,
+  failOpenWindowKey,
+  decideFailOpenAdmission,
   decideRedeem,
   parseReconcilerRepos,
   rateLimitDeadLetterKey,
@@ -1650,12 +1653,53 @@ async function acquireConcurrencySlot(
   } catch (e) {
     // Infra hiccup ⇒ ADMIT (never block a legitimate job on a DO error). A clean
     // at-capacity decision above is NOT an error and is honored as a real refusal.
+    //
+    // BUDGETED since ★A3.16/RH3: while the DO throws, nothing enforces the tenant
+    // entitlement or FLEET_MAX_CONCURRENCY, so an unconditional yes here admitted
+    // every arrival for as long as the fault lasted. The budget absorbs a hiccup and
+    // stops an outage — see FAILOPEN_MAX_PER_WINDOW for why it is deliberately small
+    // and why it is approximate.
+    const kv = env.RUNNER_JOB_PATS;
+    const bucket = failOpenWindowKey(Date.now());
+    // NO BINDING and a FAILED READ are different facts and must not collapse into
+    // one. An absent binding means this deployment has no counter infra at all —
+    // the same situation `claimSpawn` documents as "no dedup infra ⇒ fail-open to
+    // spawn (never block a job)" — so the budget simply does not apply and the
+    // original unconditional fail-open stands. A read that THROWS means the store
+    // is unreachable *while the slot DO is also failing*: two independent stores
+    // down at once is an outage, nothing is bounding the fleet, and that is exactly
+    // the unbounded case the budget exists to close.
+    let count: number | null = null;
+    let verdict: { admitted: boolean; reason?: string };
+    if (!kv) {
+      verdict = { admitted: true, reason: "slot_failopen_unbudgeted_no_kv" };
+    } else {
+      try {
+        const raw = await kv.get(bucket);
+        // A missing key is a genuine zero (a fresh window); only a THROW is unknown.
+        count = raw ? Number.parseInt(raw, 10) : 0;
+        if (!Number.isFinite(count)) count = 0;
+      } catch {
+        count = null; // store unreachable ⇒ unknown, and unknown is not zero
+      }
+      verdict = decideFailOpenAdmission(count);
+    }
+    if (verdict.admitted && kv) {
+      // Best-effort increment. A lost write undercounts, which is already stated as
+      // the bound's known imprecision; it must never turn an admit into an error.
+      await kv
+        .put(bucket, String((count ?? 0) + 1), { expirationTtl: FAILOPEN_WINDOW_S * 2 })
+        .catch(() => {});
+    }
     logEvent("error", "concurrency_slot_acquire_error_failopen", {
       jobId,
       key,
       error: (e as Error).message,
+      admitted: verdict.admitted,
+      countThisWindow: count,
+      ...(verdict.reason ? { reason: verdict.reason } : {}),
     });
-    return { admitted: true };
+    return verdict;
   }
 }
 
@@ -1700,8 +1744,22 @@ async function driveSpawn(
   if (mint.authz === "forbidden") {
     await releaseSpawnClaim(env.RUNNER_JOB_PATS, jobId);
     await bumpMetrics(env, "spawn_forbidden");
-    logEvent("error", "mint_forbidden", { jobId, repo });
+    logEvent("error", "mint_forbidden", { jobId, repo, ...(mint.coldReason ? { coldReason: mint.coldReason } : {}) });
     return;
+  }
+  // ★A3.17 — an operator misconfiguration must not hide inside the ordinary cold
+  // path. `mint_key_unarmed` means OUR key is missing and EVERY job on the fleet is
+  // spawning tenantless and unattributed; `no_installation_or_pat` is the expected
+  // cold spawn for any repo outside REPO_INSTALLATION_MAP and is not a fault. They
+  // used to be the same silent return, so the first was invisible. Only the
+  // misconfiguration is logged at `error`.
+  if (mint.coldReason) {
+    logEvent(
+      mint.coldReason === "mint_key_unarmed" ? "error" : "info",
+      "spawn_cold",
+      { jobId, repo, coldReason: mint.coldReason },
+    );
+    await bumpMetrics(env, `spawn_cold_${mint.coldReason}`);
   }
   // F2 (W3): register the revoke-key jobId->patId at MINT time — BEFORE the spawn.
   // Previously it was written only AFTER a successful container start (spawnRunner),
