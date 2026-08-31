@@ -292,6 +292,12 @@
     // The DO binding and its `v6` migration stay exactly as they are, so no state
     // is touched and no migration is rewound. Restore this entry when the DevEnv
     // image is actually built and pushed — pinned by @sha256, never by a tag.
+    //
+    // That last sentence is now ENFORCED, not advised: `test/container-image-pins.test.ts`
+    // fails the suite on any `"image"` in this file that is not an @sha256 digest,
+    // and fails vacuously-empty scans too. It is what stops a later rebase (PR #516
+    // owns `RunnerDevEnvDO` and touches this file) from re-introducing a tag pin and
+    // breaking every `wrangler deploy` again.
   ]
 
   // R2 binding (in-network CAS hydration — the moat win) is a Cache-TL

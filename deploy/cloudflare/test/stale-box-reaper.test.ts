@@ -107,15 +107,18 @@ describe("reapStaleBoxes", () => {
   });
 
   // ── The 2026-08-31 runner leak ─────────────────────────────────────────────
-  // Option-C per-tenant-PAT dispatch writes `inst: ""` on purpose — the tenant is
-  // resolved by introspecting the acquiring PAT, so there is no installation. The
-  // reaper used to require a non-empty `inst` and skipped every such record as
-  // "unverifiable", at `info`, with no age ceiling: 279 distinct runners were
-  // measured in that state, aged 7.4 h to 22.3 h, none of them even registered
-  // with GitHub. An empty installation is a CREDENTIAL CHOICE, not ignorance —
-  // `mintJitAuthToken` falls through to the static mint token, which is the same
-  // credential the spawn itself used — so the verify call must still happen.
-  it("cell 3b — an Option-C box (empty inst) is VERIFIED and reaped when idle", async () => {
+  // A COLD SPAWN writes `inst: ""` on purpose: a REPO webhook carries no
+  // `installation.id`, and REPO_INSTALLATION_MAP injects one only for the single
+  // mapped repo, so every unmapped repo spawns COLD. (Not Option-C — Option-C omits
+  // the installation only in the body of the request to OUR mint; it still flows to
+  // the GitHub JIT/box registration.) The reaper used to require a non-empty `inst`
+  // and skipped every such record as "unverifiable", at `info`, with no age ceiling:
+  // 279 distinct `sbox:` RECORDS were measured in that state, aged 7.4 h to 22.3 h,
+  // none of their runners even registered with GitHub. An empty installation is a
+  // CREDENTIAL CHOICE, not ignorance — `mintJitAuthToken` falls through to the static
+  // mint token, the same credential the spawn itself used — so the verify call must
+  // still happen.
+  it("cell 3b — a COLD-spawn box (empty inst) is VERIFIED and reaped when idle", async () => {
     const kv = kvWith({ "sbox:runner-1": { ...OLD, inst: "" } });
     const verify = vi.fn(async () => ({ httpStatus: 200, runner: { status: "online", busy: false } }));
     const n = await reapStaleBoxes(envWith(kv), NOW, verify as never);
@@ -126,7 +129,7 @@ describe("reapStaleBoxes", () => {
     expect(destroyed).toEqual(["rh-old"]);
   });
 
-  it("cell 3c — an Option-C box that GitHub reports BUSY is still never reaped", async () => {
+  it("cell 3c — a COLD-spawn box that GitHub reports BUSY is still never reaped", async () => {
     const kv = kvWith({ "sbox:runner-1": { ...OLD, inst: "" } });
     const n = await reapStaleBoxes(envWith(kv), NOW, async () => ({ httpStatus: 200, runner: { status: "online", busy: true } }));
     expect(n).toBe(0);
@@ -140,6 +143,41 @@ describe("reapStaleBoxes", () => {
     const n = await reapStaleBoxes(envWith(kv), NOW, verify as never);
     expect(n).toBe(0);
     expect(verify).not.toHaveBeenCalled();
+  });
+
+  // ── The per-tick verification ceiling (Q-7: BOTH sides) ────────────────────
+  // Dropping the `inst` requirement widened the verified population from "warm
+  // spawns only" to "every `sbox:` record under 24 h" — measured at 279. Uncapped,
+  // one tick would burst 279 GETs at api.github.com, and what a burst meets first is
+  // the SECONDARY rate limit, which trips on RATE (65 calls in one second sufficed in
+  // this campaign, with remaining=4935/5000 on the core bucket). These two cells pin
+  // the boundary from both directions: at the cap everything is asked; past it,
+  // nothing is asked AND nothing is destroyed.
+  function manyOldRecords(count: number) {
+    const recs: Record<string, unknown> = {};
+    for (let i = 0; i < count; i++) recs[`sbox:runner-${i}`] = { ...OLD, h: `rh-${i}`, inst: "" };
+    return kvWith(recs);
+  }
+
+  it("cell 3e — AT the cap (40 records) every record is verified and reaped", async () => {
+    const kv = manyOldRecords(40);
+    const verify = vi.fn(async () => ({ httpStatus: 200, runner: { status: "online", busy: false } }));
+    const n = await reapStaleBoxes(envWith(kv), NOW, verify as never);
+    expect(verify).toHaveBeenCalledTimes(40);
+    expect(n).toBe(40);
+  });
+
+  it("cell 3f — PAST the cap the surplus is NOT asked about and NOT destroyed", async () => {
+    const kv = manyOldRecords(120);
+    const verify = vi.fn(async () => ({ httpStatus: 200, runner: { status: "online", busy: false } }));
+    const n = await reapStaleBoxes(envWith(kv), NOW, verify as never);
+    // The ceiling binds the GitHub call count, which is the whole point.
+    expect(verify).toHaveBeenCalledTimes(40);
+    expect(n).toBe(40);
+    // Deferred ⇒ untouched, not destroyed and not forgotten: 80 records survive
+    // for the next tick. Nothing escalates, nothing is killed on ignorance.
+    expect(destroyed).toHaveLength(40);
+    expect(kv.store.size).toBe(80);
   });
 
   it("cell 4 — NEVER reaps when the verifier THROWS (ignorance is not idleness)", async () => {
