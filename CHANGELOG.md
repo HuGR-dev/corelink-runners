@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-08-31 — the runner image gains nightly + llvm-tools + cargo-fuzz, so seven CI lanes can leave the owner's Mac
+
+Unblocks corelink-server's WP-CI migration. Seven of its workflows
+(`corelink-{hash,meta,worker,client-verify}`, `tenant-path`, `fuzz-nightly`,
+`nightly`) pin their fuzz jobs to the owner's Mac with a hard-coded
+`…/toolchains/nightly-x86_64-apple-darwin/bin` path. That path cannot simply be
+retargeted to Linux, because **this image had no nightly toolchain at all** —
+and `echo >> $GITHUB_PATH` exits 0 on a directory that does not exist, so the
+retarget would have produced GREEN jobs running the wrong `cargo`.
+
+Added, each with its measured cost rather than an estimate:
+
+- **`nightly-2026-08-31`**, pinned to a DATE (not the floating channel) so an
+  image rebuild stays reproducible — 127,098,236 B xz across rustc + cargo +
+  rust-std. Consumers must use `cargo +${CORELINK_NIGHTLY} …`; rustup refuses to
+  alias an official channel name, so the env var is the contract, and it fails
+  loudly rather than falling back to stable when unset.
+- **`llvm-tools` on the 1.91.1 toolchain** — 37,402,920 B xz. corelink-server's
+  `coverage.yml` runs `cargo-llvm-cov` against the WORKSPACE-pinned toolchain,
+  not the default; without this it pays a `rustup component add` per ephemeral
+  spawn, which is part of why that lane is still on billed hosted minutes.
+- **`cargo-fuzz` 0.13.2** — the 899,208 B static musl binary, sha256 read from
+  the release API's own `assets[].digest`. `cargo install cargo-fuzz` would
+  COMPILE it, here or on every spawn.
+
+~156 MiB of download, once, against a per-spawn tax on seven workflows running
+on boxes that are destroyed after each job. The build prints `du -sh` of the
+nightly toolchain: the INSTALLED size is not something anyone has measured, and
+the first build of this image is that measurement.
+
 ### 2026-08-25 — the reconciler raced live spawns, and an anonymous route wrote to our logs
 
 Round 2 of the audit. Each behavioural change is pinned by a regression proven
