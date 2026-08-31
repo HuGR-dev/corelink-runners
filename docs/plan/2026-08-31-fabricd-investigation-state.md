@@ -1,4 +1,4 @@
-# fabricd outage — RESOLVED to root cause, 2026-08-31
+# fabricd outage — ROOT-CAUSED AND SERVICE RESTORED, 2026-08-31
 
 > **ROOT CAUSE FOUND.** The Neon Postgres project behind `DATABASE_URL` has been
 > refusing every connection since ~2026-08-19 with a plan-quota error. Captured from
@@ -32,7 +32,13 @@
 > readable surface: the Worker's own request log, payload in the URL path.
 > See `crates/corelink-fabric-server/Dockerfile.bootprobe`.
 >
-> **Remediation is the owner's call** — see the two options at the end of this file.
+> **SERVICE IS BACK (2026-08-31 15:35Z).** `FABRIC_PG_DISABLED=1` makes the proxy
+> behave as if DATABASE_URL were unset, so fabricd boots on the in-memory ledger and
+> stops dialling the suspended database. Measured on the fixed config: **10/10
+> SERVED**, against 0/35 before. `/health` 200 · `/v1/attestation/key` 200 serving
+> the production key · `/v1/usage` 401 fail-closed.
+>
+> This is DEGRADED and meant to be undone — see §8.
 
 ---
 
@@ -169,3 +175,27 @@ anything accrued in memory meanwhile is gone.
    ever escalating.
 3. **Container log streaming stays on.** `observability: { enabled: true }` was missing
    from this Worker and is now set; it is why the outage was investigated blind.
+
+---
+
+## 9. Restored 2026-08-31, and why this way
+
+The crash loop was not just a symptom, it was a consumer. The keep-warm cron retries
+every minute and each retry dials the database; a scale-to-zero database woken every
+60 s never autosuspends, so fabricd was burning the compute allowance whose exhaustion
+was refusing it. Waiting for the quota period to roll would therefore have bought a
+working control plane until roughly the same day of the next month.
+
+`FABRIC_PG_DISABLED=1` reuses a state the code already models coherently: the pg
+backend, the vCPU ceiling the #265 guard ties to it, and the pg-only billing export
+all arm together inside one block in the proxy, so they suppress together. Nothing
+half-arms. The DATABASE_URL secret is left bound — it is a credential this session
+cannot restore, and a var is reversible from the config by anyone.
+
+The database is still the real fix, and option A in §8 stands. A free project on an
+equivalent provider is enough to take it: `docs/handoff/2026-07-03-PLAN-postgres-
+provisioning-and-vcpu-ceiling-arm.md` already sanctions Supabase alongside Neon, with
+the public-CA TLS `FABRIC_PG_TLS=require` verifies and the CREATE TYPE/TABLE grant the
+DDL needs. Use a direct or session-mode connection — tokio-postgres uses prepared
+statements and deadpool holds connections across calls, which transaction-mode pooling
+breaks.
