@@ -36,7 +36,16 @@ on:
   # Manual-only: the control-plane image changes rarely and a build is heavy;
   # dispatch it when the fabricd binary / its Dockerfile actually change
   # (`gh workflow run build-fabricd-image.yml`).
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      image_name:
+        description: >-
+          Managed-registry image name to push to. Defaults to the live one.
+          Override it to publish IDENTICAL content under a second name — the
+          control that separates "this image cannot run" from "this registry
+          path cannot be pulled", which is otherwise unfalsifiable from outside.
+        required: false
+        default: corelink-fabricd-fabricdcontainer
 
 permissions:
   contents: read
@@ -45,7 +54,7 @@ env:
   CLOUDFLARE_ACCOUNT_ID: 6a1fc1c626fc2628823e60b9db01f5cd
   # Bare image name — matches the live image's name; wrangler prefixes the
   # account managed-registry path on push (registry.cloudflare.com/<acct>/<name>).
-  IMAGE_NAME: corelink-fabricd-fabricdcontainer
+  IMAGE_NAME: ${{ inputs.image_name || 'corelink-fabricd-fabricdcontainer' }}
 
 jobs:
   build-and-push:
