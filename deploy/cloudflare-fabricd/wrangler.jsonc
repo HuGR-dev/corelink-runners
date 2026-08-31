@@ -101,7 +101,21 @@
     // durable-export cadence (distinct from the always-on 30s corelink push).
     // MEASURED 2026-08-31: disarming this changed nothing (0/6 SERVED), so the
     // pre-bind pg connect is NOT the boot blocker. Restored to the intended value.
-    "FABRIC_BILLING_EXPORT_INTERVAL_SECS": "60",
+    // ⛔ DISARMED 2026-08-31 — THIS VAR CAUSED THE 12-DAY CONTROL-PLANE OUTAGE.
+    // `maybe_spawn_billing_exporter` runs BEFORE `TcpListener::bind` and its error
+    // is propagated with `?`, so an unreachable Postgres does not degrade billing
+    // export — it aborts the whole process before it can serve anything. Captured
+    // from the container's own stderr on 2026-08-31 via a self-reporting probe
+    // image, after every other explanation had been excluded:
+    //   [boot] introspect key VALIDATED (HTTP 200) ... auth path ready
+    //   Error: PgLedger: cannot acquire connection for DDL: ... db error
+    // The introspect key was never the problem; the database is. Leaving this unset
+    // skips the exporter entirely (absence is its disable path) and lets fabricd
+    // serve, at the cost of durable billing export until the database is restored.
+    // DO NOT re-arm until (a) the database is reachable AND (b) the exporter no
+    // longer fail-closes boot — an optional background task must not be a hard
+    // pre-bind dependency of the control plane. Tracked as the durable fix.
+    // "FABRIC_BILLING_EXPORT_INTERVAL_SECS": "60",
     // Boot-guard override. UNSET on purpose: the default (FATAL on a rejected
     // introspect key) is the intended production behaviour. What the 2026-08-30
     // outage fixed is that the var is now FORWARDED into the container at all
@@ -117,7 +131,7 @@
     // container (src/index.ts) was authored during the same triage, so the run that
     // "measured" the override may have executed against a Worker that never passed
     // it through — an inert knob measured as a null result. Re-measured properly.
-    "FABRIC_INTROSPECT_BOOTCHECK": "warn",
+    // "FABRIC_INTROSPECT_BOOTCHECK": "warn",   // unset: the key validates 200
     // ── ACQUIRE-PATH RESILIENCE (W0) — right-size the global inbound bound ─────
     // The code DEFAULT (DEFAULT_MAX_INFLIGHT_REQUESTS = 1024) is a thundering-herd
     // backstop tuned for a big box; on this 2-vCPU singleton it is far above what
@@ -295,7 +309,7 @@
       // difference from the images that do start: the registry path itself.
       //   boots ⇒ the fabricdcontainer repository's pull path is the fault
       //   fails ⇒ the path is fine and the fault is still unlocated
-      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-bootprobe@sha256:1482bbd07f9a597d374d88054e1d36df4712076ec48c019b599fb788693c2de7",
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-bootprobe@sha256:1c3e03f25f50b8e4ecd2a48afbd061dccfeb077aa0a9af12b3b62662e9619c19",
       // HTTP control plane. Bumped standard-1 → standard-2 (2026-07-07 acquire-storm
       // hardening): the single-flight singleton must keep /v1/health + lease ops
       // responsive under a burst of box provisions; 2 vCPU gives headroom so a few
@@ -323,7 +337,7 @@
       // `rollout_active_grace_period: 0` leaves no headroom for a replacement to be
       // placed before the incumbent record clears.
       // 4 makes the test unambiguous; the steady value is decided from the result.
-      "max_instances": 4
+      "max_instances": 1
     }
   ],
 
