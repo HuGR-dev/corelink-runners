@@ -2700,8 +2700,17 @@ export async function reapStaleBoxes(
     // no age ceiling and no escalation — every minute until its 24 h TTL expired.
     // Measured live 2026-08-31: 279 distinct `sbox:` RECORDS in that state, aged
     // 7.4 h to 22.3 h, none of their runners registered with GitHub at all.
+    //
+    // The skip names WHICH field is missing. Without that it reported 279 records a
+    // minute for hours while saying nothing about the cause, and a hand-read sample
+    // of those records appeared to contradict the log — a skip that does not name
+    // its reason cannot be acted on, only guessed at.
     if (typeof rec.rid !== "number" || !rec.repo) {
-      logEvent("info", "reap_skipped_unverifiable", { runnerName, ageMs: nowMs - rec.t });
+      logEvent("info", "reap_skipped_unverifiable", {
+        runnerName,
+        ageMs: nowMs - rec.t,
+        reason: typeof rec.rid !== "number" ? `rid:${typeof rec.rid}` : "repo:empty",
+      });
       continue;
     }
 
