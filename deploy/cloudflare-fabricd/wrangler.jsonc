@@ -87,6 +87,8 @@
     // live deploy (a wrangler secret — invisible in this file), so pg is the active
     // backend and this durable export is ARMED (not inert). 60s is a sane
     // durable-export cadence (distinct from the always-on 30s corelink push).
+    // MEASURED 2026-08-31: disarming this changed nothing (0/6 SERVED), so the
+    // pre-bind pg connect is NOT the boot blocker. Restored to the intended value.
     "FABRIC_BILLING_EXPORT_INTERVAL_SECS": "60",
     // Boot-guard override. UNSET on purpose: the default (FATAL on a rejected
     // introspect key) is the intended production behaviour. What the 2026-08-30
@@ -94,6 +96,10 @@
     // (src/index.ts) — it was documented here and unreachable, which made a
     // rejected key an unrecoverable outage. Set it to "warn" only to override a
     // live boot-abort, and remove it again immediately.
+    // Boot-guard override. UNSET: the default (FATAL on a rejected introspect key)
+    // is the intended production behaviour. MEASURED 2026-08-31: arming it changed
+    // nothing (0/6 SERVED), so it is not masking a rejected key. What the outage
+    // fixed is that this var is now FORWARDED into the container at all.
     // "FABRIC_INTROSPECT_BOOTCHECK": "warn",
     // ── ACQUIRE-PATH RESILIENCE (W0) — right-size the global inbound bound ─────
     // The code DEFAULT (DEFAULT_MAX_INFLIGHT_REQUESTS = 1024) is a thundering-herd
@@ -262,7 +268,7 @@
       // Bumped standard-1 → standard-2 (2026-07-07 acquire-storm hardening).
       // A 2026-08-30 bisect raised this to standard-4 and PROVED the shape was not
       // the outage cause, so it is reverted rather than left as an unratified cost.
-      "instance_type": "standard-2",
+      "instance_type": "standard-2",  // MEASURED: standard-4 changed nothing (0/6)
       // ⚠️ Raise in LOCKSTEP with `vars.FABRIC_NUM_SHARDS` — the shard fan-out
       // needs one container instance per shard. N>1 is a separate owner-gated flip.
       "max_instances": 1
