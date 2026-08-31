@@ -87,7 +87,14 @@
     // live deploy (a wrangler secret — invisible in this file), so pg is the active
     // backend and this durable export is ARMED (not inert). 60s is a sane
     // durable-export cadence (distinct from the always-on 30s corelink push).
-    "FABRIC_BILLING_EXPORT_INTERVAL_SECS": "60",
+    // ⚠️ TEMPORARILY DISARMED (2026-08-30 outage bisect) — RESTORE AFTER.
+    // `maybe_spawn_billing_exporter` (main.rs:50) connects to Postgres and applies
+    // the sink DDL, awaited with `?` BEFORE `TcpListener::bind` (:82). With the
+    // introspect boot-check already excluded (BOOTCHECK=warn changed nothing), this
+    // is the prime remaining pre-bind suspect. Absence is the documented disable
+    // path, so removing the key makes step 6 a no-op. If the container now BOOTS,
+    // the cause is the pg connect/DDL. Original value: "60".
+    // "FABRIC_BILLING_EXPORT_INTERVAL_SECS": "60",
     // ── TEMPORARY DIAGNOSTIC (2026-08-30 outage) — REMOVE ONCE THE CAUSE IS KNOWN ──
     // `warn` downgrades the introspect boot self-check from FATAL to log-only. This
     // is BOTH the fix for an unreachable escape hatch (the var was documented at

@@ -323,6 +323,22 @@ export class FabricdContainer extends Container<Env> {
     return super.onError(error);
   }
 
+  // Did the container ever reach "started"? Separates "never came up" from
+  // "came up and was stopped" — the two have completely different causes and the
+  // exit signal alone cannot tell them apart.
+  override onStart(): void | Promise<void> {
+    console.error(JSON.stringify({ event: "fabricd_container_started" }));
+    return super.onStart();
+  }
+
+  // The SDK's ONLY graceful-stop path (container.js:748 → this.stop()). A clean
+  // exitCode 0 with no `fabricd_container_activity_expired` line preceding it
+  // means the process exited on its OWN, not because we stopped it.
+  override async onActivityExpired(): Promise<void> {
+    console.error(JSON.stringify({ event: "fabricd_container_activity_expired" }));
+    return super.onActivityExpired();
+  }
+
   override onStop(params: StopParams): void | Promise<void> {
     console.error(
       JSON.stringify({
