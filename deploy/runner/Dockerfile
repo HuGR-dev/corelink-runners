@@ -363,11 +363,23 @@ RUN mkdir -p /opt/action-archive-cache && \
 # Same PINNED digest as every download stage — all stages MUST use the identical base.
 FROM ubuntu:24.04@sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae77ff1dc54
 
+# Declared HERE, before the LABEL that advertises them, so the label and the
+# install below are ONE literal each instead of two that must agree. The first
+# draft of this PR hardcoded the same values in both places; cold review pointed
+# out that nothing reconciles them and nothing consumes the labels either, so a
+# drift would be silent AND undetectable. Single-sourcing removes the drift at
+# the cost of nothing. (The remaining labels follow the file's older pattern of
+# hand-kept literals — pre-existing, not touched here.)
+ARG NIGHTLY_DATE=2026-08-31
+ARG CARGO_FUZZ_VERSION=0.13.2
+
 LABEL org.opencontainers.image.title="CoreLink ephemeral GitHub Actions runner" \
       org.opencontainers.image.description="One-shot ephemeral runner for the CoreLink fabric (ADR-0007 Stage A)" \
       org.opencontainers.image.vendor="HuGR / CoreLink" \
       corelink.runner.version="2.335.1" \
       corelink.rust.toolchain="1.96.0,1.91.1" \
+      corelink.rust.nightly="nightly-${NIGHTLY_DATE}" \
+      corelink.cargo_fuzz.version="${CARGO_FUZZ_VERSION}" \
       corelink.python3="present" \
       corelink.python3.jsonschema="present" \
       corelink.gh.version="2.97.0" \
@@ -610,7 +622,8 @@ RUN curl -fsSL "https://static.rust-lang.org/rustup/archive/${RUSTUP_INIT_VERSIO
         --profile minimal \
         --component rustfmt \
         --component clippy \
-        --component rust-src && \
+        --component rust-src \
+        --component llvm-tools && \
     rustup target add --toolchain 1.91.1 \
         wasm32-unknown-unknown \
         x86_64-unknown-linux-musl
@@ -626,6 +639,93 @@ RUN curl -fsSL "https://static.rust-lang.org/rustup/archive/${RUSTUP_INIT_VERSIO
 # what rust-toolchain.toml requires so target-add is a no-op at CI time.
 # Do NOT swap the default to 1.91.1 — that would make this repo's lanes
 # auto-download 1.96.0 on every spawn.
+#
+# `llvm-tools` on 1.91.1 (added 2026-08-31): corelink-server's `coverage.yml`
+# runs cargo-llvm-cov, which needs `llvm-profdata`/`llvm-cov` from the component
+# — on the WORKSPACE-PINNED toolchain (1.91.1), not the default. Measured cost:
+# 37,402,920 B xz (`content-length` of
+# https://static.rust-lang.org/dist/llvm-tools-1.91.1-x86_64-unknown-linux-gnu.tar.xz).
+# Without it that lane pays a `rustup component add` per ephemeral spawn, or
+# fails outright — which is why coverage.yml is still on billed hosted minutes.
+
+# ── Pinned NIGHTLY toolchain — the unlock for `cargo fuzz` ────────────────────
+# corelink-server has SEVEN workflows whose fuzz jobs need nightly:
+# corelink-{hash,meta,worker,client-verify}, tenant-path, fuzz-nightly, nightly.
+# Today each of them hard-codes a MAC path:
+#
+#   echo "$HOME/.rustup/toolchains/nightly-x86_64-apple-darwin/bin" >> $GITHUB_PATH
+#
+# That line is why they cannot leave the owner's Mac. It also cannot simply be
+# retargeted to `-unknown-linux-gnu`: until this bake, THIS IMAGE HAD NO NIGHTLY
+# AT ALL, so the retargeted path would name a directory that does not exist —
+# `echo >> $GITHUB_PATH` exits 0 regardless, and the job would go GREEN while
+# running the wrong cargo. Baking it is what makes the migration checkable.
+#
+# PINNED TO A DATE, not the floating `nightly` channel, so an image rebuild is
+# reproducible (X4 floor: same discipline as every other pin in this file). The
+# consumer must therefore say `cargo +${CORELINK_NIGHTLY} …` rather than
+# `cargo +nightly …` — rustup REFUSES `rustup toolchain link nightly <path>`
+# ("invalid custom toolchain name"), so an alias is not available. The env var
+# below is the contract. If it is ever unset, `cargo + fuzz` fails loudly rather
+# than silently falling back to stable — chosen deliberately over a default.
+#
+# Measured cost of this bake (xz `content-length`, channel nightly-2026-08-31):
+#   rustc     84,475,892 B   (80 MiB)
+#   cargo     10,938,120 B   (10 MiB)
+#   rust-std  31,684,224 B   (30 MiB)
+#   ------------------------------------
+#   total    127,098,236 B  (~121 MiB)
+# Against the alternative: `rustup toolchain install nightly` on EVERY spawn of
+# seven workflows, on a box that is destroyed after each job.
+#
+# To bump: pick a new date, and re-run the corelink-server fuzz lanes — a nightly
+# bump can break `cargo fuzz` compilation, which is exactly why this is pinned.
+# NIGHTLY_DATE is declared once, at the top of this stage, and feeds BOTH the
+# `corelink.rust.nightly` LABEL and the install below. One literal, two uses.
+ENV CORELINK_NIGHTLY=nightly-${NIGHTLY_DATE}
+RUN rustup toolchain install "nightly-${NIGHTLY_DATE}" \
+        --profile minimal \
+        --component rust-src && \
+    rustup run "nightly-${NIGHTLY_DATE}" rustc --version && \
+    echo "== installed size of the pinned nightly ==" && \
+    du -sh "${RUSTUP_HOME}/toolchains/nightly-${NIGHTLY_DATE}-x86_64-unknown-linux-gnu"
+
+# ── cargo-fuzz — verified pinned download (X4 supply-chain floor) ─────────────
+# Same discipline as gh / node / pnpm / clw / sccache: a VERSIONED URL and a
+# sha256 that is READ, never fabricated — here from the GitHub Release API's own
+# `assets[].digest` field for tag 0.13.2
+# (`sha256:b5b7…931c`, asset cargo-fuzz-0.13.2-x86_64-unknown-linux-musl.tar.gz).
+#
+# FORM CHOICE: the musl build is a static binary — it runs on this glibc image
+# and costs 899,208 B (879 KiB). The alternative, `cargo install cargo-fuzz`,
+# COMPILES it: minutes of build time here, or minutes on every ephemeral spawn
+# if left to the workflow. There is no reason to compile a published binary.
+#
+# ⚠️ `sudo install`, unlike the six other /usr/local/bin writes in this file.
+# Those all run BEFORE `USER runner` (line 581) and are therefore root; this
+# block runs after it. `/usr/local/bin` is root:root 0755 on ubuntu:24.04 and
+# nothing chowns it (see the "root-owned, world-executable" note above), so a
+# bare `install` here would fail with EACCES and break the `&&` chain — i.e.
+# fail the image build. `runner` has NOPASSWD sudo (line 518).
+# Found by cold review, 2026-08-31. The review added that "no workflow builds
+# this image"; that part is WRONG — `.github/workflows/build-cf-container-images.yml`
+# runs `docker build … deploy/runner` (line 110). It is `workflow_dispatch`-only
+# ON PURPOSE ("a heavy image build should not fire on every merge"), which lands
+# in the same place for a PR author: nothing builds this file on a PR, so a
+# broken RUN ships green. The fix is to DISPATCH that lane, not to add one.
+# CARGO_FUZZ_VERSION likewise comes from the top of this stage.
+ARG CARGO_FUZZ_SHA256=b5b704018b63e0f151c17a057ac53b5111e1db545d1b9f72fee79f08a545931c
+RUN curl -fsSL \
+      "https://github.com/rust-fuzz/cargo-fuzz/releases/download/${CARGO_FUZZ_VERSION}/cargo-fuzz-${CARGO_FUZZ_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+      -o /tmp/cargo-fuzz.tar.gz && \
+    echo "${CARGO_FUZZ_SHA256}  /tmp/cargo-fuzz.tar.gz" | sha256sum -c - && \
+    mkdir -p /tmp/cargo-fuzz-x && \
+    tar -xzf /tmp/cargo-fuzz.tar.gz -C /tmp/cargo-fuzz-x && \
+    _bin="$(find /tmp/cargo-fuzz-x -type f -name cargo-fuzz -perm -u+x | head -1)" && \
+    test -n "${_bin}" && \
+    sudo install -m 0755 "${_bin}" /usr/local/bin/cargo-fuzz && \
+    rm -rf /tmp/cargo-fuzz.tar.gz /tmp/cargo-fuzz-x && \
+    cargo-fuzz --version
 
 # cargo-deny and cargo-audit — versions match .github/workflows/ci.yml
 # (taiki-e/install-action pins: cargo-audit@0.22.2, cargo-deny@0.19.8)
