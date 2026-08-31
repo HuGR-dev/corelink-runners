@@ -157,12 +157,23 @@ export class FabricdContainer extends Container<Env> {
       FABRIC_SIGNING_KEY: env.FABRIC_SIGNING_KEY,
       // Inc-3: CF Access service-token for /internal/v1/* (both must be present
       // for the crate's cf_access to emit the headers; no-op until bound).
-      ...(env.CORELINK_CF_ACCESS_CLIENT_ID
-        ? { CORELINK_CF_ACCESS_CLIENT_ID: env.CORELINK_CF_ACCESS_CLIENT_ID }
-        : {}),
-      ...(env.CORELINK_CF_ACCESS_CLIENT_SECRET
-        ? { CORELINK_CF_ACCESS_CLIENT_SECRET: env.CORELINK_CF_ACCESS_CLIENT_SECRET }
-        : {}),
+      // ⚠️ 2026-08-30 BISECT — TEMPORARILY WITHHELD. RESTORE AFTER READING.
+      // Timeline: these two were ADDED by Inc-3 on 2026-08-19, which is the exact
+      // day the currently-stuck instance was created and the last day fabricd is
+      // known to have served. The control experiment proved the platform runs
+      // containers in this app/colo fine, so the differentiator between fabricd
+      // (fails) and check-host (runs) is not the image — and the other obvious
+      // difference is the ENV: fabricd is handed ~47 vars including a base64 PEM,
+      // check-host a handful. If withholding the Inc-3 pair lets the container
+      // start, the fault is env size or one of these two values, not the binary.
+      // Cost while withheld: outbound /internal/v1/* calls lose their CF Access
+      // service token and will be 403'd — acceptable, the fabric serves nothing today.
+      // ...(env.CORELINK_CF_ACCESS_CLIENT_ID
+      //   ? { CORELINK_CF_ACCESS_CLIENT_ID: env.CORELINK_CF_ACCESS_CLIENT_ID }
+      //   : {}),
+      // ...(env.CORELINK_CF_ACCESS_CLIENT_SECRET
+      //   ? { CORELINK_CF_ACCESS_CLIENT_SECRET: env.CORELINK_CF_ACCESS_CLIENT_SECRET }
+      //   : {}),
       FABRIC_BILLING_PUSH_INTERVAL_SECS: "30",
       ...(env.BILLING_INGEST_URL ? { BILLING_INGEST_URL: env.BILLING_INGEST_URL } : {}),
       ...(env.BILLING_INGEST_AUTH_KEY ? { BILLING_INGEST_AUTH_KEY: env.BILLING_INGEST_AUTH_KEY } : {}),
@@ -183,9 +194,12 @@ export class FabricdContainer extends Container<Env> {
       ...(env.FABRIC_GITHUB_APP_INSTALLATION_ID
         ? { FABRIC_GITHUB_APP_INSTALLATION_ID: env.FABRIC_GITHUB_APP_INSTALLATION_ID }
         : {}),
-      ...(env.FABRIC_GITHUB_APP_PRIVATE_KEY_B64
-        ? { FABRIC_GITHUB_APP_PRIVATE_KEY_B64: env.FABRIC_GITHUB_APP_PRIVATE_KEY_B64 }
-        : {}),
+      // ⚠️ 2026-08-30 ENV BISECT step 2 — the minimal env BOOTED (/health 200),
+      // so the fault is the env. This is the one large value in it (a base64 PEM).
+      // Withheld to test the env-SIZE hypothesis. RESTORE AFTER READING.
+      // ...(env.FABRIC_GITHUB_APP_PRIVATE_KEY_B64
+      //   ? { FABRIC_GITHUB_APP_PRIVATE_KEY_B64: env.FABRIC_GITHUB_APP_PRIVATE_KEY_B64 }
+      //   : {}),
       // R1 — durable ledger + vCPU ceiling, gated on DATABASE_URL. Present ⇒ pg
       // backend + FABRIC_RUNNER_VCPU=4 (standard-4 sizing) arm together; the #265
       // guard requires pg for an armed ceiling, so we never set one without the

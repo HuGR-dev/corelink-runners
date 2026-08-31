@@ -192,6 +192,39 @@ These are why a fabricd outage is hard. Check whether they still hold before ass
 produce a system that fails closed, tells nobody why, cannot be overridden, and cannot heal itself.
 When a fix here makes something "safer", ask what it does to *recoverability* and *observability*.
 
+## Step 2b — RUN THE CONTROL BEFORE YOU CONCLUDE (the most expensive omission)
+
+**The failure mode:** you vary your own side — image, env, config, instance, DO identity, machine
+shape, placement — the failure stays constant, and you conclude the fault is on the *other* side.
+That is an uncontrolled experiment. A constant failure while you only changed your own variables is
+evidence about **your** variables, and says nothing about the platform you never tested.
+
+In this outage that mistake produced a committed conclusion of *"the cause is not in this
+repository"* after seven experiments. One control reversed it.
+
+**The control:** point the SAME container application, in the SAME colo, at an image **known to run
+on this account**. Pick one whose port matches your `defaultPort` so the comparison is clean.
+
+```jsonc
+// temporarily, in the failing app's wrangler.jsonc — REVERT IMMEDIATELY AFTER READING
+"image": "registry.cloudflare.com/<acct>/<a-known-good-image>@sha256:…"
+```
+
+**Reading it:**
+
+| control image | verdict |
+|---|---|
+| runs / exits with a **real** code | the application, colo, shape and placement are FINE — the fault is your image |
+| fails the same way as yours | the fault is the application or the platform — now you have earned that conclusion |
+
+The distinction is in the *shape* of the error, not just success/failure. Here the control exited
+`1` (expected — no config in that role) while the real image produced `exitCode 0` with no `onStart`
+at all. Two different failures = the platform executes containers correctly.
+
+**Corollary — a control also calibrates your instruments.** Before the control, `exitCode 0` was
+dismissed as possibly synthetic. The control produced a truthful `1` through the same surface, which
+proved the field is real and turned that 0 into the sharpest clue available.
+
 ## Step 5b — the discipline that costs the most when skipped
 
 **Never publish a finding from a static code read while the experiment that tests it is still
