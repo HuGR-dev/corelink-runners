@@ -707,8 +707,12 @@ RUN rustup toolchain install "nightly-${NIGHTLY_DATE}" \
 # nothing chowns it (see the "root-owned, world-executable" note above), so a
 # bare `install` here would fail with EACCES and break the `&&` chain — i.e.
 # fail the image build. `runner` has NOPASSWD sudo (line 518).
-# Found by cold review, 2026-08-31: NO workflow builds this image, so this would
-# have shipped green and only exploded for whoever next ran build-and-push.sh.
+# Found by cold review, 2026-08-31. The review added that "no workflow builds
+# this image"; that part is WRONG — `.github/workflows/build-cf-container-images.yml`
+# runs `docker build … deploy/runner` (line 110). It is `workflow_dispatch`-only
+# ON PURPOSE ("a heavy image build should not fire on every merge"), which lands
+# in the same place for a PR author: nothing builds this file on a PR, so a
+# broken RUN ships green. The fix is to DISPATCH that lane, not to add one.
 # CARGO_FUZZ_VERSION likewise comes from the top of this stage.
 ARG CARGO_FUZZ_SHA256=b5b704018b63e0f151c17a057ac53b5111e1db545d1b9f72fee79f08a545931c
 RUN curl -fsSL \
