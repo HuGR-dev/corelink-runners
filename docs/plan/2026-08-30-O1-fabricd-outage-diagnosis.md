@@ -212,3 +212,60 @@ nine-step table be bisected, because only then is a forwarded variable observabl
 
 Two temporary settings must be reverted once service is restored: `FABRIC_INTROSPECT_BOOTCHECK=warn`
 and the disarmed `FABRIC_BILLING_EXPORT_INTERVAL_SECS` (original value `"60"`).
+
+---
+
+# ADDENDUM 2 — `union-34` is WITHDRAWN (my second retraction this session)
+
+**Process failure, stated plainly:** I authored `union-34` from a *static read* of the idle gate and
+`watchdogAction` while the behavioural experiment that tested it was still running, and I committed
+it. The experiment then refuted it. A finding must not be published before the evidence that bears on
+it has landed — reading code is a hypothesis, not a result.
+
+## What the traffic experiment actually showed
+
+Five minutes of traffic at 22 s intervals, `wrangler tail` filtered to the watchdog:
+
+```
+keep-warm[shard 0/1]: health 500 in 5060ms (probe 1/3)
+keep-warm[shard 0/1]: health 500 in 4637ms (probe 2/3)
+keep-warm[shard 0/1]: health 500 in 4665ms (probe 3/3)
+keep-warm[shard 0/1]: 3 health failures but destroyed 117777ms ago (< 180000ms reboot backoff) …
+keep-warm[shard 0/1]: 3 consecutive health failures (~30s) — destroying (never healthy past boot-grace)
+keep-warm[shard 0/1]: destroyed hung shard — fresh instance will boot on next request
+```
+
+**The watchdog is not disabled. It probes, reaches `destroy`, and destroys** — repeatedly, throttled
+only by `REBOOT_BACKOFF_MS` (3 min). The cron's own traffic is enough to keep the gate open, so the
+idle-gate composition I described does not produce the outcome I claimed. `union-34` is withdrawn as
+written. (Whether the idle gate could defeat self-heal under some *other* traffic pattern is an open
+question and no longer a finding.)
+
+## The contradiction that is now the live thread
+
+Two surfaces disagree and I cannot yet say which is wrong:
+
+| surface | says |
+|---|---|
+| the Worker watchdog log | it destroyed the container; "fresh instance will boot on next request" |
+| `wrangler containers instances` | one instance, id `260c9faf…`, **CREATED 2026-08-19**, unchanged across every destroy |
+
+Either the instances listing reports a desired/stale record rather than the live process, or
+`destroy()` is not producing the replacement it reports. I am not resolving this by preferring the
+convenient reading.
+
+## What this does to Addendum 1's retraction
+
+If `destroy()` genuinely yields fresh container starts, those starts use the **currently deployed**
+DO `envVars` — which now include `FABRIC_INTROSPECT_BOOTCHECK=warn` and exclude
+`FABRIC_BILLING_EXPORT_INTERVAL_SECS`. In that case the two env experiments *were* applied after all,
+and both exclusions would stand. If the instance record is accurate and no fresh process is starting,
+they do not. **The exclusions therefore remain UNRESOLVED — neither confirmed nor withdrawn — and
+they resolve only once a container is observed reaching `started`.**
+
+## Standing conclusion
+
+Every probe fails: `health 500` in ~4.6 s, or `UNREACHABLE` on an 8 s timeout. The container never
+serves. The one action that changes the container application itself — and so guarantees a genuinely
+new instance with the current config — is a **container rollout via a rebuilt image**, which is also
+the owed `≥ #515` rebuild (`fabricd-deploy-01`, `hist-04`).

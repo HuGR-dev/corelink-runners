@@ -169,17 +169,40 @@ These are why a fabricd outage is hard. Check whether they still hold before ass
 - **An optional subsystem can prevent `bind`.** Billing export is default-off yet armed in prod and
   awaited with `?` before the listener opens, so a database blip takes down the whole control plane
   (`union-33`).
-- **The self-heal watchdog is disabled by a TOTAL outage** (`union-34`). `scheduled()` skips the
-  health probe when `Date.now() - lastActivityMs > IDLE_MS` (4 min) **and deletes the watchdog
-  lifecycle state**; `watchdogAction` then refuses to destroy a never-healthy container until
-  `BOOT_GRACE_MS` (3 min) has elapsed since `firstSeenAt`. Destroying therefore needs three
-  *continuous* minutes of traffic spaced under four minutes apart. In a total outage callers give up,
-  activity lapses, the clock resets — and a stuck instance survives indefinitely. To force the
-  watchdog by hand, drive traffic every ~25 s for >3 min and watch for `keep-warm[…] destroying`.
+- **The self-heal watchdog DOES work — verify before blaming it.** A `union-34` claiming the idle
+  gate disabled self-heal was authored from a static read and **refuted the same hour**: the watchdog
+  probes, reaches `destroy`, and destroys, throttled only by `REBOOT_BACKOFF_MS` (3 min). Read it
+  live before theorising:
+
+  ```bash
+  ( for i in $(seq 1 14); do curl -s -o /dev/null -m 20 "$U/v1/attestation/key"; sleep 22; done ) &
+  timeout 330 wrangler tail <worker> --format pretty | grep -oE "keep-warm\[[^\"]{0,120}"
+  ```
+
+  Expect `health <status> (probe n/3)` → either `destroying` or `skip-backoff`/`skip-booting`. Only
+  if none of those lines appear at all is the gate actually skipping.
+
+- **Two surfaces can disagree about whether an instance was replaced.** The watchdog may log
+  `destroyed hung shard` while `wrangler containers instances` still shows the *same* instance id and
+  `CREATED` timestamp. When they conflict, say so and keep both readings — do not resolve it by
+  preferring the convenient one. It also decides whether an env-flip experiment was applied
+  (T2 above), so an unresolved conflict leaves those experiments **unresolved**, not concluded.
 
 **The pattern to expect in this codebase:** each guard is individually defensible; composed, they
 produce a system that fails closed, tells nobody why, cannot be overridden, and cannot heal itself.
 When a fix here makes something "safer", ask what it does to *recoverability* and *observability*.
+
+## Step 5b — the discipline that costs the most when skipped
+
+**Never publish a finding from a static code read while the experiment that tests it is still
+running.** Reading code produces a *hypothesis*. In this outage two conclusions were published and
+then refuted within the hour — one of them committed. The sequence that works is: read code → state
+the hypothesis and what would falsify it → run the experiment → *then* write the finding.
+
+**Never treat "the experiment changed nothing" as an exclusion until you have confirmed the treatment
+was applied.** For containers that means: a fresh process actually started with the new config
+(Step 2's `_started` event, plus a changed instance record). Otherwise "no change" is equally
+consistent with "no treatment".
 
 ## Step 6 — writing it down
 
