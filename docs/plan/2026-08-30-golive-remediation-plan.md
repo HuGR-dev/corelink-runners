@@ -144,6 +144,59 @@ items; all were accepted (§12), and rev-4 added 3 more for WPs that owned none.
 live items** (counted mechanically — see the note under the tables). The rev-2 → rev-3 delta is where
 the real go-live risk was hiding, so it is marked ★.
 
+### 3.0 Verification discipline — a `probe:` is a RATE, not an observation
+
+Round 2 of the cold review found this before any individual gap, and live operation had already
+proved it: **the control-plane container starts intermittently.** Two deploys of a configuration
+verified identical by `wrangler versions view` produced a serving plane and a dead one. Under an
+intermittent fault a single observation cannot distinguish a fix from a lucky boot — and during the
+2026-08-30 triage it repeatedly did not.
+
+So the suite carries a rule that binds every item, and no item may be greened in violation of it:
+
+> **BOOT-SENSITIVE RULE.** Any `probe:` whose subject depends on a container start is green only when
+> executed **≥10 times across ≥10 independent cold starts**, with the pass **rate** recorded in the
+> evidence artifact and at or above a stated threshold. **One failure in the sample makes the item
+> red.** A single green observation is not evidence and must not be recorded as one.
+> Instrument: `scripts/ops/fabricd-boot-rate.sh` (observation-only; deploys nothing).
+
+Boot-sensitive items, named so the rule cannot be quietly skipped: **A1.1 A1.2 A1.3 A1.5 A1.6 A1.7
+A2.4 A2.5 A2.7 A2.8 A2.10 A3.9 A3.10 A4.7 A4.10 A5.6 A5.8 A5.9 A6.6 A6.7 A6.11 A6.13**.
+
+> **ARTIFACT FRESHNESS.** Every `probe:` artifact records its timestamp and the deployed version it
+> was taken against. An artifact older than its stated max age makes its item red automatically —
+> with an intermittent substrate, a stale green proves nothing (A7.6).
+
+### Items added at rev-5 (cold review, round 2)
+
+| id | kind | item | gap |
+|---|---|---|---|
+| **A1.8** | probe | a forced-restart loop of ≥20 cold starts at the deployed config yields a serving plane at ≥ a stated rate, and every non-serving start is classified from lifecycle logs | G2 |
+| **A1.9** | probe | a continuous ≥7-day uptime record exists at a stated sampling interval, **gaps in the record are themselves alarmed**, and the longest undetected-outage window is under a stated bound | G3 |
+| **A2.11** | test | every operator override named in any error message or runbook is **consumed by the deployed binary** — an override named but unplumbed fails the check | G4 |
+| **A2.12** | probe | from a deliberately dead control plane, the documented recovery restores service within a stated bound, executed by someone following **only** the runbook | G5 |
+| **A2.13** | probe | after any deploy, the worker / control-plane / runner-image version triple is asserted against a declared compatibility matrix, and a mismatched triple is rejected | G15 |
+| **A4.14** | test | over a billing window with K real jobs, ingested billable seconds equal measured durations within tolerance **and** the invoice total equals the ledger total — reconciliation, not spot-check | G7 |
+| **A4.15** | test | usage produced while the ingest or control plane is unreachable is durably buffered and reconciled after recovery; a synthesized ingest outage loses **zero** billable seconds | G8 |
+| **A3.19** | probe | the platform container inventory is enumerated and every running instance maps to an open lease; unmapped instances = 0, asserted on a schedule | G9 |
+| **A3.20** | probe | cache hit rate over ≥N real jobs on identical inputs is ≥ a stated threshold, and **A3.14's alarm threshold is derived from that measured baseline** | G14 |
+| **A5.10** | probe | ≥2 independent cold accounts complete self-serve, and ≥1 adversarial variant (payment declined · install cancelled mid-flow · repo removed after install) leaves a documented, recoverable tenant — no operator writes | G10 |
+| **A6.16** | test | a job queued beyond a stated bound with no spawn raises an alarm naming tenant and repo, synthesized end to end | G11 |
+| **A6.17** | probe | an unacknowledged alert **escalates** within a stated bound (demonstrated), an on-call rotation with coverage exists, and the false-positive rate over the window is recorded | G12 |
+| **A6.18** | test | each C1–C5 alarm's detection and delivery path **shares no failure domain with the component it monitors** — demonstrated by killing the component and still receiving the alert | round-2 flag |
+| **A7.6** | test | every probe artifact carries a timestamp and is re-taken within a stated max age; an expired artifact makes its item red | G13 |
+| **A6.19** | test | the runbook procedures (deploy · rollback · recovery · key rotation) are executed verbatim by an operator who did not write them; any step that fails or needs undocumented knowledge is red | G6 |
+
+**Falsifiability repairs from round 2** (applied in place above where the item text allows):
+A6.1 needs a defect **set** covering each declared failure mode, not one planted defect · A6.7 needs
+≥K independent mutants, not one strawman · A6.3 is flagged as **capability-broken-while-green**: it
+proves the workflow fails on a planted miss while deliberately preserving the action's fail-open exit
+contract, so every real customer miss still passes silently — this needs an owner decision, recorded
+as **D11** · A1.7 must state N, duration and repeat count · A2.9's bound must be fixed **before**
+measurement and sampled ≥3 times · A7.1's doc-set exclusion policy is circular and needs an
+independent sweep · the three `judged:` items (A4.9 A5.1 A7.3) are greenable by writing a sentence
+and each needs a named decider plus an artifact id.
+
 ### C1 — control plane
 
 | id | kind | item |

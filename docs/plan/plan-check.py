@@ -25,6 +25,7 @@ b("W2-serial-worker", """
 billing-money-path-03 hist-06 billing-money-path-05 billing-money-path-06 billing-money-path-08 adopt-16 hist-08
 spawn-cf-01 spawn-cf-11 sc-02 sc-06 billing-money-path-12
  deploy-03  deploy-16 spawn-cf-02 spawn-cf-03 spawn-cf-04 spawn-cf-06 sec-05
+deploy-02 deploy-04
 """)
 
 b("W3-live-proof", """
@@ -95,8 +96,8 @@ gap-26 gap-27 gap-28  hist-16 hist-17 hist-18 hist-19 live-probe-09
 
 b("DEFER-needs-waiver", """
 runner-core-01 sc-08 fabricd-deploy-08  ci-cd-15 billing-money-path-15
-deploy-02
-deploy-04
+
+
 """)
 
 all_ids = [l.strip() for l in open(sys.argv[1]) if l.strip()]
