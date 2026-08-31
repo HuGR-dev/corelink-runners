@@ -389,7 +389,16 @@ export class FabricdContainer extends Container<Env> {
 // ledger's single-instance requirement). At N=1 shardDoId returns THIS exact id
 // for every shard, so the multi-instance routing below is byte-identical to the
 // old singleton proxy (the inert-at-N=1 property).
-const SINGLETON = "fabricd-singleton";
+// 2026-08-30 OUTAGE: the id is what pins PLACEMENT. Every instance since
+// 2026-08-19 — across three different images (the Inc-3 build, a fresh rebuild
+// from main, and the last verified-live 9191661 binary) and across container
+// rollouts that genuinely recreated the instance — has been placed in the SAME
+// colo (`bog04`) and has never reached `started`. Image-independent,
+// config-independent, instance-independent, colo-constant. Renaming the DO
+// forces a new placement; if the container then boots, the cause was placement,
+// not this codebase. Lease state is pg-durable (DATABASE_URL), and this DO's own
+// storage holds only the `lastActivityMs` marker, so a rename loses nothing.
+export const SINGLETON = "fabricd-singleton-r2";
 
 /** Shard count N from the wrangler var, parsed to int; default 1. */
 function numShards(env: Env): number {

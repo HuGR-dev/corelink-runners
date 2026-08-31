@@ -45,6 +45,7 @@ vi.mock("@cloudflare/containers", () => ({
 
 // Imported AFTER the mock is registered (vi.mock is hoisted, but keep intent clear).
 import worker from "../src/index";
+import { SINGLETON } from "../src/index";
 import type { Env } from "../src/index";
 
 function envWithShards(n: number): Env {
@@ -82,11 +83,11 @@ const GET_LEASES = new Request("http://fabricd/v1/leases", { method: "GET" });
 describe("GET /v1/leases scatter-gather", () => {
   it("N=1 → single passthrough to fabricd-singleton (called exactly once)", async () => {
     const passthrough = listResponse("acme", ["lease-1", "lease-2"]);
-    const calledWith = stubShards({ "fabricd-singleton": () => Promise.resolve(passthrough) });
+    const calledWith = stubShards({ [SINGLETON]: () => Promise.resolve(passthrough) });
 
     const resp = await worker.fetch(GET_LEASES, envWithShards(1));
 
-    expect(calledWith).toEqual(["fabricd-singleton"]);
+    expect(calledWith).toEqual([SINGLETON]);
     expect(getContainer).toHaveBeenCalledTimes(1);
     // Byte-identical passthrough: the SAME Response object flows through untouched.
     expect(resp).toBe(passthrough);

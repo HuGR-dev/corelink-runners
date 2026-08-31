@@ -243,7 +243,21 @@
       // `wrangler containers info <app-id>` reports the resolved digest once the
       // rollout lands. Rollback: the previous pin was
       // @sha256:db3b03ef829e21d203e1a5ac003a724fe1319eb271d849bd88178f080b468c3d.
-      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer:8631abb08a022fe2e0eef3b0f41ba784ab5d8287",
+      // ⚠️ 2026-08-30 BISECT — TEMPORARY, NOT THE INTENDED STEADY PIN.
+      // Both the Inc-3 image (db3b03ef @ e5f07f8, 2026-08-19) and a fresh rebuild
+      // from main (8631abb, run 33347304356) fail IDENTICALLY: the container never
+      // reaches `started`, crashes while checking for ports. Same Dockerfile
+      // (unchanged since #185, 2026-06-25) and same digest-pinned bases, and other
+      // container apps on this account are healthy — so the common factor is the
+      // fabricd crate code, not the image recipe or the platform.
+      // 9191661 is the last image with an in-repo "Deployed + verified LIVE" record
+      // (#407 + #408, the key-drift-hardening binary). If THIS boots, the regression
+      // is in crates/ between 9191661 and e5f07f8 and we have a bisect window; if it
+      // does not, the whole crate-regression theory is wrong.
+      // Cost while pinned here: this binary predates #514/#515 and Inc-3's CF Access
+      // service-token headers — introspect calls will be Access-403'd, so auth
+      // fail-closes. That is acceptable ONLY as a diagnostic step.
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer:9191661f77c85f9ab9fbad3de6f7372925f383c0",
       // HTTP control plane. Bumped standard-1 → standard-2 (2026-07-07 acquire-storm
       // hardening): the single-flight singleton must keep /v1/health + lease ops
       // responsive under a burst of box provisions; 2 vCPU gives headroom so a few
