@@ -36,7 +36,7 @@ run_case() {
 #!/usr/bin/env bash
 # Fake gh — answers only what pre-merge-gate-check.sh asks of it.
 if [ "\$1" = "pr" ] && [ "\$2" = "view" ]; then
-  echo "$mergeable $mergestatus OPEN"
+  echo "$mergeable $mergestatus OPEN false"
   exit 0
 fi
 if [ "\$1" = "pr" ] && [ "\$2" = "checks" ]; then
