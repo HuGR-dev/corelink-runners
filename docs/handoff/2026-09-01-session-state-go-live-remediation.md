@@ -6,7 +6,8 @@ safe next moves. It does not replace the historical handoff from 2026-08-31.
 
 The repository is `corelink-runners`. The current planning worktree is
 `.claude/worktrees/golive-rev6-r3`, on branch `plan/golive-rev6-r3`. The plan is
-deliberately **NOT FROZEN**: the current cold-critic round is **NOT QUIET**.
+rebased onto incident merge `b70deae` and deliberately **NOT FROZEN**: cold-review round 4 is
+**NOT QUIET** and the quiet count is zero.
 
 ## 1. Production containment: the Cloudflare burn is stopped
 
@@ -96,8 +97,7 @@ two consecutive quiet rounds.
 
 ## 4. Safe next steps
 
-1. Verify that `origin/main` contains merge `b70deae`, then rebase the planning branch
-   onto the current main. Preserve the incident commits and inspect the exact diff.
+1. Verify that `git merge-base HEAD origin/main` is `b70deae` and the planning worktree is clean.
 2. Run all four checks above plus `git diff --check` from the repository root.
 3. Run a fresh read-only cold critic against the complete plan, union ledger, triage,
    and all three checkers. Record every finding; do not silently promote AU items.

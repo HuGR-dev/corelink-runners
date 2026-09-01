@@ -48,7 +48,7 @@ finds no new defect on a clean post-incident commit.
 
 ## Next review contract
 
-1. Rebase the repair onto the merge of incident PR #529 and run the four commands above.
+1. **Done:** rebase the repair onto incident PR #529 merge `b70deae` and run the four commands above.
 2. Commit the byte-stable review input.
 3. Run a new independent cold review over the main plan, AU triage, round-3 delta, this ledger,
    incident evidence and all gate code.

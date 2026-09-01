@@ -1,6 +1,7 @@
 # Round-3 remediation delta — cold critic disposition
 
-**Review baseline:** `8bf1de7` · **Authored:** 2026-09-01 · **Status: NOT FROZEN**
+**Historical round-3 baseline:** `8bf1de7` · **Current review base:** `b70deae` (#529) ·
+**Authored:** 2026-09-01 · **Status: NOT FROZEN**
 
 This is the disposition and proposal companion to the rev-6 draft in
 `docs/plan/2026-08-30-golive-remediation-plan.md`. It records the third cold review, repairs the
