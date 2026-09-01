@@ -5,8 +5,8 @@
 
 **Historical baseline:** `8631abb` (snapshot `474c456` adds only `docs/plan/*` on top of it —
 the old `git diff --stat 8631abb 474c456` no-code claim applies only to that historical snapshot).
-It is **not** a claim about the current review input `af4ed85` or current HEAD; current code and
-production-state claims require a fresh SHA-labelled review.
+This historical ledger does not identify a current review input or current `HEAD`; current code
+and production-state claims require a fresh SHA-labelled review.
 
 **Sources**
 - (a) 2026-08-30 ultra audit — ids: `docs/plan/audit-2026-08-30-finding-ids.txt` (247);

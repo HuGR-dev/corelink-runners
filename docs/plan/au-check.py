@@ -206,7 +206,12 @@ EXPECTED_PLACEMENT_BUCKETS.update(
 EXPECTED_PROPOSAL_WPS = set(EXPECTED_PROPOSAL_WAVES)
 EXPECTED_EXTENSION_WPS = set(EXPECTED_EXTENSION_WAVES)
 STAGED_DECISION_IDS = {"D11", "D12", "D13"}
-STAGED_OWNER_IDS = {"O-CFINVENTORY", "O-CFRATE", "O-MONITORHOST"}
+STAGED_OWNER_IDS = {
+    "O-CFINVENTORY",
+    "O-CFCANCEL",
+    "O-CFRATE",
+    "O-MONITORHOST",
+}
 STAGED_RELAY_IDS = {"R6"}
 TOMBSTONED_WPS = {"T4-W3"}
 
@@ -234,6 +239,8 @@ READY_SET_HEADING = "## Deterministic ready sets and proof"
 READY_SET_FENCE_OPEN = "```text"
 READY_SET_FENCE_CLOSE = "```"
 EXPECTED_DAG_VERTICES = 69
+O_CFINVENTORY_ARTIFACT = "docs/plan/evidence/O-CFINVENTORY-provider-capabilities.json"
+O_CFCANCEL_ARTIFACT = "docs/plan/evidence/O-CFCANCEL-provider-cancellation.json"
 STAGED_WP_HEADER = [
     "wp",
     "owns",
@@ -1072,6 +1079,104 @@ def principal_dependency_registries(
     return decisions, armings, relays, errors
 
 
+def validate_provider_credential_contract(delta_document: str) -> list[str]:
+    """Freeze provider-read isolation and the separate cancellation obstacle.
+
+    O-CFINVENTORY remains one owner token/artifact but uses three isolated
+    read-only principals.  O-CFCANCEL is a different token/artifact and grants
+    no list access.  This is intentionally checked from the rendered normative
+    obstacle sections rather than learned from incidental prose elsewhere.
+    """
+
+    errors: list[str] = []
+    visible, _ = markdown_visible_text(delta_document)
+    start_marker = "**O-CFINVENTORY (reserved obstacle).**"
+    cancel_marker = "**O-CFCANCEL (reserved obstacle).**"
+    monitor_marker = "**O-MONITORHOST ("
+    starts = [match.start() for match in re.finditer(re.escape(start_marker), visible)]
+    cancels = [
+        match.start() for match in re.finditer(re.escape(cancel_marker), visible)
+    ]
+    monitors = [
+        match.start() for match in re.finditer(re.escape(monitor_marker), visible)
+    ]
+    if (
+        len(starts) != 1
+        or len(cancels) != 1
+        or len(monitors) != 1
+        or not starts[0] < cancels[0] < monitors[0]
+    ):
+        return [
+            "staged delta must contain one visible, ordered "
+            "O-CFINVENTORY/O-CFCANCEL/O-MONITORHOST contract "
+            f"(inventory={len(starts)}, cancel={len(cancels)}, "
+            f"monitor={len(monitors)})"
+        ]
+
+    inventory_section = plain_markdown(visible[starts[0] : cancels[0]])
+    cancel_section = plain_markdown(visible[cancels[0] : monitors[0]])
+    artifact_count = inventory_section.count(O_CFINVENTORY_ARTIFACT)
+    if artifact_count != 1:
+        errors.append(
+            "O-CFINVENTORY must name its one canonical capability artifact exactly once: "
+            f"{O_CFINVENTORY_ARTIFACT}={artifact_count}"
+        )
+
+    requirements = {
+        "three separately revocable read-only principals": (
+            r"\bthree separately revocable, read-only provider principals\b"
+        ),
+        "reconciliation-only principal": (
+            r"\bT3-W16's reconciliation/cross-check principal\b"
+        ),
+        "rearm-probe-only principal": r"\bT1-W6's rearm-probe principal\b",
+        "external-monitor-only principal": r"\bT6-W12's external monitor principal\b",
+        "isolated provider quotas and revocation": (
+            r"\brate-limit/quota allocations and revocation controls are isolated\b"
+        ),
+        "three credential schemas": (
+            r"\ball three credential schemas/permission matrices\b"
+        ),
+        "independent quota and revocation tests": (
+            r"\bindependent quota/rate-limit and revocation tests\b"
+        ),
+        "T1-W6 isolated-principal routing": (
+            r"\bT1-W6 therefore requires O-CFINVENTORY and uses only its dedicated "
+            r"rearm-probe principal, never the reconciliation or monitor principal\b"
+        ),
+    }
+    for label, pattern in requirements.items():
+        if re.search(pattern, inventory_section, re.IGNORECASE) is None:
+            errors.append(f"O-CFINVENTORY omits required {label} contract")
+
+    cancel_artifact_count = cancel_section.count(O_CFCANCEL_ARTIFACT)
+    if cancel_artifact_count != 1:
+        errors.append(
+            "O-CFCANCEL must name its one canonical cancellation artifact exactly once: "
+            f"{O_CFCANCEL_ARTIFACT}={cancel_artifact_count}"
+        )
+    cancel_requirements = {
+        "linearizable no-future-materialization barrier": (
+            r"\blinearizable barrier after which that start cannot materialize\b"
+        ),
+        "no numeric-timeout substitution": (
+            r"\ba locally measured latency or a numeric timeout is never a substitute\b"
+        ),
+        "indefinite fail-closed refusal": (
+            r"\bO-CFCANCEL remains unresolved, cancellation stays "
+            r"RECONCILIATION_REFUSED indefinitely\b"
+        ),
+        "no provider-list capability": r"\bO-CFCANCEL grants no provider-list access\b",
+        "independent dual-token route": (
+            r"\bthe two obstacles are independent and T3-W16 requires both\b"
+        ),
+    }
+    for label, pattern in cancel_requirements.items():
+        if re.search(pattern, cancel_section, re.IGNORECASE) is None:
+            errors.append(f"O-CFCANCEL omits required {label} contract")
+    return errors
+
+
 def validate_dependency_targets(
     dependencies: list[tuple[str, str]],
     *,
@@ -1494,9 +1599,16 @@ def validate_au_dag_routing(
     owners = {row.item: row.owner for row in rows}
     required_routes = {
         "AU5.10": ("O-APP",),
-        # The pin/freshness branch and the actual image-ship packet jointly
-        # represent the declared runner image build/deploy route.
-        "AU3.26b": ("T2-W2a", "T2-W4"),
+        # The repo half must land before the complete image freshness, deploy
+        # and image-ship route.  Checking every named vertex prevents the live
+        # proof from silently treating a local entrypoint edit as a deployed
+        # image.
+        "AU3.26b": ("T8-W4", "T2-W2a", "T2-W2b", "T2-W4"),
+        # AU6.17 is live evidence owned by T6-W10, but its synthetic producer
+        # and independent external-monitor ingestion are implemented by the
+        # later no-wake packet.  Evidence-only ownership must not bypass that
+        # implementation route.
+        "AU6.17": ("T6-W14", "T6-W15"),
     }
     for item, targets in required_routes.items():
         owner = owners.get(item)
@@ -1527,19 +1639,49 @@ def validate_au_dag_routing(
 
     required_direct_predecessors = {
         "T2-W2b": {"T3-W18", "O-FLEETBUSY"},
-        "T6-W6": {"T6-W9"},
+        "T6-W6": {"T6-W9", "T6-W12"},
+        "T4-W2": {"R2"},
         "T4-W7": {"O-BILLING", "T4-W2", "T9-W1"},
         "T4-W8": {"O-BILLING", "T4-W2", "T9-W1"},
         "T6-W15": {"T6-W4", "O-MONITORHOST"},
-        "T1-W6": {"T6-W15"},
-        "T6-W12": {"T6-W15", "T1-W6", "O-CFINVENTORY"},
-        "T6-W14": {"T6-W12"},
+        "T1-W6": {"T6-W15", "O-CFINVENTORY"},
+        "T6-W12": {"T6-W15", "T6-W9", "T1-W6", "O-CFINVENTORY"},
+        "T6-W13": {"T6-W4", "T6-W9", "O-CANARY", "T7-W4b"},
+        "T6-W14": {"T6-W12", "T6-W13"},
+        "T6-W10": {"T6-W6", "T6-W12", "T6-W14"},
+        "T5-W4": {"T5-W1"},
+        "T8-W7": {"T8-W4", "T2-W2a", "T2-W2b", "T2-W4"},
+        "T3-W16": {"O-CFINVENTORY", "O-CFCANCEL"},
     }
     for wp, required in required_direct_predecessors.items():
         missing = sorted(required - set(predecessors.get(wp, ())))
         if missing:
             errors.append(
                 f"DAG node {wp} is missing exact hard predecessor(s): {missing}"
+            )
+
+    forbidden_direct_predecessors = {
+        # The immediate key lane must not wait on its own later live proof.
+        # T6-W6 remains a prerequisite of T6-W10, not T6-W13.
+        "T6-W13": {"T6-W6"},
+        # Provider reads and exact-handle cancellation are separate authority
+        # domains.  These read-only consumers must not acquire cancellation.
+        "T1-W6": {"O-CFCANCEL"},
+        "T6-W12": {"O-CFCANCEL"},
+    }
+    for wp, forbidden in forbidden_direct_predecessors.items():
+        present = sorted(forbidden & set(predecessors.get(wp, ())))
+        if present:
+            errors.append(f"DAG node {wp} has forbidden hard predecessor(s): {present}")
+
+    # D7 is the non-waivable key-rotation safety interlock for D3.  Requiring
+    # it on each direct D3 consumer keeps a newly added release/publication
+    # lane from relying on prose or on another consumer's unrelated route.
+    d3_consumers = sorted(wp for wp, deps in predecessors.items() if "D3" in deps)
+    for wp in d3_consumers:
+        if "D7" not in predecessors.get(wp, ()):
+            errors.append(
+                f"DAG node {wp} consumes D3 without the mandatory D7 interlock"
             )
 
     required_transitive_predecessors = {
@@ -1557,10 +1699,22 @@ def validate_au_dag_routing(
             )
 
     required_scope_atoms = {
-        "T6-W4": {"deploy/cloudflare-canary/test/scheduled-tick-envelope.test.ts"},
+        "T6-W4": {
+            "deploy/cloudflare-canary/src/tick_outbox.ts",
+            "deploy/cloudflare-canary/wrangler.jsonc",
+            "deploy/cloudflare-canary/package.json",
+            "deploy/cloudflare-canary/package-lock.json",
+            "deploy/cloudflare-canary/test/scheduled-tick-envelope.test.ts",
+            "deploy/cloudflare-canary/test/scheduled-tick-outbox-recovery.test.ts",
+            "deploy/cloudflare-canary/test/scheduled-tick-order.test.ts",
+        },
         "T1-W6": {
             "crates/corelink-fabric-server/src/monitor_outbox.rs",
             "crates/corelink-fabric-server/tests/monitor_outbox.rs",
+            "crates/corelink-fabric/tests/pg_refusal_breaker.rs",
+            "deploy/cloudflare-fabricd/src/monitor_outbox.ts",
+            "deploy/cloudflare-fabricd/test/monitor-outbox.test.ts",
+            "docs/plan/evidence/T1-W6-pg-durable-live.json",
         },
         "T3-W16": {"deploy/cloudflare/test/attempt-monitor-outbox.test.ts"},
         "T6-W15": {
@@ -1596,27 +1750,68 @@ def validate_au_dag_routing(
             "deploy/cloudflare-fabricd/src/index.ts",
             "deploy/cloudflare-fabricd/src/lifecycle.ts",
             "deploy/cloudflare-fabricd/test/lifecycle-marker.test.ts",
+            "deploy/cloudflare-canary/src/index.ts",
             "deploy/cloudflare-canary/src/lifecycle_outbox.ts",
+            "deploy/cloudflare-canary/src/synthetic_slot.ts",
+            "deploy/cloudflare-canary/src/synthetic_outbox.ts",
             "deploy/cloudflare-canary/wrangler.jsonc",
             "deploy/cloudflare-canary/test/lifecycle-monitor-envelope.test.ts",
             "deploy/cloudflare-canary/test/lifecycle-sampler-outbox.test.ts",
+            "deploy/cloudflare-canary/test/synthetic-slot-lifecycle.test.ts",
+            "deploy/cloudflare-canary/test/synthetic-slot-outbox.test.ts",
+            "deploy/cloudflare-canary/test/synthetic-slot-default-off.test.ts",
+            "deploy/cloudflare-canary/test/synthetic-slot-credential-isolation.test.ts",
+            "deploy/cloudflare-canary/test/synthetic-slot-correlation.test.ts",
         },
         "T6-W12": {
+            "deploy/cost-monitor/Containerfile",
+            "deploy/cost-monitor/config.schema.json",
+            "deploy/cost-monitor/package.json",
+            "deploy/cost-monitor/package-lock.json",
+            "deploy/cost-monitor/src/index.ts",
+            "deploy/cost-monitor/src/scheduler.ts",
+            "deploy/cost-monitor/src/state.ts",
+            "deploy/cost-monitor/src/incidents.ts",
+            "deploy/cost-monitor/src/types.ts",
             "deploy/cost-monitor/src/provider.ts",
             "deploy/cost-monitor/src/correlator.ts",
+            "deploy/cost-monitor/src/capability_rules.ts",
+            "deploy/cost-monitor/src/synthetic_ingest.ts",
+            "deploy/cost-monitor/migrations/0002-provider-cursors.json",
             "deploy/cost-monitor/test/provider.test.ts",
+            "deploy/cost-monitor/test/provider-stale-frozen.test.ts",
             "deploy/cost-monitor/test/correlator.test.ts",
             "deploy/cost-monitor/test/cursor-crash.test.ts",
             "deploy/cost-monitor/test/provider-unavailable.test.ts",
             "deploy/cost-monitor/test/incident-boundary.test.ts",
+            "deploy/cost-monitor/test/acked-incident-update.test.ts",
             "deploy/cost-monitor/test/recovery-horizon.test.ts",
+            "deploy/cost-monitor/test/c1-c5-rules.test.ts",
+            "deploy/cost-monitor/test/c1-c5-synthetic-ingest.test.ts",
             "docs/plan/evidence/T6-W12-independent-monitor.json",
+        },
+        "T6-W10": {
+            "docs/plan/evidence/T6-W10-alerting-depth.json",
+            "docs/plan/evidence/au6.17-synthetic-slot-lifecycle.json",
         },
     }
     for wp, required in required_scope_atoms.items():
         missing = sorted(required - set(scopes.get(wp, ())))
         if missing:
             errors.append(f"DAG node {wp} is missing exact scope atom(s): {missing}")
+
+    t6_w10_implementation = sorted(
+        atom
+        for atom in scopes.get("T6-W10", ())
+        if atom.startswith("deploy/")
+        or atom.startswith("crates/")
+        or atom.startswith("scripts/")
+    )
+    if t6_w10_implementation:
+        errors.append(
+            "DAG node T6-W10 must remain evidence/arming-only after T6-W14's "
+            f"default-off implementation, got implementation atoms: {t6_w10_implementation}"
+        )
     return errors
 
 
@@ -1805,6 +2000,8 @@ def check(
     if delta_path is None:
         delta_path = plan_path.with_name("2026-09-01-round3-remediation-delta.md")
     try:
+        delta_document = delta_path.read_text(encoding="utf-8")
+        failures.extend(validate_provider_credential_contract(delta_document))
         (
             staged_wps,
             staged_existing_wps,

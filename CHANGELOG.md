@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-09-01 — go-live plan Round 9 remains 7/8 NOT QUIET; repair in progress
+
+Round 9 reviewed the exact committed input
+`f5df50d7659254ed5e4579ab75df2a4d44ceea0f` in a clean, read-only exercise. Seven of eight
+reviewers reported new blockers; one found no new finding and signed off. The consolidated ledger
+is [`docs/plan/2026-09-01-round9-cold-review-ledger.md`](docs/plan/2026-09-01-round9-cold-review-ledger.md).
+The blockers cover independent-monitor host and credential isolation, end-to-end alert timing,
+lifecycle/canary evidence, shared incident recovery, executable T6-W15/T6-W12 ownership,
+dispatch/containment authorization, and SHA-labelled evidence boundaries.
+
+The Round-9 repair cycle is **IN PROGRESS**. Its later repair tree is distinct from the reviewed
+input and has no SHA asserted by this entry; no review result transfers to an unqualified `HEAD`.
+The status remains **QUIET COUNT 0 · NOT FROZEN · NO AU PROMOTION · NO DISPATCH · NO GREEN
+CREDIT**. The one signoff is bounded to `f5df50d…` and cannot advance quietness.
+
 ### 2026-09-01 — go-live plan Round 8 remains 5/8 NOT QUIET; repair in progress
 
 Round 8 reviewed the exact committed input

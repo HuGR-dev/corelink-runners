@@ -70,7 +70,7 @@ WP = {
     "T6-W4": (
         ["A6.5", "A6.9"],
         ["INV-8"],
-        "new `secret-scan.yml`, `corelink-stress.yml`, `deploy/cloudflare-canary/**` (not its README); canary-tick producer/test only, no A6.10 detector or credit",
+        "new `secret-scan.yml`, `corelink-stress.yml`, `deploy/cloudflare-canary/**` (not its README); canary-tick producer plus durable ordered outbox/config/migration and crash/concurrency tests only, no A6.10 detector or live credit",
         1,
     ),
     "T6-W15": (
@@ -265,7 +265,7 @@ FROZEN_ITEM_KINDS = {
     "A6.7": "probe",
     "A6.8": "test",
     "A6.9": "probe",
-    "A6.10": "test",
+    "A6.10": "test+probe",
     "A6.11": "probe",
     "A6.12": "test+probe",
     "A6.13": "probe",
@@ -424,6 +424,7 @@ DAG_EXTERNAL_NODES = {
     "O-ROTATE",
     "O-PUBLISH",
     "O-CFINVENTORY",
+    "O-CFCANCEL",
     "O-CFRATE",
     "O-MONITORHOST",
 }
@@ -533,13 +534,18 @@ EVIDENCE_ARTIFACT_RE = re.compile(r"docs/plan/evidence/[A-Za-z0-9._-]+\.json")
 REQUIRED_DAG_DIRECT_PREDECESSORS = {
     # A deploy cannot resume while the containment proof or the fleet-busy
     # credential/force-deploy owner action is still outstanding.
-    "T2-W2b": {"T3-W18", "O-FLEETBUSY"},
-    # Alert rules must exist before the canary is credited with delivering
-    # their synthesized conditions end to end.
-    "T6-W6": {"T6-W9"},
+    "T2-W2b": {"T3-W18", "O-FLEETBUSY", "T8-W4"},
+    # The JIT-config secret-surface repair must precede pinning, deployment,
+    # and image shipment; a fan-in at the final probe cannot prove that the
+    # deployed digest actually contains the repaired entrypoint.
+    "T2-W2a": {"T8-W4"},
+    "T2-W4": {"T8-W4"},
+    # The independent implementation must exist before the Cloudflare canary
+    # is credited with delivering synthesized conditions end to end.
+    "T6-W6": {"T6-W9", "T6-W12"},
     # Live billing reconciliation proofs cannot begin in parallel with the
     # worker billing implementation whose behavior they are meant to prove.
-    "T4-W7": {"T4-W2"},
+    "T4-W7": {"T4-W2", "R2"},
     "T4-W8": {"T4-W2"},
     # The first Cloudflare live-risk branch must remain behind the completed
     # containment re-drive proof, not merely behind a prose convention.
@@ -547,8 +553,32 @@ REQUIRED_DAG_DIRECT_PREDECESSORS = {
     # The external detector/base is live before durable-PG recovery, and the
     # provider-backed live phase may run only after both foundations exist.
     "T6-W15": {"T6-W4", "O-MONITORHOST", "T7-W4b"},
-    "T1-W6": {"T6-W15"},
-    "T6-W12": {"T6-W15", "T1-W6"},
+    "T1-W6": {"T6-W15", "O-CFINVENTORY"},
+    # T6-W9 freezes the rule semantics; T6-W12 then implements those rules in
+    # the independent monitor before any live canary or depth proof.
+    "T6-W12": {
+        "T6-W15",
+        "T1-W6",
+        "T6-W9",
+        "T3-W16",
+        "O-CFINVENTORY",
+    },
+    "T6-W13": {"T6-W4", "T6-W9", "O-CANARY", "T7-W4b"},
+    "T6-W14": {"T6-W13", "T6-W12"},
+    "T6-W10": {"T6-W6", "T6-W12", "T6-W14"},
+    # External owner relations are not vertices and therefore must remain
+    # explicit on the exact packets that consume them.
+    "T4-W2": {"R2"},
+    "T5-W4": {"T5-W1"},
+    "T5-W1": {"R6"},
+    "T3-W16": {"O-CFINVENTORY", "O-CFCANCEL"},
+    "T8-W7": {"T8-W4", "T2-W2a", "T2-W2b", "T2-W4"},
+}
+
+FORBIDDEN_DAG_DIRECT_PREDECESSORS = {
+    # W13 is the immediate key lane. Making it wait for W6 would create a
+    # cycle now that the live W6 proof correctly waits for external T6-W12.
+    "T6-W13": {"T6-W6"},
 }
 
 REQUIRED_DAG_SCOPE_ATOMS = {
@@ -564,19 +594,65 @@ REQUIRED_DAG_SCOPE_ATOMS = {
         "deploy/cloudflare-canary/wrangler.jsonc",
         "deploy/cloudflare-canary/test/lifecycle-monitor-envelope.test.ts",
         "deploy/cloudflare-canary/test/lifecycle-sampler-outbox.test.ts",
+        "deploy/cloudflare-canary/src/synthetic_slot.ts",
+        "deploy/cloudflare-canary/src/synthetic_outbox.ts",
+        "deploy/cloudflare-canary/test/synthetic-slot-lifecycle.test.ts",
+        "deploy/cloudflare-canary/test/synthetic-slot-outbox.test.ts",
+        "deploy/cloudflare-canary/test/synthetic-slot-default-off.test.ts",
+        "deploy/cloudflare-canary/test/synthetic-slot-credential-isolation.test.ts",
+        "deploy/cloudflare-canary/test/synthetic-slot-correlation.test.ts",
     },
-    "T6-W4": {"deploy/cloudflare-canary/test/scheduled-tick-envelope.test.ts"},
+    "T6-W4": {
+        "deploy/cloudflare-canary/src/tick_outbox.ts",
+        "deploy/cloudflare-canary/wrangler.jsonc",
+        "deploy/cloudflare-canary/test/scheduled-tick-envelope.test.ts",
+        "deploy/cloudflare-canary/test/scheduled-tick-outbox-recovery.test.ts",
+        "deploy/cloudflare-canary/test/scheduled-tick-order.test.ts",
+    },
     "T1-W6": {
         "crates/corelink-fabric-server/src/monitor_outbox.rs",
         "crates/corelink-fabric-server/tests/monitor_outbox.rs",
+        "deploy/cloudflare-fabricd/src/monitor_outbox.ts",
+        "deploy/cloudflare-fabricd/test/monitor-outbox.test.ts",
+        "deploy/cloudflare-fabricd/wrangler.jsonc",
     },
     "T3-W16": {"deploy/cloudflare/test/attempt-monitor-outbox.test.ts"},
+    "T6-W12": {
+        "deploy/cost-monitor/src/index.ts",
+        "deploy/cost-monitor/src/scheduler.ts",
+        "deploy/cost-monitor/src/state.ts",
+        "deploy/cost-monitor/src/incidents.ts",
+        "deploy/cost-monitor/src/types.ts",
+        "deploy/cost-monitor/src/capability_rules.ts",
+        "deploy/cost-monitor/src/synthetic_ingest.ts",
+        "deploy/cost-monitor/config.schema.json",
+        "deploy/cost-monitor/migrations/0002-provider-cursors.json",
+        "deploy/cost-monitor/test/c1-c5-rules.test.ts",
+        "deploy/cost-monitor/test/c1-c5-synthetic-ingest.test.ts",
+        "deploy/cost-monitor/test/acked-incident-update.test.ts",
+        "deploy/cost-monitor/test/provider-stale-frozen.test.ts",
+    },
 }
 
-# These two rows are an intentional implementation split, so their path atoms
-# are frozen exactly rather than merely checked for a minimum subset.  This
-# keeps the base outbox/delivery authority separate from provider/live proof.
+# These safety-critical rows use exact path registries rather than only minimum
+# subsets, preventing broad scopes or evidence-only substitutions.
+# T6-W12 deliberately reopens only the named base seams after T6-W15, then adds
+# provider, C1-C5 and synthetic-ingest integration without taking base delivery
+# or credential-isolation ownership.
 EXACT_DAG_SCOPE_ATOMS = {
+    "T6-W4": {
+        ".github/workflows/secret-scan.yml",
+        ".github/workflows/corelink-stress.yml",
+        "deploy/cloudflare-canary/src/index.ts",
+        "deploy/cloudflare-canary/src/types.ts",
+        "deploy/cloudflare-canary/src/tick_outbox.ts",
+        "deploy/cloudflare-canary/wrangler.jsonc",
+        "deploy/cloudflare-canary/package.json",
+        "deploy/cloudflare-canary/package-lock.json",
+        "deploy/cloudflare-canary/test/scheduled-tick-envelope.test.ts",
+        "deploy/cloudflare-canary/test/scheduled-tick-outbox-recovery.test.ts",
+        "deploy/cloudflare-canary/test/scheduled-tick-order.test.ts",
+    },
     "T6-W15": {
         "deploy/cost-monitor/Containerfile",
         "deploy/cost-monitor/config.schema.json",
@@ -605,21 +681,82 @@ EXACT_DAG_SCOPE_ATOMS = {
         "deploy/cost-monitor/test/credential-isolation.test.ts",
         "deploy/cost-monitor/test/independence.test.ts",
     },
+    "T1-W6": {
+        "crates/corelink-fabric/src/pg_ledger.rs",
+        "crates/corelink-fabric/src/billing_sink.rs",
+        "crates/corelink-fabric-server/src/main.rs",
+        "crates/corelink-fabric-server/src/server.rs",
+        "crates/corelink-fabric-server/src/billing_export.rs",
+        "crates/corelink-fabric-server/src/monitor_outbox.rs",
+        "crates/corelink-fabric-server/tests/monitor_outbox.rs",
+        "crates/corelink-fabric/tests/pg_refusal_breaker.rs",
+        "deploy/cloudflare-fabricd/src/index.ts",
+        "deploy/cloudflare-fabricd/src/monitor_outbox.ts",
+        "deploy/cloudflare-fabricd/test/resilience.test.ts",
+        "deploy/cloudflare-fabricd/test/monitor-outbox.test.ts",
+        "deploy/cloudflare-fabricd/wrangler.jsonc",
+    },
     "T6-W12": {
+        "deploy/cost-monitor/Containerfile",
+        "deploy/cost-monitor/config.schema.json",
+        "deploy/cost-monitor/package.json",
+        "deploy/cost-monitor/package-lock.json",
+        "deploy/cost-monitor/src/index.ts",
+        "deploy/cost-monitor/src/scheduler.ts",
+        "deploy/cost-monitor/src/state.ts",
+        "deploy/cost-monitor/src/incidents.ts",
+        "deploy/cost-monitor/src/types.ts",
         "deploy/cost-monitor/src/provider.ts",
         "deploy/cost-monitor/src/correlator.ts",
+        "deploy/cost-monitor/src/capability_rules.ts",
+        "deploy/cost-monitor/src/synthetic_ingest.ts",
+        "deploy/cost-monitor/migrations/0002-provider-cursors.json",
         "deploy/cost-monitor/test/provider.test.ts",
+        "deploy/cost-monitor/test/provider-stale-frozen.test.ts",
         "deploy/cost-monitor/test/correlator.test.ts",
         "deploy/cost-monitor/test/provider-unavailable.test.ts",
         "deploy/cost-monitor/test/cursor-crash.test.ts",
         "deploy/cost-monitor/test/incident-boundary.test.ts",
         "deploy/cost-monitor/test/recovery-horizon.test.ts",
+        "deploy/cost-monitor/test/c1-c5-rules.test.ts",
+        "deploy/cost-monitor/test/c1-c5-synthetic-ingest.test.ts",
+        "deploy/cost-monitor/test/acked-incident-update.test.ts",
     },
+    "T6-W14": {
+        "deploy/cloudflare-fabricd/src/index.ts",
+        "deploy/cloudflare-fabricd/src/lifecycle.ts",
+        "deploy/cloudflare-fabricd/test/lifecycle-marker.test.ts",
+        "deploy/cloudflare-canary/src/index.ts",
+        "deploy/cloudflare-canary/src/lifecycle_outbox.ts",
+        "deploy/cloudflare-canary/src/synthetic_slot.ts",
+        "deploy/cloudflare-canary/src/synthetic_outbox.ts",
+        "deploy/cloudflare-canary/src/rules.ts",
+        "deploy/cloudflare-canary/src/types.ts",
+        "deploy/cloudflare-canary/wrangler.jsonc",
+        "deploy/cloudflare-canary/test/no-wake-target.test.ts",
+        "deploy/cloudflare-canary/test/lifecycle-monitor-envelope.test.ts",
+        "deploy/cloudflare-canary/test/lifecycle-sampler-outbox.test.ts",
+        "deploy/cloudflare-canary/test/synthetic-slot-lifecycle.test.ts",
+        "deploy/cloudflare-canary/test/synthetic-slot-outbox.test.ts",
+        "deploy/cloudflare-canary/test/synthetic-slot-default-off.test.ts",
+        "deploy/cloudflare-canary/test/synthetic-slot-credential-isolation.test.ts",
+        "deploy/cloudflare-canary/test/synthetic-slot-correlation.test.ts",
+    },
+    # T6-W10 owns version-bound evidence only. The external C1-C5 rules and
+    # synthetic ingress must be implemented by T6-W12/T6-W14 first.
+    "T6-W10": set(),
 }
 
 EXACT_DAG_ARTIFACTS = {
+    "T6-W4": {"docs/plan/evidence/T6-W4-stress-host.json"},
     "T6-W15": {"docs/plan/evidence/T6-W15-monitor-base.json"},
+    "T1-W6": {"docs/plan/evidence/T1-W6-pg-durable-live.json"},
     "T6-W12": {"docs/plan/evidence/T6-W12-independent-monitor.json"},
+    "T6-W10": {
+        "docs/plan/evidence/T6-W10-alerting-depth.json",
+        "docs/plan/evidence/au6.17-synthetic-slot-lifecycle.json",
+    },
+    "T6-W14": {"docs/plan/evidence/T6-W14-canary-no-wake.json"},
 }
 
 
@@ -1616,6 +1753,22 @@ def validate_dispatch_dag(path):
             dag_fail.append(
                 f"DAG {node} is missing required exact hard predecessors {missing}"
             )
+
+    for node, forbidden in FORBIDDEN_DAG_DIRECT_PREDECESSORS.items():
+        if node not in nodes:
+            continue
+        present = sorted(forbidden & set(nodes[node]["predecessors"]))
+        if present:
+            dag_fail.append(
+                f"DAG {node} has forbidden exact hard predecessors {present}"
+            )
+
+    # D7 -> D3 is an owner-action relation outside the WP graph.  Requiring D7
+    # on every physical D3 consumer prevents the scheduler from treating a
+    # satisfied publication token as proof that the leaked key was rotated.
+    for node, record in nodes.items():
+        if "D3" in record["predecessors"] and "D7" not in record["predecessors"]:
+            dag_fail.append(f"DAG D3 consumer {node} does not also name D7 directly")
 
     for node, record in nodes.items():
         if record["phase"] == "W3 live proof" and not transitively_precedes(

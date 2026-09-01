@@ -246,6 +246,48 @@ def require_actionlint_config_is_not_authoritative(work: Path) -> None:
     print("PASS actionlint suppress-all config cannot hide trusted diagnostics")
 
 
+def require_actionlint_exact_baseline(work: Path) -> None:
+    """Prove that the executable actionlint baseline rejects an extra label.
+
+    The authoritative checker owns an exact (workflow,label) multiset.  Copy
+    the workflow tree into an isolated fixture, add one otherwise-valid job
+    using an already-allowed ``corelink`` label, and require the count mismatch
+    to fail.  This catches the historical regex-only false PASS.
+    """
+
+    checker = PLAN_DIR / "actionlint-check.py"
+    if not checker.exists():
+        raise AssertionError(f"missing authoritative actionlint checker: {checker}")
+
+    fixture_root = work / "actionlint-exact-baseline"
+    workflow_root = fixture_root / ".github" / "workflows"
+    shutil.copytree(REPO / ".github" / "workflows", workflow_root)
+
+    workflow = workflow_root / "ci.yml"
+    workflow.write_text(
+        workflow.read_text(encoding="utf-8")
+        + "\n  actionlint_baseline_mutation:\n"
+        + "    runs-on: corelink\n"
+        + "    steps:\n"
+        + "      - run: true\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [sys.executable, str(checker), "--root", str(fixture_root)],
+        cwd=REPO,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    diagnostics = result.stdout + result.stderr
+    if result.returncode == 0 or "baseline mismatch" not in diagnostics:
+        raise AssertionError(
+            "actionlint exact-baseline checker accepted an extra allowed label:\n"
+            + diagnostics
+        )
+    print("PASS actionlint exact baseline blocks an extra allowed-label occurrence")
+
+
 def main() -> int:
     require("plan baseline", "plan-check.py", SOURCE, True)
     require("WP baseline", "wp-check.py", PLAN, True)
@@ -260,6 +302,7 @@ def main() -> int:
         work = Path(temp)
 
         require_actionlint_config_is_not_authoritative(work)
+        require_actionlint_exact_baseline(work)
 
         duplicate_source = work / "duplicate-source.txt"
         first_id = source.splitlines()[0]
@@ -912,6 +955,134 @@ def main() -> int:
                 dag=missing_recovery_scope,
             )
 
+            missing_cancellation_obstacle = work / "missing-o-cfcancel.md"
+            missing_cancellation_obstacle.write_text(
+                replace_once(
+                    dag_text,
+                    "| T3-W16 | W2 worker | T8-W2, T2-W2b, O-CFINVENTORY, O-CFCANCEL, T7-W4b |",
+                    "| T3-W16 | W2 worker | T8-W2, T2-W2b, O-CFINVENTORY, T7-W4b |",
+                    "T3-W16 O-CFCANCEL obstacle",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU T3-W16 missing O-CFCANCEL obstacle",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=missing_cancellation_obstacle,
+            )
+
+            forbidden_canary_predecessor = work / "forbidden-t6-w6-before-t6-w13.md"
+            forbidden_canary_predecessor.write_text(
+                replace_once(
+                    dag_text,
+                    "| T6-W13 | W3 live proof | T6-W4, T6-W9, O-CANARY, T7-W4b |",
+                    "| T6-W13 | W3 live proof | T6-W4, T6-W6, T6-W9, O-CANARY, T7-W4b |",
+                    "forbidden T6-W6 to T6-W13 predecessor",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU forbidden T6-W6 to T6-W13 predecessor",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=forbidden_canary_predecessor,
+            )
+
+            missing_alerting_depth_predecessor = (
+                work / "missing-t6-w14-before-t6-w10.md"
+            )
+            missing_alerting_depth_predecessor.write_text(
+                replace_once(
+                    dag_text,
+                    "| T6-W10 | W3 live proof | T6-W6, T6-W9, T6-W12, T6-W14, T1-W6, T7-W4b |",
+                    "| T6-W10 | W3 live proof | T6-W6, T6-W9, T6-W12, T1-W6, T7-W4b |",
+                    "T6-W10 T6-W14 predecessor",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU T6-W10 missing T6-W14 predecessor",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=missing_alerting_depth_predecessor,
+            )
+
+            missing_r2_interlock = work / "missing-r2-before-t4-w2.md"
+            missing_r2_interlock.write_text(
+                replace_once(
+                    dag_text,
+                    "| T4-W2 | W2 worker | T4-W1, R2 |",
+                    "| T4-W2 | W2 worker | T4-W1 |",
+                    "T4-W2 R2 predecessor",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU T4-W2 missing R2 interlock",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=missing_r2_interlock,
+            )
+
+            missing_d7_interlock = work / "missing-d7-before-d3-consumer.md"
+            missing_d7_interlock.write_text(
+                replace_once(
+                    dag_text,
+                    "| T5-W4 | W3 live proof | D7, D3, D8, R3, T5-W1, T1-W6, T7-W4b |",
+                    "| T5-W4 | W3 live proof | D3, D8, R3, T5-W1, T1-W6, T7-W4b |",
+                    "D3 consumer D7 interlock",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU D3 consumer missing D7 interlock",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=missing_d7_interlock,
+            )
+
+            missing_stranger_predecessor = work / "missing-t5-w1-before-t5-w4.md"
+            missing_stranger_predecessor.write_text(
+                replace_once(
+                    dag_text,
+                    "| T5-W4 | W3 live proof | D7, D3, D8, R3, T5-W1, T1-W6, T7-W4b |",
+                    "| T5-W4 | W3 live proof | D7, D3, D8, R3, T1-W6, T7-W4b |",
+                    "T5-W4 T5-W1 predecessor",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU T5-W4 missing T5-W1 predecessor",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=missing_stranger_predecessor,
+            )
+
+            drifted_monitor_scope = work / "drifted-t6-w12-provider-path.md"
+            drifted_monitor_scope.write_text(
+                replace_once(
+                    dag_text,
+                    "`deploy/cost-monitor/src/provider.ts`; ",
+                    "`deploy/cost-monitor/src/provider-adapter.ts`; ",
+                    "T6-W12 provider path scope",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU T6-W12 canonical provider path drift",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=drifted_monitor_scope,
+            )
+
         wrong_au_owner = work / "wrong-au-owner.md"
         union23 = next(
             line for line in triage.splitlines() if line.startswith("| union-23 |")
@@ -924,7 +1095,7 @@ def main() -> int:
             "AU7.10 outside canonical file owner", "au-check.py", wrong_au_owner, False
         )
 
-    print("\nplan gate self-test: PASS — baselines accepted and 38 corruptions blocked")
+    print("\nplan gate self-test: PASS — baselines accepted and 48 corruptions blocked")
     return 0
 
 

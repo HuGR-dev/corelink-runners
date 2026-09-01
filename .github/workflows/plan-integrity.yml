@@ -49,13 +49,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          expected_actionlint_version='1.7.12'
-          actual_actionlint_version="$(actionlint -version 2>&1 | sed -n '1p')"
-          if [[ "$actual_actionlint_version" != "$expected_actionlint_version" ]]; then
-            echo "actionlint: expected pinned version $expected_actionlint_version, got $actual_actionlint_version" >&2
-            exit 1
-          fi
-
           # Parse whichever optional config is present, but never use it for
           # the authoritative repository lint below.  In particular, an
           # ignore-all config must not be able to turn a malformed workflow or
@@ -92,38 +85,11 @@ jobs:
             echo "actionlint: parsed optional configuration ${config_files[0]} (non-authoritative)"
           fi
 
-          report="$(mktemp)"
-          set +e
-          # /dev/null is deliberate: repository actionlint config is validated
-          # above but cannot suppress this independent structural check.
-          actionlint -config-file /dev/null -oneline >"$report" 2>&1
-          status=$?
-          set -e
-
-          # The fleet deliberately uses private self-hosted labels.  The
-          # repository has always emitted actionlint's runner-label warning
-          # for these exact labels in these existing workflow files.  Keep
-          # that known baseline visible, but fail on every other diagnostic
-          # (including a new custom label or any warning on a new path).
-          baseline='^\.github/workflows/(build-cf-container-images|build-fabricd-image|canary-smoke|ci|clw-ticket-propagation-check|corelink-smoke|corelink-stress|dco|deploy-spawn-worker|dogfood-smoke|latency-probe|moat-action-test|moat-benchmark|moat-correctness|o7-metadata-probe|orphan-box-detect|plan-integrity|prove-baked-buildkit|release|spawn-worker-ci)\.yml:[0-9]+:[0-9]+: label "(corelink|corelink-builder|corelink-dogfood)" is unknown\. available labels are .* \[runner-label\]$'
-          if [[ "$status" -ne 0 && -z "$(tr -d '[:space:]' <"$report")" ]]; then
-            echo "actionlint: exited nonzero without a diagnostic" >&2
-            exit 1
-          fi
-          known="$(grep -E "$baseline" "$report" || true)"
-          unexpected="$(grep -Ev "$baseline" "$report" || true)"
-          if [[ -n "$known" ]]; then
-            echo "actionlint: repository-baseline custom runner-label diagnostics:"
-            printf '%s\n' "$known"
-          fi
-          if [[ -n "$unexpected" ]]; then
-            cat "$report"
-            echo "actionlint: unexpected diagnostics above (runner-label baseline is narrowly allowlisted)" >&2
-            exit 1
-          fi
-          if [[ "$status" -ne 0 ]]; then
-            echo "actionlint: no diagnostics beyond the repository baseline"
-          fi
+          # The authoritative checker pins the binary, invokes actionlint with
+          # -config-file /dev/null, and compares an exact (workflow,label)
+          # diagnostic multiset.  A regex allowlist would admit new labels or
+          # duplicate occurrences silently.
+          python3 docs/plan/actionlint-check.py
 
       - name: Check audit finding coverage
         run: python3 docs/plan/plan-check.py docs/plan/audit-2026-08-30-finding-ids.txt
