@@ -89,6 +89,37 @@ Production verification after deploy, on the fixed live version:
 Raw boot-rate observations were captured locally at
 `/tmp/fabricd-boot-rate.20260901T160055Z.tsv`.
 
+## Canary feedback loop and scale-to-zero proof
+
+The Postgres escape hatch stopped database dials but did not initially stop the
+Cloudflare container allocation. A live Worker tail showed why: every five
+minutes `corelink-canary` called both `/internal/v1/status` and `/v1/health`.
+The live canary did not have `FABRIC_OBSERVABILITY_KEY`, so the status call
+returned 401; its code converted that result to a silent sentinel only after the
+request had already traversed the fabricd Durable Object. The health call also
+traversed the container. The five-minute cadence exactly matched fabricd's
+`sleepAfter = "5m"`, pinning the `standard-2` instance awake.
+
+Commit `cf45fef` added the explicit containment mode
+`FABRIC_PROBES_ENABLED=0`. It performs zero fabricd fetches, persists health as
+`SKIPPED` rather than manufacturing a 200, and leaves the spawn-worker metrics
+path running. Verification before deploy was typecheck plus 39/39 tests,
+including a test that asserts zero fabricd fetches and one retained spawn fetch.
+
+Cloudflare canary version `852277c1-9778-459f-b1ff-9d56fbe7c32f` was deployed
+with the flag. A manual cycle returned:
+
+```text
+fabric=404 health=SKIPPED spawn=401
+```
+
+The spawn 401 is a separate metrics-key arming drift; it does not wake a
+container and was not altered during this containment. At
+2026-09-01T16:40:40Z, after the old probe cadence and sleep window had elapsed,
+the detailed fabricd inventory returned **3/3 inactive** and
+`non_inactive=[]`. This is the scale-to-zero proof that closes the Cloudflare
+container burn addressed by this incident.
+
 ## Accepted degradation and exit condition
 
 While the switch is armed, fabricd uses the in-memory ledger. Lease durability
