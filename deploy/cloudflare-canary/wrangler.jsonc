@@ -27,6 +27,12 @@
     "FABRIC_STATUS_URL": "https://corelink-fabricd.gmhelmold.workers.dev/internal/v1/status",
     "FABRIC_HEALTH_URL": "https://corelink-fabricd.gmhelmold.workers.dev/v1/health",
     "SPAWN_METRICS_URL": "https://corelink-spawn-worker.gmhelmold.workers.dev/internal/v1/metrics",
+    // RE-ARMED 2026-09-01 (cost containment): this canary runs every 5m,
+    // exactly fabricd's sleepAfter. Its unarmed status request returned 401 and
+    // its health request kept the standard-2 container awake indefinitely.
+    // Spawn-worker monitoring remains active. Remove only after fabricd exposes
+    // a container-free liveness/status surface or the cadence cannot pin it.
+    "FABRIC_PROBES_ENABLED": "0",
     // One incident won't email every tick (de-dup cooldown, minutes).
     "ALERT_COOLDOWN_MINUTES": "30",
     // Staleness ("no completions in N hours") is OFF by default (0) — dogfood

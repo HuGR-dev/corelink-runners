@@ -100,6 +100,13 @@
     // free project suffices — direct or SESSION-mode connection only, because
     // tokio-postgres uses prepared statements and deadpool holds connections across
     // calls, which transaction-mode pooling breaks.
+    //
+    // RE-ARMED 2026-09-01 (incident containment): production `/health` again
+    // returned `500 Failed to start container`, the live Worker still had
+    // DATABASE_URL armed, and its `* * * * *` scheduled trigger was confirmed
+    // live. This stops the pre-bind Postgres dial loop immediately. Remove only
+    // after a replacement/restored database passes a fixed-config boot-rate probe.
+    "FABRIC_PG_DISABLED": "1",
     "CORELINK_INTROSPECT_URL": "https://corelink-api.humangr.com/internal/v1/auth/introspect",
     "BILLING_INGEST_URL": "https://corelink-api.humangr.com/internal/v1/billing/usage",
     "BILLING_REGION": "iad",

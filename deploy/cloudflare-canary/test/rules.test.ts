@@ -99,6 +99,12 @@ describe("health rule", () => {
     const a = evaluate(null, snap(), cfg).alerts.find((x) => x.key === "health:fabric");
     expect(a).toBeUndefined();
   });
+  it("does NOT manufacture an alert or a 200 claim when explicitly skipped", () => {
+    const cur = snap({ fabricHealth: { reachable: true, status: 0, skipped: true } });
+    const a = evaluate(null, cur, cfg).alerts.find((x) => x.key === "health:fabric");
+    expect(a).toBeUndefined();
+    expect(cur.fabricHealth.status).toBe(0);
+  });
 });
 
 // ── surface reachability / auth posture ─────────────────────────────────────────

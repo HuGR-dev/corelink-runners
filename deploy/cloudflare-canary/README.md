@@ -19,6 +19,12 @@ Each tick: fetch all three, store the snapshot in KV, diff vs the previous
 snapshot, evaluate the **pure** rules in `src/rules.ts`, apply a per-alert
 cooldown, and send at most one summary email.
 
+`FABRIC_PROBES_ENABLED=0` is the explicit containment mode for a fabricd that
+must scale to zero. It skips both fabricd requests and records health as
+`SKIPPED` (never as a synthetic 200), while spawn-worker metrics and email
+delivery continue. A five-minute fabricd probe must not be re-enabled while the
+container's `sleepAfter` is also five minutes: that cadence pins the container.
+
 ## Alert rules (`src/rules.ts` — pure, unit-tested)
 
 - health unreachable / non-200 ⇒ **CRITICAL**
