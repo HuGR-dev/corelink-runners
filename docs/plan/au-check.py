@@ -244,12 +244,21 @@ O_CFCANCEL_ARTIFACT = "docs/plan/evidence/O-CFCANCEL-provider-cancellation.json"
 MONITOR_REARM_TUPLE = (
     "monitor_rearm_tuple=(deployed_monitor_image_digest,config_digest,"
     "ingress_key_epoch_map_digest,expected_source_registry_digest,"
-    "delivery_route_policy_digest,provider_adapter_api_capability_digest)"
+    "delivery_route_policy_digest,provider_adapter_api_capability_digest,"
+    "attestation_ack_signer_trust_revocation_digest)"
 )
 A6_17_WINDOW_TUPLE = (
     "A6.17_window_tuple=(monitor_rearm_tuple_digest,"
-    "sensitivity_scheduler_config_key_digest,"
-    "receipt_verifier_version_config_digest,on_call_escalation_schedule_digest)"
+    "sensitivity_scheduler_deployed_runtime_digest,"
+    "sensitivity_scheduler_config_digest,"
+    "sensitivity_scheduler_key_id_credential_epoch_digest,"
+    "receipt_verifier_deployed_runtime_digest,"
+    "receipt_verifier_config_digest,on_call_escalation_schedule_digest)"
+)
+SIGNED_ACK_SCHEMA = (
+    "(ack_version,event_id,producer_seq,payload_digest,source,service,application,"
+    "key_id,credential_epoch,monitor_rearm_tuple_digest,ingest_commit_id,"
+    "committed_at,signer_key_id,signer_epoch,signature)"
 )
 STAGED_WP_HEADER = [
     "wp",
@@ -1259,7 +1268,7 @@ def validate_final_monitor_deploy_contract(dag_document: str) -> list[str]:
             r"\bonly this final green monitor/provider version may precede T1-W6\b"
         ),
         "last version-bound rearm check": (
-            r"\brecords the exact sealed monitor_rearm_tuple digest, verifies all six "
+            r"\brecords the exact sealed monitor_rearm_tuple digest, verifies all seven "
             r"fields unchanged and performs (?:a fresh version-bound monitor/provider "
             r"poll|the last version-bound monitor/provider-polling check) immediately "
             r"before rearming PG\b"
@@ -1305,7 +1314,7 @@ def validate_final_monitor_deploy_contract(dag_document: str) -> list[str]:
             r"PG-disable/reproof rule above\b"
         ),
         "A6.17-only drift scope": (
-            r"\bdrift confined to the other three A6\.17 fields invalidates only the "
+            r"\bdrift confined to the other six A6\.17 fields invalidates only the "
             r"A6\.17 window and does not by itself invalidate the PG-rearm proof\b"
         ),
         "unchanged A6.17 digest consumption": (
@@ -1359,15 +1368,40 @@ def validate_final_monitor_deploy_contract(dag_document: str) -> list[str]:
             r"source ids\b"
         ),
         "isolated write-only credentials": (
-            r"\bissues both isolated write-only key-id/credential-[ \t]*epoch pairs\b"
+            r"\bissues (?:both|four) isolated write-only key-id/credential-[ \t]*epoch "
+            r"pairs\b"
         ),
         "credentials bound to both suite runs": (
-            r"\bthose registrations and credential epochs are inputs to both complete "
-            r"T6-W15-suite executions\b"
+            r"\b(?:those|all four) registrations and credential epochs are inputs to "
+            r"both (?:complete T6-W15-)?suite executions\b"
+        ),
+        "future inactive T6-W14 source ids": (
+            r"\b(?:pre-registers|and) the exact future T6-W14 canary-lifecycle and "
+            r"canary-synthetic source ids\b"
+        ),
+        "inactive T6-W14 write-only credentials": (
+            r"\bthe two T6-W14 registrations and credentials remain inactive through "
+            r"both complete T6-W15-suite executions\b"
+        ),
+        "four pairwise-distinct producer credentials": (
+            r"\b(?:issues four isolated write-only key-id/credential-epoch pairs|"
+            r"all four (?:key-id/credential-epoch )?pairs are pairwise distinct)\b"
+        ),
+        "T6-W14 registrations bound to both passes": (
+            r"\bthe two T6-W14 registrations and credentials remain inactive through "
+            r"both complete T6-W15-suite executions\b"
         ),
         "T1-W6 bind-only boundary": (
-            r"\bT1-W6 may only bind the already-issued pairs; it cannot mint, rotate, "
-            r"substitute or register them\b"
+            r"\bT1-W6(?: and T6-W14)? may only bind (?:their )?already-issued pairs; "
+            r"(?:it cannot|neither may) mint, rotate, substitute or register them\b"
+        ),
+        "T6-W14 bind-only boundary": (
+            r"\bT1-W6 and T6-W14 may only bind their already-issued pairs; neither may "
+            r"mint, rotate, substitute or register them\b"
+        ),
+        "inactive ingress refusal": (
+            r"\binactive credentials must be rejected at ingest, not treated as an "
+            r"absent expected sample\b"
         ),
     }
     for label, pattern in registration_requirements.items():
@@ -1415,12 +1449,27 @@ def validate_monitor_host_capability_contract(dag_document: str) -> list[str]:
         ),
         "delivery-read capability": r"\bdelivery-read permissions\b",
         "bounded control cadence": r"\bcontrol cadence of at most six hours\b",
+        "journal retention capability": (
+            r"\bappend-only(?:/WORM)? journal (?:storage|capability).+at least "
+            r"(?:8|eight) days of retention\b"
+        ),
+        "journal atomic append/read verification": (
+            r"\batomic append, read-after-write verification, immutable record ids\b"
+        ),
+        "journal independent location and read authority": (
+            r"\bjournal capability outside Cloudflare.+export/read permissions for the "
+            r"external receipt verifier\b"
+        ),
+        "mutable storage is not a journal": (
+            r"\ba mutable monitor database row or object overwrite is not that capability\b"
+        ),
         "independent failure domains": (
             r"\bindependent failure/configuration/control domains\b"
         ),
         "capability-only boundary": (
             r"\bthese are capability-only properties; O-MONITORHOST does not claim "
-            r"application behavior, a deployed control, a receipt or a delivery result\b"
+            r"application behavior, a deployed control, a receipt or (?:a )?delivery "
+            r"(?:or journal )?result\b"
         ),
         "T6-W15 integration ownership": (
             r"\bT6-W15 alone owns integration, deployed-version binding and "
@@ -1429,6 +1478,75 @@ def validate_monitor_host_capability_contract(dag_document: str) -> list[str]:
     }
     return [
         f"O-MONITORHOST contract omits required {label}"
+        for label, pattern in requirements.items()
+        if re.search(pattern, contract, re.IGNORECASE) is None
+    ]
+
+
+def validate_monitor_journal_contract(dag_document: str) -> list[str]:
+    """Freeze the exhaustive, immutable A6.17 journal and manifest boundary."""
+
+    visible, _ = markdown_visible_text(dag_document)
+    start_marker = "T6-W12 owns and deploys an append-only/WORM journal"
+    end_marker = "Before T6-W12 seals its final deployed tuple"
+    starts = [match.start() for match in re.finditer(re.escape(start_marker), visible)]
+    ends = [match.start() for match in re.finditer(re.escape(end_marker), visible)]
+    if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
+        return [
+            "canonical DAG must contain one visible, ordered exhaustive-monitor-journal "
+            f"contract (starts={len(starts)}, ends={len(ends)})"
+        ]
+
+    contract = plain_markdown(visible[starts[0] : ends[0]])
+    requirements = {
+        "T6-W12 journal ownership": re.escape(start_marker),
+        "minimum eight-day retention": (r"\bretained for at least (?:8|eight) days\b"),
+        "exhaustive record classes": (
+            r"\brecords every page, page acknowledgement, sensitivity control and "
+            r"rearm attestation\b"
+        ),
+        "no sampling or mutable replacement": (
+            r"\bwithout sampling or mutable replacement\b"
+        ),
+        "exact runtime-complete A6.17 tuple": (
+            r"\bbinds the exact A6\.17_window_tuple\b"
+        ),
+        "closed interval manifest": (r"\brecords the inclusive start, exclusive end\b"),
+        "exhaustive ordered record ids": r"\bexhaustive ordered record ids\b",
+        "record count": r"\brecord count\b",
+        "initial and terminal chain roots": (
+            r"\binitial and terminal hash-chain roots\b"
+        ),
+        "provider retention receipts": (
+            r"\bstorage-provider retention/immutability receipts\b"
+        ),
+        "manifest-root-only consumption": (
+            r"\bT6-W10 consumes only the sealed manifest root and its "
+            r"retention/immutability receipts\b"
+        ),
+        "rewrite mutant": r"\brewrite\b",
+        "first/middle/last omission mutants": (
+            r"\bomitted first/\s*middle/last record\b"
+        ),
+        "sequence/time-gap mutants": r"\bsequence/time gap\b",
+        "mixed-window and mixed-tuple mutants": (
+            r"\bmixed-window/mixed-tuple substitutions\b"
+        ),
+        "all mutants fail": (
+            r"\b(?:requires every mutant to fail|all invalidate the window and restart "
+            r"seven days at zero)\b"
+        ),
+        "no summary or reconstruction substitute": (
+            r"\bno copied journal, summary counter, selected receipt set or "
+            r"evidence-time reconstruction can substitute for that exhaustive root\b"
+        ),
+        "candidate and active-final mutant matrix": (
+            r"\bT6-W12 runs the complete journal mutant matrix against both the "
+            r"candidate and active-final deployments\b"
+        ),
+    }
+    return [
+        f"exhaustive monitor journal contract omits required {label}"
         for label, pattern in requirements.items()
         if re.search(pattern, contract, re.IGNORECASE) is None
     ]
@@ -1469,6 +1587,16 @@ def validate_rearm_interlock_contract(dag_document: str) -> list[str]:
             r"\bprovider-poll and delivery health observations are at most 60 seconds "
             r"old\b"
         ),
+        "shared attestation/ACK signer registry": (
+            r"\bthe seventh tuple field commits the exact accepted "
+            r"\(signer_key_id,signer_epoch\) registry, trust-anchor digests and "
+            r"revocation state for both rearm attestations and authenticated ingest ACKs\b"
+        ),
+        "wrong-valid signer refusal": (
+            r"\ba cryptographically valid signature from a signer/epoch not in that "
+            r"digest is invalid\b"
+        ),
+        "signer input drift": (r"\bchanging any of those inputs is tuple drift\b"),
         "T1-W6 interlock module": re.escape(
             "crates/corelink-fabric-server/src/monitor_interlock.rs"
         ),
@@ -1489,20 +1617,38 @@ def validate_rearm_interlock_contract(dag_document: str) -> list[str]:
             r"delivery health, bad signature or nonce failure first atomically arms a "
             r"durable non-PG disable latch\b"
         ),
-        "latched close/503/zero-action behavior": (
-            r"\bonce latched, T1-W6 closes and discards every PG pool/socket, returns "
-            r"typed 503 for readiness and mutation, and permits zero further PG/exporter "
-            r"socket or mutation actions, including after restart\b"
+        "generation-scoped permit on every surface": (
+            r"\bevery readiness, mutation and socket/init path first obtains a "
+            r"generation-scoped interlock permit\b"
+        ),
+        "permit held through durable commit": (
+            r"\bits generation fence is held through the action's durable commit, so "
+            r"validation cannot race a pause\b"
+        ),
+        "OPEN-to-CLOSING transition": (
+            r"\barming transitions OPEN -> CLOSING, blocks all new permits\b"
+        ),
+        "old-generation cancellation and socket disposal": (
+            r"\bcancels or rolls back every older-generation permit and closes/discards "
+            r"every socket created by one\b"
+        ),
+        "LATCHED only after complete accounting": (
+            r"\breaches LATCHED only after all such permits/actions and sockets are "
+            r"durably accounted for\b"
+        ),
+        "latched 503/zero-action behavior": (
+            r"\breadiness/mutation are typed 503 and zero socket or mutation actions "
+            r"survive the fence\b"
         ),
         "planned-change latch and drain": (
-            r"\ba planned monitor_rearm_tuple change must arm the latch and "
-            r"drain/discard pools before the change begins\b"
+            r"\ba planned monitor_rearm_tuple change must enter CLOSING and complete "
+            r"the permit/action/socket drain and pool discard before the change begins\b"
         ),
         "T1-W6 interlock test": re.escape(
             "crates/corelink-fabric-server/tests/monitor_tuple_interlock.rs"
         ),
-        "six-field and attestation negatives": (
-            r"\bindependently mutates all six tuple fields and injects unavailable, "
+        "seven-field and attestation negatives": (
+            r"\bindependently mutates all seven tuple fields and injects unavailable, "
             r"missing, stale, bad-signature, wrong-nonce, replayed and cached "
             r"attestations\b"
         ),
@@ -1510,8 +1656,12 @@ def validate_rearm_interlock_contract(dag_document: str) -> list[str]:
             "deploy/cost-monitor/test/rearm-tuple-attestation.test.ts"
         ),
         "effective tuple and two health classes": (
-            r"\bproves the signed effective tuple and the two correctly bounded health "
+            r"\bproves the signed effective tuple,? (?:and )?the two correctly bounded health "
             r"classes\b"
+        ),
+        "attestation signer rejection matrix": (
+            r"\brefusal of a wrong-but-valid signer, stale signer epoch and revoked "
+            r"signer under the seventh field\b"
         ),
         "negative-case observable result": (
             r"\bevery negative case is green only when the latch is durable, "
@@ -1522,9 +1672,131 @@ def validate_rearm_interlock_contract(dag_document: str) -> list[str]:
             r"candidate/cutover/active-final reproof, exact T1-W6 rebinding to the new "
             r"tuple and an explicit manual reset; none alone restores PG\b"
         ),
+        "pre-commit and in-commit pause fixtures": (
+            r"\bmonitor_tuple_interlock_race\.rs pauses each action immediately before "
+            r"and during durable commit\b"
+        ),
+        "CLOSING rejects new generations": (r"\bCLOSING admits no new generation\b"),
+        "old work drained before LATCHED": (
+            r"\bevery old permit/action/socket is cancelled, rolled back or closed "
+            r"before LATCHED\b"
+        ),
+        "no side effects across restart": (
+            r"\bzero post-latch side effects before and after restart\b"
+        ),
     }
     return [
         f"nonce-bound rearm interlock omits required {label}"
+        for label, pattern in requirements.items()
+        if re.search(pattern, contract, re.IGNORECASE) is None
+    ]
+
+
+def validate_signed_ack_contract(dag_document: str) -> list[str]:
+    """Freeze the one post-CAS signed ACK and every producer's action gate."""
+
+    visible, _ = markdown_visible_text(dag_document)
+    start_marker = "Every producer consumes the same signed ACK token"
+    end_marker = "`T3-W16` directly waits for T6-W15"
+    starts = [match.start() for match in re.finditer(re.escape(start_marker), visible)]
+    ends = [match.start() for match in re.finditer(re.escape(end_marker), visible)]
+    if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
+        return [
+            "canonical DAG must contain one visible, ordered signed-durable-ACK "
+            f"contract (starts={len(starts)}, ends={len(ends)})"
+        ]
+
+    contract = plain_markdown(visible[starts[0] : ends[0]])
+    requirements = {
+        "exact ordered ACK schema": re.escape(SIGNED_ACK_SCHEMA),
+        "signature covers preceding ordered fields": (
+            r"\bsignature authenticates the preceding fourteen fields in that order\b"
+        ),
+        "post-CAS emission": (
+            r"\b(?:the )?token (?:is )?emitted (?:by T6-W15 )?only after the matching "
+            r"(?:ingest )?CAS commit(?:s)?\b"
+        ),
+        "byte-identical stable duplicate": (
+            r"\ba byte-identical duplicate returns the byte-identical stable token\b"
+        ),
+        "2xx and unsigned refusal": (
+            r"\ban arbitrary HTTP 2xx, (?:an )?unsigned body or (?:a )?newly minted duplicate "
+            r"response is not an ACK\b"
+        ),
+        "verification before gated action": (
+            r"\bbefore any (?:producer performs the )?gated next action, (?:that |the )"
+            r"producer verifies the signature and frozen fields against its durable head\b"
+        ),
+        "old/wrong event refusal": r"\brejects .+old or wrong event\b",
+        "wrong ACK-version refusal": r"\brejects a wrong ACK version\b",
+        "body/payload refusal": r"\b(?:body/)?payload digest\b",
+        "sequence refusal": r"\bsequence\b",
+        "source refusal": r"\bsource\b",
+        "service/application refusal": r"\bservice/application\b",
+        "credential-epoch refusal": r"\b(?:key id or )?credential epoch\b",
+        "monitor-tuple refusal": r"\bmonitor-tuple digest\b",
+        "ingest-commit/time refusal": r"\bingest commit or commit time\b",
+        "stale/revoked/wrong-valid signer refusal": (
+            r"\brejects a stale, revoked or wrong-but-currently-valid signer under "
+            r"the seventh (?:monitor_rearm_tuple|tuple) field\b"
+        ),
+        "per-producer refusal matrix": (
+            r"\bthe focused fixtures run the complete matrix for the scheduled-tick, "
+            r"attempt/binding, fabric-server, fabricd-proxy, lifecycle and synthetic "
+            r"lanes in both candidate and active-final T6-W12 passes\b"
+        ),
+        "inactive then bind-only T6-W14 ACK matrix": (
+            r"\bthe future lifecycle/synthetic registrations remain inactive in those "
+            r"passes and are exercised after their bind-only activation by T6-W14 as well\b"
+        ),
+        "zero gated action on refusal": r"\bperforms zero gated action and fails closed\b",
+    }
+    return [
+        f"signed durable ACK contract omits required {label}"
+        for label, pattern in requirements.items()
+        if re.search(pattern, contract, re.IGNORECASE) is None
+    ]
+
+
+def validate_canary_flag_contract(dag_document: str) -> list[str]:
+    """Keep lifecycle probing off unless the canary flag is exactly ``1``."""
+
+    visible, _ = markdown_visible_text(dag_document)
+    start_marker = "For staged A6.22"
+    end_marker = "T6-W12 also integrates"
+    starts = [match.start() for match in re.finditer(re.escape(start_marker), visible)]
+    ends = [match.start() for match in re.finditer(re.escape(end_marker), visible)]
+    if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
+        return [
+            "canonical DAG must contain one visible, ordered T6-W14 canary-flag "
+            f"contract (starts={len(starts)}, ends={len(ends)})"
+        ]
+
+    contract = plain_markdown(visible[starts[0] : ends[0]])
+    requirements = {
+        "exact-one enablement": (
+            r"\b(?:the canary performs its outer-route fetch only when |"
+            r"FABRIC_PROBES_ENABLED enables lifecycle sampling if and only if )"
+            r"FABRIC_PROBES_ENABLED(?:'s value)? is the exact string 1\b"
+        ),
+        "absent/empty off": (
+            r"\b(?:an absent or empty value is off|unset, blank.+are disabled)\b"
+        ),
+        "malformed and truthy-looking off": (
+            r"\b(?:every other or malformed value.+is off|whitespace, 0, case variants, "
+            r"numeric lookalikes and every other invalid value are disabled)\b"
+        ),
+        "synthetic exact-one rule": (
+            r"\bthe same exact-1 rule governs owner arming of "
+            r"SYNTHETIC_SLOT_PROBES_ENABLED\b"
+        ),
+        "zero off-state effects": (
+            r"\b(?:each off value produces zero lifecycle fetches.+billed-usage delta|"
+            r"all other values perform zero synthetic acquire, spawn or release actions)\b"
+        ),
+    }
+    return [
+        f"T6-W14 canary-flag contract omits required {label}"
         for label, pattern in requirements.items()
         if re.search(pattern, contract, re.IGNORECASE) is None
     ]
@@ -1824,7 +2096,10 @@ def parse_dispatch_dag(
     errors = hidden_canonical_table_errors(raw_document, "canonical dispatch DAG")
     errors.extend(validate_final_monitor_deploy_contract(raw_document))
     errors.extend(validate_monitor_host_capability_contract(raw_document))
+    errors.extend(validate_monitor_journal_contract(raw_document))
     errors.extend(validate_rearm_interlock_contract(raw_document))
+    errors.extend(validate_signed_ack_contract(raw_document))
+    errors.extend(validate_canary_flag_contract(raw_document))
     errors.extend(validate_producer_lane_contract(raw_document))
     batch_rows, batch_errors = exact_ready_set_rows(raw_document)
     errors.extend(batch_errors)
@@ -2189,23 +2464,32 @@ def validate_au_dag_routing(
             "deploy/cloudflare-canary/test/scheduled-tick-envelope.test.ts",
             "deploy/cloudflare-canary/test/scheduled-tick-outbox-recovery.test.ts",
             "deploy/cloudflare-canary/test/scheduled-tick-order.test.ts",
+            "deploy/cloudflare-canary/test/scheduled-tick-ack.test.ts",
+            "deploy/cloudflare-canary/test/fabric-probe-flag-failclosed.test.ts",
         },
         "T1-W6": {
             "crates/corelink-fabric-server/src/monitor_outbox.rs",
             "crates/corelink-fabric-server/src/monitor_interlock.rs",
             "crates/corelink-fabric-server/tests/monitor_outbox.rs",
+            "crates/corelink-fabric-server/tests/monitor_ack.rs",
             "crates/corelink-fabric-server/tests/monitor_tuple_interlock.rs",
+            "crates/corelink-fabric-server/tests/monitor_tuple_interlock_race.rs",
             "crates/corelink-fabric/tests/pg_refusal_breaker.rs",
             "deploy/cloudflare-fabricd/src/monitor_outbox.ts",
             "deploy/cloudflare-fabricd/test/monitor-outbox.test.ts",
+            "deploy/cloudflare-fabricd/test/monitor-ack.test.ts",
             "docs/plan/evidence/T1-W6-pg-durable-live.json",
         },
-        "T3-W16": {"deploy/cloudflare/test/attempt-monitor-outbox.test.ts"},
+        "T3-W16": {
+            "deploy/cloudflare/test/attempt-monitor-outbox.test.ts",
+            "deploy/cloudflare/test/attempt-monitor-ack.test.ts",
+        },
         "T6-W15": {
             "deploy/cost-monitor/Containerfile",
             "deploy/cost-monitor/config.schema.json",
             "deploy/cost-monitor/src/index.ts",
             "deploy/cost-monitor/src/ingest.ts",
+            "deploy/cost-monitor/src/acks.ts",
             "deploy/cost-monitor/src/incidents.ts",
             "deploy/cost-monitor/src/lifecycle.ts",
             "deploy/cost-monitor/src/scheduler.ts",
@@ -2220,6 +2504,7 @@ def validate_au_dag_routing(
             "deploy/cost-monitor/test/lifecycle-missing.test.ts",
             "deploy/cost-monitor/test/canary-missing-tick.test.ts",
             "deploy/cost-monitor/test/ingest-idempotency.test.ts",
+            "deploy/cost-monitor/test/ack-token.test.ts",
             "deploy/cost-monitor/test/incident-state.test.ts",
             "deploy/cost-monitor/test/scheduler.test.ts",
             "deploy/cost-monitor/test/state.test.ts",
@@ -2244,6 +2529,7 @@ def validate_au_dag_routing(
             "deploy/cloudflare-canary/wrangler.jsonc",
             "deploy/cloudflare-canary/test/lifecycle-monitor-envelope.test.ts",
             "deploy/cloudflare-canary/test/lifecycle-sampler-outbox.test.ts",
+            "deploy/cloudflare-canary/test/lifecycle-synthetic-ack.test.ts",
             "deploy/cloudflare-canary/test/synthetic-slot-lifecycle.test.ts",
             "deploy/cloudflare-canary/test/synthetic-slot-outbox.test.ts",
             "deploy/cloudflare-canary/test/synthetic-slot-default-off.test.ts",
@@ -2265,8 +2551,10 @@ def validate_au_dag_routing(
             "deploy/cost-monitor/src/capability_rules.ts",
             "deploy/cost-monitor/src/synthetic_ingest.ts",
             "deploy/cost-monitor/src/sensitivity.ts",
+            "deploy/cost-monitor/src/window_journal.ts",
             "deploy/cost-monitor/src/rearm_attestation.ts",
             "deploy/cost-monitor/migrations/0002-provider-cursors.json",
+            "deploy/cost-monitor/migrations/0003-window-journal.json",
             "deploy/cost-monitor/test/provider.test.ts",
             "deploy/cost-monitor/test/provider-stale-frozen.test.ts",
             "deploy/cost-monitor/test/correlator.test.ts",
@@ -2278,6 +2566,7 @@ def validate_au_dag_routing(
             "deploy/cost-monitor/test/c1-c5-rules.test.ts",
             "deploy/cost-monitor/test/c1-c5-synthetic-ingest.test.ts",
             "deploy/cost-monitor/test/sensitivity-window.test.ts",
+            "deploy/cost-monitor/test/window-journal.test.ts",
             "deploy/cost-monitor/test/rearm-tuple-attestation.test.ts",
             "docs/plan/evidence/T6-W12-independent-monitor.json",
         },

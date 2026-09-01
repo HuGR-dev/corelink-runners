@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-09-01 — go-live plan Round 11 remains 5/8 NOT QUIET; repair in progress
+
+Round 11 reviewed the exact input
+`fd9b226d3bcda055092b5e34f0cf9adc41a802bd`: **5/8 NOT QUIET, 3/8 QUIET, quiet count 0**.
+The consolidated ledger is
+[`docs/plan/2026-09-01-round11-cold-review-ledger.md`](docs/plan/2026-09-01-round11-cold-review-ledger.md).
+The blockers cover pre-sealing future T6-W14 identities; A6.17's mutable/non-exhaustive journal and
+omitted scheduler runtime; unauthenticated or unbound ACKs; unset/invalid canary fail-open;
+interlock check/use races; absent signer trust; and shell selftests not proven in CI.
+
+The Round-11 repair cycle is **IN PROGRESS**. Its later repair tree is distinct from the reviewed
+input and has no SHA asserted by this entry; no review result transfers to an unqualified `HEAD`.
+The status remains **QUIET COUNT 0 · NOT FROZEN · NO AU PROMOTION · NO DISPATCH · NO GREEN
+CREDIT**. The three signoffs are bounded to `fd9b226d…` and cannot advance quietness. The current
+repair selftest verifies **66 meaningful corruptions (57 prior + 9 Round-11 mutations)**; that
+diagnostic is bounded to the later repair tree and is not a Round-11 review result or evidence of
+promotion, freeze, dispatch or green readiness. Executable canary fail-closed hardening is present
+in planning history at `13ce612` and was merged by PR #530 as
+`65540afe15fb65bfd431b631acfc971a7b0a2331`; this is source delivery, not a production deploy or
+permission to re-enable. Production
+containment remains explicit and unchanged: `FABRIC_PG_DISABLED=1` and
+`FABRIC_PROBES_ENABLED=0` stay armed.
+
 ### 2026-09-01 — go-live plan Round 10 remains 7/8 NOT QUIET; repair in progress
 
 Round 10 reviewed the exact clean input

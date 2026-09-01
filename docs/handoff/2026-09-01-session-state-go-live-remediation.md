@@ -5,15 +5,17 @@ session or model. It records the production containment, the planning state, and
 safe next moves. It does not replace the historical handoff from 2026-08-31.
 
 The repository is `corelink-runners`. The current planning worktree is
-`.claude/worktrees/golive-rev6-r3`, on branch `plan/golive-rev6-r3`. The immutable Round-10 review
-input was committed `e3dbba5cc0f003ee6a0b5ff8f52f73e8eb07ad29`, with the Round-9 input
+`.claude/worktrees/golive-rev6-r3`, on branch `plan/golive-rev6-r3`. The immutable Round-11 review
+input is `fd9b226d3bcda055092b5e34f0cf9adc41a802bd`, with the Round-10 input
+`e3dbba5cc0f003ee6a0b5ff8f52f73e8eb07ad29`, the Round-9 input
 `f5df50d7659254ed5e4579ab75df2a4d44ceea0f`, Round-8 input
 `9f6e281ca617113a840ac268dcb680b258064c39`, Round-7 input
 `289826e358050c7d6b4517fc8a21f79c733c7e32` and incident PR #529 merge `b70deae` in its ancestry.
-Cold-review Round 10 was **7/8 NOT QUIET; 1/8 QUIET; quiet count 0** (seven reviewers reported new
-blockers and one found no new finding/signoff). Round 9, Round 8, Round 7, Round 6 and
-earlier rounds are retained as historical ledgers. The Round-10 repair tree is a later tree and
-has no SHA asserted by this handoff; its review result cannot be transferred from `e3dbba5…`.
+Cold-review Round 11 was **5/8 NOT QUIET; 3/8 QUIET; quiet count 0** (five reviewers reported new
+blockers and three found no new finding/signoff). Round 10 was **7/8 NOT QUIET; 1/8 QUIET; quiet
+count 0**, and Round 9, Round 8, Round 7, Round 6 and earlier rounds are retained as historical
+ledgers. The Round-11 repair tree is a later tree and has no SHA asserted by this handoff; its
+review result cannot be transferred from `fd9b226d…`.
 
 ## 1. Production containment: the Cloudflare burn is stopped
 
@@ -26,6 +28,11 @@ minute `sleepAfter`, preventing scale-to-zero. The canary now has
 `FABRIC_PROBES_ENABLED=0`, deployed as version
 `852277c1-9778-459f-b1ff-9d56fbe7c32f`. It skips those fabric probes while retaining
 spawn metrics.
+
+Executable canary fail-closed hardening is committed in planning history at `13ce612`: only the
+exact value `FABRIC_PROBES_ENABLED=1` arms probes, while unset or malformed values remain off. PR
+#530 merged that hardening to `main` as `65540afe15fb65bfd431b631acfc971a7b0a2331`; source delivery
+does not prove a production deploy and does not authorize re-enable.
 
 Verified canary run:
 
@@ -82,9 +89,15 @@ python3 docs/plan/wp-check.py docs/plan/2026-08-30-golive-remediation-plan.md
 python3 docs/plan/au-check.py docs/plan/union-triage-remaining.md --plan docs/plan/2026-08-30-golive-remediation-plan.md --dag docs/plan/2026-09-01-reconciled-dispatch-dag.md
 python3 docs/plan/actionlint-check.py
 python3 docs/plan/gates-selftest.py
+find scripts -type f -name '*.selftest.sh' -print0 | sort -z | xargs -0 -r -n1 bash
 ruff check docs/plan
 git diff --check
 ```
+
+The shell selftest command is a local reproduction of the required CI discovery/execution contract;
+the CI job and required-check/path-filter binding must also be verified. An unset or invalid canary
+configuration must fail closed; the explicit containment flags remain `FABRIC_PG_DISABLED=1` and
+`FABRIC_PROBES_ENABLED=0`.
 
 The exact historical results remain bounded to their own clean inputs: Round 8
 (`9f6e281ca617113a840ac268dcb680b258064c39`) recorded 28 blocked selftest corruptions; Round 9
@@ -94,17 +107,30 @@ carried the historical 41-fixture instruction while the selftest code advertised
 target; that stale mismatch is itself a blocker. These facts must not be presented as the current
 repair count.
 
-After the CI fixture work settled, the repaired `gates-selftest.py` reports **57 meaningful
-corruptions (48 + 9, including the meaningful T3-W16 dependency mutation)**. This is a current
-dirty-tree diagnostic only: reproduce the literal output on the
-exact clean repair input and attach its externally supplied full SHA before treating it as a review
-transcript. The historical 28, 38/40 and 41 observations remain tied to their older SHAs.
+The current repair selftest verifies **66 meaningful corruptions (57 prior + 9 Round-11 mutations)**.
+This is a diagnostic of the later repair tree, not evidence from the immutable Round-11 input and
+does not provide quiet, promotion, freeze, dispatch or green credit. Keep the literal result
+separate from the review transcript and attach an externally supplied full SHA before treating the
+repair tree as a review input; never use a self-referential hash.
 
-All seven Round-10 blocker categories remain open: final monitor redeploy/provider-rearm ordering;
-total FIFO queue residence in every SLO clock; three missing canonical tests; T1-W5 live-probe
-containment ancestry; A6.17's immutable seven-day false-page window; stale gate/selftest
-instructions; and a broken pre-merge selftest fixture. Structural checks cannot close these semantic
-or evidence gaps.
+Round 10's seven blocker categories remain historical and open until independently verified: final
+monitor redeploy/provider-rearm ordering; total FIFO queue residence in every SLO clock; three
+missing canonical tests; T1-W5 live-probe containment ancestry; A6.17's immutable seven-day
+false-page window; stale gate/selftest instructions; and a broken pre-merge selftest fixture.
+Round 11 adds the current identity, journal/scheduler, ACK, canary, interlock, signer-trust and
+shell-CI blockers recorded in its ledger. Structural checks cannot close these semantic or evidence
+gaps.
+
+The current Round-11 ledger is
+`docs/plan/2026-09-01-round11-cold-review-ledger.md`. Its exact input is
+`fd9b226d3bcda055092b5e34f0cf9adc41a802bd` and its result is **5/8 NOT QUIET; 3/8 QUIET; quiet
+count 0**. The seven current blockers are: future T6-W14 identities are not presealed; A6.17's
+journal is mutable/non-exhaustive and omits scheduler runtime; ACKs are unauthenticated/unbound;
+unset or invalid canary configuration can fail open; interlock check/use races remain; signer trust
+is absent; and shell selftests are not proven in CI. The current repair selftest verifies 66
+meaningful corruptions (57 prior + 9 Round-11 mutations), but that result belongs to the later
+repair tree and cannot alter Round 11's quiet count of zero or authorize promotion, freeze, dispatch
+or green credit.
 
 The two union inputs are `docs/plan/union-catalog-ledger.md` and
 `docs/plan/union-triage-remaining.md`. They are proposed AU scope, not yet a frozen
@@ -129,8 +155,9 @@ three found no new finding. Its consolidated ledger is
 new finding. Its consolidated ledger is `docs/plan/2026-09-01-round9-cold-review-ledger.md`. Round
 10 then reviewed exact clean input `e3dbba5cc0f003ee6a0b5ff8f52f73e8eb07ad29`: seven reviewers
 found new blockers and one found no new finding. Its consolidated ledger is
-`docs/plan/2026-09-01-round10-cold-review-ledger.md`. All four rounds' findings remain open in the
-subsequent repair tree until each disposition is independently verified.
+`docs/plan/2026-09-01-round10-cold-review-ledger.md`. All five rounds' findings remain open in the
+subsequent repair tree until each disposition is independently verified. Round 11's findings are
+tracked separately against `fd9b226d3bcda055092b5e34f0cf9adc41a802bd` and are likewise open.
 
 The current repair-in-progress split gives the external monitor base to **T6-W15**. The exact
 required serial chain is **`T6-W15 → T6-W12` final provider/live deploy + active-final reproof
@@ -138,8 +165,8 @@ required serial chain is **`T6-W15 → T6-W12` final provider/live deploy + acti
 The repair draft now
 tracks 69 DAG vertices (48 principal, 9 staged-new and 12 AU), with 9 proposal-only staged-new WPs;
 **T6-W15** is the new identifier for the 48th principal WP (A6.10), not a staged-new WP. These
-numbers describe the later repair tree, not the exact Round-10 input, and do not change the 7/8 NOT
-QUIET result or quiet count zero.
+numbers describe the later repair tree, not the exact Round-10 or Round-11 input, and do not change
+either NOT QUIET result or the quiet count of zero.
 
 Round 10 consolidated seven blocker categories: the exact final monitor/provider chain
 `T6-W15 → T6-W12 → T1-W6`; total FIFO residence with at most one unacknowledged head per
@@ -159,32 +186,50 @@ zero, and two further consecutive quiet rounds on byte-identical promoted bytes.
 
 ## 4. Safe next steps
 
-1. Preserve the exact Round-10 review-input provenance at
-   `e3dbba5cc0f003ee6a0b5ff8f52f73e8eb07ad29` (and the earlier Round-9/Round-8/Round-7 inputs
-   `f5df50d7659254ed5e4579ab75df2a4d44ceea0f`, `9f6e281ca617113a840ac268dcb680b258064c39` and
-   `289826e358050c7d6b4517fc8a21f79c733c7e32`), confirm the merge-base with `origin/main` is
-   `b70deae`, and keep the subsequent repair tree separately SHA-labelled and clean before review.
-2. Run plan-check, wp-check, au-check, actionlint-check and gates-selftest, then Ruff and
-   `git diff --check` from the repository root. Do not record the repaired selftest total until the
-   CI fixture work settled at 57 meaningful corruptions (48 + 9); no clean-SHA evidence exists yet,
-   so reproduce that count on the clean signed repair input before treating it as current review
-   evidence.
-3. Finish the Round-10 repair cycle in one newly signed commit and record its full SHA. Re-run all
-   five structure/checker commands, the settled negative-selftest target, Ruff and
-   `git diff --check` from that clean signed input; do not substitute an unqualified `HEAD` or a
-   dirty-tree transcript.
-4. Run two consecutive quiet, read-only cold reviews against the byte-identical staged repair
-   commit. Any normative change creates a new input and resets the staged quiet count to zero. The
-   Round-10 review input is `e3dbba5…`; a later repair tree cannot inherit its result.
-   D11/D12/D13 and live obstacles remain red even if a review is quiet.
+1. Preserve the exact Round-11 review-input provenance at
+   `fd9b226d3bcda055092b5e34f0cf9adc41a802bd` (and the historical Round-10/Round-9/Round-8/Round-7
+   inputs `e3dbba5cc0f003ee6a0b5ff8f52f73e8eb07ad29`, `f5df50d7659254ed5e4579ab75df2a4d44ceea0f`,
+   `9f6e281ca617113a840ac268dcb680b258064c39` and `289826e358050c7d6b4517fc8a21f79c733c7e32`),
+   confirm the merge-base with `origin/main` is `b70deae`, and keep every repair tree separately
+   SHA-labelled and clean before review.
+2. Repair the seven Round-11 blocker domains in one newly signed tree: preseal the complete future
+   T6-W14 identity and signer-trust sets; make A6.17's journal append-only, exhaustive and
+   scheduler/runtime-backed; authenticate and bind ACKs; fail closed on unset/invalid canary
+   configuration; make interlock check/use atomic and versioned; and wire every tracked shell
+   selftest into the required CI lane. Keep `FABRIC_PG_DISABLED=1` and
+   `FABRIC_PROBES_ENABLED=0` explicit and armed.
+3. Run the five planning/checker commands, every tracked shell selftest, Ruff and the diff check
+   from the repository root:
+
+   ```bash
+   python3 docs/plan/plan-check.py docs/plan/audit-2026-08-30-finding-ids.txt
+   python3 docs/plan/wp-check.py docs/plan/2026-08-30-golive-remediation-plan.md
+   python3 docs/plan/au-check.py docs/plan/union-triage-remaining.md --plan docs/plan/2026-08-30-golive-remediation-plan.md --dag docs/plan/2026-09-01-reconciled-dispatch-dag.md
+   python3 docs/plan/actionlint-check.py
+   python3 docs/plan/gates-selftest.py
+   find scripts -type f -name '*.selftest.sh' -print0 | sort -z | xargs -0 -r -n1 bash
+   ruff check docs/plan
+   git diff --check
+   ```
+
+   The shell command locally reproduces the CI discovery/execution contract. Verify the CI job's
+   path filters and required-check binding separately; local PASS is not CI evidence. Preserve the
+   verified 66-mutation result (57 prior + 9 Round-11 mutations) and pair it with an
+   externally supplied full SHA before treating it as a review transcript; do not use an
+   unqualified `HEAD` or embed a self-hash.
+4. Run two consecutive quiet, read-only cold reviews against byte-identical staged repair bytes.
+   Any normative change creates a new input and resets the staged quiet count to zero. Round 11 is
+   `fd9b226d…`; no later repair tree can inherit its result. D11/D12/D13 and live obstacles remain
+   red even if a review is quiet.
 5. Promote the staged suite/checker bytes only in a new signed, full-SHA promotion commit. Promotion
    resets quiet count to zero; its result cannot inherit either staged quiet round.
 6. Run two consecutive quiet cold reviews against the byte-identical promoted bytes. Only after
    those two promoted quiet rounds capture one clean, version-bound red baseline, freeze the plan,
    verify the combined DAG at cap 8, create implementation branches/PRs, and require green checks
    before a **manual** merge. No freeze or dispatch occurs before that sequence.
-7. Keep `FABRIC_PROBES_ENABLED=0` until a bounded, non-waking probe strategy is verified; repair
-   the separate spawn-metrics key and alert path independently.
+7. Keep both containment flags unchanged until their separately gated replacement/re-enable
+   evidence exists; repair the separate spawn-metrics key and alert path independently. No current
+   review result authorizes promotion, freeze, dispatch, green credit or live mutation.
 
 Safe read-only checks:
 
@@ -197,6 +242,7 @@ python3 docs/plan/wp-check.py docs/plan/2026-08-30-golive-remediation-plan.md
 python3 docs/plan/au-check.py docs/plan/union-triage-remaining.md --plan docs/plan/2026-08-30-golive-remediation-plan.md --dag docs/plan/2026-09-01-reconciled-dispatch-dag.md
 python3 docs/plan/actionlint-check.py
 python3 docs/plan/gates-selftest.py
+find scripts -type f -name '*.selftest.sh' -print0 | sort -z | xargs -0 -r -n1 bash
 ruff check docs/plan
 git diff --check
 ```
@@ -209,16 +255,18 @@ merged containment commit (#529); `3fe8d06` is the historical Round-5 planning i
 `af4ed85dad289e333e9bf09f129fb2faa243136d` is the historical Round-6 review input;
 `289826e358050c7d6b4517fc8a21f79c733c7e32` is the exact Round-7 review input;
 `9f6e281ca617113a840ac268dcb680b258064c39` is the exact Round-8 review input; and
-`f5df50d7659254ed5e4579ab75df2a4d44ceea0f` is the exact Round-9 review input; and
-`e3dbba5cc0f003ee6a0b5ff8f52f73e8eb07ad29` is the exact Round-10 review input. These are distinct
+`f5df50d7659254ed5e4579ab75df2a4d44ceea0f` is the exact Round-9 review input;
+`e3dbba5cc0f003ee6a0b5ff8f52f73e8eb07ad29` is the exact Round-10 review input; and
+`fd9b226d3bcda055092b5e34f0cf9adc41a802bd` is the exact Round-11 review input. These are distinct
 artifacts and must not be combined into one baseline or one unlabelled transcript. Round-7's,
-Round-8's, Round-9's and Round-10's clean/signoff observations are bounded to their respective
+Round-8's, Round-9's, Round-10's and Round-11's clean/signoff observations are bounded to their respective
 exact inputs; none is a claim about the later repair tree, an unqualified `HEAD`, or a
 self-referential future hash.
 
 The canonical draft graph is now `docs/plan/2026-09-01-reconciled-dispatch-dag.md`; it is
-mechanically acyclic and capped at eight, but explicitly **NOT DISPATCHABLE**. Round 10 remains NOT
-QUIET; its mechanical checks do not establish semantic or tamper-proof proof. After two quiet rounds on the byte-identical
+mechanically acyclic and capped at eight, but explicitly **NOT DISPATCHABLE**. Round 11 remains NOT
+QUIET (5/8 NOT QUIET; 3/8 QUIET; quiet count 0); its mechanical checks do not establish semantic
+or tamper-proof proof. After two quiet rounds on the byte-identical
 staged repair, a signed promotion (which resets quiet count), two quiet rounds on the byte-identical
 promoted bytes, and the single post-incident baseline, the path is:
 
@@ -238,7 +286,9 @@ before the later worker chain reaches `T3-W16 → T3-W15` (authoritative join �
 and alert lane while fabric probes remain disabled; the later no-wake re-enable is
 `T6-W13 → T6-W14`, with T6-W14 also waiting on T6-W12. The repair split's exact durability chain
 is `T6-W15 → T6-W12 → T1-W6`, with T6-W12 carrying the final provider/live deploy and active-final
-reproof before T1-W6's re-arm. These are future edges, not current dispatch authorization.
+reproof before T1-W6's re-arm. The future T6-W14 identity set (owner, exact paths, capabilities,
+inputs/outputs and all predecessors) must be presealed and signer-trusted before any of those
+future edges can be considered. These are future edges, not current dispatch authorization.
 
 ## 6. Rules and operational traps
 

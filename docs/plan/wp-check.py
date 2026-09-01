@@ -46,7 +46,7 @@ WP = {
     "T6-W1": (
         ["A6.1", "A6.2", "A6.15"],
         ["INV-7"],
-        "`scripts/*.selftest.sh`, `scripts/pre-merge-gate-check.sh`, `.github/workflows/ci.yml`, new `selftests.yml`",
+        "`scripts/**/*.selftest.sh`, `scripts/pre-merge-gate-check.sh`, `.github/workflows/ci.yml`, new `.github/workflows/selftests.yml` with exhaustive script discovery/coverage assertion",
         1,
     ),
     "T6-W2": (
@@ -474,11 +474,15 @@ REQUIRED_DAG_SEMANTIC_CLAUSES = {
     ),
     "T6-W12 future T1-W6 source registration": (
         "Before T6-W12 seals its final deployed tuple, it pre-registers the exact "
-        "future T1-W6 `fabric-server` and `fabricd-proxy` source ids and issues both "
-        "isolated write-only key-id/credential-epoch pairs. Those registrations and "
-        "credential epochs are inputs to both complete T6-W15-suite executions. "
-        "T1-W6 may only bind the already-issued pairs; it cannot mint, rotate, "
-        "substitute or register them."
+        "future T1-W6 `fabric-server` and `fabricd-proxy` source ids and the exact "
+        "future T6-W14 `canary-lifecycle` and `canary-synthetic` source ids, and "
+        "issues four isolated write-only key-id/credential-epoch pairs. The two "
+        "T6-W14 registrations and credentials remain inactive through both complete "
+        "T6-W15-suite executions and until T6-W14's own gated activation; inactive "
+        "credentials must be rejected at ingest, not treated as an absent expected "
+        "sample. All four registrations and credential epochs are inputs to both "
+        "suite executions. T1-W6 and T6-W14 may only bind their already-issued pairs; "
+        "neither may mint, rotate, substitute or register them."
     ),
     "T3-W16 capacity-one external-ACK action gate": (
         "`T3-W16` directly waits for T6-W15 so its attempt/binding producer can use "
@@ -509,11 +513,13 @@ REQUIRED_DAG_SEMANTIC_CLAUSES = {
     ),
     "A6.17 canonical window tuple": (
         "The seven-day evidence is bound to exactly `A6.17_window_tuple=(monitor_"
-        "rearm_tuple_digest,sensitivity_scheduler_config_key_digest,receipt_verifier_"
-        "version_config_digest,on_call_escalation_schedule_digest)`. Any constituent "
+        "rearm_tuple_digest,sensitivity_scheduler_deployed_runtime_digest,sensitivity_"
+        "scheduler_config_digest,sensitivity_scheduler_key_id_credential_epoch_digest,"
+        "receipt_verifier_deployed_runtime_digest,receipt_verifier_config_digest,on_"
+        "call_escalation_schedule_digest)`. Any constituent "
         "drift during the window invalidates all elapsed time and restarts a full "
         "seven-day window. Drift of `monitor_rearm_tuple_digest` additionally invokes "
-        "the broader PG-disable/reproof rule above; drift confined to the other three "
+        "the broader PG-disable/reproof rule above; drift confined to the other six "
         "A6.17 fields invalidates only the A6.17 window and does not by itself "
         "invalidate the PG-rearm proof."
     ),
@@ -521,7 +527,8 @@ REQUIRED_DAG_SEMANTIC_CLAUSES = {
         "The final post-cutover PASS also seals the exact `monitor_rearm_tuple=("
         "deployed_monitor_image_digest,config_digest,ingress_key_epoch_map_digest,"
         "expected_source_registry_digest,delivery_route_policy_digest,provider_"
-        "adapter_api_capability_digest)` and its digest."
+        "adapter_api_capability_digest,attestation_ack_signer_trust_revocation_digest)` "
+        "and its digest."
     ),
     "nonce-bound effective-tuple health attestation": (
         "T6-W12's `deploy/cost-monitor/src/rearm_attestation.ts` derives the current "
@@ -529,26 +536,49 @@ REQUIRED_DAG_SEMANTIC_CLAUSES = {
         "caller nonce it returns a signature over that nonce, the exact effective "
         "tuple digest and separately timestamped provider-poll and delivery-route "
         "health. The challenge response age is at most 10 seconds, and provider-poll "
-        "and delivery health observations are at most 60 seconds old. T1-W6's "
+        "and delivery health observations are at most 60 seconds old. The seventh "
+        "tuple field commits the exact accepted `(signer_key_id,signer_epoch)` registry, "
+        "trust-anchor digests and revocation state for both rearm attestations and "
+        "authenticated ingest ACKs; a cryptographically valid signature from a "
+        "signer/epoch not in that digest is invalid, and changing any of those inputs "
+        "is tuple drift. T1-W6's "
         "`crates/corelink-fabric-server/src/monitor_"
         "interlock.rs` obtains a new response before every readiness answer, PG-backed "
         "mutation, and PG/exporter socket/init/pool use, then verifies the bound tuple "
         "digest, nonce echo, signature and each applicable freshness rule. A cached "
         "success, nonce replay or earlier valid response is never reusable."
     ),
-    "durable monitor tuple interlock": (
+    "linearizable generation-fenced monitor interlock": (
+        "Every readiness, mutation and socket/init path first obtains a generation-"
+        "scoped interlock permit; its generation fence is held through the action's "
+        "durable commit, so validation cannot race a pause. Arming transitions "
+        "`OPEN -> CLOSING`, blocks all new permits, cancels or rolls back every older-"
+        "generation permit and closes/discards every socket created by one, and "
+        "reaches `LATCHED` only after all such permits/actions and sockets are durably "
+        "accounted for. Only then may the operation return; readiness/mutation are "
+        "typed 503 and zero socket or mutation actions survive the fence."
+    ),
+    "durable monitor tuple interlock and race tests": (
         "Any tuple mismatch, unavailable attestation, stale provider-poll or delivery "
         "health, bad signature or nonce failure first atomically arms a durable non-PG "
         "disable latch. Once latched, T1-W6 closes and discards every PG pool/socket, "
         "returns typed 503 for readiness and mutation, and permits zero further PG/"
         "exporter socket or mutation actions, including after restart. A planned `monitor_"
-        "rearm_tuple` change must arm the latch and drain/discard pools before the "
-        "change begins. `crates/corelink-fabric-server/tests/monitor_tuple_interlock."
-        "rs` independently mutates all six tuple fields and injects unavailable, "
-        "missing, stale, bad-signature, wrong-nonce, replayed and cached "
-        "attestations; `deploy/cost-monitor/test/rearm-tuple-attestation.test.ts` "
-        "proves the signed effective tuple and the two correctly bounded health "
-        "classes. Every negative case is green only when the latch is durable, pools/"
+        "rearm_tuple` change must enter `CLOSING` and complete the permit/action/socket "
+        "drain and pool discard before the change begins. `crates/corelink-fabric-"
+        "server/tests/monitor_tuple_interlock."
+        "rs` independently mutates all seven tuple fields and injects unavailable, "
+        "missing, stale, bad-signature, wrong-nonce, replayed and cached attestations; "
+        "`crates/corelink-fabric-server/tests/monitor_tuple_interlock_race.rs` pauses "
+        "each action immediately before and during durable commit, proves `CLOSING` "
+        "admits no new generation, and proves every old permit/action/socket is "
+        "cancelled, rolled back or closed before `LATCHED`, with zero post-latch side "
+        "effects before and after restart. `deploy/cost-monitor/test/rearm-tuple-"
+        "attestation.test.ts` "
+        "proves the signed effective tuple, the two correctly bounded health classes "
+        "and refusal of a wrong-but-valid signer, stale signer epoch and revoked "
+        "signer under the seventh field. Every negative case is green only when the "
+        "latch is durable, pools/"
         "sockets are gone, typed 503 is returned and zero action occurs. The latch may "
         "clear only after complete T6-W12 candidate/cutover/active-final reproof, exact "
         "T1-W6 rebinding to the new tuple and an explicit manual reset; none alone "
@@ -567,9 +597,62 @@ REQUIRED_DAG_SEMANTIC_CLAUSES = {
         "that are distinct from the monitor application and from each other: the "
         "artifact names their separate accounts, credential ids, version/config "
         "digests, durable state, delivery-read permissions, control cadence of at most "
-        "six hours and independent failure/configuration/control domains. These are "
-        "capability-only properties; O-MONITORHOST does not claim application behavior, "
-        "a deployed control, a receipt or a delivery result."
+        "six hours and independent failure/configuration/control domains. It also "
+        "names an append-only/WORM journal capability outside Cloudflare with atomic "
+        "append, read-after-write verification, immutable record ids, at least eight "
+        "days of retention and export/read permissions for the external receipt "
+        "verifier; a mutable monitor database row or object overwrite is not that "
+        "capability. These are capability-only properties; O-MONITORHOST does not "
+        "claim application behavior, a deployed control, a receipt or a delivery or "
+        "journal result."
+    ),
+    "authenticated exact durable ACK": (
+        "Every producer consumes the same signed ACK token emitted by T6-W15 only "
+        "after the matching ingest CAS commits. The token contains exactly these "
+        "ordered fields and no implicit substitutes: `(ack_version,event_id,producer_"
+        "seq,payload_digest,source,service,application,key_id,credential_epoch,monitor_"
+        "rearm_tuple_digest,ingest_commit_id,committed_at,signer_key_id,signer_epoch,"
+        "signature)`. `signature` authenticates the preceding fourteen fields in that "
+        "order. A byte-identical duplicate returns the byte-identical stable token; an "
+        "arbitrary HTTP 2xx, unsigned body or newly minted duplicate response is not an "
+        "ACK. Before any gated next action, the producer verifies the signature and "
+        "frozen fields against its durable head and rejects a wrong ACK version, old "
+        "or wrong event, payload digest, sequence, source, service/application, key id "
+        "or credential epoch, monitor-tuple digest, ingest commit or commit time. It "
+        "also rejects a "
+        "stale, revoked or wrong-but-currently-valid signer under the seventh tuple "
+        "field. Every rejection preserves the head and original 60-second deadline, "
+        "performs zero gated action and fails closed. The focused fixtures run the "
+        "complete matrix for the scheduled-tick, attempt/binding, `fabric-server`, "
+        "`fabricd-proxy`, lifecycle and synthetic lanes in both candidate and active-"
+        "final T6-W12 passes; the future lifecycle/synthetic registrations remain "
+        "inactive in those passes and are exercised after their bind-only activation "
+        "by T6-W14 as well."
+    ),
+    "append-only exhaustive A6.17 journal": (
+        "T6-W12 owns and deploys an append-only/WORM journal retained for at least "
+        "eight days. It records every page, page acknowledgement, sensitivity control "
+        "and rearm attestation without sampling or mutable replacement. Each sealed "
+        "window manifest binds the exact `A6.17_window_tuple` and records the inclusive "
+        "start, exclusive end, exhaustive ordered record ids, record count, initial "
+        "and terminal hash-chain roots and the storage-provider retention/immutability "
+        "receipts. Rewrite, omitted first/ middle/last record, sequence/time gap and "
+        "mixed-window/mixed-tuple substitutions all invalidate the window and restart "
+        "seven days at zero. T6-W12 runs the complete journal mutant matrix against "
+        "both the candidate and active-final deployments. T6-W10 consumes only the "
+        "sealed manifest root and its retention/immutability receipts; no copied "
+        "journal, summary counter, selected receipt set or evidence-time reconstruction "
+        "can substitute for that exhaustive root."
+    ),
+    "canary exact-one fail-closed flags": (
+        "The canary performs its outer-route fetch only when `FABRIC_PROBES_ENABLED` "
+        "is the exact string `1`; unset, blank, whitespace, `0`, case variants, numeric "
+        "lookalikes and every other invalid value are disabled and perform zero "
+        "fetches. The same exact-`1` rule governs owner arming of `SYNTHETIC_SLOT_"
+        "PROBES_ENABLED`; all other values perform zero synthetic acquire, spawn or "
+        "release actions. T6-W4 owns the deterministic config-table negatives; T6-W14 "
+        "may arm only after its no-wake and external-ACK proof, and any failure keeps "
+        "or returns the flag to `0`."
     ),
 }
 
@@ -747,6 +830,8 @@ REQUIRED_DAG_SCOPE_ATOMS = {
         "deploy/cloudflare-canary/test/scheduled-tick-envelope.test.ts",
         "deploy/cloudflare-canary/test/scheduled-tick-outbox-recovery.test.ts",
         "deploy/cloudflare-canary/test/scheduled-tick-order.test.ts",
+        "deploy/cloudflare-canary/test/scheduled-tick-ack.test.ts",
+        "deploy/cloudflare-canary/test/fabric-probe-flag-failclosed.test.ts",
     },
     "T1-W6": {
         "crates/corelink-fabric-server/src/monitor_outbox.rs",
@@ -779,6 +864,13 @@ REQUIRED_DAG_SCOPE_ATOMS = {
 # provider, C1-C5 and synthetic-ingest integration without taking base delivery
 # or credential-isolation ownership.
 EXACT_DAG_SCOPE_ATOMS = {
+    "T6-W1": {
+        "scripts/orphan-box-check.selftest.sh",
+        "scripts/pre-merge-gate-check.selftest.sh",
+        "scripts/pre-merge-gate-check.sh",
+        ".github/workflows/ci.yml",
+        ".github/workflows/selftests.yml",
+    },
     "T6-W4": {
         ".github/workflows/secret-scan.yml",
         ".github/workflows/corelink-stress.yml",
@@ -791,12 +883,15 @@ EXACT_DAG_SCOPE_ATOMS = {
         "deploy/cloudflare-canary/test/scheduled-tick-envelope.test.ts",
         "deploy/cloudflare-canary/test/scheduled-tick-outbox-recovery.test.ts",
         "deploy/cloudflare-canary/test/scheduled-tick-order.test.ts",
+        "deploy/cloudflare-canary/test/scheduled-tick-ack.test.ts",
+        "deploy/cloudflare-canary/test/fabric-probe-flag-failclosed.test.ts",
     },
     "T6-W15": {
         "deploy/cost-monitor/Containerfile",
         "deploy/cost-monitor/config.schema.json",
         "deploy/cost-monitor/src/index.ts",
         "deploy/cost-monitor/src/ingest.ts",
+        "deploy/cost-monitor/src/acks.ts",
         "deploy/cost-monitor/src/incidents.ts",
         "deploy/cost-monitor/src/lifecycle.ts",
         "deploy/cost-monitor/src/scheduler.ts",
@@ -811,6 +906,7 @@ EXACT_DAG_SCOPE_ATOMS = {
         "deploy/cost-monitor/test/lifecycle-missing.test.ts",
         "deploy/cost-monitor/test/canary-missing-tick.test.ts",
         "deploy/cost-monitor/test/ingest-idempotency.test.ts",
+        "deploy/cost-monitor/test/ack-token.test.ts",
         "deploy/cost-monitor/test/incident-state.test.ts",
         "deploy/cost-monitor/test/scheduler.test.ts",
         "deploy/cost-monitor/test/state.test.ts",
@@ -832,13 +928,24 @@ EXACT_DAG_SCOPE_ATOMS = {
         "crates/corelink-fabric-server/src/monitor_outbox.rs",
         "crates/corelink-fabric-server/src/monitor_interlock.rs",
         "crates/corelink-fabric-server/tests/monitor_outbox.rs",
+        "crates/corelink-fabric-server/tests/monitor_ack.rs",
         "crates/corelink-fabric-server/tests/monitor_tuple_interlock.rs",
+        "crates/corelink-fabric-server/tests/monitor_tuple_interlock_race.rs",
         "crates/corelink-fabric/tests/pg_refusal_breaker.rs",
         "deploy/cloudflare-fabricd/src/index.ts",
         "deploy/cloudflare-fabricd/src/monitor_outbox.ts",
         "deploy/cloudflare-fabricd/test/resilience.test.ts",
         "deploy/cloudflare-fabricd/test/monitor-outbox.test.ts",
+        "deploy/cloudflare-fabricd/test/monitor-ack.test.ts",
         "deploy/cloudflare-fabricd/wrangler.jsonc",
+    },
+    "T3-W16": {
+        "deploy/cloudflare/src/index.ts",
+        "deploy/cloudflare/src/lib.ts",
+        "deploy/cloudflare/test/attempt-handle-reconcile.test.ts",
+        "deploy/cloudflare/test/attempt-monitor-outbox.test.ts",
+        "deploy/cloudflare/test/attempt-monitor-ack.test.ts",
+        "deploy/cloudflare/test/inventory-crosscheck.test.ts",
     },
     "T6-W12": {
         "deploy/cost-monitor/Containerfile",
@@ -855,8 +962,10 @@ EXACT_DAG_SCOPE_ATOMS = {
         "deploy/cost-monitor/src/capability_rules.ts",
         "deploy/cost-monitor/src/synthetic_ingest.ts",
         "deploy/cost-monitor/src/sensitivity.ts",
+        "deploy/cost-monitor/src/window_journal.ts",
         "deploy/cost-monitor/src/rearm_attestation.ts",
         "deploy/cost-monitor/migrations/0002-provider-cursors.json",
+        "deploy/cost-monitor/migrations/0003-window-journal.json",
         "deploy/cost-monitor/test/provider.test.ts",
         "deploy/cost-monitor/test/provider-stale-frozen.test.ts",
         "deploy/cost-monitor/test/correlator.test.ts",
@@ -867,6 +976,7 @@ EXACT_DAG_SCOPE_ATOMS = {
         "deploy/cost-monitor/test/c1-c5-rules.test.ts",
         "deploy/cost-monitor/test/c1-c5-synthetic-ingest.test.ts",
         "deploy/cost-monitor/test/sensitivity-window.test.ts",
+        "deploy/cost-monitor/test/window-journal.test.ts",
         "deploy/cost-monitor/test/rearm-tuple-attestation.test.ts",
         "deploy/cost-monitor/test/acked-incident-update.test.ts",
     },
@@ -884,6 +994,7 @@ EXACT_DAG_SCOPE_ATOMS = {
         "deploy/cloudflare-canary/test/no-wake-target.test.ts",
         "deploy/cloudflare-canary/test/lifecycle-monitor-envelope.test.ts",
         "deploy/cloudflare-canary/test/lifecycle-sampler-outbox.test.ts",
+        "deploy/cloudflare-canary/test/lifecycle-synthetic-ack.test.ts",
         "deploy/cloudflare-canary/test/synthetic-slot-lifecycle.test.ts",
         "deploy/cloudflare-canary/test/synthetic-slot-outbox.test.ts",
         "deploy/cloudflare-canary/test/synthetic-slot-default-off.test.ts",
@@ -905,6 +1016,20 @@ EXACT_DAG_ARTIFACTS = {
         "docs/plan/evidence/au6.17-synthetic-slot-lifecycle.json",
     },
     "T6-W14": {"docs/plan/evidence/T6-W14-canary-no-wake.json"},
+}
+
+SELFTEST_WORKFLOW = ".github/workflows/selftests.yml"
+SELFTEST_WORKFLOW_WIRING = {
+    "pull-request trigger": ("pull_request:", 1),
+    "push trigger": ("push:", 1),
+    "scripts path filters": ("- 'scripts/**'", 2),
+    "self-workflow path filters": ("- '.github/workflows/selftests.yml'", 2),
+    "tracked selftest discovery": (
+        "git ls-files -z -- ':(glob)scripts/**/*.selftest.sh'",
+        1,
+    ),
+    "non-vacuous empty-suite refusal": ("if (( ${#selftests[@]} == 0 )); then", 1),
+    "per-file execution": ('bash "${selftest}"', 1),
 }
 
 
@@ -1714,6 +1839,25 @@ def load_probe_node_registry(directory):
     return probe_nodes, errors
 
 
+def validate_selftest_workflow(repository_root):
+    """Require T6-W1's non-vacuous script-selftest CI wiring to exist."""
+    errors = []
+    workflow_path = repository_root / SELFTEST_WORKFLOW
+    try:
+        workflow = workflow_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return [f"selftest workflow {SELFTEST_WORKFLOW!r} is unavailable: {exc}"]
+
+    for label, (required_text, expected_count) in SELFTEST_WORKFLOW_WIRING.items():
+        count = workflow.count(required_text)
+        if count != expected_count:
+            errors.append(
+                f"selftest workflow wiring {label!r} count mismatch: "
+                f"expected {expected_count}, got {count}"
+            )
+    return errors
+
+
 def validate_dispatch_dag(path):
     """Validate the optional schema-v1 DAG as executable registry evidence."""
     dag_fail = []
@@ -1735,6 +1879,10 @@ def validate_dispatch_dag(path):
             "DAG frozen registry count mismatch: "
             f"expected {DAG_EXPECTED_VERTEX_COUNT}, got {len(expected_nodes)}"
         )
+    dag_fail.extend(
+        f"DAG {error}"
+        for error in validate_selftest_workflow(path.parent.parent.parent)
+    )
 
     if len(exact_line_positions(text, DAG_SCHEMA_MARKER)) != 1:
         dag_fail.append(f"DAG exact schema marker mismatch in {path.name}")

@@ -1234,6 +1234,191 @@ def main() -> int:
                 dag=missing_sensitivity_receipt_isolation,
             )
 
+            # Round 11 freezes T6-W14's future registrations as inactive.  A
+            # source-id substitution must block; otherwise a producer could
+            # mint a lane outside the sealed T6-W12 tuple.
+            missing_t6w14_preregistration = work / "missing-t6-w14-preregistration.md"
+            missing_t6w14_preregistration.write_text(
+                replace_once(
+                    dag_text,
+                    "the exact future T6-W14 `canary-lifecycle` and\n"
+                    "`canary-synthetic` source ids",
+                    "future T6-W14 source ids",
+                    "T6-W14 preregistered source ids",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU T6-W14 missing preregistered source ids",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=missing_t6w14_preregistration,
+            )
+
+            # The consumer is also bind-only: removing that boundary must
+            # block even when the inactive registrations remain present.
+            missing_t6w14_bind_only = work / "missing-t6-w14-bind-only.md"
+            missing_t6w14_bind_only.write_text(
+                replace_once(
+                    dag_text,
+                    "T1-W6 and T6-W14 may only bind their already-issued pairs; neither may\n"
+                    "mint, rotate, substitute or register them.",
+                    "T1-W6 may only bind its already-issued pair; T6-W14 may configure its lane.",
+                    "T6-W14 bind-only boundary",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU T6-W14 missing preregistration/bind-only boundary",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=missing_t6w14_bind_only,
+            )
+
+            # The ACK's ordered schema is a security boundary, not prose that
+            # may be shortened while retaining a plausible signed response.
+            signed_ack_schema = (
+                "(ack_version,event_id,producer_seq,payload_digest,source,service,application,"
+                "key_id,credential_epoch,monitor_rearm_tuple_digest,ingest_commit_id,"
+                "committed_at,signer_key_id,signer_epoch,signature)"
+            )
+            ack_schema_drift = work / "ack-token-schema-drift.md"
+            ack_schema_drift.write_text(
+                replace_once(
+                    dag_text,
+                    signed_ack_schema,
+                    signed_ack_schema.replace(",signer_epoch", ""),
+                    "signed ACK canonical schema",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU signed ACK canonical schema drift",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=ack_schema_drift,
+            )
+
+            # The canonical ACK implementation/test must remain in the
+            # monitor's executable scope, rather than being implied by prose.
+            missing_ack_scope = work / "missing-ack-token-scope.md"
+            missing_ack_scope.write_text(
+                replace_once(
+                    dag_text,
+                    "`deploy/cost-monitor/test/ack-token.test.ts`; ",
+                    "",
+                    "T6-W15 ACK-token test scope",
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP T6-W15 missing ACK-token scope",
+                PLAN,
+                False,
+                work / "ack-token-scope-mirror",
+                overrides={DAG: missing_ack_scope},
+            )
+
+            # A6.17 cannot be reconstructed from a summary after the
+            # append-only journal implementation leaves the packet scope.
+            missing_window_journal_scope = work / "missing-window-journal-scope.md"
+            missing_window_journal_scope.write_text(
+                replace_once(
+                    dag_text,
+                    "`deploy/cost-monitor/src/window_journal.ts`; ",
+                    "",
+                    "T6-W12 append-only journal scope",
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP T6-W12 missing append-only journal scope",
+                PLAN,
+                False,
+                work / "window-journal-scope-mirror",
+                overrides={DAG: missing_window_journal_scope},
+            )
+
+            missing_interlock_race_scope = work / "missing-interlock-race-scope.md"
+            missing_interlock_race_scope.write_text(
+                replace_once(
+                    dag_text,
+                    "`crates/corelink-fabric-server/tests/monitor_tuple_interlock_race.rs`; ",
+                    "",
+                    "T1-W6 interlock race scope",
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP T1-W6 missing interlock race scope",
+                PLAN,
+                False,
+                work / "interlock-race-scope-mirror",
+                overrides={DAG: missing_interlock_race_scope},
+            )
+
+            missing_signer_trust_field = work / "missing-signer-trust-tuple-field.md"
+            missing_signer_trust_field.write_text(
+                replace_once(
+                    dag_text,
+                    ",attestation_ack_signer_trust_revocation_digest)",
+                    ")",
+                    "monitor-rearm signer-trust tuple field",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU monitor tuple missing signer-trust field",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=missing_signer_trust_field,
+            )
+
+            missing_canary_flag_scope = work / "missing-canary-flag-scope.md"
+            missing_canary_flag_scope.write_text(
+                replace_once(
+                    dag_text,
+                    "`deploy/cloudflare-canary/test/fabric-probe-flag-failclosed.test.ts`; ",
+                    "",
+                    "T6-W4 canary flag fail-closed scope",
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP missing canary flag fail-closed scope",
+                PLAN,
+                False,
+                work / "canary-flag-scope-mirror",
+                overrides={DAG: missing_canary_flag_scope},
+            )
+
+            # T6-W1's CI row must retain the workflow that discovers and runs
+            # every tracked shell selftest.  A present-but-unscoped workflow
+            # is not an executable gate.
+            missing_selftests_workflow_scope = (
+                work / "missing-selftests-workflow-scope.md"
+            )
+            missing_selftests_workflow_scope.write_text(
+                replace_once(
+                    dag_text,
+                    "`.github/workflows/selftests.yml`; ",
+                    "",
+                    "T6-W1 selftests workflow scope",
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP T6-W1 missing selftests workflow scope",
+                PLAN,
+                False,
+                work / "selftests-workflow-scope-mirror",
+                overrides={DAG: missing_selftests_workflow_scope},
+            )
+
         wrong_au_owner = work / "wrong-au-owner.md"
         union23 = next(
             line for line in triage.splitlines() if line.startswith("| union-23 |")
@@ -1246,7 +1431,7 @@ def main() -> int:
             "AU7.10 outside canonical file owner", "au-check.py", wrong_au_owner, False
         )
 
-    print("\nplan gate self-test: PASS — baselines accepted and 57 corruptions blocked")
+    print("\nplan gate self-test: PASS — baselines accepted and 66 corruptions blocked")
     return 0
 
 
