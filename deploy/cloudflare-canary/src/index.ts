@@ -47,8 +47,9 @@ export interface Env {
   ALERT_COOLDOWN_MINUTES?: string; // default 30 — one incident won't email each tick
   STALENESS_HOURS?: string; // default 0 (OFF) — "no completions in N h" staleness
   BUSINESS_HOURS_UTC?: string; // e.g. "13-23" — gate staleness to a window (optional)
-  // Emergency cost-containment switch. Exact "0" skips BOTH fabricd requests
-  // while leaving the spawn-worker metrics monitor armed. Default is enabled.
+  // Emergency cost-containment switch. Only the exact string "1" arms BOTH
+  // legacy fabricd requests; every other value skips them while leaving the
+  // spawn-worker metrics monitor armed. Default is disabled (fail-closed).
   FABRIC_PROBES_ENABLED?: string;
 }
 
@@ -144,7 +145,7 @@ export async function runCycle(env: Env, now: number): Promise<string> {
   // Prefer the service binding (Worker→Worker, no same-zone 404); else public fetch.
   const fabricFetch = env.FABRICD_SVC ? env.FABRICD_SVC.fetch.bind(env.FABRICD_SVC) : fetch;
   const spawnFetch = env.SPAWN_SVC ? env.SPAWN_SVC.fetch.bind(env.SPAWN_SVC) : fetch;
-  const fabricProbesEnabled = env.FABRIC_PROBES_ENABLED !== "0";
+  const fabricProbesEnabled = env.FABRIC_PROBES_ENABLED === "1";
 
   // A 5-minute canary calling a container with sleepAfter=5m keeps it billable
   // forever. Also, an unarmed status key used to send a guaranteed 401 before
