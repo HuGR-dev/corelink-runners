@@ -7,16 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-09-01 — go-live plan round 5 remains 8/8 NOT QUIET
+
+Round 5 reviewed the current planning input `3fe8d06` (with merged containment `b70deae`, PR #529)
+and recorded **8/8 blockers**. The incident proves a Postgres-dependent **pre-bind failure class**;
+it does not distinguish `PgLedger` initialization from billing-exporter initialization. Containment
+remains `FABRIC_PG_DISABLED=1`; the measured **3/3 inactive** fabricd inventory is scale-to-zero
+evidence only. `spawn=401` remains a separate observability-key drift, not a burn diagnosis.
+
+The three primary structure gates remain the exact `plan-check.py`, `wp-check.py` and `au-check.py`
+commands recorded in `docs/plan/2026-09-01-round5-cold-review-ledger.md`; the separate
+`gates-selftest.py` is a negative mutation check. Historical snapshots `e8a9e78` and `eba6e8a`
+are SHA-labelled context, not the current review input. D11, D12 and D13 remain visible, staged and
+unresolved. The repaired AU proposal contains 30 source findings / 33 ids, and the negative selftest
+blocks 18 known corruption classes; AU remains staging-only. The plan is **NOT FROZEN** and there is
+**NO DISPATCH**.
+
 ### 2026-09-01 — go-live plan rev-6 draft fails closed under structural mutation
 
 The post-incident backlog remains **NOT FROZEN** and has quiet count zero. The rev-6 draft reconciles
-30 AU source findings into 31 STAGING-only acceptance proposals, repairs falsifiability and
+30 AU source findings into 33 STAGING-only acceptance proposals, repairs falsifiability and
 fail-closed semantics in existing A rows, and records incident-driven proposals for early runner
 kill switches, authoritative inventory joins, bounded PostgreSQL refusal, no-wake canary monitoring
 and independent burn alerts.
 
 `plan-check.py`, `wp-check.py` and `au-check.py` now reject the false-PASS classes reproduced by the
-round-4 cold review. `gates-selftest.py` requires eight corrupted fixtures to block, and the new
+round-5 cold review. `gates-selftest.py` requires 18 corrupted fixtures to block, and the new
 `plan-integrity.yml` workflow runs all planning gates on relevant changes. Structural PASS is not
 freeze, dispatch or production-readiness evidence.
 

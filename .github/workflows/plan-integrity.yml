@@ -4,17 +4,23 @@ on:
   pull_request:
     paths:
       - 'docs/plan/*.md'
-      - 'docs/plan/*-check.py'
-      - 'docs/plan/gates-selftest.py'
+      - 'docs/plan/*.py'
+      - 'docs/plan/**/*.py'
       - 'docs/plan/*finding-ids.txt'
+      - 'docs/plan/evidence/**'
+      - 'docs/plan/*.json'
+      - 'docs/plan/**/*.json'
       - '.github/workflows/plan-integrity.yml'
   push:
     branches: [main]
     paths:
       - 'docs/plan/*.md'
-      - 'docs/plan/*-check.py'
-      - 'docs/plan/gates-selftest.py'
+      - 'docs/plan/*.py'
+      - 'docs/plan/**/*.py'
       - 'docs/plan/*finding-ids.txt'
+      - 'docs/plan/evidence/**'
+      - 'docs/plan/*.json'
+      - 'docs/plan/**/*.json'
       - '.github/workflows/plan-integrity.yml'
 
 permissions:
@@ -33,6 +39,37 @@ jobs:
     steps:
       - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0  # v6.0.3
 
+      - name: Lint workflow syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="$(mktemp)"
+          set +e
+          actionlint -oneline >"$report" 2>&1
+          status=$?
+          set -e
+
+          # The fleet deliberately uses private self-hosted labels.  The
+          # repository has always emitted actionlint's runner-label warning
+          # for these exact labels in these existing workflow files.  Keep
+          # that known baseline visible, but fail on every other diagnostic
+          # (including a new custom label or any warning on a new path).
+          baseline='^\.github/workflows/(build-cf-container-images|build-fabricd-image|canary-smoke|ci|clw-ticket-propagation-check|corelink-smoke|corelink-stress|dco|deploy-spawn-worker|dogfood-smoke|latency-probe|moat-action-test|moat-benchmark|moat-correctness|o7-metadata-probe|orphan-box-detect|plan-integrity|prove-baked-buildkit|release|spawn-worker-ci)\.yml:[0-9]+:[0-9]+: label "(corelink|corelink-builder|corelink-dogfood)" is unknown\..* \[runner-label\]$'
+          known="$(grep -E "$baseline" "$report" || true)"
+          unexpected="$(grep -Ev "$baseline" "$report" || true)"
+          if [[ -n "$known" ]]; then
+            echo "actionlint: repository-baseline custom runner-label diagnostics:"
+            printf '%s\n' "$known"
+          fi
+          if [[ -n "$unexpected" ]]; then
+            cat "$report"
+            echo "actionlint: unexpected diagnostics above (runner-label baseline is narrowly allowlisted)" >&2
+            exit 1
+          fi
+          if [[ "$status" -ne 0 ]]; then
+            echo "actionlint: no diagnostics beyond the repository baseline"
+          fi
+
       - name: Check audit finding coverage
         run: python3 docs/plan/plan-check.py docs/plan/audit-2026-08-30-finding-ids.txt
 
@@ -40,7 +77,10 @@ jobs:
         run: python3 docs/plan/wp-check.py docs/plan/2026-08-30-golive-remediation-plan.md
 
       - name: Check proposed AU ownership
-        run: python3 docs/plan/au-check.py docs/plan/union-triage-remaining.md
+        run: >-
+          python3 docs/plan/au-check.py docs/plan/union-triage-remaining.md
+          --plan docs/plan/2026-08-30-golive-remediation-plan.md
+          --dag docs/plan/2026-09-01-reconciled-dispatch-dag.md
 
       - name: Prove planning gates fail closed
         run: python3 docs/plan/gates-selftest.py

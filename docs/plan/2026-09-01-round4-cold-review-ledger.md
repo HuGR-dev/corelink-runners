@@ -1,6 +1,6 @@
 # Round-4 cold-review ledger — rev-6 planning repair
 
-**Reviewed snapshot:** `e8a9e78`-equivalent draft · **Date:** 2026-09-01 · **Result: NOT QUIET**
+**Reviewed snapshot:** historical `e8a9e78` planning input · **Date:** 2026-09-01 · **Result: NOT QUIET**
 
 Eight independent read-only reviewers ran in parallel: four Sol critics over acceptance safety,
 mechanical gates, incident coverage and the dependency graph; four Luna reviewers over document
@@ -10,6 +10,11 @@ edited the snapshot it judged.
 This round resets the quiet count to **zero**. The repairs below are normative, so the next cold
 review must start from the resulting clean post-incident commit. No item is frozen, dispatched or
 credited green by this ledger.
+
+**Provenance correction.** `e8a9e78` is the historical round-3 planning snapshot reviewed here;
+`eba6e8a` is the historical runtime-investigation snapshot. Neither is the current review input.
+The current post-incident planning tree is `3fe8d06`, whose parent includes incident PR #529 merge
+`b70deae`. Any review transcript or evidence copied forward must carry the SHA it actually read.
 
 ## Findings and disposition
 
@@ -24,7 +29,7 @@ credited green by this ledger.
 | Runner burn control | A3.30 returned 503 for paused GitHub intake and arrived only after permanent re-drive work | Fixed in proposal: an early standalone WP records `paused` durably then returns 202; 503 is only persistence failure; intake and re-drive controls are independent. |
 | Re-drive liveness | A3.29 could pass by never re-driving, and did not define unknown/ambiguous inventory | Fixed in proposal with a complete safety/liveness matrix and exactly one eligible replacement state. |
 | Inventory safety | A3.31 tested only joined instances, conflated read/delete credentials and did not prove incomplete pagination refusal | Fixed in proposal with read-only O-CFINVENTORY, split complete enumeration, unjoined/ambiguous fixtures and zero destructive eligibility. |
-| PG feedback loop | A1.11 allowed one reconnect per minute, the exact cadence that prevented autosuspend, and omitted exporter pre-bind failure | Fixed in proposal: demand-only singleflight, persistent exponential backoff, diagnostics-first bind for ledger and exporter refusal, and a passive no-request scale-to-zero proof. |
+| PG feedback loop | A1.11 allowed one reconnect per minute, the exact cadence that prevented autosuspend, and omitted exporter pre-bind failure | Fixed in proposal: demand-only singleflight, persistent exponential backoff, diagnostics-first bind for ledger and exporter refusal, and a passive no-request scale-to-zero proof. The incident establishes a **Postgres pre-bind failure class**; it does not distinguish `PgLedger` initialization from billing-exporter initialization. |
 | Canary feedback loop | the real five-minute canary/fabricd wake loop, metrics-key 401 and safe re-enable contract had no item/WP | Fixed in proposed A6.21/T6-W13; fabric probes remain disabled until a non-waking isolated trial passes. |
 | Cost guard | no independent detector joined provider inventory, durable attempts and idle demand | Fixed in proposed A6.20/T6-W12 with an external failure domain and explicit thresholds. |
 | WP graph | cycles/inversions and overlapping scopes made the scheduler non-executable; legacy model names and cap-6 batches were stale | Dispatch remains blocked. Luna/Sol routing and cap 8 are recorded. T5-W2 repo work is split from T5-W6 publish proof, T2-W5 moved to Wave 3, O-CANARY has code→bind→deploy→proof order, broad docs scopes are narrowed, and T5-W2→T5-W3 plus T3-W4→T4-W4→T3-W10 are explicit serial edges. The full combined DAG is recalculated only after freeze. |
@@ -37,21 +42,23 @@ From the repository root:
 ```bash
 python3 docs/plan/plan-check.py docs/plan/audit-2026-08-30-finding-ids.txt
 python3 docs/plan/wp-check.py docs/plan/2026-08-30-golive-remediation-plan.md
-python3 docs/plan/au-check.py docs/plan/union-triage-remaining.md
+python3 docs/plan/au-check.py docs/plan/union-triage-remaining.md --plan docs/plan/2026-08-30-golive-remediation-plan.md
 python3 docs/plan/gates-selftest.py
 ```
 
-Expected structural result: 247 physical/unique findings; 94 physical/unique A rows, 92 live, 47 WPs;
-30 AU source findings → 31 proposed acceptance ids; eight corruptions blocked. These results are
-necessary structure evidence only. The round remains **NOT QUIET** until an independent reviewer
-finds no new defect on a clean post-incident commit.
+The first three commands are the primary structure gates; the fourth is the negative selftest, not
+a fourth coverage gate. Expected structural result: 247 physical/unique findings; 94
+physical/unique A rows, 92 live, 47 WPs; 30 AU source findings → 31 proposed acceptance ids; eight
+corruptions blocked. These results are necessary structure evidence only. The round remains
+**NOT QUIET** until an independent reviewer finds no new defect on a clean post-incident commit.
 
 ## Next review contract
 
 1. **Done:** rebase the repair onto incident PR #529 merge `b70deae` and run the four commands above.
-2. Commit the byte-stable review input.
-3. Run a new independent cold review over the main plan, AU triage, round-3 delta, this ledger,
-   incident evidence and all gate code.
+2. Treat current `3fe8d06` as the review input; retain `e8a9e78` and `eba6e8a` as SHA-labelled
+   historical transcripts only.
+3. Run and disposition Round 5 over the main plan, AU triage, round-3 delta, this ledger, incident
+   evidence and all gate code.
 4. Any accepted normative change keeps the quiet count at zero. Only a byte-identical follow-up
    review after one quiet round can become quiet round 2.
 
