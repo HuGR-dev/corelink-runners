@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import subprocess
 import re
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -29,6 +30,7 @@ SOURCE = PLAN_DIR / "audit-2026-08-30-finding-ids.txt"
 PLAN = PLAN_DIR / "2026-08-30-golive-remediation-plan.md"
 TRIAGE = PLAN_DIR / "union-triage-remaining.md"
 DAG = PLAN_DIR / "2026-09-01-reconciled-dispatch-dag.md"
+STAGED = PLAN_DIR / "2026-09-01-round3-remediation-delta.md"
 
 
 def execute(
@@ -37,9 +39,10 @@ def execute(
     command = [sys.executable, str(PLAN_DIR / checker), str(target)]
     if checker == "au-check.py":
         command.extend(["--plan", str(PLAN)])
-        # The dispatch DAG is a Round-5 input.  Keep this compatible with the
-        # pre-DAG snapshot while using it whenever the coordinated input is
-        # present (the evolved AU gate requires the explicit path).
+        # The dispatch DAG is the current canonical repair input.  Keep this
+        # compatible with the pre-DAG snapshot while using it whenever the
+        # coordinated input is present (the evolved AU gate requires the
+        # explicit path).
         supports_dag = False
         selected_dag = dag or DAG
         if selected_dag.exists():
@@ -88,6 +91,17 @@ def replace_once(document: str, old: str, new: str, label: str) -> str:
     return document.replace(old, new, 1)
 
 
+def fence_once(document: str, line: str, label: str) -> str:
+    """Hide one canonical Markdown line in a fenced code block."""
+
+    return replace_once(
+        document,
+        line,
+        f"```markdown\n{line}\n```",
+        label,
+    )
+
+
 def swap_once(document: str, first: str, second: str, label: str) -> str:
     """Swap two adjacent physical rows, asserting the fixture is unambiguous."""
 
@@ -128,6 +142,110 @@ def replace_in_row(
     return document.replace(row, row.replace(old, new, 1), 1)
 
 
+def require_mirrored_wp(
+    label: str,
+    target: Path,
+    should_pass: bool,
+    mirror_root: Path,
+    *,
+    overrides: dict[Path, Path] | None = None,
+) -> None:
+    """Run wp-check against an isolated plan directory.
+
+    wp-check loads the staged and AU registries beside its own source file.
+    A mirror lets this self-test corrupt one supplemental registry without
+    mutating the checked-out fixtures or making the checker configurable via
+    an untrusted environment variable.
+    """
+
+    mirror_plan = mirror_root / "docs" / "plan"
+    mirror_plan.mkdir(parents=True)
+    for source in PLAN_DIR.iterdir():
+        if source.is_file() and source.suffix in {".md", ".py", ".txt", ".json"}:
+            shutil.copy2(source, mirror_plan / source.name)
+    for destination, source in (overrides or {}).items():
+        shutil.copy2(source, mirror_plan / destination.name)
+    mirrored_target = mirror_plan / target.name
+    shutil.copy2(target, mirrored_target)
+    result = subprocess.run(
+        [sys.executable, str(mirror_plan / "wp-check.py"), str(mirrored_target)],
+        cwd=mirror_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    passed = result.returncode == 0
+    if passed != should_pass:
+        stream = result.stdout + result.stderr
+        expectation = "PASS" if should_pass else "BLOCK"
+        raise AssertionError(
+            f"{label}: expected {expectation}, rc={result.returncode}\n{stream}"
+        )
+    print(f"PASS {label}: {'accepted baseline' if should_pass else 'blocked mutation'}")
+
+
+def require_actionlint_config_is_not_authoritative(work: Path) -> None:
+    """Prove a suppress-all repository config cannot hide CI diagnostics.
+
+    actionlint intentionally honors an ignore-all config when explicitly
+    given one.  The workflow therefore runs its authoritative lint with
+    ``-config-file /dev/null``.  This fixture proves both halves: the hostile
+    config would suppress the diagnostics, while the trusted invocation still
+    reports the unexpected label and syntax error.
+    """
+
+    actionlint = shutil.which("actionlint")
+    if actionlint is None:
+        raise AssertionError(
+            "actionlint is required for the config fail-closed self-test"
+        )
+
+    workflow = work / "unexpected-actionlint.yml"
+    workflow.write_text(
+        "name: synthetic\non: push\njobs:\n  bad:\n    runs-on: corelink-unexpected\n    steps: []\n",
+        encoding="utf-8",
+    )
+    hostile_config = work / "suppress-all-actionlint.yaml"
+    hostile_config.write_text(
+        'paths:\n  "**/*.yml":\n    ignore: [".*"]\n',
+        encoding="utf-8",
+    )
+
+    suppressed = subprocess.run(
+        [actionlint, "-config-file", str(hostile_config), "-oneline", str(workflow)],
+        cwd=REPO,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if suppressed.returncode != 0:
+        raise AssertionError(
+            "actionlint suppress-all fixture did not exercise configuration suppression:\n"
+            + suppressed.stdout
+            + suppressed.stderr
+        )
+
+    trusted = subprocess.run(
+        [actionlint, "-config-file", "/dev/null", "-oneline", str(workflow)],
+        cwd=REPO,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    diagnostics = trusted.stdout + trusted.stderr
+    if trusted.returncode == 0 or "corelink-unexpected" not in diagnostics:
+        raise AssertionError(
+            "actionlint trusted invocation failed to block an unexpected runner label:\n"
+            + diagnostics
+        )
+    if "[syntax-check]" not in diagnostics:
+        raise AssertionError(
+            "actionlint trusted invocation failed to retain syntax diagnostics:\n"
+            + diagnostics
+        )
+    print("PASS actionlint suppress-all config cannot hide trusted diagnostics")
+
+
 def main() -> int:
     require("plan baseline", "plan-check.py", SOURCE, True)
     require("WP baseline", "wp-check.py", PLAN, True)
@@ -136,9 +254,12 @@ def main() -> int:
     source = SOURCE.read_text(encoding="utf-8")
     plan = PLAN.read_text(encoding="utf-8")
     triage = TRIAGE.read_text(encoding="utf-8")
+    staged = STAGED.read_text(encoding="utf-8")
 
     with tempfile.TemporaryDirectory(prefix="corelink-plan-gates-") as temp:
         work = Path(temp)
+
+        require_actionlint_config_is_not_authoritative(work)
 
         duplicate_source = work / "duplicate-source.txt"
         first_id = source.splitlines()[0]
@@ -277,6 +398,47 @@ def main() -> int:
             False,
         )
 
+        fenced_main_row = work / "fenced-main-acceptance-row.md"
+        fenced_main_row.write_text(
+            fence_once(plan, main_row, "fenced principal acceptance row"),
+            encoding="utf-8",
+        )
+        require(
+            "WP fenced principal acceptance row",
+            "wp-check.py",
+            fenced_main_row,
+            False,
+        )
+
+        fenced_capability = work / "fenced-capability-heading.md"
+        capability_heading = "### C1 — control plane"
+        fenced_capability.write_text(
+            fence_once(plan, capability_heading, "fenced capability heading"),
+            encoding="utf-8",
+        )
+        require(
+            "WP fenced capability partition",
+            "wp-check.py",
+            fenced_capability,
+            False,
+        )
+
+        fenced_staged_registry = work / "fenced-staged-principal-registry.md"
+        staged_registry_row = next(
+            line for line in staged.splitlines() if line.startswith("| new **T1-W5** |")
+        )
+        fenced_staged_registry.write_text(
+            fence_once(staged, staged_registry_row, "fenced staged principal WP row"),
+            encoding="utf-8",
+        )
+        require_mirrored_wp(
+            "WP fenced staged principal registry row",
+            PLAN,
+            False,
+            work / "staged-registry-mirror",
+            overrides={STAGED: fenced_staged_registry},
+        )
+
         deleted_t4w3_dependency = work / "deleted-t4-w3-dependency.md"
         if DAG.exists():
             deleted_t4w3_dag = work / "deleted-t4-w3-dependency-dag.md"
@@ -346,6 +508,18 @@ def main() -> int:
             "AU HTML-comment-hidden placement row",
             "au-check.py",
             hidden_au_row,
+            False,
+        )
+
+        fenced_au_row = work / "fenced-au-placement-row.md"
+        fenced_au_row.write_text(
+            fence_once(triage, au_row, "fenced AU placement row"),
+            encoding="utf-8",
+        )
+        require(
+            "AU fenced placement row",
+            "au-check.py",
+            fenced_au_row,
             False,
         )
 
@@ -510,6 +684,22 @@ def main() -> int:
                 dag=missing_evidence,
             )
 
+            dag_row = next(
+                line for line in dag_text.splitlines() if line.startswith("| T0-W1 |")
+            )
+            fenced_dag = work / "fenced-dag-table-row.md"
+            fenced_dag.write_text(
+                fence_once(dag_text, dag_row, "fenced DAG table row"),
+                encoding="utf-8",
+            )
+            require(
+                "AU fenced canonical DAG table row",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=fenced_dag,
+            )
+
         wrong_au_owner = work / "wrong-au-owner.md"
         union23 = next(
             line for line in triage.splitlines() if line.startswith("| union-23 |")
@@ -522,7 +712,7 @@ def main() -> int:
             "AU7.10 outside canonical file owner", "au-check.py", wrong_au_owner, False
         )
 
-    print("\nplan gate self-test: PASS — baselines accepted and 23 corruptions blocked")
+    print("\nplan gate self-test: PASS — baselines accepted and 28 corruptions blocked")
     return 0
 
 

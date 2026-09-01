@@ -277,41 +277,131 @@ def plain_markdown(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
-def hidden_canonical_table_errors(document: str, label: str) -> list[str]:
-    """Reject AU registry rows that Markdown renderers hide in HTML comments."""
+def _canonical_registry_content(block: str) -> bool:
+    """Return whether a hidden Markdown block contains a canonical registry."""
 
-    errors: list[str] = []
+    block = block.replace("<!--", "").replace("-->", "")
+    canonical_headings = {
+        "## 1. Summary counts",
+        "## 2. Per-finding placement",
+        "## 3. Staged ownership consequences",
+        "## Canonical node table",
+        "## 3. Acceptance proposals — reserved, not promoted",
+        "## 4. Proposed WP packet contracts (not a second dispatch DAG)",
+    }
+    canonical_markers = {
+        "**New WPs and their item counts** (all ≤ the four-item ceiling):",
+        "**Extensions to existing WPs:**",
+    }
+    headers = (
+        SUMMARY_HEADER,
+        PLACEMENT_HEADER,
+        DECLARATION_HEADER,
+        DAG_HEADER,
+        STAGED_WP_HEADER,
+        STAGED_ACCEPTANCE_HEADER,
+    )
+    for line in block.splitlines():
+        visible_line = line.lstrip(" ")
+        if visible_line in canonical_headings or visible_line in canonical_markers:
+            return True
+        if not visible_line.startswith("|"):
+            continue
+        cells = markdown_cells(visible_line)
+        normalized = [plain_markdown(cell).lower() for cell in cells]
+        if normalized in headers:
+            return True
+        first_cell = plain_markdown(cells[0]) if cells else ""
+        if (
+            AU_RE.search(visible_line)
+            or re.fullmatch(
+                r"(?:union-\d{2}|RH[59](?: \(partial\))?|M(?:3|5|19)(?: \(partial\))?)",
+                first_cell,
+            )
+            or re.fullmatch(
+                r"(?:new|existing) T\d+-W\d+[A-Za-z]*", first_cell, re.IGNORECASE
+            )
+            or re.fullmatch(r"T\d+-W\d+[A-Za-z]*", first_cell)
+            or re.fullmatch(r"A\d+\.\d+", first_cell)
+        ):
+            return True
+    return False
+
+
+def markdown_visible_text(document: str) -> tuple[str, list[tuple[str, int]]]:
+    """Mask fenced code and HTML comments while preserving lines and offsets.
+
+    CommonMark fences may use backticks or tildes, have any marker length of at
+    least three, carry an info string, and close only with the same marker and
+    at least the opening length.  Masking (rather than deleting) keeps all
+    diagnostics on physical source line numbers.
+    """
+
+    characters = list(document)
+    hidden: list[tuple[str, int]] = []
+    lines = document.splitlines(keepends=True)
+    offsets: list[int] = []
+    cursor = 0
+    for line in lines:
+        offsets.append(cursor)
+        cursor += len(line)
+
+    index = 0
+    while index < len(lines):
+        opening = re.match(r"^ {0,3}(`{3,}|~{3,})([^\r\n]*)", lines[index])
+        if opening is None or (
+            opening.group(1).startswith("`") and "`" in opening.group(2)
+        ):
+            index += 1
+            continue
+        marker = opening.group(1)[0]
+        minimum = len(opening.group(1))
+        close_pattern = re.compile(
+            rf"^ {{0,3}}{re.escape(marker)}{{{minimum},}}[ \t]*(?:\r?\n)?$"
+        )
+        end_index = index + 1
+        while end_index < len(lines) and not close_pattern.fullmatch(lines[end_index]):
+            end_index += 1
+        if end_index < len(lines):
+            end_index += 1
+        start_offset = offsets[index]
+        end_offset = offsets[end_index] if end_index < len(lines) else len(document)
+        block = document[start_offset:end_offset]
+        if _canonical_registry_content(block):
+            hidden.append(("fenced code block", index + 1))
+        for position in range(start_offset, end_offset):
+            if characters[position] not in "\r\n":
+                characters[position] = " "
+        index = end_index
+
+    fence_masked = "".join(characters)
     cursor = 0
     while True:
-        start = document.find("<!--", cursor)
+        start = fence_masked.find("<!--", cursor)
         if start < 0:
             break
-        close = document.find("-->", start + 4)
+        close = fence_masked.find("-->", start + 4)
         end = len(document) if close < 0 else close + 3
-        comment = document[start:end]
-        pipe_rows = [line for line in comment.splitlines() if line.startswith("|")]
-        canonical_row = any(
-            AU_RE.search(line)
-            or re.search(r"\b(?:union-\d{2}|RH[59]|M(?:3|5|19))\b", line)
-            or [plain_markdown(cell).lower() for cell in markdown_cells(line)]
-            in (
-                SUMMARY_HEADER,
-                PLACEMENT_HEADER,
-                DECLARATION_HEADER,
-                STAGED_WP_HEADER,
-                STAGED_ACCEPTANCE_HEADER,
-            )
-            for line in pipe_rows
-        )
-        if canonical_row:
-            line_no = document.count("\n", 0, start) + 1
-            errors.append(
-                f"{label} hides canonical AU table content in an HTML comment at line {line_no}"
-            )
+        block = document[start:end]
+        if _canonical_registry_content(block):
+            hidden.append(("HTML comment", document.count("\n", 0, start) + 1))
+        for position in range(start, end):
+            if characters[position] not in "\r\n":
+                characters[position] = " "
         cursor = end
         if close < 0:
             break
-    return errors
+    return "".join(characters), hidden
+
+
+def hidden_canonical_table_errors(document: str, label: str) -> list[str]:
+    """Reject canonical registries hidden by Markdown rendering constructs."""
+
+    _, hidden = markdown_visible_text(document)
+    return [
+        f"{label} hides canonical AU registry content in a {kind} at line {line_no}"
+        for kind, line_no in hidden
+    ]
 
 
 def exact_markdown_table(
@@ -661,8 +751,9 @@ def read_staged_wp_registry(
 ) -> tuple[set[str], set[str], set[str], list[str]]:
     """Read the exhaustive new/existing WP registry from the staged delta table."""
 
-    document = path.read_text(encoding="utf-8")
-    errors = hidden_canonical_table_errors(document, "staged principal WP registry")
+    raw_document = path.read_text(encoding="utf-8")
+    errors = hidden_canonical_table_errors(raw_document, "staged principal WP registry")
+    document, _ = markdown_visible_text(raw_document)
     section = section_between(
         document,
         "## 4. Proposed WP packet contracts (not a second dispatch DAG)",
@@ -717,12 +808,18 @@ def read_staged_wp_registry(
 
     probe_wps: set[str] = set()
     for wp, owns in packet_rows.items():
-        if "repo half" in owns.lower():
+        owns_lower = owns.lower()
+        test_half = re.search(r"\brepo(?:/test)? half\b", owns_lower) is not None
+        live_half = re.search(r"\blive(?:-probe)? half\b", owns_lower) is not None
+        if test_half and live_half:
+            errors.append(
+                f"staged principal WP {wp} declares both test-only and live-probe phases"
+            )
             continue
         owned_ids = A_RE.findall(owns)
-        if "live half" in owns.lower() or any(
-            "probe" in kinds.get(item, "") for item in owned_ids
-        ):
+        if test_half:
+            continue
+        if live_half or any("probe" in kinds.get(item, "") for item in owned_ids):
             probe_wps.add(wp)
     return new_wps, existing_wps, probe_wps, errors
 
@@ -1100,11 +1197,16 @@ def parse_dispatch_dag(
 ]:
     """Parse the canonical DAG's complete node table without learning aliases from prose."""
 
-    document = dag_path.read_text(encoding="utf-8")
+    raw_document = dag_path.read_text(encoding="utf-8")
+    errors = hidden_canonical_table_errors(raw_document, "canonical dispatch DAG")
+    document, _ = markdown_visible_text(raw_document)
     section = section_between(
         document, "## Canonical node table", "## Deterministic ready sets and proof"
     )
-    rows, errors = exact_markdown_table(section, DAG_HEADER, "canonical dispatch DAG")
+    rows, table_errors = exact_markdown_table(
+        section, DAG_HEADER, "canonical dispatch DAG"
+    )
+    errors.extend(table_errors)
     waves: dict[str, int] = {}
     phases: dict[str, str] = {}
     predecessors: dict[str, tuple[str, ...]] = {}
@@ -1160,7 +1262,10 @@ def parse_dispatch_dag(
             errors.append(f"DAG node {node} has no lane")
 
     rendered_batches: list[tuple[str, ...]] = []
-    batch_rows = re.findall(r"^B(\d{2}):\s*(.*?)\s*$", document, re.MULTILINE)
+    # The rendered ready-set proof is intentionally a code block.  It is not
+    # a canonical Markdown table/registry and remains parsed from the source;
+    # canonical node tables themselves are parsed only from visible Markdown.
+    batch_rows = re.findall(r"^B(\d{2}):\s*(.*?)\s*$", raw_document, re.MULTILINE)
     if [number for number, _ in batch_rows] != [
         f"{index:02d}" for index in range(len(batch_rows))
     ]:
@@ -1285,9 +1390,10 @@ def dag_depends_on(
 def validate_au_dag_routing(
     rows: list[Placement],
     predecessors: dict[str, tuple[str, ...]],
+    scopes: dict[str, tuple[str, ...]],
     staged_probe_wps: set[str],
 ) -> list[str]:
-    """Mechanize declared AU obstacle, image/deploy and evidence-gate routes."""
+    """Mechanize declared AU and cross-registry hard routes and scopes."""
 
     errors: list[str] = []
     owners = {row.item: row.owner for row in rows}
@@ -1323,11 +1429,47 @@ def validate_au_dag_routing(
             errors.append(
                 f"staged test+probe packet {wp} does not route through evidence gate T7-W4b"
             )
+
+    required_direct_predecessors = {
+        "T2-W2b": {"T3-W18", "O-FLEETBUSY"},
+        "T6-W6": {"T6-W9"},
+        "T4-W7": {"O-BILLING", "T9-W1"},
+        "T4-W8": {"O-BILLING", "T9-W1"},
+    }
+    for wp, required in required_direct_predecessors.items():
+        missing = sorted(required - set(predecessors.get(wp, ())))
+        if missing:
+            errors.append(
+                f"DAG node {wp} is missing exact hard predecessor(s): {missing}"
+            )
+
+    required_scope_atoms = {
+        "T6-W14": {"deploy/cloudflare-canary/wrangler.jsonc"},
+        "T6-W12": {
+            "deploy/cloudflare-cost-monitor/src/index.ts",
+            "deploy/cloudflare-cost-monitor/src/provider.ts",
+            "deploy/cloudflare-cost-monitor/src/correlator.ts",
+            "deploy/cloudflare-cost-monitor/src/types.ts",
+            "deploy/cloudflare-cost-monitor/wrangler.jsonc",
+            "deploy/cloudflare-cost-monitor/package.json",
+            "deploy/cloudflare-cost-monitor/package-lock.json",
+            "deploy/cloudflare-cost-monitor/tsconfig.json",
+            "deploy/cloudflare-cost-monitor/vitest.config.ts",
+            "deploy/cloudflare-cost-monitor/test/provider.test.ts",
+            "deploy/cloudflare-cost-monitor/test/correlator.test.ts",
+            "deploy/cloudflare-cost-monitor/test/independence.test.ts",
+            "docs/plan/evidence/T6-W12-independent-monitor.json",
+        },
+    }
+    for wp, required in required_scope_atoms.items():
+        missing = sorted(required - set(scopes.get(wp, ())))
+        if missing:
+            errors.append(f"DAG node {wp} is missing exact scope atom(s): {missing}")
     return errors
 
 
 def acceptance_ids(plan_path: Path) -> tuple[set[str], list[str], list[str]]:
-    document = plan_path.read_text(encoding="utf-8")
+    document, _ = markdown_visible_text(plan_path.read_text(encoding="utf-8"))
     suite = section_between(
         document,
         "## 3. The acceptance suite (the completeness anchor)",
@@ -1356,8 +1498,9 @@ def check(
     delta_path: Path | None = None,
 ) -> tuple[bool, list[str], dict[str, object]]:
     failures: list[str] = []
-    document = triage_path.read_text(encoding="utf-8")
-    failures.extend(hidden_canonical_table_errors(document, "AU triage"))
+    raw_document = triage_path.read_text(encoding="utf-8")
+    failures.extend(hidden_canonical_table_errors(raw_document, "AU triage"))
+    document, _ = markdown_visible_text(raw_document)
     failures.extend(validate_summary(document))
     rows, parse_errors, sources, mentioned_wps = parse_rows(document)
     failures.extend(parse_errors)
@@ -1579,7 +1722,7 @@ def check(
     if row_wave_mismatch:
         failures.append(f"placement/DAG phase mismatch: {row_wave_mismatch}")
 
-    plan_document = plan_path.read_text(encoding="utf-8")
+    plan_document, _ = markdown_visible_text(plan_path.read_text(encoding="utf-8"))
     authoritative_wps = main_names | staged_wps | proposal_names
     dag_vertex_missing = sorted(authoritative_wps - set(dag_waves))
     dag_vertex_phantoms = sorted(set(dag_waves) - authoritative_wps)
@@ -1617,7 +1760,9 @@ def check(
     )
     if scope_collisions:
         failures.append(f"parallel DAG path/glob scope collisions: {scope_collisions}")
-    failures.extend(validate_au_dag_routing(rows, dag_predecessors, staged_probe_wps))
+    failures.extend(
+        validate_au_dag_routing(rows, dag_predecessors, dag_scopes, staged_probe_wps)
+    )
 
     bad_invariants: dict[str, list[str]] = {}
     for row in rows:

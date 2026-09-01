@@ -12,6 +12,8 @@ on:
       - 'docs/plan/**/*.json'
       - '.github/workflows/*.yml'
       - '.github/workflows/*.yaml'
+      - '.github/actionlint.yaml'
+      - '.github/actionlint.yml'
   push:
     branches: [main]
     paths:
@@ -24,6 +26,8 @@ on:
       - 'docs/plan/**/*.json'
       - '.github/workflows/*.yml'
       - '.github/workflows/*.yaml'
+      - '.github/actionlint.yaml'
+      - '.github/actionlint.yml'
 
 permissions:
   contents: read
@@ -45,9 +49,54 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          expected_actionlint_version='1.7.12'
+          actual_actionlint_version="$(actionlint -version 2>&1 | sed -n '1p')"
+          if [[ "$actual_actionlint_version" != "$expected_actionlint_version" ]]; then
+            echo "actionlint: expected pinned version $expected_actionlint_version, got $actual_actionlint_version" >&2
+            exit 1
+          fi
+
+          # Parse whichever optional config is present, but never use it for
+          # the authoritative repository lint below.  In particular, an
+          # ignore-all config must not be able to turn a malformed workflow or
+          # a new private runner label into a false PASS.
+          config_files=()
+          for candidate in .github/actionlint.yaml .github/actionlint.yml; do
+            if [[ -f "$candidate" ]]; then
+              config_files+=("$candidate")
+            fi
+          done
+          if [[ "${#config_files[@]}" -gt 1 ]]; then
+            echo 'actionlint: keep only one of .github/actionlint.yaml or .github/actionlint.yml' >&2
+            exit 1
+          fi
+          if [[ "${#config_files[@]}" -eq 1 ]]; then
+            config_report="$(mktemp)"
+            set +e
+            printf '%s\n' \
+              'name: actionlint-config-validation' \
+              'on: push' \
+              'jobs:' \
+              '  check:' \
+              '    runs-on: ubuntu-latest' \
+              '    steps:' \
+              '      - run: true' \
+              | actionlint -config-file "${config_files[0]}" -stdin-filename .github/workflows/plan-integrity.yml -oneline - >"$config_report" 2>&1
+            config_status=$?
+            set -e
+            if [[ "$config_status" -ne 0 ]]; then
+              cat "$config_report"
+              echo "actionlint: invalid configuration ${config_files[0]}" >&2
+              exit 1
+            fi
+            echo "actionlint: parsed optional configuration ${config_files[0]} (non-authoritative)"
+          fi
+
           report="$(mktemp)"
           set +e
-          actionlint -oneline >"$report" 2>&1
+          # /dev/null is deliberate: repository actionlint config is validated
+          # above but cannot suppress this independent structural check.
+          actionlint -config-file /dev/null -oneline >"$report" 2>&1
           status=$?
           set -e
 

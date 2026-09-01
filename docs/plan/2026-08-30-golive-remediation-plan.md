@@ -2,16 +2,18 @@
 
 **Audit baseline:** `8631abb` (#522) · **Round-5 review input:**
 `3fe8d06d62891f99ecfd3f3c1bc4376b976f848b` · **Round-6 review input:**
-`af4ed85dad289e333e9bf09f129fb2faa243136d` · **Authored:** 2026-08-30 ·
-**Revision: rev-6 draft (NOT FROZEN)**
+`af4ed85dad289e333e9bf09f129fb2faa243136d` · **Round-7 review input:**
+`289826e358050c7d6b4517fc8a21f79c733c7e32` · **Authored:** 2026-08-30 ·
+**Revision: rev-6 Round-7 repair draft (NOT FROZEN)**
 **Sources:** the 247-finding ultra audit (`wf_31696fc3-c08`, 53 agents / 17 dimensions, 33/33
 CRITICAL+HIGH adversarially confirmed) **∪** the in-repo 2026-08-25 comprehensive audit
 (`docs/audits/2026-08-25-comprehensive-audit.md`), which contains at least one HIGH-class risk the
 ultra audit did not find (§2.1).
 **Method:** TechLead doctrine (decompose · contract · pack · verify · loop), two self-iterations,
 then repeated **independent cold reviews** whose findings are logged and dispositioned in §12.
-Round 6 ran on 2026-09-01 and is **NOT QUIET** (7/8 reviewers reported blockers; 1/8 reported no
-new finding); the quiet count is zero.
+Round 7 ran on 2026-09-01 against the exact immutable input above and is **NOT QUIET** (6/8
+reviewers reported blockers; 2/8 reported no new finding/signoff); the quiet count is zero. The
+subsequent repair tree is not that reviewed input.
 
 > **Rigor compact (inviolable).** No finding is silently dropped, deferred, or worked around. Every
 > finding lands in exactly one bucket, proven mechanically. Anything not fixed here is (a)
@@ -194,7 +196,7 @@ A2.4 A2.5 A2.7 A2.8 A2.10 A3.9 A3.10 A4.7 A4.10 A5.6 A5.8 A5.9 A6.6 A6.7 A6.11 A
 | id | kind | item | gap |
 |---|---|---|---|
 | **A1.8** | probe | a forced-restart loop at one deployed config yields **20/20** serving cold starts; any failure is red and classified from lifecycle logs | G2 |
-| **A1.9** | probe | after staged T6-W14 supplies its isolated target, record only a **non-container edge lifecycle/status marker** every 60 s for 7 continuous days; the artifact proves at least one healthy→failure and one failure→healthy transition, a missing sample alerts within 120 s, the longest undetected marker outage is <120 s, and the sampler issues **zero fabricd container requests**. This proves only edge-marker detection, never fabricd availability or container uptime | G3 |
+| **A1.9** | probe | after staged T6-W14 supplies its isolated target, read every 60 s for 7 continuous days the **source-authored FabricdContainer DO lifecycle record** `{seq, transition_id, state, transition_at_ms, version}` through its container-free read route. Only DO lifecycle hooks may write that record; the route may add only `sampled_at_ms` and echo the sampler's fresh request nonce, and may never call the container. Reject nonce mismatch, stale/future samples, sequence regression, unknown/stale state and static/untransitioned state; the sampler cannot write/refresh a heartbeat, timestamp or lifecycle state. The artifact proves at least one healthy→failure and one failure→healthy transition, a missing sample alerts within 120 s through the independent cost-monitor/correlation lane, the longest undetected marker outage is <120 s, and the sampler issues **zero fabricd container requests**. This proves lifecycle-marker detection only, never fabricd application health, availability or container uptime | G3 |
 | **A2.11** | test | every operator override named in any error message or runbook is **consumed by the deployed binary** — an override named but unplumbed fails the check | G4 |
 | **A2.12** | probe | **3/3** deliberately dead-plane recoveries restore service within 15 min, each executed by someone following **only** the runbook | G5 |
 | **A2.13** | probe | after any deploy, the worker / control-plane / runner-image version triple is asserted against a declared compatibility matrix, and a mismatched triple is rejected | G15 |
@@ -338,11 +340,15 @@ of these rows.
 | **A0.2** | test | the devenv subsystem passes the **full** gate with its tests executing and inside the coverage numerator — the gates #517 bypassed are re-run over the merged code | T9-W0 |
 | **A6.15** | test | every CI lane that runs `vitest` runs it with `--coverage` (the deploy-path job does not) | T6-W1 |
 
-**Freeze order (obligation):** T0-W1 (union reconciliation) → integrate the accepted round-5
-contracts only after two quiet reviews → **then** freeze the suite → **then** capture the single
-clean post-incident red baseline (`docs/plan/acceptance-baseline.json`) → **then** run T3-W17 →
-T3-W18 as the first post-freeze, pre-general-dispatch Wave-0 containment lane → **then** use the
-reconciled DAG for later worker mutations and other dispatch. Any
+**Freeze order (obligation):** T0-W1 (union reconciliation) → keep every repair, proposed owner
+decision and AU/principal addition **staged** while the complete input receives two consecutive quiet
+cold-review rounds over byte-identical committed bytes → if the reviewed staging is promoted or
+integrated, treat that promotion as a new normative snapshot, reset the quiet count to zero, and
+obtain two more consecutive quiet rounds over that byte-identical integrated snapshot → **only
+then** freeze the suite → **then** capture the single clean post-incident red baseline
+(`docs/plan/acceptance-baseline.json`) → **then** run T3-W17 → T3-W18 as the first post-freeze,
+pre-general-dispatch Wave-0 containment lane → **then** use the reconciled DAG for later worker
+mutations and other dispatch. A quiet review never promotes staging by implication. Any
 `test:` item green at baseline is vacuous and must be replaced (rev-2 shipped three such items; all
 three were caught only by the cold review). This ordering is a gate, not authorization: the current
 state remains NOT FROZEN / NO DISPATCH.
@@ -403,9 +409,11 @@ WAIVER (human-authorized) — <what is loosened/deferred>
 **Round-5 staged containment (not principal-suite ownership):** A3.30 remains proposal-only, but
 its packet placement is fixed. **T3-W17 → T3-W18 is the first post-freeze, pre-general-dispatch
 Wave-0 containment lane**: T3-W17 implements the repo controls and T3-W18 owns live arming/probe.
-The lane completes before every later worker mutation packet. This two-phase staging does not add
-either WP or A3.30 to the 47-WP / 94-row principal suite and does not authorize either packet to
-run.
+The lane completes before every later worker mutation packet and before the first force-deploy:
+T3-W18's re-drive containment is armed and proven, then O-FLEETBUSY supplies the read-only fleet-busy
+pair, and only then may T2-W2b perform that deploy. This two-phase staging does not add either WP or
+A3.30 to the 47-WP / 94-row principal suite and does not authorize any packet or owner arming to run.
+The canonical DAG owns the exact predecessor edges and paths.
 
 ### Wave 1 — parallel, partitioned by **named file** (32 findings)
 
@@ -463,7 +471,7 @@ staged A1.10/T1-W5 owns those assertions exclusively.
 | **T1-W2** | A1.1 A1.2 A1.3 A1.5 | O1 |
 | **T1-W3** | A1.6 A1.7 | O1 · T2-W2b |
 | **T1-W4** | A1.8 A1.9 | O1 · repeated cold-start evidence · staged T6-W14 before A1.9 credit |
-| **T2-W2b** | A2.4 A2.5 A2.7 A2.10 | W0 · O1 |
+| **T2-W2b** | A2.4 A2.5 A2.7 A2.10 | W0 · O1 · containment-first force-deploy barrier |
 | **T2-W4** | A2.8 A2.9 | T2-W2b |
 | **T2-W5** | A2.11 A2.12 A2.13 | O1 · T2-W2b |
 | **T3-W7** | A3.9 *(the moat — COLD miss → WARM hit on a real job)* | O1 · T2-W2b |
@@ -474,11 +482,11 @@ staged A1.10/T1-W5 owns those assertions exclusively.
 | **T5-W5** | A5.10 | D3 · D8 · R3 |
 | **T5-W6** | A5.4 | D3 · T5-W2 · O-PUBLISH |
 | **T6-W5** | A6.7 | O1 |
-| **T6-W6** | A6.6 A6.13 A6.14 | O-CANARY · canary deploy |
+| **T6-W6** | A6.6 A6.13 A6.14 | O-CANARY · canary deploy · T6-W9 alert rule ready |
 | **T6-W10** | A6.16 A6.17 A6.18 | alert detection, escalation, and failure-domain independence |
 | **T6-W11** | A6.19 | operator-executed runbook procedures |
 | **T6-W7** | A6.11 | T2-W2b |
-| **T6-W9** | A6.12 | T6-W6 |
+| **T6-W9** | A6.12 | alert-rule code/config before T6-W6 live canary proof |
 
 Every `C4-unverified-claim` finding rev-2 had parked in CLEAN (`fabricd-deploy-11`, `spawn-cf-15`,
 `deploy-14`, `fabric-core-16`, `billing-money-path-14`, `fabricd-09`) is now here — calling an
@@ -490,11 +498,17 @@ normative for full exact scopes and hard predecessors. In particular, staged A1.
 live success precedes T1-W3, T1-W4, T4-W7, T4-W8 and staged T6-W12; T1-W2 may collect diagnostics
 while Postgres is disabled but cannot earn green credit. A1.9 additionally receives no T1-W4 credit
 until staged T6-W14 has delivered the isolated non-waking edge target and the canonical DAG carries
-the `T6-W14 → T1-W4` credit edge. Its 60-second sampler must issue zero fabricd container requests and cannot
-be cited as fabricd availability or container-uptime evidence. Staged AU6.17 extends **T6-W10**
-(four items after integration), not T6-W6, and its synthetic canary proof follows T6-W6 delivery
-plus T6-W9 alert-rule work. These statements reserve ordering only; A1.11, T6-W12, T6-W14 and
-AU6.17 remain outside the principal suite.
+the `T6-W14 → T1-W4` credit edge. T6-W14's target is authoritative only because FabricdContainer
+DO lifecycle hooks alone persist its monotonic sequence/transition record; the container-free route
+is read-only, never calls the container, and merely adds sample time plus a fresh nonce echo. A1.9's
+60-second sampler rejects stale/future samples, nonce mismatch, sequence regression and
+static/untransitioned state, issues zero fabricd container requests, and alerts through the
+independent cost-monitor/correlation lane; it cannot be cited as fabricd application health,
+availability or container-uptime evidence. T6-W9's alert rule is ready before
+T6-W6's live canary proof. Staged AU6.17 extends **T6-W10** (four items after integration), not
+T6-W6, and its synthetic canary proof follows both T6-W6 delivery and T6-W9 alert-rule work. These
+statements reserve safety and ordering only; A1.11, T6-W12, T6-W14 and AU6.17 remain outside the
+principal suite, and the canonical DAG alone owns their exact edges.
 
 ### Wave 4 — post-decision (43 findings)
 
@@ -532,7 +546,7 @@ stated this dependency for O-BILLING alone.
 | **O-ALLOWLIST** · **O-PIN** | `INSTALLATION_ALLOWLIST` · `PINNED_IMAGE_DIGEST` (vars, `wrangler.jsonc:77-81`) | W0 deploy |
 | **O-APP** | `GITHUB_APP_ID` + private key; public installability, `Administration:write`, webhook | W0 |
 | **O-CANARY** | `RESEND_API_KEY` + `FABRIC_OBSERVABILITY_KEY` + `METRICS_OBSERVABILITY_KEY` | T6-W4 code seal → bind → deploy → T6-W6 proof |
-| **O-FLEETBUSY** | `FLEET_BUSY_READ_KEY` pair + first force-deploy (`hist-13` — rev-2 had no O-id for it) | W0 |
+| **O-FLEETBUSY** | bind the read-only `FLEET_BUSY_READ_KEY` pair used to refuse a busy-fleet force-deploy (`hist-13` — rev-2 had no O-id for it) | T3-W18 live containment proven; hard predecessor of the first T2-W2b force-deploy |
 | **O-MINTKEY** · **O-CHECKHOST** · **O-CFTOKEN** · **O-ROTATE** | disarm-confirm · check-host flip · delete-scoped token (D5) · rotate OpenRouter (D7) | — |
 | **O-PUBLISH** | npm + PyPI tokens | **D3 · T5-W2** repo half; bind/publish then T5-W6 proves the artifacts |
 
@@ -579,7 +593,7 @@ owned once; it surfaces any
 numeric A/AU shadows and keeps them STAGING-only. Proposal/principal WP collisions remain blocking.
 `au-check.py` is a proposal-integrity gate only: it cannot green an `A` item, expand the 94-row
 suite, satisfy the done-gate, or authorize dispatch before two quiet review rounds.
-`gates-selftest.py` recreates 23 structural corruption fixtures found across the cold reviews and
+`gates-selftest.py` recreates 28 structural corruption fixtures found across the cold reviews and
 requires every corrupted fixture to block. `.github/workflows/plan-integrity.yml` runs all four commands whenever
 the plan, triage, finding ids, gate code or workflow changes.
 
@@ -616,14 +630,19 @@ the [reconciled dispatch DAG](2026-09-01-reconciled-dispatch-dag.md) is the sole
 
 1. Keep the production containment armed; **T0-W1 is complete**, while all 30 AU source findings / 33
    AU proposals stay in the separate staging intake.
-2. Integrate the accepted round-5 contract repairs, including staged unresolved D11/D12/D13, then
-   obtain two consecutive quiet cold-review rounds over byte-identical, SHA-pinned inputs.
-3. Freeze the integrated suite and capture exactly one clean post-incident red
-   baseline. A mixed-SHA or mixed-deploy tuple is ineligible.
+2. Keep the accepted repair contracts and unresolved D11/D12/D13 staged while the complete committed
+   input obtains two consecutive quiet cold-review rounds over byte-identical bytes. A reviewer
+   disposition or owner answer remains staging until an explicit promotion snapshot lands.
+3. Treat any promotion/integration as normative: it creates a new committed input, resets the quiet
+   count to zero, and itself requires two consecutive quiet cold-review rounds over byte-identical
+   bytes. Only then freeze that integrated suite and capture exactly one clean post-incident red
+   baseline. A mixed-input or mixed-deploy tuple is ineligible.
 4. Run T3-W17 → T3-W18 as the first post-freeze, pre-general-dispatch Wave-0 containment lane;
-   neither is authorized by this draft, and every later worker mutation waits for both.
-5. Run only later packets exposed by the canonical cap-8 DAG. Staged T1-W6 durable-PG live success must
-   occur before any durability-dependent live proof can earn green credit.
+   neither is authorized by this draft. Before the first T2-W2b force-deploy, T3-W18 containment is
+   proven and O-FLEETBUSY is bound; every later worker mutation also waits for T3-W18.
+5. Run only later packets exposed by the canonical cap-8 DAG. T6-W9 alert-rule readiness precedes
+   T6-W6 live canary proof. Staged T1-W6 durable-PG live success must occur before any
+   durability-dependent live proof can earn green credit.
 
 ---
 
@@ -632,25 +651,30 @@ the [reconciled dispatch DAG](2026-09-01-reconciled-dispatch-dag.md) is the sole
 1. **The baseline capture has not been taken.** Until `docs/plan/acceptance-baseline.json` exists,
    red→green is unproven; the principal 94-row suite remains an acceptance definition, not a green
    claim.
-2. **Round 6 is NOT QUIET** (2026-09-01). Its findings are recorded in
-   [`2026-09-01-round6-cold-review-ledger.md`](2026-09-01-round6-cold-review-ledger.md) and reflected
-   in this draft, the staged delta, AU triage, gate code and reconciled DAG. The round-5 ledger
-   remains historical at
-   [`2026-09-01-round5-cold-review-ledger.md`](2026-09-01-round5-cold-review-ledger.md); the quiet
-   count is zero and a fresh post-repair review is required.
+2. **Round 7 is NOT QUIET** (2026-09-01): 6/8 reviewers reported blockers and 2/8 signed off with no
+   new finding on exact input `289826e358050c7d6b4517fc8a21f79c733c7e32`. Its findings are
+   recorded in
+   [`2026-09-01-round7-cold-review-ledger.md`](2026-09-01-round7-cold-review-ledger.md) and staged in
+   this later repair tree, the delta, gate code and reconciled DAG. The
+   [`round-6 ledger`](2026-09-01-round6-cold-review-ledger.md) and
+   [`round-5 ledger`](2026-09-01-round5-cold-review-ledger.md) remain historical; the quiet count is
+   zero and a fresh review of the eventual clean repair commit is required.
 3. **Wave 4 has no acceptance items** and several of its findings have no gating decision (§5).
 4. **The 30 AU source findings / 33 proposed AU acceptance ids are not integrated into the suite.**
    They remain triaged intake only, pending cold-review convergence; no `AU` item is an `A` row or an
    additional suite obligation here.
-5. The mechanical gates are required to pass together on the eventual clean integrated SHA
-   (§8.1/§16); even then they prove only coverage, ownership, disjointness, and staged AU structural
-   ownership — not semantic readiness, tamper-proof evidence/readiness, production readiness,
-   quietness, freeze eligibility, or dispatch authority.
+5. The mechanical gates are required to pass together on every clean committed review input
+   (§8.1/§16); the commit identity is supplied by Git/CI to the review record, never embedded as a
+   self-referential SHA inside its own bytes. Even then the gates prove only coverage, ownership,
+   disjointness, and staged AU structural ownership — not semantic readiness, tamper-proof
+   evidence/readiness, production readiness, quietness, freeze eligibility, or dispatch authority.
 
-### 11.1 Current blockers after round 6 — 2026-09-01 (NOT QUIET)
+### 11.1 Current blockers after round 7 — 2026-09-01 (NOT QUIET)
 
-Round 6 re-checked the combined plan, staged delta, AU intake, gates and DAG against the contained live
-state. None of its staged acceptance or decision repairs is promoted, resolved, dispatched or
+Round 7 re-checked the combined plan, staged delta, AU intake, gates and DAG at exact immutable input
+`289826e358050c7d6b4517fc8a21f79c733c7e32` against the contained live state. Six blocker reports
+and two no-new-finding signoffs leave the round NOT QUIET. The subsequent repair tree stages their
+disposition; none of its acceptance or decision repairs is promoted, resolved, dispatched or
 greened here:
 
 - **Durable Postgres is still bypassed.** `FABRIC_PG_DISABLED=1` makes fabricd servable but leaves
@@ -669,8 +693,11 @@ greened here:
   switch before any destructive runner rollout. T3-W17 is therefore staged as Wave-0 pre-dispatch
   containment, with T3-W18 reserved for its later live arming/probe.
 - **The dispatch scheduler is not authorization.** The reconciled DAG is the sole combined graph and
-  ready-set source, capped at 8. Its working-draft ready sets are illustrative, its integrated commit
-  SHA is not yet pinned, and round 5 is not quiet; therefore every ready set remains non-dispatchable.
+  ready-set source, capped at 8. Its working-draft ready sets are illustrative. The last reviewed
+  input is exact Round-7 commit `289826e358050c7d6b4517fc8a21f79c733c7e32`, and Round 7 was not
+  quiet; the subsequent repair tree has changed those bytes and has not completed a cold-review
+  round. Its eventual clean HEAD is recorded externally by Git/CI for review, so every ready set
+  remains non-dispatchable.
 - **The money path is still unproven past ingest.** No invoice or charge for a test tenant is
   recorded, and containment has suspended the durable export path; A4.10 and the reconciliation
   items remain open.
@@ -765,6 +792,15 @@ acceptance, scope/DAG and gate false-PASS findings. This repair narrows the affe
 adds exact evidence/test routing, hardens the structural gates and preserves the AU staging
 boundary at 30 source findings / 33 proposed ids, 12 new WPs and 4 extensions. Because these are
 normative changes, the quiet count remains zero: **NOT FROZEN · NO DISPATCH · NO AU PROMOTION**.
+
+**Cold review — round 7 (2026-09-01 — NOT QUIET).** Six of eight independent reviewers found new
+blockers in exact clean input `289826e358050c7d6b4517fc8a21f79c733c7e32`; two reviewers reported
+no new finding/signoff on those bytes. The
+[round-7 ledger](2026-09-01-round7-cold-review-ledger.md) records delayed-start and paused-intake
+safety gaps, lifecycle/breaker authority gaps, the promotion-review defect, DAG/scope omissions,
+Markdown/actionlint false-PASS boundaries and stale provenance. The subsequent repair tree is not
+the reviewed input and its normative changes reset the quiet count; neither signoff advances it:
+**NOT FROZEN · QUIET COUNT 0 · NO DISPATCH · NO AU PROMOTION**.
 
 ---
 
@@ -864,7 +900,26 @@ the global gate in §8; the global gate is never restated per WP.
 
 ---
 
-## 16. rev-6 draft change log — Round-6 input `af4ed85dad289e333e9bf09f129fb2faa243136d`
+## 16. rev-6 draft change log and reviewed-input provenance
+
+### Round-7 immutable review input
+
+Round 7 reviewed exact clean commit `289826e358050c7d6b4517fc8a21f79c733c7e32`, not an unqualified
+moving `HEAD`: 6/8 reviewers reported blockers and 2/8 reported no new finding/signoff. Its full
+disposition and bounded mechanical transcript are in the
+[Round-7 ledger](2026-09-01-round7-cold-review-ledger.md). That input had 247/247 findings assigned,
+94 physical / 92 live principal rows, 30 source findings / 33 proposed AU ids, a 68-vertex cap-8 DAG
+and 23 gate-selftest corruptions blocked. Those are structural results, not quietness, production or
+freeze evidence.
+
+The tree containing the subsequent Round-7 repairs has different bytes and is not allowed to borrow
+the `289826e…` review result. Its eventual clean commit identity must be supplied externally by
+Git/CI to the next review record. It must not embed its own impossible self-referential SHA: adding a
+post-commit hash to the snapshot would create a different commit. Until that later commit receives
+the required cold reviews, status remains **NOT FROZEN · QUIET COUNT 0 · NO DISPATCH · NO AU
+PROMOTION**.
+
+### Historical Round-6 repair and transcript
 
 This Round-6 repair starts from the exact committed input
 `af4ed85dad289e333e9bf09f129fb2faa243136d` and reconciles the principal plan with round 5 without
@@ -887,10 +942,10 @@ changing the principal suite's 94-row / 92-live scope:
    semantic readiness, tamper-proof evidence/readiness, production readiness, quietness, freeze
    eligibility, or dispatch authority.
 
-**Last clean reviewed-input transcript — exact SHA
-`af4ed85dad289e333e9bf09f129fb2faa243136d`.** This is the Round-6 review-input transcript retained
-as provenance, not a current-draft/freeze PASS. The integrated Round-6 repair commit must replace it
-with a new transcript carrying that commit's full SHA; a dirty worktree may not do so.
+**Historical Round-6 reviewed-input transcript — exact SHA
+`af4ed85dad289e333e9bf09f129fb2faa243136d`.** This block is retained explicitly as Round-6
+provenance. It is not the later Round-7 input, not a transcript for the subsequent repair tree and
+not a freeze PASS. A dirty-worktree run remains diagnostics only.
 
 ```
 findings: 247 physical / 247 unique   assigned-unique: 247

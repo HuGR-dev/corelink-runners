@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-09-01 — go-live plan Round 7 remains 6/8 NOT QUIET
+
+Round 7 reviewed the exact committed repair input
+`289826e358050c7d6b4517fc8a21f79c733c7e32` in a clean, read-only exercise. Six of eight reviewers
+reported new blockers; two found no new finding and signed off. The consolidated findings cover
+semantic recovery, containment and alert ordering, implementable scopes, gate bypasses, and
+current-versus-historical provenance. The full ledger is
+[`docs/plan/2026-09-01-round7-cold-review-ledger.md`](docs/plan/2026-09-01-round7-cold-review-ledger.md).
+
+At that immutable Round-7 input, the structure checks passed mechanically: 247/247 findings, 94
+suite rows (92 live), 30 AU source findings / 33 proposed AU ids, 68 DAG vertices in 20 batches
+(cap 8), and 23 known corruptions blocked by the negative selftest. The 23-case result is the
+pre-Round-7-repair baseline; it is not a claim about a later repair tree. The subsequent repair
+cycle now targets 28 blocked corruptions; that target is not evidence until it passes on its own
+signed, byte-identified tree. Structural PASS remains neither semantic readiness nor production
+evidence. The status is **QUIET COUNT 0 · NOT FROZEN · NO AU PROMOTION · NO DISPATCH · NO GREEN
+CREDIT**.
+
+The clean review result is bounded to `289826e…`; subsequent repairs are a different tree and must
+be identified by their own full SHA and reviewed again. No self-hash or unqualified `HEAD` claim is
+made here.
+
 ### 2026-09-01 — go-live plan Round 6 remains 7/8 NOT QUIET
 
 Round 6 reviewed the exact committed repair input
@@ -28,8 +50,9 @@ current selftest to 23 blocked corruptions.
 The corrected AU registry has T3-W5 as the **12th new AU WP** and **4 existing-WP extensions**.
 These results establish structural consistency only—not semantic readiness, tamper-proof proof,
 production readiness, quietness, freeze eligibility or dispatch authority. The status is
-**QUIET COUNT 0 · NOT FROZEN · NO AU PROMOTION · NO DISPATCH · NO GREEN CREDIT**. Round 7 starts
-only after this repair cycle is captured in one newly signed commit with a full SHA.
+**QUIET COUNT 0 · NOT FROZEN · NO AU PROMOTION · NO DISPATCH · NO GREEN CREDIT**. At that historical
+point, Round 7 could start only after the repair cycle was captured in one newly signed commit with
+a full SHA.
 
 ### 2026-09-01 — go-live plan round 5 remains 8/8 NOT QUIET
 
@@ -56,7 +79,8 @@ kill switches, authoritative inventory joins, bounded PostgreSQL refusal, no-wak
 and independent burn alerts.
 
 `plan-check.py`, `wp-check.py` and `au-check.py` now reject the false-PASS classes reproduced by the
-round-5 cold review. `gates-selftest.py` requires 18 corrupted fixtures to block, and the new
+round-5 cold review. The earlier Round-6 pre-repair snapshot's `gates-selftest.py` required 18
+corrupted fixtures to block, and the new
 `plan-integrity.yml` workflow runs all planning gates on relevant changes. Structural PASS is not
 freeze, dispatch or production-readiness evidence.
 

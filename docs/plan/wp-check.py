@@ -456,6 +456,17 @@ STAGED_PRINCIPAL_WPS = {
     "T6-W14",
 }
 
+# A3.30 is one test+probe item with two mandatory phase owners. Keep the
+# routing explicit: learning the kind from the aggregate item would
+# incorrectly classify both WPs as probe owners.
+STAGED_SPLIT_ACCEPTANCE_OWNERS = {
+    "A3.30": "test owner: new T3-W17; live-probe owner: new T3-W18 (1 item total)",
+}
+STAGED_SPLIT_PHASE_KINDS = {
+    ("T3-W17", "A3.30"): ("test", "a3.30 repo/test half"),
+    ("T3-W18", "A3.30"): ("probe", "a3.30 live-probe half"),
+}
+
 AU_FILENAME = "union-triage-remaining.md"
 AU_NEW_WP_MARKER = "**New WPs and their item counts** (all ≤ the four-item ceiling):"
 AU_EXTENSION_MARKER = "**Extensions to existing WPs:**"
@@ -506,6 +517,29 @@ AU_PLACEMENT_HEADER = [
 WP_ID_RE = re.compile(r"T\d+-W\d+[A-Za-z]*")
 EVIDENCE_ARTIFACT_RE = re.compile(r"docs/plan/evidence/[A-Za-z0-9._-]+\.json")
 
+# These are structural dispatch contracts, not claims that the corresponding
+# implementation or production evidence is semantically sufficient.
+REQUIRED_DAG_DIRECT_PREDECESSORS = {
+    # A deploy cannot resume while the containment proof or the fleet-busy
+    # credential/force-deploy owner action is still outstanding.
+    "T2-W2b": {"T3-W18", "O-FLEETBUSY"},
+    # Alert rules must exist before the canary is credited with delivering
+    # their synthesized conditions end to end.
+    "T6-W6": {"T6-W9"},
+}
+
+REQUIRED_DAG_SCOPE_ATOMS = {
+    # An evidence-only T6-W9 row cannot reserve or dispatch rule/channel work.
+    "T6-W9": {
+        "deploy/cloudflare-canary/src/rules.ts",
+        "deploy/cloudflare-canary/test/rules.test.ts",
+    },
+    # The metrics-key repair and later probe re-enable both change executable
+    # canary configuration, so the shared atom must be explicit and serialized.
+    "T6-W13": {"deploy/cloudflare-canary/wrangler.jsonc"},
+    "T6-W14": {"deploy/cloudflare-canary/wrangler.jsonc"},
+}
+
 
 def exact_line_positions(text, heading):
     return [m.start() for m in re.finditer(rf"^{re.escape(heading)}$", text, re.M)]
@@ -551,31 +585,89 @@ def plain_markdown(value):
     return re.sub(r"\s+", " ", value).strip()
 
 
-def rendered_markdown(text, label):
-    """Remove HTML comments while retaining offsets and line boundaries.
+def rendered_markdown(text, label, *, mask_fences=True):
+    """Mask non-rendered HTML comments and fenced code without moving offsets.
 
-    Markdown inside ``<!-- ... -->`` is not rendered and therefore cannot be
-    accepted as a visible registry.  Replacing non-newline characters with
-    spaces keeps line-oriented diagnostics stable and leaves historical
-    comments otherwise unconstrained.
+    Canonical headings and tables must be visible Markdown. Backtick and tilde
+    fences (including longer fences and language/info strings) can contain
+    examples, but those examples cannot satisfy or duplicate a registry. HTML
+    comment markers inside a fence are code, and fence markers inside an HTML
+    comment are comments, so the two states are scanned together.
     """
+
+    def mask_span(buffer, start, stop):
+        for index in range(start, stop):
+            if buffer[index] not in "\r\n":
+                buffer[index] = " "
+
     rendered = list(text)
-    position = 0
     errors = []
-    while True:
-        start = text.find("<!--", position)
-        if start < 0:
-            break
-        end = text.find("-->", start + 4)
-        if end < 0:
-            errors.append(f"{label} contains an unterminated Markdown HTML comment")
-            end = len(text) - 3
-        for index in range(start, min(end + 3, len(rendered))):
-            if rendered[index] not in "\r\n":
-                rendered[index] = " "
-        if end + 3 >= len(text):
-            break
-        position = end + 3
+    in_comment = False
+    fence_character = None
+    fence_length = 0
+    offset = 0
+
+    for line in text.splitlines(keepends=True):
+        line_body = line.rstrip("\r\n")
+
+        if fence_character is not None:
+            closing = re.fullmatch(
+                rf" {{0,3}}{re.escape(fence_character)}{{{fence_length},}}[ \t]*",
+                line_body,
+            )
+            if mask_fences:
+                mask_span(rendered, offset, offset + len(line))
+            if closing:
+                fence_character = None
+                fence_length = 0
+            offset += len(line)
+            continue
+
+        # CommonMark fenced blocks may be indented by at most three spaces.
+        # A fence is not recognized while a multi-line HTML comment is open.
+        if not in_comment:
+            opening = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line_body)
+            if opening and not (
+                opening.group(1).startswith("`") and "`" in opening.group(2)
+            ):
+                fence_character = opening.group(1)[0]
+                fence_length = len(opening.group(1))
+                if mask_fences:
+                    mask_span(rendered, offset, offset + len(line))
+                offset += len(line)
+                continue
+
+        position = 0
+        while position < len(line):
+            if in_comment:
+                end = line.find("-->", position)
+                if end < 0:
+                    mask_span(rendered, offset + position, offset + len(line))
+                    position = len(line)
+                else:
+                    mask_span(rendered, offset + position, offset + end + 3)
+                    in_comment = False
+                    position = end + 3
+            else:
+                start = line.find("<!--", position)
+                if start < 0:
+                    break
+                end = line.find("-->", start + 4)
+                if end < 0:
+                    mask_span(rendered, offset + start, offset + len(line))
+                    in_comment = True
+                    position = len(line)
+                else:
+                    mask_span(rendered, offset + start, offset + end + 3)
+                    position = end + 3
+        offset += len(line)
+
+    if fence_character is not None:
+        errors.append(
+            f"{label} contains an unterminated Markdown {fence_character * fence_length} fence"
+        )
+    if in_comment:
+        errors.append(f"{label} contains an unterminated Markdown HTML comment")
     return "".join(rendered), errors
 
 
@@ -1018,7 +1110,16 @@ def load_probe_node_registry(directory):
                     f"staged acceptance registry has opaque id/kind: {row[0]!r}, {row[1]!r}"
                 )
                 continue
-            staged_item_kinds[ids[0]] = kind
+            item_id = ids[0]
+            staged_item_kinds[item_id] = kind
+            expected_owner = STAGED_SPLIT_ACCEPTANCE_OWNERS.get(item_id)
+            if expected_owner is not None:
+                owner_cell = plain_markdown(row[2])
+                if owner_cell != expected_owner:
+                    errors.append(
+                        f"staged acceptance {item_id} split-owner routing mismatch: "
+                        f"expected {expected_owner!r}, got {owner_cell!r}"
+                    )
 
     packet_header, packet_rows, error = first_table_after(
         staged_text, STAGED_PACKET_HEADING, STAGED_PACKET_STOP
@@ -1031,6 +1132,7 @@ def load_probe_node_registry(directory):
             f"got {packet_header}"
         )
     else:
+        seen_split_phases = set()
         for row in packet_rows:
             node_ids = WP_ID_RE.findall(plain_markdown(row[0]))
             item_ids = re.findall(r"\bA\d+\.\d+\b", plain_markdown(row[1]))
@@ -1042,10 +1144,25 @@ def load_probe_node_registry(directory):
             owner = node_ids[0]
             owns = plain_markdown(row[1]).lower()
             for item_id in item_ids:
-                if "repo half" in owns:
-                    kind = "test"
-                elif "live half" in owns:
-                    kind = "probe"
+                split_key = (owner, item_id)
+                if item_id in STAGED_SPLIT_ACCEPTANCE_OWNERS:
+                    split_phase = STAGED_SPLIT_PHASE_KINDS.get(split_key)
+                    if split_phase is None:
+                        errors.append(
+                            f"staged split item {item_id} has unexpected phase owner {owner}"
+                        )
+                        continue
+                    kind, expected_owns = split_phase
+                    if split_key in seen_split_phases:
+                        errors.append(
+                            f"staged split phase is physically repeated: {split_key}"
+                        )
+                    seen_split_phases.add(split_key)
+                    if owns != expected_owns:
+                        errors.append(
+                            f"staged split phase {owner}/{item_id} routing mismatch: "
+                            f"expected {expected_owns!r}, got {owns!r}"
+                        )
                 else:
                     kind = staged_item_kinds.get(
                         item_id, FROZEN_ITEM_KINDS.get(item_id)
@@ -1056,6 +1173,11 @@ def load_probe_node_registry(directory):
                     )
                     continue
                 node_kinds.setdefault(owner, set()).add(kind)
+        missing_split_phases = sorted(set(STAGED_SPLIT_PHASE_KINDS) - seen_split_phases)
+        if missing_split_phases:
+            errors.append(
+                f"staged split phases missing from packet registry: {missing_split_phases}"
+            )
 
     au_path = directory / AU_FILENAME
     try:
@@ -1100,9 +1222,13 @@ def load_probe_node_registry(directory):
 def validate_dispatch_dag(path):
     """Validate the optional schema-v1 DAG as executable registry evidence."""
     dag_fail = []
-    text, visibility_errors = rendered_markdown(
-        path.read_text(encoding="utf-8"), path.name
-    )
+    raw_text = path.read_text(encoding="utf-8")
+    text, visibility_errors = rendered_markdown(raw_text, path.name)
+    # Ready sets are deliberately rendered inside a fenced text block. Keep
+    # that block available to the dedicated BNN parser while still masking
+    # HTML comments and tracking fence boundaries. Generic headings/tables use
+    # ``text`` above and therefore cannot be learned from fenced examples.
+    batch_text, _ = rendered_markdown(raw_text, path.name, mask_fences=False)
     dag_fail.extend(f"DAG {error}" for error in visibility_errors)
     staged_nodes, au_nodes, registry_errors = load_supplemental_registries(path.parent)
     dag_fail.extend(f"DAG {error}" for error in registry_errors)
@@ -1267,6 +1393,33 @@ def validate_dispatch_dag(path):
                 pending.extend(graph_predecessors.get(predecessor, ()))
         return False
 
+    for node, required in REQUIRED_DAG_DIRECT_PREDECESSORS.items():
+        if node not in nodes:
+            continue
+        missing = sorted(required - set(nodes[node]["predecessors"]))
+        if missing:
+            dag_fail.append(
+                f"DAG {node} is missing required exact hard predecessors {missing}"
+            )
+
+    for node, required in REQUIRED_DAG_SCOPE_ATOMS.items():
+        if node not in nodes:
+            continue
+        missing = sorted(required - set(nodes[node]["scopes"]))
+        if missing:
+            dag_fail.append(f"DAG {node} is missing required path atoms {missing}")
+
+    # O-BILLING is intentionally armed only after T9-W1 removes/quarantines
+    # the devenv poison-pill emitter. External owner actions are not graph
+    # vertices, so require every DAG consumer of O-BILLING to follow T9-W1.
+    for node, record in nodes.items():
+        if "O-BILLING" in record["predecessors"] and not transitively_precedes(
+            "T9-W1", node
+        ):
+            dag_fail.append(
+                f"DAG O-BILLING consumer {node} does not transitively follow T9-W1"
+            )
+
     scoped_nodes = sorted(scopes_by_node)
     for index, left in enumerate(scoped_nodes):
         for right in scoped_nodes[index + 1 :]:
@@ -1304,7 +1457,7 @@ def validate_dispatch_dag(path):
     rendered_batches = []
     rendered_ordinals = []
     if len(batch_section_starts) == 1:
-        batch_section = text[batch_section_starts[0] :]
+        batch_section = batch_text[batch_section_starts[0] :]
         for ordinal, node_cell in re.findall(
             r"^B(\d{2}):\s+((?:T\d+-W\d+[a-z]?(?:\s+|$))+)",
             batch_section,

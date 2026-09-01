@@ -1,13 +1,16 @@
-# Reconciled dispatch DAG — rev6 Round-6 repair draft
+# Reconciled dispatch DAG — rev6 Round-7 repair draft
 
 **Date:** 2026-09-01 · **Schema:** `dispatch-dag/v1` · **Status: NOT DISPATCHABLE**
 
 This is the sole canonical dispatch registry. Every plan, delta, triage table, handoff and
-dispatcher must reference this file and must not restate its DAG. The current Round-6 repair ledger
-is **NOT QUIET**, so the table is a schedule calculation and no row is authorized yet. The dispatch
-freeze lifts only after two consecutive quiet review rounds and one clean post-incident baseline.
-After that freeze lifts, a row may run when its own hard predecessors are satisfied: an unrelated
-decision/obstacle/relay token does not stop the whole graph.
+dispatcher must reference this file and must not restate its DAG. The current Round-7 repair ledger
+is **NOT QUIET**, so the table is a schedule calculation and no row is authorized yet. This staged
+input must first receive two consecutive quiet reviews over byte-identical bytes. Promotion is a
+normative new snapshot, resets quiet count to zero, and must itself receive two consecutive quiet
+reviews over byte-identical promoted bytes before the one clean post-incident baseline can be
+captured and the dispatch freeze discussed. After that sequence lifts the freeze, a row may run when
+its own hard predecessors are satisfied: an unrelated decision/obstacle/relay token does not stop
+the whole graph.
 
 `FABRIC_PG_DISABLED=1` is a production durability and green-credit interlock, not an implementation
 lock. It blocks T1-W6 durable-PG success, every dependent production proof, and the final live flip;
@@ -31,14 +34,18 @@ unique artifact filename in its artifact column. No row owns the broad `docs/pla
 tree. `T1-W6` is the durable-PG live-success gate; only durability-dependent live probes wait for
 it. `T6-W13` is the immediate canary-key lane (including current/stale key delivery and
 acknowledgement) and necessarily follows T6-W4, T6-W6 and T7-W4b, but has no PG predecessor;
-`T6-W14` is the later isolated no-wake re-enable trial.
+`T6-W14` is the later isolated no-wake re-enable trial. `T6-W9` implements and seals the alert
+rules before `T6-W6` attempts their live proof. `T6-W12` deploys as a standalone monitor outside
+the fabricd, spawn-worker and canary failure domains; its live half remains blocked until
+`O-CFINVENTORY` proves every required cumulative provider surface is available at no more than
+120-second freshness.
 
 The worker scope is a total order because these rows write `deploy/cloudflare/src/index.ts` or
-`deploy/cloudflare/src/lib.ts`. The exact Round-6 repair spine is:
+`deploy/cloudflare/src/lib.ts`. The exact Round-7 repair spine is:
 
 `T3-W17 → T3-W18 → T4-W1 → T4-W2 → T3-W3 → T3-W1 → T3-W2 → T8-W1 → T8-W3 → T3-W14 → T3-W9 → T8-W5 → T8-W2 → T3-W16 → T3-W15 → T3-W5`.
 
-The Round-6 repair links include `T3-W17→T3-W18`, `T3-W18→T4-W1`,
+The Round-7 repair links include `T3-W17→T3-W18`, `T3-W18→T4-W1`,
 `T4-W1→T4-W2`, `T4-W2→T3-W3`, `T3-W3→T3-W1`, `T8-W3→T3-W14`,
 `T3-W14→T3-W9`, `T3-W9→T8-W5`, `T8-W5→T8-W2`, `T8-W2→T3-W16`,
 `T3-W16→T3-W15`, and `T3-W15→T3-W5`. The complete total order above also retains the inherited
@@ -46,7 +53,9 @@ The Round-6 repair links include `T3-W17→T3-W18`, `T3-W18→T4-W1`,
 containment lane; `T3-W16` (attempt-handle/inventory cross-check) precedes `T3-W15` (re-drive
 liveness).
 `T9-W1` is a separate Sol decision-gated lane because its exact scope is limited to the devenv DO
-and its focused test; it owns neither worker-monolith file. The registry has exactly 68 vertices:
+and its focused test; it owns neither worker-monolith file. It is nevertheless a hard predecessor
+of both billing proof lanes: satisfying the external `O-BILLING` token cannot bypass the devenv
+poison-pill repair. The registry has exactly 68 vertices:
 47 principal WPs, 9 staged principal WPs and 12 AU WPs (T3-W5 is one of the 12 new AU WPs, not an
 extension).
 
@@ -54,6 +63,17 @@ T3-W16 uses a durable local attempt-to-DO-handle record committed before start. 
 `getState`/`destroy` is authoritative; provider inventory is a read-only cost/cross-check signal,
 and incomplete or ambiguous inventory pauses replacement. It introduces no provider-issued-id or
 provider-client API dependency.
+
+For staged A3.30, `T3-W17` owns the deterministic repo tests and has no live evidence credit;
+`T3-W18` exclusively owns the version-bound three-state live probe artifact. The two switches remain
+independent, and no later deploy or worker mutation can bypass the live containment half.
+
+For staged A6.22, the non-waking lifecycle endpoint is implemented in the fabricd **edge Worker**
+and reads only Durable Object lifecycle state; it never calls container `fetch`. Its authoritative
+response binds a monotonic sequence, transition id/state/time, deployed version, nonce and sample
+time, uses `no-store`, and is rejected when stale or replayed. Canary tests must prove that this
+surface, rather than a test-controlled or static response, drives both positive and negative
+transitions before `FABRIC_PROBES_ENABLED` changes in canary config.
 
 ## Canonical node table
 
@@ -105,28 +125,28 @@ provider-client API dependency.
 | T1-W2 | W3 live proof | O1, T1-W6, T7-W4b | `docs/plan/evidence/T1-W2-control-plane.json` | Sol / live-risk |
 | T1-W3 | W3 live proof | O1, T2-W2b, T1-W6, T7-W4b | `docs/plan/evidence/T1-W3-resilience.json` | Sol / live-risk |
 | T1-W4 | W3 live proof | O1, T1-W6, T6-W14, T7-W4b | `docs/plan/evidence/T1-W4-boot-rate.json` | Sol / live-risk |
-| T2-W2b | W3 live proof | T2-W1a, O1, O-DEVENV-PIN, T7-W4b | `docs/plan/evidence/T2-W2b-deploy.json` | Sol / live-risk |
+| T2-W2b | W3 live proof | T2-W1a, T3-W18, O1, O-DEVENV-PIN, O-FLEETBUSY, T7-W4b | `docs/plan/evidence/T2-W2b-deploy.json` | Sol / live-risk |
 | T2-W4 | W3 live proof | T2-W2b, T7-W4b | `docs/plan/evidence/T2-W4-image-ship.json` | Luna / release |
 | T2-W5 | W3 live proof | O1, T2-W2b, T1-W6, T7-W4b | `docs/plan/evidence/T2-W5-runbook-compat.json` | Luna / runbook |
 | T2-W6 | W3 live proof | O1, T2-W2b, T7-W4, T7-W4b | `docs/runbook/secret-rotation.md`; `docs/plan/evidence/au1.8-fabricd-secret-rotation.json` | Luna / runbook |
 | T3-W7 | W3 live proof | O1, T2-W2b, T1-W6, T7-W4b | `docs/plan/evidence/T3-W7-moat.json` | Sol / live-risk |
 | T3-W8 | W3 live proof | O1, T3-W7, T1-W6, T7-W4b | `docs/plan/evidence/T3-W8-inventory-hitrate.json` | Sol / live-risk |
-| T4-W7 | W3 live proof | O-BILLING, R1, R2, T1-W6, T7-W4b | `docs/plan/evidence/T4-W7-money.json` | Sol / money-path |
-| T4-W8 | W3 live proof | O-BILLING, T1-W6, T7-W4b | `docs/plan/evidence/T4-W8-billing-reconcile.json` | Sol / money-path |
+| T4-W7 | W3 live proof | T9-W1, O-BILLING, R1, R2, T1-W6, T7-W4b | `docs/plan/evidence/T4-W7-money.json` | Sol / money-path |
+| T4-W8 | W3 live proof | T9-W1, O-BILLING, T1-W6, T7-W4b | `docs/plan/evidence/T4-W8-billing-reconcile.json` | Sol / money-path |
 | T5-W4 | W3 live proof | D3, D8, R3, T1-W6, T7-W4b | `docs/plan/evidence/T5-W4-stranger.json` | Sol / onboarding |
 | T5-W5 | W3 live proof | D3, D8, R3, T5-W4, T1-W6, T7-W4b | `docs/plan/evidence/T5-W5-stranger-adversarial.json` | Sol / onboarding |
 | T5-W6 | W3 live proof | D3, T5-W3, O-PUBLISH, T7-W4b | `docs/plan/evidence/T5-W6-release-artifacts.json` | Luna / release |
 | T6-W5 | W3 live proof | O1, T1-W6, T7-W4b | `docs/plan/evidence/T6-W5-e2e.json` | Sol / live-risk |
-| T6-W6 | W3 live proof | T6-W4, O-CANARY, T7-W4b | `docs/plan/evidence/T6-W6-canary.json` | Sol / live-risk |
+| T6-W6 | W3 live proof | T6-W9, O-CANARY, T7-W4b | `docs/plan/evidence/T6-W6-canary.json` | Sol / live-risk |
 | T6-W7 | W3 live proof | T2-W2b, T1-W6, T7-W4b | `docs/plan/evidence/T6-W7-authz.json` | Sol / live-risk |
-| T6-W9 | W3 live proof | T6-W6, T7-W4b | `docs/plan/evidence/T6-W9-alert-rules.json` | Sol / alerting |
+| T6-W9 | W3 live proof | T6-W4, O-CANARY, T7-W4b | `deploy/cloudflare-canary/src/rules.ts`; `deploy/cloudflare-canary/src/notify.ts`; `deploy/cloudflare-canary/test/rules.test.ts`; `docs/plan/evidence/T6-W9-alert-rules.json` | Sol / alerting |
 | T6-W10 | W3 live proof | T6-W6, T6-W9, T1-W6, T7-W4b | `docs/plan/evidence/T6-W10-alerting-depth.json`; `docs/plan/evidence/au6.17-synthetic-slot-lifecycle.json` | Sol / alerting |
 | T6-W11 | W3 live proof | T1-W6, T7-W4b | `docs/plan/evidence/T6-W11-runbook-execution.json` | Luna / runbook |
 | T7-W5 | W3 live proof | O1, O-CFRATE, T3-W7, T1-W6, T7-W4b | `docs/product/pricing.md`; `docs/plan/evidence/au7.11-queued-running-latency.json`; `docs/plan/evidence/au4.19-cloudflare-container-rate.json`; `docs/plan/evidence/au7.12-memoization-hit-rate.json` | Luna / economics |
-| T6-W12 | W3 live proof | T6-W10, T3-W16, O-CFINVENTORY, T1-W6, T7-W4b | `docs/plan/evidence/T6-W12-independent-monitor.json` | Sol / alerting |
+| T6-W12 | W3 live proof | T6-W10, T3-W16, O-CFINVENTORY, T1-W6, T7-W4b | `deploy/cloudflare-cost-monitor/src/index.ts`; `deploy/cloudflare-cost-monitor/src/provider.ts`; `deploy/cloudflare-cost-monitor/src/correlator.ts`; `deploy/cloudflare-cost-monitor/src/types.ts`; `deploy/cloudflare-cost-monitor/wrangler.jsonc`; `deploy/cloudflare-cost-monitor/package.json`; `deploy/cloudflare-cost-monitor/package-lock.json`; `deploy/cloudflare-cost-monitor/tsconfig.json`; `deploy/cloudflare-cost-monitor/vitest.config.ts`; `deploy/cloudflare-cost-monitor/test/provider.test.ts`; `deploy/cloudflare-cost-monitor/test/correlator.test.ts`; `deploy/cloudflare-cost-monitor/test/independence.test.ts`; `docs/plan/evidence/T6-W12-independent-monitor.json` | Sol / alerting |
 | T3-W18 | W0 containment (post-freeze) | T3-W17, T7-W4b | `deploy/cloudflare/wrangler.jsonc` (re-drive-only arming and serialized worker deploy); `docs/plan/evidence/T3-W18-containment-live.json` | Sol / live-risk |
-| T6-W13 | W3 live proof | T6-W4, T6-W6, O-CANARY, T7-W4b | `deploy/cloudflare-canary/src/**`; `deploy/cloudflare-canary/test/metrics-key-lane.test.ts`; `docs/plan/evidence/T6-W13-canary-key-lane.json` | Sol / alerting |
-| T6-W14 | W3 live proof | T6-W13, T6-W12, O-CANARY, T7-W4b | `deploy/cloudflare-canary/src/**`; `deploy/cloudflare-canary/test/no-wake-target.test.ts`; `docs/plan/evidence/T6-W14-canary-no-wake.json` | Sol / live-risk |
+| T6-W13 | W3 live proof | T6-W4, T6-W6, O-CANARY, T7-W4b | `deploy/cloudflare-canary/src/**`; `deploy/cloudflare-canary/wrangler.jsonc`; `deploy/cloudflare-canary/test/metrics-key-lane.test.ts`; `docs/plan/evidence/T6-W13-canary-key-lane.json` | Sol / alerting |
+| T6-W14 | W3 live proof | T6-W13, T6-W12, O-CANARY, T7-W4b | `deploy/cloudflare-fabricd/src/index.ts`; `deploy/cloudflare-fabricd/test/lifecycle-marker.test.ts`; `deploy/cloudflare-canary/src/index.ts`; `deploy/cloudflare-canary/src/rules.ts`; `deploy/cloudflare-canary/src/types.ts`; `deploy/cloudflare-canary/wrangler.jsonc`; `deploy/cloudflare-canary/test/no-wake-target.test.ts`; `docs/plan/evidence/T6-W14-canary-no-wake.json` | Sol / live-risk |
 
 ## Deterministic ready sets and proof
 
@@ -140,11 +160,11 @@ B00: T0-W1 T1-W1 T2-W1a T3-W4 T5-W1 T5-W2 T6-W1 T6-W2
 B01: T2-W2a T3-W17 T4-W4 T5-W3 T6-W3 T6-W8 T7-W1 T7-W2
 B02: T3-W10 T7-W3 T7-W4 T8-W4 T9-W0
 B03: T7-W4b T9-W1
-B04: T1-W5 T2-W2b T3-W18 T5-W6 T6-W4
-B05: T1-W6 T2-W3 T2-W4 T2-W6 T4-W1 T6-W6
-B06: T1-W2 T1-W3 T2-W5 T3-W7 T4-W2 T4-W7 T4-W8 T5-W4
-B07: T3-W3 T3-W8 T5-W5 T6-W11 T6-W13 T6-W5 T6-W7 T6-W9
-B08: T3-W1 T6-W10 T7-W5 T8-W7
+B04: T1-W5 T3-W18 T5-W6 T6-W4
+B05: T1-W6 T2-W2b T2-W3 T4-W1 T6-W9
+B06: T1-W2 T1-W3 T2-W4 T2-W5 T2-W6 T3-W7 T4-W2 T4-W7
+B07: T3-W3 T3-W8 T4-W8 T5-W4 T6-W11 T6-W5 T6-W6 T6-W7
+B08: T3-W1 T5-W5 T6-W10 T6-W13 T7-W5 T8-W7
 B09: T3-W2
 B10: T8-W1
 B11: T8-W3
@@ -164,8 +184,10 @@ vertex count. Kahn's algorithm consumed all vertices (no residual indegree), pro
 acyclic. A future change must regenerate the batches and update `schema: dispatch-dag/v1`; hand-edited
 edges or repeated DAG text in another document are invalid.
 
-The table and batches remain **NOT DISPATCHABLE** while the quiet count is below two or the clean
-post-incident baseline is absent. After that freeze lifts, an unresolved D/O/R token blocks only
-the rows that name it and their descendants. `FABRIC_PG_DISABLED=1` may remain armed during
-implementation and safety containment; it blocks T1-W6 durable-PG green, dependent production
-proof credit and the final production live flip, not unrelated code/test dispatch.
+The table and batches remain **NOT DISPATCHABLE** until the staged snapshot has two quiet rounds,
+the normative promotion has reset quiet count, the byte-identical promoted snapshot has two more
+quiet rounds, and the clean post-incident baseline exists. After that freeze lifts, an unresolved
+D/O/R token blocks only the rows that name it and their descendants. `FABRIC_PG_DISABLED=1` may
+remain armed during implementation and safety containment; it blocks T1-W6 durable-PG green,
+dependent production proof credit and the final production live flip, not unrelated code/test
+dispatch.
