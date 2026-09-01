@@ -1,9 +1,17 @@
 # Deploying `corelink-fabricd` on Cloudflare Containers (gap-#1 option b)
 
 The Rust control plane (RunnerLease API · §13 envelope · attestation key) as ONE
-singleton CF Container, fronted by a thin proxy Worker, kept warm 24/7 by a cron
-ping. The runner BOXES still spawn on `../cloudflare` (the spawn-Worker); this is
-only the control-plane host. Env matrix + checkpoints: `docs/deploy/fabric-server.md`.
+singleton CF Container, fronted by a thin proxy Worker. The minute cron is an
+activity-gated watchdog: it probes only after a recent real request and refuses
+to wake an idle or uncertain shard. The runner BOXES still spawn on
+`../cloudflare` (the spawn-Worker); this is only the control-plane host. Env
+matrix + checkpoints: `docs/deploy/fabric-server.md`.
+
+> **Operational safety:** deploy, container delete/restart, image rollout, secret
+> mutation, and arm-state changes are recovery/change actions, not diagnostic
+> probes. Diagnose read-only first. Use those actions only with an accountable
+> owner, a fixed preflight, active monitoring, a declared rollback, and an
+> approved change window. This document does not authorize a live mutation.
 
 ## Prerequisites (the only owner/machine actions)
 1. **Docker daemon running** — the deploy builds the image locally (`cargo build
@@ -62,17 +70,24 @@ curl -s $HOST/v1/health                       # → ok
 curl -s $HOST/v1/attestation/key              # → key_id faa5b7726ccd2c52 (the prod pubkey)
 # acquire with a real tenant PAT → 200 Held; GET .../envelope/meta → 200 (not 404)
 ```
+
+These application-route calls are wake-capable. Use them only while validating
+an approved rollout or an already-active service. During containment or an idle
+scale-to-zero check, use provider control-plane reads and do not call `/`,
+`/health`, `/v1/health`, `/v1/usage`, or internal status routes.
+
 Then hand `$HOST` to the hugit TL as `HUGIT_RUNNER_HOST` + the spawn/lease PAT
 (`HUGIT_RUNNER_PAT`), per the frozen Seam 1.
 
-## Container health probe (why `/` + `/health` answer 200)
+## Container health probe (historical behavior; not current-state evidence)
 
-CF Containers probes the default port on `/` to mark an instance **healthy**.
-fabricd originally served only `/v1/*`, so the probe 404'd → the instance stayed
-`healthy:0` → **CF reverted rollouts** (a new image silently rolling back to the
-prior one — observed 2026-07-08). Fix: `app.rs` mounts `/` and `/health` →
-auth-free `200 "ok"` (same as `/v1/health`). Verified: after the fix the instance
-reports **`healthy:1`** and rollouts complete + stick. Keep these routes.
+CF Containers probes the default port on `/`. In the 2026-07-08 incident,
+fabricd served only `/v1/*`; the resulting 404 coincided with `healthy:0` and a
+reverted rollout. `app.rs` therefore keeps `/` and `/health` as auth-free
+`200 "ok"` routes (same liveness surface as `/v1/health`). That dated observation
+explains why the routes exist; it is not evidence about the current deployment.
+A 200 proves only that the responding process is live. It does not prove the PG
+ledger, billing exporter, mint path, image identity, or end-to-end traffic.
 
 ## Single-flight singleton — fragility, mitigations, scaling path
 
@@ -113,15 +128,16 @@ pg-only billing export, giving cross-instance cap-safety via the advisory lock.
 Unset, blank, whitespace-padded, or any other value of `FABRIC_PG_DISABLED`
 fails closed to the in-memory ledger even when the URL secret remains bound.
 
-The current containment posture is `FABRIC_PG_DISABLED="1"`, so the live deploy
-is deliberately in-memory (single-instance, state lost on restart). To arm safely,
-prepare and validate the database while that `"1"` remains deployed; change the
-tracked var to exact `"0"` only after the fixed configuration passes; deploy and
-recreate the container; then require `/internal/v1/status` to report
-`ledger_cross_instance_safe: true` before raising `FABRIC_NUM_SHARDS` or
-`max_instances`. Health 200 alone does not prove PG, because memory is healthy too.
-Rollback reverses the gate first: restore exact `"1"`, deploy/recreate and verify
-the in-memory posture before deleting or rotating `DATABASE_URL`. See
+The current containment posture is `FABRIC_PG_DISABLED="1"`, so the configured
+path is deliberately in-memory (single-instance, state lost on restart).
+`DATABASE_URL` alone never arms PG. Exact `FABRIC_PG_DISABLED="0"` is necessary
+but not sufficient authorization to rearm: the database/TLS/role preflight must
+pass on a fixed configuration, the owner must approve the change, monitors and a
+rollback to exact `"1"` must already be ready, and post-change status must prove
+`ledger_cross_instance_safe: true`. Do not raise `FABRIC_NUM_SHARDS` or
+`max_instances` on health alone. D12 still leaves attribution between PgLedger
+startup work and the PG-gated exporter unresolved, so monitor both paths and do
+not describe either one as the established source of resource burn. See
 `docs/runbook/arm-fabricd-pg-ledger-vcpu-ceiling.md` for the ordered procedure.
 
 ## Boxes (checkpoint B+ — when wiring real per-job metrics)
@@ -149,9 +165,9 @@ the spawn-Worker's only container is the GitHub-Actions runner image). So:
 # (+ NORTHFLANK_RUNNER_* tuning as needed; see docs/deploy/fabric-server.md)
 npx wrangler secret put CLOUDFLARE_SPAWN_AUTH_TOKEN   < ~/.hugit/secrets/corelink/cf-spawn-token
 npx wrangler secret put NORTHFLANK_API_TOKEN          < <northflank token, OOB>
-# OPS GOTCHA: a config-only redeploy does NOT restart the singleton container
-# (envVars are read at container start). Force it:
-npx wrangler containers delete <app-id> && npx wrangler deploy
+# envVars are read at container start. Applying them requires an owner-approved
+# rollout with preflight, monitoring, and rollback; never delete/restart/deploy
+# merely to diagnose whether a variable is present.
 ```
 
 After the env is live, smoke BOTH kinds before handing the host to the killer: a runner
@@ -160,18 +176,24 @@ Northflank (not Cloudflare). The `tests/hybrid_flip_e2e.rs` e2e pins this routin
 the live smoke confirms the real backends. **Never claim boxes work off the boot log alone
 — prove an end-to-end spawn of each kind** (the #195 lesson: "substrate wired" ≠ spawn works).
 
-## Status
-✅ **MOAT LIVE + GENUINELY PROVEN (2026-07-09)** at `https://corelink-fabricd.gmhelmold.workers.dev`.
-The live image is `@sha256:91f4b7ea…` (the #332 cred-redemption-fix binary, tag
+## Historical status snapshot (not a current production assertion)
+
+On 2026-07-09, a bounded validation at
+`https://corelink-fabricd.gmhelmold.workers.dev` recorded the moat path working.
+The image observed in that snapshot was `@sha256:91f4b7ea…` (the #332
+cred-redemption-fix binary, tag
 `golive-20260709-credredemption` — see wrangler.jsonc for the pin). It adds the
-`validate_mint_arm` boot guard: a healthy boot now PROVES `FABRIC_PUBLIC_BASE_URL` is wired, so
-the moat's per-job PAT can actually be redeemed (the earlier `cb6fca46…` moat-fix binary minted a
+`validate_mint_arm` boot guard: a successful boot checks that
+`FABRIC_PUBLIC_BASE_URL` is wired when mint is armed (the earlier `cb6fca46…`
+moat-fix binary minted a
 real PAT the box could never redeem — go-live audit wf_63a2b814). `/v1/health → 200 ok`,
 `/v1/attestation/key
 → key_id faa5b7726ccd2c52` (prod key). The per-job CAS PAT mint is proven REAL (a hydrating
 check-host acquire went 503→200 across the `token_plaintext` response-parse fix — a mint-armed
 transition a cold-run could never produce), and the attested-cost `intent_metrics_sig` rides the
 close. CF-native: introspect auth + CF spawn-Worker box backend, **no Northflank**.
+None of those dated results establishes the current image, arm state, liveness,
+or end-to-end behavior; re-establish each claim with current, read-only evidence.
 
 ⚠️ **Two go-live bugs the earlier "proven" reads MISSED** (both fixed): (1) `index.ts` didn't
 forward the mint/cred/emit vars into the CONTAINER (only the Worker saw them) → mint OFF → cold-run
@@ -183,8 +205,9 @@ mint-armed 503→200 transition (or a server-side mint-request log) does.
 `HUGIT_RUNNER_HOST` + re-pin the pubkey (`b1eba792…` → `faa5b7726…`); PAT unchanged (same introspect).
 See `docs/handoff/2026-07-07-CUTOVER-READY-to-hugit-TL-…`. Trigger is the owner's.
 
-**Ops note:** to rebuild the binary — temp-copy `crates/corelink-fabric-server/Dockerfile` to the repo
+**Controlled-change note:** to rebuild the binary — temp-copy `crates/corelink-fabric-server/Dockerfile` to the repo
 root, `npx wrangler containers build <repo-root> -t corelink-fabricd-fabricdcontainer:<tag> --push`
 (the root `.dockerignore` keeps the context small), pin the returned `@sha256` digest in
 `wrangler.jsonc`, `wrangler deploy` (a NEW digest forces the container rollout; a config-only change
-does not). Docker daemon required for the build only.
+does not). This is an owner-approved release procedure, never a diagnostic step.
+Docker daemon required for the build only.

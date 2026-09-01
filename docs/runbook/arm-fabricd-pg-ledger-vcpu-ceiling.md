@@ -3,8 +3,15 @@
 > Owner directive 2026-07-02 (`FABRIC_RUNNER_VCPU=4`). Deploy layer wired in #286.
 > The durable path now has two gates: a non-empty `DATABASE_URL` **and** the exact
 > Worker var `FABRIC_PG_DISABLED="0"`. Missing, blank, whitespace-padded, or any
-> other value keeps the ledger in memory. This runbook is the arm procedure once
-> a Postgres URL exists.
+> other value keeps the ledger in memory. `DATABASE_URL` alone never arms PG, and
+> exact `"0"` is necessary but not sufficient operational authorization. This
+> runbook is the controlled arm procedure once every preflight gate passes.
+
+This is a production change, not a diagnostic technique. Do not deploy, restart,
+delete/recreate a container, or alter a secret/flag merely to identify a fault.
+The accountable owner must approve the fixed change, monitor, success threshold,
+timeout, and rollback first. Canary flags and the canary deployment are outside
+this runbook and must remain untouched.
 
 ## What this does
 Moves the CF-fabricd DO singleton from the **in-memory** ledger to the durable **PgLedger**
@@ -34,6 +41,24 @@ use transaction-mode pooling. Keep `FABRIC_PG_DISABLED` at the committed contain
 value `"1"` during this validation: with that value, even a bound `DATABASE_URL`
 cannot reach the container.
 
+## Required go/no-go record
+
+Before changing exact `"1"`, record all of the following in the incident/change
+log. Any missing item is a NO-GO:
+
+1. accountable owner and approved change window;
+2. current deployed version/config and exact `FABRIC_PG_DISABLED="1"` containment;
+3. fixed database endpoint, TLS mode, role/DDL capability, and provider headroom;
+4. zero or explicitly drained/accepted in-flight lease blast radius;
+5. live monitor queries for startup failures, provider resource use, PG connections,
+   exporter attempts/failures, and `ledger_cross_instance_safe`;
+6. success thresholds and a bounded observation interval; and
+7. rollback prepared to restore exact `"1"` before any database-secret change.
+
+D12 remains unresolved: existing evidence does not distinguish PgLedger startup
+work from the jointly gated exporter as the source of resource burn. The arm must
+therefore observe both paths and must not claim either attribution as fact.
+
 ## Arm procedure (once DATABASE_URL is in hand)
 ```bash
 cd deploy/cloudflare-fabricd
@@ -47,15 +72,17 @@ rg '"FABRIC_PG_DISABLED": "1"' wrangler.jsonc
 npx wrangler secret put DATABASE_URL --name corelink-fabricd
 #   (optional) override TLS if the PG can't do TLS:  npx wrangler secret put FABRIC_PG_TLS  -> "disable"
 
-# 3. Only after the fixed database configuration passed its connection/permission
-#    checks, edit wrangler.jsonc and change FABRIC_PG_DISABLED from "1" to the
-#    byte-exact string "0". Do not delete the line: absence remains disabled.
+# 3. STOP unless the complete go/no-go record above is approved. Only then edit
+#    wrangler.jsonc and change FABRIC_PG_DISABLED from "1" to the byte-exact
+#    string "0". Do not delete the line: absence remains disabled.
 rg '"FABRIC_PG_DISABLED": "0"' wrangler.jsonc
 
-# 4. Deploy the Worker config (Docker-free — image is the managed-registry ref).
+# 4. Controlled change only (never diagnosis): deploy the reviewed Worker config.
 npx wrangler deploy --containers-rollout=none
 
-# 5. Recreate the singleton container so it re-reads the exact-0 arm + secret.
+# 5. Controlled change only: after checking the exact application id and blast
+#    radius, recreate the singleton so it re-reads the exact-0 arm + secret.
+#    Never use this delete/restart sequence to discover whether PG is causal.
 #    (env-only changes are NOT applied by deploy alone — the DO reads envVars at START.)
 npx wrangler containers list                      # find the fabricd app id
 npx wrangler containers delete <fabricd-app-id>   # ~1-2 min fabricd outage (in-mem state is lost anyway)
@@ -75,6 +102,12 @@ npx wrangler deploy --containers-rollout=none      # DO recreates the container 
    in-memory). This is the concrete win.
 6. Accounting armed: the compute-meter path is live (durable vCPU·ms). Enforcement stays at
    entitlement-`max_vcpu_h` (0/unlimited on corelink until the Server ships the entitlement vector).
+7. During the bounded observation interval, compare provider resource use, PG
+   connection/startup signals, and exporter attempt/failure signals against the
+   predeclared thresholds. A 200 health response is not sufficient evidence.
+
+If any monitor is unavailable, ambiguous, or crosses threshold, stop and execute
+rollback. Do not add a restart/deploy experiment to the plan while observing.
 
 ## Rollback
 Fail closed **before** changing the database secret:
@@ -89,14 +122,18 @@ Fail closed **before** changing the database secret:
    rotate, or repair `DATABASE_URL`. Removing the secret is optional defense in
    depth, not the primary rollback gate.
 
-If PG is already preventing boot, the same order applies: deploy exact `"1"`
-first, recreate the container, prove the in-memory service is healthy, and only
-then manipulate the failing database credential.
+If PG is already preventing boot, the same order applies as an approved recovery:
+restore exact `"1"` first, apply the reviewed rollback, verify the in-memory
+posture, and only then manipulate the failing database credential. Repeated
+delete/restart/deploy attempts are not diagnosis and are prohibited.
 
 ## Safety notes
 - PG is inert unless **both** gates are present: non-empty `DATABASE_URL` and
   byte-exact `FABRIC_PG_DISABLED="0"`. The explicit containment value is `"1"`;
   unset or malformed values also fail closed and must never be used as an arm.
+- Exact `"0"` only permits the jointly gated environment to reach the container;
+  it does not prove database readiness, exporter safety, deployment success, or
+  authorization. Those are separate preflight and post-change gates.
 - Do NOT set `FABRIC_TENANT_MAX_VCPU_H` on the corelink path — it is a dead-knob there (boot guard
   `server.rs:818` fail-closes) ; the ceiling is entitlement-sourced.
 - The recreate causes a brief fabricd outage; acceptable at dogfood (CI uses the autoscaler, not the

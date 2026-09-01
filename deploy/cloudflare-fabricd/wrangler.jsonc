@@ -5,9 +5,9 @@
   // every request to it. The runner BOXES still spawn on the separate
   // corelink-spawn-worker (ADR-0008 moat); this is only the control-plane host.
   //
-  // ⚠️ NOT YET DEPLOY-VERIFIED — the container build needs the Docker daemon
-  // running (cargo build --release of the workspace). Once Docker is up:
-  //   npm install && npm run deploy   (then set the secrets — see README.md)
+  // This tracked file is desired configuration, not proof of current deployment
+  // state. Establish live state read-only before any change. Deploy/restart/delete
+  // are owner-approved recovery/release actions, never diagnostic probes.
   "name": "corelink-fabricd",
   "main": "src/index.ts",
   "compatibility_date": "2026-06-01",
@@ -18,8 +18,8 @@
   // spawn-Worker has carried this since its own stall triage; fabricd never did,
   // which is why the 2026-08-19 outage was investigated blind: `wrangler
   // containers info` reported the container application with NO
-  // `configuration.observability.logs` block, while the healthy
-  // corelink-spawn-worker-runnercontainer reports `logs.enabled: true` — and that
+  // `configuration.observability.logs` block, while the then-observed
+  // corelink-spawn-worker-runnercontainer reported `logs.enabled: true` — and that
   // flag comes from THIS top-level key, not from anything under `containers[]`.
   // Without it the container's own stderr (every fabricd boot line, including the
   // reason a pre-bind step aborts) is never emitted anywhere, so a container that
@@ -48,68 +48,24 @@
     //   2. Raise this AND `max_instances` (containers block below) TOGETHER.
     // Still owner-gated (do it when real check-host burst volume arrives).
     "FABRIC_NUM_SHARDS": "1",
-    // ⛔ DURABLE LEDGER OFF — 2026-08-31. A DEGRADED state, and one to undo.
+    // ⛔ CURRENT CONTAINMENT: the durable PG block is explicitly disabled.
+    // Keep this byte-exact value. DATABASE_URL may remain bound, but it NEVER arms
+    // PG by itself: pgLedgerEnvVars forwards the PG ledger, vCPU ceiling, and
+    // PG-gated exporter only when this value is the exact string "0". Unset,
+    // blank, whitespace-padded, "1", and malformed values all fail closed.
     //
-    // The Neon project behind DATABASE_URL refuses every connection on a plan
-    // quota ("Your account or project has exceeded…"), and `PgLedger::connect`
-    // runs before `TcpListener::bind`, so the control plane could not start at all
-    // — down since 2026-08-19. Worse, the failure fed itself: the keep-warm cron
-    // retries every minute, each retry dials the database, and a scale-to-zero
-    // database woken every 60 s never autosuspends — so the crash loop burns the
-    // very compute allowance whose exhaustion caused the refusal. That is why this
-    // is set now instead of waiting for the quota period to roll: without it the
-    // next allowance is spent the same way, and the outage returns mid-month.
+    // The 2026-08-31/09-01 observations bounded the resource-burn incident to the
+    // jointly gated PG surface. They did NOT establish whether PgLedger startup
+    // work or the PG-gated exporter was causal; D12 remains unresolved. Do not
+    // attribute the burn to either path without new evidence.
     //
-    // GIVEN UP unless this is exactly "0": lease state does not survive a restart,
-    // N>1 stays refused (the acquire cap-guard fail-closes off pg), the vCPU ceiling
-    // disarms with it, and durable billing export is inert. None of that is readable
-    // today regardless — the database is refusing every connection.
-    //
-    // TO UNDO: restore a database, point DATABASE_URL at it, change this line to
-    // the exact string "0", and redeploy. NEVER delete the line to arm PG: unset,
-    // blank, whitespace and malformed values intentionally remain fail-closed.
-    // A fresh free project on an equivalent provider is enough —
-    // docs/handoff/2026-07-03-PLAN-postgres-provisioning-and-vcpu-ceiling-arm.md
-    // sanctions Supabase alongside Neon, with the same public-CA TLS that
-    // FABRIC_PG_TLS=require verifies and the same CREATE TYPE/TABLE grant the DDL
-    // needs. Use a DIRECT or SESSION-mode connection, never transaction-mode
-    // pooling: tokio-postgres uses prepared statements and deadpool holds
-    // connections across calls, which transaction pooling breaks.
-    // FABRIC_PG_DISABLED — SET during the 2026-08-31 outage, REMOVED the same day.
-    //
-    // It was armed because the Neon project refused every connection on a plan
-    // quota and `PgLedger::connect` fail-closes before `TcpListener::bind`, so the
-    // control plane could not start at all. It is removed because the quota came
-    // back AND the thing that was eating it is gone: the crash loop dialled the
-    // database every minute, and a scale-to-zero database woken every 60 s never
-    // autosuspends, so the outage was feeding on the allowance whose exhaustion
-    // caused it. A healthy fabricd sleeps after 5 m idle (see FabricdContainer),
-    // which lets Neon suspend and stops the burn.
-    //
-    // Measured on the durable ledger, two independent samples on a fixed config:
-    // 6/6 and 6/6 SERVED. A 200 here is itself the proof that Postgres accepted the
-    // connection and the DDL applied — with the pg backend armed, boot cannot reach
-    // the listener otherwise. /v1/attestation/key 200, /v1/usage 401 fail-closed.
-    //
-    // TO RE-ARM (emergency only, if the database refuses again): add
-    //   "FABRIC_PG_DISABLED": "1",
-    // and redeploy. It suppresses the whole DATABASE_URL block — pg backend, the
-    // vCPU ceiling the #265 guard ties to it, and the pg-only billing export — which
-    // is the same coherent state as never having set the secret. It costs lease
-    // durability across restarts, N>1, the ceiling and durable billing export, so it
-    // is a bridge, never a destination. If the quota keeps recurring, move the
-    // database rather than living here: docs/handoff/2026-07-03-PLAN-postgres-
-    // provisioning-and-vcpu-ceiling-arm.md sanctions Supabase alongside Neon, and a
-    // free project suffices — direct or SESSION-mode connection only, because
-    // tokio-postgres uses prepared statements and deadpool holds connections across
-    // calls, which transaction-mode pooling breaks.
-    //
-    // RE-ARMED 2026-09-01 (incident containment): production `/health` again
-    // returned `500 Failed to start container`, the live Worker still had
-    // DATABASE_URL armed, and its `* * * * *` scheduled trigger was confirmed
-    // live. This stops the pre-bind Postgres dial loop immediately. Change to exact
-    // "0" only after a replacement/restored database passes a fixed-config
-    // boot-rate probe; removing the binding intentionally keeps PG disabled.
+    // Exact "0" is a necessary technical condition, not sufficient operational
+    // authorization. Rearm only through docs/runbook/arm-fabricd-pg-ledger-vcpu-
+    // ceiling.md after owner approval, fixed-config database/TLS/role preflight,
+    // monitor readiness, and a prepared rollback to exact "1". A deploy, restart,
+    // container delete, or image rollout is a controlled change, never a diagnostic
+    // probe. Canary flags and canary deployment state are outside this config's
+    // scope and must remain untouched by this procedure.
     "FABRIC_PG_DISABLED": "1",
     "CORELINK_INTROSPECT_URL": "https://corelink-api.humangr.com/internal/v1/auth/introspect",
     "BILLING_INGEST_URL": "https://corelink-api.humangr.com/internal/v1/billing/usage",
@@ -120,8 +76,8 @@
     // /v1/spawn intermittently 500/502/504'd — root-caused to TRANSIENT Cloudflare
     // Durable-Object start errors and fixed in #268 (retry + 202/waitUntil +
     // per-attempt timeout). The shared CLOUDFLARE_SPAWN_AUTH_TOKEN secret is set on
-    // both workers (inert without this URL). A container RESTART is required to
-    // pick this up (envVars are read at container start).
+    // both workers (inert without this URL). envVars are read at container start;
+    // applying a change requires a reviewed rollout, never a diagnostic restart.
     "CLOUDFLARE_SPAWN_WORKER_URL": "https://corelink-spawn-worker.gmhelmold.workers.dev",
     // ── MOAT MINT — ARMED (FLIP-A, 2026-07-08 go-live) ────────────────────────
     // Client contract complete both sides: #319 (frozen 5-field body, owner_tenant
@@ -164,12 +120,11 @@
     // and this export remain inert under the current exact "1". 60s is a sane
     // durable-export cadence once deliberately armed (distinct from the always-on
     // 30s corelink push).
-    // Disarming this was tried during the 2026-08-31 outage triage and correctly
-    // measured as NO change (0/10 SERVED): the pre-bind Postgres failure is not the
-    // exporter's, it is `PgLedger::connect` inside `build_app_and_state`
-    // (server.rs:1274). Left at the intended value — the proxy only forwards it
-    // inside the DATABASE_URL block, so it is inert whenever the durable ledger is
-    // off, including under FABRIC_PG_DISABLED.
+    // A 2026-08-31 triage sample observed no change after disarming the exporter,
+    // but that sample is not sufficient to attribute the resource burn. D12 keeps
+    // PgLedger startup work versus the PG-gated exporter unresolved. The proxy
+    // forwards this value only inside the jointly gated PG block, so it is inert
+    // under the current exact FABRIC_PG_DISABLED="1" containment.
     "FABRIC_BILLING_EXPORT_INTERVAL_SECS": "60",
     // Boot-guard override. UNSET on purpose: the default (FATAL on a rejected
     // introspect key) is the intended production behaviour. What the 2026-08-30
@@ -226,9 +181,11 @@
   "containers": [
     {
       "class_name": "FabricdContainer",
-      // DOCKER-FREE DEPLOY (2026-07-03): references the PRE-BUILT fabricd image in
-      // the Cloudflare managed registry (the LIVE digest, confirmed via
-      // `wrangler containers info`) instead of building the Dockerfile locally — so
+      // The image-lineage notes below are historical investigation records, not
+      // current-state evidence or a runbook. Do not repeat their deploy/bisect/
+      // restart experiments without a newly approved preflight and rollback.
+      // DOCKER-FREE DEPLOY (2026-07-03): references a PRE-BUILT fabricd image in
+      // the Cloudflare managed registry instead of building the Dockerfile locally — so
       // `wrangler deploy` (incl. a container ROLLOUT to apply new envVars) no longer
       // needs a Docker daemon. To rebuild the control-plane binary: build+push a new
       // image (CI, or a Docker host) and update this @sha256 digest.
@@ -238,9 +195,9 @@
       // {CLW_FABRIC_ENDPOINT}/v1/leases/{id}/cas-cred, but CLW_FABRIC_ENDPOINT is
       // gated on FABRIC_PUBLIC_BASE_URL — which was set NOWHERE (go-live audit
       // wf_63a2b814). This binary adds the validate_mint_arm boot guard that
-      // FAILS CLOSED if the mint is armed without FABRIC_PUBLIC_BASE_URL, so a
-      // healthy boot now PROVES the redemption endpoint is wired. wrangler.jsonc
-      // vars set FABRIC_PUBLIC_BASE_URL (above) + forward it into the container.
+      // FAILS CLOSED if the mint is armed without FABRIC_PUBLIC_BASE_URL. A
+      // successful historical boot checked that config invariant; it did not by
+      // itself prove end-to-end redemption or current deployment state.
       // 2026-07-11 AUDIT-REMEDIATION binary (61fcce2c): adds WP-3 counter
       // completeness (queue-mode admission rejection counters + de-smeared
       // acquire_rejected_no_plan #382) AND the #376 dead-counter wiring
@@ -285,9 +242,10 @@
       // #398 (introspect breaker treats all 5xx as transient + mint-auth-key strength
       // floor), #399 (N>1/tenant docs). @sha256 DIGEST-PINNED (X4) — built by
       // build-fabricd-image.yml, which now resolves the pushed digest via imagetools
-      // (#400) instead of falling back to the git-SHA tag. Deployed + verified LIVE:
-      // a malformed disarmed test-mint body → 404 (was 422 on the prior fa6b1c3b
-      // binary); acquire auth/introspect healthy on the new binary.
+      // (#400) instead of falling back to the git-SHA tag. Historical rollout
+      // evidence (2026-07-18; not a current-state assertion): a malformed disarmed
+      // test-mint body → 404 (was 422 on the prior fa6b1c3b binary), and that
+      // bounded sample observed acquire auth/introspect responding.
       // 2026-07-19 KEY-DRIFT-HARDENING binary (6f899a7a): fabricd carrying #407
       // (introspect success-only short-TTL cache, DEFAULT-OFF via
       // FABRIC_INTROSPECT_CACHE_TTL_MS=0) + #408 (boot introspect self-check —
@@ -326,8 +284,9 @@
       // (unchanged since #185, 2026-06-25) and same digest-pinned bases, and other
       // container apps on this account are healthy — so the common factor is the
       // fabricd crate code, not the image recipe or the platform.
-      // 9191661 is the last image with an in-repo "Deployed + verified LIVE" record
-      // (#407 + #408, the key-drift-hardening binary). If THIS boots, the regression
+      // 9191661 had the latest dated in-repo deployment record at that investigation
+      // point (#407 + #408, key-drift hardening); that record is not current-state
+      // evidence. The historical hypothesis was: if THIS boots, the regression
       // is in crates/ between 9191661 and e5f07f8 and we have a bisect window; if it
       // does not, the whole crate-regression theory is wrong.
       // Cost while pinned here: this binary predates #514/#515 and Inc-3's CF Access
@@ -400,7 +359,9 @@
   // only after recent real traffic; idle or uncertain state refuses the waking probe.
   // DATABASE_URL remains bound, but the current exact FABRIC_PG_DISABLED="1" keeps
   // the ledger in memory. PG durability, the vCPU ceiling, and pg-only export arm
-  // only after an intentional change to byte-exact "0" + deploy/recreate + status
-  // verification. Roll back by restoring exact "1" before touching DATABASE_URL.
+  // only after an owner-approved change to byte-exact "0", fixed preflight,
+  // monitored rollout, and status verification. Exact "0" is necessary but not
+  // sufficient; DATABASE_URL alone never arms. Roll back by restoring exact "1"
+  // before touching DATABASE_URL. Never deploy/restart/delete merely to diagnose.
   "triggers": { "crons": ["* * * * *"] }
 }
