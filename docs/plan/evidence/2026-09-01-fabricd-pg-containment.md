@@ -25,6 +25,32 @@ This evidence made the recurring fabricd-to-Postgres boot loop the bounded,
 actionable source of burn. No platform instance name was used as a teardown
 handle.
 
+### Runner-fleet cross-check
+
+The runner application had a separate historical spike: 802 instance records
+were created between 18:00Z and 21:00Z on 2026-08-31. The live aggregate
+`containers info` surface reported 18 healthy instances, but that number is not a
+reliable running/billable count: the detailed inventory initially returned
+883/883 inactive, briefly exposed one older instance as running while the list
+converged, and at 2026-09-01 16:06Z returned 885/885 inactive and zero non-inactive.
+GitHub simultaneously reported zero `cf-runner-*` online or busy. The current
+queued `corelink-server` jobs used the reserved `corelink-builder` label and were
+not inputs to the Cloudflare reconciler.
+
+Seven remote `sbox:` records were inspected. Their stored handles did not match
+the UUID that appeared briefly in the detailed inventory, so no unproven
+instance-name-to-Durable-Object join was used for teardown. The instance had
+already become inactive at the next sample.
+
+The read-only code review did find a recurrence amplifier that must be fixed:
+after its grace period, `redriveOrphanedJobs` can release a queued job's spawn
+claim and try again, while the concurrency-slot acquisition is idempotent by
+`jobId`. A stuck job can therefore create another box without consuming another
+slot. This explains the shape of the historical spike but was not active for the
+reserved-label run sampled here. It belongs in the remediation backlog together
+with an explicit intake/re-drive kill switch; it did not justify a destructive
+runner rollout during this containment.
+
 ## Change
 
 Commit `2df6740` re-armed the existing emergency switch:
