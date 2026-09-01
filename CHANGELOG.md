@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-09-01 — go-live plan rev-6 draft fails closed under structural mutation
+
+The post-incident backlog remains **NOT FROZEN** and has quiet count zero. The rev-6 draft reconciles
+30 AU source findings into 31 STAGING-only acceptance proposals, repairs falsifiability and
+fail-closed semantics in existing A rows, and records incident-driven proposals for early runner
+kill switches, authoritative inventory joins, bounded PostgreSQL refusal, no-wake canary monitoring
+and independent burn alerts.
+
+`plan-check.py`, `wp-check.py` and `au-check.py` now reject the false-PASS classes reproduced by the
+round-4 cold review. `gates-selftest.py` requires eight corrupted fixtures to block, and the new
+`plan-integrity.yml` workflow runs all planning gates on relevant changes. Structural PASS is not
+freeze, dispatch or production-readiness evidence.
+
 ### 2026-09-01 — fabricd burn contained; the durable-ledger restoration is superseded
 
 The current production state is deliberately degraded under

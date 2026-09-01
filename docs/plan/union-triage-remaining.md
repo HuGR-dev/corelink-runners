@@ -5,16 +5,22 @@
 > **`AU` namespace** (`AU1.x` … `AU7.x`, capability-grouped), so provenance is visible in the id and
 > a collision with the `A` suite is impossible by construction.
 >
-> **Four structural consequences the agent correctly escalated instead of deciding — lead rulings:**
-> 1. **Wave-2 serial chain grows 8 → 11 links. ACCEPTED.** Money-path correctness still outranks
->    wall-clock. But the chain is now the plan's dominant schedule risk, which raises the value of
->    `T7-W6` (`index.ts` modularization); it stays post-GA, and §10 records the trade.
-> 2. **`T5-W2`'s scope narrowed** to `integrations/**` minus `github-actions/action.yml`. ACCEPTED —
->    otherwise `wp-check`'s parallel-scope rule fails against the new `T5-W3`.
-> 3. **`T3-W10` serialized behind `T3-W4` → `T4-W4`.** ACCEPTED — three WPs now write
+> **Five structural consequences the agent correctly escalated instead of silently deciding — lead
+> rulings:**
+> 1. **The worker-monolith serial chain grows from 8 → 11 links** when T3-W14, T3-W9 and T8-W5 are
+>    added. The canonical Wave-2 table also contains the separate T9-W1 devenv quarantine row, so
+>    its total row count would be 9 → 12 if these AU rows were ever promoted. Money-path correctness
+>    still outranks wall-clock; `index.ts` modularization has no AU WP and remains post-GA.
+> 2. **`T5-W2` → `T5-W3` is serial.** The canonical T5-W2 owns `integrations/**`, while proposed
+>    T5-W3 owns `integrations/github-actions/action.yml`. T5-W3 therefore cannot dispatch or seal
+>    until T5-W2 has sealed; the shared file is never assigned to parallel agents.
+> 3. **AU7.10 extends canonical `T5-W1`.** Its only in-repo target is
+>    `actions/corelink-memoize/README.md`, already inside T5-W1's X. Proposed T7-W4 retains AU7.8
+>    and AU7.9 only; this avoids a cross-WP ownership fiction.
+> 4. **`T3-W10` is serialized behind `T3-W4` → `T4-W4`.** Three WPs would write
 >    `crates/corelink-fabric-server/**`, and that is exactly the AP-1 trap the plan refuses.
-> 4. **Two new gating ids adopted:** owner arming **`O-CFRATE`** (one Cloudflare Containers invoice
->    line) and relay **`R6`** (two-tenant same-memoize-key CAS read-refusal, which only
+> 5. **Two new gating ids are staged:** owner arming **`O-CFRATE`** (one Cloudflare Containers
+>    invoice line) and relay **`R6`** (two-tenant same-memoize-key CAS read-refusal, which only
 >    corelink-server can assert — `INV-6` forbids asserting it here).
 >
 > **`union-14` was re-scoped, not parked:** the agent checked it at HEAD and found 2 of its 3 claims
@@ -23,8 +29,8 @@
 > every COLD at-ceiling refusal is dropped — is what carries forward. That is the ledger being
 > verified rather than trusted, which is the point.
 >
-> **ROUND-3 CORRECTION (2026-09-01).** Round 3 found that the `AU` namespace is invisible to the
-> current `wp-check.py`, three proposed WP ids collide with rev-5 WPs, and several items still carry
+> **ROUND-3 CORRECTION (2026-09-01).** Round 3 found that the `AU` namespace is intentionally
+> invisible to the principal `wp-check.py`, three proposed WP ids collide with rev-5 WPs, and several items still carry
 > an implementation fork or an unfixed proof threshold. The corrections below rename the colliding
 > WPs, split AU3.23's test from its live proof, and pre-fix the formerly open criteria. Full
 > disposition is in `docs/plan/2026-09-01-round3-remediation-delta.md`.
@@ -73,13 +79,13 @@ Nothing is placed in CLEAN-no-action or DEFER-needs-waiver — see §4.
 | W4-post-decision | 2 | union-30 · M5p |
 | DECISION | 0 | — |
 | ARMING | 0 | (one new owner ask, **O-CFRATE**, gates `union-28`; the finding itself stays W3) |
-| RELAY | 1 | union-23 (new relay **R6**; its in-repo doc half rides T7-W4) |
+| RELAY | 1 | union-23 (new relay **R6**; its in-repo doc half extends T5-W1) |
 | DOCS-sweep | 1 | union-20 |
 | CLEAN-no-action | 0 | — |
 | DEFER-needs-waiver | 0 | — |
 | **total** | **30** | |
 
-**Acceptance items proposed: 31** (`AU1.8`–`AU1.9`, `AU3.19`–`AU3.22`, `AU3.23a`, `AU3.23b`,
+**Acceptance items proposed: 31 for 30 source findings** (`AU1.8`–`AU1.9`, `AU3.19`–`AU3.22`, `AU3.23a`, `AU3.23b`,
 `AU3.24`–`AU3.28`, `AU4.14`–`AU4.19`, `AU5.10`–`AU5.12`, `AU6.16`–`AU6.17`,
 `AU7.6`–`AU7.12`). Every one is RED at `8bf1de7` — the
 evidence column is the proof of redness, since each item asserts the negation of a behaviour
@@ -87,10 +93,13 @@ I read in the code.
 
 **New WPs named: 10** — T3-W14, T3-W9, T3-W10, T8-W5, T8-W6, T8-W4, T5-W3, T7-W4,
 T7-W5, T2-W6. The round-3 renames avoid rev-5's T3-W8, T8-W3 and T2-W5.
-**Existing WPs extended: 4** — T4-W1 (+1), T8-W1 (+1), T6-W6 (+1), T3-W5 (+2).
-The proposed ownership is hand-counted at ≤4 items per WP; this is **not** a mechanical pass because
-the current `wp-check.py` parses only `A`, not `AU`. The `AU` universe must be added to the checker in
-the eventual suite-merge change, after review convergence; until then these rows are invisible to it.
+**Existing WPs extended: 5** — T4-W1 (+1), T8-W1 (+1), T6-W6 (+1), T3-W5 (+2), T5-W1 (+1).
+The proposed ownership is mechanically checked at ≤4 items per WP by the staging gate
+`python3 docs/plan/au-check.py`: it validates 30 source findings, 31 AU ids, exact-once ownership,
+the coordinated WP renames, and principal/AU id separation. The principal `wp-check.py` intentionally
+parses only `A`; `au-check.py` does not promote AU, alter the principal catalog, or adjudicate the
+explicit serial edges and scope ownership above. A future suite-delta change must carry the same
+edges and ownership into the principal catalog after review convergence.
 
 ---
 
@@ -111,14 +120,14 @@ Item ids continue the plan's §3 namespace, in the capability the ledger assigne
 | union-14 | M12 | MEDIUM | W2-serial-worker | W2 · **T3-W14** *(new)* | INV-3 | none | **AU3.20 — test:** a **COLD** at-ceiling refusal (no `installationId`) writes a terminal, queryable job record and is surfaced — today `recordOrphan` returns before writing anything | **PARTIALLY STALE — re-scoped.** Two of (b)'s three claims no longer hold: the refusal `throw`s a typed `SpawnRefusedError` (`index.ts:1744`) rather than early-returning, and it holds no phantom slot (`slot.admitted === false` means nothing was acquired, `index.ts:1721`). **The surviving half is real and is the item above:** `index.ts:1796` `if (!env.RUNNER_JOB_PATS || !opts.installationId) return; // cold ⇒ not warm-recoverable` — the catch in `driveSpawnGuarded` (`:3094`) calls `recordOrphan`, which drops every cold refusal on the floor |
 | union-15 | M16 | MEDIUM | W3-live-proof | W3 · **T6-W6** *(existing, 3 → 4 items)* | — (C6 capability; no §13 invariant) | **O-CANARY** + the canary deploy (`hist-12`) | **AU6.17 — probe:** the canary executes **20/20** synthetic acquire→spawn→release transactions on consecutive ticks; every tick returns the slot count to 0 within **75 s**, and any non-zero result delivers an alert within **120 s**; the artifact records the deployed canary version id | `deploy/cloudflare-canary/src/index.ts:144-147` — the tick fetches exactly three read-only surfaces (`fetchSurface` ×2, `fetchHealth` ×1) and performs no acquire or spawn |
 | union-16 | M17 | LOW | W1-parallel | W1 · **T3-W10** *(new)* | INV-1 | T3-W4 → T4-W4 (same crate) | **AU7.7 — test:** every error response from `cas_cred` (Rust) deserializes as the frozen `ErrorBody{code,message}`; the Worker twin is asserted in the same suite | `crates/corelink-fabric-server/src/handlers/cas_cred.rs:43` `fn err(status, msg) -> (status, Json(json!({ "error": msg })))` — an ad-hoc shape on a public route; the Worker twin repeats it at `index.ts:3566-3569` |
-| union-17 | M18 | MEDIUM | W1-parallel | W1 · **T5-W3** *(new — see §3 scope note)* | INV-3, INV-8 | none | **AU5.11 — test:** a caller passing `$(id)` / `"; touch pwned; #` as an action input has it forwarded via env indirection and never evaluated by the action's bash (assert on the composite-action source, not on a run) | `integrations/github-actions/action.yml:133-135` `ARGS+=(--url "${{ inputs.url }}")`, `:138` `if [[ -n "${{ inputs.image }}" ]]`, `:143` `if [[ "${{ inputs.verify }}" == "false" ]]` — all inside `shell: bash` steps |
+| union-17 | M18 | MEDIUM | W1-parallel | W1 · **T5-W3** *(new — serial after T5-W2)* | INV-3, INV-8 | **T5-W2 is a hard predecessor** (shared `integrations/github-actions/action.yml`) | **AU5.11 — test:** a caller passing `$(id)` / `"; touch pwned; #` as an action input has it forwarded via env indirection and never evaluated by the action's bash (assert on the composite-action source, not on a run) | `integrations/github-actions/action.yml:133-135` `ARGS+=(--url "${{ inputs.url }}")`, `:138` `if [[ -n "${{ inputs.image }}" ]]`, `:143` `if [[ "${{ inputs.verify }}" == "false" ]]` — all inside `shell: bash` steps |
 | union-18 | M20 | LOW | W1-parallel | W1 · **T7-W4** *(new)* | INV-5 | none | **AU7.8 — test:** a CI check extracts credential/binding names from this exhaustive tracked-file universe: every `deploy/**/wrangler*.jsonc`, `.github/workflows/**/*.{yml,yaml}`, `deploy/**/src/**/*.{ts,js}`, `crates/**/src/**/*.rs`, `deploy/**/*.{sh,Dockerfile}` and `scripts/**/*.sh`; the only exclusions are generated/vendor trees declared in the checker. It diffs that set against `docs/runbook/secret-inventory.md`, fails on any missing/stale name, and carries one planted fixture for each source class | `docs/runbook/secret-inventory.md` (183 lines) contains **zero** occurrences of `COLD_ORGANIC_TENANT_PAT`, `CORELINK_CF_ACCESS_CLIENT_ID`, `FABRIC_TEST_MINT_KEY`, `PINNED_IMAGE_DIGEST` (`grep -c` = 0 for each); all four are live names elsewhere (e.g. `deploy/cloudflare/wrangler.jsonc:65`, `:76`) |
 | union-19 | M21 | MEDIUM | W3-live-proof | W3 · **T2-W6** *(new)* | INV-2 | **O1** · **T2-W2b** (hard predecessors: the deploy path must work before rotation proof) | **AU1.8 — probe:** the runbook contains one prescribed secret-rotation rollout command sequence; a fresh operator executes it end to end in **≤10 min**, the new container rejects the old secret and accepts the new secret, the before/after Worker and container version ids are recorded, and the image digest is unchanged | `docs/runbook/secret-inventory.md:77-81` — *"reads them **only at boot** … a container rollout (new image digest + `wrangler deploy`) is what makes fabricd pick it up"*; the rollback lineage is narrative prose in `deploy/cloudflare-fabricd/wrangler.jsonc` comments, not a recipe |
 | union-20 | M22 | LOW | DOCS-sweep | W1 · **T7-W4** *(new)* | INV-4, INV-5 | none | **AU7.9 — test:** a unit test asserts `plans.rs`'s per-variant docstring prices and its module ladder table quote the same numbers; it fails on today's tree | `crates/corelink-fabric/src/plans.rs:13-14` module table says `Starter $16` / `Pro $40`; `:77` and `:79` docstrings say *"entry tier ($8/mo)"* and *"growing dev + agents ($20/mo)"* — and `:81` adds a third figure, *"small team / fleet ($50/mo)"* vs the table's `Team $100` |
 | union-21 | L1 | LOW | W2-serial-worker | W2 · **T3-W9** *(new)* | INV-3 | union-05 / A3.18 should land first (the atomic claim is the mechanism this item then bounds) | **AU3.22 — test:** a `workflow_job.queued` delivery replayed after `SPAWN_CLAIM_TTL_S` does not spawn a second box for the same `jobId` (a durable per-job terminal marker outlives the claim) | `deploy/cloudflare/src/lib.ts:113-124` — `claimSpawn` is the only replay guard, and its key is written with `{ expirationTtl: SPAWN_CLAIM_TTL_S }` (`:122`), `SPAWN_CLAIM_TTL_S = 7200` (`:95`). Past 2 h the claim is gone and the delivery re-enters `driveSpawn` |
 | union-22 | L2 | LOW | W1-parallel | W1 · **T8-W4** *(new)* | INV-8 | none | **AU1.9 — test:** the check-exec-server reads its auth token only from a 0400 secret-mounted file and refuses to start when only `EXEC_SERVER_AUTH_TOKEN` is present, so a co-resident process cannot read it from `/proc/self/environ` | `crates/corelink-check-exec-server/src/lib.rs:53` `pub const AUTH_TOKEN_ENV: &str = "EXEC_SERVER_AUTH_TOKEN"`, documented at `:49-52` as *"injected into the container env at spawn"* |
-| union-23 | L4 | LOW | **RELAY (new R6)** + DOCS-sweep half | W1 · **T7-W4** *(in-repo half)*; R6 for the assertion | INV-3, INV-5 | **R6 is a HARD predecessor:** AU7.10 stays red and T7-W4 cannot seal until the committed relay artifact records **20/20 refusals in each direction** for two tenants using the same memoize key; the isolation assertion lives in `corelink-server` and the session fence forbids editing it here | **AU7.10 — test:** only after R6 is committed, `actions/corelink-memoize/README.md` cites its artifact id and states that memoize-key isolation rests entirely on CAS-side tenant scoping because the key carries no tenant component; a doc test fails when the R6 id is absent or unresolved | `actions/corelink-memoize/action.yml` — `grep -i tenant` returns **nothing**; the key inputs are `CL_RUN` / `CL_INPUTS` / `CL_ENVNAMES` / `CL_TOOLS` (`:38-42`), no tenant among them |
-| union-24 | L6 | LOW | W1-parallel | W1 · **T5-W3** *(new — see §3 scope note)* | — | none | **AU5.12 — test:** CI executes the complete action in a pinned bash-only container containing no `python3`, and the run exits 0 while producing the expected outputs | `integrations/github-actions/action.yml:174` `shell: python3 {0}` — the only non-bash step of the four |
+| union-23 | L4 | LOW | **RELAY (new R6)** + DOCS-sweep half | W1 · **T5-W1** *(existing extension)*; R6 for the assertion | INV-3, INV-5 | **R6 is a HARD predecessor:** AU7.10 stays red and T5-W1 cannot seal until the committed relay artifact records **20/20 refusals in each direction** for two tenants using the same memoize key; the isolation assertion lives in `corelink-server` and the session fence forbids editing it here | **AU7.10 — test:** only after R6 is committed, `actions/corelink-memoize/README.md` cites its artifact id and states that memoize-key isolation rests entirely on CAS-side tenant scoping because the key carries no tenant component; a doc test fails when the R6 id is absent or unresolved | `actions/corelink-memoize/action.yml` — `grep -i tenant` returns **nothing**; the key inputs are `CL_RUN` / `CL_INPUTS` / `CL_ENVNAMES` / `CL_TOOLS` (`:38-42`), no tenant among them |
+| union-24 | L6 | LOW | W1-parallel | W1 · **T5-W3** *(new — serial after T5-W2)* | — | **T5-W2 is a hard predecessor** (shared `integrations/github-actions/action.yml`) | **AU5.12 — test:** CI executes the complete action in a pinned bash-only container containing no `python3`, and the run exits 0 while producing the expected outputs | `integrations/github-actions/action.yml:174` `shell: python3 {0}` — the only non-bash step of the four |
 | union-25 | L7 | LOW | W2-serial-worker | W2 · **T8-W5** *(new)* | INV-4 | none | **AU4.17 — test:** `revokeCompletedJob` with no derived tenant refuses loudly (logs + bumps a registered counter, returns an error) instead of falling back to the wrangler `CLW_TENANT` var | `index.ts:1356` `await revokeCasPatById(env, patId, derivedTenant ?? env.CLW_TENANT)`; the call-site comment at `:2583` concedes *"best-effort: revokeCompletedJob falls back to CLW_TENANT"*. `index.ts:1574` already records that this exact pattern **mis-attributed a customer's `runner_slot_seconds`** on the metering path |
 | union-26 | L8 | LOW | W2-serial-worker | W2 · **T3-W14** *(new)* | — (benign; correctness of an attempt counter) | none | **AU3.21 — test:** the concurrency Durable Object owns the orphan-attempt count, and 100 concurrent `recordOrphan` / retry-bump calls for one `jobId` produce an exact count of 100 with no lost update | `index.ts:1796-1810` — `if (await …get(key)) return;` then `put(...)`, no CAS; the retry loop repeats the pattern near `:4085` |
 | union-27 | P1 | MEDIUM | W3-live-proof | W3 · **T7-W5** *(new)* | INV-5 | **O1** (needs a live, warm fleet before the distribution means anything) | **AU7.11 — probe:** publish a measured queued→RUNNING distribution (p50/p95) from ≥50 real jobs, recorded under `docs/plan/evidence/` with the worker version id, and state the job-size break-even in the pitch docs | No measured distribution exists in-repo: `docs/plan/evidence/` does not exist, and no doc outside the two 2026-08-25 audit files carries a spawn-latency measurement. The start/retry path the claim is about is `container.start()` driven from `driveSpawn` (`index.ts:1752`) |
@@ -133,7 +142,7 @@ Item ids continue the plan's §3 namespace, in the capability the ledger assigne
 
 ---
 
-## 3. Structural consequences the lead must action
+## 3. Structural consequences
 
 **New WPs and their item counts** (all ≤ the `wp-check.py` 4-item ceiling):
 
@@ -145,26 +154,23 @@ Item ids continue the plan's §3 namespace, in the capability the ledger assigne
 | **T8-W6** *(new)* — credential-revocation live proof | W3 | AU3.23b | `docs/plan/evidence/**` |
 | **T3-W10** *(new)* — fabric-server reaper + error vocabulary | W1 (serial after T4-W4) | AU3.25 AU7.7 | `crates/corelink-fabric-server/**` |
 | **T8-W4** *(new)* — in-box secret hygiene | W1 | AU3.26 AU1.9 | `deploy/runner/entrypoint.sh`, `crates/corelink-check-exec-server/**` |
-| **T5-W3** *(new)* — GitHub Action shell safety | W1 | AU5.11 AU5.12 | `integrations/github-actions/action.yml` |
-| **T7-W4** *(new)* — inventory + price-string + memoize-dependency truth | W1 | AU7.8 AU7.9 AU7.10 | `docs/runbook/secret-inventory.md`, `crates/corelink-fabric/src/plans.rs`, `actions/corelink-memoize/README.md`, new `scripts/ci/secret-inventory-drift.sh` |
+| **T5-W3** *(new)* — GitHub Action shell safety | W1 (serial after T5-W2) | AU5.11 AU5.12 | `integrations/github-actions/action.yml` |
+| **T7-W4** *(new)* — inventory + price-string truth | W1 | AU7.8 AU7.9 | `docs/runbook/secret-inventory.md`, `crates/corelink-fabric/src/plans.rs`, new `scripts/ci/secret-inventory-drift.sh` |
 | **T7-W5** *(new)* — measured-claim probes | W3 | AU7.11 AU4.19 AU7.12 | `docs/product/pricing.md`, `docs/plan/evidence/**` |
 | **T2-W6** *(new)* — fabricd secret-rotation rollout | W3 | AU1.8 | `docs/runbook/**` (rotation playbook) |
 
 **Extensions to existing WPs:** T4-W1 `+AU4.18` (1→2) · T8-W1 `+AU7.6` (3→4) ·
-T6-W6 `+AU6.17` (3→4) · T3-W5 `+AU3.27 +AU3.28` (0→2 — this is the first content T3-W5 owns,
-so D4 landing now has a falsifiable WP behind it).
+T6-W6 `+AU6.17` (3→4) · T5-W1 `+AU7.10` (1→2) · T3-W5 `+AU3.27 +AU3.28`
+(0→2 — this is the first content T3-W5 owns, so D4 landing now has a falsifiable WP behind it).
 
-**Four things the lead must decide or fix before dispatch:**
+**Three things the lead must decide or fix before dispatch:**
 
-1. **The Wave-2 serial chain grows from 8 links to 11** (T3-W14, T3-W9, T8-W5 inserted). The
-   lead ruling at the top accepts the 11-link chain; `index.ts` modularization remains post-GA.
-2. **T5-W2's X must be narrowed.** T5-W2 owns `integrations/**`; T5-W3 needs
-   `integrations/github-actions/action.yml` exclusively. `wp-check.py`'s "no two parallel WPs
-   share an exclusive scope" rule will fail until T5-W2 is restated as `integrations/**` minus
-   that file.
-3. **T3-W10 must be serialized behind T3-W4 → T4-W4** — three WPs now write
+1. **The worker-monolith serial chain grows from 8 links to 11** (T3-W14, T3-W9, T8-W5 inserted).
+   T9-W1 is the separate devenv row in the canonical Wave-2 table; including it would make the
+   full table 9 → 12. `index.ts` modularization remains post-GA and is not assigned to this triage.
+2. **T3-W10 must be serialized behind T3-W4 → T4-W4** — three WPs now write
    `crates/corelink-fabric-server/**`. The same exemption the Wave-2 chain carries applies.
-4. **`O-CFRATE` is a new owner arming** not in §6: produce one Cloudflare Containers invoice
+3. **`O-CFRATE` is a new owner arming** not in §6: produce one Cloudflare Containers invoice
    line (vCPU-h + GiB-h, named billing period). Without it AU4.19 cannot go green, and every
    margin number in `pricing.md` keeps resting on a Northflank proxy rate.
    **`R6` is a new relay** not in §7: the two-tenant same-memoize-key CAS read-refusal proof,
@@ -172,7 +178,9 @@ so D4 landing now has a falsifiable WP behind it).
 
 ---
 
-## 4. Findings I did NOT place in CLEAN-no-action or DEFER — and why
+## 4. Findings
+
+### Findings I did NOT place in CLEAN-no-action or DEFER — and why
 
 The brief forbids parking a MEDIUM-or-higher without justification. **I parked none.** The
 one candidate was `union-14` (MEDIUM), whose ledger claim is two-thirds stale at HEAD:
@@ -191,7 +199,8 @@ CLEAN. Every other finding reproduced exactly as the ledger describes it.
 
 ## 5. Unplaceable
 
-**None.** All 30 findings have a bucket, a wave, a WP and an acceptance item.
+**None.** All 30 findings have a bucket, a wave, a WP and one or more acceptance items (31 proposed
+AU ids; M3 intentionally owns the split AU3.23a/AU3.23b pair).
 
 Two placements have hard predecessors, not implementation choices:
 

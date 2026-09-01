@@ -1,0 +1,46 @@
+name: Plan integrity
+
+on:
+  pull_request:
+    paths:
+      - 'docs/plan/*.md'
+      - 'docs/plan/*-check.py'
+      - 'docs/plan/gates-selftest.py'
+      - 'docs/plan/*finding-ids.txt'
+      - '.github/workflows/plan-integrity.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'docs/plan/*.md'
+      - 'docs/plan/*-check.py'
+      - 'docs/plan/gates-selftest.py'
+      - 'docs/plan/*finding-ids.txt'
+      - '.github/workflows/plan-integrity.yml'
+
+permissions:
+  contents: read
+
+# A newer revision supersedes an older run for the same PR or branch.
+concurrency:
+  group: plan-integrity-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Coverage, WP, and AU structure
+    runs-on: corelink
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0  # v6.0.3
+
+      - name: Check audit finding coverage
+        run: python3 docs/plan/plan-check.py docs/plan/audit-2026-08-30-finding-ids.txt
+
+      - name: Check acceptance/WP ownership
+        run: python3 docs/plan/wp-check.py docs/plan/2026-08-30-golive-remediation-plan.md
+
+      - name: Check proposed AU ownership
+        run: python3 docs/plan/au-check.py docs/plan/union-triage-remaining.md
+
+      - name: Prove planning gates fail closed
+        run: python3 docs/plan/gates-selftest.py
