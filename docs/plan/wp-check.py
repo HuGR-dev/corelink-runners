@@ -3,7 +3,7 @@
 
 Blocks unless:
   * every live acceptance item is owned by exactly one WP (or is `judged` -> owner)
-  * no WP owns zero items (an unfalsifiable WP)
+  * no WP owns zero items (every WP has structural ownership)
   * no WP owns more than 4 items (the sweet-spot ceiling)
   * every WP declares at least one invariant from the INV catalogue
   * no two PARALLEL WPs share an exclusive file scope
@@ -98,7 +98,7 @@ if ghost:
 
 empty = sorted(w for w, (v, _, _, _) in WP.items() if not v)
 if empty:
-    fail.append(f"WPs with ZERO items (unfalsifiable): {empty}")
+    fail.append(f"WPs with ZERO items (no structural ownership): {empty}")
 
 oversized = sorted(w for w, (v, _, _, _) in WP.items() if len(v) > 4)
 if oversized:
@@ -123,5 +123,5 @@ print(f"WPs {len(WP)} · items owned {len(owned)} · judged->owner {sorted(JUDGE
 print(f"items per WP: min {min(len(v) for v,_,_,_ in WP.values())} max {max(len(v) for v,_,_,_ in WP.values())}")
 for f in fail:
     print("  BLOCK:", f)
-print("\nwp-check:", "BLOCKED" if fail else "PASS — every item owned once, every WP falsifiable")
+print("\nwp-check:", "BLOCKED" if fail else "PASS — every item owned once, structural WP ownership is complete")
 sys.exit(1 if fail else 0)

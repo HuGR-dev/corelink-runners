@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-09-01 — fabricd burn contained; the durable-ledger restoration is superseded
+
+The current production state is deliberately degraded under
+[`docs/plan/evidence/2026-09-01-fabricd-pg-containment.md`](docs/plan/evidence/2026-09-01-fabricd-pg-containment.md).
+The emergency `FABRIC_PG_DISABLED=1` switch is armed on Worker version
+`40bf22a4-6c48-467d-9844-b4fc33e7a3ee`; the fixed-config boot probe served 6/6, but fabricd is
+using its in-memory ledger while durable lease replay, the Postgres-backed vCPU ceiling, and
+durable billing export are suspended.
+
+The incident and remediation lineage is:
+
+- **#524** — root-caused the control-plane outage to the quota-suspended Neon project; `PgLedger::connect`
+  failed before the listener bound.
+- **#525** — closed the COLD runner leak by allowing `reapStaleBoxes` to handle spawns without an
+  installation id, with a bounded reaper.
+- **#526** — bounded the admission fail-open and added the mint-key-unarmed signal and boot guard.
+- **#527** — restored the durable ledger after the quota returned and the retry loop was removed;
+  **superseded for the current live state** by containment commit `2df6740`, which re-armed the
+  emergency switch when the Postgres burn recurred.
+
+Containment left the fabricd image unchanged at
+`sha256:2e7bcea926f4ce2b38edb1a381f3821fcf4c898377e4f988b763fd3232c0e565`. Re-arm the durable
+backend only after a restored or replacement database passes repeated fixed-config boot-rate probes
+and its scale-to-zero behaviour is observed without the one-minute feedback loop.
+
 ### 2026-08-31 — the runner image gains nightly + llvm-tools + cargo-fuzz, so seven CI lanes can leave the owner's Mac
 
 Unblocks corelink-server's WP-CI migration. Seven of its workflows

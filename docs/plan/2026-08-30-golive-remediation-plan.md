@@ -1,12 +1,13 @@
 # Go-Live Remediation Plan — from the 2026-08-30 ultra audit to a working go-live
 
-**Baseline:** `8631abb` (#522) · **Authored:** 2026-08-30 · **Revision: rev-4**
+**Baseline:** `8631abb` (#522) · **Authored:** 2026-08-30 · **Revision: rev-5**
 **Sources:** the 247-finding ultra audit (`wf_31696fc3-c08`, 53 agents / 17 dimensions, 33/33
 CRITICAL+HIGH adversarially confirmed) **∪** the in-repo 2026-08-25 comprehensive audit
 (`docs/audits/2026-08-25-comprehensive-audit.md`), which contains at least one HIGH-class risk the
 ultra audit did not find (§2.1).
 **Method:** TechLead doctrine (decompose · contract · pack · verify · loop), two self-iterations,
-then three **independent cold reviews** whose findings are logged and dispositioned in §12.
+then three **independent cold reviews** whose findings are logged and dispositioned in §12. Round
+2 is complete; round 3 ran on 2026-09-01 and is **NOT QUIET**.
 
 > **Rigor compact (inviolable).** No finding is silently dropped, deferred, or worked around. Every
 > finding lands in exactly one bucket, proven mechanically. Anything not fixed here is (a)
@@ -27,33 +28,29 @@ then three **independent cold reviews** whose findings are logged and dispositio
  C7  what the repo SAYS is what the system DOES, and every claim cites a dated artifact
 ```
 
-## 1. The live picture, corrected (this is not what the audit's headline said)
+## 1. The live picture, corrected (2026-09-01 containment)
 
-The audit's headline — "prod is down" — is true but **materially over-broad**, and I re-verified the
-correction myself at plan time:
+The previous outage diagnosis is historical. The current production state is **CONTAINED and
+intentionally degraded**, as recorded in
+[`docs/plan/evidence/2026-09-01-fabricd-pg-containment.md`](evidence/2026-09-01-fabricd-pg-containment.md):
 
-- **fabricd (control plane) is DOWN.** `/health`, `/v1/usage`, `/v1/attestation/key` all return
-  `500 Failed to start container` (re-probed 2026-08-30).
-- **The job fleet is UP and green.** `corelink-smoke` succeeded 2026-08-30 23:14 — *after* those
-  probes — and `CI` + `spawn-worker CI` succeeded 17:19, all on `runs-on: corelink`.
+- `FABRIC_PG_DISABLED=1` is armed on Worker version
+  `40bf22a4-6c48-467d-9844-b4fc33e7a3ee`; the unchanged fabricd image is
+  `sha256:2e7bcea926f4ce2b38edb1a381f3821fcf4c898377e4f988b763fd3232c0e565`.
+- The fixed-config boot probe served **6/6**, with `/v1/attestation/key` at 200 and unauthenticated
+  `/v1/usage` at 401. This is a containment rate, not a durable-ledger recovery proof.
+- With the switch armed, fabricd uses the **in-memory ledger**. Lease durability across restarts,
+  the Postgres-backed vCPU ceiling, and durable billing export are suspended.
+- The runner inventory was cross-checked without using an unproven instance-name-to-DO join; the
+  historical runner records were inactive and GitHub reported no busy `cf-runner-*` instances.
 
-Both are true because the spawn path **fails open to COLD** when the warm mint errors:
-`deploy/cloudflare/src/lib.ts:479-481` — *"A 5xx/network/malformed-200 ⇒ `authz:"ok"` with an EMPTY
-overlay (FAIL-OPEN to cold — the job still runs, uncached)."*
+The database remains the permanent repair. Re-arm the durable backend only after a replacement or
+restored database passes repeated fixed-config boot-rate probes and its scale-to-zero behaviour is
+observed without the one-minute feedback loop.
 
-**What this changes:**
-
-1. The outage is a **moat + metering + attestation outage**, not an execution outage. Cache-warm
-   boot (the entire product thesis), the lease/usage API, the attestation key, credential redemption
-   and the vCPU ceiling are all dark. Jobs still run — expensively, uncached, unbilled.
-2. **The thing that hides it is itself the defect.** A silent warm→cold degradation with no alarm is
-   how a moat outage survives a day of green checks. This is the same class as RH1 in the 2026-08-25
-   catalog and gets its own acceptance item (A3.14).
-3. **Agent work is executable now.** A cold reviewer argued every gate is blocked because `ci.yml:29`
-   is `runs-on: corelink`; the green runs above refute it. Waves 0–2 can start before O1.
-
-**Capability status:** C1 red · C2 red · C3 amber (runs, but cold, unreaped, unrecoverable for
-external repos) · C4 red · C5 red · C6 red (§12, G19: there is no alarm on C1–C5 at all) · C7 red.
+**Capability status:** C1 is servable but degraded · C2 remains red · C3 amber (the cold fallback
+still hides a moat failure) · C4 red (durable export and invoice reconciliation are suspended) · C5
+red · C6 red · C7 red. The containment evidence does not make any acceptance item green.
 
 ---
 
@@ -89,7 +86,7 @@ this table is a summary.
 |---|---|---|
 | W0-unblock | 11 | the outage, the deploy block, and the catalog reconciliation |
 | W1-parallel | 32 | code · CI · adoption work with no live dependency |
-| W2-serial-worker | 19 | everything that writes the worker monolith |
+| W2-serial-worker | 21 | everything that writes the worker monolith |
 | W3-live-proof | 20 | closable only against a live system (incl. every `C4-unverified-claim`) |
 | W4-post-decision | 43 | real work gated on D4/D5/D6/D9 or on GA |
 | DECISION (D1–D10) | 16 | closes when the owner decides |
@@ -97,7 +94,7 @@ this table is a summary.
 | RELAY (R1–R5) | 8 | closes in corelink-server or via a cross-TL artifact |
 | DOCS-sweep | 44 | the C5 drift mass |
 | CLEAN — no action | 21 | verified clean; the audit's genuine positive results |
-| DEFER — needs a waiver | 7 | ships only with a written waiver |
+| DEFER — needs a waiver | 5 | ships only with a written waiver |
 
 ### 2.3 The union delta — T0-W1 has run (`docs/plan/union-catalog-ledger.md`)
 
@@ -128,9 +125,10 @@ which is now `releaseConcurrencySlot` — the real defect moved to `:1650-1658` 
 **Suite impact.** `union-02` and `union-03` were already covered — I had authored A3.15/A3.16 from
 the catalog at rev-3. Two new items added: **A3.17** (union-01 + union-04) and **A3.18** (union-05).
 
-**Still owed before the freeze:** the remaining **25 NEW (MEDIUM/LOW) and 5 PARTIAL** need a lead
-triage pass — bucket, wave, and acceptance item each. They are listed with proposed items in the
-ledger; they are *not* yet in the suite, and this plan does not claim otherwise.
+The remaining **25 NEW (MEDIUM/LOW) and 5 PARTIAL** are triaged in
+`docs/plan/union-triage-remaining.md` as `AU1.x`–`AU7.x`. They remain a separate intake: **AU is
+not integrated into this acceptance suite**, and no AU item is promoted to an `A` row here. The
+round-3 blockers are recorded in §11.1; the suite stays at the mechanically checked rev-5 shape.
 
 ---
 
@@ -140,9 +138,10 @@ Kinds: `test:` (repo runner, red now → green after) · `probe:` (live, recorde
 `docs/plan/evidence/`) · `judged:` (owner decision, never auto-greened).
 
 rev-2 had 48 items. The cold suite-critic refuted its completeness with 26 gaps and 9 unfalsifiable
-items; all were accepted (§12), and rev-4 added 3 more for WPs that owned none. **The suite is 75
-live items** (counted mechanically — see the note under the tables). The rev-2 → rev-3 delta is where
-the real go-live risk was hiding, so it is marked ★.
+items; round 2 completed that review and added the rev-5 rows below. **The suite has 94 rows, 92 live
+(89 `test`/`probe` assignments and 3 `judged`; A2.2 and A5.7 are withdrawn), 46 WPs, and 89 owned
+items.** These counts are mechanical, not a claim that any item is green. The rev-2 → rev-3 delta is
+where the real go-live risk was hiding, so it is marked ★.
 
 ### 3.0 Verification discipline — a `probe:` is a RATE, not an observation
 
@@ -308,10 +307,10 @@ and each needs a named decider plus an artifact id.
 | ★A7.4 | test | every present-tense capability claim cites a dated artifact id — rev-2's linter only caught claims naming a config key, which is a **minority** of the overclaim class ("the moat is live", "cache-warm boot", benchmark numbers) |
 | ★A7.5 | test | each recorded probe artifact carries the version id/digest it was taken against, and that value matches what is deployed |
 
-**75 items — 72 `test`/`probe`, 3 `judged` (A4.9, A5.1, A7.3), plus 2 withdrawn rows (A2.2, A5.7).**
-*(rev-3 printed "80 — 76/4". Counted mechanically at rev-4: 74 rows, 72 live, 42 `test` + 26 `probe`
-+ 1 `test+probe` + 3 `judged`; rev-4 then adds A0.1, A0.2 and A6.15 → 75 live. An unverified count in
-my own headline is exactly the class of claim this plan forbids elsewhere.)*
+**94 rows — 54 `test`, 34 `probe`, 1 `test+probe`, 3 `judged` (A4.9, A5.1, A7.3), plus 2
+withdrawn rows (A2.2, A5.7); 92 rows are live.** `wp-check.py` reports 89 non-judged items owned
+exactly once and routes the three judged rows to their owners. The separate `AU` intake is not part
+of these rows.
 
 ### Items added at rev-4 (WPs that had none)
 
@@ -333,7 +332,7 @@ review).
 
 | id | decision | blocks |
 |---|---|---|
-| **D1** | ceiling = hard stop or billed overage | A4.9 A4.11 · T4-W3 · R1 |
+| **D1** | ceiling = hard stop or billed overage | A4.9 A4.11 · T4-W4 · R1 |
 | **D2** | devenv: **quarantine** (lead recommendation) or rectify now — note quarantine of two HIGH-CONFIRMED findings (`deploy-02`, `deploy-04`) is a **deferral requiring a waiver**, not a fix | A3.8 A4.8 |
 | **D3** | repo public + LICENSE. **Hard predecessor: D7** | all of C5 |
 | **D4** | ratify ADR-0005 admission mode (queue vs reject) | T3-W5 |
@@ -385,12 +384,14 @@ WAIVER (human-authorized) — <what is loosened/deferred>
 | **T7-W3** | A7.4 A7.5 | new `scripts/ci/claim-artifact-lint.sh` + `docs/plan/evidence/` schema | sonnet | 120K/300K | — |
 | **T9-W0** | A0.2 | `deploy/cloudflare/vitest.config.ts`, `deploy/cloudflare/test/devenv-do.test.ts` | sonnet | 120K/300K | — |
 | **T2-W3** *(closer)* | A2.6 | **every** `.github/workflows/*.yml` | haiku | 40K/100K | all workflow WPs merged |
+| **T2-W5** | A2.11 A2.12 A2.13 | runbook override consumption + compatibility matrix | sonnet | 120K/300K | O1 · T2-W2b |
+| **T7-W4b** | A7.6 | probe-artifact freshness schema/check | sonnet | 120K/300K | T7-W3 |
 
 **T4-W3 is deleted.** rev-3 left it owning `crates/corelink-fabric/**` with **zero items** after
 A4.4/A4.5 correctly moved to `corelink-fabric-server`. A WP with nothing to prove is unfalsifiable;
 `corelink-fabric` work that remains is `fabric-core-06` (owned by T6-W8) and Wave-4 items.
 
-### Wave 2 — SERIAL on `index.ts` / `lib.ts` (19 findings)
+### Wave 2 — SERIAL on `index.ts` / `lib.ts` (21 findings)
 
 | # | WP | owns | scope |
 |---|---|---|---|
@@ -400,8 +401,9 @@ A4.4/A4.5 correctly moved to `corelink-fabric-server`. A WP with nothing to prov
 | 4 | **T3-W1** *(re-cut)* | A3.1 A3.2 A3.7 | `crates/corelink-cloud-engine/**` **+** `index.ts` — one coupled wire change; rev-3 split it across waves and closed the Rust side first |
 | 5 | **T3-W2** | A3.3 A3.4 A3.10 A3.12 | `index.ts` + `metrics.ts` + `lib.ts` |
 | 6 | **T8-W1** | A3.14 A3.15 A3.16 | the RH-class: silent cold-degrade alarm · spawn-token scoping · admission fail-open |
-| 7 | **T8-W2** | A3.13 | cross-tenant CAS isolation + per-job credential scope/TTL |
-| 8 | **T9-W1** | A3.8 A4.8 | devenv quarantine — **D2** |
+| 7 | **T8-W3** | A3.17 A3.18 | mint-key arming/self-check · atomic spawn claim |
+| 8 | **T8-W2** | A3.13 | cross-tenant CAS isolation + per-job credential scope/TTL |
+| 9 | **T9-W1** | A3.8 A4.8 | devenv quarantine — **D2** |
 
 ### Wave 3 — live proof (20 findings)
 
@@ -409,13 +411,19 @@ A4.4/A4.5 correctly moved to `corelink-fabric-server`. A WP with nothing to prov
 |---|---|---|
 | **T1-W2** | A1.1 A1.2 A1.3 A1.5 | O1 |
 | **T1-W3** | A1.6 A1.7 | O1 · T2-W2b |
+| **T1-W4** | A1.8 A1.9 | O1 · repeated cold-start evidence |
 | **T2-W2b** | A2.4 A2.5 A2.7 A2.10 | W0 · O1 |
 | **T2-W4** | A2.8 A2.9 | T2-W2b |
 | **T3-W7** | A3.9 *(the moat — COLD miss → WARM hit on a real job)* | O1 · T2-W2b |
+| **T3-W8** | A3.19 A3.20 | O1 · T3-W7 |
 | **T4-W7** | A4.7 A4.10 A4.12 | O-BILLING · R1 · R2 |
+| **T4-W8** | A4.14 A4.15 | O-BILLING · durable ledger/ingest recovery |
 | **T5-W4** | A5.6 A5.8 A5.9 | D3 · D8 · R3 |
+| **T5-W5** | A5.10 | D3 · D8 · R3 |
 | **T6-W5** | A6.7 | O1 |
 | **T6-W6** | A6.6 A6.13 A6.14 | O-CANARY · canary deploy |
+| **T6-W10** | A6.16 A6.17 A6.18 | alert detection, escalation, and failure-domain independence |
+| **T6-W11** | A6.19 | operator-executed runbook procedures |
 | **T6-W7** | A6.11 | T2-W2b |
 | **T6-W9** | A6.12 | T6-W6 |
 
@@ -452,7 +460,7 @@ stated this dependency for O-BILLING alone.
 
 ## 7. Cross-repo relays (8 findings)
 
-**R1** `max_vcpu_h` on the introspect vector under D1 semantics — **hard predecessor of T4-W3**:
+**R1** `max_vcpu_h` on the introspect vector under D1 semantics — **hard predecessor of T4-W4**:
 flipping `parse_max_vcpu_h_ceiling_ms` to fail-closed while the field is still absent walls off
 **every** tenant · **R2** ingest batch cap, per-record vs all-or-nothing, region canonicalization,
 vector byte-identity · **R3** the stranger chain (signup → checkout → install → green) · **R4**
@@ -480,7 +488,7 @@ sign-off.
 |---|---|
 | O1's root cause is not the key drift | T1-W1 classifies from evidence before anything is changed |
 | Billing armed before the poison-pill fix | O-BILLING sequenced after **T9-W1** |
-| **T4-W3 lands fail-closed before R1** | **every tenant refused; T4-W3 gated on D1 *and* R1, or the new behavior ships behind a default-off flag** |
+| **T4-W4 lands fail-closed before R1** | **every tenant refused; T4-W4 gated on D1 *and* R1, or the new behavior ships behind a default-off flag** |
 | **A4.6 implemented as rev-2 wrote it** | **would have broken the frozen 3-char region vector and the wire-contract law; restated to 3-char, the ≥5-char question routed to R2** |
 | **A2.3 landing in Wave 0** | **`COPY . .` makes it red on every commit until Wave 3; scoped to narrow paths, report-only until T2-W2b** |
 | Repo public before key rotation | D7 is a hard predecessor of D3 |
@@ -492,9 +500,10 @@ sign-off.
 
 ## 10. Sequence
 
-1. **O1** (owner) and **T0-W1** (union reconciliation) start now, in parallel — one restores the
-   moat, the other decides what the suite must cover.
-2. Re-run the cold suite-critic on the union; freeze the suite; capture the baseline.
+1. The owner handles the contained production state; **T0-W1 is complete** and the 30 remaining
+   union findings stay in the separate `AU` intake.
+2. Resolve the round-3 blockers, re-run the cold suite-critic until two consecutive quiet rounds,
+   then capture the baseline. Do not merge `AU` into the suite before that convergence.
 3. Wave 0 repo half (T1-W1, T2-W1a, T2-W2a) → **O-DEVENV-PIN** → first deploy unblocked.
 4. Wave 1 (two batches ≤6) ∥ Wave 2 chain; T2-W3 closes Wave 1.
 5. Deploy fabricd ≥#515 + check-host ≥#521 + the worker → Wave 3 live proofs, moat first (A3.9).
@@ -504,15 +513,37 @@ sign-off.
 
 ## 11. What this plan still owes
 
-1. **T0-W1 has not run.** Until it does, the scope is known-incomplete (§2.1 proves the 247 is not a
-   superset), and the suite is frozen against the wrong universe.
-2. **The baseline capture has not been taken**, so red→green is unproven and rev-2 shipped three
-   vacuous items that only a cold reviewer caught.
+1. **The baseline capture has not been taken.** Until `docs/plan/acceptance-baseline.json` exists,
+   red→green is unproven; the rev-5 suite remains an acceptance definition, not a green claim.
+2. **Round 3 is NOT QUIET** (2026-09-01). Its current blockers are recorded in §11.1 and must be
+   cleared before the suite can converge.
 3. **Wave 4 has no acceptance items** and several of its findings have no gating decision (§5).
-4. **The suite critic has not seen rev-3.** Its 26 gaps are incorporated; the doctrine requires
-   looping until **two consecutive** quiet rounds. One round has run.
-5. **Gate tooling unverified** — the `techlead` MCP server failed to connect (`CONNECTION_CLOSED`);
-   `plan-check` was re-implemented as a plain script and the acceptance gate must be too.
+4. **The 30 `AU` items are not integrated into the suite.** They remain triaged intake only, pending
+   round-3 convergence; no `AU` item is an `A` row or an additional suite obligation here.
+5. The mechanical gates are now runnable and currently pass (§16); they prove only coverage,
+   ownership, and disjointness of the current plan, not production readiness.
+
+### 11.1 Round 3 blockers — 2026-09-01 (NOT QUIET)
+
+Round 3 re-checked the plan against the contained live state. These blockers are recorded here as
+open findings in the existing plan; they do **not** add or promote acceptance items:
+
+- **Durable Postgres is still bypassed.** `FABRIC_PG_DISABLED=1` makes fabricd servable but leaves
+  lease replay, the Postgres-backed vCPU ceiling, and durable billing export suspended. The database
+  must be restored or replaced before those claims can be re-probed.
+- **The live rate sample is containment-only and below the suite's probe rule.** The evidence is
+  6/6 served starts, while boot-sensitive probes require at least 10 independent cold starts and a
+  recorded pass rate. It cannot green the control-plane or restart items.
+- **The re-drive amplifier remains open.** `redriveOrphanedJobs` can release a queued job's claim
+  after its grace period while slot acquisition remains idempotent by `jobId`; a retry can therefore
+  create another box without another slot. The evidence calls for an explicit intake/re-drive kill
+  switch before any destructive runner rollout.
+- **The money path is still unproven past ingest.** No invoice or charge for a test tenant is
+  recorded, and containment has suspended the durable export path; A4.10 and the reconciliation
+  items remain open.
+- **Cold-path attribution still needs an alarm before fail-closed arming.** The
+  `spawn_cold_mint_key_unarmed` signal must be watched at zero before `REQUIRE_MINT_KEY=1` is armed;
+  otherwise a fleet-wide stop would replace a silent misattribution without an observed warning.
 
 ---
 
@@ -552,11 +583,22 @@ an invalid-by-construction emitter; six `C4-unverified-claim` findings were park
 and every var-based arming is silently W0-gated. 21 re-triage moves applied; plan-check re-run:
 **247/247, 0 duplicates, 0 orphans.**
 
-**Not yet done:** the second suite-critic round on rev-3 and on the union catalog (§11.1, §11.4).
-Self-inspection found real defects at both iterations, and the cold reviews then found defects that
-self-inspection could not — including three vacuous items and a change that would have broken a
-frozen cross-repo contract. That asymmetry is the argument for running the second round before any
-dispatch.
+**Historical pre-rev-5 note.** Before round 2, the second suite-critic pass on rev-3 and the union
+catalog was still owed. Self-inspection found real defects at both iterations, and the cold reviews
+then found defects that self-inspection could not — including three vacuous items and a change that
+would have broken a frozen cross-repo contract. That asymmetry is why round 2 was required before
+dispatch; its completion and the round-3 result are recorded below.
+
+**Cold review — suite critic, round 2 (complete).** Found 15 gaps and repaired the suite with the
+rev-5 rows (A1.8–A1.9, A2.11–A2.13, A3.19–A3.20, A4.14–A4.15, A5.10, A6.16–A6.19 and A7.6),
+including the quality repairs recorded above. The resulting 94-row shape is the one checked
+by `wp-check.py`; it is not a green-result claim.
+
+**Cold review — round 3 (2026-09-01 — NOT QUIET).** The re-check used the contained live artifact
+and found the blockers recorded in §11.1: durable Postgres remains bypassed, the measured 6/6 boot
+sample is below the suite's rate rule, the re-drive amplifier remains open, money is unproven past
+ingest, and the cold-path alarm must precede fail-closed arming. The round did not converge. The 30
+triaged `AU` items remain outside the suite and are not promoted by this revision.
 
 ---
 
@@ -655,7 +697,51 @@ the global gate in §8; the global gate is never restated per WP.
 
 ---
 
-## 16. rev-4 change log
+## 16. rev-5 change log
+
+This revision reconciles the plan with the 2026-09-01 containment and the completed second cold
+review without changing the suite's scope:
+
+1. The live picture now names the contained, intentionally degraded state: `FABRIC_PG_DISABLED=1`,
+   in-memory ledger, and suspended durable vCPU/billing paths, with the evidence artifact cited.
+2. The plan-check totals now match the current assignment: W2 = 21 and DEFER = 5. The suite is 94
+   rows / 92 live, with 46 WPs, 89 owned items, and 3 judged items routed to owners.
+3. Wave tables now include every WP known to `wp-check.py`; active `T4-W3` references were corrected
+   to `T4-W4`. The deleted T4-W3 remains only where the rev-4 history describes that deletion.
+4. Round 2 is recorded as complete. Round 3 (2026-09-01) is explicitly **NOT QUIET** and its
+   blockers are recorded in §11.1. The 30 `AU` items remain a separate intake and are not added to
+   or promoted in this suite. No baseline is claimed.
+
+Current mechanical outputs, reproduced from the repo root:
+
+```
+findings: 247   assigned-unique: 247
+  W0-unblock              11
+  W1-parallel              32
+  W2-serial-worker         21
+  W3-live-proof            20
+  W4-post-decision         43
+  DECISION                 16
+  ARMING                   26
+  RELAY                     8
+  DOCS-sweep               44
+  CLEAN-no-action          21
+  DEFER-needs-waiver        5
+
+DUPLICATE (owned twice): 0
+UNKNOWN id (typo / not a finding): 0
+ORPHAN (no bucket): 0
+plan-check: PASS — total and disjoint
+suite rows 94 · live 92 · withdrawn ['A2.2', 'A5.7']
+WPs 46 · items owned 89 · judged->owner ['A4.9', 'A5.1', 'A7.3']
+items per WP: min 1 max 4
+wp-check: PASS — every item owned once, structural WP ownership is complete
+```
+
+The final line is the validator's mechanical output for the current A-suite ownership map; it does
+not describe the pending `AU` intake or make a production-readiness claim.
+
+### Historical — rev-4 change log
 
 Answering "do all WPs have completeness criteria, invariants, DoDs and quality standards?" — they
 did not. What was missing and is now closed:
