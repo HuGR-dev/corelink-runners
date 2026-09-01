@@ -106,16 +106,23 @@ long ack-wait — is handled (`close_ack_gate` bounds concurrent ack-waits +
 `standard-2` keeps a worker for health; verified).
 
 **Scaling path (not yet done):** the singleton was required only by the in-memory
-ledger. The **pg ledger arms conditionally** — only when a `DATABASE_URL` secret is
-set (the Worker's DATABASE_URL-derived block then turns on
-`FABRIC_LEDGER_BACKEND=pg` + `FABRIC_RUNNER_VCPU=4`), giving cross-instance
-cap-safety via the advisory lock. **Absent `DATABASE_URL`, the live deploy runs the
-in-memory ledger** (single-instance, state lost on restart) — the current N=1 pilot
-posture (`wrangler.jsonc` sets `FABRIC_NUM_SHARDS=1` and does not set `DATABASE_URL`
-as a var). Once `DATABASE_URL` is set, the plane CAN run multiple instances — remove
-the fixed DO id (route per-request / round-robin) + raise `max_instances`. A tracked
-scaling enhancement for **before rota-A carries real check-host bursts**; a known
-limit, not debt.
+ledger. The **pg ledger has two gates**: a non-empty `DATABASE_URL` secret **and**
+the byte-exact Worker var `FABRIC_PG_DISABLED="0"`. Only then does the Worker
+forward `FABRIC_LEDGER_BACKEND=pg`, the URL, `FABRIC_RUNNER_VCPU=4`, and the
+pg-only billing export, giving cross-instance cap-safety via the advisory lock.
+Unset, blank, whitespace-padded, or any other value of `FABRIC_PG_DISABLED`
+fails closed to the in-memory ledger even when the URL secret remains bound.
+
+The current containment posture is `FABRIC_PG_DISABLED="1"`, so the live deploy
+is deliberately in-memory (single-instance, state lost on restart). To arm safely,
+prepare and validate the database while that `"1"` remains deployed; change the
+tracked var to exact `"0"` only after the fixed configuration passes; deploy and
+recreate the container; then require `/internal/v1/status` to report
+`ledger_cross_instance_safe: true` before raising `FABRIC_NUM_SHARDS` or
+`max_instances`. Health 200 alone does not prove PG, because memory is healthy too.
+Rollback reverses the gate first: restore exact `"1"`, deploy/recreate and verify
+the in-memory posture before deleting or rotating `DATABASE_URL`. See
+`docs/runbook/arm-fabricd-pg-ledger-vcpu-ceiling.md` for the ordered procedure.
 
 ## Boxes (checkpoint B+ — when wiring real per-job metrics)
 

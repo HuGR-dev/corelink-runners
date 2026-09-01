@@ -42,8 +42,9 @@
     // (fabric_suspended_tenants table), and the Worker now shard-routes the trigger
     // (by body lease_id), round-robins the webhook autoscaler, and scatter-gathers
     // GET /v1/metrics/tenant. So raising N is now safe — the ONLY preconditions:
-    //   1. DATABASE_URL (pg) MUST be set (the acquire cap-guard fail-closes N>1
-    //      without it, so a misconfigured raise refuses rather than over-admits).
+    //   1. DATABASE_URL (pg) MUST be set AND FABRIC_PG_DISABLED MUST be the exact
+    //      string "0" (the acquire cap-guard fail-closes N>1 without a pg ledger,
+    //      so a misconfigured raise refuses rather than over-admits).
     //   2. Raise this AND `max_instances` (containers block below) TOGETHER.
     // Still owner-gated (do it when real check-host burst volume arrives).
     "FABRIC_NUM_SHARDS": "1",
@@ -157,10 +158,10 @@
     "FABRIC_CRASH_PROBE_INTERVAL_SECS": "20",
     // Durable billing EXPORT (WP-A): pg-ONLY. ⚠️ server.rs FAIL-CLOSES boot if this
     // is set WITHOUT the pg ledger (FABRIC_LEDGER_BACKEND=pg via DATABASE_URL) — so
-    // the proxy forwards it into the container ONLY when DATABASE_URL is present
-    // (src/index.ts, inside the DATABASE_URL block). DATABASE_URL IS bound on the
-    // live deploy (a wrangler secret — invisible in this file), but PG and this
-    // export remain inert until FABRIC_PG_DISABLED is exactly "0". 60s is a sane
+    // the proxy forwards it only inside the jointly gated PG block: DATABASE_URL
+    // must be present and FABRIC_PG_DISABLED must be exact "0". DATABASE_URL IS
+    // bound on the live deploy (a wrangler secret — invisible in this file), but PG
+    // and this export remain inert under the current exact "1". 60s is a sane
     // durable-export cadence once deliberately armed (distinct from the always-on
     // 30s corelink push).
     // Disarming this was tried during the 2026-08-31 outage triage and correctly
@@ -212,11 +213,11 @@
   },
 
   // The singleton control-plane container DO. ONE instance (max_instances 1, a fixed
-  // DO id in src/index.ts): DATABASE_URL IS bound → pg-durable ledger, so N>1 is
-  // offline-proven + unblocked (flip = raise FABRIC_NUM_SHARDS + max_instances
-  // together), but kept at N=1 as a deliberate volume choice. (Only the in-memory
-  // fallback — DATABASE_URL absent — would require every /v1 request to hit the SAME
-  // process; pg does not.)
+  // DO id in src/index.ts). DATABASE_URL is bound but FABRIC_PG_DISABLED is exact
+  // "1", so containment deliberately selects the in-memory ledger and every /v1
+  // request must hit this same process. N>1 is offline-proven but may be raised only
+  // after exact "0" arms PG and status proves ledger_cross_instance_safe=true; then
+  // FABRIC_NUM_SHARDS and max_instances must rise together.
   "durable_objects": {
     "bindings": [{ "name": "FABRICD", "class_name": "FabricdContainer" }]
   },
@@ -395,10 +396,11 @@
     }
   ],
 
-  // Keep-alive: the proxy Worker's scheduled() pings /v1/health every minute so the
-  // singleton container never sleeps (sleepAfter) — the "24/7" knob on CF. DATABASE_URL
-  // IS bound → the pg-durable ledger (FABRIC_LEDGER_BACKEND=pg) persists lease state
-  // across a restart/redeploy. (Only the in-memory fallback — DATABASE_URL absent —
-  // would lose lease state on restart.)
+  // The minute cron reads the container-free activity marker and probes /v1/health
+  // only after recent real traffic; idle or uncertain state refuses the waking probe.
+  // DATABASE_URL remains bound, but the current exact FABRIC_PG_DISABLED="1" keeps
+  // the ledger in memory. PG durability, the vCPU ceiling, and pg-only export arm
+  // only after an intentional change to byte-exact "0" + deploy/recreate + status
+  // verification. Roll back by restoring exact "1" before touching DATABASE_URL.
   "triggers": { "crons": ["* * * * *"] }
 }
