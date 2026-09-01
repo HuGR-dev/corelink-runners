@@ -45,7 +45,7 @@ describe("FABRIC_PROBES_ENABLED", () => {
     const fabricFetch = vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
       const url = String(input);
       if (url.endsWith("/v1/health")) return new Response("ok", { status: 200 });
-      return new Response(JSON.stringify({ counters: {} }), { status: 200 });
+      return new Response(JSON.stringify({ counters: { leases_acquired: 0 } }), { status: 200 });
     });
     const spawnFetch = vi.fn(async (): Promise<Response> =>
       new Response(JSON.stringify({ counters: { spawn_failed: 0 } }), { status: 200 }),

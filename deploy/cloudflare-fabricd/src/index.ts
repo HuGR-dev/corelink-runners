@@ -57,9 +57,10 @@ export interface Env {
   // fail-closes an armed ceiling on a non-pg backend, so the two are wired together.
   // Absent ⇒ in-memory ledger, no ceiling (unchanged dogfood behaviour). Secret.
   DATABASE_URL?: string;
-  // Kill-switch for the durable ledger, WITHOUT deleting the secret. "1" makes the
-  // DATABASE_URL block below behave as if the secret were absent, so the container
-  // boots on the in-memory ledger and stops dialling the database at all.
+  // Fail-closed arm for the durable ledger, WITHOUT deleting the secret. Only the
+  // exact string "0" permits DATABASE_URL to reach the container; unset, blank,
+  // whitespace, "1", and every malformed value behave as if DATABASE_URL were
+  // absent, so the container boots on the in-memory ledger and never dials PG.
   //
   // It exists because `PgLedger::connect` fail-closes BEFORE `TcpListener::bind`:
   // when the database refuses connections the control plane cannot start, the
@@ -133,6 +134,36 @@ export interface Env {
   // container (see the constructor) — it was previously documented but
   // unreachable, which made a rejected introspect key unrecoverable.
   FABRIC_INTROSPECT_BOOTCHECK?: string;
+}
+
+/**
+ * Container env for the durable PG ledger.
+ *
+ * The operational containment binding is an explicit arm, despite its historical
+ * `*_DISABLED` name: PG is reachable only when it is byte-for-byte `"0"`.
+ * Keeping this decision pure makes the complete fail-closed matrix testable.
+ */
+export function pgLedgerEnvVars(
+  env: Pick<
+    Env,
+    | "DATABASE_URL"
+    | "FABRIC_PG_DISABLED"
+    | "FABRIC_PG_TLS"
+    | "FABRIC_BILLING_EXPORT_INTERVAL_SECS"
+  >,
+): Record<string, string> {
+  if (!env.DATABASE_URL || env.FABRIC_PG_DISABLED !== "0") return {};
+
+  return {
+    FABRIC_LEDGER_BACKEND: "pg",
+    DATABASE_URL: env.DATABASE_URL,
+    FABRIC_PG_TLS: env.FABRIC_PG_TLS ?? "require",
+    FABRIC_RUNNER_VCPU: "4",
+    // Durable billing EXPORT (WP-A) is pg-only and therefore shares this arm.
+    ...(env.FABRIC_BILLING_EXPORT_INTERVAL_SECS
+      ? { FABRIC_BILLING_EXPORT_INTERVAL_SECS: env.FABRIC_BILLING_EXPORT_INTERVAL_SECS }
+      : {}),
+  };
 }
 
 /** The singleton control-plane container. fabricd binds 0.0.0.0:8080. */
@@ -215,27 +246,13 @@ export class FabricdContainer extends Container<Env> {
       // backend + FABRIC_RUNNER_VCPU=4 (standard-4 sizing) arm together; the #265
       // guard requires pg for an armed ceiling, so we never set one without the
       // other. Absent ⇒ neither key is injected → in-memory, unchanged behaviour.
-      // `FABRIC_PG_DISABLED=1` suppresses this entire block — see the Env field.
+      // Only exact `FABRIC_PG_DISABLED=0` permits this block — see the Env field.
+      // This deliberately makes the operational kill-switch fail closed: a lost,
+      // blank, whitespace-padded, or malformed binding cannot silently re-arm PG.
       // Every key here arms together (the pg backend, the vCPU ceiling the #265
       // guard ties to it, and the pg-only export), so suppressing them together is
       // the same coherent state as never having set the secret. Nothing half-arms.
-      ...(env.DATABASE_URL && env.FABRIC_PG_DISABLED !== "1"
-        ? {
-            FABRIC_LEDGER_BACKEND: "pg",
-            DATABASE_URL: env.DATABASE_URL,
-            FABRIC_PG_TLS: env.FABRIC_PG_TLS ?? "require",
-            FABRIC_RUNNER_VCPU: "4",
-            // Durable billing EXPORT (WP-A) — pg-ONLY: server.rs fail-closes boot
-            // if FABRIC_BILLING_EXPORT_INTERVAL_SECS is set without the pg ledger
-            // (nowhere durable to export to in memory). So it lives INSIDE this
-            // DATABASE_URL block and is forwarded only when its var is set — inert
-            // on the in-memory ledger, never a boot break. (Distinct from the
-            // always-on FABRIC_BILLING_PUSH_INTERVAL_SECS corelink push above.)
-            ...(env.FABRIC_BILLING_EXPORT_INTERVAL_SECS
-              ? { FABRIC_BILLING_EXPORT_INTERVAL_SECS: env.FABRIC_BILLING_EXPORT_INTERVAL_SECS }
-              : {}),
-          }
-        : {}),
+      ...pgLedgerEnvVars(env),
       // ── Moat mint + env-0 + attested-cost — forward the wrangler vars/secrets
       // INTO the container (the fabricd binary reads these from its own env). The
       // mint trio (URL+key, cred-ticket secret, CLW endpoint) arm together or the
@@ -829,6 +846,39 @@ export interface WatchdogEntry {
 
 export type WatchdogAction = "healthy" | "skip-booting" | "skip-backoff" | "destroy";
 
+export type IdleGateDecision =
+  | { action: "probe"; lastActivityMs: number }
+  | { action: "skip"; reason: "idle" | "unset" | "malformed_marker" };
+
+/**
+ * Decide whether a container-waking health probe is permitted by the
+ * container-free activity marker. Only a structurally valid, positive,
+ * non-future, recent timestamp is affirmative. Everything uncertain refuses
+ * the probe; zero is the DO's explicit "never active" value.
+ */
+export function idleGateDecision(
+  body: unknown,
+  now: number,
+  idleMs: number,
+): IdleGateDecision {
+  if (body === null || typeof body !== "object" || Array.isArray(body)) {
+    return { action: "skip", reason: "malformed_marker" };
+  }
+
+  const lastActivityMs = (body as { lastActivityMs?: unknown }).lastActivityMs;
+  if (lastActivityMs === 0) return { action: "skip", reason: "unset" };
+  if (
+    typeof lastActivityMs !== "number" ||
+    !Number.isSafeInteger(lastActivityMs) ||
+    lastActivityMs < 0 ||
+    lastActivityMs > now
+  ) {
+    return { action: "skip", reason: "malformed_marker" };
+  }
+  if (now - lastActivityMs > idleMs) return { action: "skip", reason: "idle" };
+  return { action: "probe", lastActivityMs };
+}
+
 /**
  * Pure boot-grace decision for one container tick. `entry` is mutated to record
  * firstHealthyAt on a healthy probe (the caller persists it across ticks). Given
@@ -1005,29 +1055,71 @@ export default {
       // > IDLE_MS, it is idle → SKIP the /v1/health probe so the container can
       // sleep (a probe would wake it). A sleeping container is not "dark": the next
       // real acquire wakes it, and a genuine hang while a job is active is caught
-      // because the box's own call fails. Fail-CLOSED: any idle-read error runs the
-      // legacy watchdog unchanged.
-      let idleSkip = false;
+      // because the box's own call fails. This gate is affirmative-only: only a
+      // valid, recent marker permits the legacy watchdog. Read errors, non-200s,
+      // malformed JSON/markers, future timestamps, and unset markers all refuse
+      // `/v1/health`, so uncertainty can never wake a container or re-arm PG.
+      let gateDecision: IdleGateDecision;
       try {
         const idleRes = await container.fetch(
           new Request("http://fabricd/__do/idle-status"),
         );
-        if (idleRes.status === 200) {
-          const body = (await idleRes.json()) as { lastActivityMs?: unknown };
-          const lastActivityMs =
-            typeof body.lastActivityMs === "number" &&
-            Number.isFinite(body.lastActivityMs)
-              ? body.lastActivityMs
-              : 0; // unset/non-numeric ⇒ 0 ⇒ treat as idle
-          idleSkip = Date.now() - lastActivityMs > IDLE_MS;
+        if (idleRes.status !== 200) {
+          console.warn(
+            JSON.stringify({
+              event: "fabricd_watchdog_probe_refused",
+              reason: "idle_status_non_200",
+              status: idleRes.status,
+              shard: k,
+              numShards: N,
+            }),
+          );
+          watchdogState.delete(id);
+          continue;
         }
+
+        let body: unknown;
+        try {
+          body = await idleRes.json();
+        } catch {
+          console.warn(
+            JSON.stringify({
+              event: "fabricd_watchdog_probe_refused",
+              reason: "idle_status_malformed_json",
+              shard: k,
+              numShards: N,
+            }),
+          );
+          watchdogState.delete(id);
+          continue;
+        }
+        gateDecision = idleGateDecision(body, Date.now(), IDLE_MS);
       } catch {
-        idleSkip = false; // fail-closed: run the legacy watchdog
+        console.warn(
+          JSON.stringify({
+            event: "fabricd_watchdog_probe_refused",
+            reason: "idle_status_unreachable",
+            shard: k,
+            numShards: N,
+          }),
+        );
+        watchdogState.delete(id);
+        continue;
       }
-      if (idleSkip) {
+      if (gateDecision.action === "skip") {
         // Clear watchdog lifecycle so the next active period treats a possibly-slept
         // container as a fresh boot, not a previously-healthy one that "went dark".
         watchdogState.delete(id);
+        if (gateDecision.reason === "malformed_marker") {
+          console.warn(
+            JSON.stringify({
+              event: "fabricd_watchdog_probe_refused",
+              reason: gateDecision.reason,
+              shard: k,
+              numShards: N,
+            }),
+          );
+        }
         continue;
       }
 

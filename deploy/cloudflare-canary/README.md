@@ -30,7 +30,8 @@ container's `sleepAfter` is also five minutes: that cadence pins the container.
 - health unreachable / non-200 ⇒ **CRITICAL**
 - a counter surface unreachable ⇒ **CRITICAL** (down IS the alert, not a crash)
 - surface 401 (key mismatch) ⇒ **WARN**; other non-200/404 ⇒ **WARN**;
-  404 (not armed yet) ⇒ silent
+  an armed surface's 404 ⇒ **WARN**; an explicitly unarmed 404 ⇒ silent;
+  malformed/empty/non-object 200 bodies ⇒ **CRITICAL**
 - `mint_failures` / `spawn_failed` delta > 0 ⇒ **CRITICAL**
 - `provision_capacity_503` / `revoke_failures` delta > 0 ⇒ **WARN**
 - a counter surface went backwards ⇒ **INFO** (the process restarted)
@@ -40,8 +41,10 @@ container's `sleepAfter` is also five minutes: that cadence pins the container.
 ## Default-off & safe
 
 With no secrets bound the Worker deploys, runs, and no-ops with a log line. A
-scheduled run never throws: every fetch is wrapped, a surface being down is an
-alert, and `sendAlert` no-ops (logging) when the Resend config is absent.
+scheduled run never throws: every fetch is wrapped, invalid surface bodies and
+KV read/write failures are visible alerts, a failed KV read never overwrites
+the prior snapshot, and `sendAlert` no-ops (logging) when the Resend config is
+absent.
 
 ## Test
 

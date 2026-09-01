@@ -12,7 +12,7 @@
 // `getContainer` is a spy; `cloudflare:workers` is aliased to a node stub by
 // vitest.config.ts.
 
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const getContainer = vi.fn();
 vi.mock("@cloudflare/containers", () => ({
@@ -28,7 +28,9 @@ vi.mock("@cloudflare/containers", () => ({
 }));
 
 import worker, {
+  idleGateDecision,
   isLongLivedRoute,
+  pgLedgerEnvVars,
   watchdogAction,
   type Env,
   type WatchdogEntry,
@@ -46,6 +48,94 @@ function envWithShards(n: number): Env {
 
 beforeEach(() => {
   getContainer.mockReset();
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+// ───────────────────── containment configuration matrices ────────────────────
+describe("PG containment arm — only exact string zero reaches the container", () => {
+  const DATABASE_URL = "postgres://must-not-leak.example/fabric";
+  const disabledValues: Array<string | undefined> = [
+    undefined,
+    "",
+    " ",
+    "\t",
+    "\n",
+    "1",
+    "true",
+    "false",
+    "00",
+    "0 ",
+    " 0",
+    "0\n",
+    "disabled",
+  ];
+
+  it.each(disabledValues)("FABRIC_PG_DISABLED=%j keeps every PG-only key absent", (flag) => {
+    const vars = pgLedgerEnvVars({
+      DATABASE_URL,
+      FABRIC_PG_DISABLED: flag,
+      FABRIC_PG_TLS: "require",
+      FABRIC_BILLING_EXPORT_INTERVAL_SECS: "30",
+    });
+
+    expect(vars).toEqual({});
+    expect(vars).not.toHaveProperty("DATABASE_URL");
+    expect(vars).not.toHaveProperty("FABRIC_LEDGER_BACKEND");
+    expect(vars).not.toHaveProperty("FABRIC_PG_TLS");
+    expect(vars).not.toHaveProperty("FABRIC_RUNNER_VCPU");
+    expect(vars).not.toHaveProperty("FABRIC_BILLING_EXPORT_INTERVAL_SECS");
+  });
+
+  it("exact FABRIC_PG_DISABLED=0 preserves the intended PG arm", () => {
+    expect(
+      pgLedgerEnvVars({
+        DATABASE_URL,
+        FABRIC_PG_DISABLED: "0",
+        FABRIC_PG_TLS: "disable",
+        FABRIC_BILLING_EXPORT_INTERVAL_SECS: "45",
+      }),
+    ).toEqual({
+      FABRIC_LEDGER_BACKEND: "pg",
+      DATABASE_URL,
+      FABRIC_PG_TLS: "disable",
+      FABRIC_RUNNER_VCPU: "4",
+      FABRIC_BILLING_EXPORT_INTERVAL_SECS: "45",
+    });
+  });
+
+  it("exact zero without a DATABASE_URL remains in-memory", () => {
+    expect(pgLedgerEnvVars({ FABRIC_PG_DISABLED: "0" })).toEqual({});
+    expect(pgLedgerEnvVars({ DATABASE_URL: "", FABRIC_PG_DISABLED: "0" })).toEqual({});
+  });
+});
+
+describe("idleGateDecision — a wake requires a definitive recent marker", () => {
+  const NOW = 1_800_000_000_000;
+  const IDLE_MS = 4 * 60_000;
+
+  it("permits only a valid recent timestamp", () => {
+    expect(idleGateDecision({ lastActivityMs: NOW - 1 }, NOW, IDLE_MS)).toEqual({
+      action: "probe",
+      lastActivityMs: NOW - 1,
+    });
+  });
+
+  it.each([
+    ["unset", { lastActivityMs: 0 }, "unset"],
+    ["old", { lastActivityMs: NOW - IDLE_MS - 1 }, "idle"],
+    ["missing", {}, "malformed_marker"],
+    ["string", { lastActivityMs: String(NOW) }, "malformed_marker"],
+    ["negative", { lastActivityMs: -1 }, "malformed_marker"],
+    ["fractional", { lastActivityMs: NOW - 0.5 }, "malformed_marker"],
+    ["future", { lastActivityMs: NOW + 1 }, "malformed_marker"],
+    ["null body", null, "malformed_marker"],
+    ["array body", [{ lastActivityMs: NOW }], "malformed_marker"],
+  ] as const)("refuses a %s marker", (_name, body, reason) => {
+    expect(idleGateDecision(body, NOW, IDLE_MS)).toEqual({ action: "skip", reason });
+  });
 });
 
 // ─────────────────────────── watchdogAction (boot-grace) ───────────────────────
@@ -114,9 +204,18 @@ function timeoutError(): Error {
 
 // ─────────────────────── scheduled() zero-idle-cost gate ───────────────────────
 describe("scheduled() — idle gate skips the health probe so an idle fabricd sleeps", () => {
+  const NOW = 1_800_000_000_000;
+
   // A container mock that records every path it is fetched and answers the
   // container-free idle-status from `lastActivityMs`, and /v1/health with 200.
-  function mockContainer(lastActivityMs: number, opts: { idleThrows?: boolean } = {}) {
+  function mockContainer(
+    opts: {
+      idleBody?: unknown;
+      idleRawBody?: string;
+      idleStatus?: number;
+      idleThrows?: boolean;
+    } = {},
+  ) {
     const paths: string[] = [];
     getContainer.mockImplementation(() => ({
       fetch: (req: Request) => {
@@ -125,9 +224,13 @@ describe("scheduled() — idle gate skips the health probe so an idle fabricd sl
         if (pathname === "/__do/idle-status") {
           if (opts.idleThrows) return Promise.reject(new Error("boom"));
           return Promise.resolve(
-            new Response(JSON.stringify({ lastActivityMs }), {
-              headers: { "content-type": "application/json" },
-            }),
+            new Response(
+              opts.idleRawBody ?? JSON.stringify(opts.idleBody ?? { lastActivityMs: 0 }),
+              {
+                status: opts.idleStatus ?? 200,
+                headers: { "content-type": "application/json" },
+              },
+            ),
           );
         }
         // /v1/health → healthy (200) so the watchdog loop exits on the first probe
@@ -138,6 +241,10 @@ describe("scheduled() — idle gate skips the health probe so an idle fabricd sl
     return paths;
   }
 
+  beforeEach(() => {
+    vi.spyOn(Date, "now").mockReturnValue(NOW);
+  });
+
   const run = () =>
     worker.scheduled(
       {} as unknown as Parameters<typeof worker.scheduled>[0],
@@ -145,28 +252,45 @@ describe("scheduled() — idle gate skips the health probe so an idle fabricd sl
     );
 
   it("idle (last activity > 4m ago) ⇒ reads idle-status but does NOT probe /v1/health", async () => {
-    const paths = mockContainer(Date.now() - 5 * 60_000);
+    const paths = mockContainer({ idleBody: { lastActivityMs: NOW - 5 * 60_000 } });
     await run();
     expect(paths).toContain("/__do/idle-status");
     expect(paths).not.toContain("/v1/health");
   });
 
   it("unset marker (lastActivityMs=0) ⇒ treated as idle ⇒ no /v1/health probe", async () => {
-    const paths = mockContainer(0);
+    const paths = mockContainer({ idleBody: { lastActivityMs: 0 } });
     await run();
     expect(paths).not.toContain("/v1/health");
   });
 
   it("recent activity ⇒ runs the watchdog (does probe /v1/health)", async () => {
-    const paths = mockContainer(Date.now());
+    const paths = mockContainer({ idleBody: { lastActivityMs: NOW } });
     await run();
     expect(paths).toContain("/v1/health");
   });
 
-  it("idle-status read failure ⇒ fail-CLOSED to the legacy watchdog (probes /v1/health)", async () => {
-    const paths = mockContainer(0, { idleThrows: true });
+  it.each([
+    ["read error", { idleThrows: true }, "idle_status_unreachable"],
+    ["non-200", { idleStatus: 503 }, "idle_status_non_200"],
+    ["malformed JSON", { idleRawBody: "{" }, "idle_status_malformed_json"],
+    ["missing field", { idleBody: {} }, "malformed_marker"],
+    ["wrong field type", { idleBody: { lastActivityMs: String(NOW) } }, "malformed_marker"],
+    ["future timestamp", { idleBody: { lastActivityMs: NOW + 1 } }, "malformed_marker"],
+  ] as const)("%s ⇒ refuses the wake probe and emits a structured event", async (_name, opts, reason) => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const paths = mockContainer(opts);
     await run();
-    expect(paths).toContain("/v1/health");
+
+    expect(paths).toContain("/__do/idle-status");
+    expect(paths).not.toContain("/v1/health");
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(warn.mock.calls[0]?.[0]))).toMatchObject({
+      event: "fabricd_watchdog_probe_refused",
+      reason,
+      shard: 0,
+      numShards: 1,
+    });
   });
 });
 

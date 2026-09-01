@@ -59,13 +59,15 @@
     // is set now instead of waiting for the quota period to roll: without it the
     // next allowance is spent the same way, and the outage returns mid-month.
     //
-    // GIVEN UP while this is "1": lease state does not survive a restart, N>1 stays
-    // refused (the acquire cap-guard fail-closes off pg), the vCPU ceiling disarms
-    // with it, and durable billing export is inert. None of that is readable today
-    // regardless — the database is refusing every connection.
+    // GIVEN UP unless this is exactly "0": lease state does not survive a restart,
+    // N>1 stays refused (the acquire cap-guard fail-closes off pg), the vCPU ceiling
+    // disarms with it, and durable billing export is inert. None of that is readable
+    // today regardless — the database is refusing every connection.
     //
-    // TO UNDO: restore a database, point DATABASE_URL at it, delete this line,
-    // redeploy. A fresh free project on an equivalent provider is enough —
+    // TO UNDO: restore a database, point DATABASE_URL at it, change this line to
+    // the exact string "0", and redeploy. NEVER delete the line to arm PG: unset,
+    // blank, whitespace and malformed values intentionally remain fail-closed.
+    // A fresh free project on an equivalent provider is enough —
     // docs/handoff/2026-07-03-PLAN-postgres-provisioning-and-vcpu-ceiling-arm.md
     // sanctions Supabase alongside Neon, with the same public-CA TLS that
     // FABRIC_PG_TLS=require verifies and the same CREATE TYPE/TABLE grant the DDL
@@ -104,8 +106,9 @@
     // RE-ARMED 2026-09-01 (incident containment): production `/health` again
     // returned `500 Failed to start container`, the live Worker still had
     // DATABASE_URL armed, and its `* * * * *` scheduled trigger was confirmed
-    // live. This stops the pre-bind Postgres dial loop immediately. Remove only
-    // after a replacement/restored database passes a fixed-config boot-rate probe.
+    // live. This stops the pre-bind Postgres dial loop immediately. Change to exact
+    // "0" only after a replacement/restored database passes a fixed-config
+    // boot-rate probe; removing the binding intentionally keeps PG disabled.
     "FABRIC_PG_DISABLED": "1",
     "CORELINK_INTROSPECT_URL": "https://corelink-api.humangr.com/internal/v1/auth/introspect",
     "BILLING_INGEST_URL": "https://corelink-api.humangr.com/internal/v1/billing/usage",
@@ -156,9 +159,10 @@
     // is set WITHOUT the pg ledger (FABRIC_LEDGER_BACKEND=pg via DATABASE_URL) — so
     // the proxy forwards it into the container ONLY when DATABASE_URL is present
     // (src/index.ts, inside the DATABASE_URL block). DATABASE_URL IS bound on the
-    // live deploy (a wrangler secret — invisible in this file), so pg is the active
-    // backend and this durable export is ARMED (not inert). 60s is a sane
-    // durable-export cadence (distinct from the always-on 30s corelink push).
+    // live deploy (a wrangler secret — invisible in this file), but PG and this
+    // export remain inert until FABRIC_PG_DISABLED is exactly "0". 60s is a sane
+    // durable-export cadence once deliberately armed (distinct from the always-on
+    // 30s corelink push).
     // Disarming this was tried during the 2026-08-31 outage triage and correctly
     // measured as NO change (0/10 SERVED): the pre-bind Postgres failure is not the
     // exporter's, it is `PgLedger::connect` inside `build_app_and_state`
