@@ -108,7 +108,10 @@ export function evaluate(prev: Snapshot | null, cur: Snapshot, cfg: RulesConfig)
   const alerts: Alert[] = [];
 
   // ── health ──────────────────────────────────────────────────────────────
-  if (!cur.fabricHealth.reachable) {
+  if (cur.fabricHealth.skipped) {
+    // Explicit containment mode. Do not manufacture a green health result and
+    // do not alert on a request that was intentionally never sent.
+  } else if (!cur.fabricHealth.reachable) {
     alerts.push({
       key: "health:fabric",
       severity: "critical",

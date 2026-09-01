@@ -15,7 +15,7 @@ import type { FabricStatusJson, SpawnMetricsJson, Snapshot, SurfaceSnapshot, Hea
 import { evaluate, applyCooldown, type RulesConfig } from "./rules";
 import { sendAlert } from "./notify";
 
-interface Env {
+export interface Env {
   // ── KV: snapshot + cooldown state (owner creates the namespace + binds it) ──
   CANARY_KV: KVNamespace;
 
@@ -47,6 +47,9 @@ interface Env {
   ALERT_COOLDOWN_MINUTES?: string; // default 30 — one incident won't email each tick
   STALENESS_HOURS?: string; // default 0 (OFF) — "no completions in N h" staleness
   BUSINESS_HOURS_UTC?: string; // e.g. "13-23" — gate staleness to a window (optional)
+  // Emergency cost-containment switch. Exact "0" skips BOTH fabricd requests
+  // while leaving the spawn-worker metrics monitor armed. Default is enabled.
+  FABRIC_PROBES_ENABLED?: string;
 }
 
 const DEFAULT_FABRIC_STATUS_URL = "https://corelink-fabricd.gmhelmold.workers.dev/internal/v1/status";
@@ -133,7 +136,7 @@ function parseBusinessHours(env: Env): { start: number; end: number } | undefine
 
 /** Run one monitor cycle. Fully wrapped by the caller; returns a summary string
  *  for the log. Never throws under normal operation. */
-async function runCycle(env: Env, now: number): Promise<string> {
+export async function runCycle(env: Env, now: number): Promise<string> {
   const fabricStatusUrl = env.FABRIC_STATUS_URL ?? DEFAULT_FABRIC_STATUS_URL;
   const fabricHealthUrl = env.FABRIC_HEALTH_URL ?? DEFAULT_FABRIC_HEALTH_URL;
   const spawnMetricsUrl = env.SPAWN_METRICS_URL ?? DEFAULT_SPAWN_METRICS_URL;
@@ -141,9 +144,21 @@ async function runCycle(env: Env, now: number): Promise<string> {
   // Prefer the service binding (Worker→Worker, no same-zone 404); else public fetch.
   const fabricFetch = env.FABRICD_SVC ? env.FABRICD_SVC.fetch.bind(env.FABRICD_SVC) : fetch;
   const spawnFetch = env.SPAWN_SVC ? env.SPAWN_SVC.fetch.bind(env.SPAWN_SVC) : fetch;
+  const fabricProbesEnabled = env.FABRIC_PROBES_ENABLED !== "0";
+
+  // A 5-minute canary calling a container with sleepAfter=5m keeps it billable
+  // forever. Also, an unarmed status key used to send a guaranteed 401 before
+  // the result was coerced to the silent 404 sentinel. Skip the I/O itself:
+  // post-processing a response is too late to avoid waking the container.
+  const fabricStatusProbe = fabricProbesEnabled && env.FABRIC_OBSERVABILITY_KEY
+    ? fetchSurface(fabricStatusUrl, env.FABRIC_OBSERVABILITY_KEY, fabricFetch)
+    : Promise.resolve<SurfaceSnapshot>({ reachable: true, status: 404, counters: {} });
+  const fabricHealthProbe = fabricProbesEnabled
+    ? fetchHealth(fabricHealthUrl, fabricFetch)
+    : Promise.resolve<HealthSnapshot>({ reachable: true, status: 0, skipped: true });
   const [fabric, fabricHealth, spawn] = await Promise.all([
-    fetchSurface(fabricStatusUrl, env.FABRIC_OBSERVABILITY_KEY, fabricFetch),
-    fetchHealth(fabricHealthUrl, fabricFetch),
+    fabricStatusProbe,
+    fabricHealthProbe,
     fetchSurface(spawnMetricsUrl, env.METRICS_OBSERVABILITY_KEY, spawnFetch),
   ]);
 
@@ -183,7 +198,12 @@ async function runCycle(env: Env, now: number): Promise<string> {
   await writeJson(env.CANARY_KV, SNAPSHOT_KEY, cur);
   await writeJson(env.CANARY_KV, COOLDOWN_KEY, nextCooldowns);
 
-  return `fabric=${fabric.reachable ? fabric.status : "DOWN"} health=${fabricHealth.reachable ? fabricHealth.status : "DOWN"} spawn=${spawn.reachable ? spawn.status : "DOWN"} | triggered=${alerts.length} | ${sendSummary}`;
+  const healthSummary = fabricHealth.skipped
+    ? "SKIPPED"
+    : fabricHealth.reachable
+      ? String(fabricHealth.status)
+      : "DOWN";
+  return `fabric=${fabric.reachable ? fabric.status : "DOWN"} health=${healthSummary} spawn=${spawn.reachable ? spawn.status : "DOWN"} | triggered=${alerts.length} | ${sendSummary}`;
 }
 
 async function readJson<T>(kv: KVNamespace, key: string): Promise<T | null> {

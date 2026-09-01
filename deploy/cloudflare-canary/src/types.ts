@@ -44,6 +44,9 @@ export interface SurfaceSnapshot {
 export interface HealthSnapshot {
   reachable: boolean;
   status: number;
+  /** True when the operator deliberately disabled fabricd probes. This is
+   *  distinct from a synthetic 200: no liveness claim was made. */
+  skipped?: boolean;
 }
 
 /** The full per-cycle snapshot, persisted in KV and diffed against next cycle. */
