@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Negative tests for the three planning gates.
+"""Negative tests for the three structural planning gates.
 
 Each mutation recreates a false PASS found by a cold review.  The self-test
 passes only when the unmodified inputs pass and every corrupted copy blocks.
@@ -8,11 +8,16 @@ The fixtures intentionally exercise the physical Markdown surfaces as well as
 the catalogues: a gate must not pass merely because a malformed row is opaque,
 or because a summary/header/capability section was changed while the global id
 set still looks correct.
+
+These are structural parser/registry checks only. They do not prevent a
+coordinated checker-and-source tamper or arbitrary semantic text edits, and a
+PASS is not production, evidence, freeze, or dispatch readiness.
 """
 
 from __future__ import annotations
 
 import subprocess
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -256,6 +261,22 @@ def main() -> int:
             False,
         )
 
+        hidden_main_row = work / "html-comment-hidden-main-row.md"
+        main_row = next(
+            line
+            for line in plan.splitlines()
+            if re.match(r"^\|\s+(?:\*\*)?A1\.1(?:\*\*)?\s+\|", line)
+        )
+        hidden_main_row.write_text(
+            plan.replace(main_row, f"<!-- {main_row} -->", 1), encoding="utf-8"
+        )
+        require(
+            "WP HTML-comment-hidden acceptance row",
+            "wp-check.py",
+            hidden_main_row,
+            False,
+        )
+
         deleted_t4w3_dependency = work / "deleted-t4-w3-dependency.md"
         if DAG.exists():
             deleted_t4w3_dag = work / "deleted-t4-w3-dependency-dag.md"
@@ -301,6 +322,32 @@ def main() -> int:
             encoding="utf-8",
         )
         require("AU source→AU swap", "au-check.py", source_au_swap, False)
+
+        au_bucket_drift = work / "au-bucket-drift.md"
+        au_bucket_drift.write_text(
+            replace_once(
+                triage,
+                "| union-09 | M7 | MEDIUM | W1-parallel + W3-live-proof |",
+                "| union-09 | M7 | MEDIUM | W2-serial-worker + W3-live-proof |",
+                "AU bucket drift",
+            ),
+            encoding="utf-8",
+        )
+        require("AU bucket drift", "au-check.py", au_bucket_drift, False)
+
+        hidden_au_row = work / "html-comment-hidden-au-row.md"
+        au_row = next(
+            line for line in triage.splitlines() if line.startswith("| union-06 |")
+        )
+        hidden_au_row.write_text(
+            triage.replace(au_row, f"<!-- {au_row} -->", 1), encoding="utf-8"
+        )
+        require(
+            "AU HTML-comment-hidden placement row",
+            "au-check.py",
+            hidden_au_row,
+            False,
+        )
 
         au_invalid_kind = work / "au-invalid-kind.md"
         au_invalid_kind.write_text(
@@ -391,6 +438,78 @@ def main() -> int:
         )
         require("AU parallel scope overlap", "au-check.py", scope_overlap, False)
 
+        if DAG.exists():
+            dag_text = DAG.read_text(encoding="utf-8")
+
+            phantom_dag = work / "phantom-dag-wp.md"
+            phantom_anchor = (
+                "| T0-W1 | W0 unblock | — | `docs/plan/union-catalog-ledger.md`; — | "
+                "Luna / mechanical |"
+            )
+            phantom_dag.write_text(
+                replace_once(
+                    dag_text,
+                    phantom_anchor,
+                    "| T99-W1 | W1 parallel | — | `docs/plan/phantom.md`; — | Luna / test |\n"
+                    + phantom_anchor,
+                    "phantom DAG WP",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU phantom DAG WP",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=phantom_dag,
+            )
+
+            nested_scope = work / "nested-glob-file-overlap-dag.md"
+            t7w2_line = next(
+                line for line in dag_text.splitlines() if line.startswith("| T7-W2 |")
+            )
+            t7w2_scope = t7w2_line.split("|")[4].strip()
+            docs_glob = "`docs/**`"
+            docs_glob_start = t7w2_scope.index(docs_glob)
+            docs_glob_end = t7w2_scope.index(";", docs_glob_start)
+            broad_scope = (
+                t7w2_scope[:docs_glob_start] + docs_glob + t7w2_scope[docs_glob_end:]
+            )
+            nested_scope.write_text(
+                replace_once(
+                    dag_text,
+                    t7w2_line,
+                    t7w2_line.replace(t7w2_scope, broad_scope, 1),
+                    "nested glob/file overlap",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU nested glob/file scope overlap",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=nested_scope,
+            )
+
+            missing_evidence = work / "missing-evidence-prerequisite-dag.md"
+            missing_evidence.write_text(
+                replace_once(
+                    dag_text,
+                    "| T8-W7 | W3 live proof | T8-W4, T2-W2a, T2-W2b, T2-W4, T1-W6, T7-W4b |",
+                    "| T8-W7 | W3 live proof | T8-W4, T2-W2a, T2-W2b, T2-W4, T1-W6 |",
+                    "missing evidence gate/prerequisite",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU missing evidence gate/prerequisite",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=missing_evidence,
+            )
+
         wrong_au_owner = work / "wrong-au-owner.md"
         union23 = next(
             line for line in triage.splitlines() if line.startswith("| union-23 |")
@@ -403,7 +522,7 @@ def main() -> int:
             "AU7.10 outside canonical file owner", "au-check.py", wrong_au_owner, False
         )
 
-    print("\nplan gate self-test: PASS — baselines accepted and 18 corruptions blocked")
+    print("\nplan gate self-test: PASS — baselines accepted and 23 corruptions blocked")
     return 0
 
 

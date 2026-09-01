@@ -10,7 +10,8 @@ on:
       - 'docs/plan/evidence/**'
       - 'docs/plan/*.json'
       - 'docs/plan/**/*.json'
-      - '.github/workflows/plan-integrity.yml'
+      - '.github/workflows/*.yml'
+      - '.github/workflows/*.yaml'
   push:
     branches: [main]
     paths:
@@ -21,7 +22,8 @@ on:
       - 'docs/plan/evidence/**'
       - 'docs/plan/*.json'
       - 'docs/plan/**/*.json'
-      - '.github/workflows/plan-integrity.yml'
+      - '.github/workflows/*.yml'
+      - '.github/workflows/*.yaml'
 
 permissions:
   contents: read
@@ -54,7 +56,11 @@ jobs:
           # for these exact labels in these existing workflow files.  Keep
           # that known baseline visible, but fail on every other diagnostic
           # (including a new custom label or any warning on a new path).
-          baseline='^\.github/workflows/(build-cf-container-images|build-fabricd-image|canary-smoke|ci|clw-ticket-propagation-check|corelink-smoke|corelink-stress|dco|deploy-spawn-worker|dogfood-smoke|latency-probe|moat-action-test|moat-benchmark|moat-correctness|o7-metadata-probe|orphan-box-detect|plan-integrity|prove-baked-buildkit|release|spawn-worker-ci)\.yml:[0-9]+:[0-9]+: label "(corelink|corelink-builder|corelink-dogfood)" is unknown\..* \[runner-label\]$'
+          baseline='^\.github/workflows/(build-cf-container-images|build-fabricd-image|canary-smoke|ci|clw-ticket-propagation-check|corelink-smoke|corelink-stress|dco|deploy-spawn-worker|dogfood-smoke|latency-probe|moat-action-test|moat-benchmark|moat-correctness|o7-metadata-probe|orphan-box-detect|plan-integrity|prove-baked-buildkit|release|spawn-worker-ci)\.yml:[0-9]+:[0-9]+: label "(corelink|corelink-builder|corelink-dogfood)" is unknown\. available labels are .* \[runner-label\]$'
+          if [[ "$status" -ne 0 && -z "$(tr -d '[:space:]' <"$report")" ]]; then
+            echo "actionlint: exited nonzero without a diagnostic" >&2
+            exit 1
+          fi
           known="$(grep -E "$baseline" "$report" || true)"
           unexpected="$(grep -Ev "$baseline" "$report" || true)"
           if [[ -n "$known" ]]; then
@@ -82,5 +88,5 @@ jobs:
           --plan docs/plan/2026-08-30-golive-remediation-plan.md
           --dag docs/plan/2026-09-01-reconciled-dispatch-dag.md
 
-      - name: Prove planning gates fail closed
+      - name: Exercise structural planning gates
         run: python3 docs/plan/gates-selftest.py

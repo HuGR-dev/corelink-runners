@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-09-01 — go-live plan Round 6 remains 7/8 NOT QUIET
+
+Round 6 reviewed the exact committed repair input
+`af4ed85dad289e333e9bf09f129fb2faa243136d` in a clean, read-only exercise. Seven of eight
+reviewers reported blockers; one reviewer found no new issue and signed off. The blockers span
+historical-catalog provenance, semantic acceptance, the meaning of mechanical gates, DAG
+dispatchability, production containment evidence, and staged owner decisions/registry. The full
+ledger is [`docs/plan/2026-09-01-round6-cold-review-ledger.md`](docs/plan/2026-09-01-round6-cold-review-ledger.md).
+
+The latest measured fabricd inventory remains **3/3 inactive at `2026-09-01T17:52:13Z`**. That is
+post-containment scale-to-zero evidence only: `FABRIC_PG_DISABLED=1` still suspends durable ledger
+replay, the Postgres vCPU ceiling and durable billing export. The runner wave was correlated with
+four in-progress `corelink-server` workflows and provider runners; it was not proof of a leak.
+
+On the reviewed Round-6 input, the structure checks passed mechanically: 247/247 findings, 94 suite
+rows (92 live), 30 AU source findings / 33 proposed AU ids, and 18 known corruptions blocked by the
+negative selftest. This repair cycle adds five reproduced structural mutations, bringing the
+current selftest to 23 blocked corruptions.
+The corrected AU registry has T3-W5 as the **12th new AU WP** and **4 existing-WP extensions**.
+These results establish structural consistency only—not semantic readiness, tamper-proof proof,
+production readiness, quietness, freeze eligibility or dispatch authority. The status is
+**QUIET COUNT 0 · NOT FROZEN · NO AU PROMOTION · NO DISPATCH · NO GREEN CREDIT**. Round 7 starts
+only after this repair cycle is captured in one newly signed commit with a full SHA.
+
 ### 2026-09-01 — go-live plan round 5 remains 8/8 NOT QUIET
 
 Round 5 reviewed the current planning input `3fe8d06` (with merged containment `b70deae`, PR #529)

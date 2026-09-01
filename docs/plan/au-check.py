@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import argparse
 import ast
-import fnmatch
 import re
 import sys
 from collections import Counter, defaultdict
@@ -49,12 +48,12 @@ EXPECTED_PROPOSAL_WAVES = {
     "T7-W4": 1,
     "T7-W5": 3,
     "T2-W6": 3,
+    "T3-W5": 4,
 }
 EXPECTED_EXTENSION_WAVES = {
     "T4-W1": 2,
     "T8-W1": 2,
     "T6-W10": 3,
-    "T3-W5": 4,
     "T5-W1": 1,
 }
 ALLOWED_BUCKETS = {
@@ -190,6 +189,20 @@ EXPECTED_BUCKET_FINDINGS = {
     "CLEAN-no-action": (),
     "DEFER-needs-waiver": (),
 }
+EXPECTED_PLACEMENT_BUCKETS = {
+    finding.removesuffix("p"): frozenset({bucket})
+    for bucket, findings in EXPECTED_BUCKET_FINDINGS.items()
+    for finding in findings
+}
+# The three source findings split across a repo packet and a live-proof packet.
+EXPECTED_PLACEMENT_BUCKETS.update(
+    {
+        "union-06": frozenset({"W2-serial-worker", "W3-live-proof"}),
+        "union-09": frozenset({"W1-parallel", "W3-live-proof"}),
+        "union-23": frozenset({"RELAY", "DOCS-sweep"}),
+        "M3": frozenset({"W2-serial-worker", "W3-live-proof"}),
+    }
+)
 EXPECTED_PROPOSAL_WPS = set(EXPECTED_PROPOSAL_WAVES)
 EXPECTED_EXTENSION_WPS = set(EXPECTED_EXTENSION_WAVES)
 STAGED_DECISION_IDS = {"D11", "D12", "D13"}
@@ -217,6 +230,24 @@ DAG_HEADER = [
     "exclusive path atoms; artifact filename",
     "lane",
 ]
+STAGED_WP_HEADER = [
+    "wp",
+    "owns",
+    "count",
+    "exclusive x",
+    "exact acceptance prerequisite",
+    "pre-decided implementation contract",
+]
+STAGED_ACCEPTANCE_HEADER = [
+    "id",
+    "kind",
+    "wp (≤4)",
+    "x",
+    "deps",
+    "invariants",
+    "fixed threshold",
+    "red → green test",
+]
 AU_DECL_RE = re.compile(r"\*\*(AU\d+\.\d+(?:[a-z])?)\s+—\s+([a-z+]+):\*\*")
 DEPENDENCY_TARGET_RE = re.compile(
     r"\b(?:T\d+-W\d+[A-Za-z]*|AU\d+\.\d+(?:[a-z])?|A\d+\.\d+|"
@@ -233,7 +264,7 @@ class Placement:
     owner: str
     invariants: frozenset[str]
     source: str
-    bucket: str
+    buckets: frozenset[str]
     dependency: str
 
 
@@ -244,6 +275,43 @@ def markdown_cells(line: str) -> list[str]:
 def plain_markdown(value: str) -> str:
     value = value.replace("*", "").replace("`", "")
     return re.sub(r"\s+", " ", value).strip()
+
+
+def hidden_canonical_table_errors(document: str, label: str) -> list[str]:
+    """Reject AU registry rows that Markdown renderers hide in HTML comments."""
+
+    errors: list[str] = []
+    cursor = 0
+    while True:
+        start = document.find("<!--", cursor)
+        if start < 0:
+            break
+        close = document.find("-->", start + 4)
+        end = len(document) if close < 0 else close + 3
+        comment = document[start:end]
+        pipe_rows = [line for line in comment.splitlines() if line.startswith("|")]
+        canonical_row = any(
+            AU_RE.search(line)
+            or re.search(r"\b(?:union-\d{2}|RH[59]|M(?:3|5|19))\b", line)
+            or [plain_markdown(cell).lower() for cell in markdown_cells(line)]
+            in (
+                SUMMARY_HEADER,
+                PLACEMENT_HEADER,
+                DECLARATION_HEADER,
+                STAGED_WP_HEADER,
+                STAGED_ACCEPTANCE_HEADER,
+            )
+            for line in pipe_rows
+        )
+        if canonical_row:
+            line_no = document.count("\n", 0, start) + 1
+            errors.append(
+                f"{label} hides canonical AU table content in an HTML comment at line {line_no}"
+            )
+        cursor = end
+        if close < 0:
+            break
+    return errors
 
 
 def exact_markdown_table(
@@ -472,7 +540,7 @@ def parse_rows(document: str) -> tuple[list[Placement], list[str], list[str], se
                     owner,
                     invariants,
                     source,
-                    "+".join(sorted(bucket_tokens)),
+                    frozenset(bucket_tokens),
                     columns[6],
                 )
             )
@@ -488,7 +556,7 @@ def parse_wp_declarations(
     dict[str, str],
     list[str],
 ]:
-    """Parse new-WP rows and the five existing-WP AU extensions."""
+    """Parse new-WP rows and the four existing-WP AU extensions."""
 
     section = section_between(
         document,
@@ -586,6 +654,77 @@ def parse_wp_declarations(
                 f"extension {name} physically repeats AU ids: {duplicate_ids}"
             )
     return declarations, dict(extensions), declaration_waves, declaration_scopes, errors
+
+
+def read_staged_wp_registry(
+    path: Path,
+) -> tuple[set[str], set[str], set[str], list[str]]:
+    """Read the exhaustive new/existing WP registry from the staged delta table."""
+
+    document = path.read_text(encoding="utf-8")
+    errors = hidden_canonical_table_errors(document, "staged principal WP registry")
+    section = section_between(
+        document,
+        "## 4. Proposed WP packet contracts (not a second dispatch DAG)",
+        "## 5. One eligible baseline and required review sequence",
+    )
+    rows, table_errors = exact_markdown_table(
+        section, STAGED_WP_HEADER, "staged principal WP packets"
+    )
+    errors.extend(table_errors)
+    new_wps: set[str] = set()
+    existing_wps: set[str] = set()
+    packet_rows: dict[str, str] = {}
+    for line_no, columns in rows:
+        label = plain_markdown(columns[0])
+        match = re.fullmatch(
+            r"(new|existing) (T\d+-W\d+[A-Za-z]*)", label, re.IGNORECASE
+        )
+        if not match:
+            errors.append(
+                f"staged principal WP row {line_no} has an opaque WP label: {columns[0]!r}"
+            )
+            continue
+        kind, wp = match.group(1).lower(), match.group(2)
+        registry = new_wps if kind == "new" else existing_wps
+        if wp in new_wps | existing_wps:
+            errors.append(f"staged principal WP registry repeats {wp}")
+        registry.add(wp)
+        packet_rows[wp] = columns[1]
+    if not new_wps:
+        errors.append("staged principal WP registry contains no new WP packets")
+
+    acceptance_section = section_between(
+        document,
+        "## 3. Acceptance proposals — reserved, not promoted",
+        "### 3.1 Binding A3.29 liveness/safety matrix",
+    )
+    acceptance_rows, table_errors = exact_markdown_table(
+        acceptance_section,
+        STAGED_ACCEPTANCE_HEADER,
+        "staged principal acceptance proposals",
+    )
+    errors.extend(table_errors)
+    kinds: dict[str, str] = {}
+    for line_no, columns in acceptance_rows:
+        ids = A_RE.findall(columns[0])
+        if len(ids) != 1:
+            errors.append(
+                f"staged principal acceptance row {line_no} has an opaque id: {columns[0]!r}"
+            )
+            continue
+        kinds[ids[0]] = plain_markdown(columns[1]).lower()
+
+    probe_wps: set[str] = set()
+    for wp, owns in packet_rows.items():
+        if "repo half" in owns.lower():
+            continue
+        owned_ids = A_RE.findall(owns)
+        if "live half" in owns.lower() or any(
+            "probe" in kinds.get(item, "") for item in owned_ids
+        ):
+            probe_wps.add(wp)
+    return new_wps, existing_wps, probe_wps, errors
 
 
 def validate_summary(document: str) -> list[str]:
@@ -790,7 +929,7 @@ def validate_dependency_targets(
 
 
 def scope_atoms(scope: str) -> tuple[str, ...]:
-    """Extract normalized path/glob atoms from a prose scope declaration."""
+    """Extract path/glob atoms without destroying dots, stars or globstars."""
 
     fragments: list[str] = []
     for segment in scope.split(";"):
@@ -798,21 +937,16 @@ def scope_atoms(scope: str) -> tuple[str, ...]:
         if "excluding" in segment.lower() and segment_fragments:
             segment_fragments = segment_fragments[:1]
         fragments.extend(segment_fragments)
-    if not fragments:
-        fragments = [scope]
     atoms: list[str] = []
     for fragment in fragments:
-        for raw in re.split(r"\s*(?:,|\+)\s*", fragment):
-            atom = plain_markdown(raw).lower().strip(" .;:")
-            atom = re.sub(r"^(?:new|every)\s+", "", atom)
-            atom = re.sub(r"\s+\([^)]*\)$", "", atom)
-            if not atom or atom.startswith("probe:"):
-                continue
-            if "/" not in atom and not re.search(r"[.*][a-z0-9{}*,?-]*$", atom):
-                continue
-            if atom.endswith("/"):
-                atom += "**"
-            atoms.append(atom)
+        atom = fragment.strip()
+        if not atom or atom.startswith("probe:"):
+            continue
+        if "/" not in atom and not any(char in atom for char in ".*?["):
+            continue
+        if atom.endswith("/"):
+            atom += "**"
+        atoms.append(atom)
     return tuple(dict.fromkeys(atoms))
 
 
@@ -824,11 +958,11 @@ def scope_exclusions(scope: str) -> tuple[str, ...]:
         if "excluding" not in segment.lower():
             continue
         fragments = re.findall(r"`([^`]+)`", segment)
-        if len(fragments) < 2:
+        if not fragments:
             continue
-        base = re.split(r"[*?[{]", fragments[0].lower(), maxsplit=1)[0]
+        base = re.split(r"[*?[{]", fragments[0], maxsplit=1)[0]
         for raw in fragments[1:]:
-            atom = plain_markdown(raw).lower().strip(" .;:")
+            atom = raw.strip()
             if not atom:
                 continue
             if not atom.startswith(base):
@@ -836,25 +970,122 @@ def scope_exclusions(scope: str) -> tuple[str, ...]:
             if atom.endswith("/"):
                 atom += "**"
             exclusions.append(atom)
+        # This canonical carveout is deliberately prose because "canary" is
+        # a lane name, not a literal basename beside the broad deploy glob.
+        if len(fragments) == 1 and re.search(
+            r"\bexcluding\s+canary\b", segment, re.IGNORECASE
+        ):
+            exclusions.append("deploy/cloudflare-canary/**")
     return tuple(dict.fromkeys(exclusions))
 
 
 def path_atoms_overlap(left: str, right: str) -> bool:
     """Conservatively detect exact/glob path intersections."""
 
-    left_glob = any(char in left for char in "*?[")
-    right_glob = any(char in right for char in "*?[")
+    left_glob = any(char in left for char in "*?[{")
+    right_glob = any(char in right for char in "*?[{")
     if not left_glob and not right_glob:
         return left == right
     if left_glob and not right_glob:
-        return fnmatch.fnmatchcase(right, left)
+        return glob_matches(left, right)
     if right_glob and not left_glob:
-        return fnmatch.fnmatchcase(left, right)
+        return glob_matches(right, left)
     if left == right:
         return True
+    for witness in glob_witnesses(left) | glob_witnesses(right):
+        if glob_matches(left, witness) and glob_matches(right, witness):
+            return True
     left_prefix = re.split(r"[*?[{]", left, maxsplit=1)[0]
     right_prefix = re.split(r"[*?[{]", right, maxsplit=1)[0]
-    return left_prefix.startswith(right_prefix) or right_prefix.startswith(left_prefix)
+    if not (
+        left_prefix.startswith(right_prefix) or right_prefix.startswith(left_prefix)
+    ):
+        return False
+    left_suffix = re.split(r"[*?\]}]", left)[-1]
+    right_suffix = re.split(r"[*?\]}]", right)[-1]
+    return left_suffix.endswith(right_suffix) or right_suffix.endswith(left_suffix)
+
+
+def glob_matches(pattern: str, path: str) -> bool:
+    """Match a repo path with slash-aware ``*`` and recursive ``**`` semantics."""
+
+    expression = ""
+    index = 0
+    while index < len(pattern):
+        character = pattern[index]
+        if character == "*":
+            if index + 1 < len(pattern) and pattern[index + 1] == "*":
+                index += 1
+                if index + 1 < len(pattern) and pattern[index + 1] == "/":
+                    expression += "(?:.*/)?"
+                    index += 1
+                else:
+                    expression += ".*"
+            else:
+                expression += "[^/]*"
+        elif character == "?":
+            expression += "[^/]"
+        elif character == "[":
+            close = pattern.find("]", index + 1)
+            if close < 0:
+                expression += re.escape(character)
+            else:
+                expression += pattern[index : close + 1]
+                index = close
+        elif character == "{":
+            close = pattern.find("}", index + 1)
+            if close < 0:
+                expression += re.escape(character)
+            else:
+                choices = pattern[index + 1 : close].split(",")
+                expression += "(?:" + "|".join(map(re.escape, choices)) + ")"
+                index = close
+        else:
+            expression += re.escape(character)
+        index += 1
+    return re.fullmatch(expression, path) is not None
+
+
+def glob_witnesses(pattern: str) -> set[str]:
+    """Create small concrete paths that witness the common repo glob forms."""
+
+    variants = [pattern]
+    while any("**" in item for item in variants):
+        expanded: list[str] = []
+        for item in variants:
+            if "**/" in item:
+                expanded.extend(
+                    (item.replace("**/", "", 1), item.replace("**/", "x/", 1))
+                )
+            elif "**" in item:
+                expanded.extend((item.replace("**", "", 1), item.replace("**", "x", 1)))
+            else:
+                expanded.append(item)
+        variants = expanded
+    witnesses: set[str] = set()
+    for item in variants:
+        item = re.sub(r"\{([^{}]+)\}", lambda match: match.group(1).split(",")[0], item)
+        item = re.sub(
+            r"\[([^]]+)\]", lambda match: match.group(1).lstrip("!^")[:1] or "x", item
+        )
+        item = item.replace("*", "x").replace("?", "x")
+        witnesses.add(item)
+    return witnesses
+
+
+def path_atom_covers(container: str, candidate: str) -> bool:
+    """Return true only when a carveout covers the complete competing atom."""
+
+    if container == candidate:
+        return True
+    candidate_glob = any(char in candidate for char in "*?[{")
+    if not candidate_glob:
+        return glob_matches(container, candidate)
+    if container.endswith("/**"):
+        prefix = container[: -len("**")]
+        candidate_prefix = re.split(r"[*?[{]", candidate, maxsplit=1)[0]
+        return candidate_prefix.startswith(prefix)
+    return False
 
 
 def parse_dispatch_dag(
@@ -1003,7 +1234,7 @@ def dag_scope_collisions(
         return False
 
     def excluded(owner: str, atom: str) -> bool:
-        return any(path_atoms_overlap(atom, item) for item in exclusions.get(owner, ()))
+        return any(path_atom_covers(item, atom) for item in exclusions.get(owner, ()))
 
     nodes = sorted(scopes)
     for index, left_wp in enumerate(nodes):
@@ -1033,6 +1264,68 @@ def dag_scope_collisions(
     return collisions
 
 
+def dag_depends_on(
+    node: str, target: str, predecessors: dict[str, tuple[str, ...]]
+) -> bool:
+    """Return whether ``target`` is a direct or transitive DAG predecessor."""
+
+    pending = list(predecessors.get(node, ()))
+    seen: set[str] = set()
+    while pending:
+        current = pending.pop()
+        if current == target:
+            return True
+        if current in seen:
+            continue
+        seen.add(current)
+        pending.extend(predecessors.get(current, ()))
+    return False
+
+
+def validate_au_dag_routing(
+    rows: list[Placement],
+    predecessors: dict[str, tuple[str, ...]],
+    staged_probe_wps: set[str],
+) -> list[str]:
+    """Mechanize declared AU obstacle, image/deploy and evidence-gate routes."""
+
+    errors: list[str] = []
+    owners = {row.item: row.owner for row in rows}
+    required_routes = {
+        "AU5.10": ("O-APP",),
+        # The pin/freshness branch and the actual image-ship packet jointly
+        # represent the declared runner image build/deploy route.
+        "AU3.26b": ("T2-W2a", "T2-W4"),
+    }
+    for item, targets in required_routes.items():
+        owner = owners.get(item)
+        if owner is None:
+            continue
+        missing = [
+            target
+            for target in targets
+            if not dag_depends_on(owner, target, predecessors)
+        ]
+        if missing:
+            errors.append(
+                f"{item}/{owner} declared prerequisite routing is absent from DAG: {missing}"
+            )
+
+    for row in rows:
+        if row.kind != "probe":
+            continue
+        if "T7-W4b" not in predecessors.get(row.owner, ()):
+            errors.append(
+                f"{row.item}/{row.owner} probe does not route through evidence gate T7-W4b"
+            )
+    for wp in sorted(staged_probe_wps):
+        if "T7-W4b" not in predecessors.get(wp, ()):
+            errors.append(
+                f"staged test+probe packet {wp} does not route through evidence gate T7-W4b"
+            )
+    return errors
+
+
 def acceptance_ids(plan_path: Path) -> tuple[set[str], list[str], list[str]]:
     document = plan_path.read_text(encoding="utf-8")
     suite = section_between(
@@ -1060,9 +1353,11 @@ def check(
     wp_path: Path,
     finding_path: Path,
     dag_path: Path,
+    delta_path: Path | None = None,
 ) -> tuple[bool, list[str], dict[str, object]]:
     failures: list[str] = []
     document = triage_path.read_text(encoding="utf-8")
+    failures.extend(hidden_canonical_table_errors(document, "AU triage"))
     failures.extend(validate_summary(document))
     rows, parse_errors, sources, mentioned_wps = parse_rows(document)
     failures.extend(parse_errors)
@@ -1105,6 +1400,19 @@ def check(
     if association_mismatches:
         failures.append(
             f"canonical source/AU association mismatch: {association_mismatches}"
+        )
+    placement_bucket_mismatches = {
+        row.source: {
+            "expected": sorted(EXPECTED_PLACEMENT_BUCKETS.get(row.source, ())),
+            "got": sorted(row.buckets),
+        }
+        for row in rows
+        if row.buckets != EXPECTED_PLACEMENT_BUCKETS.get(row.source, frozenset())
+    }
+    if placement_bucket_mismatches:
+        failures.append(
+            "placement buckets disagree with frozen summary/source mapping: "
+            f"{placement_bucket_mismatches}"
         )
     kind_mismatches = {
         row.item: {"expected": EXPECTED_AU_KINDS.get(row.item), "got": row.kind}
@@ -1199,6 +1507,20 @@ def check(
         failures.append(f"cannot read principal finding catalog: {exc}")
         principal_findings = set()
 
+    if delta_path is None:
+        delta_path = plan_path.with_name("2026-09-01-round3-remediation-delta.md")
+    try:
+        (
+            staged_wps,
+            staged_existing_wps,
+            staged_probe_wps,
+            staged_errors,
+        ) = read_staged_wp_registry(delta_path)
+        failures.extend(staged_errors)
+    except (OSError, ValueError) as exc:
+        failures.append(f"cannot read staged principal WP registry: {exc}")
+        staged_wps, staged_existing_wps, staged_probe_wps = set(), set(), set()
+
     main_names = set(main_items)
     proposal_names = set(declarations)
     # After applying the three coordinated renames, proposal names must be
@@ -1207,6 +1529,18 @@ def check(
     collisions = sorted(proposal_names & main_names)
     if collisions:
         failures.append(f"proposal/principal WP name collisions: {collisions}")
+
+    bad_staged_existing = sorted(staged_existing_wps - main_names)
+    if bad_staged_existing:
+        failures.append(
+            "staged registry labels non-principal WPs as existing: "
+            f"{bad_staged_existing}"
+        )
+    staged_collisions = sorted(staged_wps & (main_names | proposal_names))
+    if staged_collisions:
+        failures.append(
+            f"staged/principal/AU new-WP registry collisions: {staged_collisions}"
+        )
 
     if proposal_names != EXPECTED_PROPOSAL_WPS:
         failures.append(
@@ -1246,7 +1580,15 @@ def check(
         failures.append(f"placement/DAG phase mismatch: {row_wave_mismatch}")
 
     plan_document = plan_path.read_text(encoding="utf-8")
-    known_wps = set(dag_waves)
+    authoritative_wps = main_names | staged_wps | proposal_names
+    dag_vertex_missing = sorted(authoritative_wps - set(dag_waves))
+    dag_vertex_phantoms = sorted(set(dag_waves) - authoritative_wps)
+    if dag_vertex_missing or dag_vertex_phantoms:
+        failures.append(
+            "DAG vertex set differs from exhaustive principal/staged/AU registries: "
+            f"missing={dag_vertex_missing}, phantom={dag_vertex_phantoms}"
+        )
+    known_wps = authoritative_wps
     unknown_wps = sorted(mentioned_wps - known_wps)
     if unknown_wps:
         failures.append(f"placement rows mention unknown WP ids: {unknown_wps}")
@@ -1275,6 +1617,7 @@ def check(
     )
     if scope_collisions:
         failures.append(f"parallel DAG path/glob scope collisions: {scope_collisions}")
+    failures.extend(validate_au_dag_routing(rows, dag_predecessors, staged_probe_wps))
 
     bad_invariants: dict[str, list[str]] = {}
     for row in rows:
@@ -1424,11 +1767,22 @@ def main(argv: list[str] | None = None) -> int:
         default=Path(__file__).with_name("2026-09-01-reconciled-dispatch-dag.md"),
         help="canonical reconciled dispatch DAG",
     )
+    parser.add_argument(
+        "--delta",
+        type=Path,
+        default=Path(__file__).with_name("2026-09-01-round3-remediation-delta.md"),
+        help="staged principal WP packet registry",
+    )
     args = parser.parse_args(argv)
 
     try:
         ok, failures, context = check(
-            args.triage, args.plan, args.wp_check, args.plan_check, args.dag
+            args.triage,
+            args.plan,
+            args.wp_check,
+            args.plan_check,
+            args.dag,
+            args.delta,
         )
     except (OSError, ValueError) as exc:
         print(f"au-check: BLOCKED — {exc}")

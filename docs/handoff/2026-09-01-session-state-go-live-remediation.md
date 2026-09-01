@@ -5,10 +5,12 @@ session or model. It records the production containment, the planning state, and
 safe next moves. It does not replace the historical handoff from 2026-08-31.
 
 The repository is `corelink-runners`. The current planning worktree is
-`.claude/worktrees/golive-rev6-r3`, on branch `plan/golive-rev6-r3`. The Round-5 review input was
-`3fe8d06`, with incident PR #529 merge `b70deae` in its ancestry. Its reconciled repair tree is
-deliberately **NOT FROZEN**: cold-review round 5 was **NOT QUIET** (8/8 reviewers reported blockers)
-and the quiet count is zero. Round 4 is retained as a historical ledger.
+`.claude/worktrees/golive-rev6-r3`, on branch `plan/golive-rev6-r3`. The exact Round-6 review input
+was committed `af4ed85dad289e333e9bf09f129fb2faa243136d`, with incident PR #529 merge `b70deae` in
+its ancestry. Its reconciled repair tree is deliberately **NOT FROZEN**: cold-review round 6 was
+**NOT QUIET** (7/8 reviewers reported blockers; 1/8 reported no new finding and signed off) and the
+quiet count remains zero. Round 5 and earlier rounds are retained as historical ledgers. Round 7
+starts only after the Round-6 repair is in one newly signed commit.
 
 ## 1. Production containment: the Cloudflare burn is stopped
 
@@ -84,9 +86,10 @@ Observed on the current planning tree:
 - `au-check`: AU STAGING PASS, 30 AU source findings and 33 proposed AU acceptance IDs
   are structurally owned exactly once; this is explicitly not freeze evidence. The three extra
   rows are the live halves of the AU3.23, AU4.16 and AU3.26 test/probe splits.
-- `gates-selftest`: PASS. It accepts all three baselines and proves 18 corruptions block,
+- `gates-selftest`: PASS. It accepts all three baselines and proves 23 corruptions block,
   including physical/opaque rows, kind and summary drift, source→AU swaps, tombstoned aliases,
-  capability/serial-order corruption and parallel scope collisions.
+  HTML-comment hiding, phantom DAG nodes, evidence-route removal, capability/serial-order
+  corruption and broad/narrow parallel scope collisions.
 
 The two union inputs are `docs/plan/union-catalog-ledger.md` and
 `docs/plan/union-triage-remaining.md`. They are proposed AU scope, not yet a frozen
@@ -94,27 +97,35 @@ addition to the acceptance suite. Round 5 identified weak falsifiability, the A3
 split, unbounded KV-miss behavior, redrive/kill-switch gaps, Postgres refusal/alert gaps, DAG scope
 collisions and false-PASS gates. The repair tree dispositions are recorded in
 `docs/plan/2026-09-01-round3-remediation-delta.md`,
-`docs/plan/2026-09-01-round5-cold-review-ledger.md` and the canonical DAG; Round 6 must verify them
-independently. The staged intake contract returns 202 only after a durable paused record and uses
-503 only when persistence fails.
+`docs/plan/2026-09-01-round5-cold-review-ledger.md`,
+`docs/plan/2026-09-01-round6-cold-review-ledger.md` and the canonical DAG. Round 6 found seven
+blocker categories spanning provenance, semantic acceptance, gate meaning, DAG dispatchability,
+containment evidence and staged decisions; one reviewer signed off with no new finding. The
+corrected AU registry is 30 source findings / 33 proposed ids, with T3-W5 as the 12th new AU WP and
+4 existing-WP extensions. The staged intake contract returns 202 only after a durable paused
+record and uses 503 only when persistence fails.
 
 `D11` (memoize-miss contract), `D12` (Postgres refusal semantics) and `D13` (tenant
 owner-of-record precedence) are visible in the round-3 delta and remain **staged/unresolved**; none
 is owner-signed or dispatchable. Do not claim
 freeze, go-live, or AU convergence from the mechanical PASS results. The three gates establish
-structural consistency only, and the selftest establishes rejection of known corruptions; the
-cold-review doctrine still requires two consecutive quiet rounds.
+structural consistency only, and the selftest establishes rejection of known structural
+corruptions; none is semantic or tamper-proof evidence. The cold-review doctrine still requires
+two consecutive quiet rounds.
 
 ## 4. Safe next steps
 
-1. Verify the exact signed Round-5 repair commit selected for review, confirm its merge-base with
-   `origin/main` is `b70deae`, and require a clean planning worktree.
+1. Preserve the exact Round-6 review-input provenance at
+   `af4ed85dad289e333e9bf09f129fb2faa243136d`, confirm its merge-base with `origin/main` is
+   `b70deae`, and require a clean planning worktree before the next cold review.
 2. Run the three primary gates plus the negative selftest above, then `git diff --check` from the
    repository root.
-3. Run Round 6 as a fresh read-only cold review against the byte-identical signed repair commit,
-   including the plan, union ledger, triage, incident evidence, canonical DAG and all gate code.
-4. Disposition every new finding, rerun mutation probes, and repeat on a byte-identical input until
-   two consecutive rounds are quiet. D11/D12/D13 and live obstacles remain red even if review is quiet.
+3. Finish the Round-6 repair cycle in one newly signed commit and record its full SHA. Run all four
+   structure checks and `git diff --check` from that clean signed input; do not substitute an
+   unqualified `HEAD` or a dirty-tree transcript.
+4. Run **Round 7** as a fresh read-only cold review against that exact signed repair commit,
+   including semantic acceptance, gate/selftest meaning, the union ledger, triage, incident evidence,
+   canonical DAG and all gate code. D11/D12/D13 and live obstacles remain red even if review is quiet.
 5. Only then capture one clean, version-bound red baseline, freeze the plan, verify the combined
    DAG at cap 8, create implementation branches/PRs, and require green checks before a
    **manual** merge. No freeze or dispatch occurs before that sequence.
@@ -138,11 +149,15 @@ git diff --check
 
 Keep review transcripts SHA-labelled. `eba6e8a` is the historical runtime-investigation snapshot;
 `e8a9e78` is the historical round-3 planning snapshot used by the round-4 ledger; `b70deae` is the
-merged containment commit (#529); and `3fe8d06` is the current planning review input. These are
-distinct artifacts and must not be combined into one baseline or one unlabelled transcript.
+merged containment commit (#529); `3fe8d06` is the historical Round-5 planning input; and
+`af4ed85dad289e333e9bf09f129fb2faa243136d` is the exact Round-6 review input. These are distinct
+artifacts and must not be combined into one baseline or one unlabelled transcript. The Round-6
+review's clean/signoff observation is bounded to that committed input; it is not a claim about a
+later checkout or unqualified `HEAD`.
 
 The canonical draft graph is now `docs/plan/2026-09-01-reconciled-dispatch-dag.md`; it is
-mechanically acyclic and capped at eight, but explicitly **NOT DISPATCHABLE**. After two quiet
+mechanically acyclic and capped at eight, but explicitly **NOT DISPATCHABLE**. Round 6's mechanical
+PASS does not establish semantic or tamper-proof proof. After two quiet
 rounds and the single post-incident baseline, the path is:
 
 ```text

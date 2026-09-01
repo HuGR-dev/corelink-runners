@@ -15,6 +15,7 @@ falsifiable, green, or ready for production.
 Usage: python3 docs/plan/wp-check.py docs/plan/2026-08-30-golive-remediation-plan.md
 """
 
+import fnmatch
 import re
 import sys
 from collections import Counter
@@ -428,11 +429,90 @@ DAG_PHASES = {
     "W2 separate lane",
     "W3 live proof",
     "W4 post-decision",
+    "W1 serial test+probe",
+    "W2 worker test+probe",
 }
+
+STAGED_FILENAME = "2026-09-01-round3-remediation-delta.md"
+STAGED_PACKET_HEADING = "## 4. Proposed WP packet contracts (not a second dispatch DAG)"
+STAGED_PACKET_STOP = "## 5. One eligible baseline and required review sequence"
+STAGED_PACKET_HEADER = [
+    "wp",
+    "owns",
+    "count",
+    "exclusive x",
+    "exact acceptance prerequisite",
+    "pre-decided implementation contract",
+]
+STAGED_PRINCIPAL_WPS = {
+    "T1-W5",
+    "T1-W6",
+    "T3-W15",
+    "T3-W16",
+    "T3-W17",
+    "T3-W18",
+    "T6-W12",
+    "T6-W13",
+    "T6-W14",
+}
+
+AU_FILENAME = "union-triage-remaining.md"
+AU_NEW_WP_MARKER = "**New WPs and their item counts** (all ≤ the four-item ceiling):"
+AU_EXTENSION_MARKER = "**Extensions to existing WPs:**"
+AU_NEW_WP_HEADER = ["wp", "owns", "exact exclusive write scope (the x)"]
+AU_DECLARED_NEW_WPS = {
+    "T2-W6",
+    "T3-W9",
+    "T3-W10",
+    "T3-W14",
+    "T3-W5",
+    "T5-W3",
+    "T7-W4",
+    "T7-W5",
+    "T8-W4",
+    "T8-W5",
+    "T8-W6",
+    "T8-W7",
+}
+AU_EXTENSION_WPS = {"T4-W1", "T5-W1", "T6-W10", "T8-W1"}
+AU_DAG_WPS = AU_DECLARED_NEW_WPS
+
+STAGED_ACCEPTANCE_HEADING = "## 3. Acceptance proposals — reserved, not promoted"
+STAGED_ACCEPTANCE_STOP = "### 3.1 Binding A3.29 liveness/safety matrix"
+STAGED_ACCEPTANCE_HEADER = [
+    "id",
+    "kind",
+    "wp (≤4)",
+    "x",
+    "deps",
+    "invariants",
+    "fixed threshold",
+    "red → green test",
+]
+AU_PLACEMENT_HEADING = "## 2. Per-finding placement"
+AU_PLACEMENT_STOP = "## 3. Staged ownership consequences"
+AU_PLACEMENT_HEADER = [
+    "id",
+    "origin",
+    "sev",
+    "bucket",
+    "phase / wp",
+    "inv",
+    "dependency",
+    "proposed acceptance item",
+    "source evidence revalidated at b70deae / 3fe8d06",
+]
+
+WP_ID_RE = re.compile(r"T\d+-W\d+[A-Za-z]*")
+EVIDENCE_ARTIFACT_RE = re.compile(r"docs/plan/evidence/[A-Za-z0-9._-]+\.json")
 
 
 def exact_line_positions(text, heading):
     return [m.start() for m in re.finditer(rf"^{re.escape(heading)}$", text, re.M)]
+
+
+def prefix_line_positions(text, prefix):
+    return [m.start() for m in re.finditer(rf"^{re.escape(prefix)}", text, re.M)]
 
 
 def markdown_cells(line):
@@ -469,6 +549,34 @@ def markdown_cells(line):
 def plain_markdown(value):
     value = value.replace("**", "").replace("`", "")
     return re.sub(r"\s+", " ", value).strip()
+
+
+def rendered_markdown(text, label):
+    """Remove HTML comments while retaining offsets and line boundaries.
+
+    Markdown inside ``<!-- ... -->`` is not rendered and therefore cannot be
+    accepted as a visible registry.  Replacing non-newline characters with
+    spaces keeps line-oriented diagnostics stable and leaves historical
+    comments otherwise unconstrained.
+    """
+    rendered = list(text)
+    position = 0
+    errors = []
+    while True:
+        start = text.find("<!--", position)
+        if start < 0:
+            break
+        end = text.find("-->", start + 4)
+        if end < 0:
+            errors.append(f"{label} contains an unterminated Markdown HTML comment")
+            end = len(text) - 3
+        for index in range(start, min(end + 3, len(rendered))):
+            if rendered[index] not in "\r\n":
+                rendered[index] = " "
+        if end + 3 >= len(text):
+            break
+        position = end + 3
+    return "".join(rendered), errors
 
 
 def acceptance_cell_id(value):
@@ -512,6 +620,332 @@ def first_table_after(text, heading, stop_heading):
     return header, rows, None
 
 
+def first_table_between_offsets(text, start, stop, label):
+    """Return the first complete table in a pre-isolated visible range."""
+    lines = text[start:stop].splitlines()[1:]
+    table = []
+    started = False
+    for line in lines:
+        if line.startswith("|"):
+            table.append(line)
+            started = True
+        elif started:
+            break
+    if len(table) < 3:
+        return None, None, f"missing Markdown table in {label}"
+    header = [plain_markdown(cell).lower() for cell in markdown_cells(table[0])]
+    separator = markdown_cells(table[1])
+    if len(separator) != len(header) or any(
+        not re.fullmatch(r":?-{3,}:?", cell) for cell in separator
+    ):
+        return None, None, f"malformed Markdown table separator in {label}"
+    rows = [markdown_cells(line) for line in table[2:]]
+    if any(len(row) != len(header) for row in rows):
+        return None, None, f"wrong cell count in Markdown table in {label}"
+    return header, rows, None
+
+
+def extract_wp_registry(table_rows, *, label, required_prefix=None):
+    """Read one WP id per registry row without learning ids from prose."""
+    registry = set()
+    errors = []
+    for row in table_rows:
+        label_cell = plain_markdown(row[0])
+        matches = WP_ID_RE.findall(label_cell)
+        if len(matches) != 1:
+            errors.append(f"{label} has an opaque WP label {row[0]!r}")
+            continue
+        if required_prefix and not label_cell.startswith(required_prefix):
+            continue
+        node = matches[0]
+        if node in registry:
+            errors.append(f"{label} physically repeats WP {node}")
+        registry.add(node)
+    return registry, errors
+
+
+def load_supplemental_registries(directory):
+    """Return the frozen staged-principal and AU-only DAG vertex registries."""
+    errors = []
+
+    staged_path = directory / STAGED_FILENAME
+    try:
+        staged_text, visibility_errors = rendered_markdown(
+            staged_path.read_text(encoding="utf-8"), staged_path.name
+        )
+    except OSError as exc:
+        return set(), set(), [f"cannot read staged WP registry: {exc}"]
+    errors.extend(visibility_errors)
+    header, rows, error = first_table_after(
+        staged_text, STAGED_PACKET_HEADING, STAGED_PACKET_STOP
+    )
+    if error:
+        errors.append(f"staged WP registry: {error}")
+        staged = set()
+    elif header != STAGED_PACKET_HEADER:
+        errors.append(
+            f"staged WP registry header mismatch: expected {STAGED_PACKET_HEADER}, "
+            f"got {header}"
+        )
+        staged = set()
+    else:
+        staged, row_errors = extract_wp_registry(
+            rows, label="staged WP registry", required_prefix="new "
+        )
+        errors.extend(row_errors)
+    if staged != STAGED_PRINCIPAL_WPS:
+        errors.append(
+            "staged principal WP registry mismatch: "
+            f"missing {sorted(STAGED_PRINCIPAL_WPS - staged)}, "
+            f"unexpected {sorted(staged - STAGED_PRINCIPAL_WPS)}"
+        )
+
+    au_path = directory / AU_FILENAME
+    try:
+        au_text, visibility_errors = rendered_markdown(
+            au_path.read_text(encoding="utf-8"), au_path.name
+        )
+    except OSError as exc:
+        return staged, set(), errors + [f"cannot read AU WP registry: {exc}"]
+    errors.extend(visibility_errors)
+    au_starts = exact_line_positions(au_text, AU_NEW_WP_MARKER)
+    extension_starts = prefix_line_positions(au_text, AU_EXTENSION_MARKER)
+    if len(au_starts) != 1 or len(extension_starts) != 1:
+        header, rows, error = (
+            None,
+            None,
+            (
+                "cannot isolate AU new-WP table: "
+                f"new marker={len(au_starts)}, extension marker={len(extension_starts)}"
+            ),
+        )
+    else:
+        header, rows, error = first_table_between_offsets(
+            au_text, au_starts[0], extension_starts[0], "AU new-WP registry"
+        )
+    if error:
+        errors.append(f"AU WP registry: {error}")
+        au_declared = set()
+    elif header != AU_NEW_WP_HEADER:
+        errors.append(
+            f"AU WP registry header mismatch: expected {AU_NEW_WP_HEADER}, got {header}"
+        )
+        au_declared = set()
+    else:
+        au_declared, row_errors = extract_wp_registry(rows, label="AU new-WP registry")
+        errors.extend(row_errors)
+    if au_declared != AU_DECLARED_NEW_WPS:
+        errors.append(
+            "AU declared-new WP registry mismatch: "
+            f"missing {sorted(AU_DECLARED_NEW_WPS - au_declared)}, "
+            f"unexpected {sorted(au_declared - AU_DECLARED_NEW_WPS)}"
+        )
+
+    if len(extension_starts) != 1:
+        extensions = set()
+        errors.append(
+            "AU extension registry marker count mismatch: "
+            f"expected 1, got {len(extension_starts)}"
+        )
+    else:
+        extension_tail = au_text[extension_starts[0] :]
+        paragraph = extension_tail.split("\n\n", 1)[0]
+        extension_ids = WP_ID_RE.findall(paragraph)
+        duplicate_extensions = sorted(
+            node for node, count in Counter(extension_ids).items() if count > 1
+        )
+        if duplicate_extensions:
+            errors.append(
+                f"AU extension registry physically repeats WPs: {duplicate_extensions}"
+            )
+        extensions = set(extension_ids)
+    if extensions != AU_EXTENSION_WPS:
+        errors.append(
+            "AU extension WP registry mismatch: "
+            f"missing {sorted(AU_EXTENSION_WPS - extensions)}, "
+            f"unexpected {sorted(extensions - AU_EXTENSION_WPS)}"
+        )
+
+    au_vertices = au_declared | (extensions - set(WP))
+    if au_vertices != AU_DAG_WPS:
+        errors.append(
+            "AU DAG vertex registry mismatch: "
+            f"missing {sorted(AU_DAG_WPS - au_vertices)}, "
+            f"unexpected {sorted(au_vertices - AU_DAG_WPS)}"
+        )
+    return staged, au_vertices, errors
+
+
+def normalize_path_atom(value):
+    """Normalize a path/glob without stripping leading dots or wildcards."""
+    atom = re.sub(r"\s+", " ", value.replace("`", "")).strip(" ;:")
+    atom = re.sub(r"^(?:new|every)\s+", "", atom, flags=re.I)
+    atom = re.sub(r"\s+\([^)]*\)$", "", atom)
+    atom = atom.removeprefix("./")
+    if atom.endswith("/"):
+        atom += "**"
+    return atom
+
+
+def path_like(value):
+    return bool(
+        value
+        and value != "—"
+        and (
+            "/" in value
+            or any(character in value for character in "*?[")
+            or re.search(r"(?:^|/)[.A-Za-z0-9_-]+\.[A-Za-z0-9*?{}_-]+$", value)
+        )
+    )
+
+
+def resolve_exclusion(base, exclusion):
+    exclusion = normalize_path_atom(exclusion)
+    if not exclusion:
+        return ""
+    root = re.split(r"[*?[{]", base, maxsplit=1)[0]
+    if exclusion.startswith(root) or exclusion.startswith("."):
+        return exclusion
+    if base.startswith("deploy/**/") and exclusion == "canary":
+        return "deploy/cloudflare-canary/**"
+    # ``deploy/**/README.md excluding canary`` means a canary-bearing path
+    # segment, whereas ``docs/** excluding plan/`` is rooted below ``docs/``.
+    if "/**/" in base and "/" not in exclusion:
+        prefix, suffix = base.split("/**/", 1)
+        return f"{prefix}/**/*{exclusion}*/{suffix}"
+    return root + exclusion.lstrip("/")
+
+
+def parse_scope_declaration(scope):
+    """Return real path/glob atoms and their explicit carve-outs."""
+    atoms = []
+    exclusions = []
+    for segment in scope.split(";"):
+        code_fragments = re.findall(r"`([^`]+)`", segment)
+        fragments = code_fragments or [segment]
+        carveout = re.search(r"\s+(?:excluding|minus)\s+", segment, re.I)
+        if carveout and code_fragments:
+            base = normalize_path_atom(fragments[0])
+            if path_like(base):
+                atoms.append(base)
+                raw_exclusions = fragments[1:]
+                if not raw_exclusions:
+                    raw_exclusions = re.split(
+                        r"\s*,\s*", plain_markdown(segment[carveout.end() :])
+                    )
+                exclusions.extend(
+                    item
+                    for item in (resolve_exclusion(base, raw) for raw in raw_exclusions)
+                    if item
+                )
+            continue
+        for fragment in fragments:
+            split = re.split(
+                r"\s+(?:excluding|minus)\s+", fragment, maxsplit=1, flags=re.I
+            )
+            base_text = split[0]
+            for raw in re.split(r"\s*(?:,|\+)\s*", base_text):
+                atom = normalize_path_atom(raw)
+                if path_like(atom) and not atom.startswith("probe:"):
+                    atoms.append(atom)
+            if len(split) == 2:
+                base = normalize_path_atom(base_text)
+                exclusions.extend(
+                    item
+                    for item in (
+                        resolve_exclusion(base, raw)
+                        for raw in re.split(r"\s*,\s*", split[1])
+                    )
+                    if item
+                )
+    return tuple(dict.fromkeys(atoms)), tuple(dict.fromkeys(exclusions))
+
+
+def path_atoms_overlap(left, right):
+    """Conservatively detect an intersection between exact paths and globs."""
+
+    def segment_overlap(left_segment, right_segment):
+        left_glob = any(character in left_segment for character in "*?[")
+        right_glob = any(character in right_segment for character in "*?[")
+        if not left_glob and not right_glob:
+            return left_segment == right_segment
+        if not left_glob:
+            return fnmatch.fnmatchcase(left_segment, right_segment)
+        if not right_glob:
+            return fnmatch.fnmatchcase(right_segment, left_segment)
+        if left_segment == right_segment:
+            return True
+        left_prefix = re.split(r"[*?\[]", left_segment, maxsplit=1)[0]
+        right_prefix = re.split(r"[*?\[]", right_segment, maxsplit=1)[0]
+        left_suffix = re.split(r"[*?\[]", left_segment[::-1], maxsplit=1)[0][::-1]
+        right_suffix = re.split(r"[*?\[]", right_segment[::-1], maxsplit=1)[0][::-1]
+        return (
+            left_prefix.startswith(right_prefix) or right_prefix.startswith(left_prefix)
+        ) and (left_suffix.endswith(right_suffix) or right_suffix.endswith(left_suffix))
+
+    left_parts = tuple(left.split("/"))
+    right_parts = tuple(right.split("/"))
+    memo = {}
+
+    def intersects(left_index, right_index):
+        key = (left_index, right_index)
+        if key in memo:
+            return memo[key]
+        if left_index == len(left_parts) and right_index == len(right_parts):
+            result = True
+        elif left_index == len(left_parts):
+            result = all(part == "**" for part in right_parts[right_index:])
+        elif right_index == len(right_parts):
+            result = all(part == "**" for part in left_parts[left_index:])
+        elif left_parts[left_index] == "**":
+            result = intersects(left_index + 1, right_index) or intersects(
+                left_index, right_index + 1
+            )
+        elif right_parts[right_index] == "**":
+            result = intersects(left_index, right_index + 1) or intersects(
+                left_index + 1, right_index
+            )
+        else:
+            result = segment_overlap(
+                left_parts[left_index], right_parts[right_index]
+            ) and intersects(left_index + 1, right_index + 1)
+        memo[key] = result
+        return result
+
+    return intersects(0, 0)
+
+
+def path_atom_covers(cover, candidate):
+    """Return whether a carve-out covers the complete candidate atom."""
+    cover_glob = any(character in cover for character in "*?[")
+    candidate_glob = any(character in candidate for character in "*?[")
+    if not candidate_glob:
+        return (
+            path_atoms_overlap(cover, candidate) if cover_glob else candidate == cover
+        )
+    if not cover_glob:
+        return False
+    if cover == candidate:
+        return True
+    if cover.endswith("/**"):
+        return re.split(r"[*?[{]", candidate, maxsplit=1)[0].startswith(cover[:-2])
+    return False
+
+
+def scope_overlap(left_atoms, left_exclusions, right_atoms, right_exclusions):
+    overlaps = []
+    for left in left_atoms:
+        for right in right_atoms:
+            if not path_atoms_overlap(left, right):
+                continue
+            if any(path_atom_covers(item, right) for item in left_exclusions):
+                continue
+            if any(path_atom_covers(item, left) for item in right_exclusions):
+                continue
+            overlaps.append((left, right))
+    return overlaps
+
+
 def doc_wave(wave):
     if wave == 0:
         return 0
@@ -520,10 +954,161 @@ def doc_wave(wave):
     return int(wave)
 
 
+def parse_dag_scope_cell(value):
+    """Split a DAG registry cell into path atoms, carve-outs, and artifacts."""
+    artifacts = []
+    scope_parts = []
+    opaque_artifacts = []
+    for segment in value.split(";"):
+        fragments = re.findall(r"`([^`]+)`", segment)
+        if not fragments:
+            fragment = plain_markdown(segment)
+            if fragment and fragment != "—":
+                scope_parts.append(segment)
+            continue
+        remaining = segment
+        for fragment in fragments:
+            normalized = normalize_path_atom(fragment)
+            if normalized.startswith("docs/plan/evidence/"):
+                if EVIDENCE_ARTIFACT_RE.fullmatch(normalized):
+                    artifacts.append(normalized)
+                else:
+                    opaque_artifacts.append(normalized)
+                remaining = remaining.replace(f"`{fragment}`", "", 1)
+        if plain_markdown(remaining) not in {"", "—"}:
+            scope_parts.append(remaining)
+    atoms, exclusions = parse_scope_declaration(";".join(scope_parts))
+    return atoms, exclusions, tuple(artifacts), tuple(opaque_artifacts)
+
+
+def load_probe_node_registry(directory):
+    """Derive probe/test+probe nodes from the three acceptance registries."""
+    node_kinds = {node: set() for node in WP}
+    errors = []
+    for node, (owned_items, _, _, _) in WP.items():
+        node_kinds[node].update(
+            FROZEN_ITEM_KINDS[item] for item in owned_items if item in FROZEN_ITEM_KINDS
+        )
+
+    staged_path = directory / STAGED_FILENAME
+    try:
+        staged_text, visibility_errors = rendered_markdown(
+            staged_path.read_text(encoding="utf-8"), staged_path.name
+        )
+    except OSError as exc:
+        return set(), [f"cannot read staged acceptance registry: {exc}"]
+    errors.extend(visibility_errors)
+    header, proposal_rows, error = first_table_after(
+        staged_text, STAGED_ACCEPTANCE_HEADING, STAGED_ACCEPTANCE_STOP
+    )
+    staged_item_kinds = {}
+    if error:
+        errors.append(f"staged acceptance registry: {error}")
+    elif header != STAGED_ACCEPTANCE_HEADER:
+        errors.append(
+            "staged acceptance registry header mismatch: "
+            f"expected {STAGED_ACCEPTANCE_HEADER}, got {header}"
+        )
+    else:
+        for row in proposal_rows:
+            ids = re.findall(r"\bA\d+\.\d+\b", plain_markdown(row[0]))
+            kind = plain_markdown(row[1])
+            if len(ids) != 1 or kind not in ITEM_KINDS - {"judged", "—"}:
+                errors.append(
+                    f"staged acceptance registry has opaque id/kind: {row[0]!r}, {row[1]!r}"
+                )
+                continue
+            staged_item_kinds[ids[0]] = kind
+
+    packet_header, packet_rows, error = first_table_after(
+        staged_text, STAGED_PACKET_HEADING, STAGED_PACKET_STOP
+    )
+    if error:
+        errors.append(f"staged packet kind registry: {error}")
+    elif packet_header != STAGED_PACKET_HEADER:
+        errors.append(
+            f"staged packet kind header mismatch: expected {STAGED_PACKET_HEADER}, "
+            f"got {packet_header}"
+        )
+    else:
+        for row in packet_rows:
+            node_ids = WP_ID_RE.findall(plain_markdown(row[0]))
+            item_ids = re.findall(r"\bA\d+\.\d+\b", plain_markdown(row[1]))
+            if len(node_ids) != 1 or not item_ids:
+                errors.append(
+                    f"staged packet has opaque WP/item ownership: {row[0]!r}, {row[1]!r}"
+                )
+                continue
+            owner = node_ids[0]
+            owns = plain_markdown(row[1]).lower()
+            for item_id in item_ids:
+                if "repo half" in owns:
+                    kind = "test"
+                elif "live half" in owns:
+                    kind = "probe"
+                else:
+                    kind = staged_item_kinds.get(
+                        item_id, FROZEN_ITEM_KINDS.get(item_id)
+                    )
+                if kind is None:
+                    errors.append(
+                        f"staged packet {owner} references unknown item kind for {item_id}"
+                    )
+                    continue
+                node_kinds.setdefault(owner, set()).add(kind)
+
+    au_path = directory / AU_FILENAME
+    try:
+        au_text, visibility_errors = rendered_markdown(
+            au_path.read_text(encoding="utf-8"), au_path.name
+        )
+    except OSError as exc:
+        return set(), errors + [f"cannot read AU acceptance registry: {exc}"]
+    errors.extend(visibility_errors)
+    header, placement_rows, error = first_table_after(
+        au_text, AU_PLACEMENT_HEADING, AU_PLACEMENT_STOP
+    )
+    if error:
+        errors.append(f"AU acceptance registry: {error}")
+    elif header != AU_PLACEMENT_HEADER:
+        errors.append(
+            f"AU acceptance registry header mismatch: expected {AU_PLACEMENT_HEADER}, "
+            f"got {header}"
+        )
+    else:
+        declaration_re = re.compile(
+            r"\*\*(AU\d+\.\d+(?:[a-z])?)\s+—\s+(test|probe):\*\*"
+        )
+        for row in placement_rows:
+            declarations = declaration_re.findall(row[7])
+            owners = re.findall(r"\*\*(T\d+-W\d+[A-Za-z]*)\*\*", row[4])
+            if len(declarations) != len(owners) or not declarations:
+                errors.append(
+                    "AU placement row has opaque item/WP ownership: "
+                    f"items={declarations}, owners={owners}"
+                )
+                continue
+            for (_, kind), owner in zip(declarations, owners):
+                node_kinds.setdefault(owner, set()).add(kind)
+
+    probe_nodes = {
+        node for node, kinds in node_kinds.items() if kinds & {"probe", "test+probe"}
+    }
+    return probe_nodes, errors
+
+
 def validate_dispatch_dag(path):
     """Validate the optional schema-v1 DAG as executable registry evidence."""
     dag_fail = []
-    text = path.read_text(encoding="utf-8")
+    text, visibility_errors = rendered_markdown(
+        path.read_text(encoding="utf-8"), path.name
+    )
+    dag_fail.extend(f"DAG {error}" for error in visibility_errors)
+    staged_nodes, au_nodes, registry_errors = load_supplemental_registries(path.parent)
+    dag_fail.extend(f"DAG {error}" for error in registry_errors)
+    probe_nodes, probe_registry_errors = load_probe_node_registry(path.parent)
+    dag_fail.extend(f"DAG {error}" for error in probe_registry_errors)
+    expected_nodes = set(WP) | staged_nodes | au_nodes
 
     if len(exact_line_positions(text, DAG_SCHEMA_MARKER)) != 1:
         dag_fail.append(f"DAG exact schema marker mismatch in {path.name}")
@@ -550,7 +1135,8 @@ def validate_dispatch_dag(path):
     physical_nodes = []
     opaque_nodes = []
     artifacts = {}
-    scope_owners = {}
+    scopes_by_node = {}
+    exclusions_by_node = {}
     for row in table_rows:
         node = plain_markdown(row[0])
         if not re.fullmatch(r"T\d+-W\d+[a-z]?", node):
@@ -567,45 +1153,43 @@ def validate_dispatch_dag(path):
             if predecessor_cell == "—"
             else [token.strip() for token in predecessor_cell.split(",")]
         )
-        scope_parts = [part.strip() for part in row[3].split(";")]
-        if any(not part for part in scope_parts):
+        if any(not part.strip() for part in row[3].split(";")):
             dag_fail.append(
                 f"DAG {node} scope/artifact cell contains an empty registry atom"
             )
-            scopes = []
-            artifact = ""
-        else:
-            scopes = [plain_markdown(part) for part in scope_parts[:-1]]
-            artifact = plain_markdown(scope_parts[-1])
+        scopes, exclusions, node_artifacts, opaque_artifacts = parse_dag_scope_cell(
+            row[3]
+        )
+        if opaque_artifacts:
+            dag_fail.append(
+                f"DAG {node} has invalid artifact filename(s) {list(opaque_artifacts)}"
+            )
 
         lane = plain_markdown(row[4])
         nodes[node] = {
             "phase": phase,
             "predecessors": predecessors,
             "scopes": scopes,
-            "artifact": artifact,
+            "exclusions": exclusions,
+            "artifacts": node_artifacts,
             "lane": lane,
         }
-        for scope in set(scopes):
-            scope_owners.setdefault(scope, []).append(node)
+        scopes_by_node[node] = scopes
+        exclusions_by_node[node] = exclusions
 
         if phase not in DAG_PHASES:
             dag_fail.append(f"DAG {node} has unknown phase/wave {phase!r}")
         if not lane:
             dag_fail.append(f"DAG {node} has an empty lane")
-        if artifact != "—":
-            if not re.fullmatch(r"docs/plan/evidence/[A-Za-z0-9._-]+\.json", artifact):
-                dag_fail.append(
-                    f"DAG {node} has invalid artifact filename {artifact!r}"
-                )
-            elif artifact in artifacts:
+        for artifact in node_artifacts:
+            if artifact in artifacts:
                 dag_fail.append(
                     f"DAG artifact filename {artifact!r} is shared by "
                     f"{artifacts[artifact]} and {node}"
                 )
             else:
                 artifacts[artifact] = node
-        if phase == "W3 live proof" and artifact == "—":
+        if phase == "W3 live proof" and not node_artifacts:
             dag_fail.append(f"DAG live-proof node {node} has no artifact filename")
         if any(scope == "docs/plan/evidence/**" for scope in scopes):
             dag_fail.append(f"DAG {node} owns forbidden broad evidence scope")
@@ -618,9 +1202,13 @@ def validate_dispatch_dag(path):
     if opaque_nodes:
         dag_fail.append(f"DAG opaque/invalid node rows: {opaque_nodes}")
 
-    missing_principal = sorted(set(WP) - set(nodes))
-    if missing_principal:
-        dag_fail.append(f"DAG missing principal WP nodes: {missing_principal}")
+    missing_vertices = sorted(expected_nodes - set(nodes))
+    unexpected_vertices = sorted(set(nodes) - expected_nodes)
+    if missing_vertices or unexpected_vertices:
+        dag_fail.append(
+            "DAG exact registry vertex mismatch: "
+            f"missing {missing_vertices}, unexpected {unexpected_vertices}"
+        )
     for node in sorted(set(WP) & set(nodes)):
         expected_wave_prefix = f"W{doc_wave(WP[node][3])} "
         if not nodes[node]["phase"].startswith(expected_wave_prefix):
@@ -679,18 +1267,38 @@ def validate_dispatch_dag(path):
                 pending.extend(graph_predecessors.get(predecessor, ()))
         return False
 
-    for scope, owners in sorted(scope_owners.items()):
-        if len(owners) < 2:
-            continue
-        for index, left in enumerate(owners):
-            for right in owners[index + 1 :]:
-                if not (
-                    transitively_precedes(left, right)
-                    or transitively_precedes(right, left)
-                ):
-                    dag_fail.append(
-                        f"DAG exclusive scope {scope!r} is parallel in {left} and {right}"
-                    )
+    scoped_nodes = sorted(scopes_by_node)
+    for index, left in enumerate(scoped_nodes):
+        for right in scoped_nodes[index + 1 :]:
+            if transitively_precedes(left, right) or transitively_precedes(right, left):
+                continue
+            overlaps = scope_overlap(
+                scopes_by_node[left],
+                exclusions_by_node[left],
+                scopes_by_node[right],
+                exclusions_by_node[right],
+            )
+            if overlaps:
+                dag_fail.append(
+                    f"DAG parallel path/glob scope collision in {left} and {right}: "
+                    f"{overlaps}"
+                )
+
+    for node in sorted(probe_nodes & set(nodes)):
+        if node != "T7-W4b" and "T7-W4b" not in nodes[node]["predecessors"]:
+            dag_fail.append(
+                f"DAG probe/test+probe node {node} does not declare T7-W4b "
+                "as an exact hard predecessor"
+            )
+        if not nodes[node]["artifacts"]:
+            dag_fail.append(
+                f"DAG probe/test+probe node {node} has no evidence artifact filename"
+            )
+    unregistered_probe_nodes = sorted(probe_nodes - set(nodes))
+    if unregistered_probe_nodes:
+        dag_fail.append(
+            f"DAG probe/test+probe registry nodes missing from graph: {unregistered_probe_nodes}"
+        )
 
     batch_section_starts = exact_line_positions(text, DAG_BATCH_HEADING)
     rendered_batches = []
@@ -738,8 +1346,9 @@ def validate_dispatch_dag(path):
     return dag_fail
 
 
-doc = Path(sys.argv[1]).read_text(encoding="utf-8")
-fail = []
+raw_doc = Path(sys.argv[1]).read_text(encoding="utf-8")
+doc, visibility_errors = rendered_markdown(raw_doc, Path(sys.argv[1]).name)
+fail = list(visibility_errors)
 
 required_headings = [
     SUITE_HEADING,
@@ -1020,15 +1629,29 @@ for wave in range(4):
                     f"{wp_id} Markdown scope mismatch: expected {expected_scope!r}, got {doc_scope!r}"
                 )
 
-# parallel-scope collision: only within the same integer wave, and wave 2 is serial by design
-scopes = {}
-for w, (_, _, sc, wave) in WP.items():
-    if wave in (2,):  # serial chain — shared scope is the plan's explicit decision
+# Principal scope collision: compare path/glob atoms rather than whole prose
+# cells, and honor only explicit carve-outs.  Wave 2 is a declared serial chain.
+principal_scopes = {}
+for node, (_, _, scope, wave) in WP.items():
+    atoms, exclusions = parse_scope_declaration(scope)
+    principal_scopes[node] = (wave, atoms, exclusions)
+principal_collisions = []
+principal_nodes = sorted(principal_scopes)
+for index, left in enumerate(principal_nodes):
+    left_wave, left_atoms, left_exclusions = principal_scopes[left]
+    if left_wave == 2:
         continue
-    scopes.setdefault((wave, sc), []).append(w)
-collide = {k: v for k, v in scopes.items() if len(v) > 1}
-if collide:
-    fail.append(f"PARALLEL scope collisions: {collide}")
+    for right in principal_nodes[index + 1 :]:
+        right_wave, right_atoms, right_exclusions = principal_scopes[right]
+        if right_wave != left_wave or right_wave == 2:
+            continue
+        overlaps = scope_overlap(
+            left_atoms, left_exclusions, right_atoms, right_exclusions
+        )
+        if overlaps:
+            principal_collisions.append((left, right, overlaps))
+if principal_collisions:
+    fail.append(f"PARALLEL path/glob scope collisions: {principal_collisions}")
 
 dag_path = Path(__file__).with_name(DAG_FILENAME)
 if dag_path.exists():

@@ -1,7 +1,8 @@
 # Go-Live Remediation Plan — from the 2026-08-30 ultra audit to a working go-live
 
 **Audit baseline:** `8631abb` (#522) · **Round-5 review input:**
-`3fe8d06d62891f99ecfd3f3c1bc4376b976f848b` · **Authored:** 2026-08-30 ·
+`3fe8d06d62891f99ecfd3f3c1bc4376b976f848b` · **Round-6 review input:**
+`af4ed85dad289e333e9bf09f129fb2faa243136d` · **Authored:** 2026-08-30 ·
 **Revision: rev-6 draft (NOT FROZEN)**
 **Sources:** the 247-finding ultra audit (`wf_31696fc3-c08`, 53 agents / 17 dimensions, 33/33
 CRITICAL+HIGH adversarially confirmed) **∪** the in-repo 2026-08-25 comprehensive audit
@@ -9,7 +10,8 @@ CRITICAL+HIGH adversarially confirmed) **∪** the in-repo 2026-08-25 comprehens
 ultra audit did not find (§2.1).
 **Method:** TechLead doctrine (decompose · contract · pack · verify · loop), two self-iterations,
 then repeated **independent cold reviews** whose findings are logged and dispositioned in §12.
-Round 5 ran on 2026-09-01 and is **NOT QUIET**; the quiet count is zero.
+Round 6 ran on 2026-09-01 and is **NOT QUIET** (7/8 reviewers reported blockers; 1/8 reported no
+new finding); the quiet count is zero.
 
 > **Rigor compact (inviolable).** No finding is silently dropped, deferred, or worked around. Every
 > finding lands in exactly one bucket, proven mechanically. Anything not fixed here is (a)
@@ -79,8 +81,10 @@ catalog contains risks absent from all 247 findings and therefore from every buc
   covers this.**
 - **RH1 (second half) — authz fail-open to COLD** (`lib.ts:479-481`, above): a misconfigured or
   erroring mint key silently downgrades every job. Covered only obliquely by the ultra audit.
-- **RH3 — DO acquire fail-open bypassing the cap system** (citation stale at HEAD; needs
-  re-verification, see T0-W1).
+- **RH3 — DO acquire fail-open bypassing the cap system.** Re-verified at the exact Round-6 input
+  `af4ed85dad289e333e9bf09f129fb2faa243136d`: the stale historical citation now points at unrelated
+  code, while `deploy/cloudflare/src/index.ts:1650-1658` still catches the acquire error and returns
+  `{ admitted: true }`; the ledger maps it to `union-03`.
 
 **Consequence:** the plan's scope is the **union** of both catalogs, and reconciling them is
 **Wave-0 work that must complete before the acceptance suite is frozen** (T0-W1). `hist-20` ("the
@@ -134,8 +138,9 @@ before adopting them, plus two MEDIUMs as a reliability sample — 7/7 confirmed
 | `union-05` | `claimSpawn` is a non-atomic `get`→`put` ⇒ cross-colo **double spawn**; `if (!kv) return true` fails open | `lib.ts:113-124` |
 
 T0-W1 also re-located **16 drifted citations** (the catalog was written five days before HEAD) and
-found no finding unreproducible in substance. RH3 in particular was cited at `index.ts:1608-1617`,
-which is now `releaseConcurrencySlot` — the real defect moved to `:1650-1658` and is still live.
+found no finding unreproducible in substance. At the exact Round-6 input
+`af4ed85dad289e333e9bf09f129fb2faa243136d`, RH3's historical `index.ts:1608-1617` citation points
+to `releaseConcurrencySlot`; the defect is re-verified at `index.ts:1650-1658` and remains live.
 
 **Suite impact.** `union-02` and `union-03` were already covered — I had authored A3.15/A3.16 from
 the catalog at rev-3. Two new principal items were added: **A3.17** (union-01's worker half) and
@@ -189,7 +194,7 @@ A2.4 A2.5 A2.7 A2.8 A2.10 A3.9 A3.10 A4.7 A4.10 A5.6 A5.8 A5.9 A6.6 A6.7 A6.11 A
 | id | kind | item | gap |
 |---|---|---|---|
 | **A1.8** | probe | a forced-restart loop at one deployed config yields **20/20** serving cold starts; any failure is red and classified from lifecycle logs | G2 |
-| **A1.9** | probe | a continuous 7-day uptime record sampled every 60 s exists; a missing sample alerts within 120 s and the longest undetected-outage window is <120 s | G3 |
+| **A1.9** | probe | after staged T6-W14 supplies its isolated target, record only a **non-container edge lifecycle/status marker** every 60 s for 7 continuous days; the artifact proves at least one healthy→failure and one failure→healthy transition, a missing sample alerts within 120 s, the longest undetected marker outage is <120 s, and the sampler issues **zero fabricd container requests**. This proves only edge-marker detection, never fabricd availability or container uptime | G3 |
 | **A2.11** | test | every operator override named in any error message or runbook is **consumed by the deployed binary** — an override named but unplumbed fails the check | G4 |
 | **A2.12** | probe | **3/3** deliberately dead-plane recoveries restore service within 15 min, each executed by someone following **only** the runbook | G5 |
 | **A2.13** | probe | after any deploy, the worker / control-plane / runner-image version triple is asserted against a declared compatibility matrix, and a mismatched triple is rejected | G15 |
@@ -389,7 +394,7 @@ WAIVER (human-authorized) — <what is loosened/deferred>
 
 | WP | owns | notes |
 |---|---|---|
-| **T0-W1** union-catalog reconciliation | **A0.1** (+ `hist-20`, the RH-delta) | maps every 2026-08-25 finding to a 2026-08-30 id or a **new** id; re-verifies stale citations (RH3). **Blocks the suite freeze.** |
+| **T0-W1** union-catalog reconciliation | **A0.1** (+ `hist-20`, the RH-delta) | maps every 2026-08-25 finding to a 2026-08-30 id or a **new** id; records RH3's completed stale-citation revalidation at the exact reviewed input. **Blocks the suite freeze.** |
 | **T1-W1** fabricd preflight + triage runbook | A1.4 | delivers a *classifier* (boot-FATAL · image-pull · port-bind · Access-403), never a guess |
 | **T2-W1a** devenv build lane (repo half) | A2.1 | authors the third build+push job; the **dispatch** needs CF credentials → **O-DEVENV-PIN** |
 | **T2-W2a** image-pin freshness tripwire | A2.3 | per-image **narrow** source-path lists; report-only until T2-W2b lands, else it is red on every PR |
@@ -422,7 +427,8 @@ run.
 | **T2-W3** *(closer)* | A2.6 | **every** `.github/workflows/*.yml` | Luna — mechanical/CI | all workflow WPs merged |
 | **T7-W4b** | A7.6 | probe-artifact freshness schema/check | Luna — mechanical/docs | T7-W3 |
 
-The route labels are classifications, not a schedule or ready set. The **sole source of truth** for
+The route labels and wave tables are ownership summaries, not a schedule, full scope registry or
+ready set. The **sole source of truth** for every packet's full exact scope and hard predecessors,
 the combined principal + staged-A + AU dependency graph, its mechanically derived ready sets, and
 the hard maximum of **8 concurrent agents** is
 [`docs/plan/2026-09-01-reconciled-dispatch-dag.md`](2026-09-01-reconciled-dispatch-dag.md). Its ready
@@ -456,7 +462,7 @@ staged A1.10/T1-W5 owns those assertions exclusively.
 |---|---|---|
 | **T1-W2** | A1.1 A1.2 A1.3 A1.5 | O1 |
 | **T1-W3** | A1.6 A1.7 | O1 · T2-W2b |
-| **T1-W4** | A1.8 A1.9 | O1 · repeated cold-start evidence |
+| **T1-W4** | A1.8 A1.9 | O1 · repeated cold-start evidence · staged T6-W14 before A1.9 credit |
 | **T2-W2b** | A2.4 A2.5 A2.7 A2.10 | W0 · O1 |
 | **T2-W4** | A2.8 A2.9 | T2-W2b |
 | **T2-W5** | A2.11 A2.12 A2.13 | O1 · T2-W2b |
@@ -478,12 +484,17 @@ Every `C4-unverified-claim` finding rev-2 had parked in CLEAN (`fabricd-deploy-1
 `deploy-14`, `fabric-core-16`, `billing-money-path-14`, `fabricd-09`) is now here — calling an
 unverified claim a "positive result" is the exact overclaim the repo's skeptic rule forbids.
 
-The `dep` cells above are acceptance prerequisites, not a dispatch schedule. The reconciled DAG is
-normative. In particular, staged A1.11/T1-W6 durable-PG live success precedes T1-W3, T1-W4, T4-W7,
-T4-W8 and staged T6-W12; T1-W2 may collect diagnostics while Postgres is disabled but cannot earn
-green credit. Staged AU6.17 extends **T6-W10** (four items after integration), not T6-W6, and its
-synthetic canary proof follows T6-W6 delivery plus T6-W9 alert-rule work. These statements reserve
-ordering only; A1.11, T6-W12 and AU6.17 remain outside the principal suite.
+The `dep` cells above are non-exhaustive acceptance notes, not a dispatch schedule or the complete
+scope/dependency contract. The [reconciled dispatch DAG](2026-09-01-reconciled-dispatch-dag.md) is
+normative for full exact scopes and hard predecessors. In particular, staged A1.11/T1-W6 durable-PG
+live success precedes T1-W3, T1-W4, T4-W7, T4-W8 and staged T6-W12; T1-W2 may collect diagnostics
+while Postgres is disabled but cannot earn green credit. A1.9 additionally receives no T1-W4 credit
+until staged T6-W14 has delivered the isolated non-waking edge target and the canonical DAG carries
+the `T6-W14 → T1-W4` credit edge. Its 60-second sampler must issue zero fabricd container requests and cannot
+be cited as fabricd availability or container-uptime evidence. Staged AU6.17 extends **T6-W10**
+(four items after integration), not T6-W6, and its synthetic canary proof follows T6-W6 delivery
+plus T6-W9 alert-rule work. These statements reserve ordering only; A1.11, T6-W12, T6-W14 and
+AU6.17 remain outside the principal suite.
 
 ### Wave 4 — post-decision (43 findings)
 
@@ -554,7 +565,9 @@ Run these from the repository root, reproducing them cold on the lead branch:
 ```sh
 python3 docs/plan/plan-check.py docs/plan/audit-2026-08-30-finding-ids.txt
 python3 docs/plan/wp-check.py docs/plan/2026-08-30-golive-remediation-plan.md
-python3 docs/plan/au-check.py --plan docs/plan/2026-08-30-golive-remediation-plan.md
+python3 docs/plan/au-check.py docs/plan/union-triage-remaining.md \
+  --plan docs/plan/2026-08-30-golive-remediation-plan.md \
+  --dag docs/plan/2026-09-01-reconciled-dispatch-dag.md
 python3 docs/plan/gates-selftest.py
 ```
 
@@ -566,9 +579,13 @@ owned once; it surfaces any
 numeric A/AU shadows and keeps them STAGING-only. Proposal/principal WP collisions remain blocking.
 `au-check.py` is a proposal-integrity gate only: it cannot green an `A` item, expand the 94-row
 suite, satisfy the done-gate, or authorize dispatch before two quiet review rounds.
-`gates-selftest.py` recreates the eight false-PASS classes found by cold review and requires every
-corrupted fixture to block. `.github/workflows/plan-integrity.yml` runs all four commands whenever
+`gates-selftest.py` recreates 23 structural corruption fixtures found across the cold reviews and
+requires every corrupted fixture to block. `.github/workflows/plan-integrity.yml` runs all four commands whenever
 the plan, triage, finding ids, gate code or workflow changes.
+
+These are structural checks only. Passing them does **not** establish semantic readiness,
+tamper-proof evidence/readiness, production readiness, quietness, freeze eligibility, or dispatch
+authority.
 
 No gate transcript is current unless it names the exact commit SHA containing **all** reviewed plan,
 delta, triage, DAG and checker inputs. A dirty-tree run is useful diagnostics but is not a freeze
@@ -615,22 +632,24 @@ the [reconciled dispatch DAG](2026-09-01-reconciled-dispatch-dag.md) is the sole
 1. **The baseline capture has not been taken.** Until `docs/plan/acceptance-baseline.json` exists,
    red→green is unproven; the principal 94-row suite remains an acceptance definition, not a green
    claim.
-2. **Round 5 is NOT QUIET** (2026-09-01). Its findings are recorded in
-   [`2026-09-01-round5-cold-review-ledger.md`](2026-09-01-round5-cold-review-ledger.md) and reflected
-   in this draft, the staged delta, AU triage and reconciled DAG. The round-4 ledger remains at
-   [`2026-09-01-round4-cold-review-ledger.md`](2026-09-01-round4-cold-review-ledger.md); the quiet
-   count is zero and a fresh post-incident review is required.
+2. **Round 6 is NOT QUIET** (2026-09-01). Its findings are recorded in
+   [`2026-09-01-round6-cold-review-ledger.md`](2026-09-01-round6-cold-review-ledger.md) and reflected
+   in this draft, the staged delta, AU triage, gate code and reconciled DAG. The round-5 ledger
+   remains historical at
+   [`2026-09-01-round5-cold-review-ledger.md`](2026-09-01-round5-cold-review-ledger.md); the quiet
+   count is zero and a fresh post-repair review is required.
 3. **Wave 4 has no acceptance items** and several of its findings have no gating decision (§5).
 4. **The 30 AU source findings / 33 proposed AU acceptance ids are not integrated into the suite.**
    They remain triaged intake only, pending cold-review convergence; no `AU` item is an `A` row or an
    additional suite obligation here.
 5. The mechanical gates are required to pass together on the eventual clean integrated SHA
    (§8.1/§16); even then they prove only coverage, ownership, disjointness, and staged AU structural
-   ownership, not production readiness.
+   ownership — not semantic readiness, tamper-proof evidence/readiness, production readiness,
+   quietness, freeze eligibility, or dispatch authority.
 
-### 11.1 Current blockers after round 5 — 2026-09-01 (NOT QUIET)
+### 11.1 Current blockers after round 6 — 2026-09-01 (NOT QUIET)
 
-Round 5 re-checked the combined plan, staged delta, AU intake and DAG against the contained live
+Round 6 re-checked the combined plan, staged delta, AU intake, gates and DAG against the contained live
 state. None of its staged acceptance or decision repairs is promoted, resolved, dispatched or
 greened here:
 
@@ -738,6 +757,15 @@ durability and alert-order barriers, and delegates the combined cap-8 graph sole
 DAG. D11/D12/D13 remain staged and unresolved. The changes are normative, so the quiet count is
 zero: **NOT FROZEN · NO DISPATCH · NO AU PROMOTION**.
 
+**Cold review — round 6 (2026-09-01 — NOT QUIET).** Seven of eight independent reviewers found
+new blockers in the exact clean input
+`af4ed85dad289e333e9bf09f129fb2faa243136d`; one reviewer reported no new finding. The
+[round-6 ledger](2026-09-01-round6-cold-review-ledger.md) records the provenance, semantic
+acceptance, scope/DAG and gate false-PASS findings. This repair narrows the affected contracts,
+adds exact evidence/test routing, hardens the structural gates and preserves the AU staging
+boundary at 30 source findings / 33 proposed ids, 12 new WPs and 4 extensions. Because these are
+normative changes, the quiet count remains zero: **NOT FROZEN · NO DISPATCH · NO AU PROMOTION**.
+
 ---
 
 ## 13. Invariants (L2 charter — HARD REJECT, never delegated, never relaxed)
@@ -819,7 +847,7 @@ the global gate in §8; the global gate is never restated per WP.
 
 | WP | invariants live | DoD bullets specific to this WP |
 |---|---|---|
-| **T0-W1** | INV-5, INV-6 | union ledger committed · every 2026-08-25 finding mapped or assigned a new id · RH3's stale citation re-verified at HEAD or marked unreproducible · the check fails on an unmapped finding |
+| **T0-W1** | INV-5, INV-6 | union ledger committed · every 2026-08-25 finding mapped or assigned a new id · RH3's stale historical citation re-located and the live defect re-verified at exact Round-6 input `af4ed85dad289e333e9bf09f129fb2faa243136d` · the check fails on an unmapped finding |
 | **T1-W1** | INV-5 | classifier distinguishes all four failure modes on fixtures · never mutates live state · runbook cites the exact command per mode |
 | **T2-W1a** | INV-2 | devenv build job mirrors the RunnerContainer job · guard test covers **all three** `wrangler.jsonc` files · no mutable tag introduced anywhere |
 | **T2-W2a** | INV-2, INV-5 | per-image source-path list is **narrow** and declared · gate is report-only until T2-W2b · never blocks a PR before the fabricd rebuild |
@@ -836,10 +864,11 @@ the global gate in §8; the global gate is never restated per WP.
 
 ---
 
-## 16. rev-6 draft change log — review input `3fe8d06d62891f99ecfd3f3c1bc4376b976f848b`
+## 16. rev-6 draft change log — Round-6 input `af4ed85dad289e333e9bf09f129fb2faa243136d`
 
-This uncommitted draft reconciles the principal plan with round 5 without changing the principal
-suite's 94-row / 92-live scope:
+This Round-6 repair starts from the exact committed input
+`af4ed85dad289e333e9bf09f129fb2faa243136d` and reconciles the principal plan with round 5 without
+changing the principal suite's 94-row / 92-live scope:
 
 1. The live picture now names the contained, intentionally degraded state: `FABRIC_PG_DISABLED=1`,
    in-memory ledger, and suspended durable vCPU/billing paths, with the evidence artifact cited.
@@ -847,7 +876,7 @@ suite's 94-row / 92-live scope:
    53 test, 34 probe, 2 test+probe, 3 judged and 2 withdrawn; 47 WPs own 89 non-judged items.
 3. Wave tables now include every WP known to `wp-check.py`; active `T4-W3` references were corrected
    to `T4-W4`. The deleted T4-W3 remains only where the rev-4 history describes that deletion.
-4. Round 2 is complete. Rounds 3, 4 and 5 (2026-09-01) are explicitly **NOT QUIET** and their
+4. Round 2 is complete. Rounds 3, 4, 5 and 6 (2026-09-01) are explicitly **NOT QUIET** and their
    blockers are recorded in §11.1 and the review ledger. The 30 AU source findings / 33 proposed
    AU acceptance ids remain
    a separate, **STAGING-only** intake and are not added to or promoted in this suite. No baseline
@@ -855,12 +884,13 @@ suite's 94-row / 92-live scope:
 5. The explicit structural gates are `plan-check.py` (247-finding coverage), `wp-check.py`
    (frozen-suite ownership), and `au-check.py` (STAGING-only AU proposal). Their mutation suite is
    `gates-selftest.py`, and the plan-integrity CI lane runs all four; passing still does not establish
-   production readiness.
+   semantic readiness, tamper-proof evidence/readiness, production readiness, quietness, freeze
+   eligibility, or dispatch authority.
 
 **Last clean reviewed-input transcript — exact SHA
-`3fe8d06d62891f99ecfd3f3c1bc4376b976f848b`.** This is the pre-round-5-split transcript retained
-as provenance, not a current-draft/freeze PASS. The integrated round-5 commit must replace it with a
-new transcript carrying that commit's full SHA; a dirty worktree may not do so.
+`af4ed85dad289e333e9bf09f129fb2faa243136d`.** This is the Round-6 review-input transcript retained
+as provenance, not a current-draft/freeze PASS. The integrated Round-6 repair commit must replace it
+with a new transcript carrying that commit's full SHA; a dirty worktree may not do so.
 
 ```
 findings: 247 physical / 247 unique   assigned-unique: 247
@@ -892,8 +922,9 @@ exactly once; not freeze evidence
 plan gate self-test: PASS — baselines accepted and 18 corruptions blocked
 ```
 
-These are structural outputs. The AU line remains proposal-only, and none of the four results makes
-a production-readiness or freeze claim.
+These are structural outputs. The AU line remains proposal-only, and none of the four results
+establishes semantic readiness, tamper-proof evidence/readiness, production readiness, quietness,
+freeze eligibility, or dispatch authority.
 
 ### Historical — rev-4 change log
 

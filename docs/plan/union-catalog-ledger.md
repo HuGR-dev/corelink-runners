@@ -1,8 +1,12 @@
 # Union catalog ledger — 2026-08-25 audit ∪ 2026-08-30 ultra audit
 
-**Baseline:** `8631abb` (the worktree HEAD, `474c456`, adds only `docs/plan/*` on top of it —
-`git diff --stat 8631abb HEAD` touches no code path, so every citation below is a citation at
-the declared baseline).
+> **HISTORICAL CATALOG — reviewed at `474c456`.** This ledger is retained as provenance for
+> that planning snapshot; it is not a current-HEAD review or a freeze/dispatch record.
+
+**Historical baseline:** `8631abb` (snapshot `474c456` adds only `docs/plan/*` on top of it —
+the old `git diff --stat 8631abb 474c456` no-code claim applies only to that historical snapshot).
+It is **not** a claim about the current review input `af4ed85` or current HEAD; current code and
+production-state claims require a fresh SHA-labelled review.
 
 **Sources**
 - (a) 2026-08-30 ultra audit — ids: `docs/plan/audit-2026-08-30-finding-ids.txt` (247);
