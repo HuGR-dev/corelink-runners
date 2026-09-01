@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-09-01 — go-live plan Round 10 remains 7/8 NOT QUIET; repair in progress
+
+Round 10 reviewed the exact clean input
+`e3dbba5cc0f003ee6a0b5ff8f52f73e8eb07ad29`: **7/8 NOT QUIET, 1/8 QUIET, quiet count 0**. The
+consolidated ledger is
+[`docs/plan/2026-09-01-round10-cold-review-ledger.md`](docs/plan/2026-09-01-round10-cold-review-ledger.md).
+The blockers cover final monitor redeploy/provider-rearm ordering, total FIFO residence in every
+end-to-end SLO, three missing canonical tests, T1-W5 live-probe containment ancestry, A6.17's
+immutable seven-day window, stale gate/selftest instructions, and a broken pre-merge selftest
+fixture.
+
+The Round-10 repair cycle is **IN PROGRESS**. Its later repair tree is distinct from the reviewed
+input and has no SHA asserted by this entry; no review result transfers to an unqualified `HEAD`.
+The status remains **QUIET COUNT 0 · NOT FROZEN · NO AU PROMOTION · NO DISPATCH · NO GREEN
+CREDIT**. The one signoff is bounded to `e3dbba5…` and cannot advance quietness. After the CI
+fixture work settled, the repaired `gates-selftest.py` reports 57 meaningful corruptions (48 + 9,
+including the meaningful T3-W16 dependency mutation); this is a
+dirty-tree diagnostic until reproduced on a clean signed input with an externally supplied SHA.
+
 ### 2026-09-01 — go-live plan Round 9 remains 7/8 NOT QUIET; repair in progress
 
 Round 9 reviewed the exact committed input

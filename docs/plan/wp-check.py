@@ -70,13 +70,13 @@ WP = {
     "T6-W4": (
         ["A6.5", "A6.9"],
         ["INV-8"],
-        "new `secret-scan.yml`, `corelink-stress.yml`, `deploy/cloudflare-canary/**` (not its README); canary-tick producer plus durable ordered outbox/config/migration and crash/concurrency tests only, no A6.10 detector or live credit",
+        "new `secret-scan.yml`, `corelink-stress.yml`, `deploy/cloudflare-canary/**` (not its README); default-off canary-tick producer plus durable capacity-1 ordered outbox/config/head-preserving credential migration and ≤60 s total enqueue→ACK/terminal crash/concurrency tests only, no A6.10 detector or live credit",
         1,
     ),
     "T6-W15": (
         ["A6.10"],
         ["INV-5"],
-        "base-only `deploy/cost-monitor/` paths enumerated exactly in the canonical DAG; explicitly excludes `deploy/cost-monitor/README.md` and every T6-W12 provider/correlator/live-proof path",
+        "base-only `deploy/cost-monitor/` paths enumerated exactly in the canonical DAG; explicitly excludes `deploy/cost-monitor/README.md` and every T6-W12 provider/correlator/live-proof path. Its mandatory base suite includes `deploy/cost-monitor/test/outbox-transition-head.test.ts`, `deploy/cost-monitor/test/outbox-periodic-head.test.ts` and `deploy/cost-monitor/test/outbox-quarantine.test.ts`; while PG stays disabled T6-W12 must rerun the unchanged complete suite on its candidate before cutover and on the active final `monitor_rearm_tuple` after cutover",
         1,
     ),
     "T5-W1": (
@@ -433,6 +433,7 @@ DAG_PHASES = {
     "W0 containment (post-freeze)",
     "W1 parallel",
     "W1 serial",
+    "W1 pre-rearm live gate",
     "W1 closer",
     "W2 worker",
     "W2 separate lane",
@@ -440,6 +441,136 @@ DAG_PHASES = {
     "W4 post-decision",
     "W1 serial test+probe",
     "W2 worker test+probe",
+}
+
+# T6-W12 must execute T6-W15's complete base suite but may not acquire its test
+# files. Freeze the version/cutover evidence contract in visible DAG prose so
+# a dependency-only repair cannot silently restore the unsafe historical
+# monitor version after PG is rearmed.
+REQUIRED_DAG_SEMANTIC_CLAUSES = {
+    "T6-W12 final-version base regression": (
+        "With `FABRIC_PG_DISABLED=1`, T6-W12 must first execute every unchanged "
+        "T6-W15 test against its candidate image before cutover. A candidate PASS "
+        "permits an atomic cutover; T6-W12 must then rerun the entire unchanged "
+        "T6-W15 suite against the active final deployed tuple before PG rearm. The "
+        "existing `docs/plan/evidence/T6-W12-independent-monitor.json` records both "
+        "complete executions and their candidate/final image digest, config digest, "
+        "credential epochs, expected-source registry digest and T6-W15 test-tree "
+        "digest/results, plus the previous active version and atomic cutover/rollback "
+        "outcome. A candidate failure forbids cutover; any post-cutover failure rolls "
+        "back, keeps PG disabled and forbids T6-W12 completion. Only a post-cutover "
+        "PASS against the active final tuple completes T6-W12. This is an execution "
+        "obligation only: T6-W15 retains exclusive ownership of every base test file, "
+        "and T6-W12 may not copy, weaken or rewrite the suite."
+    ),
+    "T6-W12 A6.17 sensitivity-control ownership": (
+        "T6-W12 also owns the A6.17 sensitivity-window implementation. It runs "
+        "from an O-MONITORHOST scheduler and credential distinct from the monitor "
+        "application and validates delivery through an external receipt verifier "
+        "isolated from monitor application configuration, so disabling or "
+        "desensitizing the monitored detector/delivery path cannot green the "
+        "seven-day window. T6-W10 owns only the evidence-only consumption of those "
+        "seven-day sensitivity results."
+    ),
+    "T6-W12 future T1-W6 source registration": (
+        "Before T6-W12 seals its final deployed tuple, it pre-registers the exact "
+        "future T1-W6 `fabric-server` and `fabricd-proxy` source ids and issues both "
+        "isolated write-only key-id/credential-epoch pairs. Those registrations and "
+        "credential epochs are inputs to both complete T6-W15-suite executions. "
+        "T1-W6 may only bind the already-issued pairs; it cannot mint, rotate, "
+        "substitute or register them."
+    ),
+    "T3-W16 capacity-one external-ACK action gate": (
+        "`T3-W16` directly waits for T6-W15 so its attempt/binding producer can use "
+        "only the deployed external monitor. That lane has durable capacity one: it "
+        "may hold at most one nonterminal head, and the total interval from durable "
+        "enqueue to the external monitor's committed ACK or typed terminal is at most "
+        "60 seconds. The exact head must be externally ACKed before container start "
+        "or before any next immutable lifecycle/cost action. If the head is not "
+        "terminal within 60 seconds, the packet is hard RED and the start/action "
+        "fails closed."
+    ),
+    "other producer capacity and rotation gates": (
+        "`T1-W6` applies the same already-required action gate to its two non-"
+        "interchangeable write-only producer scopes (`fabric-server` and "
+        "`fabricd-proxy`), each with its own durable capacity-one ordered outbox, key "
+        "id and credential epoch; neither may reuse any read-only O-CFINVENTORY "
+        "principal. T1-W6's provider inactivity proof therefore names O-CFINVENTORY "
+        "directly and uses only the rearm-probe principal. T6-W14's periodic lifecycle "
+        "and synthetic lanes are independently capacity one and cannot enqueue a "
+        "successor or perform the successor's immutable action until the current head "
+        "receives its external ACK or typed terminal. Credential rotation cannot reset "
+        "the original enqueue clock or bypass a head: the producer must either drain "
+        "that exact head under its original credential or perform a signed epoch "
+        "migration that preserves its exact bytes, source/event/sequence identity, "
+        "original timestamps and original deadline. Migration never restarts the "
+        "60-second bound; exceeding it is hard RED and all dependent actions remain "
+        "fail closed."
+    ),
+    "A6.17 canonical window tuple": (
+        "The seven-day evidence is bound to exactly `A6.17_window_tuple=(monitor_"
+        "rearm_tuple_digest,sensitivity_scheduler_config_key_digest,receipt_verifier_"
+        "version_config_digest,on_call_escalation_schedule_digest)`. Any constituent "
+        "drift during the window invalidates all elapsed time and restarts a full "
+        "seven-day window. Drift of `monitor_rearm_tuple_digest` additionally invokes "
+        "the broader PG-disable/reproof rule above; drift confined to the other three "
+        "A6.17 fields invalidates only the A6.17 window and does not by itself "
+        "invalidate the PG-rearm proof."
+    ),
+    "canonical monitor rearm tuple": (
+        "The final post-cutover PASS also seals the exact `monitor_rearm_tuple=("
+        "deployed_monitor_image_digest,config_digest,ingress_key_epoch_map_digest,"
+        "expected_source_registry_digest,delivery_route_policy_digest,provider_"
+        "adapter_api_capability_digest)` and its digest."
+    ),
+    "nonce-bound effective-tuple health attestation": (
+        "T6-W12's `deploy/cost-monitor/src/rearm_attestation.ts` derives the current "
+        "effective `monitor_rearm_tuple` from the running deployment. For each fresh "
+        "caller nonce it returns a signature over that nonce, the exact effective "
+        "tuple digest and separately timestamped provider-poll and delivery-route "
+        "health. The challenge response age is at most 10 seconds, and provider-poll "
+        "and delivery health observations are at most 60 seconds old. T1-W6's "
+        "`crates/corelink-fabric-server/src/monitor_"
+        "interlock.rs` obtains a new response before every readiness answer, PG-backed "
+        "mutation, and PG/exporter socket/init/pool use, then verifies the bound tuple "
+        "digest, nonce echo, signature and each applicable freshness rule. A cached "
+        "success, nonce replay or earlier valid response is never reusable."
+    ),
+    "durable monitor tuple interlock": (
+        "Any tuple mismatch, unavailable attestation, stale provider-poll or delivery "
+        "health, bad signature or nonce failure first atomically arms a durable non-PG "
+        "disable latch. Once latched, T1-W6 closes and discards every PG pool/socket, "
+        "returns typed 503 for readiness and mutation, and permits zero further PG/"
+        "exporter socket or mutation actions, including after restart. A planned `monitor_"
+        "rearm_tuple` change must arm the latch and drain/discard pools before the "
+        "change begins. `crates/corelink-fabric-server/tests/monitor_tuple_interlock."
+        "rs` independently mutates all six tuple fields and injects unavailable, "
+        "missing, stale, bad-signature, wrong-nonce, replayed and cached "
+        "attestations; `deploy/cost-monitor/test/rearm-tuple-attestation.test.ts` "
+        "proves the signed effective tuple and the two correctly bounded health "
+        "classes. Every negative case is green only when the latch is durable, pools/"
+        "sockets are gone, typed 503 is returned and zero action occurs. The latch may "
+        "clear only after complete T6-W12 candidate/cutover/active-final reproof, exact "
+        "T1-W6 rebinding to the new tuple and an explicit manual reset; none alone "
+        "restores PG."
+    ),
+    "sensitivity receipt excluded from PG interlock": (
+        "Sensitivity receipt/health is excluded from the rearm attestation and PG "
+        "latch: a missing or overdue sensitivity receipt alerts and restarts only the "
+        "A6.17 window unless an independent tuple, provider-poll or core delivery "
+        "failure separately triggers the interlock. The sensitivity receipt is overdue "
+        "only relative to its configured cadence of at most six hours, never the rearm "
+        "attestation's 60-second observation bound."
+    ),
+    "O-MONITORHOST independent sensitivity capabilities": (
+        "It does the same for a sensitivity scheduler and an external receipt verifier "
+        "that are distinct from the monitor application and from each other: the "
+        "artifact names their separate accounts, credential ids, version/config "
+        "digests, durable state, delivery-read permissions, control cadence of at most "
+        "six hours and independent failure/configuration/control domains. These are "
+        "capability-only properties; O-MONITORHOST does not claim application behavior, "
+        "a deployed control, a receipt or a delivery result."
+    ),
 }
 
 STAGED_FILENAME = "2026-09-01-round3-remediation-delta.md"
@@ -470,13 +601,16 @@ STAGED_PRINCIPAL_WPS = {
 # incorrectly classify both WPs as probe owners.
 STAGED_SPLIT_ACCEPTANCE_OWNERS = {
     "A3.30": "test owner: new T3-W17; live-probe owner: new T3-W18 (1 item total)",
-    "A6.20": "base owner: principal T6-W15; provider/live owner: new T6-W12 (1 item total)",
+    "A6.20": "base owner: principal T6-W15; pre-rearm final-monitor/provider owner: new T6-W12 (1 item total)",
 }
 STAGED_SPLIT_PHASE_KINDS = {
     ("T3-W17", "A3.30"): ("test", "a3.30 repo/test half"),
     ("T3-W18", "A3.30"): ("probe", "a3.30 live-probe half"),
     ("T6-W15", "A6.20"): ("test", "a6.10 + a6.20 base half"),
-    ("T6-W12", "A6.20"): ("probe", "a6.20 provider/live half"),
+    ("T6-W12", "A6.20"): (
+        "probe",
+        "a6.20 pre-rearm final-monitor/provider half",
+    ),
 }
 
 AU_FILENAME = "union-triage-remaining.md"
@@ -553,25 +687,27 @@ REQUIRED_DAG_DIRECT_PREDECESSORS = {
     # The external detector/base is live before durable-PG recovery, and the
     # provider-backed live phase may run only after both foundations exist.
     "T6-W15": {"T6-W4", "O-MONITORHOST", "T7-W4b"},
-    "T1-W6": {"T6-W15", "O-CFINVENTORY"},
     # T6-W9 freezes the rule semantics; T6-W12 then implements those rules in
-    # the independent monitor before any live canary or depth proof.
+    # the independent monitor and re-proves the complete base against the
+    # final candidate before PG may re-arm. T6-W15 remains a transitive base
+    # predecessor through T6-W12 rather than a substitute for that final seal.
+    "T1-W6": {"T6-W12", "O-CFINVENTORY"},
     "T6-W12": {
         "T6-W15",
-        "T1-W6",
         "T6-W9",
         "T3-W16",
         "O-CFINVENTORY",
     },
     "T6-W13": {"T6-W4", "T6-W9", "O-CANARY", "T7-W4b"},
-    "T6-W14": {"T6-W13", "T6-W12"},
+    "T6-W14": {"T1-W6", "T6-W12", "T6-W13"},
     "T6-W10": {"T6-W6", "T6-W12", "T6-W14"},
     # External owner relations are not vertices and therefore must remain
     # explicit on the exact packets that consume them.
     "T4-W2": {"R2"},
     "T5-W4": {"T5-W1"},
     "T5-W1": {"R6"},
-    "T3-W16": {"O-CFINVENTORY", "O-CFCANCEL"},
+    "T3-W16": {"T6-W15", "O-CFINVENTORY", "O-CFCANCEL"},
+    "T1-W5": {"T3-W18"},
     "T8-W7": {"T8-W4", "T2-W2a", "T2-W2b", "T2-W4"},
 }
 
@@ -579,6 +715,9 @@ FORBIDDEN_DAG_DIRECT_PREDECESSORS = {
     # W13 is the immediate key lane. Making it wait for W6 would create a
     # cycle now that the live W6 proof correctly waits for external T6-W12.
     "T6-W13": {"T6-W6"},
+    # The provider/final-version phase must finish before T1-W6. Retaining the
+    # old reverse edge would recreate the Round-9 unsafe-rearm cycle.
+    "T6-W12": {"T1-W6"},
 }
 
 REQUIRED_DAG_SCOPE_ATOMS = {
@@ -677,6 +816,9 @@ EXACT_DAG_SCOPE_ATOMS = {
         "deploy/cost-monitor/test/state.test.ts",
         "deploy/cost-monitor/test/delivery.test.ts",
         "deploy/cost-monitor/test/outbox-recovery.test.ts",
+        "deploy/cost-monitor/test/outbox-transition-head.test.ts",
+        "deploy/cost-monitor/test/outbox-periodic-head.test.ts",
+        "deploy/cost-monitor/test/outbox-quarantine.test.ts",
         "deploy/cost-monitor/test/delivery-dedupe.test.ts",
         "deploy/cost-monitor/test/credential-isolation.test.ts",
         "deploy/cost-monitor/test/independence.test.ts",
@@ -688,7 +830,9 @@ EXACT_DAG_SCOPE_ATOMS = {
         "crates/corelink-fabric-server/src/server.rs",
         "crates/corelink-fabric-server/src/billing_export.rs",
         "crates/corelink-fabric-server/src/monitor_outbox.rs",
+        "crates/corelink-fabric-server/src/monitor_interlock.rs",
         "crates/corelink-fabric-server/tests/monitor_outbox.rs",
+        "crates/corelink-fabric-server/tests/monitor_tuple_interlock.rs",
         "crates/corelink-fabric/tests/pg_refusal_breaker.rs",
         "deploy/cloudflare-fabricd/src/index.ts",
         "deploy/cloudflare-fabricd/src/monitor_outbox.ts",
@@ -710,6 +854,8 @@ EXACT_DAG_SCOPE_ATOMS = {
         "deploy/cost-monitor/src/correlator.ts",
         "deploy/cost-monitor/src/capability_rules.ts",
         "deploy/cost-monitor/src/synthetic_ingest.ts",
+        "deploy/cost-monitor/src/sensitivity.ts",
+        "deploy/cost-monitor/src/rearm_attestation.ts",
         "deploy/cost-monitor/migrations/0002-provider-cursors.json",
         "deploy/cost-monitor/test/provider.test.ts",
         "deploy/cost-monitor/test/provider-stale-frozen.test.ts",
@@ -720,6 +866,8 @@ EXACT_DAG_SCOPE_ATOMS = {
         "deploy/cost-monitor/test/recovery-horizon.test.ts",
         "deploy/cost-monitor/test/c1-c5-rules.test.ts",
         "deploy/cost-monitor/test/c1-c5-synthetic-ingest.test.ts",
+        "deploy/cost-monitor/test/sensitivity-window.test.ts",
+        "deploy/cost-monitor/test/rearm-tuple-attestation.test.ts",
         "deploy/cost-monitor/test/acked-incident-update.test.ts",
     },
     "T6-W14": {
@@ -1597,6 +1745,14 @@ def validate_dispatch_dag(path):
                 f"DAG EXACT HEADING count for {heading!r}: expected 1, got {count}"
             )
 
+    normalized_dag = plain_markdown(text)
+    for label, clause in REQUIRED_DAG_SEMANTIC_CLAUSES.items():
+        count = normalized_dag.count(plain_markdown(clause))
+        if count != 1:
+            dag_fail.append(
+                f"DAG semantic clause {label!r} count mismatch: expected 1, got {count}"
+            )
+
     header, table_rows, error = first_table_after(
         text, DAG_TABLE_HEADING, DAG_BATCH_HEADING
     )
@@ -1848,6 +2004,16 @@ def validate_dispatch_dag(path):
                 )
 
     for node in sorted(probe_nodes & set(nodes)):
+        # Phase labels are scheduling metadata, not evidence semantics. A
+        # staged or principal probe owner can perform live work from W0/W1/W2,
+        # so every actual probe phase (apart from the containment probe itself)
+        # must inherit the completed containment deployment in the WP graph.
+        # External obstacle tokens cannot substitute for this ancestry.
+        if node != "T3-W18" and not transitively_precedes("T3-W18", node):
+            dag_fail.append(
+                f"DAG probe/test+probe node {node} does not transitively "
+                "follow T3-W18 containment"
+            )
         if node != "T7-W4b" and "T7-W4b" not in nodes[node]["predecessors"]:
             dag_fail.append(
                 f"DAG probe/test+probe node {node} does not declare T7-W4b "

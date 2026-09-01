@@ -241,6 +241,16 @@ READY_SET_FENCE_CLOSE = "```"
 EXPECTED_DAG_VERTICES = 69
 O_CFINVENTORY_ARTIFACT = "docs/plan/evidence/O-CFINVENTORY-provider-capabilities.json"
 O_CFCANCEL_ARTIFACT = "docs/plan/evidence/O-CFCANCEL-provider-cancellation.json"
+MONITOR_REARM_TUPLE = (
+    "monitor_rearm_tuple=(deployed_monitor_image_digest,config_digest,"
+    "ingress_key_epoch_map_digest,expected_source_registry_digest,"
+    "delivery_route_policy_digest,provider_adapter_api_capability_digest)"
+)
+A6_17_WINDOW_TUPLE = (
+    "A6.17_window_tuple=(monitor_rearm_tuple_digest,"
+    "sensitivity_scheduler_config_key_digest,"
+    "receipt_verifier_version_config_digest,on_call_escalation_schedule_digest)"
+)
 STAGED_WP_HEADER = [
     "wp",
     "owns",
@@ -1177,6 +1187,425 @@ def validate_provider_credential_contract(delta_document: str) -> list[str]:
     return errors
 
 
+def validate_final_monitor_deploy_contract(dag_document: str) -> list[str]:
+    """Freeze the final-monitor reproof that must precede PG rearm.
+
+    T6-W12 is allowed to reopen base implementation seams, but it does not own
+    T6-W15's tests.  The canonical DAG must therefore state an execution and
+    evidence obligation in visible prose: run the unchanged complete base
+    suite against the candidate and again against the active post-cutover
+    deployment, bind both precise tuples and rollback result, fail closed, and
+    only then allow T1-W6 to rearm.
+    """
+
+    errors: list[str] = []
+    visible, _ = markdown_visible_text(dag_document)
+    start_marker = "`T6-W12` is the serialized pre-rearm follow-on"
+    end_marker = "`T6-W14` later"
+    starts = [match.start() for match in re.finditer(re.escape(start_marker), visible)]
+    ends = [match.start() for match in re.finditer(re.escape(end_marker), visible)]
+    if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
+        return [
+            "canonical DAG must contain one visible, ordered T6-W12 final-monitor "
+            f"contract (starts={len(starts)}, ends={len(ends)})"
+        ]
+
+    contract = plain_markdown(visible[starts[0] : ends[0]])
+    requirements = {
+        "serialized pre-rearm placement": r"\bserialized pre-rearm follow-on\b",
+        "final external deployment": (
+            r"\bperforms the final external-[ \t]*service deployment\b"
+        ),
+        "PG-disabled finalization": r"\bwith FABRIC_PG_DISABLED=1\b",
+        "pre-cutover candidate execution": (
+            r"\bT6-W12 must first execute every unchanged T6-W15 test against its "
+            r"candidate image before cutover\b"
+        ),
+        "candidate-pass cutover gate": (
+            r"\ba candidate PASS permits an atomic cutover\b"
+        ),
+        "post-cutover active-final rerun": (
+            r"\bT6-W12 must then rerun the entire unchanged T6-W15 suite against "
+            r"the active final deployed tuple before PG rearm\b"
+        ),
+        "both complete executions": r"\brecords both complete executions\b",
+        "canonical monitor-rearm tuple": re.escape(MONITOR_REARM_TUPLE),
+        "complete test-tree binding": r"\bT6-W15 test-tree digest/results\b",
+        "previous-version binding": r"\bprevious active version\b",
+        "atomic cutover/rollback result": r"\batomic cutover/rollback outcome\b",
+        "canonical T6-W12 evidence": re.escape(
+            "docs/plan/evidence/T6-W12-independent-monitor.json"
+        ),
+        "candidate failure blocks cutover": r"\ba candidate failure forbids cutover\b",
+        "post-cutover failure rollback": (
+            r"\bany post-cutover failure rolls back, keeps PG disabled and forbids "
+            r"T6-W12 completion\b"
+        ),
+        "active-final completion gate": (
+            r"\bonly a post-cutover PASS against the active final tuple completes "
+            r"T6-W12\b"
+        ),
+        "execution-only ownership boundary": r"\bexecution obligation only\b",
+        "T6-W15 exclusive test ownership": (
+            r"\bT6-W15 retains exclusive ownership of every base test file\b"
+        ),
+        "no T6-W12 test rewrite": (
+            r"\bT6-W12 may not copy, weaken or rewrite the suite\b"
+        ),
+        "base-suite regression fails closed": (
+            r"\bany T6-W15-suite regression fail closed\b"
+        ),
+        "final version before rearm": (
+            r"\bonly this final green monitor/provider version may precede T1-W6\b"
+        ),
+        "last version-bound rearm check": (
+            r"\brecords the exact sealed monitor_rearm_tuple digest, verifies all six "
+            r"fields unchanged and performs (?:a fresh version-bound monitor/provider "
+            r"poll|the last version-bound monitor/provider-polling check) immediately "
+            r"before rearming PG\b"
+        ),
+        "pre-rearm tuple drift scope": (
+            r"\bany tuple-field drift after T6-W12's post-cutover PASS and before rearm "
+            r"invalidates both packets and keeps PG disabled\b"
+        ),
+        "post-rearm tuple drift sequence": (
+            r"\bafter rearm, any proposed tuple-field drift must first atomically restore "
+            r"FABRIC_PG_DISABLED=1, then repeat T6-W12's candidate/cutover/active-suite "
+            r"proof and T1-W6's final poll\b"
+        ),
+        "tuple drift fails closed": (
+            r"\bdrift without that sequence is hard RED and fails closed\b"
+        ),
+        "T6-W12 sensitivity ownership": (
+            r"\bT6-W12 also owns the A6\.17 sensitivity-window implementation\b"
+        ),
+        "isolated sensitivity scheduler and credential": (
+            r"\ban O-MONITORHOST scheduler and credential distinct from the monitor "
+            r"application\b"
+        ),
+        "isolated sensitivity receipt verification": (
+            r"\ban external receipt verifier isolated from monitor application "
+            r"configuration\b"
+        ),
+        "non-vacuous sensitivity window": (
+            r"\bdisabling or desensitizing the monitored detector/delivery path cannot "
+            r"green the seven-day window\b"
+        ),
+        "T6-W10 evidence-only sensitivity role": (
+            r"\bT6-W10 owns only the evidence-only consumption of those seven-day "
+            r"sensitivity results\b"
+        ),
+        "canonical A6.17 window tuple": re.escape(A6_17_WINDOW_TUPLE),
+        "A6.17 all-field drift reset": (
+            r"\bany constituent drift during the window invalidates all elapsed time and "
+            r"restarts a full seven-day window\b"
+        ),
+        "monitor drift has broader PG scope": (
+            r"\bdrift of monitor_rearm_tuple_digest additionally invokes the broader "
+            r"PG-disable/reproof rule above\b"
+        ),
+        "A6.17-only drift scope": (
+            r"\bdrift confined to the other three A6\.17 fields invalidates only the "
+            r"A6\.17 window and does not by itself invalidate the PG-rearm proof\b"
+        ),
+        "unchanged A6.17 digest consumption": (
+            r"\bT6-W10 must record and consume one unchanged A6\.17_window_tuple digest "
+            r"for the complete window\b"
+        ),
+        "sensitivity excluded from PG interlock": (
+            r"\bsensitivity receipt/health is excluded from the rearm attestation and "
+            r"PG latch\b"
+        ),
+        "sensitivity-only failure scope": (
+            r"\ba missing or overdue sensitivity receipt alerts and restarts only the "
+            r"A6\.17 window unless an independent tuple, provider-poll or core delivery "
+            r"failure separately triggers the interlock\b"
+        ),
+        "sensitivity-specific freshness bound": (
+            r"\bthe sensitivity receipt is overdue only relative to its configured "
+            r"cadence of at most six hours, never the rearm attestation's 60-second "
+            r"observation bound\b"
+        ),
+    }
+    for label, pattern in requirements.items():
+        if re.search(pattern, contract, re.IGNORECASE) is None:
+            errors.append(f"T6-W12 final-monitor contract omits required {label}")
+
+    registration_start = "Before T6-W12 seals its final deployed tuple"
+    registration_end = "`T6-W4` durably enqueues"
+    registration_starts = [
+        match.start() for match in re.finditer(re.escape(registration_start), visible)
+    ]
+    registration_ends = [
+        match.start() for match in re.finditer(re.escape(registration_end), visible)
+    ]
+    if (
+        len(registration_starts) != 1
+        or len(registration_ends) != 1
+        or registration_starts[0] >= registration_ends[0]
+    ):
+        errors.append(
+            "canonical DAG must contain one visible, ordered T6-W12/T1-W6 "
+            "pre-registration contract"
+        )
+        return errors
+
+    registration = plain_markdown(
+        visible[registration_starts[0] : registration_ends[0]]
+    )
+    registration_requirements = {
+        "future T1-W6 source ids": (
+            r"\bpre-registers the exact future T1-W6 fabric-server and fabricd-proxy "
+            r"source ids\b"
+        ),
+        "isolated write-only credentials": (
+            r"\bissues both isolated write-only key-id/credential-[ \t]*epoch pairs\b"
+        ),
+        "credentials bound to both suite runs": (
+            r"\bthose registrations and credential epochs are inputs to both complete "
+            r"T6-W15-suite executions\b"
+        ),
+        "T1-W6 bind-only boundary": (
+            r"\bT1-W6 may only bind the already-issued pairs; it cannot mint, rotate, "
+            r"substitute or register them\b"
+        ),
+    }
+    for label, pattern in registration_requirements.items():
+        if re.search(pattern, registration, re.IGNORECASE) is None:
+            errors.append(f"T6-W12/T1-W6 pre-registration contract omits {label}")
+    return errors
+
+
+def validate_monitor_host_capability_contract(dag_document: str) -> list[str]:
+    """Keep O-MONITORHOST capability-only and freeze its isolated hosts."""
+
+    visible, _ = markdown_visible_text(dag_document)
+    start_marker = "`O-MONITORHOST` is a pre-implementation capability token"
+    end_marker = "`O-CFINVENTORY` is one atomic obstacle"
+    starts = [match.start() for match in re.finditer(re.escape(start_marker), visible)]
+    ends = [match.start() for match in re.finditer(re.escape(end_marker), visible)]
+    if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
+        return [
+            "canonical DAG must contain one visible, ordered O-MONITORHOST "
+            f"capability contract (starts={len(starts)}, ends={len(ends)})"
+        ]
+
+    contract = plain_markdown(visible[starts[0] : ends[0]])
+    requirements = {
+        "canonical capability artifact": re.escape(
+            "docs/plan/evidence/O-MONITORHOST-external-monitor.json"
+        ),
+        "external monitor capability domains": (
+            r"\bnames a viable runtime, scheduler, durable incident store, "
+            r"alert-delivery transport and credential domain that are all outside "
+            r"Cloudflare and outside every monitored component\b"
+        ),
+        "monitor permissions/idempotency/SLO support": (
+            r"\bwith documented permissions/idempotency/SLO support\b"
+        ),
+        "distinct sensitivity scheduler and verifier": (
+            r"\ba sensitivity scheduler and an external receipt verifier that are "
+            r"distinct from the monitor application and from each other\b"
+        ),
+        "separate accounts and credentials": (
+            r"\bthe artifact names their separate accounts, credential ids\b"
+        ),
+        "version/config and durable state": (
+            r"\bversion/config digests, durable state\b"
+        ),
+        "delivery-read capability": r"\bdelivery-read permissions\b",
+        "bounded control cadence": r"\bcontrol cadence of at most six hours\b",
+        "independent failure domains": (
+            r"\bindependent failure/configuration/control domains\b"
+        ),
+        "capability-only boundary": (
+            r"\bthese are capability-only properties; O-MONITORHOST does not claim "
+            r"application behavior, a deployed control, a receipt or a delivery result\b"
+        ),
+        "T6-W15 integration ownership": (
+            r"\bT6-W15 alone owns integration, deployed-version binding and "
+            r"crash/timing/kill-path proof in T6-W15-monitor-base\.json\b"
+        ),
+    }
+    return [
+        f"O-MONITORHOST contract omits required {label}"
+        for label, pattern in requirements.items()
+        if re.search(pattern, contract, re.IGNORECASE) is None
+    ]
+
+
+def validate_rearm_interlock_contract(dag_document: str) -> list[str]:
+    """Freeze nonce-bound current-tuple checks and the durable PG latch."""
+
+    visible, _ = markdown_visible_text(dag_document)
+    start_marker = "**Nonce-bound rearm attestation and durable interlock.**"
+    end_marker = "T6-W12 also owns the A6.17 sensitivity-window implementation."
+    starts = [match.start() for match in re.finditer(re.escape(start_marker), visible)]
+    ends = [match.start() for match in re.finditer(re.escape(end_marker), visible)]
+    if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
+        return [
+            "canonical DAG must contain one visible, ordered nonce-bound rearm "
+            f"interlock contract (starts={len(starts)}, ends={len(ends)})"
+        ]
+
+    contract = plain_markdown(visible[starts[0] : ends[0]])
+    requirements = {
+        "T6-W12 attestation module": re.escape(
+            "deploy/cost-monitor/src/rearm_attestation.ts"
+        ),
+        "current effective tuple derivation": (
+            r"\bderives the current effective monitor_rearm_tuple from the running "
+            r"deployment\b"
+        ),
+        "fresh nonce signed fields": (
+            r"\bfor each fresh caller nonce it returns a signature over that nonce, "
+            r"the exact effective tuple digest and separately timestamped provider-poll "
+            r"and delivery-route health\b"
+        ),
+        "attestation response freshness": (
+            r"\bthe challenge response age is at most 10 seconds\b"
+        ),
+        "provider/delivery freshness": (
+            r"\bprovider-poll and delivery health observations are at most 60 seconds "
+            r"old\b"
+        ),
+        "T1-W6 interlock module": re.escape(
+            "crates/corelink-fabric-server/src/monitor_interlock.rs"
+        ),
+        "fresh challenge before every PG surface": (
+            r"\bobtains a new response before every readiness answer, PG-backed "
+            r"mutation, and PG/exporter socket/init/pool use\b"
+        ),
+        "attestation verification": (
+            r"\bverifies the bound tuple digest, nonce echo, signature and each "
+            r"applicable freshness rule\b"
+        ),
+        "no cached/replayed success": (
+            r"\ba cached success, nonce replay or earlier valid response is never "
+            r"reusable\b"
+        ),
+        "atomic durable latch triggers": (
+            r"\bany tuple mismatch, unavailable attestation, stale provider-poll or "
+            r"delivery health, bad signature or nonce failure first atomically arms a "
+            r"durable non-PG disable latch\b"
+        ),
+        "latched close/503/zero-action behavior": (
+            r"\bonce latched, T1-W6 closes and discards every PG pool/socket, returns "
+            r"typed 503 for readiness and mutation, and permits zero further PG/exporter "
+            r"socket or mutation actions, including after restart\b"
+        ),
+        "planned-change latch and drain": (
+            r"\ba planned monitor_rearm_tuple change must arm the latch and "
+            r"drain/discard pools before the change begins\b"
+        ),
+        "T1-W6 interlock test": re.escape(
+            "crates/corelink-fabric-server/tests/monitor_tuple_interlock.rs"
+        ),
+        "six-field and attestation negatives": (
+            r"\bindependently mutates all six tuple fields and injects unavailable, "
+            r"missing, stale, bad-signature, wrong-nonce, replayed and cached "
+            r"attestations\b"
+        ),
+        "T6-W12 attestation test": re.escape(
+            "deploy/cost-monitor/test/rearm-tuple-attestation.test.ts"
+        ),
+        "effective tuple and two health classes": (
+            r"\bproves the signed effective tuple and the two correctly bounded health "
+            r"classes\b"
+        ),
+        "negative-case observable result": (
+            r"\bevery negative case is green only when the latch is durable, "
+            r"pools/sockets are gone, typed 503 is returned and zero action occurs\b"
+        ),
+        "manual-reset-only recovery": (
+            r"\bthe latch may clear only after complete T6-W12 "
+            r"candidate/cutover/active-final reproof, exact T1-W6 rebinding to the new "
+            r"tuple and an explicit manual reset; none alone restores PG\b"
+        ),
+    }
+    return [
+        f"nonce-bound rearm interlock omits required {label}"
+        for label, pattern in requirements.items()
+        if re.search(pattern, contract, re.IGNORECASE) is None
+    ]
+
+
+def validate_producer_lane_contract(dag_document: str) -> list[str]:
+    """Freeze capacity, ACK gating and rotation safety for monitor producers."""
+
+    visible, _ = markdown_visible_text(dag_document)
+    start_marker = "`T6-W4` durably enqueues each scheduled tick"
+    end_marker = "The worker scope is a total order"
+    starts = [match.start() for match in re.finditer(re.escape(start_marker), visible)]
+    ends = [match.start() for match in re.finditer(re.escape(end_marker), visible)]
+    if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
+        return [
+            "canonical DAG must contain one visible, ordered monitor-producer "
+            f"contract (starts={len(starts)}, ends={len(ends)})"
+        ]
+
+    contract = plain_markdown(visible[starts[0] : ends[0]])
+    requirements = {
+        "T6-W4 capacity-one/60-second proof": (
+            r"\bT6-W4 durably enqueues each scheduled tick before transmission through "
+            r"a Durable Object outbox\b.*\bprove durable capacity one and a total bound "
+            r"of at most 60 seconds from enqueue to the external monitor's committed ACK "
+            r"or typed terminal\b"
+        ),
+        "T3-W16 waits for deployed monitor": (
+            r"\bT3-W16 directly waits for T6-W15 so its attempt/binding producer can use "
+            r"only the deployed external monitor\b"
+        ),
+        "T3-W16 capacity-one lane": (
+            r"\bthat lane has durable capacity one: it may hold at most one nonterminal "
+            r"head\b"
+        ),
+        "single total 60-second interval": (
+            r"\bthe total interval from durable enqueue to the external monitor's "
+            r"committed ACK or typed terminal is at most 60 seconds\b"
+        ),
+        "ACK before start or next action": (
+            r"\bthe exact head must be externally ACKed before container start or before "
+            r"any next immutable lifecycle/cost action\b"
+        ),
+        "nonterminal head fails closed": (
+            r"\bif the head is not terminal within 60 seconds, the packet is hard RED and "
+            r"the start/action fails closed\b"
+        ),
+        "T1-W6 capacity-one producer scopes": (
+            r"\bT1-W6 applies the same already-required action gate to its two "
+            r"non-interchangeable write-only producer scopes \(fabric-server and "
+            r"fabricd-proxy\), each with its own durable capacity-one ordered outbox, "
+            r"key id and credential epoch\b"
+        ),
+        "T6-W14 successor ACK gate": (
+            r"\bT6-W14's periodic lifecycle and synthetic lanes are independently "
+            r"capacity one and cannot enqueue a successor or perform the successor's "
+            r"immutable action until the current head receives its external ACK or typed "
+            r"terminal\b"
+        ),
+        "rotation cannot reset or bypass": (
+            r"\bcredential rotation cannot reset the original enqueue clock or bypass "
+            r"a head\b"
+        ),
+        "safe rotation choices": (
+            r"\bthe producer must either drain that exact head under its original "
+            r"credential or perform a signed epoch migration that preserves its exact "
+            r"bytes, source/event/sequence identity, original timestamps and original "
+            r"deadline\b"
+        ),
+        "migration preserves deadline": (
+            r"\bmigration never restarts the 60-second bound; exceeding it is hard RED "
+            r"and all dependent actions remain fail closed\b"
+        ),
+    }
+    return [
+        f"monitor-producer contract omits required {label}"
+        for label, pattern in requirements.items()
+        if re.search(pattern, contract, re.IGNORECASE) is None
+    ]
+
+
 def validate_dependency_targets(
     dependencies: list[tuple[str, str]],
     *,
@@ -1393,6 +1822,10 @@ def parse_dispatch_dag(
 
     raw_document = dag_path.read_text(encoding="utf-8")
     errors = hidden_canonical_table_errors(raw_document, "canonical dispatch DAG")
+    errors.extend(validate_final_monitor_deploy_contract(raw_document))
+    errors.extend(validate_monitor_host_capability_contract(raw_document))
+    errors.extend(validate_rearm_interlock_contract(raw_document))
+    errors.extend(validate_producer_lane_contract(raw_document))
     batch_rows, batch_errors = exact_ready_set_rows(raw_document)
     errors.extend(batch_errors)
     document, _ = markdown_visible_text(raw_document)
@@ -1593,7 +2026,13 @@ def validate_au_dag_routing(
     scopes: dict[str, tuple[str, ...]],
     staged_probe_wps: set[str],
 ) -> list[str]:
-    """Mechanize declared AU and cross-registry hard routes and scopes."""
+    """Mechanize declared AU and cross-registry hard routes and scopes.
+
+    Round 10 deliberately orders the final external-monitor deploy before PG
+    rearm: T6-W12 consumes the base monitor, then T1-W6 consumes that final
+    deploy.  Keep that direction explicit here so a regenerated ready-set
+    proof cannot silently restore the old inverse edge.
+    """
 
     errors: list[str] = []
     owners = {row.item: row.owner for row in rows}
@@ -1644,14 +2083,11 @@ def validate_au_dag_routing(
         "T4-W7": {"O-BILLING", "T4-W2", "T9-W1"},
         "T4-W8": {"O-BILLING", "T4-W2", "T9-W1"},
         "T6-W15": {"T6-W4", "O-MONITORHOST"},
-        "T1-W6": {"T6-W15", "O-CFINVENTORY"},
-        "T6-W12": {"T6-W15", "T6-W9", "T1-W6", "O-CFINVENTORY"},
         "T6-W13": {"T6-W4", "T6-W9", "O-CANARY", "T7-W4b"},
-        "T6-W14": {"T6-W12", "T6-W13"},
         "T6-W10": {"T6-W6", "T6-W12", "T6-W14"},
         "T5-W4": {"T5-W1"},
         "T8-W7": {"T8-W4", "T2-W2a", "T2-W2b", "T2-W4"},
-        "T3-W16": {"O-CFINVENTORY", "O-CFCANCEL"},
+        "T3-W16": {"T6-W15", "O-CFINVENTORY", "O-CFCANCEL"},
     }
     for wp, required in required_direct_predecessors.items():
         missing = sorted(required - set(predecessors.get(wp, ())))
@@ -1660,14 +2096,49 @@ def validate_au_dag_routing(
                 f"DAG node {wp} is missing exact hard predecessor(s): {missing}"
             )
 
+    # These Round-10 rows are intentionally exact, not minimum dependency
+    # sets.  In particular, accepting an extra T1-W6 predecessor on T6-W12
+    # would restore the unsafe inverse edge even if all new edges remained.
+    round10_exact_direct_predecessors = {
+        "T1-W5": {"T3-W10", "T3-W18", "O-MINTKEY", "T7-W4b"},
+        "T1-W6": {"D12", "T1-W5", "T6-W12", "O-CFINVENTORY", "T7-W4b"},
+        "T6-W12": {
+            "T6-W15",
+            "T6-W9",
+            "T3-W16",
+            "O-CFINVENTORY",
+            "T7-W4b",
+        },
+        "T6-W14": {
+            "T6-W13",
+            "T6-W12",
+            "T1-W6",
+            "O-CANARY",
+            "O-MONITORHOST",
+            "T7-W4b",
+        },
+    }
+    for wp, expected in round10_exact_direct_predecessors.items():
+        actual = set(predecessors.get(wp, ()))
+        if actual != expected:
+            errors.append(
+                f"DAG node {wp} Round-10 exact hard predecessors differ: "
+                f"expected={sorted(expected)}, got={sorted(actual)}"
+            )
+
     forbidden_direct_predecessors = {
         # The immediate key lane must not wait on its own later live proof.
         # T6-W6 remains a prerequisite of T6-W10, not T6-W13.
         "T6-W13": {"T6-W6"},
+        # The monitor must exist before the attempt producer.  Restoring the
+        # inverse route would either admit starts without ACKs or form a cycle.
+        "T6-W15": {"T3-W16"},
         # Provider reads and exact-handle cancellation are separate authority
         # domains.  These read-only consumers must not acquire cancellation.
         "T1-W6": {"O-CFCANCEL"},
-        "T6-W12": {"O-CFCANCEL"},
+        # Round 10 reverses the former monitor/rearm edge.  T6-W12 must be
+        # deployable and provable before T1-W6 may rearm PG.
+        "T6-W12": {"O-CFCANCEL", "T1-W6"},
     }
     for wp, forbidden in forbidden_direct_predecessors.items():
         present = sorted(forbidden & set(predecessors.get(wp, ())))
@@ -1685,6 +2156,7 @@ def validate_au_dag_routing(
             )
 
     required_transitive_predecessors = {
+        "T1-W6": {"T6-W15"},
         "T6-W14": {"T6-W15"},
     }
     for wp, required in required_transitive_predecessors.items():
@@ -1698,6 +2170,16 @@ def validate_au_dag_routing(
                 f"DAG node {wp} is missing transitive hard predecessor(s): {missing}"
             )
 
+    if dag_depends_on("T6-W12", "T1-W6", predecessors):
+        errors.append(
+            "DAG node T6-W12 follows the forbidden old inverse rearm edge to T1-W6"
+        )
+    if dag_depends_on("T6-W15", "T3-W16", predecessors):
+        errors.append(
+            "DAG node T6-W15 follows the forbidden inverse attempt-producer edge "
+            "to T3-W16"
+        )
+
     required_scope_atoms = {
         "T6-W4": {
             "deploy/cloudflare-canary/src/tick_outbox.ts",
@@ -1710,7 +2192,9 @@ def validate_au_dag_routing(
         },
         "T1-W6": {
             "crates/corelink-fabric-server/src/monitor_outbox.rs",
+            "crates/corelink-fabric-server/src/monitor_interlock.rs",
             "crates/corelink-fabric-server/tests/monitor_outbox.rs",
+            "crates/corelink-fabric-server/tests/monitor_tuple_interlock.rs",
             "crates/corelink-fabric/tests/pg_refusal_breaker.rs",
             "deploy/cloudflare-fabricd/src/monitor_outbox.ts",
             "deploy/cloudflare-fabricd/test/monitor-outbox.test.ts",
@@ -1741,6 +2225,9 @@ def validate_au_dag_routing(
             "deploy/cost-monitor/test/state.test.ts",
             "deploy/cost-monitor/test/delivery.test.ts",
             "deploy/cost-monitor/test/outbox-recovery.test.ts",
+            "deploy/cost-monitor/test/outbox-transition-head.test.ts",
+            "deploy/cost-monitor/test/outbox-periodic-head.test.ts",
+            "deploy/cost-monitor/test/outbox-quarantine.test.ts",
             "deploy/cost-monitor/test/delivery-dedupe.test.ts",
             "deploy/cost-monitor/test/credential-isolation.test.ts",
             "deploy/cost-monitor/test/independence.test.ts",
@@ -1777,6 +2264,8 @@ def validate_au_dag_routing(
             "deploy/cost-monitor/src/correlator.ts",
             "deploy/cost-monitor/src/capability_rules.ts",
             "deploy/cost-monitor/src/synthetic_ingest.ts",
+            "deploy/cost-monitor/src/sensitivity.ts",
+            "deploy/cost-monitor/src/rearm_attestation.ts",
             "deploy/cost-monitor/migrations/0002-provider-cursors.json",
             "deploy/cost-monitor/test/provider.test.ts",
             "deploy/cost-monitor/test/provider-stale-frozen.test.ts",
@@ -1788,6 +2277,8 @@ def validate_au_dag_routing(
             "deploy/cost-monitor/test/recovery-horizon.test.ts",
             "deploy/cost-monitor/test/c1-c5-rules.test.ts",
             "deploy/cost-monitor/test/c1-c5-synthetic-ingest.test.ts",
+            "deploy/cost-monitor/test/sensitivity-window.test.ts",
+            "deploy/cost-monitor/test/rearm-tuple-attestation.test.ts",
             "docs/plan/evidence/T6-W12-independent-monitor.json",
         },
         "T6-W10": {

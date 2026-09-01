@@ -830,30 +830,6 @@ def main() -> int:
                 dag=missing_ready_close,
             )
 
-            # T6-W15 is the external-monitor base.  Its ordering is a safety
-            # barrier: PG durability and the provider-backed monitor follow the
-            # independently deployed monitor base, never merely its prose.
-            t1w6_row = next(
-                line for line in dag_text.splitlines() if line.startswith("| T1-W6 |")
-            )
-            missing_monitor_before_pg = work / "missing-t6-w15-before-t1-w6.md"
-            missing_monitor_before_pg.write_text(
-                replace_once(
-                    dag_text,
-                    t1w6_row,
-                    t1w6_row.replace("T6-W15, ", "", 1),
-                    "T6-W15 to T1-W6 predecessor",
-                ),
-                encoding="utf-8",
-            )
-            require(
-                "AU missing T6-W15 predecessor before T1-W6",
-                "au-check.py",
-                TRIAGE,
-                False,
-                dag=missing_monitor_before_pg,
-            )
-
             t6w12_row = next(
                 line for line in dag_text.splitlines() if line.startswith("| T6-W12 |")
             )
@@ -955,12 +931,128 @@ def main() -> int:
                 dag=missing_recovery_scope,
             )
 
+            # T6-W15's ordered outbox contract has three distinct safety
+            # surfaces: immutable-transition HOL handling, periodic-observation
+            # HOL handling, and fail-closed quarantine.  Each path is required
+            # independently; dropping any one must not leave a false PASS.
+            for path, label in (
+                (
+                    "deploy/cost-monitor/test/outbox-transition-head.test.ts",
+                    "AU T6-W15 missing transition-head HOL scope",
+                ),
+                (
+                    "deploy/cost-monitor/test/outbox-periodic-head.test.ts",
+                    "AU T6-W15 missing periodic-head HOL scope",
+                ),
+                (
+                    "deploy/cost-monitor/test/outbox-quarantine.test.ts",
+                    "AU T6-W15 missing quarantine scope",
+                ),
+            ):
+                missing_path = work / (Path(path).stem + "-missing.md")
+                missing_path.write_text(
+                    replace_once(
+                        dag_text,
+                        f"`{path}`; ",
+                        "",
+                        label,
+                    ),
+                    encoding="utf-8",
+                )
+                require(
+                    label,
+                    "au-check.py",
+                    TRIAGE,
+                    False,
+                    dag=missing_path,
+                )
+
+            # Round 10 serializes durable PG re-arm before the provider/live
+            # phase.  Keep the old edge as a separate mutation so a checker
+            # that merely sees both vertices (or only checks reachability)
+            # cannot accept the inverse ordering.
+            inverse_t6w12_t1w6 = work / "inverse-t6-w12-t1-w6-order.md"
+            inverse_t6w12_t1w6.write_text(
+                replace_in_row(
+                    dag_text,
+                    "| T6-W12 |",
+                    "T6-W15, ",
+                    "T1-W6, T6-W15, ",
+                    "inverse T6-W12 to T1-W6 ordering",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU inverse/old T6-W12→T1-W6 ordering",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=inverse_t6w12_t1w6,
+            )
+
+            missing_t6w12_from_t1w6 = work / "missing-t6-w12-from-t1-w6.md"
+            missing_t6w12_from_t1w6.write_text(
+                replace_in_row(
+                    dag_text,
+                    "| T1-W6 |",
+                    "T6-W12, ",
+                    "",
+                    "T1-W6 T6-W12 predecessor",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU T1-W6 missing T6-W12 predecessor",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=missing_t6w12_from_t1w6,
+            )
+
+            missing_t1w6_from_t6w14 = work / "missing-t1-w6-from-t6-w14.md"
+            missing_t1w6_from_t6w14.write_text(
+                replace_in_row(
+                    dag_text,
+                    "| T6-W14 |",
+                    "T1-W6, ",
+                    "",
+                    "T6-W14 T1-W6 predecessor",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU T6-W14 missing T1-W6 predecessor",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=missing_t1w6_from_t6w14,
+            )
+
+            missing_t3w18_from_t1w5 = work / "missing-t3-w18-from-t1-w5.md"
+            missing_t3w18_from_t1w5.write_text(
+                replace_in_row(
+                    dag_text,
+                    "| T1-W5 |",
+                    "T3-W18, ",
+                    "",
+                    "T1-W5 T3-W18 predecessor",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU T1-W5 missing T3-W18 predecessor",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=missing_t3w18_from_t1w5,
+            )
+
             missing_cancellation_obstacle = work / "missing-o-cfcancel.md"
             missing_cancellation_obstacle.write_text(
                 replace_once(
                     dag_text,
-                    "| T3-W16 | W2 worker | T8-W2, T2-W2b, O-CFINVENTORY, O-CFCANCEL, T7-W4b |",
-                    "| T3-W16 | W2 worker | T8-W2, T2-W2b, O-CFINVENTORY, T7-W4b |",
+                    "| T3-W16 | W2 worker | T8-W2, T2-W2b, T6-W15, O-CFINVENTORY, O-CFCANCEL, T7-W4b |",
+                    "| T3-W16 | W2 worker | T8-W2, T2-W2b, T6-W15, O-CFINVENTORY, T7-W4b |",
                     "T3-W16 O-CFCANCEL obstacle",
                 ),
                 encoding="utf-8",
@@ -971,6 +1063,25 @@ def main() -> int:
                 TRIAGE,
                 False,
                 dag=missing_cancellation_obstacle,
+            )
+
+            missing_monitor_before_attempt = work / "missing-t6-w15-before-t3-w16.md"
+            missing_monitor_before_attempt.write_text(
+                replace_in_row(
+                    dag_text,
+                    "| T3-W16 |",
+                    "T6-W15, ",
+                    "",
+                    "T3-W16 T6-W15 producer prerequisite",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU T3-W16 missing T6-W15 producer prerequisite",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=missing_monitor_before_attempt,
             )
 
             forbidden_canary_predecessor = work / "forbidden-t6-w6-before-t6-w13.md"
@@ -1083,6 +1194,46 @@ def main() -> int:
                 dag=drifted_monitor_scope,
             )
 
+            missing_monitor_tuple_interlock = (
+                work / "missing-t1-w6-monitor-tuple-interlock.md"
+            )
+            missing_monitor_tuple_interlock.write_text(
+                replace_once(
+                    dag_text,
+                    "`crates/corelink-fabric-server/tests/monitor_tuple_interlock.rs`; ",
+                    "",
+                    "T1-W6 monitor tuple interlock scope",
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP T1-W6 missing monitor_tuple_interlock test",
+                PLAN,
+                False,
+                work / "monitor-tuple-interlock-mirror",
+                overrides={DAG: missing_monitor_tuple_interlock},
+            )
+
+            missing_sensitivity_receipt_isolation = (
+                work / "missing-sensitivity-receipt-isolation.md"
+            )
+            missing_sensitivity_receipt_isolation.write_text(
+                replace_once(
+                    dag_text,
+                    "external receipt verifier isolated from monitor application configuration",
+                    "external receipt verifier",
+                    "O-MONITORHOST receipt-verifier isolation",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU missing O-MONITORHOST receipt-verifier isolation",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=missing_sensitivity_receipt_isolation,
+            )
+
         wrong_au_owner = work / "wrong-au-owner.md"
         union23 = next(
             line for line in triage.splitlines() if line.startswith("| union-23 |")
@@ -1095,7 +1246,7 @@ def main() -> int:
             "AU7.10 outside canonical file owner", "au-check.py", wrong_au_owner, False
         )
 
-    print("\nplan gate self-test: PASS — baselines accepted and 48 corruptions blocked")
+    print("\nplan gate self-test: PASS — baselines accepted and 57 corruptions blocked")
     return 0
 
 
