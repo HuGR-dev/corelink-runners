@@ -68,9 +68,15 @@ WP = {
         1,
     ),
     "T6-W4": (
-        ["A6.5", "A6.9", "A6.10"],
+        ["A6.5", "A6.9"],
         ["INV-8"],
-        "new `secret-scan.yml`, `corelink-stress.yml`, `deploy/cloudflare-canary/**` (not its README)",
+        "new `secret-scan.yml`, `corelink-stress.yml`, `deploy/cloudflare-canary/**` (not its README); canary-tick producer/test only, no A6.10 detector or credit",
+        1,
+    ),
+    "T6-W15": (
+        ["A6.10"],
+        ["INV-5"],
+        "base-only `deploy/cost-monitor/` paths enumerated exactly in the canonical DAG; explicitly excludes `deploy/cost-monitor/README.md` and every T6-W12 provider/correlator/live-proof path",
         1,
     ),
     "T5-W1": (
@@ -393,6 +399,7 @@ DAG_FILENAME = "2026-09-01-reconciled-dispatch-dag.md"
 DAG_SCHEMA_MARKER = "**Date:** 2026-09-01 · **Schema:** `dispatch-dag/v1` · **Status: NOT DISPATCHABLE**"
 DAG_TABLE_HEADING = "## Canonical node table"
 DAG_BATCH_HEADING = "## Deterministic ready sets and proof"
+DAG_EXPECTED_VERTEX_COUNT = 69
 DAG_HEADER = [
     "node",
     "phase / wave",
@@ -418,6 +425,7 @@ DAG_EXTERNAL_NODES = {
     "O-PUBLISH",
     "O-CFINVENTORY",
     "O-CFRATE",
+    "O-MONITORHOST",
 }
 DAG_PHASES = {
     "W0 unblock",
@@ -461,10 +469,13 @@ STAGED_PRINCIPAL_WPS = {
 # incorrectly classify both WPs as probe owners.
 STAGED_SPLIT_ACCEPTANCE_OWNERS = {
     "A3.30": "test owner: new T3-W17; live-probe owner: new T3-W18 (1 item total)",
+    "A6.20": "base owner: principal T6-W15; provider/live owner: new T6-W12 (1 item total)",
 }
 STAGED_SPLIT_PHASE_KINDS = {
     ("T3-W17", "A3.30"): ("test", "a3.30 repo/test half"),
     ("T3-W18", "A3.30"): ("probe", "a3.30 live-probe half"),
+    ("T6-W15", "A6.20"): ("test", "a6.10 + a6.20 base half"),
+    ("T6-W12", "A6.20"): ("probe", "a6.20 provider/live half"),
 }
 
 AU_FILENAME = "union-triage-remaining.md"
@@ -526,6 +537,18 @@ REQUIRED_DAG_DIRECT_PREDECESSORS = {
     # Alert rules must exist before the canary is credited with delivering
     # their synthesized conditions end to end.
     "T6-W6": {"T6-W9"},
+    # Live billing reconciliation proofs cannot begin in parallel with the
+    # worker billing implementation whose behavior they are meant to prove.
+    "T4-W7": {"T4-W2"},
+    "T4-W8": {"T4-W2"},
+    # The first Cloudflare live-risk branch must remain behind the completed
+    # containment re-drive proof, not merely behind a prose convention.
+    "T6-W4": {"T3-W18"},
+    # The external detector/base is live before durable-PG recovery, and the
+    # provider-backed live phase may run only after both foundations exist.
+    "T6-W15": {"T6-W4", "O-MONITORHOST", "T7-W4b"},
+    "T1-W6": {"T6-W15"},
+    "T6-W12": {"T6-W15", "T1-W6"},
 }
 
 REQUIRED_DAG_SCOPE_ATOMS = {
@@ -537,7 +560,66 @@ REQUIRED_DAG_SCOPE_ATOMS = {
     # The metrics-key repair and later probe re-enable both change executable
     # canary configuration, so the shared atom must be explicit and serialized.
     "T6-W13": {"deploy/cloudflare-canary/wrangler.jsonc"},
-    "T6-W14": {"deploy/cloudflare-canary/wrangler.jsonc"},
+    "T6-W14": {
+        "deploy/cloudflare-canary/wrangler.jsonc",
+        "deploy/cloudflare-canary/test/lifecycle-monitor-envelope.test.ts",
+        "deploy/cloudflare-canary/test/lifecycle-sampler-outbox.test.ts",
+    },
+    "T6-W4": {"deploy/cloudflare-canary/test/scheduled-tick-envelope.test.ts"},
+    "T1-W6": {
+        "crates/corelink-fabric-server/src/monitor_outbox.rs",
+        "crates/corelink-fabric-server/tests/monitor_outbox.rs",
+    },
+    "T3-W16": {"deploy/cloudflare/test/attempt-monitor-outbox.test.ts"},
+}
+
+# These two rows are an intentional implementation split, so their path atoms
+# are frozen exactly rather than merely checked for a minimum subset.  This
+# keeps the base outbox/delivery authority separate from provider/live proof.
+EXACT_DAG_SCOPE_ATOMS = {
+    "T6-W15": {
+        "deploy/cost-monitor/Containerfile",
+        "deploy/cost-monitor/config.schema.json",
+        "deploy/cost-monitor/src/index.ts",
+        "deploy/cost-monitor/src/ingest.ts",
+        "deploy/cost-monitor/src/incidents.ts",
+        "deploy/cost-monitor/src/lifecycle.ts",
+        "deploy/cost-monitor/src/scheduler.ts",
+        "deploy/cost-monitor/src/state.ts",
+        "deploy/cost-monitor/src/delivery.ts",
+        "deploy/cost-monitor/src/outbox.ts",
+        "deploy/cost-monitor/src/types.ts",
+        "deploy/cost-monitor/package.json",
+        "deploy/cost-monitor/package-lock.json",
+        "deploy/cost-monitor/tsconfig.json",
+        "deploy/cost-monitor/vitest.config.ts",
+        "deploy/cost-monitor/test/lifecycle-missing.test.ts",
+        "deploy/cost-monitor/test/canary-missing-tick.test.ts",
+        "deploy/cost-monitor/test/ingest-idempotency.test.ts",
+        "deploy/cost-monitor/test/incident-state.test.ts",
+        "deploy/cost-monitor/test/scheduler.test.ts",
+        "deploy/cost-monitor/test/state.test.ts",
+        "deploy/cost-monitor/test/delivery.test.ts",
+        "deploy/cost-monitor/test/outbox-recovery.test.ts",
+        "deploy/cost-monitor/test/delivery-dedupe.test.ts",
+        "deploy/cost-monitor/test/credential-isolation.test.ts",
+        "deploy/cost-monitor/test/independence.test.ts",
+    },
+    "T6-W12": {
+        "deploy/cost-monitor/src/provider.ts",
+        "deploy/cost-monitor/src/correlator.ts",
+        "deploy/cost-monitor/test/provider.test.ts",
+        "deploy/cost-monitor/test/correlator.test.ts",
+        "deploy/cost-monitor/test/provider-unavailable.test.ts",
+        "deploy/cost-monitor/test/cursor-crash.test.ts",
+        "deploy/cost-monitor/test/incident-boundary.test.ts",
+        "deploy/cost-monitor/test/recovery-horizon.test.ts",
+    },
+}
+
+EXACT_DAG_ARTIFACTS = {
+    "T6-W15": {"docs/plan/evidence/T6-W15-monitor-base.json"},
+    "T6-W12": {"docs/plan/evidence/T6-W12-independent-monitor.json"},
 }
 
 
@@ -669,6 +751,120 @@ def rendered_markdown(text, label, *, mask_fences=True):
     if in_comment:
         errors.append(f"{label} contains an unterminated Markdown HTML comment")
     return "".join(rendered), errors
+
+
+def parse_dag_ready_sets(visible_text, fence_visible_text):
+    """Return ready-set rows from the one canonical fenced text block.
+
+    ``visible_text`` has fenced code masked, while ``fence_visible_text`` keeps
+    fences and their contents visible but still masks HTML comments.  The two
+    strings retain identical line boundaries, so the visible heading can
+    safely delimit the section without accepting a heading forged in code.
+    """
+    errors = []
+    visible_lines = visible_text.splitlines()
+    fence_visible_lines = fence_visible_text.splitlines()
+    heading_lines = [
+        index for index, line in enumerate(visible_lines) if line == DAG_BATCH_HEADING
+    ]
+    if len(heading_lines) != 1:
+        return [], [], errors
+
+    section_start = heading_lines[0] + 1
+    section_stop = next(
+        (
+            index
+            for index in range(section_start, len(visible_lines))
+            if re.fullmatch(r"## .+", visible_lines[index])
+        ),
+        len(visible_lines),
+    )
+
+    blocks = []
+    fence_character = None
+    fence_length = 0
+    opening_line = None
+    opening_text = None
+    for line_number in range(section_start, section_stop):
+        line = fence_visible_lines[line_number]
+        if fence_character is not None:
+            closing = re.fullmatch(
+                rf" {{0,3}}{re.escape(fence_character)}{{{fence_length},}}[ \t]*",
+                line,
+            )
+            if closing:
+                blocks.append((opening_line, line_number, opening_text, line))
+                fence_character = None
+                fence_length = 0
+                opening_line = None
+                opening_text = None
+            continue
+
+        opening = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+        if opening and not (
+            opening.group(1).startswith("`") and "`" in opening.group(2)
+        ):
+            fence_character = opening.group(1)[0]
+            fence_length = len(opening.group(1))
+            opening_line = line_number
+            opening_text = line
+
+    if fence_character is not None:
+        errors.append("ready-set section has an unterminated fenced block")
+    if len(blocks) != 1:
+        errors.append(
+            "ready-set section fenced-block count mismatch: "
+            f"expected 1, got {len(blocks)}"
+        )
+
+    canonical_bounds = None
+    if len(blocks) == 1:
+        block_open, block_close, opening_text, closing_text = blocks[0]
+        if opening_text != "```text":
+            errors.append(
+                "ready-set block must open with exact canonical fence '```text'"
+            )
+        if closing_text != "```":
+            errors.append("ready-set block must close with exact canonical fence '```'")
+        if opening_text == "```text" and closing_text == "```":
+            canonical_bounds = (block_open, block_close)
+
+    ready_row_re = re.compile(r"\s*B\d{2}:")
+    outside_rows = []
+    for line_number, line in enumerate(fence_visible_lines):
+        if not ready_row_re.match(line):
+            continue
+        if canonical_bounds is None or not (
+            canonical_bounds[0] < line_number < canonical_bounds[1]
+        ):
+            outside_rows.append(line_number + 1)
+    if outside_rows:
+        errors.append(
+            "ready-set BNN rows exist outside the canonical fenced block "
+            f"at lines {outside_rows}"
+        )
+
+    rendered_batches = []
+    rendered_ordinals = []
+    if canonical_bounds is None:
+        return rendered_ordinals, rendered_batches, errors
+
+    batch_row_re = re.compile(r"B(\d{2}): (T\d+-W\d+[a-z]?(?: T\d+-W\d+[a-z]?)*)")
+    for line_number in range(canonical_bounds[0] + 1, canonical_bounds[1]):
+        line = fence_visible_lines[line_number]
+        match = batch_row_re.fullmatch(line)
+        if not match:
+            errors.append(
+                "ready-set canonical block contains a malformed or ambiguous row "
+                f"at line {line_number + 1}: {line!r}"
+            )
+            continue
+        rendered_ordinals.append(match.group(1))
+        rendered_batches.append(match.group(2).split())
+
+    if not rendered_batches:
+        errors.append("ready-set canonical fenced block contains no BNN rows")
+    return rendered_ordinals, rendered_batches, errors
 
 
 def acceptance_cell_id(value):
@@ -915,12 +1111,23 @@ def parse_scope_declaration(scope):
     for segment in scope.split(";"):
         code_fragments = re.findall(r"`([^`]+)`", segment)
         fragments = code_fragments or [segment]
-        carveout = re.search(r"\s+(?:excluding|minus)\s+", segment, re.I)
+        carveout = re.search(
+            r"\s+(?:excluding|explicitly excludes|minus)\s+", segment, re.I
+        )
         if carveout and code_fragments:
-            base = normalize_path_atom(fragments[0])
-            if path_like(base):
-                atoms.append(base)
+            has_inline_base = bool(plain_markdown(segment[: carveout.start()]))
+            if has_inline_base:
+                base = normalize_path_atom(fragments[0])
                 raw_exclusions = fragments[1:]
+            elif atoms:
+                base = atoms[-1]
+                raw_exclusions = fragments
+            else:
+                base = ""
+                raw_exclusions = fragments
+            if path_like(base):
+                if has_inline_base:
+                    atoms.append(base)
                 if not raw_exclusions:
                     raw_exclusions = re.split(
                         r"\s*,\s*", plain_markdown(segment[carveout.end() :])
@@ -933,7 +1140,10 @@ def parse_scope_declaration(scope):
             continue
         for fragment in fragments:
             split = re.split(
-                r"\s+(?:excluding|minus)\s+", fragment, maxsplit=1, flags=re.I
+                r"\s+(?:excluding|explicitly excludes|minus)\s+",
+                fragment,
+                maxsplit=1,
+                flags=re.I,
             )
             base_text = split[0]
             for raw in re.split(r"\s*(?:,|\+)\s*", base_text):
@@ -1235,6 +1445,11 @@ def validate_dispatch_dag(path):
     probe_nodes, probe_registry_errors = load_probe_node_registry(path.parent)
     dag_fail.extend(f"DAG {error}" for error in probe_registry_errors)
     expected_nodes = set(WP) | staged_nodes | au_nodes
+    if len(expected_nodes) != DAG_EXPECTED_VERTEX_COUNT:
+        dag_fail.append(
+            "DAG frozen registry count mismatch: "
+            f"expected {DAG_EXPECTED_VERTEX_COUNT}, got {len(expected_nodes)}"
+        )
 
     if len(exact_line_positions(text, DAG_SCHEMA_MARKER)) != 1:
         dag_fail.append(f"DAG exact schema marker mismatch in {path.name}")
@@ -1402,12 +1617,54 @@ def validate_dispatch_dag(path):
                 f"DAG {node} is missing required exact hard predecessors {missing}"
             )
 
+    for node, record in nodes.items():
+        if record["phase"] == "W3 live proof" and not transitively_precedes(
+            "T3-W18", node
+        ):
+            dag_fail.append(
+                f"DAG W3 live-proof node {node} does not transitively follow T3-W18"
+            )
+
     for node, required in REQUIRED_DAG_SCOPE_ATOMS.items():
         if node not in nodes:
             continue
         missing = sorted(required - set(nodes[node]["scopes"]))
         if missing:
             dag_fail.append(f"DAG {node} is missing required path atoms {missing}")
+
+    for node, expected_scopes in EXACT_DAG_SCOPE_ATOMS.items():
+        if node not in nodes:
+            continue
+        actual_scopes = set(nodes[node]["scopes"])
+        if actual_scopes != expected_scopes:
+            dag_fail.append(
+                f"DAG {node} exact split-scope mismatch: "
+                f"missing {sorted(expected_scopes - actual_scopes)}, "
+                f"unexpected {sorted(actual_scopes - expected_scopes)}"
+            )
+
+    for node, expected_artifacts in EXACT_DAG_ARTIFACTS.items():
+        if node not in nodes:
+            continue
+        actual_artifacts = set(nodes[node]["artifacts"])
+        if actual_artifacts != expected_artifacts:
+            dag_fail.append(
+                f"DAG {node} exact split-artifact mismatch: "
+                f"expected {sorted(expected_artifacts)}, "
+                f"got {sorted(actual_artifacts)}"
+            )
+
+    if "T6-W4" in nodes:
+        detector_scopes = sorted(
+            scope
+            for scope in nodes["T6-W4"]["scopes"]
+            if path_atoms_overlap(scope, "deploy/cost-monitor/**")
+        )
+        if detector_scopes:
+            dag_fail.append(
+                "DAG T6-W4 producer-only boundary owns external-monitor scopes "
+                f"{detector_scopes}"
+            )
 
     # O-BILLING is intentionally armed only after T9-W1 removes/quarantines
     # the devenv poison-pill emitter. External owner actions are not graph
@@ -1453,18 +1710,10 @@ def validate_dispatch_dag(path):
             f"DAG probe/test+probe registry nodes missing from graph: {unregistered_probe_nodes}"
         )
 
-    batch_section_starts = exact_line_positions(text, DAG_BATCH_HEADING)
-    rendered_batches = []
-    rendered_ordinals = []
-    if len(batch_section_starts) == 1:
-        batch_section = batch_text[batch_section_starts[0] :]
-        for ordinal, node_cell in re.findall(
-            r"^B(\d{2}):\s+((?:T\d+-W\d+[a-z]?(?:\s+|$))+)",
-            batch_section,
-            re.M,
-        ):
-            rendered_ordinals.append(ordinal)
-            rendered_batches.append(node_cell.split())
+    rendered_ordinals, rendered_batches, ready_set_errors = parse_dag_ready_sets(
+        text, batch_text
+    )
+    dag_fail.extend(f"DAG {error}" for error in ready_set_errors)
 
     expected_ordinals = [f"{index:02d}" for index in range(len(rendered_batches))]
     if rendered_ordinals != expected_ordinals:
@@ -1786,7 +2035,11 @@ for wave in range(4):
 # cells, and honor only explicit carve-outs.  Wave 2 is a declared serial chain.
 principal_scopes = {}
 for node, (_, _, scope, wave) in WP.items():
-    atoms, exclusions = parse_scope_declaration(scope)
+    if node in EXACT_DAG_SCOPE_ATOMS:
+        atoms = tuple(sorted(EXACT_DAG_SCOPE_ATOMS[node]))
+        exclusions = ()
+    else:
+        atoms, exclusions = parse_scope_declaration(scope)
     principal_scopes[node] = (wave, atoms, exclusions)
 principal_collisions = []
 principal_nodes = sorted(principal_scopes)

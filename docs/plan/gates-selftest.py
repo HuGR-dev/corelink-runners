@@ -700,6 +700,218 @@ def main() -> int:
                 dag=fenced_dag,
             )
 
+            # Ready-set proofs are executable registry evidence, not free-form
+            # prose.  Keep the negative fixtures here so a parser cannot accept
+            # a BNN row merely because it appears somewhere in the document.
+            ready_open = "```text\n"
+            first_batch = next(
+                line for line in dag_text.splitlines() if line.startswith("B00:")
+            )
+
+            outside_ready_set = work / "ready-set-row-outside-fence.md"
+            outside_ready_set.write_text(
+                replace_once(
+                    dag_text,
+                    ready_open + first_batch + "\n",
+                    first_batch + "\n\n" + ready_open,
+                    "ready-set row outside fence",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU ready-set row outside canonical fence",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=outside_ready_set,
+            )
+            require_mirrored_wp(
+                "WP ready-set row outside canonical fence",
+                PLAN,
+                False,
+                work / "ready-set-outside-wp-mirror",
+                overrides={DAG: outside_ready_set},
+            )
+
+            missing_ready_fence = work / "ready-set-fence-missing.md"
+            missing_ready_fence.write_text(
+                replace_once(
+                    dag_text,
+                    ready_open,
+                    "",
+                    "missing ready-set opening fence",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU ready-set opening fence missing",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=missing_ready_fence,
+            )
+
+            wrong_ready_fence = work / "ready-set-fence-wrong-info.md"
+            wrong_ready_fence.write_text(
+                replace_once(
+                    dag_text,
+                    ready_open,
+                    "```markdown\n",
+                    "wrong ready-set fence info string",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU ready-set fence has wrong info string",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=wrong_ready_fence,
+            )
+
+            missing_ready_close = work / "ready-set-fence-unclosed.md"
+            missing_ready_close.write_text(
+                replace_once(
+                    dag_text,
+                    "\n```\n\nThe checker validates",
+                    "\n\nThe checker validates",
+                    "missing ready-set closing fence",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU ready-set closing fence missing",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=missing_ready_close,
+            )
+
+            # T6-W15 is the external-monitor base.  Its ordering is a safety
+            # barrier: PG durability and the provider-backed monitor follow the
+            # independently deployed monitor base, never merely its prose.
+            t1w6_row = next(
+                line for line in dag_text.splitlines() if line.startswith("| T1-W6 |")
+            )
+            missing_monitor_before_pg = work / "missing-t6-w15-before-t1-w6.md"
+            missing_monitor_before_pg.write_text(
+                replace_once(
+                    dag_text,
+                    t1w6_row,
+                    t1w6_row.replace("T6-W15, ", "", 1),
+                    "T6-W15 to T1-W6 predecessor",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU missing T6-W15 predecessor before T1-W6",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=missing_monitor_before_pg,
+            )
+
+            t6w12_row = next(
+                line for line in dag_text.splitlines() if line.startswith("| T6-W12 |")
+            )
+            missing_monitor_before_provider = work / "missing-t6-w15-before-t6-w12.md"
+            missing_monitor_before_provider.write_text(
+                replace_once(
+                    dag_text,
+                    t6w12_row,
+                    t6w12_row.replace("T6-W15, ", "", 1),
+                    "T6-W15 to T6-W12 predecessor",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU missing T6-W15 predecessor before T6-W12",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=missing_monitor_before_provider,
+            )
+
+            t6w15_row = next(
+                line for line in dag_text.splitlines() if line.startswith("| T6-W15 |")
+            )
+            inverted_monitor_edge = work / "inverted-t6-w15-t6-w12-edge.md"
+            inverted_monitor_edge_text = replace_once(
+                dag_text,
+                t6w12_row,
+                t6w12_row.replace("T6-W15, ", "", 1),
+                "inverted T6-W15/T6-W12 edge removal",
+            )
+            inverted_monitor_edge.write_text(
+                replace_once(
+                    inverted_monitor_edge_text,
+                    t6w15_row,
+                    t6w15_row.replace("T6-W4, ", "T6-W4, T6-W12, ", 1),
+                    "inverted T6-W15/T6-W12 edge insertion",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU inverted T6-W15/T6-W12 dependency",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=inverted_monitor_edge,
+            )
+
+            wrong_a610_owner = work / "wrong-a610-owner.md"
+            wrong_a610_owner.write_text(
+                replace_once(
+                    plan,
+                    "| **T6-W15** | A6.10 |",
+                    "| **T6-W15** | A6.9 |",
+                    "A6.10 ownership",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "WP A6.10 outside T6-W15 owner",
+                "wp-check.py",
+                wrong_a610_owner,
+                False,
+            )
+
+            missing_outbox_scope = work / "missing-t6-w15-outbox-scope.md"
+            missing_outbox_scope.write_text(
+                replace_once(
+                    dag_text,
+                    "`deploy/cost-monitor/src/outbox.ts`; ",
+                    "",
+                    "T6-W15 outbox scope",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU T6-W15 missing outbox scope",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=missing_outbox_scope,
+            )
+
+            missing_recovery_scope = work / "missing-t6-w15-recovery-scope.md"
+            missing_recovery_scope.write_text(
+                replace_once(
+                    dag_text,
+                    "`deploy/cost-monitor/test/outbox-recovery.test.ts`; ",
+                    "",
+                    "T6-W15 recovery scope",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU T6-W15 missing outbox recovery scope",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=missing_recovery_scope,
+            )
+
         wrong_au_owner = work / "wrong-au-owner.md"
         union23 = next(
             line for line in triage.splitlines() if line.startswith("| union-23 |")
@@ -712,7 +924,7 @@ def main() -> int:
             "AU7.10 outside canonical file owner", "au-check.py", wrong_au_owner, False
         )
 
-    print("\nplan gate self-test: PASS — baselines accepted and 28 corruptions blocked")
+    print("\nplan gate self-test: PASS — baselines accepted and 38 corruptions blocked")
     return 0
 
 

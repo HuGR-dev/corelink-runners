@@ -5,12 +5,13 @@ session or model. It records the production containment, the planning state, and
 safe next moves. It does not replace the historical handoff from 2026-08-31.
 
 The repository is `corelink-runners`. The current planning worktree is
-`.claude/worktrees/golive-rev6-r3`, on branch `plan/golive-rev6-r3`. The immutable Round-7 review
-input was committed `289826e358050c7d6b4517fc8a21f79c733c7e32`, with incident PR #529 merge
-`b70deae` in its ancestry. Cold-review round 7 was **NOT QUIET** (6/8 reviewers reported new
-blockers; 2/8 found no new finding and signed off) and the quiet count remains zero. Round 6 and
-earlier rounds are retained as historical ledgers. The post-review repair tree is a later tree and
-has no SHA asserted by this handoff; its review result cannot be transferred from `289826e…`.
+`.claude/worktrees/golive-rev6-r3`, on branch `plan/golive-rev6-r3`. The immutable Round-8 review
+input was committed `9f6e281ca617113a840ac268dcb680b258064c39`, with the Round-7 input
+`289826e358050c7d6b4517fc8a21f79c733c7e32` and incident PR #529 merge `b70deae` in its ancestry.
+Cold-review round 8 was **NOT QUIET** (5/8 reviewers reported new blockers; 3/8 found no new
+finding and signed off) and the quiet count remains zero. Round 7, Round 6 and earlier rounds are
+retained as historical ledgers. The Round-8 repair tree is a later tree and has no SHA asserted by
+this handoff; its review result cannot be transferred from `9f6e281…`.
 
 ## 1. Production containment: the Cloudflare burn is stopped
 
@@ -79,22 +80,23 @@ python3 docs/plan/au-check.py docs/plan/union-triage-remaining.md --plan docs/pl
 python3 docs/plan/gates-selftest.py
 ```
 
-Observed on the exact Round-7 review input `289826e358050c7d6b4517fc8a21f79c733c7e32` before its
-new repair cycle:
+Observed on the exact Round-8 review input `9f6e281ca617113a840ac268dcb680b258064c39` before the
+current repair-in-progress cycle:
 
 - `plan-check`: PASS, 247/247 findings covered (`W2=21`, `DEFER=5`).
 - `wp-check`: PASS, 94 suite rows, 92 live, 47 WPs, 89 owned, 3 judged.
 - `au-check`: AU STAGING PASS, 30 AU source findings and 33 proposed AU acceptance IDs
   are structurally owned exactly once; this is explicitly not freeze evidence. The three extra
   rows are the live halves of the AU3.23, AU4.16 and AU3.26 test/probe splits.
-- `gates-selftest`: PASS. It accepts all three baselines and proves 23 corruptions block,
+- `gates-selftest`: PASS. It accepts all three baselines and proves 28 corruptions block,
   including physical/opaque rows, kind and summary drift, source→AU swaps, tombstoned aliases,
   HTML-comment hiding, phantom DAG nodes, evidence-route removal, capability/serial-order
   corruption and broad/narrow parallel scope collisions.
 
-The 23-case result is historical to the exact Round-7 input. The subsequent repair cycle targets
-28 blocked corruptions; that target must be reproduced on its own clean, signed tree before it can
-be recorded as evidence.
+These 28-case results are structural evidence for the exact Round-8 input only. They do not make
+the input quiet, semantically ready, production-ready, freeze-eligible or dispatchable, and they
+must be reproduced on any later clean, signed repair tree rather than attributed to an unqualified
+`HEAD`.
 
 The two union inputs are `docs/plan/union-catalog-ledger.md` and
 `docs/plan/union-triage-remaining.md`. They are proposed AU scope, not yet a frozen
@@ -110,9 +112,19 @@ corrected AU registry is 30 source findings / 33 proposed ids, with T3-W5 as the
 4 existing-WP extensions. The staged intake contract returns 202 only after a durable paused
 record and uses 503 only when persistence fails.
 
-Round 7 found six reviewers with new blockers and two with no new finding; the consolidated ledger
-is `docs/plan/2026-09-01-round7-cold-review-ledger.md`. Its findings remain open in the subsequent
-repair tree until each disposition is independently verified.
+Round 7 found six reviewers with new blockers and two with no new finding; its consolidated ledger
+is `docs/plan/2026-09-01-round7-cold-review-ledger.md`. Round 8 then reviewed the exact signed
+repair input `9f6e281ca617113a840ac268dcb680b258064c39`: five reviewers found new blockers and
+three found no new finding. Its consolidated ledger is
+`docs/plan/2026-09-01-round8-cold-review-ledger.md`. Both rounds' findings remain open in the
+subsequent repair tree until each disposition is independently verified.
+
+The current repair-in-progress split gives the external monitor base to **T6-W15**, before both
+`T1-W6` durable-PG re-arm and `T6-W12` provider-inventory/cost live proof. The repair draft now
+tracks 69 DAG vertices (48 principal, 9 staged-new and 12 AU), with 9 proposal-only staged-new WPs;
+**T6-W15** is the new identifier for the 48th principal WP (A6.10), not a staged-new WP. These
+numbers describe the later repair tree, not the exact Round-8 input, and do not change the 5/8 NOT
+QUIET result or quiet count zero.
 
 `D11` (memoize-miss contract), `D12` (Postgres refusal semantics) and `D13` (tenant
 owner-of-record precedence) are visible in the round-3 delta and remain **staged/unresolved**; none
@@ -125,16 +137,19 @@ zero, and two further consecutive quiet rounds on byte-identical promoted bytes.
 
 ## 4. Safe next steps
 
-1. Preserve the exact Round-7 review-input provenance at
-   `289826e358050c7d6b4517fc8a21f79c733c7e32`, confirm its merge-base with `origin/main` is
+1. Preserve the exact Round-8 review-input provenance at
+   `9f6e281ca617113a840ac268dcb680b258064c39` (and the Round-7 input
+   `289826e358050c7d6b4517fc8a21f79c733c7e32`), confirm the merge-base with `origin/main` is
    `b70deae`, and keep the subsequent repair tree separately SHA-labelled and clean before review.
 2. Run the three primary gates plus the negative selftest above, then `git diff --check` from the
    repository root.
-3. Finish the Round-7 repair cycle in one newly signed commit and record its full SHA. Run all four
-   structure checks (including the 28-case repair selftest target) and `git diff --check` from that
-   clean signed input; do not substitute an unqualified `HEAD` or a dirty-tree transcript.
+3. Finish the Round-8 repair cycle in one newly signed commit and record its full SHA. Run all four
+   structure checks, the current negative selftest target, actionlint classification and
+   `git diff --check` from that clean signed input; do not substitute an unqualified `HEAD` or a
+   dirty-tree transcript.
 4. Run two consecutive quiet, read-only cold reviews against the byte-identical staged repair
-   commit. Any normative change creates a new input and resets the staged quiet count to zero.
+   commit. Any normative change creates a new input and resets the staged quiet count to zero. The
+   Round-8 review input is `9f6e281…`; a later repair tree cannot inherit its result.
    D11/D12/D13 and live obstacles remain red even if a review is quiet.
 5. Promote the staged suite/checker bytes only in a new signed, full-SHA promotion commit. Promotion
    resets quiet count to zero; its result cannot inherit either staged quiet round.
@@ -163,15 +178,16 @@ git diff --check
 Keep review transcripts SHA-labelled. `eba6e8a` is the historical runtime-investigation snapshot;
 `e8a9e78` is the historical round-3 planning snapshot used by the round-4 ledger; `b70deae` is the
 merged containment commit (#529); `3fe8d06` is the historical Round-5 planning input;
-`af4ed85dad289e333e9bf09f129fb2faa243136d` is the historical Round-6 review input; and
-`289826e358050c7d6b4517fc8a21f79c733c7e32` is the exact Round-7 review input. These are distinct
-artifacts and must not be combined into one baseline or one unlabelled transcript. Round-7's
-clean/signoff observation is bounded to `289826e…`; it is not a claim about the later repair tree,
-an unqualified `HEAD`, or a self-referential future hash.
+`af4ed85dad289e333e9bf09f129fb2faa243136d` is the historical Round-6 review input;
+`289826e358050c7d6b4517fc8a21f79c733c7e32` is the exact Round-7 review input; and
+`9f6e281ca617113a840ac268dcb680b258064c39` is the exact Round-8 review input. These are distinct
+artifacts and must not be combined into one baseline or one unlabelled transcript. Round-7's and
+Round-8's clean/signoff observations are bounded to their respective exact inputs; neither is a
+claim about the later repair tree, an unqualified `HEAD`, or a self-referential future hash.
 
 The canonical draft graph is now `docs/plan/2026-09-01-reconciled-dispatch-dag.md`; it is
-mechanically acyclic and capped at eight, but explicitly **NOT DISPATCHABLE**. Round 7's mechanical
-PASS does not establish semantic or tamper-proof proof. After two quiet rounds on the byte-identical
+mechanically acyclic and capped at eight, but explicitly **NOT DISPATCHABLE**. Round 8 remains NOT
+QUIET; its mechanical checks do not establish semantic or tamper-proof proof. After two quiet rounds on the byte-identical
 staged repair, a signed promotion (which resets quiet count), two quiet rounds on the byte-identical
 promoted bytes, and the single post-incident baseline, the path is:
 
@@ -189,8 +205,8 @@ The worker safety spine starts `T3-W17 → T3-W18` (repo kill switches → live 
 before the later worker chain reaches `T3-W16 → T3-W15` (authoritative join → permanent redrive).
 `T1-W5 → T1-W6` keeps mint and PG/exporter evidence separate. `T6-W13` is the immediate metrics-key
 and alert lane while fabric probes remain disabled; the later no-wake re-enable is
-`T6-W13 → T6-W14`, with T6-W14 also waiting on T6-W12. These are future edges, not current dispatch
-authorization.
+`T6-W13 → T6-W14`, with T6-W14 also waiting on T6-W12. The repair split puts the monitor base in
+T6-W15 before T1-W6 and T6-W12. These are future edges, not current dispatch authorization.
 
 ## 6. Rules and operational traps
 

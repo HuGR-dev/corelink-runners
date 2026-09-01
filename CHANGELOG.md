@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-09-01 — go-live plan Round 8 remains 5/8 NOT QUIET; repair in progress
+
+Round 8 reviewed the exact committed input
+`9f6e281ca617113a840ac268dcb680b258064c39` in a clean, read-only exercise. Five of eight
+reviewers reported new blockers; three found no new finding and signed off. The consolidated
+ledger is [`docs/plan/2026-09-01-round8-cold-review-ledger.md`](docs/plan/2026-09-01-round8-cold-review-ledger.md).
+The blockers cover independent incident monitoring, ready-set fence enforcement, the lifecycle
+missing-sample acceptance path, DAG ordering/replay semantics, and executable scope/ownership for
+the external monitor and provider inventory adapter.
+
+The Round-8 repair cycle is **IN PROGRESS**. Its later repair tree is distinct from the reviewed
+input and has no SHA asserted by this entry; no review result transfers to an unqualified `HEAD`.
+The repair now splits the external monitor base into **T6-W15**, before both durable-PG re-arm
+(`T1-W6`) and the provider-inventory/cost live proof (`T6-W12`). The current repair draft therefore
+tracks 69 DAG vertices (48 principal, 9 staged-new and 12 AU), with 9 proposal-only staged-new WPs;
+**T6-W15** is the new identifier for the 48th principal WP (A6.10), not a staged-new WP. These
+numbers describe the later repair draft, not the reviewed input, and are not quietness or dispatch
+evidence. The status remains **QUIET COUNT 0 · NOT FROZEN · NO AU PROMOTION · NO DISPATCH · NO
+GREEN CREDIT**.
+
+The Round-8 review input is separate from the historical Round-7 input
+`289826e358050c7d6b4517fc8a21f79c733c7e32`; neither review record asserts a self-referential hash.
+
 ### 2026-09-01 — go-live plan Round 7 remains 6/8 NOT QUIET
 
 Round 7 reviewed the exact committed repair input

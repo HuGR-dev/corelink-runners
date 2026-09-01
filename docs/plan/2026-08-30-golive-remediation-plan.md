@@ -3,16 +3,17 @@
 **Audit baseline:** `8631abb` (#522) · **Round-5 review input:**
 `3fe8d06d62891f99ecfd3f3c1bc4376b976f848b` · **Round-6 review input:**
 `af4ed85dad289e333e9bf09f129fb2faa243136d` · **Round-7 review input:**
-`289826e358050c7d6b4517fc8a21f79c733c7e32` · **Authored:** 2026-08-30 ·
-**Revision: rev-6 Round-7 repair draft (NOT FROZEN)**
+`289826e358050c7d6b4517fc8a21f79c733c7e32` · **Round-8 review input:**
+`9f6e281ca617113a840ac268dcb680b258064c39` · **Authored:** 2026-08-30 ·
+**Revision: rev-6 Round-8 repair draft (NOT FROZEN)**
 **Sources:** the 247-finding ultra audit (`wf_31696fc3-c08`, 53 agents / 17 dimensions, 33/33
 CRITICAL+HIGH adversarially confirmed) **∪** the in-repo 2026-08-25 comprehensive audit
 (`docs/audits/2026-08-25-comprehensive-audit.md`), which contains at least one HIGH-class risk the
 ultra audit did not find (§2.1).
 **Method:** TechLead doctrine (decompose · contract · pack · verify · loop), two self-iterations,
 then repeated **independent cold reviews** whose findings are logged and dispositioned in §12.
-Round 7 ran on 2026-09-01 against the exact immutable input above and is **NOT QUIET** (6/8
-reviewers reported blockers; 2/8 reported no new finding/signoff); the quiet count is zero. The
+Round 8 ran on 2026-09-01 against the exact immutable input above and is **NOT QUIET** (5/8
+reviewers reported blockers; 3/8 reported no new finding/signoff); the quiet count is zero. The
 subsequent repair tree is not that reviewed input.
 
 > **Rigor compact (inviolable).** No finding is silently dropped, deferred, or worked around. Every
@@ -57,10 +58,12 @@ fixed-config boot-rate probes and its scale-to-zero behaviour is observed withou
 feedback loop.
 
 **Durability barrier.** A diagnostics-only bind is not durable recovery. The staged A1.11/T1-W6
-contract must first prove a version-bound, Postgres-backed ledger/exporter success with
-`FABRIC_PG_DISABLED=1` removed. Until then, no restart/replay, cap, money-path, invoice, or other
-durability-dependent live proof earns green credit. The exact predecessor edges are maintained only
-in the [reconciled dispatch DAG](2026-09-01-reconciled-dispatch-dag.md).
+contract may not re-arm Postgres until T6-W15's non-Cloudflare monitor base is active and has proved
+its independent breaker/missing-source page path. T1-W6 must then prove a version-bound,
+Postgres-backed ledger/exporter success with `FABRIC_PG_DISABLED=1` removed. Until then, no
+restart/replay, cap, money-path, invoice, or other durability-dependent live proof earns green
+credit. The exact predecessor edges are maintained only in the
+[reconciled dispatch DAG](2026-09-01-reconciled-dispatch-dag.md).
 
 **Capability status:** C1 is **red** (the edge is servable, but restart and durability remain
 unproven) · C2 remains red · C3 amber (the cold fallback still hides a moat failure) · C4 red
@@ -164,7 +167,7 @@ Kinds: `test:` (repo runner, red now → green after) · `probe:` (live, recorde
 
 rev-2 had 48 items. The cold suite-critic refuted its completeness with 26 gaps and 9 unfalsifiable
 items; round 2 completed that review and added the rev-5 rows below. **The suite has 94 rows, 92 live
-(89 `test`/`probe` assignments and 3 `judged`; A2.2 and A5.7 are withdrawn), 47 WPs, and 89 owned
+(89 `test`/`probe` assignments and 3 `judged`; A2.2 and A5.7 are withdrawn), 48 WPs, and 89 owned
 items.** These counts are mechanical, not a claim that any item is green. The rev-2 → rev-3 delta is
 where the real go-live risk was hiding, so it is marked ★.
 
@@ -196,7 +199,7 @@ A2.4 A2.5 A2.7 A2.8 A2.10 A3.9 A3.10 A4.7 A4.10 A5.6 A5.8 A5.9 A6.6 A6.7 A6.11 A
 | id | kind | item | gap |
 |---|---|---|---|
 | **A1.8** | probe | a forced-restart loop at one deployed config yields **20/20** serving cold starts; any failure is red and classified from lifecycle logs | G2 |
-| **A1.9** | probe | after staged T6-W14 supplies its isolated target, read every 60 s for 7 continuous days the **source-authored FabricdContainer DO lifecycle record** `{seq, transition_id, state, transition_at_ms, version}` through its container-free read route. Only DO lifecycle hooks may write that record; the route may add only `sampled_at_ms` and echo the sampler's fresh request nonce, and may never call the container. Reject nonce mismatch, stale/future samples, sequence regression, unknown/stale state and static/untransitioned state; the sampler cannot write/refresh a heartbeat, timestamp or lifecycle state. The artifact proves at least one healthy→failure and one failure→healthy transition, a missing sample alerts within 120 s through the independent cost-monitor/correlation lane, the longest undetected marker outage is <120 s, and the sampler issues **zero fabricd container requests**. This proves lifecycle-marker detection only, never fabricd application health, availability or container uptime | G3 |
+| **A1.9** | probe | after T6-W15 supplies the independent lifecycle-sample detector and staged T6-W14 supplies its isolated sampler/target, read every 60 s for 7 continuous days the **source-authored FabricdContainer DO lifecycle record** `{seq, transition_id, state, transition_at_ms, version}` through its container-free read route. Only DO lifecycle hooks may write that record; the route may add only `sampled_at_ms` and echo the sampler's fresh request nonce, and may never call the container or the monitor. The T6-W14 canary sampler rejects nonce mismatch, stale/future samples, sequence regression, unknown/stale state and static/untransitioned state; it cannot write/refresh lifecycle state or create a self-heartbeat. After validation it durably queues and exact-retries one authenticated, service-bound envelope until T6-W15 acknowledges that exact event. The artifact proves at least one healthy→failure and one failure→healthy transition, a missing expected sample pages within 120 s after its scheduled time, and the sampler issues **zero fabricd container requests**. This proves lifecycle-marker detection only, never fabricd application health, availability or container uptime | G3 |
 | **A2.11** | test | every operator override named in any error message or runbook is **consumed by the deployed binary** — an override named but unplumbed fails the check | G4 |
 | **A2.12** | probe | **3/3** deliberately dead-plane recoveries restore service within 15 min, each executed by someone following **only** the runbook | G5 |
 | **A2.13** | probe | after any deploy, the worker / control-plane / runner-image version triple is asserted against a declared compatibility matrix, and a mismatched triple is rejected | G15 |
@@ -311,7 +314,7 @@ A6.3 remains capability-broken-while-green until owner decision **D11**, reserve
 | A6.7 | probe | the e2e suite runs green against live on a schedule and its completeness critic kills **8/8** independent mutants: auth, entitlement, mint, atomic claim, spawn, completion, billing and alert delivery |
 | A6.8 | test | the cross-instance pg cap-safety suite (`pg_ledger.rs:1429…`, `billing_sink.rs:643,672`) executes in CI — **runner + Postgres provisioning pre-decided**, not left to the agent |
 | A6.9 | probe | the stress lane dispatches on a **named** host and **its result is asserted on** |
-| A6.10 | test | a canary that fails to **run** raises a staleness alarm |
+| A6.10 | test | T6-W4's scheduled canary run emits an authenticated monotonic tick, while T6-W15 owns the external detector and all acceptance credit: if the canary fails to **run**, that monitor outside Cloudflare detects the missing expected tick and pages within 120 s after its scheduled time — the canary cannot satisfy this item by grading its own last-success state |
 | A6.11 | probe | an anonymous write to the deployed diagnostics sink is refused |
 | ★A6.12 | test+probe | an alert rule exists for **each of C1–C5** with a named condition and channel, and each fires end to end when its condition is synthesized — today alarms cover only the canary and the diag sink; **C1–C5 have none** |
 | ★A6.13 | probe | an alert reaches a **named on-call destination and is acknowledged**; a response-time target exists |
@@ -346,9 +349,11 @@ cold-review rounds over byte-identical committed bytes → if the reviewed stagi
 integrated, treat that promotion as a new normative snapshot, reset the quiet count to zero, and
 obtain two more consecutive quiet rounds over that byte-identical integrated snapshot → **only
 then** freeze the suite → **then** capture the single clean post-incident red baseline
-(`docs/plan/acceptance-baseline.json`) → **then** run T3-W17 → T3-W18 as the first post-freeze,
-pre-general-dispatch Wave-0 containment lane → **then** use the reconciled DAG for later worker
-mutations and other dispatch. A quiet review never promotes staging by implication. Any
+(`docs/plan/acceptance-baseline.json`) → **then** run T3-W17 → T3-W18 before any worker-monolith
+mutation, force deploy, destructive/live Cloudflare operation or live proof → **then** use the
+reconciled DAG for those protected lanes. Disjoint documentation, local tests and other non-live
+packets may appear earlier in the full-plan calculation. A quiet review never promotes staging by
+implication. Any
 `test:` item green at baseline is vacuous and must be replaced (rev-2 shipped three such items; all
 three were caught only by the cold review). This ordering is a gate, not authorization: the current
 state remains NOT FROZEN / NO DISPATCH.
@@ -375,7 +380,8 @@ state remains NOT FROZEN / NO DISPATCH.
 - **D11 — exact customer-visible memoize-miss contract: STAGED / RED.** No signed ADR exists;
   T6-W2 remains decision-blocked.
 - **D12 — permanent Postgres ledger/exporter refusal semantics: STAGED / RED.** No signed ADR
-  exists; T1-W6 and every durability-dependent live proof remain blocked.
+  exists; T1-W6 additionally waits for active T6-W15 external monitoring, and every
+  durability-dependent live proof remains blocked.
 - **D13 — AU4.18 owner-of-record precedence and conflict policy: STAGED / RED.** No signed decision
   exists; AU4.18 remains proposal-only.
 
@@ -407,12 +413,14 @@ WAIVER (human-authorized) — <what is loosened/deferred>
 | **O1** *(owner)* | `live-probe-01`, `e2e-01` | the outage itself — rev-2 filed these CRITICALs in the wave they block |
 
 **Round-5 staged containment (not principal-suite ownership):** A3.30 remains proposal-only, but
-its packet placement is fixed. **T3-W17 → T3-W18 is the first post-freeze, pre-general-dispatch
-Wave-0 containment lane**: T3-W17 implements the repo controls and T3-W18 owns live arming/probe.
-The lane completes before every later worker mutation packet and before the first force-deploy:
+its packet placement is fixed. **T3-W17 → T3-W18 is the first post-freeze Wave-0 safety lane for
+worker-monolith mutation, force deploy, destructive/live Cloudflare operation and live proof**:
+T3-W17 implements the repo controls and T3-W18 owns live arming/probe. Independent docs, local-test
+and other non-live packets do not acquire a false predecessor from this prose. The lane completes
+before every later worker mutation packet and before the first force-deploy:
 T3-W18's re-drive containment is armed and proven, then O-FLEETBUSY supplies the read-only fleet-busy
 pair, and only then may T2-W2b perform that deploy. This two-phase staging does not add either WP or
-A3.30 to the 47-WP / 94-row principal suite and does not authorize any packet or owner arming to run.
+A3.30 to the 48-WP / 94-row principal suite and does not authorize any packet or owner arming to run.
 The canonical DAG owns the exact predecessor edges and paths.
 
 ### Wave 1 — parallel, partitioned by **named file** (32 findings)
@@ -425,7 +433,8 @@ The canonical DAG owns the exact predecessor edges and paths.
 | **T6-W2** | A6.3 | `moat-benchmark.yml`, `moat-action-test.yml`, `actions/corelink-memoize/action.yml` | Sol — contract/risk | — |
 | **T6-W3** | A6.4 | new `conformance.yml`, `spawn-worker-ci.yml` (path filter only), `sdk/**` test/CI files | Luna — mechanical/CI | — |
 | **T6-W8** | A6.8 | new `pg-suite.yml` + `crates/corelink-fabric/**` test cfg | Sol — architecture/live-risk | — |
-| **T6-W4** | A6.5 A6.9 A6.10 | new `secret-scan.yml`, `corelink-stress.yml`, `deploy/cloudflare-canary/**` (not its README) | Sol — security/live-risk | — |
+| **T6-W4** | A6.5 A6.9 | new `secret-scan.yml`, `corelink-stress.yml`, `deploy/cloudflare-canary/**` (not its README); canary-tick producer/test only, no A6.10 detector or credit | Sol — security/live-risk | — |
+| **T6-W15** | A6.10 | base-only `deploy/cost-monitor/` paths enumerated exactly in the canonical DAG; explicitly excludes `deploy/cost-monitor/README.md` and every T6-W12 provider/correlator/live-proof path | Sol — external monitoring | T6-W4 · O-MONITORHOST · T7-W4b |
 | **T5-W1** | A5.3 | new `docs/onboarding/`, `actions/corelink-memoize/README.md` | Luna — documentation | — |
 | **T5-W2** | A5.2 A5.5 | `integrations/**` | Sol — release/security | D3 |
 | **T7-W1** | A7.2 | `docs/ROADMAP.md`, `CHANGELOG.md` | Luna — documentation | T0-W1 |
@@ -494,21 +503,23 @@ unverified claim a "positive result" is the exact overclaim the repo's skeptic r
 
 The `dep` cells above are non-exhaustive acceptance notes, not a dispatch schedule or the complete
 scope/dependency contract. The [reconciled dispatch DAG](2026-09-01-reconciled-dispatch-dag.md) is
-normative for full exact scopes and hard predecessors. In particular, staged A1.11/T1-W6 durable-PG
-live success precedes T1-W3, T1-W4, T4-W7, T4-W8 and staged T6-W12; T1-W2 may collect diagnostics
+normative for full exact scopes and hard predecessors. In particular, T6-W15 deploys the active
+external-monitor base before staged T1-W6 may attempt to re-arm durable Postgres. T1-W6 then precedes
+T1-W3, T1-W4, T4-W7, T4-W8 and the later T6-W12 provider/live phase; T1-W2 may collect diagnostics
 while Postgres is disabled but cannot earn green credit. A1.9 additionally receives no T1-W4 credit
-until staged T6-W14 has delivered the isolated non-waking edge target and the canonical DAG carries
-the `T6-W14 → T1-W4` credit edge. T6-W14's target is authoritative only because FabricdContainer
-DO lifecycle hooks alone persist its monotonic sequence/transition record; the container-free route
-is read-only, never calls the container, and merely adds sample time plus a fresh nonce echo. A1.9's
-60-second sampler rejects stale/future samples, nonce mismatch, sequence regression and
-static/untransitioned state, issues zero fabricd container requests, and alerts through the
-independent cost-monitor/correlation lane; it cannot be cited as fabricd application health,
-availability or container-uptime evidence. T6-W9's alert rule is ready before
-T6-W6's live canary proof. Staged AU6.17 extends **T6-W10** (four items after integration), not
-T6-W6, and its synthetic canary proof follows both T6-W6 delivery and T6-W9 alert-rule work. These
-statements reserve safety and ordering only; A1.11, T6-W12, T6-W14 and AU6.17 remain outside the
-principal suite, and the canonical DAG alone owns their exact edges.
+until staged T6-W14 has delivered the isolated non-waking edge target and sampler. FabricdContainer
+DO lifecycle hooks alone author the monotonic sequence/transition record; the container-free route
+is read-only, never calls the container and never emits a monitor heartbeat. T6-W14's canary sampler
+reads that route every 60 seconds, rejects stale/future data, nonce mismatch, sequence regression and
+static/untransitioned state, persists an outbox event, and retries the exact envelope until T6-W15
+acknowledges that event. It cannot be cited as fabricd application health, availability or
+container-uptime evidence. A6.10 receives no detector credit from T6-W4's producer/test or a
+canary-owned last-success record: T6-W15 alone owns the external missing-tick detector and principal
+credit. T6-W9's alert rule is ready before T6-W6's live canary proof. Staged AU6.17 extends
+**T6-W10** (four items after integration), not T6-W6, and its synthetic canary proof follows both
+T6-W6 delivery and T6-W9 alert-rule work. These statements reserve safety and ordering only; A1.11,
+the A6.20 phases, T6-W14 and AU6.17 remain ungreened, and the canonical DAG alone owns their exact
+edges.
 
 ### Wave 4 — post-decision (43 findings)
 
@@ -518,18 +529,32 @@ sudo/rootful, `fabric-core-09` unbounded lease rows, `billing-money-path-13` no 
 `gap-15` NoOp AC hook, `runner-core-02` no CAS transport, `fabric-core-05` N>1 ping) must be given a
 gating id or moved to W1/W2/DEFER — otherwise the §2 waiver rule is bypassed by construction.
 
-### Round-5 principal proposals — staging only
+### Principal repair packets and staged proposals
 
 | item / packet | reserved contract | staging state |
 |---|---|---|
 | **A1.10 / T1-W5** | fabric-only mint-key diagnostics, boot and readiness test+probe; absent/wrong refuses readiness/acquire, valid serves, with no secret logging | RED by absence; no A3.17 credit |
-| **A1.11 / T1-W6** | diagnostics-first Postgres ledger/exporter refusal and version-bound durable recovery test+probe | RED by absence; blocked on unresolved D12 |
+| **A1.11 / T1-W6** | diagnostics-first Postgres ledger/exporter refusal and version-bound durable recovery test+probe; durable-PG re-arm follows the active T6-W15 external-monitor base | RED by absence; blocked on unresolved D12 and T6-W15 |
 | **A3.30 / T3-W17 + T3-W18** | one test+probe contract split into Wave-0 repo containment implementation and a separate live arming/probe | RED by absence; neither packet dispatched |
+| **A6.10 / T6-W15** | T6-W4 implements only the canary tick producer/test; T6-W15 owns the external detector, stopped-canary proof and all principal credit | RED by absence; O-MONITORHOST remains unresolved |
+| **A6.20 / T6-W15 + T6-W12** | one provider-neutral monitor contract split into an external base phase active before PG re-arm and a later provider/live proof phase. The base owns scheduler/state/delivery, exact-ingress ACKs, durable idempotent delivery outbox, missing-source detectors and incident recovery; the later phase owns provider/cost correlation and version-bound evidence. Exact SLOs, recovery high-water and ≥330-second all-clear horizon remain normative only in the round-3 delta | RED by absence; both phases are mandatory, with no partial green; O-MONITORHOST and O-CFINVENTORY remain unresolved |
 | **A6.21 / T6-W13** | while fabric probes remain 0, prove the current metrics key works, the stale key fails, and the stale-key condition delivers and is acknowledged | RED by absence; immediate key/alert repair, with no durable-PG or no-wake predecessor |
-| **A6.22 / T6-W14** | later isolated non-waking target and re-enable proof | RED by absence; follows durable recovery and independent monitoring |
+| **A6.22 / T6-W14** | later isolated non-waking canary sampler/target and re-enable proof; the outer Worker/DO only authors lifecycle state, while the sampler validates, persists and exact-retries monitor envelopes | RED by absence; follows durable recovery and independent monitoring |
 
-These are reserved principal `A` proposals, not rows in the 94-row suite. AU remains separately
-staged; nothing in this table promotes an AU item, freezes an id, or authorizes dispatch.
+**A6.10 is already a principal row; T6-W15 is its owner and raises the principal WP count to 48
+without changing the 89 owned items.** The other new `A` ids remain reserved proposals outside the
+94-row suite. The delta continues to stage 9 proposal-only new WPs; T6-W15 is instead the new 48th
+principal WP, so the canonical combined DAG has 48 principal + 9 staged-principal + 12 AU = 69
+vertices. AU remains separately staged. Nothing in this table promotes an AU item, freezes a
+proposed id, grants partial green, or authorizes dispatch.
+
+**Staged external obstacle — O-MONITORHOST.** Before T6-W15 can implement or deploy the base, a
+version-bound capability artifact must name non-Cloudflare compute/runtime, scheduler, durable
+state and alert-delivery providers plus independent inventory-read, producer-write and delivery
+credential domains. Absence of that artifact is RED and fail-closed; a Cloudflare Worker/DO cannot
+satisfy “outside Cloudflare.” The exact artifact schema, key lifecycle, signal/SLO math and recovery
+contract are defined only in the
+[round-3 remediation delta](2026-09-01-round3-remediation-delta.md), not duplicated here.
 
 ---
 
@@ -627,6 +652,9 @@ transcript.
 
 This section defines state transitions only. It does **not** duplicate ready sets or packet batches;
 the [reconciled dispatch DAG](2026-09-01-reconciled-dispatch-dag.md) is the sole scheduling source.
+Its deterministic batches are a **full-from-zero review replay**, not runtime state: the dispatcher
+subtracts durably completed WP records before each ready-set calculation and never redispatches an
+already complete WP such as T0-W1.
 
 1. Keep the production containment armed; **T0-W1 is complete**, while all 30 AU source findings / 33
    AU proposals stay in the separate staging intake.
@@ -637,12 +665,14 @@ the [reconciled dispatch DAG](2026-09-01-reconciled-dispatch-dag.md) is the sole
    count to zero, and itself requires two consecutive quiet cold-review rounds over byte-identical
    bytes. Only then freeze that integrated suite and capture exactly one clean post-incident red
    baseline. A mixed-input or mixed-deploy tuple is ineligible.
-4. Run T3-W17 → T3-W18 as the first post-freeze, pre-general-dispatch Wave-0 containment lane;
-   neither is authorized by this draft. Before the first T2-W2b force-deploy, T3-W18 containment is
-   proven and O-FLEETBUSY is bound; every later worker mutation also waits for T3-W18.
-5. Run only later packets exposed by the canonical cap-8 DAG. T6-W9 alert-rule readiness precedes
-   T6-W6 live canary proof. Staged T1-W6 durable-PG live success must occur before any
-   durability-dependent live proof can earn green credit.
+4. Run T3-W17 → T3-W18 before any worker-monolith mutation, force deploy, destructive/live
+   Cloudflare operation or live proof; neither is authorized by this draft. Before the first
+   T2-W2b force-deploy, T3-W18 containment is proven and O-FLEETBUSY is bound. Disjoint docs,
+   local-test and other non-live packets may precede T3-W18 when the canonical DAG exposes them.
+5. Run only packets exposed by the canonical cap-8 DAG after subtracting completed WP state. T6-W9
+   alert-rule readiness precedes T6-W6 live canary proof. T6-W15's external-monitor base must be
+   active before staged T1-W6 attempts durable-PG re-arm; T1-W6 live success must then occur before
+   any durability-dependent live proof or later T6-W12 provider/cost proof can earn green credit.
 
 ---
 
@@ -651,11 +681,12 @@ the [reconciled dispatch DAG](2026-09-01-reconciled-dispatch-dag.md) is the sole
 1. **The baseline capture has not been taken.** Until `docs/plan/acceptance-baseline.json` exists,
    red→green is unproven; the principal 94-row suite remains an acceptance definition, not a green
    claim.
-2. **Round 7 is NOT QUIET** (2026-09-01): 6/8 reviewers reported blockers and 2/8 signed off with no
-   new finding on exact input `289826e358050c7d6b4517fc8a21f79c733c7e32`. Its findings are
+2. **Round 8 is NOT QUIET** (2026-09-01): 5/8 reviewers reported blockers and 3/8 signed off with no
+   new finding on exact input `9f6e281ca617113a840ac268dcb680b258064c39`. Its findings are
    recorded in
-   [`2026-09-01-round7-cold-review-ledger.md`](2026-09-01-round7-cold-review-ledger.md) and staged in
+   [`2026-09-01-round8-cold-review-ledger.md`](2026-09-01-round8-cold-review-ledger.md) and staged in
    this later repair tree, the delta, gate code and reconciled DAG. The
+   [`round-7 ledger`](2026-09-01-round7-cold-review-ledger.md),
    [`round-6 ledger`](2026-09-01-round6-cold-review-ledger.md) and
    [`round-5 ledger`](2026-09-01-round5-cold-review-ledger.md) remain historical; the quiet count is
    zero and a fresh review of the eventual clean repair commit is required.
@@ -669,11 +700,11 @@ the [reconciled dispatch DAG](2026-09-01-reconciled-dispatch-dag.md) is the sole
    disjointness, and staged AU structural ownership — not semantic readiness, tamper-proof
    evidence/readiness, production readiness, quietness, freeze eligibility, or dispatch authority.
 
-### 11.1 Current blockers after round 7 — 2026-09-01 (NOT QUIET)
+### 11.1 Current blockers after round 8 — 2026-09-01 (NOT QUIET)
 
-Round 7 re-checked the combined plan, staged delta, AU intake, gates and DAG at exact immutable input
-`289826e358050c7d6b4517fc8a21f79c733c7e32` against the contained live state. Six blocker reports
-and two no-new-finding signoffs leave the round NOT QUIET. The subsequent repair tree stages their
+Round 8 re-checked the combined plan, staged delta, AU intake, gates and DAG at exact immutable input
+`9f6e281ca617113a840ac268dcb680b258064c39` against the contained live state. Five blocker reports
+and three no-new-finding signoffs leave the round NOT QUIET. The subsequent repair tree stages their
 disposition; none of its acceptance or decision repairs is promoted, resolved, dispatched or
 greened here:
 
@@ -687,17 +718,28 @@ greened here:
   because their five-minute cadence matched `sleepAfter=5m`; spawn metrics currently return 401.
   Staged A6.21 owns the immediate current/stale-key matrix plus delivered/acknowledged stale-key
   alert while probes stay 0; staged A6.22 separately owns the later isolated non-waking re-enable.
+  A6.10 additionally stays red until T6-W15 watches T6-W4 canary ticks outside Cloudflare; T6-W4
+  remains only the producer/test packet.
+- **The independent monitor does not exist and its host is not selected.** Round 8 rejected the
+  Cloudflare Worker/DO design as sharing the provider failure domain, its 120-second provider-alert
+  claim as arithmetically impossible, its wall-clock incident bucket as split-prone, and its missing
+  lifecycle-sample input. O-MONITORHOST, provider-neutral base T6-W15, later provider/live T6-W12,
+  derived one-/two-scan SLOs, exact-retry ingress ACKs, idempotent delivery outbox and a durable
+  open-incident pointer are staged in the normative delta/DAG. Recovery cannot clear that pointer
+  until the provider cursor/high-water covers the recovery boundary and all signals remain clear
+  for the normative ≥330-second horizon; every absent phase or obstacle remains RED.
 - **The re-drive amplifier remains open.** `redriveOrphanedJobs` can release a queued job's claim
   after its grace period while slot acquisition remains idempotent by `jobId`; a retry can therefore
   create another box without another slot. The evidence calls for an explicit intake/re-drive kill
   switch before any destructive runner rollout. T3-W17 is therefore staged as Wave-0 pre-dispatch
   containment, with T3-W18 reserved for its later live arming/probe.
 - **The dispatch scheduler is not authorization.** The reconciled DAG is the sole combined graph and
-  ready-set source, capped at 8. Its working-draft ready sets are illustrative. The last reviewed
-  input is exact Round-7 commit `289826e358050c7d6b4517fc8a21f79c733c7e32`, and Round 7 was not
-  quiet; the subsequent repair tree has changed those bytes and has not completed a cold-review
-  round. Its eventual clean HEAD is recorded externally by Git/CI for review, so every ready set
-  remains non-dispatchable.
+  ready-set source, capped at 8. Its full-from-zero ready sets are review calculations; runtime
+  subtracts durable completed-WP state and never redispatches T0-W1. The last reviewed input is exact
+  Round-8 commit `9f6e281ca617113a840ac268dcb680b258064c39`, and Round 8 was not quiet; the
+  subsequent repair tree has changed those bytes and has not completed a cold-review round. Its
+  eventual clean HEAD is recorded externally by Git/CI for review, so every ready set remains
+  non-dispatchable.
 - **The money path is still unproven past ingest.** No invoice or charge for a test tenant is
   recorded, and containment has suspended the durable export path; A4.10 and the reconciliation
   items remain open.
@@ -802,6 +844,16 @@ Markdown/actionlint false-PASS boundaries and stale provenance. The subsequent r
 the reviewed input and its normative changes reset the quiet count; neither signoff advances it:
 **NOT FROZEN · QUIET COUNT 0 · NO DISPATCH · NO AU PROMOTION**.
 
+**Cold review — round 8 (2026-09-01 — NOT QUIET).** Five of eight independent reviewers found new
+blockers in exact clean input `9f6e281ca617113a840ac268dcb680b258064c39`; three reviewers reported
+no new finding/signoff on those bytes. The
+[round-8 ledger](2026-09-01-round8-cold-review-ledger.md) records the containment-prose/DAG mismatch,
+the Cloudflare-hosted “independent” monitor and invalid latency/incident contracts, missing
+lifecycle-sample and canary-tick detector ownership, two DAG dependency/scope gaps, and the
+ready-set fence false PASS. Repairs are staged in a later tree and are normative; none advances the
+quiet count or authorizes promotion, freeze or dispatch: **NOT FROZEN · QUIET COUNT 0 · NO
+DISPATCH · NO AU PROMOTION**.
+
 ---
 
 ## 13. Invariants (L2 charter — HARD REJECT, never delegated, never relaxed)
@@ -901,6 +953,22 @@ the global gate in §8; the global gate is never restated per WP.
 ---
 
 ## 16. rev-6 draft change log and reviewed-input provenance
+
+### Round-8 immutable review input
+
+Round 8 reviewed exact clean commit `9f6e281ca617113a840ac268dcb680b258064c39`, not an unqualified
+moving `HEAD`: 5/8 reviewers reported blockers and 3/8 reported no new finding/signoff. Its full
+disposition and bounded mechanical transcript are in the
+[Round-8 ledger](2026-09-01-round8-cold-review-ledger.md). That input had 247/247 findings assigned,
+94 physical / 92 live principal rows, 30 source findings / 33 proposed AU ids, a 68-vertex cap-8 DAG
+and 28 gate-selftest corruptions blocked. Those are structural results, not quietness, production or
+freeze evidence.
+
+The tree containing the subsequent Round-8 repairs has different bytes and cannot borrow the
+`9f6e281…` review result. Its eventual clean commit identity must be supplied externally by Git/CI
+to the next review record, without an impossible self-referential SHA. Until that later commit
+receives the required cold reviews, status remains **NOT FROZEN · QUIET COUNT 0 · NO DISPATCH · NO
+AU PROMOTION**.
 
 ### Round-7 immutable review input
 

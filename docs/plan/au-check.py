@@ -206,7 +206,7 @@ EXPECTED_PLACEMENT_BUCKETS.update(
 EXPECTED_PROPOSAL_WPS = set(EXPECTED_PROPOSAL_WAVES)
 EXPECTED_EXTENSION_WPS = set(EXPECTED_EXTENSION_WAVES)
 STAGED_DECISION_IDS = {"D11", "D12", "D13"}
-STAGED_OWNER_IDS = {"O-CFINVENTORY", "O-CFRATE"}
+STAGED_OWNER_IDS = {"O-CFINVENTORY", "O-CFRATE", "O-MONITORHOST"}
 STAGED_RELAY_IDS = {"R6"}
 TOMBSTONED_WPS = {"T4-W3"}
 
@@ -230,6 +230,10 @@ DAG_HEADER = [
     "exclusive path atoms; artifact filename",
     "lane",
 ]
+READY_SET_HEADING = "## Deterministic ready sets and proof"
+READY_SET_FENCE_OPEN = "```text"
+READY_SET_FENCE_CLOSE = "```"
+EXPECTED_DAG_VERTICES = 69
 STAGED_WP_HEADER = [
     "wp",
     "owns",
@@ -546,6 +550,91 @@ def section_between(document: str, start: str, end: str) -> str:
             f"section heading order is invalid: {start!r} must precede {end!r}"
         )
     return "".join(lines[starts[0] : ends[0]])
+
+
+def exact_ready_set_rows(document: str) -> tuple[list[tuple[str, str]], list[str]]:
+    """Read ready sets only from one exact, closed canonical text fence.
+
+    The ready-set proof is intentionally source-parsed rather than visible
+    Markdown, but that must not make its claimed fence boundary advisory.  A
+    moved row, a second lookalike section, or a different/unterminated fence is
+    ambiguous dispatch input and therefore fails closed.
+    """
+
+    errors: list[str] = []
+    lines = document.splitlines()
+    headings = [index for index, line in enumerate(lines) if line == READY_SET_HEADING]
+    heading_lookalikes = [
+        index
+        for index, line in enumerate(lines)
+        if re.fullmatch(
+            r" {0,3}#{1,6}[ \t]+deterministic[ \t]+ready[ \t]+sets"
+            r"[ \t]+and[ \t]+proof[ \t]*#*[ \t]*",
+            line,
+            re.IGNORECASE,
+        )
+    ]
+    if len(headings) != 1:
+        errors.append(
+            f"DAG ready-set heading must occur exactly once as {READY_SET_HEADING!r}: "
+            f"got {len(headings)}"
+        )
+        return [], errors
+    if heading_lookalikes != headings:
+        errors.append(
+            "DAG ready-set heading has additional or non-canonical lookalikes at "
+            f"lines {[index + 1 for index in heading_lookalikes]}"
+        )
+
+    heading = headings[0]
+    section_end = next(
+        (
+            index
+            for index in range(heading + 1, len(lines))
+            if re.match(r"^##(?:[ \t]+|$)", lines[index])
+        ),
+        len(lines),
+    )
+    fence_lines = [
+        index
+        for index in range(heading + 1, section_end)
+        if re.match(r"^ {0,3}(?:`{3,}|~{3,})", lines[index])
+    ]
+    expected_fences = [READY_SET_FENCE_OPEN, READY_SET_FENCE_CLOSE]
+    actual_fences = [lines[index] for index in fence_lines]
+    if actual_fences != expected_fences:
+        errors.append(
+            "DAG ready sets must use exactly one closed canonical ```text fence; "
+            f"got {actual_fences} at lines {[index + 1 for index in fence_lines]}"
+        )
+        body_indices: set[int] = set()
+    else:
+        body_indices = set(range(fence_lines[0] + 1, fence_lines[1]))
+
+    ready_row_candidates = [
+        index
+        for index, line in enumerate(lines)
+        if re.match(r"^[ \t]*(?:>[ \t]*)?B\d{2}[ \t]*:", line)
+    ]
+    outside = [index + 1 for index in ready_row_candidates if index not in body_indices]
+    if outside:
+        errors.append(
+            f"DAG ready-set Bnn rows occur outside the canonical text fence: {outside}"
+        )
+
+    rows: list[tuple[str, str]] = []
+    for index in sorted(body_indices):
+        match = re.fullmatch(r"B(\d{2}): ([^\s]+(?: [^\s]+)*)", lines[index])
+        if match is None:
+            errors.append(
+                f"DAG ready-set fence contains a non-canonical row at line {index + 1}: "
+                f"{lines[index]!r}"
+            )
+            continue
+        rows.append((match.group(1), match.group(2)))
+    if body_indices and not rows:
+        errors.append("DAG ready-set canonical text fence contains no batch rows")
+    return rows, errors
 
 
 def parse_rows(document: str) -> tuple[list[Placement], list[str], list[str], set[str]]:
@@ -1199,6 +1288,8 @@ def parse_dispatch_dag(
 
     raw_document = dag_path.read_text(encoding="utf-8")
     errors = hidden_canonical_table_errors(raw_document, "canonical dispatch DAG")
+    batch_rows, batch_errors = exact_ready_set_rows(raw_document)
+    errors.extend(batch_errors)
     document, _ = markdown_visible_text(raw_document)
     section = section_between(
         document, "## Canonical node table", "## Deterministic ready sets and proof"
@@ -1261,11 +1352,15 @@ def parse_dispatch_dag(
         if not plain_markdown(columns[4]):
             errors.append(f"DAG node {node} has no lane")
 
+    if len(waves) != EXPECTED_DAG_VERTICES:
+        errors.append(
+            f"DAG must contain exactly {EXPECTED_DAG_VERTICES} WP vertices, got {len(waves)}"
+        )
+
     rendered_batches: list[tuple[str, ...]] = []
-    # The rendered ready-set proof is intentionally a code block.  It is not
-    # a canonical Markdown table/registry and remains parsed from the source;
-    # canonical node tables themselves are parsed only from visible Markdown.
-    batch_rows = re.findall(r"^B(\d{2}):\s*(.*?)\s*$", raw_document, re.MULTILINE)
+    # The rendered ready-set proof is intentionally a code block.  Parse it
+    # from raw source only after proving its exact heading and fence boundary;
+    # canonical node tables themselves remain visible-Markdown-only.
     if [number for number, _ in batch_rows] != [
         f"{index:02d}" for index in range(len(batch_rows))
     ]:
@@ -1433,8 +1528,12 @@ def validate_au_dag_routing(
     required_direct_predecessors = {
         "T2-W2b": {"T3-W18", "O-FLEETBUSY"},
         "T6-W6": {"T6-W9"},
-        "T4-W7": {"O-BILLING", "T9-W1"},
-        "T4-W8": {"O-BILLING", "T9-W1"},
+        "T4-W7": {"O-BILLING", "T4-W2", "T9-W1"},
+        "T4-W8": {"O-BILLING", "T4-W2", "T9-W1"},
+        "T6-W15": {"T6-W4", "O-MONITORHOST"},
+        "T1-W6": {"T6-W15"},
+        "T6-W12": {"T6-W15", "T1-W6", "O-CFINVENTORY"},
+        "T6-W14": {"T6-W12"},
     }
     for wp, required in required_direct_predecessors.items():
         missing = sorted(required - set(predecessors.get(wp, ())))
@@ -1443,21 +1542,74 @@ def validate_au_dag_routing(
                 f"DAG node {wp} is missing exact hard predecessor(s): {missing}"
             )
 
+    required_transitive_predecessors = {
+        "T6-W14": {"T6-W15"},
+    }
+    for wp, required in required_transitive_predecessors.items():
+        missing = sorted(
+            target
+            for target in required
+            if not dag_depends_on(wp, target, predecessors)
+        )
+        if missing:
+            errors.append(
+                f"DAG node {wp} is missing transitive hard predecessor(s): {missing}"
+            )
+
     required_scope_atoms = {
-        "T6-W14": {"deploy/cloudflare-canary/wrangler.jsonc"},
+        "T6-W4": {"deploy/cloudflare-canary/test/scheduled-tick-envelope.test.ts"},
+        "T1-W6": {
+            "crates/corelink-fabric-server/src/monitor_outbox.rs",
+            "crates/corelink-fabric-server/tests/monitor_outbox.rs",
+        },
+        "T3-W16": {"deploy/cloudflare/test/attempt-monitor-outbox.test.ts"},
+        "T6-W15": {
+            "deploy/cost-monitor/Containerfile",
+            "deploy/cost-monitor/config.schema.json",
+            "deploy/cost-monitor/src/index.ts",
+            "deploy/cost-monitor/src/ingest.ts",
+            "deploy/cost-monitor/src/incidents.ts",
+            "deploy/cost-monitor/src/lifecycle.ts",
+            "deploy/cost-monitor/src/scheduler.ts",
+            "deploy/cost-monitor/src/state.ts",
+            "deploy/cost-monitor/src/delivery.ts",
+            "deploy/cost-monitor/src/outbox.ts",
+            "deploy/cost-monitor/src/types.ts",
+            "deploy/cost-monitor/package.json",
+            "deploy/cost-monitor/package-lock.json",
+            "deploy/cost-monitor/tsconfig.json",
+            "deploy/cost-monitor/vitest.config.ts",
+            "deploy/cost-monitor/test/lifecycle-missing.test.ts",
+            "deploy/cost-monitor/test/canary-missing-tick.test.ts",
+            "deploy/cost-monitor/test/ingest-idempotency.test.ts",
+            "deploy/cost-monitor/test/incident-state.test.ts",
+            "deploy/cost-monitor/test/scheduler.test.ts",
+            "deploy/cost-monitor/test/state.test.ts",
+            "deploy/cost-monitor/test/delivery.test.ts",
+            "deploy/cost-monitor/test/outbox-recovery.test.ts",
+            "deploy/cost-monitor/test/delivery-dedupe.test.ts",
+            "deploy/cost-monitor/test/credential-isolation.test.ts",
+            "deploy/cost-monitor/test/independence.test.ts",
+            "docs/plan/evidence/T6-W15-monitor-base.json",
+        },
+        "T6-W14": {
+            "deploy/cloudflare-fabricd/src/index.ts",
+            "deploy/cloudflare-fabricd/src/lifecycle.ts",
+            "deploy/cloudflare-fabricd/test/lifecycle-marker.test.ts",
+            "deploy/cloudflare-canary/src/lifecycle_outbox.ts",
+            "deploy/cloudflare-canary/wrangler.jsonc",
+            "deploy/cloudflare-canary/test/lifecycle-monitor-envelope.test.ts",
+            "deploy/cloudflare-canary/test/lifecycle-sampler-outbox.test.ts",
+        },
         "T6-W12": {
-            "deploy/cloudflare-cost-monitor/src/index.ts",
-            "deploy/cloudflare-cost-monitor/src/provider.ts",
-            "deploy/cloudflare-cost-monitor/src/correlator.ts",
-            "deploy/cloudflare-cost-monitor/src/types.ts",
-            "deploy/cloudflare-cost-monitor/wrangler.jsonc",
-            "deploy/cloudflare-cost-monitor/package.json",
-            "deploy/cloudflare-cost-monitor/package-lock.json",
-            "deploy/cloudflare-cost-monitor/tsconfig.json",
-            "deploy/cloudflare-cost-monitor/vitest.config.ts",
-            "deploy/cloudflare-cost-monitor/test/provider.test.ts",
-            "deploy/cloudflare-cost-monitor/test/correlator.test.ts",
-            "deploy/cloudflare-cost-monitor/test/independence.test.ts",
+            "deploy/cost-monitor/src/provider.ts",
+            "deploy/cost-monitor/src/correlator.ts",
+            "deploy/cost-monitor/test/provider.test.ts",
+            "deploy/cost-monitor/test/correlator.test.ts",
+            "deploy/cost-monitor/test/cursor-crash.test.ts",
+            "deploy/cost-monitor/test/provider-unavailable.test.ts",
+            "deploy/cost-monitor/test/incident-boundary.test.ts",
+            "deploy/cost-monitor/test/recovery-horizon.test.ts",
             "docs/plan/evidence/T6-W12-independent-monitor.json",
         },
     }
