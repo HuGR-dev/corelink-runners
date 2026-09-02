@@ -48,8 +48,66 @@ run_selftest() {
   fi
   printf 'SELFTEST=PASS path=--help\n'
   printf 'SELFTEST=PASS path=--require-all--help\n'
+  if ! run_log_selftest; then
+    printf 'SELFTEST=FAIL path=secure-log\n' >&2
+    return 1
+  fi
+  printf 'SELFTEST=PASS path=secure-log\n'
   printf 'SELFTEST=PASS\n'
 }
+
+run_log_selftest() (
+  # Exercise log creation without a live probe. `false` is a local executable
+  # that makes the one observation a deterministic transport failure (exit 1).
+  set -euo pipefail
+  local_tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/fabricd-boot-rate-selftest.XXXXXX")"
+  trap 'rm -rf -- "$local_tmpdir"' EXIT
+
+  default_output=''
+  default_rc=0
+  if default_output="$(FABRICD_BOOT_RATE_LOG='' FABRICD_CURL=false "$0" 1 0 https://example.invalid 2>&1)"; then
+    default_rc=0
+  else
+    default_rc=$?
+  fi
+  [[ "$default_rc" -eq 1 ]]
+  default_log="$(printf '%s\n' "$default_output" | sed -n 's/^  raw observations: //p')"
+  [[ -n "$default_log" && -f "$default_log" && ! -L "$default_log" ]]
+  case "$default_log" in
+    "${TMPDIR:-/tmp}"/fabricd-boot-rate.*) ;;
+    *) return 1 ;;
+  esac
+  default_mode="$(stat -f '%Lp' "$default_log" 2>/dev/null || stat -c '%a' "$default_log" 2>/dev/null)"
+  [[ "$default_mode" == '600' ]]
+  rm -f -- "$default_log"
+
+  explicit_log="$local_tmpdir/explicit.tsv"
+  explicit_rc=0
+  if FABRICD_BOOT_RATE_LOG="$explicit_log" FABRICD_CURL=false "$0" 1 0 https://example.invalid >/dev/null 2>&1; then
+    explicit_rc=0
+  else
+    explicit_rc=$?
+  fi
+  [[ "$explicit_rc" -eq 1 && -f "$explicit_log" && ! -L "$explicit_log" ]]
+  explicit_before="$(<"$explicit_log")"
+  existing_rc=0
+  if FABRICD_BOOT_RATE_LOG="$explicit_log" FABRICD_CURL=false "$0" 1 0 https://example.invalid >/dev/null 2>&1; then
+    existing_rc=0
+  else
+    existing_rc=$?
+  fi
+  [[ "$existing_rc" -eq 2 && "$(<"$explicit_log")" == "$explicit_before" ]]
+
+  printf 'sentinel\n' >"$local_tmpdir/target"
+  ln -s "$local_tmpdir/target" "$local_tmpdir/log-link.tsv"
+  symlink_rc=0
+  if FABRICD_BOOT_RATE_LOG="$local_tmpdir/log-link.tsv" FABRICD_CURL=false "$0" 1 0 https://example.invalid >/dev/null 2>&1; then
+    symlink_rc=0
+  else
+    symlink_rc=$?
+  fi
+  [[ "$symlink_rc" -eq 2 && "$(<"$local_tmpdir/target")" == 'sentinel' ]]
+)
 
 if [[ "${1:-}" == "--selftest" ]]; then
   [[ "$#" -eq 1 ]] || { printf 'usage: %s --selftest\n' "${0##*/}" >&2; exit 2; }
@@ -105,21 +163,63 @@ if ! command -v "$CURL_BIN" >/dev/null 2>&1; then
   exit 2
 fi
 
-LOG="${FABRICD_BOOT_RATE_LOG:-/tmp/fabricd-boot-rate.$(date -u +%Y%m%dT%H%M%SZ).tsv}"
-[[ -n "$LOG" ]] || { printf 'fabricd boot-rate: log path is empty\n' >&2; exit 2; }
 umask 077
+LOG=''
+
+open_log() {
+  local requested_log="${FABRICD_BOOT_RATE_LOG:-}"
+
+  if [[ -z "$requested_log" ]]; then
+    # mktemp creates a 0600 file with an unpredictable name. Keep writes on a
+    # descriptor, rather than repeatedly reopening a pathname in /tmp.
+    LOG="$(mktemp "${TMPDIR:-/tmp}/fabricd-boot-rate.XXXXXX")" || {
+      printf 'fabricd boot-rate: could not create default log\n' >&2
+      return 1
+    }
+    if ! exec 9>>"$LOG"; then
+      rm -f -- "$LOG"
+      printf 'fabricd boot-rate: could not open default log\n' >&2
+      return 1
+    fi
+    return 0
+  fi
+
+  # A caller-supplied pathname is allowed only for a brand-new regular file.
+  # noclobber makes the creation O_EXCL; keeping fd 9 open prevents a later
+  # pathname swap from redirecting observations to a symlink target.
+  if [[ -e "$requested_log" || -L "$requested_log" ]]; then
+    printf 'fabricd boot-rate: refusing existing or symlink log path: %s\n' "$requested_log" >&2
+    return 1
+  fi
+  set -o noclobber
+  if ! exec 9>"$requested_log"; then
+    set +o noclobber
+    printf 'fabricd boot-rate: could not atomically create log: %s\n' "$requested_log" >&2
+    return 1
+  fi
+  set +o noclobber
+  LOG="$requested_log"
+}
 
 served=0 startfail=0 transportfail=0 other=0
 body_file=''
-cleanup() {
+cleanup_body() {
   if [[ -n "$body_file" ]]; then
     rm -f -- "$body_file"
     body_file=''
   fi
 }
+cleanup() {
+  cleanup_body
+  exec 9>&- 2>/dev/null || true
+}
 trap cleanup EXIT INT TERM
 
-printf 'ts\tattempt\thttp\tverdict\tdetail\n' >"$LOG"
+if ! open_log; then
+  exit 2
+fi
+
+printf 'ts\tattempt\thttp\tverdict\tdetail\n' >&9
 echo "fabricd boot-rate — ${ATTEMPTS} attempts, ${INTERVAL}s apart, target ${URL}"
 echo "(observation only: nothing is deployed, restarted or reconfigured)"
 echo
@@ -132,7 +232,7 @@ for i in $(seq 1 "$ATTEMPTS"); do
     code=000
   fi
   body="$(head -c 200 "$body_file" 2>/dev/null | tr '\r\n\t' '   ' || true)"
-  cleanup
+  cleanup_body
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
   # Classify. "Failed to start container" is the container never coming up; it is
@@ -148,7 +248,7 @@ for i in $(seq 1 "$ATTEMPTS"); do
     verdict=OTHER; other=$((other + 1))
   fi
 
-  printf '%s\t%d\t%s\t%s\t%s\n' "$ts" "$i" "$code" "$verdict" "$body" >>"$LOG"
+  printf '%s\t%d\t%s\t%s\t%s\n' "$ts" "$i" "$code" "$verdict" "$body" >&9
   printf '%s  #%-3d %s  %s\n' "$ts" "$i" "$code" "$verdict"
 
   if (( i < ATTEMPTS && INTERVAL > 0 )); then

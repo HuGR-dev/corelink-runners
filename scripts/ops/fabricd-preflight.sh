@@ -96,7 +96,7 @@ classify() {
   # Access must be a 403 with an edge/service-token signal.  A generic authz
   # 403 is intentionally UNKNOWN: it is not evidence of a Cloudflare Access
   # failure and must not be mistaken for one.
-  if [[ "$status" == "403" ]] && [[ "$normalized" =~ (cf[-[:space:]]*access|cloudflare[[:space:]]+access|service[[:space:]]+token|cf[-[:space:]]*mitigated|access[[:space:]]+denied) ]]; then
+  if [[ "$status" == "403" ]] && [[ "$normalized" =~ (cf[-[:space:]]*access|cloudflare[[:space:]]+access|service[[:space:]]+token|cf[-[:space:]]*mitigated) ]]; then
     MODE=Access-403
     SIGNAL='HTTP 403 with a Cloudflare Access/service-token signal'
     NEXT='curl -sS -D - -o /dev/null -m 30 <URL>/health'
@@ -162,6 +162,12 @@ run_selftest() {
     return 1
   fi
   printf 'SELFTEST=PASS fixture=generic-403 mode=UNKNOWN\n'
+  classify $'HTTP/2 403 Forbidden\napplication says: access denied'
+  if [[ "$MODE" != "UNKNOWN" ]]; then
+    printf 'SELFTEST=FAIL fixture=app-access-denied expected=UNKNOWN actual=%s\n' "$MODE" >&2
+    return 1
+  fi
+  printf 'SELFTEST=PASS fixture=app-access-denied mode=UNKNOWN\n'
   printf 'SELFTEST=PASS\n'
 }
 
