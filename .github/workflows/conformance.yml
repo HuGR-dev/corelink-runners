@@ -1,0 +1,63 @@
+# Conformance and SDK drift gate.
+#
+# The TypeScript and Python verifiers both transcribe the v2 result-binding
+# contract.  This workflow runs their shipped test suites on every change to
+# the shared vectors, either SDK, or the Rust reference formula.  It is a
+# pure local-vector check: it does not contact CoreLink, GitHub App, or any
+# deployed service.
+name: Conformance and SDKs
+
+on:
+  pull_request:
+    paths:
+      - 'conformance/**'
+      - 'crates/corelink-cli/src/binding.rs'
+      - 'sdk/**'
+      - '.github/workflows/conformance.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'conformance/**'
+      - 'crates/corelink-cli/src/binding.rs'
+      - 'sdk/**'
+      - '.github/workflows/conformance.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: conformance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  typescript:
+    name: TypeScript conformance
+    runs-on: "${{ 'corelink' }}"
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0  # v6.0.3
+
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6
+        with:
+          node-version: '22'
+
+      - name: Run shipped TypeScript conformance suite
+        working-directory: sdk/typescript
+        run: npm test
+
+  python:
+    name: Python conformance
+    runs-on: "${{ 'corelink' }}"
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0  # v6.0.3
+
+      - name: Create local Python environment
+        run: python3 -m venv .venv
+
+      - name: Install SDK and test dependencies
+        run: .venv/bin/python -m pip install --disable-pip-version-check 'sdk/python[dev]'
+
+      - name: Run shipped Python conformance suite
+        run: .venv/bin/python -m pytest sdk/python/tests

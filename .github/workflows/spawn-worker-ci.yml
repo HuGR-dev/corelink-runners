@@ -20,11 +20,16 @@ on:
   pull_request:
     paths:
       - 'deploy/cloudflare/**'
+      # The Worker-side conformance tests read shared vectors from the repo
+      # root; rerun them when a vector changes even if the Worker source does
+      # not.
+      - 'conformance/**'
       - '.github/workflows/spawn-worker-ci.yml'
   push:
     branches: [main]
     paths:
       - 'deploy/cloudflare/**'
+      - 'conformance/**'
       - '.github/workflows/spawn-worker-ci.yml'
 
 permissions:
