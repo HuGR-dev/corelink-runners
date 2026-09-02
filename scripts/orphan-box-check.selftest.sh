@@ -33,7 +33,7 @@ pass_count=0
 fail_count=0
 
 APP="corelink-spawn-worker-runnercontainer"
-FABRICD_APP="corelink-spawn-worker-fabricd"
+FABRICD_APP="corelink-fabricd-fabricdcontainer"
 
 # ts <minutes-ago> → an RFC3339 UTC timestamp that many minutes in the past.
 ts() {
@@ -137,6 +137,7 @@ run_case "missing fixture ⇒ exit 2" 2 "$WORK/does-not-exist.json"
 # never be over-age. Before the app-class filter existed this exact data made
 # the check page on a healthy account.
 { inst "fabricd-singleton" 6684 "$FABRICD_APP" "bog"
+  inst "legacy-fabricd-singleton" 6684 "corelink-spawn-worker-fabricd" "bog"
   inst "0e1c2f3a-prod-ewr" 20000 "corelink-prod-corelinkserver-prod" "ewr"
   inst "0e1c2f3a-prod-nrt" 20000 "corelink-prod-nrt-corelinkserver-prod-nrt" "nrt"
 } | jq -s '.' > "$WORK/services.json"
@@ -147,7 +148,16 @@ run_case "long-lived service classes ⇒ no page" 0 "$WORK/services.json"
 run_case "service class, pattern widened ⇒ page" 1 "$WORK/services.json" \
   --app-pattern '.'
 
-# ── Cases 11–12: live-mode token/pagination paths, with an offline API ───────
+# ── Case 11: unknown/new classes must never be silently called services ─────
+# A new worker-shaped application has no entry in either the ephemeral lease
+# allowlist or the explicit service list. It is deliberately young, so this
+# proves the failure is classification itself: a zero ephemeral count must not
+# turn a new leak class into a false CLEAN verdict.
+inst "new-worker-class" 7 "corelink-spawn-worker-newrunnercontainer" "ewr" \
+  | jq -s '.' > "$WORK/unknown-app.json"
+run_case "unknown ephemeral-looking application ⇒ page, never CLEAN" 1 "$WORK/unknown-app.json"
+
+# ── Cases 12–13: live-mode token/pagination paths, with an offline API ───────
 # These run WITHOUT --instances-json, i.e. down the real credential path and
 # through the real container-instances.sh counter. A fake curl is placed first
 # on PATH so no request can leave this process. This keeps the test deterministic
@@ -228,7 +238,7 @@ live_case "rejected token ⇒ exit 2, not a false clean" 2 \
   CLOUDFLARE_ACCOUNT_ID=6a1fc1c626fc2628823e60b9db01f5cd \
   CLOUDFLARE_API_TOKEN=deliberately-invalid-token-for-the-selftest
 
-# ── Case 12: a truncated page must be exit 2, never CLEAN ───────────────────
+# ── Case 13: a truncated page must be exit 2, never CLEAN ───────────────────
 # Truncation is the one failure that would silently hide the orphan that matters
 # — the one past the cap. The fake API returns a next_page_token after the
 # requested single page, so the test stays deterministic and offline.
