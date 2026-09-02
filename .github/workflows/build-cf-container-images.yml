@@ -81,6 +81,43 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Guard — all configured container image pins are immutable
+        # A2.1 / INV-2: validate every image entry across every Wrangler
+        # config, including the currently image-free canary config. Keep this
+        # guard here until the dedicated image-pin tripwire lands; a deploy of
+        # an unpinned image must fail before any build or push starts.
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          paths = (
+              Path("deploy/cloudflare/wrangler.jsonc"),
+              Path("deploy/cloudflare-fabricd/wrangler.jsonc"),
+              Path("deploy/cloudflare-canary/wrangler.jsonc"),
+          )
+          image_key = re.compile(r'^\s*"image"\s*:\s*"([^"]*)"', re.MULTILINE)
+          digest = re.compile(r'@sha256:[0-9a-f]{64}$')
+          total = 0
+
+          for path in paths:
+              if not path.is_file():
+                  raise SystemExit(f"::error::Missing Wrangler config: {path}")
+              refs = image_key.findall(path.read_text(encoding="utf-8"))
+              total += len(refs)
+              for ref in refs:
+                  if not digest.search(ref):
+                      raise SystemExit(
+                          f"::error::{path}: mutable or malformed container image pin: {ref}"
+                      )
+              print(f"{path}: checked {len(refs)} image pin(s)")
+
+          if total == 0:
+              raise SystemExit("::error::Container image scan was vacuous")
+          print(f"Checked {total} immutable container image pin(s) across 3 Wrangler configs")
+          PY
+
       - name: Unpoison a stale docker-shim lock (warm-box bootstrap)
         # A warm-reused RunnerContainer can carry a root-owned
         # /tmp/corelink-docker-shim.lock from a prior job, which bricks the
@@ -143,6 +180,26 @@ jobs:
           echo "ref=${REF}" >> "${GITHUB_OUTPUT}"
           echo "Check-host image pushed: ${REF}"
 
+      # RunnerDevEnvDO — the persistent customer development environment.
+      # Its Dockerfile copies the Rust workspace, so the repository root is the
+      # build context while the Dockerfile remains under deploy/cloudflare.
+      - name: Build + push RunnerDevEnvDO image
+        id: devenv
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          IMAGE="corelink-runner-devenv"
+          TAG="${GITHUB_SHA}"
+          docker build \
+            --file deploy/cloudflare/Dockerfile.runner-devenv \
+            --tag "${IMAGE}:${TAG}" \
+            .
+          ( cd deploy/cloudflare && npx wrangler containers push "${IMAGE}:${TAG}" 2>&1 | tee /tmp/devenv-push.out )
+          REF="$(scripts/ci/resolve-pushed-ref.sh "${IMAGE}" "${TAG}" /tmp/devenv-push.out)"
+          echo "ref=${REF}" >> "${GITHUB_OUTPUT}"
+          echo "RunnerDevEnvDO image pushed: ${REF}"
+
       - name: Summary — pushed image refs to pin in wrangler.jsonc
         run: |
           {
@@ -158,5 +215,10 @@ jobs:
             echo "**CheckHostContainer** (first push — then flip wrangler.jsonc off the Dockerfile)"
             echo '```'
             echo "${{ steps.checkhost.outputs.ref }}"
+            echo '```'
+            echo ""
+            echo "**RunnerDevEnvDO** (hand-pin this digest before restoring its Wrangler container entry)"
+            echo '```'
+            echo "${{ steps.devenv.outputs.ref }}"
             echo '```'
           } >> "${GITHUB_STEP_SUMMARY}"
