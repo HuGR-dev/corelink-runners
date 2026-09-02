@@ -90,6 +90,24 @@ run_negative_case INTEGRATION_MISSING \
   integrations/fixture/action.yml \
   "runs: echo \${${au_prefix}INTEGRATION_MISSING}"
 
+# Real-world names must be classified by their credential suffix even when
+# they do not carry a CORELINK/FABRIC/GITHUB prefix.  In particular, removing
+# this inventory entry must fail for the cold-organic tenant PAT binding.
+real_name='COLD_ORGANIC_TENANT_PAT'
+reset_fixture deploy/fixture/src/index.ts \
+  "const token = env.${real_name};" 1 "${real_name}"
+expect_pass COLD_ORGANIC_TENANT_PAT_PRESENT
+reset_fixture deploy/fixture/src/index.ts \
+  "const token = env.${real_name};" 0 "${real_name}"
+expect_fail COLD_ORGANIC_TENANT_PAT_MISSING
+
+# A near miss must remain ordinary application configuration rather than
+# broadening the matcher to every uppercase environment variable.
+near_miss='COLD_ORGANIC_TENANT_PATS'
+reset_fixture deploy/fixture/src/index.ts \
+  "const token = env.${near_miss};" 0 "${near_miss}"
+expect_pass COLD_ORGANIC_TENANT_PATS_NEAR_MISS
+
 # Inventory-only drift is also an error.
 stale_name="${au_prefix}STALE_INVENTORY"
 reset_fixture docs/runbook/fixture.txt "fixture" 1 "${stale_name}"
