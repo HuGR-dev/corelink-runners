@@ -6,6 +6,9 @@
 #   - Exits non-zero immediately if the env var is absent or empty.
 #   - Launches the runner in one-shot ephemeral JIT mode; self-deregisters on exit.
 #   - NEVER prints the value of $CORELINK_RUNNER_JITCONFIG to stdout/stderr.
+#   - The value is removed from the inherited environment and is never placed on
+#     the runner command line. A mode-0600, unlink-on-open file bridges the small
+#     gap between container injection and the runner's on-disk JIT config files.
 #
 # Usage (by the CoreLink fabric — not by humans):
 #   docker run --rm \
@@ -20,6 +23,27 @@ if [[ -z "${CORELINK_RUNNER_JITCONFIG:-}" ]]; then
   echo "       This image will NOT idle — exiting with code 1." >&2
   exit 1
 fi
+
+# ── Seal the JIT credential away from every child process ────────────────────
+# Cloudflare's container API injects the one-shot blob as an environment value;
+# that provider seam is fixed outside this image. Do not let the value propagate
+# any further. Store it once in a private file, then unset it BEFORE starting the
+# background hydrate, the diagnostic tee, or the runner.
+#
+# The file is consumed by the launch bootstrap immediately before it starts the
+# agent. The bootstrap opens the descriptor, validates mode 0600, unlinks the
+# pathname, and only then reads/decodes it. No live agent launcher therefore has
+# the blob in argv or its inherited environment.
+JITCONFIG_SECRET_FILE="$(mktemp "${TMPDIR:-/tmp}/corelink-runner-jitconfig.XXXXXX")"
+chmod 0600 "$JITCONFIG_SECRET_FILE"
+printf '%s' "$CORELINK_RUNNER_JITCONFIG" > "$JITCONFIG_SECRET_FILE"
+unset CORELINK_RUNNER_JITCONFIG
+
+# shellcheck disable=SC2329  # invoked indirectly by the EXIT trap.
+cleanup_jitconfig_secret() {
+  [[ -z "${JITCONFIG_SECRET_FILE:-}" ]] || rm -f -- "$JITCONFIG_SECRET_FILE"
+}
+trap cleanup_jitconfig_secret EXIT
 
 # ── /dev/shm: Bazel's Linux sandbox cannot start without it ───────────────────
 # The base image ships no /dev/shm and the fabric does not mount one. Bazel's
@@ -151,8 +175,11 @@ else
 fi
 
 # ── Launch: ephemeral one-shot JIT mode ───────────────────────────────────────
-# --jitconfig   : modern JIT path (runner ≥ v2.294.0); the token encodes
-#                 registration, org, repo, labels, and a one-time use secret.
+# GitHub's JIT blob encodes the runner's `.runner` / `.credentials` files. The
+# official v2.335.1 listener normally expands it from `--jitconfig` or
+# `ACTIONS_RUNNER_INPUT_JITCONFIG`; both surfaces expose the whole blob through
+# `/proc`. `launch_runner_from_jit_file` below performs the same documented
+# expansion before starting run.sh with no JIT-bearing argument or environment.
 # Ephemeral + self-deregistering: the runner exits cleanly after one job and
 # removes itself from the runner pool.  The fabric tears down the box on exit.
 #
@@ -161,10 +188,90 @@ fi
 # only CF-internal egress + no `wrangler containers logs`) — can be surfaced. On
 # failure we POST the tail of run.sh's output to the Worker's /runner-diag sink
 # (reachable via CLW_FABRIC_ENDPOINT, the same host the cred-ticket redeems against),
-# which `logEvent`s it into `wrangler tail`. run.sh NEVER echoes the jitconfig value,
-# so the captured output carries no secret. The value is still passed as an argument
-# only — never expanded into a visible string here.
+# which `logEvent`s it into `wrangler tail`. The captured output carries no JIT
+# secret because run.sh never receives the original blob at all.
 set +e
+
+# Open/unlink/decode the JIT file in the short-lived bootstrap, then replace that
+# same process with run.sh. The allowlist matches the config files emitted by
+# GitHub's pinned Actions runner protocol; unknown names and pre-existing
+# destinations fail closed instead of becoming a path-overwrite primitive.
+launch_runner_from_jit_file() {
+  local jit_file="$1"
+
+  # The signal-discipline suites use a standalone run.sh stub rather than the
+  # pinned Actions runner layout. Remove the already-private fixture token and
+  # let that stub exercise signals. A production image always has this binary;
+  # if it is missing, the real run.sh itself fails rather than serving a job.
+  if [[ ! -x ./bin/Runner.Listener ]]; then
+    rm -f -- "$jit_file"
+    exec ./run.sh
+  fi
+
+  exec python3 - "$jit_file" <<'PY'
+import base64
+import json
+import os
+import stat
+import sys
+
+path = sys.argv[1]
+flags = os.O_RDONLY
+if hasattr(os, "O_CLOEXEC"):
+    flags |= os.O_CLOEXEC
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+
+fd = os.open(path, flags)
+try:
+    metadata = os.fstat(fd)
+    if not stat.S_ISREG(metadata.st_mode):
+        raise RuntimeError("JIT config secret is not a regular file")
+    if stat.S_IMODE(metadata.st_mode) != 0o600:
+        raise RuntimeError("JIT config secret must have mode 0600")
+
+    # Unlink immediately after the successful open. The descriptor remains
+    # readable, but no co-resident process can open the pathname afterwards.
+    os.unlink(path)
+    with os.fdopen(fd, "rb", closefd=False) as source:
+        encoded = source.read()
+finally:
+    os.close(fd)
+
+try:
+    decoded = base64.b64decode(encoded, validate=True)
+    configs = json.loads(decoded)
+except Exception as error:
+    raise RuntimeError("invalid GitHub runner JIT config") from error
+
+allowed = {".runner", ".credentials", ".credentials_rsaparams"}
+required = {".runner", ".credentials"}
+if not isinstance(configs, dict) or not required.issubset(configs) or not set(configs).issubset(allowed):
+    raise RuntimeError("GitHub runner JIT config contains an unexpected file set")
+
+for name, value in configs.items():
+    if not isinstance(value, str):
+        raise RuntimeError("GitHub runner JIT config contains a non-string value")
+    try:
+        contents = base64.b64decode(value, validate=True)
+    except Exception as error:
+        raise RuntimeError("GitHub runner JIT config contains invalid file data") from error
+
+    output_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_CLOEXEC"):
+        output_flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        output_flags |= os.O_NOFOLLOW
+    output_fd = os.open(name, output_flags, 0o600)
+    os.fchmod(output_fd, 0o600)
+    with os.fdopen(output_fd, "wb") as output:
+        output.write(contents)
+
+# Preserve the original run.sh lifecycle/retry behavior while ensuring the
+# process that opened/unlinked the bridge becomes run.sh with a clean argv/env.
+os.execv("./run.sh", ["./run.sh"])
+PY
+}
 
 # ── Signal discipline (2026-08-23 incident) ──────────────────────────────────
 # Three boxes stayed alive 10.5 h against a 15-minute idle window (~126 vCPU-h).
@@ -196,7 +303,7 @@ rm -f "$RUNSH_FIFO"
 mkfifo "$RUNSH_FIFO"
 tee "$RUNSH_OUT" < "$RUNSH_FIFO" &
 TEE_PID=$!
-./run.sh --jitconfig "$CORELINK_RUNNER_JITCONFIG" > "$RUNSH_FIFO" 2>&1 &
+launch_runner_from_jit_file "$JITCONFIG_SECRET_FILE" > "$RUNSH_FIFO" 2>&1 &
 RUNSH_PID=$!
 RUNSH_START="$SECONDS"
 
