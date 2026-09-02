@@ -134,6 +134,28 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
       expect(runningStatus.containerHandle).toBe("mock-do-tenant-123");
     });
 
+    it("rejects an invalid start payload before it can mutate the DevEnv state", async () => {
+      const doInstance = new RunnerDevEnvDO(mockCtx, mockEnv);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      await expect(doInstance.startDevenv({
+        config: {
+          workspaceName: "invalid/workspace",
+          profileName: "default",
+          tier: "standard-4",
+          clwEndpoint: "https://corelink-api.humangr.com",
+          clwTenant: "ee30f7ba-fc25-4d71-939e-ebe130b4c6a3",
+          clwToken: "cl_pat_1234567890abcdef1234567890",
+        },
+      })).rejects.toThrow();
+
+      expect(await doInstance.getStatus()).toMatchObject({
+        status: "stopped",
+        workspaceName: null,
+      });
+      expect((doInstance as any).envVars).toEqual({});
+    });
+
     it("executes snapshot on running container", async () => {
       const doInstance = new RunnerDevEnvDO(mockCtx, mockEnv);
       await doInstance.startDevenv({
