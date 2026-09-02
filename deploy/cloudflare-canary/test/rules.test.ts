@@ -120,6 +120,22 @@ describe("surface posture rule", () => {
     const posture = evaluate(null, cur, cfg).alerts.filter((x) => x.key.startsWith("auth:") || x.key.startsWith("status:") || x.key.startsWith("unreachable:"));
     expect(posture).toHaveLength(0);
   });
+
+  it("alerts on 404 when the counter surface was configured", () => {
+    const cur = snap({ spawn: surface({}, 404) });
+    cur.spawn.configured = true;
+    const a = evaluate(null, cur, cfg).alerts.find((x) => x.key === "status:spawn");
+    expect(a?.severity).toBe("warn");
+    expect(a?.title).toContain("while configured");
+  });
+
+  it("alerts on a typed invalid 200 body", () => {
+    const cur = snap({
+      fabric: { reachable: true, status: 200, counters: {}, failure: { code: "invalid_body", detail: "empty" } },
+    });
+    const a = evaluate(null, cur, cfg).alerts.find((x) => x.key === "invalid:fabric:invalid_body");
+    expect(a?.severity).toBe("critical");
+  });
   it("fires WARN on 401 (key mismatch)", () => {
     const cur = snap({ fabric: surface({}, 401) });
     const a = evaluate(null, cur, cfg).alerts.find((x) => x.key === "auth:fabric");

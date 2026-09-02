@@ -6,6 +6,23 @@ worker names, endpoints, header names, and KV bindings are the live ones, not
 invented. Run the read-only probes first; they tell you which surface is sick
 before you touch anything.
 
+**Safety invariant:** diagnosis is read-only. Do not deploy, restart, delete a
+container/KV key, roll an image, rotate a secret, or change an arm flag to learn
+what is wrong. Those are recovery mutations with blast radius. Use one only after
+an accountable owner approves a fixed preflight, monitoring, success criteria,
+and rollback. The fabricd PG containment is the exact tracked
+`FABRIC_PG_DISABLED="1"`; `DATABASE_URL` alone never arms PG. Canary containment
+is a separate surface and is outside this playbook's fabricd procedures.
+
+Read-only is not automatically non-waking. A request to the fabricd Worker,
+including `/`, `/health`, `/v1/health`, `/v1/usage`, or an internal status route,
+may instantiate or wake the singleton. While containment or scale-to-zero is the
+objective, begin with provider control-plane reads (`wrangler versions view` and
+container application/instance inventory) and do not call application routes.
+Route probes below are allowed only for an already-active service or as an
+explicit post-change validation whose possible wake is inside the approved blast
+radius.
+
 All commands assume `npx wrangler` from inside the relevant worker directory
 (`deploy/cloudflare/` or `deploy/cloudflare-fabricd/`) so the `wrangler.jsonc`
 bindings resolve. The Cloudflare account is `6a1fc1c626fc2628823e60b9db01f5cd`
@@ -39,6 +56,7 @@ ADR-0008 moat win); fabricd is only the control-plane host.
 ```sh
 HOST="https://corelink-fabricd.gmhelmold.workers.dev"
 
+# WAKE-CAPABLE: post-change/already-active validation only; never idle containment diagnosis.
 # Liveness — auth-free, expected 200 body "ok". Also answers on / and /health
 # (the CF container health probe hits /, so those routes must 200 — see §2).
 curl -s -o /dev/null -w '%{http_code}\n' $HOST/v1/health          # → 200
@@ -47,8 +65,11 @@ curl -s -o /dev/null -w '%{http_code}\n' $HOST/v1/health          # → 200
 curl -s $HOST/v1/attestation/key                                  # → key_id faa5b7726ccd2c52...
 ```
 
-A `/v1/health` timeout or non-200 = the singleton is hung or mid-cold-boot. Go
-to §2 (watchdog / force restart).
+A `/v1/health` result is a point-in-time liveness observation, not a backend or
+deployment proof, and the request itself may wake the singleton. A timeout/non-200
+may mean a cold boot, saturation, placement, startup failure, or an actual hang.
+Capture the control-plane evidence in §2; do not repeat the route probe, restart,
+or deploy to classify it.
 
 ### 1b. fabricd golden counters + occupancy (gated)
 
@@ -73,7 +94,7 @@ curl -s -H "X-Corelink-Internal-Auth: $OBS_KEY" $HOST/internal/v1/occupancy | jq
 |---|---|---|
 | `leases_acquired` | climbs steadily | flat while jobs are queued → admission is refusing (check the `acquire_rejected_*` split) |
 | `acquire_rejected_over_cap` / `acquire_rejected_no_plan` | 0 or slow | spiking → tenant hit its concurrency cap, or has no plan on file (see §3d) |
-| `acquire_rejected_compute_ceiling` | 0 | spiking → monthly vCPU-h ceiling reached (only arms with `DATABASE_URL`) |
+| `acquire_rejected_compute_ceiling` | 0 | spiking → monthly vCPU-h ceiling reached (PG path requires non-empty `DATABASE_URL` **and** exact `FABRIC_PG_DISABLED="0"`) |
 | `mint_attempts` vs `mint_failures` | failures ≈ 0 | `mint_failures` climbing = the **silent-cold-hydration** seam: CAS PATs aren't minting, jobs run cold |
 | `revoke_attempts` vs `revoke_failures` | failures ≈ 0 | `revoke_failures` climbing = PATs are surviving to TTL self-expiry, not being revoked (see §3b) |
 | `leases_crashed` | ~0 | rising = boxes dying under leases (reaper reclaiming Held→Crashed) |
@@ -118,17 +139,21 @@ metrics reset means the DO was migrated/wiped, which is unusual and worth noting
 
 ---
 
-## 2. fabricd is a singleton — how it self-heals and how to restart it
+## 2. fabricd singleton — observe the watchdog, then escalate
 
 The control plane runs as **ONE** container: `max_instances: 1` + a fixed DO id
 in `src/index.ts`, because the in-memory lease ledger requires every `/v1`
 request to hit the SAME process. This is deliberate (raising N is a separate
 owner-gated flip — see the RAISE-N handoff). Two consequences you must know at 3am:
 
-### 2a. The watchdog self-heals a hung singleton (no human needed for the common case)
+### 2a. The activity-gated watchdog
 
 The proxy Worker's `scheduled()` cron runs **every minute** (`* * * * *`,
-`wrangler.jsonc` `triggers.crons`). It:
+`wrangler.jsonc` `triggers.crons`). The schedule is not a 24/7 keep-warm promise.
+For each shard it first reads the container-free activity marker; an idle,
+missing, malformed, future, or unreadable marker refuses the `/v1/health` probe,
+so uncertainty cannot wake the container. Only a recent valid marker permits it
+to:
 
 1. Probes each shard's `http://fabricd/v1/health` (source: `src/index.ts` ~L545).
 2. **Requires 3 consecutive failures** (`PROBES = 3`, ~30s of misses) before
@@ -137,35 +162,23 @@ The proxy Worker's `scheduled()` cron runs **every minute** (`* * * * *`,
 3. On 3 consecutive failures it calls `container.destroy()`. A **fresh instance
    cold-boots on the next request** — no manual step.
 
-The same cron is the **keep-warm**: pinging `/v1/health` each minute stops the
-container ever hitting `sleepAfter` (`1h`). So a healthy singleton never sleeps.
+An idle container is expected to reach `sleepAfter`; the cron must not wake it.
+For an active shard with failures, collect the timestamped watchdog events and
+instance state for ~2–3 ticks. A `keep-warm[...]` prefix is a legacy log label,
+not evidence that 24/7 warming is enabled. If recovery does not occur, escalate
+with that evidence. Do not force a restart as a diagnostic experiment.
 
-**If `/v1/health` is failing but the watchdog hasn't recovered it:** give it
-~2–3 cron ticks (up to ~3 min). Watch `wrangler tail` for the
-`keep-warm[shard 0/1]: ... destroying hung shard` line. If it never fires, or
-the fresh boot also fails, force a restart (§2b) and check the boot log.
+### 2b. Restart/rollout is an approved recovery change, not diagnosis
 
-### 2b. Force a restart (rollout a new image digest)
-
-The singleton reads its env **only at boot**. Saving a secret/var alone does NOT
-restart it. The mechanism to force a true restart (and to pick up freshly-set
-secrets) is a **container rollout**, triggered by changing the image digest in
-`deploy/cloudflare-fabricd/wrangler.jsonc` and running `wrangler deploy`:
-
-```sh
-cd deploy/cloudflare-fabricd
-# The image is pinned by @sha256 digest in wrangler.jsonc (containers[].image).
-# A config-only change may NOT roll the container; a NEW digest always does.
-# To rebuild the binary (needs a Docker host): npx wrangler containers build <repo-root> \
-#   -t corelink-fabricd-fabricdcontainer:<tag> --push  → take the pushed @sha256 digest.
-npx wrangler deploy
-```
-
-To confirm the live image / instance after a rollout:
-
-```sh
-npx wrangler containers info    # shows the running image digest
-```
+The singleton reads its env only at boot, but that does not make a restart a
+safe probe. Before any rollout, the incident owner must record the exact current
+version/config, affected workloads, reason the read-only evidence supports the
+change, monitor queries, success threshold, timeout, and rollback version. For a
+PG arm-state change, follow
+[`arm-fabricd-pg-ledger-vcpu-ceiling.md`](./arm-fabricd-pg-ledger-vcpu-ceiling.md):
+exact `FABRIC_PG_DISABLED="0"` is necessary but not sufficient, and rollback
+restores exact `"1"` first. Container delete, image rollout, and deploy must not
+be improvised from this section.
 
 **"How many containers are actually running?"** — don't use the `instances`
 field on `GET .../containers/applications`; it's a health-block sum, not a
@@ -183,9 +196,11 @@ or `rhandle:` keys in `RUNNER_JOB_PATS` matched any running instance name. So
 `POST /v1/teardown` with an instance name resolves `idFromName()` to a fresh,
 unrelated stub, destroys nothing, and still returns `204`. **A silent no-op that
 looks like success is the worst possible thing to hand someone mid-incident.**
-Until a mapping exists, the only lever that reliably removes a running box is a
-container image roll — which is also what finally cleared the three boxes leaked
-on 2026-08-23, and which kills in-flight jobs on every other box as a side effect.
+Until a mapping exists, a container image roll has been observed to remove
+running boxes, but it also kills in-flight jobs on every other box. That dated
+2026-08-23 recovery is not a standard diagnostic or cleanup procedure. Treat a
+roll as a destructive, owner-approved last resort with the full fleet blast
+radius declared in advance.
 The fix for this — enumerable, validatable DO names, so a bogus handle can be
 told apart from a real one — is specified but **not implemented**:
 [ADR-0010](../adr/0010-enumerable-runner-do-names.md), status
@@ -193,10 +208,12 @@ told apart from a real one — is specified but **not implemented**:
 
 **In-memory counters reset on every restart** — `leases_acquired`,
 `mint_attempts`, etc. all go back to 0. That is expected and NOT data loss.
-**Lease STATE persists only if `DATABASE_URL` (pg ledger) is set** — otherwise
-the in-memory ledger also resets and any Held leases are forgotten (acceptable
-at dogfood; the reaper/box teardown reconciles). The keep-warm counter starting
-back at `...0001` is the diagnostic that a real restart happened.
+**Lease STATE persists only when both PG gates are active:** non-empty
+`DATABASE_URL` and byte-exact `FABRIC_PG_DISABLED="0"`. `DATABASE_URL` alone
+never arms the durable ledger. Under the current exact `"1"` containment, the
+in-memory ledger resets and Held leases are forgotten on restart. Use version,
+instance, and timestamp evidence to establish a restart; a log counter alone is
+not sufficient.
 
 ---
 
@@ -218,7 +235,7 @@ the same namespace: `conc:<tenant>:<jobId>` (tenant concurrency slots),
 `jtenant:<jobId>` / job-handle / bare `<jobId>` (job→pat_id map), `complete:<jobId>`
 (completion idempotency), `ghtok:<installationId>` (App-token cache).
 
-**Inspect + unblock** (run from `deploy/cloudflare/` so the binding resolves):
+**Inspect read-only first** (run from `deploy/cloudflare/` so the binding resolves):
 
 ```sh
 cd deploy/cloudflare
@@ -229,15 +246,15 @@ npx wrangler kv key list --binding RUNNER_JOB_PATS | jq -r '.[].name' | grep '^s
 # 2. Confirm the specific job is stuck (value is just "1").
 npx wrangler kv key get "spawn:<JOB_ID>" --binding RUNNER_JOB_PATS
 
-# 3. Delete the leaked claim → the next reconciler tick (≤1 min) re-drives it.
-npx wrangler kv key delete "spawn:<JOB_ID>" --binding RUNNER_JOB_PATS
 ```
 
 (If your wrangler version rejects `--binding` for `kv key`, substitute
 `--namespace-id 4fb7e9c773d64f83ae3415c5a0879d66`.)
 
-The claim self-heals after the 7200s TTL anyway, but deleting it unblocks the
-job immediately. `wrangler tail` on the spawn-worker will show the re-drive.
+The claim self-heals after the 7200s TTL. Deleting it is a state mutation, not a
+diagnostic step: require explicit incident-owner approval, confirm the exact key,
+record its value/TTL and affected job first, then monitor the reconciler re-drive.
+This playbook intentionally does not provide a copy-paste delete command.
 
 ### 3b. Orphaned CAS PATs (revoke didn't run)
 
@@ -286,10 +303,12 @@ Walk it in this order:
   `over_cap` deliberately): the tenant has zero purchased concurrency. This is a
   billing/onboarding gap, not an outage.
 - **Compute ceiling** — `acquire_rejected_compute_ceiling`: the monthly vCPU-h
-  ceiling (only arms when `DATABASE_URL` is set). Owner decision to raise.
+  ceiling (PG path requires non-empty `DATABASE_URL` plus exact
+  `FABRIC_PG_DISABLED="0"`). Owner decision to raise.
 - **Box backend full** — provision capacity-503: the spawn-worker's container
-  `max_instances` (runner=6, check-host=4 in `wrangler.jsonc`) is saturated. Raise
-  `max_instances` + `wrangler deploy` if the account has room (PAYG, ample).
+  `max_instances` (runner=6, check-host=4 in `wrangler.jsonc`) is saturated. A
+  capacity change requires owner approval, a cost bound, monitored rollout, and
+  rollback; do not raise and deploy merely to test this hypothesis.
 
 ---
 
@@ -337,9 +356,9 @@ curl -s -X POST -H "Authorization: Bearer $JWT" -H "Accept: application/vnd.gith
   https://api.github.com/app/installations/150584374/access_tokens | jq 'keys'
 ```
 
-A 201 with a `token` field = the App credential is healthy. A 401 = the private
-key is wrong/rotated/mangled (re-set `GITHUB_APP_PRIVATE_KEY`, PKCS#8, then
-`wrangler deploy`). A 404 = the installation id is wrong.
+A 201 with a `token` field proves that bounded exchange at that timestamp. A 401
+supports investigating a wrong/rotated/mangled private key; it does not authorize
+a secret mutation or deploy. A 404 supports investigating the installation id.
 
 ### 4c. The webhook route + how to inspect deliveries
 
@@ -384,9 +403,10 @@ If dogfood suddenly spawns COLD, check that map matches
   the `cloud_backend_status` line — it will never claim a backend it isn't running.
 - **`wrangler tail`** on either worker is the live log. Both have
   `observability.enabled: true`.
-- The fabricd **boot guard `validate_mint_arm` fails closed**: if the moat mint is
-  armed without `FABRIC_PUBLIC_BASE_URL`, the container refuses to boot healthy —
-  so a healthy `/v1/health` proves the cred-redemption endpoint is wired.
+- The fabricd **boot guard `validate_mint_arm` fails closed** if the moat mint is
+  armed without `FABRIC_PUBLIC_BASE_URL`. A `/v1/health` 200 is still only a
+  liveness/config-consistency signal; it does not prove current image identity or
+  a successful end-to-end credential redemption.
 
 **Code + doc references:**
 - Spawn-worker: [`deploy/cloudflare/src/index.ts`](../../deploy/cloudflare/src/index.ts),
