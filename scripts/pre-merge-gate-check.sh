@@ -164,6 +164,11 @@ if [ -n "$ADMIN_REASON" ] && [ "$MODE" != "merge" ]; then
   exit 2
 fi
 
+if [ "$DRY_RUN" -eq 1 ] && [ "$MODE" != "merge" ]; then
+  echo "  ⛔ --dry-run is only meaningful with --merge." >&2
+  exit 2
+fi
+
 # ── The pipe footgun, named on stderr ─────────────────────────────────────────
 # `[ -t 1 ]` is false exactly when the caller piped or redirected stdout, i.e.
 # in the `… | tail -3 && gh pr merge …` shape that produced the #1049 incident.

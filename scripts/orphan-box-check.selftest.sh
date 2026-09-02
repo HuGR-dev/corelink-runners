@@ -147,19 +147,61 @@ run_case "long-lived service classes ⇒ no page" 0 "$WORK/services.json"
 run_case "service class, pattern widened ⇒ page" 1 "$WORK/services.json" \
   --app-pattern '.'
 
-# ── Case 11: LIVE-mode token resolution ─────────────────────────────────────
-# These run WITHOUT --instances-json, i.e. down the real credential path, but
-# they are still prod-safe: cases (a) and (b) never reach the network, and (c)
-# only ever issues a GET that the API rejects. Nothing is mutated in any of them.
+# ── Cases 11–12: live-mode token/pagination paths, with an offline API ───────
+# These run WITHOUT --instances-json, i.e. down the real credential path and
+# through the real container-instances.sh counter. A fake curl is placed first
+# on PATH so no request can leave this process. This keeps the test deterministic
+# and still exercises auth failure and the single-page truncation guard.
 #
 # The load-bearing assertion is that every one of these is exit 2 ("cannot
 # check") and NOT exit 0. A sweep that cannot authenticate and then reports
 # nothing is silent success — the defect class this whole check exists to end.
+FAKE_BIN="$WORK/bin"
+mkdir -p "$FAKE_BIN"
+cat > "$FAKE_BIN/curl" <<'CURL'
+#!/usr/bin/env bash
+set -euo pipefail
+
+output=""
+url=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) output="$2"; shift 2 ;;
+    -w) shift 2 ;;
+    -*) shift ;;
+    *)  url="$1"; shift ;;
+  esac
+done
+[ -n "$output" ] || { echo "fake curl: missing -o" >&2; exit 97; }
+
+if [ "${FAKE_CF_MODE:-reject}" = "reject" ]; then
+  printf '%s\n' '{"success":false,"errors":[{"code":9106,"message":"Authentication failed"}]}' >"$output"
+  printf '400'
+  exit 0
+fi
+
+case "$url" in
+  */containers/applications)
+    printf '%s\n' '{"success":true,"result":[{"id":"app-runner","name":"corelink-spawn-worker-runnercontainer"}],"result_info":{}}' >"$output"
+    printf '200'
+    ;;
+  */containers/applications/app-runner/instances\?per_page=1)
+    printf '%s\n' '{"success":true,"result":{"instances":[{"id":"i-truncated","name":"truncated","location":{"name":"ewr"},"started_at":"2026-09-01T00:00:00.000000Z","created_at":"2026-09-01T00:00:00.000000Z","image":"runner:test","status":{"state":"running"}}]},"result_info":{"next_page_token":"more"}}' >"$output"
+    printf '200'
+    ;;
+  *)
+    printf '%s\n' '{"success":false,"errors":[{"code":1000,"message":"unexpected fake request"}]}' >"$output"
+    printf '500'
+    ;;
+esac
+CURL
+chmod +x "$FAKE_BIN/curl"
+
 live_case() {
   local name="$1" expected="$2"; shift 2
   local out rc
   set +e
-  out="$(env "$@" "$TARGET" 2>&1)"
+  out="$(env "$@" PATH="$FAKE_BIN:$PATH" "$TARGET" 2>&1)"
   rc=$?
   set -e
   if [ "$rc" -eq "$expected" ]; then
@@ -179,8 +221,8 @@ live_case "no token at all ⇒ exit 2, not a false clean" 2 \
 live_case "no account id ⇒ exit 2" 2 \
   -u CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN=irrelevant
 
-# A token the API rejects must be exit 2. Uses a syntactically valid but bogus
-# value against the real endpoint: one GET, 401/403, nothing touched.
+# A token the API rejects must be exit 2. The fake API returns Cloudflare's
+# authentication-error shape (HTTP 400/code 9106), without network.
 live_case "rejected token ⇒ exit 2, not a false clean" 2 \
   -u CLOUDFLARE_CONTAINERS_API_TOKEN \
   CLOUDFLARE_ACCOUNT_ID=6a1fc1c626fc2628823e60b9db01f5cd \
@@ -188,15 +230,13 @@ live_case "rejected token ⇒ exit 2, not a false clean" 2 \
 
 # ── Case 12: a truncated page must be exit 2, never CLEAN ───────────────────
 # Truncation is the one failure that would silently hide the orphan that matters
-# — the one past the cap. Forcing per_page below the account's record count
-# reproduces it exactly, and is still just a GET. Skipped when no credential is
-# available (it needs the real API to produce a real next_page_token).
-if [ -n "${CLOUDFLARE_CONTAINERS_API_TOKEN:-}${CLOUDFLARE_API_TOKEN:-}" ] && [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
-  live_case "truncated page ⇒ exit 2, not a false clean" 2 \
-    CONTAINER_INSTANCES_PER_PAGE=1
-else
-  echo "SKIP  truncated page ⇒ exit 2  (no Cloudflare credential in the environment)"
-fi
+# — the one past the cap. The fake API returns a next_page_token after the
+# requested single page, so the test stays deterministic and offline.
+live_case "truncated page ⇒ exit 2, not a false clean" 2 \
+  FAKE_CF_MODE=truncated \
+  CLOUDFLARE_CONTAINERS_API_TOKEN=offline-test-token \
+  CLOUDFLARE_ACCOUNT_ID=6a1fc1c626fc2628823e60b9db01f5cd \
+  CONTAINER_INSTANCES_PER_PAGE=1
 
 echo
 echo "selftest: ${pass_count} passed, ${fail_count} failed"
