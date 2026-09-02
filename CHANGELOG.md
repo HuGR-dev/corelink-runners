@@ -7,7 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### 2026-09-01 — go-live plan Round 12 remains 7/8 NOT QUIET; repair in progress
+### 2026-09-01 — go-live plan Round 13 is 8/8 NOT QUIET; provenance repair only
+
+Round 13 reviewed the exact clean committed input
+`b3371e8b6e9803d0ceac3b5df2677366b37aad1b`: **8/8 NOT QUIET, quiet count 0**. Local
+reproductions of CI, Plan integrity and DCO passed on those bytes, including the 131-corruption
+negative selftest, but this is not remote CI evidence. The organization Actions budget boundary
+produced zero-job `startup_failure` suites for incident PR #531: GitHub must create a job before a
+self-hosted CoreLink runner can receive it. No jobless suite or local PASS supplies green, freeze,
+dispatch or merge credit.
+
+The latest read-only containment configuration observation remains
+`2026-09-01T22:40:33Z`: fabricd version `40bf22a4-6c48-467d-9844-b4fc33e7a3ee` had
+`FABRIC_PG_DISABLED=1`, canary version `852277c1-9778-459f-b1ff-9d56fbe7c32f` had
+`FABRIC_PROBES_ENABLED=0`, and fabricd was **0 running / 3 inactive**. The subsequent
+`2026-09-01T22:48:57Z` runner inventory contained **883 inactive / zero live** records. These
+timestamped observations are not immutable review evidence or authorization for a later live
+action. Incident-branch commits `51b9cb8` and `243e2e1` remain local, unpushed and undeployed.
+
+This post-review provenance/operations repair is a new input and inherits no quiet credit. Status
+remains **QUIET COUNT 0 · NOT FROZEN · NO AU PROMOTION · NO DISPATCH · NO GREEN CREDIT**.
+No push, deploy, rearm, promotion, freeze or dispatch is authorized.
+
+### 2026-09-01 — go-live plan Round 12 was 7/8 NOT QUIET; repair sealed for Round 13
 
 Round 12 reviewed the exact committed input
 `3d1ed13bb1d53af6ce27385736f19d54bb5f90cc`: **7/8 NOT QUIET, 1/8 QUIET, quiet count 0**.
@@ -19,23 +41,21 @@ contradictions; stale triage doctrine; producer ACK test-cycle coverage; signer-
 fabricd idle no-wake behavior; canary fail-visible behavior; exact-`0` PG-flag enablement;
 O-CFRATE; and checker exclusion/workflow false-PASS paths.
 
-The Round-12 repair cycle is **IN PROGRESS**. Its later repair tree is distinct from the reviewed
-input and has no SHA asserted by this entry; no review result transfers to an unqualified `HEAD`.
+The Round-12 repair cycle was sealed as clean DCO commit
+`b3371e8b6e9803d0ceac3b5df2677366b37aad1b`, the exact Round-13 input. No Round-12 review result
+transferred to those later bytes; Round 13 independently returned 8/8 NOT QUIET.
 The status remains **QUIET COUNT 0 · NOT FROZEN · NO AU PROMOTION · NO DISPATCH · NO GREEN
 CREDIT**. The repaired checker blocks **131 meaningful corruptions (66 prior + 65 Round-12/
-repair-audit mutations)** on the dirty repair tree. This structural diagnostic is not a review result and gains no
-quiet or readiness credit until sealed to a clean full SHA. A read-only containment
-check at `2026-09-01T21:14:17Z` found
-fabricd `0/3` active, with `FABRIC_PG_DISABLED=1` and `FABRIC_PROBES_ENABLED=0`; PR #530's
-source-only merge is `65540af`. No promotion, freeze, dispatch, green credit or live re-enable is
-authorized by this review.
-A newer read-only `versions view` observation at `2026-09-01T22:40:33Z` confirmed fabricd version
+repair-audit mutations)** on the clean committed Round-13 input. This local structural diagnostic is
+not remote CI or review evidence. A read-only `versions view` observation at
+`2026-09-01T22:40:33Z` recorded fabricd version
 `40bf22a4-6c48-467d-9844-b4fc33e7a3ee` with `FABRIC_PG_DISABLED=1` and canary version
 `852277c1-9778-459f-b1ff-9d56fbe7c32f` with `FABRIC_PROBES_ENABLED=0`. Detailed instances showed
 fabricd **0 running / 3 inactive** and the runner fleet **0 running / 865 inactive / 18 stopped**;
 the app summary's `LIVE INSTANCES` field was not used as state. No health/status/deploy/restart/
-delete/rearm operation occurred. This is a version-view observation recorded here without a
-standalone version-bound artifact.
+delete/rearm operation occurred. The later runner-only observation at `2026-09-01T22:48:57Z`
+recorded **883 inactive / zero live**. Neither observation is an immutable review artifact or
+authorization for a later action.
 
 ### 2026-09-01 — go-live plan Round 11 remains 5/8 NOT QUIET; repair in progress
 
