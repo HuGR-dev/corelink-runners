@@ -28,7 +28,7 @@ INV = {f"INV-{i}" for i in range(1, 9)}
 # structural gate. Update this digest only with an explicitly reviewed contract
 # revision and a matching negative self-test.
 T3_W17_CONTRACT_SHA256 = (
-    "b3aad07907bc92305d021165aa92d658bcb37d7a9c5708c2a57de6c390160d65"
+    "ede785af3f97311517b6ec58f8956340dc924fa9978821c881ec1f0c2bc85520"
 )
 
 # WP -> (items owned, invariants live, exclusive scope, wave)
@@ -2132,6 +2132,80 @@ def normalized_contract_text(document):
     return re.sub(r"\s+", " ", plain_markdown(document)).strip()
 
 
+T3_W17_CONTRACT_INVARIANTS = {
+    "reservation-before-mutation": (
+        "before listing-derived claim release, attempt mutation, claim, drive, "
+        "jit, mint, slot, lease, start, or destroy"
+    ),
+    "held-only-reclaim": (
+        "held reservation may expire and be reclaimed only because the deciding "
+        "do transaction still observes that exact reservation state as held"
+    ),
+    "repo-job-identity-and-effect-id": (
+        "job_id must match ^[1-9][0-9]*$ and satisfy 1 <= bigint(job_id) <= "
+        "9007199254740991"
+    ),
+    "exact-redrive-effect-id": (
+        "redrive effect_id is exactly containment:v1:redrive:<repo>/<job_id> and "
+        "is stable across epoch reclaim"
+    ),
+    "reservation-apis-own-state": (
+        "reservation apis never inspect or mutate a backlog head, event claim, "
+        "or backlog recovery state"
+    ),
+    "completion-cannot-reopen": (
+        "it can never reopen or downgrade a completed reservation"
+    ),
+    "admit-unexpired-held-503": (
+        "an exact held reservation with expires_ms > now returns typed "
+        "authority-busy without writing an event, and the route returns 503 "
+        "so github retries"
+    ),
+    "admit-expired-held-atomic": (
+        "an exact held reservation with expires_ms <= now is atomically fenced "
+        "and removed, and the contained event is appended in that same "
+        "transaction; this does not depend on a scheduled tick"
+    ),
+    "stale-owner-zero-effects": (
+        "any stale owner tuple observed after that commit is a typed no-op and "
+        "touches zero kv or effect state"
+    ),
+    "completion-observed-latch": (
+        "with completion_observed = true, completeredrive transitions the "
+        "eligible record to terminal completion and removes it in that same "
+        "transaction"
+    ),
+    "completion-unobserved-tombstone": (
+        "with completion_observed = false, it changes effect_eligible -> "
+        "completed but leaves the tombstone for verified completion cleanup"
+    ),
+    "canonical-repo-job-normalizer": (
+        "one canonical fail-closed normalizerepojob(repo, job_id) is the only "
+        "normalizer for reservation identity"
+    ),
+    "normalizer-before-reservation-mutation": (
+        "admitqueued, reserveredrivecandidate, completeredrive, and "
+        "clearcompletedredrive call this normalizer before any reservation "
+        "lookup, kv read/write, or mutation"
+    ),
+    "orphan-identity-fail-closed": (
+        "before reserveredrivecandidate or any mutation, an orphan record's "
+        "repo, managed labels, and installationid are validated together"
+    ),
+}
+
+
+def validate_t3_w17_contract(document):
+    """Require named T3-W17 reservation invariants beyond the byte hash."""
+
+    normalized = normalized_contract_text(document).lower()
+    return [
+        f"T3-W17 named invariant missing: {name}"
+        for name, requirement in T3_W17_CONTRACT_INVARIANTS.items()
+        if requirement not in normalized
+    ]
+
+
 def contract_section_between(document, start, end):
     """Return one ordered contract section, or empty on missing/ambiguous markers."""
 
@@ -3266,6 +3340,8 @@ contract_path = Path(__file__).with_name("contracts") / "T3-W17.md"
 if not contract_path.is_file():
     fail.append(f"T3-W17 frozen contract missing: {contract_path}")
 else:
+    contract_document = contract_path.read_text(encoding="utf-8")
+    fail.extend(validate_t3_w17_contract(contract_document))
     contract_digest = hashlib.sha256(contract_path.read_bytes()).hexdigest()
     if contract_digest != T3_W17_CONTRACT_SHA256:
         fail.append(

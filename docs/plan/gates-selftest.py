@@ -16,9 +16,10 @@ PASS is not production, evidence, freeze, or dispatch readiness.
 
 from __future__ import annotations
 
-import subprocess
+import hashlib
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -128,6 +129,19 @@ EXPECTED_MUTATION_INVENTORY = frozenset(
         "missing-t1-w6-monitor-tuple-interlock.md",
         "missing-t3-w17-containment-evidence-scope.md",
         "t3-w17-contract-drift.md",
+        "t3-w17-reservation-api-drift.md",
+        "t3-w17-reservation-completion-reopen.md",
+        "t3-w17-reservation-identity-drift.md",
+        "t3-w17-reservation-order-drift.md",
+        "t3-w17-reservation-reclaim-drift.md",
+        "t3-w17-admit-unexpired-held-503.md",
+        "t3-w17-admit-expired-held-atomic.md",
+        "t3-w17-stale-owner-zero-effects.md",
+        "t3-w17-completion-observed-latch.md",
+        "t3-w17-completion-unobserved-tombstone.md",
+        "t3-w17-repo-job-normalizer.md",
+        "t3-w17-normalizer-before-mutation.md",
+        "t3-w17-orphan-identity-fail-closed.md",
         "missing-t3-w18-from-t1-w5.md",
         "missing-t5-w1-before-t5-w4.md",
         "missing-t6-w12-from-t1-w6.md",
@@ -382,6 +396,7 @@ def require_mirrored_wp(
     overrides: dict[Path, Path] | None = None,
     workflow: Path | None = None,
     handoff: Path | None = None,
+    contract_digest_bypass: bool = False,
 ) -> None:
     """Run wp-check against an isolated plan directory.
 
@@ -407,6 +422,27 @@ def require_mirrored_wp(
         mirrored_destination = mirror_plan / relative_destination
         mirrored_destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, mirrored_destination)
+    if contract_digest_bypass:
+        contract_override = (overrides or {}).get(PLAN_DIR / "contracts" / "T3-W17.md")
+        if contract_override is None:
+            raise AssertionError(
+                "contract digest bypass requires an overridden T3-W17 contract"
+            )
+        checker_path = mirror_plan / "wp-check.py"
+        checker_text = checker_path.read_text(encoding="utf-8")
+        mutated_digest = hashlib.sha256(contract_override.read_bytes()).hexdigest()
+        checker_text, replacements = re.subn(
+            r'(T3_W17_CONTRACT_SHA256\s*=\s*\(\s*")[0-9a-f]+(")',
+            rf"\g<1>{mutated_digest}\g<2>",
+            checker_text,
+            count=1,
+            flags=re.DOTALL,
+        )
+        if replacements != 1:
+            raise AssertionError(
+                "contract digest bypass could not update mirrored checker digest"
+            )
+        checker_path.write_text(checker_text, encoding="utf-8")
     mirror_workflows = mirror_root / ".github" / "workflows"
     mirror_workflows.mkdir(parents=True)
     shutil.copy2(
@@ -440,6 +476,12 @@ def require_mirrored_wp(
             handoff,
         )
     print(f"PASS {label}: {'accepted baseline' if should_pass else 'blocked mutation'}")
+    # Each mirrored gate invocation is self-contained. Keeping every mirror
+    # until the outer TemporaryDirectory exits made the full negative suite
+    # consume several GiB and fail with ENOSPC before reaching the later
+    # mutations. Release it immediately after its verdict; the mutation source
+    # and inventory record live outside this mirror and remain available.
+    shutil.rmtree(mirror_root)
 
 
 def require_actionlint_config_is_not_authoritative(work: Path) -> None:
@@ -2657,6 +2699,262 @@ def main() -> int:
                 False,
                 work / "t3-w17-contract-drift-mirror",
                 overrides={contract_path: contract_drift},
+            )
+
+            # The admission reservation closes a bidirectional TOCTOU: moving
+            # its check after release is an unsafe ordering that must not be a
+            # false PASS, even though the rest of the contract is unchanged.
+            reservation_order_drift = work / "t3-w17-reservation-order-drift.md"
+            reservation_order_drift.write_text(
+                replace_once(
+                    contract_path.read_text(encoding="utf-8"),
+                    "before listing-derived claim release",
+                    "after listing-derived claim release",
+                    "T3-W17 reservation-before-release ordering",
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP T3-W17 reservation ordering drift",
+                PLAN,
+                False,
+                work / "t3-w17-reservation-order-drift-mirror",
+                overrides={contract_path: reservation_order_drift},
+                contract_digest_bypass=True,
+            )
+
+            # Removing the DO-state reclaim fence would permit a time-based
+            # second effect eligibility. Keep this mutation physically
+            # distinct from the generic lease-drift fixture.
+            reservation_reclaim_drift = work / "t3-w17-reservation-reclaim-drift.md"
+            reservation_reclaim_drift.write_text(
+                replace_once(
+                    contract_path.read_text(encoding="utf-8"),
+                    "only because the deciding\n  DO transaction still observes that exact reservation state as `HELD`.",
+                    "because a timer says the reservation is old.",
+                    "T3-W17 reservation reclaim fence",
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP T3-W17 reservation reclaim fence drift",
+                PLAN,
+                False,
+                work / "t3-w17-reservation-reclaim-drift-mirror",
+                overrides={contract_path: reservation_reclaim_drift},
+                contract_digest_bypass=True,
+            )
+
+            reservation_identity_drift = work / "t3-w17-reservation-identity-drift.md"
+            reservation_identity_drift.write_text(
+                replace_once(
+                    contract_path.read_text(encoding="utf-8"),
+                    "The redrive `effect_id` is exactly",
+                    "The redrive `effect_id` is derived from",
+                    "T3-W17 exact redrive identity",
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP T3-W17 exact identity/effect-id drift",
+                PLAN,
+                False,
+                work / "t3-w17-reservation-identity-drift-mirror",
+                overrides={contract_path: reservation_identity_drift},
+                contract_digest_bypass=True,
+            )
+
+            reservation_api_drift = work / "t3-w17-reservation-api-drift.md"
+            reservation_api_drift.write_text(
+                replace_once(
+                    contract_path.read_text(encoding="utf-8"),
+                    "Reservation APIs\n  never inspect or mutate a backlog head",
+                    "Reservation APIs\n  may inspect or mutate a backlog head",
+                    "T3-W17 reservation API ownership",
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP T3-W17 reservation API/head isolation drift",
+                PLAN,
+                False,
+                work / "t3-w17-reservation-api-drift-mirror",
+                overrides={contract_path: reservation_api_drift},
+                contract_digest_bypass=True,
+            )
+
+            reservation_completion_reopen = work / "t3-w17-reservation-completion-reopen.md"
+            reservation_completion_reopen.write_text(
+                replace_once(
+                    contract_path.read_text(encoding="utf-8"),
+                    "It can never reopen or downgrade a completed reservation",
+                    "It may reopen or downgrade a completed reservation",
+                    "T3-W17 completion no-reopen fence",
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP T3-W17 completion reopen drift",
+                PLAN,
+                False,
+                work / "t3-w17-reservation-completion-reopen-mirror",
+                overrides={contract_path: reservation_completion_reopen},
+                contract_digest_bypass=True,
+            )
+
+            # Admission must distinguish an unexpired holder from an expired
+            # holder, and the expired branch must append in the fencing tx.
+            contract_text = contract_path.read_text(encoding="utf-8")
+            admission_unexpired = work / "t3-w17-admit-unexpired-held-503.md"
+            admission_unexpired.write_text(
+                replace_once(
+                    contract_text,
+                    "An exact `HELD` reservation with\n  `expires_ms > now` returns typed `authority-busy` without writing an event,\n  and the route returns 503 so GitHub retries.",
+                    "An exact `HELD` reservation with\n  `expires_ms > now` proceeds without writing an event,\n  and the route returns 202.",
+                    "T3-W17 unexpired HELD 503 invariant",
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP T3-W17 unexpired HELD returns 503",
+                PLAN,
+                False,
+                work / "t3-w17-admit-unexpired-held-503-mirror",
+                overrides={contract_path: admission_unexpired},
+                contract_digest_bypass=True,
+            )
+
+            admission_expired = work / "t3-w17-admit-expired-held-atomic.md"
+            admission_expired.write_text(
+                replace_once(
+                    contract_text,
+                    "An exact `HELD` reservation with\n  `expires_ms <= now` is atomically fenced and removed, and the contained event\n  is appended in that same transaction; this does not depend on a scheduled\n  tick.",
+                    "An exact `HELD` reservation with\n  `expires_ms <= now` is removed, and the contained event\n  is appended by a later scheduled tick.",
+                    "T3-W17 expired HELD atomic append invariant",
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP T3-W17 expired HELD append is atomic",
+                PLAN,
+                False,
+                work / "t3-w17-admit-expired-held-atomic-mirror",
+                overrides={contract_path: admission_expired},
+                contract_digest_bypass=True,
+            )
+
+            stale_owner = work / "t3-w17-stale-owner-zero-effects.md"
+            stale_owner.write_text(
+                replace_once(
+                    contract_text,
+                    "Any stale owner tuple observed after that commit is a typed no-op and\n  touches zero KV or effect state.",
+                    "Any stale owner tuple observed after that commit may continue and\n  touch effect state.",
+                    "T3-W17 stale owner zero-effects invariant",
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP T3-W17 stale owner has zero effects",
+                PLAN,
+                False,
+                work / "t3-w17-stale-owner-zero-effects-mirror",
+                overrides={contract_path: stale_owner},
+                contract_digest_bypass=True,
+            )
+
+            completion_latch = work / "t3-w17-completion-observed-latch.md"
+            completion_latch.write_text(
+                replace_once(
+                    contract_text,
+                    "With\n  `completion_observed = true`, `completeRedrive` transitions the eligible\n  record to terminal completion and removes it in that same transaction.",
+                    "With\n  `completion_observed = true`, `completeRedrive` transitions the eligible\n  record to terminal completion but leaves the tombstone.",
+                    "T3-W17 completion observed latch invariant",
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP T3-W17 completion latch removes atomically",
+                PLAN,
+                False,
+                work / "t3-w17-completion-observed-latch-mirror",
+                overrides={contract_path: completion_latch},
+                contract_digest_bypass=True,
+            )
+
+            completion_tombstone = work / "t3-w17-completion-unobserved-tombstone.md"
+            completion_tombstone.write_text(
+                replace_once(
+                    contract_text,
+                    "With\n  `completion_observed = false`, it changes `EFFECT_ELIGIBLE -> COMPLETED` but\n  leaves the tombstone for verified completion cleanup.",
+                    "With\n  `completion_observed = false`, it removes the reservation immediately.",
+                    "T3-W17 unobserved completion tombstone invariant",
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP T3-W17 unobserved completion retains tombstone",
+                PLAN,
+                False,
+                work / "t3-w17-completion-unobserved-tombstone-mirror",
+                overrides={contract_path: completion_tombstone},
+                contract_digest_bypass=True,
+            )
+
+            normalizer = work / "t3-w17-repo-job-normalizer.md"
+            normalizer.write_text(
+                replace_once(
+                    contract_text,
+                    "One canonical fail-closed `normalizeRepoJob(repo, job_id)` is the only\n  normalizer for reservation identity.",
+                    "Multiple caller-provided normalizers may be used for reservation identity.",
+                    "T3-W17 canonical repo/job normalizer invariant",
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP T3-W17 canonical repo/job normalizer",
+                PLAN,
+                False,
+                work / "t3-w17-repo-job-normalizer-mirror",
+                overrides={contract_path: normalizer},
+                contract_digest_bypass=True,
+            )
+
+            normalizer_order = work / "t3-w17-normalizer-before-mutation.md"
+            normalizer_order.write_text(
+                replace_once(
+                    contract_text,
+                    "`admitQueued`,\n  `reserveRedriveCandidate`, `completeRedrive`, and\n  `clearCompletedRedrive` call this normalizer before any reservation lookup,\n  KV read/write, or mutation;",
+                    "These APIs may perform a reservation lookup or mutation before calling\n  the normalizer;",
+                    "T3-W17 normalizer-before-mutation invariant",
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP T3-W17 normalizer precedes reservation mutation",
+                PLAN,
+                False,
+                work / "t3-w17-normalizer-before-mutation-mirror",
+                overrides={contract_path: normalizer_order},
+                contract_digest_bypass=True,
+            )
+
+            orphan_identity = work / "t3-w17-orphan-identity-fail-closed.md"
+            orphan_identity.write_text(
+                replace_once(
+                    contract_text,
+                    "before\n  `reserveRedriveCandidate` or any mutation, an orphan record's `repo`,\n  managed `labels`, and `installationId` are validated together",
+                    "after\n  `reserveRedriveCandidate` or a mutation, an orphan record's `repo`,\n  managed `labels`, and `installationId` may be validated independently",
+                    "T3-W17 orphan identity fail-closed invariant",
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP T3-W17 orphan identity validation is fail-closed",
+                PLAN,
+                False,
+                work / "t3-w17-orphan-identity-fail-closed-mirror",
+                overrides={contract_path: orphan_identity},
+                contract_digest_bypass=True,
             )
 
             t6w1_missing_scope = work / "t6w1-missing-script-scope.md"
