@@ -873,6 +873,9 @@ EVIDENCE_ARTIFACT_RE = re.compile(r"docs/plan/evidence/[A-Za-z0-9._-]+\.json")
 # These are structural dispatch contracts, not claims that the corresponding
 # implementation or production evidence is semantically sufficient.
 REQUIRED_DAG_DIRECT_PREDECESSORS = {
+    # The containment implementation consumes the reconciled immutable ledger;
+    # the staged delta must not revive its stale "no predecessor" wording.
+    "T3-W17": {"T0-W1"},
     # A deploy cannot resume while the containment proof or the fleet-busy
     # credential/force-deploy owner action is still outstanding.
     "T2-W2b": {"T3-W18", "O-FLEETBUSY", "T8-W4a", "T8-W4b"},
@@ -1022,6 +1025,13 @@ REQUIRED_DAG_SCOPE_ATOMS = {
 # provider, C1-C5 and synthetic-ingest integration without taking base delivery
 # or credential-isolation ownership.
 EXACT_DAG_SCOPE_ATOMS = {
+    "T3-W17": {
+        "deploy/cloudflare/src/index.ts",
+        "deploy/cloudflare/src/metrics.ts",
+        "deploy/cloudflare/wrangler.jsonc",
+        "deploy/cloudflare/test/containment-intake.test.ts",
+        "deploy/cloudflare/test/containment-redrive.test.ts",
+    },
     "T6-W1": {
         "scripts/orphan-box-check.selftest.sh",
         "scripts/pre-merge-gate-check.selftest.sh",
@@ -1183,6 +1193,7 @@ EXACT_DAG_SCOPE_ATOMS = {
 }
 
 EXACT_DAG_ARTIFACTS = {
+    "T3-W17": {"docs/plan/evidence/T3-W17-containment-test.json"},
     "T6-W4": {"docs/plan/evidence/T6-W4-stress-host.json"},
     "T6-W15": {"docs/plan/evidence/T6-W15-monitor-base.json"},
     "T1-W6": {"docs/plan/evidence/T1-W6-pg-durable-live.json"},

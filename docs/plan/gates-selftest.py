@@ -123,8 +123,10 @@ EXPECTED_MUTATION_INVENTORY = frozenset(
         "missing-sensitivity-receipt-isolation.md",
         "missing-signer-manifest-binding.md",
         "missing-signer-trust-tuple-field.md",
+        "missing-t0-w1-from-t3-w17.md",
         "missing-t1-w6-from-t6-w14.md",
         "missing-t1-w6-monitor-tuple-interlock.md",
+        "missing-t3-w17-containment-evidence-scope.md",
         "missing-t3-w18-from-t1-w5.md",
         "missing-t5-w1-before-t5-w4.md",
         "missing-t6-w12-from-t1-w6.md",
@@ -2580,6 +2582,51 @@ def main() -> int:
                     False,
                     dag=mutant,
                 )
+
+            # T3-W17 is the post-freeze containment implementation that
+            # consumes the reconciled immutable ledger; its T0-W1 predecessor
+            # cannot be dropped for a bare em-dash root.
+            missing_t0w1_from_t3w17 = work / "missing-t0-w1-from-t3-w17.md"
+            missing_t0w1_from_t3w17.write_text(
+                replace_in_row(
+                    dag_text,
+                    "| T3-W17 |",
+                    "T0-W1",
+                    "—",
+                    "T3-W17 T0-W1 predecessor",
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP T3-W17 missing T0-W1 predecessor",
+                PLAN,
+                False,
+                work / "missing-t0-w1-from-t3-w17-mirror",
+                overrides={DAG: missing_t0w1_from_t3w17},
+            )
+
+            # T3-W17's staged containment proof is an exact DAG artifact; the
+            # evidence scope cannot be dropped while the row still passes.
+            missing_t3w17_evidence_scope = (
+                work / "missing-t3-w17-containment-evidence-scope.md"
+            )
+            missing_t3w17_evidence_scope.write_text(
+                replace_in_row(
+                    dag_text,
+                    "| T3-W17 |",
+                    "; `docs/plan/evidence/T3-W17-containment-test.json`",
+                    "",
+                    "T3-W17 exact test evidence scope",
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP T3-W17 missing exact test evidence scope",
+                PLAN,
+                False,
+                work / "missing-t3-w17-containment-evidence-scope-mirror",
+                overrides={DAG: missing_t3w17_evidence_scope},
+            )
 
             t6w1_missing_scope = work / "t6w1-missing-script-scope.md"
             t6w1_missing_scope.write_text(

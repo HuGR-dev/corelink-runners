@@ -451,7 +451,8 @@ this introduces no new SDK/package dependency and never makes provider inventory
 `O-CFCANCEL` independently supplies the exact-handle cancellation barrier. T3-W15 consumes the
 adapter and inherits both gates through T3-W16 for its re-drive liveness decision.
 
-For staged A3.30, `T3-W17` owns the deterministic repo tests and has no live evidence credit;
+For staged A3.30, `T3-W17` is implemented only against the exact frozen contract in
+`docs/plan/contracts/T3-W17.md`, owns the deterministic repo tests and has no live evidence credit;
 `T3-W18` exclusively owns the version-bound three-state live probe artifact. The two switches remain
 independent, and no later deploy or worker mutation can bypass the live containment half.
 
@@ -587,7 +588,7 @@ implementation, the byte-identical phase tuple or its mandatory predecessor phas
 | T2-W1a | W0 unblock | — | `.github/workflows/build-cf-container-images.yml`; — | Luna / CI |
 | T2-W2a | W0 unblock | T2-W1a, T8-W4a | `scripts/ci/image-pin-freshness.sh`; `scripts/ci/image-pin-freshness.selftest.sh`; — | Luna / CI |
 | T9-W0 | W1 parallel | — | `deploy/cloudflare/vitest.config.ts`; `deploy/cloudflare/test/devenv-do.test.ts`; — | Luna / CI |
-| T3-W17 | W0 unblock | T0-W1 | `deploy/cloudflare/src/index.ts`; `deploy/cloudflare/src/metrics.ts`; `deploy/cloudflare/wrangler.jsonc`; `deploy/cloudflare/test/containment-intake.test.ts`; `deploy/cloudflare/test/containment-redrive.test.ts`; — | Sol / safety |
+| T3-W17 | W0 unblock | T0-W1 | `deploy/cloudflare/src/index.ts`; `deploy/cloudflare/src/metrics.ts`; `deploy/cloudflare/wrangler.jsonc`; `deploy/cloudflare/test/containment-intake.test.ts`; `deploy/cloudflare/test/containment-redrive.test.ts`; `docs/plan/evidence/T3-W17-containment-test.json` | Sol / safety |
 | T3-W4 | W1 serial | D1 | `crates/corelink-fabric-server/src/**`; `crates/corelink-fabric-server/tests/corelink_plans.rs`; `crates/corelink-fabric-server/tests/close_reaper_lock_split.rs`; — | Sol / architecture |
 | T4-W4 | W1 serial | T3-W4, D1, R1 | `crates/corelink-fabric-server/src/**`; `crates/corelink-fabric-server/tests/corelink_admission_arms.rs`; `crates/corelink-fabric-server/tests/acceptance_infra_capacity.rs`; — | Sol / architecture |
 | T3-W10 | W1 serial | T3-W4, T4-W4 | `crates/corelink-fabric-server/src/reaper.rs`; `crates/corelink-fabric-server/src/handlers/cas_cred.rs`; `crates/corelink-fabric-server/tests/reaper_teardown_retry.rs`; `crates/corelink-fabric-server/tests/cas_cred_error_body.rs`; — | Sol / architecture |
