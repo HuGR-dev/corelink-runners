@@ -63,12 +63,11 @@ fixed-config boot-rate probes and its scale-to-zero behaviour is observed withou
 feedback loop.
 
 **Canonical tuples.** The PG safety identity is defined once as
-`monitor_rearm_tuple = (deployed_monitor_image_digest, config_digest,
-ingress_key_epoch_map_digest, expected_source_registry_digest, delivery_route_policy_digest,
-provider_adapter_api_capability_digest, attestation_ack_signer_trust_revocation_digest)`. The seventh field
-commits the exact accepted `(signer_key_id, signer_epoch)` registry, trust-anchor digests and
-revocation state for both rearm attestations and authenticated ingest ACKs; a cryptographically
-valid signature from a signer/epoch not in that digest is invalid. The seven-day false-page identity
+`monitor_rearm_tuple=(deployed_monitor_image_digest,config_digest,ingress_key_epoch_map_digest,expected_source_registry_digest,delivery_route_policy_digest,provider_adapter_api_capability_digest,rearm_attestation_signer_trust_revocation_digest,ingest_ack_signer_trust_revocation_digest,page_ack_signer_trust_revocation_digest,ack_recovery_signer_trust_revocation_digest,signer_manifest_issuer_trust_revocation_digest)`. The last five fields are role-separated and each commits the exact accepted
+`(signer_key_id, signer_epoch)`, trust-anchor digest and revocation state for, respectively, rearm
+attestations, ingest ACKs, human page ACKs, `ACK_RECOVERY` and signer-manifest issuance. A key trusted
+for one role has no authority in another; a wrong-role, stale-epoch or revoked signature is invalid,
+and any change to any of the five role registries is tuple drift. The seven-day false-page identity
 is defined once as
 `A6.17_window_tuple = (monitor_rearm_tuple_digest,
 sensitivity_scheduler_deployed_runtime_digest, sensitivity_scheduler_config_digest,
@@ -78,26 +77,53 @@ on_call_escalation_schedule_digest)`. Rebuilding either helper with unchanged co
 therefore window drift, as is a sensitivity-scheduler key rotation.
 
 The canary's armed-probe identity is separately and canonically encoded as
-`canary_activation_tuple=(activation_version,lifecycle_source,lifecycle_service,lifecycle_application,lifecycle_key_id,lifecycle_credential_epoch,synthetic_source,synthetic_service,synthetic_application,synthetic_key_id,synthetic_credential_epoch,monitor_rearm_tuple_digest,producer_image_digest,producer_config_digest,probe_flag_name,probe_flag_value,synthetic_flag_name,synthetic_flag_value,activated_at)`.
+`canary_activation_tuple=(activation_version,activation_phase,activation_generation,previous_activation_digest,lifecycle_source,lifecycle_service,lifecycle_application,lifecycle_key_id,lifecycle_credential_epoch,synthetic_source,synthetic_service,synthetic_application,synthetic_key_id,synthetic_credential_epoch,monitor_rearm_tuple_digest,producer_image_digest,producer_config_digest,probe_flag_name,probe_flag_value,synthetic_flag_name,synthetic_flag_value,activated_at,expires_at,revocation_state_digest,owner_authorization_digest,activation_signer_key_id,activation_signer_epoch,signature)`.
+The signature authenticates the preceding twenty-seven ordered fields. `activation_generation` is
+exactly the durable high-water plus one and `previous_activation_digest` is the byte-exact digest of
+that high-water head, including a revoked or expired head; the canary and independent verifier persist
+that high-water outside producer config and reject rollback, skipped generations, forks and replay.
+`activation_phase`, the one-shot owner authorization, trusted `activated_at`, finite `expires_at`,
+current revocation state and role-authorized activation signer are checked before every emission.
 No such tuple exists and no activation, re-enable or probe credit accrues during T6-W14's
 implementation/default-off deterministic phase. T6-W14's deterministic default-off phase keeps both
 `FABRIC_PROBES_ENABLED` and `SYNTHETIC_SLOT_PROBES_ENABLED` exact `0` and proves zero outer-route
 requests, lifecycle envelopes, container fetches, starts, active minutes or attributable usage.
 T6-W14 remains A6.22's sole item
-owner. T6-W10 contributes only the evidence-only live collector: phase 1 seals and deploys the
-intended tuple with `FABRIC_PROBES_ENABLED=1` and `SYNTHETIC_SLOT_PROBES_ENABLED=0`, presents its
+owner. T6-W10 contributes only the evidence-only live collector: phase 1 consumes one unexpired
+`O-CANARY-ACTIVATE` owner authorization, seals and deploys the intended tuple with
+`FABRIC_PROBES_ENABLED=1` and `SYNTHETIC_SLOT_PROBES_ENABLED=0`, presents its
 byte-identical bytes/digest to the canary, external verifier and rearm decision, and runs exactly 12
 lifecycle ticks, 12 outer-route requests and 12 durably acknowledged lifecycle envelopes with zero
 container fetches, starts, active minutes or attributable usage before sealing A6.22's no-wake live
-artifact. Only after the Phase-1 artifact is sealed and immutable may Phase 2 begin and seal the next tuple with
-`SYNTHETIC_SLOT_PROBES_ENABLED=1` and collects 20/20 causally tagged AU6.17
+artifact. Only Phase 1 completes the T6-W14-owned A6.22 item. After that artifact is sealed and
+immutable, Phase 2 consumes a distinct fresh one-shot owner authorization and seals the exact
+successor with `SYNTHETIC_SLOT_PROBES_ENABLED=1`, then collects 20/20 causally tagged AU6.17
 acquire→spawn→release transactions; those starts are excluded from and cannot amend or rerun the
-sealed A6.22 artifact. Phase 2 changes only `synthetic_flag_value` while preserving both lifecycle
-and synthetic lane identities byte-for-byte. T6-W10 implements no driver, detector, credential or monitor route and does
+sealed A6.22 artifact and can earn only AU6.17 credit. The only Phase-2 field changes are
+`activation_phase`, `activation_generation`, `previous_activation_digest`, `synthetic_flag_value`,
+`activated_at`, `expires_at`, `owner_authorization_digest` and `signature`; every identity, image,
+config, monitor tuple, flag name, probe flag value, revocation state and signer id/epoch remains
+byte-identical. T6-W10 implements no driver, detector, credential or monitor route and does
 not double-own A6.22. Any source/service/application, key/epoch, monitor tuple, producer
-image/config, flag name/value or trusted activation-time drift immediately disables probe emission
-and requires a new T6-W10 reproof; it never creates, edits or rotates the already sealed monitor
-registry.
+image/config, flag name/value, generation/predecessor, authorization, expiry, revocation or trusted
+activation-time violation immediately disables probe emission and requires a new T6-W10 reproof; an
+observed cryptographically verified mismatch/replay is `FAILED`, while unavailable or ambiguous
+authority/checkpoint evidence is `UNKNOWN`. Neither is green. It never creates, edits or rotates the
+already sealed monitor registry.
+
+**One-shot owner mutation authority.** Scheduling, predecessor readiness, a green test, a sealed
+tuple and possession of deploy credentials never authorize a production mutation. `O-PG-REARM` and
+`O-CANARY-ACTIVATE` issue only the canonical signed
+`OWNER_ACTION_AUTHORIZATION=(authorization_version,authorization_id,action,subject_digest,review_input_sha,issued_at,not_before,expires_at,nonce,owner_identity,owner_role,owner_key_id,owner_key_epoch,role_authority_digest,signature)`.
+The signature authenticates the preceding fourteen ordered fields. The owner key/epoch and role must
+verify against an independently maintained role-authority digest; `not_before <= consumed_at <
+expires_at`, and the exact authorization digest is atomically consumed once into an append-only
+consumption high-water before the bound action. Reuse, expiry, wrong action/subject/SHA/role, forked
+consumption state or unavailable authority is refusal, never an instruction to retry the mutation.
+`O-PG-REARM` binds the final monitor tuple, three idle scans, final poll and exact
+`FABRIC_PG_DISABLED: 1 -> 0` deployment. `O-CANARY-ACTIVATE` binds exactly one activation phase and
+tuple digest; Phase 2 requires a different authorization issued only after the immutable Phase-1
+artifact exists. Neither token authorizes any other deploy, flag, phase or provider mutation.
 
 **Durability barrier.** A diagnostics-only bind is not durable recovery. T6-W15 first deploys the
 non-Cloudflare monitor base; T6-W12 then deploys the final monitor/provider candidate once, cuts
@@ -107,8 +133,9 @@ T6-W15 mandatory suite twice: once on the candidate before cutover and once on t
 `monitor_rearm_tuple`
 after cutover. A post-cutover failure rolls back the monitor/provider deployment and keeps PG
 disabled; only the active-final PASS completes T6-W12. Only after that sequence may staged
-A1.11/T1-W6 attempt to
-re-arm Postgres. Postgres is enabled only when `FABRIC_PG_DISABLED` is the exact string `0`;
+A1.11/T1-W6 request and atomically consume the still-unexpired `O-PG-REARM` authorization for the
+exact tuple/scans/poll and attempt to re-arm Postgres. A scheduled/ready T1-W6 without that one-shot
+token performs no mutation. Postgres is enabled only when `FABRIC_PG_DISABLED` is the exact string `0`;
 unset, blank, whitespace, `1`, case variants, malformed and every other value remain disabled.
 Removing the variable is not re-arm;
 `deploy/cloudflare-fabricd/test/pg-flag-failclosed.test.ts` proves the full matrix. Before any external PG action, T1-W6 atomically reserves it with a signed ordered
@@ -164,8 +191,8 @@ encoded, signed token with exactly
 The signature authenticates the preceding fourteen ordered fields. The external provider issues it
 only after the referenced ingest commit is durable. A transport
 2xx, JSON success flag or unsigned receipt is never an ACK. Before advancing an outbox head,
-enqueuing a successor or executing an action, every producer verifies the signature and current
-signer trust/revocation digest, freshness, exact event/sequence/payload identity, exact
+enqueuing a successor or executing an action, every producer verifies the signature against
+`ingest_ack_signer_trust_revocation_digest`, freshness, exact event/sequence/payload identity, exact
 source/service/application lane, producer key and credential epoch, current tuple digest and durable
 commit id. Arbitrary 2xx; an old/replayed token; a wrong event, payload or sequence; a cross-lane,
 cross-service or cross-application token; a wrong/stale credential epoch or tuple; and a
@@ -190,22 +217,35 @@ WP that implements them: T6-W4
 rejection before its own successor or action. Byte-identical retry returns the same post-commit
 token without a second effect.
 
+All monitor/canary refusal fixtures are cryptographically and operationally separate from production:
+fixture-only source ids, key ids/epochs, trust roots, signer-manifest WORM log and activation registry
+are unequal to every deployed lane. Harness execution schedules no production timer, changes no live
+flag or route, emits no production envelope and cannot advance a production producer sequence,
+signer-manifest generation, activation generation or verifier high-water. A fixture that touches any
+production credential, timer, cursor, journal or high-water is RED and earns no deterministic credit.
+
 Signer rotation cannot strand or unsafely release an already committed head. Before rotation,
 T6-W15 preseals the canonical
-`signer_rotation_manifest=(manifest_version,active_signer_key_id,active_signer_epoch,next_signer_key_id,next_signer_epoch,revoked_signer_set_digest,overlap_started_at,overlap_expires_at,recovery_custody_digest,monitor_rearm_tuple_digest,previous_manifest_digest,issued_at,signature)`;
-the signature authenticates the preceding twelve ordered fields. Active, next and revoked identities,
-epochs, bounded overlap, recovery custody, current tuple and the previous-manifest chain are therefore
-fixed before use. Promotion of `next` to `active` is one durable atomic CAS that journals the new
-manifest and revocation evidence before any verifier accepts the new epoch; it cannot overlap outside
-the sealed interval, roll back to an older manifest/root, or leave two active signers.
+`signer_rotation_manifest=(manifest_version,manifest_generation,active_signer_key_id,active_signer_epoch,next_signer_key_id,next_signer_epoch,revoked_signer_set_digest,overlap_started_at,overlap_expires_at,recovery_custody_digest,monitor_rearm_tuple_digest,previous_manifest_digest,manifest_issuer_key_id,manifest_issuer_epoch,worm_log_id,witness_checkpoint_sequence,witness_previous_root_digest,witness_root_digest,issued_at,signature)`;
+the signature authenticates the preceding nineteen ordered fields. Active, next and revoked
+identities, epochs, bounded overlap, recovery custody, current tuple, role-authorized manifest issuer
+and the previous-manifest/WORM-witness chains are therefore fixed before use. `manifest_generation`
+must equal the verifier's persisted durable high-water plus one; both the canary-independent verifier
+and monitor persist the accepted generation, manifest digest and witness root outside mutable signer
+storage. Promotion of `next` to `active` is one durable atomic CAS that appends and independently
+witnesses the manifest and revocation evidence in the named WORM log before any verifier accepts the
+new epoch. A missing witness, non-successor generation/root, same-predecessor sibling, rollback,
+truncated prefix or split view is RED even when every local signature verifies; no verifier may fall
+back to an in-memory/default head.
 
 If the original ACK signer is revoked after the immutable ingest CAS but before the producer accepts
 the ACK, T6-W15 may issue a distinct canonical
-`ACK_RECOVERY=(recovery_version,event_id,producer_seq,payload_digest,source,service,application,key_id,credential_epoch,original_monitor_rearm_tuple_digest,ingest_commit_id,original_ack_digest,revocation_record_digest,signer_rotation_manifest_digest,current_monitor_rearm_tuple_digest,recovery_signer_key_id,recovery_signer_epoch,issued_at,signature)`
-whose signature authenticates the preceding eighteen ordered fields. The recovery signer must be the
+`ACK_RECOVERY=(recovery_version,event_id,producer_seq,payload_digest,source,service,application,key_id,credential_epoch,original_monitor_rearm_tuple_digest,ingest_commit_id,original_ack_digest,revocation_record_digest,signer_rotation_manifest_digest,signer_manifest_generation,signer_manifest_witness_root_digest,current_monitor_rearm_tuple_digest,recovery_signer_key_id,recovery_signer_epoch,issued_at,signature)`
+whose signature authenticates the preceding twenty ordered fields. The recovery signer must be the
 currently trusted manifest-authorized signer under the exact overlap/custody policy; the provider must
 read the persisted original CAS, original ACK and manifest chain, and the proof binds their exact
-commit id/digests plus the revocation record. Acceptance closes only that same head. It never
+commit id/digests plus the revocation record and the verifier's current witnessed manifest high-water.
+Acceptance closes only that same head. It never
 re-ingests, changes the original historical state/time/SLO, creates a second effect or authorizes a
 different action. Missing, ambiguous, forked or divergent original CAS/ACK/manifest evidence; wrong
 event/lane/epoch/old or current tuple; wrong revocation or manifest digest; expired overlap; unavailable
@@ -216,10 +256,11 @@ recovery custody, rollback/forked-manifest refusal and crash at each recovery bo
 
 **Authenticated human page ACK.** A page acknowledgement is not an ingest ACK, a provider 2xx, a
 button click or an unauthenticated webhook. It is the canonical signed token
-`page_ack_token=(page_ack_version,incident_id,page_id,delivery_id,destination,on_call_identity,on_call_schedule_digest,action,payload_digest,monitor_rearm_tuple_digest,acknowledged_at,expires_at,signer_key_id,signer_epoch,signature)`;
-the signature authenticates the preceding fourteen ordered fields. `action` must be the exact ACK
+`page_ack_token=(page_ack_version,incident_id,page_id,delivery_id,destination,on_call_identity,on_call_schedule_digest,action,payload_digest,monitor_rearm_tuple_digest,signer_rotation_manifest_digest,acknowledged_at,expires_at,signer_key_id,signer_epoch,signature)`;
+the signature authenticates the preceding fifteen ordered fields. `action` must be the exact ACK
 action, `payload_digest` commits the immutable page/delivery body, and the tuple digest must equal the
-current monitor tuple. The incident CAS accepts it only from
+current monitor tuple and the manifest digest must resolve to the current witnessed manifest
+high-water under `page_ack_signer_trust_revocation_digest`. The incident CAS accepts it only from
 an authenticated, non-revoked human identity authorized for the exact destination and on-call
 schedule at `acknowledged_at`, before the trusted `expires_at`, and only for the exact open
 incident/page/delivery. The ACK and
@@ -289,7 +330,7 @@ chain and receipts must verify.
 effective `monitor_rearm_tuple`, accepts a fresh caller nonce and returns a signed attestation over
 that nonce, the exact tuple digest, and separately timestamped health for the continuously running
 provider poll and core delivery route only, using the exact signer id/epoch and trust/revocation
-state committed by `attestation_ack_signer_trust_revocation_digest`. T1-W6 owns
+state committed by `rearm_attestation_signer_trust_revocation_digest`. T1-W6 owns
 `crates/corelink-fabric-server/src/monitor_interlock.rs` and
 `crates/corelink-fabric-server/tests/monitor_tuple_interlock.rs`, plus
 `crates/corelink-fabric-server/src/monitor_transaction_fence.rs`,
@@ -330,7 +371,7 @@ server fence commit but before `CLOSING`, a lost COMMIT response and a coordinat
 mandatory cases. A planned `monitor_rearm_tuple` change completes this fence sequence **before**
 the tuple change.
 
-Deterministic tests mutate each of the seven tuple fields independently and inject missing, >10 s
+Deterministic tests mutate each of the eleven tuple fields independently and inject missing, >10 s
 response, >60 s poll/delivery, bad-signature, wrong-nonce and cached proofs, plus a valid signature
 from the wrong signer, a stale signer epoch and a revoked signer. Multi-instance race tests pause one
 operation after checkout, one during query, one after its final client check and one at server
@@ -715,7 +756,7 @@ The canonical DAG owns the exact predecessor edges and paths.
 |---|---|---|---|---|
 | **T3-W4** | A3.6 A4.4 A4.5 | `crates/corelink-fabric-server/**` | Sol — architecture/security | D1 |
 | **T4-W4** *(serial after T3-W4 — same crate)* | A4.11 A4.13 | `crates/corelink-fabric-server/**` | Sol — architecture/security | T3-W4 · D1 · **R1** |
-| **T6-W1** | A6.1 A6.2 A6.15 | `scripts/**/*.selftest.sh`, `scripts/pre-merge-gate-check.sh`, `.github/workflows/ci.yml`, new `.github/workflows/selftests.yml` with exhaustive script discovery/coverage assertion | Luna — mechanical/CI | — |
+| **T6-W1** | A6.1 A6.2 A6.15 | only `scripts/orphan-box-check.selftest.sh`, `scripts/pre-merge-gate-check.selftest.sh` and `scripts/pre-merge-gate-check.sh`; it specifies exhaustive discovery but owns no T7-W4 selftest and no workflow file | Luna — mechanical/CI | — |
 | **T6-W2** | A6.3 | `moat-benchmark.yml`, `moat-action-test.yml`, `actions/corelink-memoize/action.yml` | Sol — contract/risk | — |
 | **T6-W3** | A6.4 | new `conformance.yml`, `spawn-worker-ci.yml` (path filter only), `sdk/**` test/CI files | Luna — mechanical/CI | — |
 | **T6-W8** | A6.8 | new `pg-suite.yml` + `crates/corelink-fabric/**` test cfg | Sol — architecture/live-risk | — |
@@ -855,6 +896,12 @@ gating id or moved to W1/W2/DEFER — otherwise the §2 waiver rule is bypassed 
 | **A6.21 / T6-W13** | while fabric probes remain exact `0`, prove the current metrics key works, the stale key fails, and the stale-key condition delivers the canonical authenticated human `page_ack_token`; the scheduled tick/config-state signal stays live independently of fabric probes, and missing/malformed probe config emits authenticated `CANARY_CONFIG_INVALID` while monitor credential/path failure is externally fail-visible rather than silent. Every probe records `SKIPPED|FAILED|UNKNOWN|SERVED` plus reason/version/monitor tuple/trusted `observed_at` | RED by absence; immediate key/alert repair, with no durable-PG or no-wake predecessor |
 | **A6.22 / T6-W14** | one T6-W14-owned `test+probe` item completed by two mandatory contributions without changing ownership: T6-W14 owns implementation plus the deterministic default-off phase; T6-W10 owns only the evidence-only live collection. T6-W14 is bind-only to T6-W12's stable pre-registered exact `canary-lifecycle` and `canary-synthetic` source/key/epoch/authorization lanes and cannot create, rotate or substitute them. With both `FABRIC_PROBES_ENABLED=0` and `SYNTHETIC_SLOT_PROBES_ENABLED=0`, T6-W14 creates no `canary_activation_tuple`, makes zero outer-route requests, lifecycle envelopes, container fetches, starts, active minutes or attributable usage, and earns no activation, re-enable or probe credit. The outer Worker/DO only authors lifecycle state, while each lane is capacity 1, validates, persists and exact-retries one monitor envelope, and T6-W14's deterministic `lifecycle-synthetic-ack.test.ts` proves no successor/action before a canonical authenticated ACK/manifest-bound `ACK_RECOVERY`/typed terminal within ≤60 s. The AU6.17 synthetic driver is implemented but default-off behind `SYNTHETIC_SLOT_PROBES_ENABLED`; malformed config emits authenticated `CANARY_CONFIG_INVALID` and cannot disable scheduled tick/spawn monitoring. Every probe outcome is `SKIPPED|FAILED|UNKNOWN|SERVED` with reason/version/monitor tuple/trusted `observed_at`; ambiguity is never success. `synthetic-slot-default-off.test.ts` proves the matrix. T6-W10 then acts only as live collector: phase 1 seals/deploys the byte-identical `canary_activation_tuple` with `FABRIC_PROBES_ENABLED=1` and `SYNTHETIC_SLOT_PROBES_ENABLED=0`, runs exactly 12 lifecycle ticks, 12 outer-route requests and 12 durably acknowledged lifecycle envelopes with zero container fetches, starts, active minutes or attributable usage, and seals A6.22's no-wake live artifact. Only after that immutable seal, phase 2 seals the next tuple with `SYNTHETIC_SLOT_PROBES_ENABLED=1` and collects 20/20 causally tagged AU6.17 acquire→spawn→release transactions; those starts are excluded from and cannot amend or rerun A6.22's artifact. T6-W10 implements no driver, detector, credential or monitor route and does not double-own A6.22. Canary, verifier and rearm use byte-identical tuple bytes/digest in each phase; drift disables emission and reproves without any registry mutation | RED by absence; strictly after T1-W6 durable recovery and independent monitoring, with both the T6-W14 deterministic contribution and T6-W10 phase-1 live collector mandatory before A6.22 can complete |
 
+T6-W14 is the sole explicit artifact-column exception among probe/test+probe implementation rows: its
+packet is intentionally default-off and authors no live evidence artifact. T6-W10 Phase 1 alone
+authors `docs/plan/evidence/T6-W14-canary-no-wake.json` and that Phase-1 artifact alone supplies the
+live contribution that can complete A6.22; Phase 2 writes only the AU6.17 artifact and cannot add,
+rerun or transfer A6.22 credit.
+
 **A6.10 is already a principal row; T6-W15 is its owner and raises the principal WP count to 48
 without changing the 89 owned items.** The other new `A` ids remain reserved proposals outside the
 94-row suite. The delta continues to stage 9 proposal-only new WPs; T6-W15 is instead the new 48th
@@ -935,7 +982,7 @@ only when the owner signs exactly
 `docs/plan/evidence/O-CFRATE-cloudflare-containers-rate.json` for one named Cloudflare Containers
 invoice line **and** one complete, version-bound observed cost/failure-rate budget interval, encoded
 exactly as
-`O_CFRATE_EVIDENCE=(schema_version,obstacle_id,status,accountable_owner,accountable_role,attested_at,review_input_sha,deployed_image_digest,provider,provider_api_or_export_version,account_id,plan,billing_period_start,billing_period_end,threshold_policy_digest,threshold_declared_at,threshold_receipt_id,threshold_receipt_sha256,budget_interval_start,budget_interval_end,source,source_locator,receipt_id,receipt_sha256,activity_manifest_sha256,complete_provider_cursor,invoice_line_id,invoice_line_description,quantity,unit,currency,line_amount,effective_rate,effective_rate_formula,rate_effective_from,rate_effective_to,attempt_count,failed_attempt_count,retry_count,idle_wakeup_count,served_count,failure_rate_numerator_formula,failure_rate_denominator_formula,failure_rate_numerator,failure_rate_denominator,observed_failure_rate,failure_rate_threshold,billable_vcpu_hours,billable_gib_hours,observed_cost,cost_budget,cost_per_served_attempt,cost_per_served_attempt_threshold,owner_signature)`.
+`O_CFRATE_EVIDENCE=(schema_version,obstacle_id,status,accountable_owner,accountable_role,owner_key_id,owner_key_epoch,owner_role_authority_digest,attested_at,review_input_sha,deployed_image_digest,provider,provider_api_or_export_version,account_id,plan,billing_period_start,billing_period_end,threshold_policy_digest,threshold_declared_at,threshold_witness_log_id,threshold_witness_sequence,threshold_witness_previous_root_digest,threshold_witness_root_digest,threshold_witnessed_at,threshold_witness_key_id,threshold_witness_signature,budget_interval_start,budget_interval_end,source,source_locator,receipt_id,receipt_sha256,activity_manifest_sha256,complete_provider_cursor,invoice_line_id,invoice_line_description,invoice_line_payload_digest,quantity,unit,currency,line_amount,effective_rate,effective_rate_formula,rate_effective_from,rate_effective_to,attempt_count,failed_attempt_count,retry_count,idle_wakeup_count,served_count,failure_rate_numerator_formula,failure_rate_denominator_formula,failure_rate_numerator,failure_rate_denominator,observed_failure_rate,failure_rate_threshold,billable_vcpu_hours,billable_gib_hours,observed_cost,cost_budget,cost_per_served_attempt,cost_per_served_attempt_threshold,cost_quantity_reconciliation_digest,canonical_payload_digest,owner_signature)`.
 The rate half binds account/period, currency, exact provider SKU/unit, billed quantity and amount,
 per-unit rate, immutable provider receipt and owner signature. The budget interval is contiguous and
 uses the complete provider cursor, activity manifest and matching receipt. Its predeclared formulas
@@ -946,8 +993,10 @@ failure, retry, idle wakeup and served request exactly once, and derives `observ
 those fields. `failure_rate_threshold`, `cost_budget` and
 `cost_per_served_attempt_threshold` are owner-approved before the interval begins and cannot be
 retuned from its result. `threshold_declared_at < budget_interval_start`; the immutable
-`threshold_policy_digest` binds all three values and formulas, and the independently witnessed
-`threshold_receipt_id` plus `threshold_receipt_sha256` bind that declaration before observation.
+`threshold_policy_digest` binds all three values and formulas. Before observation the independent
+witness appends it to `threshold_witness_log_id`; the strictly increasing sequence, previous/root
+digests, witnessed time, witness key and signature prove an append-only declaration distinct from the
+owner and implementation. A local receipt or mutable timestamp is insufficient.
 The half-open `[budget_interval_start,budget_interval_end)` interval uses a provider-issued invoice
 or usage export as its source. The same interval derives `observed_cost` from its provider billable
 vCPU/GiB quantities and effective rates, and
@@ -955,9 +1004,22 @@ vCPU/GiB quantities and effective rates, and
 the observed failure rate, observed cost and cost per served attempt each to remain at or below its
 predeclared threshold. A gap, partial cursor, unsealed or non-exhaustive manifest, unresolved class,
 missing/mismatched receipt, zero denominator/served count or unverifiable formula leaves O-CFRATE
-unresolved.
+unresolved. Every identifier, role, digest, locator, formula, unit, currency, key and signature field
+is nonempty and canonically encoded. The interval is nonempty; counts are non-negative integers;
+quantities, rates, thresholds and monetary values are finite canonical non-negative decimals;
+`quantity > 0`, `failure_rate_denominator > 0`, `served_count > 0`, and at least one billable
+quantity is positive. `invoice_line_payload_digest` commits provider/account/plan/period/SKU,
+description, unit, currency, quantity, line amount and rate-effective bounds, with
+`line_amount = quantity * effective_rate` under the provider's canonical rounding.
+`cost_quantity_reconciliation_digest` commits that line, every interval usage line, both billable
+quantities, `observed_cost`, the activity manifest and receipt/cursor roots. `canonical_payload_digest`
+commits every preceding field with the O-CFRATE domain tag, and `owner_signature` must verify those
+exact canonical bytes under `owner_key_id`/epoch and the independently verified Billing-Administrator
+role authority. Blank/default/NaN/infinite/negative/out-of-domain values are RED.
 A public list price, calculator, proxy-provider price, dashboard estimate or unsigned transcription
-does not resolve it. Only T7-W5 consumes this token, reads but does not rewrite its artifact, and still
+does not resolve it. O-CFRATE is a hard, non-waivable prerequisite of the entire T7-W5 packet: T7-W5
+cannot dispatch, collect, derive or publish any of AU7.11/AU4.19/AU7.12 until the exact artifact is
+verified. T7-W5 reads but does not rewrite it and still
 waits independently for O1, T3-W7, T1-W6 and T7-W4b before deriving or publishing AU4.19 economics.
 O-CFRATE does not authorize dispatch or green any pricing claim.
 
@@ -976,6 +1038,8 @@ stated this dependency for O-BILLING alone.
 | **O-ALLOWLIST** · **O-PIN** | `INSTALLATION_ALLOWLIST` · `PINNED_IMAGE_DIGEST` (vars, `wrangler.jsonc:77-81`) | W0 deploy |
 | **O-APP** | `GITHUB_APP_ID` + private key; public installability, `Administration:write`, webhook | W0 |
 | **O-CANARY** | `RESEND_API_KEY` + `FABRIC_OBSERVABILITY_KEY` + `METRICS_OBSERVABILITY_KEY` | T6-W4 code seal → bind → deploy → T6-W6 proof |
+| **O-PG-REARM** | issue and one-shot consume the exact expiring owner authorization bound to the final tuple/scans/poll and `FABRIC_PG_DISABLED: 1 -> 0`; predecessor readiness alone is not mutation authority | hard predecessor of T1-W6's production flag mutation |
+| **O-CANARY-ACTIVATE** | issue and one-shot consume one exact expiring owner authorization per activation phase/tuple; Phase 2 requires a distinct token after the immutable Phase-1 artifact | hard runtime subgate of each T6-W10 activation |
 | **O-FLEETBUSY** | bind the read-only `FLEET_BUSY_READ_KEY` pair used to refuse a busy-fleet force-deploy (`hist-13` — rev-2 had no O-id for it) | T3-W18 live containment proven; hard predecessor of the first T2-W2b force-deploy |
 | **O-MINTKEY** · **O-CHECKHOST** · **O-CFTOKEN** · **O-ROTATE** | disarm-confirm · check-host flip · delete-scoped token (D5) · rotate OpenRouter (D7) | — |
 | **O-PUBLISH** | npm + PyPI tokens | **D3 · T5-W2** repo half; bind/publish then T5-W6 proves the artifacts |
@@ -990,6 +1054,15 @@ vector byte-identity; this contract is fixed before either emitter implementatio
 its live money proof · **R3** the stranger chain (signup → checkout → install → green) · **R4**
 free-tier seed vs "no free tier" (D8) · **R5** cross-TL closure: `deploy-06` and `docs-truth-20`
 name artifacts in a sibling repo that the mechanized session fence makes unreachable from here.
+
+**R6 owner registry.** R6 can be authored only by the `corelink-server` CAS tenant-isolation owner
+in the Security/Storage role; a corelink-runners implementer, plan lead or documentation owner cannot
+self-attest it. Its committed relay record is exactly
+`R6_RELAY=(schema_version,relay_id,status,source_repo,source_commit_sha,owner_identity,owner_role,owner_key_id,owner_key_epoch,role_authority_digest,tenant_a_digest,tenant_b_digest,memoize_key_digest,a_to_b_trials,a_to_b_refusals,b_to_a_trials,b_to_a_refusals,cas_endpoint_version,test_artifact_digest,issued_at,signature)`.
+The signature authenticates the preceding twenty fields. The tenants are distinct, the memoize key
+is byte-identical in both directions, and both refusal ratios must be exactly 20/20 on the named CAS
+version. Missing owner-role verification, a mutable/uncommitted sibling result, any permitted
+cross-tenant read or a runners-authored assertion leaves R6 unresolved and T5-W1 RED.
 
 ---
 
@@ -1163,7 +1236,7 @@ greened here:
 - **The final tuple omitted its own post-rearm producers.** Before either mandatory T6-W12 pass, the
   repaired contract pre-registers stable exact source ids `canary-lifecycle` and
   `canary-synthetic` with distinct key/credential epochs and permanent ingress authorization in the
-  seven-field tuple. Both default-off producer deployments emit zero. T6-W14 is bind-only after
+  eleven-field tuple. Both default-off producer deployments emit zero. T6-W14 is bind-only after
   T1-W6 and its deterministic phase keeps both flags `0`, performs zero outer-route requests or
   lifecycle envelopes and earns no activation/re-enable/probe credit. T6-W10 later seals/deploys
   the phase-1 fabric-`1`/synthetic-`0` activation tuple to collect A6.22's 12-tick live artifact,
@@ -1171,7 +1244,7 @@ greened here:
   registry, route or parallel lane after rearm or taking ownership of A6.22.
 - **A bare HTTP success could counterfeit durable ingest.** The repaired contract defines the exact
   signed ACK-token fields and binds the accepted signer id/epoch, trust anchors and revocation state
-  into `attestation_ack_signer_trust_revocation_digest`. Every producer rejects arbitrary 2xx and
+  into the role-separated `ingest_ack_signer_trust_revocation_digest`. Every producer rejects arbitrary 2xx and
   old/wrong/cross-lane/epoch/tuple/signer tokens before action or outbox advance; wrong-valid,
   stale-epoch and revoked signer tests are mandatory.
 - **The seven-day evidence could be rebuilt or curated across versions.** `A6.17_window_tuple` now

@@ -68,6 +68,59 @@
 > Until that sequence is complete there is no promotion, freeze, baseline, dispatch or green
 > credit; mechanical PASS results and review silence do not change that status.
 
+> **ROUND-13 CANONICAL SECURITY CONTRACTS (2026-09-01).** This staging document consumes exactly
+> the same monitor and activation schemas as the remediation plan, delta and canonical DAG; it does
+> not retain a weaker AU-only interpretation. The sealed monitor tuple is exactly
+> `monitor_rearm_tuple=(deployed_monitor_image_digest,config_digest,ingress_key_epoch_map_digest,expected_source_registry_digest,delivery_route_policy_digest,provider_adapter_api_capability_digest,rearm_attestation_signer_trust_revocation_digest,ingest_ack_signer_trust_revocation_digest,page_ack_signer_trust_revocation_digest,ack_recovery_signer_trust_revocation_digest,signer_manifest_issuer_trust_revocation_digest)`.
+> The last five digests bind exhaustive role-separated signer trust/revocation sets; a signer trusted
+> for one role cannot sign another role's object, and any mutation is tuple drift.
+>
+> The page ACK is exactly
+> `page_ack_token=(page_ack_version,incident_id,page_id,delivery_id,destination,on_call_identity,on_call_schedule_digest,action,payload_digest,monitor_rearm_tuple_digest,signer_rotation_manifest_digest,acknowledged_at,expires_at,signer_key_id,signer_epoch,signature)`.
+> Its signature covers the preceding fifteen fields. The rotation authority is exactly
+> `signer_rotation_manifest=(manifest_version,manifest_generation,active_signer_key_id,active_signer_epoch,next_signer_key_id,next_signer_epoch,revoked_signer_set_digest,overlap_started_at,overlap_expires_at,recovery_custody_digest,monitor_rearm_tuple_digest,previous_manifest_digest,manifest_issuer_key_id,manifest_issuer_epoch,worm_log_id,witness_checkpoint_sequence,witness_previous_root_digest,witness_root_digest,issued_at,signature)`;
+> its signature covers the preceding nineteen fields. The manifest issuer id/epoch is verified under
+> its exclusive tuple role; generation and predecessor digest form one monotonic chain; each accepted
+> generation extends an independently witnessed append-only/WORM sequence and root. Verifiers persist
+> manifest-generation and witness-head high-water before accepting named tokens and reject rollback,
+> fork, equivocation, reused generation, missing predecessor, issuer regression and root discontinuity.
+> Recovery is exactly
+> `ACK_RECOVERY=(recovery_version,event_id,producer_seq,payload_digest,source,service,application,key_id,credential_epoch,original_monitor_rearm_tuple_digest,ingest_commit_id,original_ack_digest,revocation_record_digest,signer_rotation_manifest_digest,signer_manifest_generation,signer_manifest_witness_root_digest,current_monitor_rearm_tuple_digest,recovery_signer_key_id,recovery_signer_epoch,issued_at,signature)`;
+> its signature covers the preceding twenty fields and its manifest generation/root must equal the
+> unique accepted current chain at or above persisted high-water.
+>
+> Canary activation is exactly
+> `canary_activation_tuple=(activation_version,activation_phase,activation_generation,previous_activation_digest,lifecycle_source,lifecycle_service,lifecycle_application,lifecycle_key_id,lifecycle_credential_epoch,synthetic_source,synthetic_service,synthetic_application,synthetic_key_id,synthetic_credential_epoch,monitor_rearm_tuple_digest,producer_image_digest,producer_config_digest,probe_flag_name,probe_flag_value,synthetic_flag_name,synthetic_flag_value,activated_at,expires_at,revocation_state_digest,owner_authorization_digest,activation_signer_key_id,activation_signer_epoch,signature)`.
+> Its signature covers the preceding twenty-seven fields. Acceptance persists the generation and
+> digest high-water and requires the exact predecessor, fresh trusted `activated_at`, live
+> `expires_at`, current revocation state and correct role. Phase 2's only permitted changes are
+> `activation_phase`, `activation_generation`, `previous_activation_digest`,
+> `synthetic_flag_value`, `activated_at`, `expires_at`, `owner_authorization_digest` and `signature`;
+> every other field is byte-identical. Replay, rollback, fork, equivocation, expiry, revocation or a
+> verified wrong field is `FAILED`; unavailable/unverifiable evidence is `UNKNOWN`; neither is green.
+> Phase 1 alone credits A6.22 and Phase 2 alone credits AU6.17. Fixture identities, keys,
+> sequence/outbox namespaces, manifest/verifier stores and activation high-water stores are
+> cryptographically separate and fixtures arm no production timer or mutation. T6-W14's named
+> deterministic default-off artifact is the explicit implementation-artifact exception: it proves
+> bind/default-off behavior only and provides no activation, A6.22 or AU6.17 live credit.
+>
+> PG rearm and each canary phase consume distinct one-shot owner authority exactly
+> `OWNER_ACTION_AUTHORIZATION=(authorization_version,authorization_id,action,subject_digest,review_input_sha,issued_at,not_before,expires_at,nonce,owner_identity,owner_role,owner_key_id,owner_key_epoch,role_authority_digest,signature)`.
+> The signature covers the preceding fourteen fields; role/key validation, time bounds and atomic
+> append-only one-time consumption precede the bound mutation. O-PG-REARM binds the final PG tuple
+> and rearm transition; O-CANARY-ACTIVATE binds one activation phase, and Phase 2 authorization may
+> issue only after the immutable Phase-1 root. Scheduling, ready-set membership, credentials or a
+> green test never confer mutation authority.
+>
+> R6 is owned exclusively by the `corelink-server` CAS tenant-isolation owner in the
+> Security/Storage role and is exactly
+> `R6_RELAY=(schema_version,relay_id,status,source_repo,source_commit_sha,owner_identity,owner_role,owner_key_id,owner_key_epoch,role_authority_digest,tenant_a_digest,tenant_b_digest,memoize_key_digest,a_to_b_trials,a_to_b_refusals,b_to_a_trials,b_to_a_refusals,cas_endpoint_version,test_artifact_digest,issued_at,signature)`.
+> Its signature covers the preceding twenty fields; distinct tenants, the identical memoize key and
+> exactly 20/20 refusals in both directions are mandatory. T6-W1 owns only
+> `scripts/orphan-box-check.selftest.sh`, `scripts/pre-merge-gate-check.selftest.sh` and
+> `scripts/pre-merge-gate-check.sh`; T7-W4 exclusively owns
+> `scripts/ci/secret-inventory-drift.selftest.sh`; T2-W3 exclusively owns final workflow wiring.
+
 > **External owner obstacle `O-CFRATE` (staged and unresolved).** The accountable owner is the
 > human Cloudflare account owner or authorized Cloudflare **Billing Administrator** for the named
 > production account, acting in the Finance/Billing role; the plan lead only verifies the submitted
@@ -82,7 +135,7 @@
 > `docs/plan/evidence/O-CFRATE-cloudflare-containers-rate.json`, committed only after the manual
 > action and bound to the reviewed implementation version. The exact required tuple is:
 >
-> `O_CFRATE_EVIDENCE=(schema_version,obstacle_id,status,accountable_owner,accountable_role,attested_at,review_input_sha,deployed_image_digest,provider,provider_api_or_export_version,account_id,plan,billing_period_start,billing_period_end,threshold_policy_digest,threshold_declared_at,threshold_receipt_id,threshold_receipt_sha256,budget_interval_start,budget_interval_end,source,source_locator,receipt_id,receipt_sha256,activity_manifest_sha256,complete_provider_cursor,invoice_line_id,invoice_line_description,quantity,unit,currency,line_amount,effective_rate,effective_rate_formula,rate_effective_from,rate_effective_to,attempt_count,failed_attempt_count,retry_count,idle_wakeup_count,served_count,failure_rate_numerator_formula,failure_rate_denominator_formula,failure_rate_numerator,failure_rate_denominator,observed_failure_rate,failure_rate_threshold,billable_vcpu_hours,billable_gib_hours,observed_cost,cost_budget,cost_per_served_attempt,cost_per_served_attempt_threshold,owner_signature)`
+> `O_CFRATE_EVIDENCE=(schema_version,obstacle_id,status,accountable_owner,accountable_role,owner_key_id,owner_key_epoch,owner_role_authority_digest,attested_at,review_input_sha,deployed_image_digest,provider,provider_api_or_export_version,account_id,plan,billing_period_start,billing_period_end,threshold_policy_digest,threshold_declared_at,threshold_witness_log_id,threshold_witness_sequence,threshold_witness_previous_root_digest,threshold_witness_root_digest,threshold_witnessed_at,threshold_witness_key_id,threshold_witness_signature,budget_interval_start,budget_interval_end,source,source_locator,receipt_id,receipt_sha256,activity_manifest_sha256,complete_provider_cursor,invoice_line_id,invoice_line_description,invoice_line_payload_digest,quantity,unit,currency,line_amount,effective_rate,effective_rate_formula,rate_effective_from,rate_effective_to,attempt_count,failed_attempt_count,retry_count,idle_wakeup_count,served_count,failure_rate_numerator_formula,failure_rate_denominator_formula,failure_rate_numerator,failure_rate_denominator,observed_failure_rate,failure_rate_threshold,billable_vcpu_hours,billable_gib_hours,observed_cost,cost_budget,cost_per_served_attempt,cost_per_served_attempt_threshold,cost_quantity_reconciliation_digest,canonical_payload_digest,owner_signature)`
 >
 > Every tuple field is required, with no unresolved placeholder. `source` must identify the
 > provider-issued invoice or usage export; `source_locator` must identify the account/period/export
@@ -97,6 +150,12 @@
 > stated credits or discounts; `effective_rate_formula` and any provider conversion are mandatory.
 > The period and effective dates must cover the version-bound deployed image; a receipt for another
 > account, plan, period, unit or image is RED.
+> `invoice_line_payload_digest` binds the exact provider/account/plan/period/SKU, unit, currency,
+> quantity, amount and effective-rate bounds for that line; `cost_quantity_reconciliation_digest`
+> binds every usage/invoice line, billed quantity, observed cost, receipt/cursor root and activity
+> manifest. `canonical_payload_digest` commits every preceding tuple field under the O-CFRATE domain
+> tag, and `owner_signature` signs that digest under the independently verified accountable
+> Billing-Administrator role, key id and epoch. A signer merely named in the payload is not verified.
 >
 > The tuple also carries a version-bound observed budget for one contiguous, half-open interval
 > `[budget_interval_start,budget_interval_end)` of the exact deployment/account/plan. `attempt_count`
@@ -119,18 +178,26 @@
 > is RED and may not be represented as a zero cost. `failure_rate_threshold`, `cost_budget` and
 > `cost_per_served_attempt_threshold` must be predeclared, version-bound thresholds in explicit
 > currency/unit, and the owner must sign the comparison; no threshold may be selected or changed
-> after observing the interval. `threshold_declared_at < budget_interval_start`;
+> after observing the interval. `threshold_declared_at < threshold_witnessed_at < budget_interval_start`;
 > `threshold_policy_digest` binds the thresholds and formulas, and the independently witnessed
-> `threshold_receipt_id` plus `threshold_receipt_sha256` bind the declaration before observation.
+> append-only `threshold_witness_log_id`, strictly increasing sequence, previous/root digests,
+> timestamp, witness key id and witness signature bind the declaration before observation. The
+> witness is independent of the owner and threshold author; rollback, fork, equivocation, missing
+> predecessor or non-extending root is RED.
 > The source is a provider-issued invoice or usage export. The artifact must show the numerator, denominator, result and
 > threshold comparison for each formula, with any threshold breach RED.
+> Every identifier, digest, signature, formula and unit is nonempty; counts are non-negative
+> integers; quantity/rate/threshold/money fields are finite canonical non-negative decimals; the
+> interval is nonempty; quantity, denominator and served count are positive; and at least one
+> billable quantity is positive. Blank/default/NaN/infinite/negative/out-of-domain values are RED.
 >
 > The owner attestation, complete cursor/activity manifests and provider receipts are the
 > satisfaction evidence; this plan does not claim them now. Until every field is supplied,
 > owner-signed and independently verifiable, `status` remains **UNRESOLVED / RED**; the tuple
 > cannot arm Cloudflare usage, alter containment or authorize any live action.
 >
-> `O-CFRATE` is a prerequisite to **T7-W5/AU4.19**, but it is not T7-W5's measured economics
+> `O-CFRATE` is a hard non-waivable prerequisite to **every T7-W5 collection, derivation and
+> publication**, but it is not T7-W5's measured economics
 > proof. `O-CFRATE` proves only that a human owner supplied an authoritative, account/plan/
 > period/unit/version-bound provider rate. T7-W5 must still deploy and run its own ≥50-job latency,
 > seven-window/≥500-execution memoization, and pricing re-derivation evidence, including the exact
@@ -184,7 +251,7 @@ acceptance items for union-06 and union-09 do not double-count their source rows
 | W3-live-proof | 5 | union-15 · union-19 · union-27 · union-28 · union-29 |
 | W4-post-decision | 2 | union-30 · M5p |
 | DECISION | 0 | — |
-| ARMING | 0 | (one new owner ask, **O-CFRATE**, gates `union-28`; the finding itself stays W3) |
+| ARMING | 0 | (external **O-CFRATE** gates all of T7-W5; O-PG-REARM and O-CANARY-ACTIVATE gate mutations in the canonical DAG; none is a source-finding row) |
 | RELAY | 1 | union-23 (new relay **R6**; its in-repo doc half extends T5-W1) |
 | DOCS-sweep | 1 | union-20 |
 | CLEAN-no-action | 0 | — |
@@ -280,7 +347,7 @@ T6-W10 `+AU6.17` (3→4; exact artifact
 These are the only four extensions; T3-W5 is separately counted above as a new staged AU WP.
 
 The worker serialization, release ordering (including T5-W3 as a T5-W6 predecessor), D13,
-O-CFRATE and R6 routing are all encoded in the canonical DAG. This triage does not duplicate its
+O-CFRATE, O-PG-REARM, O-CANARY-ACTIVATE and R6 routing are all encoded in the canonical DAG. This triage does not duplicate its
 edges or ready sets. `index.ts` modularization remains post-GA and has no AU packet.
 
 ---
