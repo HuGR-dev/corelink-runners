@@ -28,7 +28,9 @@ concurrency:
 jobs:
   postgres:
     name: Cross-instance ledger and billing
-    runs-on: ubuntu-latest
+    # This uses the product fleet, not GitHub-hosted compute. A first successful
+    # `services:` run is capability evidence; it is not pre-credited beforehand.
+    runs-on: corelink
     timeout-minutes: 30
     services:
       postgres:
