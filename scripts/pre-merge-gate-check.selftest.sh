@@ -76,6 +76,10 @@ LOOKALIKE_GATE_CHECKS='[
   {"name":"fake-gates","bucket":"pass","link":"https://x/fake-gates"},
   {"name":"fake-dco","bucket":"pass","link":"https://x/fake-dco"}
 ]'
+SKIPPED_REQUIRED_CHECKS='[
+  {"name":"gates","bucket":"skipping","link":"https://x/gates"},
+  {"name":"dco","bucket":"pass","link":"https://x/dco"}
+]'
 FAILED_CHECKS='[
   {"name":"gates","bucket":"fail","link":"https://x/gates"},
   {"name":"dco","bucket":"pass","link":"https://x/dco"}
@@ -145,6 +149,7 @@ run_case "draft PR refused" 1 "MERGEABLE CLEAN OPEN true" "$HEALTHY_CHECKS" -- "
 run_case "zero checks refused" 1 "MERGEABLE CLEAN OPEN false" '[]' -- "NO checks at all"
 run_case "missing always-present gate refused" 1 "MERGEABLE CLEAN OPEN false" "$MISSING_GATE_CHECKS" -- "always-present gates never ran"
 run_case "lookalike gate identities refused" 1 "MERGEABLE CLEAN OPEN false" "$LOOKALIKE_GATE_CHECKS" -- "always-present gates never ran"
+run_case "required gate skipped refused" 1 "MERGEABLE CLEAN OPEN false" "$SKIPPED_REQUIRED_CHECKS" -- "required gate(s) skipped"
 run_case "pending check refused" 1 "MERGEABLE CLEAN OPEN false" "$PENDING_CHECKS" -- "1 pending"
 run_case "cancelled check refused" 1 "MERGEABLE CLEAN OPEN false" "$CANCELLED_CHECKS" -- "bucket=cancel"
 run_case "unknown bucket refused" 1 "MERGEABLE CLEAN OPEN false" "$UNKNOWN_BUCKET_CHECKS" -- "bucket=future-status"
