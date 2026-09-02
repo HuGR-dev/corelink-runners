@@ -25,7 +25,7 @@ zero: the **promoted normative bytes** and checker bytes at that exact SHA must 
 consecutive quiet cold-review rounds**. Any intervening normative or checker change resets the
 applicable count. Only after the two post-promotion quiet rounds may the lead freeze ids, capture one
 post-incident red baseline, and dispatch. `plan-check.py`, `wp-check.py`, `au-check.py`,
-`actionlint-check.py`, the current **131-corruption** `gates-selftest.py`, Ruff and
+`actionlint-check.py`, the current **133-corruption** `gates-selftest.py`, Ruff and
 `git diff --check` must all PASS over that same clean commit; no one gate substitutes for another.
 
 ## 1. Round-3 disposition
@@ -39,6 +39,7 @@ post-incident red baseline, and dispatch. `plan-check.py`, `wp-check.py`, `au-ch
 | AU7.10 did not make R6 a predecessor | **ACCEPTED — CORRECTED IN TRIAGE** | R6 is a hard predecessor. AU7.10 extends canonical T5-W1, which owns the memoize README and cannot seal until a committed sibling artifact proves 20/20 cross-tenant refusals in each direction. |
 | AU7.8 had no exhaustive universe | **ACCEPTED — CORRECTED IN TRIAGE** | The tracked source/config/workflow universe and generated/vendor exclusions are explicit; planted fixtures cover every source class. |
 | AU3.23 mixed test and probe | **ACCEPTED — SPLIT** | AU3.23a is the deterministic retry/counter test in T8-W5; AU3.23b is the 10/10 live revocation proof in T8-W6. Round 3 therefore had 30 findings and 31 proposed rows; the current **STAGING-only** triage has 30 findings and 33 rows after the later AU4.16 and AU3.26 test/probe splits. None is promoted here. |
+| AU3.26a/AU1.9 shared secret-hygiene scope | **ACCEPTED — SPLIT/HARDENED** | AU3.26a is now the JIT-only repo packet T8-W4a, restricted to the runner entrypoint and process test and hard-preceding image pin/build/deploy/ship. AU1.9 is T8-W4b, the provider-env-to-mode-0400-file auth bridge across check-exec, check-host, Cloudflare and DevEnv boot/process consumers; its possible `index.ts` touch is serialized before T4-W1 and its image work precedes DevEnv deployment. Cloudflare Containers 0.3.7 has no secret mount, so durable-process `/proc`, argv and log absence is mandatory. |
 | D11 named but absent | **ACCEPTED — PROPOSED BELOW** | D11 remains red until a signed artifact fixes the customer-visible memoize-miss contract. A prose mention is not a decision record. |
 | AU4.18 left tenant owner-of-record precedence to the implementer | **ACCEPTED — PROPOSED BELOW** | Stage D13. A signed human decision must name one authoritative source and one exact conflict response before the staged T4-W1 extension can run; adding D13 does not promote AU4.18. |
 | A3.16 was over-credited and “exactly 5” over-specified liveness | **ACCEPTED — CREDIT WITHDRAWN TO RED** | KV read-modify-write is not a global bound and failed/missing state is fail-open. The proposed criterion is a safety limit of **at most 5**, never a requirement to spend all five; unavailable authority admits zero. |
@@ -691,7 +692,7 @@ remain dated evidence only.
    bytes. Obtain promoted quiet round 1, then a separately prompted promoted quiet round 2 over
    byte-identical inputs at the same SHA. Any finding-driven edit returns this step to quiet 0.
 7. After both promoted rounds are quiet, run every command below from that clean post-incident
-   commit. The selftest must report its current **131 corruptions blocked**; then freeze the reviewed
+   commit. The selftest must report its current **133 corruptions blocked**; then freeze the reviewed
    ids, capture the single red baseline defined above and prove the baseline gate rejects a mixed-SHA
    fixture.
 8. Then and only then dispatch eligible WPs from the reviewed canonical DAG.

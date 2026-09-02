@@ -43,7 +43,8 @@ EXPECTED_PROPOSAL_WAVES = {
     "T8-W6": 3,
     "T8-W7": 3,
     "T3-W10": 1,
-    "T8-W4": 1,
+    "T8-W4a": 1,
+    "T8-W4b": 1,
     "T5-W3": 1,
     "T7-W4": 1,
     "T7-W5": 3,
@@ -238,7 +239,7 @@ DAG_HEADER = [
 READY_SET_HEADING = "## Deterministic ready sets and proof"
 READY_SET_FENCE_OPEN = "```text"
 READY_SET_FENCE_CLOSE = "```"
-EXPECTED_DAG_VERTICES = 69
+EXPECTED_DAG_VERTICES = 70
 O_CFINVENTORY_ARTIFACT = "docs/plan/evidence/O-CFINVENTORY-provider-capabilities.json"
 O_CFCANCEL_ARTIFACT = "docs/plan/evidence/O-CFCANCEL-provider-cancellation.json"
 MONITOR_REARM_TUPLE = (
@@ -3341,7 +3342,7 @@ def validate_au_dag_routing(
         # and image-ship route.  Checking every named vertex prevents the live
         # proof from silently treating a local entrypoint edit as a deployed
         # image.
-        "AU3.26b": ("T8-W4", "T2-W2a", "T2-W2b", "T2-W4"),
+        "AU3.26b": ("T8-W4a", "T2-W2a", "T2-W2b", "T2-W4"),
         # AU6.17 is live evidence owned by T6-W10, but its synthetic producer
         # and independent external-monitor ingestion are implemented by the
         # later no-wake packet.  Evidence-only ownership must not bypass that
@@ -3376,7 +3377,12 @@ def validate_au_dag_routing(
             )
 
     required_direct_predecessors = {
-        "T2-W2b": {"T3-W18", "O-FLEETBUSY"},
+        "T2-W2b": {"T3-W18", "O-FLEETBUSY", "T8-W4a", "T8-W4b"},
+        "T2-W2a": {"T8-W4a"},
+        "T2-W4": {"T8-W4a", "T8-W4b"},
+        "T8-W4b": {"T3-W18", "T9-W0"},
+        "T4-W1": {"T8-W4b"},
+        "T9-W1": {"T8-W4b"},
         "T6-W6": {"T6-W9", "T6-W12"},
         "T4-W2": {"R2"},
         "T4-W7": {"O-BILLING", "T4-W2", "T9-W1"},
@@ -3395,7 +3401,7 @@ def validate_au_dag_routing(
         "T5-W4": {"T5-W1"},
         "T5-W1": {"R6"},
         "T7-W5": {"O-CFRATE"},
-        "T8-W7": {"T8-W4", "T2-W2a", "T2-W2b", "T2-W4"},
+        "T8-W7": {"T8-W4a", "T2-W2a", "T2-W2b", "T2-W4"},
         "T3-W16": {"T6-W15", "O-CFINVENTORY", "O-CFCANCEL"},
     }
     for wp, required in required_direct_predecessors.items():
@@ -4123,20 +4129,11 @@ def check(
     )
     failures.extend(registry_errors)
     dependencies = [(row.item, row.dependency) for row in rows]
-    dependencies.extend(
-        (
-            wp,
-            next(
-                (
-                    line
-                    for line in document.splitlines()
-                    if line.startswith(f"| **{wp}**")
-                ),
-                "",
-            ),
-        )
-        for wp in declarations
-    )
+    # The declaration table has no dependency column.  Do not scan its full
+    # scope cell as dependency prose: an exact path such as
+    # ``deploy/cloudflare/test/e2e-40-stories-driver.test.ts`` contains a
+    # dependency-shaped token but is not a graph dependency.
+    dependencies.extend((wp, "") for wp in declarations)
     failures.extend(
         validate_dependency_targets(
             dependencies,

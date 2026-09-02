@@ -907,9 +907,21 @@ rerun or transfer A6.22 credit.
 **A6.10 is already a principal row; T6-W15 is its owner and raises the principal WP count to 48
 without changing the 89 owned items.** The other new `A` ids remain reserved proposals outside the
 94-row suite. The delta continues to stage 9 proposal-only new WPs; T6-W15 is instead the new 48th
-principal WP, so the canonical combined DAG has 48 principal + 9 staged-principal + 12 AU = 69
+principal WP, so the canonical combined DAG has 48 principal + 9 staged-principal + 13 AU = 70
 vertices. AU remains separately staged. Nothing in this table promotes an AU item, freezes a
 proposed id, grants partial green, or authorizes dispatch.
+
+**T8-W4 blocker split (staging-only).** The former in-box secret-hygiene proposal is two
+executable packets: **T8-W4a** owns only the JIT repo half (`deploy/runner/entrypoint.sh` and its
+process test) and is the hard predecessor of image pin/build/deploy/ship plus the AU3.26b probe;
+**T8-W4b** owns the auth-secret bridge across check-exec-server `src/**`/`tests/**`, check-host,
+Cloudflare entrypoint/supervisor/protocol consumers and check-host/DevEnv boot/process tests. If
+T8-W4b touches `deploy/cloudflare/src/index.ts`, its explicit edge to T4-W1 serializes it before
+the Worker monolith; it also precedes DevEnv image deployment. Cloudflare Containers 0.3.7 has no
+secret mount, so the acceptance contract is provider env → short entrypoint → regular mode-0400
+file → unset and clean exec/re-exec → server file read. Every durable process is checked for token
+absence from `/proc`, argv and logs. This expands the AU staging graph to 13 WPs/70 vertices but
+does not expand the 94-row principal suite or grant implementation/live credit.
 
 T6-W15's four named base tests are mandatory, not illustrative: `outbox-transition-head.test.ts`
 proves a late immutable transition is ingested in order with its historical effect;
@@ -1104,7 +1116,7 @@ suite, satisfy the done-gate, or authorize dispatch before two quiet review roun
 `actionlint-check.py` pins actionlint 1.7.12, ignores repository suppression config for its
 authoritative run and compares the exact `(workflow, private-runner-label)` diagnostic multiset;
 an extra duplicate of an otherwise allowed label is red.
-`gates-selftest.py` recreates 131 meaningful structural corruption fixtures found across the cold reviews and
+`gates-selftest.py` recreates 133 meaningful structural corruption fixtures found across the cold reviews and
 requires every corrupted fixture to block. `.github/workflows/plan-integrity.yml` runs all five commands whenever
 the plan, triage, finding ids, gate code or workflow changes.
 
@@ -1513,8 +1525,9 @@ new blockers in the exact clean input
 [round-6 ledger](2026-09-01-round6-cold-review-ledger.md) records the provenance, semantic
 acceptance, scope/DAG and gate false-PASS findings. This repair narrows the affected contracts,
 adds exact evidence/test routing, hardens the structural gates and preserves the AU staging
-boundary at 30 source findings / 33 proposed ids, 12 new WPs and 4 extensions. Because these are
-normative changes, the quiet count remains zero: **NOT FROZEN · NO DISPATCH · NO AU PROMOTION**.
+boundary at 30 source findings / 33 proposed ids, 12 new WPs and 4 extensions in that historical
+input. The current staging split adds T8-W4a/T8-W4b (13 new WPs total). Because these are normative
+changes, the quiet count remains zero: **NOT FROZEN · NO DISPATCH · NO AU PROMOTION**.
 
 **Cold review — round 7 (2026-09-01 — NOT QUIET).** Six of eight independent reviewers found new
 blockers in exact clean input `289826e358050c7d6b4517fc8a21f79c733c7e32`; two reviewers reported
