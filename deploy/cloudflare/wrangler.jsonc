@@ -4,6 +4,10 @@
   "name": "corelink-spawn-worker",
   "main": "src/index.ts",
   "compatibility_date": "2026-06-01",
+  // Vitest supplies MODE="test" for legacy fixtures that predate the mandatory
+  // CONTAINMENT binding. Production is fixed at build time, so Wrangler removes
+  // that fixture-only compatibility branch from the deployed Worker bundle.
+  "define": { "import.meta.env.MODE": "\"production\"" },
   // CoreLink infra account (gmhelmold@gmail.com's Account) — the same account
   // that hosts the R2 CAS (corelink-chunk-*/corelink-manifest-*), so a runner
   // Container here reads the cache IN-NETWORK (the ADR-0008 moat win).
@@ -133,7 +137,12 @@
       // fail-open KV counter). A plain DO — just DO storage, not a container class.
       { "name": "CONCURRENCY_SLOTS", "class_name": "ConcurrencySlotsDO" },
       // DevEnv persistent sandbox container Durable Object (WP-01)
-      { "name": "RUNNER_DEVENV_DO", "class_name": "RunnerDevEnvDO" }
+      { "name": "RUNNER_DEVENV_DO", "class_name": "RunnerDevEnvDO" },
+      // Containment (T3-W17): ONE singleton DO (fixed id "global") is the durable
+      // authority for intake/re-drive containment — dedupes invalid-config signals,
+      // persists pause/event records, and owns the ordered resume backlog. A plain
+      // DO (SQLite-backed), not a container-image class. Addressed with idFromName("global").
+      { "name": "CONTAINMENT", "class_name": "ContainmentDO" }
     ]
   },
   "migrations": [
@@ -142,7 +151,8 @@
     { "tag": "v3", "new_sqlite_classes": ["CredStashDO"] },
     { "tag": "v4", "new_sqlite_classes": ["MetricsDO"] },
     { "tag": "v5", "new_sqlite_classes": ["ConcurrencySlotsDO"] },
-    { "tag": "v6", "new_sqlite_classes": ["RunnerDevEnvDO"] }
+    { "tag": "v6", "new_sqlite_classes": ["RunnerDevEnvDO"] },
+    { "tag": "v7", "new_sqlite_classes": ["ContainmentDO"] }
   ],
 
   // The runner container. IMPORTANT (ADR-0008 / README wrinkle #1): the image is
