@@ -16,12 +16,20 @@ Usage: python3 docs/plan/wp-check.py docs/plan/2026-08-30-golive-remediation-pla
 """
 
 import fnmatch
+import hashlib
 import re
 import sys
 from collections import Counter
 from pathlib import Path
 
 INV = {f"INV-{i}" for i in range(1, 9)}
+
+# A contract freeze is only meaningful if silent prose drift is visible to the
+# structural gate. Update this digest only with an explicitly reviewed contract
+# revision and a matching negative self-test.
+T3_W17_CONTRACT_SHA256 = (
+    "b3aad07907bc92305d021165aa92d658bcb37d7a9c5708c2a57de6c390160d65"
+)
 
 # WP -> (items owned, invariants live, exclusive scope, wave)
 WP = {
@@ -873,6 +881,9 @@ EVIDENCE_ARTIFACT_RE = re.compile(r"docs/plan/evidence/[A-Za-z0-9._-]+\.json")
 # These are structural dispatch contracts, not claims that the corresponding
 # implementation or production evidence is semantically sufficient.
 REQUIRED_DAG_DIRECT_PREDECESSORS = {
+    # The containment implementation consumes the reconciled immutable ledger;
+    # the staged delta must not revive its stale "no predecessor" wording.
+    "T3-W17": {"T0-W1"},
     # A deploy cannot resume while the containment proof or the fleet-busy
     # credential/force-deploy owner action is still outstanding.
     "T2-W2b": {"T3-W18", "O-FLEETBUSY", "T8-W4a", "T8-W4b"},
@@ -1022,6 +1033,13 @@ REQUIRED_DAG_SCOPE_ATOMS = {
 # provider, C1-C5 and synthetic-ingest integration without taking base delivery
 # or credential-isolation ownership.
 EXACT_DAG_SCOPE_ATOMS = {
+    "T3-W17": {
+        "deploy/cloudflare/src/index.ts",
+        "deploy/cloudflare/src/metrics.ts",
+        "deploy/cloudflare/wrangler.jsonc",
+        "deploy/cloudflare/test/containment-intake.test.ts",
+        "deploy/cloudflare/test/containment-redrive.test.ts",
+    },
     "T6-W1": {
         "scripts/orphan-box-check.selftest.sh",
         "scripts/pre-merge-gate-check.selftest.sh",
@@ -1183,6 +1201,7 @@ EXACT_DAG_SCOPE_ATOMS = {
 }
 
 EXACT_DAG_ARTIFACTS = {
+    "T3-W17": {"docs/plan/evidence/T3-W17-containment-test.json"},
     "T6-W4": {"docs/plan/evidence/T6-W4-stress-host.json"},
     "T6-W15": {"docs/plan/evidence/T6-W15-monitor-base.json"},
     "T1-W6": {"docs/plan/evidence/T1-W6-pg-durable-live.json"},
@@ -3243,6 +3262,16 @@ dag_path = Path(__file__).with_name(DAG_FILENAME)
 delta_path = Path(__file__).with_name(STAGED_FILENAME)
 triage_path = Path(__file__).with_name("union-triage-remaining.md")
 handoff_path = Path(__file__).parent.parent / "handoff" / HANDOFF_FILENAME
+contract_path = Path(__file__).with_name("contracts") / "T3-W17.md"
+if not contract_path.is_file():
+    fail.append(f"T3-W17 frozen contract missing: {contract_path}")
+else:
+    contract_digest = hashlib.sha256(contract_path.read_bytes()).hexdigest()
+    if contract_digest != T3_W17_CONTRACT_SHA256:
+        fail.append(
+            "T3-W17 frozen contract digest mismatch: "
+            f"expected {T3_W17_CONTRACT_SHA256}, got {contract_digest}"
+        )
 fail.extend(
     validate_cross_document_contracts(
         plan_path, delta_path, dag_path, triage_path, handoff_path
