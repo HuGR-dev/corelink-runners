@@ -583,8 +583,9 @@ REQUIRED_DAG_SEMANTIC_CLAUSES = {
         "latch is durable, pools/"
         "sockets are gone, typed 503 is returned and zero action occurs. The latch may "
         "clear only after complete T6-W12 candidate/cutover/active-final reproof, exact "
-        "T1-W6 rebinding to the new tuple and an explicit manual reset; none alone "
-        "restores PG."
+        "T1-W6 rebinding to the new tuple and T1-W6's atomic consumption of a fresh, "
+        "unexpired, one-shot `O-PG-REARM` authorization bound to the final tuple/scans/"
+        "poll and exact flag transition; none alone restores PG."
     ),
     "sensitivity receipt excluded from PG interlock": (
         "Sensitivity receipt/health is excluded from the rearm attestation and PG "
@@ -697,6 +698,31 @@ REQUIRED_DAG_SEMANTIC_CLAUSES = {
         "signer trust/revocation set. Those fields and their canonical digest are the "
         "sole activation authority."
     ),
+    "canary activation successor authority": (
+        "Acceptance atomically persists `activation_generation` and tuple digest as a "
+        "monotonic high-water; `previous_activation_digest` must equal the accepted "
+        "predecessor, `activated_at` must be trusted and fresh, `expires_at` must be "
+        "later and unexpired, and `revocation_state_digest` must prove the signer and "
+        "authorization remain current."
+    ),
+    "canary activation FAILED versus UNKNOWN": (
+        "Reused/regressed generation, missing/wrong predecessor, fork/equivocation, "
+        "stale/future activation, expired tuple, revoked signer/authorization, wrong "
+        "signer role or replay is a verified violation and therefore `FAILED`; "
+        "unavailable or unverifiable activation evidence is `UNKNOWN`."
+    ),
+    "canary phase credit and fixture isolation": (
+        "Phase 1 alone may credit A6.22 and Phase 2 alone may credit AU6.17. Fixture "
+        "keys, identities, sequence/outbox namespaces, manifest/verifier stores and "
+        "activation high-water stores are cryptographically separate from production "
+        "lanes; fixtures cannot arm production timers, mutate production signer/"
+        "activation high-water or satisfy a production ACK."
+    ),
+    "canary implementation artifact exception": (
+        "T6-W14's named deterministic default-off artifact is the explicit "
+        "implementation-artifact exception: it proves bind/default-off behavior only, "
+        "never activation, live A6.22/AU6.17 credit or mutation authority."
+    ),
     "canary fail-visible state machine": (
         "Every probe result records exactly one of `SKIPPED`, `FAILED`, `UNKNOWN` or "
         "`SERVED`, plus reason, deployed version, `monitor_rearm_tuple` digest and "
@@ -711,6 +737,45 @@ REQUIRED_DAG_SEMANTIC_CLAUSES = {
     "O-CFRATE read-only owner evidence": (
         "Resolving the token is read-only evidence and authorizes no provider mutation, "
         "Cloudflare re-enable, proof credit or dispatch."
+    ),
+    "one-shot owner mutation authority": (
+        f"`{OWNER_ACTION_AUTHORIZATION}`. The signature covers the preceding fourteen "
+        "fields; independent role/key verification, strict `not_before <= consumed_at "
+        "< expires_at`, and atomic one-time append-only consumption precede the bound "
+        "mutation."
+    ),
+    "one-shot owner replay refusal": (
+        "Ready-set membership, credentials, a green test or an expired/replayed token "
+        "authorizes no mutation."
+    ),
+    "R6 exact relay authority": (
+        f"`{R6_RELAY_SCHEMA}`. The signature covers the preceding twenty fields; "
+        "tenants differ, the key is identical and both directions are exactly 20/20 "
+        "refusals."
+    ),
+    "R6 fail-closed provenance": (
+        "Runners/plan self-attestation, mutable sibling evidence, unverified role or "
+        "any allowed cross-tenant read leaves R6 unresolved and T5-W1 blocked."
+    ),
+    "O-CFRATE formula and owner binding": (
+        "`invoice_line_payload_digest` binds the exact provider/account/plan/period/SKU/"
+        "unit/currency/quantity/amount/rate bounds and proves the line formula. "
+        "`cost_quantity_reconciliation_digest` binds all usage lines, billable "
+        "quantities, observed cost, manifest and receipt/cursor roots. "
+        "`canonical_payload_digest` commits every preceding field under the O-CFRATE "
+        "domain tag, and the owner signature verifies those bytes under the "
+        "independently verified Billing-Administrator role/key/epoch."
+    ),
+    "O-CFRATE observed cost recomputation": (
+        "`observed_cost` is recomputed from the complete provider quantities, verified "
+        "effective rate and the declared credits/discounts/tax treatment and must remain "
+        "at or below `cost_budget`."
+    ),
+    "O-CFRATE finite positive domain": (
+        "All identifiers/digests/signatures/formulas/units are nonempty; counts are non-"
+        "negative integers; quantity/rate/threshold/money fields are finite canonical "
+        "non-negative decimals; the interval is nonempty; quantity, denominator and "
+        "served count are positive; and at least one billable quantity is positive."
     ),
 }
 
@@ -855,6 +920,7 @@ REQUIRED_DAG_DIRECT_PREDECESSORS = {
     "T4-W2": {"R2"},
     "T5-W4": {"T5-W1"},
     "T5-W1": {"R6"},
+    "T7-W5": {"O-CFRATE"},
     "T3-W16": {"T6-W15", "O-CFINVENTORY", "O-CFCANCEL"},
     "T1-W5": {"T3-W18"},
     "T8-W7": {"T8-W4", "T2-W2a", "T2-W2b", "T2-W4"},
@@ -2059,14 +2125,16 @@ def canonical_schema_section(document, label):
             return contract_section_between(
                 document, "### Wave 4", "## 6. Owner arming"
             )
+        if label == "R6 relay":
+            return contract_section_between(
+                document, "## 7. Cross-repo relays", "## 8. Gates and the done-gate"
+            )
         return contract_section_between(
             document, "## 1. The live picture", "## 2. Scope"
         )
     if "# Round-3 remediation delta" in document:
         if label == "canary activation":
-            return contract_section_between(
-                document, "## 3. Acceptance proposals", "### 3.1"
-            )
+            return contract_section_between(document, "## 2. Decisions", "### 3.1")
         return contract_section_between(
             document, "## 2. Decisions", "## 3. Acceptance proposals"
         )
@@ -2074,7 +2142,11 @@ def canonical_schema_section(document, label):
         return contract_section_between(
             document, "## Registry contract", "## Canonical node table"
         )
-    if "# Union catalog" in document and label == "O-CFRATE evidence":
+    if "# Union catalog" in document and label in {
+        "O-CFRATE evidence",
+        "owner action authorization",
+        "R6 relay",
+    }:
         return document[: document.index("# Union catalog")]
     return ""
 
@@ -2106,8 +2178,9 @@ def validate_canary_split_contract(document, label):
             r"phase[- ]?2.{0,900}(?:exactly )?20.{0,120}transactions"
         ),
         "Phase 1 seal precedes Phase 2": (
-            r"(?:only after.{0,120}phase[- ]?1.{0,160}sealed.{0,160}phase[- ]?2|"
-            r"after.{0,120}artifact.{0,100}sealed.{0,160}phase[- ]?2)"
+            r"(?:only after the phase[- ]?1 artifact is sealed and immutable may "
+            r"phase[- ]?2|phase[- ]?2.{0,160}(?:only after|issued only after).{0,80}"
+            r"(?:the )?immutable phase[- ]?1 (?:artifact|root))"
         ),
         "Phase 2 cannot contaminate Phase 1 artifact": (
             r"phase[- ]?2.{0,900}excluded.{0,180}cannot.{0,100}"
@@ -2127,6 +2200,14 @@ def validate_canary_split_contract(document, label):
             r"owner_authorization_digest.{0,80}signature.{0,180}"
             r"(?:every other field|every identity|all identity).{0,240}"
             r"(?:byte-identical|remains)"
+        ),
+        "Phase 2 requires probe exact 1 and synthetic exact 1": (
+            r"(?:phase[- ]?2.{0,900}(?:probe exact 1.{0,100}synthetic exact 1|"
+            r"successor.{0,160}synthetic.{0,80}(?:exact )?1.{0,900}"
+            r"(?:only phase[- ]?2 field changes|exact permitted phase[- ]?2 delta).{0,700}"
+            r"(?:probe flag value|probe-value).{0,160}(?:byte-identical|remains))|"
+            r"only later T6-W10.{0,600}with probe exact 1.{0,120}synthetic exact 0"
+            r".{0,700}only after.{0,300}T6-W10 seal/arm synthetic exact 1)"
         ),
     }
     return [
@@ -2151,12 +2232,42 @@ def validate_cf_rate_cross_document(document, label):
             r"(?:sequence|previous/root digests).{0,180}"
             r"(?:signature|signs|witness(?:ed)?(?:_at| time| key))"
         ),
+        "threshold policy digest binds thresholds and formulas to witness": (
+            r"threshold_policy_digest.{0,80}binds.{0,120}"
+            r"(?:threshold|all three|every).{0,120}formula.{0,360}witness"
+        ),
         "provider-issued invoice/usage source": (
             r"provider-issued (?:invoice|usage export|invoice or usage export)"
         ),
         "half-open budget interval": (
             r"(?:half-open|inclusive-start/exclusive-end|"
             r"\[budget_interval_start,budget_interval_end\))"
+        ),
+        "failure numerator formula is recomputable": (
+            r"(?:failure_rate_numerator_formula|failure_rate_numerator|failure-rate "
+            r"numerator formula).{0,80}failed_attempt_count.{0,80}"
+            r"retry_count.{0,80}idle_wakeup_count"
+        ),
+        "failure denominator formula is recomputable": (
+            r"(?:failure_rate_denominator_formula|failure_rate_denominator|denominator "
+            r"formula).{0,80}attempt_count.{0,80}"
+            r"retry_count.{0,80}idle_wakeup_count"
+        ),
+        "invoice line digest binds its arithmetic": (
+            r"invoice_line_payload_digest.{0,500}(?:line_amount.{0,80}quantity.{0,80}"
+            r"effective_rate|line formula|effective-rate bounds)"
+        ),
+        "cost reconciliation digest binds observed cost": (
+            r"cost_quantity_reconciliation_digest.{0,260}(?:usage|invoice) lines?.{0,180}"
+            r"(?:observed_cost|observed cost)"
+        ),
+        "canonical payload has verified owner authority": (
+            r"canonical_payload_digest.{0,220}(?:every preceding|complete).{0,160}"
+            r"owner[_ ]signature.{0,220}(?:independently verified|role authority)"
+        ),
+        "numeric domain is finite and nonnegative": (
+            r"(?:quantities|quantity/rate).{0,100}(?:finite canonical )?non-negative "
+            r"decimals"
         ),
     }
     errors = [
@@ -2171,6 +2282,44 @@ def validate_cf_rate_cross_document(document, label):
     ):
         errors.append(f"{label} O-CFRATE mislabels its half-open interval as closed")
     return errors
+
+
+def validate_owner_and_r6_cross_document(document, label):
+    """Freeze owner-mutation and tenant-isolation authority in every source."""
+
+    normalized = normalized_contract_text(document)
+    requirements = {
+        "owner authorization signature coverage": (
+            r"signature (?:authenticates|covers) the preceding fourteen "
+            r"(?:ordered )?fields"
+        ),
+        "owner role and key verification": (
+            r"(?:owner key/epoch and role must verify|role/key verifies independently|"
+            r"role/key validation|independent role/key verification)"
+        ),
+        "owner authorization one-shot consumption": (
+            r"(?:atomically consumed once into an append-only|atomic.{0,60}"
+            r"append-only one-time consumption|atomic one-time append-only consumption)"
+        ),
+        "R6 role-exclusive owner": (
+            r"corelink-server.{0,80}CAS tenant-isolation owner.{0,80}Security/Storage role"
+        ),
+        "R6 signature coverage": (
+            r"signature (?:authenticates|covers) the preceding twenty fields"
+        ),
+        "R6 distinct-tenant bidirectional refusal proof": (
+            r"(?:tenants (?:are )?distinct|distinct tenants|tenants differ).{0,100}"
+            r"(?:memoize key.{0,40}(?:byte-)?identical|identical memoize key|"
+            r"the key is identical).{0,140}"
+            r"(?:20/20.{0,80}(?:both directions|each direction|in both directions)|"
+            r"both.{0,80}20/20)"
+        ),
+    }
+    return [
+        f"{label} owner/R6 contract omits {requirement}"
+        for requirement, pattern in requirements.items()
+        if re.search(pattern, normalized, re.IGNORECASE) is None
+    ]
 
 
 def validate_cross_document_contracts(
@@ -2193,6 +2342,14 @@ def validate_cross_document_contracts(
         "canary activation": (
             CANARY_ACTIVATION_TUPLE,
             (plan_path, delta_path, dag_path),
+        ),
+        "owner action authorization": (
+            OWNER_ACTION_AUTHORIZATION,
+            (plan_path, delta_path, dag_path, triage_path),
+        ),
+        "R6 relay": (
+            R6_RELAY_SCHEMA,
+            (plan_path, delta_path, dag_path, triage_path),
         ),
     }
     visible_documents = {}
@@ -2234,6 +2391,11 @@ def validate_cross_document_contracts(
         if document_path in visible_documents:
             errors.extend(
                 validate_cf_rate_cross_document(
+                    visible_documents[document_path], document_path.name
+                )
+            )
+            errors.extend(
+                validate_owner_and_r6_cross_document(
                     visible_documents[document_path], document_path.name
                 )
             )

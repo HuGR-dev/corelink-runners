@@ -1338,14 +1338,16 @@ def canonical_schema_section(document: str, label: str) -> str:
             return contract_section_between(
                 document, "### Wave 4", "## 6. Owner arming"
             )
+        if label == "R6 relay":
+            return contract_section_between(
+                document, "## 7. Cross-repo relays", "## 8. Gates and the done-gate"
+            )
         return contract_section_between(
             document, "## 1. The live picture", "## 2. Scope"
         )
     if "# Round-3 remediation delta" in document:
         if label == "canary activation":
-            return contract_section_between(
-                document, "## 3. Acceptance proposals", "### 3.1"
-            )
+            return contract_section_between(document, "## 2. Decisions", "### 3.1")
         return contract_section_between(
             document, "## 2. Decisions", "## 3. Acceptance proposals"
         )
@@ -1353,7 +1355,11 @@ def canonical_schema_section(document: str, label: str) -> str:
         return contract_section_between(
             document, "## Registry contract", "## Canonical node table"
         )
-    if "# Union catalog" in document and label == "O-CFRATE evidence":
+    if "# Union catalog" in document and label in {
+        "O-CFRATE evidence",
+        "owner action authorization",
+        "R6 relay",
+    }:
         return document[: document.index("# Union catalog")]
     return ""
 
@@ -1386,8 +1392,9 @@ def validate_canary_split_contract(document: str, label: str) -> list[str]:
             r"phase[- ]?2.{0,900}(?:exactly )?20.{0,120}transactions"
         ),
         "Phase 1 seal precedes Phase 2": (
-            r"(?:only after.{0,120}phase[- ]?1.{0,160}sealed.{0,160}phase[- ]?2|"
-            r"after.{0,120}artifact.{0,100}sealed.{0,160}phase[- ]?2)"
+            r"(?:only after the phase[- ]?1 artifact is sealed and immutable may "
+            r"phase[- ]?2|phase[- ]?2.{0,160}(?:only after|issued only after).{0,80}"
+            r"(?:the )?immutable phase[- ]?1 (?:artifact|root))"
         ),
         "Phase 2 cannot contaminate Phase 1 artifact": (
             r"phase[- ]?2.{0,900}excluded.{0,180}cannot.{0,100}"
@@ -1406,6 +1413,14 @@ def validate_canary_split_contract(document: str, label: str) -> list[str]:
             r"activated_at.{0,80}expires_at.{0,80}owner_authorization_digest.{0,80}"
             r"signature.{0,180}(?:every other field|every identity|all identity)"
             r".{0,240}(?:byte-identical|remains)"
+        ),
+        "Phase 2 requires probe exact 1 and synthetic exact 1": (
+            r"(?:phase[- ]?2.{0,900}(?:probe exact 1.{0,100}synthetic exact 1|"
+            r"successor.{0,160}synthetic.{0,80}(?:exact )?1.{0,900}"
+            r"(?:only phase[- ]?2 field changes|exact permitted phase[- ]?2 delta).{0,700}"
+            r"(?:probe flag value|probe-value).{0,160}(?:byte-identical|remains))|"
+            r"only later T6-W10.{0,600}with probe exact 1.{0,120}synthetic exact 0"
+            r".{0,700}only after.{0,300}T6-W10 seal/arm synthetic exact 1)"
         ),
     }
     return [
@@ -1430,12 +1445,42 @@ def validate_cf_rate_cross_document(document: str, label: str) -> list[str]:
             r"(?:sequence|previous/root digests).{0,180}"
             r"(?:signature|signs|witness(?:ed)?(?:_at| time| key))"
         ),
+        "threshold policy digest binds thresholds and formulas to witness": (
+            r"threshold_policy_digest.{0,80}binds.{0,120}"
+            r"(?:threshold|all three|every).{0,120}formula.{0,360}witness"
+        ),
         "provider-issued invoice/usage source": (
             r"provider-issued (?:invoice|usage export|invoice or usage export)"
         ),
         "half-open budget interval": (
             r"(?:half-open|inclusive-start/exclusive-end|"
             r"\[budget_interval_start,budget_interval_end\))"
+        ),
+        "failure numerator formula is recomputable": (
+            r"(?:failure_rate_numerator_formula|failure_rate_numerator|failure-rate "
+            r"numerator formula).{0,80}failed_attempt_count.{0,80}"
+            r"retry_count.{0,80}idle_wakeup_count"
+        ),
+        "failure denominator formula is recomputable": (
+            r"(?:failure_rate_denominator_formula|failure_rate_denominator|denominator "
+            r"formula).{0,80}attempt_count.{0,80}"
+            r"retry_count.{0,80}idle_wakeup_count"
+        ),
+        "invoice line digest binds its arithmetic": (
+            r"invoice_line_payload_digest.{0,500}(?:line_amount.{0,80}quantity.{0,80}"
+            r"effective_rate|line formula|effective-rate bounds)"
+        ),
+        "cost reconciliation digest binds observed cost": (
+            r"cost_quantity_reconciliation_digest.{0,260}(?:usage|invoice) lines?.{0,180}"
+            r"(?:observed_cost|observed cost)"
+        ),
+        "canonical payload has verified owner authority": (
+            r"canonical_payload_digest.{0,220}(?:every preceding|complete).{0,160}"
+            r"owner[_ ]signature.{0,220}(?:independently verified|role authority)"
+        ),
+        "numeric domain is finite and nonnegative": (
+            r"(?:quantities|quantity/rate).{0,100}(?:finite canonical )?non-negative "
+            r"decimals"
         ),
     }
     errors = [
@@ -1450,6 +1495,44 @@ def validate_cf_rate_cross_document(document: str, label: str) -> list[str]:
     ):
         errors.append(f"{label} O-CFRATE mislabels its half-open interval as closed")
     return errors
+
+
+def validate_owner_and_r6_cross_document(document: str, label: str) -> list[str]:
+    """Freeze owner-mutation and tenant-isolation authority in every source."""
+
+    normalized = normalized_contract_text(document)
+    requirements = {
+        "owner authorization signature coverage": (
+            r"signature (?:authenticates|covers) the preceding fourteen "
+            r"(?:ordered )?fields"
+        ),
+        "owner role and key verification": (
+            r"(?:owner key/epoch and role must verify|role/key verifies independently|"
+            r"role/key validation|independent role/key verification)"
+        ),
+        "owner authorization one-shot consumption": (
+            r"(?:atomically consumed once into an append-only|atomic.{0,60}"
+            r"append-only one-time consumption|atomic one-time append-only consumption)"
+        ),
+        "R6 role-exclusive owner": (
+            r"corelink-server.{0,80}CAS tenant-isolation owner.{0,80}Security/Storage role"
+        ),
+        "R6 signature coverage": (
+            r"signature (?:authenticates|covers) the preceding twenty fields"
+        ),
+        "R6 distinct-tenant bidirectional refusal proof": (
+            r"(?:tenants (?:are )?distinct|distinct tenants|tenants differ).{0,100}"
+            r"(?:memoize key.{0,40}(?:byte-)?identical|identical memoize key|"
+            r"the key is identical).{0,140}"
+            r"(?:20/20.{0,80}(?:both directions|each direction|in both directions)|"
+            r"both.{0,80}20/20)"
+        ),
+    }
+    return [
+        f"{label} owner/R6 contract omits {requirement}"
+        for requirement, pattern in requirements.items()
+        if re.search(pattern, normalized, re.IGNORECASE) is None
+    ]
 
 
 def validate_handoff_contract(handoff_path: Path) -> list[str]:
@@ -1556,6 +1639,10 @@ def validate_cf_rate_contract(dag_document: str) -> list[str]:
             r"wholly covered by the billing/export evidence\b"
         ),
         "predeclared thresholds": r"\bthresholds are predeclared before observation\b",
+        "independent threshold witness": (
+            r"\bbefore observation the independent witness appends it to the named log "
+            r"and signs the increasing sequence, previous/root digests and witness time\b"
+        ),
         "failure numerator formula": (
             r"\bcanonical failure-rate numerator formula is "
             r"failed_attempt_count \+ retry_count \+ idle_wakeup_count\b"
@@ -1569,6 +1656,10 @@ def validate_cf_rate_contract(dag_document: str) -> list[str]:
             r"\bremain at or below failure_rate_threshold\b"
         ),
         "cost budget comparison": r"\bremain at or below cost_budget\b",
+        "observed cost recomputation": (
+            r"\bobserved_cost is recomputed from the complete provider quantities, "
+            r"verified effective rate and the declared credits/discounts/tax treatment\b"
+        ),
         "cost-per-served formula": (
             r"\bcost_per_served_attempt=observed_cost/served_count\b"
         ),
@@ -1584,15 +1675,64 @@ def validate_cf_rate_contract(dag_document: str) -> list[str]:
         "missing accounting cannot pass": (
             r"\bmissing or unjoined accounting cannot PASS\b"
         ),
+        "finite nonnegative domain": (
+            r"\ball identifiers/digests/signatures/formulas/units are nonempty; counts "
+            r"are non-negative integers; quantity/rate/threshold/money fields are finite "
+            r"canonical non-negative decimals\b"
+        ),
+        "strict positive domain": (
+            r"\bthe interval is nonempty; quantity, denominator and served count are "
+            r"positive; and at least one billable quantity is positive\b"
+        ),
+        "invoice line formula digest": (
+            r"\binvoice_line_payload_digest binds the exact provider/account/plan/period/"
+            r"SKU/unit/currency/quantity/amount/rate bounds and proves the line formula\b"
+        ),
+        "cost quantity reconciliation digest": (
+            r"\bcost_quantity_reconciliation_digest binds all usage lines, billable "
+            r"quantities, observed cost, manifest and receipt/cursor roots\b"
+        ),
+        "canonical owner signature": (
+            r"\bcanonical_payload_digest commits every preceding field under the "
+            r"O-CFRATE domain tag, and the owner signature verifies those bytes under "
+            r"the independently verified Billing-Administrator role/key/epoch\b"
+        ),
         "no estimate substitution": (
             r"\bpublic list price, calculator, proxy-provider price, dashboard estimate "
             r"or unsigned transcription does not resolve it\b"
         ),
-        "single read-only consumer": (
-            r"\bonly T7-W5 consumes this token, reads but does not rewrite its artifact\b"
+        "hard T7-W5 prerequisite": (
+            r"\bO-CFRATE is a hard non-waivable prerequisite of every T7-W5 collection, "
+            r"derivation and publication; T7-W5 reads but does not rewrite it\b"
         ),
         "no re-enable or dispatch authority": (
             r"\bauthorizes no provider mutation, Cloudflare re-enable, proof credit or dispatch\b"
+        ),
+        "one-shot owner authorization schema": re.escape(OWNER_ACTION_AUTHORIZATION),
+        "one-shot authorization verification": (
+            r"\bsignature covers the preceding fourteen fields; independent role/key "
+            r"verification, strict not_before <= consumed_at < expires_at, and atomic "
+            r"one-time append-only consumption precede the bound mutation\b"
+        ),
+        "PG authorization binding": (
+            r"\bO-PG-REARM binds the exact final tuple/scans/poll/flag transition\b"
+        ),
+        "per-phase canary authorization": (
+            r"\beach canary phase needs a distinct O-CANARY-ACTIVATE token, and Phase "
+            r"2's may issue only after the immutable Phase-1 root\b"
+        ),
+        "non-authority and replay refusal": (
+            r"\bready-set membership, credentials, a green test or an expired/replayed "
+            r"token authorizes no mutation\b"
+        ),
+        "R6 exact relay schema": re.escape(R6_RELAY_SCHEMA),
+        "R6 signature and bidirectional refusals": (
+            r"\bsignature covers the preceding twenty fields; tenants differ, the key "
+            r"is identical and both directions are exactly 20/20 refusals\b"
+        ),
+        "R6 fail-closed authority": (
+            r"\brunners/plan self-attestation, mutable sibling evidence, unverified role "
+            r"or any allowed cross-tenant read leaves R6 unresolved and T5-W1 blocked\b"
         ),
     }
     return [
@@ -1674,7 +1814,7 @@ def validate_final_monitor_deploy_contract(dag_document: str) -> list[str]:
             r"\bonly this final green monitor/provider version may precede T1-W6\b"
         ),
         "last version-bound rearm check": (
-            r"\brecords the exact sealed monitor_rearm_tuple digest, verifies all seven "
+            r"\brecords the exact sealed monitor_rearm_tuple digest, verifies all eleven "
             r"fields unchanged and performs (?:a fresh version-bound monitor/provider "
             r"poll|the last version-bound monitor/provider-polling check) immediately "
             r"before rearming PG\b"
@@ -2080,16 +2220,17 @@ def validate_rearm_interlock_contract(dag_document: str) -> list[str]:
             r"\bprovider-poll and delivery health observations are at most 60 seconds "
             r"old\b"
         ),
-        "shared attestation/ACK signer registry": (
-            r"\bthe seventh tuple field commits the exact accepted "
+        "five role-exclusive signer registries": (
+            r"\bthe last five tuple fields separately commit the exact "
             r"\(signer_key_id,signer_epoch\) registry, trust-anchor digests and "
-            r"revocation state for both rearm attestations and authenticated ingest ACKs\b"
+            r"revocation state for rearm, ingest-ACK, page-ACK, recovery and "
+            r"manifest-issuer roles\b"
         ),
-        "wrong-valid signer refusal": (
-            r"\ba cryptographically valid signature from a signer/epoch not in that "
+        "cross-role signer refusal": (
+            r"\bcross-role trust is forbidden; a signature outside its exact role "
             r"digest is invalid\b"
         ),
-        "signer input drift": (r"\bchanging any of those inputs is tuple drift\b"),
+        "signer input drift": (r"\bchanging any role input is tuple drift\b"),
         "T1-W6 interlock module": re.escape(
             "crates/corelink-fabric-server/src/monitor_interlock.rs"
         ),
@@ -2173,8 +2314,8 @@ def validate_rearm_interlock_contract(dag_document: str) -> list[str]:
         "T1-W6 interlock test": re.escape(
             "crates/corelink-fabric-server/tests/monitor_tuple_interlock.rs"
         ),
-        "seven-field and attestation negatives": (
-            r"\bindependently mutates all seven tuple fields and injects unavailable, "
+        "eleven-field and attestation negatives": (
+            r"\bindependently mutates all eleven tuple fields and injects unavailable, "
             r"missing, stale, bad-signature, wrong-nonce, replayed and cached "
             r"attestations\b"
         ),
@@ -2193,10 +2334,12 @@ def validate_rearm_interlock_contract(dag_document: str) -> list[str]:
             r"\bevery negative case is green only when the latch is durable, "
             r"pools/sockets are gone, typed 503 is returned and zero action occurs\b"
         ),
-        "manual-reset-only recovery": (
+        "one-shot-authorized manual recovery": (
             r"\bthe latch may clear only after complete T6-W12 "
             r"candidate/cutover/active-final reproof, exact T1-W6 rebinding to the new "
-            r"tuple and an explicit manual reset; none alone restores PG\b"
+            r"tuple and T1-W6's atomic consumption of a fresh, unexpired, one-shot "
+            r"O-PG-REARM authorization bound to the final tuple/scans/poll and exact "
+            r"flag transition; none alone restores PG\b"
         ),
         "pre-commit and in-commit pause fixtures": (
             r"\bmonitor_tuple_interlock_race\.rs pauses each action immediately before "
@@ -2264,7 +2407,7 @@ def validate_signed_ack_contract(dag_document: str) -> list[str]:
         "ingest-commit/time refusal": r"\bingest commit or commit time\b",
         "stale/revoked/wrong-valid signer refusal": (
             r"\brejects a stale, revoked or wrong-but-currently-valid signer under "
-            r"the seventh (?:monitor_rearm_tuple|tuple) field\b"
+            r"ingest_ack_signer_trust_revocation_digest\b"
         ),
         "monitor-side fixture boundary": (
             r"\bin both candidate and active-final passes, T6-W12's monitor-side "
@@ -2340,7 +2483,7 @@ def validate_page_ack_and_recovery_contract(dag_document: str) -> list[str]:
     ]
     requirements = {
         "page ACK signature coverage": (
-            r"\bsignature authenticates the preceding fourteen fields in that order\b"
+            r"\bsignature authenticates the preceding fifteen fields in that order\b"
         ),
         "current signer trust": (
             r"\bverifies the signer/epoch against current trust/revocation\b"
@@ -2354,6 +2497,10 @@ def validate_page_ack_and_recovery_contract(dag_document: str) -> list[str]:
         ),
         "effective tuple binding": (
             r"\btoken's tuple digest must equal the effective monitor_rearm_tuple\b"
+        ),
+        "manifest generation binding": (
+            r"\bmanifest digest must resolve to the unique accepted manifest "
+            r"generation at or above the verifier's persisted manifest high-water\b"
         ),
         "trusted expiry bound": (
             r"\btrusted acknowledgement time must be no later than expires_at\b"
@@ -2376,11 +2523,21 @@ def validate_page_ack_and_recovery_contract(dag_document: str) -> list[str]:
             r"\bvalid token is journaled before incident state advances\b"
         ),
         "manifest signature coverage": (
-            r"\bsignature authenticates the preceding twelve fields in that order\b"
+            r"\bsignature authenticates the preceding nineteen fields in that order "
+            r"under the role-exclusive manifest-issuer trust and revocation set\b"
         ),
         "manifest monotonic hash chain": (
             r"\bmanifests form one monotonic hash-linked sequence through "
-            r"previous_manifest_digest\b"
+            r"manifest_generation and previous_manifest_digest\b"
+        ),
+        "manifest witness high-water": (
+            r"\bevery accepted generation is durably appended to worm_log_id with an "
+            r"independently verified witness checkpoint.+persisted manifest-generation "
+            r"and witness-head high-water marks\b"
+        ),
+        "manifest fork and witness refusal": (
+            r"\brollback, fork, equivocation, missing predecessor, reused generation, "
+            r"witness-root discontinuity or issuer id/epoch regression is RED\b"
         ),
         "manifest presealed authority": (
             r"\bactive/next epochs, bounded overlap, complete revoked set, recovery "
@@ -2389,10 +2546,10 @@ def validate_page_ack_and_recovery_contract(dag_document: str) -> list[str]:
         "manifest RED matrix": (
             r"\brollback, fork, missing predecessor, epoch regression, overlap outside "
             r"its bounds, revoked active/next key, wrong tuple, unavailable custody or "
-            r"an untrusted manifest signer is RED\b"
+            r"an untrusted or role-confused manifest issuer is RED\b"
         ),
         "canonical manifest digest": (
-            r"\bcanonical digest of all thirteen manifest fields is "
+            r"\bcanonical digest of all twenty manifest fields is "
             r"signer_rotation_manifest_digest\b"
         ),
         "durable ACK_RECOVERY state": (
@@ -2403,7 +2560,7 @@ def validate_page_ack_and_recovery_contract(dag_document: str) -> list[str]:
             r"\bcannot resample, create a successor or perform the gated action\b"
         ),
         "recovery signature coverage": (
-            r"\bsignature authenticates the preceding eighteen fields in that order\b"
+            r"\bsignature authenticates the preceding twenty fields in that order\b"
         ),
         "no second ingest": (
             r"\bonly from the persisted original ingest CAS and ACK, with no second "
@@ -2413,10 +2570,10 @@ def validate_page_ack_and_recovery_contract(dag_document: str) -> list[str]:
             r"\bseparate token signed by a currently trusted recovery signer\b"
         ),
         "recovery manifest resolution": (
-            r"\bmanifest digest must resolve to the unique current hash-linked manifest "
-            r"that proves the original signer's revocation, the recovery signer's "
-            r"active custody/epoch, the bounded overlap and both the original and "
-            r"current tuple binding\b"
+            r"\bmanifest digest, generation and witness root must resolve to the unique "
+            r"current hash-linked manifest at or above the verifier's persisted high-water "
+            r"that proves the original signer's revocation, the recovery signer's active "
+            r"custody/epoch, the bounded overlap and both the original and current tuple binding\b"
         ),
         "recovery manifest RED": (
             r"\bmissing, stale, forked or mismatched manifest is RED\b"
@@ -2549,9 +2706,26 @@ def validate_canary_flag_contract(dag_document: str) -> list[str]:
             r"malformed-config cases have zero scheduled wake, container "
             r"handle/fetch/start, PG/exporter socket and billable active-minute delta\b"
         ),
-        "nineteen-field sole activation authority": (
-            r"\bthose nineteen ordered fields and their canonical digest are the sole "
-            r"activation authority\b"
+        "signed twenty-eight-field activation authority": (
+            r"\bsignature authenticates the preceding twenty-seven fields in that "
+            r"order under the role-exclusive canary-activation signer trust/revocation "
+            r"set\. those fields and their canonical digest are the sole activation authority\b"
+        ),
+        "activation successor high-water": (
+            r"\bacceptance atomically persists activation_generation and tuple digest "
+            r"as a monotonic high-water; previous_activation_digest must equal the "
+            r"accepted predecessor\b"
+        ),
+        "activation freshness and revocation": (
+            r"\bactivated_at must be trusted and fresh, expires_at must be later and "
+            r"unexpired, and revocation_state_digest must prove the signer and "
+            r"authorization remain current\b"
+        ),
+        "activation replay classification": (
+            r"\breused/regressed generation, missing/wrong predecessor, fork/equivocation, "
+            r"stale/future activation, expired tuple, revoked signer/authorization, wrong "
+            r"signer role or replay is a verified violation and therefore FAILED; "
+            r"unavailable or unverifiable activation evidence is UNKNOWN\b"
         ),
         "three-way byte-identical activation": (
             r"\bcanary producer, independent external verifier and rearm decision have "
@@ -2563,12 +2737,37 @@ def validate_canary_flag_contract(dag_document: str) -> list[str]:
             r"have their exact intended values, that the monitor tuple is current, and "
             r"that activated_at is trusted and fresh\b"
         ),
-        "activation drift fail-closed": (
-            r"\bmissing, stale, malformed or contradictory bytes, any field/digest "
-            r"drift, post-check config/runtime/key/flag change, or disagreement among "
-            r"canary, verifier and rearm atomically disables both lanes, returns both "
-            r"flags to exact-0, emits fail-visible UNKNOWN, invalidates prior probe "
-            r"credit and requires a new T6-W10 activation proof\b"
+        "activation verified failures fail closed": (
+            r"\bany cryptographically verified stale, malformed or contradictory bytes, "
+            r"verified field/digest drift, observed post-check config/runtime/key/flag "
+            r"change, or verified disagreement among canary, verifier and rearm atomically "
+            r"disables both lanes, returns both flags to exact-0, emits fail-visible FAILED, "
+            r"invalidates prior probe credit and requires a new T6-W10 activation proof\b"
+        ),
+        "UNKNOWN only for unavailable evidence": (
+            r"\bonly unavailable or unverifiable evidence emits fail-visible UNKNOWN; it "
+            r"keeps or returns both flags to exact-0, invalidates prior probe credit and "
+            r"requires a new T6-W10 activation proof\b"
+        ),
+        "exact Phase-2 permitted delta": (
+            r"\bonly permitted Phase-1-to-Phase-2 field changes are activation_phase, "
+            r"activation_generation, previous_activation_digest, synthetic_flag_value, "
+            r"activated_at, expires_at, owner_authorization_digest and signature; every "
+            r"other field.+remains byte-identical\b"
+        ),
+        "phase-exclusive credit": (
+            r"\bPhase 1 alone may credit A6.22 and Phase 2 alone may credit AU6.17\b"
+        ),
+        "fixture isolation": (
+            r"\bfixture keys, identities, sequence/outbox namespaces, manifest/verifier "
+            r"stores and activation high-water stores are cryptographically separate "
+            r"from production lanes; fixtures cannot arm production timers, mutate "
+            r"production signer/activation high-water or satisfy a production ACK\b"
+        ),
+        "implementation artifact exception": (
+            r"\bT6-W14's named deterministic default-off artifact is the explicit "
+            r"implementation-artifact exception: it proves bind/default-off behavior "
+            r"only, never activation, live A6.22/AU6.17 credit or mutation authority\b"
         ),
         "T6-W10 exclusive activation ownership": (
             r"\bT6-W10 exclusively owns this later activation plus the 20/20 AU6.17 "
@@ -3184,8 +3383,18 @@ def validate_au_dag_routing(
         "T4-W8": {"O-BILLING", "T4-W2", "T9-W1"},
         "T6-W15": {"T6-W4", "O-MONITORHOST"},
         "T6-W13": {"T6-W4", "T6-W9", "O-CANARY", "T7-W4b"},
-        "T6-W10": {"T6-W6", "T6-W12", "T6-W14"},
+        "T6-W10": {
+            "T6-W6",
+            "T6-W9",
+            "T6-W12",
+            "T6-W14",
+            "T1-W6",
+            "O-CANARY-ACTIVATE",
+            "T7-W4b",
+        },
         "T5-W4": {"T5-W1"},
+        "T5-W1": {"R6"},
+        "T7-W5": {"O-CFRATE"},
         "T8-W7": {"T8-W4", "T2-W2a", "T2-W2b", "T2-W4"},
         "T3-W16": {"T6-W15", "O-CFINVENTORY", "O-CFCANCEL"},
     }
@@ -3201,7 +3410,14 @@ def validate_au_dag_routing(
     # would restore the unsafe inverse edge even if all new edges remained.
     round10_exact_direct_predecessors = {
         "T1-W5": {"T3-W10", "T3-W18", "O-MINTKEY", "T7-W4b"},
-        "T1-W6": {"D12", "T1-W5", "T6-W12", "O-CFINVENTORY", "T7-W4b"},
+        "T1-W6": {
+            "D12",
+            "T1-W5",
+            "T6-W12",
+            "O-CFINVENTORY",
+            "O-PG-REARM",
+            "T7-W4b",
+        },
         "T6-W12": {
             "T6-W15",
             "T6-W9",
@@ -3672,6 +3888,14 @@ def check(
             CANARY_ACTIVATION_TUPLE,
             (plan_path, delta_path, dag_path),
         ),
+        "owner action authorization": (
+            OWNER_ACTION_AUTHORIZATION,
+            (triage_path, plan_path, delta_path, dag_path),
+        ),
+        "R6 relay": (
+            R6_RELAY_SCHEMA,
+            (triage_path, plan_path, delta_path, dag_path),
+        ),
     }
     cached_contract_documents: dict[Path, str] = {}
     for label, (literal, contract_paths) in cross_document_contracts.items():
@@ -3711,6 +3935,11 @@ def check(
     for contract_path in (plan_path, delta_path, dag_path, triage_path):
         failures.extend(
             validate_cf_rate_cross_document(
+                cached_contract_documents.get(contract_path, ""), contract_path.name
+            )
+        )
+        failures.extend(
+            validate_owner_and_r6_cross_document(
                 cached_contract_documents.get(contract_path, ""), contract_path.name
             )
         )

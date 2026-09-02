@@ -45,6 +45,13 @@ EXPECTED_MUTATION_INVENTORY = frozenset(
         "actionlint-unexpected-workflow",
         "actionlint-weakened-sha-binding",
         "ambiguous-canary-status.md",
+        "activation-artifact-exception-weakened.md",
+        "activation-expiry-accepted.md",
+        "activation-fixture-isolation-weakened.md",
+        "activation-permitted-delta-weakened.md",
+        "activation-phase-credit-swapped.md",
+        "activation-replay-accepted.md",
+        "activation-verified-negative-unknown.md",
         "au-bucket-drift.md",
         "au-invalid-kind.md",
         "au-scope-overlap.md",
@@ -89,6 +96,9 @@ EXPECTED_MUTATION_INVENTORY = frozenset(
         "inverted-t6-w15-t6-w12-edge.md",
         "kind-drift.md",
         "legacy-au-alias.md",
+        "manifest-fork-accepted.md",
+        "manifest-rollback-accepted.md",
+        "manifest-witness-discontinuity-accepted.md",
         "missing-ack-token-scope.md",
         "missing-au-serial-edge-dag.md",
         "missing-canary-activation-field.md",
@@ -99,11 +109,15 @@ EXPECTED_MUTATION_INVENTORY = frozenset(
         "missing-interlock-race-scope.md",
         "missing-journal-reconciler-scope.md",
         "missing-o-cfcancel.md",
+        "missing-o-canary-activate-predecessor.md",
+        "missing-o-cfrate-predecessor.md",
+        "missing-o-pg-rearm-predecessor.md",
         "missing-page-ack-binding.md",
         "missing-pg-fence-scope.md",
         "missing-r2-before-t4-w2.md",
+        "missing-r6-before-t5-w1.md",
         "missing-recovery-manifest-digest.md",
-        "missing-selftests-workflow-scope.md",
+        "forbidden-t6-w1-workflow-scope.md",
         "missing-sensitivity-receipt-isolation.md",
         "missing-signer-manifest-binding.md",
         "missing-signer-trust-tuple-field.md",
@@ -125,24 +139,36 @@ EXPECTED_MUTATION_INVENTORY = frozenset(
         "no-wake-artifact-wrong-owner.md",
         "no-wake-target.test.ts-t6w14-missing.md",
         "ocfrate-closed-interval.md",
+        "ocfrate-domain-weakened.md",
+        "ocfrate-failure-formula-weakened.md",
+        "ocfrate-line-formula-weakened.md",
         "ocfrate-missing-threshold-proof-dag.md",
         "ocfrate-missing-threshold-proof-delta.md",
         "ocfrate-missing-threshold-proof-main.md",
         "ocfrate-missing-threshold-proof-triage.md",
         "ocfrate-non-provider-source.md",
+        "ocfrate-observed-cost-formula-weakened.md",
+        "ocfrate-owner-signature-weakened.md",
+        "ocfrate-policy-id-only.md",
+        "ocfrate-threshold-witness-weakened.md",
         "opaque-extra-a-row.md",
         "outbox-periodic-head.test-missing.md",
         "outbox-quarantine.test-missing.md",
         "outbox-transition-head.test-missing.md",
         "ownership-drift.md",
+        "owner-auth-cross-doc-drift.md",
+        "owner-auth-replay-allowed.md",
+        "owner-auth-schema-weakened.md",
         "pg-unset-enables.md",
         "phantom-dag-wp.md",
         "phase1-12-acks.md",
         "phase1-12-requests.md",
         "phase1-12-ticks.md",
         "phase1-before-phase2.md",
+        "phase1-unrelated-artifact-ordering.md",
         "phase2-20-transactions.md",
         "phase2-no-contamination.md",
+        "phase2-probe-zero.md",
         "producer-test-cycle.md",
         "ready-set-fence-missing.md",
         "ready-set-fence-unclosed.md",
@@ -153,6 +179,9 @@ EXPECTED_MUTATION_INVENTORY = frozenset(
         "renamed-heading.md",
         "reset-array-selftests.yml",
         "retrospective-journal.md",
+        "r6-cross-doc-drift.md",
+        "r6-cross-tenant-read-allowed.md",
+        "r6-schema-weakened.md",
         "rules.ts-t6w14-missing.md",
         "source-au-swap.md",
         "summary-corruption.md",
@@ -162,6 +191,7 @@ EXPECTED_MUTATION_INVENTORY = frozenset(
         "t6w14-flags-zero-zero.md",
         "t6w14-forbidden-arming-delta.md",
         "t6w14-zero-action.md",
+        "t6w1-missing-script-scope.md",
         "types.ts-t6w14-missing.md",
         "unstable-canary-activation.md",
         "wave2-reordered.md",
@@ -1400,8 +1430,8 @@ def main() -> int:
             missing_alerting_depth_predecessor.write_text(
                 replace_once(
                     dag_text,
-                    "| T6-W10 | W3 live proof | T6-W6, T6-W9, T6-W12, T6-W14, T1-W6, T7-W4b |",
-                    "| T6-W10 | W3 live proof | T6-W6, T6-W9, T6-W12, T1-W6, T7-W4b |",
+                    "| T6-W10 | W3 live proof | T6-W6, T6-W9, T6-W12, T6-W14, T1-W6, O-CANARY-ACTIVATE, T7-W4b |",
+                    "| T6-W10 | W3 live proof | T6-W6, T6-W9, T6-W12, T1-W6, O-CANARY-ACTIVATE, T7-W4b |",
                     "T6-W10 T6-W14 predecessor",
                 ),
                 encoding="utf-8",
@@ -1657,8 +1687,9 @@ def main() -> int:
             missing_signer_trust_field.write_text(
                 replace_once(
                     dag_text,
-                    ",attestation_ack_signer_trust_revocation_digest)",
-                    ")",
+                    ",page_ack_signer_trust_revocation_digest,"
+                    "ack_recovery_signer_trust_revocation_digest,",
+                    ",ack_recovery_signer_trust_revocation_digest,",
                     "monitor-rearm signer-trust tuple field",
                 ),
                 encoding="utf-8",
@@ -1689,27 +1720,25 @@ def main() -> int:
                 overrides={DAG: missing_canary_flag_scope},
             )
 
-            # T6-W1's CI row must retain the workflow that discovers and runs
-            # every tracked shell selftest.  A present-but-unscoped workflow
-            # is not an executable gate.
-            missing_selftests_workflow_scope = (
-                work / "missing-selftests-workflow-scope.md"
-            )
-            missing_selftests_workflow_scope.write_text(
-                replace_once(
+            # T6-W1 owns only its three scripts. Workflow wiring belongs to
+            # T2-W3, so reintroducing the former workflow atom is overlap.
+            forbidden_t6w1_workflow_scope = work / "forbidden-t6-w1-workflow-scope.md"
+            forbidden_t6w1_workflow_scope.write_text(
+                replace_in_row(
                     dag_text,
-                    "`.github/workflows/selftests.yml`; ",
-                    "",
-                    "T6-W1 selftests workflow scope",
+                    "| T6-W1 |",
+                    "`scripts/pre-merge-gate-check.sh`",
+                    "`scripts/pre-merge-gate-check.sh`; `.github/workflows/selftests.yml`",
+                    "T6-W1 forbidden selftests workflow scope",
                 ),
                 encoding="utf-8",
             )
             require_mirrored_wp(
-                "WP T6-W1 missing selftests workflow scope",
+                "WP T6-W1 rejects workflow scope owned by T2-W3",
                 PLAN,
                 False,
-                work / "selftests-workflow-scope-mirror",
-                overrides={DAG: missing_selftests_workflow_scope},
+                work / "forbidden-t6-w1-workflow-scope-mirror",
+                overrides={DAG: forbidden_t6w1_workflow_scope},
             )
 
             # A listed atom is not effectively owned when the same row carves
@@ -1943,7 +1972,9 @@ def main() -> int:
             missing_recovery_manifest_digest.write_text(
                 replace_once(
                     dag_text,
-                    "revocation_record_digest,signer_rotation_manifest_digest,current_monitor_rearm_tuple_digest,",
+                    "revocation_record_digest,signer_rotation_manifest_digest,"
+                    "signer_manifest_generation,signer_manifest_witness_root_digest,"
+                    "current_monitor_rearm_tuple_digest,",
                     "revocation_record_digest,current_monitor_rearm_tuple_digest,",
                     "ACK_RECOVERY signer manifest digest",
                 ),
@@ -2216,8 +2247,17 @@ def main() -> int:
             )
             for slug, source_document, old, new, role in semantic_mutants:
                 mutant = work / f"{slug}.md"
+                mutated_document = replace_once(source_document, old, new, slug)
+                if slug == "phase1-before-phase2":
+                    mutated_document = replace_once(
+                        mutated_document,
+                        "Phase 2's may issue only after the immutable Phase-1\nroot.",
+                        "Phase 2 may issue before any Phase-1 root.",
+                        "Phase-2 owner-token ordering",
+                    )
                 mutant.write_text(
-                    replace_once(source_document, old, new, slug), encoding="utf-8"
+                    mutated_document,
+                    encoding="utf-8",
                 )
                 if role == "main":
                     require(f"WP rejects {slug}", "wp-check.py", mutant, False)
@@ -2246,6 +2286,421 @@ def main() -> int:
                     require(
                         f"AU rejects {slug}", "au-check.py", TRIAGE, False, dag=mutant
                     )
+
+            # Round-13 security clauses get independent physical mutations.
+            # Each fixture changes one authority, continuity, classification,
+            # formula or isolation rule and must block without relying on a
+            # companion schema corruption.
+            dag_security_mutants = (
+                (
+                    "manifest-rollback-accepted",
+                    "rollback, fork, equivocation, missing predecessor, reused generation,\n"
+                    "witness-root discontinuity or issuer id/epoch regression is RED.",
+                    "rollback is accepted; fork, equivocation, missing predecessor, reused generation,\n"
+                    "witness-root discontinuity or issuer id/epoch regression is RED.",
+                    False,
+                ),
+                (
+                    "manifest-fork-accepted",
+                    "rollback, fork, equivocation, missing predecessor, reused generation,\n"
+                    "witness-root discontinuity or issuer id/epoch regression is RED.",
+                    "rollback is RED; fork is accepted; equivocation, missing predecessor, reused generation,\n"
+                    "witness-root discontinuity or issuer id/epoch regression is RED.",
+                    False,
+                ),
+                (
+                    "manifest-witness-discontinuity-accepted",
+                    "rollback, fork, equivocation, missing predecessor, reused generation,\n"
+                    "witness-root discontinuity or issuer id/epoch regression is RED.",
+                    "rollback, fork, equivocation, missing predecessor and reused generation are RED;\n"
+                    "witness-root discontinuity is accepted.",
+                    False,
+                ),
+                (
+                    "activation-replay-accepted",
+                    "wrong signer role or replay is a verified violation and therefore `FAILED`; unavailable or\n"
+                    "unverifiable activation evidence is `UNKNOWN`.",
+                    "wrong signer role is `FAILED`; replay is accepted and unavailable activation evidence is `UNKNOWN`.",
+                    True,
+                ),
+                (
+                    "activation-expiry-accepted",
+                    "expired tuple, revoked signer/authorization,",
+                    "expired tuple is accepted; revoked signer/authorization,",
+                    True,
+                ),
+                (
+                    "activation-permitted-delta-weakened",
+                    "`previous_activation_digest`, `synthetic_flag_value`, `activated_at`, `expires_at`,\n"
+                    "`owner_authorization_digest` and `signature`; every other field, including both lane identities,",
+                    "`previous_activation_digest`, `synthetic_flag_value`, `producer_image_digest`, `activated_at`,\n"
+                    "`expires_at`, `owner_authorization_digest` and `signature`; selected other fields may drift,",
+                    True,
+                ),
+                (
+                    "activation-fixture-isolation-weakened",
+                    "cryptographically separate from production lanes; fixtures cannot arm production timers, mutate\n"
+                    "production signer/activation high-water or satisfy a production ACK.",
+                    "shared with production lanes; fixtures may arm production timers and satisfy a production ACK.",
+                    True,
+                ),
+                (
+                    "activation-phase-credit-swapped",
+                    "Phase 1 alone may credit A6.22 and Phase 2 alone may credit AU6.17.",
+                    "Either phase may credit A6.22 or AU6.17.",
+                    True,
+                ),
+                (
+                    "activation-artifact-exception-weakened",
+                    "implementation-artifact exception: it proves bind/default-off\n"
+                    "behavior only, never activation, live A6.22/AU6.17 credit or mutation authority.",
+                    "implementation artifact: it proves activation and live A6.22/AU6.17 credit.",
+                    True,
+                ),
+                (
+                    "activation-verified-negative-unknown",
+                    "returns both flags to exact-`0`, emits fail-visible `FAILED`,",
+                    "returns both flags to exact-`0`, emits fail-visible `UNKNOWN`,",
+                    False,
+                ),
+                (
+                    "owner-auth-replay-allowed",
+                    "Ready-set membership, credentials, a green test or an expired/replayed token authorizes no\n"
+                    "mutation.",
+                    "Ready-set membership or an expired/replayed token authorizes the mutation.",
+                    True,
+                ),
+                (
+                    "ocfrate-owner-signature-weakened",
+                    "`canonical_payload_digest` commits every preceding\n"
+                    "field under the O-CFRATE domain tag, and the owner signature verifies those bytes under the\n"
+                    "independently verified Billing-Administrator role/key/epoch.",
+                    "`canonical_payload_digest` omits fields and an unverified named owner may sign it.",
+                    True,
+                ),
+                (
+                    "ocfrate-threshold-witness-weakened",
+                    "Before observation the independent\n"
+                    "witness appends it to the named log and signs the increasing sequence, previous/root digests and\n"
+                    "witness time; local/mutable timestamps are invalid.",
+                    "After observation the owner may write a mutable local threshold timestamp.",
+                    True,
+                ),
+                (
+                    "ocfrate-line-formula-weakened",
+                    "the exact provider/account/plan/period/SKU/unit/currency/quantity/amount/rate bounds and proves the\n"
+                    "line formula.",
+                    "selected provider fields but does not prove the line formula.",
+                    True,
+                ),
+                (
+                    "ocfrate-observed-cost-formula-weakened",
+                    "`observed_cost` is recomputed from the complete provider quantities, verified effective rate and\n"
+                    "the declared credits/discounts/tax treatment and must remain at or below `cost_budget`.",
+                    "`observed_cost` may be copied from a local estimate and may exceed `cost_budget`.",
+                    True,
+                ),
+                (
+                    "ocfrate-domain-weakened",
+                    "All identifiers/digests/signatures/formulas/units\n"
+                    "are nonempty; counts are non-negative integers; quantity/rate/threshold/money fields are finite\n"
+                    "canonical non-negative decimals; the interval is nonempty; quantity, denominator and served count\n"
+                    "are positive; and at least one billable quantity is positive.",
+                    "Blank identifiers, negative counts, NaN money and zero quantity are accepted.",
+                    True,
+                ),
+                (
+                    "ocfrate-failure-formula-weakened",
+                    "`failed_attempt_count + retry_count + idle_wakeup_count`; its denominator formula is\n"
+                    "`attempt_count + retry_count + idle_wakeup_count`.",
+                    "`failed_attempt_count`; its denominator formula is `attempt_count`.",
+                    False,
+                ),
+                (
+                    "r6-cross-tenant-read-allowed",
+                    "unverified role or any allowed cross-tenant read leaves R6 unresolved and T5-W1 blocked.",
+                    "unverified role or an allowed cross-tenant read resolves R6 and unblocks T5-W1.",
+                    True,
+                ),
+            )
+            for slug, old, new, check_wp in dag_security_mutants:
+                mutant = work / f"{slug}.md"
+                mutant.write_text(
+                    replace_once(dag_text, old, new, slug), encoding="utf-8"
+                )
+                if check_wp:
+                    require_mirrored_wp(
+                        f"WP rejects {slug}",
+                        PLAN,
+                        False,
+                        work / f"{slug}-mirror",
+                        overrides={DAG: mutant},
+                    )
+                require(
+                    f"AU rejects {slug}",
+                    "au-check.py",
+                    TRIAGE,
+                    False,
+                    dag=mutant,
+                )
+
+            owner_auth_schema = re.findall(
+                r"OWNER_ACTION_AUTHORIZATION=\([^`\r\n]+\)", dag_text
+            )
+            if len(owner_auth_schema) != 1:
+                raise AssertionError(
+                    "owner authorization fixture requires one DAG schema"
+                )
+            owner_auth_weakened = work / "owner-auth-schema-weakened.md"
+            owner_auth_weakened.write_text(
+                replace_once(
+                    dag_text,
+                    owner_auth_schema[0],
+                    owner_auth_schema[0].replace("nonce,", "reusable_hint,", 1),
+                    "owner authorization nonce",
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP rejects weakened owner authorization schema",
+                PLAN,
+                False,
+                work / "owner-auth-schema-weakened-mirror",
+                overrides={DAG: owner_auth_weakened},
+            )
+            require(
+                "AU rejects weakened owner authorization schema",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=owner_auth_weakened,
+            )
+
+            r6_schema = re.findall(r"R6_RELAY=\([^`\r\n]+\)", dag_text)
+            if len(r6_schema) != 1:
+                raise AssertionError("R6 fixture requires one DAG schema")
+            r6_schema_weakened = work / "r6-schema-weakened.md"
+            r6_schema_weakened.write_text(
+                replace_once(
+                    dag_text,
+                    r6_schema[0],
+                    r6_schema[0].replace(
+                        "role_authority_digest,", "self_asserted_role,", 1
+                    ),
+                    "R6 role authority",
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP rejects weakened R6 schema",
+                PLAN,
+                False,
+                work / "r6-schema-weakened-mirror",
+                overrides={DAG: r6_schema_weakened},
+            )
+            require(
+                "AU rejects weakened R6 schema",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=r6_schema_weakened,
+            )
+
+            predecessor_mutants = (
+                ("missing-o-pg-rearm-predecessor", "| T1-W6 |", "O-PG-REARM, "),
+                (
+                    "missing-o-canary-activate-predecessor",
+                    "| T6-W10 |",
+                    "O-CANARY-ACTIVATE, ",
+                ),
+                ("missing-o-cfrate-predecessor", "| T7-W5 |", "O-CFRATE, "),
+                ("missing-r6-before-t5-w1", "| T5-W1 |", "R6"),
+            )
+            for slug, row_marker, predecessor in predecessor_mutants:
+                mutant = work / f"{slug}.md"
+                mutant.write_text(
+                    replace_in_row(
+                        dag_text,
+                        row_marker,
+                        predecessor,
+                        "—" if predecessor == "R6" else "",
+                        slug,
+                    ),
+                    encoding="utf-8",
+                )
+                require_mirrored_wp(
+                    f"WP rejects {slug}",
+                    PLAN,
+                    False,
+                    work / f"{slug}-mirror",
+                    overrides={DAG: mutant},
+                )
+                require(
+                    f"AU rejects {slug}",
+                    "au-check.py",
+                    TRIAGE,
+                    False,
+                    dag=mutant,
+                )
+
+            t6w1_missing_scope = work / "t6w1-missing-script-scope.md"
+            t6w1_missing_scope.write_text(
+                replace_in_row(
+                    dag_text,
+                    "| T6-W1 |",
+                    "`scripts/pre-merge-gate-check.selftest.sh`; ",
+                    "",
+                    "T6-W1 exact three-script scope",
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP rejects missing T6-W1 script scope",
+                PLAN,
+                False,
+                work / "t6w1-missing-script-scope-mirror",
+                overrides={DAG: t6w1_missing_scope},
+            )
+
+            phase1_unrelated_artifact = work / "phase1-unrelated-artifact-ordering.md"
+            phase1_unrelated_artifact.write_text(
+                replace_once(
+                    plan,
+                    "different authorization issued only after the immutable Phase-1\n"
+                    "artifact exists.",
+                    "different authorization issued after any unrelated\n"
+                    "artifact exists.",
+                    "explicit Phase-1 artifact ordering",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "WP rejects unrelated artifact as Phase-2 predecessor",
+                "wp-check.py",
+                phase1_unrelated_artifact,
+                False,
+            )
+            require(
+                "AU rejects unrelated artifact as Phase-2 predecessor",
+                "au-check.py",
+                TRIAGE,
+                False,
+                plan=phase1_unrelated_artifact,
+            )
+
+            phase2_probe_zero = work / "phase2-probe-zero.md"
+            phase2_probe_zero.write_text(
+                replace_once(
+                    dag_text,
+                    "Phase 2 begin and T6-W10 seal the next tuple with probe exact `1` "
+                    "and synthetic exact `1`.",
+                    "Phase 2 begin and T6-W10 seal the next tuple with probe exact `0` "
+                    "and synthetic exact `1`.",
+                    "Phase-2 exact 1/1 flag vector",
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP rejects Phase-2 probe=0 despite 20 transactions",
+                PLAN,
+                False,
+                work / "phase2-probe-zero-mirror",
+                overrides={DAG: phase2_probe_zero},
+            )
+            require(
+                "AU rejects Phase-2 probe=0 despite 20 transactions",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=phase2_probe_zero,
+            )
+
+            ocfrate_policy_id_only = work / "ocfrate-policy-id-only.md"
+            ocfrate_policy_id_only.write_text(
+                replace_once(
+                    dag_text,
+                    "`threshold_policy_digest` binds every threshold and formula.",
+                    "`threshold_policy_digest` identifies a generic policy version.",
+                    "O-CFRATE policy-to-threshold/formula binding",
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP rejects generic O-CFRATE policy id",
+                PLAN,
+                False,
+                work / "ocfrate-policy-id-only-mirror",
+                overrides={DAG: ocfrate_policy_id_only},
+            )
+            require(
+                "AU rejects generic O-CFRATE policy id",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=ocfrate_policy_id_only,
+            )
+
+            plan_owner_schemas = re.findall(
+                r"OWNER_ACTION_AUTHORIZATION=\([^`\r\n]+\)", plan
+            )
+            if len(plan_owner_schemas) != 1:
+                raise AssertionError(
+                    "cross-document owner fixture requires one main-plan schema"
+                )
+            owner_cross_doc = work / "owner-auth-cross-doc-drift.md"
+            owner_cross_doc.write_text(
+                replace_once(
+                    plan,
+                    plan_owner_schemas[0],
+                    plan_owner_schemas[0].replace("nonce,", "reusable_hint,", 1),
+                    "main-plan owner authorization schema",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "WP rejects cross-document owner authorization drift",
+                "wp-check.py",
+                owner_cross_doc,
+                False,
+            )
+            require(
+                "AU rejects cross-document owner authorization drift",
+                "au-check.py",
+                TRIAGE,
+                False,
+                plan=owner_cross_doc,
+            )
+
+            plan_r6_schemas = re.findall(r"R6_RELAY=\([^`\r\n]+\)", plan)
+            if len(plan_r6_schemas) != 1:
+                raise AssertionError(
+                    "cross-document R6 fixture requires one main schema"
+                )
+            r6_cross_doc = work / "r6-cross-doc-drift.md"
+            r6_cross_doc.write_text(
+                replace_once(
+                    plan,
+                    plan_r6_schemas[0],
+                    plan_r6_schemas[0].replace(
+                        "owner_key_epoch,", "owner_claimed_epoch,", 1
+                    ),
+                    "main-plan R6 owner epoch",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "WP rejects cross-document R6 drift",
+                "wp-check.py",
+                r6_cross_doc,
+                False,
+            )
+            require(
+                "AU rejects cross-document R6 drift",
+                "au-check.py",
+                TRIAGE,
+                False,
+                plan=r6_cross_doc,
+            )
 
             no_t6w10_predecessor = work / "t1w4-missing-t6w10-predecessor.md"
             no_t6w10_predecessor.write_text(
@@ -2623,7 +3078,7 @@ def main() -> int:
             weakened_activation_drift.write_text(
                 replace_once(
                     dag_text,
-                    "any field/digest drift, post-check config/runtime/key/flag\nchange,",
+                    "verified field/digest drift,\nobserved post-check config/runtime/key/flag change,",
                     "selected field drift,",
                     "canary activation drift fail-closed matrix",
                 ),

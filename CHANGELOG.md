@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-09-02 — Round-13 normative/checker alignment
+
+The post-review checker repair was aligned to normative follow-up `cfa1408` (replayed locally as
+`4259b6a`) without changing the Round-13 review result. WP and AU now enforce the 11-field monitor
+tuple; expanded ACK, signer-manifest, recovery, signed activation, owner-authorization, R6-relay and
+O-CFRATE contracts; the new owner-token predecessors; the exact T6-W1 scope; and the clarified
+Phase-1/Phase-2, artifact, activation and FAILED-versus-UNKNOWN semantics. The runtime-inventoried
+negative suite accepted all baselines and blocked its measured **164 corruptions**. This is a local
+structural diagnostic on later bytes, not remote CI evidence and not quiet, freeze, promotion,
+dispatch or green credit.
+
+The latest read-only observation at `2026-09-02T01:29:19Z` found fabricd version
+`40bf22a4-6c48-467d-9844-b4fc33e7a3ee` with `FABRIC_PG_DISABLED=1` and **3/3 inactive**, canary
+version `852277c1-9778-459f-b1ff-9d56fbe7c32f` with `FABRIC_PROBES_ENABLED=0`, and a returned
+runner detail page with **426 inactive / zero live** records. `check-host` returned `No instances
+found` and `active=0`; its aggregate `healthy=1` was inconsistent with those details. No health
+route, deploy, restart, delete or rearm operation occurred, and the observation is not immutable
+evidence or later authorization.
+
 ### 2026-09-01 — go-live plan Round 13 is 8/8 NOT QUIET; provenance repair only
 
 Round 13 reviewed the exact clean committed input
@@ -17,7 +36,7 @@ produced zero-job `startup_failure` suites for incident PR #531: GitHub must cre
 self-hosted CoreLink runner can receive it. No jobless suite or local PASS supplies green, freeze,
 dispatch or merge credit.
 
-The latest read-only containment configuration observation remains
+At that checkpoint, the latest read-only containment configuration observation was
 `2026-09-01T22:40:33Z`: fabricd version `40bf22a4-6c48-467d-9844-b4fc33e7a3ee` had
 `FABRIC_PG_DISABLED=1`, canary version `852277c1-9778-459f-b1ff-9d56fbe7c32f` had
 `FABRIC_PROBES_ENABLED=0`, and fabricd was **0 running / 3 inactive**. The subsequent

@@ -10,14 +10,14 @@ This subsection is the current resumable state. Read it before continuing any ol
 below.
 
 - **The latest read-only containment configuration observation was at
-  `2026-09-01T22:40:33Z`:** production `corelink-fabricd` version
-  `40bf22a4-6c48-467d-9844-b4fc33e7a3ee` had `FABRIC_PG_DISABLED=1`; production
-  `corelink-canary` version `852277c1-9778-459f-b1ff-9d56fbe7c32f` had
-  `FABRIC_PROBES_ENABLED=0`; detailed instances showed fabricd **0 running / 3 inactive** and the
-  runner fleet **0 running / 865 inactive / 18 stopped**. A later runner-only inventory read at
-  `2026-09-01T22:48:57Z` parsed **883 inactive / zero live** records. Neither observation is an
-  immutable review artifact or authority for a later live action. No health/status/deploy/restart/
-  delete/rearm operation occurred.
+  `2026-09-02T01:29:19Z`:** production `corelink-fabricd` version
+  `40bf22a4-6c48-467d-9844-b4fc33e7a3ee` had `FABRIC_PG_DISABLED=1` and **3/3 inactive**
+  instances; production `corelink-canary` version `852277c1-9778-459f-b1ff-9d56fbe7c32f` had
+  `FABRIC_PROBES_ENABLED=0`. The returned runner detail page contained **426 inactive / zero live**
+  records. `check-host` returned the full-instances text `No instances found` and `active=0`, while
+  its aggregate `healthy=1` was inconsistent with those details. This observation is not an
+  immutable review artifact or authority for a later live action. No health route, deploy, restart,
+  delete or rearm operation occurred.
 - **Canary exact-1 hardening is delivered:** PR #530 merged to `main` as
   `65540afe15fb65bfd431b631acfc971a7b0a2331`. The planning branch contains its equivalent code at
   `13ce6122f73b2d24de9c6b2a265fc2359cfd9d25`. This is source delivery, not a production deploy.
@@ -37,16 +37,17 @@ below.
   QUIET:** result **8/8 NOT QUIET, quiet count 0**. Every Round-13 reviewer reported a new blocker.
   This subsequent provenance/operations repair is a new unreviewed input whose exact clean commit
   identity must be supplied externally after commit; it inherits no quiet or readiness credit.
-- **Canonical new schemas:** `page_ack_token=(page_ack_version,incident_id,page_id,delivery_id,
-  destination,on_call_identity,on_call_schedule_digest,action,payload_digest,
-  monitor_rearm_tuple_digest,acknowledged_at,expires_at,signer_key_id,signer_epoch,signature)`;
-  `ACK_RECOVERY=(recovery_version,event_id,producer_seq,payload_digest,source,service,application,
-  key_id,credential_epoch,original_monitor_rearm_tuple_digest,ingest_commit_id,
-  original_ack_digest,revocation_record_digest,signer_rotation_manifest_digest,
-  current_monitor_rearm_tuple_digest,recovery_signer_key_id,recovery_signer_epoch,issued_at,
-  signature)`. Recovery is separate from the
-  canonical ACK, is anchored to the persisted original CAS/ACK, and creates no second ingest or
-  action.
+- **Canonical Round-13 schemas:**
+  `monitor_rearm_tuple=(deployed_monitor_image_digest,config_digest,ingress_key_epoch_map_digest,expected_source_registry_digest,delivery_route_policy_digest,provider_adapter_api_capability_digest,rearm_attestation_signer_trust_revocation_digest,ingest_ack_signer_trust_revocation_digest,page_ack_signer_trust_revocation_digest,ack_recovery_signer_trust_revocation_digest,signer_manifest_issuer_trust_revocation_digest)`;
+  `page_ack_token=(page_ack_version,incident_id,page_id,delivery_id,destination,on_call_identity,on_call_schedule_digest,action,payload_digest,monitor_rearm_tuple_digest,signer_rotation_manifest_digest,acknowledged_at,expires_at,signer_key_id,signer_epoch,signature)`;
+  `signer_rotation_manifest=(manifest_version,manifest_generation,active_signer_key_id,active_signer_epoch,next_signer_key_id,next_signer_epoch,revoked_signer_set_digest,overlap_started_at,overlap_expires_at,recovery_custody_digest,monitor_rearm_tuple_digest,previous_manifest_digest,manifest_issuer_key_id,manifest_issuer_epoch,worm_log_id,witness_checkpoint_sequence,witness_previous_root_digest,witness_root_digest,issued_at,signature)`;
+  `ACK_RECOVERY=(recovery_version,event_id,producer_seq,payload_digest,source,service,application,key_id,credential_epoch,original_monitor_rearm_tuple_digest,ingest_commit_id,original_ack_digest,revocation_record_digest,signer_rotation_manifest_digest,signer_manifest_generation,signer_manifest_witness_root_digest,current_monitor_rearm_tuple_digest,recovery_signer_key_id,recovery_signer_epoch,issued_at,signature)`;
+  `canary_activation_tuple=(activation_version,activation_phase,activation_generation,previous_activation_digest,lifecycle_source,lifecycle_service,lifecycle_application,lifecycle_key_id,lifecycle_credential_epoch,synthetic_source,synthetic_service,synthetic_application,synthetic_key_id,synthetic_credential_epoch,monitor_rearm_tuple_digest,producer_image_digest,producer_config_digest,probe_flag_name,probe_flag_value,synthetic_flag_name,synthetic_flag_value,activated_at,expires_at,revocation_state_digest,owner_authorization_digest,activation_signer_key_id,activation_signer_epoch,signature)`;
+  `OWNER_ACTION_AUTHORIZATION=(authorization_version,authorization_id,action,subject_digest,review_input_sha,issued_at,not_before,expires_at,nonce,owner_identity,owner_role,owner_key_id,owner_key_epoch,role_authority_digest,signature)`;
+  `R6_RELAY=(schema_version,relay_id,status,source_repo,source_commit_sha,owner_identity,owner_role,owner_key_id,owner_key_epoch,role_authority_digest,tenant_a_digest,tenant_b_digest,memoize_key_digest,a_to_b_trials,a_to_b_refusals,b_to_a_trials,b_to_a_refusals,cas_endpoint_version,test_artifact_digest,issued_at,signature)`; and
+  `O_CFRATE_EVIDENCE=(schema_version,obstacle_id,status,accountable_owner,accountable_role,owner_key_id,owner_key_epoch,owner_role_authority_digest,attested_at,review_input_sha,deployed_image_digest,provider,provider_api_or_export_version,account_id,plan,billing_period_start,billing_period_end,threshold_policy_digest,threshold_declared_at,threshold_witness_log_id,threshold_witness_sequence,threshold_witness_previous_root_digest,threshold_witness_root_digest,threshold_witnessed_at,threshold_witness_key_id,threshold_witness_signature,budget_interval_start,budget_interval_end,source,source_locator,receipt_id,receipt_sha256,activity_manifest_sha256,complete_provider_cursor,invoice_line_id,invoice_line_description,invoice_line_payload_digest,quantity,unit,currency,line_amount,effective_rate,effective_rate_formula,rate_effective_from,rate_effective_to,attempt_count,failed_attempt_count,retry_count,idle_wakeup_count,served_count,failure_rate_numerator_formula,failure_rate_denominator_formula,failure_rate_numerator,failure_rate_denominator,observed_failure_rate,failure_rate_threshold,billable_vcpu_hours,billable_gib_hours,observed_cost,cost_budget,cost_per_served_attempt,cost_per_served_attempt_threshold,cost_quantity_reconciliation_digest,canonical_payload_digest,owner_signature)`.
+  Recovery is separate from the canonical ACK, is anchored to the persisted original CAS/ACK and
+  unique current witnessed manifest, and creates no second ingest or action.
 - **Exact-input local validation:** local reproductions of CI, Plan integrity and DCO passed on clean
   `b3371e8b6e9803d0ceac3b5df2677366b37aad1b`. Plan-check, WP, AU, actionlint, Ruff format/check,
   both shell selftests and `git diff --check` passed; the negative selftest reported the literal
@@ -54,6 +55,15 @@ below.
   diagnostics, not remote CI evidence and not quiet, freeze, dispatch or green credit. No remote CI
   evidence is claimed for `b3371e8…`: the observed organization budget boundary is producing
   zero-job `startup_failure` suites before a runner can receive work.
+- **Post-review checker alignment diagnostic:** against normative follow-up `cfa1408` (replayed
+  locally as `4259b6a`) and the later checker repair, Plan, WP, AU and actionlint accepted their
+  baselines and the runtime-inventoried negative suite reported the literal result
+  `plan gate self-test: PASS — baselines accepted and 164 corruptions blocked`. The added mutations
+  cover the expanded signed schemas and their security semantics, activation phase/order/replay,
+  one-shot owner authorization, R6 isolation, O-CFRATE witness/formula binding and exact task scope.
+  This result must be paired with the externally supplied full checker commit SHA; it is a local
+  structural diagnostic on later bytes, not remote CI evidence and not quiet, promotion, freeze,
+  dispatch or green credit.
 - **Second executable containment PR:** isolated worktree
   `.claude/worktrees/incident-containment-hardening`, branch `incident/containment-hardening`, DCO
   commit `4c14fd3c2891f4329b82e6c5a120b1a4de270c07`, PR #531. It makes PG arm only for exact
