@@ -52,7 +52,8 @@ def git(root, *args):
 def fixture(parent, label, *, artifact=True, raw_artifact=None,
             observed_at="2026-09-01T12:00:00Z", version=VERSION,
             temporal_kind="point", window_end_at=None, status="PASS",
-            coverage="READY"):
+            coverage="READY", manifest_anchor=True, manifest_version=None,
+            registry_version=None):
     root = parent / label
     root.mkdir()
     artifact_path = "docs/plan/evidence/probe.json"
@@ -67,8 +68,18 @@ def fixture(parent, label, *, artifact=True, raw_artifact=None,
         "claims": ["A7.6"],
         "version": {"digest": version},
     }
+    manifest_version = manifest_version or version
+    registry_version = registry_version or version
+    authority_path = "docs/plan/deployed-authority/fabricd.json"
+    authority_record = {
+        "schema_version": "deployed-version-authority/v1",
+        "kind": "deployment-authority",
+        "digest": manifest_version,
+        "observed_at": "2026-09-01T12:00:00Z",
+    }
     write(root / artifact_path, raw_artifact if raw_artifact is not None else artifact_value,
           raw=raw_artifact is not None)
+    write(root / authority_path, authority_record)
     write(root / "docs/plan/evidence/manifest-v1.json", {
         "schema_version": "evidence-manifest/v1", "manifest_id": label,
         "coverage_status": coverage, "generated_at": FREEZE,
@@ -81,7 +92,7 @@ def fixture(parent, label, *, artifact=True, raw_artifact=None,
         "repository": "corelink-runners", "freeze_at": FREEZE,
         "max_age_seconds": 86400, "max_future_skew_seconds": 0,
         "coverage_status": coverage,
-        "deployed_versions": {"fabricd": {"digest": VERSION}},
+        "deployed_versions": {"fabricd": {"digest": registry_version}},
         "artifacts": [],
     })
     git(root, "init", "-q")
@@ -107,8 +118,18 @@ def fixture(parent, label, *, artifact=True, raw_artifact=None,
         registry["artifacts"] = [entry]
         write(root / "docs/plan/evidence/freshness-v1.json", registry)
         manifest = json.loads((root / "docs/plan/evidence/manifest-v1.json").read_text())
+        manifest["commit_sha"] = commit
         manifest["artifacts"] = [{"path": artifact_path, "artifact_id": "probe-current",
                                   "sha256": hashlib.sha256(artifact_bytes).hexdigest()}]
+        if manifest_anchor:
+            manifest["deployed_versions"] = {"fabricd": {
+                "digest": manifest_version,
+                "authority": {
+                    "commit_sha": commit,
+                    "path": authority_path,
+                    "sha256": hashlib.sha256((root / authority_path).read_bytes()).hexdigest(),
+                },
+            }}
         write(root / "docs/plan/evidence/manifest-v1.json", manifest)
         git(root, "add", ".")
         git(root, "commit", "-qm", "index fixture")
@@ -124,27 +145,26 @@ def run(root):
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
 
-def expect(root, good, label):
+def expect(root, good, label, needle=None):
     result = run(root)
     if (result.returncode == 0) != good:
         raise SystemExit(f"{label}: expected {'PASS' if good else 'FAIL'}, "
                          f"got {result.returncode}\n{result.stdout}")
+    if needle is not None and needle not in result.stdout:
+        raise SystemExit(f"{label}: expected diagnostic {needle!r}\n{result.stdout}")
 
 
 with tempfile.TemporaryDirectory(prefix="corelink-freshness-selftest-") as tmp:
     parent = pathlib.Path(tmp)
-    valid = fixture(parent, "valid")
-    # The fixture's second commit must update the source commit in the artifact;
-    # rebuild this one after the helper's intentional two-phase commit.
-    artifact = valid / "docs/plan/evidence/probe.json"
-    value = json.loads(artifact.read_text())
-    value["source"]["commit_sha"] = git(valid, "rev-parse", "HEAD")
-    write(artifact, value)
-    manifest = json.loads((valid / "docs/plan/evidence/manifest-v1.json").read_text())
-    manifest["artifacts"][0]["sha256"] = hashlib.sha256(artifact.read_bytes()).hexdigest()
-    write(valid / "docs/plan/evidence/manifest-v1.json", manifest)
-    git(valid, "add", "."); git(valid, "commit", "-qm", "bind source")
-    expect(valid, True, "fresh version-bound evidence")
+    expect(fixture(parent, "source-bytes-diverge"), False,
+           "artifact bytes must match source.commit_sha",
+           "bytes differ from artifact at source.commit_sha")
+    expect(fixture(parent, "registry-only-anchor", manifest_anchor=False), False,
+           "registry-only deployment anchor", "manifest.deployed_versions.fabricd: must be an object")
+    expect(fixture(parent, "divergent-deployed-version",
+                   manifest_version="sha256:" + "b" * 64), False,
+           "registry and manifest deployed versions diverge",
+           "disagrees with manifest deployed version")
 
     expect(fixture(parent, "stale", observed_at="2026-08-31T23:59:59Z"), False,
            "24h+1s stale evidence")
@@ -162,7 +182,7 @@ with tempfile.TemporaryDirectory(prefix="corelink-freshness-selftest-") as tmp:
            "stale continuous window")
     empty = fixture(parent, "red-baseline", artifact=False, coverage="RED")
     expect(empty, False, "honest RED baseline")
-print("probe-freshness-check selftest: PASS (8 cases; offline)")
+print("probe-freshness-check selftest: PASS (11 negative cases; offline)")
 PY
     ;;
   "") ;;
@@ -189,6 +209,9 @@ MANIFEST_FIELDS = {"schema_version", "manifest_id", "coverage_status", "generate
                    "repository", "commit_sha", "artifacts", "claims", "claim_sources",
                    "deployed_versions"}
 MANIFEST_ARTIFACT_FIELDS = {"path", "artifact_id", "sha256"}
+DEPLOYED_VERSION_FIELDS = {"id", "digest", "authority"}
+AUTHORITY_FIELDS = {"commit_sha", "path", "sha256"}
+AUTHORITY_RECORD_FIELDS = {"schema_version", "kind", "id", "digest", "observed_at"}
 ARTIFACT_FIELDS = {"schema_version", "artifact_id", "kind", "status", "observed_at",
                    "source", "claims", "version", "evidence", "notes"}
 SOURCE_FIELDS = {"repository", "commit_sha", "path"}
@@ -284,6 +307,42 @@ def git_bytes(commit, path):
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
+def commit_exists(commit, label):
+    result = subprocess.run(["git", "-C", str(root), "cat-file", "-e", f"{commit}^{{commit}}"],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode:
+        fail(f"{label}: declared commit does not exist")
+        return False
+    return True
+
+
+def committed_bytes(commit, relative_path, expected_sha, label):
+    """Return immutable bytes only when their commit, path and digest all bind.
+
+    A registry entry is merely an index.  The byte-bearing authority must be a
+    tracked object in a reachable commit, whose content hash is explicit.
+    """
+    if not isinstance(commit, str) or not HEX40.fullmatch(commit):
+        fail(f"{label}.commit_sha: must be 40 lowercase hex")
+        return None
+    path = safe_path(relative_path, f"{label}.path")
+    if path is None:
+        return None
+    if not isinstance(expected_sha, str) or not HEX64.fullmatch(expected_sha):
+        fail(f"{label}.sha256: must be 64 lowercase hex")
+        return None
+    if not commit_exists(commit, f"{label}.commit_sha"):
+        return None
+    result = git_bytes(commit, relative_path)
+    if result.returncode:
+        fail(f"{label}: declared path is absent at declared commit")
+        return None
+    if hashlib.sha256(result.stdout).hexdigest() != expected_sha:
+        fail(f"{label}: committed bytes do not match sha256")
+        return None
+    return result.stdout
+
+
 def version_valid(value, label):
     if not object_only(value, VERSION_FIELDS, label):
         return False
@@ -295,6 +354,14 @@ def version_valid(value, label):
     if isinstance(value, dict) and "digest" in value and (not isinstance(value["digest"], str) or not DIGEST.fullmatch(value["digest"])):
         fail(f"{label}.digest: must be sha256:<64 lowercase hex>")
     return isinstance(value, dict)
+
+
+def same_version(left, right):
+    """Require both version records to name exactly the same immutable version."""
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        return False
+    return (set(left) == set(right) and
+            all(left.get(field) == right.get(field) for field in left))
 
 
 registry = load(registry_path, "freshness registry")
@@ -331,6 +398,12 @@ if manifest.get("coverage_status") not in {"RED", "READY"}:
 if registry.get("coverage_status") != manifest.get("coverage_status"):
     fail("coverage_status: registry and manifest disagree")
 
+manifest_commit = manifest.get("commit_sha")
+if not isinstance(manifest_commit, str) or not HEX40.fullmatch(manifest_commit):
+    fail("manifest.commit_sha: must be 40 lowercase hex")
+elif not commit_exists(manifest_commit, "manifest.commit_sha"):
+    pass
+
 freeze = timestamp(registry.get("freeze_at"), "registry.freeze_at")
 if registry.get("max_age_seconds") != MAX_AGE:
     fail("registry.max_age_seconds: must be exactly 86400")
@@ -341,9 +414,70 @@ anchors = registry.get("deployed_versions")
 if not isinstance(anchors, dict):
     fail("registry.deployed_versions: must be an object")
     anchors = {}
+manifest_anchors = manifest.get("deployed_versions")
+if not isinstance(manifest_anchors, dict):
+    fail("manifest.deployed_versions: must be an object")
+    manifest_anchors = {}
+
+# An anchor is not evidence merely because the freshness registry says so.  It
+# must be mirrored by the evidence manifest and bind an immutable, hashed,
+# committed deployment-authority record, following the T7-W3 WP contract.
+verified_anchors = {}
 for name, anchor in anchors.items():
-    if not isinstance(name, str) or not name or not version_valid(anchor, f"registry.deployed_versions.{name}"):
+    label = f"registry.deployed_versions.{name}"
+    if not isinstance(name, str) or not name or not version_valid(anchor, label):
         continue
+    manifest_anchor = manifest_anchors.get(name)
+    manifest_label = f"manifest.deployed_versions.{name}"
+    if not object_only(manifest_anchor, DEPLOYED_VERSION_FIELDS, manifest_label):
+        continue
+    if not required(manifest_anchor, {"authority"}, manifest_label):
+        continue
+    manifest_version = {field: manifest_anchor[field] for field in ("id", "digest")
+                        if field in manifest_anchor}
+    if not version_valid(manifest_version, manifest_label):
+        continue
+    if not same_version(anchor, manifest_version):
+        fail(f"{label}: disagrees with manifest deployed version")
+        continue
+    authority = manifest_anchor.get("authority")
+    authority_label = f"{manifest_label}.authority"
+    if not object_only(authority, AUTHORITY_FIELDS, authority_label) or not required(
+            authority, AUTHORITY_FIELDS, authority_label):
+        continue
+    authority_path = authority.get("path") if isinstance(authority, dict) else None
+    if isinstance(authority_path, str) and not authority_path.startswith("docs/plan/deployed-authority/"):
+        fail(f"{authority_label}.path: must be under docs/plan/deployed-authority/")
+        continue
+    authority_bytes = committed_bytes(authority.get("commit_sha"), authority_path,
+                                      authority.get("sha256"), authority_label)
+    if authority_bytes is None:
+        continue
+    try:
+        authority_record = json.loads(authority_bytes.decode("utf-8"),
+                                      object_pairs_hook=reject_duplicates)
+    except (UnicodeDecodeError, ValueError) as exc:
+        fail(f"{authority_label}: must be UTF-8 JSON ({exc})")
+        continue
+    if not object_only(authority_record, AUTHORITY_RECORD_FIELDS, authority_label):
+        continue
+    if not required(authority_record, {"schema_version", "kind", "observed_at"}, authority_label):
+        continue
+    if (authority_record.get("schema_version") != "deployed-version-authority/v1" or
+            authority_record.get("kind") != "deployment-authority"):
+        fail(f"{authority_label}: invalid authority record kind/schema")
+        continue
+    timestamp(authority_record.get("observed_at"), f"{authority_label}.observed_at")
+    authority_version = {field: authority_record[field] for field in ("id", "digest")
+                         if field in authority_record}
+    if not version_valid(authority_version, authority_label):
+        continue
+    if not same_version(anchor, authority_version):
+        fail(f"{authority_label}: does not declare the registry/manifest version")
+        continue
+    verified_anchors[name] = anchor
+for name in sorted(set(manifest_anchors) - set(anchors)):
+    fail(f"manifest.deployed_versions.{name}: absent from freshness registry")
 
 manifest_entries = manifest.get("artifacts")
 if not isinstance(manifest_entries, list):
@@ -448,14 +582,21 @@ for index, entry in enumerate(registry_entries):
     if source_path != path_value:
         fail(f"{path_value}.source.path: must equal registry path")
     if isinstance(commit, str) and HEX40.fullmatch(commit) and source_path == path_value:
-        result = git_bytes(commit, source_path)
-        if result.returncode:
-            fail(f"{path_value}: source commit does not contain the declared path")
+        if commit != manifest_commit:
+            fail(f"{path_value}.source.commit_sha: disagrees with manifest.commit_sha")
+        elif commit_exists(commit, f"{path_value}.source.commit_sha"):
+            result = git_bytes(commit, source_path)
+            if result.returncode:
+                fail(f"{path_value}: source commit does not contain the declared path")
+            elif result.stdout != path.read_bytes():
+                fail(f"{path_value}: bytes differ from artifact at source.commit_sha")
+            elif hashlib.sha256(result.stdout).hexdigest() != manifest_entry.get("sha256"):
+                fail(f"{path_value}: source.commit_sha bytes differ from manifest sha256")
     version = artifact.get("version")
     if not version_valid(version, f"{path_value}.version"):
         continue
     matches = []
-    for anchor in anchors.values():
+    for anchor in verified_anchors.values():
         if not isinstance(anchor, dict):
             continue
         fields = set(version) | set(anchor)
@@ -473,8 +614,8 @@ for path in sorted(set(indexed) - seen):
 if registry.get("coverage_status") == "READY":
     if not registry_entries:
         fail("coverage_status READY: no current probe evidence")
-    if not anchors:
-        fail("coverage_status READY: no deployment version anchors")
+    if not verified_anchors:
+        fail("coverage_status READY: no manifest-correlated deployment version anchors")
 if registry.get("coverage_status") == "RED":
     fail("coverage_status RED: no evidence credit is available")
 if not registry_entries and registry.get("coverage_status") != "RED":
