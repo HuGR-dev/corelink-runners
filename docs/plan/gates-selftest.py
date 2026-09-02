@@ -116,6 +116,8 @@ EXPECTED_MUTATION_INVENTORY = frozenset(
         "missing-pg-fence-scope.md",
         "missing-r2-before-t4-w2.md",
         "missing-r6-before-t5-w1.md",
+        "missing-t8w4a-image-predecessor.md",
+        "missing-t8w4b-worker-serialization.md",
         "missing-recovery-manifest-digest.md",
         "forbidden-t6-w1-workflow-scope.md",
         "missing-sensitivity-receipt-isolation.md",
@@ -964,7 +966,7 @@ def main() -> int:
         )
 
         scope_overlap = work / "au-scope-overlap.md"
-        t8w4_scope = table_cell(triage, "| **T8-W4**", "AU parallel scope overlap")
+        t8w4_scope = table_cell(triage, "| **T8-W4a**", "AU parallel scope overlap")
         t7w4_scope = table_cell(triage, "| **T7-W4**", "AU parallel scope overlap")
         scope_overlap.write_text(
             replace_once(
@@ -1035,8 +1037,8 @@ def main() -> int:
             missing_evidence.write_text(
                 replace_once(
                     dag_text,
-                    "| T8-W7 | W3 live proof | T8-W4, T2-W2a, T2-W2b, T2-W4, T1-W6, T7-W4b |",
-                    "| T8-W7 | W3 live proof | T8-W4, T2-W2a, T2-W2b, T2-W4, T1-W6 |",
+                    "| T8-W7 | W3 live proof | T8-W4a, T2-W2a, T2-W2b, T2-W4, T1-W6, T7-W4b |",
+                    "| T8-W7 | W3 live proof | T8-W4a, T2-W2a, T2-W2b, T2-W4, T1-W6 |",
                     "missing evidence gate/prerequisite",
                 ),
                 encoding="utf-8",
@@ -1047,6 +1049,42 @@ def main() -> int:
                 TRIAGE,
                 False,
                 dag=missing_evidence,
+            )
+
+            missing_jit_image = work / "missing-t8w4a-image-predecessor.md"
+            missing_jit_image.write_text(
+                replace_once(
+                    dag_text,
+                    "| T2-W2a | W0 unblock | T2-W1a, T8-W4a |",
+                    "| T2-W2a | W0 unblock | T2-W1a |",
+                    "missing T8-W4a image predecessor",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU missing JIT image predecessor",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=missing_jit_image,
+            )
+
+            missing_worker_serial = work / "missing-t8w4b-worker-serialization.md"
+            missing_worker_serial.write_text(
+                replace_once(
+                    dag_text,
+                    "| T4-W1 | W2 worker | T3-W18, T8-W4b, D13 |",
+                    "| T4-W1 | W2 worker | T3-W18, D13 |",
+                    "missing T8-W4b worker serialization",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU missing auth bridge worker serialization",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=missing_worker_serial,
             )
 
             dag_row = next(
