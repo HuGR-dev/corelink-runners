@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-09-02 — T7-W1 current ledger and immutable finding identity
+
+The current-facing roadmap now indexes the complete remediation ledger: the 247-finding
+principal catalog and the 51-row 2026-08-25 union ledger (`MAPPED`, `PARTIAL`, `NEW`/
+`union-01`…`union-30`, and the single code-verified `CLOSED` row). Finding ids are stable across
+corrections, splits, renames, moves and historical documentation; changing a label, striking a
+line, or adding this entry cannot turn an open finding green. The canonical plan and its exact
+evidence requirements remain the authority for every status transition.
+
+The principal suite remains **94 physical / 92 live rows, NOT FROZEN, RED by absence**. The AU
+intake remains **30 source findings / 33 proposed ids, STAGING-only**. Round 13 remains bound to
+its exact input `b3371e8b6e9803d0ceac3b5df2677366b37aad1b` with **8/8 NOT QUIET** and quiet count
+zero; no review, implementation, local test, or changelog entry transfers credit to another
+commit. This docs-only update does not close `A7.2`, promote AU, or authorize a live action.
+
+Production containment is unchanged: `FABRIC_PG_DISABLED=1` and `FABRIC_PROBES_ENABLED=0` remain
+armed. No deploy, restart, delete, rearm, promotion, freeze, dispatch, or live-credit operation
+was performed or authorized by this entry.
+
 ### 2026-09-02 — Round-13 normative/checker alignment
 
 The post-review checker repair was aligned to normative follow-up `cfa1408` (replayed locally as
