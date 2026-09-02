@@ -47,10 +47,97 @@
 > are stated here as acceptance/ownership facts while the canonical DAG remains the sole schedule.
 > `T3-W5`, absent from the principal 47-WP catalog, is a new staged AU WP rather than an extension.
 >
+> **ROUND-12 PROVENANCE (2026-09-01).** The immutable Round-12 cold-review input is
+> `3d1ed13bb1d53af6ce27385736f19d54bb5f90cc`; it was reviewed read-only and returned **7/8 NOT
+> QUIET, 1/8 QUIET, quiet count 0**. The repair draft visible after that review is unsealed,
+> has no SHA of its own, and inherits no review or quiet credit. `b70deae` (incident merge/runtime)
+> and `3fe8d06` (earlier planning snapshot) are historical provenance only; the validation notes
+> below must not be read as current deploy, baseline or acceptance evidence. No stale observation,
+> historical SHA or structural PASS authorizes re-enable, deletion, teardown, promotion, freeze,
+> dispatch or green credit.
+>
 > **NOT FROZEN; NOT MERGED INTO THE SUITE.** `AU` remains a staging namespace and must not be
-> promoted merely because this triage is corrected. Doctrine now requires a new cold pass over the
-> combined proposal and then **two consecutive quiet cold-review rounds** before freeze, baseline,
-> or dispatch.
+> promoted merely because this triage is corrected. The normative review sequence is exact:
+> (1) run **two byte-identical staged quiet rounds** against one clean, signed, full-SHA staged
+> input; (2) make one signed, full-SHA promotion commit containing only the reviewed staged suite /
+> checker bytes — that promotion commit **resets the quiet count to 0**, and no staged quiet result
+> transfers across it; (3) run **two byte-identical promoted quiet rounds** against the promoted
+> commit; and (4) only after both promoted rounds are quiet capture one clean, version-bound,
+> post-incident **red** baseline and discuss freeze, DAG verification, implementation PRs or
+> dispatch. Any normative edit creates a new input and resets the applicable quiet count to 0.
+> Until that sequence is complete there is no promotion, freeze, baseline, dispatch or green
+> credit; mechanical PASS results and review silence do not change that status.
+
+> **External owner obstacle `O-CFRATE` (staged and unresolved).** The accountable owner is the
+> human Cloudflare account owner or authorized Cloudflare **Billing Administrator** for the named
+> production account, acting in the Finance/Billing role; the plan lead only verifies the submitted
+> artifact and may not self-attest the rate. The owner's manual action is to open the provider
+> billing console for that account, select the named billing period containing the deployed
+> Cloudflare Containers usage, export the provider invoice/usage receipt (including the Containers
+> line and billable quantity), preserve the original provider receipt byte-for-byte, and sign or
+> otherwise attest the resulting artifact. Screenshots, a Northflank proxy, a public price page,
+> an estimate, or a rate copied from `pricing.md` cannot satisfy this obstacle.
+>
+> The exact satisfaction artifact is
+> `docs/plan/evidence/O-CFRATE-cloudflare-containers-rate.json`, committed only after the manual
+> action and bound to the reviewed implementation version. The exact required tuple is:
+>
+> `O_CFRATE_EVIDENCE=(schema_version,obstacle_id,status,accountable_owner,accountable_role,attested_at,review_input_sha,deployed_image_digest,provider,provider_api_or_export_version,account_id,plan,billing_period_start,billing_period_end,threshold_policy_digest,threshold_declared_at,threshold_receipt_id,threshold_receipt_sha256,budget_interval_start,budget_interval_end,source,source_locator,receipt_id,receipt_sha256,activity_manifest_sha256,complete_provider_cursor,invoice_line_id,invoice_line_description,quantity,unit,currency,line_amount,effective_rate,effective_rate_formula,rate_effective_from,rate_effective_to,attempt_count,failed_attempt_count,retry_count,idle_wakeup_count,served_count,failure_rate_numerator_formula,failure_rate_denominator_formula,failure_rate_numerator,failure_rate_denominator,observed_failure_rate,failure_rate_threshold,billable_vcpu_hours,billable_gib_hours,observed_cost,cost_budget,cost_per_served_attempt,cost_per_served_attempt_threshold,owner_signature)`
+>
+> Every tuple field is required, with no unresolved placeholder. `source` must identify the
+> provider-issued invoice or usage export; `source_locator` must identify the account/period/export
+> record without embedding a secret; `receipt_id` and `receipt_sha256` together must enumerate and
+> authenticate the complete provider receipt set (invoice, usage, cursor and activity receipts),
+> not merely a local summary; `complete_provider_cursor` must contain every ordered provider page,
+> cursor, page bound, record count and interval bound; and `activity_manifest_sha256` must bind the
+> complete ordered activity manifest byte-for-byte. `account_id` and `plan` must identify the billed
+> Cloudflare account and Containers plan. `unit` must state the exact denominator (for example
+> `USD/vCPU-hour` or `USD/GiB-hour`, never merely `hour`). `effective_rate` must be a numeric rate
+> in `currency` for that exact `unit`, derived as `line_amount / quantity` after the provider's
+> stated credits or discounts; `effective_rate_formula` and any provider conversion are mandatory.
+> The period and effective dates must cover the version-bound deployed image; a receipt for another
+> account, plan, period, unit or image is RED.
+>
+> The tuple also carries a version-bound observed budget for one contiguous, half-open interval
+> `[budget_interval_start,budget_interval_end)` of the exact deployment/account/plan. `attempt_count`
+> counts every initial and retry attempt; `failed_attempt_count` counts every failed attempt,
+> including failed retries; `retry_count` counts every retry attempt; `idle_wakeup_count` counts
+> every provider or scheduler wake while no work was present; and `served_count` counts successful
+> served jobs. `billable_vcpu_hours` and `billable_gib_hours` are the provider-billed quantities for
+> that same interval, while `observed_cost` is the provider-billed amount in `currency` after
+> credits/discounts. These exhaustive counters are not samples: every attempt, failure, retry,
+> idle wakeup and served result must be present and verifiable in the complete activity manifest,
+> with immutable event id/timestamp and reconciliation to the tuple totals. Any gap, duplicate,
+> rewrite, unjoinable record, non-contiguous interval or unverified provider receipt is RED.
+>
+> The required failure-rate formulas are exact: `failure_rate_numerator_formula` is
+> `failed_attempt_count + retry_count + idle_wakeup_count`, and
+> `failure_rate_denominator_formula` is `attempt_count + retry_count + idle_wakeup_count`.
+> `failure_rate_numerator` and `failure_rate_denominator` must contain those evaluated values, and
+> `observed_failure_rate` is numerator / denominator. A zero denominator is RED, never zero or
+> omitted. `cost_per_served_attempt` is exactly `observed_cost / served_count`; `served_count == 0`
+> is RED and may not be represented as a zero cost. `failure_rate_threshold`, `cost_budget` and
+> `cost_per_served_attempt_threshold` must be predeclared, version-bound thresholds in explicit
+> currency/unit, and the owner must sign the comparison; no threshold may be selected or changed
+> after observing the interval. `threshold_declared_at < budget_interval_start`;
+> `threshold_policy_digest` binds the thresholds and formulas, and the independently witnessed
+> `threshold_receipt_id` plus `threshold_receipt_sha256` bind the declaration before observation.
+> The source is a provider-issued invoice or usage export. The artifact must show the numerator, denominator, result and
+> threshold comparison for each formula, with any threshold breach RED.
+>
+> The owner attestation, complete cursor/activity manifests and provider receipts are the
+> satisfaction evidence; this plan does not claim them now. Until every field is supplied,
+> owner-signed and independently verifiable, `status` remains **UNRESOLVED / RED**; the tuple
+> cannot arm Cloudflare usage, alter containment or authorize any live action.
+>
+> `O-CFRATE` is a prerequisite to **T7-W5/AU4.19**, but it is not T7-W5's measured economics
+> proof. `O-CFRATE` proves only that a human owner supplied an authoritative, account/plan/
+> period/unit/version-bound provider rate. T7-W5 must still deploy and run its own ≥50-job latency,
+> seven-window/≥500-execution memoization, and pricing re-derivation evidence, including the exact
+> `docs/plan/evidence/au4.19-cloudflare-container-rate.json` citation. T7-W5 may consume the
+> O-CFRATE artifact; it cannot create, replace, or waive it. Both remain RED until their separate
+> artifacts and all other predecessors are satisfied, and neither authorizes re-enabling live
+> Cloudflare activity.
 
 # Union catalog — triage of the remaining 25 NEW (MEDIUM/LOW) + 5 PARTIAL findings
 

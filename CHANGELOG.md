@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-09-01 — go-live plan Round 12 remains 7/8 NOT QUIET; repair in progress
+
+Round 12 reviewed the exact committed input
+`3d1ed13bb1d53af6ce27385736f19d54bb5f90cc`: **7/8 NOT QUIET, 1/8 QUIET, quiet count 0**.
+The consolidated ledger is
+[`docs/plan/2026-09-01-round12-cold-review-ledger.md`](docs/plan/2026-09-01-round12-cold-review-ledger.md).
+Its deduplicated blocker domains are the PG server fence; human-page ACK authentication;
+journal completeness and non-equivocation; trusted time/freshness; canary activation-tuple
+contradictions; stale triage doctrine; producer ACK test-cycle coverage; signer-rotation recovery;
+fabricd idle no-wake behavior; canary fail-visible behavior; exact-`0` PG-flag enablement;
+O-CFRATE; and checker exclusion/workflow false-PASS paths.
+
+The Round-12 repair cycle is **IN PROGRESS**. Its later repair tree is distinct from the reviewed
+input and has no SHA asserted by this entry; no review result transfers to an unqualified `HEAD`.
+The status remains **QUIET COUNT 0 · NOT FROZEN · NO AU PROMOTION · NO DISPATCH · NO GREEN
+CREDIT**. The repaired checker blocks **131 meaningful corruptions (66 prior + 65 Round-12/
+repair-audit mutations)** on the dirty repair tree. This structural diagnostic is not a review result and gains no
+quiet or readiness credit until sealed to a clean full SHA. A read-only containment
+check at `2026-09-01T21:14:17Z` found
+fabricd `0/3` active, with `FABRIC_PG_DISABLED=1` and `FABRIC_PROBES_ENABLED=0`; PR #530's
+source-only merge is `65540af`. No promotion, freeze, dispatch, green credit or live re-enable is
+authorized by this review.
+A newer read-only `versions view` observation at `2026-09-01T22:40:33Z` confirmed fabricd version
+`40bf22a4-6c48-467d-9844-b4fc33e7a3ee` with `FABRIC_PG_DISABLED=1` and canary version
+`852277c1-9778-459f-b1ff-9d56fbe7c32f` with `FABRIC_PROBES_ENABLED=0`. Detailed instances showed
+fabricd **0 running / 3 inactive** and the runner fleet **0 running / 865 inactive / 18 stopped**;
+the app summary's `LIVE INSTANCES` field was not used as state. No health/status/deploy/restart/
+delete/rearm operation occurred. This is a version-view observation recorded here without a
+standalone version-bound artifact.
+
 ### 2026-09-01 — go-live plan Round 11 remains 5/8 NOT QUIET; repair in progress
 
 Round 11 reviewed the exact input
@@ -175,8 +205,9 @@ durable billing export are suspended.
 
 The incident and remediation lineage is:
 
-- **#524** — root-caused the control-plane outage to the quota-suspended Neon project; `PgLedger::connect`
-  failed before the listener bound.
+- **#524** — established a Postgres-dependent pre-bind failure class during the quota-suspended Neon
+  incident; the available evidence did not distinguish `PgLedger` initialization from
+  billing-exporter initialization as the failing path.
 - **#525** — closed the COLD runner leak by allowing `reapStaleBoxes` to handle spawns without an
   installation id, with a bounded reaper.
 - **#526** — bounded the admission fail-open and added the mint-key-unarmed signal and boot guard.
@@ -186,8 +217,10 @@ The incident and remediation lineage is:
 
 Containment left the fabricd image unchanged at
 `sha256:2e7bcea926f4ce2b38edb1a381f3821fcf4c898377e4f988b763fd3232c0e565`. Re-arm the durable
-backend only after a restored or replacement database passes repeated fixed-config boot-rate probes
-and its scale-to-zero behaviour is observed without the one-minute feedback loop.
+backend only after a restored or replacement database passes every monitor/provider/transaction
+predecessor and an owner-approved fixed-config preflight. Exact `FABRIC_PG_DISABLED="0"` is necessary
+but not sufficient; `DATABASE_URL` alone never arms or authorizes PG. This changelog grants no live
+deploy, restart, delete, probe, rearm or canary action.
 
 ### 2026-08-31 — the runner image gains nightly + llvm-tools + cargo-fuzz, so seven CI lanes can leave the owner's Mac
 

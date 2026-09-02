@@ -396,7 +396,11 @@ WAVE2_CHAIN = (
 )
 
 DAG_FILENAME = "2026-09-01-reconciled-dispatch-dag.md"
-DAG_SCHEMA_MARKER = "**Date:** 2026-09-01 · **Schema:** `dispatch-dag/v1` · **Status: NOT DISPATCHABLE**"
+HANDOFF_FILENAME = "2026-09-01-session-state-go-live-remediation.md"
+DAG_SCHEMA_MARKER = (
+    "**Date:** 2026-09-01 · **Schema:** `dispatch-dag/v1` · "
+    "**Status: NOT FROZEN · NOT DISPATCHABLE · quiet count 0**"
+)
 DAG_TABLE_HEADING = "## Canonical node table"
 DAG_BATCH_HEADING = "## Deterministic ready sets and proof"
 DAG_EXPECTED_VERTEX_COUNT = 69
@@ -442,12 +446,56 @@ DAG_PHASES = {
     "W1 serial test+probe",
     "W2 worker test+probe",
 }
+O_CFRATE_EVIDENCE_SCHEMA = (
+    "O_CFRATE_EVIDENCE=(schema_version,obstacle_id,status,accountable_owner,"
+    "accountable_role,attested_at,review_input_sha,deployed_image_digest,provider,"
+    "provider_api_or_export_version,account_id,plan,billing_period_start,billing_period_"
+    "end,threshold_policy_digest,threshold_declared_at,threshold_receipt_id,threshold_"
+    "receipt_sha256,budget_interval_start,budget_interval_end,source,source_locator,receipt_id,"
+    "receipt_sha256,activity_manifest_sha256,complete_provider_cursor,invoice_line_id,"
+    "invoice_line_description,quantity,unit,currency,line_amount,effective_rate,effective_"
+    "rate_formula,rate_effective_from,rate_effective_to,attempt_count,failed_attempt_count,"
+    "retry_count,idle_wakeup_count,served_count,failure_rate_numerator_formula,failure_"
+    "rate_denominator_formula,failure_rate_numerator,failure_rate_denominator,observed_"
+    "failure_rate,failure_rate_threshold,billable_vcpu_hours,billable_gib_hours,observed_"
+    "cost,cost_budget,cost_per_served_attempt,cost_per_served_attempt_threshold,owner_"
+    "signature)"
+)
+PAGE_ACK_SCHEMA = (
+    "page_ack_token=(page_ack_version,incident_id,page_id,delivery_id,destination,"
+    "on_call_identity,on_call_schedule_digest,action,payload_digest,"
+    "monitor_rearm_tuple_digest,acknowledged_at,expires_at,signer_key_id,"
+    "signer_epoch,signature)"
+)
+SIGNER_ROTATION_MANIFEST = (
+    "signer_rotation_manifest=(manifest_version,active_signer_key_id,"
+    "active_signer_epoch,next_signer_key_id,next_signer_epoch,"
+    "revoked_signer_set_digest,overlap_started_at,overlap_expires_at,"
+    "recovery_custody_digest,monitor_rearm_tuple_digest,previous_manifest_digest,"
+    "issued_at,signature)"
+)
+ACK_RECOVERY_SCHEMA = (
+    "ACK_RECOVERY=(recovery_version,event_id,producer_seq,payload_digest,source,"
+    "service,application,key_id,credential_epoch,original_monitor_rearm_tuple_digest,"
+    "ingest_commit_id,original_ack_digest,revocation_record_digest,"
+    "signer_rotation_manifest_digest,current_monitor_rearm_tuple_digest,"
+    "recovery_signer_key_id,recovery_signer_epoch,issued_at,signature)"
+)
+CANARY_ACTIVATION_TUPLE = (
+    "canary_activation_tuple=(activation_version,lifecycle_source,lifecycle_service,"
+    "lifecycle_application,lifecycle_key_id,lifecycle_credential_epoch,synthetic_source,"
+    "synthetic_service,synthetic_application,synthetic_key_id,synthetic_credential_epoch,"
+    "monitor_rearm_tuple_digest,producer_image_digest,"
+    "producer_config_digest,probe_flag_name,probe_flag_value,synthetic_flag_name,"
+    "synthetic_flag_value,activated_at)"
+)
 
 # T6-W12 must execute T6-W15's complete base suite but may not acquire its test
 # files. Freeze the version/cutover evidence contract in visible DAG prose so
 # a dependency-only repair cannot silently restore the unsafe historical
 # monitor version after PG is rearmed.
 REQUIRED_DAG_SEMANTIC_CLAUSES = {
+    "O-CFRATE exact evidence schema": O_CFRATE_EVIDENCE_SCHEMA,
     "T6-W12 final-version base regression": (
         "With `FABRIC_PG_DISABLED=1`, T6-W12 must first execute every unchanged "
         "T6-W15 test against its candidate image before cutover. A candidate PASS "
@@ -473,16 +521,9 @@ REQUIRED_DAG_SEMANTIC_CLAUSES = {
         "seven-day sensitivity results."
     ),
     "T6-W12 future T1-W6 source registration": (
-        "Before T6-W12 seals its final deployed tuple, it pre-registers the exact "
-        "future T1-W6 `fabric-server` and `fabricd-proxy` source ids and the exact "
-        "future T6-W14 `canary-lifecycle` and `canary-synthetic` source ids, and "
-        "issues four isolated write-only key-id/credential-epoch pairs. The two "
-        "T6-W14 registrations and credentials remain inactive through both complete "
-        "T6-W15-suite executions and until T6-W14's own gated activation; inactive "
-        "credentials must be rejected at ingest, not treated as an absent expected "
-        "sample. All four registrations and credential epochs are inputs to both "
-        "suite executions. T1-W6 and T6-W14 may only bind their already-issued pairs; "
-        "neither may mint, rotate, substitute or register them."
+        "All four registry entries and credential authorizations are accepted and "
+        "byte-stable before both complete T6-W15-suite executions and are inputs to "
+        "the sealed tuple; T6-W14 never changes an accepted/active bit at bind time."
     ),
     "T3-W16 capacity-one external-ACK action gate": (
         "`T3-W16` directly waits for T6-W15 so its attempt/binding producer can use "
@@ -550,13 +591,10 @@ REQUIRED_DAG_SEMANTIC_CLAUSES = {
     ),
     "linearizable generation-fenced monitor interlock": (
         "Every readiness, mutation and socket/init path first obtains a generation-"
-        "scoped interlock permit; its generation fence is held through the action's "
-        "durable commit, so validation cannot race a pause. Arming transitions "
-        "`OPEN -> CLOSING`, blocks all new permits, cancels or rolls back every older-"
-        "generation permit and closes/discards every socket created by one, and "
-        "reaches `LATCHED` only after all such permits/actions and sockets are durably "
-        "accounted for. Only then may the operation return; readiness/mutation are "
-        "typed 503 and zero socket or mutation actions survive the fence."
+        "scoped coordinator permit. Every PG transaction additionally holds the same "
+        "generation's shared transaction-scoped PostgreSQL advisory fence and "
+        "validates the durable fence-row generation inside that transaction; an "
+        "application-side check alone is never authority."
     ),
     "durable monitor tuple interlock and race tests": (
         "Any tuple mismatch, unavailable attestation, stale provider-poll or delivery "
@@ -622,17 +660,20 @@ REQUIRED_DAG_SEMANTIC_CLAUSES = {
         "also rejects a "
         "stale, revoked or wrong-but-currently-valid signer under the seventh tuple "
         "field. Every rejection preserves the head and original 60-second deadline, "
-        "performs zero gated action and fails closed. The focused fixtures run the "
-        "complete matrix for the scheduled-tick, attempt/binding, `fabric-server`, "
-        "`fabricd-proxy`, lifecycle and synthetic lanes in both candidate and active-"
-        "final T6-W12 passes; the future lifecycle/synthetic registrations remain "
-        "inactive in those passes and are exercised after their bind-only activation "
-        "by T6-W14 as well."
+        "performs zero gated action and fails closed. In both candidate and active-"
+        "final passes, T6-W12's monitor-side fixtures submit isolated exact "
+        "authenticated envelopes under every accepted lane and prove only ingest/CAS/"
+        "stable-token behavior; they never execute, activate or claim a producer "
+        "fixture. T6-W4, T3-W16, T1-W6 and T6-W14 each own their producer-side refusal/"
+        "recovery suite, and T1-W6/T6-W14 must pass it after bind but before their "
+        "first gated socket, fetch, start, acquire, spawn, release or successor "
+        "emission. This split removes any producer-test dependency from T6-W12 back to "
+        "consumers that follow it."
     ),
     "append-only exhaustive A6.17 journal": (
         "T6-W12 owns and deploys an append-only/WORM journal retained for at least "
-        "eight days. It records every page, page acknowledgement, sensitivity control "
-        "and rearm attestation without sampling or mutable replacement. Each sealed "
+        "eight days. It records every page, page acknowledgement, sensitivity control, "
+        "rearm attestation and ingest ACK without sampling or mutable replacement. Each sealed "
         "window manifest binds the exact `A6.17_window_tuple` and records the inclusive "
         "start, exclusive end, exhaustive ordered record ids, record count, initial "
         "and terminal hash-chain roots and the storage-provider retention/immutability "
@@ -646,13 +687,77 @@ REQUIRED_DAG_SEMANTIC_CLAUSES = {
     ),
     "canary exact-one fail-closed flags": (
         "The canary performs its outer-route fetch only when `FABRIC_PROBES_ENABLED` "
-        "is the exact string `1`; unset, blank, whitespace, `0`, case variants, numeric "
-        "lookalikes and every other invalid value are disabled and perform zero "
-        "fetches. The same exact-`1` rule governs owner arming of `SYNTHETIC_SLOT_"
-        "PROBES_ENABLED`; all other values perform zero synthetic acquire, spawn or "
-        "release actions. T6-W4 owns the deterministic config-table negatives; T6-W14 "
-        "may arm only after its no-wake and external-ACK proof, and any failure keeps "
-        "or returns the flag to `0`."
+        "is the exact string `1`; exact `0` is the valid contained state and performs "
+        "zero fabric fetches while the independent tick lane still emits its scheduled "
+        "tick and authenticated containment/config state."
+    ),
+    "PG fence exact state machine": (
+        "Arming is exactly `OPEN -> FENCING -> CLOSING -> LATCHED`: the coordinator "
+        "first blocks new permits and publishes `FENCING`, then obtains the exclusive "
+        "transaction-scoped fence lock, waits for every earlier shared transaction to "
+        "commit or roll back, atomically advances the durable PG generation/latch and "
+        "commits, and only then publishes `CLOSING`, closes/discards pools and reaches "
+        "`LATCHED`."
+    ),
+    "write-ahead provider reconciliation": (
+        "The journal is write-ahead, not a retrospective audit. Before sending a page, "
+        "applying a sensitivity control or returning a rearm attestation, T6-W12 "
+        "durably appends the exact immutable intent with its deterministic operation id "
+        "and previous hash root; after the external effect it appends the exact provider "
+        "result/receipt."
+    ),
+    "trusted monotonic evidence time": (
+        "All window, freshness, ACK and receipt times pass through `deploy/cost-monitor/"
+        "src/clock.ts`, which persists a monotonic high-water value and verifies the "
+        "monitor's durable ingest-commit checkpoint, provider-authenticated monotonic "
+        "watermark/`as_of` and immutable delivery/control receipt against the named "
+        "O-MONITORHOST trusted time/checkpoint capability."
+    ),
+    "human page ACK exact schema": (
+        "An on-call page is acknowledged only by the exact signed `page_ack_token=(page_"
+        "ack_version,incident_id,page_id,delivery_id,destination,on_call_identity,on_call_"
+        "schedule_digest,action,payload_digest,monitor_rearm_tuple_digest,acknowledged_at,"
+        "expires_at,signer_key_id,signer_epoch,signature)`; `signature` authenticates the "
+        "preceding fourteen fields in that order."
+    ),
+    "signer rotation manifest exact schema": (
+        "Signer rotation is authorized only by the exact signed `signer_rotation_manifest=("
+        "manifest_version,active_signer_key_id,active_signer_epoch,next_signer_key_id,next_"
+        "signer_epoch,revoked_signer_set_digest,overlap_started_at,overlap_expires_at,"
+        "recovery_custody_digest,monitor_rearm_tuple_digest,previous_manifest_digest,issued_"
+        "at,signature)`; `signature` authenticates the preceding twelve fields in that order."
+    ),
+    "signer rotation ACK recovery exact schema": (
+        "`ACK_RECOVERY=(recovery_version,event_id,producer_seq,payload_digest,source,"
+        "service,application,key_id,credential_epoch,original_monitor_rearm_tuple_digest,"
+        "ingest_commit_id,original_ack_digest,revocation_record_digest,signer_rotation_"
+        "manifest_digest,current_monitor_rearm_tuple_digest,recovery_signer_key_id,recovery_"
+        "signer_epoch,issued_at,signature)`; `signature` authenticates the preceding eighteen "
+        "fields in that order."
+    ),
+    "canary activation exact schema": (
+        "`canary_activation_tuple=(activation_version,lifecycle_source,lifecycle_service,"
+        "lifecycle_application,lifecycle_key_id,lifecycle_credential_epoch,synthetic_source,"
+        "synthetic_service,synthetic_application,synthetic_key_id,synthetic_credential_epoch,"
+        "monitor_rearm_tuple_digest,producer_image_digest,producer_config_digest,probe_flag_name,"
+        "probe_flag_value,synthetic_flag_name,synthetic_flag_value,activated_at)`. Those nineteen "
+        "ordered fields and their canonical digest are the "
+        "sole activation authority."
+    ),
+    "canary fail-visible state machine": (
+        "Every probe result records exactly one of `SKIPPED`, `FAILED`, `UNKNOWN` or "
+        "`SERVED`, plus reason, deployed version, `monitor_rearm_tuple` digest and "
+        "trusted `observed_at`: valid exact-`0` is `SKIPPED`, an authoritative exact-`1` "
+        "response alone may be `SERVED`, an observed negative is `FAILED`, and missing, "
+        "invalid or unverifiable evidence is `UNKNOWN`."
+    ),
+    "PG exact-zero and idle no-wake": (
+        "The fabricd containment switch is independently fail-closed: exact `FABRIC_PG_"
+        "DISABLED=0` is the only value that permits a PG/container path."
+    ),
+    "O-CFRATE read-only owner evidence": (
+        "Resolving the token is read-only evidence and authorizes no provider mutation, "
+        "Cloudflare re-enable, proof credit or dispatch."
     ),
 }
 
@@ -825,22 +930,36 @@ REQUIRED_DAG_SCOPE_ATOMS = {
         "deploy/cloudflare-canary/test/synthetic-slot-correlation.test.ts",
     },
     "T6-W4": {
+        "deploy/cloudflare-canary/src/config.ts",
         "deploy/cloudflare-canary/src/tick_outbox.ts",
         "deploy/cloudflare-canary/wrangler.jsonc",
         "deploy/cloudflare-canary/test/scheduled-tick-envelope.test.ts",
         "deploy/cloudflare-canary/test/scheduled-tick-outbox-recovery.test.ts",
         "deploy/cloudflare-canary/test/scheduled-tick-order.test.ts",
         "deploy/cloudflare-canary/test/scheduled-tick-ack.test.ts",
+        "deploy/cloudflare-canary/test/scheduled-tick-ack-recovery.test.ts",
         "deploy/cloudflare-canary/test/fabric-probe-flag-failclosed.test.ts",
+        "deploy/cloudflare-canary/test/fabric-probe-flag-failvisible.test.ts",
     },
     "T1-W6": {
+        "crates/corelink-fabric/src/pg_monitor_fence.rs",
+        "crates/corelink-fabric/tests/pg_monitor_transaction_fence.rs",
         "crates/corelink-fabric-server/src/monitor_outbox.rs",
+        "crates/corelink-fabric-server/src/monitor_transaction_fence.rs",
         "crates/corelink-fabric-server/tests/monitor_outbox.rs",
+        "crates/corelink-fabric-server/tests/monitor_transaction_fence.rs",
+        "crates/corelink-fabric-server/tests/monitor_ack_recovery.rs",
         "deploy/cloudflare-fabricd/src/monitor_outbox.ts",
         "deploy/cloudflare-fabricd/test/monitor-outbox.test.ts",
+        "deploy/cloudflare-fabricd/test/monitor-ack-recovery.test.ts",
+        "deploy/cloudflare-fabricd/test/pg-flag-failclosed.test.ts",
+        "deploy/cloudflare-fabricd/test/idle-no-wake.test.ts",
         "deploy/cloudflare-fabricd/wrangler.jsonc",
     },
-    "T3-W16": {"deploy/cloudflare/test/attempt-monitor-outbox.test.ts"},
+    "T3-W16": {
+        "deploy/cloudflare/test/attempt-monitor-outbox.test.ts",
+        "deploy/cloudflare/test/attempt-monitor-ack-recovery.test.ts",
+    },
     "T6-W12": {
         "deploy/cost-monitor/src/index.ts",
         "deploy/cost-monitor/src/scheduler.ts",
@@ -849,12 +968,18 @@ REQUIRED_DAG_SCOPE_ATOMS = {
         "deploy/cost-monitor/src/types.ts",
         "deploy/cost-monitor/src/capability_rules.ts",
         "deploy/cost-monitor/src/synthetic_ingest.ts",
+        "deploy/cost-monitor/src/journal_reconciler.ts",
+        "deploy/cost-monitor/src/clock.ts",
         "deploy/cost-monitor/config.schema.json",
         "deploy/cost-monitor/migrations/0002-provider-cursors.json",
         "deploy/cost-monitor/test/c1-c5-rules.test.ts",
         "deploy/cost-monitor/test/c1-c5-synthetic-ingest.test.ts",
         "deploy/cost-monitor/test/acked-incident-update.test.ts",
         "deploy/cost-monitor/test/provider-stale-frozen.test.ts",
+        "deploy/cost-monitor/test/window-journal-writeahead.test.ts",
+        "deploy/cost-monitor/test/window-journal-reconcile.test.ts",
+        "deploy/cost-monitor/test/window-journal-fork.test.ts",
+        "deploy/cost-monitor/test/clock-freshness.test.ts",
     },
 }
 
@@ -875,6 +1000,7 @@ EXACT_DAG_SCOPE_ATOMS = {
         ".github/workflows/secret-scan.yml",
         ".github/workflows/corelink-stress.yml",
         "deploy/cloudflare-canary/src/index.ts",
+        "deploy/cloudflare-canary/src/config.ts",
         "deploy/cloudflare-canary/src/types.ts",
         "deploy/cloudflare-canary/src/tick_outbox.ts",
         "deploy/cloudflare-canary/wrangler.jsonc",
@@ -884,7 +1010,9 @@ EXACT_DAG_SCOPE_ATOMS = {
         "deploy/cloudflare-canary/test/scheduled-tick-outbox-recovery.test.ts",
         "deploy/cloudflare-canary/test/scheduled-tick-order.test.ts",
         "deploy/cloudflare-canary/test/scheduled-tick-ack.test.ts",
+        "deploy/cloudflare-canary/test/scheduled-tick-ack-recovery.test.ts",
         "deploy/cloudflare-canary/test/fabric-probe-flag-failclosed.test.ts",
+        "deploy/cloudflare-canary/test/fabric-probe-flag-failvisible.test.ts",
     },
     "T6-W15": {
         "deploy/cost-monitor/Containerfile",
@@ -892,6 +1020,8 @@ EXACT_DAG_SCOPE_ATOMS = {
         "deploy/cost-monitor/src/index.ts",
         "deploy/cost-monitor/src/ingest.ts",
         "deploy/cost-monitor/src/acks.ts",
+        "deploy/cost-monitor/src/ack_recovery.ts",
+        "deploy/cost-monitor/src/page_ack.ts",
         "deploy/cost-monitor/src/incidents.ts",
         "deploy/cost-monitor/src/lifecycle.ts",
         "deploy/cost-monitor/src/scheduler.ts",
@@ -907,6 +1037,8 @@ EXACT_DAG_SCOPE_ATOMS = {
         "deploy/cost-monitor/test/canary-missing-tick.test.ts",
         "deploy/cost-monitor/test/ingest-idempotency.test.ts",
         "deploy/cost-monitor/test/ack-token.test.ts",
+        "deploy/cost-monitor/test/ack-recovery.test.ts",
+        "deploy/cost-monitor/test/page-ack-auth.test.ts",
         "deploy/cost-monitor/test/incident-state.test.ts",
         "deploy/cost-monitor/test/scheduler.test.ts",
         "deploy/cost-monitor/test/state.test.ts",
@@ -922,21 +1054,29 @@ EXACT_DAG_SCOPE_ATOMS = {
     "T1-W6": {
         "crates/corelink-fabric/src/pg_ledger.rs",
         "crates/corelink-fabric/src/billing_sink.rs",
+        "crates/corelink-fabric/src/pg_monitor_fence.rs",
+        "crates/corelink-fabric/tests/pg_monitor_transaction_fence.rs",
         "crates/corelink-fabric-server/src/main.rs",
         "crates/corelink-fabric-server/src/server.rs",
         "crates/corelink-fabric-server/src/billing_export.rs",
         "crates/corelink-fabric-server/src/monitor_outbox.rs",
         "crates/corelink-fabric-server/src/monitor_interlock.rs",
+        "crates/corelink-fabric-server/src/monitor_transaction_fence.rs",
         "crates/corelink-fabric-server/tests/monitor_outbox.rs",
         "crates/corelink-fabric-server/tests/monitor_ack.rs",
         "crates/corelink-fabric-server/tests/monitor_tuple_interlock.rs",
         "crates/corelink-fabric-server/tests/monitor_tuple_interlock_race.rs",
+        "crates/corelink-fabric-server/tests/monitor_transaction_fence.rs",
+        "crates/corelink-fabric-server/tests/monitor_ack_recovery.rs",
         "crates/corelink-fabric/tests/pg_refusal_breaker.rs",
         "deploy/cloudflare-fabricd/src/index.ts",
         "deploy/cloudflare-fabricd/src/monitor_outbox.ts",
         "deploy/cloudflare-fabricd/test/resilience.test.ts",
         "deploy/cloudflare-fabricd/test/monitor-outbox.test.ts",
         "deploy/cloudflare-fabricd/test/monitor-ack.test.ts",
+        "deploy/cloudflare-fabricd/test/monitor-ack-recovery.test.ts",
+        "deploy/cloudflare-fabricd/test/pg-flag-failclosed.test.ts",
+        "deploy/cloudflare-fabricd/test/idle-no-wake.test.ts",
         "deploy/cloudflare-fabricd/wrangler.jsonc",
     },
     "T3-W16": {
@@ -945,6 +1085,7 @@ EXACT_DAG_SCOPE_ATOMS = {
         "deploy/cloudflare/test/attempt-handle-reconcile.test.ts",
         "deploy/cloudflare/test/attempt-monitor-outbox.test.ts",
         "deploy/cloudflare/test/attempt-monitor-ack.test.ts",
+        "deploy/cloudflare/test/attempt-monitor-ack-recovery.test.ts",
         "deploy/cloudflare/test/inventory-crosscheck.test.ts",
     },
     "T6-W12": {
@@ -963,6 +1104,8 @@ EXACT_DAG_SCOPE_ATOMS = {
         "deploy/cost-monitor/src/synthetic_ingest.ts",
         "deploy/cost-monitor/src/sensitivity.ts",
         "deploy/cost-monitor/src/window_journal.ts",
+        "deploy/cost-monitor/src/journal_reconciler.ts",
+        "deploy/cost-monitor/src/clock.ts",
         "deploy/cost-monitor/src/rearm_attestation.ts",
         "deploy/cost-monitor/migrations/0002-provider-cursors.json",
         "deploy/cost-monitor/migrations/0003-window-journal.json",
@@ -977,6 +1120,10 @@ EXACT_DAG_SCOPE_ATOMS = {
         "deploy/cost-monitor/test/c1-c5-synthetic-ingest.test.ts",
         "deploy/cost-monitor/test/sensitivity-window.test.ts",
         "deploy/cost-monitor/test/window-journal.test.ts",
+        "deploy/cost-monitor/test/window-journal-writeahead.test.ts",
+        "deploy/cost-monitor/test/window-journal-reconcile.test.ts",
+        "deploy/cost-monitor/test/window-journal-fork.test.ts",
+        "deploy/cost-monitor/test/clock-freshness.test.ts",
         "deploy/cost-monitor/test/rearm-tuple-attestation.test.ts",
         "deploy/cost-monitor/test/acked-incident-update.test.ts",
     },
@@ -995,15 +1142,13 @@ EXACT_DAG_SCOPE_ATOMS = {
         "deploy/cloudflare-canary/test/lifecycle-monitor-envelope.test.ts",
         "deploy/cloudflare-canary/test/lifecycle-sampler-outbox.test.ts",
         "deploy/cloudflare-canary/test/lifecycle-synthetic-ack.test.ts",
+        "deploy/cloudflare-canary/test/lifecycle-synthetic-ack-recovery.test.ts",
         "deploy/cloudflare-canary/test/synthetic-slot-lifecycle.test.ts",
         "deploy/cloudflare-canary/test/synthetic-slot-outbox.test.ts",
         "deploy/cloudflare-canary/test/synthetic-slot-default-off.test.ts",
         "deploy/cloudflare-canary/test/synthetic-slot-credential-isolation.test.ts",
         "deploy/cloudflare-canary/test/synthetic-slot-correlation.test.ts",
     },
-    # T6-W10 owns version-bound evidence only. The external C1-C5 rules and
-    # synthetic ingress must be implemented by T6-W12/T6-W14 first.
-    "T6-W10": set(),
 }
 
 EXACT_DAG_ARTIFACTS = {
@@ -1014,8 +1159,9 @@ EXACT_DAG_ARTIFACTS = {
     "T6-W10": {
         "docs/plan/evidence/T6-W10-alerting-depth.json",
         "docs/plan/evidence/au6.17-synthetic-slot-lifecycle.json",
+        "docs/plan/evidence/T6-W14-canary-no-wake.json",
     },
-    "T6-W14": {"docs/plan/evidence/T6-W14-canary-no-wake.json"},
+    "T6-W14": set(),
 }
 
 SELFTEST_WORKFLOW = ".github/workflows/selftests.yml"
@@ -1029,7 +1175,20 @@ SELFTEST_WORKFLOW_WIRING = {
         1,
     ),
     "non-vacuous empty-suite refusal": ("if (( ${#selftests[@]} == 0 )); then", 1),
+    "fail-fast shell mode": ("set -euo pipefail", 1),
     "per-file execution": ('bash "${selftest}"', 1),
+}
+
+SELFTEST_WORKFLOW_FALSE_PASS_PATTERNS = {
+    "conditional job/step": re.compile(r"(?m)^\s+if\s*:"),
+    "continue-on-error": re.compile(r"(?m)^\s+continue-on-error\s*:"),
+    "successful shell short-circuit": re.compile(
+        r"(?m)^\s*(?:exit|return)(?:\s+0)?\s*(?:#.*)?$"
+    ),
+    "shell error suppression": re.compile(
+        r"(?m)(?:^\s*set\s+\+e(?:\s|$)|\|\|\s*(?:true|:)(?:\s|$))"
+    ),
+    "backgrounded selftest": re.compile(r'(?m)^\s*bash\s+"\$\{selftest\}"\s*&\s*$'),
 }
 
 
@@ -1522,7 +1681,9 @@ def parse_scope_declaration(scope):
         code_fragments = re.findall(r"`([^`]+)`", segment)
         fragments = code_fragments or [segment]
         carveout = re.search(
-            r"\s+(?:excluding|explicitly excludes|minus)\s+", segment, re.I
+            r"(?:^|\s+)(?:excluding|explicitly excludes|minus)\s*:?\s+",
+            segment,
+            re.I,
         )
         if carveout and code_fragments:
             has_inline_base = bool(plain_markdown(segment[: carveout.start()]))
@@ -1550,7 +1711,7 @@ def parse_scope_declaration(scope):
             continue
         for fragment in fragments:
             split = re.split(
-                r"\s+(?:excluding|explicitly excludes|minus)\s+",
+                r"(?:^|\s+)(?:excluding|explicitly excludes|minus)\s*:?\s+",
                 fragment,
                 maxsplit=1,
                 flags=re.I,
@@ -1855,6 +2016,329 @@ def validate_selftest_workflow(repository_root):
                 f"selftest workflow wiring {label!r} count mismatch: "
                 f"expected {expected_count}, got {count}"
             )
+    for label, pattern in SELFTEST_WORKFLOW_FALSE_PASS_PATTERNS.items():
+        if pattern.search(workflow):
+            errors.append(
+                f"selftest workflow contains forbidden false-pass control {label!r}"
+            )
+
+    execution_lines = re.findall(r'(?m)^\s*bash\s+"\$\{selftest\}"\s*$', workflow)
+    if len(execution_lines) != 1:
+        errors.append(
+            "selftest workflow must execute the tracked selftest on one exact "
+            f"fail-fast line, got {len(execution_lines)}"
+        )
+    return errors
+
+
+def normalized_contract_text(document):
+    """Collapse presentation-only Markdown whitespace for semantic clauses."""
+
+    return re.sub(r"\s+", " ", plain_markdown(document)).strip()
+
+
+def contract_section_between(document, start, end):
+    """Return one ordered contract section, or empty on missing/ambiguous markers."""
+
+    if document.count(start) != 1 or document.count(end) != 1:
+        return ""
+    start_index = document.index(start)
+    end_index = document.index(end, start_index + len(start))
+    return document[start_index:end_index] if start_index < end_index else ""
+
+
+def canonical_schema_section(document, label):
+    """Return the normative section for a schema, never a trailing note/example."""
+
+    if "# Go-Live Remediation Plan" in document:
+        if label == "O-CFRATE evidence":
+            return contract_section_between(
+                document, "### Wave 4", "## 6. Owner arming"
+            )
+        return contract_section_between(
+            document, "## 1. The live picture", "## 2. Scope"
+        )
+    if "# Round-3 remediation delta" in document:
+        if label == "canary activation":
+            return contract_section_between(
+                document, "## 3. Acceptance proposals", "### 3.1"
+            )
+        return contract_section_between(
+            document, "## 2. Decisions", "## 3. Acceptance proposals"
+        )
+    if "# Reconciled dispatch DAG" in document:
+        return contract_section_between(
+            document, "## Registry contract", "## Canonical node table"
+        )
+    if "# Union catalog" in document and label == "O-CFRATE evidence":
+        return document[: document.index("# Union catalog")]
+    return ""
+
+
+def validate_canary_split_contract(document, label):
+    """Freeze the default-off implementation/evidence-only two-phase split."""
+
+    canonical = canonical_schema_section(document, "canary activation")
+    normalized = normalized_contract_text(canonical)
+    requirements = {
+        "T6-W14 exact 0/0 default-off with zero action": (
+            r"T6-W14's deterministic default-off phase keeps both.{0,100}"
+            r"FABRIC_PROBES_ENABLED.{0,80}SYNTHETIC_SLOT_PROBES_ENABLED.{0,80}exact `?0`?"
+            r".{0,120}proves zero outer-route requests.{0,100}lifecycle envelopes.{0,100}"
+            r"container fetches.{0,80}starts.{0,100}(?:usage|active minutes)"
+        ),
+        "T6-W14 receives no live arm/probe credit": (
+            r"(?:no activation, re-enable or probe credit.{0,100}T6-W14|"
+            r"T6-W14.{0,800}(?:earns|claims?|receives?).{0,40}no.{0,80}(?:live|probe) credit)"
+        ),
+        "T6-W10 Phase 1 exact 12-count no-wake seal": (
+            r"phase[- ]?1.{0,800}(?:exactly )?12.{0,80}lifecycle ticks.{0,120}"
+            r"(?:exactly )?12.{0,80}(?:outer-route|passive outer-route) requests.{0,120}"
+            r"(?:exactly )?12.{0,80}(?:durably )?acknowledged lifecycle envelopes.{0,180}"
+            r"(?:zero|0).{0,80}(?:container(?:-proxy)? )?(?:fetch|fetches).{0,120}"
+            r"(?:start|starts).{0,120}(?:usage|active minutes)"
+        ),
+        "T6-W10 Phase 2 exact 20 transactions": (
+            r"phase[- ]?2.{0,900}(?:exactly )?20.{0,120}transactions"
+        ),
+        "Phase 1 seal precedes Phase 2": (
+            r"only after.{0,80}phase[- ]?1.{0,100}sealed.{0,100}phase[- ]?2"
+        ),
+        "Phase 2 cannot contaminate Phase 1 artifact": (
+            r"phase[- ]?2.{0,900}excluded.{0,180}cannot.{0,100}"
+            r"(?:amend|rerun|falsify)"
+        ),
+        "T6-W10 evidence-only no implementation/double ownership": (
+            r"T6-W10 implements no.{0,150}driver.{0,100}detector.{0,160}credential."
+            r"{0,180}monitor.{0,700}(?:does not double-own|no second A6\.22 ownership|"
+            r"does not make it an A6\.22 owner|not make it an A6\.22 owner)"
+        ),
+        "Phase 2 changes only synthetic flag and preserves both lane identities": (
+            r"phase[- ]?2.{0,900}(?:change|changes).{0,100}only.{0,100}"
+            r"synthetic_flag_value.{0,350}(?:preserv|keep|remain).{0,160}"
+            r"(?:both|lifecycle.{0,60}synthetic).{0,100}identit"
+        ),
+    }
+    return [
+        f"{label} canary split omits {requirement}"
+        for requirement, pattern in requirements.items()
+        if re.search(pattern, normalized, re.IGNORECASE) is None
+    ]
+
+
+def validate_cf_rate_cross_document(document, label):
+    """Require provider-issued, predeclared and half-open O-CFRATE evidence."""
+
+    normalized = normalized_contract_text(document)
+    prose = normalized.replace(plain_markdown(O_CFRATE_EVIDENCE_SCHEMA), "")
+    requirements = {
+        "threshold declaration precedes observation": (
+            r"threshold_declared_at.{0,140}(?:<|before).{0,80}budget_interval_start"
+        ),
+        "threshold policy receipt binds the declaration": (
+            r"threshold_policy_digest.{0,260}threshold_receipt_id.{0,120}"
+            r"threshold_receipt_sha256"
+        ),
+        "provider-issued invoice/usage source": (
+            r"provider-issued (?:invoice|usage export|invoice or usage export)"
+        ),
+        "half-open budget interval": (
+            r"(?:half-open|inclusive-start/exclusive-end|"
+            r"\[budget_interval_start,budget_interval_end\))"
+        ),
+    }
+    errors = [
+        f"{label} O-CFRATE omits {requirement}"
+        for requirement, pattern in requirements.items()
+        if re.search(pattern, prose, re.IGNORECASE) is None
+    ]
+    if re.search(
+        r"\bclosed interval(?:\s|>)*`?\[budget_interval_start",
+        prose,
+        re.IGNORECASE,
+    ):
+        errors.append(f"{label} O-CFRATE mislabels its half-open interval as closed")
+    return errors
+
+
+def validate_cross_document_contracts(
+    plan_path, delta_path, dag_path, triage_path, handoff_path
+):
+    """Require byte-exact safety schemas in every normative document that owns them."""
+
+    errors = []
+    contracts = {
+        "O-CFRATE evidence": (
+            O_CFRATE_EVIDENCE_SCHEMA,
+            (plan_path, delta_path, dag_path, triage_path),
+        ),
+        "page ACK": (PAGE_ACK_SCHEMA, (plan_path, delta_path, dag_path)),
+        "signer rotation manifest": (
+            SIGNER_ROTATION_MANIFEST,
+            (plan_path, delta_path, dag_path),
+        ),
+        "ACK_RECOVERY": (ACK_RECOVERY_SCHEMA, (plan_path, delta_path, dag_path)),
+        "canary activation": (
+            CANARY_ACTIVATION_TUPLE,
+            (plan_path, delta_path, dag_path),
+        ),
+    }
+    visible_documents = {}
+    for document_path in {path for _, paths in contracts.values() for path in paths}:
+        try:
+            visible, visibility_errors = rendered_markdown(
+                document_path.read_text(encoding="utf-8"), document_path.name
+            )
+        except OSError as exc:
+            errors.append(f"contract document {document_path} is unavailable: {exc}")
+            continue
+        visible_documents[document_path] = visible
+        errors.extend(
+            f"contract document {document_path.name}: {error}"
+            for error in visibility_errors
+        )
+    for label, (literal, document_paths) in contracts.items():
+        for document_path in document_paths:
+            visible = visible_documents.get(document_path, "")
+            section_count = canonical_schema_section(visible, label).count(literal)
+            total_count = visible.count(literal)
+            if section_count != 1 or total_count != 1:
+                errors.append(
+                    f"{label} exact schema must occur once in its canonical section "
+                    f"and once visibly in {document_path.name}, got "
+                    f"section={section_count}, total={total_count}"
+                )
+
+    for role, document_path in (
+        ("main plan", plan_path),
+        ("round-3 delta", delta_path),
+        ("canonical DAG", dag_path),
+    ):
+        if document_path in visible_documents:
+            errors.extend(
+                validate_canary_split_contract(visible_documents[document_path], role)
+            )
+    for document_path in (plan_path, delta_path, dag_path, triage_path):
+        if document_path in visible_documents:
+            errors.extend(
+                validate_cf_rate_cross_document(
+                    visible_documents[document_path], document_path.name
+                )
+            )
+
+    try:
+        handoff_visible, handoff_visibility_errors = rendered_markdown(
+            handoff_path.read_text(encoding="utf-8"), handoff_path.name
+        )
+    except OSError as exc:
+        errors.append(f"contract document {handoff_path} is unavailable: {exc}")
+    else:
+        errors.extend(
+            f"contract document {handoff_path.name}: {error}"
+            for error in handoff_visibility_errors
+        )
+        handoff_schema_section = contract_section_between(
+            handoff_visible, "## Compaction checkpoint", "## 1. Production containment"
+        )
+        compact_handoff = re.sub(r"\s+", "", handoff_visible)
+        compact_handoff_section = re.sub(r"\s+", "", handoff_schema_section)
+        for label, literal in (
+            ("page ACK", PAGE_ACK_SCHEMA),
+            ("ACK_RECOVERY", ACK_RECOVERY_SCHEMA),
+        ):
+            compact_literal = re.sub(r"\s+", "", literal)
+            section_count = compact_handoff_section.count(compact_literal)
+            total_count = compact_handoff.count(compact_literal)
+            if section_count != 1 or total_count != 1:
+                errors.append(
+                    f"{label} exact schema must occur once in the handoff checkpoint "
+                    f"and once visibly, got section={section_count}, total={total_count}"
+                )
+        normalized_handoff = normalized_contract_text(handoff_visible)
+        handoff_flow_section = contract_section_between(
+            handoff_visible,
+            "## 5. Provenance and future DAG",
+            "## 6. Rules and operational traps",
+        )
+        exact_canary_chain = "`T6-W13 → T6-W14 → T6-W10`"
+        if (
+            handoff_flow_section.count(exact_canary_chain) != 1
+            or handoff_visible.count(exact_canary_chain) != 1
+        ):
+            errors.append(
+                "handoff must contain the exact T6-W13 -> T6-W14 -> T6-W10 "
+                "canary chain once in its provenance section"
+            )
+        if re.search(
+            r"later no-wake re-enable is.{0,40}T6-W13.{0,20}T6-W14",
+            normalized_handoff,
+            re.IGNORECASE,
+        ):
+            errors.append(
+                "handoff falsely assigns no-wake re-enable to T6-W14 instead of "
+                "T6-W10's evidence-only phase"
+            )
+        if (
+            re.search(
+                r"T6-W13.{0,100}T6-W14.{0,100}T6-W10",
+                normalized_handoff,
+                re.IGNORECASE,
+            )
+            is None
+        ):
+            errors.append(
+                "handoff must preserve the T6-W13 -> T6-W14 -> T6-W10 canary chain"
+            )
+
+    try:
+        delta_visible, _ = rendered_markdown(
+            delta_path.read_text(encoding="utf-8"), delta_path.name
+        )
+    except OSError as exc:
+        errors.append(f"cannot validate A6.22 activation authority: {exc}")
+        return errors
+    rows = [
+        line for line in delta_visible.splitlines() if line.startswith("| **A6.22** |")
+    ]
+    if len(rows) != 1:
+        errors.append(
+            "round-3 delta must contain exactly one visible A6.22 acceptance row, "
+            f"got {len(rows)}"
+        )
+        return errors
+    row = plain_markdown(rows[0])
+    required = {
+        "T6-W14 bind-only/default-off boundary": (
+            r"\bT6-W14 remains bind-only/default-off and may neither seal "
+            r"canary_activation_tuple nor change either flag\b"
+        ),
+        "T6-W10 sole seal/arm authority": (
+            r"\bonly later T6-W10 may seal the byte-exact tuple and change only the "
+            r"flag value committed for that phase\b"
+        ),
+        "RED on T6-W14 seal/arm": r"\bT6-W14 seals or arms\b",
+        "green only under T6-W10": (
+            r"\bonly T6-W10 seals one byte-exact canary_activation_tuple per phase, "
+            r"changes only its committed flag value to exact 1, and arms/proves the "
+            r"lifecycle and synthetic phases in order\b"
+        ),
+    }
+    errors.extend(
+        f"A6.22 activation authority omits required {label}"
+        for label, pattern in required.items()
+        if re.search(pattern, row, re.IGNORECASE) is None
+    )
+    forbidden = re.search(
+        r"\b(?:before\s+)?T6-W14\s+may\s+(?:set|change|seal|arm)|"
+        r"\bT6-W14\s+owner-arm",
+        row,
+        re.IGNORECASE,
+    )
+    if forbidden:
+        errors.append(
+            "A6.22 acceptance row grants forbidden T6-W14 activation authority: "
+            f"{forbidden.group(0)!r}"
+        )
     return errors
 
 
@@ -1971,7 +2455,7 @@ def validate_dispatch_dag(path):
                 )
             else:
                 artifacts[artifact] = node
-        if phase == "W3 live proof" and not node_artifacts:
+        if phase == "W3 live proof" and not node_artifacts and node != "T6-W14":
             dag_fail.append(f"DAG live-proof node {node} has no artifact filename")
         if any(scope == "docs/plan/evidence/**" for scope in scopes):
             dag_fail.append(f"DAG {node} owns forbidden broad evidence scope")
@@ -2088,6 +2572,22 @@ def validate_dispatch_dag(path):
         missing = sorted(required - set(nodes[node]["scopes"]))
         if missing:
             dag_fail.append(f"DAG {node} is missing required path atoms {missing}")
+        excluded = {
+            atom: sorted(
+                exclusion
+                for exclusion in nodes[node]["exclusions"]
+                if path_atom_covers(exclusion, atom)
+            )
+            for atom in sorted(required & set(nodes[node]["scopes"]))
+        }
+        excluded = {
+            atom: carveouts for atom, carveouts in excluded.items() if carveouts
+        }
+        if excluded:
+            dag_fail.append(
+                f"DAG {node} excludes required path atoms from effective scope: "
+                f"{excluded}"
+            )
 
     for node, expected_scopes in EXACT_DAG_SCOPE_ATOMS.items():
         if node not in nodes:
@@ -2098,6 +2598,22 @@ def validate_dispatch_dag(path):
                 f"DAG {node} exact split-scope mismatch: "
                 f"missing {sorted(expected_scopes - actual_scopes)}, "
                 f"unexpected {sorted(actual_scopes - expected_scopes)}"
+            )
+        excluded = {
+            atom: sorted(
+                exclusion
+                for exclusion in nodes[node]["exclusions"]
+                if path_atom_covers(exclusion, atom)
+            )
+            for atom in sorted(expected_scopes & actual_scopes)
+        }
+        excluded = {
+            atom: carveouts for atom, carveouts in excluded.items() if carveouts
+        }
+        if excluded:
+            dag_fail.append(
+                f"DAG {node} exact path atoms are absent from effective scope: "
+                f"{excluded}"
             )
 
     for node, expected_artifacts in EXACT_DAG_ARTIFACTS.items():
@@ -2110,6 +2626,11 @@ def validate_dispatch_dag(path):
                 f"expected {sorted(expected_artifacts)}, "
                 f"got {sorted(actual_artifacts)}"
             )
+
+    if "T1-W4" in nodes and "T6-W10" not in nodes["T1-W4"]["predecessors"]:
+        dag_fail.append(
+            "DAG T1-W4/A1.9 must declare T6-W10 as an exact hard predecessor"
+        )
 
     if "T6-W4" in nodes:
         detector_scopes = sorted(
@@ -2167,7 +2688,7 @@ def validate_dispatch_dag(path):
                 f"DAG probe/test+probe node {node} does not declare T7-W4b "
                 "as an exact hard predecessor"
             )
-        if not nodes[node]["artifacts"]:
+        if not nodes[node]["artifacts"] and node != "T6-W14":
             dag_fail.append(
                 f"DAG probe/test+probe node {node} has no evidence artifact filename"
             )
@@ -2211,12 +2732,24 @@ def validate_dispatch_dag(path):
             f"DAG rendered ready sets are not deterministic Kahn output: "
             f"expected {deterministic_batches}, got {rendered_batches}"
         )
+    if "T6-W10" in rendered_nodes and "T1-W4" in rendered_nodes:
+        t6_batch = next(
+            index for index, batch in enumerate(rendered_batches) if "T6-W10" in batch
+        )
+        t1_batch = next(
+            index for index, batch in enumerate(rendered_batches) if "T1-W4" in batch
+        )
+        if t6_batch >= t1_batch:
+            dag_fail.append(
+                "DAG ready sets must serialize T6-W10 before T1-W4/A1.9 in a later batch"
+            )
 
     return dag_fail
 
 
-raw_doc = Path(sys.argv[1]).read_text(encoding="utf-8")
-doc, visibility_errors = rendered_markdown(raw_doc, Path(sys.argv[1]).name)
+plan_path = Path(sys.argv[1])
+raw_doc = plan_path.read_text(encoding="utf-8")
+doc, visibility_errors = rendered_markdown(raw_doc, plan_path.name)
 fail = list(visibility_errors)
 
 required_headings = [
@@ -2527,6 +3060,14 @@ if principal_collisions:
     fail.append(f"PARALLEL path/glob scope collisions: {principal_collisions}")
 
 dag_path = Path(__file__).with_name(DAG_FILENAME)
+delta_path = Path(__file__).with_name(STAGED_FILENAME)
+triage_path = Path(__file__).with_name("union-triage-remaining.md")
+handoff_path = Path(__file__).parent.parent / "handoff" / HANDOFF_FILENAME
+fail.extend(
+    validate_cross_document_contracts(
+        plan_path, delta_path, dag_path, triage_path, handoff_path
+    )
+)
 if dag_path.exists():
     fail.extend(validate_dispatch_dag(dag_path))
 

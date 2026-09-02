@@ -31,14 +31,23 @@ PLAN = PLAN_DIR / "2026-08-30-golive-remediation-plan.md"
 TRIAGE = PLAN_DIR / "union-triage-remaining.md"
 DAG = PLAN_DIR / "2026-09-01-reconciled-dispatch-dag.md"
 STAGED = PLAN_DIR / "2026-09-01-round3-remediation-delta.md"
+HANDOFF = REPO / "docs" / "handoff" / "2026-09-01-session-state-go-live-remediation.md"
 
 
 def execute(
-    checker: str, target: Path, *, dag: Path | None = None
+    checker: str,
+    target: Path,
+    *,
+    dag: Path | None = None,
+    plan: Path | None = None,
+    delta: Path | None = None,
+    handoff: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     command = [sys.executable, str(PLAN_DIR / checker), str(target)]
     if checker == "au-check.py":
-        command.extend(["--plan", str(PLAN)])
+        command.extend(["--plan", str(plan or PLAN)])
+        command.extend(["--delta", str(delta or STAGED)])
+        command.extend(["--handoff", str(handoff or HANDOFF)])
         # The dispatch DAG is the current canonical repair input.  Keep this
         # compatible with the pre-DAG snapshot while using it whenever the
         # coordinated input is present (the evolved AU gate requires the
@@ -72,8 +81,11 @@ def require(
     should_pass: bool,
     *,
     dag: Path | None = None,
+    plan: Path | None = None,
+    delta: Path | None = None,
+    handoff: Path | None = None,
 ) -> None:
-    result = execute(checker, target, dag=dag)
+    result = execute(checker, target, dag=dag, plan=plan, delta=delta, handoff=handoff)
     passed = result.returncode == 0
     if passed != should_pass:
         stream = result.stdout + result.stderr
@@ -89,6 +101,23 @@ def replace_once(document: str, old: str, new: str, label: str) -> str:
     if count != 1:
         raise AssertionError(f"{label}: expected one mutation target, found {count}")
     return document.replace(old, new, 1)
+
+
+def replace_regex_once(
+    document: str, pattern: str, replacement: str, label: str
+) -> str:
+    """Replace one regex target while proving the fixture is physical/non-vacuous."""
+
+    matches = list(re.finditer(pattern, document, re.IGNORECASE | re.DOTALL))
+    if len(matches) != 1:
+        raise AssertionError(
+            f"{label}: expected one regex mutation target, found {len(matches)}"
+        )
+    start, end = matches[0].span()
+    mutated = document[:start] + replacement + document[end:]
+    if mutated == document:
+        raise AssertionError(f"{label}: regex replacement was vacuous")
+    return mutated
 
 
 def fence_once(document: str, line: str, label: str) -> str:
@@ -149,6 +178,8 @@ def require_mirrored_wp(
     mirror_root: Path,
     *,
     overrides: dict[Path, Path] | None = None,
+    workflow: Path | None = None,
+    handoff: Path | None = None,
 ) -> None:
     """Run wp-check against an isolated plan directory.
 
@@ -165,6 +196,15 @@ def require_mirrored_wp(
             shutil.copy2(source, mirror_plan / source.name)
     for destination, source in (overrides or {}).items():
         shutil.copy2(source, mirror_plan / destination.name)
+    mirror_workflows = mirror_root / ".github" / "workflows"
+    mirror_workflows.mkdir(parents=True)
+    shutil.copy2(
+        workflow or REPO / ".github" / "workflows" / "selftests.yml",
+        mirror_workflows / "selftests.yml",
+    )
+    mirror_handoff = mirror_root / "docs" / "handoff"
+    mirror_handoff.mkdir(parents=True)
+    shutil.copy2(handoff or HANDOFF, mirror_handoff / HANDOFF.name)
     mirrored_target = mirror_plan / target.name
     shutil.copy2(target, mirrored_target)
     result = subprocess.run(
@@ -297,6 +337,7 @@ def main() -> int:
     plan = PLAN.read_text(encoding="utf-8")
     triage = TRIAGE.read_text(encoding="utf-8")
     staged = STAGED.read_text(encoding="utf-8")
+    handoff = HANDOFF.read_text(encoding="utf-8")
 
     with tempfile.TemporaryDirectory(prefix="corelink-plan-gates-") as temp:
         work = Path(temp)
@@ -1234,9 +1275,9 @@ def main() -> int:
                 dag=missing_sensitivity_receipt_isolation,
             )
 
-            # Round 11 freezes T6-W14's future registrations as inactive.  A
-            # source-id substitution must block; otherwise a producer could
-            # mint a lane outside the sealed T6-W12 tuple.
+            # The accepted registrations are stable before both suite runs.
+            # A source-id substitution must still block; otherwise a producer
+            # could mint a lane outside the sealed T6-W12 tuple.
             missing_t6w14_preregistration = work / "missing-t6-w14-preregistration.md"
             missing_t6w14_preregistration.write_text(
                 replace_once(
@@ -1257,13 +1298,14 @@ def main() -> int:
             )
 
             # The consumer is also bind-only: removing that boundary must
-            # block even when the inactive registrations remain present.
+            # block even when the stable accepted registrations remain present.
             missing_t6w14_bind_only = work / "missing-t6-w14-bind-only.md"
             missing_t6w14_bind_only.write_text(
                 replace_once(
                     dag_text,
-                    "T1-W6 and T6-W14 may only bind their already-issued pairs; neither may\n"
-                    "mint, rotate, substitute or register them.",
+                    "T1-W6 and T6-W14 may\n"
+                    "only bind their already-issued pairs; neither may mint, rotate, substitute, register or mutate\n"
+                    "monitor acceptance or author an activation tuple.",
                     "T1-W6 may only bind its already-issued pair; T6-W14 may configure its lane.",
                     "T6-W14 bind-only boundary",
                 ),
@@ -1419,6 +1461,1186 @@ def main() -> int:
                 overrides={DAG: missing_selftests_workflow_scope},
             )
 
+            # A listed atom is not effectively owned when the same row carves
+            # it back out. Both DAG consumers must apply exclusions before
+            # satisfying their required-path registries.
+            excluded_required_scope = work / "excluded-required-scope.md"
+            excluded_required_scope.write_text(
+                replace_once(
+                    dag_text,
+                    "`deploy/cost-monitor/src/window_journal.ts`; ",
+                    "`deploy/cost-monitor/src/window_journal.ts` excluding "
+                    "`deploy/cost-monitor/src/window_journal.ts`; ",
+                    "T6-W12 excluded required scope",
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP required atom excluded from effective scope",
+                PLAN,
+                False,
+                work / "excluded-required-scope-mirror",
+                overrides={DAG: excluded_required_scope},
+            )
+            require(
+                "AU required atom excluded from effective scope",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=excluded_required_scope,
+            )
+
+            excluded_required_scope_colon = work / "excluded-required-scope-colon.md"
+            excluded_required_scope_colon.write_text(
+                replace_once(
+                    dag_text,
+                    "`deploy/cost-monitor/src/window_journal.ts`; ",
+                    "`deploy/cost-monitor/src/window_journal.ts`; excluding: "
+                    "`deploy/cost-monitor/src/window_journal.ts`; ",
+                    "T6-W12 colon-delimited excluded required scope",
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP colon-delimited required atom exclusion",
+                PLAN,
+                False,
+                work / "excluded-required-scope-colon-mirror",
+                overrides={DAG: excluded_required_scope_colon},
+            )
+            require(
+                "AU colon-delimited required atom exclusion",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=excluded_required_scope_colon,
+            )
+
+            workflow_text = (REPO / ".github/workflows/selftests.yml").read_text(
+                encoding="utf-8"
+            )
+            disabled_job_workflow = work / "disabled-job-selftests.yml"
+            disabled_job_workflow.write_text(
+                replace_once(
+                    workflow_text,
+                    "  selftests:\n",
+                    "  selftests:\n    if: ${{ false }}\n",
+                    "selftests job condition",
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP selftests workflow rejects disabled job",
+                PLAN,
+                False,
+                work / "disabled-job-selftests-mirror",
+                workflow=disabled_job_workflow,
+            )
+
+            ignored_step_workflow = work / "ignored-step-selftests.yml"
+            ignored_step_workflow.write_text(
+                replace_once(
+                    workflow_text,
+                    "      - name: Discover and run every tracked selftest\n",
+                    "      - name: Discover and run every tracked selftest\n"
+                    "        continue-on-error: true\n",
+                    "selftests step continue-on-error",
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP selftests workflow rejects continue-on-error",
+                PLAN,
+                False,
+                work / "ignored-step-selftests-mirror",
+                workflow=ignored_step_workflow,
+            )
+
+            early_success_workflow = work / "early-success-selftests.yml"
+            early_success_workflow.write_text(
+                replace_once(
+                    workflow_text,
+                    "          set -euo pipefail\n",
+                    "          set -euo pipefail\n          exit 0\n",
+                    "selftests early successful exit",
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP selftests workflow rejects early successful exit",
+                PLAN,
+                False,
+                work / "early-success-selftests-mirror",
+                workflow=early_success_workflow,
+            )
+
+            missing_pg_fence_scope = work / "missing-pg-fence-scope.md"
+            missing_pg_fence_scope.write_text(
+                replace_in_row(
+                    dag_text,
+                    "| T1-W6 |",
+                    "`crates/corelink-fabric/src/pg_monitor_fence.rs`; ",
+                    "",
+                    "T1-W6 PG transaction-fence scope",
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP T1-W6 missing PG transaction-fence scope",
+                PLAN,
+                False,
+                work / "missing-pg-fence-scope-mirror",
+                overrides={DAG: missing_pg_fence_scope},
+            )
+
+            wrong_page_ack_schema = work / "wrong-page-ack-schema.md"
+            wrong_page_ack_schema.write_text(
+                replace_once(
+                    dag_text,
+                    "page_ack_token=(page_ack_version,incident_id,",
+                    "page_ack_token=(incident_id,",
+                    "human page ACK exact schema",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU human page ACK schema drift",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=wrong_page_ack_schema,
+            )
+
+            wrong_ack_recovery_schema = work / "wrong-ack-recovery-schema.md"
+            wrong_ack_recovery_schema.write_text(
+                replace_once(
+                    dag_text,
+                    "ACK_RECOVERY=(recovery_version,event_id,",
+                    "ACK_RECOVERY=(event_id,",
+                    "ACK_RECOVERY exact schema",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU ACK_RECOVERY schema drift",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=wrong_ack_recovery_schema,
+            )
+
+            missing_page_ack_binding = work / "missing-page-ack-binding.md"
+            missing_page_ack_binding.write_text(
+                replace_once(
+                    dag_text,
+                    "on_call_schedule_digest,action,payload_digest,monitor_rearm_tuple_digest,",
+                    "on_call_schedule_digest,action,monitor_rearm_tuple_digest,",
+                    "page ACK payload binding",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU page ACK missing payload binding",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=missing_page_ack_binding,
+            )
+
+            missing_signer_manifest_binding = (
+                work / "missing-signer-manifest-binding.md"
+            )
+            missing_signer_manifest_binding.write_text(
+                replace_once(
+                    dag_text,
+                    "overlap_expires_at,recovery_custody_digest,monitor_rearm_tuple_digest,",
+                    "overlap_expires_at,monitor_rearm_tuple_digest,",
+                    "signer rotation recovery custody binding",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU signer manifest missing recovery-custody binding",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=missing_signer_manifest_binding,
+            )
+
+            missing_recovery_manifest_digest = (
+                work / "missing-recovery-manifest-digest.md"
+            )
+            missing_recovery_manifest_digest.write_text(
+                replace_once(
+                    dag_text,
+                    "revocation_record_digest,signer_rotation_manifest_digest,current_monitor_rearm_tuple_digest,",
+                    "revocation_record_digest,current_monitor_rearm_tuple_digest,",
+                    "ACK_RECOVERY signer manifest digest",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU ACK_RECOVERY missing signer-manifest digest",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=missing_recovery_manifest_digest,
+            )
+
+            cross_document_schema_mutants = (
+                (
+                    "page ACK",
+                    r"page_ack_token=\([^`\r\n]+\)",
+                    "payload_digest",
+                    "optional_payload_digest",
+                ),
+                (
+                    "signer rotation manifest",
+                    r"signer_rotation_manifest=\([^`\r\n]+\)",
+                    "previous_manifest_digest",
+                    "previous_manifest_hint",
+                ),
+                (
+                    "ACK_RECOVERY",
+                    r"ACK_RECOVERY=\([^`\r\n]+\)",
+                    "signer_rotation_manifest_digest",
+                    "signer_rotation_manifest_hint",
+                ),
+                (
+                    "canary activation",
+                    r"canary_activation_tuple=\([^`\r\n]+\)",
+                    "producer_config_digest",
+                    "producer_config_hint",
+                ),
+            )
+            for family, pattern, old_field, new_field in cross_document_schema_mutants:
+                schemas = re.findall(pattern, dag_text)
+                if len(schemas) != 1:
+                    raise AssertionError(
+                        f"{family} cross-document fixture requires one DAG schema, "
+                        f"got {len(schemas)}"
+                    )
+                schema = schemas[0]
+                mutated_schema = schema.replace(old_field, new_field, 1)
+                if mutated_schema == schema:
+                    raise AssertionError(
+                        f"{family} cross-document fixture did not mutate {old_field}"
+                    )
+                slug = family.lower().replace(" ", "-").replace("_", "-")
+
+                bad_main_contract = work / f"bad-{slug}-schema-main.md"
+                bad_main_contract.write_text(
+                    replace_once(
+                        plan,
+                        schema,
+                        mutated_schema,
+                        f"main {family} exact schema",
+                    ),
+                    encoding="utf-8",
+                )
+                require(
+                    f"WP {family} exact schema drift in main",
+                    "wp-check.py",
+                    bad_main_contract,
+                    False,
+                )
+                require(
+                    f"AU {family} exact schema drift in main",
+                    "au-check.py",
+                    TRIAGE,
+                    False,
+                    plan=bad_main_contract,
+                )
+
+                bad_delta_contract = work / f"bad-{slug}-schema-delta.md"
+                bad_delta_contract.write_text(
+                    replace_once(
+                        staged,
+                        schema,
+                        mutated_schema,
+                        f"delta {family} exact schema",
+                    ),
+                    encoding="utf-8",
+                )
+                require_mirrored_wp(
+                    f"WP {family} exact schema drift in delta",
+                    PLAN,
+                    False,
+                    work / f"bad-{slug}-delta-mirror",
+                    overrides={STAGED: bad_delta_contract},
+                )
+                require(
+                    f"AU {family} exact schema drift in delta",
+                    "au-check.py",
+                    TRIAGE,
+                    False,
+                    delta=bad_delta_contract,
+                )
+
+            t6w14_arming_delta = work / "t6w14-forbidden-arming-delta.md"
+            t6w14_arming_delta.write_text(
+                replace_once(
+                    staged,
+                    "T6-W14 remains bind-only/default-off and may neither seal "
+                    "`canary_activation_tuple` nor change either flag. Only later "
+                    "T6-W10 may",
+                    "T6-W14 may set `FABRIC_PROBES_ENABLED=1` after its own proof. "
+                    "Only later T6-W10 may",
+                    "T6-W14 forbidden activation authority",
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP delta rejects T6-W14 arming authority",
+                PLAN,
+                False,
+                work / "t6w14-forbidden-arming-mirror",
+                overrides={STAGED: t6w14_arming_delta},
+            )
+            require(
+                "AU delta rejects T6-W14 arming authority",
+                "au-check.py",
+                TRIAGE,
+                False,
+                delta=t6w14_arming_delta,
+            )
+
+            # Cross-document canary identity schemas must retain two isolated
+            # credential lanes; a singular/collapsed lane is not equivalent.
+            activation_schema = re.findall(
+                r"canary_activation_tuple=\([^`\r\n]+\)", dag_text
+            )
+            if len(activation_schema) != 1:
+                raise AssertionError(
+                    "dual-lane activation fixture requires one canonical DAG schema"
+                )
+            collapsed_activation = activation_schema[0].replace(
+                "synthetic_source", "lifecycle_source", 1
+            )
+            for role, source_document in (
+                ("main", plan),
+                ("delta", staged),
+                ("DAG", dag_text),
+            ):
+                bad_activation = work / f"collapsed-activation-lane-{role.lower()}.md"
+                bad_activation.write_text(
+                    replace_once(
+                        source_document,
+                        activation_schema[0],
+                        collapsed_activation,
+                        f"{role} collapsed activation lane",
+                    ),
+                    encoding="utf-8",
+                )
+                if role == "main":
+                    require(
+                        "WP main rejects collapsed activation lane",
+                        "wp-check.py",
+                        bad_activation,
+                        False,
+                    )
+                    require(
+                        "AU main rejects collapsed activation lane",
+                        "au-check.py",
+                        TRIAGE,
+                        False,
+                        plan=bad_activation,
+                    )
+                elif role == "delta":
+                    require_mirrored_wp(
+                        "WP delta rejects collapsed activation lane",
+                        PLAN,
+                        False,
+                        work / "collapsed-activation-delta-mirror",
+                        overrides={STAGED: bad_activation},
+                    )
+                    require(
+                        "AU delta rejects collapsed activation lane",
+                        "au-check.py",
+                        TRIAGE,
+                        False,
+                        delta=bad_activation,
+                    )
+                else:
+                    require_mirrored_wp(
+                        "WP DAG rejects collapsed activation lane",
+                        PLAN,
+                        False,
+                        work / "collapsed-activation-dag-mirror",
+                        overrides={DAG: bad_activation},
+                    )
+                    require(
+                        "AU DAG rejects collapsed activation lane",
+                        "au-check.py",
+                        TRIAGE,
+                        False,
+                        dag=bad_activation,
+                    )
+
+            # Each cardinality/order/ownership clause receives its own physical
+            # corruption so a broad prose check cannot accidentally mask one.
+            semantic_mutants = (
+                (
+                    "phase1-12-ticks",
+                    dag_text,
+                    "observes exactly 12\nconsecutive lifecycle ticks",
+                    "observes exactly 11\nconsecutive lifecycle ticks",
+                    "dag",
+                ),
+                (
+                    "phase1-12-requests",
+                    staged,
+                    "exactly 12 passive outer-route\nrequests",
+                    "exactly 11 passive outer-route\nrequests",
+                    "delta",
+                ),
+                (
+                    "phase1-12-acks",
+                    plan,
+                    "and runs exactly 12\nlifecycle ticks, 12 outer-route requests and 12 durably acknowledged lifecycle envelopes",
+                    "and runs exactly 12\nlifecycle ticks, 12 outer-route requests and 11 durably acknowledged lifecycle envelopes",
+                    "main",
+                ),
+                (
+                    "phase2-20-transactions",
+                    staged,
+                    "then collects exactly 20 transactions",
+                    "then collects exactly 19 transactions",
+                    "delta",
+                ),
+                (
+                    "phase1-before-phase2",
+                    dag_text,
+                    "Only after the Phase-1 artifact is sealed and immutable may\nPhase 2 begin and T6-W10",
+                    "Before the Phase-1 artifact is sealed, Phase 2 may begin and T6-W10",
+                    "dag",
+                ),
+                (
+                    "phase2-no-contamination",
+                    plan,
+                    "those starts are excluded from and cannot amend or rerun the\nsealed A6.22 artifact",
+                    "those starts may amend and rerun the\nsealed A6.22 artifact",
+                    "main",
+                ),
+                (
+                    "t6w14-flags-zero-zero",
+                    plan,
+                    "keeps both\n`FABRIC_PROBES_ENABLED` and `SYNTHETIC_SLOT_PROBES_ENABLED` exact `0`",
+                    "keeps\n`FABRIC_PROBES_ENABLED` exact `1` and `SYNTHETIC_SLOT_PROBES_ENABLED` exact `0`",
+                    "main",
+                ),
+                (
+                    "t6w14-zero-action",
+                    plan,
+                    "proves zero outer-route\nrequests, lifecycle envelopes, container fetches, starts",
+                    "permits one outer-route\nrequest, lifecycle envelope, container fetch and start",
+                    "main",
+                ),
+                (
+                    "t6w10-no-implementation",
+                    staged,
+                    "T6-W10 implements no driver, detector, credential or monitor\nroute",
+                    "T6-W10 implements the driver, detector, credential and monitor\nroute",
+                    "delta",
+                ),
+            )
+            for slug, source_document, old, new, role in semantic_mutants:
+                mutant = work / f"{slug}.md"
+                mutant.write_text(
+                    replace_once(source_document, old, new, slug), encoding="utf-8"
+                )
+                if role == "main":
+                    require(f"WP rejects {slug}", "wp-check.py", mutant, False)
+                    require(
+                        f"AU rejects {slug}", "au-check.py", TRIAGE, False, plan=mutant
+                    )
+                elif role == "delta":
+                    require_mirrored_wp(
+                        f"WP rejects {slug}",
+                        PLAN,
+                        False,
+                        work / f"{slug}-mirror",
+                        overrides={STAGED: mutant},
+                    )
+                    require(
+                        f"AU rejects {slug}", "au-check.py", TRIAGE, False, delta=mutant
+                    )
+                else:
+                    require_mirrored_wp(
+                        f"WP rejects {slug}",
+                        PLAN,
+                        False,
+                        work / f"{slug}-mirror",
+                        overrides={DAG: mutant},
+                    )
+                    require(
+                        f"AU rejects {slug}", "au-check.py", TRIAGE, False, dag=mutant
+                    )
+
+            no_t6w10_predecessor = work / "t1w4-missing-t6w10-predecessor.md"
+            no_t6w10_predecessor.write_text(
+                replace_in_row(
+                    dag_text, "| T1-W4 |", ", T6-W10", "", "T1-W4 T6-W10 predecessor"
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP rejects T1-W4 without T6-W10 predecessor",
+                PLAN,
+                False,
+                work / "t1w4-predecessor-mirror",
+                overrides={DAG: no_t6w10_predecessor},
+            )
+            require(
+                "AU rejects T1-W4 without T6-W10 predecessor",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=no_t6w10_predecessor,
+            )
+
+            same_batch = work / "t1w4-same-batch-as-t6w10.md"
+            same_batch.write_text(
+                replace_regex_once(
+                    dag_text,
+                    r"B(\d{2}): T6-W10\nB\d{2}: T1-W4",
+                    r"B\1: T6-W10 T1-W4",
+                    "T6-W10/T1-W4 batch serialization",
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP rejects same-batch T6-W10/T1-W4",
+                PLAN,
+                False,
+                work / "same-batch-mirror",
+                overrides={DAG: same_batch},
+            )
+            require(
+                "AU rejects same-batch T6-W10/T1-W4",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=same_batch,
+            )
+
+            wrong_artifact_owner = work / "no-wake-artifact-wrong-owner.md"
+            wrong_artifact_text = replace_in_row(
+                dag_text,
+                "| T6-W10 |",
+                "`docs/plan/evidence/T6-W14-canary-no-wake.json`; ",
+                "",
+                "remove no-wake artifact from T6-W10",
+            )
+            wrong_artifact_text = replace_in_row(
+                wrong_artifact_text,
+                "| T6-W14 |",
+                " | Sol / live-risk |",
+                "; `docs/plan/evidence/T6-W14-canary-no-wake.json` | Sol / live-risk |",
+                "assign no-wake artifact to T6-W14",
+            )
+            wrong_artifact_owner.write_text(wrong_artifact_text, encoding="utf-8")
+            require_mirrored_wp(
+                "WP rejects T6-W14 artifact ownership",
+                PLAN,
+                False,
+                work / "wrong-artifact-owner-mirror",
+                overrides={DAG: wrong_artifact_owner},
+            )
+            require(
+                "AU rejects T6-W14 artifact ownership",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=wrong_artifact_owner,
+            )
+
+            handoff_page_schema = re.findall(r"page_ack_token=\([^`]+\)", handoff)
+            handoff_recovery_schema = re.findall(r"ACK_RECOVERY=\([^`]+\)", handoff)
+            for family, schemas, field in (
+                ("page-ack", handoff_page_schema, "payload_digest,"),
+                (
+                    "ack-recovery",
+                    handoff_recovery_schema,
+                    "signer_rotation_manifest_digest,",
+                ),
+            ):
+                if len(schemas) != 1:
+                    raise AssertionError(
+                        f"handoff {family} fixture requires one schema"
+                    )
+                bad_handoff = work / f"handoff-{family}-missing-binding.md"
+                bad_handoff.write_text(
+                    replace_once(
+                        handoff,
+                        schemas[0],
+                        schemas[0].replace(field, "", 1),
+                        f"handoff {family}",
+                    ),
+                    encoding="utf-8",
+                )
+                require_mirrored_wp(
+                    f"WP rejects handoff {family} drift",
+                    PLAN,
+                    False,
+                    work / f"handoff-{family}-mirror",
+                    handoff=bad_handoff,
+                )
+                require(
+                    f"AU rejects handoff {family} drift",
+                    "au-check.py",
+                    TRIAGE,
+                    False,
+                    handoff=bad_handoff,
+                )
+
+            relocated_schema = work / "relocated-page-ack-schema.md"
+            page_schema = re.findall(r"page_ack_token=\([^`\r\n]+\)", plan)
+            if len(page_schema) != 1:
+                raise AssertionError(
+                    "schema relocation fixture requires one main page ACK schema"
+                )
+            relocated_schema.write_text(
+                plan.replace(f"`{page_schema[0]}`;", "", 1)
+                + f"\n\n> Non-normative note: `{page_schema[0]}`\n",
+                encoding="utf-8",
+            )
+            require(
+                "WP rejects schema relocated outside canonical section",
+                "wp-check.py",
+                relocated_schema,
+                False,
+            )
+            require(
+                "AU rejects schema relocated outside canonical section",
+                "au-check.py",
+                TRIAGE,
+                False,
+                plan=relocated_schema,
+            )
+
+            for role, source_document in (
+                ("main", plan),
+                ("delta", staged),
+                ("dag", dag_text),
+                ("triage", triage),
+            ):
+                schemas = re.findall(
+                    r"O_CFRATE_EVIDENCE=\([^`\r\n]+\)", source_document
+                )
+                if len(schemas) != 1:
+                    raise AssertionError(
+                        f"{role} threshold fixture requires one O-CFRATE schema"
+                    )
+                weakened = schemas[0].replace("threshold_policy_digest,", "", 1)
+                mutant = work / f"ocfrate-missing-threshold-proof-{role}.md"
+                mutant.write_text(
+                    replace_once(
+                        source_document, schemas[0], weakened, f"{role} threshold proof"
+                    ),
+                    encoding="utf-8",
+                )
+                if role == "main":
+                    require(
+                        "WP rejects main O-CFRATE threshold proof drift",
+                        "wp-check.py",
+                        mutant,
+                        False,
+                    )
+                    require(
+                        "AU rejects main O-CFRATE threshold proof drift",
+                        "au-check.py",
+                        TRIAGE,
+                        False,
+                        plan=mutant,
+                    )
+                elif role == "delta":
+                    require_mirrored_wp(
+                        "WP rejects delta O-CFRATE threshold proof drift",
+                        PLAN,
+                        False,
+                        work / "ocfrate-threshold-delta-mirror",
+                        overrides={STAGED: mutant},
+                    )
+                    require(
+                        "AU rejects delta O-CFRATE threshold proof drift",
+                        "au-check.py",
+                        TRIAGE,
+                        False,
+                        delta=mutant,
+                    )
+                elif role == "dag":
+                    require_mirrored_wp(
+                        "WP rejects DAG O-CFRATE threshold proof drift",
+                        PLAN,
+                        False,
+                        work / "ocfrate-threshold-dag-mirror",
+                        overrides={DAG: mutant},
+                    )
+                    require(
+                        "AU rejects DAG O-CFRATE threshold proof drift",
+                        "au-check.py",
+                        TRIAGE,
+                        False,
+                        dag=mutant,
+                    )
+                else:
+                    require_mirrored_wp(
+                        "WP rejects triage O-CFRATE threshold proof drift",
+                        PLAN,
+                        False,
+                        work / "ocfrate-threshold-triage-mirror",
+                        overrides={TRIAGE: mutant},
+                    )
+                    require(
+                        "AU rejects triage O-CFRATE threshold proof drift",
+                        "au-check.py",
+                        mutant,
+                        False,
+                    )
+
+            closed_interval = work / "ocfrate-closed-interval.md"
+            closed_interval.write_text(
+                replace_once(
+                    triage,
+                    "half-open interval",
+                    "closed interval",
+                    "O-CFRATE half-open interval",
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP rejects O-CFRATE closed interval",
+                PLAN,
+                False,
+                work / "ocfrate-closed-mirror",
+                overrides={TRIAGE: closed_interval},
+            )
+            require(
+                "AU rejects O-CFRATE closed interval",
+                "au-check.py",
+                closed_interval,
+                False,
+            )
+
+            non_provider_source = work / "ocfrate-non-provider-source.md"
+            non_provider_source.write_text(
+                replace_once(
+                    staged,
+                    "provider-issued invoice or\nusage export",
+                    "locally transcribed dashboard summary",
+                    "O-CFRATE provider-issued source",
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP rejects non-provider O-CFRATE source",
+                PLAN,
+                False,
+                work / "ocfrate-source-mirror",
+                overrides={STAGED: non_provider_source},
+            )
+            require(
+                "AU rejects non-provider O-CFRATE source",
+                "au-check.py",
+                TRIAGE,
+                False,
+                delta=non_provider_source,
+            )
+
+            stale_handoff_sequence = work / "handoff-stale-canary-sequence.md"
+            stale_handoff_sequence.write_text(
+                replace_once(
+                    handoff,
+                    "`T6-W13 → T6-W14 → T6-W10`",
+                    "`T6-W13 → T6-W14`",
+                    "handoff canary evidence sequence",
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP rejects stale handoff re-enable owner",
+                PLAN,
+                False,
+                work / "handoff-sequence-mirror",
+                handoff=stale_handoff_sequence,
+            )
+            require(
+                "AU rejects stale handoff re-enable owner",
+                "au-check.py",
+                TRIAGE,
+                False,
+                handoff=stale_handoff_sequence,
+            )
+
+            missing_journal_reconciler_scope = (
+                work / "missing-journal-reconciler-scope.md"
+            )
+            missing_journal_reconciler_scope.write_text(
+                replace_in_row(
+                    dag_text,
+                    "| T6-W12 |",
+                    "`deploy/cost-monitor/src/journal_reconciler.ts`; ",
+                    "",
+                    "T6-W12 provider-reconciliation scope",
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP T6-W12 missing journal reconciler scope",
+                PLAN,
+                False,
+                work / "missing-journal-reconciler-scope-mirror",
+                overrides={DAG: missing_journal_reconciler_scope},
+            )
+
+            missing_clock_scope = work / "missing-trusted-clock-scope.md"
+            missing_clock_scope.write_text(
+                replace_in_row(
+                    dag_text,
+                    "| T6-W12 |",
+                    "`deploy/cost-monitor/src/clock.ts`; ",
+                    "",
+                    "T6-W12 trusted-clock scope",
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP T6-W12 missing trusted-clock scope",
+                PLAN,
+                False,
+                work / "missing-trusted-clock-scope-mirror",
+                overrides={DAG: missing_clock_scope},
+            )
+
+            unstable_activation = work / "unstable-canary-activation.md"
+            unstable_activation.write_text(
+                replace_once(
+                    dag_text,
+                    "All four registry entries and credential authorizations are accepted and byte-stable",
+                    "All four registry entries and credential authorizations remain inactive and mutable",
+                    "stable canary registration",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU unstable canary activation registry",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=unstable_activation,
+            )
+
+            missing_activation_field = work / "missing-canary-activation-field.md"
+            missing_activation_field.write_text(
+                replace_once(
+                    dag_text,
+                    "producer_image_digest,producer_config_digest,probe_flag_name,",
+                    "producer_image_digest,probe_flag_name,",
+                    "canary activation producer-config binding",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU canary activation tuple missing config digest",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=missing_activation_field,
+            )
+
+            weakened_activation_drift = work / "weakened-canary-activation-drift.md"
+            weakened_activation_drift.write_text(
+                replace_once(
+                    dag_text,
+                    "any field/digest drift, post-check config/runtime/key/flag\nchange,",
+                    "selected field drift,",
+                    "canary activation drift fail-closed matrix",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU canary activation drift weakening",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=weakened_activation_drift,
+            )
+
+            ambiguous_canary_status = work / "ambiguous-canary-status.md"
+            ambiguous_canary_status.write_text(
+                replace_once(
+                    dag_text,
+                    "`SKIPPED`, `FAILED`, `UNKNOWN` or `SERVED`",
+                    "`SKIPPED`, `FAILED`, `OK` or `SERVED`",
+                    "canary fail-visible status vocabulary",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU canary ambiguous status vocabulary",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=ambiguous_canary_status,
+            )
+
+            missing_idle_no_wake_scope = work / "missing-idle-no-wake-scope.md"
+            missing_idle_no_wake_scope.write_text(
+                replace_in_row(
+                    dag_text,
+                    "| T1-W6 |",
+                    "`deploy/cloudflare-fabricd/test/idle-no-wake.test.ts`; ",
+                    "",
+                    "T1-W6 idle no-wake scope",
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP T1-W6 missing idle no-wake scope",
+                PLAN,
+                False,
+                work / "missing-idle-no-wake-scope-mirror",
+                overrides={DAG: missing_idle_no_wake_scope},
+            )
+
+            for path, label in (
+                (
+                    "deploy/cloudflare-canary/test/no-wake-target.test.ts",
+                    "AU T6-W14 missing no-wake-target scope",
+                ),
+                (
+                    "deploy/cloudflare-canary/src/rules.ts",
+                    "AU T6-W14 missing rules scope",
+                ),
+                (
+                    "deploy/cloudflare-canary/src/types.ts",
+                    "AU T6-W14 missing types scope",
+                ),
+            ):
+                missing_t6w14_scope = work / (Path(path).name + "-t6w14-missing.md")
+                missing_t6w14_scope.write_text(
+                    replace_in_row(
+                        dag_text,
+                        "| T6-W14 |",
+                        f"`{path}`; ",
+                        "",
+                        label,
+                    ),
+                    encoding="utf-8",
+                )
+                require(
+                    label,
+                    "au-check.py",
+                    TRIAGE,
+                    False,
+                    dag=missing_t6w14_scope,
+                )
+
+            pg_unset_enables = work / "pg-unset-enables.md"
+            pg_unset_enables.write_text(
+                replace_once(
+                    dag_text,
+                    "exact `FABRIC_PG_DISABLED=0` is the\nonly value",
+                    "unset `FABRIC_PG_DISABLED` is the\nonly value",
+                    "PG exact-zero enablement",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU PG flag unset enablement",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=pg_unset_enables,
+            )
+
+            wrong_cf_rate_artifact = work / "wrong-cf-rate-artifact.md"
+            wrong_cf_rate_artifact.write_text(
+                replace_once(
+                    dag_text,
+                    "docs/plan/evidence/O-CFRATE-cloudflare-containers-rate.json",
+                    "docs/plan/evidence/O-CFRATE-estimate.json",
+                    "O-CFRATE canonical artifact",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU O-CFRATE artifact substitution",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=wrong_cf_rate_artifact,
+            )
+
+            cf_rate_schemas = re.findall(r"O_CFRATE_EVIDENCE=\([^`\r\n]+\)", dag_text)
+            if len(cf_rate_schemas) != 1:
+                raise AssertionError(
+                    "O-CFRATE fixture requires one canonical DAG schema, got "
+                    f"{len(cf_rate_schemas)}"
+                )
+            cf_rate_schema = cf_rate_schemas[0]
+            weakened_cf_rate_schema = cf_rate_schema.replace(
+                ",cost_budget,", ",optional_cost_budget,", 1
+            )
+            if weakened_cf_rate_schema == cf_rate_schema:
+                raise AssertionError(
+                    "O-CFRATE schema fixture did not mutate cost_budget"
+                )
+
+            bad_cf_rate_triage = work / "bad-cf-rate-schema-triage.md"
+            bad_cf_rate_triage.write_text(
+                replace_once(
+                    triage,
+                    cf_rate_schema,
+                    weakened_cf_rate_schema,
+                    "triage O-CFRATE exact schema",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU O-CFRATE exact schema drift in triage",
+                "au-check.py",
+                bad_cf_rate_triage,
+                False,
+            )
+
+            bad_cf_rate_plan = work / "bad-cf-rate-schema-plan.md"
+            bad_cf_rate_plan.write_text(
+                replace_once(
+                    plan,
+                    cf_rate_schema,
+                    weakened_cf_rate_schema,
+                    "plan O-CFRATE exact schema",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU O-CFRATE exact schema drift in plan",
+                "au-check.py",
+                TRIAGE,
+                False,
+                plan=bad_cf_rate_plan,
+            )
+            require(
+                "WP O-CFRATE exact schema drift in plan",
+                "wp-check.py",
+                bad_cf_rate_plan,
+                False,
+            )
+
+            bad_cf_rate_delta = work / "bad-cf-rate-schema-delta.md"
+            bad_cf_rate_delta.write_text(
+                replace_once(
+                    staged,
+                    cf_rate_schema,
+                    weakened_cf_rate_schema,
+                    "delta O-CFRATE exact schema",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU O-CFRATE exact schema drift in delta",
+                "au-check.py",
+                TRIAGE,
+                False,
+                delta=bad_cf_rate_delta,
+            )
+            require_mirrored_wp(
+                "WP O-CFRATE exact schema drift in delta",
+                PLAN,
+                False,
+                work / "bad-cf-rate-delta-mirror",
+                overrides={STAGED: bad_cf_rate_delta},
+            )
+
+            bad_cf_rate_dag = work / "bad-cf-rate-schema-dag.md"
+            bad_cf_rate_dag.write_text(
+                replace_once(
+                    dag_text,
+                    cf_rate_schema,
+                    weakened_cf_rate_schema,
+                    "DAG O-CFRATE exact schema",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU O-CFRATE exact schema drift in DAG",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=bad_cf_rate_dag,
+            )
+            require_mirrored_wp(
+                "WP O-CFRATE exact schema drift in DAG",
+                PLAN,
+                False,
+                work / "bad-cf-rate-dag-mirror",
+                overrides={DAG: bad_cf_rate_dag},
+            )
+
+            weakened_cf_rate_budget = work / "weakened-cf-rate-budget.md"
+            weakened_cf_rate_budget.write_text(
+                replace_once(
+                    dag_text,
+                    "must remain at or below `cost_budget`",
+                    "may exceed `cost_budget`",
+                    "O-CFRATE total-cost budget",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU O-CFRATE weakened cost budget",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=weakened_cf_rate_budget,
+            )
+
+            producer_test_cycle = work / "producer-test-cycle.md"
+            producer_test_cycle.write_text(
+                replace_once(
+                    dag_text,
+                    "| T6-W12 | W1 pre-rearm live gate | T6-W15, T6-W9, T3-W16,",
+                    "| T6-W12 | W1 pre-rearm live gate | T6-W15, T6-W9, T3-W16, T1-W6,",
+                    "T6-W12 producer-test dependency cycle",
+                ),
+                encoding="utf-8",
+            )
+            require(
+                "AU T6-W12 producer-test dependency cycle",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=producer_test_cycle,
+            )
+
+            retrospective_journal = work / "retrospective-journal.md"
+            retrospective_text = replace_once(
+                dag_text,
+                "The journal is write-ahead, not a retrospective audit.",
+                "The journal may be reconstructed retrospectively.",
+                "journal write-ahead boundary",
+            )
+            retrospective_text = replace_once(
+                retrospective_text,
+                "Before sending a page, applying a sensitivity\n"
+                "control or returning a rearm attestation, T6-W12 durably appends the exact immutable intent",
+                "After all external effects, T6-W12 may reconstruct an intent",
+                "journal intent-before-effect boundary",
+            )
+            retrospective_journal.write_text(
+                retrospective_text,
+                encoding="utf-8",
+            )
+            require(
+                "AU retrospective journal substitution",
+                "au-check.py",
+                TRIAGE,
+                False,
+                dag=retrospective_journal,
+            )
+
         wrong_au_owner = work / "wrong-au-owner.md"
         union23 = next(
             line for line in triage.splitlines() if line.startswith("| union-23 |")
@@ -1431,7 +2653,9 @@ def main() -> int:
             "AU7.10 outside canonical file owner", "au-check.py", wrong_au_owner, False
         )
 
-    print("\nplan gate self-test: PASS — baselines accepted and 66 corruptions blocked")
+    print(
+        "\nplan gate self-test: PASS — baselines accepted and 131 corruptions blocked"
+    )
     return 0
 
 

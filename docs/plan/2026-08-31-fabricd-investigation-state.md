@@ -1,8 +1,10 @@
-# fabricd outage — ROOT-CAUSED AND SERVICE RESTORED, 2026-08-31
+# fabricd outage — historical investigation snapshot (superseded), 2026-08-31
 
-> **ROOT CAUSE FOUND.** The Neon Postgres project behind `DATABASE_URL` has been
-> refusing every connection since ~2026-08-19 with a plan-quota error. Captured from
-> the container's own stderr:
+> **Evidence is bounded, not a definitive root cause.** The measurements establish a
+> Postgres-dependent pre-bind failure class. The Neon project behind `DATABASE_URL` was observed
+> refusing connections with a plan-quota error, and the captured stderr names `PgLedger`, but this
+> evidence does not distinguish `PgLedger` initialization from billing-exporter initialization as
+> the failing database-dependent path. Captured from the container's own stderr:
 >
 > ```
 > [boot] introspect key VALIDATED (HTTP 200) at .../internal/v1/auth/introspect — auth path ready
@@ -12,15 +14,17 @@
 >        message: "Your account or project has excee[ded …]"
 > ```
 >
-> `PgLedger::connect` runs inside `build_app_and_state` (server.rs:1274), **before**
-> `TcpListener::bind`, and its error is propagated with `?`. So a quota-suspended
-> database does not degrade durability — it aborts the whole control plane before it
-> can serve anything. Nothing about the image, the entrypoint, the colo, the instance
-> cap, the registry path or Cloudflare was ever involved; each was excluded by a
-> measured rate, and the list is kept below because those exclusions are what made
-> the remaining surface small enough to instrument.
+> The captured `PgLedger::connect` path is inside `build_app_and_state` (server.rs:1274), **before**
+> `TcpListener::bind`, and its error is propagated with `?`. A database refusal in that path can
+> abort the whole control plane before it can serve anything. This supports a Postgres-dependent
+> pre-bind failure class; it does not by itself identify whether `PgLedger` or the billing exporter
+> was the failing initializer. The listed
+> image, entrypoint, colo, instance cap, registry path and Cloudflare surfaces were excluded by the
+> measured experiments recorded below, but this historical snapshot is not a current production
+> verdict.
 >
-> **The owner's correction was right:** it was never a support issue.
+> **The owner's correction remains material:** the support/platform-fault conclusion was unproven;
+> this snapshot must not be used as a definitive root-cause statement.
 >
 > **How it was finally read:** every log surface reachable from this session was
 > blind — `onStart` never fires, `health.errors` is empty, the `exitCode: 0` the
@@ -32,17 +36,19 @@
 > readable surface: the Worker's own request log, payload in the URL path.
 > See `crates/corelink-fabric-server/Dockerfile.bootprobe`.
 >
-> **SERVICE IS BACK (2026-08-31 15:35Z).** `FABRIC_PG_DISABLED=1` makes the proxy
-> behave as if DATABASE_URL were unset, so fabricd boots on the in-memory ledger and
-> stops dialling the suspended database. Measured on the fixed config: **10/10
-> SERVED**, against 0/35 before. `/health` 200 · `/v1/attestation/key` 200 serving
-> the production key · `/v1/usage` 401 fail-closed.
+> **HISTORICAL CONTAINMENT OBSERVATION (2026-08-31 15:35Z; superseded for current state).**
+> `FABRIC_PG_DISABLED=1` made the proxy behave as if `DATABASE_URL` were unset, so fabricd booted
+> on the in-memory ledger and stopped dialing the unavailable database. The fixed-config probe
+> measured **10/10 SERVED**, against 0/35 before. `/health` 200 · `/v1/attestation/key` 200
+> serving the production key · `/v1/usage` 401 fail-closed. Current containment and authority
+> remain governed by the session handoff: quiet count 0, NOT FROZEN, NO DISPATCH and NO GREEN
+> CREDIT.
 >
 > This is DEGRADED and meant to be undone — see §8.
 
 ---
 
-# Original investigation state (kept for the record)
+# Original investigation state (kept for the record; superseded)
 
 **Read this instead of the session transcript.** Written 2026-08-31 by the session that got it
 wrong, to hand a fresh context the facts without the dead ends.
@@ -127,15 +133,17 @@ These are the gaps that make the platform conclusion premature. Roughly in order
 - **`wrangler versions view` is the arbiter** of whether two configs are actually identical. Use it
   before saying "same config".
 
-## 6. Live state right now
+## 6. Historical live-state snapshot (2026-08-31; superseded)
 
-Prod is at the intended steady config — no diagnostic knobs armed. Image pinned by **git-SHA tag**,
-not `@sha256`: run `33347304356` emitted
+This section is an older observation, not the current production state. At that time, prod was
+believed to be at the intended steady config — no diagnostic knobs armed. The image was pinned by
+**git-SHA tag**, not `@sha256`: run `33347304356` emitted
 `::warning::Could not resolve an @sha256 digest (push output + imagetools both empty)`, which is a
 **regression of #400** and an open INV-2 deviation. Three DO instances exist
 (`fabricd-singleton`, `-r2`, `-enam`); the live one is `-enam`. Two temporary code changes remain,
 both harmless and documented in place: lifecycle logging on the Container subclass, and a
-`locationHint` wrapper that measurably does nothing.
+`locationHint` wrapper that measurably does nothing. Refer to the current handoff for the later
+read-only containment flags and live-state authority.
 
 ## 7. The one question worth keeping in front
 
@@ -146,13 +154,17 @@ every hypothesis this session produced.
 
 ---
 
-## 8. Remediation (2026-08-31)
+## 8. Historical remediation options (2026-08-31; superseded)
 
-**The blocker is a database plan quota, not code.** Two ways forward:
+The evidence supports a Postgres-dependent pre-bind failure class, but does not distinguish
+`PgLedger` initialization from billing-exporter initialization. A database plan quota was the
+leading remediation hypothesis at the time, not a definitive root-cause attribution. Two
+historical options were considered:
 
 **A — restore the database (recommended).** Raise the Neon plan or wait out the quota
 period, then confirm with the boot probe. fabricd needs no change: the moment Neon
-accepts connections, `PgLedger::connect` succeeds and the control plane binds. This
+accepts connections, the database-dependent initialization path can proceed and the control plane
+can bind. This
 keeps the durable ledger, so lease state and the billing records derived from it stay
 intact. It costs money and only the owner can authorise it.
 
@@ -167,8 +179,8 @@ anything accrued in memory meanwhile is gone.
 
 1. **An optional background task must not be a hard pre-bind dependency.** The durable
    billing exporter (`maybe_spawn_billing_exporter`) also runs before `bind` and also
-   propagates with `?`. It was not the cause here, but it is the same trap armed and
-   waiting: a database blip would take the control plane down through it too. It should
+   propagates with `?`. Its causal role was not established by this evidence; it is the same trap
+   armed and waiting: a database blip could take the control plane down through it too. It should
    retry in the background and surface its state, not abort boot.
 2. **A dead control plane must be loud.** This ran twelve days. The keep-warm cron saw
    every failure and logged "cold boot in progress, NOT destroying" each minute without
@@ -178,13 +190,12 @@ anything accrued in memory meanwhile is gone.
 
 ---
 
-## 9. Restored 2026-08-31, and why this way
+## 9. Historical containment rationale (2026-08-31; superseded)
 
-The crash loop was not just a symptom, it was a consumer. The keep-warm cron retries
-every minute and each retry dials the database; a scale-to-zero database woken every
-60 s never autosuspends, so fabricd was burning the compute allowance whose exhaustion
-was refusing it. Waiting for the quota period to roll would therefore have bought a
-working control plane until roughly the same day of the next month.
+At the time, the keep-warm cron was observed retrying every minute and each retry dialed the
+database; this supported a possible feedback loop, but did not prove the complete causal chain.
+The Postgres-dependent pre-bind failure class and the observed quota error made quota recovery a
+plausible remediation hypothesis, not a definitive root cause.
 
 `FABRIC_PG_DISABLED=1` reuses a state the code already models coherently: the pg
 backend, the vCPU ceiling the #265 guard ties to it, and the pg-only billing export
@@ -192,7 +203,7 @@ all arm together inside one block in the proxy, so they suppress together. Nothi
 half-arms. The DATABASE_URL secret is left bound — it is a credential this session
 cannot restore, and a var is reversible from the config by anyone.
 
-The database is still the real fix, and option A in §8 stands. A free project on an
+Database restoration remained the leading durable-recovery option, and option A in §8 stands. A free project on an
 equivalent provider is enough to take it: `docs/handoff/2026-07-03-PLAN-postgres-
 provisioning-and-vcpu-ceiling-arm.md` already sanctions Supabase alongside Neon, with
 the public-CA TLS `FABRIC_PG_TLS=require` verifies and the CREATE TYPE/TABLE grant the

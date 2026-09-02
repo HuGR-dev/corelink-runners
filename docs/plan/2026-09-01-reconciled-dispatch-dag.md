@@ -1,9 +1,9 @@
-# Reconciled dispatch DAG — rev6 Round-11 repair draft
+# Reconciled dispatch DAG — rev6 Round-12 repair draft
 
-**Date:** 2026-09-01 · **Schema:** `dispatch-dag/v1` · **Status: NOT DISPATCHABLE**
+**Date:** 2026-09-01 · **Schema:** `dispatch-dag/v1` · **Status: NOT FROZEN · NOT DISPATCHABLE · quiet count 0**
 
 This is the sole canonical dispatch registry. Every plan, delta, triage table, handoff and
-dispatcher must reference this file and must not restate its DAG. The current Round-11 repair tree
+dispatcher must reference this file and must not restate its DAG. The current Round-12 repair tree
 has not received a cold review and is **NOT QUIET**, so the table is a schedule calculation and no
 row is authorized yet. This staged
 input must first receive two consecutive quiet reviews over byte-identical bytes. Promotion is a
@@ -61,6 +61,47 @@ start cannot materialize. A numeric latency or inventory absence cannot satisfy 
 both O-CFINVENTORY and O-CFCANCEL; without the cancellation token it remains
 `RECONCILIATION_REFUSED` indefinitely.
 
+`O-CFRATE` is an owner-of-record arming token, not a rate guessed by an implementation agent. It
+has no WP predecessor. Its accountable owner is the human Cloudflare account owner or an authorized
+Cloudflare Billing Administrator for the named production account; the plan lead may verify but
+may not self-attest it. The owner's manual action is to open that account's provider billing
+console, select the billing period containing the deployed Containers usage, export and preserve
+the provider invoice/usage receipt byte-for-byte, and sign the derived artifact. The token is
+satisfied only when the owner signs
+`docs/plan/evidence/O-CFRATE-cloudflare-containers-rate.json` for one named Cloudflare Containers
+invoice line. Its exact ordered schema is
+`O_CFRATE_EVIDENCE=(schema_version,obstacle_id,status,accountable_owner,accountable_role,attested_at,review_input_sha,deployed_image_digest,provider,provider_api_or_export_version,account_id,plan,billing_period_start,billing_period_end,threshold_policy_digest,threshold_declared_at,threshold_receipt_id,threshold_receipt_sha256,budget_interval_start,budget_interval_end,source,source_locator,receipt_id,receipt_sha256,activity_manifest_sha256,complete_provider_cursor,invoice_line_id,invoice_line_description,quantity,unit,currency,line_amount,effective_rate,effective_rate_formula,rate_effective_from,rate_effective_to,attempt_count,failed_attempt_count,retry_count,idle_wakeup_count,served_count,failure_rate_numerator_formula,failure_rate_denominator_formula,failure_rate_numerator,failure_rate_denominator,observed_failure_rate,failure_rate_threshold,billable_vcpu_hours,billable_gib_hours,observed_cost,cost_budget,cost_per_served_attempt,cost_per_served_attempt_threshold,owner_signature)`.
+The artifact binds the account/billing-period identifier, currency, exact provider SKU and unit,
+billed quantity and amount, resulting per-unit rate, redacted source-receipt digest, capture time and
+owner signature; it also binds the review input, deployed image, account plan, provider export
+version, effective dates, credits/discounts/tax treatment and explicit rate formula.
+
+The budget interval is one contiguous inclusive-start/exclusive-end interval wholly covered by the
+billing/export evidence. `activity_manifest_sha256` commits the exhaustive ordered activity pages
+and operation ids, `complete_provider_cursor` proves terminal fully paginated traversal, and the
+invoice/export receipt id and SHA-256 bind the byte-preserved provider source. Missing, partial,
+stale, gapped, overlapping or mixed-version intervals, cursors, manifests or receipts are RED. The
+thresholds are predeclared before observation: `threshold_declared_at < budget_interval_start`.
+`threshold_policy_digest` binds every threshold and formula, and the immutable independently
+witnessed `threshold_receipt_id` and `threshold_receipt_sha256` bind that declaration. The source is
+a provider-issued invoice or usage export for the half-open
+`[budget_interval_start,budget_interval_end)` interval. The canonical failure-rate numerator formula is
+`failed_attempt_count + retry_count + idle_wakeup_count`; its denominator formula is
+`attempt_count + retry_count + idle_wakeup_count`. Those classes are exhaustively counted from the
+manifest, `failure_rate_denominator=0` is RED, and the stored numerator, denominator and observed
+rate must reproduce the formulas byte-for-byte and remain at or below `failure_rate_threshold`.
+`observed_cost` is recomputed from the complete provider quantities, verified effective rate and
+the declared credits/discounts/tax treatment and must remain at or below `cost_budget`.
+`cost_per_served_attempt=observed_cost/served_count`; `served_count=0` is RED, and the value must
+remain at or below its predeclared threshold. Every retry, idle wakeup, failed attempt, served
+attempt, billable vCPU-hour, billable GiB-hour and cost unit in the interval is included exactly
+once; missing or unjoined accounting cannot PASS.
+A public list price, calculator, proxy-provider price, dashboard
+estimate or unsigned transcription does not resolve it. Only T7-W5 consumes this token, reads but
+does not rewrite its artifact, and still waits independently for O1, T3-W7, T1-W6 and T7-W4b before
+deriving or publishing AU4.19 economics. Resolving the token is read-only evidence and authorizes no
+provider mutation, Cloudflare re-enable, proof credit or dispatch.
+
 `T7-W3` is the evidence-schema gate and `T7-W4b` is the evidence-freshness gate. Every probe or
 test+probe row has `T7-W4b` as a hard predecessor (and therefore transitively has T7-W3), has
 `T3-W18` ancestry (and therefore cannot probe before containment is live), and has a unique
@@ -68,7 +109,8 @@ artifact filename in its artifact column. No row owns the broad `docs/plan/evide
 `T1-W6` is the durable-PG live-success gate; only durability-dependent live probes wait for it.
 `T6-W13` is the immediate canary-key lane (including current/stale key delivery and
 acknowledgement) and necessarily follows T6-W4, T6-W9, O-CANARY and T7-W4b, but has no PG predecessor;
-`T6-W14` is the later isolated no-wake re-enable trial. `T6-W9` implements and seals the alert
+`T6-W14` is the later isolated default-off bind/no-wake trial; only T6-W10 may perform the subsequent
+canonical re-enable. `T6-W9` implements and seals the alert
 rules before `T6-W6` attempts their live proof. `T6-W4` implements only the default-off canary
 scheduled-tick producer with its own scoped key. `T6-W15` then deploys the provider-neutral
 external-monitor base, including authenticated lifecycle-sample and canary-heartbeat ingestion,
@@ -115,12 +157,26 @@ obtains a new response before every readiness answer, PG-backed mutation, and PG
 socket/init/pool use, then verifies the bound tuple digest, nonce echo, signature and each applicable
 freshness rule. A cached success, nonce replay or earlier valid response is never reusable.
 
-Every readiness, mutation and socket/init path first obtains a generation-scoped interlock permit;
-its generation fence is held through the action's durable commit, so validation cannot race a
-pause. Arming transitions `OPEN -> CLOSING`, blocks all new permits, cancels or rolls back every
-older-generation permit and closes/discards every socket created by one, and reaches `LATCHED` only
-after all such permits/actions and sockets are durably accounted for. Only then may the operation
-return; readiness/mutation are typed 503 and zero socket or mutation actions survive the fence.
+Every readiness, mutation and socket/init path first obtains a generation-scoped coordinator
+permit. Every PG transaction additionally holds the same generation's shared transaction-scoped
+PostgreSQL advisory fence and validates the durable fence-row generation inside that transaction;
+an application-side check alone is never authority. Arming is exactly
+`OPEN -> FENCING -> CLOSING -> LATCHED`: the coordinator first blocks new permits and publishes
+`FENCING`, then obtains the exclusive transaction-scoped fence lock, waits for every earlier shared
+transaction to commit or roll back, atomically advances the durable PG generation/latch and commits,
+and only then publishes `CLOSING`, closes/discards pools and reaches `LATCHED`. A transaction ordered
+before the exclusive lock may commit only before `CLOSING` is published; one ordered after it sees
+the new generation and aborts before mutation. An unavailable or ambiguous exclusive-lock/update
+outcome never publishes `CLOSING` or `LATCHED`, keeps new work refused, alerts, and reconciles the
+durable fence row. It remains `FENCING`, serves typed 503, grants no retry, and after restart
+reconciles that exact transaction without assuming commit or rollback.
+`crates/corelink-fabric/src/pg_monitor_fence.rs` and
+`crates/corelink-fabric-server/src/monitor_transaction_fence.rs` own this server-side transaction
+fence; `crates/corelink-fabric/tests/pg_monitor_transaction_fence.rs` and
+`crates/corelink-fabric-server/tests/monitor_transaction_fence.rs` pause two independent instances
+before lock, after the shared lock and immediately before commit, including restart and ambiguous
+exclusive-update cases. Only after every action/socket is durably accounted for may arming return;
+readiness/mutation are typed 503 and zero socket or mutation actions survive the fence.
 
 Any tuple mismatch, unavailable attestation, stale provider-poll or delivery health, bad signature
 or nonce failure first atomically arms a durable non-PG disable latch. Once latched, T1-W6 closes and
@@ -157,14 +213,14 @@ rearm attestation and PG latch: a missing or overdue sensitivity receipt alerts 
 the A6.17 window unless an independent tuple, provider-poll or core delivery failure separately
 triggers the interlock. The sensitivity receipt is overdue only relative to its configured cadence
 of at most six hours, never the rearm attestation's 60-second observation bound. `T6-W14` later
-makes
-canary read the passive fabricd outer-Worker lifecycle route
-and deliver service-bound authenticated lifecycle samples into T6-W15's ingestion contract; the
-outer Worker never self-heartbeats or posts to the monitor.
+implements and binds, still default-off, the canary reader for the passive fabricd outer-Worker
+lifecycle route and its service-bound authenticated lifecycle-sample delivery into T6-W15's
+ingestion contract; only T6-W10 may activate that reader. The outer Worker never self-heartbeats or
+posts to the monitor.
 
 T6-W12 owns and deploys an append-only/WORM journal retained for at least eight days. It records
-every page, page acknowledgement, sensitivity control and rearm attestation without sampling or
-mutable replacement. Each sealed window manifest binds the exact `A6.17_window_tuple` and records
+every page, page acknowledgement, sensitivity control, rearm attestation and ingest ACK without
+sampling or mutable replacement. Each sealed window manifest binds the exact `A6.17_window_tuple` and records
 the inclusive start, exclusive end, exhaustive ordered record ids, record count, initial and terminal
 hash-chain roots and the storage-provider retention/immutability receipts. Rewrite, omitted first/
 middle/last record, sequence/time gap and mixed-window/mixed-tuple substitutions all invalidate the
@@ -173,14 +229,47 @@ the candidate and active-final deployments. T6-W10 consumes only the sealed mani
 retention/immutability receipts; no copied journal, summary counter, selected receipt set or
 evidence-time reconstruction can substitute for that exhaustive root.
 
+The journal is write-ahead, not a retrospective audit. Before sending a page, applying a sensitivity
+control or returning a rearm attestation, T6-W12 durably appends the exact immutable intent with its
+deterministic operation id and previous hash root; after the external effect it appends the exact
+provider result/receipt. The same verified write-ahead intent precedes every ingest ACK emission and
+every accepted page ACK's incident transition. `deploy/cost-monitor/src/journal_reconciler.ts` resumes every intent lacking
+an outcome by reading the provider with the same idempotency key and appends the observed result; it
+never guesses absence or issues a second effect while provider state is unavailable or ambiguous.
+Only one successor may CAS from a journal root. Two records claiming the same predecessor, a
+provider record without its local intent, a local intent absent from the provider after a complete
+read, an unresolved write/result or any fork makes sealing and rearm RED. The candidate and
+active-final passes run `deploy/cost-monitor/test/window-journal-writeahead.test.ts`,
+`deploy/cost-monitor/test/window-journal-reconcile.test.ts` and
+`deploy/cost-monitor/test/window-journal-fork.test.ts` across crashes before/after each append,
+provider timeout, duplicate receipt, omission and competing-writer schedules.
+
+All window, freshness, ACK and receipt times pass through `deploy/cost-monitor/src/clock.ts`, which
+persists a monotonic high-water value and verifies the monitor's durable ingest-commit checkpoint,
+provider-authenticated monotonic watermark/`as_of` and immutable delivery/control receipt against
+the named O-MONITORHOST trusted time/checkpoint capability. Producer, process and scheduler wall
+times are evidence only. Checkpoint rollback, excessive forward skew, unavailable time authority,
+restart below high-water, receipt-before-intent, domain mismatch or a timestamp outside its contract refuses
+the action, appends the typed failure when journaling is available and invalidates the affected
+window; it never manufactures freshness or shortens a deadline. Candidate and active-final runs of
+`deploy/cost-monitor/test/clock-freshness.test.ts` pin rollback, forward jump, boundary, restart and
+time-source outage cases.
+
 Before T6-W12 seals its final deployed tuple, it pre-registers the exact future T1-W6
 `fabric-server` and `fabricd-proxy` source ids and the exact future T6-W14 `canary-lifecycle` and
 `canary-synthetic` source ids, and issues four isolated write-only key-id/credential-epoch pairs.
-The two T6-W14 registrations and credentials remain inactive through both complete T6-W15-suite
-executions and until T6-W14's own gated activation; inactive credentials must be rejected at ingest,
-not treated as an absent expected sample. All four registrations and credential epochs are inputs
-to both suite executions. T1-W6 and T6-W14 may only bind their already-issued pairs; neither may
-mint, rotate, substitute or register them. `T6-W4` durably enqueues each scheduled tick before
+All four registry entries and credential authorizations are accepted and byte-stable before both
+complete T6-W15-suite executions and are inputs to the sealed tuple; T6-W14 never changes an
+accepted/active bit at bind time. Before T6-W14, no lifecycle or synthetic producer has the issued
+secret bound. Both T6-W14 producer lanes remain locally default-off, and its exact default-off tests
+prove zero lifecycle and synthetic envelopes. T6-W14's gated bind installs only those already-issued
+credentials and deploys producer code without arming it; it changes no source, key, epoch, route,
+activation flag or `monitor_rearm_tuple` field. Lifecycle probing and synthetic emission remain off
+through T6-W14 and may begin only under T6-W10's later canonical activation transaction.
+The monitor missing-source clock starts with its first accepted emitted envelope for each lane, so pre-bind
+silence neither pages nor changes registry/auth state. T1-W6 and T6-W14 may
+only bind their already-issued pairs; neither may mint, rotate, substitute, register or mutate
+monitor acceptance or author an activation tuple. Any mismatch stays emission-off and is tuple drift. `T6-W4` durably enqueues each scheduled tick before
 transmission through a Durable Object outbox. Its existing canonical
 `deploy/cloudflare-canary/test/scheduled-tick-outbox-recovery.test.ts` and
 `deploy/cloudflare-canary/test/scheduled-tick-order.test.ts` deterministic tests, run with
@@ -198,10 +287,67 @@ and frozen fields against its durable head and rejects a wrong ACK version, old 
 payload digest, sequence, source, service/application, key id or credential epoch, monitor-tuple digest, ingest
 commit or commit time. It also rejects a stale, revoked or wrong-but-currently-valid signer under
 the seventh tuple field. Every rejection preserves the head and original 60-second deadline,
-performs zero gated action and fails closed. The focused fixtures run the complete matrix for the
-scheduled-tick, attempt/binding, `fabric-server`, `fabricd-proxy`, lifecycle and synthetic lanes in
-both candidate and active-final T6-W12 passes; the future lifecycle/synthetic registrations remain
-inactive in those passes and are exercised after their bind-only activation by T6-W14 as well.
+performs zero gated action and fails closed. In both candidate and active-final passes, T6-W12's
+monitor-side fixtures submit isolated exact authenticated envelopes under every accepted lane and
+prove only ingest/CAS/stable-token behavior; they never execute, activate or claim a producer
+fixture. T6-W4, T3-W16, T1-W6 and T6-W14 each own their producer-side refusal/recovery suite, and
+T1-W6/T6-W14 must pass it after bind but before their first gated socket, fetch, start, acquire,
+spawn, release or successor emission. This split removes any producer-test dependency from T6-W12
+back to consumers that follow it.
+
+An on-call page is acknowledged only by the exact signed
+`page_ack_token=(page_ack_version,incident_id,page_id,delivery_id,destination,on_call_identity,on_call_schedule_digest,action,payload_digest,monitor_rearm_tuple_digest,acknowledged_at,expires_at,signer_key_id,signer_epoch,signature)`;
+`signature` authenticates the preceding fourteen fields in that order. T6-W15's
+`deploy/cost-monitor/src/page_ack.ts` verifies the signer/epoch against current trust/revocation,
+joins the page/delivery to its immutable journal record and monitor tuple, and proves destination,
+on-call identity and schedule digest were authorized for that exact action and payload. The token's
+tuple digest must equal the effective `monitor_rearm_tuple`, and trusted acknowledgement time must
+be no later than `expires_at`. Arbitrary HTTP 2xx, provider
+delivery receipt, unsigned/manual state change, replay from another page/incident, stale schedule,
+wrong action/payload/tuple/destination/identity, expired token or revoked/wrong-valid signer cannot
+acknowledge, suppress escalation or start recovery. A stale/future ACK or ACK after close is invalid; a byte-identical duplicate is
+idempotently journaled once and neither resets the escalation deadline nor erases a later update.
+`deploy/cost-monitor/test/page-ack-auth.test.ts` proves that complete matrix and that the valid token
+is journaled before incident state advances.
+
+Signer rotation is authorized only by the exact signed
+`signer_rotation_manifest=(manifest_version,active_signer_key_id,active_signer_epoch,next_signer_key_id,next_signer_epoch,revoked_signer_set_digest,overlap_started_at,overlap_expires_at,recovery_custody_digest,monitor_rearm_tuple_digest,previous_manifest_digest,issued_at,signature)`;
+`signature` authenticates the preceding twelve fields in that order. Manifests form one monotonic
+hash-linked sequence through `previous_manifest_digest`; the active/next epochs, bounded overlap,
+complete revoked set, recovery custody and exact tuple are presealed before rotation. Rollback,
+fork, missing predecessor, epoch regression, overlap outside its bounds, revoked active/next key,
+wrong tuple, unavailable custody or an untrusted manifest signer is RED and cannot issue or accept
+an ACK or recovery token. The canonical digest of all thirteen manifest fields is
+`signer_rotation_manifest_digest`.
+
+If a byte-identical retry finds the matching committed ingest and stable original ACK but that ACK's
+signer was revoked after CAS and before producer acceptance, the producer enters durable
+`ACK_RECOVERY` with the byte-identical original head, identity and deadline; a merely lost response
+under a still-current signer returns the original stable ACK. Recovery cannot resample, create a
+successor or perform the gated action. T6-W15 may recover only from the persisted original ingest
+CAS and ACK, with no second ingest effect, by issuing exactly
+`ACK_RECOVERY=(recovery_version,event_id,producer_seq,payload_digest,source,service,application,key_id,credential_epoch,original_monitor_rearm_tuple_digest,ingest_commit_id,original_ack_digest,revocation_record_digest,signer_rotation_manifest_digest,current_monitor_rearm_tuple_digest,recovery_signer_key_id,recovery_signer_epoch,issued_at,signature)`;
+`signature` authenticates the preceding eighteen fields in that order. This is a separate token
+signed by a currently trusted recovery signer and issuance creates no second ingest/state effect.
+Its manifest digest must resolve to the unique current hash-linked manifest that proves the original
+signer's revocation, the recovery signer's active custody/epoch, the bounded overlap and both the
+original and current tuple binding; a missing, stale, forked or mismatched manifest is RED.
+When validated before the unchanged original deadline it satisfies only that committed head's exact
+original ACK gate and can authorize only its one original gated action, never a different or second
+action. If recovery completes after the original 60-second deadline, it may terminal/drain only that
+head, the old action remains forbidden and a later action requires a new envelope with its own clock.
+Missing original CAS/ACK, identity mismatch, untrusted signer or ambiguous revocation
+record remains fail-closed. `deploy/cost-monitor/src/ack_recovery.ts` and
+`deploy/cost-monitor/test/ack-recovery.test.ts` own the server contract; the exact producer suites
+are `deploy/cloudflare-canary/test/scheduled-tick-ack-recovery.test.ts`,
+`deploy/cloudflare/test/attempt-monitor-ack-recovery.test.ts`,
+`crates/corelink-fabric-server/tests/monitor_ack_recovery.rs`,
+`deploy/cloudflare-fabricd/test/monitor-ack-recovery.test.ts` and
+`deploy/cloudflare-canary/test/lifecycle-synthetic-ack-recovery.test.ts`.
+Together those server and producer recovery suites pin manifest issuance, active/next overlap
+boundaries, rollback/fork refusal, revoked-set changes, verifier restart, loss of the primary signer,
+recovery-custody failure, manifest-digest substitution and exact duplicate stability before any
+gated action.
 
 `T3-W16` directly waits for T6-W15 so its attempt/binding producer can use only the deployed
 external monitor. That lane has durable capacity one: it may hold at most one nonterminal head, and
@@ -268,31 +414,103 @@ For staged A6.22, the non-waking lifecycle endpoint is implemented in the fabric
 and reads only Durable Object lifecycle state; it never calls container `fetch`. Its authoritative
 response binds a monotonic sequence, transition id/state/time, deployed version, nonce and sample
 time, uses `no-store`, and is rejected when stale or replayed. The route is passive: it never owns
-a timer, monitor credential, delivery sequence or heartbeat. T6-W14's canary sampler reads it with
-a fresh nonce, validates it, then durably emits a service-bound authenticated lifecycle envelope
-with rotation/revocation, replay and monotonic-sequence refusal semantics into the T6-W15 monitor.
+a timer, monitor credential, delivery sequence or heartbeat. T6-W14 implements and binds the canary
+sampler default-off. Only after T6-W10's canonical activation does it read the route with a fresh
+nonce, validate it, then durably emit a service-bound authenticated lifecycle envelope with
+rotation/revocation, replay and monotonic-sequence refusal semantics into the T6-W15 monitor.
 The T6-W4 canary scheduled tick uses an independently keyed envelope with the same anti-replay
 discipline; the external monitor owns both missing-sample timers, incident state and page-delivery
 outbox, not either Cloudflare producer. Canary tests must prove that this surface, rather than a
 test-controlled or static response, drives both positive and negative transitions before
 `FABRIC_PROBES_ENABLED` changes in canary config. The canary performs its outer-route fetch only
-when `FABRIC_PROBES_ENABLED` is the exact string `1`; unset, blank, whitespace, `0`, case variants,
-numeric lookalikes and every other invalid value are disabled and perform zero fetches. The same
-exact-`1` rule governs owner arming of `SYNTHETIC_SLOT_PROBES_ENABLED`; all other values perform zero
-synthetic acquire, spawn or release actions. T6-W4 owns the deterministic config-table negatives;
-T6-W14 may arm only after its no-wake and external-ACK proof, and any failure keeps or returns the
-flag to `0`.
+when `FABRIC_PROBES_ENABLED` is the exact string `1`; exact `0` is the valid contained state and
+performs zero fabric fetches while the independent tick lane still emits its scheduled tick and
+authenticated containment/config state. Unset, blank, whitespace, case variants, numeric lookalikes and every other
+value also perform zero fetches but are not silently treated as healthy/off: `deploy/cloudflare-canary/src/config.ts`
+returns typed config-unavailable readiness and durably emits one deduplicated
+`CANARY_CONFIG_INVALID` signal for external delivery without disabling scheduled tick/spawn
+monitoring. Every probe result records exactly one of
+`SKIPPED`, `FAILED`, `UNKNOWN` or `SERVED`, plus reason, deployed version,
+`monitor_rearm_tuple` digest and trusted `observed_at`: valid exact-`0` is `SKIPPED`, an authoritative
+exact-`1` response alone may be `SERVED`, an observed negative is `FAILED`, and missing, invalid or
+unverifiable evidence is `UNKNOWN`. `SKIPPED`, `FAILED` and `UNKNOWN` never count as green, quiet,
+rearm or re-enable evidence. The same exact-`0`/exact-`1` and fail-visible
+rule governs owner arming of `SYNTHETIC_SLOT_PROBES_ENABLED`: only the exact string `1` arms the
+synthetic driver, exact `0` is valid off, and invalid values perform zero synthetic
+acquire, spawn or release actions. T6-W4 owns the deterministic config-table negatives in
+`deploy/cloudflare-canary/test/fabric-probe-flag-failclosed.test.ts` and the typed readiness/signal
+proof in `deploy/cloudflare-canary/test/fabric-probe-flag-failvisible.test.ts`;
+T6-W14 is bind-only and leaves both flags exact-`0`; it has no arming authority. T6-W10 may arm only
+after T6-W14's no-wake, default-off and external-ACK proof, and any failure keeps or returns both
+flags to `0`.
+
+The fabricd containment switch is independently fail-closed: exact `FABRIC_PG_DISABLED=0` is the
+only value that permits a PG/container path. Exact `1` is valid containment; missing, blank,
+whitespace, case variants, numeric lookalikes and every other value are config-invalid. Every such
+non-`0` value is disabled at the edge Worker, strips `DATABASE_URL`, opens zero PG/exporter sockets
+and returns typed 503 before any container handle, `fetch`, start or wake; the passive DO lifecycle
+route remains edge-only. Invalid values additionally
+emit the configured deduplicated external config signal and cannot masquerade as intentional
+containment. `deploy/cloudflare-fabricd/test/pg-flag-failclosed.test.ts` proves the complete value
+table and exact-`0` positive path. `deploy/cloudflare-fabricd/test/idle-no-wake.test.ts` proves cold
+start, idle sleep, restart, bounded/no retry and malformed-config cases have zero scheduled wake,
+container handle/fetch/start, PG/exporter socket and billable active-minute delta before T1-W6 can
+rearm.
 
 T6-W12 also integrates the external monitor's real C1–C5 rules and synthetic-ingest contract after
 T6-W9 seals the rule semantics; T6-W6 cannot attempt its live outage proof until that external
 implementation is deployed. T6-W14 implements and deploys the canary's synthetic
 acquire→spawn→release transaction and its focused deterministic test, but deploys it default-off
-and earns no AU6.17 probe credit. Its synthetic-result producer uses its own scoped credential,
-source id and monotonic sequence/outbox lane, and binds one correlation id across acquire, spawn and
-release; tick and lifecycle credentials or sequence spaces are never reused. The A6.22 evidence
-runs with this synthetic lane off. T6-W10 follows T6-W6, T6-W12 and T6-W14, exclusively owns its
-later arming plus the 20/20 AU6.17 execution, and writes the live C1–C5 failure-domain/AU6.17
-artifacts. Evidence that precedes either real implementation is invalid.
+and bind-only. Its synthetic-result producer uses its own scoped credential, source id and monotonic
+sequence/outbox lane, and binds one correlation id across acquire, spawn and release; tick and
+lifecycle credentials or sequence spaces are never reused. T6-W14's deterministic default-off phase keeps both
+`FABRIC_PROBES_ENABLED` and `SYNTHETIC_SLOT_PROBES_ENABLED` exact `0` and proves zero outer-route
+requests, lifecycle envelopes, container fetches, starts, active minutes or attributable usage and
+provider cost. It seals no
+activation tuple or live artifact, performs no re-enable, and earns no A6.22 or AU6.17 live credit.
+
+T6-W10 follows T6-W6, T6-W12 and T6-W14 as an evidence-only two-phase executor/collector and
+exclusively authors
+`canary_activation_tuple=(activation_version,lifecycle_source,lifecycle_service,lifecycle_application,lifecycle_key_id,lifecycle_credential_epoch,synthetic_source,synthetic_service,synthetic_application,synthetic_key_id,synthetic_credential_epoch,monitor_rearm_tuple_digest,producer_image_digest,producer_config_digest,probe_flag_name,probe_flag_value,synthetic_flag_name,synthetic_flag_value,activated_at)`.
+Those nineteen ordered fields and their canonical digest are the sole activation authority. Before
+either phase, T6-W10 atomically verifies that the canary producer, independent external verifier
+and rearm decision have byte-identical tuple bytes/digest, that lifecycle and synthetic lane
+identities equal the pre-registered binds, that image/config equal the running producer, that both named
+flags have their exact intended values, that the monitor tuple is current, and that `activated_at`
+is trusted and fresh. The bind remains owned by T6-W14 and "intended values" means the exact values
+committed by the applicable T6-W10 phase. The canary emits the same tuple digest on every result;
+the verifier joins it to the same bytes; rearm consumes that identical digest.
+
+**Phase 1 — A6.22 lifecycle/no-wake evidence.** T6-W10 seals a tuple whose probe flag is exact `1`
+and synthetic flag is exact `0`, changes only the committed probe flag, and observes exactly 12
+consecutive lifecycle ticks. They must produce exactly 12 passive outer-route requests and exactly
+12 durably acknowledged lifecycle envelopes, with zero container-proxy `fetch`, container start,
+active-minute increment, attributable billed usage or provider cost. Only after every request,
+envelope, ACK and zero-use receipt joins the byte-identical tuple may T6-W10 immutably seal
+`docs/plan/evidence/T6-W14-canary-no-wake.json` as the A6.22 no-wake artifact.
+
+**Phase 2 — AU6.17 synthetic evidence.** Only after the Phase-1 artifact is sealed and immutable may
+Phase 2 begin and T6-W10 seal the next tuple with probe exact `1` and synthetic exact `1`, change only the committed
+`synthetic_flag_value` while preserving both lifecycle and synthetic lane identities byte-for-byte,
+and execute exactly 20 consecutive causally tagged acquire→spawn→release
+transactions under AU6.17's fixed slot/alert bounds. Every synthetic request, start, usage and cost
+record is excluded from the already sealed A6.22 artifact and cannot amend, rerun, backfill or
+falsify its zero-use interval.
+
+T6-W10 implements no canary sampler, synthetic driver, detector, delivery path, credential,
+registry entry or monitor route: T6-W14 remains the sole A6.22 implementation/item owner and T6-W12/
+T6-W15 retain detector/ingest ownership. T6-W10 only activates the already bound implementation and
+collects/seals evidence. T6-W10 remains the sole AU6.17 evidence owner, its Phase-1 collection does
+not make it an A6.22 owner, and no acceptance item or implementation scope is owned twice. Missing, stale,
+malformed or contradictory bytes, any field/digest drift, post-check config/runtime/key/flag
+change, or disagreement among canary, verifier and rearm atomically disables both lanes, returns
+both flags to exact-`0`, emits fail-visible `UNKNOWN`, invalidates prior probe credit and requires a
+new T6-W10 activation proof. A count other than 12 or 20, missing ACK, any Phase-1 fetch/start/usage,
+or Phase-2 contamination of the sealed no-wake artifact invokes the same failure and restarts the
+affected phase in order. T6-W10 exclusively owns this later activation plus the 20/20 AU6.17
+execution, but no canary or monitor implementation. T6-W14 remains default-off/bind-only and may
+neither author nor mutate the activation tuple for either phase. Evidence that precedes the real
+implementation, the byte-identical phase tuple or its mandatory predecessor phase is invalid.
 
 ## Canonical node table
 
@@ -311,8 +529,8 @@ artifacts. Evidence that precedes either real implementation is invalid.
 | T6-W2 | W1 parallel | D11 | `.github/workflows/moat-benchmark.yml`; `.github/workflows/moat-action-test.yml`; `actions/corelink-memoize/action.yml`; — | Sol / contract |
 | T6-W3 | W1 parallel | — | `.github/workflows/conformance.yml`; `.github/workflows/spawn-worker-ci.yml`; `sdk/**`; — | Luna / CI |
 | T6-W8 | W1 parallel | — | `.github/workflows/pg-suite.yml`; `crates/corelink-fabric/tests/acceptance_cf0_fabric_core.rs`; — | Sol / live-risk |
-| T6-W4 | W1 parallel | T3-W18, T7-W4b | `.github/workflows/secret-scan.yml`; `.github/workflows/corelink-stress.yml`; `deploy/cloudflare-canary/src/index.ts`; `deploy/cloudflare-canary/src/types.ts`; `deploy/cloudflare-canary/src/tick_outbox.ts`; `deploy/cloudflare-canary/wrangler.jsonc` (Durable Object binding and migration); `deploy/cloudflare-canary/package.json`; `deploy/cloudflare-canary/package-lock.json`; `deploy/cloudflare-canary/test/scheduled-tick-envelope.test.ts`; `deploy/cloudflare-canary/test/scheduled-tick-outbox-recovery.test.ts`; `deploy/cloudflare-canary/test/scheduled-tick-order.test.ts`; `deploy/cloudflare-canary/test/scheduled-tick-ack.test.ts`; `deploy/cloudflare-canary/test/fabric-probe-flag-failclosed.test.ts`; `docs/plan/evidence/T6-W4-stress-host.json` | Sol / live-risk |
-| T6-W15 | W1 serial | T6-W4, O-MONITORHOST, T7-W4b | `deploy/cost-monitor/Containerfile`; `deploy/cost-monitor/config.schema.json`; `deploy/cost-monitor/src/index.ts`; `deploy/cost-monitor/src/ingest.ts`; `deploy/cost-monitor/src/acks.ts`; `deploy/cost-monitor/src/incidents.ts`; `deploy/cost-monitor/src/lifecycle.ts`; `deploy/cost-monitor/src/scheduler.ts`; `deploy/cost-monitor/src/state.ts`; `deploy/cost-monitor/src/delivery.ts`; `deploy/cost-monitor/src/outbox.ts`; `deploy/cost-monitor/src/types.ts`; `deploy/cost-monitor/package.json`; `deploy/cost-monitor/package-lock.json`; `deploy/cost-monitor/tsconfig.json`; `deploy/cost-monitor/vitest.config.ts`; `deploy/cost-monitor/test/lifecycle-missing.test.ts`; `deploy/cost-monitor/test/canary-missing-tick.test.ts`; `deploy/cost-monitor/test/ingest-idempotency.test.ts`; `deploy/cost-monitor/test/ack-token.test.ts`; `deploy/cost-monitor/test/incident-state.test.ts`; `deploy/cost-monitor/test/scheduler.test.ts`; `deploy/cost-monitor/test/state.test.ts`; `deploy/cost-monitor/test/delivery.test.ts`; `deploy/cost-monitor/test/outbox-recovery.test.ts`; `deploy/cost-monitor/test/outbox-transition-head.test.ts`; `deploy/cost-monitor/test/outbox-periodic-head.test.ts`; `deploy/cost-monitor/test/outbox-quarantine.test.ts`; `deploy/cost-monitor/test/delivery-dedupe.test.ts`; `deploy/cost-monitor/test/credential-isolation.test.ts`; `deploy/cost-monitor/test/independence.test.ts`; `docs/plan/evidence/T6-W15-monitor-base.json` | Sol / alerting |
+| T6-W4 | W1 parallel | T3-W18, T7-W4b | `.github/workflows/secret-scan.yml`; `.github/workflows/corelink-stress.yml`; `deploy/cloudflare-canary/src/index.ts`; `deploy/cloudflare-canary/src/config.ts`; `deploy/cloudflare-canary/src/types.ts`; `deploy/cloudflare-canary/src/tick_outbox.ts`; `deploy/cloudflare-canary/wrangler.jsonc` (Durable Object binding and migration); `deploy/cloudflare-canary/package.json`; `deploy/cloudflare-canary/package-lock.json`; `deploy/cloudflare-canary/test/scheduled-tick-envelope.test.ts`; `deploy/cloudflare-canary/test/scheduled-tick-outbox-recovery.test.ts`; `deploy/cloudflare-canary/test/scheduled-tick-order.test.ts`; `deploy/cloudflare-canary/test/scheduled-tick-ack.test.ts`; `deploy/cloudflare-canary/test/scheduled-tick-ack-recovery.test.ts`; `deploy/cloudflare-canary/test/fabric-probe-flag-failclosed.test.ts`; `deploy/cloudflare-canary/test/fabric-probe-flag-failvisible.test.ts`; `docs/plan/evidence/T6-W4-stress-host.json` | Sol / live-risk |
+| T6-W15 | W1 serial | T6-W4, O-MONITORHOST, T7-W4b | `deploy/cost-monitor/Containerfile`; `deploy/cost-monitor/config.schema.json`; `deploy/cost-monitor/src/index.ts`; `deploy/cost-monitor/src/ingest.ts`; `deploy/cost-monitor/src/acks.ts`; `deploy/cost-monitor/src/ack_recovery.ts`; `deploy/cost-monitor/src/page_ack.ts`; `deploy/cost-monitor/src/incidents.ts`; `deploy/cost-monitor/src/lifecycle.ts`; `deploy/cost-monitor/src/scheduler.ts`; `deploy/cost-monitor/src/state.ts`; `deploy/cost-monitor/src/delivery.ts`; `deploy/cost-monitor/src/outbox.ts`; `deploy/cost-monitor/src/types.ts`; `deploy/cost-monitor/package.json`; `deploy/cost-monitor/package-lock.json`; `deploy/cost-monitor/tsconfig.json`; `deploy/cost-monitor/vitest.config.ts`; `deploy/cost-monitor/test/lifecycle-missing.test.ts`; `deploy/cost-monitor/test/canary-missing-tick.test.ts`; `deploy/cost-monitor/test/ingest-idempotency.test.ts`; `deploy/cost-monitor/test/ack-token.test.ts`; `deploy/cost-monitor/test/ack-recovery.test.ts`; `deploy/cost-monitor/test/page-ack-auth.test.ts`; `deploy/cost-monitor/test/incident-state.test.ts`; `deploy/cost-monitor/test/scheduler.test.ts`; `deploy/cost-monitor/test/state.test.ts`; `deploy/cost-monitor/test/delivery.test.ts`; `deploy/cost-monitor/test/outbox-recovery.test.ts`; `deploy/cost-monitor/test/outbox-transition-head.test.ts`; `deploy/cost-monitor/test/outbox-periodic-head.test.ts`; `deploy/cost-monitor/test/outbox-quarantine.test.ts`; `deploy/cost-monitor/test/delivery-dedupe.test.ts`; `deploy/cost-monitor/test/credential-isolation.test.ts`; `deploy/cost-monitor/test/independence.test.ts`; `docs/plan/evidence/T6-W15-monitor-base.json` | Sol / alerting |
 | T5-W1 | W1 parallel | R6 | `docs/onboarding/**`; `actions/corelink-memoize/README.md`; — | Luna / documentation |
 | T5-W2 | W1 parallel | D7, D3 | `integrations/**`; — | Sol / release |
 | T5-W3 | W1 serial | T5-W2 | `integrations/github-actions/action.yml`; `integrations/github-actions/test/validate.sh`; — | Sol / security |
@@ -333,7 +551,7 @@ artifacts. Evidence that precedes either real implementation is invalid.
 | T3-W9 | W2 worker | T3-W14, O-APP | `deploy/cloudflare/src/index.ts`; `deploy/cloudflare/src/lib.ts`; `deploy/cloudflare/test/spawn-durability.test.ts`; — | Sol / lifecycle |
 | T8-W5 | W2 worker | T3-W9 | `deploy/cloudflare/src/index.ts`; `deploy/cloudflare/src/lib.ts`; `deploy/cloudflare/test/credential-revocation.test.ts`; — | Sol / credential lifecycle |
 | T8-W2 | W2 worker | T8-W5 | `deploy/cloudflare/src/index.ts`; `deploy/cloudflare/src/lib.ts`; `deploy/cloudflare/test/cred-cred-route.test.ts`; `deploy/cloudflare/test/cred-stash-do.test.ts`; — | Sol / credential scope |
-| T3-W16 | W2 worker | T8-W2, T2-W2b, T6-W15, O-CFINVENTORY, O-CFCANCEL, T7-W4b | `deploy/cloudflare/src/index.ts`; `deploy/cloudflare/src/lib.ts`; `deploy/cloudflare/test/attempt-handle-reconcile.test.ts`; `deploy/cloudflare/test/attempt-monitor-outbox.test.ts`; `deploy/cloudflare/test/attempt-monitor-ack.test.ts`; `deploy/cloudflare/test/inventory-crosscheck.test.ts`; `docs/plan/evidence/T3-W16-attempt-handle-crosscheck.json` | Sol / inventory |
+| T3-W16 | W2 worker | T8-W2, T2-W2b, T6-W15, O-CFINVENTORY, O-CFCANCEL, T7-W4b | `deploy/cloudflare/src/index.ts`; `deploy/cloudflare/src/lib.ts`; `deploy/cloudflare/test/attempt-handle-reconcile.test.ts`; `deploy/cloudflare/test/attempt-monitor-outbox.test.ts`; `deploy/cloudflare/test/attempt-monitor-ack.test.ts`; `deploy/cloudflare/test/attempt-monitor-ack-recovery.test.ts`; `deploy/cloudflare/test/inventory-crosscheck.test.ts`; `docs/plan/evidence/T3-W16-attempt-handle-crosscheck.json` | Sol / inventory |
 | T3-W15 | W2 worker | T3-W16 | `deploy/cloudflare/src/index.ts`; `deploy/cloudflare/src/lib.ts`; `deploy/cloudflare/test/redrive-state-machine.test.ts`; — | Sol / lifecycle |
 | T8-W4 | W1 parallel | — | `deploy/runner/entrypoint.sh`; `deploy/runner/test/jitconfig-secret-surface.sh`; `crates/corelink-check-exec-server/src/**`; `crates/corelink-check-exec-server/tests/auth_token_file.rs`; — | Sol / security |
 | T8-W6 | W3 live proof | T8-W5, T8-W2, T1-W6, T7-W4b | deployed worker version containing T8-W2; `docs/plan/evidence/au4.16b-suspension-pat-revocation.json`; `docs/plan/evidence/au3.23b-completion-pat-revocation.json` | Sol / live-risk |
@@ -341,10 +559,10 @@ artifacts. Evidence that precedes either real implementation is invalid.
 | T3-W5 | W4 post-decision | D4, T3-W15 | `deploy/cloudflare/src/index.ts`; `deploy/cloudflare/src/lib.ts`; `deploy/cloudflare/wrangler.jsonc`; `deploy/cloudflare/test/burst-above-ceiling.test.ts`; `deploy/cloudflare/test/orphan-retry.test.ts`; — | Sol / decision-gated |
 | T9-W1 | W2 separate lane | D2, T9-W0 | `deploy/cloudflare/src/durable_objects/runner_dev_env.ts`; `deploy/cloudflare/test/devenv-do.test.ts`; — | Sol / decision-gated |
 | T1-W5 | W1 serial | T3-W10, T3-W18, O-MINTKEY, T7-W4b | `crates/corelink-fabric-server/src/runner_cas_mint.rs`; `crates/corelink-fabric-server/src/server.rs`; `crates/corelink-fabric-server/tests/mint_selfcheck.rs`; `docs/plan/evidence/T1-W5-mint-selfcheck.json` | Sol / architecture |
-| T1-W6 | W1 serial | D12, T1-W5, T6-W12, O-CFINVENTORY, T7-W4b | `crates/corelink-fabric/src/pg_ledger.rs`; `crates/corelink-fabric/src/billing_sink.rs`; `crates/corelink-fabric-server/src/main.rs`; `crates/corelink-fabric-server/src/server.rs`; `crates/corelink-fabric-server/src/billing_export.rs`; `crates/corelink-fabric-server/src/monitor_outbox.rs` (write-only `fabric-server` producer); `crates/corelink-fabric-server/src/monitor_interlock.rs`; `crates/corelink-fabric-server/tests/monitor_outbox.rs`; `crates/corelink-fabric-server/tests/monitor_ack.rs`; `crates/corelink-fabric-server/tests/monitor_tuple_interlock.rs`; `crates/corelink-fabric-server/tests/monitor_tuple_interlock_race.rs`; `crates/corelink-fabric/tests/pg_refusal_breaker.rs`; `deploy/cloudflare-fabricd/src/index.ts`; `deploy/cloudflare-fabricd/src/monitor_outbox.ts` (write-only `fabricd-proxy` producer); `deploy/cloudflare-fabricd/test/resilience.test.ts`; `deploy/cloudflare-fabricd/test/monitor-outbox.test.ts`; `deploy/cloudflare-fabricd/test/monitor-ack.test.ts`; `deploy/cloudflare-fabricd/wrangler.jsonc`; `docs/plan/evidence/T1-W6-pg-durable-live.json` | Sol / live-risk |
+| T1-W6 | W1 serial | D12, T1-W5, T6-W12, O-CFINVENTORY, T7-W4b | `crates/corelink-fabric/src/pg_ledger.rs`; `crates/corelink-fabric/src/billing_sink.rs`; `crates/corelink-fabric/src/pg_monitor_fence.rs`; `crates/corelink-fabric/tests/pg_monitor_transaction_fence.rs`; `crates/corelink-fabric-server/src/main.rs`; `crates/corelink-fabric-server/src/server.rs`; `crates/corelink-fabric-server/src/billing_export.rs`; `crates/corelink-fabric-server/src/monitor_outbox.rs` (write-only `fabric-server` producer); `crates/corelink-fabric-server/src/monitor_interlock.rs`; `crates/corelink-fabric-server/src/monitor_transaction_fence.rs`; `crates/corelink-fabric-server/tests/monitor_outbox.rs`; `crates/corelink-fabric-server/tests/monitor_ack.rs`; `crates/corelink-fabric-server/tests/monitor_ack_recovery.rs`; `crates/corelink-fabric-server/tests/monitor_tuple_interlock.rs`; `crates/corelink-fabric-server/tests/monitor_tuple_interlock_race.rs`; `crates/corelink-fabric-server/tests/monitor_transaction_fence.rs`; `crates/corelink-fabric/tests/pg_refusal_breaker.rs`; `deploy/cloudflare-fabricd/src/index.ts`; `deploy/cloudflare-fabricd/src/monitor_outbox.ts` (write-only `fabricd-proxy` producer); `deploy/cloudflare-fabricd/test/resilience.test.ts`; `deploy/cloudflare-fabricd/test/monitor-outbox.test.ts`; `deploy/cloudflare-fabricd/test/monitor-ack.test.ts`; `deploy/cloudflare-fabricd/test/monitor-ack-recovery.test.ts`; `deploy/cloudflare-fabricd/test/pg-flag-failclosed.test.ts`; `deploy/cloudflare-fabricd/test/idle-no-wake.test.ts`; `deploy/cloudflare-fabricd/wrangler.jsonc`; `docs/plan/evidence/T1-W6-pg-durable-live.json` | Sol / live-risk |
 | T1-W2 | W3 live proof | O1, T1-W6, T7-W4b | `docs/plan/evidence/T1-W2-control-plane.json` | Sol / live-risk |
 | T1-W3 | W3 live proof | O1, T2-W2b, T1-W6, T7-W4b | `docs/plan/evidence/T1-W3-resilience.json` | Sol / live-risk |
-| T1-W4 | W3 live proof | O1, T1-W6, T6-W14, T7-W4b | `docs/plan/evidence/T1-W4-boot-rate.json` | Sol / live-risk |
+| T1-W4 | W3 live proof | O1, T1-W6, T6-W14, T6-W10, T7-W4b | `docs/plan/evidence/T1-W4-boot-rate.json` | Sol / live-risk |
 | T2-W2b | W3 live proof | T2-W1a, T3-W18, T8-W4, O1, O-DEVENV-PIN, O-FLEETBUSY, T7-W4b | deployed image digest containing T8-W4; `docs/plan/evidence/T2-W2b-deploy.json` | Sol / live-risk |
 | T2-W4 | W3 live proof | T2-W2b, T8-W4, T7-W4b | deployed image digest containing T8-W4; `docs/plan/evidence/T2-W4-image-ship.json` | Luna / release |
 | T2-W5 | W3 live proof | O1, T2-W2b, T1-W6, T7-W4b | `docs/plan/evidence/T2-W5-runbook-compat.json` | Luna / runbook |
@@ -360,13 +578,13 @@ artifacts. Evidence that precedes either real implementation is invalid.
 | T6-W6 | W3 live proof | T6-W9, T6-W12, O-CANARY, T7-W4b | `docs/plan/evidence/T6-W6-canary.json` | Sol / live-risk |
 | T6-W7 | W3 live proof | T2-W2b, T1-W6, T7-W4b | `docs/plan/evidence/T6-W7-authz.json` | Sol / live-risk |
 | T6-W9 | W3 live proof | T6-W4, O-CANARY, T7-W4b | `deploy/cloudflare-canary/src/rules.ts`; `deploy/cloudflare-canary/src/notify.ts`; `deploy/cloudflare-canary/test/rules.test.ts`; `docs/plan/evidence/T6-W9-alert-rules.json` | Sol / alerting |
-| T6-W10 | W3 live proof | T6-W6, T6-W9, T6-W12, T6-W14, T1-W6, T7-W4b | later synthetic-slot arming and 20-of-20 execution; `docs/plan/evidence/T6-W10-alerting-depth.json`; `docs/plan/evidence/au6.17-synthetic-slot-lifecycle.json` | Sol / alerting |
+| T6-W10 | W3 live proof | T6-W6, T6-W9, T6-W12, T6-W14, T1-W6, T7-W4b | evidence-only Phase 1 byte-identical lifecycle activation and twelve-tick no-wake collection; evidence-only Phase 2 synthetic activation and twenty-transaction AU6.17 collection; `docs/plan/evidence/T6-W14-canary-no-wake.json`; `docs/plan/evidence/T6-W10-alerting-depth.json`; `docs/plan/evidence/au6.17-synthetic-slot-lifecycle.json` | Sol / alerting |
 | T6-W11 | W3 live proof | T1-W6, T7-W4b | `docs/plan/evidence/T6-W11-runbook-execution.json` | Luna / runbook |
 | T7-W5 | W3 live proof | O1, O-CFRATE, T3-W7, T1-W6, T7-W4b | `docs/product/pricing.md`; `docs/plan/evidence/au7.11-queued-running-latency.json`; `docs/plan/evidence/au4.19-cloudflare-container-rate.json`; `docs/plan/evidence/au7.12-memoization-hit-rate.json` | Luna / economics |
-| T6-W12 | W1 pre-rearm live gate | T6-W15, T6-W9, T3-W16, O-CFINVENTORY, T7-W4b | `deploy/cost-monitor/Containerfile`; `deploy/cost-monitor/config.schema.json`; `deploy/cost-monitor/package.json`; `deploy/cost-monitor/package-lock.json`; `deploy/cost-monitor/src/index.ts`; `deploy/cost-monitor/src/scheduler.ts`; `deploy/cost-monitor/src/state.ts`; `deploy/cost-monitor/src/incidents.ts`; `deploy/cost-monitor/src/types.ts`; `deploy/cost-monitor/src/provider.ts`; `deploy/cost-monitor/src/correlator.ts`; `deploy/cost-monitor/src/capability_rules.ts`; `deploy/cost-monitor/src/synthetic_ingest.ts`; `deploy/cost-monitor/src/sensitivity.ts`; `deploy/cost-monitor/src/window_journal.ts`; `deploy/cost-monitor/src/rearm_attestation.ts`; `deploy/cost-monitor/migrations/0002-provider-cursors.json`; `deploy/cost-monitor/migrations/0003-window-journal.json`; `deploy/cost-monitor/test/provider.test.ts`; `deploy/cost-monitor/test/provider-stale-frozen.test.ts`; `deploy/cost-monitor/test/correlator.test.ts`; `deploy/cost-monitor/test/cursor-crash.test.ts`; `deploy/cost-monitor/test/provider-unavailable.test.ts`; `deploy/cost-monitor/test/incident-boundary.test.ts`; `deploy/cost-monitor/test/acked-incident-update.test.ts`; `deploy/cost-monitor/test/recovery-horizon.test.ts`; `deploy/cost-monitor/test/c1-c5-rules.test.ts`; `deploy/cost-monitor/test/c1-c5-synthetic-ingest.test.ts`; `deploy/cost-monitor/test/sensitivity-window.test.ts`; `deploy/cost-monitor/test/window-journal.test.ts`; `deploy/cost-monitor/test/rearm-tuple-attestation.test.ts`; `docs/plan/evidence/T6-W12-independent-monitor.json` | Sol / alerting |
+| T6-W12 | W1 pre-rearm live gate | T6-W15, T6-W9, T3-W16, O-CFINVENTORY, T7-W4b | `deploy/cost-monitor/Containerfile`; `deploy/cost-monitor/config.schema.json`; `deploy/cost-monitor/package.json`; `deploy/cost-monitor/package-lock.json`; `deploy/cost-monitor/src/index.ts`; `deploy/cost-monitor/src/scheduler.ts`; `deploy/cost-monitor/src/state.ts`; `deploy/cost-monitor/src/incidents.ts`; `deploy/cost-monitor/src/types.ts`; `deploy/cost-monitor/src/provider.ts`; `deploy/cost-monitor/src/correlator.ts`; `deploy/cost-monitor/src/capability_rules.ts`; `deploy/cost-monitor/src/synthetic_ingest.ts`; `deploy/cost-monitor/src/sensitivity.ts`; `deploy/cost-monitor/src/window_journal.ts`; `deploy/cost-monitor/src/journal_reconciler.ts`; `deploy/cost-monitor/src/clock.ts`; `deploy/cost-monitor/src/rearm_attestation.ts`; `deploy/cost-monitor/migrations/0002-provider-cursors.json`; `deploy/cost-monitor/migrations/0003-window-journal.json`; `deploy/cost-monitor/test/provider.test.ts`; `deploy/cost-monitor/test/provider-stale-frozen.test.ts`; `deploy/cost-monitor/test/correlator.test.ts`; `deploy/cost-monitor/test/cursor-crash.test.ts`; `deploy/cost-monitor/test/provider-unavailable.test.ts`; `deploy/cost-monitor/test/incident-boundary.test.ts`; `deploy/cost-monitor/test/acked-incident-update.test.ts`; `deploy/cost-monitor/test/recovery-horizon.test.ts`; `deploy/cost-monitor/test/c1-c5-rules.test.ts`; `deploy/cost-monitor/test/c1-c5-synthetic-ingest.test.ts`; `deploy/cost-monitor/test/sensitivity-window.test.ts`; `deploy/cost-monitor/test/window-journal.test.ts`; `deploy/cost-monitor/test/window-journal-writeahead.test.ts`; `deploy/cost-monitor/test/window-journal-reconcile.test.ts`; `deploy/cost-monitor/test/window-journal-fork.test.ts`; `deploy/cost-monitor/test/clock-freshness.test.ts`; `deploy/cost-monitor/test/rearm-tuple-attestation.test.ts`; `docs/plan/evidence/T6-W12-independent-monitor.json` | Sol / alerting |
 | T3-W18 | W0 containment (post-freeze) | T3-W17, T7-W4b | `deploy/cloudflare/wrangler.jsonc` (re-drive-only arming and serialized worker deploy); `docs/plan/evidence/T3-W18-containment-live.json` | Sol / live-risk |
 | T6-W13 | W3 live proof | T6-W4, T6-W9, O-CANARY, T7-W4b | `deploy/cloudflare-canary/src/**`; `deploy/cloudflare-canary/wrangler.jsonc`; `deploy/cloudflare-canary/test/metrics-key-lane.test.ts`; `docs/plan/evidence/T6-W13-canary-key-lane.json` | Sol / alerting |
-| T6-W14 | W3 live proof | T6-W13, T6-W12, T1-W6, O-CANARY, O-MONITORHOST, T7-W4b | `deploy/cloudflare-fabricd/src/index.ts`; `deploy/cloudflare-fabricd/src/lifecycle.ts`; `deploy/cloudflare-fabricd/test/lifecycle-marker.test.ts`; `deploy/cloudflare-canary/src/index.ts`; `deploy/cloudflare-canary/src/lifecycle_outbox.ts`; `deploy/cloudflare-canary/src/synthetic_slot.ts`; `deploy/cloudflare-canary/src/synthetic_outbox.ts`; `deploy/cloudflare-canary/src/rules.ts`; `deploy/cloudflare-canary/src/types.ts`; `deploy/cloudflare-canary/wrangler.jsonc` (lifecycle and default-off synthetic bindings/migrations); `deploy/cloudflare-canary/test/no-wake-target.test.ts`; `deploy/cloudflare-canary/test/lifecycle-monitor-envelope.test.ts`; `deploy/cloudflare-canary/test/lifecycle-sampler-outbox.test.ts`; `deploy/cloudflare-canary/test/lifecycle-synthetic-ack.test.ts`; `deploy/cloudflare-canary/test/synthetic-slot-lifecycle.test.ts`; `deploy/cloudflare-canary/test/synthetic-slot-outbox.test.ts`; `deploy/cloudflare-canary/test/synthetic-slot-default-off.test.ts`; `deploy/cloudflare-canary/test/synthetic-slot-credential-isolation.test.ts`; `deploy/cloudflare-canary/test/synthetic-slot-correlation.test.ts`; `docs/plan/evidence/T6-W14-canary-no-wake.json` | Sol / live-risk |
+| T6-W14 | W3 live proof | T6-W13, T6-W12, T1-W6, O-CANARY, O-MONITORHOST, T7-W4b | `deploy/cloudflare-fabricd/src/index.ts`; `deploy/cloudflare-fabricd/src/lifecycle.ts`; `deploy/cloudflare-fabricd/test/lifecycle-marker.test.ts`; `deploy/cloudflare-canary/src/index.ts`; `deploy/cloudflare-canary/src/lifecycle_outbox.ts`; `deploy/cloudflare-canary/src/synthetic_slot.ts`; `deploy/cloudflare-canary/src/synthetic_outbox.ts`; `deploy/cloudflare-canary/src/rules.ts`; `deploy/cloudflare-canary/src/types.ts`; `deploy/cloudflare-canary/wrangler.jsonc` (default-off lifecycle and synthetic bindings/migrations); `deploy/cloudflare-canary/test/no-wake-target.test.ts`; `deploy/cloudflare-canary/test/lifecycle-monitor-envelope.test.ts`; `deploy/cloudflare-canary/test/lifecycle-sampler-outbox.test.ts`; `deploy/cloudflare-canary/test/lifecycle-synthetic-ack.test.ts`; `deploy/cloudflare-canary/test/lifecycle-synthetic-ack-recovery.test.ts`; `deploy/cloudflare-canary/test/synthetic-slot-lifecycle.test.ts`; `deploy/cloudflare-canary/test/synthetic-slot-outbox.test.ts`; `deploy/cloudflare-canary/test/synthetic-slot-default-off.test.ts`; `deploy/cloudflare-canary/test/synthetic-slot-credential-isolation.test.ts`; `deploy/cloudflare-canary/test/synthetic-slot-correlation.test.ts` | Sol / live-risk |
 
 ## Deterministic ready sets and proof
 
@@ -400,12 +618,13 @@ B16: T3-W15 T6-W12
 B17: T1-W6 T3-W5 T6-W6
 B18: T1-W2 T1-W3 T2-W5 T3-W7 T4-W7 T4-W8 T5-W4 T6-W11
 B19: T3-W8 T5-W5 T6-W14 T6-W5 T6-W7 T7-W5 T8-W6 T8-W7
-B20: T1-W4 T6-W10
+B20: T6-W10
+B21: T1-W4
 ```
 
 The checker validates that every predecessor token is in the registry, every WP appears exactly
 once in the ready-set output, no batch exceeds eight, and the final emitted count equals the table
-vertex count. This rendering has 21 batches, 69 unique emissions and maximum width eight. Kahn's
+vertex count. This rendering has 22 batches, 69 unique emissions and maximum width eight. Kahn's
 algorithm consumed all vertices (no residual indegree), proving this version acyclic. A future
 change must regenerate the batches and update `schema: dispatch-dag/v1`; hand-edited edges or
 repeated DAG text in another document are invalid.

@@ -7,17 +7,18 @@
 `9f6e281ca617113a840ac268dcb680b258064c39` · **Round-9 review input:**
 `f5df50d7659254ed5e4579ab75df2a4d44ceea0f` · **Round-10 review input:**
 `e3dbba5cc0f003ee6a0b5ff8f52f73e8eb07ad29` · **Round-11 review input:**
-`fd9b226d3bcda055092b5e34f0cf9adc41a802bd` · **Authored:** 2026-08-30 ·
-**Revision: rev-6 Round-11 repair draft (NOT FROZEN)**
+`fd9b226d3bcda055092b5e34f0cf9adc41a802bd` · **Round-12 review input:**
+`3d1ed13bb1d53af6ce27385736f19d54bb5f90cc` · **Authored:** 2026-08-30 ·
+**Revision: rev-6 Round-12 repair draft (NOT FROZEN)**
 **Sources:** the 247-finding ultra audit (`wf_31696fc3-c08`, 53 agents / 17 dimensions, 33/33
 CRITICAL+HIGH adversarially confirmed) **∪** the in-repo 2026-08-25 comprehensive audit
 (`docs/audits/2026-08-25-comprehensive-audit.md`), which contains at least one HIGH-class risk the
 ultra audit did not find (§2.1).
 **Method:** TechLead doctrine (decompose · contract · pack · verify · loop), two self-iterations,
 then repeated **independent cold reviews** whose findings are logged and dispositioned in §12.
-Round 11 ran on 2026-09-01 against exact immutable input
-`fd9b226d3bcda055092b5e34f0cf9adc41a802bd` and is **NOT QUIET** (5/8 reviewers reported blockers;
-3/8 reported QUIET); the quiet count is zero. The
+Round 12 ran on 2026-09-01 against exact immutable input
+`3d1ed13bb1d53af6ce27385736f19d54bb5f90cc` and is **NOT QUIET** (7/8 reviewers reported blockers;
+1/8 reported QUIET); the quiet count is zero. The
 subsequent repair tree is not that reviewed input.
 
 > **Rigor compact (inviolable).** No finding is silently dropped, deferred, or worked around. Every
@@ -76,6 +77,28 @@ receipt_verifier_deployed_runtime_digest, receipt_verifier_config_digest,
 on_call_escalation_schedule_digest)`. Rebuilding either helper with unchanged configuration is
 therefore window drift, as is a sensitivity-scheduler key rotation.
 
+The canary's armed-probe identity is separately and canonically encoded as
+`canary_activation_tuple=(activation_version,lifecycle_source,lifecycle_service,lifecycle_application,lifecycle_key_id,lifecycle_credential_epoch,synthetic_source,synthetic_service,synthetic_application,synthetic_key_id,synthetic_credential_epoch,monitor_rearm_tuple_digest,producer_image_digest,producer_config_digest,probe_flag_name,probe_flag_value,synthetic_flag_name,synthetic_flag_value,activated_at)`.
+No such tuple exists and no activation, re-enable or probe credit accrues during T6-W14's
+implementation/default-off deterministic phase. T6-W14's deterministic default-off phase keeps both
+`FABRIC_PROBES_ENABLED` and `SYNTHETIC_SLOT_PROBES_ENABLED` exact `0` and proves zero outer-route
+requests, lifecycle envelopes, container fetches, starts, active minutes or attributable usage.
+T6-W14 remains A6.22's sole item
+owner. T6-W10 contributes only the evidence-only live collector: phase 1 seals and deploys the
+intended tuple with `FABRIC_PROBES_ENABLED=1` and `SYNTHETIC_SLOT_PROBES_ENABLED=0`, presents its
+byte-identical bytes/digest to the canary, external verifier and rearm decision, and runs exactly 12
+lifecycle ticks, 12 outer-route requests and 12 durably acknowledged lifecycle envelopes with zero
+container fetches, starts, active minutes or attributable usage before sealing A6.22's no-wake live
+artifact. Only after the Phase-1 artifact is sealed and immutable may Phase 2 begin and seal the next tuple with
+`SYNTHETIC_SLOT_PROBES_ENABLED=1` and collects 20/20 causally tagged AU6.17
+acquire→spawn→release transactions; those starts are excluded from and cannot amend or rerun the
+sealed A6.22 artifact. Phase 2 changes only `synthetic_flag_value` while preserving both lifecycle
+and synthetic lane identities byte-for-byte. T6-W10 implements no driver, detector, credential or monitor route and does
+not double-own A6.22. Any source/service/application, key/epoch, monitor tuple, producer
+image/config, flag name/value or trusted activation-time drift immediately disables probe emission
+and requires a new T6-W10 reproof; it never creates, edits or rotates the already sealed monitor
+registry.
+
 **Durability barrier.** A diagnostics-only bind is not durable recovery. T6-W15 first deploys the
 non-Cloudflare monitor base; T6-W12 then deploys the final monitor/provider candidate once, cuts
 over once after its candidate PASS, and keeps the active final deployment continuously running and
@@ -85,33 +108,50 @@ T6-W15 mandatory suite twice: once on the candidate before cutover and once on t
 after cutover. A post-cutover failure rolls back the monitor/provider deployment and keeps PG
 disabled; only the active-final PASS completes T6-W12. Only after that sequence may staged
 A1.11/T1-W6 attempt to
-re-arm Postgres. Before any external PG action, T1-W6 atomically reserves it with a signed ordered
+re-arm Postgres. Postgres is enabled only when `FABRIC_PG_DISABLED` is the exact string `0`;
+unset, blank, whitespace, `1`, case variants, malformed and every other value remain disabled.
+Removing the variable is not re-arm;
+`deploy/cloudflare-fabricd/test/pg-flag-failclosed.test.ts` proves the full matrix. Before any external PG action, T1-W6 atomically reserves it with a signed ordered
 `ATTEMPT_RESERVED` envelope and waits for the external monitor's durable ingest acknowledgement;
 without that acknowledgement the action does not execute and zero later PG attempts are admitted.
 Every breaker OPEN and CLOSED transition likewise commits atomically with its signed ordered outbox
 event; an unresolved state/event commit admits zero later PG attempts and is reconciled before
-progress. Its 6/11/16-minute provider inactivity scans use only O-CFINVENTORY's isolated rearm-probe
+progress. Its 6/11/16-minute provider inactivity gate uses only O-CFINVENTORY's isolated rearm-probe
 principal and its dedicated direct-read token, never the worker-reconciler or monitor principal.
+Idle means three complete, fully paginated zero-active scans with strictly advancing authenticated
+provider watermarks and immutable trusted-time receipts. Missing, partial, stale, frozen, future,
+regressed, unauthenticated, 401/429/5xx, cursor-gap, ambiguous/unjoined or receipt-less inventory is
+not idle; it keeps `FABRIC_PG_DISABLED=1`, emits a fail-visible external-monitor signal and admits
+zero rearm attempts. Absence of evidence can never be normalized to zero inventory;
+`deploy/cloudflare-fabricd/test/idle-no-wake.test.ts` proves all fresh-zero and uncertainty/error
+cases with zero wake.
 
 T1-W6 binds its re-arm evidence to the exact immutable `monitor_rearm_tuple` and must then prove
 version-bound Postgres-backed ledger/exporter success with
-`FABRIC_PG_DISABLED=1` removed. Any later `monitor_rearm_tuple` change keeps Postgres disabled or
+`FABRIC_PG_DISABLED=0` explicitly deployed. Any later `monitor_rearm_tuple` change keeps Postgres disabled or
 returns it immediately to `FABRIC_PG_DISABLED=1`; T6-W12 must repeat its complete
 candidate/cutover/active-final reproof, including both suite passes on the new candidate and active
 final `monitor_rearm_tuple`, and T1-W6 must repeat binding/recovery before another re-arm.
 Before cutover T6-W12 pre-registers T1-W6's future source ids exactly as `fabric-server` and
 `fabricd-proxy` and both corresponding write-only producer `(key_id, credential_epoch)` pairs. In that same
-registry transaction, before either mandatory T6-W12 suite pass, it also pre-registers the inactive
+registry transaction, before either mandatory T6-W12 suite pass, it also pre-registers the stable
 future T6-W14 source ids exactly as `canary-lifecycle` and `canary-synthetic`, with distinct
 write-only `(key_id, credential_epoch)` pairs and unequal credential epochs. All four future lanes,
-including the inactive state of the two canary lanes, are committed by
+including the permanent ingress authorization identity of the two canary lanes, are committed by
 `expected_source_registry_digest` and `ingress_key_epoch_map_digest` in the candidate and active-final
-`monitor_rearm_tuple`; both passes prove that inactive lanes cannot emit or be activated. T1-W6 and
+`monitor_rearm_tuple`; both passes prove that the default-off producer deployments emit zero events.
+Runtime activation state remains absent from `monitor_rearm_tuple` and the authentication registry,
+but an armed canary is authorized only by the distinct canonical `canary_activation_tuple` above.
+Exact-`1` activation may enable emission by the already registered producer only after T6-W10 seals
+and deploys the intended activation tuple; it may not create, edit, rotate, authorize or substitute
+a source, key, epoch, route or monitor registry entry. T1-W6 and
 T6-W14 are bind-only consumers of those exact registrations: neither may create, alter, rotate or
 activate a parallel source lane as part of its implementation. Changing any source id, key, epoch or
-inactive registration changes `monitor_rearm_tuple` and triggers the same disable-and-reproof rule.
-T6-W14 is strictly post-T1-W6 and may only bind those pre-registered lanes; later runtime arming is
-governed by its separate contract and cannot alter their registry identity. Until durable recovery succeeds, no
+authorization registration changes `monitor_rearm_tuple` and triggers the same disable-and-reproof rule.
+T6-W14 is strictly post-T1-W6 and may only bind those pre-registered lanes; its deterministic
+default-off phase has no activation tuple and earns no activation, re-enable or probe credit. Later
+T6-W10 evidence-only phase-1 and phase-2 runtime arming is governed by the byte-identical activation
+tuple for each phase and cannot alter registry identity. Until durable recovery succeeds, no
 restart/replay, cap, money-path, invoice, or other durability-dependent live proof earns green
 credit. The exact predecessor edges are maintained only in the
 [reconciled dispatch DAG](2026-09-01-reconciled-dispatch-dag.md).
@@ -130,18 +170,116 @@ source/service/application lane, producer key and credential epoch, current tupl
 commit id. Arbitrary 2xx; an old/replayed token; a wrong event, payload or sequence; a cross-lane,
 cross-service or cross-application token; a wrong/stale credential epoch or tuple; and a
 wrong-but-cryptographically-valid, stale-epoch or revoked signer all fail closed before any action.
-Deterministic producer and monitor tests cover every rejection and byte-identical retry returns the
-same post-commit token without a second effect.
+Monitor-side T6-W15 owns `deploy/cost-monitor/src/acks.ts`,
+`deploy/cost-monitor/src/ack_recovery.ts` and `deploy/cost-monitor/src/page_ack.ts`. Its tests cover
+post-CAS issuance, canonical encoding, signature, duplicate stability and rejection at
+`deploy/cost-monitor/test/ack-token.test.ts`, `deploy/cost-monitor/test/ack-recovery.test.ts` and
+`deploy/cost-monitor/test/page-ack-auth.test.ts`; they do not claim that a
+later producer blocks its action. Producer-side pre-action negatives belong only to the producer
+WP that implements them: T6-W4
+`deploy/cloudflare-canary/test/scheduled-tick-ack.test.ts` and
+`deploy/cloudflare-canary/test/scheduled-tick-ack-recovery.test.ts`; T3-W16
+`deploy/cloudflare/test/attempt-monitor-ack.test.ts` and
+`deploy/cloudflare/test/attempt-monitor-ack-recovery.test.ts`; T1-W6
+`crates/corelink-fabric-server/tests/monitor_ack.rs`,
+`crates/corelink-fabric-server/tests/monitor_ack_recovery.rs`,
+`deploy/cloudflare-fabricd/test/monitor-ack.test.ts` and
+`deploy/cloudflare-fabricd/test/monitor-ack-recovery.test.ts`; and T6-W14
+`deploy/cloudflare-canary/test/lifecycle-synthetic-ack.test.ts` and
+`deploy/cloudflare-canary/test/lifecycle-synthetic-ack-recovery.test.ts`. Each later suite proves every
+rejection before its own successor or action. Byte-identical retry returns the same post-commit
+token without a second effect.
+
+Signer rotation cannot strand or unsafely release an already committed head. Before rotation,
+T6-W15 preseals the canonical
+`signer_rotation_manifest=(manifest_version,active_signer_key_id,active_signer_epoch,next_signer_key_id,next_signer_epoch,revoked_signer_set_digest,overlap_started_at,overlap_expires_at,recovery_custody_digest,monitor_rearm_tuple_digest,previous_manifest_digest,issued_at,signature)`;
+the signature authenticates the preceding twelve ordered fields. Active, next and revoked identities,
+epochs, bounded overlap, recovery custody, current tuple and the previous-manifest chain are therefore
+fixed before use. Promotion of `next` to `active` is one durable atomic CAS that journals the new
+manifest and revocation evidence before any verifier accepts the new epoch; it cannot overlap outside
+the sealed interval, roll back to an older manifest/root, or leave two active signers.
+
+If the original ACK signer is revoked after the immutable ingest CAS but before the producer accepts
+the ACK, T6-W15 may issue a distinct canonical
+`ACK_RECOVERY=(recovery_version,event_id,producer_seq,payload_digest,source,service,application,key_id,credential_epoch,original_monitor_rearm_tuple_digest,ingest_commit_id,original_ack_digest,revocation_record_digest,signer_rotation_manifest_digest,current_monitor_rearm_tuple_digest,recovery_signer_key_id,recovery_signer_epoch,issued_at,signature)`
+whose signature authenticates the preceding eighteen ordered fields. The recovery signer must be the
+currently trusted manifest-authorized signer under the exact overlap/custody policy; the provider must
+read the persisted original CAS, original ACK and manifest chain, and the proof binds their exact
+commit id/digests plus the revocation record. Acceptance closes only that same head. It never
+re-ingests, changes the original historical state/time/SLO, creates a second effect or authorizes a
+different action. Missing, ambiguous, forked or divergent original CAS/ACK/manifest evidence; wrong
+event/lane/epoch/old or current tuple; wrong revocation or manifest digest; expired overlap; unavailable
+custody; stale/revoked recovery signer; or replay onto another head remains fail-closed. Mandatory
+monitor and later-producer fixtures cover the old/new boundary, atomic promotion, rotation between
+commit and delivery, verifier restart in every state, primary-signer loss with and without valid
+recovery custody, rollback/forked-manifest refusal and crash at each recovery boundary.
+
+**Authenticated human page ACK.** A page acknowledgement is not an ingest ACK, a provider 2xx, a
+button click or an unauthenticated webhook. It is the canonical signed token
+`page_ack_token=(page_ack_version,incident_id,page_id,delivery_id,destination,on_call_identity,on_call_schedule_digest,action,payload_digest,monitor_rearm_tuple_digest,acknowledged_at,expires_at,signer_key_id,signer_epoch,signature)`;
+the signature authenticates the preceding fourteen ordered fields. `action` must be the exact ACK
+action, `payload_digest` commits the immutable page/delivery body, and the tuple digest must equal the
+current monitor tuple. The incident CAS accepts it only from
+an authenticated, non-revoked human identity authorized for the exact destination and on-call
+schedule at `acknowledged_at`, before the trusted `expires_at`, and only for the exact open
+incident/page/delivery. The ACK and
+incident transition commit atomically before escalation suppression. Unsigned or provider-bot ACKs;
+expired/revoked/off-rotation identities; wrong-valid signers; cross-incident/page/delivery/
+destination/schedule reuse; altered action/body/payload digest or tuple; role or authorization loss;
+stale/future/expired time; replay or duplicate divergence;
+and an ACK after close are RED. An exact duplicate is idempotent and journaled once; it does not
+reset the escalation deadline or erase later incident updates. Mandatory fixtures alter the body,
+action, tuple and expiry independently and exercise expired and cross-head replay before any release.
+
+**Trusted time and freshness.** Freshness and every SLO/deadline are authorized only by the
+monitor's durable ingest-commit time, the provider's authenticated monotonic source watermark/
+`as_of`, and immutable delivery/control receipt time, all anchored to the trusted monotonic
+time/checkpoint capability selected by O-MONITORHOST. T6-W12 implements this at
+`deploy/cost-monitor/src/clock.ts` and proves it in
+`deploy/cost-monitor/test/clock-freshness.test.ts`. Producer `occurred_at`/`scheduled_for` remains
+evidence and correlation input but neither it nor a process wall clock, scheduler wall clock or
+mutable HTTP date can make an ACK fresh, suppress a page, advance recovery, prove idle or seal a
+window. A missing/unverifiable checkpoint; clock rollback, jump, freeze or excessive skew; future or
+regressed watermark; delayed/reordered receipt; receipt before its intent; or watermark/receipt/
+commit-domain mismatch fails closed, pages time-source failure and cannot advance a cursor,
+escalation, recovery, PG action or A6.17 window. Deterministic clock mutants cover every boundary.
 
 **Provider evidence journal.** T6-W12 configures a provider-side, append-only/WORM journal retaining at
 least eight complete days of page delivery, page acknowledgement, sensitivity-control execution,
 authenticated ingest ACK and rearm-attestation records. Each sealed window manifest carries an
 inclusive start and exclusive end, the complete ordered record-id list (not only bounds), record
 count, initial and terminal hash-chain roots, and storage-provider retention/immutability receipts;
-its root commits all record bytes, object versions and deployed component versions. Independent
-tests delete the first, middle or last record; rewrite a record; introduce a sequence/time gap; omit
-an object or receipt; and splice a mixed window, tuple or component version. Every gap, rewrite,
-omission or mixed-version window is RED. T6-W10 cannot author, copy, curate or splice those records:
+its root commits all record bytes, object versions and deployed component versions.
+The exclusive implementation/migration paths are
+`deploy/cost-monitor/src/window_journal.ts`,
+`deploy/cost-monitor/src/journal_reconciler.ts` and
+`deploy/cost-monitor/migrations/0003-window-journal.json`; mandatory tests are
+`deploy/cost-monitor/test/window-journal.test.ts`,
+`deploy/cost-monitor/test/window-journal-writeahead.test.ts`,
+`deploy/cost-monitor/test/window-journal-reconcile.test.ts` and
+`deploy/cost-monitor/test/window-journal-fork.test.ts`.
+
+Every externally visible delivery, human page ACK, control, attestation or ingest-ACK issuance first
+uses one local CAS to create the immutable operation/outbox and `PENDING` journal-intent identity,
+then appends and read-after-write verifies the matching WORM `WRITE_AHEAD_INTENT` with that stable
+provider idempotency operation id. No external effect executes if either write or its receipt fails.
+After the effect, the exact provider receipt and matching `RESULT` must append and verify before a
+second local CAS can advance completion/cursor, bound to that exact intent/result/root. A crash or
+partition at any boundary leaves an unresolved intent, never an assumed success: the reconciler queries the provider
+by that exact operation id and records its one result or retries the same bytes/id. It never invents
+a replacement id, and no unresolved or multiply resolved intent can seal a window.
+
+Reconciliation is bidirectionally exhaustive across every provider page: each journal intent has
+exactly one provider outcome and each provider delivery/ACK/control/attestation/ingest-ACK record has
+exactly one journal entry. Provider-signed monotonic checkpoints commit the previous checkpoint/root
+and are independently witnessed by the receipt verifier before cursor advancement or manifest seal;
+forks, split views, rollback, equivocation or conflicting receipts are RED even if either branch is
+individually well signed. Independent tests crash before/after intent append, after provider accept
+but before result append, after result append but before CAS/cursor commit, and at every page/cursor
+boundary; delete the first, middle or last record; rewrite or add a record; introduce a sequence/time
+gap; omit an object or receipt; return conflicting same-id results; fork/rollback a checkpoint; and
+splice a mixed window, tuple or component version. Every gap, rewrite, extra, omission, unresolved
+intent, equivocation or mixed-version window is RED. T6-W10 cannot author, copy, curate or splice those records:
 its evidence references only the provider-issued journal root, from which the complete manifest,
 chain and receipts must verify.
 
@@ -153,7 +291,11 @@ that nonce, the exact tuple digest, and separately timestamped health for the co
 provider poll and core delivery route only, using the exact signer id/epoch and trust/revocation
 state committed by `attestation_ack_signer_trust_revocation_digest`. T1-W6 owns
 `crates/corelink-fabric-server/src/monitor_interlock.rs` and
-`crates/corelink-fabric-server/tests/monitor_tuple_interlock.rs`. Before **every** readiness answer,
+`crates/corelink-fabric-server/tests/monitor_tuple_interlock.rs`, plus
+`crates/corelink-fabric-server/src/monitor_transaction_fence.rs`,
+`crates/corelink-fabric-server/tests/monitor_transaction_fence.rs`,
+`crates/corelink-fabric/src/pg_monitor_fence.rs` and
+`crates/corelink-fabric/tests/pg_monitor_transaction_fence.rs`. Before **every** readiness answer,
 PG-backed mutation or PG socket/pool use, T1-W6 obtains a new response and verifies the exact bound
 tuple digest, nonce echo and signature; response age must be ≤10 s, provider-poll and delivery
 health observations must each be ≤60 s old. The response itself must be challenge-fresh; cached
@@ -162,22 +304,41 @@ and on-call health are deliberately absent from this attestation and PG latch.
 
 Successful verification acquires a linearizable interlock-epoch permit from a shared non-PG
 coordinator; a permit is bound to the verified tuple and is held from pool checkout through every
-query and through transaction commit or rollback, including the final precommit check. Process-local
-flags or a check immediately before checkout are insufficient. Mismatch, unavailability, any stale
-component, bad signature, wrong nonce or signer-trust failure atomically moves the shared interlock
-from `OPEN(epoch)` to `CLOSING(epoch+1)`, which blocks every new permit on every instance. The
-latch then cancels and rolls back or drains every prior-epoch checkout/query/transaction, closes and
-discards every socket and pool on every instance, and only after all prior permits are terminal may
-it publish `LATCHED`. No prior-epoch operation may commit after `CLOSING` begins. While
-`CLOSING` or `LATCHED`, readiness/mutation returns 503 and zero PG actions execute. A planned
-`monitor_rearm_tuple` change enters `CLOSING` **before** the change.
+query and transaction terminal result. Every PG mutation transaction additionally acquires the
+shared transaction-scoped server-side advisory lock for that permit epoch and validates the exact
+durable PG fence generation inside the same transaction. A client precommit check, process-local
+flag, socket close or client permit alone is insufficient to fence `COMMIT`.
+
+The only latch progression is `OPEN -> FENCING -> CLOSING -> LATCHED`; no transition is skipped.
+On mismatch, unavailability, stale component, bad signature, wrong nonce, signer-trust failure or
+planned tuple change, the coordinator first blocks every new permit on every instance and enters
+`FENCING(epoch+1)`. The closer then obtains the exclusive server-side fence lock, which drains all
+prior shared transaction locks; in one durable PG transaction it advances the fence generation and
+latch row, and confirms that commit before publishing `CLOSING(epoch+1)`. Therefore every old
+transaction has committed strictly before the fence linearization point or is rolled back, and no
+old-epoch transaction can commit after `CLOSING` begins. `CLOSING` cancels/rolls back or drains any
+remaining non-transaction checkout/query, closes and discards every socket/pool, and publishes
+`LATCHED` only after all prior permits are terminal. `FENCING`, `CLOSING` and `LATCHED` all return
+503 for readiness/mutation and execute zero new PG actions.
+
+An unavailable, partitioned or ambiguous server fence/commit result never publishes `CLOSING` or
+`LATCHED`, never reopens and is never retried as a new fence/action. It remains `FENCING` and 503
+until reconciliation reads the authoritative fence transaction id/generation through a fresh
+connection and proves whether that exact commit landed; if it did, closure resumes from that exact
+generation, and otherwise the same operation id is safely completed. A process crash after the
+server fence commit but before `CLOSING`, a lost COMMIT response and a coordinator↔PG partition are
+mandatory cases. A planned `monitor_rearm_tuple` change completes this fence sequence **before**
+the tuple change.
 
 Deterministic tests mutate each of the seven tuple fields independently and inject missing, >10 s
 response, >60 s poll/delivery, bad-signature, wrong-nonce and cached proofs, plus a valid signature
 from the wrong signer, a stale signer epoch and a revoked signer. Multi-instance race tests pause one
-operation after checkout, one during query and one at precommit while another instance latches; all
-3/3 cases pass only when new permits stop, prior-epoch work cancels/rolls back or drains without a
-late commit, every socket/pool closes before `LATCHED`, and the system remains fail-closed. The latch
+operation after checkout, one during query, one after its final client check and one at server
+`COMMIT` while another instance fences; they also drop the COMMIT response, partition coordinator
+from PG and crash/restart after the fence-row commit but before `CLOSING`. All cases pass only when
+new permits stop, the shared/exclusive server lock ordering proves every old transaction committed
+before fence advance or rolled back, ambiguous outcomes reconcile the exact transaction without a
+duplicate effect, every socket/pool closes before `LATCHED`, and the system remains fail-closed. The latch
 may clear only after full T6-W12 candidate/cutover/active-final reproof, T1-W6 rebinding to the exact
 new tuple, and an explicit manual latch reset; none of those steps alone restores PG.
 
@@ -325,7 +486,7 @@ A2.4 A2.5 A2.7 A2.8 A2.10 A3.9 A3.10 A4.7 A4.10 A5.6 A5.8 A5.9 A6.6 A6.7 A6.11 A
 | **A3.20** | probe | of 20 second runs of one frozen input, at least 19 are cache hits; a rolling-20 hit rate below 90% alerts | G14 |
 | **A5.10** | probe | ≥2 independent cold accounts complete self-serve, and ≥1 adversarial variant (payment declined · install cancelled mid-flow · repo removed after install) leaves a documented, recoverable tenant — no operator writes | G10 |
 | **A6.16** | test | in **3/3** injections, a job queued for 120 s with no spawn raises an alarm within the next 120 s naming tenant and repo | G11 |
-| **A6.17** | probe | in **3/3** injections an unacknowledged alert escalates within 5 min; an on-call rotation exists; then one immutable `A6.17_window_tuple` produces ≤1 false page over **7 continuous days with zero observation, scheduler, receipt or evidence-delivery gaps**. The tuple commits the sensitivity scheduler's deployed runtime, configuration and key-id/credential epoch and the receipt verifier's deployed runtime and configuration, not merely logical settings. T6-W12 implements/configures sensitivity controls on a distinct O-MONITORHOST scheduler and credential, plus an external receipt verifier isolated from the monitor application and configuration; controls execute at intervals ≤6 h throughout all 7 days, inject and clear every covered failure class, and must page within its normative SLO. Its provider-side append-only journal retains ≥8 days of page/ack/control/attestation records and seals start/end, the complete ordered record ids, hash chain and immutable object receipts under one root. T6-W10 only collects evidence by referencing that provider-issued root and cannot implement/schedule controls or author/copy/splice journal records. Any tuple drift, missed/late control, overdue/missing receipt, journal gap/rewrite/omission/mixed-version splice, or evidence/schedule/delivery gap alerts, invalidates the artifact and restarts the full 7-day window from zero. Drift confined to its sensitivity-scheduler, receipt-verifier or on-call-schedule fields, including an overdue receipt, does **not by itself** disable PG; PG disable/reproof occurs only if the embedded `monitor_rearm_tuple` changes or the separately attested core delivery health fails | G12 |
+| **A6.17** | probe | in **3/3** injections an unacknowledged alert escalates within 5 min; a named on-call rotation exists and only its authenticated human `page_ack_token` bound to action/payload/current tuple and unexpired trusted time can suppress escalation; then one immutable `A6.17_window_tuple` produces ≤1 false page over **7 continuous days with zero observation, scheduler, trusted-time, receipt, journal-reconciliation or evidence-delivery gaps**. The tuple commits the sensitivity scheduler's deployed runtime, configuration and key-id/credential epoch and the receipt verifier's deployed runtime and configuration, not merely logical settings. T6-W12 implements/configures sensitivity controls on a distinct O-MONITORHOST scheduler and credential, plus an external receipt verifier isolated from the monitor application and configuration; controls execute at intervals ≤6 h throughout all 7 days, inject and clear every covered failure class, and must page within its normative SLO. Its provider-side append-only journal retains ≥8 days of page/ACK/control/attestation records and seals start/end, the complete ordered record ids, hash chain, signed monotonic checkpoints and immutable object receipts under one root. Every external effect has a verified `WRITE_AHEAD_INTENT`; exhaustive bidirectional provider reconciliation and independently witnessed previous-root checkpoints prove no unresolved intent, omission, extra record, fork, rollback, equivocation or split view before seal. All freshness derives from trusted commit/watermark/receipt checkpoints, never a local wall clock. T6-W10 first seals/deploys the intended armed `canary_activation_tuple` and requires the canary/verifier/rearm decision to consume its byte-identical bytes/digest, then collects evidence by referencing the provider-issued root; it cannot implement/schedule controls or author/copy/splice journal records. Any activation/window tuple drift, unauthorized/invalid human ACK, missed/late control, overdue/missing receipt, unresolved intent, trusted-clock anomaly, reconciliation mismatch, journal gap/rewrite/extra/omission/fork/mixed-version splice, or evidence/schedule/delivery gap alerts, disables the probe, invalidates the artifact and restarts the full 7-day window from zero. Activation drift never mutates the registry. Drift confined to the window's sensitivity-scheduler, receipt-verifier or on-call-schedule fields, including an overdue receipt, does **not by itself** disable PG; PG disable/reproof occurs only if the embedded `monitor_rearm_tuple` changes or the separately attested core delivery health fails | G12 |
 | **A6.18** | test | each C1–C5 alarm has an authenticated input, detector and delivery path implemented in T6-W12's non-Cloudflare monitoring extension, **sharing no failure domain with the component it monitors**; T6-W10 owns the deterministic kill/isolation proof that the alert is still received. Canary-only rules or evidence-only implementation scope cannot satisfy this item | round-2 flag |
 | **A7.6** | test | every probe artifact carries a timestamp/version; point-in-time evidence is ≤24 h old at freeze and a continuous window ends ≤24 h before freeze; 24 h + 1 s is red | G13 |
 | **A6.19** | test | the runbook procedures (deploy · rollback · recovery · key rotation) are executed verbatim by an operator who did not write them; any step that fails or needs undocumented knowledge is red | G6 |
@@ -430,10 +591,10 @@ A6.3 remains capability-broken-while-green until owner decision **D11**, reserve
 | A6.7 | probe | the e2e suite runs green against live on a schedule and its completeness critic kills **8/8** independent mutants: auth, entitlement, mint, atomic claim, spawn, completion, billing and alert delivery |
 | A6.8 | test | the cross-instance pg cap-safety suite (`pg_ledger.rs:1429…`, `billing_sink.rs:643,672`) executes in CI — **runner + Postgres provisioning pre-decided**, not left to the agent |
 | A6.9 | probe | the stress lane dispatches on a **named** host and **its result is asserted on** |
-| A6.10 | test+probe | T6-W4's scheduled canary run, while the live producer remains default-off, tests that its capacity-1 lane durably queues one authenticated monotonic tick and completes total enqueue→durable-ACK/typed-terminal residence within ≤60 s across crash/concurrency retry. It creates no successor before terminal and cannot locally drop, resample or reclock the head. T6-W15 owns the deployed external detector and live credit: in 3/3 stopped-canary injections that monitor outside Cloudflare detects the missing expected tick and pages within 120 s after its scheduled time. The canary cannot satisfy this item by grading its own last-success state, and neither the test nor probe half alone is green |
+| A6.10 | test+probe | T6-W4's scheduled canary run, while fabric/synthetic producers remain default-off, tests that its capacity-1 lane durably queues one authenticated monotonic tick and completes total enqueue→durable-ACK/typed-terminal residence within ≤60 s across crash/concurrency retry. It creates no successor before terminal and cannot locally drop, resample or reclock the head. Exact `FABRIC_PROBES_ENABLED=0` still emits the authenticated containment/config state and scheduled tick; an unset/blank/whitespace/malformed value performs zero fabric fetches but emits authenticated `CANARY_CONFIG_INVALID` without disabling tick/spawn monitoring. Every probe records exactly one of `SKIPPED`, `FAILED`, `UNKNOWN` or `SERVED` with reason, deployed version, `monitor_rearm_tuple` digest and trusted `observed_at`: exact-`0` is `SKIPPED`, authoritative failure is `FAILED`, unavailable/partial/ambiguous is `UNKNOWN`, and only a successful exact-`1` probe is `SERVED`; an exception/absent outcome is never `SKIPPED` or success. `deploy/cloudflare-canary/test/fabric-probe-flag-failvisible.test.ts` proves this matrix independently of the fail-closed fetch test. T6-W15 owns the deployed external detector and live credit: in 3/3 stopped-canary, invalid-config-event delivery failure and canary-monitor credential/path failure injections, that monitor outside Cloudflare detects the missing expected tick/config signal and pages within 120 s of its trusted scheduled checkpoint. The canary cannot satisfy this item by grading its own last-success/config state, and neither the test nor probe half alone is green |
 | A6.11 | probe | an anonymous write to the deployed diagnostics sink is refused |
 | ★A6.12 | test+probe | an alert rule exists for **each of C1–C5** with a named condition and channel, and each fires end to end when its condition is synthesized — today alarms cover only the canary and the diag sink; **C1–C5 have none** |
-| ★A6.13 | probe | an alert reaches a **named on-call destination and is acknowledged**; a response-time target exists |
+| ★A6.13 | probe | an alert reaches a **named on-call destination** and only an authenticated, currently authorized human on that exact schedule acknowledges the exact incident/page/delivery/action/payload/current monitor tuple before the canonical signed `page_ack_token` expires; provider 2xx, bot/unsigned/off-rotation/cross-scope/stale/expired/replayed ACKs and altered body/action/tuple do not suppress the 5-minute escalation; a trusted receipt-anchored response-time target exists |
 | ★A6.14 | probe | each synthesized C1–C5 outage alerts within 120 s in **3/3** injections |
 
 ### C7 — truth
@@ -499,10 +660,13 @@ state remains NOT FROZEN / NO DISPATCH.
   exists; T1-W6 additionally waits for T6-W12's final deployed, continuously running/polling monitor/provider stack
   and T6-W12's rerun of the unchanged full T6-W15 suite on the exact `monitor_rearm_tuple`, including
   the nonce-bound signed rearm-attestation interlock, its signer trust/revocation digest,
-  linearizable epoch permits held through commit, exact authenticated ACK-token gating,
+  coordinator permits plus transaction-scoped shared server fence locks and same-transaction durable
+  generation checks, exclusive fence commit before `CLOSING`, ambiguous-commit reconciliation,
+  exact authenticated ACK/`ACK_RECOVERY` gating,
   `ATTEMPT_RESERVED` action gating and atomic breaker transition-event ingestion, plus
   O-CFINVENTORY's isolated rearm-probe credential
-  and dedicated direct-read token for its live inactivity scans; every
+  and dedicated direct-read token for three complete fresh receipt-anchored inactivity scans;
+  Postgres enables only on exact `FABRIC_PG_DISABLED=0`; every
   durability-dependent live proof remains blocked.
 - **D13 — AU4.18 owner-of-record precedence and conflict policy: STAGED / RED.** No signed decision
   exists; AU4.18 remains proposal-only.
@@ -614,7 +778,7 @@ staged A1.10/T1-W5 owns those assertions exclusively.
 | **T5-W6** | A5.4 | D3 · T5-W2 · O-PUBLISH |
 | **T6-W5** | A6.7 | O1 |
 | **T6-W6** | A6.6 A6.13 A6.14 | O-CANARY · canary deploy · external C1–C5 rules ready |
-| **T6-W10** | A6.16 A6.17 A6.18 | evidence-only collection for external alert detection, escalation, the 7-day false-page/sensitivity-control window, C1–C5 failure-domain independence and the staged AU6.17 transaction; all monitor, control scheduler and receipt-verifier implementation/configuration belongs to T6-W12, and the later producer belongs to T6-W14 |
+| **T6-W10** | A6.16 A6.17 A6.18 | evidence-only collection for external alert detection, escalation, the 7-day false-page/sensitivity-control window and C1–C5 failure-domain independence; it also contributes A6.22's phase-1 12-tick live collector to the T6-W14-owned item and collects the later staged AU6.17 phase-2 20/20 transaction artifact. It implements no canary driver, detector, credential, monitor route, control scheduler or receipt verifier and does not own A6.22; monitor/control implementation belongs to T6-W12 and canary producer implementation belongs to T6-W14 |
 | **T6-W11** | A6.19 | operator-executed runbook procedures |
 | **T6-W7** | A6.11 | T2-W2b |
 | **T6-W9** | A6.12 | alert-rule code/config before T6-W6 live canary proof |
@@ -634,25 +798,38 @@ may attempt to re-arm durable Postgres. T1-W6 binds that exact `monitor_rearm_tu
 T1-W4, T4-W7, T4-W8 and T6-W14; T1-W2 may collect diagnostics while Postgres is disabled but cannot
 earn green credit. Any later `monitor_rearm_tuple` change keeps or returns Postgres to disabled and
 repeats the full T6-W12 reproof and T1-W6 rebinding in the T6-W15 → T6-W12 → T1-W6 gate. A1.9
-additionally receives no T1-W4 credit until staged T6-W14
-has delivered the isolated non-waking edge target and sampler. FabricdContainer
-DO lifecycle hooks alone author the monotonic sequence/transition record; the container-free route
-is read-only, never calls the container and never emits a monitor heartbeat. T6-W14's canary sampler
-reads that route every 60 seconds, rejects stale/future data, nonce mismatch, sequence regression and
-static/untransitioned state, persists an outbox event, and retries the exact envelope until T6-W15
-returns the exact authenticated post-commit ACK token for that event. It cannot be cited as fabricd application health, availability or
-container-uptime evidence. T6-W4's tick producer must likewise persist exact ordered bytes before
+additionally receives no T1-W4 credit until the T6-W14-owned staged A6.22 item is complete. T6-W14
+implements the isolated non-waking edge target and sampler, then proves deterministically with both
+activation flags exact `0` that it makes zero outer-route requests, lifecycle envelopes, container
+fetches, starts, active minutes or attributable usage and earns no activation, re-enable or probe
+credit. T6-W10's evidence-only phase 1 then seals the exact
+`FABRIC_PROBES_ENABLED=1`/`SYNTHETIC_SLOT_PROBES_ENABLED=0` activation tuple and runs exactly 12
+60-second lifecycle ticks. FabricdContainer DO lifecycle hooks alone author the monotonic
+sequence/transition record; the container-free route is read-only, never calls the container and
+never emits a monitor heartbeat. The T6-W14-implemented sampler, under that T6-W10-sealed phase-1
+tuple, rejects stale/future data, nonce mismatch, sequence regression and static/untransitioned
+state, persists each of the 12 outbox events, and retries the exact envelope until T6-W15 returns the
+exact authenticated post-commit ACK token for that event. The sealed A6.22 live artifact therefore
+contains exactly 12 outer-route requests and 12 acknowledged lifecycle envelopes but zero container
+fetches, starts, active minutes or attributable usage. It cannot be cited as fabricd application
+health, availability or container-uptime evidence. T6-W4's tick producer must likewise persist exact ordered bytes before
 send; a typed terminal stale/late acknowledgement advances the head only after it is recorded and
 queues a current replacement without resetting the original missing-tick clock. A6.10 receives no
 detector/live credit from that producer or a canary-owned last-success record: T6-W15 alone owns the
 external missing-tick detector and the version-bound 3/3 stopped-canary proof. T6-W12 owns the
 pre-rearm final non-Cloudflare C1–C5/provider adapters/rules/tests needed by A6.18, deploys them once,
 keeps them continuously running/polling and runs the full T6-W15 suite before and after cutover;
-Before both passes T6-W12 includes inactive `canary-lifecycle` and `canary-synthetic` registrations
-with distinct key/credential epochs in the exact tuple. T6-W14 is bind-only and owns AU6.17's
-separately keyed, default-off canary transaction driver, while T6-W10 alone arms it for the 20/20 version-bound
-synthetic-transaction proof. The A6.22 no-wake trial keeps that driver off so spawned work cannot
-contaminate its zero-container-use evidence. T6-W10 also owns the C1–C5 failure-domain proofs.
+Before both passes T6-W12 includes stable `canary-lifecycle` and `canary-synthetic` registrations,
+permanent ingress authorization and distinct key/credential epochs in the exact tuple; their
+default-off producer deployments emit zero. T6-W14 is bind-only, creates no activation tuple or
+activation/re-enable/probe credit, and owns AU6.17's separately keyed, default-off canary transaction
+driver. T6-W10 first contributes A6.22's evidence-only phase-1 collector under the exact fabric-`1`/
+synthetic-`0` tuple and seals the 12-tick no-wake live artifact without owning the item. Only after
+that seal does it deploy the next canonical tuple with synthetic exact `1` and collect the 20/20
+version-bound synthetic-transaction proof; canary, verifier and rearm evidence consume the
+byte-identical bytes/digest for each phase, and any drift disables the probe without mutating the
+registry. The phase-2 transactions are excluded from and cannot amend or rerun A6.22's sealed
+zero-container-use artifact. T6-W10 also owns the C1–C5 failure-domain proofs.
 Neither can borrow implementation or acceptance credit from the Cloudflare-hosted T6-W6/T6-W9
 path. These statements reserve safety and ordering only; A1.11,
 the A6.20 phases, T6-W14 and AU6.17 remain ungreened, and the canonical DAG alone owns their exact
@@ -671,12 +848,12 @@ gating id or moved to W1/W2/DEFER — otherwise the §2 waiver rule is bypassed 
 | item / packet | reserved contract | staging state |
 |---|---|---|
 | **A1.10 / T1-W5** | fabric-only mint-key diagnostics, boot and readiness test+probe; repo fixtures first, then T3-W18's intake/re-drive containment must be armed and proved before any live absent/wrong-key mutation. Under that containment absent/wrong refuses readiness/acquire, valid serves, no secret is logged, and the exact prior mint-key/config state is restored and re-probed before containment may be released | RED by absence; no A3.17 credit and no live proof before T3-W18 containment |
-| **A1.11 / T1-W6** | diagnostics-first Postgres ledger/exporter refusal and version-bound durable recovery test+probe; its capacity-1 lane first atomically enqueues signed `ATTEMPT_RESERVED` and every external PG action executes only after validating the canonical authenticated post-commit ACK token within ≤60 s total enqueue→ACK residence, while breaker OPEN/CLOSED state changes atomically enqueue their signed transitions. Arbitrary 2xx and old/wrong/cross-lane/epoch/tuple/signer ACKs are hard RED/fail-closed and admit zero socket/action or successor. T6-W12 pre-registers the future source ids and write-only producer key-id/epoch pairs. Re-arm follows T6-W12's one-time final monitor/provider cutover, continuously running/polling final deployment and pre-cutover-candidate plus post-cutover-active reruns of the unchanged complete T6-W15 suite while PG stays disabled; T1-W6 only binds the exact immutable `monitor_rearm_tuple` and cannot create a parallel lane. `src/monitor_interlock.rs` challenge-verifies T6-W12's signed tuple/provider-poll/core-delivery attestation and acquires a shared linearizable epoch permit before every readiness, mutation or socket/pool use; PG work holds it through commit/rollback. Failure blocks new permits, cancels/rolls back or drains all prior-epoch work and closes every socket before publishing `LATCHED`; paused-after-checkout, during-query and precommit multi-instance races are mandatory. Sensitivity/on-call health is excluded. Any `monitor_rearm_tuple` change keeps/returns PG disabled until the entire gate repeats | RED by absence; blocked on unresolved D12, completed T6-W12 and the isolated rearm-probe credential/direct-read token from O-CFINVENTORY; `tests/monitor_tuple_interlock.rs` is mandatory |
+| **A1.11 / T1-W6** | diagnostics-first Postgres ledger/exporter refusal and version-bound durable recovery test+probe; Postgres enables only on exact `FABRIC_PG_DISABLED=0`, while unset/blank/whitespace/`1`/malformed remains disabled. Its capacity-1 lane first atomically enqueues signed `ATTEMPT_RESERVED` and every external PG action executes only after validating the canonical authenticated post-commit ACK token or exact original-CAS-bound `ACK_RECOVERY` within ≤60 s total enqueue→ACK residence, while breaker OPEN/CLOSED state changes atomically enqueue their signed transitions. Arbitrary 2xx and old/wrong/cross-lane/epoch/tuple/signer/recovery ACKs are hard RED/fail-closed and admit zero socket/action or successor; the later T1-W6 tests own that pre-action claim. Re-arm follows T6-W12's final cutover/two suite passes and three complete fresh receipt-anchored 6/11/16-minute zero-active inventory scans; any missing/partial/stale/frozen/future/error/ambiguous scan is not idle and admits zero attempts. T1-W6 only binds the exact immutable tuple and pre-registered lanes. `src/monitor_interlock.rs` challenge-verifies the signed attestation; every PG transaction holds both its coordinator permit and a shared transaction-scoped server advisory lock and validates the durable PG fence generation in that same transaction. A closer first blocks new permits, then obtains the exclusive fence lock, drains old shared transactions, atomically advances/commits the server fence/latch row, and only then publishes `CLOSING` and later `LATCHED`. An ambiguous fence/COMMIT response, partition or crash remains FENCING/503 and reconciles the exact transaction; it never retries a new action or claims LATCHED. Paused-after-checkout/during-query/after-final-client-check/at-COMMIT, lost-response, partition and crash/restart races are mandatory. Sensitivity/on-call health is excluded. Any tuple change keeps/returns PG disabled until the entire gate repeats | RED by absence; blocked on unresolved D12, completed T6-W12 and the isolated rearm-probe credential/direct-read token from O-CFINVENTORY; `tests/monitor_tuple_interlock.rs` is mandatory |
 | **A3.30 / T3-W17 + T3-W18** | one test+probe contract split into Wave-0 repo containment implementation and a separate live arming/probe | RED by absence; neither packet dispatched |
 | **A6.10 / T6-W15** | T6-W4 implements only the durable canary tick producer/outbox and repo test; T6-W15 owns the external detector plus deterministic and version-bound 3/3 stopped-canary proof; both halves of this principal `test+probe` item are mandatory | RED by absence; O-MONITORHOST capability selection and T6-W15 integration remain unresolved |
-| **A6.20 / T6-W15 + T6-W12** | one provider-neutral monitor contract split into an external base phase and a final provider/live cutover-and-continuous-running phase, both before PG re-arm. The base owns scheduler/state/delivery, canonical signed post-commit ingest ACK tokens, durable idempotent delivery outbox, missing-source detectors and incident recovery; each source lane permits at most one unacknowledged envelope and every action/SLO includes ≤60 s **total** producer+transport+monitor queue residence, never a fresh per-hop budget. T6-W12 owns provider/cost plus external C1–C5/AU6.17 detector schemas/fixtures and version-bound evidence. Before both suite passes it pre-registers T1-W6's future lanes and the inactive exact `canary-lifecycle`/`canary-synthetic` T6-W14 lanes, whose key/credential epochs are distinct, and commits them in the tuple; later consumers are bind-only. It deploys the candidate once, cuts over once after PASS, and then keeps the active final stack continuously running/polling. With PG disabled it runs the unchanged complete T6-W15 suite on the candidate before cutover and again on the active final seven-field `monitor_rearm_tuple` after cutover; post-cutover failure rolls back and leaves PG disabled, and only active-final PASS completes T6-W12. `src/rearm_attestation.ts` returns a nonce-bound signature over the effective tuple digest and fresh provider-poll/core-delivery health only, using signer id/epoch and trust/revocation state committed by `attestation_ack_signer_trust_revocation_digest`; wrong-valid, stale-epoch and revoked signer tests in `test/rearm-tuple-attestation.test.ts` are mandatory. A provider-side append-only ≥8-day page/ack/control/attestation journal seals start/end, full ordered ids, hash chain and immutable object receipts, and tests gap/rewrite/omission/mixed-version failures. Runtime stale/frozen provider watermarks are source failure; a stale exactly-next periodic observation receives a durable historical-no-state ACK so it cannot block newer outbox entries or clear an incident, while immutable transitions are ingested in order with their historical state effect; an expanded signal set or higher severity emits a deduplicated incident update even while ACKED. Any PG-affecting action is gated by an authenticated ACKed `ATTEMPT_RESERVED`; exact SLOs, recovery high-water and ≥330-second all-clear horizon remain normative only in the round-3 delta | RED by absence; both deployment phases plus T6-W12's two full-suite passes and attestation interlock are mandatory, with no partial green; O-MONITORHOST and the three-principal O-CFINVENTORY remain unresolved |
-| **A6.21 / T6-W13** | while fabric probes remain 0, prove the current metrics key works, the stale key fails, and the stale-key condition delivers and is acknowledged | RED by absence; immediate key/alert repair, with no durable-PG or no-wake predecessor |
-| **A6.22 / T6-W14** | later isolated non-waking canary sampler/target and re-enable proof; T6-W14 is bind-only to T6-W12's inactive pre-registered exact `canary-lifecycle` and `canary-synthetic` source/key/epoch lanes and cannot create, rotate or substitute them. The outer Worker/DO only authors lifecycle state, while each lane is capacity 1, validates, persists and exact-retries one monitor envelope, and blocks successor enqueue/action until the canonical authenticated ACK token/typed terminal within ≤60 s total residence. The AU6.17 synthetic driver is default-off behind `SYNTHETIC_SLOT_PROBES_ENABLED`: only the exact string `1` enables it; absent, empty, `0`, case variants, whitespace and every other value remain off. `deploy/cloudflare-canary/test/synthetic-slot-default-off.test.ts` proves the complete matrix. A6.22's zero-use trial keeps it off and T6-W10 alone later arms it | RED by absence; strictly after T1-W6 durable recovery and independent monitoring |
+| **A6.20 / T6-W15 + T6-W12** | one provider-neutral monitor contract split into an external base phase and a final provider/live cutover-and-continuous-running phase, both before PG re-arm. The base owns scheduler/state/delivery, canonical signed post-commit ingest ACK, presealed atomic `signer_rotation_manifest`, manifest-bound original-CAS `ACK_RECOVERY` issuance, and the authenticated human `page_ack_token` bound to action/payload/tuple/expiry, plus durable idempotent delivery outbox, missing-source detectors and incident recovery; its `ack-token.test.ts` is monitor-only. Producer pre-action negatives remain owned by later T6-W4/T3-W16/T1-W6/T6-W14 paths and cannot be pre-claimed. Each source lane permits at most one unacknowledged envelope and every action/SLO includes ≤60 s total residence. T6-W12 owns provider/cost plus C1–C5/AU6.17 schemas/fixtures. Before both suite passes it pre-registers stable T1-W6 and `canary-lifecycle`/`canary-synthetic` identities/key epochs and permanent ingress authorization in the tuple. T6-W14 remains deterministic default-off with no activation tuple or activation/re-enable/probe credit; later T6-W10 seals/deploys the distinct byte-identical `canary_activation_tuple` for A6.22's phase-1 live collection and the subsequent AU6.17 phase, and activation changes no monitor tuple/auth/route registry. Both passes prove default-off producers emit zero. It deploys/cuts over once and runs the unchanged full base suite before and after cutover while PG is exact-disabled. `src/rearm_attestation.ts` binds the effective tuple and fresh provider-poll/core-delivery health. Every external page/ACK/control/attestation/ingest-ACK first writes a verified WORM `WRITE_AHEAD_INTENT`; result receipt and cursor/state CAS reconcile atomically, unresolved intents block seal, and exhaustive provider reconciliation plus independently witnessed signed previous-root checkpoints reject extra/missing records, forks, rollback, equivocation and split views across crash boundaries. All freshness/SLOs use trusted ingest-commit, provider watermark and immutable receipt checkpoints selected by O-MONITORHOST, never local wall clocks. Runtime stale/frozen/clock-anomalous feeds are source failure; historical-no-state and incident-update semantics remain. Any PG action is gated by authenticated ACKed `ATTEMPT_RESERVED`; exact SLOs, recovery high-water and ≥330-second all-clear horizon remain normative only in the round-3 delta | RED by absence; both deployment phases plus T6-W12's two full-suite passes and attestation interlock are mandatory, with no partial green; O-MONITORHOST and the three-principal O-CFINVENTORY remain unresolved |
+| **A6.21 / T6-W13** | while fabric probes remain exact `0`, prove the current metrics key works, the stale key fails, and the stale-key condition delivers the canonical authenticated human `page_ack_token`; the scheduled tick/config-state signal stays live independently of fabric probes, and missing/malformed probe config emits authenticated `CANARY_CONFIG_INVALID` while monitor credential/path failure is externally fail-visible rather than silent. Every probe records `SKIPPED|FAILED|UNKNOWN|SERVED` plus reason/version/monitor tuple/trusted `observed_at` | RED by absence; immediate key/alert repair, with no durable-PG or no-wake predecessor |
+| **A6.22 / T6-W14** | one T6-W14-owned `test+probe` item completed by two mandatory contributions without changing ownership: T6-W14 owns implementation plus the deterministic default-off phase; T6-W10 owns only the evidence-only live collection. T6-W14 is bind-only to T6-W12's stable pre-registered exact `canary-lifecycle` and `canary-synthetic` source/key/epoch/authorization lanes and cannot create, rotate or substitute them. With both `FABRIC_PROBES_ENABLED=0` and `SYNTHETIC_SLOT_PROBES_ENABLED=0`, T6-W14 creates no `canary_activation_tuple`, makes zero outer-route requests, lifecycle envelopes, container fetches, starts, active minutes or attributable usage, and earns no activation, re-enable or probe credit. The outer Worker/DO only authors lifecycle state, while each lane is capacity 1, validates, persists and exact-retries one monitor envelope, and T6-W14's deterministic `lifecycle-synthetic-ack.test.ts` proves no successor/action before a canonical authenticated ACK/manifest-bound `ACK_RECOVERY`/typed terminal within ≤60 s. The AU6.17 synthetic driver is implemented but default-off behind `SYNTHETIC_SLOT_PROBES_ENABLED`; malformed config emits authenticated `CANARY_CONFIG_INVALID` and cannot disable scheduled tick/spawn monitoring. Every probe outcome is `SKIPPED|FAILED|UNKNOWN|SERVED` with reason/version/monitor tuple/trusted `observed_at`; ambiguity is never success. `synthetic-slot-default-off.test.ts` proves the matrix. T6-W10 then acts only as live collector: phase 1 seals/deploys the byte-identical `canary_activation_tuple` with `FABRIC_PROBES_ENABLED=1` and `SYNTHETIC_SLOT_PROBES_ENABLED=0`, runs exactly 12 lifecycle ticks, 12 outer-route requests and 12 durably acknowledged lifecycle envelopes with zero container fetches, starts, active minutes or attributable usage, and seals A6.22's no-wake live artifact. Only after that immutable seal, phase 2 seals the next tuple with `SYNTHETIC_SLOT_PROBES_ENABLED=1` and collects 20/20 causally tagged AU6.17 acquire→spawn→release transactions; those starts are excluded from and cannot amend or rerun A6.22's artifact. T6-W10 implements no driver, detector, credential or monitor route and does not double-own A6.22. Canary, verifier and rearm use byte-identical tuple bytes/digest in each phase; drift disables emission and reproves without any registry mutation | RED by absence; strictly after T1-W6 durable recovery and independent monitoring, with both the T6-W14 deterministic contribution and T6-W10 phase-1 live collector mandatory before A6.22 can complete |
 
 **A6.10 is already a principal row; T6-W15 is its owner and raises the principal WP count to 48
 without changing the 89 owned items.** The other new `A` ids remain reserved proposals outside the
@@ -685,17 +862,21 @@ principal WP, so the canonical combined DAG has 48 principal + 9 staged-principa
 vertices. AU remains separately staged. Nothing in this table promotes an AU item, freezes a
 proposed id, grants partial green, or authorizes dispatch.
 
-T6-W15's three named base tests are mandatory, not illustrative: `outbox-transition-head.test.ts`
+T6-W15's four named base tests are mandatory, not illustrative: `outbox-transition-head.test.ts`
 proves a late immutable transition is ingested in order with its historical effect;
 `outbox-periodic-head.test.ts` proves an exactly-next stale periodic head terminals/resamples only
 after the monitor's CAS commit; and `outbox-quarantine.test.ts` proves invalid, revoked, divergent
-and future input fails closed without advancing the lane. They pass at the initial base; while PG
+and future input fails closed without advancing the lane. Monitor-only `ack-token.test.ts` proves
+post-CAS token issuance, byte-stable idempotency, presealed signer-manifest rotation and
+manifest-bound current-trust `ACK_RECOVERY` anchored to the persisted original CAS/ACK; it
+deliberately does not prove any later producer action gate. They pass at the initial base; while PG
 is disabled T6-W12 must rerun the unchanged complete suite on the candidate before cutover and on the
 active final `monitor_rearm_tuple` after cutover.
 
 **Shared producer capacity/latency contract.** T3-W16, T6-W4, T1-W6 and T6-W14 each have capacity
 exactly 1 per `(producer, source, credential)` lane and ≤60 s **total** residence from durable
-enqueue to the external monitor's canonical authenticated post-commit ACK token or typed terminal
+enqueue to the external monitor's canonical authenticated post-commit ACK token, exact
+original-CAS- and signer-manifest-bound `ACK_RECOVERY`, or typed terminal
 result. More than 60 s is hard RED
 and fail-closed. No producer may enqueue or execute the next immutable action or periodic successor
 before terminal; locally dropping, resampling or reclocking the head, or resetting the lane by
@@ -707,19 +888,27 @@ immutable action. T6-W4 proves the same contract in deterministic tests while th
 default-off. T1-W6 applies it to every `ATTEMPT_RESERVED`/breaker action. T6-W14 applies it separately
 to the pre-registered `canary-lifecycle` and `canary-synthetic` lanes and blocks successor
 enqueue/action until terminal; it is bind-only and the tick lane belongs exclusively to T6-W4. All
-four producers reject arbitrary 2xx and old/wrong/cross-lane/epoch/tuple/signer tokens against the
-exact canonical ACK fields before advancing the head or taking action.
+four producers reject arbitrary 2xx and old/wrong/cross-lane/epoch/tuple/signer tokens, plus
+recovery proofs with a missing/divergent original CAS/ACK, wrong revocation record/current tuple or
+untrusted recovery signer, before advancing the head or taking action. Those pre-action claims are
+proven only in each later producer path named in the authenticated-ACK contract; the earlier
+monitor suite cannot substitute for them.
 
 **Staged external obstacle — O-MONITORHOST.** This is one pre-implementation capability gate, not a
 proof-before-code cycle and not a pair of pseudo-tokens. The owner-approved artifact selects the
 named non-Cloudflare runtime/scheduler, durable store and delivery transport; independent accounts/
 domains/permissions; and documented support for atomic incident+outbox state, idempotency and the
-required SLO. It also names and qualifies a sensitivity scheduler and external receipt verifier
+required SLO. It also names the trusted monotonic time/checkpoint authority used to anchor monitor
+commit, provider watermark and immutable receipt freshness; mutable HTTP dates or an application
+clock cannot satisfy it. It names and qualifies a sensitivity scheduler and external receipt verifier
 distinct from the monitor application and from each other: separate accounts, independently
 revocable credentials, configuration and state; scheduler-only control/cadence authority; verifier
 delivery-read-only permission; support for the ≤6 h control cadence and authenticated timestamped
-receipt lookup; an append-only provider-side journal with ≥8-day retention, full ordered record ids,
-hash-chain sealing and immutable object receipts; and failure-domain/config independence from the
+receipt lookup; an append-only provider-side journal with ≥8-day retention, verified write-ahead
+intent before external effects, atomic result/receipt+cursor reconciliation, full ordered record ids,
+hash-chain sealing, provider-signed monotonically linked previous-root checkpoints, independent
+witnessing, immutable object receipts and exhaustive export/reconciliation APIs capable of proving
+no missing/extra record, unresolved intent, fork, rollback, equivocation or split view; and failure-domain/config independence from the
 application being graded. The
 artifact proves host/account/permission/cadence/receipt **capability only** and requires no
 application code, deployment, injection result or application-behavior proof. After code, T6-W15's
@@ -740,6 +929,38 @@ provider's version-bound exact-handle linearizability/no-future-materialization 
 cancellation needs both capabilities, while monitoring and inactivity scans never inherit
 destructive/cancellation authority. Exact routing remains canonical-DAG-only.
 
+**Staged evidence obstacle — O-CFRATE.** This owner-of-record arming token has no WP predecessor and
+is not application implementation, a rate proxy or permission to mutate Cloudflare. It is satisfied
+only when the owner signs exactly
+`docs/plan/evidence/O-CFRATE-cloudflare-containers-rate.json` for one named Cloudflare Containers
+invoice line **and** one complete, version-bound observed cost/failure-rate budget interval, encoded
+exactly as
+`O_CFRATE_EVIDENCE=(schema_version,obstacle_id,status,accountable_owner,accountable_role,attested_at,review_input_sha,deployed_image_digest,provider,provider_api_or_export_version,account_id,plan,billing_period_start,billing_period_end,threshold_policy_digest,threshold_declared_at,threshold_receipt_id,threshold_receipt_sha256,budget_interval_start,budget_interval_end,source,source_locator,receipt_id,receipt_sha256,activity_manifest_sha256,complete_provider_cursor,invoice_line_id,invoice_line_description,quantity,unit,currency,line_amount,effective_rate,effective_rate_formula,rate_effective_from,rate_effective_to,attempt_count,failed_attempt_count,retry_count,idle_wakeup_count,served_count,failure_rate_numerator_formula,failure_rate_denominator_formula,failure_rate_numerator,failure_rate_denominator,observed_failure_rate,failure_rate_threshold,billable_vcpu_hours,billable_gib_hours,observed_cost,cost_budget,cost_per_served_attempt,cost_per_served_attempt_threshold,owner_signature)`.
+The rate half binds account/period, currency, exact provider SKU/unit, billed quantity and amount,
+per-unit rate, immutable provider receipt and owner signature. The budget interval is contiguous and
+uses the complete provider cursor, activity manifest and matching receipt. Its predeclared formulas
+are exactly `failure_rate_numerator = failed_attempt_count + retry_count + idle_wakeup_count` and
+`failure_rate_denominator = attempt_count + retry_count + idle_wakeup_count`; denominator zero is
+RED. The manifest proves `attempt_count = served_count + failed_attempt_count`, covers every attempt,
+failure, retry, idle wakeup and served request exactly once, and derives `observed_failure_rate` from
+those fields. `failure_rate_threshold`, `cost_budget` and
+`cost_per_served_attempt_threshold` are owner-approved before the interval begins and cannot be
+retuned from its result. `threshold_declared_at < budget_interval_start`; the immutable
+`threshold_policy_digest` binds all three values and formulas, and the independently witnessed
+`threshold_receipt_id` plus `threshold_receipt_sha256` bind that declaration before observation.
+The half-open `[budget_interval_start,budget_interval_end)` interval uses a provider-issued invoice
+or usage export as its source. The same interval derives `observed_cost` from its provider billable
+vCPU/GiB quantities and effective rates, and
+`cost_per_served_attempt = observed_cost / served_count`; served count zero is RED. PASS requires
+the observed failure rate, observed cost and cost per served attempt each to remain at or below its
+predeclared threshold. A gap, partial cursor, unsealed or non-exhaustive manifest, unresolved class,
+missing/mismatched receipt, zero denominator/served count or unverifiable formula leaves O-CFRATE
+unresolved.
+A public list price, calculator, proxy-provider price, dashboard estimate or unsigned transcription
+does not resolve it. Only T7-W5 consumes this token, reads but does not rewrite its artifact, and still
+waits independently for O1, T3-W7, T1-W6 and T7-W4b before deriving or publishing AU4.19 economics.
+O-CFRATE does not authorize dispatch or green any pricing claim.
+
 ---
 
 ## 6. Owner arming (config only)
@@ -758,6 +979,7 @@ stated this dependency for O-BILLING alone.
 | **O-FLEETBUSY** | bind the read-only `FLEET_BUSY_READ_KEY` pair used to refuse a busy-fleet force-deploy (`hist-13` — rev-2 had no O-id for it) | T3-W18 live containment proven; hard predecessor of the first T2-W2b force-deploy |
 | **O-MINTKEY** · **O-CHECKHOST** · **O-CFTOKEN** · **O-ROTATE** | disarm-confirm · check-host flip · delete-scoped token (D5) · rotate OpenRouter (D7) | — |
 | **O-PUBLISH** | npm + PyPI tokens | **D3 · T5-W2** repo half; bind/publish then T5-W6 proves the artifacts |
+| **O-CFRATE** | supply and verify `docs/plan/evidence/O-CFRATE-cloudflare-containers-rate.json` with the provider-issued rate plus the complete version-bound observed cost/failure-rate interval, formulas, thresholds, exhaustive attempt/failure/retry/idle-wakeup/served counts, cursor/manifest and immutable receipt; no partial/proxy/default evidence and no provider mutation | T7-W5 evidence/pricing derivation |
 
 ## 7. Cross-repo relays (8 findings)
 
@@ -807,7 +1029,7 @@ suite, satisfy the done-gate, or authorize dispatch before two quiet review roun
 `actionlint-check.py` pins actionlint 1.7.12, ignores repository suppression config for its
 authoritative run and compares the exact `(workflow, private-runner-label)` diagnostic multiset;
 an extra duplicate of an otherwise allowed label is red.
-`gates-selftest.py` recreates 66 meaningful structural corruption fixtures found across the cold reviews and
+`gates-selftest.py` recreates 131 meaningful structural corruption fixtures found across the cold reviews and
 requires every corrupted fixture to block. `.github/workflows/plan-integrity.yml` runs all five commands whenever
 the plan, triage, finding ids, gate code or workflow changes.
 
@@ -868,23 +1090,32 @@ already complete WP such as T0-W1.
    feeds T6-W12's external C1–C5 implementation before T6-W6's live outage proof. T6-W15's initial
    external-monitor base precedes T6-W12's one-time final monitor/provider candidate deployment and
    cutover; the active final deployment then remains continuously running/polling. With PG
-   disabled, T6-W12 first pre-registers the future T1-W6 lanes and the inactive exact
-   `canary-lifecycle`/`canary-synthetic` lanes with distinct key/credential epochs in the tuple, then
+   disabled, T6-W12 first pre-registers the future T1-W6 lanes and the stable exact
+   `canary-lifecycle`/`canary-synthetic` lanes with distinct key/credential epochs and permanent
+   ingress authorization in the tuple, then
    runs the unchanged complete T6-W15 suite on the pre-cutover candidate and again
    on the post-cutover active final `monitor_rearm_tuple`. Failure after cutover rolls back and PG remains disabled;
-   only active-final PASS completes T6-W12. Only then may
-   staged T1-W6 bind the exact `monitor_rearm_tuple` and attempt durable-PG re-arm. Any later
+   only active-final PASS completes T6-W12. Only then may staged T1-W6 bind the exact
+   `monitor_rearm_tuple`, prove three complete fresh receipt-anchored idle scans and attempt durable-PG
+   re-arm by explicitly deploying exact `FABRIC_PG_DISABLED=0`; removing, omitting or malforming the
+   flag remains disabled. Any later
    `monitor_rearm_tuple` change keeps/returns PG disabled and repeats the full T6-W12
    candidate/cutover/active-final reproof and `monitor_rearm_tuple`-bound T1-W6 recovery proof.
    After rearm, every readiness, mutation and socket/pool use remains gated on the challenge-fresh
    signed T6-W12 attestation, its bounded provider-poll/core-delivery health and a shared
-   linearizable interlock-epoch permit held through commit/rollback. Any proof failure or planned
-   tuple change blocks new permits, cancels/rolls back or drains all prior-epoch work and closes all
-   PG connectivity before `LATCHED`; it remains 503 until full reproof, rebinding and manual reset.
+   linearizable interlock-epoch permit plus transaction-scoped shared server advisory lock and same-
+   transaction durable fence-generation validation. Any proof failure or planned tuple change first
+   blocks new permits, then the exclusive server lock drains old transactions and commits the fence/
+   latch row before `CLOSING`; ambiguous/partitioned outcomes remain FENCING/503 until the exact
+   commit reconciles. Only then are remaining work/pools drained before `LATCHED`; it remains 503
+   until full reproof, rebinding and manual reset.
    T6-W14 follows successful T1-W6, binds only its exact pre-registered lanes, and delivers the
-   distinct AU6.17 synthetic driver default-off so that only exact
-   `SYNTHETIC_SLOT_PROBES_ENABLED=1` enables it,
-   and precedes T6-W10's external grading proof. T1-W6 live success must occur before any other
+   distinct lifecycle sampler plus AU6.17 synthetic driver with both activation flags exact `0`,
+   zero outer-route requests or lifecycle envelopes and no activation/re-enable/probe credit.
+   T6-W10 then contributes A6.22's evidence-only 12-tick phase-1 collector under fabric exact `1`/
+   synthetic exact `0`, followed only after seal by the 20/20 AU6.17 phase under synthetic exact
+   `1`, without changing tuple authority, auth/source or route registry or double-owning A6.22.
+   T1-W6 live success must occur before any other
    durability-dependent live proof can earn green credit.
    The same canonical graph, without a duplicate edge list here, enforces D7 before D3, T5-W1's
    onboarding deliverable before the stranger proof, R2 before billing emitter implementation, and
@@ -897,11 +1128,12 @@ already complete WP such as T0-W1.
 1. **The baseline capture has not been taken.** Until `docs/plan/acceptance-baseline.json` exists,
    red→green is unproven; the principal 94-row suite remains an acceptance definition, not a green
    claim.
-2. **Round 11 is NOT QUIET** (2026-09-01): 5/8 reviewers reported blockers and 3/8 reported QUIET on
-   exact input `fd9b226d3bcda055092b5e34f0cf9adc41a802bd`. The quiet count remains zero. Its findings are
+2. **Round 12 is NOT QUIET** (2026-09-01): 7/8 reviewers reported blockers and 1/8 reported QUIET on
+   exact input `3d1ed13bb1d53af6ce27385736f19d54bb5f90cc`. The quiet count remains zero. Its findings are
    recorded in the
-   [`round-11 ledger`](2026-09-01-round11-cold-review-ledger.md) and staged in this later repair
+   [`round-12 ledger`](2026-09-01-round12-cold-review-ledger.md) and staged in this later repair
    tree; none is promoted or green. The
+   [`round-11 ledger`](2026-09-01-round11-cold-review-ledger.md),
    [`round-10 ledger`](2026-09-01-round10-cold-review-ledger.md),
    [`round-9 ledger`](2026-09-01-round9-cold-review-ledger.md),
    [`round-8 ledger`](2026-09-01-round8-cold-review-ledger.md),
@@ -919,7 +1151,7 @@ already complete WP such as T0-W1.
    disjointness, and staged AU structural ownership — not semantic readiness, tamper-proof
    evidence/readiness, production readiness, quietness, freeze eligibility, or dispatch authority.
 
-### 11.1 Current blockers after round 11 — 2026-09-01 (NOT QUIET)
+### 11.1 Historical blockers after round 11 — 2026-09-01 (NOT QUIET)
 
 Round 11 re-checked the combined plan, staged delta, AU intake, gates and DAG at exact immutable input
 `fd9b226d3bcda055092b5e34f0cf9adc41a802bd` against the contained live state. Five blocker reports
@@ -929,10 +1161,14 @@ disposition; none of its acceptance or decision repairs is promoted, resolved, d
 greened here:
 
 - **The final tuple omitted its own post-rearm producers.** Before either mandatory T6-W12 pass, the
-  repaired contract pre-registers inactive exact source ids `canary-lifecycle` and
-  `canary-synthetic` with distinct key/credential epochs, and commits both inactive registrations in
-  the seven-field tuple. T6-W14 is bind-only after T1-W6; it cannot manufacture a source, key epoch
-  or parallel lane after rearm.
+  repaired contract pre-registers stable exact source ids `canary-lifecycle` and
+  `canary-synthetic` with distinct key/credential epochs and permanent ingress authorization in the
+  seven-field tuple. Both default-off producer deployments emit zero. T6-W14 is bind-only after
+  T1-W6 and its deterministic phase keeps both flags `0`, performs zero outer-route requests or
+  lifecycle envelopes and earns no activation/re-enable/probe credit. T6-W10 later seals/deploys
+  the phase-1 fabric-`1`/synthetic-`0` activation tuple to collect A6.22's 12-tick live artifact,
+  then the phase-2 synthetic-`1` tuple for AU6.17, without manufacturing or mutating a source, key,
+  registry, route or parallel lane after rearm or taking ownership of A6.22.
 - **A bare HTTP success could counterfeit durable ingest.** The repaired contract defines the exact
   signed ACK-token fields and binds the accepted signer id/epoch, trust anchors and revocation state
   into `attestation_ack_signer_trust_revocation_digest`. Every producer rejects arbitrary 2xx and
@@ -943,10 +1179,10 @@ greened here:
   runtime/config. T6-W12's provider-side append-only ≥8-day journal seals start/end, the complete
   ordered ids, hash chain and object receipts. Gap/rewrite/omission/mixed-version mutations are RED,
   and T6-W10 evidence references only the provider-issued root.
-- **The latch had a checkout-to-commit race.** A shared linearizable interlock epoch now issues
-  permits held through commit/rollback. `CLOSING` blocks new permits, cancels/rolls back or drains
-  all prior-epoch work and closes every socket before `LATCHED`; paused-after-checkout, during-query
-  and precommit multi-instance tests prove the boundary.
+- **The latch had a checkout-to-commit race.** Round 11 added a shared interlock permit held through
+  commit/rollback, but Round 12 correctly found that a client permit alone could not fence server
+  `COMMIT`. The current repair adds transaction-scoped shared server locks and same-transaction
+  generation validation; the exclusive fence commit drains old transactions before `CLOSING`.
 - **Default-off and selftest execution were not exact.** The synthetic canary is on only for exact
   `SYNTHETIC_SLOT_PROBES_ENABLED=1`; absent or any other value is off, proven at
   `deploy/cloudflare-canary/test/synthetic-slot-default-off.test.ts`.
@@ -964,7 +1200,10 @@ greened here:
 - **The canary no-wake state is containment, not monitoring closure.** Fabric probes remain disabled
   because their five-minute cadence matched `sleepAfter=5m`; spawn metrics currently return 401.
   Staged A6.21 owns the immediate current/stale-key matrix plus delivered/acknowledged stale-key
-  alert while probes stay 0; staged A6.22 separately owns the later isolated non-waking re-enable.
+  alert while probes stay 0. Staged A6.22 remains owned once by T6-W14 and cannot complete from its
+  implementation/default-off deterministic contribution alone: T6-W10 must collect the later
+  phase-1 12-tick no-wake live artifact under the canonical fabric-`1`/synthetic-`0` activation
+  tuple, then keep the phase-2 AU6.17 transactions outside that sealed artifact.
   A6.10 additionally stays red until T6-W15 watches T6-W4 canary ticks outside Cloudflare; T6-W4
   now owns the missing durable ordered outbox/config/crash tests, but remains only the producer/test
   half of a `test+probe` item.
@@ -985,19 +1224,24 @@ greened here:
   T6-W15 base → T6-W12 one-time final candidate deployment/cutover, continuous running/polling and
   unchanged complete T6-W15-suite passes before and after cutover → T1-W6 exact
   `monitor_rearm_tuple` binding/recovery, with T6-W14
-  only afterward. T6-W12 pre-registers the future T1-W6 and inactive exact T6-W14 lanes in the tuple
-  before both passes; T1-W6 and T6-W14 only bind them. Post-cutover failure rolls back and keeps PG
+  only afterward. T6-W12 pre-registers the future T1-W6 and stable exact T6-W14 lanes/authorization
+  in the tuple before both passes; T1-W6 and T6-W14 only bind them. T6-W14 has no activation tuple
+  or activation/re-enable/probe credit while both flags remain `0`; T6-W10 alone seals/deploys the
+  separate phase-1 and phase-2 armed activation tuples, whose bytes/digest are shared by canary,
+  verifier and rearm evidence. Its phase-1 evidence contribution completes the T6-W14-owned A6.22
+  item without transferring or duplicating ownership.
+  Post-cutover failure rolls back and keeps PG
   disabled. T1-W6 atomically reserves each PG action as `ATTEMPT_RESERVED` and executes it only after
   validating the exact signed post-commit ACK token; write,
   acknowledgement or reconciliation failure admits zero later attempts. Any `monitor_rearm_tuple` drift
   keeps/returns PG disabled and restarts the barrier.
 - **Post-rearm tuple drift had no falsifiable enforcement.** T6-W12 now owns the nonce-bound signed
   current-tuple/provider-poll/core-delivery attestation, and T1-W6 verifies it before every readiness, mutation and
-  socket/pool use, acquiring a shared epoch permit held through commit. Mismatch,
-  missing/stale/replayed proof, bad signature or signer-trust failure atomically blocks new permits;
-  prior-epoch work cancels/rolls back or drains and every socket closes before `LATCHED`. Each of the
-  seven tuple fields, each signer failure and paused checkout/query/precommit multi-instance race is
-  tested 3/3; planned drift latches first, and only complete T6-W12
+  socket/pool use, acquiring a shared epoch permit plus transaction-scoped server fence lock and
+  validating the durable generation in that transaction. Mismatch, missing/stale/replayed proof,
+  bad signature or signer-trust failure blocks new permits; the exclusive server fence drains old
+  transactions and commits before `CLOSING`, while ambiguity stays FENCING/503. Each tuple/signature,
+  checkout/query/precommit/COMMIT, partition and crash boundary is tested; only complete T6-W12
   reproof, T1-W6 rebinding and manual reset can clear it.
 - **Per-hop queue budgets could conceal an SLO breach.** Every source lane now permits at most one
   unacknowledged envelope, and the ≤60-second bound is total queue residence across producer,
@@ -1015,11 +1259,14 @@ greened here:
   attested core-delivery-health failure does.
 - **C1–C5 and AU6.17 lacked an external implementation owner.** T6-W12 now stages the authenticated
   non-Cloudflare C1–C5 rules/ingest as a final pre-rearm deployment; T6-W14, only after T1-W6, stages
-  AU6.17 by binding only the exact inactive independently keyed synthetic lane T6-W12 already sealed;
-  its driver enables only for exact flag value `1` and otherwise stays off. T6-W6/T6-W10 own the
-  corresponding live proofs. A6.22 keeps that driver off throughout
-  its no-wake/zero-use trial; only T6-W10 later arms it for 20/20. Canary-local delivery or
-  evidence-only scope cannot satisfy A6.18 or AU6.17.
+  AU6.17 by binding only the exact stable independently keyed and permanently authorized synthetic
+  lane T6-W12 already sealed; its driver remains off while T6-W14 proves both flags exact `0` and
+  zero outer-route requests/envelopes. T6-W10 first seals the fabric-`1`/synthetic-`0` tuple and
+  collects the 12-tick A6.22 live artifact, then seals synthetic exact `1` and collects the 20/20
+  AU6.17 transactions; phase-2 starts cannot contaminate or rerun the sealed phase-1 artifact. Drift
+  disables/reproves and never changes the registry. T6-W10 implements no driver, detector or
+  credential and does not own A6.22. Canary-local delivery or evidence-only implementation scope
+  cannot satisfy A6.18 or AU6.17.
 - **The re-drive amplifier remains open.** `redriveOrphanedJobs` can release a queued job's claim
   after its grace period while slot acquisition remains idempotent by `jobId`; a retry can therefore
   create another box without another slot. The evidence calls for an explicit intake/re-drive kill
@@ -1047,6 +1294,67 @@ greened here:
   emitter, D7-before-D3, onboarding-before-stranger and complete AU3.26 pinned-image route, plus the
   external C1–C5/AU6.17 implementation/proof order. This prose does not duplicate or authorize its
   exact edges.
+
+### 11.2 Current blockers after round 12 — 2026-09-01 (NOT QUIET)
+
+Round 12 re-checked exact clean input
+`3d1ed13bb1d53af6ce27385736f19d54bb5f90cc`. Seven blocker reports and one QUIET report leave the
+quiet count at zero. The full disposition is in the
+[Round-12 ledger](2026-09-01-round12-cold-review-ledger.md); this later repair tree changes normative
+bytes and cannot inherit the one signoff, freeze, dispatch, promotion or green credit.
+
+- **A client permit could not fence a server `COMMIT`.** T1-W6 now requires a shared
+  transaction-scoped server advisory lock and same-transaction durable generation check. The closer
+  blocks new permits, obtains the exclusive fence lock, drains old transactions and commits the
+  fence/latch row before publishing `CLOSING`; ambiguous COMMIT, partition and crash remain
+  FENCING/503 until the exact transaction reconciles.
+- **A provider-side click could impersonate a human page ACK.** The exact signed 15-field
+  `page_ack_token` binds incident/page/delivery/destination, current on-call identity/schedule,
+  action, payload digest, current monitor tuple, acknowledgement/expiry and signer epoch. Only a
+  currently authenticated, authorized human can suppress escalation; altered body/action/tuple,
+  cross-scope, bot, expired, revoked, off-rotation and replay cases are mandatory refusals.
+- **Append-only storage was not complete or non-equivocating.** Every external effect now has a
+  verified `WRITE_AHEAD_INTENT`; result receipt and cursor/state reconcile atomically. Exhaustive
+  provider export plus independently witnessed signed previous-root checkpoints reject unresolved
+  intents, omissions, extra records, fork, rollback, equivocation and split views through every
+  crash boundary.
+- **Freshness trusted application clocks.** Monitor commit, provider watermark/`as_of` and immutable
+  receipt times now share the trusted monotonic checkpoint capability selected by O-MONITORHOST.
+  Rollback/jump/freeze/skew, future/regressed watermark and delayed/reordered/mismatched receipt
+  mutants fail closed and cannot advance any ACK, deadline, recovery, idle proof or window.
+- **Canary activation contradicted tuple immutability.** T6-W12 pre-registers stable identities,
+  key epochs and permanent ingress authorization, while T6-W14's deterministic contribution keeps
+  both flags `0`, emits zero outer-route/lifecycle traffic and has no activation tuple or
+  activation/re-enable/probe credit. T6-W10 alone seals/deploys first the canonical
+  fabric-`1`/synthetic-`0` `canary_activation_tuple` for A6.22's 12-tick live collection and then the
+  synthetic-`1` tuple for 20/20 AU6.17. Canary, verifier and rearm decision consume byte-identical
+  bytes/digest for each phase, phase-2 starts cannot alter the sealed A6.22 artifact, and any
+  runtime/config/key/flag drift disables and reproves without registry mutation. T6-W10's collector
+  contribution does not transfer A6.22 ownership from T6-W14.
+- **Monitor ACK tests pre-claimed later producer behavior.** T6-W15 tests only monitor post-CAS
+  issuance/idempotency. T6-W4, T3-W16, T1-W6 and T6-W14 each own their named later pre-action test;
+  no earlier candidate fixture can claim that absent producer implementation.
+- **Signer rotation could strand a committed head.** A signed chained `signer_rotation_manifest`
+  preseals active/next/revoked signer epochs, overlap, recovery custody and atomic promotion. The
+  exact signed 19-field `ACK_RECOVERY` additionally binds that manifest digest to the persisted
+  original CAS/ACK, revocation record, old/current tuple and current trusted recovery signer. It
+  closes the same head with no re-ingest, time reset or second effect; restart, loss-of-primary,
+  rollback and ambiguous/divergent evidence remain blocked.
+- **Fail-closed controls could fail silently.** PG enables only on exact
+  `FABRIC_PG_DISABLED=0`; any other value remains disabled. Idle requires three complete fresh
+  receipt-anchored zero scans. Canary invalid/missing flags perform zero fabric/synthetic fetches but
+  emit authenticated `CANARY_CONFIG_INVALID`, while every probe reports
+  `SKIPPED|FAILED|UNKNOWN|SERVED` with reason/version/monitor tuple/trusted `observed_at`, exact-`0`
+  containment still emits tick/config state and
+  the external missing-signal monitor remains independent.
+- **O-CFRATE was named without its obstacle contract.** Its sole owner-derived, owner-signed artifact is now
+  `docs/plan/evidence/O-CFRATE-cloudflare-containers-rate.json`, with exact rate provenance plus a
+  contiguous version-bound cost/failure-rate budget: complete cursor/manifest/receipt, exhaustive
+  attempt/failure/retry/idle-wakeup/served counts, fixed formulas and predeclared failure-rate,
+  total-cost and cost-per-served thresholds. Missing or partial accounting blocks T7-W5 without
+  authorizing provider mutation.
+
+These repairs preserve the principal/AU topology and canonical-DAG-only scheduling doctrine.
 
 ---
 
@@ -1180,6 +1488,17 @@ race; permissive canary arming; and an unproven all-selftests workflow. Repairs 
 later tree and are normative; none advances the quiet count or authorizes promotion, freeze or
 dispatch: **NOT FROZEN · QUIET COUNT 0 · NO DISPATCH · NO AU PROMOTION**.
 
+**Cold review — round 12 (2026-09-01 — NOT QUIET).** Seven of eight independent reviewers reported
+blockers in exact clean input `3d1ed13bb1d53af6ce27385736f19d54bb5f90cc`; one reviewer reported
+QUIET on those bytes. The
+[round-12 ledger](2026-09-01-round12-cold-review-ledger.md) records the blockers: a client-only
+PG permit that could not fence server commit; unauthenticated human/page ACK; non-atomic and
+equivocating journal evidence; untrusted freshness clocks; canary activation that changed sealed
+registry state; monitor tests that pre-claimed absent producer behavior; signer-rotation deadlock;
+fail-silent PG/idle/canary controls; and an incomplete O-CFRATE obstacle. Repairs are staged in this
+later tree and are normative; they preserve topology but do not inherit the one signoff or advance
+quietness: **NOT FROZEN · QUIET COUNT 0 · NO DISPATCH · NO AU PROMOTION**.
+
 ---
 
 ## 13. Invariants (L2 charter — HARD REJECT, never delegated, never relaxed)
@@ -1279,6 +1598,15 @@ the global gate in §8; the global gate is never restated per WP.
 ---
 
 ## 16. rev-6 draft change log and reviewed-input provenance
+
+### Round-12 immutable review input
+
+Round 12 reviewed exact clean commit `3d1ed13bb1d53af6ce27385736f19d54bb5f90cc`, not an unqualified
+moving `HEAD`: 7/8 reviewers reported blockers and 1/8 reported QUIET. Its full disposition is in
+the [Round-12 ledger](2026-09-01-round12-cold-review-ledger.md). The subsequent repair tree has
+different normative bytes and cannot borrow the `3d1ed13…` signoff. No future repair SHA is asserted
+inside this file; Git/CI must supply the next exact clean input externally. Status remains **NOT
+FROZEN · QUIET COUNT 0 · NO DISPATCH · NO AU PROMOTION**.
 
 ### Round-11 immutable review input
 

@@ -4,18 +4,118 @@
 session or model. It records the production containment, the planning state, and the
 safe next moves. It does not replace the historical handoff from 2026-08-31.
 
+## Compaction checkpoint — 2026-09-01T22:10:59Z
+
+This subsection is the current resumable state. Read it before continuing any older “next step”
+below.
+
+- **Live containment is still armed and was last verified read-only at
+  `2026-09-01T21:14:17Z`:** production `corelink-fabricd` version
+  `40bf22a4-6c48-467d-9844-b4fc33e7a3ee` has `FABRIC_PG_DISABLED=1`; production
+  `corelink-canary` version `852277c1-9778-459f-b1ff-9d56fbe7c32f` has
+  `FABRIC_PROBES_ENABLED=0`; fabricd inventory was **0 running / 3 inactive**. The same aggregate
+  snapshot saw 6 active runner instances and 2 other production-server instances; they were not
+  classified as leaks and were not changed. No deploy, rearm, teardown, delete or restart was
+  performed.
+- **Canary exact-1 hardening is delivered:** PR #530 merged to `main` as
+  `65540afe15fb65bfd431b631acfc971a7b0a2331`. The planning branch contains its equivalent code at
+  `13ce6122f73b2d24de9c6b2a265fc2359cfd9d25`. This is source delivery, not a production deploy.
+- **Round 11 repair is sealed:** clean DCO commit
+  `3d1ed13bb1d53af6ce27385736f19d54bb5f90cc` (`docs(plan): repair round-eleven review
+  blockers`, parent `13ce612…`) passed plan 247/247, WP 94/94 with 48 WPs/89 items, AU 30/33,
+  actionlint's exact 23-diagnostic baseline, Ruff/diff, both shell selftests, canary 51/51 and the
+  then-current negative suite 66/66.
+- **Round 12 formally reviewed that exact clean SHA and is NOT QUIET:** result **7/8 NOT QUIET,
+  1/8 QUIET, quiet count 0**. The review input SHA is immutable, but its ledger
+  `docs/plan/2026-09-01-round12-cold-review-ledger.md` is currently an untracked planning/repair
+  draft in this worktree and is not an immutable artifact until committed. The repair tree is
+  currently dirty and must not inherit any quiet credit.
+- The read-only containment observation at `2026-09-01T21:14:17Z` is recorded in this handoff and
+  the planning ledger, but no standalone version-bound artifact for that snapshot was supplied.
+  Treat it as an observation, not as a substitute for fresh version-bound evidence.
+- A newer read-only `versions view` observation at `2026-09-01T22:40:33Z` confirmed fabricd version
+  `40bf22a4-6c48-467d-9844-b4fc33e7a3ee` with `FABRIC_PG_DISABLED=1` and canary version
+  `852277c1-9778-459f-b1ff-9d56fbe7c32f` with `FABRIC_PROBES_ENABLED=0`. Detailed instances showed
+  fabricd **0 running / 3 inactive** and the runner fleet **0 running / 865 inactive / 18 stopped**;
+  the app summary's `LIVE INSTANCES` field was not used as state. No health/status/deploy/restart/
+  delete/rearm operation occurred. This remains a version-view observation recorded here without a
+  standalone version-bound artifact.
+- A later runner-inventory read at `2026-09-01T22:48:57Z` parsed the provider JSON as **883
+  inactive / zero live**. Those records are tombstones/history, not active resource use. It made no
+  application health/status call and performed no mutation.
+- **Round 12 planning repairs are present but not committed:** main plan, delta, canonical DAG,
+  union triage, `wp-check.py`, `au-check.py`, `gates-selftest.py`, changelog, this handoff and the
+  new Round-12 ledger are modified. The repairs cover the server-side PG transaction fence
+  `OPEN -> FENCING -> CLOSING -> LATCHED`; authenticated human `page_ack_token`; current-signer
+  `ACK_RECOVERY`; WORM write-ahead/provider reconciliation/non-equivocation; trusted-time
+  freshness; stable canary auth with producer-only activation; monitor-versus-producer ACK-test
+  ownership; exact O-CFRATE owner/artifact; exact-value containment flags; no-wake uncertainty;
+  fail-visible canary state; effective scope after exclusions; and non-disableable shell-selftest
+  workflow semantics.
+- **Canonical new schemas:** `page_ack_token=(page_ack_version,incident_id,page_id,delivery_id,
+  destination,on_call_identity,on_call_schedule_digest,action,payload_digest,
+  monitor_rearm_tuple_digest,acknowledged_at,expires_at,signer_key_id,signer_epoch,signature)`;
+  `ACK_RECOVERY=(recovery_version,event_id,producer_seq,payload_digest,source,service,application,
+  key_id,credential_epoch,original_monitor_rearm_tuple_digest,ingest_commit_id,
+  original_ack_digest,revocation_record_digest,signer_rotation_manifest_digest,
+  current_monitor_rearm_tuple_digest,recovery_signer_key_id,recovery_signer_epoch,issued_at,
+  signature)`. Recovery is separate from the
+  canonical ACK, is anchored to the persisted original CAS/ACK, and creates no second ingest or
+  action.
+- **Current planning validation:** plan-check, WP, AU, actionlint, Ruff format/check and
+  `git diff --check` all pass on the dirty repair tree. The repaired Round-12 negative selftest
+  blocks **131 meaningful mutations** (66 prior + 65 Round-12/repair-audit) and completed with the literal
+  result `plan gate self-test: PASS — baselines accepted and 131 corruptions blocked`. Do not
+  grant review credit until the result is sealed to a clean full SHA.
+- **Second executable containment PR:** isolated worktree
+  `.claude/worktrees/incident-containment-hardening`, branch `incident/containment-hardening`, DCO
+  commit `4c14fd3c2891f4329b82e6c5a120b1a4de270c07`, PR #531. It makes PG arm only for exact
+  `FABRIC_PG_DISABLED="0"`, refuses wake-inducing health probes on uncertain idle state, and makes
+  configured-surface/malformed-body/KV failures visible in the canary. Local verification is
+  canary **63/63**, fabricd **102/102**, both TypeScript checks and diff check. **Do not deploy.**
+  GitHub created two jobless `BuildFailed` runs (`33563015483` push and `33563020276` PR), both
+  `startup_failure`; raw actionlint still reports only the known runner-label diagnostics and the
+  PR changes no workflow file. The bounded likely cause is the HuGR-Labs Actions budget
+  `95f39884-fa30-4d81-84f5-dee0ba4b2a0c`: amount 47, `prevent_further_usage=true`, with August net
+  usage `47.00000000000002`; the organization update at `2026-09-01T21:45:09Z` matches the jobless
+  failure onset across multiple HuGR-Labs repos. The suites have zero jobs/check-runs and are not
+  rerunnable, so a new event is required only after the account owner resolves or explicitly raises
+  that financial bound.
+- Two additional DCO documentation commits are local and deliberately unpushed on the incident
+  branch: `51b9cb8390d6c4046c72fe68d0edd2040880db88` and `243e2e1` (branch ahead 2). They make the PG
+  rearm gate byte-exact, remove restart/delete/deploy-as-diagnosis guidance, mark health/status
+  routes wake-capable, and keep PgLedger-versus-exporter attribution unresolved. Until those commits
+  land, the copies of `deploy/cloudflare-fabricd/README.md`, `deploy/cloudflare-fabricd/wrangler.jsonc`,
+  `docs/runbook/arm-fabricd-pg-ledger-vcpu-ceiling.md` and `docs/runbook/incident-playbook.md` in this
+  planning worktree are superseded and MUST NOT be used as live instructions. Do not push solely to
+  retry CI while the Actions budget remains blocked.
+- **Disk incident recovered:** free space briefly fell below 100 MiB and an in-progress checker
+  write truncated `au-check.py`. The agent restored it from `HEAD` and reapplied all changes; the
+  file is again non-empty and both WP/AU baselines pass. Only reproducible Rust `target/` artifacts
+  from the inactive `repository-complete-audit-955a0c` worktree were partially deleted, raising
+  free space to about 9.4 GiB. No versioned/user source was deleted.
+- **Immediate safe continuation:** finish the current checker/document convergence, then run one
+  serial complete gate/shell/code suite; audit exact
+  vocabulary/path convergence; commit the Round-12 planning repair with DCO; rerun
+  post-commit gates; then begin Round 13 against that one clean full SHA. Separately, after the
+  account owner fixes the Actions budget, push the two local PR #531 documentation commits to create
+  a new CI event and merge only after named workflows/jobs actually run green. Never deploy or
+  re-enable as part of those steps.
+
 The repository is `corelink-runners`. The current planning worktree is
-`.claude/worktrees/golive-rev6-r3`, on branch `plan/golive-rev6-r3`. The immutable Round-11 review
-input is `fd9b226d3bcda055092b5e34f0cf9adc41a802bd`, with the Round-10 input
+`.claude/worktrees/golive-rev6-r3`, on branch `plan/golive-rev6-r3`. The immutable Round-12 review
+input is `3d1ed13bb1d53af6ce27385736f19d54bb5f90cc`, with the Round-11 input
+`fd9b226d3bcda055092b5e34f0cf9adc41a802bd` and Round-10 input
 `e3dbba5cc0f003ee6a0b5ff8f52f73e8eb07ad29`, the Round-9 input
 `f5df50d7659254ed5e4579ab75df2a4d44ceea0f`, Round-8 input
 `9f6e281ca617113a840ac268dcb680b258064c39`, Round-7 input
 `289826e358050c7d6b4517fc8a21f79c733c7e32` and incident PR #529 merge `b70deae` in its ancestry.
-Cold-review Round 11 was **5/8 NOT QUIET; 3/8 QUIET; quiet count 0** (five reviewers reported new
-blockers and three found no new finding/signoff). Round 10 was **7/8 NOT QUIET; 1/8 QUIET; quiet
-count 0**, and Round 9, Round 8, Round 7, Round 6 and earlier rounds are retained as historical
-ledgers. The Round-11 repair tree is a later tree and has no SHA asserted by this handoff; its
-review result cannot be transferred from `fd9b226d…`.
+Cold-review Round 12 was **7/8 NOT QUIET; 1/8 QUIET; quiet count 0** (seven reviewers reported new
+blockers and one found no new finding/signoff). Round 11 was **5/8 NOT QUIET; 3/8 QUIET; quiet
+count 0**, Round 10 was **7/8 NOT QUIET; 1/8 QUIET; quiet count 0**, and Round 9, Round 8, Round 7,
+Round 6 and earlier rounds are retained as historical ledgers. The Round-12 repair tree is a later
+tree and has no SHA asserted by this handoff; its review result cannot be transferred from
+`3d1ed13…`.
 
 ## 1. Production containment: the Cloudflare burn is stopped
 
@@ -33,6 +133,10 @@ Executable canary fail-closed hardening is committed in planning history at `13c
 exact value `FABRIC_PROBES_ENABLED=1` arms probes, while unset or malformed values remain off. PR
 #530 merged that hardening to `main` as `65540afe15fb65bfd431b631acfc971a7b0a2331`; source delivery
 does not prove a production deploy and does not authorize re-enable.
+
+A read-only containment check at `2026-09-01T21:14:17Z` recorded fabricd `0/3` active and the
+explicit flags `FABRIC_PG_DISABLED=1` / `FABRIC_PROBES_ENABLED=0`. PR #530's merge `65540af` is
+source-only evidence; it is not a live deploy or re-enable authorization.
 
 Verified canary run:
 
@@ -107,11 +211,13 @@ carried the historical 41-fixture instruction while the selftest code advertised
 target; that stale mismatch is itself a blocker. These facts must not be presented as the current
 repair count.
 
-The current repair selftest verifies **66 meaningful corruptions (57 prior + 9 Round-11 mutations)**.
-This is a diagnostic of the later repair tree, not evidence from the immutable Round-11 input and
-does not provide quiet, promotion, freeze, dispatch or green credit. Keep the literal result
-separate from the review transcript and attach an externally supplied full SHA before treating the
-repair tree as a review input; never use a self-referential hash.
+The Round-11 repair diagnostic reported **66 meaningful corruptions (57 prior + 9 Round-11
+mutations)** on its later tree. The Round-12 repair diagnostic blocks **131 meaningful
+corruptions (66 prior + 65 Round-12/repair-audit mutations)** on the repaired tree. Neither diagnostic is
+evidence from the immutable review input or provides quiet, promotion, freeze, dispatch or green
+credit. Keep the literal result separate from the review transcript and attach an externally
+supplied full SHA before treating the repair tree as a review input; never use a self-referential
+hash.
 
 Round 10's seven blocker categories remain historical and open until independently verified: final
 monitor redeploy/provider-rearm ordering; total FIFO queue residence in every SLO clock; three
@@ -127,10 +233,23 @@ The current Round-11 ledger is
 count 0**. The seven current blockers are: future T6-W14 identities are not presealed; A6.17's
 journal is mutable/non-exhaustive and omits scheduler runtime; ACKs are unauthenticated/unbound;
 unset or invalid canary configuration can fail open; interlock check/use races remain; signer trust
-is absent; and shell selftests are not proven in CI. The current repair selftest verifies 66
-meaningful corruptions (57 prior + 9 Round-11 mutations), but that result belongs to the later
-repair tree and cannot alter Round 11's quiet count of zero or authorize promotion, freeze, dispatch
-or green credit.
+is absent; and shell selftests are not proven in CI. The Round-11 repair selftest then verified 66
+meaningful corruptions (57 prior + 9 Round-11 mutations), but that historical diagnostic belongs to
+the later repair tree and cannot alter Round 11's quiet count of zero or authorize promotion, freeze,
+dispatch or green credit.
+
+The current Round-12 ledger is
+`docs/plan/2026-09-01-round12-cold-review-ledger.md`. Its exact input is
+`3d1ed13bb1d53af6ce27385736f19d54bb5f90cc` and its result is **7/8 NOT QUIET; 1/8 QUIET; quiet
+count 0**. The deduplicated blocker domains are: PG server fence; human-page ACK auth; journal
+completeness/non-equivocation; trusted time/freshness; canary activation-tuple contradiction;
+stale triage doctrine; producer ACK test cycle; signer-rotation recovery; fabricd idle no-wake;
+canary fail-visible behavior; exact-`0` PG-flag enablement; O-CFRATE; and checker
+exclusion/workflow false-PASS. The repaired checker blocks **131 meaningful
+corruptions (66 prior + 65 Round-12/repair-audit mutations)**; this remains structural diagnostic
+evidence only until sealed to a clean full SHA. A read-only containment check at
+`2026-09-01T21:14:17Z` recorded fabricd `0/3` active and flags `1/0`; PR #530 merge `65540af` is
+source-only. No promotion, freeze, dispatch or green credit is authorized.
 
 The two union inputs are `docs/plan/union-catalog-ledger.md` and
 `docs/plan/union-triage-remaining.md`. They are proposed AU scope, not yet a frozen
@@ -186,18 +305,19 @@ zero, and two further consecutive quiet rounds on byte-identical promoted bytes.
 
 ## 4. Safe next steps
 
-1. Preserve the exact Round-11 review-input provenance at
-   `fd9b226d3bcda055092b5e34f0cf9adc41a802bd` (and the historical Round-10/Round-9/Round-8/Round-7
-   inputs `e3dbba5cc0f003ee6a0b5ff8f52f73e8eb07ad29`, `f5df50d7659254ed5e4579ab75df2a4d44ceea0f`,
-   `9f6e281ca617113a840ac268dcb680b258064c39` and `289826e358050c7d6b4517fc8a21f79c733c7e32`),
-   confirm the merge-base with `origin/main` is `b70deae`, and keep every repair tree separately
-   SHA-labelled and clean before review.
-2. Repair the seven Round-11 blocker domains in one newly signed tree: preseal the complete future
-   T6-W14 identity and signer-trust sets; make A6.17's journal append-only, exhaustive and
-   scheduler/runtime-backed; authenticate and bind ACKs; fail closed on unset/invalid canary
-   configuration; make interlock check/use atomic and versioned; and wire every tracked shell
-   selftest into the required CI lane. Keep `FABRIC_PG_DISABLED=1` and
-   `FABRIC_PROBES_ENABLED=0` explicit and armed.
+1. Preserve the exact Round-12 review-input provenance at
+   `3d1ed13bb1d53af6ce27385736f19d54bb5f90cc` (and the exact Round-11/Round-10/Round-9/Round-8/Round-7
+   inputs `fd9b226d3bcda055092b5e34f0cf9adc41a802bd`, `e3dbba5cc0f003ee6a0b5ff8f52f73e8eb07ad29`,
+   `f5df50d7659254ed5e4579ab75df2a4d44ceea0f`, `9f6e281ca617113a840ac268dcb680b258064c39` and
+   `289826e358050c7d6b4517fc8a21f79c733c7e32`), confirm the merge-base with `origin/main` is
+   `b70deae`, and keep every repair tree separately SHA-labelled and clean before review.
+2. Repair the thirteen Round-12 blocker domains in one newly signed tree, while retaining all
+   unresolved Round-11 obligations: PG server fence; human-page ACK auth; journal completeness and
+   non-equivocation; trusted time/freshness; canary activation-tuple consistency; stale triage
+   doctrine; producer ACK test-cycle coverage; signer-rotation recovery; fabricd idle no-wake;
+   canary fail-visible behavior; exact-`0` PG-flag enablement; O-CFRATE; and checker
+   exclusion/workflow false-PASS. Keep `FABRIC_PG_DISABLED=1` and `FABRIC_PROBES_ENABLED=0` explicit
+   and armed.
 3. Run the five planning/checker commands, every tracked shell selftest, Ruff and the diff check
    from the repository root:
 
@@ -213,8 +333,9 @@ zero, and two further consecutive quiet rounds on byte-identical promoted bytes.
    ```
 
    The shell command locally reproduces the CI discovery/execution contract. Verify the CI job's
-   path filters and required-check binding separately; local PASS is not CI evidence. Preserve the
-   verified 66-mutation result (57 prior + 9 Round-11 mutations) and pair it with an
+   path filters and required-check binding separately; local PASS is not CI evidence. Record the
+   latest Round-12 negative-selftest output as a dirty-tree diagnostic: **131 corruptions blocked
+   (66 prior + 65 Round-12/repair-audit mutations)**. Pair the result with an
    externally supplied full SHA before treating it as a review transcript; do not use an
    unqualified `HEAD` or embed a self-hash.
 4. Run two consecutive quiet, read-only cold reviews against byte-identical staged repair bytes.
@@ -256,17 +377,19 @@ merged containment commit (#529); `3fe8d06` is the historical Round-5 planning i
 `289826e358050c7d6b4517fc8a21f79c733c7e32` is the exact Round-7 review input;
 `9f6e281ca617113a840ac268dcb680b258064c39` is the exact Round-8 review input; and
 `f5df50d7659254ed5e4579ab75df2a4d44ceea0f` is the exact Round-9 review input;
-`e3dbba5cc0f003ee6a0b5ff8f52f73e8eb07ad29` is the exact Round-10 review input; and
-`fd9b226d3bcda055092b5e34f0cf9adc41a802bd` is the exact Round-11 review input. These are distinct
-artifacts and must not be combined into one baseline or one unlabelled transcript. Round-7's,
-Round-8's, Round-9's, Round-10's and Round-11's clean/signoff observations are bounded to their respective
-exact inputs; none is a claim about the later repair tree, an unqualified `HEAD`, or a
-self-referential future hash.
+`e3dbba5cc0f003ee6a0b5ff8f52f73e8eb07ad29` is the exact Round-10 review input;
+`fd9b226d3bcda055092b5e34f0cf9adc41a802bd` is the exact Round-11 review input; and
+`3d1ed13bb1d53af6ce27385736f19d54bb5f90cc` is the exact Round-12 review input. These are distinct
+artifacts and must not be combined into one baseline or one unlabelled transcript. The Round-12
+ledger path above is currently an untracked planning/repair draft, not an immutable ledger, until
+it is committed. Round-7's, Round-8's, Round-9's, Round-10's, Round-11's and Round-12's
+clean/signoff observations are bounded to their respective exact inputs; none is a claim about
+the later repair tree, an unqualified `HEAD`, or a self-referential future hash.
 
 The canonical draft graph is now `docs/plan/2026-09-01-reconciled-dispatch-dag.md`; it is
-mechanically acyclic and capped at eight, but explicitly **NOT DISPATCHABLE**. Round 11 remains NOT
-QUIET (5/8 NOT QUIET; 3/8 QUIET; quiet count 0); its mechanical checks do not establish semantic
-or tamper-proof proof. After two quiet rounds on the byte-identical
+mechanically acyclic and capped at eight, but explicitly **NOT DISPATCHABLE**. The latest formal
+review, Round 12, remains NOT QUIET (7/8 NOT QUIET; 1/8 QUIET; quiet count 0); its mechanical
+checks do not establish semantic or tamper-proof proof. After two quiet rounds on the byte-identical
 staged repair, a signed promotion (which resets quiet count), two quiet rounds on the byte-identical
 promoted bytes, and the single post-incident baseline, the path is:
 
@@ -283,8 +406,9 @@ baseline + freeze
 The worker safety spine starts `T3-W17 → T3-W18` (repo kill switches → live re-drive-only arming)
 before the later worker chain reaches `T3-W16 → T3-W15` (authoritative join → permanent redrive).
 `T1-W5 → T1-W6` keeps mint and PG/exporter evidence separate. `T6-W13` is the immediate metrics-key
-and alert lane while fabric probes remain disabled; the later no-wake re-enable is
-`T6-W13 → T6-W14`, with T6-W14 also waiting on T6-W12. The repair split's exact durability chain
+and alert lane while fabric probes remain disabled; T6-W14 then implements and proves the
+default-off binding, and only T6-W10 performs the later evidence-only activation. The exact chain is
+`T6-W13 → T6-W14 → T6-W10`, with T6-W14 also waiting on T6-W12. The repair split's exact durability chain
 is `T6-W15 → T6-W12 → T1-W6`, with T6-W12 carrying the final provider/live deploy and active-final
 reproof before T1-W6's re-arm. The future T6-W14 identity set (owner, exact paths, capabilities,
 inputs/outputs and all predecessors) must be presealed and signer-trusted before any of those

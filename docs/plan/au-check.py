@@ -260,6 +260,50 @@ SIGNED_ACK_SCHEMA = (
     "key_id,credential_epoch,monitor_rearm_tuple_digest,ingest_commit_id,"
     "committed_at,signer_key_id,signer_epoch,signature)"
 )
+PAGE_ACK_SCHEMA = (
+    "page_ack_token=(page_ack_version,incident_id,page_id,delivery_id,destination,"
+    "on_call_identity,on_call_schedule_digest,action,payload_digest,"
+    "monitor_rearm_tuple_digest,acknowledged_at,expires_at,signer_key_id,"
+    "signer_epoch,signature)"
+)
+SIGNER_ROTATION_MANIFEST = (
+    "signer_rotation_manifest=(manifest_version,active_signer_key_id,"
+    "active_signer_epoch,next_signer_key_id,next_signer_epoch,"
+    "revoked_signer_set_digest,overlap_started_at,overlap_expires_at,"
+    "recovery_custody_digest,monitor_rearm_tuple_digest,previous_manifest_digest,"
+    "issued_at,signature)"
+)
+ACK_RECOVERY_SCHEMA = (
+    "ACK_RECOVERY=(recovery_version,event_id,producer_seq,payload_digest,source,"
+    "service,application,key_id,credential_epoch,original_monitor_rearm_tuple_digest,"
+    "ingest_commit_id,original_ack_digest,revocation_record_digest,"
+    "signer_rotation_manifest_digest,current_monitor_rearm_tuple_digest,"
+    "recovery_signer_key_id,recovery_signer_epoch,issued_at,signature)"
+)
+CANARY_ACTIVATION_TUPLE = (
+    "canary_activation_tuple=(activation_version,lifecycle_source,lifecycle_service,"
+    "lifecycle_application,lifecycle_key_id,lifecycle_credential_epoch,synthetic_source,"
+    "synthetic_service,synthetic_application,synthetic_key_id,synthetic_credential_epoch,"
+    "monitor_rearm_tuple_digest,producer_image_digest,"
+    "producer_config_digest,probe_flag_name,probe_flag_value,synthetic_flag_name,"
+    "synthetic_flag_value,activated_at)"
+)
+O_CFRATE_EVIDENCE = (
+    "O_CFRATE_EVIDENCE=(schema_version,obstacle_id,status,accountable_owner,"
+    "accountable_role,attested_at,review_input_sha,deployed_image_digest,provider,"
+    "provider_api_or_export_version,account_id,plan,billing_period_start,"
+    "billing_period_end,threshold_policy_digest,threshold_declared_at,threshold_receipt_id,"
+    "threshold_receipt_sha256,budget_interval_start,budget_interval_end,source,"
+    "source_locator,receipt_id,receipt_sha256,activity_manifest_sha256,"
+    "complete_provider_cursor,invoice_line_id,invoice_line_description,quantity,unit,"
+    "currency,line_amount,effective_rate,effective_rate_formula,rate_effective_from,"
+    "rate_effective_to,attempt_count,failed_attempt_count,retry_count,"
+    "idle_wakeup_count,served_count,failure_rate_numerator_formula,"
+    "failure_rate_denominator_formula,failure_rate_numerator,"
+    "failure_rate_denominator,observed_failure_rate,failure_rate_threshold,"
+    "billable_vcpu_hours,billable_gib_hours,observed_cost,cost_budget,"
+    "cost_per_served_attempt,cost_per_served_attempt_threshold,owner_signature)"
+)
 STAGED_WP_HEADER = [
     "wp",
     "owns",
@@ -1196,6 +1240,333 @@ def validate_provider_credential_contract(delta_document: str) -> list[str]:
     return errors
 
 
+def validate_delta_canary_activation_authority(delta_document: str) -> list[str]:
+    """Keep A6.22 bind-only; only T6-W10 may seal or arm activation."""
+
+    visible, _ = markdown_visible_text(delta_document)
+    rows = [line for line in visible.splitlines() if line.startswith("| **A6.22** |")]
+    if len(rows) != 1:
+        return [
+            "round-3 delta must contain exactly one visible A6.22 acceptance row, "
+            f"got {len(rows)}"
+        ]
+    row = plain_markdown(rows[0])
+    requirements = {
+        "T6-W14 bind-only/default-off boundary": (
+            r"\bT6-W14 remains bind-only/default-off and may neither seal "
+            r"canary_activation_tuple nor change either flag\b"
+        ),
+        "T6-W10 sole seal/arm authority": (
+            r"\bonly later T6-W10 may seal the byte-exact tuple and change only the "
+            r"flag value committed for that phase\b"
+        ),
+        "RED on T6-W14 seal/arm": r"\bT6-W14 seals or arms\b",
+        "green only under T6-W10": (
+            r"\bonly T6-W10 seals one byte-exact canary_activation_tuple per phase, "
+            r"changes only its committed flag value to exact 1, and arms/proves the "
+            r"lifecycle and synthetic phases in order\b"
+        ),
+    }
+    errors = [
+        f"A6.22 activation authority omits required {label}"
+        for label, pattern in requirements.items()
+        if re.search(pattern, row, re.IGNORECASE) is None
+    ]
+    forbidden = re.search(
+        r"\b(?:before\s+)?T6-W14\s+may\s+(?:set|change|seal|arm)|"
+        r"\bT6-W14\s+owner-arm",
+        row,
+        re.IGNORECASE,
+    )
+    if forbidden:
+        errors.append(
+            "A6.22 acceptance row grants forbidden T6-W14 activation authority: "
+            f"{forbidden.group(0)!r}"
+        )
+    return errors
+
+
+def normalized_contract_text(document: str) -> str:
+    """Collapse presentation-only Markdown whitespace for semantic clauses."""
+
+    return re.sub(r"\s+", " ", plain_markdown(document)).strip()
+
+
+def contract_section_between(document: str, start: str, end: str) -> str:
+    """Return one ordered contract section, or empty on missing/ambiguous markers."""
+
+    if document.count(start) != 1 or document.count(end) != 1:
+        return ""
+    start_index = document.index(start)
+    end_index = document.index(end, start_index + len(start))
+    return document[start_index:end_index] if start_index < end_index else ""
+
+
+def canonical_schema_section(document: str, label: str) -> str:
+    """Return the normative section for a schema, never a trailing note/example."""
+
+    if "# Go-Live Remediation Plan" in document:
+        if label == "O-CFRATE evidence":
+            return contract_section_between(
+                document, "### Wave 4", "## 6. Owner arming"
+            )
+        return contract_section_between(
+            document, "## 1. The live picture", "## 2. Scope"
+        )
+    if "# Round-3 remediation delta" in document:
+        if label == "canary activation":
+            return contract_section_between(
+                document, "## 3. Acceptance proposals", "### 3.1"
+            )
+        return contract_section_between(
+            document, "## 2. Decisions", "## 3. Acceptance proposals"
+        )
+    if "# Reconciled dispatch DAG" in document:
+        return contract_section_between(
+            document, "## Registry contract", "## Canonical node table"
+        )
+    if "# Union catalog" in document and label == "O-CFRATE evidence":
+        return document[: document.index("# Union catalog")]
+    return ""
+
+
+def validate_canary_split_contract(document: str, label: str) -> list[str]:
+    """Freeze the default-off implementation/evidence-only two-phase split."""
+
+    normalized = normalized_contract_text(
+        canonical_schema_section(document, "canary activation")
+    )
+    requirements = {
+        "T6-W14 exact 0/0 default-off with zero action": (
+            r"T6-W14's deterministic default-off phase keeps both.{0,100}"
+            r"FABRIC_PROBES_ENABLED.{0,80}SYNTHETIC_SLOT_PROBES_ENABLED.{0,80}exact `?0`?"
+            r".{0,120}proves zero outer-route requests.{0,100}lifecycle envelopes.{0,100}"
+            r"container fetches.{0,80}starts.{0,100}(?:usage|active minutes)"
+        ),
+        "T6-W14 receives no live arm/probe credit": (
+            r"(?:no activation, re-enable or probe credit.{0,100}T6-W14|"
+            r"T6-W14.{0,800}(?:earns|claims?|receives?).{0,40}no.{0,80}(?:live|probe) credit)"
+        ),
+        "T6-W10 Phase 1 exact 12-count no-wake seal": (
+            r"phase[- ]?1.{0,800}(?:exactly )?12.{0,80}lifecycle ticks.{0,120}"
+            r"(?:exactly )?12.{0,80}(?:outer-route|passive outer-route) requests.{0,120}"
+            r"(?:exactly )?12.{0,80}(?:durably )?acknowledged lifecycle envelopes.{0,180}"
+            r"(?:zero|0).{0,80}(?:container(?:-proxy)? )?(?:fetch|fetches).{0,120}"
+            r"(?:start|starts).{0,120}(?:usage|active minutes)"
+        ),
+        "T6-W10 Phase 2 exact 20 transactions": (
+            r"phase[- ]?2.{0,900}(?:exactly )?20.{0,120}transactions"
+        ),
+        "Phase 1 seal precedes Phase 2": (
+            r"only after.{0,80}phase[- ]?1.{0,100}sealed.{0,100}phase[- ]?2"
+        ),
+        "Phase 2 cannot contaminate Phase 1 artifact": (
+            r"phase[- ]?2.{0,900}excluded.{0,180}cannot.{0,100}"
+            r"(?:amend|rerun|falsify)"
+        ),
+        "T6-W10 evidence-only no implementation/double ownership": (
+            r"T6-W10 implements no.{0,150}driver.{0,100}detector.{0,160}credential."
+            r"{0,180}monitor.{0,700}(?:does not double-own|no second A6\.22 ownership|"
+            r"does not make it an A6\.22 owner|not make it an A6\.22 owner)"
+        ),
+        "Phase 2 changes only synthetic flag and preserves both lane identities": (
+            r"phase[- ]?2.{0,900}(?:change|changes).{0,100}only.{0,100}"
+            r"synthetic_flag_value.{0,350}(?:preserv|keep|remain).{0,160}"
+            r"(?:both|lifecycle.{0,60}synthetic).{0,100}identit"
+        ),
+    }
+    return [
+        f"{label} canary split omits {requirement}"
+        for requirement, pattern in requirements.items()
+        if re.search(pattern, normalized, re.IGNORECASE) is None
+    ]
+
+
+def validate_cf_rate_cross_document(document: str, label: str) -> list[str]:
+    """Require provider-issued, predeclared and half-open O-CFRATE evidence."""
+
+    normalized = normalized_contract_text(document)
+    prose = normalized.replace(plain_markdown(O_CFRATE_EVIDENCE), "")
+    requirements = {
+        "threshold declaration precedes observation": (
+            r"threshold_declared_at.{0,140}(?:<|before).{0,80}budget_interval_start"
+        ),
+        "threshold policy receipt binds the declaration": (
+            r"threshold_policy_digest.{0,260}threshold_receipt_id.{0,120}"
+            r"threshold_receipt_sha256"
+        ),
+        "provider-issued invoice/usage source": (
+            r"provider-issued (?:invoice|usage export|invoice or usage export)"
+        ),
+        "half-open budget interval": (
+            r"(?:half-open|inclusive-start/exclusive-end|"
+            r"\[budget_interval_start,budget_interval_end\))"
+        ),
+    }
+    errors = [
+        f"{label} O-CFRATE omits {requirement}"
+        for requirement, pattern in requirements.items()
+        if re.search(pattern, prose, re.IGNORECASE) is None
+    ]
+    if re.search(
+        r"\bclosed interval(?:\s|>)*`?\[budget_interval_start",
+        prose,
+        re.IGNORECASE,
+    ):
+        errors.append(f"{label} O-CFRATE mislabels its half-open interval as closed")
+    return errors
+
+
+def validate_handoff_contract(handoff_path: Path) -> list[str]:
+    """Keep handoff schemas and canary sequencing aligned with normative inputs."""
+
+    errors: list[str] = []
+    try:
+        visible, _ = markdown_visible_text(handoff_path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        return [f"cannot read handoff contract {handoff_path}: {exc}"]
+    checkpoint = contract_section_between(
+        visible, "## Compaction checkpoint", "## 1. Production containment"
+    )
+    compact = re.sub(r"\s+", "", visible)
+    compact_checkpoint = re.sub(r"\s+", "", checkpoint)
+    for label, literal in (
+        ("page ACK", PAGE_ACK_SCHEMA),
+        ("ACK_RECOVERY", ACK_RECOVERY_SCHEMA),
+    ):
+        compact_literal = re.sub(r"\s+", "", literal)
+        section_count = compact_checkpoint.count(compact_literal)
+        total_count = compact.count(compact_literal)
+        if section_count != 1 or total_count != 1:
+            errors.append(
+                f"{label} exact schema must occur once in the handoff checkpoint "
+                f"and once visibly, got section={section_count}, total={total_count}"
+            )
+    normalized = normalized_contract_text(visible)
+    flow_section = contract_section_between(
+        visible,
+        "## 5. Provenance and future DAG",
+        "## 6. Rules and operational traps",
+    )
+    exact_canary_chain = "`T6-W13 → T6-W14 → T6-W10`"
+    if (
+        flow_section.count(exact_canary_chain) != 1
+        or visible.count(exact_canary_chain) != 1
+    ):
+        errors.append(
+            "handoff must contain the exact T6-W13 -> T6-W14 -> T6-W10 "
+            "canary chain once in its provenance section"
+        )
+    if re.search(
+        r"later no-wake re-enable is.{0,40}T6-W13.{0,20}T6-W14",
+        normalized,
+        re.IGNORECASE,
+    ):
+        errors.append(
+            "handoff falsely assigns no-wake re-enable to T6-W14 instead of "
+            "T6-W10's evidence-only phase"
+        )
+    if (
+        re.search(r"T6-W13.{0,100}T6-W14.{0,100}T6-W10", normalized, re.IGNORECASE)
+        is None
+    ):
+        errors.append(
+            "handoff must preserve the T6-W13 -> T6-W14 -> T6-W10 canary chain"
+        )
+    return errors
+
+
+def validate_cf_rate_contract(dag_document: str) -> list[str]:
+    """Freeze the human-owner Cloudflare rate obstacle and its read-only consumer."""
+
+    visible, _ = markdown_visible_text(dag_document)
+    start_marker = "`O-CFRATE` is an owner-of-record arming token"
+    end_marker = "`T7-W3` is the evidence-schema gate"
+    starts = [match.start() for match in re.finditer(re.escape(start_marker), visible)]
+    ends = [match.start() for match in re.finditer(re.escape(end_marker), visible)]
+    if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
+        return [
+            "canonical DAG must contain one visible, ordered O-CFRATE contract "
+            f"(starts={len(starts)}, ends={len(ends)})"
+        ]
+    contract = plain_markdown(visible[starts[0] : ends[0]])
+    requirements = {
+        "exact ordered evidence schema": re.escape(O_CFRATE_EVIDENCE),
+        "human owner/Billing Administrator": (
+            r"\bhuman Cloudflare account owner or an authorized Cloudflare Billing "
+            r"Administrator\b"
+        ),
+        "manual console/export/sign action": (
+            r"\bmanual action is to open.+provider billing console.+export and preserve "
+            r"the provider invoice/usage receipt byte-for-byte, and sign\b"
+        ),
+        "canonical artifact": re.escape(
+            "docs/plan/evidence/O-CFRATE-cloudflare-containers-rate.json"
+        ),
+        "named invoice line": r"\bone named Cloudflare Containers invoice line\b",
+        "account period currency SKU unit": (
+            r"\baccount/billing-period identifier, currency, exact provider SKU and unit\b"
+        ),
+        "quantity amount rate formula": (
+            r"\bbilled quantity and amount, resulting per-unit rate\b"
+        ),
+        "receipt and signature provenance": (
+            r"\bsource-receipt digest, capture time and owner signature\b"
+        ),
+        "credits/tax and effective dates": (
+            r"\beffective dates, credits/discounts/tax treatment and explicit rate formula\b"
+        ),
+        "contiguous bounded budget interval": (
+            r"\bbudget interval is one contiguous inclusive-start/exclusive-end interval "
+            r"wholly covered by the billing/export evidence\b"
+        ),
+        "predeclared thresholds": r"\bthresholds are predeclared before observation\b",
+        "failure numerator formula": (
+            r"\bcanonical failure-rate numerator formula is "
+            r"failed_attempt_count \+ retry_count \+ idle_wakeup_count\b"
+        ),
+        "failure denominator formula": (
+            r"\bits denominator formula is attempt_count \+ retry_count \+ "
+            r"idle_wakeup_count\b"
+        ),
+        "zero failure denominator RED": r"\bfailure_rate_denominator=0 is RED\b",
+        "failure threshold comparison": (
+            r"\bremain at or below failure_rate_threshold\b"
+        ),
+        "cost budget comparison": r"\bremain at or below cost_budget\b",
+        "cost-per-served formula": (
+            r"\bcost_per_served_attempt=observed_cost/served_count\b"
+        ),
+        "zero served RED": r"\bserved_count=0 is RED\b",
+        "cost-per-served threshold comparison": (
+            r"\bremain at or below its predeclared threshold\b"
+        ),
+        "exactly-once complete accounting": (
+            r"\bevery retry, idle wakeup, failed attempt, served attempt, billable "
+            r"vCPU-hour, billable GiB-hour and cost unit in the interval is included "
+            r"exactly once\b"
+        ),
+        "missing accounting cannot pass": (
+            r"\bmissing or unjoined accounting cannot PASS\b"
+        ),
+        "no estimate substitution": (
+            r"\bpublic list price, calculator, proxy-provider price, dashboard estimate "
+            r"or unsigned transcription does not resolve it\b"
+        ),
+        "single read-only consumer": (
+            r"\bonly T7-W5 consumes this token, reads but does not rewrite its artifact\b"
+        ),
+        "no re-enable or dispatch authority": (
+            r"\bauthorizes no provider mutation, Cloudflare re-enable, proof credit or dispatch\b"
+        ),
+    }
+    return [
+        f"O-CFRATE contract omits required {label}"
+        for label, pattern in requirements.items()
+        if re.search(pattern, contract, re.IGNORECASE) is None
+    ]
+
+
 def validate_final_monitor_deploy_contract(dag_document: str) -> list[str]:
     """Freeze the final-monitor reproof that must precede PG rearm.
 
@@ -1371,37 +1742,39 @@ def validate_final_monitor_deploy_contract(dag_document: str) -> list[str]:
             r"\bissues (?:both|four) isolated write-only key-id/credential-[ \t]*epoch "
             r"pairs\b"
         ),
-        "credentials bound to both suite runs": (
-            r"\b(?:those|all four) registrations and credential epochs are inputs to "
-            r"both (?:complete T6-W15-)?suite executions\b"
-        ),
+        "credentials bound to both suite runs": r"\binputs to the sealed tuple\b",
         "future inactive T6-W14 source ids": (
             r"\b(?:pre-registers|and) the exact future T6-W14 canary-lifecycle and "
             r"canary-synthetic source ids\b"
         ),
-        "inactive T6-W14 write-only credentials": (
-            r"\bthe two T6-W14 registrations and credentials remain inactive through "
-            r"both complete T6-W15-suite executions\b"
+        "stable accepted registrations": (
+            r"\ball four registry entries and credential authorizations are accepted "
+            r"and byte-stable before both complete T6-W15-suite executions\b"
         ),
         "four pairwise-distinct producer credentials": (
             r"\b(?:issues four isolated write-only key-id/credential-epoch pairs|"
             r"all four (?:key-id/credential-epoch )?pairs are pairwise distinct)\b"
         ),
-        "T6-W14 registrations bound to both passes": (
-            r"\bthe two T6-W14 registrations and credentials remain inactive through "
-            r"both complete T6-W15-suite executions\b"
+        "no accepted-bit activation drift": (
+            r"\bT6-W14 never changes an accepted/active bit at bind time\b"
+        ),
+        "emission-only default off": (
+            r"\b(?:only the T6-W14 producer emission|both T6-W14 producer lanes) "
+            r"remain locally default-off\b"
+        ),
+        "missing-source clock after first emission": (
+            r"\bmonitor missing-source clock starts with its first accepted emitted "
+            r"envelope\b"
         ),
         "T1-W6 bind-only boundary": (
-            r"\bT1-W6(?: and T6-W14)? may only bind (?:their )?already-issued pairs; "
-            r"(?:it cannot|neither may) mint, rotate, substitute or register them\b"
+            r"\bT1-W6 and T6-W14 may only bind their already-issued pairs\b"
         ),
         "T6-W14 bind-only boundary": (
-            r"\bT1-W6 and T6-W14 may only bind their already-issued pairs; neither may "
-            r"mint, rotate, substitute or register them\b"
+            r"\bneither may mint, rotate, substitute, register or mutate monitor "
+            r"acceptance\b"
         ),
-        "inactive ingress refusal": (
-            r"\binactive credentials must be rejected at ingest, not treated as an "
-            r"absent expected sample\b"
+        "no bind-time monitor mutation": (
+            r"\bany mismatch stays emission-off and is tuple drift\b"
         ),
     }
     for label, pattern in registration_requirements.items():
@@ -1502,8 +1875,8 @@ def validate_monitor_journal_contract(dag_document: str) -> list[str]:
         "T6-W12 journal ownership": re.escape(start_marker),
         "minimum eight-day retention": (r"\bretained for at least (?:8|eight) days\b"),
         "exhaustive record classes": (
-            r"\brecords every page, page acknowledgement, sensitivity control and "
-            r"rearm attestation\b"
+            r"\brecords every page, page acknowledgement, sensitivity control, rearm "
+            r"attestation and ingest ACK\b"
         ),
         "no sampling or mutable replacement": (
             r"\bwithout sampling or mutable replacement\b"
@@ -1544,9 +1917,94 @@ def validate_monitor_journal_contract(dag_document: str) -> list[str]:
             r"\bT6-W12 runs the complete journal mutant matrix against both the "
             r"candidate and active-final deployments\b"
         ),
+        "write-ahead intent before effects": (
+            r"\bbefore sending a page, applying a sensitivity control or returning a "
+            r"rearm attestation, T6-W12 durably appends the exact immutable intent\b"
+        ),
+        "stable operation and previous root": (
+            r"\bdeterministic operation id and previous hash root\b"
+        ),
+        "provider result receipt": (
+            r"\bafter the external effect it appends the exact provider result/receipt\b"
+        ),
+        "journal reconciler": re.escape(
+            "deploy/cost-monitor/src/journal_reconciler.ts"
+        ),
+        "same-id provider reconciliation": (
+            r"\breading the provider with the same idempotency key\b"
+        ),
+        "no ambiguous retry or guess": (
+            r"\bnever guesses absence or issues a second effect while provider state "
+            r"is unavailable or ambiguous\b"
+        ),
+        "single successor root CAS": r"\bonly one successor may CAS from a journal root\b",
+        "bidirectional exhaustiveness": (
+            r"\ba provider record without its local intent, a local intent absent from "
+            r"the provider after a complete read\b"
+        ),
+        "fork refuses seal and rearm": r"\bany fork makes sealing and rearm RED\b",
+        "write-ahead fixture": re.escape(
+            "deploy/cost-monitor/test/window-journal-writeahead.test.ts"
+        ),
+        "provider-reconciliation fixture": re.escape(
+            "deploy/cost-monitor/test/window-journal-reconcile.test.ts"
+        ),
+        "non-equivocation fixture": re.escape(
+            "deploy/cost-monitor/test/window-journal-fork.test.ts"
+        ),
     }
     return [
         f"exhaustive monitor journal contract omits required {label}"
+        for label, pattern in requirements.items()
+        if re.search(pattern, contract, re.IGNORECASE) is None
+    ]
+
+
+def validate_trusted_time_contract(dag_document: str) -> list[str]:
+    """Freeze trusted-clock identity, monotonic watermark and freshness refusal."""
+
+    visible, _ = markdown_visible_text(dag_document)
+    start_marker = "All window, freshness, ACK and receipt times pass through"
+    end_marker = "Before T6-W12 seals its final deployed tuple"
+    starts = [match.start() for match in re.finditer(re.escape(start_marker), visible)]
+    ends = [match.start() for match in re.finditer(re.escape(end_marker), visible)]
+    if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
+        return [
+            "canonical DAG must contain one visible, ordered trusted-time contract "
+            f"(starts={len(starts)}, ends={len(ends)})"
+        ]
+    contract = plain_markdown(visible[starts[0] : ends[0]])
+    requirements = {
+        "trusted clock implementation": re.escape("deploy/cost-monitor/src/clock.ts"),
+        "durable monotonic high-water": r"\bpersists a monotonic high-water value\b",
+        "trusted commit/watermark/receipt domains": (
+            r"\bverifies the monitor's durable ingest-commit checkpoint, provider-"
+            r"authenticated monotonic watermark/as_of and immutable delivery/control "
+            r"receipt against the named O-MONITORHOST trusted time/checkpoint capability\b"
+        ),
+        "producer time evidence-only": (
+            r"\bproducer, process and scheduler wall times are evidence only\b"
+        ),
+        "rollback/skew/outage refusal": (
+            r"\bcheckpoint rollback, excessive forward skew, unavailable time authority, "
+            r"restart below high-water.+or a timestamp outside its contract refuses\b"
+        ),
+        "no manufactured freshness": (
+            r"\bnever manufactures freshness or shortens a deadline\b"
+        ),
+        "trusted-time fixture": re.escape(
+            "deploy/cost-monitor/test/clock-freshness.test.ts"
+        ),
+        "candidate and active-final proof": (
+            r"\bcandidate and active-final runs of deploy/cost-monitor/test/"
+            r"clock-freshness\.test\.ts\b"
+        ),
+        "deterministic time mutants": (
+            r"\brollback, forward jump, boundary, restart and time-source outage cases\b"
+        ),
+    }
+    return [
+        f"trusted-time contract omits required {label}"
         for label, pattern in requirements.items()
         if re.search(pattern, contract, re.IGNORECASE) is None
     ]
@@ -1619,22 +2077,55 @@ def validate_rearm_interlock_contract(dag_document: str) -> list[str]:
         ),
         "generation-scoped permit on every surface": (
             r"\bevery readiness, mutation and socket/init path first obtains a "
-            r"generation-scoped interlock permit\b"
+            r"generation-scoped coordinator permit\b"
         ),
-        "permit held through durable commit": (
-            r"\bits generation fence is held through the action's durable commit, so "
-            r"validation cannot race a pause\b"
+        "shared transaction fence through commit": (
+            r"\bevery PG transaction additionally holds the same generation's shared "
+            r"transaction-scoped PostgreSQL advisory fence and validates the durable "
+            r"fence-row generation inside that transaction\b"
         ),
-        "OPEN-to-CLOSING transition": (
-            r"\barming transitions OPEN -> CLOSING, blocks all new permits\b"
+        "server authority, not app check": (
+            r"\ban application-side check alone is never authority\b"
         ),
-        "old-generation cancellation and socket disposal": (
-            r"\bcancels or rolls back every older-generation permit and closes/discards "
-            r"every socket created by one\b"
+        "exact fence state machine": r"\bOPEN -> FENCING -> CLOSING -> LATCHED\b",
+        "exclusive fence drains prior transactions": (
+            r"\bobtains the exclusive transaction-scoped fence lock, waits for every "
+            r"earlier shared transaction to commit or roll back\b"
+        ),
+        "durable generation before CLOSING": (
+            r"\batomically advances the durable PG generation/latch and commits, and "
+            r"only then publishes CLOSING\b"
+        ),
+        "transaction order around linearization": (
+            r"\ba transaction ordered before the exclusive lock may commit only before "
+            r"CLOSING is published; one ordered after it sees the new generation and "
+            r"aborts before mutation\b"
+        ),
+        "ambiguous fence fail-closed reconciliation": (
+            r"\ban unavailable or ambiguous exclusive-lock/update outcome never "
+            r"publishes CLOSING or LATCHED.+keeps new work refused, alerts, and "
+            r"reconciles the durable fence row\b"
+        ),
+        "PG fence implementation paths": (
+            re.escape("crates/corelink-fabric/src/pg_monitor_fence.rs")
+            + r".+"
+            + re.escape(
+                "crates/corelink-fabric-server/src/monitor_transaction_fence.rs"
+            )
+        ),
+        "PG fence test paths": (
+            re.escape("crates/corelink-fabric/tests/pg_monitor_transaction_fence.rs")
+            + r".+"
+            + re.escape(
+                "crates/corelink-fabric-server/tests/monitor_transaction_fence.rs"
+            )
+        ),
+        "two-instance transaction pause matrix": (
+            r"\bpause two independent instances before lock, after the shared lock and "
+            r"immediately before commit\b"
         ),
         "LATCHED only after complete accounting": (
-            r"\breaches LATCHED only after all such permits/actions and sockets are "
-            r"durably accounted for\b"
+            r"\bonly after every action/socket is durably accounted for may arming return\b"
         ),
         "latched 503/zero-action behavior": (
             r"\breadiness/mutation are typed 503 and zero socket or mutation actions "
@@ -1740,14 +2231,25 @@ def validate_signed_ack_contract(dag_document: str) -> list[str]:
             r"\brejects a stale, revoked or wrong-but-currently-valid signer under "
             r"the seventh (?:monitor_rearm_tuple|tuple) field\b"
         ),
-        "per-producer refusal matrix": (
-            r"\bthe focused fixtures run the complete matrix for the scheduled-tick, "
-            r"attempt/binding, fabric-server, fabricd-proxy, lifecycle and synthetic "
-            r"lanes in both candidate and active-final T6-W12 passes\b"
+        "monitor-side fixture boundary": (
+            r"\bin both candidate and active-final passes, T6-W12's monitor-side "
+            r"fixtures submit isolated exact authenticated envelopes under every "
+            r"accepted lane and prove only ingest/CAS/stable-token behavior\b"
         ),
-        "inactive then bind-only T6-W14 ACK matrix": (
-            r"\bthe future lifecycle/synthetic registrations remain inactive in those "
-            r"passes and are exercised after their bind-only activation by T6-W14 as well\b"
+        "no future producer credit": (
+            r"\bnever execute, activate or claim a producer fixture\b"
+        ),
+        "producer refusal/recovery owners": (
+            r"\bT6-W4, T3-W16, T1-W6 and T6-W14 each own their producer-side "
+            r"refusal/recovery suite\b"
+        ),
+        "post-bind pre-action proof": (
+            r"\bT1-W6/T6-W14 must pass it after bind but before their first gated "
+            r"socket, fetch, start, acquire, spawn, release or successor emission\b"
+        ),
+        "no producer-test dependency cycle": (
+            r"\bthis split removes any producer-test dependency from T6-W12 back to "
+            r"consumers that follow it\b"
         ),
         "zero gated action on refusal": r"\bperforms zero gated action and fails closed\b",
     }
@@ -1758,12 +2260,160 @@ def validate_signed_ack_contract(dag_document: str) -> list[str]:
     ]
 
 
+def validate_page_ack_and_recovery_contract(dag_document: str) -> list[str]:
+    """Freeze authenticated human ACKs and signer-rotation ACK recovery."""
+
+    visible, _ = markdown_visible_text(dag_document)
+    start_marker = "An on-call page is acknowledged only by the exact signed"
+    end_marker = "`T3-W16` directly waits for T6-W15"
+    starts = [match.start() for match in re.finditer(re.escape(start_marker), visible)]
+    ends = [match.start() for match in re.finditer(re.escape(end_marker), visible)]
+    if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
+        return [
+            "canonical DAG must contain one visible, ordered human-ACK/recovery "
+            f"contract (starts={len(starts)}, ends={len(ends)})"
+        ]
+    contract = plain_markdown(visible[starts[0] : ends[0]])
+    required_literals = {
+        "exact page ACK schema": PAGE_ACK_SCHEMA,
+        "page ACK implementation": "deploy/cost-monitor/src/page_ack.ts",
+        "page ACK test": "deploy/cost-monitor/test/page-ack-auth.test.ts",
+        "exact signer rotation manifest": SIGNER_ROTATION_MANIFEST,
+        "exact ACK_RECOVERY schema": ACK_RECOVERY_SCHEMA,
+        "recovery implementation": "deploy/cost-monitor/src/ack_recovery.ts",
+        "recovery server test": "deploy/cost-monitor/test/ack-recovery.test.ts",
+        "tick recovery owner": (
+            "deploy/cloudflare-canary/test/scheduled-tick-ack-recovery.test.ts"
+        ),
+        "attempt recovery owner": (
+            "deploy/cloudflare/test/attempt-monitor-ack-recovery.test.ts"
+        ),
+        "fabric server recovery owner": (
+            "crates/corelink-fabric-server/tests/monitor_ack_recovery.rs"
+        ),
+        "fabricd recovery owner": (
+            "deploy/cloudflare-fabricd/test/monitor-ack-recovery.test.ts"
+        ),
+        "lifecycle synthetic recovery owner": (
+            "deploy/cloudflare-canary/test/lifecycle-synthetic-ack-recovery.test.ts"
+        ),
+    }
+    errors = [
+        f"human page ACK / ACK_RECOVERY contract omits required {label}"
+        for label, literal in required_literals.items()
+        if literal not in contract
+    ]
+    requirements = {
+        "page ACK signature coverage": (
+            r"\bsignature authenticates the preceding fourteen fields in that order\b"
+        ),
+        "current signer trust": (
+            r"\bverifies the signer/epoch against current trust/revocation\b"
+        ),
+        "journal and tuple binding": (
+            r"\bjoins the page/delivery to its immutable journal record and monitor tuple\b"
+        ),
+        "human destination authorization": (
+            r"\bproves destination, on-call identity and schedule digest were authorized "
+            r"for that exact action and payload\b"
+        ),
+        "effective tuple binding": (
+            r"\btoken's tuple digest must equal the effective monitor_rearm_tuple\b"
+        ),
+        "trusted expiry bound": (
+            r"\btrusted acknowledgement time must be no later than expires_at\b"
+        ),
+        "page ACK refusal matrix": (
+            r"\barbitrary HTTP 2xx, provider delivery receipt, unsigned/manual state "
+            r"change, replay from another page/incident, stale schedule, wrong "
+            r"action/payload/tuple/destination/identity, expired token or revoked/"
+            r"wrong-valid signer cannot acknowledge, "
+            r"suppress escalation or start recovery\b"
+        ),
+        "stale/future/closed refusal": (
+            r"\ba stale/future ACK or ACK after close is invalid\b"
+        ),
+        "duplicate ACK idempotency": (
+            r"\bbyte-identical duplicate is idempotently journaled once and neither "
+            r"resets the escalation deadline nor erases a later update\b"
+        ),
+        "journal before incident advance": (
+            r"\bvalid token is journaled before incident state advances\b"
+        ),
+        "manifest signature coverage": (
+            r"\bsignature authenticates the preceding twelve fields in that order\b"
+        ),
+        "manifest monotonic hash chain": (
+            r"\bmanifests form one monotonic hash-linked sequence through "
+            r"previous_manifest_digest\b"
+        ),
+        "manifest presealed authority": (
+            r"\bactive/next epochs, bounded overlap, complete revoked set, recovery "
+            r"custody and exact tuple are presealed before rotation\b"
+        ),
+        "manifest RED matrix": (
+            r"\brollback, fork, missing predecessor, epoch regression, overlap outside "
+            r"its bounds, revoked active/next key, wrong tuple, unavailable custody or "
+            r"an untrusted manifest signer is RED\b"
+        ),
+        "canonical manifest digest": (
+            r"\bcanonical digest of all thirteen manifest fields is "
+            r"signer_rotation_manifest_digest\b"
+        ),
+        "durable ACK_RECOVERY state": (
+            r"\bproducer enters durable ACK_RECOVERY with the byte-identical original "
+            r"head, identity and deadline\b"
+        ),
+        "recovery blocks action/successor": (
+            r"\bcannot resample, create a successor or perform the gated action\b"
+        ),
+        "recovery signature coverage": (
+            r"\bsignature authenticates the preceding eighteen fields in that order\b"
+        ),
+        "no second ingest": (
+            r"\bonly from the persisted original ingest CAS and ACK, with no second "
+            r"ingest effect\b"
+        ),
+        "current recovery signer": (
+            r"\bseparate token signed by a currently trusted recovery signer\b"
+        ),
+        "recovery manifest resolution": (
+            r"\bmanifest digest must resolve to the unique current hash-linked manifest "
+            r"that proves the original signer's revocation, the recovery signer's "
+            r"active custody/epoch, the bounded overlap and both the original and "
+            r"current tuple binding\b"
+        ),
+        "recovery manifest RED": (
+            r"\bmissing, stale, forked or mismatched manifest is RED\b"
+        ),
+        "same committed head only": (
+            r"\bsatisfies only that committed head's exact original ACK gate and can "
+            r"authorize only its one original gated action, never a different or second action\b"
+        ),
+        "deadline not reset": (
+            r"\bif recovery completes after the original 60-second deadline.+the old "
+            r"action remains forbidden and a later action requires a new envelope with "
+            r"its own clock\b"
+        ),
+        "ambiguous recovery refusal": (
+            r"\bmissing original CAS/ACK, identity mismatch, untrusted signer or "
+            r"ambiguous revocation record remains fail-closed\b"
+        ),
+    }
+    errors.extend(
+        f"human page ACK / ACK_RECOVERY contract omits required {label}"
+        for label, pattern in requirements.items()
+        if re.search(pattern, contract, re.IGNORECASE) is None
+    )
+    return errors
+
+
 def validate_canary_flag_contract(dag_document: str) -> list[str]:
     """Keep lifecycle probing off unless the canary flag is exactly ``1``."""
 
     visible, _ = markdown_visible_text(dag_document)
     start_marker = "For staged A6.22"
-    end_marker = "T6-W12 also integrates"
+    end_marker = "## Canonical node table"
     starts = [match.start() for match in re.finditer(re.escape(start_marker), visible)]
     ends = [match.start() for match in re.finditer(re.escape(end_marker), visible)]
     if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
@@ -1774,25 +2424,124 @@ def validate_canary_flag_contract(dag_document: str) -> list[str]:
 
     contract = plain_markdown(visible[starts[0] : ends[0]])
     requirements = {
+        "exact canary activation tuple": re.escape(CANARY_ACTIVATION_TUPLE),
+        "passive edge lifecycle authority": (
+            r"\bnon-waking lifecycle endpoint is implemented in the fabricd edge "
+            r"Worker and reads only Durable Object lifecycle state; it never calls "
+            r"container fetch\b"
+        ),
+        "no route wake loop": (
+            r"\bthe route is passive: it never owns a timer, monitor credential, "
+            r"delivery sequence or heartbeat\b"
+        ),
+        "external missing-source timers": (
+            r"\bthe external monitor owns both missing-sample timers, incident state "
+            r"and page-delivery outbox, not either Cloudflare producer\b"
+        ),
         "exact-one enablement": (
             r"\b(?:the canary performs its outer-route fetch only when |"
             r"FABRIC_PROBES_ENABLED enables lifecycle sampling if and only if )"
             r"FABRIC_PROBES_ENABLED(?:'s value)? is the exact string 1\b"
         ),
         "absent/empty off": (
-            r"\b(?:an absent or empty value is off|unset, blank.+are disabled)\b"
+            r"\bunset, blank, whitespace, case variants, numeric lookalikes and every "
+            r"other value also perform zero fetches\b"
         ),
         "malformed and truthy-looking off": (
-            r"\b(?:every other or malformed value.+is off|whitespace, 0, case variants, "
-            r"numeric lookalikes and every other invalid value are disabled)\b"
+            r"\bnot silently treated as healthy/off\b"
         ),
         "synthetic exact-one rule": (
-            r"\bthe same exact-1 rule governs owner arming of "
-            r"SYNTHETIC_SLOT_PROBES_ENABLED\b"
+            r"\bthe same exact-0/exact-1 and fail-visible rule governs owner arming of "
+            r"SYNTHETIC_SLOT_PROBES_ENABLED: only the exact string 1 arms the synthetic "
+            r"driver\b"
         ),
         "zero off-state effects": (
-            r"\b(?:each off value produces zero lifecycle fetches.+billed-usage delta|"
-            r"all other values perform zero synthetic acquire, spawn or release actions)\b"
+            r"\binvalid values perform zero synthetic acquire, spawn or release actions\b"
+        ),
+        "exact-zero contained state": (
+            r"\bexact 0 is the valid contained state and performs zero fabric fetches\b"
+        ),
+        "fail-visible config module": re.escape(
+            "deploy/cloudflare-canary/src/config.ts"
+        ),
+        "typed config-unavailable readiness": (
+            r"\breturns typed config-unavailable readiness\b"
+        ),
+        "deduplicated invalid-config signal": (
+            r"\bdurably emits one deduplicated CANARY_CONFIG_INVALID signal for "
+            r"external delivery\b"
+        ),
+        "fail-visible test": re.escape(
+            "deploy/cloudflare-canary/test/fabric-probe-flag-failvisible.test.ts"
+        ),
+        "four-state fail-visible result": (
+            r"\bSKIPPED, FAILED, UNKNOWN or SERVED, plus reason, deployed version, "
+            r"monitor_rearm_tuple digest and trusted observed_at\b"
+        ),
+        "exact state classification": (
+            r"\bvalid exact-0 is SKIPPED, an authoritative exact-1 response alone may "
+            r"be SERVED, an observed negative is FAILED, and missing, invalid or "
+            r"unverifiable evidence is UNKNOWN\b"
+        ),
+        "non-green degraded states": (
+            r"\bSKIPPED, FAILED and UNKNOWN never count as green, quiet, rearm or "
+            r"re-enable evidence\b"
+        ),
+        "failure returns to zero": (
+            r"\bany failure keeps or returns (?:the flag|both flags) to 0\b"
+        ),
+        "PG exact-zero enablement": (
+            r"\bexact FABRIC_PG_DISABLED=0 is the only value that permits a "
+            r"PG/container path\b"
+        ),
+        "invalid PG values no wake": (
+            r"\bevery such non-0 value is disabled at the edge Worker, strips "
+            r"DATABASE_URL, opens zero PG/exporter sockets and returns typed 503 before "
+            r"any container handle, fetch, start or wake\b"
+        ),
+        "PG config fail-visible": (
+            r"\binvalid values additionally emit the configured deduplicated external "
+            r"config signal and cannot masquerade as intentional containment\b"
+        ),
+        "PG flag test": re.escape(
+            "deploy/cloudflare-fabricd/test/pg-flag-failclosed.test.ts"
+        ),
+        "idle no-wake test": re.escape(
+            "deploy/cloudflare-fabricd/test/idle-no-wake.test.ts"
+        ),
+        "idle restart proof": (
+            r"\bproves cold start, idle sleep, restart, bounded/no retry and "
+            r"malformed-config cases have zero scheduled wake, container "
+            r"handle/fetch/start, PG/exporter socket and billable active-minute delta\b"
+        ),
+        "nineteen-field sole activation authority": (
+            r"\bthose nineteen ordered fields and their canonical digest are the sole "
+            r"activation authority\b"
+        ),
+        "three-way byte-identical activation": (
+            r"\bcanary producer, independent external verifier and rearm decision have "
+            r"byte-identical tuple bytes/digest\b"
+        ),
+        "activation identity/image/config/flag/time binding": (
+            r"\blifecycle and synthetic (?:lane )?identities equal the pre-registered "
+            r"binds, that image/config equal the running producer, that both named flags "
+            r"have their exact intended values, that the monitor tuple is current, and "
+            r"that activated_at is trusted and fresh\b"
+        ),
+        "activation drift fail-closed": (
+            r"\bmissing, stale, malformed or contradictory bytes, any field/digest "
+            r"drift, post-check config/runtime/key/flag change, or disagreement among "
+            r"canary, verifier and rearm atomically disables both lanes, returns both "
+            r"flags to exact-0, emits fail-visible UNKNOWN, invalidates prior probe "
+            r"credit and requires a new T6-W10 activation proof\b"
+        ),
+        "T6-W10 exclusive activation ownership": (
+            r"\bT6-W10 exclusively owns this later activation plus the 20/20 AU6.17 "
+            r"execution\b"
+        ),
+        "T6-W14 cannot author activation": (
+            r"\bT6-W14 remains default-off/bind-only and may neither author nor mutate "
+            r"the activation tuple\b"
         ),
     }
     return [
@@ -1926,8 +2675,16 @@ def scope_atoms(scope: str) -> tuple[str, ...]:
     fragments: list[str] = []
     for segment in scope.split(";"):
         segment_fragments = re.findall(r"`([^`]+)`", segment)
-        if "excluding" in segment.lower() and segment_fragments:
-            segment_fragments = segment_fragments[:1]
+        carveout = re.search(
+            r"(?:^|\s+)(?:excluding|explicitly excludes|minus)\s*:?\s+",
+            segment,
+            re.IGNORECASE,
+        )
+        if carveout and segment_fragments:
+            if plain_markdown(segment[: carveout.start()]):
+                segment_fragments = segment_fragments[:1]
+            else:
+                segment_fragments = []
         fragments.extend(segment_fragments)
     atoms: list[str] = []
     for fragment in fragments:
@@ -1946,14 +2703,30 @@ def scope_exclusions(scope: str) -> tuple[str, ...]:
     """Resolve backticked exclusions relative to their preceding broad atom."""
 
     exclusions: list[str] = []
+    previous_atom = ""
     for segment in scope.split(";"):
-        if "excluding" not in segment.lower():
-            continue
         fragments = re.findall(r"`([^`]+)`", segment)
-        if not fragments:
+        carveout = re.search(
+            r"(?:^|\s+)(?:excluding|explicitly excludes|minus)\s*:?\s+",
+            segment,
+            re.IGNORECASE,
+        )
+        if carveout is None:
+            if fragments:
+                previous_atom = fragments[-1].strip()
             continue
-        base = re.split(r"[*?[{]", fragments[0], maxsplit=1)[0]
-        for raw in fragments[1:]:
+        has_inline_base = bool(plain_markdown(segment[: carveout.start()]))
+        if has_inline_base and fragments:
+            base_atom = fragments[0].strip()
+            raw_exclusions = fragments[1:]
+            previous_atom = base_atom
+        else:
+            base_atom = previous_atom
+            raw_exclusions = fragments
+        if not base_atom:
+            continue
+        base = re.split(r"[*?[{]", base_atom, maxsplit=1)[0]
+        for raw in raw_exclusions:
             atom = raw.strip()
             if not atom:
                 continue
@@ -1964,8 +2737,8 @@ def scope_exclusions(scope: str) -> tuple[str, ...]:
             exclusions.append(atom)
         # This canonical carveout is deliberately prose because "canary" is
         # a lane name, not a literal basename beside the broad deploy glob.
-        if len(fragments) == 1 and re.search(
-            r"\bexcluding\s+canary\b", segment, re.IGNORECASE
+        if not raw_exclusions and re.search(
+            r"\bexcluding\s*:?\s+canary\b", segment, re.IGNORECASE
         ):
             exclusions.append("deploy/cloudflare-canary/**")
     return tuple(dict.fromkeys(exclusions))
@@ -2095,10 +2868,13 @@ def parse_dispatch_dag(
     raw_document = dag_path.read_text(encoding="utf-8")
     errors = hidden_canonical_table_errors(raw_document, "canonical dispatch DAG")
     errors.extend(validate_final_monitor_deploy_contract(raw_document))
+    errors.extend(validate_cf_rate_contract(raw_document))
     errors.extend(validate_monitor_host_capability_contract(raw_document))
     errors.extend(validate_monitor_journal_contract(raw_document))
+    errors.extend(validate_trusted_time_contract(raw_document))
     errors.extend(validate_rearm_interlock_contract(raw_document))
     errors.extend(validate_signed_ack_contract(raw_document))
+    errors.extend(validate_page_ack_and_recovery_contract(raw_document))
     errors.extend(validate_canary_flag_contract(raw_document))
     errors.extend(validate_producer_lane_contract(raw_document))
     batch_rows, batch_errors = exact_ready_set_rows(raw_document)
@@ -2220,6 +2996,19 @@ def parse_dispatch_dag(
             f"DAG rendered ready sets disagree with deterministic Kahn batches: "
             f"rendered={rendered_batches}, computed={computed_batches}"
         )
+    if "T6-W10" not in predecessors.get("T1-W4", ()):
+        errors.append("DAG T1-W4/A1.9 must declare T6-W10 as an exact hard predecessor")
+    if "T6-W10" in rendered_nodes and "T1-W4" in rendered_nodes:
+        t6_batch = next(
+            index for index, batch in enumerate(rendered_batches) if "T6-W10" in batch
+        )
+        t1_batch = next(
+            index for index, batch in enumerate(rendered_batches) if "T1-W4" in batch
+        )
+        if t6_batch >= t1_batch:
+            errors.append(
+                "DAG ready sets must serialize T6-W10 before T1-W4/A1.9 in a later batch"
+            )
     return waves, phases, predecessors, scopes, exclusions, errors
 
 
@@ -2299,6 +3088,7 @@ def validate_au_dag_routing(
     rows: list[Placement],
     predecessors: dict[str, tuple[str, ...]],
     scopes: dict[str, tuple[str, ...]],
+    exclusions: dict[str, tuple[str, ...]],
     staged_probe_wps: set[str],
 ) -> list[str]:
     """Mechanize declared AU and cross-registry hard routes and scopes.
@@ -2457,6 +3247,7 @@ def validate_au_dag_routing(
 
     required_scope_atoms = {
         "T6-W4": {
+            "deploy/cloudflare-canary/src/config.ts",
             "deploy/cloudflare-canary/src/tick_outbox.ts",
             "deploy/cloudflare-canary/wrangler.jsonc",
             "deploy/cloudflare-canary/package.json",
@@ -2465,24 +3256,35 @@ def validate_au_dag_routing(
             "deploy/cloudflare-canary/test/scheduled-tick-outbox-recovery.test.ts",
             "deploy/cloudflare-canary/test/scheduled-tick-order.test.ts",
             "deploy/cloudflare-canary/test/scheduled-tick-ack.test.ts",
+            "deploy/cloudflare-canary/test/scheduled-tick-ack-recovery.test.ts",
             "deploy/cloudflare-canary/test/fabric-probe-flag-failclosed.test.ts",
+            "deploy/cloudflare-canary/test/fabric-probe-flag-failvisible.test.ts",
         },
         "T1-W6": {
+            "crates/corelink-fabric/src/pg_monitor_fence.rs",
+            "crates/corelink-fabric/tests/pg_monitor_transaction_fence.rs",
             "crates/corelink-fabric-server/src/monitor_outbox.rs",
             "crates/corelink-fabric-server/src/monitor_interlock.rs",
+            "crates/corelink-fabric-server/src/monitor_transaction_fence.rs",
             "crates/corelink-fabric-server/tests/monitor_outbox.rs",
             "crates/corelink-fabric-server/tests/monitor_ack.rs",
             "crates/corelink-fabric-server/tests/monitor_tuple_interlock.rs",
             "crates/corelink-fabric-server/tests/monitor_tuple_interlock_race.rs",
+            "crates/corelink-fabric-server/tests/monitor_transaction_fence.rs",
+            "crates/corelink-fabric-server/tests/monitor_ack_recovery.rs",
             "crates/corelink-fabric/tests/pg_refusal_breaker.rs",
             "deploy/cloudflare-fabricd/src/monitor_outbox.ts",
             "deploy/cloudflare-fabricd/test/monitor-outbox.test.ts",
             "deploy/cloudflare-fabricd/test/monitor-ack.test.ts",
+            "deploy/cloudflare-fabricd/test/monitor-ack-recovery.test.ts",
+            "deploy/cloudflare-fabricd/test/pg-flag-failclosed.test.ts",
+            "deploy/cloudflare-fabricd/test/idle-no-wake.test.ts",
             "docs/plan/evidence/T1-W6-pg-durable-live.json",
         },
         "T3-W16": {
             "deploy/cloudflare/test/attempt-monitor-outbox.test.ts",
             "deploy/cloudflare/test/attempt-monitor-ack.test.ts",
+            "deploy/cloudflare/test/attempt-monitor-ack-recovery.test.ts",
         },
         "T6-W15": {
             "deploy/cost-monitor/Containerfile",
@@ -2490,6 +3292,8 @@ def validate_au_dag_routing(
             "deploy/cost-monitor/src/index.ts",
             "deploy/cost-monitor/src/ingest.ts",
             "deploy/cost-monitor/src/acks.ts",
+            "deploy/cost-monitor/src/ack_recovery.ts",
+            "deploy/cost-monitor/src/page_ack.ts",
             "deploy/cost-monitor/src/incidents.ts",
             "deploy/cost-monitor/src/lifecycle.ts",
             "deploy/cost-monitor/src/scheduler.ts",
@@ -2505,6 +3309,8 @@ def validate_au_dag_routing(
             "deploy/cost-monitor/test/canary-missing-tick.test.ts",
             "deploy/cost-monitor/test/ingest-idempotency.test.ts",
             "deploy/cost-monitor/test/ack-token.test.ts",
+            "deploy/cost-monitor/test/ack-recovery.test.ts",
+            "deploy/cost-monitor/test/page-ack-auth.test.ts",
             "deploy/cost-monitor/test/incident-state.test.ts",
             "deploy/cost-monitor/test/scheduler.test.ts",
             "deploy/cost-monitor/test/state.test.ts",
@@ -2526,10 +3332,14 @@ def validate_au_dag_routing(
             "deploy/cloudflare-canary/src/lifecycle_outbox.ts",
             "deploy/cloudflare-canary/src/synthetic_slot.ts",
             "deploy/cloudflare-canary/src/synthetic_outbox.ts",
+            "deploy/cloudflare-canary/src/rules.ts",
+            "deploy/cloudflare-canary/src/types.ts",
             "deploy/cloudflare-canary/wrangler.jsonc",
+            "deploy/cloudflare-canary/test/no-wake-target.test.ts",
             "deploy/cloudflare-canary/test/lifecycle-monitor-envelope.test.ts",
             "deploy/cloudflare-canary/test/lifecycle-sampler-outbox.test.ts",
             "deploy/cloudflare-canary/test/lifecycle-synthetic-ack.test.ts",
+            "deploy/cloudflare-canary/test/lifecycle-synthetic-ack-recovery.test.ts",
             "deploy/cloudflare-canary/test/synthetic-slot-lifecycle.test.ts",
             "deploy/cloudflare-canary/test/synthetic-slot-outbox.test.ts",
             "deploy/cloudflare-canary/test/synthetic-slot-default-off.test.ts",
@@ -2552,6 +3362,8 @@ def validate_au_dag_routing(
             "deploy/cost-monitor/src/synthetic_ingest.ts",
             "deploy/cost-monitor/src/sensitivity.ts",
             "deploy/cost-monitor/src/window_journal.ts",
+            "deploy/cost-monitor/src/journal_reconciler.ts",
+            "deploy/cost-monitor/src/clock.ts",
             "deploy/cost-monitor/src/rearm_attestation.ts",
             "deploy/cost-monitor/migrations/0002-provider-cursors.json",
             "deploy/cost-monitor/migrations/0003-window-journal.json",
@@ -2567,18 +3379,39 @@ def validate_au_dag_routing(
             "deploy/cost-monitor/test/c1-c5-synthetic-ingest.test.ts",
             "deploy/cost-monitor/test/sensitivity-window.test.ts",
             "deploy/cost-monitor/test/window-journal.test.ts",
+            "deploy/cost-monitor/test/window-journal-writeahead.test.ts",
+            "deploy/cost-monitor/test/window-journal-reconcile.test.ts",
+            "deploy/cost-monitor/test/window-journal-fork.test.ts",
+            "deploy/cost-monitor/test/clock-freshness.test.ts",
             "deploy/cost-monitor/test/rearm-tuple-attestation.test.ts",
             "docs/plan/evidence/T6-W12-independent-monitor.json",
         },
         "T6-W10": {
             "docs/plan/evidence/T6-W10-alerting-depth.json",
             "docs/plan/evidence/au6.17-synthetic-slot-lifecycle.json",
+            "docs/plan/evidence/T6-W14-canary-no-wake.json",
         },
     }
     for wp, required in required_scope_atoms.items():
         missing = sorted(required - set(scopes.get(wp, ())))
         if missing:
             errors.append(f"DAG node {wp} is missing exact scope atom(s): {missing}")
+        excluded = {
+            atom: sorted(
+                exclusion
+                for exclusion in exclusions.get(wp, ())
+                if path_atom_covers(exclusion, atom)
+            )
+            for atom in sorted(required & set(scopes.get(wp, ())))
+        }
+        excluded = {
+            atom: carveouts for atom, carveouts in excluded.items() if carveouts
+        }
+        if excluded:
+            errors.append(
+                f"DAG node {wp} excludes required atom(s) from effective scope: "
+                f"{excluded}"
+            )
 
     t6_w10_implementation = sorted(
         atom
@@ -2591,6 +3424,15 @@ def validate_au_dag_routing(
         errors.append(
             "DAG node T6-W10 must remain evidence/arming-only after T6-W14's "
             f"default-off implementation, got implementation atoms: {t6_w10_implementation}"
+        )
+    no_wake_artifact = "docs/plan/evidence/T6-W14-canary-no-wake.json"
+    artifact_owners = sorted(
+        wp for wp, atoms in scopes.items() if no_wake_artifact in atoms
+    )
+    if artifact_owners != ["T6-W10"]:
+        errors.append(
+            "A6.22 no-wake artifact must be produced/sealed only by T6-W10's "
+            f"evidence contribution, got scope owners {artifact_owners}"
         )
     return errors
 
@@ -2623,6 +3465,7 @@ def check(
     finding_path: Path,
     dag_path: Path,
     delta_path: Path | None = None,
+    handoff_path: Path | None = None,
 ) -> tuple[bool, list[str], dict[str, object]]:
     failures: list[str] = []
     raw_document = triage_path.read_text(encoding="utf-8")
@@ -2779,9 +3622,74 @@ def check(
 
     if delta_path is None:
         delta_path = plan_path.with_name("2026-09-01-round3-remediation-delta.md")
+    cross_document_contracts = {
+        "O-CFRATE evidence": (
+            O_CFRATE_EVIDENCE,
+            (triage_path, plan_path, delta_path, dag_path),
+        ),
+        "page ACK": (PAGE_ACK_SCHEMA, (plan_path, delta_path, dag_path)),
+        "signer rotation manifest": (
+            SIGNER_ROTATION_MANIFEST,
+            (plan_path, delta_path, dag_path),
+        ),
+        "ACK_RECOVERY": (ACK_RECOVERY_SCHEMA, (plan_path, delta_path, dag_path)),
+        "canary activation": (
+            CANARY_ACTIVATION_TUPLE,
+            (plan_path, delta_path, dag_path),
+        ),
+    }
+    cached_contract_documents: dict[Path, str] = {}
+    for label, (literal, contract_paths) in cross_document_contracts.items():
+        for contract_path in contract_paths:
+            if contract_path not in cached_contract_documents:
+                try:
+                    visible, _ = markdown_visible_text(
+                        contract_path.read_text(encoding="utf-8")
+                    )
+                except OSError as exc:
+                    failures.append(
+                        f"cannot read contract document {contract_path}: {exc}"
+                    )
+                    cached_contract_documents[contract_path] = ""
+                else:
+                    cached_contract_documents[contract_path] = visible
+            literal_count = cached_contract_documents[contract_path].count(literal)
+            section_count = canonical_schema_section(
+                cached_contract_documents[contract_path], label
+            ).count(literal)
+            if literal_count != 1 or section_count != 1:
+                failures.append(
+                    f"{label} exact schema must occur once in its canonical section "
+                    f"and once visibly in {contract_path.name}, got "
+                    f"section={section_count}, total={literal_count}"
+                )
+    for role, contract_path in (
+        ("main plan", plan_path),
+        ("round-3 delta", delta_path),
+        ("canonical DAG", dag_path),
+    ):
+        failures.extend(
+            validate_canary_split_contract(
+                cached_contract_documents.get(contract_path, ""), role
+            )
+        )
+    for contract_path in (plan_path, delta_path, dag_path, triage_path):
+        failures.extend(
+            validate_cf_rate_cross_document(
+                cached_contract_documents.get(contract_path, ""), contract_path.name
+            )
+        )
+    if handoff_path is None:
+        handoff_path = (
+            Path(__file__).parent.parent
+            / "handoff"
+            / "2026-09-01-session-state-go-live-remediation.md"
+        )
+    failures.extend(validate_handoff_contract(handoff_path))
     try:
         delta_document = delta_path.read_text(encoding="utf-8")
         failures.extend(validate_provider_credential_contract(delta_document))
+        failures.extend(validate_delta_canary_activation_authority(delta_document))
         (
             staged_wps,
             staged_existing_wps,
@@ -2890,7 +3798,13 @@ def check(
     if scope_collisions:
         failures.append(f"parallel DAG path/glob scope collisions: {scope_collisions}")
     failures.extend(
-        validate_au_dag_routing(rows, dag_predecessors, dag_scopes, staged_probe_wps)
+        validate_au_dag_routing(
+            rows,
+            dag_predecessors,
+            dag_scopes,
+            dag_exclusions,
+            staged_probe_wps,
+        )
     )
 
     bad_invariants: dict[str, list[str]] = {}
@@ -3047,6 +3961,16 @@ def main(argv: list[str] | None = None) -> int:
         default=Path(__file__).with_name("2026-09-01-round3-remediation-delta.md"),
         help="staged principal WP packet registry",
     )
+    parser.add_argument(
+        "--handoff",
+        type=Path,
+        default=(
+            Path(__file__).parent.parent
+            / "handoff"
+            / "2026-09-01-session-state-go-live-remediation.md"
+        ),
+        help="canonical session handoff carrying checkpoint schemas and sequencing",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -3057,6 +3981,7 @@ def main(argv: list[str] | None = None) -> int:
             args.plan_check,
             args.dag,
             args.delta,
+            args.handoff,
         )
     except (OSError, ValueError) as exc:
         print(f"au-check: BLOCKED — {exc}")
