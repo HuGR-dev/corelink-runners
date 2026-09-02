@@ -92,7 +92,10 @@ with tempfile.TemporaryDirectory(prefix="corelink-claim-selftest-") as tmp:
     root = pathlib.Path(tmp) / "red"; root.mkdir(); case(root, coverage="RED"); expect(root, False, "red baseline")
     root = pathlib.Path(tmp) / "wrapped"; root.mkdir(); case(root, text="the moat\nis live", marker=False)
     expect(root, False, "line-wrapped present-tense claim")
-print("claim-artifact-lint selftest: PASS (11 cases; offline)")
+    root = pathlib.Path(tmp) / "two-claims-one-marker"; root.mkdir()
+    case(root, text="the moat is live. the cache-warm path is live.", marker=True)
+    expect(root, False, "two capability claims with one marker")
+print("claim-artifact-lint selftest: PASS (12 cases; offline)")
 PY
 fi
 if [[ $# -ne 0 ]]; then usage; exit 2; fi
@@ -199,6 +202,31 @@ def prose_paragraphs(source):
         current.append((line_no, line))
     flush()
     return paragraphs
+
+def prose_claim_units(lines):
+    """Yield (normalized sentence, has-marker) units from one paragraph.
+
+    A paragraph may contain several independently assertable capability claims.
+    One marker therefore cannot vouch for the whole paragraph: split at sentence
+    boundaries after Markdown/code/comment normalization and retain marker
+    ownership for the sentence where it physically appears.
+    """
+    marker_token = "__CORELINK_CLAIM_MARKER__"
+    values = []
+    for line in lines:
+        value = f" {marker_token} " if MARKER.search(line) else " "
+        value = re.sub(r"<!--.*?-->", value, line)
+        value = re.sub(r"`[^`]*`", " ", value)
+        value = re.sub(r"^\s{0,3}(?:#{1,6}\s+|[-*+]\s+|>\s*)", " ", value)
+        values.append(value)
+    normalized = re.sub(r"\s+", " ", " ".join(values)).strip()
+    if not normalized:
+        return []
+    units = re.split(r"(?<=[.!?])\s+(?=[A-Za-z0-9])", normalized)
+    return [
+        (unit.replace(marker_token, " ").strip(), marker_token in unit)
+        for unit in units
+    ]
 
 schema, manifest = load(schema_path, "schema"), load(manifest_path, "manifest")
 if not isinstance(schema, dict) or schema.get("$id") != "https://corelink.dev/schemas/evidence-artifact-v1.json": fail("schema: unexpected schema identity")
@@ -327,9 +355,9 @@ for source in markdown_sources:
             cid, aid = marker.groups(); record = claims.get(cid)
             if not record or record.get("file") != str(source.relative_to(root)) or record.get("line") != line_no or record.get("artifact_id") != aid: fail(f"{source.relative_to(root)}:{line_no}: marker is not represented in manifest")
     for first_line, _last_line, prose, paragraph_lines in prose_paragraphs(source):
-        marker = any(MARKER.search(line) for line in paragraph_lines)
-        if CAPABILITY.search(prose) and (PRESENT.search(prose) or re.search(r"\b(?:moat|benchmark)\b", prose, re.I)) and not marker:
-            fail(f"{source.relative_to(root)}:{first_line}: present-tense capability claim lacks artifact marker")
+        for claim_text, marker in prose_claim_units(paragraph_lines):
+            if CAPABILITY.search(claim_text) and (PRESENT.search(claim_text) or re.search(r"\b(?:moat|benchmark)\b", claim_text, re.I)) and not marker:
+                fail(f"{source.relative_to(root)}:{first_line}: present-tense capability claim lacks artifact marker")
 
 if errors:
     for error in errors[:100]: print(f"claim-artifact-lint: ERROR: {error}", file=sys.stderr)

@@ -347,6 +347,26 @@ if missing:
     verdict("STRUCTURAL")
     sys.exit(1)
 
+# A required check that is present but skipped did not execute.  Skipping is
+# acceptable for optional, path-filtered checks only; it is never acceptable for
+# the unconditional gates above.  Check the records themselves instead of
+# relying on the presence set, so a skipped `gates` cannot masquerade as a
+# green structural prerequisite.
+skipped_required = []
+for job, identities in AUTHORITATIVE_CHECKS.items():
+    if any(
+        " ".join(str(c.get("name", "")).casefold().split()) in identities
+        and c.get("bucket") == "skipping"
+        for c in data
+    ):
+        skipped_required.append(job)
+if skipped_required:
+    print(f"  ⛔ DO NOT MERGE PR #{pr} — required gate(s) skipped: "
+          f"{', '.join(skipped_required)}.")
+    print("     The unconditional gates must execute; a skipped result is not a verdict.")
+    verdict("STRUCTURAL")
+    sys.exit(1)
+
 if fails or pends:
     print(f"  ⛔ DO NOT MERGE PR #{pr} — {len(fails)} not-green, {len(pends)} pending.")
     for c in fails:
