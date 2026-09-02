@@ -90,7 +90,9 @@ with tempfile.TemporaryDirectory(prefix="corelink-claim-selftest-") as tmp:
     root = pathlib.Path(tmp) / "duplicate"; root.mkdir(); case(root, duplicate=True); expect(root, False, "duplicate claim id")
     root = pathlib.Path(tmp) / "nested"; root.mkdir(); case(root, nested=True); expect(root, False, "nested unindexed evidence")
     root = pathlib.Path(tmp) / "red"; root.mkdir(); case(root, coverage="RED"); expect(root, False, "red baseline")
-print("claim-artifact-lint selftest: PASS (10 cases; offline)")
+    root = pathlib.Path(tmp) / "wrapped"; root.mkdir(); case(root, text="the moat\nis live", marker=False)
+    expect(root, False, "line-wrapped present-tense claim")
+print("claim-artifact-lint selftest: PASS (11 cases; offline)")
 PY
 fi
 if [[ $# -ne 0 ]]; then usage; exit 2; fi
@@ -157,6 +159,46 @@ def sources():
             if path and path.is_file(): answer.append(path)
     if not answer: fail("claim_sources: no eligible tracked Markdown source")
     return sorted(answer)
+
+def prose_paragraphs(source):
+    """Yield (first line, last line, normalized prose, raw lines) paragraphs.
+
+    Capability claims are prose properties, not line properties: Markdown wraps
+    sentences at arbitrary newlines.  Keep fenced code and HTML comments out of
+    this signal, while retaining line numbers for the manifest/diagnostic path.
+    Blank lines delimit paragraphs, so a marker in an adjacent paragraph cannot
+    accidentally vouch for an unmarked claim.
+    """
+    paragraphs, current = [], []
+    fenced = False
+
+    def flush():
+        if not current:
+            return
+        start, lines = current[0][0], [item[1] for item in current]
+        prose = []
+        for line in lines:
+            value = re.sub(r'<!--.*?-->', ' ', line)
+            value = re.sub(r'`[^`]*`', ' ', value)
+            value = re.sub(r'^\s{0,3}(?:#{1,6}\s+|[-*+]\s+|>\s*)', ' ', value)
+            prose.append(value)
+        normalized = re.sub(r'\s+', ' ', ' '.join(prose)).strip()
+        paragraphs.append((start, start + len(lines) - 1, normalized, lines))
+        current.clear()
+
+    for line_no, line in enumerate(source.read_text(encoding="utf-8").splitlines(), 1):
+        if re.match(r'^\s{0,3}(```|~~~)', line):
+            flush()
+            fenced = not fenced
+            continue
+        if fenced:
+            continue
+        if not line.strip():
+            flush()
+            continue
+        current.append((line_no, line))
+    flush()
+    return paragraphs
 
 schema, manifest = load(schema_path, "schema"), load(manifest_path, "manifest")
 if not isinstance(schema, dict) or schema.get("$id") != "https://corelink.dev/schemas/evidence-artifact-v1.json": fail("schema: unexpected schema identity")
@@ -271,13 +313,23 @@ for number, claim in enumerate(claims_raw):
         if not any(isinstance(item, dict) and ((version.get("id") and item.get("id") == version.get("id")) or (version.get("digest") and item.get("digest") == version.get("digest"))) for item in deployed.values()): fail(f"{label}: artifact version lacks committed deployed-version anchor")
 
 for source in markdown_sources:
-    for line_no, line in enumerate(source.read_text(encoding="utf-8").splitlines(), 1):
+    lines = source.read_text(encoding="utf-8").splitlines()
+    fenced = False
+    for line_no, line in enumerate(lines, 1):
+        if re.match(r'^\s{0,3}(```|~~~)', line):
+            fenced = not fenced
+            continue
+        if fenced:
+            continue
         marker = MARKER.search(line)
         if "corelink-claim" in line and marker is None: fail(f"{source.relative_to(root)}:{line_no}: malformed claim marker")
         if marker:
             cid, aid = marker.groups(); record = claims.get(cid)
             if not record or record.get("file") != str(source.relative_to(root)) or record.get("line") != line_no or record.get("artifact_id") != aid: fail(f"{source.relative_to(root)}:{line_no}: marker is not represented in manifest")
-        if CAPABILITY.search(line) and (PRESENT.search(line) or re.search(r"\b(?:moat|benchmark)\b", line, re.I)) and marker is None: fail(f"{source.relative_to(root)}:{line_no}: present-tense capability claim lacks artifact marker")
+    for first_line, _last_line, prose, paragraph_lines in prose_paragraphs(source):
+        marker = any(MARKER.search(line) for line in paragraph_lines)
+        if CAPABILITY.search(prose) and (PRESENT.search(prose) or re.search(r"\b(?:moat|benchmark)\b", prose, re.I)) and not marker:
+            fail(f"{source.relative_to(root)}:{first_line}: present-tense capability claim lacks artifact marker")
 
 if errors:
     for error in errors[:100]: print(f"claim-artifact-lint: ERROR: {error}", file=sys.stderr)

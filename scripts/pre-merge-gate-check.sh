@@ -319,8 +319,9 @@ print()
 # Chosen because both are triggered by a bare `on: pull_request` with NO paths
 # filter, so they run for every PR regardless of what it touches. If either is
 # missing, the `pull_request` workflows did not fire and the rest of this list
-# is metadata jobs that gate nothing. Substring match keeps this robust against
-# job-name edits ("dco-check" → "dco", "ci / gates" → "gates").
+# is metadata jobs that gate nothing. The accepted names below are the exact
+# job identities emitted by GitHub, plus the exact workflow/job display form.
+# Substring matching is forbidden: `fake-gates` is not the `gates` job.
 #
 # ⚠️ REPO-SPECIFIC: the server's list is ["dco", "gitleaks"]; this repo has no
 # per-PR gitleaks lane, and its unconditional pair is `gates` + `dco`.
@@ -329,9 +330,13 @@ print()
 # would make the script fail on PRs that legitimately skip it — turning a
 # fail-open into a fail-noisy, which gets the whole check disabled by the next
 # person in a hurry.
-REQUIRED_PRESENT = ["gates", "dco"]
-names = " ".join(c.get("name", "").lower() for c in data)
-missing = [g for g in REQUIRED_PRESENT if g not in names]
+AUTHORITATIVE_CHECKS = {
+    "gates": {"gates", "ci / gates"},
+    "dco": {"dco", "dco / dco"},
+}
+names = {" ".join(str(c.get("name", "")).casefold().split()) for c in data}
+missing = [job for job, identities in AUTHORITATIVE_CHECKS.items()
+           if not names.intersection(identities)]
 if missing:
     print(f"  ⛔ DO NOT MERGE PR #{pr} — the always-present gates never ran: "
           f"{', '.join(missing)}.")
