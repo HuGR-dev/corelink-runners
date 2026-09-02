@@ -1191,6 +1191,22 @@ SELFTEST_WORKFLOW_FALSE_PASS_PATTERNS = {
     "backgrounded selftest": re.compile(r'(?m)^\s*bash\s+"\$\{selftest\}"\s*&\s*$'),
 }
 
+SELFTEST_WORKFLOW_STEP_NAME = "      - name: Discover and run every tracked selftest"
+SELFTEST_WORKFLOW_RUN_BODY = [
+    "set -euo pipefail",
+    "# The glob magic makes **/ include selftests directly below scripts/",
+    "# as well as in nested directories.",
+    "mapfile -d '' selftests < <(git ls-files -z -- ':(glob)scripts/**/*.selftest.sh')",
+    "if (( ${#selftests[@]} == 0 )); then",
+    "  echo 'No tracked scripts/**/*.selftest.sh files found.' >&2",
+    "  exit 1",
+    "fi",
+    'for selftest in "${selftests[@]}"; do',
+    '  echo "==> bash ${selftest}"',
+    '  bash "${selftest}"',
+    "done",
+]
+
 
 def exact_line_positions(text, heading):
     return [m.start() for m in re.finditer(rf"^{re.escape(heading)}$", text, re.M)]
@@ -2020,6 +2036,35 @@ def validate_selftest_workflow(repository_root):
         if pattern.search(workflow):
             errors.append(
                 f"selftest workflow contains forbidden false-pass control {label!r}"
+            )
+
+    lines = workflow.splitlines()
+    step_positions = [
+        index for index, line in enumerate(lines) if line == SELFTEST_WORKFLOW_STEP_NAME
+    ]
+    if len(step_positions) != 1:
+        errors.append(
+            "selftest workflow must contain exactly one canonical discovery/execution step"
+        )
+    else:
+        step_index = step_positions[0]
+        expected_prelude = ["        shell: bash", "        run: |"]
+        actual_prelude = lines[step_index + 1 : step_index + 3]
+        body: list[str] = []
+        cursor = step_index + 3
+        while cursor < len(lines):
+            line = lines[cursor]
+            if line and len(line) - len(line.lstrip(" ")) <= 8:
+                break
+            if line.startswith("          "):
+                body.append(line[10:])
+            else:
+                body.append(line)
+            cursor += 1
+        if actual_prelude != expected_prelude or body != SELFTEST_WORKFLOW_RUN_BODY:
+            errors.append(
+                "selftest workflow discovery/execution body differs from the canonical "
+                "fail-fast dataflow"
             )
 
     execution_lines = re.findall(r'(?m)^\s*bash\s+"\$\{selftest\}"\s*$', workflow)

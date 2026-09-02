@@ -10,6 +10,7 @@ on:
       - 'docs/plan/evidence/**'
       - 'docs/plan/*.json'
       - 'docs/plan/**/*.json'
+      - 'docs/handoff/**'
       - '.github/workflows/*.yml'
       - '.github/workflows/*.yaml'
       - '.github/actionlint.yaml'
@@ -24,6 +25,7 @@ on:
       - 'docs/plan/evidence/**'
       - 'docs/plan/*.json'
       - 'docs/plan/**/*.json'
+      - 'docs/handoff/**'
       - '.github/workflows/*.yml'
       - '.github/workflows/*.yaml'
       - '.github/actionlint.yaml'
@@ -41,9 +43,49 @@ jobs:
   check:
     name: Coverage, WP, and AU structure
     runs-on: corelink
-    timeout-minutes: 5
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0  # v6.0.3
+
+      - name: Bind checkout to triggering SHA
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_AFTER_SHA: ${{ github.event.after }}
+        run: |
+          set -euo pipefail
+          ACTUAL_SHA="$(git rev-parse --verify HEAD)"
+          if [[ ! "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "plan-integrity: malformed triggering SHA: $EXPECTED_SHA" >&2
+            exit 1
+          fi
+          if [[ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]]; then
+            echo "plan-integrity: checkout SHA mismatch: expected=$EXPECTED_SHA actual=$ACTUAL_SHA" >&2
+            exit 1
+          fi
+          case "$EVENT_NAME" in
+            pull_request)
+              PARENTS="$(git show -s --format=%P HEAD)"
+              read -r FIRST_PARENT SECOND_PARENT EXTRA_PARENT <<< "$PARENTS"
+              if [[ -n "$EXTRA_PARENT" || "$FIRST_PARENT" != "$PR_BASE_SHA" || "$SECOND_PARENT" != "$PR_HEAD_SHA" ]]; then
+                echo "plan-integrity: PR merge binding mismatch: expected_base=$PR_BASE_SHA expected_head=$PR_HEAD_SHA parents=$PARENTS" >&2
+                exit 1
+              fi
+              ;;
+            push)
+              if [[ "$ACTUAL_SHA" != "$PUSH_AFTER_SHA" ]]; then
+                echo "plan-integrity: push event binding mismatch: after=$PUSH_AFTER_SHA actual=$ACTUAL_SHA" >&2
+                exit 1
+              fi
+              ;;
+            *)
+              echo "plan-integrity: unsupported event for SHA binding: $EVENT_NAME" >&2
+              exit 1
+              ;;
+          esac
 
       - name: Lint workflow syntax
         shell: bash
@@ -105,3 +147,21 @@ jobs:
 
       - name: Exercise structural planning gates
         run: python3 docs/plan/gates-selftest.py
+
+      - name: Emit SHA-bound completion record
+        if: ${{ success() }}
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          ACTUAL_SHA="$(git rev-parse --verify HEAD)"
+          if [[ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]]; then
+            echo "plan-integrity: completion SHA mismatch: expected=$EXPECTED_SHA actual=$ACTUAL_SHA" >&2
+            exit 1
+          fi
+          RECORD="plan-integrity-completion/v1 event=$EVENT_NAME ref=$REF_NAME sha=$ACTUAL_SHA"
+          echo "$RECORD"
+          printf '### Plan integrity completion\n\n%s\n' "$RECORD" >> "$GITHUB_STEP_SUMMARY"

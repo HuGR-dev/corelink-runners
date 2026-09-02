@@ -33,6 +33,171 @@ DAG = PLAN_DIR / "2026-09-01-reconciled-dispatch-dag.md"
 STAGED = PLAN_DIR / "2026-09-01-round3-remediation-delta.md"
 HANDOFF = REPO / "docs" / "handoff" / "2026-09-01-session-state-go-live-remediation.md"
 
+CANONICAL_INPUTS = {
+    path.resolve() for path in (SOURCE, PLAN, TRIAGE, DAG, STAGED, HANDOFF)
+}
+EXPECTED_MUTATION_INVENTORY = frozenset(
+    {
+        "ack-token-schema-drift.md",
+        "actionlint-dynamic-runner-expression",
+        "actionlint-extra-allowed-label",
+        "actionlint-suppress-all-config",
+        "actionlint-unexpected-workflow",
+        "actionlint-weakened-sha-binding",
+        "ambiguous-canary-status.md",
+        "au-bucket-drift.md",
+        "au-invalid-kind.md",
+        "au-scope-overlap.md",
+        "bad-ack-recovery-schema-delta.md",
+        "bad-ack-recovery-schema-main.md",
+        "bad-canary-activation-schema-delta.md",
+        "bad-canary-activation-schema-main.md",
+        "bad-cf-rate-schema-dag.md",
+        "bad-cf-rate-schema-delta.md",
+        "bad-cf-rate-schema-plan.md",
+        "bad-cf-rate-schema-triage.md",
+        "bad-page-ack-schema-delta.md",
+        "bad-page-ack-schema-main.md",
+        "bad-signer-rotation-manifest-schema-delta.md",
+        "bad-signer-rotation-manifest-schema-main.md",
+        "capability-corruption.md",
+        "collapsed-activation-lane-dag.md",
+        "collapsed-activation-lane-delta.md",
+        "collapsed-activation-lane-main.md",
+        "deleted-t4-w3-dependency-dag.md",
+        "disabled-job-selftests.yml",
+        "drifted-t6-w12-provider-path.md",
+        "duplicate-a-row.md",
+        "duplicate-source.txt",
+        "early-success-selftests.yml",
+        "excluded-required-scope-colon.md",
+        "excluded-required-scope.md",
+        "fenced-au-placement-row.md",
+        "fenced-capability-heading.md",
+        "fenced-dag-table-row.md",
+        "fenced-main-acceptance-row.md",
+        "fenced-staged-principal-registry.md",
+        "forbidden-t6-w6-before-t6-w13.md",
+        "handoff-ack-recovery-missing-binding.md",
+        "handoff-page-ack-missing-binding.md",
+        "handoff-stale-canary-sequence.md",
+        "header-corruption.md",
+        "html-comment-hidden-au-row.md",
+        "html-comment-hidden-main-row.md",
+        "ignored-step-selftests.yml",
+        "inverse-t6-w12-t1-w6-order.md",
+        "inverted-t6-w15-t6-w12-edge.md",
+        "kind-drift.md",
+        "legacy-au-alias.md",
+        "missing-ack-token-scope.md",
+        "missing-au-serial-edge-dag.md",
+        "missing-canary-activation-field.md",
+        "missing-canary-flag-scope.md",
+        "missing-d7-before-d3-consumer.md",
+        "missing-evidence-prerequisite-dag.md",
+        "missing-idle-no-wake-scope.md",
+        "missing-interlock-race-scope.md",
+        "missing-journal-reconciler-scope.md",
+        "missing-o-cfcancel.md",
+        "missing-page-ack-binding.md",
+        "missing-pg-fence-scope.md",
+        "missing-r2-before-t4-w2.md",
+        "missing-recovery-manifest-digest.md",
+        "missing-selftests-workflow-scope.md",
+        "missing-sensitivity-receipt-isolation.md",
+        "missing-signer-manifest-binding.md",
+        "missing-signer-trust-tuple-field.md",
+        "missing-t1-w6-from-t6-w14.md",
+        "missing-t1-w6-monitor-tuple-interlock.md",
+        "missing-t3-w18-from-t1-w5.md",
+        "missing-t5-w1-before-t5-w4.md",
+        "missing-t6-w12-from-t1-w6.md",
+        "missing-t6-w14-before-t6-w10.md",
+        "missing-t6-w14-bind-only.md",
+        "missing-t6-w14-preregistration.md",
+        "missing-t6-w15-before-t3-w16.md",
+        "missing-t6-w15-before-t6-w12.md",
+        "missing-t6-w15-outbox-scope.md",
+        "missing-t6-w15-recovery-scope.md",
+        "missing-trusted-clock-scope.md",
+        "missing-window-journal-scope.md",
+        "nested-glob-file-overlap-dag.md",
+        "no-wake-artifact-wrong-owner.md",
+        "no-wake-target.test.ts-t6w14-missing.md",
+        "ocfrate-closed-interval.md",
+        "ocfrate-missing-threshold-proof-dag.md",
+        "ocfrate-missing-threshold-proof-delta.md",
+        "ocfrate-missing-threshold-proof-main.md",
+        "ocfrate-missing-threshold-proof-triage.md",
+        "ocfrate-non-provider-source.md",
+        "opaque-extra-a-row.md",
+        "outbox-periodic-head.test-missing.md",
+        "outbox-quarantine.test-missing.md",
+        "outbox-transition-head.test-missing.md",
+        "ownership-drift.md",
+        "pg-unset-enables.md",
+        "phantom-dag-wp.md",
+        "phase1-12-acks.md",
+        "phase1-12-requests.md",
+        "phase1-12-ticks.md",
+        "phase1-before-phase2.md",
+        "phase2-20-transactions.md",
+        "phase2-no-contamination.md",
+        "producer-test-cycle.md",
+        "ready-set-fence-missing.md",
+        "ready-set-fence-unclosed.md",
+        "ready-set-fence-wrong-info.md",
+        "ready-set-row-outside-fence.md",
+        "relocated-page-ack-schema.md",
+        "renamed-au-heading.md",
+        "renamed-heading.md",
+        "reset-array-selftests.yml",
+        "retrospective-journal.md",
+        "rules.ts-t6w14-missing.md",
+        "source-au-swap.md",
+        "summary-corruption.md",
+        "t1w4-missing-t6w10-predecessor.md",
+        "t1w4-same-batch-as-t6w10.md",
+        "t6w10-no-implementation.md",
+        "t6w14-flags-zero-zero.md",
+        "t6w14-forbidden-arming-delta.md",
+        "t6w14-zero-action.md",
+        "types.ts-t6w14-missing.md",
+        "unstable-canary-activation.md",
+        "wave2-reordered.md",
+        "weakened-canary-activation-drift.md",
+        "weakened-cf-rate-budget.md",
+        "wrong-a610-owner.md",
+        "wrong-ack-recovery-schema.md",
+        "wrong-au-owner.md",
+        "wrong-cf-rate-artifact.md",
+        "wrong-page-ack-schema.md",
+    }
+)
+blocked_mutation_inventory: set[str] = set()
+mutation_fixture_paths: dict[str, Path] = {}
+
+
+def record_mutation(name: str) -> None:
+    """Record one distinct corrupted fixture after its negative check blocks."""
+
+    if not name:
+        raise AssertionError("mutation inventory entries must be non-empty")
+    blocked_mutation_inventory.add(name)
+
+
+def record_mutated_paths(*paths: Path | None) -> None:
+    for path in paths:
+        if path is not None and path.resolve() not in CANONICAL_INPUTS:
+            resolved = path.resolve()
+            previous = mutation_fixture_paths.setdefault(path.name, resolved)
+            if previous != resolved:
+                raise AssertionError(
+                    f"mutation fixture basename collision for {path.name!r}: "
+                    f"{previous} versus {resolved}"
+                )
+            record_mutation(path.name)
+
 
 def execute(
     checker: str,
@@ -93,6 +258,8 @@ def require(
         raise AssertionError(
             f"{label}: expected {expectation}, rc={result.returncode}\n{stream}"
         )
+    if not should_pass:
+        record_mutated_paths(target, dag, plan, delta, handoff)
     print(f"PASS {label}: {'accepted baseline' if should_pass else 'blocked mutation'}")
 
 
@@ -221,6 +388,13 @@ def require_mirrored_wp(
         raise AssertionError(
             f"{label}: expected {expectation}, rc={result.returncode}\n{stream}"
         )
+    if not should_pass:
+        record_mutated_paths(
+            target,
+            *(overrides or {}).values(),
+            workflow,
+            handoff,
+        )
     print(f"PASS {label}: {'accepted baseline' if should_pass else 'blocked mutation'}")
 
 
@@ -283,6 +457,8 @@ def require_actionlint_config_is_not_authoritative(work: Path) -> None:
             "actionlint trusted invocation failed to retain syntax diagnostics:\n"
             + diagnostics
         )
+    record_mutation("actionlint-unexpected-workflow")
+    record_mutation("actionlint-suppress-all-config")
     print("PASS actionlint suppress-all config cannot hide trusted diagnostics")
 
 
@@ -325,7 +501,80 @@ def require_actionlint_exact_baseline(work: Path) -> None:
             "actionlint exact-baseline checker accepted an extra allowed label:\n"
             + diagnostics
         )
+    record_mutation("actionlint-extra-allowed-label")
     print("PASS actionlint exact baseline blocks an extra allowed-label occurrence")
+
+
+def require_actionlint_dynamic_runner_rejected(work: Path) -> None:
+    """Prove an expression-resolved unapproved runner cannot evade diagnostics."""
+
+    checker = PLAN_DIR / "actionlint-check.py"
+    fixture_root = work / "actionlint-dynamic-runner"
+    workflow_root = fixture_root / ".github" / "workflows"
+    shutil.copytree(REPO / ".github" / "workflows", workflow_root)
+    workflow = workflow_root / "corelink-stress.yml"
+    source = workflow.read_text(encoding="utf-8")
+    workflow.write_text(
+        replace_once(
+            source,
+            "    runs-on: ubuntu-latest",
+            "    runs-on: \"${{ 'corelink-unexpected' }}\"",
+            "dynamic runs-on expression",
+        ),
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [sys.executable, str(checker), "--root", str(fixture_root)],
+        cwd=REPO,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    diagnostics = result.stdout + result.stderr
+    if result.returncode == 0 or "unapproved runs-on binding" not in diagnostics:
+        raise AssertionError(
+            "actionlint checker accepted an expression-resolved unapproved runner:\n"
+            + diagnostics
+        )
+    record_mutation("actionlint-dynamic-runner-expression")
+    print("PASS actionlint blocks an expression-resolved unapproved runner")
+
+
+def require_actionlint_sha_binding_rejected(work: Path) -> None:
+    """Prove the authoritative lint gate rejects weakened event-SHA binding."""
+
+    checker = PLAN_DIR / "actionlint-check.py"
+    fixture_root = work / "actionlint-sha-binding"
+    workflow_root = fixture_root / ".github" / "workflows"
+    shutil.copytree(REPO / ".github" / "workflows", workflow_root)
+    workflow = workflow_root / "plan-integrity.yml"
+    source = workflow.read_text(encoding="utf-8")
+    workflow.write_text(
+        replace_once(
+            source,
+            ' || "$SECOND_PARENT" != "$PR_HEAD_SHA"',
+            "",
+            "PR head SHA binding",
+        ),
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [sys.executable, str(checker), "--root", str(fixture_root)],
+        cwd=REPO,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    diagnostics = result.stdout + result.stderr
+    if (
+        result.returncode == 0
+        or "plan-integrity SHA binding mismatch" not in diagnostics
+    ):
+        raise AssertionError(
+            "actionlint checker accepted weakened PR head-SHA binding:\n" + diagnostics
+        )
+    record_mutation("actionlint-weakened-sha-binding")
+    print("PASS actionlint blocks weakened plan-integrity SHA binding")
 
 
 def main() -> int:
@@ -344,6 +593,8 @@ def main() -> int:
 
         require_actionlint_config_is_not_authoritative(work)
         require_actionlint_exact_baseline(work)
+        require_actionlint_dynamic_runner_rejected(work)
+        require_actionlint_sha_binding_rejected(work)
 
         duplicate_source = work / "duplicate-source.txt"
         first_id = source.splitlines()[0]
@@ -1574,6 +1825,25 @@ def main() -> int:
                 workflow=early_success_workflow,
             )
 
+            reset_array_workflow = work / "reset-array-selftests.yml"
+            reset_array_workflow.write_text(
+                replace_once(
+                    workflow_text,
+                    '          fi\n          for selftest in "${selftests[@]}"; do\n',
+                    "          fi\n          selftests=()\n"
+                    '          for selftest in "${selftests[@]}"; do\n',
+                    "selftests post-discovery array reset",
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP selftests workflow rejects post-discovery array reset",
+                PLAN,
+                False,
+                work / "reset-array-selftests-mirror",
+                workflow=reset_array_workflow,
+            )
+
             missing_pg_fence_scope = work / "missing-pg-fence-scope.md"
             missing_pg_fence_scope.write_text(
                 replace_in_row(
@@ -2653,8 +2923,18 @@ def main() -> int:
             "AU7.10 outside canonical file owner", "au-check.py", wrong_au_owner, False
         )
 
+    missing_mutations = EXPECTED_MUTATION_INVENTORY - blocked_mutation_inventory
+    unexpected_mutations = blocked_mutation_inventory - EXPECTED_MUTATION_INVENTORY
+    if missing_mutations or unexpected_mutations:
+        raise AssertionError(
+            "mutation inventory mismatch: "
+            f"missing={sorted(missing_mutations)}, "
+            f"unexpected={sorted(unexpected_mutations)}"
+        )
+    mutation_count = len(blocked_mutation_inventory)
     print(
-        "\nplan gate self-test: PASS — baselines accepted and 131 corruptions blocked"
+        "\nplan gate self-test: PASS — baselines accepted and "
+        f"{mutation_count} corruptions blocked"
     )
     return 0
 
