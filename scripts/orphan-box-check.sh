@@ -94,7 +94,8 @@
 #                            a lease; pointing it at a service class guarantees
 #                            a permanent false page.
 #
-# Exit 0 = no delta. Exit 1 = at least one unaccounted or over-age box (page).
+# Exit 0 = no delta. Exit 1 = at least one unaccounted, over-age, or
+#          unclassified application (page).
 # Exit 2 = the check could not be performed (bad input, API failure).
 #
 # ── Required env (live mode only) ────────────────────────────────────────────
@@ -133,15 +134,12 @@ ACCOUNTED=""
 INSTANCES_JSON=""
 ONLY_APP=""
 # The ephemeral box classes — the only ones that carry a lease and can therefore
-# be over-age. Everything else on the account (the fabricd singleton, the
-# regional corelinkserver containers) is a long-lived SERVICE and is excluded;
-# including them pages forever on a healthy account (measured: fabricd up 111 h).
+# be over-age. The fabricd singleton and regional corelinkserver containers are
+# separately enumerated known long-lived SERVICE classes; a new, unclassified
+# application makes this check page rather than disappearing from the count.
 #
-# ⚠️ THIS IS AN ALLOWLIST, SO IT FAILS SILENT, NOT LOUD. A NEW ephemeral box
-# class added under a different application name is INVISIBLE to this check —
-# it will not page, it will simply never be looked at, and a leak in it reads as
-# CLEAN. Whoever adds a spawnable container class must add it here in the same
-# PR. `--app-pattern` overrides it ad hoc; `--app-pattern .` inspects everything
+# Whoever adds a spawnable container class must add it here in the same PR.
+# `--app-pattern` overrides it ad hoc; `--app-pattern .` inspects everything
 # (and will fire on the service classes, by design).
 APP_PATTERN='^corelink-spawn-worker-(runnercontainer|checkhostcontainer)$'
 
@@ -204,19 +202,54 @@ fi
 jq -e 'type == "array"' "$RAW" >/dev/null 2>&1 \
   || die "instance list is not a JSON array (got: $(head -c 200 "$RAW"))"
 
-# ── Drop the platform pool and every non-ephemeral application class ─────────
+# ── Classify every non-platform application explicitly ──────────────────────
+#
+# A filter that merely selects the ephemeral allowlist has a fatal blind spot:
+# a newly introduced application class is excluded and the resulting zero count
+# reads CLEAN. There are only two known long-lived service families on this
+# account; everything else must be classified as ephemeral by APP_PATTERN or
+# make the check page for operator review. APP_PATTERN deliberately has first
+# priority, so an explicit `--app-pattern .` remains an operator opt-in to
+# inspect a service class as a lease-bearing box (the documented diagnostic
+# behavior and the runner accounting path are preserved).
+SERVICE_APP_PATTERN='^(corelink-fabricd-fabricdcontainer|corelink-spawn-worker-fabricd|corelink-prod-(.*-)?corelinkserver-.*)$'
+CLASSIFIED="${WORKDIR}/classified.json"
 OURS="${WORKDIR}/ours.json"
-jq --arg re "$APP_PATTERN" \
-  '[.[] | select(.name != "_system") | select((.app // "") | test($re))]' "$RAW" > "$OURS"
+SERVICES="${WORKDIR}/services.json"
+UNKNOWN="${WORKDIR}/unknown.json"
+jq --arg ephemeral_re "$APP_PATTERN" --arg service_re "$SERVICE_APP_PATTERN" '
+  [.[]
+   | select(.name != "_system")
+   | . as $instance
+   | ($instance.app // "") as $app
+   | if ($app | test($ephemeral_re)) then
+       {class: "ephemeral", instance: $instance}
+     elif ($app | test($service_re)) then
+       {class: "service", instance: $instance}
+     else
+       {class: "unknown", instance: $instance}
+     end]
+' "$RAW" > "$CLASSIFIED"
+jq '[.[] | select(.class == "ephemeral") | .instance]' "$CLASSIFIED" > "$OURS"
+jq '[.[] | select(.class == "service") | .instance]' "$CLASSIFIED" > "$SERVICES"
+jq '[.[] | select(.class == "unknown") | .instance]' "$CLASSIFIED" > "$UNKNOWN"
 total_count="$(jq 'length' "$RAW")"
 system_count="$(jq '[.[] | select(.name == "_system")] | length' "$RAW")"
 ours_count="$(jq 'length' "$OURS")"
-service_count=$((total_count - system_count - ours_count))
+service_count="$(jq 'length' "$SERVICES")"
+unknown_count="$(jq 'length' "$UNKNOWN")"
 
 echo "running instances: ${total_count}"
 echo "  ephemeral boxes in scope (${APP_PATTERN}): ${ours_count}"
 echo "  platform _system pool:                     ${system_count}  (not ours)"
 echo "  long-lived service classes:                ${service_count}  (no lease — cannot be over-age)"
+echo "  unclassified application classes:          ${unknown_count}  (cannot report CLEAN)"
+
+if [ "$unknown_count" -gt 0 ]; then
+  while IFS=$'\t' read -r app name loc; do
+    echo "::error::UNCLASSIFIED APPLICATION: app=${app} instance=${name} location=${loc} — it is neither a known long-lived service nor in the ephemeral lease allowlist (${APP_PATTERN}). Refusing to report a clean fleet; classify it in this checker before adding or operating the application."
+  done < <(jq -r '.[] | [(.app // "?"), .name, (.location // "?")] | @tsv' "$UNKNOWN")
+fi
 
 now_epoch="$(date -u +%s)"
 max_age_sec=$((MAX_LEASE_HOURS * 3600))
@@ -250,8 +283,8 @@ else
 fi
 
 echo
-if [ "$overage" -gt 0 ] || [ "$unaccounted" -gt 0 ]; then
-  echo "VERDICT: LEAK — over-age=${overage} unaccounted=${unaccounted}"
+if [ "$overage" -gt 0 ] || [ "$unaccounted" -gt 0 ] || [ "$unknown_count" -gt 0 ]; then
+  echo "VERDICT: LEAK OR UNCLASSIFIED APPLICATION — over-age=${overage} unaccounted=${unaccounted} unclassified=${unknown_count}"
   echo "⛔ Do NOT try to teardown by instance name: it is a silent 204 no-op." >&2
   echo "   The only lever that removes a running box today is an image roll," >&2
   echo "   which kills in-flight jobs on the OTHER boxes. See" >&2
