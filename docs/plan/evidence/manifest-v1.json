@@ -1,0 +1,12 @@
+{
+  "schema_version": "evidence-manifest/v1",
+  "manifest_id": "baseline-2026-09-02",
+  "coverage_status": "RED",
+  "generated_at": "2026-09-02T00:00:00Z",
+  "repository": "corelink-runners",
+  "commit_sha": "6c83f6baf5432b6991b6aac9aecc49291ab1a184",
+  "artifacts": [],
+  "claims": [],
+  "claim_sources": ["@tracked-markdown"],
+  "deployed_versions": {}
+}
