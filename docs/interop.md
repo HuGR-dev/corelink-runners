@@ -2,19 +2,21 @@
 
 > ⚠️ **HISTORICAL (M0 spec-phase artifact, 2026-06-09).** This seam map predates the
 > built fabric and centers on **serving hugit as the anchor tenant** — but **hugit +
-> githugr (campaign #3) are DISCONTINUED (2026-07)** and the fabric is now **LIVE** on
-> Cloudflare. So the "spec phase / no fabric code" status and the hugit-serving sections
-> (§1, §4 "via hugit", §5 `hugit-runner-01`) are **history**. The live model: Runners is
-> **direct-to-ICP** + Workspaces SKUs on the live fabric, with **corelink-server** as the
-> cross-repo seam (introspect + billing ingest). Current state:
+> githugr (campaign #3) are DISCONTINUED (2026-07)**. The fabric implementation and its
+> Cloudflare target now exist in this repository, but this historical map carries no current
+> deployment or liveness evidence. So the "spec phase / no fabric code" status and the hugit-serving sections
+> (§1, §4 "via hugit", §5 `hugit-runner-01`) are **history**. The intended current model is
+> **direct-to-ICP** + Workspaces SKUs, with **corelink-server** as the cross-repo seam
+> (introspect + billing ingest). Current product context lives in:
 > `docs/product/FEATURES.md` + `docs/product/USE-SCENARIOS.md`. The mechanisms these
-> sections describe (§13 envelope, attestation, memo-key) are the fabric's own and live.
+> sections describe (§13 envelope, attestation, memo-key) are implemented by this fabric;
+> their runtime arm and deployment status require separate current evidence.
 
 ```
-   hugit (built) ──lease/exec/attest──▶  RUNNERS FABRIC (this repo, to build)
+   hugit (built) ──lease/exec/attest──▶  RUNNERS FABRIC (this repo, implemented)
    Workspaces (M4: sandboxes/dev boxes) ──▶      │ consumes, never forks
    direct customers (M2: concurrency plans) ──▶  ▼
-                                     CoreLink Cache — CAS·AC·R2·tenancy·PAT (live)
+                                     CoreLink Cache — CAS·AC·R2·tenancy·PAT
 ```
 
 ## 1. Serving hugit (the anchor tenant) — the exact loop
@@ -35,7 +37,7 @@ Per check, the fabric's obligations (full context in the frozen contract):
 | Honest accounting | exec vs cache-hit reported truthfully (no inflated "served from cache") — githugr renders these numbers as product KPIs |
 | Caps & fairness | per-tenant rate + concurrency/budget caps set **before** load (X10⑤ preventive); p95-wait fairness under contention (C7); other-tenant latency unmoved under hugit storms (X6/X10 — measurable) |
 
-**Definition of done for the seam:** hugit's gated suites flip live (run-not-skip
+**Historical definition of done for the seam:** hugit's gated suites flip live (run-not-skip
 with the endpoint set): B2b byte-identity · C3 warm<cold + cache-down
 fail-closed · C2a/C2b/C9 lease lifecycle · C5b secrets red-team · X11 mid-op
 broker fault · X6/X10 non-interference.
@@ -67,9 +69,10 @@ Workspaces sells the object, Runners executes beside it.
 
 ## 5. The interim → M1 handover (stated honestly)
 
-Today hugit's CI executes on `hugit-runner-01` (Hetzner) over SSH with
-`docker run` (pinned known-hosts; env `HUGIT_RUNNER_HOST`) — dogfood-grade
-transport that lights live CI at **P2**. **M1 replaces the transport, not the
+Before the July 2026 discontinuation, hugit's CI executed on `hugit-runner-01`
+(Hetzner) over SSH with `docker run` (pinned known-hosts; env
+`HUGIT_RUNNER_HOST`) — dogfood-grade transport that lit live CI at **P2**.
+**M1 was intended to replace the transport, not the
 contract**: same `RunnerLease` semantics behind an authenticated API, plus
 multi-tenancy, caps, and attested execution at production grade. The contract
 was written so hugit's client does not change.
