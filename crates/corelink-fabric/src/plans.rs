@@ -74,15 +74,15 @@ use crate::tenant::{TenantId, TenantPlan};
 /// module docs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PlanTier {
-    /// 20 parallel runners — solo dev / entry tier ($8/mo).
+    /// 20 parallel runners — solo dev / entry tier ($16/mo).
     Starter,
-    /// 40 parallel runners — growing dev + agents ($20/mo).
+    /// 40 parallel runners — growing dev + agents ($40/mo).
     Pro,
-    /// 80 parallel runners — small team / fleet ($50/mo).
+    /// 80 parallel runners — small team / fleet ($100/mo).
     Team,
-    /// 160 parallel runners — busy fleet ($100/mo).
+    /// 160 parallel runners — busy fleet ($200/mo).
     Scale,
-    /// 320 parallel runners — heavy fleet, volume tier ($200/mo).
+    /// 320 parallel runners — heavy fleet, volume tier ($400/mo).
     Max,
 }
 
@@ -333,6 +333,53 @@ mod tests {
             assert!(
                 fits_ledger(got),
                 "ceiling_for({tier:?}) = {got} overflows i64 ledger"
+            );
+        }
+    }
+
+    #[test]
+    fn plan_doc_prices_match_module_ladder() {
+        // Keep the public per-variant descriptions and the module-level
+        // pricing ladder in lockstep.  This is intentionally a source-level
+        // pin: a documentation-only price drift must fail the focused suite.
+        let src = include_str!("plans.rs");
+        let expected = [
+            ("Starter", "$16", "entry tier"),
+            ("Pro", "$40", "growing dev + agents"),
+            ("Team", "$100", "small team / fleet"),
+            ("Scale", "$200", "busy fleet"),
+            ("Max", "$400", "heavy fleet"),
+        ];
+        let lines: Vec<&str> = src.lines().collect();
+
+        for (tier, price, description) in expected {
+            let module_row = format!("| {tier} | {price} |");
+            assert!(
+                lines.iter().any(|line| {
+                    let fields: Vec<&str> = line
+                        .trim_start_matches("//! ")
+                        .split('|')
+                        .map(str::trim)
+                        .filter(|field| !field.is_empty())
+                        .collect();
+                    fields.get(0) == Some(&tier) && fields.get(1) == Some(&price)
+                }),
+                "module ladder price drift for {tier}: expected {module_row}"
+            );
+
+            let variant_line = format!("    {tier},");
+            let variant_index = lines
+                .iter()
+                .position(|line| *line == variant_line)
+                .unwrap_or_else(|| panic!("PlanTier::{tier} variant is missing"));
+            let doc_start = lines[..variant_index]
+                .iter()
+                .rposition(|line| !line.starts_with("    /// "))
+                .map_or(0, |index| index + 1);
+            let doc = lines[doc_start..variant_index].join("\n");
+            assert!(
+                doc.contains(description) && doc.contains(&format!("({price}/mo)")),
+                "PlanTier::{tier} documentation price drift: expected {price}/mo"
             );
         }
     }
