@@ -24,8 +24,11 @@ jobs:
     # so the in-job setup actions below install with no cross-job contention. The
     # gate's whole toolchain is still set up in-job by the pinned actions
     # (rust-toolchain + rust-cache + install-action), so it runs identically on a
-    # clean lease. Trigger: the GitHub-hosted lanes were also billing-blocked
-    # ("account payments have failed"), which self-hosted runners are exempt from.
+    # clean lease. A self-hosted label does not bypass GitHub's workflow-start
+    # boundary: GitHub must create a job before a CoreLink runner can receive it.
+    # An organization Actions budget/payment block may therefore end the suite as
+    # a zero-job `startup_failure`; that is no CI evidence and must not be replaced
+    # by a local PASS.
     runs-on: corelink
     steps:
       - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0  # v6.0.3 (Node 24; v4 is Node 20, forced off runners 2026-06-16)

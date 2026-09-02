@@ -1,0 +1,167 @@
+name: Plan integrity
+
+on:
+  pull_request:
+    paths:
+      - 'docs/plan/*.md'
+      - 'docs/plan/*.py'
+      - 'docs/plan/**/*.py'
+      - 'docs/plan/*finding-ids.txt'
+      - 'docs/plan/evidence/**'
+      - 'docs/plan/*.json'
+      - 'docs/plan/**/*.json'
+      - 'docs/handoff/**'
+      - '.github/workflows/*.yml'
+      - '.github/workflows/*.yaml'
+      - '.github/actionlint.yaml'
+      - '.github/actionlint.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'docs/plan/*.md'
+      - 'docs/plan/*.py'
+      - 'docs/plan/**/*.py'
+      - 'docs/plan/*finding-ids.txt'
+      - 'docs/plan/evidence/**'
+      - 'docs/plan/*.json'
+      - 'docs/plan/**/*.json'
+      - 'docs/handoff/**'
+      - '.github/workflows/*.yml'
+      - '.github/workflows/*.yaml'
+      - '.github/actionlint.yaml'
+      - '.github/actionlint.yml'
+
+permissions:
+  contents: read
+
+# A newer revision supersedes an older run for the same PR or branch.
+concurrency:
+  group: plan-integrity-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Coverage, WP, and AU structure
+    runs-on: corelink
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0  # v6.0.3
+
+      - name: Bind checkout to triggering SHA
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_AFTER_SHA: ${{ github.event.after }}
+        run: |
+          set -euo pipefail
+          ACTUAL_SHA="$(git rev-parse --verify HEAD)"
+          if [[ ! "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "plan-integrity: malformed triggering SHA: $EXPECTED_SHA" >&2
+            exit 1
+          fi
+          if [[ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]]; then
+            echo "plan-integrity: checkout SHA mismatch: expected=$EXPECTED_SHA actual=$ACTUAL_SHA" >&2
+            exit 1
+          fi
+          case "$EVENT_NAME" in
+            pull_request)
+              PARENTS="$(git show -s --format=%P HEAD)"
+              read -r FIRST_PARENT SECOND_PARENT EXTRA_PARENT <<< "$PARENTS"
+              if [[ -n "$EXTRA_PARENT" || "$FIRST_PARENT" != "$PR_BASE_SHA" || "$SECOND_PARENT" != "$PR_HEAD_SHA" ]]; then
+                echo "plan-integrity: PR merge binding mismatch: expected_base=$PR_BASE_SHA expected_head=$PR_HEAD_SHA parents=$PARENTS" >&2
+                exit 1
+              fi
+              ;;
+            push)
+              if [[ "$ACTUAL_SHA" != "$PUSH_AFTER_SHA" ]]; then
+                echo "plan-integrity: push event binding mismatch: after=$PUSH_AFTER_SHA actual=$ACTUAL_SHA" >&2
+                exit 1
+              fi
+              ;;
+            *)
+              echo "plan-integrity: unsupported event for SHA binding: $EVENT_NAME" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Lint workflow syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Parse whichever optional config is present, but never use it for
+          # the authoritative repository lint below.  In particular, an
+          # ignore-all config must not be able to turn a malformed workflow or
+          # a new private runner label into a false PASS.
+          config_files=()
+          for candidate in .github/actionlint.yaml .github/actionlint.yml; do
+            if [[ -f "$candidate" ]]; then
+              config_files+=("$candidate")
+            fi
+          done
+          if [[ "${#config_files[@]}" -gt 1 ]]; then
+            echo 'actionlint: keep only one of .github/actionlint.yaml or .github/actionlint.yml' >&2
+            exit 1
+          fi
+          if [[ "${#config_files[@]}" -eq 1 ]]; then
+            config_report="$(mktemp)"
+            set +e
+            printf '%s\n' \
+              'name: actionlint-config-validation' \
+              'on: push' \
+              'jobs:' \
+              '  check:' \
+              '    runs-on: ubuntu-latest' \
+              '    steps:' \
+              '      - run: true' \
+              | actionlint -config-file "${config_files[0]}" -stdin-filename .github/workflows/plan-integrity.yml -oneline - >"$config_report" 2>&1
+            config_status=$?
+            set -e
+            if [[ "$config_status" -ne 0 ]]; then
+              cat "$config_report"
+              echo "actionlint: invalid configuration ${config_files[0]}" >&2
+              exit 1
+            fi
+            echo "actionlint: parsed optional configuration ${config_files[0]} (non-authoritative)"
+          fi
+
+          # The authoritative checker pins the binary, invokes actionlint with
+          # -config-file /dev/null, and compares an exact (workflow,label)
+          # diagnostic multiset.  A regex allowlist would admit new labels or
+          # duplicate occurrences silently.
+          python3 docs/plan/actionlint-check.py
+
+      - name: Check audit finding coverage
+        run: python3 docs/plan/plan-check.py docs/plan/audit-2026-08-30-finding-ids.txt
+
+      - name: Check acceptance/WP ownership
+        run: python3 docs/plan/wp-check.py docs/plan/2026-08-30-golive-remediation-plan.md
+
+      - name: Check proposed AU ownership
+        run: >-
+          python3 docs/plan/au-check.py docs/plan/union-triage-remaining.md
+          --plan docs/plan/2026-08-30-golive-remediation-plan.md
+          --dag docs/plan/2026-09-01-reconciled-dispatch-dag.md
+
+      - name: Exercise structural planning gates
+        run: python3 docs/plan/gates-selftest.py
+
+      - name: Emit SHA-bound completion record
+        if: ${{ success() }}
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          ACTUAL_SHA="$(git rev-parse --verify HEAD)"
+          if [[ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]]; then
+            echo "plan-integrity: completion SHA mismatch: expected=$EXPECTED_SHA actual=$ACTUAL_SHA" >&2
+            exit 1
+          fi
+          RECORD="plan-integrity-completion/v1 event=$EVENT_NAME ref=$REF_NAME sha=$ACTUAL_SHA"
+          echo "$RECORD"
+          printf '### Plan integrity completion\n\n%s\n' "$RECORD" >> "$GITHUB_STEP_SUMMARY"

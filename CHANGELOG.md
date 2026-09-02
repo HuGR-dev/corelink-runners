@@ -7,6 +7,260 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-09-02 — Round-13 normative/checker alignment
+
+The post-review checker repair was aligned to normative follow-up `cfa1408` (replayed locally as
+`4259b6a`) without changing the Round-13 review result. WP and AU now enforce the 11-field monitor
+tuple; expanded ACK, signer-manifest, recovery, signed activation, owner-authorization, R6-relay and
+O-CFRATE contracts; the new owner-token predecessors; the exact T6-W1 scope; and the clarified
+Phase-1/Phase-2, artifact, activation and FAILED-versus-UNKNOWN semantics. The runtime-inventoried
+negative suite accepted all baselines and blocked its measured **164 corruptions**. This is a local
+structural diagnostic on later bytes, not remote CI evidence and not quiet, freeze, promotion,
+dispatch or green credit.
+
+The latest read-only observation at `2026-09-02T01:29:19Z` found fabricd version
+`40bf22a4-6c48-467d-9844-b4fc33e7a3ee` with `FABRIC_PG_DISABLED=1` and **3/3 inactive**, canary
+version `852277c1-9778-459f-b1ff-9d56fbe7c32f` with `FABRIC_PROBES_ENABLED=0`, and a returned
+runner detail page with **426 inactive / zero live** records. `check-host` returned `No instances
+found` and `active=0`; its aggregate `healthy=1` was inconsistent with those details. No health
+route, deploy, restart, delete or rearm operation occurred, and the observation is not immutable
+evidence or later authorization.
+
+### 2026-09-01 — go-live plan Round 13 is 8/8 NOT QUIET; provenance repair only
+
+Round 13 reviewed the exact clean committed input
+`b3371e8b6e9803d0ceac3b5df2677366b37aad1b`: **8/8 NOT QUIET, quiet count 0**. Local
+reproductions of CI, Plan integrity and DCO passed on those bytes, including the 131-corruption
+negative selftest, but this is not remote CI evidence. The organization Actions budget boundary
+produced zero-job `startup_failure` suites for incident PR #531: GitHub must create a job before a
+self-hosted CoreLink runner can receive it. No jobless suite or local PASS supplies green, freeze,
+dispatch or merge credit.
+
+At that checkpoint, the latest read-only containment configuration observation was
+`2026-09-01T22:40:33Z`: fabricd version `40bf22a4-6c48-467d-9844-b4fc33e7a3ee` had
+`FABRIC_PG_DISABLED=1`, canary version `852277c1-9778-459f-b1ff-9d56fbe7c32f` had
+`FABRIC_PROBES_ENABLED=0`, and fabricd was **0 running / 3 inactive**. The subsequent
+`2026-09-01T22:48:57Z` runner inventory contained **883 inactive / zero live** records. These
+timestamped observations are not immutable review evidence or authorization for a later live
+action. Incident-branch commits `51b9cb8` and `243e2e1` remain local, unpushed and undeployed.
+
+This post-review provenance/operations repair is a new input and inherits no quiet credit. Status
+remains **QUIET COUNT 0 · NOT FROZEN · NO AU PROMOTION · NO DISPATCH · NO GREEN CREDIT**.
+No push, deploy, rearm, promotion, freeze or dispatch is authorized.
+
+### 2026-09-01 — go-live plan Round 12 was 7/8 NOT QUIET; repair sealed for Round 13
+
+Round 12 reviewed the exact committed input
+`3d1ed13bb1d53af6ce27385736f19d54bb5f90cc`: **7/8 NOT QUIET, 1/8 QUIET, quiet count 0**.
+The consolidated ledger is
+[`docs/plan/2026-09-01-round12-cold-review-ledger.md`](docs/plan/2026-09-01-round12-cold-review-ledger.md).
+Its deduplicated blocker domains are the PG server fence; human-page ACK authentication;
+journal completeness and non-equivocation; trusted time/freshness; canary activation-tuple
+contradictions; stale triage doctrine; producer ACK test-cycle coverage; signer-rotation recovery;
+fabricd idle no-wake behavior; canary fail-visible behavior; exact-`0` PG-flag enablement;
+O-CFRATE; and checker exclusion/workflow false-PASS paths.
+
+The Round-12 repair cycle was sealed as clean DCO commit
+`b3371e8b6e9803d0ceac3b5df2677366b37aad1b`, the exact Round-13 input. No Round-12 review result
+transferred to those later bytes; Round 13 independently returned 8/8 NOT QUIET.
+The status remains **QUIET COUNT 0 · NOT FROZEN · NO AU PROMOTION · NO DISPATCH · NO GREEN
+CREDIT**. The repaired checker blocks **131 meaningful corruptions (66 prior + 65 Round-12/
+repair-audit mutations)** on the clean committed Round-13 input. This local structural diagnostic is
+not remote CI or review evidence. A read-only `versions view` observation at
+`2026-09-01T22:40:33Z` recorded fabricd version
+`40bf22a4-6c48-467d-9844-b4fc33e7a3ee` with `FABRIC_PG_DISABLED=1` and canary version
+`852277c1-9778-459f-b1ff-9d56fbe7c32f` with `FABRIC_PROBES_ENABLED=0`. Detailed instances showed
+fabricd **0 running / 3 inactive** and the runner fleet **0 running / 865 inactive / 18 stopped**;
+the app summary's `LIVE INSTANCES` field was not used as state. No health/status/deploy/restart/
+delete/rearm operation occurred. The later runner-only observation at `2026-09-01T22:48:57Z`
+recorded **883 inactive / zero live**. Neither observation is an immutable review artifact or
+authorization for a later action.
+
+### 2026-09-01 — go-live plan Round 11 remains 5/8 NOT QUIET; repair in progress
+
+Round 11 reviewed the exact input
+`fd9b226d3bcda055092b5e34f0cf9adc41a802bd`: **5/8 NOT QUIET, 3/8 QUIET, quiet count 0**.
+The consolidated ledger is
+[`docs/plan/2026-09-01-round11-cold-review-ledger.md`](docs/plan/2026-09-01-round11-cold-review-ledger.md).
+The blockers cover pre-sealing future T6-W14 identities; A6.17's mutable/non-exhaustive journal and
+omitted scheduler runtime; unauthenticated or unbound ACKs; unset/invalid canary fail-open;
+interlock check/use races; absent signer trust; and shell selftests not proven in CI.
+
+The Round-11 repair cycle is **IN PROGRESS**. Its later repair tree is distinct from the reviewed
+input and has no SHA asserted by this entry; no review result transfers to an unqualified `HEAD`.
+The status remains **QUIET COUNT 0 · NOT FROZEN · NO AU PROMOTION · NO DISPATCH · NO GREEN
+CREDIT**. The three signoffs are bounded to `fd9b226d…` and cannot advance quietness. The current
+repair selftest verifies **66 meaningful corruptions (57 prior + 9 Round-11 mutations)**; that
+diagnostic is bounded to the later repair tree and is not a Round-11 review result or evidence of
+promotion, freeze, dispatch or green readiness. Executable canary fail-closed hardening is present
+in planning history at `13ce612` and was merged by PR #530 as
+`65540afe15fb65bfd431b631acfc971a7b0a2331`; this is source delivery, not a production deploy or
+permission to re-enable. Production
+containment remains explicit and unchanged: `FABRIC_PG_DISABLED=1` and
+`FABRIC_PROBES_ENABLED=0` stay armed.
+
+### 2026-09-01 — go-live plan Round 10 remains 7/8 NOT QUIET; repair in progress
+
+Round 10 reviewed the exact clean input
+`e3dbba5cc0f003ee6a0b5ff8f52f73e8eb07ad29`: **7/8 NOT QUIET, 1/8 QUIET, quiet count 0**. The
+consolidated ledger is
+[`docs/plan/2026-09-01-round10-cold-review-ledger.md`](docs/plan/2026-09-01-round10-cold-review-ledger.md).
+The blockers cover final monitor redeploy/provider-rearm ordering, total FIFO residence in every
+end-to-end SLO, three missing canonical tests, T1-W5 live-probe containment ancestry, A6.17's
+immutable seven-day window, stale gate/selftest instructions, and a broken pre-merge selftest
+fixture.
+
+The Round-10 repair cycle is **IN PROGRESS**. Its later repair tree is distinct from the reviewed
+input and has no SHA asserted by this entry; no review result transfers to an unqualified `HEAD`.
+The status remains **QUIET COUNT 0 · NOT FROZEN · NO AU PROMOTION · NO DISPATCH · NO GREEN
+CREDIT**. The one signoff is bounded to `e3dbba5…` and cannot advance quietness. After the CI
+fixture work settled, the repaired `gates-selftest.py` reports 57 meaningful corruptions (48 + 9,
+including the meaningful T3-W16 dependency mutation); this is a
+dirty-tree diagnostic until reproduced on a clean signed input with an externally supplied SHA.
+
+### 2026-09-01 — go-live plan Round 9 remains 7/8 NOT QUIET; repair in progress
+
+Round 9 reviewed the exact committed input
+`f5df50d7659254ed5e4579ab75df2a4d44ceea0f` in a clean, read-only exercise. Seven of eight
+reviewers reported new blockers; one found no new finding and signed off. The consolidated ledger
+is [`docs/plan/2026-09-01-round9-cold-review-ledger.md`](docs/plan/2026-09-01-round9-cold-review-ledger.md).
+The blockers cover independent-monitor host and credential isolation, end-to-end alert timing,
+lifecycle/canary evidence, shared incident recovery, executable T6-W15/T6-W12 ownership,
+dispatch/containment authorization, and SHA-labelled evidence boundaries.
+
+The Round-9 repair cycle is **IN PROGRESS**. Its later repair tree is distinct from the reviewed
+input and has no SHA asserted by this entry; no review result transfers to an unqualified `HEAD`.
+The status remains **QUIET COUNT 0 · NOT FROZEN · NO AU PROMOTION · NO DISPATCH · NO GREEN
+CREDIT**. The one signoff is bounded to `f5df50d…` and cannot advance quietness.
+
+### 2026-09-01 — go-live plan Round 8 remains 5/8 NOT QUIET; repair in progress
+
+Round 8 reviewed the exact committed input
+`9f6e281ca617113a840ac268dcb680b258064c39` in a clean, read-only exercise. Five of eight
+reviewers reported new blockers; three found no new finding and signed off. The consolidated
+ledger is [`docs/plan/2026-09-01-round8-cold-review-ledger.md`](docs/plan/2026-09-01-round8-cold-review-ledger.md).
+The blockers cover independent incident monitoring, ready-set fence enforcement, the lifecycle
+missing-sample acceptance path, DAG ordering/replay semantics, and executable scope/ownership for
+the external monitor and provider inventory adapter.
+
+The Round-8 repair cycle is **IN PROGRESS**. Its later repair tree is distinct from the reviewed
+input and has no SHA asserted by this entry; no review result transfers to an unqualified `HEAD`.
+The repair now splits the external monitor base into **T6-W15**, before both durable-PG re-arm
+(`T1-W6`) and the provider-inventory/cost live proof (`T6-W12`). The current repair draft therefore
+tracks 69 DAG vertices (48 principal, 9 staged-new and 12 AU), with 9 proposal-only staged-new WPs;
+**T6-W15** is the new identifier for the 48th principal WP (A6.10), not a staged-new WP. These
+numbers describe the later repair draft, not the reviewed input, and are not quietness or dispatch
+evidence. The status remains **QUIET COUNT 0 · NOT FROZEN · NO AU PROMOTION · NO DISPATCH · NO
+GREEN CREDIT**.
+
+The Round-8 review input is separate from the historical Round-7 input
+`289826e358050c7d6b4517fc8a21f79c733c7e32`; neither review record asserts a self-referential hash.
+
+### 2026-09-01 — go-live plan Round 7 remains 6/8 NOT QUIET
+
+Round 7 reviewed the exact committed repair input
+`289826e358050c7d6b4517fc8a21f79c733c7e32` in a clean, read-only exercise. Six of eight reviewers
+reported new blockers; two found no new finding and signed off. The consolidated findings cover
+semantic recovery, containment and alert ordering, implementable scopes, gate bypasses, and
+current-versus-historical provenance. The full ledger is
+[`docs/plan/2026-09-01-round7-cold-review-ledger.md`](docs/plan/2026-09-01-round7-cold-review-ledger.md).
+
+At that immutable Round-7 input, the structure checks passed mechanically: 247/247 findings, 94
+suite rows (92 live), 30 AU source findings / 33 proposed AU ids, 68 DAG vertices in 20 batches
+(cap 8), and 23 known corruptions blocked by the negative selftest. The 23-case result is the
+pre-Round-7-repair baseline; it is not a claim about a later repair tree. The subsequent repair
+cycle now targets 28 blocked corruptions; that target is not evidence until it passes on its own
+signed, byte-identified tree. Structural PASS remains neither semantic readiness nor production
+evidence. The status is **QUIET COUNT 0 · NOT FROZEN · NO AU PROMOTION · NO DISPATCH · NO GREEN
+CREDIT**.
+
+The clean review result is bounded to `289826e…`; subsequent repairs are a different tree and must
+be identified by their own full SHA and reviewed again. No self-hash or unqualified `HEAD` claim is
+made here.
+
+### 2026-09-01 — go-live plan Round 6 remains 7/8 NOT QUIET
+
+Round 6 reviewed the exact committed repair input
+`af4ed85dad289e333e9bf09f129fb2faa243136d` in a clean, read-only exercise. Seven of eight
+reviewers reported blockers; one reviewer found no new issue and signed off. The blockers span
+historical-catalog provenance, semantic acceptance, the meaning of mechanical gates, DAG
+dispatchability, production containment evidence, and staged owner decisions/registry. The full
+ledger is [`docs/plan/2026-09-01-round6-cold-review-ledger.md`](docs/plan/2026-09-01-round6-cold-review-ledger.md).
+
+The latest measured fabricd inventory remains **3/3 inactive at `2026-09-01T17:52:13Z`**. That is
+post-containment scale-to-zero evidence only: `FABRIC_PG_DISABLED=1` still suspends durable ledger
+replay, the Postgres vCPU ceiling and durable billing export. The runner wave was correlated with
+four in-progress `corelink-server` workflows and provider runners; it was not proof of a leak.
+
+On the reviewed Round-6 input, the structure checks passed mechanically: 247/247 findings, 94 suite
+rows (92 live), 30 AU source findings / 33 proposed AU ids, and 18 known corruptions blocked by the
+negative selftest. This repair cycle adds five reproduced structural mutations, bringing the
+current selftest to 23 blocked corruptions.
+The corrected AU registry has T3-W5 as the **12th new AU WP** and **4 existing-WP extensions**.
+These results establish structural consistency only—not semantic readiness, tamper-proof proof,
+production readiness, quietness, freeze eligibility or dispatch authority. The status is
+**QUIET COUNT 0 · NOT FROZEN · NO AU PROMOTION · NO DISPATCH · NO GREEN CREDIT**. At that historical
+point, Round 7 could start only after the repair cycle was captured in one newly signed commit with
+a full SHA.
+
+### 2026-09-01 — go-live plan round 5 remains 8/8 NOT QUIET
+
+Round 5 reviewed the current planning input `3fe8d06` (with merged containment `b70deae`, PR #529)
+and recorded **8/8 blockers**. The incident proves a Postgres-dependent **pre-bind failure class**;
+it does not distinguish `PgLedger` initialization from billing-exporter initialization. Containment
+remains `FABRIC_PG_DISABLED=1`; the measured **3/3 inactive** fabricd inventory is scale-to-zero
+evidence only. `spawn=401` remains a separate observability-key drift, not a burn diagnosis.
+
+The three primary structure gates remain the exact `plan-check.py`, `wp-check.py` and `au-check.py`
+commands recorded in `docs/plan/2026-09-01-round5-cold-review-ledger.md`; the separate
+`gates-selftest.py` is a negative mutation check. Historical snapshots `e8a9e78` and `eba6e8a`
+are SHA-labelled context, not the current review input. D11, D12 and D13 remain visible, staged and
+unresolved. The repaired AU proposal contains 30 source findings / 33 ids, and the negative selftest
+blocks 18 known corruption classes; AU remains staging-only. The plan is **NOT FROZEN** and there is
+**NO DISPATCH**.
+
+### 2026-09-01 — go-live plan rev-6 draft fails closed under structural mutation
+
+The post-incident backlog remains **NOT FROZEN** and has quiet count zero. The rev-6 draft reconciles
+30 AU source findings into 33 STAGING-only acceptance proposals, repairs falsifiability and
+fail-closed semantics in existing A rows, and records incident-driven proposals for early runner
+kill switches, authoritative inventory joins, bounded PostgreSQL refusal, no-wake canary monitoring
+and independent burn alerts.
+
+`plan-check.py`, `wp-check.py` and `au-check.py` now reject the false-PASS classes reproduced by the
+round-5 cold review. The earlier Round-6 pre-repair snapshot's `gates-selftest.py` required 18
+corrupted fixtures to block, and the new
+`plan-integrity.yml` workflow runs all planning gates on relevant changes. Structural PASS is not
+freeze, dispatch or production-readiness evidence.
+
+### 2026-09-01 — fabricd burn contained; the durable-ledger restoration is superseded
+
+The current production state is deliberately degraded under
+[`docs/plan/evidence/2026-09-01-fabricd-pg-containment.md`](docs/plan/evidence/2026-09-01-fabricd-pg-containment.md).
+The emergency `FABRIC_PG_DISABLED=1` switch is armed on Worker version
+`40bf22a4-6c48-467d-9844-b4fc33e7a3ee`; the fixed-config boot probe served 6/6, but fabricd is
+using its in-memory ledger while durable lease replay, the Postgres-backed vCPU ceiling, and
+durable billing export are suspended.
+
+The incident and remediation lineage is:
+
+- **#524** — established a Postgres-dependent pre-bind failure class during the quota-suspended Neon
+  incident; the available evidence did not distinguish `PgLedger` initialization from
+  billing-exporter initialization as the failing path.
+- **#525** — closed the COLD runner leak by allowing `reapStaleBoxes` to handle spawns without an
+  installation id, with a bounded reaper.
+- **#526** — bounded the admission fail-open and added the mint-key-unarmed signal and boot guard.
+- **#527** — restored the durable ledger after the quota returned and the retry loop was removed;
+  **superseded for the current live state** by containment commit `2df6740`, which re-armed the
+  emergency switch when the Postgres burn recurred.
+
+Containment left the fabricd image unchanged at
+`sha256:2e7bcea926f4ce2b38edb1a381f3821fcf4c898377e4f988b763fd3232c0e565`. Re-arm the durable
+backend only after a restored or replacement database passes every monitor/provider/transaction
+predecessor and an owner-approved fixed-config preflight. Exact `FABRIC_PG_DISABLED="0"` is necessary
+but not sufficient; `DATABASE_URL` alone never arms or authorizes PG. This changelog grants no live
+deploy, restart, delete, probe, rearm or canary action.
+
 ### 2026-08-31 — the runner image gains nightly + llvm-tools + cargo-fuzz, so seven CI lanes can leave the owner's Mac
 
 Unblocks corelink-server's WP-CI migration. Seven of its workflows

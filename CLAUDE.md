@@ -16,15 +16,19 @@ HuGR (the company / brand)
    hugit / githugr (agent-fleet forge)                         (campaign #3, DISCONTINUED 2026-07)
 ```
 
-**CURRENT STATE (2026-07-17).** Repo `HuGR-Labs/corelink-runners` (private; migrated
+**CURRENT STATE (2026-09-01 containment).** Repo `HuGR-Labs/corelink-runners` (private; migrated
 out of `HumanGuardrail` on 2026-08-01, which had itself been renamed from `humangr-labs`
 — both are DEAD slugs; the GitHub App installation moved `144561227` → `150584374` in the
 same migration, and every match is EXACT-string, redirects do not apply), default branch
 `main`, real CI on the self-hosted runner
-`corelink-runners-builder-01`. The fabric is **LIVE on Cloudflare**: `fabricd` (the Rust
-control plane) runs as a CF Container singleton behind a proxy Worker with a **pg-durable
-ledger** (DATABASE_URL bound → survives restart; vCPU-ceiling gate armed), and the
-**cache-moat is live + proven** (2026-07-09: native check-exec + per-job mint). A go-live
+`corelink-runners-builder-01`. The Cloudflare edge is serving under **intentional emergency
+degradation**, not go-live: `FABRIC_PG_DISABLED=1` is armed, so fabricd uses an in-memory ledger and
+durable lease replay, the Postgres-backed vCPU ceiling, and durable billing export are suspended.
+The 2026-09-01 containment evidence is
+`docs/plan/evidence/2026-09-01-fabricd-pg-containment.md`; PR #529 also disables the five-minute
+canary fabric probes that prevented scale-to-zero. C1 and C4 remain red. The **cache-moat was proven**
+on 2026-07-09 (native check-exec + per-job mint), but current go-live credit requires a fresh
+version-bound proof after durable recovery. A go-live
 hardening wave (2026-07-17) landed billing-usage durability, the external-GA installation
 allowlist, the idem_key cross-path disjointness lock, and the shim cfg-gate. **hugit +
 githugr (campaign #3) are DISCONTINUED (2026-07)** — Runners is sold **direct to its own
@@ -67,11 +71,12 @@ seam** (`conformance/corelink-introspect.json` + the billing `conformance/UsageE
   example had to be a real UUID, not `"acme"`.)
 - No git/path dependency in either direction (`deny.toml` enforces crates.io only).
 
-**M1 progress.** The multi-tenant control plane (`fabricd`), the Cloudflare-Containers
-substrate, the pg-durable ledger, the concurrency-cap + vCPU-ceiling gates, and the
-cache-moat are **live**. Open work is owner/config-gated, not missing code: external-GA
-flip · billing usage-push (COGS-only, low-urgency) · N>1 multi-instance (offline-proven,
-flip = env) · the server-side `max_vcpu_h` value. Live list: `docs/ROADMAP.md`. The **live
+**M1 progress.** The multi-tenant control plane (`fabricd`) and Cloudflare-Containers substrate are
+deployed, but the 2026-09-01 emergency switch bypasses the pg-durable ledger and therefore suspends
+durable concurrency/vCPU and billing guarantees. This is a contained service edge, not a green M1
+claim. Permanent repair must remove pre-bind dependency failure, timer-driven reconnect burn and
+missing independent paging before the durable backend is re-armed. Other open work includes
+external-GA, billing usage-push, N>1 multi-instance and the server-side `max_vcpu_h` value. The **live
 cross-repo seam is corelink-server** (auth introspect + billing ingest); the old
 hugit-gated seams (`IntentMetrics`, `hugit-c9-`) are **dead** — hugit is discontinued.
 
