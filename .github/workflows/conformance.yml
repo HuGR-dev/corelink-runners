@@ -42,9 +42,54 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Run shipped TypeScript conformance suite
+      - name: Run shipped TypeScript conformance suite and prove collection
         working-directory: sdk/typescript
-        run: npm test
+        run: |
+          # Keep the test command's exit status authoritative even though its
+          # TAP is retained for the anti-vacuity assertion below.
+          set -euo pipefail
+          tap_log="$(mktemp)"
+          negative_tap="$(mktemp)"
+          trap 'rm -f "$tap_log" "$negative_tap"' EXIT
+
+          assert_tap_summary() {
+            # Node's TAP reporter has a fixed summary shape.  Require every
+            # counter exactly once so an empty suite, a filtered suite, or a
+            # failing/cancelled/skipped test cannot turn this gate green.
+            awk '
+              $0 == "# tests 9" { tests++ }
+              $0 == "# pass 9" { pass++ }
+              $0 == "# fail 0" { fail++ }
+              $0 == "# cancelled 0" { cancelled++ }
+              $0 == "# skipped 0" { skipped++ }
+              $0 == "# todo 0" { todo++ }
+              END {
+                if (tests == 1 && pass == 1 && fail == 1 &&
+                    cancelled == 1 && skipped == 1 && todo == 1) {
+                  exit 0
+                }
+                exit 1
+              }
+            ' "$1"
+          }
+
+          npm test 2>&1 | tee "$tap_log"
+          if ! assert_tap_summary "$tap_log"; then
+            echo "::error ::TypeScript conformance TAP summary was not exactly 9 passing, non-skipped tests."
+            exit 1
+          fi
+
+          # Focused negative mutation: a one-test collection regression must
+          # be rejected by the same parser, rather than merely documenting the
+          # expected count beside the real command.
+          printf '%s\n' \
+            '# tests 8' '# pass 8' '# fail 0' '# cancelled 0' '# skipped 0' '# todo 0' \
+            > "$negative_tap"
+          if assert_tap_summary "$negative_tap"; then
+            echo "::error ::TAP collection guard accepted its 8-test mutation."
+            exit 1
+          fi
+          echo "TAP collection guard rejected the 8-test mutation as expected."
 
   python:
     name: Python conformance
