@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://corelink.dev/schemas/evidence-artifact-v1.json",
+  "title": "CoreLink evidence artifact v1",
+  "description": "A dated, immutable record of a test or probe. A record is evidence only when its provenance and version binding are complete.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact_id",
+    "kind",
+    "status",
+    "observed_at",
+    "source",
+    "claims",
+    "version"
+  ],
+  "properties": {
+    "schema_version": { "const": "evidence/v1" },
+    "artifact_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$"
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["test", "probe", "test+probe", "decision", "obstacle", "relay", "capability"]
+    },
+    "status": {
+      "type": "string",
+      "enum": ["PASS", "FAIL", "SKIPPED", "FAILED", "UNKNOWN", "SERVED", "CONTAINED", "RED"]
+    },
+    "observed_at": { "type": "string", "format": "date-time" },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "commit_sha", "path"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "commit_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "path": { "type": "string", "pattern": "^[^/].*\\.json$" }
+      }
+    },
+    "claims": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{1,127}$" },
+      "uniqueItems": true
+    },
+    "version": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+      },
+      "anyOf": [
+        { "required": ["id"] },
+        { "required": ["digest"] }
+      ]
+    },
+    "evidence": { "type": "object" },
+    "notes": { "type": "string" }
+  }
+}

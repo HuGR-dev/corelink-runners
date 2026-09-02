@@ -403,7 +403,7 @@ DAG_SCHEMA_MARKER = (
 )
 DAG_TABLE_HEADING = "## Canonical node table"
 DAG_BATCH_HEADING = "## Deterministic ready sets and proof"
-DAG_EXPECTED_VERTEX_COUNT = 69
+DAG_EXPECTED_VERTEX_COUNT = 70
 DAG_HEADER = [
     "node",
     "phase / wave",
@@ -832,7 +832,8 @@ AU_DECLARED_NEW_WPS = {
     "T5-W3",
     "T7-W4",
     "T7-W5",
-    "T8-W4",
+    "T8-W4a",
+    "T8-W4b",
     "T8-W5",
     "T8-W6",
     "T8-W7",
@@ -874,12 +875,17 @@ EVIDENCE_ARTIFACT_RE = re.compile(r"docs/plan/evidence/[A-Za-z0-9._-]+\.json")
 REQUIRED_DAG_DIRECT_PREDECESSORS = {
     # A deploy cannot resume while the containment proof or the fleet-busy
     # credential/force-deploy owner action is still outstanding.
-    "T2-W2b": {"T3-W18", "O-FLEETBUSY", "T8-W4"},
+    "T2-W2b": {"T3-W18", "O-FLEETBUSY", "T8-W4a", "T8-W4b"},
     # The JIT-config secret-surface repair must precede pinning, deployment,
     # and image shipment; a fan-in at the final probe cannot prove that the
     # deployed digest actually contains the repaired entrypoint.
-    "T2-W2a": {"T8-W4"},
-    "T2-W4": {"T8-W4"},
+    "T2-W2a": {"T8-W4a"},
+    "T2-W4": {"T8-W4a", "T8-W4b"},
+    # T8-W4b follows containment and the DevEnv test harness, and may touch the
+    # Worker monolith's index.ts, so it must land before monolith/DevEnv users.
+    "T8-W4b": {"T3-W18", "T9-W0"},
+    "T4-W1": {"T8-W4b"},
+    "T9-W1": {"T8-W4b"},
     # The independent implementation must exist before the Cloudflare canary
     # is credited with delivering synthesized conditions end to end.
     "T6-W6": {"T6-W9", "T6-W12"},
@@ -923,7 +929,7 @@ REQUIRED_DAG_DIRECT_PREDECESSORS = {
     "T7-W5": {"O-CFRATE"},
     "T3-W16": {"T6-W15", "O-CFINVENTORY", "O-CFCANCEL"},
     "T1-W5": {"T3-W18"},
-    "T8-W7": {"T8-W4", "T2-W2a", "T2-W2b", "T2-W4"},
+    "T8-W7": {"T8-W4a", "T2-W2a", "T2-W2b", "T2-W4"},
 }
 
 FORBIDDEN_DAG_DIRECT_PREDECESSORS = {

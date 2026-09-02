@@ -106,6 +106,7 @@ EXPECTED_RUNNER_LABEL_DIAGNOSTICS: Counter[tuple[str, str]] = Counter(
         (".github/workflows/o7-metadata-probe.yml", "corelink-dogfood"): 1,
         (".github/workflows/orphan-box-detect.yml", "corelink"): 1,
         (".github/workflows/plan-integrity.yml", "corelink"): 1,
+        (".github/workflows/pg-suite.yml", "corelink"): 1,
         (".github/workflows/prove-baked-buildkit.yml", "corelink"): 1,
         (".github/workflows/release.yml", "corelink"): 3,
         (".github/workflows/spawn-worker-ci.yml", "corelink"): 1,

@@ -8,10 +8,11 @@
 # and a final:
 #     Pushed image: registry.cloudflare.com/<account>/<image>:<tag>
 #
-# We prefer the immutable digest form
+# The resolver emits only the immutable digest form
 #     registry.cloudflare.com/<account>/<image>@sha256:<64hex>
-# and fall back to the mutable tag ref if no digest is found (never regresses —
-# the original hosted workflow also fell back to the tag).
+# A missing or malformed digest is an error. Falling back to the tag would make
+# a successful push look pin-ready while leaving the subsequent deployment
+# mutable, violating the X4 floor.
 #
 # Usage: resolve-pushed-ref.sh <image-name> <tag> <push-output-file>
 set -euo pipefail
@@ -36,6 +37,7 @@ fi
 if printf '%s' "$digest" | grep -qE '^sha256:[0-9a-f]{64}$'; then
   printf '%s@%s\n' "$base" "$digest"
 else
-  # fall back to the tag ref (mutable, but never empty)
-  printf '%s:%s\n' "$base" "$TAG"
+  printf 'resolve-pushed-ref: push output did not contain an immutable sha256 digest for %s:%s\n' \
+    "$base" "$TAG" >&2
+  exit 1
 fi

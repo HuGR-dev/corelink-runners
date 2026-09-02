@@ -164,6 +164,11 @@ if [ -n "$ADMIN_REASON" ] && [ "$MODE" != "merge" ]; then
   exit 2
 fi
 
+if [ "$DRY_RUN" -eq 1 ] && [ "$MODE" != "merge" ]; then
+  echo "  ⛔ --dry-run is only meaningful with --merge." >&2
+  exit 2
+fi
+
 # ── The pipe footgun, named on stderr ─────────────────────────────────────────
 # `[ -t 1 ]` is false exactly when the caller piped or redirected stdout, i.e.
 # in the `… | tail -3 && gh pr merge …` shape that produced the #1049 incident.
@@ -314,8 +319,9 @@ print()
 # Chosen because both are triggered by a bare `on: pull_request` with NO paths
 # filter, so they run for every PR regardless of what it touches. If either is
 # missing, the `pull_request` workflows did not fire and the rest of this list
-# is metadata jobs that gate nothing. Substring match keeps this robust against
-# job-name edits ("dco-check" → "dco", "ci / gates" → "gates").
+# is metadata jobs that gate nothing. The accepted names below are the exact
+# job identities emitted by GitHub, plus the exact workflow/job display form.
+# Substring matching is forbidden: `fake-gates` is not the `gates` job.
 #
 # ⚠️ REPO-SPECIFIC: the server's list is ["dco", "gitleaks"]; this repo has no
 # per-PR gitleaks lane, and its unconditional pair is `gates` + `dco`.
@@ -324,9 +330,13 @@ print()
 # would make the script fail on PRs that legitimately skip it — turning a
 # fail-open into a fail-noisy, which gets the whole check disabled by the next
 # person in a hurry.
-REQUIRED_PRESENT = ["gates", "dco"]
-names = " ".join(c.get("name", "").lower() for c in data)
-missing = [g for g in REQUIRED_PRESENT if g not in names]
+AUTHORITATIVE_CHECKS = {
+    "gates": {"gates", "ci / gates"},
+    "dco": {"dco", "dco / dco"},
+}
+names = {" ".join(str(c.get("name", "")).casefold().split()) for c in data}
+missing = [job for job, identities in AUTHORITATIVE_CHECKS.items()
+           if not names.intersection(identities)]
 if missing:
     print(f"  ⛔ DO NOT MERGE PR #{pr} — the always-present gates never ran: "
           f"{', '.join(missing)}.")
@@ -334,6 +344,26 @@ if missing:
     print("     no paths filter), so their ABSENCE means the pull_request")
     print("     workflows did not fire for this head sha. The checks listed above")
     print("     are pull_request_target metadata jobs; they gate nothing.")
+    verdict("STRUCTURAL")
+    sys.exit(1)
+
+# A required check that is present but skipped did not execute.  Skipping is
+# acceptable for optional, path-filtered checks only; it is never acceptable for
+# the unconditional gates above.  Check the records themselves instead of
+# relying on the presence set, so a skipped `gates` cannot masquerade as a
+# green structural prerequisite.
+skipped_required = []
+for job, identities in AUTHORITATIVE_CHECKS.items():
+    if any(
+        " ".join(str(c.get("name", "")).casefold().split()) in identities
+        and c.get("bucket") == "skipping"
+        for c in data
+    ):
+        skipped_required.append(job)
+if skipped_required:
+    print(f"  ⛔ DO NOT MERGE PR #{pr} — required gate(s) skipped: "
+          f"{', '.join(skipped_required)}.")
+    print("     The unconditional gates must execute; a skipped result is not a verdict.")
     verdict("STRUCTURAL")
     sys.exit(1)
 

@@ -423,8 +423,8 @@ Cloudflare.
 `T9-W1` is a separate Sol decision-gated lane because its exact scope is limited to the devenv DO
 and its focused test; it owns neither worker-monolith file. It is nevertheless a hard predecessor
 of both billing proof lanes: satisfying the external `O-BILLING` token cannot bypass the devenv
-poison-pill repair. The registry has exactly 69 vertices:
-48 principal WPs, 9 staged principal WPs and 12 AU WPs (T3-W5 is one of the 12 new AU WPs, not an
+poison-pill repair. The registry has exactly 70 vertices:
+48 principal WPs, 9 staged principal WPs and 13 AU WPs (T3-W5 is one of the 13 new AU WPs, not an
 extension). T6-W15 is the principal A6.10 external-detector owner; T6-W4 owns only the canary tick
 producer half. T6-W15 also owns A6.20's base half, but cannot green that staged item without
 T6-W12's final pre-rearm provider/live half.
@@ -432,8 +432,15 @@ T6-W12's final pre-rearm provider/live half.
 Because `D3` is an external token rather than a graph vertex, each D3 consumer also names `D7`
 directly; the scheduler may not infer the owner-decision relation `D7 → D3`. Similarly, T4-W2 names
 R2 directly before changing usage accounting, and the stranger proof T5-W4 waits for T5-W1's
-onboarding surface. T8-W4 directly precedes the pin, deploy and image-ship packets so T8-W7 can
-prove a deployed digest that actually contains the JIT-config fix.
+onboarding surface. T8-W4a directly precedes the pin, deploy and image-ship packets so T8-W7 can
+prove a deployed digest that actually contains the JIT-config fix. T8-W4b is the auth-secret bridge
+for check-exec, check-host and DevEnv; because its consumer set may include
+`deploy/cloudflare/src/index.ts`, it is an explicit hard predecessor of the first Worker-monolith
+packet, T4-W1. T8-W4b also precedes the DevEnv image deploy packets. Cloudflare Containers 0.3.7
+has no secret mount: provider env is ingress only, and the short entrypoint must create a regular
+0400 auth-token file, unset the token and exec/re-exec a clean environment before durable
+server/supervisor processes boot. Acceptance measures every durable process and check-host/DevEnv
+boot path; it does not claim a native provider secret mount or live/deploy credit.
 
 T3-W16 uses a durable local attempt-to-DO-handle record committed before start. Handle RPC
 `getState`/`destroy` is authoritative; provider inventory is a read-only cost/cross-check signal,
@@ -578,7 +585,7 @@ implementation, the byte-identical phase tuple or its mandatory predecessor phas
 | T0-W1 | W0 unblock | — | `docs/plan/union-catalog-ledger.md`; — | Luna / mechanical |
 | T1-W1 | W0 unblock | — | `scripts/ops/fabricd-preflight.sh`; `scripts/ops/fabricd-boot-rate.sh`; — | Luna / runbook |
 | T2-W1a | W0 unblock | — | `.github/workflows/build-cf-container-images.yml`; — | Luna / CI |
-| T2-W2a | W0 unblock | T2-W1a, T8-W4 | `scripts/ci/image-pin-freshness.sh`; `scripts/ci/image-pin-freshness.selftest.sh`; — | Luna / CI |
+| T2-W2a | W0 unblock | T2-W1a, T8-W4a | `scripts/ci/image-pin-freshness.sh`; `scripts/ci/image-pin-freshness.selftest.sh`; — | Luna / CI |
 | T9-W0 | W1 parallel | — | `deploy/cloudflare/vitest.config.ts`; `deploy/cloudflare/test/devenv-do.test.ts`; — | Luna / CI |
 | T3-W17 | W0 unblock | T0-W1 | `deploy/cloudflare/src/index.ts`; `deploy/cloudflare/src/metrics.ts`; `deploy/cloudflare/wrangler.jsonc`; `deploy/cloudflare/test/containment-intake.test.ts`; `deploy/cloudflare/test/containment-redrive.test.ts`; — | Sol / safety |
 | T3-W4 | W1 serial | D1 | `crates/corelink-fabric-server/src/**`; `crates/corelink-fabric-server/tests/corelink_plans.rs`; `crates/corelink-fabric-server/tests/close_reaper_lock_split.rs`; — | Sol / architecture |
@@ -599,7 +606,7 @@ implementation, the byte-identical phase tuple or its mandatory predecessor phas
 | T7-W4 | W1 parallel | — | `docs/runbook/secret-inventory.md`; `crates/corelink-fabric/src/plans.rs`; `scripts/ci/secret-inventory-drift.sh`; `scripts/ci/secret-inventory-drift.selftest.sh`; — | Luna / documentation |
 | T7-W4b | W1 serial | T7-W3 | `scripts/ci/probe-freshness-check.sh`; `docs/plan/evidence/freshness-v1.json` | Luna / mechanical |
 | T2-W3 | W1 closer | T2-W1a, T6-W1, T6-W2, T6-W3, T6-W4, T6-W8, T7-W4 | `.github/workflows/*.yml`; — | Luna / CI |
-| T4-W1 | W2 worker | T3-W18, D13 | `deploy/cloudflare/src/index.ts`; `deploy/cloudflare/src/lib.ts`; `deploy/cloudflare/test/webhook-installation-allowlist.test.ts`; — | Sol / money-path |
+| T4-W1 | W2 worker | T3-W18, T8-W4b, D13 | `deploy/cloudflare/src/index.ts`; `deploy/cloudflare/src/lib.ts`; `deploy/cloudflare/test/webhook-installation-allowlist.test.ts`; — | Sol / money-path |
 | T4-W2 | W2 worker | T4-W1, R2 | `deploy/cloudflare/src/index.ts`; `deploy/cloudflare/src/lib.ts`; `deploy/cloudflare/test/usage-ledger-backfill.test.ts`; — | Sol / money-path |
 | T3-W3 | W2 worker | T4-W2 | `deploy/cloudflare/src/index.ts`; `deploy/cloudflare/src/lib.ts`; `deploy/cloudflare/test/orphan-box-reconcile.test.ts`; — | Sol / lifecycle |
 | T3-W1 | W2 worker | T3-W3 | `deploy/cloudflare/src/index.ts`; `crates/corelink-cloud-engine/src/cloudflare.rs`; `crates/corelink-cloud-engine/src/http.rs`; `crates/corelink-cloud-engine/src/lib.rs`; `crates/corelink-cloud-engine/tests/acceptance_cloud.rs`; `crates/corelink-cloud-engine/tests/cloudflare_conformance.rs`; `deploy/cloudflare/test/spawn-conformance.test.ts`; — | Sol / wire |
@@ -612,18 +619,19 @@ implementation, the byte-identical phase tuple or its mandatory predecessor phas
 | T8-W2 | W2 worker | T8-W5 | `deploy/cloudflare/src/index.ts`; `deploy/cloudflare/src/lib.ts`; `deploy/cloudflare/test/cred-cred-route.test.ts`; `deploy/cloudflare/test/cred-stash-do.test.ts`; — | Sol / credential scope |
 | T3-W16 | W2 worker | T8-W2, T2-W2b, T6-W15, O-CFINVENTORY, O-CFCANCEL, T7-W4b | `deploy/cloudflare/src/index.ts`; `deploy/cloudflare/src/lib.ts`; `deploy/cloudflare/test/attempt-handle-reconcile.test.ts`; `deploy/cloudflare/test/attempt-monitor-outbox.test.ts`; `deploy/cloudflare/test/attempt-monitor-ack.test.ts`; `deploy/cloudflare/test/attempt-monitor-ack-recovery.test.ts`; `deploy/cloudflare/test/inventory-crosscheck.test.ts`; `docs/plan/evidence/T3-W16-attempt-handle-crosscheck.json` | Sol / inventory |
 | T3-W15 | W2 worker | T3-W16 | `deploy/cloudflare/src/index.ts`; `deploy/cloudflare/src/lib.ts`; `deploy/cloudflare/test/redrive-state-machine.test.ts`; — | Sol / lifecycle |
-| T8-W4 | W1 parallel | — | `deploy/runner/entrypoint.sh`; `deploy/runner/test/jitconfig-secret-surface.sh`; `crates/corelink-check-exec-server/src/**`; `crates/corelink-check-exec-server/tests/auth_token_file.rs`; — | Sol / security |
+| T8-W4a | W1 parallel | — | `deploy/runner/entrypoint.sh`; `deploy/runner/test/jitconfig-secret-surface.sh`; — | Luna / security |
+| T8-W4b | W1 serial | T3-W18, T9-W0 | `crates/corelink-check-exec-server/src/**`; `crates/corelink-check-exec-server/tests/**`; `deploy/check-host/entrypoint.sh`; `deploy/check-host/test/auth-secret-bridge.sh`; `deploy/cloudflare/entrypoint.sh`; `deploy/cloudflare/supervisord.conf`; `deploy/cloudflare/src/index.ts`; `deploy/cloudflare/src/durable_objects/runner_dev_env.ts`; `deploy/cloudflare/src/lib/clw.ts`; `deploy/cloudflare/test/auth-secret-bridge.test.ts`; `deploy/cloudflare/test/check-host.test.ts`; `deploy/cloudflare/test/devenv-do.test.ts`; `deploy/cloudflare/test/customer-unprivileged-user-flow.test.ts`; `deploy/cloudflare/test/e2e-40-stories-driver.test.ts`; `deploy/cloudflare/test/deep-step-by-step-audit.test.ts`; `deploy/cloudflare/test/user-journey-driver.test.ts`; — | Luna / security |
 | T8-W6 | W3 live proof | T8-W5, T8-W2, T1-W6, T7-W4b | deployed worker version containing T8-W2; `docs/plan/evidence/au4.16b-suspension-pat-revocation.json`; `docs/plan/evidence/au3.23b-completion-pat-revocation.json` | Sol / live-risk |
-| T8-W7 | W3 live proof | T8-W4, T2-W2a, T2-W2b, T2-W4, T1-W6, T7-W4b | deployed image digest containing T8-W4; `docs/plan/evidence/au3.26b-jitconfig-process-surface.json` | Sol / live-risk |
+| T8-W7 | W3 live proof | T8-W4a, T2-W2a, T2-W2b, T2-W4, T1-W6, T7-W4b | deployed image digest containing T8-W4a; `docs/plan/evidence/au3.26b-jitconfig-process-surface.json` | Sol / live-risk |
 | T3-W5 | W4 post-decision | D4, T3-W15 | `deploy/cloudflare/src/index.ts`; `deploy/cloudflare/src/lib.ts`; `deploy/cloudflare/wrangler.jsonc`; `deploy/cloudflare/test/burst-above-ceiling.test.ts`; `deploy/cloudflare/test/orphan-retry.test.ts`; — | Sol / decision-gated |
-| T9-W1 | W2 separate lane | D2, T9-W0 | `deploy/cloudflare/src/durable_objects/runner_dev_env.ts`; `deploy/cloudflare/test/devenv-do.test.ts`; — | Sol / decision-gated |
+| T9-W1 | W2 separate lane | D2, T8-W4b, T9-W0 | `deploy/cloudflare/src/durable_objects/runner_dev_env.ts`; `deploy/cloudflare/test/devenv-do.test.ts`; — | Sol / decision-gated |
 | T1-W5 | W1 serial | T3-W10, T3-W18, O-MINTKEY, T7-W4b | `crates/corelink-fabric-server/src/runner_cas_mint.rs`; `crates/corelink-fabric-server/src/server.rs`; `crates/corelink-fabric-server/tests/mint_selfcheck.rs`; `docs/plan/evidence/T1-W5-mint-selfcheck.json` | Sol / architecture |
 | T1-W6 | W1 serial | D12, T1-W5, T6-W12, O-CFINVENTORY, O-PG-REARM, T7-W4b | `crates/corelink-fabric/src/pg_ledger.rs`; `crates/corelink-fabric/src/billing_sink.rs`; `crates/corelink-fabric/src/pg_monitor_fence.rs`; `crates/corelink-fabric/tests/pg_monitor_transaction_fence.rs`; `crates/corelink-fabric-server/src/main.rs`; `crates/corelink-fabric-server/src/server.rs`; `crates/corelink-fabric-server/src/billing_export.rs`; `crates/corelink-fabric-server/src/monitor_outbox.rs` (write-only `fabric-server` producer); `crates/corelink-fabric-server/src/monitor_interlock.rs`; `crates/corelink-fabric-server/src/monitor_transaction_fence.rs`; `crates/corelink-fabric-server/tests/monitor_outbox.rs`; `crates/corelink-fabric-server/tests/monitor_ack.rs`; `crates/corelink-fabric-server/tests/monitor_ack_recovery.rs`; `crates/corelink-fabric-server/tests/monitor_tuple_interlock.rs`; `crates/corelink-fabric-server/tests/monitor_tuple_interlock_race.rs`; `crates/corelink-fabric-server/tests/monitor_transaction_fence.rs`; `crates/corelink-fabric/tests/pg_refusal_breaker.rs`; `deploy/cloudflare-fabricd/src/index.ts`; `deploy/cloudflare-fabricd/src/monitor_outbox.ts` (write-only `fabricd-proxy` producer); `deploy/cloudflare-fabricd/test/resilience.test.ts`; `deploy/cloudflare-fabricd/test/monitor-outbox.test.ts`; `deploy/cloudflare-fabricd/test/monitor-ack.test.ts`; `deploy/cloudflare-fabricd/test/monitor-ack-recovery.test.ts`; `deploy/cloudflare-fabricd/test/pg-flag-failclosed.test.ts`; `deploy/cloudflare-fabricd/test/idle-no-wake.test.ts`; `deploy/cloudflare-fabricd/wrangler.jsonc`; `docs/plan/evidence/T1-W6-pg-durable-live.json` | Sol / live-risk |
 | T1-W2 | W3 live proof | O1, T1-W6, T7-W4b | `docs/plan/evidence/T1-W2-control-plane.json` | Sol / live-risk |
 | T1-W3 | W3 live proof | O1, T2-W2b, T1-W6, T7-W4b | `docs/plan/evidence/T1-W3-resilience.json` | Sol / live-risk |
 | T1-W4 | W3 live proof | O1, T1-W6, T6-W14, T6-W10, T7-W4b | `docs/plan/evidence/T1-W4-boot-rate.json` | Sol / live-risk |
-| T2-W2b | W3 live proof | T2-W1a, T3-W18, T8-W4, O1, O-DEVENV-PIN, O-FLEETBUSY, T7-W4b | deployed image digest containing T8-W4; `docs/plan/evidence/T2-W2b-deploy.json` | Sol / live-risk |
-| T2-W4 | W3 live proof | T2-W2b, T8-W4, T7-W4b | deployed image digest containing T8-W4; `docs/plan/evidence/T2-W4-image-ship.json` | Luna / release |
+| T2-W2b | W3 live proof | T2-W1a, T3-W18, T8-W4a, T8-W4b, O1, O-DEVENV-PIN, O-FLEETBUSY, T7-W4b | deployed image digest containing T8-W4a + T8-W4b; `docs/plan/evidence/T2-W2b-deploy.json` | Sol / live-risk |
+| T2-W4 | W3 live proof | T2-W2b, T8-W4a, T8-W4b, T7-W4b | deployed image digest containing T8-W4a + T8-W4b; `docs/plan/evidence/T2-W4-image-ship.json` | Luna / release |
 | T2-W5 | W3 live proof | O1, T2-W2b, T1-W6, T7-W4b | `docs/plan/evidence/T2-W5-runbook-compat.json` | Luna / runbook |
 | T2-W6 | W3 live proof | O1, T2-W2b, T7-W4, T7-W4b | `docs/runbook/secret-rotation.md`; `docs/plan/evidence/au1.8-fabricd-secret-rotation.json` | Luna / runbook |
 | T3-W7 | W3 live proof | O1, T2-W2b, T1-W6, T7-W4b | `docs/plan/evidence/T3-W7-moat.json` | Sol / live-risk |
@@ -659,26 +667,27 @@ calculation, not authorization:
 ```text
 B00: T0-W1 T1-W1 T2-W1a T3-W4 T5-W1 T5-W2 T6-W1 T6-W2
 B01: T3-W17 T4-W4 T5-W3 T6-W3 T6-W8 T7-W1 T7-W2 T7-W3
-B02: T3-W10 T7-W4 T7-W4b T8-W4 T9-W0
-B03: T2-W2a T3-W18 T9-W1
-B04: T1-W5 T2-W2b T4-W1 T5-W6 T6-W4
-B05: T2-W3 T2-W4 T2-W6 T4-W2 T6-W15 T6-W9
-B06: T3-W3 T6-W13
-B07: T3-W1
-B08: T3-W2
-B09: T8-W1
-B10: T8-W3
-B11: T3-W14
-B12: T3-W9
-B13: T8-W5
-B14: T8-W2
-B15: T3-W16
-B16: T3-W15 T6-W12
-B17: T1-W6 T3-W5 T6-W6
-B18: T1-W2 T1-W3 T2-W5 T3-W7 T4-W7 T4-W8 T5-W4 T6-W11
-B19: T3-W8 T5-W5 T6-W14 T6-W5 T6-W7 T7-W5 T8-W6 T8-W7
-B20: T6-W10
-B21: T1-W4
+B02: T3-W10 T7-W4 T7-W4b T8-W4a T9-W0
+B03: T2-W2a T3-W18
+B04: T1-W5 T5-W6 T6-W4 T8-W4b
+B05: T2-W2b T2-W3 T4-W1 T6-W15 T6-W9 T9-W1
+B06: T2-W4 T2-W6 T4-W2 T6-W13
+B07: T3-W3
+B08: T3-W1
+B09: T3-W2
+B10: T8-W1
+B11: T8-W3
+B12: T3-W14
+B13: T3-W9
+B14: T8-W5
+B15: T8-W2
+B16: T3-W16
+B17: T3-W15 T6-W12
+B18: T1-W6 T3-W5 T6-W6
+B19: T1-W2 T1-W3 T2-W5 T3-W7 T4-W7 T4-W8 T5-W4 T6-W11
+B20: T3-W8 T5-W5 T6-W14 T6-W5 T6-W7 T7-W5 T8-W6 T8-W7
+B21: T6-W10
+B22: T1-W4
 ```
 
 The checker validates that every predecessor token is in the registry, every WP appears exactly
