@@ -219,7 +219,26 @@ function surfacePosture(
     });
     return;
   }
-  if (s.status === 200 || s.status === 404) return; // live, or not-armed-yet (silent)
+  if (s.failure) {
+    alerts.push({
+      key: `invalid:${id}:${s.failure.code}`,
+      severity: "critical",
+      title: `${label} returned an invalid 200 body`,
+      detail: `${s.failure.code}: ${s.failure.detail}`,
+    });
+    return;
+  }
+  if (s.status === 200) return;
+  if (s.status === 404 && s.configured !== true) return; // explicitly unarmed (silent)
+  if (s.status === 404) {
+    alerts.push({
+      key: `status:${id}`,
+      severity: "warn",
+      title: `${label} returned 404 while configured`,
+      detail: "A configured counter surface disappeared or rejected the expected route.",
+    });
+    return;
+  }
   if (s.status === 401) {
     alerts.push({
       key: `auth:${id}`,

@@ -36,8 +36,21 @@ export interface SurfaceSnapshot {
   /** HTTP status of the counter fetch (0 when unreachable). 404 = not armed yet
    *  (default-off), 401 = key mismatch, 200 = live. */
   status: number;
-  /** Flat monotonic counter map (0-filled by the source). Empty when not 200. */
+  /** Whether this surface was deliberately armed/configured for this cycle.
+   * An unarmed synthetic 404 is quiet; an armed 404 is a regression. */
+  configured?: boolean;
+  /** Flat monotonic counter map (0-filled by the source). Empty when not 200 or
+   * when `failure` records an invalid 200 body. */
   counters: Record<string, number>;
+  /** A 200 response whose body could not represent a counter surface. */
+  failure?: SurfaceFailure;
+}
+
+export type SurfaceFailureCode = "invalid_body";
+
+export interface SurfaceFailure {
+  code: SurfaceFailureCode;
+  detail: string;
 }
 
 /** A bare liveness probe (fabricd GET /v1/health → 200 "ok"). */

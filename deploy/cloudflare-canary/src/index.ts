@@ -12,7 +12,7 @@
 // Worker deploys, runs, and no-ops with a log line.
 
 import type { FabricStatusJson, SpawnMetricsJson, Snapshot, SurfaceSnapshot, HealthSnapshot } from "./types";
-import { evaluate, applyCooldown, type RulesConfig } from "./rules";
+import { evaluate, applyCooldown, type Alert, type RulesConfig } from "./rules";
 import { sendAlert } from "./notify";
 
 export interface Env {
@@ -67,25 +67,51 @@ const FETCH_TIMEOUT_MS = 6000;
 async function fetchSurface(
   url: string,
   key: string | undefined,
+  configured: boolean,
   fetcher: typeof fetch = fetch,
 ): Promise<SurfaceSnapshot> {
   try {
     const headers: Record<string, string> = {};
     if (key) headers["X-Corelink-Internal-Auth"] = key;
     const resp = await fetcher(url, { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
-    let counters: Record<string, number> = {};
     if (resp.status === 200) {
-      // Tolerant parse: unknown/added fields ride through; a bad body ⇒ empty.
-      const body = (await resp.json().catch(() => ({}))) as FabricStatusJson & SpawnMetricsJson;
-      counters = normalizeCounters(body.counters);
+      const raw = await resp.text();
+      let body: unknown;
+      try {
+        body = JSON.parse(raw);
+      } catch {
+        return invalidSurface(configured, "response body is not valid JSON");
+      }
+      if (!body || typeof body !== "object" || Array.isArray(body)) {
+        return invalidSurface(configured, "response body is not a JSON object");
+      }
+      const candidate = body as FabricStatusJson & SpawnMetricsJson;
+      if (!candidate.counters || typeof candidate.counters !== "object" || Array.isArray(candidate.counters)) {
+        return invalidSurface(configured, "response object has no counters object");
+      }
+      const counters = normalizeCounters(candidate.counters);
+      if (Object.keys(counters).length === 0) {
+        return invalidSurface(configured, "response counters object is empty or has no numeric counters");
+      }
+      return { reachable: true, status: 200, configured, counters };
     } else {
       // Drain the body so the connection is released; ignore content.
       await resp.text().catch(() => "");
     }
-    return { reachable: true, status: resp.status, counters };
+    return { reachable: true, status: resp.status, configured, counters: {} };
   } catch {
-    return { reachable: false, status: 0, counters: {} };
+    return { reachable: false, status: 0, configured, counters: {} };
   }
+}
+
+function invalidSurface(configured: boolean, detail: string): SurfaceSnapshot {
+  return {
+    reachable: true,
+    status: 200,
+    configured,
+    counters: {},
+    failure: { code: "invalid_body", detail },
+  };
 }
 
 /** Fetch the bare health probe. Fetch failure ⇒ `{reachable:false}`. */
@@ -146,37 +172,44 @@ export async function runCycle(env: Env, now: number): Promise<string> {
   const fabricFetch = env.FABRICD_SVC ? env.FABRICD_SVC.fetch.bind(env.FABRICD_SVC) : fetch;
   const spawnFetch = env.SPAWN_SVC ? env.SPAWN_SVC.fetch.bind(env.SPAWN_SVC) : fetch;
   const fabricProbesEnabled = env.FABRIC_PROBES_ENABLED === "1";
+  const metricsConfigured = Boolean(env.METRICS_OBSERVABILITY_KEY);
 
   // A 5-minute canary calling a container with sleepAfter=5m keeps it billable
   // forever. Also, an unarmed status key used to send a guaranteed 401 before
   // the result was coerced to the silent 404 sentinel. Skip the I/O itself:
   // post-processing a response is too late to avoid waking the container.
   const fabricStatusProbe = fabricProbesEnabled && env.FABRIC_OBSERVABILITY_KEY
-    ? fetchSurface(fabricStatusUrl, env.FABRIC_OBSERVABILITY_KEY, fabricFetch)
-    : Promise.resolve<SurfaceSnapshot>({ reachable: true, status: 404, counters: {} });
+    ? fetchSurface(fabricStatusUrl, env.FABRIC_OBSERVABILITY_KEY, true, fabricFetch)
+    : Promise.resolve<SurfaceSnapshot>({ reachable: true, status: 404, configured: false, counters: {} });
   const fabricHealthProbe = fabricProbesEnabled
     ? fetchHealth(fabricHealthUrl, fabricFetch)
     : Promise.resolve<HealthSnapshot>({ reachable: true, status: 0, skipped: true });
   const [fabric, fabricHealth, spawn] = await Promise.all([
     fabricStatusProbe,
     fabricHealthProbe,
-    fetchSurface(spawnMetricsUrl, env.METRICS_OBSERVABILITY_KEY, spawnFetch),
+    metricsConfigured
+      ? fetchSurface(spawnMetricsUrl, env.METRICS_OBSERVABILITY_KEY, true, spawnFetch)
+      : Promise.resolve<SurfaceSnapshot>({ reachable: true, status: 404, configured: false, counters: {} }),
   ]);
 
-  // Load prior state (fail-soft: a KV miss/parse error ⇒ cold start).
-  const prev = await readJson<Snapshot>(env.CANARY_KV, SNAPSHOT_KEY);
-  const cooldowns = (await readJson<Record<string, number>>(env.CANARY_KV, COOLDOWN_KEY)) ?? {};
+  // Load prior state. A read failure is not a cold start: preserve the old
+  // snapshot by skipping this cycle's snapshot write, and surface the failure.
+  const snapshotRead = await readJson<Snapshot>(env.CANARY_KV, SNAPSHOT_KEY, isSnapshot);
+  const cooldownRead = await readJson<Record<string, number>>(env.CANARY_KV, COOLDOWN_KEY, isCooldownState);
+  const prev = snapshotRead.ok ? snapshotRead.value : null;
+  const cooldowns = cooldownRead.ok ? cooldownRead.value ?? {} : {};
+  const storageAlerts: Alert[] = [];
+  if (!snapshotRead.ok) storageAlerts.push(storageAlert("read", SNAPSHOT_KEY, snapshotRead.detail));
+  if (!cooldownRead.ok) storageAlerts.push(storageAlert("read", COOLDOWN_KEY, cooldownRead.detail));
 
   // If the FABRIC obs key isn't bound on THIS canary, the moat status surface is
   // deliberately not-armed here (a bare request 401s). Coerce it to the 404
   // "not-armed, silent" sentinel the rules already ignore, so an unbound key
   // doesn't fire a noise WARN every cycle. Bind FABRIC_OBSERVABILITY_KEY (matching
-  // fabricd's) to actually monitor the moat counters. The direct-fleet surface
-  // (spawn) is armed + monitored regardless — it's the live product.
-  const fabricSnap: SurfaceSnapshot = env.FABRIC_OBSERVABILITY_KEY
-    ? fabric
-    : { reachable: true, status: 404, counters: {} };
-  const cur: Snapshot = { at: now, fabric: fabricSnap, fabricHealth, spawn };
+  // fabricd's) to actually monitor the moat counters. Bind
+  // METRICS_OBSERVABILITY_KEY to arm the direct-fleet surface; without an
+  // explicit key it remains an intentionally unarmed synthetic 404.
+  const cur: Snapshot = { at: now, fabric, fabricHealth, spawn };
 
   const cfg: RulesConfig = {
     now,
@@ -187,7 +220,32 @@ export async function runCycle(env: Env, now: number): Promise<string> {
   const { alerts, lastCompletionAt } = evaluate(prev, cur, cfg);
   cur.lastCompletionAt = lastCompletionAt;
 
-  const { toSend, cooldowns: nextCooldowns } = applyCooldown(alerts, cooldowns, now, parseCooldownMs(env));
+  // Never replace a previously readable snapshot after a failed read. A KV
+  // write failure is also an alert; the old value remains the only safe state.
+  if (snapshotRead.ok) {
+    const result = await writeJson(env.CANARY_KV, SNAPSHOT_KEY, cur);
+    if (!result.ok) storageAlerts.push(storageAlert("write", SNAPSHOT_KEY, result.detail));
+  }
+
+  const allAlerts = [...alerts, ...storageAlerts];
+  const { toSend: initiallyToSend, cooldowns: nextCooldowns } = applyCooldown(
+    allAlerts,
+    cooldowns,
+    now,
+    parseCooldownMs(env),
+  );
+  let toSend = initiallyToSend;
+
+  if (cooldownRead.ok) {
+    const result = await writeJson(env.CANARY_KV, COOLDOWN_KEY, nextCooldowns);
+    if (!result.ok) {
+      const failure = storageAlert("write", COOLDOWN_KEY, result.detail);
+      storageAlerts.push(failure);
+      // This failure cannot be persisted for cooldown, so make it visible in
+      // this cycle regardless of the previous cooldown map.
+      toSend = [...toSend, failure];
+    }
+  }
 
   let sendSummary = "no alerts";
   if (toSend.length > 0) {
@@ -195,32 +253,74 @@ export async function runCycle(env: Env, now: number): Promise<string> {
     sendSummary = `${toSend.length} alert(s), sent=${res.sent}${res.reason ? ` (${res.reason})` : ""}`;
   }
 
-  // Persist the new snapshot + cooldown state (best-effort).
-  await writeJson(env.CANARY_KV, SNAPSHOT_KEY, cur);
-  await writeJson(env.CANARY_KV, COOLDOWN_KEY, nextCooldowns);
-
   const healthSummary = fabricHealth.skipped
     ? "SKIPPED"
     : fabricHealth.reachable
       ? String(fabricHealth.status)
       : "DOWN";
-  return `fabric=${fabric.reachable ? fabric.status : "DOWN"} health=${healthSummary} spawn=${spawn.reachable ? spawn.status : "DOWN"} | triggered=${alerts.length} | ${sendSummary}`;
+  return `fabric=${fabric.reachable ? fabric.status : "DOWN"} health=${healthSummary} spawn=${spawn.reachable ? spawn.status : "DOWN"} | triggered=${alerts.length + storageAlerts.length} | ${sendSummary}`;
 }
 
-async function readJson<T>(kv: KVNamespace, key: string): Promise<T | null> {
+type ReadResult<T> = { ok: true; value: T | null } | { ok: false; detail: string };
+type WriteResult = { ok: true } | { ok: false; detail: string };
+
+async function readJson<T>(kv: KVNamespace, key: string, isValid: (value: unknown) => value is T): Promise<ReadResult<T>> {
   try {
-    return await kv.get<T>(key, "json");
-  } catch {
-    return null;
+    const value = await kv.get<T>(key, "json");
+    if (value === null) return { ok: true, value: null };
+    return isValid(value) ? { ok: true, value } : { ok: false, detail: "stored value has an invalid shape" };
+  } catch (err) {
+    return { ok: false, detail: err instanceof Error ? err.message : "KV read threw" };
   }
 }
 
-async function writeJson(kv: KVNamespace, key: string, value: unknown): Promise<void> {
+async function writeJson(kv: KVNamespace, key: string, value: unknown): Promise<WriteResult> {
   try {
     await kv.put(key, JSON.stringify(value));
-  } catch {
-    // Persistence is best-effort; a KV write failure must not crash the run.
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, detail: err instanceof Error ? err.message : "KV write threw" };
   }
+}
+
+function storageAlert(operation: "read" | "write", key: string, detail: string): Alert {
+  return {
+    key: `storage:${operation}:${key}`,
+    severity: "critical",
+    title: `canary KV ${operation} failed for ${key}`,
+    detail: `Persistent monitor state is unavailable; delta/staleness continuity is not trusted. ${detail}`,
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function isSurfaceSnapshot(value: unknown): value is SurfaceSnapshot {
+  if (!isRecord(value) || typeof value.reachable !== "boolean" ||
+      typeof value.status !== "number" || !Number.isFinite(value.status) ||
+      (value.configured !== undefined && typeof value.configured !== "boolean") ||
+      (value.failure !== undefined && (!isRecord(value.failure) || value.failure.code !== "invalid_body" || typeof value.failure.detail !== "string")) ||
+      !isRecord(value.counters)) {
+    return false;
+  }
+  return Object.values(value.counters).every((v) => typeof v === "number" && Number.isFinite(v));
+}
+
+function isSnapshot(value: unknown): value is Snapshot {
+  if (!isRecord(value) || typeof value.at !== "number" || !Number.isFinite(value.at) || !isSurfaceSnapshot(value.fabric) ||
+      !isSurfaceSnapshot(value.spawn) || !isRecord(value.fabricHealth) ||
+      typeof value.fabricHealth.reachable !== "boolean" || typeof value.fabricHealth.status !== "number" ||
+      !Number.isFinite(value.fabricHealth.status) ||
+      (value.fabricHealth.skipped !== undefined && typeof value.fabricHealth.skipped !== "boolean")) {
+    return false;
+  }
+  return value.lastCompletionAt === undefined ||
+    (typeof value.lastCompletionAt === "number" && Number.isFinite(value.lastCompletionAt));
+}
+
+function isCooldownState(value: unknown): value is Record<string, number> {
+  return isRecord(value) && Object.values(value).every((v) => typeof v === "number" && Number.isFinite(v));
 }
 
 export default {
