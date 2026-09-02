@@ -2414,7 +2414,7 @@ def main() -> int:
                     "`failed_attempt_count + retry_count + idle_wakeup_count`; its denominator formula is\n"
                     "`attempt_count + retry_count + idle_wakeup_count`.",
                     "`failed_attempt_count`; its denominator formula is `attempt_count`.",
-                    False,
+                    True,
                 ),
                 (
                     "r6-cross-tenant-read-allowed",
