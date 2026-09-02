@@ -1,8 +1,10 @@
 # CoreLink spawn-Worker + Container DO (Cloudflare substrate)
 
-> **Status: LIVE — deployed to the gmhelmold CF account; autoscaler (/webhook) + /v1/* spawn
-> surface in prod** (per the header declaration in `wrangler.jsonc`, which also carries the
-> live runner-image digest pins and the prod-incident notes behind them).
+> **Status: IMPLEMENTED IN REPO; LIVE OPERATION UNVERIFIED HERE.** The Worker, Durable Object,
+> and pinned image declaration are present in this tree. The `wrangler.jsonc` header is a
+> deployment declaration, not independently captured runtime evidence. The deploy, isolation,
+> R2, and runner-lifecycle gates below remain the authoritative readiness list; until they are
+> checked with dated evidence, do not describe the `/webhook` or `/v1/*` surface as production-live.
 > Pioneering (no documented precedent for GitHub-Actions runners on Cloudflare Containers).
 > This is the Cloudflare side of the frozen seam in
 > `docs/spec/cloudflare-spawn-worker-contract.md`; the Rust side (`CloudflareEngine`,

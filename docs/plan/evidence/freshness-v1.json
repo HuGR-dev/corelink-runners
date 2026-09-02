@@ -1,0 +1,11 @@
+{
+  "schema_version": "evidence-freshness/v1",
+  "registry_id": "freshness-baseline-2026-09-02",
+  "repository": "corelink-runners",
+  "freeze_at": "2026-09-02T00:00:00Z",
+  "max_age_seconds": 86400,
+  "max_future_skew_seconds": 0,
+  "coverage_status": "RED",
+  "deployed_versions": {},
+  "artifacts": []
+}

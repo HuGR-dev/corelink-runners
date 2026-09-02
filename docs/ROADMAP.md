@@ -1,49 +1,91 @@
 # CoreLink Runners — roadmap
 
-> ⚠️ **SUBSTRATE FLIP (2026-07, read first):** the LIVE deploy is now
-> **Cloudflare-first** (ADR-0008): fabricd runs as a CF Container + proxy Worker
-> (`deploy/cloudflare-fabricd/`), boxes spawn on the CF `corelink-spawn-worker`
-> (`deploy/cloudflare/`), and the moat (native check-host exec + per-job CAS-PAT
-> mint + attested cost) is live on Cloudflare. The **Northflank "LIVE" / "MULTI-
-> INSTANCE on Postgres" framing below is HISTORICAL** — the current CF deploy is a
-> **singleton** (`wrangler.jsonc` `FABRIC_NUM_SHARDS=1`, kept at N=1 by deliberate
-> volume choice, not a technical block). **Corrected 2026-08-22:** the earlier
-> "no `DATABASE_URL` var ⇒ in-memory ledger" line here was stale — commit
-> `80df8921` (2026-07-17) fixed the same claim in `wrangler.jsonc`'s own
-> comments, three hours after an earlier commit that same day had introduced
-> it, and nothing since has reverted it (`git log --all -S "DATABASE_URL" --
-> deploy/cloudflare-fabricd/wrangler.jsonc`). `wrangler.jsonc` now states
-> `DATABASE_URL` **is bound** (a wrangler secret, so its value is invisible in
-> the file itself) → the pg-durable ledger (`FABRIC_LEDGER_BACKEND=pg`) is the
-> declared active backend, durable billing export is armed, and N>1 is
-> pg-unblocked (kept at 1 by choice). This is what the repo's config
-> **declares**; verifying the *running* deployment actually has that secret
-> set would require reading it back from Cloudflare, which is write-only (no
-> API read-back of secret values) — so treat this as the declared config, not
-> an independent live-probe. Northflank is the ADR-0008 fallback substrate,
-> not the live one. Source of truth for the live deploy =
-> `deploy/cloudflare-fabricd/wrangler.jsonc` + the 2026-07-07..09 CF handoff
-> docs, NOT the Northflank lines below. Those lines are kept for history.
+> ⚠️ **CURRENT VERIFICATION STATUS — 2026-09-02: RED by absence; NOT FROZEN.**
+> This roadmap separates implementation state from deployment and proof. The repository
+> contains built/merged implementation and dated deployment records, but the current
+> runtime and deploy have **not been verified**. No Cloudflare container/Worker or moat
+> capability is currently claimed as deployed, live, or proven.
+>
+> The verified `corelink-fabricd` boundary remains containment-only:
+> `FABRIC_PG_DISABLED=1` and `FABRIC_PROBES_ENABLED=0`. Therefore the PG durable
+> ledger/billing path and runtime probes are **not armed in the verified runtime**.
+> Config declarations, merged commits, tests, handoff prose, and historical live-E2E
+> records do not substitute for current live evidence.
+>
+> | Evidence dimension | Current status |
+> |---|---|
+> | Built / merged | Implementation and merge records are retained below; this establishes code state only. |
+> | Deployed / live | **Not verified** for Cloudflare, Northflank, or any other runtime. |
+> | Proven | No current live, probe, or production-credit proof is available. |
+> | Acceptance ledger | **RED by absence; NOT FROZEN**; `T7-W1` updates this index and the changelog only. |
+>
+> **Historical records:** the dated sections below preserve the claims and evidence recorded
+> at their respective dates. In particular, the Cloudflare substrate-pivot and Northflank
+> multi-instance entries distinguish what was built/merged from what was reported deployed,
+> live, or proven then; they are not current runtime evidence.
 
-> Owner: HuGR TechLead · baseline: cloud-execution campaign 2026-06-12
-> (post seed + cloud fabric, full gate green on CI: fmt · clippy `-D warnings` ·
-> tests · deny · audit · conformance hashes byte-checked; live E2E proven against
-> Northflank).
+> Owner: HuGR TechLead · **historical baseline:** cloud-execution campaign 2026-06-12
+> (post seed + cloud fabric, CI gates green; live E2E was reported against Northflank at
+> that date).
 > Evidence: `docs/handoff/2026-06-10-runner-seed.md` ·
 > `docs/spec/hugit-integration-contract.md` v1.2.0 ·
 > `docs/whitepaper/corelink-runners-v1.md` (M1 bar) · ADR-0003 (egress posture) ·
 > ADR-0008 (Cloudflare Containers = default compute substrate, Northflank fallback).
 
-Deployed ≠ shipped to paying customers. The **cloud-execution fabric is LIVE on
-Northflank** and, as of **2026-06-14, MULTI-INSTANCE on a persistent Postgres
-ledger** (cross-instance cap-safety proven live: 2 containers, advisory-lock
-serialized admission, no over-admit). End-to-end acquire→provision→real
-microVM→exec→signed attestation→teardown proven; deploy ops in
-`deploy/northflank-postgres-runbook.md`. The execution core is now **exhaustively
-audited** (2026-06-14 comprehensive audit, 28 findings closed incl. a P0
-attestation-forgery) and **zero open P0/P1**. What remains is the cross-repo
-billing/auth flip, the live envelope turn-feed (§13.2 WRITE side), and M2 GA.
-This file tracks the distance; one line per item, struck through when closed.
+Historical deployment record (2026-06-14, **not current status**): the cloud-execution
+fabric was reported LIVE on Northflank and MULTI-INSTANCE on a persistent Postgres ledger
+(cross-instance cap-safety reported at 2 containers, advisory-lock serialized admission,
+no over-admit). The acquire→provision→real microVM→exec→signed attestation→teardown path
+was reported proven; deploy ops were recorded in `deploy/northflank-postgres-runbook.md`.
+The execution core was reported exhaustively audited (2026-06-14 comprehensive audit, 28
+findings closed incl. a P0 attestation-forgery) with zero open P0/P1 at that snapshot. The
+historical follow-ups were the cross-repo billing/auth flip, live envelope turn-feed
+(§13.2 WRITE side), and M2 GA. The historical sections below preserve the state and claims
+recorded at their dates. The current remediation ledger is the dated section immediately
+below and is authoritative for open-item identity and status. A finding is not closed by
+striking a line, changing its title, moving it to another section, renaming its id, or
+adding a CHANGELOG entry: closure requires the same immutable id, its canonical disposition,
+and the evidence required by the remediation plan.
+
+## Current remediation ledger — 2026-09-02
+
+This section is the current-facing index for the go-live remediation campaign. Its source of
+truth is the [go-live remediation plan](plan/2026-08-30-golive-remediation-plan.md), with the
+complete 247-finding assignment in
+[`docs/plan/audit-2026-08-30-finding-ids.txt`](plan/audit-2026-08-30-finding-ids.txt) and the
+51-row union ledger in [`docs/plan/union-catalog-ledger.md`](plan/union-catalog-ledger.md).
+The union ledger is additive provenance: its `MAPPED`, `PARTIAL`, `NEW` (`union-01` through
+`union-30`) and `CLOSED` dispositions do not erase the source finding or grant go-live credit.
+
+| ledger | inventory | current status | closure rule |
+|---|---:|---|---|
+| Principal acceptance suite (`A0.*`–`A7.*`) | 94 physical rows / 92 live rows; 2 withdrawn | **RED by absence; NOT FROZEN** | The exact acceptance item id remains stable; only its own required test, probe or owner decision can change its status. |
+| Union catalog | 51 source rows: 15 `MAPPED`, 5 `PARTIAL`, 30 `NEW`, 1 code-verified `CLOSED` | **OPEN intake; AU staging remains RED** | A source row remains addressable by its catalog id. A `MAPPED`/`PARTIAL` relation is not closure; the one `CLOSED` row is closed by code evidence, not prose. |
+| Staged AU intake (`AU1.*`–`AU7.*`) | 30 source findings / 33 proposed acceptance ids | **STAGING-ONLY; not promoted** | AU ids cannot be promoted, renamed into an `A` item, or used as a green substitute before the required review/promotion sequence. |
+| Review state | Round-13 input `b3371e8…` | **8/8 NOT QUIET; quiet count 0** | Review results are bound to their exact committed input and never transfer to a later or unqualified `HEAD`. |
+
+Implementation and proof are separate dimensions. `T0-W1` has committed the union ledger and
+completed its reconciliation obligation at the planning snapshot; that does not make the
+principal suite green. `T7-W1` updates this index and the changelog only; this documentation
+change is not acceptance evidence and does not close `A7.2` or any other finding. All other
+implementation, owner, relay, and live-proof statuses remain those in the canonical plan and
+are not inferred from a checkbox, a commit message, a test-green result, or a historical entry.
+
+The current production boundary is also explicit: containment remains armed (`FABRIC_PG_DISABLED=1`
+and `FABRIC_PROBES_ENABLED=0`). No roadmap or changelog text authorizes deployment, restart,
+delete, rearm, promotion, freeze, dispatch, or live-credit attribution.
+
+### Stable-id and closure policy
+
+- Every principal and union row keeps its original catalog id for its entire lifecycle. A
+  corrected citation, split, merge, or renamed description records a relationship to that id;
+  it does not create a clean finding or reset its status.
+- `MAPPED`, `PARTIAL`, `NEW`, `CLOSED`, `RED`, `STAGING`, `WITHDRAWN`, and `NOT FROZEN` are
+  bounded ledger states, not editorial labels. A status change must name the same id, the
+  required owner/evidence, and the exact committed input or artifact that supports it.
+- `CHANGELOG.md` records chronology and provenance only. It cannot close a finding, override the
+  plan, promote AU, transfer review credit, or turn local structural PASS into semantic, live,
+  freeze, dispatch, or green credit.
 
 ## P0 — seed hardening (CLOSED 2026-06-12)
 
