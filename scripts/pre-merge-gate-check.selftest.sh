@@ -64,9 +64,17 @@ HEALTHY_CHECKS='[
   {"name":"dco","bucket":"pass","link":"https://x/dco"},
   {"name":"spawn-worker-ci","bucket":"skipping","link":"https://x/swc"}
 ]'
+PREFIXED_HEALTHY_CHECKS='[
+  {"name":"CI / gates","bucket":"pass","link":"https://x/gates"},
+  {"name":"DCO / dco","bucket":"pass","link":"https://x/dco"}
+]'
 MISSING_GATE_CHECKS='[
   {"name":"dco","bucket":"pass","link":"https://x/dco"},
   {"name":"spawn-worker-ci","bucket":"pass","link":"https://x/swc"}
+]'
+LOOKALIKE_GATE_CHECKS='[
+  {"name":"fake-gates","bucket":"pass","link":"https://x/fake-gates"},
+  {"name":"fake-dco","bucket":"pass","link":"https://x/fake-dco"}
 ]'
 FAILED_CHECKS='[
   {"name":"gates","bucket":"fail","link":"https://x/gates"},
@@ -136,10 +144,12 @@ run_case "closed PR refused" 1 "MERGEABLE CLEAN CLOSED false" '[]' -- "not OPEN"
 run_case "draft PR refused" 1 "MERGEABLE CLEAN OPEN true" "$HEALTHY_CHECKS" -- "DRAFT"
 run_case "zero checks refused" 1 "MERGEABLE CLEAN OPEN false" '[]' -- "NO checks at all"
 run_case "missing always-present gate refused" 1 "MERGEABLE CLEAN OPEN false" "$MISSING_GATE_CHECKS" -- "always-present gates never ran"
+run_case "lookalike gate identities refused" 1 "MERGEABLE CLEAN OPEN false" "$LOOKALIKE_GATE_CHECKS" -- "always-present gates never ran"
 run_case "pending check refused" 1 "MERGEABLE CLEAN OPEN false" "$PENDING_CHECKS" -- "1 pending"
 run_case "cancelled check refused" 1 "MERGEABLE CLEAN OPEN false" "$CANCELLED_CHECKS" -- "bucket=cancel"
 run_case "unknown bucket refused" 1 "MERGEABLE CLEAN OPEN false" "$UNKNOWN_BUCKET_CHECKS" -- "bucket=future-status"
 run_case "healthy PR passes" 0 "MERGEABLE CLEAN OPEN false" "$HEALTHY_CHECKS" -- "All gates green"
+run_case "authoritative workflow/job identities pass" 0 "MERGEABLE CLEAN OPEN false" "$PREFIXED_HEALTHY_CHECKS" -- "All gates green"
 
 # CLI safety boundaries are checked without invoking gh at all.
 run_case "admin reason outside merge refused" 2 "MERGEABLE CLEAN OPEN false" "$HEALTHY_CHECKS" --admin-reason "why" -- "only meaningful with --merge"
