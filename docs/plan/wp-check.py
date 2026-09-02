@@ -16,12 +16,20 @@ Usage: python3 docs/plan/wp-check.py docs/plan/2026-08-30-golive-remediation-pla
 """
 
 import fnmatch
+import hashlib
 import re
 import sys
 from collections import Counter
 from pathlib import Path
 
 INV = {f"INV-{i}" for i in range(1, 9)}
+
+# A contract freeze is only meaningful if silent prose drift is visible to the
+# structural gate. Update this digest only with an explicitly reviewed contract
+# revision and a matching negative self-test.
+T3_W17_CONTRACT_SHA256 = (
+    "b3aad07907bc92305d021165aa92d658bcb37d7a9c5708c2a57de6c390160d65"
+)
 
 # WP -> (items owned, invariants live, exclusive scope, wave)
 WP = {
@@ -3254,6 +3262,16 @@ dag_path = Path(__file__).with_name(DAG_FILENAME)
 delta_path = Path(__file__).with_name(STAGED_FILENAME)
 triage_path = Path(__file__).with_name("union-triage-remaining.md")
 handoff_path = Path(__file__).parent.parent / "handoff" / HANDOFF_FILENAME
+contract_path = Path(__file__).with_name("contracts") / "T3-W17.md"
+if not contract_path.is_file():
+    fail.append(f"T3-W17 frozen contract missing: {contract_path}")
+else:
+    contract_digest = hashlib.sha256(contract_path.read_bytes()).hexdigest()
+    if contract_digest != T3_W17_CONTRACT_SHA256:
+        fail.append(
+            "T3-W17 frozen contract digest mismatch: "
+            f"expected {T3_W17_CONTRACT_SHA256}, got {contract_digest}"
+        )
 fail.extend(
     validate_cross_document_contracts(
         plan_path, delta_path, dag_path, triage_path, handoff_path

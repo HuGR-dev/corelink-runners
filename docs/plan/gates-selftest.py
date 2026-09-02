@@ -127,6 +127,7 @@ EXPECTED_MUTATION_INVENTORY = frozenset(
         "missing-t1-w6-from-t6-w14.md",
         "missing-t1-w6-monitor-tuple-interlock.md",
         "missing-t3-w17-containment-evidence-scope.md",
+        "t3-w17-contract-drift.md",
         "missing-t3-w18-from-t1-w5.md",
         "missing-t5-w1-before-t5-w4.md",
         "missing-t6-w12-from-t1-w6.md",
@@ -395,8 +396,17 @@ def require_mirrored_wp(
     for source in PLAN_DIR.iterdir():
         if source.is_file() and source.suffix in {".md", ".py", ".txt", ".json"}:
             shutil.copy2(source, mirror_plan / source.name)
+    contracts = PLAN_DIR / "contracts"
+    if contracts.is_dir():
+        shutil.copytree(contracts, mirror_plan / "contracts")
     for destination, source in (overrides or {}).items():
-        shutil.copy2(source, mirror_plan / destination.name)
+        try:
+            relative_destination = destination.relative_to(PLAN_DIR)
+        except ValueError:
+            relative_destination = Path(destination.name)
+        mirrored_destination = mirror_plan / relative_destination
+        mirrored_destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, mirrored_destination)
     mirror_workflows = mirror_root / ".github" / "workflows"
     mirror_workflows.mkdir(parents=True)
     shutil.copy2(
@@ -2626,6 +2636,27 @@ def main() -> int:
                 False,
                 work / "missing-t3-w17-containment-evidence-scope-mirror",
                 overrides={DAG: missing_t3w17_evidence_scope},
+            )
+
+            # The individually frozen implementation contract must not be
+            # editable without an explicit checker digest update and review.
+            contract_path = PLAN_DIR / "contracts" / "T3-W17.md"
+            contract_drift = work / "t3-w17-contract-drift.md"
+            contract_drift.write_text(
+                replace_once(
+                    contract_path.read_text(encoding="utf-8"),
+                    "DRAIN_LEASE_TTL_MS = 120_000",
+                    "DRAIN_LEASE_TTL_MS = 60_000",
+                    "T3-W17 frozen contract lease drift",
+                ),
+                encoding="utf-8",
+            )
+            require_mirrored_wp(
+                "WP T3-W17 frozen contract digest drift",
+                PLAN,
+                False,
+                work / "t3-w17-contract-drift-mirror",
+                overrides={contract_path: contract_drift},
             )
 
             t6w1_missing_scope = work / "t6w1-missing-script-scope.md"
