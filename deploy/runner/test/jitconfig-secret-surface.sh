@@ -5,6 +5,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ENTRYPOINT="$HERE/../entrypoint.sh"
 RUNNER_DOCKERFILE="$HERE/../Dockerfile"
+RUNNER_README="$HERE/../README.md"
 SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$SANDBOX"' EXIT
 
@@ -160,6 +161,9 @@ fi
 # env may return in a refactor.
 if grep -Eq '^[[:space:]]*[^#].*(--jitconfig[[:space:]]+|ACTIONS_RUNNER_INPUT_JITCONFIG=)' "$ENTRYPOINT"; then
   fail "entrypoint source contains a secret-bearing runner launch surface"
+fi
+if grep -Eq '(\./run\.sh[[:space:]]+--jitconfig|passes it as an argument)' "$RUNNER_README"; then
+  fail "runner documentation reintroduced the forbidden JIT argv contract"
 fi
 
 # Malformed input fails closed and is still unlinked; run.sh must not start.

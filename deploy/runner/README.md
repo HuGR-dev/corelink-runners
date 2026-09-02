@@ -9,12 +9,17 @@ GitHub Actions job.
 
 A cache-warm, one-shot GitHub Actions runner that:
 
-1. Receives a **JIT config token** at provision time via the `CORELINK_RUNNER_JITCONFIG`
-   environment variable.
-2. Starts the official GitHub Actions runner agent in `--ephemeral` JIT mode
-   (`./run.sh --jitconfig "$CORELINK_RUNNER_JITCONFIG"`).
-3. Executes exactly **one job** from the customer's unmodified workflow.
-4. **Self-deregisters** and exits cleanly; the fabric tears down the microVM.
+1. Receives a **JIT config token** at provision time via the
+   `CORELINK_RUNNER_JITCONFIG` environment variable in the short-lived initial
+   entrypoint stage.
+2. Seals it into a private mode-0600 bridge, removes the value-bearing
+   environment, and cleanly re-execs the entrypoint. The pinned Python
+   bootstrap opens that bridge without following symlinks, unlinks it
+   immediately, and materializes the official runner config files mode 0600.
+3. Starts `./run.sh` with zero arguments and without any JIT value or bridge
+   pathname in its environment.
+4. Executes exactly **one job** from the customer's unmodified workflow.
+5. **Self-deregisters** and exits cleanly; the fabric tears down the microVM.
 
 No credential, secret, or runner registration is baked into the image.  The JIT
 config is the only per-job credential, and it is one-time-use.
@@ -117,11 +122,12 @@ against the registry's published `dist.integrity`). Never fabricate a checksum.
 | **Contents** | Base64-encoded JIT config blob from the GitHub Actions API (`actions/generateRunnerJitconfig`) |
 | **Lifetime** | Single-use; valid for one job registration; expires after the job completes |
 | **If absent** | Container exits with code 1 and a clear error message — never idles |
-| **Never echoed** | The entrypoint passes it as an argument; the value is never printed |
+| **Process surface** | The initial entrypoint seals the value before a clean re-exec; `run.sh` receives zero arguments and inherits neither the value nor the bridge pathname |
 
 The fabric obtains this token via the GitHub API before provisioning the box and
-injects it via the container runtime's env mechanism (never via a file, never
-baked into the image).
+injects it via the container runtime's env mechanism. That environment is only
+the ingress to the short-lived sealing stage; the private bridge is unlinked on
+open before `run.sh` starts. The value is never baked into the image.
 
 ---
 
