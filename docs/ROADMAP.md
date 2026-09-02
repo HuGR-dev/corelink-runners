@@ -43,7 +43,51 @@ microVM→exec→signed attestation→teardown proven; deploy ops in
 audited** (2026-06-14 comprehensive audit, 28 findings closed incl. a P0
 attestation-forgery) and **zero open P0/P1**. What remains is the cross-repo
 billing/auth flip, the live envelope turn-feed (§13.2 WRITE side), and M2 GA.
-This file tracks the distance; one line per item, struck through when closed.
+The historical sections below preserve the state and claims recorded at their dates. The
+current remediation ledger is the dated section immediately below and is authoritative for
+open-item identity and status. A finding is not closed by striking a line, changing its title,
+moving it to another section, renaming its id, or adding a CHANGELOG entry: closure requires the
+same immutable id, its canonical disposition, and the evidence required by the remediation plan.
+
+## Current remediation ledger — 2026-09-02
+
+This section is the current-facing index for the go-live remediation campaign. Its source of
+truth is the [go-live remediation plan](plan/2026-08-30-golive-remediation-plan.md), with the
+complete 247-finding assignment in
+[`docs/plan/audit-2026-08-30-finding-ids.txt`](plan/audit-2026-08-30-finding-ids.txt) and the
+51-row union ledger in [`docs/plan/union-catalog-ledger.md`](plan/union-catalog-ledger.md).
+The union ledger is additive provenance: its `MAPPED`, `PARTIAL`, `NEW` (`union-01` through
+`union-30`) and `CLOSED` dispositions do not erase the source finding or grant go-live credit.
+
+| ledger | inventory | current status | closure rule |
+|---|---:|---|---|
+| Principal acceptance suite (`A0.*`–`A7.*`) | 94 physical rows / 92 live rows; 2 withdrawn | **RED by absence; NOT FROZEN** | The exact acceptance item id remains stable; only its own required test, probe or owner decision can change its status. |
+| Union catalog | 51 source rows: 15 `MAPPED`, 5 `PARTIAL`, 30 `NEW`, 1 code-verified `CLOSED` | **OPEN intake; AU staging remains RED** | A source row remains addressable by its catalog id. A `MAPPED`/`PARTIAL` relation is not closure; the one `CLOSED` row is closed by code evidence, not prose. |
+| Staged AU intake (`AU1.*`–`AU7.*`) | 30 source findings / 33 proposed acceptance ids | **STAGING-ONLY; not promoted** | AU ids cannot be promoted, renamed into an `A` item, or used as a green substitute before the required review/promotion sequence. |
+| Review state | Round-13 input `b3371e8…` | **8/8 NOT QUIET; quiet count 0** | Review results are bound to their exact committed input and never transfer to a later or unqualified `HEAD`. |
+
+Implementation and proof are separate dimensions. `T0-W1` has committed the union ledger and
+completed its reconciliation obligation at the planning snapshot; that does not make the
+principal suite green. `T7-W1` updates this index and the changelog only; this documentation
+change is not acceptance evidence and does not close `A7.2` or any other finding. All other
+implementation, owner, relay, and live-proof statuses remain those in the canonical plan and
+are not inferred from a checkbox, a commit message, a test-green result, or a historical entry.
+
+The current production boundary is also explicit: containment remains armed (`FABRIC_PG_DISABLED=1`
+and `FABRIC_PROBES_ENABLED=0`). No roadmap or changelog text authorizes deployment, restart,
+delete, rearm, promotion, freeze, dispatch, or live-credit attribution.
+
+### Stable-id and closure policy
+
+- Every principal and union row keeps its original catalog id for its entire lifecycle. A
+  corrected citation, split, merge, or renamed description records a relationship to that id;
+  it does not create a clean finding or reset its status.
+- `MAPPED`, `PARTIAL`, `NEW`, `CLOSED`, `RED`, `STAGING`, `WITHDRAWN`, and `NOT FROZEN` are
+  bounded ledger states, not editorial labels. A status change must name the same id, the
+  required owner/evidence, and the exact committed input or artifact that supports it.
+- `CHANGELOG.md` records chronology and provenance only. It cannot close a finding, override the
+  plan, promote AU, transfer review credit, or turn local structural PASS into semantic, live,
+  freeze, dispatch, or green credit.
 
 ## P0 — seed hardening (CLOSED 2026-06-12)
 
