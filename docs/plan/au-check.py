@@ -245,7 +245,11 @@ MONITOR_REARM_TUPLE = (
     "monitor_rearm_tuple=(deployed_monitor_image_digest,config_digest,"
     "ingress_key_epoch_map_digest,expected_source_registry_digest,"
     "delivery_route_policy_digest,provider_adapter_api_capability_digest,"
-    "attestation_ack_signer_trust_revocation_digest)"
+    "rearm_attestation_signer_trust_revocation_digest,"
+    "ingest_ack_signer_trust_revocation_digest,"
+    "page_ack_signer_trust_revocation_digest,"
+    "ack_recovery_signer_trust_revocation_digest,"
+    "signer_manifest_issuer_trust_revocation_digest)"
 )
 A6_17_WINDOW_TUPLE = (
     "A6.17_window_tuple=(monitor_rearm_tuple_digest,"
@@ -263,46 +267,70 @@ SIGNED_ACK_SCHEMA = (
 PAGE_ACK_SCHEMA = (
     "page_ack_token=(page_ack_version,incident_id,page_id,delivery_id,destination,"
     "on_call_identity,on_call_schedule_digest,action,payload_digest,"
-    "monitor_rearm_tuple_digest,acknowledged_at,expires_at,signer_key_id,"
-    "signer_epoch,signature)"
+    "monitor_rearm_tuple_digest,signer_rotation_manifest_digest,acknowledged_at,"
+    "expires_at,signer_key_id,signer_epoch,signature)"
 )
 SIGNER_ROTATION_MANIFEST = (
-    "signer_rotation_manifest=(manifest_version,active_signer_key_id,"
-    "active_signer_epoch,next_signer_key_id,next_signer_epoch,"
+    "signer_rotation_manifest=(manifest_version,manifest_generation,"
+    "active_signer_key_id,active_signer_epoch,next_signer_key_id,next_signer_epoch,"
     "revoked_signer_set_digest,overlap_started_at,overlap_expires_at,"
     "recovery_custody_digest,monitor_rearm_tuple_digest,previous_manifest_digest,"
+    "manifest_issuer_key_id,manifest_issuer_epoch,worm_log_id,"
+    "witness_checkpoint_sequence,witness_previous_root_digest,witness_root_digest,"
     "issued_at,signature)"
 )
 ACK_RECOVERY_SCHEMA = (
     "ACK_RECOVERY=(recovery_version,event_id,producer_seq,payload_digest,source,"
     "service,application,key_id,credential_epoch,original_monitor_rearm_tuple_digest,"
     "ingest_commit_id,original_ack_digest,revocation_record_digest,"
-    "signer_rotation_manifest_digest,current_monitor_rearm_tuple_digest,"
+    "signer_rotation_manifest_digest,signer_manifest_generation,"
+    "signer_manifest_witness_root_digest,current_monitor_rearm_tuple_digest,"
     "recovery_signer_key_id,recovery_signer_epoch,issued_at,signature)"
 )
 CANARY_ACTIVATION_TUPLE = (
-    "canary_activation_tuple=(activation_version,lifecycle_source,lifecycle_service,"
-    "lifecycle_application,lifecycle_key_id,lifecycle_credential_epoch,synthetic_source,"
-    "synthetic_service,synthetic_application,synthetic_key_id,synthetic_credential_epoch,"
+    "canary_activation_tuple=(activation_version,activation_phase,"
+    "activation_generation,previous_activation_digest,lifecycle_source,"
+    "lifecycle_service,lifecycle_application,lifecycle_key_id,"
+    "lifecycle_credential_epoch,synthetic_source,synthetic_service,"
+    "synthetic_application,synthetic_key_id,synthetic_credential_epoch,"
     "monitor_rearm_tuple_digest,producer_image_digest,"
     "producer_config_digest,probe_flag_name,probe_flag_value,synthetic_flag_name,"
-    "synthetic_flag_value,activated_at)"
+    "synthetic_flag_value,activated_at,expires_at,revocation_state_digest,"
+    "owner_authorization_digest,activation_signer_key_id,activation_signer_epoch,signature)"
 )
 O_CFRATE_EVIDENCE = (
     "O_CFRATE_EVIDENCE=(schema_version,obstacle_id,status,accountable_owner,"
-    "accountable_role,attested_at,review_input_sha,deployed_image_digest,provider,"
+    "accountable_role,owner_key_id,owner_key_epoch,owner_role_authority_digest,"
+    "attested_at,review_input_sha,deployed_image_digest,provider,"
     "provider_api_or_export_version,account_id,plan,billing_period_start,"
-    "billing_period_end,threshold_policy_digest,threshold_declared_at,threshold_receipt_id,"
-    "threshold_receipt_sha256,budget_interval_start,budget_interval_end,source,"
+    "billing_period_end,threshold_policy_digest,threshold_declared_at,"
+    "threshold_witness_log_id,threshold_witness_sequence,"
+    "threshold_witness_previous_root_digest,threshold_witness_root_digest,"
+    "threshold_witnessed_at,threshold_witness_key_id,threshold_witness_signature,"
+    "budget_interval_start,budget_interval_end,source,"
     "source_locator,receipt_id,receipt_sha256,activity_manifest_sha256,"
-    "complete_provider_cursor,invoice_line_id,invoice_line_description,quantity,unit,"
-    "currency,line_amount,effective_rate,effective_rate_formula,rate_effective_from,"
+    "complete_provider_cursor,invoice_line_id,invoice_line_description,"
+    "invoice_line_payload_digest,quantity,unit,currency,line_amount,effective_rate,"
+    "effective_rate_formula,rate_effective_from,"
     "rate_effective_to,attempt_count,failed_attempt_count,retry_count,"
     "idle_wakeup_count,served_count,failure_rate_numerator_formula,"
     "failure_rate_denominator_formula,failure_rate_numerator,"
     "failure_rate_denominator,observed_failure_rate,failure_rate_threshold,"
     "billable_vcpu_hours,billable_gib_hours,observed_cost,cost_budget,"
-    "cost_per_served_attempt,cost_per_served_attempt_threshold,owner_signature)"
+    "cost_per_served_attempt,cost_per_served_attempt_threshold,"
+    "cost_quantity_reconciliation_digest,canonical_payload_digest,owner_signature)"
+)
+OWNER_ACTION_AUTHORIZATION = (
+    "OWNER_ACTION_AUTHORIZATION=(authorization_version,authorization_id,action,"
+    "subject_digest,review_input_sha,issued_at,not_before,expires_at,nonce,"
+    "owner_identity,owner_role,owner_key_id,owner_key_epoch,role_authority_digest,signature)"
+)
+R6_RELAY_SCHEMA = (
+    "R6_RELAY=(schema_version,relay_id,status,source_repo,source_commit_sha,"
+    "owner_identity,owner_role,owner_key_id,owner_key_epoch,role_authority_digest,"
+    "tenant_a_digest,tenant_b_digest,memoize_key_digest,a_to_b_trials,"
+    "a_to_b_refusals,b_to_a_trials,b_to_a_refusals,cas_endpoint_version,"
+    "test_artifact_digest,issued_at,signature)"
 )
 STAGED_WP_HEADER = [
     "wp",
@@ -1358,7 +1386,8 @@ def validate_canary_split_contract(document: str, label: str) -> list[str]:
             r"phase[- ]?2.{0,900}(?:exactly )?20.{0,120}transactions"
         ),
         "Phase 1 seal precedes Phase 2": (
-            r"only after.{0,80}phase[- ]?1.{0,100}sealed.{0,100}phase[- ]?2"
+            r"(?:only after.{0,120}phase[- ]?1.{0,160}sealed.{0,160}phase[- ]?2|"
+            r"after.{0,120}artifact.{0,100}sealed.{0,160}phase[- ]?2)"
         ),
         "Phase 2 cannot contaminate Phase 1 artifact": (
             r"phase[- ]?2.{0,900}excluded.{0,180}cannot.{0,100}"
@@ -1369,10 +1398,14 @@ def validate_canary_split_contract(document: str, label: str) -> list[str]:
             r"{0,180}monitor.{0,700}(?:does not double-own|no second A6\.22 ownership|"
             r"does not make it an A6\.22 owner|not make it an A6\.22 owner)"
         ),
-        "Phase 2 changes only synthetic flag and preserves both lane identities": (
-            r"phase[- ]?2.{0,900}(?:change|changes).{0,100}only.{0,100}"
-            r"synthetic_flag_value.{0,350}(?:preserv|keep|remain).{0,160}"
-            r"(?:both|lifecycle.{0,60}synthetic).{0,100}identit"
+        "Phase 2 exact permitted delta preserves all other fields": (
+            r"(?:phase[- ]?2.{0,120}(?:only permitted|only).{0,80}(?:field )?changes|"
+            r"only phase[- ]?2 field changes|exact permitted phase[- ]?2 delta is)"
+            r".{0,80}activation_phase.{0,80}activation_generation.{0,80}"
+            r"previous_activation_digest.{0,80}synthetic_flag_value.{0,80}"
+            r"activated_at.{0,80}expires_at.{0,80}owner_authorization_digest.{0,80}"
+            r"signature.{0,180}(?:every other field|every identity|all identity)"
+            r".{0,240}(?:byte-identical|remains)"
         ),
     }
     return [
@@ -1391,9 +1424,11 @@ def validate_cf_rate_cross_document(document: str, label: str) -> list[str]:
         "threshold declaration precedes observation": (
             r"threshold_declared_at.{0,140}(?:<|before).{0,80}budget_interval_start"
         ),
-        "threshold policy receipt binds the declaration": (
-            r"threshold_policy_digest.{0,260}threshold_receipt_id.{0,120}"
-            r"threshold_receipt_sha256"
+        "threshold policy has an independent append-only witness": (
+            r"threshold_policy_digest.{0,300}(?:before observation.{0,120})?"
+            r"independent(?:ly)? witness(?:ed)?.{0,120}(?:append|named log).{0,180}"
+            r"(?:sequence|previous/root digests).{0,180}"
+            r"(?:signature|signs|witness(?:ed)?(?:_at| time| key))"
         ),
         "provider-issued invoice/usage source": (
             r"provider-issued (?:invoice|usage export|invoice or usage export)"

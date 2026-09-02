@@ -46,7 +46,7 @@ WP = {
     "T6-W1": (
         ["A6.1", "A6.2", "A6.15"],
         ["INV-7"],
-        "`scripts/**/*.selftest.sh`, `scripts/pre-merge-gate-check.sh`, `.github/workflows/ci.yml`, new `.github/workflows/selftests.yml` with exhaustive script discovery/coverage assertion",
+        "only `scripts/orphan-box-check.selftest.sh`, `scripts/pre-merge-gate-check.selftest.sh` and `scripts/pre-merge-gate-check.sh`; it specifies exhaustive discovery but owns no T7-W4 selftest and no workflow file",
         1,
     ),
     "T6-W2": (
@@ -430,6 +430,8 @@ DAG_EXTERNAL_NODES = {
     "O-CFINVENTORY",
     "O-CFCANCEL",
     "O-CFRATE",
+    "O-PG-REARM",
+    "O-CANARY-ACTIVATE",
     "O-MONITORHOST",
 }
 DAG_PHASES = {
@@ -446,49 +448,14 @@ DAG_PHASES = {
     "W1 serial test+probe",
     "W2 worker test+probe",
 }
-O_CFRATE_EVIDENCE_SCHEMA = (
-    "O_CFRATE_EVIDENCE=(schema_version,obstacle_id,status,accountable_owner,"
-    "accountable_role,attested_at,review_input_sha,deployed_image_digest,provider,"
-    "provider_api_or_export_version,account_id,plan,billing_period_start,billing_period_"
-    "end,threshold_policy_digest,threshold_declared_at,threshold_receipt_id,threshold_"
-    "receipt_sha256,budget_interval_start,budget_interval_end,source,source_locator,receipt_id,"
-    "receipt_sha256,activity_manifest_sha256,complete_provider_cursor,invoice_line_id,"
-    "invoice_line_description,quantity,unit,currency,line_amount,effective_rate,effective_"
-    "rate_formula,rate_effective_from,rate_effective_to,attempt_count,failed_attempt_count,"
-    "retry_count,idle_wakeup_count,served_count,failure_rate_numerator_formula,failure_"
-    "rate_denominator_formula,failure_rate_numerator,failure_rate_denominator,observed_"
-    "failure_rate,failure_rate_threshold,billable_vcpu_hours,billable_gib_hours,observed_"
-    "cost,cost_budget,cost_per_served_attempt,cost_per_served_attempt_threshold,owner_"
-    "signature)"
-)
-PAGE_ACK_SCHEMA = (
-    "page_ack_token=(page_ack_version,incident_id,page_id,delivery_id,destination,"
-    "on_call_identity,on_call_schedule_digest,action,payload_digest,"
-    "monitor_rearm_tuple_digest,acknowledged_at,expires_at,signer_key_id,"
-    "signer_epoch,signature)"
-)
-SIGNER_ROTATION_MANIFEST = (
-    "signer_rotation_manifest=(manifest_version,active_signer_key_id,"
-    "active_signer_epoch,next_signer_key_id,next_signer_epoch,"
-    "revoked_signer_set_digest,overlap_started_at,overlap_expires_at,"
-    "recovery_custody_digest,monitor_rearm_tuple_digest,previous_manifest_digest,"
-    "issued_at,signature)"
-)
-ACK_RECOVERY_SCHEMA = (
-    "ACK_RECOVERY=(recovery_version,event_id,producer_seq,payload_digest,source,"
-    "service,application,key_id,credential_epoch,original_monitor_rearm_tuple_digest,"
-    "ingest_commit_id,original_ack_digest,revocation_record_digest,"
-    "signer_rotation_manifest_digest,current_monitor_rearm_tuple_digest,"
-    "recovery_signer_key_id,recovery_signer_epoch,issued_at,signature)"
-)
-CANARY_ACTIVATION_TUPLE = (
-    "canary_activation_tuple=(activation_version,lifecycle_source,lifecycle_service,"
-    "lifecycle_application,lifecycle_key_id,lifecycle_credential_epoch,synthetic_source,"
-    "synthetic_service,synthetic_application,synthetic_key_id,synthetic_credential_epoch,"
-    "monitor_rearm_tuple_digest,producer_image_digest,"
-    "producer_config_digest,probe_flag_name,probe_flag_value,synthetic_flag_name,"
-    "synthetic_flag_value,activated_at)"
-)
+MONITOR_REARM_TUPLE = "monitor_rearm_tuple=(deployed_monitor_image_digest,config_digest,ingress_key_epoch_map_digest,expected_source_registry_digest,delivery_route_policy_digest,provider_adapter_api_capability_digest,rearm_attestation_signer_trust_revocation_digest,ingest_ack_signer_trust_revocation_digest,page_ack_signer_trust_revocation_digest,ack_recovery_signer_trust_revocation_digest,signer_manifest_issuer_trust_revocation_digest)"
+O_CFRATE_EVIDENCE_SCHEMA = "O_CFRATE_EVIDENCE=(schema_version,obstacle_id,status,accountable_owner,accountable_role,owner_key_id,owner_key_epoch,owner_role_authority_digest,attested_at,review_input_sha,deployed_image_digest,provider,provider_api_or_export_version,account_id,plan,billing_period_start,billing_period_end,threshold_policy_digest,threshold_declared_at,threshold_witness_log_id,threshold_witness_sequence,threshold_witness_previous_root_digest,threshold_witness_root_digest,threshold_witnessed_at,threshold_witness_key_id,threshold_witness_signature,budget_interval_start,budget_interval_end,source,source_locator,receipt_id,receipt_sha256,activity_manifest_sha256,complete_provider_cursor,invoice_line_id,invoice_line_description,invoice_line_payload_digest,quantity,unit,currency,line_amount,effective_rate,effective_rate_formula,rate_effective_from,rate_effective_to,attempt_count,failed_attempt_count,retry_count,idle_wakeup_count,served_count,failure_rate_numerator_formula,failure_rate_denominator_formula,failure_rate_numerator,failure_rate_denominator,observed_failure_rate,failure_rate_threshold,billable_vcpu_hours,billable_gib_hours,observed_cost,cost_budget,cost_per_served_attempt,cost_per_served_attempt_threshold,cost_quantity_reconciliation_digest,canonical_payload_digest,owner_signature)"
+PAGE_ACK_SCHEMA = "page_ack_token=(page_ack_version,incident_id,page_id,delivery_id,destination,on_call_identity,on_call_schedule_digest,action,payload_digest,monitor_rearm_tuple_digest,signer_rotation_manifest_digest,acknowledged_at,expires_at,signer_key_id,signer_epoch,signature)"
+SIGNER_ROTATION_MANIFEST = "signer_rotation_manifest=(manifest_version,manifest_generation,active_signer_key_id,active_signer_epoch,next_signer_key_id,next_signer_epoch,revoked_signer_set_digest,overlap_started_at,overlap_expires_at,recovery_custody_digest,monitor_rearm_tuple_digest,previous_manifest_digest,manifest_issuer_key_id,manifest_issuer_epoch,worm_log_id,witness_checkpoint_sequence,witness_previous_root_digest,witness_root_digest,issued_at,signature)"
+ACK_RECOVERY_SCHEMA = "ACK_RECOVERY=(recovery_version,event_id,producer_seq,payload_digest,source,service,application,key_id,credential_epoch,original_monitor_rearm_tuple_digest,ingest_commit_id,original_ack_digest,revocation_record_digest,signer_rotation_manifest_digest,signer_manifest_generation,signer_manifest_witness_root_digest,current_monitor_rearm_tuple_digest,recovery_signer_key_id,recovery_signer_epoch,issued_at,signature)"
+CANARY_ACTIVATION_TUPLE = "canary_activation_tuple=(activation_version,activation_phase,activation_generation,previous_activation_digest,lifecycle_source,lifecycle_service,lifecycle_application,lifecycle_key_id,lifecycle_credential_epoch,synthetic_source,synthetic_service,synthetic_application,synthetic_key_id,synthetic_credential_epoch,monitor_rearm_tuple_digest,producer_image_digest,producer_config_digest,probe_flag_name,probe_flag_value,synthetic_flag_name,synthetic_flag_value,activated_at,expires_at,revocation_state_digest,owner_authorization_digest,activation_signer_key_id,activation_signer_epoch,signature)"
+OWNER_ACTION_AUTHORIZATION = "OWNER_ACTION_AUTHORIZATION=(authorization_version,authorization_id,action,subject_digest,review_input_sha,issued_at,not_before,expires_at,nonce,owner_identity,owner_role,owner_key_id,owner_key_epoch,role_authority_digest,signature)"
+R6_RELAY_SCHEMA = "R6_RELAY=(schema_version,relay_id,status,source_repo,source_commit_sha,owner_identity,owner_role,owner_key_id,owner_key_epoch,role_authority_digest,tenant_a_digest,tenant_b_digest,memoize_key_digest,a_to_b_trials,a_to_b_refusals,b_to_a_trials,b_to_a_refusals,cas_endpoint_version,test_artifact_digest,issued_at,signature)"
 
 # T6-W12 must execute T6-W15's complete base suite but may not acquire its test
 # files. Freeze the version/cutover evidence contract in visible DAG prose so
@@ -565,10 +532,7 @@ REQUIRED_DAG_SEMANTIC_CLAUSES = {
         "invalidate the PG-rearm proof."
     ),
     "canonical monitor rearm tuple": (
-        "The final post-cutover PASS also seals the exact `monitor_rearm_tuple=("
-        "deployed_monitor_image_digest,config_digest,ingress_key_epoch_map_digest,"
-        "expected_source_registry_digest,delivery_route_policy_digest,provider_"
-        "adapter_api_capability_digest,attestation_ack_signer_trust_revocation_digest)` "
+        f"The final post-cutover PASS also seals the exact `{MONITOR_REARM_TUPLE}` "
         "and its digest."
     ),
     "nonce-bound effective-tuple health attestation": (
@@ -577,12 +541,12 @@ REQUIRED_DAG_SEMANTIC_CLAUSES = {
         "caller nonce it returns a signature over that nonce, the exact effective "
         "tuple digest and separately timestamped provider-poll and delivery-route "
         "health. The challenge response age is at most 10 seconds, and provider-poll "
-        "and delivery health observations are at most 60 seconds old. The seventh "
-        "tuple field commits the exact accepted `(signer_key_id,signer_epoch)` registry, "
-        "trust-anchor digests and revocation state for both rearm attestations and "
-        "authenticated ingest ACKs; a cryptographically valid signature from a "
-        "signer/epoch not in that digest is invalid, and changing any of those inputs "
-        "is tuple drift. T1-W6's "
+        "and delivery health observations are at most 60 seconds old. The last five "
+        "tuple fields separately commit the exact `(signer_key_id,signer_epoch)` registry, "
+        "trust-anchor digests and revocation state for rearm, ingest-ACK, page-ACK, "
+        "recovery and manifest-issuer roles. Cross-role trust is forbidden; a signature "
+        "outside its exact role digest is invalid, and changing any role input is tuple "
+        "drift. T1-W6's "
         "`crates/corelink-fabric-server/src/monitor_"
         "interlock.rs` obtains a new response before every readiness answer, PG-backed "
         "mutation, and PG/exporter socket/init/pool use, then verifies the bound tuple "
@@ -605,7 +569,7 @@ REQUIRED_DAG_SEMANTIC_CLAUSES = {
         "rearm_tuple` change must enter `CLOSING` and complete the permit/action/socket "
         "drain and pool discard before the change begins. `crates/corelink-fabric-"
         "server/tests/monitor_tuple_interlock."
-        "rs` independently mutates all seven tuple fields and injects unavailable, "
+        "rs` independently mutates all eleven tuple fields and injects unavailable, "
         "missing, stale, bad-signature, wrong-nonce, replayed and cached attestations; "
         "`crates/corelink-fabric-server/tests/monitor_tuple_interlock_race.rs` pauses "
         "each action immediately before and during durable commit, proves `CLOSING` "
@@ -657,9 +621,9 @@ REQUIRED_DAG_SEMANTIC_CLAUSES = {
         "frozen fields against its durable head and rejects a wrong ACK version, old "
         "or wrong event, payload digest, sequence, source, service/application, key id "
         "or credential epoch, monitor-tuple digest, ingest commit or commit time. It "
-        "also rejects a "
-        "stale, revoked or wrong-but-currently-valid signer under the seventh tuple "
-        "field. Every rejection preserves the head and original 60-second deadline, "
+        "also rejects a stale, revoked or wrong-but-currently-valid signer under "
+        "`ingest_ack_signer_trust_revocation_digest`. Every rejection preserves the "
+        "head and original 60-second deadline, "
         "performs zero gated action and fails closed. In both candidate and active-"
         "final passes, T6-W12's monitor-side fixtures submit isolated exact "
         "authenticated envelopes under every accepted lane and prove only ingest/CAS/"
@@ -714,34 +678,23 @@ REQUIRED_DAG_SEMANTIC_CLAUSES = {
         "O-MONITORHOST trusted time/checkpoint capability."
     ),
     "human page ACK exact schema": (
-        "An on-call page is acknowledged only by the exact signed `page_ack_token=(page_"
-        "ack_version,incident_id,page_id,delivery_id,destination,on_call_identity,on_call_"
-        "schedule_digest,action,payload_digest,monitor_rearm_tuple_digest,acknowledged_at,"
-        "expires_at,signer_key_id,signer_epoch,signature)`; `signature` authenticates the "
-        "preceding fourteen fields in that order."
+        f"An on-call page is acknowledged only by the exact signed `{PAGE_ACK_SCHEMA}`; "
+        "`signature` authenticates the preceding fifteen fields in that order."
     ),
     "signer rotation manifest exact schema": (
-        "Signer rotation is authorized only by the exact signed `signer_rotation_manifest=("
-        "manifest_version,active_signer_key_id,active_signer_epoch,next_signer_key_id,next_"
-        "signer_epoch,revoked_signer_set_digest,overlap_started_at,overlap_expires_at,"
-        "recovery_custody_digest,monitor_rearm_tuple_digest,previous_manifest_digest,issued_"
-        "at,signature)`; `signature` authenticates the preceding twelve fields in that order."
+        f"Signer rotation is authorized only by the exact signed "
+        f"`{SIGNER_ROTATION_MANIFEST}`; `signature` authenticates the preceding "
+        "nineteen fields in that order under the role-exclusive manifest-issuer trust "
+        "and revocation set committed by the monitor tuple."
     ),
     "signer rotation ACK recovery exact schema": (
-        "`ACK_RECOVERY=(recovery_version,event_id,producer_seq,payload_digest,source,"
-        "service,application,key_id,credential_epoch,original_monitor_rearm_tuple_digest,"
-        "ingest_commit_id,original_ack_digest,revocation_record_digest,signer_rotation_"
-        "manifest_digest,current_monitor_rearm_tuple_digest,recovery_signer_key_id,recovery_"
-        "signer_epoch,issued_at,signature)`; `signature` authenticates the preceding eighteen "
-        "fields in that order."
+        f"`{ACK_RECOVERY_SCHEMA}`; `signature` authenticates the preceding twenty fields "
+        "in that order."
     ),
     "canary activation exact schema": (
-        "`canary_activation_tuple=(activation_version,lifecycle_source,lifecycle_service,"
-        "lifecycle_application,lifecycle_key_id,lifecycle_credential_epoch,synthetic_source,"
-        "synthetic_service,synthetic_application,synthetic_key_id,synthetic_credential_epoch,"
-        "monitor_rearm_tuple_digest,producer_image_digest,producer_config_digest,probe_flag_name,"
-        "probe_flag_value,synthetic_flag_name,synthetic_flag_value,activated_at)`. Those nineteen "
-        "ordered fields and their canonical digest are the "
+        f"`{CANARY_ACTIVATION_TUPLE}`. `signature` authenticates the preceding "
+        "twenty-seven fields in that order under the role-exclusive canary-activation "
+        "signer trust/revocation set. Those fields and their canonical digest are the "
         "sole activation authority."
     ),
     "canary fail-visible state machine": (
@@ -879,7 +832,7 @@ REQUIRED_DAG_DIRECT_PREDECESSORS = {
     # the independent monitor and re-proves the complete base against the
     # final candidate before PG may re-arm. T6-W15 remains a transitive base
     # predecessor through T6-W12 rather than a substitute for that final seal.
-    "T1-W6": {"T6-W12", "O-CFINVENTORY"},
+    "T1-W6": {"T6-W12", "O-CFINVENTORY", "O-PG-REARM"},
     "T6-W12": {
         "T6-W15",
         "T6-W9",
@@ -888,7 +841,15 @@ REQUIRED_DAG_DIRECT_PREDECESSORS = {
     },
     "T6-W13": {"T6-W4", "T6-W9", "O-CANARY", "T7-W4b"},
     "T6-W14": {"T1-W6", "T6-W12", "T6-W13"},
-    "T6-W10": {"T6-W6", "T6-W12", "T6-W14"},
+    "T6-W10": {
+        "T6-W6",
+        "T6-W9",
+        "T6-W12",
+        "T6-W14",
+        "T1-W6",
+        "O-CANARY-ACTIVATE",
+        "T7-W4b",
+    },
     # External owner relations are not vertices and therefore must remain
     # explicit on the exact packets that consume them.
     "T4-W2": {"R2"},
@@ -993,8 +954,6 @@ EXACT_DAG_SCOPE_ATOMS = {
         "scripts/orphan-box-check.selftest.sh",
         "scripts/pre-merge-gate-check.selftest.sh",
         "scripts/pre-merge-gate-check.sh",
-        ".github/workflows/ci.yml",
-        ".github/workflows/selftests.yml",
     },
     "T6-W4": {
         ".github/workflows/secret-scan.yml",
@@ -2147,7 +2106,8 @@ def validate_canary_split_contract(document, label):
             r"phase[- ]?2.{0,900}(?:exactly )?20.{0,120}transactions"
         ),
         "Phase 1 seal precedes Phase 2": (
-            r"only after.{0,80}phase[- ]?1.{0,100}sealed.{0,100}phase[- ]?2"
+            r"(?:only after.{0,120}phase[- ]?1.{0,160}sealed.{0,160}phase[- ]?2|"
+            r"after.{0,120}artifact.{0,100}sealed.{0,160}phase[- ]?2)"
         ),
         "Phase 2 cannot contaminate Phase 1 artifact": (
             r"phase[- ]?2.{0,900}excluded.{0,180}cannot.{0,100}"
@@ -2158,10 +2118,15 @@ def validate_canary_split_contract(document, label):
             r"{0,180}monitor.{0,700}(?:does not double-own|no second A6\.22 ownership|"
             r"does not make it an A6\.22 owner|not make it an A6\.22 owner)"
         ),
-        "Phase 2 changes only synthetic flag and preserves both lane identities": (
-            r"phase[- ]?2.{0,900}(?:change|changes).{0,100}only.{0,100}"
-            r"synthetic_flag_value.{0,350}(?:preserv|keep|remain).{0,160}"
-            r"(?:both|lifecycle.{0,60}synthetic).{0,100}identit"
+        "Phase 2 exact permitted delta preserves all other fields": (
+            r"(?:phase[- ]?2.{0,120}(?:only permitted|only).{0,80}(?:field )?changes|"
+            r"only phase[- ]?2 field changes|exact permitted phase[- ]?2 delta is)"
+            r".{0,80}activation_phase.{0,80}"
+            r"activation_generation.{0,80}previous_activation_digest.{0,80}"
+            r"synthetic_flag_value.{0,80}activated_at.{0,80}expires_at.{0,80}"
+            r"owner_authorization_digest.{0,80}signature.{0,180}"
+            r"(?:every other field|every identity|all identity).{0,240}"
+            r"(?:byte-identical|remains)"
         ),
     }
     return [
@@ -2180,9 +2145,11 @@ def validate_cf_rate_cross_document(document, label):
         "threshold declaration precedes observation": (
             r"threshold_declared_at.{0,140}(?:<|before).{0,80}budget_interval_start"
         ),
-        "threshold policy receipt binds the declaration": (
-            r"threshold_policy_digest.{0,260}threshold_receipt_id.{0,120}"
-            r"threshold_receipt_sha256"
+        "threshold policy has an independent append-only witness": (
+            r"threshold_policy_digest.{0,300}(?:before observation.{0,120})?"
+            r"independent(?:ly)? witness(?:ed)?.{0,120}(?:append|named log).{0,180}"
+            r"(?:sequence|previous/root digests).{0,180}"
+            r"(?:signature|signs|witness(?:ed)?(?:_at| time| key))"
         ),
         "provider-issued invoice/usage source": (
             r"provider-issued (?:invoice|usage export|invoice or usage export)"
