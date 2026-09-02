@@ -93,8 +93,9 @@ fn ledger_legal_transitions_only() {
     for (i, from) in all_five_states().iter().enumerate() {
         for (j, to) in to_states.iter().enumerate() {
             let id = format!("lease-{i}-{j}");
+            let seeded = record(&id, &t, from.clone());
             ledger
-                .put(record(&id, &t, from.clone()))
+                .put(seeded.clone())
                 .expect("seeding the matrix record must succeed");
             let is_legal = legal.iter().any(|(f, tt)| f == from && tt == to);
             let result = ledger.transition(&id, to.clone(), 2_000);
@@ -102,16 +103,33 @@ fn ledger_legal_transitions_only() {
                 let rec = result.unwrap_or_else(|e| {
                     panic!("legal transition {from:?} -> {to:?} must succeed: {e}")
                 });
-                assert_eq!(rec.state, LeaseState::Wire(to.clone()));
-                assert_eq!(rec.updated_at_ms, 2_000, "transition must stamp now_ms");
+                let mut expected = seeded;
+                expected.state = LeaseState::Wire(to.clone());
+                expected.updated_at_ms = 2_000;
+                if matches!(from, LeaseState::Pending) {
+                    expected.billing_acquired_at_ms = Some(2_000);
+                }
+                assert_eq!(
+                    rec, expected,
+                    "legal transition {from:?} -> {to:?} must mutate only the contract fields"
+                );
+                assert_eq!(
+                    ledger.get(&id).unwrap().as_ref(),
+                    Some(&expected),
+                    "the stored record must equal the returned legal transition"
+                );
             } else {
                 assert!(
                     result.is_err(),
                     "illegal transition {from:?} -> {to:?} must Err (fail-closed)"
                 );
-                // Fail-closed means untouched: state did not move.
+                // Fail-closed means the complete record is untouched: no
+                // timestamp, deadline, billing stamp, identity, or state drift.
                 let after = ledger.get(&id).unwrap().unwrap();
-                assert_eq!(&after.state, from, "rejected transition must not mutate");
+                assert_eq!(
+                    after, seeded,
+                    "rejected transition {from:?} -> {to:?} must not mutate any field"
+                );
             }
             checked += 1;
         }
@@ -129,6 +147,35 @@ fn ledger_legal_transitions_only() {
             .put(record("lease-0-0", &t, LeaseState::Pending))
             .is_err(),
         "duplicate put must Err, never silently overwrite"
+    );
+}
+
+// The ordinary workspace suite deliberately has no database dependency. The
+// dedicated PostgreSQL workflow opts into this guard so an absent/malformed
+// TEST_DATABASE_URL cannot turn every DB-backed test's documented skip into a
+// false-green CI run. Keep the accepted URL exact and loopback-only: this lane
+// is allowed to reach its ephemeral service container, never a live database.
+#[test]
+fn pg_ci_configuration_is_explicit_and_local() {
+    const REQUIRED_URL: &str =
+        "postgresql://corelink_ci:corelink_ci@127.0.0.1:5432/corelink_fabric_test";
+
+    match std::env::var("CORELINK_PG_CI_REQUIRED") {
+        Err(std::env::VarError::NotPresent) => return,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            panic!("CORELINK_PG_CI_REQUIRED must be valid UTF-8")
+        }
+        Ok(value) => assert_eq!(
+            value, "1",
+            "CORELINK_PG_CI_REQUIRED must be the exact arming value 1"
+        ),
+    }
+
+    let database_url = std::env::var("TEST_DATABASE_URL")
+        .expect("TEST_DATABASE_URL is mandatory when the PostgreSQL CI guard is armed");
+    assert!(
+        database_url == REQUIRED_URL,
+        "the PostgreSQL CI suite may connect only to its pinned loopback service"
     );
 }
 

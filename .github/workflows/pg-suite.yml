@@ -1,0 +1,87 @@
+name: PostgreSQL suite
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/pg-suite.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/corelink-fabric/**'
+      - 'crates/corelink-runners-contracts/**'
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/pg-suite.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/corelink-fabric/**'
+      - 'crates/corelink-runners-contracts/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pg-suite-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  postgres:
+    name: Cross-instance ledger and billing
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        # The repository's DB-backed proofs target PostgreSQL 16. This is an
+        # isolated per-job service, never the live fabric database.
+        # Docker Hub's official `postgres:16` OCI index, resolved 2026-09-02.
+        image: postgres@sha256:f1c3376c26f2609ab9f29f71f824103fe2fcd8ee0346485cb6122a4f93df6f94
+        env:
+          POSTGRES_USER: corelink_ci
+          POSTGRES_PASSWORD: corelink_ci
+          POSTGRES_DB: corelink_fabric_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U corelink_ci -d corelink_fabric_test"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 15
+    env:
+      CORELINK_PG_CI_REQUIRED: '1'
+      TEST_DATABASE_URL: postgresql://corelink_ci:corelink_ci@127.0.0.1:5432/corelink_fabric_test
+    steps:
+      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0  # v6.0.3
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          toolchain: '1.96.0'
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          workspaces: . -> target
+
+      - name: Require the isolated PostgreSQL service
+        shell: bash
+        env:
+          POSTGRES_SERVICE_ID: ${{ job.services.postgres.id }}
+        run: |
+          set -euo pipefail
+          [[ "$CORELINK_PG_CI_REQUIRED" == "1" ]]
+          [[ "$TEST_DATABASE_URL" == "postgresql://corelink_ci:corelink_ci@127.0.0.1:5432/corelink_fabric_test" ]]
+          [[ -n "$POSTGRES_SERVICE_ID" ]]
+          docker exec "$POSTGRES_SERVICE_ID" \
+            pg_isready -U corelink_ci -d corelink_fabric_test
+
+      - name: Contract matrix and fail-closed DB configuration
+        run: >-
+          cargo test -p corelink-fabric --locked
+          --test acceptance_cf0_fabric_core
+
+      # Every TEST_DATABASE_URL-gated unit group shares the same schema. The
+      # established --test-threads=1 convention prevents one group's TRUNCATE
+      # from invalidating another group's cross-instance assertions.
+      - name: PostgreSQL-backed unit suite
+        run: >-
+          cargo test -p corelink-fabric --locked --lib --
+          --test-threads=1
