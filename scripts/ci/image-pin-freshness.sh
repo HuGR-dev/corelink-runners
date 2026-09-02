@@ -8,6 +8,8 @@
 # A pin is fresh only when all of these are true:
 #   * it is an exact registry.cloudflare.com ref with @sha256:<64 lowercase hex>;
 #   * the surrounding wrangler entry records the source/build commit SHA; and
+#   * the entry has an image-provenance comment binding that full 40-char SHA to
+#     the exact pinned digest (for example, `digest=sha256:… build-sha=…`); and
 #   * no commit after that build SHA touched the image's declared narrow source
 #     paths.  The paths are intentionally not the whole repository: the
 #     fabricd Dockerfile's COPY . . does not mean every documentation edit
@@ -17,7 +19,8 @@
 set -euo pipefail
 
 readonly ACCOUNT="6a1fc1c626fc2628823e60b9db01f5cd"
-readonly WORKFLOW=".github/workflows/build-cf-container-images.yml"
+readonly CONTAINER_WORKFLOW=".github/workflows/build-cf-container-images.yml"
+readonly FABRICD_WORKFLOW=".github/workflows/build-fabricd-image.yml"
 
 usage() {
   cat <<'EOF'
@@ -60,15 +63,30 @@ declare -a CONFIGS=(
 
 # image-name -> narrow, declared source paths.  Keep these lists explicit and
 # reviewable.  A workflow change is included because it changes the build
-# context/recipe even when the Dockerfile is untouched.
-declare -a RUNNER_PATHS=("deploy/runner" "$WORKFLOW")
-declare -a CHECKHOST_PATHS=("deploy/check-host" "$WORKFLOW")
+# context/recipe even when the Dockerfile is untouched.  CheckHost's image
+# context is deploy/check-host, but its binary is compiled by Cargo from the
+# repository workspace first; the workspace manifests, lockfile, and package
+# therefore belong to the closure too.  Fabricd's Dockerfile uses the root
+# context and COPY . ., with .dockerignore selecting the effective inputs; the
+# complete crates tree is intentional here because Cargo resolves all workspace
+# members and fabricd reaches path dependencies transitively.
+declare -a RUNNER_PATHS=("deploy/runner" "$CONTAINER_WORKFLOW")
+declare -a CHECKHOST_PATHS=(
+  "deploy/check-host"
+  "Cargo.toml"
+  "Cargo.lock"
+  "rust-toolchain.toml"
+  "crates/corelink-check-exec-server"
+  "$CONTAINER_WORKFLOW"
+)
 declare -a FABRICD_PATHS=(
-  "crates/corelink-fabric-server"
-  "crates/corelink-fabric"
-  "crates/corelink-runners-contracts"
+  ".dockerignore"
+  "Cargo.toml"
+  "Cargo.lock"
+  "rust-toolchain.toml"
+  "crates"
   "crates/corelink-fabric-server/Dockerfile"
-  "$WORKFLOW"
+  "$FABRICD_WORKFLOW"
 )
 
 paths_for_image() {
@@ -99,8 +117,42 @@ source_build_sha() {
   # nearby comments.  Do not treat the image digest or an arbitrary prose hash
   # as build provenance.
   printf '%s\n' "$before" \
-    | grep -Eio '(build[-_ ]sha|git[[:space:]]+sha|git|tag)[^0-9a-f]{1,16}[0-9a-f]{7,40}([^0-9a-f]|$)' \
-    | grep -Eio '[0-9a-f]{7,40}' | tail -n 1 || true
+    | grep -Eiv 'image[-_[:space:]]provenance' \
+    | grep -Eio '(build[-_ ]sha|git[-_ ]sha|git[[:space:]]+commit|tag)[[:space:]:=]+[0-9a-f]{40}([^0-9a-f]|$)' \
+    | grep -Eio '[0-9a-f]{40}' | tail -n 1 || true
+}
+
+entry_comments() {
+  local file=$1 line=$2 start
+  ((line > 1)) || return 0
+  start="$(awk -v limit="$line" 'NR < limit && /"class_name"[[:space:]]*:/ {last=NR} END {print last + 1}' "$file")"
+  [[ "$start" -ge 1 && "$start" -lt "$line" ]] || return 0
+  sed -n "${start},$((line - 1))p" "$file"
+}
+
+provenance_digest() {
+  local file=$1 line=$2 comment digest
+  while IFS= read -r comment; do
+    # The explicit image-provenance record is deliberately required to bind
+    # this pin's digest to its recorded build SHA.  Accept either the digest
+    # alone or a complete registry ref, but never infer it from prose.
+    if [[ "$comment" =~ image[-_[:space:]]provenance ]] &&
+      [[ "$comment" =~ (digest|image[-_[:space:]]digest)[=:][[:space:]]*([^[:space:]]+) ]]; then
+      digest="${BASH_REMATCH[2]}"
+      printf '%s\n' "$digest"
+    fi
+  done < <(entry_comments "$file" "$line")
+}
+
+provenance_build_sha() {
+  local file=$1 line=$2 comment sha
+  while IFS= read -r comment; do
+    if [[ "$comment" =~ image[-_[:space:]]provenance ]] &&
+      [[ "$comment" =~ build[-_[:space:]]sha[=:][[:space:]]*([0-9A-Fa-f]{40})([^0-9A-Fa-f]|$) ]]; then
+      sha="${BASH_REMATCH[1]}"
+      printf '%s\n' "$sha"
+    fi
+  done < <(entry_comments "$file" "$line")
 }
 
 red=0
@@ -136,12 +188,31 @@ for rel in "${CONFIGS[@]}"; do
       fi
     fi
 
-    build_sha=$(source_build_sha "$file" "$line")
+    build_sha_raw=$(source_build_sha "$file" "$line")
+    provenance_digest=$(provenance_digest "$file" "$line" | tail -n 1)
+    provenance_sha_raw=$(provenance_build_sha "$file" "$line" | tail -n 1)
+    build_sha="$build_sha_raw"
     if [[ -z "$build_sha" ]]; then
       reasons+=("missing-recorded-build-sha")
     elif ! git -C "$repo" cat-file -e "${build_sha}^{commit}" 2>/dev/null; then
       reasons+=("recorded-build-sha-not-in-repository")
+    elif ! git -C "$repo" merge-base --is-ancestor "$build_sha" HEAD; then
+      reasons+=("recorded-build-sha-not-ancestor")
     else
+      build_sha="$(git -C "$repo" rev-parse "${build_sha}^{commit}")"
+      if [[ -z "$provenance_digest" || -z "$provenance_sha_raw" ]]; then
+        reasons+=("missing-digest-build-provenance")
+      else
+        pin_digest="${ref##*@}"
+        provenance_digest_value="${provenance_digest##*@}"
+        if [[ "$provenance_digest_value" != "$pin_digest" ]]; then
+          reasons+=("provenance-digest-mismatch")
+        fi
+        if ! provenance_sha="$(git -C "$repo" rev-parse "${provenance_sha_raw}^{commit}" 2>/dev/null)" ||
+          [[ "$provenance_sha" != "$build_sha" ]]; then
+          reasons+=("provenance-build-sha-mismatch")
+        fi
+      fi
       for source_path in "${declared_paths[@]}"; do
         if ! git -C "$repo" ls-files --error-unmatch -- "$source_path" >/dev/null 2>&1; then
           reasons+=("undeclared-or-untracked-source-path:$source_path")
