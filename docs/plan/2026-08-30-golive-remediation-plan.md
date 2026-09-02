@@ -379,9 +379,11 @@ operation after checkout, one during query, one after its final client check and
 from PG and crash/restart after the fence-row commit but before `CLOSING`. All cases pass only when
 new permits stop, the shared/exclusive server lock ordering proves every old transaction committed
 before fence advance or rolled back, ambiguous outcomes reconcile the exact transaction without a
-duplicate effect, every socket/pool closes before `LATCHED`, and the system remains fail-closed. The latch
-may clear only after full T6-W12 candidate/cutover/active-final reproof, T1-W6 rebinding to the exact
-new tuple, and an explicit manual latch reset; none of those steps alone restores PG.
+duplicate effect, every socket/pool closes before `LATCHED`, and the system remains fail-closed. The
+latch may clear only after full T6-W12 candidate/cutover/active-final reproof, T1-W6 rebinding to the
+exact new tuple, and T1-W6's atomic consumption of a fresh, unexpired, one-shot `O-PG-REARM`
+authorization bound to that tuple, the final scans/poll and the exact flag transition; none of those
+steps alone restores PG.
 
 **Capability status:** C1 is **red** (the edge is servable, but restart and durability remain
 unproven) · C2 remains red · C3 amber (the cold fallback still hides a moat failure) · C4 red
@@ -1181,7 +1183,8 @@ already complete WP such as T0-W1.
    blocks new permits, then the exclusive server lock drains old transactions and commits the fence/
    latch row before `CLOSING`; ambiguous/partitioned outcomes remain FENCING/503 until the exact
    commit reconciles. Only then are remaining work/pools drained before `LATCHED`; it remains 503
-   until full reproof, rebinding and manual reset.
+   until full reproof, exact rebinding and atomic consumption of a fresh, unexpired, one-shot
+   `O-PG-REARM` authorization bound to the final tuple/scans/poll and flag transition.
    T6-W14 follows successful T1-W6, binds only its exact pre-registered lanes, and delivers the
    distinct lifecycle sampler plus AU6.17 synthetic driver with both activation flags exact `0`,
    zero outer-route requests or lifecycle envelopes and no activation/re-enable/probe credit.
@@ -1315,7 +1318,8 @@ greened here:
   bad signature or signer-trust failure blocks new permits; the exclusive server fence drains old
   transactions and commits before `CLOSING`, while ambiguity stays FENCING/503. Each tuple/signature,
   checkout/query/precommit/COMMIT, partition and crash boundary is tested; only complete T6-W12
-  reproof, T1-W6 rebinding and manual reset can clear it.
+  reproof, exact T1-W6 rebinding and atomic consumption of a fresh, unexpired, one-shot
+  `O-PG-REARM` authorization bound to the final tuple/scans/poll and flag transition can clear it.
 - **Per-hop queue budgets could conceal an SLO breach.** Every source lane now permits at most one
   unacknowledged envelope, and the ≤60-second bound is total queue residence across producer,
   transport and monitor. T6-W15's late-transition, stale-periodic-head and quarantine tests are

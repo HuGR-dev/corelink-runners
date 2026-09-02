@@ -223,7 +223,9 @@ effective tuple, the two correctly bounded health classes and refusal of a wrong
 stale signer epoch and revoked signer under the seventh field. Every negative case is green only
 when the latch is durable, pools/sockets are gone, typed 503 is returned and zero action occurs.
 The latch may clear only after complete T6-W12 candidate/cutover/active-final reproof, exact T1-W6
-rebinding to the new tuple and an explicit manual reset; none alone restores PG.
+rebinding to the new tuple and T1-W6's atomic consumption of a fresh, unexpired, one-shot
+`O-PG-REARM` authorization bound to the final tuple/scans/poll and exact flag transition; none alone
+restores PG.
 
 T6-W12 also owns the A6.17 sensitivity-window implementation. It runs from an O-MONITORHOST
 scheduler and credential distinct from the monitor application and validates delivery through an
@@ -555,13 +557,16 @@ T6-W10 implements no canary sampler, synthetic driver, detector, delivery path, 
 registry entry or monitor route: T6-W14 remains the sole A6.22 implementation/item owner and T6-W12/
 T6-W15 retain detector/ingest ownership. T6-W10 only activates the already bound implementation and
 collects/seals evidence. T6-W10 remains the sole AU6.17 evidence owner, its Phase-1 collection does
-not make it an A6.22 owner, and no acceptance item or implementation scope is owned twice. Missing, stale,
-malformed or contradictory bytes, any field/digest drift, post-check config/runtime/key/flag
-change, or disagreement among canary, verifier and rearm atomically disables both lanes, returns
-both flags to exact-`0`, emits fail-visible `UNKNOWN`, invalidates prior probe credit and requires a
-new T6-W10 activation proof. A count other than 12 or 20, missing ACK, any Phase-1 fetch/start/usage,
-or Phase-2 contamination of the sealed no-wake artifact invokes the same failure and restarts the
-affected phase in order. T6-W10 exclusively owns this later activation plus the 20/20 AU6.17
+not make it an A6.22 owner, and no acceptance item or implementation scope is owned twice. Any
+cryptographically verified stale, malformed or contradictory bytes, verified field/digest drift,
+observed post-check config/runtime/key/flag change, or verified disagreement among canary, verifier
+and rearm atomically disables both lanes, returns both flags to exact-`0`, emits fail-visible `FAILED`,
+invalidates prior probe credit and requires a new T6-W10 activation proof. A count other than 12 or
+20, missing ACK, any observed Phase-1 fetch/start/usage, or Phase-2 contamination of the sealed
+no-wake artifact invokes the same `FAILED` outcome and restarts the affected phase in order. Only
+unavailable or unverifiable evidence emits fail-visible `UNKNOWN`; it keeps or returns both flags to
+exact-`0`, invalidates prior probe credit and requires a new T6-W10 activation proof. T6-W10
+exclusively owns this later activation plus the 20/20 AU6.17
 execution, but no canary or monitor implementation. T6-W14 remains default-off/bind-only and may
 neither author nor mutate the activation tuple for either phase. Evidence that precedes the real
 implementation, the byte-identical phase tuple or its mandatory predecessor phase is invalid.
