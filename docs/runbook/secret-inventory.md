@@ -74,6 +74,47 @@ Non-secret `vars` here (not secrets): `FABRIC_NUM_SHARDS`,
 `CLOUDFLARE_SPAWN_WORKER_URL`, `FABRIC_PUBLIC_BASE_URL`, `CLW_ENDPOINT`,
 `CORELINK_RUNNER_MINT_URL`, `FABRIC_EMIT_INTENT_METRICS_SIG`.
 
+## Repository, CI, and runtime surfaces
+
+The drift checker also inventories names used outside the two production
+Workers. This keeps CI credentials, env-0 hand-off names, and Cloudflare
+bindings visible without ever recording a value.
+
+| Name | Surface / contract |
+|---|---|
+| `COLD_ORGANIC_TENANT_PAT` | Spawn-worker tenant PAT selected by `REPO_TENANT_PAT_MAP`; absent mapping is rejected. |
+| `CORELINK_CF_ACCESS_CLIENT_ID` | Fabricd/runner CF Access service-token client id; forwarded only when configured. |
+| `CORELINK_CF_ACCESS_CLIENT_SECRET` | Fabricd/runner CF Access service-token client secret; forwarded only when configured. |
+| `FABRIC_TEST_MINT_KEY` | Opt-in test-mint arming key; absent keeps the route 404/inert. |
+| `FABRIC_GITHUB_APP_PRIVATE_KEY` | Optional fabricd GitHub-App PEM fallback credential for runner minting. |
+| `FABRIC_PAT` | Fabric-side PAT name used by the local/CI operator tooling. |
+| `PINNED_IMAGE_DIGEST` | Spawn-worker image admission `var`; absent leaves the optional pin disarmed. |
+| `CORELINK_ADMIN_KEY` | Local operator alias for the fabric admin key; value is never logged. |
+| `CLOUDFLARE_API_TOKEN` | CI/API fallback token for Cloudflare deploy and container operations. |
+| `CLOUDFLARE_CONTAINERS_API_TOKEN` | Preferred CI/API token for Cloudflare container operations. |
+| `GITHUB_TOKEN` | GitHub Actions job token used by repository automation. |
+| `NPM_TOKEN` | Optional npm publish credential in the release workflow. |
+| `PYPI_TOKEN` | Optional PyPI publish credential in the release workflow. |
+| `RESEND_API_KEY` | Canary notification credential; absent makes notifications a no-op. |
+| `CORELINK_PAT` | GitHub Actions integration PAT for CoreLink operations. |
+| `CORELINK_PROBE_PAT` | Probe credential used by CI smoke/latency checks. |
+| `CLW_TOKEN` | Legacy/raw env-0 token name; production injection uses the ticket below. |
+| `CLW_CRED_TICKET` | Single-use env-0 credential ticket redeemed inside the trusted runner. |
+| `CLW_LEASE_ID` | Lease binding paired with `CLW_CRED_TICKET` during redemption. |
+| `CLW_FABRIC_ENDPOINT` | Fabric endpoint binding paired with env-0 runner credentials. |
+| `TOOLCHAIN_DIGEST` | Check-host toolchain manifest digest; absent makes check-host startup fail closed. |
+| `RUNNER_JOB_PATS` | Spawn-worker KV binding for per-job PAT state. |
+| `CRED_STASH` | Spawn-worker Durable Object binding for single-use credential tickets. |
+| `CONCURRENCY_SLOTS` | Spawn-worker Durable Object binding for fleet slot admission. |
+| `WEBHOOK_LIMITER` | Spawn-worker rate-limit binding for webhook and diagnostic routes. |
+| `METRICS` | Metrics binding used by the worker observability surface. |
+| `CANARY_KV` | Canary Worker KV binding for probe state. |
+| `FABRICD` | Fabricd service/container binding used by deployment configuration. |
+| `FABRICD_SVC` | Canary service binding to `corelink-fabricd`. |
+| `SPAWN_SVC` | Canary service binding to `corelink-spawn-worker`. |
+| `CHECK_HOST_CONTAINER` | Spawn-worker Durable Object binding for check-host leases. |
+| `RUNNER_CONTAINER` | Spawn-worker Durable Object binding for runner leases. |
+
 > The `FABRIC_*` secrets and vars are set on the **Worker**, but the singleton
 > **container** only sees what `wrangler.jsonc` explicitly forwards into its
 > `envVars`, and reads them **only at boot**. Setting a secret is not enough — a
