@@ -27,7 +27,7 @@
 #      end-to-end on a live lease 2026-08-17 (a build+push of a probe image
 #      returned `Pushed image: registry.cloudflare.com/.../...`).
 # The manifest digest is parsed from wrangler's push output for an immutable X4
-# pin (falls back to the git-SHA tag if not found — never regresses).
+# pin; resolution fails closed if the push transcript has no valid digest.
 #
 # ── WHY THERE IS NO BUSY-FLEET GATE HERE ─────────────────────────────────────
 # deploy-spawn-worker.yml refuses to run while fabric runners are executing
