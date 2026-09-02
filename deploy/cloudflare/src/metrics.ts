@@ -106,6 +106,11 @@ export const COUNTER_NAMES = [
   "rate_limit_deadletter_capped", // rate-limit dead-letter budget exhausted
   "vcpu_ceiling_approaching", // tenant nearing its included vCPU-h
   "vcpu_ceiling_exceeded", // tenant past its included vCPU-h
+  // ── Containment (T3-W17) ──────────────────────────────────────────────────
+  // One deduplicated signal per invalid config value. Deduped by
+  // `bumpOnce(signalId, name)`, so a misconfigured switch fires this counter
+  // exactly once regardless of how many independent paths observe it.
+  "containment_config_invalid",
 ] as const;
 
 export type CounterName = (typeof COUNTER_NAMES)[number];
@@ -132,6 +137,32 @@ export class MetricsDO extends DurableObject<MetricsEnv> {
     const cur = (await this.ctx.storage.get<CounterMap>(STORAGE_KEY)) ?? {};
     for (const n of names) cur[n] = (cur[n] ?? 0) + 1;
     await this.ctx.storage.put(STORAGE_KEY, cur);
+  }
+
+  /** Increment a named counter exactly once per unique `signalId`.
+   *
+   * The seen id and counter bump commit in one storage transaction, so a crash
+   * commits both or neither. Invalid inputs are rejected before storage access.
+   */
+  async bumpOnce(signalId: string, name: CounterName): Promise<boolean> {
+    if (!/^[0-9a-f]{64}$/.test(signalId)) {
+      throw new TypeError(
+        "bumpOnce signalId must be a 64-character lowercase SHA-256 digest",
+      );
+    }
+    if (!COUNTER_NAMES.includes(name)) {
+      throw new TypeError(`bumpOnce name must be a registered counter: ${name}`);
+    }
+    const seenKey = `containment:v1:seen:${name}:${signalId}`;
+    return await this.ctx.storage.transaction(async (txn) => {
+      const already = await txn.get<boolean>(seenKey);
+      if (already) return false;
+      const cur = (await txn.get<CounterMap>(STORAGE_KEY)) ?? {};
+      cur[name] = (cur[name] ?? 0) + 1;
+      await txn.put(STORAGE_KEY, cur);
+      await txn.put(seenKey, true);
+      return true;
+    });
   }
 
   /** The full fixed counter set, 0-filled for never-incremented signals. */

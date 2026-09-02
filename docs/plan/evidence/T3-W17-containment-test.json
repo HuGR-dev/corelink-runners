@@ -1,0 +1,104 @@
+{
+  "schema_version": "evidence/v1",
+  "artifact_id": "t3-w17-containment-test",
+  "kind": "test",
+  "status": "PASS",
+  "observed_at": "2026-09-02T08:57:34Z",
+  "source": {
+    "repository": "corelink-runners",
+    "commit_sha": "d0447da4a7163c43e65bf4f2d08f0197778503f3",
+    "path": "docs/plan/evidence/T3-W17-containment-test.json"
+  },
+  "claims": [
+    "A3.30",
+    "T3-W17"
+  ],
+  "version": {
+    "id": "d0447da4a7163c43e65bf4f2d08f0197778503f3"
+  },
+  "evidence": {
+    "contract_sha256": "ede785af3f97311517b6ec58f8956340dc924fa9978821c881ec1f0c2bc85520",
+    "implementation_commit_sha": "d0447da4a7163c43e65bf4f2d08f0197778503f3",
+    "base_commit_sha": "e79fd69272b5164dd7fbe2bd1a055aa4ad4e0449",
+    "dependency_install": {
+      "command": "npm --prefix deploy/cloudflare ci",
+      "status": "PASS"
+    },
+    "typecheck": {
+      "command": "npm run typecheck",
+      "working_directory": "deploy/cloudflare",
+      "status": "PASS",
+      "test_output_sha256": "f8368b627d95ab1b96fe595cbb9b588edcf51f39ab9cc975fe413d1e359a65e2"
+    },
+    "focused": {
+      "command": "npm exec vitest run --config vitest.config.ts -- test/containment-intake.test.ts test/containment-redrive.test.ts",
+      "working_directory": "deploy/cloudflare",
+      "switch_matrix": {
+        "AUTOSCALER_INTAKE_PAUSED": [
+          "unset",
+          "0",
+          "1",
+          "invalid-values"
+        ],
+        "AUTOSCALER_REDRIVE_PAUSED": [
+          "unset",
+          "0",
+          "1",
+          "invalid-values"
+        ]
+      },
+      "case_counts": {
+        "intake": {
+          "passed": 19,
+          "failed": 0,
+          "total": 19
+        },
+        "redrive": {
+          "passed": 35,
+          "failed": 0,
+          "total": 35
+        },
+        "all": {
+          "passed": 54,
+          "failed": 0,
+          "total": 54
+        }
+      },
+      "failures": [],
+      "test_output_sha256": "7ef265022906ef2a6aa5b5caf07025b36b29de450bd85cd43b5d4a735f0a16d9"
+    },
+    "shared_bundle": {
+      "command": "npm run test:coverage",
+      "working_directory": "deploy/cloudflare",
+      "execution": "local exact-SHA fallback after GitHub Actions startup_failure created zero jobs",
+      "stack_tip_sha": "d0447da4a7163c43e65bf4f2d08f0197778503f3",
+      "test_files": {
+        "passed": 41,
+        "failed": 0,
+        "total": 41
+      },
+      "tests": {
+        "passed": 632,
+        "failed": 0,
+        "total": 632
+      },
+      "coverage_percent": {
+        "statements": 82.03,
+        "branches": 84.23,
+        "functions": 92.07,
+        "lines": 82.03
+      },
+      "failures": [],
+      "test_output_sha256": "66cc0e4d96e519f4307a1eaa46c44c76516e51139a548ac6a6adb169a40da341"
+    },
+    "production_dry_run": {
+      "command": "npx wrangler deploy --dry-run --outdir <temporary-directory>",
+      "working_directory": "deploy/cloudflare",
+      "status": "PASS",
+      "containment_binding": "ContainmentDO",
+      "sqlite_migration": "v7",
+      "legacy_fixture_branch": "compiled to return false"
+    }
+  },
+  "notes": "Test evidence only; no deploy, live probe, activation, freeze, dispatch, or acceptance credit. The evidence commit follows the signed implementation commit to avoid a self-referential commit hash; do not squash."
+}
