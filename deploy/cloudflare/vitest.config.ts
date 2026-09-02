@@ -8,6 +8,15 @@ import { fileURLToPath } from "node:url";
 // containers` resolves natively from node_modules (no alias needed).
 export default defineConfig({
   test: {
+    // Keep the DevEnv state-machine suite in the authoritative Vitest
+    // collection. The explicit entry is intentional: the broad globs preserve
+    // the complete Worker suite, while this named contract makes a future
+    // discovery-pattern edit unable to quietly drop the A0.2 suite.
+    include: [
+      "test/**/*.test.ts",
+      "test/**/*.test.mjs",
+      "test/devenv-do.test.ts",
+    ],
     alias: {
       "cloudflare:workers": fileURLToPath(
         new URL("./test/stubs/cloudflare-workers.ts", import.meta.url),
@@ -32,7 +41,15 @@ export default defineConfig({
     // permanently-red check that trains everyone to ignore CI.
     coverage: {
       provider: "v8",
-      include: ["src/**/*.ts"],
+      // `all` plus the named DevEnv source means this state machine is in the
+      // coverage denominator even if an import or a discovery glob changes.
+      // The file-specific threshold below then makes an unexercised DevEnv
+      // implementation fail the same full gate as the global floor.
+      all: true,
+      include: [
+        "src/**/*.ts",
+        "src/durable_objects/runner_dev_env.ts",
+      ],
       exclude: ["src/**/*.d.ts"],
       reporter: ["text"],
       thresholds: {
@@ -40,6 +57,15 @@ export default defineConfig({
         functions: 86,
         branches: 78,
         statements: 75,
+        // A0.2: RunnerDevEnvDO must be both collected and exercised by the
+        // full Vitest coverage gate. These conservative floors are below the
+        // focused state-machine measurement (L/S 55.50, F 70.83, B 51.56).
+        "src/durable_objects/runner_dev_env.ts": {
+          lines: 50,
+          functions: 65,
+          branches: 45,
+          statements: 50,
+        },
       },
     },
   },
