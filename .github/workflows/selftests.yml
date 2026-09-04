@@ -23,6 +23,27 @@ jobs:
     steps:
       - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0  # v6.0.3
 
+      - name: Validate tracked selftest files
+        shell: bash
+        run: |
+          set -e -u -o pipefail
+          found=0
+          while IFS= read -r -d '' index_entry; do
+            mode="${index_entry%% *}"
+            selftest="${index_entry#*$'\t'}"
+            if [[ "$selftest" =~ ^scripts/.+\.selftest\.sh$ ]]; then
+              found=1
+              if [[ "$mode" != "100755" || -L "$selftest" || ! -f "$selftest" || ! -x "$selftest" ]]; then
+                echo "Tracked selftest is not a regular executable: $selftest (mode=$mode)" >&2
+                exit 1
+              fi
+            fi
+          done < <(git ls-files --stage -z)
+          if (( found == 0 )); then
+            echo 'No tracked scripts/**/*.selftest.sh files found.' >&2
+            exit 1
+          fi
+
       - name: Discover and run every tracked selftest
         shell: bash
         run: |

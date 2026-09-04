@@ -213,7 +213,7 @@ run_gate() {
   # GitHub computes `mergeable` asynchronously, so UNKNOWN means "ask again", not
   # "fine". Both non-MERGEABLE states are refused: on a conflict the check list is
   # actively misleading (see the header), and on UNKNOWN we cannot yet tell.
-  local state mergeable mergestatus prstate isdraft json
+  local state mergeable mergestatus prstate isdraft json changed_files contract_change
   state="$(gh pr view "$PR" --json mergeable,mergeStateStatus,state,isDraft \
     -q '"\(.mergeable) \(.mergeStateStatus) \(.state) \(.isDraft)"' 2>/dev/null \
     || echo "ERROR ERROR ERROR ERROR")"
@@ -259,6 +259,21 @@ run_gate() {
     return 1
   fi
 
+  # Contract documents are consumed by plan-integrity, so a PR that changes
+  # one must prove that this path-filtered check actually ran.  Keep the
+  # requirement conditional: unrelated PRs legitimately do not trigger it.
+  if ! changed_files="$(gh pr view "$PR" --json files -q '.files[].path' 2>/dev/null)"; then
+    echo "  ⛔ DO NOT MERGE PR #$PR — changed-file list unavailable; cannot verify contract coverage."
+    verdict STRUCTURAL
+    return 1
+  fi
+  contract_change=0
+  while IFS= read -r changed_file; do
+    case "$changed_file" in
+      docs/plan/contracts/*) contract_change=1; break ;;
+    esac
+  done <<< "$changed_files"
+
   # ── Defense 3 (ordering: checked before the per-check loop) ─────────────────
   # "No checks reported" used to `exit 0` with "nothing to gate". On a repo where
   # every PR runs dco + gitleaks unconditionally, no checks means the workflows did
@@ -272,7 +287,7 @@ run_gate() {
     return 1
   fi
 
-  GATE_JSON="$json" GATE_VERDICT_FILE="$VERDICT_FILE" python3 - "$PR" <<'PY'
+  GATE_JSON="$json" GATE_VERDICT_FILE="$VERDICT_FILE" GATE_REQUIRE_PLAN_INTEGRITY="$contract_change" python3 - "$PR" <<'PY'
 import os, sys, json
 pr = sys.argv[1]
 data = json.loads(os.environ["GATE_JSON"])
@@ -334,6 +349,10 @@ AUTHORITATIVE_CHECKS = {
     "gates": {"gates", "ci / gates"},
     "dco": {"dco", "dco / dco"},
 }
+if os.environ.get("GATE_REQUIRE_PLAN_INTEGRITY") == "1":
+    AUTHORITATIVE_CHECKS["plan-integrity"] = {
+        "plan integrity / coverage, wp, and au structure",
+    }
 names = {" ".join(str(c.get("name", "")).casefold().split()) for c in data}
 missing = [job for job, identities in AUTHORITATIVE_CHECKS.items()
            if not names.intersection(identities)]

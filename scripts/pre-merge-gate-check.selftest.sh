@@ -31,6 +31,7 @@ set -euo pipefail
 
 if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
   case "$*" in
+    *"--json files"*)                         printf '%s\n' "${GH_FILES:-}" ;;
     *state,headRefName,isCrossRepository*) cat "$GH_POST_FILE" ;;
     *)                                         printf '%s\n' "${GH_INITIAL_VIEW}" ;;
   esac
@@ -121,6 +122,7 @@ run_case() {
   set +e
   out="$(env PATH="$FAKE_BIN:$PATH" \
     GH_INITIAL_VIEW="$initial_view" GH_POST_VIEW="$(cat "$post_file")" \
+    GH_FILES="${GH_FILES_CASE:-}" \
     GH_POST_FILE="$post_file" GH_CHECKS_FILE="$checks_file" \
     GH_CALLS_FILE="$calls_file" GH_MARK_MERGED=0 GH_MERGE_RC=0 GH_API_RC=0 \
     bash "$TARGET" "${args[@]}" 2>&1)"
@@ -140,6 +142,20 @@ run_case() {
     fail_count=$((fail_count + 1))
   fi
 }
+
+# A contract-only change must require the path-filtered plan-integrity check;
+# this fixture is deliberately green everywhere else and omits that check.
+GH_FILES_CASE='docs/plan/contracts/T3-W17.md'
+run_case "contract-only PR missing plan-integrity refused" 1 \
+  "MERGEABLE CLEAN OPEN false" "$HEALTHY_CHECKS" -- "always-present gates never ran: plan-integrity"
+GH_FILES_CASE='docs/plan/contracts/T3-W17.md'
+run_case "contract-only PR with plan-integrity passes" 0 \
+  "MERGEABLE CLEAN OPEN false" '[
+  {"name":"gates","bucket":"pass","link":"https://x/gates"},
+  {"name":"dco","bucket":"pass","link":"https://x/dco"},
+  {"name":"Plan integrity / Coverage, WP, and AU structure","bucket":"pass","link":"https://x/plan"}
+]' -- "All gates green"
+GH_FILES_CASE=""
 
 # Initial structural refusals: each fixture reaches the intended branch.
 run_case "CONFLICTING refused" 1 "CONFLICTING DIRTY OPEN false" '[]' -- "git rebase origin/main"
