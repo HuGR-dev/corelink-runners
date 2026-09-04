@@ -1,3 +1,10 @@
+# SUPERSEDED — historical Wave 1 implementation state (2026-09-02)
+
+> This handoff preserves the historical 14/70 source-delivery count and the
+> deployment observations exactly as recorded on 2026-09-02. It is superseded
+> by [`2026-09-04-backlog-resume.md`](2026-09-04-backlog-resume.md); neither
+> record is current runtime, freeze, dispatch, or live evidence.
+
 # Session state — Wave 1 implementation, 2026-09-02
 
 **Scope:** resumable source-delivery state after the second repo-only remediation

@@ -14,10 +14,18 @@ its own hard predecessors are satisfied: an unrelated decision/obstacle/relay to
 the whole graph.
 
 `FABRIC_PG_DISABLED=1` is a production durability and green-credit interlock, not an implementation
-lock. It blocks T1-W6 durable-PG success, every dependent production proof, and the final live flip;
-it does not block code/test packets whose own predecessors are ready. In particular, post-freeze
-T3-W17 implementation and the T3-W18 safety-only containment deploy/probe may run while the switch
-remains armed. Neither can claim durable recovery or production green.
+lock. It blocks T1-W6 durable-PG success, every dependent production proof, and the final live flip.
+The T3-W17 source packet is landed but remains `SOURCE_LANDED_REPAIR_REQUIRED`; its R14 repair
+implementation may proceed only within the exact contract after the required freeze sequence.
+T3-W18 is a separate safety-only containment deploy/probe and is **BLOCKED** until T3-W17-R14 is
+accepted with its focused tests, evidence provenance, review sequence, and hard predecessors. Neither
+can claim durable recovery or production green.
+
+Round-14 adds a contract-only repair boundary for `T3-W17`; it does not change
+the vertex set, predecessor edges, or ready-set batches. The exact obligations
+are frozen in [`docs/plan/contracts/T3-W17-R14.md`](contracts/T3-W17-R14.md); the governance
+ledger is materialized by the next stack commit.
+The source census is **15/70**, `A3.30` is RED, and `T3-W18` remains blocked.
 
 ## Registry contract
 
@@ -452,9 +460,15 @@ this introduces no new SDK/package dependency and never makes provider inventory
 adapter and inherits both gates through T3-W16 for its re-drive liveness decision.
 
 For staged A3.30, `T3-W17` is implemented only against the exact frozen contract in
-`docs/plan/contracts/T3-W17.md`, owns the deterministic repo tests and has no live evidence credit;
+`docs/plan/contracts/T3-W17-R14.md` (which supersedes the earlier contract for the repair stack),
+owns the deterministic repo tests and has no live evidence credit;
 `T3-W18` exclusively owns the version-bound three-state live probe artifact. The two switches remain
 independent, and no later deploy or worker mutation can bypass the live containment half.
+
+The Round-14 scope overlay adds only the contract's named `index.ts`, `lib.ts`, `metrics.ts`, the
+intake, redrive, and worker keepalive tests, and evidence symbols; `wrangler.jsonc` is an explicitly
+read-only v7 binding/migration audit and remains unchanged. The row's path atoms remain the exact
+mechanical scope registry; the overlay does not broaden them or alter ownership.
 
 For staged A6.22, the non-waking lifecycle endpoint is implemented in the fabricd **edge Worker**
 and reads only Durable Object lifecycle state; it never calls container `fetch`. Its authoritative
@@ -588,7 +602,7 @@ implementation, the byte-identical phase tuple or its mandatory predecessor phas
 | T2-W1a | W0 unblock | — | `.github/workflows/build-cf-container-images.yml`; — | Luna / CI |
 | T2-W2a | W0 unblock | T2-W1a, T8-W4a | `scripts/ci/image-pin-freshness.sh`; `scripts/ci/image-pin-freshness.selftest.sh`; — | Luna / CI |
 | T9-W0 | W1 parallel | — | `deploy/cloudflare/vitest.config.ts`; `deploy/cloudflare/test/devenv-do.test.ts`; — | Luna / CI |
-| T3-W17 | W0 unblock | T0-W1 | `deploy/cloudflare/src/index.ts`; `deploy/cloudflare/src/metrics.ts`; `deploy/cloudflare/wrangler.jsonc`; `deploy/cloudflare/test/containment-intake.test.ts`; `deploy/cloudflare/test/containment-redrive.test.ts`; `docs/plan/evidence/T3-W17-containment-test.json` | Sol / safety |
+| T3-W17 | W0 unblock | T0-W1 | `deploy/cloudflare/src/index.ts`; `deploy/cloudflare/src/lib.ts`; `deploy/cloudflare/src/metrics.ts`; `deploy/cloudflare/wrangler.jsonc` (read-only v7 audit; unchanged); `deploy/cloudflare/test/containment-intake.test.ts`; `deploy/cloudflare/test/containment-redrive.test.ts`; `deploy/cloudflare/test/keepalive-verified-busy.test.ts`; `docs/plan/evidence/T3-W17-containment-test.json` | Sol / safety |
 | T3-W4 | W1 serial | D1 | `crates/corelink-fabric-server/src/**`; `crates/corelink-fabric-server/tests/corelink_plans.rs`; `crates/corelink-fabric-server/tests/close_reaper_lock_split.rs`; — | Sol / architecture |
 | T4-W4 | W1 serial | T3-W4, D1, R1 | `crates/corelink-fabric-server/src/**`; `crates/corelink-fabric-server/tests/corelink_admission_arms.rs`; `crates/corelink-fabric-server/tests/acceptance_infra_capacity.rs`; — | Sol / architecture |
 | T3-W10 | W1 serial | T3-W4, T4-W4 | `crates/corelink-fabric-server/src/reaper.rs`; `crates/corelink-fabric-server/src/handlers/cas_cred.rs`; `crates/corelink-fabric-server/tests/reaper_teardown_retry.rs`; `crates/corelink-fabric-server/tests/cas_cred_error_body.rs`; — | Sol / architecture |
@@ -693,7 +707,7 @@ B22: T1-W4
 
 The checker validates that every predecessor token is in the registry, every WP appears exactly
 once in the ready-set output, no batch exceeds eight, and the final emitted count equals the table
-vertex count. This rendering has 22 batches, 69 unique emissions and maximum width eight. Kahn's
+vertex count. This rendering has **23 batches, 70 unique emissions** and maximum width eight. Kahn's
 algorithm consumed all vertices (no residual indegree), proving this version acyclic. A future
 change must regenerate the batches and update `schema: dispatch-dag/v1`; hand-edited edges or
 repeated DAG text in another document are invalid.

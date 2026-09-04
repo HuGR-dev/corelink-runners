@@ -1035,10 +1035,12 @@ REQUIRED_DAG_SCOPE_ATOMS = {
 EXACT_DAG_SCOPE_ATOMS = {
     "T3-W17": {
         "deploy/cloudflare/src/index.ts",
+        "deploy/cloudflare/src/lib.ts",
         "deploy/cloudflare/src/metrics.ts",
         "deploy/cloudflare/wrangler.jsonc",
         "deploy/cloudflare/test/containment-intake.test.ts",
         "deploy/cloudflare/test/containment-redrive.test.ts",
+        "deploy/cloudflare/test/keepalive-verified-busy.test.ts",
     },
     "T6-W1": {
         "scripts/orphan-box-check.selftest.sh",
