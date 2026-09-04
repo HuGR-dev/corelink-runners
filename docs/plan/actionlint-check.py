@@ -15,6 +15,7 @@ workflow, but it cannot suppress syntax or runner-label diagnostics here.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import shutil
 import subprocess
@@ -84,6 +85,18 @@ PLAN_INTEGRITY_STEP_ORDER = (
     "      - name: Exercise structural planning gates",
     "      - name: Emit SHA-bound completion record",
 )
+PLAN_INTEGRITY_STEP_NAMES = tuple(step.split(": ", 1)[1] for step in PLAN_INTEGRITY_STEP_ORDER)
+
+PLAN_INTEGRITY_GUARD_SURFACES = {
+    "trigger SHA environment": (("Bind checkout to triggering SHA", "Emit SHA-bound completion record"), "yaml"),
+    "checked-out SHA capture": (("Bind checkout to triggering SHA", "Emit SHA-bound completion record"), "shell"),
+    "checked-out SHA equality": (("Bind checkout to triggering SHA", "Emit SHA-bound completion record"), "shell"),
+    "PR base/head parent binding": (("Bind checkout to triggering SHA",), "shell"),
+    "push after binding": (("Bind checkout to triggering SHA",), "shell"),
+    "success-only completion": (("Emit SHA-bound completion record",), "yaml"),
+    "completion record": (("Emit SHA-bound completion record",), "shell"),
+    "completion summary": (("Emit SHA-bound completion record",), "shell"),
+}
 
 # Keep this as an exact occurrence multiset, rather than a path/label regex.
 # The key is (workflow path relative to the repository root, runner label).
@@ -161,6 +174,51 @@ def _static_literal_expression_label(value: str) -> str | None:
     return None
 
 
+def _yaml_quoted_key(value: str, quote: str) -> str:
+    if quote == "'":
+        return value.replace("''", "'")
+    try:
+        return json.loads(f'"{value}"')
+    except json.JSONDecodeError:
+        return ""
+
+
+def _inline_runs_on_key(line: str) -> bool:
+    line = _strip_yaml_comment(line)
+    quote: str | None = None
+    escaped = False
+    token_start = 0
+    for index, character in enumerate(line):
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif character == "\\" and quote == '"':
+                escaped = True
+            elif character == quote:
+                key = _yaml_quoted_key(line[token_start + 1 : index], quote)
+                after = line[index + 1 :].lstrip()
+                prefix = line[:token_start].rstrip()
+                if key == "runs-on" and after.startswith(":") and (
+                    not prefix or prefix[-1] in "{,"
+                ):
+                    return True
+                quote = None
+            continue
+        if character in {"'", '"'}:
+            quote = character
+            token_start = index
+            continue
+        if character == "#":
+            break
+        if line.startswith("runs-on", index):
+            after_index = index + len("runs-on")
+            after = line[after_index:].lstrip()
+            prefix = line[:index].rstrip()
+            if after.startswith(":") and (not prefix or prefix[-1] in "{,"):
+                return True
+    return False
+
+
 def validate_runs_on_bindings(workflow_path: Path) -> list[str]:
     """Reject runner expressions/aliases that cannot be proven repository-approved."""
 
@@ -170,6 +228,11 @@ def validate_runs_on_bindings(workflow_path: Path) -> list[str]:
     for index, line in enumerate(lines):
         match = RUNS_ON_KEY_RE.match(line)
         if match is None:
+            if _inline_runs_on_key(line):
+                errors.append(
+                    f"{workflow_path}: line {index + 1}: inline runs-on mapping "
+                    "cannot be statically proven"
+                )
             continue
 
         line_number = index + 1
@@ -222,27 +285,134 @@ def validate_runs_on_bindings(workflow_path: Path) -> list[str]:
     return errors
 
 
-def validate_plan_integrity_sha_binding(root: Path) -> list[str]:
-    """Require the CI checkout and completion record to bind to the event SHA."""
+def _workflow_steps(workflow: str) -> list[tuple[str, list[str]]]:
+    lines = workflow.splitlines()
+    starts = [
+        index
+        for index, line in enumerate(lines)
+        if re.fullmatch(r"      - name:\s*.+", line)
+    ]
+    steps: list[tuple[str, list[str]]] = []
+    for offset, start in enumerate(starts):
+        end = starts[offset + 1] if offset + 1 < len(starts) else len(lines)
+        name = lines[start].split(":", 1)[1].strip()
+        steps.append((name, lines[start:end]))
+    return steps
 
+
+def _step_block(workflow: str, name: str) -> list[str]:
+    matches = [block for step_name, block in _workflow_steps(workflow) if step_name == name]
+    return matches[0] if len(matches) == 1 else []
+
+
+def validate_plan_integrity_structure(workflow: str) -> list[str]:
+    lines = workflow.splitlines()
+    jobs = [line for line in lines if re.fullmatch(r"  [A-Za-z0-9_-]+:\s*", line)]
+    check_jobs = [line for line in jobs if line.strip() == "check:"]
+    errors: list[str] = []
+    if len(check_jobs) != 1:
+        errors.append(f"plan-integrity check job count mismatch: expected 1, got {len(check_jobs)}")
+    steps = _workflow_steps(workflow)
+    for name in PLAN_INTEGRITY_STEP_NAMES:
+        matches = [block for step_name, block in steps if step_name == name]
+        if len(matches) != 1:
+            errors.append(f"plan-integrity executable step {name!r} count mismatch: expected 1, got {len(matches)}")
+            continue
+        if any(re.match(r"^\s*if:\s*\$\{\{\s*false\s*\}\}\s*$", line) for line in matches[0]):
+            errors.append(f"plan-integrity executable step {name!r} is disabled")
+    positions = [next((index for index, (step_name, _) in enumerate(steps) if step_name == name), -1) for name in PLAN_INTEGRITY_STEP_NAMES]
+    if positions != sorted(positions) or any(position < 0 for position in positions):
+        errors.append("plan-integrity executable steps are missing or reordered")
+    return errors
+
+
+def _run_block(step: list[str]) -> list[str]:
+    for index, line in enumerate(step):
+        if line == "        run: |":
+            body: list[str] = []
+            for candidate in step[index + 1 :]:
+                if candidate and not candidate.startswith("          "):
+                    break
+                body.append(candidate[10:] if candidate else "")
+            return body
+    return []
+
+
+def _statically_false_if(line: str) -> bool:
+    candidate = line.strip()
+    match = re.match(r"if\s+(.+?)(?:;\s*|\s+)then\b", candidate)
+    if match is None:
+        return False
+    condition = match.group(1).strip().rstrip(";").strip()
+    normalized = re.sub(r"\s+", " ", condition)
+    return normalized in {
+        "false",
+        ": false",
+        "! true",
+        "[[ 0 -eq 1 ]]",
+        "[[ 1 -eq 0 ]]",
+        "[ 0 -eq 1 ]",
+        "[ 1 -eq 0 ]",
+        "test 0 -eq 1",
+        "test 1 -eq 0",
+        "(( 0 ))",
+    }
+
+
+def _active_shell_lines(lines: list[str]) -> list[str]:
+    active: list[str] = []
+    dead_depth = 0
+    heredoc: str | None = None
+    for line in lines:
+        stripped = line.strip()
+        if heredoc is not None:
+            if stripped == heredoc or stripped == heredoc.lstrip("-"):
+                heredoc = None
+            continue
+        if not stripped or stripped.startswith("#"):
+            continue
+        if dead_depth:
+            if _statically_false_if(stripped):
+                dead_depth += 1
+            if stripped == "fi" or stripped.endswith("; fi"):
+                dead_depth -= 1
+            continue
+        if _statically_false_if(stripped):
+            if not stripped.endswith("; fi"):
+                dead_depth = 1
+            continue
+        active.append(stripped)
+        heredoc_match = re.search(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1", stripped)
+        if heredoc_match:
+            heredoc = heredoc_match.group(2)
+    return active
+
+
+def validate_plan_integrity_sha_binding(root: Path) -> list[str]:
     workflow_path = root / ".github" / "workflows" / "plan-integrity.yml"
     workflow = workflow_path.read_text(encoding="utf-8")
-    errors: list[str] = []
-    for label, (
-        required_text,
-        expected_count,
-    ) in PLAN_INTEGRITY_SHA_BINDING_REQUIREMENTS.items():
-        count = workflow.count(required_text)
+    errors = validate_plan_integrity_structure(workflow)
+    for label, (required_text, expected_count) in PLAN_INTEGRITY_SHA_BINDING_REQUIREMENTS.items():
+        step_names, surface = PLAN_INTEGRITY_GUARD_SURFACES[label]
+        steps = [_step_block(workflow, name) for name in step_names]
+        if surface == "shell":
+            count = sum(
+                line == required_text.strip()
+                for step in steps
+                for line in _active_shell_lines(_run_block(step))
+            )
+        else:
+            count = sum(
+                line.strip() == required_text.strip()
+                and not line.lstrip().startswith("#")
+                for step in steps
+                for line in step
+            )
         if count != expected_count:
             errors.append(
                 f"{workflow_path}: SHA binding {label!r} count mismatch: "
                 f"expected {expected_count}, got {count}"
             )
-    positions = [workflow.find(step) for step in PLAN_INTEGRITY_STEP_ORDER]
-    if any(position < 0 for position in positions) or positions != sorted(positions):
-        errors.append(
-            f"{workflow_path}: SHA binding/check/completion steps are missing or reordered"
-        )
     return errors
 
 
