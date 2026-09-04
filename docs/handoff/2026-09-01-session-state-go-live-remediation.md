@@ -1,3 +1,10 @@
+# SUPERSEDED — historical session state (2026-09-01)
+
+> This handoff preserves the historical 2026-09-01/02 observations and planning
+> state. It is superseded for current planning by
+> [`2026-09-04-backlog-resume.md`](2026-09-04-backlog-resume.md); it is not
+> current runtime, freeze, dispatch, or live evidence.
+
 # Session state — go-live remediation campaign, 2026-09-01
 
 **Read this to continue the campaign.** This is a post-incident handoff for a new
