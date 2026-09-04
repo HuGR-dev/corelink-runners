@@ -81,7 +81,7 @@ source and historical deployment records, but current runtime status is unverifi
 durable concurrency/vCPU and billing guarantees. This is a contained service edge, not a green M1
 claim. Permanent repair must remove pre-bind dependency failure, timer-driven reconnect burn and
 missing independent paging before the durable backend is re-armed. Other open work includes
-external-GA, billing usage-push, N>1 multi-instance and the server-side `max_vcpu_h` value. The **live
+external-GA, billing usage-push, N>1 multi-instance and the server-side `max_vcpu_h` value. The **current
 cross-repo seam is corelink-server** (auth introspect + billing ingest); the old
 hugit-gated seams (`IntentMetrics`, `hugit-c9-`) are **dead** — hugit is discontinued.
 
@@ -131,10 +131,10 @@ truth) · `docs/product/product.md` · `docs/product/FEATURES.md` + `docs/produc
   dead weight to clean up**, not a live obligation. This repo is the FABRIC, sold direct.
 - **Is consumed by CoreLink Workspaces** (campaign #2) — agent sandboxes / dev boxes
   are workspace SKUs that run on this fabric.
-- **Compute substrate (ADR-0008):** the default substrate is **Cloudflare Containers**
+- **Compute substrate (ADR-0008):** the intended default substrate is **Cloudflare Containers**
   (co-located with R2 → in-network, zero-egress cache hydration — the moat win);
-  **Northflank is the fallback/interim** backend. Both live behind the `Engine` seam,
-  all default-off; the composition root selects Cloudflare when `CLOUDFLARE_SPAWN_*`
+  **Northflank is the fallback/interim** backend. Both are modeled behind the `Engine` seam,
+  all default-off; current runtime selection is unverified. The composition root selects Cloudflare when `CLOUDFLARE_SPAWN_*`
   env is present, else Northflank, else fail-closed. The new seam is the spawn-Worker
   HTTP contract (`deploy/cloudflare/` Worker + `CloudflareEngine` Rust client,
   transcribed each side). See `docs/adr/0008-cloudflare-containers-substrate.md`.

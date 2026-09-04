@@ -83,6 +83,8 @@ Round-14 records the corrected source census and freezes the implementation obli
 [`docs/plan/contracts/T3-W17-R14.md`](plan/contracts/T3-W17-R14.md). The planning status remains
 **NOT FROZEN / NOT DISPATCHABLE / quiet count 0**; the documentation commit itself is not a
 source, acceptance, semantic, deployment, or live-proof result.
+The authoritative finding and D/O/R registry is
+[`docs/plan/2026-09-04-round14-cold-review-ledger.md`](plan/2026-09-04-round14-cold-review-ledger.md).
 
 ### Stable-id and closure policy
 

@@ -10,6 +10,8 @@
 `fd9b226d3bcda055092b5e34f0cf9adc41a802bd` · **Round-12 review input:**
 `3d1ed13bb1d53af6ce27385736f19d54bb5f90cc` · **Authored:** 2026-08-30 ·
 **Revision: rev-6 Round-12 repair draft (NOT FROZEN)**
+**Round-14 overlay:** additive planning/contract/ledger snapshot; it does not replace historical
+Round-12/13 records, alter the canonical graph, or confer source/acceptance/live credit.
 **Sources:** the 247-finding ultra audit (`wf_31696fc3-c08`, 53 agents / 17 dimensions, 33/33
 CRITICAL+HIGH adversarially confirmed) **∪** the in-repo 2026-08-25 comprehensive audit
 (`docs/audits/2026-08-25-comprehensive-audit.md`), which contains at least one HIGH-class risk the
@@ -33,7 +35,7 @@ source census is **15/70** canonical DAG emissions; `T3-W17` is
 `SOURCE_LANDED_REPAIR_REQUIRED`, `A3.30` is RED, and `T3-W18` is blocked. The historical Wave-1
 handoff retains its superseded 14/70 count. The exact T3 repair boundary is
 [`contracts/T3-W17-R14.md`](contracts/T3-W17-R14.md); governance dispositions are materialized
-by the next stack commit.
+in the [Round-14 cold-review ledger](2026-09-04-round14-cold-review-ledger.md).
 
 The R14 ledger is the one registry for R1–R6 and the one non-branching gate vocabulary for
 decisions, obstacles, and relays. `D5`, `D6`, `D9`, and `D10` remain unresolved: a missing,
@@ -60,10 +62,11 @@ semantic, acceptance, live, freeze, or dispatch credit.
  C7  what the repo SAYS is what the system DOES, and every claim cites a dated artifact
 ```
 
-## 1. The live picture, corrected (2026-09-01 containment)
+## 1. The live picture — last recorded 2026-09-01 (historical, not current status)
 
-The previous outage diagnosis is historical. The current production state is **CONTAINED and
-intentionally degraded**, as recorded in
+The following is the last recorded containment snapshot, **not current runtime status**. It is
+preserved from 2026-09-01 and carries no present deploy, health, freeze, dispatch, or live credit,
+as recorded in
 [`docs/plan/evidence/2026-09-01-fabricd-pg-containment.md`](evidence/2026-09-01-fabricd-pg-containment.md):
 
 - `FABRIC_PG_DISABLED=1` is armed on Worker version
@@ -1095,12 +1098,17 @@ that name it; no duplicate R6 entry, implicit R5 fallback, or local owner substi
 
 **R6 owner registry.** R6 can be authored only by the `corelink-server` CAS tenant-isolation owner
 in the Security/Storage role; a corelink-runners implementer, plan lead or documentation owner cannot
-self-attest it. Its committed relay record is exactly
+self-attest it. Its committed relay record is `R6_RELAY_V1 = RELAY_GATE_V1 +
+(tenant_a_digest,tenant_b_digest,memoize_key_digest,a_to_b_trials,a_to_b_refusals,
+b_to_a_trials,b_to_a_refusals,cas_endpoint_version,test_artifact_digest)`. The
+full RELAY_GATE_V1 envelope and signature are mechanically mandatory; this
+specialization adds fields and creates no competing exact schema. Tenants differ,
+the key is byte-identical, and both directions are exactly 20/20. Missing envelope,
+role verification, mutable sibling evidence, any allowed cross-tenant read or a
+runners-authored assertion leaves R6 unresolved and T5-W1 RED.
+The legacy checker projection is non-authoritative and cannot satisfy acceptance:
 `R6_RELAY=(schema_version,relay_id,status,source_repo,source_commit_sha,owner_identity,owner_role,owner_key_id,owner_key_epoch,role_authority_digest,tenant_a_digest,tenant_b_digest,memoize_key_digest,a_to_b_trials,a_to_b_refusals,b_to_a_trials,b_to_a_refusals,cas_endpoint_version,test_artifact_digest,issued_at,signature)`.
-The signature authenticates the preceding twenty fields. The tenants are distinct, the memoize key
-is byte-identical in both directions, and both refusal ratios must be exactly 20/20 on the named CAS
-version. Missing owner-role verification, a mutable/uncommitted sibling result, any permitted
-cross-tenant read or a runners-authored assertion leaves R6 unresolved and T5-W1 RED.
+The full-envelope signature covers the preceding twenty fields; tenants differ, the key is identical and both directions are exactly 20/20 refusals. Runners/plan self-attestation, mutable sibling evidence, unverified role or any allowed cross-tenant read leaves R6 unresolved and T5-W1 blocked.
 
 ---
 
@@ -1183,6 +1191,10 @@ the [reconciled dispatch DAG](2026-09-01-reconciled-dispatch-dag.md) is the sole
 Its deterministic batches are a **full-from-zero review replay**, not runtime state: the dispatcher
 subtracts durably completed WP records before each ready-set calculation and never redispatches an
 already complete WP such as T0-W1.
+`SOURCE_LANDED_REPAIR_REQUIRED` is explicitly non-complete and cannot be subtracted. T3-W18 also
+requires an unconsumed `R14_ACCEPTED_V1` token bound to the T3-W17 repair/source/contract/evidence
+SHAs and review/predecessor state; absent or invalid token means non-ready, without inventing a graph
+edge.
 
 1. Keep the production containment armed; **T0-W1 is complete**, while all 30 AU source findings / 33
    AU proposals stay in the separate staging intake.

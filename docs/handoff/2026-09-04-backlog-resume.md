@@ -31,7 +31,7 @@ not semantic closure. Round 14 retains these open repair obligations:
   a defect.
 
 The corrective contract is [`T3-W17-R14.md`](../plan/contracts/T3-W17-R14.md); the governance
-ledger is materialized by the next stack commit.
+registry is the [Round-14 cold-review ledger](../plan/2026-09-04-round14-cold-review-ledger.md).
 
 ## Dispatch boundary
 

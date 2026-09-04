@@ -113,10 +113,14 @@
 > green test never confer mutation authority.
 >
 > R6 is owned exclusively by the `corelink-server` CAS tenant-isolation owner in the
-> Security/Storage role and is exactly
-> `R6_RELAY=(schema_version,relay_id,status,source_repo,source_commit_sha,owner_identity,owner_role,owner_key_id,owner_key_epoch,role_authority_digest,tenant_a_digest,tenant_b_digest,memoize_key_digest,a_to_b_trials,a_to_b_refusals,b_to_a_trials,b_to_a_refusals,cas_endpoint_version,test_artifact_digest,issued_at,signature)`.
-> Its signature covers the preceding twenty fields; distinct tenants, the identical memoize key and
+> Security/Storage role. `R6_RELAY_V1` is the versioned specialization of the full
+> `RELAY_GATE_V1` envelope, adding the tenant digests, memoize-key digest, bidirectional
+> 20/20 trial/refusal counts, CAS version and test artifact; the full signed envelope is
+> mandatory and there is no competing exact schema. Distinct tenants, identical memoize key and
 > exactly 20/20 refusals in both directions are mandatory. T6-W1 owns only
+> Compatibility projection for the legacy checker only (not an accepted schema):
+> `R6_RELAY=(schema_version,relay_id,status,source_repo,source_commit_sha,owner_identity,owner_role,owner_key_id,owner_key_epoch,role_authority_digest,tenant_a_digest,tenant_b_digest,memoize_key_digest,a_to_b_trials,a_to_b_refusals,b_to_a_trials,b_to_a_refusals,cas_endpoint_version,test_artifact_digest,issued_at,signature)`.
+> The full-envelope signature covers the preceding twenty fields; tenants differ, the key is identical and both directions are exactly 20/20 refusals. Runners/plan self-attestation, mutable sibling evidence, unverified role or any allowed cross-tenant read leaves R6 unresolved and T5-W1 blocked. T6-W1 owns only
 > `scripts/orphan-box-check.selftest.sh`, `scripts/pre-merge-gate-check.selftest.sh` and
 > `scripts/pre-merge-gate-check.sh`; T7-W4 exclusively owns
 > `scripts/ci/secret-inventory-drift.selftest.sh`; T2-W3 exclusively owns final workflow wiring.
@@ -301,7 +305,7 @@ Item ids continue the plan's §3 namespace, in the capability the ledger assigne
 | union-20 | M22 | LOW | DOCS-sweep | W1 · **T7-W4** *(new)* | INV-4, INV-5 | none | **AU7.9 — test:** a unit test asserts `plans.rs`'s per-variant docstring prices and its module ladder table quote the same numbers; it fails on today's tree | `crates/corelink-fabric/src/plans.rs:13-14` module table says `Starter $16` / `Pro $40`; `:77` and `:79` docstrings say *"entry tier ($8/mo)"* and *"growing dev + agents ($20/mo)"* — and `:81` adds a third figure, *"small team / fleet ($50/mo)"* vs the table's `Team $100` |
 | union-21 | L1 | LOW | W2-serial-worker | repo · **T3-W9** | INV-3 | A3.18 is a hard predecessor | **AU3.22 — test:** keep attempt 1 non-terminal with its box active, advance to `SPAWN_CLAIM_TTL_S + 1 s`, then replay the same `workflow_job.queued` delivery 100 times concurrently. A durable active-attempt marker that outlives the claim TTL yields zero additional mints, JIT configs, slots or boxes; only an authoritative terminal/absent transition may clear it | `deploy/cloudflare/src/lib.ts:100,118-128` shows the only replay guard is `spawn:<jobId>` with the 7200-second TTL. When it expires, no separate durable active-attempt marker prevents re-entry |
 | union-22 | L2 | LOW | W1-parallel | W1 serial · **T8-W4b** *(new; serial-worker bridge)* | INV-8 | **T8-W4b → T4-W1** is a hard edge because the bridge may touch `deploy/cloudflare/src/index.ts`; **T8-W4b → T2-W2b/T2-W4** also ensures the DevEnv image contains the bridge before deploy | **AU1.9 — test:** (auth-secret bridge) Cloudflare Containers 0.3.7 has no secret mount, so the provider-delivered env is ingress only: a short PID1 entrypoint writes the auth token to a regular non-symlink file with exact mode **0400**, unsets the token, and `exec`s/re-execs a clean environment; check-exec-server opens and validates that file. `check-host` and DevEnv boot tests, supervisor children, the server and every other durable process assert the token is absent from `/proc/<pid>/environ`, argv and logs; missing/empty/wrong-mode/symlink/only-env inputs fail closed. Worker protocol consumers continue to send the token header without reintroducing it into durable container environments. This WP owns the check-exec `src/**` and `tests/**`, check-host entrypoint/test, Cloudflare entrypoint/supervisor/protocol consumers and their boot/process tests; it is serialized with the Worker monolith if `index.ts` is touched | `crates/corelink-check-exec-server/src/lib.rs:53` `pub const AUTH_TOKEN_ENV: &str = "EXEC_SERVER_AUTH_TOKEN"`, documented at `:49-52` as *"injected into the container env at spawn"*; `deploy/check-host/entrypoint.sh` and `deploy/cloudflare/entrypoint.sh` currently pass provider env through to long-lived processes |
-| union-23 | L4 | LOW | **RELAY (new R6)** + DOCS-sweep half | repo · **T5-W1** *(existing extension)*; R6 owns the assertion | INV-3, INV-5 | **R6 is a HARD predecessor:** AU7.10 stays red and T5-W1 cannot seal until the committed relay artifact records **20/20 refusals in each direction** for two tenants using the same memoize key | **AU7.10 — test:** only after R6 is committed, `actions/corelink-memoize/README.md` cites its artifact id and states that memoize-key isolation rests entirely on CAS-side tenant scoping because the key carries no tenant component; a doc test fails when the R6 id is absent or unresolved | Current `actions/corelink-memoize/action.yml:38-42` builds the key from run, inputs, env names and tools; the file has no tenant input/component |
+| union-23 | L4 | LOW | **RELAY (new R6)** + DOCS-sweep half | repo · **T5-W1** *(existing extension)*; R6 owns the assertion | INV-3, INV-5 | **R6 is a HARD predecessor:** AU7.10 stays red and T5-W1 cannot seal until the committed relay artifact records **20/20 refusals in each direction** for two tenants using the same memoize key | **AU7.10 — test:** only after R6 is committed, `actions/corelink-memoize/README.md` cites its artifact id and states that memoize-key isolation rests entirely on CAS-side tenant scoping because the key carries no tenant component; a doc test fails when the R6 id is absent or unresolved | Current `actions/corelink-memoize/action.yml:38-42` derives key inputs from run, inputs, env names and tools; those inputs contain no tenant component |
 | union-24 | L6 | LOW | W1-parallel | repo · **T5-W3** | — | release predecessors are canonical-DAG-owned; T5-W6 includes T5-W3 | **AU5.12 — test:** in a pinned container with `bash` and no `python3`, a stub `corelink` returning `{"lease_id":"lease-au5-12","exit":0,"verified":true}` executes the complete action successfully and produces exactly the public outputs `exit=0`, `verified=true`, `lease-id=lease-au5-12` (backed by step outputs `exit`, `verified`, `lease_id`) | `integrations/github-actions/action.yml:74-85` declares those three public outputs, while the parse step at `:172-207` still requires `shell: python3 {0}` |
 | union-25 | L7 | LOW | W2-serial-worker | repo · **T8-W5** | INV-4 | none | **AU4.17 — test:** `revokeCompletedJob` with no derived tenant refuses loudly (logs + bumps a registered counter, returns an error) instead of falling back to the wrangler `CLW_TENANT` var | `index.ts:1359` still calls `revokeCasPatById(..., derivedTenant ?? env.CLW_TENANT)`; `:2667` documents the fallback. The billing path's historical mis-attribution is recorded separately at `:1577-1580`; that comment is incident history, not proof of a current live occurrence |
 | union-26 | L8 | LOW | W2-serial-worker | repo · **T3-W14** | — (benign; retry accounting) | none | **AU3.21 — test:** the concurrency Durable Object owns retry epochs and the orphan-attempt count. For one job, 100 concurrent duplicates carrying the same epoch id increment the count exactly once (`+1`); two later distinct epoch ids each increment once (final count `3`), and 100 replays of any consumed epoch add zero. The test counts retry epochs, not API calls | `index.ts:1857-1868` uses get-then-put for the first record, while the retry bump at `:4227-4233` is another non-atomic put whose own comment accepts a lost update. Neither stores an idempotency/epoch key |
@@ -386,3 +390,28 @@ Two placements have hard predecessors, not implementation choices:
 - **`union-23`** is the only row whose assertion cannot be written in this repo at all: CAS
   tenant scoping lives in `corelink-server` and the session fence (INV-6) forbids reaching it.
   Relay **R6** is a hard predecessor of the in-repo documentation test AU7.10 and T5-W1 seal.
+
+## Round-14 anchor refresh — 2026-09-04
+
+The T3 source landing at `d0447da` shifted `index.ts`/`lib.ts` line numbers and
+introduced containment symbols. The old line references in the rows below are
+**stale snapshot anchors**, not semantic closure. They are retained for
+provenance and must be re-resolved against the exact implementation SHA before
+any AU or union row can change disposition.
+
+| row | current symbol anchor after the T3 shift | disposition after refresh |
+|---|---|---|
+| `union-07`, `union-21` | `deploy/cloudflare/src/lib.ts`: `claimSpawn`, `SPAWN_CLAIM_TTL_S`, and the contained drain/redrive call boundary | **OPEN / REVIEW-REQUIRED**; the legacy job-only claim does not close the row |
+| `union-11` | `deploy/cloudflare/src/index.ts`: `bindContainmentSpawnClaim`, `containmentEffectJobKey`, and post-start binding writes | **OPEN / REVIEW-REQUIRED**; repo-scoped R14 binding is not semantic closure |
+| `union-14` | `deploy/cloudflare/src/index.ts`: `recordOrphan` COLD refusal branch and its terminal-state path | **PARTIAL / OPEN**; the stale early-return and phantom-slot halves remain historical, while the missing COLD terminal half remains tracked |
+| `union-25`, `M3 (partial)` | `deploy/cloudflare/src/index.ts`: completion/revoke call sites and durable retry/counter boundary | **OPEN / REVIEW-REQUIRED**; fallback/retry semantics are not inferred from the new containment code |
+| `RH9 (partial)` | `deploy/cloudflare/src/index.ts`: limiter dead-letter and webhook-auth counter path | **OPEN / REVIEW-REQUIRED**; no closure from structural gate output |
+| `union-23` | `actions/corelink-memoize/action.yml` key construction; external CAS assertion remains relay **R6** | **OPEN / R6-BLOCKED**; no in-repo line refresh can substitute for the cross-repo artifact |
+
+R14-specific containment findings are recorded in
+[`docs/plan/2026-09-04-round14-cold-review-ledger.md`](2026-09-04-round14-cold-review-ledger.md)
+and the exact source/test obligations in
+[`docs/plan/contracts/T3-W17-R14.md`](contracts/T3-W17-R14.md). This anchor refresh does not
+mark any union row `CLOSED`, does not promote AU, and does not change canonical DAG ownership or
+edges. A future source change must refresh these symbol anchors again rather than carrying line
+numbers forward by assumption.

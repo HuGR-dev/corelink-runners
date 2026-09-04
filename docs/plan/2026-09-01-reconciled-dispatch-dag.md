@@ -1,6 +1,8 @@
 # Reconciled dispatch DAG — rev6 Round-12 repair draft
 
 **Date:** 2026-09-01 · **Schema:** `dispatch-dag/v1` · **Status: NOT FROZEN · NOT DISPATCHABLE · quiet count 0**
+**Round-14 overlay:** additive contract/ledger/status snapshot; graph vertices, edges, predecessors,
+and ready sets remain unchanged, and no source-delivered record is completion credit.
 
 This is the sole canonical dispatch registry. Every plan, delta, triage table, handoff and
 dispatcher must reference this file and must not restate its DAG. The current Round-12 repair tree
@@ -24,7 +26,7 @@ can claim durable recovery or production green.
 Round-14 adds a contract-only repair boundary for `T3-W17`; it does not change
 the vertex set, predecessor edges, or ready-set batches. The exact obligations
 are frozen in [`docs/plan/contracts/T3-W17-R14.md`](contracts/T3-W17-R14.md); the governance
-ledger is materialized by the next stack commit.
+ledger is the [Round-14 cold-review ledger](2026-09-04-round14-cold-review-ledger.md).
 The source census is **15/70**, `A3.30` is RED, and `T3-W18` remains blocked.
 
 ## Registry contract
@@ -131,12 +133,18 @@ needs a distinct O-CANARY-ACTIVATE token, and Phase 2's may issue only after the
 root. Ready-set membership, credentials, a green test or an expired/replayed token authorizes no
 mutation.
 
-R6 is owned only by the `corelink-server` CAS tenant-isolation owner in the Security/Storage role and
-is exactly
-`R6_RELAY=(schema_version,relay_id,status,source_repo,source_commit_sha,owner_identity,owner_role,owner_key_id,owner_key_epoch,role_authority_digest,tenant_a_digest,tenant_b_digest,memoize_key_digest,a_to_b_trials,a_to_b_refusals,b_to_a_trials,b_to_a_refusals,cas_endpoint_version,test_artifact_digest,issued_at,signature)`.
-The signature covers the preceding twenty fields; tenants differ, the key is identical and both
-directions are exactly 20/20 refusals. Runners/plan self-attestation, mutable sibling evidence,
-unverified role or any allowed cross-tenant read leaves R6 unresolved and T5-W1 blocked.
+R6 is owned only by the `corelink-server` CAS tenant-isolation owner in the Security/Storage role.
+Its one complete ordered record is
+`R6_RELAY_V1=(schema_version,relay_id,status,source_repo,source_commit_sha,owner_identity,owner_role,owner_key_id,owner_key_epoch,role_authority_digest,tenant_a_digest,tenant_b_digest,memoize_key_digest,a_to_b_trials,a_to_b_refusals,b_to_a_trials,b_to_a_refusals,cas_endpoint_version,test_artifact_digest,artifact_id,artifact_sha,review_input_sha,canonical_payload_digest,revocation_state_digest,issued_at,expires_at,consumed_at,signature_algorithm,signature_domain,signature)`.
+The specialized tenant/CAS fields precede digest, revocation, expiry, algorithm and signature fields;
+the canonical payload digest excludes itself and the signature, and the signature covers the domain,
+schema, digest and every ordered payload field except signature. The full RELAY_GATE_V1 envelope and
+specialization are contractually mandatory, not a competing legacy schema; current checker
+enforcement is pending Phase-B B4 and does not make R6 satisfied. Tenants differ, the key is identical
+and both directions are exactly 20/20; self-attestation, mutable evidence, unverified role or any
+permitted cross-tenant read leaves R6 unresolved and T5-W1 blocked.
+For compatibility only, the legacy checker projection is
+`R6_RELAY=(schema_version,relay_id,status,source_repo,source_commit_sha,owner_identity,owner_role,owner_key_id,owner_key_epoch,role_authority_digest,tenant_a_digest,tenant_b_digest,memoize_key_digest,a_to_b_trials,a_to_b_refusals,b_to_a_trials,b_to_a_refusals,cas_endpoint_version,test_artifact_digest,issued_at,signature)`. The signature covers the preceding twenty fields; tenants differ, the key is identical and both directions are exactly 20/20 refusals. It is not an accepted schema. The full-envelope signature is additionally mandatory for R6_RELAY_V1. Runners/plan self-attestation, mutable sibling evidence, unverified role or any allowed cross-tenant read leaves R6 unresolved and T5-W1 blocked.
 
 `T7-W3` is the evidence-schema gate and `T7-W4b` is the evidence-freshness gate. Every probe or
 test+probe row has `T7-W4b` as a hard predecessor (and therefore transitively has T7-W3), has
@@ -465,10 +473,10 @@ owns the deterministic repo tests and has no live evidence credit;
 `T3-W18` exclusively owns the version-bound three-state live probe artifact. The two switches remain
 independent, and no later deploy or worker mutation can bypass the live containment half.
 
-The Round-14 scope overlay adds only the contract's named `index.ts`, `lib.ts`, `metrics.ts`, the
-intake, redrive, and worker keepalive tests, and evidence symbols; `wrangler.jsonc` is an explicitly
+The R14 scope overlay adds only the contract's named `index.ts`, `lib.ts`, `metrics.ts`, the intake,
+redrive, and worker keepalive tests, and evidence symbols; `wrangler.jsonc` is an explicitly
 read-only v7 binding/migration audit and remains unchanged. The row's path atoms remain the exact
-mechanical scope registry; the overlay does not broaden them or alter ownership.
+mechanical scope registry above; the overlay does not broaden them or alter ownership.
 
 For staged A6.22, the non-waking lifecycle endpoint is implemented in the fabricd **edge Worker**
 and reads only Durable Object lifecycle state; it never calls container `fetch`. Its authoritative
@@ -676,8 +684,12 @@ emits at most eight nodes per batch. The rendered batches are a deterministic **
 with every external token assumed satisfied; they deliberately include T0-W1 even though that WP
 is already complete in the current incident. A runtime dispatcher must subtract every WP with a
 durable complete record before calculating its live ready set and must never redispatch that WP;
-completion subtraction preserves its outgoing edges as satisfied. The batches are a schedule
-calculation, not authorization:
+completion subtraction preserves its outgoing edges as satisfied. `SOURCE_LANDED_REPAIR_REQUIRED`
+is not a durable completion record and is never subtractable. T3-W18 readiness additionally
+requires one exact `R14_ACCEPTED_V1` token binding T3-W17's repair SHA, contract SHA, focused-test
+evidence/index SHA, and required review/predecessor state; a missing, stale, ambiguous, or
+unconsumed token leaves T3-W18 non-ready. This is a dispatcher predicate, not a new graph edge.
+The batches are a schedule calculation, not authorization:
 
 ```text
 B00: T0-W1 T1-W1 T2-W1a T3-W4 T5-W1 T5-W2 T6-W1 T6-W2
