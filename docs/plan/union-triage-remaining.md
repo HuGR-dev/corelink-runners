@@ -386,3 +386,28 @@ Two placements have hard predecessors, not implementation choices:
 - **`union-23`** is the only row whose assertion cannot be written in this repo at all: CAS
   tenant scoping lives in `corelink-server` and the session fence (INV-6) forbids reaching it.
   Relay **R6** is a hard predecessor of the in-repo documentation test AU7.10 and T5-W1 seal.
+
+## Round-14 anchor refresh — 2026-09-04
+
+The T3 source landing at `d0447da` shifted `index.ts`/`lib.ts` line numbers and
+introduced containment symbols. The old line references in the rows below are
+**stale snapshot anchors**, not semantic closure. They are retained for
+provenance and must be re-resolved against the exact implementation SHA before
+any AU or union row can change disposition.
+
+| row | current symbol anchor after the T3 shift | disposition after refresh |
+|---|---|---|
+| `union-07`, `union-21` | `deploy/cloudflare/src/lib.ts`: `claimSpawn`, `SPAWN_CLAIM_TTL_S`, and the contained drain/redrive call boundary | **OPEN / REVIEW-REQUIRED**; the legacy job-only claim does not close the row |
+| `union-11` | `deploy/cloudflare/src/index.ts`: `bindContainmentSpawnClaim`, `containmentEffectJobKey`, and post-start binding writes | **OPEN / REVIEW-REQUIRED**; repo-scoped R14 binding is not semantic closure |
+| `union-14` | `deploy/cloudflare/src/index.ts`: `recordOrphan` COLD refusal branch and its terminal-state path | **PARTIAL / OPEN**; the stale early-return and phantom-slot halves remain historical, while the missing COLD terminal half remains tracked |
+| `union-25`, `M3 (partial)` | `deploy/cloudflare/src/index.ts`: completion/revoke call sites and durable retry/counter boundary | **OPEN / REVIEW-REQUIRED**; fallback/retry semantics are not inferred from the new containment code |
+| `RH9 (partial)` | `deploy/cloudflare/src/index.ts`: limiter dead-letter and webhook-auth counter path | **OPEN / REVIEW-REQUIRED**; no closure from structural gate output |
+| `union-23` | `actions/corelink-memoize/action.yml` key construction; external CAS assertion remains relay **R6** | **OPEN / R6-BLOCKED**; no in-repo line refresh can substitute for the cross-repo artifact |
+
+R14-specific containment findings are recorded in
+[`docs/plan/2026-09-04-round14-cold-review-ledger.md`](2026-09-04-round14-cold-review-ledger.md)
+and the exact source/test obligations in
+[`docs/plan/contracts/T3-W17-R14.md`](contracts/T3-W17-R14.md). This anchor refresh does not
+mark any union row `CLOSED`, does not promote AU, and does not change canonical DAG ownership or
+edges. A future source change must refresh these symbol anchors again rather than carrying line
+numbers forward by assumption.
