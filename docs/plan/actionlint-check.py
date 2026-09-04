@@ -85,6 +85,17 @@ PLAN_INTEGRITY_STEP_ORDER = (
     "      - name: Emit SHA-bound completion record",
 )
 
+PLAN_INTEGRITY_GUARD_SURFACES = {
+    "trigger SHA environment": (("Bind checkout to triggering SHA", "Emit SHA-bound completion record"), "yaml"),
+    "checked-out SHA capture": (("Bind checkout to triggering SHA", "Emit SHA-bound completion record"), "shell"),
+    "checked-out SHA equality": (("Bind checkout to triggering SHA", "Emit SHA-bound completion record"), "shell"),
+    "PR base/head parent binding": (("Bind checkout to triggering SHA",), "shell"),
+    "push after binding": (("Bind checkout to triggering SHA",), "shell"),
+    "success-only completion": (("Emit SHA-bound completion record",), "yaml"),
+    "completion record": (("Emit SHA-bound completion record",), "shell"),
+    "completion summary": (("Emit SHA-bound completion record",), "shell"),
+}
+
 # Keep this as an exact occurrence multiset, rather than a path/label regex.
 # The key is (workflow path relative to the repository root, runner label).
 EXPECTED_RUNNER_LABEL_DIAGNOSTICS: Counter[tuple[str, str]] = Counter(
@@ -161,6 +172,38 @@ def _static_literal_expression_label(value: str) -> str | None:
     return None
 
 
+def _has_unquoted_runs_on_key(line: str) -> bool:
+    """Find an inline YAML ``runs-on`` key, ignoring comments and strings."""
+
+    quote: str | None = None
+    escaped = False
+    for index, character in enumerate(line):
+        if escaped:
+            escaped = False
+            continue
+        if character == "\\" and quote == '"':
+            escaped = True
+            continue
+        if character in {"'", '"'}:
+            if quote is None:
+                quote = character
+            elif quote == character:
+                quote = None
+            continue
+        if character == "#" and quote is None:
+            return False
+        if quote is None and line.startswith("runs-on", index):
+            before = line[index - 1] if index else " "
+            after_index = index + len("runs-on")
+            after = line[after_index] if after_index < len(line) else " "
+            if not (before.isalnum() or before in "_-" or after.isalnum() or after in "_-"):
+                remainder = line[after_index:].lstrip()
+                if remainder.startswith(":"):
+                    return True
+    uncommented = _strip_yaml_comment(line)
+    return re.search(r"(?:^|[,{]\s*)['\"]runs-on['\"]\s*:", uncommented) is not None
+
+
 def validate_runs_on_bindings(workflow_path: Path) -> list[str]:
     """Reject runner expressions/aliases that cannot be proven repository-approved."""
 
@@ -170,6 +213,11 @@ def validate_runs_on_bindings(workflow_path: Path) -> list[str]:
     for index, line in enumerate(lines):
         match = RUNS_ON_KEY_RE.match(line)
         if match is None:
+            if _has_unquoted_runs_on_key(line):
+                errors.append(
+                    f"{workflow_path}: line {index + 1}: inline runs-on mapping "
+                    "cannot be statically proven"
+                )
             continue
 
         line_number = index + 1
@@ -222,17 +270,104 @@ def validate_runs_on_bindings(workflow_path: Path) -> list[str]:
     return errors
 
 
+def _step_block(workflow: str, name: str) -> list[str]:
+    lines = workflow.splitlines()
+    marker = f"      - name: {name}"
+    try:
+        start = lines.index(marker)
+    except ValueError:
+        return []
+    block = [lines[start]]
+    for line in lines[start + 1 :]:
+        if line.startswith("      - "):
+            break
+        block.append(line)
+    return block
+
+
+def _run_block(step: list[str]) -> list[str]:
+    for index, line in enumerate(step):
+        if line == "        run: |":
+            body: list[str] = []
+            for candidate in step[index + 1 :]:
+                if candidate and not candidate.startswith("          "):
+                    break
+                body.append(candidate[10:] if candidate else "")
+            return body
+    return []
+
+
+def _statically_false_if(line: str) -> bool:
+    candidate = line.strip()
+    if not candidate.startswith("if ") or " then" not in candidate:
+        return False
+    condition = candidate[3 : candidate.index(" then")].strip().rstrip(";").strip()
+    normalized = re.sub(r"\s+", " ", condition)
+    return normalized in {
+        "false",
+        ": false",
+        "! true",
+        "[[ 0 -eq 1 ]]",
+        "[[ 1 -eq 0 ]]",
+        "[ 0 -eq 1 ]",
+        "[ 1 -eq 0 ]",
+        "test 0 -eq 1",
+        "test 1 -eq 0",
+        "(( 0 ))",
+    }
+
+
+def _active_shell_lines(lines: list[str]) -> list[str]:
+    active: list[str] = []
+    dead_depth = 0
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if dead_depth:
+            if _statically_false_if(stripped):
+                dead_depth += 1
+            if stripped == "fi" or stripped.endswith("; fi"):
+                dead_depth -= 1
+            continue
+        if _statically_false_if(stripped):
+            if not stripped.endswith("; fi"):
+                dead_depth = 1
+            continue
+        active.append(stripped)
+    return active
+
+
 def validate_plan_integrity_sha_binding(root: Path) -> list[str]:
-    """Require the CI checkout and completion record to bind to the event SHA."""
+    """Require executable, SHA-bound guards in their intended workflow steps.
+
+    Matching the whole YAML document is insufficient: a commented line or a
+    shell copy under ``if false`` can satisfy a substring count without
+    protecting the job.  Match each guard only in its named step and ignore
+    comments/dead constant-false shell branches.
+    """
 
     workflow_path = root / ".github" / "workflows" / "plan-integrity.yml"
     workflow = workflow_path.read_text(encoding="utf-8")
     errors: list[str] = []
-    for label, (
-        required_text,
-        expected_count,
-    ) in PLAN_INTEGRITY_SHA_BINDING_REQUIREMENTS.items():
-        count = workflow.count(required_text)
+    for label, (required_text, expected_count) in PLAN_INTEGRITY_SHA_BINDING_REQUIREMENTS.items():
+        step_names, surface = PLAN_INTEGRITY_GUARD_SURFACES[label]
+        steps = [_step_block(workflow, name) for name in step_names]
+        if surface == "shell":
+            count = sum(
+                line == required_text.strip()
+                for step in steps
+                for line in _active_shell_lines(_run_block(step))
+            )
+        else:
+            # YAML ``if``/``env`` entries must be direct, uncommented members
+            # of the named step; they are not shell text.
+            count = sum(
+                line.strip() == required_text.strip()
+                and not line.lstrip().startswith("#")
+                for step in steps
+                for line in step
+            )
         if count != expected_count:
             errors.append(
                 f"{workflow_path}: SHA binding {label!r} count mismatch: "

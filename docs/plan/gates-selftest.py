@@ -42,6 +42,8 @@ EXPECTED_MUTATION_INVENTORY = frozenset(
         "ack-token-schema-drift.md",
         "actionlint-dynamic-runner-expression",
         "actionlint-extra-allowed-label",
+        "actionlint-commented-dead-sha-binding",
+        "actionlint-inline-runs-on-mapping",
         "actionlint-suppress-all-config",
         "actionlint-unexpected-workflow",
         "actionlint-weakened-sha-binding",
@@ -197,6 +199,9 @@ EXPECTED_MUTATION_INVENTORY = frozenset(
         "renamed-au-heading.md",
         "renamed-heading.md",
         "reset-array-selftests.yml",
+        "selftests-non-100755",
+        "selftests-nonregular",
+        "selftests-symlink",
         "retrospective-journal.md",
         "r6-cross-doc-drift.md",
         "r6-cross-tenant-read-allowed.md",
@@ -626,6 +631,80 @@ def require_actionlint_dynamic_runner_rejected(work: Path) -> None:
     print("PASS actionlint blocks an expression-resolved unapproved runner")
 
 
+def require_actionlint_inline_runner_rejected(work: Path) -> None:
+    """Prove an inline YAML job mapping cannot hide an unapproved runner."""
+
+    checker = PLAN_DIR / "actionlint-check.py"
+    fixture_root = work / "actionlint-inline-runner"
+    workflow_root = fixture_root / ".github" / "workflows"
+    shutil.copytree(REPO / ".github" / "workflows", workflow_root)
+    workflow = workflow_root / "ci.yml"
+    workflow.write_text(
+        workflow.read_text(encoding="utf-8")
+        + "\n  inline_runner_mutation: {runs-on: corelink-unexpected, steps: []}\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [sys.executable, str(checker), "--root", str(fixture_root)],
+        cwd=REPO,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    diagnostics = result.stdout + result.stderr
+    if result.returncode == 0 or "unapproved runs-on binding" not in diagnostics:
+        raise AssertionError(
+            "actionlint checker accepted an inline unapproved runner mapping:\n"
+            + diagnostics
+        )
+    record_mutation("actionlint-inline-runs-on-mapping")
+    print("PASS actionlint blocks an inline unapproved runner mapping")
+
+
+def require_actionlint_commented_dead_sha_rejected(work: Path) -> None:
+    """Prove comments/dead shell copies cannot satisfy SHA guard requirements."""
+
+    checker = PLAN_DIR / "actionlint-check.py"
+    fixture_root = work / "actionlint-commented-dead-sha"
+    workflow_root = fixture_root / ".github" / "workflows"
+    shutil.copytree(REPO / ".github" / "workflows", workflow_root)
+    workflow = workflow_root / "plan-integrity.yml"
+    source = workflow.read_text(encoding="utf-8")
+    source = source.replace(
+        "          EXPECTED_SHA: ${{ github.sha }}",
+        "          # EXPECTED_SHA: ${{ github.sha }}",
+    )
+    source = source.replace(
+        "          set -euo pipefail\n",
+        "          if false; then\n          set -euo pipefail\n",
+        2,
+    )
+    source = source.replace("          esac\n", "          esac\n          fi\n", 1)
+    source = source.replace(
+        "          printf '### Plan integrity completion\\n\\n%s\\n' \"$RECORD\" >> \"$GITHUB_STEP_SUMMARY\"\n",
+        "          printf '### Plan integrity completion\\n\\n%s\\n' \"$RECORD\" >> \"$GITHUB_STEP_SUMMARY\"\n          fi\n",
+    )
+    source = source.replace(
+        "        if: ${{ success() }}",
+        "        # if: ${{ success() }}",
+    )
+    workflow.write_text(source, encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, str(checker), "--root", str(fixture_root)],
+        cwd=REPO,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    diagnostics = result.stdout + result.stderr
+    if result.returncode == 0 or "plan-integrity SHA binding mismatch" not in diagnostics:
+        raise AssertionError(
+            "actionlint checker accepted commented/dead SHA guards:\n" + diagnostics
+        )
+    record_mutation("actionlint-commented-dead-sha-binding")
+    print("PASS actionlint blocks commented/dead SHA guard copies")
+
+
 def require_actionlint_sha_binding_rejected(work: Path) -> None:
     """Prove the authoritative lint gate rejects weakened event-SHA binding."""
 
@@ -663,6 +742,118 @@ def require_actionlint_sha_binding_rejected(work: Path) -> None:
     print("PASS actionlint blocks weakened plan-integrity SHA binding")
 
 
+def _selftests_run_script(
+    workflow: Path,
+    marker: str = "      - name: Discover and run every tracked selftest",
+) -> str:
+    lines = workflow.read_text(encoding="utf-8").splitlines()
+    try:
+        start = lines.index(marker)
+    except ValueError as exc:
+        raise AssertionError("selftests workflow discovery step is missing") from exc
+    run_index = start + 1
+    while run_index < len(lines) and lines[run_index] != "        run: |":
+        run_index += 1
+    if run_index == len(lines):
+        raise AssertionError("selftests workflow discovery run block is missing")
+    body: list[str] = []
+    for line in lines[run_index + 1 :]:
+        if line and not line.startswith("          "):
+            break
+        body.append(line[10:] if line else "")
+    return "\n".join(body) + "\n"
+
+
+def require_tracked_selftest_integrity(work: Path) -> None:
+    workflow = REPO / ".github" / "workflows" / "selftests.yml"
+    runner = work / "tracked-selftests-run.sh"
+    runner.write_text(_selftests_run_script(workflow), encoding="utf-8")
+    validation_runner = work / "tracked-selftests-validation.sh"
+    validation_runner.write_text(
+        _selftests_run_script(workflow, "      - name: Validate tracked selftest files"),
+        encoding="utf-8",
+    )
+
+    def git(root: Path, *args: str) -> None:
+        result = subprocess.run(
+            ["git", *args], cwd=root, check=False, capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            raise AssertionError(
+                f"git fixture command failed: git {' '.join(args)}\n"
+                + result.stdout
+                + result.stderr
+            )
+
+    def init(root: Path) -> None:
+        (root / "scripts").mkdir(parents=True)
+        git(root, "init", "-q")
+        git(root, "config", "user.email", "gates-selftest@example.invalid")
+        git(root, "config", "user.name", "gates-selftest")
+
+    valid = work / "selftests-valid"
+    valid.mkdir()
+    init(valid)
+    valid_script = valid / "scripts" / "valid.selftest.sh"
+    valid_script.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    valid_script.chmod(0o755)
+    git(valid, "add", ".")
+    result = subprocess.run(["bash", str(validation_runner)], cwd=valid, check=False)
+    if result.returncode != 0:
+        raise AssertionError("valid tracked executable selftest was rejected")
+    result = subprocess.run(["bash", str(runner)], cwd=valid, check=False)
+    if result.returncode != 0:
+        raise AssertionError("valid tracked executable selftest failed to run")
+
+    def expect_blocked(name: str, setup) -> None:
+        root = work / name
+        root.mkdir()
+        init(root)
+        setup(root)
+        result = subprocess.run(
+            ["bash", str(validation_runner)], cwd=root, check=False, capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            raise AssertionError(
+                f"selftests workflow accepted {name}:\n{result.stdout}{result.stderr}"
+            )
+        record_mutation(name)
+        print(f"PASS tracked selftest integrity blocks {name}")
+
+    def non_executable(root: Path) -> None:
+        path = root / "scripts" / "mode.selftest.sh"
+        path.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        path.chmod(0o644)
+        git(root, "add", ".")
+
+    def symlink(root: Path) -> None:
+        target = root / "scripts" / "target.sh"
+        target.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        target.chmod(0o755)
+        (root / "scripts" / "linked.selftest.sh").symlink_to("target.sh")
+        git(root, "add", ".")
+
+    def nonregular(root: Path) -> None:
+        nested = root / "nested-repo"
+        nested.mkdir()
+        git(nested, "init", "-q")
+        git(nested, "config", "user.email", "gates-selftest@example.invalid")
+        git(nested, "config", "user.name", "gates-selftest")
+        (nested / "README").write_text("fixture\n", encoding="utf-8")
+        git(nested, "add", "README")
+        git(nested, "commit", "-qm", "fixture")
+        nested_sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=nested, text=True
+        ).strip()
+        path = root / "scripts" / "nonregular.selftest.sh"
+        path.mkdir()
+        git(root, "update-index", "--add", "--cacheinfo", f"160000,{nested_sha},{path.relative_to(root)}")
+
+    expect_blocked("selftests-non-100755", non_executable)
+    expect_blocked("selftests-symlink", symlink)
+    expect_blocked("selftests-nonregular", nonregular)
+
+
 def main() -> int:
     require("plan baseline", "plan-check.py", SOURCE, True)
     require("WP baseline", "wp-check.py", PLAN, True)
@@ -680,7 +871,10 @@ def main() -> int:
         require_actionlint_config_is_not_authoritative(work)
         require_actionlint_exact_baseline(work)
         require_actionlint_dynamic_runner_rejected(work)
+        require_actionlint_inline_runner_rejected(work)
+        require_actionlint_commented_dead_sha_rejected(work)
         require_actionlint_sha_binding_rejected(work)
+        require_tracked_selftest_integrity(work)
 
         duplicate_source = work / "duplicate-source.txt"
         first_id = source.splitlines()[0]
