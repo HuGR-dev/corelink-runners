@@ -17,6 +17,7 @@ PASS is not production, evidence, freeze, or dispatch readiness.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import re
 import shutil
 import subprocess
@@ -42,6 +43,12 @@ EXPECTED_MUTATION_INVENTORY = frozenset(
         "ack-token-schema-drift.md",
         "actionlint-dynamic-runner-expression",
         "actionlint-extra-allowed-label",
+        "actionlint-commented-dead-sha-binding",
+        "actionlint-inline-runs-on-mapping",
+        "actionlint-inline-escaped-runner",
+        "actionlint-plan-structure-duplicate-job",
+        "actionlint-plan-structure-duplicate-step",
+        "actionlint-sha-heredoc-string-copy",
         "actionlint-suppress-all-config",
         "actionlint-unexpected-workflow",
         "actionlint-weakened-sha-binding",
@@ -626,6 +633,214 @@ def require_actionlint_dynamic_runner_rejected(work: Path) -> None:
     print("PASS actionlint blocks an expression-resolved unapproved runner")
 
 
+def require_actionlint_inline_runner_rejected(work: Path) -> None:
+    """Prove an inline YAML job mapping cannot hide an unapproved runner."""
+
+    checker = PLAN_DIR / "actionlint-check.py"
+    fixture_root = work / "actionlint-inline-runner"
+    workflow_root = fixture_root / ".github" / "workflows"
+    shutil.copytree(REPO / ".github" / "workflows", workflow_root)
+    workflow = workflow_root / "ci.yml"
+    workflow.write_text(
+        workflow.read_text(encoding="utf-8")
+        + "\n  inline_runner_mutation: {runs-on: corelink-unexpected, steps: []}\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [sys.executable, str(checker), "--root", str(fixture_root)],
+        cwd=REPO,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    diagnostics = result.stdout + result.stderr
+    if result.returncode == 0 or "unapproved runs-on binding" not in diagnostics:
+        raise AssertionError(
+            "actionlint checker accepted an inline unapproved runner mapping:\n"
+            + diagnostics
+        )
+    record_mutation("actionlint-inline-runs-on-mapping")
+    print("PASS actionlint blocks an inline unapproved runner mapping")
+
+
+def require_actionlint_escaped_runner_rejected(work: Path) -> None:
+    checker = PLAN_DIR / "actionlint-check.py"
+    fixture_root = work / "actionlint-escaped-runner"
+    workflow_root = fixture_root / ".github" / "workflows"
+    shutil.copytree(REPO / ".github" / "workflows", workflow_root)
+    workflow = workflow_root / "ci.yml"
+    workflow.write_text(
+        workflow.read_text(encoding="utf-8")
+        + '\n  escaped_runner_mutation: {"\\u0072uns-on": corelink-unexpected, steps: []}\n',
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [sys.executable, str(checker), "--root", str(fixture_root)],
+        cwd=REPO,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    diagnostics = result.stdout + result.stderr
+    if result.returncode == 0 or "unapproved runs-on binding" not in diagnostics:
+        raise AssertionError("actionlint checker accepted an escaped runs-on key:\n" + diagnostics)
+    record_mutation("actionlint-inline-escaped-runner")
+    print("PASS actionlint blocks an escaped inline runner key")
+
+
+def require_actionlint_plan_structure_rejected(work: Path) -> None:
+    checker = PLAN_DIR / "actionlint-check.py"
+    mutations = (
+        (
+            "actionlint-plan-structure-duplicate-job",
+            "\n  check:\n    name: duplicate\n",
+        ),
+        (
+            "actionlint-plan-structure-duplicate-step",
+            "      - name: Lint workflow syntax\n        run: true\n",
+        ),
+    )
+    for mutation, addition in mutations:
+        fixture_root = work / mutation
+        workflow_root = fixture_root / ".github" / "workflows"
+        shutil.copytree(REPO / ".github" / "workflows", workflow_root)
+        workflow = workflow_root / "plan-integrity.yml"
+        source = workflow.read_text(encoding="utf-8")
+        if "duplicate-step" in mutation:
+            source = replace_once(
+                source,
+                "      - name: Exercise structural planning gates\n",
+                addition + "      - name: Exercise structural planning gates\n",
+                mutation,
+            )
+        else:
+            source += addition
+        workflow.write_text(source, encoding="utf-8")
+        result = subprocess.run(
+            [sys.executable, str(checker), "--root", str(fixture_root)],
+            cwd=REPO,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        diagnostics = result.stdout + result.stderr
+        if result.returncode == 0 or "plan-integrity SHA binding mismatch" not in diagnostics:
+            raise AssertionError(f"actionlint checker accepted {mutation}:\n{diagnostics}")
+        record_mutation(mutation)
+        print(f"PASS actionlint blocks {mutation}")
+
+
+def require_actionlint_heredoc_copy_rejected(work: Path) -> None:
+    checker = PLAN_DIR / "actionlint-check.py"
+    fixture_root = work / "actionlint-heredoc-copy"
+    workflow_root = fixture_root / ".github" / "workflows"
+    shutil.copytree(REPO / ".github" / "workflows", workflow_root)
+    workflow = workflow_root / "plan-integrity.yml"
+    source = workflow.read_text(encoding="utf-8")
+    actual_sha = '          ACTUAL_SHA="$(git rev-parse --verify HEAD)"\n'
+    if source.count(actual_sha) != 2:
+        raise AssertionError("heredoc SHA copy: expected two capture commands")
+    source = source.replace(
+        actual_sha,
+        "          cat <<'EOF'\n"
+        '          ACTUAL_SHA="$(git rev-parse --verify HEAD)"\n'
+        "          EOF\n",
+        1,
+    )
+    source = source.replace(
+        actual_sha,
+        "          echo 'ACTUAL_SHA=\"$(git rev-parse --verify HEAD)\"'\n",
+        1,
+    )
+    workflow.write_text(source, encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, str(checker), "--root", str(fixture_root)],
+        cwd=REPO,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    diagnostics = result.stdout + result.stderr
+    if result.returncode == 0 or "plan-integrity SHA binding mismatch" not in diagnostics:
+        raise AssertionError("actionlint checker accepted heredoc/string SHA copies:\n" + diagnostics)
+    record_mutation("actionlint-sha-heredoc-string-copy")
+    print("PASS actionlint excludes heredoc/string SHA copies")
+
+
+def require_actionlint_runner_lexing_controls(work: Path) -> None:
+    checker_spec = importlib.util.spec_from_file_location(
+        "actionlint_check", PLAN_DIR / "actionlint-check.py"
+    )
+    if checker_spec is None or checker_spec.loader is None:
+        raise AssertionError("could not load actionlint checker for lexer controls")
+    checker_module = importlib.util.module_from_spec(checker_spec)
+    checker_spec.loader.exec_module(checker_module)
+    workflow = work / "runner-lexing-controls.yml"
+    controls = (
+        "name: controls\n"
+        "jobs:\n"
+        "  safe:\n"
+        "    runs-on: abc#frag\n"
+        "    steps: []\n"
+        "  url:\n"
+        "    runs-on: ubuntu-latest # https://example.test/runs-on:foo\n"
+        "    steps: []\n"
+    )
+    workflow.write_text(controls, encoding="utf-8")
+    errors = checker_module.validate_runs_on_bindings(workflow)
+    if not any("runs-on value cannot be statically proven" in error for error in errors):
+        raise AssertionError("runner checker accepted abc#frag as a static label")
+    url_only = work / "runner-url-only.yml"
+    url_only.write_text("name: url\nmeta: https://example.test/runs-on:foo\n", encoding="utf-8")
+    if checker_module.validate_runs_on_bindings(url_only):
+        raise AssertionError("runner checker treated URL scalar text as a runs-on key")
+    print("PASS actionlint runner-key lexing controls")
+
+
+def require_actionlint_commented_dead_sha_rejected(work: Path) -> None:
+    """Prove comments/dead shell copies cannot satisfy SHA guard requirements."""
+
+    checker = PLAN_DIR / "actionlint-check.py"
+    fixture_root = work / "actionlint-commented-dead-sha"
+    workflow_root = fixture_root / ".github" / "workflows"
+    shutil.copytree(REPO / ".github" / "workflows", workflow_root)
+    workflow = workflow_root / "plan-integrity.yml"
+    source = workflow.read_text(encoding="utf-8")
+    source = source.replace(
+        "          EXPECTED_SHA: ${{ github.sha }}",
+        "          # EXPECTED_SHA: ${{ github.sha }}",
+    )
+    source = source.replace(
+        "          set -euo pipefail\n",
+        "          if false; then\n          set -euo pipefail\n",
+        2,
+    )
+    source = source.replace("          esac\n", "          esac\n          fi\n", 1)
+    source = source.replace(
+        "          printf '### Plan integrity completion\\n\\n%s\\n' \"$RECORD\" >> \"$GITHUB_STEP_SUMMARY\"\n",
+        "          printf '### Plan integrity completion\\n\\n%s\\n' \"$RECORD\" >> \"$GITHUB_STEP_SUMMARY\"\n          fi\n",
+    )
+    source = source.replace(
+        "        if: ${{ success() }}",
+        "        # if: ${{ success() }}",
+    )
+    workflow.write_text(source, encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, str(checker), "--root", str(fixture_root)],
+        cwd=REPO,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    diagnostics = result.stdout + result.stderr
+    if result.returncode == 0 or "plan-integrity SHA binding mismatch" not in diagnostics:
+        raise AssertionError(
+            "actionlint checker accepted commented/dead SHA guards:\n" + diagnostics
+        )
+    record_mutation("actionlint-commented-dead-sha-binding")
+    print("PASS actionlint blocks commented/dead SHA guard copies")
+
+
 def require_actionlint_sha_binding_rejected(work: Path) -> None:
     """Prove the authoritative lint gate rejects weakened event-SHA binding."""
 
@@ -680,6 +895,12 @@ def main() -> int:
         require_actionlint_config_is_not_authoritative(work)
         require_actionlint_exact_baseline(work)
         require_actionlint_dynamic_runner_rejected(work)
+        require_actionlint_inline_runner_rejected(work)
+        require_actionlint_escaped_runner_rejected(work)
+        require_actionlint_runner_lexing_controls(work)
+        require_actionlint_plan_structure_rejected(work)
+        require_actionlint_commented_dead_sha_rejected(work)
+        require_actionlint_heredoc_copy_rejected(work)
         require_actionlint_sha_binding_rejected(work)
 
         duplicate_source = work / "duplicate-source.txt"
