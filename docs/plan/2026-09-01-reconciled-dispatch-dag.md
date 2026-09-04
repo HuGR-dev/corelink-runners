@@ -19,6 +19,12 @@ it does not block code/test packets whose own predecessors are ready. In particu
 T3-W17 implementation and the T3-W18 safety-only containment deploy/probe may run while the switch
 remains armed. Neither can claim durable recovery or production green.
 
+Round-14 adds a contract-only repair boundary for `T3-W17`; it does not change
+the vertex set, predecessor edges, or ready-set batches. The exact obligations
+are frozen in [`docs/plan/contracts/T3-W17-R14.md`](contracts/T3-W17-R14.md), and
+the findings and source census are in the [Round-14 cold-review ledger](2026-09-04-round14-cold-review-ledger.md).
+The source census is **15/70**, `A3.30` is RED, and `T3-W18` remains blocked.
+
 ## Registry contract
 
 The vertex set is the WP rows in the table below. A predecessor cell may contain only another WP
@@ -452,7 +458,8 @@ this introduces no new SDK/package dependency and never makes provider inventory
 adapter and inherits both gates through T3-W16 for its re-drive liveness decision.
 
 For staged A3.30, `T3-W17` is implemented only against the exact frozen contract in
-`docs/plan/contracts/T3-W17.md`, owns the deterministic repo tests and has no live evidence credit;
+`docs/plan/contracts/T3-W17-R14.md` (which supersedes the earlier contract for the repair stack),
+owns the deterministic repo tests and has no live evidence credit;
 `T3-W18` exclusively owns the version-bound three-state live probe artifact. The two switches remain
 independent, and no later deploy or worker mutation can bypass the live containment half.
 
@@ -693,7 +700,7 @@ B22: T1-W4
 
 The checker validates that every predecessor token is in the registry, every WP appears exactly
 once in the ready-set output, no batch exceeds eight, and the final emitted count equals the table
-vertex count. This rendering has 22 batches, 69 unique emissions and maximum width eight. Kahn's
+vertex count. This rendering has **23 batches, 70 unique emissions** and maximum width eight. Kahn's
 algorithm consumed all vertices (no residual indegree), proving this version acyclic. A future
 change must regenerate the batches and update `schema: dispatch-dag/v1`; hand-edited edges or
 repeated DAG text in another document are invalid.

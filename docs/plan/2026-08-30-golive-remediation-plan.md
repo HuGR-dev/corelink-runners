@@ -26,6 +26,26 @@ subsequent repair tree is not that reviewed input.
 > owner-gated with the exact ask written out, (b) relayed cross-repo with a named artifact, or (c)
 > **explicitly deferred pending a written owner waiver** — never assumed away.
 
+## Round-14 corrective addendum — 2026-09-04
+
+The current planning snapshot remains **NOT FROZEN / NOT DISPATCHABLE / quiet count 0**. The
+source census is **15/70** canonical DAG emissions; `T3-W17` is
+`SOURCE_LANDED_REPAIR_REQUIRED`, `A3.30` is RED, and `T3-W18` is blocked. The historical Wave-1
+handoff retains its superseded 14/70 count. The complete disposition is the
+[Round-14 ledger](2026-09-04-round14-cold-review-ledger.md), and the exact T3 repair boundary is
+[`contracts/T3-W17-R14.md`](contracts/T3-W17-R14.md).
+
+The R14 ledger is the one registry for R1–R6 and the one non-branching gate vocabulary for
+decisions, obstacles, and relays. `D5`, `D6`, `D9`, and `D10` remain unresolved: a missing,
+ambiguous, stale, revoked, or conflicting owner artifact blocks the named WP and descendants;
+no agent chooses an owner outcome and no plan prose silently edits the dependency semantics.
+The contract-only Phase-A stack does not repair the separate plan-integrity SHA-spoof or dynamic
+`runs-on` false-green gate findings. Comment-only `runs-on` text is not a finding.
+
+The corrected DAG prose is **23 batches / 70 emissions**; B00–B22, vertices, edges, predecessors,
+and ready sets are unchanged. Source landing, local structural checks, and this addendum are not
+semantic, acceptance, live, freeze, or dispatch credit.
+
 ---
 
 ## 0. What "go-live with everything working" means
@@ -431,7 +451,7 @@ this table is a summary.
 | W4-post-decision | 43 | real work gated on D4/D5/D6/D9 or on GA |
 | DECISION (D1–D10) | 16 | closes when the owner decides |
 | ARMING (O\*) | 26 | the code exists; the owner binds a value |
-| RELAY (R1–R5) | 8 | closes in corelink-server or via a cross-TL artifact |
+| RELAY (R1–R6) | 8 | closes in corelink-server or via a cross-TL artifact |
 | DOCS-sweep | 44 | the C5 drift mass |
 | CLEAN — no action | 21 | verified clean; the audit's genuine positive results |
 | DEFER — needs a waiver | 5 | ships only with a written waiver |
@@ -1069,6 +1089,10 @@ its live money proof · **R3** the stranger chain (signup → checkout → insta
 free-tier seed vs "no free tier" (D8) · **R5** cross-TL closure: `deploy-06` and `docs-truth-20`
 name artifacts in a sibling repo that the mechanized session fence makes unreachable from here.
 
+**Single relay registry:** `R1`–`R6` are one stable registry. A relay is either independently
+verified with its exact schema and owner, or remains unresolved and blocks only the canonical rows
+that name it; no duplicate R6 entry, implicit R5 fallback, or local owner substitution is valid.
+
 **R6 owner registry.** R6 can be authored only by the `corelink-server` CAS tenant-isolation owner
 in the Security/Storage role; a corelink-runners implementer, plan lead or documentation owner cannot
 self-attest it. Its committed relay record is exactly
@@ -1277,8 +1301,12 @@ greened here:
   Fabric probes likewise run only for exact `FABRIC_PROBES_ENABLED=1`; unset, blank, whitespace,
   malformed and every other value perform zero fabricd fetches while spawn monitoring continues,
   proven at `deploy/cloudflare-canary/test/fabric-probe-flag-failclosed.test.ts`.
-  `.github/workflows/selftests.yml` must exist, run and prove coverage of every
-  `scripts/**/*.selftest.sh`.
+  `.github/workflows/selftests.yml` must exist, run and prove coverage of every exact selftest
+  path named by its DAG packet; the current T6-W1 set is
+  `scripts/orphan-box-check.selftest.sh`, `scripts/pre-merge-gate-check.selftest.sh`, and
+  `scripts/pre-merge-gate-check.sh`, while `scripts/ci/secret-inventory-drift.selftest.sh` is
+  exclusively T7-W4. Broad `scripts/**/*.selftest.sh` discovery is a completeness assertion, not
+  an ownership scope.
 - **Durable Postgres is still bypassed.** `FABRIC_PG_DISABLED=1` makes fabricd servable but leaves
   lease replay, the Postgres-backed vCPU ceiling, and durable billing export suspended. The database
   must be restored or replaced before those claims can be re-probed.
@@ -1653,9 +1681,12 @@ would absorb the agent's dump — anti-pattern AP-2), no per-WP DoD, and no inva
 ```
 WP <id> — <one-line intent>            baseline: <frozen-baseline-sha>   model: <m>   budget: <in>/<total>
 OWNS (acceptance items) : <ids — these and only these go red→green>
-THE X (exclusive files)  : <exact paths; nothing outside them may change>
+THE X (exclusive files)  : <exact DAG paths, symbols and allowlisted test names; nothing else may change>
 INVARIANTS LIVE          : <INV-ids from §13 — violation is HARD REJECT>
 PRE-DECIDED FORKS        : <every fork the agent would otherwise resolve, decided here>
+FORBIDDEN ACTIONS        : <deploy/live/rearm/decision/owner choice/broad glob/bypass actions>
+COMPLETENESS PROOF       : <all owned ids, paths, predecessors and required artifacts enumerated>
+FOCAL VALIDATIONS        : <behavior tests plus negative/ambiguity/crash fixtures, with exact counts>
 DoD (<=8, checkable)     : 1..8
 GATE (run verbatim)      : cargo fmt --check && cargo clippy --workspace --all-targets --locked -- -D warnings
                            && cargo test --workspace --locked && cargo deny check && cargo audit --deny warnings

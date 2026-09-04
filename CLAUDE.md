@@ -10,19 +10,20 @@ CoreLink **expansion campaign #1**. The compute layer of the HuGR stack:
 ```
 HuGR (the company / brand)
  └─ CoreLink (the platform)
-     ├─ Cache         — content-addressed CAS + Action Cache   (launch, live)
+     ├─ Cache         — content-addressed CAS + Action Cache   (historical launch record; live status unverified)
      ├─ Runners       — ephemeral compute on the cache         (campaign #1, THIS REPO)
      └─ Workspaces    — workspace-as-object                    (campaign #2)
    hugit / githugr (agent-fleet forge)                         (campaign #3, DISCONTINUED 2026-07)
 ```
 
-**CURRENT STATE (2026-09-01 containment).** Repo `HuGR-Labs/corelink-runners` (private; migrated
+**CURRENT STATE (2026-09-04 containment).** Repo `HuGR-Labs/corelink-runners` (private; migrated
 out of `HumanGuardrail` on 2026-08-01, which had itself been renamed from `humangr-labs`
 — both are DEAD slugs; the GitHub App installation moved `144561227` → `150584374` in the
 same migration, and every match is EXACT-string, redirects do not apply), default branch
-`main`, real CI on the self-hosted runner
-`corelink-runners-builder-01`. The Cloudflare edge is serving under **intentional emergency
-degradation**, not go-live: `FABRIC_PG_DISABLED=1` is armed, so fabricd uses an in-memory ledger and
+`main`, with the self-hosted runner `corelink-runners-builder-01` retained in source/CI records.
+The Cloudflare edge is historically recorded under **intentional emergency
+degradation**, not go-live; the current runtime is unverified. The recorded containment posture has
+`FABRIC_PG_DISABLED=1` armed, so fabricd uses an in-memory ledger and
 durable lease replay, the Postgres-backed vCPU ceiling, and durable billing export are suspended.
 The 2026-09-01 containment evidence is
 `docs/plan/evidence/2026-09-01-fabricd-pg-containment.md`; PR #529 also disables the five-minute
@@ -33,7 +34,10 @@ hardening wave (2026-07-17) landed billing-usage durability, the external-GA ins
 allowlist, the idem_key cross-path disjointness lock, and the shim cfg-gate. **hugit +
 githugr (campaign #3) are DISCONTINUED (2026-07)** — Runners is sold **direct to its own
 ICP** (infra/CI teams), the single front door; the hugit seam is historical dead weight.
-Not-yet-live (owner/config-gated, not missing code): external-GA flip, billing usage-push
+The current verification posture is **RED by absence**: no current runtime, deployment, or
+production credit is claimed. Source delivery is 15/70 DAG emissions; `T3-W17` is
+`SOURCE_LANDED_REPAIR_REQUIRED`, `A3.30` is RED, and `T3-W18` is blocked. Not-yet-live
+(owner/config-gated, not missing code): external-GA flip, billing usage-push
 (COGS-only, low-urgency), N>1 multi-instance (offline-proven, flip = env), `max_vcpu_h`
 value (server-side).
 
@@ -71,8 +75,9 @@ seam** (`conformance/corelink-introspect.json` + the billing `conformance/UsageE
   example had to be a real UUID, not `"acme"`.)
 - No git/path dependency in either direction (`deny.toml` enforces crates.io only).
 
-**M1 progress.** The multi-tenant control plane (`fabricd`) and Cloudflare-Containers substrate are
-deployed, but the 2026-09-01 emergency switch bypasses the pg-durable ledger and therefore suspends
+**M1 progress.** The multi-tenant control plane (`fabricd`) and Cloudflare-Containers substrate have
+source and historical deployment records, but current runtime status is unverified. The
+2026-09-01 emergency switch bypasses the pg-durable ledger and therefore suspends
 durable concurrency/vCPU and billing guarantees. This is a contained service edge, not a green M1
 claim. Permanent repair must remove pre-bind dependency failure, timer-driven reconnect burn and
 missing independent paging before the durable backend is re-armed. Other open work includes
@@ -108,10 +113,11 @@ truth) · `docs/product/product.md` · `docs/product/FEATURES.md` + `docs/produc
   notes: dedup is **intra-tenant at GA**; cross-tenant is staged
   (`CAP-DEDUP-CROSS-TENANT`). Never propagate the "cross-tenant dedup, live"
   overclaim (see the review note in Read-first).
-- **M1 replaces the transport, not the contract.** M1 is the production fabric behind
-  the same `RunnerLease` semantics — multi-tenant, capped, sellable — now **LIVE on
-  Cloudflare** (`fabricd` + spawn-Worker). (The old interim SSH box `hugit-runner-01` and
-  hugit's P2 CI are historical — hugit is discontinued.)
+- **M1 replaces the transport, not the contract.** M1 is intended to be the production fabric
+  behind the same `RunnerLease` semantics — multi-tenant, capped, sellable. A historical record
+  reports it **LIVE on Cloudflare** (`fabricd` + spawn-Worker), but the current runtime is not
+  verified and no live credit is implied. (The old interim SSH box `hugit-runner-01` and hugit's
+  P2 CI are historical — hugit is discontinued.)
 - **Identity is decided (ADR-0002):** M2 direct GA onboards via the **HuGR
   account** (same Clerk pool; org = tenant keys caps/fairness/billing).
 
