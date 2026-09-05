@@ -410,6 +410,9 @@ const CONTAINMENT_PAUSE_PREFIX = "containment:v1:pause:";
 const CONTAINMENT_INVALID_PREFIX = "containment:v1:invalid:";
 const CONTAINMENT_OUTBOX_PREFIX = "containment:v1:outbox:";
 const CONTAINMENT_RESERVATION_PREFIX = "containment:v1:reservation:";
+const CONTAINMENT_JOB_INDEX_PREFIX = "containment:v1:job-index:";
+const CONTAINMENT_INDEX_META_KEY = "containment:v1:job-index-meta";
+const CONTAINMENT_INDEX_MAX_EVENTS = 32;
 const INVALID_CONFIG_SWITCHES = new Set(["AUTOSCALER_INTAKE_PAUSED", "AUTOSCALER_REDRIVE_PAUSED"]);
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 export const DRAIN_LEASE_TTL_MS = 120_000;
@@ -503,6 +506,13 @@ export interface ContainmentRedrivePermit {
   path: "redrive";
   effect_id: string;
 }
+interface ContainmentJobIndex {
+  schema_version: 1;
+  repo: string;
+  job_id: string;
+  event_ids: string[];
+}
+interface ContainmentJobIndexMeta { schema_version: 1; initialized: true }
 
 function emptyContainmentMeta(): ContainmentMeta {
   return { schema_version: 1, next_pause_seq: 1, drain_cursor: 0, backlog_count: 0, lease_epoch: 0, lease: null, drain_requested: false };
@@ -511,6 +521,23 @@ function containmentEventKey(id: string): string { return `${CONTAINMENT_EVENT_P
 function containmentPauseKey(seq: number): string { return `${CONTAINMENT_PAUSE_PREFIX}${String(seq).padStart(20, "0")}`; }
 function containmentInvalidKey(name: string, digest: string): string { return `${CONTAINMENT_INVALID_PREFIX}${name}:${digest}`; }
 function containmentOutboxKey(signalId: string): string { return `${CONTAINMENT_OUTBOX_PREFIX}${signalId}`; }
+function containmentJobIndexKey(repo: string, jobId: string): string { return `${CONTAINMENT_JOB_INDEX_PREFIX}${repo}/${jobId}`; }
+function isValidJobIndex(value: unknown, repo: string, jobId: string): value is ContainmentJobIndex {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Partial<ContainmentJobIndex>;
+  return record.schema_version === 1
+    && record.repo === repo
+    && record.job_id === jobId
+    && Array.isArray(record.event_ids)
+    && record.event_ids.length <= CONTAINMENT_INDEX_MAX_EVENTS
+    && new Set(record.event_ids).size === record.event_ids.length
+    && record.event_ids.every((id) => typeof id === "string" && id.length > 0);
+}
+function isValidJobIndexMeta(value: unknown): value is ContainmentJobIndexMeta {
+  return !!value && typeof value === "object"
+    && (value as Partial<ContainmentJobIndexMeta>).schema_version === 1
+    && (value as Partial<ContainmentJobIndexMeta>).initialized === true;
+}
 function isValidOutboxRecord(value: unknown): value is ContainmentOutboxRecord {
   if (!value || typeof value !== "object") return false;
   const record = value as Partial<ContainmentOutboxRecord>;
@@ -528,21 +555,26 @@ function isValidInvalidConfigRecord(value: unknown, key: string): value is Inval
     && typeof record.signal_id === "string" && SHA256_HEX.test(record.signal_id)
     && key === containmentInvalidKey(record.switch_name, record.raw_value_sha256);
 }
-function normalizeRedriveIdentity(repo: unknown, jobId: unknown): { repo: string; job_id: string } | null {
-  if (typeof repo !== "string" || typeof jobId !== "string") return null;
-  const normalizedRepo = repo.trim();
-  const normalizedJobId = jobId.trim();
-  // Trim only surrounding transport whitespace, then reject aliases such as
-  // case-folded or structurally different values: every reservation/event/key
-  // transition must use the one canonical repo/job identity.
-  if (!/^[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9])?\/[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9])?$/.test(normalizedRepo)) return null;
-  if (!/^[1-9][0-9]*$/.test(normalizedJobId)) return null;
+function canonicalSafeJobId(jobId: unknown): string | null {
+  if (typeof jobId !== "string") return null;
+  const normalizedJobId = trimAsciiWhitespace(jobId);
+  // Trim only surrounding transport whitespace, then collapse decimal aliases
+  // (leading zeroes): every reservation/event/key transition uses one job id.
+  if (!/^[0-9]+$/.test(normalizedJobId)) return null;
   try {
-    if (BigInt(normalizedJobId) > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+    const numeric = BigInt(normalizedJobId);
+    if (numeric > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+    return numeric.toString(10);
   } catch {
     return null;
   }
-  return { repo: normalizedRepo, job_id: normalizedJobId };
+}
+function normalizeRedriveIdentity(repo: unknown, jobId: unknown): { repo: string; job_id: string } | null {
+  if (typeof repo !== "string") return null;
+  const normalizedRepo = trimAsciiWhitespace(repo).toLowerCase();
+  if (!/^[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9])?\/[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9])?$/.test(normalizedRepo)) return null;
+  const normalizedJobId = canonicalSafeJobId(jobId);
+  return normalizedJobId === null ? null : { repo: normalizedRepo, job_id: normalizedJobId };
 }
 function containmentReservationKey(repo: string, jobId: string): string {
   return `${CONTAINMENT_RESERVATION_PREFIX}${repo}/${jobId}`;
@@ -572,7 +604,8 @@ function reservationTupleMatches(
   path: "redrive",
   effectId: string,
 ): boolean {
-  return reservation.repo === repo
+  return reservation.schema_version === 1
+    && reservation.repo === repo
     && reservation.job_id === jobId
     && reservation.owner === owner
     && reservation.token === token
@@ -620,12 +653,42 @@ export class ContainmentDO extends DurableObject<Env> {
     return (await this.ctx.storage.get<ContainmentEvent>(containmentEventKey(eventId))) ?? null;
   }
 
-  private async containedEventExists(s: any, repo: string, jobId: string): Promise<boolean> {
-    const events = await s.list({ prefix: CONTAINMENT_EVENT_PREFIX }) as Map<string, ContainmentEvent>;
-    return [...events.values()].some((event) => {
+  private async ensureJobIndex(
+    s: any,
+    repo: string,
+    jobId: string,
+    freshAuthority: boolean,
+  ): Promise<ContainmentJobIndex> {
+    const meta = await s.get(CONTAINMENT_INDEX_META_KEY);
+    if (meta === undefined) {
+      // A brand-new authority has no meta or index state. A deployed legacy
+      // authority has its containment meta already, but no index; treating that
+      // as empty would reopen jobs hidden from the index, so fail closed.
+      if (!freshAuthority) throw new Error("containment job index missing");
+      await s.put(CONTAINMENT_INDEX_META_KEY, { schema_version: 1, initialized: true } satisfies ContainmentJobIndexMeta);
+    } else if (!isValidJobIndexMeta(meta)) {
+      throw new Error("containment job index meta divergent");
+    }
+    const key = containmentJobIndexKey(repo, jobId);
+    const existing = await s.get(key) as ContainmentJobIndex | undefined;
+    if (existing === undefined) {
+      const created: ContainmentJobIndex = { schema_version: 1, repo, job_id: jobId, event_ids: [] };
+      await s.put(key, created);
+      return created;
+    }
+    if (!isValidJobIndex(existing, repo, jobId)) throw new Error("containment job index divergent");
+    return existing;
+  }
+
+  private async containedEventExists(s: any, repo: string, jobId: string, freshAuthority: boolean): Promise<boolean> {
+    const index = await this.ensureJobIndex(s, repo, jobId, freshAuthority);
+    for (const eventId of index.event_ids) {
+      const event = await s.get(containmentEventKey(eventId)) as ContainmentEvent | undefined;
+      if (!event) throw new Error("containment job index references missing event");
       const identity = normalizeRedriveIdentity(event.repo, event.job_id);
-      return identity?.repo === repo && identity.job_id === jobId;
-    });
+      if (!identity || identity.repo !== repo || identity.job_id !== jobId) throw new Error("containment job index identity divergent");
+    }
+    return index.event_ids.length > 0;
   }
 
   async reserveRedriveCandidate(
@@ -638,12 +701,14 @@ export class ContainmentDO extends DurableObject<Env> {
     const { repo, job_id: jobId } = identity;
     const key = containmentReservationKey(repo, jobId);
     return this.tx(async (s) => {
+      const rawMeta = await s.get(CONTAINMENT_META_KEY) as ContainmentMeta | undefined;
       // An unacknowledged contained intake owns the job before a redrive can
-      // enter its first mutable seam. This scan is inside the deciding DO tx.
-      if (await this.containedEventExists(s, repo, jobId)) return { status: "contained" as const };
+      // enter its first mutable seam. The direct index is inside the deciding
+      // DO tx; never scan the full event collection per candidate.
+      if (await this.containedEventExists(s, repo, jobId, rawMeta === undefined)) return { status: "contained" as const };
       const prior = (await s.get(key)) as ContainmentRedriveReservation | undefined;
       if (prior) {
-        if (prior.repo !== repo || prior.job_id !== jobId || prior.path !== "redrive" || prior.effect_id !== redriveEffectId(repo, jobId) || !Number.isSafeInteger(prior.epoch) || prior.epoch < 1 || typeof prior.completion_observed !== "boolean") return { status: "busy" as const };
+        if (prior.schema_version !== 1 || prior.repo !== repo || prior.job_id !== jobId || typeof prior.owner !== "string" || typeof prior.token !== "string" || prior.path !== "redrive" || prior.effect_id !== redriveEffectId(repo, jobId) || !Number.isSafeInteger(prior.epoch) || prior.epoch < 1 || !Number.isFinite(prior.expires_ms) || !["HELD", "EFFECT_ELIGIBLE", "COMPLETED"].includes(prior.state) || (prior.event_id !== null && typeof prior.event_id !== "string") || typeof prior.completion_observed !== "boolean") return { status: "busy" as const };
         if (prior.state === "EFFECT_ELIGIBLE") return { status: "effect_eligible" as const, reservation: prior };
         if (prior.state === "COMPLETED") return { status: "completed" as const, reservation: prior };
         if (prior.state !== "HELD" || prior.expires_ms > now) return { status: "busy" as const, reservation: prior };
@@ -689,6 +754,7 @@ export class ContainmentDO extends DurableObject<Env> {
     epoch: number,
     path: "redrive" = "redrive",
     effectId?: string,
+    now = Date.now(),
   ): Promise<{ status: "eligible" | "stale" | "ineligible" | "invalid"; permit?: ContainmentRedrivePermit }> {
     const identity = normalizeRedriveIdentity(repoInput, jobIdInput);
     if (!identity || !Number.isSafeInteger(epoch) || epoch < 1 || path !== "redrive") return { status: "invalid" };
@@ -698,7 +764,10 @@ export class ContainmentDO extends DurableObject<Env> {
     return this.tx(async (s) => {
       const reservation = (await s.get(containmentReservationKey(repo, jobId))) as ContainmentRedriveReservation | undefined;
       if (!reservation || !reservationTupleMatches(reservation, repo, jobId, owner, token, epoch, path, expectedEffectId)) return { status: "stale" as const };
-      if (reservation.state !== "HELD") return { status: "ineligible" as const };
+      // Expiry is a fence, not a hint. A worker that read a HELD tuple before
+      // its deadline must not promote it after the deadline; it has to reclaim
+      // a fresh tuple through reserveRedriveCandidate first.
+      if (reservation.state !== "HELD" || !Number.isFinite(reservation.expires_ms) || reservation.expires_ms <= now) return { status: "ineligible" as const };
       const eligible: ContainmentRedriveReservation = { ...reservation, state: "EFFECT_ELIGIBLE" };
       await s.put(containmentReservationKey(repo, jobId), eligible);
       return { status: "eligible" as const, permit: reservationPermit(eligible) };
@@ -746,7 +815,7 @@ export class ContainmentDO extends DurableObject<Env> {
     const key = containmentReservationKey(repo, jobId);
     return this.tx(async (s) => {
       const reservation = (await s.get(key)) as ContainmentRedriveReservation | undefined;
-      if (!reservation || reservation.repo !== repo || reservation.job_id !== jobId || reservation.path !== "redrive" || reservation.effect_id !== effectId || typeof reservation.completion_observed !== "boolean") return { status: "not_completed" as const };
+      if (!reservation || reservation.schema_version !== 1 || reservation.repo !== repo || reservation.job_id !== jobId || reservation.path !== "redrive" || reservation.effect_id !== effectId || !Number.isFinite(reservation.expires_ms) || typeof reservation.completion_observed !== "boolean") return { status: "not_completed" as const };
       if (reservation.state === "COMPLETED") {
         await s.delete(key);
         return { status: "cleared" as const };
@@ -770,6 +839,7 @@ export class ContainmentDO extends DurableObject<Env> {
     s: any,
     event: Omit<ContainmentEvent, "pause_seq" | "state" | "claim" | "effect_permit">,
     meta: ContainmentMeta,
+    freshAuthority = false,
   ): Promise<{ status: "appended" | "duplicate" | "conflict"; event?: ContainmentEvent }> {
     const key = containmentEventKey(event.event_id);
     const prior = (await s.get(key)) as ContainmentEvent | undefined;
@@ -793,14 +863,23 @@ export class ContainmentDO extends DurableObject<Env> {
       effect_permit: null,
     };
     const pause: ContainmentPause = { schema_version: 1, event_id: event.event_id, pause_seq: next.pause_seq };
+    const index = await this.ensureJobIndex(s, event.repo, event.job_id, freshAuthority);
+    if (index.event_ids.length >= CONTAINMENT_INDEX_MAX_EVENTS) throw new Error("containment job index bound exceeded");
     await s.put(key, next);
     await s.put(containmentPauseKey(next.pause_seq), pause);
+    await s.put(containmentJobIndexKey(event.repo, event.job_id), { ...index, event_ids: [...index.event_ids, event.event_id] });
     await s.put(CONTAINMENT_META_KEY, { ...meta, next_pause_seq: next.pause_seq + 1, backlog_count: meta.backlog_count + 1 });
     return { status: "appended", event: next };
   }
 
   async append(event: Omit<ContainmentEvent, "pause_seq" | "state" | "claim" | "effect_permit">): Promise<{ status: "appended" | "duplicate" | "conflict"; event?: ContainmentEvent }> {
-    return this.tx(async (s) => this.appendInTransaction(s, event, ((await s.get(CONTAINMENT_META_KEY)) as ContainmentMeta | undefined) ?? emptyContainmentMeta()));
+    const identity = normalizeRedriveIdentity(event.repo, event.job_id);
+    if (!identity) throw new TypeError("invalid containment repo/job identity");
+    const normalizedEvent = { ...event, repo: identity.repo, job_id: identity.job_id };
+    return this.tx(async (s) => {
+      const rawMeta = await s.get(CONTAINMENT_META_KEY) as ContainmentMeta | undefined;
+      return this.appendInTransaction(s, normalizedEvent, rawMeta ?? emptyContainmentMeta(), rawMeta === undefined);
+    });
   }
 
   async admitQueued(
@@ -815,7 +894,8 @@ export class ContainmentDO extends DurableObject<Env> {
     if (!identity) return { status: "authority-busy" };
     const normalizedEvent = { ...event, repo: identity.repo, job_id: identity.job_id };
     return this.tx(async (s) => {
-      const meta = ((await s.get(CONTAINMENT_META_KEY)) as ContainmentMeta | undefined) ?? emptyContainmentMeta();
+      const rawMeta = await s.get(CONTAINMENT_META_KEY) as ContainmentMeta | undefined;
+      const meta = rawMeta ?? emptyContainmentMeta();
       if (intakeState === "normal" && meta.backlog_count === 0) return { status: "continued" as const };
       // A duplicate is already durable and never needs reservation arbitration.
       const prior = (await s.get(containmentEventKey(event.event_id))) as ContainmentEvent | undefined;
@@ -841,7 +921,7 @@ export class ContainmentDO extends DurableObject<Env> {
           return { status: "authority-busy" as const };
         }
       }
-      return this.appendInTransaction(s, normalizedEvent, meta);
+      return this.appendInTransaction(s, normalizedEvent, meta, rawMeta === undefined);
     });
   }
 
@@ -1127,9 +1207,15 @@ export class ContainmentDO extends DurableObject<Env> {
       if (!Number.isSafeInteger(meta.backlog_count) || meta.backlog_count < 1) return null;
       const pause = (await s.get(containmentPauseKey(event.pause_seq))) as ContainmentPause | undefined;
       if (!pause || pause.event_id !== event.event_id || pause.pause_seq !== event.pause_seq) return null;
+      const indexKey = containmentJobIndexKey(event.repo, event.job_id);
+      const index = await s.get(indexKey) as ContainmentJobIndex | undefined;
+      if (!index || !isValidJobIndex(index, event.repo, event.job_id) || !index.event_ids.includes(event.event_id)) return null;
       const backlog = meta.backlog_count - 1;
       await s.delete(containmentEventKey(eventId));
       await s.delete(containmentPauseKey(event.pause_seq));
+      const remaining = index.event_ids.filter((id) => id !== event.event_id);
+      if (remaining.length === 0) await s.delete(indexKey);
+      else await s.put(indexKey, { ...index, event_ids: remaining });
       await s.put(CONTAINMENT_META_KEY, { ...meta, drain_cursor: event.pause_seq, backlog_count: backlog, drain_requested: backlog > 0 });
       return event;
     });
@@ -4589,14 +4675,17 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       }
       // The stable correlation id across queued→completed for THIS job. The PAT
       // is minted under it (job_id) so completion can revoke the SAME PAT.
-      const jobId = String(evt.workflow_job?.id ?? "");
-      if (!jobId || !/^\d+$/.test(jobId)) return json({ error: "no workflow_job.id in payload" }, 400);
+      const rawJobId = String(evt.workflow_job?.id ?? "");
+      const jobId = canonicalSafeJobId(rawJobId);
+      if (jobId === null) return json({ error: "no workflow_job.id in payload" }, 400);
 
       // T3-W17 queued-intake gate. Completed events deliberately skip this block
       // and continue through the existing cleanup path below.
       if (evt.action === "queued" && !isVitestLegacyFixtureContext(env)) {
-        const repo = evt.repository?.full_name ?? "";
-        if (!repo) return json({ error: "no repository in payload" }, 400);
+        const rawRepo = evt.repository?.full_name ?? "";
+        const identity = normalizeRedriveIdentity(rawRepo, jobId);
+        if (!identity) return json({ error: "no repository in payload" }, 400);
+        const repo = identity.repo;
         let installationId = evt.installation?.id != null ? String(evt.installation.id) : "";
         if (!installationId) installationId = installationIdForRepo(env.REPO_INSTALLATION_MAP, repo);
         let intake: ContainmentSwitch;
@@ -4753,7 +4842,8 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       // id were resolved. It now runs AFTER them (below), because a refusal has
       // to dead-letter the job and the dead-letter record needs both.
       // The repo is the webhook's repository (full_name).
-      const repo = evt.repository?.full_name ?? "";
+      const rawRepo = evt.repository?.full_name ?? "";
+      const repo = normalizeRedriveIdentity(rawRepo, jobId)?.repo ?? rawRepo;
       // NOTE: the `!repo` 400 is deliberately NOT here. It moved BELOW the rate
       // limiter, because a queued+labeled job must consult the limiter even when
       // the payload names no repository (invariant I1: never fail-open to

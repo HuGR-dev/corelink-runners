@@ -216,7 +216,7 @@ describe("atomic redrive reservation state machine", () => {
     expect((await worker.fetch(await webhook(123, "completed-tombstone"), env(d, kv(), { AUTOSCALER_INTAKE_PAUSED: "1" }), ctx() as never)).status).toBe(202);
   });
 
-  it("repoJobNormalizerFailClosed: refuses contained-first, trims identity, and never reopens effects", async () => {
+  it("repoJobNormalizerFailClosed: refuses contained-first, canonicalizes identity, and never reopens effects", async () => {
     const d = makeDO(); await d.instance.append(event(123)); expect((await d.instance.reserveRedriveCandidate("acme/repo", "123", T0)).status).toBe("contained");
     const e = makeDO(); const r = await e.instance.reserveRedriveCandidate("acme/repo", "123", T0); const first = r.reservation!;
     vi.setSystemTime(T0 + REDRIVE_RESERVATION_TTL_MS); const reclaimed = await e.instance.reserveRedriveCandidate("acme/repo", "123"); expect(reclaimed.status).toBe("reserved"); expect(reclaimed.reservation?.epoch).toBe(2); expect(reclaimed.reservation?.owner).not.toBe(first.owner);
@@ -244,8 +244,19 @@ describe("redrive gates and identity/authorization", () => {
   });
 
   it("canonicalizes identity by trimming and fences every tuple field", async () => {
-    const d = makeDO(); const r = await d.instance.reserveRedriveCandidate("  Acme/repo  ", " 123 ", T0); expect(r.reservation?.repo).toBe("Acme/repo"); expect(r.reservation?.job_id).toBe("123"); const p = r.reservation!;
-    expect((await d.instance.beginReservedEffect("Acme/repo", "123", p.owner, "wrong", p.epoch)).status).toBe("stale"); expect((await d.instance.beginReservedEffect("Acme/repo", "123", p.owner, p.token, p.epoch, "redrive", "wrong-effect")).status).toBe("invalid"); expect((await d.instance.completeRedrive("Acme/repo", "123", p.owner, p.token, p.epoch, p.effect_id)).status).toBe("incomplete");
+    const d = makeDO(); const r = await d.instance.reserveRedriveCandidate("  Acme/repo  ", " 000123 ", T0); expect(r.reservation?.repo).toBe("acme/repo"); expect(r.reservation?.job_id).toBe("123"); const p = r.reservation!;
+    expect((await d.instance.beginReservedEffect("ACME/REPO", "123", p.owner, "wrong", p.epoch)).status).toBe("stale"); expect((await d.instance.beginReservedEffect("ACME/REPO", "123", p.owner, p.token, p.epoch, "redrive", "wrong-effect")).status).toBe("invalid"); expect((await d.instance.completeRedrive("ACME/REPO", "123", p.owner, p.token, p.epoch, p.effect_id)).status).toBe("incomplete");
+  });
+
+  it("does not promote an expired HELD tuple and keeps repo/job indexes independent", async () => {
+    const d = makeDO();
+    const list = vi.spyOn(d.storage, "list");
+    const first = (await d.instance.reserveRedriveCandidate(" Acme/Repo ", "0007", T0)).reservation!;
+    expect((await d.instance.beginReservedEffect(first.repo, first.job_id, first.owner, first.token, first.epoch, first.path, first.effect_id, T0 + REDRIVE_RESERVATION_TTL_MS)).status).toBe("ineligible");
+    const other = await d.instance.reserveRedriveCandidate("other/repo", "7", T0 + REDRIVE_RESERVATION_TTL_MS);
+    expect(other.status).toBe("reserved");
+    expect((await d.instance.reserveRedriveCandidate("acme/repo", "7", T0 + REDRIVE_RESERVATION_TTL_MS)).status).toBe("reserved");
+    expect(list).not.toHaveBeenCalled();
   });
 });
 
@@ -319,7 +330,7 @@ describe("T3-W17 anti-vacuity queue and reservation fences", () => {
   it("fails closed for every invalid canonical repo/job before creating a reservation", async () => {
     const invalid: Array<[string, string]> = [
       ["", "123"], ["acme", "123"], ["acme/repo/extra", "123"], ["acme//repo", "123"], ["acme/.", "123"],
-      ["acme/repo", ""], ["acme/repo", "0"], ["acme/repo", "01"], ["acme/repo", "-1"], ["acme/repo", "1.5"],
+      ["acme/repo", ""], ["acme/repo", "-0"], ["acme/repo", "-1"], ["acme/repo", "1.5"],
       ["acme/repo", "9007199254740992"],
     ];
     for (const [repo, job] of invalid) {

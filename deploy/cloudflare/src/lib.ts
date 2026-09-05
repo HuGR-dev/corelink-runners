@@ -945,8 +945,17 @@ export function installationIdForRepo(json: string | undefined, repoFullName: st
   if (!json || !repoFullName) return "";
   try {
     const map = JSON.parse(json) as Record<string, unknown>;
-    const v = map[repoFullName];
-    return typeof v === "string" ? v : typeof v === "number" ? String(v) : "";
+    const edgeTrim = (value: string) => value.replace(/^[\t\n\v\f\r ]+|[\t\n\v\f\r ]+$/g, "");
+    const canonical = (value: string) => {
+      const parts = edgeTrim(value).split("/");
+      return parts.length === 2 ? `${edgeTrim(parts[0]).toLowerCase()}/${edgeTrim(parts[1]).toLowerCase()}` : "";
+    };
+    const wanted = canonical(repoFullName);
+    for (const [key, value] of Object.entries(map)) {
+      if (canonical(key) !== wanted) continue;
+      return typeof value === "string" ? value : typeof value === "number" ? String(value) : "";
+    }
+    return "";
   } catch {
     return "";
   }
