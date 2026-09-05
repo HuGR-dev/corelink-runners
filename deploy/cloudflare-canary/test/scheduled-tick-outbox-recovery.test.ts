@@ -36,7 +36,9 @@ function state(): DurableObjectState {
 }
 
 function terminal(durable: DurableObjectState): string | undefined {
-  return ((durable as unknown as { testValues: Map<string, { terminal?: string }> }).testValues.get("state"))?.terminal;
+  return (
+    durable as unknown as { testValues: Map<string, { terminal?: string }> }
+  ).testValues.get("state")?.terminal;
 }
 
 describe("scheduled tick durable outbox", () => {

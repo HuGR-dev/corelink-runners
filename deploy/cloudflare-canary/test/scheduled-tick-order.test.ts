@@ -210,4 +210,80 @@ describe("scheduled tick order", () => {
     fetcher.mockRestore();
     vi.useRealTimers();
   });
+
+  it("persists TIMED_OUT when the terminal CAS reaches the exact deadline", async () => {
+    const values = new Map<string, unknown>();
+    let transactions = 0;
+    const clone = <T>(value: T): T =>
+      value === undefined ? value : structuredClone(value);
+    const storage = {
+      get: async <T>(key: string) => clone(values.get(key)) as T | undefined,
+      put: async (key: string, value: unknown) => {
+        values.set(key, clone(value));
+      },
+      setAlarm: async () => undefined,
+      deleteAlarm: async () => undefined,
+    };
+    const durable = {
+      storage: {
+        ...storage,
+        transaction: async <T>(
+          fn: (txn: DurableObjectStorage) => Promise<T>,
+        ) => {
+          transactions += 1;
+          if (transactions === 2) vi.setSystemTime(61_000);
+          return fn(storage as unknown as DurableObjectStorage);
+        },
+      },
+      blockConcurrencyWhile: async <T>(fn: () => Promise<T>) => fn(),
+    } as unknown as DurableObjectState;
+    let verifier: Awaited<ReturnType<typeof signedToken>>["verifier"];
+    const fetcher = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (_url, init) => {
+        const e = JSON.parse(String(init?.body));
+        const signed = await signedToken(
+          {
+            ack_version: "1",
+            event_id: e.event_id,
+            producer_seq: e.producer_seq,
+            payload_digest: e.payload_digest,
+            source: e.source,
+            service: e.service,
+            application: e.application,
+            key_id: e.key_id,
+            credential_epoch: e.credential_epoch,
+            monitor_rearm_tuple_digest: e.monitor_rearm_tuple_digest,
+            ingest_commit_id: "commit",
+            committed_at: 1_001,
+            signer_key_id: "ack-signer",
+            signer_epoch: "4",
+          },
+          ACK_FIELDS,
+          "ack-signer",
+          "4",
+        );
+        verifier = signed.verifier;
+        return new Response(JSON.stringify(signed.token), { status: 200 });
+      });
+    const outbox = new CanaryTickOutbox(durable);
+    const result = await outbox.enqueueAndDrain(
+      {
+        ...config,
+        get ackVerifier() {
+          return verifier;
+        },
+        trustedNow: () => 1_001,
+      },
+      1_000,
+    );
+    expect(result).toContain("TIMED_OUT");
+    expect(
+      (await storage.get<{ head?: unknown; terminal?: string }>("state"))?.head,
+    ).toBeUndefined();
+    expect((await storage.get<{ terminal?: string }>("state"))?.terminal).toBe(
+      "TIMED_OUT",
+    );
+    fetcher.mockRestore();
+  });
 });

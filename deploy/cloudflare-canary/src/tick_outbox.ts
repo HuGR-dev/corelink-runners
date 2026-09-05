@@ -380,18 +380,17 @@ export class CanaryTickOutbox {
       return "tick head pending: transmit failed";
     }
     const body = await bodyUntil(response, deadline);
-    if (body === undefined)
-      return this.terminal(head, "TIMED_OUT", Date.now());
+    if (body === undefined) return this.terminal(head, "TIMED_OUT", Date.now());
     let candidate: unknown = null;
     try {
       candidate = response.ok ? JSON.parse(body) : null;
     } catch {
       /* invalid token remains pending */
     }
-    if (
-      !response.ok ||
-      !sameHead(await this.state.storage.get<State>(stateKey), head)
-    )
+    const current = await this.state.storage.get<State>(stateKey);
+    if (Date.now() >= deadline)
+      return this.terminal(head, "TIMED_OUT", Date.now());
+    if (!response.ok || !sameHead(current, head))
       return "tick head pending: invalid ACK";
     const observed = config.trustedNow?.();
     if (strict(candidate, ackFields, ackChecks)) {
@@ -404,6 +403,8 @@ export class CanaryTickOutbox {
               config.ackVerifier,
               observed,
             );
+      if (Date.now() >= deadline)
+        return this.terminal(head, "TIMED_OUT", Date.now());
       if (status === "valid") return this.terminal(head, "ACKED", Date.now());
       if (status === "revoked") {
         await this.persistRecovery(head, candidate as AckToken);
@@ -500,13 +501,13 @@ export class CanaryTickOutbox {
     await this.state.blockConcurrencyWhile(async () => {
       await this.state.storage.transaction(async (txn) => {
         const current = await txn.get<State>(stateKey);
+        if (!sameHead(current, head)) return;
         if (
-          !sameHead(current, head) ||
-          (terminal === "ACKED" &&
-            (now >= head.enqueuedAt + TICK_DEADLINE_MS ||
-              Date.now() >= head.enqueuedAt + TICK_DEADLINE_MS))
+          terminal === "ACKED" &&
+          (now >= head.enqueuedAt + TICK_DEADLINE_MS ||
+            Date.now() >= head.enqueuedAt + TICK_DEADLINE_MS)
         )
-          return;
+          terminal = "TIMED_OUT";
         current!.head = undefined;
         current!.terminal = terminal;
         await txn.put(stateKey, current!);
