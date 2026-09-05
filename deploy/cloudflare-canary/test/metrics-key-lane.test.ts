@@ -68,7 +68,10 @@ function env(spawn: Fetcher, key: string, fabric: Fetcher): Env {
 }
 
 describe("T6-W13 metrics-key lane (offline local capability fixtures)", () => {
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
 
   it("uses the current key and keeps fabric status/health at zero across 12 cycles", async () => {
     const { service, calls } = namedSpawnService();
@@ -78,7 +81,8 @@ describe("T6-W13 metrics-key lane (offline local capability fixtures)", () => {
     const canaryEnv = env(service, CURRENT_KEY, fabric);
 
     for (let cycle = 0; cycle < 12; cycle += 1) {
-      const result = await runCycle(canaryEnv, NOW + cycle * 60_000);
+      const result = await runCycle(canaryEnv, NOW + cycle * 300_000);
+      expect(result).toContain("spawn=200");
       expect(result).toContain("config=valid");
     }
 
@@ -93,9 +97,12 @@ describe("T6-W13 metrics-key lane (offline local capability fixtures)", () => {
     const { service, calls } = namedSpawnService();
     const fabric = fabricMustStayAsleep();
     const resendRequests: RequestInit[] = [];
+    const resendCycles: number[] = [];
     const logs: string[] = [];
+    let observedCycle = 0;
     const resend = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       resendRequests.push(init ?? {});
+      resendCycles.push(observedCycle);
       return new Response("{}", { status: 200 });
     });
     const log = vi.spyOn(console, "log").mockImplementation((...args) => logs.push(args.join(" ")));
@@ -103,13 +110,16 @@ describe("T6-W13 metrics-key lane (offline local capability fixtures)", () => {
     const canaryEnv = env(service, PRIOR_KEY, fabric);
 
     for (let cycle = 0; cycle < 12; cycle += 1) {
-      const result = await runCycle(canaryEnv, NOW + cycle * 60_000);
+      observedCycle = cycle;
+      const result = await runCycle(canaryEnv, NOW + cycle * 300_000);
+      expect(result).toContain("spawn=401");
       expect(result).toContain("config=valid");
     }
 
     expect(calls).toHaveLength(12);
     expect(calls.every(({ key }) => key === PRIOR_KEY)).toBe(true);
-    expect(resend).toHaveBeenCalledTimes(1); // stale-key WARN is cooldown-deduplicated
+    expect(resend).toHaveBeenCalledTimes(2); // 30-minute cooldown expires at cycle 6
+    expect(resendCycles).toEqual([0, 6]);
     expect(resendRequests[0]?.headers).toEqual({
       Authorization: `Bearer ${RESEND_KEY}`,
       "content-type": "application/json",
