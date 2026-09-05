@@ -125,6 +125,9 @@ MODE="gate"
 DRY_RUN=0
 ADMIN_REASON=""
 PR=""
+BOUND_HEAD_SHA=""
+BOUND_BASE_SHA=""
+BOUND_MERGE_SHA=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -213,11 +216,11 @@ run_gate() {
   # GitHub computes `mergeable` asynchronously, so UNKNOWN means "ask again", not
   # "fine". Both non-MERGEABLE states are refused: on a conflict the check list is
   # actively misleading (see the header), and on UNKNOWN we cannot yet tell.
-  local state mergeable mergestatus prstate isdraft json
-  state="$(gh pr view "$PR" --json mergeable,mergeStateStatus,state,isDraft \
-    -q '"\(.mergeable) \(.mergeStateStatus) \(.state) \(.isDraft)"' 2>/dev/null \
+  local state mergeable mergestatus prstate isdraft head_sha base_sha merge_sha json repository
+  state="$(gh pr view "$PR" --json mergeable,mergeStateStatus,state,isDraft,headRefOid,baseRefOid,potentialMergeCommit \
+    -q '"\(.mergeable) \(.mergeStateStatus) \(.state) \(.isDraft) \(.headRefOid) \(.baseRefOid) \(.potentialMergeCommit.oid // "")"' 2>/dev/null \
     || echo "ERROR ERROR ERROR ERROR")"
-  read -r mergeable mergestatus prstate isdraft <<<"$state"
+  read -r mergeable mergestatus prstate isdraft head_sha base_sha merge_sha <<<"$state"
 
   if [ "$prstate" != "OPEN" ]; then
     echo "  ⛔ DO NOT MERGE PR #$PR — the PR is $prstate, not OPEN."
@@ -259,6 +262,21 @@ run_gate() {
     return 1
   fi
 
+  if [[ ! "$head_sha" =~ ^[0-9a-fA-F]{40}$ || ! "$base_sha" =~ ^[0-9a-fA-F]{40}$ || ! "$merge_sha" =~ ^[0-9a-fA-F]{40}$ ]]; then
+    echo "  ⛔ DO NOT MERGE PR #$PR — malformed source/base/merge OID; cannot bind checks safely."
+    verdict STRUCTURAL
+    return 1
+  fi
+  BOUND_HEAD_SHA="$head_sha"
+  BOUND_BASE_SHA="$base_sha"
+  BOUND_MERGE_SHA="$merge_sha"
+  if ! repository="$(gh repo view --json nameWithOwner -q '.nameWithOwner' 2>/dev/null)" \
+    || [[ ! "$repository" =~ ^[^/]+/[^/]+$ ]]; then
+    echo "  ⛔ DO NOT MERGE PR #$PR — repository identity unavailable; cannot query checks safely."
+    verdict STRUCTURAL
+    return 1
+  fi
+
   # ── Defense 3 (ordering: checked before the per-check loop) ─────────────────
   # "No checks reported" used to `exit 0` with "nothing to gate". On a repo where
   # every PR runs dco + gitleaks unconditionally, no checks means the workflows did
@@ -272,18 +290,117 @@ run_gate() {
     return 1
   fi
 
-  GATE_JSON="$json" GATE_VERDICT_FILE="$VERDICT_FILE" python3 - "$PR" <<'PY'
+  GATE_JSON="$json" GATE_VERDICT_FILE="$VERDICT_FILE" GATE_REPOSITORY="$repository" GATE_HEAD_SHA="$merge_sha" python3 - "$PR" <<'PY'
 import os, sys, json
+import subprocess
 pr = sys.argv[1]
 data = json.loads(os.environ["GATE_JSON"])
+repository = os.environ["GATE_REPOSITORY"]
+head_sha = os.environ["GATE_HEAD_SHA"].lower()
+pr_number = int(pr)
 
 def verdict(kind):
-    """Side channel for --admin-reason eligibility. Never touches stdout, so the
-    default (no --merge) output stays byte-identical to the pre-2026-08-04 script."""
     path = os.environ.get("GATE_VERDICT_FILE") or ""
     if path:
         with open(path, "w") as fh:
             fh.write(kind)
+
+def api(path):
+    result = subprocess.run(
+        ["gh", "api", "--paginate", "--slurp", path],
+        capture_output=True, text=True, check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or f"gh api failed for {path}")
+    pages = json.loads(result.stdout)
+    if not isinstance(pages, list):
+        raise RuntimeError(f"gh api returned non-array pages for {path}")
+    return pages
+
+def page_items(pages, key):
+    items = []
+    for page in pages:
+        if isinstance(page, list):
+            page_items = page
+        elif isinstance(page, dict) and isinstance(page.get(key), list):
+            page_items = page[key]
+        else:
+            raise RuntimeError(f"gh api page did not contain an array for {key}")
+        for item in page_items:
+            if not isinstance(item, dict):
+                raise RuntimeError("gh api item was not an object")
+            items.append(item)
+    return items
+
+try:
+    files = page_items(api(f"repos/{repository}/pulls/{pr}/files?per_page=100"), "filename")
+    if not files:
+        raise RuntimeError("pull request file list was empty")
+    contract_change = any(
+        str(item.get("filename", "")).startswith("docs/plan/contracts/") for item in files
+    )
+    runs = page_items(
+        api(f"repos/{repository}/actions/runs?head_sha={head_sha}&per_page=100"),
+        "workflow_runs",
+    )
+except (RuntimeError, json.JSONDecodeError) as error:
+    print(f"  ⛔ DO NOT MERGE PR #{pr} — authoritative GitHub API query failed: {error}")
+    verdict("STRUCTURAL")
+    sys.exit(1)
+
+required = [(".github/workflows/ci.yml", "gates"), (".github/workflows/dco.yml", "dco")]
+if contract_change:
+    required.append((".github/workflows/plan-integrity.yml", "Coverage, WP, and AU structure"))
+
+canonical = []
+for workflow_path, job_name in required:
+    candidates = [
+        run for run in runs
+        if run.get("path") == workflow_path
+        and run.get("event") == "pull_request"
+        and str(run.get("head_sha", "")).lower() == head_sha
+        and isinstance(run.get("pull_requests"), list)
+        and any(
+            isinstance(relation, dict)
+            and relation.get("number") == pr_number
+            for relation in run.get("pull_requests", [])
+        )
+    ]
+    candidates.sort(key=lambda run: (run.get("run_started_at", ""), run.get("id", 0)))
+    if not candidates:
+        canonical.append({"name": job_name, "bucket": "missing", "link": workflow_path})
+        continue
+    run = candidates[-1]
+    try:
+        jobs = page_items(
+            api(f"repos/{repository}/actions/runs/{run['id']}/jobs?per_page=100"),
+            "jobs",
+        )
+    except (RuntimeError, json.JSONDecodeError) as error:
+        print(f"  ⛔ DO NOT MERGE PR #{pr} — job API query failed: {error}")
+        verdict("STRUCTURAL")
+        sys.exit(1)
+    matches = [job for job in jobs if job.get("name") == job_name]
+    if len(matches) != 1:
+        canonical.append({"name": job_name, "bucket": "missing", "link": workflow_path})
+        continue
+    job = matches[0]
+    status, conclusion = job.get("status"), job.get("conclusion")
+    if status != "completed":
+        bucket = "pending"
+    elif conclusion == "success":
+        bucket = "pass"
+    elif conclusion == "skipped":
+        bucket = "skipping"
+    else:
+        bucket = "fail"
+    canonical.append({"name": job_name, "bucket": bucket, "link": workflow_path})
+
+# Display names from `gh pr checks` are advisory only.  Replace the required
+# identities with the canonical workflow/job/event/head-SHA records above.
+required_names = {job_name for _, job_name in required}
+data = [check for check in data if check.get("name") not in required_names]
+data.extend(canonical)
 
 # Bucket handling is ALLOWLIST-based, not denylist-based, and that is the whole
 # point. The previous version tested `b == "fail"` / `b == "pending"` and let
@@ -334,6 +451,10 @@ AUTHORITATIVE_CHECKS = {
     "gates": {"gates", "ci / gates"},
     "dco": {"dco", "dco / dco"},
 }
+if os.environ.get("GATE_REQUIRE_PLAN_INTEGRITY") == "1":
+    AUTHORITATIVE_CHECKS["plan-integrity"] = {
+        "plan integrity / coverage, wp, and au structure",
+    }
 names = {" ".join(str(c.get("name", "")).casefold().split()) for c in data}
 missing = [job for job, identities in AUTHORITATIVE_CHECKS.items()
            if not names.intersection(identities)]
@@ -401,6 +522,14 @@ fi
 # gate returns here; nothing downstream re-evaluates the verdict.
 GATE_VERDICT="$(cat "$VERDICT_FILE" 2>/dev/null || true)"
 
+# A merge decision must use a fresh run/job snapshot after the initial gate.
+# This catches a rerun or status transition while the operator was reviewing
+# the report, and rebinds the snapshot to the current source/base/merge OIDs.
+if [ "$gate_rc" -eq 0 ] || [ "$GATE_VERDICT" = "OVERRIDABLE" ]; then
+  if run_gate; then gate_rc=0; else gate_rc=$?; fi
+  GATE_VERDICT="$(cat "$VERDICT_FILE" 2>/dev/null || true)"
+fi
+
 if [ "$gate_rc" -ne 0 ]; then
   echo
   if [ -n "$ADMIN_REASON" ] && [ "$GATE_VERDICT" = "OVERRIDABLE" ]; then
@@ -419,6 +548,16 @@ if [ "$gate_rc" -ne 0 ]; then
   fi
 fi
 
+current_identity="$(gh pr view "$PR" --json headRefOid,baseRefOid,potentialMergeCommit \
+  -q '"\(.headRefOid) \(.baseRefOid) \(.potentialMergeCommit.oid // "")"' 2>/dev/null || true)"
+read -r current_head current_base current_merge <<<"$current_identity"
+if [ "$current_head" != "$BOUND_HEAD_SHA" ] \
+  || [ "$current_base" != "$BOUND_BASE_SHA" ] \
+  || [ "$current_merge" != "$BOUND_MERGE_SHA" ]; then
+  echo "  ⛔ NO MERGE ISSUED for PR #$PR — source/base/merge OID changed while checks were evaluated."
+  exit 1
+fi
+
 # squash is house practice: every PR merged since #1013 landed as a single
 # `… (#NNNN)` squash commit on main.
 #
@@ -434,6 +573,7 @@ fi
 # branch is deliberately left alone — a worktree may be sitting on it — and is
 # named in the output so the operator can remove it.
 MERGE_ARGS=(--squash --delete-branch=false)
+MERGE_ARGS+=(--match-head-commit "$BOUND_HEAD_SHA")
 if [ -n "$ADMIN_REASON" ] && [ "$gate_rc" -ne 0 ]; then
   MERGE_ARGS+=(--admin)
 fi
