@@ -35,6 +35,7 @@ class FakeStorage {
 
 function ns<T>(instance: T, name = "global") { return { idFromName: vi.fn(() => name), get: vi.fn(() => instance) }; }
 function makeDO(runtimeEnv: Record<string, unknown> = {}) { const storage = new FakeStorage(); const instance = new ContainmentDO({ storage } as never, runtimeEnv as never); return { storage, instance, binding: ns(instance) }; }
+async function bootstrap(d: ReturnType<typeof makeDO>, job = "1", repo = "acme/repo") { expect(await d.instance.bootstrapContainedEventIndex(repo, job)).toMatchObject({ status: "bootstrapped" }); }
 function kv(seed: Record<string, string> = {}) {
   const map = new Map(Object.entries(seed));
   return { map, get: vi.fn(async (key: string) => map.get(key) ?? null), put: vi.fn(async (key: string, value: string) => { map.set(key, value); }), delete: vi.fn(async (key: string) => { map.delete(key); }), list: vi.fn(async ({ prefix }: { prefix?: string } = {}) => ({ keys: [...map.keys()].filter((key) => key.startsWith(prefix ?? "")).map((name) => ({ name })) })) };
@@ -83,7 +84,7 @@ afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe("ordered queue / lease / immutable evidence recovery", () => {
   it("claims strictly in order, issues one permit, and fences stale leases", async () => {
-    const d = makeDO(); await d.instance.append(event(1)); await d.instance.append(event(2));
+    const d = makeDO(); await bootstrap(d, "1"); await bootstrap(d, "2"); await d.instance.append(event(1)); await d.instance.append(event(2));
     const a = await d.instance.acquireLease("owner-a"); expect(a).toEqual({ owner: "owner-a", epoch: 1, expires_ms: T0 + 120_000 });
     expect(await d.instance.acquireLease("owner-b")).toBeNull();
     const head = await d.instance.claimNext("owner-a", 1); expect(head?.event.pause_seq).toBe(1); expect(head?.committed).toBe(false);
@@ -104,7 +105,7 @@ describe("ordered queue / lease / immutable evidence recovery", () => {
   });
 
   it("recovers an eligible head from canonical immutable evidence and acknowledges it", async () => {
-    const d = makeDO(); const store = kv(); const withKv = new ContainmentDO({ storage: d.storage }, { RUNNER_JOB_PATS: store } as never);
+    const d = makeDO(); await bootstrap(d, "1"); const store = kv(); const withKv = new ContainmentDO({ storage: d.storage }, { RUNNER_JOB_PATS: store } as never);
     await withKv.append(event(1)); await withKv.acquireLease("owner-a"); await withKv.claimNext("owner-a", 1); const permit = await withKv.beginEffect("evt-1", "owner-a", 1); expect(permit).not.toBeNull();
     const effect = "containment:v1:evt-1"; const evidence = [
       ["spawn_claim", `spawn:1`, "123"],
@@ -129,7 +130,7 @@ describe("ordered queue / lease / immutable evidence recovery", () => {
   });
 
   it("fails closed on malformed schema or tampered evidence", async () => {
-    const d = makeDO(); const store = kv(); const instance = new ContainmentDO({ storage: d.storage }, { RUNNER_JOB_PATS: store } as never);
+    const d = makeDO(); await bootstrap(d, "1"); await bootstrap(d, "123"); const store = kv(); const instance = new ContainmentDO({ storage: d.storage }, { RUNNER_JOB_PATS: store } as never);
     await instance.append(event(1)); await instance.acquireLease("a"); await instance.claimNext("a", 1); const permit = await instance.beginEffect("evt-1", "a", 1); expect(permit).not.toBeNull();
     await instance.markEffectCommitted("evt-1", "a", 1); // no evidence, remains CLAIMED
     expect(await instance.recoverEffectCommitted("containment:v1:evt-1", "a", 1, "0".repeat(64))).toBe(false);
@@ -141,7 +142,7 @@ describe("ordered queue / lease / immutable evidence recovery", () => {
 async function digest(value: string): Promise<string> { const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)); return [...new Uint8Array(bytes)].map((b) => b.toString(16).padStart(2, "0")).join(""); }
 
 async function recoveryFixture(mutate: (records: Record<string, unknown>[]) => void = () => {}) {
-  const d = makeDO(); const store = kv(); const instance = new ContainmentDO({ storage: d.storage }, { RUNNER_JOB_PATS: store } as never);
+  const d = makeDO(); await bootstrap(d, "1"); const store = kv(); const instance = new ContainmentDO({ storage: d.storage }, { RUNNER_JOB_PATS: store } as never);
   await instance.append(event(1)); await instance.acquireLease("old", T0); await instance.claimNext("old", 1, T0);
   const permit = await instance.beginEffect("evt-1", "old", 1, T0); expect(permit).not.toBeNull();
   const effect = "containment:v1:evt-1";
@@ -210,6 +211,21 @@ describe("atomic redrive reservation state machine", () => {
     expect(d.storage.map.has("containment:v1:repo-job-index:acme/repo/1")).toBe(false);
   });
 
+  it("requires the pair marker before duplicate append or acknowledgement mutation", async () => {
+    const d = makeDO(); await d.instance.bootstrapContainedEventIndex("acme/repo", "1");
+    await d.instance.append(event(1));
+    d.storage.map.delete("containment:v1:repo-job-index-marker:acme/repo/1");
+    await expect(d.instance.append(event(1))).rejects.toThrow("containment job index marker divergent");
+    const before = new Map(d.storage.map);
+    const fresh = makeDO(); await fresh.instance.bootstrapContainedEventIndex("acme/repo", "1"); await fresh.instance.append(event(1));
+    await fresh.instance.acquireLease("owner", T0); const claimed = await fresh.instance.claimNext("owner", 1, T0);
+    fresh.storage.map.set("containment:v1:event:evt-1", { ...claimed!.event, state: "EFFECT_COMMITTED" });
+    fresh.storage.map.delete("containment:v1:repo-job-index-marker:acme/repo/1");
+    expect(await fresh.instance.acknowledge("evt-1", "owner", 1)).toBe(false);
+    expect(fresh.storage.map.has("containment:v1:event:evt-1")).toBe(true);
+    expect(before.has("containment:v1:event:evt-1")).toBe(true);
+  });
+
   it("fails closed for a missing or damaged pair index and rejects the legacy key", async () => {
     const d = makeDO(); await d.instance.requestDrain();
     d.storage.map.set("containment:v1:job-index:acme/repo/1", { schema_version: 1, repo: "acme/repo", job_id: "1", event_ids: [] });
@@ -244,6 +260,7 @@ describe("atomic redrive reservation state machine", () => {
     await Promise.all(contexts.map(settle));
     expect(drive).toHaveBeenCalledTimes(1); expect(verify).toHaveBeenCalledTimes(0);
     expect((d.storage.map.get(reserveKey()) as ContainmentRedriveReservation).state).toBe("COMPLETED");
+    expect(d.storage.map.get("containment:v1:repo-job-index-marker:acme/repo/123")).toMatchObject({ schema_version: 1, repo: "acme/repo", job_id: "123" });
   });
 
   it("redriveOrphanedJobs: 100 concurrent GitHub scans produce exactly one effect", async () => {
@@ -262,14 +279,14 @@ describe("atomic redrive reservation state machine", () => {
   });
 
   it("admitExpiredHeldAtomicFence: active HELD is busy; expiry appends and fences stale owner", async () => {
-    const d = makeDO(); const held = await d.instance.reserveRedriveCandidate("acme/repo", "123", T0); expect(held.status).toBe("reserved");
+    const d = makeDO(); await bootstrap(d, "123"); const held = await d.instance.reserveRedriveCandidate("acme/repo", "123", T0); expect(held.status).toBe("reserved");
     const active = await worker.fetch(await webhook(123, "held-active"), env(d, kv(), { AUTOSCALER_INTAKE_PAUSED: "1" }), ctx() as never); expect(active.status).toBe(503);
     vi.setSystemTime(T0 + REDRIVE_RESERVATION_TTL_MS); const expired = await worker.fetch(await webhook(123, "held-expired"), env(d, kv(), { AUTOSCALER_INTAKE_PAUSED: "1" }), ctx() as never); expect(expired.status).toBe(202);
     expect(d.storage.map.has(reserveKey())).toBe(false); expect(await d.instance.beginReservedEffect("acme/repo", "123", held.reservation!.owner, held.reservation!.token, held.reservation!.epoch)).toMatchObject({ status: "stale" });
   });
 
   it("returns redrive_owned (route 202) for eligible and completed tombstones", async () => {
-    const d = makeDO(); const held = await d.instance.reserveRedriveCandidate("acme/repo", "123", T0); const r = held.reservation!;
+    const d = makeDO(); await bootstrap(d, "123"); const held = await d.instance.reserveRedriveCandidate("acme/repo", "123", T0); const r = held.reservation!;
     expect((await d.instance.beginReservedEffect(r.repo, r.job_id, r.owner, r.token, r.epoch, r.path, r.effect_id)).status).toBe("eligible");
     expect((await worker.fetch(await webhook(123, "eligible"), env(d, kv(), { AUTOSCALER_INTAKE_PAUSED: "1" }), ctx() as never)).status).toBe(202);
     expect((await d.instance.completeRedrive(r.repo, r.job_id, r.owner, r.token, r.epoch, r.effect_id)).status).toBe("completed");
@@ -277,17 +294,17 @@ describe("atomic redrive reservation state machine", () => {
   });
 
   it("repoJobNormalizerFailClosed: refuses contained-first, canonicalizes identity, and never reopens effects", async () => {
-    const d = makeDO(); await d.instance.append(event(123)); expect((await d.instance.reserveRedriveCandidate("acme/repo", "123", T0)).status).toBe("contained");
-    const e = makeDO(); const r = await e.instance.reserveRedriveCandidate("acme/repo", "123", T0); const first = r.reservation!;
+    const d = makeDO(); await bootstrap(d, "123"); await d.instance.append(event(123)); expect((await d.instance.reserveRedriveCandidate("acme/repo", "123", T0)).status).toBe("contained");
+    const e = makeDO(); await bootstrap(e, "123"); const r = await e.instance.reserveRedriveCandidate("acme/repo", "123", T0); const first = r.reservation!;
     vi.setSystemTime(T0 + REDRIVE_RESERVATION_TTL_MS); const reclaimed = await e.instance.reserveRedriveCandidate("acme/repo", "123"); expect(reclaimed.status).toBe("reserved"); expect(reclaimed.reservation?.epoch).toBe(2); expect(reclaimed.reservation?.owner).not.toBe(first.owner);
     const p = reclaimed.reservation!; await e.instance.beginReservedEffect(p.repo, p.job_id, p.owner, p.token, p.epoch, p.path, p.effect_id); vi.setSystemTime(T0 + 2 * REDRIVE_RESERVATION_TTL_MS); expect((await e.instance.reserveRedriveCandidate(p.repo, p.job_id)).status).toBe("effect_eligible");
     expect((await e.instance.completeRedrive(p.repo, p.job_id, p.owner, p.token, p.epoch, p.effect_id)).status).toBe("completed"); expect((await e.instance.reserveRedriveCandidate(p.repo, p.job_id)).status).toBe("completed");
   });
 
   it("completionObservedLatchStateMachine: handles HELD, latch, and tombstone interleavings", async () => {
-    const held = makeDO(); const h = await held.instance.reserveRedriveCandidate("acme/repo", "123", T0); expect((await held.instance.clearCompletedRedrive("acme/repo", "123", h.reservation!.effect_id)).status).toBe("terminal"); expect((await held.instance.beginReservedEffect("acme/repo", "123", h.reservation!.owner, h.reservation!.token, 1)).status).toBe("stale");
-    const latch = makeDO(); const l = await latch.instance.reserveRedriveCandidate("acme/repo", "123", T0); const lr = l.reservation!; await latch.instance.beginReservedEffect(lr.repo, lr.job_id, lr.owner, lr.token, lr.epoch, lr.path, lr.effect_id); expect((await latch.instance.clearCompletedRedrive(lr.repo, lr.job_id, lr.effect_id)).status).toBe("latched"); expect((await latch.instance.completeRedrive(lr.repo, lr.job_id, lr.owner, lr.token, lr.epoch, lr.effect_id)).status).toBe("cleared_after_completion"); expect(latch.storage.map.has(reserveKey())).toBe(false);
-    const tomb = makeDO(); const t = await tomb.instance.reserveRedriveCandidate("acme/repo", "123", T0); const tr = t.reservation!; await tomb.instance.beginReservedEffect(tr.repo, tr.job_id, tr.owner, tr.token, tr.epoch, tr.path, tr.effect_id); expect((await tomb.instance.completeRedrive(tr.repo, tr.job_id, tr.owner, tr.token, tr.epoch, tr.effect_id)).status).toBe("completed"); expect((await tomb.instance.clearCompletedRedrive(tr.repo, tr.job_id, tr.effect_id)).status).toBe("cleared");
+    const held = makeDO(); await bootstrap(held, "123"); const h = await held.instance.reserveRedriveCandidate("acme/repo", "123", T0); expect((await held.instance.clearCompletedRedrive("acme/repo", "123", h.reservation!.effect_id)).status).toBe("terminal"); expect((await held.instance.beginReservedEffect("acme/repo", "123", h.reservation!.owner, h.reservation!.token, 1)).status).toBe("stale");
+    const latch = makeDO(); await bootstrap(latch, "123"); const l = await latch.instance.reserveRedriveCandidate("acme/repo", "123", T0); const lr = l.reservation!; await latch.instance.beginReservedEffect(lr.repo, lr.job_id, lr.owner, lr.token, lr.epoch, lr.path, lr.effect_id); expect((await latch.instance.clearCompletedRedrive(lr.repo, lr.job_id, lr.effect_id)).status).toBe("latched"); expect((await latch.instance.completeRedrive(lr.repo, lr.job_id, lr.owner, lr.token, lr.epoch, lr.effect_id)).status).toBe("cleared_after_completion"); expect(latch.storage.map.has(reserveKey())).toBe(false);
+    const tomb = makeDO(); await bootstrap(tomb, "123"); const t = await tomb.instance.reserveRedriveCandidate("acme/repo", "123", T0); const tr = t.reservation!; await tomb.instance.beginReservedEffect(tr.repo, tr.job_id, tr.owner, tr.token, tr.epoch, tr.path, tr.effect_id); expect((await tomb.instance.completeRedrive(tr.repo, tr.job_id, tr.owner, tr.token, tr.epoch, tr.effect_id)).status).toBe("completed"); expect((await tomb.instance.clearCompletedRedrive(tr.repo, tr.job_id, tr.effect_id)).status).toBe("cleared");
   });
 });
 
@@ -304,12 +321,12 @@ describe("redrive gates and identity/authorization", () => {
   });
 
   it("canonicalizes identity by trimming and fences every tuple field", async () => {
-    const d = makeDO(); const r = await d.instance.reserveRedriveCandidate("  Acme/repo  ", " 000123 ", T0); expect(r.reservation?.repo).toBe("acme/repo"); expect(r.reservation?.job_id).toBe("123"); const p = r.reservation!;
+    const d = makeDO(); await bootstrap(d, "123"); const r = await d.instance.reserveRedriveCandidate("  Acme/repo  ", " 000123 ", T0); expect(r.reservation?.repo).toBe("acme/repo"); expect(r.reservation?.job_id).toBe("123"); const p = r.reservation!;
     expect((await d.instance.beginReservedEffect("ACME/REPO", "123", p.owner, "wrong", p.epoch)).status).toBe("stale"); expect((await d.instance.beginReservedEffect("ACME/REPO", "123", p.owner, p.token, p.epoch, "redrive", "wrong-effect")).status).toBe("invalid"); expect((await d.instance.completeRedrive("ACME/REPO", "123", p.owner, p.token, p.epoch, p.effect_id)).status).toBe("incomplete");
   });
 
   it("does not promote an expired HELD tuple and keeps repo/job indexes independent", async () => {
-    const d = makeDO();
+    const d = makeDO(); await bootstrap(d, "7"); await bootstrap(d, "7", "other/repo");
     const list = vi.spyOn(d.storage, "list");
     const first = (await d.instance.reserveRedriveCandidate(" Acme/Repo ", "0007", T0)).reservation!;
     expect((await d.instance.beginReservedEffect(first.repo, first.job_id, first.owner, first.token, first.epoch, first.path, first.effect_id, T0 + REDRIVE_RESERVATION_TTL_MS)).status).toBe("ineligible");
@@ -322,7 +339,7 @@ describe("redrive gates and identity/authorization", () => {
 
 describe("T3-W17 anti-vacuity queue and reservation fences", () => {
   it("keeps the claimed head ahead of later appends and reclaims a pre-permit claim with a new epoch", async () => {
-    const d = makeDO();
+    const d = makeDO(); await bootstrap(d, "1"); await bootstrap(d, "2"); await bootstrap(d, "3");
     await d.instance.append(event(1));
     await d.instance.append(event(2));
     const first = await d.instance.acquireLease("first", T0);
@@ -342,7 +359,7 @@ describe("T3-W17 anti-vacuity queue and reservation fences", () => {
   });
 
   it("rejects every stale lease transition after reclaim without moving the head", async () => {
-    const d = makeDO();
+    const d = makeDO(); await bootstrap(d, "1");
     await d.instance.append(event(1));
     await d.instance.acquireLease("old", T0);
     await d.instance.claimNext("old", 1, T0);
@@ -358,7 +375,7 @@ describe("T3-W17 anti-vacuity queue and reservation fences", () => {
   });
 
   it("never transfers an issued permit to a lease reclaimer", async () => {
-    const d = makeDO();
+    const d = makeDO(); await bootstrap(d, "1");
     await d.instance.append(event(1));
     await d.instance.acquireLease("old", T0);
     await d.instance.claimNext("old", 1, T0);
@@ -372,7 +389,7 @@ describe("T3-W17 anti-vacuity queue and reservation fences", () => {
   });
 
   it("persists the exact repo-scoped reservation schema and stable effect id", async () => {
-    const d = makeDO();
+    const d = makeDO(); await bootstrap(d, "123");
     const result = await d.instance.reserveRedriveCandidate("acme/repo", "123", T0);
     expect(result.status).toBe("reserved");
     expect(d.storage.map.get(reserveKey())).toMatchObject({
@@ -401,7 +418,7 @@ describe("T3-W17 anti-vacuity queue and reservation fences", () => {
   });
 
   it("fences stale reservation tuples before any caller can enter a second effect", async () => {
-    const d = makeDO();
+    const d = makeDO(); await bootstrap(d, "123");
     const old = (await d.instance.reserveRedriveCandidate("acme/repo", "123", T0)).reservation!;
     const next = (await d.instance.reserveRedriveCandidate("acme/repo", "123", T0 + REDRIVE_RESERVATION_TTL_MS)).reservation!;
     expect(next.epoch).toBe(2);
@@ -412,7 +429,7 @@ describe("T3-W17 anti-vacuity queue and reservation fences", () => {
   });
 
   it("routes a verified completed webhook through the reservation latch while intake is paused", async () => {
-    const d = makeDO();
+    const d = makeDO(); await bootstrap(d, "123");
     const held = (await d.instance.reserveRedriveCandidate("acme/repo", "123", T0)).reservation!;
     await d.instance.beginReservedEffect(held.repo, held.job_id, held.owner, held.token, held.epoch, held.path, held.effect_id);
     const response = await worker.fetch(await webhook(123, "completed-during-pause", "completed"), env(d, kv(), { AUTOSCALER_INTAKE_PAUSED: "1" }), ctx() as never);
@@ -447,7 +464,7 @@ describe("T3-W17 redrive gate and proof failure boundaries", () => {
   });
 
   it("does not recover an unresolved permit with no immutable proof", async () => {
-    const d = makeDO(); const instance = new ContainmentDO({ storage: d.storage }, { RUNNER_JOB_PATS: kv() } as never);
+    const d = makeDO(); await bootstrap(d, "1"); const instance = new ContainmentDO({ storage: d.storage }, { RUNNER_JOB_PATS: kv() } as never);
     await instance.append(event(1)); await instance.acquireLease("old", T0); await instance.claimNext("old", 1, T0);
     expect(await instance.beginEffect("evt-1", "old", 1, T0)).not.toBeNull();
     await instance.acquireLease("new", T0 + 120_000); await instance.claimNext("new", 2, T0 + 120_000);
@@ -489,7 +506,7 @@ describe("T3-W17 redrive gate and proof failure boundaries", () => {
   });
 
   it("does not retry a post-eligibility reservation after a redrive failure", async () => {
-    const d = makeDO();
+    const d = makeDO(); await bootstrap(d, "123");
     const store = kv({ "orphan:123": JSON.stringify({ repo: "acme/repo", installationId: "42", labels: ["corelink"], attempts: 1, firstRecordedMs: T0 - 1 }) });
     const failingDrive = vi.fn(async () => { throw new Error("crash after eligibility"); });
     await retryOrphanedSpawns(env(d, store, { AUTOSCALER_REDRIVE_PAUSED: "0" }), ctx() as never, T0, failingDrive, vi.fn(async () => null));
@@ -504,6 +521,7 @@ describe("T3-W17 redrive gate and proof failure boundaries", () => {
 describe("T3-W17 deterministic continuation crash seams", () => {
   async function queuedDrain() {
     const store = kv(); const d = makeDO({ RUNNER_JOB_PATS: store });
+    await bootstrap(d, "1");
     await d.instance.append(event(1));
     return { d, store };
   }
@@ -584,6 +602,7 @@ describe("T3-W17 deterministic continuation crash seams", () => {
 
   it("recovers a proven permit through the real drain without a second continuation entry", async () => {
     const store = kv(); const d = makeDO({ RUNNER_JOB_PATS: store });
+    await bootstrap(d, "1");
     await d.instance.append(event(1)); await d.instance.acquireLease("old", T0); await d.instance.claimNext("old", 1, T0);
     const permit = await d.instance.beginEffect("evt-1", "old", 1, T0); expect(permit).not.toBeNull();
     await writeDeliveredProof(store, { jobId: "1", effect_id: "containment:v1:evt-1", containment_event_id: "evt-1", effect_permit_id: permit!.permit_id });
@@ -598,6 +617,7 @@ describe("T3-W17 deterministic continuation crash seams", () => {
 
   it("clears drain_requested only on the final ACK and leaves a repeated empty drain empty", async () => {
     const store = kv(); const d = makeDO({ RUNNER_JOB_PATS: store }); const instance = d.instance;
+    await bootstrap(d, "1"); await bootstrap(d, "2");
     await instance.append(event(1)); await instance.append(event(2));
     expect(await instance.requestDrain()).toMatchObject({ drain_requested: true, backlog_count: 2 });
     await instance.acquireLease("owner", T0); await instance.claimNext("owner", 1, T0);

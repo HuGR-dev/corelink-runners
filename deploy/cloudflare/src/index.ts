@@ -839,6 +839,9 @@ export class ContainmentDO extends DurableObject<Env> {
     event: Omit<ContainmentEvent, "pause_seq" | "state" | "claim" | "effect_permit">,
     meta: ContainmentMeta,
   ): Promise<{ status: "appended" | "duplicate" | "conflict"; event?: ContainmentEvent }> {
+    // Validate the pair authority before looking at delivery identity. A
+    // duplicate must not bypass a missing/corrupt marker.
+    const index = await this.ensureJobIndex(s, event.repo, event.job_id);
     const key = containmentEventKey(event.event_id);
     const prior = (await s.get(key)) as ContainmentEvent | undefined;
     if (prior) return prior.body_sha256 === event.body_sha256 ? { status: "duplicate", event: prior } : { status: "conflict" };
@@ -861,7 +864,6 @@ export class ContainmentDO extends DurableObject<Env> {
       effect_permit: null,
     };
     const pause: ContainmentPause = { schema_version: 1, event_id: event.event_id, pause_seq: next.pause_seq };
-    const index = await this.ensureJobIndex(s, event.repo, event.job_id);
     if (index.active_count >= MAX_ACTIVE_INDEX_EVENTS) throw new Error("containment job index bound exceeded");
     await s.put(key, next);
     await s.put(containmentPauseKey(next.pause_seq), pause);
@@ -1210,7 +1212,8 @@ export class ContainmentDO extends DurableObject<Env> {
       if (!pause || pause.event_id !== event.event_id || pause.pause_seq !== event.pause_seq) return null;
       const indexKey = containmentJobIndexKey(event.repo, event.job_id);
       const index = await s.get(indexKey) as ContainmentJobIndex | undefined;
-      if (!index || !isValidJobIndex(index, event.repo, event.job_id) || !index.active_event_ids.includes(event.event_id)) return null;
+      const marker = await s.get(containmentJobIndexMarkerKey(event.repo, event.job_id));
+      if (!index || !isValidJobIndex(index, event.repo, event.job_id) || !isValidJobIndexMarker(marker, event.repo, event.job_id) || !index.active_event_ids.includes(event.event_id)) return null;
       const backlog = meta.backlog_count - 1;
       await s.delete(containmentEventKey(eventId));
       await s.delete(containmentPauseKey(event.pause_seq));
@@ -4701,6 +4704,8 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
           const bodySha = await sha256Hex(rawBytes);
           const delivery = trimAsciiWhitespace(request.headers.get("x-github-delivery") ?? "");
           const eventId = delivery || await sha256Hex(`containment:v1\n${jobId}\n${evt.action}\n${bodySha}`);
+          const bootstrapped = await authority.bootstrapContainedEventIndex(repo, jobId);
+          if (bootstrapped.status === "blocked" || bootstrapped.status === "invalid") return json({ error: "containment pair authority unavailable" }, 503);
           // One DO transaction observes backlog/switch state and either admits
           // continuation or appends. A fresh arrival cannot race a draining head.
           const result = await authority.admitQueued({ schema_version: 1, event_id: eventId, received_at_ms: Date.now(), body_sha256: bodySha, raw_payload: raw, action: "queued", job_id: jobId, repo, installation_id: installationId, labels: mintLabels, effect_id: `containment:v1:${eventId}` }, intake);
@@ -5374,6 +5379,8 @@ export async function redriveOrphanedJobs(
         redriveJobId = identity.job_id;
         let admitted: Awaited<ReturnType<ContainmentDO["reserveRedriveCandidate"]>>;
         try {
+          const bootstrapped = await reservationAuthority.bootstrapContainedEventIndex(identity.repo, identity.job_id);
+          if (bootstrapped.status === "blocked" || bootstrapped.status === "invalid") continue;
           admitted = await reservationAuthority.reserveRedriveCandidate(identity.repo, identity.job_id, now);
         } catch {
           continue; // authority uncertainty is fail-closed before any KV seam
@@ -5646,6 +5653,8 @@ export async function retryOrphanedSpawns(
       if (!identity) continue;
       let admitted: Awaited<ReturnType<ContainmentDO["reserveRedriveCandidate"]>>;
       try {
+        const bootstrapped = await reservationAuthority.bootstrapContainedEventIndex(identity.repo, identity.job_id);
+        if (bootstrapped.status === "blocked" || bootstrapped.status === "invalid") continue;
         admitted = await reservationAuthority.reserveRedriveCandidate(identity.repo, identity.job_id, now);
       } catch {
         continue; // authority uncertainty precedes every retry mutation
