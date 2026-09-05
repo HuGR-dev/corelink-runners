@@ -55,6 +55,7 @@ use crate::auth::{BearerPat, error_response};
 use crate::handlers::leases::{
     FinalizeOutcome, MintedLease, capacity_exhausted_503, finalize_admitted_lease,
 };
+use crate::pending_cleanup::{PendingRollbackPhase, rollback_pending_admission};
 
 /// Which admission discipline the acquire path uses when a tenant is over its
 /// concurrency cap. From `FABRIC_ADMISSION_MODE` (default [`Reject`]).
@@ -650,7 +651,7 @@ fn evict_waiter(queue: &AdmissionQueue, lease_id: &str) {
     }
 }
 
-/// Roll back a dispatched-but-UNCLAIMED lease so it leaks NOTHING — the seam the
+/// Roll back a dispatched-but-unowned lease so it leaks NOTHING — the seam the
 /// queued-admission rollback arms use whenever a lease that was reserved (and
 /// possibly already finalized to `Held`) must be undone because no client will
 /// ever own it (the dispatch↔timeout race, a teardown/dispatch failure).
@@ -676,20 +677,22 @@ fn evict_waiter(queue: &AdmissionQueue, lease_id: &str) {
 ///   (Pending+Held) concurrency set; then emit the matching `Crashed` slot event
 ///   so the meter balances the `Acquired(+1)` finalize already emitted (no stuck
 ///   occupancy). `remove` is NEVER used on a Held accounting-on lease.
-/// - **Pending** (finalize never reached `Held`, e.g. the waiter timed out
-///   between reserve and finalize): `remove` is correct and SUCCEEDS — the
-///   reservation rides a `pending` row, which `remove` legally drops, and no
-///   `Acquired` was ever emitted, so there is no slot event to balance.
+/// - **Pending**: claim it through the Pending cleanup fence. The phase records
+///   whether this caller knows provisioning never began; after provisioning an
+///   unconfirmed box retains the claimed reservation for retry. No `Acquired`
+///   was emitted, so there is no slot event to balance.
 /// - **Already gone / terminal / no row** (finalize itself failed and already
 ///   rolled back, or a concurrent path won): a no-op.
 ///
-/// Default-OFF (no compute reservation): a `Pending` rollback still goes through
-/// `remove` byte-identically, and a (rare) `Held` default-off lease terminalizes
-/// via `transition` exactly as the reaper would — neither path leaks.
-///
-/// The caller MUST have already `teardown_lease`d the box (this only reconciles
-/// the ledger + slot meter), mirroring the reaper's teardown-first discipline.
-async fn rollback_undispatched_lease(state: &AppState, tenant: &TenantId, lease_id: &str) {
+/// Default-OFF (no compute reservation) follows the same claim/confirmation
+/// fence; a (rare) `Held` default-off lease terminalizes via `transition` exactly
+/// as the reaper would.
+async fn rollback_undispatched_lease(
+    state: &AppState,
+    tenant: &TenantId,
+    lease_id: &str,
+    pending_phase: PendingRollbackPhase,
+) {
     // Read the current state WITHOUT holding the lock across the (later) slot
     // emit — `record_slot` locks the slot_meter and must never nest under the
     // ledger guard (the AppState lock-discipline invariant).
@@ -701,6 +704,10 @@ async fn rollback_undispatched_lease(state: &AppState, tenant: &TenantId, lease_
         // Finalize reached Held: terminalize so the §8 accrual folds once and the
         // reservation leaves Σ + the concurrency set; balance the slot meter.
         Some(state_held) if state_held.is_held() => {
+            // This remains the ordinary Held teardown seam. Revoke before the
+            // terminal transition may forget local PAT metadata.
+            state.teardown_lease(lease_id).await;
+            state.revoke_pat_for(lease_id).await;
             let now_ms = state.clock.now_ms();
             let crashed_ok = {
                 let ledger = &*state.ledger;
@@ -720,14 +727,15 @@ async fn rollback_undispatched_lease(state: &AppState, tenant: &TenantId, lease_
             // (e.g. a late close/reaper) — the slot is then already accounted for;
             // we must NOT double-emit. Nothing more to do.
         }
-        // Still Pending (or, default-off, any non-Held row `remove` accepts):
-        // `remove` is the correct Pending-rollback seam and succeeds. No Acquired
-        // was emitted, so there is no slot event to balance.
-        Some(_) => {
-            let _ = state.ledger.remove(lease_id);
+        // A named Pending uses the same claim/confirm/finish fence as stale
+        // cleanup. In particular, this never tears down after a sweep has
+        // claimed the row and thereby races a Held transition.
+        Some(LeaseState::Pending) => {
+            let _ = rollback_pending_admission(state, lease_id, pending_phase).await;
+            state.revoke_pat_for(lease_id).await;
         }
-        // No row: already rolled back / never inserted — a no-op.
-        None => {}
+        // No row or a terminal state: already rolled back / never inserted.
+        _ => {}
     }
 }
 
@@ -1082,15 +1090,21 @@ pub async fn run_admission_tick(state: &AppState, now_ms: u64) -> usize {
             //
             // FIX-E: route through `rollback_undispatched_lease`, NOT a bare
             // `remove`. Here finalize never ran so the lease is still `Pending`
-            // and the helper's `remove` branch fires (no box was provisioned, so
-            // no teardown is owed); but using the shared seam keeps EVERY
+            // and the helper's `BeforeProvision` Pending branch conditionally
+            // finishes without provider I/O; using the shared seam keeps EVERY
             // undo-path uniform and correct should the state ever be Held.
             let tenant = {
                 let ledger = &*state.ledger;
                 ledger.get(&lease_id).ok().flatten().map(|r| r.tenant)
             };
             if let Some(tenant) = tenant {
-                rollback_undispatched_lease(state, &tenant, &lease_id).await;
+                rollback_undispatched_lease(
+                    state,
+                    &tenant,
+                    &lease_id,
+                    PendingRollbackPhase::BeforeProvision,
+                )
+                .await;
             }
             continue;
         };
@@ -1198,23 +1212,21 @@ pub async fn run_admission_tick(state: &AppState, now_ms: u64) -> usize {
                         // phantom Held lease — reservation stuck in Σ, a
                         // concurrency slot pinned, and an unbalanced
                         // `Acquired(+1)` in the slot meter — until the deadline
-                        // reaper swept it. Tear the box down first (no lock),
-                        // then `rollback_undispatched_lease` terminalizes the
+                        // reaper swept it. `rollback_undispatched_lease`
+                        // preserves the Held teardown then terminalizes the
                         // Held lease via `transition(Crashed)` (folding the §8
                         // accrual once, releasing the reservation + the slot)
                         // and emits the balancing `Crashed` slot event — falling
-                        // back to `remove` only when finalize left the lease
-                        // `Pending` (e.g. it 503'd and already rolled itself
-                        // back).
-                        state.teardown_lease(&lease_id).await;
-                        // A7b: revoke any CAS PAT minted for this lease BEFORE
-                        // `rollback_undispatched_lease` (which calls `forget_lease`,
-                        // dropping the `pat_id` mapping). Mirrors the reaper's
-                        // revoke-before-forget ordering. Without this, a lease whose
-                        // dispatch lost the dispatch-vs-timeout race keeps its minted
-                        // PAT alive until D-9 self-expiry. No-op when none was minted.
-                        state.revoke_pat_for(&lease_id).await;
-                        rollback_undispatched_lease(state, &tenant, &lease_id).await;
+                        // through the named Pending cleanup claim if finalize
+                        // left a Pending row. This post-finalize path must treat
+                        // a partial spawn as uncertain.
+                        rollback_undispatched_lease(
+                            state,
+                            &tenant,
+                            &lease_id,
+                            PendingRollbackPhase::AfterProvision,
+                        )
+                        .await;
                         // NOT genuinely dispatched — excluded from wait stats.
                     }
                 }
@@ -2535,6 +2547,23 @@ mod queue_tests {
             fn remove(&self, lease_id: &str) -> anyhow::Result<bool> {
                 self.inner.remove(lease_id)
             }
+            fn claim_stale_pending_cleanup(
+                &self,
+                now_ms: u64,
+                max_age_ms: u64,
+            ) -> anyhow::Result<Vec<corelink_fabric::LeaseRecord>> {
+                self.inner.claim_stale_pending_cleanup(now_ms, max_age_ms)
+            }
+            fn claim_pending_cleanup(
+                &self,
+                lease_id: &str,
+                now_ms: u64,
+            ) -> anyhow::Result<Option<corelink_fabric::LeaseRecord>> {
+                self.inner.claim_pending_cleanup(lease_id, now_ms)
+            }
+            fn finish_pending_cleanup(&self, lease_id: &str) -> anyhow::Result<bool> {
+                self.inner.finish_pending_cleanup(lease_id)
+            }
         }
 
         let now = 10_000_000u64;
@@ -3197,6 +3226,57 @@ mod queue_tests {
             active_count(&ledger, &tid("alpha")),
             1,
             "exactly the one fresh lease is active (the phantom is gone, not double-counted)"
+        );
+    }
+
+    /// A dropped waiter can encounter a Pending already claimed by the stale
+    /// sweep. Its post-finalize rollback must reuse that fence, never issue the
+    /// old general teardown before attempting the named cleanup claim.
+    #[tokio::test]
+    async fn dropped_waiter_pending_reuses_stale_cleanup_claim() {
+        let now = 12_000_000u64;
+        let (state, ledger) = queue_state(1, now, Duration::from_secs(1));
+        let lease_id = "dropped-pending-claimed";
+        ledger
+            .try_admit(
+                LeaseRecord {
+                    lease_id: lease_id.to_string(),
+                    tenant: tid("alpha"),
+                    state: LeaseState::Pending,
+                    box_ref: format!("box:{lease_id}"),
+                    created_at_ms: 0,
+                    updated_at_ms: 0,
+                    deadline_ms: Some(now + 60_000),
+                    billing_acquired_at_ms: None,
+                },
+                1,
+            )
+            .unwrap();
+        assert!(
+            ledger
+                .claim_stale_pending_cleanup(now, 1)
+                .unwrap()
+                .iter()
+                .any(|row| row.lease_id == lease_id),
+            "model the stale sweep claiming the Pending before the dropped-waiter arm"
+        );
+
+        // This is the `waker.send`-failure arm's post-finalize phase. The
+        // default NoBox provisioner is explicit known-no-box evidence, so its
+        // conditional finish may release the claim without a general teardown.
+        rollback_undispatched_lease(
+            &state,
+            &tid("alpha"),
+            lease_id,
+            PendingRollbackPhase::AfterProvision,
+        )
+        .await;
+
+        assert!(ledger.get(lease_id).unwrap().is_none());
+        assert_eq!(
+            active_count(&ledger, &tid("alpha")),
+            0,
+            "conditional finish frees the claimed Pending slot exactly once"
         );
     }
 

@@ -15,8 +15,8 @@ use corelink_cloud_engine::{
 };
 use corelink_fabric::{InMemoryLedger, LeaseLedger, TenantId, TenantPlan};
 use corelink_fabric_server::{
-    AppState, BoxProvisioner, BoxRegistry, EngineLeasedExec, LeasedExec, NoBoxProvisioner,
-    NorthflankBoxProvisioner, StaticPlans, StaticTokenStore, SystemClock,
+    AppState, BoxProvisioner, BoxRegistry, CleanupTeardown, EngineLeasedExec, LeasedExec,
+    NoBoxProvisioner, NorthflankBoxProvisioner, StaticPlans, StaticTokenStore, SystemClock,
 };
 use corelink_runner::isolation::RunningContainer;
 use corelink_runner::lease::ContainerSpec;
@@ -428,6 +428,11 @@ impl BoxProvisioner for FailingProvisioner {
     fn teardown(&self, _lease_id: &str) -> Result<()> {
         Ok(())
     }
+    fn teardown_pending(&self, lease_id: &str) -> CleanupTeardown {
+        let _ = self.teardown(lease_id);
+        // Provision fails before this fixture creates a provider object.
+        CleanupTeardown::ConfirmedDestroyed
+    }
 }
 
 /// Provisioner that records which lease ids teardown was called with.
@@ -462,6 +467,12 @@ impl BoxProvisioner for RecordingProvisioner {
             .unwrap()
             .push(lease_id.to_string());
         Ok(())
+    }
+    fn teardown_pending(&self, lease_id: &str) -> CleanupTeardown {
+        let _ = self.teardown(lease_id);
+        // This fake is the test's explicit authoritative known-no-box/cleanup
+        // source; generic teardown success is not used by production code.
+        CleanupTeardown::ConfirmedDestroyed
     }
 }
 
