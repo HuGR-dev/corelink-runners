@@ -20,18 +20,30 @@
 //! `IntrospectHttp` trait seam is the injection point (a canned `FakeIntrospect`).
 
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Result as AnyResult;
+use axum::body::Body;
+use axum::http::{header, Request, StatusCode};
 use corelink_fabric::{
-    CapDecision, CapGate, InMemoryLedger, LeaseLedger, LeaseRecord, LeaseState, RateWindow,
-    TenantId, TenantPlan,
+    ledger::{AdmitOutcome, ComputeGate},
+    AdmitLedger, CapDecision, CapGate, InMemoryLedger, LeaseLedger, LeaseRecord, LeaseState,
+    RateWindow, TenantId, TenantPlan,
 };
+use corelink_fabric_api::{paths, AcquireRequest};
 use corelink_fabric_server::app::{PlanSource, PlanSourceError};
 use corelink_fabric_server::corelink_auth::{
     CoreLinkAuthConfig, IntrospectHttp, IntrospectResponse,
 };
 use corelink_fabric_server::corelink_plans::CoreLinkPlanStore;
+use corelink_fabric_server::{
+    app, AppState, BoxProvisioner, ProbeStatus, StaticPlans, StaticTokenStore, SystemClock,
+};
+use corelink_runner::lease::ContainerSpec;
 use corelink_runners_contracts::RunnerState;
+use tower::ServiceExt;
 
 const NOW_MS: u64 = 1_717_000_000_000;
 
@@ -307,4 +319,143 @@ fn arm3_missing_valid_field_is_unreachable() {
         resolve(FakeIntrospect::ok(200, r#"{"tenant_id":"x"}"#)),
         Err(PlanSourceError::Unreachable),
     );
+}
+
+struct CountingProvisioner(Arc<AtomicUsize>);
+impl BoxProvisioner for CountingProvisioner {
+    fn provision(&self, _id: &str, _spec: &ContainerSpec) -> AnyResult<()> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+    fn teardown(&self, _id: &str) -> AnyResult<()> {
+        Ok(())
+    }
+    fn probe(&self, _id: &str) -> AnyResult<ProbeStatus> {
+        Ok(ProbeStatus::Unbound)
+    }
+}
+
+struct FailingAdmit;
+impl AdmitLedger for FailingAdmit {
+    fn try_admit(&self, _rec: LeaseRecord, _cap: u32) -> AnyResult<bool> {
+        Err(anyhow::anyhow!("ledger unavailable"))
+    }
+    fn try_admit_with_compute(
+        &self,
+        _rec: LeaseRecord,
+        _cap: u32,
+        _gate: Option<ComputeGate>,
+    ) -> AnyResult<AdmitOutcome> {
+        Err(anyhow::anyhow!("ledger unavailable"))
+    }
+}
+
+fn acquire_req(token: &str, expiry_ms: u64) -> Request<Body> {
+    let body = AcquireRequest {
+        expiry_ms,
+        ..AcquireRequest {
+            repo_full_name: None,
+            installation_id: None,
+            image_digest:
+                "alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
+                    .into(),
+            net_policy: "isolated".into(),
+            tmp_root: "/work/tmp".into(),
+            expiry_ms: 60_000,
+            runner: None,
+            toolchain_digest: None,
+            agent: None,
+        }
+    };
+    Request::builder()
+        .method("POST")
+        .uri(paths::LEASES)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn t4w4_ceiling_429_preserves_held_and_has_zero_new_side_effects() {
+    let ledger = Arc::new(InMemoryLedger::new());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let plan = TenantPlan {
+        tenant: tenant(),
+        max_concurrency: 8,
+        rate_ceiling_per_min: 10_000,
+        repo_allowlist: vec![],
+    };
+    let plans = StaticPlans::new([plan]).with_ceiling_vcpu_ms(1_000);
+    let mut state = AppState::new(ledger.clone(), Arc::new(plans), Arc::new(SystemClock))
+        .with_runner_vcpu(Some(1));
+    state.provisioner = Arc::new(CountingProvisioner(Arc::clone(&calls)));
+    let router = app(
+        Arc::new(StaticTokenStore::new([("pat-acme".into(), tenant())])),
+        state,
+    );
+    let first = router
+        .clone()
+        .oneshot(acquire_req("pat-acme", 1_000))
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let first_body = axum::body::to_bytes(first.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let lease_id = serde_json::from_slice::<serde_json::Value>(&first_body).unwrap()["lease"]
+        ["lease_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let second = router
+        .oneshot(acquire_req("pat-acme", 1_000))
+        .await
+        .unwrap();
+    let second_status = second.status();
+    let second_body = axum::body::to_bytes(second.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(second_status, StatusCode::TOO_MANY_REQUESTS);
+    assert!(String::from_utf8_lossy(&second_body).contains("monthly compute ceiling"));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        ledger.get(&lease_id).unwrap().unwrap().state,
+        LeaseState::Wire(RunnerState::Held)
+    );
+}
+
+#[tokio::test]
+async fn t4w4_ledger_error_is_503_before_provision_and_optional_wall_stays_off() {
+    let tenant = tenant();
+    let plans = StaticPlans::new([TenantPlan {
+        tenant: tenant.clone(),
+        max_concurrency: 7,
+        rate_ceiling_per_min: 10_000,
+        repo_allowlist: vec![],
+    }]);
+    assert_eq!(
+        plans.tenant_ceiling_vcpu_ms(&tenant),
+        0,
+        "absent max_vcpu_h is legacy-unmetered"
+    );
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut state = AppState::new(
+        Arc::new(InMemoryLedger::new()),
+        Arc::new(plans),
+        Arc::new(SystemClock),
+    )
+    .with_admit(Arc::new(FailingAdmit))
+    .with_runner_vcpu(Some(1));
+    state.provisioner = Arc::new(CountingProvisioner(Arc::clone(&calls)));
+    let router = app(
+        Arc::new(StaticTokenStore::new([("pat-acme".into(), tenant)])),
+        state,
+    );
+    let response = router
+        .oneshot(acquire_req("pat-acme", 1_000))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
