@@ -208,3 +208,76 @@ fn claimed_pending_refuses_every_normal_mutator_for_accounting_off_and_on() {
     assert!(ledger.finish_pending_cleanup(&on).unwrap());
     assert!(ledger.get_envelope_checkpoint(&on).unwrap().is_none());
 }
+
+#[test]
+fn named_pending_claim_is_exact_and_never_claims_held_for_accounting_off_or_on() {
+    let Some(url) = db_url() else {
+        eprintln!("pending_cleanup_pg named claim: TEST_DATABASE_URL unset — UNRUN");
+        return;
+    };
+    let (_rt, ledger) = connect(&url);
+    let tenant = TenantId::new(nonce("named-tenant")).unwrap();
+
+    let off = nonce("named-off");
+    let untouched = nonce("named-untouched");
+    assert!(ledger.try_admit(pending(&off, &tenant, 100), 10).unwrap());
+    assert!(
+        ledger
+            .try_admit(pending(&untouched, &tenant, 100), 10)
+            .unwrap()
+    );
+    assert_eq!(
+        ledger
+            .claim_pending_cleanup(&off, 1)
+            .unwrap()
+            .unwrap()
+            .lease_id,
+        off,
+        "named rollback claims its fresh Pending without using a fake stale cutoff"
+    );
+    assert!(matches!(
+        ledger.get(&untouched).unwrap().unwrap().state,
+        LeaseState::Pending
+    ));
+    assert_eq!(
+        ledger
+            .claim_pending_cleanup(&off, 2)
+            .unwrap()
+            .unwrap()
+            .lease_id,
+        off,
+        "the named claim is returned for rollback retry"
+    );
+    assert!(ledger.finish_pending_cleanup(&off).unwrap());
+
+    let held = nonce("named-held");
+    assert!(ledger.try_admit(pending(&held, &tenant, 100), 10).unwrap());
+    ledger.transition(&held, RunnerState::Held, 101).unwrap();
+    assert!(ledger.claim_pending_cleanup(&held, 102).unwrap().is_none());
+    assert!(ledger.get(&held).unwrap().unwrap().state.is_held());
+
+    let on = nonce("named-on");
+    let compute = ComputeGate {
+        period_key: 202609,
+        ceiling_vcpu_ms: 100,
+        box_vcpu_count: 1,
+        new_reserved_vcpu_ms: 10,
+    };
+    assert_eq!(
+        ledger
+            .try_admit_with_compute(pending(&on, &tenant, 100), 10, Some(compute))
+            .unwrap(),
+        AdmitOutcome::Admitted
+    );
+    assert_eq!(
+        ledger
+            .claim_pending_cleanup(&on, 1)
+            .unwrap()
+            .unwrap()
+            .lease_id,
+        on,
+        "accounting-on Pending uses the same named row/advisory fence"
+    );
+    assert!(ledger.transition(&on, RunnerState::Held, 102).is_err());
+    assert!(ledger.finish_pending_cleanup(&on).unwrap());
+}
