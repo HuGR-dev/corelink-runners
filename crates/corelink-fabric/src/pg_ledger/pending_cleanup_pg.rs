@@ -13,6 +13,13 @@ use tokio_postgres::Transaction;
 const RECORD_COLUMNS: &str = "lease_id, tenant, state::text AS state, box_ref, \
     created_at_ms, updated_at_ms, deadline_ms, billing_acquired_at_ms";
 
+/// The stale sweep has an age predicate; acquisition rollback claims exactly
+/// one named row and deliberately bypasses only that predicate.
+enum ClaimPredicate {
+    StrictlyOlderThan(i64),
+    NamedPending,
+}
+
 /// Strict stale-age cutoff, representable by PostgreSQL's `bigint`.
 pub(crate) fn strict_cutoff_ms(now_ms: u64, max_age_ms: u64) -> anyhow::Result<i64> {
     let now_ms = checked_epoch_ms(now_ms, "now_ms")?;
@@ -55,11 +62,38 @@ pub(crate) fn claim_stale_pending_cleanup(
 
         let mut claimed = Vec::with_capacity(ids.len());
         for lease_id in ids {
-            if let Some(record) = claim_one(ledger, &lease_id, cutoff, claimed_at_ms).await? {
+            if let Some(record) = claim_one(
+                ledger,
+                &lease_id,
+                ClaimPredicate::StrictlyOlderThan(cutoff),
+                claimed_at_ms,
+            )
+            .await?
+            {
                 claimed.push(record);
             }
         }
         Ok(claimed)
+    })
+}
+
+/// Claim exactly one Pending lease for acquisition rollback, regardless of age.
+/// An existing claim is returned for retry; non-Pending or absent rows are never
+/// changed or returned.
+pub(crate) fn claim_pending_cleanup(
+    ledger: &PgLedger,
+    lease_id: &str,
+    now_ms: u64,
+) -> anyhow::Result<Option<LeaseRecord>> {
+    let claimed_at_ms = checked_epoch_ms(now_ms, "now_ms")?;
+    ledger.block_on(async {
+        claim_one(
+            ledger,
+            lease_id,
+            ClaimPredicate::NamedPending,
+            claimed_at_ms,
+        )
+        .await
     })
 }
 
@@ -226,7 +260,7 @@ pub(crate) fn finish_pending_cleanup(ledger: &PgLedger, lease_id: &str) -> anyho
 async fn claim_one(
     ledger: &PgLedger,
     lease_id: &str,
-    cutoff: i64,
+    predicate: ClaimPredicate,
     claimed_at_ms: i64,
 ) -> anyhow::Result<Option<LeaseRecord>> {
     let mut client = ledger.pool.get().await?;
@@ -272,14 +306,16 @@ async fn claim_one(
         )
         .await?
         .is_some();
-    let created_at_ms = i64::try_from(record.created_at_ms).map_err(|_| {
-        anyhow::anyhow!(
-            "lease {lease_id} created_at_ms exceeds PostgreSQL bigint range (corrupt row)"
-        )
-    })?;
-    if !already_claimed && created_at_ms >= cutoff {
-        txn.rollback().await.ok();
-        return Ok(None);
+    if !already_claimed && let ClaimPredicate::StrictlyOlderThan(cutoff) = predicate {
+        let created_at_ms = i64::try_from(record.created_at_ms).map_err(|_| {
+            anyhow::anyhow!(
+                "lease {lease_id} created_at_ms exceeds PostgreSQL bigint range (corrupt row)"
+            )
+        })?;
+        if created_at_ms >= cutoff {
+            txn.rollback().await.ok();
+            return Ok(None);
+        }
     }
     if !already_claimed {
         txn.execute(

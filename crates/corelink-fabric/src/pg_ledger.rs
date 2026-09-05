@@ -1002,6 +1002,14 @@ impl LeaseLedger for PgLedger {
         pending_cleanup_pg::claim_stale_pending_cleanup(self, now_ms, max_age_ms)
     }
 
+    fn claim_pending_cleanup(
+        &self,
+        lease_id: &str,
+        now_ms: u64,
+    ) -> anyhow::Result<Option<LeaseRecord>> {
+        pending_cleanup_pg::claim_pending_cleanup(self, lease_id, now_ms)
+    }
+
     fn finish_pending_cleanup(&self, lease_id: &str) -> anyhow::Result<bool> {
         pending_cleanup_pg::finish_pending_cleanup(self, lease_id)
     }
