@@ -1550,7 +1550,19 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
         fabric_public_base_url_present,
     )?;
     let state = match mint {
-        Some(mint) => state.with_cas_pat_mint(mint),
+        Some(mint) => {
+            let url = std::env::var(crate::runner_cas_mint::CAS_RUNNER_MINT_URL_ENV)
+                .expect("mint URL was present while arming the mint")
+                .trim()
+                .to_owned();
+            let auth = std::env::var(crate::runner_cas_mint::CAS_RUNNER_MINT_AUTH_KEY_ENV)
+                .expect("mint auth key was present while arming the mint")
+                .trim()
+                .to_owned();
+            state.with_cas_pat_mint(mint).with_mint_readiness(Some(
+                crate::mint_readiness::MintReadiness::production(url, auth),
+            ))
+        }
         None => state,
     };
 

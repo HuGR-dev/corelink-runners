@@ -764,6 +764,12 @@ pub async fn run_admission_tick(state: &AppState, now_ms: u64) -> usize {
     let Some(queue) = state.admission_queue.as_ref() else {
         return 0;
     };
+    // Queued admission observes the same readiness fence before scheduler
+    // selection, reservation, or finalization. Existing Held leases remain
+    // usable by close/reaper paths.
+    if !crate::mint_readiness::MintReadiness::acquire_guard(state.mint_readiness.as_ref()).await {
+        return 0;
+    }
 
     // ── 1. Tick the scheduler to SELECT the fair dispatch order — but reserve
     // NOTHING under the scheduler lock. `cap_check` is the cheap under-cap

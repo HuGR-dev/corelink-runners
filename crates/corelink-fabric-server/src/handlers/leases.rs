@@ -270,6 +270,13 @@ pub(crate) async fn acquire(
     headers: axum::http::HeaderMap,
     Json(req): Json<AcquireRequest>,
 ) -> Response {
+    // An armed mint must prove dispatcher reachability before any action-cache
+    // lookup, cap resolution, slot reservation, provider call, or JIT exchange.
+    // The readiness task is independent of this request, so cancellation cannot
+    // cancel the single-flight probe or start a duplicate.
+    if !crate::mint_readiness::MintReadiness::acquire_guard(state.mint_readiness.as_ref()).await {
+        return fail_closed("runner mint is not ready");
+    }
     let now_ms = state.clock.now_ms();
     // Multi-instance routing: the proxy Worker assigns this acquire a target shard
     // via the frozen `X-Fabricd-*` headers, so the lease-id we mint hashes to THIS
