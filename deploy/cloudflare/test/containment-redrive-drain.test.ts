@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("@cloudflare/containers", () => ({ Container: class {}, getContainer: vi.fn(() => ({ startWithEnv: vi.fn(async () => {}), teardown: vi.fn(async () => {}) })) }));
 
 import { ContainmentDO, REDRIVE_RESERVATION_TTL_MS, redriveOrphanedJobs, retryOrphanedSpawns, runContainmentDrain } from "../src/index";
-import { authorityProxy, bootstrap, ctx, digest, env, envWithAuthority, event, makeDO, kv, recoveryFixture, reserveKey, settle, T0, writeDeliveredProof } from "./containment-redrive-test-helpers";
+import { authorityProxy, bootstrap, ctx, digest, env, envWithAuthority, event, makeDO, kv, providerReceipt, recoveryFixture, reserveKey, settle, T0, writeDeliveredProof } from "./containment-redrive-test-helpers";
 
 beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(T0); });
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
@@ -102,14 +102,17 @@ describe("T3-W17 deterministic continuation crash seams", () => {
     }
     {
       const { d, store } = await queuedDrain();
+      const drive = vi.fn(async () => providerReceipt({ jobId: "1", repo: "acme/repo" }));
       const authority = authorityProxy(d.instance, { beginEffect: async () => { throw new Error("after claim before permit"); } });
-      await expect(runContainmentDrain(envWithAuthority(d, store, authority))).rejects.toThrow("after claim before permit");
+      await runContainmentDrain(envWithAuthority(d, store, authority), { driveSpawn: drive });
       expect((await d.instance.getEvent("evt-1"))).toMatchObject({ state: "CLAIMED", effect_permit: null });
+      expect([...d.storage.map.values()]).toContainEqual(expect.objectContaining({ path: "drain", state: "UNKNOWN", permit_id: null, effect_started: false }));
+      expect(drive).not.toHaveBeenCalled();
     }
     {
       const { d, store } = await queuedDrain();
-      await expect(runContainmentDrain(env(d, store), { claimSpawn: async () => { throw new Error("after permit"); } })).rejects.toThrow("after permit");
-      expect((await d.instance.getEvent("evt-1"))).toMatchObject({ state: "CLAIMED", effect_permit: expect.any(Object) });
+      await runContainmentDrain(env(d, store), { claimSpawn: async () => { throw new Error("after permit"); } });
+      expect((await d.instance.getEvent("evt-1"))).toMatchObject({ state: "CLAIMED", effect_permit: null });
       expect(store.map.has("spawn:1")).toBe(false);
     }
     {
@@ -119,6 +122,7 @@ describe("T3-W17 deterministic continuation crash seams", () => {
       await runContainmentDrain(env(d, store), { claimSpawn: claim, bindContainmentSpawnClaim: bind });
       expect(claim).toHaveBeenCalledTimes(1); expect(bind).toHaveBeenCalledTimes(1); expect(store.map.get("spawn:1")).toBe("123");
       expect((await d.instance.getEvent("evt-1"))?.state).toBe("CLAIMED");
+      expect([...d.storage.map.values()]).toContainEqual(expect.objectContaining({ path: "drain", state: "DRIVING" }));
     }
     {
       const { d, store } = await queuedDrain();
@@ -126,21 +130,24 @@ describe("T3-W17 deterministic continuation crash seams", () => {
       await runContainmentDrain(env(d, store), { claimSpawn: async () => true, bindContainmentSpawnClaim: bind, driveSpawn: drive });
       expect(bind).toHaveBeenCalledTimes(1); expect(drive).toHaveBeenCalledTimes(1);
       expect((await d.instance.getEvent("evt-1"))?.state).toBe("CLAIMED");
+      expect([...d.storage.map.values()]).toContainEqual(expect.objectContaining({ path: "drain", state: "DRIVING" }));
     }
     {
       const { d, store } = await queuedDrain();
       const authority = authorityProxy(d.instance, { markEffectCommitted: async () => { throw new Error("after drive before commit"); } });
-      const drive = vi.fn(async () => {});
-      await expect(runContainmentDrain(envWithAuthority(d, store, authority), { claimSpawn: async () => true, bindContainmentSpawnClaim: async () => {}, driveSpawn: drive })).rejects.toThrow("after drive before commit");
+      const drive = vi.fn(async (_env: unknown, opts: { jobId: string; repo: string }) => providerReceipt(opts));
+      await runContainmentDrain(envWithAuthority(d, store, authority), { claimSpawn: async () => true, bindContainmentSpawnClaim: async () => {}, driveSpawn: drive });
       expect(drive).toHaveBeenCalledTimes(1); expect((await d.instance.getEvent("evt-1"))?.state).toBe("CLAIMED");
+      expect([...d.storage.map.values()]).toContainEqual(expect.objectContaining({ path: "drain", state: "COMMITTED" }));
     }
     {
       const { d, store } = await queuedDrain();
       const authority = authorityProxy(d.instance, { acknowledge: async () => { throw new Error("after commit before ack"); } });
       const drive = vi.fn(async (_env: unknown, opts: { jobId: string; effect_id?: string; containment_event_id?: string; effect_permit_id?: string }) => {
         await writeDeliveredProof(store, { jobId: opts.jobId, effect_id: opts.effect_id!, containment_event_id: opts.containment_event_id!, effect_permit_id: opts.effect_permit_id! });
+        return providerReceipt({ jobId: opts.jobId, repo: "acme/repo" });
       });
-      await expect(runContainmentDrain(envWithAuthority(d, store, authority), { claimSpawn: async () => true, bindContainmentSpawnClaim: async () => {}, driveSpawn: drive as never })).rejects.toThrow("after commit before ack");
+      await runContainmentDrain(envWithAuthority(d, store, authority), { claimSpawn: async () => true, bindContainmentSpawnClaim: async () => {}, driveSpawn: drive as never });
       expect(drive).toHaveBeenCalledTimes(1); expect((await d.instance.getEvent("evt-1"))?.state).toBe("EFFECT_COMMITTED");
       expect(await d.instance.snapshot()).toMatchObject({ drain_cursor: 0, backlog_count: 1 });
     }
@@ -151,11 +158,11 @@ describe("T3-W17 deterministic continuation crash seams", () => {
     let releaseOld: (() => void) | undefined; let signalEntered: (() => void) | undefined;
     const oldGate = new Promise<void>((resolve) => { releaseOld = resolve; });
     const entered = new Promise<void>((resolve) => { signalEntered = resolve; });
-    let enteredOld = 0; const enteredNew = vi.fn(async () => {});
+    let enteredOld = 0; const enteredNew = vi.fn(async (_env: unknown, opts: { jobId: string; repo: string }) => providerReceipt(opts));
     const oldRun = runContainmentDrain(env(d, store), {
       claimSpawn: async () => true,
       bindContainmentSpawnClaim: async () => {},
-      driveSpawn: async () => { enteredOld++; signalEntered!(); await oldGate; },
+      driveSpawn: async (_env, opts) => { enteredOld++; signalEntered!(); await oldGate; return providerReceipt(opts); },
     });
     await entered;
     expect(enteredOld).toBe(1);

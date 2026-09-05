@@ -11,6 +11,7 @@ class TxnStorage {
   async put(key: string, value: unknown): Promise<void> { this.map.set(key, clone(value)); }
   async delete(key: string): Promise<void> { this.map.delete(key); }
   async list<T>(opts: { prefix?: string } = {}): Promise<Map<string, T>> { return new Map([...this.map].filter(([key]) => key.startsWith(opts.prefix ?? "")).map(([key, value]) => [key, clone(value) as T])); }
+  async transaction<T>(fn: (storage: TxnStorage) => Promise<T>): Promise<T> { return fn(this); }
 }
 export class FakeStorage {
   readonly map = new Map<string, unknown>();
@@ -31,7 +32,7 @@ export class FakeStorage {
 }
 
 export function ns<T>(instance: T, name = "global") { return { idFromName: vi.fn(() => name), get: vi.fn(() => instance) }; }
-export function makeDO(runtimeEnv: Record<string, unknown> = {}) { const storage = new FakeStorage(); const instance = new ContainmentDO({ storage } as never, runtimeEnv as never); return { storage, instance, binding: ns(instance) }; }
+export function makeDO(runtimeEnv: Record<string, unknown> = {}) { const storage = new FakeStorage(); const instance = new ContainmentDO({ storage } as never, runtimeEnv as never); return { storage, instance, binding: ns(instance), runtimeEnv }; }
 export async function bootstrap(d: ReturnType<typeof makeDO>, job = "1", repo = "acme/repo") {
   const result = await d.instance.bootstrapContainedEventIndex(repo, job);
   expect(result).toMatchObject({ status: "bootstrapped" });
@@ -47,12 +48,16 @@ export function event(n: number, overrides: Partial<ContainmentEvent> = {}): Omi
 export function ctx() { const tasks: Promise<unknown>[] = []; return { tasks, waitUntil(p: Promise<unknown>) { tasks.push(Promise.resolve(p)); }, passThroughOnException() {} }; }
 export async function settle(c: ReturnType<typeof ctx>) { for (let i = 0; i < 8 && c.tasks.length; i++) await Promise.all(c.tasks.splice(0)); }
 export function env(d: ReturnType<typeof makeDO>, store = kv(), extra: Record<string, unknown> = {}) {
+  d.runtimeEnv.RUNNER_JOB_PATS = store;
   return {
     GITHUB_WEBHOOK_SECRET: "secret", GITHUB_MINT_TOKEN: "mint", RUNNER_JOB_PATS: store, CONTAINMENT: d.binding,
     REPO_INSTALLATION_MAP: JSON.stringify({ "acme/repo": "42" }), RUNNER_CONTAINER: {}, CHECK_HOST_CONTAINER: {},
     CONCURRENCY_SLOTS: ns({ acquire: vi.fn(async () => ({ admitted: true })), release: vi.fn(async () => {}) }),
     CRED_STASH: ns({ stash: vi.fn(async () => "ticket"), wipe: vi.fn(async () => {}) }), ...extra,
   } as never;
+}
+export function providerReceipt(opts: { jobId: string; repo: string }) {
+  return { resource_id: `job:${opts.repo}/${opts.jobId}`, receipt_id: `receipt-${opts.jobId}`, provider_signature: "test-signature" };
 }
 export function envWithAuthority(d: ReturnType<typeof makeDO>, store: ReturnType<typeof kv>, authority: unknown, extra: Record<string, unknown> = {}) {
   return { ...env(d, store, extra), CONTAINMENT: ns(authority) } as never;

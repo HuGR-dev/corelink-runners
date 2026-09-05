@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { ContainmentEffectLedger, type OwnerTuple } from "../src/containment_effect_ledger";
-import { containmentSpawnActiveKey, containmentSpawnAttemptKey, intakeOwnerTuple, redriveOwnerTuple, runCanonicalEffect } from "../src/containment_effect_route";
+import { containmentSpawnActiveKey, containmentSpawnAttemptKey, drainOwnerTuple, intakeOwnerTuple, redriveOwnerTuple, runCanonicalEffect } from "../src/containment_effect_route";
 
 const clone = <T>(value: T): T => value === undefined ? value : JSON.parse(JSON.stringify(value)) as T;
 class Storage {
@@ -20,6 +20,7 @@ function make() {
 function tuple(effect = "containment:v1:intake/acme/repo/123"): OwnerTuple {
   return { repo: "acme/repo", job_id: "123", path: "intake", event_id: "delivery-1", reservation_epoch: null, effect_id: effect, owner: "owner-a", token: "token-a", lease_epoch: 1, drain_owner: null, drain_lease_epoch: null, caller_nonce: "0123456789abcdef0123456789abcdef" };
 }
+function drainTuple(base = tuple()): OwnerTuple { return { ...base, path: "drain", drain_owner: base.owner, drain_lease_epoch: base.lease_epoch }; }
 function legacyPermit(t: OwnerTuple, permitId: string) { return { permit_id: permitId, issued_to_owner: t.owner, issued_to_epoch: t.lease_epoch }; }
 function deps(ledger: ContainmentEffectLedger, t: OwnerTuple) {
   let claimed = false;
@@ -113,14 +114,14 @@ describe("canonical containment effect route", () => {
 
   it("orders redrive release, claim, reservation eligibility, then drive", async () => {
     const events: string[] = []; const { ledger } = make(); const t = await redriveOwnerTuple("acme/repo", "123", "containment:v1:redrive:acme/repo/123", "owner", "token", 7);
-    const result = await runCanonicalEffect({ ...deps(ledger, t), beforeClaim: async () => { events.push("release"); }, claim: async () => { events.push("claim"); return true; }, afterClaim: async () => { events.push("eligible"); return true; }, drive: async () => { events.push("drive"); return { resource_id: `job:${t.repo}/${t.job_id}`, receipt_id: "r", provider_signature: "s" }; } });
-    expect(result.status).toBe("committed"); expect(events).toEqual(["release", "claim", "eligible", "drive"]);
+    const result = await runCanonicalEffect({ ...deps(ledger, t), admit: async () => { events.push("eligible"); return true; }, beforeClaim: async () => { events.push("release"); }, claim: async () => { events.push("claim"); return true; }, drive: async () => { events.push("drive"); return { resource_id: `job:${t.repo}/${t.job_id}`, receipt_id: "r", provider_signature: "s" }; } });
+    expect(result.status).toBe("committed"); expect(events).toEqual(["eligible", "release", "claim", "drive"]);
   });
 
   it("orders orphan mutation before claim and eligibility", async () => {
     const events: string[] = []; const { ledger } = make(); const t = await redriveOwnerTuple("acme/repo", "123", "containment:v1:redrive:acme/repo/123", "owner", "token", 7);
-    const result = await runCanonicalEffect({ ...deps(ledger, t), beforeClaim: async () => { events.push("mutation"); }, claim: async () => { events.push("claim"); return true; }, afterClaim: async () => { events.push("eligible"); return true; }, drive: async () => { events.push("drive"); return { resource_id: `job:${t.repo}/${t.job_id}`, receipt_id: "r", provider_signature: "s" }; } });
-    expect(result.status).toBe("committed"); expect(events).toEqual(["mutation", "claim", "eligible", "drive"]);
+    const result = await runCanonicalEffect({ ...deps(ledger, t), admit: async () => { events.push("eligible"); return true; }, beforeClaim: async () => { events.push("mutation"); }, claim: async () => { events.push("claim"); return true; }, drive: async () => { events.push("drive"); return { resource_id: `job:${t.repo}/${t.job_id}`, receipt_id: "r", provider_signature: "s" }; } });
+    expect(result.status).toBe("committed"); expect(events).toEqual(["eligible", "mutation", "claim", "drive"]);
   });
 
   it("derives retry-stable nonces from the full logical attempt", async () => {
@@ -159,7 +160,8 @@ describe("canonical containment effect route", () => {
   });
 
   it("persists a legacy drain permit before canonical PERMIT_ISSUED and binds its id", async () => {
-    const { ledger } = make(); const t = { ...tuple(), path: "drain" as const, owner: "drain:lease-owner", token: "drain-token", lease_epoch: 4 };
+    const { ledger } = make(); const t = await drainOwnerTuple("acme/repo", "123", "containment:v1:drain", "event-drain", "lease-owner", 4);
+    expect(t).toMatchObject({ path: "drain", owner: "lease-owner", drain_owner: "lease-owner", lease_epoch: 4, drain_lease_epoch: 4 });
     const events: string[] = []; const base = deps(ledger, t);
     const originalConfirm = (base.ledger as any).ownerConfirm;
     const originalPrepare = (base.ledger as any).ownerPrepare; const originalAcquire = (base.ledger as any).ownerAcquire; const originalMirror = (base.ledger as any).ownerMirror;
@@ -180,7 +182,7 @@ describe("canonical containment effect route", () => {
   });
 
   it("fails closed when legacy permit issuance returns null", async () => {
-    const { ledger, storage, values } = make(); const t = { ...tuple(), path: "drain" as const };
+    const { ledger, storage, values } = make(); const t = drainTuple();
     let claimed = false; let released = 0; let drives = 0;
     const result = await runCanonicalEffect({ ...deps(ledger, t), claim: async () => !claimed && (claimed = true), release: async () => { claimed = false; released++; },
       beforeConfirm: async () => undefined, drive: async () => { drives++; return undefined; } });
@@ -191,20 +193,20 @@ describe("canonical containment effect route", () => {
   });
 
   it("retries a throw-before-commit with the same deterministic permit ID", async () => {
-    const { ledger } = make(); const t = { ...tuple(), path: "drain" as const }; let drives = 0; let calls = 0; let candidate = "";
+    const { ledger } = make(); const t = drainTuple(); let drives = 0; let calls = 0; let candidate = "";
     const result = await runCanonicalEffect({ ...deps(ledger, t), beforeConfirm: async permitId => { candidate = permitId; calls++; if (calls === 1) throw new Error("response lost before commit"); return legacyPermit(t, permitId); }, drive: async () => { drives++; return { resource_id: `job:${t.repo}/${t.job_id}`, receipt_id: "retry", provider_signature: "sig" }; } });
     expect(result.status).toBe("committed"); expect(calls).toBe(2); expect(drives).toBe(1); if (result.status === "committed") expect(result.receipt.permit_id).toBe(candidate);
   });
 
   it("uses the same persisted permit after a legacy response loss", async () => {
-    const { ledger } = make(); const t = { ...tuple(), path: "drain" as const }; let drives = 0; let calls = 0; let persisted: ReturnType<typeof legacyPermit> | null = null;
+    const { ledger } = make(); const t = drainTuple(); let drives = 0; let calls = 0; let persisted: ReturnType<typeof legacyPermit> | null = null;
     const result = await runCanonicalEffect({ ...deps(ledger, t), beforeConfirm: async permitId => { calls++; persisted = persisted ?? legacyPermit(t, permitId); if (calls === 1) throw new Error("response lost after commit"); return persisted; }, drive: async () => { drives++; return { resource_id: `job:${t.repo}/${t.job_id}`, receipt_id: "readback", provider_signature: "sig" }; } });
     expect(result.status).toBe("committed"); if (result.status !== "committed") return;
     expect(result.receipt.permit_id).toBe(persisted!.permit_id); expect(drives).toBe(1);
   });
 
   it("freezes ambiguous legacy response and blocks a cross-lease drive", async () => {
-    const { ledger, storage } = make(); const t = { ...tuple(), path: "drain" as const }; let drives = 0; let firstRelease = 0;
+    const { ledger, storage } = make(); const t = drainTuple(); let drives = 0; let firstRelease = 0;
     const first = await runCanonicalEffect({ ...deps(ledger, t), beforeConfirm: async () => { throw new Error("ambiguous"); }, release: async () => { firstRelease++; }, drive: async () => { drives++; return undefined; } });
     expect(first.status).toBe("unknown_terminal");
     const attempt = storage.map.get(containmentSpawnAttemptKey(t)) as any;
@@ -221,7 +223,7 @@ describe("canonical containment effect route", () => {
   });
 
   it("does not claim an unverified freeze and retains the current claim", async () => {
-    const { ledger } = make(); const t = { ...tuple(), path: "drain" as const }; let released = 0;
+    const { ledger } = make(); const t = drainTuple(); let released = 0;
     const base = deps(ledger, t);
     const result = await runCanonicalEffect({ ...base, release: async () => { released++; },
       ledger: { ...base.ledger, ownerFreeze: async () => ({ kind: "unknown", state: "UNKNOWN", schema_version: 1, tuple_digest: "", attempt_key: "", active_pointer_key: "", permit: null, proof: null }) } as any,
@@ -235,7 +237,7 @@ describe("canonical containment effect route", () => {
       (permit: ReturnType<typeof legacyPermit>) => ({ ...permit, issued_to_owner: "other-owner" }),
       (permit: ReturnType<typeof legacyPermit>) => ({ ...permit, issued_to_epoch: permit.issued_to_epoch + 1 }),
     ]) {
-      const { ledger } = make(); const t = { ...tuple(), path: "drain" as const }; let calls = 0; let drives = 0; let released = 0;
+      const { ledger } = make(); const t = drainTuple(); let calls = 0; let drives = 0; let released = 0;
       const result = await runCanonicalEffect({ ...deps(ledger, t), release: async () => { released++; }, beforeConfirm: async permitId => { calls++; if (calls === 1) throw new Error("response lost"); return mismatch(legacyPermit(t, permitId)); }, drive: async () => { drives++; return undefined; } });
       expect(result.status).toBe("unknown_terminal"); expect(calls).toBe(2); expect(drives).toBe(0); expect(released).toBe(0);
     }
@@ -255,11 +257,12 @@ describe("canonical containment effect route", () => {
   });
 
   it("releases claim on afterClaim refusal and throw before owner mutation", async () => {
-    const { ledger, storage } = make(); const t = tuple(); let claimed = false; let released = 0; let calls = 0;
+    const { ledger, storage } = make(); const t = tuple(); let claimed = false; let released = 0; let claims = 0; let calls = 0;
     const makeAttempt = () => ({ ...deps(ledger, t), claim: async () => !claimed && (claimed = true), release: async () => { claimed = false; released++; },
-      afterClaim: async () => { calls++; if (calls === 2) throw new Error("reservation unavailable"); return false; } });
+      admit: async () => { calls++; if (calls === 2) throw new Error("reservation unavailable"); return false; },
+      beforeClaim: async () => { claims++; } });
     expect((await runCanonicalEffect(makeAttempt())).status).toBe("busy");
     expect((await runCanonicalEffect(makeAttempt())).status).toBe("unavailable");
-    expect(released).toBe(2); expect(storage.map.size).toBe(0);
+    expect(claims).toBe(0); expect(released).toBe(0); expect(storage.map.size).toBe(0);
   });
 });

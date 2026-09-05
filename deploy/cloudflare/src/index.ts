@@ -5446,17 +5446,17 @@ export async function redriveOrphanedJobs(
             provider: "cloudflare-container",
             resource_id: `job:${ownedReservation.repo}/${ownedReservation.job_id}`,
             idempotency_key: effect,
+            admit: async () => (await ownedAuthority.beginReservedEffect(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, ownedReservation.path, effect)).status === "eligible",
             beforeClaim: () => release(env.RUNNER_JOB_PATS, redriveJobId),
             claim: () => claim(env.RUNNER_JOB_PATS, redriveJobId),
             release: () => releaseSpawnClaim(env.RUNNER_JOB_PATS!, redriveJobId),
-            afterClaim: async () => { const status = (await ownedAuthority.beginReservedEffect(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, ownedReservation.path, effect)).status; return status === "eligible" || status === "ineligible"; },
             drive: driveOpts => drive(env, driveOpts),
             finalize: async () => {
               const terminal = await ownedAuthority.completeRedrive(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, effect);
               return terminal.status === "completed" || terminal.status === "cleared_after_completion";
             },
           });
-          if (result.status !== "committed" || !result.finalized) logEvent("error", "contained_redrive_blocked", { jobId: redriveJobId, repo: redriveRepo, status: result.status });
+          if (result.status !== "committed" || !result.finalized) logEvent("error", "contained_redrive_blocked", { jobId: redriveJobId, repo: redriveRepo, status: result.status, ...(result.status !== "committed" ? { reason: result.reason } : {}) });
         })());
         continue;
       }
@@ -5666,15 +5666,6 @@ export async function retryOrphanedSpawns(
       if (admitted.status !== "reserved" || !admitted.reservation) continue;
       reservation = admitted.reservation;
     }
-    if (deferredPlacementUnconfirmed) {
-      logEvent("error", "placement_unconfirmed", {
-        jobId,
-        repo: deferredPlacementUnconfirmed.repo,
-        waitedMs: deferredPlacementUnconfirmed.waitedMs,
-        attempts: deferredPlacementUnconfirmed.attempts,
-      });
-      await bumpMetrics(env, "placement_unconfirmed");
-    }
     // retry: bump the attempt count (same TTL), then claim + WARM re-drive.
     const bumped: OrphanRecord = { ...(rec as OrphanRecord), attempts: step.nextAttempts };
     if (reservation && reservationAuthority) {
@@ -5688,17 +5679,23 @@ export async function retryOrphanedSpawns(
         provider: "cloudflare-container",
         resource_id: `job:${ownedReservation.repo}/${ownedReservation.job_id}`,
         idempotency_key: effect,
-        beforeClaim: () => kv.put(name, JSON.stringify(bumped), { expirationTtl: ORPHAN_TTL_S }),
+        admit: async () => (await ownedAuthority.beginReservedEffect(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, ownedReservation.path, effect)).status === "eligible",
+        beforeClaim: async () => {
+          if (deferredPlacementUnconfirmed) {
+            logEvent("error", "placement_unconfirmed", { jobId, ...deferredPlacementUnconfirmed });
+            await bumpMetrics(env, "placement_unconfirmed");
+          }
+          await kv.put(name, JSON.stringify(bumped), { expirationTtl: ORPHAN_TTL_S });
+        },
         claim: () => claimSpawn(kv, ownedReservation.job_id),
         release: () => releaseSpawnClaim(kv, ownedReservation.job_id),
-        afterClaim: async () => { const status = (await ownedAuthority.beginReservedEffect(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, ownedReservation.path, effect)).status; return status === "eligible" || status === "ineligible"; },
         drive: driveOpts => drive(env, driveOpts),
         finalize: async () => {
           const terminal = await ownedAuthority.completeRedrive(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, effect);
           return terminal.status === "completed" || terminal.status === "cleared_after_completion";
         },
       });
-      if (result.status !== "committed" || !result.finalized) logEvent("error", "contained_orphan_retry_blocked", { jobId, repo: bumped.repo, status: result.status });
+      if (result.status !== "committed" || !result.finalized) logEvent("error", "contained_orphan_retry_blocked", { jobId, repo: bumped.repo, status: result.status, ...(result.status !== "committed" ? { reason: result.reason } : {}) });
       continue;
     }
     await kv

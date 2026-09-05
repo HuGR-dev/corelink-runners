@@ -51,8 +51,9 @@ export interface CanonicalEffectRouteDeps<TOpts extends object> {
   idempotency_key: string;
   claim: () => Promise<boolean>;
   release?: () => Promise<void>;
+  /** Authority-only admission fence; runs before every mutable external seam. */
+  admit?: () => Promise<boolean>;
   beforeClaim?: () => Promise<void>;
-  afterClaim?: () => Promise<boolean>;
   beforeDrive?: () => Promise<boolean>;
   /** Legacy drain persists its recovery-only permit before owner PERMIT_ISSUED. */
   beforeConfirm?: (permitId: string) => Promise<LegacyPermit | null | undefined>;
@@ -127,6 +128,7 @@ export async function runCanonicalEffect<TOpts extends object>(
   };
 
   try {
+    if (deps.admit && !(await deps.admit())) return { status: "busy" };
     // Finalization retries must observe the exact owner tuple before claim
     // admission. A committed pointer is already an idempotency record; asking
     // the provider or competing for the external claim again is forbidden.
@@ -146,7 +148,6 @@ export async function runCanonicalEffect<TOpts extends object>(
     // invocation must win the claim in this invocation; only that claim may be
     // released on an abortable failure.
     if (!claimAdmitted) return { status: "claim_refused" };
-    if (deps.afterClaim && !(await deps.afterClaim())) { await releaseClaim(); return { status: "busy" }; }
     if (deps.beforeDrive && !(await deps.beforeDrive())) { await releaseClaim(); return { status: "before_drive_refused" }; }
     if (!resumable) {
       const prepared = await deps.ledger.ownerPrepare(req);
@@ -341,8 +342,8 @@ export async function intakeOwnerTuple(repo: string, jobId: string, effectId: st
 }
 export async function drainOwnerTuple(repo: string, jobId: string, effectId: string, eventId: string, owner: string, epoch: number): Promise<OwnerTuple> {
   return ownerTuple({ repo, job_id: jobId, path: "drain", event_id: eventId, reservation_epoch: null, effect_id: effectId,
-    owner: `drain:${owner}`, token: `drain:${owner}:${epoch}`, lease_epoch: epoch,
-    drain_owner: null, drain_lease_epoch: null });
+    owner, token: `drain:${owner}:${epoch}`, lease_epoch: epoch,
+    drain_owner: owner, drain_lease_epoch: epoch });
 }
 export async function redriveOwnerTuple(repo: string, jobId: string, effectId: string, owner: string, token: string, epoch: number): Promise<OwnerTuple> {
   return ownerTuple({ repo, job_id: jobId, path: "redrive", event_id: effectId, reservation_epoch: epoch, effect_id: effectId,

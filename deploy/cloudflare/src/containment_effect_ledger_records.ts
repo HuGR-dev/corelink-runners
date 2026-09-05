@@ -27,13 +27,13 @@ export function normalizeTuple(input: unknown, nonce?: unknown): OwnerTuple | nu
   if (t.path !== "intake" && t.path !== "drain" && t.path !== "redrive") return null;
   if (!validEpoch(t.lease_epoch)) return null;
   if (t.path === "redrive" ? !validEpoch(t.reservation_epoch) : t.reservation_epoch !== null) return null;
-  if (t.path === "redrive" && (!validText(t.drain_owner) || !validEpoch(t.drain_lease_epoch))) return null;
-  if (t.path !== "redrive" && (t.drain_owner !== null || t.drain_lease_epoch !== null)) return null;
+  if ((t.path === "drain" || t.path === "redrive") && (!validText(t.drain_owner) || !validEpoch(t.drain_lease_epoch))) return null;
+  if (t.path === "intake" && (t.drain_owner !== null || t.drain_lease_epoch !== null)) return null;
   const reservation_epoch = t.reservation_epoch === undefined ? null : t.reservation_epoch;
   return { ...id, path: t.path as OwnerPath, event_id: t.event_id, reservation_epoch,
     effect_id: t.effect_id, owner: t.owner, token: t.token, lease_epoch: t.lease_epoch,
-    drain_owner: t.path === "redrive" ? t.drain_owner! : null,
-    drain_lease_epoch: t.path === "redrive" ? t.drain_lease_epoch! : null, caller_nonce: String(n) };
+    drain_owner: t.path === "intake" ? null : t.drain_owner!,
+    drain_lease_epoch: t.path === "intake" ? null : t.drain_lease_epoch!, caller_nonce: String(n) };
 }
 export function requestTuple(request: SpawnOwnerRequest): OwnerTuple | null {
   if (!request || request.schema_version !== 1 || typeof request.caller_nonce !== "string" || !NONCE.test(request.caller_nonce)
