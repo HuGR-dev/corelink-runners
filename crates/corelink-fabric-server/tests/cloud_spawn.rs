@@ -140,7 +140,7 @@ fn registry_unbind_unbound_is_noop() {
 #[test]
 fn noboxprovisioner_is_noop() {
     let reg = BoxRegistry::new();
-    let prov = NoBoxProvisioner;
+    let prov = NoBoxProvisioner::default();
     let spec = pinned_spec("job-noop");
 
     assert!(prov.provision("l", &spec).is_ok(), "provision must be Ok");
@@ -889,7 +889,7 @@ fn exec_request_body() -> Vec<u8> {
 async fn http_default_off_acquire_ok_exec_503() {
     // Build the harness with a plain NoBoxProvisioner (harness_with_provisioner
     // default), which keeps NoBoxExec on state.exec.
-    let prov = Arc::new(NoBoxProvisioner) as Arc<dyn BoxProvisioner>;
+    let prov = Arc::new(NoBoxProvisioner::default()) as Arc<dyn BoxProvisioner>;
     let (router, _ledger) = harness_with_provisioner(prov);
 
     // Acquire — NoBoxProvisioner is a no-op Ok → 200.

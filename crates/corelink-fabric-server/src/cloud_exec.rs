@@ -111,103 +111,75 @@ pub(crate) fn is_capacity_error(e: &anyhow::Error) -> bool {
 /// (the codebase idiom from `app.rs`).
 ///
 /// [`bind`]: BoxRegistry::bind
-#[derive(Clone)]
-pub struct BoxRegistry {
-    boxes: Arc<Mutex<HashMap<String, RunningContainer>>>,
-    no_box: Arc<Mutex<HashSet<String>>>,
+#[derive(Default)]
+struct RegistryEvidence {
+    boxes: HashMap<String, RunningContainer>,
+    no_box: HashSet<String>,
 }
 
+#[derive(Clone)]
+pub struct BoxRegistry(Arc<Mutex<RegistryEvidence>>);
+
 impl BoxRegistry {
-    /// Construct an empty registry.
+    /// Construct an empty registry: missing evidence never proves absence.
     pub fn new() -> Self {
-        Self {
-            boxes: Arc::new(Mutex::new(HashMap::new())),
-            no_box: Arc::new(Mutex::new(HashSet::new())),
-        }
+        Self(Arc::new(Mutex::new(RegistryEvidence::default())))
     }
 
-    /// Bind `container` as the live box for `lease_id`. Called by the spawn
-    /// lifecycle path at spawn time (future work-package).
-    ///
-    /// **Re-binding semantics (last-bind-wins):** re-binding the same
-    /// `lease_id` OVERWRITES the previous entry. A re-spawned container
-    /// replaces a stale handle, matching the dedup/recovery semantics of the
-    /// spawn lifecycle — there is no "already bound" error; the latest bind
-    /// always wins.
+    /// Record a successfully provisioned handle. Real-box evidence replaces
+    /// no-box evidence atomically, so concurrent teardown cannot observe both.
     pub fn bind(&self, lease_id: &str, container: RunningContainer) {
-        self.boxes
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(lease_id.to_string(), container);
-        self.no_box
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(lease_id);
+        let mut evidence = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        evidence.no_box.remove(lease_id);
+        evidence.boxes.insert(lease_id.to_string(), container);
     }
 
-    /// Resolve the live container bound to `lease_id`, if any.
-    ///
-    /// Returns `None` when no container has been bound — the caller
-    /// ([ `EngineLeasedExec`]) must fail closed on `None`.
+    /// Resolve the exact provider handle retained until ledger completion.
     pub fn resolve(&self, lease_id: &str) -> Option<RunningContainer> {
-        self.boxes
+        self.0
             .lock()
             .unwrap_or_else(|p| p.into_inner())
+            .boxes
             .get(lease_id)
             .cloned()
     }
 
-    /// Remove the entry for `lease_id`, if any.
-    ///
-    /// Called by the teardown path ([`NorthflankBoxProvisioner::teardown`])
-    /// after the provider job is deleted, so a stale handle cannot be resolved
-    /// after teardown. Idempotent: a missing entry is silently ignored.
-    /// Poison-safe (mirrors [`bind`]/[`resolve`]).
-    ///
-    /// [`bind`]: BoxRegistry::bind
+    /// Forget a provider handle only after confirmed terminal ledger completion.
     pub fn unbind(&self, lease_id: &str) {
-        self.boxes
+        self.0
             .lock()
             .unwrap_or_else(|p| p.into_inner())
+            .boxes
             .remove(lease_id);
     }
 
-    /// Clone the inner [`Arc`] so multiple owners share the same registry
-    /// (e.g. the composition root and the spawn-lifecycle path).
+    /// Share the same evidence between exec and provisioner owners.
     pub fn clone_handle(&self) -> Self {
-        Self {
-            boxes: Arc::clone(&self.boxes),
-            no_box: Arc::clone(&self.no_box),
-        }
+        Self(Arc::clone(&self.0))
     }
 
     fn mark_no_box(&self, lease_id: &str) -> Result<()> {
-        if self
-            .boxes
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .contains_key(lease_id)
-        {
+        let mut evidence = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        if evidence.boxes.contains_key(lease_id) {
             bail!("cannot record no-box evidence while a real binding exists for {lease_id}");
         }
-        self.no_box
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(lease_id.to_string());
+        evidence.no_box.insert(lease_id.to_string());
         Ok(())
     }
 
     fn has_no_box(&self, lease_id: &str) -> bool {
-        self.no_box
+        self.0
             .lock()
             .unwrap_or_else(|p| p.into_inner())
+            .no_box
             .contains(lease_id)
     }
 
     fn forget_no_box(&self, lease_id: &str) {
-        self.no_box
+        self.0
             .lock()
             .unwrap_or_else(|p| p.into_inner())
+            .no_box
             .remove(lease_id);
     }
 }

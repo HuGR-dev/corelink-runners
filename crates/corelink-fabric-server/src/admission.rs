@@ -706,8 +706,13 @@ async fn rollback_undispatched_lease(
         Some(state_held) if state_held.is_held() => {
             // This remains the ordinary Held teardown seam. Revoke before the
             // terminal transition may forget local PAT metadata.
-            state.teardown_lease(lease_id).await;
+            let torn = state.teardown_lease(lease_id).await;
             state.revoke_pat_for(lease_id).await;
+            if !torn {
+                // The response waiter may be gone, but its box is not confirmed
+                // gone. Keep Held and its reservation for reaper/close retry.
+                return;
+            }
             let now_ms = state.clock.now_ms();
             let crashed_ok = {
                 let ledger = &*state.ledger;

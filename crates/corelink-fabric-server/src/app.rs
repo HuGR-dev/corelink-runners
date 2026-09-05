@@ -890,7 +890,7 @@ impl AppState {
             queue_wait_timeout: std::time::Duration::from_millis(DEFAULT_QUEUE_WAIT_MS),
             rate_windows: Arc::new(Mutex::new(HashMap::new())),
             exec: Arc::new(NoBoxExec),
-            provisioner: Arc::new(crate::cloud_exec::NoBoxProvisioner),
+            provisioner: Arc::new(crate::cloud_exec::NoBoxProvisioner::default()),
             trigger_dedup: Arc::new(Mutex::new(HashMap::new())),
             signer: Arc::new(FabricSigner::new_from_bytes(&DEV_FABRIC_KEY_SEED)),
             ingest_signer: Arc::new(IngestSigner::new(DEV_INGEST_SECRET.to_vec())),
@@ -1467,8 +1467,13 @@ impl AppState {
         for lease_id in held {
             // Teardown first (reclaim the box), then terminalize — the reaper's
             // proven order. Revoke the CAS PAT on the way out (A7b).
-            let _ = self.teardown_lease(&lease_id).await;
+            let torn = self.teardown_lease(&lease_id).await;
             self.revoke_pat_for(&lease_id).await;
+            if !torn {
+                // Suspension revokes credentials, but an unconfirmed live box
+                // must retain its lease and reservation for the reaper's retry.
+                continue;
+            }
             let transitioned = self
                 .ledger
                 .transition(
@@ -2033,6 +2038,10 @@ impl AppState {
     /// there is nothing to clear there — the terminal `transition` already
     /// removes the lease from the `held()` reap set.
     pub(crate) fn forget_lease(&self, lease_id: &str) {
+        // All production callers reach this only after the terminal transition
+        // (or confirmed Pending cleanup) wins. Failed ledger writes keep the
+        // exact provider handle available for an authoritative retry.
+        self.provisioner.forget_pending_cleanup(lease_id);
         self.images
             .lock()
             .unwrap_or_else(|p| p.into_inner())
