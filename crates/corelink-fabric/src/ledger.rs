@@ -327,6 +327,17 @@ pub trait LeaseLedger {
         anyhow::bail!("pending cleanup claims are unsupported by this ledger")
     }
 
+    /// Atomically claim exactly one named Pending row for acquisition rollback.
+    /// Age is intentionally irrelevant; absent, Held, and terminal rows return
+    /// `None` without mutating another row.
+    fn claim_pending_cleanup(
+        &self,
+        _lease_id: &str,
+        _now_ms: u64,
+    ) -> anyhow::Result<Option<LeaseRecord>> {
+        anyhow::bail!("pending cleanup claims are unsupported by this ledger")
+    }
+
     /// Conditionally finish a previously claimed cleanup. The default is
     /// unsupported (never a success/no-op).
     fn finish_pending_cleanup(&self, _lease_id: &str) -> anyhow::Result<bool> {
@@ -1033,6 +1044,14 @@ impl LeaseLedger for InMemoryLedger {
         self.lock()?.claim_stale_pending_cleanup(now_ms, max_age_ms)
     }
 
+    fn claim_pending_cleanup(
+        &self,
+        lease_id: &str,
+        now_ms: u64,
+    ) -> anyhow::Result<Option<LeaseRecord>> {
+        self.lock()?.claim_pending_cleanup(lease_id, now_ms)
+    }
+
     fn finish_pending_cleanup(&self, lease_id: &str) -> anyhow::Result<bool> {
         self.lock()?.finish_pending_cleanup(lease_id)
     }
@@ -1689,6 +1708,14 @@ impl LeaseLedger for FileLedger {
         max_age_ms: u64,
     ) -> anyhow::Result<Vec<LeaseRecord>> {
         self.lock()?.claim_stale_pending_cleanup(now_ms, max_age_ms)
+    }
+
+    fn claim_pending_cleanup(
+        &self,
+        lease_id: &str,
+        now_ms: u64,
+    ) -> anyhow::Result<Option<LeaseRecord>> {
+        self.lock()?.claim_pending_cleanup(lease_id, now_ms)
     }
 
     fn finish_pending_cleanup(&self, lease_id: &str) -> anyhow::Result<bool> {
