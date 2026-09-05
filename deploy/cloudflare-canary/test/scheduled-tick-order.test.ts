@@ -5,7 +5,8 @@ import type { TickConfig } from "../src/config";
 const config: TickConfig = { ingestUrl: "https://monitor.invalid", source: "canary", service: "canary", application: "corelink", keyId: "lane", credentialEpoch: "1", monitorRearmTupleDigest: "tuple", envelopeHmacKey: "fixture" };
 function state(): DurableObjectState {
   const values = new Map<string, unknown>();
-  return { storage: { get: async <T>(key: string) => values.get(key) as T | undefined, put: async (key: string, value: unknown) => { values.set(key, value); }, setAlarm: async () => undefined, deleteAlarm: async () => undefined } } as unknown as DurableObjectState;
+  const storage = { get: async <T>(key: string) => values.get(key) as T | undefined, put: async (key: string, value: unknown) => { values.set(key, value); }, setAlarm: async () => undefined, deleteAlarm: async () => undefined };
+  return { storage: { ...storage, transaction: async <T>(fn: (txn: DurableObjectStorage) => Promise<T>) => fn(storage as unknown as DurableObjectStorage) }, blockConcurrencyWhile: async <T>(fn: () => Promise<T>) => fn() } as unknown as DurableObjectState;
 }
 describe("scheduled tick order", () => {
   it("does not emit a successor while its durable head lacks a verified ACK", async () => {

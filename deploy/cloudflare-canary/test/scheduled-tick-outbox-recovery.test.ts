@@ -9,11 +9,12 @@ const config: TickConfig = {
 };
 function state(): DurableObjectState {
   const values = new Map<string, unknown>();
-  return { storage: {
+  const storage = {
     get: async <T>(key: string) => values.get(key) as T | undefined,
     put: async (key: string, value: unknown) => { values.set(key, value); },
     setAlarm: async () => undefined, deleteAlarm: async () => undefined,
-  } } as unknown as DurableObjectState;
+  };
+  return { storage: { ...storage, transaction: async <T>(fn: (txn: DurableObjectStorage) => Promise<T>) => fn(storage as unknown as DurableObjectStorage) }, blockConcurrencyWhile: async <T>(fn: () => Promise<T>) => fn() } as unknown as DurableObjectState;
 }
 
 describe("scheduled tick durable outbox", () => {

@@ -26,7 +26,7 @@ export interface TickConfig {
   recoveryVerifier?: AckVerifier;
 }
 export interface AckVerifier {
-  verify(serializedToken: string, signerKeyId: string, signerEpoch: string): Promise<"valid" | "revoked" | "invalid">;
+  verify(serializedToken: string, signature: string, signerKeyId: string, signerEpoch: string): Promise<"valid" | "revoked" | "invalid">;
 }
 
 /** There are intentionally no endpoint, identity, digest, or key defaults.
