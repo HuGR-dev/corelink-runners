@@ -3,11 +3,6 @@ import {
   containmentOutboxKey,
   isValidInvalidConfigRecord,
   isValidOutboxRecord,
-  type ContainmentMetaShape,
-  type ContainmentOutboxShape,
-  type InvalidConfigShape,
-  type RedrivePermitShape,
-  type RedriveReservationShape,
 } from "./containment_authority_helpers";
 
 export const CONTAINMENT_META_KEY = "containment:v1:meta";
@@ -20,14 +15,61 @@ export const DRAIN_LEASE_TTL_MS = 120_000;
 export const DRAIN_RENEW_THRESHOLD_MS = 30_000;
 export const REDRIVE_RESERVATION_TTL_MS = 120_000;
 
-export type ContainmentMeta = ContainmentMetaShape;
-export type InvalidConfigRecord = InvalidConfigShape;
-export type ContainmentOutboxRecord = ContainmentOutboxShape;
-export type ContainmentRedriveReservation = RedriveReservationShape;
-export type ContainmentRedrivePermit = RedrivePermitShape;
 export type ContainmentState = "QUEUED" | "CLAIMED" | "EFFECT_COMMITTED";
 export type ContainmentEffectWitnessKind = "spawn_claim" | "attempt" | "placement" | "lease" | "result";
 export const CONTAINMENT_EFFECT_WITNESS_KINDS: readonly ContainmentEffectWitnessKind[] = ["spawn_claim", "attempt", "placement", "lease", "result"];
+
+export interface ContainmentMeta {
+  schema_version: 1;
+  next_pause_seq: number;
+  drain_cursor: number;
+  backlog_count: number;
+  lease_epoch: number;
+  lease: { owner: string; epoch: number; expires_ms: number } | null;
+  drain_requested: boolean;
+}
+
+export interface InvalidConfigRecord {
+  schema_version: 1;
+  signal_id: string;
+  switch_name: string;
+  raw_value_sha256: string;
+}
+
+export interface ContainmentOutboxRecord {
+  schema_version: 1;
+  signal_id: string;
+  state: "PENDING" | "DELIVERED";
+  attempts: number;
+}
+
+export interface ContainmentRedriveReservation {
+  schema_version: 1;
+  repo: string;
+  job_id: string;
+  owner: string;
+  token: string;
+  epoch: number;
+  path: "redrive";
+  state: "HELD" | "EFFECT_ELIGIBLE" | "COMPLETED";
+  expires_ms: number;
+  event_id: string | null;
+  effect_id: string;
+  // A verified completed webhook may arrive after EFFECT_ELIGIBLE but before
+  // the owner can atomically mark its successful continuation completed.
+  completion_observed: boolean;
+}
+
+export interface ContainmentRedrivePermit {
+  schema_version: 1;
+  repo: string;
+  job_id: string;
+  owner: string;
+  token: string;
+  epoch: number;
+  path: "redrive";
+  effect_id: string;
+}
 
 export interface ContainmentEffectEvidence {
   schema_version: 1;
@@ -109,20 +151,27 @@ interface ContainmentStorage {
 
 type Sha256Hex = (value: string) => Promise<string>;
 
-export async function recordInvalidConfigInStorage(
-  storage: ContainmentStorage,
+export async function validateInvalidConfigIdentity(
   switchName: string,
   rawValue: string,
   rawValueSha256: string,
   sha256Hex: Sha256Hex,
-): Promise<ContainmentOutboxRecord> {
+): Promise<string> {
   if (!INVALID_CONFIG_SWITCHES.has(switchName) || !SHA256_HEX.test(rawValueSha256)) {
     throw new TypeError("unsupported or malformed invalid-config identity");
   }
   if (await sha256Hex(rawValue) !== rawValueSha256) {
     throw new TypeError("invalid-config digest does not match raw value");
   }
-  const signalId = await sha256Hex(`containment:v1:config-invalid\n${switchName}\n${rawValueSha256}`);
+  return sha256Hex(`containment:v1:config-invalid\n${switchName}\n${rawValueSha256}`);
+}
+
+export async function recordInvalidConfigInStorage(
+  storage: ContainmentStorage,
+  switchName: string,
+  rawValueSha256: string,
+  signalId: string,
+): Promise<ContainmentOutboxRecord> {
   const key = containmentInvalidKey(switchName, rawValueSha256);
   const prior = await storage.get<InvalidConfigRecord>(key);
   if (prior && (!isValidInvalidConfigRecord(prior, key) || prior.signal_id !== signalId)) {

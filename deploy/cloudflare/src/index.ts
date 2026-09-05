@@ -167,8 +167,7 @@ import {
   leaseMatches,
   markInvalidConfigAttemptInStorage,
   pendingInvalidConfigInStorage,
-  recordInvalidConfigInStorage,
-  REDRIVE_RESERVATION_TTL_MS,
+  recordInvalidConfigInStorage, REDRIVE_RESERVATION_TTL_MS, validateInvalidConfigIdentity,
   type ContainmentEffectEvidence,
   type ContainmentEffectWitnessKind,
   type ContainmentEvent,
@@ -849,7 +848,8 @@ export class ContainmentDO extends DurableObject<Env> {
   }
 
   async recordInvalidConfig(switchName: string, rawValue: string, rawValueSha256: string): Promise<ContainmentOutboxRecord> {
-    return this.tx((storage) => recordInvalidConfigInStorage(storage, switchName, rawValue, rawValueSha256, sha256Hex));
+    const signalId = await validateInvalidConfigIdentity(switchName, rawValue, rawValueSha256, sha256Hex);
+    return this.tx((storage) => recordInvalidConfigInStorage(storage, switchName, rawValueSha256, signalId));
   }
 
   async pendingInvalidConfig(): Promise<ContainmentOutboxRecord[]> {
