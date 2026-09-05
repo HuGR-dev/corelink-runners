@@ -86,8 +86,12 @@ export async function sendAlert(env: NotifyEnv, alerts: Alert[]): Promise<SendRe
       body: JSON.stringify({ from, to, subject, text }),
       signal: AbortSignal.timeout(8000),
     });
+    // Always consume the response, including failures, so the Worker can
+    // release the connection. The body is intentionally discarded: provider
+    // error payloads are untrusted and may contain sensitive request data.
+    await resp.text().catch(() => "");
     if (!resp.ok) {
-      // Do NOT echo the response body blindly (avoid leaking anything); status only.
+      // Do NOT echo the response body (avoid leaking anything); status only.
       console.log(`[canary] Resend send failed: HTTP ${resp.status}`);
       return { sent: false, reason: `resend-${resp.status}` };
     }

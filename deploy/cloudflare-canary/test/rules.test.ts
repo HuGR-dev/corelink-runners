@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   evaluate,
   applyCooldown,
@@ -8,7 +8,7 @@ import {
   type RulesConfig,
   type Alert,
 } from "../src/rules";
-import { formatAlertEmail } from "../src/notify";
+import { formatAlertEmail, sendAlert } from "../src/notify";
 import type { Snapshot } from "../src/types";
 
 // ── snapshot builders ──────────────────────────────────────────────────────────
@@ -147,6 +147,18 @@ describe("surface posture rule", () => {
     expect(a?.severity).toBe("warn");
     expect(a?.title).toContain("500");
   });
+  it("fires WARN when an armed surface returns 404", () => {
+    const cur = snap({ spawn: { ...surface({}, 404, true), configured: true } });
+    const a = evaluate(null, cur, cfg).alerts.find((x) => x.key === "status:spawn");
+    expect(a?.severity).toBe("warn");
+  });
+  it("fires CRITICAL when a 200 surface body is invalid", () => {
+    const cur = snap({
+      fabric: { ...surface(), failure: { code: "invalid_body", detail: "missing counters" } },
+    });
+    const a = evaluate(null, cur, cfg).alerts.find((x) => x.key === "invalid:fabric:invalid_body");
+    expect(a?.severity).toBe("critical");
+  });
 });
 
 // ── delta rules ─────────────────────────────────────────────────────────────────
@@ -188,6 +200,13 @@ describe("delta rules", () => {
     const cur = snap({ fabric: surface({ mint_failures: 9 }) });
     const a = evaluate(null, cur, cfg).alerts.find((x) => x.key === "delta:fabric:mint_failures");
     expect(a).toBeUndefined();
+  });
+  it("webhook auth failures rise ⇒ WARN", () => {
+    const prev = snap({ spawn: surface({ webhook_auth_failed: 2 }) });
+    const cur = snap({ spawn: surface({ webhook_auth_failed: 5 }) });
+    const a = evaluate(prev, cur, cfg).alerts.find((x) => x.key === "delta:spawn:webhook_auth_failed");
+    expect(a?.severity).toBe("warn");
+    expect(a?.title).toContain("+3");
   });
 });
 
@@ -313,5 +332,22 @@ describe("formatAlertEmail", () => {
     expect(subject).toContain("WARN");
     expect(subject).toContain("1 alert");
     expect(subject).not.toContain("1 alerts");
+  });
+});
+
+describe("sendAlert transport", () => {
+  it("drains provider error responses without logging the body", async () => {
+    const text = vi.fn(async () => "provider secret-looking body");
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status: 429, text })));
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const result = await sendAlert(
+      { RESEND_API_KEY: "test-key", ALERT_EMAIL_TO: "owner@example.test", ALERT_EMAIL_FROM: "alerts@example.test" },
+      [{ key: "health:fabric", severity: "critical", title: "down", detail: "detail" }],
+    );
+    expect(result).toEqual({ sent: false, reason: "resend-429" });
+    expect(text).toHaveBeenCalledOnce();
+    expect(log.mock.calls.flat().join(" ")).not.toContain("provider secret-looking body");
+    log.mockRestore();
+    vi.unstubAllGlobals();
   });
 });
