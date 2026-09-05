@@ -53,6 +53,17 @@
         }
       ]
     },
+    "post_deploy_inventory": {
+      "observed_at": "2026-09-05T19:37:18.655Z",
+      "worker_version": "95b39a6a-cf7e-4c5b-95fd-53dc290498f9",
+      "prior_plaintext_var_drift": [],
+      "applications": [
+        { "name": "corelink-spawn-worker-runnercontainer", "id": "a03d11a2-7e03-48a4-96bb-4d2c43892cd4", "pagination_complete": true, "container_instances": 0, "durable_object_records": 426 },
+        { "name": "corelink-spawn-worker-checkhostcontainer", "id": "a038b8b1-aeb8-4664-a9d6-ffe65e31f0f5", "pagination_complete": true, "container_instances": 0, "durable_object_records": 0 },
+        { "name": "corelink-fabricd-fabricdcontainer", "id": "a0337af9-26db-42c0-a816-0a63ba0e58a3", "pagination_complete": true, "container_instances": 0, "durable_object_records": 3 }
+      ],
+      "scope": "Read-only exact-application inventory with actual pagination metadata. Point-in-time absence of container instances, not invoice savings, continuous no-wake proof, or before/after running-box preservation. Durable Object records are not running containers."
+    },
     "acceptance": {
       "status": "RED",
       "intake_only_10_of_10": "NOT_RUN",
@@ -72,7 +83,8 @@
     "log_provenance": [
       { "path": "/private/tmp/corelink-deploy-ops.V1KGSC/preflight.log", "sha256": "f0869bb9b499971fc310421806055a4da786cf03fabcc57961fad42a5d0f6095" },
       { "path": "/private/tmp/corelink-deploy-ops.V1KGSC/deploy.log", "sha256": "f6b4b1bc0f38ff10e4b89f2c22c622c1a1a55a84ac80a890b8452b1396a00fd2" },
-      { "path": "/private/tmp/corelink-deploy-ops.V1KGSC/post-deploy.json", "sha256": "899f8181cc2677d258838e9a9e424d0366435379486a8e18c0b08da29e9825fb" }
+      { "path": "/private/tmp/corelink-deploy-ops.V1KGSC/post-deploy.json", "sha256": "899f8181cc2677d258838e9a9e424d0366435379486a8e18c0b08da29e9825fb" },
+      { "path": "/private/tmp/corelink-deploy-ops.V1KGSC/provider-state.json", "sha256": "f9a251c1ac4628eec105f0e0e59fc38b6c2158c68ea6b0a8eb9a59107ae87c18" }
     ]
   },
   "notes": "Deployment and four smoke probes succeeded, but this artifact intentionally remains RED for A3.30/T3-W18. No full three-state, nonempty-drain, unchanged-running-box, durable-PG, go-live, or descendant integration/deployment credit. Credentials and raw webhook payloads are excluded. Full CI remains a final stacked-sprint-tip gate."
