@@ -24,6 +24,7 @@
 //!     never by calling the production `result_binding_preimage` on both sides.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::body::Body;
@@ -35,10 +36,11 @@ use corelink_fabric_api::{
     ExecResponse, paths,
 };
 use corelink_fabric_server::{
-    AppState, MOCK_STDOUT, MockLeasedExec, StaticPlans, StaticTokenStore, SystemClock, app,
-    verify_execution,
+    AppState, HookRegistry, MOCK_STDOUT, MockLeasedExec, StaticPlans, StaticTokenStore,
+    SystemClock, app_full, verify_execution,
 };
 use corelink_runner::attest::{FabricSigner, verify_chain, verify_raw};
+use corelink_runner::envelope::{CaptureHook, EnvelopeConfig, MetricsCollector};
 use corelink_runners_contracts::CheckDef;
 use tower::ServiceExt;
 
@@ -56,6 +58,7 @@ const TREE_HASH: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5
 
 struct Harness {
     app: Router,
+    registry: Arc<HookRegistry>,
 }
 
 /// One tenant with a plan, the REAL [`MockLeasedExec`] backend (NOT a fake),
@@ -79,13 +82,38 @@ fn harness_with_seed(seed: [u8; 32]) -> Harness {
     let state = AppState::new(ledger, Arc::new(plans), Arc::new(SystemClock))
         .with_executor(exec)
         .with_signer(Arc::new(FabricSigner::new_from_bytes(&seed)));
+    let registry = Arc::new(HookRegistry::default());
     Harness {
-        app: app(store, state),
+        app: app_full(store, state, registry.clone()),
+        registry,
     }
 }
 
 fn harness() -> Harness {
     harness_with_seed([0x5a; 32])
+}
+
+fn ack_close(h: &Harness, lease_id: &str) -> std::thread::JoinHandle<()> {
+    let hook = CaptureHook::open(
+        EnvelopeConfig {
+            ack_timeout: Duration::from_secs(30),
+            buffer_capacity: 256,
+        },
+        "pat-acme",
+        MetricsCollector::new(Instant::now()),
+    );
+    h.registry.register(
+        lease_id,
+        TenantId::new("acme").unwrap(),
+        hook.clone(),
+        "pat-acme",
+    );
+    let sub = hook.subscribe("pat-acme").expect("fixture subscriber");
+    std::thread::spawn(move || {
+        sub.wait_close_signal(std::time::Duration::from_secs(10))
+            .expect("close signal published");
+        sub.ack("pat-acme").expect("in-window fixture ack");
+    })
 }
 
 fn json_request(method: &str, path: &str, body: Vec<u8>) -> Request<Body> {
@@ -254,6 +282,7 @@ async fn mock_exec_e2e_pins_consumer_contract() {
         check_result: Some(exec_body.result.clone()),
         cost_usd_micros: None,
     };
+    let acker = ack_close(&h, &lease_id);
     let response = h
         .app
         .clone()
@@ -264,6 +293,7 @@ async fn mock_exec_e2e_pins_consumer_contract() {
         ))
         .await
         .unwrap();
+    acker.join().unwrap();
     assert_eq!(response.status(), StatusCode::OK, "close must return 200");
     let close_body: CloseResponse =
         serde_json::from_value(body_json(response).await).expect("frozen CloseResponse shape");
