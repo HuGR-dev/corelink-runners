@@ -20,26 +20,26 @@
 //! `IntrospectHttp` trait seam is the injection point (a canned `FakeIntrospect`).
 
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::Result as AnyResult;
 use axum::body::Body;
-use axum::http::{header, Request, StatusCode};
+use axum::http::{Request, StatusCode, header};
 use corelink_fabric::{
-    ledger::{AdmitOutcome, ComputeGate},
     AdmitLedger, CapDecision, CapGate, InMemoryLedger, LeaseLedger, LeaseRecord, LeaseState,
     RateWindow, TenantId, TenantPlan,
+    ledger::{AdmitOutcome, ComputeGate},
 };
-use corelink_fabric_api::{paths, AcquireRequest};
+use corelink_fabric_api::{AcquireRequest, paths};
 use corelink_fabric_server::app::{PlanSource, PlanSourceError};
 use corelink_fabric_server::corelink_auth::{
     CoreLinkAuthConfig, IntrospectHttp, IntrospectResponse,
 };
 use corelink_fabric_server::corelink_plans::CoreLinkPlanStore;
 use corelink_fabric_server::{
-    app, AppState, BoxProvisioner, ProbeStatus, StaticPlans, StaticTokenStore, SystemClock,
+    AppState, BoxProvisioner, ProbeStatus, StaticPlans, StaticTokenStore, SystemClock, app,
 };
 use corelink_runner::lease::ContainerSpec;
 use corelink_runners_contracts::RunnerState;
@@ -403,11 +403,11 @@ async fn t4w4_ceiling_429_preserves_held_and_has_zero_new_side_effects() {
     let first_body = axum::body::to_bytes(first.into_body(), usize::MAX)
         .await
         .unwrap();
-    let lease_id = serde_json::from_slice::<serde_json::Value>(&first_body).unwrap()["lease"]
-        ["lease_id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    let lease_id =
+        serde_json::from_slice::<serde_json::Value>(&first_body).unwrap()["lease"]["lease_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
     let second = router
         .oneshot(acquire_req("pat-acme", 1_000))
         .await
