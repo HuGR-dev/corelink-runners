@@ -79,7 +79,7 @@ jobs:
           fi
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Guard — all configured container image pins are immutable
         # A2.1 / INV-2: validate every image entry across every Wrangler
