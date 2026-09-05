@@ -1,0 +1,32 @@
+{
+  "scope": "Focused development validation, not full CI or sprint acceptance",
+  "source_commit": "f77e4d03fa0db053522bd6571a9ef5286099a130",
+  "review": {
+    "reviewer": "sprint1_scope (Luna)",
+    "decision": "APPROVE",
+    "commit": "f77e4d03fa0db053522bd6571a9ef5286099a130",
+    "resolved": [
+      "absolute injection sentinel",
+      "bounded job execution time",
+      "explicit strict Bash",
+      "cancelled/zero-job never passing evidence"
+    ]
+  },
+  "commands": [
+    {
+      "command": "bash -n scripts/ci/stress-inputs.sh scripts/ci/stress-inputs.selftest.sh",
+      "exit": 0
+    },
+    {
+      "command": "bash scripts/ci/stress-inputs.selftest.sh",
+      "exit": 0,
+      "output": "stress input selftest: ok"
+    },
+    {
+      "command": "git diff --check",
+      "exit": 0
+    }
+  ],
+  "observed_at": "2026-09-05T22:59:46.324136+00:00",
+  "integration_commit": "0aef3ccc8d909a33de746600c989980673a462bb"
+}

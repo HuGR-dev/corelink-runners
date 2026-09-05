@@ -1,0 +1,1724 @@
+{
+  "schema_version": "delivery-ledger/v1",
+  "registry": "docs/plan/2026-09-01-reconciled-dispatch-dag.md",
+  "baseline": {
+    "main_commit": "cda90940f74735c006693d9b9e3be85c37b26f1a",
+    "prepared_commit": "bb165bad54125460ebae213e405df3a75baa6566",
+    "recorded_delivered": 16,
+    "source": "docs/handoff/2026-09-05-session-state.md"
+  },
+  "sprint_scope": {
+    "1": [
+      "T3-W18",
+      "T8-W4b",
+      "T6-W4",
+      "T6-W9",
+      "T6-W13",
+      "T6-W15",
+      "T4-W4",
+      "T3-W10",
+      "T1-W5",
+      "T6-W2",
+      "T2-W3",
+      "T9-W1"
+    ],
+    "2": [
+      "T2-W2b",
+      "T2-W4",
+      "T2-W6",
+      "T4-W1",
+      "T4-W2",
+      "T3-W3",
+      "T3-W1",
+      "T3-W2",
+      "T8-W1",
+      "T8-W3",
+      "T3-W14",
+      "T3-W9",
+      "T8-W5",
+      "T8-W2"
+    ],
+    "3": [
+      "T3-W16",
+      "T3-W15",
+      "T6-W12",
+      "T1-W6",
+      "T6-W6",
+      "T1-W2",
+      "T1-W3",
+      "T2-W5",
+      "T3-W7",
+      "T3-W8",
+      "T4-W7",
+      "T4-W8",
+      "T6-W5",
+      "T6-W7",
+      "T8-W6"
+    ],
+    "4": [
+      "T6-W14",
+      "T6-W10",
+      "T1-W4",
+      "T3-W5",
+      "T5-W1",
+      "T5-W2",
+      "T5-W3",
+      "T5-W4",
+      "T5-W5",
+      "T5-W6",
+      "T6-W11",
+      "T7-W5",
+      "T8-W7"
+    ]
+  },
+  "sprints": [
+    {
+      "id": 1,
+      "state": "implementation",
+      "tip_commit": null,
+      "ci": {
+        "status": "not_run",
+        "commit": null,
+        "evidence": []
+      },
+      "acceptance": {
+        "status": "pending",
+        "evidence": []
+      },
+      "merge_commit": null
+    },
+    {
+      "id": 2,
+      "state": "backlog",
+      "tip_commit": null,
+      "ci": {
+        "status": "not_run",
+        "commit": null,
+        "evidence": []
+      },
+      "acceptance": {
+        "status": "pending",
+        "evidence": []
+      },
+      "merge_commit": null
+    },
+    {
+      "id": 3,
+      "state": "backlog",
+      "tip_commit": null,
+      "ci": {
+        "status": "not_run",
+        "commit": null,
+        "evidence": []
+      },
+      "acceptance": {
+        "status": "pending",
+        "evidence": []
+      },
+      "merge_commit": null
+    },
+    {
+      "id": 4,
+      "state": "backlog",
+      "tip_commit": null,
+      "ci": {
+        "status": "not_run",
+        "commit": null,
+        "evidence": []
+      },
+      "acceptance": {
+        "status": "pending",
+        "evidence": []
+      },
+      "merge_commit": null
+    }
+  ],
+  "items": [
+    {
+      "id": "T0-W1",
+      "sprint": 0,
+      "state": "recorded_delivered",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [],
+      "next_action": "Historical source delivery recorded in handoff; retain separate count from complete sprints.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T1-W1",
+      "sprint": 0,
+      "state": "recorded_delivered",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [],
+      "next_action": "Historical source delivery recorded in handoff; retain separate count from complete sprints.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T2-W1a",
+      "sprint": 0,
+      "state": "recorded_delivered",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [],
+      "next_action": "Historical source delivery recorded in handoff; retain separate count from complete sprints.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T2-W2a",
+      "sprint": 0,
+      "state": "recorded_delivered",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "T2-W1a",
+        "T8-W4a"
+      ],
+      "next_action": "Historical source delivery recorded in handoff; retain separate count from complete sprints.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T9-W0",
+      "sprint": 0,
+      "state": "recorded_delivered",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [],
+      "next_action": "Historical source delivery recorded in handoff; retain separate count from complete sprints.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T3-W17",
+      "sprint": 0,
+      "state": "recorded_delivered",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "T0-W1"
+      ],
+      "next_action": "Historical source delivery recorded in handoff; retain separate count from complete sprints.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T3-W4",
+      "sprint": 0,
+      "state": "recorded_delivered",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "D1"
+      ],
+      "next_action": "Historical source delivery recorded in handoff; retain separate count from complete sprints.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T4-W4",
+      "sprint": 1,
+      "state": "ready",
+      "implementation": "complete",
+      "owner": "root",
+      "dependencies": [
+        "T3-W4",
+        "D1",
+        "R1"
+      ],
+      "next_action": "Include unchanged reviewed admission implementation in complete sprint validation, then applicable production configuration/deployment acceptance.",
+      "blockers": [],
+      "commits": [
+        "bb165bad54125460ebae213e405df3a75baa6566"
+      ],
+      "review": {
+        "status": "approved",
+        "commit": "bb165bad54125460ebae213e405df3a75baa6566",
+        "evidence": [
+          "docs/plan/execution/2026-09-05-admission-review.json"
+        ]
+      },
+      "evidence": [
+        "docs/plan/execution/2026-09-05-admission-review.json"
+      ]
+    },
+    {
+      "id": "T3-W10",
+      "sprint": 1,
+      "state": "prepared",
+      "implementation": "partial",
+      "owner": "root",
+      "dependencies": [
+        "T3-W4",
+        "T4-W4"
+      ],
+      "next_action": "Reconcile remaining teardown/reaper acceptance and integrate after T4-W4; preserve confirmed pending cleanup protocol.",
+      "blockers": [],
+      "commits": [
+        "bb165bad54125460ebae213e405df3a75baa6566"
+      ],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T6-W1",
+      "sprint": 0,
+      "state": "recorded_delivered",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [],
+      "next_action": "Historical source delivery recorded in handoff; retain separate count from complete sprints.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T6-W2",
+      "sprint": 1,
+      "state": "prepared",
+      "implementation": "partial",
+      "owner": "root",
+      "dependencies": [
+        "D11"
+      ],
+      "next_action": "Versioned clw0.1.5 inspected locally: no authenticated atomic required-hit replay operation. Obtain client-owner implementation/release contract; retain refusal78 and never infer HIT from logs.",
+      "blockers": [
+        "Authenticated atomic no-exec HIT/restore contract unavailable in recorded clw 0.1.5; fresh inspection in progress."
+      ],
+      "commits": [
+        "bb165bad54125460ebae213e405df3a75baa6566"
+      ],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T6-W3",
+      "sprint": 0,
+      "state": "recorded_delivered",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [],
+      "next_action": "Historical source delivery recorded in handoff; retain separate count from complete sprints.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T6-W8",
+      "sprint": 0,
+      "state": "recorded_delivered",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [],
+      "next_action": "Historical source delivery recorded in handoff; retain separate count from complete sprints.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T6-W4",
+      "sprint": 1,
+      "state": "prepared",
+      "implementation": "partial",
+      "owner": "root",
+      "dependencies": [
+        "T3-W18",
+        "T7-W4b"
+      ],
+      "next_action": "Reconcile remaining scheduled-tick envelope acceptance, then collect named-host stress evidence with complete sprint validation. Secret scan and bounded stress source are integrated.",
+      "blockers": [],
+      "commits": [
+        "bb165bad54125460ebae213e405df3a75baa6566",
+        "f77e4d03fa0db053522bd6571a9ef5286099a130",
+        "f8270299f581e9eefa7274bfcf1a0304acb2a8f4"
+      ],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": [
+        "docs/plan/execution/2026-09-05-stress-inputs.json",
+        "docs/plan/execution/2026-09-05-secret-scan.json"
+      ]
+    },
+    {
+      "id": "T6-W15",
+      "sprint": 1,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "T6-W4",
+        "O-MONITORHOST",
+        "T7-W4b"
+      ],
+      "next_action": "Owner input pending: identify authorized non-Cloudflare runtime and alert channel. Establish required independent storage/scheduler/credential capabilities before monitor implementation.",
+      "blockers": [
+        "O-MONITORHOST capability artifact and external runtime not established."
+      ],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T5-W1",
+      "sprint": 4,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "R6"
+      ],
+      "next_action": "Implement and verify the canonical WP acceptance at docs/onboarding/**; actions/corelink-memoize/README.md.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T5-W2",
+      "sprint": 4,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "D7",
+        "D3"
+      ],
+      "next_action": "Implement and verify the canonical WP acceptance at integrations/**.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T5-W3",
+      "sprint": 4,
+      "state": "prepared",
+      "implementation": "partial",
+      "owner": "root",
+      "dependencies": [
+        "T5-W2"
+      ],
+      "next_action": "Implement and verify the canonical WP acceptance at integrations/github-actions/action.yml; integrations/github-actions/test/validate.sh.",
+      "blockers": [],
+      "commits": [
+        "8505fda9245ac02665ddac264c7e5f3414022de2"
+      ],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T7-W1",
+      "sprint": 0,
+      "state": "recorded_delivered",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "T0-W1"
+      ],
+      "next_action": "Historical source delivery recorded in handoff; retain separate count from complete sprints.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T7-W2",
+      "sprint": 0,
+      "state": "recorded_delivered",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [],
+      "next_action": "Historical source delivery recorded in handoff; retain separate count from complete sprints.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T7-W3",
+      "sprint": 0,
+      "state": "recorded_delivered",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [],
+      "next_action": "Historical source delivery recorded in handoff; retain separate count from complete sprints.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T7-W4",
+      "sprint": 0,
+      "state": "recorded_delivered",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [],
+      "next_action": "Historical source delivery recorded in handoff; retain separate count from complete sprints.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T7-W4b",
+      "sprint": 0,
+      "state": "recorded_delivered",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "T7-W3"
+      ],
+      "next_action": "Historical source delivery recorded in handoff; retain separate count from complete sprints.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T2-W3",
+      "sprint": 1,
+      "state": "ready",
+      "implementation": "complete",
+      "owner": "root",
+      "dependencies": [
+        "T2-W1a",
+        "T6-W1",
+        "T6-W2",
+        "T6-W3",
+        "T6-W4",
+        "T6-W8",
+        "T7-W4"
+      ],
+      "next_action": "All current workflow references are immutable; retain final inventory check after any further Sprint1 workflow edits and run full CI only at complete-sprint tip.",
+      "blockers": [],
+      "commits": [
+        "2171dd91034e46d18cce6d6e50624a6d44879858"
+      ],
+      "review": {
+        "status": "approved",
+        "commit": "2171dd91034e46d18cce6d6e50624a6d44879858",
+        "evidence": [
+          "docs/plan/execution/2026-09-05-action-pins.json"
+        ]
+      },
+      "evidence": [
+        "docs/plan/execution/2026-09-05-action-pins.json"
+      ]
+    },
+    {
+      "id": "T4-W1",
+      "sprint": 2,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "T3-W18",
+        "T8-W4b",
+        "D13"
+      ],
+      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare/src/index.ts; deploy/cloudflare/src/lib.ts.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T4-W2",
+      "sprint": 2,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "T4-W1",
+        "R2"
+      ],
+      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare/src/index.ts; deploy/cloudflare/src/lib.ts.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T3-W3",
+      "sprint": 2,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "T4-W2"
+      ],
+      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare/src/index.ts; deploy/cloudflare/src/lib.ts.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T3-W1",
+      "sprint": 2,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "T3-W3"
+      ],
+      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare/src/index.ts; crates/corelink-cloud-engine/src/cloudflare.rs.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T3-W2",
+      "sprint": 2,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "T3-W1",
+        "T7-W4b"
+      ],
+      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare/src/index.ts; deploy/cloudflare/src/lib.ts.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T8-W1",
+      "sprint": 2,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "T3-W2"
+      ],
+      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare/src/index.ts; deploy/cloudflare/src/lib.ts.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T8-W3",
+      "sprint": 2,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "T8-W1",
+        "O-MINTKEY",
+        "T6-W9",
+        "T7-W4b"
+      ],
+      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare/src/index.ts; deploy/cloudflare/src/lib.ts.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T3-W14",
+      "sprint": 2,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "T8-W3"
+      ],
+      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare/src/index.ts; deploy/cloudflare/src/lib.ts.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T3-W9",
+      "sprint": 2,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "T3-W14",
+        "O-APP"
+      ],
+      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare/src/index.ts; deploy/cloudflare/src/lib.ts.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T8-W5",
+      "sprint": 2,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "T3-W9"
+      ],
+      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare/src/index.ts; deploy/cloudflare/src/lib.ts.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T8-W2",
+      "sprint": 2,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "T8-W5"
+      ],
+      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare/src/index.ts; deploy/cloudflare/src/lib.ts.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T3-W16",
+      "sprint": 3,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "T8-W2",
+        "T2-W2b",
+        "T6-W15",
+        "O-CFINVENTORY",
+        "O-CFCANCEL",
+        "T7-W4b"
+      ],
+      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare/src/index.ts; deploy/cloudflare/src/lib.ts.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T3-W15",
+      "sprint": 3,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "T3-W16"
+      ],
+      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare/src/index.ts; deploy/cloudflare/src/lib.ts.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T8-W4a",
+      "sprint": 0,
+      "state": "recorded_delivered",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [],
+      "next_action": "Historical source delivery recorded in handoff; retain separate count from complete sprints.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T8-W4b",
+      "sprint": 1,
+      "state": "prepared",
+      "implementation": "partial",
+      "owner": "root",
+      "dependencies": [
+        "T3-W18",
+        "T9-W0"
+      ],
+      "next_action": "Reconcile prepared Rust/boot/Worker auth-file integration against full acceptance; retain complete sprint validation and T3-W18 prerequisite.",
+      "blockers": [],
+      "commits": [
+        "bb165bad54125460ebae213e405df3a75baa6566"
+      ],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T8-W6",
+      "sprint": 3,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "T8-W5",
+        "T8-W2",
+        "T1-W6",
+        "T7-W4b"
+      ],
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/au4.16b-suspension-pat-revocation.json; docs/plan/evidence/au3.23b-completion-pat-revocation.json.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T8-W7",
+      "sprint": 4,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "T8-W4a",
+        "T2-W2a",
+        "T2-W2b",
+        "T2-W4",
+        "T1-W6",
+        "T7-W4b"
+      ],
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/au3.26b-jitconfig-process-surface.json.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T3-W5",
+      "sprint": 4,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "D4",
+        "T3-W15"
+      ],
+      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare/src/index.ts; deploy/cloudflare/src/lib.ts.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T9-W1",
+      "sprint": 1,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "D2",
+        "T8-W4b",
+        "T9-W0"
+      ],
+      "next_action": "Verify D2 decision/waiver or rectify the actual devenv defects without a waiver; preserve auth-file integration.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T1-W5",
+      "sprint": 1,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "T3-W10",
+        "T3-W18",
+        "O-MINTKEY",
+        "T7-W4b"
+      ],
+      "next_action": "Implement startup mint selfcheck and readiness gating against the existing mint contract; establish O-MINTKEY and version-bound proof.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T1-W6",
+      "sprint": 3,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "D12",
+        "T1-W5",
+        "T6-W12",
+        "O-CFINVENTORY",
+        "O-PG-REARM",
+        "T7-W4b"
+      ],
+      "next_action": "Implement and verify the canonical WP acceptance at crates/corelink-fabric/src/pg_ledger.rs; crates/corelink-fabric/src/billing_sink.rs.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T1-W2",
+      "sprint": 3,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "O1",
+        "T1-W6",
+        "T7-W4b"
+      ],
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T1-W2-control-plane.json.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T1-W3",
+      "sprint": 3,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "O1",
+        "T2-W2b",
+        "T1-W6",
+        "T7-W4b"
+      ],
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T1-W3-resilience.json.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T1-W4",
+      "sprint": 4,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "O1",
+        "T1-W6",
+        "T6-W14",
+        "T6-W10",
+        "T7-W4b"
+      ],
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T1-W4-boot-rate.json.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T2-W2b",
+      "sprint": 2,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "T2-W1a",
+        "T3-W18",
+        "T8-W4a",
+        "T8-W4b",
+        "O1",
+        "O-DEVENV-PIN",
+        "O-FLEETBUSY",
+        "T7-W4b"
+      ],
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T2-W2b-deploy.json.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T2-W4",
+      "sprint": 2,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "T2-W2b",
+        "T8-W4a",
+        "T8-W4b",
+        "T7-W4b"
+      ],
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T2-W4-image-ship.json.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T2-W5",
+      "sprint": 3,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "O1",
+        "T2-W2b",
+        "T1-W6",
+        "T7-W4b"
+      ],
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T2-W5-runbook-compat.json.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T2-W6",
+      "sprint": 2,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "O1",
+        "T2-W2b",
+        "T7-W4",
+        "T7-W4b"
+      ],
+      "next_action": "Implement and verify the canonical WP acceptance at docs/runbook/secret-rotation.md; docs/plan/evidence/au1.8-fabricd-secret-rotation.json.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T3-W7",
+      "sprint": 3,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "O1",
+        "T2-W2b",
+        "T1-W6",
+        "T7-W4b"
+      ],
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T3-W7-moat.json.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T3-W8",
+      "sprint": 3,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "O1",
+        "T3-W7",
+        "T1-W6",
+        "T7-W4b"
+      ],
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T3-W8-inventory-hitrate.json.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T4-W7",
+      "sprint": 3,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "T4-W2",
+        "T9-W1",
+        "O-BILLING",
+        "R1",
+        "R2",
+        "T1-W6",
+        "T7-W4b"
+      ],
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T4-W7-money.json.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T4-W8",
+      "sprint": 3,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "T4-W2",
+        "T9-W1",
+        "O-BILLING",
+        "T1-W6",
+        "T7-W4b"
+      ],
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T4-W8-billing-reconcile.json.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T5-W4",
+      "sprint": 4,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "D7",
+        "D3",
+        "D8",
+        "R3",
+        "T5-W1",
+        "T1-W6",
+        "T7-W4b"
+      ],
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T5-W4-stranger.json.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T5-W5",
+      "sprint": 4,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "D7",
+        "D3",
+        "D8",
+        "R3",
+        "T5-W4",
+        "T1-W6",
+        "T7-W4b"
+      ],
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T5-W5-stranger-adversarial.json.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T5-W6",
+      "sprint": 4,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "T3-W18",
+        "D7",
+        "D3",
+        "T5-W3",
+        "O-PUBLISH",
+        "T7-W4b"
+      ],
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T5-W6-release-artifacts.json.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T6-W5",
+      "sprint": 3,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "O1",
+        "T1-W6",
+        "T7-W4b"
+      ],
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T6-W5-e2e.json.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T6-W6",
+      "sprint": 3,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "T6-W9",
+        "T6-W12",
+        "O-CANARY",
+        "T7-W4b"
+      ],
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T6-W6-canary.json.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T6-W7",
+      "sprint": 3,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "T2-W2b",
+        "T1-W6",
+        "T7-W4b"
+      ],
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T6-W7-authz.json.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T6-W9",
+      "sprint": 1,
+      "state": "prepared",
+      "implementation": "partial",
+      "owner": "root",
+      "dependencies": [
+        "T6-W4",
+        "O-CANARY",
+        "T7-W4b"
+      ],
+      "next_action": "Reconcile remaining alert-rule coverage and obtain version-bound real-channel delivery evidence.",
+      "blockers": [],
+      "commits": [
+        "bb165bad54125460ebae213e405df3a75baa6566"
+      ],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T6-W10",
+      "sprint": 4,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "T6-W6",
+        "T6-W9",
+        "T6-W12",
+        "T6-W14",
+        "T1-W6",
+        "O-CANARY-ACTIVATE",
+        "T7-W4b"
+      ],
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T6-W14-canary-no-wake.json; docs/plan/evidence/T6-W10-alerting-depth.json.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T6-W11",
+      "sprint": 4,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "T1-W6",
+        "T7-W4b"
+      ],
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T6-W11-runbook-execution.json.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T7-W5",
+      "sprint": 4,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "O1",
+        "O-CFRATE",
+        "T3-W7",
+        "T1-W6",
+        "T7-W4b"
+      ],
+      "next_action": "Implement and verify the canonical WP acceptance at docs/product/pricing.md; docs/plan/evidence/au7.11-queued-running-latency.json.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T6-W12",
+      "sprint": 3,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "T6-W15",
+        "T6-W9",
+        "T3-W16",
+        "O-CFINVENTORY",
+        "T7-W4b"
+      ],
+      "next_action": "Implement and verify the canonical WP acceptance at deploy/cost-monitor/Containerfile; deploy/cost-monitor/config.schema.json.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T3-W18",
+      "sprint": 1,
+      "state": "prepared",
+      "implementation": "partial",
+      "owner": "root",
+      "dependencies": [
+        "T3-W17",
+        "T7-W4b"
+      ],
+      "next_action": "Implement and execute the genuine three-state 10/10 and nonempty ordered resume proof, including side-effect and running-instance observations. Existing live artifact remains RED.",
+      "blockers": [
+        "Three-state live matrix and nonempty resume not executed; running-box/side-effect proof absent."
+      ],
+      "commits": [
+        "bb165bad54125460ebae213e405df3a75baa6566"
+      ],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": [
+        "docs/plan/evidence/T3-W18-containment-live.json"
+      ]
+    },
+    {
+      "id": "T6-W13",
+      "sprint": 1,
+      "state": "prepared",
+      "implementation": "partial",
+      "owner": "root",
+      "dependencies": [
+        "T6-W4",
+        "T6-W9",
+        "O-CANARY",
+        "T7-W4b"
+      ],
+      "next_action": "Verify complete key-lane behavior and collect twelve-tick deployed evidence after composition.",
+      "blockers": [],
+      "commits": [
+        "bb165bad54125460ebae213e405df3a75baa6566"
+      ],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    },
+    {
+      "id": "T6-W14",
+      "sprint": 4,
+      "state": "backlog",
+      "implementation": "unknown",
+      "owner": "root",
+      "dependencies": [
+        "T6-W13",
+        "T6-W12",
+        "T1-W6",
+        "O-CANARY",
+        "O-MONITORHOST",
+        "T7-W4b"
+      ],
+      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare-fabricd/src/index.ts; deploy/cloudflare-fabricd/src/lifecycle.ts.",
+      "blockers": [],
+      "commits": [],
+      "review": {
+        "status": "pending",
+        "commit": null,
+        "evidence": []
+      },
+      "evidence": []
+    }
+  ],
+  "findings": [
+    {
+      "id": "F-20260905-001",
+      "wp": "T6-W4",
+      "sprint": 1,
+      "severity": "high",
+      "state": "fixed",
+      "owner": "root",
+      "summary": "Stress workflow embeds dispatch inputs in shell source and accepts unbounded resource counts.",
+      "reproduction": "Inspect corelink-stress.yml setup n assignment and sleep source interpolation; count and hold_seconds are unvalidated workflow_dispatch strings.",
+      "acceptance": "Env-only quoted input passage; reject nondecimal/out-of-range count (1..100) and hold_seconds (1..300) before dispatch; injection sentinel never executes; final result rejects failed/skipped/cancelled stress.",
+      "blocks_delivery": true,
+      "commits": [
+        "f77e4d03fa0db053522bd6571a9ef5286099a130"
+      ],
+      "evidence": [
+        "docs/plan/execution/2026-09-05-stress-inputs.json"
+      ]
+    }
+  ],
+  "activity": [
+    {
+      "at": "2026-09-05T22:54:39.372774+00:00",
+      "task": "Established isolated Sprint1 integration, ledger and reviewed source composition",
+      "owner": "root",
+      "state": "completed",
+      "scope": [
+        "docs/plan/delivery-ledger.json",
+        "docs/plan/delivery-ledger.md"
+      ]
+    },
+    {
+      "at": "2026-09-05T22:54:39.372774+00:00",
+      "task": "Mechanical ledger validator",
+      "owner": "delivery_ledger_validator",
+      "state": "integrated",
+      "scope": [
+        "scripts/dev/delivery-ledger.py",
+        "scripts/dev/test_delivery_ledger.py"
+      ]
+    },
+    {
+      "at": "2026-09-05T22:54:39.372774+00:00",
+      "task": "Stress input and result repair",
+      "owner": "sprint1_stress_fix",
+      "state": "integrated",
+      "scope": [
+        ".github/workflows/corelink-stress.yml",
+        "scripts/ci/stress-inputs.sh",
+        "scripts/ci/stress-inputs.selftest.sh"
+      ]
+    },
+    {
+      "at": "2026-09-05T22:54:39.372774+00:00",
+      "task": "Verified R1/clw and existing mint-probe seam (read-only)",
+      "owner": "sprint1_external_seams",
+      "state": "completed",
+      "scope": []
+    },
+    {
+      "at": "2026-09-05T22:54:39.372774+00:00",
+      "task": "Sprint1 source scope reconciliation (read-only)",
+      "owner": "sprint1_scope",
+      "state": "completed",
+      "scope": []
+    },
+    {
+      "at": "2026-09-05T22:59:46.324136+00:00",
+      "task": "Missing secret-scan lane",
+      "owner": "sprint1_secret_scan",
+      "state": "integrated",
+      "scope": [
+        ".github/workflows/secret-scan.yml",
+        "scripts/ci/secret-scan.sh",
+        "scripts/ci/secret-scan.selftest.sh"
+      ]
+    },
+    {
+      "at": "2026-09-05T23:05:51.968660+00:00",
+      "task": "Pin eight remaining mutable workflow actions",
+      "owner": "sprint1_external_seams",
+      "state": "integrated",
+      "scope": [
+        ".github/workflows/build-cf-container-images.yml",
+        ".github/workflows/release.yml",
+        ".github/workflows/ci.yml",
+        ".github/workflows/dogfood-smoke.yml",
+        ".github/workflows/build-fabricd-image.yml",
+        ".github/workflows/deploy-spawn-worker.yml"
+      ]
+    },
+    {
+      "at": "2026-09-05T23:17:43.225934+00:00",
+      "task": "Close remaining Sprint1 implementation and external capabilities",
+      "owner": "root",
+      "state": "active",
+      "scope": []
+    }
+  ]
+}
