@@ -253,6 +253,9 @@ PY
   cat > "$DYNAMIC_TMP/bin/corelink" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ -n "${GITHUB_OUTPUT+x}" || -n "${GITHUB_PATH+x}" ]]; then
+  printf 'control-file-env-present\n' > "$DYNAMIC_CAPTURE.control-env"
+fi
 printf 'stub-corelink-executed\n' > "$DYNAMIC_CAPTURE.marker"
 printf '%s\0' "$@" > "$DYNAMIC_CAPTURE.argv"
 {
@@ -346,9 +349,38 @@ IDSTUB
     if [[ -e "$DYNAMIC_CAPTURE.id" ]]; then
       dynamic_fail "$label id command executed"
     fi
+    if [[ -e "$DYNAMIC_CAPTURE.control-env" ]]; then
+      dynamic_fail "$label corelink inherited GitHub control-file env"
+    fi
+    [[ -s "$GITHUB_OUTPUT" ]] || dynamic_fail "$label parent GITHUB_OUTPUT was lost"
     if find "$case_dir/work" -name pwned -print -quit | grep -q .; then
       dynamic_fail "$label payload executed shell code"
     fi
+
+    # Negative cleanup matrix: all paths use the required basename but must be
+    # rejected unless they are direct children of canonical RUNNER_TEMP.
+    outside_parent="$DYNAMIC_TMP/outside-parent"
+    sibling_parent="$case_dir/runner-sibling"
+    link_target="$case_dir/link-target"
+    link_path="$RUNNER_TEMP/corelink.symlink"
+    mkdir -p "$outside_parent/corelink.outside" "$sibling_parent/corelink.sibling" "$link_target/corelink.target"
+    printf '%s\n' sentinel > "$outside_parent/corelink.outside/sentinel"
+    printf '%s\n' sentinel > "$sibling_parent/corelink.sibling/sentinel"
+    printf '%s\n' sentinel > "$link_target/corelink.target/sentinel"
+    ln -s "$link_target/corelink.target" "$link_path"
+    for bad_path in "$outside_parent/corelink.outside" "$sibling_parent/corelink.sibling" "$link_path"; do
+      export STEP_RUN_TEMP_DIR="$bad_path"
+      set +e
+      (cd "$case_dir/work" && source "$DYNAMIC_TMP/env-cleanup" && bash "$DYNAMIC_TMP/cleanup") >"$case_dir/negative-cleanup.log" 2>&1
+      cleanup_status=$?
+      set -e
+      [[ "$cleanup_status" -ne 0 ]] || dynamic_fail "$label accepted invalid cleanup path $bad_path"
+    done
+    [[ -f "$outside_parent/corelink.outside/sentinel" ]] || dynamic_fail "$label touched outside sentinel"
+    [[ -f "$sibling_parent/corelink.sibling/sentinel" ]] || dynamic_fail "$label touched sibling sentinel"
+    [[ -L "$link_path" && -f "$link_target/corelink.target/sentinel" ]] || dynamic_fail "$label followed cleanup symlink"
+    rm -f -- "$link_path"
+    rm -rf -- "$outside_parent" "$sibling_parent" "$link_target"
 
     if [[ "$expected_run" -eq 0 ]]; then
       [[ -f "$DYNAMIC_CAPTURE.argv" && -f "$DYNAMIC_CAPTURE.env" ]] || dynamic_fail "$label capture missing"

@@ -155,7 +155,7 @@ runs:
         CORELINK_OUTPUT_FILE="$CORELINK_TMP_DIR/output.json"
         echo "temp_dir=$CORELINK_TMP_DIR" >> "$GITHUB_OUTPUT"
         set +e
-        JSON_OUT=$(corelink "${ARGS[@]}" 2>"$CORELINK_STDERR_FILE")
+        JSON_OUT=$(env -u GITHUB_OUTPUT -u GITHUB_PATH corelink "${ARGS[@]}" 2>"$CORELINK_STDERR_FILE")
         RAW_EXIT=$?
         set -e
 
@@ -249,7 +249,24 @@ runs:
       env:
         CORELINK_TMP_DIR: ${{ steps.run.outputs.temp_dir }}
       run: |
-        if [[ -n "${CORELINK_TMP_DIR:-}" && -d "$CORELINK_TMP_DIR" ]]; then
-          rm -f -- "$CORELINK_TMP_DIR/stderr" "$CORELINK_TMP_DIR/output.json"
-          rmdir -- "$CORELINK_TMP_DIR" 2>/dev/null || true
+        if [[ -z "${CORELINK_TMP_DIR:-}" ]]; then
+          exit 0
         fi
+        RUNNER_TEMP_PARENT="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+        if [[ "$RUNNER_TEMP_PARENT" != /* || ! -d "$RUNNER_TEMP_PARENT" ]]; then
+          echo "::error::invalid RUNNER_TEMP cleanup parent" >&2
+          exit 1
+        fi
+        RUNNER_TEMP_PARENT=$(cd -P -- "$RUNNER_TEMP_PARENT" && pwd -P)
+        CORELINK_TMP_PARENT=$(cd -P -- "$(dirname -- "$CORELINK_TMP_DIR")" 2>/dev/null && pwd -P) || {
+          echo "::error::invalid CoreLink temporary path parent" >&2
+          exit 1
+        }
+        if [[ "$CORELINK_TMP_PARENT" != "$RUNNER_TEMP_PARENT" || \
+              "$(basename -- "$CORELINK_TMP_DIR")" != corelink.* || \
+              -L "$CORELINK_TMP_DIR" || ! -d "$CORELINK_TMP_DIR" ]]; then
+          echo "::error::refusing to clean an invalid CoreLink temporary path" >&2
+          exit 1
+        fi
+        rm -f -- "$CORELINK_TMP_DIR/stderr" "$CORELINK_TMP_DIR/output.json"
+        rmdir -- "$CORELINK_TMP_DIR"
