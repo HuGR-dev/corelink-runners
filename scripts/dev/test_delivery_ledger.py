@@ -1,4 +1,5 @@
 import importlib.util
+import copy
 import json
 import tempfile
 import unittest
@@ -60,7 +61,10 @@ class LedgerCorruptionTests(unittest.TestCase):
         value = self.fixture()
         self.assertEqual(self.validate_fixture(value), [])
         value["items"][16]["dependencies"] = ["T99-W99"]
-        value["findings"] = [{"id": "F-1", "wp": "T99-W99", "sprint": 1, "state": "open", "blocks_delivery": True}]
+        value["findings"] = [{"id": "F-1", "wp": "T99-W99", "sprint": 1,
+            "state": "open", "blocks_delivery": True, "severity": "high", "owner": "root",
+            "summary": "fixture", "reproduction": "fixture", "acceptance": "fixture",
+            "commits": [], "evidence": []}]
         errors = self.validate_fixture(value)
         self.assertTrue(any("dependencies do not match" in error for error in errors))
         self.assertTrue(any("unknown WP" in error for error in errors))
@@ -90,6 +94,76 @@ class LedgerCorruptionTests(unittest.TestCase):
         value["sprint_scope"]["1"][0], value["sprint_scope"]["2"][0] = value["sprint_scope"]["2"][0], value["sprint_scope"]["1"][0]
         errors = self.validate_fixture(value)
         self.assertTrue(any("frozen membership" in error for error in errors))
+
+    def ready_fixture(self, sprint_id=1):
+        value = self.fixture()
+        head = ledger.git(self.repo, "rev-parse", "HEAD")
+        for item in value["items"]:
+            if item["sprint"] == sprint_id:
+                item.update(state="ready", implementation="complete", commits=[head])
+                item["review"] = {"status": "approved", "commit": head, "evidence": ["fixture review"]}
+        value["sprints"][sprint_id - 1]["tip_commit"] = head
+        return value, head
+
+    def test_malformed_records_fail_without_traceback(self):
+        base = self.fixture()
+        self.assertEqual(self.validate_fixture(base), [])
+        cases = [("baseline", None), ("sprints", None), ("findings", [None]),
+                 ("activity", [None]), ("items", [None])]
+        for key, malformed in cases:
+            with self.subTest(field=key):
+                value = copy.deepcopy(base)
+                value[key] = malformed
+                self.assertTrue(self.validate_fixture(value))
+        for key, malformed in [("dependencies", [{}]), ("sprint", None),
+                               ("review", None), ("state", {})]:
+            with self.subTest(item_field=key):
+                value = copy.deepcopy(base)
+                value["items"][0][key] = malformed
+                self.assertTrue(self.validate_fixture(value))
+        value = copy.deepcopy(base)
+        value["sprint_scope"]["1"][0] = {}
+        self.assertTrue(self.validate_fixture(value))
+
+    def test_source_binding_and_earlier_dependencies(self):
+        value, head = self.ready_fixture()
+        self.assertEqual(self.validate_fixture(value, "ready-ci", 1), [])
+        value["sprints"][0]["ci"] = {"status": "running", "commit": "0" * 40, "evidence": []}
+        self.assertTrue(any("CI source" in e for e in self.validate_fixture(value)))
+        value["sprints"][0]["ci"]["commit"] = head
+        self.assertEqual(self.validate_fixture(value), [])
+        value, _ = self.ready_fixture(2)
+        self.assertTrue(any("is not ready" in e for e in self.validate_fixture(value, "ready-ci", 2)))
+
+    def test_delivered_record_requires_complete_sprint_and_no_open_finding(self):
+        value, head = self.ready_fixture()
+        row = value["sprints"][0]
+        row.update(state="delivered", merge_commit=head,
+                   ci={"status": "passed", "commit": head, "evidence": ["fixture CI"]},
+                   acceptance={"status": "passed", "evidence": ["fixture acceptance"]})
+        self.assertEqual(self.validate_fixture(value), [])
+        for item in value["items"]:
+            if item["sprint"] == 1:
+                item["state"] = "delivered"
+        self.assertEqual(self.validate_fixture(value), [])
+        value["findings"] = [{"id": "F-1", "wp": "T6-W4", "sprint": 1,
+            "state": "open", "blocks_delivery": True, "severity": "high", "owner": "root",
+            "summary": "fixture", "reproduction": "fixture", "acceptance": "fixture",
+            "commits": [], "evidence": []}]
+        self.assertTrue(any("open blocking finding" in e for e in self.validate_fixture(value)))
+        value["findings"] = []
+        next(i for i in value["items"] if i["sprint"] == 1)["implementation"] = "partial"
+        self.assertTrue(any("complete implementation" in e for e in self.validate_fixture(value)))
+
+    def test_external_dependency_and_baseline_count_cannot_disappear(self):
+        value = self.fixture()
+        self.assertEqual(self.validate_fixture(value), [])
+        item = next(i for i in value["items"] if i["id"] == "T4-W4")
+        item["dependencies"].remove("R1")
+        self.assertTrue(any("dependencies do not match" in e for e in self.validate_fixture(value)))
+        value = self.fixture()
+        value["baseline"]["recorded_delivered"] = 0
+        self.assertTrue(any("computed 16" in e for e in self.validate_fixture(value)))
 
 
 if __name__ == "__main__":

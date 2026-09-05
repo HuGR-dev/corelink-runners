@@ -97,12 +97,91 @@ def list_field(obj: object, name: str, errors: Errors) -> list:
     return value if isinstance(value, list) else []
 
 
+def structure(value: object) -> list[str]:
+    """Reject malformed nested values before set operations or Git checks."""
+    errors = Errors()
+
+    def object_at(obj: object, label: str) -> bool:
+        errors.require(isinstance(obj, dict), f"{label}: expected object")
+        return isinstance(obj, dict)
+
+    def strings(obj: dict, keys: tuple[str, ...], label: str) -> None:
+        for key in keys:
+            errors.require(isinstance(obj.get(key), str) and bool(obj[key].strip()),
+                           f"{label}.{key}: expected nonempty string")
+
+    def arrays(obj: dict, keys: tuple[str, ...], label: str) -> None:
+        for key in keys:
+            entries = obj.get(key)
+            errors.require(isinstance(entries, list) and
+                           all(isinstance(x, str) and bool(x.strip()) for x in entries),
+                           f"{label}.{key}: expected string array")
+
+    if not object_at(value, "ledger"):
+        return errors.items
+    strings(value, ("schema_version", "registry"), "ledger")
+    errors.require(value.get("registry") == "docs/plan/2026-09-01-reconciled-dispatch-dag.md",
+                   "registry must name the canonical dispatch registry")
+    baseline = value.get("baseline")
+    if object_at(baseline, "baseline"):
+        strings(baseline, ("main_commit", "prepared_commit", "source"), "baseline")
+        errors.require(type(baseline.get("recorded_delivered")) is int,
+                       "baseline.recorded_delivered: expected integer")
+    scope = value.get("sprint_scope")
+    if object_at(scope, "sprint_scope"):
+        errors.require(set(scope) == {"1", "2", "3", "4"}, "sprint_scope needs keys 1..4")
+        arrays(scope, ("1", "2", "3", "4"), "sprint_scope")
+    for section in ("items", "sprints", "findings", "activity"):
+        rows = value.get(section)
+        errors.require(isinstance(rows, list), f"{section}: expected array")
+        for row in rows if isinstance(rows, list) else []:
+            if not object_at(row, section):
+                continue
+            if section == "items":
+                strings(row, ("id", "state", "implementation", "owner", "next_action"), section)
+                arrays(row, ("dependencies", "blockers", "commits", "evidence"), section)
+                errors.require(type(row.get("sprint")) is int, "item sprint: expected integer")
+                review = row.get("review")
+                if object_at(review, "review"):
+                    strings(review, ("status",), "review")
+                    arrays(review, ("evidence",), "review")
+                    errors.require(review.get("commit") is None or sha(review["commit"]),
+                                   "review.commit: expected SHA or null")
+            elif section == "sprints":
+                errors.require(type(row.get("id")) is int, "sprint id: expected integer")
+                strings(row, ("state",), section)
+                for key in ("tip_commit", "merge_commit"):
+                    errors.require(row.get(key) is None or sha(row[key]), f"sprint {key}: invalid SHA")
+                for key in ("ci", "acceptance"):
+                    detail = row.get(key)
+                    if object_at(detail, key):
+                        strings(detail, ("status",), key)
+                        arrays(detail, ("evidence",), key)
+                        if key == "ci":
+                            errors.require(detail.get("commit") is None or sha(detail["commit"]),
+                                           "ci.commit: expected SHA or null")
+            elif section == "findings":
+                strings(row, ("id", "wp", "state", "severity", "owner", "summary",
+                              "reproduction", "acceptance"), section)
+                arrays(row, ("commits", "evidence"), section)
+                errors.require(type(row.get("sprint")) is int, "finding sprint: expected integer")
+                errors.require(type(row.get("blocks_delivery")) is bool,
+                               "finding blocks_delivery: expected boolean")
+            else:
+                strings(row, ("at", "task", "owner", "state"), section)
+                arrays(row, ("scope",), section)
+    return errors.items
+
+
 def validate(repo: Path, ledger_path: Path, mode: str, target: int | None = None) -> tuple[list[str], str]:
     errors = Errors()
     try:
         ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
     except Exception as exc:
         return [f"cannot read ledger: {exc}"], ""
+    shape_errors = structure(ledger)
+    if shape_errors:
+        return shape_errors, ""
     errors.require(isinstance(ledger, dict), "ledger must be an object")
     if not isinstance(ledger, dict):
         return errors.items, ""
@@ -141,6 +220,9 @@ def validate(repo: Path, ledger_path: Path, mode: str, target: int | None = None
         errors.require(isinstance(item.get("sprint"), int) and item.get("sprint") in range(5), f"{ident}: sprint must be 0..4")
         errors.require(isinstance(item.get("state"), str) and item.get("state") in {"recorded_delivered", "backlog", "active", "prepared", "ready", "delivered"}, f"{ident}: invalid state")
         errors.require(isinstance(item.get("implementation"), str) and item.get("implementation") in {"unknown", "missing", "partial", "complete"}, f"{ident}: invalid implementation")
+        if item.get("state") in {"ready", "delivered"}:
+            errors.require(item.get("implementation") == "complete",
+                           f"{ident}: ready/delivered requires complete implementation")
         errors.require(bool(item.get("owner")) and isinstance(item.get("owner"), str), f"{ident}: owner is required")
         errors.require(bool(item.get("next_action")) and isinstance(item.get("next_action"), str), f"{ident}: next_action is required")
         errors.require(isinstance(item.get("dependencies"), list), f"{ident}: dependencies must be an array")
@@ -268,6 +350,12 @@ def validate(repo: Path, ledger_path: Path, mode: str, target: int | None = None
             errors.require(not item.get("blockers"), f"{ident}: blockers remain")
             review = item.get("review", {})
             errors.require(review.get("status") == "approved" and sha(review.get("commit")) and review.get("commit") in item.get("commits", []), f"{ident}: approved review commit is missing from commits")
+            for dep in item["dependencies"]:
+                if dep in item_map:
+                    predecessor = item_map[dep]
+                    allowed = {"recorded_delivered"} if predecessor["sprint"] == 0 else {"ready", "delivered"}
+                    errors.require(predecessor["state"] in allowed,
+                                   f"{ident}: dependency {dep} is not ready")
         sprint_row = by_sprint.get(sprint, {})
         tip = sprint_row.get("tip_commit")
         errors.require(valid_commit(repo, tip), f"sprint {sprint}: tip_commit is not an existing commit")
@@ -294,6 +382,12 @@ def validate(repo: Path, ledger_path: Path, mode: str, target: int | None = None
     for sprint, row in by_sprint.items():
         if row.get("state") == "delivered":
             ready_check(sprint, True)
+        elif row["ci"]["status"] in {"running", "passed", "failed"}:
+            ready_check(sprint, False)
+            errors.require(row["ci"]["commit"] == row["tip_commit"],
+                           f"sprint {sprint}: CI source must equal the composed tip")
+            if row["ci"]["status"] in {"passed", "failed"}:
+                errors.require(bool(row["ci"]["evidence"]), f"sprint {sprint}: CI result needs evidence")
 
     lines = [f"historical recorded source WPs: {sum(1 for i in item_map.values() if i.get('sprint') == 0)}; newly complete sprints: {sum(1 for s in range(1, 5) if by_sprint.get(s, {}).get('state') == 'delivered')} / 4"]
     for sprint in range(1, 5):
