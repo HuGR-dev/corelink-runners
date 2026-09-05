@@ -87,6 +87,7 @@ validate_auth_file() {
 }
 
 if [ "${EXEC_SERVER_AUTH_TOKEN+x}" = x ]; then
+    unset CORELINK_AUTH_BRIDGED CORELINK_DUMB_INIT
     bridge_exec_auth_token
     export CORELINK_AUTH_BRIDGED=1
     # Re-exec with the provider bearer removed from the kernel environment.
