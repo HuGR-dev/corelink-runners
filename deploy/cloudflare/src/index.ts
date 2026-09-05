@@ -641,22 +641,22 @@ export class ContainmentDO extends DurableObject<Env> {
     return this.effectLedger().reapEffect(input);
   }
 
-  // Canonical owner-ledger RPCs. Keep these explicit on the DO so route code
-  // cannot silently fall back to the pre-R14 compatibility adapters.
-  async prepare(input: SpawnOwnerRequest): Promise<OwnerResult> { return this.effectLedger().prepare(input); }
-  async acquire(input: SpawnOwnerRequest): Promise<OwnerResult> { return this.effectLedger().acquire(input); }
-  async mirror(input: SpawnOwnerRequest, result?: "acquired" | "owned"): Promise<SpawnMirrorObservation> { return this.effectLedger().mirror(input, result); }
-  async confirm(input: SpawnOwnerRequest, mirrorDigest: string, readbackDigest: string): Promise<OwnerResult> { return this.effectLedger().confirm(input, mirrorDigest, readbackDigest); }
-  async beginEffect(input: SpawnOwnerRequest, permitId: string): Promise<OwnerResult>;
-  async beginEffect(eventId: string, owner: string, epoch: number, now?: number, permitId?: string): Promise<ContainmentEvent["effect_permit"]>;
-  async beginEffect(input: SpawnOwnerRequest | string, permitIdOrOwner: string, epoch?: number, now = Date.now(), legacyPermitId?: string): Promise<OwnerResult | ContainmentEvent["effect_permit"]> {
-    if (typeof input === "string") return this.beginContainmentEventEffect(input, permitIdOrOwner, epoch!, now, legacyPermitId);
-    return this.effectLedger().beginEffect(input, permitIdOrOwner);
+  // Canonical owner-ledger RPCs have unique names. The legacy beginEffect
+  // seam below is intentionally event-shaped and can never dispatch a
+  // canonical SpawnOwnerRequest by accident.
+  async ownerPrepare(input: SpawnOwnerRequest): Promise<OwnerResult> { return this.effectLedger().prepare(input); }
+  async ownerAcquire(input: SpawnOwnerRequest): Promise<OwnerResult> { return this.effectLedger().acquire(input); }
+  async ownerMirror(input: SpawnOwnerRequest, result?: "acquired" | "owned"): Promise<SpawnMirrorObservation> { return this.effectLedger().mirror(input, result); }
+  async ownerConfirm(input: SpawnOwnerRequest, mirrorDigest: string, readbackDigest: string): Promise<OwnerResult> { return this.effectLedger().confirm(input, mirrorDigest, readbackDigest); }
+  async ownerBegin(input: SpawnOwnerRequest, permitId: string): Promise<OwnerResult> { return this.effectLedger().beginEffect(input, permitId); }
+  async ownerBind(input: SpawnOwnerRequest, permitId: string, proofId: string, binding: ContainmentEffectBinding): Promise<OwnerResult> { return this.effectLedger().bind(input, permitId, proofId, binding); }
+  async ownerMarkDriving(input: SpawnOwnerRequest, permitId: string, proofId: string): Promise<OwnerResult> { return this.effectLedger().markDriving(input, permitId, proofId); }
+  async ownerCommit(input: SpawnOwnerRequest, permitId: string, proofId: string, receipt: ContainmentEffectReceipt): Promise<OwnerResult> { return this.effectLedger().commitEffect(input, permitId, proofId, receipt) as Promise<OwnerResult>; }
+  async ownerObserve(pointerKey: string, attemptKey: string): Promise<OwnerResult> { return this.effectLedger().observe(pointerKey, attemptKey); }
+  async ownerAbort(input: SpawnOwnerRequest): Promise<OwnerResult> { return this.effectLedger().abort(input); }
+  async beginEffect(eventId: string, owner: string, epoch: number, now = Date.now(), permitId?: string): Promise<ContainmentEvent["effect_permit"]> {
+    return this.beginContainmentEventEffect(eventId, owner, epoch, now, permitId);
   }
-  async bind(input: SpawnOwnerRequest, permitId: string, proofId: string, binding: ContainmentEffectBinding): Promise<OwnerResult> { return this.effectLedger().bind(input, permitId, proofId, binding); }
-  async markDriving(input: SpawnOwnerRequest, permitId: string, proofId: string): Promise<OwnerResult> { return this.effectLedger().markDriving(input, permitId, proofId); }
-  async observe(pointerKey: string, attemptKey: string): Promise<OwnerResult> { return this.effectLedger().observe(pointerKey, attemptKey); }
-  async abort(input: SpawnOwnerRequest): Promise<OwnerResult> { return this.effectLedger().abort(input); }
 
   private async ensureJobIndex(
     s: any,
@@ -4443,6 +4443,7 @@ export async function runContainmentDrain(env: Env, dependencies: ContainmentDra
         resource_id: `job:${event.repo}/${event.job_id}`,
         idempotency_key: event.effect_id,
         claim: () => claim(env.RUNNER_JOB_PATS!, event.job_id),
+        release: () => releaseSpawnClaim(env.RUNNER_JOB_PATS!, event.job_id),
         drive: async driveOpts => {
           const typed = driveOpts as ContainmentDriveOpts & { effect_id: string; containment_event_id: string; effect_permit_id: string };
           await bindClaim(env, typed);
@@ -5446,7 +5447,8 @@ export async function redriveOrphanedJobs(
             idempotency_key: effect,
             beforeClaim: () => release(env.RUNNER_JOB_PATS, redriveJobId),
             claim: () => claim(env.RUNNER_JOB_PATS, redriveJobId),
-            afterClaim: async () => (await ownedAuthority.beginReservedEffect(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, ownedReservation.path, effect)).status === "eligible",
+            release: () => releaseSpawnClaim(env.RUNNER_JOB_PATS!, redriveJobId),
+            afterClaim: async () => { const status = (await ownedAuthority.beginReservedEffect(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, ownedReservation.path, effect)).status; return status === "eligible" || status === "ineligible"; },
             drive: driveOpts => drive(env, driveOpts),
             finalize: async () => {
               const terminal = await ownedAuthority.completeRedrive(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, effect);
@@ -5688,7 +5690,7 @@ export async function retryOrphanedSpawns(
         beforeClaim: () => kv.put(name, JSON.stringify(bumped), { expirationTtl: ORPHAN_TTL_S }),
         claim: () => claimSpawn(kv, ownedReservation.job_id),
         release: () => releaseSpawnClaim(kv, ownedReservation.job_id),
-        afterClaim: async () => (await ownedAuthority.beginReservedEffect(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, ownedReservation.path, effect)).status === "eligible",
+        afterClaim: async () => { const status = (await ownedAuthority.beginReservedEffect(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, ownedReservation.path, effect)).status; return status === "eligible" || status === "ineligible"; },
         drive: driveOpts => drive(env, driveOpts),
         finalize: async () => {
           const terminal = await ownedAuthority.completeRedrive(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, effect);

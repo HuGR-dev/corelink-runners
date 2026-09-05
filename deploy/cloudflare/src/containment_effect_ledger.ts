@@ -115,6 +115,11 @@ export interface OwnerRecordV1 {
   created_ms: number;
   expires_ms: number;
   tombstone: boolean;
+  // Durable records carry these typed payloads alongside their identity
+  // projection; keeping them optional preserves the pre-R14 wire shape.
+  permit?: ContainmentEffectPermit | null;
+  binding?: ContainmentEffectBinding | null;
+  effect_observation?: EffectObservationV1 | ContainmentEffectReceipt;
   attempt_key?: string;
   reap_proof?: EffectReapProofV1;
 }
@@ -437,6 +442,13 @@ export class ContainmentEffectLedger {
       const a: any = await s.get(attemptKey(t)); const p: any = await s.get(activeKey(t)); const existing = await s.get<EffectStartProofV1>(startKey(t));
       if (!a || !p || !pointerMatchesAttempt(p, a, t) || a.permit_id !== permit_id
         || !permitValid(a.permit, t) || await sha256(t.token) !== a.permit.owner_token_digest) return this.out(t, "unknown", "UNKNOWN");
+      // A crash after bind leaves a durable BOUND record and proof. Returning
+      // that proof is a read-only idempotent recovery path; it never creates a
+      // new provider effect start. DRIVING/COMMITTED are handled by observe.
+      if (a.state === "BOUND" && a.effect_start_proof_id) {
+        if (!proofValid(existing, t, permit_id) || existing.proof_id !== a.effect_start_proof_id) return this.out(t, "unknown", "UNKNOWN");
+        const out = await this.out(t, "already_started", a.state, a); out.permit = a.permit; out.proof = existing; return out;
+      }
       if (a.state !== "PERMIT_ISSUED") return this.out(t, "rejected", a.state, a);
       if (a.effect_start_proof_id) {
         if (!proofValid(existing, t, permit_id) || existing.proof_id !== a.effect_start_proof_id) return this.out(t, "unknown", "UNKNOWN");

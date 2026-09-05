@@ -26,9 +26,18 @@ export interface ProviderNoEffectRefusal {
 export type ProviderDriveResult = ProviderDriveReceipt | ProviderNoEffectRefusal | void;
 
 export interface CanonicalEffectRouteDeps<TOpts extends object> {
-  ledger: Pick<ContainmentEffectLedger,
-    "prepare" | "acquire" | "mirror" | "confirm" | "beginEffect" | "bind" |
-    "markDriving" | "commitEffect" | "observe" | "abort">;
+  ledger: {
+    ownerPrepare: (request: SpawnOwnerRequest) => Promise<OwnerResult>;
+    ownerAcquire: (request: SpawnOwnerRequest) => Promise<OwnerResult>;
+    ownerMirror: (request: SpawnOwnerRequest, result?: "acquired" | "owned") => Promise<SpawnMirrorObservation>;
+    ownerConfirm: (request: SpawnOwnerRequest, mirrorDigest: string, readbackDigest: string) => Promise<OwnerResult>;
+    ownerBegin: (request: SpawnOwnerRequest, permitId: string) => Promise<OwnerResult>;
+    ownerBind: (request: SpawnOwnerRequest, permitId: string, proofId: string, binding: ContainmentEffectBinding) => Promise<OwnerResult>;
+    ownerMarkDriving: (request: SpawnOwnerRequest, permitId: string, proofId: string) => Promise<OwnerResult>;
+    ownerCommit: (request: SpawnOwnerRequest, permitId: string, proofId: string, receipt: ContainmentEffectReceipt) => Promise<OwnerResult>;
+    ownerObserve: (pointerKey: string, attemptKey: string) => Promise<OwnerResult>;
+    ownerAbort: (request: SpawnOwnerRequest) => Promise<OwnerResult>;
+  };
   tuple: OwnerTuple;
   opts: TOpts;
   provider: string;
@@ -87,10 +96,9 @@ function observationDigest(mirror: SpawnMirrorObservation): string | null {
 }
 
 /**
- * Execute one provider effect through the canonical owner ledger. Claim
- * admission happens before owner records are created, so a losing caller has
- * no provider, mirror, binding, or permit artifact. Once beginEffect creates
- * a proof, every failure is terminal/unknown and is never retried by time.
+ * Execute one provider effect through the canonical owner ledger. Every
+ * pre-DRIVING state is resumable from the durable owner record; once DRIVING
+ * is observed the provider is never called again by this route.
  */
 export async function runCanonicalEffect<TOpts extends object>(
   deps: CanonicalEffectRouteDeps<TOpts>,
@@ -109,52 +117,44 @@ export async function runCanonicalEffect<TOpts extends object>(
     // Finalization retries must observe the exact owner tuple before claim
     // admission. A committed pointer is already an idempotency record; asking
     // the provider or competing for the external claim again is forbidden.
-    const existing = await deps.ledger.observe(containmentSpawnActiveKey(tuple), containmentSpawnAttemptKey(tuple));
+    const existing = await deps.ledger.ownerObserve(containmentSpawnActiveKey(tuple), containmentSpawnAttemptKey(tuple));
     const recovered = existing.kind === "committed" || (existing.kind === "owned" && existing.state === "DRIVING")
       ? terminal(existing) : null;
     if (recovered) {
       if (recovered.status === "committed" && deps.finalize) recovered.finalized = await deps.finalize(recovered.receipt);
       return recovered;
     }
+    const resumable = existing.kind === "owned" && (existing.state === "PREPARED" || existing.state === "CLAIM_ACQUIRED" || existing.state === "PERMIT_ISSUED" || existing.state === "BOUND");
+    let state: "PREPARED" | "CLAIM_ACQUIRED" | "PERMIT_ISSUED" | "BOUND" = (resumable ? existing.state : "PREPARED") as "PREPARED" | "CLAIM_ACQUIRED" | "PERMIT_ISSUED" | "BOUND";
+    let ownerRecord: any = resumable ? existing.record : undefined;
     if (deps.beforeClaim) await deps.beforeClaim();
     claimAdmitted = await deps.claim();
-    if (!claimAdmitted) return { status: "claim_refused" };
+    // The durable tuple is the claim for a resumable pre-effect attempt. A
+    // stale external claim must not wedge a permit awaiting its beforeBegin.
+    if (!claimAdmitted && !resumable) return { status: "claim_refused" };
+    if (resumable) claimAdmitted = true;
     if (deps.afterClaim && !(await deps.afterClaim())) { await releaseClaim(); return { status: "busy" }; }
     if (deps.beforeDrive && !(await deps.beforeDrive())) { await releaseClaim(); return { status: "before_drive_refused" }; }
 
-    const prepared = await deps.ledger.prepare(req);
-    const previous = prepared.kind === "committed" || (prepared.kind === "owned" && prepared.state === "COMMITTED")
-      ? terminal(prepared) : null;
-    if (previous) {
-      if (previous.status === "committed" && deps.finalize) previous.finalized = await deps.finalize(previous.receipt);
-      return previous;
+    if (!resumable) {
+      const prepared = await deps.ledger.ownerPrepare(req);
+      const previous = prepared.kind === "committed" || (prepared.kind === "owned" && prepared.state === "COMMITTED") ? terminal(prepared) : null;
+      if (previous) {
+        if (previous.status === "committed" && deps.finalize) previous.finalized = await deps.finalize(previous.receipt);
+        return previous;
+      }
+      if (prepared.kind !== "prepared") { await releaseClaim(); return prepared.kind === "busy" ? { status: "busy" } : (terminal(prepared) ?? { status: "busy" }); }
+      ownerRecord = prepared.record;
     }
-    if (prepared.kind !== "prepared") { await releaseClaim(); return { status: "busy" }; }
-
-    const acquired = await deps.ledger.acquire(req);
-    if (acquired.kind !== "acquired") {
-      const prior = terminal(acquired);
-      await releaseClaim();
-      return acquired.kind === "busy" && acquired.state !== "DRIVING" ? { status: "busy" } : (prior ?? { status: "busy" });
+    if (state === "PREPARED") {
+      const acquired = await deps.ledger.ownerAcquire(req);
+      if (acquired.kind !== "acquired" && !(acquired.kind === "owned" && acquired.state === "CLAIM_ACQUIRED")) {
+        await releaseClaim(); return acquired.kind === "busy" ? { status: "busy" } : (terminal(acquired) ?? { status: "busy" });
+      }
+      state = "CLAIM_ACQUIRED"; ownerRecord = acquired.record ?? ownerRecord;
     }
-    const mirrored = await deps.ledger.mirror(req, "acquired");
-    const mirrorDigest = observationDigest(mirrored);
-    if (mirrored.kind !== "exact" || !mirrorDigest) {
-      await deps.ledger.abort(req).catch(() => undefined);
-      await releaseClaim();
-      return { status: mirrored.kind === "mismatch" ? "mirror_tampered" : "unauthorized" };
-    }
-    const confirmed = await deps.ledger.confirm(
-      { ...req, observation_kind: mirrored.kind, observation_digest: mirrorDigest },
-      mirrorDigest,
-      mirrorDigest,
-    );
-    if (confirmed.kind !== "permit_issued" || !confirmed.permit) {
-      const prior = terminal(confirmed);
-      await releaseClaim();
-      return prior ?? { status: "unauthorized" };
-    }
-    const permit = confirmed.permit;
+    let permit: ContainmentEffectPermit;
+    let proof: NonNullable<OwnerResult["proof"]>;
     const bindingBase = {
       schema_version: 1 as const,
       provider: deps.provider,
@@ -165,21 +165,69 @@ export async function runCanonicalEffect<TOpts extends object>(
       ...bindingBase,
       binding_sha256: await sha256(JSON.stringify(bindingBase)),
     };
-    if (deps.beforeBegin && !(await deps.beforeBegin(permit))) {
-      await releaseClaim();
-      return { status: "before_drive_refused" };
+    if (state === "CLAIM_ACQUIRED") {
+      const mirrored = await deps.ledger.ownerMirror(req, "acquired");
+      const mirrorDigest = observationDigest(mirrored);
+      if (mirrored.kind !== "exact" || !mirrorDigest) {
+        await deps.ledger.ownerAbort(req).catch(() => undefined);
+        await releaseClaim();
+        return { status: mirrored.kind === "mismatch" ? "mirror_tampered" : "unauthorized" };
+      }
+      const confirmed = await deps.ledger.ownerConfirm(
+        { ...req, observation_kind: mirrored.kind, observation_digest: mirrorDigest }, mirrorDigest, mirrorDigest,
+      );
+      if (confirmed.kind !== "permit_issued" || !confirmed.permit) {
+        await releaseClaim(); return terminal(confirmed) ?? { status: "unauthorized" };
+      }
+      permit = confirmed.permit; ownerRecord = confirmed.record; state = "PERMIT_ISSUED";
+    } else {
+      const persisted = ownerRecord as { permit?: ContainmentEffectPermit; permit_id?: string | null } | undefined;
+      if (!persisted?.permit || persisted.permit.permit_id !== persisted.permit_id) {
+        await releaseClaim(); return { status: "unknown_terminal", reason: "missing or corrupt persisted permit" };
+      }
+      permit = persisted.permit;
     }
-    const started = await deps.ledger.beginEffect(req, permit.permit_id);
-    if (!started.proof || started.kind !== "already_started") {
-      const prior = terminal(started);
-      await releaseClaim();
-      return prior ?? { status: "unauthorized" };
+    if (state === "PERMIT_ISSUED") {
+      if (deps.beforeBegin && !(await deps.beforeBegin(permit))) {
+        await releaseClaim(); return { status: "before_drive_refused" };
+      }
+      const started = await deps.ledger.ownerBegin(req, permit.permit_id);
+      if (!started.proof || (started.kind !== "already_started" && started.kind !== "owned")) {
+        await releaseClaim(); return terminal(started) ?? { status: "unavailable" };
+      }
+      proof = started.proof; ownerRecord = started.record ?? ownerRecord; state = "PERMIT_ISSUED";
+    } else {
+      const persisted = ownerRecord as { effect_start_proof_id?: string | null } | undefined;
+      if (!persisted?.effect_start_proof_id) {
+        await releaseClaim(); return { status: "unknown_terminal", reason: "missing persisted start proof" };
+      }
+      // ownerBegin is idempotent for BOUND and returns the validated durable
+      // proof; it does not create a second effect start.
+      const started = await deps.ledger.ownerBegin(req, permit.permit_id);
+      if (!started.proof || (started.kind !== "already_started" && started.kind !== "owned")) {
+        await releaseClaim(); return { status: "unknown_terminal", reason: "corrupt persisted start proof" };
+      }
+      proof = started.proof;
     }
-    const proof = started.proof;
-    const bound = await deps.ledger.bind(req, permit.permit_id, proof.proof_id, binding);
-    if (bound.kind !== "bound") { await releaseClaim(); return terminal(bound) ?? { status: "unauthorized" }; }
-    const driving = await deps.ledger.markDriving(req, permit.permit_id, proof.proof_id);
-    if (driving.kind !== "driving" && driving.kind !== "already_started") {
+    let boundBinding = binding;
+    if (state === "PERMIT_ISSUED") {
+      const bound = await deps.ledger.ownerBind(req, permit.permit_id, proof.proof_id, binding);
+      if (bound.kind !== "bound") { await releaseClaim(); return terminal(bound) ?? { status: "unauthorized" }; }
+      boundBinding = (bound.record as any)?.binding ?? binding;
+    } else {
+      const persistedBinding = (ownerRecord as { binding?: ContainmentEffectBinding } | undefined)?.binding;
+      if (!persistedBinding || persistedBinding.binding_sha256 !== binding.binding_sha256) {
+        await releaseClaim(); return { status: "unknown_terminal", reason: "missing or corrupt persisted binding" };
+      }
+      boundBinding = persistedBinding;
+    }
+    const driving = await deps.ledger.ownerMarkDriving(req, permit.permit_id, proof.proof_id);
+    // A concurrent retry that observes an already-started transition is
+    // terminal uncertainty, never permission to invoke the provider again.
+    if (driving.kind === "already_started") {
+      await releaseClaim(); return { status: "unknown_terminal", reason: "effect already driving" };
+    }
+    if (driving.kind !== "driving") {
       await releaseClaim();
       return terminal(driving) ?? { status: "unknown_terminal" };
     }
@@ -192,7 +240,7 @@ export async function runCanonicalEffect<TOpts extends object>(
         effect_id: tuple.effect_id,
         effect_permit_id: permit.permit_id,
         effect_proof_id: proof.proof_id,
-        effect_binding: binding,
+        effect_binding: boundBinding,
       });
     } catch (error) {
       return { status: "unknown_terminal", reason: error instanceof Error ? error.message : "provider failed" };
@@ -202,7 +250,7 @@ export async function runCanonicalEffect<TOpts extends object>(
     }
     if ("status" in provider) return { status: "unknown_terminal", reason: provider.reason ?? "provider refused after DRIVING" };
     if (!text(provider.resource_id) || !text(provider.receipt_id) || !text(provider.provider_signature)) return { status: "unknown_terminal", reason: "provider returned no trusted receipt" };
-    if (provider.resource_id !== binding.resource_id) return { status: "unknown_terminal", reason: "provider resource mismatch" };
+    if (provider.resource_id !== boundBinding.resource_id) return { status: "unknown_terminal", reason: "provider resource mismatch" };
     const receiptBase = {
       schema_version: 1 as const,
       trusted: true as const,
@@ -212,12 +260,12 @@ export async function runCanonicalEffect<TOpts extends object>(
       event_id: tuple.event_id,
       reservation_epoch: tuple.reservation_epoch,
       effect_id: tuple.effect_id,
-      provider: binding.provider,
-      resource_id: binding.resource_id,
-      idempotency_key: binding.idempotency_key,
+      provider: boundBinding.provider,
+      resource_id: boundBinding.resource_id,
+      idempotency_key: boundBinding.idempotency_key,
       nonce: tuple.caller_nonce,
       permit_id: permit.permit_id,
-      binding_sha256: binding.binding_sha256,
+      binding_sha256: boundBinding.binding_sha256,
       receipt_id: provider.receipt_id,
       provider_signature: provider.provider_signature,
     };
@@ -225,7 +273,7 @@ export async function runCanonicalEffect<TOpts extends object>(
       ...receiptBase,
       receipt_sha256: await sha256(JSON.stringify(receiptBase)),
     };
-    const committed = await deps.ledger.commitEffect(req, permit.permit_id, proof.proof_id, receipt);
+    const committed = await deps.ledger.ownerCommit(req, permit.permit_id, proof.proof_id, receipt);
     if (committed.kind !== "committed") return terminal(committed) ?? { status: "unknown_terminal" };
     const finalized = deps.finalize ? await deps.finalize(receipt) : true;
     return { status: "committed", receipt, finalized };

@@ -22,8 +22,13 @@ function tuple(effect = "containment:v1:intake/acme/repo/123"): OwnerTuple {
 }
 function deps(ledger: ContainmentEffectLedger, t: OwnerTuple) {
   let claimed = false;
+  const source = ledger as any;
   return {
-    ledger, tuple: t, opts: { jobId: t.job_id }, provider: "fake", resource_id: `job:${t.repo}/${t.job_id}`, idempotency_key: t.effect_id,
+    ledger: source.ownerPrepare ? source : {
+      ownerPrepare: source.prepare.bind(source), ownerAcquire: source.acquire.bind(source), ownerMirror: source.mirror.bind(source),
+      ownerConfirm: source.confirm.bind(source), ownerBegin: source.beginEffect.bind(source), ownerBind: source.bind.bind(source),
+      ownerMarkDriving: source.markDriving.bind(source), ownerCommit: source.commitEffect.bind(source), ownerObserve: source.observe.bind(source), ownerAbort: source.abort.bind(source),
+    }, tuple: t, opts: { jobId: t.job_id }, provider: "fake", resource_id: `job:${t.repo}/${t.job_id}`, idempotency_key: t.effect_id,
     claim: async () => !claimed && (claimed = true), release: async () => { claimed = false; },
     drive: async () => ({ resource_id: `job:${t.repo}/${t.job_id}`, receipt_id: "receipt-1", provider_signature: "sig-1" }),
   };
@@ -83,8 +88,8 @@ describe("canonical containment effect route", () => {
   it("releases a claim when canonical prepare is already busy", async () => {
     let released = 0; let claimed = 0;
     const ledger = {
-      observe: async () => ({ kind: "unknown", schema_version: 1, tuple_digest: "", attempt_key: "", active_pointer_key: "", permit: null, proof: null, state: "UNKNOWN" }),
-      prepare: async () => ({ kind: "busy", schema_version: 1, tuple_digest: "", attempt_key: "", active_pointer_key: "", permit: null, proof: null, state: "PREPARED" }),
+      ownerObserve: async () => ({ kind: "unknown", schema_version: 1, tuple_digest: "", attempt_key: "", active_pointer_key: "", permit: null, proof: null, state: "UNKNOWN" }),
+      ownerPrepare: async () => ({ kind: "busy", schema_version: 1, tuple_digest: "", attempt_key: "", active_pointer_key: "", permit: null, proof: null, state: "PREPARED" }),
     } as any;
     const result = await runCanonicalEffect({ ...deps(ledger, tuple()), claim: async () => { claimed++; return true; }, release: async () => { released++; } });
     expect(result.status).toBe("busy"); expect(claimed).toBe(1); expect(released).toBe(1);
@@ -93,9 +98,9 @@ describe("canonical containment effect route", () => {
   it("releases a claim when canonical acquire is already busy", async () => {
     let released = 0;
     const ledger = {
-      observe: async () => ({ kind: "unknown", schema_version: 1, tuple_digest: "", attempt_key: "", active_pointer_key: "", permit: null, proof: null, state: "UNKNOWN" }),
-      prepare: async () => ({ kind: "prepared", schema_version: 1, tuple_digest: "", attempt_key: "", active_pointer_key: "", permit: null, proof: null, state: "PREPARED" }),
-      acquire: async () => ({ kind: "busy", schema_version: 1, tuple_digest: "", attempt_key: "", active_pointer_key: "", permit: null, proof: null, state: "CLAIM_ACQUIRED" }),
+      ownerObserve: async () => ({ kind: "unknown", schema_version: 1, tuple_digest: "", attempt_key: "", active_pointer_key: "", permit: null, proof: null, state: "UNKNOWN" }),
+      ownerPrepare: async () => ({ kind: "prepared", schema_version: 1, tuple_digest: "", attempt_key: "", active_pointer_key: "", permit: null, proof: null, state: "PREPARED" }),
+      ownerAcquire: async () => ({ kind: "busy", schema_version: 1, tuple_digest: "", attempt_key: "", active_pointer_key: "", permit: null, proof: null, state: "CLAIM_ACQUIRED" }),
     } as any;
     const result = await runCanonicalEffect({ ...deps(ledger, tuple()), release: async () => { released++; } });
     expect(result.status).toBe("busy"); expect(released).toBe(1);
@@ -125,5 +130,38 @@ describe("canonical containment effect route", () => {
     const common = { ...deps(ledger, t), claim: async () => { if (claimed) return false; claimed = true; return true; }, drive: async () => { drives++; return { resource_id: `job:${t.repo}/${t.job_id}`, receipt_id: `r-${drives}`, provider_signature: "s" }; } };
     const results = await Promise.all([runCanonicalEffect(common), runCanonicalEffect(common)]);
     expect(results.filter(x => x.status === "committed")).toHaveLength(1); expect(drives).toBe(1);
+  });
+
+  it("releases a permit claim after beforeBegin refusal/throw and retries", async () => {
+    const { ledger } = make(); const t = tuple(); let claimed = false; let released = 0; let before = 0; let drives = 0;
+    const common = () => ({ ...deps(ledger, t), claim: async () => !claimed && (claimed = true), release: async () => { claimed = false; released++; },
+      beforeBegin: async () => { before++; if (before === 1) return false; if (before === 2) throw new Error("transient"); return true; },
+      drive: async () => { drives++; return { resource_id: `job:${t.repo}/${t.job_id}`, receipt_id: "retry", provider_signature: "sig" }; } });
+    expect((await runCanonicalEffect(common())).status).toBe("before_drive_refused");
+    expect((await runCanonicalEffect(common())).status).toBe("unavailable");
+    expect((await runCanonicalEffect(common())).status).toBe("committed");
+    expect(released).toBe(2); expect(drives).toBe(1);
+  });
+
+  it("resumes from BOUND after a mark-driving crash without a second begin", async () => {
+    const { ledger } = make(); const t = tuple(); let claimed = false; let releases = 0; let markCalls = 0; let drives = 0;
+    const base = deps(ledger, t);
+    const first = { ...base, claim: async () => !claimed && (claimed = true), release: async () => { claimed = false; releases++; },
+      ledger: { ...base.ledger, ownerMarkDriving: async (...args: any[]) => { markCalls++; if (markCalls === 1) throw new Error("crash after bind"); return (base.ledger as any).ownerMarkDriving(...args); },
+      }, drive: async () => { drives++; return { resource_id: `job:${t.repo}/${t.job_id}`, receipt_id: "bound-retry", provider_signature: "sig" }; } };
+    expect((await runCanonicalEffect(first)).status).toBe("unavailable");
+    const second = { ...base, ledger: first.ledger, claim: async () => !claimed && (claimed = true), release: async () => { claimed = false; releases++; },
+      drive: first.drive };
+    expect((await runCanonicalEffect(second)).status).toBe("committed");
+    expect(markCalls).toBe(2); expect(releases).toBe(1); expect(drives).toBe(1);
+  });
+
+  it("releases claim on afterClaim refusal and throw before owner mutation", async () => {
+    const { ledger, storage } = make(); const t = tuple(); let claimed = false; let released = 0; let calls = 0;
+    const makeAttempt = () => ({ ...deps(ledger, t), claim: async () => !claimed && (claimed = true), release: async () => { claimed = false; released++; },
+      afterClaim: async () => { calls++; if (calls === 2) throw new Error("reservation unavailable"); return false; } });
+    expect((await runCanonicalEffect(makeAttempt())).status).toBe("busy");
+    expect((await runCanonicalEffect(makeAttempt())).status).toBe("unavailable");
+    expect(released).toBe(2); expect(storage.map.size).toBe(0);
   });
 });
