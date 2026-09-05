@@ -16,6 +16,7 @@ vi.mock("@cloudflare/containers", () => ({
 
 import worker, { ContainmentDO, MetricsDO, parseContainmentSwitch, retryOrphanedSpawns, type ContainmentEvent } from "../src/index";
 import { COUNTER_NAMES } from "../src/metrics";
+import { canonicalWorkflowJobIdFromRaw } from "../src/workflow_job_id";
 
 const T0 = 1_750_000_000_000;
 const SECRET = "containment-webhook-secret";
@@ -160,6 +161,28 @@ beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(T0); vi.clearAllMocks();
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe("T3-W17 switch/HMAC intake matrix", () => {
+  it("lexically rejects non-canonical workflow job ids before JSON admission", async () => {
+    expect(canonicalWorkflowJobIdFromRaw('{"workflow_job":{"id":1}}')).toBe("1");
+    expect(canonicalWorkflowJobIdFromRaw('{"workflow_job":{"id":"1"}}')).toBe("1");
+    for (const token of ["1e3", "1.0", "[1]", "null", "true", "\" 1\"", "\"01\"", "-1"]) {
+      expect(canonicalWorkflowJobIdFromRaw(`{"workflow_job":{"id":${token}}}`)).toBeNull();
+    }
+    expect(canonicalWorkflowJobIdFromRaw('{"other":{"a":[{"b":1}]},"workflow_job":{"id":1}}')).toBe("1");
+    for (const raw of [
+      '{"workflow_job":{"id":1},"workflow_job":{"id":2}}',
+      '{"workflow_job":{"id":1,"id":2}}',
+      '{"workflow_job":{"id":"\\u0031"}}',
+      '{"other":{"a":[1}},"workflow_job":{"id":1}}',
+      '{"workflow_job":{"id":1}} trailing',
+    ]) expect(canonicalWorkflowJobIdFromRaw(raw)).toBeNull();
+    const d = makeDO(); const store = makeKv(); const metrics = makeMetrics();
+    for (const token of ["1e3", "1.0", "[1]"]) {
+      const raw = new TextEncoder().encode(`{"action":"queued","workflow_job":{"id":${token},"labels":["corelink"]},"repository":{"full_name":"acme/repo"},"installation":{"id":7}}`);
+      expect((await worker.fetch(await request(raw), env(d, store, metrics), ctx() as never)).status).toBe(400);
+    }
+    expect(d.storage.map.size).toBe(0); expect(store.put).not.toHaveBeenCalled(); expect(store.delete).not.toHaveBeenCalled();
+  });
+
   it("uses the exact independent 0/1/invalid table", () => {
     expect(parseContainmentSwitch(undefined)).toBe("normal"); expect(parseContainmentSwitch("0")).toBe("normal"); expect(parseContainmentSwitch("1")).toBe("paused");
     for (const raw of ["", " ", "\t", " 0", "0 ", "01", "2", "true", "TRUE", "false", "on", "yes"]) expect(parseContainmentSwitch(raw)).toBe("invalid");
@@ -277,8 +300,17 @@ describe("T3-W17 switch/HMAC intake matrix", () => {
 });
 
 describe("durable intake authority and delivery identity", () => {
+  it("fresh paused webhook explicitly bootstraps its repo-job pair before admission", async () => {
+    const d = makeDO(); const c = ctx();
+    const response = await worker.fetch(await request(body(777)), env(d, makeKv(), makeMetrics(), { AUTOSCALER_INTAKE_PAUSED: "1" }), c as never);
+    expect(response.status).toBe(202);
+    expect(d.storage.map.get("containment:v1:repo-job-index:acme/repo/777")).toMatchObject({ active_count: 1, active_event_ids: [expect.any(String)] });
+    expect(d.storage.map.get("containment:v1:repo-job-index-marker:acme/repo/777")).toMatchObject({ schema_version: 1, repo: "acme/repo", job_id: "777" });
+  });
+
   it("appends an ordered event with canonical schema and deduplicates/conflicts", async () => {
     const d = makeDO();
+    await d.instance.bootstrapContainedEventIndex("acme/repo", "1");
     expect((await d.instance.append(event(1))).status).toBe("appended");
     expect((await d.instance.append(event(1))).status).toBe("duplicate");
     expect((await d.instance.append({ ...event(1), body_sha256: "b".repeat(64) })).status).toBe("conflict");
@@ -289,6 +321,7 @@ describe("durable intake authority and delivery identity", () => {
 
   it("allocates 100 distinct pause sequences atomically with exact metadata and pause records", async () => {
     const d = makeDO();
+    await Promise.all([...Array(100)].map((_, i) => d.instance.bootstrapContainedEventIndex("acme/repo", String(i + 1))));
     const results = await Promise.all([...Array(100)].map((_, i) => d.instance.append(event(i + 1))));
     expect(results.every((result) => result.status === "appended")).toBe(true);
     expect(await d.instance.snapshot()).toEqual({ schema_version: 1, next_pause_seq: 101, drain_cursor: 0, backlog_count: 100, lease_epoch: 0, lease: null, drain_requested: false });
@@ -337,6 +370,7 @@ describe("durable intake authority and delivery identity", () => {
     const fetchSpy = vi.fn(async () => new Response(null, { status: 204 })); vi.stubGlobal("fetch", fetchSpy);
     const metricBump = vi.spyOn(metrics.instance, "bump");
     kv.map.set("91", "pat-91"); kv.map.set("jtenant:91", "tenant-91"); kv.map.set("orphan:91", JSON.stringify({ jobId: "91" })); kv.map.set("jhandle:91", "handle-91");
+    await d.instance.bootstrapContainedEventIndex("acme/repo", "91");
     const reservation = await d.instance.reserveRedriveCandidate("acme/repo", "91");
     expect(reservation.status).toBe("reserved");
     await d.instance.append(event(91));
@@ -371,7 +405,7 @@ describe("durable intake authority and delivery identity", () => {
     expect((await route(undefined)).status).toBe(401); expect((await route("{}", "wrong")).status).toBe(401); expect((await route("{}", "admin")).status).toBe(400); expect((await route(" ", "admin")).status).toBe(400);
     const empty = { schema_version: 1, drain_requested: false, intake_paused: true, backlog_count: 0, drain_cursor: 0 };
     expect(await (await route(undefined, "admin")).json()).toEqual(empty); expect(await (await route("", "admin")).json()).toEqual(empty);
-    await d.instance.append(event(501));
+    await d.instance.bootstrapContainedEventIndex("acme/repo", "501"); await d.instance.append(event(501));
     const expected = { schema_version: 1, drain_requested: true, intake_paused: true, backlog_count: 1, drain_cursor: 0 };
     const pausedBacklogCtx = ctx();
     expect(await (await worker.fetch(new Request("https://worker/internal/v1/containment/drain", { method: "POST", headers: { "x-corelink-internal-auth": "admin" }, body: "" }), base, pausedBacklogCtx as never)).json()).toEqual(expected);
@@ -380,7 +414,7 @@ describe("durable intake authority and delivery identity", () => {
   });
 
   it("never bypasses an older backlog on a fresh normal intake", async () => {
-    const d = makeDO(); await d.instance.append(event(600)); const c = ctx(); const e = env(d, makeKv(), makeMetrics(), { RUNNER_JOB_PATS: undefined });
+    const d = makeDO(); await d.instance.bootstrapContainedEventIndex("acme/repo", "600"); await d.instance.append(event(600)); const c = ctx(); const e = env(d, makeKv(), makeMetrics(), { RUNNER_JOB_PATS: undefined });
     const response = await worker.fetch(await request(body(601), { delivery: "fresh-after-backlog" }), e, c as never);
     expect(response.status).toBe(202); expect(await response.json()).toMatchObject({ contained: true, deduped: false });
     expect(await d.instance.snapshot()).toMatchObject({ next_pause_seq: 3, backlog_count: 2 });
