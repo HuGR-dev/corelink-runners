@@ -13,7 +13,9 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use corelink_fabric::{InMemoryLedger, LeaseLedger, TenantId, TenantPlan};
 use corelink_fabric_api::{AcquireRequest, CloseRequest, paths};
-use corelink_fabric_server::{AppState, BoxProvisioner, Clock, StaticPlans, StaticTokenStore, app};
+use corelink_fabric_server::{
+    AppState, BoxProvisioner, CleanupTeardown, Clock, StaticPlans, StaticTokenStore, app,
+};
 use corelink_runner::lease::ContainerSpec;
 use tower::ServiceExt;
 
@@ -235,6 +237,10 @@ async fn failed_acquire_via_failing_provisioner_emits_no_slot() {
         }
         fn teardown(&self, _: &str) -> anyhow::Result<()> {
             Ok(())
+        }
+        fn teardown_pending(&self, _: &str) -> CleanupTeardown {
+            // The fixture fails before creating any provider object.
+            CleanupTeardown::ConfirmedDestroyed
         }
     }
 
