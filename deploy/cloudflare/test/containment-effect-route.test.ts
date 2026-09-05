@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { ContainmentEffectLedger, type OwnerTuple } from "../src/containment_effect_ledger";
-import { intakeOwnerTuple, redriveOwnerTuple, runCanonicalEffect } from "../src/containment_effect_route";
+import { containmentSpawnActiveKey, containmentSpawnAttemptKey, intakeOwnerTuple, redriveOwnerTuple, runCanonicalEffect } from "../src/containment_effect_route";
 
 const clone = <T>(value: T): T => value === undefined ? value : JSON.parse(JSON.stringify(value)) as T;
 class Storage {
@@ -205,9 +205,17 @@ describe("canonical containment effect route", () => {
   });
 
   it("freezes ambiguous legacy response and blocks a cross-lease drive", async () => {
-    const { ledger } = make(); const t = { ...tuple(), path: "drain" as const }; let drives = 0; let firstRelease = 0;
+    const { ledger, storage } = make(); const t = { ...tuple(), path: "drain" as const }; let drives = 0; let firstRelease = 0;
     const first = await runCanonicalEffect({ ...deps(ledger, t), beforeConfirm: async () => { throw new Error("ambiguous"); }, release: async () => { firstRelease++; }, drive: async () => { drives++; return undefined; } });
     expect(first.status).toBe("unknown_terminal");
+    const attempt = storage.map.get(containmentSpawnAttemptKey(t)) as any;
+    const active = storage.map.get(containmentSpawnActiveKey(t)) as any;
+    expect(attempt).toBeDefined(); expect(active).toBeDefined();
+    expect(attempt.state).toBe("UNKNOWN"); expect(active.state).toBe("UNKNOWN");
+    expect(attempt.tuple).toEqual(t); expect(active.tuple).toEqual(t);
+    expect(attempt.caller_nonce).toBe(t.caller_nonce); expect(active.caller_nonce).toBe(t.caller_nonce);
+    expect(attempt.permit_id).toBeNull(); expect(attempt.binding_id).toBeNull(); expect(attempt.effect_start_proof_id).toBeNull(); expect(attempt.effect_started).toBe(false);
+    expect(active.permit_id).toBeNull(); expect(active.binding_id).toBeNull(); expect(active.effect_start_proof_id).toBeNull();
     const next = { ...t, owner: "drain:other", token: "drain-other", lease_epoch: 3, caller_nonce: "1234567890abcdef1234567890abcdef" };
     const second = await runCanonicalEffect({ ...deps(ledger, next), beforeConfirm: async () => { throw new Error("must not be reached"); }, drive: async () => { drives++; return undefined; } });
     expect(second.status).toBe("unknown_terminal"); expect(drives).toBe(0); expect(firstRelease).toBe(0);
