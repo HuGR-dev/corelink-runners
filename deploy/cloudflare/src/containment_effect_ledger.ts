@@ -1,4 +1,9 @@
 import type { KvLike } from "./lib";
+import {
+  HEX, NONCE, PREFIX, activeKey, activePointerProjection, attemptKey, bindingKey,
+  bindingValid, mirrorKey, normalizeTuple, permitValid, pointerValid, proofValid, recordValid, requestTuple,
+  startKey, validText,
+} from "./containment_effect_ledger_records";
 
 export type OwnerPath = "intake" | "drain" | "redrive";
 export type ContainmentEffectState =
@@ -196,66 +201,6 @@ interface EffectStorage {
   put(key: string, value: unknown): Promise<void>;
   transaction<T>(fn: (s: EffectStorage) => Promise<T>): Promise<T>;
 }
-const HEX = /^[0-9a-f]{64}$/;
-const NONCE = /^[0-9a-f]{32}$/;
-const REPO = /^[a-z0-9](?:[a-z0-9_.-]*[a-z0-9])?\/[a-z0-9](?:[a-z0-9_.-]*[a-z0-9])?$/;
-const PREFIX = "containment:v1:";
-const enc = (v: string) => encodeURIComponent(v);
-const trim = (v: string) => v.replace(/^[\u0009-\u000d\u0020]+|[\u0009-\u000d\u0020]+$/g, "");
-const validEpoch = (n: unknown): n is number => Number.isSafeInteger(n) && (n as number) >= 1;
-const validText = (v: unknown): v is string => typeof v === "string" && v.length > 0 && v.length <= 512 && !/[\u0000\n\r]/.test(v);
-function normalizeRepoJob(repo: unknown, job: unknown): { repo: string; job_id: string } | null {
-  if (typeof repo !== "string" || typeof job !== "string") return null;
-  const r = trim(repo).toLowerCase(); if (!REPO.test(r) || !/^[1-9][0-9]*$/.test(job)) return null;
-  try { if (BigInt(job) > BigInt(Number.MAX_SAFE_INTEGER)) return null; } catch { return null; }
-  return { repo: r, job_id: String(BigInt(job)) };
-}
-function normalizeTuple(input: unknown, nonce?: unknown): OwnerTuple | null {
-  if (!input || typeof input !== "object") return null;
-  const t = input as Partial<OwnerTuple>;
-  const id = normalizeRepoJob(t.repo, t.job_id);
-  const n = nonce ?? t.caller_nonce;
-  if (!id || (nonce !== undefined && t.caller_nonce !== nonce)
-    || !validText(t.event_id) || !validText(t.effect_id)
-    || !validText(t.owner) || !validText(t.token)
-    || !NONCE.test(String(n ?? ""))) return null;
-  const event_id = t.event_id;
-  const effect_id = t.effect_id;
-  const owner = t.owner;
-  const token = t.token;
-  if (t.path !== "intake" && t.path !== "drain" && t.path !== "redrive") return null;
-  if (!validEpoch(t.lease_epoch)) return null;
-  if (t.path === "redrive" ? !validEpoch(t.reservation_epoch) : t.reservation_epoch !== null) return null;
-  let drain_owner: string | null = null;
-  let drain_lease_epoch: number | null = null;
-  if (t.path === "redrive") {
-    if (!validText(t.drain_owner) || !validEpoch(t.drain_lease_epoch)) return null;
-    drain_owner = t.drain_owner;
-    drain_lease_epoch = t.drain_lease_epoch;
-  } else if (t.drain_owner !== null || t.drain_lease_epoch !== null) return null;
-  return {
-    ...id,
-    path: t.path,
-    event_id,
-    reservation_epoch: t.reservation_epoch,
-    effect_id,
-    owner,
-    token,
-    lease_epoch: t.lease_epoch,
-    drain_owner,
-    drain_lease_epoch,
-    caller_nonce: String(n),
-  };
-}
-function requestTuple(request: SpawnOwnerRequest): OwnerTuple | null {
-  if (!request || request.schema_version !== 1 || typeof request.caller_nonce !== "string"
-    || !NONCE.test(request.caller_nonce)) return null;
-  return normalizeTuple(request.tuple, request.caller_nonce);
-}
-const activeKey = (t: OwnerTuple) => `${PREFIX}spawn-active:${t.repo}/${t.job_id}/${t.path}/${enc(t.effect_id)}`;
-const attemptKey = (t: OwnerTuple) => `${PREFIX}spawn-attempt:${t.repo}/${t.job_id}/${t.path}/${enc(t.effect_id)}/${enc(t.caller_nonce)}`;
-const mirrorKey = (t: OwnerTuple) => `${PREFIX}spawn-mirror:${t.repo}/${t.job_id}/${t.path}/${enc(t.effect_id)}`;
-const startKey = (t: OwnerTuple) => `${PREFIX}effect-start:${t.repo}/${t.job_id}/${t.path}/${enc(t.effect_id)}`;
 function legacyTuple(i: ContainmentEffectIdentity, nonce: string, owner: string, token: string, epoch: number): OwnerTuple | null { return normalizeTuple({ ...i, path: "redrive", event_id: `${PREFIX}legacy:${i.effect_id}`, reservation_epoch: epoch, effect_id: i.effect_id, owner, token, lease_epoch: epoch, drain_owner: owner, drain_lease_epoch: epoch, caller_nonce: nonce }); }
 export function containmentSpawnActiveKey(t: OwnerTuple): string { return activeKey(t); }
 export function containmentSpawnAttemptKey(t: OwnerTuple): string { return attemptKey(t); }
@@ -273,100 +218,6 @@ export function containmentEffectMirrorKey(i: ContainmentEffectIdentity | OwnerT
 export async function sha256(value: string): Promise<string> { const b = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)); return [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, "0")).join(""); }
 export async function ownerTupleDigest(t: OwnerTuple): Promise<string> { return sha256(JSON.stringify(t)); }
 function rejected(): OwnerResult { return { schema_version: 1, kind: "rejected", tuple_digest: "", attempt_key: "", active_pointer_key: "", permit: null, proof: null, state: null }; }
-function recordValid(v: unknown, t: OwnerTuple): v is OwnerRecordV1 {
-  if (!v || typeof v !== "object") return false;
-  const r = v as Partial<OwnerRecordV1>;
-  const states = ["PREPARED", "CLAIM_ACQUIRED", "PERMIT_ISSUED", "BOUND",
-    "DRIVING", "COMMITTED", "ABORTED_PRE_EFFECT", "UNKNOWN"];
-  if (!(r.schema_version === 1 && r.nonce === t.caller_nonce
-    && r.repo === t.repo && r.job_id === t.job_id && r.path === t.path
-    && r.event_id === t.event_id && r.reservation_epoch === t.reservation_epoch
-    && r.effect_id === t.effect_id && r.owner === t.owner && r.token === t.token
-    && r.drain_owner === t.drain_owner && r.drain_lease_epoch === t.drain_lease_epoch
-    && r.caller_nonce === t.caller_nonce
-    && JSON.stringify(r.tuple) === JSON.stringify(t)
-    && states.includes(r.state as string)
-    && (r.permit_id === null || validText(r.permit_id))
-    && (r.binding_id === null || validText(r.binding_id))
-    && (r.effect_start_proof_id === null || validText(r.effect_start_proof_id))
-    && typeof r.effect_started === "boolean"
-    && Number.isFinite(r.created_ms) && Number.isFinite(r.expires_ms)
-    && typeof r.tombstone === "boolean")) return false;
-  const x = r as OwnerRecordV1 & {
-    permit?: ContainmentEffectPermit;
-    effect_observation?: EffectObservationV1;
-  };
-  const observation = x.effect_observation;
-  if (r.state === "PREPARED" || r.state === "CLAIM_ACQUIRED") {
-    return r.permit_id === null && r.binding_id === null
-      && r.effect_start_proof_id === null && r.effect_started === false
-      && r.tombstone === false;
-  }
-  if (r.state === "PERMIT_ISSUED") {
-    return r.permit_id !== null && r.binding_id === null
-      && ((r.effect_start_proof_id === null && r.effect_started === false)
-        || (validText(r.effect_start_proof_id) && r.effect_started === true))
-      && r.tombstone === false && permitValid(x.permit, t);
-  }
-  if (r.state === "BOUND") {
-    return r.permit_id !== null && r.binding_id !== null
-      && r.effect_start_proof_id !== null && r.effect_started === true
-      && r.tombstone === false && permitValid(x.permit, t);
-  }
-  if (r.state === "DRIVING" || r.state === "COMMITTED") {
-    return r.permit_id !== null && r.binding_id !== null
-      && r.effect_start_proof_id !== null && r.effect_started === true
-      && r.tombstone === false && permitValid(x.permit, t)
-      && (r.state !== "COMMITTED" || (!!observation
-        && observation.repo === t.repo && observation.job_id === t.job_id
-        && observation.path === t.path && observation.event_id === t.event_id
-        && observation.reservation_epoch === t.reservation_epoch
-        && observation.effect_id === t.effect_id));
-  }
-  if (r.state === "ABORTED_PRE_EFFECT") {
-    return r.tombstone === true && r.permit_id === null
-      && r.binding_id === null && r.effect_start_proof_id === null
-      && r.effect_started === false;
-  }
-  return r.state === "UNKNOWN" && r.tombstone === false;
-}
-function pointerValid(v: unknown, t: OwnerTuple): v is OwnerPointerV1 {
-  if (!v || typeof v !== "object") return false;
-  const p = v as Partial<OwnerPointerV1>;
-  return p.schema_version === 1 && p.nonce === t.caller_nonce
-    && JSON.stringify(p.tuple) === JSON.stringify(t)
-    && p.repo === t.repo && p.job_id === t.job_id && p.path === t.path
-    && p.event_id === t.event_id && p.reservation_epoch === t.reservation_epoch
-    && p.effect_id === t.effect_id && p.owner === t.owner && p.token === t.token
-    && p.lease_epoch === t.lease_epoch && p.drain_owner === t.drain_owner
-    && p.drain_lease_epoch === t.drain_lease_epoch && p.caller_nonce === t.caller_nonce
-    && p.attempt_key === attemptKey(t) && p.state !== undefined
-    && (p.permit_id === null || validText(p.permit_id))
-    && (p.binding_id === null || validText(p.binding_id))
-    && (p.effect_start_proof_id === null || validText(p.effect_start_proof_id))
-    && typeof p.tombstone === "boolean";
-}
-function permitValid(v: unknown, t: OwnerTuple): v is ContainmentEffectPermit {
-  if (!v || typeof v !== "object") return false;
-  const p = v as Partial<ContainmentEffectPermit>;
-  return p.schema_version === 1 && p.repo === t.repo && p.job_id === t.job_id
-    && p.path === t.path && p.event_id === t.event_id
-    && p.reservation_epoch === t.reservation_epoch && p.effect_id === t.effect_id
-    && p.issued_to_owner === t.owner && validEpoch(p.issued_to_epoch)
-    && validText(p.permit_id) && validText(p.owner_token_digest)
-    && Number.isFinite(p.issued_at_ms) && Number.isFinite(p.expires_ms);
-}
-function proofValid(v: unknown, t: OwnerTuple, permit: string): v is EffectStartProofV1 {
-  if (!v || typeof v !== "object") return false;
-  const p = v as Partial<EffectStartProofV1>;
-  return p.schema_version === 1 && p.repo === t.repo && p.job_id === t.job_id
-    && p.path === t.path && p.event_id === t.event_id
-    && p.reservation_epoch === t.reservation_epoch && p.effect_id === t.effect_id
-    && p.permit_id === permit && p.owner === t.owner && p.token === t.token
-    && p.caller_nonce === t.caller_nonce && p.writer === "ContainmentDO"
-    && validText(p.proof_id) && HEX.test(p.effect_request_digest)
-    && Number.isFinite(p.started_at_ms);
-}
 function mirrorShapeValid(v: unknown, t: OwnerTuple): v is SpawnMirrorPayloadV1 {
   if (!v || typeof v !== "object") return false;
   const m = v as Partial<SpawnMirrorPayloadV1>;
@@ -382,13 +233,15 @@ async function mirrorValid(v: unknown, t: OwnerTuple): Promise<boolean> {
   if (!mirrorShapeValid(v, t)) return false;
   return (v as SpawnMirrorPayloadV1).tuple_digest === await ownerTupleDigest(t);
 }
-function trustedReceipt(r: ContainmentEffectReceipt, t: OwnerTuple, permit: string, binding: string): boolean {
-  return r.trusted === true && r.repo === t.repo
+function trustedReceipt(r: ContainmentEffectReceipt, t: OwnerTuple, permit: string, binding: ContainmentEffectBinding | null): boolean {
+  return r.schema_version === 1 && r.trusted === true && !!binding && r.repo === t.repo
     && r.job_id === t.job_id && r.path === t.path
     && r.event_id === t.event_id && r.reservation_epoch === t.reservation_epoch
     && r.effect_id === t.effect_id
     && r.nonce === t.caller_nonce && r.permit_id === permit
-    && r.binding_sha256 === binding && validText(r.provider)
+    && r.binding_sha256 === binding.binding_sha256 && r.provider === binding.provider
+    && r.resource_id === binding.resource_id && r.idempotency_key === binding.idempotency_key
+    && validText(r.provider)
     && validText(r.resource_id) && validText(r.idempotency_key)
     && validText(r.receipt_id) && HEX.test(r.receipt_sha256)
     && validText(r.provider_signature);
@@ -404,19 +257,27 @@ function compat(r: OwnerRecordV1, t: OwnerTuple, receipt: ContainmentEffectRecei
     provider_receipt: receipt,
   };
 }
-function pointerFrom(r: OwnerRecordV1): OwnerPointerV1 {
-  const { created_ms: _created, expires_ms: _expires, effect_started: _started, ...pointer } = r;
-  return pointer as OwnerPointerV1;
-}
-
 export class ContainmentEffectLedger {
-  constructor(private readonly storage: EffectStorage, private readonly kv?: KvLike) {}
+  private readonly storage: EffectStorage;
+  constructor(storage: EffectStorage, private readonly kv?: KvLike) {
+    const pointerPut = (s: EffectStorage, key: string, value: unknown) =>
+      s.put(key, key.startsWith(`${PREFIX}spawn-active:`)
+        ? activePointerProjection(value as Record<string, unknown>) : value);
+    this.storage = {
+      get: storage.get.bind(storage),
+      put: (key, value) => pointerPut(storage, key, value),
+      transaction: fn => storage.transaction(s => fn({
+        get: s.get.bind(s), put: (key, value) => pointerPut(s, key, value),
+        transaction: s.transaction.bind(s),
+      })),
+    };
+  }
   private async out(t: OwnerTuple, kind: OwnerResult["kind"], state: ContainmentEffectState | null, record?: OwnerRecordV1): Promise<OwnerResult> { return { schema_version: 1, kind, tuple_digest: await ownerTupleDigest(t), attempt_key: attemptKey(t), active_pointer_key: activeKey(t), permit: null, proof: null, state, record }; }
   async observe(pointer: string, attempt: string): Promise<OwnerResult> {
     const p = await this.storage.get<OwnerRecordV1>(pointer);
     const a = await this.storage.get<OwnerRecordV1>(attempt);
-    if (!p || !a || !recordValid(p, p.tuple) || !recordValid(a, a.tuple)
-      || p.nonce !== a.nonce) {
+    if (!p || !a || !pointerValid(p, a.tuple) || !recordValid(a, a.tuple)
+      || p.attempt_key !== attempt || p.nonce !== a.nonce) {
       return { schema_version: 1, kind: "unknown", tuple_digest: "",
         attempt_key: attempt, active_pointer_key: pointer, permit: null,
         proof: null, state: "UNKNOWN" };
@@ -430,12 +291,17 @@ export class ContainmentEffectLedger {
       const raw = await s.get<OwnerPointerV1>(activeKey(t));
       const orphan = await s.get<OwnerRecordV1>(attemptKey(t));
       if (raw === undefined && orphan !== undefined) return this.out(t, "legacy_unknown", "UNKNOWN");
-      if (raw !== undefined && (!pointerValid(raw, raw.tuple)
-        || (raw.tombstone && raw.nonce === t.caller_nonce))) {
-        return this.out(t, "legacy_unknown", "UNKNOWN");
+      if (raw !== undefined) {
+        const oldTuple = raw.tuple;
+        if (!pointerValid(raw, oldTuple) || raw.attempt_key !== attemptKey(oldTuple)
+          || (!raw.tombstone && !pointerValid(raw, t)) || (raw.tombstone && raw.nonce === t.caller_nonce)) {
+          return this.out(t, "legacy_unknown", "UNKNOWN");
+        }
       }
       if (raw && !raw.tombstone) {
-        return this.out(t, raw.state === "COMMITTED" ? "owned" : "busy", raw.state, raw as unknown as OwnerRecordV1);
+        const current = await s.get<OwnerRecordV1>(attemptKey(t));
+        if (!current || !recordValid(current, t)) return this.out(t, "legacy_unknown", "UNKNOWN");
+        return this.out(t, current.state === "COMMITTED" ? "owned" : "busy", current.state, current);
       }
       const created = request.now ?? Date.now();
       const r: OwnerRecordV1 = {
@@ -445,7 +311,7 @@ export class ContainmentEffectLedger {
         tombstone: false, attempt_key: attemptKey(t),
       };
       await s.put(attemptKey(t), r);
-      await s.put(activeKey(t), pointerFrom(r));
+      await s.put(activeKey(t), r);
       return this.out(t, "prepared", r.state, r);
     });
   }
@@ -464,7 +330,7 @@ export class ContainmentEffectLedger {
       if (a.state === "PREPARED") {
         const n = { ...a, state: "CLAIM_ACQUIRED" as const };
         await s.put(attemptKey(t), n);
-        await s.put(activeKey(t), pointerFrom(n));
+        await s.put(activeKey(t), n);
         return this.out(t, "acquired", n.state, n);
       }
       const owned = ["COMMITTED", "DRIVING", "BOUND", "PERMIT_ISSUED", "CLAIM_ACQUIRED"].includes(a.state);
@@ -512,7 +378,8 @@ export class ContainmentEffectLedger {
     return this.storage.transaction(async s => {
       const a: any = await s.get(attemptKey(t));
       const p: any = await s.get(activeKey(t));
-      if (!a || !p || !recordValid(a, t) || !pointerValid(p, t) || a.nonce !== p.nonce) return this.out(t, "unknown", "UNKNOWN");
+      if (!a || !p || !recordValid(a, t) || !pointerValid(p, t)
+        || p.attempt_key !== attemptKey(t) || a.nonce !== p.nonce) return this.out(t, "unknown", "UNKNOWN");
       if (a.state === "PERMIT_ISSUED" || a.state === "BOUND" || a.state === "DRIVING") return this.out(t, "owned", a.state, a);
       if (a.state !== "CLAIM_ACQUIRED") return this.out(t, "rejected", a.state, a);
       const issued = Date.now();
@@ -524,42 +391,92 @@ export class ContainmentEffectLedger {
         owner_token_digest: await sha256(t.token), issued_at_ms: issued, expires_ms: issued + 120_000,
       };
       const n: any = { ...a, state: "PERMIT_ISSUED", permit_id: permit.permit_id, permit };
-      await s.put(attemptKey(t), n); await s.put(activeKey(t), pointerFrom(n));
+      await s.put(attemptKey(t), n); await s.put(activeKey(t), n);
       const out = await this.out(t, "permit_issued", n.state, n); out.permit = permit; return out;
     });
   }
   async beginEffect(request: SpawnOwnerRequest, permit_id: string): Promise<OwnerResult> { return this.begin(request, permit_id); }
   async beginReservedEffect(request: SpawnOwnerRequest, permit_id: string): Promise<OwnerResult> { return this.begin(request, permit_id); }
-  private async begin(request: SpawnOwnerRequest, permit_id: string): Promise<OwnerResult> { const t = normalizeTuple(request.tuple, request.caller_nonce); if (!t || !validText(permit_id)) return rejected(); return this.storage.transaction(async s => { const a: any = await s.get(attemptKey(t)); if (!a || !recordValid(a, t) || a.permit_id !== permit_id || !permitValid(a.permit, t)) return this.out(t, "unknown", "UNKNOWN"); if (a.effect_start_proof_id) return this.out(t, "already_started", a.state, a); if (a.state !== "PERMIT_ISSUED") return this.out(t, "rejected", a.state, a); const proof: EffectStartProofV1 = { schema_version: 1, proof_id: crypto.randomUUID(), repo: t.repo, job_id: t.job_id, path: t.path, event_id: t.event_id, reservation_epoch: t.reservation_epoch, effect_id: t.effect_id, permit_id, owner: t.owner, token: t.token, caller_nonce: t.caller_nonce, effect_request_digest: await sha256(JSON.stringify(t)), writer: "ContainmentDO", started_at_ms: Date.now() }; const n = { ...a, effect_start_proof_id: proof.proof_id, effect_started: true }; await s.put(startKey(t), proof); await s.put(attemptKey(t), n); await s.put(activeKey(t), n); const out = await this.out(t, "already_started", n.state, n); out.permit = a.permit; out.proof = proof; return out; }); }
-  async bind(request: SpawnOwnerRequest, permit_id: string, proof_id: string, binding_id = proof_id): Promise<OwnerResult> { const t = normalizeTuple(request.tuple, request.caller_nonce); if (!t || !validText(permit_id) || !validText(proof_id)) return rejected(); return this.storage.transaction(async s => { const a: any = await s.get(attemptKey(t)); const proof = await s.get<EffectStartProofV1>(startKey(t)); if (!a || !recordValid(a, t) || a.permit_id !== permit_id || a.effect_start_proof_id !== proof_id || !proofValid(proof, t, permit_id)) return this.out(t, "unknown", "UNKNOWN"); if (a.state === "BOUND") return this.out(t, "bound", a.state, a); if (a.state !== "PERMIT_ISSUED") return this.out(t, "rejected", a.state, a); const n = { ...a, state: "BOUND" as const, binding_id }; await s.put(attemptKey(t), n); await s.put(activeKey(t), n); const out = await this.out(t, "bound", n.state, n); out.permit = a.permit; out.proof = proof; return out; }); }
-  async markDriving(request: SpawnOwnerRequest, permit_id: string, proof_id: string): Promise<OwnerResult> { const t = normalizeTuple(request.tuple, request.caller_nonce); if (!t) return rejected(); return this.storage.transaction(async s => { const a: any = await s.get(attemptKey(t)); const proof = await s.get<EffectStartProofV1>(startKey(t)); if (!a || !recordValid(a, t) || a.permit_id !== permit_id || a.effect_start_proof_id !== proof_id || !proofValid(proof, t, permit_id)) return this.out(t, "unknown", "UNKNOWN"); if (a.state === "DRIVING") return this.out(t, "driving", a.state, a); if (a.state !== "BOUND") return this.out(t, "rejected", a.state, a); const n = { ...a, state: "DRIVING" as const }; await s.put(attemptKey(t), n); await s.put(activeKey(t), n); const out = await this.out(t, "driving", n.state, n); out.permit = a.permit; out.proof = proof; return out; }); }
+  private async begin(request: SpawnOwnerRequest, permit_id: string): Promise<OwnerResult> {
+    const t = requestTuple(request); if (!t || !validText(permit_id)) return rejected();
+    return this.storage.transaction(async s => {
+      const a: any = await s.get(attemptKey(t));
+      if (!a || !recordValid(a, t) || a.permit_id !== permit_id || !permitValid(a.permit, t)) return this.out(t, "unknown", "UNKNOWN");
+      if (a.state !== "PERMIT_ISSUED") return this.out(t, "rejected", a.state, a);
+      if (a.effect_start_proof_id) return this.out(t, "already_started", a.state, a);
+      const proof: EffectStartProofV1 = { schema_version: 1, proof_id: crypto.randomUUID(), repo: t.repo, job_id: t.job_id, path: t.path, event_id: t.event_id, reservation_epoch: t.reservation_epoch, effect_id: t.effect_id, permit_id, owner: t.owner, token: t.token, lease_epoch: t.lease_epoch, caller_nonce: t.caller_nonce, effect_request_digest: await sha256(JSON.stringify(t)), writer: "ContainmentDO", started_at_ms: Date.now() };
+      const n = { ...a, effect_start_proof_id: proof.proof_id, effect_started: true };
+      await s.put(startKey(t), proof); await s.put(attemptKey(t), n); await s.put(activeKey(t), n);
+      const out = await this.out(t, "already_started", n.state, n); out.permit = a.permit; out.proof = proof; return out;
+    });
+  }
+  async bind(request: SpawnOwnerRequest, permit_id: string, proof_id: string, binding: ContainmentEffectBinding): Promise<OwnerResult> {
+    const t = requestTuple(request); if (!t || !validText(permit_id) || !validText(proof_id)
+      || !bindingValid(binding, binding?.binding_sha256 ?? null) || !this.kv) return rejected();
+    const payload = JSON.stringify({ schema_version: 1, tuple: t, permit_id, binding });
+    try {
+      await this.kv.put(bindingKey(t), payload); const back = await this.kv.get(bindingKey(t));
+      if (back !== payload) return rejected();
+    } catch { return rejected(); }
+    return this.storage.transaction(async s => {
+      const a: any = await s.get(attemptKey(t)); const proof = await s.get<EffectStartProofV1>(startKey(t));
+      if (!a || !recordValid(a, t) || a.permit_id !== permit_id || a.effect_start_proof_id !== proof_id || !proofValid(proof, t, permit_id)) return this.out(t, "unknown", "UNKNOWN");
+      if (a.state === "BOUND") return this.out(t, "bound", a.state, a);
+      if (a.state !== "PERMIT_ISSUED") return this.out(t, "rejected", a.state, a);
+      const n = { ...a, state: "BOUND" as const, binding_id: binding.binding_sha256, binding };
+      await s.put(attemptKey(t), n); await s.put(activeKey(t), n);
+      const out = await this.out(t, "bound", n.state, n); out.permit = a.permit; out.proof = proof; return out;
+    });
+  }
+  async markDriving(request: SpawnOwnerRequest, permit_id: string, proof_id: string): Promise<OwnerResult> {
+    const t = requestTuple(request); if (!t) return rejected();
+    return this.storage.transaction(async s => {
+      const a: any = await s.get(attemptKey(t)); const proof = await s.get<EffectStartProofV1>(startKey(t));
+      if (!a || !recordValid(a, t) || a.permit_id !== permit_id || a.effect_start_proof_id !== proof_id || !proofValid(proof, t, permit_id)) return this.out(t, "unknown", "UNKNOWN");
+      if (a.state === "DRIVING") return this.out(t, "driving", a.state, a);
+      if (a.state !== "BOUND") return this.out(t, "rejected", a.state, a);
+      const n = { ...a, state: "DRIVING" as const }; await s.put(attemptKey(t), n); await s.put(activeKey(t), n);
+      const out = await this.out(t, "driving", n.state, n); out.permit = a.permit; out.proof = proof; return out;
+    });
+  }
   async commitEffect(legacy: ContainmentEffectTransition & { permit_id: string; receipt: ContainmentEffectReceipt }): Promise<ContainmentEffectResult>;
   async commitEffect(request: SpawnOwnerRequest, permit_id: string, proof_id: string, observation: ContainmentEffectReceipt): Promise<OwnerResult>;
-  async commitEffect(request: SpawnOwnerRequest | (ContainmentEffectTransition & { permit_id: string; receipt: ContainmentEffectReceipt }), permit_id?: string, proof_id?: string, observation?: EffectObservationV1 | ContainmentEffectReceipt): Promise<OwnerResult | ContainmentEffectResult> {
+  async commitEffect(request: SpawnOwnerRequest | (ContainmentEffectTransition & { permit_id: string; receipt: ContainmentEffectReceipt }), permit_id?: string, proof_id?: string, observation?: ContainmentEffectReceipt): Promise<OwnerResult | ContainmentEffectResult> {
     if ("identity" in request) return this.commitLegacy(request);
-    const t = normalizeTuple(request.tuple, request.caller_nonce); if (!t || !permit_id || !proof_id || !observation) return rejected();
+    const t = requestTuple(request); if (!t || !permit_id || !proof_id || !observation) return rejected();
     return this.storage.transaction(async s => {
       const a: any = await s.get(attemptKey(t)); const proof = await s.get<EffectStartProofV1>(startKey(t));
       if (!a || !recordValid(a, t) || !proofValid(proof, t, permit_id) || a.permit_id !== permit_id || a.effect_start_proof_id !== proof_id) return this.out(t, "unknown", "UNKNOWN");
       if (a.state === "COMMITTED") return this.out(t, "committed", a.state, a);
       if (a.state !== "DRIVING") return this.out(t, "unknown", "UNKNOWN", a);
-      const identityOk = "trusted" in observation ? trustedReceipt(observation, t, permit_id, a.binding_id ?? "") : observation.schema_version === 1 && observation.repo === t.repo && observation.job_id === t.job_id && observation.path === t.path && observation.event_id === t.event_id && observation.reservation_epoch === t.reservation_epoch && observation.effect_id === t.effect_id && observation.permit_id === permit_id && observation.proof_id === proof_id && (observation.status === "started" || observation.status === "committed") && !!observation.external_effect_digest;
-      if (!identityOk) { const unknown = { ...a, state: "UNKNOWN" as const }; await s.put(attemptKey(t), unknown); await s.put(activeKey(t), unknown); return this.out(t, "unknown", unknown.state, unknown); }
+      if (!trustedReceipt(observation, t, permit_id, a.binding ?? null)) { const unknown = { ...a, state: "UNKNOWN" as const }; await s.put(attemptKey(t), unknown); await s.put(activeKey(t), unknown); return this.out(t, "unknown", unknown.state, unknown); }
       const n = { ...a, state: "COMMITTED" as const, effect_observation: observation }; await s.put(attemptKey(t), n); await s.put(activeKey(t), n); const out = await this.out(t, "committed", n.state, n); out.permit = a.permit; out.proof = proof; return out;
     });
   }
   async abort(request: SpawnOwnerRequest, owner = request.tuple.owner, token = request.tuple.token): Promise<OwnerResult> { return this.abortReap(request, owner, token, false, 0); }
   async reap(request: SpawnOwnerRequest, stale_after_ms: number, authority = "containment-reaper-v1"): Promise<OwnerResult> { if (authority !== "containment-reaper-v1" || !Number.isSafeInteger(stale_after_ms) || stale_after_ms < 1) return rejected(); return this.abortReap(request, "", "", true, stale_after_ms); }
-  private async abortReap(request: SpawnOwnerRequest, owner: string, token: string, reap: boolean, stale: number): Promise<OwnerResult> { const t = normalizeTuple(request.tuple, request.caller_nonce); if (!t) return rejected(); return this.storage.transaction(async s => { const p = await s.get<any>(activeKey(t)); const a = await s.get<any>(attemptKey(t)); if (!p || !a || !recordValid(p, t) || !recordValid(a, t) || p.nonce !== a.nonce) return this.out(t, "unknown", "UNKNOWN"); if (a.tuple.owner !== t.owner || a.tuple.token !== t.token || a.tuple.drain_lease_epoch !== t.drain_lease_epoch || (!reap && (a.tuple.owner !== owner || a.tuple.token !== token))) return this.out(t, "rejected", a.state, a); if (a.state !== "PREPARED" && a.state !== "CLAIM_ACQUIRED") return this.out(t, a.state === "DRIVING" ? "unknown" : "rejected", a.state, a); if (reap && (request.now ?? Date.now()) < a.expires_ms + stale) return this.out(t, "busy", a.state, a); if (a.permit_id !== null || a.binding_id !== null || a.effect_start_proof_id !== null || a.effect_started) return this.out(t, "rejected", a.state, a); const tomb = { ...a, state: "ABORTED_PRE_EFFECT" as const, tombstone: true }; await s.put(attemptKey(t), tomb); await s.put(activeKey(t), tomb); return this.out(t, "aborted", tomb.state, tomb); }); }
+  private async abortReap(request: SpawnOwnerRequest, owner: string, token: string, reap: boolean, stale: number): Promise<OwnerResult> {
+    const t = requestTuple(request); if (!t) return rejected();
+    return this.storage.transaction(async s => {
+      const p = await s.get<any>(activeKey(t)); const a = await s.get<any>(attemptKey(t));
+      if (!p || !a || !pointerValid(p, t) || !recordValid(a, t) || p.attempt_key !== attemptKey(t) || p.nonce !== a.nonce) return this.out(t, "unknown", "UNKNOWN");
+      if (a.tuple.owner !== t.owner || a.tuple.token !== t.token || a.tuple.drain_lease_epoch !== t.drain_lease_epoch || (!reap && (a.tuple.owner !== owner || a.tuple.token !== token))) return this.out(t, "rejected", a.state, a);
+      if (a.state !== "PREPARED" && a.state !== "CLAIM_ACQUIRED") return this.out(t, a.state === "DRIVING" ? "unknown" : "rejected", a.state, a);
+      if (reap && (request.now ?? Date.now()) < a.expires_ms + stale) return this.out(t, "busy", a.state, a);
+      if (a.permit_id !== null || a.binding_id !== null || a.effect_start_proof_id !== null || a.effect_started || a.tombstone) return this.out(t, "rejected", a.state, a);
+      const tomb = { ...a, state: "ABORTED_PRE_EFFECT" as const, tombstone: true };
+      await s.put(attemptKey(t), tomb); await s.put(activeKey(t), tomb); return this.out(t, "aborted", tomb.state, tomb);
+    });
+  }
 
   // Compatibility methods preserve the untouched ContainmentDO seam. No compatibility operation
   // can clear a permit, binding, start proof, or DRIVING record.
-  async getEffectAttempt(i: ContainmentEffectIdentity, nonce: string): Promise<ContainmentEffectAttempt | null> { if (!NONCE.test(nonce)) return null; const pointer = await this.storage.get<OwnerRecordV1>(containmentEffectPointerKey(i)); if (!pointer || !recordValid(pointer, pointer.tuple) || pointer.nonce !== nonce) return null; const r = await this.storage.get<OwnerRecordV1>(attemptKey(pointer.tuple)); return r && recordValid(r, pointer.tuple) ? compat(r, pointer.tuple) : null; }
+  async getEffectAttempt(i: ContainmentEffectIdentity, nonce: string): Promise<ContainmentEffectAttempt | null> { if (!NONCE.test(nonce)) return null; const pointer = await this.storage.get<OwnerPointerV1>(containmentEffectPointerKey(i)); if (!pointer || !pointerValid(pointer, pointer.tuple) || pointer.nonce !== nonce || pointer.attempt_key !== attemptKey(pointer.tuple)) return null; const r = await this.storage.get<OwnerRecordV1>(pointer.attempt_key); return r && recordValid(r, pointer.tuple) ? compat(r, pointer.tuple) : null; }
   async prepareEffect(i: ContainmentEffectPrepareInput): Promise<ContainmentEffectResult> { const t = legacyTuple(i.identity, "00000000000000000000000000000001", i.owner, crypto.randomUUID(), i.lease_epoch); if (!t) return { status: "invalid" }; const r = await this.prepare({ schema_version: 1, tuple: t, caller_nonce: t.caller_nonce }); return r.record ? { status: r.kind === "prepared" ? "prepared" : r.kind === "owned" ? "committed" : "active", attempt: compat(r.record, t) } : { status: "busy" }; }
   async acquireEffectClaim(i: ContainmentEffectTransition): Promise<ContainmentEffectResult> { const t = legacyTuple(i.identity, i.nonce, i.owner, i.owner_token, i.lease_epoch); if (!t) return { status: "stale" }; const r = await this.acquire({ schema_version: 1, tuple: t, caller_nonce: t.caller_nonce }); return r.record ? { status: r.kind === "acquired" ? "transitioned" : "busy", attempt: compat(r.record, t) } : { status: "stale" }; }
   async issueEffectPermit(i: ContainmentEffectTransition): Promise<ContainmentEffectResult> { const t = legacyTuple(i.identity, i.nonce, i.owner, i.owner_token, i.lease_epoch); if (!t) return { status: "stale" }; const m = await this.mirror({ schema_version: 1, tuple: t, caller_nonce: t.caller_nonce }); const r = await this.confirm({ schema_version: 1, tuple: t, caller_nonce: t.caller_nonce, observation_kind: m.kind, observation_digest: m.payload_digest }, m.payload_digest ?? "", m.payload_digest ?? ""); return r.record ? { status: r.kind === "permit_issued" || r.kind === "owned" ? "transitioned" : "busy", attempt: compat(r.record, t) } : { status: "stale" }; }
-  async bindEffect(i: ContainmentEffectTransition & { permit_id: string; binding: ContainmentEffectBinding }): Promise<ContainmentEffectResult> { const t = legacyTuple(i.identity, i.nonce, i.owner, i.owner_token, i.lease_epoch); if (!t) return { status: "stale" }; const b = await this.beginEffect({ schema_version: 1, tuple: t, caller_nonce: t.caller_nonce }, i.permit_id); if (!b.proof) return { status: "busy" }; const r = await this.bind({ schema_version: 1, tuple: t, caller_nonce: t.caller_nonce }, i.permit_id, b.proof.proof_id, i.binding.binding_sha256); if (r.record) { (r.record as any).binding = i.binding; await this.storage.put(attemptKey(t), r.record); await this.storage.put(activeKey(t), r.record); } return r.record ? { status: r.kind === "bound" ? "transitioned" : "busy", attempt: compat(r.record, t) } : { status: "stale" }; }
-  async beginEffectDrive(i: ContainmentEffectTransition & { permit_id: string }): Promise<ContainmentEffectResult> { const t = legacyTuple(i.identity, i.nonce, i.owner, i.owner_token, i.lease_epoch); if (!t || !this.kv) return { status: "mirror_unavailable" }; const m = await readContainmentEffectMirror(this.kv, i.identity); if (!m) return { status: "mirror_mismatch" }; const a = await this.getEffectAttempt(i.identity, i.nonce); if (!a?.effect_start_proof_id) return { status: "stale" }; const r = await this.markDriving({ schema_version: 1, tuple: t, caller_nonce: t.caller_nonce }, i.permit_id, a.effect_start_proof_id); return r.record ? { status: r.kind === "driving" ? "transitioned" : "unknown_terminal", attempt: compat(r.record, t) } : { status: "stale" }; }
+  async bindEffect(i: ContainmentEffectTransition & { permit_id: string; binding: ContainmentEffectBinding }): Promise<ContainmentEffectResult> { const t = legacyTuple(i.identity, i.nonce, i.owner, i.owner_token, i.lease_epoch); if (!t) return { status: "stale" }; const b = await this.beginEffect({ schema_version: 1, tuple: t, caller_nonce: t.caller_nonce }, i.permit_id); if (!b.proof) return { status: "busy" }; const r = await this.bind({ schema_version: 1, tuple: t, caller_nonce: t.caller_nonce }, i.permit_id, b.proof.proof_id, i.binding); return r.record ? { status: r.kind === "bound" ? "transitioned" : "busy", attempt: compat(r.record, t) } : { status: "stale" }; }
+  async beginEffectDrive(i: ContainmentEffectTransition & { permit_id: string }): Promise<ContainmentEffectResult> { const t = legacyTuple(i.identity, i.nonce, i.owner, i.owner_token, i.lease_epoch); if (!t || !this.kv) return { status: "mirror_unavailable" }; const m = await readContainmentEffectMirror(this.kv, t); if (!m) return { status: "mirror_mismatch" }; const a = await this.getEffectAttempt(i.identity, i.nonce); if (!a?.effect_start_proof_id) return { status: "stale" }; const r = await this.markDriving({ schema_version: 1, tuple: t, caller_nonce: t.caller_nonce }, i.permit_id, a.effect_start_proof_id); return r.record ? { status: r.kind === "driving" ? "transitioned" : "unknown_terminal", attempt: compat(r.record, t) } : { status: "stale" }; }
   async commitLegacy(i: ContainmentEffectTransition & { permit_id: string; receipt: ContainmentEffectReceipt }): Promise<ContainmentEffectResult> { const t = legacyTuple(i.identity, i.nonce, i.owner, i.owner_token, i.lease_epoch); if (!t) return { status: "stale" }; const a = await this.getEffectAttempt(i.identity, i.nonce); if (!a?.effect_start_proof_id) return { status: "stale" }; const r = await this.commitEffect({ schema_version: 1, tuple: t, caller_nonce: t.caller_nonce }, i.permit_id, a.effect_start_proof_id, i.receipt); return r.record ? { status: r.kind === "committed" ? "committed" : "busy", attempt: compat(r.record, t, i.receipt) } : { status: "stale" }; }
   async abortEffect(i: ContainmentEffectTransition): Promise<ContainmentEffectResult> { const t = legacyTuple(i.identity, i.nonce, i.owner, i.owner_token, i.lease_epoch); const r = t ? await this.abort({ schema_version: 1, tuple: t, caller_nonce: t.caller_nonce }, i.owner, i.owner_token) : null; return r?.record ? { status: "aborted", attempt: compat(r.record, t!) } : { status: "busy" }; }
   async reapEffect(i: ContainmentEffectReapInput): Promise<ContainmentEffectResult> { const t = legacyTuple(i.identity, i.nonce, "legacy-owner", "legacy-token", i.lease_epoch); const r = t ? await this.reap({ schema_version: 1, tuple: t, caller_nonce: t.caller_nonce }, i.stale_after_ms, i.authority) : null; return r?.record ? { status: "reaped", attempt: compat(r.record, t!) } : { status: "busy" }; }
@@ -581,9 +498,13 @@ export function containmentEffectMirrorFromAttempt(a: ContainmentEffectAttempt):
   };
 }
 export async function readContainmentEffectMirror(kv: KvLike | undefined, i: ContainmentEffectIdentity | OwnerTuple): Promise<ContainmentEffectMirror | null> {
-  if (!kv) return null;
+  if (!kv || !("path" in i)) return null;
   try {
-    const x = JSON.parse((await kv.get(containmentEffectMirrorKey(i))) ?? "null");
-    return x && x.schema_version === 1 && typeof x.nonce === "string" ? x : null;
+    const t = normalizeTuple(i); if (!t) return null;
+    const raw = await kv.get(mirrorKey(t)); if (!raw) return null;
+    const x = JSON.parse(raw); if (raw !== JSON.stringify(x) || !(await mirrorValid(x, t))) return null;
+    return { schema_version: 1, repo: t.repo, job_id: t.job_id, effect_id: t.effect_id,
+      nonce: t.caller_nonce, owner: t.owner, owner_token: t.token, lease_epoch: t.lease_epoch,
+      state: "PERMIT_ISSUED", permit_id: x.permit_id, binding_sha256: null };
   } catch { return null; }
 }

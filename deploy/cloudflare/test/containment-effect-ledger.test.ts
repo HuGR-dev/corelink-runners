@@ -38,6 +38,9 @@ describe("T3-W17-R14 owner ledger", () => {
       ["containment:v1:spawn-attempt:acme/repo/123/redrive/containment%3Av1%3Aredrive%3Aacme%2Frepo%2F123/0123456789abcdef0123456789abcdef", expect.anything()],
       ["containment:v1:spawn-active:acme/repo/123/redrive/containment%3Av1%3Aredrive%3Aacme%2Frepo%2F123", expect.anything()],
     ]);
+    const pointer = storage.map.get([...storage.map.keys()][1]) as any;
+    expect(pointer.created_ms).toBeUndefined(); expect(pointer.effect_started).toBeUndefined();
+    expect(pointer.attempt_key).toBe([...storage.map.keys()][0]);
     const again = await ledger.acquire(request); expect(again.kind).toBe("acquired");
     const mirror = await ledger.mirror(request); expect(mirror.key).toContain("spawn-mirror:"); expect(map.has(mirror.key)).toBe(true);
     expect(again.record?.tuple.caller_nonce).toBe(nonce);
@@ -59,12 +62,19 @@ describe("T3-W17-R14 owner ledger", () => {
     expect((await ledger.acquire(request)).record?.nonce).toBe(nonce);
   });
 
+  it("requires schema and explicit nonce on every transition", async () => {
+    const { ledger } = make(); const t = tuple();
+    expect((await ledger.prepare({ tuple: t, caller_nonce: nonce } as any)).kind).toBe("rejected");
+    expect((await ledger.beginEffect({ schema_version: 1, tuple: t } as any, "permit")).kind).toBe("rejected");
+  });
+
   it("executes prepare/acquire/confirm/bind/DRIVING/commit with identity-bound receipt", async () => {
     const { ledger } = make(); const t = tuple(); const { request, confirmed } = await claim(ledger, t); const permit = confirmed.permit!;
     const started = await ledger.beginEffect(request, permit.permit_id); expect(started.kind).toBe("already_started");
-    const bound = await ledger.bind(request, permit.permit_id, started.proof!.proof_id, "binding-1"); expect(bound.kind).toBe("bound");
+    const binding = { schema_version: 1 as const, provider: "provider", resource_id: "resource-1", idempotency_key: "idem-1", binding_sha256: "b".repeat(64) };
+    const bound = await ledger.bind(request, permit.permit_id, started.proof!.proof_id, binding); expect(bound.kind).toBe("bound");
     const driving = await ledger.markDriving(request, permit.permit_id, started.proof!.proof_id); expect(driving.kind).toBe("driving");
-    const receipt: ContainmentEffectReceipt = { schema_version: 1, trusted: true, repo: "acme/repo", job_id: "123", path: "redrive", event_id: "delivery-1", reservation_epoch: 7, effect_id: t.effect_id, provider: "provider", resource_id: "resource-1", idempotency_key: "binding-1", nonce, permit_id: permit.permit_id, binding_sha256: "binding-1", receipt_id: "receipt-1", receipt_sha256: "a".repeat(64), provider_signature: "sig" };
+    const receipt: ContainmentEffectReceipt = { schema_version: 1, trusted: true, repo: "acme/repo", job_id: "123", path: "redrive", event_id: "delivery-1", reservation_epoch: 7, effect_id: t.effect_id, provider: "provider", resource_id: "resource-1", idempotency_key: "idem-1", nonce, permit_id: permit.permit_id, binding_sha256: binding.binding_sha256, receipt_id: "receipt-1", receipt_sha256: "a".repeat(64), provider_signature: "sig" };
     expect((await ledger.commitEffect(request, permit.permit_id, started.proof!.proof_id, receipt)).kind).toBe("committed");
   });
 
@@ -76,8 +86,8 @@ describe("T3-W17-R14 owner ledger", () => {
   });
 
   it("turns an untrusted commit into UNKNOWN and never drives a second time", async () => {
-    const { ledger } = make(); const t = tuple(); const { request, confirmed } = await claim(ledger, t); const p = confirmed.permit!; const started = await ledger.beginEffect(request, p.permit_id); await ledger.bind(request, p.permit_id, started.proof!.proof_id, "binding-1"); await ledger.markDriving(request, p.permit_id, started.proof!.proof_id);
-    const bad: ContainmentEffectReceipt = { schema_version: 1, trusted: true, repo: "other/repo", job_id: "123", path: "redrive", event_id: t.event_id, reservation_epoch: 7, effect_id: t.effect_id, provider: "provider", resource_id: "resource-1", idempotency_key: "binding-1", nonce, permit_id: p.permit_id, binding_sha256: "binding-1", receipt_id: "receipt-1", receipt_sha256: "a".repeat(64), provider_signature: "sig" };
+    const { ledger } = make(); const t = tuple(); const { request, confirmed } = await claim(ledger, t); const p = confirmed.permit!; const started = await ledger.beginEffect(request, p.permit_id); const binding = { schema_version: 1 as const, provider: "provider", resource_id: "resource-1", idempotency_key: "idem-1", binding_sha256: "b".repeat(64) }; await ledger.bind(request, p.permit_id, started.proof!.proof_id, binding); await ledger.markDriving(request, p.permit_id, started.proof!.proof_id);
+    const bad: ContainmentEffectReceipt = { schema_version: 1, trusted: true, repo: "other/repo", job_id: "123", path: "redrive", event_id: t.event_id, reservation_epoch: 7, effect_id: t.effect_id, provider: "provider", resource_id: "resource-1", idempotency_key: "idem-1", nonce, permit_id: p.permit_id, binding_sha256: binding.binding_sha256, receipt_id: "receipt-1", receipt_sha256: "a".repeat(64), provider_signature: "sig" };
     expect((await ledger.commitEffect(request, p.permit_id, started.proof!.proof_id, bad)).kind).toBe("unknown"); expect((await ledger.beginEffect(request, p.permit_id)).kind).toBe("rejected");
   });
 
