@@ -24,6 +24,8 @@ export interface TickConfig {
    * production substitute for role-separated trust and revocation. */
   ackVerifier?: AckVerifier;
   recoveryVerifier?: AckVerifier;
+  /** Trusted monitor-clock capability; wall time cannot accept an ACK. */
+  trustedNow?: () => number;
 }
 export interface AckVerifier {
   verify(serializedToken: string, signature: string, signerKeyId: string, signerEpoch: string): Promise<"valid" | "revoked" | "invalid">;

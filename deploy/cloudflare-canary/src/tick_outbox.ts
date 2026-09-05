@@ -60,9 +60,9 @@ export class CanaryTickOutbox {
     let candidate: unknown = null;
     try { candidate = response.ok ? JSON.parse(body) : null; } catch { /* invalid token remains pending */ }
     if (!response.ok || !sameHead(await this.state.storage.get<State>(stateKey), head)) return "tick head pending: invalid ACK";
-    const observed = Date.now();
+    const observed = config.trustedNow?.();
     if (strict(candidate, ackFields, ackChecks)) {
-      const status = await validAck(candidate as AckToken, head, config.ackVerifier, observed);
+      const status = observed === undefined ? "invalid" : await validAck(candidate as AckToken, head, config.ackVerifier, observed);
       if (status === "valid") return this.terminal(head, "ACKED", Date.now());
       if (status === "revoked") { await this.persistRecovery(head, candidate as AckToken); return "tick head pending: ACK_RECOVERY"; }
     }
