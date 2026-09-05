@@ -95,25 +95,73 @@ owner_identity,owner_role,owner_key_id,owner_key_epoch,role_authority_digest,
 artifact_id,artifact_sha,review_input_sha,canonical_payload_digest,
 revocation_state_digest,issued_at,expires_at,consumed_at,signature_algorithm,
 signature_domain,signature)
+
+R6_RELAY_V1=(schema_version,relay_id,status,source_repo,source_commit_sha,
+owner_identity,owner_role,owner_key_id,owner_key_epoch,role_authority_digest,
+tenant_a_digest,tenant_b_digest,memoize_key_digest,a_to_b_trials,
+a_to_b_refusals,b_to_a_trials,b_to_a_refusals,cas_endpoint_version,
+test_artifact_digest,artifact_id,artifact_sha,review_input_sha,
+canonical_payload_digest,revocation_state_digest,issued_at,expires_at,
+consumed_at,signature_algorithm,signature_domain,signature)
 ```
 
-The signature covers every preceding field in the listed order after canonical
-serialization. `owner_identity`, `owner_key_id`, `owner_key_epoch`, and
+The listed order is normative. For every gate, `canonical_payload_digest` is
+`sha256(signature_domain || "\\n" || schema_version || "\\n" || canonical_bytes(all
+ordered payload fields except canonical_payload_digest and signature))`; the
+signature is Ed25519 over `signature_domain || "\\n" || schema_version || "\\n" ||
+canonical_payload_digest || "\\n" || canonical_bytes(all ordered payload fields
+except signature)`. Thus the digest excludes itself and the signature, while the
+signature covers the domain, schema, digest, and every ordered field including
+specialized R6 tenant/CAS fields. `owner_identity`, `owner_key_id`, `owner_key_epoch`, and
 `role_authority_digest` are required even when the value is an explicit
 unresolved sentinel; a missing field is malformed, not an implicit owner.
-`canonical_payload_digest` commits the same field set, while
 `revocation_state_digest`, `issued_at`, and `expires_at` make revocation and
 expiry part of verification rather than prose. No registry row below has a
 verified owner artifact yet.
 
 The canonical serializer is versioned and domain-separated: `signature_algorithm=
 ed25519-sha256-v1`, `signature_domain=corelink-gate/v1`, and the signature covers
-the canonical payload digest plus every preceding field. Reject unless the schema,
+the canonical payload digest plus every ordered field. Reject unless the schema,
 serializer, algorithm/domain, signature, current revocation digest, and owner role
 verify, `issued_at < now < expires_at`, and `consumed_at=null`; otherwise status is
 not dispatchable. `SATISFIED` is the only dispatchable status; `UNRESOLVED`, `PENDING`,
 `EXPIRED`, `REVOKED`, `CONFLICT`, and `UNKNOWN` block named descendants. R1–R6 use
 one registry; cross-repo R6 cannot be self-attested here.
+
+### Enforceable T3-W17 acceptance token
+
+`R14_ACCEPTED_V1` is the only token that can make T3-W18 eligible after all other
+predecessors are satisfied. Its exact canonical order is:
+
+```text
+R14_ACCEPTED_V1=(schema_version,token_id,status,producer_id,issuer_identity,
+issuer_role,issuer_key_id,issuer_key_epoch,issuer_role_authority_digest,
+subject_wp,source_seal_sha,contract_sha256,evidence_index_sha,review_input_sha,
+artifact_id,artifact_path,artifact_sha,predecessor_digest,canonical_payload_digest,
+revocation_state_digest,issued_at,expires_at,consumed_at,consumption_high_water,
+signature_algorithm,signature_domain,signature)
+```
+
+The producer is the independent R14 acceptance gate; its issuer must be the
+owner-authorized review role represented by the identity/key/epoch/authority
+fields, never the implementation author or live deployer. `artifact_path` is
+exactly `docs/plan/evidence/T3-W17-containment-test.json`, `artifact_id` is the
+version-1 evidence artifact id, `source_seal_sha` identifies the implementation
+commit, `contract_sha256` identifies `docs/plan/contracts/T3-W17-R14.md`, and
+`evidence_index_sha` identifies the embedded sequence record's current digest.
+`predecessor_digest` binds the accepted T3-W17 predecessor set and review input.
+`consumption_high_water` is an integer monotonic counter plus the last consumed
+token digest for `T3-W18`; a token is single-use and cannot be consumed at a
+counter lower than the recorded high-water mark.
+
+The producer must issue this token only after the exact source, contract, focused
+evidence/index, review-input, and predecessor digests validate. The verifier
+requires `schema_version=1`, the exact serializer/domain/algorithm, valid issuer
+role authority and current revocation digest, `issued_at < now < expires_at`,
+`consumed_at=null`, unconsumed high-water sequence, and byte/path/hash equality
+for every bound artifact. Any missing, stale, replayed, revoked, ambiguous, or
+cross-repository token is `UNKNOWN` and leaves T3-W18 blocked; no plan paragraph
+or structural PASS can issue or consume it.
 
 Specifically, D5 (instance-delete token), D6 (legacy live-wire purge), D9
 (N>1 fabricd flip), and D10 (independent CI host) remain unresolved. Their
@@ -128,6 +176,40 @@ structural check is a decision artifact. `owner_identity`, key fields, and
 review SHA are `—` because no independently signed owner record is present.
 The blocked-descendant column is copied from the canonical plan/DAG; it is not
 an inferred owner outcome.
+
+Expected canonical artifact locations are fixed here even when the artifact is
+absent. The path and artifact id are requirements, not evidence that the file
+exists:
+
+| id | expected artifact id and canonical location | present / review SHA |
+|---|---|---|
+| D1 | `DECISION-D1-RESOURCE-CEILING` · `docs/plan/evidence/decisions/D1-resource-ceiling.json` | absent / — |
+| D2 | `DECISION-D2-DEVENV-QUARANTINE` · `docs/plan/evidence/decisions/D2-devenv-quarantine.json` | absent / — |
+| D3 | `DECISION-D3-REPO-LICENSE` · `docs/plan/evidence/decisions/D3-repo-license.json` | absent / — |
+| D4 | `DECISION-D4-ADMISSION-MODE` · `docs/plan/evidence/decisions/D4-admission-mode.json` | absent / — |
+| D5 | `DECISION-D5-INSTANCE-DELETE-TOKEN` · `docs/plan/evidence/decisions/D5-instance-delete-token.json` | absent / — |
+| D6 | `DECISION-D6-LEGACY-LIVE-WIRE` · `docs/plan/evidence/decisions/D6-legacy-live-wire.json` | absent / — |
+| D7 | `DECISION-D7-OPENROUTER-ROTATION` · `docs/plan/evidence/decisions/D7-openrouter-rotation.json` | absent / — |
+| D8 | `DECISION-D8-FREE-TIER` · `docs/plan/evidence/decisions/D8-free-tier.json` | absent / — |
+| D9 | `DECISION-D9-FABRICD-FLIP` · `docs/plan/evidence/decisions/D9-fabricd-flip.json` | absent / — |
+| D10 | `DECISION-D10-INDEPENDENT-CI-HOST` · `docs/plan/evidence/decisions/D10-independent-ci-host.json` | absent / — |
+| D11 | `DECISION-D11-MEMOIZE-MISS` · `docs/adr/0011-memoize-miss-contract.md` | absent / — |
+| D12 | `DECISION-D12-PG-REFUSAL` · `docs/adr/0012-pg-refusal-semantics.md` | absent / — |
+| D13 | `DECISION-D13-RUNNER-TENANT-OWNER` · `docs/adr/0013-runner-tenant-owner-precedence.md` | absent / — |
+
+Expected relay artifacts are likewise explicit. R1–R5 require an owner-signed
+artifact at the listed local path; R6 requires an external immutable URI supplied
+by the corelink-server owner plus the local immutable relay-index witness. None
+is present in this repository:
+
+| id | expected artifact id and canonical location | present / review SHA |
+|---|---|---|
+| R1 | `RELAY-R1-CAPACITY` · `docs/plan/evidence/relays/R1-capacity.json` | absent / — |
+| R2 | `RELAY-R2-USAGE-BILLING` · `docs/plan/evidence/relays/R2-usage-billing.json` | absent / — |
+| R3 | `RELAY-R3-ONBOARDING` · `docs/plan/evidence/relays/R3-onboarding.json` | absent / — |
+| R4 | `RELAY-R4-PRODUCT-DECISION` · `docs/plan/evidence/relays/R4-product-decision.json` | absent / — |
+| R5 | `RELAY-R5-RELEASE-DOCS` · `docs/plan/evidence/relays/R5-release-docs.json` | absent / — |
+| R6 | `RELAY-R6-CAS-TENANT-ISOLATION` · external immutable URI **required** + `docs/plan/evidence/relays/R6-relay-index.json` | absent / — |
 
 | id | status | owner role (identity unbound) | exact artifact / review SHA | blocked descendants or consumers |
 |---|---|---|---|---|

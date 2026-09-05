@@ -113,10 +113,12 @@
 > green test never confer mutation authority.
 >
 > R6 is owned exclusively by the `corelink-server` CAS tenant-isolation owner in the
-> Security/Storage role. `R6_RELAY_V1` is the versioned specialization of the full
-> `RELAY_GATE_V1` envelope, adding the tenant digests, memoize-key digest, bidirectional
-> 20/20 trial/refusal counts, CAS version and test artifact; the full signed envelope is
-> mandatory and there is no competing exact schema. Distinct tenants, identical memoize key and
+> Security/Storage role. The complete ordered `R6_RELAY_V1` tuple is frozen in the
+> Round-14 ledger: specialized tenant/CAS fields precede canonical digest, revocation,
+> expiry, algorithm and signature fields; the digest excludes itself/signature and the
+> signature covers the domain, schema, digest and every ordered payload field except signature.
+> The full signed envelope is contractually mandatory and there is no competing exact schema;
+> current checker enforcement is pending Phase-B B4. Distinct tenants, identical memoize key and
 > exactly 20/20 refusals in both directions are mandatory. T6-W1 owns only
 > Compatibility projection for the legacy checker only (not an accepted schema):
 > `R6_RELAY=(schema_version,relay_id,status,source_repo,source_commit_sha,owner_identity,owner_role,owner_key_id,owner_key_epoch,role_authority_digest,tenant_a_digest,tenant_b_digest,memoize_key_digest,a_to_b_trials,a_to_b_refusals,b_to_a_trials,b_to_a_refusals,cas_endpoint_version,test_artifact_digest,issued_at,signature)`.
@@ -406,7 +408,7 @@ any AU or union row can change disposition.
 | `union-14` | `deploy/cloudflare/src/index.ts`: `recordOrphan` COLD refusal branch and its terminal-state path | **PARTIAL / OPEN**; the stale early-return and phantom-slot halves remain historical, while the missing COLD terminal half remains tracked |
 | `union-25`, `M3 (partial)` | `deploy/cloudflare/src/index.ts`: completion/revoke call sites and durable retry/counter boundary | **OPEN / REVIEW-REQUIRED**; fallback/retry semantics are not inferred from the new containment code |
 | `RH9 (partial)` | `deploy/cloudflare/src/index.ts`: limiter dead-letter and webhook-auth counter path | **OPEN / REVIEW-REQUIRED**; no closure from structural gate output |
-| `union-23` | `actions/corelink-memoize/action.yml` key construction; external CAS assertion remains relay **R6** | **OPEN / R6-BLOCKED**; no in-repo line refresh can substitute for the cross-repo artifact |
+| `union-23` | `actions/corelink-memoize/action.yml` key-input derivation (no tenant component); external CAS assertion remains relay **R6** | **OPEN / R6-BLOCKED**; no in-repo line refresh can substitute for the cross-repo artifact |
 
 R14-specific containment findings are recorded in
 [`docs/plan/2026-09-04-round14-cold-review-ledger.md`](2026-09-04-round14-cold-review-ledger.md)

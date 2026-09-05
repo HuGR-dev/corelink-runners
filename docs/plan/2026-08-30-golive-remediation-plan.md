@@ -1098,14 +1098,15 @@ that name it; no duplicate R6 entry, implicit R5 fallback, or local owner substi
 
 **R6 owner registry.** R6 can be authored only by the `corelink-server` CAS tenant-isolation owner
 in the Security/Storage role; a corelink-runners implementer, plan lead or documentation owner cannot
-self-attest it. Its committed relay record is `R6_RELAY_V1 = RELAY_GATE_V1 +
-(tenant_a_digest,tenant_b_digest,memoize_key_digest,a_to_b_trials,a_to_b_refusals,
-b_to_a_trials,b_to_a_refusals,cas_endpoint_version,test_artifact_digest)`. The
-full RELAY_GATE_V1 envelope and signature are mechanically mandatory; this
-specialization adds fields and creates no competing exact schema. Tenants differ,
-the key is byte-identical, and both directions are exactly 20/20. Missing envelope,
-role verification, mutable sibling evidence, any allowed cross-tenant read or a
-runners-authored assertion leaves R6 unresolved and T5-W1 RED.
+self-attest it. Its one complete ordered record is:
+`R6_RELAY_V1=(schema_version,relay_id,status,source_repo,source_commit_sha,owner_identity,owner_role,owner_key_id,owner_key_epoch,role_authority_digest,tenant_a_digest,tenant_b_digest,memoize_key_digest,a_to_b_trials,a_to_b_refusals,b_to_a_trials,b_to_a_refusals,cas_endpoint_version,test_artifact_digest,artifact_id,artifact_sha,review_input_sha,canonical_payload_digest,revocation_state_digest,issued_at,expires_at,consumed_at,signature_algorithm,signature_domain,signature)`.
+The specialized tenant/CAS fields precede digest, revocation, expiry, algorithm and signature fields;
+the canonical payload digest excludes itself and the signature, and the signature covers the domain,
+schema, digest and every ordered payload field except signature. The full RELAY_GATE_V1 envelope and
+specialization are contractually mandatory; current checker enforcement is pending Phase-B B4 and
+does not make R6 satisfied. Tenants differ, the key is byte-identical, and both directions are exactly
+20/20. Missing envelope, role verification, mutable sibling evidence, any allowed cross-tenant read
+or a runners-authored assertion leaves R6 unresolved and T5-W1 RED.
 The legacy checker projection is non-authoritative and cannot satisfy acceptance:
 `R6_RELAY=(schema_version,relay_id,status,source_repo,source_commit_sha,owner_identity,owner_role,owner_key_id,owner_key_epoch,role_authority_digest,tenant_a_digest,tenant_b_digest,memoize_key_digest,a_to_b_trials,a_to_b_refusals,b_to_a_trials,b_to_a_refusals,cas_endpoint_version,test_artifact_digest,issued_at,signature)`.
 The full-envelope signature covers the preceding twenty fields; tenants differ, the key is identical and both directions are exactly 20/20 refusals. Runners/plan self-attestation, mutable sibling evidence, unverified role or any allowed cross-tenant read leaves R6 unresolved and T5-W1 blocked.
