@@ -53,6 +53,13 @@ describe("T3-W17-R14 owner ledger", () => {
     expect((await ledger.acquire(request)).kind).toBe("owned");
   });
 
+  it("authorizes mirror writes only after the canonical claim exists", async () => {
+    const { ledger, map } = make(); const t = tuple(); const request = { schema_version: 1 as const, tuple: t, caller_nonce: nonce };
+    expect((await ledger.mirror(request)).kind).toBe("unavailable"); expect(map.size).toBe(0);
+    await ledger.prepare(request); expect((await ledger.mirror(request)).kind).toBe("unavailable"); expect(map.size).toBe(0);
+    await ledger.acquire(request); expect((await ledger.mirror(request)).kind).toBe("exact");
+  });
+
   it("rejects a caller nonce mismatch and preserves a crash-retry nonce", async () => {
     const { ledger } = make(); const t = tuple();
     const request = { schema_version: 1 as const, tuple: t, caller_nonce: nonce };
@@ -78,6 +85,13 @@ describe("T3-W17-R14 owner ledger", () => {
     const binding = { schema_version: 1 as const, provider: "provider", resource_id: "resource-1", idempotency_key: "idem-1", binding_sha256: "c".repeat(64) };
     expect((await ledger.bind(c.request, c.confirmed.permit!.permit_id, started.proof!.proof_id, binding)).kind).toBe("unknown");
     expect(map.has("containment:v1:effect-binding:acme/repo/123/redrive/effect-bind")).toBe(false);
+  });
+
+  it("rejects a binding replacement observed by the final DO transaction", async () => {
+    const { ledger, kv, map } = make(); const t = tuple(); const { request, confirmed } = await claim(ledger, t); const permit = confirmed.permit!;
+    const started = await ledger.beginEffect(request, permit.permit_id); const binding = { schema_version: 1 as const, provider: "provider", resource_id: "resource-1", idempotency_key: "idem-1", binding_sha256: "f".repeat(64) };
+    let reads = 0; kv.get.mockImplementation(async key => { const raw = map.get(key) ?? null; reads++; if (reads === 2 && raw) { const x = JSON.parse(raw); x.binding.resource_id = "replacement"; return JSON.stringify(x); } return raw; });
+    expect((await ledger.bind(request, permit.permit_id, started.proof!.proof_id, binding)).kind).toBe("unknown");
   });
 
   it("returns the existing proof on retries and never authorizes a second drive", async () => {

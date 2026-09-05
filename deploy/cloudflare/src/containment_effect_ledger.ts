@@ -240,6 +240,7 @@ function mirrorShapeValid(v: unknown, t: OwnerTuple): v is SpawnMirrorPayloadV1 
     && (m.result === "acquired" || m.result === "owned")
     && m.owner === t.owner && m.token === t.token
     && m.lease_epoch === t.lease_epoch
+    && (m.permit_id === null || validText(m.permit_id))
     && m.attempt_key === attemptKey(t) && m.active_pointer_key === activeKey(t)
     && validTime(m.written_at_ms);
 }
@@ -259,6 +260,14 @@ function trustedReceipt(r: ContainmentEffectReceipt, t: OwnerTuple, permit: stri
     && validText(r.resource_id) && validText(r.idempotency_key)
     && validText(r.receipt_id) && HEX.test(r.receipt_sha256)
     && validText(r.provider_signature);
+}
+function bindingPayloadValid(raw: string, t: OwnerTuple, permit: string, binding: ContainmentEffectBinding): boolean {
+  try {
+    const x = JSON.parse(raw);
+    return raw === JSON.stringify(x) && x?.schema_version === 1 && x.permit_id === permit
+      && JSON.stringify(x.tuple) === JSON.stringify(t) && bindingValid(x.binding, binding.binding_sha256)
+      && JSON.stringify(x.binding) === JSON.stringify(binding);
+  } catch { return false; }
 }
 function compat(r: OwnerRecordV1, t: OwnerTuple, receipt: ContainmentEffectReceipt | null = null): ContainmentEffectAttempt {
   const x = r as OwnerRecordV1 & { permit?: ContainmentEffectPermit; binding?: ContainmentEffectBinding };
@@ -363,10 +372,17 @@ export class ContainmentEffectLedger {
     });
     if (!t || !this.kv) return unavailable();
     const key = mirrorKey(t);
+    const authorization = await this.storage.transaction(async s => {
+      const p = await s.get<OwnerPointerV1>(activeKey(t)); const a = await s.get<OwnerRecordV1>(attemptKey(t));
+      const owned = ["CLAIM_ACQUIRED", "PERMIT_ISSUED", "BOUND", "DRIVING", "COMMITTED"].includes(a?.state ?? "");
+      const ok = !!a && !!p && pointerMatchesAttempt(p, a, t) && (result === "acquired" ? a.state === "CLAIM_ACQUIRED" : owned);
+      return { ok, permit_id: ok ? a!.permit_id : null };
+    });
+    if (!authorization.ok) return unavailable(key);
     const payload: SpawnMirrorPayloadV1 = {
       schema_version: 1, tuple: t, tuple_digest: await ownerTupleDigest(t),
       caller_nonce: t.caller_nonce, result, owner: t.owner, token: t.token,
-      lease_epoch: t.lease_epoch, permit_id: null,
+      lease_epoch: t.lease_epoch, permit_id: authorization.permit_id,
       attempt_key: attemptKey(t), active_pointer_key: activeKey(t), written_at_ms: Date.now(),
     };
     const text = JSON.stringify(payload);
@@ -456,6 +472,10 @@ export class ContainmentEffectLedger {
       if (!a || !p || !pointerMatchesAttempt(p, a, t) || !recordValid(a, t) || a.permit_id !== permit_id || a.effect_start_proof_id !== proof_id || !proofValid(proof, t, permit_id) || !permitValid(a.permit, t) || await sha256(t.token) !== a.permit.owner_token_digest) return this.out(t, "unknown", "UNKNOWN");
       if (a.state === "BOUND") return a.binding_id === binding.binding_sha256 ? this.out(t, "bound", a.state, a) : this.out(t, "rejected", a.state, a);
       if (a.state !== "PERMIT_ISSUED") return this.out(t, "rejected", a.state, a);
+      let current: string | null;
+      try { current = await this.kv!.get(bindingKey(t)); } catch { return this.out(t, "unknown", "UNKNOWN", a); }
+      if (!current || current !== payload || await sha256(current) !== await sha256(payload)
+        || !bindingPayloadValid(current, t, permit_id, binding)) return this.out(t, "unknown", "UNKNOWN", a);
       const n = { ...a, state: "BOUND" as const, binding_id: binding.binding_sha256, binding };
       await s.put(attemptKey(t), n); await s.put(activeKey(t), n);
       const out = await this.out(t, "bound", n.state, n); out.permit = a.permit; out.proof = proof; return out;
