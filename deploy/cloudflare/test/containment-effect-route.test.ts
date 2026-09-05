@@ -37,10 +37,11 @@ function deps(ledger: ContainmentEffectLedger, t: OwnerTuple) {
 describe("canonical containment effect route", () => {
   it("refuses an unauthorized mirror and never drives", async () => {
     const { ledger, kv } = make(); const t = tuple(); let drives = 0; let reads = 0;
+    let legacyPermits = 0;
     const originalGet = kv.get;
     kv.get.mockImplementation(async key => { const raw = await originalGet(key); reads++; return raw && reads === 2 ? `${raw}tampered` : raw; });
-    const result = await runCanonicalEffect({ ...deps(ledger, t), drive: async () => { drives++; return undefined; } });
-    expect(["unauthorized", "mirror_tampered"]).toContain(result.status); expect(drives).toBe(0);
+    const result = await runCanonicalEffect({ ...deps(ledger, t), beforeConfirm: async () => { legacyPermits++; return "must-not-issue"; }, drive: async () => { drives++; return undefined; } });
+    expect(["unauthorized", "mirror_tampered"]).toContain(result.status); expect(drives).toBe(0); expect(legacyPermits).toBe(0);
   });
 
   it("losing claim creates no owner artifact or provider call", async () => {
@@ -90,12 +91,13 @@ describe("canonical containment effect route", () => {
 
   it("releases a claim when canonical prepare is already busy", async () => {
     let released = 0; let claimed = 0;
+    let legacyPermits = 0;
     const ledger = {
       ownerObserve: async () => ({ kind: "unknown", schema_version: 1, tuple_digest: "", attempt_key: "", active_pointer_key: "", permit: null, proof: null, state: "UNKNOWN" }),
       ownerPrepare: async () => ({ kind: "busy", schema_version: 1, tuple_digest: "", attempt_key: "", active_pointer_key: "", permit: null, proof: null, state: "PREPARED" }),
     } as any;
-    const result = await runCanonicalEffect({ ...deps(ledger, tuple()), claim: async () => { claimed++; return true; }, release: async () => { released++; } });
-    expect(result.status).toBe("busy"); expect(claimed).toBe(1); expect(released).toBe(1);
+    const result = await runCanonicalEffect({ ...deps(ledger, tuple()), beforeConfirm: async () => { legacyPermits++; return "must-not-issue"; }, claim: async () => { claimed++; return true; }, release: async () => { released++; } });
+    expect(result.status).toBe("busy"); expect(claimed).toBe(1); expect(released).toBe(1); expect(legacyPermits).toBe(0);
   });
 
   it("releases a claim when canonical acquire is already busy", async () => {
@@ -160,12 +162,19 @@ describe("canonical containment effect route", () => {
     const { ledger } = make(); const t = { ...tuple(), path: "drain" as const, owner: "drain:lease-owner", token: "drain-token", lease_epoch: 4 };
     const events: string[] = []; const base = deps(ledger, t);
     const originalConfirm = (base.ledger as any).ownerConfirm;
-    const route = { ...base, ledger: { ...base.ledger, ownerConfirm: async (...args: any[]) => { events.push("owner-confirm"); return originalConfirm(...args); } },
+    const originalPrepare = (base.ledger as any).ownerPrepare; const originalAcquire = (base.ledger as any).ownerAcquire; const originalMirror = (base.ledger as any).ownerMirror;
+    const route = { ...base, ledger: {
+      ...base.ledger,
+      ownerPrepare: async (...args: any[]) => { const result = await originalPrepare(...args); events.push("prepare"); return result; },
+      ownerAcquire: async (...args: any[]) => { const result = await originalAcquire(...args); events.push("acquire"); return result; },
+      ownerMirror: async (...args: any[]) => { const result = await originalMirror(...args); events.push("mirror"); return result; },
+      ownerConfirm: async (...args: any[]) => { events.push("owner-confirm"); return originalConfirm(...args); },
+    },
       beforeConfirm: async () => { events.push("legacy-permit"); return "legacy-permit-1"; },
       beforeBegin: async permit => { events.push(`before-begin:${permit.permit_id}`); return true; } };
     const result = await runCanonicalEffect(route);
     expect(result.status).toBe("committed"); if (result.status !== "committed") return;
-    expect(events.slice(0, 3)).toEqual(["legacy-permit", "owner-confirm", "before-begin:legacy-permit-1"]);
+    expect(events.slice(0, 6)).toEqual(["prepare", "acquire", "mirror", "legacy-permit", "owner-confirm", "before-begin:legacy-permit-1"]);
     expect(result.receipt.permit_id).toBe("legacy-permit-1");
   });
 
@@ -174,7 +183,9 @@ describe("canonical containment effect route", () => {
     let claimed = false; let released = 0; let drives = 0;
     const result = await runCanonicalEffect({ ...deps(ledger, t), claim: async () => !claimed && (claimed = true), release: async () => { claimed = false; released++; },
       beforeConfirm: async () => undefined, drive: async () => { drives++; return undefined; } });
-    expect(result.status).toBe("unavailable"); expect(storage.map.size).toBe(0); expect(values.size).toBe(0);
+    expect(result.status).toBe("unavailable");
+    expect([...storage.map.values()].every((value: any) => value?.permit_id === null && value?.state !== "PERMIT_ISSUED")).toBe(true);
+    expect([...values.values()].every(raw => JSON.parse(raw).permit_id === null)).toBe(true);
     expect(released).toBe(1); expect(drives).toBe(0);
   });
 

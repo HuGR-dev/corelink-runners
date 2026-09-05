@@ -137,15 +137,6 @@ export async function runCanonicalEffect<TOpts extends object>(
     if (!claimAdmitted) return { status: "claim_refused" };
     if (deps.afterClaim && !(await deps.afterClaim())) { await releaseClaim(); return { status: "busy" }; }
     if (deps.beforeDrive && !(await deps.beforeDrive())) { await releaseClaim(); return { status: "before_drive_refused" }; }
-    let externalPermitId: string | undefined;
-    if (!resumable && deps.beforeConfirm) {
-      externalPermitId = await deps.beforeConfirm();
-      if (!text(externalPermitId)) {
-        await releaseClaim();
-        return { status: "unavailable", reason: "legacy permit unavailable" };
-      }
-    }
-
     if (!resumable) {
       const prepared = await deps.ledger.ownerPrepare(req);
       const previous = prepared.kind === "committed" || (prepared.kind === "owned" && prepared.state === "COMMITTED") ? terminal(prepared) : null;
@@ -182,6 +173,12 @@ export async function runCanonicalEffect<TOpts extends object>(
         await deps.ledger.ownerAbort(req).catch(() => undefined);
         await releaseClaim();
         return { status: mirrored.kind === "mismatch" ? "mirror_tampered" : "unauthorized" };
+      }
+      const externalPermitId = deps.beforeConfirm ? await deps.beforeConfirm() : undefined;
+      if (deps.beforeConfirm && !text(externalPermitId)) {
+        await deps.ledger.ownerAbort(req).catch(() => undefined);
+        await releaseClaim();
+        return { status: "unavailable", reason: "legacy permit unavailable" };
       }
       const confirmed = await deps.ledger.ownerConfirm(
         { ...req, observation_kind: mirrored.kind, observation_digest: mirrorDigest }, mirrorDigest, mirrorDigest, externalPermitId,
