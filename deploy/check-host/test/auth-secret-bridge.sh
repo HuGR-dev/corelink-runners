@@ -10,39 +10,85 @@ mkdir -p "$bin"
 
 cat >"$bin/clw" <<'EOF'
 #!/bin/sh
+[ "${CLW_FAIL:-0}" = 1 ] && exit 7
 exit 0
 EOF
 cat >"$bin/exec-server" <<'EOF'
 #!/bin/sh
 env >"${AUTH_ENV_CAPTURE:?}"
 cat "${EXEC_SERVER_AUTH_TOKEN_FILE:?}" >"${AUTH_FILE_CAPTURE:?}"
+mode=$(stat -c '%a' "${EXEC_SERVER_AUTH_TOKEN_FILE}" 2>/dev/null || stat -f '%Lp' "${EXEC_SERVER_AUTH_TOKEN_FILE}")
+printf '%s' "$mode" >"${AUTH_MODE_CAPTURE:?}"
+ps -p $$ -o command= >"${AUTH_ARG_CAPTURE:?}"
+case "${EXEC_MODE:-normal}" in
+    term) sleep 30 & sleep_pid=$!; trap 'kill -TERM "$sleep_pid" 2>/dev/null; exit 0' TERM; wait "$sleep_pid" ;;
+    fail) exit 42 ;;
+esac
 EOF
 cat >"$bin/supervisord" <<'EOF'
 #!/bin/sh
 env >"${AUTH_ENV_CAPTURE:?}"
 cat "${EXEC_SERVER_AUTH_TOKEN_FILE:?}" >"${AUTH_FILE_CAPTURE:?}"
+mode=$(stat -c '%a' "${EXEC_SERVER_AUTH_TOKEN_FILE}" 2>/dev/null || stat -f '%Lp' "${EXEC_SERVER_AUTH_TOKEN_FILE}")
+printf '%s' "$mode" >"${AUTH_MODE_CAPTURE:?}"
+ps -p $$ -o command= >"${AUTH_ARG_CAPTURE:?}"
+case "${EXEC_MODE:-normal}" in
+    term) sleep 30 & sleep_pid=$!; trap 'kill -TERM "$sleep_pid" 2>/dev/null; exit 0' TERM; wait "$sleep_pid" ;;
+    fail) exit 42 ;;
+esac
 EOF
 chmod 0755 "$bin"/*
-file_mode() {
-    stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"
-}
-
 check_script="$tmp/check-host.sh"
-sed "s#exec /usr/local/bin/corelink-check-exec-server#exec \"$bin/exec-server\"#" \
+sed "s#/usr/local/bin/corelink-check-exec-server#\"$bin/exec-server\"#" \
     "$root/entrypoint.sh" >"$check_script"
 chmod 0755 "$check_script"
 
 auth="$tmp/run/corelink/exec-server-auth-token"
 mkdir -p "$(dirname "$auth")"
-AUTH_ENV_CAPTURE="$tmp/check.env" AUTH_FILE_CAPTURE="$tmp/check.file" \
+AUTH_ENV_CAPTURE="$tmp/check.env" AUTH_FILE_CAPTURE="$tmp/check.file" AUTH_MODE_CAPTURE="$tmp/check.mode" AUTH_ARG_CAPTURE="$tmp/check.argv" \
     PATH="$bin:$PATH" EXEC_SERVER_AUTH_TOKEN='bridge-secret' \
     EXEC_SERVER_AUTH_TOKEN_FILE="$auth" TOOLCHAIN_DIGEST=digest \
     TOOLCHAIN_DIR="$tmp/toolchain" "$check_script"
 
 test "$(cat "$tmp/check.file")" = bridge-secret
-test "$(file_mode "$auth")" = 400
+test "$(cat "$tmp/check.mode")" = 400
+test ! -e "$auth"
 ! grep -q '^EXEC_SERVER_AUTH_TOKEN=' "$tmp/check.env"
 grep -q "^EXEC_SERVER_AUTH_TOKEN_FILE=$auth$" "$tmp/check.env"
+! grep -q 'bridge-secret' "$tmp/check.argv"
+
+# TERM is forwarded and still removes the ephemeral file.
+term_auth="$tmp/term/run/corelink/token"
+AUTH_ENV_CAPTURE="$tmp/term.env" AUTH_FILE_CAPTURE="$tmp/term.file" AUTH_MODE_CAPTURE="$tmp/term.mode" \
+    PATH="$bin:$PATH" AUTH_ARG_CAPTURE="$tmp/term.argv" EXEC_MODE=term EXEC_SERVER_AUTH_TOKEN=term-secret EXEC_SERVER_AUTH_TOKEN_FILE="$term_auth" \
+    TOOLCHAIN_DIGEST=digest TOOLCHAIN_DIR="$tmp/toolchain" "$check_script" &
+term_pid=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do [ -e "$tmp/term.mode" ] && break; sleep 0.01; done
+kill -TERM "$term_pid"
+if wait "$term_pid"; then
+    echo 'TERM unexpectedly changed child status' >&2; exit 1
+else
+    test "$?" = 143
+fi
+test ! -e "$term_auth"
+
+# A durable child failure is returned while cleanup still runs.
+fail_auth="$tmp/fail/run/corelink/token"
+if AUTH_ENV_CAPTURE="$tmp/fail.env" AUTH_FILE_CAPTURE="$tmp/fail.file" AUTH_MODE_CAPTURE="$tmp/fail.mode" \
+    PATH="$bin:$PATH" AUTH_ARG_CAPTURE="$tmp/fail.argv" EXEC_MODE=fail EXEC_SERVER_AUTH_TOKEN=fail-secret EXEC_SERVER_AUTH_TOKEN_FILE="$fail_auth" \
+    TOOLCHAIN_DIGEST=digest TOOLCHAIN_DIR="$tmp/toolchain" "$check_script"; then
+    echo 'child failure unexpectedly swallowed' >&2; exit 1
+fi
+test ! -e "$fail_auth"
+
+# Hydration failure also removes the file before the process can become durable.
+hydrate_fail_auth="$tmp/hydrate-fail/run/corelink/token"
+if PATH="$bin:$PATH" CLW_FAIL=1 EXEC_SERVER_AUTH_TOKEN=hydrate-fail \
+    EXEC_SERVER_AUTH_TOKEN_FILE="$hydrate_fail_auth" TOOLCHAIN_DIGEST=digest \
+    TOOLCHAIN_DIR="$tmp/toolchain" "$check_script" 2>/dev/null; then
+    echo 'hydration failure unexpectedly accepted' >&2; exit 1
+fi
+test ! -e "$hydrate_fail_auth"
 
 # Invalid inputs fail closed before the durable process is started.
 if EXEC_SERVER_AUTH_TOKEN='' EXEC_SERVER_AUTH_TOKEN_FILE="$tmp/empty" \
@@ -74,13 +120,44 @@ sed -e "s#/usr/local/bin/clw#$bin/clw#g" \
     "$root/../cloudflare/entrypoint.sh" >"$cloud_script"
 chmod 0755 "$cloud_script"
 cloud_auth="$tmp/cloud/run/corelink/token"
-AUTH_ENV_CAPTURE="$tmp/cloud.env" AUTH_FILE_CAPTURE="$tmp/cloud.file" \
+AUTH_ENV_CAPTURE="$tmp/cloud.env" AUTH_FILE_CAPTURE="$tmp/cloud.file" AUTH_MODE_CAPTURE="$tmp/cloud.mode" AUTH_ARG_CAPTURE="$tmp/cloud.argv" \
     EXEC_SERVER_AUTH_TOKEN='cloud-secret' EXEC_SERVER_AUTH_TOKEN_FILE="$cloud_auth" \
     CLW_TENANT=tenant WORKSPACE_NAME=workspace PROFILE_NAME=profile \
-    "$cloud_script"
+    "$cloud_script" >"$tmp/cloud.log" 2>&1
 test "$(cat "$tmp/cloud.file")" = cloud-secret
-test "$(file_mode "$cloud_auth")" = 400
+test "$(cat "$tmp/cloud.mode")" = 400
+test ! -e "$cloud_auth"
 ! grep -q '^EXEC_SERVER_AUTH_TOKEN=' "$tmp/cloud.env"
 grep -q "^EXEC_SERVER_AUTH_TOKEN_FILE=$cloud_auth$" "$tmp/cloud.env"
+! grep -q 'cloud-secret' "$tmp/cloud.argv" "$tmp/cloud.log"
+
+# DevEnv TERM forwarding runs the existing snapshot path and removes auth.
+cloud_term_auth="$tmp/cloud-term/run/corelink/token"
+AUTH_ENV_CAPTURE="$tmp/cloud-term.env" AUTH_FILE_CAPTURE="$tmp/cloud-term.file" AUTH_MODE_CAPTURE="$tmp/cloud-term.mode" \
+    AUTH_ARG_CAPTURE="$tmp/cloud-term.argv" EXEC_MODE=term EXEC_SERVER_AUTH_TOKEN=cloud-term EXEC_SERVER_AUTH_TOKEN_FILE="$cloud_term_auth" \
+    CLW_TENANT=tenant WORKSPACE_NAME=workspace PROFILE_NAME=profile "$cloud_script" &
+cloud_term_pid=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do [ -e "$tmp/cloud-term.mode" ] && break; sleep 0.01; done
+kill -TERM "$cloud_term_pid"
+wait "$cloud_term_pid"
+test ! -e "$cloud_term_auth"
+
+# Supervisor failure remains observable and still cleans the bridge file.
+cloud_fail_auth="$tmp/cloud-fail/run/corelink/token"
+if AUTH_ENV_CAPTURE="$tmp/cloud-fail.env" AUTH_FILE_CAPTURE="$tmp/cloud-fail.file" AUTH_MODE_CAPTURE="$tmp/cloud-fail.mode" \
+    AUTH_ARG_CAPTURE="$tmp/cloud-fail.argv" EXEC_MODE=fail EXEC_SERVER_AUTH_TOKEN=cloud-fail EXEC_SERVER_AUTH_TOKEN_FILE="$cloud_fail_auth" \
+    CLW_TENANT=tenant WORKSPACE_NAME=workspace PROFILE_NAME=profile "$cloud_script"; then
+    echo 'supervisor failure unexpectedly swallowed' >&2; exit 1
+fi
+test ! -e "$cloud_fail_auth"
+
+cloud_hydrate_fail_auth="$tmp/cloud-hydrate-fail/run/corelink/token"
+if CLW_FAIL=1 EXEC_SERVER_AUTH_TOKEN=cloud-hydrate-fail \
+    EXEC_SERVER_AUTH_TOKEN_FILE="$cloud_hydrate_fail_auth" \
+    CLW_TENANT=tenant WORKSPACE_NAME=workspace PROFILE_NAME=profile "$cloud_script" \
+    >/dev/null 2>&1; then
+    echo 'cloud hydration failure unexpectedly accepted' >&2; exit 1
+fi
+test ! -e "$cloud_hydrate_fail_auth"
 
 echo 'auth-secret-bridge: PASS'

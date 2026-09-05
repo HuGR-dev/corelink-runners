@@ -58,7 +58,19 @@ error() {
 : "${WORKSPACE_NAME:?WORKSPACE_NAME must be set}"
 : "${PROFILE_NAME:?PROFILE_NAME must be set}"
 
-bridge_exec_auth_token
+if [[ "${CORELINK_AUTH_BRIDGED:-}" != 1 ]]; then
+    bridge_exec_auth_token
+    export CORELINK_AUTH_BRIDGED=1
+    # Force a fresh process environment so the provider bearer is absent from
+    # this shell's /proc entry before hydration and supervisor startup.
+    exec env -u EXEC_SERVER_AUTH_TOKEN "$0" "$@"
+fi
+unset CORELINK_AUTH_BRIDGED
+
+cleanup_auth_file() {
+    rm -f "${EXEC_SERVER_AUTH_TOKEN_FILE}" || true
+}
+trap cleanup_auth_file EXIT
 
 CLW_BIN="/usr/local/bin/clw"
 CLW_REF_DOMAIN="${CLW_REF_DOMAIN:-runner}"
@@ -137,7 +149,16 @@ snapshot_on_shutdown() {
     exit 0
 }
 
-trap snapshot_on_shutdown SIGTERM SIGINT
+SUPERVISOR_PID=""
+forward_shutdown() {
+    if [[ -n "$SUPERVISOR_PID" ]]; then
+        kill -TERM "$SUPERVISOR_PID" 2>/dev/null || true
+        wait "$SUPERVISOR_PID" 2>/dev/null || true
+    fi
+    snapshot_on_shutdown
+}
+
+trap forward_shutdown SIGTERM SIGINT
 
 # ── 5. Main Execution Flow ────────────────────────────────────────────
 main() {
@@ -148,7 +169,15 @@ main() {
     hydrate_workspace
 
     log "Starting supervisord process manager..."
-    exec /usr/bin/supervisord -n -c /etc/supervisor/conf.d/supervisord.conf
+    /usr/bin/supervisord -n -c /etc/supervisor/conf.d/supervisord.conf &
+    SUPERVISOR_PID=$!
+    set +e
+    wait "$SUPERVISOR_PID"
+    supervisor_status=$?
+    set -e
+    SUPERVISOR_PID=""
+    cleanup_auth_file
+    return "$supervisor_status"
 }
 
 main "$@"
