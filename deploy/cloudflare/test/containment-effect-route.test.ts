@@ -37,10 +37,9 @@ function deps(ledger: ContainmentEffectLedger, t: OwnerTuple) {
 
 describe("canonical containment effect route", () => {
   it("refuses an unauthorized mirror and never drives", async () => {
-    const { ledger, kv } = make(); const t = tuple(); let drives = 0; let reads = 0;
+    const { ledger, kv, values } = make(); const t = tuple(); let drives = 0; let reads = 0;
     let legacyPermits = 0;
-    const originalGet = kv.get;
-    kv.get.mockImplementation(async key => { const raw = await originalGet(key); reads++; return raw && reads === 2 ? `${raw}tampered` : raw; });
+    kv.get.mockImplementation(async key => { const raw = values.get(key) ?? null; reads++; return raw && reads === 1 ? `${raw}tampered` : raw; });
     const result = await runCanonicalEffect({ ...deps(ledger, t), beforeConfirm: async () => { legacyPermits++; return null; }, drive: async () => { drives++; return undefined; } });
     expect(["unauthorized", "mirror_tampered"]).toContain(result.status); expect(drives).toBe(0); expect(legacyPermits).toBe(0);
   });
