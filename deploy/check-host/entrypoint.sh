@@ -11,7 +11,7 @@ set -eu
 bridge_exec_auth_token() {
     auth_file="${EXEC_SERVER_AUTH_TOKEN_FILE:-/run/corelink/exec-server-auth-token}"
     auth_dir=${auth_file%/*}
-    if [ -z "$auth_dir" ] || [ "$auth_dir" = "$auth_file" ]; then
+    if [ "${auth_file#/}" = "$auth_file" ] || [ -z "$auth_dir" ] || [ "$auth_dir" = "$auth_file" ]; then
         echo "[check-host] FATAL: EXEC_SERVER_AUTH_TOKEN_FILE must name a file" >&2
         return 1
     fi
@@ -21,6 +21,11 @@ bridge_exec_auth_token() {
     fi
     if [ ! -e "$auth_dir" ]; then
         mkdir -p "$auth_dir"
+    fi
+    resolved_auth_dir=$(CDPATH= cd -P "$auth_dir" 2>/dev/null && pwd -P) || resolved_auth_dir=
+    if [ -z "$resolved_auth_dir" ]; then
+        echo "[check-host] FATAL: auth directory resolves through a symlink" >&2
+        return 1
     fi
     chmod 0700 "$auth_dir"
     if [ -L "$auth_file" ] || [ -e "$auth_file" ]; then
@@ -48,13 +53,29 @@ bridge_exec_auth_token() {
     unset EXEC_SERVER_AUTH_TOKEN
 }
 
-if [ "${CORELINK_AUTH_BRIDGED:-}" != 1 ]; then
+validate_auth_file() {
+    auth_file="${EXEC_SERVER_AUTH_TOKEN_FILE:-/run/corelink/exec-server-auth-token}"
+    auth_dir=${auth_file%/*}
+    resolved_auth_dir=$(CDPATH= cd -P "$auth_dir" 2>/dev/null && pwd -P) || resolved_auth_dir=
+    mode=$(stat -c '%a' "$auth_file" 2>/dev/null) || mode=$(stat -f '%Lp' "$auth_file" 2>/dev/null) || mode=
+    if [ "${auth_file#/}" = "$auth_file" ] || [ -z "$resolved_auth_dir" ] \
+        || [ -L "$auth_file" ] || [ ! -f "$auth_file" ] || [ "$mode" != 400 ] \
+        || [ ! -O "$auth_file" ]; then
+        echo "[check-host] FATAL: auth file is not a validated regular 0400 file" >&2
+        return 1
+    fi
+}
+
+if [ "${EXEC_SERVER_AUTH_TOKEN+x}" = x ]; then
     bridge_exec_auth_token
     export CORELINK_AUTH_BRIDGED=1
     # Re-exec with the provider bearer removed from the kernel environment.
     # The first shell therefore cannot become a durable process with the token
     # visible through /proc, even transiently after the bridge returns.
     exec env -u EXEC_SERVER_AUTH_TOKEN "$0" "$@"
+fi
+if [ "${CORELINK_AUTH_BRIDGED:-}" = 1 ]; then
+    validate_auth_file
 fi
 unset CORELINK_AUTH_BRIDGED
 

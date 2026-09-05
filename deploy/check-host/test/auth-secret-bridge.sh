@@ -57,6 +57,24 @@ test ! -e "$auth"
 grep -q "^EXEC_SERVER_AUTH_TOKEN_FILE=$auth$" "$tmp/check.env"
 ! grep -q 'bridge-secret' "$tmp/check.argv"
 
+# A provider-injected marker cannot bypass a raw token bridge.
+marked_auth="$tmp/marked/run/corelink/token"
+AUTH_ENV_CAPTURE="$tmp/marked.env" AUTH_FILE_CAPTURE="$tmp/marked.file" AUTH_MODE_CAPTURE="$tmp/marked.mode" AUTH_ARG_CAPTURE="$tmp/marked.argv" \
+    PATH="$bin:$PATH" CORELINK_AUTH_BRIDGED=1 EXEC_SERVER_AUTH_TOKEN=marked-secret \
+    EXEC_SERVER_AUTH_TOKEN_FILE="$marked_auth" TOOLCHAIN_DIGEST=digest \
+    TOOLCHAIN_DIR="$tmp/toolchain" "$check_script"
+test "$(cat "$tmp/marked.file")" = marked-secret
+! grep -q '^EXEC_SERVER_AUTH_TOKEN=' "$tmp/marked.env"
+
+if CORELINK_AUTH_BRIDGED=1 EXEC_SERVER_AUTH_TOKEN='' EXEC_SERVER_AUTH_TOKEN_FILE="$tmp/marked-empty" \
+    TOOLCHAIN_DIGEST=digest TOOLCHAIN_DIR="$tmp/toolchain" "$check_script" 2>/dev/null; then
+    echo 'marker plus empty token unexpectedly accepted' >&2; exit 1
+fi
+if CORELINK_AUTH_BRIDGED=1 EXEC_SERVER_AUTH_TOKEN_FILE="$tmp/marker-missing" \
+    TOOLCHAIN_DIGEST=digest TOOLCHAIN_DIR="$tmp/toolchain" "$check_script" 2>/dev/null; then
+    echo 'marker without auth file unexpectedly accepted' >&2; exit 1
+fi
+
 # TERM is forwarded and still removes the ephemeral file.
 term_auth="$tmp/term/run/corelink/token"
 AUTH_ENV_CAPTURE="$tmp/term.env" AUTH_FILE_CAPTURE="$tmp/term.file" AUTH_MODE_CAPTURE="$tmp/term.mode" \
@@ -130,6 +148,8 @@ test ! -e "$cloud_auth"
 ! grep -q '^EXEC_SERVER_AUTH_TOKEN=' "$tmp/cloud.env"
 grep -q "^EXEC_SERVER_AUTH_TOKEN_FILE=$cloud_auth$" "$tmp/cloud.env"
 ! grep -q 'cloud-secret' "$tmp/cloud.argv" "$tmp/cloud.log"
+grep -q '^user=coder$' "$root/../cloudflare/supervisord.conf"
+grep -q '^USER coder$' "$root/../cloudflare/Dockerfile.runner-devenv"
 
 # DevEnv TERM forwarding runs the existing snapshot path and removes auth.
 cloud_term_auth="$tmp/cloud-term/run/corelink/token"

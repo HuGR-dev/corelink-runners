@@ -9,7 +9,7 @@ set -euo pipefail
 bridge_exec_auth_token() {
     local auth_file="${EXEC_SERVER_AUTH_TOKEN_FILE:-/run/corelink/exec-server-auth-token}"
     local auth_dir="${auth_file%/*}"
-    if [[ -z "$auth_dir" || "$auth_dir" == "$auth_file" ]]; then
+    if [[ "${auth_file#/}" == "$auth_file" || -z "$auth_dir" || "$auth_dir" == "$auth_file" ]]; then
         error "EXEC_SERVER_AUTH_TOKEN_FILE must name a file"
         return 1
     fi
@@ -18,6 +18,12 @@ bridge_exec_auth_token() {
         return 1
     fi
     [[ -e "$auth_dir" ]] || mkdir -p "$auth_dir"
+    local resolved_auth_dir
+    resolved_auth_dir=$(CDPATH= cd -P "$auth_dir" 2>/dev/null && pwd -P) || resolved_auth_dir=
+    if [[ -z "$resolved_auth_dir" ]]; then
+        error "auth directory resolves through a symlink"
+        return 1
+    fi
     chmod 0700 "$auth_dir"
     if [[ -L "$auth_file" || -e "$auth_file" ]]; then
         error "refusing pre-existing auth file"
@@ -45,6 +51,19 @@ bridge_exec_auth_token() {
     unset EXEC_SERVER_AUTH_TOKEN
 }
 
+validate_auth_file() {
+    local auth_file="${EXEC_SERVER_AUTH_TOKEN_FILE:-/run/corelink/exec-server-auth-token}"
+    local auth_dir="${auth_file%/*}"
+    local resolved_auth_dir mode
+    resolved_auth_dir=$(CDPATH= cd -P "$auth_dir" 2>/dev/null && pwd -P) || resolved_auth_dir=
+    mode=$(stat -c '%a' "$auth_file" 2>/dev/null) || mode=$(stat -f '%Lp' "$auth_file" 2>/dev/null) || mode=
+    if [[ "${auth_file#/}" == "$auth_file" || -z "$resolved_auth_dir" \
+        || -L "$auth_file" || ! -f "$auth_file" || "$mode" != 400 || ! -O "$auth_file" ]]; then
+        error "auth file is not a validated regular 0400 file"
+        return 1
+    fi
+}
+
 log() {
     echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] [entrypoint] $*"
 }
@@ -58,12 +77,15 @@ error() {
 : "${WORKSPACE_NAME:?WORKSPACE_NAME must be set}"
 : "${PROFILE_NAME:?PROFILE_NAME must be set}"
 
-if [[ "${CORELINK_AUTH_BRIDGED:-}" != 1 ]]; then
+if [[ -v EXEC_SERVER_AUTH_TOKEN ]]; then
     bridge_exec_auth_token
     export CORELINK_AUTH_BRIDGED=1
     # Force a fresh process environment so the provider bearer is absent from
     # this shell's /proc entry before hydration and supervisor startup.
     exec env -u EXEC_SERVER_AUTH_TOKEN "$0" "$@"
+fi
+if [[ "${CORELINK_AUTH_BRIDGED:-}" == 1 ]]; then
+    validate_auth_file
 fi
 unset CORELINK_AUTH_BRIDGED
 
