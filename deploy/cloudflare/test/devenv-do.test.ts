@@ -140,6 +140,24 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
       expect(runningStatus.containerHandle).toBe("mock-do-tenant-123");
     });
 
+    it("does not overwrite an active session on a repeated start", async () => {
+      const payload: StartPayload = {
+        config: {
+          workspaceName: "active-session",
+          profileName: "default",
+          tier: "standard-4",
+          clwEndpoint: "https://corelink-api.humangr.com",
+          clwTenant: "ee30f7ba-fc25-4d71-939e-ebe130b4c6a3",
+          clwToken: "cl_pat_1234567890abcdef1234567890",
+        },
+      };
+      const doInstance = new RunnerDevEnvDO(mockCtx, mockEnv);
+      await doInstance.startDevenv(payload);
+      const firstSession = (doInstance as any).devenvState.sessionUuid;
+      await expect(doInstance.startDevenv(payload)).rejects.toThrow("DEVENV_START_REQUIRES_TERMINAL_STATE");
+      expect((doInstance as any).devenvState.sessionUuid).toBe(firstSession);
+    });
+
     it("rejects an invalid start payload before it can mutate the DevEnv state", async () => {
       const doInstance = new RunnerDevEnvDO(mockCtx, mockEnv);
       await new Promise((resolve) => setTimeout(resolve, 10));
@@ -241,11 +259,85 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
 
       const frozen = mockStorage.get("devenv:usage:pending");
       expect(frozen?.event?.idem_key).toMatch(/^[0-9a-f]{64}$/);
+      await expect(doInstance.startDevenv(payload)).rejects.toThrow("DEVENV_START_REQUIRES_TERMINAL_STATE");
+      await doInstance.onStop();
       await expect(doInstance.startDevenv(payload)).resolves.toMatchObject({ status: "starting" });
       expect(fetchMock).toHaveBeenCalledTimes(2);
       const retryBody = JSON.parse(fetchMock.mock.calls[1][1].body as string) as Array<Record<string, unknown>>;
       expect(retryBody[0]).toEqual(frozen.event);
       expect(mockStorage.has("devenv:usage:pending")).toBe(false);
+    });
+
+    it("keeps pending delivery after a settled-marker/delete interleaving", async () => {
+      mockEnv.BILLING_INGEST_URL = "https://billing.test/usage";
+      mockEnv.BILLING_INGEST_AUTH_KEY = "test-key";
+      mockEnv.BILLING_REGION = "iad";
+      const fetchMock = vi.fn(async () => new Response("{}", { status: 202 }));
+      vi.stubGlobal("fetch", fetchMock);
+      let failDelete = true;
+      const storageDelete = mockCtx.storage.delete;
+      mockCtx.storage.delete = vi.fn(async (key: string) => {
+        if (key === "devenv:usage:pending" && failDelete) {
+          failDelete = false;
+          throw new Error("delete interrupted");
+        }
+        return storageDelete(key);
+      });
+      const doInstance = new RunnerDevEnvDO(mockCtx, mockEnv);
+      await doInstance.startDevenv({
+        config: {
+          workspaceName: "delete-interleave",
+          profileName: "default",
+          tier: "standard-4",
+          clwEndpoint: "https://corelink-api.humangr.com",
+          clwTenant: "ee30f7ba-fc25-4d71-939e-ebe130b4c6a3",
+          clwToken: "cl_pat_1234567890abcdef1234567890",
+        },
+      });
+      await doInstance.onStart();
+      await doInstance.requestStop();
+      await doInstance.onStop();
+      expect(mockStorage.has("devenv:usage:settled")).toBe(true);
+      expect(mockStorage.has("devenv:usage:pending")).toBe(true);
+      await doInstance.onStop();
+      expect(mockStorage.has("devenv:usage:pending")).toBe(false);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("retains the terminal identity when the initial pending snapshot fails", async () => {
+      mockEnv.BILLING_INGEST_URL = "https://billing.test/usage";
+      mockEnv.BILLING_INGEST_AUTH_KEY = "test-key";
+      mockEnv.BILLING_REGION = "iad";
+      const fetchMock = vi.fn(async () => new Response("{}", { status: 202 }));
+      vi.stubGlobal("fetch", fetchMock);
+      let failPut = true;
+      const storagePut = mockCtx.storage.put;
+      mockCtx.storage.put = vi.fn(async (key: string, value: unknown) => {
+        if (key === "devenv:usage:pending" && failPut) {
+          failPut = false;
+          throw new Error("snapshot interrupted");
+        }
+        return storagePut(key, value);
+      });
+      const doInstance = new RunnerDevEnvDO(mockCtx, mockEnv);
+      await doInstance.startDevenv({
+        config: {
+          workspaceName: "snapshot-failure",
+          profileName: "default",
+          tier: "standard-4",
+          clwEndpoint: "https://corelink-api.humangr.com",
+          clwTenant: "ee30f7ba-fc25-4d71-939e-ebe130b4c6a3",
+          clwToken: "cl_pat_1234567890abcdef1234567890",
+        },
+      });
+      await doInstance.onStart();
+      await doInstance.requestStop();
+      await doInstance.onStop();
+      expect((doInstance as any).devenvState.status).toBe("stopping");
+      expect(mockStorage.has("devenv:usage:pending")).toBe(false);
+      await doInstance.onStop();
+      expect((doInstance as any).devenvState.status).toBe("stopped");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
     });
   });
 });

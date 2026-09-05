@@ -141,7 +141,16 @@ export class RunnerDevEnvDO extends Container<any> {
   async startDevenv(payload: StartPayload): Promise<StatusResponse> {
     return await this.ctx.blockConcurrencyWhile(async () => {
       this.validateStartPayload(payload);
+      if (this.devenvState.status !== "stopped" && this.devenvState.status !== "errored") {
+        throw new Error("DEVENV_START_REQUIRES_TERMINAL_STATE");
+      }
       await this.flushPendingUsage();
+      if (this.devenvState.status === "errored" && this.env.BILLING_INGEST_URL) {
+        const settledSession = await this.ctx.storage.get(DEVENV_USAGE_SETTLED_KEY) as string | undefined;
+        if (settledSession !== (this.devenvState as any).sessionUuid) {
+          throw new Error("DEVENV_BILLING_PENDING");
+        }
+      }
       
       const sessionUuid = crypto.randomUUID();
       const generationId = ((this.devenvState as any).generationId ?? 0) + 1;
@@ -199,13 +208,13 @@ export class RunnerDevEnvDO extends Container<any> {
       await this.transitionState({
         status: "stopping",
         createdAt: this.devenvState.createdAt,
-        startedAt: (this.devenvState as any).startedAt ?? Date.now(),
+        startedAt: (this.devenvState as any).startedAt,
         sessionUuid: (this.devenvState as any).sessionUuid,
         tenantId: (this.devenvState as any).tenantId,
-        billingSeq: (this.devenvState as any).billingSeq ?? 0,
-        generationId: (this.devenvState as any).generationId ?? 1,
-        workspaceName: (this.devenvState as any).workspaceName ?? "",
-        profileName: (this.devenvState as any).profileName ?? "",
+        billingSeq: (this.devenvState as any).billingSeq,
+        generationId: (this.devenvState as any).generationId,
+        workspaceName: (this.devenvState as any).workspaceName,
+        profileName: (this.devenvState as any).profileName,
         tier: (this.devenvState as any).tier,
       });
       
@@ -276,7 +285,8 @@ export class RunnerDevEnvDO extends Container<any> {
   }
 
   override async onStop(): Promise<void> {
-    await this.recordUsage();
+    const settlement = await this.recordUsage();
+    if (settlement.outcome === "pending") return;
     if (this.devenvState.status !== "stopped" && this.devenvState.status !== "errored") {
       await this.transitionState({
         status: "stopped",
@@ -360,8 +370,12 @@ export class RunnerDevEnvDO extends Container<any> {
     const pending = await this.ctx.storage.get(DEVENV_USAGE_PENDING_KEY) as DevenvUsagePending | undefined;
     if (pending) return this.deliverPendingUsage(pending);
     const state = this.devenvState as any;
-    if (state.status === "stopped" || !state.startedAt || !state.sessionUuid || !state.tenantId || !state.tier) {
+    if (state.status === "stopped") {
       return { outcome: "no_session" };
+    }
+    if (state.startedAt === undefined || state.sessionUuid === undefined || state.tenantId === undefined || state.tier === undefined) {
+      console.error(JSON.stringify({ event: "devenv_billing_invalid", code: "missing_session_identity" }));
+      return { outcome: "invalid", code: "missing_session_identity" };
     }
     const settledSession = await this.ctx.storage.get(DEVENV_USAGE_SETTLED_KEY) as string | undefined;
     if (settledSession === state.sessionUuid) return { outcome: "no_session" };
@@ -399,8 +413,8 @@ export class RunnerDevEnvDO extends Container<any> {
     const timer = setTimeout(() => controller.abort(), 5000);
     try {
       await pushUsageEvent(this.env as any, pending.event, controller.signal);
-      await this.ctx.storage.delete(DEVENV_USAGE_PENDING_KEY);
       await this.ctx.storage.put(DEVENV_USAGE_SETTLED_KEY, pending.sessionUuid);
+      await this.ctx.storage.delete(DEVENV_USAGE_PENDING_KEY);
       return { outcome: "sent" };
     } catch {
       await this.ctx.storage.put(DEVENV_USAGE_PENDING_KEY, nextDevenvUsageAttempt(pending));
