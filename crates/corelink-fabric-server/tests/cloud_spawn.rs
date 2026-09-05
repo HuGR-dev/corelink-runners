@@ -8,6 +8,7 @@
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use corelink_cloud_engine::{
@@ -15,9 +16,11 @@ use corelink_cloud_engine::{
 };
 use corelink_fabric::{InMemoryLedger, LeaseLedger, TenantId, TenantPlan};
 use corelink_fabric_server::{
-    AppState, BoxProvisioner, BoxRegistry, EngineLeasedExec, LeasedExec, NoBoxProvisioner,
-    NorthflankBoxProvisioner, StaticPlans, StaticTokenStore, SystemClock,
+    AppState, BoxProvisioner, BoxRegistry, EngineLeasedExec, HookRegistry, LeasedExec,
+    NoBoxProvisioner, NorthflankBoxProvisioner, StaticPlans, StaticTokenStore, SystemClock,
+    app_full,
 };
+use corelink_runner::envelope::{CaptureHook, EnvelopeConfig, MetricsCollector};
 use corelink_runner::isolation::RunningContainer;
 use corelink_runner::lease::ContainerSpec;
 
@@ -496,6 +499,31 @@ fn harness_with_provisioner(
     (app(store, state), ledger)
 }
 
+fn harness_with_provisioner_and_registry(
+    prov: Arc<dyn BoxProvisioner>,
+) -> (
+    axum::Router,
+    Arc<dyn LeaseLedger + Send + Sync>,
+    Arc<HookRegistry>,
+) {
+    let store = Arc::new(StaticTokenStore::new([(
+        "pat-acme".to_string(),
+        TenantId::new("acme").unwrap(),
+    )]));
+    let plans = StaticPlans::new([TenantPlan {
+        tenant: TenantId::new("acme").unwrap(),
+        max_concurrency: 4,
+        rate_ceiling_per_min: 100,
+        repo_allowlist: Vec::new(),
+    }]);
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
+    let clock = Arc::new(FixedClock(Arc::new(AtomicU64::new(1_717_000_000_000))));
+    let mut state = AppState::new(ledger.clone(), Arc::new(plans), clock);
+    state.provisioner = prov;
+    let registry = Arc::new(HookRegistry::default());
+    (app_full(store, state, registry.clone()), ledger, registry)
+}
+
 /// `acquire` with a `FailingProvisioner` → 503, AND the ledger has NO Held
 /// lease (the fail-closed ordering guarantee).
 #[tokio::test]
@@ -679,7 +707,7 @@ fn teardown_delete_failure_keeps_binding() {
 async fn close_invokes_teardown() {
     let rec = Arc::new(RecordingProvisioner::new());
     let prov = Arc::clone(&rec) as Arc<dyn BoxProvisioner>;
-    let (router, _ledger) = harness_with_provisioner(prov);
+    let (router, _ledger, registry) = harness_with_provisioner_and_registry(prov);
 
     // Acquire a lease.
     let acq_body = AcquireRequest {
@@ -713,6 +741,26 @@ async fn close_invokes_teardown() {
         check_result: None,
         cost_usd_micros: None,
     };
+    let hook = CaptureHook::open(
+        EnvelopeConfig {
+            ack_timeout: Duration::from_secs(30),
+            buffer_capacity: 256,
+        },
+        "pat-acme",
+        MetricsCollector::new(Instant::now()),
+    );
+    registry.register(
+        &lease_id,
+        TenantId::new("acme").unwrap(),
+        hook.clone(),
+        "pat-acme",
+    );
+    let sub = hook.subscribe("pat-acme").expect("fixture subscriber");
+    let acker = std::thread::spawn(move || {
+        sub.wait_close_signal(std::time::Duration::from_secs(10))
+            .expect("close signal published");
+        sub.ack("pat-acme").expect("in-window fixture ack");
+    });
     let close_resp = router
         .oneshot(json_req(
             "POST",
@@ -722,6 +770,7 @@ async fn close_invokes_teardown() {
         ))
         .await
         .unwrap();
+    acker.join().unwrap();
     assert_eq!(close_resp.status(), StatusCode::OK, "close must succeed");
 
     // Give the background spawn_blocking a moment to complete.
