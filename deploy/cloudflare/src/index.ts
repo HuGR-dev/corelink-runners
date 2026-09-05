@@ -128,6 +128,26 @@ import {
   type ContainmentEffectResult,
   type ContainmentEffectTransition,
 } from "./containment_effect_ledger";
+import {
+  canonicalSafeJobId,
+  containmentEventKey,
+  containmentInvalidKey,
+  containmentJobIndexKey,
+  containmentOutboxKey,
+  containmentPauseKey,
+  containmentReservationKey,
+  emptyContainmentMeta,
+  isValidInvalidConfigRecord,
+  isValidJobIndex,
+  isValidJobIndexMeta,
+  isValidOutboxRecord,
+  normalizeRedriveIdentity,
+  redriveEffectId,
+  reservationPermit,
+  reservationTupleMatches,
+  type ContainmentJobIndex,
+  type ContainmentJobIndexMeta,
+} from "./containment_authority_helpers";
 export {
   ContainmentEffectLedger,
   containmentEffectMirrorFromAttempt,

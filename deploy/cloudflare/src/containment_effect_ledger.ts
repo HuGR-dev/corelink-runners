@@ -124,6 +124,9 @@ function attemptKey(identity: ContainmentEffectIdentity, nonce: string): string 
 function state(value: unknown): value is ContainmentEffectState {
   return typeof value === "string" && ["PREPARED", "CLAIM_ACQUIRED", "PERMIT_ISSUED", "BOUND", "DRIVING", "COMMITTED", "ABORTED_PRE_EFFECT"].includes(value);
 }
+function mirrorState(value: unknown): value is ContainmentEffectMirror["state"] {
+  return typeof value === "string" && ["PREPARED", "CLAIM_ACQUIRED", "PERMIT_ISSUED", "BOUND", "DRIVING", "COMMITTED"].includes(value);
+}
 function validBinding(value: unknown): value is ContainmentEffectBinding {
   if (!value || typeof value !== "object") return false; const b = value as Partial<ContainmentEffectBinding>;
   return b.schema_version === 1 && typeof b.provider === "string" && b.provider.length > 0 && typeof b.resource_id === "string" && b.resource_id.length > 0
@@ -175,7 +178,7 @@ export async function readContainmentEffectMirror(kv: KvLike | undefined, identi
     const value = JSON.parse(raw) as ContainmentEffectMirror;
     return value.schema_version === 1 && value.repo === identity.repo && value.job_id === identity.job_id && value.effect_id === identity.effect_id
       && typeof value.nonce === "string" && typeof value.owner === "string" && typeof value.owner_token === "string" && Number.isSafeInteger(value.lease_epoch)
-      && state(value.state) && value.state !== "ABORTED_PRE_EFFECT" && (value.permit_id === null || typeof value.permit_id === "string")
+      && mirrorState(value.state) && (value.permit_id === null || typeof value.permit_id === "string")
       && (value.binding_sha256 === null || SHA256_HEX.test(value.binding_sha256)) ? value : null;
   } catch { return null; }
 }
