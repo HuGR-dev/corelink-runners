@@ -15,7 +15,8 @@ use axum::http::{Request, StatusCode, header};
 use corelink_fabric::{InMemoryLedger, LeaseLedger, TenantId, TenantPlan};
 use corelink_fabric_api::{AcquireRequest, CloseRequest, paths};
 use corelink_fabric_server::{
-    AppState, BoxProvisioner, Clock, HookRegistry, StaticPlans, StaticTokenStore, app, app_full,
+    AppState, BoxProvisioner, CleanupTeardown, Clock, HookRegistry, StaticPlans, StaticTokenStore,
+    app, app_full,
 };
 use corelink_runner::envelope::{CaptureHook, EnvelopeConfig, MetricsCollector};
 use corelink_runner::lease::ContainerSpec;
@@ -257,6 +258,10 @@ async fn failed_acquire_via_failing_provisioner_emits_no_slot() {
         }
         fn teardown(&self, _: &str) -> anyhow::Result<()> {
             Ok(())
+        }
+        fn teardown_pending(&self, _: &str) -> CleanupTeardown {
+            // The fixture fails before creating any provider object.
+            CleanupTeardown::ConfirmedDestroyed
         }
     }
 

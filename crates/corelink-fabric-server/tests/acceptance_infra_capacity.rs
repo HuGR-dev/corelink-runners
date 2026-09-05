@@ -32,8 +32,8 @@ use axum::http::{Request, StatusCode, header};
 use corelink_fabric::{InMemoryLedger, LeaseLedger, LeaseRecord, LeaseState, TenantId, TenantPlan};
 use corelink_fabric_api::{AcquireRequest, paths};
 use corelink_fabric_server::{
-    AppState, BoxProvisioner, ProbeStatus, ProviderCapacityError, StaticPlans, StaticTokenStore,
-    SystemClock, app, run_admission_tick,
+    AppState, BoxProvisioner, CleanupTeardown, ProbeStatus, ProviderCapacityError, StaticPlans,
+    StaticTokenStore, SystemClock, app, run_admission_tick,
 };
 use corelink_runner::lease::ContainerSpec;
 use corelink_runners_contracts::RunnerState;
@@ -131,6 +131,11 @@ impl BoxProvisioner for CapacityFailingProvisioner {
         Ok(())
     }
 
+    fn teardown_pending(&self, _lease_id: &str) -> CleanupTeardown {
+        // This scripted quota rejection happens before a box is created.
+        CleanupTeardown::ConfirmedDestroyed
+    }
+
     fn probe(&self, _lease_id: &str) -> Result<ProbeStatus> {
         Ok(ProbeStatus::Unbound)
     }
@@ -175,6 +180,11 @@ impl BoxProvisioner for TransientCapacityProvisioner {
         Ok(())
     }
 
+    fn teardown_pending(&self, _lease_id: &str) -> CleanupTeardown {
+        // The scripted failed attempts are explicit known-no-box outcomes.
+        CleanupTeardown::ConfirmedDestroyed
+    }
+
     fn probe(&self, _lease_id: &str) -> Result<ProbeStatus> {
         Ok(ProbeStatus::Unbound)
     }
@@ -192,6 +202,11 @@ impl BoxProvisioner for FatalProvisioner {
 
     fn teardown(&self, _lease_id: &str) -> Result<()> {
         Ok(())
+    }
+
+    fn teardown_pending(&self, _lease_id: &str) -> CleanupTeardown {
+        // This fixture fails before returning any provider handle.
+        CleanupTeardown::ConfirmedDestroyed
     }
 
     fn probe(&self, _lease_id: &str) -> Result<ProbeStatus> {
