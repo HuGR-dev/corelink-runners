@@ -62,6 +62,9 @@ use crate::compute_meter;
 use crate::ledger::{AdmitLedger, AdmitOutcome, ComputeGate, LeaseLedger, LeaseRecord, LeaseState};
 use crate::tenant::TenantId;
 
+#[path = "pg_ledger/pending_cleanup_pg.rs"]
+mod pending_cleanup_pg;
+
 /// Transport-security mode for the Postgres ledger connection (WP-B).
 ///
 /// Opt-in via the `FABRIC_PG_TLS` env var; **default [`PgTlsMode::Disable`]**.
@@ -188,6 +191,12 @@ CREATE TABLE IF NOT EXISTS compute_accrual (
 -- cross-instance source of truth read on a cache miss at N>1.
 CREATE TABLE IF NOT EXISTS fabric_suspended_tenants (
   tenant_id text PRIMARY KEY);
+-- Pending-cleanup ownership is ledger-internal: a cleanup claim never changes
+-- the public lifecycle state.  The FK makes final lease deletion clear the
+-- claim exactly once, including old rollback paths.
+CREATE TABLE IF NOT EXISTS pending_cleanup_claims (
+  lease_id text PRIMARY KEY REFERENCES leases(lease_id) ON DELETE CASCADE,
+  claimed_at_ms bigint NOT NULL);
 ";
 
 // -- M1 WAVE-0 frozen anchor (tenant_plans) ---------------------------------
@@ -302,7 +311,7 @@ fn record_from_row(row: &tokio_postgres::Row) -> anyhow::Result<LeaseRecord> {
 /// across the split (the #1 risk if they diverged).
 #[derive(Clone)]
 pub struct PgLedger {
-    pool: Pool,
+    pub(crate) pool: Pool,
     handle: Handle,
     /// C3 — MECHANIZED pool-floor (the connection reservation). Bounds the
     /// number of admit calls that may hold a pooled connection across the
@@ -463,7 +472,7 @@ impl PgLedger {
     /// holding only a `Handle`), `block_in_place` is illegal, so fall back to a
     /// plain [`Handle::block_on`](tokio::runtime::Handle::block_on) — the thread
     /// is not a worker, so blocking it starves nothing.
-    fn block_on<F, T>(&self, fut: F) -> T
+    pub(crate) fn block_on<F, T>(&self, fut: F) -> T
     where
         F: std::future::Future<Output = T>,
     {
@@ -483,7 +492,7 @@ impl PgLedger {
         self.block_on(async {
             let client = self.pool.get().await?;
             client
-                .batch_execute("TRUNCATE TABLE leases, compute_accrual")
+                .batch_execute("TRUNCATE TABLE leases, pending_cleanup_claims, compute_accrual")
                 .await?;
             Ok::<_, anyhow::Error>(())
         })
@@ -610,11 +619,10 @@ impl LeaseLedger for PgLedger {
         // reaper relies on this Err.
         //
         // COMPUTE-CEILING (wave plan §10 P0-E / §11.5 / P1-K, P1-I):
-        // `transition` is respecified as an advisory-locked txn ONLY when the
-        // lease is accounting-ON (`box_vcpu_count IS NOT NULL`). The default-OFF
-        // path keeps the cheap AUTOCOMMIT `UPDATE` — byte-identical to today,
-        // ZERO new pool pressure (no advisory wait on the close/cancel/reap hot
-        // path → no deadpool starvation under a same-tenant burst).
+        // Accounting-on transitions retain their tenant-advisory transaction.
+        // Accounting-off transitions now use a short lease-row transaction too:
+        // the cleanup claim must fence Pending→Held after the row lock, which a
+        // default-autocommit snapshot predicate cannot do safely.
         //
         // The branch is decided by a cheap pre-read of `box_vcpu_count` (+
         // `tenant`, needed for the lock key). `box_vcpu_count` is IMMUTABLE
@@ -651,9 +659,32 @@ impl LeaseLedger for PgLedger {
                 .unwrap_or(false);
 
             if !accounting_on {
-                // DEFAULT-OFF: today's path EXACTLY — bare autocommit UPDATE, no
-                // lock, no txn. (Also covers an unknown lease → 0 rows → Err.)
-                let row = client
+                // The cleanup claim fences Pending→Held with the lease row lock.
+                // A snapshot-only `NOT EXISTS` would let a claim commit while an
+                // already-started UPDATE still sees the old snapshot.
+                let txn = client.transaction().await?;
+                let locked = txn
+                    .query_opt(
+                        "SELECT 1 FROM leases WHERE lease_id = $1 FOR UPDATE",
+                        &[&lease_id],
+                    )
+                    .await?;
+                if locked.is_none()
+                    || txn
+                        .query_opt(
+                            "SELECT 1 FROM pending_cleanup_claims WHERE lease_id = $1",
+                            &[&lease_id],
+                        )
+                        .await?
+                        .is_some()
+                {
+                    txn.rollback().await.ok();
+                    anyhow::bail!(
+                        "illegal/lost lease transition for {lease_id}: -> {to_label} \
+                         (cleanup-claimed or no row; contract §1 fail-closed)"
+                    );
+                }
+                let row = txn
                     .query_opt(
                         // ADR-0004: the SET clause must NOT touch deadline_ms — a
                         // state change never alters the durable deadline; it is
@@ -678,13 +709,18 @@ impl LeaseLedger for PgLedger {
                         ],
                     )
                     .await?;
-                return match row {
+                let record = match row {
                     Some(r) => record_from_row(&r),
-                    None => anyhow::bail!(
+                    None => {
+                        txn.rollback().await.ok();
+                        anyhow::bail!(
                         "illegal/lost lease transition for {lease_id}: -> {to_label} \
                          (no row in the required source state; contract §1 fail-closed)"
-                    ),
+                        )
+                    }
                 };
+                txn.commit().await?;
+                return record;
             }
 
             // ACCOUNTING-ON: advisory-locked txn. The lock is keyed on the SAME
@@ -702,6 +738,30 @@ impl LeaseLedger for PgLedger {
             let txn = client.transaction().await?;
             txn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", &[&tenant])
                 .await?;
+            // Advisory lock precedes the row lock, matching the accounting-on
+            // admit/terminal ordering. The claim check happens *after* the row
+            // lock, so it cannot race an INSERT into the claim table.
+            let locked = txn
+                .query_opt(
+                    "SELECT 1 FROM leases WHERE lease_id = $1 FOR UPDATE",
+                    &[&lease_id],
+                )
+                .await?;
+            if locked.is_none()
+                || txn
+                    .query_opt(
+                        "SELECT 1 FROM pending_cleanup_claims WHERE lease_id = $1",
+                        &[&lease_id],
+                    )
+                    .await?
+                    .is_some()
+            {
+                txn.rollback().await.ok();
+                anyhow::bail!(
+                    "illegal/lost lease transition for {lease_id}: -> {to_label} \
+                     (cleanup-claimed or no row; contract §1 fail-closed)"
+                );
+            }
 
             // The winning terminal UPDATE, via a CTE so RETURNING can expose the
             // PRE-update `accrued_at_ms` (plain RETURNING reflects the NEW value).
@@ -889,8 +949,43 @@ impl LeaseLedger for PgLedger {
         // vCPU·ms is never silently dropped. Accounting-OFF leases keep today's
         // exact unconditional-delete behavior (byte-identical).
         self.block_on(async {
-            let client = self.pool.get().await?;
-            let row = client
+            let mut client = self.pool.get().await?;
+            let pre = client
+                .query_opt(
+                    "SELECT tenant, box_vcpu_count IS NOT NULL AS accounting_on \
+                     FROM leases WHERE lease_id = $1",
+                    &[&lease_id],
+                )
+                .await?;
+            let Some(pre) = pre else {
+                return Ok(false);
+            };
+            let tenant: String = pre.get("tenant");
+            let accounting_on: bool = pre.get("accounting_on");
+            let txn = client.transaction().await?;
+            if accounting_on {
+                txn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", &[&tenant])
+                    .await?;
+            }
+            let locked = txn
+                .query_opt(
+                    "SELECT 1 FROM leases WHERE lease_id = $1 FOR UPDATE",
+                    &[&lease_id],
+                )
+                .await?;
+            if locked.is_none()
+                || txn
+                    .query_opt(
+                        "SELECT 1 FROM pending_cleanup_claims WHERE lease_id = $1",
+                        &[&lease_id],
+                    )
+                    .await?
+                    .is_some()
+            {
+                txn.rollback().await.ok();
+                return Ok(false);
+            }
+            let row = txn
                 .query_opt(
                     "DELETE FROM leases \
                      WHERE lease_id = $1 \
@@ -900,12 +995,13 @@ impl LeaseLedger for PgLedger {
                 )
                 .await?;
             if row.is_some() {
+                txn.commit().await?;
                 return Ok(true);
             }
             // Nothing deleted: either the lease is absent/already-gone (today's
             // Ok(false)), OR it is an accounting-on, non-Pending lease we
             // REFUSED to drop. Distinguish so the latter is a loud violation.
-            let still = client
+            let still = txn
                 .query_opt(
                     "SELECT state::text AS state FROM leases \
                      WHERE lease_id = $1 AND box_vcpu_count IS NOT NULL \
@@ -915,6 +1011,7 @@ impl LeaseLedger for PgLedger {
                 .await?;
             if let Some(r) = still {
                 let state: String = r.get("state");
+                txn.rollback().await.ok();
                 anyhow::bail!(
                     "remove({lease_id}): refusing to drop an accounting-on lease in \
                      state {state:?} — `remove` is Pending-only under accounting-on \
@@ -922,6 +1019,7 @@ impl LeaseLedger for PgLedger {
                      consumed vCPU·ms accrues)"
                 );
             }
+            txn.commit().await?;
             Ok(false)
         })
     }
@@ -937,13 +1035,49 @@ impl LeaseLedger for PgLedger {
         // check-then-remove (the InMemory/File guard holds the same lock the
         // sweep does; the DB holds it in the single statement).
         self.block_on(async {
-            let client = self.pool.get().await?;
-            let n = client
+            let mut client = self.pool.get().await?;
+            let pre = client
+                .query_opt(
+                    "SELECT tenant, box_vcpu_count IS NOT NULL AS accounting_on \
+                     FROM leases WHERE lease_id = $1",
+                    &[&lease_id],
+                )
+                .await?;
+            let Some(pre) = pre else {
+                return Ok(false);
+            };
+            let tenant: String = pre.get("tenant");
+            let accounting_on: bool = pre.get("accounting_on");
+            let txn = client.transaction().await?;
+            if accounting_on {
+                txn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", &[&tenant])
+                    .await?;
+            }
+            let locked = txn
+                .query_opt(
+                    "SELECT 1 FROM leases WHERE lease_id = $1 FOR UPDATE",
+                    &[&lease_id],
+                )
+                .await?;
+            if locked.is_none()
+                || txn
+                    .query_opt(
+                        "SELECT 1 FROM pending_cleanup_claims WHERE lease_id = $1",
+                        &[&lease_id],
+                    )
+                    .await?
+                    .is_some()
+            {
+                txn.rollback().await.ok();
+                return Ok(false);
+            }
+            let n = txn
                 .execute(
                     "DELETE FROM leases WHERE lease_id = $1 AND state = 'pending'",
                     &[&lease_id],
                 )
                 .await?;
+            txn.commit().await?;
             Ok(n == 1)
         })
     }
@@ -1004,6 +1138,18 @@ impl LeaseLedger for PgLedger {
                 .await?;
             rows.iter().map(record_from_row).collect()
         })
+    }
+
+    fn claim_stale_pending_cleanup(
+        &self,
+        now_ms: u64,
+        max_age_ms: u64,
+    ) -> anyhow::Result<Vec<LeaseRecord>> {
+        pending_cleanup_pg::claim_stale_pending_cleanup(self, now_ms, max_age_ms)
+    }
+
+    fn finish_pending_cleanup(&self, lease_id: &str) -> anyhow::Result<bool> {
+        pending_cleanup_pg::finish_pending_cleanup(self, lease_id)
     }
 
     fn try_admit(&self, rec: LeaseRecord, max_concurrency: u32) -> anyhow::Result<bool> {

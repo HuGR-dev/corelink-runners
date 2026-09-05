@@ -1,0 +1,139 @@
+//! Real-Postgres proof for the internal stale-Pending cleanup fence.
+//!
+//! These tests intentionally skip when `TEST_DATABASE_URL` is absent; the normal
+//! builder has no disposable Postgres service. They are not a mock substitute
+//! for the transaction race.
+
+use std::sync::{Arc, Barrier};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use corelink_fabric::ledger::{AdmitOutcome, ComputeGate};
+use corelink_fabric::{LeaseLedger, LeaseRecord, LeaseState, PgLedger, PgTlsMode, TenantId};
+use corelink_runners_contracts::RunnerState;
+
+fn db_url() -> Option<String> {
+    std::env::var("TEST_DATABASE_URL").ok()
+}
+
+fn nonce(label: &str) -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_nanos();
+    format!("pending-cleanup-pg-{label}-{nanos}")
+}
+
+fn pending(id: &str, tenant: &TenantId, created_at_ms: u64) -> LeaseRecord {
+    LeaseRecord {
+        lease_id: id.to_owned(),
+        tenant: tenant.clone(),
+        state: LeaseState::Pending,
+        box_ref: "opaque-box".to_owned(),
+        created_at_ms,
+        updated_at_ms: created_at_ms,
+        deadline_ms: None,
+        billing_acquired_at_ms: None,
+    }
+}
+
+fn connect(url: &str) -> (tokio::runtime::Runtime, PgLedger) {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let ledger = rt
+        .block_on(PgLedger::connect(url, 4, PgTlsMode::Disable))
+        .expect("isolated test database must accept PgLedger DDL");
+    (rt, ledger)
+}
+
+#[test]
+fn claim_fences_pending_to_held_race_and_finish_is_idempotent() {
+    let Some(url) = db_url() else {
+        eprintln!("pending_cleanup_pg race: TEST_DATABASE_URL unset — UNRUN");
+        return;
+    };
+    let (_rt, ledger) = connect(&url);
+    let tenant = TenantId::new(nonce("tenant")).unwrap();
+    let id = nonce("race");
+    assert!(ledger.try_admit(pending(&id, &tenant, 1), 2).unwrap());
+
+    let gate = Arc::new(Barrier::new(3));
+    let claim_ledger = ledger.clone();
+    let claim_id = id.clone();
+    let claim_gate = Arc::clone(&gate);
+    let claim = std::thread::spawn(move || {
+        claim_gate.wait();
+        claim_ledger
+            .claim_stale_pending_cleanup(100, 10)
+            .expect("claim transaction")
+    });
+    let held_ledger = ledger.clone();
+    let held_id = id.clone();
+    let held_gate = Arc::clone(&gate);
+    let held = std::thread::spawn(move || {
+        held_gate.wait();
+        held_ledger.transition(&held_id, RunnerState::Held, 100)
+    });
+    gate.wait();
+
+    let claimed = claim.join().expect("claim thread");
+    let held = held.join().expect("transition thread");
+    if claimed.iter().any(|row| row.lease_id == id) {
+        assert!(held.is_err(), "a cleanup claim must fence Pending->Held");
+        assert!(ledger.finish_pending_cleanup(&id).unwrap());
+        assert!(!ledger.finish_pending_cleanup(&id).unwrap());
+        assert!(ledger.get(&id).unwrap().is_none());
+    } else {
+        assert!(held.is_ok(), "if Held won, claim must leave it untouched");
+        assert!(!ledger.finish_pending_cleanup(&id).unwrap());
+        assert!(ledger.get(&id).unwrap().unwrap().state.is_held());
+    }
+}
+
+#[test]
+fn accounting_pending_claim_keeps_slot_and_reservation_until_finish() {
+    let Some(url) = db_url() else {
+        eprintln!("pending_cleanup_pg accounting: TEST_DATABASE_URL unset — UNRUN");
+        return;
+    };
+    let (_rt, ledger) = connect(&url);
+    let tenant = TenantId::new(nonce("accounting-tenant")).unwrap();
+    let gate = ComputeGate {
+        period_key: 202609,
+        ceiling_vcpu_ms: 100,
+        box_vcpu_count: 1,
+        new_reserved_vcpu_ms: 10,
+    };
+    let id = nonce("accounting-old");
+    assert_eq!(
+        ledger
+            .try_admit_with_compute(pending(&id, &tenant, 1), 1, Some(gate))
+            .unwrap(),
+        AdmitOutcome::Admitted
+    );
+    assert!(
+        ledger
+            .claim_stale_pending_cleanup(100, 10)
+            .unwrap()
+            .iter()
+            .any(|row| row.lease_id == id),
+        "the accounting-on Pending row is claimed"
+    );
+    assert_eq!(
+        ledger
+            .try_admit_with_compute(pending(&nonce("blocked"), &tenant, 1), 1, Some(gate))
+            .unwrap(),
+        AdmitOutcome::OverConcurrency,
+        "claimed Pending remains in the concurrency and compute reservation set"
+    );
+    assert!(ledger.finish_pending_cleanup(&id).unwrap());
+    assert_eq!(
+        ledger
+            .try_admit_with_compute(pending(&nonce("freed"), &tenant, 1), 1, Some(gate))
+            .unwrap(),
+        AdmitOutcome::Admitted,
+        "conditional finish releases the slot and reservation"
+    );
+}
