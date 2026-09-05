@@ -1310,7 +1310,7 @@ pub(crate) async fn cancel(
     // `emit_released`: Some(lease_id) means "we performed a real transition
     // and must emit Released"; None means "idempotent path — no transition,
     // no emit".
-    let (response, emit_released): (Response, Option<String>) = {
+    let record = {
         let ledger = &*state.ledger;
         let record = match ledger.get(&lease_id) {
             Ok(Some(record)) => record,
@@ -1323,8 +1323,13 @@ pub(crate) async fn cancel(
 
         match record.state {
             // Pre-wire: nothing wire-visible exists to cancel (see module doc).
-            LeaseState::Pending => (not_found(), None),
+            LeaseState::Pending => return not_found(),
             LeaseState::Wire(RunnerState::Held) => {
+                drop(ledger);
+                if !state.teardown_lease(&lease_id).await {
+                    return fail_closed("lease teardown unconfirmed; lease remains Held");
+                }
+                let ledger = &*state.ledger;
                 // Held → Released through LeaseLedger::transition — the contract
                 // §1 legal matrix, never bypassed, never written directly.
                 // BIL1: emit Released only on the SUCCESSFUL transition (Ok arm).
@@ -1333,26 +1338,34 @@ pub(crate) async fn cancel(
                 match ledger.transition(&lease_id, RunnerState::Released, state.clock.now_ms()) {
                     Ok(updated) => {
                         let id = updated.lease_id.clone();
-                        (released(updated.lease_id), Some(id))
+                        updated
                     }
-                    Err(_) => (fail_closed("lease ledger refused Held->Released"), None),
+                    Err(_) => {
+                        return match ledger.get(&lease_id) {
+                            Ok(Some(record))
+                                if record.state == LeaseState::Wire(RunnerState::Released) =>
+                            {
+                                released(record.lease_id)
+                            }
+                            _ => fail_closed("lease ledger refused Held->Released"),
+                        };
+                    }
                 }
             }
             // Idempotent: the goal state is already reached; no transition is
             // attempted (Released is terminal in the matrix).
             // BIL1: do NOT emit here — a prior cancel/close already freed the
             // slot; a second emit would double-free and corrupt the journal.
-            LeaseState::Wire(RunnerState::Released) => (released(record.lease_id), None),
+            LeaseState::Wire(RunnerState::Released) => return released(record.lease_id),
             // Expired/Crashed are terminal NON-released states: the matrix
             // forbids any way out, and faking `released` would turn a dead lease
             // green. Refused with the frozen 400.
-            LeaseState::Wire(RunnerState::Expired | RunnerState::Crashed) => (
-                error_response(
+            LeaseState::Wire(RunnerState::Expired | RunnerState::Crashed) => {
+                return error_response(
                     ApiError::Invalid,
                     "lease is terminal (expired/crashed): contract §1 legal matrix forbids release",
-                ),
-                None,
-            ),
+                );
+            }
         }
         // `ledger` (MutexGuard) is dropped here.
     };
@@ -1368,7 +1381,8 @@ pub(crate) async fn cancel(
     // leases) is NOT a live emission site in the current binary — no running
     // sweep drives it; Crashed-slot metering is a documented non-goal here,
     // consistent with the reaper's crash-reclamation non-goal.
-    if let Some(id) = emit_released {
+    {
+        let id = record.lease_id.clone();
         state.record_slot(&id, &tenant, SlotEventKind::Released);
         state.counters.leases_closed.incr();
 
@@ -1387,22 +1401,10 @@ pub(crate) async fn cancel(
         // sweeps Held only, and this lease is now Released). We still don't fail
         // the cancel (the provider deadline is the hard backstop), but the failure
         // is now LOUD so ops can reconcile — never a silent live-box leak.
-        if !state.teardown_lease(&id).await {
-            eprintln!(
-                "lease {id}: teardown FAILED on cancel — box relies on the provider deadline; \
-                 reconcile if it persists"
-            );
-        }
-        // GC the lease's side-tables + hook entry (mirror the reaper's
-        // post-teardown `forget_lease`): the lease is terminal, nothing else
-        // will reclaim these.
-        //
-        // WP-7: revoke the CAS PAT before the sync GC (fire-and-forget).
         state.revoke_pat_for(&id).await;
         state.forget_lease(&id);
     }
-
-    response
+    released(record.lease_id)
 }
 
 // ── Regression tests ─────────────────────────────────────────────────────────
