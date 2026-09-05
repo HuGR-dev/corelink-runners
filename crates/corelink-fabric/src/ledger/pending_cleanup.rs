@@ -96,6 +96,7 @@ impl FileInner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ledger::LeaseLedger;
     use std::fs::{File, OpenOptions};
     use std::path::PathBuf;
 

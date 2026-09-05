@@ -86,6 +86,34 @@ fn concurrent_claimers_and_compute_reservation_are_fenced() {
             .is_err()
     );
 
+    let held_race = InMemoryLedger::new();
+    held_race.put(pending("held-race", 1)).unwrap();
+    let race_barrier = Arc::new(Barrier::new(3));
+    let claimant = held_race.clone();
+    let holder = held_race.clone();
+    let claim_thread = {
+        let barrier = race_barrier.clone();
+        thread::spawn(move || {
+            barrier.wait();
+            claimant.claim_stale_pending_cleanup(1_000, 10).unwrap()
+        })
+    };
+    let hold_thread = {
+        let barrier = race_barrier.clone();
+        thread::spawn(move || {
+            barrier.wait();
+            holder.transition(
+                "held-race",
+                corelink_runners_contracts::RunnerState::Held,
+                1_001,
+            )
+        })
+    };
+    race_barrier.wait();
+    let claimed = claim_thread.join().unwrap();
+    let held = hold_thread.join().unwrap();
+    assert!((claimed.len() == 1 && held.is_err()) || (claimed.is_empty() && held.is_ok()));
+
     let accounted = InMemoryLedger::new();
     let gate = ComputeGate {
         period_key: 202609,
@@ -93,10 +121,10 @@ fn concurrent_claimers_and_compute_reservation_are_fenced() {
         box_vcpu_count: 1,
         new_reserved_vcpu_ms: 100,
     };
-    assert_eq!(
-        accounted.try_admit_with_compute(pending("reserved", 1), 10, Some(gate)),
-        Ok(AdmitOutcome::Admitted)
-    );
+    let outcome = accounted
+        .try_admit_with_compute(pending("reserved", 1), 10, Some(gate))
+        .unwrap();
+    assert_eq!(outcome, AdmitOutcome::Admitted);
     assert_eq!(
         accounted
             .claim_stale_pending_cleanup(1_000, 10)
@@ -108,13 +136,13 @@ fn concurrent_claimers_and_compute_reservation_are_fenced() {
         new_reserved_vcpu_ms: 100,
         ..gate
     };
-    assert_eq!(
-        accounted.try_admit_with_compute(pending("next", 1), 10, Some(next)),
-        Ok(AdmitOutcome::OverCompute)
-    );
+    let outcome = accounted
+        .try_admit_with_compute(pending("next", 1), 10, Some(next))
+        .unwrap();
+    assert_eq!(outcome, AdmitOutcome::OverCompute);
     assert!(accounted.finish_pending_cleanup("reserved").unwrap());
-    assert_eq!(
-        accounted.try_admit_with_compute(pending("next", 1), 10, Some(next)),
-        Ok(AdmitOutcome::Admitted)
-    );
+    let outcome = accounted
+        .try_admit_with_compute(pending("next", 1), 10, Some(next))
+        .unwrap();
+    assert_eq!(outcome, AdmitOutcome::Admitted);
 }
