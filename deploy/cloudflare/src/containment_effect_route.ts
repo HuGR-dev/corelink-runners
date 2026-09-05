@@ -135,7 +135,7 @@ export async function runCanonicalEffect<TOpts extends object>(
     if (acquired.kind !== "acquired") {
       const prior = terminal(acquired);
       await releaseClaim();
-      return prior ?? { status: "busy" };
+      return acquired.kind === "busy" && acquired.state !== "DRIVING" ? { status: "busy" } : (prior ?? { status: "busy" });
     }
     const mirrored = await deps.ledger.mirror(req, "acquired");
     const mirrorDigest = observationDigest(mirrored);

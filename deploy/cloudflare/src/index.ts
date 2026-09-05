@@ -5490,7 +5490,7 @@ export async function retryOrphanedSpawns(
   drive: (
     env: Env,
     opts: { jobId: string; repo: string; installationId: string; labels: string[]; credential_source?: "installation-only" },
-  ) => Promise<void> = driveSpawn,
+  ) => Promise<ProviderDriveReceipt | void> = driveSpawn,
   // Injected for the same reason as `drive` — so the placement-confirmation
   // branches are testable without reaching the real GitHub API. Takes the
   // installation id from the record (same seam as `fetchJobObservation`).

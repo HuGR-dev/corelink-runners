@@ -90,10 +90,27 @@ describe("canonical containment effect route", () => {
     expect(result.status).toBe("busy"); expect(claimed).toBe(1); expect(released).toBe(1);
   });
 
+  it("releases a claim when canonical acquire is already busy", async () => {
+    let released = 0;
+    const ledger = {
+      observe: async () => ({ kind: "unknown", schema_version: 1, tuple_digest: "", attempt_key: "", active_pointer_key: "", permit: null, proof: null, state: "UNKNOWN" }),
+      prepare: async () => ({ kind: "prepared", schema_version: 1, tuple_digest: "", attempt_key: "", active_pointer_key: "", permit: null, proof: null, state: "PREPARED" }),
+      acquire: async () => ({ kind: "busy", schema_version: 1, tuple_digest: "", attempt_key: "", active_pointer_key: "", permit: null, proof: null, state: "CLAIM_ACQUIRED" }),
+    } as any;
+    const result = await runCanonicalEffect({ ...deps(ledger, tuple()), release: async () => { released++; } });
+    expect(result.status).toBe("busy"); expect(released).toBe(1);
+  });
+
   it("orders redrive release, claim, reservation eligibility, then drive", async () => {
     const events: string[] = []; const { ledger } = make(); const t = await redriveOwnerTuple("acme/repo", "123", "containment:v1:redrive:acme/repo/123", "owner", "token", 7);
     const result = await runCanonicalEffect({ ...deps(ledger, t), beforeClaim: async () => { events.push("release"); }, claim: async () => { events.push("claim"); return true; }, afterClaim: async () => { events.push("eligible"); return true; }, drive: async () => { events.push("drive"); return { resource_id: `job:${t.repo}/${t.job_id}`, receipt_id: "r", provider_signature: "s" }; } });
     expect(result.status).toBe("committed"); expect(events).toEqual(["release", "claim", "eligible", "drive"]);
+  });
+
+  it("orders orphan mutation before claim and eligibility", async () => {
+    const events: string[] = []; const { ledger } = make(); const t = await redriveOwnerTuple("acme/repo", "123", "containment:v1:redrive:acme/repo/123", "owner", "token", 7);
+    const result = await runCanonicalEffect({ ...deps(ledger, t), beforeClaim: async () => { events.push("mutation"); }, claim: async () => { events.push("claim"); return true; }, afterClaim: async () => { events.push("eligible"); return true; }, drive: async () => { events.push("drive"); return { resource_id: `job:${t.repo}/${t.job_id}`, receipt_id: "r", provider_signature: "s" }; } });
+    expect(result.status).toBe("committed"); expect(events).toEqual(["mutation", "claim", "eligible", "drive"]);
   });
 
   it("derives retry-stable nonces from the full logical attempt", async () => {
