@@ -125,35 +125,43 @@ runs:
         # PAT is injected into the environment; the variable is never printed.
         CORELINK_PAT: ${{ inputs.pat }}
         CORELINK_URL: ${{ inputs.url }}
+        CORELINK_CHECK: ${{ inputs.check }}
+        CORELINK_CHECK_ID: ${{ inputs.check-id }}
+        CORELINK_IMAGE: ${{ inputs.image }}
+        CORELINK_VERIFY: ${{ inputs.verify }}
       run: |
         # Build the argument list incrementally so we never interpolate the
         # PAT into a string that might be echoed.
         ARGS=()
         ARGS+=(run)
-        ARGS+=(--url "${{ inputs.url }}")
-        ARGS+=(--check "${{ inputs.check }}")
-        ARGS+=(--check-id "${{ inputs.check-id }}")
+        ARGS+=(--url "$CORELINK_URL")
+        ARGS+=(--check "$CORELINK_CHECK")
+        ARGS+=(--check-id "$CORELINK_CHECK_ID")
         ARGS+=(--json)
 
-        if [[ -n "${{ inputs.image }}" ]]; then
-          ARGS+=(--image "${{ inputs.image }}")
+        if [[ -n "$CORELINK_IMAGE" ]]; then
+          ARGS+=(--image "$CORELINK_IMAGE")
         fi
 
-        if [[ "${{ inputs.verify }}" == "false" ]]; then
+        if [[ "$CORELINK_VERIFY" == "false" ]]; then
           ARGS+=(--no-verify)
         fi
 
         # Run and capture JSON stdout; steps/diagnostics go to stderr.
         # We capture the exit code manually so we can handle exit-1
         # (check ran but failed) separately from exit-2 (wire/auth/attest error).
+        CORELINK_TMP_DIR=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/corelink.XXXXXX")
+        CORELINK_STDERR_FILE="$CORELINK_TMP_DIR/stderr"
+        CORELINK_OUTPUT_FILE="$CORELINK_TMP_DIR/output.json"
+        echo "temp_dir=$CORELINK_TMP_DIR" >> "$GITHUB_OUTPUT"
         set +e
-        JSON_OUT=$(corelink "${ARGS[@]}" 2>/tmp/corelink_stderr)
+        JSON_OUT=$(env -u GITHUB_OUTPUT -u GITHUB_PATH corelink "${ARGS[@]}" 2>"$CORELINK_STDERR_FILE")
         RAW_EXIT=$?
         set -e
 
         # Always surface stderr so the runner log shows fabric diagnostics.
-        if [[ -s /tmp/corelink_stderr ]]; then
-          cat /tmp/corelink_stderr >&2
+        if [[ -s "$CORELINK_STDERR_FILE" ]]; then
+          cat "$CORELINK_STDERR_FILE" >&2
         fi
 
         # exit 2 = attestation failed / wire / auth error → always hard fail.
@@ -163,53 +171,65 @@ runs:
         fi
 
         # Persist the raw JSON and the fabric exit code for the next step.
-        echo "$JSON_OUT" > /tmp/corelink_output.json
+        echo "$JSON_OUT" > "$CORELINK_OUTPUT_FILE"
         echo "raw_exit=$RAW_EXIT" >> "$GITHUB_OUTPUT"
+        echo "output_file=$CORELINK_OUTPUT_FILE" >> "$GITHUB_OUTPUT"
 
     # -----------------------------------------------------------------------
     # Step 3 — parse JSON and set action outputs
     # -----------------------------------------------------------------------
     - name: Parse output and set outputs
       id: parse
-      shell: python3 {0}
-      run: |
-        import json
-        import os
-        import sys
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+      env:
+        CORELINK_VERIFY: ${{ inputs.verify }}
+        CORELINK_OUTPUT_FILE: ${{ steps.run.outputs.output_file }}
+      with:
+        script: |
+          const fs = require("fs");
 
-        output_file = os.environ.get("GITHUB_OUTPUT", "")
+          function parserFailure() {
+            core.setFailed("CoreLink response failed validation.");
+            process.exitCode = 2;
+          }
 
-        try:
-            with open("/tmp/corelink_output.json") as f:
-                data = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError) as e:
-            print(f"::error::Failed to parse corelink JSON output: {e}", file=sys.stderr)
-            sys.exit(2)
+          let data;
+          try {
+            data = JSON.parse(fs.readFileSync(process.env.CORELINK_OUTPUT_FILE, "utf8"));
+          } catch {
+            parserFailure();
+            return;
+          }
 
-        lease_id = data.get("lease_id", "")
-        exit_code = str(data.get("exit", ""))
-        verified = str(data.get("verified", "false")).lower()
+          if (data === null || Array.isArray(data) || typeof data !== "object") {
+            parserFailure();
+            return;
+          }
+          const leaseId = data.lease_id;
+          const exitCode = data.exit;
+          const verified = data.verified;
+          if (
+            typeof leaseId !== "string" ||
+            leaseId.length === 0 ||
+            leaseId.includes("\n") ||
+            leaseId.includes("\r") ||
+            !Number.isInteger(exitCode) ||
+            exitCode < -2147483648 ||
+            exitCode > 2147483647 ||
+            typeof verified !== "boolean"
+          ) {
+            parserFailure();
+            return;
+          }
 
-        # A false verified with verify=true is a hard failure.
-        verify_input = "${{ inputs.verify }}"
-        if verify_input != "false" and verified != "true":
-            print(
-                "::error::CoreLink attestation NOT verified (verified=false in fabric response). "
-                "Do NOT trust this result. Set verify=false only for local dev with FABRIC_DEV_UNSAFE=1.",
-                file=sys.stderr,
-            )
-            sys.exit(2)
+          if (process.env.CORELINK_VERIFY !== "false" && verified !== true) {
+            parserFailure();
+            return;
+          }
 
-        if output_file:
-            with open(output_file, "a") as f:
-                f.write(f"exit={exit_code}\n")
-                f.write(f"verified={verified}\n")
-                f.write(f"lease_id={lease_id}\n")
-        else:
-            # Fallback for local testing
-            print(f"exit={exit_code}")
-            print(f"verified={verified}")
-            print(f"lease_id={lease_id}")
+          core.setOutput("exit", String(exitCode));
+          core.setOutput("verified", String(verified));
+          core.setOutput("lease_id", leaseId);
 
     # -----------------------------------------------------------------------
     # Step 4 — propagate check exit code as step status
@@ -217,11 +237,44 @@ runs:
     - name: Propagate check exit
       id: propagate
       shell: bash
+      env:
+        RAW_EXIT: ${{ steps.run.outputs.raw_exit }}
       run: |
-        RAW_EXIT="${{ steps.run.outputs.raw_exit }}"
         # exit 0 = ran + verified + check passed
         # exit 1 = ran + verified but check itself failed (job failure)
         if [[ "$RAW_EXIT" -ne 0 ]]; then
           echo "::error::The check command exited with code $RAW_EXIT on the CoreLink fabric."
           exit "$RAW_EXIT"
         fi
+
+    # Always remove only the private files created by the run step. This runs
+    # after parse/propagate for normal outcomes and also after an exit-2 hard
+    # failure, while preserving no caller-controlled path or recursive delete.
+    - name: Cleanup CoreLink temporary files
+      id: cleanup
+      if: always()
+      shell: bash
+      env:
+        CORELINK_TMP_DIR: ${{ steps.run.outputs.temp_dir }}
+      run: |
+        if [[ -z "${CORELINK_TMP_DIR:-}" ]]; then
+          exit 0
+        fi
+        RUNNER_TEMP_PARENT="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+        if [[ "$RUNNER_TEMP_PARENT" != /* || ! -d "$RUNNER_TEMP_PARENT" ]]; then
+          echo "::error::invalid RUNNER_TEMP cleanup parent" >&2
+          exit 1
+        fi
+        RUNNER_TEMP_PARENT=$(cd -P -- "$RUNNER_TEMP_PARENT" && pwd -P)
+        CORELINK_TMP_PARENT=$(cd -P -- "$(dirname -- "$CORELINK_TMP_DIR")" 2>/dev/null && pwd -P) || {
+          echo "::error::invalid CoreLink temporary path parent" >&2
+          exit 1
+        }
+        if [[ "$CORELINK_TMP_PARENT" != "$RUNNER_TEMP_PARENT" || \
+              "$(basename -- "$CORELINK_TMP_DIR")" != corelink.* || \
+              -L "$CORELINK_TMP_DIR" || ! -d "$CORELINK_TMP_DIR" ]]; then
+          echo "::error::refusing to clean an invalid CoreLink temporary path" >&2
+          exit 1
+        fi
+        rm -f -- "$CORELINK_TMP_DIR/stderr" "$CORELINK_TMP_DIR/output.json"
+        rmdir -- "$CORELINK_TMP_DIR"

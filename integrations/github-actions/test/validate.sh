@@ -104,12 +104,28 @@ assert_true "All declared inputs are referenced in the run steps" "$INPUTS_OK"
 OUTPUTS_OK=0
 # Check that the key output fields appear in GITHUB_OUTPUT writes
 for field in exit verified lease_id; do
-  if ! grep -q "\"$field=" "$ACTION_FILE" && ! grep -q "'$field=" "$ACTION_FILE" && ! grep -q "${field}=" "$ACTION_FILE"; then
+  if ! grep -q "\"$field=" "$ACTION_FILE" && ! grep -q "'$field=" "$ACTION_FILE" && ! grep -q "${field}=" "$ACTION_FILE" && ! grep -q "setOutput(\"$field\"" "$ACTION_FILE"; then
     echo "    output field '$field' not found in GITHUB_OUTPUT writes"
     OUTPUTS_OK=1
   fi
 done
 assert_true "Declared outputs are wired to \$GITHUB_OUTPUT" "$OUTPUTS_OK"
+
+PARSER_IMPL_OK=0
+GITHUB_SCRIPT_PIN=3a2844b7e9c422d3c10d287c895573f7108da1b3
+ACTION_PIN_ARCHIVE="$SCRIPT_DIR/../../../deploy/runner/action-archive-pins.txt"
+if [[ "${#GITHUB_SCRIPT_PIN}" -eq 40 ]] \
+  && grep -Fqx "actions/github-script@$GITHUB_SCRIPT_PIN" "$ACTION_PIN_ARCHIVE" \
+  && grep -Fqx "      uses: actions/github-script@$GITHUB_SCRIPT_PIN" "$ACTION_FILE" \
+  && grep -q '^    - name: Parse output and set outputs$' "$ACTION_FILE" \
+  && grep -q 'JSON.parse' "$ACTION_FILE" \
+  && grep -q 'fs.readFileSync' "$ACTION_FILE" \
+  && grep -q 'process.exitCode = 2' "$ACTION_FILE"; then
+  PARSER_IMPL_OK=0
+else
+  PARSER_IMPL_OK=1
+fi
+assert_true "output parser uses the pinned github-script implementation" "$PARSER_IMPL_OK"
 
 # ---------------------------------------------------------------------------
 # 4. PAT is never echoed
@@ -152,6 +168,392 @@ assert_true "exit-2 from corelink (attestation/wire error) causes hard failure" 
 VERIFY_FAIL_OK=0
 grep -q 'verified.*!=.*true\|verified != .true' "$ACTION_FILE" || VERIFY_FAIL_OK=1
 assert_true "verified=false with verify=true causes hard step failure" "$VERIFY_FAIL_OK"
+
+# ---------------------------------------------------------------------------
+# 9. AU5.11 — input interpolation and execution-surface checks
+# ---------------------------------------------------------------------------
+# Composite-action expressions are safe in step env maps, but unsafe when
+# embedded in a shell/Python run body. Keep this structural assertion separate
+# from the execution proof below: a future edit cannot pass by merely retaining
+# the expected strings in comments.
+INPUT_SURFACE_OK=0
+if python3 -c "import yaml" 2>/dev/null; then
+  if ! python3 - "$ACTION_FILE" <<'PY'
+import re
+import sys
+import yaml
+
+data = yaml.safe_load(open(sys.argv[1]))
+inputs = set(data.get("inputs", {}))
+steps = data.get("runs", {}).get("steps", [])
+def inspect(doc):
+    seen_env = set()
+    bad = []
+    for step in doc.get("runs", {}).get("steps", []):
+        env = step.get("env", {}) or {}
+        for value in env.values():
+            if isinstance(value, str):
+                match = re.fullmatch(r"\s*\$\{\{\s*inputs\.([A-Za-z0-9_-]+)\s*\}\}\s*", value)
+                if match:
+                    seen_env.add(match.group(1))
+        bodies = [("run", step.get("run", "")),
+                  ("with.script", (step.get("with", {}) or {}).get("script", ""))]
+        for location, body in bodies:
+            if isinstance(body, str):
+                for match in re.finditer(r"\$\{\{\s*inputs\.([A-Za-z0-9_-]+)\s*\}\}", body):
+                    bad.append(f"{step.get('id', step.get('name', '<unnamed>'))}:{location}:{match.group(1)}")
+    return seen_env, bad
+
+seen_env, bad = inspect(data)
+missing = sorted(inputs - seen_env)
+if bad:
+    print("direct input interpolation in run/script body: " + ", ".join(bad), file=sys.stderr)
+if missing:
+    print("inputs not supplied through step env: " + ", ".join(missing), file=sys.stderr)
+mutated = yaml.safe_load(open(sys.argv[1]))
+for step in mutated.get("runs", {}).get("steps", []):
+    if step.get("id") == "parse":
+        step.setdefault("with", {})["script"] = step["with"]["script"] + "\\n${{ inputs.pat }}"
+_, mutation_bad = inspect(mutated)
+if not any(":with.script:pat" in item for item in mutation_bad):
+    print("negative with.script input mutation was not rejected", file=sys.stderr)
+    sys.exit(1)
+sys.exit(bool(bad or missing))
+PY
+  then
+    INPUT_SURFACE_OK=1
+  fi
+else
+  echo "    NOTE: PyYAML unavailable; structural AU5.11 parser check skipped (fallback checks remain)."
+  if grep -Eq '\$\{\{[[:space:]]*inputs\.[A-Za-z0-9_-]+[[:space:]]*\}\}' "$ACTION_FILE"; then
+    # Input expressions are allowed only on env: assignment lines in the
+    # fallback parser; no run-body line may contain one.
+    if grep -E '^      run:|^        [^#].*\$\{\{[[:space:]]*inputs\.' "$ACTION_FILE" | grep -q '\$\{\{'; then
+      INPUT_SURFACE_OK=1
+    fi
+  fi
+fi
+assert_true "all action inputs enter through step env and none interpolate in run bodies" "$INPUT_SURFACE_OK"
+
+# Execute the actual locate/run/parse/propagate bodies with a stub corelink.
+# The harness resolves each step's real env mappings from action.yml, routes
+# prior-step outputs through those mappings, and runs every body inside an
+# owned private fixture. Every case has unique RUNNER_TEMP/output paths; no
+# fixed /tmp path is deleted. The parser matrix below uses a local core/fs shim,
+# so pinned-runner no-Python proof remains open.
+echo "NOTE: AU5.12 pinned no-Python runner/container proof remains open; local github-script shim is preparation evidence only."
+DYNAMIC_OK=0
+if python3 -c "import yaml" 2>/dev/null; then
+  DYNAMIC_TMP=$(mktemp -d)
+  cleanup_dynamic() { rm -rf "$DYNAMIC_TMP"; }
+  trap cleanup_dynamic EXIT
+  for step_id in locate run parse propagate cleanup; do
+    python3 - "$ACTION_FILE" "$step_id" "$DYNAMIC_TMP/$step_id" "$DYNAMIC_TMP/env-$step_id" <<'PY'
+import re
+import sys
+import yaml
+
+action, wanted, body_path, env_path = sys.argv[1:]
+data = yaml.safe_load(open(action))
+for step in data.get("runs", {}).get("steps", []):
+    if step.get("id") != wanted:
+        continue
+    body = step.get("run")
+    if wanted == "parse":
+        body = (step.get("with", {}) or {}).get("script")
+    if not body:
+        raise SystemExit(f"step {wanted} has no run body")
+    open(body_path, "w").write(body)
+    with open(env_path, "w") as out:
+        for key, value in (step.get("env", {}) or {}).items():
+            value = str(value)
+            input_match = re.fullmatch(r"\$\{\{\s*inputs\.([A-Za-z0-9_-]+)\s*\}\}", value)
+            output_match = re.fullmatch(r"\$\{\{\s*steps\.run\.outputs\.([A-Za-z0-9_-]+)\s*\}\}", value)
+            if input_match:
+                var = "INPUT_" + input_match.group(1).replace("-", "_").upper()
+            elif output_match:
+                var = "STEP_RUN_" + output_match.group(1).replace("-", "_").upper()
+            else:
+                raise SystemExit(f"unhandled env mapping {wanted}:{key}={value}")
+            out.write(f'export {key}="${{{var}}}"\n')
+    break
+else:
+    raise SystemExit(f"step {wanted} not found")
+PY
+  done
+  mkdir -p "$DYNAMIC_TMP/bin"
+  cat > "$DYNAMIC_TMP/bin/corelink" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ -n "${GITHUB_OUTPUT+x}" || -n "${GITHUB_PATH+x}" ]]; then
+  printf 'control-file-env-present\n' > "$DYNAMIC_CAPTURE.control-env"
+fi
+printf 'stub-corelink-executed\n' > "$DYNAMIC_CAPTURE.marker"
+printf '%s\0' "$@" > "$DYNAMIC_CAPTURE.argv"
+{
+  printf 'CORELINK_URL=%s\n' "$CORELINK_URL"
+  printf 'CORELINK_PAT=%s\n' "$CORELINK_PAT"
+  printf 'CORELINK_CHECK=%s\n' "$CORELINK_CHECK"
+  printf 'CORELINK_CHECK_ID=%s\n' "$CORELINK_CHECK_ID"
+  printf 'CORELINK_IMAGE=%s\n' "$CORELINK_IMAGE"
+  printf 'CORELINK_VERIFY=%s\n' "$CORELINK_VERIFY"
+  printf 'CORELINK_VERSION=%s\n' "${CORELINK_VERSION-}"
+} > "$DYNAMIC_CAPTURE.env"
+printf '{"lease_id":"lease-au5-11","exit":%s,"verified":%s}\n' "${DYNAMIC_CHECK_EXIT:-$DYNAMIC_RAW_EXIT}" "$DYNAMIC_VERIFIED"
+exit "$DYNAMIC_RAW_EXIT"
+STUB
+  chmod +x "$DYNAMIC_TMP/bin/corelink"
+  cat > "$DYNAMIC_TMP/bin/id" <<'IDSTUB'
+#!/usr/bin/env bash
+printf 'id-command-executed\n' > "$DYNAMIC_CAPTURE.id"
+printf 'uid=9999(stub)\n'
+IDSTUB
+  chmod +x "$DYNAMIC_TMP/bin/id"
+  cat > "$DYNAMIC_TMP/parser-runner.cjs" <<'PARSER_RUNNER'
+const fs = require("fs");
+const script = fs.readFileSync(process.argv[2], "utf8");
+const core = {
+  setFailed(message) {
+    fs.writeFileSync(process.env.SHIM_FAILED, "setFailed:" + message);
+  },
+  setOutput(name, value) {
+    fs.appendFileSync(process.env.GITHUB_OUTPUT, `${name}=${String(value)}\n`);
+  },
+};
+const fn = new Function("core", "require", "process", "console", script);
+Promise.resolve(fn(core, require, process, console)).catch(() => {
+  core.setFailed("local parser shim failure");
+  process.exitCode = 2;
+});
+PARSER_RUNNER
+
+  dynamic_fail() { echo "    FAIL: $*"; DYNAMIC_OK=1; }
+  execute_case() {
+    local label="$1" input_name="$2" payload="$3" raw="$4" verified="$5" verify_input="$6"
+    local expected_run="$7" expected_parse="$8" expected_propagate="$9"
+    local json_exit="${10-$raw}"
+    local case_dir run_status parse_status propagate_status
+    case_dir=$(mktemp -d "$DYNAMIC_TMP/case.XXXXXX")
+    mkdir -p "$case_dir/work" "$case_dir/runner-temp"
+    export PATH="$DYNAMIC_TMP/bin:$PATH" RUNNER_TEMP="$case_dir/runner-temp"
+    export GITHUB_OUTPUT="$case_dir/gh-output" GITHUB_PATH="$case_dir/gh-path"
+    export DYNAMIC_CAPTURE="$case_dir/capture" DYNAMIC_RAW_EXIT="$raw" DYNAMIC_CHECK_EXIT="$json_exit" DYNAMIC_VERIFIED="$verified"
+    export SHIM_FAILED="$case_dir/shim-failed"
+    export INPUT_VERSION=0.1.0 INPUT_URL=https://safe.example INPUT_PAT=pat-safe \
+      INPUT_CHECK='printf safe' INPUT_CHECK_ID=ci-safe INPUT_IMAGE='' INPUT_VERIFY=true
+    case "$input_name" in
+      url) INPUT_URL="$payload" ;; pat) INPUT_PAT="$payload" ;;
+      check) INPUT_CHECK="$payload" ;; check-id) INPUT_CHECK_ID="$payload" ;;
+      image) INPUT_IMAGE="$payload" ;; verify) INPUT_VERIFY="$payload" ;;
+      version) INPUT_VERSION="$payload" ;;
+    esac
+    export INPUT_VERSION INPUT_URL INPUT_PAT INPUT_CHECK INPUT_CHECK_ID INPUT_IMAGE INPUT_VERIFY
+
+    set +e
+    (cd "$case_dir/work" && source "$DYNAMIC_TMP/env-locate" && bash "$DYNAMIC_TMP/locate") >"$case_dir/locate.log" 2>&1
+    local locate_status=$?
+    (cd "$case_dir/work" && source "$DYNAMIC_TMP/env-run" && bash "$DYNAMIC_TMP/run") >"$case_dir/run.log" 2>&1
+    run_status=$?
+    set -e
+    [[ "$locate_status" -eq 0 ]] || dynamic_fail "$label locate status=$locate_status"
+    [[ "$run_status" -eq "$expected_run" ]] || dynamic_fail "$label run status=$run_status expected=$expected_run"
+
+    if [[ "$run_status" -eq 0 ]]; then
+      export STEP_RUN_RAW_EXIT="$(sed -n 's/^raw_exit=//p' "$GITHUB_OUTPUT")"
+      export STEP_RUN_OUTPUT_FILE="$(sed -n 's/^output_file=//p' "$GITHUB_OUTPUT")"
+    else
+      export STEP_RUN_RAW_EXIT="$(sed -n 's/^raw_exit=//p' "$GITHUB_OUTPUT")"
+    fi
+    export STEP_RUN_TEMP_DIR="$(sed -n 's/^temp_dir=//p' "$GITHUB_OUTPUT")"
+    if [[ "$run_status" -eq 0 ]]; then
+      set +e
+      (cd "$case_dir/work" && source "$DYNAMIC_TMP/env-parse" && node "$DYNAMIC_TMP/parser-runner.cjs" "$DYNAMIC_TMP/parse") >"$case_dir/parse.log" 2>&1
+      parse_status=$?
+      if [[ "$parse_status" -eq 0 ]]; then
+        (cd "$case_dir/work" && source "$DYNAMIC_TMP/env-propagate" && bash "$DYNAMIC_TMP/propagate") >"$case_dir/propagate.log" 2>&1
+        propagate_status=$?
+      else
+        propagate_status=99
+      fi
+      set -e
+      [[ "$parse_status" -eq "$expected_parse" ]] || dynamic_fail "$label parse status=$parse_status expected=$expected_parse"
+      [[ "$propagate_status" -eq "$expected_propagate" ]] || dynamic_fail "$label propagate status=$propagate_status expected=$expected_propagate"
+    else
+      parse_status=99
+      propagate_status=99
+      if grep -q '^output_file=' "$GITHUB_OUTPUT" 2>/dev/null; then
+        dynamic_fail "$label emitted output_file despite hard exit"
+      fi
+    fi
+
+    set +e
+    (cd "$case_dir/work" && source "$DYNAMIC_TMP/env-cleanup" && bash "$DYNAMIC_TMP/cleanup") >"$case_dir/cleanup.log" 2>&1
+    local cleanup_status=$?
+    set -e
+    [[ "$cleanup_status" -eq 0 ]] || dynamic_fail "$label cleanup status=$cleanup_status"
+    if find "$RUNNER_TEMP" -mindepth 1 -print -quit | grep -q .; then
+      dynamic_fail "$label RUNNER_TEMP was not emptied by the cleanup step"
+    fi
+    if [[ ! -f "$DYNAMIC_CAPTURE.marker" ]]; then
+      dynamic_fail "$label stub did not execute"
+    fi
+    if [[ -e "$DYNAMIC_CAPTURE.id" ]]; then
+      dynamic_fail "$label id command executed"
+    fi
+    if [[ -e "$DYNAMIC_CAPTURE.control-env" ]]; then
+      dynamic_fail "$label corelink inherited GitHub control-file env"
+    fi
+    [[ -s "$GITHUB_OUTPUT" ]] || dynamic_fail "$label parent GITHUB_OUTPUT was lost"
+    if find "$case_dir/work" -name pwned -print -quit | grep -q .; then
+      dynamic_fail "$label payload executed shell code"
+    fi
+
+    # Negative cleanup matrix: all paths use the required basename but must be
+    # rejected unless they are direct children of canonical RUNNER_TEMP.
+    outside_parent="$DYNAMIC_TMP/outside-parent"
+    sibling_parent="$case_dir/runner-sibling"
+    link_target="$case_dir/link-target"
+    link_path="$RUNNER_TEMP/corelink.symlink"
+    mkdir -p "$outside_parent/corelink.outside" "$sibling_parent/corelink.sibling" "$link_target/corelink.target"
+    printf '%s\n' sentinel > "$outside_parent/corelink.outside/sentinel"
+    printf '%s\n' sentinel > "$sibling_parent/corelink.sibling/sentinel"
+    printf '%s\n' sentinel > "$link_target/corelink.target/sentinel"
+    ln -s "$link_target/corelink.target" "$link_path"
+    for bad_path in "$outside_parent/corelink.outside" "$sibling_parent/corelink.sibling" "$link_path"; do
+      export STEP_RUN_TEMP_DIR="$bad_path"
+      set +e
+      (cd "$case_dir/work" && source "$DYNAMIC_TMP/env-cleanup" && bash "$DYNAMIC_TMP/cleanup") >"$case_dir/negative-cleanup.log" 2>&1
+      cleanup_status=$?
+      set -e
+      [[ "$cleanup_status" -ne 0 ]] || dynamic_fail "$label accepted invalid cleanup path $bad_path"
+    done
+    [[ -f "$outside_parent/corelink.outside/sentinel" ]] || dynamic_fail "$label touched outside sentinel"
+    [[ -f "$sibling_parent/corelink.sibling/sentinel" ]] || dynamic_fail "$label touched sibling sentinel"
+    [[ -L "$link_path" && -f "$link_target/corelink.target/sentinel" ]] || dynamic_fail "$label followed cleanup symlink"
+    rm -f -- "$link_path"
+    rm -rf -- "$outside_parent" "$sibling_parent" "$link_target"
+
+    if [[ "$expected_run" -eq 0 ]]; then
+      [[ -f "$DYNAMIC_CAPTURE.argv" && -f "$DYNAMIC_CAPTURE.env" ]] || dynamic_fail "$label capture missing"
+      grep -Fqx "raw_exit=$raw" "$GITHUB_OUTPUT" || dynamic_fail "$label raw_exit output missing"
+      grep -Fqx "output_file=$STEP_RUN_OUTPUT_FILE" "$GITHUB_OUTPUT" || dynamic_fail "$label output_file output missing"
+      if [[ "$expected_parse" -eq 0 ]]; then
+        grep -Fqx "exit=$json_exit" "$GITHUB_OUTPUT" || dynamic_fail "$label exit output missing"
+        grep -Fqx "verified=$verified" "$GITHUB_OUTPUT" || dynamic_fail "$label verified output missing"
+        grep -Fqx "lease_id=lease-au5-11" "$GITHUB_OUTPUT" || dynamic_fail "$label lease output missing"
+      fi
+      if grep -F -- "$INPUT_PAT" "$case_dir"/*.log >/dev/null 2>&1; then
+        dynamic_fail "$label PAT leaked to logs"
+      fi
+      if [[ "$input_name" == version ]] && ! grep -F -- "$payload" "$case_dir/locate.log" >/dev/null 2>&1; then
+        dynamic_fail "$label version was not preserved in locate env"
+      fi
+      python3 - "$input_name" "$payload" "$DYNAMIC_CAPTURE" "$verify_input" <<'PY' || dynamic_fail "$label argv/env mismatch"
+import pathlib
+import sys
+
+name, payload, prefix, verify_input = sys.argv[1:]
+argv = pathlib.Path(prefix + ".argv").read_bytes().split(b"\0")[:-1]
+env = dict(line.split("=", 1) for line in pathlib.Path(prefix + ".env").read_text().splitlines())
+values = {"url": "https://safe.example", "pat": "pat-safe", "check": "printf safe",
+          "check-id": "ci-safe", "image": "", "verify": "true", "version": "0.1.0"}
+values[name] = payload
+expected_env = {"CORELINK_URL": values["url"], "CORELINK_PAT": values["pat"],
+                "CORELINK_CHECK": values["check"], "CORELINK_CHECK_ID": values["check-id"],
+                "CORELINK_IMAGE": values["image"], "CORELINK_VERIFY": values["verify"],
+                # version belongs to locate's env, not the run step.
+                "CORELINK_VERSION": ""}
+for key, expected in expected_env.items():
+    if env.get(key) != expected:
+        raise SystemExit(f"{key} was not preserved in the actual step env")
+expected_argv = [b"run", b"--url", values["url"].encode(), b"--check", values["check"].encode(),
+                 b"--check-id", values["check-id"].encode(), b"--json"]
+if values["image"]:
+    expected_argv.extend([b"--image", values["image"].encode()])
+if values["verify"] == "false":
+    expected_argv.append(b"--no-verify")
+if argv != expected_argv:
+    raise SystemExit(f"argv mismatch: {argv!r} != {expected_argv!r}")
+if verify_input == "false" and b"--no-verify" not in argv:
+    raise SystemExit("verify=false did not set --no-verify")
+PY
+    fi
+    rm -rf "$case_dir"
+  }
+
+  payloads=('$(id)' '"; touch pwned; #')
+  for input_name in url pat check check-id image verify version; do
+    for payload in "${payloads[@]}"; do
+      execute_case "literal-$input_name" "$input_name" "$payload" 0 true true 0 0 0
+    done
+  done
+  execute_case "exit-one" check 'printf safe' 1 true true 0 0 1
+  execute_case "raw-one-check-137" check 'printf safe' 1 true true 0 0 1 137
+  execute_case "exit-two" check 'printf safe' 2 true true 2 99 99
+  execute_case "verified-false" check 'printf safe' 0 false true 0 2 99
+  execute_case "verify-false" verify false 0 false false 0 0 0
+
+  # AU5.12 parser matrix: execute the checked-in github-script body through a
+  # deliberately local core/fs shim. This is preparation evidence, not proof
+  # that the pinned action runs without Python on GitHub's hosted runner.
+  parser_case() {
+    local label="$1" json="$2" verify_input="$3" expected_status="$4"
+    local expected_exit="${5-}" expected_verified="${6-}" expected_lease="${7-}"
+    local parser_dir status
+    parser_dir=$(mktemp -d "$DYNAMIC_TMP/parser.XXXXXX")
+    printf '%s' "$json" > "$parser_dir/output.json"
+    : > "$parser_dir/gh-output"
+    : > "$parser_dir/shim-failed"
+    export CORELINK_OUTPUT_FILE="$parser_dir/output.json" CORELINK_VERIFY="$verify_input"
+    export GITHUB_OUTPUT="$parser_dir/gh-output" SHIM_FAILED="$parser_dir/shim-failed"
+    set +e
+    (cd "$parser_dir" && node "$DYNAMIC_TMP/parser-runner.cjs" "$DYNAMIC_TMP/parse") >"$parser_dir/parser.log" 2>&1
+    status=$?
+    set -e
+    [[ "$status" -eq "$expected_status" ]] || dynamic_fail "$label status=$status expected=$expected_status"
+    if [[ "$expected_status" -eq 0 ]]; then
+      grep -Fqx "exit=$expected_exit" "$parser_dir/gh-output" || dynamic_fail "$label exit output mismatch"
+      grep -Fqx "verified=$expected_verified" "$parser_dir/gh-output" || dynamic_fail "$label verified output mismatch"
+      grep -Fqx "lease_id=$expected_lease" "$parser_dir/gh-output" || dynamic_fail "$label lease output mismatch"
+      [[ ! -s "$parser_dir/shim-failed" ]] || dynamic_fail "$label unexpectedly called setFailed"
+    else
+      [[ ! -s "$parser_dir/gh-output" ]] || dynamic_fail "$label emitted outputs on rejection"
+      grep -Fqx 'setFailed:CoreLink response failed validation.' "$parser_dir/shim-failed" \
+        || dynamic_fail "$label did not use generic setFailed"
+      if grep -F -- "$json" "$parser_dir/parser.log" >/dev/null 2>&1; then
+        dynamic_fail "$label echoed raw response"
+      fi
+    fi
+    rm -rf -- "$parser_dir"
+  }
+  parser_case "parser-valid-exit0" '{"lease_id":"lease-0","exit":0,"verified":true}' true 0 0 true lease-0
+  parser_case "parser-valid-exit1" '{"lease_id":"lease-1","exit":1,"verified":true}' true 0 1 true lease-1
+  parser_case "parser-valid-exit2" '{"lease_id":"lease-2","exit":2,"verified":true}' true 0 2 true lease-2
+  parser_case "parser-valid-check137" '{"lease_id":"lease-137","exit":137,"verified":true}' true 0 137 true lease-137
+  parser_case "parser-valid-extra" '{"lease_id":"lease-extra","exit":0,"verified":true,"extra":{"x":1}}' true 0 0 true lease-extra
+  parser_case "parser-malformed" '{' true 2
+  parser_case "parser-null" 'null' true 2
+  parser_case "parser-array" '[]' true 2
+  parser_case "parser-missing" '{}' true 2
+  parser_case "parser-empty-lease" '{"lease_id":"","exit":0,"verified":true}' true 2
+  parser_case "parser-newline-lease" '{"lease_id":"lease\nx","exit":0,"verified":true}' true 2
+  parser_case "parser-numeric-lease" '{"lease_id":7,"exit":0,"verified":true}' true 2
+  parser_case "parser-string-exit" '{"lease_id":"lease","exit":"0","verified":true}' true 2
+  parser_case "parser-float-exit" '{"lease_id":"lease","exit":1.5,"verified":true}' true 2
+  parser_case "parser-high-exit" '{"lease_id":"lease","exit":2147483648,"verified":true}' true 2
+  parser_case "parser-low-exit" '{"lease_id":"lease","exit":-2147483649,"verified":true}' true 2
+  parser_case "parser-null-exit" '{"lease_id":"lease","exit":null,"verified":true}' true 2
+  parser_case "parser-string-verified" '{"lease_id":"lease","exit":0,"verified":"true"}' true 2
+  parser_case "parser-unverified" '{"lease_id":"lease","exit":0,"verified":false}' true 2
+  parser_case "parser-verify-disabled" '{"lease_id":"lease","exit":0,"verified":false}' false 0 0 false lease
+  parser_case "parser-verify-case-sensitive" '{"lease_id":"lease","exit":0,"verified":false}' False 2
+  trap - EXIT
+  cleanup_dynamic
+else
+  echo "    NOTE: PyYAML unavailable; dynamic AU5.11 execution proof skipped."
+  DYNAMIC_OK=1
+fi
+assert_true "dangerous literals remain literal through argv/env execution surface" "$DYNAMIC_OK"
 
 # ---------------------------------------------------------------------------
 # Summary
