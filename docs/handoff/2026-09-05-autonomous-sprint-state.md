@@ -27,18 +27,55 @@ These isolated branches earn no completion, deployment or merge credit yet:
 
 - `prep/t8-auth-file`: Rust file-only auth, FIFO refusal and tests;
   `a08978b`, 12 focused tests plus doc-tests passed.
-- `prep/t8-auth-boot`: check-host/DevEnv 0400 bridge, clean re-exec and lifecycle
-  cleanup. Cold review is correcting marker injection and coder/root ownership;
-  earlier tip `2ca5d08` must not be certified.
+- `prep/t8-auth-boot@3723178`: independently approved 0400 bridge, clean
+  re-exec, marker-injection refusal and shutdown cleanup. The actual defect was
+  raw auth reaching outer dumb-init before the bridge; ENTRYPOINT now bridges
+  first. The earlier root/coder ownership hypothesis was refuted by the real
+  Dockerfile and did not require a privilege change. Composed boot tests pass.
 - `prep/t8-auth-worker`: fixed Worker-owned auth file path and provider ingress;
   `6c164b9`, 49 focused tests and typecheck passed. These three lanes jointly
   implement T8-W4b, not three completed WPs.
-- `prep/t6-tick`: T6-W4 durable default-off tick/ACK producer. Earlier `da0f2a6`
-  is rejected for signature/deadline/concurrency defects; corrections consume
-  the orchestrator's explicit ordered-JSON/Ed25519 wire decisions. No shared
-  producer HMAC may replace role-separated ACK trust.
-- `prep/t6-alert-rules`: disjoint offline T6-W9 rule/notification work. No
-  monitor binding, external page delivery or outage-proof credit.
+- `prep/t6-tick@f53cf82`: independently approved default-off producer;
+  46/46 focused tests and typecheck pass. Real Ed25519 fixtures, byte-identical
+  concurrent reservation, stale/expired terminal CAS, hung stream/cancel/signer
+  and actual Miniflare DO dispatch are proved. Deadline-observed paths persist
+  TIMED_OUT directly; alarm remains crash recovery. No shared producer HMAC
+  replaces role-separated ACK trust; production capabilities remain unbound.
+- `prep/t6-alert-rules@b1f591b`: independently approved scoped T6-W9 subset;
+  44 focused tests and typecheck pass. No complete monitor-rule matrix,
+  external page delivery or acknowledgement proof is claimed.
+- `prep/t4w4-boundaries@2fdcef8`: admission tests only; source behavior stays
+  unchanged and R1 is unresolved. Shared Rust run passed 9 admission tests,
+  5 existing infrastructure-capacity tests and 7 credential-route tests.
+- `prep/t3w10-error-body@7ca6fb9`: canonical safe ErrorBody with original
+  transport statuses; no widened production visibility. Four credential unit
+  tests also pass after the entire library-test target compiles. The other
+  T3-W10 half (durable
+  teardown tombstone/cap retention) is undergoing a bounded design review.
+- T6-W2 policy/workflow partial `9df0eaef6cbca789bebea37ab160094afd8add4c`:
+  five focused fixtures pass. Optional behavior stays unchanged; required-hit
+  refuses with78 and never runs a child. The actual authenticated atomic
+  no-exec HIT/restore clw API is missing; this is not a completed required-HIT
+  implementation. Do not substitute inferred HIT JSON or output text.
+
+The published draft source stack follows #548/#549 with #550 Rust auth,
+#551 boot bridge, #552 Worker binding, #553 tick producer, #554 alert subset,
+#555 admission proof, #556 credential errors and #557 memoize policy. These
+are reviewable layers, not separate sprints or completed WPs. The available
+source snapshot is being prepared for the single complete bundle matrix;
+it is not certified yet, and no operational/DAG acceptance is waived.
+Root integration is `/private/tmp/corelink-sprint1-auth-stack`, current branch
+`prep/sprint1-tail-signed`; old unsigned/obsolete simulation branches are not
+publication sources. All source commits are retained through DCO merges.
+
+Focused evidence (local logs; not full CI certificates):
+
+| Scope | Result | Log SHA-256 |
+|---|---|---|
+| T6 tick + probe flags + actual DO runtime | 46/46 | `0cc387e294383921f47ba1d7c49153447850004771e3b7e66326254fd61ad8b2` |
+| Shared Rust admission/capacity/credential routes | 21/21 | `667047e28c6e689ca432ce520b090b8dc90fd5a27c5df6a26af9c46061c50844` |
+| Existing private credential unit cases | 4/4 | `19ede82e31fafc6c856983fc5aca8ceab101b4699c804c7de034aef120d2341d` |
+| Memoize policy | 5/5 | `f97fb90cf11178cb7a46035f81ff5e08f9fd863a55f52b032a04d26aaa6cabc8` |
 
 ## Execution rules
 
