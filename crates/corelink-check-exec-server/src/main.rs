@@ -3,11 +3,10 @@
 //! Binds `0.0.0.0:8080` (the `defaultPort` the Worker's `containerFetch`
 //! targets, §C4) and serves the [`corelink_check_exec_server::app_with_auth`]
 //! router. FAIL-CLOSED: the binary refuses to serve `/exec` (which executes
-//! argv) unless `EXEC_SERVER_AUTH_TOKEN` is set — the Worker injects it on every
-//! real spawn. The unauthenticated posture (container boundary + Worker bearer as
-//! the only gates) is available ONLY behind the explicit `CHECK_EXEC_ALLOW_UNAUTH`
-//! opt-in, so a future/alternate deploy that forgets the token can never silently
-//! expose an unauthenticated exec endpoint.
+//! argv) unless `EXEC_SERVER_AUTH_TOKEN_FILE` names a regular mode-0400 file —
+//! the short-lived entrypoint creates it from provider ingress and removes the
+//! provider token from the durable process environment. Environment-only tokens
+//! and unauthenticated serving are rejected.
 
 use std::net::{Ipv4Addr, SocketAddr};
 
@@ -15,10 +14,8 @@ use corelink_check_exec_server::{DEFAULT_PORT, ExecAuth, app_with_auth, toolchai
 
 #[tokio::main]
 async fn main() -> anyhow_lite::Result {
-    // WP-9c: the fail-closed decision now lives in the LIBRARY (`ExecAuth`), so
-    // the binary and every other caller share one gate. Same rule as before:
-    // token set ⇒ authenticated; unset + CHECK_EXEC_ALLOW_UNAUTH ⇒ open with a
-    // warning; unset + no opt-in ⇒ refuse to serve.
+    // The fail-closed decision lives in the library (`ExecAuth`), so the binary
+    // and every other caller share the file-only gate.
     let auth = ExecAuth::from_env().map_err(|e| e.to_string())?;
 
     let mut bind_addr_str: Option<String> = None;
