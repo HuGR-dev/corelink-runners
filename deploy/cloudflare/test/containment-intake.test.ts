@@ -397,7 +397,8 @@ describe("durable intake authority and delivery identity", () => {
 
 describe("invalid-config outbox and MetricsDO.bumpOnce", () => {
   it("deduplicates one invalid signal and retries the same outbox id", async () => {
-    const d = makeDO(); const first = await d.instance.recordInvalidConfig("AUTOSCALER_INTAKE_PAUSED", "bogus", "c".repeat(64)); const second = await d.instance.recordInvalidConfig("AUTOSCALER_INTAKE_PAUSED", "bogus", "c".repeat(64));
+    const d = makeDO(); const digest = await sha256Hex("bogus");
+    const first = await d.instance.recordInvalidConfig("AUTOSCALER_INTAKE_PAUSED", "bogus", digest); const second = await d.instance.recordInvalidConfig("AUTOSCALER_INTAKE_PAUSED", "bogus", digest);
     expect(second.signal_id).toBe(first.signal_id); expect((await d.instance.pendingInvalidConfig())).toHaveLength(1); await d.instance.markInvalidConfigAttempt(first.signal_id); await d.instance.acknowledgeInvalidConfig(first.signal_id); expect(await d.instance.pendingInvalidConfig()).toHaveLength(0);
   });
 
@@ -406,6 +407,45 @@ describe("invalid-config outbox and MetricsDO.bumpOnce", () => {
     expect(metrics.instance.bumpOnce).toBeTypeOf("function");
     await Promise.all([...Array(100)].map(() => metrics.instance.bumpOnce("a".repeat(64), "containment_config_invalid")));
     expect((await metrics.instance.snapshot()).containment_config_invalid).toBe(1);
+  });
+
+  it("bumps once for the same raw value, but once per distinct raw value", async () => {
+    const d = makeDO(); const metrics = makeMetrics(); const e = env(d, makeKv(), metrics, { AUTOSCALER_INTAKE_PAUSED: "bogus" }) as any;
+    const first = await worker.fetch(await request(body(901), { delivery: "invalid-same-1" }), e, ctx() as never);
+    const second = await worker.fetch(await request(body(902), { delivery: "invalid-same-2" }), e, ctx() as never);
+    expect(first.status).toBe(202); expect(second.status).toBe(202);
+    expect((await metrics.instance.snapshot()).containment_config_invalid).toBe(1);
+    e.AUTOSCALER_INTAKE_PAUSED = "also-bogus";
+    const third = await worker.fetch(await request(body(903), { delivery: "invalid-different" }), e, ctx() as never);
+    expect(third.status).toBe(202); expect((await metrics.instance.snapshot()).containment_config_invalid).toBe(2);
+  });
+
+  it("keeps equal raw bytes distinct across supported switch names", async () => {
+    const d = makeDO(); const metrics = makeMetrics(); const raw = "same-invalid-value"; const digest = await sha256Hex(raw);
+    await d.instance.recordInvalidConfig("AUTOSCALER_INTAKE_PAUSED", raw, digest);
+    await d.instance.recordInvalidConfig("AUTOSCALER_REDRIVE_PAUSED", raw, digest);
+    const e = env(d, makeKv(), metrics, { AUTOSCALER_INTAKE_PAUSED: "1" });
+    await worker.scheduled({} as ScheduledEvent, e, ctx() as never);
+    expect((await metrics.instance.snapshot()).containment_config_invalid).toBe(2);
+  });
+
+  it("fails closed on unsupported or malformed durable identity records", async () => {
+    const d = makeDO(); const digest = await sha256Hex("bogus");
+    await expect(d.instance.recordInvalidConfig("UNSUPPORTED_SWITCH", "bogus", digest)).rejects.toThrow();
+    await expect(d.instance.recordInvalidConfig("AUTOSCALER_INTAKE_PAUSED", "bogus", "0".repeat(64))).rejects.toThrow();
+    d.storage.map.set("containment:v1:invalid:AUTOSCALER_INTAKE_PAUSED:bad", { schema_version: 1, signal_id: "a".repeat(64), switch_name: "AUTOSCALER_INTAKE_PAUSED", raw_value_sha256: "bad" });
+    d.storage.map.set(`containment:v1:outbox:${"a".repeat(64)}`, { schema_version: 1, signal_id: "a".repeat(64), state: "PENDING", attempts: 0 });
+    expect(await d.instance.pendingInvalidConfig()).toHaveLength(0);
+  });
+
+  it("does not duplicate delivery across repeated scheduled retries", async () => {
+    const d = makeDO(); const metrics = makeMetrics(); const raw = "scheduled-invalid"; const digest = await sha256Hex(raw);
+    await d.instance.recordInvalidConfig("AUTOSCALER_INTAKE_PAUSED", raw, digest);
+    const e = env(d, makeKv(), metrics, { AUTOSCALER_INTAKE_PAUSED: "1" });
+    await worker.scheduled({} as ScheduledEvent, e, ctx() as never);
+    await worker.scheduled({} as ScheduledEvent, e, ctx() as never);
+    expect((await metrics.instance.snapshot()).containment_config_invalid).toBe(1);
+    expect(await d.instance.pendingInvalidConfig()).toHaveLength(0);
   });
 
   it("retries one stable invalid-config signal through Worker/scheduled across every cross-DO seam", async () => {
