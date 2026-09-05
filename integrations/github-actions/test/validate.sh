@@ -217,7 +217,7 @@ if python3 -c "import yaml" 2>/dev/null; then
   DYNAMIC_TMP=$(mktemp -d)
   cleanup_dynamic() { rm -rf "$DYNAMIC_TMP"; }
   trap cleanup_dynamic EXIT
-  for step_id in locate run parse propagate; do
+  for step_id in locate run parse propagate cleanup; do
     python3 - "$ACTION_FILE" "$step_id" "$DYNAMIC_TMP/$step_id" "$DYNAMIC_TMP/env-$step_id" <<'PY'
 import re
 import sys
@@ -268,6 +268,12 @@ printf '{"lease_id":"lease-au5-11","exit":%s,"verified":%s}\n' "$DYNAMIC_RAW_EXI
 exit "$DYNAMIC_RAW_EXIT"
 STUB
   chmod +x "$DYNAMIC_TMP/bin/corelink"
+  cat > "$DYNAMIC_TMP/bin/id" <<'IDSTUB'
+#!/usr/bin/env bash
+printf 'id-command-executed\n' > "$DYNAMIC_CAPTURE.id"
+printf 'uid=9999(stub)\n'
+IDSTUB
+  chmod +x "$DYNAMIC_TMP/bin/id"
 
   dynamic_fail() { echo "    FAIL: $*"; DYNAMIC_OK=1; }
   execute_case() {
@@ -301,6 +307,11 @@ STUB
     if [[ "$run_status" -eq 0 ]]; then
       export STEP_RUN_RAW_EXIT="$(sed -n 's/^raw_exit=//p' "$GITHUB_OUTPUT")"
       export STEP_RUN_OUTPUT_FILE="$(sed -n 's/^output_file=//p' "$GITHUB_OUTPUT")"
+    else
+      export STEP_RUN_RAW_EXIT="$(sed -n 's/^raw_exit=//p' "$GITHUB_OUTPUT")"
+    fi
+    export STEP_RUN_TEMP_DIR="$(sed -n 's/^temp_dir=//p' "$GITHUB_OUTPUT")"
+    if [[ "$run_status" -eq 0 ]]; then
       set +e
       (cd "$case_dir/work" && source "$DYNAMIC_TMP/env-parse" && python3 "$DYNAMIC_TMP/parse") >"$case_dir/parse.log" 2>&1
       parse_status=$?
@@ -321,8 +332,25 @@ STUB
       fi
     fi
 
+    set +e
+    (cd "$case_dir/work" && source "$DYNAMIC_TMP/env-cleanup" && bash "$DYNAMIC_TMP/cleanup") >"$case_dir/cleanup.log" 2>&1
+    local cleanup_status=$?
+    set -e
+    [[ "$cleanup_status" -eq 0 ]] || dynamic_fail "$label cleanup status=$cleanup_status"
+    if find "$RUNNER_TEMP" -mindepth 1 -print -quit | grep -q .; then
+      dynamic_fail "$label RUNNER_TEMP was not emptied by the cleanup step"
+    fi
+    if [[ ! -f "$DYNAMIC_CAPTURE.marker" ]]; then
+      dynamic_fail "$label stub did not execute"
+    fi
+    if [[ -e "$DYNAMIC_CAPTURE.id" ]]; then
+      dynamic_fail "$label id command executed"
+    fi
+    if find "$case_dir/work" -name pwned -print -quit | grep -q .; then
+      dynamic_fail "$label payload executed shell code"
+    fi
+
     if [[ "$expected_run" -eq 0 ]]; then
-      [[ -f "$DYNAMIC_CAPTURE.marker" ]] || dynamic_fail "$label stub did not execute"
       [[ -f "$DYNAMIC_CAPTURE.argv" && -f "$DYNAMIC_CAPTURE.env" ]] || dynamic_fail "$label capture missing"
       grep -Fqx "raw_exit=$raw" "$GITHUB_OUTPUT" || dynamic_fail "$label raw_exit output missing"
       grep -Fqx "output_file=$STEP_RUN_OUTPUT_FILE" "$GITHUB_OUTPUT" || dynamic_fail "$label output_file output missing"
@@ -336,9 +364,6 @@ STUB
       fi
       if [[ "$input_name" == version ]] && ! grep -F -- "$payload" "$case_dir/locate.log" >/dev/null 2>&1; then
         dynamic_fail "$label version was not preserved in locate env"
-      fi
-      if find "$case_dir/work" -name pwned -print -quit | grep -q .; then
-        dynamic_fail "$label payload executed shell code"
       fi
       python3 - "$input_name" "$payload" "$DYNAMIC_CAPTURE" "$verify_input" <<'PY' || dynamic_fail "$label argv/env mismatch"
 import pathlib

@@ -153,6 +153,7 @@ runs:
         CORELINK_TMP_DIR=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/corelink.XXXXXX")
         CORELINK_STDERR_FILE="$CORELINK_TMP_DIR/stderr"
         CORELINK_OUTPUT_FILE="$CORELINK_TMP_DIR/output.json"
+        echo "temp_dir=$CORELINK_TMP_DIR" >> "$GITHUB_OUTPUT"
         set +e
         JSON_OUT=$(corelink "${ARGS[@]}" 2>"$CORELINK_STDERR_FILE")
         RAW_EXIT=$?
@@ -236,4 +237,19 @@ runs:
         if [[ "$RAW_EXIT" -ne 0 ]]; then
           echo "::error::The check command exited with code $RAW_EXIT on the CoreLink fabric."
           exit "$RAW_EXIT"
+        fi
+
+    # Always remove only the private files created by the run step. This runs
+    # after parse/propagate for normal outcomes and also after an exit-2 hard
+    # failure, while preserving no caller-controlled path or recursive delete.
+    - name: Cleanup CoreLink temporary files
+      id: cleanup
+      if: always()
+      shell: bash
+      env:
+        CORELINK_TMP_DIR: ${{ steps.run.outputs.temp_dir }}
+      run: |
+        if [[ -n "${CORELINK_TMP_DIR:-}" && -d "$CORELINK_TMP_DIR" ]]; then
+          rm -f -- "$CORELINK_TMP_DIR/stderr" "$CORELINK_TMP_DIR/output.json"
+          rmdir -- "$CORELINK_TMP_DIR" 2>/dev/null || true
         fi
