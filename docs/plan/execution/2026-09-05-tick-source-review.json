@@ -1,0 +1,13 @@
+{
+  "scope": "T6-W4 code acceptance, distinct full sprint CI and live proof",
+  "source_commit": "f1836f94b4dcdc840bd756738589d5fe85b1b478",
+  "reviewer": "delivery_ledger_validator (Luna)",
+  "verdict": "APPROVE",
+  "findings": [
+    "Scheduled producer calls stable DO, configured with binding and migration.",
+    "Durable capacity-one reservation and alarm before transmission; exact head fence before terminalization/successor.",
+    "ACK/recovery binds complete producer envelope identity and trusted deadline.",
+    "Invalid probe flag produces signed config-invalid envelope when configured;0 defaultoff and1 enabled."
+  ],
+  "validation": "Static review only; envelope exactfocusedtest separately recorded; no CI/fullsuite execution."
+}

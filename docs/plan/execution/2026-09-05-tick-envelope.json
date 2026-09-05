@@ -1,0 +1,22 @@
+{
+  "scope": "T6-W4 canonical producer envelope focused development check; no full suite or CI",
+  "source_commit": "e1501f6246fba66d6deaa9aad9ddd4be0be71586",
+  "review": {
+    "reviewer": "sprint1_stress_fix (Luna)",
+    "approved_source": "40c1553040b1975352b914bea12fc38dbede554d",
+    "final_delta_reviewer": "root",
+    "final_delta": "Align Vitest fake clock with producer timestamps; preserve all assertions."
+  },
+  "focused_author_validation": {
+    "command": "./node_modules/.bin/vitest run test/scheduled-tick-envelope.test.ts",
+    "exit": 0,
+    "tests": 2
+  },
+  "root_verification": "Verified actual SHA and final clock delta; earlier root execution caught2/2 failures now repaired by author. Exact tested commit integrated.",
+  "limitations": [
+    "ACK verifier is a test stub; assertions authenticate producer HMAC only.",
+    "Full recovery/order/live acceptance deferred to complete sprint validation.",
+    "Validation summary; no preserved raw successful execution log."
+  ],
+  "observed_at": "2026-09-05T23:36:46.399253+00:00"
+}
