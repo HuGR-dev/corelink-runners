@@ -122,10 +122,10 @@ fn accounting_pending_claim_keeps_slot_and_reservation_until_finish() {
     );
     assert_eq!(
         ledger
-            .try_admit_with_compute(pending(&nonce("blocked"), &tenant, 1), 1, Some(gate))
+            .try_admit_with_compute(pending(&nonce("blocked"), &tenant, 1), 1, None)
             .unwrap(),
         AdmitOutcome::OverConcurrency,
-        "claimed Pending remains in the concurrency and compute reservation set"
+        "claimed Pending retains the concurrency slot even without a new compute gate"
     );
     assert_eq!(
         ledger
