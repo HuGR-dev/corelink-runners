@@ -14,6 +14,7 @@
 
 import { Container, getContainer } from "@cloudflare/containers";
 import { DurableObject } from "cloudflare:workers";
+import { EXEC_SERVER_AUTH_TOKEN_FILE } from "./lib/clw";
 export { RunnerDevEnvDO } from "./durable_objects/runner_dev_env";
 
 // ── G2 metadata-exposure denylist (O7 hardening) — BEST-EFFORT, NOT G2-closing ─
@@ -223,7 +224,9 @@ export interface Env {
   CONTAINMENT_ADMIN_KEY?: string;
   CONTAINMENT?: DurableObjectNamespace<ContainmentDO>;
   // Track-C C2b: the bearer the in-container check-host exec-server requires on
-  // /exec. Injected into the check-host container env at spawn and presented on
+  // /exec. Provider ingress is passed only to the short-lived entrypoint; the
+  // entrypoint writes EXEC_SERVER_AUTH_TOKEN_FILE and unsets this variable
+  // before starting the durable server. The Worker presents the same bearer on
   // the /v1/exec containerFetch. Set via `wrangler secret put`.
   //
   // O7: now REQUIRED for a mode==="check" spawn — an unset secret FAILS CLOSED
@@ -5002,9 +5005,10 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
                   ...body.env,
                   TOOLCHAIN_DIGEST: body.toolchain_digest!,
                   // Track-C C2b (now REQUIRED, guaranteed present by the check above):
-                  // inject the exec-server bearer so the in-container /exec requires
-                  // it; the SAME value is presented on the /v1/exec containerFetch.
+                  // provider ingress only. The entrypoint converts it to the
+                  // mode-0400 file consumed by the durable exec-server.
                   EXEC_SERVER_AUTH_TOKEN: execAuthToken,
+                  EXEC_SERVER_AUTH_TOKEN_FILE,
                 },
                 enableInternet: true,
               }),

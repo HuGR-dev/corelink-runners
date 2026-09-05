@@ -57,6 +57,7 @@ import {
   rateLimitDeadLetterStep,
   RATE_LIMIT_DEADLETTER_MAX,
 } from "../src/lib";
+import { EXEC_SERVER_AUTH_TOKEN_FILE } from "../src/lib/clw";
 import { getContainer } from "@cloudflare/containers";
 
 const AUTH = "spawn-secret";
@@ -104,7 +105,14 @@ describe("/v1/spawn mode:'check' (C2)", () => {
         image_digest: IMG,
         mode: "check",
         toolchain_digest: "sha256:deadbeef",
-        env: { CLW_TENANT: "t", CLW_TOKEN: "x" },
+        // Caller-controlled env cannot replace the Worker-owned auth path or
+        // ingress bearer used by the bridge.
+        env: {
+          CLW_TENANT: "t",
+          CLW_TOKEN: "x",
+          EXEC_SERVER_AUTH_TOKEN: "caller-spoof",
+          EXEC_SERVER_AUTH_TOKEN_FILE: "/tmp/caller-spoof",
+        },
       }),
       env,
     );
@@ -124,6 +132,9 @@ describe("/v1/spawn mode:'check' (C2)", () => {
     expect(arg.envVars.CLW_TOKEN).toBe("x");
     // O7: the exec-server bearer is injected into the check-host env (required).
     expect(arg.envVars.EXEC_SERVER_AUTH_TOKEN).toBe(EXEC_AUTH);
+    // The bearer is ingress-only; the entrypoint writes this path and removes
+    // the raw token before the durable exec-server starts.
+    expect(arg.envVars.EXEC_SERVER_AUTH_TOKEN_FILE).toBe(EXEC_SERVER_AUTH_TOKEN_FILE);
     // The check DO was NOT started via the runner-only startWithEnv path.
     expect(containers[0].startWithEnv).not.toHaveBeenCalled();
   });
