@@ -169,6 +169,15 @@ describe("canonical containment effect route", () => {
     expect(result.receipt.permit_id).toBe("legacy-permit-1");
   });
 
+  it("fails closed when legacy permit issuance returns null", async () => {
+    const { ledger, storage, values } = make(); const t = { ...tuple(), path: "drain" as const };
+    let claimed = false; let released = 0; let drives = 0;
+    const result = await runCanonicalEffect({ ...deps(ledger, t), claim: async () => !claimed && (claimed = true), release: async () => { claimed = false; released++; },
+      beforeConfirm: async () => undefined, drive: async () => { drives++; return undefined; } });
+    expect(result.status).toBe("unavailable"); expect(storage.map.size).toBe(0); expect(values.size).toBe(0);
+    expect(released).toBe(1); expect(drives).toBe(0);
+  });
+
   it("resumes from BOUND after a mark-driving crash without a second begin", async () => {
     const { ledger } = make(); const t = tuple(); let claimed = false; let releases = 0; let markCalls = 0; let drives = 0;
     const base = deps(ledger, t);
