@@ -44,6 +44,7 @@ pub mod introspect_breaker;
 /// introspect burst into ONE upstream round-trip, with zero cache staleness.
 pub(crate) mod introspect_cache;
 pub(crate) mod introspect_coalesce;
+pub mod mint_readiness;
 /// Golden-signal counters (Stage-C observability) — a lock-free, always-on
 /// operational metric surface exposed via `GET /internal/v1/status`.
 pub mod observability;

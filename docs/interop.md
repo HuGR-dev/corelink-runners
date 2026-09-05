@@ -84,3 +84,17 @@ hugit techlead" protocol is retired. The wire + envelope contract is the fabric'
 shape/guarantee changes go through the owner. The live cross-repo seam is corelink-server
 (introspect + billing ingest) — changes there coordinate with the server TL via the
 conformance-vector drift tripwire.
+
+## 7. Runner-mint readiness
+
+fabricd always exposes unauthenticated `GET /readyz`; with neither mint env var
+armed it remains an immediate 200 for the default-off cold behavior. When
+`CORELINK_RUNNER_MINT_AUTH_KEY` and `CORELINK_RUNNER_MINT_URL` are both armed,
+it starts one bounded, process-local probe on first readiness or acquire request: an authenticated
+`POST /internal/v1/runner/mint` with exactly `{}`, no bearer token, and no
+tenant, job, or PAT fields. Readiness accepts only HTTP 400 with the typed
+`BAD_REQUEST` / `job_id required` envelope and a non-empty `request_id`; this
+proves dispatcher-key routing and request parsing, not tenant entitlement or a
+successful mint. Transport failures retry at most twice, then readiness is
+terminal for that process. Until the probe passes, acquire cannot reserve a
+slot or contact a provider; liveness (`/v1/health`) remains a cheap 200.
