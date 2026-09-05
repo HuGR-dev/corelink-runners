@@ -653,7 +653,7 @@ export class ContainmentDO extends DurableObject<Env> {
   async ownerMarkDriving(input: SpawnOwnerRequest, permitId: string, proofId: string): Promise<OwnerResult> { return this.effectLedger().markDriving(input, permitId, proofId); }
   async ownerCommit(input: SpawnOwnerRequest, permitId: string, proofId: string, receipt: ContainmentEffectReceipt): Promise<OwnerResult> { return this.effectLedger().commitEffect(input, permitId, proofId, receipt) as Promise<OwnerResult>; }
   async ownerObserve(pointerKey: string, attemptKey: string): Promise<OwnerResult> { return this.effectLedger().observe(pointerKey, attemptKey); }
-  async ownerAbort(input: SpawnOwnerRequest): Promise<OwnerResult> { return this.effectLedger().abort(input); }
+  async ownerAbort(input: SpawnOwnerRequest): Promise<OwnerResult> { return this.effectLedger().abort(input); } async ownerFreeze(input: SpawnOwnerRequest): Promise<OwnerResult> { return this.effectLedger().freezeUnknown(input); }
   async beginEffect(eventId: string, owner: string, epoch: number, now = Date.now(), permitId?: string): Promise<ContainmentEvent["effect_permit"]> {
     return this.beginContainmentEventEffect(eventId, owner, epoch, now, permitId);
   }
@@ -4450,6 +4450,7 @@ export async function runContainmentDrain(env: Env, dependencies: ContainmentDra
           return drive(env, typed);
         },
         beforeConfirm: async () => (await authority.beginEffect(event.event_id, owner, lease!.epoch, Date.now()))?.permit_id,
+        readbackConfirm: async () => (await authority.getEvent(event.event_id))?.effect_permit?.permit_id ?? null,
         beforeBegin: async permit => !!(await authority.beginEffect(event.event_id, owner, lease!.epoch, Date.now(), permit.permit_id)),
         finalize: async () => (await authority.markEffectCommitted(event.event_id, owner, lease!.epoch))
           && (await authority.acknowledge(event.event_id, owner, lease!.epoch)),

@@ -37,6 +37,7 @@ export interface CanonicalEffectRouteDeps<TOpts extends object> {
     ownerCommit: (request: SpawnOwnerRequest, permitId: string, proofId: string, receipt: ContainmentEffectReceipt) => Promise<OwnerResult>;
     ownerObserve: (pointerKey: string, attemptKey: string) => Promise<OwnerResult>;
     ownerAbort: (request: SpawnOwnerRequest) => Promise<OwnerResult>;
+    ownerFreeze: (request: SpawnOwnerRequest) => Promise<OwnerResult>;
   };
   tuple: OwnerTuple;
   opts: TOpts;
@@ -50,6 +51,8 @@ export interface CanonicalEffectRouteDeps<TOpts extends object> {
   beforeDrive?: () => Promise<boolean>;
   /** Legacy drain may persist its recovery-only permit before owner PERMIT_ISSUED. */
   beforeConfirm?: () => Promise<string | undefined>;
+  /** Read back the legacy permit after a lost response: null=absent, undefined=ambiguous. */
+  readbackConfirm?: () => Promise<string | null | undefined>;
   beforeBegin?: (permit: ContainmentEffectPermit) => Promise<boolean>;
   drive: (opts: TOpts & {
     containment_event_id: string;
@@ -174,7 +177,24 @@ export async function runCanonicalEffect<TOpts extends object>(
         await releaseClaim();
         return { status: mirrored.kind === "mismatch" ? "mirror_tampered" : "unauthorized" };
       }
-      const externalPermitId = deps.beforeConfirm ? await deps.beforeConfirm() : undefined;
+      let externalPermitId: string | undefined;
+      if (deps.beforeConfirm) {
+        try {
+          externalPermitId = await deps.beforeConfirm();
+        } catch {
+          const readback = deps.readbackConfirm ? await deps.readbackConfirm().catch(() => undefined) : undefined;
+          if (text(readback)) externalPermitId = readback;
+          else if (readback === null) {
+            await deps.ledger.ownerAbort(req).catch(() => undefined);
+            await releaseClaim();
+            return { status: "unavailable", reason: "legacy permit absent after response loss" };
+          } else {
+            await deps.ledger.ownerFreeze(req).catch(() => undefined);
+            await releaseClaim();
+            return { status: "unknown_terminal", reason: "legacy permit response ambiguous" };
+          }
+        }
+      }
       if (deps.beforeConfirm && !text(externalPermitId)) {
         await deps.ledger.ownerAbort(req).catch(() => undefined);
         await releaseClaim();

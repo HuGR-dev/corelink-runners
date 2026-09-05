@@ -27,7 +27,7 @@ function deps(ledger: ContainmentEffectLedger, t: OwnerTuple) {
     ledger: source.ownerPrepare ? source : {
       ownerPrepare: source.prepare.bind(source), ownerAcquire: source.acquire.bind(source), ownerMirror: source.mirror.bind(source),
       ownerConfirm: source.confirm.bind(source), ownerBegin: source.beginEffect.bind(source), ownerBind: source.bind.bind(source),
-      ownerMarkDriving: source.markDriving.bind(source), ownerCommit: source.commitEffect.bind(source), ownerObserve: source.observe.bind(source), ownerAbort: source.abort.bind(source),
+      ownerMarkDriving: source.markDriving.bind(source), ownerCommit: source.commitEffect.bind(source), ownerObserve: source.observe.bind(source), ownerAbort: source.abort.bind(source), ownerFreeze: source.freezeUnknown.bind(source),
     }, tuple: t, opts: { jobId: t.job_id }, provider: "fake", resource_id: `job:${t.repo}/${t.job_id}`, idempotency_key: t.effect_id,
     claim: async () => !claimed && (claimed = true), release: async () => { claimed = false; },
     drive: async () => ({ resource_id: `job:${t.repo}/${t.job_id}`, receipt_id: "receipt-1", provider_signature: "sig-1" }),
@@ -187,6 +187,31 @@ describe("canonical containment effect route", () => {
     expect([...storage.map.values()].every((value: any) => value?.permit_id === null && value?.state !== "PERMIT_ISSUED")).toBe(true);
     expect([...values.values()].every(raw => JSON.parse(raw).permit_id === null)).toBe(true);
     expect(released).toBe(1); expect(drives).toBe(0);
+  });
+
+  it("aborts on a definitive absent readback and lets a new lease retry", async () => {
+    const { ledger } = make(); const t = { ...tuple(), path: "drain" as const }; let drives = 0;
+    const first = await runCanonicalEffect({ ...deps(ledger, t), beforeConfirm: async () => { throw new Error("response lost before commit"); }, readbackConfirm: async () => null, drive: async () => { drives++; return undefined; } });
+    expect(first.status).toBe("unavailable");
+    const next = { ...t, owner: "drain:new-owner", token: "drain:new-token", lease_epoch: 2, caller_nonce: "abcdefabcdefabcdefabcdefabcdefab" };
+    const second = await runCanonicalEffect({ ...deps(ledger, next), beforeConfirm: async () => "legacy-retry", drive: async () => { drives++; return { resource_id: `job:${next.repo}/${next.job_id}`, receipt_id: "retry", provider_signature: "sig" }; } });
+    expect(second.status).toBe("committed"); expect(drives).toBe(1);
+  });
+
+  it("uses readback ID after a legacy permit response loss", async () => {
+    const { ledger } = make(); const t = { ...tuple(), path: "drain" as const }; let drives = 0;
+    const result = await runCanonicalEffect({ ...deps(ledger, t), beforeConfirm: async () => { throw new Error("response lost after commit"); }, readbackConfirm: async () => "legacy-readback", drive: async () => { drives++; return { resource_id: `job:${t.repo}/${t.job_id}`, receipt_id: "readback", provider_signature: "sig" }; } });
+    expect(result.status).toBe("committed"); if (result.status !== "committed") return;
+    expect(result.receipt.permit_id).toBe("legacy-readback"); expect(drives).toBe(1);
+  });
+
+  it("freezes ambiguous legacy response and blocks a cross-lease drive", async () => {
+    const { ledger } = make(); const t = { ...tuple(), path: "drain" as const }; let drives = 0;
+    const first = await runCanonicalEffect({ ...deps(ledger, t), beforeConfirm: async () => { throw new Error("ambiguous"); }, readbackConfirm: async () => undefined, drive: async () => { drives++; return undefined; } });
+    expect(first.status).toBe("unknown_terminal");
+    const next = { ...t, owner: "drain:other", token: "drain-other", lease_epoch: 3, caller_nonce: "1234567890abcdef1234567890abcdef" };
+    const second = await runCanonicalEffect({ ...deps(ledger, next), beforeConfirm: async () => { throw new Error("must not be reached"); }, drive: async () => { drives++; return undefined; } });
+    expect(second.status).toBe("unknown_terminal"); expect(drives).toBe(0);
   });
 
   it("resumes from BOUND after a mark-driving crash without a second begin", async () => {

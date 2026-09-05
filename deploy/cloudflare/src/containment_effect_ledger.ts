@@ -522,6 +522,18 @@ export class ContainmentEffectLedger {
     });
   }
   async abort(request: SpawnOwnerRequest, owner = request.tuple.owner, token = request.tuple.token): Promise<OwnerResult> { return this.abortReap(request, owner, token, false, 0); }
+  async freezeUnknown(request: SpawnOwnerRequest): Promise<OwnerResult> {
+    const t = requestTuple(request); if (!t) return rejected();
+    return this.storage.transaction(async s => {
+      const a: any = await s.get(attemptKey(t)); const p: any = await s.get(activeKey(t));
+      if (!a || !p || !pointerMatchesAttempt(p, a, t) || !recordValid(a, t)
+        || a.permit_id !== null || a.binding_id !== null || a.effect_start_proof_id !== null
+        || (a.state !== "PREPARED" && a.state !== "CLAIM_ACQUIRED")) return this.out(t, "unknown", "UNKNOWN", a);
+      const frozen = { ...a, state: "UNKNOWN" as const };
+      await s.put(attemptKey(t), frozen); await s.put(activeKey(t), frozen);
+      return this.out(t, "unknown", frozen.state, frozen);
+    });
+  }
   async reap(request: SpawnOwnerRequest, stale_after_ms: number, authority = "containment-reaper-v1"): Promise<OwnerResult> { if (authority !== "containment-reaper-v1" || !Number.isSafeInteger(stale_after_ms) || stale_after_ms < 1) return rejected(); return this.abortReap(request, "", "", true, stale_after_ms); }
   private async abortReap(request: SpawnOwnerRequest, owner: string, token: string, reap: boolean, stale: number): Promise<OwnerResult> {
     const t = requestTuple(request); if (!t) return rejected();
