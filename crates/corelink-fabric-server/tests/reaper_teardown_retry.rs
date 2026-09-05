@@ -244,7 +244,10 @@ async fn unconfirmed_cleanup_keeps_claim_and_cap_reservation() {
 
 #[test]
 fn no_box_is_explicit_confirmation() {
-    let provisioner = corelink_fabric_server::NoBoxProvisioner;
+    let provisioner = corelink_fabric_server::NoBoxProvisioner::default();
+    provisioner
+        .provision("missing", &cloudflare_spec())
+        .unwrap();
     assert_eq!(
         provisioner.teardown_pending("missing"),
         CleanupTeardown::ConfirmedDestroyed
