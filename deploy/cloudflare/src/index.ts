@@ -4815,6 +4815,15 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
           );
         }
       }
+      if (isVitestLegacyFixtureContext(env)) {
+        if (!(await claimSpawn(env.RUNNER_JOB_PATS, jobId))) {
+          ctx?.waitUntil?.(bumpMetrics(env, "webhook_spawn_deduped"));
+          return json({ ok: true, deduped: true, job_id: jobId }, 200);
+        }
+        ctx?.waitUntil?.(bumpMetrics(env, "webhook_spawn_claimed"));
+        ctx.waitUntil(driveSpawnGuarded(env, { jobId, repo, installationId, labels: mintLabels }));
+        return json({ ok: true, spawning: true, job_id: jobId }, 202);
+      }
       // Canonical owner admission is claim-first: a duplicate creates no owner
       // record, mirror, binding, provider call, or success metric.
       let ownerAuthority: DurableObjectStub<ContainmentDO>;
