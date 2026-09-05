@@ -37,6 +37,10 @@ if [ "$1" = "repo" ] && [ "$2" = "view" ]; then
   exit 0
 fi
 if [ "$1" = "api" ]; then
+  if [ "${GH_API_RC:-0}" -ne 0 ]; then
+    echo "fake gh: simulated API failure" >&2
+    exit "${GH_API_RC}"
+  fi
   path="${@: -1}"
   case "$path" in
     */pulls/*/files*) printf '%s\n' "${GH_API_FILES}" ;;
@@ -49,9 +53,27 @@ fi
 if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
   case "$*" in
     *"--json mergeable,mergeStateStatus,state,isDraft,headRefOid,baseRefOid,potentialMergeCommit"*)
-      printf '%s %s %s %s %s %s %s\n' ${GH_INITIAL_VIEW} "${GH_HEAD_SHA}" "${GH_BASE_SHA}" "${GH_MERGE_SHA}" ;;
+      count=0
+      if [ -n "${GH_IDENTITY_COUNT_FILE:-}" ]; then
+        count="$(cat "$GH_IDENTITY_COUNT_FILE" 2>/dev/null || echo 0)"
+        count=$((count + 1)); printf '%s\n' "$count" >"$GH_IDENTITY_COUNT_FILE"
+      fi
+      head="${GH_HEAD_SHA}"; base="${GH_BASE_SHA}"; merge="${GH_MERGE_SHA}"
+      if [ "${GH_RACE_AT:-0}" -gt 0 ] && [ "$count" -ge "${GH_RACE_AT}" ]; then
+        head="${GH_RECHECK_HEAD_SHA:-$head}"; base="${GH_RECHECK_BASE_SHA:-$base}"; merge="${GH_RECHECK_MERGE_SHA:-$merge}"
+      fi
+      printf '%s %s %s %s %s %s %s\n' ${GH_INITIAL_VIEW} "$head" "$base" "$merge" ;;
     *"--json headRefOid,baseRefOid,potentialMergeCommit"*)
-      printf '%s %s %s\n' "${GH_HEAD_SHA}" "${GH_BASE_SHA}" "${GH_MERGE_SHA}" ;;
+      count=0
+      if [ -n "${GH_IDENTITY_COUNT_FILE:-}" ]; then
+        count="$(cat "$GH_IDENTITY_COUNT_FILE" 2>/dev/null || echo 0)"
+        count=$((count + 1)); printf '%s\n' "$count" >"$GH_IDENTITY_COUNT_FILE"
+      fi
+      head="${GH_HEAD_SHA}"; base="${GH_BASE_SHA}"; merge="${GH_MERGE_SHA}"
+      if [ "${GH_RACE_AT:-0}" -gt 0 ] && [ "$count" -ge "${GH_RACE_AT}" ]; then
+        head="${GH_RECHECK_HEAD_SHA:-$head}"; base="${GH_RECHECK_BASE_SHA:-$base}"; merge="${GH_RECHECK_MERGE_SHA:-$merge}"
+      fi
+      printf '%s %s %s\n' "$head" "$base" "$merge" ;;
     *"--json headRefOid"*)                    printf '%s\n' "${GH_HEAD_SHA}" ;;
     *state,headRefName,isCrossRepository*) cat "$GH_POST_FILE" ;;
     *)                                         printf '%s %s\n' "${GH_INITIAL_VIEW}" "${GH_HEAD_SHA}" ;;
@@ -116,6 +138,8 @@ UNKNOWN_BUCKET_CHECKS='[
 ]'
 API_FILES_NORMAL='[[{"filename":"README.md"}]]'
 API_FILES_CONTRACT='[[{"filename":"docs/plan/contracts/T3-W17.md"}]]'
+API_RUNS_OTHER_PR='[{"total_count":2,"workflow_runs":[{"id":101,"path":".github/workflows/ci.yml","event":"pull_request","head_sha":"2222222222222222222222222222222222222222","pull_requests":[{"number":1000}],"status":"completed","conclusion":"success"},{"id":102,"path":".github/workflows/dco.yml","event":"pull_request","head_sha":"2222222222222222222222222222222222222222","pull_requests":[{"number":1000}],"status":"completed","conclusion":"success"}]}]'
+API_RUNS_WRONG_IDENTITY='[{"total_count":2,"workflow_runs":[{"id":101,"path":".github/workflows/ci.yml","event":"push","head_sha":"2222222222222222222222222222222222222222","pull_requests":[{"number":999}],"status":"completed","conclusion":"success"},{"id":102,"path":".github/workflows/dco.yml","event":"pull_request","head_sha":"1111111111111111111111111111111111111111","pull_requests":[{"number":999}],"status":"completed","conclusion":"success"}]}]'
 API_RUNS_BASE='[{"total_count":2,"workflow_runs":[{"id":101,"path":".github/workflows/ci.yml","event":"pull_request","head_sha":"2222222222222222222222222222222222222222","pull_requests":[{"number":999}],"status":"completed","conclusion":"success"},{"id":102,"path":".github/workflows/dco.yml","event":"pull_request","head_sha":"2222222222222222222222222222222222222222","pull_requests":[{"number":999}],"status":"completed","conclusion":"success"}]}]'
 API_RUNS_DCO='[{"total_count":1,"workflow_runs":[{"id":102,"path":".github/workflows/dco.yml","event":"pull_request","head_sha":"2222222222222222222222222222222222222222","pull_requests":[{"number":999}],"status":"completed","conclusion":"success"}]}]'
 API_RUNS_WITH_PLAN='[{"total_count":3,"workflow_runs":[{"id":101,"path":".github/workflows/ci.yml","event":"pull_request","head_sha":"2222222222222222222222222222222222222222","pull_requests":[{"number":999}],"status":"completed","conclusion":"success"},{"id":102,"path":".github/workflows/dco.yml","event":"pull_request","head_sha":"2222222222222222222222222222222222222222","pull_requests":[{"number":999}],"status":"completed","conclusion":"success"},{"id":103,"path":".github/workflows/plan-integrity.yml","event":"pull_request","head_sha":"2222222222222222222222222222222222222222","pull_requests":[{"number":999}],"status":"completed","conclusion":"success"}]}]'
@@ -126,6 +150,7 @@ API_JOBS_PENDING='[{"total_count":2,"jobs":[{"name":"gates","status":"in_progres
 API_JOBS_SKIPPED='[{"total_count":2,"jobs":[{"name":"gates","status":"completed","conclusion":"skipped"},{"name":"dco","status":"completed","conclusion":"success"}]}]'
 API_JOBS_UNKNOWN='[{"total_count":2,"jobs":[{"name":"gates","status":"completed","conclusion":"future-status"},{"name":"dco","status":"completed","conclusion":"success"}]}]'
 API_JOBS_WITH_PLAN='[{"total_count":3,"jobs":[{"name":"gates","status":"completed","conclusion":"success"},{"name":"dco","status":"completed","conclusion":"success"},{"name":"Coverage, WP, and AU structure","status":"completed","conclusion":"success"}]}]'
+API_JOBS_LOOKALIKE='[{"total_count":2,"jobs":[{"name":"CI / gates","status":"completed","conclusion":"success"},{"name":"DCO / dco","status":"completed","conclusion":"success"}]}]'
 
 # run_case name expected initial-view checks [gate arguments...] -- [message]
 run_case() {
@@ -170,7 +195,7 @@ run_case() {
     GH_HEAD_SHA="$HEAD_SHA" GH_BASE_SHA="$BASE_SHA" GH_MERGE_SHA="$MERGE_SHA" GH_REPOSITORY=owner/repo \
     GH_API_FILES="$api_files" GH_API_RUNS="$api_runs" GH_API_JOBS="$api_jobs" \
     GH_POST_FILE="$post_file" GH_CHECKS_FILE="$checks_file" \
-    GH_CALLS_FILE="$calls_file" GH_MARK_MERGED=0 GH_MERGE_RC=0 GH_API_RC=0 \
+    GH_CALLS_FILE="$calls_file" GH_MARK_MERGED=0 GH_MERGE_RC=0 GH_API_RC="${GH_API_RC_CASE:-0}" \
     bash "$TARGET" "${args[@]}" 2>&1)"
   rc=$?
   set -e
@@ -223,6 +248,17 @@ run_case "cancelled check refused" 1 "MERGEABLE CLEAN OPEN false" "$CANCELLED_CH
 run_case "unknown bucket refused" 1 "MERGEABLE CLEAN OPEN false" "$UNKNOWN_BUCKET_CHECKS" -- "gates  .github/workflows/ci.yml"
 run_case "healthy PR passes" 0 "MERGEABLE CLEAN OPEN false" "$HEALTHY_CHECKS" -- "All gates green"
 run_case "authoritative workflow/job identities pass" 0 "MERGEABLE CLEAN OPEN false" "$PREFIXED_HEALTHY_CHECKS" -- "All gates green"
+GH_API_RUNS_CASE="$API_RUNS_OTHER_PR"
+run_case "workflow run for another PR refused" 1 "MERGEABLE CLEAN OPEN false" "$HEALTHY_CHECKS" -- "gates  .github/workflows/ci.yml"
+GH_API_RUNS_CASE="$API_RUNS_WRONG_IDENTITY"
+run_case "workflow path/event/head provenance refused" 1 "MERGEABLE CLEAN OPEN false" "$HEALTHY_CHECKS" -- "gates  .github/workflows/ci.yml"
+GH_API_RUNS_CASE=""
+GH_API_JOBS_CASE="$API_JOBS_LOOKALIKE"
+run_case "display-name-only job identity refused" 1 "MERGEABLE CLEAN OPEN false" "$HEALTHY_CHECKS" -- "gates  .github/workflows/ci.yml"
+GH_API_JOBS_CASE=""
+GH_API_RC_CASE=7
+run_case "authoritative API failure refused" 1 "MERGEABLE CLEAN OPEN false" "$HEALTHY_CHECKS" -- "authoritative GitHub API query failed"
+GH_API_RC_CASE=0
 
 # CLI safety boundaries are checked without invoking gh at all.
 run_case "admin reason outside merge refused" 2 "MERGEABLE CLEAN OPEN false" "$HEALTHY_CHECKS" --admin-reason "why" -- "only meaningful with --merge"
@@ -235,6 +271,7 @@ run_merge_case() {
   local mode="${9:-}" admin="${10:-0}" forbidden_call="${11:-}"
   local checks_file="$WORK/merge-checks.json" calls_file="$WORK/merge-calls" post_file="$WORK/merge-post"
   local api_jobs="$API_JOBS_BASE"
+  : >"$WORK/identity-count"
   [ "$checks" = "$FAILED_CHECKS" ] && api_jobs="$API_JOBS_FAILED"
   [ "$checks" = "$CANCELLED_CHECKS" ] && api_jobs="$API_JOBS_CANCELLED"
   [ "$checks" = "$PENDING_CHECKS" ] && api_jobs="$API_JOBS_PENDING"
@@ -251,6 +288,9 @@ run_merge_case() {
     GH_POST_VIEW="$(cat "$post_file")" GH_CHECKS_FILE="$checks_file" \
     GH_HEAD_SHA="$HEAD_SHA" GH_BASE_SHA="$BASE_SHA" GH_MERGE_SHA="$MERGE_SHA" GH_REPOSITORY=owner/repo \
     GH_API_FILES="$API_FILES_NORMAL" GH_API_RUNS="$API_RUNS_BASE" GH_API_JOBS="$api_jobs" \
+    GH_IDENTITY_COUNT_FILE="$WORK/identity-count" GH_RACE_AT="${RACE_AT_CASE:-0}" \
+    GH_RECHECK_HEAD_SHA="${RECHECK_HEAD_CASE:-$HEAD_SHA}" GH_RECHECK_BASE_SHA="${RECHECK_BASE_CASE:-$BASE_SHA}" \
+    GH_RECHECK_MERGE_SHA="${RECHECK_MERGE_CASE:-$MERGE_SHA}" \
     GH_CALLS_FILE="$calls_file" GH_MARK_MERGED="$mark_merged" GH_MERGE_RC="$merge_rc" GH_API_RC=0 \
     bash "$TARGET" "${merge_args[@]}" 999 2>&1)"
   rc=$?
@@ -286,6 +326,18 @@ run_merge_case "draft admin override refused" 1 \
   "MERGEABLE CLEAN OPEN true" "$HEALTHY_CHECKS" 0 0 "" "NO MERGE ISSUED" normal 1 "pr merge"
 run_merge_case "pending admin override refused" 1 \
   "MERGEABLE CLEAN OPEN false" "$PENDING_CHECKS" 0 0 "" "NO MERGE ISSUED" normal 0 "pr merge"
+RACE_AT_CASE=3
+RECHECK_BASE_CASE='4444444444444444444444444444444444444444'
+run_merge_case "base OID race refused" 1 \
+  "MERGEABLE CLEAN OPEN false" "$HEALTHY_CHECKS" 0 0 "" "source/base/merge OID changed" normal 0 "pr merge"
+RACE_AT_CASE=3
+RECHECK_BASE_CASE="$BASE_SHA"
+RECHECK_MERGE_CASE='5555555555555555555555555555555555555555'
+run_merge_case "potential merge OID race refused" 1 \
+  "MERGEABLE CLEAN OPEN false" "$HEALTHY_CHECKS" 0 0 "" "source/base/merge OID changed" normal 0 "pr merge"
+RACE_AT_CASE=0
+RECHECK_BASE_CASE=""
+RECHECK_MERGE_CASE=""
 
 echo
 echo "  $pass_count passed, $fail_count failed"

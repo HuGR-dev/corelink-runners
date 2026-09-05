@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import os
 import re
 import shutil
 import subprocess
@@ -204,6 +205,13 @@ EXPECTED_MUTATION_INVENTORY = frozenset(
         "renamed-au-heading.md",
         "renamed-heading.md",
         "reset-array-selftests.yml",
+        "selftests-head-blob-toctou",
+        "selftests-mode-toctou",
+        "selftests-non-100755",
+        "selftests-nonregular",
+        "selftests-nonregular-toctou",
+        "selftests-symlink",
+        "selftests-symlink-toctou",
         "retrospective-journal.md",
         "r6-cross-doc-drift.md",
         "r6-cross-tenant-read-allowed.md",
@@ -878,6 +886,168 @@ def require_actionlint_sha_binding_rejected(work: Path) -> None:
     print("PASS actionlint blocks weakened plan-integrity SHA binding")
 
 
+def require_tracked_selftest_guard_fixtures(work: Path) -> None:
+    """Prove tracked selftests remain executable and immutable until launch.
+
+    The workflow's first pass checks the index, while its discovery loop checks
+    the same mode/type/blob immediately before each invocation. Keep both
+    checks exercised: malformed index entries are rejected, and a first
+    selftest cannot tamper with the next one before it runs.
+    """
+
+    workflow = REPO / ".github" / "workflows" / "selftests.yml"
+    workflow_text = workflow.read_text(encoding="utf-8")
+    start = workflow_text.index(
+        "          set -e -u -o pipefail\n",
+        workflow_text.index("- name: Validate tracked selftest files"),
+    )
+    discover_start = workflow_text.index(
+        "          set -euo pipefail\n",
+        workflow_text.index("- name: Discover and run every tracked selftest"),
+    )
+    validate_end = workflow_text.index(
+        "\n      - name: Discover and run every tracked selftest", start
+    )
+
+    def script_from(start: int, end: int) -> str:
+        return "\n".join(
+            line[10:] if line.startswith("          ") else line
+            for line in workflow_text[start:end].splitlines()
+        ) + "\n"
+
+    validate_script = script_from(start, validate_end)
+    discover_script = script_from(discover_start, len(workflow_text))
+
+    def git(root: Path, *args: str) -> str:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return result.stdout.strip()
+
+    def base_fixture(name: str) -> tuple[Path, Path]:
+        root = work / name
+        scripts = root / "scripts"
+        scripts.mkdir(parents=True)
+        selftest = scripts / "fixture.selftest.sh"
+        selftest.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        selftest.chmod(0o755)
+        git(root, "init", "-q")
+        git(root, "config", "user.email", "fixture@example.test")
+        git(root, "config", "user.name", "fixture")
+        return root, selftest
+
+    def invalid_fixture(name: str, kind: str) -> tuple[Path, Path]:
+        root, selftest = base_fixture(name)
+        if kind == "mode":
+            selftest.chmod(0o644)
+        elif kind == "symlink":
+            target = selftest.parent / "target.sh"
+            target.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            selftest.unlink()
+            selftest.symlink_to(target.name)
+        else:
+            child = root / "child-repo"
+            child.mkdir()
+            git(child, "init", "-q")
+            git(child, "config", "user.email", "fixture@example.test")
+            git(child, "config", "user.name", "fixture")
+            (child / "README").write_text("fixture\n", encoding="utf-8")
+            git(child, "add", "README")
+            git(child, "commit", "-qm", "fixture")
+            selftest.unlink()
+            git(root, "update-index", "--add", "--cacheinfo", f"160000,{git(child, 'rev-parse', 'HEAD')},scripts/fixture.selftest.sh")
+        if kind != "nonregular":
+            git(root, "add", "scripts")
+        git(root, "commit", "-qm", "fixture")
+        return root, selftest
+
+    def run_script(root: Path, script: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["/usr/local/bin/bash", "-c", script],
+            cwd=root,
+            env=os.environ.copy(),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+    def toctou_fixture(name: str, replacement: str) -> Path:
+        root = work / name
+        scripts = root / "scripts"
+        scripts.mkdir(parents=True)
+        first = scripts / "a-first.selftest.sh"
+        second = scripts / "b-second.selftest.sh"
+        commands = {
+            "content": "printf '#!/usr/bin/env bash\\nexit 7\\n' > scripts/b-second.selftest.sh",
+            "mode": "chmod 644 scripts/b-second.selftest.sh",
+            "symlink": "rm scripts/b-second.selftest.sh && ln -s missing-target.sh scripts/b-second.selftest.sh",
+            "nonregular": "rm scripts/b-second.selftest.sh && mkdir scripts/b-second.selftest.sh",
+        }
+        first.write_text(
+            "#!/usr/bin/env bash\n"
+            f"{commands[replacement]}\n",
+            encoding="utf-8",
+        )
+        second.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        first.chmod(0o755)
+        second.chmod(0o755)
+        git(root, "init", "-q")
+        git(root, "config", "user.email", "fixture@example.test")
+        git(root, "config", "user.name", "fixture")
+        git(root, "add", "scripts")
+        git(root, "commit", "-qm", "fixture")
+        return root
+
+    valid_root, _ = base_fixture("selftests-valid")
+    git(valid_root, "add", "scripts")
+    git(valid_root, "commit", "-qm", "fixture")
+    if run_script(valid_root, validate_script).returncode != 0:
+        raise AssertionError("tracked selftest guard rejected its valid executable fixture")
+    local_discover_script = discover_script.replace("/usr/bin/bash", "/usr/local/bin/bash")
+    if run_script(valid_root, local_discover_script).returncode != 0:
+        raise AssertionError("tracked selftest discovery rejected its valid executable fixture")
+    print("PASS tracked selftest guard accepts a valid executable")
+
+    for mutation, kind in (
+        ("selftests-non-100755", "mode"),
+        ("selftests-symlink", "symlink"),
+        ("selftests-nonregular", "nonregular"),
+    ):
+        root, _ = invalid_fixture(mutation, kind)
+        result = run_script(root, validate_script)
+        if result.returncode == 0:
+            raise AssertionError(f"tracked selftest guard accepted {mutation}")
+        record_mutation(mutation)
+        print(f"PASS tracked selftest guard blocks {mutation}")
+
+    for mutation, replacement in (
+        ("selftests-head-blob-toctou", "content"),
+        ("selftests-mode-toctou", "mode"),
+        ("selftests-symlink-toctou", "symlink"),
+        ("selftests-nonregular-toctou", "nonregular"),
+    ):
+        root = toctou_fixture(mutation, replacement)
+        if run_script(root, validate_script).returncode != 0:
+            raise AssertionError(f"could not prepare discovery for {mutation}")
+        if run_script(root, local_discover_script).returncode == 0:
+            raise AssertionError(f"tracked selftest discovery accepted {mutation}")
+        record_mutation(mutation)
+        print(f"PASS tracked selftest discovery blocks {mutation}")
+
+
+def _obsolete_tracked_selftest_guard_fixture(work: Path) -> None:
+    """Retained only as a review anchor; use the inline guard above."""
+    raise AssertionError("obsolete helper must not be called")
+
+
+def _removed_guard_fixture_tail() -> None:
+    return None
+
+
 def main() -> int:
     require("plan baseline", "plan-check.py", SOURCE, True)
     require("WP baseline", "wp-check.py", PLAN, True)
@@ -902,6 +1072,7 @@ def main() -> int:
         require_actionlint_commented_dead_sha_rejected(work)
         require_actionlint_heredoc_copy_rejected(work)
         require_actionlint_sha_binding_rejected(work)
+        require_tracked_selftest_guard_fixtures(work)
 
         duplicate_source = work / "duplicate-source.txt"
         first_id = source.splitlines()[0]
