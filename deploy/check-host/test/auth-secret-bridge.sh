@@ -173,6 +173,15 @@ grep -q "^EXEC_SERVER_AUTH_TOKEN_FILE=$cloud_auth$" "$tmp/cloud.env"
 ! grep -q 'cloud-secret' "$tmp/cloud.argv" "$tmp/cloud.log"
 ! grep -q '^EXEC_SERVER_AUTH_TOKEN=' "$tmp/cloud.outer.env"
 grep -q '^ENTRYPOINT \["/entrypoint.sh"\]' "$root/../cloudflare/Dockerfile.runner-devenv"
+
+# An injected dumb-init marker cannot suppress the clean outer-init re-exec.
+marked_init_auth="$tmp/marked-init/run/corelink/token"
+AUTH_ENV_CAPTURE="$tmp/marked-init.env" AUTH_FILE_CAPTURE="$tmp/marked-init.file" AUTH_MODE_CAPTURE="$tmp/marked-init.mode" AUTH_ARG_CAPTURE="$tmp/marked-init.argv" OUTER_ENV_CAPTURE="$tmp/marked-init.outer.env" \
+    PATH="$bin:$PATH" CORELINK_DUMB_INIT=1 EXEC_SERVER_AUTH_TOKEN=marked-init-secret \
+    EXEC_SERVER_AUTH_TOKEN_FILE="$marked_init_auth" CLW_TENANT=tenant \
+    WORKSPACE_NAME=workspace PROFILE_NAME=profile "$cloud_script" >/dev/null 2>&1
+test -s "$tmp/marked-init.outer.env"
+! grep -q '^EXEC_SERVER_AUTH_TOKEN=' "$tmp/marked-init.outer.env"
 grep -q '^user=coder$' "$root/../cloudflare/supervisord.conf"
 grep -q '^USER coder$' "$root/../cloudflare/Dockerfile.runner-devenv"
 
