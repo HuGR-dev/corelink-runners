@@ -935,10 +935,23 @@ export function parseReconcilerRepos(csv: string | undefined): string[] {
     .filter((s) => s.includes("/"));
 }
 
-function canonicalRepoLookupKey(value: string): string {
+function canonicalRepoLookupKey(value: string): string | null {
   const edgeTrim = (part: string) => part.replace(/^[\t\n\v\f\r ]+|[\t\n\v\f\r ]+$/g, "");
   const parts = edgeTrim(value).split("/");
-  return parts.length === 2 ? `${edgeTrim(parts[0]).toLowerCase()}/${edgeTrim(parts[1]).toLowerCase()}` : "";
+  const canonical = parts.length === 2 ? `${edgeTrim(parts[0]).toLowerCase()}/${edgeTrim(parts[1]).toLowerCase()}` : "";
+  return /^[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9])?\/[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9])?$/.test(canonical) ? canonical : null;
+}
+function canonicalRepoMapEntries(map: Record<string, unknown>): Array<[string, unknown]> | null {
+  const seen = new Set<string>();
+  const entries: Array<[string, unknown]> = [];
+  for (const [key, value] of Object.entries(map)) {
+    const canonical = canonicalRepoLookupKey(key);
+    if (canonical === null) continue;
+    if (seen.has(canonical)) return null;
+    seen.add(canonical);
+    entries.push([canonical, value]);
+  }
+  return entries;
 }
 
 /**
@@ -952,8 +965,11 @@ export function installationIdForRepo(json: string | undefined, repoFullName: st
   try {
     const map = JSON.parse(json) as Record<string, unknown>;
     const wanted = canonicalRepoLookupKey(repoFullName);
-    for (const [key, value] of Object.entries(map)) {
-      if (canonicalRepoLookupKey(key) !== wanted) continue;
+    if (wanted === null) return "";
+    const entries = canonicalRepoMapEntries(map);
+    if (entries === null) return "";
+    for (const [key, value] of entries) {
+      if (key !== wanted) continue;
       return typeof value === "string" ? value : typeof value === "number" ? String(value) : "";
     }
     return "";
@@ -977,8 +993,11 @@ export function tenantPatSecretForRepo(json: string | undefined, repoFullName: s
   try {
     const map = JSON.parse(json) as Record<string, unknown>;
     const wanted = canonicalRepoLookupKey(repoFullName);
-    for (const [key, value] of Object.entries(map)) {
-      if (canonicalRepoLookupKey(key) === wanted && typeof value === "string") return value;
+    if (wanted === null) return "";
+    const entries = canonicalRepoMapEntries(map);
+    if (entries === null) return "";
+    for (const [key, value] of entries) {
+      if (key === wanted && typeof value === "string") return value;
     }
     return "";
   } catch {
