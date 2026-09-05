@@ -56,6 +56,7 @@ pub mod ledger;
 mod ledger_conformance;
 pub mod lifecycle;
 pub mod meter;
+mod pending_cleanup;
 pub mod pg_ledger;
 // M1 WAVE-0 frozen anchor — cross-instance fair-admission queue row contract.
 pub mod pg_queue;
