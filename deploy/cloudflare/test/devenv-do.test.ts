@@ -40,6 +40,7 @@ vi.mock("@cloudflare/containers", () => {
 });
 
 import { RunnerDevEnvDO } from "../src/durable_objects/runner_dev_env";
+import { EXEC_SERVER_AUTH_TOKEN_FILE } from "../src/lib/clw";
 
 describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
   let mockStorage: Map<string, any>;
@@ -123,6 +124,10 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
 
       const startResp = await doInstance.startDevenv(payload);
       expect(startResp.status).toBe("starting");
+      expect((doInstance as any).envVars.EXEC_SERVER_AUTH_TOKEN).toBeDefined();
+      expect((doInstance as any).envVars.EXEC_SERVER_AUTH_TOKEN_FILE).toBe(
+        EXEC_SERVER_AUTH_TOKEN_FILE,
+      );
       expect(startResp.workspaceName).toBe("frontend-repo");
       expect(startResp.profileName).toBe("browser-profile-1");
       expect(startResp.tier).toBe("power-8");
