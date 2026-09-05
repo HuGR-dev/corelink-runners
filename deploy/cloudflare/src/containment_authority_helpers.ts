@@ -4,6 +4,7 @@ export interface ContainmentMetaShape {
 }
 export const MAX_ACTIVE_INDEX_EVENTS = 256;
 export interface ContainmentJobIndex { schema_version: 1; repo: string; job_id: string; active_event_ids: string[]; active_count: number; updated_at_ms: number }
+export interface ContainmentJobIndexMarker { schema_version: 1; repo: string; job_id: string; bootstrapped_at_ms: number }
 export interface ContainmentJobIndexMeta { schema_version: 1; initialized: true }
 export interface ContainmentOutboxShape { schema_version: 1; signal_id: string; state: "PENDING" | "DELIVERED"; attempts: number }
 export interface InvalidConfigShape { schema_version: 1; signal_id: string; switch_name: string; raw_value_sha256: string }
@@ -18,7 +19,8 @@ const PAUSE_PREFIX = "containment:v1:pause:";
 const INVALID_PREFIX = "containment:v1:invalid:";
 const OUTBOX_PREFIX = "containment:v1:outbox:";
 const RESERVATION_PREFIX = "containment:v1:reservation:";
-const INDEX_PREFIX = "containment:v1:job-index:";
+const INDEX_PREFIX = "containment:v1:repo-job-index:";
+const INDEX_MARKER_PREFIX = "containment:v1:repo-job-index-marker:";
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 const SWITCHES = new Set(["AUTOSCALER_INTAKE_PAUSED", "AUTOSCALER_REDRIVE_PAUSED"]);
 function trimAscii(value: string): string { return value.replace(/^[\u0009-\u000d\u0020]+|[\u0009-\u000d\u0020]+$/g, ""); }
@@ -28,6 +30,7 @@ export function containmentPauseKey(seq: number): string { return `${PAUSE_PREFI
 export function containmentInvalidKey(name: string, digest: string): string { return `${INVALID_PREFIX}${name}:${digest}`; }
 export function containmentOutboxKey(signalId: string): string { return `${OUTBOX_PREFIX}${signalId}`; }
 export function containmentJobIndexKey(repo: string, jobId: string): string { return `${INDEX_PREFIX}${repo}/${jobId}`; }
+export function containmentJobIndexMarkerKey(repo: string, jobId: string): string { return `${INDEX_MARKER_PREFIX}${repo}/${jobId}`; }
 export function containmentReservationKey(repo: string, jobId: string): string { return `${RESERVATION_PREFIX}${repo}/${jobId}`; }
 export function redriveEffectId(repo: string, jobId: string): string { return `containment:v1:redrive:${repo}/${jobId}`; }
 export function isValidJobIndex(value: unknown, repo: string, jobId: string): value is ContainmentJobIndex {
@@ -38,6 +41,10 @@ export function isValidJobIndex(value: unknown, repo: string, jobId: string): va
 }
 export function isValidJobIndexMeta(value: unknown): value is ContainmentJobIndexMeta {
   return !!value && typeof value === "object" && (value as Partial<ContainmentJobIndexMeta>).schema_version === 1 && (value as Partial<ContainmentJobIndexMeta>).initialized === true;
+}
+export function isValidJobIndexMarker(value: unknown, repo: string, jobId: string): value is ContainmentJobIndexMarker {
+  if (!value || typeof value !== "object") return false; const r = value as Partial<ContainmentJobIndexMarker>;
+  return r.schema_version === 1 && r.repo === repo && r.job_id === jobId && Number.isFinite(r.bootstrapped_at_ms);
 }
 export function isValidOutboxRecord(value: unknown): value is ContainmentOutboxShape {
   if (!value || typeof value !== "object") return false; const r = value as Partial<ContainmentOutboxShape>;

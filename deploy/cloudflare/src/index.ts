@@ -118,6 +118,7 @@ import { bumpMetrics, snapshotMetrics, MetricsDO } from "./metrics";
 import { installationToken } from "./github_app";
 import {
   ContainmentEffectLedger,
+  containmentEffectPointerKey,
   type ContainmentEffectAttempt,
   type ContainmentEffectBinding,
   type ContainmentEffectIdentity,
@@ -129,10 +130,10 @@ import {
   type ContainmentEffectTransition,
 } from "./containment_effect_ledger";
 import {
-  canonicalSafeJobId,
   containmentEventKey,
   containmentInvalidKey,
   containmentJobIndexKey,
+  containmentJobIndexMarkerKey,
   containmentOutboxKey,
   containmentPauseKey,
   containmentReservationKey,
@@ -140,6 +141,7 @@ import {
   isValidInvalidConfigRecord,
   isValidJobIndex,
   isValidJobIndexMeta,
+  isValidJobIndexMarker,
   isValidOutboxRecord,
   MAX_ACTIVE_INDEX_EVENTS,
   normalizeRedriveIdentity,
@@ -147,8 +149,10 @@ import {
   reservationPermit,
   reservationTupleMatches,
   type ContainmentJobIndex,
+  type ContainmentJobIndexMarker,
   type ContainmentJobIndexMeta,
 } from "./containment_authority_helpers";
+import { canonicalWorkflowJobIdFromRaw } from "./workflow_job_id";
 export {
   ContainmentEffectLedger,
   containmentEffectMirrorFromAttempt,
@@ -462,7 +466,6 @@ const CONTAINMENT_PAUSE_PREFIX = "containment:v1:pause:";
 const CONTAINMENT_INVALID_PREFIX = "containment:v1:invalid:";
 const CONTAINMENT_OUTBOX_PREFIX = "containment:v1:outbox:";
 const CONTAINMENT_RESERVATION_PREFIX = "containment:v1:reservation:";
-const CONTAINMENT_JOB_INDEX_PREFIX = "containment:v1:job-index:";
 const CONTAINMENT_INDEX_META_KEY = "containment:v1:job-index-meta";
 const INVALID_CONFIG_SWITCHES = new Set(["AUTOSCALER_INTAKE_PAUSED", "AUTOSCALER_REDRIVE_PAUSED"]);
 const SHA256_HEX = /^[0-9a-f]{64}$/;
@@ -634,31 +637,51 @@ export class ContainmentDO extends DurableObject<Env> {
     s: any,
     repo: string,
     jobId: string,
-    freshAuthority: boolean,
   ): Promise<ContainmentJobIndex> {
     const meta = await s.get(CONTAINMENT_INDEX_META_KEY);
-    if (meta === undefined) {
-      // A brand-new authority has no meta or index state. A deployed legacy
-      // authority has its containment meta already, but no index; treating that
-      // as empty would reopen jobs hidden from the index, so fail closed.
-      if (!freshAuthority) throw new Error("containment job index missing");
-      await s.put(CONTAINMENT_INDEX_META_KEY, { schema_version: 1, initialized: true } satisfies ContainmentJobIndexMeta);
-    } else if (!isValidJobIndexMeta(meta)) {
-      throw new Error("containment job index meta divergent");
-    }
+    if (meta === undefined) throw new Error("containment job index missing");
+    if (!isValidJobIndexMeta(meta)) throw new Error("containment job index meta divergent");
     const key = containmentJobIndexKey(repo, jobId);
     const existing = await s.get(key) as ContainmentJobIndex | undefined;
-    if (existing === undefined) {
-      const created: ContainmentJobIndex = { schema_version: 1, repo, job_id: jobId, active_event_ids: [], active_count: 0, updated_at_ms: Date.now() };
-      await s.put(key, created);
-      return created;
-    }
+    if (existing === undefined) throw new Error("containment job index missing");
     if (!isValidJobIndex(existing, repo, jobId)) throw new Error("containment job index divergent");
+    if (!isValidJobIndexMarker(await s.get(containmentJobIndexMarkerKey(repo, jobId)), repo, jobId)) throw new Error("containment job index marker divergent");
     return existing;
   }
 
-  private async containedEventExists(s: any, repo: string, jobId: string, freshAuthority: boolean): Promise<boolean> {
-    const index = await this.ensureJobIndex(s, repo, jobId, freshAuthority);
+  async bootstrapContainedEventIndex(
+    repoInput: string,
+    jobIdInput: string,
+    now = Date.now(),
+  ): Promise<{ status: "bootstrapped" | "already_present" | "blocked" | "invalid" }> {
+    const identity = normalizeRedriveIdentity(repoInput, jobIdInput);
+    if (!identity) return { status: "invalid" };
+    const { repo, job_id: jobId } = identity;
+    return this.tx(async (s) => {
+      const meta = await s.get(CONTAINMENT_INDEX_META_KEY);
+      if (meta !== undefined && !isValidJobIndexMeta(meta)) return { status: "blocked" as const };
+      const key = containmentJobIndexKey(repo, jobId);
+      const existing = await s.get(key) as ContainmentJobIndex | undefined;
+      const marker = await s.get(containmentJobIndexMarkerKey(repo, jobId));
+      if (existing !== undefined) return isValidJobIndex(existing, repo, jobId) && isValidJobIndexMarker(marker, repo, jobId) ? { status: "already_present" as const } : { status: "blocked" as const };
+      if (marker !== undefined) return { status: "blocked" as const };
+      // The pair can only be initialized when the authority proves that no
+      // active queue or reservation owns it. Never scan broad event/owner
+      // namespaces: an initialized-but-missing pair remains fail-closed.
+      const reservation = await s.get(containmentReservationKey(repo, jobId));
+      const pointer = await s.get(containmentEffectPointerKey({ repo, job_id: jobId, effect_id: redriveEffectId(repo, jobId) }));
+      const legacyJobState = await s.get(containmentEffectJobKey(jobId));
+      const legacyIndex = await s.get(`containment:v1:job-index:${repo}/${jobId}`);
+      if (reservation !== undefined || pointer !== undefined || legacyJobState !== undefined || legacyIndex !== undefined) return { status: "blocked" as const };
+      if (meta === undefined) await s.put(CONTAINMENT_INDEX_META_KEY, { schema_version: 1, initialized: true } satisfies ContainmentJobIndexMeta);
+      await s.put(key, { schema_version: 1, repo, job_id: jobId, active_event_ids: [], active_count: 0, updated_at_ms: now } satisfies ContainmentJobIndex);
+      await s.put(containmentJobIndexMarkerKey(repo, jobId), { schema_version: 1, repo, job_id: jobId, bootstrapped_at_ms: now } satisfies ContainmentJobIndexMarker);
+      return { status: "bootstrapped" as const };
+    });
+  }
+
+  private async containedEventExists(s: any, repo: string, jobId: string): Promise<boolean> {
+    const index = await this.ensureJobIndex(s, repo, jobId);
     for (const eventId of index.active_event_ids) {
       const event = await s.get(containmentEventKey(eventId)) as ContainmentEvent | undefined;
       if (!event) throw new Error("containment job index references missing event");
@@ -678,11 +701,10 @@ export class ContainmentDO extends DurableObject<Env> {
     const { repo, job_id: jobId } = identity;
     const key = containmentReservationKey(repo, jobId);
     return this.tx(async (s) => {
-      const rawMeta = await s.get(CONTAINMENT_META_KEY) as ContainmentMeta | undefined;
       // An unacknowledged contained intake owns the job before a redrive can
       // enter its first mutable seam. The direct index is inside the deciding
       // DO tx; never scan the full event collection per candidate.
-      if (await this.containedEventExists(s, repo, jobId, rawMeta === undefined)) return { status: "contained" as const };
+      if (await this.containedEventExists(s, repo, jobId)) return { status: "contained" as const };
       const prior = (await s.get(key)) as ContainmentRedriveReservation | undefined;
       if (prior) {
         if (prior.schema_version !== 1 || prior.repo !== repo || prior.job_id !== jobId || typeof prior.owner !== "string" || typeof prior.token !== "string" || prior.path !== "redrive" || prior.effect_id !== redriveEffectId(repo, jobId) || !Number.isSafeInteger(prior.epoch) || prior.epoch < 1 || !Number.isFinite(prior.expires_ms) || !["HELD", "EFFECT_ELIGIBLE", "COMPLETED"].includes(prior.state) || (prior.event_id !== null && typeof prior.event_id !== "string") || typeof prior.completion_observed !== "boolean") return { status: "busy" as const };
@@ -816,7 +838,6 @@ export class ContainmentDO extends DurableObject<Env> {
     s: any,
     event: Omit<ContainmentEvent, "pause_seq" | "state" | "claim" | "effect_permit">,
     meta: ContainmentMeta,
-    freshAuthority = false,
   ): Promise<{ status: "appended" | "duplicate" | "conflict"; event?: ContainmentEvent }> {
     const key = containmentEventKey(event.event_id);
     const prior = (await s.get(key)) as ContainmentEvent | undefined;
@@ -840,7 +861,7 @@ export class ContainmentDO extends DurableObject<Env> {
       effect_permit: null,
     };
     const pause: ContainmentPause = { schema_version: 1, event_id: event.event_id, pause_seq: next.pause_seq };
-    const index = await this.ensureJobIndex(s, event.repo, event.job_id, freshAuthority);
+    const index = await this.ensureJobIndex(s, event.repo, event.job_id);
     if (index.active_count >= MAX_ACTIVE_INDEX_EVENTS) throw new Error("containment job index bound exceeded");
     await s.put(key, next);
     await s.put(containmentPauseKey(next.pause_seq), pause);
@@ -855,7 +876,7 @@ export class ContainmentDO extends DurableObject<Env> {
     const normalizedEvent = { ...event, repo: identity.repo, job_id: identity.job_id };
     return this.tx(async (s) => {
       const rawMeta = await s.get(CONTAINMENT_META_KEY) as ContainmentMeta | undefined;
-      return this.appendInTransaction(s, normalizedEvent, rawMeta ?? emptyContainmentMeta(), rawMeta === undefined);
+      return this.appendInTransaction(s, normalizedEvent, rawMeta ?? emptyContainmentMeta());
     });
   }
 
@@ -898,7 +919,7 @@ export class ContainmentDO extends DurableObject<Env> {
           return { status: "authority-busy" as const };
         }
       }
-      return this.appendInTransaction(s, normalizedEvent, meta, rawMeta === undefined);
+      return this.appendInTransaction(s, normalizedEvent, meta);
     });
   }
 
@@ -4638,7 +4659,10 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         // tenant. Present on App-authed webhooks (required for the runner mint).
         installation?: { id?: number | string };
       };
+      let lexicalJobId: string | null = null;
       try {
+        lexicalJobId = canonicalWorkflowJobIdFromRaw(raw);
+        if (lexicalJobId === null) return json({ error: "no workflow_job.id in payload" }, 400);
         evt = JSON.parse(raw) as typeof evt;
       } catch {
         return json({ error: "invalid JSON body" }, 400);
@@ -4655,9 +4679,10 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       }
       // The stable correlation id across queued→completed for THIS job. The PAT
       // is minted under it (job_id) so completion can revoke the SAME PAT.
-      const rawJobId = String(evt.workflow_job?.id ?? "");
-      const jobId = canonicalSafeJobId(rawJobId);
-      if (jobId === null) return json({ error: "no workflow_job.id in payload" }, 400);
+      const jobId = lexicalJobId;
+      const decodedJobId: unknown = evt.workflow_job?.id;
+      if (jobId === null || !((typeof decodedJobId === "number" && Number.isSafeInteger(decodedJobId) && String(decodedJobId) === jobId)
+        || (typeof decodedJobId === "string" && decodedJobId === jobId))) return json({ error: "no workflow_job.id in payload" }, 400);
 
       // T3-W17 queued-intake gate. Completed events deliberately skip this block
       // and continue through the existing cleanup path below.

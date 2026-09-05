@@ -16,6 +16,7 @@ vi.mock("@cloudflare/containers", () => ({
 
 import worker, { ContainmentDO, MetricsDO, parseContainmentSwitch, retryOrphanedSpawns, type ContainmentEvent } from "../src/index";
 import { COUNTER_NAMES } from "../src/metrics";
+import { canonicalWorkflowJobIdFromRaw } from "../src/workflow_job_id";
 
 const T0 = 1_750_000_000_000;
 const SECRET = "containment-webhook-secret";
@@ -160,6 +161,28 @@ beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(T0); vi.clearAllMocks();
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe("T3-W17 switch/HMAC intake matrix", () => {
+  it("lexically rejects non-canonical workflow job ids before JSON admission", async () => {
+    expect(canonicalWorkflowJobIdFromRaw('{"workflow_job":{"id":1}}')).toBe("1");
+    expect(canonicalWorkflowJobIdFromRaw('{"workflow_job":{"id":"1"}}')).toBe("1");
+    for (const token of ["1e3", "1.0", "[1]", "null", "true", "\" 1\"", "\"01\"", "-1"]) {
+      expect(canonicalWorkflowJobIdFromRaw(`{"workflow_job":{"id":${token}}}`)).toBeNull();
+    }
+    expect(canonicalWorkflowJobIdFromRaw('{"other":{"a":[{"b":1}]},"workflow_job":{"id":1}}')).toBe("1");
+    for (const raw of [
+      '{"workflow_job":{"id":1},"workflow_job":{"id":2}}',
+      '{"workflow_job":{"id":1,"id":2}}',
+      '{"workflow_job":{"id":"\\u0031"}}',
+      '{"other":{"a":[1}},"workflow_job":{"id":1}}',
+      '{"workflow_job":{"id":1}} trailing',
+    ]) expect(canonicalWorkflowJobIdFromRaw(raw)).toBeNull();
+    const d = makeDO(); const store = makeKv(); const metrics = makeMetrics();
+    for (const token of ["1e3", "1.0", "[1]"]) {
+      const raw = new TextEncoder().encode(`{"action":"queued","workflow_job":{"id":${token},"labels":["corelink"]},"repository":{"full_name":"acme/repo"},"installation":{"id":7}}`);
+      expect((await worker.fetch(await request(raw), env(d, store, metrics), ctx() as never)).status).toBe(400);
+    }
+    expect(d.storage.map.size).toBe(0); expect(store.put).not.toHaveBeenCalled(); expect(store.delete).not.toHaveBeenCalled();
+  });
+
   it("uses the exact independent 0/1/invalid table", () => {
     expect(parseContainmentSwitch(undefined)).toBe("normal"); expect(parseContainmentSwitch("0")).toBe("normal"); expect(parseContainmentSwitch("1")).toBe("paused");
     for (const raw of ["", " ", "\t", " 0", "0 ", "01", "2", "true", "TRUE", "false", "on", "yes"]) expect(parseContainmentSwitch(raw)).toBe("invalid");

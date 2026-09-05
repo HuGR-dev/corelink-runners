@@ -2,8 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@cloudflare/containers", () => ({ Container: class {}, getContainer: vi.fn(() => ({ startWithEnv: vi.fn(async () => {}), teardown: vi.fn(async () => {}) })) }));
 
-import worker, { ContainmentDO, REDRIVE_RESERVATION_TTL_MS, redriveOrphanedJobs, retryOrphanedSpawns, runContainmentDrain, type ContainmentEvent, type ContainmentRedriveReservation } from "../src/index";
-import { canonicalSafeJobId } from "../src/containment_authority_helpers";
+import worker, { ContainmentDO, REDRIVE_RESERVATION_TTL_MS, containmentEffectPointerKey, redriveOrphanedJobs, retryOrphanedSpawns, runContainmentDrain, type ContainmentEvent, type ContainmentRedriveReservation } from "../src/index";
+import { canonicalSafeJobId, redriveEffectId } from "../src/containment_authority_helpers";
 
 const T0 = 1_750_000_000_000;
 
@@ -188,16 +188,53 @@ describe("atomic redrive reservation state machine", () => {
 
   it("uses the repo-job active index schema and supports 100 active events", async () => {
     const d = makeDO();
+    await d.instance.bootstrapContainedEventIndex("acme/repo", "1");
     for (let i = 0; i < 100; i++) await d.instance.append(event(1, { event_id: `evt-index-${i}`, effect_id: `containment:v1:evt-index-${i}` }));
-    expect(d.storage.map.get("containment:v1:job-index:acme/repo/1")).toMatchObject({ schema_version: 1, repo: "acme/repo", job_id: "1", active_count: 100, active_event_ids: expect.any(Array), updated_at_ms: expect.any(Number) });
-    expect((d.storage.map.get("containment:v1:job-index:acme/repo/1") as { active_event_ids: string[] }).active_event_ids).toHaveLength(100);
+    expect(d.storage.map.get("containment:v1:repo-job-index:acme/repo/1")).toMatchObject({ schema_version: 1, repo: "acme/repo", job_id: "1", active_count: 100, active_event_ids: expect.any(Array), updated_at_ms: expect.any(Number) });
+    expect((d.storage.map.get("containment:v1:repo-job-index:acme/repo/1") as { active_event_ids: string[] }).active_event_ids).toHaveLength(100);
   });
 
   it("admin drain bootstraps index metadata atomically before the next append", async () => {
     const d = makeDO();
     await d.instance.requestDrain();
     expect(d.storage.map.get("containment:v1:job-index-meta")).toEqual({ schema_version: 1, initialized: true });
+    await expect(d.instance.append(event(1))).rejects.toThrow("containment job index missing");
+    expect(await d.instance.bootstrapContainedEventIndex("acme/repo", "1")).toEqual({ status: "bootstrapped" });
     expect((await d.instance.append(event(1))).status).toBe("appended");
+  });
+
+  it("does not allocate a missing pair during direct append or redrive admission", async () => {
+    const d = makeDO();
+    await expect(d.instance.append(event(1))).rejects.toThrow("containment job index missing");
+    await expect(d.instance.reserveRedriveCandidate("acme/repo", "1", T0)).rejects.toThrow("containment job index missing");
+    expect(d.storage.map.has("containment:v1:repo-job-index:acme/repo/1")).toBe(false);
+  });
+
+  it("fails closed for a missing or damaged pair index and rejects the legacy key", async () => {
+    const d = makeDO(); await d.instance.requestDrain();
+    d.storage.map.set("containment:v1:job-index:acme/repo/1", { schema_version: 1, repo: "acme/repo", job_id: "1", event_ids: [] });
+    await expect(d.instance.append(event(1))).rejects.toThrow("containment job index missing");
+    expect(await d.instance.bootstrapContainedEventIndex("acme/repo", "1")).toEqual({ status: "blocked" });
+    d.storage.map.set("containment:v1:repo-job-index:acme/repo/1", { schema_version: 1, repo: "acme/repo", job_id: "1", active_event_ids: ["evt-old"], active_count: 2, updated_at_ms: T0 });
+    await expect(d.instance.append(event(1))).rejects.toThrow("containment job index divergent");
+  });
+
+  it("bootstraps unrelated pairs despite another active pair and never recreates a deleted index", async () => {
+    const d = makeDO(); await d.instance.requestDrain();
+    expect(await d.instance.bootstrapContainedEventIndex("acme/repo", "1")).toEqual({ status: "bootstrapped" });
+    await d.instance.append(event(1));
+    expect(await d.instance.bootstrapContainedEventIndex("acme/repo", "2")).toEqual({ status: "bootstrapped" });
+    d.storage.map.delete("containment:v1:repo-job-index:acme/repo/2");
+    expect(await d.instance.bootstrapContainedEventIndex("acme/repo", "2")).toEqual({ status: "blocked" });
+  });
+
+  it("blocks first bootstrap on exact reservation and effect-owner state", async () => {
+    const reserved = makeDO(); await reserved.instance.requestDrain();
+    reserved.storage.map.set("containment:v1:reservation:acme/repo/7", { schema_version: 1 });
+    expect(await reserved.instance.bootstrapContainedEventIndex("acme/repo", "7")).toEqual({ status: "blocked" });
+    const owned = makeDO(); await owned.instance.requestDrain();
+    owned.storage.map.set(containmentEffectPointerKey({ repo: "acme/repo", job_id: "7", effect_id: redriveEffectId("acme/repo", "7") }), { schema_version: 1 });
+    expect(await owned.instance.bootstrapContainedEventIndex("acme/repo", "7")).toEqual({ status: "blocked" });
   });
 
   it("retryOrphanedSpawns: 100 concurrent candidates have exactly one eligibility/effect", async () => {
