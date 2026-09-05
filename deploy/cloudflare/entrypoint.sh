@@ -3,6 +3,20 @@
 # CoreLink Runner DevEnv Container Entrypoint
 set -euo pipefail
 
+assert_no_symlink_components() {
+    local path="$1" prefix=/ rest component
+    rest="${path#/}"
+    while [[ -n "$rest" ]]; do
+        component="${rest%%/*}"
+        rest="${rest#*/}"
+        [[ "$component" == "$rest" ]] && rest=
+        [[ -n "$component" ]] || continue
+        prefix="${prefix}${component}"
+        [[ ! -L "$prefix" ]] || return 1
+        prefix="${prefix}/"
+    done
+}
+
 # Cloudflare Containers 0.3.7 has no secret mount. Convert the provider's
 # ingress-only env secret to a regular 0400 file before hydration or supervisor
 # starts; durable children receive only the path and never the bearer itself.
@@ -15,6 +29,10 @@ bridge_exec_auth_token() {
     fi
     if [[ -L "$auth_dir" || ( -e "$auth_dir" && ! -d "$auth_dir" ) ]]; then
         error "auth directory is not a safe directory"
+        return 1
+    fi
+    if ! assert_no_symlink_components "$auth_dir"; then
+        error "auth directory contains a symlink component"
         return 1
     fi
     [[ -e "$auth_dir" ]] || mkdir -p "$auth_dir"
@@ -55,6 +73,7 @@ validate_auth_file() {
     local auth_file="${EXEC_SERVER_AUTH_TOKEN_FILE:-/run/corelink/exec-server-auth-token}"
     local auth_dir="${auth_file%/*}"
     local resolved_auth_dir mode
+    assert_no_symlink_components "$auth_dir" || return 1
     resolved_auth_dir=$(CDPATH= cd -P "$auth_dir" 2>/dev/null && pwd -P) || resolved_auth_dir=
     mode=$(stat -c '%a' "$auth_file" 2>/dev/null) || mode=$(stat -f '%Lp' "$auth_file" 2>/dev/null) || mode=
     if [[ "${auth_file#/}" == "$auth_file" || -z "$resolved_auth_dir" \

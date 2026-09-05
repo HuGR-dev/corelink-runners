@@ -1,6 +1,10 @@
 #!/bin/sh
 # Offline T8-W4b boot bridge checks. No network, image build, or live calls.
 set -eu
+if [ -d /private/var/folders ]; then
+    case "${TMPDIR:-}" in /var/*) TMPDIR="/private${TMPDIR}" ;; esac
+fi
+export TMPDIR
 
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/corelink-auth-bridge.XXXXXX")
@@ -128,6 +132,12 @@ if EXEC_SERVER_AUTH_TOKEN=secret EXEC_SERVER_AUTH_TOKEN_FILE="$tmp/unsafe-dir/to
     TOOLCHAIN_DIGEST=digest TOOLCHAIN_DIR="$tmp/toolchain" "$check_script" 2>/dev/null; then
     echo 'symlink directory unexpectedly accepted' >&2; exit 1
 fi
+mkdir -p "$tmp/real-parent"
+ln -s "$tmp/real-parent" "$tmp/unsafe-parent"
+if EXEC_SERVER_AUTH_TOKEN=secret EXEC_SERVER_AUTH_TOKEN_FILE="$tmp/unsafe-parent/deep/token" \
+    TOOLCHAIN_DIGEST=digest TOOLCHAIN_DIR="$tmp/toolchain" "$check_script" 2>/dev/null; then
+    echo 'parent symlink unexpectedly accepted' >&2; exit 1
+fi
 
 # The DevEnv entrypoint applies the same bridge before supervisord. Substitute
 # fixed image paths so this remains an offline host-shell test.
@@ -141,7 +151,7 @@ cloud_auth="$tmp/cloud/run/corelink/token"
 AUTH_ENV_CAPTURE="$tmp/cloud.env" AUTH_FILE_CAPTURE="$tmp/cloud.file" AUTH_MODE_CAPTURE="$tmp/cloud.mode" AUTH_ARG_CAPTURE="$tmp/cloud.argv" \
     EXEC_SERVER_AUTH_TOKEN='cloud-secret' EXEC_SERVER_AUTH_TOKEN_FILE="$cloud_auth" \
     CLW_TENANT=tenant WORKSPACE_NAME=workspace PROFILE_NAME=profile \
-    "$cloud_script" >"$tmp/cloud.log" 2>&1
+    "$cloud_script" >"$tmp/cloud.log" 2>&1 || { cat "$tmp/cloud.log" >&2; exit 1; }
 test "$(cat "$tmp/cloud.file")" = cloud-secret
 test "$(cat "$tmp/cloud.mode")" = 400
 test ! -e "$cloud_auth"
