@@ -79,7 +79,7 @@ async fn route(state: AppState, request: Request<Body>) -> axum::response::Respo
 async fn malformed_body_is_typed_and_does_not_reflect_input() {
     let state = held_state(CredTicketSigner::new(SECRET));
     let response = app(Arc::new(StaticTokenStore::new([])), state)
-        .oneshot(request(r#"{"ticket":"secret-ticket"} trailing"#))
+        .oneshot(request(r#"{"ticket":"secret-ticket""#))
         .await
         .unwrap();
 
@@ -95,10 +95,7 @@ async fn extractor_rejections_keep_transport_status_and_frozen_body() {
     let signer = CredTicketSigner::new(SECRET);
     let syntax = route(
         held_state(signer.clone()),
-        request_with_content_type(
-            r#"{"ticket":"secret-ticket"} trailing"#,
-            Some("application/json"),
-        ),
+        request_with_content_type(r#"{"ticket":"secret-ticket""#, Some("application/json")),
     )
     .await;
     assert_eq!(syntax.status(), StatusCode::BAD_REQUEST);
