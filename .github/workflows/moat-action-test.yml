@@ -13,7 +13,7 @@ jobs:
   action-test:
     runs-on: corelink-dogfood
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
 
       - name: Generate a deterministic crate (run-unique key ⇒ COLD is a fresh miss)
         run: |
@@ -86,7 +86,7 @@ jobs:
           set -euo pipefail
           test "${{ steps.required_hit.outcome }}" = failure
           test ! -e t6-w2-required-hit-child.marker
-          echo "required-hit: exit 78 refusal; planted child never executed"
+          echo "required-hit refused; planted child never executed (exact exit 78 is covered by actions/corelink-memoize/test/policy.sh)"
 
       - name: TOOL-FOLD via action (safety-by-default — toolchain folded into key)
         uses: ./actions/corelink-memoize
