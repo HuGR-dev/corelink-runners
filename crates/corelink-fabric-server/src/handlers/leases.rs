@@ -1064,8 +1064,17 @@ pub(crate) async fn finalize_admitted_lease(
         // ─────────────────────────────────────────────────────────────────────
         if is_capacity_error(&e) {
             // Roll back the slot only after confirmed pending cleanup.
-            rollback_pending_admission(state, &lease_id, PendingRollbackPhase::AfterProvision)
-                .await;
+            let cleaned =
+                rollback_pending_admission(state, &lease_id, PendingRollbackPhase::AfterProvision)
+                    .await;
+            if !cleaned {
+                // The claim still owns this id/slot: re-admitting the same id
+                // would race its cleanup or hit a duplicate ledger row.
+                state.revoke_pat_for(&lease_id).await;
+                return FinalizeOutcome::Done(fail_closed(
+                    "provider capacity exhausted; pending cleanup must finish before retry",
+                ));
+            }
             // Signal caller: re-enqueue (queue mode) or distinct-503 (reject).
             return FinalizeOutcome::CapacityError;
         }
