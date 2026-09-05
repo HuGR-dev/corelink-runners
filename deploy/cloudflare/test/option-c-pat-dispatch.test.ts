@@ -60,6 +60,11 @@ describe("tenantPatSecretForRepo — repo → secret-name map (pure)", () => {
     expect(tenantPatSecretForRepo("{not json", REPO)).toBe("");
     expect(tenantPatSecretForRepo(JSON.stringify({ [REPO]: 42 }), REPO)).toBe("");
   });
+  it("fails closed for an invalid query or duplicate canonical map keys", () => {
+    expect(tenantPatSecretForRepo(map, "not-a-repo")).toBe("");
+    const duplicate = JSON.stringify({ "Acme/Repo": "PAT_A", " acme/repo ": "PAT_B" });
+    expect(tenantPatSecretForRepo(duplicate, "acme/repo")).toBe("");
+  });
 });
 
 describe("mintCasPat Option-C wire (via buildContainerEnv)", () => {

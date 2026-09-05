@@ -1126,6 +1126,11 @@ describe("installationIdForRepo (inject installation_id on repo webhooks)", () =
   it("returns '' (never throws) on malformed JSON", () =>
     expect(installationIdForRepo("{not json", "HuGR-Labs/corelink-runners")).toBe(""));
   it("returns '' for an empty repo name", () => expect(installationIdForRepo(MAP, "")).toBe(""));
+  it("fails closed for an invalid query or duplicate canonical map keys", () => {
+    expect(installationIdForRepo(MAP, "not-a-repo")).toBe("");
+    const duplicate = JSON.stringify({ "Acme/Repo": "1", " acme/repo ": "2" });
+    expect(installationIdForRepo(duplicate, "acme/repo")).toBe("");
+  });
 });
 
 describe("unservedCapabilityClaims (hardware claims we cannot honour)", () => {
