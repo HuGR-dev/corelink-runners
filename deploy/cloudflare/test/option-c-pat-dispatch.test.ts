@@ -47,6 +47,10 @@ describe("tenantPatSecretForRepo — repo → secret-name map (pure)", () => {
   it("returns the secret NAME for a mapped repo", () => {
     expect(tenantPatSecretForRepo(map, REPO)).toBe("COLD_ORGANIC_TENANT_PAT");
   });
+  it("matches canonical lowercase webhook repos to mixed-case map keys", () => {
+    const mixedCaseMap = JSON.stringify({ "HuGR-Labs/Corelink-Cold-Organic-E2E": "COLD_ORGANIC_TENANT_PAT" });
+    expect(tenantPatSecretForRepo(mixedCaseMap, REPO.toLowerCase())).toBe("COLD_ORGANIC_TENANT_PAT");
+  });
   it("returns '' for an unmapped repo", () => {
     expect(tenantPatSecretForRepo(map, "acme/other")).toBe("");
   });
