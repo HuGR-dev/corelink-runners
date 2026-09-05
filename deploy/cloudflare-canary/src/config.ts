@@ -20,7 +20,13 @@ export interface TickConfig {
   credentialEpoch: string;
   monitorRearmTupleDigest: string;
   envelopeHmacKey: string;
-  ackHmacKey: string;
+  /** Bound only by the later signer-manifest verifier; a shared HMAC is not a
+   * production substitute for role-separated trust and revocation. */
+  ackVerifier?: AckVerifier;
+  recoveryVerifier?: AckVerifier;
+}
+export interface AckVerifier {
+  verify(serializedToken: string, signerKeyId: string, signerEpoch: string): Promise<"valid" | "revoked" | "invalid">;
 }
 
 /** There are intentionally no endpoint, identity, digest, or key defaults.
@@ -28,13 +34,12 @@ export interface TickConfig {
 export function tickConfig(env: {
   CANARY_TICK_INGEST_URL?: string; CANARY_TICK_SOURCE?: string; CANARY_TICK_SERVICE?: string;
   CANARY_TICK_APPLICATION?: string; CANARY_TICK_KEY_ID?: string; CANARY_TICK_CREDENTIAL_EPOCH?: string;
-  CANARY_TICK_MONITOR_REARM_TUPLE_DIGEST?: string; CANARY_TICK_ENVELOPE_HMAC_KEY?: string; CANARY_TICK_ACK_HMAC_KEY?: string;
+  CANARY_TICK_MONITOR_REARM_TUPLE_DIGEST?: string; CANARY_TICK_ENVELOPE_HMAC_KEY?: string;
 }): TickConfig | null {
   const fields = [
     "CANARY_TICK_INGEST_URL", "CANARY_TICK_SOURCE", "CANARY_TICK_SERVICE",
     "CANARY_TICK_APPLICATION", "CANARY_TICK_KEY_ID", "CANARY_TICK_CREDENTIAL_EPOCH",
     "CANARY_TICK_MONITOR_REARM_TUPLE_DIGEST", "CANARY_TICK_ENVELOPE_HMAC_KEY",
-    "CANARY_TICK_ACK_HMAC_KEY",
   ] as const;
   if (fields.some((field) => !env[field])) return null;
   return {
@@ -42,6 +47,6 @@ export function tickConfig(env: {
     service: env.CANARY_TICK_SERVICE!, application: env.CANARY_TICK_APPLICATION!,
     keyId: env.CANARY_TICK_KEY_ID!, credentialEpoch: env.CANARY_TICK_CREDENTIAL_EPOCH!,
     monitorRearmTupleDigest: env.CANARY_TICK_MONITOR_REARM_TUPLE_DIGEST!,
-    envelopeHmacKey: env.CANARY_TICK_ENVELOPE_HMAC_KEY!, ackHmacKey: env.CANARY_TICK_ACK_HMAC_KEY!,
+    envelopeHmacKey: env.CANARY_TICK_ENVELOPE_HMAC_KEY!,
   };
 }

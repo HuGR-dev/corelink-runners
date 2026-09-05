@@ -273,7 +273,7 @@ export async function runCycle(env: Env, now: number): Promise<string> {
 async function runScheduledTick(env: Env, now: number): Promise<string> {
   if (!env.CANARY_TICK_OUTBOX) return "tick outbox unavailable";
   const stub = env.CANARY_TICK_OUTBOX.get(env.CANARY_TICK_OUTBOX.idFromName("scheduled-tick")) as unknown as CanaryTickOutbox;
-  return stub.enqueueAndDrain(tickConfig(env), now);
+  return stub.enqueueAndDrain(tickConfig(env), now, !parseProbeFlag(env.FABRIC_PROBES_ENABLED).valid);
 }
 
 type ReadResult<T> = { ok: true; value: T | null } | { ok: false; detail: string };

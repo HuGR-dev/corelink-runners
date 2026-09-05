@@ -5,7 +5,7 @@ import type { TickConfig } from "../src/config";
 const config: TickConfig = {
   ingestUrl: "https://monitor.invalid/ingest", source: "canary", service: "canary",
   application: "corelink", keyId: "tick-key", credentialEpoch: "1",
-  monitorRearmTupleDigest: "tuple", envelopeHmacKey: "envelope", ackHmacKey: "ack",
+  monitorRearmTupleDigest: "tuple", envelopeHmacKey: "envelope",
 };
 function state(): DurableObjectState {
   const values = new Map<string, unknown>();
@@ -36,6 +36,14 @@ describe("scheduled tick durable outbox", () => {
     const fetcher = vi.spyOn(globalThis, "fetch");
     expect(await outbox.enqueueAndDrain(null, 1_000)).toContain("config unavailable");
     expect(fetcher).not.toHaveBeenCalled();
+    fetcher.mockRestore();
+  });
+
+  it("makes malformed probe configuration an authenticated, distinct signal when a fixture capability is injected", async () => {
+    const outbox = new CanaryTickOutbox(state());
+    const fetcher = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}", { status: 200 }));
+    await outbox.enqueueAndDrain(config, 1_000, true);
+    expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body)).event_id).toBe("CANARY_CONFIG_INVALID-1");
     fetcher.mockRestore();
   });
 });
