@@ -125,21 +125,25 @@ runs:
         # PAT is injected into the environment; the variable is never printed.
         CORELINK_PAT: ${{ inputs.pat }}
         CORELINK_URL: ${{ inputs.url }}
+        CORELINK_CHECK: ${{ inputs.check }}
+        CORELINK_CHECK_ID: ${{ inputs.check-id }}
+        CORELINK_IMAGE: ${{ inputs.image }}
+        CORELINK_VERIFY: ${{ inputs.verify }}
       run: |
         # Build the argument list incrementally so we never interpolate the
         # PAT into a string that might be echoed.
         ARGS=()
         ARGS+=(run)
-        ARGS+=(--url "${{ inputs.url }}")
-        ARGS+=(--check "${{ inputs.check }}")
-        ARGS+=(--check-id "${{ inputs.check-id }}")
+        ARGS+=(--url "$CORELINK_URL")
+        ARGS+=(--check "$CORELINK_CHECK")
+        ARGS+=(--check-id "$CORELINK_CHECK_ID")
         ARGS+=(--json)
 
-        if [[ -n "${{ inputs.image }}" ]]; then
-          ARGS+=(--image "${{ inputs.image }}")
+        if [[ -n "$CORELINK_IMAGE" ]]; then
+          ARGS+=(--image "$CORELINK_IMAGE")
         fi
 
-        if [[ "${{ inputs.verify }}" == "false" ]]; then
+        if [[ "$CORELINK_VERIFY" == "false" ]]; then
           ARGS+=(--no-verify)
         fi
 
@@ -172,6 +176,8 @@ runs:
     - name: Parse output and set outputs
       id: parse
       shell: python3 {0}
+      env:
+        CORELINK_VERIFY: ${{ inputs.verify }}
       run: |
         import json
         import os
@@ -191,7 +197,7 @@ runs:
         verified = str(data.get("verified", "false")).lower()
 
         # A false verified with verify=true is a hard failure.
-        verify_input = "${{ inputs.verify }}"
+        verify_input = os.environ.get("CORELINK_VERIFY", "true")
         if verify_input != "false" and verified != "true":
             print(
                 "::error::CoreLink attestation NOT verified (verified=false in fabric response). "
@@ -217,8 +223,9 @@ runs:
     - name: Propagate check exit
       id: propagate
       shell: bash
+      env:
+        RAW_EXIT: ${{ steps.run.outputs.raw_exit }}
       run: |
-        RAW_EXIT="${{ steps.run.outputs.raw_exit }}"
         # exit 0 = ran + verified + check passed
         # exit 1 = ran + verified but check itself failed (job failure)
         if [[ "$RAW_EXIT" -ne 0 ]]; then
