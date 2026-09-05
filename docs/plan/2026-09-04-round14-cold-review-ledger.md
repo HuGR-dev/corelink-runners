@@ -142,17 +142,18 @@ revocation_state_digest,issued_at,expires_at,consumed_at,consumption_high_water,
 signature_algorithm,signature_domain,signature)
 ```
 
-The producer is the independent R14 acceptance gate; its issuer must be the
+The producer is exactly `T3-W17-R14-ACCEPTANCE-GATE`; its issuer must be the
 owner-authorized review role represented by the identity/key/epoch/authority
 fields, never the implementation author or live deployer. `artifact_path` is
 exactly `docs/plan/evidence/T3-W17-containment-test.json`, `artifact_id` is the
 version-1 evidence artifact id, `source_seal_sha` identifies the implementation
 commit, `contract_sha256` identifies `docs/plan/contracts/T3-W17-R14.md`, and
 `evidence_index_sha` identifies the embedded sequence record's current digest.
-`predecessor_digest` binds the accepted T3-W17 predecessor set and review input.
-`consumption_high_water` is an integer monotonic counter plus the last consumed
-token digest for `T3-W18`; a token is single-use and cannot be consumed at a
-counter lower than the recorded high-water mark.
+`subject_wp` is exactly `T3-W17`; `predecessor_digest` binds the accepted T3-W17
+predecessor set and review input. `consumption_high_water` has the exact shape
+`(consumer_id,counter,last_token_digest)` with `consumer_id=T3-W18`, an integer
+counter, and the last consumed token digest; a token is single-use and cannot be
+consumed at a counter lower than the recorded high-water mark.
 
 The producer must issue this token only after the exact source, contract, focused
 evidence/index, review-input, and predecessor digests validate. The verifier
