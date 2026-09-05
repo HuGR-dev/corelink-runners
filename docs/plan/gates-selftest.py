@@ -206,6 +206,7 @@ EXPECTED_MUTATION_INVENTORY = frozenset(
         "renamed-heading.md",
         "reset-array-selftests.yml",
         "selftests-head-blob-toctou",
+        "selftests-index-conflict",
         "selftests-mode-toctou",
         "selftests-non-100755",
         "selftests-nonregular",
@@ -896,6 +897,9 @@ def require_tracked_selftest_guard_fixtures(work: Path) -> None:
     """
 
     workflow = REPO / ".github" / "workflows" / "selftests.yml"
+    bash_path = shutil.which("bash")
+    if bash_path is None:
+        raise AssertionError("bash is required for tracked selftest guard fixtures")
     workflow_text = workflow.read_text(encoding="utf-8")
     start = workflow_text.index(
         "          set -e -u -o pipefail\n",
@@ -965,9 +969,38 @@ def require_tracked_selftest_guard_fixtures(work: Path) -> None:
         git(root, "commit", "-qm", "fixture")
         return root, selftest
 
+    def conflict_fixture(name: str) -> Path:
+        root, selftest = base_fixture(name)
+        git(root, "add", "scripts")
+        git(root, "commit", "-qm", "fixture")
+        blob = git(root, "rev-parse", "HEAD:scripts/fixture.selftest.sh")
+        selftest_index = "100755 {0} 1\tscripts/fixture.selftest.sh\n100755 {0} 2\tscripts/fixture.selftest.sh\n".format(blob)
+        subprocess.run(
+            ["git", "update-index", "--index-info"],
+            cwd=root,
+            input=selftest_index,
+            check=True,
+            text=True,
+        )
+        return root
+
+    def nul_safe_fixture(name: str) -> Path:
+        root = work / name
+        scripts = root / "scripts"
+        scripts.mkdir(parents=True)
+        selftest = scripts / "newline\nfixture.selftest.sh"
+        selftest.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        selftest.chmod(0o755)
+        git(root, "init", "-q")
+        git(root, "config", "user.email", "fixture@example.test")
+        git(root, "config", "user.name", "fixture")
+        git(root, "add", "scripts")
+        git(root, "commit", "-qm", "fixture")
+        return root
+
     def run_script(root: Path, script: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["/usr/local/bin/bash", "-c", script],
+            [bash_path, "-c", script],
             cwd=root,
             env=os.environ.copy(),
             check=False,
@@ -1007,10 +1040,16 @@ def require_tracked_selftest_guard_fixtures(work: Path) -> None:
     git(valid_root, "commit", "-qm", "fixture")
     if run_script(valid_root, validate_script).returncode != 0:
         raise AssertionError("tracked selftest guard rejected its valid executable fixture")
-    local_discover_script = discover_script.replace("/usr/bin/bash", "/usr/local/bin/bash")
+    local_discover_script = discover_script.replace("/usr/bin/bash", bash_path)
     if run_script(valid_root, local_discover_script).returncode != 0:
         raise AssertionError("tracked selftest discovery rejected its valid executable fixture")
     print("PASS tracked selftest guard accepts a valid executable")
+
+    nul_root = nul_safe_fixture("selftests-nul-safe-path")
+    if (run_script(nul_root, validate_script).returncode != 0
+            or run_script(nul_root, local_discover_script).returncode != 0):
+        raise AssertionError("tracked selftest guard is not NUL-safe for a newline path")
+    print("PASS tracked selftest guard handles NUL-delimited newline paths")
 
     for mutation, kind in (
         ("selftests-non-100755", "mode"),
@@ -1023,6 +1062,13 @@ def require_tracked_selftest_guard_fixtures(work: Path) -> None:
             raise AssertionError(f"tracked selftest guard accepted {mutation}")
         record_mutation(mutation)
         print(f"PASS tracked selftest guard blocks {mutation}")
+
+    conflict_root = conflict_fixture("selftests-index-conflict")
+    conflict_result = run_script(conflict_root, validate_script)
+    if conflict_result.returncode == 0:
+        raise AssertionError("tracked selftest guard accepted multiple non-stage-0 index records")
+    record_mutation("selftests-index-conflict")
+    print("PASS tracked selftest guard blocks index stage conflict")
 
     for mutation, replacement in (
         ("selftests-head-blob-toctou", "content"),

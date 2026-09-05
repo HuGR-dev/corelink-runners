@@ -43,6 +43,9 @@ if [ "$1" = "api" ]; then
   fi
   path="${@: -1}"
   case "$path" in
+    */contents/.github/workflows/ci.yml*) printf '%s\n' '{"sha":"ae9b11926d8418f5044db92ee4b9f97d8886d2c8"}' ;;
+    */contents/.github/workflows/dco.yml*) printf '%s\n' '{"sha":"aa510af1234a2cb3127a9249cb1e644fb0a182be"}' ;;
+    */contents/.github/workflows/plan-integrity.yml*) printf '%s\n' '{"sha":"c97bb503768fc6fb1efc6a89e3c08ca7eb075a3e"}' ;;
     */pulls/*/files*) printf '%s\n' "${GH_API_FILES}" ;;
     */actions/runs/*/jobs*) printf '%s\n' "${GH_API_JOBS}" ;;
     */actions/runs*) printf '%s\n' "${GH_API_RUNS}" ;;
@@ -137,20 +140,21 @@ UNKNOWN_BUCKET_CHECKS='[
   {"name":"dco","bucket":"pass","link":"https://x/dco"}
 ]'
 API_FILES_NORMAL='[[{"filename":"README.md"}]]'
-API_FILES_CONTRACT='[[{"filename":"docs/plan/contracts/T3-W17.md"}]]'
+API_FILES_CONTRACT='[[{"filename":"README.md"}],[{"filename":"docs/plan/contracts/T3-W17.md"}]]'
+API_FILES_WORKFLOW='[[{"filename":".github/workflows/ci.yml"}]]'
 API_RUNS_OTHER_PR='[{"total_count":2,"workflow_runs":[{"id":101,"path":".github/workflows/ci.yml","event":"pull_request","head_sha":"2222222222222222222222222222222222222222","pull_requests":[{"number":1000}],"status":"completed","conclusion":"success"},{"id":102,"path":".github/workflows/dco.yml","event":"pull_request","head_sha":"2222222222222222222222222222222222222222","pull_requests":[{"number":1000}],"status":"completed","conclusion":"success"}]}]'
 API_RUNS_WRONG_IDENTITY='[{"total_count":2,"workflow_runs":[{"id":101,"path":".github/workflows/ci.yml","event":"push","head_sha":"2222222222222222222222222222222222222222","pull_requests":[{"number":999}],"status":"completed","conclusion":"success"},{"id":102,"path":".github/workflows/dco.yml","event":"pull_request","head_sha":"1111111111111111111111111111111111111111","pull_requests":[{"number":999}],"status":"completed","conclusion":"success"}]}]'
 API_RUNS_BASE='[{"total_count":2,"workflow_runs":[{"id":101,"path":".github/workflows/ci.yml","event":"pull_request","head_sha":"2222222222222222222222222222222222222222","pull_requests":[{"number":999}],"status":"completed","conclusion":"success"},{"id":102,"path":".github/workflows/dco.yml","event":"pull_request","head_sha":"2222222222222222222222222222222222222222","pull_requests":[{"number":999}],"status":"completed","conclusion":"success"}]}]'
 API_RUNS_DCO='[{"total_count":1,"workflow_runs":[{"id":102,"path":".github/workflows/dco.yml","event":"pull_request","head_sha":"2222222222222222222222222222222222222222","pull_requests":[{"number":999}],"status":"completed","conclusion":"success"}]}]'
 API_RUNS_WITH_PLAN='[{"total_count":3,"workflow_runs":[{"id":101,"path":".github/workflows/ci.yml","event":"pull_request","head_sha":"2222222222222222222222222222222222222222","pull_requests":[{"number":999}],"status":"completed","conclusion":"success"},{"id":102,"path":".github/workflows/dco.yml","event":"pull_request","head_sha":"2222222222222222222222222222222222222222","pull_requests":[{"number":999}],"status":"completed","conclusion":"success"},{"id":103,"path":".github/workflows/plan-integrity.yml","event":"pull_request","head_sha":"2222222222222222222222222222222222222222","pull_requests":[{"number":999}],"status":"completed","conclusion":"success"}]}]'
-API_JOBS_BASE='[{"total_count":2,"jobs":[{"name":"gates","status":"completed","conclusion":"success"},{"name":"dco","status":"completed","conclusion":"success"}]}]'
-API_JOBS_FAILED='[{"total_count":2,"jobs":[{"name":"gates","status":"completed","conclusion":"failure"},{"name":"dco","status":"completed","conclusion":"success"}]}]'
-API_JOBS_CANCELLED='[{"total_count":2,"jobs":[{"name":"gates","status":"completed","conclusion":"cancelled"},{"name":"dco","status":"completed","conclusion":"success"}]}]'
-API_JOBS_PENDING='[{"total_count":2,"jobs":[{"name":"gates","status":"in_progress","conclusion":null},{"name":"dco","status":"completed","conclusion":"success"}]}]'
-API_JOBS_SKIPPED='[{"total_count":2,"jobs":[{"name":"gates","status":"completed","conclusion":"skipped"},{"name":"dco","status":"completed","conclusion":"success"}]}]'
-API_JOBS_UNKNOWN='[{"total_count":2,"jobs":[{"name":"gates","status":"completed","conclusion":"future-status"},{"name":"dco","status":"completed","conclusion":"success"}]}]'
-API_JOBS_WITH_PLAN='[{"total_count":3,"jobs":[{"name":"gates","status":"completed","conclusion":"success"},{"name":"dco","status":"completed","conclusion":"success"},{"name":"Coverage, WP, and AU structure","status":"completed","conclusion":"success"}]}]'
-API_JOBS_LOOKALIKE='[{"total_count":2,"jobs":[{"name":"CI / gates","status":"completed","conclusion":"success"},{"name":"DCO / dco","status":"completed","conclusion":"success"}]}]'
+API_JOBS_BASE='[{"total_count":2,"jobs":[{"id":201,"name":"gates","status":"completed","conclusion":"success","run_attempt":1},{"id":202,"name":"dco","status":"completed","conclusion":"success","run_attempt":1}]}]'
+API_JOBS_FAILED='[{"total_count":2,"jobs":[{"id":201,"name":"gates","status":"completed","conclusion":"failure","run_attempt":1},{"id":202,"name":"dco","status":"completed","conclusion":"success","run_attempt":1}]}]'
+API_JOBS_CANCELLED='[{"total_count":2,"jobs":[{"id":201,"name":"gates","status":"completed","conclusion":"cancelled","run_attempt":1},{"id":202,"name":"dco","status":"completed","conclusion":"success","run_attempt":1}]}]'
+API_JOBS_PENDING='[{"total_count":2,"jobs":[{"id":201,"name":"gates","status":"in_progress","conclusion":null,"run_attempt":1},{"id":202,"name":"dco","status":"completed","conclusion":"success","run_attempt":1}]}]'
+API_JOBS_SKIPPED='[{"total_count":2,"jobs":[{"id":201,"name":"gates","status":"completed","conclusion":"skipped","run_attempt":1},{"id":202,"name":"dco","status":"completed","conclusion":"success","run_attempt":1}]}]'
+API_JOBS_UNKNOWN='[{"total_count":2,"jobs":[{"id":201,"name":"gates","status":"completed","conclusion":"future-status","run_attempt":1},{"id":202,"name":"dco","status":"completed","conclusion":"success","run_attempt":1}]}]'
+API_JOBS_WITH_PLAN='[{"total_count":3,"jobs":[{"id":201,"name":"gates","status":"completed","conclusion":"success","run_attempt":1},{"id":202,"name":"dco","status":"completed","conclusion":"success","run_attempt":1},{"id":203,"name":"Coverage, WP, and AU structure","status":"completed","conclusion":"success","run_attempt":1}]}]'
+API_JOBS_LOOKALIKE='[{"total_count":2,"jobs":[{"id":201,"name":"CI / gates","status":"completed","conclusion":"success","run_attempt":1},{"id":202,"name":"DCO / dco","status":"completed","conclusion":"success","run_attempt":1}]}]'
 
 # run_case name expected initial-view checks [gate arguments...] -- [message]
 run_case() {
@@ -233,6 +237,10 @@ run_case "contract-only PR with plan-integrity passes" 0 \
 GH_API_FILES_CASE=""
 GH_API_RUNS_CASE=""
 GH_API_JOBS_CASE=""
+GH_API_FILES_CASE="$API_FILES_WORKFLOW"
+run_case "canonical workflow mutation requires protected bootstrap" 1 \
+  "MERGEABLE CLEAN OPEN false" "$HEALTHY_CHECKS" -- "canonical workflow changed"
+GH_API_FILES_CASE=""
 
 # Initial structural refusals: each fixture reaches the intended branch.
 run_case "CONFLICTING refused" 1 "CONFLICTING DIRTY OPEN false" '[]' -- "git rebase origin/main"
@@ -315,7 +323,7 @@ run_merge_case() {
 run_merge_case "healthy --merge dry-run does not mutate" 0 \
   "MERGEABLE CLEAN OPEN false" "$HEALTHY_CHECKS" 0 0 "" "NOT executed" dry-run 0 "pr merge"
 run_merge_case "healthy --merge lands" 0 \
-  "MERGEABLE CLEAN OPEN false" "$HEALTHY_CHECKS" 1 0 "merge pr merge 999 --squash --delete-branch=false" "PR #999 merged"
+  "MERGEABLE CLEAN OPEN false" "$HEALTHY_CHECKS" 1 0 "merge pr merge 999 --squash --delete-branch=false --match-head-commit $HEAD_SHA" "PR #999 merged"
 run_merge_case "post-merge cleanup error still confirms landed" 0 \
   "MERGEABLE CLEAN OPEN false" "$HEALTHY_CHECKS" 1 1 "merge pr merge 999 --squash --delete-branch=false" "IS MERGED"
 run_merge_case "admin override allows failed check" 0 \
@@ -335,7 +343,12 @@ RECHECK_BASE_CASE="$BASE_SHA"
 RECHECK_MERGE_CASE='5555555555555555555555555555555555555555'
 run_merge_case "potential merge OID race refused" 1 \
   "MERGEABLE CLEAN OPEN false" "$HEALTHY_CHECKS" 0 0 "" "source/base/merge OID changed" normal 0 "pr merge"
+RACE_AT_CASE=3
+RECHECK_HEAD_CASE='6666666666666666666666666666666666666666'
+run_merge_case "source head OID race refused" 1 \
+  "MERGEABLE CLEAN OPEN false" "$HEALTHY_CHECKS" 0 0 "" "source/base/merge OID changed" normal 0 "pr merge"
 RACE_AT_CASE=0
+RECHECK_HEAD_CASE=""
 RECHECK_BASE_CASE=""
 RECHECK_MERGE_CASE=""
 

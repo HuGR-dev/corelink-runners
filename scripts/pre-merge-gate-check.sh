@@ -128,6 +128,11 @@ PR=""
 BOUND_HEAD_SHA=""
 BOUND_BASE_SHA=""
 BOUND_MERGE_SHA=""
+BOUND_REPOSITORY=""
+# These are the protected origin/main blob roots, not PR copies. A PR changing
+# one of these files cannot bootstrap its own authority; it needs the protected
+# workflow/reusable-workflow attestation named in the refusal below.
+TRUSTED_WORKFLOW_BLOBS='{".github/workflows/ci.yml":"ae9b11926d8418f5044db92ee4b9f97d8886d2c8",".github/workflows/dco.yml":"aa510af1234a2cb3127a9249cb1e644fb0a182be",".github/workflows/plan-integrity.yml":"c97bb503768fc6fb1efc6a89e3c08ca7eb075a3e"}'
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -276,6 +281,7 @@ run_gate() {
     verdict STRUCTURAL
     return 1
   fi
+  BOUND_REPOSITORY="$repository"
 
   # ── Defense 3 (ordering: checked before the per-check loop) ─────────────────
   # "No checks reported" used to `exit 0` with "nothing to gate". On a repo where
@@ -290,7 +296,7 @@ run_gate() {
     return 1
   fi
 
-  GATE_JSON="$json" GATE_VERDICT_FILE="$VERDICT_FILE" GATE_REPOSITORY="$repository" GATE_HEAD_SHA="$merge_sha" python3 - "$PR" <<'PY'
+  GATE_JSON="$json" GATE_VERDICT_FILE="$VERDICT_FILE" GATE_REPOSITORY="$repository" GATE_HEAD_SHA="$merge_sha" GATE_BASE_SHA="$base_sha" GATE_WORKFLOW_BLOBS="$TRUSTED_WORKFLOW_BLOBS" GATE_RECORD_FILE="${GATE_RECORD_FILE:-}" python3 - "$PR" <<'PY'
 import os, sys, json
 import subprocess
 pr = sys.argv[1]
@@ -317,6 +323,17 @@ def api(path):
         raise RuntimeError(f"gh api returned non-array pages for {path}")
     return pages
 
+def api_one(path):
+    result = subprocess.run(
+        ["gh", "api", path], capture_output=True, text=True, check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or f"gh api failed for {path}")
+    value = json.loads(result.stdout)
+    if not isinstance(value, dict):
+        raise RuntimeError(f"gh api returned non-object for {path}")
+    return value
+
 def page_items(pages, key):
     items = []
     for page in pages:
@@ -339,6 +356,22 @@ try:
     contract_change = any(
         str(item.get("filename", "")).startswith("docs/plan/contracts/") for item in files
     )
+    trusted_blobs = json.loads(os.environ["GATE_WORKFLOW_BLOBS"])
+    workflow_changes = [
+        name for item in files
+        for name in (str(item.get("filename", "")), str(item.get("previous_filename", "")))
+        if name in trusted_blobs
+    ]
+    if workflow_changes:
+        raise RuntimeError(
+            "canonical workflow changed; protected default-branch bootstrap attestation required"
+        )
+    for workflow_path, expected_blob in trusted_blobs.items():
+        base_file = api_one(
+            f"repos/{repository}/contents/{workflow_path}?ref={os.environ['GATE_BASE_SHA']}"
+        )
+        if base_file.get("sha") != expected_blob:
+            raise RuntimeError(f"trusted default-branch workflow blob mismatch: {workflow_path}")
     runs = page_items(
         api(f"repos/{repository}/actions/runs?head_sha={head_sha}&per_page=100"),
         "workflow_runs",
@@ -353,6 +386,7 @@ if contract_change:
     required.append((".github/workflows/plan-integrity.yml", "Coverage, WP, and AU structure"))
 
 canonical = []
+records = []
 for workflow_path, job_name in required:
     candidates = [
         run for run in runs
@@ -395,6 +429,24 @@ for workflow_path, job_name in required:
     else:
         bucket = "fail"
     canonical.append({"name": job_name, "bucket": bucket, "link": workflow_path})
+    records.append({
+        "workflow_path": workflow_path,
+        "job_name": job_name,
+        "run_id": run.get("id"),
+        "run_attempt": run.get("run_attempt", 1),
+        "run_path": run.get("path"),
+        "run_event": run.get("event"),
+        "run_head_sha": str(run.get("head_sha", "")).lower(),
+        "job_id": job.get("id"),
+        "job_run_attempt": job.get("run_attempt", run.get("run_attempt", 1)),
+        "job_status": status,
+        "job_conclusion": conclusion,
+    })
+
+record_file = os.environ.get("GATE_RECORD_FILE") or ""
+if record_file:
+    with open(record_file, "w", encoding="utf-8") as fh:
+        json.dump(records, fh, sort_keys=True)
 
 # Display names from `gh pr checks` are advisory only.  Replace the required
 # identities with the canonical workflow/job/event/head-SHA records above.
@@ -507,6 +559,7 @@ PY
 
 if [ "$MODE" = "merge" ]; then
   VERDICT_FILE="$(mktemp "${TMPDIR:-/tmp}/premergegate.XXXXXX")"
+  GATE_RECORD_FILE="$(mktemp "${TMPDIR:-/tmp}/premerge-records.XXXXXX")"
 fi
 
 gate_rc=0
@@ -555,6 +608,73 @@ if [ "$current_head" != "$BOUND_HEAD_SHA" ] \
   || [ "$current_base" != "$BOUND_BASE_SHA" ] \
   || [ "$current_merge" != "$BOUND_MERGE_SHA" ]; then
   echo "  ⛔ NO MERGE ISSUED for PR #$PR — source/base/merge OID changed while checks were evaluated."
+  exit 1
+fi
+
+revalidate_canonical() {
+  GATE_RECORD_FILE="$GATE_RECORD_FILE" GATE_REPOSITORY="$BOUND_REPOSITORY" GATE_HEAD_SHA="$BOUND_MERGE_SHA" GATE_PR="$PR" python3 - <<'PY'
+import json, os, subprocess, sys
+
+def api(path):
+    result = subprocess.run(["gh", "api", "--paginate", "--slurp", path],
+                            capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or f"gh api failed for {path}")
+    pages = json.loads(result.stdout)
+    if not isinstance(pages, list):
+        raise RuntimeError("gh api returned non-array pages")
+    return pages
+
+def items(pages, key):
+    result = []
+    for page in pages:
+        values = page if isinstance(page, list) else page.get(key) if isinstance(page, dict) else None
+        if not isinstance(values, list) or any(not isinstance(item, dict) for item in values):
+            raise RuntimeError(f"gh api page did not contain an object array for {key}")
+        result.extend(values)
+    return result
+
+try:
+    with open(os.environ["GATE_RECORD_FILE"], encoding="utf-8") as fh:
+        records = json.load(fh)
+    if not isinstance(records, list) or not records:
+        raise RuntimeError("canonical records were not retained")
+    repository = os.environ["GATE_REPOSITORY"]
+    head_sha = os.environ["GATE_HEAD_SHA"].lower()
+    pr_number = int(os.environ["GATE_PR"])
+    runs = items(api(f"repos/{repository}/actions/runs?head_sha={head_sha}&per_page=100"), "workflow_runs")
+    for record in records:
+        selected = [run for run in runs if run.get("id") == record["run_id"]]
+        if len(selected) != 1:
+            raise RuntimeError(f"canonical run identity changed: {record['workflow_path']}")
+        run = selected[0]
+        if (run.get("path") != record["run_path"]
+                or run.get("path") != record["workflow_path"]
+                or run.get("event") != record["run_event"]
+                or str(run.get("head_sha", "")).lower() != head_sha
+                or run.get("run_attempt", 1) != record["run_attempt"]
+                or not any(isinstance(rel, dict) and rel.get("number") == pr_number
+                           for rel in run.get("pull_requests", []))):
+            raise RuntimeError(f"canonical run provenance/attempt changed: {record['workflow_path']}")
+        jobs = items(api(f"repos/{repository}/actions/runs/{record['run_id']}/jobs?per_page=100"), "jobs")
+        selected_jobs = [job for job in jobs if job.get("id") == record["job_id"]
+                         and job.get("name") == record["job_name"]]
+        if len(selected_jobs) != 1:
+            raise RuntimeError(f"canonical job identity changed: {record['job_name']}")
+        job = selected_jobs[0]
+        if (job.get("status") != record["job_status"]
+                or job.get("conclusion") != record["job_conclusion"]
+                or job.get("run_attempt", record["run_attempt"]) != record["job_run_attempt"]):
+            raise RuntimeError(f"canonical job status/attempt changed: {record['job_name']}")
+except (OSError, KeyError, TypeError, ValueError, RuntimeError, json.JSONDecodeError) as error:
+    print(f"  ⛔ canonical gate revalidation failed: {error}", file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
+if ! revalidate_canonical; then
+  echo "  ⛔ NO MERGE ISSUED for PR #$PR — canonical run/job identity or status changed after final OID binding."
+  echo "     Residual boundary: GitHub cannot make the final API read and merge mutation atomic."
   exit 1
 fi
 

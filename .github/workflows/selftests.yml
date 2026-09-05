@@ -28,39 +28,66 @@ jobs:
         run: |
           set -e -u -o pipefail
           found=0
+          stage0_selftests=()
           while IFS= read -r -d '' index_entry; do
-            mode="${index_entry%% *}"
+            metadata="${index_entry%%$'\t'*}"
+            mode="${metadata%% *}"
+            stage="${metadata##* }"
             selftest="${index_entry#*$'\t'}"
             if [[ "$selftest" =~ ^scripts/.+\.selftest\.sh$ ]]; then
               found=1
-              if [[ "$mode" != "100755" || -L "$selftest" || ! -f "$selftest" || ! -x "$selftest" ]]; then
+              if [[ "$stage" != "0" || "$mode" != "100755" || -L "$selftest" || ! -f "$selftest" || ! -x "$selftest" ]]; then
                 echo "Tracked selftest is not a regular executable: $selftest (mode=$mode)" >&2
                 exit 1
               fi
+              stage0_selftests+=("$selftest")
             fi
           done < <(git ls-files --stage -z)
           if (( found == 0 )); then
             echo 'No tracked scripts/**/*.selftest.sh files found.' >&2
             exit 1
           fi
+          for selftest in "${stage0_selftests[@]}"; do
+            count=0
+            for candidate in "${stage0_selftests[@]}"; do
+              [[ "$candidate" == "$selftest" ]] && count=$((count + 1))
+            done
+            if (( count != 1 )); then
+              echo "Tracked selftest does not have exactly one stage-0 index record: $selftest" >&2
+              exit 1
+            fi
+          done
       - name: Discover and run every tracked selftest
         shell: bash
         run: |
           set -euo pipefail
           # The glob magic makes **/ include selftests directly below scripts/
           # as well as in nested directories.
-          mapfile -d '' selftests < <(git ls-files -z -- ':(glob)scripts/**/*.selftest.sh')
+          selftests=()
+          while IFS= read -r -d '' selftest; do
+            selftests+=("$selftest")
+          done < <(git ls-files -z -- ':(glob)scripts/**/*.selftest.sh')
           if (( ${#selftests[@]} == 0 )); then
             echo 'No tracked scripts/**/*.selftest.sh files found.' >&2
             exit 1
           fi
           for selftest in "${selftests[@]}"; do
             echo "==> bash ${selftest}"
-            index_entry="$(git ls-files --stage -- "${selftest}")"
-            mode="${index_entry%% *}"
-            rest="${index_entry#* }"
+            index_entries=()
+            while IFS= read -r -d '' index_entry; do
+              index_entries+=("$index_entry")
+            done < <(git ls-files --stage -z -- "${selftest}")
+            [[ "${#index_entries[@]}" -eq 1 ]] || {
+              echo "Tracked selftest does not have exactly one index record: $selftest" >&2
+              exit 1
+            }
+            index_entry="${index_entries[0]}"
+            metadata="${index_entry%%$'\t'*}"
+            mode="${metadata%% *}"
+            stage="${metadata##* }"
+            rest="${metadata#* }"
             index_blob="${rest%% *}"
-            [[ "$mode" == "100755" && -f "$selftest" && ! -L "$selftest" && -x "$selftest" ]] || {
+            [[ "$stage" == "0" && "$mode" == "100755" && -f "$selftest" && ! -L "$selftest" && -x "$selftest" ]] || {
               echo "Tracked selftest changed type/mode before invocation: $selftest" >&2
               exit 1
             }
@@ -70,5 +97,5 @@ jobs:
               echo "Tracked selftest blob changed before invocation: $selftest" >&2
               exit 1
             }
-            /usr/bin/bash "${selftest}"
+            /bin/bash "${selftest}"
           done
