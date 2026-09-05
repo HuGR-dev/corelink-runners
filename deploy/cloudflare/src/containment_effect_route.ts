@@ -3,6 +3,7 @@ import {
   containmentSpawnAttemptKey,
   type ContainmentEffectBinding,
   type ContainmentEffectReceipt,
+  type ContainmentEffectPermit,
   type OwnerResult,
   type OwnerTuple,
   type SpawnOwnerRequest,
@@ -36,7 +37,9 @@ export interface CanonicalEffectRouteDeps<TOpts extends object> {
   claim: () => Promise<boolean>;
   release?: () => Promise<void>;
   beforeClaim?: () => Promise<void>;
-  beforeDrive?: (permit: string, proof: string, binding: ContainmentEffectBinding) => Promise<boolean>;
+  afterClaim?: () => Promise<boolean>;
+  beforeDrive?: () => Promise<boolean>;
+  beforeBegin?: (permit: ContainmentEffectPermit) => Promise<boolean>;
   drive: (opts: TOpts & {
     containment_event_id: string;
     effect_id: string;
@@ -116,18 +119,22 @@ export async function runCanonicalEffect<TOpts extends object>(
     if (deps.beforeClaim) await deps.beforeClaim();
     claimAdmitted = await deps.claim();
     if (!claimAdmitted) return { status: "claim_refused" };
+    if (deps.afterClaim && !(await deps.afterClaim())) { await releaseClaim(); return { status: "busy" }; }
+    if (deps.beforeDrive && !(await deps.beforeDrive())) { await releaseClaim(); return { status: "before_drive_refused" }; }
 
     const prepared = await deps.ledger.prepare(req);
-    const previous = terminal(prepared);
+    const previous = prepared.kind === "committed" || (prepared.kind === "owned" && prepared.state === "COMMITTED")
+      ? terminal(prepared) : null;
     if (previous) {
       if (previous.status === "committed" && deps.finalize) previous.finalized = await deps.finalize(previous.receipt);
       return previous;
     }
-    if (prepared.kind !== "prepared") return { status: "busy" };
+    if (prepared.kind !== "prepared") { await releaseClaim(); return { status: "busy" }; }
 
     const acquired = await deps.ledger.acquire(req);
     if (acquired.kind !== "acquired") {
       const prior = terminal(acquired);
+      await releaseClaim();
       return prior ?? { status: "busy" };
     }
     const mirrored = await deps.ledger.mirror(req, "acquired");
@@ -144,17 +151,10 @@ export async function runCanonicalEffect<TOpts extends object>(
     );
     if (confirmed.kind !== "permit_issued" || !confirmed.permit) {
       const prior = terminal(confirmed);
-      if (!prior || prior.status !== "unknown_terminal") await releaseClaim();
-      return prior ?? { status: "unauthorized" };
-    }
-    const permit = confirmed.permit;
-    const started = await deps.ledger.beginEffect(req, permit.permit_id);
-    if (!started.proof || started.kind !== "already_started") {
-      const prior = terminal(started);
       await releaseClaim();
       return prior ?? { status: "unauthorized" };
     }
-    const proof = started.proof;
+    const permit = confirmed.permit;
     const bindingBase = {
       schema_version: 1 as const,
       provider: deps.provider,
@@ -165,13 +165,19 @@ export async function runCanonicalEffect<TOpts extends object>(
       ...bindingBase,
       binding_sha256: await sha256(JSON.stringify(bindingBase)),
     };
-    const bound = await deps.ledger.bind(req, permit.permit_id, proof.proof_id, binding);
-    if (bound.kind !== "bound") { await releaseClaim(); return terminal(bound) ?? { status: "unauthorized" }; }
-    if (deps.beforeDrive && !(await deps.beforeDrive(permit.permit_id, proof.proof_id, binding))) {
-      await deps.ledger.abort(req).catch(() => undefined);
+    if (deps.beforeBegin && !(await deps.beforeBegin(permit))) {
       await releaseClaim();
       return { status: "before_drive_refused" };
     }
+    const started = await deps.ledger.beginEffect(req, permit.permit_id);
+    if (!started.proof || started.kind !== "already_started") {
+      const prior = terminal(started);
+      await releaseClaim();
+      return prior ?? { status: "unauthorized" };
+    }
+    const proof = started.proof;
+    const bound = await deps.ledger.bind(req, permit.permit_id, proof.proof_id, binding);
+    if (bound.kind !== "bound") { await releaseClaim(); return terminal(bound) ?? { status: "unauthorized" }; }
     const driving = await deps.ledger.markDriving(req, permit.permit_id, proof.proof_id);
     if (driving.kind !== "driving" && driving.kind !== "already_started") {
       await releaseClaim();
@@ -191,12 +197,11 @@ export async function runCanonicalEffect<TOpts extends object>(
     } catch (error) {
       return { status: "unknown_terminal", reason: error instanceof Error ? error.message : "provider failed" };
     }
-    if (provider && "status" in provider && provider.status === "refused" && provider.no_effect === true) {
-      return { status: "provider_refused", reason: provider.reason };
-    }
-    if (!provider || !text(provider.resource_id) || !text(provider.receipt_id) || !text(provider.provider_signature)) {
+    if (!provider) {
       return { status: "unknown_terminal", reason: "provider returned no trusted receipt" };
     }
+    if ("status" in provider) return { status: "unknown_terminal", reason: provider.reason ?? "provider refused after DRIVING" };
+    if (!text(provider.resource_id) || !text(provider.receipt_id) || !text(provider.provider_signature)) return { status: "unknown_terminal", reason: "provider returned no trusted receipt" };
     if (provider.resource_id !== binding.resource_id) return { status: "unknown_terminal", reason: "provider resource mismatch" };
     const receiptBase = {
       schema_version: 1 as const,
@@ -232,22 +237,26 @@ export async function runCanonicalEffect<TOpts extends object>(
 
 export { containmentSpawnActiveKey, containmentSpawnAttemptKey };
 
-export async function callerNonceForEffect(effectId: string): Promise<string> {
-  return (await sha256(effectId)).slice(0, 32);
+export async function callerNonceForEffect(tuple: Omit<OwnerTuple, "caller_nonce">): Promise<string> {
+  return (await sha256(JSON.stringify(tuple))).slice(0, 32);
 }
 
 export async function intakeOwnerTuple(repo: string, jobId: string, effectId: string, eventId: string): Promise<OwnerTuple> {
-  return { repo, job_id: jobId, path: "intake", event_id: eventId, reservation_epoch: null, effect_id: effectId,
+  return ownerTuple({ repo, job_id: jobId, path: "intake", event_id: eventId, reservation_epoch: null, effect_id: effectId,
     owner: `intake:${repo}/${jobId}`, token: `intake:${effectId}`, lease_epoch: 1,
-    drain_owner: null, drain_lease_epoch: null, caller_nonce: await callerNonceForEffect(effectId) };
+    drain_owner: null, drain_lease_epoch: null });
 }
 export async function drainOwnerTuple(repo: string, jobId: string, effectId: string, eventId: string, owner: string, epoch: number): Promise<OwnerTuple> {
-  return { repo, job_id: jobId, path: "drain", event_id: eventId, reservation_epoch: null, effect_id: effectId,
+  return ownerTuple({ repo, job_id: jobId, path: "drain", event_id: eventId, reservation_epoch: null, effect_id: effectId,
     owner: `drain:${owner}`, token: `drain:${owner}:${epoch}`, lease_epoch: epoch,
-    drain_owner: owner, drain_lease_epoch: epoch, caller_nonce: await callerNonceForEffect(effectId) };
+    drain_owner: owner, drain_lease_epoch: epoch });
 }
 export async function redriveOwnerTuple(repo: string, jobId: string, effectId: string, owner: string, token: string, epoch: number): Promise<OwnerTuple> {
-  return { repo, job_id: jobId, path: "redrive", event_id: effectId, reservation_epoch: epoch, effect_id: effectId,
+  return ownerTuple({ repo, job_id: jobId, path: "redrive", event_id: effectId, reservation_epoch: epoch, effect_id: effectId,
     owner, token, lease_epoch: epoch, drain_owner: `redrive:${owner}`, drain_lease_epoch: epoch,
-    caller_nonce: await callerNonceForEffect(effectId) };
+  });
+}
+
+async function ownerTuple(base: Omit<OwnerTuple, "caller_nonce">): Promise<OwnerTuple> {
+  return { ...base, caller_nonce: await callerNonceForEffect(base) };
 }

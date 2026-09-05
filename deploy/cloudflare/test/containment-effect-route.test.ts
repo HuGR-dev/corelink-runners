@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { ContainmentEffectLedger, type OwnerTuple } from "../src/containment_effect_ledger";
-import { runCanonicalEffect } from "../src/containment_effect_route";
+import { intakeOwnerTuple, redriveOwnerTuple, runCanonicalEffect } from "../src/containment_effect_route";
 
 const clone = <T>(value: T): T => value === undefined ? value : JSON.parse(JSON.stringify(value)) as T;
 class Storage {
@@ -45,9 +45,9 @@ describe("canonical containment effect route", () => {
   });
 
   it("aborts before DRIVING when the pre-drive guard refuses", async () => {
-    const { ledger } = make(); let drives = 0;
+    const { ledger, storage, values } = make(); let drives = 0;
     const result = await runCanonicalEffect({ ...deps(ledger, tuple()), beforeDrive: async () => false, drive: async () => { drives++; return undefined; } });
-    expect(result.status).toBe("before_drive_refused"); expect(drives).toBe(0);
+    expect(result.status).toBe("before_drive_refused"); expect(drives).toBe(0); expect(storage.map.size).toBe(0); expect(values.size).toBe(0);
   });
 
   it("returns a complete identity-bound receipt", async () => {
@@ -70,6 +70,37 @@ describe("canonical containment effect route", () => {
     const first = await runCanonicalEffect({ ...deps(ledger, t), drive: async () => { drives++; throw new Error("crash"); } });
     const second = await runCanonicalEffect({ ...deps(ledger, t), claim: async () => { throw new Error("claim must not repeat"); }, drive: async () => { drives++; return undefined; } });
     expect(first.status).toBe("unknown_terminal"); expect(second.status).toBe("unknown_terminal"); expect(drives).toBe(1);
+  });
+
+  it("treats a no-effect provider refusal after DRIVING as UNKNOWN", async () => {
+    const { ledger, storage } = make(); const t = tuple();
+    const result = await runCanonicalEffect({ ...deps(ledger, t), drive: async () => ({ status: "refused" as const, no_effect: true as const }) });
+    expect(result.status).toBe("unknown_terminal");
+    const active = [...storage.map.values()].find((v: any) => v && v.state === "DRIVING") as any;
+    expect(active?.state).toBe("DRIVING");
+  });
+
+  it("releases a claim when canonical prepare is already busy", async () => {
+    let released = 0; let claimed = 0;
+    const ledger = {
+      observe: async () => ({ kind: "unknown", schema_version: 1, tuple_digest: "", attempt_key: "", active_pointer_key: "", permit: null, proof: null, state: "UNKNOWN" }),
+      prepare: async () => ({ kind: "busy", schema_version: 1, tuple_digest: "", attempt_key: "", active_pointer_key: "", permit: null, proof: null, state: "PREPARED" }),
+    } as any;
+    const result = await runCanonicalEffect({ ...deps(ledger, tuple()), claim: async () => { claimed++; return true; }, release: async () => { released++; } });
+    expect(result.status).toBe("busy"); expect(claimed).toBe(1); expect(released).toBe(1);
+  });
+
+  it("orders redrive release, claim, reservation eligibility, then drive", async () => {
+    const events: string[] = []; const { ledger } = make(); const t = await redriveOwnerTuple("acme/repo", "123", "containment:v1:redrive:acme/repo/123", "owner", "token", 7);
+    const result = await runCanonicalEffect({ ...deps(ledger, t), beforeClaim: async () => { events.push("release"); }, claim: async () => { events.push("claim"); return true; }, afterClaim: async () => { events.push("eligible"); return true; }, drive: async () => { events.push("drive"); return { resource_id: `job:${t.repo}/${t.job_id}`, receipt_id: "r", provider_signature: "s" }; } });
+    expect(result.status).toBe("committed"); expect(events).toEqual(["release", "claim", "eligible", "drive"]);
+  });
+
+  it("derives retry-stable nonces from the full logical attempt", async () => {
+    const first = await intakeOwnerTuple("acme/repo", "123", "effect", "event");
+    const same = await intakeOwnerTuple("acme/repo", "123", "effect", "event");
+    const reclaimed = await redriveOwnerTuple("acme/repo", "123", "effect", "owner-b", "token-b", 2);
+    expect(first.caller_nonce).toBe(same.caller_nonce); expect(reclaimed.caller_nonce).not.toBe(first.caller_nonce);
   });
 
   it("allows only one concurrent winner for an effect tuple", async () => {
