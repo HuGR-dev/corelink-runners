@@ -3,6 +3,48 @@
 # CoreLink Runner DevEnv Container Entrypoint
 set -euo pipefail
 
+# Cloudflare Containers 0.3.7 has no secret mount. Convert the provider's
+# ingress-only env secret to a regular 0400 file before hydration or supervisor
+# starts; durable children receive only the path and never the bearer itself.
+bridge_exec_auth_token() {
+    local auth_file="${EXEC_SERVER_AUTH_TOKEN_FILE:-/run/corelink/exec-server-auth-token}"
+    local auth_dir="${auth_file%/*}"
+    if [[ -z "$auth_dir" || "$auth_dir" == "$auth_file" ]]; then
+        error "EXEC_SERVER_AUTH_TOKEN_FILE must name a file"
+        return 1
+    fi
+    if [[ -L "$auth_dir" || ( -e "$auth_dir" && ! -d "$auth_dir" ) ]]; then
+        error "auth directory is not a safe directory"
+        return 1
+    fi
+    [[ -e "$auth_dir" ]] || mkdir -p "$auth_dir"
+    chmod 0700 "$auth_dir"
+    if [[ -L "$auth_file" || -e "$auth_file" ]]; then
+        error "refusing pre-existing auth file"
+        return 1
+    fi
+    if [[ -z "${EXEC_SERVER_AUTH_TOKEN:-}" ]]; then
+        error "EXEC_SERVER_AUTH_TOKEN is empty"
+        return 1
+    fi
+    local old_umask
+    old_umask=$(umask)
+    umask 077
+    if ! (set -o noclobber; printf '%s' "$EXEC_SERVER_AUTH_TOKEN" > "$auth_file"); then
+        umask "$old_umask"
+        error "could not create auth file safely"
+        return 1
+    fi
+    umask "$old_umask"
+    if ! chmod 0400 "$auth_file"; then
+        rm -f "$auth_file"
+        error "could not secure auth file"
+        return 1
+    fi
+    export EXEC_SERVER_AUTH_TOKEN_FILE="$auth_file"
+    unset EXEC_SERVER_AUTH_TOKEN
+}
+
 log() {
     echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] [entrypoint] $*"
 }
@@ -16,12 +58,14 @@ error() {
 : "${WORKSPACE_NAME:?WORKSPACE_NAME must be set}"
 : "${PROFILE_NAME:?PROFILE_NAME must be set}"
 
+bridge_exec_auth_token
+
 CLW_BIN="/usr/local/bin/clw"
 CLW_REF_DOMAIN="${CLW_REF_DOMAIN:-runner}"
 PROFILE_DIR="/data/chrome"
 WORKSPACE_DIR="/data/workspace"
 
-# ── 2. Export Auth Token ──────────────────────────────────────────────
+# ── 2. CLW auth remains available only to the hydration command ────────
 if [[ -n "${CLW_TOKEN:-}" ]]; then
     export CLW_TOKEN="${CLW_TOKEN}"
 fi
@@ -88,7 +132,7 @@ snapshot_on_shutdown() {
         snapshot "${WORKSPACE_DIR}" --name "${WORKSPACE_NAME}" --force || true
 
     # Clean up auth file from memory
-    rm -f /dev/shm/.clw-auth || true
+    rm -f /dev/shm/.clw-auth "${EXEC_SERVER_AUTH_TOKEN_FILE}" || true
     log "Final snapshot complete. Exiting."
     exit 0
 }

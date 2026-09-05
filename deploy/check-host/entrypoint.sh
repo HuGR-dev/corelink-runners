@@ -4,6 +4,52 @@
 # DEFAULT-OFF: this container is only spawned when the check-host path is live-flipped.
 set -eu
 
+# The provider can only deliver the bearer through the container environment.
+# Convert it to a short-lived, mode-0400 file before starting any durable
+# process.  The exec-server reads EXEC_SERVER_AUTH_TOKEN_FILE; retaining the
+# original variable would expose the bearer through /proc/*/environ.
+bridge_exec_auth_token() {
+    auth_file="${EXEC_SERVER_AUTH_TOKEN_FILE:-/run/corelink/exec-server-auth-token}"
+    auth_dir=${auth_file%/*}
+    if [ -z "$auth_dir" ] || [ "$auth_dir" = "$auth_file" ]; then
+        echo "[check-host] FATAL: EXEC_SERVER_AUTH_TOKEN_FILE must name a file" >&2
+        return 1
+    fi
+    if [ -L "$auth_dir" ] || { [ -e "$auth_dir" ] && [ ! -d "$auth_dir" ]; }; then
+        echo "[check-host] FATAL: auth directory is not a safe directory" >&2
+        return 1
+    fi
+    if [ ! -e "$auth_dir" ]; then
+        mkdir -p "$auth_dir"
+    fi
+    chmod 0700 "$auth_dir"
+    if [ -L "$auth_file" ] || [ -e "$auth_file" ]; then
+        echo "[check-host] FATAL: refusing pre-existing auth file" >&2
+        return 1
+    fi
+    if [ -z "${EXEC_SERVER_AUTH_TOKEN:-}" ]; then
+        echo "[check-host] FATAL: EXEC_SERVER_AUTH_TOKEN is empty" >&2
+        return 1
+    fi
+    old_umask=$(umask)
+    umask 077
+    if ! (set -C; printf '%s' "$EXEC_SERVER_AUTH_TOKEN" > "$auth_file"); then
+        umask "$old_umask"
+        echo "[check-host] FATAL: could not create auth file safely" >&2
+        return 1
+    fi
+    umask "$old_umask"
+    if ! chmod 0400 "$auth_file"; then
+        rm -f "$auth_file"
+        echo "[check-host] FATAL: could not secure auth file" >&2
+        return 1
+    fi
+    export EXEC_SERVER_AUTH_TOKEN_FILE="$auth_file"
+    unset EXEC_SERVER_AUTH_TOKEN
+}
+
+bridge_exec_auth_token
+
 # ---------------------------------------------------------------------------
 # Guard: TOOLCHAIN_DIGEST must be present (C6).
 # A check-host container MUST always carry the toolchain digest injected by the
