@@ -3,10 +3,9 @@ description: >-
   Run a command with CoreLink cache memoization (clw run). On a cache HIT the
   memoized result is returned WITHOUT re-running (re-runs ≈ 0). The default
   `optional` policy is fail-open: if the CoreLink moat is absent or clw errors
-  internally, the command runs COLD. `required-hit` is fail-closed: it accepts
-  only clw's authenticated structured HIT response and returns exit 78 for an
-  absent, missed, malformed, untrusted, or internally failed cache, without
-  executing the wrapped command. Use on a CoreLink ephemeral runner.
+  internally, the command runs COLD. `required-hit` is fail-closed and returns
+  exit 78 until the installed clw exposes the authenticated no-exec HIT API
+  required by ADR-0011. Use on a CoreLink ephemeral runner.
 
 inputs:
   run:
@@ -35,7 +34,8 @@ inputs:
   cache-policy:
     description: >-
       Cache availability policy: `optional` (default, fail-open COLD) or
-      `required-hit` (authenticated HIT required; refusal is exit 78).
+      `required-hit` (authenticated no-exec HIT required; currently unavailable
+      with clw 0.1.5, so refusal is exit 78).
     required: false
     default: "optional"
 
