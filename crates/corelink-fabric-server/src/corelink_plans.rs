@@ -208,17 +208,16 @@ impl<H: IntrospectHttp> PlanSource for CoreLinkPlanStore<H> {
         // include the secret or the token in any error/log path.
         let body = serde_json::json!({ "token": token }).to_string();
 
-        // The breaker-gated retry loop (W3) — the SHARED choke point that also
-        // serves the auth token store. It preserves the #204 cold-start retry
-        // (transient 503 / transport error retried; AUTHORITATIVE 200 or 401/other
-        // returned immediately) AND adds the circuit breaker: while OPEN it
-        // fast-fails here WITHOUT any upstream POST or retry, so a sustained
-        // introspect brownout no longer pins the blocking pool `3×` per plan leg.
+        // The breaker-gated retry loop (W3) is the SHARED choke point for auth
+        // and plan. It preserves cold-start retry while the circuit breaker
+        // fast-fails OPEN brownouts without upstream POSTs or blocking-pool burn.
         match run_introspect(&self.http, &self.breaker, &self.cfg, &body, "plan") {
             IntrospectOutcome::Body200(body) => self.parse_plan_200(tenant, &body),
-            // Breaker OPEN / transient-exhausted / authoritative non-200/503 →
-            // fail closed → 503, never a false 0-slot admit.
-            IntrospectOutcome::FailClosed => Err(PlanSourceError::Unreachable),
+            // Breaker OPEN / transient-exhausted / non-200/503 → fail closed.
+            IntrospectOutcome::FailClosed => {
+                self.invalidate_cache(tenant);
+                Err(PlanSourceError::Unreachable)
+            }
         }
     }
 

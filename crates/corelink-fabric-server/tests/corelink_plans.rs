@@ -92,6 +92,10 @@ impl MutableIntrospect {
         self.response.lock().unwrap().body = body.to_string();
     }
 
+    fn set_status(&self, status: u16) {
+        self.response.lock().unwrap().status = status;
+    }
+
     fn calls(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
     }
@@ -282,4 +286,35 @@ async fn queue_skips_waiter_after_malformed_entitlement_refresh() {
     assert!(!waiter.is_finished(), "waiter remains safely queued");
     waiter.abort();
     let _ = waiter.await;
+}
+
+#[tokio::test]
+async fn failed_entitlement_refresh_clears_plan_and_ceiling() {
+    let http = MutableIntrospect::new(r#"{"valid":true,"max_concurrency":1,"max_vcpu_h":100}"#);
+    let plans = CoreLinkPlanStore::new(
+        http,
+        CoreLinkAuthConfig {
+            introspect_url: "https://example.com/introspect".to_string(),
+            service_secret: "s3cr3t".to_string(),
+            timeout: Duration::from_secs(2),
+            retry_backoff: Duration::ZERO,
+        },
+    );
+    let tenant = TenantId::new("acme").unwrap();
+    assert!(
+        plans
+            .plan_of_resolving(&tenant, "pat-acme")
+            .unwrap()
+            .is_some()
+    );
+    assert!(plans.plan_of(&tenant).is_some());
+    assert_ne!(plans.tenant_ceiling_vcpu_ms(&tenant), 0);
+
+    plans.http.set_status(503);
+    assert_eq!(
+        plans.plan_of_resolving(&tenant, "pat-acme"),
+        Err(corelink_fabric_server::PlanSourceError::Unreachable)
+    );
+    assert!(plans.plan_of(&tenant).is_none());
+    assert_eq!(plans.tenant_ceiling_vcpu_ms(&tenant), 0);
 }
