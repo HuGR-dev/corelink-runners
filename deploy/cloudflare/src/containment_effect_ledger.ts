@@ -115,6 +115,11 @@ export interface OwnerRecordV1 {
   created_ms: number;
   expires_ms: number;
   tombstone: boolean;
+  // Durable records carry these typed payloads alongside their identity
+  // projection; keeping them optional preserves the pre-R14 wire shape.
+  permit?: ContainmentEffectPermit | null;
+  binding?: ContainmentEffectBinding | null;
+  effect_observation?: EffectObservationV1 | ContainmentEffectReceipt;
   attempt_key?: string;
   reap_proof?: EffectReapProofV1;
 }
@@ -398,9 +403,9 @@ export class ContainmentEffectLedger {
       return unavailable(key);
     }
   }
-  async confirm(request: SpawnOwnerRequest, mirror_digest: string, readback_digest: string): Promise<OwnerResult> {
+  async confirm(request: SpawnOwnerRequest, mirror_digest: string, readback_digest: string, external_permit_id?: string): Promise<OwnerResult> {
     const t = requestTuple(request);
-    if (!t || !HEX.test(mirror_digest) || mirror_digest !== readback_digest
+    if (!t || (external_permit_id !== undefined && !validText(external_permit_id)) || !HEX.test(mirror_digest) || mirror_digest !== readback_digest
       || request.observation_kind !== "exact" || request.observation_digest !== mirror_digest) return rejected();
     if (!this.kv) return rejected();
     let mirrorRaw: string | null;
@@ -414,11 +419,14 @@ export class ContainmentEffectLedger {
       const p: any = await s.get(activeKey(t));
       if (!a || !p || !pointerMatchesAttempt(p, a, t)
         || p.attempt_key !== attemptKey(t) || a.nonce !== p.nonce) return this.out(t, "unknown", "UNKNOWN");
-      if (a.state === "PERMIT_ISSUED" || a.state === "BOUND" || a.state === "DRIVING") return this.out(t, "owned", a.state, a);
+      if (a.state === "PERMIT_ISSUED" || a.state === "BOUND" || a.state === "DRIVING") {
+        if (external_permit_id !== undefined && a.permit_id !== external_permit_id) return this.out(t, "unknown", "UNKNOWN");
+        return this.out(t, "owned", a.state, a);
+      }
       if (a.state !== "CLAIM_ACQUIRED") return this.out(t, "rejected", a.state, a);
       const issued = Date.now();
       const permit: ContainmentEffectPermit = {
-        schema_version: 1, permit_id: crypto.randomUUID(), repo: t.repo,
+        schema_version: 1, permit_id: external_permit_id ?? crypto.randomUUID(), repo: t.repo,
         job_id: t.job_id, path: t.path, event_id: t.event_id,
         reservation_epoch: t.reservation_epoch, effect_id: t.effect_id,
         issued_to_owner: t.owner, issued_to_epoch: t.lease_epoch,
@@ -437,6 +445,13 @@ export class ContainmentEffectLedger {
       const a: any = await s.get(attemptKey(t)); const p: any = await s.get(activeKey(t)); const existing = await s.get<EffectStartProofV1>(startKey(t));
       if (!a || !p || !pointerMatchesAttempt(p, a, t) || a.permit_id !== permit_id
         || !permitValid(a.permit, t) || await sha256(t.token) !== a.permit.owner_token_digest) return this.out(t, "unknown", "UNKNOWN");
+      // A crash after bind leaves a durable BOUND record and proof. Returning
+      // that proof is a read-only idempotent recovery path; it never creates a
+      // new provider effect start. DRIVING/COMMITTED are handled by observe.
+      if (a.state === "BOUND" && a.effect_start_proof_id) {
+        if (!proofValid(existing, t, permit_id) || existing.proof_id !== a.effect_start_proof_id) return this.out(t, "unknown", "UNKNOWN");
+        const out = await this.out(t, "already_started", a.state, a); out.permit = a.permit; out.proof = existing; return out;
+      }
       if (a.state !== "PERMIT_ISSUED") return this.out(t, "rejected", a.state, a);
       if (a.effect_start_proof_id) {
         if (!proofValid(existing, t, permit_id) || existing.proof_id !== a.effect_start_proof_id) return this.out(t, "unknown", "UNKNOWN");
@@ -507,6 +522,18 @@ export class ContainmentEffectLedger {
     });
   }
   async abort(request: SpawnOwnerRequest, owner = request.tuple.owner, token = request.tuple.token): Promise<OwnerResult> { return this.abortReap(request, owner, token, false, 0); }
+  async freezeUnknown(request: SpawnOwnerRequest): Promise<OwnerResult> {
+    const t = requestTuple(request); if (!t) return rejected();
+    return this.storage.transaction(async s => {
+      const a: any = await s.get(attemptKey(t)); const p: any = await s.get(activeKey(t));
+      if (!a || !p || !pointerMatchesAttempt(p, a, t) || !recordValid(a, t)
+        || a.permit_id !== null || a.binding_id !== null || a.effect_start_proof_id !== null
+        || (a.state !== "PREPARED" && a.state !== "CLAIM_ACQUIRED")) return this.out(t, "unknown", "UNKNOWN", a);
+      const frozen = { ...a, state: "UNKNOWN" as const };
+      await s.put(attemptKey(t), frozen); await s.put(activeKey(t), frozen);
+      return this.out(t, "unknown", frozen.state, frozen);
+    });
+  }
   async reap(request: SpawnOwnerRequest, stale_after_ms: number, authority = "containment-reaper-v1"): Promise<OwnerResult> { if (authority !== "containment-reaper-v1" || !Number.isSafeInteger(stale_after_ms) || stale_after_ms < 1) return rejected(); return this.abortReap(request, "", "", true, stale_after_ms); }
   private async abortReap(request: SpawnOwnerRequest, owner: string, token: string, reap: boolean, stale: number): Promise<OwnerResult> {
     const t = requestTuple(request); if (!t) return rejected();
