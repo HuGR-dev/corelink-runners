@@ -53,6 +53,7 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
       storage: {
         get: vi.fn(async (key: string) => mockStorage.get(key)),
         put: vi.fn(async (key: string, val: any) => mockStorage.set(key, val)),
+        delete: vi.fn(async (key: string) => { mockStorage.delete(key); }),
       },
       blockConcurrencyWhile: vi.fn(async (fn: () => Promise<any>) => fn()),
       id: { toString: () => "mock-do-tenant-123" },
@@ -181,7 +182,12 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
       expect(snapResp.workspaceSnapshot.bytesTotal).toBe(1048576);
     });
 
-    it("stops gracefully and executes D1 billing recording with 30s floor (INV-05)", async () => {
+    it("stops gracefully and sends canonical HTTP billing without a duplicate D1 tally", async () => {
+      mockEnv.BILLING_INGEST_URL = "https://billing.test/usage";
+      mockEnv.BILLING_INGEST_AUTH_KEY = "test-key";
+      mockEnv.BILLING_REGION = "iad";
+      const fetchMock = vi.fn(async () => new Response("{}", { status: 202 }));
+      vi.stubGlobal("fetch", fetchMock);
       const doInstance = new RunnerDevEnvDO(mockCtx, mockEnv);
       await doInstance.startDevenv({
         config: {
@@ -202,8 +208,44 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
       const finalStatus = await doInstance.getStatus();
       expect(finalStatus.status).toBe("stopped");
 
-      // Verify D1 billing query was bound with minimum 30s * 16 vCPU = 480 vCPU-seconds
-      expect(mockEnv.CONFIG_DB.prepare).toHaveBeenCalled();
+      expect(mockEnv.CONFIG_DB.prepare).not.toHaveBeenCalled();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body as string) as Array<Record<string, unknown>>;
+      expect(body[0]).toMatchObject({ event_kind: "runner_vcpu_seconds", region: "iad" });
+      expect(body[0].qty).toBeLessThan(480);
+    });
+
+    it("keeps a failed delivery frozen and blocks a new session until retry succeeds", async () => {
+      mockEnv.BILLING_INGEST_URL = "https://billing.test/usage";
+      mockEnv.BILLING_INGEST_AUTH_KEY = "test-key";
+      mockEnv.BILLING_REGION = "iad";
+      const fetchMock = vi.fn()
+        .mockRejectedValueOnce(new Error("billing unavailable"))
+        .mockResolvedValue(new Response("{}", { status: 202 }));
+      vi.stubGlobal("fetch", fetchMock);
+      const doInstance = new RunnerDevEnvDO(mockCtx, mockEnv);
+      const payload: StartPayload = {
+        config: {
+          workspaceName: "pending-billing",
+          profileName: "default",
+          tier: "standard-4",
+          clwEndpoint: "https://corelink-api.humangr.com",
+          clwTenant: "ee30f7ba-fc25-4d71-939e-ebe130b4c6a3",
+          clwToken: "cl_pat_1234567890abcdef1234567890",
+        },
+      };
+      await doInstance.startDevenv(payload);
+      await doInstance.onStart();
+      await doInstance.requestStop();
+      await doInstance.onStop();
+
+      const frozen = mockStorage.get("devenv:usage:pending");
+      expect(frozen?.event?.idem_key).toMatch(/^[0-9a-f]{64}$/);
+      await expect(doInstance.startDevenv(payload)).resolves.toMatchObject({ status: "starting" });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const retryBody = JSON.parse(fetchMock.mock.calls[1][1].body as string) as Array<Record<string, unknown>>;
+      expect(retryBody[0]).toEqual(frozen.event);
+      expect(mockStorage.has("devenv:usage:pending")).toBe(false);
     });
   });
 });

@@ -85,22 +85,24 @@ export type DevenvState =
       readonly createdAt: number;
       readonly startedAt: number;
       readonly sessionUuid: string;
+      readonly tenantId: string;
       readonly billingSeq: number;
       readonly generationId: number;
       readonly workspaceName: string;
       readonly profileName: string;
-      readonly tier?: DevenvTier;
+      readonly tier: DevenvTier;
     }
   | {
       readonly status: "running";
       readonly createdAt: number;
       readonly startedAt: number;
       readonly sessionUuid: string;
+      readonly tenantId: string;
       readonly billingSeq: number;
       readonly generationId: number;
       readonly workspaceName: string;
       readonly profileName: string;
-      readonly tier?: DevenvTier;
+      readonly tier: DevenvTier;
       readonly containerHandle: string;
       readonly lastHealthCheckAt: number;
       readonly healthCheckFailures: number;
@@ -110,19 +112,24 @@ export type DevenvState =
       readonly createdAt: number;
       readonly startedAt: number;
       readonly sessionUuid: string;
+      readonly tenantId: string;
       readonly billingSeq: number;
       readonly generationId: number;
       readonly workspaceName: string;
       readonly profileName: string;
-      readonly tier?: DevenvTier;
+      readonly tier: DevenvTier;
     }
   | {
       readonly status: "errored";
       readonly createdAt: number;
+      readonly startedAt: number;
+      readonly sessionUuid: string;
+      readonly billingSeq: number;
+      readonly tenantId: string;
       readonly lastError: string;
       readonly lastWorkspaceName: string;
-      readonly generationId?: number;
-      readonly tier?: DevenvTier;
+      readonly generationId: number;
+      readonly tier: DevenvTier;
     };
 
 // ─── RPC Payloads ────────────────────────────────────────────────────
@@ -191,4 +198,3 @@ export interface SnapshotMetadata {
   readonly unchanged: boolean;
   readonly timestamp: number;
 }
-
