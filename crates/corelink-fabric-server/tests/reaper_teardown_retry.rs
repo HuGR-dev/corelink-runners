@@ -1,12 +1,16 @@
 //! Offline checks for the confirmed-cleanup sweep.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
+use corelink_cloud_engine::{
+    CloudflareConfig, CloudflareEngine, HttpRequest, HttpResponse, HttpTransport,
+};
 use corelink_fabric::{InMemoryLedger, LeaseLedger, LeaseRecord, LeaseState, TenantId};
-use corelink_fabric_server::cloud_exec::HybridBoxProvisioner;
+use corelink_fabric_server::cloud_exec::{CloudflareBoxProvisioner, HybridBoxProvisioner};
 use corelink_fabric_server::{
     AppState, BoxProvisioner, CleanupTeardown, PlanSource, StaticPlans, SystemClock,
 };
@@ -52,6 +56,123 @@ impl BoxProvisioner for ScriptedProvisioner {
             .unwrap()
             .pop()
             .unwrap_or(CleanupTeardown::Unconfirmed)
+    }
+}
+
+/// Delegates all ordinary operations to the real in-memory ledger, but injects
+/// one transient failure at the conditional finish seam. This proves that a
+/// provider-confirmed cleanup retains its authoritative handle until the
+/// ledger can durably consume the claim.
+struct FinishFailsOnceLedger {
+    inner: InMemoryLedger,
+    fail_finish: std::sync::atomic::AtomicBool,
+}
+
+impl FinishFailsOnceLedger {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryLedger::new(),
+            fail_finish: std::sync::atomic::AtomicBool::new(true),
+        }
+    }
+}
+
+impl LeaseLedger for FinishFailsOnceLedger {
+    fn put(&self, rec: LeaseRecord) -> Result<()> {
+        self.inner.put(rec)
+    }
+    fn get(&self, id: &str) -> Result<Option<LeaseRecord>> {
+        self.inner.get(id)
+    }
+    fn transition(
+        &self,
+        id: &str,
+        to: corelink_runners_contracts::RunnerState,
+        now: u64,
+    ) -> Result<LeaseRecord> {
+        self.inner.transition(id, to, now)
+    }
+    fn by_tenant(&self, tenant: &TenantId) -> Result<Vec<LeaseRecord>> {
+        self.inner.by_tenant(tenant)
+    }
+    fn held(&self) -> Result<Vec<LeaseRecord>> {
+        self.inner.held()
+    }
+    fn pending_older_than(&self, now: u64, age: u64) -> Result<Vec<LeaseRecord>> {
+        self.inner.pending_older_than(now, age)
+    }
+    fn try_admit(&self, rec: LeaseRecord, cap: u32) -> Result<bool> {
+        self.inner.try_admit(rec, cap)
+    }
+    fn set_envelope_checkpoint(&self, id: &str, value: &str) -> Result<()> {
+        self.inner.set_envelope_checkpoint(id, value)
+    }
+    fn get_envelope_checkpoint(&self, id: &str) -> Result<Option<String>> {
+        self.inner.get_envelope_checkpoint(id)
+    }
+    fn remove(&self, id: &str) -> Result<bool> {
+        self.inner.remove(id)
+    }
+    fn remove_if_pending(&self, id: &str) -> Result<bool> {
+        self.inner.remove_if_pending(id)
+    }
+    fn claim_stale_pending_cleanup(&self, now: u64, age: u64) -> Result<Vec<LeaseRecord>> {
+        self.inner.claim_stale_pending_cleanup(now, age)
+    }
+    fn finish_pending_cleanup(&self, id: &str) -> Result<bool> {
+        if self.fail_finish.swap(false, Ordering::SeqCst) {
+            anyhow::bail!("injected transient ledger finish failure")
+        }
+        self.inner.finish_pending_cleanup(id)
+    }
+}
+
+#[derive(Clone)]
+struct ScriptedHttp {
+    responses: Arc<Mutex<VecDeque<HttpResponse>>>,
+    requests: Arc<Mutex<Vec<HttpRequest>>>,
+}
+
+impl ScriptedHttp {
+    fn new(responses: impl IntoIterator<Item = HttpResponse>) -> Self {
+        Self {
+            responses: Arc::new(Mutex::new(responses.into_iter().collect())),
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.requests.lock().unwrap().len()
+    }
+}
+
+impl HttpTransport for ScriptedHttp {
+    fn send(&self, request: &HttpRequest) -> Result<HttpResponse> {
+        self.requests.lock().unwrap().push(request.clone());
+        self.responses.lock().unwrap().pop_front().ok_or_else(|| {
+            anyhow::anyhow!("unexpected provider request after scripted responses were consumed")
+        })
+    }
+}
+
+fn response(status: u16, body: &str) -> HttpResponse {
+    HttpResponse {
+        status,
+        body: body.to_owned(),
+    }
+}
+
+fn cloudflare_spec() -> corelink_runner::lease::ContainerSpec {
+    corelink_runner::lease::ContainerSpec {
+        name: "cleanup-runner".to_owned(),
+        image: "alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
+            .to_owned(),
+        tmp_root: "/tmp/cleanup".to_owned(),
+        no_network: false,
+        allow_egress: true,
+        run_on_create: true,
+        path_set: Vec::new(),
+        env: Vec::new(),
     }
 }
 
@@ -135,5 +256,91 @@ fn hybrid_missing_route_is_unconfirmed() {
     assert_eq!(
         hybrid.teardown_pending("after-restart"),
         CleanupTeardown::Unconfirmed
+    );
+}
+
+#[tokio::test]
+async fn cloudflare_confirmed_delete_retries_same_handle_after_finish_failure_then_forgets() {
+    let ledger = Arc::new(FinishFailsOnceLedger::new());
+    ledger.try_admit(pending("cf-finish-retry"), 1).unwrap();
+
+    // Spawn gives the opaque handle. The first cleanup receives 2xx, but the
+    // durable finish is injected to fail; the second receives 404 for the SAME
+    // retained handle, which the real engine defines as confirmed deletion.
+    let http = ScriptedHttp::new([
+        response(200, r#"{"handle":"opaque_cf_handle"}"#),
+        response(200, ""),
+        response(404, "gone"),
+    ]);
+    let registry = corelink_fabric_server::BoxRegistry::new();
+    let engine = Arc::new(CloudflareEngine::new(
+        http.clone(),
+        CloudflareConfig::new("https://spawn.invalid", "test-token"),
+    ));
+    let provider = Arc::new(CloudflareBoxProvisioner::new(
+        engine,
+        registry.clone_handle(),
+    ));
+    provider
+        .provision("cf-finish-retry", &cloudflare_spec())
+        .unwrap();
+    assert!(
+        registry.resolve("cf-finish-retry").is_some(),
+        "spawn bound the opaque handle"
+    );
+
+    let state = state_with(ledger.clone(), provider.clone());
+    assert_eq!(
+        corelink_fabric_server::pending_cleanup::sweep_stale_pending(
+            &state,
+            Duration::from_millis(1)
+        )
+        .await,
+        0,
+        "provider success alone must not free the pending cap slot"
+    );
+    assert!(ledger.get("cf-finish-retry").unwrap().is_some());
+    assert!(
+        registry.resolve("cf-finish-retry").is_some(),
+        "finish failure must retain the known opaque handle for retry"
+    );
+
+    assert_eq!(
+        corelink_fabric_server::pending_cleanup::sweep_stale_pending(
+            &state,
+            Duration::from_millis(1)
+        )
+        .await,
+        1,
+        "404 on the retained same handle confirms the retry and permits finish"
+    );
+    assert!(ledger.get("cf-finish-retry").unwrap().is_none());
+    assert!(
+        registry.resolve("cf-finish-retry").is_none(),
+        "final finish GCs local identity"
+    );
+    assert_eq!(http.calls(), 3, "spawn plus 2xx and 404 teardown calls");
+}
+
+#[test]
+fn cloudflare_missing_registry_is_unconfirmed_without_provider_http() {
+    let http = ScriptedHttp::new([]);
+    let registry = corelink_fabric_server::BoxRegistry::new();
+    let provisioner = CloudflareBoxProvisioner::new(
+        Arc::new(CloudflareEngine::new(
+            http.clone(),
+            CloudflareConfig::new("https://spawn.invalid", "test-token"),
+        )),
+        registry,
+    );
+    assert_eq!(
+        provisioner.teardown_pending("post-restart-unknown"),
+        CleanupTeardown::Unconfirmed,
+        "an absent process-local handle cannot prove a Cloudflare box is gone"
+    );
+    assert_eq!(
+        http.calls(),
+        0,
+        "unknown registry state must not fabricate a provider handle"
     );
 }
