@@ -1,0 +1,383 @@
+#!/usr/bin/env bash
+# Focused, network-free gates for the AU1.8 destructive harness.
+set -Eeuo pipefail
+umask 077
+
+here="$(cd -- "$(dirname -- "$0")" && pwd)"
+harness="$here/au1.8-fabricd-cred-ticket-rotation.sh"
+repo="$(mktemp -d "${TMPDIR:-/tmp}/au1.8-selftest.XXXXXX")"
+test_mint_key="$(mktemp "${TMPDIR:-/tmp}/au1.8-test-mint.XXXXXX")"
+observability_key="$(mktemp "${TMPDIR:-/tmp}/au1.8-observability.XXXXXX")"
+access_id="$(mktemp "${TMPDIR:-/tmp}/au1.8-access-id.XXXXXX")"
+access_secret="$(mktemp "${TMPDIR:-/tmp}/au1.8-access-secret.XXXXXX")"
+trap 'rm -rf -- "$repo" "$test_mint_key" "$observability_key" "$access_id" "$access_secret"' EXIT
+
+git -C "$repo" init -q
+git -C "$repo" config user.email au1.8-selftest@example.invalid
+git -C "$repo" config user.name au1.8-selftest
+printf 'tracked\n' > "$repo/tracked"
+git -C "$repo" add tracked
+git -C "$repo" commit -q -m baseline
+head="$(git -C "$repo" rev-parse HEAD)"
+
+dispatch_case() {
+  local label="$1" version="${2-}" case_repo case_repo_real case_log case_err sha rc
+  case_repo="$(mktemp -d "${TMPDIR:-/tmp}/au1.8-wrangler-dispatch.XXXXXX")"
+  case_repo_real="$(cd "$case_repo" && pwd -P)"
+  mkdir -p "$case_repo/deploy/cloudflare-fabricd/node_modules/.bin"
+  cp "$here/../../deploy/cloudflare-fabricd/wrangler.jsonc" "$case_repo/deploy/cloudflare-fabricd/wrangler.jsonc"
+  case "$label" in
+    missing) : ;;
+    wrong|correct)
+      # shellcheck disable=SC2016
+      printf '%s\n' '#!/usr/bin/env bash' \
+        'printf "%s|%s\\n" "$PWD" "$*" >> "${DISPATCH_LOG:?}"' \
+        "if [ \"\${1:-}\" = --version ]; then printf '%s\\n' '$version'; exit 0; fi" \
+        'if [ "${1:-}" = auth ] && [ "${2:-}" = token ]; then printf '\''{"token":"dispatch-test-token-1234567890"}\n'\''; exit 0; fi' \
+        'exit 1' > "$case_repo/deploy/cloudflare-fabricd/node_modules/.bin/wrangler"
+      chmod 700 "$case_repo/deploy/cloudflare-fabricd/node_modules/.bin/wrangler"
+      ;;
+    *) echo "unknown dispatch test case: $label" >&2; exit 1 ;;
+  esac
+  git -C "$case_repo" init -q
+  git -C "$case_repo" config user.email au1.8-dispatch@example.invalid
+  git -C "$case_repo" config user.name au1.8-dispatch
+  git -C "$case_repo" add -f .
+  git -C "$case_repo" commit -qm baseline
+  sha="$(git -C "$case_repo" rev-parse HEAD)"
+  case_log="$(mktemp "${TMPDIR:-/tmp}/au1.8-wrangler-dispatch-log.XXXXXX")"
+  case_err="$(mktemp "${TMPDIR:-/tmp}/au1.8-wrangler-dispatch-err.XXXXXX")"
+  set +e
+  DISPATCH_LOG="$case_log" AU18_REPO_ROOT="$case_repo" AU18_SOURCE_COMMIT="$sha" \
+    "$harness" --execute --ack-destructive >/dev/null 2>"$case_err"
+  rc=$?
+  set -e
+  case "$label" in
+    missing) [[ "$rc" != 0 ]] && rg -q 'missing local Wrangler binary' "$case_err" ;;
+    wrong) [[ "$rc" != 0 ]] && rg -q 'local Wrangler version mismatch' "$case_err" ;;
+    correct) [[ "$rc" != 0 ]] && grep -F -q "$case_repo_real/deploy/cloudflare-fabricd|--config $case_repo_real/deploy/cloudflare-fabricd/wrangler.jsonc containers list --json" "$case_log" ;;
+  esac
+  local result=$?
+  rm -rf -- "$case_repo" "$case_log" "$case_err"
+  return "$result"
+}
+
+if dispatch_case missing; then :; else echo 'FAIL: missing local Wrangler must refuse before provider work' >&2; exit 1; fi
+if dispatch_case wrong 4.104.0; then :; else echo 'FAIL: wrong local Wrangler version must refuse' >&2; exit 1; fi
+if dispatch_case correct 4.105.0; then :; else echo 'FAIL: local Wrangler dispatch must preserve cwd and config' >&2; exit 1; fi
+if rg -n '\bnpx\b' "$harness" >/dev/null; then
+  echo 'FAIL: AU1.8 must not resolve Wrangler through npx' >&2
+  exit 1
+fi
+if ! rg -n -- '--header "@\$INTROSPECT_HEADER_FILE"' "$harness" >/dev/null ||
+   ! rg -n 'INTROSPECT_URL.*corelink-api\.humangr\.com/internal/v1/auth/introspect|INTROSPECT_URL.*CANONICAL' "$harness" >/dev/null; then
+  echo 'FAIL: canonical introspection must use the combined temporary header file' >&2
+  exit 1
+fi
+
+validate() {
+  local status_json="${2-}"
+  [[ -n "$status_json" ]] || status_json='{"num_shards":1,"ledger_cross_instance_safe":true}'
+  AU18_REPO_ROOT="$repo" \
+  AU18_SOURCE_COMMIT="${1:-$head}" \
+  AU18_VALIDATE_ONLY=1 \
+  AU18_STATUS_REPORT_JSON="$status_json" \
+    "$harness" --execute --ack-destructive >/dev/null 2>&1
+}
+
+validate_files() {
+  AU18_REPO_ROOT="$repo" \
+  AU18_SOURCE_COMMIT="$head" \
+  AU18_VALIDATE_ONLY=1 \
+  AU18_VALIDATE_FILE_METADATA_ONLY=1 \
+  AU18_TEST_MINT_KEY_FILE="$test_mint_key" \
+  AU18_OBSERVABILITY_KEY_FILE="$observability_key" \
+    "$harness" --execute --ack-destructive >/dev/null 2>&1
+}
+
+validate_stability() {
+  AU18_REPO_ROOT="$repo" \
+  AU18_SOURCE_COMMIT="$head" \
+  AU18_VALIDATE_ONLY=1 \
+  AU18_PROVIDER_STABILITY_SECS=0 \
+  AU18_PROVIDER_STABILITY_SAMPLE_1="$1" \
+  AU18_PROVIDER_STABILITY_SAMPLE_2="$2" \
+    "$harness" --execute --ack-destructive >/dev/null 2>&1
+}
+
+validate_access_pair() {
+  AU18_REPO_ROOT="$repo" \
+  AU18_SOURCE_COMMIT="$head" \
+  AU18_VALIDATE_ONLY=1 \
+  AU18_ACCESS_CLIENT_ID_FILE="$1" \
+  AU18_ACCESS_CLIENT_SECRET_FILE="$2" \
+    "$harness" --execute --ack-destructive >/dev/null 2>&1
+}
+
+container_version_case() {
+  local expected="$1" payload="$2" expected_value="${3-}" extractor info output rc
+  extractor="$(sed -n '/^extract_container_version() {/,/^}$/p' "$harness")"
+  info="$(mktemp "${TMPDIR:-/tmp}/au1.8-container-info.XXXXXX")"
+  printf '%s\n' "$payload" > "$info"
+  set +e
+  output="$(bash -u -c '
+    set -Eeuo pipefail
+    eval "$1"
+    extract_container_version "$2"
+  ' -- "$extractor" "$info")"
+  rc=$?
+  set -e
+  rm -f -- "$info"
+  if [[ "$expected" == pass ]]; then
+    [[ "$rc" == 0 && "$output" == "$expected_value" ]]
+  else
+    [[ "$rc" != 0 ]]
+  fi
+}
+
+unset_local_regression() {
+  local remote_fn header_fn mock key
+  remote_fn="$(sed -n '/^capture_remote_bindings() {/,/^}$/p' "$harness")"
+  header_fn="$(sed -n '/^make_oob_header_file() {/,/^}$/p' "$harness")"
+  mock="$(mktemp "${TMPDIR:-/tmp}/au1.8-mock-wrangler.XXXXXX")"
+  key="$(mktemp "${TMPDIR:-/tmp}/au1.8-mock-key.XXXXXX")"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf '\''{"bindings":[{"name":"FABRIC_TEST_MINT_TENANTS","type":"plain_text","text":""}]}'\''' > "$mock"
+  printf 'mock-observability-key\n' > "$key"
+  chmod 700 "$mock"
+  chmod 600 "$key"
+  # Execute the production function bodies under nounset with no globals named
+  # `label` or `name`; this catches premature expansion in local declarations.
+  # shellcheck disable=SC2016
+  if ! env -u label -u name bash -u -c '
+    set -Eeuo pipefail
+    source="$1"
+    mock="$2"
+    key="$3"
+    eval "$source"
+    TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/au1.8-local-regression.XXXXXX")"
+    LOG_DIR="$TMP_DIR/log"
+    mkdir -p "$LOG_DIR"
+    scrub_file() { :; }
+    log_event() { :; }
+    WRANGLER=("$mock")
+    run_wrangle() { "${WRANGLER[@]}" "$@"; }
+    WORKER_NAME=corelink-fabricd
+    CONTAINER_APP_NAME=corelink-fabricd-fabriccontainer
+    result="$(capture_remote_bindings sample version-a)"
+    test -f "$result"
+    jq -e "length == 1 and .[0].name == \"FABRIC_TEST_MINT_TENANTS\"" "$result" >/dev/null
+    header="$(make_oob_header_file observability "$key")"
+    test "$(sed -n "1p" "$header")" = "X-Corelink-Internal-Auth: mock-observability-key"
+    rm -rf -- "$TMP_DIR"
+  ' -- "$remote_fn
+$header_fn" "$mock" "$key"; then
+    rm -f -- "$mock" "$key"
+    return 1
+  fi
+  rm -f -- "$mock" "$key"
+}
+
+admission_pause_case() {
+  local expected="$1" payload="$2" capture_fn assert_fn mock rc
+  capture_fn="$(sed -n '/^capture_fabricd_admission_pause() {/,/^}$/p' "$harness")"
+  assert_fn="$(sed -n '/^assert_fabricd_admission_paused() {/,/^}$/p' "$harness")"
+  mock="$(mktemp "${TMPDIR:-/tmp}/au1.8-admission-mock.XXXXXX")"
+  # shellcheck disable=SC2016
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\\n" "${MOCK_BINDINGS_JSON:?}"' > "$mock"
+  chmod 700 "$mock"
+  set +e
+  # shellcheck disable=SC2016
+  env -u label -u version_id bash -u -c '
+    set -Eeuo pipefail
+    capture_fn="$1"
+    assert_fn="$2"
+    mock="$3"
+    payload="$4"
+    eval "$capture_fn"
+    eval "$assert_fn"
+    TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/au1.8-admission-case.XXXXXX")"
+    LOG_DIR="$TMP_DIR/log"
+    mkdir -p "$LOG_DIR"
+    scrub_file() { :; }
+    log_event() { :; }
+    run_wrangle() { MOCK_BINDINGS_JSON="$payload" "$mock" "$@"; }
+    WORKER_NAME=corelink-fabricd
+    assert_fabricd_admission_paused sample version-a
+    rm -rf -- "$TMP_DIR"
+  ' -- "$capture_fn" "$assert_fn" "$mock" "$payload"
+  rc=$?
+  set -e
+  rm -f -- "$mock"
+  if [[ "$expected" == pass ]]; then
+    [[ "$rc" == 0 ]]
+  else
+    [[ "$rc" != 0 ]]
+  fi
+}
+
+access_header_case() {
+  local header_fn scrub_fn id secret key tmp output
+  header_fn="$(sed -n '/^make_introspect_header_file() {/,/^}$/p' "$harness")"
+  scrub_fn="$(sed -n '/^scrub_file() {/,/^}$/p' "$harness")"
+  id="$(mktemp "${TMPDIR:-/tmp}/au1.8-access-header-id.XXXXXX")"
+  secret="$(mktemp "${TMPDIR:-/tmp}/au1.8-access-header-secret.XXXXXX")"
+  key="$(mktemp "${TMPDIR:-/tmp}/au1.8-access-header-key.XXXXXX")"
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/au1.8-access-header-case.XXXXXX")"
+  printf 'access-id-value\n' > "$id"
+  printf 'access-secret-value\n' > "$secret"
+  printf 'internal-key-value\n' > "$key"
+  chmod 600 "$id" "$secret" "$key"
+  # The helper returns only the temporary path; the scrubber removes both
+  # Access header values before an error file can be retained.
+  # shellcheck disable=SC2016
+  output="$(bash -u -c '
+    set -Eeuo pipefail
+    eval "$1"
+    eval "$2"
+    TMP_DIR="$3"
+    INTROSPECT_KEY_FILE="$4"
+    ACCESS_CLIENT_ID_FILE="$5"
+    ACCESS_CLIENT_SECRET_FILE="$6"
+    header="$(make_introspect_header_file)"
+    grep -F "CF-Access-Client-Id: access-id-value" "$header" >/dev/null
+    grep -F "CF-Access-Client-Secret: access-secret-value" "$header" >/dev/null
+    printf "CF-Access-Client-Id: access-id-value\nCF-Access-Client-Secret: access-secret-value\n" > "$TMP_DIR/error"
+    scrub_file "$TMP_DIR/error"
+    ! grep -F "access-id-value" "$TMP_DIR/error" >/dev/null
+    ! grep -F "access-secret-value" "$TMP_DIR/error" >/dev/null
+    printf "%s" "$header"
+  ' -- "$header_fn" "$scrub_fn" "$tmp" "$key" "$id" "$secret")"
+  test -n "$output"
+  rm -rf -- "$id" "$secret" "$key" "$tmp"
+}
+
+validate
+
+printf 'untracked\n' > "$repo/untracked"
+if validate; then
+  echo "FAIL: untracked files must block AU1.8" >&2
+  exit 1
+fi
+rm -f -- "$repo/untracked"
+
+if validate "0000000000000000000000000000000000000000"; then
+  echo "FAIL: stale source commit must block AU1.8" >&2
+  exit 1
+fi
+
+validate "$head" '{"num_shards":1,"ledger_cross_instance_safe":true}'
+validate "$head" '{"num_shards":1,"ledger_cross_instance_safe":false}'
+if validate "$head" '{"num_shards":1}'; then
+  echo "FAIL: missing ledger_cross_instance_safe must block AU1.8" >&2
+  exit 1
+fi
+
+# The canonical AU1.8 memory-ledger exception is a provider-attested paused
+# singleton window. Exercise the age boundary without any provider calls.
+memory_age_fn="$(sed -n '/^provider_timestamp_epoch() {/,/^}$/p' "$harness")
+$(sed -n '/^memory_singleton_age_gate() {/,/^}$/p' "$harness")"
+if ! now_iso="$(node -e 'process.stdout.write(new Date(Date.now()-3910*1000).toISOString())')"; then
+  echo "FAIL: unable to construct age fixture" >&2
+  exit 1
+fi
+# shellcheck disable=SC2016
+if ! env -u created_on bash -u -c 'set -Eeuo pipefail; log_event(){ :; }; eval "$1"; memory_singleton_age_gate "$2"' -- "$memory_age_fn" "$now_iso"; then
+  echo "FAIL: exactly 65 minutes of provider age must pass" >&2
+  exit 1
+fi
+# shellcheck disable=SC2016
+if env -u created_on bash -u -c 'set -Eeuo pipefail; log_event(){ :; }; eval "$1"; memory_singleton_age_gate "$2"' -- "$memory_age_fn" "$(node -e 'process.stdout.write(new Date(Date.now()-3000*1000).toISOString())')"; then
+  echo "FAIL: provider age below 65 minutes must fail closed" >&2
+  exit 1
+fi
+
+printf 'test-mint-key\n' > "$test_mint_key"
+printf 'observability-key\n' > "$observability_key"
+chmod 600 "$test_mint_key" "$observability_key"
+validate_files
+printf 'access-id-value\n' > "$access_id"
+printf 'access-secret-value\n' > "$access_secret"
+chmod 600 "$access_id" "$access_secret"
+if validate_access_pair "$access_id" ""; then
+  echo "FAIL: incomplete Cloudflare Access pair must block AU1.8" >&2
+  exit 1
+fi
+printf 'access-id-value\nsecond-line\n' > "$access_id"
+if validate_access_pair "$access_id" "$access_secret"; then
+  echo "FAIL: multiline Cloudflare Access id must block AU1.8" >&2
+  exit 1
+fi
+printf 'access-id-value\n' > "$access_id"
+validate_access_pair "$access_id" "$access_secret"
+if ! access_header_case; then
+  echo "FAIL: direct introspection must carry and scrub Cloudflare Access headers" >&2
+  exit 1
+fi
+chmod 640 "$test_mint_key"
+if validate_files; then
+  echo "FAIL: FABRIC_TEST_MINT_KEY mode drift must block AU1.8" >&2
+  exit 1
+fi
+chmod 600 "$test_mint_key"
+chmod 640 "$observability_key"
+if validate_files; then
+  echo "FAIL: observability OOB key mode drift must block AU1.8" >&2
+  exit 1
+fi
+chmod 600 "$observability_key"
+: > "$test_mint_key"
+if validate_files; then
+  echo "FAIL: empty FABRIC_TEST_MINT_KEY must block AU1.8" >&2
+  exit 1
+fi
+printf 'test-mint-key\n' > "$test_mint_key"
+mv "$observability_key" "${observability_key}.real"
+ln -s "${observability_key}.real" "$observability_key"
+if validate_files; then
+  echo "FAIL: symlinked observability OOB key must block AU1.8" >&2
+  exit 1
+fi
+rm "$observability_key"
+mv "${observability_key}.real" "$observability_key"
+validate_stability 'worker-a	container-a	sha256:aaa' 'worker-a	container-a	sha256:aaa'
+if validate_stability 'worker-a	container-a	sha256:aaa' 'worker-b	container-a	sha256:aaa'; then
+  echo "FAIL: provider version drift must block AU1.8" >&2
+  exit 1
+fi
+if validate_stability 'worker-a	container-a	sha256:aaa' ''; then
+  echo "FAIL: missing provider stability sample must block AU1.8" >&2
+  exit 1
+fi
+
+if ! container_version_case pass '{"name":"corelink-fabricd-fabricdcontainer","version":1}' '1' ||
+   ! container_version_case pass '{"name":"corelink-fabricd-fabricdcontainer","version_id":"container-v1"}' 'container-v1' ||
+   ! container_version_case fail '{"name":"corelink-fabricd-fabricdcontainer","version":{"id":"container-v1"}}' ||
+   ! container_version_case fail '{"name":"corelink-fabricd-fabricdcontainer","version":null}' ||
+   ! container_version_case fail '{"name":"corelink-fabricd-fabricdcontainer","metadata":{"version":2}}' ; then
+  echo "FAIL: containers info version scalar compatibility must remain fail-closed" >&2
+  exit 1
+fi
+
+if rg -n -- '--containers-rollout=none' "$harness" >/dev/null; then
+  echo "FAIL: AU1.8 must recreate with immediate immutable rollout" >&2
+  exit 1
+fi
+if [[ "$(rg -c -- '--containers-rollout=immediate' "$harness")" -lt 2 ]]; then
+  echo "FAIL: AU1.8 must use immediate rollout for arm and disarm" >&2
+  exit 1
+fi
+if ! unset_local_regression; then
+  echo "FAIL: unset local names must not break mocked AU1.8 helper paths" >&2
+  exit 1
+fi
+if ! admission_pause_case pass '{"bindings":[{"name":"FABRIC_ADMISSION_PAUSED","type":"plain_text","text":"1"}]}' ||
+   ! admission_pause_case fail '{"bindings":[]}' ||
+   ! admission_pause_case fail '{"bindings":[{"name":"FABRIC_ADMISSION_PAUSED","type":"plain_text","text":"1"},{"name":"FABRIC_ADMISSION_PAUSED","type":"plain_text","text":"1"}]}' ||
+   ! admission_pause_case fail '{"bindings":[{"name":"FABRIC_ADMISSION_PAUSED","type":"plain_text","text":"0"}]}' ||
+   ! admission_pause_case fail '{"bindings":[{"name":"FABRIC_ADMISSION_PAUSED","type":"secret_text","text":"1"}]}' ; then
+  echo "FAIL: Fabricd admission pause must be exactly one authoritative plain-text binding set to 1" >&2
+  exit 1
+fi
+
+echo "AU1.8 focused gates: PASS"
