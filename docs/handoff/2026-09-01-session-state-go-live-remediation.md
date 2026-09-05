@@ -7,14 +7,15 @@
 
 # Session state — go-live remediation campaign, 2026-09-01
 
-**Read this to continue the campaign.** This is a post-incident handoff for a new
-session or model. It records the production containment, the planning state, and the
-safe next moves. It does not replace the historical handoff from 2026-08-31.
+**Historical-only record; do not use it to resume the campaign.** This is a post-incident
+handoff for the 2026-09-01 session. It records the production containment, planning state,
+and safe next moves as then observed. It does not replace the historical handoff from
+2026-08-31 or provide current resumable state.
 
 ## Compaction checkpoint — Round 13 post-review state
 
-This subsection is the current resumable state. Read it before continuing any older “next step”
-below.
+This subsection records the historical resumable state at that date only. Do not treat it as
+current status or as instructions to continue any older “next step” below.
 
 - **The latest read-only containment configuration observation was at
   `2026-09-02T01:29:19Z`:** production `corelink-fabricd` version
