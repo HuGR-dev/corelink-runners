@@ -7,10 +7,10 @@
 //! Trust model: reachable ONLY inside the container, behind the Worker's
 //! `containerFetch`; the container boundary + the Worker bearer are the PRIMARY
 //! gates (§C4). Bind is `0.0.0.0:8080`. **Track-C C2b defense-in-depth:** when
-//! [`AUTH_TOKEN_ENV`] (`EXEC_SERVER_AUTH_TOKEN`) is injected at spawn, `/exec`
-//! ADDITIONALLY requires `Authorization: Bearer <token>` (constant-time), and the
-//! spawn-Worker presents the same value on its `containerFetch` — so even a
-//! lateral in-container caller cannot drive `/exec` without it.
+//! the mode-0400 file named by [`AUTH_TOKEN_FILE_ENV`] is supplied at spawn,
+//! `/exec` ADDITIONALLY requires `Authorization: Bearer <token>` (constant-time),
+//! and the spawn-Worker presents the same value on its `containerFetch` — so
+//! even a lateral in-container caller cannot drive `/exec` without it.
 //!
 //! **WP-9c — the fail-closed gate lives HERE, in the library, not only in the
 //! binary.** [`app_with_auth`] takes an [`ExecAuth`], and an *unauthenticated*
@@ -26,6 +26,8 @@
 //! `argv`) is a `400`; a timeout kills the whole process group and returns
 //! `exit_code: null` so the caller's `run_check` fails closed (§C3).
 
+use std::fs::OpenOptions;
+use std::io::Read;
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -39,24 +41,24 @@ use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
 /// The env var naming the hydrated toolchain directory (cwd for every exec).
 pub const TOOLCHAIN_DIR_ENV: &str = "TOOLCHAIN_DIR";
 /// Default cwd when `TOOLCHAIN_DIR` is unset (§C4).
 pub const DEFAULT_TOOLCHAIN_DIR: &str = "/toolchain";
 /// The `defaultPort` the Worker's `containerFetch` targets (§C4).
 pub const DEFAULT_PORT: u16 = 8080;
-/// Track-C C2b: the bearer token the exec-server requires on `/exec`
-/// (defense-in-depth on top of the container boundary + Worker bearer). Injected
-/// into the container env at spawn; the spawn-Worker presents the SAME value on
-/// its `containerFetch` to `/exec`. Unset ⇒ [`ExecAuth::from_env`] FAILS unless
-/// [`ALLOW_UNAUTH_ENV`] is explicitly set (WP-9c fail-closed).
+/// Historical provider env name. It is intentionally never accepted as a
+/// credential; env-only token configuration fails closed.
 pub const AUTH_TOKEN_ENV: &str = "EXEC_SERVER_AUTH_TOKEN";
+/// Path to the regular mode-0400 file containing the bearer token. The token
+/// environment variable above is intentionally not accepted as a credential.
+pub const AUTH_TOKEN_FILE_ENV: &str = "EXEC_SERVER_AUTH_TOKEN_FILE";
 
-/// WP-9c: the explicit opt-in to build/serve the router WITHOUT the bearer gate
-/// (dev, or a deployment gated by something else). Absent ⇒ an unset
-/// [`AUTH_TOKEN_ENV`] fails closed instead of yielding an open `/exec`. This is
-/// the SAME env var the production binary has always required; it now lives in
-/// the library so every caller — binary, test harness, example — inherits it.
+/// Historical unauthenticated opt-in name. It is retained for source
+/// compatibility but is no longer honored.
 pub const ALLOW_UNAUTH_ENV: &str = "CHECK_EXEC_ALLOW_UNAUTH";
 
 /// Per-stream capture cap. stdout and stderr are each bounded to this many
@@ -99,27 +101,40 @@ pub fn toolchain_dir() -> String {
 /// out a router — none of them degrade to an open `/exec`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecAuthError {
+    /// The file path variable is absent or empty.
+    AuthFileNotConfigured,
+    /// The historical environment token was supplied; it is not accepted.
+    EnvTokenNotAccepted,
+    /// The auth file could not be opened or inspected.
+    AuthFileUnreadable,
+    /// The opened file is not regular or does not have exact mode 0400.
+    AuthFileUnsafe,
     /// A bearer token was supplied but empty — an empty token is not a gate.
     EmptyToken,
-    /// [`AUTH_TOKEN_ENV`] is unset/empty and [`ALLOW_UNAUTH_ENV`] is not set:
-    /// serving an unauthenticated arbitrary-argv `/exec` requires an explicit
-    /// opt-in, never a default.
+    /// Retained for source compatibility; unauthenticated serving is disabled.
     UnauthenticatedNotOptedIn,
 }
 
 impl std::fmt::Display for ExecAuthError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::AuthFileNotConfigured => write!(f, "{AUTH_TOKEN_FILE_ENV} is unset or empty"),
+            Self::EnvTokenNotAccepted => write!(
+                f,
+                "{AUTH_TOKEN_ENV} is not an accepted credential input; use {AUTH_TOKEN_FILE_ENV}"
+            ),
+            Self::AuthFileUnreadable => write!(f, "{AUTH_TOKEN_FILE_ENV} could not be read"),
+            Self::AuthFileUnsafe => write!(
+                f,
+                "{AUTH_TOKEN_FILE_ENV} must name a regular non-symlink file with mode 0400"
+            ),
             Self::EmptyToken => write!(
                 f,
-                "{AUTH_TOKEN_ENV} was supplied but EMPTY — an empty bearer is not a gate"
+                "{AUTH_TOKEN_FILE_ENV} contains an empty token — an empty bearer is not a gate"
             ),
             Self::UnauthenticatedNotOptedIn => write!(
                 f,
-                "{AUTH_TOKEN_ENV} is unset/empty — refusing to build an UNAUTHENTICATED /exec \
-                 (argv execution). The spawn Worker injects {AUTH_TOKEN_ENV} on every real \
-                 spawn; if it is missing the box is misconfigured. Set {AUTH_TOKEN_ENV}, or set \
-                 {ALLOW_UNAUTH_ENV}=1 to explicitly opt into the unauthenticated posture."
+                "unauthenticated /exec is disabled; configure {AUTH_TOKEN_FILE_ENV}"
             ),
         }
     }
@@ -130,9 +145,7 @@ impl std::error::Error for ExecAuthError {}
 /// The auth posture of an exec router — the WP-9c capability token.
 ///
 /// [`app_with_auth`] takes one of these and nothing else, so there is no value
-/// a caller can pass that silently yields an open `/exec`: the only way to get
-/// the unauthenticated posture is [`ExecAuth::unauthenticated_opt_in`], which
-/// is fallible and gated on [`ALLOW_UNAUTH_ENV`].
+/// a caller can pass that silently yields an open `/exec`.
 #[derive(Debug, Clone)]
 pub struct ExecAuth(AuthMode);
 
@@ -156,28 +169,22 @@ impl ExecAuth {
         Ok(Self(AuthMode::Bearer(token)))
     }
 
-    /// The UNAUTHENTICATED posture — available ONLY behind the explicit
-    /// [`ALLOW_UNAUTH_ENV`] opt-in. Without it this returns
-    /// [`ExecAuthError::UnauthenticatedNotOptedIn`] and the caller gets no
-    /// router at all. This is the whole of WP-9c: the protection cannot be lost
-    /// by refactor (no `None` shape exists) nor by a rename of
-    /// [`AUTH_TOKEN_ENV`] (a supplied-but-unexpected name still lands here).
+    /// Legacy constructor retained for source compatibility. Unauthenticated
+    /// serving is disabled and this always fails closed.
     pub fn unauthenticated_opt_in() -> Result<Self, ExecAuthError> {
-        if allow_unauth_opt_in() {
-            Ok(Self(AuthMode::Unauthenticated))
-        } else {
-            Err(ExecAuthError::UnauthenticatedNotOptedIn)
-        }
+        Err(ExecAuthError::UnauthenticatedNotOptedIn)
     }
 
-    /// Resolve the posture from the process env: [`AUTH_TOKEN_ENV`] when set
-    /// and non-empty, else the [`ALLOW_UNAUTH_ENV`]-gated unauthenticated
-    /// posture, else an error. This is exactly the production binary's rule.
+    /// Resolve the authenticated posture from the mode-0400 file named by
+    /// [`AUTH_TOKEN_FILE_ENV`]. A process-env token is never accepted.
     pub fn from_env() -> Result<Self, ExecAuthError> {
-        match std::env::var(AUTH_TOKEN_ENV).ok().filter(|t| !t.is_empty()) {
-            Some(token) => Self::bearer(token),
-            None => Self::unauthenticated_opt_in(),
+        if std::env::var_os(AUTH_TOKEN_ENV).is_some() {
+            return Err(ExecAuthError::EnvTokenNotAccepted);
         }
+        let path = std::env::var_os(AUTH_TOKEN_FILE_ENV)
+            .filter(|path| !path.is_empty())
+            .ok_or(ExecAuthError::AuthFileNotConfigured)?;
+        Self::bearer(read_auth_token_file(&path)?)
     }
 
     /// `true` when this posture gates the routes with a bearer.
@@ -186,19 +193,50 @@ impl ExecAuth {
     }
 }
 
-/// Read the [`ALLOW_UNAUTH_ENV`] opt-in (`1` / `true`, case-insensitive).
-fn allow_unauth_opt_in() -> bool {
-    std::env::var(ALLOW_UNAUTH_ENV)
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+fn read_auth_token_file(path: &std::ffi::OsStr) -> Result<String, ExecAuthError> {
+    #[cfg(unix)]
+    {
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+        let file = options
+            .open(path)
+            .map_err(|_| ExecAuthError::AuthFileUnreadable)?;
+        let metadata = file
+            .metadata()
+            .map_err(|_| ExecAuthError::AuthFileUnreadable)?;
+        if !metadata.file_type().is_file() || metadata.mode() & 0o7777 != 0o400 {
+            return Err(ExecAuthError::AuthFileUnsafe);
+        }
+        let mut bytes = Vec::new();
+        file.take(4097)
+            .read_to_end(&mut bytes)
+            .map_err(|_| ExecAuthError::AuthFileUnreadable)?;
+        if bytes.len() > 4096 {
+            return Err(ExecAuthError::AuthFileUnsafe);
+        }
+        let mut token = String::from_utf8(bytes).map_err(|_| ExecAuthError::AuthFileUnsafe)?;
+        while token.ends_with(['\n', '\r']) {
+            token.pop();
+        }
+        if token.is_empty() {
+            return Err(ExecAuthError::EmptyToken);
+        }
+        Ok(token)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Err(ExecAuthError::AuthFileUnsafe)
+    }
 }
 
 /// Build the exec-server router, resolving the posture from the process env via
 /// [`ExecAuth::from_env`]. Pure (no sockets) so tests drive it via
 /// `tower::ServiceExt::oneshot`, mirroring `corelink-fabric-server`'s suites.
 ///
-/// Fails closed: with no token and no [`ALLOW_UNAUTH_ENV`] opt-in there is no
-/// router, rather than an open one plus a log line.
+/// Fails closed: with no valid mode-0400 auth file there is no router.
 pub fn app() -> Result<Router, ExecAuthError> {
     Ok(app_with_auth(ExecAuth::from_env()?))
 }
@@ -206,8 +244,7 @@ pub fn app() -> Result<Router, ExecAuthError> {
 /// Build the router for an already-validated [`ExecAuth`] posture (Track-C C2b
 /// defense-in-depth). [`ExecAuth::bearer`] ⇒ every route requires
 /// `Authorization: Bearer <token>` or `X-Exec-Token: <token>`; anything else is
-/// a `401`. [`ExecAuth::unauthenticated_opt_in`] ⇒ served WITHOUT auth — and
-/// that value cannot exist unless the operator set [`ALLOW_UNAUTH_ENV`].
+/// a `401`. The unauthenticated posture is not constructible.
 pub fn app_with_auth(auth: ExecAuth) -> Router {
     let router = Router::new()
         .route("/exec", post(exec_handler))

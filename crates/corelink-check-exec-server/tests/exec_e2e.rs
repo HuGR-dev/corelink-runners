@@ -19,13 +19,16 @@
 use std::future::Future;
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use axum::body::Body;
 use axum::http::Request;
 use axum::http::{StatusCode, header};
 use axum::response::Response;
 use corelink_check_exec_server::{
-    ALLOW_UNAUTH_ENV, AUTH_TOKEN_ENV, ExecAuth, ExecAuthError, ExecRequest, ExecResponse, app,
-    app_with_auth, run_captured,
+    ALLOW_UNAUTH_ENV, AUTH_TOKEN_ENV, AUTH_TOKEN_FILE_ENV, ExecAuth, ExecAuthError, ExecRequest,
+    ExecResponse, app, app_with_auth, run_captured,
 };
 use serde_json::{Value, json};
 
@@ -319,6 +322,7 @@ fn library_refuses_an_unauthenticated_router_without_the_explicit_opt_in() {
     unsafe {
         std::env::remove_var(ALLOW_UNAUTH_ENV);
         std::env::remove_var(AUTH_TOKEN_ENV);
+        std::env::remove_var(AUTH_TOKEN_FILE_ENV);
     }
 
     // 1. No opt-in ⇒ the unauthenticated posture is UNCONSTRUCTIBLE. There is
@@ -330,12 +334,12 @@ fn library_refuses_an_unauthenticated_router_without_the_explicit_opt_in() {
         "no token + no opt-in must refuse, never yield an open /exec"
     );
 
-    // 2. …and the env-driven entry point refuses for the same reason, so a
-    //    caller cannot reach an open router by going through `app()` either.
+    // 2. …and the env-driven entry point refuses without a file, so a caller
+    //    cannot reach an open router by going through `app()` either.
     assert_eq!(
         app().err(),
-        Some(ExecAuthError::UnauthenticatedNotOptedIn),
-        "app() must fail closed with no token and no opt-in"
+        Some(ExecAuthError::AuthFileNotConfigured),
+        "app() must fail closed with no auth file"
     );
 
     // 3. An EMPTY token is not a gate and is refused too.
@@ -345,20 +349,30 @@ fn library_refuses_an_unauthenticated_router_without_the_explicit_opt_in() {
         "an empty bearer must not be accepted as a gate"
     );
 
-    // 4. WITH the explicit opt-in the unauthenticated posture is available —
-    //    the escape hatch still exists, it is just no longer the default.
+    // 4. Unauthenticated serving is no longer available even if the old
+    //    opt-in variable is present.
     unsafe { std::env::set_var(ALLOW_UNAUTH_ENV, "1") };
     assert!(
-        ExecAuth::unauthenticated_opt_in().is_ok(),
-        "the explicit opt-in must still yield the unauthenticated posture"
+        ExecAuth::unauthenticated_opt_in().is_err(),
+        "the legacy opt-in must not yield an unauthenticated posture"
     );
-    assert!(
-        app().is_ok(),
-        "app() must build once the opt-in is explicitly set"
-    );
+    assert!(app().is_err(), "app() must still fail without an auth file");
 
-    // 5. A configured token wins over the opt-in and stays authenticated.
+    // 5. A configured env token is rejected, even when the legacy opt-in is set.
     unsafe { std::env::set_var(AUTH_TOKEN_ENV, "from-env-tok") };
+    assert_eq!(
+        ExecAuth::from_env().unwrap_err(),
+        ExecAuthError::EnvTokenNotAccepted,
+        "the process environment is never an accepted credential source"
+    );
+    unsafe { std::env::remove_var(AUTH_TOKEN_ENV) };
+
+    // 6. A mode-0400 file is accepted and produces the authenticated posture.
+    let path = std::env::temp_dir().join(format!("corelink-auth-{}", std::process::id()));
+    std::fs::write(&path, "from-file-tok\n").expect("write auth fixture");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400))
+        .expect("chmod auth fixture");
+    unsafe { std::env::set_var(AUTH_TOKEN_FILE_ENV, &path) };
     let auth = ExecAuth::from_env().expect("token configured");
     assert!(
         auth.is_authenticated(),
@@ -368,5 +382,60 @@ fn library_refuses_an_unauthenticated_router_without_the_explicit_opt_in() {
     unsafe {
         std::env::remove_var(ALLOW_UNAUTH_ENV);
         std::env::remove_var(AUTH_TOKEN_ENV);
+        std::env::remove_var(AUTH_TOKEN_FILE_ENV);
     }
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn auth_file_rejects_missing_empty_wrong_mode_and_symlink() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let base = std::env::temp_dir().join(format!("corelink-auth-matrix-{}", std::process::id()));
+    let file = base.join("token");
+    let link = base.join("link");
+    std::fs::create_dir_all(&base).expect("fixture dir");
+    unsafe {
+        std::env::remove_var(AUTH_TOKEN_ENV);
+        std::env::set_var(AUTH_TOKEN_FILE_ENV, &file);
+    }
+    assert_eq!(
+        ExecAuth::from_env().unwrap_err(),
+        ExecAuthError::AuthFileUnreadable
+    );
+
+    std::fs::write(&file, b"\n").expect("empty fixture");
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o400)).expect("chmod");
+    assert_eq!(ExecAuth::from_env().unwrap_err(), ExecAuthError::EmptyToken);
+
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+    std::fs::write(&file, b"secret").expect("mode fixture");
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+    assert_eq!(
+        ExecAuth::from_env().unwrap_err(),
+        ExecAuthError::AuthFileUnsafe
+    );
+
+    let _ = std::fs::remove_file(&file);
+    let directory = base.join("directory");
+    std::fs::create_dir(&directory).expect("directory fixture");
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o400))
+        .expect("chmod directory");
+    unsafe { std::env::set_var(AUTH_TOKEN_FILE_ENV, &directory) };
+    assert_eq!(
+        ExecAuth::from_env().unwrap_err(),
+        ExecAuthError::AuthFileUnsafe
+    );
+
+    std::os::unix::fs::symlink("/etc/hosts", &link).expect("symlink fixture");
+    unsafe { std::env::set_var(AUTH_TOKEN_FILE_ENV, &link) };
+    assert_eq!(
+        ExecAuth::from_env().unwrap_err(),
+        ExecAuthError::AuthFileUnreadable
+    );
+
+    unsafe {
+        std::env::remove_var(AUTH_TOKEN_FILE_ENV);
+        std::env::remove_var(AUTH_TOKEN_ENV);
+    }
+    let _ = std::fs::remove_dir_all(base);
 }
