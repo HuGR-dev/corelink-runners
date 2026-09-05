@@ -375,10 +375,13 @@ export class CanaryTickOutbox {
         signal: AbortSignal.timeout(remaining),
       });
     } catch {
+      if (Date.now() >= deadline)
+        return this.terminal(head, "TIMED_OUT", Date.now());
       return "tick head pending: transmit failed";
     }
     const body = await bodyUntil(response, deadline);
-    if (body === undefined) return "tick head pending: deadline elapsed";
+    if (body === undefined)
+      return this.terminal(head, "TIMED_OUT", Date.now());
     let candidate: unknown = null;
     try {
       candidate = response.ok ? JSON.parse(body) : null;
@@ -422,6 +425,8 @@ export class CanaryTickOutbox {
         Date.now() < deadline ? "ACKED" : "TIMED_OUT",
         Date.now(),
       );
+    if (Date.now() >= deadline)
+      return this.terminal(head, "TIMED_OUT", Date.now());
     return "tick head pending: invalid ACK";
   }
 

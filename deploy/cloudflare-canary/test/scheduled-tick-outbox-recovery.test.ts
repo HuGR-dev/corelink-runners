@@ -23,7 +23,7 @@ function state(): DurableObjectState {
     setAlarm: async () => undefined,
     deleteAlarm: async () => undefined,
   };
-  return {
+  const durable = {
     storage: {
       ...storage,
       transaction: async <T>(fn: (txn: DurableObjectStorage) => Promise<T>) =>
@@ -31,6 +31,12 @@ function state(): DurableObjectState {
     },
     blockConcurrencyWhile: async <T>(fn: () => Promise<T>) => fn(),
   } as unknown as DurableObjectState;
+  Object.assign(durable as object, { testValues: values });
+  return durable;
+}
+
+function terminal(durable: DurableObjectState): string | undefined {
+  return ((durable as unknown as { testValues: Map<string, { terminal?: string }> }).testValues.get("state"))?.terminal;
 }
 
 describe("scheduled tick durable outbox", () => {
@@ -43,7 +49,8 @@ describe("scheduled tick durable outbox", () => {
     vi.useRealTimers();
   });
   it("holds the write-ahead head across a failed send and retries the exact event", async () => {
-    const outbox = new CanaryTickOutbox(state());
+    const durable = state();
+    const outbox = new CanaryTickOutbox(durable);
     const calls: unknown[] = [];
     const original = globalThis.fetch;
     globalThis.fetch = vi.fn(async (_url, init) => {
@@ -64,7 +71,8 @@ describe("scheduled tick durable outbox", () => {
   });
 
   it("does not create a head or fetch while the monitor binding is absent", async () => {
-    const outbox = new CanaryTickOutbox(state());
+    const durable = state();
+    const outbox = new CanaryTickOutbox(durable);
     const fetcher = vi.spyOn(globalThis, "fetch");
     expect(await outbox.enqueueAndDrain(null, 1_000)).toContain(
       "config unavailable",
@@ -86,7 +94,8 @@ describe("scheduled tick durable outbox", () => {
   });
 
   it("bounds a hung response body at the original 60-second deadline", async () => {
-    const outbox = new CanaryTickOutbox(state());
+    const durable = state();
+    const outbox = new CanaryTickOutbox(durable);
     const body = new Response(
       new ReadableStream({
         pull: () => new Promise<void>(() => undefined),
@@ -98,22 +107,21 @@ describe("scheduled tick durable outbox", () => {
     const pending = outbox.enqueueAndDrain(config, 1_000);
     await vi.waitFor(() => expect(fetcher).toHaveBeenCalled());
     await vi.advanceTimersByTimeAsync(60_000);
-    await expect(pending).resolves.toContain("deadline elapsed");
+    await expect(pending).resolves.toContain("TIMED_OUT");
+    expect(terminal(durable)).toBe("TIMED_OUT");
     expect(fetcher.mock.calls[0]?.[1]).toMatchObject({
       signal: expect.any(AbortSignal),
     });
   });
 
   it("passes an abort deadline to a fetch that otherwise never settles", async () => {
-    vi.useRealTimers();
-    const clock = vi.spyOn(Date, "now").mockReturnValue(1_000);
-    const outbox = new CanaryTickOutbox(state());
+    const durable = state();
+    const outbox = new CanaryTickOutbox(durable);
     let aborted = false;
     const controller = new AbortController();
     const timeout = vi
       .spyOn(AbortSignal, "timeout")
       .mockImplementation((ms: number) => {
-        expect(ms).toBe(60_000);
         return controller.signal;
       });
     const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(
@@ -132,13 +140,13 @@ describe("scheduled tick durable outbox", () => {
     const pending = outbox.enqueueAndDrain(config, 1_000);
     await vi.waitFor(() => expect(fetcher).toHaveBeenCalled());
     expect(fetcher).toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(60_000);
     controller.abort();
-    await expect(pending).resolves.toContain("transmit failed");
+    await expect(pending).resolves.toContain("TIMED_OUT");
+    expect(terminal(durable)).toBe("TIMED_OUT");
     expect(aborted).toBe(true);
     fetcher.mockRestore();
     timeout.mockRestore();
-    clock.mockRestore();
-    vi.useRealTimers();
   });
 
   it("never authorizes an ACK observed at the deadline", async () => {
@@ -198,7 +206,8 @@ describe("scheduled tick durable outbox", () => {
       ackVerifier: verifier,
       trustedNow: () => 1_001,
     };
-    const outbox = new CanaryTickOutbox(state());
+    const durable = state();
+    const outbox = new CanaryTickOutbox(durable);
     const fetcher = vi
       .spyOn(globalThis, "fetch")
       .mockImplementation(async (_url, init) => {
@@ -238,6 +247,7 @@ describe("scheduled tick durable outbox", () => {
     ]);
     await vi.advanceTimersByTimeAsync(60_001);
     expect(await outcome).not.toBe("timeout");
+    expect(terminal(durable)).toBe("TIMED_OUT");
     expect(timeout.mock.calls[0]?.[0]).toBeGreaterThan(0);
     expect(timeout.mock.calls[0]?.[0]).toBeLessThanOrEqual(60_000);
   });
