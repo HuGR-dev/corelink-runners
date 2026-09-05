@@ -76,7 +76,10 @@ pub use global_gate::{
     GlobalAdmit, GlobalAdmitGuard, GlobalGate, GlobalGatePolicy, GlobalMeters, GlobalReject,
 };
 pub use interference::{TenantWaitStats, WaitSnapshot};
-pub use ledger::{AdmitLedger, FileLedger, InMemoryLedger, LeaseLedger, LeaseRecord, LeaseState};
+pub use ledger::{
+    AdmitLedger, AdmitOutcome, ComputeGate, FileLedger, InMemoryLedger, LeaseLedger, LeaseRecord,
+    LeaseState,
+};
 pub use lifecycle::{BoxProbe, LeaseLifecycle};
 pub use meter::{CogsCounters, SlotEventKind, SlotOccupancyEvent};
 pub use pg_ledger::{PgLedger, PgTlsMode, pg_tls_mode_from_env};

@@ -23,7 +23,6 @@ fn claim_replays_and_tombstone_clears_on_restart() {
             .unwrap()
             .as_nanos()
     ));
-    let _ = std::fs::remove_file(&path);
     {
         let ledger = FileLedger::open(&path).unwrap();
         ledger.put(pending("stale")).unwrap();
