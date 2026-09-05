@@ -270,6 +270,11 @@ pub trait BoxProvisioner: Send + Sync {
         CleanupTeardown::Unconfirmed
     }
 
+    /// Drop the process-local identity after the ledger conditionally finished
+    /// cleanup. Kept separate from `teardown_pending` so a finish failure can
+    /// retry the same authoritative handle.
+    fn forget_pending_cleanup(&self, _lease_id: &str) {}
+
     /// Liveness of the box bound to `lease_id`. FAIL-SAFE: only `Ok(Dead)`
     /// authorizes reclamation; `Alive`/`Unbound`/`Err` all leave the lease alone.
     ///
@@ -419,12 +424,13 @@ impl<H: corelink_cloud_engine::HttpTransport + Send + Sync> BoxProvisioner
             return CleanupTeardown::Unconfirmed;
         };
         match self.engine.delete_job(&container) {
-            Ok(()) => {
-                self.registry.unbind(lease_id);
-                CleanupTeardown::ConfirmedDestroyed
-            }
+            Ok(()) => CleanupTeardown::ConfirmedDestroyed,
             Err(_) => CleanupTeardown::Retryable,
         }
+    }
+
+    fn forget_pending_cleanup(&self, lease_id: &str) {
+        self.registry.unbind(lease_id);
     }
 
     fn probe(&self, lease_id: &str) -> Result<ProbeStatus> {
@@ -585,12 +591,13 @@ impl<H: corelink_cloud_engine::HttpTransport + Send + Sync> BoxProvisioner
             return CleanupTeardown::Unconfirmed;
         };
         match self.engine.teardown(&container) {
-            Ok(()) => {
-                self.registry.unbind(lease_id);
-                CleanupTeardown::ConfirmedDestroyed
-            }
+            Ok(()) => CleanupTeardown::ConfirmedDestroyed,
             Err(_) => CleanupTeardown::Retryable,
         }
+    }
+
+    fn forget_pending_cleanup(&self, lease_id: &str) {
+        self.registry.unbind(lease_id);
     }
 
     fn probe(&self, lease_id: &str) -> Result<ProbeStatus> {
@@ -854,6 +861,18 @@ impl BoxProvisioner for HybridBoxProvisioner {
             HybridRoute::Check => &self.check,
         };
         sub.teardown_pending(lease_id)
+    }
+
+    fn forget_pending_cleanup(&self, lease_id: &str) {
+        let Some(route) = self.route_of(lease_id) else {
+            return;
+        };
+        let sub = match route {
+            HybridRoute::Runner | HybridRoute::CheckHost => &self.runner,
+            HybridRoute::Check => &self.check,
+        };
+        sub.forget_pending_cleanup(lease_id);
+        self.forget_route(lease_id);
     }
 
     fn probe(&self, lease_id: &str) -> Result<ProbeStatus> {

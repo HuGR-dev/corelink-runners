@@ -52,7 +52,8 @@ pub async fn sweep_stale_pending(state: &crate::AppState, max_age: Duration) -> 
     {
         Ok(rows) => rows,
         Err(e) => {
-            eprintln!("pending-cleanup: claim failed; will retry next tick: {e:#}");
+            let _ = e;
+            eprintln!("pending-cleanup: claim failed; will retry next tick");
             return 0;
         }
     };
@@ -71,15 +72,14 @@ pub async fn sweep_stale_pending(state: &crate::AppState, max_age: Duration) -> 
         let removed = match state.ledger.finish_pending_cleanup(&row.lease_id) {
             Ok(done) => done,
             Err(e) => {
-                eprintln!(
-                    "pending-cleanup: finish failed for lease={}: {e:#}",
-                    row.lease_id
-                );
+                let _ = e;
+                eprintln!("pending-cleanup: finish failed for lease={}", row.lease_id);
                 false
             }
         };
         if removed {
             // Side effects happen only after the conditional finish won.
+            state.forget_pending_cleanup(&row.lease_id);
             state.revoke_pat_for(&row.lease_id).await;
             state.forget_lease(&row.lease_id);
             finished += 1;

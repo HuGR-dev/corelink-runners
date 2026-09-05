@@ -1971,10 +1971,15 @@ impl AppState {
         match tokio::task::spawn_blocking(move || prov.teardown_pending(&lid)).await {
             Ok(result) => result,
             Err(e) => {
-                eprintln!("pending-cleanup: teardown task panicked for lease {lease_id}: {e}");
+                let _ = e;
+                eprintln!("pending-cleanup: teardown task panicked for lease {lease_id}");
                 crate::pending_cleanup::CleanupTeardown::Retryable
             }
         }
+    }
+
+    pub(crate) fn forget_pending_cleanup(&self, lease_id: &str) {
+        self.provisioner.forget_pending_cleanup(lease_id);
     }
 
     /// Probe the liveness of the box bound to `lease_id` on a blocking thread
