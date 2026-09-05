@@ -607,7 +607,7 @@ pub fn spawn_reaper_with_pending_age(
             }
             // Stale-Pending sweep: reclaim cap slots leaked by a Pending whose
             // instance died between reserve and the Held transition / rollback.
-            let p = sweep_stale_pending(&state, pending_max_age).await;
+            let p = crate::pending_cleanup::sweep_stale_pending(&state, pending_max_age).await;
             if p > 0 {
                 eprintln!("reaper: reclaimed {p} stale Pending lease(s) (leaked cap slot)");
             }
@@ -801,170 +801,19 @@ pub fn spawn_crash_sweep(
 }
 
 // ── Stale-Pending sweep (WP-PENDING-SWEEP) ───────────────────────────────────
-//
-// `try_admit` reserves a `Pending` lease BEFORE provisioning, and that Pending
-// counts against the tenant concurrency cap (the §1 active set is Pending+Held).
-// The normal path moves Pending→Held (acquire success) or `remove`s it (provision
-// failure rollback). But if the instance dies BETWEEN the reserve and either of
-// those — e.g. it crashes mid-provision — the Pending row sits forever counting
-// against the cap. The deadline reaper only sweeps `Held` (a Pending has no
-// `deadline_ms` and is never in `held()`), so nothing reclaims it.
-//
-// This sweep reclaims a GENUINELY-stale Pending: one whose `created_at_ms` is
-// older than a bound well past any legitimate provision window. It tears down
-// any box the dead instance may have half-provisioned (best-effort, mirroring
-// the Held reaper's teardown-first posture) and then `remove`s the Pending row —
-// the §1-honest rollback (a Pending has no legal terminal transition), freeing
-// the leaked cap slot. NO slot-meter event is emitted: the `Acquired` event
-// fires only at Pending→Held (see the acquire handler), so a never-Held Pending
-// never recorded one — there is nothing to balance.
+// The confirmed claim/teardown/finish implementation lives in
+// [`crate::pending_cleanup`]. This module retains only the historical public
+// entry point and configuration re-exports.
 
 /// Default staleness bound for the [`sweep_stale_pending`] reclaim: a `Pending`
 /// older than this is considered leaked (well past any legitimate provision
 /// window — provisioning a box is an O(seconds) operation, so 5 minutes is a
 /// very conservative floor that can never catch a mid-provision Pending).
-pub const DEFAULT_PENDING_MAX_AGE: Duration = Duration::from_secs(300);
+pub use crate::pending_cleanup::{DEFAULT_PENDING_MAX_AGE, pending_max_age_from_env};
 
-/// Resolve the stale-Pending staleness bound from an environment-variable
-/// accessor.
-///
-/// Reads `FABRIC_PENDING_MAX_AGE_SECS`.
-/// - Absent or empty → [`DEFAULT_PENDING_MAX_AGE`] (300 s).
-/// - Present → parse as `u32`; value `0` or an unparseable string → `Err`
-///   (a zero bound would reap a just-reserved Pending mid-provision — a
-///   deployer mistake, fail-closed rather than silently disable).
-///
-/// `get` is `|k| std::env::var(k).ok()` in production; a map lookup in tests.
-pub fn pending_max_age_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<Duration> {
-    match get("FABRIC_PENDING_MAX_AGE_SECS").filter(|s| !s.is_empty()) {
-        None => Ok(DEFAULT_PENDING_MAX_AGE),
-        Some(val) => {
-            let parsed = val.trim().parse::<u32>().map_err(|_| {
-                anyhow::anyhow!(
-                    "FABRIC_PENDING_MAX_AGE_SECS must be a valid u32 (got {:?})",
-                    val.trim()
-                )
-            })?;
-            if parsed == 0 {
-                anyhow::bail!(
-                    "FABRIC_PENDING_MAX_AGE_SECS must be >= 1 \
-                     (0 would reap a Pending mid-provision)"
-                );
-            }
-            Ok(Duration::from_secs(parsed as u64))
-        }
-    }
-}
-
-/// Run one stale-Pending sweep: reclaim every `Pending` lease older than
-/// `max_age` by tearing down any half-provisioned box (best-effort) and
-/// removing the Pending row, freeing the leaked concurrency slot.
-///
-/// Returns the number of stale Pending leases reclaimed this tick.
-///
-/// # Fail-safe
-///
-/// ONLY a Pending strictly older than `max_age` (per its durable
-/// `created_at_ms`) is touched — a fresh Pending that is legitimately
-/// mid-provision is NEVER reclaimed. The bound is set well past any legitimate
-/// provision window ([`DEFAULT_PENDING_MAX_AGE`]).
-///
-/// # Posture (GUARDED-delete-first, won-the-race CAS like [`reap_once`])
-///
-/// The reclaim is a CAS on the lease still being `Pending`: between the
-/// snapshot above and this point, the sweep `await`s — and a concurrent acquire
-/// can complete provisioning and transition the SAME lease `Pending → Held`.
-/// So the row is removed via the GUARDED [`LeaseLedger::remove_if_pending`]
-/// (delete iff `state = Pending`, atomic under the ledger lock) — NOT the
-/// state-blind `remove`, which would delete the now-live `Held` lease out from
-/// under its running box (over-admit + a leaked box with no ledger record).
-///
-/// Because the box of a lease that won the race to `Held` MUST survive, the
-/// guarded delete is the GATE: teardown runs only AFTER we win the delete (the
-/// row was genuinely still Pending and is now gone, so any box it
-/// half-provisioned is orphaned and ours to reclaim). A lost CAS
-/// (`Ok(false)` — raced to Held, already rolled back, or already gone) tears
-/// down NOTHING and counts NOTHING. Teardown is still best-effort: a stale
-/// Pending has no deadline to retry on, so a teardown failure is logged (the
-/// box may leak) but the cap slot is already reclaimed by the delete.
-///
-/// # Lock-ordering note
-///
-/// No `MutexGuard` is held across any `await`: the stale-Pending snapshot is
-/// taken in a scoped block (guard dropped before any await), the guarded
-/// `remove_if_pending` re-acquires the ledger lock briefly (dropped before the
-/// teardown await), and teardown holds no lock. The compile-time
-/// [`_ASSERT_SWEEP_STALE_PENDING_IS_SEND`] assertion enforces this.
+/// Run one confirmed stale-Pending cleanup sweep.
 pub async fn sweep_stale_pending(state: &crate::AppState, max_age: Duration) -> usize {
-    let now = state.clock.now_ms();
-    let max_age_ms = max_age.as_millis() as u64;
-
-    // ── 1. Snapshot stale Pending leases — guard dropped before any await.
-    let stale = {
-        let ledger = &*state.ledger;
-        match ledger.pending_older_than(now, max_age_ms) {
-            Ok(records) => records,
-            Err(e) => {
-                eprintln!(
-                    "pending-sweep: ledger pending_older_than() read failed this tick \
-                     (skipping, will retry next tick): {e:#}"
-                );
-                Vec::new()
-            }
-        }
-        // `ledger` (MutexGuard) dropped here — before any await below.
-    };
-
-    let mut reclaimed = 0usize;
-
-    for rec in stale {
-        // ── 2. GUARDED reclaim FIRST — win the CAS atomically under the ledger
-        // lock: remove the row IFF it is STILL `Pending`. In the await window
-        // since the snapshot, a concurrent acquire may have transitioned this
-        // very lease `Pending → Held` (the provision completed). The guarded
-        // delete makes that case a no-op (`Ok(false)`), so we never delete a
-        // live `Held` lease — the W2-B regression. The §1-honest rollback
-        // (Pending has no legal terminal transition) frees the leaked cap slot.
-        let removed = {
-            let ledger = &*state.ledger;
-            ledger.remove_if_pending(&rec.lease_id).unwrap_or(false)
-            // guard dropped here at end of block
-        };
-
-        if !removed {
-            // Lost the CAS: the lease raced to `Held` (a LIVE lease — leave its
-            // box ALONE), was already rolled back, or is already gone. Tear down
-            // nothing, count nothing.
-            continue;
-        }
-
-        // ── 3. TEARDOWN (best-effort) — no lock held. We won the delete, so the
-        // lease was genuinely still Pending: any box the dead instance
-        // half-provisioned is now orphaned and ours to reclaim. A failure is
-        // logged but does NOT un-reclaim the cap slot (a Pending has no deadline
-        // to retry on); the box may leak but the slot is already freed.
-        let torn = state.teardown_lease(&rec.lease_id).await;
-        if !torn {
-            eprintln!(
-                "pending-sweep: teardown of reclaimed stale Pending {} failed — box may be \
-                 LEAKED (the cap slot is already freed; a Pending has no deadline to retry on)",
-                rec.lease_id
-            );
-        }
-
-        // A7b (audit r4): a stale Pending may carry a minted CAS PAT (the mint
-        // happens WHILE the lease is Pending, before provision). Revoke it BEFORE
-        // forget_lease (which drops the pat_ids entry), mirroring reap_once /
-        // surface_crashes — else the PAT lives to D-9 self-expiry with no lease.
-        state.revoke_pat_for(&rec.lease_id).await;
-        // GC any image side-table entry the half-acquire recorded (the slot
-        // meter never got an Acquired event for a never-Held Pending, so there
-        // is nothing to free there).
-        state.forget_lease(&rec.lease_id);
-        reclaimed += 1;
-    }
-
-    reclaimed
+    crate::pending_cleanup::sweep_stale_pending(state, max_age).await
 }
 
 // ── Compile-time Send guard ────────────────────────────────────────────────
@@ -1074,6 +923,10 @@ mod tests {
                 .push(lease_id.to_string());
             Ok(())
         }
+        fn teardown_pending(&self, lease_id: &str) -> crate::CleanupTeardown {
+            let _ = self.teardown(lease_id);
+            crate::CleanupTeardown::ConfirmedDestroyed
+        }
         fn probe(&self, _lease_id: &str) -> Result<ProbeStatus> {
             Ok(ProbeStatus::Unbound)
         }
@@ -1121,6 +974,15 @@ mod tests {
                 Ok(())
             } else {
                 Err(anyhow::anyhow!("teardown intentionally failed"))
+            }
+        }
+        fn teardown_pending(&self, lease_id: &str) -> crate::CleanupTeardown {
+            if self.should_succeed.load(Ordering::SeqCst) {
+                let _ = self.teardown(lease_id);
+                crate::CleanupTeardown::ConfirmedDestroyed
+            } else {
+                let _ = self.teardown(lease_id);
+                crate::CleanupTeardown::Retryable
             }
         }
         fn probe(&self, _lease_id: &str) -> Result<ProbeStatus> {
@@ -1178,6 +1040,15 @@ mod tests {
                 Ok(())
             } else {
                 Err(anyhow::anyhow!("teardown intentionally failed"))
+            }
+        }
+        fn teardown_pending(&self, lease_id: &str) -> crate::CleanupTeardown {
+            if self.teardown_succeed.load(Ordering::SeqCst) {
+                let _ = self.teardown(lease_id);
+                crate::CleanupTeardown::ConfirmedDestroyed
+            } else {
+                let _ = self.teardown(lease_id);
+                crate::CleanupTeardown::Retryable
             }
         }
         fn probe(&self, _lease_id: &str) -> Result<ProbeStatus> {
