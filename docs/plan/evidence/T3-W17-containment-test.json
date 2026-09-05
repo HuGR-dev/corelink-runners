@@ -3,10 +3,10 @@
   "artifact_id": "t3-w17-containment-test",
   "kind": "test",
   "status": "PASS",
-  "observed_at": "2026-09-02T08:57:34Z",
+  "observed_at": "2026-09-05T17:37:36Z",
   "source": {
     "repository": "corelink-runners",
-    "commit_sha": "d0447da4a7163c43e65bf4f2d08f0197778503f3",
+    "commit_sha": "9aef4136c225ba23153db8c416433cc8e6845788",
     "path": "docs/plan/evidence/T3-W17-containment-test.json"
   },
   "claims": [
@@ -14,25 +14,59 @@
     "T3-W17"
   ],
   "version": {
-    "id": "d0447da4a7163c43e65bf4f2d08f0197778503f3"
+    "id": "9aef4136c225ba23153db8c416433cc8e6845788"
   },
   "evidence": {
     "contract_sha256": "ede785af3f97311517b6ec58f8956340dc924fa9978821c881ec1f0c2bc85520",
-    "implementation_commit_sha": "d0447da4a7163c43e65bf4f2d08f0197778503f3",
-    "base_commit_sha": "e79fd69272b5164dd7fbe2bd1a055aa4ad4e0449",
+    "implementation_commit_sha": "9aef4136c225ba23153db8c416433cc8e6845788",
+    "base_commit_sha": "ca2d47b850dd0c178806c31281a6f03a8ea99efa",
+    "log_provenance": [
+      {
+        "path": "/private/tmp/corelink-heavy-9aef4136-rerun.log",
+        "sha256": "8792ec3530b9b4f45b7a5891b93b538b389cf6db46755c0e88b9fa393e0e7cf2",
+        "started_at": "2026-09-05T16:37:41Z",
+        "scope": "entrypoint, completeness, fmt, clippy, full Rust workspace"
+      },
+      {
+        "path": "/private/tmp/corelink-heavy-9aef4136-continuation.log",
+        "sha256": "07cc79f8b3f23df73c7a78808025d2ff3b59fcadeae0c77efd855404cd619fd8",
+        "started_at": "2026-09-05T17:27:49Z",
+        "scope": "cargo deny, cargo audit, npm ci, typecheck, superseded coverage attempt"
+      },
+      {
+        "path": "/private/tmp/corelink-heavy-9aef4136-coverage-rerun.log",
+        "sha256": "e0c9d2ae5252695b29fc03e79797d3754e22839aa9bcaec7d09d301f264b9488",
+        "started_at": "2026-09-05T17:35:25Z",
+        "completed_at": "2026-09-05T17:37:36Z",
+        "scope": "exact-SHA Cloudflare coverage rerun and Wrangler dry-run"
+      }
+    ],
+    "quality_gates": {
+      "entrypoint_signal": { "status": "PASS" },
+      "entrypoint_devshm": { "status": "PASS" },
+      "e2e_completeness": { "status": "PASS", "passed": 4, "failed": 0 },
+      "cargo_fmt": { "status": "PASS" },
+      "cargo_clippy": { "status": "PASS" },
+      "cargo_test_workspace": { "status": "PASS" },
+      "cargo_deny": { "status": "PASS" },
+      "cargo_audit": { "status": "PASS" }
+    },
     "dependency_install": {
-      "command": "npm --prefix deploy/cloudflare ci",
-      "status": "PASS"
+      "command": "npm ci",
+      "working_directory": "deploy/cloudflare",
+      "status": "PASS",
+      "observed_at": "2026-09-05T17:27:49Z"
     },
     "typecheck": {
       "command": "npm run typecheck",
       "working_directory": "deploy/cloudflare",
       "status": "PASS",
-      "test_output_sha256": "f8368b627d95ab1b96fe595cbb9b588edcf51f39ab9cc975fe413d1e359a65e2"
+      "observed_at": "2026-09-05T17:27:49Z"
     },
     "focused": {
-      "command": "npm exec vitest run --config vitest.config.ts -- test/containment-intake.test.ts test/containment-redrive.test.ts",
+      "command": "npm run test:coverage",
       "working_directory": "deploy/cloudflare",
+      "execution": "exact-SHA full-suite rerun; scoped T3-W17 files observed in the same run",
       "switch_matrix": {
         "AUTOSCALER_INTAKE_PAUSED": [
           "unset",
@@ -47,58 +81,50 @@
           "invalid-values"
         ]
       },
-      "case_counts": {
-        "intake": {
-          "passed": 19,
-          "failed": 0,
-          "total": 19
-        },
-        "redrive": {
-          "passed": 35,
-          "failed": 0,
-          "total": 35
-        },
-        "all": {
-          "passed": 54,
-          "failed": 0,
-          "total": 54
-        }
+      "files": {
+        "containment-intake": { "passed": 25, "failed": 0, "total": 25 },
+        "containment-redrive": { "passed": 4, "failed": 0, "total": 4 },
+        "containment-redrive-drain": { "passed": 15, "failed": 0, "total": 15 },
+        "containment-redrive-reservation": { "passed": 32, "failed": 0, "total": 32 },
+        "containment-effect-route": { "passed": 24, "failed": 0, "total": 24 },
+        "containment-effect-ledger": { "passed": 13, "failed": 0, "total": 13 }
       },
-      "failures": [],
-      "test_output_sha256": "7ef265022906ef2a6aa5b5caf07025b36b29de450bd85cd43b5d4a735f0a16d9"
+      "scoped_total": { "passed": 113, "failed": 0, "total": 113 },
+      "test_output_sha256": "e0c9d2ae5252695b29fc03e79797d3754e22839aa9bcaec7d09d301f264b9488"
     },
     "shared_bundle": {
       "command": "npm run test:coverage",
       "working_directory": "deploy/cloudflare",
-      "execution": "local exact-SHA fallback after GitHub Actions startup_failure created zero jobs",
-      "stack_tip_sha": "d0447da4a7163c43e65bf4f2d08f0197778503f3",
-      "test_files": {
-        "passed": 41,
-        "failed": 0,
-        "total": 41
-      },
-      "tests": {
-        "passed": 632,
-        "failed": 0,
-        "total": 632
-      },
+      "status": "PASS",
+      "test_files": { "passed": 45, "failed": 0, "total": 45 },
+      "tests": { "passed": 694, "failed": 0, "skipped": 0, "total": 694 },
       "coverage_percent": {
-        "statements": 82.03,
-        "branches": 84.23,
-        "functions": 92.07,
-        "lines": 82.03
+        "statements": 84.73,
+        "branches": 83.2,
+        "functions": 88.31,
+        "lines": 84.73
       },
-      "failures": [],
-      "test_output_sha256": "66cc0e4d96e519f4307a1eaa46c44c76516e51139a548ac6a6adb169a40da341"
+      "test_output_sha256": "e0c9d2ae5252695b29fc03e79797d3754e22839aa9bcaec7d09d301f264b9488"
+    },
+    "superseded_attempt": {
+      "command": "npm run test:coverage",
+      "working_directory": "deploy/cloudflare",
+      "status": "ENVIRONMENTAL_TIMEOUT",
+      "failed_suite": "test/github-app.test.ts",
+      "failed_tests": 0,
+      "skipped_tests": 12,
+      "passed_tests": 682,
+      "total_tests": 694,
+      "reason": "Vitest hook timed out at 10000ms; a separate isolated github-app retry passed 12/12 before the final full-suite rerun",
+      "test_output_sha256": "07cc79f8b3f23df73c7a78808025d2ff3b59fcadeae0c77efd855404cd619fd8"
     },
     "production_dry_run": {
       "command": "npx wrangler deploy --dry-run --outdir <temporary-directory>",
       "working_directory": "deploy/cloudflare",
       "status": "PASS",
       "containment_binding": "ContainmentDO",
-      "sqlite_migration": "v7",
-      "legacy_fixture_branch": "compiled to return false"
+      "test_output_sha256": "e0c9d2ae5252695b29fc03e79797d3754e22839aa9bcaec7d09d301f264b9488"
     }
   },
-  "notes": "Test evidence only; no deploy, live probe, activation, freeze, dispatch, or acceptance credit. The evidence commit follows the signed implementation commit to avoid a self-referential commit hash; do not squash."
+  "notes": "Test evidence only. The Wrangler invocation was --dry-run and grants no deploy or live credit. No live probe, activation, freeze, dispatch, or acceptance credit is claimed. The initial coverage attempt timed out in the github-app hook; the exact-SHA rerun passed 45/45 files and 694/694 tests, including the isolated github-app 12/12 result. Documentation is excluded from LOC accounting. Do not squash this evidence child commit."
 }

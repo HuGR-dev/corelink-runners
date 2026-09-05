@@ -935,43 +935,7 @@ export function parseReconcilerRepos(csv: string | undefined): string[] {
     .filter((s) => s.includes("/"));
 }
 
-/**
- * Look up a repo's installation_id from the REPO_INSTALLATION_MAP JSON. A repo
- * webhook carries no `installation.id`; for known first-party repos we inject it
- * so the server-derived mint (#283) runs WARM. Returns "" when the map is
- * absent/malformed or the repo isn't listed (⇒ COLD, fail-open — never throws).
- */
-export function installationIdForRepo(json: string | undefined, repoFullName: string): string {
-  if (!json || !repoFullName) return "";
-  try {
-    const map = JSON.parse(json) as Record<string, unknown>;
-    const v = map[repoFullName];
-    return typeof v === "string" ? v : typeof v === "number" ? String(v) : "";
-  } catch {
-    return "";
-  }
-}
-
-/**
- * Option-C per-tenant-PAT dispatch (server-confirmed live 2026-07-21). Look up a
- * repo in REPO_TENANT_PAT_MAP — a JSON `{ "<owner/repo>": "<SECRET_ENV_NAME>" }`
- * that maps a repo to the NAME of the secret binding holding that tenant's
- * acquiring PAT (the raw PAT is a Worker secret, never in this var). Returns the
- * secret NAME, or "" when the map is absent/malformed or the repo isn't listed
- * (⇒ default installation-derived mint). Never throws. The caller reads
- * `env[<name>]` to get the PAT, so a mapped-but-unbound secret still falls back to
- * the default path (no PAT ⇒ no Option-C).
- */
-export function tenantPatSecretForRepo(json: string | undefined, repoFullName: string): string {
-  if (!json || !repoFullName) return "";
-  try {
-    const map = JSON.parse(json) as Record<string, unknown>;
-    const v = map[repoFullName];
-    return typeof v === "string" ? v : "";
-  } catch {
-    return "";
-  }
-}
+export { installationIdForRepo, tenantPatSecretForRepo } from "./repo_config_lookup";
 
 // ── External-GA installation allowlist (WP-D) ────────────────────────────────
 //

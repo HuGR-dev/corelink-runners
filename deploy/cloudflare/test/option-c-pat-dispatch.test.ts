@@ -47,6 +47,10 @@ describe("tenantPatSecretForRepo — repo → secret-name map (pure)", () => {
   it("returns the secret NAME for a mapped repo", () => {
     expect(tenantPatSecretForRepo(map, REPO)).toBe("COLD_ORGANIC_TENANT_PAT");
   });
+  it("matches canonical lowercase webhook repos to mixed-case map keys", () => {
+    const mixedCaseMap = JSON.stringify({ "HuGR-Labs/Corelink-Cold-Organic-E2E": "COLD_ORGANIC_TENANT_PAT" });
+    expect(tenantPatSecretForRepo(mixedCaseMap, REPO.toLowerCase())).toBe("COLD_ORGANIC_TENANT_PAT");
+  });
   it("returns '' for an unmapped repo", () => {
     expect(tenantPatSecretForRepo(map, "acme/other")).toBe("");
   });
@@ -55,6 +59,11 @@ describe("tenantPatSecretForRepo — repo → secret-name map (pure)", () => {
     expect(tenantPatSecretForRepo("", REPO)).toBe("");
     expect(tenantPatSecretForRepo("{not json", REPO)).toBe("");
     expect(tenantPatSecretForRepo(JSON.stringify({ [REPO]: 42 }), REPO)).toBe("");
+  });
+  it("fails closed for an invalid query or duplicate canonical map keys", () => {
+    expect(tenantPatSecretForRepo(map, "not-a-repo")).toBe("");
+    const duplicate = JSON.stringify({ "Acme/Repo": "PAT_A", " acme/repo ": "PAT_B" });
+    expect(tenantPatSecretForRepo(duplicate, "acme/repo")).toBe("");
   });
 });
 
