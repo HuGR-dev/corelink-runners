@@ -251,6 +251,20 @@ describe("T3-W17 deterministic continuation crash seams", () => {
     expect(JSON.stringify([...d.storage.map.entries()])).toBe(before);
   });
 
+  it("refuses null and primitive canonical pointers without throwing or mutation", async () => {
+    for (const malformed of [null, 7, "pointer"] as const) {
+      vi.setSystemTime(T0);
+      const { d } = await queuedDrain();
+      const lease = await d.instance.acquireLease("authority-owner", T0);
+      await d.instance.claimNext("authority-owner", lease!.epoch, T0);
+      const tuple = await drainOwnerTuple("acme/repo", "1", "containment:v1:evt-1", "evt-1", "authority-owner", lease!.epoch);
+      d.storage.map.set(containmentSpawnActiveKey(tuple), malformed);
+      const before = [...d.storage.map.entries()];
+      await expect(d.instance.admitDrainOwner("evt-1", tuple, T0)).resolves.toBe(false);
+      expect([...d.storage.map.entries()]).toEqual(before);
+    }
+  });
+
   it("refuses malformed drain authority shapes without mutation", async () => {
     const cases: Array<(d: ReturnType<typeof makeDO>) => void> = [
       d => { d.storage.map.set("containment:v1:meta", { ...(d.storage.map.get("containment:v1:meta") as object), backlog_count: Number.NaN }); },

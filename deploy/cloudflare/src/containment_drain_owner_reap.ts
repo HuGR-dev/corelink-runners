@@ -88,12 +88,14 @@ export async function admitDrainOwnerInTransaction(
     || event.effect_id !== tuple.effect_id) return false;
 
   const pointerKey = activeKey(tuple);
-  const pointer = await storage.get<OwnerPointerV1>(pointerKey);
+  const pointer = await storage.get<OwnerPointerV1 | null | unknown>(pointerKey);
   if (pointer === undefined) return true;
-  const oldTuple = exactDrainTuple(pointer.tuple);
+  if (pointer === null || typeof pointer !== "object") return false;
+  const candidate = pointer as OwnerPointerV1;
+  const oldTuple = exactDrainTuple(candidate.tuple);
   const oldAttempt = oldTuple ? await storage.get<OwnerRecordV1>(attemptKey(oldTuple)) : undefined;
   if (!oldTuple || !oldAttempt || activeKey(oldTuple) !== pointerKey
-    || oldTuple.event_id !== eventId || !pointerMatchesAttempt(pointer, oldAttempt, oldTuple)
+    || oldTuple.event_id !== eventId || !pointerMatchesAttempt(candidate, oldAttempt, oldTuple)
     || !recordValid(oldAttempt, oldTuple)) return false;
   if (JSON.stringify(oldTuple) === JSON.stringify(tuple)) return cleanPreEffect(oldAttempt);
   if (oldTuple.lease_epoch >= tuple.lease_epoch) return false;
