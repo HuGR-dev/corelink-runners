@@ -41,7 +41,7 @@ make_fixture() {
   printf '%s\n' '#!/usr/bin/env bash' \
     'set -euo pipefail' \
     'secret_path="$2"' \
-    'mode="$(stat -f "%Lp" "$secret_path" 2>/dev/null || stat -c "%a" "$secret_path")"' \
+    'if mode="$(stat -c "%a" "$secret_path" 2>/dev/null)"; then :; else mode="$(stat -f "%Lp" "$secret_path" 2>/dev/null)"; fi' \
     'printf "%s\n%s\n" "$secret_path" "$mode" > "$JIT_OBSERVATION"' \
     'exec "$REAL_PYTHON" "$@"' > "$root/tool-bin/python3"
   chmod +x "$root/tool-bin/python3"
@@ -56,7 +56,10 @@ make_fixture() {
     '[[ "$(cat .runner)" == "runner-config" ]]' \
     '[[ "$(cat .credentials)" == "au3-26-jit-secret-never-in-proc" ]]' \
     '[[ "$(cat .credentials_rsaparams)" == "rsa-config" ]]' \
-    'printf "%s\n%s\n%s\n" "$(stat -f "%Lp" .runner 2>/dev/null || stat -c "%a" .runner)" "$(stat -f "%Lp" .credentials 2>/dev/null || stat -c "%a" .credentials)" "$(stat -f "%Lp" .credentials_rsaparams 2>/dev/null || stat -c "%a" .credentials_rsaparams)" > "$CONFIG_MODES"' \
+    'if runner_mode="$(stat -c "%a" .runner 2>/dev/null)"; then :; else runner_mode="$(stat -f "%Lp" .runner 2>/dev/null)"; fi' \
+    'if credentials_mode="$(stat -c "%a" .credentials 2>/dev/null)"; then :; else credentials_mode="$(stat -f "%Lp" .credentials 2>/dev/null)"; fi' \
+    'if rsa_mode="$(stat -c "%a" .credentials_rsaparams 2>/dev/null)"; then :; else rsa_mode="$(stat -f "%Lp" .credentials_rsaparams 2>/dev/null)"; fi' \
+    'printf "%s\n%s\n%s\n" "$runner_mode" "$credentials_mode" "$rsa_mode" > "$CONFIG_MODES"' \
     'sleep 2' > "$root/run.sh"
   chmod +x "$root/run.sh"
 }
