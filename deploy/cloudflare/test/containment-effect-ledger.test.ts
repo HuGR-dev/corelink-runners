@@ -1,75 +1,91 @@
 import { describe, expect, it, vi } from "vitest";
-import {
-  ContainmentEffectLedger,
-  containmentEffectMirrorFromAttempt,
-  containmentEffectMirrorKey,
-  type ContainmentEffectAttempt,
-  type ContainmentEffectBinding,
-  type ContainmentEffectIdentity,
-  type ContainmentEffectReceipt,
-} from "../src/containment_effect_ledger";
+import { ContainmentEffectLedger, ownerTupleDigest, type ContainmentEffectReceipt, type OwnerTuple } from "../src/containment_effect_ledger";
 
-function clone<T>(value: T): T { return value === undefined ? value : JSON.parse(JSON.stringify(value)) as T; }
+const nonce = "0123456789abcdef0123456789abcdef";
+const nonce2 = "fedcba9876543210fedcba9876543210";
+const tuple = (caller_nonce = nonce): OwnerTuple => ({
+  repo: "Acme/Repo", job_id: "123", path: "redrive", event_id: "delivery-1",
+  reservation_epoch: 7, effect_id: "containment:v1:redrive:acme/repo/123", owner: "owner-a",
+  token: "token-a", lease_epoch: 3, drain_owner: "drain-a", drain_lease_epoch: 3, caller_nonce,
+});
+const clone = <T>(v: T): T => v === undefined ? v : JSON.parse(JSON.stringify(v)) as T;
 class Storage {
   map = new Map<string, unknown>(); private tail = Promise.resolve();
-  async get<T>(key: string): Promise<T | undefined> { return clone(this.map.get(key) as T | undefined); }
+  async get<T>(key: string): Promise<T | undefined> { return clone(this.map.get(key) as T); }
   async put(key: string, value: unknown): Promise<void> { this.map.set(key, clone(value)); }
-  async transaction<T>(fn: (s: Storage) => Promise<T>): Promise<T> {
-    const run = this.tail.then(async () => { const snapshot = new Map([...this.map].map(([k, v]) => [k, clone(v)])); const tx = new Storage(); tx.map = snapshot; const out = await fn(tx); this.map = snapshot; return out; });
-    this.tail = run.then(() => undefined, () => undefined); return run;
-  }
+  async transaction<T>(fn: (s: Storage) => Promise<T>): Promise<T> { const run = this.tail.then(async () => { const tx = new Storage(); tx.map = new Map([...this.map].map(([k, v]) => [k, clone(v)])); const out = await fn(tx); this.map = tx.map; return out; }); this.tail = run.then(() => undefined, () => undefined); return run; }
 }
-function kv() { const map = new Map<string, string>(); return { map, get: vi.fn(async (key: string) => map.get(key) ?? null), put: vi.fn(async (key: string, value: string) => { map.set(key, value); }), delete: vi.fn(async (key: string) => { map.delete(key); }) }; }
-function make() { const storage = new Storage(); const store = kv(); return { storage, store, ledger: new ContainmentEffectLedger(storage, store) }; }
-function id(repo = "acme/repo", job_id = "123", effect_id = "containment:v1:redrive:acme/repo/123"): ContainmentEffectIdentity { return { repo, job_id, effect_id }; }
-function step(a: ContainmentEffectAttempt, now = 1_750_000_000_000) { return { identity: id(a.repo, a.job_id, a.effect_id), nonce: a.nonce, owner: a.owner, owner_token: a.owner_token, lease_epoch: a.lease_epoch, now }; }
-function binding(): ContainmentEffectBinding { return { schema_version: 1, provider: "cloudflare-container", resource_id: "handle-1", idempotency_key: "idem-1", binding_sha256: "a".repeat(64) }; }
-function sync(store: ReturnType<typeof kv>, a: ContainmentEffectAttempt) { const mirror = containmentEffectMirrorFromAttempt(a); if (mirror) store.map.set(containmentEffectMirrorKey(id(a.repo, a.job_id, a.effect_id)), JSON.stringify(mirror)); }
-function receipt(a: ContainmentEffectAttempt): ContainmentEffectReceipt { const b = a.binding!; return { schema_version: 1, trusted: true, provider: b.provider, resource_id: b.resource_id, idempotency_key: b.idempotency_key, nonce: a.nonce, permit_id: a.permit!.permit_id, binding_sha256: b.binding_sha256, receipt_id: "receipt-1", receipt_sha256: "b".repeat(64), provider_signature: "provider-signature" }; }
+function make() {
+  const storage = new Storage(); const map = new Map<string, string>();
+  const kv = { get: vi.fn(async (k: string) => map.get(k) ?? null), put: vi.fn(async (k: string, v: string) => { map.set(k, v); }), delete: vi.fn(async (k: string) => { map.delete(k); }) };
+  return { storage, map, kv, ledger: new ContainmentEffectLedger(storage, kv) };
+}
+async function claim(ledger: ContainmentEffectLedger, t = tuple()) {
+  const request = { schema_version: 1 as const, tuple: t, caller_nonce: t.caller_nonce };
+  const prepared = await ledger.prepare(request); expect(prepared.kind).toBe("prepared");
+  const acquired = await ledger.acquire(request); expect(acquired.kind).toBe("acquired");
+  const mirror = await ledger.mirror(request); expect(mirror.kind).toBe("exact");
+  const confirmed = await ledger.confirm({ ...request, observation_kind: mirror.kind, observation_digest: mirror.payload_digest }, mirror.payload_digest!, mirror.payload_digest!);
+  expect(confirmed.kind).toBe("permit_issued"); expect(confirmed.permit).not.toBeNull();
+  return { request, mirror, confirmed };
+}
 
-describe("T3-W17 canonical effect owner ledger", () => {
-  it("serializes PREPARED through COMMITTED and keeps completion canonical", async () => {
-    const { ledger, store } = make(); const identity = id(); const prepared = await ledger.prepareEffect({ identity, owner: "owner-a", lease_epoch: 1, now: 1 });
-    expect(prepared.status).toBe("prepared"); if (prepared.status !== "prepared") return; sync(store, prepared.attempt);
-    const claimed = await ledger.acquireEffectClaim(step(prepared.attempt, 2)); expect(claimed.status).toBe("transitioned"); if (claimed.status !== "transitioned") return; sync(store, claimed.attempt);
-    const issued = await ledger.issueEffectPermit(step(claimed.attempt, 3)); expect(issued.status).toBe("transitioned"); if (issued.status !== "transitioned") return; sync(store, issued.attempt);
-    const bound = await ledger.bindEffect({ ...step(issued.attempt, 4), permit_id: issued.attempt.permit!.permit_id, binding: binding() }); expect(bound.status).toBe("transitioned"); if (bound.status !== "transitioned") return; sync(store, bound.attempt);
-    const driving = await ledger.beginEffectDrive({ ...step(bound.attempt, 5), permit_id: bound.attempt.permit!.permit_id }); expect(driving.status).toBe("transitioned"); if (driving.status !== "transitioned") return; sync(store, driving.attempt);
-    const committed = await ledger.commitEffect({ ...step(driving.attempt, 6), permit_id: driving.attempt.permit!.permit_id, receipt: receipt(driving.attempt) });
-    expect(committed.status).toBe("committed"); expect((await ledger.prepareEffect({ identity, owner: "owner-b", lease_epoch: 2 })).status).toBe("committed");
+describe("T3-W17-R14 owner ledger", () => {
+  it("uses exact active/attempt/mirror keys and preserves caller nonce", async () => {
+    const { ledger, storage, map } = make(); const t = tuple(); const request = { schema_version: 1 as const, tuple: t, caller_nonce: nonce };
+    expect((await ledger.prepare(request)).kind).toBe("prepared");
+    expect([...storage.map]).toEqual([
+      ["containment:v1:spawn-attempt:acme/repo/123/redrive/containment%3Av1%3Aredrive%3Aacme%2Frepo%2F123/0123456789abcdef0123456789abcdef", expect.anything()],
+      ["containment:v1:spawn-active:acme/repo/123/redrive/containment%3Av1%3Aredrive%3Aacme%2Frepo%2F123", expect.anything()],
+    ]);
+    const again = await ledger.acquire(request); expect(again.kind).toBe("acquired");
+    const mirror = await ledger.mirror(request); expect(mirror.key).toContain("spawn-mirror:"); expect(map.has(mirror.key)).toBe(true);
+    expect(again.record?.tuple.caller_nonce).toBe(nonce);
   });
-  it("keeps one active pointer and fences competing owners/nonces", async () => {
-    const { ledger, storage } = make(); const identity = id(); const first = await ledger.prepareEffect({ identity, owner: "a", lease_epoch: 1 }); expect(first.status).toBe("prepared"); if (first.status !== "prepared") return;
-    expect((await ledger.prepareEffect({ identity, owner: "b", lease_epoch: 1 })).status).toBe("active");
-    expect((await ledger.acquireEffectClaim({ ...step(first.attempt), nonce: "other", owner: "b", owner_token: "token" })).status).toBe("stale");
-    expect([...storage.map.keys()].filter((key) => key.includes("effect-owner:")).length).toBe(1);
+
+  it("requires exact mirror write/readback before issuing a permit", async () => {
+    const { ledger } = make(); const t = tuple(); const request = { schema_version: 1 as const, tuple: t, caller_nonce: nonce };
+    await ledger.prepare(request); await ledger.acquire(request); const digest = await ownerTupleDigest(t);
+    expect((await ledger.confirm({ ...request, observation_kind: "mismatch", observation_digest: digest }, digest, digest)).kind).toBe("rejected");
+    expect((await ledger.acquire(request)).kind).toBe("owned");
   });
-  it("reads the actual KV mirror and refuses missing, legacy, or divergent state", async () => {
-    const { ledger, store } = make(); const prepared = await ledger.prepareEffect({ identity: id(), owner: "a", lease_epoch: 1 }); if (prepared.status !== "prepared") return;
-    await ledger.acquireEffectClaim(step(prepared.attempt)); const issued = await ledger.issueEffectPermit(step(prepared.attempt)); if (issued.status !== "transitioned") return;
-    const bound = await ledger.bindEffect({ ...step(issued.attempt), permit_id: issued.attempt.permit!.permit_id, binding: binding() }); if (bound.status !== "transitioned") return;
-    store.map.clear(); expect((await ledger.beginEffectDrive({ ...step(bound.attempt), permit_id: bound.attempt.permit!.permit_id })).status).toBe("mirror_mismatch");
-    store.map.set(containmentEffectMirrorKey(id()), JSON.stringify({ schema_version: 0 })); expect((await ledger.beginEffectDrive({ ...step(bound.attempt), permit_id: bound.attempt.permit!.permit_id })).status).toBe("mirror_mismatch");
-    sync(store, bound.attempt); store.map.set(containmentEffectMirrorKey(id()), store.map.get(containmentEffectMirrorKey(id()))!.replace('"owner":"a"', '"owner":"other"'));
-    expect((await ledger.beginEffectDrive({ ...step(bound.attempt), permit_id: bound.attempt.permit!.permit_id })).status).toBe("mirror_mismatch");
+
+  it("rejects a caller nonce mismatch and preserves a crash-retry nonce", async () => {
+    const { ledger } = make(); const t = tuple();
+    const request = { schema_version: 1 as const, tuple: t, caller_nonce: nonce };
+    expect((await ledger.prepare({ ...request, caller_nonce: nonce2 })).kind).toBe("rejected");
+    expect((await ledger.prepare(request)).kind).toBe("prepared");
+    expect((await ledger.prepare(request)).kind).toBe("busy");
+    expect((await ledger.acquire(request)).record?.nonce).toBe(nonce);
   });
-  it("treats DRIVING as unknown-terminal and never permits a second drive", async () => {
-    const { ledger, store } = make(); const p = await ledger.prepareEffect({ identity: id(), owner: "a", lease_epoch: 1 }); if (p.status !== "prepared") return;
-    await ledger.acquireEffectClaim(step(p.attempt)); const i = await ledger.issueEffectPermit(step(p.attempt)); if (i.status !== "transitioned") return; const b = await ledger.bindEffect({ ...step(i.attempt), permit_id: i.attempt.permit!.permit_id, binding: binding() }); if (b.status !== "transitioned") return; sync(store, b.attempt);
-    const d = await ledger.beginEffectDrive({ ...step(b.attempt), permit_id: b.attempt.permit!.permit_id }); expect(d.status).toBe("transitioned"); if (d.status !== "transitioned") return; sync(store, d.attempt);
-    expect((await ledger.prepareEffect({ identity: id(), owner: "b", lease_epoch: 2 })).status).toBe("unknown_terminal"); expect((await ledger.beginEffectDrive({ ...step(d.attempt), permit_id: d.attempt.permit!.permit_id })).status).toBe("unknown_terminal");
+
+  it("executes prepare/acquire/confirm/bind/DRIVING/commit with identity-bound receipt", async () => {
+    const { ledger } = make(); const t = tuple(); const { request, confirmed } = await claim(ledger, t); const permit = confirmed.permit!;
+    const started = await ledger.beginEffect(request, permit.permit_id); expect(started.kind).toBe("already_started");
+    const bound = await ledger.bind(request, permit.permit_id, started.proof!.proof_id, "binding-1"); expect(bound.kind).toBe("bound");
+    const driving = await ledger.markDriving(request, permit.permit_id, started.proof!.proof_id); expect(driving.kind).toBe("driving");
+    const receipt: ContainmentEffectReceipt = { schema_version: 1, trusted: true, repo: "acme/repo", job_id: "123", path: "redrive", event_id: "delivery-1", reservation_epoch: 7, effect_id: t.effect_id, provider: "provider", resource_id: "resource-1", idempotency_key: "binding-1", nonce, permit_id: permit.permit_id, binding_sha256: "binding-1", receipt_id: "receipt-1", receipt_sha256: "a".repeat(64), provider_signature: "sig" };
+    expect((await ledger.commitEffect(request, permit.permit_id, started.proof!.proof_id, receipt)).kind).toBe("committed");
   });
-  it("requires a trusted receipt bound to provider, resource, idempotency key, nonce, permit, and digest", async () => {
-    const { ledger, store } = make(); const p = await ledger.prepareEffect({ identity: id(), owner: "a", lease_epoch: 1 }); if (p.status !== "prepared") return; await ledger.acquireEffectClaim(step(p.attempt)); const i = await ledger.issueEffectPermit(step(p.attempt)); if (i.status !== "transitioned") return; const b = await ledger.bindEffect({ ...step(i.attempt), permit_id: i.attempt.permit!.permit_id, binding: binding() }); if (b.status !== "transitioned") return; sync(store, b.attempt); const d = await ledger.beginEffectDrive({ ...step(b.attempt), permit_id: b.attempt.permit!.permit_id }); if (d.status !== "transitioned") return; sync(store, d.attempt);
-    const bad = { ...receipt(d.attempt), resource_id: "other" }; expect((await ledger.commitEffect({ ...step(d.attempt), permit_id: d.attempt.permit!.permit_id, receipt: bad })).status).toBe("mirror_mismatch"); expect((await ledger.getEffectAttempt(id(), d.attempt.nonce))?.state).toBe("DRIVING");
+
+  it("fails closed on corrupt, missing, or legacy records", async () => {
+    const { ledger, storage, map } = make(); const t = tuple(); const request = { schema_version: 1 as const, tuple: t, caller_nonce: nonce };
+    await ledger.prepare(request); const active = [...storage.map.keys()][1]; storage.map.set(active, { schema_version: 0 });
+    expect((await ledger.acquire(request)).kind).toBe("legacy_unknown"); storage.map.delete(active); expect((await ledger.acquire(request)).kind).toBe("legacy_unknown");
+    map.set("spawn:123", JSON.stringify({ owner: "legacy" })); expect((await ledger.acquire(request)).kind).toBe("legacy_unknown");
   });
-  it("only aborts pre-effect and requires stale age plus reaper authority for BOUND", async () => {
-    const { ledger, store } = make(); const p = await ledger.prepareEffect({ identity: id(), owner: "a", lease_epoch: 7, now: 100 }); if (p.status !== "prepared") return; const c = await ledger.acquireEffectClaim(step(p.attempt, 101)); if (c.status !== "transitioned") return; const i = await ledger.issueEffectPermit(step(c.attempt, 102)); if (i.status !== "transitioned") return; const b = await ledger.bindEffect({ ...step(i.attempt, 103), permit_id: i.attempt.permit!.permit_id, binding: binding() }); if (b.status !== "transitioned") return;
-    expect((await ledger.abortEffect(step(b.attempt, 104))).status).toBe("busy"); expect((await ledger.reapEffect({ identity: id(), nonce: b.attempt.nonce, authority: "containment-reaper-v1", lease_epoch: 7, stale_after_ms: 10, now: 105 })).status).toBe("busy");
-    expect((await ledger.reapEffect({ identity: id(), nonce: b.attempt.nonce, authority: "containment-reaper-v1", lease_epoch: 7, stale_after_ms: 10, now: 114 })).status).toBe("reaped");
+
+  it("turns an untrusted commit into UNKNOWN and never drives a second time", async () => {
+    const { ledger } = make(); const t = tuple(); const { request, confirmed } = await claim(ledger, t); const p = confirmed.permit!; const started = await ledger.beginEffect(request, p.permit_id); await ledger.bind(request, p.permit_id, started.proof!.proof_id, "binding-1"); await ledger.markDriving(request, p.permit_id, started.proof!.proof_id);
+    const bad: ContainmentEffectReceipt = { schema_version: 1, trusted: true, repo: "other/repo", job_id: "123", path: "redrive", event_id: t.event_id, reservation_epoch: 7, effect_id: t.effect_id, provider: "provider", resource_id: "resource-1", idempotency_key: "binding-1", nonce, permit_id: p.permit_id, binding_sha256: "binding-1", receipt_id: "receipt-1", receipt_sha256: "a".repeat(64), provider_signature: "sig" };
+    expect((await ledger.commitEffect(request, p.permit_id, started.proof!.proof_id, bad)).kind).toBe("unknown"); expect((await ledger.beginEffect(request, p.permit_id)).kind).toBe("rejected");
   });
-  it("scopes pointers by repository and rejects malformed mirrors", async () => {
-    const { ledger } = make(); expect((await ledger.prepareEffect({ identity: id("acme/repo"), owner: "a", lease_epoch: 1 })).status).toBe("prepared"); expect((await ledger.prepareEffect({ identity: id("other/repo"), owner: "b", lease_epoch: 1 })).status).toBe("prepared");
-    expect(containmentEffectMirrorKey(id("acme/repo"))).not.toBe(containmentEffectMirrorKey(id("other/repo")));
+
+  it("aborts/reaps only pre-effect, tombstones nonce, and rejects stale tuples", async () => {
+    const { ledger } = make(); const t = tuple(); const request = { schema_version: 1 as const, tuple: t, caller_nonce: nonce };
+    await ledger.prepare(request); expect((await ledger.abort(request, t.owner, t.token)).kind).toBe("aborted"); expect((await ledger.acquire(request)).kind).toBe("rejected");
+    const fresh = { ...request, tuple: tuple(nonce2), caller_nonce: nonce2 }; expect((await ledger.prepare(fresh)).kind).toBe("prepared");
+    const claimed = await ledger.acquire(fresh); expect(claimed.kind).toBe("acquired"); const wrong = { ...fresh, tuple: { ...fresh.tuple, token: "stale" } }; expect((await ledger.acquire(wrong)).kind).toBe("legacy_unknown");
+    const c = await claim(ledger, { ...tuple("abcdefabcdefabcdefabcdefabcdefab"), effect_id: "effect-2" }); const p = c.confirmed.permit!; expect((await ledger.abort(c.request)).kind).toBe("rejected"); expect((await ledger.reap(c.request, 1, "wrong-authority")).kind).toBe("rejected"); expect((await ledger.reap(c.request, 1)).kind).toBe("rejected"); expect(p.permit_id).toBeTruthy();
   });
 });
