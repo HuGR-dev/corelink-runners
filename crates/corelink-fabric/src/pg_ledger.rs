@@ -311,7 +311,7 @@ fn record_from_row(row: &tokio_postgres::Row) -> anyhow::Result<LeaseRecord> {
 /// across the split (the #1 risk if they diverged).
 #[derive(Clone)]
 pub struct PgLedger {
-    pub(crate) pool: Pool,
+    pool: Pool,
     handle: Handle,
     /// C3 — MECHANIZED pool-floor (the connection reservation). Bounds the
     /// number of admit calls that may hold a pooled connection across the
@@ -472,7 +472,7 @@ impl PgLedger {
     /// holding only a `Handle`), `block_in_place` is illegal, so fall back to a
     /// plain [`Handle::block_on`](tokio::runtime::Handle::block_on) — the thread
     /// is not a worker, so blocking it starves nothing.
-    pub(crate) fn block_on<F, T>(&self, fut: F) -> T
+    fn block_on<F, T>(&self, fut: F) -> T
     where
         F: std::future::Future<Output = T>,
     {
@@ -663,21 +663,7 @@ impl LeaseLedger for PgLedger {
                 // A snapshot-only `NOT EXISTS` would let a claim commit while an
                 // already-started UPDATE still sees the old snapshot.
                 let txn = client.transaction().await?;
-                let locked = txn
-                    .query_opt(
-                        "SELECT 1 FROM leases WHERE lease_id = $1 FOR UPDATE",
-                        &[&lease_id],
-                    )
-                    .await?;
-                if locked.is_none()
-                    || txn
-                        .query_opt(
-                            "SELECT 1 FROM pending_cleanup_claims WHERE lease_id = $1",
-                            &[&lease_id],
-                        )
-                        .await?
-                        .is_some()
-                {
+                if !pending_cleanup_pg::lock_unclaimed_lease(&txn, lease_id).await? {
                     txn.rollback().await.ok();
                     anyhow::bail!(
                         "illegal/lost lease transition for {lease_id}: -> {to_label} \
@@ -741,21 +727,7 @@ impl LeaseLedger for PgLedger {
             // Advisory lock precedes the row lock, matching the accounting-on
             // admit/terminal ordering. The claim check happens *after* the row
             // lock, so it cannot race an INSERT into the claim table.
-            let locked = txn
-                .query_opt(
-                    "SELECT 1 FROM leases WHERE lease_id = $1 FOR UPDATE",
-                    &[&lease_id],
-                )
-                .await?;
-            if locked.is_none()
-                || txn
-                    .query_opt(
-                        "SELECT 1 FROM pending_cleanup_claims WHERE lease_id = $1",
-                        &[&lease_id],
-                    )
-                    .await?
-                    .is_some()
-            {
+            if !pending_cleanup_pg::lock_unclaimed_lease(&txn, lease_id).await? {
                 txn.rollback().await.ok();
                 anyhow::bail!(
                     "illegal/lost lease transition for {lease_id}: -> {to_label} \
@@ -948,80 +920,7 @@ impl LeaseLedger for PgLedger {
         // untouched (rowcount 0) and reported as a violation, so the consumed
         // vCPU·ms is never silently dropped. Accounting-OFF leases keep today's
         // exact unconditional-delete behavior (byte-identical).
-        self.block_on(async {
-            let mut client = self.pool.get().await?;
-            let pre = client
-                .query_opt(
-                    "SELECT tenant, box_vcpu_count IS NOT NULL AS accounting_on \
-                     FROM leases WHERE lease_id = $1",
-                    &[&lease_id],
-                )
-                .await?;
-            let Some(pre) = pre else {
-                return Ok(false);
-            };
-            let tenant: String = pre.get("tenant");
-            let accounting_on: bool = pre.get("accounting_on");
-            let txn = client.transaction().await?;
-            if accounting_on {
-                txn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", &[&tenant])
-                    .await?;
-            }
-            let locked = txn
-                .query_opt(
-                    "SELECT 1 FROM leases WHERE lease_id = $1 FOR UPDATE",
-                    &[&lease_id],
-                )
-                .await?;
-            if locked.is_none()
-                || txn
-                    .query_opt(
-                        "SELECT 1 FROM pending_cleanup_claims WHERE lease_id = $1",
-                        &[&lease_id],
-                    )
-                    .await?
-                    .is_some()
-            {
-                txn.rollback().await.ok();
-                return Ok(false);
-            }
-            let row = txn
-                .query_opt(
-                    "DELETE FROM leases \
-                     WHERE lease_id = $1 \
-                       AND (state = 'pending' OR box_vcpu_count IS NULL) \
-                     RETURNING (box_vcpu_count IS NOT NULL) AS was_accounting_on",
-                    &[&lease_id],
-                )
-                .await?;
-            if row.is_some() {
-                txn.commit().await?;
-                return Ok(true);
-            }
-            // Nothing deleted: either the lease is absent/already-gone (today's
-            // Ok(false)), OR it is an accounting-on, non-Pending lease we
-            // REFUSED to drop. Distinguish so the latter is a loud violation.
-            let still = txn
-                .query_opt(
-                    "SELECT state::text AS state FROM leases \
-                     WHERE lease_id = $1 AND box_vcpu_count IS NOT NULL \
-                       AND state <> 'pending'",
-                    &[&lease_id],
-                )
-                .await?;
-            if let Some(r) = still {
-                let state: String = r.get("state");
-                txn.rollback().await.ok();
-                anyhow::bail!(
-                    "remove({lease_id}): refusing to drop an accounting-on lease in \
-                     state {state:?} — `remove` is Pending-only under accounting-on \
-                     (wave plan §13 F5; use `transition` to a terminal state so the \
-                     consumed vCPU·ms accrues)"
-                );
-            }
-            txn.commit().await?;
-            Ok(false)
-        })
+        pending_cleanup_pg::remove(self, lease_id, false)
     }
 
     fn remove_if_pending(&self, lease_id: &str) -> anyhow::Result<bool> {
@@ -1033,53 +932,8 @@ impl LeaseLedger for PgLedger {
         // iff a still-`Pending` row was removed; `Ok(false)` if absent OR no
         // longer Pending. This is the DB-atomic counterpart of the default
         // check-then-remove (the InMemory/File guard holds the same lock the
-        // sweep does; the DB holds it in the single statement).
-        self.block_on(async {
-            let mut client = self.pool.get().await?;
-            let pre = client
-                .query_opt(
-                    "SELECT tenant, box_vcpu_count IS NOT NULL AS accounting_on \
-                     FROM leases WHERE lease_id = $1",
-                    &[&lease_id],
-                )
-                .await?;
-            let Some(pre) = pre else {
-                return Ok(false);
-            };
-            let tenant: String = pre.get("tenant");
-            let accounting_on: bool = pre.get("accounting_on");
-            let txn = client.transaction().await?;
-            if accounting_on {
-                txn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", &[&tenant])
-                    .await?;
-            }
-            let locked = txn
-                .query_opt(
-                    "SELECT 1 FROM leases WHERE lease_id = $1 FOR UPDATE",
-                    &[&lease_id],
-                )
-                .await?;
-            if locked.is_none()
-                || txn
-                    .query_opt(
-                        "SELECT 1 FROM pending_cleanup_claims WHERE lease_id = $1",
-                        &[&lease_id],
-                    )
-                    .await?
-                    .is_some()
-            {
-                txn.rollback().await.ok();
-                return Ok(false);
-            }
-            let n = txn
-                .execute(
-                    "DELETE FROM leases WHERE lease_id = $1 AND state = 'pending'",
-                    &[&lease_id],
-                )
-                .await?;
-            txn.commit().await?;
-            Ok(n == 1)
-        })
+        // sweep does; the Pg cleanup fence holds it in one short transaction).
+        pending_cleanup_pg::remove(self, lease_id, true)
     }
 
     fn by_tenant(&self, t: &TenantId) -> anyhow::Result<Vec<LeaseRecord>> {
@@ -1122,7 +976,7 @@ impl LeaseLedger for PgLedger {
         // bound has not yet sat LONGER than max_age, so it is not reclaimed
         // (consistent with InMemory / File). The filter is server-side so an
         // instance never pulls fresh, mid-provision Pendings.
-        let cutoff = now_ms.saturating_sub(max_age_ms);
+        let cutoff = pending_cleanup_pg::strict_cutoff_ms(now_ms, max_age_ms)?;
         self.block_on(async {
             let client = self.pool.get().await?;
             let rows = client
@@ -1133,7 +987,7 @@ impl LeaseLedger for PgLedger {
                      FROM leases \
                      WHERE state = 'pending' AND created_at_ms < $1 \
                      ORDER BY lease_id",
-                    &[&(cutoff as i64)],
+                    &[&cutoff],
                 )
                 .await?;
             rows.iter().map(record_from_row).collect()

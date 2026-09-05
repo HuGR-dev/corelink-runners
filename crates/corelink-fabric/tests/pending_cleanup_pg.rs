@@ -61,7 +61,6 @@ fn claim_fences_pending_to_held_race_and_finish_is_idempotent() {
 
     let gate = Arc::new(Barrier::new(3));
     let claim_ledger = ledger.clone();
-    let claim_id = id.clone();
     let claim_gate = Arc::clone(&gate);
     let claim = std::thread::spawn(move || {
         claim_gate.wait();
@@ -102,7 +101,7 @@ fn accounting_pending_claim_keeps_slot_and_reservation_until_finish() {
     let tenant = TenantId::new(nonce("accounting-tenant")).unwrap();
     let gate = ComputeGate {
         period_key: 202609,
-        ceiling_vcpu_ms: 100,
+        ceiling_vcpu_ms: 15,
         box_vcpu_count: 1,
         new_reserved_vcpu_ms: 10,
     };
@@ -128,12 +127,84 @@ fn accounting_pending_claim_keeps_slot_and_reservation_until_finish() {
         AdmitOutcome::OverConcurrency,
         "claimed Pending remains in the concurrency and compute reservation set"
     );
+    assert_eq!(
+        ledger
+            .try_admit_with_compute(
+                pending(&nonce("compute-blocked"), &tenant, 1),
+                100,
+                Some(gate)
+            )
+            .unwrap(),
+        AdmitOutcome::OverCompute,
+        "with concurrency nonbinding, the claimed Pending reservation still consumes Σ"
+    );
     assert!(ledger.finish_pending_cleanup(&id).unwrap());
     assert_eq!(
         ledger
-            .try_admit_with_compute(pending(&nonce("freed"), &tenant, 1), 1, Some(gate))
+            .try_admit_with_compute(pending(&nonce("freed"), &tenant, 1), 100, Some(gate))
             .unwrap(),
         AdmitOutcome::Admitted,
         "conditional finish releases the slot and reservation"
     );
+}
+
+#[test]
+fn claimed_pending_refuses_every_normal_mutator_for_accounting_off_and_on() {
+    let Some(url) = db_url() else {
+        eprintln!("pending_cleanup_pg mutator fence: TEST_DATABASE_URL unset — UNRUN");
+        return;
+    };
+    let (_rt, ledger) = connect(&url);
+    let tenant = TenantId::new(nonce("fence-tenant")).unwrap();
+
+    let off = nonce("fence-off");
+    assert!(ledger.try_admit(pending(&off, &tenant, 1), 10).unwrap());
+    let first_claim = ledger.claim_stale_pending_cleanup(100, 10).unwrap();
+    assert!(first_claim.iter().any(|row| row.lease_id == off));
+    let retry_claim = ledger.claim_stale_pending_cleanup(100, 10).unwrap();
+    assert!(
+        retry_claim.iter().any(|row| row.lease_id == off),
+        "claimed Pending retries"
+    );
+    assert!(!ledger.remove(&off).unwrap());
+    assert!(!ledger.remove_if_pending(&off).unwrap());
+    assert!(ledger.transition(&off, RunnerState::Held, 100).is_err());
+    assert!(matches!(
+        ledger.get(&off).unwrap().unwrap().state,
+        LeaseState::Pending
+    ));
+    assert!(ledger.finish_pending_cleanup(&off).unwrap());
+
+    let on = nonce("fence-on");
+    let compute = ComputeGate {
+        period_key: 202609,
+        ceiling_vcpu_ms: 100,
+        box_vcpu_count: 1,
+        new_reserved_vcpu_ms: 10,
+    };
+    assert_eq!(
+        ledger
+            .try_admit_with_compute(pending(&on, &tenant, 1), 10, Some(compute))
+            .unwrap(),
+        AdmitOutcome::Admitted
+    );
+    ledger
+        .set_envelope_checkpoint(&on, "{\"redacted\":true}")
+        .unwrap();
+    assert!(
+        ledger
+            .claim_stale_pending_cleanup(100, 10)
+            .unwrap()
+            .iter()
+            .any(|row| row.lease_id == on)
+    );
+    assert!(!ledger.remove(&on).unwrap());
+    assert!(!ledger.remove_if_pending(&on).unwrap());
+    assert!(ledger.transition(&on, RunnerState::Held, 100).is_err());
+    assert!(matches!(
+        ledger.get(&on).unwrap().unwrap().state,
+        LeaseState::Pending
+    ));
+    assert!(ledger.finish_pending_cleanup(&on).unwrap());
+    assert!(ledger.get_envelope_checkpoint(&on).unwrap().is_none());
 }
