@@ -157,4 +157,6 @@ ENV HOME=/home/coder \
 EXPOSE 6080/tcp 7681/tcp 8080/tcp 9090/tcp
 
 # INV-01: PID 1 dumb-init for zombie reaping & signal proxying
-ENTRYPOINT ["/usr/bin/dumb-init", "--", "/entrypoint.sh"]
+# The shell bridge must receive provider env first; entrypoint re-execs a clean
+# dumb-init after converting EXEC_SERVER_AUTH_TOKEN to the 0400 file.
+ENTRYPOINT ["/entrypoint.sh"]

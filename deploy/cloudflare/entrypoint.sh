@@ -103,10 +103,17 @@ if [[ -v EXEC_SERVER_AUTH_TOKEN ]]; then
     # this shell's /proc entry before hydration and supervisor startup.
     exec env -u EXEC_SERVER_AUTH_TOKEN "$0" "$@"
 fi
-if [[ "${CORELINK_AUTH_BRIDGED:-}" == 1 ]]; then
+if [[ "${CORELINK_DUMB_INIT:-}" == 1 ]]; then
     validate_auth_file
+elif [[ "${CORELINK_AUTH_BRIDGED:-}" == 1 ]]; then
+    validate_auth_file
+    export CORELINK_DUMB_INIT=1
+    exec /usr/bin/dumb-init -- "$0" "$@"
+else
+    error "auth bridge marker is missing"
+    exit 1
 fi
-unset CORELINK_AUTH_BRIDGED
+unset CORELINK_AUTH_BRIDGED CORELINK_DUMB_INIT
 
 cleanup_auth_file() {
     rm -f "${EXEC_SERVER_AUTH_TOKEN_FILE}" || true

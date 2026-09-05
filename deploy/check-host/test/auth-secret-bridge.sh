@@ -41,6 +41,13 @@ case "${EXEC_MODE:-normal}" in
     fail) exit 42 ;;
 esac
 EOF
+cat >"$bin/dumb-init" <<'EOF'
+#!/bin/sh
+env >"${OUTER_ENV_CAPTURE:?}"
+[ "${1:-}" = -- ] || exit 64
+shift
+exec "$@"
+EOF
 chmod 0755 "$bin"/*
 check_script="$tmp/check-host.sh"
 sed "s#/usr/local/bin/corelink-check-exec-server#\"$bin/exec-server\"#" \
@@ -78,6 +85,10 @@ if CORELINK_AUTH_BRIDGED=1 EXEC_SERVER_AUTH_TOKEN_FILE="$tmp/marker-missing" \
     TOOLCHAIN_DIGEST=digest TOOLCHAIN_DIR="$tmp/toolchain" "$check_script" 2>/dev/null; then
     echo 'marker without auth file unexpectedly accepted' >&2; exit 1
 fi
+if EXEC_SERVER_AUTH_TOKEN_FILE="$tmp/no-marker" TOOLCHAIN_DIGEST=digest \
+    TOOLCHAIN_DIR="$tmp/toolchain" "$check_script" 2>/dev/null; then
+    echo 'missing marker unexpectedly accepted' >&2; exit 1
+fi
 
 # TERM is forwarded and still removes the ephemeral file.
 term_auth="$tmp/term/run/corelink/token"
@@ -85,7 +96,7 @@ AUTH_ENV_CAPTURE="$tmp/term.env" AUTH_FILE_CAPTURE="$tmp/term.file" AUTH_MODE_CA
     PATH="$bin:$PATH" AUTH_ARG_CAPTURE="$tmp/term.argv" EXEC_MODE=term EXEC_SERVER_AUTH_TOKEN=term-secret EXEC_SERVER_AUTH_TOKEN_FILE="$term_auth" \
     TOOLCHAIN_DIGEST=digest TOOLCHAIN_DIR="$tmp/toolchain" "$check_script" &
 term_pid=$!
-for _ in 1 2 3 4 5 6 7 8 9 10; do [ -e "$tmp/term.mode" ] && break; sleep 0.01; done
+for _ in $(seq 1 100); do [ -e "$tmp/term.mode" ] && break; sleep 0.01; done
 kill -TERM "$term_pid"
 if wait "$term_pid"; then
     echo 'TERM unexpectedly changed child status' >&2; exit 1
@@ -144,11 +155,13 @@ fi
 cloud_script="$tmp/cloudflare.sh"
 sed -e "s#/usr/local/bin/clw#$bin/clw#g" \
     -e "s#/usr/bin/supervisord#$bin/supervisord#g" \
+    -e "s#/usr/bin/dumb-init#$bin/dumb-init#g" \
     -e "s#/data/chrome#$tmp/chrome#g" -e "s#/data/workspace#$tmp/workspace#g" \
     "$root/../cloudflare/entrypoint.sh" >"$cloud_script"
 chmod 0755 "$cloud_script"
 cloud_auth="$tmp/cloud/run/corelink/token"
-AUTH_ENV_CAPTURE="$tmp/cloud.env" AUTH_FILE_CAPTURE="$tmp/cloud.file" AUTH_MODE_CAPTURE="$tmp/cloud.mode" AUTH_ARG_CAPTURE="$tmp/cloud.argv" \
+AUTH_ENV_CAPTURE="$tmp/cloud.env" AUTH_FILE_CAPTURE="$tmp/cloud.file" AUTH_MODE_CAPTURE="$tmp/cloud.mode" AUTH_ARG_CAPTURE="$tmp/cloud.argv" OUTER_ENV_CAPTURE="$tmp/cloud.outer.env" \
+    PATH="$bin:$PATH" \
     EXEC_SERVER_AUTH_TOKEN='cloud-secret' EXEC_SERVER_AUTH_TOKEN_FILE="$cloud_auth" \
     CLW_TENANT=tenant WORKSPACE_NAME=workspace PROFILE_NAME=profile \
     "$cloud_script" >"$tmp/cloud.log" 2>&1 || { cat "$tmp/cloud.log" >&2; exit 1; }
@@ -158,16 +171,18 @@ test ! -e "$cloud_auth"
 ! grep -q '^EXEC_SERVER_AUTH_TOKEN=' "$tmp/cloud.env"
 grep -q "^EXEC_SERVER_AUTH_TOKEN_FILE=$cloud_auth$" "$tmp/cloud.env"
 ! grep -q 'cloud-secret' "$tmp/cloud.argv" "$tmp/cloud.log"
+! grep -q '^EXEC_SERVER_AUTH_TOKEN=' "$tmp/cloud.outer.env"
+grep -q '^ENTRYPOINT \["/entrypoint.sh"\]' "$root/../cloudflare/Dockerfile.runner-devenv"
 grep -q '^user=coder$' "$root/../cloudflare/supervisord.conf"
 grep -q '^USER coder$' "$root/../cloudflare/Dockerfile.runner-devenv"
 
 # DevEnv TERM forwarding runs the existing snapshot path and removes auth.
 cloud_term_auth="$tmp/cloud-term/run/corelink/token"
 AUTH_ENV_CAPTURE="$tmp/cloud-term.env" AUTH_FILE_CAPTURE="$tmp/cloud-term.file" AUTH_MODE_CAPTURE="$tmp/cloud-term.mode" \
-    AUTH_ARG_CAPTURE="$tmp/cloud-term.argv" EXEC_MODE=term EXEC_SERVER_AUTH_TOKEN=cloud-term EXEC_SERVER_AUTH_TOKEN_FILE="$cloud_term_auth" \
+    AUTH_ARG_CAPTURE="$tmp/cloud-term.argv" OUTER_ENV_CAPTURE="$tmp/cloud-term.outer.env" EXEC_MODE=term EXEC_SERVER_AUTH_TOKEN=cloud-term EXEC_SERVER_AUTH_TOKEN_FILE="$cloud_term_auth" \
     CLW_TENANT=tenant WORKSPACE_NAME=workspace PROFILE_NAME=profile "$cloud_script" &
 cloud_term_pid=$!
-for _ in 1 2 3 4 5 6 7 8 9 10; do [ -e "$tmp/cloud-term.mode" ] && break; sleep 0.01; done
+for _ in $(seq 1 100); do [ -e "$tmp/cloud-term.mode" ] && break; sleep 0.01; done
 kill -TERM "$cloud_term_pid"
 wait "$cloud_term_pid"
 test ! -e "$cloud_term_auth"
@@ -175,14 +190,14 @@ test ! -e "$cloud_term_auth"
 # Supervisor failure remains observable and still cleans the bridge file.
 cloud_fail_auth="$tmp/cloud-fail/run/corelink/token"
 if AUTH_ENV_CAPTURE="$tmp/cloud-fail.env" AUTH_FILE_CAPTURE="$tmp/cloud-fail.file" AUTH_MODE_CAPTURE="$tmp/cloud-fail.mode" \
-    AUTH_ARG_CAPTURE="$tmp/cloud-fail.argv" EXEC_MODE=fail EXEC_SERVER_AUTH_TOKEN=cloud-fail EXEC_SERVER_AUTH_TOKEN_FILE="$cloud_fail_auth" \
+    AUTH_ARG_CAPTURE="$tmp/cloud-fail.argv" OUTER_ENV_CAPTURE="$tmp/cloud-fail.outer.env" EXEC_MODE=fail EXEC_SERVER_AUTH_TOKEN=cloud-fail EXEC_SERVER_AUTH_TOKEN_FILE="$cloud_fail_auth" \
     CLW_TENANT=tenant WORKSPACE_NAME=workspace PROFILE_NAME=profile "$cloud_script"; then
     echo 'supervisor failure unexpectedly swallowed' >&2; exit 1
 fi
 test ! -e "$cloud_fail_auth"
 
 cloud_hydrate_fail_auth="$tmp/cloud-hydrate-fail/run/corelink/token"
-if CLW_FAIL=1 EXEC_SERVER_AUTH_TOKEN=cloud-hydrate-fail \
+if CLW_FAIL=1 OUTER_ENV_CAPTURE="$tmp/cloud-hydrate-fail.outer.env" EXEC_SERVER_AUTH_TOKEN=cloud-hydrate-fail \
     EXEC_SERVER_AUTH_TOKEN_FILE="$cloud_hydrate_fail_auth" \
     CLW_TENANT=tenant WORKSPACE_NAME=workspace PROFILE_NAME=profile "$cloud_script" \
     >/dev/null 2>&1; then

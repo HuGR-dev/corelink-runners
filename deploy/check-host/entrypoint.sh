@@ -96,6 +96,9 @@ if [ "${EXEC_SERVER_AUTH_TOKEN+x}" = x ]; then
 fi
 if [ "${CORELINK_AUTH_BRIDGED:-}" = 1 ]; then
     validate_auth_file
+else
+    echo "[check-host] FATAL: auth bridge marker is missing" >&2
+    exit 1
 fi
 unset CORELINK_AUTH_BRIDGED
 
