@@ -98,7 +98,9 @@ const SPAWN_COMPLETION = ["webhook_job_completed"];
  *  - health non-200 (or unreachable) ⇒ CRITICAL
  *  - a counter surface unreachable ⇒ CRITICAL (the surface being down is the alert)
  *  - a counter surface reachable but 401 (key mismatch) ⇒ WARN; other non-200
- *    non-404 ⇒ WARN; 404 (not armed yet) ⇒ silent (pre-arm is expected)
+ *    non-404 ⇒ WARN; unconfigured 404 ⇒ silent (pre-arm is expected), while a
+ *    configured 404 is a route regression
+ *  - a 200 response with an invalid body ⇒ CRITICAL
  *  - mint_failures / spawn_failed delta > 0 ⇒ CRITICAL
  *  - provision_capacity_503 / revoke_failures delta > 0 ⇒ WARN
  *  - counter reset (surface went backwards) ⇒ INFO (fabricd/spawn restarted)
@@ -178,6 +180,12 @@ export function evaluate(prev: Snapshot | null, cur: Snapshot, cfg: RulesConfig)
   deltaAlert(alerts, "delta:spawn:spawn_failed", "critical", "spawn-worker spawn_failed rising",
     positiveDelta(prevSpawn, cur.spawn.counters, "spawn_failed"),
     "Direct-fleet mint/spawn threw — runners are not coming up for queued jobs.");
+
+  // Keep bad-auth traffic distinct from worker failures: it is actionable
+  // abuse/configuration evidence, but must not be counted as a spawn outage.
+  deltaAlert(alerts, "delta:spawn:webhook_auth_failed", "warn", "spawn-worker webhook_auth_failed rising",
+    positiveDelta(prevSpawn, cur.spawn.counters, "webhook_auth_failed"),
+    "Rejected webhook signatures are rising — investigate credential drift or abuse; these requests must not enter the spawn path.");
 
   // ── staleness (optional) — no completions in the business window ──────────
   const prevLast = prev?.lastCompletionAt;
