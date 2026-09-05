@@ -14,6 +14,8 @@
 # North star: this is a benchmark, not the product path. If the moat is COLD
 # (CLW_* not injected) clw run can't memoize — the workflow reports that and the
 # raw build time, never hangs.
+# The action-level optional|required-hit contract is asserted by moat-action-test;
+# this benchmark remains a direct clw capability measurement.
 name: moat-benchmark
 
 on:
