@@ -138,18 +138,7 @@ impl HttpTransport for FakeWorker {
 
 // ── Harness: the REAL fabric over a Cloudflare backend on the fake transport ──
 
-/// Build the full fabric router with:
-///   - one tenant (`acme`) + a plan (so admission can reserve a slot),
-///   - the real in-memory ledger (the accounting oracle the fail-closed case
-///     inspects),
-///   - a `MockBroker` (so a RUNNER acquire mints a JIT config and reaches the
-///     provision step — mirrors `acceptance_moat.rs`),
-///   - the Cloudflare backend injected via the PUBLIC `with_cloud_backend`: the
-///     runner-direct exec half (`NoBoxExec`) + a `CloudflareBoxProvisioner` over
-///     a `CloudflareEngine` on the supplied [`FakeWorker`], sharing `registry`.
-///
-/// Returns the router, the ledger (for slot assertions), the shared registry (for
-/// binding assertions), and the `Arc<FakeWorker>` (for request assertions).
+/// Deterministic clock used to make stale-Pending eligibility explicit.
 #[derive(Clone)]
 struct ManualClock(Arc<AtomicU64>);
 
@@ -165,6 +154,9 @@ impl Clock for ManualClock {
     }
 }
 
+/// Build the full fabric router with the real ledger, runner broker, and a
+/// Cloudflare backend over the supplied fake Worker. It also returns its shared
+/// registry, state, and deterministic clock for lifecycle assertions.
 fn cloudflare_harness(
     worker: Arc<FakeWorker>,
 ) -> (
@@ -454,23 +446,21 @@ async fn cloudflare_flip_fail_closed_non_2xx_spawn_retains_unknown_pending_claim
         1,
         "unknown partial spawn must retain its durable Pending cleanup claim"
     );
-    let lease_id = &rows[0].lease_id;
+    let lease_id = rows[0].lease_id.clone();
     assert_eq!(rows[0].state, corelink_fabric::LeaseState::Pending);
     assert!(
         ledger
             .transition(
-                lease_id,
+                &lease_id,
                 corelink_runners_contracts::RunnerState::Held,
                 1_001
             )
             .is_err()
     );
-    assert!(ledger.remove(lease_id).is_err());
+    assert!(ledger.remove(&lease_id).is_err());
 
-    // 3. nothing was ever bound (no phantom box from a failed spawn). The fabric
-    // assigns lease ids; we did not capture one (acquire failed), so assert the
-    // registry holds NOTHING for this tenant's only attempted lease by checking
-    // the spawn was attempted but bound zero handles.
+    // 3. Nothing was ever bound for the actual durable lease id. The spawn was
+    // attempted, but the engine returned before it could bind a real handle.
     let spawn = worker.request_to("/v1/spawn");
     assert!(
         spawn.is_some(),
@@ -487,28 +477,45 @@ async fn cloudflare_flip_fail_closed_non_2xx_spawn_retains_unknown_pending_claim
         worker.request_to("/v1/teardown").is_none(),
         "a failed spawn must not drive a teardown (nothing was bound to tear down)"
     );
-    // And no stray binding can be resolved (the fabric never reached bind).
-    // We can't know the fabric-minted id, but bind is the ONLY writer of the
-    // registry and provision returned Err before calling it — so the registry is
-    // empty. Probe a representative id to document the invariant.
     assert!(
-        registry.resolve("any-lease-id").is_none(),
-        "no phantom binding may exist after a failed spawn"
+        registry.resolve(&lease_id).is_none(),
+        "the actual failed lease must have no phantom registry binding"
     );
 
     // A later stale sweep sees the same claim but cannot substitute missing
     // registry state for a provider handle. It retains row/cap and sends no
     // additional spawn or teardown HTTP request.
     clock.set(2_000);
-    assert_eq!(
-        corelink_fabric_server::pending_cleanup::sweep_stale_pending(
-            &state,
-            Duration::from_millis(1),
-        )
-        .await,
-        0
-    );
-    assert!(ledger.get(lease_id).unwrap().is_some());
+    for attempt in 1..=2 {
+        assert_eq!(
+            corelink_fabric_server::pending_cleanup::sweep_stale_pending(
+                &state,
+                Duration::from_millis(1),
+            )
+            .await,
+            0,
+            "unknown sweep attempt {attempt} must retain the durable claim"
+        );
+        assert_eq!(
+            ledger.get(&lease_id).unwrap().unwrap().state,
+            corelink_fabric::LeaseState::Pending,
+            "unknown sweep attempt {attempt} must retain Pending"
+        );
+        assert!(
+            ledger
+                .transition(
+                    &lease_id,
+                    corelink_runners_contracts::RunnerState::Held,
+                    2_000 + attempt,
+                )
+                .is_err(),
+            "unknown sweep attempt {attempt} must keep Held fenced"
+        );
+        assert!(
+            ledger.remove(&lease_id).is_err(),
+            "unknown sweep attempt {attempt} must keep ordinary remove fenced"
+        );
+    }
     assert_eq!(
         worker.requests().len(),
         1,
