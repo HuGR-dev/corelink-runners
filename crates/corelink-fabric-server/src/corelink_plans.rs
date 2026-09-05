@@ -24,24 +24,23 @@
 //! a golden test on BOTH sides if either diverges (see
 //! `tests/corelink_introspect_vector.rs`).
 //!
-//! The runtime parse below is deliberately TOLERANT so a self-serve tenant
-//! resolves whatever entitlement is present and a missing/garbage OPTIONAL field
-//! never locks out — or 503s — a live tenant:
+//! The runtime parse below is tolerant of an absent OPTIONAL field, but a
+//! present unreadable ceiling is a plan-source failure and fails closed. This
+//! keeps the deliberate unmetered sentinel distinct from corrupt input:
 //!   - `max_concurrency` present → the per-tenant concurrency cap (`TenantPlan`).
 //!     ABSENT / non-int → `Ok(None)` (authenticated-but-uncapped → over-cap
 //!     reject, NEVER a panic or a 503); a real cap lights up the moment present.
-//!   - `max_vcpu_h` present (a JSON `number`) → the monthly vCPU-h compute
-//!     ceiling, surfaced as vCPU·ms on [`tenant_ceiling_vcpu_ms`]. ABSENT → `0`
-//!     (ceiling disabled, the ledger skips the compute check). Garbage (string /
-//!     negative / NaN / i64-overflow) → treated ABSENT → `0`, NEVER a 503 on a
-//!     field issue.
+//!   - `max_vcpu_h` absent or explicit JSON zero → `0` (deliberately unmetered);
+//!     a readable positive number is surfaced as vCPU·ms on
+//!     [`tenant_ceiling_vcpu_ms`]. Garbage (string / negative / non-representable
+//!     fraction / i64-overflow) fails closed, NEVER silently becomes `0`.
 //!   - `plan` present (a string, the cache tier) → carried for display IFF
 //!     `TenantPlan` has a tier field. It has none at M1, so the field is IGNORED
 //!     (per spec) — the runner never re-parses it for the plan.
 //!
-//! 503 stays for ENDPOINT-UNREACHABLE only (transport ↯ / 503 / unparseable
-//! authoritative 200) — never for a missing or malformed OPTIONAL entitlement
-//! field. (corelink-server is building the `runners_entitlement` lookup behind
+//! 503 stays for ENDPOINT-UNREACHABLE and malformed entitlement data (including
+//! an unreadable ceiling). A missing OPTIONAL field remains unmetered.
+//! (corelink-server is building the `runners_entitlement` lookup behind
 //! this shape; an empty row returns `valid:true` with no cap → `Ok(None)` →
 //! reject, the fail-closed direction — never a false admit.)
 //!
@@ -65,7 +64,7 @@
 //! | 200         | unparseable / missing bool `valid`            | `Err(Unreachable)`     |
 //! | 200         | `valid:false`                                 | `Ok(None)` (authoritative: no plan) |
 //! | 200         | `valid:true`, no `max_concurrency` (or not u64) | `Ok(None)` (authenticated but uncapped → reject, NOT 503) |
-//! | 200         | `valid:true` + `max_concurrency:<u32>`        | `Ok(Some(TenantPlan))`; vCPU-h ceiling cached from `max_vcpu_h` (absent/garbage → 0, disabled) |
+//! | 200         | `valid:true` + `max_concurrency:<u32>`        | `Ok(Some(TenantPlan))`; absent/zero vCPU-h is unmetered, malformed vCPU-h fails closed |
 //! | 503         | (any)                                         | `Err(Unreachable)`     |
 //! | any other   | (any)                                         | `Err(Unreachable)`     |
 //!
@@ -110,44 +109,142 @@ use crate::introspect_breaker::{CircuitBreaker, IntrospectOutcome, run_introspec
 const DERIVED_RATE_MULTIPLIER: u32 = 10;
 
 /// Parse the OPTIONAL `max_vcpu_h` entitlement field into a vCPU·ms ceiling
-/// (the [`PlanSource::tenant_ceiling_vcpu_ms`] unit), TOLERANTLY.
+/// (the [`PlanSource::tenant_ceiling_vcpu_ms`] unit).
 ///
-/// The ratified introspect shape carries `max_vcpu_h` as a JSON `number`
-/// (`int` or `float`), OPTIONAL. The consumer is fail-SAFE-disabled on absence
-/// and tolerant of garbage — a missing or malformed value yields the disabled
-/// sentinel `0` (the ledger SKIPS the compute check), NEVER a 503 and NEVER a
-/// panic. 503 stays reserved for an endpoint-unreachable transport failure.
-///
-/// Resolution:
-/// - absent / `null`                       → `0` (ceiling disabled);
-/// - integer ≥ 0                            → `compute_meter::ceiling_vcpu_ms(h)`;
-/// - finite float ≥ 0 (e.g. `2.5`)         → floored to whole vCPU-h, then converted;
-/// - string / negative / NaN / ∞ / garbage → treated as ABSENT → `0`;
-/// - an `h` so large the conversion overflows the i64 ledger column
-///   (`ceiling_vcpu_ms` `Err`) → treated as ABSENT → `0` (fail-SAFE-disabled,
-///   never a reject-all wrap; mirrors the plan-load guard's intent).
-fn parse_max_vcpu_h_ceiling_ms(v: &serde_json::Value) -> u64 {
+/// `0` is a meaningful, deliberate value: it means *unmetered*. It is therefore
+/// not a safe catch-all for malformed input. An absent field or an explicit JSON
+/// zero returns `Ok(0)`; a present value with the wrong type, a negative value,
+/// a non-representable fraction, or an overflow returns `Err` and makes the
+/// whole plan response fail closed. Fractions are converted exactly to integer
+/// vCPU·milliseconds (with a safe floor at the millisecond boundary), rather
+/// than being converted through `f64` and silently rounded down to sentinel 0.
+fn parse_max_vcpu_h_ceiling_ms(v: &serde_json::Value) -> Result<u64, PlanSourceError> {
     let Some(field) = v.get("max_vcpu_h") else {
-        return 0;
+        return Ok(0);
     };
-    // Tolerant numeric extraction: accept an integer verbatim, or a finite,
-    // non-negative float floored to whole vCPU-h. Anything else (string, bool,
-    // negative, NaN, ∞) is treated as absent.
-    let max_vcpu_h: u64 = if let Some(n) = field.as_u64() {
-        n
-    } else if let Some(f) = field.as_f64() {
-        if f.is_finite() && f >= 0.0 {
-            f as u64
-        } else {
-            return 0;
-        }
+    let Some(number) = field.as_number() else {
+        return Err(PlanSourceError::Unreachable);
+    };
+    let raw = number.to_string();
+    let (mantissa, fractional_digits, exponent) = parse_decimal_number(&raw)?;
+    if mantissa == 0 {
+        return Ok(0);
+    }
+
+    // `mantissa × 3_600_000 × 10^-scale`, calculated in u128 so malformed
+    // JSON cannot wrap into a small, apparently valid ceiling.
+    let scale = i32::try_from(fractional_digits)
+        .ok()
+        .and_then(|fractional| fractional.checked_sub(exponent))
+        .ok_or(PlanSourceError::Unreachable)?;
+    let numerator = mantissa
+        .checked_mul(u128::from(compute_meter::MS_PER_VCPU_HOUR))
+        .ok_or(PlanSourceError::Unreachable)?;
+    let milliseconds = if scale <= 0 {
+        let magnitude = scale.checked_neg().ok_or(PlanSourceError::Unreachable)?;
+        let multiplier =
+            checked_pow10(u32::try_from(magnitude).map_err(|_| PlanSourceError::Unreachable)?)
+                .ok_or(PlanSourceError::Unreachable)?;
+        numerator
+            .checked_mul(multiplier)
+            .ok_or(PlanSourceError::Unreachable)?
     } else {
-        return 0;
+        let divisor =
+            checked_pow10(u32::try_from(scale).map_err(|_| PlanSourceError::Unreachable)?)
+                .ok_or(PlanSourceError::Unreachable)?;
+        numerator / divisor
     };
-    // A value that overflows the i64 ledger column is treated as absent (0 =
-    // disabled), never a wrapping reject-all. The disabled sentinel `0` maps to
-    // `Ok(0)`.
-    compute_meter::ceiling_vcpu_ms(max_vcpu_h).unwrap_or(0)
+    let milliseconds = u64::try_from(milliseconds).map_err(|_| PlanSourceError::Unreachable)?;
+    if milliseconds == 0 || !compute_meter::fits_ledger(milliseconds) {
+        return Err(PlanSourceError::Unreachable);
+    }
+    Ok(milliseconds)
+}
+
+/// Parse serde_json's canonical JSON-number spelling without using floating
+/// point. JSON permits an exponent, and the entitlement is untrusted input.
+fn parse_decimal_number(raw: &str) -> Result<(u128, usize, i32), PlanSourceError> {
+    let bytes = raw.as_bytes();
+    let mut pos = 0;
+    if bytes.first() == Some(&b'-') {
+        return Err(PlanSourceError::Unreachable);
+    }
+    if bytes.first() == Some(&b'+') || bytes.is_empty() {
+        return Err(PlanSourceError::Unreachable);
+    }
+    let mut mantissa = 0u128;
+    let mut digits = 0usize;
+    while pos < bytes.len() && bytes[pos].is_ascii_digit() {
+        mantissa = mantissa
+            .checked_mul(10)
+            .and_then(|value| value.checked_add(u128::from(bytes[pos] - b'0')))
+            .ok_or(PlanSourceError::Unreachable)?;
+        digits = digits.checked_add(1).ok_or(PlanSourceError::Unreachable)?;
+        pos += 1;
+    }
+    if digits == 0 {
+        return Err(PlanSourceError::Unreachable);
+    }
+    let mut fractional_digits = 0usize;
+    if bytes.get(pos) == Some(&b'.') {
+        pos += 1;
+        let start = pos;
+        while pos < bytes.len() && bytes[pos].is_ascii_digit() {
+            mantissa = mantissa
+                .checked_mul(10)
+                .and_then(|value| value.checked_add(u128::from(bytes[pos] - b'0')))
+                .ok_or(PlanSourceError::Unreachable)?;
+            pos += 1;
+        }
+        fractional_digits = pos - start;
+        if fractional_digits == 0 {
+            return Err(PlanSourceError::Unreachable);
+        }
+    }
+    let mut exponent = 0i32;
+    if matches!(bytes.get(pos), Some(b'e' | b'E')) {
+        pos += 1;
+        let negative = match bytes.get(pos) {
+            Some(b'-') => {
+                pos += 1;
+                true
+            }
+            Some(b'+') => {
+                pos += 1;
+                false
+            }
+            _ => false,
+        };
+        let start = pos;
+        while pos < bytes.len() && bytes[pos].is_ascii_digit() {
+            exponent = exponent
+                .checked_mul(10)
+                .and_then(|value| value.checked_add(i32::from(bytes[pos] - b'0')))
+                .ok_or(PlanSourceError::Unreachable)?;
+            pos += 1;
+        }
+        if pos == start {
+            return Err(PlanSourceError::Unreachable);
+        }
+        if negative {
+            exponent = exponent.checked_neg().ok_or(PlanSourceError::Unreachable)?;
+        }
+    }
+    if pos != bytes.len() {
+        return Err(PlanSourceError::Unreachable);
+    }
+    Ok((mantissa, fractional_digits, exponent))
+}
+
+fn checked_pow10(power: u32) -> Option<u128> {
+    if power > 38 {
+        return None;
+    }
+    let mut value = 1u128;
+    for _ in 0..power {
+        value = value.checked_mul(10)?;
+    }
+    Some(value)
 }
 
 /// A production [`PlanSource`] that derives the per-tenant cap from CoreLink's
@@ -169,7 +266,8 @@ pub struct CoreLinkPlanStore<H: IntrospectHttp> {
     /// introspect response, read back by the TOKEN-FREE
     /// [`tenant_ceiling_vcpu_ms`](PlanSource::tenant_ceiling_vcpu_ms) on the same
     /// acquire. Populated on every authoritative `valid:true` resolve (the value
-    /// is `0` when `max_vcpu_h` is absent/garbage — the disabled sentinel), so it
+    /// is `0` only when `max_vcpu_h` is absent/explicitly zero — the disabled
+    /// sentinel), so it
     /// reflects the LATEST entitlement and a downgrade (ceiling removed) takes
     /// effect on the next acquire. Bounded by the active tenant set the same way
     /// the rest of the fabric's per-tenant maps are. A poisoned lock is recovered
@@ -335,13 +433,14 @@ impl<H: IntrospectHttp> CoreLinkPlanStore<H> {
         }
 
         // valid:true — the tenant's self-serve entitlement. Resolve the
-        // OPTIONAL vCPU-h ceiling NOW (tolerant: absent/garbage → 0,
-        // disabled) and CACHE it per tenant so the token-free
+        // OPTIONAL vCPU-h ceiling NOW. Absence/explicit zero means unmetered;
+        // malformed or unrepresentable input is an unreachable plan response
+        // and fails closed. Cache it per tenant so the token-free
         // `tenant_ceiling_vcpu_ms` (called next on the acquire path) can
         // read it back. Cache on every valid resolve — including the
         // uncapped path below — so a removed ceiling (downgrade) takes
         // effect, and a tenant never resolved leaves the disabled `0`.
-        let ceiling_vcpu_ms = parse_max_vcpu_h_ceiling_ms(&v);
+        let ceiling_vcpu_ms = parse_max_vcpu_h_ceiling_ms(&v)?;
         self.ceilings
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -699,9 +798,11 @@ mod tests {
         );
     }
 
-    /// A float `max_vcpu_h` (e.g. `2.5`) is tolerated — floored to whole vCPU-h.
+    /// A fractional `max_vcpu_h` is represented at millisecond precision rather
+    /// than being floored to whole hours (which would silently disable a trial
+    /// ceiling below one hour).
     #[test]
-    fn float_max_vcpu_h_floors() {
+    fn fractional_max_vcpu_h_is_exact() {
         let body = r#"{"valid":true,"max_concurrency":2,"max_vcpu_h":2.5}"#;
         let store =
             CoreLinkPlanStore::new(FakeIntrospect::ok(200, body), cfg("https://x/i", "s3cr3t"));
@@ -711,8 +812,8 @@ mod tests {
             .expect("a plan");
         assert_eq!(
             store.tenant_ceiling_vcpu_ms(&tenant()),
-            compute_meter::ceiling_vcpu_ms(2).unwrap(),
-            "2.5 vCPU-h floors to 2",
+            9_000_000,
+            "2.5 vCPU-h is 9,000,000 vCPU-ms",
         );
     }
 
@@ -734,10 +835,11 @@ mod tests {
         );
     }
 
-    /// (d) GARBAGE max_vcpu_h (a string, a negative, NaN) → treated as absent →
-    /// ceiling 0, the resolve still succeeds (cap set), NEVER a 503.
+    /// A present but unreadable entitlement is not the unmetered sentinel. It
+    /// must fail closed, otherwise a typo in the ceiling silently buys unlimited
+    /// compute.
     #[test]
-    fn garbage_max_vcpu_h_tolerated_as_zero() {
+    fn malformed_max_vcpu_h_fails_closed() {
         for garbage in [
             r#""lots""#, // string
             "-5",        // negative
@@ -750,35 +852,52 @@ mod tests {
                 FakeIntrospect::ok(200, &body),
                 cfg("https://x/i", "s3cr3t"),
             );
-            let plan = store
-                .plan_of_resolving(&tenant(), "pat-acme")
-                .expect("reachable — garbage optional field is NOT a 503")
-                .expect("a plan — the cap still resolves");
-            assert_eq!(plan.max_concurrency, 3, "cap unaffected by garbage ceiling");
             assert_eq!(
-                store.tenant_ceiling_vcpu_ms(&tenant()),
-                0,
-                "garbage max_vcpu_h {garbage} → ceiling treated absent (0)",
+                store.plan_of_resolving(&tenant(), "pat-acme"),
+                Err(PlanSourceError::Unreachable),
+                "present unreadable max_vcpu_h {garbage} must fail closed",
             );
         }
     }
 
     /// An `max_vcpu_h` so large the vCPU·ms conversion overflows the i64 ledger
-    /// column is treated as absent (0, disabled), never a wrapping reject-all.
+    /// column fails closed, never becoming the disabled sentinel or a wrapping
+    /// reject-all value.
     #[test]
-    fn overflowing_max_vcpu_h_is_zero() {
+    fn overflowing_max_vcpu_h_fails_closed() {
         let huge = (i64::MAX as u64) / compute_meter::MS_PER_VCPU_HOUR + 1;
         let body = format!(r#"{{"valid":true,"max_concurrency":1,"max_vcpu_h":{huge}}}"#);
         let store =
             CoreLinkPlanStore::new(FakeIntrospect::ok(200, &body), cfg("https://x/i", "s3cr3t"));
-        store
-            .plan_of_resolving(&tenant(), "pat-acme")
-            .expect("reachable")
-            .expect("a plan");
         assert_eq!(
-            store.tenant_ceiling_vcpu_ms(&tenant()),
-            0,
-            "i64-overflowing ceiling → disabled (0), never a wrap",
+            store.plan_of_resolving(&tenant(), "pat-acme"),
+            Err(PlanSourceError::Unreachable),
+            "i64-overflowing ceiling must fail closed",
+        );
+    }
+
+    #[test]
+    fn explicit_zero_is_the_only_present_unmetered_value() {
+        let zero = CoreLinkPlanStore::new(
+            FakeIntrospect::ok(200, r#"{"valid":true,"max_concurrency":1,"max_vcpu_h":0}"#),
+            cfg("https://x/i", "s3cr3t"),
+        );
+        zero.plan_of_resolving(&tenant(), "pat-acme")
+            .expect("explicit zero is a valid unmetered entitlement")
+            .expect("cap remains present");
+        assert_eq!(zero.tenant_ceiling_vcpu_ms(&tenant()), 0);
+
+        let tiny = CoreLinkPlanStore::new(
+            FakeIntrospect::ok(
+                200,
+                r#"{"valid":true,"max_concurrency":1,"max_vcpu_h":0.0000001}"#,
+            ),
+            cfg("https://x/i", "s3cr3t"),
+        );
+        assert_eq!(
+            tiny.plan_of_resolving(&tenant(), "pat-acme"),
+            Err(PlanSourceError::Unreachable),
+            "a nonzero value below one millisecond cannot collapse to sentinel 0",
         );
     }
 

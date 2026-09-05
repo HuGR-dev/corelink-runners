@@ -169,3 +169,16 @@ async fn plan_valid_with_cap_admits() {
         "valid+capped tenant must be admitted"
     );
 }
+
+/// A present but unreadable compute entitlement is not equivalent to an
+/// unmetered tenant. The plan leg must fail closed before admission, preserving
+/// the distinction between absent/zero and corrupt authority data.
+#[tokio::test]
+async fn plan_malformed_compute_ceiling_fails_closed_503() {
+    let app = harness(FakeIntrospect::ok(
+        200,
+        r#"{"valid":true,"max_concurrency":5,"max_vcpu_h":"unreadable"}"#,
+    ));
+    let resp = app.oneshot(acquire_req()).await.unwrap();
+    assert_frozen_error(resp, ApiError::FailClosed).await;
+}
