@@ -136,18 +136,14 @@ import { admitDrainOwnerInTransaction } from "./containment_drain_owner_reap";
 import { drainOwnerTuple, intakeOwnerTuple, redriveOwnerTuple, runCanonicalEffect, type ProviderDriveReceipt } from "./containment_effect_route";
 import {
   containmentEventKey,
-  containmentInvalidKey,
   containmentJobIndexKey,
   containmentJobIndexMarkerKey,
-  containmentOutboxKey,
   containmentPauseKey,
   containmentReservationKey,
   emptyContainmentMeta,
-  isValidInvalidConfigRecord,
   isValidJobIndex,
   isValidJobIndexMeta,
   isValidJobIndexMarker,
-  isValidOutboxRecord,
   MAX_ACTIVE_INDEX_EVENTS,
   normalizeRedriveIdentity,
   redriveEffectId,
@@ -157,6 +153,30 @@ import {
   type ContainmentJobIndexMarker,
   type ContainmentJobIndexMeta,
 } from "./containment_authority_helpers";
+import {
+  acknowledgeInvalidConfigInStorage,
+  canonicalContainmentEvidence,
+  CONTAINMENT_EFFECT_WITNESS_KINDS,
+  containmentEffectEvidenceKey,
+  containmentEffectJobKey,
+  CONTAINMENT_INDEX_META_KEY,
+  CONTAINMENT_META_KEY,
+  DRAIN_LEASE_TTL_MS,
+  DRAIN_RENEW_THRESHOLD_MS,
+  isCurrentHead,
+  leaseMatches,
+  markInvalidConfigAttemptInStorage,
+  pendingInvalidConfigInStorage,
+  recordInvalidConfigInStorage, REDRIVE_RESERVATION_TTL_MS, validateInvalidConfigIdentity,
+  type ContainmentEffectEvidence,
+  type ContainmentEffectWitnessKind,
+  type ContainmentEvent,
+  type ContainmentMeta,
+  type ContainmentOutboxRecord,
+  type ContainmentPause,
+  type ContainmentRedrivePermit,
+  type ContainmentRedriveReservation,
+} from "./containment_authority_records";
 import { canonicalWorkflowJobIdFromRaw } from "./workflow_job_id";
 export {
   ContainmentEffectLedger,
@@ -177,6 +197,9 @@ export type {
   ContainmentEffectState,
   ContainmentEffectTransition,
 } from "./containment_effect_ledger";
+export type { ContainmentEffectEvidence, ContainmentEffectWitnessKind, ContainmentEvent, ContainmentMeta,
+  ContainmentOutboxRecord, ContainmentPause, ContainmentRedrivePermit, ContainmentRedriveReservation, ContainmentState, InvalidConfigRecord } from "./containment_authority_records";
+export { DRAIN_LEASE_TTL_MS, REDRIVE_RESERVATION_TTL_MS };
 
 // Re-export the counter Durable Object so wrangler resolves `MetricsDO` from
 // this main module (its class + migration are in wrangler.jsonc). Defined in
@@ -465,132 +488,6 @@ export class ConcurrencySlotsDO extends DurableObject<Env> {
 // leases, fencing and effect permits. Sequencing lives exclusively in this DO;
 // immutable effect evidence lives in KV and is revalidated by this DO before a
 // recovery/commit can advance the cursor.
-const CONTAINMENT_META_KEY = "containment:v1:meta";
-const CONTAINMENT_EVENT_PREFIX = "containment:v1:event:";
-const CONTAINMENT_PAUSE_PREFIX = "containment:v1:pause:";
-const CONTAINMENT_INVALID_PREFIX = "containment:v1:invalid:";
-const CONTAINMENT_OUTBOX_PREFIX = "containment:v1:outbox:";
-const CONTAINMENT_RESERVATION_PREFIX = "containment:v1:reservation:";
-const CONTAINMENT_INDEX_META_KEY = "containment:v1:job-index-meta";
-const INVALID_CONFIG_SWITCHES = new Set(["AUTOSCALER_INTAKE_PAUSED", "AUTOSCALER_REDRIVE_PAUSED"]);
-const SHA256_HEX = /^[0-9a-f]{64}$/;
-export const DRAIN_LEASE_TTL_MS = 120_000;
-const DRAIN_RENEW_THRESHOLD_MS = 30_000;
-// A HELD reservation is deliberately short-lived and may be reclaimed only
-// before eligibility. Once an external effect can start, the state has no TTL.
-export const REDRIVE_RESERVATION_TTL_MS = 120_000;
-
-export type ContainmentState = "QUEUED" | "CLAIMED" | "EFFECT_COMMITTED";
-export type ContainmentEffectWitnessKind = "spawn_claim" | "attempt" | "placement" | "lease" | "result";
-const CONTAINMENT_EFFECT_WITNESS_KINDS: readonly ContainmentEffectWitnessKind[] = ["spawn_claim", "attempt", "placement", "lease", "result"];
-export interface ContainmentEffectEvidence {
-  schema_version: 1;
-  kind: ContainmentEffectWitnessKind;
-  effect_id: string;
-  event_id: string;
-  job_id: string;
-  permit_id: string;
-  source_key: string;
-  // The immutable source bytes are carried with the witness. Completion may
-  // legitimately delete the mutable spawn/orphan/handle keys before a new
-  // fenced owner recovers, so recovery must never depend on those keys.
-  source_value: string;
-  source_sha256: string;
-  terminal?: "DELIVERED";
-  attempt_count?: number;
-}
-export interface ContainmentMeta {
-  schema_version: 1;
-  next_pause_seq: number;
-  drain_cursor: number;
-  backlog_count: number;
-  lease_epoch: number;
-  lease: { owner: string; epoch: number; expires_ms: number } | null;
-  drain_requested: boolean;
-}
-export interface ContainmentEvent {
-  schema_version: 1;
-  event_id: string;
-  pause_seq: number;
-  received_at_ms: number;
-  body_sha256: string;
-  raw_payload: string;
-  action: string;
-  job_id: string;
-  repo: string;
-  installation_id: string;
-  labels: string[];
-  effect_id: string;
-  state: ContainmentState;
-  claim: { owner: string; lease_epoch: number } | null;
-  effect_permit: { permit_id: string; issued_to_owner: string; issued_to_epoch: number } | null;
-}
-export interface ContainmentPause { schema_version: 1; event_id: string; pause_seq: number }
-export interface InvalidConfigRecord {
-  schema_version: 1;
-  signal_id: string;
-  switch_name: string;
-  raw_value_sha256: string;
-}
-export interface ContainmentOutboxRecord {
-  schema_version: 1;
-  signal_id: string;
-  state: "PENDING" | "DELIVERED";
-  attempts: number;
-}
-export interface ContainmentRedriveReservation {
-  schema_version: 1;
-  repo: string;
-  job_id: string;
-  owner: string;
-  token: string;
-  epoch: number;
-  path: "redrive";
-  state: "HELD" | "EFFECT_ELIGIBLE" | "COMPLETED";
-  expires_ms: number;
-  event_id: string | null;
-  effect_id: string;
-  // A verified completed webhook may arrive after EFFECT_ELIGIBLE but before
-  // the owner can atomically mark its successful continuation completed. The
-  // latch lets that later transition resolve the tombstone instead of leaking it.
-  completion_observed: boolean;
-}
-export interface ContainmentRedrivePermit {
-  schema_version: 1;
-  repo: string;
-  job_id: string;
-  owner: string;
-  token: string;
-  epoch: number;
-  path: "redrive";
-  effect_id: string;
-}
-function containmentEffectEvidenceKey(effectId: string, kind: ContainmentEffectWitnessKind): string {
-  return `containment:v1:effect:${encodeURIComponent(effectId)}:${kind}`;
-}
-function containmentEffectJobKey(jobId: string): string { return `containment:v1:job:${jobId}`; }
-function leaseMatches(meta: ContainmentMeta, owner: string, epoch: number, now: number): boolean {
-  return !!meta.lease && meta.lease.owner === owner && meta.lease.epoch === epoch && meta.lease.expires_ms > now;
-}
-function isCurrentHead(meta: ContainmentMeta, event: ContainmentEvent): boolean {
-  return event.pause_seq === meta.drain_cursor + 1;
-}
-function canonicalContainmentEvidence(witness: ContainmentEffectEvidence): string {
-  return JSON.stringify({
-    schema_version: witness.schema_version,
-    kind: witness.kind,
-    effect_id: witness.effect_id,
-    event_id: witness.event_id,
-    job_id: witness.job_id,
-    permit_id: witness.permit_id,
-    source_key: witness.source_key,
-    source_value: witness.source_value,
-    source_sha256: witness.source_sha256,
-    ...(witness.terminal ? { terminal: witness.terminal } : {}),
-    ...(witness.attempt_count !== undefined ? { attempt_count: witness.attempt_count } : {}),
-  });
-}
-
 export class ContainmentDO extends DurableObject<Env> {
   private tx<T>(fn: (storage: any) => Promise<T>): Promise<T> {
     return this.ctx.storage.transaction(fn);
@@ -951,65 +848,20 @@ export class ContainmentDO extends DurableObject<Env> {
   }
 
   async recordInvalidConfig(switchName: string, rawValue: string, rawValueSha256: string): Promise<ContainmentOutboxRecord> {
-    if (!INVALID_CONFIG_SWITCHES.has(switchName) || !SHA256_HEX.test(rawValueSha256)) {
-      throw new TypeError("unsupported or malformed invalid-config identity");
-    }
-    // The durable identity is over the exact UTF-8 bytes of the raw value. Do
-    // not trust a caller-supplied digest: accepting a mismatched digest could
-    // alias two config values into one exactly-once signal.
-    if (await sha256Hex(rawValue) !== rawValueSha256) {
-      throw new TypeError("invalid-config digest does not match raw value");
-    }
-    const signalId = await sha256Hex(`containment:v1:config-invalid\n${switchName}\n${rawValueSha256}`);
-    return this.tx(async (s) => {
-      const key = containmentInvalidKey(switchName, rawValueSha256);
-      const prior = (await s.get(key)) as InvalidConfigRecord | undefined;
-      if (prior && (!isValidInvalidConfigRecord(prior, key) || prior.signal_id !== signalId)) {
-        throw new TypeError("malformed invalid-config record");
-      }
-      if (!prior) await s.put(key, { schema_version: 1 as const, signal_id: signalId, switch_name: switchName, raw_value_sha256: rawValueSha256 } satisfies InvalidConfigRecord);
-      const outboxKey = containmentOutboxKey(signalId);
-      const existingOutbox = (await s.get(outboxKey)) as ContainmentOutboxRecord | undefined;
-      if (existingOutbox && (!isValidOutboxRecord(existingOutbox) || existingOutbox.signal_id !== signalId)) {
-        throw new TypeError("malformed invalid-config outbox record");
-      }
-      const outbox = existingOutbox ?? { schema_version: 1 as const, signal_id: signalId, state: "PENDING" as const, attempts: 0 };
-      if (!existingOutbox) await s.put(outboxKey, outbox);
-      return outbox;
-    });
+    const signalId = await validateInvalidConfigIdentity(switchName, rawValue, rawValueSha256, sha256Hex);
+    return this.tx((storage) => recordInvalidConfigInStorage(storage, switchName, rawValueSha256, signalId));
   }
 
   async pendingInvalidConfig(): Promise<ContainmentOutboxRecord[]> {
-    const records = await this.ctx.storage.list<ContainmentOutboxRecord>({ prefix: CONTAINMENT_OUTBOX_PREFIX });
-    const identities = await this.ctx.storage.list<InvalidConfigRecord>({ prefix: CONTAINMENT_INVALID_PREFIX });
-    const validSignals = new Set<string>();
-    for (const [key, identity] of identities) {
-      if (!isValidInvalidConfigRecord(identity, key)) continue;
-      const expected = await sha256Hex(`containment:v1:config-invalid\n${identity.switch_name}\n${identity.raw_value_sha256}`);
-      if (identity.signal_id === expected) validSignals.add(identity.signal_id);
-    }
-    return [...records.entries()]
-      .filter(([key, record]) => isValidOutboxRecord(record)
-        && key === containmentOutboxKey(record.signal_id)
-        && record.state === "PENDING"
-        && validSignals.has(record.signal_id))
-      .map(([, record]) => record);
+    return pendingInvalidConfigInStorage(this.ctx.storage, sha256Hex);
   }
 
   async markInvalidConfigAttempt(signalId: string): Promise<void> {
-    await this.tx(async (s) => {
-      const key = containmentOutboxKey(signalId);
-      const rec = (await s.get(key)) as ContainmentOutboxRecord | undefined;
-      if (rec?.signal_id === signalId && rec.state === "PENDING") await s.put(key, { ...rec, attempts: rec.attempts + 1 });
-    });
+    await this.tx((storage) => markInvalidConfigAttemptInStorage(storage, signalId));
   }
 
   async acknowledgeInvalidConfig(signalId: string): Promise<void> {
-    await this.tx(async (s) => {
-      const key = containmentOutboxKey(signalId);
-      const rec = (await s.get(key)) as ContainmentOutboxRecord | undefined;
-      if (rec?.signal_id === signalId && rec.state === "PENDING") await s.put(key, { ...rec, state: "DELIVERED" });
-    });
+    await this.tx((storage) => acknowledgeInvalidConfigInStorage(storage, signalId));
   }
 
   async requestDrain(): Promise<ContainmentMeta> {
@@ -4962,6 +4814,15 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
             202,
           );
         }
+      }
+      if (isVitestLegacyFixtureContext(env)) {
+        if (!(await claimSpawn(env.RUNNER_JOB_PATS, jobId))) {
+          ctx?.waitUntil?.(bumpMetrics(env, "webhook_spawn_deduped"));
+          return json({ ok: true, deduped: true, job_id: jobId }, 200);
+        }
+        ctx?.waitUntil?.(bumpMetrics(env, "webhook_spawn_claimed"));
+        ctx.waitUntil(driveSpawnGuarded(env, { jobId, repo, installationId, labels: mintLabels }));
+        return json({ ok: true, spawning: true, job_id: jobId }, 202);
       }
       // Canonical owner admission is claim-first: a duplicate creates no owner
       // record, mirror, binding, provider call, or success metric.
