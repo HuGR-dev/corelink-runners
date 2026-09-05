@@ -1081,7 +1081,7 @@ pub(crate) async fn finalize_admitted_lease(
         // Fatal provision error — roll back, revoke any minted PAT, fail closed.
         // The cleanup helper claims before provider I/O and releases the
         // reservation only after authoritative confirmation. An uncertain
-        // partial spawn remains durably claimed for retry.
+        // partial provisioning remains durably claimed for retry.
         rollback_pending_admission(state, &lease_id, PendingRollbackPhase::AfterProvision).await;
         // WP-7 A7b: revoke the minted PAT on this terminal provision-failure
         // path so no per-job PAT is ever leaked on a fatal error.
