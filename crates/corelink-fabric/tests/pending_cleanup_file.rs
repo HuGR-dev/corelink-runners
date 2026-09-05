@@ -27,6 +27,28 @@ fn claim_replays_and_tombstone_clears_on_restart() {
         let ledger = FileLedger::open(&path).unwrap();
         ledger.put(pending("stale")).unwrap();
         assert_eq!(
+            ledger
+                .claim_pending_cleanup("stale", 1)
+                .unwrap()
+                .unwrap()
+                .lease_id,
+            "stale"
+        );
+        assert_eq!(
+            ledger
+                .claim_pending_cleanup("stale", 2)
+                .unwrap()
+                .unwrap()
+                .lease_id,
+            "stale"
+        );
+        assert!(
+            ledger
+                .claim_pending_cleanup("missing", 1)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
             ledger.claim_stale_pending_cleanup(100, 10).unwrap().len(),
             1
         );

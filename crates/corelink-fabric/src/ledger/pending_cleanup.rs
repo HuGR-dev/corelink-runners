@@ -23,6 +23,21 @@ fn candidates(inner: &InMemoryInner, now_ms: u64, max_age_ms: u64) -> Vec<LeaseR
 }
 
 impl InMemoryInner {
+    pub(super) fn claim_pending_cleanup(
+        &mut self,
+        lease_id: &str,
+        _now_ms: u64,
+    ) -> anyhow::Result<Option<LeaseRecord>> {
+        let Some(record) = self.records.get(lease_id).cloned() else {
+            return Ok(None);
+        };
+        if !matches!(record.state, LeaseState::Pending) {
+            return Ok(None);
+        }
+        self.pending_cleanup_claims.insert(lease_id.to_string());
+        Ok(Some(record))
+    }
+
     pub(super) fn claim_stale_pending_cleanup(
         &mut self,
         now_ms: u64,
@@ -52,6 +67,29 @@ impl InMemoryInner {
 }
 
 impl FileInner {
+    pub(super) fn claim_pending_cleanup(
+        &mut self,
+        lease_id: &str,
+        _now_ms: u64,
+    ) -> anyhow::Result<Option<LeaseRecord>> {
+        let Some(record) = self.index.records.get(lease_id).cloned() else {
+            return Ok(None);
+        };
+        if !matches!(record.state, LeaseState::Pending) {
+            return Ok(None);
+        }
+        if !self.index.pending_cleanup_claims.contains(lease_id) {
+            self.append_line(&JournalLine::PendingCleanupClaim {
+                lease_id: lease_id.to_string(),
+            })?;
+            // Publish only after append_line's fsync succeeds.
+            self.index
+                .pending_cleanup_claims
+                .insert(lease_id.to_string());
+        }
+        Ok(Some(record))
+    }
+
     pub(super) fn claim_stale_pending_cleanup(
         &mut self,
         now_ms: u64,

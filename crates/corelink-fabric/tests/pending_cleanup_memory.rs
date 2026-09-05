@@ -48,12 +48,40 @@ fn claims_fence_race_and_finish_is_idempotent() {
             .len(),
         1
     );
+    assert_eq!(
+        ledger
+            .claim_pending_cleanup("fresh", 1)
+            .unwrap()
+            .unwrap()
+            .lease_id,
+        "fresh"
+    );
+    assert_eq!(
+        ledger
+            .claim_pending_cleanup("fresh", 2)
+            .unwrap()
+            .unwrap()
+            .lease_id,
+        "fresh"
+    );
+    assert!(
+        ledger
+            .claim_pending_cleanup("missing", 1)
+            .unwrap()
+            .is_none()
+    );
     assert!(!ledger.try_admit(pending("replacement", 1_000), 2).unwrap());
     assert!(ledger.finish_pending_cleanup("stale").unwrap());
     assert!(!ledger.finish_pending_cleanup("stale").unwrap());
     assert!(ledger.try_admit(pending("replacement", 1_000), 2).unwrap());
     assert!(ledger.get("stale").unwrap().is_none());
     assert!(ledger.get("fresh").unwrap().is_some());
+
+    let held = InMemoryLedger::new();
+    held.put(pending("held", 1)).unwrap();
+    held.transition("held", corelink_runners_contracts::RunnerState::Held, 2)
+        .unwrap();
+    assert!(held.claim_pending_cleanup("held", 3).unwrap().is_none());
 }
 
 #[test]
