@@ -95,7 +95,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use corelink_fabric::compute_meter;
 use corelink_fabric::{TenantId, TenantPlan};
 
 use crate::app::{PlanSource, PlanSourceError};
@@ -107,146 +106,6 @@ use crate::introspect_breaker::{CircuitBreaker, IntrospectOutcome, run_introspec
 /// model has no per-minute rate dimension, so this is a DERIVED placeholder,
 /// consistent with the M1 default elsewhere (`server.rs` / `plans.rs`).
 const DERIVED_RATE_MULTIPLIER: u32 = 10;
-
-/// Parse the OPTIONAL `max_vcpu_h` entitlement field into a vCPU·ms ceiling
-/// (the [`PlanSource::tenant_ceiling_vcpu_ms`] unit).
-///
-/// `0` is a meaningful, deliberate value: it means *unmetered*. It is therefore
-/// not a safe catch-all for malformed input. An absent field or an explicit JSON
-/// zero returns `Ok(0)`; a present value with the wrong type, a negative value,
-/// a non-representable fraction, or an overflow returns `Err` and makes the
-/// whole plan response fail closed. Fractions are converted exactly to integer
-/// vCPU·milliseconds (with a safe floor at the millisecond boundary), rather
-/// than being converted through `f64` and silently rounded down to sentinel 0.
-fn parse_max_vcpu_h_ceiling_ms(v: &serde_json::Value) -> Result<u64, PlanSourceError> {
-    let Some(field) = v.get("max_vcpu_h") else {
-        return Ok(0);
-    };
-    let Some(number) = field.as_number() else {
-        return Err(PlanSourceError::Unreachable);
-    };
-    let raw = number.to_string();
-    let (mantissa, fractional_digits, exponent) = parse_decimal_number(&raw)?;
-    if mantissa == 0 {
-        return Ok(0);
-    }
-
-    // `mantissa × 3_600_000 × 10^-scale`, calculated in u128 so malformed
-    // JSON cannot wrap into a small, apparently valid ceiling.
-    let scale = i32::try_from(fractional_digits)
-        .ok()
-        .and_then(|fractional| fractional.checked_sub(exponent))
-        .ok_or(PlanSourceError::Unreachable)?;
-    let numerator = mantissa
-        .checked_mul(u128::from(compute_meter::MS_PER_VCPU_HOUR))
-        .ok_or(PlanSourceError::Unreachable)?;
-    let milliseconds = if scale <= 0 {
-        let magnitude = scale.checked_neg().ok_or(PlanSourceError::Unreachable)?;
-        let multiplier =
-            checked_pow10(u32::try_from(magnitude).map_err(|_| PlanSourceError::Unreachable)?)
-                .ok_or(PlanSourceError::Unreachable)?;
-        numerator
-            .checked_mul(multiplier)
-            .ok_or(PlanSourceError::Unreachable)?
-    } else {
-        let divisor =
-            checked_pow10(u32::try_from(scale).map_err(|_| PlanSourceError::Unreachable)?)
-                .ok_or(PlanSourceError::Unreachable)?;
-        numerator / divisor
-    };
-    let milliseconds = u64::try_from(milliseconds).map_err(|_| PlanSourceError::Unreachable)?;
-    if milliseconds == 0 || !compute_meter::fits_ledger(milliseconds) {
-        return Err(PlanSourceError::Unreachable);
-    }
-    Ok(milliseconds)
-}
-
-/// Parse serde_json's canonical JSON-number spelling without using floating
-/// point. JSON permits an exponent, and the entitlement is untrusted input.
-fn parse_decimal_number(raw: &str) -> Result<(u128, usize, i32), PlanSourceError> {
-    let bytes = raw.as_bytes();
-    let mut pos = 0;
-    if bytes.first() == Some(&b'-') {
-        return Err(PlanSourceError::Unreachable);
-    }
-    if bytes.first() == Some(&b'+') || bytes.is_empty() {
-        return Err(PlanSourceError::Unreachable);
-    }
-    let mut mantissa = 0u128;
-    let mut digits = 0usize;
-    while pos < bytes.len() && bytes[pos].is_ascii_digit() {
-        mantissa = mantissa
-            .checked_mul(10)
-            .and_then(|value| value.checked_add(u128::from(bytes[pos] - b'0')))
-            .ok_or(PlanSourceError::Unreachable)?;
-        digits = digits.checked_add(1).ok_or(PlanSourceError::Unreachable)?;
-        pos += 1;
-    }
-    if digits == 0 {
-        return Err(PlanSourceError::Unreachable);
-    }
-    let mut fractional_digits = 0usize;
-    if bytes.get(pos) == Some(&b'.') {
-        pos += 1;
-        let start = pos;
-        while pos < bytes.len() && bytes[pos].is_ascii_digit() {
-            mantissa = mantissa
-                .checked_mul(10)
-                .and_then(|value| value.checked_add(u128::from(bytes[pos] - b'0')))
-                .ok_or(PlanSourceError::Unreachable)?;
-            pos += 1;
-        }
-        fractional_digits = pos - start;
-        if fractional_digits == 0 {
-            return Err(PlanSourceError::Unreachable);
-        }
-    }
-    let mut exponent = 0i32;
-    if matches!(bytes.get(pos), Some(b'e' | b'E')) {
-        pos += 1;
-        let negative = match bytes.get(pos) {
-            Some(b'-') => {
-                pos += 1;
-                true
-            }
-            Some(b'+') => {
-                pos += 1;
-                false
-            }
-            _ => false,
-        };
-        let start = pos;
-        while pos < bytes.len() && bytes[pos].is_ascii_digit() {
-            exponent = exponent
-                .checked_mul(10)
-                .and_then(|value| value.checked_add(i32::from(bytes[pos] - b'0')))
-                .ok_or(PlanSourceError::Unreachable)?;
-            pos += 1;
-        }
-        if pos == start {
-            return Err(PlanSourceError::Unreachable);
-        }
-        if negative {
-            exponent = exponent.checked_neg().ok_or(PlanSourceError::Unreachable)?;
-        }
-    }
-    if pos != bytes.len() {
-        return Err(PlanSourceError::Unreachable);
-    }
-    Ok((mantissa, fractional_digits, exponent))
-}
-
-fn checked_pow10(power: u32) -> Option<u128> {
-    if power > 38 {
-        return None;
-    }
-    let mut value = 1u128;
-    for _ in 0..power {
-        value = value.checked_mul(10)?;
-    }
-    Some(value)
-}
-
 /// A production [`PlanSource`] that derives the per-tenant cap from CoreLink's
 /// internal introspection endpoint — the SAME endpoint, secret, and timeout as
 /// [`CoreLinkTokenStore`] (the cap rides the auth response at M2).
@@ -262,32 +121,16 @@ pub struct CoreLinkPlanStore<H: IntrospectHttp> {
     /// SAME `Arc` given to the auth token store) via
     /// [`with_breaker`](Self::with_breaker).
     breaker: Arc<CircuitBreaker>,
-    /// Per-tenant vCPU-h ceiling (in vCPU·ms) resolved from the WITH-token
-    /// introspect response, read back by the TOKEN-FREE
-    /// [`tenant_ceiling_vcpu_ms`](PlanSource::tenant_ceiling_vcpu_ms) on the same
-    /// acquire. Populated on every authoritative `valid:true` resolve (the value
-    /// is `0` only when `max_vcpu_h` is absent/explicitly zero — the disabled
-    /// sentinel), so it
-    /// reflects the LATEST entitlement and a downgrade (ceiling removed) takes
-    /// effect on the next acquire. Bounded by the active tenant set the same way
-    /// the rest of the fabric's per-tenant maps are. A poisoned lock is recovered
-    /// (`into_inner`) — the cache is advisory, never an admission gate.
-    ceilings: Mutex<HashMap<TenantId, u64>>,
-    /// Per-tenant cache of the resolved [`TenantPlan`] (cap + rate), populated by
-    /// the WITH-token [`plan_of_resolving`] and read back by the TOKEN-FREE
-    /// [`plan_of`](PlanSource::plan_of) — the exact mirror of `ceilings`. The
-    /// CoreLink cap can ONLY be resolved with the bearer token, so the token-free
-    /// callers (`/v1/usage` dashboard `plan_cap`; the queue-mode `under_cap`
-    /// pre-filter in `admission.rs`) would otherwise read `None` even for a tenant
-    /// whose cap is live and enforced on the acquire path. Populated on every
-    /// authoritative `valid:true` resolve: a CAPPED resolve INSERTS, an UNCAPPED or
-    /// `valid:false` resolve REMOVES — so a downgrade (cap removed) or revoke takes
-    /// effect on the next resolve, never a stale cap. A tenant never resolved
-    /// through `plan_of_resolving` reads `None` token-free — the SAME fail-closed
-    /// default as before this cache (it only ever turns a false `None` into the
-    /// true cap, never fabricates one). Advisory: the authoritative gate is
-    /// `plan_of_resolving` + `try_admit`, never this map.
-    plans: Mutex<HashMap<TenantId, TenantPlan>>,
+    /// Paired token-free caches populated by the WITH-token resolve. One lock
+    /// makes plan + ceiling invalidation/update atomic: a parse failure cannot
+    /// leave a queue pre-filter or compute gate with old authority.
+    cache: Mutex<PlanCache>,
+}
+
+#[derive(Default)]
+struct PlanCache {
+    ceilings: HashMap<TenantId, u64>,
+    plans: HashMap<TenantId, TenantPlan>,
 }
 
 impl<H: IntrospectHttp> CoreLinkPlanStore<H> {
@@ -298,8 +141,7 @@ impl<H: IntrospectHttp> CoreLinkPlanStore<H> {
             http,
             cfg,
             breaker: Arc::new(CircuitBreaker::standalone()),
-            ceilings: Mutex::new(HashMap::new()),
-            plans: Mutex::new(HashMap::new()),
+            cache: Mutex::new(PlanCache::default()),
         }
     }
 
@@ -311,14 +153,11 @@ impl<H: IntrospectHttp> CoreLinkPlanStore<H> {
         self
     }
 
-    /// Drop any cached plan for `tenant` — called on an uncapped or `valid:false`
-    /// resolve so a downgrade/revoke takes effect on the token-free read (never a
-    /// stale cap). Poisoned lock recovered; the cache is advisory.
-    fn evict_plan(&self, tenant: &TenantId) {
-        self.plans
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(tenant);
+    /// Drop both cached authority values before returning an unanswerable plan.
+    fn invalidate_cache(&self, tenant: &TenantId) {
+        let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
+        cache.plans.remove(tenant);
+        cache.ceilings.remove(tenant);
     }
 }
 
@@ -334,9 +173,10 @@ impl<H: IntrospectHttp> PlanSource for CoreLinkPlanStore<H> {
     ///
     /// [`plan_of_resolving`]: PlanSource::plan_of_resolving
     fn plan_of(&self, tenant: &TenantId) -> Option<TenantPlan> {
-        self.plans
+        self.cache
             .lock()
             .unwrap_or_else(|p| p.into_inner())
+            .plans
             .get(tenant)
             .cloned()
     }
@@ -350,9 +190,10 @@ impl<H: IntrospectHttp> PlanSource for CoreLinkPlanStore<H> {
     ///
     /// [`plan_of_resolving`]: PlanSource::plan_of_resolving
     fn tenant_ceiling_vcpu_ms(&self, tenant: &TenantId) -> u64 {
-        self.ceilings
+        self.cache
             .lock()
             .unwrap_or_else(|p| p.into_inner())
+            .ceilings
             .get(tenant)
             .copied()
             .unwrap_or(0)
@@ -415,36 +256,43 @@ impl<H: IntrospectHttp> CoreLinkPlanStore<H> {
         // A malformed authoritative 200 is fail-closed (Unreachable),
         // not a silent Ok(None) — a transient glitch must not 0-slot a
         // legitimate tenant.
-        let v: serde_json::Value =
-            serde_json::from_str(body).map_err(|_| PlanSourceError::Unreachable)?;
+        let v: serde_json::Value = match serde_json::from_str(body) {
+            Ok(v) => v,
+            Err(_) => {
+                self.invalidate_cache(tenant);
+                return Err(PlanSourceError::Unreachable);
+            }
+        };
 
         // `valid` MUST be present and a bool — absent/non-bool is a
         // can't-determine-intent fail-closed.
-        let valid = v
-            .get("valid")
-            .and_then(|f| f.as_bool())
-            .ok_or(PlanSourceError::Unreachable)?;
+        let valid = match v.get("valid").and_then(|f| f.as_bool()) {
+            Some(valid) => valid,
+            None => {
+                self.invalidate_cache(tenant);
+                return Err(PlanSourceError::Unreachable);
+            }
+        };
 
         if !valid {
             // Authoritative "no plan" answer — evict any stale cached plan
             // (a revoke takes effect on the token-free read).
-            self.evict_plan(tenant);
+            self.invalidate_cache(tenant);
             return Ok(None);
         }
 
         // valid:true — the tenant's self-serve entitlement. Resolve the
         // OPTIONAL vCPU-h ceiling NOW. Absence/explicit zero means unmetered;
         // malformed or unrepresentable input is an unreachable plan response
-        // and fails closed. Cache it per tenant so the token-free
-        // `tenant_ceiling_vcpu_ms` (called next on the acquire path) can
-        // read it back. Cache on every valid resolve — including the
-        // uncapped path below — so a removed ceiling (downgrade) takes
-        // effect, and a tenant never resolved leaves the disabled `0`.
-        let ceiling_vcpu_ms = parse_max_vcpu_h_ceiling_ms(&v)?;
-        self.ceilings
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(tenant.clone(), ceiling_vcpu_ms);
+        // and fails closed. The paired caches are written only after the cap
+        // parses too, so a queued dispatch cannot observe a partial authority.
+        let ceiling_vcpu_ms = match crate::decimal::max_vcpu_h_ceiling_ms(&v) {
+            Ok(ceiling) => ceiling,
+            Err(error) => {
+                self.invalidate_cache(tenant);
+                return Err(error);
+            }
+        };
 
         // `plan` (the cache tier): an OPTIONAL display label. `TenantPlan`
         // carries no tier field at M1, so it is IGNORED (per the self-serve
@@ -460,7 +308,7 @@ impl<H: IntrospectHttp> CoreLinkPlanStore<H> {
         else {
             // Authenticated-but-uncapped — evict any stale cached plan so a
             // downgrade (cap removed) takes effect on the token-free read.
-            self.evict_plan(tenant);
+            self.invalidate_cache(tenant);
             return Ok(None);
         };
 
@@ -488,10 +336,9 @@ impl<H: IntrospectHttp> CoreLinkPlanStore<H> {
         };
         // CACHE the resolved plan so the TOKEN-FREE `plan_of` (dashboard
         // cap + queue-mode pre-filter) reflects the live cap.
-        self.plans
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(tenant.clone(), plan.clone());
+        let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
+        cache.ceilings.insert(tenant.clone(), ceiling_vcpu_ms);
+        cache.plans.insert(tenant.clone(), plan.clone());
         Ok(Some(plan))
     }
 }
@@ -502,6 +349,8 @@ impl<H: IntrospectHttp> CoreLinkPlanStore<H> {
 mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
+
+    use corelink_fabric::compute_meter;
 
     use super::*;
     use crate::corelink_auth::IntrospectResponse;
@@ -858,6 +707,38 @@ mod tests {
                 "present unreadable max_vcpu_h {garbage} must fail closed",
             );
         }
+    }
+
+    /// A failed refresh revokes both token-free authority caches before the
+    /// error is returned. This is the queue safety boundary: its pre-filter
+    /// must not continue to see the previous cap after malformed entitlement.
+    #[test]
+    fn malformed_refresh_invalidates_plan_and_ceiling_atomically() {
+        let store = CoreLinkPlanStore::new(
+            SeqIntrospect::new(&[
+                (
+                    200,
+                    r#"{"valid":true,"max_concurrency":2,"max_vcpu_h":100}"#,
+                ),
+                (200, r#"{"valid":true,"max_concurrency":2,"max_vcpu_h":-1}"#),
+            ]),
+            cfg("https://x/i", "s3cr3t"),
+        );
+        assert!(
+            store
+                .plan_of_resolving(&tenant(), "pat")
+                .expect("initial response reachable")
+                .is_some()
+        );
+        assert!(store.plan_of(&tenant()).is_some());
+        assert_ne!(store.tenant_ceiling_vcpu_ms(&tenant()), 0);
+
+        assert_eq!(
+            store.plan_of_resolving(&tenant(), "pat"),
+            Err(PlanSourceError::Unreachable)
+        );
+        assert!(store.plan_of(&tenant()).is_none());
+        assert_eq!(store.tenant_ceiling_vcpu_ms(&tenant()), 0);
     }
 
     /// An `max_vcpu_h` so large the vCPU·ms conversion overflows the i64 ledger

@@ -31,6 +31,7 @@ pub mod corelink_auth;
 pub mod corelink_billing;
 pub mod corelink_plans;
 pub mod cred_ticket;
+mod decimal;
 pub mod envelope_inject;
 pub mod exec;
 pub mod handlers;
