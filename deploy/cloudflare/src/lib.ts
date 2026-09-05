@@ -935,6 +935,12 @@ export function parseReconcilerRepos(csv: string | undefined): string[] {
     .filter((s) => s.includes("/"));
 }
 
+function canonicalRepoLookupKey(value: string): string {
+  const edgeTrim = (part: string) => part.replace(/^[\t\n\v\f\r ]+|[\t\n\v\f\r ]+$/g, "");
+  const parts = edgeTrim(value).split("/");
+  return parts.length === 2 ? `${edgeTrim(parts[0]).toLowerCase()}/${edgeTrim(parts[1]).toLowerCase()}` : "";
+}
+
 /**
  * Look up a repo's installation_id from the REPO_INSTALLATION_MAP JSON. A repo
  * webhook carries no `installation.id`; for known first-party repos we inject it
@@ -945,14 +951,9 @@ export function installationIdForRepo(json: string | undefined, repoFullName: st
   if (!json || !repoFullName) return "";
   try {
     const map = JSON.parse(json) as Record<string, unknown>;
-    const edgeTrim = (value: string) => value.replace(/^[\t\n\v\f\r ]+|[\t\n\v\f\r ]+$/g, "");
-    const canonical = (value: string) => {
-      const parts = edgeTrim(value).split("/");
-      return parts.length === 2 ? `${edgeTrim(parts[0]).toLowerCase()}/${edgeTrim(parts[1]).toLowerCase()}` : "";
-    };
-    const wanted = canonical(repoFullName);
+    const wanted = canonicalRepoLookupKey(repoFullName);
     for (const [key, value] of Object.entries(map)) {
-      if (canonical(key) !== wanted) continue;
+      if (canonicalRepoLookupKey(key) !== wanted) continue;
       return typeof value === "string" ? value : typeof value === "number" ? String(value) : "";
     }
     return "";
@@ -975,8 +976,11 @@ export function tenantPatSecretForRepo(json: string | undefined, repoFullName: s
   if (!json || !repoFullName) return "";
   try {
     const map = JSON.parse(json) as Record<string, unknown>;
-    const v = map[repoFullName];
-    return typeof v === "string" ? v : "";
+    const wanted = canonicalRepoLookupKey(repoFullName);
+    for (const [key, value] of Object.entries(map)) {
+      if (canonicalRepoLookupKey(key) === wanted && typeof value === "string") return value;
+    }
+    return "";
   } catch {
     return "";
   }
