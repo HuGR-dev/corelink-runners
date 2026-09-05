@@ -4,7 +4,7 @@ import { ContainmentDO, REDRIVE_RESERVATION_TTL_MS, type ContainmentEvent, type 
 
 export const T0 = 1_750_000_000_000;
 
-function clone<T>(value: T): T { return value === undefined ? value : JSON.parse(JSON.stringify(value)) as T; }
+function clone<T>(value: T): T { return value === undefined ? value : structuredClone(value); }
 class TxnStorage {
   constructor(private readonly map: Map<string, unknown>) {}
   async get<T>(key: string): Promise<T | undefined> { return clone(this.map.get(key) as T | undefined); }

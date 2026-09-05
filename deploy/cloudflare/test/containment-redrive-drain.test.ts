@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("@cloudflare/containers", () => ({ Container: class {}, getContainer: vi.fn(() => ({ startWithEnv: vi.fn(async () => {}), teardown: vi.fn(async () => {}) })) }));
 
 import { ContainmentDO, REDRIVE_RESERVATION_TTL_MS, redriveOrphanedJobs, retryOrphanedSpawns, runContainmentDrain } from "../src/index";
+import { containmentSpawnActiveKey, drainOwnerTuple } from "../src/containment_effect_route";
 import { authorityProxy, bootstrap, ctx, digest, env, envWithAuthority, event, makeDO, kv, providerReceipt, recoveryFixture, reserveKey, settle, T0, writeDeliveredProof } from "./containment-redrive-test-helpers";
 
 beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(T0); });
@@ -135,7 +136,10 @@ describe("T3-W17 deterministic continuation crash seams", () => {
     {
       const { d, store } = await queuedDrain();
       const authority = authorityProxy(d.instance, { markEffectCommitted: async () => { throw new Error("after drive before commit"); } });
-      const drive = vi.fn(async (_env: unknown, opts: { jobId: string; repo: string }) => providerReceipt(opts));
+      const drive = vi.fn(async (_env: unknown, opts: { jobId: string; repo: string; effect_id?: string; containment_event_id?: string; effect_permit_id?: string }) => {
+        await writeDeliveredProof(store, { jobId: opts.jobId, effect_id: opts.effect_id!, containment_event_id: opts.containment_event_id!, effect_permit_id: opts.effect_permit_id! });
+        return providerReceipt(opts);
+      });
       await runContainmentDrain(envWithAuthority(d, store, authority), { claimSpawn: async () => true, bindContainmentSpawnClaim: async () => {}, driveSpawn: drive });
       expect(drive).toHaveBeenCalledTimes(1); expect((await d.instance.getEvent("evt-1"))?.state).toBe("CLAIMED");
       expect([...d.storage.map.values()]).toContainEqual(expect.objectContaining({ path: "drain", state: "COMMITTED" }));
@@ -172,6 +176,139 @@ describe("T3-W17 deterministic continuation crash seams", () => {
     expect((await d.instance.getEvent("evt-1"))).toMatchObject({ state: "CLAIMED", effect_permit: expect.any(Object) });
     releaseOld!(); await oldRun;
     expect(enteredOld).toBe(1);
+  });
+
+  it("reclaims PREPARED and CLAIM_ACQUIRED owners before the sole drain permit", async () => {
+    for (const crashState of ["PREPARED", "CLAIM_ACQUIRED"] as const) {
+      vi.setSystemTime(T0);
+      const { d, store } = await queuedDrain();
+      const oldAuthority = authorityProxy(d.instance, {
+        releaseLease: async () => {},
+        ...(crashState === "PREPARED"
+          ? { ownerAcquire: async () => { throw new Error("crash after prepare"); } }
+          : { ownerMirror: async () => { throw new Error("crash after acquire"); } }),
+      });
+      await runContainmentDrain(envWithAuthority(d, store, oldAuthority));
+      expect([...d.storage.map.values()]).toContainEqual(expect.objectContaining({ path: "drain", state: crashState }));
+      expect((await d.instance.getEvent("evt-1"))?.effect_permit).toBeNull();
+
+      vi.setSystemTime(T0 + 120_000);
+      const permits = new Set<string>();
+      const newAuthority = authorityProxy(d.instance, {
+        beginEffect: async (...args: Parameters<ContainmentDO["beginEffect"]>) => {
+          const permit = await d.instance.beginEffect(...args);
+          if (permit) permits.add(permit.permit_id);
+          return permit;
+        },
+      });
+      const drive = vi.fn(async (_env: unknown, opts: { jobId: string; repo: string; effect_id?: string; containment_event_id?: string; effect_permit_id?: string }) => {
+        await writeDeliveredProof(store, { jobId: opts.jobId, effect_id: opts.effect_id!, containment_event_id: opts.containment_event_id!, effect_permit_id: opts.effect_permit_id! });
+        return providerReceipt(opts);
+      });
+      await runContainmentDrain(envWithAuthority(d, store, newAuthority), { driveSpawn: drive });
+      expect(permits.size).toBe(1);
+      expect(drive).toHaveBeenCalledTimes(1);
+      expect(await d.instance.getEvent("evt-1")).toBeNull();
+      expect(await d.instance.snapshot()).toMatchObject({ drain_cursor: 1, backlog_count: 0 });
+    }
+  });
+
+  it("refuses cross-lease owner reap after a legacy permit exists", async () => {
+    const { d, store } = await queuedDrain();
+    const oldAuthority = authorityProxy(d.instance, {
+      releaseLease: async () => {},
+      ownerConfirm: async () => { throw new Error("crash after legacy permit"); },
+    });
+    await runContainmentDrain(envWithAuthority(d, store, oldAuthority));
+    expect((await d.instance.getEvent("evt-1"))?.effect_permit).toMatchObject({ issued_to_epoch: 1 });
+    vi.setSystemTime(T0 + 120_000);
+    const lease = await d.instance.acquireLease("new-owner", T0 + 120_000);
+    expect(lease).toMatchObject({ epoch: 2 });
+    await d.instance.claimNext("new-owner", 2, T0 + 120_000);
+    const tuple = await drainOwnerTuple("acme/repo", "1", "containment:v1:evt-1", "evt-1", "new-owner", 2);
+    const before = JSON.stringify([...d.storage.map.entries()]);
+    expect(await d.instance.admitDrainOwner("evt-1", tuple, T0 + 120_000)).toBe(false);
+    expect(JSON.stringify([...d.storage.map.entries()])).toBe(before);
+  });
+
+  it("refuses a corrupt canonical predecessor without mutation", async () => {
+    const { d, store } = await queuedDrain();
+    const oldAuthority = authorityProxy(d.instance, {
+      releaseLease: async () => {},
+      ownerAcquire: async () => { throw new Error("crash after prepare"); },
+    });
+    await runContainmentDrain(envWithAuthority(d, store, oldAuthority));
+    const oldPointer = [...d.storage.map.entries()].find(([key]) => key.includes("spawn-active:"));
+    expect(oldPointer).toBeDefined();
+    d.storage.map.set(oldPointer![0], { ...(oldPointer![1] as object), permit_id: "corrupt" });
+    vi.setSystemTime(T0 + 120_000);
+    const lease = await d.instance.acquireLease("new-owner", T0 + 120_000);
+    await d.instance.claimNext("new-owner", lease!.epoch, T0 + 120_000);
+    const tuple = await drainOwnerTuple("acme/repo", "1", "containment:v1:evt-1", "evt-1", "new-owner", lease!.epoch);
+    expect(containmentSpawnActiveKey(tuple)).toBe(oldPointer![0]);
+    const before = JSON.stringify([...d.storage.map.entries()]);
+    expect(await d.instance.admitDrainOwner("evt-1", tuple, T0 + 120_000)).toBe(false);
+    expect(JSON.stringify([...d.storage.map.entries()])).toBe(before);
+  });
+
+  it("refuses malformed drain authority shapes without mutation", async () => {
+    const cases: Array<(d: ReturnType<typeof makeDO>) => void> = [
+      d => { d.storage.map.set("containment:v1:meta", { ...(d.storage.map.get("containment:v1:meta") as object), backlog_count: Number.NaN }); },
+      d => { const key = "containment:v1:pause:00000000000000000001"; d.storage.map.set(key, { ...(d.storage.map.get(key) as object), schema_version: 2 }); },
+      d => { const key = "containment:v1:event:evt-1"; d.storage.map.set(key, { ...(d.storage.map.get(key) as object), schema_version: 2 }); },
+      d => { const key = "containment:v1:event:evt-1"; d.storage.map.set(key, { ...(d.storage.map.get(key) as object), claim: { owner: "authority-owner", lease_epoch: "1" } }); },
+    ];
+    for (const corrupt of cases) {
+      vi.setSystemTime(T0);
+      const { d } = await queuedDrain();
+      const lease = await d.instance.acquireLease("authority-owner", T0);
+      await d.instance.claimNext("authority-owner", lease!.epoch, T0);
+      const tuple = await drainOwnerTuple("acme/repo", "1", "containment:v1:evt-1", "evt-1", "authority-owner", lease!.epoch);
+      corrupt(d);
+      const before = [...d.storage.map.entries()];
+      expect(await d.instance.admitDrainOwner("evt-1", tuple, T0)).toBe(false);
+      expect([...d.storage.map.entries()]).toEqual(before);
+    }
+  });
+
+  it("retries safely when the external claim is refused after predecessor reap", async () => {
+    vi.setSystemTime(T0);
+    const { d, store } = await queuedDrain();
+    const oldAuthority = authorityProxy(d.instance, {
+      releaseLease: async () => {},
+      ownerAcquire: async () => { throw new Error("crash after prepare"); },
+    });
+    await runContainmentDrain(envWithAuthority(d, store, oldAuthority));
+    const oldEvent = (await d.instance.getEvent("evt-1"))!;
+    const oldOwner = oldEvent.claim!.owner;
+    vi.setSystemTime(T0 + 120_000);
+    const refusedDrive = vi.fn(async () => providerReceipt({ jobId: "1", repo: "acme/repo" }));
+    await runContainmentDrain(env(d, store), { claimSpawn: async () => false, driveSpawn: refusedDrive });
+    expect(refusedDrive).not.toHaveBeenCalled();
+    expect((await d.instance.getEvent("evt-1"))?.effect_permit).toBeNull();
+    expect([...d.storage.map.values()]).toContainEqual(expect.objectContaining({ path: "drain", state: "ABORTED_PRE_EFFECT", tombstone: true }));
+
+    const permits = new Set<string>();
+    const newAuthority = authorityProxy(d.instance, {
+      beginEffect: async (...args: Parameters<ContainmentDO["beginEffect"]>) => {
+        const permit = await d.instance.beginEffect(...args);
+        if (permit) permits.add(permit.permit_id);
+        return permit;
+      },
+    });
+    const drive = vi.fn(async (_env: unknown, opts: { jobId: string; repo: string; effect_id?: string; containment_event_id?: string; effect_permit_id?: string }) => {
+      await writeDeliveredProof(store, { jobId: opts.jobId, effect_id: opts.effect_id!, containment_event_id: opts.containment_event_id!, effect_permit_id: opts.effect_permit_id! });
+      return providerReceipt(opts);
+    });
+    await runContainmentDrain(envWithAuthority(d, store, newAuthority), {
+      claimSpawn: async () => { await store.put("spawn:1", "123"); return true; },
+      bindContainmentSpawnClaim: async () => {},
+      driveSpawn: drive,
+    });
+    expect(permits.size).toBe(1);
+    expect(drive).toHaveBeenCalledTimes(1);
+    expect(await d.instance.getEvent("evt-1")).toBeNull();
+    expect(await d.instance.beginEffect("evt-1", oldOwner, 1, Date.now())).toBeNull();
   });
 
   it("recovers a proven permit through the real drain without a second continuation entry", async () => {

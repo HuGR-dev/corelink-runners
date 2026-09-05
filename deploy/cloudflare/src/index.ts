@@ -132,6 +132,7 @@ import {
   type SpawnOwnerRequest,
   type SpawnMirrorObservation,
 } from "./containment_effect_ledger";
+import { admitDrainOwnerInTransaction } from "./containment_drain_owner_reap";
 import { drainOwnerTuple, intakeOwnerTuple, redriveOwnerTuple, runCanonicalEffect, type ProviderDriveReceipt } from "./containment_effect_route";
 import {
   containmentEventKey,
@@ -604,8 +605,6 @@ export class ContainmentDO extends DurableObject<Env> {
   }
 
   private effectLedger(): ContainmentEffectLedger {
-    // Stable authority seam. Existing drain/redrive callers retain their
-    // legacy APIs until the route-integration WP switches them atomically.
     return new ContainmentEffectLedger(this.ctx.storage as never, this.env.RUNNER_JOB_PATS);
   }
 
@@ -654,6 +653,7 @@ export class ContainmentDO extends DurableObject<Env> {
   async ownerCommit(input: SpawnOwnerRequest, permitId: string, proofId: string, receipt: ContainmentEffectReceipt): Promise<OwnerResult> { return this.effectLedger().commitEffect(input, permitId, proofId, receipt) as Promise<OwnerResult>; }
   async ownerObserve(pointerKey: string, attemptKey: string): Promise<OwnerResult> { return this.effectLedger().observe(pointerKey, attemptKey); }
   async ownerAbort(input: SpawnOwnerRequest): Promise<OwnerResult> { return this.effectLedger().abort(input); } async ownerFreeze(input: SpawnOwnerRequest): Promise<OwnerResult> { return this.effectLedger().freezeUnknown(input); }
+  async admitDrainOwner(eventId: string, tuple: Awaited<ReturnType<typeof drainOwnerTuple>>, now = Date.now()): Promise<boolean> { return this.tx(s => admitDrainOwnerInTransaction(s, eventId, tuple, now)); }
   async beginEffect(eventId: string, owner: string, epoch: number, now = Date.now(), permitId?: string): Promise<ContainmentEvent["effect_permit"]> {
     return this.beginContainmentEventEffect(eventId, owner, epoch, now, permitId);
   }
@@ -4406,8 +4406,6 @@ type ContainmentDrainDependencies = {
 };
 
 export async function runContainmentDrain(env: Env, dependencies: ContainmentDrainDependencies = {}): Promise<void> {
-  // Optional only for deterministic callers: production omits dependencies and
-  // therefore resolves each seam to the exact existing implementation.
   const claim = dependencies.claimSpawn ?? claimSpawn;
   const bindClaim = dependencies.bindContainmentSpawnClaim ?? bindContainmentSpawnClaim;
   const drive = dependencies.driveSpawn ?? driveSpawn;
@@ -4435,13 +4433,15 @@ export async function runContainmentDrain(env: Env, dependencies: ContainmentDra
         continue;
       }
       if (!env.RUNNER_JOB_PATS) break;
+      const tuple = await drainOwnerTuple(event.repo, event.job_id, event.effect_id, event.event_id, owner, lease.epoch);
       const routeResult = await runCanonicalEffect({
         ledger: authority,
-        tuple: await drainOwnerTuple(event.repo, event.job_id, event.effect_id, event.event_id, owner, lease.epoch),
+        tuple,
         opts: { jobId: event.job_id, repo: event.repo, installationId: event.installation_id, labels: event.labels },
         provider: "cloudflare-container",
         resource_id: `job:${event.repo}/${event.job_id}`,
         idempotency_key: event.effect_id,
+        admit: () => authority.admitDrainOwner(event.event_id, tuple),
         claim: () => claim(env.RUNNER_JOB_PATS!, event.job_id),
         release: () => releaseSpawnClaim(env.RUNNER_JOB_PATS!, event.job_id),
         drive: async driveOpts => {
