@@ -597,6 +597,8 @@ export class ContainmentDO extends DurableObject<Env> {
   }
 
   private effectLedger(): ContainmentEffectLedger {
+    // Stable authority seam. Existing drain/redrive callers retain their
+    // legacy APIs until the route-integration WP switches them atomically.
     return new ContainmentEffectLedger(this.ctx.storage as never, this.env.RUNNER_JOB_PATS);
   }
 
