@@ -1251,24 +1251,17 @@ mod tests {
     // ── W2-B regression: the sweep must NOT delete a Pending that raced to
     // Held in the sweep window ──────────────────────────────────────────────
 
-    /// Ledger decorator that models a CONCURRENT ACQUIRE winning the race: on the
-    /// FIRST `pending_older_than` call (the sweep's snapshot) it returns the real
-    /// stale set AND THEN transitions the named lease `Pending → Held` — exactly
-    /// the window in which a provision completes after the sweep snapshotted the
-    /// lease as Pending. Every other method delegates to the inner
-    /// [`InMemoryLedger`]; the inner is held in a `RefCell` so the `&self`
-    /// `pending_older_than` can perform the in-window flip (modeling a concurrent
-    /// writer). The sweep's later `remove_if_pending` then sees the lease as
-    /// `Held` and MUST no-op (the W2-B fix); a state-blind `remove` would instead
-    /// delete the live `Held` lease.
+    /// Ledger decorator that models a concurrent acquire winning immediately
+    /// BEFORE the new atomic cleanup-claim seam. The claim must observe `Held`
+    /// and return no work; it may neither claim nor tear down the live box.
     struct RaceToHeldLedger {
         // W-LEDGER-A2: the trait is `&self` + the ledger Arc is `Send + Sync`, so the
         // interior mutability lives in `InMemoryLedger` (its own `Arc<Mutex<..>>`),
         // not a `!Sync` `RefCell`.
         inner: InMemoryLedger,
-        /// The lease to flip to `Held` right after the first snapshot.
+        /// The lease to flip to `Held` immediately before the first cleanup claim.
         race_lease: String,
-        /// Flips false after the first `pending_older_than` so the race fires once.
+        /// Flips false after the first cleanup-claim attempt so the race fires once.
         armed: std::sync::atomic::AtomicBool,
     }
 
@@ -1299,16 +1292,22 @@ mod tests {
             self.inner.held()
         }
         fn pending_older_than(&self, now_ms: u64, max_age_ms: u64) -> Result<Vec<LeaseRecord>> {
-            // The snapshot the sweep will iterate (the lease is still Pending here).
-            let snapshot = self.inner.pending_older_than(now_ms, max_age_ms)?;
-            // …then the concurrent acquire wins: flip the raced lease to Held,
-            // ONCE, modeling the provision completing in the sweep window.
+            self.inner.pending_older_than(now_ms, max_age_ms)
+        }
+        fn claim_stale_pending_cleanup(
+            &self,
+            now_ms: u64,
+            max_age_ms: u64,
+        ) -> Result<Vec<LeaseRecord>> {
+            // The old snapshot/delete race is now one atomic ledger claim. Make
+            // Held win immediately before that claim, so the claim cannot turn a
+            // live lease into cleanup work.
             if self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
                 self.inner
                     .transition(&self.race_lease, RunnerState::Held, now_ms)
                     .expect("race-flip Pending→Held must be a legal transition");
             }
-            Ok(snapshot)
+            self.inner.claim_stale_pending_cleanup(now_ms, max_age_ms)
         }
         fn try_admit(&self, rec: LeaseRecord, max_concurrency: u32) -> Result<bool> {
             self.inner.try_admit(rec, max_concurrency)
@@ -1328,6 +1327,9 @@ mod tests {
             // (delete iff still Pending). By now the lease is Held → no-op.
             self.inner.remove_if_pending(lease_id)
         }
+        fn finish_pending_cleanup(&self, lease_id: &str) -> Result<bool> {
+            self.inner.finish_pending_cleanup(lease_id)
+        }
     }
 
     /// A genuinely-stale `Pending` that races to `Held` in the sweep window is
@@ -1337,7 +1339,7 @@ mod tests {
     #[tokio::test]
     async fn sweep_does_not_reclaim_pending_that_raced_to_held() {
         // Build state on a race-injecting ledger that flips the lease to Held
-        // right after the sweep snapshots it as Pending.
+        // immediately before the atomic cleanup claim.
         let ledger: Arc<dyn LeaseLedger + Send + Sync> =
             Arc::new(RaceToHeldLedger::new("pending-raced"));
         let clock = FixedClock::new(1_000_000);
@@ -1350,14 +1352,14 @@ mod tests {
         state.provisioner = Arc::clone(&prov) as Arc<dyn BoxProvisioner>;
 
         // A genuinely-stale Pending (created at 100_000 ≪ cutoff 700_000) that
-        // appears in the sweep's snapshot — then races to Held in the window.
+        // races to Held before the cleanup claim can fence it.
         insert_pending(&state, "pending-raced", 100_000);
 
         let reclaimed = sweep_stale_pending(&state, Duration::from_secs(300)).await;
 
         assert_eq!(
             reclaimed, 0,
-            "a lease that raced Pending→Held must NOT be reclaimed (guarded delete no-ops)"
+            "a lease that won Pending→Held before cleanup claim must not be reclaimed"
         );
         // The live lease must still exist AND still be Held — never deleted.
         let rec = state
@@ -1369,7 +1371,7 @@ mod tests {
             rec.state.is_held(),
             "the raced lease must remain Held (a live lease), not deleted"
         );
-        // And its box must NOT be torn down (delete-first gate: lost CAS → no teardown).
+        // And its box must NOT be torn down (Held won before claim → no teardown).
         assert!(
             prov.teardown_calls().is_empty(),
             "the live Held lease's box must NOT be torn down by the stale-Pending sweep"
