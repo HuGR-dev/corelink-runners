@@ -410,6 +410,8 @@ const CONTAINMENT_PAUSE_PREFIX = "containment:v1:pause:";
 const CONTAINMENT_INVALID_PREFIX = "containment:v1:invalid:";
 const CONTAINMENT_OUTBOX_PREFIX = "containment:v1:outbox:";
 const CONTAINMENT_RESERVATION_PREFIX = "containment:v1:reservation:";
+const INVALID_CONFIG_SWITCHES = new Set(["AUTOSCALER_INTAKE_PAUSED", "AUTOSCALER_REDRIVE_PAUSED"]);
+const SHA256_HEX = /^[0-9a-f]{64}$/;
 export const DRAIN_LEASE_TTL_MS = 120_000;
 const DRAIN_RENEW_THRESHOLD_MS = 30_000;
 // A HELD reservation is deliberately short-lived and may be reclaimed only
@@ -509,6 +511,23 @@ function containmentEventKey(id: string): string { return `${CONTAINMENT_EVENT_P
 function containmentPauseKey(seq: number): string { return `${CONTAINMENT_PAUSE_PREFIX}${String(seq).padStart(20, "0")}`; }
 function containmentInvalidKey(name: string, digest: string): string { return `${CONTAINMENT_INVALID_PREFIX}${name}:${digest}`; }
 function containmentOutboxKey(signalId: string): string { return `${CONTAINMENT_OUTBOX_PREFIX}${signalId}`; }
+function isValidOutboxRecord(value: unknown): value is ContainmentOutboxRecord {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Partial<ContainmentOutboxRecord>;
+  return record.schema_version === 1
+    && typeof record.signal_id === "string" && SHA256_HEX.test(record.signal_id)
+    && (record.state === "PENDING" || record.state === "DELIVERED")
+    && Number.isSafeInteger(record.attempts) && (record.attempts as number) >= 0;
+}
+function isValidInvalidConfigRecord(value: unknown, key: string): value is InvalidConfigRecord {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Partial<InvalidConfigRecord>;
+  return record.schema_version === 1
+    && typeof record.switch_name === "string" && INVALID_CONFIG_SWITCHES.has(record.switch_name)
+    && typeof record.raw_value_sha256 === "string" && SHA256_HEX.test(record.raw_value_sha256)
+    && typeof record.signal_id === "string" && SHA256_HEX.test(record.signal_id)
+    && key === containmentInvalidKey(record.switch_name, record.raw_value_sha256);
+}
 function normalizeRedriveIdentity(repo: unknown, jobId: unknown): { repo: string; job_id: string } | null {
   if (typeof repo !== "string" || typeof jobId !== "string") return null;
   const normalizedRepo = repo.trim();
@@ -827,23 +846,49 @@ export class ContainmentDO extends DurableObject<Env> {
   }
 
   async recordInvalidConfig(switchName: string, rawValue: string, rawValueSha256: string): Promise<ContainmentOutboxRecord> {
+    if (!INVALID_CONFIG_SWITCHES.has(switchName) || !SHA256_HEX.test(rawValueSha256)) {
+      throw new TypeError("unsupported or malformed invalid-config identity");
+    }
+    // The durable identity is over the exact UTF-8 bytes of the raw value. Do
+    // not trust a caller-supplied digest: accepting a mismatched digest could
+    // alias two config values into one exactly-once signal.
+    if (await sha256Hex(rawValue) !== rawValueSha256) {
+      throw new TypeError("invalid-config digest does not match raw value");
+    }
+    const signalId = await sha256Hex(`containment:v1:config-invalid\n${switchName}\n${rawValueSha256}`);
     return this.tx(async (s) => {
       const key = containmentInvalidKey(switchName, rawValueSha256);
       const prior = (await s.get(key)) as InvalidConfigRecord | undefined;
-      const signalId = prior?.signal_id ?? await sha256Hex(`containment:v1:config-invalid\n${switchName}\n${rawValueSha256}`);
+      if (prior && (!isValidInvalidConfigRecord(prior, key) || prior.signal_id !== signalId)) {
+        throw new TypeError("malformed invalid-config record");
+      }
       if (!prior) await s.put(key, { schema_version: 1 as const, signal_id: signalId, switch_name: switchName, raw_value_sha256: rawValueSha256 } satisfies InvalidConfigRecord);
       const outboxKey = containmentOutboxKey(signalId);
       const existingOutbox = (await s.get(outboxKey)) as ContainmentOutboxRecord | undefined;
+      if (existingOutbox && (!isValidOutboxRecord(existingOutbox) || existingOutbox.signal_id !== signalId)) {
+        throw new TypeError("malformed invalid-config outbox record");
+      }
       const outbox = existingOutbox ?? { schema_version: 1 as const, signal_id: signalId, state: "PENDING" as const, attempts: 0 };
       if (!existingOutbox) await s.put(outboxKey, outbox);
-      void rawValue;
       return outbox;
     });
   }
 
   async pendingInvalidConfig(): Promise<ContainmentOutboxRecord[]> {
     const records = await this.ctx.storage.list<ContainmentOutboxRecord>({ prefix: CONTAINMENT_OUTBOX_PREFIX });
-    return [...records.values()].filter((r) => r.state === "PENDING");
+    const identities = await this.ctx.storage.list<InvalidConfigRecord>({ prefix: CONTAINMENT_INVALID_PREFIX });
+    const validSignals = new Set<string>();
+    for (const [key, identity] of identities) {
+      if (!isValidInvalidConfigRecord(identity, key)) continue;
+      const expected = await sha256Hex(`containment:v1:config-invalid\n${identity.switch_name}\n${identity.raw_value_sha256}`);
+      if (identity.signal_id === expected) validSignals.add(identity.signal_id);
+    }
+    return [...records.entries()]
+      .filter(([key, record]) => isValidOutboxRecord(record)
+        && key === containmentOutboxKey(record.signal_id)
+        && record.state === "PENDING"
+        && validSignals.has(record.signal_id))
+      .map(([, record]) => record);
   }
 
   async markInvalidConfigAttempt(signalId: string): Promise<void> {
