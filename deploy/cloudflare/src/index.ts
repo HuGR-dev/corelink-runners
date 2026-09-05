@@ -141,6 +141,7 @@ import {
   isValidJobIndex,
   isValidJobIndexMeta,
   isValidOutboxRecord,
+  MAX_ACTIVE_INDEX_EVENTS,
   normalizeRedriveIdentity,
   redriveEffectId,
   reservationPermit,
@@ -463,7 +464,6 @@ const CONTAINMENT_OUTBOX_PREFIX = "containment:v1:outbox:";
 const CONTAINMENT_RESERVATION_PREFIX = "containment:v1:reservation:";
 const CONTAINMENT_JOB_INDEX_PREFIX = "containment:v1:job-index:";
 const CONTAINMENT_INDEX_META_KEY = "containment:v1:job-index-meta";
-const CONTAINMENT_INDEX_MAX_EVENTS = 32;
 const INVALID_CONFIG_SWITCHES = new Set(["AUTOSCALER_INTAKE_PAUSED", "AUTOSCALER_REDRIVE_PAUSED"]);
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 export const DRAIN_LEASE_TTL_MS = 120_000;
@@ -649,7 +649,7 @@ export class ContainmentDO extends DurableObject<Env> {
     const key = containmentJobIndexKey(repo, jobId);
     const existing = await s.get(key) as ContainmentJobIndex | undefined;
     if (existing === undefined) {
-      const created: ContainmentJobIndex = { schema_version: 1, repo, job_id: jobId, event_ids: [] };
+      const created: ContainmentJobIndex = { schema_version: 1, repo, job_id: jobId, active_event_ids: [], active_count: 0, updated_at_ms: Date.now() };
       await s.put(key, created);
       return created;
     }
@@ -659,13 +659,13 @@ export class ContainmentDO extends DurableObject<Env> {
 
   private async containedEventExists(s: any, repo: string, jobId: string, freshAuthority: boolean): Promise<boolean> {
     const index = await this.ensureJobIndex(s, repo, jobId, freshAuthority);
-    for (const eventId of index.event_ids) {
+    for (const eventId of index.active_event_ids) {
       const event = await s.get(containmentEventKey(eventId)) as ContainmentEvent | undefined;
       if (!event) throw new Error("containment job index references missing event");
       const identity = normalizeRedriveIdentity(event.repo, event.job_id);
       if (!identity || identity.repo !== repo || identity.job_id !== jobId) throw new Error("containment job index identity divergent");
     }
-    return index.event_ids.length > 0;
+    return index.active_count > 0;
   }
 
   async reserveRedriveCandidate(
@@ -841,10 +841,10 @@ export class ContainmentDO extends DurableObject<Env> {
     };
     const pause: ContainmentPause = { schema_version: 1, event_id: event.event_id, pause_seq: next.pause_seq };
     const index = await this.ensureJobIndex(s, event.repo, event.job_id, freshAuthority);
-    if (index.event_ids.length >= CONTAINMENT_INDEX_MAX_EVENTS) throw new Error("containment job index bound exceeded");
+    if (index.active_count >= MAX_ACTIVE_INDEX_EVENTS) throw new Error("containment job index bound exceeded");
     await s.put(key, next);
     await s.put(containmentPauseKey(next.pause_seq), pause);
-    await s.put(containmentJobIndexKey(event.repo, event.job_id), { ...index, event_ids: [...index.event_ids, event.event_id] });
+    await s.put(containmentJobIndexKey(event.repo, event.job_id), { ...index, active_event_ids: [...index.active_event_ids, event.event_id], active_count: index.active_count + 1, updated_at_ms: Date.now() });
     await s.put(CONTAINMENT_META_KEY, { ...meta, next_pause_seq: next.pause_seq + 1, backlog_count: meta.backlog_count + 1 });
     return { status: "appended", event: next };
   }
@@ -967,6 +967,9 @@ export class ContainmentDO extends DurableObject<Env> {
   async requestDrain(): Promise<ContainmentMeta> {
     return this.tx(async (s) => {
       const meta = ((await s.get(CONTAINMENT_META_KEY)) as ContainmentMeta | undefined) ?? emptyContainmentMeta();
+      const indexMeta = await s.get(CONTAINMENT_INDEX_META_KEY);
+      if (indexMeta === undefined) await s.put(CONTAINMENT_INDEX_META_KEY, { schema_version: 1, initialized: true } satisfies ContainmentJobIndexMeta);
+      else if (!isValidJobIndexMeta(indexMeta)) throw new Error("containment job index meta divergent");
       const next = { ...meta, drain_requested: meta.backlog_count > 0 };
       await s.put(CONTAINMENT_META_KEY, next);
       return next;
@@ -1186,13 +1189,13 @@ export class ContainmentDO extends DurableObject<Env> {
       if (!pause || pause.event_id !== event.event_id || pause.pause_seq !== event.pause_seq) return null;
       const indexKey = containmentJobIndexKey(event.repo, event.job_id);
       const index = await s.get(indexKey) as ContainmentJobIndex | undefined;
-      if (!index || !isValidJobIndex(index, event.repo, event.job_id) || !index.event_ids.includes(event.event_id)) return null;
+      if (!index || !isValidJobIndex(index, event.repo, event.job_id) || !index.active_event_ids.includes(event.event_id)) return null;
       const backlog = meta.backlog_count - 1;
       await s.delete(containmentEventKey(eventId));
       await s.delete(containmentPauseKey(event.pause_seq));
-      const remaining = index.event_ids.filter((id) => id !== event.event_id);
+      const remaining = index.active_event_ids.filter((id) => id !== event.event_id);
       if (remaining.length === 0) await s.delete(indexKey);
-      else await s.put(indexKey, { ...index, event_ids: remaining });
+      else await s.put(indexKey, { ...index, active_event_ids: remaining, active_count: remaining.length, updated_at_ms: Date.now() });
       await s.put(CONTAINMENT_META_KEY, { ...meta, drain_cursor: event.pause_seq, backlog_count: backlog, drain_requested: backlog > 0 });
       return event;
     });

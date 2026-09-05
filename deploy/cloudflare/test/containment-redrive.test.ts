@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("@cloudflare/containers", () => ({ Container: class {}, getContainer: vi.fn(() => ({ startWithEnv: vi.fn(async () => {}), teardown: vi.fn(async () => {}) })) }));
 
 import worker, { ContainmentDO, REDRIVE_RESERVATION_TTL_MS, redriveOrphanedJobs, retryOrphanedSpawns, runContainmentDrain, type ContainmentEvent, type ContainmentRedriveReservation } from "../src/index";
+import { canonicalSafeJobId } from "../src/containment_authority_helpers";
 
 const T0 = 1_750_000_000_000;
 
@@ -177,6 +178,28 @@ async function writeDeliveredProof(store: ReturnType<typeof kv>, opts: { jobId: 
 }
 
 describe("atomic redrive reservation state machine", () => {
+  it("canonical job ids reject zero, leading zeroes, whitespace, signs, fractions, and exponents", () => {
+    for (const value of ["0", "01", " 1", "1 ", "+1", "-1", "1.0", "1e3", "9007199254740992", "9007199254740991x"]) {
+      expect(canonicalSafeJobId(value)).toBeNull();
+    }
+    expect(canonicalSafeJobId("1")).toBe("1");
+    expect(canonicalSafeJobId("9007199254740991")).toBe("9007199254740991");
+  });
+
+  it("uses the repo-job active index schema and supports 100 active events", async () => {
+    const d = makeDO();
+    for (let i = 0; i < 100; i++) await d.instance.append(event(1, { event_id: `evt-index-${i}`, effect_id: `containment:v1:evt-index-${i}` }));
+    expect(d.storage.map.get("containment:v1:job-index:acme/repo/1")).toMatchObject({ schema_version: 1, repo: "acme/repo", job_id: "1", active_count: 100, active_event_ids: expect.any(Array), updated_at_ms: expect.any(Number) });
+    expect((d.storage.map.get("containment:v1:job-index:acme/repo/1") as { active_event_ids: string[] }).active_event_ids).toHaveLength(100);
+  });
+
+  it("admin drain bootstraps index metadata atomically before the next append", async () => {
+    const d = makeDO();
+    await d.instance.requestDrain();
+    expect(d.storage.map.get("containment:v1:job-index-meta")).toEqual({ schema_version: 1, initialized: true });
+    expect((await d.instance.append(event(1))).status).toBe("appended");
+  });
+
   it("retryOrphanedSpawns: 100 concurrent candidates have exactly one eligibility/effect", async () => {
     const d = makeDO(); const store = kv({ "orphan:123": JSON.stringify({ repo: "acme/repo", installationId: "42", labels: ["corelink"], attempts: 1, firstRecordedMs: T0 - 1000 }) });
     const drive = vi.fn(async () => {}); const verify = vi.fn(async () => null); const contexts = [...Array(100)].map(() => ctx());
