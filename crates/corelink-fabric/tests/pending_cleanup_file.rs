@@ -15,7 +15,14 @@ fn pending(id: &str) -> LeaseRecord {
 
 #[test]
 fn claim_replays_and_tombstone_clears_on_restart() {
-    let path = std::env::temp_dir().join(format!("corelink-cleanup-{}.jsonl", std::process::id()));
+    let path = std::env::temp_dir().join(format!(
+        "corelink-cleanup-{}-{}.jsonl",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     let _ = std::fs::remove_file(&path);
     {
         let ledger = FileLedger::open(&path).unwrap();
