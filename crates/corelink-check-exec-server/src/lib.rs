@@ -153,8 +153,6 @@ pub struct ExecAuth(AuthMode);
 enum AuthMode {
     /// Every `/exec`-bearing route requires this exact token.
     Bearer(String),
-    /// No bearer gate. Only reachable via the explicit env opt-in.
-    Unauthenticated,
 }
 
 impl ExecAuth {
@@ -261,14 +259,6 @@ pub fn app_with_auth(auth: ExecAuth) -> Router {
                 let expected = token.clone();
                 async move { require_bearer_or_header(&expected, req, next).await }
             }))
-        }
-        AuthMode::Unauthenticated => {
-            eprintln!(
-                "check-exec-server: {ALLOW_UNAUTH_ENV} set — serving WITHOUT auth \
-                 (explicit opt-in; C2b defense-in-depth OFF; the container boundary + Worker \
-                 bearer remain the gates)"
-            );
-            router
         }
     }
 }
