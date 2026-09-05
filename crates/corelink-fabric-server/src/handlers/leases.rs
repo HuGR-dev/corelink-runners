@@ -51,6 +51,7 @@ use crate::admission::AdmissionMode;
 use crate::app::AppState;
 use crate::auth::{BearerPat, CachedIntrospect, error_response};
 use crate::handlers::envelope::HookRegistry;
+use crate::pending_cleanup::{PendingRollbackPhase, rollback_pending_admission};
 
 /// A minted-and-validated lease ready to RESERVE then finalize: the lease id,
 /// the wire `RunnerLease`, and the validated `ContainerSpec`. Bundled so the
@@ -121,8 +122,8 @@ pub(crate) fn is_capacity_error(e: &anyhow::Error) -> bool {
 ///   directly to the caller.
 /// - [`FinalizeOutcome::CapacityError`]: provision failed with a transient
 ///   provider-capacity error. The caller MUST:
-///   - In queue mode: roll back the reserved `Pending` (teardown + ledger
-///     `remove`), re-insert the `QueuedAcquire` context into the queue, and
+///   - In queue mode: finalize the claimed reserved `Pending` through the
+///     cleanup fence, re-insert the `QueuedAcquire` context into the queue, and
 ///     re-enqueue the `WorkItem` so the next tick re-dispatches it.
 ///   - In reject mode (or immediate path): return
 ///     [`capacity_exhausted_503()`] to the client.
@@ -839,7 +840,7 @@ pub(crate) async fn acquire(
 /// the wire shape is byte-for-byte the same (no `AcquireResponse` divergence).
 ///
 /// On a CAPACITY provision failure it rolls back the reserved `Pending`
-/// (teardown + ledger `remove`, + revoke_pat_for on the give-up path) and
+/// (the Pending cleanup fence, + revoke_pat_for on the give-up path) and
 /// returns [`FinalizeOutcome::CapacityError`] — the caller handles re-enqueue
 /// (queue mode) or the distinct-503 (reject mode). On any other failure it
 /// rolls back and returns [`FinalizeOutcome::Done`] with a fail-closed 503.
@@ -872,8 +873,8 @@ pub(crate) async fn finalize_admitted_lease(
         // at admission, step 0). Defensive: a missing broker here is an internal
         // inconsistency → fail closed, never a config-less runner box.
         if state.runner_broker.is_none() {
-            state.teardown_lease(&lease_id).await;
-            let _ = state.ledger.remove(&lease_id);
+            rollback_pending_admission(state, &lease_id, PendingRollbackPhase::BeforeProvision)
+                .await;
             return FinalizeOutcome::Done(fail_closed(
                 "runner lease reached finalize with no registration broker",
             ));
@@ -890,8 +891,8 @@ pub(crate) async fn finalize_admitted_lease(
                 crate::runner_inject::inject_runner_jitconfig(&mut spec, &jitconfig);
             }
             Err(e) => {
-                state.teardown_lease(&lease_id).await;
-                let _ = state.ledger.remove(&lease_id);
+                rollback_pending_admission(state, &lease_id, PendingRollbackPhase::BeforeProvision)
+                    .await;
                 return FinalizeOutcome::Done(fail_closed(&format!(
                     "runner registration mint failed: {e}"
                 )));
@@ -933,8 +934,8 @@ pub(crate) async fn finalize_admitted_lease(
             (Some(repo), inst_opt) => Some((repo, inst_opt)),
             (None, None) => None,
             (None, Some(_)) => {
-                state.teardown_lease(&lease_id).await;
-                let _ = state.ledger.remove(&lease_id);
+                rollback_pending_admission(state, &lease_id, PendingRollbackPhase::BeforeProvision)
+                    .await;
                 return FinalizeOutcome::Done(fail_closed(
                     "acquire declared installation_id without repo_full_name; repo_full_name is \
                      required for a hydrating (moat) lease — fail closed",
@@ -1018,8 +1019,12 @@ pub(crate) async fn finalize_admitted_lease(
                         tenant.as_str(),
                         req.repo_full_name.as_deref()
                     );
-                    state.teardown_lease(&lease_id).await;
-                    let _ = state.ledger.remove(&lease_id);
+                    rollback_pending_admission(
+                        state,
+                        &lease_id,
+                        PendingRollbackPhase::BeforeProvision,
+                    )
+                    .await;
                     return FinalizeOutcome::Done(fail_closed(&format!(
                         "CAS PAT mint failed: {e}"
                     )));
@@ -1031,8 +1036,8 @@ pub(crate) async fn finalize_admitted_lease(
 
     // ── 3b. Provision the container. The slot is ALREADY reserved (Pending in
     // the ledger). A provision failure here means NO Held lease is ever handed
-    // out — AND the reserved Pending MUST be rolled back, or it permanently
-    // consumes a concurrency slot (occupancy + cap leak).
+    // out. Its Pending cleanup is fenced below: an uncertain provider outcome
+    // deliberately retains the reservation for a later confirmed retry.
     //
     // Under `NoBoxProvisioner` (the default), provision is a no-op Ok →
     // acquire behaves exactly as before (no box, exec later fails closed).
@@ -1046,9 +1051,8 @@ pub(crate) async fn finalize_admitted_lease(
         //   quota / rate-limit is transient — provider capacity may free when
         //   another job finishes. Re-enqueue (queue mode) so the next tick can
         //   retry; return CapacityError so the caller handles it.
-        //   Roll back the reserved Pending here (teardown + ledger remove) so
-        //   the cap/occupancy is clean; the re-enqueue caller does NOT roll back
-        //   further (there is nothing left to roll back).
+        //   Attempt fenced cleanup. Only authoritative destruction releases
+        //   cap/occupancy; uncertainty retains the durable claim for retry.
         //   WP-7: do NOT revoke the PAT here — if the caller re-enqueues, the
         //   PAT will be needed on the next provision attempt.  The give-up
         //   path (reject mode or park timeout) is responsible for calling
@@ -1059,22 +1063,17 @@ pub(crate) async fn finalize_admitted_lease(
         //   terminal path (WP-7 A7b: revoke on EVERY terminal teardown path).
         // ─────────────────────────────────────────────────────────────────────
         if is_capacity_error(&e) {
-            // Roll back the slot — teardown then ledger remove.
-            state.teardown_lease(&lease_id).await;
-            let _ = state.ledger.remove(&lease_id);
+            // Roll back the slot only after confirmed pending cleanup.
+            rollback_pending_admission(state, &lease_id, PendingRollbackPhase::AfterProvision)
+                .await;
             // Signal caller: re-enqueue (queue mode) or distinct-503 (reject).
             return FinalizeOutcome::CapacityError;
         }
         // Fatal provision error — roll back, revoke any minted PAT, fail closed.
-        // Free the reserved slot: tear down any box the (failed) provision may
-        // have partially created, then REMOVE the Pending admission record so
-        // the cap/occupancy frees correctly — no dangling reserved Pending.
-        // Teardown is async and MUST run outside the ledger lock; the removal
-        // takes the lock in its own short critical section after.
-        state.teardown_lease(&lease_id).await;
-        // Best-effort rollback: if the ledger op errors we still return 503 below;
-        // the reaper's terminal sweep is the backstop.
-        let _ = state.ledger.remove(&lease_id);
+        // The cleanup helper claims before provider I/O and releases the
+        // reservation only after authoritative confirmation. An uncertain
+        // partial spawn remains durably claimed for retry.
+        rollback_pending_admission(state, &lease_id, PendingRollbackPhase::AfterProvision).await;
         // WP-7 A7b: revoke the minted PAT on this terminal provision-failure
         // path so no per-job PAT is ever leaked on a fatal error.
         state.revoke_pat_for(&lease_id).await;
@@ -1102,7 +1101,7 @@ pub(crate) async fn finalize_admitted_lease(
     // guard across this one slot_meter lock is safe.)
     //
     // A ledger-write failure is a 503, never a half-admitted lease handed to
-    // the caller; the reserved Pending is torn down + removed first.
+    // the caller; its Pending is passed through the cleanup fence first.
     //
     // The `MutexGuard` is guaranteed dead by the time this expression yields
     // its value — the block drops it before returning — so the subsequent
@@ -1132,15 +1131,12 @@ pub(crate) async fn finalize_admitted_lease(
         }
     };
     if let Some(msg) = ledger_err {
-        // Guard is long gone; safe to await teardown. Then free the reserved
-        // Pending so the cap/occupancy does not leak.
-        state.teardown_lease(&lease_id).await;
-        let _ = state.ledger.remove(&lease_id);
+        // Guard is long gone; use the Pending cleanup fence. This may retain
+        // the cap rather than guessing about a possibly-live provisioned box.
+        rollback_pending_admission(state, &lease_id, PendingRollbackPhase::AfterProvision).await;
         // A7b (audit r4): revoke the minted PAT on this terminal Pending→Held
-        // transition-failure path. The ledger row is removed above, so the
-        // stale-Pending reaper sweep never sees this lease — without an explicit
-        // revoke the PAT would live to D-9 self-expiry. Mirrors the
-        // fatal-provision path below.
+        // transition-failure path. The Pending cleanup claim may remain for a
+        // later provider retry, but PAT ownership stays with this caller.
         state.revoke_pat_for(&lease_id).await;
         return FinalizeOutcome::Done(fail_closed(msg));
     }
@@ -1578,6 +1574,13 @@ mod tests {
         fn teardown(&self, lease_id: &str) -> Result<()> {
             self.torn_down.lock().unwrap().push(lease_id.to_string());
             Ok(())
+        }
+
+        fn teardown_pending(&self, lease_id: &str) -> crate::CleanupTeardown {
+            let _ = self.teardown(lease_id);
+            // This fixture's provision always fails before it can create a
+            // box, so its test double explicitly supplies known-no-box proof.
+            crate::CleanupTeardown::ConfirmedDestroyed
         }
     }
 

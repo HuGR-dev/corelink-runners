@@ -119,6 +119,9 @@ impl LeaseLedger for FinishFailsOnceLedger {
     fn claim_stale_pending_cleanup(&self, now: u64, age: u64) -> Result<Vec<LeaseRecord>> {
         self.inner.claim_stale_pending_cleanup(now, age)
     }
+    fn claim_pending_cleanup(&self, id: &str, now: u64) -> Result<Option<LeaseRecord>> {
+        self.inner.claim_pending_cleanup(id, now)
+    }
     fn finish_pending_cleanup(&self, id: &str) -> Result<bool> {
         if self.fail_finish.swap(false, Ordering::SeqCst) {
             anyhow::bail!("injected transient ledger finish failure")
@@ -342,5 +345,87 @@ fn cloudflare_missing_registry_is_unconfirmed_without_provider_http() {
         http.calls(),
         0,
         "unknown registry state must not fabricate a provider handle"
+    );
+}
+
+#[tokio::test]
+async fn before_provision_rollback_finishes_without_provider_http() {
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
+    ledger.try_admit(pending("before-provision"), 1).unwrap();
+    let http = ScriptedHttp::new([]);
+    let provider: Arc<dyn BoxProvisioner> = Arc::new(CloudflareBoxProvisioner::new(
+        Arc::new(CloudflareEngine::new(
+            http.clone(),
+            CloudflareConfig::new("https://spawn.invalid", "test-token"),
+        )),
+        corelink_fabric_server::BoxRegistry::new(),
+    ));
+    let state = state_with(Arc::clone(&ledger), provider);
+
+    assert!(
+        corelink_fabric_server::pending_cleanup::rollback_pending_admission(
+            &state,
+            "before-provision",
+            corelink_fabric_server::pending_cleanup::PendingRollbackPhase::BeforeProvision,
+        )
+        .await,
+        "known pre-provision evidence permits finish without a provider guess"
+    );
+    assert!(ledger.get("before-provision").unwrap().is_none());
+    assert_eq!(
+        http.calls(),
+        0,
+        "BeforeProvision must make zero Cloudflare HTTP calls"
+    );
+}
+
+#[tokio::test]
+async fn rollback_reuses_sweep_claim_and_never_tears_down_a_held_lease() {
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
+    ledger.try_admit(pending("claimed-by-sweep"), 2).unwrap();
+    assert!(
+        ledger
+            .claim_stale_pending_cleanup(1_000, 1)
+            .unwrap()
+            .iter()
+            .any(|row| row.lease_id == "claimed-by-sweep"),
+        "model the sweep winning the durable claim before normal rollback"
+    );
+    let provider = ScriptedProvisioner::new([CleanupTeardown::ConfirmedDestroyed]);
+    let state = state_with(Arc::clone(&ledger), provider.clone());
+    assert!(
+        corelink_fabric_server::pending_cleanup::rollback_pending_admission(
+            &state,
+            "claimed-by-sweep",
+            corelink_fabric_server::pending_cleanup::PendingRollbackPhase::AfterProvision,
+        )
+        .await,
+        "normal rollback reuses the existing claim rather than remove/unbind"
+    );
+    assert!(ledger.get("claimed-by-sweep").unwrap().is_none());
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+
+    ledger.try_admit(pending("held-winner"), 2).unwrap();
+    ledger
+        .transition(
+            "held-winner",
+            corelink_runners_contracts::RunnerState::Held,
+            2,
+        )
+        .unwrap();
+    assert!(
+        !corelink_fabric_server::pending_cleanup::rollback_pending_admission(
+            &state,
+            "held-winner",
+            corelink_fabric_server::pending_cleanup::PendingRollbackPhase::AfterProvision,
+        )
+        .await,
+        "a Held winner is not a Pending rollback target"
+    );
+    assert!(ledger.get("held-winner").unwrap().unwrap().state.is_held());
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        1,
+        "normal rollback must never teardown a lease that won Held"
     );
 }

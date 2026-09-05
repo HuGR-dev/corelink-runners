@@ -1309,6 +1309,13 @@ mod tests {
             }
             self.inner.claim_stale_pending_cleanup(now_ms, max_age_ms)
         }
+        fn claim_pending_cleanup(
+            &self,
+            lease_id: &str,
+            now_ms: u64,
+        ) -> Result<Option<LeaseRecord>> {
+            self.inner.claim_pending_cleanup(lease_id, now_ms)
+        }
         fn try_admit(&self, rec: LeaseRecord, max_concurrency: u32) -> Result<bool> {
             self.inner.try_admit(rec, max_concurrency)
         }

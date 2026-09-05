@@ -19,6 +19,19 @@ pub enum CleanupTeardown {
     Unconfirmed,
 }
 
+/// What the acquisition path knows about provider contact when abandoning its
+/// reserved Pending admission. This evidence is deliberately call-site
+/// explicit: an absent registry entry is never used to guess that no box exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingRollbackPhase {
+    /// Provisioning was not invoked for this acquisition, so no provider I/O is
+    /// necessary before conditionally finishing the durable Pending claim.
+    BeforeProvision,
+    /// Provisioning was invoked and may have partially spawned a box; only an
+    /// authoritative cleanup teardown permits the conditional finish.
+    AfterProvision,
+}
+
 /// Default stale-Pending bound. This remains the existing configuration and
 /// is not a default-off switch: only rows older than this bound qualify.
 pub const DEFAULT_PENDING_MAX_AGE: Duration = Duration::from_secs(300);
@@ -84,6 +97,54 @@ pub async fn sweep_stale_pending(state: &crate::AppState, max_age: Duration) -> 
             state.forget_lease(&row.lease_id);
             finished += 1;
         }
+    }
+    finished
+}
+
+/// Abandon one named acquisition's reserved Pending lease through the same
+/// claim/confirm/finish fence as the stale sweep.
+///
+/// An existing cleanup claim is deliberately reused, so concurrent retries may
+/// perform at-least-once teardown of the same Pending handle. A `Pending → Held`
+/// winner is never torn down by this rollback. PAT revoke and caller-specific
+/// retry policy intentionally remain with the caller.
+pub async fn rollback_pending_admission(
+    state: &crate::AppState,
+    lease_id: &str,
+    phase: PendingRollbackPhase,
+) -> bool {
+    let now = state.clock.now_ms();
+    let claimed = match state.ledger.claim_pending_cleanup(lease_id, now) {
+        Ok(Some(row)) => row,
+        Ok(None) => return false,
+        Err(e) => {
+            let _ = e;
+            eprintln!("pending-cleanup: rollback claim failed for lease={lease_id}");
+            return false;
+        }
+    };
+
+    if phase == PendingRollbackPhase::AfterProvision
+        && state.teardown_pending_lease(&claimed.lease_id).await
+            != CleanupTeardown::ConfirmedDestroyed
+    {
+        eprintln!(
+            "pending-cleanup: rollback lease={} not confirmed after provision; retaining claim, cap, and compute reservation",
+            claimed.lease_id
+        );
+        return false;
+    }
+
+    let finished = match state.ledger.finish_pending_cleanup(&claimed.lease_id) {
+        Ok(done) => done,
+        Err(e) => {
+            let _ = e;
+            eprintln!("pending-cleanup: rollback finish failed for lease={lease_id}");
+            false
+        }
+    };
+    if finished {
+        state.forget_pending_cleanup(&claimed.lease_id);
     }
     finished
 }
