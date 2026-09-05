@@ -725,6 +725,11 @@ pub struct AppState {
     /// Wired by the production composition root via [`with_cas_pat_mint`](Self::with_cas_pat_mint).
     pub(crate) cas_pat_mint: Option<Arc<dyn crate::runner_cas_mint::CasPatMint>>,
 
+    /// Readiness gate for an armed runner mint. `None` preserves the historical
+    /// default-off cold path; `Some` must pass the dispatcher self-check before
+    /// acquire can reserve or provision anything.
+    pub(crate) mint_readiness: Option<Arc<crate::mint_readiness::MintReadiness>>,
+
     /// WP-7: AC pre-lease lookup hook (memoized-exec short-circuit).
     ///
     /// Consulted at the TOP of `acquire`, BEFORE `try_admit_with_compute`
@@ -941,6 +946,7 @@ impl AppState {
             // `with_cas_pat_mint` / `with_ac_pre_lease_hook` / `with_clw_endpoint`
             // builders.
             cas_pat_mint: None,
+            mint_readiness: None,
             ac_pre_lease_hook: Arc::new(crate::ac_pre_lease::NoOpAcHook),
             pat_ids: Arc::new(Mutex::new(HashMap::new())),
             clw_endpoint: None,
@@ -1055,6 +1061,16 @@ impl AppState {
     #[must_use]
     pub fn with_runner_vcpu(mut self, runner_vcpu: Option<u32>) -> Self {
         self.runner_vcpu = runner_vcpu.filter(|&v| v > 0);
+        self
+    }
+
+    /// Install the armed mint readiness gate.
+    #[must_use]
+    pub fn with_mint_readiness(
+        mut self,
+        readiness: Option<Arc<crate::mint_readiness::MintReadiness>>,
+    ) -> Self {
+        self.mint_readiness = readiness;
         self
     }
 
@@ -2217,6 +2233,15 @@ pub fn app_full(
         .route(paths::ATTESTATION_KEY, get(crate::attestation::key))
         .with_state(state.clone());
 
+    // Always mounted: an unarmed process is ready immediately; an armed
+    // process starts the bounded mint self-check lazily.
+    let readiness_route = Router::new()
+        .route(
+            "/readyz",
+            get(crate::mint_readiness::MintReadiness::endpoint),
+        )
+        .with_state(state.clone());
+
     // Internal/ops route (WP-OCCUPANCY-API): the slot-occupancy snapshot.
     // Mounted OUTSIDE the Bearer-PAT layer below — it is gated by its own
     // observability secret (the `X-Corelink-Internal-Auth` header), NOT a tenant
@@ -2391,6 +2416,7 @@ pub fn app_full(
         // ATT-KEY-ROTATION: the attestation key-set is UNAUTHENTICATED (module
         // docs); mirrors health: fixed-cost, no tenant data, no auth gate.
         .merge(key_route)
+        .merge(readiness_route)
         .merge(work)
 }
 

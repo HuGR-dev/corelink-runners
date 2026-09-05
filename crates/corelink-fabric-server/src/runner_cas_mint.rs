@@ -540,13 +540,26 @@ impl<H: MintHttp> CasPatMint for HttpCasPatMint<H> {
 /// explicitly. Mirrors [`crate::runner_broker::UreqGitHub`].
 pub struct UreqMint {
     timeout: std::time::Duration,
+    response_limit: Option<u64>,
 }
 
 impl UreqMint {
     /// Construct with a per-call request timeout.
     #[must_use]
     pub fn new(timeout: std::time::Duration) -> Self {
-        Self { timeout }
+        Self {
+            timeout,
+            response_limit: None,
+        }
+    }
+
+    /// Set an explicit response-body limit for callers probing a small typed
+    /// envelope. The normal mint transport remains unlimited beyond ureq's
+    /// existing default because this is opt-in.
+    #[must_use]
+    pub fn with_response_limit(mut self, limit: usize) -> Self {
+        self.response_limit = Some(limit as u64);
+        self
     }
 }
 
@@ -584,7 +597,14 @@ impl MintHttp for UreqMint {
         let mut resp = req.send(json_body)?;
 
         let status = resp.status().as_u16();
-        let body = resp.body_mut().read_to_string()?;
+        let body = match self.response_limit {
+            Some(limit) => resp
+                .body_mut()
+                .with_config()
+                .limit(limit)
+                .read_to_string()?,
+            None => resp.body_mut().read_to_string()?,
+        };
         Ok(MintHttpResponse { status, body })
     }
 }
