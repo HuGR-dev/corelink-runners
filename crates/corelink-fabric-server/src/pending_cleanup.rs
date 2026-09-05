@@ -7,6 +7,10 @@
 
 use std::time::Duration;
 
+#[cfg(test)]
+#[path = "pending_cleanup/capacity_tests.rs"]
+mod capacity_tests;
+
 /// Result of the cleanup-specific teardown seam.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CleanupTeardown {
