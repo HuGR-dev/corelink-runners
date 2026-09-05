@@ -32,7 +32,11 @@ export class FakeStorage {
 
 export function ns<T>(instance: T, name = "global") { return { idFromName: vi.fn(() => name), get: vi.fn(() => instance) }; }
 export function makeDO(runtimeEnv: Record<string, unknown> = {}) { const storage = new FakeStorage(); const instance = new ContainmentDO({ storage } as never, runtimeEnv as never); return { storage, instance, binding: ns(instance) }; }
-export async function bootstrap(d: ReturnType<typeof makeDO>, job = "1", repo = "acme/repo") { return d.instance.bootstrapContainedEventIndex(repo, job); }
+export async function bootstrap(d: ReturnType<typeof makeDO>, job = "1", repo = "acme/repo") {
+  const result = await d.instance.bootstrapContainedEventIndex(repo, job);
+  expect(result).toMatchObject({ status: "bootstrapped" });
+  return result;
+}
 export function kv(seed: Record<string, string> = {}) {
   const map = new Map(Object.entries(seed));
   return { map, get: vi.fn(async (key: string) => map.get(key) ?? null), put: vi.fn(async (key: string, value: string) => { map.set(key, value); }), delete: vi.fn(async (key: string) => { map.delete(key); }), list: vi.fn(async ({ prefix }: { prefix?: string } = {}) => ({ keys: [...map.keys()].filter((key) => key.startsWith(prefix ?? "")).map((name) => ({ name })) })) };
