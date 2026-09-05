@@ -20,6 +20,7 @@ function make() {
 function tuple(effect = "containment:v1:intake/acme/repo/123"): OwnerTuple {
   return { repo: "acme/repo", job_id: "123", path: "intake", event_id: "delivery-1", reservation_epoch: null, effect_id: effect, owner: "owner-a", token: "token-a", lease_epoch: 1, drain_owner: null, drain_lease_epoch: null, caller_nonce: "0123456789abcdef0123456789abcdef" };
 }
+function legacyPermit(t: OwnerTuple, permitId: string) { return { permit_id: permitId, issued_to_owner: t.owner, issued_to_epoch: t.lease_epoch }; }
 function deps(ledger: ContainmentEffectLedger, t: OwnerTuple) {
   let claimed = false;
   const source = ledger as any;
@@ -40,7 +41,7 @@ describe("canonical containment effect route", () => {
     let legacyPermits = 0;
     const originalGet = kv.get;
     kv.get.mockImplementation(async key => { const raw = await originalGet(key); reads++; return raw && reads === 2 ? `${raw}tampered` : raw; });
-    const result = await runCanonicalEffect({ ...deps(ledger, t), beforeConfirm: async () => { legacyPermits++; return "must-not-issue"; }, drive: async () => { drives++; return undefined; } });
+    const result = await runCanonicalEffect({ ...deps(ledger, t), beforeConfirm: async () => { legacyPermits++; return null; }, drive: async () => { drives++; return undefined; } });
     expect(["unauthorized", "mirror_tampered"]).toContain(result.status); expect(drives).toBe(0); expect(legacyPermits).toBe(0);
   });
 
@@ -96,7 +97,7 @@ describe("canonical containment effect route", () => {
       ownerObserve: async () => ({ kind: "unknown", schema_version: 1, tuple_digest: "", attempt_key: "", active_pointer_key: "", permit: null, proof: null, state: "UNKNOWN" }),
       ownerPrepare: async () => ({ kind: "busy", schema_version: 1, tuple_digest: "", attempt_key: "", active_pointer_key: "", permit: null, proof: null, state: "PREPARED" }),
     } as any;
-    const result = await runCanonicalEffect({ ...deps(ledger, tuple()), beforeConfirm: async () => { legacyPermits++; return "must-not-issue"; }, claim: async () => { claimed++; return true; }, release: async () => { released++; } });
+    const result = await runCanonicalEffect({ ...deps(ledger, tuple()), beforeConfirm: async () => { legacyPermits++; return null; }, claim: async () => { claimed++; return true; }, release: async () => { released++; } });
     expect(result.status).toBe("busy"); expect(claimed).toBe(1); expect(released).toBe(1); expect(legacyPermits).toBe(0);
   });
 
@@ -170,12 +171,13 @@ describe("canonical containment effect route", () => {
       ownerMirror: async (...args: any[]) => { const result = await originalMirror(...args); events.push("mirror"); return result; },
       ownerConfirm: async (...args: any[]) => { events.push("owner-confirm"); return originalConfirm(...args); },
     },
-      beforeConfirm: async () => { events.push("legacy-permit"); return "legacy-permit-1"; },
+      beforeConfirm: async permitId => { events.push("legacy-permit"); return legacyPermit(t, permitId); },
       beforeBegin: async permit => { events.push(`before-begin:${permit.permit_id}`); return true; } };
     const result = await runCanonicalEffect(route);
     expect(result.status).toBe("committed"); if (result.status !== "committed") return;
-    expect(events.slice(0, 6)).toEqual(["prepare", "acquire", "mirror", "legacy-permit", "owner-confirm", "before-begin:legacy-permit-1"]);
-    expect(result.receipt.permit_id).toBe("legacy-permit-1");
+    expect(events.slice(0, 5)).toEqual(["prepare", "acquire", "mirror", "legacy-permit", "owner-confirm"]);
+    expect(events[5]).toMatch(/^before-begin:containment:v1:legacy-permit:/);
+    expect(result.receipt.permit_id).toMatch(/^containment:v1:legacy-permit:/);
   });
 
   it("fails closed when legacy permit issuance returns null", async () => {
@@ -189,29 +191,47 @@ describe("canonical containment effect route", () => {
     expect(released).toBe(1); expect(drives).toBe(0);
   });
 
-  it("aborts on a definitive absent readback and lets a new lease retry", async () => {
-    const { ledger } = make(); const t = { ...tuple(), path: "drain" as const }; let drives = 0;
-    const first = await runCanonicalEffect({ ...deps(ledger, t), beforeConfirm: async () => { throw new Error("response lost before commit"); }, readbackConfirm: async () => null, drive: async () => { drives++; return undefined; } });
-    expect(first.status).toBe("unavailable");
-    const next = { ...t, owner: "drain:new-owner", token: "drain:new-token", lease_epoch: 2, caller_nonce: "abcdefabcdefabcdefabcdefabcdefab" };
-    const second = await runCanonicalEffect({ ...deps(ledger, next), beforeConfirm: async () => "legacy-retry", drive: async () => { drives++; return { resource_id: `job:${next.repo}/${next.job_id}`, receipt_id: "retry", provider_signature: "sig" }; } });
-    expect(second.status).toBe("committed"); expect(drives).toBe(1);
+  it("retries a throw-before-commit with the same deterministic permit ID", async () => {
+    const { ledger } = make(); const t = { ...tuple(), path: "drain" as const }; let drives = 0; let calls = 0; let candidate = "";
+    const result = await runCanonicalEffect({ ...deps(ledger, t), beforeConfirm: async permitId => { candidate = permitId; calls++; if (calls === 1) throw new Error("response lost before commit"); return legacyPermit(t, permitId); }, drive: async () => { drives++; return { resource_id: `job:${t.repo}/${t.job_id}`, receipt_id: "retry", provider_signature: "sig" }; } });
+    expect(result.status).toBe("committed"); expect(calls).toBe(2); expect(drives).toBe(1); if (result.status === "committed") expect(result.receipt.permit_id).toBe(candidate);
   });
 
-  it("uses readback ID after a legacy permit response loss", async () => {
-    const { ledger } = make(); const t = { ...tuple(), path: "drain" as const }; let drives = 0;
-    const result = await runCanonicalEffect({ ...deps(ledger, t), beforeConfirm: async () => { throw new Error("response lost after commit"); }, readbackConfirm: async () => "legacy-readback", drive: async () => { drives++; return { resource_id: `job:${t.repo}/${t.job_id}`, receipt_id: "readback", provider_signature: "sig" }; } });
+  it("uses the same persisted permit after a legacy response loss", async () => {
+    const { ledger } = make(); const t = { ...tuple(), path: "drain" as const }; let drives = 0; let calls = 0; let persisted: ReturnType<typeof legacyPermit> | null = null;
+    const result = await runCanonicalEffect({ ...deps(ledger, t), beforeConfirm: async permitId => { calls++; persisted = persisted ?? legacyPermit(t, permitId); if (calls === 1) throw new Error("response lost after commit"); return persisted; }, drive: async () => { drives++; return { resource_id: `job:${t.repo}/${t.job_id}`, receipt_id: "readback", provider_signature: "sig" }; } });
     expect(result.status).toBe("committed"); if (result.status !== "committed") return;
-    expect(result.receipt.permit_id).toBe("legacy-readback"); expect(drives).toBe(1);
+    expect(result.receipt.permit_id).toBe(persisted!.permit_id); expect(drives).toBe(1);
   });
 
   it("freezes ambiguous legacy response and blocks a cross-lease drive", async () => {
-    const { ledger } = make(); const t = { ...tuple(), path: "drain" as const }; let drives = 0;
-    const first = await runCanonicalEffect({ ...deps(ledger, t), beforeConfirm: async () => { throw new Error("ambiguous"); }, readbackConfirm: async () => undefined, drive: async () => { drives++; return undefined; } });
+    const { ledger } = make(); const t = { ...tuple(), path: "drain" as const }; let drives = 0; let firstRelease = 0;
+    const first = await runCanonicalEffect({ ...deps(ledger, t), beforeConfirm: async () => { throw new Error("ambiguous"); }, release: async () => { firstRelease++; }, drive: async () => { drives++; return undefined; } });
     expect(first.status).toBe("unknown_terminal");
     const next = { ...t, owner: "drain:other", token: "drain-other", lease_epoch: 3, caller_nonce: "1234567890abcdef1234567890abcdef" };
     const second = await runCanonicalEffect({ ...deps(ledger, next), beforeConfirm: async () => { throw new Error("must not be reached"); }, drive: async () => { drives++; return undefined; } });
-    expect(second.status).toBe("unknown_terminal"); expect(drives).toBe(0);
+    expect(second.status).toBe("unknown_terminal"); expect(drives).toBe(0); expect(firstRelease).toBe(0);
+  });
+
+  it("does not claim an unverified freeze and retains the current claim", async () => {
+    const { ledger } = make(); const t = { ...tuple(), path: "drain" as const }; let released = 0;
+    const base = deps(ledger, t);
+    const result = await runCanonicalEffect({ ...base, release: async () => { released++; },
+      ledger: { ...base.ledger, ownerFreeze: async () => ({ kind: "unknown", state: "UNKNOWN", schema_version: 1, tuple_digest: "", attempt_key: "", active_pointer_key: "", permit: null, proof: null }) } as any,
+      beforeConfirm: async () => { throw new Error("ambiguous"); }, drive: async () => undefined });
+    expect(result.status).toBe("unavailable"); expect(released).toBe(0);
+  });
+
+  it("freezes mismatched retry permits without downstream effect", async () => {
+    for (const mismatch of [
+      (permit: ReturnType<typeof legacyPermit>) => ({ ...permit, permit_id: `${permit.permit_id}-wrong` }),
+      (permit: ReturnType<typeof legacyPermit>) => ({ ...permit, issued_to_owner: "other-owner" }),
+      (permit: ReturnType<typeof legacyPermit>) => ({ ...permit, issued_to_epoch: permit.issued_to_epoch + 1 }),
+    ]) {
+      const { ledger } = make(); const t = { ...tuple(), path: "drain" as const }; let calls = 0; let drives = 0; let released = 0;
+      const result = await runCanonicalEffect({ ...deps(ledger, t), release: async () => { released++; }, beforeConfirm: async permitId => { calls++; if (calls === 1) throw new Error("response lost"); return mismatch(legacyPermit(t, permitId)); }, drive: async () => { drives++; return undefined; } });
+      expect(result.status).toBe("unknown_terminal"); expect(calls).toBe(2); expect(drives).toBe(0); expect(released).toBe(0);
+    }
   });
 
   it("resumes from BOUND after a mark-driving crash without a second begin", async () => {

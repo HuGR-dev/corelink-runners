@@ -4449,8 +4449,7 @@ export async function runContainmentDrain(env: Env, dependencies: ContainmentDra
           await bindClaim(env, typed);
           return drive(env, typed);
         },
-        beforeConfirm: async () => (await authority.beginEffect(event.event_id, owner, lease!.epoch, Date.now()))?.permit_id,
-        readbackConfirm: async () => (await authority.getEvent(event.event_id))?.effect_permit?.permit_id ?? null,
+        beforeConfirm: permitId => authority.beginEffect(event.event_id, owner, lease!.epoch, Date.now(), permitId),
         beforeBegin: async permit => !!(await authority.beginEffect(event.event_id, owner, lease!.epoch, Date.now(), permit.permit_id)),
         finalize: async () => (await authority.markEffectCommitted(event.event_id, owner, lease!.epoch))
           && (await authority.acknowledge(event.event_id, owner, lease!.epoch)),

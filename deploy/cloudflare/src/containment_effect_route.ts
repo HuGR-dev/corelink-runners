@@ -22,6 +22,11 @@ export interface ProviderNoEffectRefusal {
   no_effect: true;
   reason?: string;
 }
+export interface LegacyPermit {
+  permit_id: string;
+  issued_to_owner: string;
+  issued_to_epoch: number;
+}
 
 export type ProviderDriveResult = ProviderDriveReceipt | ProviderNoEffectRefusal | void;
 
@@ -49,10 +54,8 @@ export interface CanonicalEffectRouteDeps<TOpts extends object> {
   beforeClaim?: () => Promise<void>;
   afterClaim?: () => Promise<boolean>;
   beforeDrive?: () => Promise<boolean>;
-  /** Legacy drain may persist its recovery-only permit before owner PERMIT_ISSUED. */
-  beforeConfirm?: () => Promise<string | undefined>;
-  /** Read back the legacy permit after a lost response: null=absent, undefined=ambiguous. */
-  readbackConfirm?: () => Promise<string | null | undefined>;
+  /** Legacy drain persists its recovery-only permit before owner PERMIT_ISSUED. */
+  beforeConfirm?: (permitId: string) => Promise<LegacyPermit | null | undefined>;
   beforeBegin?: (permit: ContainmentEffectPermit) => Promise<boolean>;
   drive: (opts: TOpts & {
     containment_event_id: string;
@@ -74,6 +77,11 @@ const text = (value: unknown): value is string => typeof value === "string" && v
 async function sha256(value: string): Promise<string> {
   const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
   return [...new Uint8Array(bytes)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+export async function legacyPermitCandidate(tuple: OwnerTuple): Promise<string> {
+  const digest = await sha256(JSON.stringify({ domain: "corelink:containment-legacy-permit:v1", tuple, token: tuple.token, caller_nonce: tuple.caller_nonce }));
+  return `containment:v1:legacy-permit:${digest}`;
 }
 
 function request(tuple: OwnerTuple): SpawnOwnerRequest {
@@ -179,21 +187,31 @@ export async function runCanonicalEffect<TOpts extends object>(
       }
       let externalPermitId: string | undefined;
       if (deps.beforeConfirm) {
+        const candidate = await legacyPermitCandidate(tuple);
+        let legacy: LegacyPermit | null | undefined;
+        let responseLost = false;
         try {
-          externalPermitId = await deps.beforeConfirm();
+          legacy = await deps.beforeConfirm(candidate);
         } catch {
-          const readback = deps.readbackConfirm ? await deps.readbackConfirm().catch(() => undefined) : undefined;
-          if (text(readback)) externalPermitId = readback;
-          else if (readback === null) {
-            await deps.ledger.ownerAbort(req).catch(() => undefined);
-            await releaseClaim();
-            return { status: "unavailable", reason: "legacy permit absent after response loss" };
-          } else {
-            await deps.ledger.ownerFreeze(req).catch(() => undefined);
-            await releaseClaim();
-            return { status: "unknown_terminal", reason: "legacy permit response ambiguous" };
-          }
+          responseLost = true;
+          try { legacy = await deps.beforeConfirm(candidate); } catch { legacy = undefined; }
         }
+        const validLegacy = !!legacy && text(legacy.permit_id) && legacy.permit_id === candidate
+          && legacy.issued_to_owner === tuple.owner && legacy.issued_to_epoch === tuple.lease_epoch;
+        if (!validLegacy && responseLost) {
+          const frozen = await deps.ledger.ownerFreeze(req).catch(() => null);
+          const frozenRecord = frozen?.record;
+          const durableFreeze = frozen?.kind === "unknown" && frozen.state === "UNKNOWN" && frozenRecord?.state === "UNKNOWN"
+            && frozenRecord.caller_nonce === tuple.caller_nonce && JSON.stringify(frozenRecord.tuple) === JSON.stringify(tuple);
+          if (durableFreeze) return { status: "unknown_terminal", reason: "legacy permit response ambiguous" };
+          return { status: "unavailable", reason: "legacy permit ambiguity not durably frozen" };
+        }
+        if (!validLegacy) {
+          await deps.ledger.ownerAbort(req).catch(() => undefined);
+          await releaseClaim();
+          return { status: "unavailable", reason: "legacy permit unavailable or invalid" };
+        }
+        externalPermitId = legacy!.permit_id;
       }
       if (deps.beforeConfirm && !text(externalPermitId)) {
         await deps.ledger.ownerAbort(req).catch(() => undefined);
