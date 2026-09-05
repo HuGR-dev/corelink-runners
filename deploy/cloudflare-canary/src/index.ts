@@ -15,7 +15,6 @@ import type { FabricStatusJson, SpawnMetricsJson, Snapshot, SurfaceSnapshot, Hea
 import { evaluate, applyCooldown, type Alert, type RulesConfig } from "./rules";
 import { sendAlert } from "./notify";
 import { parseProbeFlag } from "./config";
-import { CanaryTickOutboxAdapter } from "./tick_adapter";
 export { CanaryTickOutboxAdapter } from "./tick_adapter";
 
 export interface Env {
@@ -270,7 +269,7 @@ export async function runCycle(env: Env, now: number): Promise<string> {
   return `fabric=${fabric.reachable ? fabric.status : "DOWN"} health=${healthSummary} spawn=${spawn.reachable ? spawn.status : "DOWN"} config=${configState} | triggered=${alerts.length + storageAlerts.length} | ${sendSummary}`;
 }
 
-async function runScheduledTick(env: Env, now: number): Promise<string> {
+async function runScheduledTick(env: Env): Promise<string> {
   if (!env.CANARY_TICK_OUTBOX) return "tick outbox unavailable";
   const stub = env.CANARY_TICK_OUTBOX.get(env.CANARY_TICK_OUTBOX.idFromName("scheduled-tick"));
   const response = await stub.fetch("https://canary.internal/tick", {
@@ -349,7 +348,7 @@ export default {
     ctx.waitUntil(
       (async () => {
         try {
-          const [summary, tick] = await Promise.all([runCycle(env, now), runScheduledTick(env, now)]);
+          const [summary, tick] = await Promise.all([runCycle(env, now), runScheduledTick(env)]);
           console.log(`[canary] cycle ok: ${summary}; ${tick}`);
         } catch (err) {
           // A monitored surface being down is an ALERT, handled inside runCycle;
