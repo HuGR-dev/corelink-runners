@@ -210,11 +210,19 @@ mod tests {
         assert_eq!(v["clw_ref_domain"], "runner");
 
         // SECOND redemption → 410 (single-use latch consumed).
-        assert_eq!(
-            redeem_status(&state, "lease-1", &ticket).await,
-            StatusCode::GONE,
-            "a second redemption must be 410, even with the valid ticket"
-        );
+        let replay = redeem(
+            State(state.clone()),
+            Path("lease-1".to_string()),
+            Ok(Json(CasCredRequest { ticket })),
+        )
+        .await;
+        assert_eq!(replay.status(), StatusCode::GONE);
+        let replay_body = axum::body::to_bytes(replay.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let replay_json: serde_json::Value = serde_json::from_slice(&replay_body).unwrap();
+        assert_eq!(replay_json["code"], "invalid");
+        assert_eq!(replay_json["message"], "ticket already redeemed");
     }
 
     #[tokio::test]

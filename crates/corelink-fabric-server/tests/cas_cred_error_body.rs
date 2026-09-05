@@ -6,7 +6,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use corelink_fabric::{InMemoryLedger, LeaseLedger, LeaseRecord, LeaseState, TenantId};
 use corelink_fabric_api::ErrorBody;
-use corelink_fabric_server::cred_ticket::{CredTicketSigner, StashedCred};
+use corelink_fabric_server::cred_ticket::CredTicketSigner;
 use corelink_fabric_server::{AppState, StaticPlans, StaticTokenStore, SystemClock, app};
 use corelink_runners_contracts::RunnerState;
 use tower::ServiceExt;
@@ -275,48 +275,20 @@ async fn unreadable_ledger_is_503_with_frozen_body() {
 }
 
 #[tokio::test]
-async fn redeemed_ticket_keeps_410_and_frozen_body_without_secret() {
+async fn unstashed_ticket_keeps_410_and_frozen_body_without_secret() {
     let signer = CredTicketSigner::new(SECRET);
-    let state = held_state(signer.clone());
-    state.stash_cred(
-        "lease-1",
-        StashedCred {
-            token: "the-per-job-pat".to_string(),
-            endpoint: "https://cas".to_string(),
-            tenant: "acme".to_string(),
-        },
-    );
     let ticket = signer.ticket("lease-1");
-    let router = app(Arc::new(StaticTokenStore::new([])), state);
-
-    let first = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/leases/lease-1/cas-cred")
-                .header("content-type", "application/json")
-                .body(Body::from(format!(r#"{{"ticket":"{ticket}"}}"#)))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(first.status(), StatusCode::OK);
-
-    let second = router
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/leases/lease-1/cas-cred")
-                .header("content-type", "application/json")
-                .body(Body::from(format!(r#"{{"ticket":"{ticket}"}}"#)))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(second.status(), StatusCode::GONE);
-    let body = body(second).await;
+    let response = route(
+        held_state(signer),
+        request_with_content_type(
+            format!(r#"{{"ticket":"{ticket}"}}"#),
+            Some("application/json"),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::GONE);
+    let body = body(response).await;
     assert_eq!(body.code, "invalid");
     assert_eq!(body.message, "ticket already redeemed");
-    assert!(!body.message.contains("the-per-job-pat"));
+    assert!(!body.message.contains(&ticket));
 }
