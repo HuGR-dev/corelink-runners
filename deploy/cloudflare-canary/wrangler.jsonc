@@ -47,8 +47,8 @@
 
   // T6-W4 preparation only. No endpoint, source identity, tuple digest, or
   // key is supplied here; without the later owner binding it cannot transmit.
-  "durable_objects": { "bindings": [{ "name": "CANARY_TICK_OUTBOX", "class_name": "CanaryTickOutbox" }] },
-  "migrations": [{ "tag": "v1-canary-tick-outbox", "new_classes": ["CanaryTickOutbox"] }],
+  "durable_objects": { "bindings": [{ "name": "CANARY_TICK_OUTBOX", "class_name": "CanaryTickOutboxAdapter" }] },
+  "migrations": [{ "tag": "v1-canary-tick-outbox", "new_classes": ["CanaryTickOutboxAdapter"] }],
 
   // Snapshot + cooldown state. The canary reads the previous snapshot each tick,
   // diffs, and writes the new one. ⚠️ id is a PLACEHOLDER — owner replaces it

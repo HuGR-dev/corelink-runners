@@ -14,9 +14,9 @@
 import type { FabricStatusJson, SpawnMetricsJson, Snapshot, SurfaceSnapshot, HealthSnapshot } from "./types";
 import { evaluate, applyCooldown, type Alert, type RulesConfig } from "./rules";
 import { sendAlert } from "./notify";
-import { parseProbeFlag, tickConfig } from "./config";
-import { CanaryTickOutbox } from "./tick_outbox";
-export { CanaryTickOutbox } from "./tick_outbox";
+import { parseProbeFlag } from "./config";
+import { CanaryTickOutboxAdapter } from "./tick_adapter";
+export { CanaryTickOutboxAdapter } from "./tick_adapter";
 
 export interface Env {
   // ── KV: snapshot + cooldown state (owner creates the namespace + binds it) ──
@@ -57,7 +57,7 @@ export interface Env {
   CANARY_TICK_OUTBOX?: DurableObjectNamespace;
   CANARY_TICK_INGEST_URL?: string; CANARY_TICK_SOURCE?: string; CANARY_TICK_SERVICE?: string;
   CANARY_TICK_APPLICATION?: string; CANARY_TICK_KEY_ID?: string; CANARY_TICK_CREDENTIAL_EPOCH?: string;
-  CANARY_TICK_MONITOR_REARM_TUPLE_DIGEST?: string; CANARY_TICK_ENVELOPE_HMAC_KEY?: string; CANARY_TICK_ACK_HMAC_KEY?: string;
+  CANARY_TICK_MONITOR_REARM_TUPLE_DIGEST?: string; CANARY_TICK_ENVELOPE_HMAC_KEY?: string;
 }
 
 const DEFAULT_FABRIC_STATUS_URL = "https://corelink-fabricd.gmhelmold.workers.dev/internal/v1/status";
@@ -272,8 +272,12 @@ export async function runCycle(env: Env, now: number): Promise<string> {
 
 async function runScheduledTick(env: Env, now: number): Promise<string> {
   if (!env.CANARY_TICK_OUTBOX) return "tick outbox unavailable";
-  const stub = env.CANARY_TICK_OUTBOX.get(env.CANARY_TICK_OUTBOX.idFromName("scheduled-tick")) as unknown as CanaryTickOutbox;
-  return stub.enqueueAndDrain(tickConfig(env), now, !parseProbeFlag(env.FABRIC_PROBES_ENABLED).valid);
+  const stub = env.CANARY_TICK_OUTBOX.get(env.CANARY_TICK_OUTBOX.idFromName("scheduled-tick"));
+  const response = await stub.fetch("https://canary.internal/tick", {
+    method: "POST",
+    body: JSON.stringify({ command: "scheduled-tick" }),
+  });
+  return response.text();
 }
 
 type ReadResult<T> = { ok: true; value: T | null } | { ok: false; detail: string };
