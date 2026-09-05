@@ -104,12 +104,28 @@ assert_true "All declared inputs are referenced in the run steps" "$INPUTS_OK"
 OUTPUTS_OK=0
 # Check that the key output fields appear in GITHUB_OUTPUT writes
 for field in exit verified lease_id; do
-  if ! grep -q "\"$field=" "$ACTION_FILE" && ! grep -q "'$field=" "$ACTION_FILE" && ! grep -q "${field}=" "$ACTION_FILE"; then
+  if ! grep -q "\"$field=" "$ACTION_FILE" && ! grep -q "'$field=" "$ACTION_FILE" && ! grep -q "${field}=" "$ACTION_FILE" && ! grep -q "setOutput(\"$field\"" "$ACTION_FILE"; then
     echo "    output field '$field' not found in GITHUB_OUTPUT writes"
     OUTPUTS_OK=1
   fi
 done
 assert_true "Declared outputs are wired to \$GITHUB_OUTPUT" "$OUTPUTS_OK"
+
+PARSER_IMPL_OK=0
+GITHUB_SCRIPT_PIN=3a2844b7e9c422d3c10d287c895573f7108da1b3
+ACTION_PIN_ARCHIVE="$SCRIPT_DIR/../../../deploy/runner/action-archive-pins.txt"
+if [[ "${#GITHUB_SCRIPT_PIN}" -eq 40 ]] \
+  && grep -Fqx "actions/github-script@$GITHUB_SCRIPT_PIN" "$ACTION_PIN_ARCHIVE" \
+  && grep -Fqx "      uses: actions/github-script@$GITHUB_SCRIPT_PIN" "$ACTION_FILE" \
+  && grep -q '^    - name: Parse output and set outputs$' "$ACTION_FILE" \
+  && grep -q 'JSON.parse' "$ACTION_FILE" \
+  && grep -q 'fs.readFileSync' "$ACTION_FILE" \
+  && grep -q 'process.exitCode = 2' "$ACTION_FILE"; then
+  PARSER_IMPL_OK=0
+else
+  PARSER_IMPL_OK=1
+fi
+assert_true "output parser uses the pinned github-script implementation" "$PARSER_IMPL_OK"
 
 # ---------------------------------------------------------------------------
 # 4. PAT is never echoed
@@ -209,9 +225,9 @@ assert_true "all action inputs enter through step env and none interpolate in ru
 # The harness resolves each step's real env mappings from action.yml, routes
 # prior-step outputs through those mappings, and runs every body inside an
 # owned private fixture. Every case has unique RUNNER_TEMP/output paths; no
-# fixed /tmp path is deleted. AU5.12 remains open: the production parse step
-# still requires python3, and this test adds no runtime dependency to the action.
-echo "NOTE: AU5.12 (python3 parser dependency) remains open; this validation covers AU5.11 only."
+# fixed /tmp path is deleted. The parser matrix below uses a local core/fs shim,
+# so pinned-runner no-Python proof remains open.
+echo "NOTE: AU5.12 pinned no-Python runner/container proof remains open; local github-script shim is preparation evidence only."
 DYNAMIC_OK=0
 if python3 -c "import yaml" 2>/dev/null; then
   DYNAMIC_TMP=$(mktemp -d)
@@ -229,6 +245,8 @@ for step in data.get("runs", {}).get("steps", []):
     if step.get("id") != wanted:
         continue
     body = step.get("run")
+    if wanted == "parse":
+        body = (step.get("with", {}) or {}).get("script")
     if not body:
         raise SystemExit(f"step {wanted} has no run body")
     open(body_path, "w").write(body)
@@ -277,6 +295,23 @@ printf 'id-command-executed\n' > "$DYNAMIC_CAPTURE.id"
 printf 'uid=9999(stub)\n'
 IDSTUB
   chmod +x "$DYNAMIC_TMP/bin/id"
+  cat > "$DYNAMIC_TMP/parser-runner.cjs" <<'PARSER_RUNNER'
+const fs = require("fs");
+const script = fs.readFileSync(process.argv[2], "utf8");
+const core = {
+  setFailed(message) {
+    fs.writeFileSync(process.env.SHIM_FAILED, "setFailed:" + message);
+  },
+  setOutput(name, value) {
+    fs.appendFileSync(process.env.GITHUB_OUTPUT, `${name}=${String(value)}\n`);
+  },
+};
+const fn = new Function("core", "require", "process", "console", script);
+Promise.resolve(fn(core, require, process, console)).catch(() => {
+  core.setFailed("local parser shim failure");
+  process.exitCode = 2;
+});
+PARSER_RUNNER
 
   dynamic_fail() { echo "    FAIL: $*"; DYNAMIC_OK=1; }
   execute_case() {
@@ -288,6 +323,7 @@ IDSTUB
     export PATH="$DYNAMIC_TMP/bin:$PATH" RUNNER_TEMP="$case_dir/runner-temp"
     export GITHUB_OUTPUT="$case_dir/gh-output" GITHUB_PATH="$case_dir/gh-path"
     export DYNAMIC_CAPTURE="$case_dir/capture" DYNAMIC_RAW_EXIT="$raw" DYNAMIC_VERIFIED="$verified"
+    export SHIM_FAILED="$case_dir/shim-failed"
     export INPUT_VERSION=0.1.0 INPUT_URL=https://safe.example INPUT_PAT=pat-safe \
       INPUT_CHECK='printf safe' INPUT_CHECK_ID=ci-safe INPUT_IMAGE='' INPUT_VERIFY=true
     case "$input_name" in
@@ -316,7 +352,7 @@ IDSTUB
     export STEP_RUN_TEMP_DIR="$(sed -n 's/^temp_dir=//p' "$GITHUB_OUTPUT")"
     if [[ "$run_status" -eq 0 ]]; then
       set +e
-      (cd "$case_dir/work" && source "$DYNAMIC_TMP/env-parse" && python3 "$DYNAMIC_TMP/parse") >"$case_dir/parse.log" 2>&1
+      (cd "$case_dir/work" && source "$DYNAMIC_TMP/env-parse" && node "$DYNAMIC_TMP/parser-runner.cjs" "$DYNAMIC_TMP/parse") >"$case_dir/parse.log" 2>&1
       parse_status=$?
       if [[ "$parse_status" -eq 0 ]]; then
         (cd "$case_dir/work" && source "$DYNAMIC_TMP/env-propagate" && bash "$DYNAMIC_TMP/propagate") >"$case_dir/propagate.log" 2>&1
@@ -440,6 +476,61 @@ PY
   execute_case "exit-two" check 'printf safe' 2 true true 2 99 99
   execute_case "verified-false" check 'printf safe' 0 false true 0 2 99
   execute_case "verify-false" verify false 0 false false 0 0 0
+
+  # AU5.12 parser matrix: execute the checked-in github-script body through a
+  # deliberately local core/fs shim. This is preparation evidence, not proof
+  # that the pinned action runs without Python on GitHub's hosted runner.
+  parser_case() {
+    local label="$1" json="$2" verify_input="$3" expected_status="$4"
+    local expected_exit="${5-}" expected_verified="${6-}" expected_lease="${7-}"
+    local parser_dir status
+    parser_dir=$(mktemp -d "$DYNAMIC_TMP/parser.XXXXXX")
+    printf '%s' "$json" > "$parser_dir/output.json"
+    : > "$parser_dir/gh-output"
+    : > "$parser_dir/shim-failed"
+    export CORELINK_OUTPUT_FILE="$parser_dir/output.json" CORELINK_VERIFY="$verify_input"
+    export GITHUB_OUTPUT="$parser_dir/gh-output" SHIM_FAILED="$parser_dir/shim-failed"
+    set +e
+    (cd "$parser_dir" && node "$DYNAMIC_TMP/parser-runner.cjs" "$DYNAMIC_TMP/parse") >"$parser_dir/parser.log" 2>&1
+    status=$?
+    set -e
+    [[ "$status" -eq "$expected_status" ]] || dynamic_fail "$label status=$status expected=$expected_status"
+    if [[ "$expected_status" -eq 0 ]]; then
+      grep -Fqx "exit=$expected_exit" "$parser_dir/gh-output" || dynamic_fail "$label exit output mismatch"
+      grep -Fqx "verified=$expected_verified" "$parser_dir/gh-output" || dynamic_fail "$label verified output mismatch"
+      grep -Fqx "lease_id=$expected_lease" "$parser_dir/gh-output" || dynamic_fail "$label lease output mismatch"
+      [[ ! -s "$parser_dir/shim-failed" ]] || dynamic_fail "$label unexpectedly called setFailed"
+    else
+      [[ ! -s "$parser_dir/gh-output" ]] || dynamic_fail "$label emitted outputs on rejection"
+      grep -Fqx 'setFailed:CoreLink response failed validation.' "$parser_dir/shim-failed" \
+        || dynamic_fail "$label did not use generic setFailed"
+      if grep -F -- "$json" "$parser_dir/parser.log" >/dev/null 2>&1; then
+        dynamic_fail "$label echoed raw response"
+      fi
+    fi
+    rm -rf -- "$parser_dir"
+  }
+  parser_case "parser-valid-exit0" '{"lease_id":"lease-0","exit":0,"verified":true}' true 0 0 true lease-0
+  parser_case "parser-valid-exit1" '{"lease_id":"lease-1","exit":1,"verified":true}' true 0 1 true lease-1
+  parser_case "parser-valid-exit2" '{"lease_id":"lease-2","exit":2,"verified":true}' true 0 2 true lease-2
+  parser_case "parser-valid-check137" '{"lease_id":"lease-137","exit":137,"verified":true}' true 0 137 true lease-137
+  parser_case "parser-valid-extra" '{"lease_id":"lease-extra","exit":0,"verified":true,"extra":{"x":1}}' true 0 0 true lease-extra
+  parser_case "parser-malformed" '{' true 2
+  parser_case "parser-null" 'null' true 2
+  parser_case "parser-array" '[]' true 2
+  parser_case "parser-missing" '{}' true 2
+  parser_case "parser-empty-lease" '{"lease_id":"","exit":0,"verified":true}' true 2
+  parser_case "parser-newline-lease" '{"lease_id":"lease\nx","exit":0,"verified":true}' true 2
+  parser_case "parser-numeric-lease" '{"lease_id":7,"exit":0,"verified":true}' true 2
+  parser_case "parser-string-exit" '{"lease_id":"lease","exit":"0","verified":true}' true 2
+  parser_case "parser-float-exit" '{"lease_id":"lease","exit":1.5,"verified":true}' true 2
+  parser_case "parser-high-exit" '{"lease_id":"lease","exit":2147483648,"verified":true}' true 2
+  parser_case "parser-low-exit" '{"lease_id":"lease","exit":-2147483649,"verified":true}' true 2
+  parser_case "parser-null-exit" '{"lease_id":"lease","exit":null,"verified":true}' true 2
+  parser_case "parser-string-verified" '{"lease_id":"lease","exit":0,"verified":"true"}' true 2
+  parser_case "parser-unverified" '{"lease_id":"lease","exit":0,"verified":false}' true 2
+  parser_case "parser-verify-disabled" '{"lease_id":"lease","exit":0,"verified":false}' false 0 0 false lease
+  parser_case "parser-verify-case-sensitive" '{"lease_id":"lease","exit":0,"verified":false}' False 2
   trap - EXIT
   cleanup_dynamic
 else

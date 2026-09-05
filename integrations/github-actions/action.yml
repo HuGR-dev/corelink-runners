@@ -180,48 +180,56 @@ runs:
     # -----------------------------------------------------------------------
     - name: Parse output and set outputs
       id: parse
-      shell: python3 {0}
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
       env:
         CORELINK_VERIFY: ${{ inputs.verify }}
         CORELINK_OUTPUT_FILE: ${{ steps.run.outputs.output_file }}
-      run: |
-        import json
-        import os
-        import sys
+      with:
+        script: |
+          const fs = require("fs");
 
-        output_file = os.environ.get("GITHUB_OUTPUT", "")
+          function parserFailure() {
+            core.setFailed("CoreLink response failed validation.");
+            process.exitCode = 2;
+          }
 
-        try:
-            with open(os.environ["CORELINK_OUTPUT_FILE"]) as f:
-                data = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError) as e:
-            print(f"::error::Failed to parse corelink JSON output: {e}", file=sys.stderr)
-            sys.exit(2)
+          let data;
+          try {
+            data = JSON.parse(fs.readFileSync(process.env.CORELINK_OUTPUT_FILE, "utf8"));
+          } catch {
+            parserFailure();
+            return;
+          }
 
-        lease_id = data.get("lease_id", "")
-        exit_code = str(data.get("exit", ""))
-        verified = str(data.get("verified", "false")).lower()
+          if (data === null || Array.isArray(data) || typeof data !== "object") {
+            parserFailure();
+            return;
+          }
+          const leaseId = data.lease_id;
+          const exitCode = data.exit;
+          const verified = data.verified;
+          if (
+            typeof leaseId !== "string" ||
+            leaseId.length === 0 ||
+            leaseId.includes("\n") ||
+            leaseId.includes("\r") ||
+            !Number.isInteger(exitCode) ||
+            exitCode < -2147483648 ||
+            exitCode > 2147483647 ||
+            typeof verified !== "boolean"
+          ) {
+            parserFailure();
+            return;
+          }
 
-        # A false verified with verify=true is a hard failure.
-        verify_input = os.environ.get("CORELINK_VERIFY", "true")
-        if verify_input != "false" and verified != "true":
-            print(
-                "::error::CoreLink attestation NOT verified (verified=false in fabric response). "
-                "Do NOT trust this result. Set verify=false only for local dev with FABRIC_DEV_UNSAFE=1.",
-                file=sys.stderr,
-            )
-            sys.exit(2)
+          if (process.env.CORELINK_VERIFY !== "false" && verified !== true) {
+            parserFailure();
+            return;
+          }
 
-        if output_file:
-            with open(output_file, "a") as f:
-                f.write(f"exit={exit_code}\n")
-                f.write(f"verified={verified}\n")
-                f.write(f"lease_id={lease_id}\n")
-        else:
-            # Fallback for local testing
-            print(f"exit={exit_code}")
-            print(f"verified={verified}")
-            print(f"lease_id={lease_id}")
+          core.setOutput("exit", String(exitCode));
+          core.setOutput("verified", String(verified));
+          core.setOutput("lease_id", leaseId);
 
     # -----------------------------------------------------------------------
     # Step 4 — propagate check exit code as step status
