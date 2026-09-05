@@ -79,6 +79,61 @@ Focused evidence (local logs; not full CI certificates):
 
 ## Execution rules
 
+### Next prepared cohort and Linux validation
+
+The earlier `c494639` bundle passed its Mac-executable matrix (Rust1296,
+Worker694, canary101), but is **RED on real Linux G0**: GNU `stat -f`
+emitted filesystem output before failing, contaminating the BSD-first fallback
+and rejecting a valid sealed JIT file. The failure is retained; the Mac result
+does not override it. Correction `8eef9fc9` uses isolated GNU-first assignments
+and preserves strict ownership/mode checks. Real Linux tests on source
+`82d049c3` pass every G0 cell, including literal PID1 and its old-shape negative
+control, dev-shm and JIT `/proc` surface checks. Runner blobs are unchanged in
+the later cleanup source `010906e9`; git-diff equality was checked.
+
+The next isolated source preparation is
+`/private/tmp/corelink-sprint1-cleanup-next`, branch `prep/sprint1-cleanup-signed`.
+It adds atomic stale-Pending cleanup claims across memory, File and PostgreSQL,
+confirmed provider teardown, and conditional final deletion. Claims retain
+concurrency and compute reservation, fence Held/normal removal, and survive
+File replay. File fsync precedes in-memory publication. Provider handles and
+Hybrid routes survive a successful teardown followed by a failed ledger finish;
+they are forgotten only after the conditional finish succeeds. Missing cloud
+registry state is Unconfirmed, never inferred provider absence. Complete cloud
+restart reclamation remains unproved because provider identities are still
+process-local. This is partial T3-W10 preparation, not operational acceptance.
+
+Central focused checks passed: 3 memory/File integration tests, 1 journal
+append-failure unit test, 37 existing reaper regressions, 6 cleanup/provider
+tests, and **3 real PostgreSQL16.15 tests** including claim/Held race and
+reservation retention. The first PG run exposed a fixture that bound both
+compute and concurrency but assumed concurrency precedence; it now tests each
+limit independently without changing production precedence. An unavailable
+short-lived SSH tunnel attempt also failed explicitly; the confirmed run uses
+Lima's loopback-only port55432, not the live database.
+
+Four test harnesses now provide authenticated close ACKs through existing
+public fixture seams: 39/39 tests pass in0.35s of execution versus approximately
+120s previously. No production timeout, public test-accessor API, assertions or
+explicit timeout tests were removed. The offline T6-W13 key-lane test is also
+independently reviewed; its simulated12 cycles do not prove a live hour/page ACK.
+
+| Focused evidence | SHA-256 |
+|---|---|
+| Real PG16 cleanup3/3 | `f33d157792c3d043ae731638479c633d458d30f6d8b8305db4ea808ec5965576` |
+| Existing reaper37/37 | `666c848383b47117b5a4c040bfa49ca81c1aeaffab6fc02e51eb8c47505ac072` |
+| Cleanup/provider6/6 | `a3bd5d38a353c7bba1305a83ebfde63aa9b19ef1d222d802a0250782e1138c01` |
+| File append-failure1/1 | `a6f65629258fc06b4679ddb8da20849cd018e2a7afe2f94b6f75089889db2a5e` |
+| ACK fixtures39/39 | `43163e5416d404991d9e8ac212a5e3b8e4ff102fcb7a1dc84001986f01497aa0` |
+| Actual Linux G0/JIT | `81a5fb9972c14cfe5639a7c88e9938ad631723bee7756a0bb63c2ce823852bc8` |
+
+Full CI for this new source tip is still required. No new train merge or WP
+completion is claimed. The hard integration predecessors remain unchanged:
+offline preparation/default-off does not itself remove a DAG edge. T3-W18 live
+acceptance and T4-W4/R1 still constrain the prepared descendants.
+
+### Standing rules
+
 The owner authorized autonomous deployment and maximum safe parallelism,
 Luna-first (Terra for bounded harder work). Offline preparation can proceed
 while operational gates are pending; actual integration, deployment and
