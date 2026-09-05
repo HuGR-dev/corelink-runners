@@ -24,6 +24,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::tenant::TenantId;
 
+mod pending_cleanup;
+
 /// Ledger-level lifecycle state: the contract §1 five states.
 ///
 /// `Pending` is the admission state (never on the `RunnerLease` wire — the
@@ -811,47 +813,6 @@ impl InMemoryInner {
         Ok(out)
     }
 
-    fn claim_stale_pending_cleanup(
-        &mut self,
-        now_ms: u64,
-        max_age_ms: u64,
-    ) -> anyhow::Result<Vec<LeaseRecord>> {
-        let cutoff = now_ms.saturating_sub(max_age_ms);
-        let mut out: Vec<LeaseRecord> = self
-            .records
-            .values()
-            .filter(|r| {
-                (crate::pending_cleanup::is_stale_pending(
-                    matches!(r.state, LeaseState::Pending),
-                    r.created_at_ms,
-                    cutoff,
-                ) || self.pending_cleanup_claims.contains(&r.lease_id))
-            })
-            .cloned()
-            .collect();
-        out.sort_by(|a, b| a.lease_id.cmp(&b.lease_id));
-        for rec in &out {
-            self.pending_cleanup_claims.insert(rec.lease_id.clone());
-        }
-        Ok(out)
-    }
-
-    fn finish_pending_cleanup(&mut self, lease_id: &str) -> anyhow::Result<bool> {
-        if !self.pending_cleanup_claims.contains(lease_id) {
-            return Ok(false);
-        }
-        if !matches!(
-            self.records.get(lease_id).map(|r| &r.state),
-            Some(LeaseState::Pending)
-        ) {
-            return Ok(false);
-        }
-        self.pending_cleanup_claims.remove(lease_id);
-        self.checkpoints.remove(lease_id);
-        self.reservations.remove(lease_id);
-        Ok(self.records.remove(lease_id).is_some())
-    }
-
     fn try_admit(&mut self, rec: LeaseRecord, max_concurrency: u32) -> anyhow::Result<bool> {
         // Active = Pending OR Held — mirrors CapGate/by_tenant's definition
         // EXACTLY. Counted under the caller's Mutex, so count+put is atomic.
@@ -1535,47 +1496,6 @@ impl FileInner {
 
     fn pending_older_than(&self, now_ms: u64, max_age_ms: u64) -> anyhow::Result<Vec<LeaseRecord>> {
         self.index.pending_older_than(now_ms, max_age_ms)
-    }
-
-    fn claim_stale_pending_cleanup(
-        &mut self,
-        now_ms: u64,
-        max_age_ms: u64,
-    ) -> anyhow::Result<Vec<LeaseRecord>> {
-        let prior = self.index.pending_cleanup_claims.clone();
-        let rows = self.index.claim_stale_pending_cleanup(now_ms, max_age_ms)?;
-        // Publish each fence durably before returning the claimed row. A crash
-        // after one line simply causes that row to be retried after replay.
-        for row in &rows {
-            if prior.contains(&row.lease_id) {
-                continue;
-            }
-            self.append_line(&JournalLine::PendingCleanupClaim {
-                lease_id: row.lease_id.clone(),
-            })?;
-        }
-        Ok(rows)
-    }
-
-    fn finish_pending_cleanup(&mut self, lease_id: &str) -> anyhow::Result<bool> {
-        if !self.index.pending_cleanup_claims.contains(lease_id)
-            || !matches!(
-                self.index.records.get(lease_id).map(|r| &r.state),
-                Some(LeaseState::Pending)
-            )
-        {
-            return Ok(false);
-        }
-        // Tombstone is the single durable erase for record, claim, checkpoint,
-        // and reservation. Publish it before mutating the replay index.
-        self.append_line(&JournalLine::Tombstone {
-            lease_id: lease_id.to_string(),
-        })?;
-        self.index.records.remove(lease_id);
-        self.index.pending_cleanup_claims.remove(lease_id);
-        self.index.checkpoints.remove(lease_id);
-        self.index.reservations.remove(lease_id);
-        Ok(true)
     }
 
     fn try_admit(&mut self, rec: LeaseRecord, max_concurrency: u32) -> anyhow::Result<bool> {

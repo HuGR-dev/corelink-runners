@@ -35,9 +35,19 @@ fn claims_fence_race_and_finish_is_idempotent() {
             )
             .is_err()
     );
+    assert!(ledger.remove("stale").is_err());
     assert!(!ledger.remove_if_pending("stale").unwrap());
+    assert_eq!(
+        ledger
+            .claim_stale_pending_cleanup(1_000, 100)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(!ledger.try_admit(pending("replacement", 1_000), 2).unwrap());
     assert!(ledger.finish_pending_cleanup("stale").unwrap());
     assert!(!ledger.finish_pending_cleanup("stale").unwrap());
+    assert!(ledger.try_admit(pending("replacement", 1_000), 2).unwrap());
     assert!(ledger.get("stale").unwrap().is_none());
     assert!(ledger.get("fresh").unwrap().is_some());
 }

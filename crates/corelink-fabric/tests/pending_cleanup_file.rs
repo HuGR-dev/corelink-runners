@@ -24,6 +24,8 @@ fn claim_replays_and_tombstone_clears_on_restart() {
             ledger.claim_stale_pending_cleanup(100, 10).unwrap().len(),
             1
         );
+        assert!(ledger.remove("stale").is_err());
+        assert!(!ledger.remove_if_pending("stale").unwrap());
     }
     {
         let ledger = FileLedger::open(&path).unwrap();
