@@ -14,6 +14,8 @@
 import type { FabricStatusJson, SpawnMetricsJson, Snapshot, SurfaceSnapshot, HealthSnapshot } from "./types";
 import { evaluate, applyCooldown, type Alert, type RulesConfig } from "./rules";
 import { sendAlert } from "./notify";
+import { parseProbeFlag } from "./config";
+export { CanaryTickOutboxAdapter } from "./tick_adapter";
 
 export interface Env {
   // ── KV: snapshot + cooldown state (owner creates the namespace + binds it) ──
@@ -51,6 +53,10 @@ export interface Env {
   // legacy fabricd requests; every other value skips them while leaving the
   // spawn-worker metrics monitor armed. Default is disabled (fail-closed).
   FABRIC_PROBES_ENABLED?: string;
+  CANARY_TICK_OUTBOX?: DurableObjectNamespace;
+  CANARY_TICK_INGEST_URL?: string; CANARY_TICK_SOURCE?: string; CANARY_TICK_SERVICE?: string;
+  CANARY_TICK_APPLICATION?: string; CANARY_TICK_KEY_ID?: string; CANARY_TICK_CREDENTIAL_EPOCH?: string;
+  CANARY_TICK_MONITOR_REARM_TUPLE_DIGEST?: string; CANARY_TICK_ENVELOPE_HMAC_KEY?: string;
 }
 
 const DEFAULT_FABRIC_STATUS_URL = "https://corelink-fabricd.gmhelmold.workers.dev/internal/v1/status";
@@ -171,7 +177,8 @@ export async function runCycle(env: Env, now: number): Promise<string> {
   // Prefer the service binding (Worker→Worker, no same-zone 404); else public fetch.
   const fabricFetch = env.FABRICD_SVC ? env.FABRICD_SVC.fetch.bind(env.FABRICD_SVC) : fetch;
   const spawnFetch = env.SPAWN_SVC ? env.SPAWN_SVC.fetch.bind(env.SPAWN_SVC) : fetch;
-  const fabricProbesEnabled = env.FABRIC_PROBES_ENABLED === "1";
+  const probeFlag = parseProbeFlag(env.FABRIC_PROBES_ENABLED);
+  const fabricProbesEnabled = probeFlag.valid && probeFlag.enabled;
   const metricsConfigured = Boolean(env.METRICS_OBSERVABILITY_KEY);
 
   // A 5-minute canary calling a container with sleepAfter=5m keeps it billable
@@ -258,7 +265,18 @@ export async function runCycle(env: Env, now: number): Promise<string> {
     : fabricHealth.reachable
       ? String(fabricHealth.status)
       : "DOWN";
-  return `fabric=${fabric.reachable ? fabric.status : "DOWN"} health=${healthSummary} spawn=${spawn.reachable ? spawn.status : "DOWN"} | triggered=${alerts.length + storageAlerts.length} | ${sendSummary}`;
+  const configState = probeFlag.valid ? "valid" : "invalid";
+  return `fabric=${fabric.reachable ? fabric.status : "DOWN"} health=${healthSummary} spawn=${spawn.reachable ? spawn.status : "DOWN"} config=${configState} | triggered=${alerts.length + storageAlerts.length} | ${sendSummary}`;
+}
+
+async function runScheduledTick(env: Env): Promise<string> {
+  if (!env.CANARY_TICK_OUTBOX) return "tick outbox unavailable";
+  const stub = env.CANARY_TICK_OUTBOX.get(env.CANARY_TICK_OUTBOX.idFromName("scheduled-tick"));
+  const response = await stub.fetch("https://canary.internal/tick", {
+    method: "POST",
+    body: JSON.stringify({ command: "scheduled-tick" }),
+  });
+  return response.text();
 }
 
 type ReadResult<T> = { ok: true; value: T | null } | { ok: false; detail: string };
@@ -330,8 +348,8 @@ export default {
     ctx.waitUntil(
       (async () => {
         try {
-          const summary = await runCycle(env, now);
-          console.log(`[canary] cycle ok: ${summary}`);
+          const [summary, tick] = await Promise.all([runCycle(env, now), runScheduledTick(env)]);
+          console.log(`[canary] cycle ok: ${summary}; ${tick}`);
         } catch (err) {
           // A monitored surface being down is an ALERT, handled inside runCycle;
           // reaching HERE means an unexpected canary bug — log, never rethrow.
