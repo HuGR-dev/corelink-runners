@@ -66,6 +66,37 @@ describe("T3-W17-R14 owner ledger", () => {
     const { ledger } = make(); const t = tuple();
     expect((await ledger.prepare({ tuple: t, caller_nonce: nonce } as any)).kind).toBe("rejected");
     expect((await ledger.beginEffect({ schema_version: 1, tuple: t } as any, "permit")).kind).toBe("rejected");
+    expect((await ledger.prepare({ schema_version: 1, tuple: t, caller_nonce: nonce, now: Number.NaN } as any)).kind).toBe("rejected");
+  });
+
+  it("fences canonical pointer corruption and leaves stale bind without KV artifacts", async () => {
+    const { ledger, storage, map } = make(); const t = tuple(); const request = { schema_version: 1 as const, tuple: t, caller_nonce: nonce };
+    await ledger.prepare(request); const active = [...storage.map.keys()][1]; const pointer: any = storage.map.get(active); pointer.state = "DRIVING";
+    expect((await ledger.acquire(request)).kind).toBe("legacy_unknown");
+    const c = await claim(ledger, { ...t, effect_id: "effect-bind" }); const started = await ledger.beginEffect(c.request, c.confirmed.permit!.permit_id);
+    const attempt = [...storage.map.keys()].find(k => k.includes("effect-bind") && k.includes("spawn-attempt"))!; (storage.map.get(attempt) as any).state = "DRIVING";
+    const binding = { schema_version: 1 as const, provider: "provider", resource_id: "resource-1", idempotency_key: "idem-1", binding_sha256: "c".repeat(64) };
+    expect((await ledger.bind(c.request, c.confirmed.permit!.permit_id, started.proof!.proof_id, binding)).kind).toBe("unknown");
+    expect(map.has("containment:v1:effect-binding:acme/repo/123/redrive/effect-bind")).toBe(false);
+  });
+
+  it("returns the existing proof on retries and never authorizes a second drive", async () => {
+    const { ledger } = make(); const { request, confirmed } = await claim(ledger); const permit = confirmed.permit!;
+    const first = await ledger.beginEffect(request, permit.permit_id); const again = await ledger.beginEffect(request, permit.permit_id);
+    expect(again.kind).toBe("already_started"); expect(again.proof?.proof_id).toBe(first.proof?.proof_id);
+    const binding = { schema_version: 1 as const, provider: "provider", resource_id: "resource-1", idempotency_key: "idem-1", binding_sha256: "d".repeat(64) };
+    await ledger.bind(request, permit.permit_id, first.proof!.proof_id, binding); const drive = await ledger.markDriving(request, permit.permit_id, first.proof!.proof_id);
+    const retry = await ledger.markDriving(request, permit.permit_id, first.proof!.proof_id); expect(drive.kind).toBe("driving"); expect(retry.kind).toBe("already_started"); expect(retry.proof?.proof_id).toBe(first.proof?.proof_id);
+  });
+
+  it("observes a committed record as UNKNOWN when its typed receipt is altered", async () => {
+    const { ledger, storage } = make(); const t = tuple(); const { request, confirmed } = await claim(ledger, t); const permit = confirmed.permit!;
+    const started = await ledger.beginEffect(request, permit.permit_id); const binding = { schema_version: 1 as const, provider: "provider", resource_id: "resource-1", idempotency_key: "idem-1", binding_sha256: "e".repeat(64) };
+    await ledger.bind(request, permit.permit_id, started.proof!.proof_id, binding); await ledger.markDriving(request, permit.permit_id, started.proof!.proof_id);
+    const receipt: ContainmentEffectReceipt = { schema_version: 1, trusted: true, repo: "acme/repo", job_id: "123", path: "redrive", event_id: t.event_id, reservation_epoch: 7, effect_id: t.effect_id, provider: "provider", resource_id: "resource-1", idempotency_key: "idem-1", nonce, permit_id: permit.permit_id, binding_sha256: binding.binding_sha256, receipt_id: "receipt-1", receipt_sha256: "a".repeat(64), provider_signature: "sig" };
+    const committed = await ledger.commitEffect(request, permit.permit_id, started.proof!.proof_id, receipt); expect(committed.kind).toBe("committed");
+    const attempt = storage.map.get(committed.attempt_key) as any; attempt.effect_observation.provider = "tampered";
+    expect((await ledger.observe(committed.active_pointer_key, committed.attempt_key)).kind).toBe("unknown");
   });
 
   it("executes prepare/acquire/confirm/bind/DRIVING/commit with identity-bound receipt", async () => {

@@ -1,8 +1,8 @@
 import type { KvLike } from "./lib";
 import {
   HEX, NONCE, PREFIX, activeKey, activePointerProjection, attemptKey, bindingKey,
-  bindingValid, mirrorKey, normalizeTuple, permitValid, pointerValid, proofValid, recordValid, requestTuple,
-  startKey, validText,
+  bindingValid, mirrorKey, normalizeTuple, permitValid, pointerMatchesAttempt, pointerValid, proofValid, recordValid, requestTuple,
+  startKey, validText, validTime,
 } from "./containment_effect_ledger_records";
 
 export type OwnerPath = "intake" | "drain" | "redrive";
@@ -116,6 +116,19 @@ export interface OwnerRecordV1 {
   expires_ms: number;
   tombstone: boolean;
   attempt_key?: string;
+  reap_proof?: EffectReapProofV1;
+}
+export interface EffectReapProofV1 {
+  schema_version: 1;
+  tuple: OwnerTuple;
+  nonce: string;
+  attempt_key: string;
+  active_pointer_key: string;
+  authority: "containment-reaper-v1" | "owner-abort-v1";
+  checked_at_ms: number;
+  no_permit: true;
+  no_binding: true;
+  no_effect: true;
 }
 export interface OwnerPointerV1 {
   schema_version: 1;
@@ -227,7 +240,8 @@ function mirrorShapeValid(v: unknown, t: OwnerTuple): v is SpawnMirrorPayloadV1 
     && (m.result === "acquired" || m.result === "owned")
     && m.owner === t.owner && m.token === t.token
     && m.lease_epoch === t.lease_epoch
-    && m.attempt_key === attemptKey(t) && m.active_pointer_key === activeKey(t);
+    && m.attempt_key === attemptKey(t) && m.active_pointer_key === activeKey(t)
+    && validTime(m.written_at_ms);
 }
 async function mirrorValid(v: unknown, t: OwnerTuple): Promise<boolean> {
   if (!mirrorShapeValid(v, t)) return false;
@@ -276,8 +290,10 @@ export class ContainmentEffectLedger {
   async observe(pointer: string, attempt: string): Promise<OwnerResult> {
     const p = await this.storage.get<OwnerRecordV1>(pointer);
     const a = await this.storage.get<OwnerRecordV1>(attempt);
-    if (!p || !a || !pointerValid(p, a.tuple) || !recordValid(a, a.tuple)
-      || p.attempt_key !== attempt || p.nonce !== a.nonce) {
+    const t = a ? normalizeTuple(a.tuple) : null;
+    const permitOk = !!a && !!t && (a.permit_id === null || (permitValid((a as any).permit, t) && await sha256(t.token) === (a as any).permit.owner_token_digest));
+    if (!t || pointer !== activeKey(t) || attempt !== attemptKey(t)
+      || !p || !a || !permitOk || !pointerMatchesAttempt(p, a, t) || p.attempt_key !== attempt || p.nonce !== a.nonce) {
       return { schema_version: 1, kind: "unknown", tuple_digest: "",
         attempt_key: attempt, active_pointer_key: pointer, permit: null,
         proof: null, state: "UNKNOWN" };
@@ -292,18 +308,20 @@ export class ContainmentEffectLedger {
       const orphan = await s.get<OwnerRecordV1>(attemptKey(t));
       if (raw === undefined && orphan !== undefined) return this.out(t, "legacy_unknown", "UNKNOWN");
       if (raw !== undefined) {
-        const oldTuple = raw.tuple;
-        if (!pointerValid(raw, oldTuple) || raw.attempt_key !== attemptKey(oldTuple)
+        const oldTuple = normalizeTuple(raw.tuple);
+        const oldAttempt = oldTuple ? await s.get<OwnerRecordV1>(attemptKey(oldTuple)) : undefined;
+        if (!oldTuple || !oldAttempt || !pointerMatchesAttempt(raw, oldAttempt, oldTuple)
           || (!raw.tombstone && !pointerValid(raw, t)) || (raw.tombstone && raw.nonce === t.caller_nonce)) {
           return this.out(t, "legacy_unknown", "UNKNOWN");
         }
       }
       if (raw && !raw.tombstone) {
         const current = await s.get<OwnerRecordV1>(attemptKey(t));
-        if (!current || !recordValid(current, t)) return this.out(t, "legacy_unknown", "UNKNOWN");
+        if (!current || !pointerMatchesAttempt(raw, current, t)) return this.out(t, "legacy_unknown", "UNKNOWN");
         return this.out(t, current.state === "COMMITTED" ? "owned" : "busy", current.state, current);
       }
       const created = request.now ?? Date.now();
+      if (!validTime(created) || !validTime(created + 120_000)) return this.out(t, "rejected", null);
       const r: OwnerRecordV1 = {
         schema_version: 1, tuple: t, ...t, nonce: t.caller_nonce, state: "PREPARED",
         permit_id: null, binding_id: null, effect_start_proof_id: null,
@@ -321,7 +339,7 @@ export class ContainmentEffectLedger {
     return this.storage.transaction(async s => {
       const p = await s.get<OwnerPointerV1>(activeKey(t));
       const a = await s.get<OwnerRecordV1>(attemptKey(t));
-      if (!p || !a || !pointerValid(p, t) || !recordValid(a, t) || p.nonce !== a.nonce) {
+      if (!p || !a || !pointerMatchesAttempt(p, a, t) || p.nonce !== a.nonce) {
         return this.out(t, "legacy_unknown", "UNKNOWN");
       }
       if (a.state === "ABORTED_PRE_EFFECT" || a.tombstone) {
@@ -378,7 +396,7 @@ export class ContainmentEffectLedger {
     return this.storage.transaction(async s => {
       const a: any = await s.get(attemptKey(t));
       const p: any = await s.get(activeKey(t));
-      if (!a || !p || !recordValid(a, t) || !pointerValid(p, t)
+      if (!a || !p || !pointerMatchesAttempt(p, a, t)
         || p.attempt_key !== attemptKey(t) || a.nonce !== p.nonce) return this.out(t, "unknown", "UNKNOWN");
       if (a.state === "PERMIT_ISSUED" || a.state === "BOUND" || a.state === "DRIVING") return this.out(t, "owned", a.state, a);
       if (a.state !== "CLAIM_ACQUIRED") return this.out(t, "rejected", a.state, a);
@@ -400,10 +418,14 @@ export class ContainmentEffectLedger {
   private async begin(request: SpawnOwnerRequest, permit_id: string): Promise<OwnerResult> {
     const t = requestTuple(request); if (!t || !validText(permit_id)) return rejected();
     return this.storage.transaction(async s => {
-      const a: any = await s.get(attemptKey(t));
-      if (!a || !recordValid(a, t) || a.permit_id !== permit_id || !permitValid(a.permit, t)) return this.out(t, "unknown", "UNKNOWN");
+      const a: any = await s.get(attemptKey(t)); const p: any = await s.get(activeKey(t)); const existing = await s.get<EffectStartProofV1>(startKey(t));
+      if (!a || !p || !pointerMatchesAttempt(p, a, t) || a.permit_id !== permit_id
+        || !permitValid(a.permit, t) || await sha256(t.token) !== a.permit.owner_token_digest) return this.out(t, "unknown", "UNKNOWN");
       if (a.state !== "PERMIT_ISSUED") return this.out(t, "rejected", a.state, a);
-      if (a.effect_start_proof_id) return this.out(t, "already_started", a.state, a);
+      if (a.effect_start_proof_id) {
+        if (!proofValid(existing, t, permit_id) || existing.proof_id !== a.effect_start_proof_id) return this.out(t, "unknown", "UNKNOWN");
+        const out = await this.out(t, "already_started", a.state, a); out.permit = a.permit; out.proof = existing; return out;
+      }
       const proof: EffectStartProofV1 = { schema_version: 1, proof_id: crypto.randomUUID(), repo: t.repo, job_id: t.job_id, path: t.path, event_id: t.event_id, reservation_epoch: t.reservation_epoch, effect_id: t.effect_id, permit_id, owner: t.owner, token: t.token, lease_epoch: t.lease_epoch, caller_nonce: t.caller_nonce, effect_request_digest: await sha256(JSON.stringify(t)), writer: "ContainmentDO", started_at_ms: Date.now() };
       const n = { ...a, effect_start_proof_id: proof.proof_id, effect_started: true };
       await s.put(startKey(t), proof); await s.put(attemptKey(t), n); await s.put(activeKey(t), n);
@@ -413,15 +435,26 @@ export class ContainmentEffectLedger {
   async bind(request: SpawnOwnerRequest, permit_id: string, proof_id: string, binding: ContainmentEffectBinding): Promise<OwnerResult> {
     const t = requestTuple(request); if (!t || !validText(permit_id) || !validText(proof_id)
       || !bindingValid(binding, binding?.binding_sha256 ?? null) || !this.kv) return rejected();
+    const authorized = await this.storage.transaction(async s => {
+      const a: any = await s.get(attemptKey(t)); const p: any = await s.get(activeKey(t));
+      const proof = await s.get<EffectStartProofV1>(startKey(t));
+      if (!a || !p || !pointerMatchesAttempt(p, a, t) || !recordValid(a, t)
+        || a.permit_id !== permit_id || a.effect_start_proof_id !== proof_id
+        || !proofValid(proof, t, permit_id) || !permitValid(a.permit, t)
+        || await sha256(t.token) !== a.permit.owner_token_digest) return this.out(t, "unknown", "UNKNOWN");
+      if (a.state === "BOUND") return a.binding_id === binding.binding_sha256 ? this.out(t, "bound", a.state, a) : this.out(t, "rejected", a.state, a);
+      return a.state === "PERMIT_ISSUED" ? true : this.out(t, "rejected", a.state, a);
+    });
+    if (authorized !== true) return authorized;
     const payload = JSON.stringify({ schema_version: 1, tuple: t, permit_id, binding });
     try {
       await this.kv.put(bindingKey(t), payload); const back = await this.kv.get(bindingKey(t));
       if (back !== payload) return rejected();
     } catch { return rejected(); }
     return this.storage.transaction(async s => {
-      const a: any = await s.get(attemptKey(t)); const proof = await s.get<EffectStartProofV1>(startKey(t));
-      if (!a || !recordValid(a, t) || a.permit_id !== permit_id || a.effect_start_proof_id !== proof_id || !proofValid(proof, t, permit_id)) return this.out(t, "unknown", "UNKNOWN");
-      if (a.state === "BOUND") return this.out(t, "bound", a.state, a);
+      const a: any = await s.get(attemptKey(t)); const p: any = await s.get(activeKey(t)); const proof = await s.get<EffectStartProofV1>(startKey(t));
+      if (!a || !p || !pointerMatchesAttempt(p, a, t) || !recordValid(a, t) || a.permit_id !== permit_id || a.effect_start_proof_id !== proof_id || !proofValid(proof, t, permit_id) || !permitValid(a.permit, t) || await sha256(t.token) !== a.permit.owner_token_digest) return this.out(t, "unknown", "UNKNOWN");
+      if (a.state === "BOUND") return a.binding_id === binding.binding_sha256 ? this.out(t, "bound", a.state, a) : this.out(t, "rejected", a.state, a);
       if (a.state !== "PERMIT_ISSUED") return this.out(t, "rejected", a.state, a);
       const n = { ...a, state: "BOUND" as const, binding_id: binding.binding_sha256, binding };
       await s.put(attemptKey(t), n); await s.put(activeKey(t), n);
@@ -431,9 +464,9 @@ export class ContainmentEffectLedger {
   async markDriving(request: SpawnOwnerRequest, permit_id: string, proof_id: string): Promise<OwnerResult> {
     const t = requestTuple(request); if (!t) return rejected();
     return this.storage.transaction(async s => {
-      const a: any = await s.get(attemptKey(t)); const proof = await s.get<EffectStartProofV1>(startKey(t));
-      if (!a || !recordValid(a, t) || a.permit_id !== permit_id || a.effect_start_proof_id !== proof_id || !proofValid(proof, t, permit_id)) return this.out(t, "unknown", "UNKNOWN");
-      if (a.state === "DRIVING") return this.out(t, "driving", a.state, a);
+      const a: any = await s.get(attemptKey(t)); const p: any = await s.get(activeKey(t)); const proof = await s.get<EffectStartProofV1>(startKey(t));
+      if (!a || !p || !pointerMatchesAttempt(p, a, t) || !recordValid(a, t) || a.permit_id !== permit_id || a.effect_start_proof_id !== proof_id || !proofValid(proof, t, permit_id) || !permitValid(a.permit, t) || await sha256(t.token) !== a.permit.owner_token_digest) return this.out(t, "unknown", "UNKNOWN");
+      if (a.state === "DRIVING") { const out = await this.out(t, "already_started", a.state, a); out.permit = a.permit; out.proof = proof; return out; }
       if (a.state !== "BOUND") return this.out(t, "rejected", a.state, a);
       const n = { ...a, state: "DRIVING" as const }; await s.put(attemptKey(t), n); await s.put(activeKey(t), n);
       const out = await this.out(t, "driving", n.state, n); out.permit = a.permit; out.proof = proof; return out;
@@ -445,8 +478,8 @@ export class ContainmentEffectLedger {
     if ("identity" in request) return this.commitLegacy(request);
     const t = requestTuple(request); if (!t || !permit_id || !proof_id || !observation) return rejected();
     return this.storage.transaction(async s => {
-      const a: any = await s.get(attemptKey(t)); const proof = await s.get<EffectStartProofV1>(startKey(t));
-      if (!a || !recordValid(a, t) || !proofValid(proof, t, permit_id) || a.permit_id !== permit_id || a.effect_start_proof_id !== proof_id) return this.out(t, "unknown", "UNKNOWN");
+      const a: any = await s.get(attemptKey(t)); const p: any = await s.get(activeKey(t)); const proof = await s.get<EffectStartProofV1>(startKey(t));
+      if (!a || !p || !pointerMatchesAttempt(p, a, t) || !recordValid(a, t) || !proofValid(proof, t, permit_id) || a.permit_id !== permit_id || a.effect_start_proof_id !== proof_id || !permitValid(a.permit, t) || await sha256(t.token) !== a.permit.owner_token_digest) return this.out(t, "unknown", "UNKNOWN");
       if (a.state === "COMMITTED") return this.out(t, "committed", a.state, a);
       if (a.state !== "DRIVING") return this.out(t, "unknown", "UNKNOWN", a);
       if (!trustedReceipt(observation, t, permit_id, a.binding ?? null)) { const unknown = { ...a, state: "UNKNOWN" as const }; await s.put(attemptKey(t), unknown); await s.put(activeKey(t), unknown); return this.out(t, "unknown", unknown.state, unknown); }
@@ -459,19 +492,25 @@ export class ContainmentEffectLedger {
     const t = requestTuple(request); if (!t) return rejected();
     return this.storage.transaction(async s => {
       const p = await s.get<any>(activeKey(t)); const a = await s.get<any>(attemptKey(t));
-      if (!p || !a || !pointerValid(p, t) || !recordValid(a, t) || p.attempt_key !== attemptKey(t) || p.nonce !== a.nonce) return this.out(t, "unknown", "UNKNOWN");
+      if (!p || !a || !pointerMatchesAttempt(p, a, t) || p.attempt_key !== attemptKey(t) || p.nonce !== a.nonce) return this.out(t, "unknown", "UNKNOWN");
       if (a.tuple.owner !== t.owner || a.tuple.token !== t.token || a.tuple.drain_lease_epoch !== t.drain_lease_epoch || (!reap && (a.tuple.owner !== owner || a.tuple.token !== token))) return this.out(t, "rejected", a.state, a);
       if (a.state !== "PREPARED" && a.state !== "CLAIM_ACQUIRED") return this.out(t, a.state === "DRIVING" ? "unknown" : "rejected", a.state, a);
       if (reap && (request.now ?? Date.now()) < a.expires_ms + stale) return this.out(t, "busy", a.state, a);
       if (a.permit_id !== null || a.binding_id !== null || a.effect_start_proof_id !== null || a.effect_started || a.tombstone) return this.out(t, "rejected", a.state, a);
-      const tomb = { ...a, state: "ABORTED_PRE_EFFECT" as const, tombstone: true };
+      const checked = request.now ?? Date.now();
+      if (!validTime(checked)) return this.out(t, "rejected", a.state, a);
+      const reap_proof: EffectReapProofV1 = { schema_version: 1, tuple: t, nonce: t.caller_nonce,
+        attempt_key: attemptKey(t), active_pointer_key: activeKey(t),
+        authority: reap ? "containment-reaper-v1" : "owner-abort-v1", checked_at_ms: checked,
+        no_permit: true, no_binding: true, no_effect: true };
+      const tomb = { ...a, state: "ABORTED_PRE_EFFECT" as const, tombstone: true, reap_proof };
       await s.put(attemptKey(t), tomb); await s.put(activeKey(t), tomb); return this.out(t, "aborted", tomb.state, tomb);
     });
   }
 
   // Compatibility methods preserve the untouched ContainmentDO seam. No compatibility operation
   // can clear a permit, binding, start proof, or DRIVING record.
-  async getEffectAttempt(i: ContainmentEffectIdentity, nonce: string): Promise<ContainmentEffectAttempt | null> { if (!NONCE.test(nonce)) return null; const pointer = await this.storage.get<OwnerPointerV1>(containmentEffectPointerKey(i)); if (!pointer || !pointerValid(pointer, pointer.tuple) || pointer.nonce !== nonce || pointer.attempt_key !== attemptKey(pointer.tuple)) return null; const r = await this.storage.get<OwnerRecordV1>(pointer.attempt_key); return r && recordValid(r, pointer.tuple) ? compat(r, pointer.tuple) : null; }
+  async getEffectAttempt(i: ContainmentEffectIdentity, nonce: string): Promise<ContainmentEffectAttempt | null> { if (!NONCE.test(nonce)) return null; const pointer = await this.storage.get<OwnerPointerV1>(containmentEffectPointerKey(i)); if (!pointer || !pointerValid(pointer, pointer.tuple) || pointer.nonce !== nonce || pointer.attempt_key !== attemptKey(pointer.tuple)) return null; const r = await this.storage.get<OwnerRecordV1>(pointer.attempt_key); return r && pointerMatchesAttempt(pointer, r, pointer.tuple) ? compat(r, pointer.tuple) : null; }
   async prepareEffect(i: ContainmentEffectPrepareInput): Promise<ContainmentEffectResult> { const t = legacyTuple(i.identity, "00000000000000000000000000000001", i.owner, crypto.randomUUID(), i.lease_epoch); if (!t) return { status: "invalid" }; const r = await this.prepare({ schema_version: 1, tuple: t, caller_nonce: t.caller_nonce }); return r.record ? { status: r.kind === "prepared" ? "prepared" : r.kind === "owned" ? "committed" : "active", attempt: compat(r.record, t) } : { status: "busy" }; }
   async acquireEffectClaim(i: ContainmentEffectTransition): Promise<ContainmentEffectResult> { const t = legacyTuple(i.identity, i.nonce, i.owner, i.owner_token, i.lease_epoch); if (!t) return { status: "stale" }; const r = await this.acquire({ schema_version: 1, tuple: t, caller_nonce: t.caller_nonce }); return r.record ? { status: r.kind === "acquired" ? "transitioned" : "busy", attempt: compat(r.record, t) } : { status: "stale" }; }
   async issueEffectPermit(i: ContainmentEffectTransition): Promise<ContainmentEffectResult> { const t = legacyTuple(i.identity, i.nonce, i.owner, i.owner_token, i.lease_epoch); if (!t) return { status: "stale" }; const m = await this.mirror({ schema_version: 1, tuple: t, caller_nonce: t.caller_nonce }); const r = await this.confirm({ schema_version: 1, tuple: t, caller_nonce: t.caller_nonce, observation_kind: m.kind, observation_digest: m.payload_digest }, m.payload_digest ?? "", m.payload_digest ?? ""); return r.record ? { status: r.kind === "permit_issued" || r.kind === "owned" ? "transitioned" : "busy", attempt: compat(r.record, t) } : { status: "stale" }; }
