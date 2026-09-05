@@ -30,6 +30,13 @@ export const CLW_REF_DOMAIN = "runner";
 /** Exec-server port (alongside code-server, per WP-02/03/06). */
 export const EXEC_SERVER_PORT = 9090;
 
+/**
+ * Provider ingress delivers EXEC_SERVER_AUTH_TOKEN only to the short-lived
+ * entrypoint. That bridge writes this regular mode-0400 file, unsets the raw
+ * token, and exports the path to the durable exec-server process.
+ */
+export const EXEC_SERVER_AUTH_TOKEN_FILE = "/run/corelink/exec-server-auth-token";
+
 /** Side-table keys for snapshot metadata + lock + tenant (per WP-06 §3.3 convention). */
 export const TENANT_KEY = "clwTenant";
 export const SNAPSHOT_LOCK_KEY = "snapshotInProgress";

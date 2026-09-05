@@ -38,6 +38,7 @@ vi.mock("@cloudflare/containers", () => {
 
 import { RunnerDevEnvDO } from "../src/durable_objects/runner_dev_env";
 import { type StartPayload } from "../src/types/devenv";
+import { EXEC_SERVER_AUTH_TOKEN_FILE } from "../src/lib/clw";
 
 // ── Ingress Header Sanitizer (Edge Security Gateway) ───────────────────
 function edgeIngressFilter(rawHeaders: Record<string, string>): Headers {
@@ -203,6 +204,9 @@ describe("Real Customer User Simulation (Provisioned Test User Flow)", () => {
 
     const startResp = await sandbox.startDevenv(payload);
     expect(startResp.status).toBe("starting");
+    expect((sandbox as any).envVars.EXEC_SERVER_AUTH_TOKEN_FILE).toBe(
+      EXEC_SERVER_AUTH_TOKEN_FILE,
+    );
 
     await sandbox.onStart();
     const liveStatus = await sandbox.getStatus();

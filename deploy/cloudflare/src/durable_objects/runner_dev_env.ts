@@ -15,7 +15,13 @@ import {
   validateStateTransition,
 } from "../types/devenv.js";
 import { pushUsageEvent } from "../lib.js";
-import { hydrateViaClw, snapshotViaClw, acquireSnapshotLock, releaseSnapshotLock } from "../lib/clw.js";
+import {
+  hydrateViaClw,
+  snapshotViaClw,
+  acquireSnapshotLock,
+  releaseSnapshotLock,
+  EXEC_SERVER_AUTH_TOKEN_FILE,
+} from "../lib/clw.js";
 
 /** State machine storage key */
 const STATE_KEY = "state";
@@ -132,6 +138,10 @@ export class RunnerDevEnvDO extends Container<any> {
         CLW_TOKEN: payload.config.clwToken,
         WORKSPACE_NAME: payload.config.workspaceName,
         PROFILE_NAME: payload.config.profileName,
+        // Provider ingress token is consumed by entrypoint.sh only. The bridge
+        // writes this mode-0400 path, unsets EXEC_SERVER_AUTH_TOKEN, and the
+        // supervisor passes only the path to the durable exec-server.
+        EXEC_SERVER_AUTH_TOKEN_FILE,
         EXEC_SERVER_AUTH_TOKEN: this.execToken,
         SESSION_UUID: sessionUuid,
         BILLING_TENANT_UUID: payload.config.clwTenant,
