@@ -1,38 +1,30 @@
-//! Integration proof for capacity retry when a Pending cleanup cannot yet be
-//! confirmed. The queue must not re-admit the same id while its durable claim
-//! still owns the concurrency slot.
+//! Private-module proof for a capacity error whose pending cleanup is retryable.
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use corelink_fabric::{InMemoryLedger, LeaseLedger, LeaseRecord, LeaseState, TenantId, TenantPlan};
 use corelink_fabric_api::{AcquireRequest, paths};
-use corelink_fabric_server::{
-    AppState, BoxProvisioner, CleanupTeardown, Clock, ProviderCapacityError, StaticPlans,
-    StaticTokenStore, app, run_admission_tick,
-};
 use corelink_runner::lease::ContainerSpec;
 use corelink_runners_contracts::RunnerState;
 use tower::ServiceExt;
+
+use crate as corelink_fabric_server;
+use crate::runner_cas_mint::{CasPatMint, MintError, MintedPat};
+use crate::{
+    AppState, BoxProvisioner, CleanupTeardown, Clock, ProviderCapacityError, StaticPlans,
+    StaticTokenStore, app, run_admission_tick,
+};
 
 const PINNED_IMAGE: &str =
     "alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc";
 
 fn acme() -> TenantId {
     TenantId::new("acme").unwrap()
-}
-
-fn plan() -> TenantPlan {
-    TenantPlan {
-        tenant: acme(),
-        max_concurrency: 1,
-        rate_ceiling_per_min: 10_000,
-        repo_allowlist: Vec::new(),
-    }
 }
 
 fn pending(id: &str, created_at_ms: u64) -> LeaseRecord {
@@ -48,9 +40,101 @@ fn pending(id: &str, created_at_ms: u64) -> LeaseRecord {
     }
 }
 
+#[derive(Clone)]
+struct FixedClock(Arc<AtomicU64>);
+impl FixedClock {
+    fn set(&self, now_ms: u64) {
+        self.0.store(now_ms, Ordering::SeqCst);
+    }
+}
+impl Clock for FixedClock {
+    fn now_ms(&self) -> u64 {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+#[derive(Clone, Default)]
+struct RecordingMint(Arc<Mutex<Vec<String>>>);
+impl RecordingMint {
+    fn pat_id(lease_id: &str) -> String {
+        format!("rec-patid::{lease_id}")
+    }
+    fn revoked(&self) -> Vec<String> {
+        self.0.lock().unwrap().clone()
+    }
+}
+impl CasPatMint for RecordingMint {
+    fn mint<'a>(
+        &'a self,
+        _: &'a str,
+        _: Option<&'a str>,
+        _: &'a str,
+        lease_id: &'a str,
+        expires_ms: u64,
+        _: u64,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<MintedPat, MintError>> + Send + 'a>,
+    > {
+        let pat_id = Self::pat_id(lease_id);
+        Box::pin(async move {
+            Ok(MintedPat {
+                token: "test-token".to_owned(),
+                pat_id,
+                expires_ms,
+            })
+        })
+    }
+    fn revoke<'a>(
+        &'a self,
+        pat_id: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), MintError>> + Send + 'a>>
+    {
+        self.0.lock().unwrap().push(pat_id.to_owned());
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// Capacity classification and cleanup confirmation are independently scripted.
+struct CapacityThenCleanup {
+    cleanup: Mutex<Vec<CleanupTeardown>>,
+    cleanup_calls: AtomicUsize,
+    provision_calls: AtomicUsize,
+}
+impl CapacityThenCleanup {
+    fn new(outcomes: impl IntoIterator<Item = CleanupTeardown>) -> Arc<Self> {
+        Arc::new(Self {
+            cleanup: Mutex::new(outcomes.into_iter().collect()),
+            cleanup_calls: AtomicUsize::new(0),
+            provision_calls: AtomicUsize::new(0),
+        })
+    }
+}
+impl BoxProvisioner for CapacityThenCleanup {
+    fn provision(&self, _: &str, _: &ContainerSpec) -> Result<()> {
+        self.provision_calls.fetch_add(1, Ordering::SeqCst);
+        Err(
+            anyhow::Error::msg("scripted provider capacity").context(ProviderCapacityError {
+                status: 429,
+                body_excerpt: "quota".to_owned(),
+            }),
+        )
+    }
+    fn teardown(&self, _: &str) -> Result<()> {
+        Ok(())
+    }
+    fn teardown_pending(&self, _: &str) -> CleanupTeardown {
+        self.cleanup_calls.fetch_add(1, Ordering::SeqCst);
+        self.cleanup
+            .lock()
+            .unwrap()
+            .pop()
+            .unwrap_or(CleanupTeardown::Unconfirmed)
+    }
+}
+
 fn request() -> Request<Body> {
     let body = AcquireRequest {
-        repo_full_name: None,
+        repo_full_name: Some("acme/repo".to_owned()),
         installation_id: None,
         image_digest: PINNED_IMAGE.to_owned(),
         net_policy: "isolated".to_owned(),
@@ -69,61 +153,6 @@ fn request() -> Request<Body> {
         .unwrap()
 }
 
-#[derive(Clone)]
-struct FixedClock(Arc<AtomicU64>);
-
-impl FixedClock {
-    fn set(&self, now_ms: u64) {
-        self.0.store(now_ms, Ordering::SeqCst);
-    }
-}
-
-impl Clock for FixedClock {
-    fn now_ms(&self) -> u64 {
-        self.0.load(Ordering::SeqCst)
-    }
-}
-
-/// The capacity error is typed, while the cleanup result is independently
-/// scripted. A Retryable outcome is never inferred from the generic teardown.
-struct CapacityThenCleanup {
-    cleanup: Mutex<Vec<CleanupTeardown>>,
-    cleanup_calls: AtomicUsize,
-}
-
-impl CapacityThenCleanup {
-    fn new(cleanup: impl IntoIterator<Item = CleanupTeardown>) -> Arc<Self> {
-        Arc::new(Self {
-            cleanup: Mutex::new(cleanup.into_iter().collect()),
-            cleanup_calls: AtomicUsize::new(0),
-        })
-    }
-}
-
-impl BoxProvisioner for CapacityThenCleanup {
-    fn provision(&self, _: &str, _: &ContainerSpec) -> Result<()> {
-        Err(
-            anyhow::anyhow!("scripted provider capacity").context(ProviderCapacityError {
-                status: 429,
-                body_excerpt: "quota".to_owned(),
-            }),
-        )
-    }
-
-    fn teardown(&self, _: &str) -> Result<()> {
-        Ok(())
-    }
-
-    fn teardown_pending(&self, _: &str) -> CleanupTeardown {
-        self.cleanup_calls.fetch_add(1, Ordering::SeqCst);
-        self.cleanup
-            .lock()
-            .unwrap()
-            .pop()
-            .unwrap_or(CleanupTeardown::Unconfirmed)
-    }
-}
-
 #[tokio::test]
 async fn capacity_with_retryable_cleanup_503s_without_requeue_then_sweep_frees_once() {
     let now = FixedClock(Arc::new(AtomicU64::new(10_000)));
@@ -132,21 +161,23 @@ async fn capacity_with_retryable_cleanup_503s_without_requeue_then_sweep_frees_o
         CleanupTeardown::ConfirmedDestroyed,
         CleanupTeardown::Retryable,
     ]);
+    let mint = RecordingMint::default();
     let mut state = AppState::new(
         Arc::clone(&ledger),
-        Arc::new(StaticPlans::new([plan()])),
+        Arc::new(StaticPlans::new([TenantPlan {
+            tenant: acme(),
+            max_concurrency: 1,
+            rate_ceiling_per_min: 10_000,
+            repo_allowlist: vec!["acme/repo".to_owned()],
+        }])),
         Arc::new(now.clone()),
     )
-    .with_admission_queue(8, Duration::from_secs(5), 4);
+    .with_admission_queue(8, Duration::from_secs(5), 4)
+    .with_cas_pat_mint(Arc::new(mint.clone()));
     state.provisioner = provider.clone();
     let state = Arc::new(state);
-
-    // Fill the only slot so the router parks the request. Releasing it below
-    // makes the manual tick own the sole attempt and any possible re-enqueue.
     ledger.try_admit(pending("held", 1), 1).unwrap();
-    ledger
-        .transition("held", RunnerState::Held, 1)
-        .expect("pre-fill Held");
+    ledger.transition("held", RunnerState::Held, 1).unwrap();
     let task_state = Arc::clone(&state);
     let response = tokio::spawn(async move {
         app(
@@ -171,52 +202,57 @@ async fn capacity_with_retryable_cleanup_503s_without_requeue_then_sweep_frees_o
     );
     ledger
         .transition("held", RunnerState::Released, now.now_ms())
-        .expect("free pre-filled slot");
-
+        .unwrap();
     run_admission_tick(&state, now.now_ms()).await;
-    let response = response.await.unwrap();
     assert_eq!(
-        response.status(),
-        StatusCode::SERVICE_UNAVAILABLE,
-        "retryable cleanup must fail closed instead of re-enqueueing the same claimed id"
+        response.await.unwrap().status(),
+        StatusCode::SERVICE_UNAVAILABLE
     );
-    assert_eq!(queue.pending(&acme()), 0, "no capacity retry was enqueued");
+    assert_eq!(
+        queue.pending(&acme()),
+        0,
+        "retryable cleanup must not re-enqueue the claimed id"
+    );
+    assert_eq!(provider.provision_calls.load(Ordering::SeqCst), 1);
     assert_eq!(provider.cleanup_calls.load(Ordering::SeqCst), 1);
-
     let claimed = ledger
         .by_tenant(&acme())
         .unwrap()
         .into_iter()
         .find(|row| row.lease_id != "held")
-        .expect("retryable cleanup retains the Pending row");
+        .unwrap();
     assert_eq!(claimed.state, LeaseState::Pending);
+    assert_eq!(
+        mint.revoked(),
+        vec![RecordingMint::pat_id(&claimed.lease_id)]
+    );
     assert!(
         !ledger
             .try_admit(pending("must-not-fit", now.now_ms()), 1)
             .unwrap(),
-        "the claimed Pending still owns the concurrency slot"
+        "claimed Pending retains cap"
     );
-
+    // A later scheduler tick cannot reprovision the failed acquisition because it was not re-enqueued.
+    run_admission_tick(&state, now.now_ms() + 1).await;
+    assert_eq!(provider.provision_calls.load(Ordering::SeqCst), 1);
     now.set(20_000);
     assert_eq!(
         corelink_fabric_server::pending_cleanup::sweep_stale_pending(
             &state,
-            Duration::from_millis(1),
+            Duration::from_millis(1)
         )
         .await,
-        1,
-        "the later confirmed sweep conditionally finishes the original claim"
+        1
     );
     assert!(ledger.get(&claimed.lease_id).unwrap().is_none());
     assert_eq!(provider.cleanup_calls.load(Ordering::SeqCst), 2);
     assert_eq!(
         corelink_fabric_server::pending_cleanup::sweep_stale_pending(
             &state,
-            Duration::from_millis(1),
+            Duration::from_millis(1)
         )
         .await,
-        0,
-        "finish is idempotent: no second provider cleanup or slot release"
+        0
     );
     assert_eq!(provider.cleanup_calls.load(Ordering::SeqCst), 2);
 }
