@@ -1959,6 +1959,24 @@ impl AppState {
         }
     }
 
+    /// Cleanup-specific provider call. It runs on the blocking executor and
+    /// carries explicit confirmation semantics; unknown local state remains
+    /// unconfirmed rather than being treated as cloud absence.
+    pub(crate) async fn teardown_pending_lease(
+        &self,
+        lease_id: &str,
+    ) -> crate::pending_cleanup::CleanupTeardown {
+        let prov = Arc::clone(&self.provisioner);
+        let lid = lease_id.to_string();
+        match tokio::task::spawn_blocking(move || prov.teardown_pending(&lid)).await {
+            Ok(result) => result,
+            Err(e) => {
+                eprintln!("pending-cleanup: teardown task panicked for lease {lease_id}: {e}");
+                crate::pending_cleanup::CleanupTeardown::Retryable
+            }
+        }
+    }
+
     /// Probe the liveness of the box bound to `lease_id` on a blocking thread
     /// and await the result (WP-CRASH-SWEEP).
     ///
