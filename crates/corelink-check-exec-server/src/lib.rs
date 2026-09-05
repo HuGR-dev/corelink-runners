@@ -199,7 +199,9 @@ fn read_auth_token_file(path: &std::ffi::OsStr) -> Result<String, ExecAuthError>
         let mut options = OpenOptions::new();
         options
             .read(true)
-            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+            // O_NONBLOCK is required before metadata validation: a FIFO must
+            // be rejected as non-regular without waiting for a writer.
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
         let file = options
             .open(path)
             .map_err(|_| ExecAuthError::AuthFileUnreadable)?;

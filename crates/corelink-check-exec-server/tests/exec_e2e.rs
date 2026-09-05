@@ -415,6 +415,17 @@ fn auth_file_rejects_missing_empty_wrong_mode_and_symlink() {
         ExecAuthError::AuthFileUnsafe
     );
 
+    // O_NONBLOCK must be present on the open itself: a FIFO with no writer
+    // must fail closed immediately, before regular-file metadata validation.
+    let fifo = base.join("fifo");
+    let fifo_c = std::ffi::CString::new(fifo.to_string_lossy().as_bytes()).expect("fifo path");
+    assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o400) }, 0);
+    unsafe { std::env::set_var(AUTH_TOKEN_FILE_ENV, &fifo) };
+    assert_eq!(
+        ExecAuth::from_env().unwrap_err(),
+        ExecAuthError::AuthFileUnsafe
+    );
+
     let _ = std::fs::remove_file(&file);
     let directory = base.join("directory");
     std::fs::create_dir(&directory).expect("directory fixture");
