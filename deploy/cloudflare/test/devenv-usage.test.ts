@@ -62,6 +62,30 @@ describe("buildDevenvUsageEvent", () => {
     expect(boundary).toMatchObject({ ok: true, event: { qty: 0 } });
   });
 
+  it("rejects timestamps outside JavaScript Date's representable range", async () => {
+    const result = await buildDevenvUsageEvent({
+      ...base,
+      startedAtMs: 8_640_000_000_000_001,
+      completedAtMs: 8_640_000_000_000_001,
+    });
+    expect(result).toMatchObject({ ok: false, error: { code: "invalid_started_at" } });
+  });
+
+  it("canonicalizes UUID case before deriving the event identity", async () => {
+    const lower = await buildDevenvUsageEvent(base);
+    const upper = await buildDevenvUsageEvent({
+      ...base,
+      tenantId: tenantId.toUpperCase(),
+      sessionId: sessionId.toUpperCase(),
+    });
+    expect(lower).toMatchObject({ ok: true });
+    expect(upper).toMatchObject({ ok: true });
+    if (lower.ok && upper.ok) {
+      expect(upper.event.tenant_id).toBe(lower.event.tenant_id);
+      expect(upper.event.idem_key).toBe(lower.event.idem_key);
+    }
+  });
+
   it("keeps DevEnv keys disjoint from the decimal GitHub job namespace", async () => {
     const result = await buildDevenvUsageEvent(base);
     expect(result.ok).toBe(true);
