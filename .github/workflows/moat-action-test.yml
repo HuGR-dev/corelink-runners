@@ -1,7 +1,8 @@
 # moat-action-test — prove the corelink-memoize composite action end-to-end:
 #   1. COLD      (1st use)  → cache MISS  → real build, memoized
 #   2. WARM      (2nd use)  → cache HIT   → memoized, no re-run
-#   3. FAIL-OPEN (CLW_TOKEN forced empty) → moat absent → COLD passthrough (still builds)
+#   3. FAIL-OPEN (CLW_TOKEN forced empty) → moat absent → optional COLD passthrough
+#   4. T6-W2 focused fixtures: required-hit refuses every non-authenticated HIT
 # Uses the LOCAL action (./actions/corelink-memoize) so it tests exactly what ships.
 name: moat-action-test
 
@@ -12,7 +13,7 @@ jobs:
   action-test:
     runs-on: corelink-dogfood
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
 
       - name: Generate a deterministic crate (run-unique key ⇒ COLD is a fresh miss)
         run: |
@@ -47,12 +48,14 @@ jobs:
       - name: COLD via action (expect cache miss + build)
         uses: ./actions/corelink-memoize
         with:
+          cache-policy: optional
           run: cd moatbench && cargo build --release -q
           inputs: moatbench/Cargo.toml moatbench/src
 
       - name: WARM via action (expect cache hit, memoized)
         uses: ./actions/corelink-memoize
         with:
+          cache-policy: optional
           run: cd moatbench && cargo build --release -q
           inputs: moatbench/Cargo.toml moatbench/src
 
@@ -62,17 +65,41 @@ jobs:
           CLW_TOKEN: ""        # mask the injected PAT for THIS step only
           CLW_ENDPOINT: ""
         with:
+          cache-policy: optional
           run: echo "fail-open passthrough OK" && cd moatbench && cargo build --release -q
           inputs: moatbench/Cargo.toml moatbench/src
+
+      # D11/T6-W2: this is intentionally a planted miss against the real
+      # action. clw 0.1.5 lacks an authenticated atomic no-exec HIT/restore
+      # operation, so required-hit must return 78 before the child runs.
+      - name: REQUIRED-HIT planted miss refuses before child execution
+        id: required_hit
+        continue-on-error: true
+        uses: ./actions/corelink-memoize
+        with:
+          cache-policy: required-hit
+          run: printf 'child-ran\n' > t6-w2-required-hit-child.marker
+          inputs: moatbench/Cargo.toml moatbench/src
+
+      - name: Assert required-hit refusal and no child execution
+        run: |
+          set -euo pipefail
+          test "${{ steps.required_hit.outcome }}" = failure
+          test ! -e t6-w2-required-hit-child.marker
+          echo "required-hit refused; planted child never executed (exact exit 78 is covered by actions/corelink-memoize/test/policy.sh)"
 
       - name: TOOL-FOLD via action (safety-by-default — toolchain folded into key)
         uses: ./actions/corelink-memoize
         with:
+          cache-policy: optional
           run: cd moatbench && cargo build --release -q
           inputs: moatbench/Cargo.toml moatbench/src
           tool: rust
         # Expect the log line "toolchain folded into key →|rust=rustc 1.96.0…".
         # Correctness of "a version bump ⇒ MISS" is the proven --env path (moat-correctness #5).
+
+      - name: T6-W2 cache-policy fixtures
+        run: bash actions/corelink-memoize/test/policy.sh
 
       - name: Result
         run: |

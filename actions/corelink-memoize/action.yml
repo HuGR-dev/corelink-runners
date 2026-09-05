@@ -1,10 +1,11 @@
 name: "CoreLink Memoize"
 description: >-
   Run a command with CoreLink cache memoization (clw run). On a cache HIT the
-  memoized result is returned WITHOUT re-running (re-runs ≈ 0). FAIL-OPEN: if the
-  CoreLink moat is absent (CLW_* not injected) or clw errors internally, the
-  command runs COLD — a job ALWAYS runs (north star: cache absent ⇒ slow, never
-  broken). Use on a CoreLink ephemeral runner (the autoscaler injects CLW_*).
+  memoized result is returned WITHOUT re-running (re-runs ≈ 0). The default
+  `optional` policy is fail-open: if the CoreLink moat is absent or clw errors
+  internally, the command runs COLD. `required-hit` is fail-closed and returns
+  exit 78 until the installed clw exposes the authenticated no-exec HIT API
+  required by ADR-0011. Use on a CoreLink ephemeral runner.
 
 inputs:
   run:
@@ -30,6 +31,13 @@ inputs:
       the compiler version via `env`. Unknown names are warned + ignored.
     required: false
     default: ""
+  cache-policy:
+    description: >-
+      Cache availability policy: `optional` (default, fail-open COLD) or
+      `required-hit` (authenticated no-exec HIT required; currently unavailable
+      with clw 0.1.5, so refusal is exit 78).
+    required: false
+    default: "optional"
 
 runs:
   using: "composite"
@@ -40,58 +48,6 @@ runs:
         CL_INPUTS: ${{ inputs.inputs }}
         CL_ENVNAMES: ${{ inputs.env }}
         CL_TOOLS: ${{ inputs.tool }}
+        CL_CACHE_POLICY: ${{ inputs.cache-policy }}
       run: |
-        set +e   # we manage exit codes explicitly (north-star fail-open)
-
-        # Build repeated --input / --env argument arrays (simple word-split; paths
-        # with spaces are out of scope for v0).
-        input_args=(); for p in $CL_INPUTS; do input_args+=(--input "$p"); done
-        env_args=();   for e in $CL_ENVNAMES; do env_args+=(--env "$e"); done
-
-        # Auto-fold toolchain versions into the key (safety-by-default): capture each
-        # tool's version and add it via a folded env var, so a toolchain upgrade busts
-        # the cache. Correctness of "version change ⇒ MISS" is the proven --env path
-        # (moat-correctness #5). A tool that's absent contributes empty (still safe).
-        if [ -n "${CL_TOOLS:-}" ]; then
-          tv=""
-          for t in $CL_TOOLS; do
-            case "$t" in
-              rust)   tv="${tv}|rust=$(rustc --version 2>/dev/null)";;
-              node)   tv="${tv}|node=$(node --version 2>/dev/null)";;
-              python) tv="${tv}|python=$(python3 --version 2>/dev/null)";;
-              go)     tv="${tv}|go=$(go version 2>/dev/null)";;
-              *)      echo "::warning title=corelink-memoize::unknown tool '$t' (ignored)";;
-            esac
-          done
-          export __CL_TOOLVERS="$tv"
-          env_args+=(--env __CL_TOOLVERS)
-          echo "corelink-memoize: toolchain folded into key →$tv"
-        fi
-
-        run_cold() { bash -c "$CL_RUN"; }
-
-        # Moat present? (CLW_* injected by the CoreLink autoscaler + clw on PATH).
-        # Two credential shapes are accepted:
-        #   • CLW_TOKEN        — the raw CAS PAT (legacy direct injection), OR
-        #   • CLW_CRED_TICKET  — env-0: a single-use ticket that `clw run` redeems
-        #     at run time (CredentialSource, clw >= 0.1.4) for the CAS PAT, so the
-        #     raw PAT never sits in the container env. Either ⇒ the moat is present.
-        if [ -n "${CLW_ENDPOINT:-}" ] && { [ -n "${CLW_TOKEN:-}" ] || [ -n "${CLW_CRED_TICKET:-}" ]; } && command -v clw >/dev/null 2>&1; then
-          export CLW_REF_DOMAIN="${CLW_REF_DOMAIN:-runner}"
-          echo "corelink-memoize: moat present — memoizing via clw run"
-          # env-0 redeem diagnostic (coordinator ask 2026-07-06): show what clw sees
-          # at its process env — WITHOUT leaking the single-use ticket (length only).
-          echo "corelink-memoize[env-0-check]: CLW_REF_DOMAIN=[${CLW_REF_DOMAIN:-}] CLW_CRED_TICKET_len=[${#CLW_CRED_TICKET}] CLW_LEASE_ID=[${CLW_LEASE_ID:-}] CLW_FABRIC_ENDPOINT_set=[$([ -n "${CLW_FABRIC_ENDPOINT:-}" ] && echo yes || echo no)] CLW_TOKEN_set=[$([ -n "${CLW_TOKEN:-}" ] && echo yes || echo no)]"
-          clw run "${input_args[@]}" "${env_args[@]}" -- bash -c "$CL_RUN"
-          rc=$?
-          # clw exit contract: 125 = clw-INTERNAL error (NOT the command's verdict).
-          # Any other code is the wrapped command's real exit (cached or fresh).
-          if [ "$rc" -eq 125 ]; then
-            echo "::warning title=corelink-memoize::clw internal error (125) — falling back to a COLD run (north star)"
-            run_cold; rc=$?
-          fi
-          exit "$rc"
-        else
-          echo "corelink-memoize: moat absent (no CLW_*/clw) — COLD run"
-          run_cold; exit "$?"
-        fi
+        "${GITHUB_ACTION_PATH}/memoize.sh"
