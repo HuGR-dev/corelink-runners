@@ -607,7 +607,7 @@ pub fn spawn_reaper_with_pending_age(
             }
             // Stale-Pending sweep: reclaim cap slots leaked by a Pending whose
             // instance died between reserve and the Held transition / rollback.
-            let p = sweep_stale_pending(&state, pending_max_age).await;
+            let p = crate::pending_cleanup::sweep_stale_pending(&state, pending_max_age).await;
             if p > 0 {
                 eprintln!("reaper: reclaimed {p} stale Pending lease(s) (leaked cap slot)");
             }
@@ -823,7 +823,7 @@ pub fn spawn_crash_sweep(
 /// older than this is considered leaked (well past any legitimate provision
 /// window — provisioning a box is an O(seconds) operation, so 5 minutes is a
 /// very conservative floor that can never catch a mid-provision Pending).
-pub const DEFAULT_PENDING_MAX_AGE: Duration = Duration::from_secs(300);
+pub const DEFAULT_PENDING_MAX_AGE: Duration = crate::pending_cleanup::DEFAULT_PENDING_MAX_AGE;
 
 /// Resolve the stale-Pending staleness bound from an environment-variable
 /// accessor.
@@ -895,7 +895,15 @@ pub fn pending_max_age_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow:
 /// `remove_if_pending` re-acquires the ledger lock briefly (dropped before the
 /// teardown await), and teardown holds no lock. The compile-time
 /// [`_ASSERT_SWEEP_STALE_PENDING_IS_SEND`] assertion enforces this.
+/// Compatibility wrapper for callers of the old reaper entry point.
 pub async fn sweep_stale_pending(state: &crate::AppState, max_age: Duration) -> usize {
+    crate::pending_cleanup::sweep_stale_pending(state, max_age).await
+}
+
+// Retained only as historical test documentation; production uses the bounded
+// claim/confirm implementation above. It is intentionally not reachable.
+#[allow(dead_code)]
+async fn legacy_sweep_stale_pending(state: &crate::AppState, max_age: Duration) -> usize {
     let now = state.clock.now_ms();
     let max_age_ms = max_age.as_millis() as u64;
 

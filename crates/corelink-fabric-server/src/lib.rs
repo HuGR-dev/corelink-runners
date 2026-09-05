@@ -47,6 +47,7 @@ pub(crate) mod introspect_coalesce;
 /// Golden-signal counters (Stage-C observability) — a lock-free, always-on
 /// operational metric surface exposed via `GET /internal/v1/status`.
 pub mod observability;
+pub mod pending_cleanup;
 pub mod quota_headroom;
 pub mod reaper;
 pub mod runner_broker;
@@ -79,6 +80,7 @@ pub use cloud_exec::{
     BoxProvisioner, BoxRegistry, EngineLeasedExec, NoBoxProvisioner, NorthflankBoxProvisioner,
     ProbeStatus, cloud_backend_from_env, cloud_executor_from_env,
 };
+pub use pending_cleanup::CleanupTeardown;
 // Re-export the capacity-error type so callers (tests, external provisioners)
 // can construct ProviderCapacityError-carrying errors without depending on
 // corelink-cloud-engine directly.
