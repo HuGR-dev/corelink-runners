@@ -150,14 +150,17 @@ runs:
         # Run and capture JSON stdout; steps/diagnostics go to stderr.
         # We capture the exit code manually so we can handle exit-1
         # (check ran but failed) separately from exit-2 (wire/auth/attest error).
+        CORELINK_TMP_DIR=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/corelink.XXXXXX")
+        CORELINK_STDERR_FILE="$CORELINK_TMP_DIR/stderr"
+        CORELINK_OUTPUT_FILE="$CORELINK_TMP_DIR/output.json"
         set +e
-        JSON_OUT=$(corelink "${ARGS[@]}" 2>/tmp/corelink_stderr)
+        JSON_OUT=$(corelink "${ARGS[@]}" 2>"$CORELINK_STDERR_FILE")
         RAW_EXIT=$?
         set -e
 
         # Always surface stderr so the runner log shows fabric diagnostics.
-        if [[ -s /tmp/corelink_stderr ]]; then
-          cat /tmp/corelink_stderr >&2
+        if [[ -s "$CORELINK_STDERR_FILE" ]]; then
+          cat "$CORELINK_STDERR_FILE" >&2
         fi
 
         # exit 2 = attestation failed / wire / auth error → always hard fail.
@@ -167,8 +170,9 @@ runs:
         fi
 
         # Persist the raw JSON and the fabric exit code for the next step.
-        echo "$JSON_OUT" > /tmp/corelink_output.json
+        echo "$JSON_OUT" > "$CORELINK_OUTPUT_FILE"
         echo "raw_exit=$RAW_EXIT" >> "$GITHUB_OUTPUT"
+        echo "output_file=$CORELINK_OUTPUT_FILE" >> "$GITHUB_OUTPUT"
 
     # -----------------------------------------------------------------------
     # Step 3 — parse JSON and set action outputs
@@ -178,6 +182,7 @@ runs:
       shell: python3 {0}
       env:
         CORELINK_VERIFY: ${{ inputs.verify }}
+        CORELINK_OUTPUT_FILE: ${{ steps.run.outputs.output_file }}
       run: |
         import json
         import os
@@ -186,7 +191,7 @@ runs:
         output_file = os.environ.get("GITHUB_OUTPUT", "")
 
         try:
-            with open("/tmp/corelink_output.json") as f:
+            with open(os.environ["CORELINK_OUTPUT_FILE"]) as f:
                 data = json.load(f)
         except (FileNotFoundError, json.JSONDecodeError) as e:
             print(f"::error::Failed to parse corelink JSON output: {e}", file=sys.stderr)

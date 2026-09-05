@@ -206,11 +206,11 @@ fi
 assert_true "all action inputs enter through step env and none interpolate in run bodies" "$INPUT_SURFACE_OK"
 
 # Execute the actual locate/run/parse/propagate bodies with a stub corelink.
-# Each dangerous value is supplied as an environment value, then captured from
-# both argv and env by the stub. This proves shell never evaluates $(id) or the
-# command-substitution payload, rather than merely grepping for safe-looking
-# source text. The action's Python parser dependency remains an AU5.12 item;
-# this test does not replace it or add a runtime dependency to the action.
+# The harness resolves each step's real env mappings from action.yml, routes
+# prior-step outputs through those mappings, and runs every body inside an
+# owned private fixture. Every case has unique RUNNER_TEMP/output paths; no
+# fixed /tmp path is deleted. AU5.12 remains open: the production parse step
+# still requires python3, and this test adds no runtime dependency to the action.
 echo "NOTE: AU5.12 (python3 parser dependency) remains open; this validation covers AU5.11 only."
 DYNAMIC_OK=0
 if python3 -c "import yaml" 2>/dev/null; then
@@ -218,27 +218,43 @@ if python3 -c "import yaml" 2>/dev/null; then
   cleanup_dynamic() { rm -rf "$DYNAMIC_TMP"; }
   trap cleanup_dynamic EXIT
   for step_id in locate run parse propagate; do
-    python3 - "$ACTION_FILE" "$step_id" "$DYNAMIC_TMP/$step_id" <<'PY'
+    python3 - "$ACTION_FILE" "$step_id" "$DYNAMIC_TMP/$step_id" "$DYNAMIC_TMP/env-$step_id" <<'PY'
+import re
 import sys
 import yaml
 
-data = yaml.safe_load(open(sys.argv[1]))
+action, wanted, body_path, env_path = sys.argv[1:]
+data = yaml.safe_load(open(action))
 for step in data.get("runs", {}).get("steps", []):
-    if step.get("id") == sys.argv[2]:
-        body = step.get("run")
-        if not body:
-            raise SystemExit(f"step {sys.argv[2]} has no run body")
-        open(sys.argv[3], "w").write(body)
-        break
+    if step.get("id") != wanted:
+        continue
+    body = step.get("run")
+    if not body:
+        raise SystemExit(f"step {wanted} has no run body")
+    open(body_path, "w").write(body)
+    with open(env_path, "w") as out:
+        for key, value in (step.get("env", {}) or {}).items():
+            value = str(value)
+            input_match = re.fullmatch(r"\$\{\{\s*inputs\.([A-Za-z0-9_-]+)\s*\}\}", value)
+            output_match = re.fullmatch(r"\$\{\{\s*steps\.run\.outputs\.([A-Za-z0-9_-]+)\s*\}\}", value)
+            if input_match:
+                var = "INPUT_" + input_match.group(1).replace("-", "_").upper()
+            elif output_match:
+                var = "STEP_RUN_" + output_match.group(1).replace("-", "_").upper()
+            else:
+                raise SystemExit(f"unhandled env mapping {wanted}:{key}={value}")
+            out.write(f'export {key}="${{{var}}}"\n')
+    break
 else:
-    raise SystemExit(f"step {sys.argv[2]} not found")
+    raise SystemExit(f"step {wanted} not found")
 PY
   done
   mkdir -p "$DYNAMIC_TMP/bin"
   cat > "$DYNAMIC_TMP/bin/corelink" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
-printf '%s\0' "$@" > "$CORELINK_CAPTURE.argv"
+printf 'stub-corelink-executed\n' > "$DYNAMIC_CAPTURE.marker"
+printf '%s\0' "$@" > "$DYNAMIC_CAPTURE.argv"
 {
   printf 'CORELINK_URL=%s\n' "$CORELINK_URL"
   printf 'CORELINK_PAT=%s\n' "$CORELINK_PAT"
@@ -246,84 +262,127 @@ printf '%s\0' "$@" > "$CORELINK_CAPTURE.argv"
   printf 'CORELINK_CHECK_ID=%s\n' "$CORELINK_CHECK_ID"
   printf 'CORELINK_IMAGE=%s\n' "$CORELINK_IMAGE"
   printf 'CORELINK_VERIFY=%s\n' "$CORELINK_VERIFY"
-  printf 'CORELINK_VERSION=%s\n' "$CORELINK_VERSION"
-} > "$CORELINK_CAPTURE.env"
-printf '%s\n' '{"lease_id":"lease-au5-11","exit":0,"verified":true}'
+  printf 'CORELINK_VERSION=%s\n' "${CORELINK_VERSION-}"
+} > "$DYNAMIC_CAPTURE.env"
+printf '{"lease_id":"lease-au5-11","exit":%s,"verified":%s}\n' "$DYNAMIC_RAW_EXIT" "$DYNAMIC_VERIFIED"
+exit "$DYNAMIC_RAW_EXIT"
 STUB
   chmod +x "$DYNAMIC_TMP/bin/corelink"
 
-  DYNAMIC_OK=0
-  export RAW_EXIT=0
-  for input_name in url pat check check-id image verify version; do
-    for payload in '$(id)' '"; touch pwned; #'; do
-      rm -f "$DYNAMIC_TMP/capture.argv" "$DYNAMIC_TMP/capture.env" "$DYNAMIC_TMP/output" "$DYNAMIC_TMP/gh-output" \
-        /tmp/corelink_output.json /tmp/corelink_stderr
-      export PATH="$DYNAMIC_TMP/bin:$PATH"
-      export CORELINK_VERSION=0.1.0 CORELINK_URL=https://safe.example CORELINK_PAT=pat-safe \
-        CORELINK_CHECK='printf safe' CORELINK_CHECK_ID=ci-safe CORELINK_IMAGE='' CORELINK_VERIFY=true
-      case "$input_name" in
-        url) CORELINK_URL="$payload" ;;
-        pat) CORELINK_PAT="$payload" ;;
-        check) CORELINK_CHECK="$payload" ;;
-        check-id) CORELINK_CHECK_ID="$payload" ;;
-        image) CORELINK_IMAGE="$payload" ;;
-        verify) CORELINK_VERIFY="$payload" ;;
-        version) CORELINK_VERSION="$payload" ;;
-      esac
-      export CORELINK_CAPTURE="$DYNAMIC_TMP/capture"
-      export GITHUB_OUTPUT="$DYNAMIC_TMP/gh-output"
-      export GITHUB_PATH="$DYNAMIC_TMP/gh-path"
-      if ! bash "$DYNAMIC_TMP/locate" >/dev/null 2>&1; then
-        echo "    locate step failed for input $input_name payload $payload"
-        DYNAMIC_OK=1
-        continue
+  dynamic_fail() { echo "    FAIL: $*"; DYNAMIC_OK=1; }
+  execute_case() {
+    local label="$1" input_name="$2" payload="$3" raw="$4" verified="$5" verify_input="$6"
+    local expected_run="$7" expected_parse="$8" expected_propagate="$9"
+    local case_dir run_status parse_status propagate_status
+    case_dir=$(mktemp -d "$DYNAMIC_TMP/case.XXXXXX")
+    mkdir -p "$case_dir/work" "$case_dir/runner-temp"
+    export PATH="$DYNAMIC_TMP/bin:$PATH" RUNNER_TEMP="$case_dir/runner-temp"
+    export GITHUB_OUTPUT="$case_dir/gh-output" GITHUB_PATH="$case_dir/gh-path"
+    export DYNAMIC_CAPTURE="$case_dir/capture" DYNAMIC_RAW_EXIT="$raw" DYNAMIC_VERIFIED="$verified"
+    export INPUT_VERSION=0.1.0 INPUT_URL=https://safe.example INPUT_PAT=pat-safe \
+      INPUT_CHECK='printf safe' INPUT_CHECK_ID=ci-safe INPUT_IMAGE='' INPUT_VERIFY=true
+    case "$input_name" in
+      url) INPUT_URL="$payload" ;; pat) INPUT_PAT="$payload" ;;
+      check) INPUT_CHECK="$payload" ;; check-id) INPUT_CHECK_ID="$payload" ;;
+      image) INPUT_IMAGE="$payload" ;; verify) INPUT_VERIFY="$payload" ;;
+      version) INPUT_VERSION="$payload" ;;
+    esac
+    export INPUT_VERSION INPUT_URL INPUT_PAT INPUT_CHECK INPUT_CHECK_ID INPUT_IMAGE INPUT_VERIFY
+
+    set +e
+    (cd "$case_dir/work" && source "$DYNAMIC_TMP/env-locate" && bash "$DYNAMIC_TMP/locate") >"$case_dir/locate.log" 2>&1
+    local locate_status=$?
+    (cd "$case_dir/work" && source "$DYNAMIC_TMP/env-run" && bash "$DYNAMIC_TMP/run") >"$case_dir/run.log" 2>&1
+    run_status=$?
+    set -e
+    [[ "$locate_status" -eq 0 ]] || dynamic_fail "$label locate status=$locate_status"
+    [[ "$run_status" -eq "$expected_run" ]] || dynamic_fail "$label run status=$run_status expected=$expected_run"
+
+    if [[ "$run_status" -eq 0 ]]; then
+      export STEP_RUN_RAW_EXIT="$(sed -n 's/^raw_exit=//p' "$GITHUB_OUTPUT")"
+      export STEP_RUN_OUTPUT_FILE="$(sed -n 's/^output_file=//p' "$GITHUB_OUTPUT")"
+      set +e
+      (cd "$case_dir/work" && source "$DYNAMIC_TMP/env-parse" && python3 "$DYNAMIC_TMP/parse") >"$case_dir/parse.log" 2>&1
+      parse_status=$?
+      if [[ "$parse_status" -eq 0 ]]; then
+        (cd "$case_dir/work" && source "$DYNAMIC_TMP/env-propagate" && bash "$DYNAMIC_TMP/propagate") >"$case_dir/propagate.log" 2>&1
+        propagate_status=$?
+      else
+        propagate_status=99
       fi
-      if ! bash "$DYNAMIC_TMP/run" >/dev/null 2>&1; then
-        echo "    run step failed for input $input_name payload $payload"
-        DYNAMIC_OK=1
-        continue
+      set -e
+      [[ "$parse_status" -eq "$expected_parse" ]] || dynamic_fail "$label parse status=$parse_status expected=$expected_parse"
+      [[ "$propagate_status" -eq "$expected_propagate" ]] || dynamic_fail "$label propagate status=$propagate_status expected=$expected_propagate"
+    else
+      parse_status=99
+      propagate_status=99
+      if grep -q '^output_file=' "$GITHUB_OUTPUT" 2>/dev/null; then
+        dynamic_fail "$label emitted output_file despite hard exit"
       fi
-      if ! python3 "$DYNAMIC_TMP/parse" >/dev/null 2>&1; then
-        echo "    parse step failed for input $input_name payload $payload"
-        DYNAMIC_OK=1
-        continue
+    fi
+
+    if [[ "$expected_run" -eq 0 ]]; then
+      [[ -f "$DYNAMIC_CAPTURE.marker" ]] || dynamic_fail "$label stub did not execute"
+      [[ -f "$DYNAMIC_CAPTURE.argv" && -f "$DYNAMIC_CAPTURE.env" ]] || dynamic_fail "$label capture missing"
+      grep -Fqx "raw_exit=$raw" "$GITHUB_OUTPUT" || dynamic_fail "$label raw_exit output missing"
+      grep -Fqx "output_file=$STEP_RUN_OUTPUT_FILE" "$GITHUB_OUTPUT" || dynamic_fail "$label output_file output missing"
+      if [[ "$expected_parse" -eq 0 ]]; then
+        grep -Fqx "exit=$raw" "$GITHUB_OUTPUT" || dynamic_fail "$label exit output missing"
+        grep -Fqx "verified=$verified" "$GITHUB_OUTPUT" || dynamic_fail "$label verified output missing"
+        grep -Fqx "lease_id=lease-au5-11" "$GITHUB_OUTPUT" || dynamic_fail "$label lease output missing"
       fi
-      if ! bash "$DYNAMIC_TMP/propagate" >/dev/null 2>&1; then
-        echo "    propagate step failed for input $input_name payload $payload"
-        DYNAMIC_OK=1
-        continue
+      if grep -F -- "$INPUT_PAT" "$case_dir"/*.log >/dev/null 2>&1; then
+        dynamic_fail "$label PAT leaked to logs"
       fi
-      if [[ -e pwned ]]; then
-        echo "    payload executed shell code for input $input_name"
-        DYNAMIC_OK=1
+      if [[ "$input_name" == version ]] && ! grep -F -- "$payload" "$case_dir/locate.log" >/dev/null 2>&1; then
+        dynamic_fail "$label version was not preserved in locate env"
       fi
-      if ! python3 - "$input_name" "$payload" "$DYNAMIC_TMP/capture" <<'PY'
+      if find "$case_dir/work" -name pwned -print -quit | grep -q .; then
+        dynamic_fail "$label payload executed shell code"
+      fi
+      python3 - "$input_name" "$payload" "$DYNAMIC_CAPTURE" "$verify_input" <<'PY' || dynamic_fail "$label argv/env mismatch"
 import pathlib
 import sys
 
-name, payload, prefix = sys.argv[1:]
+name, payload, prefix, verify_input = sys.argv[1:]
 argv = pathlib.Path(prefix + ".argv").read_bytes().split(b"\0")[:-1]
 env = dict(line.split("=", 1) for line in pathlib.Path(prefix + ".env").read_text().splitlines())
-expected_env = {"url": "CORELINK_URL", "pat": "CORELINK_PAT", "check": "CORELINK_CHECK",
-                "check-id": "CORELINK_CHECK_ID", "image": "CORELINK_IMAGE",
-                "verify": "CORELINK_VERIFY", "version": "CORELINK_VERSION"}[name]
-if env[expected_env] != payload:
-    raise SystemExit(f"{expected_env} was not preserved in env")
-if name == "url" and argv[argv.index(b"--url") + 1].decode() != payload:
-    raise SystemExit("url was not preserved in argv")
-if name == "check" and argv[argv.index(b"--check") + 1].decode() != payload:
-    raise SystemExit("check was not preserved in argv")
-if name == "check-id" and argv[argv.index(b"--check-id") + 1].decode() != payload:
-    raise SystemExit("check-id was not preserved in argv")
-if name == "image" and argv[argv.index(b"--image") + 1].decode() != payload:
-    raise SystemExit("image was not preserved in argv")
+values = {"url": "https://safe.example", "pat": "pat-safe", "check": "printf safe",
+          "check-id": "ci-safe", "image": "", "verify": "true", "version": "0.1.0"}
+values[name] = payload
+expected_env = {"CORELINK_URL": values["url"], "CORELINK_PAT": values["pat"],
+                "CORELINK_CHECK": values["check"], "CORELINK_CHECK_ID": values["check-id"],
+                "CORELINK_IMAGE": values["image"], "CORELINK_VERIFY": values["verify"],
+                # version belongs to locate's env, not the run step.
+                "CORELINK_VERSION": ""}
+for key, expected in expected_env.items():
+    if env.get(key) != expected:
+        raise SystemExit(f"{key} was not preserved in the actual step env")
+expected_argv = [b"run", b"--url", values["url"].encode(), b"--check", values["check"].encode(),
+                 b"--check-id", values["check-id"].encode(), b"--json"]
+if values["image"]:
+    expected_argv.extend([b"--image", values["image"].encode()])
+if values["verify"] == "false":
+    expected_argv.append(b"--no-verify")
+if argv != expected_argv:
+    raise SystemExit(f"argv mismatch: {argv!r} != {expected_argv!r}")
+if verify_input == "false" and b"--no-verify" not in argv:
+    raise SystemExit("verify=false did not set --no-verify")
 PY
-      then
-        DYNAMIC_OK=1
-      fi
+    fi
+    rm -rf "$case_dir"
+  }
+
+  payloads=('$(id)' '"; touch pwned; #')
+  for input_name in url pat check check-id image verify version; do
+    for payload in "${payloads[@]}"; do
+      execute_case "literal-$input_name" "$input_name" "$payload" 0 true true 0 0 0
     done
   done
-  rm -f pwned /tmp/corelink_output.json /tmp/corelink_stderr
+  execute_case "exit-one" check 'printf safe' 1 true true 0 0 1
+  execute_case "exit-two" check 'printf safe' 2 true true 2 99 99
+  execute_case "verified-false" check 'printf safe' 0 false true 0 2 99
+  execute_case "verify-false" verify false 0 false false 0 0 0
   trap - EXIT
   cleanup_dynamic
 else
