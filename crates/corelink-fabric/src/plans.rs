@@ -362,7 +362,7 @@ mod tests {
                         .map(str::trim)
                         .filter(|field| !field.is_empty())
                         .collect();
-                    fields.get(0) == Some(&tier) && fields.get(1) == Some(&price)
+                    fields.first() == Some(&tier) && fields.get(1) == Some(&price)
                 }),
                 "module ladder price drift for {tier}: expected {module_row}"
             );
