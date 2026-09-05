@@ -4,7 +4,7 @@ vi.mock("@cloudflare/containers", () => ({ Container: class {}, getContainer: vi
 
 import worker, { ContainmentDO, REDRIVE_RESERVATION_TTL_MS, containmentEffectPointerKey, redriveOrphanedJobs, retryOrphanedSpawns, type ContainmentRedriveReservation } from "../src/index";
 import { canonicalSafeJobId, redriveEffectId } from "../src/containment_authority_helpers";
-import { authorityProxy, bootstrap, ctx, env, envWithAuthority, event, makeDO, kv, reserveKey, settle, T0, webhook, writeDeliveredProof } from "./containment-redrive-test-helpers";
+import { authorityProxy, bootstrap, ctx, env, envWithAuthority, event, makeDO, kv, providerReceipt, reserveKey, settle, T0, webhook, writeDeliveredProof } from "./containment-redrive-test-helpers";
 
 beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(T0); });
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
@@ -85,7 +85,7 @@ describe("atomic redrive reservation state machine", () => {
 
   it("retryOrphanedSpawns: 100 concurrent candidates have exactly one eligibility/effect", async () => {
     const d = makeDO(); const store = kv({ "orphan:123": JSON.stringify({ repo: "acme/repo", installationId: "42", labels: ["corelink"], attempts: 1, firstRecordedMs: T0 - 1000 }) });
-    const drive = vi.fn(async () => {}); const verify = vi.fn(async () => null); const contexts = [...Array(100)].map(() => ctx());
+    const drive = vi.fn(async (_env: unknown, opts: { jobId: string; repo: string }) => providerReceipt(opts)); const verify = vi.fn(async () => null); const contexts = [...Array(100)].map(() => ctx());
     await Promise.all(contexts.map((c) => retryOrphanedSpawns(env(d, store, { AUTOSCALER_REDRIVE_PAUSED: "0" }), c as never, T0, drive, verify)));
     await Promise.all(contexts.map(settle));
     expect(drive).toHaveBeenCalledTimes(1); expect(verify).toHaveBeenCalledTimes(0);
@@ -103,7 +103,9 @@ describe("atomic redrive reservation state machine", () => {
       return new Response(JSON.stringify({ workflow_runs: [{ id: 1, created_at: old }] }), { status: 200 });
     });
     vi.stubGlobal("fetch", fetchSpy);
-    const contexts = [...Array(100)].map(() => ctx()); const calls = contexts.map((c) => redriveOrphanedJobs(env(d, store, { AUTOSCALER_REDRIVE_PAUSED: "0", RECONCILER_REPOS: "acme/repo" }), c as never, undefined, T0));
+    const contexts = [...Array(100)].map(() => ctx()); const calls = contexts.map((c) => redriveOrphanedJobs(env(d, store, { AUTOSCALER_REDRIVE_PAUSED: "0", RECONCILER_REPOS: "acme/repo" }), c as never, undefined, T0, {
+      driveSpawn: async (_env, opts) => { generated(); return providerReceipt(opts); },
+    }));
     await Promise.all(calls); await Promise.all(contexts.map(settle));
     expect(generated).toHaveBeenCalledTimes(1); expect((d.storage.map.get(reserveKey()) as ContainmentRedriveReservation).state).toBe("COMPLETED");
   });
@@ -145,7 +147,7 @@ describe("redrive gates and identity/authorization", () => {
   });
 
   it("preserves orphan repo/labels/installation and forces installation-only drive", async () => {
-    const d = makeDO(); const store = kv({ "orphan:123": JSON.stringify({ repo: "acme/repo", installationId: "42", labels: ["corelink"], attempts: 1, firstRecordedMs: T0 - 1000 }) }); const drive = vi.fn(async (_env: unknown, opts: { repo: string; installationId: string; labels: string[]; credential_source?: string }) => { expect(opts.repo).toBe("acme/repo"); expect(opts.installationId).toBe("42"); expect(opts.labels).toEqual(["corelink"]); expect(opts.credential_source).toBe("installation-only"); });
+    const d = makeDO(); const store = kv({ "orphan:123": JSON.stringify({ repo: "acme/repo", installationId: "42", labels: ["corelink"], attempts: 1, firstRecordedMs: T0 - 1000 }) }); const drive = vi.fn(async (_env: unknown, opts: { jobId: string; repo: string; installationId: string; labels: string[]; credential_source?: string }) => { expect(opts.repo).toBe("acme/repo"); expect(opts.installationId).toBe("42"); expect(opts.labels).toEqual(["corelink"]); expect(opts.credential_source).toBe("installation-only"); return providerReceipt(opts); });
     await retryOrphanedSpawns(env(d, store, { AUTOSCALER_REDRIVE_PAUSED: "0" }), ctx() as never, T0, drive, vi.fn(async () => null)); expect(drive).toHaveBeenCalledTimes(1);
     const badDo = makeDO(); const bad = kv({ "orphan:123": JSON.stringify({ repo: "acme/repo", installationId: "999", labels: ["other"], attempts: 1, firstRecordedMs: T0 }) }); await retryOrphanedSpawns(env(badDo, bad, { AUTOSCALER_REDRIVE_PAUSED: "0" }), ctx() as never, T0, drive, vi.fn(async () => null)); expect(drive).toHaveBeenCalledTimes(1);
   });
@@ -279,7 +281,7 @@ describe("T3-W17 deterministic first-party reservation seams", () => {
       expect(d.storage.map.get(reserveKey())).toMatchObject({ state: "EFFECT_ELIGIBLE" });
     });
     const claim = vi.fn(async () => { order.push("claim"); return true; });
-    const drive = vi.fn(async () => { order.push("drive"); });
+    const drive = vi.fn(async (_env: unknown, opts: { jobId: string; repo: string }) => { order.push("drive"); return providerReceipt(opts); });
     const orphan = vi.fn(async () => { order.push("orphan"); });
     const contexts = [...Array(100)].map(() => ctx());
     await Promise.all(contexts.map((c) => redriveOrphanedJobs(
@@ -293,7 +295,7 @@ describe("T3-W17 deterministic first-party reservation seams", () => {
   });
 
   it("keeps re-drive enabled while intake is paused and preserves the unmapped cold fallback", async () => {
-    const d = makeDO(); const store = kv(); const drive = vi.fn(async () => {});
+    const d = makeDO(); const store = kv(); const drive = vi.fn(async (_env: unknown, opts: { jobId: string; repo: string }) => providerReceipt(opts));
     const c = ctx();
     await redriveOrphanedJobs(
       env(d, store, { AUTOSCALER_INTAKE_PAUSED: "1", AUTOSCALER_REDRIVE_PAUSED: "0", RECONCILER_REPOS: "acme/repo", REPO_INSTALLATION_MAP: undefined }),
@@ -327,10 +329,12 @@ describe("T3-W17 deterministic first-party reservation seams", () => {
       },
     });
     const release = vi.fn(async () => {}); const claim = vi.fn(async () => true); const drive = vi.fn(async () => {});
+    const c = ctx();
     await redriveOrphanedJobs(
-      envWithAuthority(d, store, authority, { AUTOSCALER_REDRIVE_PAUSED: "0", RECONCILER_REPOS: "acme/repo" }), ctx() as never, undefined, T0,
+      envWithAuthority(d, store, authority, { AUTOSCALER_REDRIVE_PAUSED: "0", RECONCILER_REPOS: "acme/repo" }), c as never, undefined, T0,
       { listOrphanRunnerJobs: async () => [{ jobId: "123", labels: ["corelink"] }], releaseSpawnClaim: release, claimSpawn: claim, driveSpawn: drive, recordOrphan: async () => {} },
     );
+    await settle(c);
     expect(release).not.toHaveBeenCalled(); expect(claim).not.toHaveBeenCalled(); expect(drive).not.toHaveBeenCalled();
     expect(store.put).not.toHaveBeenCalled(); expect(store.delete).not.toHaveBeenCalled();
     expect(d.storage.map.get(reserveKey())).toMatchObject({ state: "HELD", epoch: 2 });
@@ -351,16 +355,35 @@ describe("T3-W17 retry ordering and independent switches", () => {
       }
       await put(key, value);
     });
-    const drive = vi.fn(async () => {}); const contexts = [...Array(100)].map(() => ctx());
+    const drive = vi.fn(async (_env: unknown, opts: { jobId: string; repo: string }) => providerReceipt(opts)); const contexts = [...Array(100)].map(() => ctx());
     await Promise.all(contexts.map((c) => retryOrphanedSpawns(env(d, store, { AUTOSCALER_REDRIVE_PAUSED: "0" }), c as never, T0, drive, vi.fn(async () => null))));
     await Promise.all(contexts.map(settle));
     expect(order).toEqual(["orphan:123", "spawn:123"]); expect(drive).toHaveBeenCalledTimes(1);
     expect(d.storage.map.get(reserveKey())).toMatchObject({ state: "COMPLETED" });
   });
 
+  it("leaves a claim-refused reservation terminal at EFFECT_ELIGIBLE", async () => {
+    const store = kv({
+      "orphan:123": JSON.stringify({ repo: "acme/repo", installationId: "42", labels: ["corelink"], attempts: 1, firstRecordedMs: T0 - 1 }),
+      "spawn:123": "existing-claim",
+    });
+    const d = makeDO({ RUNNER_JOB_PATS: store });
+    const drive = vi.fn(async (_env: unknown, opts: { jobId: string; repo: string }) => providerReceipt(opts));
+    await retryOrphanedSpawns(env(d, store, { AUTOSCALER_REDRIVE_PAUSED: "0" }), ctx() as never, T0, drive, vi.fn(async () => null));
+    expect(d.storage.map.get(reserveKey())).toMatchObject({ state: "EFFECT_ELIGIBLE" });
+    expect(JSON.parse(store.map.get("orphan:123")!)).toMatchObject({ attempts: 2 });
+    expect(drive).not.toHaveBeenCalled();
+    store.put.mockClear();
+    await retryOrphanedSpawns(env(d, store, { AUTOSCALER_REDRIVE_PAUSED: "0" }), ctx() as never, T0 + 10 * REDRIVE_RESERVATION_TTL_MS, drive, vi.fn(async () => null));
+    expect(store.put).not.toHaveBeenCalled();
+    expect(drive).not.toHaveBeenCalled();
+    expect(d.storage.map.get(reserveKey())).toMatchObject({ state: "EFFECT_ELIGIBLE" });
+  });
+
   it("does not let a paused redrive switch suppress fresh intake, while both switches suppress both surfaces", async () => {
     const live = makeDO(); const liveStore = kv(); const liveCtx = ctx();
     const fresh = await worker.fetch(await webhook(123, "redrive-only-pause"), env(live, liveStore, { AUTOSCALER_INTAKE_PAUSED: "0", AUTOSCALER_REDRIVE_PAUSED: "1" }), liveCtx as never);
+    await settle(liveCtx);
     expect(fresh.status).toBe(202); expect(liveStore.put).toHaveBeenCalled(); expect((await live.instance.snapshot()).backlog_count).toBe(0);
 
     const both = makeDO(); const bothStore = kv({ "orphan:123": JSON.stringify({ repo: "acme/repo", installationId: "42", labels: ["corelink"], attempts: 1, firstRecordedMs: T0 }) });

@@ -27,12 +27,13 @@ export function normalizeTuple(input: unknown, nonce?: unknown): OwnerTuple | nu
   if (t.path !== "intake" && t.path !== "drain" && t.path !== "redrive") return null;
   if (!validEpoch(t.lease_epoch)) return null;
   if (t.path === "redrive" ? !validEpoch(t.reservation_epoch) : t.reservation_epoch !== null) return null;
-  if (t.path === "redrive" && (!validText(t.drain_owner) || !validEpoch(t.drain_lease_epoch))) return null;
-  if (t.path !== "redrive" && (t.drain_owner !== null || t.drain_lease_epoch !== null)) return null;
-  return { ...id, path: t.path as OwnerPath, event_id: t.event_id, reservation_epoch: t.reservation_epoch,
+  if ((t.path === "drain" || t.path === "redrive") && (!validText(t.drain_owner) || !validEpoch(t.drain_lease_epoch))) return null;
+  if (t.path === "intake" && (t.drain_owner !== null || t.drain_lease_epoch !== null)) return null;
+  const reservation_epoch = t.reservation_epoch === undefined ? null : t.reservation_epoch;
+  return { ...id, path: t.path as OwnerPath, event_id: t.event_id, reservation_epoch,
     effect_id: t.effect_id, owner: t.owner, token: t.token, lease_epoch: t.lease_epoch,
-    drain_owner: t.path === "redrive" ? t.drain_owner! : null,
-    drain_lease_epoch: t.path === "redrive" ? t.drain_lease_epoch! : null, caller_nonce: String(n) };
+    drain_owner: t.path === "intake" ? null : t.drain_owner!,
+    drain_lease_epoch: t.path === "intake" ? null : t.drain_lease_epoch!, caller_nonce: String(n) };
 }
 export function requestTuple(request: SpawnOwnerRequest): OwnerTuple | null {
   if (!request || request.schema_version !== 1 || typeof request.caller_nonce !== "string" || !NONCE.test(request.caller_nonce)
@@ -90,7 +91,7 @@ export function pointerValid(v: unknown, t: OwnerTuple, attempt?: unknown): v is
     && p.attempt_key === attemptKey(t) && states.includes(p.state as string)
     && (p.permit_id === null || validText(p.permit_id)) && (p.binding_id === null || validText(p.binding_id))
     && (p.effect_start_proof_id === null || validText(p.effect_start_proof_id)) && typeof p.tombstone === "boolean"
-    && (!attempt || (recordValid(attempt, t) && JSON.stringify(p) === JSON.stringify(activePointerProjection(attempt as Record<string, unknown>))))
+    && (!attempt || (recordValid(attempt, t) && JSON.stringify(p) === JSON.stringify(activePointerProjection(attempt as unknown as Record<string, unknown>))))
     && ((p.state === "PREPARED" || p.state === "CLAIM_ACQUIRED")
       ? p.permit_id === null && p.binding_id === null && p.effect_start_proof_id === null && p.tombstone === false
       : p.state === "PERMIT_ISSUED" ? p.permit_id !== null && p.binding_id === null && p.tombstone === false
@@ -113,7 +114,7 @@ export function recordValid(v: unknown, t: OwnerTuple): v is OwnerRecordV1 {
     || JSON.stringify(r.tuple) !== JSON.stringify(t) || !states.includes(r.state as string)
     || (r.permit_id !== null && !permitValid(r.permit, t))
     || (r.permit_id === null && r.permit !== undefined)
-    || (r.binding_id !== null && !bindingValid(r.binding, r.binding_id))
+    || (r.binding_id !== null && !bindingValid(r.binding, r.binding_id ?? null))
     || (r.binding_id === null && r.binding !== undefined)
     || (r.effect_start_proof_id === null) !== (r.effect_started === false)
     || !validTime(r.created_ms) || !validTime(r.expires_ms) || typeof r.tombstone !== "boolean") return false;

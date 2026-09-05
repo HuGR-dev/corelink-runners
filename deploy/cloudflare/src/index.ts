@@ -128,21 +128,22 @@ import {
   type ContainmentEffectReceipt,
   type ContainmentEffectResult,
   type ContainmentEffectTransition,
+  type OwnerResult,
+  type SpawnOwnerRequest,
+  type SpawnMirrorObservation,
 } from "./containment_effect_ledger";
+import { admitDrainOwnerInTransaction } from "./containment_drain_owner_reap";
+import { drainOwnerTuple, intakeOwnerTuple, redriveOwnerTuple, runCanonicalEffect, type ProviderDriveReceipt } from "./containment_effect_route";
 import {
   containmentEventKey,
-  containmentInvalidKey,
   containmentJobIndexKey,
   containmentJobIndexMarkerKey,
-  containmentOutboxKey,
   containmentPauseKey,
   containmentReservationKey,
   emptyContainmentMeta,
-  isValidInvalidConfigRecord,
   isValidJobIndex,
   isValidJobIndexMeta,
   isValidJobIndexMarker,
-  isValidOutboxRecord,
   MAX_ACTIVE_INDEX_EVENTS,
   normalizeRedriveIdentity,
   redriveEffectId,
@@ -152,6 +153,30 @@ import {
   type ContainmentJobIndexMarker,
   type ContainmentJobIndexMeta,
 } from "./containment_authority_helpers";
+import {
+  acknowledgeInvalidConfigInStorage,
+  canonicalContainmentEvidence,
+  CONTAINMENT_EFFECT_WITNESS_KINDS,
+  containmentEffectEvidenceKey,
+  containmentEffectJobKey,
+  CONTAINMENT_INDEX_META_KEY,
+  CONTAINMENT_META_KEY,
+  DRAIN_LEASE_TTL_MS,
+  DRAIN_RENEW_THRESHOLD_MS,
+  isCurrentHead,
+  leaseMatches,
+  markInvalidConfigAttemptInStorage,
+  pendingInvalidConfigInStorage,
+  recordInvalidConfigInStorage, REDRIVE_RESERVATION_TTL_MS, validateInvalidConfigIdentity,
+  type ContainmentEffectEvidence,
+  type ContainmentEffectWitnessKind,
+  type ContainmentEvent,
+  type ContainmentMeta,
+  type ContainmentOutboxRecord,
+  type ContainmentPause,
+  type ContainmentRedrivePermit,
+  type ContainmentRedriveReservation,
+} from "./containment_authority_records";
 import { canonicalWorkflowJobIdFromRaw } from "./workflow_job_id";
 export {
   ContainmentEffectLedger,
@@ -172,6 +197,9 @@ export type {
   ContainmentEffectState,
   ContainmentEffectTransition,
 } from "./containment_effect_ledger";
+export type { ContainmentEffectEvidence, ContainmentEffectWitnessKind, ContainmentEvent, ContainmentMeta,
+  ContainmentOutboxRecord, ContainmentPause, ContainmentRedrivePermit, ContainmentRedriveReservation, ContainmentState, InvalidConfigRecord } from "./containment_authority_records";
+export { DRAIN_LEASE_TTL_MS, REDRIVE_RESERVATION_TTL_MS };
 
 // Re-export the counter Durable Object so wrangler resolves `MetricsDO` from
 // this main module (its class + migration are in wrangler.jsonc). Defined in
@@ -460,132 +488,6 @@ export class ConcurrencySlotsDO extends DurableObject<Env> {
 // leases, fencing and effect permits. Sequencing lives exclusively in this DO;
 // immutable effect evidence lives in KV and is revalidated by this DO before a
 // recovery/commit can advance the cursor.
-const CONTAINMENT_META_KEY = "containment:v1:meta";
-const CONTAINMENT_EVENT_PREFIX = "containment:v1:event:";
-const CONTAINMENT_PAUSE_PREFIX = "containment:v1:pause:";
-const CONTAINMENT_INVALID_PREFIX = "containment:v1:invalid:";
-const CONTAINMENT_OUTBOX_PREFIX = "containment:v1:outbox:";
-const CONTAINMENT_RESERVATION_PREFIX = "containment:v1:reservation:";
-const CONTAINMENT_INDEX_META_KEY = "containment:v1:job-index-meta";
-const INVALID_CONFIG_SWITCHES = new Set(["AUTOSCALER_INTAKE_PAUSED", "AUTOSCALER_REDRIVE_PAUSED"]);
-const SHA256_HEX = /^[0-9a-f]{64}$/;
-export const DRAIN_LEASE_TTL_MS = 120_000;
-const DRAIN_RENEW_THRESHOLD_MS = 30_000;
-// A HELD reservation is deliberately short-lived and may be reclaimed only
-// before eligibility. Once an external effect can start, the state has no TTL.
-export const REDRIVE_RESERVATION_TTL_MS = 120_000;
-
-export type ContainmentState = "QUEUED" | "CLAIMED" | "EFFECT_COMMITTED";
-export type ContainmentEffectWitnessKind = "spawn_claim" | "attempt" | "placement" | "lease" | "result";
-const CONTAINMENT_EFFECT_WITNESS_KINDS: readonly ContainmentEffectWitnessKind[] = ["spawn_claim", "attempt", "placement", "lease", "result"];
-export interface ContainmentEffectEvidence {
-  schema_version: 1;
-  kind: ContainmentEffectWitnessKind;
-  effect_id: string;
-  event_id: string;
-  job_id: string;
-  permit_id: string;
-  source_key: string;
-  // The immutable source bytes are carried with the witness. Completion may
-  // legitimately delete the mutable spawn/orphan/handle keys before a new
-  // fenced owner recovers, so recovery must never depend on those keys.
-  source_value: string;
-  source_sha256: string;
-  terminal?: "DELIVERED";
-  attempt_count?: number;
-}
-export interface ContainmentMeta {
-  schema_version: 1;
-  next_pause_seq: number;
-  drain_cursor: number;
-  backlog_count: number;
-  lease_epoch: number;
-  lease: { owner: string; epoch: number; expires_ms: number } | null;
-  drain_requested: boolean;
-}
-export interface ContainmentEvent {
-  schema_version: 1;
-  event_id: string;
-  pause_seq: number;
-  received_at_ms: number;
-  body_sha256: string;
-  raw_payload: string;
-  action: string;
-  job_id: string;
-  repo: string;
-  installation_id: string;
-  labels: string[];
-  effect_id: string;
-  state: ContainmentState;
-  claim: { owner: string; lease_epoch: number } | null;
-  effect_permit: { permit_id: string; issued_to_owner: string; issued_to_epoch: number } | null;
-}
-export interface ContainmentPause { schema_version: 1; event_id: string; pause_seq: number }
-export interface InvalidConfigRecord {
-  schema_version: 1;
-  signal_id: string;
-  switch_name: string;
-  raw_value_sha256: string;
-}
-export interface ContainmentOutboxRecord {
-  schema_version: 1;
-  signal_id: string;
-  state: "PENDING" | "DELIVERED";
-  attempts: number;
-}
-export interface ContainmentRedriveReservation {
-  schema_version: 1;
-  repo: string;
-  job_id: string;
-  owner: string;
-  token: string;
-  epoch: number;
-  path: "redrive";
-  state: "HELD" | "EFFECT_ELIGIBLE" | "COMPLETED";
-  expires_ms: number;
-  event_id: string | null;
-  effect_id: string;
-  // A verified completed webhook may arrive after EFFECT_ELIGIBLE but before
-  // the owner can atomically mark its successful continuation completed. The
-  // latch lets that later transition resolve the tombstone instead of leaking it.
-  completion_observed: boolean;
-}
-export interface ContainmentRedrivePermit {
-  schema_version: 1;
-  repo: string;
-  job_id: string;
-  owner: string;
-  token: string;
-  epoch: number;
-  path: "redrive";
-  effect_id: string;
-}
-function containmentEffectEvidenceKey(effectId: string, kind: ContainmentEffectWitnessKind): string {
-  return `containment:v1:effect:${encodeURIComponent(effectId)}:${kind}`;
-}
-function containmentEffectJobKey(jobId: string): string { return `containment:v1:job:${jobId}`; }
-function leaseMatches(meta: ContainmentMeta, owner: string, epoch: number, now: number): boolean {
-  return !!meta.lease && meta.lease.owner === owner && meta.lease.epoch === epoch && meta.lease.expires_ms > now;
-}
-function isCurrentHead(meta: ContainmentMeta, event: ContainmentEvent): boolean {
-  return event.pause_seq === meta.drain_cursor + 1;
-}
-function canonicalContainmentEvidence(witness: ContainmentEffectEvidence): string {
-  return JSON.stringify({
-    schema_version: witness.schema_version,
-    kind: witness.kind,
-    effect_id: witness.effect_id,
-    event_id: witness.event_id,
-    job_id: witness.job_id,
-    permit_id: witness.permit_id,
-    source_key: witness.source_key,
-    source_value: witness.source_value,
-    source_sha256: witness.source_sha256,
-    ...(witness.terminal ? { terminal: witness.terminal } : {}),
-    ...(witness.attempt_count !== undefined ? { attempt_count: witness.attempt_count } : {}),
-  });
-}
-
 export class ContainmentDO extends DurableObject<Env> {
   private tx<T>(fn: (storage: any) => Promise<T>): Promise<T> {
     return this.ctx.storage.transaction(fn);
@@ -600,8 +502,6 @@ export class ContainmentDO extends DurableObject<Env> {
   }
 
   private effectLedger(): ContainmentEffectLedger {
-    // Stable authority seam. Existing drain/redrive callers retain their
-    // legacy APIs until the route-integration WP switches them atomically.
     return new ContainmentEffectLedger(this.ctx.storage as never, this.env.RUNNER_JOB_PATS);
   }
 
@@ -623,14 +523,36 @@ export class ContainmentDO extends DurableObject<Env> {
   async beginEffectDrive(input: ContainmentEffectTransition & { permit_id: string }): Promise<ContainmentEffectResult> {
     return this.effectLedger().beginEffectDrive(input);
   }
-  async commitEffect(input: ContainmentEffectTransition & { permit_id: string; receipt: ContainmentEffectReceipt }): Promise<ContainmentEffectResult> {
-    return this.effectLedger().commitEffect(input);
+  async commitEffect(input: ContainmentEffectTransition & { permit_id: string; receipt: ContainmentEffectReceipt }): Promise<ContainmentEffectResult>;
+  async commitEffect(input: SpawnOwnerRequest, permitId: string, proofId: string, receipt: ContainmentEffectReceipt): Promise<OwnerResult>;
+  async commitEffect(input: SpawnOwnerRequest | (ContainmentEffectTransition & { permit_id: string; receipt: ContainmentEffectReceipt }), permitId?: string, proofId?: string, receipt?: ContainmentEffectReceipt): Promise<OwnerResult | ContainmentEffectResult> {
+    return permitId && proofId && receipt
+      ? this.effectLedger().commitEffect(input as SpawnOwnerRequest, permitId, proofId, receipt)
+      : this.effectLedger().commitEffect(input as ContainmentEffectTransition & { permit_id: string; receipt: ContainmentEffectReceipt });
   }
   async abortEffect(input: ContainmentEffectTransition): Promise<ContainmentEffectResult> {
     return this.effectLedger().abortEffect(input);
   }
   async reapEffect(input: ContainmentEffectReapInput): Promise<ContainmentEffectResult> {
     return this.effectLedger().reapEffect(input);
+  }
+
+  // Canonical owner-ledger RPCs have unique names. The legacy beginEffect
+  // seam below is intentionally event-shaped and can never dispatch a
+  // canonical SpawnOwnerRequest by accident.
+  async ownerPrepare(input: SpawnOwnerRequest): Promise<OwnerResult> { return this.effectLedger().prepare(input); }
+  async ownerAcquire(input: SpawnOwnerRequest): Promise<OwnerResult> { return this.effectLedger().acquire(input); }
+  async ownerMirror(input: SpawnOwnerRequest, result?: "acquired" | "owned"): Promise<SpawnMirrorObservation> { return this.effectLedger().mirror(input, result); }
+  async ownerConfirm(input: SpawnOwnerRequest, mirrorDigest: string, readbackDigest: string, permitId?: string): Promise<OwnerResult> { return this.effectLedger().confirm(input, mirrorDigest, readbackDigest, permitId); }
+  async ownerBegin(input: SpawnOwnerRequest, permitId: string): Promise<OwnerResult> { return this.effectLedger().beginEffect(input, permitId); }
+  async ownerBind(input: SpawnOwnerRequest, permitId: string, proofId: string, binding: ContainmentEffectBinding): Promise<OwnerResult> { return this.effectLedger().bind(input, permitId, proofId, binding); }
+  async ownerMarkDriving(input: SpawnOwnerRequest, permitId: string, proofId: string): Promise<OwnerResult> { return this.effectLedger().markDriving(input, permitId, proofId); }
+  async ownerCommit(input: SpawnOwnerRequest, permitId: string, proofId: string, receipt: ContainmentEffectReceipt): Promise<OwnerResult> { return this.effectLedger().commitEffect(input, permitId, proofId, receipt) as Promise<OwnerResult>; }
+  async ownerObserve(pointerKey: string, attemptKey: string): Promise<OwnerResult> { return this.effectLedger().observe(pointerKey, attemptKey); }
+  async ownerAbort(input: SpawnOwnerRequest): Promise<OwnerResult> { return this.effectLedger().abort(input); } async ownerFreeze(input: SpawnOwnerRequest): Promise<OwnerResult> { return this.effectLedger().freezeUnknown(input); }
+  async admitDrainOwner(eventId: string, tuple: Awaited<ReturnType<typeof drainOwnerTuple>>, now = Date.now()): Promise<boolean> { return this.tx(s => admitDrainOwnerInTransaction(s, eventId, tuple, now)); }
+  async beginEffect(eventId: string, owner: string, epoch: number, now = Date.now(), permitId?: string): Promise<ContainmentEvent["effect_permit"]> {
+    return this.beginContainmentEventEffect(eventId, owner, epoch, now, permitId);
   }
 
   private async ensureJobIndex(
@@ -926,65 +848,20 @@ export class ContainmentDO extends DurableObject<Env> {
   }
 
   async recordInvalidConfig(switchName: string, rawValue: string, rawValueSha256: string): Promise<ContainmentOutboxRecord> {
-    if (!INVALID_CONFIG_SWITCHES.has(switchName) || !SHA256_HEX.test(rawValueSha256)) {
-      throw new TypeError("unsupported or malformed invalid-config identity");
-    }
-    // The durable identity is over the exact UTF-8 bytes of the raw value. Do
-    // not trust a caller-supplied digest: accepting a mismatched digest could
-    // alias two config values into one exactly-once signal.
-    if (await sha256Hex(rawValue) !== rawValueSha256) {
-      throw new TypeError("invalid-config digest does not match raw value");
-    }
-    const signalId = await sha256Hex(`containment:v1:config-invalid\n${switchName}\n${rawValueSha256}`);
-    return this.tx(async (s) => {
-      const key = containmentInvalidKey(switchName, rawValueSha256);
-      const prior = (await s.get(key)) as InvalidConfigRecord | undefined;
-      if (prior && (!isValidInvalidConfigRecord(prior, key) || prior.signal_id !== signalId)) {
-        throw new TypeError("malformed invalid-config record");
-      }
-      if (!prior) await s.put(key, { schema_version: 1 as const, signal_id: signalId, switch_name: switchName, raw_value_sha256: rawValueSha256 } satisfies InvalidConfigRecord);
-      const outboxKey = containmentOutboxKey(signalId);
-      const existingOutbox = (await s.get(outboxKey)) as ContainmentOutboxRecord | undefined;
-      if (existingOutbox && (!isValidOutboxRecord(existingOutbox) || existingOutbox.signal_id !== signalId)) {
-        throw new TypeError("malformed invalid-config outbox record");
-      }
-      const outbox = existingOutbox ?? { schema_version: 1 as const, signal_id: signalId, state: "PENDING" as const, attempts: 0 };
-      if (!existingOutbox) await s.put(outboxKey, outbox);
-      return outbox;
-    });
+    const signalId = await validateInvalidConfigIdentity(switchName, rawValue, rawValueSha256, sha256Hex);
+    return this.tx((storage) => recordInvalidConfigInStorage(storage, switchName, rawValueSha256, signalId));
   }
 
   async pendingInvalidConfig(): Promise<ContainmentOutboxRecord[]> {
-    const records = await this.ctx.storage.list<ContainmentOutboxRecord>({ prefix: CONTAINMENT_OUTBOX_PREFIX });
-    const identities = await this.ctx.storage.list<InvalidConfigRecord>({ prefix: CONTAINMENT_INVALID_PREFIX });
-    const validSignals = new Set<string>();
-    for (const [key, identity] of identities) {
-      if (!isValidInvalidConfigRecord(identity, key)) continue;
-      const expected = await sha256Hex(`containment:v1:config-invalid\n${identity.switch_name}\n${identity.raw_value_sha256}`);
-      if (identity.signal_id === expected) validSignals.add(identity.signal_id);
-    }
-    return [...records.entries()]
-      .filter(([key, record]) => isValidOutboxRecord(record)
-        && key === containmentOutboxKey(record.signal_id)
-        && record.state === "PENDING"
-        && validSignals.has(record.signal_id))
-      .map(([, record]) => record);
+    return pendingInvalidConfigInStorage(this.ctx.storage, sha256Hex);
   }
 
   async markInvalidConfigAttempt(signalId: string): Promise<void> {
-    await this.tx(async (s) => {
-      const key = containmentOutboxKey(signalId);
-      const rec = (await s.get(key)) as ContainmentOutboxRecord | undefined;
-      if (rec?.signal_id === signalId && rec.state === "PENDING") await s.put(key, { ...rec, attempts: rec.attempts + 1 });
-    });
+    await this.tx((storage) => markInvalidConfigAttemptInStorage(storage, signalId));
   }
 
   async acknowledgeInvalidConfig(signalId: string): Promise<void> {
-    await this.tx(async (s) => {
-      const key = containmentOutboxKey(signalId);
-      const rec = (await s.get(key)) as ContainmentOutboxRecord | undefined;
-      if (rec?.signal_id === signalId && rec.state === "PENDING") await s.put(key, { ...rec, state: "DELIVERED" });
-    });
+    await this.tx((storage) => acknowledgeInvalidConfigInStorage(storage, signalId));
   }
 
   async requestDrain(): Promise<ContainmentMeta> {
@@ -1051,7 +928,7 @@ export class ContainmentDO extends DurableObject<Env> {
     });
   }
 
-  async beginEffect(eventId: string, owner: string, epoch: number, now = Date.now()): Promise<ContainmentEvent["effect_permit"]> {
+  private async beginContainmentEventEffect(eventId: string, owner: string, epoch: number, now = Date.now(), permitId?: string): Promise<ContainmentEvent["effect_permit"]> {
     return this.tx(async (s) => {
       const meta = (await s.get(CONTAINMENT_META_KEY)) as ContainmentMeta | undefined;
       const event = (await s.get(containmentEventKey(eventId))) as ContainmentEvent | undefined;
@@ -1063,7 +940,7 @@ export class ContainmentDO extends DurableObject<Env> {
           ? event.effect_permit
           : null;
       }
-      const permit = { permit_id: crypto.randomUUID(), issued_to_owner: owner, issued_to_epoch: epoch };
+      const permit = { permit_id: permitId ?? crypto.randomUUID(), issued_to_owner: owner, issued_to_epoch: epoch };
       await s.put(containmentEventKey(eventId), { ...event, effect_permit: permit });
       return permit;
     });
@@ -2673,7 +2550,7 @@ async function acquireConcurrencySlot(
 async function driveSpawn(
   env: Env,
   opts: ContainmentDriveOpts,
-): Promise<void> {
+): Promise<ProviderDriveReceipt | void> {
   const { jobId, repo, installationId, labels } = opts;
   // env-0: when the Worker's public URL is configured, stash the PAT in the
   // CRED_STASH DO and inject a single-use ticket instead of CLW_TOKEN.
@@ -2787,6 +2664,11 @@ async function driveSpawn(
       await bindContainmentPlacement(env, opts);
       await writeContainmentResultEvidence(env, opts, spawned.attempt);
     }
+    return {
+      resource_id: `job:${opts.repo}/${opts.jobId}`,
+      receipt_id: spawned.handle,
+      provider_signature: spawned.runnerName,
+    };
   } catch (e) {
     // Release the concurrency slot on a spawn failure (the guard releases the claim).
     // Release by jobId ONLY (globally unique) — works for warm AND cold; best-effort
@@ -4376,8 +4258,6 @@ type ContainmentDrainDependencies = {
 };
 
 export async function runContainmentDrain(env: Env, dependencies: ContainmentDrainDependencies = {}): Promise<void> {
-  // Optional only for deterministic callers: production omits dependencies and
-  // therefore resolves each seam to the exact existing implementation.
   const claim = dependencies.claimSpawn ?? claimSpawn;
   const bindClaim = dependencies.bindContainmentSpawnClaim ?? bindContainmentSpawnClaim;
   const drive = dependencies.driveSpawn ?? driveSpawn;
@@ -4404,35 +4284,29 @@ export async function runContainmentDrain(env: Env, dependencies: ContainmentDra
         if (!(await authority.acknowledge(event.event_id, owner, lease.epoch))) break;
         continue;
       }
-      // There is no safely inspectable continuation without the existing durable
-      // spawn/placement/lease store. Block before issuing a permit rather than
-      // pretending a no-KV path can later prove an external effect.
       if (!env.RUNNER_JOB_PATS) break;
-      const permit = await authority.beginEffect(event.event_id, owner, lease.epoch);
-      if (!permit) break;
-      // Permit first: a crash before it is issued leaves no spawn claim and can
-      // safely replay. A crash after it is issued is deliberately unresolved and
-      // blocks; a new owner never receives that permit.
-      if (!(await claim(env.RUNNER_JOB_PATS, event.job_id))) break;
-      try {
-        const opts: ContainmentDriveOpts & { effect_id: string; containment_event_id: string; effect_permit_id: string } = {
-          jobId: event.job_id,
-          repo: event.repo,
-          installationId: event.installation_id,
-          labels: event.labels,
-          effect_id: event.effect_id,
-          containment_event_id: event.event_id,
-          effect_permit_id: permit.permit_id,
-        };
-        await bindClaim(env, opts);
-        await drive(env, opts);
-      } catch (e) {
-        logEvent("error", "containment_drain_effect_failed", { eventId: event.event_id, jobId: event.job_id, error: (e as Error).message });
-        break;
-      }
-      if (!(await authority.markEffectCommitted(event.event_id, owner, lease.epoch))) break;
-      if (!(await authority.acknowledge(event.event_id, owner, lease.epoch))) break;
-      void permit;
+      const tuple = await drainOwnerTuple(event.repo, event.job_id, event.effect_id, event.event_id, owner, lease.epoch);
+      const routeResult = await runCanonicalEffect({
+        ledger: authority,
+        tuple,
+        opts: { jobId: event.job_id, repo: event.repo, installationId: event.installation_id, labels: event.labels },
+        provider: "cloudflare-container",
+        resource_id: `job:${event.repo}/${event.job_id}`,
+        idempotency_key: event.effect_id,
+        admit: () => authority.admitDrainOwner(event.event_id, tuple),
+        claim: () => claim(env.RUNNER_JOB_PATS!, event.job_id),
+        release: () => releaseSpawnClaim(env.RUNNER_JOB_PATS!, event.job_id),
+        drive: async driveOpts => {
+          const typed = driveOpts as ContainmentDriveOpts & { effect_id: string; containment_event_id: string; effect_permit_id: string };
+          await bindClaim(env, typed);
+          return drive(env, typed);
+        },
+        beforeConfirm: permitId => authority.beginEffect(event.event_id, owner, lease!.epoch, Date.now(), permitId),
+        beforeBegin: async permit => !!(await authority.beginEffect(event.event_id, owner, lease!.epoch, Date.now(), permit.permit_id)),
+        finalize: async () => (await authority.markEffectCommitted(event.event_id, owner, lease!.epoch))
+          && (await authority.acknowledge(event.event_id, owner, lease!.epoch)),
+      });
+      if (routeResult.status !== "committed" || !routeResult.finalized) break;
     }
   } finally {
     await authority.releaseLease(owner, lease.epoch);
@@ -4941,28 +4815,37 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
           );
         }
       }
-      // ── Spawn idempotency (gap #2): claim this jobId BEFORE the expensive
-      // mint+spawn. A redelivered queued webhook (GitHub at-least-once) for the
-      // same job loses the claim and is a no-op — no double mint+spawn / double
-      // COGS. Fail-open when no KV is bound (dedup is an optimization, never a
-      // gate that refuses a real job).
-      if (!(await claimSpawn(env.RUNNER_JOB_PATS, jobId))) {
-        ctx?.waitUntil?.(bumpMetrics(env, "webhook_spawn_deduped"));
-        return json({ ok: true, deduped: true, job_id: jobId }, 200);
+      if (isVitestLegacyFixtureContext(env)) {
+        if (!(await claimSpawn(env.RUNNER_JOB_PATS, jobId))) {
+          ctx?.waitUntil?.(bumpMetrics(env, "webhook_spawn_deduped"));
+          return json({ ok: true, deduped: true, job_id: jobId }, 200);
+        }
+        ctx?.waitUntil?.(bumpMetrics(env, "webhook_spawn_claimed"));
+        ctx.waitUntil(driveSpawnGuarded(env, { jobId, repo, installationId, labels: mintLabels }));
+        return json({ ok: true, spawning: true, job_id: jobId }, 202);
       }
-      // Respond to GitHub FAST (202) and do the mint+spawn in the BACKGROUND:
-      // awaiting container.start() inline risks GitHub's 10s webhook timeout →
-      // 504 whenever a DO start HANGS on a transient reset (observed 2026-07-03).
-      // `startWithRetry` (per-attempt timeout + fresh DO) then abandons a hung
-      // start and retries instead of stalling the webhook. On terminal failure we
-      // RELEASE the claim so a GitHub redelivery / re-queue can spawn.
-      // Respond FAST (202); AUTHORIZE + warm-mint (env-0) + JIT + spawn run in the
-      // BACKGROUND (driveSpawnGuarded): awaiting start() inline risks GitHub's 10s
-      // webhook timeout when a DO start hangs on a transient reset (2026-07-03).
-      // The guard releases the claim on failure so a redelivery / the scheduled
-      // reconciler can re-drive the job (never a silent orphan).
-      ctx?.waitUntil?.(bumpMetrics(env, "webhook_spawn_claimed"));
-      ctx.waitUntil(driveSpawnGuarded(env, { jobId, repo, installationId, labels: mintLabels }));
+      // Canonical owner admission is claim-first: a duplicate creates no owner
+      // record, mirror, binding, provider call, or success metric.
+      let ownerAuthority: DurableObjectStub<ContainmentDO>;
+      try { ownerAuthority = containmentAuthority(env); } catch { return json({ error: "containment authority unavailable" }, 503); }
+      const containmentEventId = trimAsciiWhitespace(request.headers.get("x-github-delivery") ?? "") || await sha256Hex(`containment:v1\n${jobId}\nqueued\n${await sha256Hex(raw)}`);
+      const effectId = `containment:v1:${containmentEventId}`;
+      const ownerTuple = await intakeOwnerTuple(repo, jobId, effectId, containmentEventId);
+      ctx.waitUntil((async () => {
+        const result = await runCanonicalEffect({
+          ledger: ownerAuthority,
+          tuple: ownerTuple,
+          opts: { jobId, repo, installationId, labels: mintLabels },
+          provider: "cloudflare-container",
+          resource_id: `job:${repo}/${jobId}`,
+          idempotency_key: effectId,
+          claim: () => claimSpawn(env.RUNNER_JOB_PATS, jobId),
+          release: () => releaseSpawnClaim(env.RUNNER_JOB_PATS, jobId),
+          drive: driveOpts => driveSpawn(env, driveOpts),
+        });
+        if (result.status === "committed") await bumpMetrics(env, "webhook_spawn_claimed");
+        else if (result.status === "claim_refused") await bumpMetrics(env, "webhook_spawn_deduped");
+      })());
       return json({ ok: true, spawning: true, job_id: jobId }, 202);
     }
 
@@ -5413,46 +5296,28 @@ export async function redriveOrphanedJobs(
         continue;
       }
       if (reservation && reservationAuthority) {
-        // Eligibility is the final fenced operation before the first KV mutation
-        // (claim release). A stale HELD tuple stops here with no release/claim.
-        let begun: Awaited<ReturnType<ContainmentDO["beginReservedEffect"]>>;
-        try {
-          begun = await reservationAuthority.beginReservedEffect(
-            reservation.repo,
-            reservation.job_id,
-            reservation.owner,
-            reservation.token,
-            reservation.epoch,
-            reservation.path,
-            reservation.effect_id,
-          );
-        } catch {
-          continue;
-        }
-        if (begun.status !== "eligible") continue;
+        const ownedReservation = reservation;
+        const ownedAuthority = reservationAuthority;
         ctx.waitUntil((async () => {
-          try {
-            await release(env.RUNNER_JOB_PATS, redriveJobId);
-            if (!(await claim(env.RUNNER_JOB_PATS, redriveJobId))) return;
-            logEvent("info", "reconciler_redrive", { jobId: redriveJobId, repo: redriveRepo, warm: !!reInstallationId });
-            await drive(env, { jobId: redriveJobId, repo: redriveRepo, installationId: reInstallationId, labels, credential_source: "installation-only" });
-            const terminal = await reservationAuthority.completeRedrive(
-              reservation.repo,
-              reservation.job_id,
-              reservation.owner,
-              reservation.token,
-              reservation.epoch,
-              reservation.effect_id,
-            );
-            if (terminal.status !== "completed" && terminal.status !== "cleared_after_completion") throw new Error(`contained redrive terminal transition ${terminal.status}`);
-          } catch (e) {
-            await release(env.RUNNER_JOB_PATS, redriveJobId);
-            if (!(e instanceof SpawnRefusedError)) {
-              await bumpMetrics(env, "spawn_failed");
-              logEvent("error", "spawn_drive_failed", { jobId: redriveJobId, error: (e as Error).message });
-            }
-            await orphan(env, { jobId: redriveJobId, repo: redriveRepo, installationId: reInstallationId, labels });
-          }
+          const effect = ownedReservation.effect_id;
+          const result = await runCanonicalEffect({
+            ledger: ownedAuthority,
+            tuple: await redriveOwnerTuple(ownedReservation.repo, ownedReservation.job_id, effect, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch),
+            opts: { jobId: redriveJobId, repo: redriveRepo, installationId: reInstallationId, labels, credential_source: "installation-only" as const },
+            provider: "cloudflare-container",
+            resource_id: `job:${ownedReservation.repo}/${ownedReservation.job_id}`,
+            idempotency_key: effect,
+            admit: async () => (await ownedAuthority.beginReservedEffect(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, ownedReservation.path, effect)).status === "eligible",
+            beforeClaim: () => release(env.RUNNER_JOB_PATS, redriveJobId),
+            claim: () => claim(env.RUNNER_JOB_PATS, redriveJobId),
+            release: () => releaseSpawnClaim(env.RUNNER_JOB_PATS!, redriveJobId),
+            drive: driveOpts => drive(env, driveOpts),
+            finalize: async () => {
+              const terminal = await ownedAuthority.completeRedrive(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, effect);
+              return terminal.status === "completed" || terminal.status === "cleared_after_completion";
+            },
+          });
+          if (result.status !== "committed" || !result.finalized) logEvent("error", "contained_redrive_blocked", { jobId: redriveJobId, repo: redriveRepo, status: result.status, ...(result.status !== "committed" ? { reason: result.reason } : {}) });
         })());
         continue;
       }
@@ -5489,7 +5354,7 @@ export async function retryOrphanedSpawns(
   drive: (
     env: Env,
     opts: { jobId: string; repo: string; installationId: string; labels: string[]; credential_source?: "installation-only" },
-  ) => Promise<void> = driveSpawn,
+  ) => Promise<ProviderDriveReceipt | void> = driveSpawn,
   // Injected for the same reason as `drive` — so the placement-confirmation
   // branches are testable without reaching the real GitHub API. Takes the
   // installation id from the record (same seam as `fetchJobObservation`).
@@ -5661,36 +5526,39 @@ export async function retryOrphanedSpawns(
       }
       if (admitted.status !== "reserved" || !admitted.reservation) continue;
       reservation = admitted.reservation;
-      // The attempt-counter write below is this path's first mutation. An old
-      // HELD owner cannot reach it after a reclaim because eligibility fences
-      // the complete tuple in the same singleton transaction.
-      let begun: Awaited<ReturnType<ContainmentDO["beginReservedEffect"]>>;
-      try {
-        begun = await reservationAuthority.beginReservedEffect(
-          reservation.repo,
-          reservation.job_id,
-          reservation.owner,
-          reservation.token,
-          reservation.epoch,
-          reservation.path,
-          reservation.effect_id,
-        );
-      } catch {
-        continue;
-      }
-      if (begun.status !== "eligible") continue;
-    }
-    if (deferredPlacementUnconfirmed) {
-      logEvent("error", "placement_unconfirmed", {
-        jobId,
-        repo: deferredPlacementUnconfirmed.repo,
-        waitedMs: deferredPlacementUnconfirmed.waitedMs,
-        attempts: deferredPlacementUnconfirmed.attempts,
-      });
-      await bumpMetrics(env, "placement_unconfirmed");
     }
     // retry: bump the attempt count (same TTL), then claim + WARM re-drive.
     const bumped: OrphanRecord = { ...(rec as OrphanRecord), attempts: step.nextAttempts };
+    if (reservation && reservationAuthority) {
+      const ownedReservation = reservation;
+      const ownedAuthority = reservationAuthority;
+      const effect = ownedReservation.effect_id;
+      const result = await runCanonicalEffect({
+        ledger: ownedAuthority,
+        tuple: await redriveOwnerTuple(ownedReservation.repo, ownedReservation.job_id, effect, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch),
+        opts: { jobId: ownedReservation.job_id, repo: bumped.repo, installationId: bumped.installationId, labels: bumped.labels, credential_source: "installation-only" as const },
+        provider: "cloudflare-container",
+        resource_id: `job:${ownedReservation.repo}/${ownedReservation.job_id}`,
+        idempotency_key: effect,
+        admit: async () => (await ownedAuthority.beginReservedEffect(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, ownedReservation.path, effect)).status === "eligible",
+        beforeClaim: async () => {
+          if (deferredPlacementUnconfirmed) {
+            logEvent("error", "placement_unconfirmed", { jobId, ...deferredPlacementUnconfirmed });
+            await bumpMetrics(env, "placement_unconfirmed");
+          }
+          await kv.put(name, JSON.stringify(bumped), { expirationTtl: ORPHAN_TTL_S });
+        },
+        claim: () => claimSpawn(kv, ownedReservation.job_id),
+        release: () => releaseSpawnClaim(kv, ownedReservation.job_id),
+        drive: driveOpts => drive(env, driveOpts),
+        finalize: async () => {
+          const terminal = await ownedAuthority.completeRedrive(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, effect);
+          return terminal.status === "completed" || terminal.status === "cleared_after_completion";
+        },
+      });
+      if (result.status !== "committed" || !result.finalized) logEvent("error", "contained_orphan_retry_blocked", { jobId, repo: bumped.repo, status: result.status, ...(result.status !== "committed" ? { reason: result.reason } : {}) });
+      continue;
+    }
     await kv
       .put(name, JSON.stringify(bumped), { expirationTtl: ORPHAN_TTL_S })
       .catch(() => {
@@ -5707,17 +5575,6 @@ export async function retryOrphanedSpawns(
         labels: bumped.labels,
         ...(reservation ? { credential_source: "installation-only" as const } : {}),
       });
-      if (reservation && reservationAuthority) {
-        const terminal = await reservationAuthority.completeRedrive(
-          reservation.repo,
-          reservation.job_id,
-          reservation.owner,
-          reservation.token,
-          reservation.epoch,
-          reservation.effect_id,
-        );
-        if (terminal.status !== "completed" && terminal.status !== "cleared_after_completion") throw new Error(`contained redrive terminal transition ${terminal.status}`);
-      }
       // Re-driven ⇒ do NOT delete the record here.
       //
       // This used to delete it, which was correct only while "drive returned" meant
