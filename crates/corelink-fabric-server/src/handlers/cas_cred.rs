@@ -10,12 +10,13 @@
 //! stash and returns the PAT; any second redemption (e.g. by untrusted code
 //! after boot) finds the stash gone and gets `410`.
 
-use axum::extract::{Json, Path, State};
+use axum::extract::{Json, Path, State, rejection::JsonRejection};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
 use corelink_fabric::LeaseState;
+use corelink_fabric_api::ApiError;
 use corelink_runners_contracts::RunnerState;
 
 use crate::app::AppState;
@@ -40,26 +41,42 @@ pub struct CasCredResponse {
     pub clw_ref_domain: String,
 }
 
-fn err(status: StatusCode, msg: &str) -> Response {
-    (status, Json(serde_json::json!({ "error": msg }))).into_response()
+/// Serialize a cas-cred failure using the frozen API error body. The redeemed
+/// ticket keeps its historical 410 status; `invalid` is the closest existing
+/// frozen machine code because the shared vocabulary has no `gone` variant.
+fn err(status: StatusCode, api_error: ApiError, msg: &str) -> Response {
+    (status, Json(api_error.body(msg))).into_response()
 }
 
 /// Redeem the single-use cred ticket for the stashed per-job CAS PAT.
 pub(crate) async fn redeem(
     State(state): State<AppState>,
     Path(lease_id): Path<String>,
-    Json(req): Json<CasCredRequest>,
+    body: Result<Json<CasCredRequest>, JsonRejection>,
 ) -> Response {
+    let Json(req) = match body {
+        Ok(body) => body,
+        // Do not reflect extractor details: they can contain request material.
+        // A malformed or wrong-shape body is a typed, frozen response while
+        // preserving axum's established extractor status.
+        Err(rejection) => {
+            return err(rejection.status(), ApiError::Invalid, "invalid JSON body");
+        }
+    };
     // C2c must be ON (a signer configured); else this route is inert — return the
     // no-oracle 404 (identical to an unknown lease), never leaking that the
     // feature is off.
     let Some(signer) = state.cred_signer.as_ref() else {
-        return err(StatusCode::NOT_FOUND, "no such lease");
+        return err(StatusCode::NOT_FOUND, ApiError::NotFound, "no such lease");
     };
     // The ticket IS the auth: constant-time verify it is the one THIS fabric
     // minted for THIS lease. A mismatch (forged/wrong-lease/tampered) → 401.
     if !signer.verify(&lease_id, &req.ticket) {
-        return err(StatusCode::UNAUTHORIZED, "invalid ticket");
+        return err(
+            StatusCode::UNAUTHORIZED,
+            ApiError::Unauthorized,
+            "invalid ticket",
+        );
     }
     // The lease must be Held: a ticket redeemed after the lease terminalized (or
     // for a lease that never existed) gets nothing. NO tenant scope — the ticket
@@ -69,8 +86,20 @@ pub(crate) async fn redeem(
         let ledger = &*state.ledger;
         match ledger.get(&lease_id) {
             Ok(Some(rec)) if matches!(rec.state, LeaseState::Wire(RunnerState::Held)) => {}
-            Ok(_) => return err(StatusCode::NOT_FOUND, "no such held lease"),
-            Err(_) => return err(StatusCode::SERVICE_UNAVAILABLE, "lease ledger unreadable"),
+            Ok(_) => {
+                return err(
+                    StatusCode::NOT_FOUND,
+                    ApiError::NotFound,
+                    "no such held lease",
+                );
+            }
+            Err(_) => {
+                return err(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    ApiError::FailClosed,
+                    "lease ledger unreadable",
+                );
+            }
         }
     }
     // Single-use latch: take the stash. `Some` ⇒ the FIRST redemption → hand out
@@ -87,7 +116,11 @@ pub(crate) async fn redeem(
             }),
         )
             .into_response(),
-        None => err(StatusCode::GONE, "ticket already redeemed"),
+        None => err(
+            StatusCode::GONE,
+            ApiError::Invalid,
+            "ticket already redeemed",
+        ),
     }
 }
 
@@ -137,9 +170,9 @@ mod tests {
         redeem(
             State(state.clone()),
             Path(lease_id.to_string()),
-            Json(CasCredRequest {
+            Ok(Json(CasCredRequest {
                 ticket: ticket.to_string(),
-            }),
+            })),
         )
         .await
         .status()
@@ -163,9 +196,9 @@ mod tests {
         let resp = redeem(
             State(state.clone()),
             Path("lease-1".to_string()),
-            Json(CasCredRequest {
+            Ok(Json(CasCredRequest {
                 ticket: ticket.clone(),
-            }),
+            })),
         )
         .await;
         assert_eq!(resp.status(), StatusCode::OK);
