@@ -132,6 +132,28 @@ completion is claimed. The hard integration predecessors remain unchanged:
 offline preparation/default-off does not itself remove a DAG edge. T3-W18 live
 acceptance and T4-W4/R1 still constrain the prepared descendants.
 
+The subsequent integration review found and corrected two concrete rollback
+interleavings before full CI. Acquisition rollback and a dropped queued waiter
+now use a named Pending claim, not normal teardown followed by removal. The
+four pre-provision call sites can finish because provisioning never began;
+post-provision paths require explicit confirmation. Normal Held teardown is
+unchanged. A capacity error returns the requeue outcome only after cleanup
+finishes; otherwise it revokes the PAT, returns503 and leaves the claim for
+the stale sweep, rather than inserting the same retained id again.
+
+Five composed server suites pass42/42 (capacity5, lock split1, cloud21,
+cleanup8, slots7), and the real DB-backed named-claim run passes7/7 across
+memory/File/Pg (4 Pg cases). The additional private router/queue regression
+passes: cleanupRetryable retains the cap, a second tick performs no second
+provision, the PAT is revoked, and a later confirmed sweep finishes exactly
+once. Private queue access stays inside a unit-test child module; no production
+visibility was widened. Linux auth bridge also passes, with3 durable process
+observations finding no raw token in environment or argv.
+
+The preparation is published as DRAFT #558, base #557. Its next exact tip gets
+the complete shared matrix; no per-author full suite or zero-job merge credit.
+Final CI logs are allocated at `/private/tmp/corelink-sprint1-cleanup-ci.GRfK0o`.
+
 ### Standing rules
 
 The owner authorized autonomous deployment and maximum safe parallelism,
