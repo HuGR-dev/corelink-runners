@@ -79,10 +79,13 @@ describe("canonical containment effect route", () => {
 
   it("treats a no-effect provider refusal after DRIVING as UNKNOWN", async () => {
     const { ledger, storage } = make(); const t = tuple();
-    const result = await runCanonicalEffect({ ...deps(ledger, t), drive: async () => ({ status: "refused" as const, no_effect: true as const }) });
+    let drives = 0;
+    const result = await runCanonicalEffect({ ...deps(ledger, t), drive: async () => { drives++; return { status: "refused" as const, no_effect: true as const }; } });
     expect(result.status).toBe("unknown_terminal");
     const active = [...storage.map.values()].find((v: any) => v && v.state === "DRIVING") as any;
     expect(active?.state).toBe("DRIVING");
+    const retry = await runCanonicalEffect({ ...deps(ledger, t), claim: async () => { throw new Error("must not reclaim DRIVING"); }, drive: async () => { drives++; return undefined; } });
+    expect(retry.status).toBe("unknown_terminal"); expect(drives).toBe(1);
   });
 
   it("releases a claim when canonical prepare is already busy", async () => {
@@ -141,6 +144,29 @@ describe("canonical containment effect route", () => {
     expect((await runCanonicalEffect(common())).status).toBe("unavailable");
     expect((await runCanonicalEffect(common())).status).toBe("committed");
     expect(released).toBe(2); expect(drives).toBe(1);
+  });
+
+  it("does not resume a pre-effect tuple when this invocation loses the external claim", async () => {
+    const { ledger, storage } = make(); const t = tuple(); let claimed = false; let released = 0; let drives = 0;
+    const first = { ...deps(ledger, t), claim: async () => !claimed && (claimed = true), release: async () => { claimed = false; released++; }, beforeBegin: async () => false };
+    expect((await runCanonicalEffect(first)).status).toBe("before_drive_refused");
+    const snapshot = JSON.stringify([...storage.map.entries()]);
+    const second = { ...deps(ledger, t), claim: async () => false, release: async () => { released++; }, drive: async () => { drives++; return undefined; } };
+    expect((await runCanonicalEffect(second)).status).toBe("claim_refused");
+    expect(JSON.stringify([...storage.map.entries()])).toBe(snapshot); expect(released).toBe(1); expect(drives).toBe(0);
+  });
+
+  it("persists a legacy drain permit before canonical PERMIT_ISSUED and binds its id", async () => {
+    const { ledger } = make(); const t = { ...tuple(), path: "drain" as const, owner: "drain:lease-owner", token: "drain-token", lease_epoch: 4 };
+    const events: string[] = []; const base = deps(ledger, t);
+    const originalConfirm = (base.ledger as any).ownerConfirm;
+    const route = { ...base, ledger: { ...base.ledger, ownerConfirm: async (...args: any[]) => { events.push("owner-confirm"); return originalConfirm(...args); } },
+      beforeConfirm: async () => { events.push("legacy-permit"); return "legacy-permit-1"; },
+      beforeBegin: async permit => { events.push(`before-begin:${permit.permit_id}`); return true; } };
+    const result = await runCanonicalEffect(route);
+    expect(result.status).toBe("committed"); if (result.status !== "committed") return;
+    expect(events.slice(0, 3)).toEqual(["legacy-permit", "owner-confirm", "before-begin:legacy-permit-1"]);
+    expect(result.receipt.permit_id).toBe("legacy-permit-1");
   });
 
   it("resumes from BOUND after a mark-driving crash without a second begin", async () => {

@@ -30,7 +30,7 @@ export interface CanonicalEffectRouteDeps<TOpts extends object> {
     ownerPrepare: (request: SpawnOwnerRequest) => Promise<OwnerResult>;
     ownerAcquire: (request: SpawnOwnerRequest) => Promise<OwnerResult>;
     ownerMirror: (request: SpawnOwnerRequest, result?: "acquired" | "owned") => Promise<SpawnMirrorObservation>;
-    ownerConfirm: (request: SpawnOwnerRequest, mirrorDigest: string, readbackDigest: string) => Promise<OwnerResult>;
+    ownerConfirm: (request: SpawnOwnerRequest, mirrorDigest: string, readbackDigest: string, permitId?: string) => Promise<OwnerResult>;
     ownerBegin: (request: SpawnOwnerRequest, permitId: string) => Promise<OwnerResult>;
     ownerBind: (request: SpawnOwnerRequest, permitId: string, proofId: string, binding: ContainmentEffectBinding) => Promise<OwnerResult>;
     ownerMarkDriving: (request: SpawnOwnerRequest, permitId: string, proofId: string) => Promise<OwnerResult>;
@@ -48,6 +48,8 @@ export interface CanonicalEffectRouteDeps<TOpts extends object> {
   beforeClaim?: () => Promise<void>;
   afterClaim?: () => Promise<boolean>;
   beforeDrive?: () => Promise<boolean>;
+  /** Legacy drain may persist its recovery-only permit before owner PERMIT_ISSUED. */
+  beforeConfirm?: () => Promise<string | undefined>;
   beforeBegin?: (permit: ContainmentEffectPermit) => Promise<boolean>;
   drive: (opts: TOpts & {
     containment_event_id: string;
@@ -129,10 +131,10 @@ export async function runCanonicalEffect<TOpts extends object>(
     let ownerRecord: any = resumable ? existing.record : undefined;
     if (deps.beforeClaim) await deps.beforeClaim();
     claimAdmitted = await deps.claim();
-    // The durable tuple is the claim for a resumable pre-effect attempt. A
-    // stale external claim must not wedge a permit awaiting its beforeBegin.
-    if (!claimAdmitted && !resumable) return { status: "claim_refused" };
-    if (resumable) claimAdmitted = true;
+    // A persisted tuple does not transfer or replace the external claim. Every
+    // invocation must win the claim in this invocation; only that claim may be
+    // released on an abortable failure.
+    if (!claimAdmitted) return { status: "claim_refused" };
     if (deps.afterClaim && !(await deps.afterClaim())) { await releaseClaim(); return { status: "busy" }; }
     if (deps.beforeDrive && !(await deps.beforeDrive())) { await releaseClaim(); return { status: "before_drive_refused" }; }
 
@@ -173,8 +175,9 @@ export async function runCanonicalEffect<TOpts extends object>(
         await releaseClaim();
         return { status: mirrored.kind === "mismatch" ? "mirror_tampered" : "unauthorized" };
       }
+      const externalPermitId = deps.beforeConfirm ? await deps.beforeConfirm() : undefined;
       const confirmed = await deps.ledger.ownerConfirm(
-        { ...req, observation_kind: mirrored.kind, observation_digest: mirrorDigest }, mirrorDigest, mirrorDigest,
+        { ...req, observation_kind: mirrored.kind, observation_digest: mirrorDigest }, mirrorDigest, mirrorDigest, externalPermitId,
       );
       if (confirmed.kind !== "permit_issued" || !confirmed.permit) {
         await releaseClaim(); return terminal(confirmed) ?? { status: "unauthorized" };
@@ -297,7 +300,7 @@ export async function intakeOwnerTuple(repo: string, jobId: string, effectId: st
 export async function drainOwnerTuple(repo: string, jobId: string, effectId: string, eventId: string, owner: string, epoch: number): Promise<OwnerTuple> {
   return ownerTuple({ repo, job_id: jobId, path: "drain", event_id: eventId, reservation_epoch: null, effect_id: effectId,
     owner: `drain:${owner}`, token: `drain:${owner}:${epoch}`, lease_epoch: epoch,
-    drain_owner: owner, drain_lease_epoch: epoch });
+    drain_owner: null, drain_lease_epoch: null });
 }
 export async function redriveOwnerTuple(repo: string, jobId: string, effectId: string, owner: string, token: string, epoch: number): Promise<OwnerTuple> {
   return ownerTuple({ repo, job_id: jobId, path: "redrive", event_id: effectId, reservation_epoch: epoch, effect_id: effectId,

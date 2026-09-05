@@ -403,9 +403,9 @@ export class ContainmentEffectLedger {
       return unavailable(key);
     }
   }
-  async confirm(request: SpawnOwnerRequest, mirror_digest: string, readback_digest: string): Promise<OwnerResult> {
+  async confirm(request: SpawnOwnerRequest, mirror_digest: string, readback_digest: string, external_permit_id?: string): Promise<OwnerResult> {
     const t = requestTuple(request);
-    if (!t || !HEX.test(mirror_digest) || mirror_digest !== readback_digest
+    if (!t || (external_permit_id !== undefined && !validText(external_permit_id)) || !HEX.test(mirror_digest) || mirror_digest !== readback_digest
       || request.observation_kind !== "exact" || request.observation_digest !== mirror_digest) return rejected();
     if (!this.kv) return rejected();
     let mirrorRaw: string | null;
@@ -419,11 +419,14 @@ export class ContainmentEffectLedger {
       const p: any = await s.get(activeKey(t));
       if (!a || !p || !pointerMatchesAttempt(p, a, t)
         || p.attempt_key !== attemptKey(t) || a.nonce !== p.nonce) return this.out(t, "unknown", "UNKNOWN");
-      if (a.state === "PERMIT_ISSUED" || a.state === "BOUND" || a.state === "DRIVING") return this.out(t, "owned", a.state, a);
+      if (a.state === "PERMIT_ISSUED" || a.state === "BOUND" || a.state === "DRIVING") {
+        if (external_permit_id !== undefined && a.permit_id !== external_permit_id) return this.out(t, "unknown", "UNKNOWN");
+        return this.out(t, "owned", a.state, a);
+      }
       if (a.state !== "CLAIM_ACQUIRED") return this.out(t, "rejected", a.state, a);
       const issued = Date.now();
       const permit: ContainmentEffectPermit = {
-        schema_version: 1, permit_id: crypto.randomUUID(), repo: t.repo,
+        schema_version: 1, permit_id: external_permit_id ?? crypto.randomUUID(), repo: t.repo,
         job_id: t.job_id, path: t.path, event_id: t.event_id,
         reservation_epoch: t.reservation_epoch, effect_id: t.effect_id,
         issued_to_owner: t.owner, issued_to_epoch: t.lease_epoch,

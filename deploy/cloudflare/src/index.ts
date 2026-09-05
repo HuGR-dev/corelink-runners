@@ -647,7 +647,7 @@ export class ContainmentDO extends DurableObject<Env> {
   async ownerPrepare(input: SpawnOwnerRequest): Promise<OwnerResult> { return this.effectLedger().prepare(input); }
   async ownerAcquire(input: SpawnOwnerRequest): Promise<OwnerResult> { return this.effectLedger().acquire(input); }
   async ownerMirror(input: SpawnOwnerRequest, result?: "acquired" | "owned"): Promise<SpawnMirrorObservation> { return this.effectLedger().mirror(input, result); }
-  async ownerConfirm(input: SpawnOwnerRequest, mirrorDigest: string, readbackDigest: string): Promise<OwnerResult> { return this.effectLedger().confirm(input, mirrorDigest, readbackDigest); }
+  async ownerConfirm(input: SpawnOwnerRequest, mirrorDigest: string, readbackDigest: string, permitId?: string): Promise<OwnerResult> { return this.effectLedger().confirm(input, mirrorDigest, readbackDigest, permitId); }
   async ownerBegin(input: SpawnOwnerRequest, permitId: string): Promise<OwnerResult> { return this.effectLedger().beginEffect(input, permitId); }
   async ownerBind(input: SpawnOwnerRequest, permitId: string, proofId: string, binding: ContainmentEffectBinding): Promise<OwnerResult> { return this.effectLedger().bind(input, permitId, proofId, binding); }
   async ownerMarkDriving(input: SpawnOwnerRequest, permitId: string, proofId: string): Promise<OwnerResult> { return this.effectLedger().markDriving(input, permitId, proofId); }
@@ -4449,6 +4449,7 @@ export async function runContainmentDrain(env: Env, dependencies: ContainmentDra
           await bindClaim(env, typed);
           return drive(env, typed);
         },
+        beforeConfirm: async () => (await authority.beginEffect(event.event_id, owner, lease!.epoch, Date.now()))?.permit_id,
         beforeBegin: async permit => !!(await authority.beginEffect(event.event_id, owner, lease!.epoch, Date.now(), permit.permit_id)),
         finalize: async () => (await authority.markEffectCommitted(event.event_id, owner, lease!.epoch))
           && (await authority.acknowledge(event.event_id, owner, lease!.epoch)),
