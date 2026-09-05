@@ -19,7 +19,7 @@ type State = { seq: number; head?: Head; terminal?: "ACKED" | "TIMED_OUT" | "CON
 
 const stateKey = "state";
 const encoder = new TextEncoder();
-const fields = (v: Record<string, unknown>, keys: readonly string[]) => keys.map((key) => String(v[key])).join("\n");
+const fields = (v: object, keys: readonly string[]) => keys.map((key) => String((v as Record<string, unknown>)[key])).join("\n");
 const envelopeFields = ["event_id", "producer_seq", "payload_digest", "source", "service", "application", "key_id", "credential_epoch", "monitor_rearm_tuple_digest", "occurred_at"] as const;
 const ackFields = ["ack_version", "event_id", "producer_seq", "payload_digest", "source", "service", "application", "key_id", "credential_epoch", "monitor_rearm_tuple_digest", "ingest_commit_id", "committed_at", "signer_key_id", "signer_epoch"] as const;
 
@@ -60,12 +60,14 @@ export class CanaryTickOutbox {
       const envelope: TickEnvelope = { ...unsigned, signature: await hmac(fields(unsigned, envelopeFields), config.envelopeHmacKey) };
       value = { seq: producer_seq, head: { envelope, enqueuedAt: now } };
       await this.state.storage.put(stateKey, value); // write-ahead before transmit
+      await this.state.storage.setAlarm(now + TICK_DEADLINE_MS);
     }
     if (!config) return "tick head held: config unavailable";
     const head = value.head!;
     if (now - head.enqueuedAt > TICK_DEADLINE_MS) {
       value.head = undefined; value.terminal = "TIMED_OUT";
       await this.state.storage.put(stateKey, value);
+      await this.state.storage.deleteAlarm();
       return "tick terminal: deadline exceeded";
     }
     try {
@@ -74,6 +76,7 @@ export class CanaryTickOutbox {
       if (!isAck(candidate) || !await this.validAck(candidate, head.envelope, config)) return "tick head pending: invalid ACK";
       value.head = undefined; value.terminal = "ACKED";
       await this.state.storage.put(stateKey, value);
+      await this.state.storage.deleteAlarm();
       return "tick terminal: ACKED";
     } catch { return "tick head pending: transmit failed"; }
   }
@@ -84,5 +87,15 @@ export class CanaryTickOutbox {
       ack.application !== envelope.application || ack.key_id !== envelope.key_id || ack.credential_epoch !== envelope.credential_epoch ||
       ack.monitor_rearm_tuple_digest !== envelope.monitor_rearm_tuple_digest || !ack.ingest_commit_id || !Number.isFinite(ack.committed_at)) return false;
     return ack.signature === await hmac(fields(ack, ackFields), config.ackHmacKey);
+  }
+
+  /** Alarm preserves the original enqueue clock even if cron delivery pauses.
+   * A retry can never use a later tick to restart the 60-second residence cap. */
+  async alarm(): Promise<void> {
+    const value = await this.state.storage.get<State>(stateKey);
+    if (!value?.head || Date.now() - value.head.enqueuedAt < TICK_DEADLINE_MS) return;
+    value.head = undefined;
+    value.terminal = "TIMED_OUT";
+    await this.state.storage.put(stateKey, value);
   }
 }
