@@ -159,8 +159,11 @@ export class MetricsDO extends DurableObject<MetricsEnv> {
       if (already) return false;
       const cur = (await txn.get<CounterMap>(STORAGE_KEY)) ?? {};
       cur[name] = (cur[name] ?? 0) + 1;
-      await txn.put(STORAGE_KEY, cur);
+      // Persist the delivery marker first inside the same atomic transaction;
+      // a retry can therefore never observe a committed bump without its
+      // exactly-once identity, or vice versa.
       await txn.put(seenKey, true);
+      await txn.put(STORAGE_KEY, cur);
       return true;
     });
   }
