@@ -97,6 +97,7 @@ error() {
 : "${PROFILE_NAME:?PROFILE_NAME must be set}"
 
 if [[ -v EXEC_SERVER_AUTH_TOKEN ]]; then
+    unset CORELINK_AUTH_BRIDGED CORELINK_DUMB_INIT
     bridge_exec_auth_token
     export CORELINK_AUTH_BRIDGED=1
     # Force a fresh process environment so the provider bearer is absent from
