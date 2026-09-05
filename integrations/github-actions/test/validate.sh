@@ -186,24 +186,38 @@ import yaml
 data = yaml.safe_load(open(sys.argv[1]))
 inputs = set(data.get("inputs", {}))
 steps = data.get("runs", {}).get("steps", [])
-seen_env = set()
-bad = []
-for step in steps:
-    env = step.get("env", {}) or {}
-    for value in env.values():
-        if isinstance(value, str):
-            match = re.fullmatch(r"\s*\$\{\{\s*inputs\.([A-Za-z0-9_-]+)\s*\}\}\s*", value)
-            if match:
-                seen_env.add(match.group(1))
-    body = step.get("run", "")
-    if isinstance(body, str):
-        for match in re.finditer(r"\$\{\{\s*inputs\.([A-Za-z0-9_-]+)\s*\}\}", body):
-            bad.append(f"{step.get('id', step.get('name', '<unnamed>'))}:{match.group(1)}")
+def inspect(doc):
+    seen_env = set()
+    bad = []
+    for step in doc.get("runs", {}).get("steps", []):
+        env = step.get("env", {}) or {}
+        for value in env.values():
+            if isinstance(value, str):
+                match = re.fullmatch(r"\s*\$\{\{\s*inputs\.([A-Za-z0-9_-]+)\s*\}\}\s*", value)
+                if match:
+                    seen_env.add(match.group(1))
+        bodies = [("run", step.get("run", "")),
+                  ("with.script", (step.get("with", {}) or {}).get("script", ""))]
+        for location, body in bodies:
+            if isinstance(body, str):
+                for match in re.finditer(r"\$\{\{\s*inputs\.([A-Za-z0-9_-]+)\s*\}\}", body):
+                    bad.append(f"{step.get('id', step.get('name', '<unnamed>'))}:{location}:{match.group(1)}")
+    return seen_env, bad
+
+seen_env, bad = inspect(data)
 missing = sorted(inputs - seen_env)
 if bad:
-    print("direct input interpolation in run body: " + ", ".join(bad), file=sys.stderr)
+    print("direct input interpolation in run/script body: " + ", ".join(bad), file=sys.stderr)
 if missing:
     print("inputs not supplied through step env: " + ", ".join(missing), file=sys.stderr)
+mutated = yaml.safe_load(open(sys.argv[1]))
+for step in mutated.get("runs", {}).get("steps", []):
+    if step.get("id") == "parse":
+        step.setdefault("with", {})["script"] = step["with"]["script"] + "\\n${{ inputs.pat }}"
+_, mutation_bad = inspect(mutated)
+if not any(":with.script:pat" in item for item in mutation_bad):
+    print("negative with.script input mutation was not rejected", file=sys.stderr)
+    sys.exit(1)
 sys.exit(bool(bad or missing))
 PY
   then
@@ -285,7 +299,7 @@ printf '%s\0' "$@" > "$DYNAMIC_CAPTURE.argv"
   printf 'CORELINK_VERIFY=%s\n' "$CORELINK_VERIFY"
   printf 'CORELINK_VERSION=%s\n' "${CORELINK_VERSION-}"
 } > "$DYNAMIC_CAPTURE.env"
-printf '{"lease_id":"lease-au5-11","exit":%s,"verified":%s}\n' "$DYNAMIC_RAW_EXIT" "$DYNAMIC_VERIFIED"
+printf '{"lease_id":"lease-au5-11","exit":%s,"verified":%s}\n' "${DYNAMIC_CHECK_EXIT:-$DYNAMIC_RAW_EXIT}" "$DYNAMIC_VERIFIED"
 exit "$DYNAMIC_RAW_EXIT"
 STUB
   chmod +x "$DYNAMIC_TMP/bin/corelink"
@@ -317,12 +331,13 @@ PARSER_RUNNER
   execute_case() {
     local label="$1" input_name="$2" payload="$3" raw="$4" verified="$5" verify_input="$6"
     local expected_run="$7" expected_parse="$8" expected_propagate="$9"
+    local json_exit="${10-$raw}"
     local case_dir run_status parse_status propagate_status
     case_dir=$(mktemp -d "$DYNAMIC_TMP/case.XXXXXX")
     mkdir -p "$case_dir/work" "$case_dir/runner-temp"
     export PATH="$DYNAMIC_TMP/bin:$PATH" RUNNER_TEMP="$case_dir/runner-temp"
     export GITHUB_OUTPUT="$case_dir/gh-output" GITHUB_PATH="$case_dir/gh-path"
-    export DYNAMIC_CAPTURE="$case_dir/capture" DYNAMIC_RAW_EXIT="$raw" DYNAMIC_VERIFIED="$verified"
+    export DYNAMIC_CAPTURE="$case_dir/capture" DYNAMIC_RAW_EXIT="$raw" DYNAMIC_CHECK_EXIT="$json_exit" DYNAMIC_VERIFIED="$verified"
     export SHIM_FAILED="$case_dir/shim-failed"
     export INPUT_VERSION=0.1.0 INPUT_URL=https://safe.example INPUT_PAT=pat-safe \
       INPUT_CHECK='printf safe' INPUT_CHECK_ID=ci-safe INPUT_IMAGE='' INPUT_VERIFY=true
@@ -423,7 +438,7 @@ PARSER_RUNNER
       grep -Fqx "raw_exit=$raw" "$GITHUB_OUTPUT" || dynamic_fail "$label raw_exit output missing"
       grep -Fqx "output_file=$STEP_RUN_OUTPUT_FILE" "$GITHUB_OUTPUT" || dynamic_fail "$label output_file output missing"
       if [[ "$expected_parse" -eq 0 ]]; then
-        grep -Fqx "exit=$raw" "$GITHUB_OUTPUT" || dynamic_fail "$label exit output missing"
+        grep -Fqx "exit=$json_exit" "$GITHUB_OUTPUT" || dynamic_fail "$label exit output missing"
         grep -Fqx "verified=$verified" "$GITHUB_OUTPUT" || dynamic_fail "$label verified output missing"
         grep -Fqx "lease_id=lease-au5-11" "$GITHUB_OUTPUT" || dynamic_fail "$label lease output missing"
       fi
@@ -473,6 +488,7 @@ PY
     done
   done
   execute_case "exit-one" check 'printf safe' 1 true true 0 0 1
+  execute_case "raw-one-check-137" check 'printf safe' 1 true true 0 0 1 137
   execute_case "exit-two" check 'printf safe' 2 true true 2 99 99
   execute_case "verified-false" check 'printf safe' 0 false true 0 2 99
   execute_case "verify-false" verify false 0 false false 0 0 0
