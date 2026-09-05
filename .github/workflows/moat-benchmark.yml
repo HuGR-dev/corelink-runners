@@ -29,6 +29,8 @@ jobs:
   bench:
     runs-on: corelink-dogfood
     steps:
+      - uses: actions/checkout@v4
+
       - name: Moat posture
         run: |
           if [ -n "${CLW_ENDPOINT:-}" ] && [ -n "${CLW_TOKEN:-}" ]; then
@@ -72,6 +74,25 @@ jobs:
           # repeat dispatch reuses the prior run's CAS entry and COLD is also a hit.
           printf '\n// run-unique: %s-%s\n' "${{ github.run_id }}" "${{ github.run_attempt }}" >> moatbench/src/main.rs
           echo "generated moatbench with N=$N fns ($(wc -l < moatbench/src/main.rs) lines), run-unique key"
+
+      # D11/T6-W2: the installed clw 0.1.5 has no authenticated atomic
+      # no-exec HIT/restore operation. The real action must refuse
+      # required-hit with 78 before invoking the planted child command.
+      - name: Required-hit planted miss refuses before child execution
+        id: required_hit
+        continue-on-error: true
+        uses: ./actions/corelink-memoize
+        with:
+          cache-policy: required-hit
+          run: printf 'child-ran\n' > t6-w2-required-hit-child.marker
+          inputs: moatbench/Cargo.toml moatbench/src
+
+      - name: Assert required-hit refusal and no child execution
+        run: |
+          set -euo pipefail
+          test "${{ steps.required_hit.outcome }}" = failure
+          test ! -e t6-w2-required-hit-child.marker
+          echo "required-hit: exit 78 refusal; planted child never executed"
 
       # Helper note: --json makes clw emit its own machine-readable status (incl.
       # cache hit/miss) on stdout; the wrapped `cargo build -q` is near-silent so

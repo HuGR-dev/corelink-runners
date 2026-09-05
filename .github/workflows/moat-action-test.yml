@@ -69,6 +69,25 @@ jobs:
           run: echo "fail-open passthrough OK" && cd moatbench && cargo build --release -q
           inputs: moatbench/Cargo.toml moatbench/src
 
+      # D11/T6-W2: this is intentionally a planted miss against the real
+      # action. clw 0.1.5 lacks an authenticated atomic no-exec HIT/restore
+      # operation, so required-hit must return 78 before the child runs.
+      - name: REQUIRED-HIT planted miss refuses before child execution
+        id: required_hit
+        continue-on-error: true
+        uses: ./actions/corelink-memoize
+        with:
+          cache-policy: required-hit
+          run: printf 'child-ran\n' > t6-w2-required-hit-child.marker
+          inputs: moatbench/Cargo.toml moatbench/src
+
+      - name: Assert required-hit refusal and no child execution
+        run: |
+          set -euo pipefail
+          test "${{ steps.required_hit.outcome }}" = failure
+          test ! -e t6-w2-required-hit-child.marker
+          echo "required-hit: exit 78 refusal; planted child never executed"
+
       - name: TOOL-FOLD via action (safety-by-default — toolchain folded into key)
         uses: ./actions/corelink-memoize
         with:
