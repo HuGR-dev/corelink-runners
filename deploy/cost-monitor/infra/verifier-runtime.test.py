@@ -17,4 +17,13 @@ assert "sns:" not in T and "AWS::CloudFront" not in T and "SecretsManager" not i
 assert "Principal: '*'" not in T
 assert "FunctionName: !Ref WitnessFunction" not in T.split("  MonitorInvokePermission:", 1)[1]
 assert not re.search(r"ImageUri:.*:latest", T, re.I)
+prefix_pattern = re.search(r"JournalPrefix:.*AllowedPattern: '([^']+)'", T).group(1)
+prefix_re = re.compile(prefix_pattern)
+assert prefix_re.fullmatch("journal/")
+assert prefix_re.fullmatch("journal/witness/")
+assert not prefix_re.fullmatch("journal")
+assert prefix_re.fullmatch("journal-other/")
+assert re.search(r"Resource: !Sub '\$\{JournalBucketArn\}/\$\{JournalPrefix\}\*'", T)
+assert not re.match(r"^journal/", "journal-other/object")
+assert "Condition: {StringLike: {s3:prefix: [!Sub '${JournalPrefix}*']}}" in T
 print("verifier runtime policy assertions: PASS")
