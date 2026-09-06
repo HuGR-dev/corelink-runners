@@ -110,3 +110,62 @@ mint/normal webhook durable ACK, shared monthly budget, clw signed release,
 monitor capability/runtime, live containment evidence and subsequent sprint
 scope remain unfinished. Full CI remains prohibited until a complete original
 sprint implementation is composed; focused checks continue.
+
+## Progress at 02:38 BRT (supersedes earlier pending status)
+
+Integration source HEAD `348f79846e3c857ee3a8b28c826c3b96a16f603d`.
+Still 16/70 delivered, 54 outstanding, no complete sprint; no full CI, push,
+release, deployment or new PR has been performed by this takeover.
+
+- Required authorization HTTP client and capacity-before-mint are wired in the
+  actual Worker. Root reproduced 14 authorization/capacity tests.
+- Concurrency authority transactionally records ceiling refusal, exposes scoped
+  authenticated job status, and renews active runner slots from keepalive. Root
+  reproduced 28 slot/control tests. Refusal persistence errors now refuse without
+  spending the bounded infrastructure fail-open budget; real-DO rollback test.
+- Terra split prepareSpawn from provider drive in all four canonical callers.
+  Required authorization/cap/mint failures precede claim/DRIVING. Root reproduced
+  six real-DO public drain tests; pre-effect abandonment revokes only exact newly
+  minted PAT, never a job fence or a potentially concurrent winner's slot.
+- Cold review found a genuine same-job stash race: the old job-scoped stash could
+  return another attempt's ticket. Stashes now use exact job/tenant/PAT lease IDs.
+  Cleanup wipes the exact stash before marking revocation terminal; three focused
+  tests include wipe-failure/cron recovery and preserve the winner's ticket.
+- Root added a separate normal intake inbox in ContainmentDO, preserving the
+  normal-empty exclusion from containment backlog. Durable enqueue precedes 202;
+  limiter refusals enqueue with 60-second backoff or return503 on storage failure.
+  Cron resumes normal canonical owner flow, uncertain effects never replay, and
+  the active inbox is bounded500. Root fixed starvation beyond25 delayed heads,
+  field/schema/index validation, and the normal caller's missing claim witness.
+  The inherited isVitestLegacyFixtureContext production-source bypass is removed.
+  Root11 inbox/public webhook tests and strict Worker TypeScript pass.
+- Root39 earlier composed concurrency/capacity/route/slot lifecycle tests passed.
+  Pg suspension producer: two REAL PostgreSQL tests and engine37+2 conformance
+  tests passed. Lima corelink-ci-proof and its PostgreSQL container were stopped
+  after those tests; host5432 untouched. Protected DB env remains available.
+
+Dependencies are prepared in isolated sibling worktrees, not released:
+- Server relay+authorize: `/private/tmp/corelink-takeover-server-authorize`,
+  HEAD `7c58cc0febcedfeec844a641ce7bb52a3454cb41`. Shared read-only authorize
+  gates, budget0 preservation, safe caps and whitespace identity rejection;
+  reviewer reproduced73 tests, author78 after repair. Existing unrelated TS errors
+  in durable_object/replication_coordinator are assigned for bounded repair.
+- Workspaces/clw: `/private/tmp/corelink-takeover-clw`, HEAD
+  `aca24f728ca44eac26118653a631033297eec51f`, required-hit implementation and
+  version0.1.12 release preparation. Required release secret NAMES exist in GitHub;
+  values were not read. Signed release/five targets and consumer pins remain.
+  No renewed owner exception is needed: bounded sibling edits already authorized.
+
+Route fixtures are being repaired by the existing Terra agent using real DOs,
+external authorize/mint HTTP mocks, and actual composed source. Luna's44f6224
+fixture commit is not integrated: it had33 failures. Do not accept legacy path
+bypasses or remove contract assertions to green it. Root owns index.ts integration.
+
+O-MONITORHOST remains unresolved. AWS accounts exist (above), but SNS/SQS FIFO
+supports only5-minute deduplication and lacks historical exact operation receipt
+lookup after deletion; CloudWatch logs lack the required exhaustive delivery
+cursor proof. Rekor v2+Sigstore RFC3161 TSA can anchor blinded hash receipts, but
+cannot retroactively prove transport delivery. Capability review notes live at
+/private/tmp/corelink-monitor-capability-review.md; they are not a GREEN artifact.
+No deploy/cost-monitor application exists. The later seven continuous observation
+ days remain mandatory and have not started. Do not invent elapsed evidence.
