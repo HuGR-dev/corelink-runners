@@ -24,19 +24,56 @@ fn real_pg_lifecycle_generation_is_exact_across_same_clock_resume() -> anyhow::R
         .build()?;
     runtime.block_on(async {
         let ledger = PgLedger::connect(&url, 4, PgTlsMode::Disable).await?;
+        let observer = PgLedger::connect(&url, 4, PgTlsMode::Disable).await?;
         let tenant = uuid::Uuid::new_v4().to_string();
         let first = event(&tenant, "suspend-a", 7);
         ledger.record_tenant_suspension(first.clone())?;
+        let pointer: String = ledger
+            .pool
+            .get()
+            .await?
+            .query_one(
+                "SELECT suspension_event_id FROM fabric_suspended_tenants WHERE tenant_id=$1",
+                &[&tenant],
+            )
+            .await?
+            .get(0);
         assert_eq!(ledger.tenant_lifecycle(&tenant)?.generation, 1);
         assert!(ledger.tenant_lifecycle(&tenant)?.suspended);
-        assert_eq!(ledger.tenant_suspension_generation(&first.event_id)?, 1);
+        assert_eq!(ledger.tenant_suspension_generation(&pointer)?, 1);
+        ledger.record_tenant_suspension(first.clone())?;
+        let repeated_pointer: String = ledger
+            .pool
+            .get()
+            .await?
+            .query_one(
+                "SELECT suspension_event_id FROM fabric_suspended_tenants WHERE tenant_id=$1",
+                &[&tenant],
+            )
+            .await?
+            .get(0);
+        assert_eq!(repeated_pointer, pointer);
+        assert_eq!(ledger.tenant_lifecycle(&tenant)?.generation, 1);
         ledger.set_tenant_suspended(&tenant, false)?;
         assert_eq!(ledger.tenant_lifecycle(&tenant)?.generation, 2);
+        assert_eq!(observer.tenant_lifecycle(&tenant)?.generation, 2);
         ledger.set_tenant_suspended(&tenant, false)?;
         assert_eq!(ledger.tenant_lifecycle(&tenant)?.generation, 2);
         let second = event(&tenant, "suspend-b", 7);
         ledger.record_tenant_suspension(second.clone())?;
-        assert_eq!(ledger.tenant_suspension_generation(&second.event_id)?, 2);
+        let second_pointer: String = ledger
+            .pool
+            .get()
+            .await?
+            .query_one(
+                "SELECT suspension_event_id FROM fabric_suspended_tenants WHERE tenant_id=$1",
+                &[&tenant],
+            )
+            .await?
+            .get(0);
+        assert_ne!(second_pointer, pointer);
+        assert_eq!(ledger.tenant_suspension_generation(&second_pointer)?, 2);
+        assert_eq!(observer.tenant_suspension_generation(&pointer)?, 1);
         Ok::<_, anyhow::Error>(())
     })
 }
@@ -60,7 +97,8 @@ fn real_pg_legacy_event_is_generation_zero_and_missing_pointer_repairs_current()
         ledger.set_tenant_suspended(&tenant, true)?;
         db.execute("UPDATE fabric_suspended_tenants SET suspension_event_id=NULL WHERE tenant_id=$1", &[&tenant]).await?;
         ledger.record_tenant_suspension(event(&tenant, "repair", 9))?;
-        assert_eq!(ledger.tenant_suspension_generation("repair")?, 1);
+        let repaired: String = ledger.pool.get().await?.query_one("SELECT suspension_event_id FROM fabric_suspended_tenants WHERE tenant_id=$1", &[&tenant]).await?.get(0);
+        assert_eq!(ledger.tenant_suspension_generation(&repaired)?, 1);
         Ok::<_, anyhow::Error>(())
     })
 }
