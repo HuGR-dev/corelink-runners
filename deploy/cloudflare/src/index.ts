@@ -5632,8 +5632,10 @@ export async function redriveOrphanedJobs(
       if (reservationAuthority) {
         const identity = normalizeRedriveIdentity(repo, jobId);
         if (!identity) continue;
-        redriveRepo = identity.repo;
-        redriveJobId = identity.job_id;
+        // The containment ledger owns its canonical key. Keep the authorized
+        // registry spelling in redriveRepo for prepareSpawn and its downstream
+        // authorize/mint request; normalizing it here would change that external
+        // identity before the issuer sees it.
         let admitted: Awaited<ReturnType<ContainmentDO["reserveRedriveCandidate"]>>;
         try {
           const bootstrapped = await reservationAuthority.bootstrapContainedEventIndex(identity.repo, identity.job_id);
