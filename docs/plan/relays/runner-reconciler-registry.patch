@@ -1,6 +1,51 @@
+diff --git a/worker/src/index.ts b/worker/src/index.ts
+index 0e17001b0..5b4718951 100644
+--- a/worker/src/index.ts
++++ b/worker/src/index.ts
+@@ -56,6 +56,7 @@ import { resolveTenantTierCached } from "./lib/tenant_tier_cache.js";
+ import { verifyPatRowCached, type KvReader } from "./lib/pat_verify_cache.js";
+ import { handleSessionExchange, handleTokenExchange } from "./lib/session_exchange.js";
+ import { handleRunnerMint, handleRunnerRevoke } from "./lib/runner_mint.js";
++import { handleRunnerReconcilerRegistry } from "./lib/runner_reconciler_registry.js";
+ import {
+   readPublicHit,
+   shadowCompareEdgePublicRead,
+@@ -534,6 +535,7 @@ type RouteKind =
+   | "token_exchange"
+   | "runner_mint"
+   | "runner_revoke"
++  | "runner_reconciler_registry"
+   | "auth_rotate"
+   | "internal"
+   | "health_container"
+@@ -1125,6 +1127,12 @@ function matchRoute(url: URL): RouteMatch {
+     return { tenantId: "_system", pathSuffix: path, routeKind: "runner_revoke" };
+   }
+ 
++  // corelink-runners recovery inventory. Internal-auth gated and sourced from
++  // the same installation/allowlist/entitlement authorities as runner mint.
++  if (path === "/internal/v1/runner/reconciler-registry") {
++    return { tenantId: "_system", pathSuffix: path, routeKind: "runner_reconciler_registry" };
++  }
++
+   // clw `auth rotate` seam — atomic mint-new + revoke-old. EXACT
+   // /internal/v1/auth/rotate. Internal-auth gated (same pat_mint consumer key as
+   // runner-mint/revoke); reads the old `pat` row for its tenant + scope, mints an
+@@ -2698,6 +2706,11 @@ const baseHandler: ExportedHandler<Env> = {
+       return applyCors(revokeResp, request);
+     }
+ 
++    if (route.routeKind === "runner_reconciler_registry") {
++      const registryResp = await handleRunnerReconcilerRegistry(request, env, requestId);
++      return applyCors(registryResp, request);
++    }
++
+     // clw `auth rotate` (POST /internal/v1/auth/rotate). Internal-auth gated
+     // (pat_mint consumer key + shared fallback); reads the old PAT's tenant +
+     // scope, mints an equivalent new PAT via the container's single mint authority
 diff --git a/worker/src/lib/runner_reconciler_registry.ts b/worker/src/lib/runner_reconciler_registry.ts
 new file mode 100644
-index 0000000..f458019
+index 000000000..f458019bd
 --- /dev/null
 +++ b/worker/src/lib/runner_reconciler_registry.ts
 @@ -0,0 +1,111 @@
@@ -117,17 +162,33 @@ index 0000000..f458019
 +}
 diff --git a/worker/tests/runner_reconciler_registry.test.ts b/worker/tests/runner_reconciler_registry.test.ts
 new file mode 100644
-index 0000000..c76c817
+index 000000000..908813d50
 --- /dev/null
 +++ b/worker/tests/runner_reconciler_registry.test.ts
-@@ -0,0 +1,56 @@
+@@ -0,0 +1,96 @@
 +import { describe, expect, it, vi } from "vitest";
++import workerHandler from "../src/index.js";
 +import {
 +  handleRunnerReconcilerRegistry,
 +  queryRunnerReconcilerRegistry,
 +} from "../src/lib/runner_reconciler_registry.js";
 +
 +const KEY = "k".repeat(32);
++const webCrypto = globalThis.crypto;
++vi.stubGlobal("crypto", {
++  ...webCrypto,
++  randomUUID: () => "00000000-0000-4000-8000-000000000001",
++  subtle: {
++    ...webCrypto.subtle,
++    timingSafeEqual(left: ArrayBuffer, right: ArrayBuffer) {
++      const a = new Uint8Array(left);
++      const b = new Uint8Array(right);
++      let result = a.length === b.length ? 0 : 1;
++      for (let i = 0; i < Math.max(a.length, b.length); i++) result |= (a[i] ?? 0) ^ (b[i] ?? 0);
++      return result === 0;
++    },
++  },
++});
 +const env = (db: unknown) => ({
 +  CONFIG_DB: db,
 +  CORELINK_RUNNER_MINT_AUTH_KEY: KEY,
@@ -142,6 +203,28 @@ index 0000000..c76c817
 +}
 +
 +describe("runner reconciler registry", () => {
++  it("dispatches through the real Worker route with runner-mint auth", async () => {
++    const response = await workerHandler.fetch(
++      new Request("https://api.invalid/internal/v1/runner/reconciler-registry"),
++      env(db([{ installation_id: "42", repo_full_name: "acme/a" }])),
++      { waitUntil: () => {}, passThroughOnException: () => {} } as never,
++    );
++    expect(response.status).toBe(401);
++
++    const authorized = await workerHandler.fetch(
++      new Request("https://api.invalid/internal/v1/runner/reconciler-registry", {
++        headers: { "x-corelink-internal-auth": KEY },
++      }),
++      env(db([{ installation_id: "42", repo_full_name: "acme/a" }])),
++      { waitUntil: () => {}, passThroughOnException: () => {} } as never,
++    );
++    expect(authorized.status).toBe(200);
++    expect(authorized.headers.get("x-request-id")).toBeTruthy();
++    await expect(authorized.json()).resolves.toMatchObject({
++      repositories: [{ installation_id: "42", repo_full_name: "acme/a" }],
++    });
++  });
++
 +  it("uses the installation map plus allowlist and emits a bounded cursor", async () => {
 +    const result = await queryRunnerReconcilerRegistry(db([
 +      { installation_id: "42", repo_full_name: "acme/a" },
@@ -169,7 +252,9 @@ index 0000000..c76c817
 +  it("rejects malformed cursors before touching D1", async () => {
 +    const database = db([]);
 +    const response = await handleRunnerReconcilerRegistry(
-+      new Request("https://api.invalid/internal/v1/runner/reconciler-registry?cursor=bad"),
++      new Request("https://api.invalid/internal/v1/runner/reconciler-registry?cursor=bad", {
++        headers: { "x-corelink-internal-auth": KEY },
++      }),
 +      env(database),
 +      "req-2",
 +    );
