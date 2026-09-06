@@ -3,7 +3,7 @@ import { canonicalJSON, type JournalReceipt, type JournalRecord } from "./journa
 import { verifyOrderedFields, type AsyncSigner, type PublicSigningIdentity } from "./acks.js";
 import type { MonitorStateStore, Stored } from "./state.js";
 // @ts-expect-error supplied by the trusted-time foundation integration.
-import type { TrustedClock } from "./trusted_time.js";
+import type { TrustedClock, TrustedTimeProof } from "./trusted_time.js";
 
 const ROOT = "0".repeat(64);
 const DIGEST = /^[0-9a-f]{64}$/;
@@ -64,6 +64,7 @@ interface Pending {
   checkpoint: SignedCheckpoint;
   checkpointRoot: string;
   journalRecord: JournalRecord;
+  timeProof: TrustedTimeProof;
   journalReceipt?: JournalReceipt;
   witnessReceipt?: WitnessReceipt;
   witnessRoot?: string;
@@ -93,6 +94,12 @@ function text(value: unknown, name: string, max = 256): string {
 function digest(value: unknown, name: string): string { if (typeof value !== "string" || !DIGEST.test(value)) throw new AuditIntegrityError(`invalid ${name}`); return value; }
 function validateJournalReceipt(receipt: JournalReceipt, record: JournalRecord): void {
   if (!receipt || receipt.operationId !== record.operationId || receipt.sequence !== record.sequence || receipt.previousDigest !== record.previousDigest || receipt.recordDigest !== sha(journalBytes(record)) || typeof receipt.versionId !== "string" || receipt.versionId.length === 0 || typeof receipt.key !== "string" || typeof receipt.bucket !== "string" || !Number.isSafeInteger(receipt.retainedUntilMs) || receipt.retainedUntilMs <= 0) throw new AuditIntegrityError("journal receipt refused");
+}
+function validateTimeProof(proof: TrustedTimeProof): TrustedTimeProof {
+  positive(proof.timeMs, "trusted time");
+  digest(proof.proofDigest, "trusted proof digest"); digest(proof.requestDigest, "trusted request digest");
+  text(proof.authority, "trusted authority");
+  return { timeMs: proof.timeMs, proofDigest: proof.proofDigest, requestDigest: proof.requestDigest, authority: proof.authority };
 }
 function identity(value: PublicSigningIdentity, role: "journal" | "witness"): void {
   if (!value || value.role !== role || typeof value.keyId !== "string" || typeof value.epoch !== "string") throw new AuditIntegrityError(`invalid ${role} identity`);
@@ -174,7 +181,8 @@ export class DurableAuditLog {
       if (pending.payloadCanonical !== payloadCanonical) throw new AuditIntegrityError("operation payload fork");
       return pending;
     }
-    const now = positive(await (this.clock as unknown as { now(): Promise<number> }).now(), "trustedAtMs");
+    const timeProof = validateTimeProof(await this.clock.now());
+    const now = timeProof.timeMs;
     const sequence = head ? positive(head.value.sequence + 1, "sequence") : 1;
     const previousRoot = head?.value.checkpointRoot ?? ROOT;
     const canonicalPayload = JSON.parse(payloadCanonical) as unknown;
@@ -183,7 +191,7 @@ export class DurableAuditLog {
     const unsigned: SignedCheckpoint = { version: VERSION, logId: this.logId, sequence, previousRoot, recordDigest, operationId, trustedAtMs: now, signerKeyId: this.signer.identity.keyId, signerEpoch: this.signer.identity.epoch, signature: "pending" };
     const signature = await this.signer.sign(bytes(signedTuple(unsigned)));
     unsigned.signature = text(signature, "checkpoint signature", 8192);
-    const pending: Pending = { kind: "pending", operationId, payload: canonicalPayload, payloadCanonical, checkpoint: unsigned, checkpointRoot: verifyCheckpoint(unsigned, this.signer), journalRecord };
+    const pending: Pending = { kind: "pending", operationId, payload: canonicalPayload, payloadCanonical, checkpoint: unsigned, checkpointRoot: verifyCheckpoint(unsigned, this.signer), journalRecord, timeProof };
     const result = await this.store.transact([
       { key: this.headKey, expectedVersion: head?.version ?? null, value: { kind: "head", sequence: head?.value.sequence ?? 0, checkpointRoot: head?.value.checkpointRoot ?? ROOT, witnessRoot: head?.value.witnessRoot ?? ROOT, pending } satisfies Head },
       { key: this.operationKey(operationId), expectedVersion: null, value: { kind: "pending", pending } satisfies OperationPending },
@@ -206,6 +214,7 @@ export class DurableAuditLog {
     let pending = reserved as Pending;
     let head = (await this.getHead())!;
     if (!head?.value.pending || head.value.pending.operationId !== pending.operationId || head.value.pending.checkpointRoot !== pending.checkpointRoot) throw new AuditIntegrityError("pending audit state is incomplete");
+    validateTimeProof(pending.timeProof);
     if (!pending.journalReceipt) {
       const journalReceipt = await this.journal.append(pending.journalRecord);
       validateJournalReceipt(journalReceipt, pending.journalRecord);

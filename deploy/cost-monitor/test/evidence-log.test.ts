@@ -15,6 +15,7 @@ function signer(role: "journal" | "witness"): AsyncSigner {
 const journalSigner = signer("journal");
 const witnessSigner = signer("witness");
 const now = 1_700_000_000_000;
+const proof = { timeMs: now, proofDigest: "a".repeat(64), requestDigest: "b".repeat(64), authority: "test-tsa" };
 function recordDigest(record: JournalRecord): string { return createHash("sha256").update(JSON.stringify([record.operationId, record.sequence, record.previousDigest, canonicalJSON(record.payload), record.trustedAtMs])).digest("hex"); }
 function journalReceipt(record: JournalRecord): JournalReceipt { return { operationId: record.operationId, sequence: record.sequence, previousDigest: record.previousDigest, recordDigest: recordDigest(record), bucket: "bucket", key: `journal/${record.sequence}`, versionId: "v1", retainedUntilMs: now + 8 * 86400000 }; }
 class FakeJournal implements ImmutableJournal {
@@ -34,7 +35,7 @@ class FakeWitness implements CheckpointWitness {
 }
 function make(overrides: Partial<{ store: MemoryStateStore; journal: FakeJournal; witness: FakeWitness }> = {}) {
   const store = overrides.store ?? new MemoryStateStore(); const journal = overrides.journal ?? new FakeJournal(); const witness = overrides.witness ?? new FakeWitness();
-  const log = new DurableAuditLog({ store, journal, witness, signer: journalSigner, witnessIdentity: witnessSigner.identity, clock: { async now() { return now; } } as never, logId: "log", namespace: "ns" });
+  const log = new DurableAuditLog({ store, journal, witness, signer: journalSigner, witnessIdentity: witnessSigner.identity, clock: { async now() { return proof; } } as never, logId: "log", namespace: "ns" });
   return { log, store, journal, witness };
 }
 
@@ -49,7 +50,7 @@ describe("DurableAuditLog", () => {
     const store = new MemoryStateStore(); const journal = new FakeJournal();
     let release!: () => void; const gate = new Promise<void>((resolve) => { release = resolve; });
     const witness: CheckpointWitness = { async accept(checkpoint) { await gate; return new FakeWitness().accept(checkpoint); } };
-    const a = new DurableAuditLog({ store, journal, witness, signer: journalSigner, witnessIdentity: witnessSigner.identity, clock: { async now() { return now; } } as never, logId: "log", namespace: "ns" });
+    const a = new DurableAuditLog({ store, journal, witness, signer: journalSigner, witnessIdentity: witnessSigner.identity, clock: { async now() { return proof; } } as never, logId: "log", namespace: "ns" });
     const first = a.append("op-a", { x: 1 }); await new Promise((resolve) => setTimeout(resolve, 0));
     await expect(a.append("op-b", { x: 2 })).rejects.toBeInstanceOf(AuditBusyError);
     await expect(a.append("op-a", { x: 2 })).rejects.toBeInstanceOf(AuditIntegrityError);
@@ -58,14 +59,14 @@ describe("DurableAuditLog", () => {
   it("fails closed on a forged witness and retains pending state", async () => {
     const store = new MemoryStateStore(); const journal = new FakeJournal();
     const bad: CheckpointWitness = { async accept(checkpoint) { const receipt = await new FakeWitness().accept(checkpoint); return { ...receipt, checkpointRoot: "f".repeat(64) }; } };
-    const log = new DurableAuditLog({ store, journal, witness: bad, signer: journalSigner, witnessIdentity: witnessSigner.identity, clock: { async now() { return now; } } as never, logId: "log", namespace: "ns" });
+    const log = new DurableAuditLog({ store, journal, witness: bad, signer: journalSigner, witnessIdentity: witnessSigner.identity, clock: { async now() { return proof; } } as never, logId: "log", namespace: "ns" });
     await expect(log.append("op", { safe: true })).rejects.toBeInstanceOf(AuditIntegrityError);
     expect((await store.get("ns/head"))?.value).toMatchObject({ pending: { operationId: "op", journalReceipt: { recordDigest: expect.any(String) } } });
   });
   it("reconstructs after a final CAS failure without reclocking or re-journaling", async () => {
     const store = new MemoryStateStore(); const journal = new FakeJournal(); const witness = new FakeWitness();
     let commits = 0; const wrapped = { get: store.get.bind(store), scan: store.scan.bind(store), async transact(writes: any) { commits++; const result = await store.transact(writes); if (commits === 4) throw new Error("crash after durable commit"); return result; } };
-    const first = new DurableAuditLog({ store: wrapped as never, journal, witness, signer: journalSigner, witnessIdentity: witnessSigner.identity, clock: { async now() { return now; } } as never, logId: "log", namespace: "ns" });
+    const first = new DurableAuditLog({ store: wrapped as never, journal, witness, signer: journalSigner, witnessIdentity: witnessSigner.identity, clock: { async now() { return proof; } } as never, logId: "log", namespace: "ns" });
     await expect(first.append("op", { x: 1 })).rejects.toThrow("crash");
     const second = new DurableAuditLog({ store, journal, witness, signer: journalSigner, witnessIdentity: witnessSigner.identity, clock: { async now() { throw new Error("must not reclock"); } } as never, logId: "log", namespace: "ns" });
     await expect(second.append("op", { x: 1 })).resolves.toBeDefined();
