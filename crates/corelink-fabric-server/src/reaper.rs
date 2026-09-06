@@ -169,7 +169,7 @@ fn secure_worker_origin(raw: &str) -> Option<&str> {
     {
         return None;
     }
-    if authority_end < rest.len() && rest[authority_end..] != "/" {
+    if authority_end < rest.len() && &rest[authority_end..] != "/" {
         return None;
     }
     let (host, port) = if authority.starts_with('[') {
@@ -194,11 +194,12 @@ fn secure_worker_origin(raw: &str) -> Option<&str> {
 fn suspension_receipt_is_ack(
     status: u16,
     body: &[u8],
+    coverage_verified: bool,
     event_id: &str,
     tenant_id: &str,
     lifecycle_generation: &str,
 ) -> bool {
-    if status != 200 || body.len() > MAX_SUSPENSION_RECEIPT_BYTES {
+    if status != 200 || !coverage_verified || body.len() > MAX_SUSPENSION_RECEIPT_BYTES {
         return false;
     }
     let Ok(payload) = serde_json::from_slice::<serde_json::Value>(body) else {
@@ -293,10 +294,15 @@ pub async fn dispatch_tenant_suspension_events(state: &crate::AppState) {
                 .header("Content-Type", "application/json")
                 .send(&body);
             response
-                .map(|r| {
+                .map(|mut r| {
                     let status = r.status().as_u16();
+                    let coverage_verified = r
+                        .headers()
+                        .get("x-corelink-legacy-coverage")
+                        .is_some_and(|value| value == "verified");
                     let mut reader = r
-                        .into_reader()
+                        .body_mut()
+                        .as_reader()
                         .take((MAX_SUSPENSION_RECEIPT_BYTES + 1) as u64);
                     let mut body = Vec::with_capacity(MAX_SUSPENSION_RECEIPT_BYTES + 1);
                     if reader.read_to_end(&mut body).is_err() {
@@ -305,6 +311,7 @@ pub async fn dispatch_tenant_suspension_events(state: &crate::AppState) {
                     suspension_receipt_is_ack(
                         status,
                         &body,
+                        coverage_verified,
                         &expected_event_id,
                         &expected_tenant_id,
                         &expected_generation,
@@ -3217,8 +3224,9 @@ mod tests {
             "complete": true,
         })
         .to_string();
-        assert!(suspension_receipt_is_ack(200, body.as_bytes(), "event-1", "tenant-1", "7"));
-        assert!(!suspension_receipt_is_ack(202, body.as_bytes(), "event-1", "tenant-1", "7"));
+        assert!(suspension_receipt_is_ack(200, body.as_bytes(), true, "event-1", "tenant-1", "7"));
+        assert!(!suspension_receipt_is_ack(200, body.as_bytes(), false, "event-1", "tenant-1", "7"));
+        assert!(!suspension_receipt_is_ack(202, body.as_bytes(), true, "event-1", "tenant-1", "7"));
 
         for (field, value) in [
             ("event_id", serde_json::json!("other-event")),
@@ -3236,6 +3244,7 @@ mod tests {
             assert!(!suspension_receipt_is_ack(
                 200,
                 receipt.to_string().as_bytes(),
+                true,
                 "event-1",
                 "tenant-1",
                 "7"
@@ -3255,6 +3264,7 @@ mod tests {
         assert!(!suspension_receipt_is_ack(
             200,
             receipt.to_string().as_bytes(),
+            true,
             "event-1",
             "tenant-1",
             "7"
@@ -3262,6 +3272,7 @@ mod tests {
         assert!(!suspension_receipt_is_ack(
             200,
             &vec![b'x'; MAX_SUSPENSION_RECEIPT_BYTES + 1],
+            true,
             "event-1",
             "tenant-1",
             "7"

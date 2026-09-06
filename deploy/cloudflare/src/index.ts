@@ -130,6 +130,7 @@ import {
 } from "./lib/revocation_outbox.js";
 import type { CredentialIdentity, CredentialPage, CredentialSelection } from "./lib/credential_authority_contract.js";
 import { TenantSuspensionAuthority, type TenantSuspensionInput } from "./lib/tenant_suspension_authority.js";
+import { consumeTenantSuspensionCredentials, type TenantSuspensionConsumerDependencies } from "./lib/tenant_suspension_credentials.js";
 import { installationToken } from "./github_app";
 import {
   claimReconcileHandoff,
@@ -4786,12 +4787,23 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
     // this route is never public or tenant-authenticated.
     if (request.method === "POST" && pathname === "/internal/v1/tenant-suspension") {
       if (!controlAuthed(request, env)) return unauthorized();
-      let body: { event_id?: string; tenant_id?: string; action?: string };
+      let body: { event_id?: string; tenant_id?: string; lifecycle_generation?: string; action?: string };
       try { body = (await request.json()) as typeof body; } catch { return json({ error: "invalid JSON body" }, 400); }
-      if (body.action !== "suspended" || !body.event_id || !body.tenant_id) return json({ error: "invalid suspension event" }, 400);
+      if (body.action !== "suspended" || !body.event_id || !body.tenant_id || !body.lifecycle_generation || Object.keys(body).sort().join(",") !== "action,event_id,lifecycle_generation,tenant_id" || body.lifecycle_generation.length > 19 || !/^(0|[1-9][0-9]*)$/.test(body.lifecycle_generation) || (() => { try { return BigInt(body.lifecycle_generation!) > 9_223_372_036_854_775_807n; } catch { return true; } })()) return json({ error: "invalid suspension event" }, 400);
       try {
-        const dispatched = await dispatchTenantSuspensionRevocations(env, { event_id: body.event_id, tenant_id: body.tenant_id });
-        return json({ ok: true, event_id: body.event_id, dispatched }, 200);
+        const input: TenantSuspensionInput = { event_id: body.event_id, tenant_id: body.tenant_id, lifecycle_generation: body.lifecycle_generation };
+        const authority = containmentAuthority(env) as unknown as TenantSuspensionConsumerDependencies["authority"];
+        const result = await consumeTenantSuspensionCredentials(env, input, {
+          authority,
+          revokeCredential: async identity => {
+            if (!(await revokeIssuedCredential(env, authority, identity))) throw new Error("credential revoke pending");
+          },
+        });
+        const complete = result.complete;
+        return new Response(JSON.stringify({ ...input, complete }), {
+          status: complete ? 200 : 202,
+          headers: { "content-type": "application/json", "x-corelink-legacy-coverage": complete ? "verified" : "unknown" },
+        });
       } catch (e) {
         logEvent("error", "tenant_suspension_dispatch_failed", { eventId: body.event_id, error: (e as Error).message });
         return json({ error: "suspension dispatch unavailable" }, 503);
