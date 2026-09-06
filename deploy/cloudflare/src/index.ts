@@ -3,6 +3,7 @@ import { CredentialObligationAuthority } from "./lib/credential_obligation_autho
 import { RetryEpochAuthority } from "./lib/retry_epoch_authority";
 import { retryEpochClient, type RetryEpochAuthorityRpc } from "./lib/retry_epoch_client";
 import { controlAuthed } from "./lib/control_auth";
+import { ConcurrencyAuthority } from "./lib/concurrency_authority";
 // CoreLink spawn-Worker + Container DO (ADR-0008).
 //
 // Cloudflare side of the frozen seam (docs/spec/cloudflare-spawn-worker-contract.md).
@@ -65,8 +66,6 @@ import {
   spawnClaimAgeMs,
   SPAWN_CLAIM_TTL_S,
   claimCompletion,
-  decideSlotAcquire,
-  releaseSlotByJob,
   SLOT_TTL_S,
   FLEET_MAX_CONCURRENCY,
   COLD_REPO_CAP,
@@ -113,7 +112,6 @@ import {
   type RunnerActivity,
   logEvent,
   type ContainerEnvResult,
-  type SlotRecord,
   type StashedCred,
   type StashRecord,
   type CredStashLike,
@@ -489,6 +487,7 @@ export class CredStashDO extends DurableObject<Env> {
 // The DECISION is the pure `decideSlotAcquire`/`releaseSlotByJob` (lib, unit-
 // tested); this wrapper only persists the resulting slot list.
 export class ConcurrencySlotsDO extends DurableObject<Env> {
+  private authority(): ConcurrencyAuthority { return new ConcurrencyAuthority(this.ctx.storage); }
   // ATOMIC acquire: prune-expired → decide (per-key cap THEN fleet cap; idempotent
   // per jobId) → persist. Returns the clean admit/refuse decision — the caller
   // fail-opens ONLY on a THROWN error (infra hiccup), never on a `{admitted:false}`.
@@ -499,25 +498,24 @@ export class ConcurrencySlotsDO extends DurableObject<Env> {
     fleetCap: number,
     ttlMs: number,
   ): Promise<{ admitted: boolean; reason?: string }> {
-    const slots = (await this.ctx.storage.get<SlotRecord[]>("slots")) ?? [];
-    const d = decideSlotAcquire(slots, key, jobId, perKeyCap, fleetCap, Date.now(), ttlMs);
-    await this.ctx.storage.put("slots", d.slots);
-    return { admitted: d.admitted, reason: d.reason };
+    return this.authority().acquire(key, jobId, perKeyCap, fleetCap, Date.now(), ttlMs);
   }
 
   // Release a slot by jobId (globally unique — no key needed). Also prunes expired
   // slots. Idempotent: releasing an unknown/already-released jobId is a safe no-op.
-  async release(jobId: string): Promise<void> {
-    const slots = (await this.ctx.storage.get<SlotRecord[]>("slots")) ?? [];
-    await this.ctx.storage.put("slots", releaseSlotByJob(slots, jobId, Date.now()));
+  async release(jobId: string, nowMs = Date.now()): Promise<void> {
+    await this.authority().release(jobId, nowMs);
   }
 
   /** Prune leases even when no acquire/release request arrives. */
-  async pruneExpired(): Promise<number> {
-    const slots = (await this.ctx.storage.get<SlotRecord[]>("slots")) ?? [];
-    const live = slots.filter((slot) => slot.expiresMs > Date.now());
-    await this.ctx.storage.put("slots", live);
-    return slots.length - live.length;
+  async pruneExpired(nowMs = Date.now()): Promise<number> {
+    return this.authority().prune(nowMs);
+  }
+
+  async getRefusal(jobId: string): Promise<object | null> { return this.authority().getRefusal(jobId); }
+
+  async renew(jobId: string, ttlMs: number): Promise<boolean> {
+    return this.authority().renew(jobId, Date.now(), ttlMs);
   }
 
   async recordRetry(jobId: string, epochId: string, legacyFloor = 0): Promise<{ attempts: number; recorded: boolean }> {
