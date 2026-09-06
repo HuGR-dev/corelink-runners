@@ -453,9 +453,12 @@
         "O-MONITORHOST",
         "T7-W4b"
       ],
-      "next_action": "Single executor at /private/tmp/corelink-t6-w15-owner-20260906 composes the remaining reviewed codecs and witness runtime for r2_pair_acceptance (Luna), then terminal-ingest only after Terra cold approval. No new component work packages or author dispatches; keep UNKNOWN fail-closed and complete the remaining qualification before any work-package acceptance or deployment.",
+      "next_action": "Single executor at /private/tmp/corelink-t6-w15-owner-20260906 composes the reviewed witness runtime, durable signer registry, ACK recovery, human page acknowledgement, and concrete main runtime for r2_pair_acceptance (Luna). Ingest aaa68154 and the three approved codecs are integrated. No new component work packages or author dispatches; keep UNKNOWN fail-closed and complete the remaining qualification before any work-package acceptance or deployment.",
       "blockers": [
-        "Trusted time/TSA qualification, WORM and three-account independence qualification, crash/rotation/isolation tests, and seven real observation days remain required before acceptance."
+        "Trusted time/TSA qualification, WORM and three-account independence qualification, crash/rotation/isolation tests, and the base A6.10 probe 3/3 remain required before base acceptance."
+      ],
+      "post_base_gates": [
+        "The seven-day A6.17 observation is a final qualification gate implemented by T6-W12 and collected by T6-W10; it is not a T6-W15 base blocker."
       ],
       "commits": [
         "a0f13d37c2ace4b30f2d6f42d6a1b9fa4a49b6fe",
@@ -477,11 +480,27 @@
         "5576b1d",
         "e68d343",
         "2819578",
-        "7ddfdcb"
+        "7ddfdcb",
+        "92837d5",
+        "4e5f270",
+        "a8283d2",
+        "54be7ac",
+        "1f1a527",
+        "1a9eb2a",
+        "4363dba",
+        "8a2303e",
+        "c2b43ee",
+        "786fb28",
+        "e23ce21",
+        "63d7f8d",
+        "b025351",
+        "ffaea8c",
+        "de13d45",
+        "c600bd4"
       ],
       "review": {
         "status": "partial",
-        "commit": "7ddfdcb",
+        "commit": "c600bd4",
         "evidence": [
           "Outbox cold composition review: 8 focused tests and tsc --noEmit at a0f13d37.",
           "Witness independent review: 6 focused tests and tsc --noEmit; canonical source 5f64ca68 through baf5b9ca and integration fc1ec79 through 59b1a15.",
@@ -493,6 +512,8 @@
           "Fresh independent witness-head composition review: witness 7/7, journal 10/10, and tsc; source 66037ec through a991435f with journal b734531f and integration c8e7a5e through 95d51f3. SignedWitnessHead has nine named fields before a separate signature. These results overlap module evidence and do not change delivery counts.",
           "Missing-source scheduler independent review: 10 focused tests and tsc --noEmit; source 521bda03 through 4b8b32f and integration 0e50daf through 5576b1d, where scheduler.test.ts and canary-missing-tick.test.ts passed 10/10 and typecheck passed. Source-only; no delivery credit.",
           "AWS source-secret and Lambda-witness adapters cold review: 5 focused tests and tsc --noEmit; source ebaf217 through b2404a9 and integration e68d343 through 7ddfdcb, where aws-adapters.test.ts passed 5/5 and typecheck passed. Adapter tests do not prove IAM isolation, three-account independence, deployment, or live capability.",
+          "Atomic ingest Terra final review: source f0bd9f2 through aaa68154 and frozen acceptance paths. Integration 92837d5 through b025351 passed six suites/25 distinct tests (integrity6, transition4, periodic4, quarantine2, idempotency7, credential-isolation2) and tsc --noEmit. The duplicate 4a73 test was already present in source as e27276f and was not counted twice.",
+          "Signer-manifest, recovery-token, and page-ack codecs were independently approved by r2; integration ffaea8c through c600bd4 passed their three focused suites/9 tests and tsc --noEmit. Codecs do not satisfy their durable services or delivery acceptance.",
           "Composed monitor source evidence: all 14 focused suites/89 tests completed exit 0 in bounded runs at 528f032; a prior 120-second aggregate process was not counted as an aggregate pass because of host Vitest contention."
         ]
       },

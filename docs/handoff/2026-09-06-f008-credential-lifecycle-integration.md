@@ -334,18 +334,42 @@ architect; the global integrator composes approved work; and
 have finished their assigned work and no new component dispatch or work package
 is created by this ownership decision.
 
-The immediate acceptance batch is the three token codecs with witness-runtime
-composition under `r2_pair_acceptance`. The terminal-ingest source at `aaa68154`
-remains pending final Terra cold review; its reported author tests do not yet
-authorize integration. This records execution ownership and acceptance flow
-only. It preserves the T6-W15 DoD, `prepared`/partial status, qualification
-gates, 16/70 delivery count, and all worktrees and data.
+The three token codecs and terminal-ingest source through `aaa68154` are now
+integrated. The ingest acceptance suite passed 25 distinct tests (integrity 6,
+transition 4, periodic 4, quarantine 2, idempotency 7, credential isolation 2)
+and `tsc --noEmit`; the `4a73` proof was already present in source as `e27276f`
+and was not counted twice. The remaining composition is witness runtime, durable
+signer registry, ACK recovery, durable human page acknowledgement, and concrete
+main runtime under `r2_pair_acceptance`. This records execution ownership and
+acceptance flow only. It preserves the T6-W15 DoD, `prepared`/partial status,
+qualification gates, 16/70 delivery count, and all worktrees and data.
 
 The ledger's direct item summary separates 16 historical
 `recorded_delivered` items from 16 nonhistorical implementation-complete items,
 6 partial items, and 32 unknown-backlog items. These categories total 70
 items. Only the historical 16 are delivery credit; the other counts do not add
 deliveries or change the T6-W15 DoD.
+
+## Canonical closeout execution plan
+
+`docs/plan/execution/2026-09-06-closeout-three-bundles.md` is the sole
+canonical closeout plan, byte-identical to
+`$CODEX_HOME/plans/corelink-wp-closeout-20260906.md` at SHA-256
+`bf6839181736a67fc3c086a10456cffcd169ffce5712caadc502cc845d7cfbe1`.
+It fixes exactly three Runner merges: B1 has 12 Sprint 1 WPs, B2 has 14 Sprint
+2 WPs, and B3 has 28 Sprint 3/4 WPs. It supersedes prior closeout variants.
+
+The plan's mandatory method governs entry, review, correction, and exit for
+each WP: the same executor receives partial-review follow-up; a second
+submission rejected by review goes to root for causal diagnosis before another
+attempt; lack of progress requires a checkpoint within 60 minutes; and no WP
+is abandoned or moved to a new plan after compaction. These rules preserve the
+original DoD and forbid new policy or test suppression.
+
+For T6-W15 base acceptance, trusted time/TSA, WORM, three-account independence,
+crash/rotation/isolation, and A6.10 probe 3/3 remain required. The A6.17
+seven-day observation is a later final qualification performed by T6-W12 and
+collected by T6-W10; it is not a base-only T6-W15 blocker or a waiver.
 
 ## Earlier integrated packets
 
