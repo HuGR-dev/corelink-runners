@@ -3,6 +3,7 @@ import { CredentialObligationAuthority } from "./lib/credential_obligation_autho
 import { RetryEpochAuthority } from "./lib/retry_epoch_authority";
 import { retryEpochClient, type RetryEpochAuthorityRpc } from "./lib/retry_epoch_client";
 import { controlAuthed } from "./lib/control_auth";
+import { authorizeRunner, RunnerAuthorizationError } from "./lib/runner_authorization";
 // CoreLink spawn-Worker + Container DO (ADR-0008).
 //
 // Cloudflare side of the frozen seam (docs/spec/cloudflare-spawn-worker-contract.md).
@@ -2727,10 +2728,8 @@ export async function acquireConcurrencySlot(
 }
 
 // The spawn drive shared by the webhook path AND the re-drive reconciler:
-// AUTHORIZE + warm-mint (env-0 aware) → per-tenant concurrency → GitHub JIT →
-// spawn. Assumes the caller ALREADY won the spawn claim. Throws on JIT/spawn
-// failure (the guarded wrapper releases the claim). A 403 authz / at-ceiling
-// refusal releases the claim inline and returns (no throw — a definitive no-op).
+// Server authorization → per-tenant concurrency → env-0 mint → GitHub JIT →
+// spawn. Failed authorization or capacity throws before JIT/container effects.
 async function driveSpawn(
   env: Env,
   opts: ContainmentDriveOpts,
@@ -2764,41 +2763,35 @@ async function driveSpawn(
   if (patSecretName && acquiringPat) {
     logEvent("info", "mint_option_c_pat_dispatch", { jobId, repo, patSecret: patSecretName });
   }
-  const mint = await buildContainerEnv(
-    env,
-    { jobId, repoFullName: repo, installationId, acquiringPat },
-    env0,
-  );
-  if (mint.patId && mint.tenant) {
-    await containmentAuthority(env).registerCredential({ jobId, tenant: mint.tenant, patId: mint.patId });
+  const params = { jobId, repoFullName: repo, installationId, acquiringPat };
+  const authorized = await authorizeRunner(env, params);
+  const slot = await acquireConcurrencySlot(env, jobId, {
+    authz: "ok", containerEnv: {}, ...authorized,
+  }, repo);
+  if (!slot.admitted) {
+    await bumpMetrics(env, "spawn_at_ceiling");
+    logEvent("info", "spawn_at_ceiling", { jobId, repo, tenant: authorized.tenant, reason: slot.reason });
+    throw new SpawnRefusedError(slot.reason ?? "unknown");
   }
-  if (mint.authz === "forbidden") {
+  let mint: ContainerEnvResult;
+  try {
+    mint = await buildContainerEnv(env, params, env0);
+    if (mint.patId && mint.tenant) {
+      await containmentAuthority(env).registerCredential({ jobId, tenant: mint.tenant, patId: mint.patId });
+    }
+  } catch (error) {
+    await releaseConcurrencySlot(env, jobId);
+    throw error;
+  }
+  if (mint.authz !== "ok" || mint.tenant !== authorized.tenant
+    || mint.maxConcurrency !== authorized.maxConcurrency || mint.maxVcpuH !== authorized.maxVcpuH) {
     if (mint.patId && mint.tenant) {
       await revokeIssuedCredential(env, containmentAuthority(env), { jobId, tenant: mint.tenant, patId: mint.patId });
     }
-    await releaseSpawnClaim(env.RUNNER_JOB_PATS, jobId);
+    await releaseConcurrencySlot(env, jobId);
     await bumpMetrics(env, "spawn_forbidden");
-    const failure_class = mint.forbiddenReason === "edge_proxy" ? "edge_proxy_403" : "authz_403";
-    logEvent("error", "mint_forbidden", { jobId, repo, failure_class });
-    // A queued webhook is at-most-once. Preserve the exact existing orphan:
-    // store/schema/ORPHAN_TTL contract for both classes; the reconciler applies
-    // the bounded retry policy and the record remains auditable.
-    await recordOrphan(env, { ...opts, failure_class });
-    return;
-  }
-  // ★A3.17 — an operator misconfiguration must not hide inside the ordinary cold
-  // path. `mint_key_unarmed` means OUR key is missing and EVERY job on the fleet is
-  // spawning tenantless and unattributed; `no_installation_or_pat` is the expected
-  // cold spawn for any repo outside REPO_INSTALLATION_MAP and is not a fault. They
-  // used to be the same silent return, so the first was invisible. Only the
-  // misconfiguration is logged at `error`.
-  if (mint.coldReason) {
-    logEvent(
-      mint.coldReason === "mint_key_unarmed" ? "error" : "info",
-      "spawn_cold",
-      { jobId, repo, coldReason: mint.coldReason },
-    );
-    await bumpMetrics(env, `spawn_cold_${mint.coldReason}`);
+    logEvent("error", "mint_forbidden", { jobId, repo, reason: "authorization_unavailable_or_changed" });
+    throw new RunnerAuthorizationError();
   }
   // F2 (W3): register the revoke-key jobId->patId at MINT time — BEFORE the spawn.
   // Previously it was written only AFTER a successful container start (spawnRunner),
@@ -2811,7 +2804,7 @@ async function driveSpawn(
       logEvent("error", "kv_put_job_pat_failed", { jobId, error: (e as Error).message }),
     );
   }
-  // Required immutable attribution precedes slot/JIT/container effects. Any
+  // Required immutable attribution precedes JIT/container effects. Any
   // issued credential is already registered in the independent cleanup authority.
   if (mint.tenant) {
     try {
@@ -2820,38 +2813,8 @@ async function driveSpawn(
       await persistJobAttribution(authorityStore, { jobId, tenant: mint.tenant });
     } catch (e) {
       if (mint.patId) await revokeIssuedCredential(env, containmentAuthority(env), { jobId, tenant: mint.tenant, patId: mint.patId }).catch(() => {});
+      await releaseConcurrencySlot(env, jobId);
       throw e;
-    }
-  }
-  // Concurrency ceiling (W7/F7) — ATOMIC, and enforced for BOTH warm AND cold
-  // spawns (the old KV path skipped cold ⇒ unlimited runners). At-capacity ⇒ no
-  // spawn (a clean refusal; fail-open is only on a thrown DO error).
-  {
-    const slot = await acquireConcurrencySlot(env, jobId, mint, repo);
-    if (!slot.admitted) {
-      await releaseSpawnClaim(env.RUNNER_JOB_PATS, jobId);
-      await bumpMetrics(env, "spawn_at_ceiling");
-      logEvent("info", "spawn_at_ceiling", {
-        jobId,
-        repo,
-        tenant: mint.tenant,
-        maxConcurrency: mint.maxConcurrency,
-        reason: slot.reason,
-      });
-      // W3/F2 (validation-campaign SJ-2 finding): the CAS PAT was already minted (its revoke-key
-      // was stored at mint time) but we're REFUSING the spawn — revoke it NOW instead of orphaning
-      // it to its ~2h TTL, exactly as the spawn-failure paths do. Fail-open (revokeCompletedJob
-      // swallows its own errors); reads jobId->patId, revokes by pat_id, deletes the key. No-op on
-      // a cold spawn (no patId stored).
-      if (mint.patId && mint.tenant) await revokeIssuedCredential(env, containmentAuthority(env), { jobId, tenant: mint.tenant, patId: mint.patId });
-      // THROW, don't return. A bare `return` here dropped the job PERMANENTLY:
-      // `driveSpawnGuarded` records the dead-letter only from its catch, and
-      // `retryOrphanedSpawns` reads a normal return as recovery and deletes the
-      // record. GitHub never redelivers `workflow_job.queued`, so the customer's
-      // job then hangs `queued` forever with nothing reported as failed. Throwing
-      // a TYPED refusal routes it to the dead-letter while keeping it
-      // distinguishable from a genuine failure — see SpawnRefusedError.
-      throw new SpawnRefusedError(slot.reason ?? "unknown");
     }
   }
   // Authorized ⇒ spawn. The GitHub JIT is minted per container-start ATTEMPT
