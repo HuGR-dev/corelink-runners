@@ -2299,19 +2299,31 @@ export async function dispatchTenantSuspensionRevocations(
   event: { event_id: string; tenant_id: string },
 ): Promise<number> {
   const kv = env.RUNNER_JOB_PATS;
-  if (!kv?.list || !event.event_id || !event.tenant_id) throw new Error("invalid suspension event");
+  if (!kv || !event.event_id || !event.tenant_id) throw new Error("invalid suspension event");
   if (!env.CORELINK_RUNNER_MINT_AUTH_KEY) throw new Error("runner mint revoke authority unavailable");
   const marker = `suspend-revoke:${event.event_id}`;
   if (await kv.get(marker)) return 0;
-  const names = await listRevokeKeys(kv, "jtenant:");
   let dispatched = 0;
-  for (const name of names) {
-    const jobId = name.slice("jtenant:".length);
-    if ((await kv.get(name)) !== event.tenant_id) continue;
-    const patId = await kv.get(jobId);
-    if (!patId) throw new Error(`active tenant job ${jobId} has no durable pat_id`);
-    await revokeCompletedJob(env, jobId, event.tenant_id);
-    dispatched++;
+  const authority = containmentAuthority(env);
+  let cursor: string | undefined;
+  for (;;) {
+    const page = await authority.listJobAttributions(event.tenant_id, cursor);
+    for (const record of page.records) {
+      // Treat the authority response as untrusted input at this boundary too;
+      // never revoke a job whose durable record is for another tenant.
+      if (record.tenant !== event.tenant_id) {
+        throw new Error(`tenant attribution mismatch for active job ${record.jobId}`);
+      }
+      const patId = await kv.get(record.jobId);
+      if (!patId) throw new Error(`active tenant job ${record.jobId} has no durable pat_id`);
+      if (!(await revokeCompletedJob(env, record.jobId, event.tenant_id))) {
+        throw new Error(`active tenant job ${record.jobId} revoke was not confirmed`);
+      }
+      dispatched++;
+    }
+    if (page.complete) break;
+    if (!page.cursor || page.cursor === cursor) throw new Error("incomplete tenant attribution page");
+    cursor = page.cursor;
   }
   await kv.put(marker, "1", { expirationTtl: JOB_PAT_TTL_S });
   return dispatched;
