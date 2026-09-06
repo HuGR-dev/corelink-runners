@@ -98,8 +98,8 @@ export async function confirmInstallationRepositories(
         if (body === null || typeof body !== "object" || Array.isArray(body)) return null;
         const repositories = (body as Record<string, unknown>).repositories;
         const totalCount = (body as Record<string, unknown>).total_count;
-        if (!Number.isSafeInteger(totalCount) || (totalCount as number) < 0 || !Array.isArray(repositories) || repositories.length > PAGE_SIZE) return null;
-        if (declaredTotal === null) declaredTotal = totalCount as number;
+        if (typeof totalCount !== "number" || !Number.isSafeInteger(totalCount) || totalCount < 0 || !Array.isArray(repositories) || repositories.length > PAGE_SIZE) return null;
+        if (declaredTotal === null) declaredTotal = totalCount;
         else if (declaredTotal !== totalCount) return null;
         for (const repository of repositories) {
           if (repository === null || typeof repository !== "object" || typeof (repository as Record<string, unknown>).full_name !== "string") return null;

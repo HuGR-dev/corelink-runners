@@ -134,10 +134,11 @@ import { consumeTenantSuspensionCredentials, type TenantSuspensionConsumerDepend
 import { installationToken } from "./github_app";
 import {
   claimReconcileHandoff,
-  discoverEligibleRepositories,
+  discoverAuthorizationCandidates,
   releaseReconcileHandoff,
   type ReconcilerRepository,
 } from "./reconciler";
+import { confirmInstallationRepositories } from "./reconciler_membership";
 import {
   ContainmentEffectLedger,
   containmentEffectPointerKey,
@@ -5563,13 +5564,17 @@ export async function redriveOrphanedJobs(
   const staticRepos = parseReconcilerRepos(env.RECONCILER_REPOS);
   let registryRepos: ReconcilerRepository[] | null = null;
   if (env.RECONCILER_REGISTRY_URL?.trim()) {
-    // A configured registry is authoritative. An unavailable or malformed
-    // snapshot is not permission to fall back to an unbounded GitHub scan (or
-    // to a stale static list), so this tick remains read-only.
+    // A configured registry provides candidates, never eligibility. Every
+    // candidate must also appear in that installation's GitHub repository
+    // inventory before it may reach the existing scan and reservation path.
+    // Registry or membership uncertainty is not permission to use a stale
+    // static list, so this tick remains read-only.
     try {
-      registryRepos = await discoverEligibleRepositories(env);
+      const candidates = await discoverAuthorizationCandidates(env);
+      if (candidates === null) return;
+      registryRepos = await confirmInstallationRepositories(env, candidates, now);
     } catch (e) {
-      logEvent("error", "reconciler_registry_read_failed", { error: (e as Error).message });
+      logEvent("error", "reconciler_registry_membership_failed", { error: (e as Error).message });
       return;
     }
     if (registryRepos === null) return;
