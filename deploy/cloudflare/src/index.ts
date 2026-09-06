@@ -4375,9 +4375,15 @@ type ContainmentDriveOpts = {
   // an old continuation may finish durable evidence after its lease expires but
   // cannot mark/ack. A reclaimer never receives this field for a new effect.
   effect_permit_id?: string;
+  // Supplied by runCanonicalEffect only after it has durably bound the provider
+  // identity. This is local route evidence, never a caller-provided protocol field.
+  effect_binding?: ContainmentEffectBinding;
 };
-function isContainmentDrive(opts: ContainmentDriveOpts): opts is ContainmentDriveOpts & { effect_id: string; containment_event_id: string; effect_permit_id: string } {
-  return typeof opts.effect_id === "string" && typeof opts.containment_event_id === "string" && typeof opts.effect_permit_id === "string";
+function isContainmentDrive(opts: ContainmentDriveOpts): opts is ContainmentDriveOpts & { effect_id: string; containment_event_id: string; effect_permit_id: string; effect_binding: ContainmentEffectBinding } {
+  return typeof opts.effect_id === "string"
+    && typeof opts.containment_event_id === "string"
+    && typeof opts.effect_permit_id === "string"
+    && typeof opts.effect_binding?.resource_id === "string";
 }
 async function writeContainmentEvidence(
   env: Env,
