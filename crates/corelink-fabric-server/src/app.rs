@@ -1634,11 +1634,11 @@ impl AppState {
     /// suspend action. `true` iff the tenant was NOT already suspended (a real
     /// state change — used to make the forensic line + the lease-kill fire once).
     pub(crate) fn suspend_tenant(&self, tenant: &TenantId) -> bool {
-        let changed = self
+        let mut suspended = self
             .suspended_tenants
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(tenant.as_str().to_string());
+            .unwrap_or_else(|p| p.into_inner());
+        let changed = suspended.insert(tenant.as_str().to_string());
         // Durable write-through (multi-instance): a suspend issued on one shard
         // must reach EVERY shard + survive a restart. No-op on a non-pg ledger
         // (in-memory is authoritative at N=1). A failure is logged, not fatal —
@@ -1673,23 +1673,24 @@ impl AppState {
         tenant: &TenantId,
         now_ms: u64,
     ) -> anyhow::Result<bool> {
-        self.record_tenant_suspension_event(tenant, now_ms)?;
-        let changed = self
+        let mut suspended = self
             .suspended_tenants
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(tenant.as_str().to_string());
+            .unwrap_or_else(|p| p.into_inner());
+        self.record_tenant_suspension_event(tenant, now_ms)?;
+        let changed = suspended.insert(tenant.as_str().to_string());
         Ok(changed)
     }
 
     /// Track-C AUP1: lift a tenant's suspension (idempotent). `true` iff the
     /// tenant WAS suspended (a real state change).
     pub(crate) fn unsuspend_tenant(&self, tenant: &TenantId) -> anyhow::Result<bool> {
-        self.ledger.set_tenant_suspended(tenant.as_str(), false)?;
-        Ok(self.suspended_tenants
+        let mut suspended = self
+            .suspended_tenants
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(tenant.as_str()))
+            .unwrap_or_else(|p| p.into_inner());
+        self.ledger.set_tenant_suspended(tenant.as_str(), false)?;
+        Ok(suspended.remove(tenant.as_str()))
     }
 
     /// Track-C AUP1: whether `tenant` is currently suspended. Read at the TOP of

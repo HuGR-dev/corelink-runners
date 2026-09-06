@@ -63,6 +63,8 @@ pub mod shard;
 /// Multi-size runner ladder — the `corelink-<size>` label → box-size resolver.
 /// INERT until activation (ratified design 2026-07-10); pure resolver, unwired.
 pub mod size;
+#[cfg(test)]
+mod suspension_interleaving;
 
 pub use ac_pre_lease::{AcPreLeaseHook, AcPreLeaseOutcome, MockAcHook, NoOpAcHook};
 pub use admission::{
