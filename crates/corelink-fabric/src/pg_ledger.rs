@@ -62,6 +62,10 @@ use crate::compute_meter;
 use crate::ledger::{AdmitLedger, AdmitOutcome, ComputeGate, LeaseLedger, LeaseRecord, LeaseState};
 use crate::tenant::TenantId;
 
+mod external_compute;
+#[cfg(test)]
+#[path = "pg_ledger/external_compute_tests.rs"]
+mod external_compute_tests;
 mod suspension;
 
 #[path = "pg_ledger/pending_cleanup_pg.rs"]
@@ -189,6 +193,26 @@ CREATE INDEX IF NOT EXISTS leases_held_idx ON leases (lease_id) WHERE state = 'h
 CREATE TABLE IF NOT EXISTS compute_accrual (
   tenant text NOT NULL, period_key int NOT NULL, accrued_vcpu_ms bigint NOT NULL,
   PRIMARY KEY (tenant, period_key));
+CREATE TABLE IF NOT EXISTS external_compute_periods (
+  tenant text NOT NULL, period_key int NOT NULL,
+  external_vcpu_ms bigint NOT NULL, evidence_digest text NOT NULL,
+  PRIMARY KEY (tenant, period_key),
+  CHECK (external_vcpu_ms >= 0),
+  CHECK (length(evidence_digest) = 64));
+CREATE TABLE IF NOT EXISTS external_compute_reservations (
+  reservation_id uuid PRIMARY KEY, tenant text NOT NULL,
+  workload_kind text NOT NULL, workload_id text NOT NULL,
+  period_key int NOT NULL, ceiling_vcpu_ms bigint NOT NULL,
+  vcpu_count int NOT NULL, maximum_wall_ms bigint NOT NULL,
+  grant_expires_at_ms bigint NOT NULL, grant_digest text NOT NULL,
+  state text NOT NULL, reserved_vcpu_ms bigint NOT NULL,
+  actual_vcpu_ms bigint, terminal_evidence_digest text,
+  UNIQUE (tenant, workload_kind, workload_id, period_key),
+  CHECK (ceiling_vcpu_ms > 0), CHECK (vcpu_count BETWEEN 1 AND 16),
+  CHECK (maximum_wall_ms BETWEEN 1 AND 28800000),
+  CHECK (grant_expires_at_ms > 0), CHECK (reserved_vcpu_ms > 0),
+  CHECK (state IN ('prepared','active','cancelled','settled')),
+  CHECK (actual_vcpu_ms IS NULL OR actual_vcpu_ms >= 0));
 -- AUP1 durable suspension (multi-instance): a suspended tenant is blocked on
 -- EVERY shard, not just the one that received the suspend, and the block survives
 -- a shard restart. The fabricd keeps a fast in-memory cache; this is the
@@ -518,6 +542,42 @@ impl PgLedger {
 }
 
 impl LeaseLedger for PgLedger {
+    fn initialize_external_compute_period(
+        &self,
+        baseline: crate::compute_budget::ExternalComputeBaseline,
+    ) -> anyhow::Result<()> {
+        external_compute::initialize(self, baseline)
+    }
+
+    fn reserve_external_compute(
+        &self,
+        reservation: crate::compute_budget::ExternalComputeReservation,
+    ) -> anyhow::Result<crate::compute_budget::ExternalComputeAdmission> {
+        external_compute::reserve(self, reservation)
+    }
+
+    fn activate_external_compute(
+        &self,
+        reservation: &crate::compute_budget::ExternalComputeReservation,
+    ) -> anyhow::Result<crate::compute_budget::ExternalComputeReceipt> {
+        external_compute::activate(self, reservation)
+    }
+
+    fn cancel_external_compute(
+        &self,
+        reservation: &crate::compute_budget::ExternalComputeReservation,
+    ) -> anyhow::Result<crate::compute_budget::ExternalComputeReceipt> {
+        external_compute::cancel(self, reservation)
+    }
+
+    fn settle_external_compute(
+        &self,
+        reservation: &crate::compute_budget::ExternalComputeReservation,
+        settlement: crate::compute_budget::ExternalComputeSettlement,
+    ) -> anyhow::Result<crate::compute_budget::ExternalComputeReceipt> {
+        external_compute::settle(self, reservation, settlement)
+    }
+
     /// The pg backend serializes admission across ALL instances via
     /// `pg_advisory_xact_lock` + atomic count-and-insert, so the concurrency/vCPU
     /// cap is exact at `instances > 1` — the property that makes N-shard fabricd
