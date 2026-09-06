@@ -450,7 +450,8 @@ export class CanaryTickOutbox {
         ? this.terminal(head, "TIMED_OUT", Date.now())
         : "tick head pending: invalid ACK";
     const observed = config.trustedNow?.();
-    if (strict(candidate, terminalFields, terminalChecks) && observed !== undefined && head.envelope.kind === "canary-tick") {
+    if (strict(candidate, terminalFields, terminalChecks) && observed !== undefined &&
+        (head.envelope.kind === "canary-tick" || head.envelope.kind === "CANARY_CONFIG_INVALID")) {
       const status = await validHistoricalTerminal(candidate as HistoricalTerminal, head, config.ackVerifier, observed);
       if (status === "valid") return this.terminal(head, "HISTORICAL_NO_STATE", Date.now());
       if (status === "revoked") return "tick head pending: terminal signer revoked";
