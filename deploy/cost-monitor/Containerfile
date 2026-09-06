@@ -1,0 +1,12 @@
+FROM public.ecr.aws/lambda/nodejs:22
+
+RUN microdnf install -y openssl && microdnf clean all
+
+WORKDIR ${LAMBDA_TASK_ROOT}
+COPY package.json package-lock.json ./
+RUN npm ci --ignore-scripts
+COPY tsconfig.json ./
+COPY src ./src
+RUN npm run build
+
+CMD ["dist/index.handler"]
