@@ -219,6 +219,47 @@ describe("/v1/spawn mode:'runner'/absent — unchanged runner path", () => {
 });
 
 describe("/v1/exec (C3)", () => {
+  it("rejects cross-domain bearer reuse at the production handler", async () => {
+    const env = makeEnv();
+    const spawnWithExec = await worker.fetch(
+      post("/v1/spawn", { image_digest: IMG, env: {} }, CONTROL_EXEC_AUTH),
+      env,
+    );
+    const execWithSpawn = await worker.fetch(
+      post("/v1/exec", { handle: "h", argv: ["true"], timeout_ms: 1000 }, AUTH),
+      env,
+    );
+    const teardownWithSpawn = await worker.fetch(
+      post("/v1/teardown", { handle: "h" }, AUTH),
+      env,
+    );
+    expect(spawnWithExec.status).toBe(401);
+    expect(execWithSpawn.status).toBe(401);
+    expect(teardownWithSpawn.status).toBe(401);
+    expect(containers).toHaveLength(0);
+  });
+
+  it("honors control-token rotation at the production handler", async () => {
+    const oldEnv = makeEnv();
+    const oldRequest = await worker.fetch(
+      post("/v1/exec", { handle: "h", argv: ["true"], timeout_ms: 1000 }, CONTROL_EXEC_AUTH),
+      oldEnv,
+    );
+    expect(oldRequest.status).toBe(200);
+
+    const rotatedEnv = makeEnv({ CLOUDFLARE_EXEC_AUTH_TOKEN: "exec-control-rotated" });
+    const oldToken = await worker.fetch(
+      post("/v1/exec", { handle: "h", argv: ["true"], timeout_ms: 1000 }, CONTROL_EXEC_AUTH),
+      rotatedEnv,
+    );
+    const newToken = await worker.fetch(
+      post("/v1/exec", { handle: "h", argv: ["true"], timeout_ms: 1000 }, "exec-control-rotated"),
+      rotatedEnv,
+    );
+    expect(oldToken.status).toBe(401);
+    expect(newToken.status).toBe(200);
+  });
+
   it("relays the container's {exit_code, stdout, stderr} verbatim as 200", async () => {
     nextContainerFetch = async () =>
       new Response(
