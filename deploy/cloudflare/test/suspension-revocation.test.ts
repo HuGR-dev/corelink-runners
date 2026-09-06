@@ -63,7 +63,7 @@ describe("durable tenant suspension revocation", () => {
     expect((await restarted.pendingCredentials({ kind: "all" })).records).toEqual([active]);
   });
 
-  it("production authority revokes a remint despite stale KV and preserves a concurrently replaced projection", async () => {
+  it("production authority fences a remint and preserves a concurrently replaced projection", async () => {
     const authority = new ContainmentDO({ storage: new AuthorityStorage() } as never, {} as never);
     const old = { jobId: "same-job", tenant: "tenant-a", patId: "pat-old" };
     const current = { ...old, patId: "pat-current" };
@@ -78,10 +78,10 @@ describe("durable tenant suspension revocation", () => {
       return new Response(null, { status: 204 });
     });
     vi.stubGlobal("fetch", fetcher);
-    expect(await revokeCompletedJob(envFor(authority, jobs), "same-job", "tenant-a")).toBe(true);
-    expect(JSON.parse((fetcher.mock.calls[0][1] as RequestInit).body as string).pat_id).toBe("pat-current");
-    expect(jobs.values.get("same-job")).toBe("pat-next");
-    expect((await authority.pendingCredentials({ kind: "job", jobId: "same-job" })).records).toEqual([{ ...old, patId: "pat-next" }]);
+    await expect(revokeCompletedJob(envFor(authority, jobs), "same-job", "tenant-a")).rejects.toThrow("credential revoke pending");
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(jobs.values.get("same-job")).toBeUndefined();
+    expect((await authority.revocationRequestedCredentials()).records).toEqual([current, { ...old, patId: "pat-next" }]);
   });
 
   it("production empty authority refuses a legacy suspension without acknowledging or touching the PAT", async () => {
