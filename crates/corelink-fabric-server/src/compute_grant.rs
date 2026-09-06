@@ -160,7 +160,7 @@ fn validate_payload(
         || (!allow_expired && payload.expires_at_ms <= now_ms)
         || !wall_stays_in_period(
             payload.period_key,
-            payload.issued_at_ms,
+            payload.expires_at_ms,
             payload.maximum_wall_ms,
         )
     {
@@ -174,15 +174,18 @@ fn validate_payload(
 }
 
 fn valid_decimal(value: &str) -> bool {
-    !value.is_empty() && value.bytes().all(|c| c.is_ascii_digit())
+    value.len() <= 19
+        && !value.is_empty()
+        && (value == "0"
+            || (value.as_bytes()[0] != b'0' && value.bytes().all(|c| c.is_ascii_digit())))
 }
 
 fn valid_period(period: u32) -> bool {
     let month = period % 100;
-    (1000..=999912).contains(&period) && (1..=12).contains(&month)
+    (197001..=999912).contains(&period) && (1..=12).contains(&month)
 }
 
-fn wall_stays_in_period(period: u32, issued_ms: u64, wall_ms: u64) -> bool {
+fn wall_stays_in_period(period: u32, expires_ms: u64, wall_ms: u64) -> bool {
     let year = (period / 100) as i64;
     let month = (period % 100) as i64;
     let Some(start_days) = days_from_civil(year, month, 1) else {
@@ -198,7 +201,7 @@ fn wall_stays_in_period(period: u32, issued_ms: u64, wall_ms: u64) -> bool {
     };
     let start = (start_days as u64).saturating_mul(86_400_000);
     let end = (next_days as u64).saturating_mul(86_400_000);
-    issued_ms >= start && issued_ms.checked_add(wall_ms).is_some_and(|v| v <= end)
+    expires_ms >= start && expires_ms.checked_add(wall_ms).is_some_and(|v| v <= end)
 }
 
 // Howard Hinnant's civil-date conversion, with a fixed Unix epoch.
@@ -229,15 +232,11 @@ mod tests {
     use ring::rand::SystemRandom;
     use ring::signature::{Ed25519KeyPair, KeyPair};
     use serde_json::json;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn signed_payload(
         extra: Option<(&str, serde_json::Value)>,
     ) -> (String, HashMap<String, Vec<u8>>) {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
+        let now = now_for_test();
         let period = 202609;
         let mut payload = json!({
             "v": 1, "key_id": "issuer-1", "tenant_id": "11111111-1111-4111-8111-111111111111",
@@ -248,13 +247,16 @@ mod tests {
         if let Some((key, value)) = extra {
             payload.as_object_mut().unwrap().insert(key.into(), value);
         }
-        let bytes = serde_json::to_vec(&payload).unwrap();
+        sign_bytes(&serde_json::to_vec(&payload).unwrap())
+    }
+
+    fn sign_bytes(bytes: &[u8]) -> (String, HashMap<String, Vec<u8>>) {
         let keypair = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
         let pair = Ed25519KeyPair::from_pkcs8(keypair.as_ref()).unwrap();
         let token = format!(
             "{}.{}",
-            URL_SAFE_NO_PAD.encode(&bytes),
-            URL_SAFE_NO_PAD.encode(pair.sign(&bytes).as_ref())
+            URL_SAFE_NO_PAD.encode(bytes),
+            URL_SAFE_NO_PAD.encode(pair.sign(bytes).as_ref())
         );
         let mut keys = HashMap::new();
         keys.insert("issuer-1".into(), pair.public_key().as_ref().to_vec());
@@ -291,6 +293,17 @@ mod tests {
             GrantVerifier::new(keys).verify(&unknown, now_for_test(), false),
             Err(GrantError::Malformed)
         ));
+        let (base, _) = signed_payload(None);
+        let payload = URL_SAFE_NO_PAD
+            .decode(base.split('.').next().unwrap())
+            .unwrap();
+        let mut duplicate = br#"{"v":1,"#.to_vec();
+        duplicate.extend_from_slice(&payload[1..]);
+        let (duplicate, keys) = sign_bytes(&duplicate);
+        assert!(matches!(
+            GrantVerifier::new(keys).verify(&duplicate, now_for_test(), false),
+            Err(GrantError::Malformed)
+        ));
     }
 
     #[test]
@@ -305,9 +318,6 @@ mod tests {
     }
 
     fn now_for_test() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64
+        1_788_652_800_000
     }
 }
