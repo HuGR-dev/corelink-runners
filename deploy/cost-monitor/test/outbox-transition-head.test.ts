@@ -46,6 +46,15 @@ describe("periodic historical head acceptance", () => {
     expect(current.sourceHealth).toBe("healthy"); expect(current.lastSequence).toBe(3);
   });
 
+  it("returns a signed historical terminal without advancing current health state", async () => {
+    const store = new MemoryStateStore(); const service = make(store, 1_000); await service.ingest(envelope(1, 1_000));
+    const before = (await store.get<any>("n:source:" + createHash("sha256").update(JSON.stringify([registration.source, registration.service, registration.application])).digest("hex")))!.value;
+    const result = await make(store, 70_000).ingest(envelope(2, 2_000));
+    expect(result.kind).toBe("ACK"); expect((result as any).body.terminal).toBe("HISTORICAL_NO_STATE");
+    const after = (await store.get<any>("n:source:" + createHash("sha256").update(JSON.stringify([registration.source, registration.service, registration.application])).digest("hex")))!.value;
+    expect(after.sourceHealth).toBe("healthy"); expect(after.lastOccurredAt).toBe(before.lastOccurredAt); expect(after.lastScheduledFor).toBe(before.lastScheduledFor);
+  });
+
   it("rejects future authenticated input without state or ACK", async () => {
     const store = new MemoryStateStore(); const result = await make(store, 2_000).ingest(envelope(1, 3_000));
     expect(result).toEqual({ kind: "RETRY", reason: "future_envelope" }); expect((await store.scan("n:")).items).toHaveLength(0);
