@@ -126,7 +126,7 @@ use corelink_runner::envelope::{AbnormalKind, CloseReason};
 use corelink_runners_contracts::RunnerState;
 
 /// Deliver the durable suspension outbox to the authenticated runner Worker.
-/// The URL/token are existing Cloudflare spawn bindings forwarded into the
+/// The URL and scoped lifecycle token are Cloudflare bindings forwarded into the
 /// fabric container; absent configuration leaves the outbox pending.
 pub async fn dispatch_tenant_suspension_events(state: &crate::AppState) {
     let Some(base) = std::env::var("CLOUDFLARE_SPAWN_WORKER_URL")
@@ -135,7 +135,7 @@ pub async fn dispatch_tenant_suspension_events(state: &crate::AppState) {
     else {
         return;
     };
-    let Some(token) = std::env::var("CLOUDFLARE_SPAWN_AUTH_TOKEN")
+    let Some(token) = std::env::var("CLOUDFLARE_LIFECYCLE_AUTH_TOKEN")
         .ok()
         .filter(|v| !v.is_empty())
     else {

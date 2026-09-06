@@ -40,7 +40,7 @@ execution backend (default-off).
 
 | Variable | Default | Description |
 |---|---|---|
-| `CLOUDFLARE_SPAWN_WORKER_URL` | — | The spawn-Worker base URL. When this **and** the token are present, the box engine is the all-Cloudflare spawn-Worker (co-located with R2). Absent ⇒ Northflank (if its vars are set) ⇒ else `NoBox` (lease lifecycle works, exec 503). |
+| `CLOUDFLARE_SPAWN_WORKER_URL` | — | The spawn-Worker base URL. Cloudflare requires this URL and all three distinct control tokens below. Partial configuration is rejected. With Cloudflare configuration absent, Northflank is selected if configured; otherwise `NoBox` serves the lease lifecycle and exec returns 503. |
 | `CLOUDFLARE_SPAWN_AUTH_TOKEN` | — | Bearer token for `POST /v1/spawn` (must match the Worker's spawn token). |
 | `CLOUDFLARE_EXEC_AUTH_TOKEN` | — | Bearer token for `POST /v1/exec`; required with the other two tokens for a valid Cloudflare engine configuration. |
 | `CLOUDFLARE_LIFECYCLE_AUTH_TOKEN` | — | Bearer token for status, teardown, egress cutoff, and suspension control; required with the other two tokens. |

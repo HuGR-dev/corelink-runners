@@ -14,6 +14,7 @@ const routes = [
   ["GET", "/v1/status/handle", "CLOUDFLARE_LIFECYCLE_AUTH_TOKEN"],
   ["POST", "/v1/teardown", "CLOUDFLARE_LIFECYCLE_AUTH_TOKEN"],
   ["POST", "/v1/egress-cutoff", "CLOUDFLARE_LIFECYCLE_AUTH_TOKEN"],
+  ["POST", "/internal/v1/tenant-suspension", "CLOUDFLARE_LIFECYCLE_AUTH_TOKEN"],
 ] as const;
 
 function request(method: string, path: string, token?: string): Request {

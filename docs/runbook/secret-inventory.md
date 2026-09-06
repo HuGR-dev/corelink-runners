@@ -32,6 +32,8 @@ block and are not secrets.
 | Secret | Authenticates / enables | Fail-closed behavior when absent | Notes |
 |---|---|---|---|
 | `CLOUDFLARE_SPAWN_AUTH_TOKEN` | Inbound `POST /v1/spawn` from fabricd. **Must byte-match** fabricd's `CLOUDFLARE_SPAWN_AUTH_TOKEN`. | Missing/mismatch ⇒ 401 on every spawn. | Shared control-credential across both surfaces. Rotate on BOTH workers together. |
+| `CLOUDFLARE_EXEC_AUTH_TOKEN` | Inbound `POST /v1/exec` from fabricd. Must byte-match the fabricd exec token. | Missing, mismatched or overlapping domain tokens ⇒ 401. | Rotate matching copies on both Workers; keep distinct from spawn and lifecycle. |
+| `CLOUDFLARE_LIFECYCLE_AUTH_TOKEN` | Inbound status, teardown, egress-cutoff and tenant-suspension control from fabricd. Must byte-match the fabricd lifecycle token. | Missing, mismatched or overlapping domain tokens ⇒ 401. | Rotate matching copies on both Workers; keep distinct from spawn and exec. |
 | `EXEC_SERVER_AUTH_TOKEN` | The check-host exec-server; injected into the check-host container at spawn, presented on `/v1/exec`. | Unset ⇒ a `mode:"check"` spawn **fails closed 503** (O7 hardening). | Only needed once check-host is live-flipped. |
 | `GITHUB_WEBHOOK_SECRET` | HMAC (`X-Hub-Signature-256`) verify on `POST /webhook`. | Absent ⇒ `/webhook` returns `503 "autoscaler not configured"`. | Must equal the GitHub App's configured webhook secret (verify via `/app/hook/config`). |
 | `GITHUB_MINT_TOKEN` | First-party JIT runner mint (`generate-jitconfig`), `Administration:write` on `HuGR-Labs` repos. | Absent ⇒ `/webhook` 503. | Dogfood path. Customer repos use the App path instead. |
@@ -137,11 +139,11 @@ Rotate on a **compromise**, on **staff departure**, or on a **scheduled cadence*
    npx wrangler secret put <NAME> --name <corelink-spawn-worker|corelink-fabricd>
    # (paste the value at the prompt, or pipe from a vault: `vault read ... | wrangler secret put ...`)
    ```
-3. **Only paired credentials move in lockstep.** `CLOUDFLARE_SPAWN_AUTH_TOKEN`
-   exists on both surfaces and must match the Worker copy; rotate both before
-   retiring the old value. `BILLING_INGEST_AUTH_KEY` must match its CoreLink
-   counterpart. The exec and lifecycle tokens are dedicated fabricd credentials
-   and rotate independently; all three must be present and distinct in fabricd.
+3. **Rotate each control domain on both surfaces.** The spawn, exec and
+   lifecycle tokens must each match between fabricd and the spawn Worker.
+   Rotate the corresponding client and server copies together; the three
+   domains rotate independently of one another and must remain distinct.
+   `BILLING_INGEST_AUTH_KEY` must match its CoreLink counterpart.
 4. **Roll the container** (fabricd only): the singleton reads env at boot, so
    after `wrangler secret put` you MUST trigger a rollout (new image digest +
    `wrangler deploy`) — see the playbook §2b. The spawn-worker picks up secrets

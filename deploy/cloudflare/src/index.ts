@@ -257,7 +257,7 @@ export interface Env {
   //
   // O7: now REQUIRED for a mode==="check" spawn — an unset secret FAILS CLOSED
   // (503), mirroring the CLOUDFLARE_SPAWN_AUTH_TOKEN fail-closed discipline
-  // (authed() returns false when the token is empty). Previously optional
+  // (controlAuthed() refuses missing or overlapping domain tokens). Previously optional
   // (serve-unauthenticated back-compat); that default is removed so a check-host
   // exec-server is never spawned without its auth gate.
   EXEC_SERVER_AUTH_TOKEN?: string;
@@ -1536,13 +1536,6 @@ function unauthorized(): Response {
 
 // safeEqual / verifyGithubHmac / buildContainerEnv (+ the per-job CAS-PAT mint)
 // live in ./lib — pure, runtime-agnostic, unit-tested in test/index.test.ts.
-
-function authed(request: Request, env: Env): boolean {
-  const tok = env.CLOUDFLARE_SPAWN_AUTH_TOKEN ?? "";
-  if (tok.length === 0) return false; // fail-closed: no secret configured ⇒ deny
-  const h = request.headers.get("authorization") ?? "";
-  return safeEqual(h, `Bearer ${tok}`);
-}
 
 async function sha256Hex(data: string | ArrayBuffer): Promise<string> {
   const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
@@ -4714,10 +4707,10 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
     }
 
     // Authenticated fabric suspension signal. The producer is fabricd's
-    // durable suspension outbox and uses the existing spawn control bearer;
+    // durable suspension outbox and uses the scoped lifecycle bearer;
     // this route is never public or tenant-authenticated.
     if (request.method === "POST" && pathname === "/internal/v1/tenant-suspension") {
-      if (!authed(request, env)) return unauthorized();
+      if (!controlAuthed(request, env)) return unauthorized();
       let body: { event_id?: string; tenant_id?: string; action?: string };
       try { body = (await request.json()) as typeof body; } catch { return json({ error: "invalid JSON body" }, 400); }
       if (body.action !== "suspended" || !body.event_id || !body.tenant_id) return json({ error: "invalid suspension event" }, 400);
@@ -5231,7 +5224,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
           }
           // O7 (fail-closed): the exec-server bearer is REQUIRED for a check-host
           // spawn. Without it the exec-server would serve unauthenticated, so we
-          // refuse to spawn one — mirroring authed()'s "no secret ⇒ deny" gate
+          // refuse to spawn one — mirroring controlAuthed()'s "no secret ⇒ deny" gate
           // (index.ts fail-closed on an empty CLOUDFLARE_SPAWN_AUTH_TOKEN). 503:
           // a config/service-not-ready condition, not the caller's fault.
           //

@@ -23,6 +23,7 @@ function routeDomain(request: Request): AuthDomain | undefined {
   }
   if (request.method === "POST" && url.pathname === "/v1/teardown") return "lifecycle";
   if (request.method === "POST" && url.pathname === "/v1/egress-cutoff") return "lifecycle";
+  if (request.method === "POST" && url.pathname === "/internal/v1/tenant-suspension") return "lifecycle";
   return undefined;
 }
 
