@@ -296,6 +296,8 @@ export async function revokeCasPatById(
 export type ColdReason = "mint_key_unarmed" | "no_repo" | "no_installation_or_pat";
 
 export interface ContainerEnvResult {
+  /** Exact concurrency holder created by this preparation. */
+  preparationId?: string;
   /** Durable shared compute reservation, held independently of PAT cleanup. */
   computeReservationId?: string;
   authz: "ok" | "forbidden";
@@ -310,8 +312,8 @@ export interface ContainerEnvResult {
   /**
    * Monthly compute allowance in vCPU-HOURS (server #975). Warm only, and
    * ABSENT for a tenant with no metered ceiling — absent means "nothing to warn
-   * against", never "zero allowance". ADVISORY: it is not consulted by any
-   * admission decision, only by the near-ceiling warning at completion.
+   * against", never "zero allowance". The paired authorization grant enforces
+   * metered admission; this returned value also supports completion warnings.
    */
   maxVcpuH?: number;
 }

@@ -5,34 +5,58 @@ vi.mock("@cloudflare/containers", () => ({
   getContainer: vi.fn(),
 }));
 
-import { ConcurrencySlotsDO, runContainmentDrain } from "../src/index";
+import { ConcurrencySlotsDO, ContainmentDO, runContainmentDrain } from "../src/index";
 import { getContainer } from "@cloudflare/containers";
 import { bootstrap, env, event, FakeStorage, kv, makeDO, ns } from "./containment-redrive-test-helpers";
 
 const MINT_KEY = "dispatcher-key";
-const TENANT = "tenant-a";
+const TENANT = "22222222-2222-4222-8222-222222222222";
 
 function json(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
 }
 
-function fixture(options: { mintStatus?: number; authorizeStatus?: number; mintKey?: boolean; adoptStatus?: number } = {}) {
-  const d = makeDO({ RUNNER_JOB_PATS: kv() });
+function fixture(options: { mintStatus?: number; authorizeStatus?: number; mintKey?: boolean; adoptStatus?: number; metered?: boolean; revokeStatus?: number } = {}) {
+  const d = makeDO({ RUNNER_JOB_PATS: kv(), FABRIC_COMPUTE_URL: "https://fabric.example" });
+  let gate = Promise.resolve();
+  d.instance = new ContainmentDO({ storage: d.storage, blockConcurrencyWhile: (fn: () => Promise<void>) => {
+    const result = gate.then(fn);
+    gate = result.catch(() => undefined);
+    return result;
+  } } as never, d.runtimeEnv as never);
+  d.binding = ns(d.instance);
   const store = d.runtimeEnv.RUNNER_JOB_PATS as ReturnType<typeof kv>;
   const slotsStorage = new FakeStorage();
   const slots = new ConcurrencySlotsDO({ storage: slotsStorage } as never, {} as never);
   const order: string[] = [];
   const calls: Array<{ url: string; init?: RequestInit }> = [];
+  let computeId = "";
   const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input); calls.push({ url, init });
     if (url.endsWith("/internal/v1/runner/authorize")) {
+      if (options.metered) {
+        const request = JSON.parse(String(init?.body));
+        computeId = request.compute_reservation_id;
+        const now = Date.now();
+        const payload = { v: 1, key_id: "test", tenant_id: TENANT, workload_kind: "spawn_worker_runner",
+          workload_id: request.job_id, reservation_id: computeId, period_key: 202609,
+          ceiling_vcpu_ms: "864000000", vcpu_count: 4, maximum_wall_ms: 28_800_000,
+          issued_at_ms: now, expires_at_ms: now + 60_000 };
+        const token = btoa(JSON.stringify(payload)).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
+        return json({ tenant: TENANT, max_concurrency: 2, max_vcpu_h: 240, compute_grant: `${token}.signature` });
+      }
       return json({ tenant: TENANT, max_concurrency: 2 }, options.authorizeStatus ?? 200);
     }
     if (url.endsWith("/internal/v1/runner/mint")) {
       order.push("mint");
-      return json({ token_plaintext: "new-secret", pat_id: "new-pat", tenant: TENANT, max_concurrency: 2 }, options.mintStatus ?? 200);
+      return json({ token_plaintext: "new-secret", pat_id: "new-pat", tenant: TENANT, max_concurrency: 2,
+        ...(options.metered ? { max_vcpu_h: 240 } : {}) }, options.mintStatus ?? 200);
     }
-    if (url.endsWith("/internal/v1/runner/revoke")) return new Response(null, { status: 204 });
+    if (url.endsWith("/internal/v1/runner/revoke")) return new Response(null, { status: options.revokeStatus ?? 204 });
+    if (url.includes("/internal/v1/compute/")) {
+      if (url.endsWith("/cancel")) return new Response("already active", { status: 409 });
+      return json({ reservation_id: computeId, state: url.endsWith("/reserve") ? "prepared" : url.endsWith("/settle") ? "settled" : "active" });
+    }
     if (url.endsWith("/internal/v1/runner/adopt")) {
       order.push("adopt");
       return new Response(null, { status: options.adoptStatus ?? 204 });
@@ -79,6 +103,7 @@ function spawnClaims(f: ReturnType<typeof fixture>) {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
   vi.clearAllMocks();
 });
 
@@ -175,6 +200,7 @@ describe("spawn preparation before containment claim", () => {
 
   it("revokes only the new prepared PAT when another owner already holds the claim", async () => {
     const f = fixture();
+    await f.slots.acquire(TENANT, "7104", 2, 10, 60_000, "healthy-preparation");
     await f.d.instance.registerCredential({ jobId: "7104", tenant: TENANT, patId: "healthy-pat" });
     f.store.map.set("spawn:7104", "held-by-healthy-owner");
     await queued(f, "7104");
@@ -191,5 +217,21 @@ describe("spawn preparation before containment claim", () => {
     expect(drivingRecords(f)).toEqual([]);
     expect(getContainer).not.toHaveBeenCalled();
     expect(f.slotsStorage.map.get("slots")).toEqual(expect.arrayContaining([expect.objectContaining({ jobId: "7104" })]));
+    expect(f.slotsStorage.map.get("slot-holders:v1:7104")).toMatchObject({ holders: ["healthy-preparation"] });
+  });
+
+  it("settles an unused metered preparation despite PAT revocation failure and preserves the winning slot", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-09-06T12:00:00Z"));
+    const f = fixture({ metered: true, revokeStatus: 503 });
+    await f.slots.acquire(TENANT, "7122", 2, 10, 60_000, "winning-preparation");
+    f.store.map.set("spawn:7122", "held-by-winning-owner");
+    await queued(f, "7122");
+    const settled = f.calls.filter(({ url }) => url.endsWith("/compute/settle"));
+    expect(settled).toHaveLength(1);
+    expect(JSON.parse(String(settled[0].init?.body))).toMatchObject({ actual_vcpu_ms: "0", terminal_evidence_digest: expect.stringMatching(/^[0-9a-f]{64}$/) });
+    expect(f.slotsStorage.map.get("slot-holders:v1:7122")).toMatchObject({ holders: ["winning-preparation"] });
+    expect((await f.d.instance.revocationRequestedCredentials()).records).toContainEqual({ jobId: "7122", tenant: TENANT, patId: "new-pat" });
+    expect(getContainer).not.toHaveBeenCalled();
+    expect(f.calls.filter(({ url }) => url.includes("generate-jitconfig"))).toHaveLength(0);
   });
 });

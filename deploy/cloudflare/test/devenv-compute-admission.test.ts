@@ -25,11 +25,11 @@ function grant(): AuthorizedDevenvStart {
   return { config: { workspaceName: "repo", profileName: "browser", tier: "standard-4" }, grant: { tenantId, sessionUuid, patId: "22222222-2222-4222-8222-222222222222", casPat: "synthetic-cas-secret", expiresAtMs: NOW + 60_000, computeReservationId: sessionUuid } };
 }
 function token() {
-  const payload = { v: 1, key_id: "key", tenant_id: tenantId, workload_kind: "devenv", workload_id: sessionUuid, reservation_id: sessionUuid, period_key: 202609, ceiling_vcpu_ms: "1000000", vcpu_count: 4, maximum_wall_ms: 28_800_000, issued_at_ms: NOW - 1_000, expires_at_ms: NOW + 60_000 };
+  const payload = { v: 1, key_id: "key", tenant_id: tenantId, workload_kind: "devenv", workload_id: sessionUuid, reservation_id: sessionUuid, period_key: 202609, ceiling_vcpu_ms: "864000000", vcpu_count: 4, maximum_wall_ms: 28_800_000, issued_at_ms: NOW - 1_000, expires_at_ms: NOW + 60_000 };
   return `${btoa(JSON.stringify(payload)).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_")}.signature`;
 }
 function obligationToken(id: string, workloadId: string, expiresAtMs = NOW + 60_000) {
-  const payload = { v: 1, key_id: "key", tenant_id: tenantId, workload_kind: "devenv", workload_id: workloadId, reservation_id: id, period_key: 202609, ceiling_vcpu_ms: "1000000", vcpu_count: 4, maximum_wall_ms: 28_800_000, issued_at_ms: expiresAtMs - 60_000, expires_at_ms: expiresAtMs };
+  const payload = { v: 1, key_id: "key", tenant_id: tenantId, workload_kind: "devenv", workload_id: workloadId, reservation_id: id, period_key: 202609, ceiling_vcpu_ms: "864000000", vcpu_count: 4, maximum_wall_ms: 28_800_000, issued_at_ms: expiresAtMs - 60_000, expires_at_ms: expiresAtMs };
   return `${btoa(JSON.stringify(payload)).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_")}.signature`;
 }
 function fixture(fetcher: typeof fetch) {
@@ -48,6 +48,43 @@ beforeEach(() => vi.spyOn(Date, "now").mockReturnValue(NOW));
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe("authorized DevEnv compute composition", () => {
+  it("retries failures from an earlier page after a restart and a successful tail", async () => {
+    const failedId = "11111111-1111-4111-8111-000000000001";
+    let unavailable = true;
+    const fetcher = vi.fn(async () => unavailable
+      ? new Response("unavailable", { status: 503 })
+      : new Response(JSON.stringify({ reservation_id: failedId, state: "cancelled" })));
+    const f = fixture(fetcher);
+    await f.ctx.blockConcurrencyWhile(async () => undefined);
+    for (let n = 1; n <= 26; n++) {
+      const id = `11111111-1111-4111-8111-${String(n).padStart(12, "0")}`;
+      await f.ctx.storage.put(`compute:obligation:${id}`, {
+        binding: { token: obligationToken(id, id, NOW - 1), reservationId: id, tenantId,
+          workloadKind: "devenv", workloadId: id, vcpuCount: 4, maximumWallMs: 28_800_000 },
+        phase: n === 1 ? "preparing" : "terminal", deadlineMs: NOW - 1,
+        ...(n === 1 ? {} : { terminalKind: "cancelled" }),
+      });
+    }
+    await f.instance.retryUnusedCompute({ reservationId: failedId });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(f.stored.get("compute:drain-retry")).toBe(true);
+    const restarted = new RunnerDevEnvDO(f.ctx, f.env);
+    await f.ctx.blockConcurrencyWhile(async () => undefined);
+    await restarted.retryUnusedCompute({ reservationId: failedId });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(restarted.schedule).toHaveBeenCalledTimes(1);
+    expect(f.stored.has("compute:drain-cursor")).toBe(false);
+    unavailable = false;
+    await restarted.retryUnusedCompute({ reservationId: failedId });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    vi.mocked(restarted.schedule).mockClear();
+    await restarted.retryUnusedCompute({ reservationId: failedId });
+    expect(restarted.schedule).not.toHaveBeenCalled();
+    expect(f.stored.has("compute:drain-cursor")).toBe(false);
+    expect(f.stored.has("compute:drain-retry")).toBe(false);
+    expect(restarted.start).not.toHaveBeenCalled();
+  });
+
   it("prepares metered compute before credential/provider start and claims once", async () => {
     const fetcher = vi.fn(async (url: string) => response(url)); const f = fixture(fetcher);
     await f.instance.prepareAuthorizedCompute({ token: token(), reservationId: sessionUuid, tenantId, workloadKind: "devenv", workloadId: sessionUuid, vcpuCount: 4, maximumWallMs: 28_800_000 });

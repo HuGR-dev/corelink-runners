@@ -2876,7 +2876,27 @@ async function prepareSpawn(
     }
   }
   if (computeOwned) mint.computeReservationId = preparationId;
+  mint.preparationId = preparationId;
   return mint;
+}
+
+/** An invocation that never reached provider dispatch owns only its preparation. */
+async function abandonPreparedSpawn(
+  env: Env, authority: ReturnType<typeof containmentAuthority>, jobId: string,
+  prepared: ContainerEnvResult | undefined,
+): Promise<void> {
+  if (!prepared) return;
+  if (prepared.computeReservationId) {
+    try { await authority.abandonUnusedCompute(prepared.computeReservationId); }
+    catch { logEvent("error", "compute_cleanup_pending", { jobId }); }
+  }
+  if (prepared.preparationId) {
+    try { await concurrencySlots(env).releasePreparation(jobId, prepared.preparationId); }
+    catch { logEvent("error", "preparation_slot_release_pending", { jobId, preparationId: prepared.preparationId }); }
+  }
+  if (prepared.patId && prepared.tenant) {
+    await revokeIssuedCredential(env, authority, { jobId, tenant: prepared.tenant, patId: prepared.patId });
+  }
 }
 
 // The spawn drive shared by the webhook path AND the re-drive reconciler:
@@ -4508,11 +4528,7 @@ export async function runContainmentDrain(env: Env, dependencies: ContainmentDra
         beforeClaim: async () => {
           if (drive === driveSpawn) prepared = await prepareSpawn(env, spawnOpts);
         },
-        abandonPreparation: async () => {
-          if (prepared?.patId && prepared.tenant) {
-            await revokeIssuedCredential(env, authority, { jobId: event.job_id, tenant: prepared.tenant, patId: prepared.patId });
-          }
-        },
+        abandonPreparation: () => abandonPreparedSpawn(env, authority, event.job_id, prepared),
         claim: () => claim(env.RUNNER_JOB_PATS!, event.job_id),
         release: () => releaseSpawnClaim(env.RUNNER_JOB_PATS!, event.job_id),
         drive: async driveOpts => {
@@ -4559,11 +4575,7 @@ export async function runNormalIntakeDrain(env: Env, alreadyRateAdmittedEventId?
       admit: async () => parseContainmentSwitch(env.AUTOSCALER_INTAKE_PAUSED) === "normal"
         && (await authority.snapshot()).backlog_count === 0,
       beforeClaim: async () => { prepared = await prepareSpawn(env, spawnOpts); },
-      abandonPreparation: async () => {
-        if (prepared?.patId && prepared.tenant) {
-          await revokeIssuedCredential(env, authority, { jobId: event.job_id, tenant: prepared.tenant, patId: prepared.patId });
-        }
-      },
+      abandonPreparation: () => abandonPreparedSpawn(env, authority, event.job_id, prepared),
       claim: () => claimSpawn(env.RUNNER_JOB_PATS, event.job_id),
       release: () => releaseSpawnClaim(env.RUNNER_JOB_PATS, event.job_id),
       drive: async opts => {
@@ -5654,11 +5666,7 @@ export async function redriveOrphanedJobs(
               await release(env.RUNNER_JOB_PATS, redriveJobId);
               if (drive === driveSpawn) prepared = await prepareSpawn(env, spawnOpts);
             },
-            abandonPreparation: async () => {
-              if (prepared?.patId && prepared.tenant) {
-                await revokeIssuedCredential(env, ownedAuthority, { jobId: redriveJobId, tenant: prepared.tenant, patId: prepared.patId });
-              }
-            },
+            abandonPreparation: () => abandonPreparedSpawn(env, ownedAuthority, redriveJobId, prepared),
             claim: () => claim(env.RUNNER_JOB_PATS, redriveJobId),
             release: () => releaseSpawnClaim(env.RUNNER_JOB_PATS!, redriveJobId),
             drive: async driveOpts => {
@@ -5947,11 +5955,7 @@ export async function retryOrphanedSpawns(
           await kv.put(name, JSON.stringify(bumped), { expirationTtl: ORPHAN_TTL_S });
           if (drive === driveSpawn) prepared = await prepareSpawn(env, spawnOpts);
         },
-        abandonPreparation: async () => {
-          if (prepared?.patId && prepared.tenant) {
-            await revokeIssuedCredential(env, ownedAuthority, { jobId: ownedReservation.job_id, tenant: prepared.tenant, patId: prepared.patId });
-          }
-        },
+        abandonPreparation: () => abandonPreparedSpawn(env, ownedAuthority, ownedReservation.job_id, prepared),
         claim: () => claimSpawn(kv, ownedReservation.job_id),
         release: () => releaseSpawnClaim(kv, ownedReservation.job_id),
         drive: async driveOpts => {
