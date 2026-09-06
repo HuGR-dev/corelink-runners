@@ -1,3 +1,16 @@
+# Current execution tree — 2026-09-06
+
+The owner requested TechLead replanning. Current execution/ledger moved to
+`/private/tmp/corelink-delivery-rework-20260906`, branch `delivery/rework-20260906`,
+checkpoint `fe591a1567b3f21b9fd392b6374a97209082919b`.
+Read `docs/plan/execution/2026-09-06-rework.md` and the disjoint plan in that tree.
+Seven source candidates are composed there; three disjoint extraction/fixture
+packets are integrated and 39 focused tests passed. All 54 remaining WPs have
+exclusive file ownership. Product acceptance and sprint counts are unchanged.
+Do not restart old overlapping index.ts/lib.ts executor packets.
+
+The previous checkpoint is retained below as historical context.
+
 # Delivery checkpoint — 2026-09-05
 
 Continue in `/private/tmp/corelink-delivery-sprint1-20260905`, branch
