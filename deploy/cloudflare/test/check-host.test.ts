@@ -627,7 +627,7 @@ describe("WP-2 2a: per-repo rate-limit key (WEBHOOK_LIMITER)", () => {
     };
   }
 
-  it("a RATE-LIMITED job is dead-lettered so the reconciler can re-drive it (429 is backpressure, not loss)", async () => {
+  it("a RATE-LIMITED job is durably queued for deferred intake (202 is not loss)", async () => {
     const lim = refusingLimiter();
     const kv = fakeKv();
     const waits: Promise<unknown>[] = [];
@@ -643,19 +643,16 @@ describe("WP-2 2a: per-repo rate-limit key (WEBHOOK_LIMITER)", () => {
     const resp = await queuedWebhook(env, "4242", "acme/api", SECRET, {
       waitUntil: (p: Promise<unknown>) => waits.push(p),
     });
-    // The 429 itself is UNCHANGED — only whether the job survives it.
-    expect(resp.status).toBe(429);
-    await Promise.all(waits); // the record is written in waitUntil, after the response
-    const raw = kv.store.get("orphan:4242");
-    expect(raw).toBeDefined();
-    const rec = JSON.parse(raw as string) as { repo: string; installationId: string };
-    expect(rec.repo).toBe("acme/api");
-    expect(rec.installationId).toBe("999111"); // WARM-recoverable
-    // And it did NOT take a spawn claim — the reconciler claims when it re-drives.
+    expect(resp.status).toBe(202);
+    expect(await resp.json()).toMatchObject({ ok: true, queued: true, rate_limited: true, job_id: "4242" });
+    await Promise.all(waits);
+    // Intake authority owns the delayed retry; no orphan or external claim is
+    // manufactured by the rejected admission.
+    expect(kv.store.has("orphan:4242")).toBe(false);
     expect(kv.store.has("spawn:4242")).toBe(false);
   });
 
-  it("dead-lettering is BOUNDED per repo — past the cap the job is dropped LOUDLY, never silently", async () => {
+  it("a rate-limited job still enters durable intake when the legacy dead-letter cap is full", async () => {
     // Recording every refusal would make the limiter the AMPLIFIER: driveSpawn
     // mints the CAS PAT before it checks the concurrency slot, so each reconciler
     // retry costs a real mint even when the spawn is then refused. So the
@@ -678,14 +675,15 @@ describe("WP-2 2a: per-repo rate-limit key (WEBHOOK_LIMITER)", () => {
     const resp = await queuedWebhook(env, "5353", "acme/api", SECRET, {
       waitUntil: (p: Promise<unknown>) => waits.push(p),
     });
-    expect(resp.status).toBe(429);
+    expect(resp.status).toBe(202);
+    expect(await resp.json()).toMatchObject({ ok: true, queued: true, rate_limited: true, job_id: "5353" });
     await Promise.all(waits);
-    expect(kv.store.has("orphan:5353")).toBe(false); // capped ⇒ no record
-    // The counter is NOT advanced past the cap (no unbounded growth).
+    expect(kv.store.has("orphan:5353")).toBe(false);
+    // The retired counter is not advanced by the durable intake path.
     expect(kv.store.get("rldl:acme/api")).toBe(String(RATE_LIMIT_DEADLETTER_MAX));
   });
 
-  it("a COLD rate-limited job records nothing — the deliberate gap, pinned so it stays deliberate", async () => {
+  it("an unmapped rate-limited job is durably queued without a spawn claim", async () => {
     // No installation id ⇒ not WARM-recoverable: re-driving it would mean
     // spawning without the per-job authz/mint. Same gap the ceiling refusal has
     // (cell12-deadletter-cold). Pinned so a future change has to face it.
@@ -702,7 +700,8 @@ describe("WP-2 2a: per-repo rate-limit key (WEBHOOK_LIMITER)", () => {
     const resp = await queuedWebhook(env, "6464", "cold/repo", SECRET, {
       waitUntil: (p: Promise<unknown>) => waits.push(p),
     });
-    expect(resp.status).toBe(429);
+    expect(resp.status).toBe(202);
+    expect(await resp.json()).toMatchObject({ ok: true, queued: true, rate_limited: true, job_id: "6464" });
     await Promise.all(waits);
     expect(kv.store.has("orphan:6464")).toBe(false);
     // The counter is not touched either — a cold refusal costs nothing.

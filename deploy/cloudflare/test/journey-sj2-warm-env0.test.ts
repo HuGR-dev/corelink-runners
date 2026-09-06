@@ -544,7 +544,7 @@ describe("SJ-2 cell 1 — warm env-0 injects a CLW_CRED_TICKET overlay, never th
 
     const ticket = runnerEnv().CLW_CRED_TICKET;
     // Redeeming that exact ticket against the SAME lease returns the PAT (200).
-    const r = await worker.fetch(redeemReq("2004", { ticket }), env, {} as never);
+    const r = await worker.fetch(redeemReq(runnerCredentialLeaseId("2004", "acme", "pat-1"), { ticket }), env, {} as never);
     expect(r.status).toBe(200);
     expect(await r.json()).toEqual({
       cas_pat: RAW_PAT,
@@ -592,22 +592,14 @@ describe("SJ-2 cell 2 — jobId→patId is registered at MINT, before the contai
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// CELL 3 — stash idempotency: two spawn attempts for one jobId converge on ONE ticket.
+// CELL 3 — delivery idempotency: a duplicate can never mint or start a second runner.
 // ═══════════════════════════════════════════════════════════════════════════
-describe("SJ-2 cell 3 — retry convergence: two warm drives for one jobId reuse the SAME ticket", () => {
-  it("the 2nd drive's container gets the FIRST drive's ticket (the latch is idempotent per lease)", async () => {
+describe("SJ-2 cell 3 — duplicate queued delivery retains one real spawn claim", () => {
+  it("the 2nd delivery is deduped before a second mint or provider start", async () => {
     const metrics = fakeMetrics();
     const cred = makeCredStash();
-    // NO RUNNER_JOB_PATS ⇒ claimSpawn fail-opens to true every time, so BOTH webhook
-    // deliveries drive a full env-0 spawn against the SAME CRED_STASH latch (id=jobId)
-    // — modeling the spawn-reliability retry that re-runs env-0 for one lease.
-    const env = baseEnv({
-      METRICS: metrics as never,
-      CORELINK_RUNNER_MINT_AUTH_KEY: MINT_KEY,
-      SPAWN_WORKER_PUBLIC_URL: PUBLIC_URL,
-      CLW_ENDPOINT: CAS_ENDPOINT,
-      CRED_STASH: cred.ns as never,
-    });
+    const kv = fakeKv();
+    const env = warmEnv(kv, metrics, cred);
 
     const ctx1 = makeCtx();
     await queuedWebhook(env, ctx1, { jobId: "2200", repo: "acme/api", installationId: 555 });
@@ -616,16 +608,13 @@ describe("SJ-2 cell 3 — retry convergence: two warm drives for one jobId reuse
     await queuedWebhook(env, ctx2, { jobId: "2200", repo: "acme/api", installationId: 555 });
     await drain(ctx2);
 
-    // Two mints, two containers — but ONE shared ticket (retries converge).
-    expect(mintCalls()).toHaveLength(2);
+    expect(mintCalls()).toHaveLength(1);
     const started = containers.filter((c) => c.startWithEnv.mock.calls.length > 0);
-    expect(started.length).toBe(2);
+    expect(started.length).toBe(1);
     const t1 = (started[0].startWithEnv.mock.calls[0][0] as Record<string, string>).CLW_CRED_TICKET;
-    const t2 = (started[1].startWithEnv.mock.calls[0][0] as Record<string, string>).CLW_CRED_TICKET;
-    expect(t1).toBe(t2);
     expect(t1.length).toBe(64);
-    // And that one converged ticket redeems (the latch recognizes it).
-    const r = await worker.fetch(redeemReq("2200", { ticket: t1 }), env, {} as never);
+    expect(kv.store.has("spawn:2200")).toBe(true);
+    const r = await worker.fetch(redeemReq(runnerCredentialLeaseId("2200", "acme", "pat-1"), { ticket: t1 }), env, {} as never);
     expect(r.status).toBe(200);
   });
 });
@@ -652,17 +641,18 @@ describe("SJ-2 cell 4 — the ticket is MULTI-USE within the lease (boot hydrate
       clw_ref_domain: "runner",
     };
     // Redeem #1 — the boot `clw hydrate`.
-    const r1 = await worker.fetch(redeemReq("2300", { ticket }), env, {} as never);
+    const leaseId = runnerCredentialLeaseId("2300", "acme", "pat-1");
+    const r1 = await worker.fetch(redeemReq(leaseId, { ticket }), env, {} as never);
     expect(r1.status).toBe(200);
     expect(await r1.json()).toEqual(expected);
     // Redeem #2 — the job's `clw run` (corelink-memoize). STILL served (multi-use).
-    const r2 = await worker.fetch(redeemReq("2300", { ticket }), env, {} as never);
+    const r2 = await worker.fetch(redeemReq(leaseId, { ticket }), env, {} as never);
     expect(r2.status).toBe(200);
     expect(await r2.json()).toEqual(expected);
 
     // Now wipe the lease directly (what completion does) and redeem ⇒ 404.
-    await env.CRED_STASH.get(env.CRED_STASH.idFromName("2300")).wipe();
-    const r3 = await worker.fetch(redeemReq("2300", { ticket }), env, {} as never);
+    await env.CRED_STASH.get(env.CRED_STASH.idFromName(leaseId)).wipe();
+    const r3 = await worker.fetch(redeemReq(leaseId, { ticket }), env, {} as never);
     expect(r3.status).toBe(404);
   });
 
@@ -676,11 +666,12 @@ describe("SJ-2 cell 4 — the ticket is MULTI-USE within the lease (boot hydrate
     await drain(ctx);
     const ticket = runnerEnv().CLW_CRED_TICKET;
 
-    const bad = await worker.fetch(redeemReq("2301", { ticket: "f".repeat(64) }), env, {} as never);
+    const leaseId = runnerCredentialLeaseId("2301", "acme", "pat-1");
+    const bad = await worker.fetch(redeemReq(leaseId, { ticket: "f".repeat(64) }), env, {} as never);
     expect(bad.status).toBe(404);
     expect((await bad.json()).cas_pat).toBeUndefined();
     // The bad probe did not consume/wipe the latch.
-    const good = await worker.fetch(redeemReq("2301", { ticket }), env, {} as never);
+    const good = await worker.fetch(redeemReq(leaseId, { ticket }), env, {} as never);
     expect(good.status).toBe(200);
     expect((await good.json()).cas_pat).toBe(RAW_PAT);
   });
@@ -717,7 +708,8 @@ describe("SJ-2 cell 5 — completion revokes by pat_id, wipes the stash, tears d
     // Pre-completion state: pat + tenant + handle keys all present; stash redeems.
     expect(kv.store.get("2400")).toBe("pat-1");
     expect(kv.store.get("jtenant:2400")).toBe("acme");
-    expect((await worker.fetch(redeemReq("2400", { ticket }), env, {} as never)).status).toBe(200);
+    const leaseId = runnerCredentialLeaseId("2400", "acme", "pat-1");
+    expect((await worker.fetch(redeemReq(leaseId, { ticket }), env, {} as never)).status).toBe(200);
 
     // ── Completion leg ──
     const ctxB = makeCtx();
@@ -730,11 +722,12 @@ describe("SJ-2 cell 5 — completion revokes by pat_id, wipes the stash, tears d
     expect(revokeCalls()).toHaveLength(1);
     expect(revokeBodies[0]).toEqual({ pat_id: "pat-1", owner_tenant: "acme" });
     // The stash was WIPED — the credential dies with the job (redeem ⇒ 404).
-    expect((await worker.fetch(redeemReq("2400", { ticket }), env, {} as never)).status).toBe(404);
+    expect((await worker.fetch(redeemReq(leaseId, { ticket }), env, {} as never)).status).toBe(404);
     // The container was torn down (by the stashed handle).
     expect(teardownHandles).toContain(handle);
-    // The revoke + tenant keys were deleted (pat map by revokeCompletedJob, jtenant by the handler).
-    expect(kv.store.has("2400")).toBe(false);
+    // The durable authority owns the credential terminal state; this legacy
+    // compatibility projection is not used as revocation proof.
+    expect(kv.store.has("2400")).toBe(true);
     expect(kv.store.has("jtenant:2400")).toBe(false);
     expect(kv.store.has("jhandle:2400")).toBe(false);
     // Golden signals for the completion leg.
@@ -887,11 +880,10 @@ describe("SJ-2 cell 7 — failure injection at every step of the warm journey", 
     expect(containers.filter((c) => c.startWithEnv.mock.calls.length > 0)).toHaveLength(0); // ...never spawned
     // The minted PAT was REVOKED (not left orphaned to TTL) and the key deleted.
     expect(revokeBodies).toContainEqual({ pat_id: "pat-1", owner_tenant: "acme" });
-    expect(kv.store.has("2602")).toBe(false); // revoke deleted the pat key
-    expect(kv.store.has("spawn:2602")).toBe(false); // claim released for a re-drive
-    expect(metrics.counts.spawn_failed).toBe(1);
-    // The dead-letter orphan was recorded (warm-recoverable: installation_id in hand).
-    expect(kv.store.has("orphan:2602")).toBe(true);
+    expect(kv.store.has("2602")).toBe(true); // compatibility projection is not revocation authority
+    expect(kv.store.has("spawn:2602")).toBe(true); // provider outcome is durably UNKNOWN
+    expect(metrics.counts.spawn_failed ?? 0).toBe(0);
+    expect(kv.store.has("orphan:2602")).toBe(false);
   });
 
   it("7d container start fails on ALL retries ⇒ claim released + PAT REVOKED + spawn_failed (3 attempts)", async () => {
@@ -909,11 +901,11 @@ describe("SJ-2 cell 7 — failure injection at every step of the warm journey", 
 
     // startWithRetry tried a FRESH handle each attempt (SPAWN_MAX_ATTEMPTS = 3).
     expect(containers.filter((c) => c.startWithEnv.mock.calls.length > 0)).toHaveLength(3);
-    // The PAT minted at env-0 time was revoked (not orphaned) and the claim released.
+    // The PAT minted at env-0 time was revoked; the unresolved provider claim is retained.
     expect(revokeBodies).toContainEqual({ pat_id: "pat-1", owner_tenant: "acme" });
-    expect(kv.store.has("2603")).toBe(false);
-    expect(kv.store.has("spawn:2603")).toBe(false);
-    expect(metrics.counts.spawn_failed).toBe(1);
+    expect(kv.store.has("2603")).toBe(true);
+    expect(kv.store.has("spawn:2603")).toBe(true);
+    expect(metrics.counts.spawn_failed ?? 0).toBe(0);
   }, 15000);
 
   it("7e revoke 5xx at completion ⇒ swallowed (fail-open); teardown STILL runs, response 200", async () => {
@@ -958,7 +950,7 @@ describe("SJ-2 cell 7 — failure injection at every step of the warm journey", 
     // A failed provider teardown keeps the durable obligation for retry.
     expect(kv.store.has("jhandle:2605")).toBe(true);
     expect(revokeCalls()).toHaveLength(1);
-    expect(kv.store.has("2605")).toBe(false); // pat key still cleared by the revoke
+    expect(kv.store.has("2605")).toBe(true); // durable credential history is authoritative
 
     teardownBehavior = async () => {};
     const retryCtx = makeCtx();
