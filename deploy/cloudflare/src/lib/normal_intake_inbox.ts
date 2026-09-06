@@ -7,6 +7,7 @@ export interface NormalIntakeRecord {
   installation_id: string; labels: string[]; received_at_ms: number; state: NormalIntakeState; next_attempt_ms: number;
 }
 export interface NormalIntakeInput {
+  schema_version: 1;
   event_id: string; body_sha256: string; job_id: string; repo: string; installation_id: string;
   labels: string[]; received_at_ms: number;
 }
@@ -36,18 +37,22 @@ const validCount = (value: unknown): value is number => Number.isSafeInteger(val
 
 function fail(message: string): never { throw new Error(`normal intake corruption: ${message}`); }
 function validateInput(input: NormalIntakeInput): NormalIntakeInput {
-  if (!input || !text(input.event_id) || !SHA.test(input.body_sha256) || !text(input.installation_id, MAX_TEXT, true)
+  if (!input || input.schema_version !== 1 || !text(input.event_id) || !SHA.test(input.body_sha256) || !text(input.installation_id, MAX_TEXT, true)
     || !safeTime(input.received_at_ms) || !Array.isArray(input.labels) || input.labels.length > 32
     || input.labels.some((label) => !text(label, 128))) throw new Error("invalid normal intake record");
   const identity = normalizeRedriveIdentity(input.repo, input.job_id);
   if (!identity) throw new Error("invalid normal intake identity");
-  return { ...input, repo: identity.repo, job_id: identity.job_id, labels: [...input.labels] };
+  return { schema_version: 1, event_id: input.event_id, body_sha256: input.body_sha256, job_id: identity.job_id,
+    repo: identity.repo, installation_id: input.installation_id, labels: [...input.labels], received_at_ms: input.received_at_ms };
 }
-function validRecord(value: unknown): value is NormalIntakeRecord {
+function validRecord(value: unknown, expectedEventId?: string): value is NormalIntakeRecord {
   if (!value || typeof value !== "object") return false;
   const r = value as Partial<NormalIntakeRecord>;
-  return r.schema_version === 1 && text(r.event_id) && typeof r.body_sha256 === "string" && SHA.test(r.body_sha256)
-    && text(r.job_id) && text(r.repo) && text(r.installation_id, MAX_TEXT, true) && Array.isArray(r.labels)
+  const fields = ["body_sha256", "event_id", "installation_id", "job_id", "labels", "next_attempt_ms", "received_at_ms", "repo", "schema_version", "state"];
+  if (Object.keys(value).sort().join(",") !== fields.join(",")) return false;
+  const identity = normalizeRedriveIdentity(r.repo, r.job_id);
+  return r.schema_version === 1 && text(r.event_id) && (!expectedEventId || r.event_id === expectedEventId) && typeof r.body_sha256 === "string" && SHA.test(r.body_sha256)
+    && !!identity && identity.repo === r.repo && identity.job_id === r.job_id && text(r.installation_id, MAX_TEXT, true) && Array.isArray(r.labels)
     && r.labels.length <= 32 && r.labels.every((x) => text(x, 128)) && safeTime(r.received_at_ms)
     && (r.state === "pending" || r.state === "uncertain" || r.state === "complete") && safeTime(r.next_attempt_ms);
 }
@@ -65,16 +70,22 @@ export class NormalIntakeInbox {
       const key = eventKey(normalized.event_id);
       const old = await tx.get<unknown>(key);
       if (old !== undefined) {
-        if (!validRecord(old)) fail("malformed event record");
+      if (!validRecord(old, normalized.event_id)) fail("malformed event record");
         if (old.body_sha256 !== normalized.body_sha256 || old.job_id !== normalized.job_id || old.repo !== normalized.repo
           || old.installation_id !== normalized.installation_id || JSON.stringify(old.labels) !== JSON.stringify(normalized.labels)) return { status: "conflict" };
         return { status: "duplicate", record: old };
       }
       const countValue = await tx.get<unknown>(COUNT);
+      if (countValue === undefined) {
+        const existingPending = await tx.list({ prefix: PENDING, limit: 1 });
+        if (existingPending.size > 0) fail("missing active count");
+      }
       const count = countValue === undefined ? 0 : countValue;
       if (!validCount(count)) fail("malformed active count");
       if (count >= MAX) return { status: "full" };
-      const record: NormalIntakeRecord = { schema_version: 1, ...normalized, state: "pending", next_attempt_ms: now + delayMs };
+      const record: NormalIntakeRecord = { schema_version: 1, event_id: normalized.event_id, body_sha256: normalized.body_sha256,
+        job_id: normalized.job_id, repo: normalized.repo, installation_id: normalized.installation_id, labels: [...normalized.labels],
+        received_at_ms: normalized.received_at_ms, state: "pending", next_attempt_ms: now + delayMs };
       await tx.put(key, record);
       await tx.put(pendingKey(record), record.event_id);
       await tx.put(COUNT, count + 1);
@@ -85,16 +96,16 @@ export class NormalIntakeInbox {
   async pending(now: number, limit = 25): Promise<NormalIntakeRecord[]> {
     validateNow(now);
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 25) throw new Error("invalid normal intake limit");
-    const page = await this.storage.list<string>({ prefix: PENDING, limit });
+    const page = await this.storage.list<string>({ prefix: PENDING, limit: 26 });
     const result: NormalIntakeRecord[] = [];
     for (const [key, value] of page) {
       if (typeof value !== "string" || !key.startsWith(PENDING)) fail("malformed pending index");
       const record = await this.storage.get<unknown>(eventKey(value));
-      if (!validRecord(record)) fail("malformed event record");
-      if (record.event_id !== value || record.state !== "pending") fail("pending index/state mismatch");
+      if (!validRecord(record, value)) fail("malformed event record");
+      if (record.state !== "pending" || key !== pendingKey(record)) fail("pending index/state mismatch");
       if (record.next_attempt_ms <= now) result.push(record);
     }
-    return result;
+    return result.sort((a, b) => a.received_at_ms - b.received_at_ms || a.event_id.localeCompare(b.event_id)).slice(0, limit);
   }
 
   async settle(eventId: string, expectedBodySha: string, outcome: NormalIntakeOutcome, now: number): Promise<void> {
@@ -103,11 +114,14 @@ export class NormalIntakeInbox {
     return this.storage.transaction(async (tx: AuthorityTransaction) => {
       const key = eventKey(eventId);
       const value = await tx.get<unknown>(key);
-      if (!validRecord(value)) fail("missing or malformed event record");
+      if (!validRecord(value, eventId)) fail("missing or malformed event record");
       if (value.body_sha256 !== expectedBodySha) throw new NormalIntakeConflictError();
       if (value.state === "complete" || value.state === "uncertain") return;
       const nextState: NormalIntakeState = outcome === "complete" ? "complete" : outcome === "uncertain" ? "uncertain" : "pending";
-      const next: NormalIntakeRecord = { ...value, state: nextState, next_attempt_ms: outcome === "retry" ? now + 60_000 : value.next_attempt_ms };
+      if (outcome === "retry" && now > Number.MAX_SAFE_INTEGER - 60_000) throw new Error("invalid normal intake retry time");
+      const next: NormalIntakeRecord = { schema_version: 1, event_id: value.event_id, body_sha256: value.body_sha256,
+        job_id: value.job_id, repo: value.repo, installation_id: value.installation_id, labels: [...value.labels], received_at_ms: value.received_at_ms,
+        state: nextState, next_attempt_ms: outcome === "retry" ? now + 60_000 : value.next_attempt_ms };
       const countValue = await tx.get<unknown>(COUNT);
       if (!validCount(countValue)) fail("malformed active count");
       if (outcome === "complete") { if (countValue < 1) fail("active count underflow"); await tx.delete(pendingKey(value)); await tx.put(COUNT, countValue - 1); }

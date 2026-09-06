@@ -14,7 +14,7 @@ class Store {
     this.tail = run.then(() => undefined, () => undefined); return run;
   }
 }
-const input = (event_id: string, received_at_ms = 1000, body_sha256 = "a".repeat(64)) => ({ event_id, body_sha256, job_id: "1", repo: "Owner/Repo", installation_id: "42", labels: ["self-hosted"], received_at_ms });
+const input = (event_id: string, received_at_ms = 1000, body_sha256 = "a".repeat(64)) => ({ schema_version: 1 as const, event_id, body_sha256, job_id: "1", repo: "Owner/Repo", installation_id: "42", labels: ["self-hosted"], received_at_ms });
 
 describe("NormalIntakeInbox", () => {
   it("is idempotent, survives restart, and orders bounded pages", async () => {
@@ -55,5 +55,11 @@ describe("NormalIntakeInbox", () => {
     await expect(inbox.enqueue({ ...input("x%2Fy"), repo: "other/repo" })).resolves.toMatchObject({ status: "conflict" });
     storage.data.set("normal-inbox:v1:event:broken", { schema_version: 1 });
     await expect(inbox.settle("broken", "a".repeat(64), "complete", 4)).rejects.toThrow(/corruption/);
+  });
+  it("looks past delayed successors without unbounded reads", async () => {
+    const storage = new Store(); const inbox = new NormalIntakeInbox(storage as never);
+    for (let i = 0; i < 25; i++) await inbox.enqueue(input(`delayed-${i}`, i), 0, 10000);
+    await inbox.enqueue(input("ready", 25), 0);
+    expect((await inbox.pending(1, 1)).map((x) => x.event_id)).toEqual(["ready"]);
   });
 });
