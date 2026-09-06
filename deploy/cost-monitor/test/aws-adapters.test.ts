@@ -34,6 +34,10 @@ describe("AWS source and witness adapters", () => {
     await expect(new AwsSourceSecrets({ client: y.client as any, timeoutMs: 500 }).load(registration as any)).rejects.toBeInstanceOf(AwsAdapterError);
     const z = secretClient({ ARN: registration.secretArn, VersionId: registration.secretVersionId, SecretBinary: encodedKey });
     await expect(new AwsSourceSecrets({ client: z.client as any, timeoutMs: 500 }).load(registration as any)).rejects.toBeInstanceOf(AwsAdapterError);
+    const delayed: any = { ARN: registration.secretArn, VersionId: registration.secretVersionId };
+    Object.defineProperty(delayed, "SecretString", { get() { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5); return JSON.stringify({ version: "1", source: "src", service: "svc", application: "app", key_id: "kid", credential_epoch: "epoch", hmac_key_base64url: encodedKey }); } });
+    const delayedSource = secretClient(delayed);
+    await expect(new AwsSourceSecrets({ client: delayedSource.client as any, timeoutMs: 1 }).load(registration as any)).rejects.toMatchObject({ code: "TIMEOUT" });
   });
   it("invokes a qualified version and verifies a real RSA witness receipt", async () => {
     const expected = receipt(); const response = { StatusCode: 200, ExecutedVersion: "7", Payload: new TextEncoder().encode(JSON.stringify(expected)) };

@@ -22,6 +22,7 @@ function positive(value: unknown): value is number { return typeof value === "nu
 function object(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
 function exact(value: Record<string, unknown>, fields: readonly string[]): boolean { const keys = Object.keys(value); return keys.length === fields.length && fields.every((field) => Object.prototype.hasOwnProperty.call(value, field)); }
 function sanitized(code: AwsAdapterError["code"] = "UNAVAILABLE"): AwsAdapterError { return new AwsAdapterError(code, "AWS adapter operation failed"); }
+function ensureDeadline(started: number, timeoutMs: number): void { if (performance.now() - started >= timeoutMs) throw sanitized("TIMEOUT"); }
 function accountFromArn(arn: string): string | null { return /^arn:aws:[^:]+:[^:]*:(\d{12}):/.exec(arn)?.[1] ?? null; }
 function qualifiedLambda(arn: string): { region: string; account: string; version: string } | null {
   const match = /^arn:aws:lambda:([a-z0-9-]+):(\d{12}):function:[A-Za-z0-9_-]{1,140}:([1-9]\d*)$/.exec(arn);
@@ -68,12 +69,15 @@ export class AwsSourceSecrets {
   async load(registration: SourceRegistration): Promise<Uint8Array> {
     const secretArn = registration?.secretArn; const secretVersionId = registration?.secretVersionId;
     if (!object(registration) || !text(secretArn) || !text(secretVersionId) || !text(registration.source) || !text(registration.service) || !text(registration.application) || !text(registration.keyId) || !text(registration.credentialEpoch)) throw sanitized("INVALID");
+    const started = performance.now();
     const response = await deadline(this.timeoutMs, (signal) => this.client.send(new GetSecretValueCommand({ SecretId: secretArn, VersionId: secretVersionId }), { abortSignal: signal }));
+    ensureDeadline(started, this.timeoutMs);
     if (response.ARN !== secretArn || response.VersionId !== secretVersionId || typeof response.SecretString !== "string" || response.SecretString.length === 0 || new TextEncoder().encode(response.SecretString).byteLength > MAX_SECRET_BYTES) throw sanitized("INVALID");
     let parsed: unknown; try { parsed = JSON.parse(response.SecretString); } catch { throw sanitized("INVALID"); }
     if (!object(parsed) || !exact(parsed, SECRET_FIELDS) || parsed.version !== "1" || parsed.source !== registration.source || parsed.service !== registration.service || parsed.application !== registration.application || parsed.key_id !== registration.keyId || parsed.credential_epoch !== registration.credentialEpoch || typeof parsed.hmac_key_base64url !== "string" || !/^[A-Za-z0-9_-]+$/.test(parsed.hmac_key_base64url)) throw sanitized("INVALID");
     let decoded: Buffer; try { decoded = Buffer.from(parsed.hmac_key_base64url, "base64url"); } catch { throw sanitized("INVALID"); }
     if (decoded.length < 32 || decoded.length > 1024 || decoded.toString("base64url") !== parsed.hmac_key_base64url) throw sanitized("INVALID");
+    ensureDeadline(started, this.timeoutMs);
     return new Uint8Array(decoded);
   }
 }
