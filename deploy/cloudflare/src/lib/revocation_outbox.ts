@@ -73,12 +73,14 @@ async function revokeOne(env: RevocationEnv, authority: CredentialAuthority, ide
 }
 
 export async function revokeCompletedJob(env: RevocationEnv, authority: CredentialAuthority, jobId: string, derivedTenant?: string): Promise<boolean> {
-  if (!env.CORELINK_RUNNER_MINT_AUTH_KEY) return false;
+  const closed = await authority.closeJobCredentials(jobId);
+  if (!closed.known) throw new Error(`credential authority has no migrated obligation for job ${jobId}`);
   const identities = await pendingAll(authority, { kind: "job", jobId });
-  if (identities.length === 0) throw new Error(`credential authority has no migrated obligation for job ${jobId}`);
+  if (identities.length === 0) return true;
+  if (!env.CORELINK_RUNNER_MINT_AUTH_KEY) throw new Error(`credential revoke pending for job ${jobId}`);
+  if (derivedTenant && identities.some(identity => identity.tenant !== derivedTenant)) throw new Error("credential tenant attribution conflict");
   let revoked = false;
   for (const identity of identities) {
-    if (derivedTenant && identity.tenant !== derivedTenant) throw new Error("credential tenant attribution conflict");
     if (!(await revokeOne(env, authority, identity))) throw new Error(`credential revoke pending for job ${jobId}`);
     revoked = true;
   }
