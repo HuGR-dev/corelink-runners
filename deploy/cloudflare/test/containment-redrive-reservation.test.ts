@@ -281,7 +281,11 @@ describe("T3-W17 deterministic first-party reservation seams", () => {
       order.push("release");
       expect(d.storage.map.get(reserveKey())).toMatchObject({ state: "EFFECT_ELIGIBLE" });
     });
-    const claim = vi.fn(async () => { order.push("claim"); return true; });
+    const claim = vi.fn(async () => {
+      const accepted = await realClaimSpawn(store, "123");
+      if (accepted) order.push("claim");
+      return accepted;
+    });
     const drive = vi.fn(async (_env: unknown, opts: { jobId: string; repo: string }) => { order.push("drive"); return providerReceipt(opts); });
     const orphan = vi.fn(async () => { order.push("orphan"); });
     const contexts = [...Array(100)].map(() => ctx());
@@ -305,7 +309,7 @@ describe("T3-W17 deterministic first-party reservation seams", () => {
     );
     await settle(c);
     expect(drive).toHaveBeenCalledTimes(1);
-    expect(drive).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ repo: "acme/repo", installationId: "", labels: ["corelink"], credential_source: "installation-only" }));
+    expect(drive).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ repo: "acme/repo", installationId: "", labels: ["corelink"], credential_source: "installation-only" }), undefined);
   });
 
   it("leaves an eligible first-party reservation fail-closed after its waitUntil drive crashes", async () => {
@@ -385,7 +389,9 @@ describe("T3-W17 retry ordering and independent switches", () => {
     const live = makeDO(); const liveStore = kv(); const liveCtx = ctx();
     const fresh = await worker.fetch(await webhook(123, "redrive-only-pause"), env(live, liveStore, { AUTOSCALER_INTAKE_PAUSED: "0", AUTOSCALER_REDRIVE_PAUSED: "1" }), liveCtx as never);
     await settle(liveCtx);
-    expect(fresh.status).toBe(202); expect(liveStore.put).toHaveBeenCalled(); expect((await live.instance.snapshot()).backlog_count).toBe(0);
+    expect(fresh.status).toBe(202); expect(liveStore.put).not.toHaveBeenCalled();
+    expect((await live.instance.snapshot()).backlog_count).toBe(0);
+    expect(live.storage.map.get("normal-inbox:v1:event:redrive-only-pause")).toMatchObject({ state: "pending", job_id: "123", repo: "acme/repo" });
 
     const both = makeDO(); const bothStore = kv({ "orphan:123": JSON.stringify({ repo: "acme/repo", installationId: "42", labels: ["corelink"], attempts: 1, firstRecordedMs: T0 }) });
     const contained = await worker.fetch(await webhook(124, "both-paused"), env(both, bothStore, { AUTOSCALER_INTAKE_PAUSED: "1", AUTOSCALER_REDRIVE_PAUSED: "1" }), ctx() as never);
