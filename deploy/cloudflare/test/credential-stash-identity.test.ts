@@ -102,6 +102,28 @@ describe("exact minted credential stash identity", () => {
     expect((await stashDO.redeem("ticket-a")).status).toBe(404);
   });
 
+  it("recovers a no-binding remote revoke after authority restart when the real stash returns", async () => {
+    const identity = { jobId: "restart-recovery", tenant: "tenant-a", patId: "pat-a" };
+    const storage = new FakeStorage();
+    const first = new CredentialObligationAuthority(storage as never);
+    await first.registerCredential(identity);
+    const stash = makeDO();
+    await stash.stash("ticket-a", { token: "secret", tenant: identity.tenant, endpoint: "https://fabric.invalid" }, 60_000);
+    const fetcher = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetcher);
+    await expect(revokeIssuedCredential({ CORELINK_RUNNER_MINT_AUTH_KEY: "key", CORELINK_MINT_URL: "https://mint.invalid" }, first, identity)).resolves.toBe(false);
+    expect((await first.revocationRequestedCredentials()).records).toEqual([identity]);
+    const restarted = new CredentialObligationAuthority(storage as never);
+    const env = {
+      CORELINK_RUNNER_MINT_AUTH_KEY: "key", CORELINK_MINT_URL: "https://mint.invalid",
+      CRED_STASH: { idFromName: (id: string) => id, get: () => stash },
+    };
+    await expect(retryFailedRevocations(env, restarted)).resolves.toBe(1);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect((await stash.redeem("ticket-a")).status).toBe(404);
+    expect((await restarted.revocationRequestedCredentials()).records).toEqual([]);
+  });
+
   it.each(["missing key", "remote failure"])("closes every completed-job ticket despite %s and retains remote cleanup", async failure => {
     const authority = new CredentialObligationAuthority(new FakeStorage() as never);
     const leases = new Map<string, CredStashDO>();
