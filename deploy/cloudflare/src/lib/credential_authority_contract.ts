@@ -26,6 +26,14 @@ export interface CredentialAuthority {
    * replacement for one job never replaces the older cleanup obligation.
    */
   registerCredential(identity: CredentialIdentity): Promise<void>;
+  /** Commit a permanent job terminal fence before external revocation. The fence
+   * makes every existing/future non-revoked obligation retry-eligible, including
+   * across crashes before enumeration. known means durable identity history was
+   * found, never inferred from KV. Unknown jobs are fenced but not acknowledged.
+   * Registration after this fence commits a requested obligation then rejects
+   * outside the transaction, preventing further start effects without losing PAT.
+   */
+  closeJobCredentials(jobId: string): Promise<{ known: boolean }>;
   /** Explicit durable transition registered -> revoke_requested. Registration
    * alone NEVER authorizes a background retry to revoke a live credential.
    * Exact already-requested/revoked identity is idempotent; missing/corrupt
