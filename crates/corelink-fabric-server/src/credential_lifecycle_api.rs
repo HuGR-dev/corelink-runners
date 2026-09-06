@@ -37,7 +37,7 @@ pub fn router(ledger: Arc<dyn LeaseLedger + Send + Sync>, issuer_key: Option<Str
     });
     Router::new()
         .route(
-            "/internal/v1/credentials/tenants/{tenant}/lifecycle",
+            "/internal/v1/credentials/tenants/:tenant/lifecycle",
             get(lifecycle),
         )
         .with_state(state)

@@ -631,6 +631,9 @@ export class ContainmentDO extends DurableObject<Env> {
   async confirmCredentialRevoked(identity: CredentialIdentity): Promise<void> { return new CredentialObligationAuthority(this.ctx.storage).confirmCredentialRevoked(identity); }
 
   async closeJobCredentials(jobId: string): Promise<{ known: boolean }> { return new CredentialObligationAuthority(this.ctx.storage).closeJobCredentials(jobId); }
+  async closeTenantCredentials(tenant: string, throughGeneration: string): Promise<void> {
+    return new CredentialObligationAuthority(this.ctx.storage).closeTenantCredentials(tenant, throughGeneration);
+  }
 
   async getEffectAttempt(identity: ContainmentEffectIdentity, nonce: string): Promise<ContainmentEffectAttempt | null> {
     return this.effectLedger().getEffectAttempt(identity, nonce);

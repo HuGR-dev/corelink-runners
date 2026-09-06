@@ -253,6 +253,8 @@ pub struct ServerConfig {
     pub admin_key: Option<String>,
     /// Bounded issuer public-key history for shared compute grants.
     pub compute_grant_public_keys: std::collections::HashMap<String, Vec<u8>>,
+    /// Dedicated issuer read authority; never a spawn/exec/admin key.
+    pub credential_issuer_key: Option<String>,
     // ── WP-A durable billing exporter — DEFAULT-OFF ──────────────────────────
     /// Billing-exporter tick interval, from `FABRIC_BILLING_EXPORT_INTERVAL_SECS`
     /// (u64 seconds, ≥ 1).  Absent/`0` → `None` → no exporter is spawned (the
@@ -329,6 +331,7 @@ impl std::fmt::Debug for ServerConfig {
                 &self.admin_key.as_ref().map(|_| "***REDACTED***"),
             )
             .field("billing_export_interval", &self.billing_export_interval)
+            .field("credential_issuer_key", &self.credential_issuer_key.as_ref().map(|_| "***REDACTED***"))
             .field("runner_vcpu", &self.runner_vcpu)
             .field("tenant_max_vcpu_h", &self.tenant_max_vcpu_h)
             .finish()
@@ -740,6 +743,13 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
     )?;
     anyhow::ensure!(compute_grant_public_keys.is_empty() || ledger_backend == LedgerBackend::Postgres,
         "compute grants require the shared PostgreSQL ledger");
+    let credential_issuer_key = get("FABRIC_CREDENTIAL_ISSUER_AUTH_KEY");
+    if let Some(key) = &credential_issuer_key {
+        anyhow::ensure!((32..=4096).contains(&key.len()) && key.bytes().all(|b| b.is_ascii_graphic()),
+            "credential issuer key must contain 32..4096 printable non-space ASCII bytes");
+        anyhow::ensure!(ledger_backend == LedgerBackend::Postgres,
+            "credential lifecycle authority requires PostgreSQL");
+    }
     let admin_key = get("FABRIC_ADMIN_KEY")
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
@@ -953,6 +963,7 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
         admission_park_cap,
         admin_key,
         compute_grant_public_keys,
+        credential_issuer_key,
         billing_export_interval,
         runner_vcpu,
         tenant_max_vcpu_h,
@@ -1503,7 +1514,8 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
     // Track-C AUP1: the operator secret gating the enforcement endpoints (same
     // FABRIC_ADMIN_KEY as the tenant-plan admin). Absent ⇒ the suspend routes 404.
     let state = state.with_admin_key(cfg.admin_key.as_deref().map(std::sync::Arc::from))
-        .with_compute_grant_public_keys(cfg.compute_grant_public_keys.clone());
+        .with_compute_grant_public_keys(cfg.compute_grant_public_keys.clone())
+        .with_credential_issuer_key(cfg.credential_issuer_key.clone());
 
     // DEV/TEST-ONLY out-of-band cred-ticket mint (POST /v1/test/mint-cred-ticket).
     // DEFAULT-OFF: `TestMintConfig::from_env` returns None unless FABRIC_TEST_MINT_KEY

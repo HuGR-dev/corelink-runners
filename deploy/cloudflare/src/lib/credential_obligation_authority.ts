@@ -137,6 +137,9 @@ export class CredentialObligationAuthority {
   }
 
   async pendingCredentials(selection: CredentialSelection, cursor?: string, requestedStatus?: string): Promise<CredentialPage> {
+    if (selection.kind === "tenant" && selection.throughGeneration !== undefined) {
+      CredentialObligationAuthority.generation(selection.throughGeneration);
+    }
     if (selection.kind === "tenant") CredentialObligationAuthority.validateFloor(CredentialObligationAuthority.floorKey(selection.tenant), selection.tenant, await this.storage.get(CredentialObligationAuthority.floorKey(selection.tenant)));
     const page = await this.storage.list({ prefix: "credential-obligation:", ...(cursor ? { startAfter: cursor } : {}), limit: 101 });
     const entries = [...page.entries()];
