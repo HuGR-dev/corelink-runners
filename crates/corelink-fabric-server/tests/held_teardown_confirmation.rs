@@ -2,7 +2,8 @@
 
 use std::sync::Arc;
 
-use corelink_fabric_server::{BoxProvisioner, HybridBoxProvisioner, NoBoxProvisioner};
+use corelink_fabric_server::cloud_exec::HybridBoxProvisioner;
+use corelink_fabric_server::{BoxProvisioner, NoBoxProvisioner};
 
 #[test]
 fn no_box_requires_positive_per_lease_provision_evidence() {

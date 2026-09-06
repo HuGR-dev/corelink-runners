@@ -46,9 +46,10 @@ async fn failed_cancel_teardown_keeps_held_then_retry_releases() {
         repo_allowlist: Vec::new(),
     }]);
     let mut state = AppState::new(ledger.clone(), Arc::new(plans), Arc::new(FixedClock));
-    state.provisioner = Arc::new(RetryTeardown {
+    let provider = Arc::new(RetryTeardown {
         calls: Mutex::new(0),
     });
+    state.provisioner = provider.clone();
     let router = app(
         Arc::new(StaticTokenStore::new([(
             "pat-acme".to_string(),
@@ -94,10 +95,17 @@ async fn failed_cancel_teardown_keeps_held_then_retry_releases() {
         ledger.get("lease-cancel-retry").unwrap().unwrap().state,
         LeaseState::Wire(corelink_runners_contracts::RunnerState::Held)
     );
-    let second = router.oneshot(request()).await.unwrap();
+    let second = router.clone().oneshot(request()).await.unwrap();
     assert_eq!(second.status(), StatusCode::OK);
     assert_eq!(
         ledger.get("lease-cancel-retry").unwrap().unwrap().state,
         LeaseState::Wire(corelink_runners_contracts::RunnerState::Released)
+    );
+    let third = router.oneshot(request()).await.unwrap();
+    assert_eq!(third.status(), StatusCode::OK);
+    assert_eq!(
+        *provider.calls.lock().unwrap(),
+        2,
+        "idempotent cancel must not call provider again"
     );
 }
