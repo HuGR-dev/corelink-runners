@@ -165,3 +165,64 @@ fn real_pg_native_and_external_reservations_share_the_budget_lock() -> anyhow::R
         Ok::<_, anyhow::Error>(())
     })
 }
+
+#[test]
+fn real_pg_same_reservation_uuid_is_cross_tenant_collision_safe() -> anyhow::Result<()> {
+    let Some(url) = env::var("TEST_DATABASE_URL").ok() else {
+        eprintln!("external compute collision test: TEST_DATABASE_URL unset — skipping");
+        return Ok(());
+    };
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let first = PgLedger::connect(&url, 4, PgTlsMode::Disable).await?;
+        let second = PgLedger::connect(&url, 4, PgTlsMode::Disable).await?;
+        let clock = first.pool.get().await?.query_one(
+            "SELECT EXTRACT(YEAR FROM (clock_timestamp() AT TIME ZONE 'UTC'))::int * 100 + EXTRACT(MONTH FROM (clock_timestamp() AT TIME ZONE 'UTC'))::int, (EXTRACT(EPOCH FROM (clock_timestamp() AT TIME ZONE 'UTC')) * 1000)::bigint", &[]).await?;
+        let period = clock.get::<_, i32>(0) as u32;
+        let expiry = clock.get::<_, i64>(1) as u64 + 60_000;
+        let tenant_a = uuid::Uuid::new_v4().to_string();
+        let tenant_b = uuid::Uuid::new_v4().to_string();
+        let digest = "a".repeat(64);
+        for tenant in [&tenant_a, &tenant_b] {
+            first.initialize_external_compute_period(ExternalComputeBaseline {
+                tenant_id: tenant.clone(), period_key: period, external_vcpu_ms: 0,
+                evidence_digest: digest.clone(),
+            })?;
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        let a = reservation(&tenant_a, &id, period, expiry);
+        let b = reservation(&tenant_b, &id, period, expiry);
+        let a_for_thread = a.clone();
+        let b_for_thread = b.clone();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let (a_result, b_result) = std::thread::scope(|scope| {
+            let gate_a = barrier.clone();
+            let gate_b = barrier.clone();
+            let left = scope.spawn(|| { gate_a.wait(); first.reserve_external_compute(a_for_thread) });
+            let right = scope.spawn(|| { gate_b.wait(); second.reserve_external_compute(b_for_thread) });
+            (left.join().unwrap(), right.join().unwrap())
+        });
+        let a_won = matches!(a_result, Ok(ExternalComputeAdmission::Admitted(_)));
+        let b_won = matches!(b_result, Ok(ExternalComputeAdmission::Admitted(_)));
+        assert_eq!(a_won as u8 + b_won as u8, 1);
+        let loser = if a_won { b_result } else { a_result };
+        assert!(loser.unwrap_err().downcast_ref::<crate::compute_budget::ExternalComputeError>() == Some(&crate::compute_budget::ExternalComputeError::Conflict));
+        let count_a: i64 = first.pool.get().await?.query_one("SELECT count(*) FROM external_compute_reservations WHERE tenant=$1", &[&tenant_a]).await?.get(0);
+        let count_b: i64 = first.pool.get().await?.query_one("SELECT count(*) FROM external_compute_reservations WHERE tenant=$1", &[&tenant_b]).await?.get(0);
+        assert_eq!(count_a + count_b, 1);
+
+        let winner = if a_won { a } else { b };
+        let mut divergent = if a_won { b } else { a };
+        divergent.tenant_id = winner.tenant_id.clone();
+        divergent.grant_digest = "b".repeat(64);
+        let error = first.reserve_external_compute(divergent.clone()).unwrap_err();
+        assert!(error.downcast_ref::<crate::compute_budget::ExternalComputeError>() == Some(&crate::compute_budget::ExternalComputeError::Conflict));
+        assert!(first.activate_external_compute(&divergent).is_err());
+        assert!(first.settle_external_compute(&divergent, ExternalComputeSettlement { actual_vcpu_ms: 1, terminal_evidence_digest: "c".repeat(64) }).is_err());
+        assert_eq!(winner.reservation_id, id);
+        Ok::<_, anyhow::Error>(())
+    })
+}
