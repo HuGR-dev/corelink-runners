@@ -26,6 +26,16 @@ export interface CredentialAuthority {
    * replacement for one job never replaces the older cleanup obligation.
    */
   registerCredential(identity: CredentialIdentity): Promise<void>;
+  /** Explicit durable transition registered -> revoke_requested. Registration
+   * alone NEVER authorizes a background retry to revoke a live credential.
+   * Exact already-requested/revoked identity is idempotent; missing/corrupt
+   * identity refuses. Call before the first revoke HTTP request.
+   */
+  requestCredentialRevocation(identity: CredentialIdentity): Promise<void>;
+  /** Only revoke_requested obligations; excludes healthy registered and
+   * confirmed terminal identities. Scheduled retry uses ONLY this method.
+   */
+  revocationRequestedCredentials(cursor?: string): Promise<CredentialPage>;
   /** Bounded strongly consistent pages of obligations not confirmed revoked.
    * Cursor advances over scanned keys. Invalid stored records fail closed.
    */
