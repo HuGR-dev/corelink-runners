@@ -238,6 +238,21 @@ struct LeaseReservation {
 }
 
 pub trait LeaseLedger {
+    fn initialize_external_compute_period(&self, _baseline: crate::compute_budget::ExternalComputeBaseline) -> anyhow::Result<()> {
+        anyhow::bail!("shared compute authority unavailable")
+    }
+    fn reserve_external_compute(&self, _reservation: crate::compute_budget::ExternalComputeReservation) -> anyhow::Result<crate::compute_budget::ExternalComputeAdmission> {
+        anyhow::bail!("shared compute authority unavailable")
+    }
+    fn activate_external_compute(&self, _reservation: &crate::compute_budget::ExternalComputeReservation) -> anyhow::Result<crate::compute_budget::ExternalComputeReceipt> {
+        anyhow::bail!("shared compute authority unavailable")
+    }
+    fn cancel_external_compute(&self, _reservation: &crate::compute_budget::ExternalComputeReservation) -> anyhow::Result<crate::compute_budget::ExternalComputeReceipt> {
+        anyhow::bail!("shared compute authority unavailable")
+    }
+    fn settle_external_compute(&self, _reservation: &crate::compute_budget::ExternalComputeReservation, _settlement: crate::compute_budget::ExternalComputeSettlement) -> anyhow::Result<crate::compute_budget::ExternalComputeReceipt> {
+        anyhow::bail!("shared compute authority unavailable")
+    }
     /// Whether this backend enforces the concurrency/vCPU cap SAFELY across
     /// MULTIPLE fabricd instances (shards). Only a shared, atomically-serialized
     /// store qualifies: the [`crate::pg_ledger::PgLedger`] (an advisory-locked
