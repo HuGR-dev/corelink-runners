@@ -5,13 +5,17 @@ import type { AuthorityStorage, AuthorityTransaction } from "../src/lib/authorit
 class Storage implements AuthorityStorage {
   values = new Map<string, unknown>();
   failKey: string | undefined;
+  failDeleteKey: string | undefined;
 
   async get<T>(key: string): Promise<T | undefined> { return this.values.get(key) as T | undefined; }
   async put<T>(key: string, value: T): Promise<void> {
     if (key === this.failKey) throw new Error("write failed");
     this.values.set(key, value);
   }
-  async delete(key: string): Promise<void> { this.values.delete(key); }
+  async delete(key: string): Promise<void> {
+    if (key === this.failDeleteKey) throw new Error("delete failed");
+    this.values.delete(key);
+  }
   async transaction<T>(fn: (tx: AuthorityTransaction) => Promise<T>): Promise<T> {
     const before = new Map(this.values);
     try { return await fn(this); } catch (error) { this.values = before; throw error; }
@@ -68,6 +72,36 @@ describe("durable preparation slot holders", () => {
     const before = new Map(storage.values);
     storage.failKey = "slots";
     await expect(authority.releasePreparation("job", "prep")).rejects.toThrow("write failed");
+    expect(storage.values).toEqual(before);
+  });
+
+  it("removes expired holder rows during acquire and release without touching live rows", async () => {
+    const storage = new Storage();
+    const authority = new ConcurrencyAuthority(storage);
+    await authority.acquire("old-a", "old-a", 1, 4, 0, 5, "prep-a");
+    await authority.acquire("old-b", "old-b", 1, 4, 0, 5, "prep-b");
+    await authority.acquire("live", "live", 1, 4, 0, 100, "prep-live");
+
+    await authority.acquire("new", "new", 1, 4, 10, 100, "prep-new");
+    expect([...storage.values.keys()].filter((key) => key.startsWith("slot-holders:v1:"))).toEqual([
+      "slot-holders:v1:live",
+      "slot-holders:v1:new",
+    ]);
+
+    await authority.release("new", 10);
+    expect([...storage.values.keys()].filter((key) => key.startsWith("slot-holders:v1:"))).toEqual([
+      "slot-holders:v1:live",
+    ]);
+  });
+
+  it("rolls back slots when expired-holder deletion fails during acquire", async () => {
+    const storage = new Storage();
+    const authority = new ConcurrencyAuthority(storage);
+    await authority.acquire("old", "old", 1, 3, 0, 5, "prep-old");
+    const before = new Map(storage.values);
+    storage.failDeleteKey = "slot-holders:v1:old";
+
+    await expect(authority.acquire("new", "new", 1, 3, 10, 100, "prep-new")).rejects.toThrow("delete failed");
     expect(storage.values).toEqual(before);
   });
 });

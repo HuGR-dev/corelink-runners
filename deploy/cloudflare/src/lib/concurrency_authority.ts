@@ -100,12 +100,8 @@ export class ConcurrencyAuthority {
         const existingHolders = existing ? holdersValue(await tx.get<unknown>(holdersKey(jobId))) : null;
         if (existing && existingHolders && existingHolders.key !== key) return { admitted: false, reason: "job_id_key_conflict" };
         const decision = decideSlotAcquire(slots, key, jobId, perKeyCap, fleetCap, nowMs, ttlMs);
-        refusalDecision = !decision.admitted;
-        if (!decision.admitted) {
-          const keyName = refusalKey(jobId);
-          const prior = refusalValue(await tx.get<unknown>(keyName), jobId);
-          if (!prior) await tx.put(keyName, { job_id: jobId, state: "refused_at_ceiling", reason: decision.reason ?? "refused_at_ceiling", recorded_at_ms: nowMs });
-        }
+        const expiredJobIds = new Set(slots.filter((slot) => slot.expiresMs <= nowMs).map((slot) => slot.jobId));
+        let nextHolders: SlotHolders | undefined;
         if (decision.admitted) {
           const holders = existingHolders ?? { key, holders: [], legacy: existing !== undefined || preparationId === undefined };
           holders.holders = [...holders.holders];
@@ -116,8 +112,18 @@ export class ConcurrencyAuthority {
               holders.holders.push(preparationId);
             }
           }
+          nextHolders = holders;
+        }
+        refusalDecision = !decision.admitted;
+        if (!decision.admitted) {
+          const keyName = refusalKey(jobId);
+          const prior = refusalValue(await tx.get<unknown>(keyName), jobId);
+          if (!prior) await tx.put(keyName, { job_id: jobId, state: "refused_at_ceiling", reason: decision.reason ?? "refused_at_ceiling", recorded_at_ms: nowMs });
+        }
+        for (const expiredJobId of expiredJobIds) await tx.delete(holdersKey(expiredJobId));
+        if (decision.admitted) {
           await tx.put(SLOTS_KEY, decision.slots);
-          await tx.put(holdersKey(jobId), holders);
+          await tx.put(holdersKey(jobId), nextHolders!);
         } else {
           await tx.put(SLOTS_KEY, decision.slots);
         }
@@ -134,7 +140,9 @@ export class ConcurrencyAuthority {
     numberInput(nowMs, "nowMs");
     await this.storage.transaction(async (tx) => {
       const slots = await readSlots(tx);
+      const expiredJobIds = new Set(slots.filter((slot) => slot.expiresMs <= nowMs).map((slot) => slot.jobId));
       await tx.put(SLOTS_KEY, slots.filter((slot) => slot.expiresMs > nowMs && slot.jobId !== jobId));
+      for (const expiredJobId of expiredJobIds) await tx.delete(holdersKey(expiredJobId));
       await tx.delete(holdersKey(jobId));
     });
   }
