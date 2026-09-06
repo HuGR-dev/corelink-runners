@@ -2725,3 +2725,19 @@ mod admit_lock_split_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod lifecycle_unsupported {
+    use super::{InMemoryLedger, LeaseLedger};
+
+    #[test]
+    fn in_memory_backend_refuses_lifecycle_reads_without_fabricating_state() {
+        let ledger = InMemoryLedger::new();
+        assert!(ledger.tenant_lifecycle("11111111-1111-4111-8111-111111111111").is_err());
+        assert!(ledger.tenant_suspension_generation("event-never-written").is_err());
+        // Repeated reads remain unsupported; no implicit generation or event row
+        // appears merely because a caller asked the public lifecycle seam.
+        assert!(ledger.tenant_lifecycle("11111111-1111-4111-8111-111111111111").is_err());
+        assert!(ledger.tenant_suspension_generation("event-never-written").is_err());
+    }
+}
