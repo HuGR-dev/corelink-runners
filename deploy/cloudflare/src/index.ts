@@ -2180,25 +2180,119 @@ async function spawnRunner(
   return { handle, runnerName, attempt };
 }
 
-// Best-effort revoke of a completed job's per-job CAS PAT, by pat_id (looked up
-// from KV). No-op when the mint isn't configured or no pat_id was stored. Fail-
-// OPEN: any error is swallowed (the PAT TTL-expires) — never breaks the webhook.
-async function revokeCompletedJob(
+const REVOKE_RETRY_PREFIX = "revoke-retry:";
+
+interface RevokeRetryRecord {
+  schema_version: 1;
+  job_id: string;
+  pat_id: string;
+  tenant: string;
+  attempts: number;
+}
+
+function revokeRetryKey(jobId: string): string {
+  return `${REVOKE_RETRY_PREFIX}${jobId}`;
+}
+
+async function retainRevokeRetry(
+  kv: NonNullable<Env["RUNNER_JOB_PATS"]>,
+  jobId: string,
+  patId: string,
+  tenant: string,
+): Promise<void> {
+  const key = revokeRetryKey(jobId);
+  const existing = await kv.get(key);
+  if (existing) return;
+  await kv.put(key, JSON.stringify({ schema_version: 1, job_id: jobId, pat_id: patId, tenant, attempts: 0 } satisfies RevokeRetryRecord), { expirationTtl: JOB_PAT_TTL_S });
+}
+
+/**
+ * Revoke the job PAT by its durable pat_id. A failed provider call is retained
+ * as a small retry record; the PAT mapping is deliberately kept until the revoke
+ * succeeds so a later cron tick cannot lose the exact credential identity.
+ */
+export async function revokeCompletedJob(
   env: Env,
   jobId: string,
   derivedTenant?: string,
 ): Promise<boolean> {
   if (!env.CORELINK_RUNNER_MINT_AUTH_KEY || !env.RUNNER_JOB_PATS) return false;
+  const patId = await env.RUNNER_JOB_PATS.get(jobId);
+  if (!patId) return false; // cold job, or already revoked/expired
+  if (!derivedTenant) {
+    await bumpMetrics(env, "revoke_missing_tenant");
+    logEvent("error", "revoke_missing_tenant", { jobId, patId });
+    throw new Error("revoke refused: server-derived tenant is missing");
+  }
   try {
-    const patId = await env.RUNNER_JOB_PATS.get(jobId);
-    if (!patId) return false; // cold job, or already revoked/expired
-    await revokeCasPatById(env, patId, derivedTenant ?? env.CLW_TENANT);
+    await revokeCasPatById(env, patId, derivedTenant);
     await env.RUNNER_JOB_PATS.delete(jobId);
+    await env.RUNNER_JOB_PATS.delete(revokeRetryKey(jobId));
     return true;
   } catch (e) {
-    logEvent("error", "revoke_failed", { jobId, error: (e as Error).message });
+    await retainRevokeRetry(env.RUNNER_JOB_PATS, jobId, patId, derivedTenant).catch(() => {});
+    await bumpMetrics(env, "revoke_failed");
+    logEvent("error", "revoke_failed", { jobId, patId, tenant: derivedTenant, error: (e as Error).message });
     return false;
   }
+}
+
+/** Retry completed/suspension revocations from the durable KV outbox. */
+export async function retryFailedRevocations(env: Env): Promise<number> {
+  const kv = env.RUNNER_JOB_PATS;
+  if (!kv?.list || !env.CORELINK_RUNNER_MINT_AUTH_KEY) return 0;
+  let listed: { keys: { name: string }[] };
+  try { listed = await kv.list({ prefix: REVOKE_RETRY_PREFIX }); } catch { return 0; }
+  let succeeded = 0;
+  for (const { name } of listed.keys) {
+    let rec: RevokeRetryRecord;
+    try {
+      const raw = await kv.get(name);
+      if (!raw) continue;
+      const parsed = JSON.parse(raw) as RevokeRetryRecord;
+      if (parsed.schema_version !== 1 || !parsed.job_id || !parsed.pat_id || !parsed.tenant) continue;
+      rec = parsed;
+    } catch { continue; }
+    try {
+      await revokeCasPatById(env, rec.pat_id, rec.tenant);
+      const current = await kv.get(rec.job_id);
+      if (current === rec.pat_id) await kv.delete(rec.job_id);
+      await kv.delete(name);
+      succeeded++;
+    } catch (e) {
+      await kv.put(name, JSON.stringify({ ...rec, attempts: rec.attempts + 1 }), { expirationTtl: JOB_PAT_TTL_S }).catch(() => {});
+      await bumpMetrics(env, "revoke_failed");
+      logEvent("error", "revoke_failed", { jobId: rec.job_id, patId: rec.pat_id, tenant: rec.tenant, retry: true, error: (e as Error).message });
+    }
+  }
+  return succeeded;
+}
+
+/**
+ * Consume the trusted fabric's durable tenant-suspended signal. The producer is
+ * the fabric server; this helper intentionally has no public HTTP route. It
+ * scans only server-derived tenant bindings and dispatches each exact pat_id.
+ */
+export async function dispatchTenantSuspensionRevocations(
+  env: Env,
+  event: { event_id: string; tenant_id: string },
+): Promise<number> {
+  const kv = env.RUNNER_JOB_PATS;
+  if (!kv?.list || !event.event_id || !event.tenant_id) throw new Error("invalid suspension event");
+  const marker = `suspend-revoke:${event.event_id}`;
+  if (await kv.get(marker)) return 0;
+  const listed = await kv.list({ prefix: "jtenant:" });
+  let dispatched = 0;
+  for (const { name } of listed.keys) {
+    const jobId = name.slice("jtenant:".length);
+    if ((await kv.get(name)) !== event.tenant_id) continue;
+    const patId = await kv.get(jobId);
+    if (!patId) continue;
+    await revokeCompletedJob(env, jobId, event.tenant_id);
+    dispatched++;
+  }
+  await kv.put(marker, "1", { expirationTtl: JOB_PAT_TTL_S });
+  return dispatched;
 }
 
 // Tear down a completed job's runner container by the DO handle stashed at spawn.
@@ -4416,6 +4510,11 @@ export default {
       logEvent("error", "orphan_retry_failed", { error: (e as Error).message });
     }
     try {
+      await retryFailedRevocations(env);
+    } catch (e) {
+      logEvent("error", "revoke_retry_failed", { error: (e as Error).message });
+    }
+    try {
       const pushed = await reconcileCompletedJobBilling(env, configured, now);
       if (pushed > 0) {
         logEvent("info", "billing_reconcile_pushed", { count: pushed });
@@ -4635,7 +4734,15 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
             logEvent("error", "containment_redrive_completion_cleanup_failed", { jobId, error: (e as Error).message });
           }
         }
-        const revoked = await revokeCompletedJob(env, jobId, derivedTenant);
+        let revoked = false;
+        try {
+          revoked = await revokeCompletedJob(env, jobId, derivedTenant);
+        } catch (e) {
+          // Missing server-derived identity is a loud refusal, but must not
+          // turn a GitHub completion delivery into a redelivery storm. The PAT
+          // mapping remains durable for operator-visible repair.
+          logEvent("error", "completion_revoke_refused", { jobId, error: (e as Error).message });
+        }
         // Release the concurrency slot (W7/F7) — by jobId ONLY, so it releases a
         // warm OR cold spawn's slot without needing the derived tenant. Best-effort
         // (the slot TTL self-heals a missed release, so this never permanently
@@ -4876,8 +4983,9 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
             200,
           );
         }
-        if (r.status === 401) return json({ error: "invalid ticket" }, 401);
-        if (r.status === 410) return json({ error: "ticket already redeemed" }, 410);
+        // Failed ticket redemption is intentionally a single public shape:
+        // forged, closed, expired, and unknown leases reveal no state oracle.
+        // A valid ticket remains multi-use until its lease deadline.
         return json({ error: "no such lease" }, 404);
       }
     }
