@@ -1,32 +1,193 @@
-//! Focused unit coverage for the standalone compute HTTP boundary.
+use super::*;
+use axum::body::Body;
+use axum::http::Request;
+use axum::response::Response;
+use base64::Engine as _;
+use corelink_fabric::compute_budget::{
+    ExternalComputeAdmission, ExternalComputeReceipt, ExternalComputeState,
+};
+use corelink_fabric::ledger::{LeaseLedger, LeaseRecord};
+use corelink_fabric::TenantId;
+use corelink_runners_contracts::RunnerState;
+use ring::rand::SystemRandom;
+use ring::signature::{Ed25519KeyPair, KeyPair};
+use serde_json::json;
+use std::collections::HashMap;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
+use tower::util::ServiceExt;
 
-#[cfg(test)]
-mod tests {
-    use super::super::compute_budget_api::{
-        constant_time_eq, decimal_i64, parse_empty, valid_period,
-    };
+#[derive(Clone, Copy)]
+enum Outcome {
+    Over,
+    Conflict,
+    Receipt,
+    Unavailable,
+}
 
-    #[test]
-    fn request_shapes_and_decimal_forms_are_fail_closed() {
-        assert!(parse_empty(br"{}").is_ok());
-        assert!(parse_empty(br#"{"unexpected":true}"#).is_err());
-        assert!(parse_empty(br"[]").is_err());
-        assert_eq!(decimal_i64("0"), Some(0));
-        assert_eq!(decimal_i64("19"), Some(19));
-        assert_eq!(decimal_i64("01"), None);
-        assert_eq!(decimal_i64("+1"), None);
-        assert_eq!(decimal_i64("18446744073709551615"), None);
+struct TestLedger {
+    calls: AtomicUsize,
+    outcome: Outcome,
+}
+impl TestLedger {
+    fn new(outcome: Outcome) -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            outcome,
+        }
     }
+}
 
-    #[test]
-    fn period_and_admin_comparison_cover_boundaries() {
-        assert!(valid_period(197001));
-        assert!(valid_period(999912));
-        assert!(!valid_period(197000));
-        assert!(!valid_period(196912));
-        assert!(!valid_period(202613));
-        assert!(constant_time_eq(b"operator", b"operator"));
-        assert!(!constant_time_eq(b"operator", b"operator-x"));
-        assert!(!constant_time_eq(b"operator", b"different"));
+impl LeaseLedger for TestLedger {
+    fn reserve_external_compute(
+        &self,
+        _: corelink_fabric::ExternalComputeReservation,
+    ) -> anyhow::Result<ExternalComputeAdmission> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        match self.outcome {
+            Outcome::Over => Ok(ExternalComputeAdmission::OverCompute),
+            Outcome::Conflict => Err(anyhow::Error::new(
+                corelink_fabric::ExternalComputeError::Conflict,
+            )),
+            Outcome::Unavailable => Err(anyhow::anyhow!("ledger unavailable")),
+            Outcome::Receipt => Ok(ExternalComputeAdmission::Admitted(ExternalComputeReceipt {
+                reservation_id: "22222222-2222-4222-8222-222222222222".into(),
+                state: ExternalComputeState::Prepared,
+            })),
+        }
     }
+    fn initialize_external_compute_period(
+        &self,
+        _: corelink_fabric::ExternalComputeBaseline,
+    ) -> anyhow::Result<()> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+    fn put(&self, _: LeaseRecord) -> anyhow::Result<()> {
+        unreachable!()
+    }
+    fn get(&self, _: &str) -> anyhow::Result<Option<LeaseRecord>> {
+        unreachable!()
+    }
+    fn transition(&self, _: &str, _: RunnerState, _: u64) -> anyhow::Result<LeaseRecord> {
+        unreachable!()
+    }
+    fn by_tenant(&self, _: &TenantId) -> anyhow::Result<Vec<LeaseRecord>> {
+        unreachable!()
+    }
+    fn held(&self) -> anyhow::Result<Vec<LeaseRecord>> {
+        unreachable!()
+    }
+    fn pending_older_than(&self, _: u64, _: u64) -> anyhow::Result<Vec<LeaseRecord>> {
+        unreachable!()
+    }
+    fn try_admit(&self, _: LeaseRecord, _: u32) -> anyhow::Result<bool> {
+        unreachable!()
+    }
+    fn set_envelope_checkpoint(&self, _: &str, _: &str) -> anyhow::Result<()> {
+        unreachable!()
+    }
+    fn get_envelope_checkpoint(&self, _: &str) -> anyhow::Result<Option<String>> {
+        unreachable!()
+    }
+    fn remove(&self, _: &str) -> anyhow::Result<bool> {
+        unreachable!()
+    }
+}
+
+fn token() -> (String, Vec<u8>) {
+    let now = now_ms();
+    let payload = serde_json::to_vec(&json!({
+        "v":1,"key_id":"issuer-1","tenant_id":"11111111-1111-4111-8111-111111111111",
+        "workload_kind":"devenv","workload_id":"job/1","reservation_id":"22222222-2222-4222-8222-222222222222",
+        "period_key":202609,"ceiling_vcpu_ms":"1000","vcpu_count":1,"maximum_wall_ms":1000,
+        "issued_at_ms":now-1000,"expires_at_ms":now+5000
+    })).unwrap();
+    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
+    let key = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+    let token = format!(
+        "{}.{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&payload),
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key.sign(&payload).as_ref())
+    );
+    (token, key.public_key().as_ref().to_vec())
+}
+
+fn app(ledger: Arc<TestLedger>, admin: Option<&str>, public: Vec<u8>) -> Router {
+    let mut keys = HashMap::new();
+    keys.insert("issuer-1".into(), public);
+    router(ledger, keys, admin.map(str::to_owned))
+}
+
+async fn reserve_request(app: Router, token: &str, body: &'static str) -> Response {
+    app.oneshot(
+        Request::post("/internal/v1/compute/reserve")
+            .header("authorization", format!("ComputeGrant {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap(),
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn invalid_signature_is_401_without_ledger_call() {
+    let ledger = Arc::new(TestLedger::new(Outcome::Receipt));
+    let (token, public) = token();
+    let response = reserve_request(app(ledger.clone(), None, public), &(token + "x"), "{}").await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(ledger.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn reserve_maps_receipt_over_conflict_and_bad_body() {
+    let (token, public) = token();
+    for (outcome, status) in [
+        (Outcome::Receipt, StatusCode::OK),
+        (Outcome::Over, StatusCode::TOO_MANY_REQUESTS),
+        (Outcome::Conflict, StatusCode::CONFLICT),
+        (Outcome::Unavailable, StatusCode::SERVICE_UNAVAILABLE),
+    ] {
+        let ledger = Arc::new(TestLedger::new(outcome));
+        assert_eq!(
+            reserve_request(app(ledger, None, public.clone()), &token, "{}")
+                .await
+                .status(),
+            status
+        );
+    }
+    let ledger = Arc::new(TestLedger::new(Outcome::Receipt));
+    assert_eq!(
+        reserve_request(app(ledger, None, public), &token, "{\"bad\":true}")
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
+async fn admin_gate_maps_wrong_key_and_success() {
+    let ledger = Arc::new(TestLedger::new(Outcome::Receipt));
+    let (_, public) = token();
+    let app = app(ledger, Some("admin"), public);
+    let body = r#"{"tenant_id":"11111111-1111-4111-8111-111111111111","period_key":202609,"external_vcpu_ms":"0","evidence_digest":"0000000000000000000000000000000000000000000000000000000000000000"}"#;
+    let wrong = Request::post("/internal/v1/admin/compute-baseline")
+        .header("x-corelink-internal-auth", "wrong")
+        .body(Body::from(body))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(wrong).await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let valid = Request::post("/internal/v1/admin/compute-baseline")
+        .header("x-corelink-internal-auth", "admin")
+        .body(Body::from(body))
+        .unwrap();
+    assert_eq!(
+        app.oneshot(valid).await.unwrap().status(),
+        StatusCode::NO_CONTENT
+    );
 }

@@ -22,6 +22,10 @@ use uuid::Uuid;
 
 use crate::compute_grant::{GrantError, GrantVerifier, VerifiedGrant};
 
+#[cfg(test)]
+#[path = "compute_budget_api_tests.rs"]
+mod tests;
+
 const MAX_BODY_BYTES: usize = 16 * 1024;
 const BLOCKING_PERMITS: usize = 32;
 const AUTH_HEADER: &str = "ComputeGrant ";
