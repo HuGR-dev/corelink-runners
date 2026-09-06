@@ -93,6 +93,18 @@ unrelated dependency symlink was not used. Actual compatible server/Worker
 deployment, production map and secret bindings, and live guard qualification
 remain separate gates.
 
+## T8-W2/A3.13 source acceptance
+
+T8-W2 source criteria are accepted without delivery credit. Server
+`68221dff` was independently reproduced at 141/141: cross-tenant runner PAT
+use refuses before storage, trusted own-tenant scope is forwarded, forged
+elevation is ignored, and expired PATs refuse. Runner `1e3d663` adds the real
+broker and `CredStashDO` lease-isolation regression; its focused route test
+passed 9/9.
+
+The broker remains multi-use while a lease is live and refuses after expiry.
+Three live 75-second refusal proofs remain separate T8-W6 gates.
+
 ## Earlier integrated packets
 
 The prior packets in this tree include:

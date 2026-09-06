@@ -920,21 +920,28 @@
     {
       "id": "T8-W2",
       "sprint": 2,
-      "state": "backlog",
-      "implementation": "unknown",
+      "state": "prepared",
+      "implementation": "complete",
       "owner": "root",
       "dependencies": [
         "T8-W5"
       ],
-      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare/src/index.ts; deploy/cloudflare/src/lib.ts.",
+      "next_action": "A3.13 source criteria accepted; retain prepared state and no delivery credit. Three live 75-second refusal proofs remain separately owned by T8-W6.",
       "blockers": [],
-      "commits": [],
+      "commits": [
+        "68221dff4a65ef4b05c39ef094b735c7ec68e23b",
+        "1e3d66381bead72b896ba7a7bba8a2204ebfcb67"
+      ],
       "review": {
-        "status": "pending",
-        "commit": null,
-        "evidence": []
+        "status": "approved",
+        "commit": "1e3d66381bead72b896ba7a7bba8a2204ebfcb67",
+        "evidence": [
+          "Independent server reproduction verified 141/141 for 68221dff; credential_cold_review approved Runner fd1f287 (9/9). lifecycle_suite_critic accepted A3.13 source criteria after execution-count correction."
+        ]
       },
-      "evidence": []
+      "evidence": [
+        "docs/handoff/2026-09-06-f008-credential-lifecycle-integration.md"
+      ]
     },
     {
       "id": "T3-W16",
