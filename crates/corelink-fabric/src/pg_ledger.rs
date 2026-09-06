@@ -64,6 +64,8 @@ use crate::tenant::TenantId;
 
 #[path = "pg_ledger/pending_cleanup_pg.rs"]
 mod pending_cleanup_pg;
+#[path = "pg_ledger/provider_binding.rs"]
+mod provider_binding_pg;
 
 /// Transport-security mode for the Postgres ledger connection (WP-B).
 ///
@@ -605,6 +607,14 @@ impl LeaseLedger for PgLedger {
                 None => Ok(None),
             }
         })
+    }
+
+    fn bind_provider_ref(
+        &self,
+        lease_id: &str,
+        provider_ref: &str,
+    ) -> anyhow::Result<LeaseRecord> {
+        provider_binding_pg::bind_provider_ref(self, lease_id, provider_ref)
     }
 
     fn transition(
