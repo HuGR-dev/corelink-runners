@@ -104,4 +104,31 @@ describe("durable preparation slot holders", () => {
     await expect(authority.acquire("new", "new", 1, 3, 10, 100, "prep-new")).rejects.toThrow("delete failed");
     expect(storage.values).toEqual(before);
   });
+
+  it("removes expired rows and the terminal target while preserving live rows", async () => {
+    const storage = new Storage();
+    const authority = new ConcurrencyAuthority(storage);
+    await authority.acquire("old-a", "old-a", 1, 4, 0, 5, "prep-a");
+    await authority.acquire("old-b", "old-b", 1, 4, 0, 5, "prep-b");
+    await authority.acquire("live", "live", 1, 4, 0, 100, "prep-live");
+    await authority.acquire("target", "target", 1, 4, 0, 100, "prep-target");
+
+    await authority.release("target", 10);
+    expect(slots(storage)).toEqual([{ key: "live", jobId: "live", expiresMs: 100 }]);
+    expect([...storage.values.keys()].filter((key) => key.startsWith("slot-holders:v1:"))).toEqual([
+      "slot-holders:v1:live",
+    ]);
+  });
+
+  it("rolls back release when holder deletion fails after slots are written", async () => {
+    const storage = new Storage();
+    const authority = new ConcurrencyAuthority(storage);
+    await authority.acquire("old", "old", 1, 3, 0, 5, "prep-old");
+    await authority.acquire("target", "target", 1, 3, 0, 100, "prep-target");
+    const before = new Map(storage.values);
+    storage.failDeleteKey = "slot-holders:v1:target";
+
+    await expect(authority.release("target", 10)).rejects.toThrow("delete failed");
+    expect(storage.values).toEqual(before);
+  });
 });
