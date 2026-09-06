@@ -61,7 +61,8 @@ export class RetryEpochAuthority {
 
       if (rawEpoch !== undefined) {
         RetryEpochAuthority.validateRecord(epochKey, jobId, epochId, rawEpoch);
-        if (rawCount === undefined || count > storedCount) await storage.put(countKey, count);
+        if (rawCount === undefined) throw new Error("retry epoch count missing");
+        if (count > storedCount) await storage.put(countKey, count);
         return { attempts: count, recorded: false };
       }
 

@@ -1,6 +1,7 @@
 import { JobAttributionAuthority } from "./lib/job_attribution_authority";
 import { CredentialObligationAuthority } from "./lib/credential_obligation_authority";
 import { RetryEpochAuthority } from "./lib/retry_epoch_authority";
+import { retryEpochClient, type RetryEpochAuthorityRpc } from "./lib/retry_epoch_client";
 import { controlAuthed } from "./lib/control_auth";
 // CoreLink spawn-Worker + Container DO (ADR-0008).
 //
@@ -521,6 +522,10 @@ export class ConcurrencySlotsDO extends DurableObject<Env> {
 
   async recordRetry(jobId: string, epochId: string, legacyFloor = 0): Promise<{ attempts: number; recorded: boolean }> {
     return new RetryEpochAuthority(this.ctx.storage).record(jobId, epochId, legacyFloor);
+  }
+
+  async readRetry(jobId: string): Promise<number> {
+    return new RetryEpochAuthority(this.ctx.storage).read(jobId);
   }
 }
 
@@ -2572,19 +2577,9 @@ function concurrencySlots(env: Env): DurableObjectStub<ConcurrencySlotsDO> {
   return env.CONCURRENCY_SLOTS.get(env.CONCURRENCY_SLOTS.idFromName("global"));
 }
 
-type RetryEpochAuthorityRpc = {
-  record(jobId: string, epochId: string, legacyFloor?: number): Promise<{ attempts: number; recorded: boolean }>;
-};
-
-// Legacy Vitest fixtures predate the retry authority binding. Their explicit
-// dummy preserves those unit tests; every deployed or partially bound Worker
-// fails closed when the real DO is unavailable.
 function retryEpochAuthority(env: Env): RetryEpochAuthorityRpc | null {
-  if (env.CONCURRENCY_SLOTS) return concurrencySlots(env) as unknown as RetryEpochAuthorityRpc;
-  if ((import.meta as ImportMeta & { env: { MODE: string } }).env.MODE === "test" && !env.CONCURRENCY_SLOTS) {
-    return { record: async (_jobId, _epochId, legacyFloor = 0) => ({ attempts: legacyFloor + 1, recorded: true }) };
-  }
-  return null;
+  if (!env.CONCURRENCY_SLOTS) return null;
+  return retryEpochClient(() => concurrencySlots(env));
 }
 
 async function recordRetryAttempt(
@@ -2599,6 +2594,17 @@ async function recordRetryAttempt(
     return await authority.record(jobId, epochId, legacyFloor);
   } catch (error) {
     logEvent("error", "retry_epoch_authority_failed", { jobId, error: (error as Error).message });
+    return null;
+  }
+}
+
+async function readRetryAttempts(env: Env, jobId: string): Promise<number | null> {
+  const authority = retryEpochAuthority(env);
+  if (!authority) return null;
+  try {
+    return await authority.read(jobId);
+  } catch (error) {
+    logEvent("error", "retry_epoch_authority_read_failed", { jobId, error: (error as Error).message });
     return null;
   }
 }
@@ -5792,6 +5798,12 @@ export async function retryOrphanedSpawns(
     // kept for visibility until it TTLs. Re-driving in-flight work is a separate
     // decision that has not been made, so it is never retried here.
     if (rec?.stranded != null) continue;
+    // KV is only a projection. Read the durable count before placement checks
+    // or the cap decision, so stale KV cannot reset the bound.
+    if (!rec) continue;
+    const durableAttempts = await readRetryAttempts(env, jobId);
+    if (durableAttempts === null) continue;
+    rec = { ...rec, attempts: Math.max(rec.attempts, durableAttempts) };
     // ── Placement confirmation (2026-08-03) ──────────────────────────────────
     // A record carrying `placedMs` is a spawn we believe SUCCEEDED. Most of these
     // are healthy in-flight jobs, so the default action is to do nothing at all.

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 vi.mock("@cloudflare/containers", () => ({ Container: class {}, getContainer: vi.fn() }));
-import { ConcurrencySlotsDO } from "../src/index";
+import { ConcurrencySlotsDO, retryOrphanedSpawns, type Env } from "../src/index";
 
 class DurableStorage {
   map = new Map<string, unknown>();
@@ -40,5 +40,25 @@ describe("retry epoch authority through ConcurrencySlotsDO", () => {
     expect(await authority.recordRetry("job", "initial", 7)).toEqual({ attempts: 8, recorded: true });
     expect(await authority.recordRetry("job", "retry", 2)).toEqual({ attempts: 9, recorded: true });
     expect(await authority.recordRetry("job", "retry", 1)).toEqual({ attempts: 9, recorded: false });
+  });
+
+  it("uses the actual DO RPC before the retry drive and reads its durable cap", async () => {
+    const storage = new DurableStorage();
+    const authority = makeAuthority(storage);
+    const values = new Map<string, string>([["orphan:job", JSON.stringify({ repo: "acme/repo", installationId: "1", labels: ["corelink"], attempts: 1 })]]);
+    const kv = {
+      async get(key: string) { return values.get(key) ?? null; },
+      async put(key: string, value: string) { values.set(key, value); },
+      async delete(key: string) { values.delete(key); },
+      async list() { return { keys: [{ name: "orphan:job" }] }; },
+    };
+    const env = {
+      RUNNER_JOB_PATS: kv,
+      CONCURRENCY_SLOTS: { idFromName: () => "global", get: () => ({ recordRetry: authority.recordRetry.bind(authority), readRetry: authority.readRetry.bind(authority) }) },
+    } as unknown as Env;
+    const drive = async () => {};
+    await retryOrphanedSpawns(env, {} as never, Date.now(), drive);
+    expect(JSON.parse(values.get("orphan:job")!).attempts).toBe(2);
+    expect(await authority.readRetry("job")).toBe(2);
   });
 });
