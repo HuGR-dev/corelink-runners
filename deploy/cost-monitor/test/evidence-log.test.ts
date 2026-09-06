@@ -5,12 +5,12 @@ import { canonicalJSON, type JournalRecord, type JournalReceipt } from "../src/j
 import { AuditBusyError, AuditIntegrityError, DurableAuditLog, type CheckpointWitness, type ImmutableJournal, type SignedCheckpoint, type WitnessReceipt, canonicalWitnessBytes, checkpointRootFor, witnessRootFor, type AuditReceipt } from "../src/evidence_log.js";
 import type { AsyncSigner, PublicSigningIdentity } from "../src/acks.js";
 
-const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 3072 });
-const pem = publicKey.export({ type: "spki", format: "pem" }).toString();
-const key = (role: "journal" | "witness"): PublicSigningIdentity => ({ keyId: `${role}-key`, epoch: "1", keyArn: `${role}-arn`, publicKeySpkiPem: pem, role });
+const journalKeys = generateKeyPairSync("rsa", { modulusLength: 3072 });
+const witnessKeys = generateKeyPairSync("rsa", { modulusLength: 3072 });
+const key = (role: "journal" | "witness"): PublicSigningIdentity => ({ keyId: `${role}-key`, epoch: "1", keyArn: `${role}-arn`, publicKeySpkiPem: (role === "journal" ? journalKeys.publicKey : witnessKeys.publicKey).export({ type: "spki", format: "pem" }).toString(), role });
 function signer(role: "journal" | "witness"): AsyncSigner {
   const identity = key(role);
-  return { identity, async sign(input) { return signDigest(null, createHash("sha256").update(input).digest(), { key: privateKey, padding: 6, saltLength: 32 }).toString("base64url"); } };
+  return { identity, async sign(input) { return signDigest(null, createHash("sha256").update(input).digest(), { key: role === "journal" ? journalKeys.privateKey : witnessKeys.privateKey, padding: 6, saltLength: 32 }).toString("base64url"); } };
 }
 const journalSigner = signer("journal");
 const witnessSigner = signer("witness");
@@ -27,7 +27,7 @@ class FakeWitness implements CheckpointWitness {
   async accept(checkpoint: SignedCheckpoint): Promise<WitnessReceipt> {
     this.calls++;
     const unsigned: WitnessReceipt = { version: "1", logId: checkpoint.logId, sequence: checkpoint.sequence, checkpointRoot: checkpointRootFor(checkpoint), previousWitnessRoot: this.prior, checkpointSignerKeyId: checkpoint.signerKeyId, checkpointSignerEpoch: checkpoint.signerEpoch, witnessKeyId: witnessSigner.identity.keyId, witnessEpoch: witnessSigner.identity.epoch, trustedAtMs: now, signature: "pending" };
-    unsigned.signature = signDigest(null, createHash("sha256").update(canonicalWitnessBytes(unsigned)).digest(), { key: privateKey, padding: 6, saltLength: 32 }).toString("base64url");
+    unsigned.signature = signDigest(null, createHash("sha256").update(canonicalWitnessBytes(unsigned)).digest(), { key: witnessKeys.privateKey, padding: 6, saltLength: 32 }).toString("base64url");
     this.prior = witnessRootFor(unsigned);
     return unsigned;
   }
