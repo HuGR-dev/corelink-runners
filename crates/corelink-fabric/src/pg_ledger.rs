@@ -211,7 +211,15 @@ CREATE TABLE IF NOT EXISTS external_compute_reservations (
   CHECK (maximum_wall_ms BETWEEN 1 AND 28800000),
   CHECK (grant_expires_at_ms > 0), CHECK (reserved_vcpu_ms > 0),
   CHECK (state IN ('prepared','active','cancelled','settled')),
-  CHECK (actual_vcpu_ms IS NULL OR actual_vcpu_ms >= 0));
+  CHECK (actual_vcpu_ms IS NULL OR actual_vcpu_ms >= 0),
+  CHECK (workload_kind IN ('spawn_worker_runner','devenv')),
+  CHECK (grant_digest ~ '^[0-9a-fA-F]{64}$'),
+  CHECK ((state = 'settled') = (actual_vcpu_ms IS NOT NULL)),
+  CHECK ((state = 'settled') = (terminal_evidence_digest IS NOT NULL)),
+  CHECK (terminal_evidence_digest IS NULL OR terminal_evidence_digest ~ '^[0-9a-fA-F]{64}$'));
+CREATE INDEX IF NOT EXISTS external_compute_active_tenant_idx
+  ON external_compute_reservations (tenant, period_key)
+  WHERE state IN ('prepared','active');
 -- AUP1 durable suspension (multi-instance): a suspended tenant is blocked on
 -- EVERY shard, not just the one that received the suspend, and the block survives
 -- a shard restart. The fabricd keeps a fast in-memory cache; this is the

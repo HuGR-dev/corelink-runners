@@ -82,7 +82,7 @@ fn real_pg_external_budget_lifecycle_is_idempotent_and_records_overrun() -> anyh
             ExternalComputeSettlement {
                 actual_vcpu_ms: 200,
                 terminal_evidence_digest:
-                    "fedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcba".into(),
+                    "f".repeat(64),
             },
         )?;
         assert_eq!(settled.state, ExternalComputeState::Settled);
@@ -93,13 +93,19 @@ fn real_pg_external_budget_lifecycle_is_idempotent_and_records_overrun() -> anyh
                     ExternalComputeSettlement {
                         actual_vcpu_ms: 200,
                         terminal_evidence_digest:
-                            "fedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcba"
-                                .into(),
+                            "f".repeat(64),
                     }
                 )?
                 .state,
             ExternalComputeState::Settled
         );
+        let accrued: i64 = ledger.pool.get().await?.query_one(
+            "SELECT accrued_vcpu_ms FROM compute_accrual WHERE tenant=$1 AND period_key=$2",
+            &[&tenant, &(period_key as i32)]).await?.get(0);
+        assert_eq!(accrued, 210, "baseline and actual overrun accrue exactly once");
+        assert!(ledger.settle_external_compute(&r, ExternalComputeSettlement {
+            actual_vcpu_ms: 200, terminal_evidence_digest: "e".repeat(64),
+        }).is_err(), "a different terminal proof cannot rewrite settled usage");
         let missing = reservation(&uuid::Uuid::new_v4().to_string(), &uuid::Uuid::new_v4().to_string(), period_key, expires_at_ms);
         assert!(matches!(ledger.reserve_external_compute(missing)?, ExternalComputeAdmission::BaselineRequired));
 
@@ -118,8 +124,8 @@ fn real_pg_external_budget_lifecycle_is_idempotent_and_records_overrun() -> anyh
         let overflow = reservation(&tenant, &uuid::Uuid::new_v4().to_string(), period_key, expires_at_ms);
         ledger.reserve_external_compute(overflow.clone())?;
         ledger.activate_external_compute(&overflow)?;
-        assert!(ledger.settle_external_compute(&overflow, ExternalComputeSettlement { actual_vcpu_ms: u64::MAX, terminal_evidence_digest: "fedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcba".into() }).is_err());
-        assert_eq!(ledger.settle_external_compute(&overflow, ExternalComputeSettlement { actual_vcpu_ms: 210, terminal_evidence_digest: "fedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcba".into() })?.state, ExternalComputeState::Settled);
+        assert!(ledger.settle_external_compute(&overflow, ExternalComputeSettlement { actual_vcpu_ms: i64::MAX as u64, terminal_evidence_digest: "f".repeat(64) }).is_err());
+        assert_eq!(ledger.settle_external_compute(&overflow, ExternalComputeSettlement { actual_vcpu_ms: 210, terminal_evidence_digest: "f".repeat(64) })?.state, ExternalComputeState::Settled);
         let actual: i64 = ledger.pool.get().await?.query_one("SELECT actual_vcpu_ms FROM external_compute_reservations WHERE reservation_id=$1::text::uuid", &[&overflow.reservation_id]).await?.get(0);
         assert_eq!(actual, 210);
         Ok::<_, anyhow::Error>(())

@@ -12,6 +12,13 @@ fn invalid() -> anyhow::Error {
 fn conflict() -> anyhow::Error {
     anyhow::Error::new(ExternalComputeError::Conflict)
 }
+fn database_error(error: tokio_postgres::Error) -> anyhow::Error {
+    if error.code() == Some(&tokio_postgres::error::SqlState::UNIQUE_VIOLATION) {
+        conflict()
+    } else {
+        error.into()
+    }
+}
 fn checked_i64(value: u64) -> anyhow::Result<i64> {
     i64::try_from(value).map_err(|_| invalid())
 }
@@ -152,7 +159,7 @@ pub(super) fn reserve(
         let row = tx.query_one("SELECT (COALESCE((SELECT accrued_vcpu_ms FROM compute_accrual WHERE tenant=$1 AND period_key=$2),0) + COALESCE((SELECT SUM(reserved_vcpu_ms) FROM leases WHERE tenant=$1 AND state IN ('pending','held') AND accrual_period_key=$2),0) + COALESCE((SELECT SUM(reserved_vcpu_ms) FROM external_compute_reservations WHERE tenant=$1 AND period_key=$2 AND state IN ('prepared','active')),0))::text", &[&r.tenant_id, &(r.period_key as i32)]).await?;
         let used = checked_amount_text(&row.get::<_, String>(0))?;
         if used.checked_add(reserved).ok_or_else(invalid)? > checked_i64(r.ceiling_vcpu_ms)? { tx.rollback().await.ok(); return Ok(ExternalComputeAdmission::OverCompute); }
-        tx.execute("INSERT INTO external_compute_reservations (reservation_id,tenant,workload_kind,workload_id,period_key,ceiling_vcpu_ms,vcpu_count,maximum_wall_ms,grant_expires_at_ms,grant_digest,state,reserved_vcpu_ms) VALUES ($1::text::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,'prepared',$11)", &[&reservation_id,&r.tenant_id,&kind(&r.workload_kind),&r.workload_id,&(r.period_key as i32),&checked_i64(r.ceiling_vcpu_ms)?,&(r.vcpu_count as i32),&checked_i64(r.maximum_wall_ms)?,&checked_i64(r.grant_expires_at_ms)?,&r.grant_digest,&reserved]).await?;
+        tx.execute("INSERT INTO external_compute_reservations (reservation_id,tenant,workload_kind,workload_id,period_key,ceiling_vcpu_ms,vcpu_count,maximum_wall_ms,grant_expires_at_ms,grant_digest,state,reserved_vcpu_ms) VALUES ($1::text::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,'prepared',$11)", &[&reservation_id,&r.tenant_id,&kind(&r.workload_kind),&r.workload_id,&(r.period_key as i32),&checked_i64(r.ceiling_vcpu_ms)?,&(r.vcpu_count as i32),&checked_i64(r.maximum_wall_ms)?,&checked_i64(r.grant_expires_at_ms)?,&r.grant_digest,&reserved]).await.map_err(database_error)?;
         tx.commit().await?; Ok(ExternalComputeAdmission::Admitted(receipt(&r.reservation_id, ExternalComputeState::Prepared)))
     })
 }
