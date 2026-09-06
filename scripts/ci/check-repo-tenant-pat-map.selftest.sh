@@ -39,6 +39,14 @@ def run(map_value, deployments, settings):
         env = dict(os.environ, CLOUDFLARE_API_TOKEN="fixture", CLOUDFLARE_API_BASE=base)
         return subprocess.run(["python3", str(guard), config.name], env=env, text=True, capture_output=True)
 
+def run_raw(raw):
+    with tempfile.NamedTemporaryFile("w", suffix=".jsonc") as config:
+        config.write(raw)
+        config.flush()
+        Handler.scenario = {"deployments": ok_deploy, "settings": live_empty}
+        env = dict(os.environ, CLOUDFLARE_API_TOKEN="fixture", CLOUDFLARE_API_BASE=base)
+        return subprocess.run(["python3", str(guard), config.name], env=env, text=True, capture_output=True)
+
 ok_deploy = (200, {"success": True, "result": [{"id": "deployment"}]})
 live_nonempty = (200, {"success": True, "result": {"bindings": [{"name": "REPO_TENANT_PAT_MAP", "type": "plain_text", "text": '{"a/b":"SECRET"}'}]}})
 live_empty = (200, {"success": True, "result": {"bindings": []}})
@@ -50,6 +58,12 @@ assert run("{", ok_deploy, live_empty).returncode != 0
 assert run("{}", ok_deploy, (200, {"success": True, "result": {"bindings": [{"name": "REPO_TENANT_PAT_MAP", "type": "secret_text", "text": "x"}]}})).returncode != 0
 assert run("{}", (200, {"success": True, "result": []}), live_empty).returncode != 0
 assert run("{}", (403, {"success": False, "result": None}), live_empty).returncode != 0
+assert run_raw('// "name":"decoy"\n{"name":"corelink-spawn-worker","account_id":"acct","vars":{"REPO_TENANT_PAT_MAP":"{}"}}').returncode == 0
+bad = run_raw('{"name":"corelink-spawn-worker",')
+assert bad.returncode != 0 and "decoy" not in bad.stdout + bad.stderr
+Handler.scenario = {"deployments": (302, {"location": base + "/other"}), "settings": live_empty}
+redirect = run("{}", Handler.scenario["deployments"], live_empty)
+assert redirect.returncode != 0
 
 workflow = Path(".github/workflows/deploy-spawn-worker.yml").read_text()
 guard_at = workflow.index("scripts/ci/check-repo-tenant-pat-map.py")

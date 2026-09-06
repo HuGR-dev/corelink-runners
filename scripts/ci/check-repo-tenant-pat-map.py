@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import sys
 import urllib.error
 import urllib.parse
@@ -18,26 +17,81 @@ class GuardError(Exception):
     pass
 
 
-_STRING = r'"(?:\\.|[^"\\])*"'
-_REPO = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9])?/[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9])?$")
+_REPO = __import__("re").compile(r"^[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9])?/[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9])?$")
 
 
-def _jsonc_string(text: str, key: str) -> str:
-    match = re.search(r'"' + re.escape(key) + r'"\s*:\s*(' + _STRING + r')', text)
-    if not match:
-        raise GuardError("candidate configuration is missing a required field")
+def _jsonc_load(text: str) -> object:
+    """Parse JSONC while respecting strings, comments, and trailing commas."""
+    out: list[str] = []
+    i = 0
+    quoted = False
+    escaped = False
+    while i < len(text):
+        char = text[i]
+        if quoted:
+            out.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+            i += 1
+            continue
+        if char == '"':
+            quoted = True
+            out.append(char)
+            i += 1
+        elif char == "/" and i + 1 < len(text) and text[i + 1] == "/":
+            i = text.find("\n", i + 2)
+            if i < 0:
+                break
+        elif char == "/" and i + 1 < len(text) and text[i + 1] == "*":
+            end = text.find("*/", i + 2)
+            if end < 0:
+                raise GuardError("candidate configuration contains an unterminated comment")
+            out.append("\n" * text[i:end + 2].count("\n"))
+            i = end + 2
+        else:
+            out.append(char)
+            i += 1
+    if quoted or escaped:
+        raise GuardError("candidate configuration contains an unterminated string")
+    cleaned = "".join(out)
+    # JSONC permits a comma before } or ]; remove only outside strings.
+    out = []
+    quoted = escaped = False
+    for i, char in enumerate(cleaned):
+        if quoted:
+            out.append(char)
+            if escaped: escaped = False
+            elif char == "\\": escaped = True
+            elif char == '"': quoted = False
+        elif char == '"': quoted = True; out.append(char)
+        elif char in "}]":
+            j = len(out) - 1
+            while j >= 0 and out[j].isspace(): j -= 1
+            if j >= 0 and out[j] == ",": out.pop(j)
+            out.append(char)
+        else: out.append(char)
     try:
-        value = json.loads(match.group(1))
+        return json.loads("".join(out), object_pairs_hook=_unique_pairs)
     except (TypeError, ValueError):
         raise GuardError("candidate configuration contains malformed JSONC")
-    if not isinstance(value, str):
-        raise GuardError("candidate configuration field has an invalid type")
-    return value
+
+
+def _unique_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise GuardError("candidate configuration contains duplicate keys")
+        result[key] = value
+    return result
 
 
 def _parse_map(value: str) -> int:
     try:
-        parsed = json.loads(value)
+        parsed = json.loads(value, object_pairs_hook=_unique_pairs)
     except (TypeError, ValueError):
         raise GuardError("REPO_TENANT_PAT_MAP is malformed")
     if not isinstance(parsed, dict):
@@ -55,6 +109,14 @@ def _parse_map(value: str) -> int:
     return len(parsed)
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args: object, **kwargs: object) -> None:
+        raise GuardError("Cloudflare API returned an unexpected redirect")
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
 def _request(base: str, account: str, script: str, suffix: str, token: str) -> object:
     path = "/accounts/%s/workers/scripts/%s/%s" % (
         urllib.parse.quote(account, safe=""), urllib.parse.quote(script, safe=""), suffix
@@ -65,9 +127,9 @@ def _request(base: str, account: str, script: str, suffix: str, token: str) -> o
         method="GET",
     )
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with _OPENER.open(request, timeout=20) as response:
             payload = json.load(response)
-    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError, OSError):
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError, OSError, GuardError):
         raise GuardError("Cloudflare API request failed")
     if not isinstance(payload, dict) or payload.get("success") is not True:
         raise GuardError("Cloudflare API returned an unsuccessful response")
@@ -106,9 +168,15 @@ def main() -> int:
         return 1
     try:
         text = Path(args.config).read_text(encoding="utf-8")
-        account = _jsonc_string(text, "account_id")
-        script = _jsonc_string(text, "name")
-        candidate = _parse_map(_jsonc_string(text, "REPO_TENANT_PAT_MAP"))
+        config = _jsonc_load(text)
+        if not isinstance(config, dict):
+            raise GuardError("candidate configuration has an invalid root")
+        account = config.get("account_id")
+        script = config.get("name")
+        raw_map = config.get("vars", {}).get("REPO_TENANT_PAT_MAP") if isinstance(config.get("vars"), dict) else None
+        if not isinstance(account, str) or not isinstance(script, str) or not isinstance(raw_map, str):
+            raise GuardError("candidate configuration is missing a required field")
+        candidate = _parse_map(raw_map)
         base = os.environ.get("CLOUDFLARE_API_BASE", "https://api.cloudflare.com/client/v4")
         _active_deployment(_request(base, account, script, "deployments", token))
         live = _live_count(_request(base, account, script, "settings", token))
