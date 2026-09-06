@@ -609,11 +609,7 @@ impl LeaseLedger for PgLedger {
         })
     }
 
-    fn bind_provider_ref(
-        &self,
-        lease_id: &str,
-        provider_ref: &str,
-    ) -> anyhow::Result<LeaseRecord> {
+    fn bind_provider_ref(&self, lease_id: &str, provider_ref: &str) -> anyhow::Result<LeaseRecord> {
         provider_binding_pg::bind_provider_ref(self, lease_id, provider_ref)
     }
 

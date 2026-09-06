@@ -1026,11 +1026,7 @@ impl LeaseLedger for InMemoryLedger {
         self.lock()?.get(lease_id)
     }
 
-    fn bind_provider_ref(
-        &self,
-        lease_id: &str,
-        provider_ref: &str,
-    ) -> anyhow::Result<LeaseRecord> {
+    fn bind_provider_ref(&self, lease_id: &str, provider_ref: &str) -> anyhow::Result<LeaseRecord> {
         self.lock()?.bind_provider_ref(lease_id, provider_ref)
     }
 
@@ -1700,11 +1696,7 @@ impl LeaseLedger for FileLedger {
         self.lock()?.get(lease_id)
     }
 
-    fn bind_provider_ref(
-        &self,
-        lease_id: &str,
-        provider_ref: &str,
-    ) -> anyhow::Result<LeaseRecord> {
+    fn bind_provider_ref(&self, lease_id: &str, provider_ref: &str) -> anyhow::Result<LeaseRecord> {
         self.lock()?.bind_provider_ref(lease_id, provider_ref)
     }
 

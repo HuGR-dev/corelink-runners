@@ -297,13 +297,15 @@
         "T3-W4",
         "T4-W4"
       ],
-      "next_action": "All Held terminal paths now require teardown confirmation and preservehandleuntilledgerfinish. Implement durableprovideridentity recovery; unknownafterrestart remainsfailclosed.",
+      "next_action": "Durable ledger binding integrated. Finish exact provider/domain restoration before terminalization; unknown legacy and post-create/pre-bind gaps retain capacity.",
       "blockers": [],
       "commits": [
         "bb165bad54125460ebae213e405df3a75baa6566",
         "7142f239effd7d54fd17962d8327ac1ab804a345",
         "c2fd9bff2550b51dcaf8e2fbd99c5b44a4390d3e",
-        "dd7ea7f80980d453c57bca9f6f8fa5afe6149fb5"
+        "dd7ea7f80980d453c57bca9f6f8fa5afe6149fb5",
+        "5b44b72c3bdbe4964f8d1fc63f0eef591494446d",
+        "9fe16556b992175e0164ccfa69a743b392ef2322"
       ],
       "review": {
         "status": "pending",
@@ -311,7 +313,8 @@
         "evidence": []
       },
       "evidence": [
-        "docs/plan/execution/2026-09-05-held-cleanup.json"
+        "docs/plan/execution/2026-09-05-held-cleanup.json",
+        "docs/plan/execution/2026-09-05-provider-binding.json"
       ]
     },
     {
@@ -1004,11 +1007,12 @@
         "T8-W4b",
         "T9-W0"
       ],
-      "next_action": "Canonical billing/recovery integrated (27 focusedtests and rootTScheck). Implement paired trustedRPC env-0 credential issuance, harddeadline, wipe/revoke.",
+      "next_action": "Finish credential lifecycle and durable relay revocation. Monthly ceiling authority depends on shared versus separate Runners/DevEnv budget; owner question pending. Server relay remains an unapplied artifact.",
       "blockers": [],
       "commits": [
         "f1836f94b4dcdc840bd756738589d5fe85b1b478",
-        "9b87d3b5e588fe19357741fb76c270bad3fe7437"
+        "9b87d3b5e588fe19357741fb76c270bad3fe7437",
+        "2158fbc9ea122ddedbc5ddbe025aba3d4fc121b8"
       ],
       "review": {
         "status": "pending",
@@ -1682,10 +1686,13 @@
       "commits": [
         "7142f239effd7d54fd17962d8327ac1ab804a345",
         "c2fd9bff2550b51dcaf8e2fbd99c5b44a4390d3e",
-        "dd7ea7f80980d453c57bca9f6f8fa5afe6149fb5"
+        "dd7ea7f80980d453c57bca9f6f8fa5afe6149fb5",
+        "5b44b72c3bdbe4964f8d1fc63f0eef591494446d",
+        "9fe16556b992175e0164ccfa69a743b392ef2322"
       ],
       "evidence": [
-        "docs/plan/execution/2026-09-05-held-cleanup.json"
+        "docs/plan/execution/2026-09-05-held-cleanup.json",
+        "docs/plan/execution/2026-09-05-provider-binding.json"
       ]
     },
     {
@@ -1698,6 +1705,20 @@
       "summary": "DevEnv credential rectification needs authenticated server issuance and binding; current public body forwards raw PAT and server cross-worker binding is absent. Monthly ceiling is also not enforced by existing server guard.",
       "reproduction": "Inspect sibling corelink-server HEADc0a4466 worker/src/index.ts DevEnv arm, wrangler.toml, session_exchange mint authority and devenv_guard.ts; guard reads max_vcpu_h without consumption predicate.",
       "acceptance": "Server-authenticated tenant/session grant authorizes only bounded CAS credential; no raw PAT container env/customer-selected broker record; authorized route/binding and finite cleanup/revocation are wired; metering/ceiling outcome matches ratified hard-stop contract.",
+      "blocks_delivery": true,
+      "commits": [],
+      "evidence": []
+    },
+    {
+      "id": "F-20260905-004",
+      "wp": "T9-W1",
+      "sprint": 1,
+      "severity": "high",
+      "state": "open",
+      "owner": "sprint1_mint_test_repair",
+      "summary": "Server relay can lose revocation obligation after issuing a PAT when the start RPC and both revoke attempts fail.",
+      "reproduction": "Relay artifact 2158fbc: successful mint, unavailable start RPC, two revoke failures; only diagnostic and PAT expiry remain, no restart-safe cleanup record.",
+      "acceptance": "Persist the exact issued credential cleanup obligation before RPC handoff; retain through failed revoke and restart; retry boundedly until idempotent revoke or confirmed adoption. Explicitly account for issuance/persistence atomicity and finite expiry; no token logging or falsely confirmed cleanup.",
       "blocks_delivery": true,
       "commits": [],
       "evidence": []
@@ -1868,7 +1889,9 @@
         "deploy/cloudflare/src/lib.ts",
         "deploy/cloudflare/entrypoint.sh",
         "deploy/cloudflare/test/devenv-credentials.test.ts",
-        "deploy/cloudflare/test/devenv-do.test.ts"
+        "deploy/cloudflare/test/devenv-do.test.ts",
+        "deploy/cloudflare/src/index.ts",
+        "deploy/cloudflare/src/lib/devenv_lifecycle.ts"
       ]
     },
     {
@@ -1883,9 +1906,48 @@
     },
     {
       "at": "2026-09-06T00:11:03.400636+00:00",
-      "task": "T3-W10 durable provider identity design inspection",
+      "task": "T3-W10 durable provider identity ledger binding",
       "owner": "sprint1_external_seams",
+      "state": "integrated",
+      "scope": [
+        "crates/corelink-fabric/src/ledger.rs",
+        "crates/corelink-fabric/src/ledger/provider_binding.rs",
+        "crates/corelink-fabric/src/pg_ledger.rs",
+        "crates/corelink-fabric/src/pg_ledger/provider_binding.rs",
+        "crates/corelink-fabric/tests/provider_binding.rs"
+      ]
+    },
+    {
+      "at": "2026-09-06T00:21:38.524361+00:00",
+      "task": "T3-W10 corrective provider restore/domain/mode review and implementation",
+      "owner": "sprint1_provider_review_repair",
       "state": "active",
+      "scope": [
+        "crates/corelink-fabric-server/src/cloud_exec.rs",
+        "crates/corelink-fabric-server/src/app.rs",
+        "crates/corelink-fabric-server/src/provider_binding.rs",
+        "crates/corelink-cloud-engine/src/cloudflare.rs",
+        "crates/corelink-cloud-engine/src/northflank.rs"
+      ],
+      "worktree": "/private/tmp/corelink-provider-recovery-20260905"
+    },
+    {
+      "at": "2026-09-06T00:27:08.645029+00:00",
+      "task": "T9-W1 authorized DevEnv regression drivers",
+      "owner": "sprint1_tick_envelope",
+      "state": "active",
+      "scope": [
+        "deploy/cloudflare/test/customer-unprivileged-user-flow.test.ts",
+        "deploy/cloudflare/test/user-journey-driver.test.ts",
+        "deploy/cloudflare/test/e2e-40-stories-driver.test.ts",
+        "deploy/cloudflare/test/deep-step-by-step-audit.test.ts"
+      ]
+    },
+    {
+      "at": "2026-09-06T00:27:08.645029+00:00",
+      "task": "T9-W1 monthly hard-stop authority seam inspection",
+      "owner": "sprint1_scope",
+      "state": "completed",
       "scope": []
     }
   ]
