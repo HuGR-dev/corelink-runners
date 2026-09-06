@@ -12,7 +12,6 @@ use axum::routing::post;
 use axum::{Json, Router};
 use corelink_fabric::compute_budget::{
     ExternalComputeAdmission, ExternalComputeBaseline, ExternalComputeError,
-    ExternalComputeSettlement,
 };
 use corelink_fabric::ledger::LeaseLedger;
 use serde::Deserialize;
@@ -170,20 +169,8 @@ async fn settle(State(state): State<Arc<ApiState>>, headers: HeaderMap, body: By
     if !hex_digest(&parsed.terminal_evidence_digest) {
         return bad_request("invalid terminal evidence digest");
     }
-    let settlement = ExternalComputeSettlement {
-        actual_vcpu_ms: actual,
-        terminal_evidence_digest: parsed.terminal_evidence_digest,
-    };
-    let reservation = grant.reservation();
-    match blocking(&state, move |ledger| {
-        ledger.settle_external_compute(&reservation, settlement)
-    })
-    .await
-    {
-        Ok(Ok(receipt)) => Json(receipt).into_response(),
-        Ok(Err(error)) => ledger_error(error),
-        Err(response) => response,
-    }
+    let _ = (actual, parsed.terminal_evidence_digest, grant);
+    unavailable("qualified provider terminal authority unavailable")
 }
 
 async fn baseline(State(state): State<Arc<ApiState>>, headers: HeaderMap, body: Bytes) -> Response {

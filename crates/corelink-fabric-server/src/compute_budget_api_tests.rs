@@ -4,7 +4,8 @@ use axum::http::Request;
 use axum::response::Response;
 use base64::Engine as _;
 use corelink_fabric::compute_budget::{
-    ExternalComputeAdmission, ExternalComputeReceipt, ExternalComputeState,
+    ExternalComputeAdmission, ExternalComputeReceipt, ExternalComputeReservation,
+    ExternalComputeSettlement, ExternalComputeState,
 };
 use corelink_fabric::ledger::{LeaseLedger, LeaseRecord};
 use corelink_fabric::TenantId;
@@ -30,12 +31,16 @@ enum Outcome {
 struct TestLedger {
     calls: AtomicUsize,
     outcome: Outcome,
+    state: std::sync::Mutex<ExternalComputeState>,
+    settle_calls: AtomicUsize,
 }
 impl TestLedger {
     fn new(outcome: Outcome) -> Self {
         Self {
             calls: AtomicUsize::new(0),
             outcome,
+            state: std::sync::Mutex::new(ExternalComputeState::Prepared),
+            settle_calls: AtomicUsize::new(0),
         }
     }
 }
@@ -64,6 +69,43 @@ impl LeaseLedger for TestLedger {
     ) -> anyhow::Result<()> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(())
+    }
+    fn activate_external_compute(
+        &self,
+        reservation: &ExternalComputeReservation,
+    ) -> anyhow::Result<ExternalComputeReceipt> {
+        *self.state.lock().unwrap() = ExternalComputeState::Active;
+        Ok(ExternalComputeReceipt {
+            reservation_id: reservation.reservation_id.clone(),
+            state: ExternalComputeState::Active,
+        })
+    }
+    fn cancel_external_compute(
+        &self,
+        reservation: &ExternalComputeReservation,
+    ) -> anyhow::Result<ExternalComputeReceipt> {
+        if *self.state.lock().unwrap() == ExternalComputeState::Active {
+            return Err(anyhow::Error::new(
+                corelink_fabric::compute_budget::ExternalComputeError::Conflict,
+            ));
+        }
+        *self.state.lock().unwrap() = ExternalComputeState::Cancelled;
+        Ok(ExternalComputeReceipt {
+            reservation_id: reservation.reservation_id.clone(),
+            state: ExternalComputeState::Cancelled,
+        })
+    }
+    fn settle_external_compute(
+        &self,
+        reservation: &ExternalComputeReservation,
+        _: ExternalComputeSettlement,
+    ) -> anyhow::Result<ExternalComputeReceipt> {
+        self.settle_calls.fetch_add(1, Ordering::SeqCst);
+        *self.state.lock().unwrap() = ExternalComputeState::Settled;
+        Ok(ExternalComputeReceipt {
+            reservation_id: reservation.reservation_id.clone(),
+            state: ExternalComputeState::Settled,
+        })
     }
     fn put(&self, _: LeaseRecord) -> anyhow::Result<()> {
         unreachable!()
@@ -147,6 +189,18 @@ async fn reserve_request(app: Router, token: &str, body: impl Into<Body>) -> Res
     .unwrap()
 }
 
+async fn compute_request(app: Router, path: &str, token: &str, body: impl Into<Body>) -> Response {
+    app.oneshot(
+        Request::post(path)
+            .header("authorization", format!("ComputeGrant {token}"))
+            .header("content-type", "application/json")
+            .body(body.into())
+            .unwrap(),
+    )
+    .await
+    .unwrap()
+}
+
 #[tokio::test]
 async fn invalid_signature_is_401_without_ledger_call() {
     let ledger = Arc::new(TestLedger::new(Outcome::Receipt));
@@ -216,5 +270,90 @@ async fn admin_gate_maps_wrong_key_and_success() {
     assert_eq!(
         app.oneshot(valid).await.unwrap().status(),
         StatusCode::NO_CONTENT
+    );
+}
+
+#[tokio::test]
+async fn settlement_requires_provider_authority_and_preserves_active_capacity() {
+    let ledger = Arc::new(TestLedger::new(Outcome::Receipt));
+    let (token, public) = token();
+    assert_eq!(
+        compute_request(
+            app(ledger.clone(), None, public.clone()),
+            "/internal/v1/compute/reserve",
+            &token,
+            "{}"
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        compute_request(
+            app(ledger.clone(), None, public.clone()),
+            "/internal/v1/compute/activate",
+            &token,
+            "{}"
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let body = r#"{"actual_vcpu_ms":"0","terminal_evidence_digest":"0000000000000000000000000000000000000000000000000000000000000000"}"#;
+    assert_eq!(
+        compute_request(
+            app(ledger.clone(), None, public.clone()),
+            "/internal/v1/compute/settle",
+            &token,
+            body
+        )
+        .await
+        .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        compute_request(
+            app(ledger.clone(), None, public),
+            "/internal/v1/compute/settle",
+            &token,
+            body
+        )
+        .await
+        .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(*ledger.state.lock().unwrap(), ExternalComputeState::Active);
+    assert_eq!(ledger.settle_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn prepared_reservations_can_still_cancel() {
+    let ledger = Arc::new(TestLedger::new(Outcome::Receipt));
+    let (token, public) = token();
+    assert_eq!(
+        compute_request(
+            app(ledger.clone(), None, public.clone()),
+            "/internal/v1/compute/reserve",
+            &token,
+            "{}"
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        compute_request(
+            app(ledger.clone(), None, public),
+            "/internal/v1/compute/cancel",
+            &token,
+            "{}"
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        *ledger.state.lock().unwrap(),
+        ExternalComputeState::Cancelled
     );
 }
