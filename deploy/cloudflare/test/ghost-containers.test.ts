@@ -21,6 +21,7 @@
 // NEW FILE. Touches no other test file.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { makeWorkerAuthorities } from "./helpers/worker-authorities";
 
 // ── Test double for @cloudflare/containers (mirrors journey-sj2) with per-test
 // hooks for start / teardown / isAlive, so we can fail an attempt, observe what
@@ -187,7 +188,7 @@ function installLogCapture() {
 }
 
 function baseEnv(kv: ReturnType<typeof fakeKv>, metrics: ReturnType<typeof fakeMetrics>, over: Partial<Env> = {}): Env {
-  return {
+  const env = {
     RUNNER_CONTAINER: RUNNER_NS as never,
     CHECK_HOST_CONTAINER: CHECK_NS as never,
     CLOUDFLARE_SPAWN_AUTH_TOKEN: "spawn-secret",
@@ -200,6 +201,10 @@ function baseEnv(kv: ReturnType<typeof fakeKv>, metrics: ReturnType<typeof fakeM
     METRICS: metrics as never,
     ...over,
   } as Env;
+  const authorities = makeWorkerAuthorities(env.RUNNER_JOB_PATS);
+  if (!over.CONTAINMENT) env.CONTAINMENT = authorities.CONTAINMENT as never;
+  if (!over.CONCURRENCY_SLOTS) env.CONCURRENCY_SLOTS = authorities.CONCURRENCY_SLOTS as never;
+  return env;
 }
 
 async function queuedWebhook(
