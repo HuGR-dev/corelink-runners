@@ -1421,19 +1421,6 @@ const BILLING_SOURCE = "corelink-runners/spawn-worker";
 const RUNNER_SLOT_SECONDS_KIND = "runner_slot_seconds";
 
 /**
- * The BILLABLE runner compute kind (2026-08-02). `qty` is wall-clock ALLOCATED
- * seconds × the box's vCPU count, because the entitlement it meters against
- * (`runners_entitlement.max_vcpu_h`) is denominated in vCPU-HOURS.
- *
- * A slot-second is NOT a vCPU-second. On the current 4-vCPU runner they differ
- * by exactly 4×, and both read as "seconds" — so pushing slot-seconds against a
- * vCPU-hour ceiling under-bills by 4× and looks completely reasonable while
- * doing it. That is the whole reason this is a separate kind rather than a
- * redefinition of `runner_slot_seconds`: changing what an existing kind's `qty`
- * MEANS is invisible to every consumer already reading it.
- */
-
-/**
  * vCPU count of the runner box, and the ONLY place the fleet's shape enters the
  * billing math. Pinned to `RunnerContainer`'s `instance_type` in wrangler.jsonc
  * (`standard-4` = 4 vCPU / 12 GiB / 20 GB — which is also this Cloudflare
@@ -1502,12 +1489,6 @@ export async function buildUsageEvent(opts: {
   startedMs: number;
   completedMs: number;
   region: string;
-  /**
-   * vCPU count of the box that ran this job. Defaults to the single fleet size
-   * ({@link RUNNER_BOX_VCPU}) but is a PARAMETER, not a constant read, so a
-   * mixed-size fleet only has to pass the real number here — the billing math
-   * above it never changes.
-   */
   /** @deprecated Accepted for source compatibility; the wire contract is slot-seconds. */
   vcpu?: number;
 }): Promise<UsageEvent> {

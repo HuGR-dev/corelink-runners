@@ -320,3 +320,51 @@ ADR0011 now records the supported no-exec interface and pending signed release.
 No tag, release, push, image pin or deployment was fabricated. All agent work
 packets for this wave are complete and integrated or explicitly rejected; no
 remaining hidden fixture failures from the seven-file groupB packet.
+
+
+## Progress at 04:34 BRT (latest)
+
+Runners source tip c97ba5878e241dce73ce979c961cc927bc0d5330; paired server
+and clw remain clean at dc169f8c53196e242fff213bdb3c77be3a7ade00 and
+91ab8175f458a1dfb946b83be25641d9071b2fc0. Primary conflicted checkout is
+preserved. Delivered count remains16/70,54 outstanding,0 complete sprints.
+
+- Integrated Luna unsuspend a85e3c5 and root repair015edd4: persist first,
+  preserve the suspension cache on failure, return503 rather than false success.
+  Root7 enforcement tests passed, including actual acquire429 after failure,
+  successful retry, confirmed/unconfirmed teardown and unsupported outbox.
+  Root repaired old fixture assumptions; no production test bypass was added.
+  The dependency fixture records outbox events but is not a Pg durability proof.
+- Rootc97ba58 moves tenant-suspension to the lifecycle auth domain on both
+  Worker and Rust producer.23 focused Worker auth tests and strictTS passed.
+  Luna forwarding09f3ea7 adds missing exec/lifecycle bindings to fabricd's
+  container environment. Root18 focused fabricd tests and strictTS passed.
+  Root corrected docs: EACH control token must match client/server copies;
+  domains rotate independently but do not use separate unmatched credentials.
+- Removed obsolete billing comments claiming a vCPU multiplier in the current
+  slot-seconds builder. Frozen event semantics and idempotency vectors unchanged.
+- The first root Rust build failed for ENOSPC before tests. Removed only owned
+  takeover build artifacts (Pg-r2 target, engine-auth target, clw incremental/
+  deps/build), retained the actual clw binary. Rebuilt Pg-r2 target using
+  CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2. Seven tests
+  above passed. Disk recovered to5.8GiB at04:32. Do not prune unknown worktrees.
+- All bounded packets in this wave are integrated/repaired. No full CI, new PR,
+  push, release, migration, deployment, PG rearm or external message was sent.
+
+The monitor proposal remains explicitly UNANSWERED and unapplied:
+`docs/plan/execution/2026-09-06-monitor-decision-proposal.md`. No monitor app
+implementation or owner waiver is implied by elapsed time. The existing seven
+real observation days and trusted-time qualification are still mandatory.
+
+Independent unfinished implementation remains: shared monthly compute authority;
+F008 generation-bound consumer, ordered resume and legacy migration; and
+F005/F007 authoritative provider cancellation/reconciliation. Do not attribute
+all unfinished work to the pending monitor decision. The read-only budget audit
+found June documentation for zero-disabled and allocated vCPU-ms, but September
+A4.4 wording conflicts on absent/fractional values. The root handoff itself is
+not a human ratification. Preserve current wire vectors; a stale scratch design
+or code parser is not fresh product approval. The F008 audit's proposed dual
+Pg/D1 generations is only a proposal: it has not established a single authority
+or a safe cross-service resume protocol and must not be implemented as two
+independent clocks. No additional user permission is needed for routine source
+work already authorized in this session.

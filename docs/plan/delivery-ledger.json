@@ -1893,9 +1893,19 @@
       "summary": "Suspension outbox needs durable epoch, migration coverage and ordered unsuspend semantics.",
       "reproduction": "At51ae0c PG existing suspended row returns before ensuring an outbox; unsuspend/resuspend in same millisecond reuses event ID suppressed by ON CONFLICT. A delayed old event can scan/revoke newer credentials after unsuspend. Non-PG enforcement now refuses because its durable outbox is unavailable; legacy Worker credential coverage is not established.",
       "acceptance": "Persist an exact unique suspension epoch with its event atomically, repair pre-existing suspended rows without missing signals, prove repeated suspend idempotent and unsuspend/resuspend independent at identical clocks. Bound Worker durable event receipt and revocation selection to epoch so old delivery never revokes a newer lifecycle. Define and verify legacy credential migration coverage and supported backend behavior; no successful ACK from unknown empty inventory. Add meaningful restart, replay, same-clock and legacy-state tests, then validate paired producer/consumer during sprint gate. Completion must also prevent a newly registered same-job credential from escaping an already enumerated terminal cleanup; unknown legacy/terminal history must retain a durable retry obligation.",
-      "commits": [],
+      "commits": [
+        "03fdf87e72dbe47ebccd4f997590c4fbe8c500f9",
+        "a85e3c53bc7c05600feec8d6293d9b93e24bf8f2",
+        "015edd4010dc0e97dc398b4fb8960a7278710bc0",
+        "09f3ea7b9f3602b6a9dad093033b38ad7fbba712",
+        "c97ba5878e241dce73ce979c961cc927bc0d5330"
+      ],
       "evidence": [
-        "Root inspected PgLedger::record_tenant_suspension, AppState::record_tenant_suspension_event, enforcement handlers and Worker revocation consumer at51ae0c."
+        "Root inspected PgLedger::record_tenant_suspension, AppState::record_tenant_suspension_event, enforcement handlers and Worker revocation consumer at51ae0c.",
+        "Producer03fdf87 repairs missing suspension outbox pointers and unique same-clock epochs; previously root-reproduced real PostgreSQL tests cover that bounded producer change. Full lifecycle generation binding remains absent.",
+        "Root015edd4 reproduces7 focused enforcement tests: failed persistence returns503 and preserves acquire429; retry clears suspension; confirmed teardown releases held lease, unconfirmed teardown retains it; unsupported outbox refuses. Tests inject an outbox dependency and do not claim new PostgreSQL or complete F008 proof.",
+        "Rootc97ba58 reproduces23 Worker auth tests plus strictTS; root09f3ea7 forwards dedicated exec/lifecycle credentials into fabricd, with18 focused routing tests plus strictTS reproduced. Root corrected paired rotation documentation.",
+        "At2026-09-06T07:33Z F008 remains open: a delayed first delivery can enumerate post-resume credentials; Worker receipt/selection has no lifecycle generation and legacy migration coverage is incomplete. These commits do not close the finding or WP."
       ]
     }
   ],
