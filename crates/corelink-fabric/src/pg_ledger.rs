@@ -66,6 +66,9 @@ mod external_compute;
 #[cfg(test)]
 #[path = "pg_ledger/external_compute_tests.rs"]
 mod external_compute_tests;
+#[cfg(test)]
+#[path = "pg_ledger/lifecycle_tests.rs"]
+mod lifecycle_tests;
 mod suspension;
 
 #[path = "pg_ledger/pending_cleanup_pg.rs"]
@@ -237,7 +240,13 @@ CREATE TABLE IF NOT EXISTS tenant_suspension_events (
   tenant_id text NOT NULL,
   created_at_ms bigint NOT NULL,
   attempts int NOT NULL DEFAULT 0,
-  delivered_at_ms bigint);
+  delivered_at_ms bigint,
+  generation bigint NOT NULL DEFAULT 0,
+  CHECK (generation >= 0));
+ALTER TABLE tenant_suspension_events ADD COLUMN IF NOT EXISTS generation bigint NOT NULL DEFAULT 0;
+CREATE TABLE IF NOT EXISTS tenant_lifecycle_generations (
+  tenant_id text PRIMARY KEY,
+  generation bigint NOT NULL CHECK (generation >= 0));
 CREATE INDEX IF NOT EXISTS tenant_suspension_events_pending_idx
   ON tenant_suspension_events (created_at_ms) WHERE delivered_at_ms IS NULL;
 -- Pending-cleanup ownership is ledger-internal: a cleanup claim never changes
@@ -549,6 +558,13 @@ impl PgLedger {
 }
 
 impl LeaseLedger for PgLedger {
+    fn tenant_lifecycle(&self, tenant: &str) -> anyhow::Result<crate::ledger::TenantLifecycle> {
+        self.tenant_lifecycle_pg(tenant)
+    }
+
+    fn tenant_suspension_generation(&self, event_id: &str) -> anyhow::Result<u64> {
+        self.tenant_suspension_generation_pg(event_id)
+    }
     fn initialize_external_compute_period(
         &self,
         baseline: crate::compute_budget::ExternalComputeBaseline,

@@ -44,6 +44,7 @@ impl PgLedger {
                     &[&event.tenant_id],
                 )
                 .await?;
+            let generation = ensure_generation(&tx, &event.tenant_id, current.is_some()).await?;
             if let Some(row) = current {
                 let pointer: Option<String> = row.get(0);
                 if let Some(pointer) = pointer {
@@ -65,7 +66,7 @@ impl PgLedger {
                     return Ok(());
                 }
                 let generated = next_event_id(&tx, &event.event_id).await?;
-                insert_event(&tx, &generated, &event).await?;
+                insert_event(&tx, &generated, &event, generation).await?;
                 tx.execute(
                     "UPDATE fabric_suspended_tenants SET suspension_event_id = $2 \
                      WHERE tenant_id = $1",
@@ -76,7 +77,7 @@ impl PgLedger {
                 return Ok(());
             }
             let generated = next_event_id(&tx, &event.event_id).await?;
-            insert_event(&tx, &generated, &event).await?;
+            insert_event(&tx, &generated, &event, generation).await?;
             tx.execute(
                 "INSERT INTO fabric_suspended_tenants (tenant_id, suspension_event_id) \
                  VALUES ($1, $2)",
@@ -99,6 +100,8 @@ impl PgLedger {
             let tx = client.transaction().await?;
             tx.query_one(FENCE_SQL, &[&tenant]).await?;
             if suspended {
+                let already_suspended = tx.query_opt("SELECT 1 FROM fabric_suspended_tenants WHERE tenant_id=$1", &[&tenant]).await?.is_some();
+                ensure_generation(&tx, tenant, already_suspended).await?;
                 tx.execute(
                     "INSERT INTO fabric_suspended_tenants (tenant_id) VALUES ($1) \
                      ON CONFLICT (tenant_id) DO NOTHING",
@@ -106,6 +109,13 @@ impl PgLedger {
                 )
                 .await?;
             } else {
+                let current = tx.query_opt("SELECT generation FROM tenant_lifecycle_generations WHERE tenant_id = $1 FOR UPDATE", &[&tenant]).await?;
+                if current.is_none() { ensure_generation(&tx, tenant, false).await?; }
+                if tx.query_opt("SELECT 1 FROM fabric_suspended_tenants WHERE tenant_id = $1", &[&tenant]).await?.is_some() {
+                    let generation: i64 = tx.query_one("SELECT generation FROM tenant_lifecycle_generations WHERE tenant_id = $1", &[&tenant]).await?.get(0);
+                    let next = generation.checked_add(1).ok_or_else(|| anyhow::anyhow!("tenant lifecycle generation overflow"))?;
+                    tx.execute("UPDATE tenant_lifecycle_generations SET generation=$2 WHERE tenant_id=$1", &[&tenant, &next]).await?;
+                }
                 tx.execute(
                     "DELETE FROM fabric_suspended_tenants WHERE tenant_id = $1",
                     &[&tenant],
@@ -180,6 +190,75 @@ impl PgLedger {
     }
 }
 
+impl PgLedger {
+    pub(crate) fn tenant_lifecycle_pg(
+        &self,
+        tenant: &str,
+    ) -> anyhow::Result<crate::ledger::TenantLifecycle> {
+        validate_tenant(tenant)?;
+        self.block_on(async {
+            let mut client = self.pool.get().await?;
+            let tx = client.transaction().await?;
+            tx.query_one(FENCE_SQL, &[&tenant]).await?;
+            let suspended = tx
+                .query_opt(
+                    "SELECT 1 FROM fabric_suspended_tenants WHERE tenant_id=$1",
+                    &[&tenant],
+                )
+                .await?
+                .is_some();
+            let generation = ensure_generation(&tx, tenant, suspended).await? as u64;
+            tx.commit().await?;
+            Ok(crate::ledger::TenantLifecycle {
+                tenant_id: tenant.to_string(),
+                generation,
+                suspended,
+            })
+        })
+    }
+
+    pub(crate) fn tenant_suspension_generation_pg(&self, event_id: &str) -> anyhow::Result<u64> {
+        if event_id.trim().is_empty() {
+            anyhow::bail!("suspension event id is empty");
+        }
+        self.block_on(async {
+            let client = self.pool.get().await?;
+            let row = client
+                .query_opt(
+                    "SELECT generation FROM tenant_suspension_events WHERE event_id=$1",
+                    &[&event_id],
+                )
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("unknown suspension event"))?;
+            let generation: i64 = row.get(0);
+            u64::try_from(generation).map_err(|_| anyhow::anyhow!("invalid suspension generation"))
+        })
+    }
+}
+
+async fn ensure_generation(
+    tx: &tokio_postgres::Transaction<'_>,
+    tenant: &str,
+    suspended: bool,
+) -> anyhow::Result<i64> {
+    if let Some(row) = tx
+        .query_opt(
+            "SELECT generation FROM tenant_lifecycle_generations WHERE tenant_id=$1 FOR UPDATE",
+            &[&tenant],
+        )
+        .await?
+    {
+        return Ok(row.get(0));
+    }
+    let generation = if suspended { 0 } else { 1 };
+    tx.execute(
+        "INSERT INTO tenant_lifecycle_generations (tenant_id,generation) VALUES ($1,$2)",
+        &[&tenant, &generation],
+    )
+    .await?;
+    Ok(generation)
+}
+
 async fn next_event_id(
     tx: &tokio_postgres::Transaction<'_>,
     prefix: &str,
@@ -195,15 +274,17 @@ async fn insert_event(
     tx: &tokio_postgres::Transaction<'_>,
     event_id: &str,
     event: &TenantSuspensionEvent,
+    generation: i64,
 ) -> anyhow::Result<()> {
     tx.execute(
         "INSERT INTO tenant_suspension_events \
-         (event_id, tenant_id, created_at_ms, attempts) VALUES ($1, $2, $3, $4)",
+         (event_id, tenant_id, created_at_ms, attempts, generation) VALUES ($1, $2, $3, $4, $5)",
         &[
             &event_id,
             &event.tenant_id,
             &(event.created_at_ms as i64),
             &(event.attempts as i32),
+            &generation,
         ],
     )
     .await?;
