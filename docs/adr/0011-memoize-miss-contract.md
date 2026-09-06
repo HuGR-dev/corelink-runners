@@ -1,29 +1,36 @@
 # ADR-0011 — Memoize miss policy
 
-- **Status:** accepted; required-hit implementation blocked on clw capability
-- **Date:** 2026-09-04
+- **Status:** accepted; action/client source implemented, signed client release and live HIT evidence pending
+- **Date:** 2026-09-04; implementation update 2026-09-06
 - **Decision owner:** repository owner (D11 ratification)
 - **Scope:** `actions/corelink-memoize` and its owned workflow tests
 
 The action exposes `cache-policy` with exactly two values:
 
 - `optional` (the default): cache absence, a miss, or an internal CoreLink
-  failure is fail-open. The wrapped command runs COLD and keeps its own exit
-  status, preserving existing users.
-- `required-hit`: the action must eventually succeed only when clw returns an
-  authenticated HIT without invoking the wrapped command. With the installed
-  clw **0.1.5**, this policy returns **exit 78 before invoking clw**. That
-  release explicitly reports that `--json` does not apply to `run`, proxies
-  child stdout/stderr, emits no machine-readable HIT status, and uses exit 125
-  for an internal transport failure. The action does not infer a HIT from
-  human-readable output or from an exit code.
+  failure runs the wrapped command COLD and keeps its exit status.
+- `required-hit`: the action calls the client's atomic verified no-exec
+  operation. A HIT replays the cached output and exit code; a miss, invalid
+  result, transport or setup failure returns 78 without running the child.
+  Cached nonzero exits, including 125, never trigger a COLD fallback.
 
-The smallest prerequisite for enabling `required-hit` is a clw release with a
-stable, authenticated, machine-readable **no-exec required-hit operation**:
-it must use the same key as `run`, return the cached exit/output on a HIT, and
-return 78 on absence/miss/error without invoking the child. A preflight lookup
-alone is insufficient unless it is atomically paired with cached-result replay;
-otherwise the action has a TOCTOU gap. Until that client contract exists,
-`optional` remains the only executable policy. The workflow fixtures cover
-optional cold/fallback, the observed clw 0.1.5 no-JSON behavior, required
-refusal without command execution, and invalid-policy fail-closed behavior.
+The prepared clw 0.1.12 source implements `clw run --require-hit` (alias
+`--no-exec`) using the same action key as ordinary `run`. Verification and cached
+replay occur inside this operation; a separate preflight lookup is insufficient.
+The action requires a successful `clw --version` reporting exactly `clw 0.1.12`.
+Missing endpoint, credentials or binary, older/unknown versions and a failed
+version command refuse with 78. It does not parse human HIT messages or `--json`.
+Version selection identifies the supported interface; authenticity still depends
+on the signed binary installation and the client's authenticated CAS/AC reads.
+
+The previously installed clw 0.1.5 lacks this operation, so required-hit continues
+to refuse on those images. **0.1.12 has not been published by this takeover.**
+Signed release, verified consumer pins and a real authenticated HIT remain
+required before production acceptance. Source preparation does not establish
+those facts.
+
+Focused shell fixtures cover optional COLD/fallback and required cached exit
+preservation, miss/setup failures, missing dependencies and version refusals.
+Root also ran the action with the actual locally built client: invalid setup and
+missing endpoint returned 78 with no child; optional setup failure ran COLD.
+These negative checks do not claim a live CAS HIT.

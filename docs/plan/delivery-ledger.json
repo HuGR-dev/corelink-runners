@@ -348,20 +348,24 @@
       "dependencies": [
         "D11"
       ],
-      "next_action": "Reviewed clw patch ready in docs/plan/relays. Await explicit sibling-fence exception requested from owner; then isolated client implementation/release and runnerconsumer pin.",
+      "next_action": "Action supports prepared clw0.1.12 atomic --require-hit with strict version/dependency refusal; root16 shell cases and3 actual action/client negative compositions passed. clw91ab817 pre-dispatch negatives reproduced. Signed release, verified image pins and real HIT acceptance remain pending; no WP delivery credit.",
       "blockers": [
         "Reviewed clw required-hit patch is ready; explicit owner exception to apply in isolated sibling worktree is pending. No clw release or installed capability yet."
       ],
       "commits": [
         "bb165bad54125460ebae213e405df3a75baa6566",
-        "7489786a35e402732c58a74c4d005486ed3e4aba"
+        "7489786a35e402732c58a74c4d005486ed3e4aba",
+        "4d4d4f2dfec88355cee51ff5c2a0dadf0adb011e",
+        "8260f79d6a74062e10bbcd53bf289ad2fb1fb781"
       ],
       "review": {
         "status": "pending",
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [
+        "docs/adr/0011-memoize-miss-contract.md"
+      ]
     },
     {
       "id": "T6-W3",

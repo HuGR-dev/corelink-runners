@@ -305,3 +305,18 @@ conformance lens, NOT the runtime parser. Paired server producer still emits onl
 positiveu32 or omitted cap. Preserve actual code and report the inconsistency;
 do not invent a fresh owner approval or silently change frozen billing vectors.
 The shared-budget scratch proposal remains unapproved and partly stale.
+
+
+## Progress at 04:09 BRT (latest)
+
+Root Runners8260f79 includes repaired action5059a7d+181c8b9; paired clw now
+91ab8175f458a1dfb946b83be25641d9071b2fc0 includes required-hit pre-dispatch fix
+76c4cbb. Root reproduced16 shell fixture cases and2 actual CLI process tests
+(required setup/alias failures and optional/required panic codes). Root then ran
+three composed action -> actual locally built clw cases: required invalid config
+78/nochild, required missing endpoint78/nochild, optional config failure0/child.
+These are real negative process proofs, not live authenticated cache HIT evidence.
+ADR0011 now records the supported no-exec interface and pending signed release.
+No tag, release, push, image pin or deployment was fabricated. All agent work
+packets for this wave are complete and integrated or explicitly rejected; no
+remaining hidden fixture failures from the seven-file groupB packet.
