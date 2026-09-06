@@ -1,5 +1,6 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// ADMISSION FAIL-OPEN BUDGET — ★A3.16 / RH3
+// Legacy pure fail-open decision helpers. Production A3.16 coverage is in
+// admission-budget-authority.test.ts and exercises the ContainmentDO authority.
 // ─────────────────────────────────────────────────────────────────────────────
 //
 // `acquireConcurrencySlot` admits when the slot Durable Object THROWS, so an infra
@@ -57,14 +58,8 @@ describe("decideFailOpenAdmission", () => {
     expect(v.reason).toBe("slot_failopen_budget_unreadable");
   });
 
-  // An ABSENT KV binding is not the same fact as a FAILED read, and collapsing them
-  // is a mistake this suite now pins. No binding means the deployment has no counter
-  // infra at all — the situation `claimSpawn` documents as "no dedup infra ⇒
-  // fail-open to spawn (never block a job)" — so the budget does not apply and the
-  // original unconditional fail-open stands. That branch lives in the caller
-  // (`acquireConcurrencySlot`), which never reaches this decision when `kv` is
-  // absent; the pure function only ever sees a real read outcome. Cell 5 covers the
-  // read that threw, which is the dangerous one.
+  // A zero count is only the pure helper's fresh-window input. Missing authority is
+  // covered by the production caller tests and refuses closed.
   it("cell 5b — a zero count is a fresh window, not an unknown: it admits", () => {
     expect(decideFailOpenAdmission(0)).toEqual({ admitted: true });
     expect(decideFailOpenAdmission(null).admitted).toBe(false);

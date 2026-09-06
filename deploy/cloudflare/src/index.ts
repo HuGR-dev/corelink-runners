@@ -2470,7 +2470,7 @@ async function releaseConcurrencySlot(env: Env, jobId: string): Promise<void> {
 //     now capped per-repo AND under the same global FLEET cap.
 // FAIL-OPEN ONLY on a THROWN DO/infra error (never block a legit job on an infra
 // hiccup); a clean `{admitted:false}` is a REAL at-capacity refusal and is honored.
-async function acquireConcurrencySlot(
+export async function acquireConcurrencySlot(
   env: Env,
   jobId: string,
   mint: ContainerEnvResult,

@@ -28,7 +28,7 @@ export async function spendAdmissionBudget(
   storage: AdmissionBudgetStorage,
   nowMs: number,
 ): Promise<AdmissionBudgetVerdict> {
-  if (!Number.isFinite(nowMs) || nowMs < 0) {
+  if (!Number.isSafeInteger(nowMs) || nowMs < 0) {
     return { admitted: false, reason: "slot_failopen_budget_unreadable" };
   }
 
@@ -37,13 +37,14 @@ export async function spendAdmissionBudget(
     if (stored !== undefined) {
       if (stored === null || typeof stored !== "object" || stored.schema_version !== 1
         || !Array.isArray(stored.spends_ms) || stored.spends_ms.length > ADMISSION_BUDGET_MAX_SPENDS
-        || !Number.isFinite(stored.last_observed_ms) || stored.last_observed_ms < 0
+        || !Number.isSafeInteger(stored.last_observed_ms) || stored.last_observed_ms < 0
         || nowMs < stored.last_observed_ms) {
         return { admitted: false, reason: "slot_failopen_budget_unreadable" };
       }
       let previous = -Infinity;
       for (const timestamp of stored.spends_ms) {
-        if (!Number.isFinite(timestamp) || timestamp < 0 || timestamp > nowMs || timestamp < previous) {
+        if (!Number.isSafeInteger(timestamp) || timestamp < 0 || timestamp > nowMs
+          || timestamp > stored.last_observed_ms || timestamp < previous) {
           return { admitted: false, reason: "slot_failopen_budget_unreadable" };
         }
         previous = timestamp;
