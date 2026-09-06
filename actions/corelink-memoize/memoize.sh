@@ -1,16 +1,23 @@
 #!/usr/bin/env bash
 set +e
 
-# clw 0.1.5 has no machine-readable, authenticated HIT status for `run`.
-# required-hit therefore refuses before invoking clw; see ADR-0011. Keep the
-# optional path equivalent in behavior to the pre-T6-W2 action.
 required_miss=78
 policy="${CL_CACHE_POLICY:-optional}"
 case "$policy" in
   optional) ;;
   required-hit)
-    echo "::error title=corelink-memoize::required-hit unavailable: installed clw has no authenticated no-exec HIT API; upgrade clw before enabling this policy" >&2
-    exit "$required_miss"
+    # The required-hit wire contract is released in clw 0.1.12. Refuse every
+    # other, missing, or malformed installation before the wrapped command can
+    # start; version output is the only capability check (never parse HIT text).
+    if ! command -v clw >/dev/null 2>&1; then
+      echo "::error title=corelink-memoize::required-hit requires clw 0.1.12" >&2
+      exit "$required_miss"
+    fi
+    clw_version="$(clw --version 2>/dev/null || true)"
+    if [ "$clw_version" != "clw 0.1.12" ]; then
+      echo "::error title=corelink-memoize::required-hit requires clw 0.1.12" >&2
+      exit "$required_miss"
+    fi
     ;;
   *)
     echo "::error title=corelink-memoize::invalid cache-policy '$policy' (expected optional or required-hit)" >&2
@@ -52,15 +59,20 @@ if [ -n "${CLW_ENDPOINT:-}" ] && { [ -n "${CLW_TOKEN:-}" ] || [ -n "${CLW_CRED_T
   export CLW_REF_DOMAIN="${CLW_REF_DOMAIN:-runner}"
   echo "corelink-memoize: moat present — memoizing via clw run"
   echo "corelink-memoize[env-0-check]: CLW_REF_DOMAIN=[${CLW_REF_DOMAIN:-}] CLW_CRED_TICKET_len=[${#CLW_CRED_TICKET}] CLW_LEASE_ID=[${CLW_LEASE_ID:-}] CLW_FABRIC_ENDPOINT_set=[$([ -n "${CLW_FABRIC_ENDPOINT:-}" ] && echo yes || echo no)] CLW_TOKEN_set=[$([ -n "${CLW_TOKEN:-}" ] && echo yes || echo no)]"
-  clw run "${input_args[@]}" "${env_args[@]}" -- bash -c "$CL_RUN"
-  rc=$?
-  # clw exit contract: 125 = clw-INTERNAL error (NOT the command's verdict).
-  # Any other code is the wrapped command's real exit (cached or fresh).
-  if [ "$rc" -eq 125 ]; then
-    echo "::warning title=corelink-memoize::clw internal error (125) — falling back to a COLD run (north star)"
-    run_cold; rc=$?
+  if [ "$policy" = required-hit ]; then
+    clw run --require-hit "${input_args[@]}" "${env_args[@]}" -- bash -c "$CL_RUN"
+    exit "$?"
+  else
+    clw run "${input_args[@]}" "${env_args[@]}" -- bash -c "$CL_RUN"
+    rc=$?
+    # clw exit contract: 125 = clw-INTERNAL error (NOT the command's verdict).
+    # Any other code is the wrapped command's real exit (cached or fresh).
+    if [ "$rc" -eq 125 ]; then
+      echo "::warning title=corelink-memoize::clw internal error (125) — falling back to a COLD run (north star)"
+      run_cold; rc=$?
+    fi
+    exit "$rc"
   fi
-  exit "$rc"
 else
   echo "corelink-memoize: moat absent (no CLW_*/clw) — COLD run"
   run_cold; exit "$?"
