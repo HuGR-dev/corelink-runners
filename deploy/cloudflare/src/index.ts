@@ -301,8 +301,8 @@ export interface Env {
   // if the webhook secret is ever leaked. Enforced when bound (see wrangler).
   WEBHOOK_LIMITER?: RateLimit;
   // ── Warm moat (cache-warm) — mint a per-job CAS PAT (D-9) + inject CLW_* ──
-  // D-9 internal-auth key (`x-corelink-internal-auth`). Worker secret. Absent ⇒
-  // the runner spawns COLD (no cache-warm) — fail-open, north star.
+  // D-9 internal-auth key (`x-corelink-internal-auth`). Worker secret. Required
+  // spawn preparation refuses missing authorization before JIT/provider work.
   CORELINK_RUNNER_MINT_AUTH_KEY?: string;
   // D-9 mint base URL (default the public on-net hostname; Option B).
   CORELINK_MINT_URL?: string;
@@ -310,9 +310,9 @@ export interface Env {
   CLW_ENDPOINT?: string;
   // The owner tenant the per-job CAS PAT + CLW_TENANT are scoped to (dogfood ee30f7ba).
   CLW_TENANT?: string;
-  // job_id → pat_id map (written at mint/queued, read+deleted at completion) so
-  // revoke can key on pat_id (the live /revoke contract). Absent ⇒ no revoke
-  // (PAT TTL-expires; fail-open). See wrangler kv_namespaces.
+  // Compatibility projections and lifecycle indexes. CredentialObligationAuthority
+  // owns exact-PAT revocation. Bare job→PAT metadata expires by TTL; a KV
+  // read/delete cannot safely remove a concurrent replacement. See kv_namespaces.
   RUNNER_JOB_PATS?: KVNamespace;
   // ── Billing usage-push (ASK-2) — per-completed-job runner_slot_seconds ──
   // corelink-billing ingest endpoint (e.g. .../internal/v1/billing/usage).
@@ -2871,10 +2871,9 @@ async function driveSpawn(
     // Release by jobId ONLY (globally unique) — works for warm AND cold; best-effort
     // (a miss self-heals at the slot TTL). Fully guarded: never mask the spawn error.
     await releaseConcurrencySlot(env, jobId);
-    // F2 (W3): the PAT was minted (revoke-key stored above) but the spawn failed —
-    // REVOKE it now instead of leaking a live cas:rw PAT to its TTL. revokeCompletedJob
-    // reads the jobId->patId stored at mint time, revokes by pat_id, deletes the key,
-    // and swallows its own errors (fail-open — never masks the original spawn error).
+    // Revoke this exact issued credential after the attempt fails. The durable
+    // authority retains a retry obligation if remote revoke or local wipe fails;
+    // a later attempt's credential and the job's admission remain independent.
     if (mint.patId && mint.tenant) await revokeIssuedCredential(env, containmentAuthority(env), { jobId, tenant: mint.tenant, patId: mint.patId });
     throw e;
   }
@@ -3692,7 +3691,7 @@ export async function detectStrandedInFlightJobs(
     try {
       derivedTenant = (await kv.get(jobTenantKey(jid))) ?? undefined;
     } catch {
-      /* best-effort: revokeCompletedJob falls back to CLW_TENANT */
+      /* The durable credential authority supplies the exact tenant identity. */
     }
     await revokeCompletedJob(env, jid, derivedTenant);
   }
