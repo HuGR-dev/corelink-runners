@@ -35,7 +35,7 @@ const positive = (value: unknown): value is number => typeof value === "number" 
 const digest = (value: string): string => createHash("sha256").update(value, "utf8").digest("hex");
 
 function key(namespace: string, registration: Registration): string { return `${namespace}:source:${laneKey(registration)}`; }
-function quarantineKey(namespace: string, registration: Registration): string { return `${namespace}:quarantine:${laneKey(registration)}`; }
+function quarantineKey(namespace: string, registration: Registration): string { return `${namespace}:source:${laneKey(registration)}:quarantine`; }
 function pendingKey(namespace: string, registration: Registration): string { return `${namespace}:ingest-pending:${laneKey(registration)}`; }
 function ingestKey(namespace: string, registration: Registration, eventId: string): string { return `${namespace}:ingest:${laneKey(registration)}:${digest(eventId)}`; }
 function exactRegistration(envelope: MonitorEnvelope, registrations: readonly Registration[]): Registration | undefined {
@@ -63,7 +63,8 @@ export class IngestService {
     const stored = await this.store.get<CommittedIngest>(ingestKey(this.namespace, registration, envelope.event_id));
     if (!stored || !stored.value || stored.value.envelopeDigest !== sha256(JSON.stringify(envelope)) || stored.value.envelope.event_id !== envelope.event_id) return stored ? null : null;
     await this.audit.verify(stored.value.intentReceipt);
-    if (stored.value.resultReceipt) await this.audit.verify(stored.value.resultReceipt);
+    if (!stored.value.resultReceipt) throw new Error("result_audit_pending");
+    await this.audit.verify(stored.value.resultReceipt);
     return stored.value;
   }
   async getCommitted(envelope: MonitorEnvelope): Promise<CommittedIngest | null> {
@@ -83,7 +84,7 @@ export class IngestService {
     }
     const lane = key(this.namespace, registration);
     try {
-      if (await this.store.get(lane + ":quarantine")) return { kind: "QUARANTINED", reason: "lane_quarantined" };
+      if (await this.store.get(quarantineKey(this.namespace, registration))) return { kind: "QUARANTINED", reason: "lane_quarantined" };
       const old = await this.committed(envelope, registration);
       if (old) {
         const proof = await this.clock.now();
@@ -94,8 +95,14 @@ export class IngestService {
       if (!proof || !positive(proof.timeMs)) return { kind: "UNKNOWN", reason: "trusted_time_unavailable" };
       if (envelope.occurred_at > proof.timeMs || envelope.scheduled_for > proof.timeMs) return { kind: "RETRY", reason: "future_envelope" };
       const source = await this.store.get<SourceCursor>(lane);
-      if (source && !cursorValid(source.value, registration)) return { kind: "QUARANTINED", reason: "invalid_cursor" };
-      if (source && envelope.producer_seq !== source.value.lastSequence + 1) return { kind: "QUARANTINED", reason: "sequence_not_next" };
+      if (source && !cursorValid(source.value, registration)) {
+        if (await this.store.transact([{ key: quarantineKey(this.namespace, registration), expectedVersion: null, value: { reason: "invalid_cursor", eventId: envelope.event_id } }]) !== "committed") return { kind: "UNKNOWN", reason: "quarantine_conflict" };
+        return { kind: "QUARANTINED", reason: "invalid_cursor" };
+      }
+      if (source && envelope.producer_seq !== source.value.lastSequence + 1) {
+        if (await this.store.transact([{ key: quarantineKey(this.namespace, registration), expectedVersion: null, value: { reason: "sequence_not_next", eventId: envelope.event_id } }]) !== "committed") return { kind: "UNKNOWN", reason: "quarantine_conflict" };
+        return { kind: "QUARANTINED", reason: "sequence_not_next" };
+      }
       const envelopeDigest = sha256(JSON.stringify(envelope));
       const commitId = digest(`${this.namespace}\0${laneKey(registration)}\0${envelope.event_id}\0${envelopeDigest}`);
       const pendingStored = await this.store.get<Pending>(pendingKey(this.namespace, registration));
