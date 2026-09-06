@@ -212,8 +212,14 @@ export class Rfc3161Clock implements TrustedClock {
         const crlResponse = await budget(fetcher(this.options.crlUrls[i], { method: "GET", redirect: "error", signal: AbortSignal.timeout(remaining()) }));
         if (!crlResponse.ok) throw new TrustedTimeError("UNAUTHORIZED", `CRL authority returned HTTP ${crlResponse.status}`);
         const crl = await readLimited(crlResponse, MAX_RESPONSE_BYTES);
+        const rawCrlPath = join(dir, `crl-${i}.der`);
         const crlPath = join(dir, `crl-${i}.pem`);
-        await writeFile(crlPath, crl, { mode: 0o600 });
+        await writeFile(rawCrlPath, crl, { mode: 0o600 });
+        try {
+          await run(this.options.opensslPath, ["crl", "-inform", "DER", "-in", rawCrlPath, "-outform", "PEM", "-out", crlPath], remaining());
+        } catch {
+          await run(this.options.opensslPath, ["crl", "-inform", "PEM", "-in", rawCrlPath, "-outform", "PEM", "-out", crlPath], remaining());
+        }
         const crlText = await run(this.options.opensslPath, ["crl", "-in", crlPath, "-text", "-noout"], remaining());
         const dates = parseCrlDates(crlText.stdout.toString("utf8"));
         if (genTime < dates.thisUpdate || genTime >= dates.nextUpdate) throw new TrustedTimeError("UNAUTHORIZED", "GenTime is outside CRL validity");
