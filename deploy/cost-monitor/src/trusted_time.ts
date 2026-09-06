@@ -53,17 +53,20 @@ interface ProcessResult {
 const MAX_TIMEOUT_MS = 5_000;
 const MAX_RESPONSE_BYTES = 256 * 1024;
 const MAX_FLOOR_RETRIES = 3;
+const MAX_PROCESS_OUTPUT_BYTES = 64 * 1024;
 
 function sha256(value: Uint8Array): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
 function run(program: string, args: string[], timeoutMs: number): Promise<ProcessResult> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return Promise.reject(new TrustedTimeError("TIMEOUT", "timestamp operation exceeded its budget"));
   return new Promise((resolve, reject) => {
     const child = spawn(program, args, { shell: false, stdio: ["ignore", "pipe", "pipe"] });
     const out: Buffer[] = [];
     const err: Buffer[] = [];
-    let size = 0;
+    let outSize = 0;
+    let errSize = 0;
     let settled = false;
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
@@ -76,8 +79,20 @@ function run(program: string, args: string[], timeoutMs: number): Promise<Proces
       if (error) reject(error);
       else resolve({ stdout: Buffer.concat(out), stderr: Buffer.concat(err) });
     };
-    child.stdout.on("data", (chunk: Buffer) => { size += chunk.length; out.push(chunk); });
-    child.stderr.on("data", (chunk: Buffer) => err.push(chunk));
+    child.stdout.on("data", (chunk: Buffer) => {
+      outSize += chunk.length;
+      if (outSize > MAX_PROCESS_OUTPUT_BYTES) {
+        child.kill("SIGKILL");
+        finish(new TrustedTimeError("INVALID", "openssl stdout exceeds configured bound"));
+      } else out.push(chunk);
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      errSize += chunk.length;
+      if (errSize > MAX_PROCESS_OUTPUT_BYTES) {
+        child.kill("SIGKILL");
+        finish(new TrustedTimeError("INVALID", "openssl stderr exceeds configured bound"));
+      } else err.push(chunk);
+    });
     child.on("error", (error) => finish(new TrustedTimeError("UNKNOWN", "openssl could not start", { cause: error })));
     child.on("close", (code) => {
       if (code !== 0) finish(new TrustedTimeError("UNAUTHORIZED", `openssl rejected timestamp: ${Buffer.concat(err).toString("utf8").trim()}`));
@@ -108,9 +123,7 @@ function parseCrlDates(text: string): { thisUpdate: number; nextUpdate: number }
 
 async function readLimited(response: Response, maxBytes: number): Promise<Buffer> {
   if (!response.body) {
-    const body = Buffer.from(await response.arrayBuffer());
-    if (body.length > maxBytes) throw new TrustedTimeError("INVALID", "timestamp response exceeds configured bound");
-    return body;
+    throw new TrustedTimeError("INVALID", "timestamp response has no bounded body stream");
   }
   const reader = response.body.getReader();
   const chunks: Buffer[] = [];
@@ -133,9 +146,11 @@ export class Rfc3161Clock implements TrustedClock {
   private readonly options: Rfc3161ClockOptions;
 
   constructor(options: Rfc3161ClockOptions) {
-    if (!options.endpoint.startsWith("http://") && !options.endpoint.startsWith("https://")) {
-      throw new TrustedTimeError("INVALID", "RFC 3161 endpoint must use HTTP(S)");
-    }
+    let endpoint: URL;
+    try { endpoint = new URL(options.endpoint); } catch { throw new TrustedTimeError("INVALID", "RFC 3161 endpoint is not a URL"); }
+    if (endpoint.protocol !== "http:" && endpoint.protocol !== "https:") throw new TrustedTimeError("INVALID", "RFC 3161 endpoint must use HTTP(S)");
+    if (!endpoint.hostname || endpoint.username || endpoint.password || endpoint.search || endpoint.hash) throw new TrustedTimeError("INVALID", "RFC 3161 endpoint must not contain credentials, query, or fragment");
+    if (!options.rootPem.trim() || !options.intermediatePem.trim()) throw new TrustedTimeError("INVALID", "pinned certificate roots are required");
     if (!Number.isInteger(options.timeoutMs) || options.timeoutMs <= 0 || options.timeoutMs > MAX_TIMEOUT_MS) {
       throw new TrustedTimeError("INVALID", "timeoutMs must be an integer between 1 and 5000");
     }
@@ -146,14 +161,25 @@ export class Rfc3161Clock implements TrustedClock {
     if (!Number.isSafeInteger(options.minimumTimeMs) || !Number.isSafeInteger(options.maxAdvanceMs) || options.maxAdvanceMs < 0) {
       throw new TrustedTimeError("INVALID", "time bounds must be safe integers");
     }
-    this.options = options;
+    this.options = { ...options, endpoint: endpoint.toString() };
   }
 
   async now(): Promise<TrustedTimeProof> {
     const started = process.hrtime.bigint();
     const remaining = () => {
       const elapsed = Number(process.hrtime.bigint() - started) / 1_000_000;
-      return Math.max(1, this.options.timeoutMs - Math.floor(elapsed));
+      const left = this.options.timeoutMs - Math.floor(elapsed);
+      if (left <= 0) throw new TrustedTimeError("TIMEOUT", "timestamp operation exceeded its budget");
+      return left;
+    };
+    const budget = async <T>(operation: Promise<T>): Promise<T> => {
+      const ms = remaining();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new TrustedTimeError("TIMEOUT", "timestamp operation exceeded its budget")), ms);
+      });
+      try { return await Promise.race([operation, timeout]); }
+      finally { if (timer) clearTimeout(timer); }
     };
     const dir = await mkdtemp(join(tmpdir(), "corelink-tsa-"));
     const requestPath = join(dir, "request.tsq");
@@ -169,13 +195,13 @@ export class Rfc3161Clock implements TrustedClock {
       await run(this.options.opensslPath, ["ts", "-query", "-data", challengePath, "-sha256", "-cert", "-out", requestPath], remaining());
       const request = await readFile(requestPath);
       const fetcher = this.options.fetcher ?? fetch;
-      const response = await fetcher(this.options.endpoint, {
+      const response = await budget(fetcher(this.options.endpoint, {
         method: "POST",
         redirect: "error",
         headers: { "content-type": "application/timestamp-query", accept: "application/timestamp-reply" },
         body: request,
         signal: AbortSignal.timeout(remaining()),
-      });
+      }));
       if (!response.ok) throw new TrustedTimeError("UNKNOWN", `timestamp authority returned HTTP ${response.status}`);
       const reply = await readLimited(response, this.options.maxResponseBytes);
       await writeFile(responsePath, reply, { mode: 0o600 });
@@ -183,7 +209,7 @@ export class Rfc3161Clock implements TrustedClock {
       const genTime = parseGenTime(textResult.stdout.toString("utf8"));
       const crlPaths: string[] = [];
       for (let i = 0; i < this.options.crlUrls.length; i += 1) {
-        const crlResponse = await fetcher(this.options.crlUrls[i], { method: "GET", redirect: "error", signal: AbortSignal.timeout(remaining()) });
+        const crlResponse = await budget(fetcher(this.options.crlUrls[i], { method: "GET", redirect: "error", signal: AbortSignal.timeout(remaining()) }));
         if (!crlResponse.ok) throw new TrustedTimeError("UNAUTHORIZED", `CRL authority returned HTTP ${crlResponse.status}`);
         const crl = await readLimited(crlResponse, MAX_RESPONSE_BYTES);
         const crlPath = join(dir, `crl-${i}.pem`);
@@ -191,7 +217,11 @@ export class Rfc3161Clock implements TrustedClock {
         const crlText = await run(this.options.opensslPath, ["crl", "-in", crlPath, "-text", "-noout"], remaining());
         const dates = parseCrlDates(crlText.stdout.toString("utf8"));
         if (genTime < dates.thisUpdate || genTime >= dates.nextUpdate) throw new TrustedTimeError("UNAUTHORIZED", "GenTime is outside CRL validity");
-        await run(this.options.opensslPath, ["crl", "-in", crlPath, "-CAfile", intermediatePath, "-verify", "-noout"], remaining());
+        try {
+          await run(this.options.opensslPath, ["crl", "-in", crlPath, "-CAfile", intermediatePath, "-verify", "-noout"], remaining());
+        } catch {
+          await run(this.options.opensslPath, ["crl", "-in", crlPath, "-CAfile", rootPath, "-verify", "-noout"], remaining());
+        }
         crlPaths.push(crlPath);
       }
       await run(this.options.opensslPath, ["ts", "-verify", "-in", responsePath, "-queryfile", requestPath, "-CAfile", rootPath, "-untrusted", intermediatePath, "-attime", String(Math.floor(genTime / 1000))], remaining());
@@ -208,27 +238,29 @@ export class Rfc3161Clock implements TrustedClock {
         if (/^Time Stamp signing\s*:\s*Yes$/m.test(purpose.stdout.toString("utf8"))) signerPath = certificatePath;
       }
       if (!signerPath) throw new TrustedTimeError("UNAUTHORIZED", "timestamp signer lacks the Time Stamping EKU");
-      const leafVerify = ["verify", "-CAfile", rootPath, "-untrusted", intermediatePath, "-attime", String(Math.floor(genTime / 1000)), "-crl_check"];
-      for (const crlPath of crlPaths) leafVerify.push("-CRLfile", crlPath);
+      const allCrlPath = join(dir, "all-crls.pem");
+      const allCrls = Buffer.concat(await Promise.all(crlPaths.map((path) => readFile(path))));
+      await writeFile(allCrlPath, allCrls, { mode: 0o600 });
+      const leafVerify = ["verify", "-CAfile", rootPath, "-untrusted", intermediatePath, "-attime", String(Math.floor(genTime / 1000)), "-crl_check_all", "-CRLfile", allCrlPath];
       leafVerify.push(signerPath);
       await run(this.options.opensslPath, leafVerify, remaining());
       if (genTime < this.options.minimumTimeMs) throw new TrustedTimeError("UNKNOWN", "timestamp is below configured minimum");
-      const next = await this.advanceFloor(genTime);
+      await this.advanceFloor(genTime, remaining, budget);
       return { timeMs: genTime, proofDigest: sha256(reply), requestDigest: sha256(request), authority: this.options.endpoint };
     } catch (error) {
       if (error instanceof TrustedTimeError) throw error;
       throw new TrustedTimeError("UNKNOWN", "RFC 3161 timestamp failed", { cause: error });
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      try { await rm(dir, { recursive: true, force: true }); } catch { /* preserve the primary result or error */ }
     }
   }
 
-  private async advanceFloor(timeMs: number): Promise<number> {
+  private async advanceFloor(timeMs: number, remaining: () => number, budget: <T>(operation: Promise<T>) => Promise<T>): Promise<number> {
     for (let attempt = 0; attempt < MAX_FLOOR_RETRIES; attempt += 1) {
-      const floor = await this.options.loadFloor();
+      const floor = await budget(this.options.loadFloor());
       if (!Number.isSafeInteger(floor)) throw new TrustedTimeError("UNKNOWN", "persisted time floor is invalid");
-      if (timeMs < floor || timeMs > floor + this.options.maxAdvanceMs) throw new TrustedTimeError("UNKNOWN", "timestamp violates persisted time floor");
-      if (await this.options.commitFloor(floor, timeMs)) return timeMs;
+      if (timeMs < floor || this.options.maxAdvanceMs > Number.MAX_SAFE_INTEGER - floor || timeMs > floor + this.options.maxAdvanceMs) throw new TrustedTimeError("UNKNOWN", "timestamp violates persisted time floor");
+      if (await budget(this.options.commitFloor(floor, timeMs))) return timeMs;
     }
     throw new TrustedTimeError("UNKNOWN", "time floor changed during validation");
   }
