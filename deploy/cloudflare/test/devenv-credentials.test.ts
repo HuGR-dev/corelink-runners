@@ -307,4 +307,15 @@ describe("authorized DevEnv credential lifecycle", () => {
     expect(log).toHaveBeenCalledWith(JSON.stringify({ event: "devenv_expiry_cleanup_pending" }));
   });
 
+  it("refuses an enabled billing configuration that cannot produce a canonical region", async () => {
+    const f = fixture(); f.env.BILLING_INGEST_URL = "https://billing.test/usage";
+    const instance = await f.restart();
+    for (const region of [undefined, "wnam", "IAD"]) {
+      f.env.BILLING_REGION = region;
+      await expect(instance.startAuthorizedDevenv(grant())).rejects.toThrow("DEVENV_BILLING_REGION_REQUIRED");
+    }
+    expect(f.stash).not.toHaveBeenCalled(); expect(instance.start).not.toHaveBeenCalled();
+    expect(f.stored.has(DEVENV_CREDENTIAL_KEY)).toBe(false);
+  });
+
 });

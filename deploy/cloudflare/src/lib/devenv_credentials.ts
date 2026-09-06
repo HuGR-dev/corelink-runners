@@ -51,6 +51,9 @@ export function validateAuthorizedDevenvStart(payload: AuthorizedDevenvStart, en
   }
   trustedHttpsBase(env.SPAWN_WORKER_PUBLIC_URL);
   trustedHttpsBase(env.CORELINK_MINT_URL ?? "https://corelink-api.humangr.com");
+  if (env.BILLING_INGEST_URL && (typeof env.BILLING_REGION !== "string" || !/^[a-z]{3}$/.test(env.BILLING_REGION))) {
+    throw new Error("DEVENV_BILLING_REGION_REQUIRED");
+  }
 }
 
 async function bounded<T>(operation: Promise<T>): Promise<T> {
