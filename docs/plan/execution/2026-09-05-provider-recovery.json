@@ -1,0 +1,26 @@
+{
+  "scope": "T3-W10 source acceptance: AU3.25 confirmed Pending cleanup retry/cap fence, AU7.7 frozen cas_cred errors, Held teardown safety and exact durable binding recovery.",
+  "source_commit": "dbe9b4340c0512cd80637e0388d42922fe55b62e",
+  "review": "Root reviewed integration and corrective helper source; independent scope assessment confirms AU3.25 does not promise discovery of never-persisted provider identities. New Held cannot transition before durable bind. Invalid/domain-changed references and unknown legacy local state remain fail-closed.",
+  "checks": [
+    {
+      "command": "cargo check -p corelink-fabric-server --tests --locked",
+      "exit": 0,
+      "elapsed_seconds": 206,
+      "observer": "root",
+      "kind": "Metadata only; no Rust runtime tests, linking, database or CI."
+    }
+  ],
+  "authored_oracles": [
+    "FileLedger reopen restores actual CF spawn handle and exact check/runner probe+delete mode.",
+    "Invalid descriptor, changed domain, conflicting local handle/route do not release Held.",
+    "Explicit no-box durable evidence differs from unknown legacy identity.",
+    "Cleanup claim race rejects bind before Held; known local handle remains retryable.",
+    "Northflank project/handle remain exact."
+  ],
+  "limits": [
+    "No sprint runtime or live provider proof; no claim of universal recovery or zero orphans.",
+    "F-20260905-005 explicitly owns post-create/pre-bind crash discovery and historical unknown rows, including separate Northflank reconciliation. T3-W16 Cloudflare tokens do not prove Northflank capabilities."
+  ],
+  "observed_at": "2026-09-06T00:49:13.304626+00:00"
+}
