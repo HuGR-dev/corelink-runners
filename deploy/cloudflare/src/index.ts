@@ -117,6 +117,11 @@ import {
   type OrphanRecord,
 } from "./lib";
 import { bumpMetrics, snapshotMetrics, MetricsDO } from "./metrics";
+import {
+  dispatchTenantSuspensionRevocations as dispatchTenantSuspensionRevocationsOwned,
+  revokeCompletedJob,
+  retryFailedRevocations,
+} from "./lib/revocation_outbox.js";
 import { installationToken } from "./github_app";
 import {
   ContainmentEffectLedger,
@@ -2178,155 +2183,13 @@ async function spawnRunner(
   return { handle, runnerName, attempt };
 }
 
-const REVOKE_RETRY_PREFIX = "revoke-retry:";
+export { revokeCompletedJob, retryFailedRevocations };
 
-interface RevokeRetryRecord {
-  schema_version: 1;
-  job_id: string;
-  pat_id: string;
-  tenant: string;
-  attempts: number;
-}
-
-function revokeRetryKey(jobId: string): string {
-  return `${REVOKE_RETRY_PREFIX}${jobId}`;
-}
-
-const REVOKE_MAX_LIST_PAGES = 128;
-
-async function listRevokeKeys(
-  kv: NonNullable<Env["RUNNER_JOB_PATS"]>,
-  prefix: string,
-): Promise<string[]> {
-  const keys: string[] = [];
-  let cursor: string | undefined;
-  for (let page = 0; page < REVOKE_MAX_LIST_PAGES; page++) {
-    const listed = await kv.list({ prefix, cursor });
-    for (const key of listed.keys) keys.push(key.name);
-    if (listed.list_complete !== false) return keys;
-    cursor = listed.cursor;
-    if (!cursor) throw new Error(`KV list incomplete for ${prefix}`);
-  }
-  throw new Error(`KV list page bound exceeded for ${prefix}`);
-}
-
-async function retainRevokeRetry(
-  kv: NonNullable<Env["RUNNER_JOB_PATS"]>,
-  jobId: string,
-  patId: string,
-  tenant: string,
-): Promise<void> {
-  const key = revokeRetryKey(jobId);
-  const existing = await kv.get(key);
-  if (existing) return;
-  await kv.put(key, JSON.stringify({ schema_version: 1, job_id: jobId, pat_id: patId, tenant, attempts: 0 } satisfies RevokeRetryRecord), { expirationTtl: JOB_PAT_TTL_S });
-}
-
-/**
- * Revoke the job PAT by its durable pat_id. A failed provider call is retained
- * as a small retry record; the PAT mapping is deliberately kept until the revoke
- * succeeds so a later cron tick cannot lose the exact credential identity.
- */
-export async function revokeCompletedJob(
-  env: Env,
-  jobId: string,
-  derivedTenant?: string,
-): Promise<boolean> {
-  if (!env.CORELINK_RUNNER_MINT_AUTH_KEY || !env.RUNNER_JOB_PATS) return false;
-  const patId = await env.RUNNER_JOB_PATS.get(jobId);
-  if (!patId) return false; // cold job, or already revoked/expired
-  if (!derivedTenant) {
-    await bumpMetrics(env, "revoke_missing_tenant");
-    logEvent("error", "revoke_missing_tenant", { jobId, patId });
-    throw new Error("revoke refused: server-derived tenant is missing");
-  }
-  try {
-    await revokeCasPatById(env, patId, derivedTenant);
-    await env.RUNNER_JOB_PATS.delete(jobId);
-    await env.RUNNER_JOB_PATS.delete(revokeRetryKey(jobId));
-    return true;
-  } catch (e) {
-    try {
-      await retainRevokeRetry(env.RUNNER_JOB_PATS, jobId, patId, derivedTenant);
-    } catch (outboxError) {
-      logEvent("error", "revoke_retry_persist_failed", { jobId, patId, tenant: derivedTenant, error: (outboxError as Error).message });
-      throw outboxError;
-    }
-    await bumpMetrics(env, "revoke_failed");
-    logEvent("error", "revoke_failed", { jobId, patId, tenant: derivedTenant, error: (e as Error).message });
-    return false;
-  }
-}
-
-/** Retry completed/suspension revocations from the durable KV outbox. */
-export async function retryFailedRevocations(env: Env): Promise<number> {
-  const kv = env.RUNNER_JOB_PATS;
-  if (!kv?.list || !env.CORELINK_RUNNER_MINT_AUTH_KEY) return 0;
-  let names: string[];
-  try { names = await listRevokeKeys(kv, REVOKE_RETRY_PREFIX); } catch { return 0; }
-  let succeeded = 0;
-  for (const name of names) {
-    let rec: RevokeRetryRecord;
-    try {
-      const raw = await kv.get(name);
-      if (!raw) continue;
-      const parsed = JSON.parse(raw) as RevokeRetryRecord;
-      if (parsed.schema_version !== 1 || !parsed.job_id || !parsed.pat_id || !parsed.tenant) continue;
-      rec = parsed;
-    } catch { continue; }
-    try {
-      await revokeCasPatById(env, rec.pat_id, rec.tenant);
-      const current = await kv.get(rec.job_id);
-      if (current === rec.pat_id) await kv.delete(rec.job_id);
-      await kv.delete(name);
-      succeeded++;
-    } catch (e) {
-      await kv.put(name, JSON.stringify({ ...rec, attempts: rec.attempts + 1 }), { expirationTtl: JOB_PAT_TTL_S }).catch(() => {});
-      await bumpMetrics(env, "revoke_failed");
-      logEvent("error", "revoke_failed", { jobId: rec.job_id, patId: rec.pat_id, tenant: rec.tenant, retry: true, error: (e as Error).message });
-    }
-  }
-  return succeeded;
-}
-
-/**
- * Consume the trusted fabric's durable tenant-suspended signal. The producer is
- * the fabric server; this helper intentionally has no public HTTP route. It
- * scans only server-derived tenant bindings and dispatches each exact pat_id.
- */
 export async function dispatchTenantSuspensionRevocations(
   env: Env,
   event: { event_id: string; tenant_id: string },
 ): Promise<number> {
-  const kv = env.RUNNER_JOB_PATS;
-  if (!kv || !event.event_id || !event.tenant_id) throw new Error("invalid suspension event");
-  if (!env.CORELINK_RUNNER_MINT_AUTH_KEY) throw new Error("runner mint revoke authority unavailable");
-  const marker = `suspend-revoke:${event.event_id}`;
-  if (await kv.get(marker)) return 0;
-  let dispatched = 0;
-  const authority = containmentAuthority(env);
-  let cursor: string | undefined;
-  for (;;) {
-    const page = await authority.listJobAttributions(event.tenant_id, cursor);
-    for (const record of page.records) {
-      // Treat the authority response as untrusted input at this boundary too;
-      // never revoke a job whose durable record is for another tenant.
-      if (record.tenant !== event.tenant_id) {
-        throw new Error(`tenant attribution mismatch for active job ${record.jobId}`);
-      }
-      const patId = await kv.get(record.jobId);
-      if (!patId) throw new Error(`active tenant job ${record.jobId} has no durable pat_id`);
-      if (!(await revokeCompletedJob(env, record.jobId, event.tenant_id))) {
-        throw new Error(`active tenant job ${record.jobId} revoke was not confirmed`);
-      }
-      dispatched++;
-    }
-    if (page.complete) break;
-    if (!page.cursor || page.cursor === cursor) throw new Error("incomplete tenant attribution page");
-    cursor = page.cursor;
-  }
-  await kv.put(marker, "1", { expirationTtl: JOB_PAT_TTL_S });
-  return dispatched;
+  return dispatchTenantSuspensionRevocationsOwned(env, event, containmentAuthority(env));
 }
 
 // Tear down a completed job's runner container by the DO handle stashed at spawn.
