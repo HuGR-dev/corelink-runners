@@ -147,6 +147,50 @@ fn suspension_envelope_body(
 
 const MAX_SUSPENSION_RECEIPT_BYTES: usize = 4 * 1024;
 
+/// The reaper reads this binding directly, so it must apply the same security
+/// boundary that the normal Cloudflare composition applies to outbound URLs.
+/// Only an HTTPS origin is accepted: no credentials, query/fragment, path, or
+/// ambiguous authority may be combined with the bearer token.
+fn secure_worker_origin(raw: &str) -> Option<&str> {
+    let trimmed = raw.trim();
+    if trimmed != raw || !trimmed.starts_with("https://") {
+        return None;
+    }
+    let rest = &trimmed["https://".len()..];
+    if rest.is_empty() || rest.contains(['?', '#', '\\']) {
+        return None;
+    }
+    let authority_end = rest.find('/').unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    if authority.is_empty()
+        || authority.contains('@')
+        || authority.contains('%')
+        || authority.chars().any(|c| c.is_ascii_whitespace() || c.is_control())
+    {
+        return None;
+    }
+    if authority_end < rest.len() && rest[authority_end..] != "/" {
+        return None;
+    }
+    let (host, port) = if authority.starts_with('[') {
+        let close = authority.find(']')?;
+        let port = authority.get(close + 1..).unwrap_or_default();
+        if !port.is_empty() && !port.starts_with(':') {
+            return None;
+        }
+        (&authority[..=close], port.strip_prefix(':'))
+    } else {
+        match authority.split_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (authority, None),
+        }
+    };
+    if host.is_empty() || port.is_some_and(|p| p.is_empty() || p.parse::<u16>().is_err()) {
+        return None;
+    }
+    Some(trimmed.trim_end_matches('/'))
+}
+
 fn suspension_receipt_is_ack(
     status: u16,
     body: &[u8],
@@ -180,6 +224,7 @@ pub async fn dispatch_tenant_suspension_events(state: &crate::AppState) {
     let Some(base) = std::env::var("CLOUDFLARE_SPAWN_WORKER_URL")
         .ok()
         .filter(|v| !v.trim().is_empty())
+        .and_then(|v| secure_worker_origin(&v).map(str::to_owned))
     else {
         return;
     };
@@ -3221,5 +3266,28 @@ mod tests {
             "tenant-1",
             "7"
         ));
+    }
+
+    #[test]
+    fn suspension_dispatch_accepts_only_bare_https_origin() {
+        assert_eq!(
+            secure_worker_origin("https://worker.example"),
+            Some("https://worker.example")
+        );
+        assert_eq!(
+            secure_worker_origin("https://worker.example/"),
+            Some("https://worker.example")
+        );
+        for invalid in [
+            "http://worker.example",
+            "https://user:secret@worker.example",
+            "https://worker.example/path",
+            "https://worker.example?token=secret",
+            "https://worker.example#fragment",
+            "https://:443",
+            "https://worker.example:bad",
+        ] {
+            assert!(secure_worker_origin(invalid).is_none(), "accepted {invalid}");
+        }
     }
 }
