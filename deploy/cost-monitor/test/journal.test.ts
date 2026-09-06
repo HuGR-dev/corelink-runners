@@ -94,6 +94,26 @@ describe("S3ImmutableJournal", () => {
     mode = "plus";
     await expect(boundedJournal.read(receipt)).rejects.toThrow("byte limit");
   });
+  it("paginates version cursors and treats delete markers as nonempty", async () => {
+    const inputs: Record<string, unknown>[] = []; let page = 0;
+    const client = { send: async (command: { input: Record<string, unknown> }) => {
+      inputs.push(command.input); page += 1;
+      return page === 1 ? { Versions: [], DeleteMarkers: [], IsTruncated: true, NextKeyMarker: "k1", NextVersionIdMarker: "v1" } : { Versions: [], DeleteMarkers: [{ Key: "j/x", VersionId: "v2" }], IsTruncated: false };
+    } };
+    const journal = new S3ImmutableJournal({ client: client as never, bucket: "b", prefix: "j", retentionMs: retention });
+    await expect(journal.isEmpty()).resolves.toBe(false);
+    expect(inputs).toEqual([{ Bucket: "b", Prefix: "j/", MaxKeys: 1 }, { Bucket: "b", Prefix: "j/", MaxKeys: 1, KeyMarker: "k1", VersionIdMarker: "v1" }]);
+  });
+  it("returns empty only after complete listing and rejects missing or repeated tokens", async () => {
+    const empty = new S3ImmutableJournal({ client: { send: async () => ({ Versions: [], DeleteMarkers: [], IsTruncated: false }) } as never, bucket: "b", prefix: "j/", retentionMs: retention });
+    await expect(empty.isEmpty()).resolves.toBe(true);
+    const missing = new S3ImmutableJournal({ client: { send: async () => ({ Versions: [], DeleteMarkers: [], IsTruncated: true }) } as never, bucket: "b", prefix: "j/", retentionMs: retention });
+    await expect(missing.isEmpty()).rejects.toBeInstanceOf(JournalVerificationError);
+    let calls = 0;
+    const repeated = new S3ImmutableJournal({ client: { send: async () => { calls += 1; return { Versions: [], DeleteMarkers: [], IsTruncated: true, NextKeyMarker: "same", NextVersionIdMarker: "v" }; } } as never, bucket: "b", prefix: "j/", retentionMs: retention });
+    await expect(repeated.isEmpty()).rejects.toBeInstanceOf(JournalVerificationError);
+    expect(calls).toBe(2);
+  });
 });
 
 function baseReceipt(bucket: string, prefix: string, operationId: string, sequence: number) {
