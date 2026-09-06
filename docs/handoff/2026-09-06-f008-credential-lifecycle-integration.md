@@ -77,6 +77,22 @@ This is a mocked API-boundary regression, not a real PostgreSQL HTTP-capacity
 proof. Existing real-PG external-compute conservation evidence remains separate;
 no cheap HTTP-plus-PG harness was available in the focused server suite.
 
+## T4-W1 source acceptance
+
+The T4-W1 source criteria are accepted without delivery credit. The Worker
+handler packet `b861037a` passed 11 focused tests and verifies installation plus
+PAT identity reaches authorization and mint, while denial leaves no effects.
+The AU4.18 guard stack ending at `212d0ee` prevents a nonempty live
+`REPO_TENANT_PAT_MAP` from being depleted by a candidate deploy. It reads exactly
+one 100% active deployment version, parses its JSONC bindings with pinned
+`jsonc-parser@3.2.0`, and refuses redirects before a bearer can be forwarded.
+
+Independent review reproduced the guard self-test with `npm ci --ignore-scripts`
+in an isolated worktree using the committed lockfile; the shared checkout's
+unrelated dependency symlink was not used. Actual compatible server/Worker
+deployment, production map and secret bindings, and live guard qualification
+remain separate gates.
+
 ## Earlier integrated packets
 
 The prior packets in this tree include:

@@ -644,14 +644,14 @@
       "id": "T4-W1",
       "sprint": 2,
       "state": "prepared",
-      "implementation": "partial",
+      "implementation": "complete",
       "owner": "wp_t4_w1",
       "dependencies": [
         "T3-W18",
         "T8-W4b",
         "D13"
       ],
-      "next_action": "ADR0013 records delegated implementation policy; Worker7a4a733 and serverf219e4dda preserve installation plus matching PAT. Root31 Worker and85 server tests passed. Complete composed attribution/live acceptance; no whole-WP delivery.",
+      "next_action": "Source criteria accepted; preserve prepared state and no delivery credit. Actual compatible server/Worker deployment, production installation/PAT map and secret bindings, and live active-deployment guard evidence remain required.",
       "blockers": [],
       "commits": [
         "4c849cd80ac37f0eeff09e4da7e0195451a4b188",
@@ -660,16 +660,24 @@
         "f54788e74d1f2f6bb8df2abe4cedc85102668e7e",
         "708b1e7227ebc4a965168a15aed4e4c1e168b716",
         "407f2ea4d9f2ae3b17c581cd9649bd9ad87f224d",
-        "4cbafa77c66f4484d21e52b1763cd777c17db5a9"
+        "4cbafa77c66f4484d21e52b1763cd777c17db5a9",
+        "b861037a04ff65022fd7afa2f636703129486d38",
+        "b94844e",
+        "106f2a3",
+        "b8d94d1",
+        "212d0ee"
       ],
       "review": {
-        "status": "pending",
-        "commit": null,
-        "evidence": []
+        "status": "approved",
+        "commit": "212d0ee",
+        "evidence": [
+          "credential_completion approved actual Worker handler coverage (11/11); cold review approved the active-version JSONC guard after isolated npm ci --ignore-scripts using the committed lockfile."
+        ]
       },
       "evidence": [
         "docs/plan/execution/rework-20260906/R1-final.json",
-        "docs/handoff/2026-09-06-techlead-takeover.md"
+        "docs/handoff/2026-09-06-techlead-takeover.md",
+        "docs/handoff/2026-09-06-f008-credential-lifecycle-integration.md"
       ]
     },
     {
