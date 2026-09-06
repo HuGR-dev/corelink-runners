@@ -44,24 +44,30 @@
 //! (floors, auth, fail-closed error mapping, the exact request shapes) against a
 //! fake transport with zero account/network dependency.
 
-use anyhow::{Result, bail};
-use corelink_runner::ContainerSpec;
+use anyhow::{bail, Result};
 use corelink_runner::isolation::{Engine, IsolationProbe, RunningContainer};
 use corelink_runner::lease::CmdOutput;
 use corelink_runner::pin::PinnedImageRef;
+use corelink_runner::ContainerSpec;
 
-use crate::http::{HttpRequest, HttpResponse, HttpTransport, Method};
+use crate::http::{HttpResponse, HttpTransport, Method};
 use crate::northflank::RUNNER_EPHEMERAL_STORAGE_FLOOR_MB;
+
+#[path = "cloudflare/control_auth.rs"]
+mod control_auth;
+#[cfg(test)]
+#[path = "cloudflare/scoped_auth_tests.rs"]
+mod scoped_auth_tests;
+pub use control_auth::{
+    CLOUDFLARE_EXEC_AUTH_TOKEN_ENV, CLOUDFLARE_LIFECYCLE_AUTH_TOKEN_ENV,
+    CLOUDFLARE_SPAWN_AUTH_TOKEN_ENV,
+};
 
 // ── Env var names (centralized) ───────────────────────────────────────────────
 
 /// Spawn-Worker base URL, e.g. `https://spawn.corelink.workers.dev`. REQUIRED to
 /// enable the backend (absent/empty ⇒ [`CloudflareConfig::from_env_with`] → `None`).
 pub const CLOUDFLARE_SPAWN_WORKER_URL_ENV: &str = "CLOUDFLARE_SPAWN_WORKER_URL";
-
-/// Bearer token for the spawn-Worker. REQUIRED to enable the backend
-/// (absent/empty ⇒ `None` ⇒ backend off). Sensitive — redacted in `Debug`.
-pub const CLOUDFLARE_SPAWN_AUTH_TOKEN_ENV: &str = "CLOUDFLARE_SPAWN_AUTH_TOKEN";
 
 /// OPTIONAL comma-separated labels attached to every spawned container, e.g.
 /// `corelink-runner,prod`. Absent/empty ⇒ no labels.
@@ -121,8 +127,9 @@ fn check_host_toolchain_digest(spec: &ContainerSpec) -> Option<&str> {
         .filter(|s| !s.is_empty())
 }
 
-/// Tunables for the Cloudflare spawn-Worker backend. `spawn_worker_url` +
-/// `auth_token` are required (the backend is OFF without both).
+/// Tunables for the Cloudflare spawn-Worker backend. The scoped credentials are
+/// intentionally separate: a token accepted by one Worker operation is never
+/// silently reused for another.
 #[derive(Clone)]
 pub struct CloudflareConfig {
     /// Spawn-Worker base URL (no trailing slash), e.g.
@@ -131,6 +138,10 @@ pub struct CloudflareConfig {
     /// Bearer token for the spawn-Worker (raw; the transport renders the
     /// `Bearer ` scheme). Sensitive — redacted in [`Debug`].
     pub auth_token: String,
+    /// Bearer token for `POST /v1/exec`.
+    pub exec_auth_token: String,
+    /// Bearer token for status, teardown, and egress cutoff requests.
+    pub lifecycle_auth_token: String,
     /// Configured RUNNER ephemeral disk (MiB) — the value the disk floor is
     /// asserted against in [`spawn`](Engine::spawn). A real CI workload needs
     /// at least [`RUNNER_EPHEMERAL_STORAGE_FLOOR_MB`].
@@ -149,18 +160,33 @@ impl CloudflareConfig {
         Self {
             spawn_worker_url: spawn_worker_url.into(),
             auth_token: auth_token.into(),
+            exec_auth_token: String::new(),
+            lifecycle_auth_token: String::new(),
             runner_storage_mb: DEFAULT_RUNNER_STORAGE_MB,
             expiry_ms: DEFAULT_EXPIRY_MS,
             labels: Vec::new(),
         }
     }
 
+    /// Add the credentials for exec and lifecycle operations.
+    #[must_use]
+    pub fn with_scoped_tokens(
+        mut self,
+        exec_auth_token: impl Into<String>,
+        lifecycle_auth_token: impl Into<String>,
+    ) -> Self {
+        self.exec_auth_token = exec_auth_token.into();
+        self.lifecycle_auth_token = lifecycle_auth_token.into();
+        self
+    }
+
     /// Build a config from an arbitrary key→value lookup (testable without
     /// mutating the process environment).
     ///
-    /// **Required:** [`CLOUDFLARE_SPAWN_WORKER_URL_ENV`] and
-    /// [`CLOUDFLARE_SPAWN_AUTH_TOKEN_ENV`] — if EITHER is absent or empty, returns
-    /// `None` (NEVER a partial config; fail-closed, DEFAULT-OFF).
+    /// **Required:** [`CLOUDFLARE_SPAWN_WORKER_URL_ENV`] and all three scoped
+    /// token variables — if any is absent, empty, whitespace-padded, or tokens
+    /// are not pairwise distinct, returns `None` (NEVER a partial config;
+    /// fail-closed, DEFAULT-OFF).
     ///
     /// **Optional overrides** (sane defaults otherwise):
     /// - [`CLOUDFLARE_RUNNER_LABELS_ENV`] → `labels` (comma-separated; blanks dropped)
@@ -169,10 +195,13 @@ impl CloudflareConfig {
     ///   (absent/garbage/0 ⇒ [`DEFAULT_RUNNER_STORAGE_MB`])
     #[must_use]
     pub fn from_env_with(get: impl Fn(&str) -> Option<String>) -> Option<Self> {
-        let spawn_worker_url = get(CLOUDFLARE_SPAWN_WORKER_URL_ENV).filter(|s| !s.is_empty())?;
-        let auth_token = get(CLOUDFLARE_SPAWN_AUTH_TOKEN_ENV).filter(|s| !s.is_empty())?;
+        let spawn_worker_url = get(CLOUDFLARE_SPAWN_WORKER_URL_ENV)
+            .filter(|s| !s.is_empty() && (s.starts_with("http://") || s.starts_with("https://")))?;
+        let (auth_token, exec_auth_token, lifecycle_auth_token) =
+            control_auth::tokens_from_env(&get)?;
 
-        let mut cfg = Self::new(spawn_worker_url, auth_token);
+        let mut cfg = Self::new(spawn_worker_url, auth_token)
+            .with_scoped_tokens(exec_auth_token, lifecycle_auth_token);
 
         if let Some(labels) = get(CLOUDFLARE_RUNNER_LABELS_ENV).filter(|s| !s.is_empty()) {
             cfg.labels = labels
@@ -199,10 +228,9 @@ impl CloudflareConfig {
     /// Build a config from the real process environment.
     ///
     /// Thin wrapper over [`Self::from_env_with`] — returns `None` when the
-    /// required [`CLOUDFLARE_SPAWN_WORKER_URL_ENV`] or
-    /// [`CLOUDFLARE_SPAWN_AUTH_TOKEN_ENV`] env vars are absent or empty. When this
-    /// returns `None`, the composition root MUST keep the default-off backend
-    /// (DEFAULT-OFF, fail-closed).
+    /// URL or any scoped token is absent or invalid. When this returns `None`,
+    /// the composition root MUST keep the default-off backend (DEFAULT-OFF,
+    /// fail-closed).
     #[must_use]
     pub fn from_env() -> Option<Self> {
         Self::from_env_with(|k| std::env::var(k).ok())
@@ -225,9 +253,8 @@ impl CloudflareConfig {
     ///   box would ENOSPC mid-build (the cold-start north star forbids it).
     /// - `spawn_worker_url` is not an `http(s)://` URL: the spawn endpoints would
     ///   be addressed against a garbage base and every spawn would fail.
-    /// - `auth_token` is empty: the Worker would reject every request (though
-    ///   `from_env` already drops an empty token, a programmatically-built config
-    ///   could carry one — fail closed here too).
+    /// - the spawn token is empty or malformed: the Worker would reject every
+    ///   request (though `from_env` already drops invalid values).
     ///
     /// `Ok(())` otherwise. The returned `String` is a ready-to-log, actionable
     /// message (no secret material — the token value is never interpolated).
@@ -235,12 +262,11 @@ impl CloudflareConfig {
     /// # Errors
     /// One of the misconfiguration arms documented above.
     pub fn validate(&self) -> Result<(), String> {
-        if self.auth_token.is_empty() {
-            return Err(format!(
-                "{CLOUDFLARE_SPAWN_AUTH_TOKEN_ENV} is empty — the spawn-Worker would reject \
-                 every request. Set {CLOUDFLARE_SPAWN_AUTH_TOKEN_ENV} to the Worker bearer token."
-            ));
-        }
+        control_auth::validate_tokens(
+            &self.auth_token,
+            &self.exec_auth_token,
+            &self.lifecycle_auth_token,
+        )?;
         if !(self.spawn_worker_url.starts_with("http://")
             || self.spawn_worker_url.starts_with("https://"))
         {
@@ -274,6 +300,8 @@ impl std::fmt::Debug for CloudflareConfig {
         f.debug_struct("CloudflareConfig")
             .field("spawn_worker_url", &self.spawn_worker_url)
             .field("auth_token", &"***REDACTED***")
+            .field("exec_auth_token", &"***REDACTED***")
+            .field("lifecycle_auth_token", &"***REDACTED***")
             .field("runner_storage_mb", &self.runner_storage_mb)
             .field("expiry_ms", &self.expiry_ms)
             .field("labels", &self.labels)
@@ -416,17 +444,6 @@ impl<H: HttpTransport> CloudflareEngine<H> {
 
     fn exec_url(&self) -> String {
         format!("{}/v1/exec", self.cfg.spawn_worker_url)
-    }
-
-    /// Send a request carrying the bearer token; surface transport errors and
-    /// preserve the HTTP status for the caller to branch on.
-    fn send(&self, method: Method, url: String, json_body: Option<String>) -> Result<HttpResponse> {
-        self.http.send(&HttpRequest {
-            method,
-            url,
-            bearer_token: self.cfg.auth_token.clone(),
-            json_body,
-        })
     }
 
     /// Send and require a 2xx, mapping anything else to a fail-closed `Err` (the
@@ -786,6 +803,7 @@ mod tests {
 
     fn cfg() -> CloudflareConfig {
         CloudflareConfig::new("https://spawn.example.dev", "super-secret-token-value")
+            .with_scoped_tokens("super-secret-exec-token", "super-secret-lifecycle-token")
     }
 
     #[test]
@@ -796,6 +814,8 @@ mod tests {
             !s.contains("super-secret-token-value"),
             "CloudflareConfig Debug leaked the token: {s}"
         );
+        assert!(!s.contains("super-secret-exec-token"));
+        assert!(!s.contains("super-secret-lifecycle-token"));
         assert!(
             s.contains("REDACTED"),
             "CloudflareConfig Debug missing REDACTED placeholder: {s}"
@@ -1224,7 +1244,7 @@ mod tests {
         let req = engine.http.last.lock().unwrap().clone().unwrap();
         assert_eq!(req.method, Method::Post);
         assert_eq!(req.url, "https://spawn.example.dev/v1/exec");
-        assert_eq!(req.bearer_token, "super-secret-token-value");
+        assert_eq!(req.bearer_token, "super-secret-exec-token");
         let body: serde_json::Value =
             serde_json::from_str(req.json_body.as_deref().unwrap()).unwrap();
         assert_eq!(body["handle"], "cf-check-1");
@@ -1323,7 +1343,9 @@ mod tests {
         // Present-but-empty counts as absent.
         let empty = |k: &str| match k {
             CLOUDFLARE_SPAWN_WORKER_URL_ENV => Some(String::new()),
-            CLOUDFLARE_SPAWN_AUTH_TOKEN_ENV => Some("tok".to_string()),
+            CLOUDFLARE_SPAWN_AUTH_TOKEN_ENV => Some("spawn-tok".to_string()),
+            CLOUDFLARE_EXEC_AUTH_TOKEN_ENV => Some("exec-tok".to_string()),
+            CLOUDFLARE_LIFECYCLE_AUTH_TOKEN_ENV => Some("lifecycle-tok".to_string()),
             _ => None,
         };
         assert!(CloudflareConfig::from_env_with(empty).is_none());
@@ -1333,7 +1355,9 @@ mod tests {
     fn from_env_armed_reads_required_and_optional() {
         let env = |k: &str| match k {
             CLOUDFLARE_SPAWN_WORKER_URL_ENV => Some("https://spawn.example.dev".to_string()),
-            CLOUDFLARE_SPAWN_AUTH_TOKEN_ENV => Some("tok".to_string()),
+            CLOUDFLARE_SPAWN_AUTH_TOKEN_ENV => Some("spawn-tok".to_string()),
+            CLOUDFLARE_EXEC_AUTH_TOKEN_ENV => Some("exec-tok".to_string()),
+            CLOUDFLARE_LIFECYCLE_AUTH_TOKEN_ENV => Some("lifecycle-tok".to_string()),
             CLOUDFLARE_RUNNER_LABELS_ENV => Some("a, b ,, c".to_string()),
             CLOUDFLARE_EXPIRY_MS_ENV => Some("9000".to_string()),
             CLOUDFLARE_RUNNER_STORAGE_MB_ENV => Some("16384".to_string()),
@@ -1341,7 +1365,9 @@ mod tests {
         };
         let cfg = CloudflareConfig::from_env_with(env).expect("armed config");
         assert_eq!(cfg.spawn_worker_url, "https://spawn.example.dev");
-        assert_eq!(cfg.auth_token, "tok");
+        assert_eq!(cfg.auth_token, "spawn-tok");
+        assert_eq!(cfg.exec_auth_token, "exec-tok");
+        assert_eq!(cfg.lifecycle_auth_token, "lifecycle-tok");
         // Labels split on ',', trimmed, blanks dropped.
         assert_eq!(cfg.labels, vec!["a", "b", "c"]);
         assert_eq!(cfg.expiry_ms, 9000);
@@ -1424,7 +1450,9 @@ mod tests {
         // degenerate 0 (no hard kill / disk floor disabled).
         let env = |k: &str| match k {
             CLOUDFLARE_SPAWN_WORKER_URL_ENV => Some("https://spawn.example.dev".to_string()),
-            CLOUDFLARE_SPAWN_AUTH_TOKEN_ENV => Some("tok".to_string()),
+            CLOUDFLARE_SPAWN_AUTH_TOKEN_ENV => Some("spawn-tok".to_string()),
+            CLOUDFLARE_EXEC_AUTH_TOKEN_ENV => Some("exec-tok".to_string()),
+            CLOUDFLARE_LIFECYCLE_AUTH_TOKEN_ENV => Some("lifecycle-tok".to_string()),
             CLOUDFLARE_EXPIRY_MS_ENV => Some("0".to_string()),
             CLOUDFLARE_RUNNER_STORAGE_MB_ENV => Some("nope".to_string()),
             _ => None,

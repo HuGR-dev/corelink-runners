@@ -24,8 +24,8 @@ use std::sync::{Arc, Mutex};
 use corelink_cloud_engine::{
     CloudflareConfig, CloudflareEngine, HttpRequest, HttpResponse, HttpTransport, Method,
 };
-use corelink_runner::ContainerSpec;
 use corelink_runner::isolation::Engine;
+use corelink_runner::ContainerSpec;
 
 /// The env key the engine lifts into the top-level `jitconfig` field (mirrors
 /// the private `JITCONFIG_ENV_KEY` in `cloudflare.rs`; transcribed here, as the
@@ -140,7 +140,8 @@ fn engine_from_vector(
     CloudflareEngine<RecordingTransport>,
     Arc<Mutex<Option<HttpRequest>>>,
 ) {
-    let mut cfg = CloudflareConfig::new("https://spawn.example.dev", "conformance-token");
+    let mut cfg = CloudflareConfig::new("https://spawn.example.dev", "conformance-spawn-token")
+        .with_scoped_tokens("conformance-exec-token", "conformance-lifecycle-token");
     cfg.labels = req["labels"]
         .as_array()
         .expect("vector request.labels must be an array")
