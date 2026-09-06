@@ -182,12 +182,19 @@ pub async fn dispatch_tenant_suspension_events(state: &crate::AppState) {
                 .http_status_as_error(false)
                 .build()
                 .into();
-            agent
+            let mut response = agent
                 .post(&url)
                 .header("Authorization", &format!("Bearer {token}"))
                 .header("Content-Type", "application/json")
-                .send(&body)
-                .map(|r| (200..300).contains(&r.status().as_u16()))
+                .send(&body);
+            response
+                .as_mut()
+                .map(|r| {
+                    let status_ok = (200..300).contains(&r.status().as_u16());
+                    let payload = r.body_mut().read_to_string().ok()
+                        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+                    status_ok && payload.as_ref().and_then(|v| v.get("ok")).and_then(serde_json::Value::as_bool) == Some(true)
+                })
                 .unwrap_or(false)
         })
         .await
@@ -687,7 +694,12 @@ pub fn spawn_reaper_with_pending_age(
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tick.tick().await;
-            dispatch_tenant_suspension_events(&state).await;
+            // Suspension delivery is independent of lease cleanup. A slow or
+            // unavailable Worker must never hold up expiry/teardown work.
+            let dispatch_state = state.clone();
+            tokio::spawn(async move {
+                dispatch_tenant_suspension_events(&dispatch_state).await;
+            });
             let n = reap_once(&state).await;
             if n > 0 {
                 eprintln!("reaper: expired+reclaimed {n} overdue lease(s)");

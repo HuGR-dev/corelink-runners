@@ -1668,16 +1668,18 @@ impl AppState {
             })
     }
 
-    pub(crate) fn suspend_tenant_with_event(&self, tenant: &TenantId, now_ms: u64) -> bool {
+    pub(crate) fn suspend_tenant_with_event(
+        &self,
+        tenant: &TenantId,
+        now_ms: u64,
+    ) -> anyhow::Result<bool> {
+        self.record_tenant_suspension_event(tenant, now_ms)?;
         let changed = self
             .suspended_tenants
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .insert(tenant.as_str().to_string());
-        if let Err(e) = self.record_tenant_suspension_event(tenant, now_ms) {
-            eprintln!("suspend_tenant({tenant}): durable state/event write FAILED: {e:#}");
-        }
-        changed
+        Ok(changed)
     }
 
     /// Track-C AUP1: lift a tenant's suspension (idempotent). `true` iff the

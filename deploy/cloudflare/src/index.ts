@@ -2088,9 +2088,7 @@ async function spawnRunner(
   // Intentionally NOT re-written here.)
   if (mint.tenant && env.RUNNER_JOB_PATS) {
     // Stash the derived tenant for completion (concurrency-slot release + billing).
-    await env.RUNNER_JOB_PATS.put(jobTenantKey(jobId), mint.tenant, {
-      expirationTtl: JOB_PAT_TTL_S,
-    }).catch((e) => logEvent("error", "kv_put_job_tenant_failed", { jobId, error: (e as Error).message }));
+    await env.RUNNER_JOB_PATS.put(jobTenantKey(jobId), mint.tenant).catch((e) => logEvent("error", "kv_put_job_tenant_failed", { jobId, error: (e as Error).message }));
     // Cache the tenant's monthly compute allowance (server #975) so COMPLETION —
     // a separate Worker invocation that never talks to the mint — can tell how
     // close this tenant is to it. Keyed per TENANT, not per job: the allowance is
@@ -2248,7 +2246,12 @@ export async function revokeCompletedJob(
     await env.RUNNER_JOB_PATS.delete(revokeRetryKey(jobId));
     return true;
   } catch (e) {
-    await retainRevokeRetry(env.RUNNER_JOB_PATS, jobId, patId, derivedTenant).catch(() => {});
+    try {
+      await retainRevokeRetry(env.RUNNER_JOB_PATS, jobId, patId, derivedTenant);
+    } catch (outboxError) {
+      logEvent("error", "revoke_retry_persist_failed", { jobId, patId, tenant: derivedTenant, error: (outboxError as Error).message });
+      throw outboxError;
+    }
     await bumpMetrics(env, "revoke_failed");
     logEvent("error", "revoke_failed", { jobId, patId, tenant: derivedTenant, error: (e as Error).message });
     return false;
@@ -2297,6 +2300,7 @@ export async function dispatchTenantSuspensionRevocations(
 ): Promise<number> {
   const kv = env.RUNNER_JOB_PATS;
   if (!kv?.list || !event.event_id || !event.tenant_id) throw new Error("invalid suspension event");
+  if (!env.CORELINK_RUNNER_MINT_AUTH_KEY) throw new Error("runner mint revoke authority unavailable");
   const marker = `suspend-revoke:${event.event_id}`;
   if (await kv.get(marker)) return 0;
   const names = await listRevokeKeys(kv, "jtenant:");
@@ -2305,7 +2309,7 @@ export async function dispatchTenantSuspensionRevocations(
     const jobId = name.slice("jtenant:".length);
     if ((await kv.get(name)) !== event.tenant_id) continue;
     const patId = await kv.get(jobId);
-    if (!patId) continue;
+    if (!patId) throw new Error(`active tenant job ${jobId} has no durable pat_id`);
     await revokeCompletedJob(env, jobId, event.tenant_id);
     dispatched++;
   }
@@ -2720,7 +2724,7 @@ async function driveSpawn(
   // reconciler re-minted a fresh orphan each tick — 3-lens audit F2/Lens A). Writing
   // it here lets the spawn-failure catch below revoke it immediately.
   if (mint.patId && env.RUNNER_JOB_PATS) {
-    await env.RUNNER_JOB_PATS.put(jobId, mint.patId, { expirationTtl: JOB_PAT_TTL_S }).catch((e) =>
+    await env.RUNNER_JOB_PATS.put(jobId, mint.patId).catch((e) =>
       logEvent("error", "kv_put_job_pat_failed", { jobId, error: (e as Error).message }),
     );
   }

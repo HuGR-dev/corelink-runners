@@ -545,7 +545,7 @@ impl LeaseLedger for PgLedger {
 
     fn record_tenant_suspension(
         &self,
-        event: corelink_fabric::TenantSuspensionEvent,
+        event: crate::TenantSuspensionEvent,
     ) -> anyhow::Result<()> {
         self.block_on(async {
             let mut client = self.pool.get().await?;
@@ -566,14 +566,14 @@ impl LeaseLedger for PgLedger {
     fn pending_tenant_suspension_events(
         &self,
         limit: usize,
-    ) -> anyhow::Result<Vec<corelink_fabric::TenantSuspensionEvent>> {
+    ) -> anyhow::Result<Vec<crate::TenantSuspensionEvent>> {
         self.block_on(async {
             let client = self.pool.get().await?;
             let rows = client.query(
                 "SELECT event_id, tenant_id, created_at_ms, attempts FROM tenant_suspension_events WHERE delivered_at_ms IS NULL ORDER BY created_at_ms LIMIT $1",
                 &[&(limit.min(1000) as i64)],
             ).await?;
-            rows.into_iter().map(|row| Ok(corelink_fabric::TenantSuspensionEvent {
+            rows.into_iter().map(|row| Ok(crate::TenantSuspensionEvent {
                 event_id: row.get(0), tenant_id: row.get(1), created_at_ms: row.get::<_, i64>(2) as u64, attempts: row.get::<_, i32>(3).max(0) as u32,
             })).collect()
         })
