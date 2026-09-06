@@ -2,7 +2,7 @@ import { describe, expect, it, vi, afterEach } from "vitest";
 
 vi.mock("@cloudflare/containers", () => ({ Container: class {}, getContainer: vi.fn() }));
 
-import { ContainmentDO, dispatchTenantSuspensionRevocations, type Env } from "../src/index";
+import { ContainmentDO, dispatchTenantSuspensionRevocations, retryFailedRevocations, revokeCompletedJob, type Env } from "../src/index";
 
 class AuthorityStorage {
   map = new Map<string, unknown>();
@@ -43,6 +43,56 @@ function envFor(authority: unknown, jobs: ReturnType<typeof kv>): Env {
 
 describe("durable tenant suspension revocation", () => {
   afterEach(() => vi.unstubAllGlobals());
+
+  it("production retry leaves healthy credentials live and revokes only a requested obligation after restart", async () => {
+    const storage = new AuthorityStorage();
+    const authority = new ContainmentDO({ storage } as never, {} as never);
+    const active = { jobId: "live-job", tenant: "tenant-a", patId: "pat-live" };
+    const ended = { jobId: "ended-job", tenant: "tenant-a", patId: "pat-ended" };
+    await authority.registerCredential(active);
+    await authority.registerCredential(ended);
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetcher);
+    expect(await retryFailedRevocations(envFor(authority, kv()))).toBe(0);
+    expect(fetcher).not.toHaveBeenCalled();
+    await authority.requestCredentialRevocation(ended);
+    const restarted = new ContainmentDO({ storage } as never, {} as never);
+    expect(await retryFailedRevocations(envFor(restarted, kv()))).toBe(1);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(JSON.parse((fetcher.mock.calls[0][1] as RequestInit).body as string).pat_id).toBe("pat-ended");
+    expect((await restarted.pendingCredentials({ kind: "all" })).records).toEqual([active]);
+  });
+
+  it("production authority revokes a remint despite stale KV and preserves a concurrently replaced projection", async () => {
+    const authority = new ContainmentDO({ storage: new AuthorityStorage() } as never, {} as never);
+    const old = { jobId: "same-job", tenant: "tenant-a", patId: "pat-old" };
+    const current = { ...old, patId: "pat-current" };
+    await authority.registerCredential(old);
+    await authority.requestCredentialRevocation(old);
+    await authority.confirmCredentialRevoked(old);
+    await authority.registerCredential(current);
+    const jobs = kv({ "revoke-receipt:same-job:tenant-a:pat-old": "old receipt" });
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => {
+      await authority.registerCredential({ ...old, patId: "pat-next" });
+      jobs.values.set("same-job", "pat-next");
+      return new Response(null, { status: 204 });
+    });
+    vi.stubGlobal("fetch", fetcher);
+    expect(await revokeCompletedJob(envFor(authority, jobs), "same-job", "tenant-a")).toBe(true);
+    expect(JSON.parse((fetcher.mock.calls[0][1] as RequestInit).body as string).pat_id).toBe("pat-current");
+    expect(jobs.values.get("same-job")).toBe("pat-next");
+    expect((await authority.pendingCredentials({ kind: "job", jobId: "same-job" })).records).toEqual([{ ...old, patId: "pat-next" }]);
+  });
+
+  it("production empty authority refuses a legacy suspension without acknowledging or touching the PAT", async () => {
+    const authority = new ContainmentDO({ storage: new AuthorityStorage() } as never, {} as never);
+    const jobs = kv({ "legacy-job": "legacy-pat" });
+    const fetcher = vi.fn();
+    vi.stubGlobal("fetch", fetcher);
+    await expect(dispatchTenantSuspensionRevocations(envFor(authority, jobs), { event_id: "legacy-event", tenant_id: "tenant-a" })).rejects.toThrow("no migrated obligations");
+    expect(jobs.values.has("suspend-revoke:legacy-event")).toBe(false);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
 
   it("persists registration and requested state across a production DO restart", async () => {
     const storage = new AuthorityStorage();
