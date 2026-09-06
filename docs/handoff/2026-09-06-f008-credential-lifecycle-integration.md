@@ -278,6 +278,16 @@ Its signed checkpoint has exactly nine nominal fields before `signature`:
 `version`, `logId`, `sequence`, `previousRoot`, `recordDigest`, `operationId`,
 `trustedAtMs`, `signerKeyId`, and `signerEpoch`. The signature is separate.
 
+The fresh independent witness-head source commits
+`66037ec83235b5a248ee56b400c52e58f3b1304e` and
+`a991435fda3de5d4351490df3a451c3e1a74583f` are accepted after composition
+with journal `b734531f` (witness 7/7, journal 10/10, and typecheck). Their
+integration is `c8e7a5e` through `95d51f3`. The exact wave-2 contract records
+`SignedWitnessHead` with nine nominal fields before a separate signature:
+`version`, `logId`, `nonce`, `sequence`, `checkpointRoot`, `witnessRoot`,
+`trustedAtMs`, `signerKeyId`, and `signerEpoch`. These focused results overlap
+earlier module evidence and are not added into a delivery or aggregate count.
+
 For the resulting fourteen monitor suites (89 tests), every suite has a
 completed exit-0 run at `528f032`: trusted-time and evidence-log completed
 before an aggregate 120-second process limit; witness, the ten non-heavy
