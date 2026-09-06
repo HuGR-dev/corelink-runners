@@ -91,4 +91,19 @@ describe("confirmInstallationRepositories", () => {
       expect((pending.mock.calls[0][1] as RequestInit).signal?.aborted).toBe(true);
     } finally { vi.useRealTimers(); }
   });
+
+  it("requires stable exact total_count consistency and never requests page 101", async () => {
+    const changing = vi.fn()
+      .mockResolvedValueOnce(response([{ full_name: "owner/a" }], 200, { link: '<https://api.github.com/installation/repositories?page=2>; rel="next"' }, 2))
+      .mockResolvedValueOnce(response([{ full_name: "owner/b" }], 200, undefined, 1));
+    await expect(confirmInstallationRepositories(env, [{ repo: "owner/a", installationId: A }], 1, changing)).resolves.toBeNull();
+    const zeroWithRepo = vi.fn(async () => response([{ full_name: "owner/a" }], 200, undefined, 0));
+    await expect(confirmInstallationRepositories(env, [{ repo: "owner/a", installationId: A }], 1, zeroWithRepo)).resolves.toBeNull();
+    const page101 = vi.fn(async () => response([{ full_name: "owner/a" }], 200, { link: '<https://api.github.com/installation/repositories?page=101>; rel="next"' }, 2));
+    await expect(confirmInstallationRepositories(env, [{ repo: "owner/a", installationId: A }], 1, page101)).resolves.toBeNull();
+    expect(page101).toHaveBeenCalledTimes(1);
+    const loop = vi.fn(async () => response(Array.from({ length: 100 }, (_, i) => ({ full_name: `owner/${i}` })), 200, { link: '<https://api.github.com/installation/repositories?page=1>; rel="next"' }, 101));
+    await expect(confirmInstallationRepositories(env, [{ repo: "owner/a", installationId: A }], 1, loop)).resolves.toBeNull();
+    expect(loop).toHaveBeenCalledTimes(1);
+  });
 });
