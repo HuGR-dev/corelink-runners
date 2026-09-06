@@ -2,6 +2,49 @@
 
 **Read the latest progress section first; older pending statuses are historical.**
 
+## Latest progress — shared compute composition, 13:49 BRT
+
+Runners source `de74cc3` and paired server `65208a35f` now compose shared native/
+external PostgreSQL compute admission, Ed25519 grants, Worker/DevEnv durable
+ownership, pre-provider activation and one dispatch per reservation. Root tested
+four real PostgreSQL cases in a separate fresh schema: common native/external
+budget race, checked/idempotent settlement, cross-tenant UUID collision and
+cancel-before-reserve fencing. A cancelled immutable tombstone prevents delayed
+reserve requests from reopening a refused preparation. No absence-based refund.
+
+Root reproduced26 Worker/DevEnv admission/recovery tests and31 required-mint,
+spawn preparation and Option-C tests; the latter include100 verified webhooks
+per required-key failure case,100 durable-store503 responses and a single
+provider start on concurrent duplicate delivery. Strict Worker TypeScript passed.
+Earlier composed checks:28 Rust grant/router/config/real issuer interop,
+75 paired server tests plus strictTS, fabricd strictTS and134 Worker lifecycle
+regressions. These commands overlap; do not sum their counts. Exact commands,
+scope, log hashes and remaining gates are recorded in
+`docs/plan/execution/2026-09-06-shared-compute-verification.json`.
+
+Root repaired Luna review gaps: numeric period wire, lost activation replies,
+cross-page retry loss, scheduling-before-ownership, refused reservation fencing,
+exact abandoned slot ownership and independent PAT cleanup. Rejected a proposed
+15-minute normal-intake processing lease; it lacked owner fencing and was not
+needed to satisfy the actual one-provider-effect invariant. No `it.fails` was
+accepted as green coverage. Cold review approved the two final recovery fixes.
+
+Paired server checkout is now `/private/tmp/corelink-server-budget-20260906`,
+branch `delivery/runners-budget-20260906`; the disappeared older typecheck path
+must not be used. Offline dependencies restored. Runners integration checkout
+and conflicted primary remain as described below. Lima local PostgreSQL is
+running on55432; host5432 untouched. Shared Cargo target remains
+`/private/tmp/corelink-takeover-suspension-pg-r2/target`, DEBUG=0,
+INCREMENTAL=0, BUILD_JOBS=2. All Luna packets in this compute wave are integrated
+or explicitly rejected; do not reapply their stale intermediate commits.
+
+T9-W1 remains partial: qualified provider terminal/usage and hard-stop producers,
+baseline/key provisioning, paired migration0108 and live acceptance are unfinished.
+F008 generation-bound suspension/resume and legacy coverage remain independent
+source work. The monitor proposal is still unanswered; no seven-day observation
+window has begun. Delivery is still16/70, no complete sprint. No full CI, push,
+merge, release, deployment, production migration, PG rearm or external message ran.
+
 Owner renewed the requirement to finish all backlog and prepare go-live, with
 autonomous decisions, maximum useful parallelism, Luna by default, up to 15
 agents, and Terra only when needed. Complete-sprint CI policy remains in force;

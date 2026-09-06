@@ -807,8 +807,8 @@
     {
       "id": "T8-W3",
       "sprint": 2,
-      "state": "backlog",
-      "implementation": "unknown",
+      "state": "prepared",
+      "implementation": "partial",
       "owner": "root",
       "dependencies": [
         "T8-W1",
@@ -816,15 +816,19 @@
         "T6-W9",
         "T7-W4b"
       ],
-      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare/src/index.ts; deploy/cloudflare/src/lib.ts.",
+      "next_action": "Root A3.17 local100-event required-key and unavailable-store matrix plus A3.18 duplicate-provider test passed. Complete prerequisite composition and version-bound live worker10of10; no fabric readiness credit.",
       "blockers": [],
-      "commits": [],
+      "commits": [
+        "d278569cb5a9b29803588c61058b0110d17e3c33"
+      ],
       "review": {
         "status": "pending",
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [
+        "docs/plan/execution/2026-09-06-shared-compute-verification.json"
+      ]
     },
     {
       "id": "T3-W14",
@@ -1084,9 +1088,10 @@
         "T8-W4b",
         "T9-W0"
       ],
-      "next_action": "Reviewed server relay applied in isolated paired server f219e4dda. Root63 DevEnv tests pass after vCPU billing repair. Shared tenant budget authority and live acceptance remain unfinished.",
+      "next_action": "Shared compute admission and Worker/DevEnv composition are implemented and root-tested at de74cc3 with paired server65208a35f. Finish qualified provider terminal/usage and hard-stop producers, explicit baseline/key provisioning, paired migration and live acceptance.",
       "blockers": [
-        "Shared per-tenant budget is selected under owner autonomy but not implemented or activated."
+        "Qualified provider terminal/cancellation and actual usage remain F005/F007; configured8h reservation does not by itself prove provider hard-stop.",
+        "Production signing/public keys and reconciled external baseline are not provisioned; paired server migration and live acceptance remain."
       ],
       "commits": [
         "f1836f94b4dcdc840bd756738589d5fe85b1b478",
@@ -1095,7 +1100,8 @@
         "64509e86133207a9a187f2036cad82d11c75875a",
         "4a0c3c3bd3ca3bdbc8b38a34e8adac59ac12639b",
         "dc336b89a034d9961d8cd6a6c5b239edbbc494f9",
-        "33d808240cfe3126bd3c42284ae7dacc2ddb00e4"
+        "33d808240cfe3126bd3c42284ae7dacc2ddb00e4",
+        "de74cc32fe2b2d425f22b701785dfea2e3dafa5b"
       ],
       "review": {
         "status": "pending",
@@ -1105,7 +1111,8 @@
       "evidence": [
         "docs/plan/execution/2026-09-05-devenv-billing.json",
         "docs/plan/execution/2026-09-05-devenv-credentials.json",
-        "docs/handoff/2026-09-06-techlead-takeover.md"
+        "docs/handoff/2026-09-06-techlead-takeover.md",
+        "docs/plan/execution/2026-09-06-shared-compute-verification.json"
       ]
     },
     {
@@ -1804,16 +1811,18 @@
       "severity": "high",
       "state": "open",
       "owner": "root",
-      "summary": "DevEnv credential rectification needs authenticated server issuance and binding; current public body forwards raw PAT and server cross-worker binding is absent. Monthly ceiling is also not enforced by existing server guard.",
+      "summary": "Authenticated DevEnv relay and shared monthly compute admission are composed; qualified provider maximum-duration/terminal usage and production hard-stop acceptance remain.",
       "reproduction": "Inspect sibling corelink-server HEADc0a4466 worker/src/index.ts DevEnv arm, wrangler.toml, session_exchange mint authority and devenv_guard.ts; guard reads max_vcpu_h without consumption predicate.",
       "acceptance": "Server-authenticated tenant/session grant authorizes only bounded CAS credential; no raw PAT container env/customer-selected broker record; authorized route/binding and finite cleanup/revocation are wired; metering/ceiling outcome matches ratified hard-stop contract.",
       "blocks_delivery": true,
       "commits": [
         "64509e86133207a9a187f2036cad82d11c75875a",
-        "4a0c3c3bd3ca3bdbc8b38a34e8adac59ac12639b"
+        "4a0c3c3bd3ca3bdbc8b38a34e8adac59ac12639b",
+        "de74cc32fe2b2d425f22b701785dfea2e3dafa5b"
       ],
       "evidence": [
-        "docs/plan/execution/2026-09-05-devenv-credentials.json"
+        "docs/plan/execution/2026-09-05-devenv-credentials.json",
+        "docs/plan/execution/2026-09-06-shared-compute-verification.json"
       ]
     },
     {
@@ -1823,7 +1832,7 @@
       "severity": "high",
       "state": "open",
       "owner": "root",
-      "summary": "Durable server relay revocation repair is authored and tested as an unapplied artifact; application/migration/paired validation remain pending.",
+      "summary": "Durable relay and issuer-prepared revocation obligations are applied to the paired server source; production migration and paired live acceptance remain pending.",
       "reproduction": "Relay artifact 2158fbc: successful mint, unavailable start RPC, two revoke failures; only diagnostic and PAT expiry remain, no restart-safe cleanup record.",
       "acceptance": "Persist the exact issued credential cleanup obligation before RPC handoff; retain through failed revoke and restart; retry boundedly until idempotent revoke or confirmed adoption. Explicitly account for issuance/persistence atomicity and finite expiry; no token logging or falsely confirmed cleanup.",
       "blocks_delivery": true,
@@ -1831,7 +1840,8 @@
         "33d808240cfe3126bd3c42284ae7dacc2ddb00e4"
       ],
       "evidence": [
-        "docs/plan/relays/devenv-authorized-start.md"
+        "docs/plan/relays/devenv-authorized-start.md",
+        "docs/plan/execution/2026-09-06-shared-compute-verification.json"
       ]
     },
     {
@@ -2356,6 +2366,20 @@
         "docs/handoff/2026-09-06-techlead-takeover.md",
         "docs/adr/0013-runner-tenant-owner-precedence.md",
         "docs/plan/execution/2026-09-06-monitor-decision-proposal.md"
+      ]
+    },
+    {
+      "at": "2026-09-06T16:48:55.311321+00:00",
+      "task": "Shared compute authority and paired runtime source integrated; focused verification only, no delivery credit",
+      "owner": "root",
+      "state": "integrated",
+      "scope": [
+        "T9-W1",
+        "T8-W3"
+      ],
+      "source_commit": "de74cc32fe2b2d425f22b701785dfea2e3dafa5b",
+      "evidence": [
+        "docs/plan/execution/2026-09-06-shared-compute-verification.json"
       ]
     }
   ],
