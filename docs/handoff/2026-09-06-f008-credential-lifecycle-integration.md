@@ -203,14 +203,16 @@ The waiver's justification is the provider limitation documented in the Option B
 proposal: SNS does not expose a provider-issued exhaustive cursor or historical
 per-operation receipt query. Its tracking item is T6-W15. It does not waive or
 alter T9 quarantine, F005/F007 work, PAT revocation, PostgreSQL rearm, or any
-production action.
+production gate.
 
 Unknown outcomes remain fail-closed: ambiguity, missing reconciliation, stale or
 future time, or a record gap cannot report healthy or rearm PG. Trusted time and
 qualified TSA, WORM retention, three-account and verifier independence,
 crash/rotation/isolation tests, and seven real continuous observation days remain
 explicit qualification gates. None has started or is proven by this decision.
-Implementation is authorized by the waiver; deployment and acceptance are not.
+The waiver authorizes implementation; it is not proof of, or a waiver for, the
+remaining production and PostgreSQL gates. No deployment is in scope during this
+contract and qualification work.
 
 ## Earlier integrated packets
 
