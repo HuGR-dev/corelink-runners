@@ -1,5 +1,7 @@
 # Techlead takeover — 2026-09-06
 
+**Read the latest progress section first; older pending statuses are historical.**
+
 Owner renewed the requirement to finish all backlog and prepare go-live, with
 autonomous decisions, maximum useful parallelism, Luna by default, up to 15
 agents, and Terra only when needed. Complete-sprint CI policy remains in force;
@@ -169,3 +171,87 @@ cannot retroactively prove transport delivery. Capability review notes live at
 /private/tmp/corelink-monitor-capability-review.md; they are not a GREEN artifact.
 No deploy/cost-monitor application exists. The later seven continuous observation
  days remain mandatory and have not started. Do not invent elapsed evidence.
+
+
+## Progress at 03:52 BRT (supersedes earlier pending status)
+
+Runners integration HEAD `fe4d824c9eb9b75982d9804f8f9a31ed6198902c` at `/private/tmp/corelink-techlead-takeover-20260906`.
+Paired server integration `/private/tmp/corelink-server-typecheck` now `dc169f8c5`.
+No full CI, new PR, push, release or application deployment. Canonical delivered
+count remains 16/70 with 54 outstanding and no complete sprint.
+
+Completed and root-reproduced source increments:
+- Actual route fixture suite:109 passed, then restored two improperly removed
+  cross-domain/rotation negatives and reproduced2/2. The new adoption fixture
+  revision passed all111 tests on the root integration, including the root guard
+  against unknown-operation/undefined-PAT acceptance.
+- Root13 concurrency tests pass after exact preparation ownership and atomic
+  expired-holder pruning, including rollback after partial deletion.
+- Root6 credential stash tests pass; local wipe and remote revocation are
+  independent, every job credential is attempted, and remote error bodies do
+  not enter logs (`d612733`).
+- Actual host shell auth bridge passed20.57s (`89bf884`); no simulated shell proof.
+- Root found a DevEnv billing regression: shared runner slot-seconds helper
+  was incorrectly used for DevEnv vCPU-seconds. Dedicated builder now preserves
+  the tier multiplier. All63 DevEnv credential/lifecycle/usage tests pass
+  (`4654f8b`), preserving existing assertions and adding four tier cases.
+- ADR-0013 (`7a4a733`) records the implementation decision under explicit owner
+  autonomy: a supplied installation is server-authoritative; an accompanying PAT
+  must resolve to the same tenant. Missing configured PAT refuses before effects.
+  Root31 Worker tests and85 paired server tests pass. Independent review approves.
+  The ADR does not claim a human cryptographic signature or waive live gates.
+- Server relay/authorize/TS dependency root99 focused tests and strictTS passed
+  before owner conflict;85 authorize/mint tests passed again after it. Offline
+  dependency installation repaired missing root node_modules; lockfile unchanged.
+
+Credential issuer handoff source is composed; full WP/live acceptance remains open:
+- Root Runners `14e21ce`: mint carries unique operation_id; local credential
+  registration and immutable attribution precede server adoption204; adoption
+  precedes claim/provider. Registration failure wipes local ticket and leaves
+  issuer timeout ownership. Ambiguous adoption requests exact local cleanup and
+  refuses provider effects. Root19 public preparation/client tests + strictTS pass.
+- Server helper40d3dd3 repairs immutable deadline, full-tuple readback, missing
+  metadataKV pending revocation and validated bounded drain. Root reviewed and
+  integrated it with wiring117361b+3ec5309 into paired serverec426c505. A copied
+  old helper in the author's wiring tree was not integrated. Root115 tests across
+  issuer helper/routes/authorize/mint/DevEnv cleanup pass, plus strictTypeScript.
+- SQL followup5be75a integrated asdc169f8c5. Root13 actual SQLite cases pass: moving
+  clock at activation, real transaction rollback after PAT insertion, exact tuple,
+  revoke-before-activate/adopt and adopted-before-revoke serialization.
+- GroupB384d836+99fe0c8 were NOT integrated: incomplete fixture contract and
+  an undeclared variable in capacity test. Split into independent Luna worktrees
+  fixture-webhooks, fixture-lifecycle, fixture-capacity onrootfe4d824; previous
+  groupB agent retains only SJ5. No business assertion weakening is authorized.
+- Unit index fixturef126ec9 imported from the agent's isolated clone asfe4d824.
+  Root rerun pending. Runner tests use npm-lock dependencies and direct node
+  Vitest with minWorkers1/maxWorkers1. A pnpm invocation unexpectedly attempted
+  dependency installation through the old shared symlink; root removed its own
+  symlink/generated pnpm files and installed root-local npm dependencies via
+  npm ci --offline, without lockfile changes. No test pass claimed from failures.
+
+Pending owner decision:
+- Async question submitted for the concrete proposal at
+  `docs/plan/execution/2026-09-06-monitor-decision-proposal.md`: authorize AWS
+  at-least-once delivery with explicit UNKNOWN outcomes instead of the two
+  unsupported exhaustive provider-receipt guarantees, or retain the original.
+  **No response yet; elapsed time is NOT authorization.** Do not implement the
+  monitor or apply that proposal until approval. All remaining gates, trustworthy
+  time qualification and seven actual days are preserved by the proposal.
+- Google Chat API additionally evaluated: deterministic message lookup exists,
+  but no documented monotonic receipt cursor/final watermark. It is not GREEN.
+  Primary links are in `/private/tmp/corelink-google-chat-capability.md`.
+
+Architecture/remaining acceptance:
+- Shared tenant compute budget remains unimplemented. `/private/tmp/corelink-shared-budget-contract.md`
+  is an UNAPPROVED proposal and contains stale baseline assumptions. Terra's
+  subsequent DevEnv audit was rejected because it read the wrong worktree.
+  Actual DevEnv already has authorized RPC, indirect tickets and billing outbox.
+  Do not reimplement these or invent a provider kill deadline.
+- F008 producer epoch is fixed, but no resume epoch reaches minted credentials;
+  delayed suspension still can enumerate newer lifecycles. Migration/consumer
+  ordering remains open. F005/F007 authoritative provider cancellation/recovery
+  and active reservation expiry semantics remain open.
+- Monitor capability/app, live T3-W18 proof, signed clw release/pins, shared budget,
+  subsequent sprint acceptance and seven-day observation remain outstanding.
+- Lima/PG stopped; primary conflicting checkout and original worktrees preserved.
+  Disk last~8GiB free. Do not prune unknown/other agents' trees or dependencies.

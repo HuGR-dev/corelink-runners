@@ -440,9 +440,9 @@
         "O-MONITORHOST",
         "T7-W4b"
       ],
-      "next_action": "Owner input pending: identify authorized non-Cloudflare runtime and alert channel. Establish required independent storage/scheduler/credential capabilities before monitor implementation.",
+      "next_action": "Await response to concrete monitor receipt-contract proposal; AWS independent accounts are provisioned. Original capability gate still unresolved; no monitor application code/deployment.",
       "blockers": [
-        "O-MONITORHOST capability artifact and external runtime not established."
+        "Original O-MONITORHOST transport receipt/cursor requirements remain unqualified; explicit proposal awaits owner decision."
       ],
       "commits": [],
       "review": {
@@ -450,7 +450,9 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [
+        "docs/handoff/2026-09-06-techlead-takeover.md"
+      ]
     },
     {
       "id": "T5-W1",
@@ -643,10 +645,8 @@
         "T8-W4b",
         "D13"
       ],
-      "next_action": "Review completed no-TTL transactional attribution and authoritative enumeration; D13 ratification remains required for whole-WP implementation. Pair consumer tests with T4-W2/T8-W5. Completion test is production handler with authority stub, not real DO restart proof.",
-      "blockers": [
-        "Ratified D13 owner-precedence ADR not found; do not invent precedence."
-      ],
+      "next_action": "ADR0013 records delegated implementation policy; Worker7a4a733 and serverf219e4dda preserve installation plus matching PAT. Root31 Worker and85 server tests passed. Complete composed attribution/live acceptance; no whole-WP delivery.",
+      "blockers": [],
       "commits": [
         "4c849cd80ac37f0eeff09e4da7e0195451a4b188",
         "8b7ff393486177991246e9e693e9d02ec8ff5218",
@@ -662,7 +662,8 @@
         "evidence": []
       },
       "evidence": [
-        "docs/plan/execution/rework-20260906/R1-final.json"
+        "docs/plan/execution/rework-20260906/R1-final.json",
+        "docs/handoff/2026-09-06-techlead-takeover.md"
       ]
     },
     {
@@ -706,7 +707,7 @@
       "dependencies": [
         "T4-W2"
       ],
-      "next_action": "Root review latest bounded registry source and relay. Real server relay application/integration remains pending sibling fence exception.",
+      "next_action": "Paired server relay is applied in isolated dependency integration; owner already authorized bounded sibling edits. Finish composed canonical WP acceptance; no renewed permission exception pending.",
       "blockers": [],
       "commits": [
         "e39d7a0f5078215396c58cf08fd4a6bd4adb4ecd",
@@ -719,7 +720,9 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [
+        "docs/handoff/2026-09-06-techlead-takeover.md"
+      ]
     },
     {
       "id": "T3-W1",
@@ -865,7 +868,7 @@
       "dependencies": [
         "T3-W9"
       ],
-      "next_action": "Exact credential authority components reviewed; root9focusedtests passed. Finish F008 suspension epochs/migration and job-terminal coverage; no whole-WP seal or delivery.",
+      "next_action": "Exact credential cleanup, job closure, ticket identity and independent wipe/revoke verified. Issuer handoff being composed with repaired server authority; F008 consumer epochs and migration remain open.",
       "blockers": [],
       "commits": [
         "50ab03667fe8d877321b6096439677938e0b3918",
@@ -887,7 +890,8 @@
         "evidence": []
       },
       "evidence": [
-        "docs/plan/execution/rework-20260906/R1-final.json"
+        "docs/plan/execution/rework-20260906/R1-final.json",
+        "docs/handoff/2026-09-06-techlead-takeover.md"
       ]
     },
     {
@@ -1074,10 +1078,9 @@
         "T8-W4b",
         "T9-W0"
       ],
-      "next_action": "Runners credential/billing code integrated. Apply reviewed server relay after explicit sibling exception; implement monthly hard-stop using owner-selected shared/separate budget authority.",
+      "next_action": "Reviewed server relay applied in isolated paired server f219e4dda. Root63 DevEnv tests pass after vCPU billing repair. Shared tenant budget authority and live acceptance remain unfinished.",
       "blockers": [
-        "Owner decision pending: max_vcpu_h shared between Runners and DevEnv versus separate product budgets.",
-        "Server authorized relay remains an unapplied artifact; cross-repository mutation requires explicit owner exception under CLAUDE.md:138-147."
+        "Shared per-tenant budget is selected under owner autonomy but not implemented or activated."
       ],
       "commits": [
         "f1836f94b4dcdc840bd756738589d5fe85b1b478",
@@ -1095,7 +1098,8 @@
       },
       "evidence": [
         "docs/plan/execution/2026-09-05-devenv-billing.json",
-        "docs/plan/execution/2026-09-05-devenv-credentials.json"
+        "docs/plan/execution/2026-09-05-devenv-credentials.json",
+        "docs/handoff/2026-09-06-techlead-takeover.md"
       ]
     },
     {
@@ -2316,6 +2320,17 @@
       ],
       "baseline": "e66db97269cea9a8045337b1ba50a7b054c6288d",
       "worktree": "/private/tmp/corelink-rework-t8-w5-20260906"
+    },
+    {
+      "at": "2026-09-06T06:39:19.596378+00:00",
+      "task": "Techlead takeover source composition and focused verification; no sprint delivery credit",
+      "owner": "root",
+      "state": "integrated",
+      "scope": [
+        "docs/handoff/2026-09-06-techlead-takeover.md",
+        "docs/adr/0013-runner-tenant-owner-precedence.md",
+        "docs/plan/execution/2026-09-06-monitor-decision-proposal.md"
+      ]
     }
   ],
   "execution_plan": "docs/plan/execution/2026-09-06-disjoint-plan.json"
