@@ -323,6 +323,8 @@ function baseEnv(over: Partial<Env> = {}): Env {
     RUNNER_CONTAINER: RUNNER_NS as never,
     CHECK_HOST_CONTAINER: CHECK_NS as never,
     CLOUDFLARE_SPAWN_AUTH_TOKEN: "spawn-secret",
+    CLOUDFLARE_EXEC_AUTH_TOKEN: "exec-control-secret",
+    CLOUDFLARE_LIFECYCLE_AUTH_TOKEN: "lifecycle-control-secret",
     GITHUB_WEBHOOK_SECRET: SECRET,
     GITHUB_MINT_TOKEN: "ghp-mint",
     PINNED_IMAGE_DIGEST: "",

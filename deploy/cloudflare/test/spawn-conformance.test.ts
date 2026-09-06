@@ -81,6 +81,8 @@ function envWith(over: Partial<Env> = {}): Env {
     RUNNER_CONTAINER: RUNNER_NS as never,
     CHECK_HOST_CONTAINER: { _ns: "check" } as never,
     CLOUDFLARE_SPAWN_AUTH_TOKEN: AUTH,
+    CLOUDFLARE_EXEC_AUTH_TOKEN: "exec-control-secret",
+    CLOUDFLARE_LIFECYCLE_AUTH_TOKEN: "lifecycle-control-secret",
     PINNED_IMAGE_DIGEST: "",
     ...over,
   } as Env;
