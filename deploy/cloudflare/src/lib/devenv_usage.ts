@@ -1,4 +1,4 @@
-import { buildUsageEvent, type UsageEvent } from "../lib.js";
+import { billingPeriod, usageIdemKey, type UsageEvent } from "../lib.js";
 import { DEVENV_TIERS, type DevenvTier } from "../types/devenv.js";
 
 /** Inputs captured by one DevEnv session's terminal lifecycle callback. */
@@ -58,8 +58,8 @@ function validTimestamp(value: unknown): value is number {
  *
  * Validation happens before calling `buildUsageEvent`; malformed lifecycle
  * state therefore returns a typed failure and cannot emit a partial event.
- * `buildUsageEvent` floors elapsed wall-clock seconds and multiplies by the
- * tier's actual vCPU count. There is deliberately no minimum-duration charge.
+ * Floors elapsed wall-clock seconds and multiplies by the tier's actual vCPU
+ * count. There is deliberately no minimum-duration charge.
  */
 export async function buildDevenvUsageEvent(input: DevenvUsageInput): Promise<DevenvUsageResult> {
   if (!isRealUuid(input.tenantId)) {
@@ -84,14 +84,19 @@ export async function buildDevenvUsageEvent(input: DevenvUsageInput): Promise<De
     return failure("invalid_region", "region", "region must be exactly three lower-case letters");
   }
 
-  const event = await buildUsageEvent({
-    tenantId: input.tenantId.toLowerCase(),
-    jobId: `devenv:${input.sessionId.toLowerCase()}`,
-    startedMs: input.startedAtMs,
-    completedMs: input.completedAtMs,
+  const period = billingPeriod(input.completedAtMs);
+  const elapsedSeconds = Math.floor((input.completedAtMs - input.startedAtMs) / 1000);
+  const qty = elapsedSeconds * DEVENV_TIERS[input.tier].vcpus;
+  const event: UsageEvent = {
+    tenant_id: input.tenantId.toLowerCase(),
+    event_kind: "runner_vcpu_seconds",
+    qty,
+    billing_period: period,
     region: input.region,
-    vcpu: DEVENV_TIERS[input.tier].vcpus,
-  });
+    source: "corelink-runners/spawn-worker",
+    time_ms: input.completedAtMs,
+    idem_key: await usageIdemKey(`devenv:${input.sessionId.toLowerCase()}`, period),
+  };
   if (!Number.isFinite(event.qty) || !Number.isSafeInteger(event.qty) || !Number.isFinite(Date.parse(`${event.billing_period}-01T00:00:00Z`))) {
     return failure("invalid_completed_at", "completedAtMs", "timestamps must produce a finite canonical billing event");
   }

@@ -29,6 +29,13 @@ describe("buildDevenvUsageEvent", () => {
     expect(result.event.source).toBe("corelink-runners/spawn-worker");
   });
 
+  it.each([
+    ["standard-2", 2], ["standard-4", 4], ["power-8", 8], ["ultra-16", 16],
+  ] as const)("charges elapsed seconds at the %s tier rate", async (tier, vcpus) => {
+    const result = await buildDevenvUsageEvent({ ...base, tier, startedAtMs: 10_000, completedAtMs: 13_001 });
+    expect(result).toMatchObject({ ok: true, event: { event_kind: "runner_vcpu_seconds", qty: 3 * vcpus } });
+  });
+
   it("does not apply a fabricated 30-second minimum", async () => {
     const result = await buildDevenvUsageEvent({
       ...base,
