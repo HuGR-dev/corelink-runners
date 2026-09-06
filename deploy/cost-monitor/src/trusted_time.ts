@@ -205,7 +205,7 @@ export class Rfc3161Clock implements TrustedClock {
       if (!response.ok) throw new TrustedTimeError("UNKNOWN", `timestamp authority returned HTTP ${response.status}`);
       const reply = await readLimited(response, this.options.maxResponseBytes);
       await writeFile(responsePath, reply, { mode: 0o600 });
-      const textResult = await run(this.options.opensslPath, ["ts", "-reply", "-in", responsePath, "-text", "-noout"], remaining());
+      const textResult = await run(this.options.opensslPath, ["ts", "-reply", "-in", responsePath, "-text"], remaining());
       const genTime = parseGenTime(textResult.stdout.toString("utf8"));
       const crlPaths: string[] = [];
       for (let i = 0; i < this.options.crlUrls.length; i += 1) {
