@@ -180,6 +180,13 @@ import {
   type ContainmentRedriveReservation,
 } from "./containment_authority_records";
 import { canonicalWorkflowJobIdFromRaw } from "./workflow_job_id";
+import {
+  decodeJobAttribution,
+  persistJobAttribution,
+  readJobAttribution,
+  type JobAttribution,
+  type JobAttributionStore,
+} from "./lib/job_attribution.js";
 export {
   ContainmentEffectLedger,
   containmentEffectMirrorFromAttempt,
@@ -500,6 +507,53 @@ export class ContainmentDO extends DurableObject<Env> {
 
   private effectLedger(): ContainmentEffectLedger {
     return new ContainmentEffectLedger(this.ctx.storage as never, this.env.RUNNER_JOB_PATS);
+  }
+
+  async readJobAttribution(key: string): Promise<string | null> {
+    return (await this.ctx.storage.get<string>(key)) ?? null;
+  }
+
+  async putJobAttributionIfAbsent(key: string, value: string): Promise<string> {
+    return this.tx(async s => {
+      const existing = await s.get<string>(key);
+      if (existing !== undefined) return existing;
+      await s.put(key, value);
+      return value;
+    });
+  }
+
+  async deleteJobAttribution(key: string): Promise<void> {
+    await this.ctx.storage.delete(key);
+  }
+
+  /**
+   * Enumerate durable ownership for settlement/reconciliation. The scan reads
+   * one look-ahead key so a full page never pretends to be complete. The cursor
+   * is the last scanned key, including non-matches, so callers cannot loop over
+   * a tenant-sparse prefix forever.
+   */
+  async listJobAttributions(
+    tenantId: string,
+    cursor?: string,
+  ): Promise<{ records: JobAttribution[]; cursor?: string; complete: boolean }> {
+    if (!tenantId) throw new Error("tenant id required");
+    const page = await this.ctx.storage.list<string>({
+      prefix: "job-attribution:",
+      ...(cursor ? { startAfter: cursor } : {}),
+      limit: 101,
+    });
+    const entries = [...page.entries()];
+    const records: JobAttribution[] = [];
+    for (const [key, raw] of entries) {
+      const jobId = key.slice("job-attribution:".length);
+      const record = decodeJobAttribution(raw, jobId);
+      if (record.tenant === tenantId) records.push(record);
+    }
+    const lastScanned = entries.at(-1)?.[0];
+    const complete = entries.length < 101;
+    return complete
+      ? { records, complete }
+      : { records, cursor: lastScanned, complete: false };
   }
 
   async getEffectAttempt(identity: ContainmentEffectIdentity, nonce: string): Promise<ContainmentEffectAttempt | null> {
@@ -1671,6 +1725,16 @@ function jobTenantKey(jobId: string): string {
   return `jtenant:${jobId}`;
 }
 
+function jobAttributionStore(env: Env): JobAttributionStore | undefined {
+  if (!env.CONTAINMENT) return undefined;
+  const authority = containmentAuthority(env);
+  return {
+    get: key => authority.readJobAttribution(key),
+    putIfAbsent: (key, value) => authority.putJobAttributionIfAbsent(key, value),
+    delete: key => authority.deleteJobAttribution(key),
+  };
+}
+
 // job_id → the spawned RunnerContainer DO handle (a random UUID minted at spawn).
 // Stashed so the `workflow_job:completed` webhook can DESTROY the container
 // immediately, instead of leaving it to idle out `sleepAfter` (45m). Without this
@@ -2192,7 +2256,10 @@ async function revokeCompletedJob(
   try {
     const patId = await env.RUNNER_JOB_PATS.get(jobId);
     if (!patId) return false; // cold job, or already revoked/expired
-    await revokeCasPatById(env, patId, derivedTenant ?? env.CLW_TENANT);
+    // Never substitute the deploy's CLW_TENANT: completion must use the
+    // server-verified job attribution or leave the PAT to its bounded TTL.
+    if (!derivedTenant) return false;
+    await revokeCasPatById(env, patId, derivedTenant);
     await env.RUNNER_JOB_PATS.delete(jobId);
     return true;
   } catch (e) {
@@ -2608,9 +2675,30 @@ async function driveSpawn(
   // reconciler re-minted a fresh orphan each tick — 3-lens audit F2/Lens A). Writing
   // it here lets the spawn-failure catch below revoke it immediately.
   if (mint.patId && env.RUNNER_JOB_PATS) {
-    await env.RUNNER_JOB_PATS.put(jobId, mint.patId, { expirationTtl: JOB_PAT_TTL_S }).catch((e) =>
-      logEvent("error", "kv_put_job_pat_failed", { jobId, error: (e as Error).message }),
-    );
+    try {
+      await env.RUNNER_JOB_PATS.put(jobId, mint.patId, { expirationTtl: JOB_PAT_TTL_S });
+    } catch (e) {
+      if (mint.tenant) await revokeCasPatById(env, mint.patId, mint.tenant).catch(() => {});
+      throw e;
+    }
+  }
+  // A warm mint has already resolved and authorized the tenant. Persist that
+  // identity before slot admission, JIT minting, or container start so every
+  // later cleanup/billing invocation can use the same immutable owner. A
+  // missing or conflicting durable write fails closed. Since the PAT revoke
+  // key is already durable above, an attribution failure can revoke directly.
+  if (mint.tenant) {
+    const authorityStore = jobAttributionStore(env);
+    if (!authorityStore) {
+      if (mint.patId && mint.tenant) await revokeCasPatById(env, mint.patId, mint.tenant).catch(() => {});
+      throw new Error("durable job attribution authority unavailable");
+    }
+    try {
+      await persistJobAttribution(authorityStore, { jobId, tenant: mint.tenant });
+    } catch (e) {
+      if (mint.patId && mint.tenant) await revokeCasPatById(env, mint.patId, mint.tenant).catch(() => {});
+      throw e;
+    }
   }
   // Concurrency ceiling (W7/F7) — ATOMIC, and enforced for BOTH warm AND cold
   // spawns (the old KV path skipped cold ⇒ unlimited runners). At-capacity ⇒ no
@@ -4609,8 +4697,20 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         // CLW_TENANT for legacy/cold jobs). Used for revoke, the concurrency-slot
         // release, AND billing — so every completion acts on the RIGHT tenant.
         let derivedTenant: string | undefined;
-        if (env.RUNNER_JOB_PATS) {
-          derivedTenant = (await env.RUNNER_JOB_PATS.get(jobTenantKey(jobId))) ?? undefined;
+        try {
+          const authorityStore = jobAttributionStore(env);
+          derivedTenant = (await readJobAttribution(authorityStore, jobId))?.tenant;
+          // Migration bridge for jobs spawned before the immutable record was
+          // introduced: `jtenant:` was also written from the server mint and is
+          // still a durable, tenant-specific identity. Never fall back to the
+          // deploy's CLW_TENANT or any in-memory/default value.
+          if (!derivedTenant && env.RUNNER_JOB_PATS) {
+            derivedTenant = (await env.RUNNER_JOB_PATS.get(jobTenantKey(jobId))) ?? undefined;
+          }
+        } catch (e) {
+          // An invalid or ambiguous identity is never replaced with a deploy
+          // default. Under-billing is safer than billing the wrong tenant.
+          logEvent("error", "job_attribution_unusable", { jobId, error: (e as Error).message });
         }
         // The job is over ⇒ it is definitively not waiting on us. Drop any
         // provisional placement record so the reconciler never re-drives a job that
@@ -4667,6 +4767,10 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
             /* best-effort: TTL is the backstop */
           });
         }
+        // Keep the immutable attribution record after completion. Billing
+        // settlement/outbox retry and any pending revoke/teardown obligation
+        // may arrive in a later invocation; T4-W2 owns the eventual retention
+        // policy once those obligations are durably settled.
         // ASK-2: emit the per-job runner_slot_seconds usage event (prod billing
         // lives here, not the dev-only Rust fabricd). Best-effort, fail-open.
         const billed = await maybeBillCompletedJob(
