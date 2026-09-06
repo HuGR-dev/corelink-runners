@@ -55,7 +55,7 @@ async function retainRetry(env: RevocationEnv, identity: CredentialIdentity): Pr
   if (!(await env.RUNNER_JOB_PATS.get(key))) await env.RUNNER_JOB_PATS.put(key, JSON.stringify({ schema_version: 1, ...identity, attempts: 0 }));
 }
 
-async function revokeOne(env: RevocationEnv, authority: CredentialAuthority, identity: CredentialIdentity): Promise<boolean> {
+export async function revokeOne(env: RevocationEnv, authority: CredentialAuthority, identity: CredentialIdentity): Promise<boolean> {
   try {
     await authority.requestCredentialRevocation(identity);
     // Local redemption closure and remote revocation are independent cleanup

@@ -129,6 +129,7 @@ import {
   retryFailedRevocations as retryFailedRevocationsOwned,
 } from "./lib/revocation_outbox.js";
 import type { CredentialIdentity, CredentialPage, CredentialSelection } from "./lib/credential_authority_contract.js";
+import { TenantSuspensionAuthority, type TenantSuspensionInput } from "./lib/tenant_suspension_authority.js";
 import { installationToken } from "./github_app";
 import {
   claimReconcileHandoff,
@@ -633,6 +634,12 @@ export class ContainmentDO extends DurableObject<Env> {
   async closeJobCredentials(jobId: string): Promise<{ known: boolean }> { return new CredentialObligationAuthority(this.ctx.storage).closeJobCredentials(jobId); }
   async closeTenantCredentials(tenant: string, throughGeneration: string): Promise<void> {
     return new CredentialObligationAuthority(this.ctx.storage).closeTenantCredentials(tenant, throughGeneration);
+  }
+  async beginTenantSuspension(input: TenantSuspensionInput): Promise<{ complete: boolean; cursor?: string }> {
+    return new TenantSuspensionAuthority(this.ctx.storage as never).begin(input);
+  }
+  async checkpointTenantSuspension(input: TenantSuspensionInput, expectedCursor: string | undefined, nextCursor: string | undefined, complete: boolean): Promise<boolean> {
+    return new TenantSuspensionAuthority(this.ctx.storage as never).checkpoint(input, expectedCursor, nextCursor, complete);
   }
 
   async getEffectAttempt(identity: ContainmentEffectIdentity, nonce: string): Promise<ContainmentEffectAttempt | null> {
