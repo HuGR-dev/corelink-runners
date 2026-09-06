@@ -120,6 +120,12 @@ import { flushBillingUsageBacklog } from "./billing_recovery";
 import { bumpMetrics, snapshotMetrics, MetricsDO } from "./metrics";
 import { installationToken } from "./github_app";
 import {
+  claimReconcileHandoff,
+  discoverEligibleRepositories,
+  releaseReconcileHandoff,
+  type ReconcilerRepository,
+} from "./reconciler";
+import {
   ContainmentEffectLedger,
   containmentEffectPointerKey,
   type ContainmentEffectAttempt,
@@ -268,6 +274,8 @@ export interface Env {
   // token instead (GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY below); this stays the
   // fallback when App creds are absent (byte-identical to the pre-App behaviour).
   GITHUB_MINT_TOKEN?: string;
+  // Per-installation token used only for the authoritative reconciler scan.
+  GITHUB_RECONCILER_TOKEN?: string;
   // ── GitHub-App installation-token minting (external customer repos) ──────────
   // The App's numeric id + PKCS#8 RSA private-key PEM. When BOTH are set AND a
   // spawn has an installation_id, `mintJit` mints a per-installation access token
@@ -309,6 +317,10 @@ export interface Env {
   // queued+labeled+runnerless jobs to re-drive. Absent ⇒ the reconciler is OFF.
   // Cold re-spawn skips per-job authz, so ONLY trusted repos belong here.
   RECONCILER_REPOS?: string;
+  // Authoritative external-repo registry. When armed, this replaces the static
+  // first-party list for recovery and fails closed if its snapshot is unclear.
+  RECONCILER_REGISTRY_URL?: string;
+  RECONCILER_REGISTRY_AUTH_KEY?: string;
   // repo_full_name → installation_id JSON map. A plain *repo* webhook payload has
   // no `installation.id` (only a GitHub *App* webhook does), so the server-derived
   // mint (#283) can't derive the tenant and the runner spawns COLD. For known
@@ -5365,11 +5377,46 @@ export async function redriveOrphanedJobs(
   if (redriveState !== "normal") return;
   if (!(await containmentRedriveAuthorityReadable(env))) return;
   const reservationAuthority = isVitestLegacyFixtureContext(env) ? null : containmentAuthority(env);
-  const repos = parseReconcilerRepos(env.RECONCILER_REPOS);
-  if (repos.length === 0) return; // opt-in: no allowlist ⇒ reconciler off
+  const staticRepos = parseReconcilerRepos(env.RECONCILER_REPOS);
+  let registryRepos: ReconcilerRepository[] | null = null;
+  if (env.RECONCILER_REGISTRY_URL?.trim()) {
+    // A configured registry is authoritative. An unavailable or malformed
+    // snapshot is not permission to fall back to an unbounded GitHub scan (or
+    // to a stale static list), so this tick remains read-only.
+    try {
+      registryRepos = await discoverEligibleRepositories(env);
+    } catch (e) {
+      logEvent("error", "reconciler_registry_read_failed", { error: (e as Error).message });
+      return;
+    }
+    if (registryRepos === null) return;
+  }
+  const candidates: Array<{ repo: string; installationId?: string }> = registryRepos
+    ? registryRepos.map(entry => ({ repo: entry.repo, installationId: entry.installationId }))
+    : staticRepos.map(repo => ({ repo }));
+  if (candidates.length === 0) return; // opt-in: no allowlist/registry ⇒ reconciler off
   if (!env.GITHUB_WEBHOOK_SECRET || !env.GITHUB_MINT_TOKEN) return; // autoscaler not configured
-  for (const repo of repos) {
-    const orphans = await list(env, repo, configured, RECONCILE_MIN_AGE_MS, now);
+  for (const candidate of candidates) {
+    const repo = candidate.repo;
+    let scanEnv: Env = env;
+    if (candidate.installationId) {
+      // Registry entries carry the only installation identity accepted for this
+      // scan. The token is scoped to that installation before any GitHub list.
+      let token: string;
+      try {
+        token = await mintJitAuthToken(env, candidate.installationId);
+      } catch (e) {
+        logEvent("error", "reconciler_installation_token_failed", {
+          repo,
+          installationId: candidate.installationId,
+          error: (e as Error).message,
+        });
+        continue;
+      }
+      if (!token) continue;
+      scanEnv = { ...env, GITHUB_RECONCILER_TOKEN: token };
+    }
+    const orphans = await list(scanEnv, repo, configured, RECONCILE_MIN_AGE_MS, now);
     // Each orphan carries its OWN matched family label so the redrive mints the
     // JIT with exactly what the job requested (family-aware).
     for (const { jobId, labels } of orphans) {
@@ -5410,7 +5457,8 @@ export async function redriveOrphanedJobs(
         if (admitted.status !== "reserved" || !admitted.reservation) continue;
         reservation = admitted.reservation;
       }
-      const reInstallationId = installationIdForRepo(env.REPO_INSTALLATION_MAP, redriveRepo);
+      const reInstallationId = candidate.installationId
+        ?? installationIdForRepo(env.REPO_INSTALLATION_MAP, redriveRepo);
       // ── Age-gate the force-release (2026-08-24) ──────────────────────────────
       // "queued ≥ 90 s with no runner" is ALSO what a healthy-but-slow spawn looks
       // like: the placement machinery itself waits PLACEMENT_CONFIRM_GRACE_MS
@@ -5461,15 +5509,40 @@ export async function redriveOrphanedJobs(
         continue;
       }
       await release(env.RUNNER_JOB_PATS, redriveJobId);
+      const handoff = await claimReconcileHandoff(env.RUNNER_JOB_PATS, {
+        schema_version: 1,
+        repo: redriveRepo,
+        job_id: redriveJobId,
+        installation_id: reInstallationId,
+        labels,
+        enqueued_at_ms: now,
+      }, now);
+      if (!handoff) continue;
       if (await claim(env.RUNNER_JOB_PATS, redriveJobId)) {
         logEvent("info", "reconciler_redrive", {
           jobId: redriveJobId,
           repo: redriveRepo,
           warm: !!reInstallationId,
         });
-        ctx.waitUntil(
-          driveSpawnGuarded(env, { jobId: redriveJobId, repo: redriveRepo, installationId: reInstallationId, labels }),
-        );
+        ctx.waitUntil((async () => {
+          try {
+            await drive(env, { jobId: redriveJobId, repo: redriveRepo, installationId: reInstallationId, labels });
+          } catch (e) {
+            await releaseSpawnClaim(env.RUNNER_JOB_PATS, redriveJobId);
+            if (!(e instanceof SpawnRefusedError)) {
+              await bumpMetrics(env, "spawn_failed");
+              logEvent("error", "spawn_drive_failed", { jobId: redriveJobId, error: (e as Error).message });
+            }
+            await orphan(env, { jobId: redriveJobId, repo: redriveRepo, installationId: reInstallationId, labels });
+          } finally {
+            // A successful spawn leaves the ordinary spawn claim as the
+            // lifetime idempotency record; failures release it and this marker
+            // so a later authoritative poll can hand the job off again.
+            await releaseReconcileHandoff(env.RUNNER_JOB_PATS, redriveRepo, redriveJobId);
+          }
+          })());
+      } else {
+        await releaseReconcileHandoff(env.RUNNER_JOB_PATS, redriveRepo, redriveJobId);
       }
     }
   }
