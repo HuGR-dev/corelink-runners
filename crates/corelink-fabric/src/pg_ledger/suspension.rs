@@ -112,7 +112,13 @@ impl PgLedger {
             let tx = client.transaction().await?;
             tx.query_one(FENCE_SQL, &[&tenant]).await?;
             if suspended {
-                let already_suspended = tx.query_opt("SELECT 1 FROM fabric_suspended_tenants WHERE tenant_id=$1", &[&tenant]).await?.is_some();
+                let already_suspended = tx
+                    .query_opt(
+                        "SELECT 1 FROM fabric_suspended_tenants WHERE tenant_id=$1",
+                        &[&tenant],
+                    )
+                    .await?
+                    .is_some();
                 ensure_generation(&tx, tenant, already_suspended).await?;
                 tx.execute(
                     "INSERT INTO fabric_suspended_tenants (tenant_id) VALUES ($1) \
@@ -121,13 +127,23 @@ impl PgLedger {
                 )
                 .await?;
             } else {
-                let currently_suspended = tx.query_opt("SELECT 1 FROM fabric_suspended_tenants WHERE tenant_id = $1", &[&tenant]).await?.is_some();
-                let current = tx.query_opt("SELECT generation FROM tenant_lifecycle_generations WHERE tenant_id = $1 FOR UPDATE", &[&tenant]).await?;
-                if current.is_none() { ensure_generation(&tx, tenant, currently_suspended).await?; }
+                let currently_suspended = tx
+                    .query_opt(
+                        "SELECT 1 FROM fabric_suspended_tenants WHERE tenant_id = $1",
+                        &[&tenant],
+                    )
+                    .await?
+                    .is_some();
+                let generation = ensure_generation(&tx, tenant, currently_suspended).await?;
                 if currently_suspended {
-                    let generation: i64 = tx.query_one("SELECT generation FROM tenant_lifecycle_generations WHERE tenant_id = $1", &[&tenant]).await?.get(0);
-                    let next = generation.checked_add(1).ok_or_else(|| anyhow::anyhow!("tenant lifecycle generation overflow"))?;
-                    tx.execute("UPDATE tenant_lifecycle_generations SET generation=$2 WHERE tenant_id=$1", &[&tenant, &next]).await?;
+                    let next = generation
+                        .checked_add(1)
+                        .ok_or_else(|| anyhow::anyhow!("tenant lifecycle generation overflow"))?;
+                    tx.execute(
+                        "UPDATE tenant_lifecycle_generations SET generation=$2 WHERE tenant_id=$1",
+                        &[&tenant, &next],
+                    )
+                    .await?;
                 }
                 tx.execute(
                     "DELETE FROM fabric_suspended_tenants WHERE tenant_id = $1",
