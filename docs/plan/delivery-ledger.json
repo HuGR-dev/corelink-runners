@@ -665,27 +665,32 @@
     {
       "id": "T4-W2",
       "sprint": 2,
-      "state": "active",
-      "implementation": "partial",
+      "state": "prepared",
+      "implementation": "complete",
       "owner": "wp_t4_w2",
       "dependencies": [
         "T4-W1",
         "R2"
       ],
-      "next_action": "T4-W2 fixed-contract correction: isolate per-job ledger read failure; sole executor runs exact small regression, then root reviews. No CI/heavy suite per WP.",
+      "next_action": "Approved source candidate held for predecessor composition; T4-W1/D13 and R2 remain real gates. Validate paired source at sprint composition.",
       "blockers": [],
       "commits": [
         "303622df89b201e0a53e5e23cea4a4bcba7061d3",
         "9a15de63c993aaa149917ca7a73f3d9334a55984",
         "0516442ef5e2095b27e6ef760d4ca20e2b59a10c",
-        "116bf98f46baa509119c0a2c1342afb351b3abb2"
+        "116bf98f46baa509119c0a2c1342afb351b3abb2",
+        "ffc5dadff397c546817673d04ad62e8ab527deae"
       ],
       "review": {
-        "status": "pending",
-        "commit": null,
-        "evidence": []
+        "status": "approved",
+        "commit": "ffc5dadff397c546817673d04ad62e8ab527deae",
+        "evidence": [
+          "docs/plan/execution/2026-09-05-rule-matrix-and-billing-review.json"
+        ]
       },
-      "evidence": []
+      "evidence": [
+        "docs/plan/execution/2026-09-05-rule-matrix-and-billing-review.json"
+      ]
     },
     {
       "id": "T3-W3",
@@ -842,20 +847,21 @@
     {
       "id": "T8-W5",
       "sprint": 2,
-      "state": "active",
+      "state": "prepared",
       "implementation": "partial",
       "owner": "wp_t8_w5",
       "dependencies": [
         "T3-W9"
       ],
-      "next_action": "T8-W5 fixed-contract correction: credential receipts and suspension retry after partial success; sole executor runs exact small regression, then root reviews. No CI/heavy suite per WP.",
+      "next_action": "Review exact returned source and scoped acceptance; integrate when canonical prerequisites are met. Full CI reserved for composed sprint.",
       "blockers": [],
       "commits": [
         "50ab03667fe8d877321b6096439677938e0b3918",
         "5a1ab636a3e4cc1f96bdf559c16a02a0d2253147",
         "e34819c30411ae02fdff415365aa3b6738e31529",
         "651c5aae801632726be14cb4c874c04a015e058a",
-        "8834e9f5bdbeb33cc5381767a615608da7294df7"
+        "8834e9f5bdbeb33cc5381767a615608da7294df7",
+        "e860910647b37b6bc43e2ec70064e7cd48a1f65d"
       ],
       "review": {
         "status": "pending",
@@ -1517,24 +1523,30 @@
       "id": "T6-W9",
       "sprint": 1,
       "state": "prepared",
-      "implementation": "partial",
+      "implementation": "complete",
       "owner": "root",
       "dependencies": [
         "T6-W4",
         "O-CANARY",
         "T7-W4b"
       ],
-      "next_action": "Reconcile remaining alert-rule coverage and obtain version-bound real-channel delivery evidence.",
+      "next_action": "Named C1-C5 rule/channel source integrated. Real external binding, deployed detectors and end-to-end acceptance remain pending at canonical later gates; no live credit.",
       "blockers": [],
       "commits": [
-        "bb165bad54125460ebae213e405df3a75baa6566"
+        "bb165bad54125460ebae213e405df3a75baa6566",
+        "04743acf9a7a7f2385ccce1ebd13882530b7d4f1",
+        "47ae1bc370c6a68f79aa126e203ecf661b59415a"
       ],
       "review": {
-        "status": "pending",
-        "commit": null,
-        "evidence": []
+        "status": "approved",
+        "commit": "04743acf9a7a7f2385ccce1ebd13882530b7d4f1",
+        "evidence": [
+          "docs/plan/execution/2026-09-05-rule-matrix-and-billing-review.json"
+        ]
       },
-      "evidence": []
+      "evidence": [
+        "docs/plan/execution/2026-09-05-rule-matrix-and-billing-review.json"
+      ]
     },
     {
       "id": "T6-W10",
@@ -2112,7 +2124,7 @@
       "at": "2026-09-06T02:00:41.671551+00:00",
       "task": "T4-W2 fixed-contract correction: isolate per-job ledger read failure",
       "owner": "wp_t4_w2",
-      "state": "active",
+      "state": "completed",
       "scope": [
         "/private/tmp/corelink-wp-t4_w2-20260905/"
       ],
@@ -2123,11 +2135,31 @@
       "at": "2026-09-06T02:00:41.671551+00:00",
       "task": "T8-W5 fixed-contract correction: credential receipts and suspension retry after partial success",
       "owner": "wp_t8_w5",
-      "state": "active",
+      "state": "completed",
       "scope": [
         "/private/tmp/corelink-wp-t8_w5-20260905/"
       ],
       "wp": "T8-W5",
+      "role": "executor"
+    },
+    {
+      "at": "2026-09-06T02:07:47.472509+00:00",
+      "task": "T6-W9 independent review of frozen C1-C5 matrix and source-only scope",
+      "owner": "billing_review",
+      "state": "completed",
+      "scope": [],
+      "wp": "T6-W9",
+      "role": "reviewer"
+    },
+    {
+      "at": "2026-09-06T02:12:08.801458+00:00",
+      "task": "T3-W3 correct registry relay route wiring against actual server c0a4466 source",
+      "owner": "wp_t3_w3",
+      "state": "active",
+      "scope": [
+        "/private/tmp/corelink-wp-t3_w3-20260905/"
+      ],
+      "wp": "T3-W3",
       "role": "executor"
     }
   ]
