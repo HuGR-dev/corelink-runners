@@ -744,9 +744,9 @@ mod tests {
         let flushing = target.clone(); let join = std::thread::spawn(move || flushing.flush().unwrap());
         entered.wait();
         target.export(&ev("a", "L2", SlotEventKind::Acquired, 0)).unwrap(); target.export(&ev("a", "L2", SlotEventKind::Released, 2_000)).unwrap();
-        release.wait(); join.join().unwrap();
-        assert_eq!(target.buffered(), 1);
-        let flushing = target.clone(); let join = std::thread::spawn(move || flushing.flush().unwrap());
+        release.wait();
+        // The same serialized flush observes the appended tail and posts it as
+        // its next batch before returning, so release that second POST too.
         entered.wait(); release.wait(); join.join().unwrap();
         assert_eq!(target.buffered(), 0);
     }
