@@ -45,7 +45,7 @@ function validateHead(value: unknown, logId: string, identity: PublicSigningIden
   const x = value as unknown as SignedWitnessHead;
   if (x.version !== "1" || x.logId !== logId || x.nonce !== nonce || typeof x.sequence !== "number" || !Number.isSafeInteger(x.sequence) || x.sequence < 0 || !HEX.test(x.checkpointRoot) || !HEX.test(x.witnessRoot) || !positive(x.trustedAtMs) || x.signerKeyId !== identity.keyId || x.signerEpoch !== identity.epoch || !text(x.signature, 8192)) return false;
   if (x.sequence === 0 && (x.checkpointRoot !== ZERO || x.witnessRoot !== ZERO)) return false;
-  if (x.sequence > 0 && x.checkpointRoot === ZERO) return false;
+  if (x.sequence > 0 && (x.checkpointRoot === ZERO || x.witnessRoot === ZERO)) return false;
   return verifyOrderedFields(new TextEncoder().encode(JSON.stringify([x.version, x.logId, x.nonce, x.sequence, x.checkpointRoot, x.witnessRoot, x.trustedAtMs, x.signerKeyId, x.signerEpoch])), x.signature, identity);
 }
 
@@ -66,9 +66,10 @@ export class AwsSourceSecrets {
     this.client = options.client; this.timeoutMs = options.timeoutMs;
   }
   async load(registration: SourceRegistration): Promise<Uint8Array> {
-    if (!object(registration) || !text(registration.secretArn) || !text(registration.secretVersionId) || !text(registration.source) || !text(registration.service) || !text(registration.application) || !text(registration.keyId) || !text(registration.credentialEpoch)) throw sanitized("INVALID");
-    const response = await deadline(this.timeoutMs, (signal) => this.client.send(new GetSecretValueCommand({ SecretId: registration.secretArn, VersionId: registration.secretVersionId }), { abortSignal: signal }));
-    if (response.ARN !== registration.secretArn || response.VersionId !== registration.secretVersionId || typeof response.SecretString !== "string" || response.SecretString.length === 0 || new TextEncoder().encode(response.SecretString).byteLength > MAX_SECRET_BYTES) throw sanitized("INVALID");
+    const secretArn = registration?.secretArn; const secretVersionId = registration?.secretVersionId;
+    if (!object(registration) || !text(secretArn) || !text(secretVersionId) || !text(registration.source) || !text(registration.service) || !text(registration.application) || !text(registration.keyId) || !text(registration.credentialEpoch)) throw sanitized("INVALID");
+    const response = await deadline(this.timeoutMs, (signal) => this.client.send(new GetSecretValueCommand({ SecretId: secretArn, VersionId: secretVersionId }), { abortSignal: signal }));
+    if (response.ARN !== secretArn || response.VersionId !== secretVersionId || typeof response.SecretString !== "string" || response.SecretString.length === 0 || new TextEncoder().encode(response.SecretString).byteLength > MAX_SECRET_BYTES) throw sanitized("INVALID");
     let parsed: unknown; try { parsed = JSON.parse(response.SecretString); } catch { throw sanitized("INVALID"); }
     if (!object(parsed) || !exact(parsed, SECRET_FIELDS) || parsed.version !== "1" || parsed.source !== registration.source || parsed.service !== registration.service || parsed.application !== registration.application || parsed.key_id !== registration.keyId || parsed.credential_epoch !== registration.credentialEpoch || typeof parsed.hmac_key_base64url !== "string" || !/^[A-Za-z0-9_-]+$/.test(parsed.hmac_key_base64url)) throw sanitized("INVALID");
     let decoded: Buffer; try { decoded = Buffer.from(parsed.hmac_key_base64url, "base64url"); } catch { throw sanitized("INVALID"); }
@@ -97,24 +98,28 @@ export class LambdaWitnessClient implements CurrentCheckpointWitness {
     const configured = await (this.client.config.region?.() ?? Promise.resolve(undefined));
     const qualified = qualifiedLambda(this.functionArn); if (configured !== undefined && configured !== qualified?.region) throw sanitized("INVALID");
   }
-  private async invoke(payload: Record<string, unknown>): Promise<unknown> {
+  private async invoke(payload: Record<string, unknown>): Promise<{ value: unknown; started: number }> {
+    const started = performance.now();
     await this.regionMatches();
     const response = await deadline(this.timeoutMs, (signal) => this.client.send(new InvokeCommand({ FunctionName: this.functionArn, InvocationType: "RequestResponse", Payload: new TextEncoder().encode(JSON.stringify(payload)) }), { abortSignal: signal }));
     if (response.StatusCode !== 200 || response.FunctionError || response.ExecutedVersion !== this.version || !(response.Payload instanceof Uint8Array) || response.Payload.byteLength === 0 || response.Payload.byteLength > this.maxResponseBytes) throw sanitized("UNAVAILABLE");
     let parsed: unknown; try { parsed = JSON.parse(new TextDecoder().decode(response.Payload)); } catch { throw sanitized("INVALID"); }
     if (!object(parsed)) throw sanitized("INVALID");
-    return parsed;
+    if (performance.now() - started >= this.timeoutMs) throw sanitized("TIMEOUT");
+    return { value: parsed, started };
   }
   async accept(checkpoint: SignedCheckpoint): Promise<WitnessReceipt> {
     if (!validateCheckpoint(checkpoint, this.logId, this.journalIdentity)) throw sanitized("INVALID");
-    const parsed = await this.invoke({ action: "accept", checkpoint });
-    if (!validateReceipt(parsed, checkpoint, checkpointRootFor(checkpoint), this.witnessIdentity)) throw sanitized("INVALID");
-    return parsed;
+    const invocation = await this.invoke({ action: "accept", checkpoint });
+    if (!validateReceipt(invocation.value, checkpoint, checkpointRootFor(checkpoint), this.witnessIdentity)) throw sanitized("INVALID");
+    if (performance.now() - invocation.started >= this.timeoutMs) throw sanitized("TIMEOUT");
+    return invocation.value;
   }
   async readHead(nonce: string): Promise<SignedWitnessHead> {
     if (!NONCE.test(nonce)) throw sanitized("INVALID");
-    const parsed = await this.invoke({ action: "head", nonce, logId: this.logId });
-    if (!validateHead(parsed, this.logId, this.witnessIdentity, nonce)) throw sanitized("INVALID");
-    return parsed;
+    const invocation = await this.invoke({ action: "head", nonce, logId: this.logId });
+    if (!validateHead(invocation.value, this.logId, this.witnessIdentity, nonce)) throw sanitized("INVALID");
+    if (performance.now() - invocation.started >= this.timeoutMs) throw sanitized("TIMEOUT");
+    return invocation.value;
   }
 }

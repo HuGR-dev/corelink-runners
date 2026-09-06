@@ -58,5 +58,7 @@ describe("AWS source and witness adapters", () => {
     await expect(lambda(malformed.client).readHead("b".repeat(64))).rejects.toBeInstanceOf(AwsAdapterError);
     const slow = { config: { region: async () => "us-east-1" }, send: () => new Promise(() => {}) };
     await expect(new LambdaWitnessClient({ client: slow as any, functionArn: "arn:aws:lambda:us-east-1:222222222222:function:witness:7", logId: "log", journalIdentity, witnessIdentity, timeoutMs: 10, maxResponseBytes: 100 }).readHead("b".repeat(64))).rejects.toMatchObject({ code: "TIMEOUT" });
+    const delayed = { config: { region: async () => "us-east-1" }, send: () => new Promise((resolve) => setTimeout(() => resolve({ StatusCode: 200, ExecutedVersion: "7", Payload: new TextEncoder().encode(JSON.stringify(receipt())) }), 5)) };
+    await expect(new LambdaWitnessClient({ client: delayed as any, functionArn: "arn:aws:lambda:us-east-1:222222222222:function:witness:7", logId: "log", journalIdentity, witnessIdentity, timeoutMs: 1, maxResponseBytes: 262144 }).accept(checkpoint)).rejects.toMatchObject({ code: "TIMEOUT" });
   });
 });
