@@ -11,6 +11,14 @@ import {
 } from "../lib";
 import { runnerCredentialLeaseId } from "./runner_credential_lease";
 
+const I64_MAX = 0x7fff_ffff_ffff_ffffn;
+const LIFECYCLE_GENERATION = /^(0|[1-9][0-9]*)$/;
+
+function validLifecycleGeneration(value: unknown): value is string {
+  if (typeof value !== "string" || value.length > 19 || !LIFECYCLE_GENERATION.test(value)) return false;
+  try { return BigInt(value) <= I64_MAX; } catch { return false; }
+}
+
 export class MintForbiddenError extends Error {
   readonly source: "edge_proxy" | "authz";
   readonly patId?: string;
@@ -90,6 +98,7 @@ export async function mintCasPat(env: MintEnv, params: MintParams): Promise<Mint
   const token = typeof j.token_plaintext === "string" ? j.token_plaintext : "";
   const patId = typeof j.pat_id === "string" ? j.pat_id : "";
   const tenant = typeof j.tenant === "string" ? j.tenant : "";
+  const lifecycleGeneration = j.lifecycle_generation;
   const maxConcurrency = j.max_concurrency;
   const maxVcpuH = j.max_vcpu_h;
   const validMaxConcurrency = typeof maxConcurrency === "number"
@@ -98,6 +107,7 @@ export async function mintCasPat(env: MintEnv, params: MintParams): Promise<Mint
     ? { patId, tenant, ...(validMaxConcurrency ? { maxConcurrency } : {}) } : undefined;
   if (!token.trim() || !patId.trim() || !tenant.trim() || typeof maxConcurrency !== "number"
     || !Number.isFinite(maxConcurrency) || !Number.isSafeInteger(maxConcurrency) || maxConcurrency <= 0
+    || !validLifecycleGeneration(lifecycleGeneration)
     || (maxVcpuH !== undefined && (typeof maxVcpuH !== "number" || !Number.isFinite(maxVcpuH) || maxVcpuH < 0))) {
     throw new MintForbiddenError("runner mint response invalid", "authz", metadata);
   }
@@ -105,6 +115,7 @@ export async function mintCasPat(env: MintEnv, params: MintParams): Promise<Mint
     token,
     patId,
     tenant,
+    lifecycleGeneration,
     maxConcurrency,
     ...(maxVcpuH === undefined ? {} : { maxVcpuH }),
   };
@@ -153,6 +164,7 @@ export async function buildContainerEnv(
       },
       patId: m.patId,
       tenant: m.tenant,
+      lifecycleGeneration: m.lifecycleGeneration,
       maxConcurrency: m.maxConcurrency,
       maxVcpuH: m.maxVcpuH,
     };

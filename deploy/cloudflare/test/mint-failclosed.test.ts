@@ -45,6 +45,7 @@ describe("required mint fail-closed contract", () => {
     ["missing cap", mintResponse({ token_plaintext: "pat", pat_id: "p", tenant: "t" })],
     ["string cap", mintResponse({ token_plaintext: "pat", pat_id: "p", tenant: "t", max_concurrency: "3" })],
     ["unsafe integer cap", mintResponse({ token_plaintext: "pat", pat_id: "p", tenant: "t", max_concurrency: Number.MAX_SAFE_INTEGER + 1 })],
+    ["invalid lifecycle generation", mintResponse({ token_plaintext: "pat", pat_id: "p", tenant: "t", max_concurrency: 3, lifecycle_generation: "01" })],
     ["whitespace token", mintResponse({ token_plaintext: "  ", pat_id: "p", tenant: "t", max_concurrency: 3 })],
     ["whitespace pat id", mintResponse({ token_plaintext: "pat", pat_id: "  ", tenant: "t", max_concurrency: 3 })],
     ["whitespace tenant", mintResponse({ token_plaintext: "pat", pat_id: "p", tenant: "  ", max_concurrency: 3 })],
@@ -84,6 +85,7 @@ describe("required mint fail-closed contract", () => {
       pat_id: "pat-7",
       tenant: "tenant-7",
       max_concurrency: 3,
+      lifecycle_generation: "7",
     })));
     const result = await buildContainerEnv(env, params, {
       fabricEndpoint: "https://runner.example",
@@ -101,11 +103,31 @@ describe("required mint fail-closed contract", () => {
       tenant: "tenant-7",
       max_concurrency: 3,
       max_vcpu_h: 0,
+      lifecycle_generation: "7",
     })));
     const result = await buildContainerEnv(env, params, deps);
-    expect(result).toMatchObject({ authz: "ok", patId: "pat-7", tenant: "tenant-7", maxConcurrency: 3, maxVcpuH: 0 });
+    expect(result).toMatchObject({ authz: "ok", patId: "pat-7", tenant: "tenant-7", lifecycleGeneration: "7", maxConcurrency: 3, maxVcpuH: 0 });
     expect(result.containerEnv).toMatchObject({ CLW_TENANT: "tenant-7", CLW_CRED_TICKET: "ticket-7" });
     expect(result.containerEnv).not.toHaveProperty("CLW_TOKEN");
     expect(JSON.stringify(result)).not.toContain("secret-pat");
+  });
+
+  it("uses only issuer generation and never forwards a caller generation", async () => {
+    const fetcher = vi.fn(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      expect(body).not.toHaveProperty("lifecycle_generation");
+      return mintResponse({ token_plaintext: "server-pat", pat_id: "pat-server", tenant: "tenant-server", max_concurrency: 2, lifecycle_generation: "42" });
+    });
+    vi.stubGlobal("fetch", fetcher);
+    const result = await buildContainerEnv(env, { ...params, lifecycleGeneration: "999" } as typeof params, deps);
+    expect(result).toMatchObject({ authz: "ok", lifecycleGeneration: "42" });
+  });
+
+  it.each([undefined, 1, "01", "9223372036854775808", "1.0"])("rejects malformed issuer generation before env-0/provider use: %s", async lifecycle_generation => {
+    vi.stubGlobal("fetch", vi.fn(async () => mintResponse({ token_plaintext: "server-pat", pat_id: "pat-server", tenant: "tenant-server", max_concurrency: 2, lifecycle_generation })));
+    const stashCall = vi.fn(async () => "ticket");
+    const result = await buildContainerEnv(env, params, { ...deps, stash: { stash: stashCall } });
+    expect(result).toMatchObject({ authz: "forbidden", patId: "pat-server", tenant: "tenant-server" });
+    expect(stashCall).not.toHaveBeenCalled();
   });
 });

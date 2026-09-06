@@ -247,6 +247,7 @@ export interface MintResult {
   token: string;
   patId: string;
   tenant: string;
+  lifecycleGeneration: string;
   maxConcurrency?: number;
   maxVcpuH?: number;
 }
@@ -295,7 +296,7 @@ export async function revokeCasPatById(
  */
 export type ColdReason = "mint_key_unarmed" | "no_repo" | "no_installation_or_pat";
 
-export interface ContainerEnvResult {
+interface ContainerEnvResultBase {
   /** Exact concurrency holder created by this preparation. */
   preparationId?: string;
   /** Durable shared compute reservation, held independently of PAT cleanup. */
@@ -317,6 +318,10 @@ export interface ContainerEnvResult {
    */
   maxVcpuH?: number;
 }
+
+export type ContainerEnvResult =
+  | (ContainerEnvResultBase & { authz: "forbidden"; lifecycleGeneration?: never })
+  | (ContainerEnvResultBase & { authz: "ok"; lifecycleGeneration: string });
 
 // ── env-0 (cred-ticket) — keep the CAS PAT OUT of the untrusted container env ──
 //
