@@ -592,6 +592,7 @@ pub struct AppState {
     /// `FABRIC_ADMIN_KEY` (the same operator secret as the tenant-plan admin).
     pub(crate) admin_key: Option<Arc<str>>,
     pub(crate) compute_grant_public_keys: HashMap<String, Vec<u8>>,
+    pub(crate) credential_issuer_key: Option<String>,
     /// Lease ids provisioned as CHECK-HOST leases (CF-native check-host, C1/C6),
     /// mapped to their `toolchain_digest` (the clw snapshot manifest digest the
     /// box hydrated at spawn). A fabric-internal marker table — mirrors
@@ -905,6 +906,7 @@ impl AppState {
             suspended_tenants: Arc::new(Mutex::new(std::collections::HashSet::new())),
             admin_key: None,
             compute_grant_public_keys: HashMap::new(),
+            credential_issuer_key: None,
             // Check-host mode DEFAULT-OFF: empty marker map. Populated only when
             // an acquire carries `toolchain_digest` (C1/C6).
             toolchain_digests: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -1450,6 +1452,13 @@ impl AppState {
     #[must_use]
     pub fn with_compute_grant_public_keys(mut self, keys: HashMap<String, Vec<u8>>) -> Self {
         self.compute_grant_public_keys = keys;
+        self
+    }
+
+    /// Dedicated credential-issuer key for the tenant lifecycle snapshot.
+    #[must_use]
+    pub fn with_credential_issuer_key(mut self, key: Option<String>) -> Self {
+        self.credential_issuer_key = key;
         self
     }
 
@@ -2379,6 +2388,10 @@ pub fn app_full(
         state.compute_grant_public_keys.clone(),
         state.admin_key.as_deref().map(str::to_owned),
     );
+    let credential_lifecycle = crate::credential_lifecycle_api::router(
+        state.ledger.clone(),
+        state.credential_issuer_key.clone(),
+    );
 
     let authenticated = Router::new()
         .route(paths::USAGE, get(handlers::usage::usage))
@@ -2448,6 +2461,7 @@ pub fn app_full(
     let work = Router::new()
         .merge(internal)
         .merge(compute_budget)
+        .merge(credential_lifecycle)
         .merge(ingest)
         .merge(authenticated)
         .layer(
