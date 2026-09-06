@@ -37,12 +37,13 @@ describe("durable tenant suspension revocation", () => {
     const jobs = kv({ job_a: "pat-a", job_b: "pat-b", "jtenant:job_a": "wrong-inventory" });
     let calls = 0;
     const authority = {
-      listJobAttributions: vi.fn(async (_tenant: string, cursor?: string) => {
+      pendingCredentials: vi.fn(async (_selection: unknown, cursor?: string) => {
         calls++;
         return cursor
-          ? { records: [{ jobId: "job_b", tenant: "tenant-a" }], complete: true }
-          : { records: [{ jobId: "job_a", tenant: "tenant-a" }], cursor: "job-attribution:job_a", complete: false };
+          ? { records: [{ jobId: "job_b", tenant: "tenant-a", patId: "pat-b" }], complete: true }
+          : { records: [{ jobId: "job_a", tenant: "tenant-a", patId: "pat-a" }], cursor: "credential-obligation:job_a", complete: false };
       }),
+      confirmCredentialRevoked: vi.fn(async () => {}),
     };
     const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetchMock);
@@ -60,28 +61,34 @@ describe("durable tenant suspension revocation", () => {
       .toEqual(["tenant-a", "tenant-a"]);
   });
 
-  it("does not acknowledge an incomplete active attribution with no pat_id", async () => {
+  it("revokes an authority obligation even when the KV projection is missing", async () => {
     const jobs = kv();
     const authority = {
-      listJobAttributions: vi.fn(async () => ({
-        records: [{ jobId: "job-missing", tenant: "tenant-a" }],
+      pendingCredentials: vi.fn(async () => ({
+        records: [{ jobId: "job-missing", tenant: "tenant-a", patId: "pat-missing" }],
         complete: true,
       })),
+      confirmCredentialRevoked: vi.fn(async () => {}),
     };
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 204 })));
 
     await expect(dispatchTenantSuspensionRevocations(
       envFor(authority, jobs),
       { event_id: "suspend-2", tenant_id: "tenant-a" },
-    )).rejects.toThrow("no durable pat_id");
-    expect(jobs.values.has("suspend-revoke:suspend-2")).toBe(false);
+    )).resolves.toBe(1);
+    expect(authority.confirmCredentialRevoked).toHaveBeenCalledWith({ jobId: "job-missing", tenant: "tenant-a", patId: "pat-missing" });
   });
 
   it("resumes after one job fails and skips only its confirmed historical receipt", async () => {
     const jobs = kv({ job_a: "pat-a", job_b: "pat-b" });
-    const authority = { listJobAttributions: vi.fn(async () => ({
-      records: [{ jobId: "job_a", tenant: "tenant-a" }, { jobId: "job_b", tenant: "tenant-a" }],
-      complete: true,
-    })) };
+    let pending = [
+      { jobId: "job_a", tenant: "tenant-a", patId: "pat-a" },
+      { jobId: "job_b", tenant: "tenant-a", patId: "pat-b" },
+    ];
+    const authority = {
+      pendingCredentials: vi.fn(async () => ({ records: pending, complete: true })),
+      confirmCredentialRevoked: vi.fn(async (identity: { jobId: string }) => { pending = pending.filter(record => record.jobId !== identity.jobId); }),
+    };
     let attempt = 0;
     vi.stubGlobal("fetch", vi.fn(async () => {
       attempt++;
@@ -89,8 +96,7 @@ describe("durable tenant suspension revocation", () => {
     }));
     const env = envFor(authority, jobs);
     await expect(dispatchTenantSuspensionRevocations(env, { event_id: "suspend-3", tenant_id: "tenant-a" }))
-      .rejects.toThrow("job_b revoke was not confirmed");
-    expect(jobs.values.has("revoke-receipt:job_a:tenant-a:pat-a")).toBe(true);
+      .rejects.toThrow("credential revoke pending for job job_b");
     expect(jobs.values.has("job_a")).toBe(false);
     expect(jobs.values.has("job_b")).toBe(true);
 
@@ -102,14 +108,25 @@ describe("durable tenant suspension revocation", () => {
 
   it("revokes a reminted same-job credential despite an older receipt", async () => {
     const jobs = kv({ job_same: "pat-new", "revoke-receipt:job_same:tenant-a:pat-old": JSON.stringify({ schema_version: 1, job_id: "job_same", tenant: "tenant-a", pat_id: "pat-old" }) });
-    const authority = { listJobAttributions: vi.fn(async () => ({
-      records: [{ jobId: "job_same", tenant: "tenant-a" }], complete: true,
-    })) };
+    const authority = { pendingCredentials: vi.fn(async () => ({
+      records: [{ jobId: "job_same", tenant: "tenant-a", patId: "pat-new" }], complete: true,
+    })), confirmCredentialRevoked: vi.fn(async () => {}) };
     const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetchMock);
     await expect(dispatchTenantSuspensionRevocations(envFor(authority, jobs), { event_id: "suspend-4", tenant_id: "tenant-a" }))
       .resolves.toBe(1);
     expect(JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string).pat_id).toBe("pat-new");
-    expect(jobs.values.has("revoke-receipt:job_same:tenant-a:pat-new")).toBe(true);
+    expect(authority.confirmCredentialRevoked).toHaveBeenCalledWith({ jobId: "job_same", tenant: "tenant-a", patId: "pat-new" });
+  });
+
+  it("fails closed when the transactional authority reports malformed data", async () => {
+    const jobs = kv();
+    const authority = {
+      pendingCredentials: vi.fn(async () => { throw new Error("malformed credential obligation"); }),
+      confirmCredentialRevoked: vi.fn(async () => {}),
+    };
+    await expect(dispatchTenantSuspensionRevocations(envFor(authority, jobs), { event_id: "suspend-bad", tenant_id: "tenant-a" }))
+      .rejects.toThrow("malformed credential obligation");
+    expect(jobs.values.has("suspend-revoke:suspend-bad")).toBe(false);
   });
 });

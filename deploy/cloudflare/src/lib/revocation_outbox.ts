@@ -1,5 +1,6 @@
 import { bumpMetrics } from "../metrics";
 import { logEvent, revokeCasPatById } from "../lib";
+import type { CredentialAuthority, CredentialIdentity, CredentialPage, CredentialSelection } from "./credential_authority_contract.js";
 
 export interface RevocationKv {
   get(key: string): Promise<string | null>;
@@ -7,160 +8,83 @@ export interface RevocationKv {
   delete(key: string): Promise<void>;
   list(options?: { prefix?: string; cursor?: string }): Promise<{ keys: { name: string }[]; list_complete?: boolean; cursor?: string }>;
 }
-
 export interface RevocationEnv {
   CORELINK_RUNNER_MINT_AUTH_KEY?: string;
   CORELINK_MINT_URL?: string;
   RUNNER_JOB_PATS?: RevocationKv;
   METRICS?: any;
 }
-
-export interface SuspensionAuthority {
-  listJobAttributions(tenantId: string, cursor?: string): Promise<{
-    records: Array<{ jobId: string; tenant: string }>;
-    cursor?: string;
-    complete: boolean;
-  }>;
-}
-
-interface RevokeRecord {
-  schema_version: 1;
-  job_id: string;
-  pat_id: string;
-  tenant: string;
-  attempts: number;
-}
-
 const RETRY_PREFIX = "revoke-retry:";
-const RECEIPT_PREFIX = "revoke-receipt:";
 const MAX_LIST_PAGES = 128;
 
-function identityKey(prefix: string, jobId: string, tenant: string, patId: string): string {
-  return `${prefix}${encodeURIComponent(jobId)}:${encodeURIComponent(tenant)}:${encodeURIComponent(patId)}`;
-}
-
-function retryKey(jobId: string, tenant: string, patId: string): string {
-  return identityKey(RETRY_PREFIX, jobId, tenant, patId);
-}
-
-function receiptKey(jobId: string, tenant: string, patId: string): string {
-  return identityKey(RECEIPT_PREFIX, jobId, tenant, patId);
-}
-
-async function listKeys(kv: RevocationKv, prefix: string): Promise<string[]> {
-  const keys: string[] = [];
+async function pendingAll(authority: CredentialAuthority, selection: CredentialSelection): Promise<CredentialIdentity[]> {
+  const records: CredentialIdentity[] = [];
   let cursor: string | undefined;
   for (let page = 0; page < MAX_LIST_PAGES; page++) {
-    const listed = await kv.list({ prefix, cursor });
-    keys.push(...listed.keys.map(key => key.name));
-    if (listed.list_complete !== false) return keys;
-    if (!listed.cursor) throw new Error(`KV list incomplete for ${prefix}`);
-    cursor = listed.cursor;
+    const result: CredentialPage = await authority.pendingCredentials(selection, cursor);
+    records.push(...result.records);
+    if (result.complete) return records;
+    if (!result.cursor || result.cursor === cursor) throw new Error("incomplete credential authority page");
+    cursor = result.cursor;
   }
-  throw new Error(`KV list page bound exceeded for ${prefix}`);
+  throw new Error("credential authority page bound exceeded");
 }
 
-async function writeReceipt(env: RevocationEnv, jobId: string, tenant: string, patId: string): Promise<void> {
-  const kv = env.RUNNER_JOB_PATS;
-  if (!kv) throw new Error("revocation receipt authority unavailable");
-  await kv.put(receiptKey(jobId, tenant, patId), JSON.stringify({
-    schema_version: 1, job_id: jobId, tenant, pat_id: patId, confirmed_at_ms: Date.now(),
-  }));
+function retryKey(identity: CredentialIdentity): string {
+  return `${RETRY_PREFIX}${encodeURIComponent(identity.jobId)}:${encodeURIComponent(identity.tenant)}:${encodeURIComponent(identity.patId)}`;
 }
 
-async function hasReceipt(kv: RevocationKv, jobId: string, tenant: string): Promise<boolean> {
-  const prefix = `${RECEIPT_PREFIX}${encodeURIComponent(jobId)}:${encodeURIComponent(tenant)}:`;
-  return (await listKeys(kv, prefix)).length > 0;
+async function retainRetry(env: RevocationEnv, identity: CredentialIdentity): Promise<void> {
+  if (!env.RUNNER_JOB_PATS) return;
+  const key = retryKey(identity);
+  if (!(await env.RUNNER_JOB_PATS.get(key))) await env.RUNNER_JOB_PATS.put(key, JSON.stringify({ schema_version: 1, ...identity, attempts: 0 }));
 }
 
-async function retainRetry(env: RevocationEnv, jobId: string, patId: string, tenant: string): Promise<void> {
-  const kv = env.RUNNER_JOB_PATS;
-  if (!kv) throw new Error("revocation outbox unavailable");
-  const key = retryKey(jobId, tenant, patId);
-  if (await kv.get(key)) return;
-  await kv.put(key, JSON.stringify({ schema_version: 1, job_id: jobId, pat_id: patId, tenant, attempts: 0 } satisfies RevokeRecord));
-}
-
-export async function revokeCompletedJob(env: RevocationEnv, jobId: string, derivedTenant?: string): Promise<boolean> {
-  const kv = env.RUNNER_JOB_PATS;
-  if (!env.CORELINK_RUNNER_MINT_AUTH_KEY || !kv) return false;
-  const patId = await kv.get(jobId);
-  if (!patId) return false;
-  if (!derivedTenant) {
-    await bumpMetrics(env, "revoke_missing_tenant");
-    logEvent("error", "revoke_missing_tenant", { jobId, patId });
-    throw new Error("revoke refused: server-derived tenant is missing");
-  }
+async function revokeOne(env: RevocationEnv, authority: CredentialAuthority, identity: CredentialIdentity): Promise<boolean> {
   try {
-    await revokeCasPatById(env as never, patId, derivedTenant);
-    // The receipt is the durable proof that permits later cleanup/skip.
-    await writeReceipt(env, jobId, derivedTenant, patId);
-    if (await kv.get(jobId) === patId) await kv.delete(jobId);
-    await kv.delete(retryKey(jobId, derivedTenant, patId));
+    await revokeCasPatById(env as never, identity.patId, identity.tenant);
+    await authority.confirmCredentialRevoked(identity);
+    if (env.RUNNER_JOB_PATS && await env.RUNNER_JOB_PATS.get(identity.jobId) === identity.patId) await env.RUNNER_JOB_PATS.delete(identity.jobId);
+    if (env.RUNNER_JOB_PATS) await env.RUNNER_JOB_PATS.delete(retryKey(identity));
     return true;
   } catch (e) {
-    await retainRetry(env, jobId, patId, derivedTenant);
+    await retainRetry(env, identity);
     await bumpMetrics(env, "revoke_failed");
-    logEvent("error", "revoke_failed", { jobId, patId, tenant: derivedTenant, error: (e as Error).message });
+    logEvent("error", "revoke_failed", { jobId: identity.jobId, patId: identity.patId, tenant: identity.tenant, error: (e as Error).message });
     return false;
   }
 }
 
-export async function retryFailedRevocations(env: RevocationEnv): Promise<number> {
-  const kv = env.RUNNER_JOB_PATS;
-  if (!kv || !env.CORELINK_RUNNER_MINT_AUTH_KEY) return 0;
-  let succeeded = 0;
-  for (const name of await listKeys(kv, RETRY_PREFIX)) {
-    const raw = await kv.get(name);
-    if (!raw) continue;
-    let rec: RevokeRecord;
-    try {
-      rec = JSON.parse(raw) as RevokeRecord;
-      if (rec.schema_version !== 1 || !rec.job_id || !rec.pat_id || !rec.tenant) continue;
-    } catch { continue; }
-    try {
-      await revokeCasPatById(env as never, rec.pat_id, rec.tenant);
-      await writeReceipt(env, rec.job_id, rec.tenant, rec.pat_id);
-      if (await kv.get(rec.job_id) === rec.pat_id) await kv.delete(rec.job_id);
-      await kv.delete(name);
-      succeeded++;
-    } catch (e) {
-      await kv.put(name, JSON.stringify({ ...rec, attempts: rec.attempts + 1 }));
-      await bumpMetrics(env, "revoke_failed");
-      logEvent("error", "revoke_failed", { jobId: rec.job_id, patId: rec.pat_id, tenant: rec.tenant, retry: true, error: (e as Error).message });
-    }
+export async function revokeCompletedJob(env: RevocationEnv, authority: CredentialAuthority, jobId: string, derivedTenant?: string): Promise<boolean> {
+  if (!env.CORELINK_RUNNER_MINT_AUTH_KEY) return false;
+  const identities = await pendingAll(authority, { kind: "job", jobId });
+  if (identities.length === 0) return false;
+  let revoked = false;
+  for (const identity of identities) {
+    if (derivedTenant && identity.tenant !== derivedTenant) throw new Error("credential tenant attribution conflict");
+    if (!(await revokeOne(env, authority, identity))) throw new Error(`credential revoke pending for job ${jobId}`);
+    revoked = true;
   }
+  return revoked;
+}
+
+export async function retryFailedRevocations(env: RevocationEnv, authority: CredentialAuthority): Promise<number> {
+  if (!env.CORELINK_RUNNER_MINT_AUTH_KEY) return 0;
+  let succeeded = 0;
+  for (const identity of await pendingAll(authority, { kind: "all" })) if (await revokeOne(env, authority, identity)) succeeded++;
   return succeeded;
 }
 
-export async function dispatchTenantSuspensionRevocations(
-  env: RevocationEnv,
-  event: { event_id: string; tenant_id: string },
-  authority: SuspensionAuthority,
-): Promise<number> {
-  const kv = env.RUNNER_JOB_PATS;
-  if (!kv || !event.event_id || !event.tenant_id) throw new Error("invalid suspension event");
-  if (!env.CORELINK_RUNNER_MINT_AUTH_KEY) throw new Error("runner mint revoke authority unavailable");
+export async function dispatchTenantSuspensionRevocations(env: RevocationEnv, authority: CredentialAuthority, event: { event_id: string; tenant_id: string }): Promise<number> {
+  if (!env.CORELINK_RUNNER_MINT_AUTH_KEY || !event.event_id || !event.tenant_id) throw new Error("invalid suspension event");
   const marker = `suspend-revoke:${event.event_id}`;
-  if (await kv.get(marker)) return 0;
+  if (env.RUNNER_JOB_PATS && await env.RUNNER_JOB_PATS.get(marker)) return 0;
+  const identities = await pendingAll(authority, { kind: "tenant", tenant: event.tenant_id });
   let dispatched = 0;
-  let cursor: string | undefined;
-  for (;;) {
-    const page = await authority.listJobAttributions(event.tenant_id, cursor);
-    for (const record of page.records) {
-      if (record.tenant !== event.tenant_id) throw new Error(`tenant attribution mismatch for active job ${record.jobId}`);
-      const patId = await kv.get(record.jobId);
-      if (!patId) {
-        if (await hasReceipt(kv, record.jobId, event.tenant_id)) continue;
-        throw new Error(`active tenant job ${record.jobId} has no durable pat_id or confirmed receipt`);
-      }
-      if (!(await revokeCompletedJob(env, record.jobId, event.tenant_id))) throw new Error(`active tenant job ${record.jobId} revoke was not confirmed`);
-      dispatched++;
-    }
-    if (page.complete) break;
-    if (!page.cursor || page.cursor === cursor) throw new Error("incomplete tenant attribution page");
-    cursor = page.cursor;
+  for (const identity of identities) {
+    if (!(await revokeOne(env, authority, identity))) throw new Error(`credential revoke pending for job ${identity.jobId}`);
+    dispatched++;
   }
-  await kv.put(marker, "1");
+  if (env.RUNNER_JOB_PATS) await env.RUNNER_JOB_PATS.put(marker, "1");
   return dispatched;
 }

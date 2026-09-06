@@ -119,9 +119,10 @@ import {
 import { bumpMetrics, snapshotMetrics, MetricsDO } from "./metrics";
 import {
   dispatchTenantSuspensionRevocations as dispatchTenantSuspensionRevocationsOwned,
-  revokeCompletedJob,
-  retryFailedRevocations,
+  revokeCompletedJob as revokeCompletedJobOwned,
+  retryFailedRevocations as retryFailedRevocationsOwned,
 } from "./lib/revocation_outbox.js";
+import type { CredentialIdentity, CredentialPage, CredentialSelection } from "./lib/credential_authority_contract.js";
 import { installationToken } from "./github_app";
 import {
   ContainmentEffectLedger,
@@ -505,6 +506,48 @@ export class ContainmentDO extends DurableObject<Env> {
 
   private effectLedger(): ContainmentEffectLedger {
     return new ContainmentEffectLedger(this.ctx.storage as never, this.env.RUNNER_JOB_PATS);
+  }
+
+  private static credentialKey(identity: CredentialIdentity): string {
+    return `credential-obligation:${encodeURIComponent(identity.jobId)}:${encodeURIComponent(identity.tenant)}:${encodeURIComponent(identity.patId)}`;
+  }
+
+  async registerCredential(identity: CredentialIdentity): Promise<void> {
+    if (!identity.jobId || !identity.tenant || !identity.patId) throw new Error("invalid credential identity");
+    await this.tx(async s => {
+      const key = ContainmentDO.credentialKey(identity);
+      const existing = await s.get(key) as (CredentialIdentity & { schema_version?: number; status?: string }) | undefined;
+      if (existing !== undefined) {
+        if (existing.jobId !== identity.jobId || existing.tenant !== identity.tenant || existing.patId !== identity.patId) throw new Error("credential obligation identity conflict");
+        return;
+      }
+      await s.put(key, { schema_version: 1, ...identity, status: "pending" });
+    });
+  }
+
+  async pendingCredentials(selection: CredentialSelection, cursor?: string): Promise<CredentialPage> {
+    const page = await this.ctx.storage.list({ prefix: "credential-obligation:", ...(cursor ? { startAfter: cursor } : {}), limit: 101 });
+    const entries = [...page.entries()];
+    const records: CredentialIdentity[] = [];
+    for (const [key, raw] of entries) {
+      const value = raw as Partial<CredentialIdentity> & { schema_version?: number; status?: string };
+      if (value.schema_version !== 1 || typeof value.jobId !== "string" || typeof value.tenant !== "string" || typeof value.patId !== "string" || (value.status !== "pending" && value.status !== "revoked")) throw new Error("malformed credential obligation");
+      const matches = selection.kind === "all" || (selection.kind === "job" ? value.jobId === selection.jobId : value.tenant === selection.tenant);
+      if (matches && value.status === "pending") records.push({ jobId: value.jobId, tenant: value.tenant, patId: value.patId });
+      if (!key.startsWith("credential-obligation:")) throw new Error("credential obligation key divergent");
+    }
+    const complete = entries.length < 101;
+    return complete ? { records, complete } : { records, cursor: entries.at(-1)?.[0], complete: false };
+  }
+
+  async confirmCredentialRevoked(identity: CredentialIdentity): Promise<void> {
+    const key = ContainmentDO.credentialKey(identity);
+    await this.tx(async s => {
+      const raw = await s.get(key) as Partial<CredentialIdentity> & { schema_version?: number; status?: string } | undefined;
+      if (!raw || raw.schema_version !== 1 || raw.jobId !== identity.jobId || raw.tenant !== identity.tenant || raw.patId !== identity.patId) throw new Error("credential obligation missing or divergent");
+      if (raw.status !== "pending" && raw.status !== "revoked") throw new Error("credential obligation status invalid");
+      if (raw.status === "pending") await s.put(key, { schema_version: 1, ...identity, status: "revoked", confirmed_at_ms: Date.now() });
+    });
   }
 
   async getEffectAttempt(identity: ContainmentEffectIdentity, nonce: string): Promise<ContainmentEffectAttempt | null> {
@@ -2183,13 +2226,19 @@ async function spawnRunner(
   return { handle, runnerName, attempt };
 }
 
-export { revokeCompletedJob, retryFailedRevocations };
+export async function revokeCompletedJob(env: Env, jobId: string, derivedTenant?: string): Promise<boolean> {
+  return revokeCompletedJobOwned(env, containmentAuthority(env), jobId, derivedTenant);
+}
+
+export async function retryFailedRevocations(env: Env): Promise<number> {
+  return retryFailedRevocationsOwned(env, containmentAuthority(env));
+}
 
 export async function dispatchTenantSuspensionRevocations(
   env: Env,
   event: { event_id: string; tenant_id: string },
 ): Promise<number> {
-  return dispatchTenantSuspensionRevocationsOwned(env, event, containmentAuthority(env));
+  return dispatchTenantSuspensionRevocationsOwned(env, containmentAuthority(env), event);
 }
 
 // Tear down a completed job's runner container by the DO handle stashed at spawn.
@@ -2598,10 +2647,12 @@ async function driveSpawn(
   // so a start failure orphaned the minted cas:rw PAT to its 2h TTL (and the 60s
   // reconciler re-minted a fresh orphan each tick — 3-lens audit F2/Lens A). Writing
   // it here lets the spawn-failure catch below revoke it immediately.
-  if (mint.patId && env.RUNNER_JOB_PATS) {
-    await env.RUNNER_JOB_PATS.put(jobId, mint.patId).catch((e) =>
-      logEvent("error", "kv_put_job_pat_failed", { jobId, error: (e as Error).message }),
-    );
+  if (mint.patId) {
+    if (!mint.tenant) throw new Error("credential authority requires server-derived tenant");
+    await containmentAuthority(env).registerCredential({ jobId, tenant: mint.tenant, patId: mint.patId });
+    if (env.RUNNER_JOB_PATS) await env.RUNNER_JOB_PATS.put(jobId, mint.patId).catch((e) =>
+        logEvent("error", "kv_put_job_pat_failed", { jobId, error: (e as Error).message }),
+      );
   }
   // Concurrency ceiling (W7/F7) — ATOMIC, and enforced for BOTH warm AND cold
   // spawns (the old KV path skipped cold ⇒ unlimited runners). At-capacity ⇒ no
