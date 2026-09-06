@@ -1,5 +1,5 @@
 import { bumpMetrics } from "../metrics";
-import { logEvent, revokeCasPatById } from "../lib";
+import { logEvent, revokeCasPatById, type MintEnv } from "../lib";
 import type { CredentialAuthority, CredentialIdentity, CredentialPage, CredentialSelection } from "./credential_authority_contract.js";
 
 export interface RevocationKv {
@@ -42,7 +42,11 @@ async function retainRetry(env: RevocationEnv, identity: CredentialIdentity): Pr
 
 async function revokeOne(env: RevocationEnv, authority: CredentialAuthority, identity: CredentialIdentity): Promise<boolean> {
   try {
-    await revokeCasPatById(env as never, identity.patId, identity.tenant);
+    const mintEnv: MintEnv = {
+      CORELINK_RUNNER_MINT_AUTH_KEY: env.CORELINK_RUNNER_MINT_AUTH_KEY,
+      CORELINK_MINT_URL: env.CORELINK_MINT_URL,
+    };
+    await revokeCasPatById(mintEnv, identity.patId, identity.tenant);
     await authority.confirmCredentialRevoked(identity);
     if (env.RUNNER_JOB_PATS && await env.RUNNER_JOB_PATS.get(identity.jobId) === identity.patId) await env.RUNNER_JOB_PATS.delete(identity.jobId);
     if (env.RUNNER_JOB_PATS) await env.RUNNER_JOB_PATS.delete(retryKey(identity));
