@@ -41,6 +41,16 @@ export const COUNTER_NAMES = [
   // counted instead of hidden. A climbing count is demand for the size ladder.
   "capability_claim_unserved",
   "spawn_failed", // mint/spawn threw (claim released for re-drive)
+  "stale_spawn_claim_reaped",
+  // A drive failure can strand the queued job; this is separate from a
+  // placement-unconfirmed start because the latter did reach the provider.
+  "job_stranded",
+  // Cold-path attribution is emitted with a reason suffix. Keep the three
+  // finite values in the fixed schema so snapshots never expose an unknown
+  // counter name at runtime.
+  "spawn_cold_mint_key_unarmed",
+  "spawn_cold_no_repo",
+  "spawn_cold_no_installation_or_pat",
   "placement_unconfirmed", // a started box never claimed the job (re-driven)
   // ── Ghost containers (a start we abandoned mid-flight) ───────────────────
   // Both are fleet-capacity signals, not job signals: a container that exists

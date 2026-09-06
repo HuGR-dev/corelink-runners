@@ -90,6 +90,10 @@ pub enum MintError {
     Unreachable,
     /// The D-9 service authoritatively rejected the internal auth (401/403).
     Unauthorized,
+    /// The request was rejected by the Cloudflare Access edge before reaching
+    /// the D-9 authorization handler. This is an infrastructure/configuration
+    /// failure and must be retried separately from tenant authorization.
+    EdgeProxyForbidden,
     /// A non-2xx status that is neither auth rejection nor reachability.
     BadStatus {
         /// HTTP status code returned.
@@ -123,6 +127,7 @@ impl std::fmt::Display for MintError {
         match self {
             Self::Unreachable => write!(f, "D-9 service unreachable"),
             Self::Unauthorized => write!(f, "D-9 service rejected the internal auth (401/403)"),
+            Self::EdgeProxyForbidden => write!(f, "mint request rejected by the edge proxy (403)"),
             Self::BadStatus { status } => write!(f, "D-9 service returned status {status}"),
             Self::BadResponse => write!(f, "D-9 service returned a malformed/incomplete body"),
             Self::TtlExceedsLease {
@@ -352,15 +357,25 @@ impl<H: MintHttp> HttpCasPatMint<H> {
         }
     }
 
-    /// Map an HTTP status to a `MintError`. `Ok(())` only for 2xx; 401/403 →
-    /// `Unauthorized`; everything else → `BadStatus`.
-    fn check_status(status: u16) -> Result<(), MintError> {
+    /// Map an HTTP status/body to a `MintError`. A 403 with an Access/edge
+    /// response is kept distinct from the application authorization 403.
+    fn check_status(status: u16, body: &str) -> Result<(), MintError> {
         match status {
             200..=299 => Ok(()),
-            401 | 403 => Err(MintError::Unauthorized),
+            401 => Err(MintError::Unauthorized),
+            403 if is_edge_proxy_forbidden(body) => Err(MintError::EdgeProxyForbidden),
+            403 => Err(MintError::Unauthorized),
             other => Err(MintError::BadStatus { status: other }),
         }
     }
+}
+
+fn is_edge_proxy_forbidden(body: &str) -> bool {
+    let body = body.to_ascii_lowercase();
+    body.contains("cloudflare")
+        || body.contains("cf-access")
+        || body.contains("access denied")
+        || body.contains("<!doctype html")
 }
 
 /// The wire shape for a successful mint response from the D-9 service.
@@ -475,7 +490,7 @@ impl<H: MintHttp> CasPatMint for HttpCasPatMint<H> {
                 .post(&url, &self.internal_token, Some(acquiring_pat), &body)
                 .map_err(|_| MintError::Unreachable)?;
 
-            Self::check_status(resp.status)?;
+            Self::check_status(resp.status, &resp.body)?;
 
             let parsed: MintResponseBody =
                 serde_json::from_str(&resp.body).map_err(|_| MintError::BadResponse)?;
