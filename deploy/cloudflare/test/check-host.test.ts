@@ -604,12 +604,12 @@ describe("WP-2 2a: per-repo rate-limit key (WEBHOOK_LIMITER)", () => {
     expect(lim.keys).toEqual(["spawn:acme/api", "spawn:globex/web"]); // distinct per-repo buckets
   });
 
-  it("I1: a payload with NO repository is STILL rate-limited (never fail-open to unbounded)", async () => {
+  it("I1: a payload with NO repository is rejected before it can consume a limiter bucket", async () => {
     const lim = limiter();
     const env = rlEnv(lim, ["303"]);
-    await queuedWebhook(env, "303", undefined, SECRET, {});
-    expect(lim.limit).toHaveBeenCalledTimes(1); // the limiter WAS consulted
-    expect(lim.keys).toEqual(["spawn:"]); // bounded fallback bucket, never skipped
+    const response = await queuedWebhook(env, "303", undefined, SECRET, {});
+    expect(response.status).toBe(400);
+    expect(lim.limit).not.toHaveBeenCalled();
   });
 
   // ── The refusal must not LOSE the job (2026-08-02) ─────────────────────────
