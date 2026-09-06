@@ -17,7 +17,6 @@ export interface TenantSuspensionConsumerDependencies {
     ): Promise<boolean>;
   };
   revokeCredential(identity: CredentialIdentity): Promise<void>;
-  isLegacyCoverageComplete(tenant: string, throughGeneration: string): Promise<boolean>;
 }
 
 const MAX_EVENT_ID = 512;
@@ -72,7 +71,7 @@ async function readBoundedBody(response: Response, signal: AbortSignal): Promise
   try { return JSON.parse(text); } catch { throw new Error("invalid suspension response"); }
 }
 
-async function closeGeneration(env: { CORELINK_MINT_URL?: string; CORELINK_RUNNER_MINT_AUTH_KEY?: string }, input: TenantSuspensionInput): Promise<boolean> {
+async function closeGeneration(env: { CORELINK_MINT_URL?: string; CORELINK_RUNNER_MINT_AUTH_KEY?: string }, input: TenantSuspensionInput): Promise<{ complete: boolean; coverageVerified: boolean }> {
   const key = env.CORELINK_RUNNER_MINT_AUTH_KEY;
   if (typeof key !== "string" || key.length === 0) throw new Error("runner mint auth key unavailable");
   const origin = env.CORELINK_MINT_URL;
@@ -96,7 +95,7 @@ async function closeGeneration(env: { CORELINK_MINT_URL?: string; CORELINK_RUNNE
     if (Object.keys(body).length !== 4 || body.event_id !== input.event_id || body.tenant_id !== input.tenant_id || body.lifecycle_generation !== input.lifecycle_generation || typeof body.complete !== "boolean") throw new Error("suspension response identity mismatch");
     const expected = response.status === 200;
     if (body.complete !== expected) throw new Error("suspension response completion mismatch");
-    return body.complete;
+    return { complete: body.complete, coverageVerified: response.headers.get("x-corelink-legacy-coverage") === "verified" };
   } finally { clearTimeout(timer); }
 }
 
@@ -107,12 +106,9 @@ export async function consumeTenantSuspensionCredentials(
 ): Promise<{ complete: boolean }> {
   if (!validInput(input)) throw new Error("invalid tenant suspension input");
   const receipt = await deps.authority.beginTenantSuspension(input);
-  if (receipt.complete) {
-    if (!(await deps.isLegacyCoverageComplete(input.tenant_id, input.lifecycle_generation))) return { complete: false };
-    return { complete: true };
-  }
-  const producerComplete = await closeGeneration(env, input);
-  if (!producerComplete) return { complete: false };
+  const producer = await closeGeneration(env, input);
+  if (!producer.complete) return { complete: false };
+  if (receipt.complete) return { complete: producer.coverageVerified };
   const page = await deps.authority.pendingCredentials({ kind: "tenant", tenant: input.tenant_id, throughGeneration: input.lifecycle_generation }, receipt.cursor);
   if (!Array.isArray(page.records) || page.records.length > MAX_PAGE_RECORDS) throw new Error("suspension credential page too large");
   for (const identity of page.records) {
@@ -120,7 +116,7 @@ export async function consumeTenantSuspensionCredentials(
     if (identity.lifecycleGeneration !== undefined && BigInt(identity.lifecycleGeneration) > BigInt(input.lifecycle_generation)) throw new Error("suspension credential generation mismatch");
     await deps.revokeCredential(identity);
   }
-  const coverage = page.complete && await deps.isLegacyCoverageComplete(input.tenant_id, input.lifecycle_generation);
+  const coverage = page.complete && producer.coverageVerified;
   const nextCursor = page.complete ? undefined : page.cursor;
   if (!page.complete && typeof nextCursor !== "string") throw new Error("suspension page missing cursor");
   if (page.complete && !coverage) return { complete: false };
