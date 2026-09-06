@@ -16,11 +16,25 @@ export class CredentialObligationAuthority {
     return `credential-job-fence:${encodeURIComponent(jobId)}`;
   }
 
+  private static floorKey(tenant: string): string {
+    return `credential-tenant-floor:${encodeURIComponent(tenant)}`;
+  }
+
+  private static generation(value: unknown): string {
+    if (value === undefined) return "0";
+    if (typeof value !== "string" || !/^(0|[1-9][0-9]*)$/.test(value) || value.length > 19 || BigInt(value) > I64_MAX) throw new Error("invalid lifecycle generation");
+    return value;
+  }
+
   private static validIdentity(identity: unknown): identity is CredentialIdentity {
     const value = identity as Partial<CredentialIdentity> | undefined;
     return typeof value?.jobId === "string" && value.jobId !== "" &&
       typeof value.tenant === "string" && value.tenant !== "" &&
-      typeof value.patId === "string" && value.patId !== "";
+      typeof value.patId === "string" && value.patId !== "" && (value.lifecycleGeneration === undefined || CredentialObligationAuthority.generation(value.lifecycleGeneration) === value.lifecycleGeneration);
+  }
+
+  private static identityMatches(a: CredentialIdentity, b: CredentialIdentity): boolean {
+    return a.jobId === b.jobId && a.tenant === b.tenant && a.patId === b.patId && CredentialObligationAuthority.generation(a.lifecycleGeneration) === CredentialObligationAuthority.generation(b.lifecycleGeneration);
   }
 
   private static validateFence(key: string, jobId: string, raw: unknown): void {
@@ -36,7 +50,15 @@ export class CredentialObligationAuthority {
     if (value.schema_version !== 1 || !CredentialObligationAuthority.validIdentity(value) ||
       ((value as { status?: string }).status !== "registered" && (value as { status?: string }).status !== "revoke_requested" && (value as { status?: string }).status !== "revoked") ||
       key !== CredentialObligationAuthority.credentialKey(value)) throw new Error("malformed credential obligation");
+    CredentialObligationAuthority.generation(value.lifecycleGeneration);
     return value as CredentialIdentity & { status: string };
+  }
+
+  private static validateFloor(key: string, tenant: string, raw: unknown): string | undefined {
+    if (raw === undefined) return undefined;
+    const value = raw as { schema_version?: number; tenant?: string; revokedThrough?: unknown };
+    if (value.schema_version !== 1 || value.tenant !== tenant || key !== CredentialObligationAuthority.floorKey(tenant)) throw new Error("malformed credential tenant floor");
+    return CredentialObligationAuthority.generation(value.revokedThrough);
   }
 
   async registerCredential(identity: CredentialIdentity): Promise<void> {
@@ -44,19 +66,23 @@ export class CredentialObligationAuthority {
     const fenced = await this.tx(async s => {
       const fence = await s.get(CredentialObligationAuthority.fenceKey(identity.jobId));
       CredentialObligationAuthority.validateFence(CredentialObligationAuthority.fenceKey(identity.jobId), identity.jobId, fence);
+      const floor = CredentialObligationAuthority.validateFloor(CredentialObligationAuthority.floorKey(identity.tenant), identity.tenant, await s.get(CredentialObligationAuthority.floorKey(identity.tenant)));
       const key = CredentialObligationAuthority.credentialKey(identity);
       const existing = await s.get(key);
       if (existing !== undefined) {
         const record = CredentialObligationAuthority.validateCredential(key, existing);
-        if (record.status === "registered" && fence !== undefined) {
+        if (!CredentialObligationAuthority.identityMatches(record, identity)) throw new Error("credential identity generation conflict");
+        const covered = floor !== undefined && BigInt(CredentialObligationAuthority.generation(record.lifecycleGeneration)) <= BigInt(floor);
+        if (record.status === "registered" && (fence !== undefined || covered)) {
           await s.put(key, { schema_version: 1, ...identity, status: "revoke_requested" });
           return true;
         }
         if (record.status !== "registered") throw new Error("credential obligation already terminal or requested");
         return false;
       }
-      await s.put(key, { schema_version: 1, ...identity, status: fence === undefined ? "registered" : "revoke_requested" });
-      return fence !== undefined;
+      const covered = floor !== undefined && BigInt(CredentialObligationAuthority.generation(identity.lifecycleGeneration)) <= BigInt(floor);
+      await s.put(key, { schema_version: 1, ...identity, status: fence !== undefined || covered ? "revoke_requested" : "registered" });
+      return fence !== undefined || covered;
     });
     if (fenced) throw new Error("credential job is closed");
   }
@@ -82,13 +108,34 @@ export class CredentialObligationAuthority {
     });
   }
 
+  async closeTenantCredentials(tenant: string, throughGeneration: string): Promise<void> {
+    if (typeof tenant !== "string" || tenant === "") throw new Error("invalid tenant identity");
+    const through = CredentialObligationAuthority.generation(throughGeneration);
+    await this.tx(async s => {
+      const floorKey = CredentialObligationAuthority.floorKey(tenant);
+      const current = CredentialObligationAuthority.validateFloor(floorKey, tenant, await s.get(floorKey));
+      if (current !== undefined && BigInt(current) > BigInt(through)) throw new Error("credential tenant floor regression");
+      await s.put(floorKey, { schema_version: 1, tenant, revokedThrough: current === undefined || BigInt(through) > BigInt(current) ? through : current });
+      const page = await s.list({ prefix: "credential-obligation:", limit: 1000 });
+      for (const [key, raw] of page.entries()) {
+        const record = CredentialObligationAuthority.validateCredential(key, raw);
+        if (record.tenant === tenant && BigInt(CredentialObligationAuthority.generation(record.lifecycleGeneration)) <= BigInt(through) && record.status === "registered") {
+          await s.put(key, { schema_version: 1, ...record, status: "revoke_requested" });
+        }
+      }
+    });
+  }
+
   async requestCredentialRevocation(identity: CredentialIdentity): Promise<void> {
+    if (!CredentialObligationAuthority.validIdentity(identity)) throw new Error("invalid credential identity");
     await this.tx(async s => {
       const key = CredentialObligationAuthority.credentialKey(identity);
-      const raw = await s.get(key) as Partial<CredentialIdentity> & { schema_version?: number; status?: string } | undefined;
-      if (!raw || raw.schema_version !== 1 || raw.jobId !== identity.jobId || raw.tenant !== identity.tenant || raw.patId !== identity.patId || key !== CredentialObligationAuthority.credentialKey(raw as CredentialIdentity)) throw new Error("credential obligation missing or divergent");
-      if (raw.status === "registered") await s.put(key, { schema_version: 1, ...identity, status: "revoke_requested" });
-      else if (raw.status !== "revoke_requested" && raw.status !== "revoked") throw new Error("credential obligation status invalid");
+      const raw = await s.get(key);
+      if (raw === undefined) throw new Error("credential obligation missing or divergent");
+      const record = CredentialObligationAuthority.validateCredential(key, raw);
+      if (!CredentialObligationAuthority.identityMatches(record, identity)) throw new Error("credential obligation missing or divergent");
+      if (record.status === "registered") await s.put(key, { schema_version: 1, ...record, status: "revoke_requested" });
+      else if (record.status !== "revoke_requested" && record.status !== "revoked") throw new Error("credential obligation status invalid");
     });
   }
 
@@ -105,21 +152,31 @@ export class CredentialObligationAuthority {
       const fenceKey = CredentialObligationAuthority.fenceKey(value.jobId);
       const fence = await this.storage.get(fenceKey);
       CredentialObligationAuthority.validateFence(fenceKey, value.jobId, fence);
+      const floor = CredentialObligationAuthority.validateFloor(CredentialObligationAuthority.floorKey(value.tenant), value.tenant, await this.storage.get(CredentialObligationAuthority.floorKey(value.tenant)));
+      const through = selection.kind === "tenant" && selection.throughGeneration !== undefined ? CredentialObligationAuthority.generation(selection.throughGeneration) : floor;
+      const covered = through !== undefined && BigInt(CredentialObligationAuthority.generation(value.lifecycleGeneration)) <= BigInt(through);
       const matches = selection.kind === "all" || (selection.kind === "job" ? value.jobId === selection.jobId : value.tenant === selection.tenant);
-      const fencedRegistered = requestedStatus === "revoke_requested" && value.status === "registered" && fence !== undefined;
-      if (matches && value.status !== "revoked" && ((!requestedStatus || value.status === requestedStatus) || fencedRegistered)) records.push({ jobId: value.jobId, tenant: value.tenant, patId: value.patId });
+      const fencedRegistered = requestedStatus === "revoke_requested" && value.status === "registered" && (fence !== undefined || covered);
+      if (matches && value.status !== "revoked" && ((!requestedStatus || value.status === requestedStatus) || fencedRegistered)) {
+        records.push(value.lifecycleGeneration === undefined ? { jobId: value.jobId, tenant: value.tenant, patId: value.patId } : { jobId: value.jobId, tenant: value.tenant, patId: value.patId, lifecycleGeneration: value.lifecycleGeneration });
+      }
     }
     const complete = entries.length < 101;
     return complete ? { records, complete } : { records, cursor: entries.at(-1)?.[0], complete: false };
   }
 
   async confirmCredentialRevoked(identity: CredentialIdentity): Promise<void> {
+    if (!CredentialObligationAuthority.validIdentity(identity)) throw new Error("invalid credential identity");
     const key = CredentialObligationAuthority.credentialKey(identity);
     await this.tx(async s => {
-      const raw = await s.get(key) as Partial<CredentialIdentity> & { schema_version?: number; status?: string } | undefined;
-      if (!raw || raw.schema_version !== 1 || raw.jobId !== identity.jobId || raw.tenant !== identity.tenant || raw.patId !== identity.patId) throw new Error("credential obligation missing or divergent");
-      if (raw.status !== "revoke_requested" && raw.status !== "revoked") throw new Error("credential obligation status invalid");
-      if (raw.status === "revoke_requested") await s.put(key, { schema_version: 1, ...identity, status: "revoked", confirmed_at_ms: Date.now() });
+      const raw = await s.get(key);
+      if (raw === undefined) throw new Error("credential obligation missing or divergent");
+      const record = CredentialObligationAuthority.validateCredential(key, raw);
+      if (!CredentialObligationAuthority.identityMatches(record, identity)) throw new Error("credential obligation missing or divergent");
+      if (record.status !== "revoke_requested" && record.status !== "revoked") throw new Error("credential obligation status invalid");
+      if (record.status === "revoke_requested") await s.put(key, { schema_version: 1, ...record, status: "revoked", confirmed_at_ms: Date.now() });
     });
   }
 }
+
+const I64_MAX = 9_223_372_036_854_775_807n;
