@@ -105,6 +105,10 @@ passed 9/9.
 The broker remains multi-use while a lease is live and refuses after expiry.
 Three live 75-second refusal proofs remain separate T8-W6 gates.
 
+The remaining legacy KV spawn-claim race is not waived by this acceptance. It
+belongs to T8-W3/A3.18's atomic spawn-claim work, with its F005/F007
+implications, rather than T8-W2's credential-scope contract.
+
 ## Earlier integrated packets
 
 The prior packets in this tree include:
