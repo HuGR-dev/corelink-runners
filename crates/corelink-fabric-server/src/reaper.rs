@@ -176,6 +176,7 @@ pub async fn dispatch_tenant_suspension_events(state: &crate::AppState) {
         };
         let url = url.clone();
         let token = token.clone();
+        let expected_event_id = event.event_id.clone();
         let delivered = tokio::task::spawn_blocking(move || {
             let agent: ureq::Agent = ureq::Agent::config_builder()
                 .timeout_global(Some(Duration::from_secs(5)))
@@ -193,7 +194,9 @@ pub async fn dispatch_tenant_suspension_events(state: &crate::AppState) {
                     let status_ok = (200..300).contains(&r.status().as_u16());
                     let payload = r.body_mut().read_to_string().ok()
                         .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
-                    status_ok && payload.as_ref().and_then(|v| v.get("ok")).and_then(serde_json::Value::as_bool) == Some(true)
+                    status_ok
+                        && payload.as_ref().and_then(|v| v.get("ok")).and_then(serde_json::Value::as_bool) == Some(true)
+                        && payload.as_ref().and_then(|v| v.get("event_id")).and_then(serde_json::Value::as_str) == Some(expected_event_id.as_str())
                 })
                 .unwrap_or(false)
         })

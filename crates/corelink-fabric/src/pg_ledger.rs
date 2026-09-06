@@ -550,10 +550,16 @@ impl LeaseLedger for PgLedger {
         self.block_on(async {
             let mut client = self.pool.get().await?;
             let txn = client.transaction().await?;
-            txn.execute(
+            let suspension_inserted = txn.execute(
                 "INSERT INTO fabric_suspended_tenants (tenant_id) VALUES ($1) ON CONFLICT DO NOTHING",
                 &[&event.tenant_id],
             ).await?;
+            // One durable suspension epoch produces one revoke event. A later
+            // unsuspend removes this row and permits a new suspension epoch.
+            if suspension_inserted == 0 {
+                txn.commit().await?;
+                return Ok(());
+            }
             txn.execute(
                 "INSERT INTO tenant_suspension_events (event_id, tenant_id, created_at_ms) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
                 &[&event.event_id, &event.tenant_id, &(event.created_at_ms as i64)],
