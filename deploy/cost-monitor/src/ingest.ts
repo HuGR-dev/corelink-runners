@@ -1,20 +1,12 @@
 import { createHash } from "node:crypto";
 import { createAck, type AckFields, type AckToken, type AsyncSigner } from "./acks.js";
+import { createHistoricalTerminal, type HistoricalTerminal } from "./terminal_ack.js";
 import { planEnqueue, queueKey, deliveryKey, type DeliveryQueue } from "./outbox.js";
 import type { AuditReceipt, DurableAuditLog } from "./evidence_log.js";
 import type { MonitorStateStore, Stored, Write } from "./state.js";
 import type { TrustedClock } from "./trusted_time.js";
-import { authenticateEnvelope, laneKey, parseEnvelope, sha256, type MonitorEnvelope, type SourceCursor, type SourceRegistration } from "./types.js";
+import { authenticateEnvelope, laneKey, parseEnvelope, parseSourceCursor, sha256, type MonitorEnvelope, type SourceCursor, type SourceRegistration } from "./types.js";
 
-export type HistoricalTerminal = {
-  terminal_version: "1";
-  terminal: "HISTORICAL_NO_STATE";
-  ack: AckToken;
-  terminal_at: number;
-  signer_key_id: string;
-  signer_epoch: string;
-  signature: string;
-};
 export type IngestSigningAuthority = {
   resolveIngestSigner(nowMs: number, tupleDigest: string): Promise<AsyncSigner>;
   isIngestSignerCurrent(identity: AsyncSigner["identity"], nowMs: number, tupleDigest: string): Promise<boolean>;
@@ -49,11 +41,7 @@ function ingestKey(namespace: string, registration: Registration, eventId: strin
 function exactRegistration(envelope: MonitorEnvelope, registrations: readonly Registration[]): Registration | undefined {
   return registrations.find((r) => r.enabled && r.source === envelope.source && r.service === envelope.service && r.application === envelope.application && r.keyId === envelope.key_id && r.credentialEpoch === envelope.credential_epoch && r.allowedKinds.includes(envelope.kind));
 }
-function cursorValid(value: unknown, registration: Registration): value is SourceCursor {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const c = value as Record<string, unknown>;
-  return c.source === registration.source && c.service === registration.service && c.application === registration.application && c.keyId === registration.keyId && c.credentialEpoch === registration.credentialEpoch && positive(c.lastSequence) && typeof c.lastEnvelopeDigest === "string" && Number.isSafeInteger(c.lastOccurredAt) && Number.isSafeInteger(c.lastScheduledFor) && Number.isSafeInteger(c.firstAcceptedAt) && Number.isSafeInteger(c.lastAcceptedAt) && (c.expectedAt === null || Number.isSafeInteger(c.expectedAt)) && typeof c.quarantined === "boolean";
-}
+function cursorValid(value: unknown, registration: Registration): value is SourceCursor { try { parseSourceCursor(value, registration); return true; } catch { return false; } }
 function ackFields(envelope: MonitorEnvelope, commitId: string, committedAt: number, signer: AsyncSigner): AckFields {
   return { ack_version: "1", event_id: envelope.event_id, producer_seq: envelope.producer_seq, payload_digest: envelope.payload_digest, source: envelope.source, service: envelope.service, application: envelope.application, key_id: envelope.key_id, credential_epoch: envelope.credential_epoch, monitor_rearm_tuple_digest: envelope.monitor_rearm_tuple_digest, ingest_commit_id: commitId, committed_at: committedAt, signer_key_id: signer.identity.keyId, signer_epoch: signer.identity.epoch };
 }
@@ -89,7 +77,10 @@ export class IngestService {
     if (!registration) return { kind: "REJECTED", reason: "unknown_registration" };
     let secret: Uint8Array;
     try { secret = await this.secrets.load(registration); } catch { return { kind: "UNKNOWN", reason: "secret_unavailable" }; }
-    if (!authenticateEnvelope(envelope, registration, secret)) return { kind: "QUARANTINED", reason: "authentication_failed" };
+    if (!authenticateEnvelope(envelope, registration, secret)) {
+      try { await this.store.transact([{ key: quarantineKey(this.namespace, registration), expectedVersion: null, value: { reason: "authentication_failed", eventId: envelope.event_id } }]); } catch { return { kind: "UNKNOWN", reason: "quarantine_unavailable" }; }
+      return { kind: "QUARANTINED", reason: "authentication_failed" };
+    }
     const lane = key(this.namespace, registration);
     try {
       if (await this.store.get(lane + ":quarantine")) return { kind: "QUARANTINED", reason: "lane_quarantined" };
@@ -114,9 +105,20 @@ export class IngestService {
       if (!pendingStored && await this.store.transact([{ key: pendingKey(this.namespace, registration), expectedVersion: null, value: { kind: "pending", envelope, envelopeDigest, commitId, intentReceipt } satisfies Pending }]) !== "committed") return { kind: "RETRY", reason: "pending_conflict" };
       const signer = await this.signingAuthority.resolveIngestSigner(proof.timeMs, this.monitorTupleDigest);
       const ack = await createAck(ackFields(envelope, commitId, proof.timeMs, signer), signer);
-      const next: SourceCursor = { source: registration.source, service: registration.service, application: registration.application, keyId: registration.keyId, credentialEpoch: registration.credentialEpoch, lastSequence: envelope.producer_seq, lastEnvelopeDigest: envelopeDigest, lastOccurredAt: envelope.occurred_at, lastScheduledFor: envelope.scheduled_for, firstAcceptedAt: source?.value.firstAcceptedAt ?? proof.timeMs, lastAcceptedAt: proof.timeMs, expectedAt: registration.intervalMs === 300000 ? envelope.scheduled_for + registration.intervalMs : null, quarantined: false, lifecycle: null, lastLifecycleNonce: null, sourceHealth: "healthy", sourceReason: "healthy" };
-      const committed: CommittedIngest = { envelope, envelopeDigest, commitId, committedAt: proof.timeMs, outcome: "APPLIED", ack, terminal: null, intentReceipt, resultReceipt: null };
+      const stale = proof.timeMs > envelope.occurred_at + 60_000 || proof.timeMs > envelope.scheduled_for + 120_000;
+      const terminal = stale ? await createHistoricalTerminal(ack, signer) : null;
+      const previous = source?.value;
+      const next: SourceCursor = stale && previous ? { ...previous, lastSequence: envelope.producer_seq, lastEnvelopeDigest: envelopeDigest } : { source: registration.source, service: registration.service, application: registration.application, keyId: registration.keyId, credentialEpoch: registration.credentialEpoch, lastSequence: envelope.producer_seq, lastEnvelopeDigest: envelopeDigest, lastOccurredAt: envelope.occurred_at, lastScheduledFor: envelope.scheduled_for, firstAcceptedAt: previous?.firstAcceptedAt ?? proof.timeMs, lastAcceptedAt: proof.timeMs, expectedAt: registration.intervalMs === 300000 ? envelope.scheduled_for + registration.intervalMs : null, quarantined: false, lifecycle: null, lastLifecycleNonce: null, sourceHealth: stale ? "unknown" : "healthy", sourceReason: stale ? "producer_late" : "healthy" };
+      const incidentStored = await this.store.get<import("./incidents.js").Incident>(`${this.namespace}:incident:${laneKey(registration)}`);
+      const signal = { sourceKey: laneKey(registration), failing: stale || envelope.kind === "CANARY_CONFIG_INVALID" || envelope.kind === "BREAKER_OPEN", reason: stale ? "producer_late" : (envelope.kind === "CANARY_CONFIG_INVALID" ? "config_invalid" : "healthy"), highWaters: { producer: envelope.producer_seq }, monitorTupleDigest: this.monitorTupleDigest };
+      const incidentDecision = (await import("./incidents.js")).evaluateIncident(incidentStored?.value ?? null, signal, proof.timeMs);
+      const queueStored = await this.store.get<DeliveryQueue>(queueKey(this.namespace, laneKey(registration)));
+      const planned = planEnqueue(queueStored?.value ?? null, laneKey(registration), incidentDecision.alerts, this.destination, proof.timeMs, this.monitorTupleDigest);
+      const committed: CommittedIngest = { envelope, envelopeDigest, commitId, committedAt: proof.timeMs, outcome: stale ? "HISTORICAL_NO_STATE" : "APPLIED", ack, terminal, intentReceipt, resultReceipt: null };
       const writes: Write[] = [{ key: ingestKey(this.namespace, registration, envelope.event_id), expectedVersion: null, value: committed }, { key: lane, expectedVersion: source?.version ?? null, value: next }, { key: pendingKey(this.namespace, registration), expectedVersion: (await this.store.get<Pending>(pendingKey(this.namespace, registration)))?.version ?? null, value: committed }];
+      if (incidentDecision.incident) writes.push({ key: `${this.namespace}:incident:${laneKey(registration)}`, expectedVersion: incidentStored?.version ?? null, value: incidentDecision.incident });
+      if (planned.deliveries.length > 0 || !queueStored) writes.push({ key: queueKey(this.namespace, laneKey(registration)), expectedVersion: queueStored?.version ?? null, value: planned.queue });
+      for (const delivery of planned.deliveries) writes.push({ key: deliveryKey(this.namespace, delivery.operation.operationId), expectedVersion: null, value: delivery });
       if (await this.store.transact(writes) !== "committed") return { kind: "RETRY", reason: "state_conflict" };
       const resultReceipt = await this.audit.append(`ingest:${commitId}:result`, { type: "WRITE_AHEAD_RESULT", commitId, envelopeDigest, ackDigest: digest(JSON.stringify(ack)), outcome: committed.outcome });
       await this.audit.verify(resultReceipt);
@@ -124,7 +126,7 @@ export class IngestService {
       if (!finalStored) return { kind: "UNKNOWN", reason: "commit_missing" };
       const final = { ...finalStored.value, resultReceipt };
       if (await this.store.transact([{ key: finalStored.key, expectedVersion: finalStored.version, value: final }]) !== "committed") return { kind: "UNKNOWN", reason: "result_attach_conflict" };
-      return { kind: "ACK", body: ack };
+      return { kind: "ACK", body: terminal ?? ack };
     } catch (error) { return { kind: error instanceof Error && error.name === "AuditBusyError" ? "RETRY" : "UNKNOWN", reason: error instanceof Error ? error.message : "ingest_failed" }; }
   }
 }
