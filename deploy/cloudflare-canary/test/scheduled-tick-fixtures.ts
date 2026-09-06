@@ -1,5 +1,5 @@
 import type { AckVerifier } from "../src/config";
-import type { AckRecovery, AckToken, TickEnvelope } from "../src/tick_outbox";
+import type { AckRecovery, AckToken, HistoricalTerminal, TickEnvelope } from "../src/tick_outbox";
 
 export const HEX = "a".repeat(64);
 export const ACK_FIELDS = [
@@ -109,20 +109,21 @@ export async function signedToken<T extends object>(
   fields: readonly string[],
   signerKeyId: string,
   signerEpoch: string,
-): Promise<{ token: T & { signature: string }; verifier: AckVerifier }> {
+): Promise<{ token: T & { signature: string }; verifier: AckVerifier; signPayload: (payload: string) => Promise<string> }> {
   const pair = (await crypto.subtle.generateKey("Ed25519", true, [
     "sign",
     "verify",
   ])) as CryptoKeyPair;
-  const signature = b64(
+  const signPayload = async (payload: string) => b64(
     new Uint8Array(
       await crypto.subtle.sign(
         "Ed25519",
         pair.privateKey,
-        new TextEncoder().encode(canonical(unsigned, fields)),
+        new TextEncoder().encode(payload),
       ),
     ),
   );
+  const signature = await signPayload(canonical(unsigned, fields));
   const publicKey = b64(
     new Uint8Array(
       (await crypto.subtle.exportKey("raw", pair.publicKey)) as ArrayBuffer,
@@ -149,7 +150,27 @@ export async function signedToken<T extends object>(
           : "invalid";
       },
     },
+    signPayload,
   };
+}
+
+export async function signedHistoricalTerminal(): Promise<{ token: HistoricalTerminal; verifier: AckVerifier }> {
+  const pair = await signedToken(ackUnsigned, ACK_FIELDS, "ack-signer", "4");
+  const ack = pair.token;
+  const ackDigest = await sha256(JSON.stringify([...JSON.parse(canonical(ack, ACK_FIELDS)), ack.signature]));
+  const unsigned = {
+    terminal_version: "1" as const,
+    terminal: "HISTORICAL_NO_STATE" as const,
+    ack,
+    terminal_at: ack.committed_at,
+    signer_key_id: "ack-signer",
+    signer_epoch: "4",
+  };
+  const signature = await pair.signPayload(JSON.stringify([
+    unsigned.terminal_version, unsigned.terminal, ackDigest, unsigned.terminal_at,
+    unsigned.signer_key_id, unsigned.signer_epoch,
+  ]));
+  return { token: { ...unsigned, signature }, verifier: pair.verifier };
 }
 export async function signedAck(overrides: Partial<typeof ackUnsigned> = {}) {
   return signedToken(

@@ -56,6 +56,9 @@ const recoveryFields = [
   "recovery_signer_epoch",
   "issued_at",
 ] as const;
+const terminalFields = [
+  "terminal_version", "terminal", "ack", "terminal_at", "signer_key_id", "signer_epoch",
+] as const;
 
 export interface TickEnvelope {
   kind: "canary-tick" | "CANARY_CONFIG_INVALID";
@@ -113,6 +116,15 @@ export interface AckRecovery {
   issued_at: number;
   signature: string;
 }
+export interface HistoricalTerminal {
+  terminal_version: "1";
+  terminal: "HISTORICAL_NO_STATE";
+  ack: AckToken;
+  terminal_at: number;
+  signer_key_id: string;
+  signer_epoch: string;
+  signature: string;
+}
 type Head = {
   envelope: TickEnvelope;
   enqueuedAt: number;
@@ -121,7 +133,7 @@ type Head = {
 type State = {
   seq: number;
   head?: Head;
-  terminal?: "ACKED" | "TIMED_OUT" | "CONFIG_UNAVAILABLE";
+  terminal?: "ACKED" | "TIMED_OUT" | "CONFIG_UNAVAILABLE" | "HISTORICAL_NO_STATE";
 };
 
 const record = (value: unknown): value is Record<string, unknown> =>
@@ -190,6 +202,14 @@ const recoveryChecks = {
   recovery_signer_key_id: nonempty,
   recovery_signer_epoch: nonempty,
   issued_at: timestamp,
+};
+const terminalChecks = {
+  terminal_version: (v: unknown) => v === "1",
+  terminal: (v: unknown) => v === "HISTORICAL_NO_STATE",
+  ack: (v: unknown) => strict(v, ackFields, ackChecks),
+  terminal_at: timestamp,
+  signer_key_id: nonempty,
+  signer_epoch: nonempty,
 };
 async function hash(value: string): Promise<string> {
   return [
@@ -313,6 +333,31 @@ export async function validAck(
   );
 }
 
+export async function validHistoricalTerminal(
+  terminal: HistoricalTerminal,
+  head: Head,
+  verifier: AckVerifier | undefined,
+  now: number,
+): Promise<"valid" | "revoked" | "invalid"> {
+  const envelope = head.envelope;
+  if (!verifier || !strict(terminal, terminalFields, terminalChecks)) return "invalid";
+  const ack = terminal.ack;
+  if (terminal.terminal_at !== ack.committed_at || terminal.terminal_at < head.enqueuedAt || terminal.terminal_at > now ||
+      terminal.signer_key_id !== ack.signer_key_id || terminal.signer_epoch !== ack.signer_epoch ||
+      ack.event_id !== envelope.event_id || ack.producer_seq !== envelope.producer_seq ||
+      ack.payload_digest !== envelope.payload_digest || ack.source !== envelope.source ||
+      ack.service !== envelope.service || ack.application !== envelope.application ||
+      ack.key_id !== envelope.key_id || ack.credential_epoch !== envelope.credential_epoch ||
+      ack.monitor_rearm_tuple_digest !== envelope.monitor_rearm_tuple_digest) return "invalid";
+  const ackStatus = await verifier.verify(canonical(ack, ackFields), ack.signature, ack.signer_key_id, ack.signer_epoch);
+  if (ackStatus !== "valid") return ackStatus;
+  const ackDigest = await hash(JSON.stringify([...JSON.parse(canonical(ack, ackFields)), ack.signature]));
+  return await verifier.verify(JSON.stringify([
+    terminal.terminal_version, terminal.terminal, ackDigest, terminal.terminal_at,
+    terminal.signer_key_id, terminal.signer_epoch,
+  ]), terminal.signature, terminal.signer_key_id, terminal.signer_epoch);
+}
+
 export async function validRecovery(
   recovery: AckRecovery,
   head: Head,
@@ -398,11 +443,18 @@ export class CanaryTickOutbox {
       /* invalid token remains pending */
     }
     const current = await this.state.storage.get<State>(stateKey);
-    if (Date.now() >= deadline)
-      return this.terminal(head, "TIMED_OUT", Date.now());
-    if (!response.ok || !sameHead(current, head))
+    if (!sameHead(current, head))
       return "tick head pending: invalid ACK";
+    if (!response.ok)
+      return Date.now() >= deadline
+        ? this.terminal(head, "TIMED_OUT", Date.now())
+        : "tick head pending: invalid ACK";
     const observed = config.trustedNow?.();
+    if (strict(candidate, terminalFields, terminalChecks) && observed !== undefined && head.envelope.kind === "canary-tick") {
+      const status = await validHistoricalTerminal(candidate as HistoricalTerminal, head, config.ackVerifier, observed);
+      if (status === "valid") return this.terminal(head, "HISTORICAL_NO_STATE", Date.now());
+      if (status === "revoked") return "tick head pending: terminal signer revoked";
+    }
     if (strict(candidate, ackFields, ackChecks)) {
       const status =
         observed === undefined

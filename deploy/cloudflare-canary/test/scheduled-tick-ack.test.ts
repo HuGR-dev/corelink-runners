@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { validAck } from "../src/tick_outbox";
-import { ackUnsigned, head, signedAck } from "./scheduled-tick-fixtures";
+import { validAck, validHistoricalTerminal } from "../src/tick_outbox";
+import { ackUnsigned, head, signedAck, signedHistoricalTerminal } from "./scheduled-tick-fixtures";
 
 describe("scheduled tick ACK gate", () => {
   beforeEach(() => {
@@ -36,6 +36,12 @@ describe("scheduled tick ACK gate", () => {
         1_002,
       ),
     ).toBe("revoked");
+  });
+  it("accepts a valid terminal after the original deadline while checking both signatures", async () => {
+    const { token, verifier } = await signedHistoricalTerminal();
+    expect(await validHistoricalTerminal(token, head, verifier, 61_001)).toBe("valid");
+    expect(await validHistoricalTerminal({ ...token, terminal_at: 1_002 }, head, verifier, 61_001)).toBe("invalid");
+    expect(await validHistoricalTerminal({ ...token, extra: true } as typeof token, head, verifier, 61_001)).toBe("invalid");
   });
   it("rejects ACKs committed before the head and at/after its deadline", async () => {
     const { token, verifier } = await signedAck();
