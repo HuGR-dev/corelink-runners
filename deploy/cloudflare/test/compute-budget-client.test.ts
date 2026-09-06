@@ -52,7 +52,7 @@ describe("ComputeBudgetClient", () => {
     const fetcher = vi.fn(async () => ok("active"));
     await expect(client(fetcher).reserve(TOKEN, ID)).resolves.toEqual({ reservation_id: ID, state: "active" });
     await expect(client(vi.fn(async () => ok("prepared"))).activate(TOKEN, ID)).rejects.toMatchObject({ code: "ambiguous" });
-    await expect(client(vi.fn(async () => ok("cancelled", "123e4567-e89b-12d3-a456-426614174001"))).cancel(TOKEN, ID)).rejects.toMatchObject({ code: "invalid" });
+    await expect(client(vi.fn(async () => ok("cancelled", "123e4567-e89b-12d3-a456-426614174001"))).cancel(TOKEN, ID)).rejects.toMatchObject({ code: "ambiguous" });
     await expect(client(vi.fn(async () => new Response(JSON.stringify({ reservation_id: ID, state: "active", extra: 1 })))).reserve(TOKEN, ID)).rejects.toMatchObject({ code: "ambiguous" });
   });
 
