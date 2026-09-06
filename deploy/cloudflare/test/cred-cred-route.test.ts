@@ -11,7 +11,7 @@
 // incident) — so it must be pinned at the route level, not just in decideRedeem.
 //
 // NEW FILE (W4). Does NOT touch test/index.test.ts or test/check-host.test.ts.
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // @cloudflare/containers is imported transitively by src/index.ts; mock it so the
 // worker module loads under node (mirrors test/check-host.test.ts).
@@ -20,8 +20,9 @@ vi.mock("@cloudflare/containers", () => ({
   getContainer: vi.fn(),
 }));
 
-import worker, { type Env } from "../src/index";
+import worker, { CredStashDO, type Env } from "../src/index";
 import type { StashedCred } from "../src/lib";
+import { runnerCredentialLeaseId } from "../src/lib/runner_credential_lease";
 
 // ── A CRED_STASH DO double whose `redeem` returns a scripted {status, cred}. The
 // test asserts the handler's DO-status→HTTP-status mapping + the body key rename.
@@ -52,6 +53,43 @@ function redeemReq(leaseId: string, body: unknown, rawBody?: string): Request {
     headers: { "content-type": "application/json" },
     body: rawBody !== undefined ? rawBody : JSON.stringify(body),
   });
+}
+
+function realStorage() {
+  const map = new Map<string, unknown>();
+  return {
+    map,
+    async get<T>(key: string) { return map.get(key) as T | undefined; },
+    async put(key: string, value: unknown) { map.set(key, value); },
+    async delete(key: string) { map.delete(key); },
+    async deleteAll() { map.clear(); },
+    async deleteAlarm() {},
+    async setAlarm(_when: number) {},
+  };
+}
+
+function realCredStashEnv(): { env: Env; leases: Map<string, CredStashDO> } {
+  const leases = new Map<string, CredStashDO>();
+  const CRED_STASH = {
+    idFromName: (name: string) => name,
+    get: (id: string) => {
+      if (!leases.has(id)) {
+        const storage = realStorage();
+        let tail = Promise.resolve();
+        const ctx = {
+          storage,
+          blockConcurrencyWhile<T>(fn: () => Promise<T>) {
+            const result = tail.then(fn);
+            tail = result.then(() => undefined, () => undefined);
+            return result;
+          },
+        } as never;
+        leases.set(id, new CredStashDO(ctx, {} as never));
+      }
+      return leases.get(id)!;
+    },
+  };
+  return { env: { CRED_STASH } as unknown as Env, leases };
 }
 
 beforeEach(() => {
@@ -87,18 +125,18 @@ describe("POST /v1/leases/{id}/cas-cred — DO-status → HTTP-status mapping", 
     expect(stash._stub.redeem).toHaveBeenCalledWith("tkt-abc");
   });
 
-  it("401 (bad ticket) ⇒ 401 {error:'invalid ticket'}", async () => {
+  it("401 (bad ticket) ⇒ uniform 404 without exposing ticket state", async () => {
     const stash = fakeCredStash({ status: 401 });
     const resp = await worker.fetch(redeemReq("job-1", { ticket: "wrong" }), envWith(stash));
-    expect(resp.status).toBe(401);
-    expect(await resp.json()).toEqual({ error: "invalid ticket" });
+    expect(resp.status).toBe(404);
+    expect(await resp.json()).toEqual({ error: "no such lease" });
   });
 
-  it("410 (already-redeemed/expired) ⇒ 410 {error:'ticket already redeemed'}", async () => {
+  it("410 (already-redeemed/expired) ⇒ uniform 404 without exposing ticket state", async () => {
     const stash = fakeCredStash({ status: 410 });
     const resp = await worker.fetch(redeemReq("job-1", { ticket: "t" }), envWith(stash));
-    expect(resp.status).toBe(410);
-    expect(await resp.json()).toEqual({ error: "ticket already redeemed" });
+    expect(resp.status).toBe(404);
+    expect(await resp.json()).toEqual({ error: "no such lease" });
   });
 
   it("404 (no stash for this lease) ⇒ 404 {error:'no such lease'}", async () => {
@@ -141,5 +179,47 @@ describe("POST /v1/leases/{id}/cas-cred — input guards (never reach the DO)", 
     // "acme%2Fjob" ⇒ decodeURIComponent ⇒ "acme/job".
     await worker.fetch(redeemReq("acme%2Fjob", { ticket: "t" }), envWith(stash));
     expect(stash._idFromName).toHaveBeenCalledWith("acme/job");
+  });
+});
+
+describe("POST /v1/leases/{id}/cas-cred — real lease-scoped CredStashDO", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("rejects lease-A's ticket on lease B without leaking or consuming B, then preserves B multi-use until expiry", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(1_000_000));
+    const { env, leases } = realCredStashEnv();
+    const leaseA = runnerCredentialLeaseId("jobA", "tenantA", "PATA");
+    const leaseB = runnerCredentialLeaseId("jobB", "tenantB", "PATB");
+    const ticketA = "a".repeat(64);
+    const ticketB = "b".repeat(64);
+    const credA: StashedCred = { token: "PAT-A", endpoint: "https://cas", tenant: "tenantA" };
+    const credB: StashedCred = { token: "PAT-B", endpoint: "https://cas", tenant: "tenantB" };
+    const stashA = (env.CRED_STASH as unknown as { get(id: string): CredStashDO }).get(leaseA);
+    const stashB = (env.CRED_STASH as unknown as { get(id: string): CredStashDO }).get(leaseB);
+    await stashA.stash(ticketA, credA, 60_000);
+    await stashB.stash(ticketB, credB, 60_000);
+
+    const cross = await worker.fetch(redeemReq(encodeURIComponent(leaseB), { ticket: ticketA }), env, {} as never);
+    expect(cross.status).toBe(404);
+    const crossBody = (await cross.json()) as Record<string, unknown>;
+    expect(crossBody.cas_pat).toBeUndefined();
+    expect(crossBody.clw_tenant).toBeUndefined();
+
+    const validB = await worker.fetch(redeemReq(encodeURIComponent(leaseB), { ticket: ticketB }), env, {} as never);
+    expect(validB.status).toBe(200);
+    expect((await validB.json()).cas_pat).toBe("PAT-B");
+    const secondB = await worker.fetch(redeemReq(encodeURIComponent(leaseB), { ticket: ticketB }), env, {} as never);
+    expect(secondB.status).toBe(200);
+    expect((await secondB.json()).cas_pat).toBe("PAT-B");
+
+    const validA = await worker.fetch(redeemReq(encodeURIComponent(leaseA), { ticket: ticketA }), env, {} as never);
+    expect(validA.status).toBe(200);
+    expect((await validA.json()).cas_pat).toBe("PAT-A");
+
+    vi.setSystemTime(new Date(1_060_001));
+    const expiredB = await worker.fetch(redeemReq(encodeURIComponent(leaseB), { ticket: ticketB }), env, {} as never);
+    expect(expiredB.status).toBe(404);
+    expect((await expiredB.json()).cas_pat).toBeUndefined();
   });
 });
