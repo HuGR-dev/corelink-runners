@@ -25,13 +25,16 @@
 //   • "FALLBACK" and "an UNKNOWN runner_name" — also pass pre-fix. They guard
 //     behaviour the fix must not break, which is a different job from proving it.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { makeWorkerAuthorities } from "./helpers/worker-authorities";
 
 interface FakeContainer {
   handle: string;
   startWithEnv: ReturnType<typeof vi.fn>;
   teardown: ReturnType<typeof vi.fn>;
+  isAlive: ReturnType<typeof vi.fn>;
 }
 let containers: FakeContainer[] = [];
+const issuedOperations = new Map<string, string>();
 
 vi.mock("@cloudflare/containers", () => ({
   Container: class {},
@@ -41,10 +44,12 @@ vi.mock("@cloudflare/containers", () => ({
     // teardown() observable on the object that was started.
     const existing = containers.find((c) => c.handle === handle);
     if (existing) return existing;
+    let alive = true;
     const c: FakeContainer = {
       handle,
       startWithEnv: vi.fn(async () => {}),
-      teardown: vi.fn(async () => {}),
+      teardown: vi.fn(async () => { alive = false; }),
+      isAlive: vi.fn(async () => alive),
     };
     containers.push(c);
     return c;
@@ -102,7 +107,12 @@ function installFetchRouter() {
         mintedNames.push(body.name ?? "");
         return new Response(JSON.stringify({ encoded_jit_config: "jit-perm" }), { status: 200 });
       }
+      if (url.includes("/internal/v1/runner/authorize")) {
+        return new Response(JSON.stringify({ tenant: "acme", max_concurrency: 10 }), { status: 200 });
+      }
       if (url.includes("/internal/v1/runner/mint")) {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { operation_id?: unknown };
+        if (typeof body.operation_id === "string") issuedOperations.set(body.operation_id, "pat-perm");
         return new Response(
           JSON.stringify({
             token_plaintext: "cas-pat",
@@ -112,6 +122,12 @@ function installFetchRouter() {
           }),
           { status: 200 },
         );
+      }
+      if (url.includes("/internal/v1/runner/adopt")) {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { operation_id?: unknown; pat_id?: unknown };
+        return issuedOperations.get(String(body.operation_id)) === body.pat_id
+          ? new Response(null, { status: 204 })
+          : new Response("adoption mismatch", { status: 400 });
       }
       // PAT revoke on completion, and anything else the completed leg pokes.
       return new Response("{}", { status: 200 });
@@ -173,14 +189,30 @@ const completed = (jobId: number, runnerName?: string) => ({
 });
 
 function baseEnv(kv: ReturnType<typeof fakeKv>): Env {
-  return {
+  const env = {
     RUNNER_CONTAINER: { _ns: "runner" },
     CHECK_HOST_CONTAINER: { _ns: "check" },
     GITHUB_WEBHOOK_SECRET: SECRET,
     GITHUB_MINT_TOKEN: "ghp-mint",
+    CLOUDFLARE_SPAWN_AUTH_TOKEN: "spawn-auth",
     PINNED_IMAGE_DIGEST: "",
+    CORELINK_RUNNER_MINT_AUTH_KEY: "mint-key",
+    CORELINK_MINT_URL: "https://mint.test",
+    SPAWN_WORKER_PUBLIC_URL: "https://worker.test",
+    CLW_ENDPOINT: "https://cas.test",
+    CRED_STASH: {
+      idFromName: (name: string) => name,
+      get: () => ({
+        stash: async (ticket: string) => ticket,
+        wipe: async () => {},
+      }),
+    },
     RUNNER_JOB_PATS: kv,
   } as unknown as Env;
+  const authorities = makeWorkerAuthorities(kv);
+  env.CONTAINMENT = authorities.CONTAINMENT as never;
+  env.CONCURRENCY_SLOTS = authorities.CONCURRENCY_SLOTS as never;
+  return env;
 }
 
 /** Spawn one box for `jobId`; returns its container and the name minted for it. */
@@ -197,6 +229,7 @@ describe("teardown correlates on runner_name, not the spawn-request job id", () 
   beforeEach(() => {
     containers = [];
     mintedNames = [];
+    issuedOperations.clear();
     vi.mocked(getContainer).mockClear();
     installFetchRouter();
   });
