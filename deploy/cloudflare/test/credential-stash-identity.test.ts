@@ -44,7 +44,7 @@ describe("exact minted credential stash identity", () => {
     vi.stubGlobal("fetch", vi.fn(async () => {
       mint++;
       const suffix = mint === 1 ? "a" : "b";
-      return new Response(JSON.stringify({ token_plaintext: `token-${suffix}`, pat_id: `pat-${suffix}`, tenant: "tenant-a", max_concurrency: 2 }), { status: 200 });
+      return new Response(JSON.stringify({ token_plaintext: `token-${suffix}`, pat_id: `pat-${suffix}`, tenant: "tenant-a", lifecycle_generation: "1", max_concurrency: 2 }), { status: 200 });
     }));
     const env: MintEnv = { CORELINK_RUNNER_MINT_AUTH_KEY: "key", CORELINK_MINT_URL: "https://mint.invalid" };
     const params = (repoFullName: string) => ({ jobId: "same-job", repoFullName, installationId: 7 });
