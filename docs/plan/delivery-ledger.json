@@ -635,7 +635,7 @@
     {
       "id": "T4-W1",
       "sprint": 2,
-      "state": "active",
+      "state": "prepared",
       "implementation": "partial",
       "owner": "wp_t4_w1",
       "dependencies": [
@@ -643,14 +643,17 @@
         "T8-W4b",
         "D13"
       ],
-      "next_action": "Retained attribution and PATcleanup ordering candidate reviewed; same executor adds actual Worker long-job/expiredKV/billingretry acceptance. D13 remains unratified.",
+      "next_action": "Review completed no-TTL transactional attribution and authoritative enumeration; D13 ratification remains required for whole-WP implementation. Pair consumer tests with T4-W2/T8-W5. Completion test is production handler with authority stub, not real DO restart proof.",
       "blockers": [
         "Ratified D13 owner-precedence ADR not found; do not invent precedence."
       ],
       "commits": [
         "4c849cd80ac37f0eeff09e4da7e0195451a4b188",
         "8b7ff393486177991246e9e693e9d02ec8ff5218",
-        "5956df4c8949746413271045a3f2457f93d9e8f1"
+        "5956df4c8949746413271045a3f2457f93d9e8f1",
+        "f54788e74d1f2f6bb8df2abe4cedc85102668e7e",
+        "708b1e7227ebc4a965168a15aed4e4c1e168b716",
+        "407f2ea4d9f2ae3b17c581cd9649bd9ad87f224d"
       ],
       "review": {
         "status": "pending",
@@ -669,10 +672,13 @@
         "T4-W1",
         "R2"
       ],
-      "next_action": "Same executor implements actual lost-completed recovery from durable attribution and GitHub timestamps, prevents cursor starvation, and validates poison events before batching; source candidate not accepted.",
+      "next_action": "Review corrected durable lostcompletion persistence, immutable replay, storage-failure handling and cursor safety; same executor collects actual focused-test exit result. Pair against real T4-W1 authority.",
       "blockers": [],
       "commits": [
-        "303622df89b201e0a53e5e23cea4a4bcba7061d3"
+        "303622df89b201e0a53e5e23cea4a4bcba7061d3",
+        "9a15de63c993aaa149917ca7a73f3d9334a55984",
+        "0516442ef5e2095b27e6ef760d4ca20e2b59a10c",
+        "116bf98f46baa509119c0a2c1342afb351b3abb2"
       ],
       "review": {
         "status": "pending",
@@ -839,11 +845,13 @@
       "dependencies": [
         "T3-W9"
       ],
-      "next_action": "Same executor defines and implements the missing in-repo durable fabric suspension producer and authenticated Worker delivery seam. Missing source code alone is not an external owner blocker; consumer-only candidate remains partial.",
+      "next_action": "Same executor replaces jtenant inventory with T4-W1 authoritative enumeration, preserves exact PAT obligations and fixes producer persistence/no-op defaults, independent dispatch and event-bound ACK; review pending.",
       "blockers": [],
       "commits": [
         "50ab03667fe8d877321b6096439677938e0b3918",
-        "5a1ab636a3e4cc1f96bdf559c16a02a0d2253147"
+        "5a1ab636a3e4cc1f96bdf559c16a02a0d2253147",
+        "e34819c30411ae02fdff415365aa3b6738e31529",
+        "651c5aae801632726be14cb4c874c04a015e058a"
       ],
       "review": {
         "status": "pending",
@@ -2025,7 +2033,7 @@
       "at": "2026-09-06T01:04:27.306880+00:00",
       "task": "T4-W1 Durable job tenant attribution beyond PAT TTL",
       "owner": "wp_t4_w1",
-      "state": "active",
+      "state": "completed",
       "worktree": "/private/tmp/corelink-wp-t4_w1-20260905",
       "scope": [
         "/private/tmp/corelink-wp-t4_w1-20260905/ (WP-owned helpers/tests and minimal integration wiring; no shared checkout writes)"
