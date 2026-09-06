@@ -29,13 +29,14 @@ export type IngestResult =
   | { kind: "RETRY" | "QUARANTINED" | "REJECTED" | "UNKNOWN"; reason: string };
 
 type Pending = { kind: "pending"; envelope: MonitorEnvelope; envelopeDigest: string; commitId: string; intentReceipt: AuditReceipt };
+type CompletedMarker = { kind: "completed"; envelopeDigest: string; commitId: string };
 type Registration = SourceRegistration;
 type Audit = Pick<DurableAuditLog, "append" | "verify">;
 const positive = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 const digest = (value: string): string => createHash("sha256").update(value, "utf8").digest("hex");
 
 function key(namespace: string, registration: Registration): string { return `${namespace}:source:${laneKey(registration)}`; }
-function quarantineKey(namespace: string, registration: Registration): string { return `${namespace}:source:${laneKey(registration)}:quarantine`; }
+function quarantineKey(namespace: string, registration: Registration): string { return `${namespace}:quarantine:${laneKey(registration)}`; }
 function pendingKey(namespace: string, registration: Registration): string { return `${namespace}:ingest-pending:${laneKey(registration)}`; }
 function ingestKey(namespace: string, registration: Registration, eventId: string): string { return `${namespace}:ingest:${laneKey(registration)}:${digest(eventId)}`; }
 function exactRegistration(envelope: MonitorEnvelope, registrations: readonly Registration[]): Registration | undefined {
@@ -63,7 +64,13 @@ export class IngestService {
     const stored = await this.store.get<CommittedIngest>(ingestKey(this.namespace, registration, envelope.event_id));
     if (!stored || !stored.value || stored.value.envelopeDigest !== sha256(JSON.stringify(envelope)) || stored.value.envelope.event_id !== envelope.event_id) return stored ? null : null;
     await this.audit.verify(stored.value.intentReceipt);
-    if (!stored.value.resultReceipt) throw new Error("result_audit_pending");
+    if (!stored.value.resultReceipt) {
+      const resultReceipt = await this.audit.append(`ingest:${stored.value.commitId}:result`, { type: "WRITE_AHEAD_RESULT", commitId: stored.value.commitId, envelopeDigest: stored.value.envelopeDigest, ackDigest: digest(JSON.stringify(stored.value.ack)), outcome: stored.value.outcome });
+      await this.audit.verify(resultReceipt);
+      const completed = { ...stored.value, resultReceipt };
+      if (await this.store.transact([{ key: stored.key, expectedVersion: stored.version, value: completed }]) !== "committed") throw new Error("result_attach_conflict");
+      return completed;
+    }
     await this.audit.verify(stored.value.resultReceipt);
     return stored.value;
   }
@@ -105,11 +112,12 @@ export class IngestService {
       }
       const envelopeDigest = sha256(JSON.stringify(envelope));
       const commitId = digest(`${this.namespace}\0${laneKey(registration)}\0${envelope.event_id}\0${envelopeDigest}`);
-      const pendingStored = await this.store.get<Pending>(pendingKey(this.namespace, registration));
-      if (pendingStored && (pendingStored.value.commitId !== commitId || pendingStored.value.envelopeDigest !== envelopeDigest)) return { kind: "RETRY", reason: "pending_commit" };
-      const intentReceipt = pendingStored?.value.intentReceipt ?? await this.audit.append(`ingest:${commitId}:intent`, { type: "WRITE_AHEAD_INTENT", commitId, envelope, envelopeDigest });
+      const pendingStored = await this.store.get<Pending | CompletedMarker>(pendingKey(this.namespace, registration));
+      const activePending = pendingStored?.value.kind === "pending" ? pendingStored as Stored<Pending> : null;
+      if (activePending && (activePending.value.commitId !== commitId || activePending.value.envelopeDigest !== envelopeDigest)) return { kind: "RETRY", reason: "pending_commit" };
+      const intentReceipt = activePending?.value.intentReceipt ?? await this.audit.append(`ingest:${commitId}:intent`, { type: "WRITE_AHEAD_INTENT", commitId, envelope, envelopeDigest });
       await this.audit.verify(intentReceipt);
-      if (!pendingStored && await this.store.transact([{ key: pendingKey(this.namespace, registration), expectedVersion: null, value: { kind: "pending", envelope, envelopeDigest, commitId, intentReceipt } satisfies Pending }]) !== "committed") return { kind: "RETRY", reason: "pending_conflict" };
+      if (!activePending && await this.store.transact([{ key: pendingKey(this.namespace, registration), expectedVersion: pendingStored?.version ?? null, value: { kind: "pending", envelope, envelopeDigest, commitId, intentReceipt } satisfies Pending }]) !== "committed") return { kind: "RETRY", reason: "pending_conflict" };
       const signer = await this.signingAuthority.resolveIngestSigner(proof.timeMs, this.monitorTupleDigest);
       const ack = await createAck(ackFields(envelope, commitId, proof.timeMs, signer), signer);
       const stale = proof.timeMs > envelope.occurred_at + 60_000 || proof.timeMs > envelope.scheduled_for + 120_000;
@@ -122,7 +130,7 @@ export class IngestService {
       const queueStored = await this.store.get<DeliveryQueue>(queueKey(this.namespace, laneKey(registration)));
       const planned = planEnqueue(queueStored?.value ?? null, laneKey(registration), incidentDecision.alerts, this.destination, proof.timeMs, this.monitorTupleDigest);
       const committed: CommittedIngest = { envelope, envelopeDigest, commitId, committedAt: proof.timeMs, outcome: stale ? "HISTORICAL_NO_STATE" : "APPLIED", ack, terminal, intentReceipt, resultReceipt: null };
-      const writes: Write[] = [{ key: ingestKey(this.namespace, registration, envelope.event_id), expectedVersion: null, value: committed }, { key: lane, expectedVersion: source?.version ?? null, value: next }, { key: pendingKey(this.namespace, registration), expectedVersion: (await this.store.get<Pending>(pendingKey(this.namespace, registration)))?.version ?? null, value: committed }];
+      const writes: Write[] = [{ key: ingestKey(this.namespace, registration, envelope.event_id), expectedVersion: null, value: committed }, { key: lane, expectedVersion: source?.version ?? null, value: next }, { key: pendingKey(this.namespace, registration), expectedVersion: (await this.store.get<Pending>(pendingKey(this.namespace, registration)))?.version ?? null, value: { kind: "completed", envelopeDigest, commitId } satisfies CompletedMarker }];
       if (incidentDecision.incident) writes.push({ key: `${this.namespace}:incident:${laneKey(registration)}`, expectedVersion: incidentStored?.version ?? null, value: incidentDecision.incident });
       if (planned.deliveries.length > 0 || !queueStored) writes.push({ key: queueKey(this.namespace, laneKey(registration)), expectedVersion: queueStored?.version ?? null, value: planned.queue });
       for (const delivery of planned.deliveries) writes.push({ key: deliveryKey(this.namespace, delivery.operation.operationId), expectedVersion: null, value: delivery });
