@@ -288,6 +288,16 @@ integration is `c8e7a5e` through `95d51f3`. The exact wave-2 contract records
 `trustedAtMs`, `signerKeyId`, and `signerEpoch`. These focused results overlap
 earlier module evidence and are not added into a delivery or aggregate count.
 
+The missing-source scheduler source stack
+`521bda0386a26213878e7e957acc6b5c5ee1ec36` through
+`4b8b32f6d8a9bc4ed55e076a05f324b33681ce09` is accepted after independent
+review (10 focused tests and `tsc --noEmit`). Its integration is `0e50daf`
+through `5576b1d`, where `scheduler.test.ts` and `canary-missing-tick.test.ts`
+passed 10/10 and the typecheck passed. This source packet is not delivery
+credit. The token contract is recorded at
+`docs/plan/execution/2026-09-06-monitor-token-contract.md`; its disjoint codec,
+manifest, recovery, and page paths remain under their assigned authors.
+
 For the resulting fourteen monitor suites (89 tests), every suite has a
 completed exit-0 run at `528f032`: trusted-time and evidence-log completed
 before an aggregate 120-second process limit; witness, the ten non-heavy
@@ -296,9 +306,8 @@ timeout is not recorded as an aggregate pass. The complete Canary suite passed
 13 files, 117 tests, and `npm run typecheck` at `f0b5987`.
 
 This is source composition only. T6-W15 remains prepared and partial for
-delivery: scheduler and terminal-ingest packets remain out of the integration
-tree pending approval, and all qualification gates remain open. The frozen
-runtime contract is recorded at
+delivery: terminal-ingest remains out of the integration tree pending approval,
+and all qualification gates remain open. The frozen runtime contract is recorded at
 `docs/plan/execution/2026-09-06-monitor-runtime-contract.md`. No work-package
 completion, deployment, production qualification, or change to the recorded
 16/70 delivered count is implied.
