@@ -10,17 +10,29 @@ function setup(rateAllowed = true) {
   const store = kv();
   const slotsStorage = new FakeStorage();
   const slots = new ConcurrencySlotsDO({ storage: slotsStorage } as never, {} as never);
+  const issuedOperations = new Map<string, string>();
   const limiter = vi.fn(async () => ({ success: rateAllowed }));
   const runtime = env(d, store, {
     CORELINK_RUNNER_MINT_AUTH_KEY: "mint-auth", CORELINK_MINT_URL: "https://mint.example",
     SPAWN_WORKER_PUBLIC_URL: "https://worker.example", CONCURRENCY_SLOTS: ns(slots),
     WEBHOOK_LIMITER: { limit: limiter },
   });
-  const fetchMock = vi.fn(async (input: string | URL | Request) => {
+  const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
     let body: unknown;
     if (url.endsWith("/runner/authorize")) body = { tenant: "tenant-a", max_concurrency: 2 };
-    else if (url.endsWith("/runner/mint")) body = { tenant: "tenant-a", max_concurrency: 2, pat_id: "pat-a", token_plaintext: "secret-pat" };
+    else if (url.endsWith("/runner/mint")) {
+      const requestBody = JSON.parse(String(init?.body ?? "{}")) as { operation_id?: unknown };
+      const operationId = typeof requestBody.operation_id === "string" ? requestBody.operation_id : "";
+      issuedOperations.set(operationId, "pat-a");
+      body = { operation_id: operationId, tenant: "tenant-a", max_concurrency: 2, pat_id: "pat-a", token_plaintext: "secret-pat" };
+    }
+    else if (url.endsWith("/runner/adopt")) {
+      const adoption = JSON.parse(String(init?.body ?? "{}")) as { operation_id?: unknown; pat_id?: unknown };
+      expect(typeof adoption.operation_id).toBe("string");
+      expect(adoption.pat_id).toBe(issuedOperations.get(adoption.operation_id as string));
+      return new Response(null, { status: 204 });
+    }
     else if (url.includes("generate-jitconfig")) body = { encoded_jit_config: "jit", runner: { id: 5 } };
     else if (url.endsWith("/runner/revoke")) return new Response(null, { status: 204 });
     else throw new Error(`unexpected external URL: ${url}`);
@@ -28,7 +40,7 @@ function setup(rateAllowed = true) {
   });
   vi.stubGlobal("fetch", fetchMock);
   vi.mocked(getContainer).mockReturnValue({ startWithEnv: vi.fn(async () => {}), teardown: vi.fn(async () => {}) } as never);
-  return { d, store, slotsStorage, runtime, limiter, fetchMock };
+  return { d, store, slotsStorage, runtime, limiter, fetchMock, issuedOperations };
 }
 
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.clearAllMocks(); });

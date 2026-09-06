@@ -21,13 +21,27 @@ function setup(opts: { mint?: unknown; authorize?: unknown; mintStatus?: number;
   const slotsStorage = new FakeStorage();
   const slots = new ConcurrencySlotsDO({ storage: slotsStorage } as never, {} as never);
   const store = d.runtimeEnv.RUNNER_JOB_PATS as ReturnType<typeof kv>;
-  const fetchMock = vi.fn(async (input: string | URL | Request) => {
+  const issuedOperations = new Map<string, string>();
+  const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
     if (url.endsWith("/internal/v1/runner/authorize")) {
       return response(opts.authorize ?? { tenant: TENANT, max_concurrency: 1 }, opts.authorizeStatus ?? 200);
     }
     if (url.endsWith("/internal/v1/runner/mint")) {
-      return response(opts.mint ?? { token_plaintext: "secret-pat", pat_id: "pat-1", tenant: TENANT, max_concurrency: 1 }, opts.mintStatus ?? 200);
+      const requestBody = JSON.parse(String(init?.body ?? "{}")) as { operation_id?: unknown };
+      const operationId = typeof requestBody.operation_id === "string" ? requestBody.operation_id : "";
+      const mint = opts.mint ?? { token_plaintext: "secret-pat", pat_id: "pat-1", tenant: TENANT, max_concurrency: 1 };
+      const mintBody = { ...mint, operation_id: operationId } as { operation_id?: unknown; pat_id?: unknown };
+      if (typeof mintBody.operation_id === "string" && typeof mintBody.pat_id === "string") {
+        issuedOperations.set(mintBody.operation_id, mintBody.pat_id);
+      }
+      return response(mintBody, opts.mintStatus ?? 200);
+    }
+    if (url.endsWith("/internal/v1/runner/adopt")) {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { operation_id?: unknown; pat_id?: unknown };
+      expect(typeof body.operation_id).toBe("string");
+      expect(body.pat_id).toBe(issuedOperations.get(body.operation_id as string));
+      return new Response(null, { status: 204 });
     }
     if (url.endsWith("/internal/v1/runner/revoke")) return new Response(null, { status: 204 });
     if (url.includes("generate-jitconfig")) return response({ encoded_jit_config: "jit", runner: { id: 7 } });
@@ -41,7 +55,7 @@ function setup(opts: { mint?: unknown; authorize?: unknown; mintStatus?: number;
     SPAWN_WORKER_PUBLIC_URL: "https://worker.example",
     CONCURRENCY_SLOTS: ns(slots),
   });
-  return { d, store, slotsStorage, slots, runtime, fetchMock };
+  return { d, store, slotsStorage, slots, runtime, fetchMock, issuedOperations };
 }
 
 async function queueAndDrain(fixture: ReturnType<typeof setup>, jobId: string) {
@@ -71,12 +85,21 @@ describe("capacity admission precedes required mint", () => {
 
   it("acquires the real slot before the mint request", async () => {
     const f = setup({ authorize: { tenant: TENANT, max_concurrency: 2 }, mint: { token_plaintext: "secret-pat", pat_id: "pat-2", tenant: TENANT, max_concurrency: 2 } });
-    f.fetchMock.mockImplementation(async (input: string | URL | Request) => {
+    f.fetchMock.mockImplementation(async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
+      if (url.endsWith("/internal/v1/runner/adopt")) {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { operation_id?: unknown; pat_id?: unknown };
+        expect(body.pat_id).toBe("pat-2");
+        expect(body.pat_id).toBe(f.issuedOperations.get(body.operation_id as string));
+        return new Response(null, { status: 204 });
+      }
       if (url.endsWith("/internal/v1/runner/mint")) {
+        const requestBody = JSON.parse(String(init?.body ?? "{}")) as { operation_id?: unknown };
+        const operationId = typeof requestBody.operation_id === "string" ? requestBody.operation_id : "";
+        f.issuedOperations.set(operationId, "pat-2");
         const slots = f.slotsStorage.map.get("slots") as Array<{ jobId: string }>;
         expect(slots.map((slot) => slot.jobId)).toContain("1002");
-        return response({ token_plaintext: "secret-pat", pat_id: "pat-2", tenant: TENANT, max_concurrency: 2 });
+        return response({ operation_id: operationId, token_plaintext: "secret-pat", pat_id: "pat-2", tenant: TENANT, max_concurrency: 2 });
       }
       if (url.includes("generate-jitconfig")) return response({ encoded_jit_config: "jit", runner: { id: 8 } });
       if (url.endsWith("/internal/v1/runner/revoke")) return new Response(null, { status: 204 });
