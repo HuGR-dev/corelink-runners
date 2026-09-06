@@ -1,0 +1,39 @@
+{
+  "schema_version": "evidence/v1",
+  "artifact_id": "t3-w2-lifecycle",
+  "kind": "test",
+  "status": "RED",
+  "observed_at": "2026-09-06T01:32:03Z",
+  "source": {
+    "repository": "corelink-runners",
+    "commit_sha": "6c26a7b8e05e0f94de6eae696d3eb90e6b21dc0f",
+    "path": "docs/plan/evidence/T3-W2-lifecycle.json"
+  },
+  "claims": ["A3.3", "A3.4", "A3.10", "A3.12", "T3-W2"],
+  "evidence": {
+    "counter_schema": "All literal worker bump names and the three finite cold-reason names are registered in deploy/cloudflare/src/metrics.ts.",
+    "mint_403_classification": {
+      "edge_proxy": "Distinct from authz at Rust runner_cas_mint.rs, Worker lib.ts and index.ts; both use the existing orphan: store.",
+      "store": "RUNNER_JOB_PATS",
+      "key_prefix": "orphan:",
+      "schema": "OrphanRecord with failure_class edge_proxy_403 or authz_403",
+      "retention_seconds": 1800,
+      "live_delivery": "NOT_RUN"
+    },
+    "teardown": {
+      "requirement": "Exact container handle reports down before handle deletion and slot release.",
+      "live_delivery": "NOT_RUN"
+    },
+    "recovery": {
+      "expired_slot_pruning": "ConcurrencySlotsDO.pruneExpired on scheduled tick",
+      "stale_spawn_claim": "Only a claim older than SPAWN_CLAIM_TTL_S with no durable jhandle is reaped; slot release is attempted.",
+      "live_orphan_count": "NOT_PROVEN"
+    },
+    "focused_tests": {
+      "command": "vitest run test/metrics-do.test.ts test/stale-box-reaper.test.ts test/webhook-route.test.ts --pool=threads --maxWorkers=1 --minWorkers=1; vitest run test/t3-w2-lifecycle.test.ts test/metrics-do.test.ts --pool=threads --maxWorkers=1 --minWorkers=1",
+      "passed": 34,
+      "failed": 0
+    }
+  },
+  "notes": "This artifact deliberately carries no live probe, provider teardown proof, or live orphan-count credit. The commit SHA is replaced with the final commit SHA by the delivery owner."
+}

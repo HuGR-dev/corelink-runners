@@ -58,6 +58,7 @@ import {
   claimSpawn,
   releaseSpawnClaim,
   spawnClaimAgeMs,
+  SPAWN_CLAIM_TTL_S,
   claimCompletion,
   decideSlotAcquire,
   releaseSlotByJob,
@@ -497,6 +498,14 @@ export class ConcurrencySlotsDO extends DurableObject<Env> {
   async release(jobId: string): Promise<void> {
     const slots = (await this.ctx.storage.get<SlotRecord[]>("slots")) ?? [];
     await this.ctx.storage.put("slots", releaseSlotByJob(slots, jobId, Date.now()));
+  }
+
+  /** Prune leases even when no acquire/release request arrives. */
+  async pruneExpired(): Promise<number> {
+    const slots = (await this.ctx.storage.get<SlotRecord[]>("slots")) ?? [];
+    const live = slots.filter((slot) => slot.expiresMs > Date.now());
+    await this.ctx.storage.put("slots", live);
+    return slots.length - live.length;
   }
 }
 
@@ -2301,11 +2310,9 @@ async function revokeCompletedJob(
 
 // Tear down a completed job's runner container by the DO handle stashed at spawn.
 // A finished ephemeral runner's container otherwise idles until `sleepAfter` (45m),
-// holding account container-instance capacity and starving new spawns. No-op when
-// no handle is on file (legacy/cold spawn, or the KV entry TTL-expired) — sleepAfter
-// is the backstop. Fail-OPEN: a destroy() throw is swallowed (teardown() is
-// idempotent and the provider deadline is the final backstop), never breaking the
-// webhook. Returns true only when a teardown was actually issued.
+// holding account container-instance capacity and starving new spawns. A slot is
+// released only after the exact handle reports down; a failed/uncertain teardown
+// keeps its durable handle for the next completion/retry tick.
 async function teardownCompletedRunner(
   env: Env,
   jobId: string,
@@ -2337,11 +2344,26 @@ async function teardownCompletedRunner(
   }
   if (!handle) return false; // cold/legacy job, or already torn down
   logEvent("info", "teardown_resolved", { jobId, runnerName, resolvedBy });
+  const container = getContainer(env.RUNNER_CONTAINER, handle);
   try {
-    await getContainer(env.RUNNER_CONTAINER, handle).teardown();
+    await container.teardown();
   } catch (e) {
     logEvent("error", "teardown_failed", { jobId, error: (e as Error).message });
-    // fall through: still drop the handle key so we don't retry a dead handle
+    // A failed destroy is not evidence of a released provider slot.
+    try {
+      if (await container.isAlive()) return false;
+    } catch {
+      return false;
+    }
+  }
+  try {
+    if (await container.isAlive()) {
+      logEvent("error", "teardown_still_alive", { jobId, handle });
+      return false;
+    }
+  } catch (e) {
+    logEvent("error", "teardown_confirmation_failed", { jobId, error: (e as Error).message });
+    return false;
   }
   // Drop BOTH bindings for this box. The runner-name key is the one that was
   // just consumed; the jobId key is dropped too so the stale (possibly
@@ -2355,6 +2377,18 @@ async function teardownCompletedRunner(
     /* best-effort: the key TTL-expires */
   });
   return true;
+}
+
+async function teardownObligationPresent(env: Env, jobId: string, runnerName?: string): Promise<boolean | null> {
+  if (!env.RUNNER_JOB_PATS) return false;
+  try {
+    const keys = [jobHandleKey(jobId)];
+    if (runnerName) keys.push(runnerHandleKey(runnerName));
+    for (const key of keys) if (await env.RUNNER_JOB_PATS.get(key)) return true;
+    return false;
+  } catch {
+    return null;
+  }
 }
 
 // One completed job's workflow_job fields we read for billing.
@@ -2559,6 +2593,54 @@ async function releaseConcurrencySlot(env: Env, jobId: string): Promise<void> {
   }
 }
 
+// This legacy KV-only view cannot prove provider ownership or serialize against
+// a replacement claim. Keep it diagnostic until provider cancellation and a
+// transactional generation authority exist (F007/T3-W16); it must never mutate
+// a claim or release capacity based on absence from a separate KV key.
+const STALE_CLAIM_DIAGNOSTIC_LIMIT = 32;
+
+/** Observe old claims; authoritative cancellation remains deferred. */
+export async function reapStaleSpawnClaims(env: Env, nowMs = Date.now()): Promise<number> {
+  const kv = env.RUNNER_JOB_PATS;
+  if (!kv) return 0;
+  let listed: { keys: { name: string }[] };
+  try {
+    listed = await kv.list({ prefix: "spawn:" });
+  } catch (e) {
+    logEvent("error", "stale_spawn_claim_list_failed", { error: (e as Error).message });
+    return 0;
+  }
+  let diagnosed = 0;
+  for (const { name } of listed.keys) {
+    const jobId = name.slice("spawn:".length);
+    if (!jobId) continue;
+    let raw: string | null;
+    try {
+      raw = await kv.get(name);
+    } catch {
+      continue;
+    }
+    const age = spawnClaimAgeMs(raw, nowMs);
+    if (age === null || age < SPAWN_CLAIM_TTL_S * 1000) continue;
+    let handle: string | null;
+    try {
+      handle = await kv.get(jobHandleKey(jobId));
+    } catch {
+      continue;
+    }
+    if (diagnosed < STALE_CLAIM_DIAGNOSTIC_LIMIT) {
+      logEvent("error", "stale_spawn_claim_candidate", {
+        jobId,
+        ageMs: age,
+        durableHandlePresent: Boolean(handle),
+        authority: "deferred_provider_cancellation",
+      });
+      diagnosed++;
+    }
+  }
+  return 0;
+}
+
 // Atomically acquire a concurrency slot for THIS spawn — warm OR cold:
 //   • warm (server-derived tenant + entitlement): key = the tenant, perKeyCap =
 //     min(entitlement, FLEET) so a tenant never exceeds what it bought NOR the
@@ -2686,7 +2768,12 @@ async function driveSpawn(
   if (mint.authz === "forbidden") {
     await releaseSpawnClaim(env.RUNNER_JOB_PATS, jobId);
     await bumpMetrics(env, "spawn_forbidden");
-    logEvent("error", "mint_forbidden", { jobId, repo, ...(mint.coldReason ? { coldReason: mint.coldReason } : {}) });
+    const failure_class = mint.forbiddenReason === "edge_proxy" ? "edge_proxy_403" : "authz_403";
+    logEvent("error", "mint_forbidden", { jobId, repo, failure_class });
+    // A queued webhook is at-most-once. Preserve the exact existing orphan:
+    // store/schema/ORPHAN_TTL contract for both classes; the reconciler applies
+    // the bounded retry policy and the record remains auditable.
+    await recordOrphan(env, { ...opts, failure_class });
     return;
   }
   // ★A3.17 — an operator misconfiguration must not hide inside the ordinary cold
@@ -2821,7 +2908,14 @@ function orphanKey(jobId: string): string {
 // never breaks the spawn path.
 export async function recordOrphan(
   env: Env,
-  opts: { jobId: string; repo: string; installationId: string; labels: string[]; effect_id?: string },
+  opts: {
+    jobId: string;
+    repo: string;
+    installationId: string;
+    labels: string[];
+    effect_id?: string;
+    failure_class?: "edge_proxy_403" | "authz_403";
+  },
 ): Promise<void> {
   if (!env.RUNNER_JOB_PATS || !opts.installationId) return; // cold ⇒ not warm-recoverable
   try {
@@ -2837,6 +2931,7 @@ export async function recordOrphan(
       // than by a TTL that would reset on each re-put.
       firstRecordedMs: Date.now(),
       ...(opts.effect_id ? { effect_id: opts.effect_id } : {}),
+      ...(opts.failure_class ? { failure_class: opts.failure_class } : {}),
     } as OrphanRecord;
     await env.RUNNER_JOB_PATS.put(key, JSON.stringify(rec), { expirationTtl: ORPHAN_TTL_S });
     logEvent("info", "orphan_recorded", { jobId: opts.jobId, repo: opts.repo });
@@ -4515,6 +4610,17 @@ export default {
     } catch (e) {
       logEvent("error", "orphan_reconcile_failed", { error: (e as Error).message });
     }
+    try {
+      // Reclaim claims that never acquired a durable handle, and prune expired
+      // slot leases even on a quiet fleet. Live handles remain fenced.
+      await reapStaleSpawnClaims(env, now);
+      if (env.CONCURRENCY_SLOTS) {
+        const slots = env.CONCURRENCY_SLOTS.get(env.CONCURRENCY_SLOTS.idFromName("global"));
+        if (typeof slots.pruneExpired === "function") await slots.pruneExpired();
+      }
+    } catch (e) {
+      logEvent("error", "lifecycle_reap_failed", { error: (e as Error).message });
+    }
     // FOURTH: detect jobs whose box died MID-JOB — the one loss nothing watched.
     // Its own `waitUntil` + its own `.catch()`, so it can neither delay nor take
     // down the placement work below. OBSERVE-ONLY: it tears nothing down (see the
@@ -4786,11 +4892,6 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
           }
         }
         const revoked = await revokeCompletedJob(env, jobId, derivedTenant);
-        // Release the concurrency slot (W7/F7) — by jobId ONLY, so it releases a
-        // warm OR cold spawn's slot without needing the derived tenant. Best-effort
-        // (the slot TTL self-heals a missed release, so this never permanently
-        // blocks a tenant/repo). Fully guarded (never breaks the webhook).
-        await releaseConcurrencySlot(env, jobId);
         // WP-F: durably record this job's usage to the `usage:<jobId>` ledger NOW —
         // BEFORE the `jtenant:` stash is dropped below and while derivedTenant + the
         // workflow_job timings are still in hand. Written even when the push is off
@@ -4841,6 +4942,18 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
           jobId,
           evt.workflow_job?.runner_name ?? undefined,
         );
+        // Release capacity only after exact-handle teardown is confirmed. A
+        // missing legacy handle has no provider obligation; an unreadable or
+        // still-live handle retains the slot until a later completion/retry.
+        const teardownPending = await teardownObligationPresent(
+          env,
+          jobId,
+          evt.workflow_job?.runner_name ?? undefined,
+        );
+        if (tornDown || teardownPending === false) await releaseConcurrencySlot(env, jobId);
+        else if (teardownPending === true || teardownPending === null) {
+          logEvent("error", "concurrency_slot_release_deferred", { jobId });
+        }
         // F2-3 (W3): wipe the env-0 cred-stash so the per-job cas:rw PAT window
         // closes at COMPLETION, not at the 2h lease-TTL. After this a ticket redeem
         // by any in-lease code returns 404 (stash gone) — the credential dies with

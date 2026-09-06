@@ -268,10 +268,24 @@ export interface MintResult {
 // the caller ABORTS the spawn — it must NEVER fail-open to a wrong-tenant cold
 // spawn. Any OTHER failure (5xx, network) is a plain Error ⇒ fail-open to cold.
 export class MintForbiddenError extends Error {
-  constructor(message = "runner mint unauthorized") {
+  readonly source: "edge_proxy" | "authz";
+
+  constructor(message = "runner mint unauthorized", source: "edge_proxy" | "authz" = "authz") {
     super(message);
     this.name = "MintForbiddenError";
+    this.source = source;
   }
+}
+
+/** Classify a 403 without treating an edge response as tenant authz. */
+export function classifyMintForbidden(body: string): "edge_proxy" | "authz" {
+  const normalized = body.toLowerCase();
+  return normalized.includes("cloudflare")
+    || normalized.includes("cf-access")
+    || normalized.includes("access denied")
+    || normalized.includes("<!doctype html")
+    ? "edge_proxy"
+    : "authz";
 }
 
 // Mint a per-job CAS PAT via the runner-mint seam (corelink-server). The server
@@ -310,8 +324,10 @@ async function mintCasPat(env: MintEnv, params: MintParams): Promise<MintResult>
   // 403 FORBIDDEN ⇒ HARD DENY. Propagate a distinct error so the caller aborts
   // the spawn (no JIT, no container) rather than fail-open to a wrong-tenant cold.
   if (resp.status === 403) {
+    const body = await resp.text().catch(() => "");
     throw new MintForbiddenError(
-      `runner mint unauthorized (403): ${await resp.text().catch(() => "")}`,
+      `runner mint unauthorized (403): ${body}`,
+      classifyMintForbidden(body),
     );
   }
   // Any other non-2xx (5xx D1 error "runner mint unavailable", etc.) ⇒ plain Error
@@ -395,6 +411,8 @@ export type ColdReason = "mint_key_unarmed" | "no_repo" | "no_installation_or_pa
 export interface ContainerEnvResult {
   authz: "ok" | "forbidden";
   containerEnv: Record<string, string>;
+  /** Present on a 403 so edge-proxy failures are retryable and authz is auditable. */
+  forbiddenReason?: "edge_proxy" | "authz";
   /** Set iff the spawn is COLD; absent on a warm mint. */
   coldReason?: ColdReason;
   patId?: string;
@@ -633,7 +651,7 @@ export async function buildContainerEnv(
       // 403 HARD DENY ⇒ ABORT. An unauthorized repo must not run at all — never
       // let a 403 degrade into a (wrong-tenant) cold spawn.
       console.log(`runner mint FORBIDDEN (aborting spawn): ${(e as Error).message}`);
-      return { authz: "forbidden", containerEnv: {} };
+      return { authz: "forbidden", forbiddenReason: e.source, containerEnv: {} };
     }
     // 5xx ("runner mint unavailable") / network / malformed-200 ⇒ FAIL-OPEN to
     // cold. The entrypoint's cache-warm hook is also fail-open — slow, never broken.
@@ -1285,6 +1303,9 @@ export interface OrphanRecord {
   // the placement-confirmation block below. Absent ⇒ the record is a plain
   // failure/refusal dead-letter and follows the original retry path.
   placedMs?: number;
+  /** First failure classification; retained in the same orphan: record for
+   * bounded retry/audit and never used as authorization input. */
+  failure_class?: "edge_proxy_403" | "authz_403";
 }
 
 // ── Placement confirmation (2026-08-03) — a spawn that "succeeded" and produced
