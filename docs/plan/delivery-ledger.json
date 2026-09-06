@@ -503,7 +503,7 @@
       "id": "T5-W3",
       "sprint": 4,
       "state": "prepared",
-      "implementation": "complete",
+      "implementation": "partial",
       "owner": "root",
       "dependencies": [
         "T5-W2"
@@ -873,7 +873,7 @@
       "id": "T8-W5",
       "sprint": 2,
       "state": "prepared",
-      "implementation": "partial",
+      "implementation": "complete",
       "owner": "wp_t8_w5",
       "dependencies": [
         "T3-W9"
