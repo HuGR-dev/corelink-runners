@@ -1,0 +1,22 @@
+{
+  "scope": "T1-W5 code and focused development compilation; not runtime/full CI/live proof",
+  "source_commit": "af0795ef4099a49d3b6650d301bdcf0203d13e60",
+  "review": "root reviewed exact dispatcher probe, singleflight, queue guard, transport byte cap and corrected test synchronization. Earlier independent review findings fixed.",
+  "checks": [
+    {
+      "command": "cargo check -p corelink-fabric-server --test mint_readiness_routes --locked",
+      "exit": 0,
+      "elapsed_seconds": 11.75
+    },
+    {
+      "command": "cargo check -p corelink-fabric-server --test cancel_teardown_confirmation --test held_teardown_confirmation --test mint_selfcheck --locked",
+      "exit": 0,
+      "elapsed_seconds": 36.56
+    }
+  ],
+  "limits": [
+    "Reused warm target; checks emit metadata, no runtime tests or linking.",
+    "Readiness proves dispatcher key/envelope only, not onward mint key, entitlement or PG readiness."
+  ],
+  "observed_at": "2026-09-06T00:11:03.400636+00:00"
+}

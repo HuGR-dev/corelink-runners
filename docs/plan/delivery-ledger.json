@@ -292,22 +292,27 @@
       "sprint": 1,
       "state": "active",
       "implementation": "partial",
-      "owner": "sprint1_secret_scan",
+      "owner": "root",
       "dependencies": [
         "T3-W4",
         "T4-W4"
       ],
-      "next_action": "Bounded source acceptance audit and repair preserving confirmed teardown and capacity fences.",
+      "next_action": "All Held terminal paths now require teardown confirmation and preservehandleuntilledgerfinish. Implement durableprovideridentity recovery; unknownafterrestart remainsfailclosed.",
       "blockers": [],
       "commits": [
-        "bb165bad54125460ebae213e405df3a75baa6566"
+        "bb165bad54125460ebae213e405df3a75baa6566",
+        "7142f239effd7d54fd17962d8327ac1ab804a345",
+        "c2fd9bff2550b51dcaf8e2fbd99c5b44a4390d3e",
+        "dd7ea7f80980d453c57bca9f6f8fa5afe6149fb5"
       ],
       "review": {
         "status": "pending",
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [
+        "docs/plan/execution/2026-09-05-held-cleanup.json"
+      ]
     },
     {
       "id": "T6-W1",
@@ -331,16 +336,17 @@
       "sprint": 1,
       "state": "prepared",
       "implementation": "partial",
-      "owner": "sprint1_external_seams",
+      "owner": "root",
       "dependencies": [
         "D11"
       ],
-      "next_action": "Prepare reviewable required-hit client patch against verified sibling0.1.11 source; obtain release containing capability before consumer pins.",
+      "next_action": "Reviewed clw patch ready in docs/plan/relays. Await explicit sibling-fence exception requested from owner; then isolated client implementation/release and runnerconsumer pin.",
       "blockers": [
         "Verified sibling clw source HEAD57c2256e2c380efdeba25d19db2ee48c0fd8c11c (version0.1.11) still lacks atomic required-hit replay; external implementation/release required."
       ],
       "commits": [
-        "bb165bad54125460ebae213e405df3a75baa6566"
+        "bb165bad54125460ebae213e405df3a75baa6566",
+        "7489786a35e402732c58a74c4d005486ed3e4aba"
       ],
       "review": {
         "status": "pending",
@@ -991,44 +997,56 @@
       "id": "T9-W1",
       "sprint": 1,
       "state": "active",
-      "implementation": "unknown",
-      "owner": "sprint1_devenv_billing",
+      "implementation": "partial",
+      "owner": "sprint1_billing_recovery",
       "dependencies": [
         "D2",
         "T8-W4b",
         "T9-W0"
       ],
-      "next_action": "Rectify canonical billing plus durable session settlement and credential issuance; no quarantine waiver assumed.",
+      "next_action": "Canonical billing/recovery integrated (27 focusedtests and rootTScheck). Implement paired trustedRPC env-0 credential issuance, harddeadline, wipe/revoke.",
       "blockers": [],
-      "commits": [],
+      "commits": [
+        "f1836f94b4dcdc840bd756738589d5fe85b1b478",
+        "9b87d3b5e588fe19357741fb76c270bad3fe7437"
+      ],
       "review": {
         "status": "pending",
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [
+        "docs/plan/execution/2026-09-05-devenv-billing.json"
+      ]
     },
     {
       "id": "T1-W5",
       "sprint": 1,
-      "state": "active",
-      "implementation": "unknown",
-      "owner": "sprint1_mint_readiness",
+      "state": "ready",
+      "implementation": "complete",
+      "owner": "root",
       "dependencies": [
         "T3-W10",
         "T3-W18",
         "O-MINTKEY",
         "T7-W4b"
       ],
-      "next_action": "Implement bounded single-flight dispatcher mint-key probe, readiness and admission refusal; no pre-bind upstream wait, provider changes, or full-suite execution.",
+      "next_action": "Code and focused test sources integrated; library and4 targeted test crates passed warm metadata checks. Runtime/fullCI/live keyed acceptance only at complete sprint.",
       "blockers": [],
-      "commits": [],
+      "commits": [
+        "f43898914dab1ed65c37bbac196b394aa7acaa89",
+        "af0795ef4099a49d3b6650d301bdcf0203d13e60"
+      ],
       "review": {
-        "status": "pending",
-        "commit": null,
-        "evidence": []
+        "status": "approved",
+        "commit": "af0795ef4099a49d3b6650d301bdcf0203d13e60",
+        "evidence": [
+          "docs/plan/execution/2026-09-05-mint-readiness.json"
+        ]
       },
-      "evidence": []
+      "evidence": [
+        "docs/plan/execution/2026-09-05-mint-readiness.json"
+      ]
     },
     {
       "id": "T1-W6",
@@ -1661,8 +1679,14 @@
       "reproduction": "Acquire via real provider, persist Held row, recreate provider with empty registry, expire lease. cloud_exec real teardown currently returns Ok on missing binding; box_ref only stores box:lease marker.",
       "acceptance": "Never terminalize Held or free capacity without exact-handle provider confirmation; retain handle through ledger finish failure; restart recovery must persist/resolve authoritative provider identity and reclaim same container after confirmation.",
       "blocks_delivery": true,
-      "commits": [],
-      "evidence": []
+      "commits": [
+        "7142f239effd7d54fd17962d8327ac1ab804a345",
+        "c2fd9bff2550b51dcaf8e2fbd99c5b44a4390d3e",
+        "dd7ea7f80980d453c57bca9f6f8fa5afe6149fb5"
+      ],
+      "evidence": [
+        "docs/plan/execution/2026-09-05-held-cleanup.json"
+      ]
     },
     {
       "id": "F-20260905-003",
@@ -1761,7 +1785,7 @@
       "at": "2026-09-05T23:24:03.225777+00:00",
       "task": "T1-W5 mint-key readiness implementation",
       "owner": "sprint1_mint_readiness",
-      "state": "active",
+      "state": "integrated",
       "scope": [
         "crates/corelink-fabric-server/src/mint_readiness.rs",
         "crates/corelink-fabric-server/src/app.rs",
@@ -1786,14 +1810,14 @@
       "at": "2026-09-05T23:26:02.861322+00:00",
       "task": "T9-W1 rectification seam inspection",
       "owner": "sprint1_scope",
-      "state": "active",
+      "state": "completed",
       "scope": []
     },
     {
       "at": "2026-09-05T23:36:46.399253+00:00",
       "task": "T6-W2 prepare external clw required-hit patch artifact",
       "owner": "sprint1_external_seams",
-      "state": "active",
+      "state": "completed",
       "scope": [
         "docs/plan/relays/clw-required-hit.patch",
         "docs/plan/relays/clw-required-hit.md"
@@ -1803,7 +1827,7 @@
       "at": "2026-09-05T23:36:46.399253+00:00",
       "task": "T9-W1 canonical billing and durable lifecycle settlement",
       "owner": "sprint1_devenv_billing",
-      "state": "active",
+      "state": "integrated",
       "scope": [
         "deploy/cloudflare/src/lib/devenv_usage.ts",
         "deploy/cloudflare/test/devenv-usage.test.ts",
@@ -1819,7 +1843,7 @@
       "at": "2026-09-05T23:36:46.399253+00:00",
       "task": "T3-W10 confirmed Held teardown repair",
       "owner": "sprint1_secret_scan",
-      "state": "active",
+      "state": "integrated",
       "scope": [
         "crates/corelink-fabric-server/src/cloud_exec.rs",
         "crates/corelink-fabric-server/tests/held_teardown_confirmation.rs"
@@ -1830,6 +1854,38 @@
       "task": "T8-W4b independent source acceptance review",
       "owner": "delivery_ledger_validator",
       "state": "completed",
+      "scope": []
+    },
+    {
+      "at": "2026-09-06T00:11:03.400636+00:00",
+      "task": "T9-W1 typed authorized credential lifecycle",
+      "owner": "sprint1_billing_recovery",
+      "state": "active",
+      "scope": [
+        "deploy/cloudflare/src/lib/devenv_credentials.ts",
+        "deploy/cloudflare/src/durable_objects/runner_dev_env.ts",
+        "deploy/cloudflare/src/types/devenv.ts",
+        "deploy/cloudflare/src/lib.ts",
+        "deploy/cloudflare/entrypoint.sh",
+        "deploy/cloudflare/test/devenv-credentials.test.ts",
+        "deploy/cloudflare/test/devenv-do.test.ts"
+      ]
+    },
+    {
+      "at": "2026-09-06T00:11:03.400636+00:00",
+      "task": "T9-W1 reviewed server relay patch artifact",
+      "owner": "sprint1_mint_test_repair",
+      "state": "active",
+      "scope": [
+        "docs/plan/relays/devenv-authorized-start.patch",
+        "docs/plan/relays/devenv-authorized-start.md"
+      ]
+    },
+    {
+      "at": "2026-09-06T00:11:03.400636+00:00",
+      "task": "T3-W10 durable provider identity design inspection",
+      "owner": "sprint1_external_seams",
+      "state": "active",
       "scope": []
     }
   ]
