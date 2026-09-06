@@ -3,11 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const containerSeams = vi.hoisted(() => {
   const start = vi.fn(async () => {});
   const startWithEnv = vi.fn(async () => {});
+  const isAlive = vi.fn(async () => false);
   const teardown = vi.fn(async () => {});
   const destroy = vi.fn(async () => {});
   const cutEgress = vi.fn(async () => {});
-  const instance = { start, startWithEnv, teardown, destroy, cutEgress };
-  return { getContainer: vi.fn(() => instance), instance, start, startWithEnv, teardown, destroy, cutEgress };
+  const instance = { start, startWithEnv, isAlive, teardown, destroy, cutEgress };
+  return { getContainer: vi.fn(() => instance), instance, start, startWithEnv, isAlive, teardown, destroy, cutEgress };
 });
 vi.mock("@cloudflare/containers", () => ({
   Container: class {},

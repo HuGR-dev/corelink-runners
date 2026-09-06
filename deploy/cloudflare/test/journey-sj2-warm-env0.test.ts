@@ -52,6 +52,7 @@ let containers: FakeContainer[] = [];
 // Per-test hooks: default resolve. Reset in beforeEach.
 let startWithEnvBehavior: (envVars: Record<string, string>) => Promise<void> = async () => {};
 let teardownBehavior: (handle: string) => Promise<void> = async () => {};
+const aliveHandles = new Map<string, boolean>();
 // Every handle whose teardown() was invoked (to assert the completed-leg teardown).
 let teardownHandles: string[] = [];
 
@@ -59,16 +60,18 @@ vi.mock("@cloudflare/containers", () => {
   return {
     Container: class {},
     getContainer: vi.fn((ns: unknown, handle: string): FakeContainer => {
+      aliveHandles.set(handle, true);
       const c: FakeContainer = {
         ns,
         handle,
         start: vi.fn(async () => {}),
         startWithEnv: vi.fn(async (envVars: Record<string, string>) => startWithEnvBehavior(envVars)),
         containerFetch: vi.fn(async () => new Response(null, { status: 200 })),
-        isAlive: vi.fn(async () => true),
+        isAlive: vi.fn(async () => aliveHandles.get(handle) ?? true),
         teardown: vi.fn(async () => {
           teardownHandles.push(handle);
-          return teardownBehavior(handle);
+          await teardownBehavior(handle);
+          aliveHandles.set(handle, false);
         }),
         cutEgress: vi.fn(async () => {}),
       };
@@ -166,7 +169,7 @@ function makeStorage() {
 }
 function makeDO() {
   const storage = makeStorage();
-  const ctx = { storage } as never;
+  const ctx = { storage, blockConcurrencyWhile: async <T>(fn: () => Promise<T>) => fn() } as never;
   return { doInst: new CredStashDO(ctx, {} as never), storage };
 }
 // A CRED_STASH namespace double whose get(id) resolves a REAL CredStashDO keyed
@@ -442,6 +445,7 @@ const CRED: StashedCred = { token: RAW_PAT, endpoint: CAS_ENDPOINT, tenant: "acm
 beforeEach(() => {
   containers = [];
   teardownHandles = [];
+  aliveHandles.clear();
   fetchCalls = [];
   mintBodies = [];
   revokeBodies = [];
@@ -942,7 +946,7 @@ describe("SJ-2 cell 7 — failure injection at every step of the warm journey", 
     expect(teardownHandles).toContain(handle);
   });
 
-  it("7f teardown throw at completion ⇒ swallowed; the handle key is STILL cleared, response 200", async () => {
+  it("7f teardown throw at completion ⇒ swallowed; handle is retained and a retry confirms teardown", async () => {
     const kv = fakeKv();
     const metrics = fakeMetrics();
     const cred = makeCredStash();
@@ -950,6 +954,7 @@ describe("SJ-2 cell 7 — failure injection at every step of the warm journey", 
     const ctxA = makeCtx();
     await queuedWebhook(env, ctxA, { jobId: "2605", repo: "acme/api", installationId: 555 });
     await drain(ctxA);
+    const handle = kv.store.get("jhandle:2605");
 
     teardownBehavior = async () => {
       throw new Error("destroy boom");
@@ -958,10 +963,19 @@ describe("SJ-2 cell 7 — failure injection at every step of the warm journey", 
     const resp = await completedWebhook(env, ctxB, { jobId: "2605" });
     expect(resp.status).toBe(200); // teardown throw never breaks the webhook
     await drain(ctxB);
-    // The handle key is dropped anyway (never retry a dead handle) + revoke still ran.
-    expect(kv.store.has("jhandle:2605")).toBe(false);
+    // A failed provider teardown keeps the durable obligation for retry.
+    expect(kv.store.has("jhandle:2605")).toBe(true);
     expect(revokeCalls()).toHaveLength(1);
     expect(kv.store.has("2605")).toBe(false); // pat key still cleared by the revoke
+
+    teardownBehavior = async () => {};
+    const retryCtx = makeCtx();
+    const retry = await completedWebhook(env, retryCtx, { jobId: "2605" });
+    expect(retry.status).toBe(200);
+    expect((await retry.json()).tornDown).toBe(true);
+    await drain(retryCtx);
+    expect(kv.store.has("jhandle:2605")).toBe(false);
+    expect(teardownHandles.filter((h) => h === handle)).toHaveLength(2);
   });
 
   it("7g billing 5xx at completion ⇒ swallowed; teardown + revoke still run, response 200 billed:false", async () => {

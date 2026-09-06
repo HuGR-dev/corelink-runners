@@ -34,14 +34,15 @@ vi.mock("@cloudflare/containers", () => {
     // real DO; we only drive the worker's fetch handler via getContainer).
     Container: class {},
     getContainer: vi.fn((ns: unknown, handle: string): FakeContainer => {
+      let alive = true;
       const c: FakeContainer = {
         ns,
         handle,
         start: vi.fn(async () => {}),
         startWithEnv: vi.fn(async () => {}),
         containerFetch: vi.fn(async () => nextContainerFetch()),
-        isAlive: vi.fn(async () => true),
-        teardown: vi.fn(async () => {}),
+        isAlive: vi.fn(async () => alive),
+        teardown: vi.fn(async () => { alive = false; }),
         cutEgress: vi.fn(async () => {}),
       };
       containers.push(c);
@@ -505,7 +506,7 @@ describe("workflow_job:completed ⇒ runner container teardown (capacity leak fi
     expect(containers).toHaveLength(0); // never resolved a container
   });
 
-  it("a destroy() throw is swallowed (fail-open) and the handle key is still cleared", async () => {
+  it("a destroy() throw is swallowed and the durable handle remains for retry", async () => {
     const kv = fakeKv({ "jhandle:55555": "handle-boom" });
     // Next-resolved container throws on teardown.
     vi.mocked(getContainer).mockImplementationOnce((ns: unknown, handle: string) => {
@@ -526,7 +527,7 @@ describe("workflow_job:completed ⇒ runner container teardown (capacity leak fi
     });
     const resp = await completedWebhook(webhookEnv(kv), "55555", SECRET);
     expect(resp.status).toBe(200); // never a 500 — teardown is best-effort
-    expect(kv.store.has("jhandle:55555")).toBe(false); // key still dropped
+    expect(kv.store.has("jhandle:55555")).toBe(true); // failed teardown remains retryable
   });
 });
 
