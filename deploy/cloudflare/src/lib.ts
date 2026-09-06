@@ -353,10 +353,12 @@ export async function revokeCasPatById(
   env: MintEnv,
   patId: string,
   ownerTenant?: string,
+  signal?: AbortSignal,
 ): Promise<void> {
   const base = env.CORELINK_MINT_URL ?? "https://corelink-api.humangr.com";
   const resp = await fetch(`${base}/internal/v1/runner/revoke`, {
     method: "POST",
+    signal,
     headers: {
       ...cfAccessHeaders(env),
       "x-corelink-internal-auth": env.CORELINK_RUNNER_MINT_AUTH_KEY ?? "",

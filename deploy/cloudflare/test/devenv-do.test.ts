@@ -30,6 +30,7 @@ vi.mock("@cloudflare/containers", () => {
       async start(_opts: any) {}
       async stop() {}
       async destroy() {}
+      async schedule(_when: Date, _callback: string, _payload: unknown) {}
       async containerFetch(_req: any, _port: any): Promise<Response> {
         return new Response(JSON.stringify({ exit_code: 0, stdout: JSON.stringify({ root: "bafybeicorp", bytes_total: 1048576 }), stderr: "" }), { status: 200 });
       }
@@ -38,6 +39,11 @@ vi.mock("@cloudflare/containers", () => {
     getContainer: vi.fn(),
   };
 });
+
+vi.mock("../src/lib.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../src/lib.js")>(),
+  revokeCasPatById: vi.fn(async () => undefined),
+}));
 
 import { RunnerDevEnvDO } from "../src/durable_objects/runner_dev_env";
 import { EXEC_SERVER_AUTH_TOKEN_FILE } from "../src/lib/clw";
@@ -65,6 +71,9 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
       acceptWebSocket: vi.fn(),
     };
     mockEnv = {
+      CRED_STASH: { idFromName: (name: string) => name, get: () => ({ stash: async (ticket: string) => ticket, wipe: async () => undefined }) },
+      SPAWN_WORKER_PUBLIC_URL: "https://spawn.test",
+      CORELINK_RUNNER_MINT_AUTH_KEY: "synthetic-mint-key",
       CONFIG_DB: {
         prepare: vi.fn(() => ({
           bind: vi.fn(() => ({
@@ -133,7 +142,7 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
         },
       };
 
-      const startResp = await doInstance.startDevenv(payload);
+      const startResp = await startTest(doInstance, payload);
       expect(startResp.status).toBe("starting");
       expect((doInstance as any).envVars.EXEC_SERVER_AUTH_TOKEN).toBeDefined();
       expect((doInstance as any).envVars.EXEC_SERVER_AUTH_TOKEN_FILE).toBe(
@@ -162,9 +171,9 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
         },
       };
       const doInstance = new RunnerDevEnvDO(mockCtx, mockEnv);
-      await doInstance.startDevenv(payload);
+      await startTest(doInstance, payload);
       const firstSession = (doInstance as any).devenvState.sessionUuid;
-      await expect(doInstance.startDevenv(payload)).rejects.toThrow("DEVENV_START_REQUIRES_TERMINAL_STATE");
+      await expect(startTest(doInstance, payload)).rejects.toThrow("DEVENV_START_REQUIRES_TERMINAL_STATE");
       expect((doInstance as any).devenvState.sessionUuid).toBe(firstSession);
     });
 
@@ -172,7 +181,7 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
       const doInstance = new RunnerDevEnvDO(mockCtx, mockEnv);
       await new Promise((resolve) => setTimeout(resolve, 10));
 
-      await expect(doInstance.startDevenv({
+      await expect(startTest(doInstance, {
         config: {
           workspaceName: "invalid/workspace",
           profileName: "default",
@@ -192,7 +201,7 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
 
     it("executes snapshot on running container", async () => {
       const doInstance = new RunnerDevEnvDO(mockCtx, mockEnv);
-      await doInstance.startDevenv({
+      await startTest(doInstance, {
         config: {
           workspaceName: "my-workspace",
           profileName: "my-profile",
@@ -217,7 +226,7 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
       const fetchMock = vi.fn(async () => new Response("{}", { status: 202 }));
       vi.stubGlobal("fetch", fetchMock);
       const doInstance = new RunnerDevEnvDO(mockCtx, mockEnv);
-      await doInstance.startDevenv({
+      await startTest(doInstance, {
         config: {
           workspaceName: "billing-test",
           profileName: "default",
@@ -263,16 +272,16 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
           clwToken: "cl_pat_1234567890abcdef1234567890",
         },
       };
-      await doInstance.startDevenv(payload);
+      await startTest(doInstance, payload);
       await doInstance.onStart();
       await doInstance.requestStop();
       await doInstance.onStop();
 
       const frozen = mockStorage.get("devenv:usage:pending");
       expect(frozen?.event?.idem_key).toMatch(/^[0-9a-f]{64}$/);
-      await expect(doInstance.startDevenv(payload)).rejects.toThrow("DEVENV_BILLING_PENDING");
+      await expect(startTest(doInstance, payload)).rejects.toThrow("DEVENV_BILLING_PENDING");
       expect(mockStorage.get("state").terminalUsage.sessionId).toBe(frozen.sessionUuid);
-      await expect(doInstance.startDevenv(payload)).resolves.toMatchObject({ status: "starting" });
+      await expect(startTest(doInstance, payload)).resolves.toMatchObject({ status: "starting" });
       expect(fetchMock).toHaveBeenCalledTimes(3);
       const retryBody = JSON.parse(fetchMock.mock.calls[2][1].body as string) as Array<Record<string, unknown>>;
       expect(retryBody[0]).toEqual(frozen.event);
@@ -295,7 +304,7 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
         return storageDelete(key);
       });
       const doInstance = new RunnerDevEnvDO(mockCtx, mockEnv);
-      await doInstance.startDevenv({
+      await startTest(doInstance, {
         config: {
           workspaceName: "delete-interleave",
           profileName: "default",
@@ -334,7 +343,7 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
         return storagePut(key, value);
       });
       const doInstance = new RunnerDevEnvDO(mockCtx, mockEnv);
-      await doInstance.startDevenv({
+      await startTest(doInstance, {
         config: {
           workspaceName: "snapshot-failure",
           profileName: "default",
@@ -368,7 +377,7 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
       let now = 1000;
       vi.spyOn(Date, "now").mockImplementation(() => now);
       const instance = new RunnerDevEnvDO(mockCtx, mockEnv);
-      await instance.startDevenv(testPayload());
+      await startTest(instance, testPayload());
       await instance.onStart();
       const put = mockCtx.storage.put;
       let fail = true;
@@ -397,7 +406,7 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
         .mockImplementationOnce(() => new Promise<Response>((resolve) => { resolveDelivery = resolve; }));
       vi.stubGlobal("fetch", fetchMock);
       const instance = new RunnerDevEnvDO(mockCtx, mockEnv);
-      await instance.startDevenv(testPayload());
+      await startTest(instance, testPayload());
       await instance.onStart();
       await instance.onError(new Error("container stopped"));
       expect((await instance.getStatus()).status).toBe("errored");
@@ -407,14 +416,14 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
       resolveDelivery(new Response("{}", { status: 202 }));
       await Promise.all([retry, lateCallback]);
       expect(fetchMock).toHaveBeenCalledTimes(2);
-      await expect(instance.startDevenv(testPayload())).resolves.toMatchObject({ status: "starting" });
+      await expect(startTest(instance, testPayload())).resolves.toMatchObject({ status: "starting" });
     });
 
     it("default-disabled billing emits nothing after a later configuration change", async () => {
       const fetchMock = vi.fn(async () => new Response("{}", { status: 202 }));
       vi.stubGlobal("fetch", fetchMock);
       const instance = new RunnerDevEnvDO(mockCtx, mockEnv);
-      await instance.startDevenv(testPayload());
+      await startTest(instance, testPayload());
       await instance.onStop();
       mockEnv.BILLING_INGEST_URL = "https://billing.test/usage";
       mockEnv.BILLING_REGION = "iad";
@@ -429,12 +438,12 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
       mockEnv.BILLING_REGION = "iad";
       vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
       const instance = new RunnerDevEnvDO(mockCtx, mockEnv);
-      await instance.startDevenv(testPayload());
+      await startTest(instance, testPayload());
       await instance.onStop();
       const pending = mockStorage.get("devenv:usage:pending");
       delete mockEnv.BILLING_INGEST_URL;
       await expect(instance.requestStop()).resolves.toEqual({ ok: true });
-      await expect(instance.startDevenv(testPayload())).rejects.toThrow("DEVENV_BILLING_PENDING");
+      await expect(startTest(instance, testPayload())).rejects.toThrow("DEVENV_BILLING_PENDING");
       expect(mockStorage.get("devenv:usage:pending")).toEqual(pending);
     });
 
@@ -444,17 +453,17 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
       const fetchMock = vi.fn();
       vi.stubGlobal("fetch", fetchMock);
       const instance = new RunnerDevEnvDO(mockCtx, mockEnv);
-      await instance.startDevenv(testPayload());
+      await startTest(instance, testPayload());
       const active = mockStorage.get("state");
       mockStorage.set("state", { ...active, status: "errored", lastError: "old runtime", lastWorkspaceName: "recovery" });
       const restarted = new RunnerDevEnvDO(mockCtx, mockEnv);
       await restarted.requestStop();
       await restarted.onStop();
-      await expect(restarted.startDevenv(testPayload())).rejects.toThrow("DEVENV_BILLING_PENDING");
+      await expect(startTest(restarted, testPayload())).rejects.toThrow("DEVENV_BILLING_PENDING");
       expect(mockStorage.get("state").sessionUuid).toBe(active.sessionUuid);
       expect(fetchMock).not.toHaveBeenCalled();
       mockStorage.set("devenv:usage:settled", active.sessionUuid);
-      await expect(restarted.startDevenv(testPayload())).resolves.toMatchObject({ status: "starting" });
+      await expect(startTest(restarted, testPayload())).resolves.toMatchObject({ status: "starting" });
     });
   });
 });
@@ -466,4 +475,13 @@ function testPayload(): StartPayload {
     clwTenant: "ee30f7ba-fc25-4d71-939e-ebe130b4c6a3",
     clwToken: "cl_pat_1234567890abcdef1234567890",
   } };
+}
+
+async function startTest(instance: RunnerDevEnvDO, payload: StartPayload) {
+  await instance.startAuthorizedDevenv({
+    config: { workspaceName: payload.config.workspaceName, profileName: payload.config.profileName, tier: payload.config.tier },
+    grant: { tenantId: payload.config.clwTenant, sessionUuid: crypto.randomUUID(), patId: crypto.randomUUID(),
+      casPat: payload.config.clwToken, expiresAtMs: Date.now() + 3600000 },
+  });
+  return instance.getStatus();
 }
