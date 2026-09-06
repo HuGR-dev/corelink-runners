@@ -2726,7 +2726,7 @@ export async function reapStaleSpawnClaims(env: Env, nowMs = Date.now()): Promis
 export async function acquireConcurrencySlot(
   env: Env,
   jobId: string,
-  mint: ContainerEnvResult,
+  mint: Pick<ContainerEnvResult, "tenant" | "maxConcurrency">,
   repo: string,
   preparationId?: string,
 ): Promise<{ admitted: boolean; reason?: string }> {
@@ -2818,9 +2818,7 @@ async function prepareSpawn(
     try { await concurrencySlots(env).releasePreparation(jobId, preparationId); }
     catch { logEvent("error", "preparation_slot_release_pending", { jobId, preparationId }); }
   };
-  const slot = await acquireConcurrencySlot(env, jobId, {
-    authz: "ok", containerEnv: {}, ...authorized,
-  }, repo, preparationId);
+  const slot = await acquireConcurrencySlot(env, jobId, authorized, repo, preparationId);
   if (!slot.admitted) {
     await bumpMetrics(env, "spawn_at_ceiling");
     logEvent("info", "spawn_at_ceiling", { jobId, repo, tenant: authorized.tenant, reason: slot.reason });
@@ -2835,7 +2833,7 @@ async function prepareSpawn(
     }
     mint = await buildContainerEnv(env, { ...params, credentialOperationId: preparationId }, env0);
     if (mint.patId && mint.tenant) {
-      await containmentAuthority(env).registerCredential({ jobId, tenant: mint.tenant, patId: mint.patId });
+      await containmentAuthority(env).registerCredential({ jobId, tenant: mint.tenant, patId: mint.patId, lifecycleGeneration: mint.lifecycleGeneration });
     }
   } catch (error) {
     // Until registration succeeds, the issuer's unadopted operation owns
@@ -2851,7 +2849,7 @@ async function prepareSpawn(
   if (mint.authz !== "ok" || mint.tenant !== authorized.tenant
     || mint.maxConcurrency !== authorized.maxConcurrency || mint.maxVcpuH !== authorized.maxVcpuH) {
     if (mint.patId && mint.tenant) {
-      await revokeIssuedCredential(env, containmentAuthority(env), { jobId, tenant: mint.tenant, patId: mint.patId });
+      await revokeIssuedCredential(env, containmentAuthority(env), { jobId, tenant: mint.tenant, patId: mint.patId, lifecycleGeneration: mint.lifecycleGeneration });
     }
     await releasePreparation();
     await bumpMetrics(env, "spawn_forbidden");
@@ -2881,7 +2879,7 @@ async function prepareSpawn(
       // credential ownership and attribution exist, before any provider effect.
       await adoptIssuedRunnerCredential(env, preparationId, mint.patId);
     } catch (e) {
-      if (mint.patId) await revokeIssuedCredential(env, containmentAuthority(env), { jobId, tenant: mint.tenant, patId: mint.patId }).catch(() => {});
+      if (mint.patId) await revokeIssuedCredential(env, containmentAuthority(env), { jobId, tenant: mint.tenant, patId: mint.patId, lifecycleGeneration: mint.lifecycleGeneration }).catch(() => {});
       await releasePreparation();
       throw e;
     }
@@ -2906,7 +2904,7 @@ async function abandonPreparedSpawn(
     catch { logEvent("error", "preparation_slot_release_pending", { jobId, preparationId: prepared.preparationId }); }
   }
   if (prepared.patId && prepared.tenant) {
-    await revokeIssuedCredential(env, authority, { jobId, tenant: prepared.tenant, patId: prepared.patId });
+    await revokeIssuedCredential(env, authority, { jobId, tenant: prepared.tenant, patId: prepared.patId, lifecycleGeneration: prepared.lifecycleGeneration });
   }
 }
 
@@ -2956,7 +2954,7 @@ async function driveSpawn(
     // Revoke this exact issued credential after the attempt fails. The durable
     // authority retains a retry obligation if remote revoke or local wipe fails;
     // a later attempt's credential and the job's admission remain independent.
-    if (mint.patId && mint.tenant) await revokeIssuedCredential(env, containmentAuthority(env), { jobId, tenant: mint.tenant, patId: mint.patId });
+    if (mint.patId && mint.tenant) await revokeIssuedCredential(env, containmentAuthority(env), { jobId, tenant: mint.tenant, patId: mint.patId, lifecycleGeneration: mint.lifecycleGeneration });
     throw e;
   }
 }

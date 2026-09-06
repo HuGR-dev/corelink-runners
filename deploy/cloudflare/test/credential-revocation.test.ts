@@ -39,6 +39,7 @@ function jobs() {
 
 function envFor(authority: unknown, runnerJobs: ReturnType<typeof jobs>): Env {
   return { CORELINK_RUNNER_MINT_AUTH_KEY: "mint-key", CORELINK_MINT_URL: "https://mint.invalid", RUNNER_JOB_PATS: runnerJobs,
+    CRED_STASH: { idFromName: () => "lease", get: () => ({ wipe: async () => {} }) },
     CONTAINMENT: { idFromName: () => "global", get: () => authority } } as unknown as Env;
 }
 

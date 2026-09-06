@@ -31,7 +31,7 @@ function setup(rateAllowed = true, options: { authorizeStatus?: number; mintStat
       if ((options.mintStatus ?? 200) !== 200) return new Response("mint unavailable", { status: options.mintStatus });
       const patId = `pat-${operationId}`;
       issuedOperations.set(operationId, patId);
-      body = { operation_id: operationId, tenant: "tenant-a", max_concurrency: 2, pat_id: patId, token_plaintext: `secret-${operationId}` };
+      body = { operation_id: operationId, tenant: "tenant-a", lifecycle_generation: "1", max_concurrency: 2, pat_id: patId, token_plaintext: `secret-${operationId}` };
     }
     else if (url.endsWith("/runner/adopt")) {
       const adoption = JSON.parse(String(init?.body ?? "{}")) as { operation_id?: unknown; pat_id?: unknown };

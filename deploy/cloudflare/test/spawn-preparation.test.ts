@@ -43,9 +43,9 @@ function fixture(options: { mintStatus?: number; authorizeStatus?: number; mintK
           ceiling_vcpu_ms: "864000000", vcpu_count: 4, maximum_wall_ms: 28_800_000,
           issued_at_ms: now, expires_at_ms: now + 60_000 };
         const token = btoa(JSON.stringify(payload)).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
-        return json({ tenant: TENANT, lifecycle_generation: "1", max_concurrency: 2, max_vcpu_h: 240, compute_grant: `${token}.signature` });
+        return json({ tenant: TENANT, max_concurrency: 2, max_vcpu_h: 240, compute_grant: `${token}.signature` });
       }
-      return json({ tenant: TENANT, lifecycle_generation: "1", max_concurrency: 2 }, options.authorizeStatus ?? 200);
+      return json({ tenant: TENANT, max_concurrency: 2 }, options.authorizeStatus ?? 200);
     }
     if (url.endsWith("/internal/v1/runner/mint")) {
       order.push("mint");
@@ -230,7 +230,7 @@ describe("spawn preparation before containment claim", () => {
     expect(settled).toHaveLength(1);
     expect(JSON.parse(String(settled[0].init?.body))).toMatchObject({ actual_vcpu_ms: "0", terminal_evidence_digest: expect.stringMatching(/^[0-9a-f]{64}$/) });
     expect(f.slotsStorage.map.get("slot-holders:v1:7122")).toMatchObject({ holders: ["winning-preparation"] });
-    expect((await f.d.instance.revocationRequestedCredentials()).records).toContainEqual({ jobId: "7122", tenant: TENANT, patId: "new-pat" });
+    expect((await f.d.instance.revocationRequestedCredentials()).records).toContainEqual({ jobId: "7122", tenant: TENANT, patId: "new-pat", lifecycleGeneration: "1" });
     expect(getContainer).not.toHaveBeenCalled();
     expect(f.calls.filter(({ url }) => url.includes("generate-jitconfig"))).toHaveLength(0);
   });

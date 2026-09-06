@@ -2,7 +2,6 @@ import { cfAccessHeaders, type MintEnv, type MintParams } from "../lib";
 
 export type RunnerAuthorization = {
   tenant: string;
-  lifecycleGeneration: string;
   maxConcurrency: number;
   maxVcpuH?: number;
   computeGrant?: string;
@@ -23,12 +22,9 @@ function validResponse(value: unknown): RunnerAuthorization | null {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
   const tenant = record.tenant;
-  const lifecycleGeneration = record.lifecycle_generation;
   const maxConcurrency = record.max_concurrency;
   const maxVcpuH = record.max_vcpu_h;
   const computeGrant = record.compute_grant;
-  if (!required(tenant) || typeof lifecycleGeneration !== "string" || lifecycleGeneration.length > 19 || !/^(0|[1-9][0-9]*)$/.test(lifecycleGeneration)) return null;
-  try { if (BigInt(lifecycleGeneration) > 9_223_372_036_854_775_807n) return null; } catch { return null; }
   if (!required(tenant) || typeof maxConcurrency !== "number" || !Number.isSafeInteger(maxConcurrency) || maxConcurrency <= 0) return null;
   if (maxVcpuH !== undefined && (typeof maxVcpuH !== "number" || !Number.isSafeInteger(maxVcpuH) || maxVcpuH <= 0 || maxVcpuH > 0xffffffff)) return null;
   if (maxVcpuH !== undefined && (typeof computeGrant !== "string" || computeGrant.length < 1 || computeGrant.length > 8192)) return null;
@@ -36,7 +32,6 @@ function validResponse(value: unknown): RunnerAuthorization | null {
   return {
     ...(typeof computeGrant === "string" ? { computeGrant } : {}),
     tenant,
-    lifecycleGeneration,
     maxConcurrency,
     ...(maxVcpuH === undefined ? {} : { maxVcpuH }),
   };
