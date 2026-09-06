@@ -134,6 +134,7 @@ async function queuedWebhook(
     repo?: string;
     labels?: string[];
     installationId?: number;
+    deliveryId?: string;
     signSecret?: string;
   },
 ): Promise<Response> {
@@ -149,6 +150,7 @@ async function queuedWebhook(
       headers: {
         "content-type": "application/json",
         "x-github-event": "workflow_job",
+        ...(opts.deliveryId ? { "x-github-delivery": opts.deliveryId } : {}),
         "x-hub-signature-256": await ghSign(opts.signSecret ?? SECRET, body),
       },
       body,
@@ -195,7 +197,11 @@ function installFetchRouter() {
       }
       if (url.includes("/internal/v1/runner/adopt")) {
         const body = init?.body ? JSON.parse(init.body as string) as { operation_id?: unknown; pat_id?: unknown } : undefined;
-        return issuedOperations.get(String(body?.operation_id)) === body?.pat_id
+        const patId = body?.pat_id;
+        return typeof body?.operation_id === "string"
+          && typeof patId === "string"
+          && typeof issuedOperations.get(body.operation_id) === "string"
+          && issuedOperations.get(body.operation_id) === patId
           ? new Response(null, { status: 204 })
           : new Response("adoption mismatch", { status: 400 });
       }
@@ -300,21 +306,27 @@ describe("/webhook queued — the happy-path spawn orchestration (COLD)", () => 
   });
 
   it("a redelivery with the claim already present is a NO-OP (deduped, no double mint/spawn)", async () => {
-    // Seed the claim so claimSpawn short-circuits — exactly the state a prior
-    // delivery leaves behind. GitHub's at-least-once redelivery must not re-spawn.
-    const kv = fakeKv({ "spawn:1002": "1" });
+    // Reuse the delivery identity so the real ContainmentDO owner deduplicates
+    // the second delivery after the first one has completed.
+    const kv = fakeKv();
     const metrics = fakeMetrics();
     const env = baseEnv({ RUNNER_JOB_PATS: kv as never, METRICS: metrics as never });
-    const ctx = makeCtx();
+    const firstCtx = makeCtx();
 
-    const resp = await queuedWebhook(env, ctx, { jobId: "1002", repo: "acme/api" });
+    const first = await queuedWebhook(env, firstCtx, { jobId: "1002", repo: "acme/api", installationId: 555, deliveryId: "delivery-1002" });
+    expect(first.status).toBe(202);
+    await drain(firstCtx);
+    const firstFetches = fetchCalls.length;
+    const firstContainers = containers.length;
+
+    const secondCtx = makeCtx();
+    const resp = await queuedWebhook(env, secondCtx, { jobId: "1002", repo: "acme/api", installationId: 555, deliveryId: "delivery-1002" });
     expect(resp.status).toBe(202);
     expect(await resp.json()).toMatchObject({ ok: true, queued: true, job_id: "1002" });
 
-    await drain(ctx);
-    // No mint, no JIT, no container — the claim gated the whole expensive path.
-    expect(fetchCalls).toHaveLength(0);
-    expect(containers).toHaveLength(0);
+    await drain(secondCtx);
+    expect(fetchCalls).toHaveLength(firstFetches);
+    expect(containers).toHaveLength(firstContainers);
   });
 });
 
