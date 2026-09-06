@@ -53,6 +53,10 @@ function installationId(value: unknown): string | null {
   return /^[1-9][0-9]*$/.test(id) ? id : null;
 }
 
+function record(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 async function readBoundedBody(response: Response): Promise<Uint8Array | null> {
   const reader = response.body?.getReader();
   if (!reader) return null;
@@ -121,12 +125,22 @@ export async function discoverEligibleRepositories(
       if (!response.ok) return null;
       const bytes = await readBoundedBody(response);
       if (!bytes) return null;
-      const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-      const body = JSON.parse(text) as Partial<RegistryPage>;
-      if (body.schema_version !== 1 || body.source !== "runner_repo_allowlist" || typeof body.snapshot_id !== "string" || body.snapshot_id.length === 0 || !Array.isArray(body.repositories)) return null;
+      const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes);
+      const body: unknown = JSON.parse(text);
+      if (!record(body)
+        || body.schema_version !== 1
+        || body.source !== "runner_repo_allowlist"
+        || typeof body.snapshot_id !== "string"
+        || body.snapshot_id.length === 0
+        || !Array.isArray(body.repositories)) return null;
       if (snapshot === undefined) snapshot = body.snapshot_id;
       if (snapshot !== body.snapshot_id) return null;
       for (const entry of body.repositories) {
+        if (!record(entry)
+          || (entry.repo_full_name !== undefined && typeof entry.repo_full_name !== "string")
+          || (entry.installation_id !== undefined
+            && typeof entry.installation_id !== "string"
+            && typeof entry.installation_id !== "number")) return null;
         const repo = canonicalRepo(entry.repo_full_name);
         const install = installationId(entry.installation_id);
         if (!repo || !install) return null;

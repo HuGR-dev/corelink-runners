@@ -44,8 +44,8 @@ function parseRecord(raw: string, key: string): UsageLedgerRecord {
   if (!value || typeof value.jobId !== "string" || value.jobId.length === 0) throw new Error("jobId");
   if (typeof value.tenant !== "string" || value.tenant.length === 0) throw new Error("tenant");
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.tenant)) throw new Error("tenant_uuid");
-  if (!Number.isFinite(value.startedMs)) throw new Error("startedMs");
-  if (!Number.isFinite(value.completedMs)) throw new Error("completedMs");
+  if (typeof value.startedMs !== "number" || !Number.isFinite(value.startedMs)) throw new Error("startedMs");
+  if (typeof value.completedMs !== "number" || !Number.isFinite(value.completedMs)) throw new Error("completedMs");
   if (!Number.isSafeInteger(value.startedMs) || value.startedMs < 0 || !Number.isSafeInteger(value.completedMs) || value.completedMs < value.startedMs) throw new Error("timestamp_range");
   if (typeof value.region !== "string" || !/^[a-z]{3}$/.test(value.region)) throw new Error("region");
   if (key !== `${BILLING_USAGE_PREFIX}${value.jobId}`) throw new Error("key/job mismatch");
