@@ -1763,6 +1763,7 @@ mod tests {
 
     fn cf_cfg() -> CloudflareConfig {
         CloudflareConfig::new("https://spawn.example.dev", "tok")
+            .with_scoped_tokens("exec-tok", "lifecycle-tok")
     }
 
     /// A RUNNER spec (`allow_egress == true`, runner-direct) with a pinned image.

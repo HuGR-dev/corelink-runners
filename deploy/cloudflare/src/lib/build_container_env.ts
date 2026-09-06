@@ -113,6 +113,7 @@ export async function buildContainerEnv(
   params: MintParams,
   deps?: { stash?: CredStashLike; fabricEndpoint?: string },
 ): Promise<ContainerEnvResult> {
+  if (typeof params.jobId !== "string" || !params.jobId.trim()) return forbidden();
   if (!env.CORELINK_RUNNER_MINT_AUTH_KEY) return forbidden("mint_key_unarmed");
   if (!params.repoFullName) return forbidden("no_repo");
   if (!params.installationId && !params.acquiringPat) return forbidden("no_installation_or_pat");

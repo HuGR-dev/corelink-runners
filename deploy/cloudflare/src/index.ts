@@ -123,6 +123,7 @@ import { bumpMetrics, snapshotMetrics, MetricsDO } from "./metrics";
 import {
   dispatchTenantSuspensionRevocations as dispatchTenantSuspensionRevocationsOwned,
   revokeCompletedJob as revokeCompletedJobOwned,
+  revokeIssuedCredential,
   retryFailedRevocations as retryFailedRevocationsOwned,
 } from "./lib/revocation_outbox.js";
 import type { CredentialIdentity, CredentialPage, CredentialSelection } from "./lib/credential_authority_contract.js";
@@ -2722,7 +2723,13 @@ async function driveSpawn(
     { jobId, repoFullName: repo, installationId, acquiringPat },
     env0,
   );
+  if (mint.patId && mint.tenant) {
+    await containmentAuthority(env).registerCredential({ jobId, tenant: mint.tenant, patId: mint.patId });
+  }
   if (mint.authz === "forbidden") {
+    if (mint.patId && mint.tenant) {
+      await revokeIssuedCredential(env, containmentAuthority(env), { jobId, tenant: mint.tenant, patId: mint.patId });
+    }
     await releaseSpawnClaim(env.RUNNER_JOB_PATS, jobId);
     await bumpMetrics(env, "spawn_forbidden");
     const failure_class = mint.forbiddenReason === "edge_proxy" ? "edge_proxy_403" : "authz_403";
@@ -2754,7 +2761,6 @@ async function driveSpawn(
   // it here lets the spawn-failure catch below revoke it immediately.
   if (mint.patId) {
     if (!mint.tenant) throw new Error("credential authority requires server-derived tenant");
-    await containmentAuthority(env).registerCredential({ jobId, tenant: mint.tenant, patId: mint.patId });
     if (env.RUNNER_JOB_PATS) await env.RUNNER_JOB_PATS.put(jobId, mint.patId, { expirationTtl: JOB_PAT_TTL_S }).catch((e) =>
       logEvent("error", "kv_put_job_pat_failed", { jobId, error: (e as Error).message }),
     );
@@ -2767,7 +2773,7 @@ async function driveSpawn(
       if (!authorityStore) throw new Error("durable job attribution authority unavailable");
       await persistJobAttribution(authorityStore, { jobId, tenant: mint.tenant });
     } catch (e) {
-      if (mint.patId) await revokeCompletedJob(env, jobId, mint.tenant).catch(() => {});
+      if (mint.patId) await revokeIssuedCredential(env, containmentAuthority(env), { jobId, tenant: mint.tenant, patId: mint.patId }).catch(() => {});
       throw e;
     }
   }
@@ -2791,7 +2797,7 @@ async function driveSpawn(
       // it to its ~2h TTL, exactly as the spawn-failure paths do. Fail-open (revokeCompletedJob
       // swallows its own errors); reads jobId->patId, revokes by pat_id, deletes the key. No-op on
       // a cold spawn (no patId stored).
-      await revokeCompletedJob(env, jobId, mint.tenant);
+      if (mint.patId && mint.tenant) await revokeIssuedCredential(env, containmentAuthority(env), { jobId, tenant: mint.tenant, patId: mint.patId });
       // THROW, don't return. A bare `return` here dropped the job PERMANENTLY:
       // `driveSpawnGuarded` records the dead-letter only from its catch, and
       // `retryOrphanedSpawns` reads a normal return as recovery and deletes the
@@ -2834,7 +2840,7 @@ async function driveSpawn(
     // REVOKE it now instead of leaking a live cas:rw PAT to its TTL. revokeCompletedJob
     // reads the jobId->patId stored at mint time, revokes by pat_id, deletes the key,
     // and swallows its own errors (fail-open — never masks the original spawn error).
-    await revokeCompletedJob(env, jobId, mint.tenant);
+    if (mint.patId && mint.tenant) await revokeIssuedCredential(env, containmentAuthority(env), { jobId, tenant: mint.tenant, patId: mint.patId });
     throw e;
   }
 }

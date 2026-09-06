@@ -19,6 +19,17 @@ function mintResponse(body: unknown, status = 200): Response {
 afterEach(() => vi.restoreAllMocks());
 
 describe("required mint fail-closed contract", () => {
+  it.each(["", "  ", undefined])("missing job identity %s refuses before issuance", async jobId => {
+    const fetcher = vi.fn();
+    vi.stubGlobal("fetch", fetcher);
+    const stashCall = vi.fn();
+    await expect(buildContainerEnv(env, { ...params, jobId } as typeof params, {
+      ...deps, stash: { stash: stashCall },
+    })).resolves.toMatchObject({ authz: "forbidden", containerEnv: {} });
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(stashCall).not.toHaveBeenCalled();
+  });
+
   it("absent key, missing repo, and missing installation/PAT refuse", async () => {
     await expect(buildContainerEnv({}, params)).resolves.toMatchObject({ authz: "forbidden", coldReason: "mint_key_unarmed" });
     await expect(buildContainerEnv(env, { ...params, repoFullName: "" })).resolves.toMatchObject({ authz: "forbidden", coldReason: "no_repo" });
