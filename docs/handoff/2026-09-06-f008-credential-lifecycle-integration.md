@@ -10,7 +10,7 @@ or replace the frozen implementation contract.
 ## Integrated and verified
 
 The integration tree is `/private/tmp/corelink-techlead-takeover-20260906` at
-`ab4669d2c3a2f325be05852b3e13e4fcc9c990c3`.
+`cabe443fdaa1826e1a35e10c4bec411258634e28` before this handoff update.
 
 ## Current Runner composition repair
 
@@ -32,6 +32,18 @@ This is source-level integration evidence only. F008 remains at 16/70 and is
 not production qualified; the active legacy PAT inventory, one invalid data
 row, live 75-second CAS gate, and seven-day monitor remain human/data or
 operational gates.
+
+## Unsupported lifecycle acceptance
+
+`cabe443fdaa1826e1a35e10c4bec411258634e28` integrates independently approved
+test-only packet `2059a429d6d7f0b35b3a50f32d50fa3b4ac2c0a0`. Its in-memory
+ledger acceptance verifies that unsupported lifecycle reads repeatedly refuse
+and do not fabricate lifecycle or event state.
+
+With the required shared target controls and a sourced, non-empty
+`TEST_DATABASE_URL`, the focused command passed:
+
+- `CARGO_TARGET_DIR=/private/tmp/corelink-takeover-suspension-pg-r2/target CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 cargo test -p corelink-fabric --lib lifecycle_unsupported`
 
 ## Earlier integrated packets
 
