@@ -186,9 +186,31 @@ The read-only legacy action card at
 `/private/tmp/corelink-f008-legacy-action-ready.md` records a private,
 hash-qualified inventory of 138 records and the canonical revoke route. Customer
 impact review and human approval remain pending; no revocation was performed.
-The monitor proposal remains at
-`/private/tmp/corelink-monitor-owner-decision-ready.md` without a human
-decision. T6-W15 source is blocked and its seven-day monitor has not started.
+## T6-W15 limited monitor waiver and versioned decision
+
+On 2026-09-06 the owner gave the literal authorization, “Aprovo pdoe seguir
+autonomo,” for Option B in
+`/private/tmp/corelink-monitor-owner-decision-ready.md`. This is the recorded
+owner waiver for T6-W15 implementation only: use Lambda, EventBridge Scheduler,
+DynamoDB, SNS, and S3 Object Lock in three independent AWS accounts; keep the
+operation identity and receipt cursor in the monitor's own transactional record;
+and have an independent verifier reconcile it. The signed chain, WORM storage,
+and independent witness establish integrity of observed records only. They do
+not claim completeness of internal SNS operations; delivery remains at-least-
+once and duplicates remain possible.
+
+The waiver's justification is the provider limitation documented in the Option B
+proposal: SNS does not expose a provider-issued exhaustive cursor or historical
+per-operation receipt query. Its tracking item is T6-W15. It does not waive or
+alter T9 quarantine, F005/F007 work, PAT revocation, PostgreSQL rearm, or any
+production action.
+
+Unknown outcomes remain fail-closed: ambiguity, missing reconciliation, stale or
+future time, or a record gap cannot report healthy or rearm PG. Trusted time and
+qualified TSA, WORM retention, three-account and verifier independence,
+crash/rotation/isolation tests, and seven real continuous observation days remain
+explicit qualification gates. None has started or is proven by this decision.
+Implementation is authorized by the waiver; deployment and acceptance are not.
 
 ## Earlier integrated packets
 

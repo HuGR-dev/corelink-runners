@@ -438,7 +438,7 @@
     {
       "id": "T6-W15",
       "sprint": 1,
-      "state": "backlog",
+      "state": "prepared",
       "implementation": "unknown",
       "owner": "root",
       "dependencies": [
@@ -446,9 +446,9 @@
         "O-MONITORHOST",
         "T7-W4b"
       ],
-      "next_action": "Await response to concrete monitor receipt-contract proposal; AWS independent accounts are provisioned. Original capability gate still unresolved; no monitor application code/deployment.",
+      "next_action": "Implement the owner-approved, limited AWS Option B monitor design. Keep UNKNOWN fail-closed and complete the remaining qualification before any acceptance or deployment.",
       "blockers": [
-        "Original O-MONITORHOST transport receipt/cursor requirements remain unqualified; explicit proposal awaits owner decision."
+        "Trusted time/TSA qualification, WORM and three-account independence qualification, crash/rotation/isolation tests, and seven real observation days remain required before acceptance."
       ],
       "commits": [],
       "review": {
@@ -457,7 +457,8 @@
         "evidence": []
       },
       "evidence": [
-        "docs/handoff/2026-09-06-techlead-takeover.md"
+        "docs/handoff/2026-09-06-techlead-takeover.md",
+        "docs/handoff/2026-09-06-f008-credential-lifecycle-integration.md"
       ]
     },
     {
