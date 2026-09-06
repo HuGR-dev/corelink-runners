@@ -770,17 +770,18 @@
     {
       "id": "T8-W1",
       "sprint": 2,
-      "state": "active",
+      "state": "prepared",
       "implementation": "partial",
       "owner": "wp_t8_w1",
       "dependencies": [
         "T3-W2"
       ],
-      "next_action": "Complete100-concurrent production DO/caller acceptance for A3.16; initial6 helpertests insufficient. A3.14/A3.15 source gaps remain.",
+      "next_action": "A3.16 source reviewed with production DO/caller100-request evidence. Close A3.14 required-enrichment ordering and A3.15 paired engine/Worker credential domains before whole-WP approval.",
       "blockers": [],
       "commits": [
         "61cfc0435837c3fd16006566ab4cdc6b12b3fff4",
-        "7b9fa1cd0baacb8e4d4e5cfdeb0e0cbedf6209ae"
+        "7b9fa1cd0baacb8e4d4e5cfdeb0e0cbedf6209ae",
+        "2053a7221e3a1fdabdbb3c53113d3a6741acfe0f"
       ],
       "review": {
         "status": "pending",
@@ -853,13 +854,13 @@
     {
       "id": "T8-W5",
       "sprint": 2,
-      "state": "active",
+      "state": "prepared",
       "implementation": "partial",
       "owner": "wp_t8_w5",
       "dependencies": [
         "T3-W9"
       ],
-      "next_action": "Correct live-vs-requested revocation state using root additive contract; production DO tests, legacy unknown refusal and no mutable KV deletes. F008 retains durable suspension epoch and migration acceptance.",
+      "next_action": "Exact credential authority components reviewed; root9focusedtests passed. Finish F008 suspension epochs/migration and job-terminal coverage; no whole-WP seal or delivery.",
       "blockers": [],
       "commits": [
         "50ab03667fe8d877321b6096439677938e0b3918",
@@ -870,7 +871,9 @@
         "e860910647b37b6bc43e2ec70064e7cd48a1f65d",
         "8f8bdf5a206f792e0d7e53d346636dcae04d4c06",
         "51ae0c3609ff788f7d69a177d0f6f5026c76c08d",
-        "e7d95fa98e578788f3ff2aff474303e97808b13f"
+        "e7d95fa98e578788f3ff2aff474303e97808b13f",
+        "86e9c0865070174edf149e17dfe4d8984530ee7c",
+        "3ee3d74297327bd0efc0a8acd9f18faaf4c50c7c"
       ],
       "review": {
         "status": "pending",
@@ -1834,10 +1837,14 @@
       "summary": "KV revocation receipts cannot authoritatively identify the current credential or atomically remove its mapping.",
       "reproduction": "At e860910, retain a receipt for credential A of a job, then issue credential B while a different KV location still observes the cached missing job mapping. hasReceipt only lists a matching job/tenant prefix, so suspension skips B and acknowledges the event. Concurrent get-then-delete can also erase a replacement mapping. A malformed receipt value is not validated.",
       "acceptance": "Credential registration, enumeration and confirmed revocation use a transactional authority keyed by exact job/tenant/pat identity. Different credentials for one job remain independent obligations; stale KV absence or old receipts cannot close a newer obligation. Cold receipt corruption and concurrent replacement tests fail closed. Pending obligations persist until confirmed; actual delivery acceptance remains a separate sprint gate. Registered live credentials remain separate from durably requested revocations; background retry must never revoke healthy active jobs. Tests exercise production authority, not only injected verdict stubs.",
-      "commits": [],
+      "commits": [
+        "86e9c0865070174edf149e17dfe4d8984530ee7c",
+        "3ee3d74297327bd0efc0a8acd9f18faaf4c50c7c"
+      ],
       "evidence": [
         "https://developers.cloudflare.com/kv/concepts/how-kv-works/",
-        "https://developers.cloudflare.com/kv/api/write-key-value-pairs/"
+        "https://developers.cloudflare.com/kv/api/write-key-value-pairs/",
+        "Root9focusedtests passed including actual DO+cron active/requested isolation, restart, remint during revoke preserving projection, staleKV and legacyemptyrefusal. Global migration/event completion still F008; retain open until paired lifecycle closure."
       ]
     },
     {
@@ -1869,7 +1876,7 @@
       "blocks_delivery": true,
       "summary": "Suspension outbox needs durable epoch, migration coverage and ordered unsuspend semantics.",
       "reproduction": "At51ae0c PG existing suspended row returns before ensuring an outbox; unsuspend/resuspend in same millisecond reuses event ID suppressed by ON CONFLICT. A delayed old event can scan/revoke newer credentials after unsuspend. Non-PG enforcement now refuses because its durable outbox is unavailable; legacy Worker credential coverage is not established.",
-      "acceptance": "Persist an exact unique suspension epoch with its event atomically, repair pre-existing suspended rows without missing signals, prove repeated suspend idempotent and unsuspend/resuspend independent at identical clocks. Bound Worker durable event receipt and revocation selection to epoch so old delivery never revokes a newer lifecycle. Define and verify legacy credential migration coverage and supported backend behavior; no successful ACK from unknown empty inventory. Add meaningful restart, replay, same-clock and legacy-state tests, then validate paired producer/consumer during sprint gate.",
+      "acceptance": "Persist an exact unique suspension epoch with its event atomically, repair pre-existing suspended rows without missing signals, prove repeated suspend idempotent and unsuspend/resuspend independent at identical clocks. Bound Worker durable event receipt and revocation selection to epoch so old delivery never revokes a newer lifecycle. Define and verify legacy credential migration coverage and supported backend behavior; no successful ACK from unknown empty inventory. Add meaningful restart, replay, same-clock and legacy-state tests, then validate paired producer/consumer during sprint gate. Completion must also prevent a newly registered same-job credential from escaping an already enumerated terminal cleanup; unknown legacy/terminal history must retain a durable retry obligation.",
       "commits": [],
       "evidence": [
         "Root inspected PgLedger::record_tenant_suspension, AppState::record_tenant_suspension_event, enforcement handlers and Worker revocation consumer at51ae0c."
@@ -2227,7 +2234,7 @@
       "at": "2026-09-06T02:35:51.477072+00:00",
       "task": "Implement frozen transactional credential obligations and repair F006",
       "owner": "wp_t8_w5",
-      "state": "active",
+      "state": "completed",
       "scope": [],
       "wp": "T8-W5",
       "role": "executor"
@@ -2245,7 +2252,7 @@
       "at": "2026-09-06T02:39:37.391887+00:00",
       "task": "Implement root-frozen A3.16 rolling admission authority",
       "owner": "wp_t8_w1",
-      "state": "active",
+      "state": "completed",
       "scope": [
         "/private/tmp/corelink-wp-t8_w1-20260905/"
       ],

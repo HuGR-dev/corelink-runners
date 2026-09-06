@@ -23,14 +23,17 @@ and two cold recovery tests; it remains prepared behind canonical dependencies.
 
 Root owns final review, integration and ledger. HuGR TechLead rolling dispatch
 is in use with one Luna executor per WP and distinct read-only review when useful.
-The current active executor lanes are T8-W1 (rolling admission authority) and
-T8-W5 (credential revocation state). Read actual agent status and the ledger
-before resuming any lane. T8-W1's first six sequential helper tests did not prove
-the required 100 concurrent production admissions; that correction is active.
-T8-W5's first transactional candidate incorrectly let cron revoke all registered
-live credentials. Root froze separate registration/requested-revocation states
-at `e7d95fa98e578788f3ff2aff474303e97808b13f`; the same author owns correction.
-Neither candidate has a whole-WP seal.
+The executor lanes returned their candidates; inspect ledger and actual agent
+status before resuming. T8-W1 `2053a7221e3a1fdabdbb3c53113d3a6741acfe0f`
+now exercises 100 concurrent calls through production ContainmentDO and the
+slot-acquisition caller: five permits, 95 refusals. A3.14/A3.15 remain partial.
+T8-W5 `86e9c0865070174edf149e17dfe4d8984530ee7c` separates registered,
+revoke_requested and revoked state. Root added production-authority tests in
+`3ee3d74297327bd0efc0a8acd9f18faaf4c50c7c`; nine focused tests passed,
+including live credential retry isolation, restart, stale KV/remint preservation
+and legacy unknown refusal. F008 still prevents its whole-WP seal.
+The earlier candidate that revoked healthy credentials was rejected and never
+integrated or deployed.
 
 T3-W3 `77cb30f6c5627c56d582d9d3c65f2d76295e9474` has seven cold focused
 tests passing. Root verified the complete relay applies against a fresh archive
