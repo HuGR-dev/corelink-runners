@@ -2194,6 +2194,24 @@ function revokeRetryKey(jobId: string): string {
   return `${REVOKE_RETRY_PREFIX}${jobId}`;
 }
 
+const REVOKE_MAX_LIST_PAGES = 128;
+
+async function listRevokeKeys(
+  kv: NonNullable<Env["RUNNER_JOB_PATS"]>,
+  prefix: string,
+): Promise<string[]> {
+  const keys: string[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < REVOKE_MAX_LIST_PAGES; page++) {
+    const listed = await kv.list({ prefix, cursor });
+    for (const key of listed.keys) keys.push(key.name);
+    if (listed.list_complete !== false) return keys;
+    cursor = listed.cursor;
+    if (!cursor) throw new Error(`KV list incomplete for ${prefix}`);
+  }
+  throw new Error(`KV list page bound exceeded for ${prefix}`);
+}
+
 async function retainRevokeRetry(
   kv: NonNullable<Env["RUNNER_JOB_PATS"]>,
   jobId: string,
@@ -2241,10 +2259,10 @@ export async function revokeCompletedJob(
 export async function retryFailedRevocations(env: Env): Promise<number> {
   const kv = env.RUNNER_JOB_PATS;
   if (!kv?.list || !env.CORELINK_RUNNER_MINT_AUTH_KEY) return 0;
-  let listed: { keys: { name: string }[] };
-  try { listed = await kv.list({ prefix: REVOKE_RETRY_PREFIX }); } catch { return 0; }
+  let names: string[];
+  try { names = await listRevokeKeys(kv, REVOKE_RETRY_PREFIX); } catch { return 0; }
   let succeeded = 0;
-  for (const { name } of listed.keys) {
+  for (const name of names) {
     let rec: RevokeRetryRecord;
     try {
       const raw = await kv.get(name);
@@ -2281,9 +2299,9 @@ export async function dispatchTenantSuspensionRevocations(
   if (!kv?.list || !event.event_id || !event.tenant_id) throw new Error("invalid suspension event");
   const marker = `suspend-revoke:${event.event_id}`;
   if (await kv.get(marker)) return 0;
-  const listed = await kv.list({ prefix: "jtenant:" });
+  const names = await listRevokeKeys(kv, "jtenant:");
   let dispatched = 0;
-  for (const { name } of listed.keys) {
+  for (const name of names) {
     const jobId = name.slice("jtenant:".length);
     if ((await kv.get(name)) !== event.tenant_id) continue;
     const patId = await kv.get(jobId);

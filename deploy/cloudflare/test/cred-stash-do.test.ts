@@ -179,12 +179,13 @@ describe("POST /v1/leases/{id}/cas-cred — route + DO redeem (must-fix #2, rout
     expect(await again.json()).toEqual(expected);
   });
 
-  it("wrong ticket ⇒ 401 with NO cas_pat, and the correct ticket still redeems", async () => {
+  it("wrong ticket ⇒ uniform 404 with NO cas_pat, and the correct ticket still redeems", async () => {
     await env.CRED_STASH.get(env.CRED_STASH.idFromName("job-2")).stash(TICKET, CRED, TTL_MS);
 
     const bad = await worker.fetch(redeemReq("job-2", { ticket: "c".repeat(64) }), env, {} as never);
-    expect(bad.status).toBe(401);
+    expect(bad.status).toBe(404);
     const badBody = (await bad.json()) as Record<string, unknown>;
+    expect(badBody.error).toBe("no such lease"); // no ticket/lease oracle
     expect(badBody.cas_pat).toBeUndefined(); // the PAT never leaves on a bad ticket
 
     const good = await worker.fetch(redeemReq("job-2", { ticket: TICKET }), env, {} as never);
