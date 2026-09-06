@@ -139,7 +139,7 @@
       "sprint": 0,
       "state": "recorded_delivered",
       "implementation": "unknown",
-      "owner": "root",
+      "owner": "t6_w15_executor",
       "dependencies": [],
       "next_action": "Historical source delivery recorded in handoff; retain separate count from complete sprints.",
       "blockers": [],
@@ -446,7 +446,7 @@
         "O-MONITORHOST",
         "T7-W4b"
       ],
-      "next_action": "Compose independently approved terminal-ingest, durable signer-registry, ACK-recovery, human page-acknowledgement, and concrete main-runtime packets. Keep UNKNOWN fail-closed and complete the remaining qualification before any work-package acceptance or deployment.",
+      "next_action": "Single executor at /private/tmp/corelink-t6-w15-owner-20260906 composes the remaining reviewed codecs and witness runtime for r2_pair_acceptance (Luna), then terminal-ingest only after Terra cold approval. No new component work packages or author dispatches; keep UNKNOWN fail-closed and complete the remaining qualification before any work-package acceptance or deployment.",
       "blockers": [
         "Trusted time/TSA qualification, WORM and three-account independence qualification, crash/rotation/isolation tests, and seven real observation days remain required before acceptance."
       ],

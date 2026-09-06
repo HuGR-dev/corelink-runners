@@ -323,6 +323,24 @@ gates remain open. The frozen runtime contract is recorded at
 completion, deployment, production qualification, or change to the recorded
 16/70 delivered count is implied.
 
+## T6-W15 single-executor completion plan
+
+The user assigned one T6-W15 executor through acceptance:
+`r2_pair_acceptance` (Luna), using
+`/private/tmp/corelink-t6-w15-owner-20260906` from
+`e016ca9df43b8e5b9d005c2e62f454c9d49890f5`. Root remains the orchestrator and
+architect; the global integrator composes approved work; and
+`spawn_preparation_integration` performs Terra cold review. Component authors
+have finished their assigned work and no new component dispatch or work package
+is created by this ownership decision.
+
+The immediate acceptance batch is the three token codecs with witness-runtime
+composition under `r2_pair_acceptance`. The terminal-ingest source at `aaa68154`
+remains pending final Terra cold review; its reported author tests do not yet
+authorize integration. This records execution ownership and acceptance flow
+only. It preserves the T6-W15 DoD, `prepared`/partial status, qualification
+gates, 16/70 delivery count, and all worktrees and data.
+
 ## Earlier integrated packets
 
 The prior packets in this tree include:
