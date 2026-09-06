@@ -1,3 +1,21 @@
+# Execution location updated — 2026-09-06
+
+Continue in `/private/tmp/corelink-delivery-rework-20260906`, branch
+`delivery/rework-20260906`. Read `docs/plan/execution/2026-09-06-rework.md`
+and `2026-09-06-disjoint-plan.json` first. This tree contains the seven composed
+source candidates and the three completed disjoint R1 edits. All 39 focused
+integration tests and eight ownership-guard tests passed. Full CI remains deferred
+to complete sprint; canonical completion counts are unchanged.
+
+R1 results: T4-W1 authority extracted; T8-W5 authority extracted; T4-W2 replay
+fixture corrected. Shared files have a single integration owner. Future executor
+writes must pass `scripts/dev/disjoint-plan.py` against their recorded baseline.
+The next execution packet requires D0 to close its cross-WP decisions and specify
+exact owned paths; do not resume old whole-index authoring tasks.
+
+The rest of this file is the retained previous checkpoint; the new ledger/plan
+above supersede its execution locations and active-lane descriptions.
+
 # Delivery checkpoint — 2026-09-05
 
 Continue in `/private/tmp/corelink-delivery-sprint1-20260905`, branch

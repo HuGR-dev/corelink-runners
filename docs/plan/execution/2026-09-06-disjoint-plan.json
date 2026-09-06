@@ -11,7 +11,8 @@
     "dispatch": "Only explicit packet allowlists; no wildcards. Unclosed cross-WP decisions or unpinned baseline block dispatch.",
     "already_reviewed": "Preserve reviewed code and existing green evidence; do not manufacture red baseline or reimplement working modules.",
     "canonical_validation": "disjoint-plan.py invokes existing delivery-ledger.py --check for all70IDs/four frozen scopes/dependencies.",
-    "execution_dependency_rule": "R1 is behavior-preserving extraction of source already composed at baseline; execution prerequisite is ancestor source commit, not promotion of canonical acceptance. No external flag, mint policy, live action, rollout or product dependency is satisfied by R1. Future feature/live dispatch must wait for a D0-resolved packet and actual hard prerequisites."
+    "execution_dependency_rule": "R1 is behavior-preserving extraction of source already composed at baseline; execution prerequisite is ancestor source commit, not promotion of canonical acceptance. No external flag, mint policy, live action, rollout or product dependency is satisfied by R1. Future feature/live dispatch must wait for a D0-resolved packet and actual hard prerequisites.",
+    "context": "Dispatch packet <=12000chars; exact owned files + contract + named tests, no whole-repo rediscovery. Runtime model context is not controlled by this guard."
   },
   "control_work": {
     "D0": {
@@ -78,12 +79,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Include unchanged reviewed admission implementation in complete sprint validation, then applicable production configuration/deployment acceptance.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Include unchanged reviewed admission implementation in complete sprint validation, then applicable production configuration/deployment acceptance."
     },
     {
       "id": "T3-W10",
@@ -117,12 +113,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Code and metadata checks complete. Execute runtime acceptance only in complete Sprint1 CI; discovery of unbound/historical identities is explicitly tracked as successor F-20260905-005.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Code and metadata checks complete. Execute runtime acceptance only in complete Sprint1 CI; discovery of unbound/historical identities is explicitly tracked as successor F-20260905-005."
     },
     {
       "id": "T6-W2",
@@ -147,12 +138,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Reviewed clw patch ready in docs/plan/relays. Await explicit sibling-fence exception requested from owner; then isolated client implementation/release and runnerconsumer pin.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Reviewed clw patch ready in docs/plan/relays. Await explicit sibling-fence exception requested from owner; then isolated client implementation/release and runnerconsumer pin."
     },
     {
       "id": "T6-W4",
@@ -195,12 +181,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Producer, secret-scan and stress code approved. Run full acceptance only after complete sprint composition; owner config/live evidence remains pending.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Producer, secret-scan and stress code approved. Run full acceptance only after complete sprint composition; owner config/live evidence remains pending."
     },
     {
       "id": "T6-W15",
@@ -261,12 +242,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Owner input pending: identify authorized non-Cloudflare runtime and alert channel. Establish required independent storage/scheduler/credential capabilities before monitor implementation.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Owner input pending: identify authorized non-Cloudflare runtime and alert channel. Establish required independent storage/scheduler/credential capabilities before monitor implementation."
     },
     {
       "id": "T5-W1",
@@ -288,12 +264,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Implement and verify the canonical WP acceptance at docs/onboarding/**; actions/corelink-memoize/README.md.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Implement and verify the canonical WP acceptance at docs/onboarding/**; actions/corelink-memoize/README.md."
     },
     {
       "id": "T5-W2",
@@ -314,12 +285,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Implement and verify the canonical WP acceptance at integrations/**.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Implement and verify the canonical WP acceptance at integrations/**."
     },
     {
       "id": "T5-W3",
@@ -342,12 +308,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Implement and verify the canonical WP acceptance at integrations/github-actions/action.yml; integrations/github-actions/test/validate.sh.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Implement and verify the canonical WP acceptance at integrations/github-actions/action.yml; integrations/github-actions/test/validate.sh."
     },
     {
       "id": "T2-W3",
@@ -375,18 +336,13 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "All current workflow references are immutable; retain final inventory check after any further Sprint1 workflow edits and run full CI only at complete-sprint tip.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "All current workflow references are immutable; retain final inventory check after any further Sprint1 workflow edits and run full CI only at complete-sprint tip."
     },
     {
       "id": "T4-W1",
       "sprint": 2,
       "model": "gpt-5.6-luna",
-      "state": "active",
+      "state": "integrated",
       "owns": [
         "deploy/cloudflare/src/lib/job_attribution.ts",
         "deploy/cloudflare/src/lib/job_attribution_authority.ts",
@@ -431,17 +387,16 @@
       "dispatch_baseline": "e66db97269cea9a8045337b1ba50a7b054c6288d",
       "dispatched_at": "2026-09-06T03:30:13.031908+00:00",
       "worktree": "/private/tmp/corelink-rework-t4-w1-20260906",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "result_commit": "4cbafa77c66f4484d21e52b1763cd777c17db5a9",
+      "merge_commit": "b8479fa4283575566fc2f6b1604c1df6395dbac7",
+      "verified_at": "2026-09-06T03:35:28.592588+00:00",
+      "verification": "R1 focused composed suite:39tests passed; no canonical whole-WP credit."
     },
     {
       "id": "T4-W2",
       "sprint": 2,
       "model": "gpt-5.6-luna",
-      "state": "active",
+      "state": "integrated",
       "owns": [
         "deploy/cloudflare/src/billing_recovery.ts",
         "deploy/cloudflare/test/billing-recovery.test.ts",
@@ -482,11 +437,10 @@
       "dispatch_baseline": "e66db97269cea9a8045337b1ba50a7b054c6288d",
       "dispatched_at": "2026-09-06T03:30:13.031908+00:00",
       "worktree": "/private/tmp/corelink-rework-t4-w2-20260906",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "result_commit": "5e1c105633ae9ae68ac43beecc52f1c4f851e86c",
+      "merge_commit": "e2265c11cee9f89c84458753e1a6bfea644e83d2",
+      "verified_at": "2026-09-06T03:35:28.592588+00:00",
+      "verification": "R1 focused composed suite:39tests passed; no canonical whole-WP credit."
     },
     {
       "id": "T3-W3",
@@ -518,12 +472,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Root review latest bounded registry source and relay. Real server relay application/integration remains pending sibling fence exception.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Root review latest bounded registry source and relay. Real server relay application/integration remains pending sibling fence exception."
     },
     {
       "id": "T3-W1",
@@ -554,12 +503,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Source review approved; hold isolated candidate until canonical predecessor composition, then verify composed Sprint2. Authored Rust tests have not executed.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Source review approved; hold isolated candidate until canonical predecessor composition, then verify composed Sprint2. Authored Rust tests have not executed."
     },
     {
       "id": "T3-W2",
@@ -594,12 +538,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Safe diagnostic repair reviewed: no KV-driven deletes/releases. F007 still blocks A3.12 authoritative recovery; other focused lifecycle/source components retained.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Safe diagnostic repair reviewed: no KV-driven deletes/releases. F007 still blocks A3.12 authoritative recovery; other focused lifecycle/source components retained."
     },
     {
       "id": "T8-W1",
@@ -631,12 +570,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "A3.16 source reviewed with production DO/caller100-request evidence. Close A3.14 required-enrichment ordering and A3.15 paired engine/Worker credential domains before whole-WP approval.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "A3.16 source reviewed with production DO/caller100-request evidence. Close A3.14 required-enrichment ordering and A3.15 paired engine/Worker credential domains before whole-WP approval."
     },
     {
       "id": "T8-W3",
@@ -666,12 +600,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare/src/index.ts; deploy/cloudflare/src/lib.ts.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare/src/index.ts; deploy/cloudflare/src/lib.ts."
     },
     {
       "id": "T3-W14",
@@ -695,12 +624,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare/src/index.ts; deploy/cloudflare/src/lib.ts.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare/src/index.ts; deploy/cloudflare/src/lib.ts."
     },
     {
       "id": "T3-W9",
@@ -725,18 +649,13 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare/src/index.ts; deploy/cloudflare/src/lib.ts.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare/src/index.ts; deploy/cloudflare/src/lib.ts."
     },
     {
       "id": "T8-W5",
       "sprint": 2,
       "model": "gpt-5.6-luna",
-      "state": "active",
+      "state": "integrated",
       "owns": [
         "crates/corelink-fabric-server/src/handlers/enforcement.rs",
         "crates/corelink-fabric-server/src/tenant_suspension_dispatch.rs",
@@ -793,11 +712,10 @@
       "dispatch_baseline": "e66db97269cea9a8045337b1ba50a7b054c6288d",
       "dispatched_at": "2026-09-06T03:30:13.031908+00:00",
       "worktree": "/private/tmp/corelink-rework-t8-w5-20260906",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "result_commit": "a9f67d3634a22fc472f0731be164afabc04acbbe",
+      "merge_commit": "66e15b445aa54a94cd0181a36b4f337d0e6cc96d",
+      "verified_at": "2026-09-06T03:35:28.592588+00:00",
+      "verification": "R1 focused composed suite:39tests passed; no canonical whole-WP credit."
     },
     {
       "id": "T8-W2",
@@ -822,12 +740,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare/src/index.ts; deploy/cloudflare/src/lib.ts.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare/src/index.ts; deploy/cloudflare/src/lib.ts."
     },
     {
       "id": "T3-W16",
@@ -861,12 +774,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Implement canonical Cloudflare reconciliation plus explicit F-20260905-005 Rust caller/legacy reconciliation; Northflank requires its own equivalent authority, not Cloudflare capability tokens.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Implement canonical Cloudflare reconciliation plus explicit F-20260905-005 Rust caller/legacy reconciliation; Northflank requires its own equivalent authority, not Cloudflare capability tokens."
     },
     {
       "id": "T3-W15",
@@ -890,12 +798,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare/src/index.ts; deploy/cloudflare/src/lib.ts.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare/src/index.ts; deploy/cloudflare/src/lib.ts."
     },
     {
       "id": "T8-W4b",
@@ -934,12 +837,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Code independently approved; validate complete sprint and later deployed image/process evidence. Re-review only if DevEnv integration changes bridge.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Code independently approved; validate complete sprint and later deployed image/process evidence. Re-review only if DevEnv integration changes bridge."
     },
     {
       "id": "T8-W6",
@@ -963,12 +861,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/au4.16b-suspension-pat-revocation.json; docs/plan/evidence/au3.23b-completion-pat-revocation.json.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/au4.16b-suspension-pat-revocation.json; docs/plan/evidence/au3.23b-completion-pat-revocation.json."
     },
     {
       "id": "T8-W7",
@@ -993,12 +886,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/au3.26b-jitconfig-process-surface.json.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/au3.26b-jitconfig-process-surface.json."
     },
     {
       "id": "T3-W5",
@@ -1025,12 +913,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare/src/index.ts; deploy/cloudflare/src/lib.ts.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare/src/index.ts; deploy/cloudflare/src/lib.ts."
     },
     {
       "id": "T9-W1",
@@ -1064,12 +947,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Runners credential/billing code integrated. Apply reviewed server relay after explicit sibling exception; implement monthly hard-stop using owner-selected shared/separate budget authority.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Runners credential/billing code integrated. Apply reviewed server relay after explicit sibling exception; implement monthly hard-stop using owner-selected shared/separate budget authority."
     },
     {
       "id": "T1-W5",
@@ -1099,12 +977,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Code and focused test sources integrated; library and4 targeted test crates passed warm metadata checks. Runtime/fullCI/live keyed acceptance only at complete sprint.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Code and focused test sources integrated; library and4 targeted test crates passed warm metadata checks. Runtime/fullCI/live keyed acceptance only at complete sprint."
     },
     {
       "id": "T1-W6",
@@ -1156,12 +1029,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Implement and verify the canonical WP acceptance at crates/corelink-fabric/src/pg_ledger.rs; crates/corelink-fabric/src/billing_sink.rs.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Implement and verify the canonical WP acceptance at crates/corelink-fabric/src/pg_ledger.rs; crates/corelink-fabric/src/billing_sink.rs."
     },
     {
       "id": "T1-W2",
@@ -1183,12 +1051,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T1-W2-control-plane.json.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T1-W2-control-plane.json."
     },
     {
       "id": "T1-W3",
@@ -1211,12 +1074,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T1-W3-resilience.json.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T1-W3-resilience.json."
     },
     {
       "id": "T1-W4",
@@ -1240,12 +1098,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T1-W4-boot-rate.json.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T1-W4-boot-rate.json."
     },
     {
       "id": "T2-W2b",
@@ -1272,12 +1125,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T2-W2b-deploy.json.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T2-W2b-deploy.json."
     },
     {
       "id": "T2-W4",
@@ -1300,12 +1148,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T2-W4-image-ship.json.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T2-W4-image-ship.json."
     },
     {
       "id": "T2-W5",
@@ -1328,12 +1171,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T2-W5-runbook-compat.json.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T2-W5-runbook-compat.json."
     },
     {
       "id": "T2-W6",
@@ -1357,12 +1195,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Implement and verify the canonical WP acceptance at docs/runbook/secret-rotation.md; docs/plan/evidence/au1.8-fabricd-secret-rotation.json.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Implement and verify the canonical WP acceptance at docs/runbook/secret-rotation.md; docs/plan/evidence/au1.8-fabricd-secret-rotation.json."
     },
     {
       "id": "T3-W7",
@@ -1385,12 +1218,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T3-W7-moat.json.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T3-W7-moat.json."
     },
     {
       "id": "T3-W8",
@@ -1413,12 +1241,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T3-W8-inventory-hitrate.json.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T3-W8-inventory-hitrate.json."
     },
     {
       "id": "T4-W7",
@@ -1444,12 +1267,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T4-W7-money.json.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T4-W7-money.json."
     },
     {
       "id": "T4-W8",
@@ -1473,12 +1291,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T4-W8-billing-reconcile.json.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T4-W8-billing-reconcile.json."
     },
     {
       "id": "T5-W4",
@@ -1504,12 +1317,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T5-W4-stranger.json.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T5-W4-stranger.json."
     },
     {
       "id": "T5-W5",
@@ -1535,12 +1343,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T5-W5-stranger-adversarial.json.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T5-W5-stranger-adversarial.json."
     },
     {
       "id": "T5-W6",
@@ -1565,12 +1368,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T5-W6-release-artifacts.json.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T5-W6-release-artifacts.json."
     },
     {
       "id": "T6-W5",
@@ -1592,12 +1390,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T6-W5-e2e.json.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T6-W5-e2e.json."
     },
     {
       "id": "T6-W6",
@@ -1620,12 +1413,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T6-W6-canary.json.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T6-W6-canary.json."
     },
     {
       "id": "T6-W7",
@@ -1647,12 +1435,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T6-W7-authz.json.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T6-W7-authz.json."
     },
     {
       "id": "T6-W9",
@@ -1682,12 +1465,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Named C1-C5 rule/channel source integrated. Real external binding, deployed detectors and end-to-end acceptance remain pending at canonical later gates; no live credit.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Named C1-C5 rule/channel source integrated. Real external binding, deployed detectors and end-to-end acceptance remain pending at canonical later gates; no live credit."
     },
     {
       "id": "T6-W10",
@@ -1715,12 +1493,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T6-W14-canary-no-wake.json; docs/plan/evidence/T6-W10-alerting-depth.json.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T6-W14-canary-no-wake.json; docs/plan/evidence/T6-W10-alerting-depth.json."
     },
     {
       "id": "T6-W11",
@@ -1741,12 +1514,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T6-W11-runbook-execution.json.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T6-W11-runbook-execution.json."
     },
     {
       "id": "T7-W5",
@@ -1773,12 +1541,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Implement and verify the canonical WP acceptance at docs/product/pricing.md; docs/plan/evidence/au7.11-queued-running-latency.json.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Implement and verify the canonical WP acceptance at docs/product/pricing.md; docs/plan/evidence/au7.11-queued-running-latency.json."
     },
     {
       "id": "T6-W12",
@@ -1840,12 +1603,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Implement and verify the canonical WP acceptance at deploy/cost-monitor/Containerfile; deploy/cost-monitor/config.schema.json.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Implement and verify the canonical WP acceptance at deploy/cost-monitor/Containerfile; deploy/cost-monitor/config.schema.json."
     },
     {
       "id": "T3-W18",
@@ -1870,12 +1628,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Implement and execute the genuine three-state 10/10 and nonempty ordered resume proof, including side-effect and running-instance observations. Existing live artifact remains RED.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Implement and execute the genuine three-state 10/10 and nonempty ordered resume proof, including side-effect and running-instance observations. Existing live artifact remains RED."
     },
     {
       "id": "T6-W13",
@@ -1905,12 +1658,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Verify complete key-lane behavior and collect twelve-tick deployed evidence after composition.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Verify complete key-lane behavior and collect twelve-tick deployed evidence after composition."
     },
     {
       "id": "T6-W14",
@@ -1955,12 +1703,7 @@
       "decisions_closed": false,
       "contract": null,
       "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
-      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare-fabricd/src/index.ts; deploy/cloudflare-fabricd/src/lifecycle.ts.",
-      "context_plan": {
-        "packet_max_chars": 12000,
-        "working_set": "frozen contract + exact owned files + named tests; no whole-repo discovery",
-        "enforcement": "packet size checked before dispatch; runtime model context is not controlled by this checker"
-      }
+      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare-fabricd/src/index.ts; deploy/cloudflare-fabricd/src/lifecycle.ts."
     }
   ],
   "waves": [
@@ -1972,7 +1715,10 @@
         "T8-W5",
         "T4-W2"
       ],
-      "acceptance": "Parity against preserved production implementation; no F006/F007/F008 or D13 completion credit."
+      "acceptance": "Parity against preserved production implementation; no F006/F007/F008 or D13 completion credit.",
+      "state": "complete",
+      "completed_at": "2026-09-06T03:35:28.592588+00:00",
+      "composed_source": "24988a3caeacd99feff734afecdb1e49d2c8f317"
     }
   ]
 }

@@ -653,14 +653,17 @@
         "5956df4c8949746413271045a3f2457f93d9e8f1",
         "f54788e74d1f2f6bb8df2abe4cedc85102668e7e",
         "708b1e7227ebc4a965168a15aed4e4c1e168b716",
-        "407f2ea4d9f2ae3b17c581cd9649bd9ad87f224d"
+        "407f2ea4d9f2ae3b17c581cd9649bd9ad87f224d",
+        "4cbafa77c66f4484d21e52b1763cd777c17db5a9"
       ],
       "review": {
         "status": "pending",
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [
+        "docs/plan/execution/rework-20260906/R1-final.json"
+      ]
     },
     {
       "id": "T4-W2",
@@ -679,7 +682,8 @@
         "9a15de63c993aaa149917ca7a73f3d9334a55984",
         "0516442ef5e2095b27e6ef760d4ca20e2b59a10c",
         "116bf98f46baa509119c0a2c1342afb351b3abb2",
-        "ffc5dadff397c546817673d04ad62e8ab527deae"
+        "ffc5dadff397c546817673d04ad62e8ab527deae",
+        "5e1c105633ae9ae68ac43beecc52f1c4f851e86c"
       ],
       "review": {
         "status": "approved",
@@ -689,7 +693,8 @@
         ]
       },
       "evidence": [
-        "docs/plan/execution/2026-09-05-rule-matrix-and-billing-review.json"
+        "docs/plan/execution/2026-09-05-rule-matrix-and-billing-review.json",
+        "docs/plan/execution/rework-20260906/R1-final.json"
       ]
     },
     {
@@ -873,14 +878,17 @@
         "51ae0c3609ff788f7d69a177d0f6f5026c76c08d",
         "e7d95fa98e578788f3ff2aff474303e97808b13f",
         "86e9c0865070174edf149e17dfe4d8984530ee7c",
-        "3ee3d74297327bd0efc0a8acd9f18faaf4c50c7c"
+        "3ee3d74297327bd0efc0a8acd9f18faaf4c50c7c",
+        "a9f67d3634a22fc472f0731be164afabc04acbbe"
       ],
       "review": {
         "status": "pending",
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [
+        "docs/plan/execution/rework-20260906/R1-final.json"
+      ]
     },
     {
       "id": "T8-W2",
@@ -2274,7 +2282,7 @@
       "at": "2026-09-06T03:30:13.031908+00:00",
       "task": "R1 disjoint rework step; no whole-WP acceptance credit",
       "owner": "wp_t4_w1",
-      "state": "active",
+      "state": "integrated",
       "wp": "T4-W1",
       "role": "executor",
       "scope": [
@@ -2287,7 +2295,7 @@
       "at": "2026-09-06T03:30:13.031908+00:00",
       "task": "R1 disjoint rework step; no whole-WP acceptance credit",
       "owner": "wp_t4_w2",
-      "state": "active",
+      "state": "integrated",
       "wp": "T4-W2",
       "role": "executor",
       "scope": [
@@ -2300,7 +2308,7 @@
       "at": "2026-09-06T03:30:13.031908+00:00",
       "task": "R1 disjoint rework step; no whole-WP acceptance credit",
       "owner": "wp_t8_w5",
-      "state": "active",
+      "state": "integrated",
       "wp": "T8-W5",
       "role": "executor",
       "scope": [
@@ -2309,5 +2317,6 @@
       "baseline": "e66db97269cea9a8045337b1ba50a7b054c6288d",
       "worktree": "/private/tmp/corelink-rework-t8-w5-20260906"
     }
-  ]
+  ],
+  "execution_plan": "docs/plan/execution/2026-09-06-disjoint-plan.json"
 }

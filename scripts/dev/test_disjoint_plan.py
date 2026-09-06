@@ -39,7 +39,8 @@ class OwnershipTests(unittest.TestCase):
         self.assertEqual(sum("exact relative file" in e for e in self.errors()), 2)
 
     def test_open_decision_cannot_be_dispatched(self):
-        packet = next(p for p in self.plan["packets"] if p["state"] in {"ready", "active"})
+        packet = next(p for p in self.plan["packets"] if p.get("contract"))
+        packet["state"] = "ready"
         packet["decisions_closed"] = False
         self.assertTrue(any("cannot dispatch without decisions_closed" in e for e in self.errors()))
 
