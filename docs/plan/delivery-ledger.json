@@ -701,11 +701,13 @@
       "dependencies": [
         "T4-W2"
       ],
-      "next_action": "Executor returned candidate; root cold review pending against canonical acceptance and actual producer interfaces. No whole-WP, integration or delivery credit from author completion.",
+      "next_action": "Root review latest bounded registry source and relay. Real server relay application/integration remains pending sibling fence exception.",
       "blockers": [],
       "commits": [
         "e39d7a0f5078215396c58cf08fd4a6bd4adb4ecd",
-        "31ab8b9c7c83b39572051eea0825808a620a61ca"
+        "31ab8b9c7c83b39572051eea0825808a620a61ca",
+        "2c0114e89fecb21cee52be55aceac663aeb75965",
+        "77cb30f6c5627c56d582d9d3c65f2d76295e9474"
       ],
       "review": {
         "status": "pending",
@@ -752,10 +754,11 @@
         "T3-W1",
         "T7-W4b"
       ],
-      "next_action": "Executor returned candidate; root cold review pending against canonical acceptance and actual producer interfaces. No whole-WP, integration or delivery credit from author completion.",
+      "next_action": "Safe diagnostic repair reviewed: no KV-driven deletes/releases. F007 still blocks A3.12 authoritative recovery; other focused lifecycle/source components retained.",
       "blockers": [],
       "commits": [
-        "1ef55b33260fbb722c4094b89a859be9c1b0c406"
+        "1ef55b33260fbb722c4094b89a859be9c1b0c406",
+        "6496cb3578be0b5c127d248b5341aaa4146699f5"
       ],
       "review": {
         "status": "pending",
@@ -767,15 +770,18 @@
     {
       "id": "T8-W1",
       "sprint": 2,
-      "state": "backlog",
-      "implementation": "unknown",
-      "owner": "root",
+      "state": "active",
+      "implementation": "partial",
+      "owner": "wp_t8_w1",
       "dependencies": [
         "T3-W2"
       ],
-      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare/src/index.ts; deploy/cloudflare/src/lib.ts.",
+      "next_action": "Complete100-concurrent production DO/caller acceptance for A3.16; initial6 helpertests insufficient. A3.14/A3.15 source gaps remain.",
       "blockers": [],
-      "commits": [],
+      "commits": [
+        "61cfc0435837c3fd16006566ab4cdc6b12b3fff4",
+        "7b9fa1cd0baacb8e4d4e5cfdeb0e0cbedf6209ae"
+      ],
       "review": {
         "status": "pending",
         "commit": null,
@@ -847,13 +853,13 @@
     {
       "id": "T8-W5",
       "sprint": 2,
-      "state": "prepared",
+      "state": "active",
       "implementation": "partial",
       "owner": "wp_t8_w5",
       "dependencies": [
         "T3-W9"
       ],
-      "next_action": "Review exact returned source and scoped acceptance; integrate when canonical prerequisites are met. Full CI reserved for composed sprint.",
+      "next_action": "Correct live-vs-requested revocation state using root additive contract; production DO tests, legacy unknown refusal and no mutable KV deletes. F008 retains durable suspension epoch and migration acceptance.",
       "blockers": [],
       "commits": [
         "50ab03667fe8d877321b6096439677938e0b3918",
@@ -861,7 +867,10 @@
         "e34819c30411ae02fdff415365aa3b6738e31529",
         "651c5aae801632726be14cb4c874c04a015e058a",
         "8834e9f5bdbeb33cc5381767a615608da7294df7",
-        "e860910647b37b6bc43e2ec70064e7cd48a1f65d"
+        "e860910647b37b6bc43e2ec70064e7cd48a1f65d",
+        "8f8bdf5a206f792e0d7e53d346636dcae04d4c06",
+        "51ae0c3609ff788f7d69a177d0f6f5026c76c08d",
+        "e7d95fa98e578788f3ff2aff474303e97808b13f"
       ],
       "review": {
         "status": "pending",
@@ -1813,6 +1822,58 @@
         "docs/plan/execution/2026-09-05-provider-recovery.json"
       ],
       "origin": "Successor discovery/liveness scope from F-20260905-002. AU3.25/AU7.7 source safety is complete; universal recovery and zero orphans are not claimed. Northflank scope is explicitly additional to canonical Cloudflare T3-W16."
+    },
+    {
+      "id": "F-20260905-006",
+      "wp": "T8-W5",
+      "sprint": 2,
+      "state": "open",
+      "blocks_delivery": true,
+      "severity": "high",
+      "owner": "wp_t8_w5",
+      "summary": "KV revocation receipts cannot authoritatively identify the current credential or atomically remove its mapping.",
+      "reproduction": "At e860910, retain a receipt for credential A of a job, then issue credential B while a different KV location still observes the cached missing job mapping. hasReceipt only lists a matching job/tenant prefix, so suspension skips B and acknowledges the event. Concurrent get-then-delete can also erase a replacement mapping. A malformed receipt value is not validated.",
+      "acceptance": "Credential registration, enumeration and confirmed revocation use a transactional authority keyed by exact job/tenant/pat identity. Different credentials for one job remain independent obligations; stale KV absence or old receipts cannot close a newer obligation. Cold receipt corruption and concurrent replacement tests fail closed. Pending obligations persist until confirmed; actual delivery acceptance remains a separate sprint gate. Registered live credentials remain separate from durably requested revocations; background retry must never revoke healthy active jobs. Tests exercise production authority, not only injected verdict stubs.",
+      "commits": [],
+      "evidence": [
+        "https://developers.cloudflare.com/kv/concepts/how-kv-works/",
+        "https://developers.cloudflare.com/kv/api/write-key-value-pairs/"
+      ]
+    },
+    {
+      "id": "F-20260905-007",
+      "wp": "T3-W2",
+      "sprint": 2,
+      "severity": "high",
+      "owner": "root",
+      "blocks_delivery": true,
+      "summary": "Stale claim cleanup lacks authoritative provider cancellation and generation-fenced release.",
+      "reproduction": "Candidate1ef55b3 reapStaleSpawnClaims treats null/malformed timestamp plus missing KV handle as safe absence, deletes mutable job claim and releases slot. A late provider start or concurrent replacement claim violates capacity/ownership.",
+      "acceptance": "Unknown/null/corrupt/stale KV never authorizes deletion or slot release. A3.12 stale-claim success must bind exact durable generation and confirmed provider cancellation; concurrent replacement retains its claim and slot. Restart and late-materialization tests prove no duplicate and no capacity release from ambiguous absence. Link T3-W16/F005 provider cancellation integration without moving this Sprint2 A3.12 acceptance to green.",
+      "commits": [
+        "6496cb3578be0b5c127d248b5341aaa4146699f5"
+      ],
+      "evidence": [
+        "Independent read-only review of1ef55b33260fbb722c4094b89a859be9c1b0c406; root inspected production function.",
+        "Root reviewed diagnostic-only mitigation; author3 focused lifecycle tests passed. Full authoritative reaping remains unresolved."
+      ],
+      "state": "open"
+    },
+    {
+      "id": "F-20260905-008",
+      "wp": "T8-W5",
+      "sprint": 2,
+      "severity": "high",
+      "owner": "root",
+      "state": "open",
+      "blocks_delivery": true,
+      "summary": "Suspension outbox needs durable epoch, migration coverage and ordered unsuspend semantics.",
+      "reproduction": "At51ae0c PG existing suspended row returns before ensuring an outbox; unsuspend/resuspend in same millisecond reuses event ID suppressed by ON CONFLICT. A delayed old event can scan/revoke newer credentials after unsuspend. Non-PG enforcement now refuses because its durable outbox is unavailable; legacy Worker credential coverage is not established.",
+      "acceptance": "Persist an exact unique suspension epoch with its event atomically, repair pre-existing suspended rows without missing signals, prove repeated suspend idempotent and unsuspend/resuspend independent at identical clocks. Bound Worker durable event receipt and revocation selection to epoch so old delivery never revokes a newer lifecycle. Define and verify legacy credential migration coverage and supported backend behavior; no successful ACK from unknown empty inventory. Add meaningful restart, replay, same-clock and legacy-state tests, then validate paired producer/consumer during sprint gate.",
+      "commits": [],
+      "evidence": [
+        "Root inspected PgLedger::record_tenant_suspension, AppState::record_tenant_suspension_event, enforcement handlers and Worker revocation consumer at51ae0c."
+      ]
     }
   ],
   "activity": [
@@ -2155,11 +2216,51 @@
       "at": "2026-09-06T02:12:08.801458+00:00",
       "task": "T3-W3 correct registry relay route wiring against actual server c0a4466 source",
       "owner": "wp_t3_w3",
-      "state": "active",
+      "state": "completed",
       "scope": [
         "/private/tmp/corelink-wp-t3_w3-20260905/"
       ],
       "wp": "T3-W3",
+      "role": "executor"
+    },
+    {
+      "at": "2026-09-06T02:35:51.477072+00:00",
+      "task": "Implement frozen transactional credential obligations and repair F006",
+      "owner": "wp_t8_w5",
+      "state": "active",
+      "scope": [],
+      "wp": "T8-W5",
+      "role": "executor"
+    },
+    {
+      "at": "2026-09-06T02:35:51.477072+00:00",
+      "task": "Independent read-only lifecycle source review",
+      "owner": "billing_review",
+      "state": "completed",
+      "scope": [],
+      "wp": "T3-W2",
+      "role": "reviewer"
+    },
+    {
+      "at": "2026-09-06T02:39:37.391887+00:00",
+      "task": "Implement root-frozen A3.16 rolling admission authority",
+      "owner": "wp_t8_w1",
+      "state": "active",
+      "scope": [
+        "/private/tmp/corelink-wp-t8_w1-20260905/"
+      ],
+      "wp": "T8-W1",
+      "role": "executor"
+    },
+    {
+      "at": "2026-09-06T02:39:37.391887+00:00",
+      "task": "Remove unsafe stale-claim mutation identified in review",
+      "owner": "wp_t3_w2",
+      "state": "completed",
+      "scope": [
+        "/private/tmp/corelink-wp-t3_w2-20260905/"
+      ],
+      "wp": "T3-W2",
       "role": "executor"
     }
   ]

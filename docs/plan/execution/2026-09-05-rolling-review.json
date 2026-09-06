@@ -1,0 +1,32 @@
+{
+  "at": "2026-09-06T02:44:40.464202+00:00",
+  "reviews": [
+    {
+      "wp": "T3-W3",
+      "commit": "77cb30f6c5627c56d582d9d3c65f2d76295e9474",
+      "status": "component_source_reviewed",
+      "root_validation": [
+        "Focused reconciler-discovery.test.ts7/7passed, exit0,3.20s.",
+        "git apply --check relay patch against fresh archive of serverc0a4466/tree79b51bfd passedexit0."
+      ],
+      "limitations": [
+        "Server route/producer5tests are separate author evidence. Actual sibling patch not applied.",
+        "Existing containment canonical owner reservation remains authority; KV-only test fixture does not certify provider cancellation.",
+        "No wholeWP/CI/deploy/livecredit."
+      ]
+    },
+    {
+      "wp": "T3-W2",
+      "commit": "6496cb3578be0b5c127d248b5341aaa4146699f5",
+      "status": "safe_mitigation_reviewed",
+      "root_validation": [
+        "Source now emits boundeddiagnostics with zero claim deletes/slot releases."
+      ],
+      "limitations": [
+        "Author3focusedlifecycle tests; no rootrerun after small diagnostic correction.",
+        "F007 fullA3.12 cleanup remains open."
+      ]
+    }
+  ],
+  "policy": "FullCI/heavychecks atcomplete sprint only; authorreturn is notseal."
+}

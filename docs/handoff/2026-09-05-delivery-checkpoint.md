@@ -9,27 +9,44 @@ The mechanical source of execution state is
 [`delivery-ledger.json`](../plan/delivery-ledger.json). Run
 `python3 scripts/dev/delivery-ledger.py --check --report` to recover counts,
 owners, findings and next actions. The canonical DAG retains all 70 WPs and
-the agreed four sprint scopes. Six of twelve Sprint 1 WPs have complete code;
-no new sprint or WP is recorded as delivered. Historical source records are
-not independently recertified delivery.
+the agreed four sprint scopes. Sprint 1 has 7/12 complete source implementations;
+Sprint 2 has 2/14 (T3-W1 and T4-W2) approved prepared implementations.
+No new sprint or WP is recorded as delivered. Historical source records remain
+separate from independently verified sprint delivery.
 
-Full CI and heavy test suites run only when the complete sprint is composed.
-This checkpoint has successful Rust metadata compilation and TypeScript checks,
-plus focused author tests recorded separately in the execution evidence. No
-sprint CI, deployment, live provider action or sibling mutation was performed.
-The current fan-out has one Luna executor for each of T4-W1, T4-W2, T3-W3,
-T3-W2 and T8-W5, in `/private/tmp/corelink-wp-<lowercase_wp>-20260905`.
-Root owns review, integration and ledger updates. Review corrections return
-to the same executor. The source preparation tree for Sprint 2 is
-`/private/tmp/corelink-delivery-sprint2-20260905`; pending hard dependencies
-prevent delivery credit and entry into the active delivery stack.
-T4-W1's first candidate retained the defective 7200-second attribution TTL;
-T8-W5's first candidate lacked the actual suspension producer connection.
-Both are under correction, not accepted implementations. T3-W1's redaction
-candidate `a54470eabad870568ae8ab8fbeec83c0f45099ba` passed source review and
-is held as prepared; authored Rust runtime tests await sprint validation.
-T3-W2 occupies the completed executor lane. Consult the ledger and
-live agent status before resuming any author task.
+Full CI and heavy suites run only when the complete sprint is composed. T6-W9's
+C1–C5 matrix is integrated at `47ae1bc370c6a68f79aa126e203ecf661b59415a`,
+with independent source approval and 52 focused canary tests. This freezes the
+routing contract; it does not implement T6-W12 detectors or bind an external host.
+T4-W2 source `ffc5dadff397c546817673d04ad62e8ab527deae` passed root review
+and two cold recovery tests; it remains prepared behind canonical dependencies.
+
+Root owns final review, integration and ledger. HuGR TechLead rolling dispatch
+is in use with one Luna executor per WP and distinct read-only review when useful.
+The current active executor lanes are T8-W1 (rolling admission authority) and
+T8-W5 (credential revocation state). Read actual agent status and the ledger
+before resuming any lane. T8-W1's first six sequential helper tests did not prove
+the required 100 concurrent production admissions; that correction is active.
+T8-W5's first transactional candidate incorrectly let cron revoke all registered
+live credentials. Root froze separate registration/requested-revocation states
+at `e7d95fa98e578788f3ff2aff474303e97808b13f`; the same author owns correction.
+Neither candidate has a whole-WP seal.
+
+T3-W3 `77cb30f6c5627c56d582d9d3c65f2d76295e9474` has seven cold focused
+tests passing. Root verified the complete relay applies against a fresh archive
+of actual server `c0a4466d930073d05ebedc3ac8b8d9cc8474b68f`, tree
+`79b51bfd163fb41e31fb9ab52105110a06e6d4cf`. The real sibling remains unchanged.
+T3-W2 `6496cb3578be0b5c127d248b5341aaa4146699f5` removes unsafe KV-only
+stale-claim deletion and slot release. A3.12 authoritative recovery remains F007,
+with no acceptance credit. F008 records suspension epoch, delayed-event and
+legacy migration gaps; F006 records transactional credential identity/retry safety.
+
+The Sprint 2 preparation tree is `/private/tmp/corelink-delivery-sprint2-20260905`.
+Unsatisfied hard dependencies prevent entry into the active delivery stack and
+delivery credit. T4-W1's attribution TTL is fixed and authoritative enumeration
+exists, but D13 owner precedence is unratified. T3-W1's approved redaction source
+is `a54470eabad870568ae8ab8fbeec83c0f45099ba`; its Rust tests await the sprint gate.
+No new CI, deployment, live provider action or sibling mutation was performed.
 
 Current implementation includes confirmed teardown/capacity retention, durable
 provider references and exact restore, mint readiness, brokered DevEnv credentials,
