@@ -281,22 +281,17 @@ impl std::fmt::Debug for CloudflareConfig {
     }
 }
 
-/// Bound a Worker response body before it is interpolated into an error (parity
+/// Redact a Worker response body before it is interpolated into an error (parity
 /// with `northflank::bounded_provider_body`): the spawn REQUEST carries the
 /// injected `CORELINK_RUNNER_JITCONFIG`; were the Worker ever to reflect submitted
-/// env into a 4xx/5xx body, the raw body flowing into a `bail!` could echo it into
-/// a log line — exactly the "no secret in a log" posture this fabric forbids.
-/// Capping keeps errors actionable (status + a snippet) while bounding any
-/// accidental echo to a fragment.
+/// env into a 4xx/5xx body, even a bounded raw excerpt could echo a PAT or JIT
+/// credential into a log line. Keep the HTTP status and operation in the caller's
+/// error, while treating response content as untrusted secret-bearing data.
 fn bounded_provider_body(body: &str) -> String {
-    const CAP: usize = 200;
-    let trimmed = body.trim();
-    if trimmed.len() <= CAP {
-        trimmed.to_string()
+    if body.trim().is_empty() {
+        "<empty>".to_string()
     } else {
-        let mut s: String = trimmed.chars().take(CAP).collect();
-        s.push_str("…[truncated]");
-        s
+        "***REDACTED***".to_string()
     }
 }
 
@@ -308,7 +303,12 @@ fn parse_handle(body: &str) -> Result<String> {
         .get("handle")
         .and_then(|h| h.as_str())
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("spawn-Worker response missing non-empty handle: {body}"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "spawn-Worker response missing non-empty handle: {}",
+                bounded_provider_body(body)
+            )
+        })?;
     // The handle is interpolated verbatim into the `/v1/status/{handle}` URL
     // path. Constrain it to a URL-path-safe charset (`[A-Za-z0-9_-]`, the shape
     // of a UUID/token-id) so a malformed or compromised Worker response can
@@ -812,6 +812,80 @@ mod tests {
             es.contains("REDACTED"),
             "CloudflareEngine Debug missing REDACTED placeholder: {es}"
         );
+    }
+
+    #[test]
+    fn spawn_debug_and_error_surfaces_redact_nested_pat_and_jit_content() {
+        let request_secret = "pat_nested_spawn_canary";
+        let jit_secret = "jit_nested_spawn_canary";
+        let mut runner = runner_spec();
+        runner.env = vec![(
+            JITCONFIG_ENV_KEY.to_string(),
+            format!(r#"{{"pat":"{request_secret}","jit":"{jit_secret}"}}"#),
+        )];
+        let request = HttpRequest {
+            method: Method::Post,
+            url: "https://spawn.example.dev/v1/spawn".to_string(),
+            bearer_token: "spawn-auth-canary".to_string(),
+            json_body: Some(
+                serde_json::json!({
+                    "env": {"PAT": request_secret, "JIT": jit_secret}
+                })
+                .to_string(),
+            ),
+        };
+        let request_debug = format!("{request:?}");
+        let request_pretty_debug = format!("{request:#?}");
+        for rendered in [&request_debug, &request_pretty_debug] {
+            assert!(!rendered.contains(request_secret));
+            assert!(!rendered.contains(jit_secret));
+            assert!(!rendered.contains("spawn-auth-canary"));
+            assert!(rendered.contains("REDACTED"));
+        }
+
+        let response = HttpResponse {
+            status: 502,
+            body: serde_json::json!({
+                "error": {"pat": request_secret, "jit": jit_secret}
+            })
+            .to_string(),
+        };
+        let response_debug = format!("{response:?}");
+        let response_pretty_debug = format!("{response:#?}");
+        for rendered in [&response_debug, &response_pretty_debug] {
+            assert!(!rendered.contains(request_secret));
+            assert!(!rendered.contains(jit_secret));
+            assert!(rendered.contains("REDACTED"));
+        }
+
+        let engine = CloudflareEngine::new(RecordingTransport::new(502, &response.body), cfg());
+        let err = engine
+            .spawn(&runner)
+            .expect_err("provider failure must fail closed");
+        let rendered = format!("{err:?}");
+        assert!(!rendered.contains(request_secret));
+        assert!(!rendered.contains(jit_secret));
+        assert!(rendered.contains("REDACTED"));
+
+        // A successful HTTP status does not make a malformed Worker response
+        // safe to expose: both the missing-handle JSON branch and the parser
+        // branch must keep reflected PAT/JIT content out of error displays.
+        for malformed_body in [
+            format!(r#"{{"error":{{"pat":"{request_secret}","jit":"{jit_secret}"}}}}"#),
+            format!("worker body pat={request_secret} jit={jit_secret}"),
+        ] {
+            let engine =
+                CloudflareEngine::new(RecordingTransport::new(200, &malformed_body), cfg());
+            let err = engine
+                .spawn(&runner)
+                .expect_err("malformed successful response must fail closed");
+            let display = format!("{err}");
+            let debug = format!("{err:?}");
+            for rendered in [&display, &debug] {
+                assert!(!rendered.contains(request_secret));
+                assert!(!rendered.contains(jit_secret));
+            }
+        }
     }
 
     #[test]
