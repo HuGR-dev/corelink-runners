@@ -43,13 +43,13 @@ impl TestLedger {
 impl LeaseLedger for TestLedger {
     fn reserve_external_compute(
         &self,
-        _: corelink_fabric::ExternalComputeReservation,
+        _: corelink_fabric::compute_budget::ExternalComputeReservation,
     ) -> anyhow::Result<ExternalComputeAdmission> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         match self.outcome {
             Outcome::Over => Ok(ExternalComputeAdmission::OverCompute),
             Outcome::Conflict => Err(anyhow::Error::new(
-                corelink_fabric::ExternalComputeError::Conflict,
+                corelink_fabric::compute_budget::ExternalComputeError::Conflict,
             )),
             Outcome::Unavailable => Err(anyhow::anyhow!("ledger unavailable")),
             Outcome::Receipt => Ok(ExternalComputeAdmission::Admitted(ExternalComputeReceipt {
@@ -60,7 +60,7 @@ impl LeaseLedger for TestLedger {
     }
     fn initialize_external_compute_period(
         &self,
-        _: corelink_fabric::ExternalComputeBaseline,
+        _: corelink_fabric::compute_budget::ExternalComputeBaseline,
     ) -> anyhow::Result<()> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(())
@@ -102,7 +102,7 @@ fn token() -> (String, Vec<u8>) {
     let payload = serde_json::to_vec(&json!({
         "v":1,"key_id":"issuer-1","tenant_id":"11111111-1111-4111-8111-111111111111",
         "workload_kind":"devenv","workload_id":"job/1","reservation_id":"22222222-2222-4222-8222-222222222222",
-        "period_key":202609,"ceiling_vcpu_ms":"1000","vcpu_count":1,"maximum_wall_ms":1000,
+        "period_key":current_period(),"ceiling_vcpu_ms":"1000","vcpu_count":1,"maximum_wall_ms":1000,
         "issued_at_ms":now-1000,"expires_at_ms":now+5000
     })).unwrap();
     let pkcs8 = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
@@ -115,18 +115,32 @@ fn token() -> (String, Vec<u8>) {
     (token, key.public_key().as_ref().to_vec())
 }
 
+fn current_period() -> u32 {
+    let days = (now_ms() / 86_400_000) as i64;
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    let year = y + i64::from(month <= 2);
+    (year as u32) * 100 + month as u32
+}
+
 fn app(ledger: Arc<TestLedger>, admin: Option<&str>, public: Vec<u8>) -> Router {
     let mut keys = HashMap::new();
     keys.insert("issuer-1".into(), public);
     router(ledger, keys, admin.map(str::to_owned))
 }
 
-async fn reserve_request(app: Router, token: &str, body: &'static str) -> Response {
+async fn reserve_request(app: Router, token: &str, body: impl Into<Body>) -> Response {
     app.oneshot(
         Request::post("/internal/v1/compute/reserve")
             .header("authorization", format!("ComputeGrant {token}"))
             .header("content-type", "application/json")
-            .body(Body::from(body))
+            .body(body.into())
             .unwrap(),
     )
     .await
@@ -137,7 +151,17 @@ async fn reserve_request(app: Router, token: &str, body: &'static str) -> Respon
 async fn invalid_signature_is_401_without_ledger_call() {
     let ledger = Arc::new(TestLedger::new(Outcome::Receipt));
     let (token, public) = token();
-    let response = reserve_request(app(ledger.clone(), None, public), &(token + "x"), "{}").await;
+    let mut parts = token.split('.');
+    let payload = parts.next().unwrap();
+    let mut signature = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(parts.next().unwrap())
+        .unwrap();
+    signature[0] ^= 1;
+    let tampered = format!(
+        "{payload}.{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature)
+    );
+    let response = reserve_request(app(ledger.clone(), None, public), &tampered, "{}").await;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(ledger.calls.load(Ordering::SeqCst), 0);
 }
@@ -173,10 +197,13 @@ async fn admin_gate_maps_wrong_key_and_success() {
     let ledger = Arc::new(TestLedger::new(Outcome::Receipt));
     let (_, public) = token();
     let app = app(ledger, Some("admin"), public);
-    let body = r#"{"tenant_id":"11111111-1111-4111-8111-111111111111","period_key":202609,"external_vcpu_ms":"0","evidence_digest":"0000000000000000000000000000000000000000000000000000000000000000"}"#;
+    let body = format!(
+        r#"{{"tenant_id":"11111111-1111-4111-8111-111111111111","period_key":{},"external_vcpu_ms":"0","evidence_digest":"0000000000000000000000000000000000000000000000000000000000000000"}}"#,
+        current_period()
+    );
     let wrong = Request::post("/internal/v1/admin/compute-baseline")
         .header("x-corelink-internal-auth", "wrong")
-        .body(Body::from(body))
+        .body(Body::from(body.clone()))
         .unwrap();
     assert_eq!(
         app.clone().oneshot(wrong).await.unwrap().status(),
