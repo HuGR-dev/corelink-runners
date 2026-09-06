@@ -14,6 +14,7 @@
 //
 // NEW FILE (W4). Does NOT touch test/index.test.ts or test/check-host.test.ts.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { makeWorkerAuthorities } from "./helpers/worker-authorities";
 
 // ── Test double for @cloudflare/containers (mirrors test/check-host.test.ts) ──
 interface FakeContainer {
@@ -82,17 +83,6 @@ function fakeMetrics() {
     snapshot: vi.fn(async () => ({ ...counts })),
   };
   return { counts, get: vi.fn(() => stub), idFromName: vi.fn((n: string) => n) };
-}
-
-// ── A CONCURRENCY_SLOTS DO double — returns a CLEAN admit/refuse decision. When
-// absent the acquire throws synchronously (unbound binding) and the code
-// fail-opens to admit; a bound double lets us drive a REAL at-capacity refusal.
-function fakeSlots(admitted: boolean) {
-  const stub = {
-    acquire: vi.fn(async () => ({ admitted, reason: admitted ? undefined : "at_cap" })),
-    release: vi.fn(async () => {}),
-  };
-  return { get: vi.fn(() => stub), idFromName: vi.fn((n: string) => n), _stub: stub };
 }
 
 // ── A collecting ExecutionContext so we can AWAIT the background spawn drive ───
@@ -174,10 +164,11 @@ async function queuedWebhook(
 // `mintStatus` flips the mint to a 403 HARD DENY for the forbidden test.
 let fetchCalls: string[] = [];
 let mintStatus = 200;
+const issuedOperations = new Map<string, string>();
 function installFetchRouter() {
   vi.stubGlobal(
     "fetch",
-    vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const url = typeof input === "string" ? input : (input as Request).url ?? String(input);
       fetchCalls.push(url);
       if (url.includes("generate-jitconfig")) {
@@ -185,8 +176,13 @@ function installFetchRouter() {
           status: 200,
         });
       }
+      if (url.includes("/internal/v1/runner/authorize")) {
+        return new Response(JSON.stringify({ tenant: "acme", max_concurrency: 5 }), { status: 200 });
+      }
       if (url.includes("/internal/v1/runner/mint")) {
         if (mintStatus === 403) return new Response("mint forbidden", { status: 403 });
+        const body = init?.body ? JSON.parse(init.body as string) as { operation_id?: unknown } : undefined;
+        if (typeof body?.operation_id === "string") issuedOperations.set(body.operation_id, "pat-1");
         return new Response(
           JSON.stringify({
             token_plaintext: "cas-pat-plaintext",
@@ -197,6 +193,12 @@ function installFetchRouter() {
           { status: 200 },
         );
       }
+      if (url.includes("/internal/v1/runner/adopt")) {
+        const body = init?.body ? JSON.parse(init.body as string) as { operation_id?: unknown; pat_id?: unknown } : undefined;
+        return issuedOperations.get(String(body?.operation_id)) === body?.pat_id
+          ? new Response(null, { status: 204 })
+          : new Response("adoption mismatch", { status: 400 });
+      }
       throw new Error(`unexpected fetch: ${url}`);
     }),
   );
@@ -205,21 +207,33 @@ const jitCalls = () => fetchCalls.filter((u) => u.includes("generate-jitconfig")
 const mintCalls = () => fetchCalls.filter((u) => u.includes("/internal/v1/runner/mint"));
 
 function baseEnv(over: Partial<Env> = {}): Env {
-  return {
+  const env = {
     RUNNER_CONTAINER: RUNNER_NS as never,
     CHECK_HOST_CONTAINER: CHECK_NS as never,
     CLOUDFLARE_SPAWN_AUTH_TOKEN: "spawn-secret",
     GITHUB_WEBHOOK_SECRET: SECRET,
     GITHUB_MINT_TOKEN: "ghp-mint",
     PINNED_IMAGE_DIGEST: "",
+    CORELINK_RUNNER_MINT_AUTH_KEY: MINT_KEY,
+    SPAWN_WORKER_PUBLIC_URL: "https://spawn.corelink.example",
+    CLW_ENDPOINT: "https://cas.corelink.example",
+    CRED_STASH: {
+      idFromName: vi.fn((name: string) => name),
+      get: vi.fn(() => ({ stash: vi.fn(async (ticket: string) => ticket), wipe: vi.fn(async () => {}) })),
+    } as never,
     ...over,
   } as Env;
+  const authorities = makeWorkerAuthorities(env.RUNNER_JOB_PATS);
+  if (!over.CONTAINMENT) env.CONTAINMENT = authorities.CONTAINMENT as never;
+  if (!over.CONCURRENCY_SLOTS) env.CONCURRENCY_SLOTS = authorities.CONCURRENCY_SLOTS as never;
+  return env;
 }
 
 beforeEach(() => {
   containers = [];
   fetchCalls = [];
   mintStatus = 200;
+  issuedOperations.clear();
   vi.mocked(getContainer).mockClear();
   installFetchRouter();
 });
@@ -259,14 +273,13 @@ describe("/webhook queued — the happy-path spawn orchestration (COLD)", () => 
     const env = baseEnv({ RUNNER_JOB_PATS: kv as never, METRICS: metrics as never });
     const ctx = makeCtx();
 
-    const resp = await queuedWebhook(env, ctx, { jobId: "1001", repo: "acme/api" });
+    const resp = await queuedWebhook(env, ctx, { jobId: "1001", repo: "acme/api", installationId: 555 });
     // Responds FAST (202) before the background drive runs.
     expect(resp.status).toBe(202);
-    expect(await resp.json()).toMatchObject({ ok: true, spawning: true, job_id: "1001" });
-    // The spawn CLAIM is taken BEFORE the mint (synchronously, in the request path).
-    expect(kv.store.has("spawn:1001")).toBe(true);
+    expect(await resp.json()).toMatchObject({ ok: true, queued: true, job_id: "1001" });
 
     await drain(ctx);
+    expect(kv.store.has("spawn:1001")).toBe(true);
 
     // The GitHub JIT mint was attempted (the generate-jitconfig call).
     expect(jitCalls()).toHaveLength(1);
@@ -295,8 +308,8 @@ describe("/webhook queued — the happy-path spawn orchestration (COLD)", () => 
     const ctx = makeCtx();
 
     const resp = await queuedWebhook(env, ctx, { jobId: "1002", repo: "acme/api" });
-    expect(resp.status).toBe(200);
-    expect(await resp.json()).toMatchObject({ ok: true, deduped: true, job_id: "1002" });
+    expect(resp.status).toBe(202);
+    expect(await resp.json()).toMatchObject({ ok: true, queued: true, job_id: "1002" });
 
     await drain(ctx);
     // No mint, no JIT, no container — the claim gated the whole expensive path.
@@ -342,16 +355,15 @@ describe("/webhook queued — the authz/ceiling short-circuits RELEASE the claim
   it("AT-CEILING (clean {admitted:false}) ⇒ claim released, no JIT, no spawn, spawn_at_ceiling bumped", async () => {
     const kv = fakeKv();
     const metrics = fakeMetrics();
-    const slots = fakeSlots(false); // a REAL at-capacity refusal (not a thrown infra error)
-    // Cold path (no mint key) so the slot decision alone gates the spawn.
-    const env = baseEnv({
-      RUNNER_JOB_PATS: kv as never,
-      METRICS: metrics as never,
-      CONCURRENCY_SLOTS: slots as never,
-    });
+    const env = baseEnv({ RUNNER_JOB_PATS: kv as never, METRICS: metrics as never });
+    await (env.CONCURRENCY_SLOTS as any).storage.put("slots", Array.from({ length: 250 }, (_, i) => ({
+      key: "acme",
+      jobId: `occupied-${i}`,
+      expiresMs: Date.now() + 60_000,
+    })));
     const ctx = makeCtx();
 
-    const resp = await queuedWebhook(env, ctx, { jobId: "1004", repo: "acme/api" });
+    const resp = await queuedWebhook(env, ctx, { jobId: "1004", repo: "acme/api", installationId: 555 });
     expect(resp.status).toBe(202);
 
     await drain(ctx);
@@ -362,6 +374,6 @@ describe("/webhook queued — the authz/ceiling short-circuits RELEASE the claim
     // The at-ceiling branch released the claim + bumped the ceiling golden signal.
     expect(kv.store.has("spawn:1004")).toBe(false);
     expect(metrics.counts.spawn_at_ceiling).toBe(1);
-    expect(slots._stub.acquire).toHaveBeenCalledTimes(1);
+    expect((env.CONCURRENCY_SLOTS as any).get().acquire).toHaveBeenCalledTimes(1);
   });
 });
