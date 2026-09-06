@@ -746,7 +746,9 @@ mod tests {
         target.export(&ev("a", "L2", SlotEventKind::Acquired, 0)).unwrap(); target.export(&ev("a", "L2", SlotEventKind::Released, 2_000)).unwrap();
         release.wait(); join.join().unwrap();
         assert_eq!(target.buffered(), 1);
-        target.flush().unwrap(); assert_eq!(target.buffered(), 0);
+        let flushing = target.clone(); let join = std::thread::spawn(move || flushing.flush().unwrap());
+        entered.wait(); release.wait(); join.join().unwrap();
+        assert_eq!(target.buffered(), 0);
     }
 
     #[test]
