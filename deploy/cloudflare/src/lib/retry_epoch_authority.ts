@@ -46,20 +46,22 @@ export class RetryEpochAuthority {
     return record as RetryEpochRecord;
   }
 
-  async record(jobId: string, epochId: string): Promise<{ attempts: number; recorded: boolean }> {
+  async record(jobId: string, epochId: string, legacyFloor = 0): Promise<{ attempts: number; recorded: boolean }> {
     RetryEpochAuthority.validateId(jobId, "job identity");
     RetryEpochAuthority.validateId(epochId, "epoch identity");
+    if (!Number.isSafeInteger(legacyFloor) || legacyFloor < 0) throw new Error("invalid retry legacy floor");
     const countKey = RetryEpochAuthority.countKey(jobId);
     const epochKey = RetryEpochAuthority.epochKey(jobId, epochId);
 
     return this.tx(async (storage) => {
       const rawCount = await storage.get(countKey);
       const rawEpoch = await storage.get(epochKey);
-      const count = rawCount === undefined ? 0 : RetryEpochAuthority.validateCount(rawCount);
+      const storedCount = rawCount === undefined ? 0 : RetryEpochAuthority.validateCount(rawCount);
+      const count = Math.max(storedCount, legacyFloor);
 
       if (rawEpoch !== undefined) {
         RetryEpochAuthority.validateRecord(epochKey, jobId, epochId, rawEpoch);
-        if (rawCount === undefined) throw new Error("retry epoch count missing");
+        if (rawCount === undefined || count > storedCount) await storage.put(countKey, count);
         return { attempts: count, recorded: false };
       }
 

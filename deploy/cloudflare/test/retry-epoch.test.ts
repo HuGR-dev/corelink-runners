@@ -61,6 +61,15 @@ describe("retry epoch authority", () => {
     expect(await restarted.record("restart", "e2")).toEqual({ attempts: 2, recorded: true });
   });
 
+  it("uses a legacy floor for migration without letting stale KV lower the count", async () => {
+    const storage = new SerializedStorage();
+    const auth = authority(storage);
+    expect(await auth.record("migrate", "initial", 4)).toEqual({ attempts: 5, recorded: true });
+    expect(await auth.record("migrate", "initial", 1)).toEqual({ attempts: 5, recorded: false });
+    expect(await auth.record("migrate", "next", 2)).toEqual({ attempts: 6, recorded: true });
+    await expect(auth.record("migrate", "bad-floor", -1)).rejects.toThrow("invalid retry legacy floor");
+  });
+
   it("keeps encoded identities isolated", async () => {
     const storage = new SerializedStorage();
     const auth = authority(storage);

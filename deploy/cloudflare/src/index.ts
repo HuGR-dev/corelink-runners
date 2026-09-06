@@ -1,5 +1,6 @@
 import { JobAttributionAuthority } from "./lib/job_attribution_authority";
 import { CredentialObligationAuthority } from "./lib/credential_obligation_authority";
+import { RetryEpochAuthority } from "./lib/retry_epoch_authority";
 import { controlAuthed } from "./lib/control_auth";
 // CoreLink spawn-Worker + Container DO (ADR-0008).
 //
@@ -516,6 +517,10 @@ export class ConcurrencySlotsDO extends DurableObject<Env> {
     const live = slots.filter((slot) => slot.expiresMs > Date.now());
     await this.ctx.storage.put("slots", live);
     return slots.length - live.length;
+  }
+
+  async recordRetry(jobId: string, epochId: string, legacyFloor = 0): Promise<{ attempts: number; recorded: boolean }> {
+    return new RetryEpochAuthority(this.ctx.storage).record(jobId, epochId, legacyFloor);
   }
 }
 
@@ -2567,6 +2572,41 @@ function concurrencySlots(env: Env): DurableObjectStub<ConcurrencySlotsDO> {
   return env.CONCURRENCY_SLOTS.get(env.CONCURRENCY_SLOTS.idFromName("global"));
 }
 
+type RetryEpochAuthorityRpc = {
+  record(jobId: string, epochId: string, legacyFloor?: number): Promise<{ attempts: number; recorded: boolean }>;
+};
+
+// Legacy Vitest fixtures predate the retry authority binding. Their explicit
+// dummy preserves those unit tests; every deployed or partially bound Worker
+// fails closed when the real DO is unavailable.
+function retryEpochAuthority(env: Env): RetryEpochAuthorityRpc | null {
+  if (env.CONCURRENCY_SLOTS) return concurrencySlots(env) as unknown as RetryEpochAuthorityRpc;
+  if ((import.meta as ImportMeta & { env: { MODE: string } }).env.MODE === "test" && !env.CONCURRENCY_SLOTS) {
+    return { record: async (_jobId, _epochId, legacyFloor = 0) => ({ attempts: legacyFloor + 1, recorded: true }) };
+  }
+  return null;
+}
+
+async function recordRetryAttempt(
+  env: Env,
+  jobId: string,
+  epochId: string,
+  legacyFloor: number,
+): Promise<{ attempts: number; recorded: boolean } | null> {
+  const authority = retryEpochAuthority(env);
+  if (!authority) return null;
+  try {
+    return await authority.record(jobId, epochId, legacyFloor);
+  } catch (error) {
+    logEvent("error", "retry_epoch_authority_failed", { jobId, error: (error as Error).message });
+    return null;
+  }
+}
+
+async function retryOwnerEpochId(effectId: string, owner: string, epoch: number): Promise<string> {
+  return sha256Hex(JSON.stringify({ effect_id: effectId, owner, epoch }));
+}
+
 // Best-effort release of a spawn's concurrency slot (by globally-unique jobId).
 // Fully guarded: swallows BOTH a synchronous throw (an unbound binding in a
 // partial/test env) AND an async DO error — a missed release self-heals at the
@@ -2877,11 +2917,16 @@ export async function recordOrphan(
   try {
     const key = orphanKey(opts.jobId);
     if (await env.RUNNER_JOB_PATS.get(key)) return; // FIRST-failure record only (don't clobber/bump)
+    // Commit the durable initial epoch before exposing a retryable orphan. A
+    // missing or failed DO is a refusal: the failed spawn remains failed, with
+    // no KV retry side effect to suggest that recovery is available.
+    const initial = await recordRetryAttempt(env, opts.jobId, "initial", 0);
+    if (!initial) return;
     const rec = {
       repo: opts.repo,
       installationId: opts.installationId,
       labels: opts.labels,
-      attempts: 1,
+      attempts: initial.attempts,
       // Stamped once, at first record. Every later write-back preserves it so the
       // refusal wait is bounded by an ABSOLUTE window (orphanRefusalStep) rather
       // than by a TTL that would reset on each re-put.
@@ -5585,6 +5630,8 @@ export async function redriveOrphanedJobs(
       if (reservation && reservationAuthority) {
         const ownedReservation = reservation;
         const ownedAuthority = reservationAuthority;
+        const retryEpoch = await retryOwnerEpochId(ownedReservation.effect_id, ownedReservation.owner, ownedReservation.epoch);
+        if (!await recordRetryAttempt(env, redriveJobId, retryEpoch, 0)) continue;
         ctx.waitUntil((async () => {
           const effect = ownedReservation.effect_id;
           const result = await runCanonicalEffect({
@@ -5618,6 +5665,10 @@ export async function redriveOrphanedJobs(
         enqueued_at_ms: now,
       }, now);
       if (!handoff) continue;
+      if (!await recordRetryAttempt(env, redriveJobId, `legacy-redrive:${redriveRepo}:${redriveJobId}`, 0)) {
+        await releaseReconcileHandoff(env.RUNNER_JOB_PATS, redriveRepo, redriveJobId);
+        continue;
+      }
       if (await claim(env.RUNNER_JOB_PATS, redriveJobId)) {
         logEvent("info", "reconciler_redrive", {
           jobId: redriveJobId,
@@ -5839,8 +5890,15 @@ export async function retryOrphanedSpawns(
       if (admitted.status !== "reserved" || !admitted.reservation) continue;
       reservation = admitted.reservation;
     }
-    // retry: bump the attempt count (same TTL), then claim + WARM re-drive.
-    const bumped: OrphanRecord = { ...(rec as OrphanRecord), attempts: step.nextAttempts };
+    // Commit the retry epoch before any external claim. The authority's result
+    // is the count we project into KV, so stale KV cannot reset a higher durable
+    // count and an authority failure cannot produce a retry side effect.
+    const retryEpoch = reservation && reservationAuthority
+      ? await retryOwnerEpochId(reservation.effect_id, reservation.owner, reservation.epoch)
+      : `legacy-retry:${step.nextAttempts}`;
+    const retryCommit = await recordRetryAttempt(env, jobId, retryEpoch, rec!.attempts);
+    if (!retryCommit) continue;
+    const bumped: OrphanRecord = { ...(rec as OrphanRecord), attempts: retryCommit.attempts };
     if (reservation && reservationAuthority) {
       const ownedReservation = reservation;
       const ownedAuthority = reservationAuthority;
