@@ -201,7 +201,7 @@ export class S3ImmutableJournal implements ScannableImmutableJournal {
     }
     this.client = config.client;
     this.bucket = config.bucket;
-    this.prefix = config.prefix;
+    this.prefix = config.prefix.endsWith("/") ? config.prefix : `${config.prefix}/`;
     this.retentionMs = config.retentionMs;
     this.maxRecordBytes = maxRecordBytes;
   }
@@ -278,14 +278,17 @@ export class S3ImmutableJournal implements ScannableImmutableJournal {
   }
 
   async isEmpty(): Promise<boolean> {
-    const prefix = this.prefix.endsWith("/") ? this.prefix : `${this.prefix}/`;
+    const prefix = this.prefix;
     const seen = new Set<string>();
     let marker: { KeyMarker?: string; VersionIdMarker?: string } = {};
     for (let page = 0; page < 8; page += 1) {
       const input = { Bucket: this.bucket, Prefix: prefix, MaxKeys: 1, ...marker };
-      let response: { Versions?: unknown[]; DeleteMarkers?: unknown[]; IsTruncated?: boolean; NextKeyMarker?: string; NextVersionIdMarker?: string };
+      let response: { Name?: unknown; Prefix?: unknown; Versions?: unknown; DeleteMarkers?: unknown; IsTruncated?: unknown; NextKeyMarker?: string; NextVersionIdMarker?: string };
       try { response = await this.client.send(new ListObjectVersionsCommand(input)); }
       catch (cause) { throw new JournalVerificationError("unable to establish journal emptiness", { cause }); }
+      if (response.Name !== this.bucket || response.Prefix !== prefix || typeof response.IsTruncated !== "boolean") throw new JournalVerificationError("S3 version listing metadata is malformed");
+      if (response.Versions !== undefined && !Array.isArray(response.Versions)) throw new JournalVerificationError("S3 version listing is malformed");
+      if (response.DeleteMarkers !== undefined && !Array.isArray(response.DeleteMarkers)) throw new JournalVerificationError("S3 delete-marker listing is malformed");
       if ((response.Versions?.length ?? 0) > 0 || (response.DeleteMarkers?.length ?? 0) > 0) return false;
       if (response.IsTruncated !== true) return true;
       if (typeof response.NextKeyMarker !== "string" || response.NextKeyMarker.length === 0 || typeof response.NextVersionIdMarker !== "string" || response.NextVersionIdMarker.length === 0) {
