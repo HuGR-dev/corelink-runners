@@ -46,7 +46,8 @@ describe("ConcurrencyAuthority", () => {
     const s = storage();
     expect((await s.authority.acquire("tenant", "a", 1, 1, 100, 1000)).admitted).toBe(true);
     s.setFailPut(true);
-    await expect(s.authority.acquire("tenant", "b", 1, 1, 100, 1000)).rejects.toThrow("put failed");
+    await expect(s.authority.acquire("tenant", "b", 1, 1, 100, 1000))
+      .resolves.toEqual({ admitted: false, reason: "slot_refusal_unavailable" });
     s.setFailPut(false);
     expect(await s.authority.renew("a", 100, 1000)).toBe(true);
     expect(await s.authority.getRefusal("b")).toBeNull();

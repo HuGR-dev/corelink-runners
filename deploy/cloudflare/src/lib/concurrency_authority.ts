@@ -63,19 +63,26 @@ export class ConcurrencyAuthority {
 
   async acquire(key: string, jobId: string, perKeyCap: number, fleetCap: number, nowMs: number, ttlMs: number): Promise<{ admitted: boolean; reason?: string }> {
     validateInputs(key, jobId, perKeyCap, fleetCap, nowMs, ttlMs);
-    return this.storage.transaction(async (tx) => {
-      const slots = await readSlots(tx);
-      const existing = slots.find((slot) => slot.expiresMs > nowMs && slot.jobId === jobId);
-      if (existing && existing.key !== key) return { admitted: false, reason: "job_id_key_conflict" };
-      const decision = decideSlotAcquire(slots, key, jobId, perKeyCap, fleetCap, nowMs, ttlMs);
-      if (!decision.admitted) {
-        const keyName = refusalKey(jobId);
-        const prior = refusalValue(await tx.get<unknown>(keyName), jobId);
-        if (!prior) await tx.put(keyName, { job_id: jobId, state: "refused_at_ceiling", reason: decision.reason ?? "refused_at_ceiling", recorded_at_ms: nowMs });
-      }
-      await tx.put(SLOTS_KEY, decision.slots);
-      return { admitted: decision.admitted, reason: decision.reason };
-    });
+    let refusalDecision = false;
+    try {
+      return await this.storage.transaction(async (tx) => {
+        const slots = await readSlots(tx);
+        const existing = slots.find((slot) => slot.expiresMs > nowMs && slot.jobId === jobId);
+        if (existing && existing.key !== key) return { admitted: false, reason: "job_id_key_conflict" };
+        const decision = decideSlotAcquire(slots, key, jobId, perKeyCap, fleetCap, nowMs, ttlMs);
+        refusalDecision = !decision.admitted;
+        if (!decision.admitted) {
+          const keyName = refusalKey(jobId);
+          const prior = refusalValue(await tx.get<unknown>(keyName), jobId);
+          if (!prior) await tx.put(keyName, { job_id: jobId, state: "refused_at_ceiling", reason: decision.reason ?? "refused_at_ceiling", recorded_at_ms: nowMs });
+        }
+        await tx.put(SLOTS_KEY, decision.slots);
+        return { admitted: decision.admitted, reason: decision.reason };
+      });
+    } catch (error) {
+      if (refusalDecision) return { admitted: false, reason: "slot_refusal_unavailable" };
+      throw error;
+    }
   }
 
   async release(jobId: string, nowMs: number): Promise<void> {
