@@ -15,11 +15,11 @@
 //   • add a key to the vector that TS doesn't model ⇒ the key-set assertion breaks.
 //
 // NEW FILE. Does NOT touch any existing test.
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { buildUsageEvent, type UsageEvent } from "../src/lib";
+import { buildUsageEvent, pushUsageEvent, type UsageEvent } from "../src/lib";
 
 // The committed cross-repo vector (repo root: conformance/UsageEvent.json).
 const VECTOR_PATH = fileURLToPath(
@@ -134,6 +134,32 @@ describe("conformance: UsageEvent ↔ conformance/UsageEvent.json", () => {
         vcpu: bad as number | undefined,
       });
       expect(ev.qty).toBe(3);
+    }
+  });
+
+  it("pushUsageEvent emits the committed spawn-worker billing wire byte-for-byte", async () => {
+    const fixture = readFileSync(
+      fileURLToPath(new URL("../../../conformance/spawn-worker-billing-wire.json", import.meta.url)),
+      "utf8",
+    );
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ accepted: 1 }), { status: 202 }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const event = await buildUsageEvent({
+        tenantId: "3560e213-1e23-4fd0-8871-7033c6052ebd",
+        jobId: "82597479935",
+        startedMs: Date.parse("2026-06-23T11:00:00Z"),
+        completedMs: Date.parse("2026-06-23T11:00:03Z"),
+        region: "iad",
+      });
+      await pushUsageEvent({
+        BILLING_INGEST_URL: "https://billing.example/internal/v1/usage",
+        BILLING_INGEST_AUTH_KEY: "billing-test-key",
+      }, event);
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(init.body).toBe(fixture);
+    } finally {
+      vi.unstubAllGlobals();
     }
   });
 });
