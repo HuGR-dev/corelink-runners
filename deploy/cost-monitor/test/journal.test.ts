@@ -98,21 +98,29 @@ describe("S3ImmutableJournal", () => {
     const inputs: Record<string, unknown>[] = []; let page = 0;
     const client = { send: async (command: { input: Record<string, unknown> }) => {
       inputs.push(command.input); page += 1;
-      return page === 1 ? { Versions: [], DeleteMarkers: [], IsTruncated: true, NextKeyMarker: "k1", NextVersionIdMarker: "v1" } : { Versions: [], DeleteMarkers: [{ Key: "j/x", VersionId: "v2" }], IsTruncated: false };
+      return page === 1 ? { Name: "b", Prefix: "j/", Versions: [], DeleteMarkers: [], IsTruncated: true, NextKeyMarker: "k1", NextVersionIdMarker: "v1" } : { Name: "b", Prefix: "j/", Versions: [], DeleteMarkers: [{ Key: "j/x", VersionId: "v2" }], IsTruncated: false };
     } };
     const journal = new S3ImmutableJournal({ client: client as never, bucket: "b", prefix: "j", retentionMs: retention });
     await expect(journal.isEmpty()).resolves.toBe(false);
     expect(inputs).toEqual([{ Bucket: "b", Prefix: "j/", MaxKeys: 1 }, { Bucket: "b", Prefix: "j/", MaxKeys: 1, KeyMarker: "k1", VersionIdMarker: "v1" }]);
   });
   it("returns empty only after complete listing and rejects missing or repeated tokens", async () => {
-    const empty = new S3ImmutableJournal({ client: { send: async () => ({ Versions: [], DeleteMarkers: [], IsTruncated: false }) } as never, bucket: "b", prefix: "j/", retentionMs: retention });
+    const empty = new S3ImmutableJournal({ client: { send: async () => ({ Name: "b", Prefix: "j/", IsTruncated: false }) } as never, bucket: "b", prefix: "j/", retentionMs: retention });
     await expect(empty.isEmpty()).resolves.toBe(true);
-    const missing = new S3ImmutableJournal({ client: { send: async () => ({ Versions: [], DeleteMarkers: [], IsTruncated: true }) } as never, bucket: "b", prefix: "j/", retentionMs: retention });
+    const missing = new S3ImmutableJournal({ client: { send: async () => ({ Name: "b", Prefix: "j/", Versions: [], DeleteMarkers: [], IsTruncated: true }) } as never, bucket: "b", prefix: "j/", retentionMs: retention });
     await expect(missing.isEmpty()).rejects.toBeInstanceOf(JournalVerificationError);
     let calls = 0;
-    const repeated = new S3ImmutableJournal({ client: { send: async () => { calls += 1; return { Versions: [], DeleteMarkers: [], IsTruncated: true, NextKeyMarker: "same", NextVersionIdMarker: "v" }; } } as never, bucket: "b", prefix: "j/", retentionMs: retention });
+    const repeated = new S3ImmutableJournal({ client: { send: async () => { calls += 1; return { Name: "b", Prefix: "j/", Versions: [], DeleteMarkers: [], IsTruncated: true, NextKeyMarker: "same", NextVersionIdMarker: "v" }; } } as never, bucket: "b", prefix: "j/", retentionMs: retention });
     await expect(repeated.isEmpty()).rejects.toBeInstanceOf(JournalVerificationError);
     expect(calls).toBe(2);
+  });
+  it("rejects malformed listing metadata and accepts omitted arrays only with verified metadata", async () => {
+    const malformed = new S3ImmutableJournal({ client: { send: async () => ({ Name: "b", Prefix: "j/", Versions: {}, IsTruncated: false }) } as never, bucket: "b", prefix: "j/", retentionMs: retention });
+    await expect(malformed.isEmpty()).rejects.toBeInstanceOf(JournalVerificationError);
+    const missingFlag = new S3ImmutableJournal({ client: { send: async () => ({ Name: "b", Prefix: "j/" }) } as never, bucket: "b", prefix: "j/", retentionMs: retention });
+    await expect(missingFlag.isEmpty()).rejects.toBeInstanceOf(JournalVerificationError);
+    const wrongScope = new S3ImmutableJournal({ client: { send: async () => ({ Name: "other", Prefix: "j/", IsTruncated: false }) } as never, bucket: "b", prefix: "j/", retentionMs: retention });
+    await expect(wrongScope.isEmpty()).rejects.toBeInstanceOf(JournalVerificationError);
   });
 });
 
