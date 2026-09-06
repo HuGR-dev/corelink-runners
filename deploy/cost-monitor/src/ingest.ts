@@ -120,7 +120,8 @@ export class IngestService {
       if (!activePending && await this.store.transact([{ key: pendingKey(this.namespace, registration), expectedVersion: pendingStored?.version ?? null, value: { kind: "pending", envelope, envelopeDigest, commitId, intentReceipt } satisfies Pending }]) !== "committed") return { kind: "RETRY", reason: "pending_conflict" };
       const signer = await this.signingAuthority.resolveIngestSigner(proof.timeMs, this.monitorTupleDigest);
       const ack = await createAck(ackFields(envelope, commitId, proof.timeMs, signer), signer);
-      const stale = proof.timeMs > envelope.occurred_at + 60_000 || proof.timeMs > envelope.scheduled_for + 120_000;
+      const periodic = envelope.kind === "canary-tick" || envelope.kind === "CANARY_CONFIG_INVALID" || envelope.kind === "canary-lifecycle";
+      const stale = periodic && (proof.timeMs > envelope.occurred_at + 60_000 || proof.timeMs > envelope.scheduled_for + 120_000);
       const terminal = stale ? await createHistoricalTerminal(ack, signer) : null;
       const previous = source?.value;
       const next: SourceCursor = stale && previous ? { ...previous, lastSequence: envelope.producer_seq, lastEnvelopeDigest: envelopeDigest } : { source: registration.source, service: registration.service, application: registration.application, keyId: registration.keyId, credentialEpoch: registration.credentialEpoch, lastSequence: envelope.producer_seq, lastEnvelopeDigest: envelopeDigest, lastOccurredAt: envelope.occurred_at, lastScheduledFor: envelope.scheduled_for, firstAcceptedAt: previous?.firstAcceptedAt ?? proof.timeMs, lastAcceptedAt: proof.timeMs, expectedAt: registration.intervalMs === 300000 ? envelope.scheduled_for + registration.intervalMs : null, quarantined: false, lifecycle: null, lastLifecycleNonce: null, sourceHealth: stale ? "unknown" : "healthy", sourceReason: stale ? "producer_late" : "healthy" };
