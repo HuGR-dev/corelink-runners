@@ -1940,11 +1940,19 @@ impl AppState {
             .await
             .map_err(|_| anyhow::anyhow!("provision gate closed"))?;
         let prov = Arc::clone(&self.provisioner);
+        let ledger = Arc::clone(&self.ledger);
         let lid = lease_id.to_string();
         let s = spec.clone();
-        tokio::task::spawn_blocking(move || prov.provision(&lid, &s))
-            .await
-            .map_err(|_| anyhow::anyhow!("provisioner task panicked"))?
+        tokio::task::spawn_blocking(move || {
+            prov.provision(&lid, &s)?;
+            // Provider creation and ledger persistence cannot be atomic. If this
+            // write fails, retain the live local handle and fail closed; a later
+            // retry/recovery must not invent a handle from the lease id.
+            let provider_ref = prov.provider_ref(&lid)?;
+            ledger.bind_provider_ref(&lid, &provider_ref).map(|_| ())
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("provisioner task panicked"))?
     }
 
     /// Run teardown for `lease_id` on a blocking thread.
@@ -1958,8 +1966,14 @@ impl AppState {
     /// [`provision_lease`]: AppState::provision_lease
     pub(crate) async fn teardown_lease(&self, lease_id: &str) -> bool {
         let prov = Arc::clone(&self.provisioner);
+        let ledger = Arc::clone(&self.ledger);
         let lid = lease_id.to_string();
-        match tokio::task::spawn_blocking(move || prov.teardown(&lid)).await {
+        match tokio::task::spawn_blocking(move || {
+            crate::provider_binding::restore_for_operation(ledger.as_ref(), prov.as_ref(), &lid)?;
+            prov.teardown(&lid)
+        })
+        .await
+        {
             Ok(Ok(())) => true,
             // Provider error or task panic — caller retries. OPS (observability):
             // a persistently-failing teardown is a SILENT live-box leak (billed
@@ -1988,8 +2002,18 @@ impl AppState {
         lease_id: &str,
     ) -> crate::pending_cleanup::CleanupTeardown {
         let prov = Arc::clone(&self.provisioner);
+        let ledger = Arc::clone(&self.ledger);
         let lid = lease_id.to_string();
-        match tokio::task::spawn_blocking(move || prov.teardown_pending(&lid)).await {
+        match tokio::task::spawn_blocking(move || {
+            if crate::provider_binding::restore_for_operation(ledger.as_ref(), prov.as_ref(), &lid)
+                .is_err()
+            {
+                return crate::pending_cleanup::CleanupTeardown::Unconfirmed;
+            }
+            prov.teardown_pending(&lid)
+        })
+        .await
+        {
             Ok(result) => result,
             Err(e) => {
                 let _ = e;
@@ -2021,10 +2045,14 @@ impl AppState {
         lease_id: &str,
     ) -> anyhow::Result<crate::cloud_exec::ProbeStatus> {
         let prov = Arc::clone(&self.provisioner);
+        let ledger = Arc::clone(&self.ledger);
         let lid = lease_id.to_string();
-        tokio::task::spawn_blocking(move || prov.probe(&lid))
-            .await
-            .map_err(|_| anyhow::anyhow!("probe task panicked"))?
+        tokio::task::spawn_blocking(move || {
+            crate::provider_binding::restore_for_operation(ledger.as_ref(), prov.as_ref(), &lid)?;
+            prov.probe(&lid)
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("probe task panicked"))?
     }
 
     /// Remove `lease_id` from the `images` side-table and from the hook

@@ -79,6 +79,9 @@ use corelink_runner::lease::{CmdOutput, ContainerSpec};
 
 use crate::exec::LeasedExec;
 use crate::pending_cleanup::CleanupTeardown;
+use crate::provider_binding::{ProviderBackend, ProviderBinding, ProviderRoute};
+
+mod provider_refs;
 
 // ── Capacity-error classification ─────────────────────────────────────────────
 
@@ -115,6 +118,7 @@ pub(crate) fn is_capacity_error(e: &anyhow::Error) -> bool {
 struct RegistryEvidence {
     boxes: HashMap<String, RunningContainer>,
     no_box: HashSet<String>,
+    modes: HashMap<String, ProviderRoute>,
 }
 
 #[derive(Clone)]
@@ -131,6 +135,13 @@ impl BoxRegistry {
     pub fn bind(&self, lease_id: &str, container: RunningContainer) {
         let mut evidence = self.0.lock().unwrap_or_else(|p| p.into_inner());
         evidence.no_box.remove(lease_id);
+        if evidence
+            .boxes
+            .get(lease_id)
+            .is_none_or(|old| old.name != container.name)
+        {
+            evidence.modes.remove(lease_id);
+        }
         evidence.boxes.insert(lease_id.to_string(), container);
     }
 
@@ -146,11 +157,9 @@ impl BoxRegistry {
 
     /// Forget a provider handle only after confirmed terminal ledger completion.
     pub fn unbind(&self, lease_id: &str) {
-        self.0
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .boxes
-            .remove(lease_id);
+        let mut evidence = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        evidence.boxes.remove(lease_id);
+        evidence.modes.remove(lease_id);
     }
 
     /// Share the same evidence between exec and provisioner owners.
@@ -273,6 +282,18 @@ pub trait BoxProvisioner: Send + Sync {
     /// bound on error).
     fn provision(&self, lease_id: &str, spec: &ContainerSpec) -> Result<()>;
 
+    /// Return the versioned, non-secret descriptor to persist after provision.
+    fn provider_ref(&self, _lease_id: &str) -> Result<String> {
+        bail!("provider binding descriptor unavailable")
+    }
+
+    /// Restore a process-local handle from a durable descriptor. Validation is
+    /// performed before any provider request; unknown/legacy values stay
+    /// unconfirmed and therefore cannot release capacity.
+    fn restore_provider_ref(&self, _lease_id: &str, _provider_ref: &str) -> Result<()> {
+        bail!("provider binding restore unavailable")
+    }
+
     /// Delete the container for `lease_id` from the provider and unbind it
     /// from the registry.  Idempotent: an already-unbound lease returns
     /// `Ok(())` without calling the provider.
@@ -387,6 +408,14 @@ impl BoxProvisioner for NoBoxProvisioner {
         }
     }
 
+    fn provider_ref(&self, lease_id: &str) -> Result<String> {
+        self.binding_ref(lease_id)
+    }
+
+    fn restore_provider_ref(&self, lease_id: &str, provider_ref: &str) -> Result<()> {
+        self.restore_binding(lease_id, provider_ref)
+    }
+
     fn teardown_pending(&self, lease_id: &str) -> CleanupTeardown {
         if self
             .leases
@@ -452,9 +481,28 @@ impl<H: corelink_cloud_engine::HttpTransport + Send + Sync> BoxProvisioner
 {
     fn provision(&self, lease_id: &str, spec: &ContainerSpec) -> Result<()> {
         // Fail-closed: if spawn errors, nothing is bound.
+        crate::provider_binding::validate_domain(&self.engine.provider_domain()?)?;
         let container = self.engine.spawn(spec)?;
-        self.registry.bind(lease_id, container);
+        self.registry.bind_with_route(
+            lease_id,
+            container,
+            if spec.allow_egress {
+                ProviderRoute::Runner
+            } else if is_check_host_spec(spec) {
+                ProviderRoute::CheckHost
+            } else {
+                ProviderRoute::Check
+            },
+        )?;
         Ok(())
+    }
+
+    fn provider_ref(&self, lease_id: &str) -> Result<String> {
+        self.binding_ref(lease_id)
+    }
+
+    fn restore_provider_ref(&self, lease_id: &str, provider_ref: &str) -> Result<()> {
+        self.restore_binding(lease_id, provider_ref)
     }
 
     fn teardown(&self, lease_id: &str) -> Result<()> {
@@ -617,14 +665,32 @@ impl<H: corelink_cloud_engine::HttpTransport + Send + Sync> BoxProvisioner
             return Ok(());
         }
         // Fail-closed: if spawn errors, nothing is bound (mirrors Northflank).
+        crate::provider_binding::validate_domain(self.engine.provider_domain())?;
         let container = self.engine.spawn(spec)?;
-        self.registry.bind(lease_id, container);
+        self.registry.bind_with_route(
+            lease_id,
+            container,
+            if is_check_host_spec(spec) {
+                ProviderRoute::CheckHost
+            } else {
+                ProviderRoute::Runner
+            },
+        )?;
         Ok(())
+    }
+
+    fn provider_ref(&self, lease_id: &str) -> Result<String> {
+        self.binding_ref(lease_id)
+    }
+
+    fn restore_provider_ref(&self, lease_id: &str, provider_ref: &str) -> Result<()> {
+        self.restore_binding(lease_id, provider_ref)
     }
 
     fn teardown(&self, lease_id: &str) -> Result<()> {
         if let Some(c) = self.registry.resolve(lease_id) {
-            return self.engine.teardown(&c);
+            let mode = self.registry.check_mode(lease_id)?;
+            return self.engine.teardown_with_mode(&c, mode);
         }
         if self.registry.has_no_box(lease_id) {
             return Ok(());
@@ -642,7 +708,10 @@ impl<H: corelink_cloud_engine::HttpTransport + Send + Sync> BoxProvisioner
                 CleanupTeardown::Unconfirmed
             };
         };
-        match self.engine.teardown(&container) {
+        let Ok(mode) = self.registry.check_mode(lease_id) else {
+            return CleanupTeardown::Unconfirmed;
+        };
+        match self.engine.teardown_with_mode(&container, mode) {
             Ok(()) => CleanupTeardown::ConfirmedDestroyed,
             Err(_) => CleanupTeardown::Retryable,
         }
@@ -660,7 +729,10 @@ impl<H: corelink_cloud_engine::HttpTransport + Send + Sync> BoxProvisioner
         };
         // FAIL-SAFE: is_alive only returns Ok(false) for an authoritative
         // dead/terminal status; ambiguous/5xx → Err (propagated, NOT death).
-        match self.engine.is_alive(&c) {
+        match self
+            .engine
+            .is_alive_with_mode(&c, self.registry.check_mode(lease_id)?)
+        {
             Ok(true) => Ok(ProbeStatus::Alive),
             Ok(false) => Ok(ProbeStatus::Dead),
             Err(e) => Err(e),
@@ -883,6 +955,14 @@ impl BoxProvisioner for HybridBoxProvisioner {
         };
         self.record_route(lease_id, route);
         sub.provision(lease_id, spec)
+    }
+
+    fn provider_ref(&self, lease_id: &str) -> Result<String> {
+        self.binding_ref(lease_id)
+    }
+
+    fn restore_provider_ref(&self, lease_id: &str, provider_ref: &str) -> Result<()> {
+        self.restore_binding(lease_id, provider_ref)
     }
 
     fn teardown(&self, lease_id: &str) -> Result<()> {

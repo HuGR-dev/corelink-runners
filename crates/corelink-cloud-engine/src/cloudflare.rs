@@ -349,6 +349,51 @@ impl<H: HttpTransport> CloudflareEngine<H> {
         Self { http, cfg }
     }
 
+    /// Configured Worker domain used in durable provider binding descriptors.
+    pub fn provider_domain(&self) -> &str {
+        &self.cfg.spawn_worker_url
+    }
+
+    /// Probe the same provider namespace used at spawn and teardown.
+    pub fn is_alive_with_mode(&self, c: &RunningContainer, check_mode: bool) -> Result<bool> {
+        let mut url = self.status_url(&c.name);
+        if check_mode {
+            url.push_str("?mode=check");
+        }
+        let resp = self.send(Method::Get, url, None)?;
+        if resp.is_success() {
+            Ok(true)
+        } else if resp.status == 404 {
+            Ok(false)
+        } else {
+            bail!(
+                "cloudflare spawn-Worker is_alive {}: indeterminate HTTP {} — fail-closed",
+                c.name,
+                resp.status
+            )
+        }
+    }
+
+    /// Teardown with an explicit mode so a restored check-host handle can never
+    /// be sent down the runner route.
+    pub fn teardown_with_mode(&self, c: &RunningContainer, check_mode: bool) -> Result<()> {
+        let mut body = serde_json::json!({ "handle": c.name });
+        if check_mode {
+            body["mode"] = serde_json::json!("check");
+        }
+        let resp = self.send(Method::Post, self.teardown_url(), Some(body.to_string()))?;
+        if resp.is_success() || resp.status == 404 {
+            Ok(())
+        } else {
+            bail!(
+                "cloudflare spawn-Worker teardown {} failed: HTTP {} — {} (fail-closed)",
+                c.name,
+                resp.status,
+                bounded_provider_body(&resp.body)
+            )
+        }
+    }
+
     /// Construct from a [`CloudflareConfig`] (alias of [`new`](Self::new) for
     /// composition-root symmetry with the Northflank wiring; the composition root
     /// can call `CloudflareEngine::from_config(transport, cfg)` once the backend is
@@ -564,13 +609,12 @@ impl<H: HttpTransport> Engine for CloudflareEngine<H> {
         Ok(RunningContainer { name: handle })
     }
 
-    fn probe(&self, c: &RunningContainer, _spec: &ContainerSpec) -> Result<IsolationProbe> {
+    fn probe(&self, c: &RunningContainer, spec: &ContainerSpec) -> Result<IsolationProbe> {
         // The container exists iff `GET /v1/status/{handle}` returns 2xx; a fresh
         // Cloudflare container's tmp is private by construction and it publishes
         // no ports, so the namespace is isolated. We assert liveness here and
         // report both invariants as held; absence of the container is fail-closed.
-        let resp = self.send(Method::Get, self.status_url(&c.name), None)?;
-        let alive = resp.is_success();
+        let alive = self.is_alive_with_mode(c, check_host_toolchain_digest(spec).is_some())?;
         Ok(IsolationProbe {
             tmp_is_private: alive,
             net_is_isolated: alive,
@@ -655,18 +699,7 @@ impl<H: HttpTransport> Engine for CloudflareEngine<H> {
     }
 
     fn is_alive(&self, c: &RunningContainer) -> Result<bool> {
-        let resp = self.send(Method::Get, self.status_url(&c.name), None)?;
-        if resp.is_success() {
-            Ok(true)
-        } else if resp.status == 404 {
-            Ok(false)
-        } else {
-            bail!(
-                "cloudflare spawn-Worker is_alive {}: indeterminate HTTP {} — fail-closed",
-                c.name,
-                resp.status
-            )
-        }
+        self.is_alive_with_mode(c, false)
     }
 }
 

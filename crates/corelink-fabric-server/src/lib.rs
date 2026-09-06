@@ -49,6 +49,7 @@ pub mod mint_readiness;
 /// operational metric surface exposed via `GET /internal/v1/status`.
 pub mod observability;
 pub mod pending_cleanup;
+pub mod provider_binding;
 pub mod quota_headroom;
 pub mod reaper;
 pub mod runner_broker;
