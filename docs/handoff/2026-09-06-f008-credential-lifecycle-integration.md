@@ -10,7 +10,32 @@ or replace the frozen implementation contract.
 ## Integrated and verified
 
 The integration tree is `/private/tmp/corelink-techlead-takeover-20260906` at
-`70ee2d14425a43e6ec989cf5864d6015a226b4d8`:
+`ab4669d2c3a2f325be05852b3e13e4fcc9c990c3`.
+
+## Current Runner composition repair
+
+`ab4669d2c3a2f325be05852b3e13e4fcc9c990c3` restores the existing
+`/internal/v1/runner/authorize` response contract: it consumes only tenant,
+concurrency, and optional compute grant data. The lifecycle generation is
+validated only in the canonical `/runner/mint` result, then recorded in the
+credential registration and carried through each prepared/failed spawn cleanup
+identity. No authorize request or response protocol field was added.
+
+The focused Runner checks passed on that commit:
+
+- `npm run typecheck`
+- `npx vitest run --pool=forks --minWorkers=1 --maxWorkers=1` over the eleven
+  authorization, mint, preparation, credential cleanup, and tenant-suspension
+  suites: 11 files / 116 tests passed.
+
+This is source-level integration evidence only. F008 remains at 16/70 and is
+not production qualified; the active legacy PAT inventory, one invalid data
+row, live 75-second CAS gate, and seven-day monitor remain human/data or
+operational gates.
+
+## Earlier integrated packets
+
+The prior packets in this tree include:
 
 - `e42a691e484661d6a512573a3c6cdc10314e293a` wires the Fabric dedicated issuer
   key through fabricd, exposes the ContainmentDO tenant-close RPC, validates a
