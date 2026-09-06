@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { MonitorStateStore, Stored, Write } from "./state.js";
-import type { AuditLog } from "./evidence_log.js";
+import type { DurableAuditLog } from "./evidence_log.js";
 import type { TrustedClock, TrustedTimeProof } from "./trusted_time.js";
-export type { AuditLog } from "./evidence_log.js";
+export type AuditLog = Pick<DurableAuditLog, "append" | "verify">;
 export type { TrustedClock, TrustedTimeProof } from "./trusted_time.js";
 
 export type AlertIntent = {
