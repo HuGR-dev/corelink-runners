@@ -10,7 +10,10 @@
 # ══════════════════════════════════════════════════════════════════════
 # STAGE 1: Download verified clw binary (from corelink-workspaces releases)
 # ══════════════════════════════════════════════════════════════════════
-FROM debian:12-slim AS clw-download
+# Official Docker Hub library/debian:12-slim manifest digest, resolved
+# 2026-09-05 from registry-1.docker.io; keep the tag in the comment so digest
+# drift can be checked against the named upstream release.
+FROM debian:12-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS clw-download
 ARG CLW_VERSION=0.1.5
 ARG CLW_SHA256=95a05db35e4e5be50a104acb7c30466ff7ec5f7a154403943aca24279b5d8bf2
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && rm -rf /var/lib/apt/lists/*
@@ -21,7 +24,9 @@ RUN curl -fsSL "https://github.com/HuGR-Labs/clw-releases/releases/download/v${C
 # ══════════════════════════════════════════════════════════════════════
 # STAGE 1b: Build in-container exec-server from Rust source (musl static)
 # ══════════════════════════════════════════════════════════════════════
-FROM rust:1.82-alpine AS exec-builder
+# Official Docker Hub library/rust:1.82-alpine manifest digest, resolved
+# 2026-09-05 from registry-1.docker.io; never replace this with a floating tag.
+FROM rust:1.82-alpine@sha256:2f42ce0d00c0b14f7fd84453cdc93ff5efec5da7ce03ead6e0b41adb1fbe834e AS exec-builder
 
 RUN apk add --no-cache musl-dev pkgconfig openssl-dev openssl-libs-static git make perl
 
@@ -47,7 +52,7 @@ RUN mkdir -p /out \
 # ══════════════════════════════════════════════════════════════════════
 # STAGE 2: Download pre-built ttyd + code-server binaries
 # ══════════════════════════════════════════════════════════════════════
-FROM debian:12-slim AS bin-downloader
+FROM debian:12-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS bin-downloader
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -77,7 +82,7 @@ RUN curl -fsSL -o /tmp/code-server.tar.gz \
 # ══════════════════════════════════════════════════════════════════════
 # STAGE 3: Final Runtime Image
 # ══════════════════════════════════════════════════════════════════════
-FROM debian:12-slim
+FROM debian:12-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
 
 ENV DEBIAN_FRONTEND=noninteractive
 
