@@ -1,10 +1,11 @@
-import type { LifecycleAuthority, LifecyclePayload, SourceRegistration } from "./types.js";
+import type { LifecyclePayload, SourceRegistration } from "./types.js";
 
 const MAX_ID_LENGTH = 256;
 const MAX_NONCE_LENGTH = 256;
 const MAX_SAMPLE_AGE_MS = 120_000;
 
 export type LifecycleStatus = "healthy" | "failed" | "unknown";
+export type LifecycleAuthority = [string, number, string, LifecycleStatus, number, string];
 
 export interface LifecycleDecision {
   status: LifecycleStatus;
@@ -35,7 +36,7 @@ function boundedIdentity(value: unknown, label: string): string {
 }
 
 function safeMs(value: unknown, label: string): number {
-  if (!Number.isSafeInteger(value) || (value as number) < 0) return refusal(`${label}_invalid`);
+  if (!Number.isSafeInteger(value) || (value as number) <= 0) return refusal(`${label}_invalid`);
   return value as number;
 }
 
@@ -50,12 +51,8 @@ function lifecycleState(value: unknown): LifecycleStatus {
 }
 
 function authorityEqual(a: LifecycleAuthority, b: LifecycleAuthority): boolean {
-  return a.source_id === b.source_id
-    && a.monotonic_seq === b.monotonic_seq
-    && a.transition_id === b.transition_id
-    && a.state === b.state
-    && a.transition_at === b.transition_at
-    && a.source_version === b.source_version;
+  return a[0] === b[0] && a[1] === b[1] && a[2] === b[2]
+    && a[3] === b[3] && a[4] === b[4] && a[5] === b[5];
 }
 
 /**
@@ -88,18 +85,11 @@ export function classifyLifecycle(
   if (transitionAt > sampledAt) return refusal("transition_in_future");
   if (sampledAt > now) return refusal("sample_in_future");
 
-  const authority = {
-    source_id: sourceId,
-    monotonic_seq: sequence,
-    transition_id: transitionId,
-    state,
-    transition_at: transitionAt,
-    source_version: sourceVersion,
-  } satisfies LifecycleAuthority;
+  const authority: LifecycleAuthority = [sourceId, sequence, transitionId, state, transitionAt, sourceVersion];
 
   if (previousAuthority !== null) {
-    if (sequence < previousAuthority.monotonic_seq) return refusal("sequence_regressed");
-    if (sequence === previousAuthority.monotonic_seq && !authorityEqual(authority, previousAuthority)) {
+    if (sequence < previousAuthority[1]) return refusal("sequence_regressed");
+    if (sequence === previousAuthority[1] && !authorityEqual(authority, previousAuthority)) {
       return refusal("same_sequence_changed");
     }
   }
