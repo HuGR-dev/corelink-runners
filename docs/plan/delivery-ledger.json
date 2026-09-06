@@ -446,7 +446,7 @@
         "O-MONITORHOST",
         "T7-W4b"
       ],
-      "next_action": "Compose independently approved scheduler and terminal-ingest packets. Keep UNKNOWN fail-closed and complete the remaining qualification before any work-package acceptance or deployment.",
+      "next_action": "Compose independently approved terminal-ingest, durable signer-registry, ACK-recovery, human page-acknowledgement, and concrete main-runtime packets. Keep UNKNOWN fail-closed and complete the remaining qualification before any work-package acceptance or deployment.",
       "blockers": [
         "Trusted time/TSA qualification, WORM and three-account independence qualification, crash/rotation/isolation tests, and seven real observation days remain required before acceptance."
       ],
@@ -467,11 +467,14 @@
         "95d51f3",
         "0e50daf",
         "4a087ef",
-        "5576b1d"
+        "5576b1d",
+        "e68d343",
+        "2819578",
+        "7ddfdcb"
       ],
       "review": {
         "status": "partial",
-        "commit": "5576b1d",
+        "commit": "7ddfdcb",
         "evidence": [
           "Outbox cold composition review: 8 focused tests and tsc --noEmit at a0f13d37.",
           "Witness independent review: 6 focused tests and tsc --noEmit; canonical source 5f64ca68 through baf5b9ca and integration fc1ec79 through 59b1a15.",
@@ -482,6 +485,7 @@
           "Journal extension cold review: 10 focused tests and tsc --noEmit; source 1cc9bb64 through b734531f and integration f580023 through 72c483b, where the journal suite passed 10/10 and typecheck completed. Signed checkpoints have nine named fields before a separate signature.",
           "Fresh independent witness-head composition review: witness 7/7, journal 10/10, and tsc; source 66037ec through a991435f with journal b734531f and integration c8e7a5e through 95d51f3. SignedWitnessHead has nine named fields before a separate signature. These results overlap module evidence and do not change delivery counts.",
           "Missing-source scheduler independent review: 10 focused tests and tsc --noEmit; source 521bda03 through 4b8b32f and integration 0e50daf through 5576b1d, where scheduler.test.ts and canary-missing-tick.test.ts passed 10/10 and typecheck passed. Source-only; no delivery credit.",
+          "AWS source-secret and Lambda-witness adapters cold review: 5 focused tests and tsc --noEmit; source ebaf217 through b2404a9 and integration e68d343 through 7ddfdcb, where aws-adapters.test.ts passed 5/5 and typecheck passed. Adapter tests do not prove IAM isolation, three-account independence, deployment, or live capability.",
           "Composed monitor source evidence: all 14 focused suites/89 tests completed exit 0 in bounded runs at 528f032; a prior 120-second aggregate process was not counted as an aggregate pass because of host Vitest contention."
         ]
       },

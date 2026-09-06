@@ -298,6 +298,14 @@ credit. The token contract is recorded at
 `docs/plan/execution/2026-09-06-monitor-token-contract.md`; its disjoint codec,
 manifest, recovery, and page paths remain under their assigned authors.
 
+The AWS source-secret and Lambda-witness adapter stack
+`ebaf2177744ab0b2d5cd3137b29a1875f1610e55` through
+`b2404a948cb3d732942062dd5dcf00a58ad1f06a` is accepted after cold review
+(5 focused tests and `tsc --noEmit`). Its integration is `e68d343` through
+`7ddfdcb`, where `aws-adapters.test.ts` passed 5/5 and the typecheck passed.
+It supplies bounded, pinned adapter paths only; it is not a runtime deployment
+or a proof of IAM isolation, three-account independence, or live capability.
+
 For the resulting fourteen monitor suites (89 tests), every suite has a
 completed exit-0 run at `528f032`: trusted-time and evidence-log completed
 before an aggregate 120-second process limit; witness, the ten non-heavy
@@ -306,8 +314,11 @@ timeout is not recorded as an aggregate pass. The complete Canary suite passed
 13 files, 117 tests, and `npm run typecheck` at `f0b5987`.
 
 This is source composition only. T6-W15 remains prepared and partial for
-delivery: terminal-ingest remains out of the integration tree pending approval,
-and all qualification gates remain open. The frozen runtime contract is recorded at
+delivery. The remaining source components are terminal ingest, durable signer
+registry, ACK recovery, durable human page acknowledgement, and concrete main
+runtime composition (including its separately contracted witness runtime).
+They remain out of the integration tree pending approval, and all qualification
+gates remain open. The frozen runtime contract is recorded at
 `docs/plan/execution/2026-09-06-monitor-runtime-contract.md`. No work-package
 completion, deployment, production qualification, or change to the recorded
 16/70 delivered count is implied.
