@@ -18,6 +18,7 @@ vi.mock("@cloudflare/containers", () => ({
 import worker, { ContainmentDO, MetricsDO, parseContainmentSwitch, retryOrphanedSpawns, type ContainmentEvent } from "../src/index";
 import { COUNTER_NAMES } from "../src/metrics";
 import { canonicalWorkflowJobIdFromRaw } from "../src/workflow_job_id";
+import { runnerCredentialLeaseId } from "../src/lib/runner_credential_lease";
 
 const T0 = 1_750_000_000_000;
 const SECRET = "containment-webhook-secret";
@@ -110,12 +111,14 @@ async function sha256Hex(value: string | Uint8Array): Promise<string> {
 function externalSeams() {
   const acquire = vi.fn(async () => ({ admitted: true }));
   const release = vi.fn(async () => {});
+  const readRetry = vi.fn(async () => 0);
   const wipe = vi.fn(async () => {});
   return {
     acquire,
     release,
+    readRetry,
     wipe,
-    slots: namespace({ acquire, release }),
+    slots: namespace({ acquire, release, readRetry }),
     stash: namespace({ wipe }),
   };
 }
@@ -146,7 +149,7 @@ function env(d: ReturnType<typeof makeDO>, kv = makeKv(), metrics = makeMetrics(
   return {
     GITHUB_WEBHOOK_SECRET: SECRET, GITHUB_MINT_TOKEN: "mint", RUNNER_JOB_PATS: kv, CONTAINMENT: d.binding, METRICS: metrics.binding,
     RUNNER_CONTAINER: {}, CHECK_HOST_CONTAINER: {},
-    CONCURRENCY_SLOTS: namespace({ acquire: vi.fn(async () => ({ admitted: true })), release: vi.fn(async () => {}) }),
+    CONCURRENCY_SLOTS: namespace({ acquire: vi.fn(async () => ({ admitted: true })), release: vi.fn(async () => {}), readRetry: vi.fn(async () => 0) }),
     CRED_STASH: namespace({ wipe: vi.fn(async () => {}) }), ...extra,
   } as never;
 }
@@ -213,13 +216,14 @@ describe("T3-W17 switch/HMAC intake matrix", () => {
       const response = await worker.fetch(await request(body(41), { delivery: `d-${intake ?? "normal"}-${redrive ?? "normal"}` }), env(d, kv, metrics, {
         AUTOSCALER_INTAKE_PAUSED: intake,
         AUTOSCALER_REDRIVE_PAUSED: redrive,
-        INSTALLATION_ALLOWLIST: "99",
+        INSTALLATION_ALLOWLIST: "7",
         CONCURRENCY_SLOTS: seams.slots,
         CRED_STASH: seams.stash,
       }), c as never);
       if (intake === "0") {
         expect(response.status).toBe(202);
-        expect(await response.json()).toMatchObject({ ignored: "installation not allowlisted" });
+        expect(await response.json()).toMatchObject({ ok: true, queued: true, job_id: "41" });
+        expect(d.storage.map.has("containment:v1:repo-job-index:acme/repo/41")).toBe(true);
         expect((await d.instance.snapshot()).backlog_count).toBe(0);
       } else {
         expect(response.status).toBe(202);
@@ -275,12 +279,15 @@ describe("T3-W17 switch/HMAC intake matrix", () => {
       const orphan = { schema_version: 1, jobId: "123", repo: "acme/repo", installationId: "7", labels: ["corelink"], attempts: 0, firstRecordedMs: T0, placedMs: T0 };
       const kv = makeKv({ "orphan:123": JSON.stringify(orphan) });
       const drive = vi.fn(async () => {}); const verify = vi.fn(async () => null);
-      const e = env(d, kv, metrics, { AUTOSCALER_INTAKE_PAUSED: "1", AUTOSCALER_REDRIVE_PAUSED: redrive });
+      const readRetry = vi.fn(async () => 0);
+      const e = env(d, kv, metrics, { AUTOSCALER_INTAKE_PAUSED: "1", AUTOSCALER_REDRIVE_PAUSED: redrive, CONCURRENCY_SLOTS: namespace({ readRetry }) });
       await retryOrphanedSpawns(e, ctx() as never, T0, drive, verify);
       if (redrive === "0") {
         expect(kv.list).toHaveBeenCalledWith({ prefix: "orphan:" });
+        expect(readRetry).toHaveBeenCalledWith("123");
         expect(drive).not.toHaveBeenCalled(); // the fresh placement remains within grace
       } else {
+        expect(readRetry).not.toHaveBeenCalled();
         expect(kv.list).not.toHaveBeenCalled();
         expect(drive).not.toHaveBeenCalled(); expect(kv.get).not.toHaveBeenCalled();
       }
@@ -370,7 +377,10 @@ describe("durable intake authority and delivery identity", () => {
     const d = makeDO(); const kv = makeKv(); const metrics = makeMetrics(); const seams = externalSeams();
     const fetchSpy = vi.fn(async () => new Response(null, { status: 204 })); vi.stubGlobal("fetch", fetchSpy);
     const metricBump = vi.spyOn(metrics.instance, "bump");
+    // The bare jobId projection is the legacy PAT lookup and remains TTL-bound;
+    // durable credential authority state is the revocation source of truth.
     kv.map.set("91", "pat-91"); kv.map.set("jtenant:91", "tenant-91"); kv.map.set("orphan:91", JSON.stringify({ jobId: "91" })); kv.map.set("jhandle:91", "handle-91");
+    await d.instance.registerCredential({ jobId: "91", tenant: "tenant-91", patId: "pat-91" });
     await d.instance.bootstrapContainedEventIndex("acme/repo", "91");
     const reservation = await d.instance.reserveRedriveCandidate("acme/repo", "91");
     expect(reservation.status).toBe("reserved");
@@ -382,9 +392,11 @@ describe("durable intake authority and delivery identity", () => {
       CORELINK_RUNNER_MINT_AUTH_KEY: "mint-auth", CORELINK_MINT_URL: "https://corelink.test", BILLING_INGEST_URL: "https://billing.test", BILLING_INGEST_AUTH_KEY: "billing-auth", BILLING_REGION: "iad",
     }), c as never);
     expect(response.status).toBe(200); expect(await response.json()).toMatchObject({ revoked: true, billed: true, ledgered: true, tornDown: true, deduped: false }); await settle(c);
-    expect(kv.map.has("orphan:91")).toBe(false); expect(kv.map.has("jhandle:91")).toBe(false); expect(kv.map.has("91")).toBe(false); expect(kv.map.has("jtenant:91")).toBe(false);
+    expect(kv.map.has("orphan:91")).toBe(false); expect(kv.map.has("jhandle:91")).toBe(false); expect(kv.map.has("91")).toBe(true); expect(kv.map.has("jtenant:91")).toBe(false);
     expect(kv.map.has("usage:91")).toBe(true); expect(JSON.parse(kv.map.get("usage:91") as string)).toMatchObject({ jobId: "91", tenant: "tenant-91", region: "iad" });
-    expect(seams.release).toHaveBeenCalledWith("91"); expect(seams.wipe).toHaveBeenCalled(); expect(clearReservation).toHaveBeenCalledWith("acme/repo", "91", "containment:v1:redrive:acme/repo/91");
+    expect(seams.release).toHaveBeenCalledWith("91"); expect(seams.wipe).toHaveBeenCalled(); expect(seams.stash.idFromName).toHaveBeenCalledWith(runnerCredentialLeaseId("91", "tenant-91", "pat-91"));
+    expect(fetchSpy).toHaveBeenCalledWith("https://corelink.test/internal/v1/runner/revoke", expect.objectContaining({ body: JSON.stringify({ pat_id: "pat-91", owner_tenant: "tenant-91" }) }));
+    expect((await d.instance.pendingCredentials({ kind: "job", jobId: "91" })).records).toHaveLength(0); expect(clearReservation).toHaveBeenCalledWith("acme/repo", "91", "containment:v1:redrive:acme/repo/91");
     expect(fetchSpy).toHaveBeenCalledTimes(2); expect(containerSeams.getContainer).toHaveBeenCalled(); expect(containerSeams.teardown).toHaveBeenCalledWith(); expect(metricBump).toHaveBeenCalled();
     expect(d.storage.map.has("containment:v1:reservation:acme/repo/91")).toBe(false);
     expect((await d.instance.snapshot()).backlog_count).toBe(1); expect(d.storage.map.has("containment:v1:pause:00000000000000000001")).toBe(true);
