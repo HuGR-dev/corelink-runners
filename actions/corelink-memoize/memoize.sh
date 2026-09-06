@@ -6,14 +6,17 @@ policy="${CL_CACHE_POLICY:-optional}"
 case "$policy" in
   optional) ;;
   required-hit)
-    # The required-hit wire contract is released in clw 0.1.12. Refuse every
+    # The required-hit wire contract is prepared for clw 0.1.12. Refuse every
     # other, missing, or malformed installation before the wrapped command can
     # start; version output is the only capability check (never parse HIT text).
     if ! command -v clw >/dev/null 2>&1; then
       echo "::error title=corelink-memoize::required-hit requires clw 0.1.12" >&2
       exit "$required_miss"
     fi
-    clw_version="$(clw --version 2>/dev/null || true)"
+    if ! clw_version="$(clw --version 2>/dev/null)"; then
+      echo "::error title=corelink-memoize::required-hit requires clw 0.1.12" >&2
+      exit "$required_miss"
+    fi
     if [ "$clw_version" != "clw 0.1.12" ]; then
       echo "::error title=corelink-memoize::required-hit requires clw 0.1.12" >&2
       exit "$required_miss"
@@ -74,6 +77,10 @@ if [ -n "${CLW_ENDPOINT:-}" ] && { [ -n "${CLW_TOKEN:-}" ] || [ -n "${CLW_CRED_T
     exit "$rc"
   fi
 else
+  if [ "$policy" = required-hit ]; then
+    echo "::error title=corelink-memoize::required-hit requires the CLW moat and clw 0.1.12" >&2
+    exit "$required_miss"
+  fi
   echo "corelink-memoize: moat absent (no CLW_*/clw) — COLD run"
   run_cold; exit "$?"
 fi
