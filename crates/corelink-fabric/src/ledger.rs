@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::tenant::TenantId;
 
 mod pending_cleanup;
+pub(crate) mod provider_binding;
 
 /// Ledger-level lifecycle state: the contract §1 five states.
 ///
@@ -271,6 +272,16 @@ pub trait LeaseLedger {
 
     /// Look up a record by lease id (`Ok(None)` when absent).
     fn get(&self, lease_id: &str) -> anyhow::Result<Option<LeaseRecord>>;
+
+    /// Bind the provider's opaque resource reference while a lease is still
+    /// Pending. Backends that cannot durably fence this update fail closed.
+    fn bind_provider_ref(
+        &self,
+        _lease_id: &str,
+        _provider_ref: &str,
+    ) -> anyhow::Result<LeaseRecord> {
+        anyhow::bail!("provider-ref binding unsupported by this ledger")
+    }
 
     /// Transition a lease to `to` at `now_ms`, enforcing the contract §1
     /// matrix (see [`transition_is_legal`]); returns the updated record.
@@ -1015,6 +1026,14 @@ impl LeaseLedger for InMemoryLedger {
         self.lock()?.get(lease_id)
     }
 
+    fn bind_provider_ref(
+        &self,
+        lease_id: &str,
+        provider_ref: &str,
+    ) -> anyhow::Result<LeaseRecord> {
+        self.lock()?.bind_provider_ref(lease_id, provider_ref)
+    }
+
     fn transition(
         &self,
         lease_id: &str,
@@ -1679,6 +1698,14 @@ impl LeaseLedger for FileLedger {
 
     fn get(&self, lease_id: &str) -> anyhow::Result<Option<LeaseRecord>> {
         self.lock()?.get(lease_id)
+    }
+
+    fn bind_provider_ref(
+        &self,
+        lease_id: &str,
+        provider_ref: &str,
+    ) -> anyhow::Result<LeaseRecord> {
+        self.lock()?.bind_provider_ref(lease_id, provider_ref)
     }
 
     fn transition(
