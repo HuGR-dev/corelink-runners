@@ -16,16 +16,17 @@ function envelope(seq = 1, occurred = 1000): MonitorEnvelope {
   unsigned.signature = createHmac("sha256", secret).update(JSON.stringify(tuple)).digest("hex");
   return unsigned;
 }
-function service(now = 1000) {
+function service(now = 1000, failResult = false) {
   const store = new MemoryStateStore(); let auditCalls = 0;
-  const audit = { append: async (id: string) => { auditCalls++; return receipt(id); }, verify: async () => {} };
+  const audit = { append: async (id: string) => { auditCalls++; if (failResult && id.endsWith(":result")) throw new Error("audit result unavailable"); return receipt(id); }, verify: async () => {} };
   const value = new IngestService({ store, audit, clock: { now: async () => ({ timeMs: now, proofDigest: "a", requestDigest: "b", authority: "test" }) }, signingAuthority: { resolveIngestSigner: async () => signer, isIngestSignerCurrent: async () => true }, secrets: { load: async () => secret }, registrations: [registration], namespace: "n", monitorTupleDigest: "b".repeat(64), destination: "ops" });
   return { value, store, getAuditCalls: () => auditCalls };
 }
 describe("atomic authenticated ingest", () => {
-  it("returns one byte-stable ACK for an exact duplicate", async () => { const x = service(); const e = envelope(); const a = await x.value.ingest(e); const b = await x.value.ingest(e); expect(b).toEqual(a); expect(x.getAuditCalls()).toBe(2); });
+  it("returns one byte-stable ACK for 100 exact duplicates after restart", async () => { const x = service(); const e = envelope(); const a = await x.value.ingest(e); for (let i = 0; i < 100; i++) expect(await x.value.ingest(e)).toEqual(a); expect(x.getAuditCalls()).toBe(2); });
   it("does not mutate state for a future authenticated envelope", async () => { const x = service(2000); const r = await x.value.ingest(envelope(1, 3000)); expect(r).toEqual({ kind: "RETRY", reason: "future_envelope" }); expect(await x.store.scan("n:")).toEqual({ items: [], nextCursor: null }); });
-  it("persists quarantine for a known lane with a bad HMAC", async () => { const x = service(); const e = envelope(); e.signature = "0".repeat(64); expect(await x.value.ingest(e)).toEqual({ kind: "QUARANTINED", reason: "authentication_failed" }); expect((await x.store.scan("n:quarantine:")).items).toHaveLength(1); });
+  it("persists quarantine for a known lane with a bad HMAC", async () => { const x = service(); const e = envelope(); e.signature = "0".repeat(64); expect(await x.value.ingest(e)).toEqual({ kind: "QUARANTINED", reason: "authentication_failed" }); expect((await x.store.scan("n:source:")).items).toHaveLength(1); expect(await x.value.ingest(envelope(1))).toEqual({ kind: "QUARANTINED", reason: "lane_quarantined" }); });
   it("commits a signed historical terminal after the lateness bound", async () => { const x = service(70_000); const r = await x.value.ingest(envelope(1, 1000)); expect(r.kind).toBe("ACK"); expect((r as any).body.terminal).toBe("HISTORICAL_NO_STATE"); });
   it("commits the incident and delivery queue atomically with a stale observation", async () => { const x = service(70_000); await x.value.ingest(envelope(1, 1000)); expect((await x.store.scan("n:incident:")).items).toHaveLength(1); expect((await x.store.scan("n:queue:")).items).toHaveLength(1); expect((await x.store.scan("n:delivery:")).items).toHaveLength(1); });
+  it("does not expose an ACK when result audit attachment fails", async () => { const x = service(1000, true); expect((await x.value.ingest(envelope())).kind).toBe("UNKNOWN"); expect(await x.value.ingest(envelope())).toEqual({ kind: "UNKNOWN", reason: "result_audit_pending" }); });
 });
