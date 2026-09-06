@@ -34,6 +34,9 @@ function safeVersion(value: unknown): value is number {
 function validKey(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= 1024 && !/[\u0000-\u001f\u007f]/.test(value);
 }
+function validPrefix(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 1024 && !/[\u0000-\u001f\u007f]/.test(value);
+}
 function clone<T>(value: T): T {
   return structuredClone(value);
 }
@@ -105,7 +108,7 @@ export class DynamoDbStateStore implements MonitorStateStore {
     catch (error) { if (isConditionalFailure(error)) return "conflict"; throw new StateBackendError("state transaction outcome is ambiguous", { cause: error }); }
   }
   async scan(prefix: string, cursor?: string): Promise<{ items: Stored[]; nextCursor: string | null }> {
-    if (typeof prefix !== "string" || prefix.length > 1024) throw new TypeError("invalid scan prefix");
+    if (!validPrefix(prefix)) throw new TypeError("invalid scan prefix");
     const exclusive = cursor === undefined ? undefined : decodeCursor(cursor, this.options.namespace, prefix);
     let result;
     try {
@@ -131,7 +134,7 @@ export class MemoryStateStore implements MonitorStateStore {
     return this.mutex(async () => { if (writes.some((w) => (this.values.get(w.key)?.version ?? null) !== w.expectedVersion)) return "conflict"; writes.forEach((w) => this.values.set(w.key, { key: w.key, version: w.expectedVersion === null ? 1 : w.expectedVersion + 1, value: clone(w.value) })); return "committed"; });
   }
   async scan(prefix: string, cursor?: string): Promise<{ items: Stored[]; nextCursor: string | null }> {
-    if (typeof prefix !== "string" || prefix.length > 1024) throw new TypeError("invalid scan prefix");
+    if (!validPrefix(prefix)) throw new TypeError("invalid scan prefix");
     const start = cursor === undefined ? undefined : decodeCursor(cursor, "memory", prefix);
     return this.mutex(async () => { const keys = [...this.values.keys()].filter((k) => k.startsWith(prefix)).sort(); const from = start ? keys.findIndex((k) => k > start) : 0; const selected = keys.slice(from < 0 ? 0 : from, (from < 0 ? 0 : from) + 100); const last = selected.length === 100 ? selected[selected.length - 1] : undefined; return { items: selected.map((k) => clone(this.values.get(k)!)), nextCursor: last ? encodeCursor("memory", prefix, last) : null }; });
   }
