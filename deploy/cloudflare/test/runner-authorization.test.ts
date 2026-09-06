@@ -9,7 +9,7 @@ const env: MintEnv = {
   CORELINK_CF_ACCESS_CLIENT_SECRET: "cf-secret",
 };
 const params: MintParams = { jobId: "42", repoFullName: "acme/api", installationId: "123" };
-const good = { tenant: "tenant-1", max_concurrency: 4, max_vcpu_h: 12.5 };
+const good = { tenant: "tenant-1", max_concurrency: 4, max_vcpu_h: 12, compute_grant: "fixture.grant" };
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -38,6 +38,20 @@ describe("authorizeRunner", () => {
     await expect(authorizeRunner(env, params)).rejects.toBeInstanceOf(RunnerAuthorizationError);
   });
 
+  it.each([0, 12.5, -1, 0x100000000])("refuses an invalid metered entitlement %s", async (cap) => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ ...good, max_vcpu_h: cap })));
+    await expect(authorizeRunner(env, params)).rejects.toBeInstanceOf(RunnerAuthorizationError);
+  });
+
+  it("requires a grant for metered authorization and binds the request attempt", async () => {
+    const id = "22222222-2222-4222-8222-222222222222";
+    vi.stubGlobal("fetch", vi.fn(async (_url, init) => {
+      expect(JSON.parse(init.body).compute_reservation_id).toBe(id);
+      return Response.json({ tenant: "tenant-1", max_concurrency: 4, max_vcpu_h: 12 });
+    }));
+    await expect(authorizeRunner(env, { ...params, computeReservationId: id })).rejects.toBeInstanceOf(RunnerAuthorizationError);
+  });
+
   it("fails closed on transport errors", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("secret transport detail"); }));
     await expect(authorizeRunner(env, params)).rejects.toBeInstanceOf(RunnerAuthorizationError);
@@ -52,7 +66,7 @@ describe("authorizeRunner", () => {
       return new Response(JSON.stringify(good), { status: 200 });
     });
     vi.stubGlobal("fetch", fetch);
-    await expect(authorizeRunner(env, params)).resolves.toEqual({ tenant: "tenant-1", maxConcurrency: 4, maxVcpuH: 12.5 });
+    await expect(authorizeRunner(env, params)).resolves.toEqual({ tenant: "tenant-1", maxConcurrency: 4, maxVcpuH: 12, computeGrant: "fixture.grant" });
   });
 
   it("omits installation only when the acquiring PAT caller has none", async () => {

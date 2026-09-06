@@ -591,6 +591,7 @@ pub struct AppState {
     /// DISABLED (404) — no un-authed suspend is ever possible. Wired from
     /// `FABRIC_ADMIN_KEY` (the same operator secret as the tenant-plan admin).
     pub(crate) admin_key: Option<Arc<str>>,
+    pub(crate) compute_grant_public_keys: HashMap<String, Vec<u8>>,
     /// Lease ids provisioned as CHECK-HOST leases (CF-native check-host, C1/C6),
     /// mapped to their `toolchain_digest` (the clw snapshot manifest digest the
     /// box hydrated at spawn). A fabric-internal marker table — mirrors
@@ -903,6 +904,7 @@ impl AppState {
             agent_steps: Arc::new(Mutex::new(std::collections::HashMap::new())),
             suspended_tenants: Arc::new(Mutex::new(std::collections::HashSet::new())),
             admin_key: None,
+            compute_grant_public_keys: HashMap::new(),
             // Check-host mode DEFAULT-OFF: empty marker map. Populated only when
             // an acquire carries `toolchain_digest` (C1/C6).
             toolchain_digests: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -1441,6 +1443,13 @@ impl AppState {
     #[must_use]
     pub fn with_admin_key(mut self, key: Option<Arc<str>>) -> Self {
         self.admin_key = key;
+        self
+    }
+
+    /// Issuer public keys only; private compute signing keys stay on corelink-server.
+    #[must_use]
+    pub fn with_compute_grant_public_keys(mut self, keys: HashMap<String, Vec<u8>>) -> Self {
+        self.compute_grant_public_keys = keys;
         self
     }
 
@@ -2365,6 +2374,12 @@ pub fn app_full(
         // (the per-lease collector cardinality cap is the other half of the bound).
         .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024));
 
+    let compute_budget = crate::compute_budget_api::router(
+        state.ledger.clone(),
+        state.compute_grant_public_keys.clone(),
+        state.admin_key.as_deref().map(str::to_owned),
+    );
+
     let authenticated = Router::new()
         .route(paths::USAGE, get(handlers::usage::usage))
         .route(paths::METRICS_TENANT, get(handlers::metrics::tenant_wait))
@@ -2432,6 +2447,7 @@ pub fn app_full(
     let max_inflight = max_inflight.max(1);
     let work = Router::new()
         .merge(internal)
+        .merge(compute_budget)
         .merge(ingest)
         .merge(authenticated)
         .layer(

@@ -321,3 +321,7 @@ mod tests {
         1_788_652_800_000
     }
 }
+
+#[cfg(test)]
+#[path = "compute_grant_cross_language.rs"]
+mod cross_language;

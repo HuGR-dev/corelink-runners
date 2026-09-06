@@ -13,6 +13,7 @@ corelink-runners-contracts = { path = "../corelink-runners-contracts" }
 anyhow     = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
+uuid       = { workspace = true }
 # Persistent lease ledger (WP-3-PGLEDGER) — the production `PgLedger` over
 # Postgres. The `LeaseLedger` trait stays sync; `PgLedger` bridges to these
 # async clients via `tokio::task::block_in_place` on the server's

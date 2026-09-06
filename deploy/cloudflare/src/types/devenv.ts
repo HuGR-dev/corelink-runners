@@ -161,6 +161,7 @@ export interface AuthorizedDevenvStart {
     readonly casPat: string;
     readonly patId: string;
     readonly expiresAtMs: number;
+    readonly computeReservationId?: string;
   };
 }
 

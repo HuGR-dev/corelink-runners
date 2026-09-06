@@ -74,6 +74,7 @@ async function readBoundedBody(response: Response, signal: AbortSignal): Promise
     }
   } finally {
     if (onAbort) signal.removeEventListener("abort", onAbort);
+    if (signal.aborted) void reader.cancel().catch(() => {});
     reader.releaseLock();
   }
   if (signal.aborted) throw new ComputeBudgetClientError("baseline_or_unavailable", "compute request timed out");
@@ -115,11 +116,9 @@ export class ComputeBudgetClient {
   private async call(operation: Operation, token: string, reservationId: string, body: Record<string, string> = {}): Promise<ComputeReceipt> {
     validateToken(token); validateReservationId(reservationId);
     const controller = new AbortController();
-    let timedOut = false;
     let timeoutReject!: (error: ComputeBudgetClientError) => void;
     const timeout = new Promise<never>((_, reject) => { timeoutReject = reject; });
     const timer = setTimeout(() => {
-      timedOut = true;
       controller.abort();
       timeoutReject(new ComputeBudgetClientError("ambiguous", "compute result is ambiguous"));
     }, TIMEOUT_MS);
@@ -132,7 +131,7 @@ export class ComputeBudgetClient {
           body: JSON.stringify(body),
         }), timeout]);
       } catch {
-        throw new ComputeBudgetClientError(timedOut ? "ambiguous" : "ambiguous", "compute result is ambiguous");
+        throw new ComputeBudgetClientError("ambiguous", "compute result is ambiguous");
       }
       let text: string;
       try { text = await readBoundedBody(response, controller.signal); }

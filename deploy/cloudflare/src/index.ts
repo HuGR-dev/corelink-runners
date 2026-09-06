@@ -1,3 +1,5 @@
+import { ComputeBudgetClient } from "./lib/compute_budget_client";
+import { ComputeObligations, type ComputeBinding } from "./lib/compute_budget_obligation";
 import { NormalIntakeInbox, type NormalIntakeInput, type NormalIntakeRecord } from "./lib/normal_intake_inbox";
 import { JobAttributionAuthority } from "./lib/job_attribution_authority";
 import { CredentialObligationAuthority } from "./lib/credential_obligation_authority";
@@ -234,6 +236,7 @@ export { DRAIN_LEASE_TTL_MS, REDRIVE_RESERVATION_TTL_MS };
 export { MetricsDO };
 
 export interface Env {
+  FABRIC_COMPUTE_URL?: string;
   RUNNER_CONTAINER: DurableObjectNamespace<RunnerContainer>;
   // The Container DO for a check-host lease (CF-native check-host, campaign B).
   // A `mode:"check"` /v1/spawn routes HERE (not RUNNER_CONTAINER); /v1/exec dials
@@ -538,6 +541,35 @@ export class ConcurrencySlotsDO extends DurableObject<Env> {
 // immutable effect evidence lives in KV and is revalidated by this DO before a
 // recovery/commit can advance the cursor.
 export class ContainmentDO extends DurableObject<Env> {
+  private computeObligations(): ComputeObligations {
+    return new ComputeObligations(this.ctx.storage, new ComputeBudgetClient(this.env.FABRIC_COMPUTE_URL ?? ""));
+  }
+
+  async prepareCompute(binding: ComputeBinding): Promise<void> {
+    if (binding.workloadKind !== "spawn_worker_runner" || binding.vcpuCount !== 4 || binding.maximumWallMs !== 28_800_000) {
+      throw new Error("COMPUTE_BINDING_INVALID");
+    }
+    return this.ctx.blockConcurrencyWhile(() => this.computeObligations().prepare(binding, Date.now()));
+  }
+
+  async claimComputeProvider(reservationId: string, jobId: string): Promise<void> {
+    return this.ctx.blockConcurrencyWhile(() => this.computeObligations().claimProvider(reservationId, jobId, Date.now()));
+  }
+
+  async abandonUnusedCompute(reservationId: string): Promise<void> {
+    return this.ctx.blockConcurrencyWhile(() => this.computeObligations().abandonUnused(reservationId));
+  }
+
+  async drainUnusedCompute(): Promise<void> {
+    if (!this.env.FABRIC_COMPUTE_URL) return;
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const cursor = await this.ctx.storage.get<string>("compute:drain-cursor");
+      const result = await this.computeObligations().drainUnused(Date.now(), cursor);
+      if (result.cursor) await this.ctx.storage.put("compute:drain-cursor", result.cursor);
+      else await this.ctx.storage.delete("compute:drain-cursor");
+    });
+  }
+
   private tx<T>(fn: (storage: any) => Promise<T>): Promise<T> {
     return this.ctx.storage.transaction(fn);
   }
@@ -2047,9 +2079,10 @@ async function startWithRetry<T>(
   provision: (attempt: number) => Promise<T>,
   start: (handle: string, provisioned: T) => Promise<void>,
   abandon: (handle: string, provisioned: T, reason: string) => Promise<void>,
+  maxAttempts = SPAWN_MAX_ATTEMPTS,
 ): Promise<{ handle: string; provisioned: T; attempt: number }> {
   let lastErr: unknown;
-  for (let attempt = 1; attempt <= SPAWN_MAX_ATTEMPTS; attempt++) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const provisioned = await provision(attempt);
     const handle = crypto.randomUUID();
     try {
@@ -2068,20 +2101,20 @@ async function startWithRetry<T>(
       lastErr = e;
       logEvent("info", "container_start_retry", {
         attempt,
-        maxAttempts: SPAWN_MAX_ATTEMPTS,
+        maxAttempts,
         error: (e as Error).message,
       });
       // Cancel it. Losing the race to a timeout does NOT mean nothing started —
       // see the ghost-container note above. This runs on EVERY failed attempt,
       // including the last one, so an exhausted spawn leaves no box behind either.
       await abandon(handle, provisioned, (e as Error).message);
-      if (attempt < SPAWN_MAX_ATTEMPTS) {
+      if (attempt < maxAttempts) {
         await new Promise((r) => setTimeout(r, 300 * attempt));
       }
     }
   }
   throw new Error(
-    `container start failed after ${SPAWN_MAX_ATTEMPTS} attempts: ${(lastErr as Error).message}`,
+    `container start failed after ${maxAttempts} attempts: ${(lastErr as Error).message}`,
   );
 }
 
@@ -2167,6 +2200,7 @@ async function spawnRunner(
       return minted;
     },
     async (h, minted) => {
+      if (mint.computeReservationId) await containmentAuthority(env).claimComputeProvider(mint.computeReservationId, jobId);
       await getContainer(env.RUNNER_CONTAINER, h).startWithEnv({
         CORELINK_RUNNER_JITCONFIG: minted.jit,
         ...mint.containerEnv, // CLW_* overlay (empty on a cold spawn)
@@ -2174,6 +2208,8 @@ async function spawnRunner(
     },
     (h, minted, reason) =>
       cancelSpawnAttempt(env, { jobId, repo, installationId, handle: h, minted, reason }),
+    // A fresh provider attempt needs its own independently funded reservation.
+    mint.computeReservationId ? 1 : SPAWN_MAX_ATTEMPTS,
   );
   const runnerName = provisioned.runnerName;
   if (isContainmentDrive(opts)) {
@@ -2759,10 +2795,15 @@ async function prepareSpawn(
   if (patSecretName && acquiringPat) {
     logEvent("info", "mint_option_c_pat_dispatch", { jobId, repo, patSecret: patSecretName });
   }
-  const params = { jobId, repoFullName: repo, installationId, acquiringPat };
-  const authorized = await authorizeRunner(env, params);
   const preparationId = crypto.randomUUID();
+  const params = { jobId, repoFullName: repo, installationId, acquiringPat, computeReservationId: preparationId };
+  const authorized = await authorizeRunner(env, params);
+  let computeOwned = false;
   const releasePreparation = async () => {
+    if (computeOwned) {
+      try { await containmentAuthority(env).abandonUnusedCompute(preparationId); }
+      catch { logEvent("error", "compute_cleanup_pending", { jobId }); }
+    }
     try { await concurrencySlots(env).releasePreparation(jobId, preparationId); }
     catch { logEvent("error", "preparation_slot_release_pending", { jobId, preparationId }); }
   };
@@ -2776,6 +2817,11 @@ async function prepareSpawn(
   }
   let mint: ContainerEnvResult | undefined;
   try {
+    if (authorized.computeGrant) {
+      computeOwned = true;
+      await containmentAuthority(env).prepareCompute({ token: authorized.computeGrant, reservationId: preparationId,
+        tenantId: authorized.tenant, workloadKind: "spawn_worker_runner", workloadId: jobId, vcpuCount: 4, maximumWallMs: 28_800_000 });
+    }
     mint = await buildContainerEnv(env, { ...params, credentialOperationId: preparationId }, env0);
     if (mint.patId && mint.tenant) {
       await containmentAuthority(env).registerCredential({ jobId, tenant: mint.tenant, patId: mint.patId });
@@ -2829,6 +2875,7 @@ async function prepareSpawn(
       throw e;
     }
   }
+  if (computeOwned) mint.computeReservationId = preparationId;
   return mint;
 }
 
@@ -2867,6 +2914,10 @@ async function driveSpawn(
       provider_signature: spawned.runnerName,
     };
   } catch (e) {
+    if (mint.computeReservationId) {
+      try { await containmentAuthority(env).abandonUnusedCompute(mint.computeReservationId); }
+      catch { logEvent("error", "compute_cleanup_pending", { jobId }); }
+    }
     // Release the concurrency slot on a spawn failure (the guard releases the claim).
     // Release by jobId ONLY (globally unique) — works for warm AND cold; best-effort
     // (a miss self-heals at the slot TTL). Fully guarded: never mask the spawn error.
@@ -4554,6 +4605,9 @@ export default {
   // webhook path missed; each is independently default-off and wrapped so a
   // failure in one never blocks or throws out of the other.
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    if (env.FABRIC_COMPUTE_URL && env.CONTAINMENT) {
+      ctx.waitUntil(containmentAuthority(env).drainUnusedCompute().catch(() => logEvent("error", "compute_cleanup_pending", {})));
+    }
     // Family-aware (mirrors the webhook gate): the reconcilers scan for the
     // `corelink` label family, not a fixed default, so an orphaned/unbilled
     // `runs-on: corelink` customer job is recovered too. `AUTOSCALER_LABEL`, if

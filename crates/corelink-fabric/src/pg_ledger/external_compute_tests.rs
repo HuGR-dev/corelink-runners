@@ -8,7 +8,6 @@ use crate::compute_budget::{
 };
 use crate::ledger::{AdmitOutcome, ComputeGate, LeaseRecord, LeaseState};
 use crate::tenant::TenantId;
-use corelink_runners_contracts::RunnerState;
 
 fn reservation(
     tenant: &str,
@@ -138,20 +137,22 @@ fn real_pg_native_and_external_reservations_share_the_budget_lock() -> anyhow::R
         .build()?;
     runtime.block_on(async {
         let first = PgLedger::connect(&url, 4, PgTlsMode::Disable).await?;
-        let second = first.clone();
+        let second = PgLedger::connect(&url, 4, PgTlsMode::Disable).await?;
         let tenant = uuid::Uuid::new_v4().to_string();
         let clock = first.pool.get().await?.query_one("SELECT EXTRACT(YEAR FROM (clock_timestamp() AT TIME ZONE 'UTC'))::int * 100 + EXTRACT(MONTH FROM (clock_timestamp() AT TIME ZONE 'UTC'))::int, (EXTRACT(EPOCH FROM (clock_timestamp() AT TIME ZONE 'UTC')) * 1000)::bigint", &[]).await?;
         let period: u32 = clock.get::<_, i32>(0) as u32;
         let expiry: u64 = clock.get::<_, i64>(1) as u64 + 60_000;
         first.initialize_external_compute_period(ExternalComputeBaseline { tenant_id: tenant.clone(), period_key: period, external_vcpu_ms: 0, evidence_digest: "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd".into() })?;
-        let external = reservation(&tenant, &uuid::Uuid::new_v4().to_string(), period, expiry);
+        let mut external = reservation(&tenant, &uuid::Uuid::new_v4().to_string(), period, expiry);
+        external.maximum_wall_ms = 600;
+        let barrier = std::sync::Barrier::new(2);
         let native = LeaseRecord { lease_id: format!("native-{}", uuid::Uuid::new_v4()), tenant: TenantId::new(&tenant)?, state: LeaseState::Pending, box_ref: "native-box".into(), created_at_ms: 0, updated_at_ms: 0, deadline_ms: None, billing_acquired_at_ms: None };
         let gate = ComputeGate { period_key: period, ceiling_vcpu_ms: 1_000, box_vcpu_count: 1, new_reserved_vcpu_ms: 600 };
         let (external_result, native_result) = std::thread::scope(|scope| {
-            let e = scope.spawn(|| second.reserve_external_compute(external));
-            let n = scope.spawn(|| first.try_admit_with_compute(native, 100, Some(gate)));
-            (e.join().unwrap()?, n.join().unwrap()?)
-        });
+            let e = scope.spawn(|| { barrier.wait(); second.reserve_external_compute(external) });
+            let n = scope.spawn(|| { barrier.wait(); first.try_admit_with_compute(native, 100, Some(gate)) });
+            Ok::<_, anyhow::Error>((e.join().unwrap()?, n.join().unwrap()?))
+        })?;
         let external_admitted = matches!(external_result, ExternalComputeAdmission::Admitted(_));
         let native_admitted = native_result == AdmitOutcome::Admitted;
         assert_eq!(external_admitted as u8 + native_admitted as u8, 1);

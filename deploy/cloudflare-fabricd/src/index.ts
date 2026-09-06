@@ -115,6 +115,7 @@ export interface Env {
   FABRIC_INTROSPECT_MAX_INFLIGHT?: string;
   // Enforcement / observability / safety (optional passthroughs; inert until set)
   FABRIC_ADMIN_KEY?: string;
+  FABRIC_COMPUTE_GRANT_PUBLIC_KEYS?: string;
   FABRIC_OBSERVABILITY_KEY?: string;
   // DEV/TEST-ONLY out-of-band cred-ticket mint (POST /v1/test/mint-cred-ticket).
   // OFF by default: absent ⇒ the route 404s (inert). Arms a SENSITIVE mint surface,
@@ -310,6 +311,7 @@ export class FabricdContainer extends Container<Env> {
       // + Stage-B autoscaler passthroughs so a future `wrangler secret put` /
       // var actually reaches the container (all inert until set).
       ...(env.FABRIC_ADMIN_KEY ? { FABRIC_ADMIN_KEY: env.FABRIC_ADMIN_KEY } : {}),
+      ...(env.FABRIC_COMPUTE_GRANT_PUBLIC_KEYS ? { FABRIC_COMPUTE_GRANT_PUBLIC_KEYS: env.FABRIC_COMPUTE_GRANT_PUBLIC_KEYS } : {}),
       ...(env.FABRIC_OBSERVABILITY_KEY ? { FABRIC_OBSERVABILITY_KEY: env.FABRIC_OBSERVABILITY_KEY } : {}),
       // DEV/TEST-ONLY out-of-band cred-ticket mint — forwarded so a dev/test
       // `wrangler secret put FABRIC_TEST_MINT_KEY` actually reaches the container

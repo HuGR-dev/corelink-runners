@@ -1,3 +1,5 @@
+import { ComputeBudgetClient } from "../lib/compute_budget_client";
+import { ComputeObligations, type ComputeBinding } from "../lib/compute_budget_obligation";
 import { Container } from "@cloudflare/containers";
 import {
   DevenvState,
@@ -121,18 +123,66 @@ export class RunnerDevEnvDO extends Container<any> {
     throw new Error("DEVENV_AUTHORIZED_RPC_REQUIRED");
   }
 
+  private computeObligations(): ComputeObligations {
+    return new ComputeObligations(this.ctx.storage, new ComputeBudgetClient(this.env.FABRIC_COMPUTE_URL ?? ""));
+  }
+
+  async prepareAuthorizedCompute(binding: ComputeBinding): Promise<void> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      if (binding.workloadKind !== "devenv" || binding.reservationId !== binding.workloadId || binding.vcpuCount !== 4 || binding.maximumWallMs !== 28_800_000) {
+        throw new Error("DEVENV_COMPUTE_BINDING_INVALID");
+      }
+      if (this.devenvState.status !== "stopped" && this.devenvState.status !== "errored") throw new Error("DEVENV_COMPUTE_SESSION_ACTIVE");
+      const previous = await this.ctx.storage.get<string>("compute:devenv-session");
+      if (previous && previous !== binding.reservationId) await this.computeObligations().abandonUnused(previous);
+      await this.ctx.storage.put("compute:devenv-session", binding.reservationId);
+      // Schedule recovery before RPCs; an uncertain reserve still has an owner.
+      await this.schedule(new Date(Date.now() + 90_000), "retryUnusedCompute", { reservationId: binding.reservationId });
+      await this.computeObligations().prepare(binding, Date.now());
+    });
+  }
+
+  async abandonAuthorizedCompute(reservationId: string): Promise<void> {
+    return this.ctx.blockConcurrencyWhile(() => this.computeObligations().abandonUnused(reservationId));
+  }
+
+  async retryUnusedCompute(payload: { reservationId: string }): Promise<void> {
+    let pending = true;
+    try {
+      pending = await this.ctx.blockConcurrencyWhile(async () => {
+        const result = await this.computeObligations().drainUnused(Date.now());
+        return result.pending;
+      });
+    } catch { /* retain the independent retry alarm */ }
+    if (pending) await this.schedule(new Date(Date.now() + 60_000), "retryUnusedCompute", payload);
+  }
+
   async startAuthorizedDevenv(payload: AuthorizedDevenvStart): Promise<AuthorizedDevenvAck> {
-    return this.ctx.blockConcurrencyWhile(() => launchAuthorizedDevenv({
-      env: this.env, credentials: this.credentials, execToken: this.execToken,
-      getState: () => this.devenvState, transition: (state) => this.transitionState(state),
-      settle: () => this.recordUsage(), completeStopped: () => this.completeStoppedSession(),
-      start: async (envVars) => {
-        this.envVars = envVars;
-        await this.start({ envVars, enableInternet: true }, { portToCheck: this.defaultPort, signal: AbortSignal.timeout(Math.max(1, Math.min(8000, payload.grant.expiresAtMs - Date.now()))) });
-      },
-      destroy: () => this.destroy(), schedule: (when, callback, value) => this.schedule(when, callback, value),
-      noteActivity: () => this.noteActivity(),
-    }, payload));
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const reservationId = payload?.grant?.computeReservationId;
+      if (reservationId && (reservationId !== payload.grant.sessionUuid ||
+          await this.ctx.storage.get<string>("compute:devenv-session") !== reservationId)) throw new Error("DEVENV_COMPUTE_BINDING_INVALID");
+      try {
+        return await launchAuthorizedDevenv({
+          env: this.env, credentials: this.credentials, execToken: this.execToken,
+          getState: () => this.devenvState, transition: (state) => this.transitionState(state),
+          settle: () => this.recordUsage(), completeStopped: () => this.completeStoppedSession(),
+          start: async (envVars) => {
+            if (reservationId) await this.computeObligations().claimProvider(reservationId, payload.grant.sessionUuid, Date.now());
+            this.envVars = envVars;
+            await this.start({ envVars, enableInternet: true }, { portToCheck: this.defaultPort, signal: AbortSignal.timeout(Math.max(1, Math.min(8000, payload.grant.expiresAtMs - Date.now()))) });
+          },
+          destroy: () => this.destroy(), schedule: (when, callback, value) => this.schedule(when, callback, value),
+          noteActivity: () => this.noteActivity(),
+        }, payload);
+      } catch (error) {
+        if (reservationId) {
+          try { await this.computeObligations().abandonUnused(reservationId); }
+          catch { /* The independently scheduled compute obligation remains. */ }
+        }
+        throw error;
+      }
+    });
   }
 
   private recoverTerminalCredentials(): Promise<void> {

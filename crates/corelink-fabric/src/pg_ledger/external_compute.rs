@@ -5,7 +5,6 @@ use crate::compute_budget::{
     ExternalComputeState, ExternalWorkloadKind,
 };
 use crate::compute_meter;
-use crate::ledger::LeaseLedger;
 
 fn invalid() -> anyhow::Error {
     anyhow::Error::new(ExternalComputeError::InvalidInput)
@@ -30,7 +29,7 @@ fn digest(value: &str) -> anyhow::Result<()> {
 }
 fn tenant(value: &str) -> anyhow::Result<()> {
     let id = uuid::Uuid::parse_str(value).map_err(|_| invalid())?;
-    if id.is_nil() {
+    if id.is_nil() || id.to_string() != value {
         return Err(invalid());
     }
     Ok(())
@@ -66,7 +65,7 @@ fn validate(r: &ExternalComputeReservation) -> anyhow::Result<i64> {
     workload(&r.workload_id)?;
     digest(&r.grant_digest)?;
     let id = uuid::Uuid::parse_str(&r.reservation_id).map_err(|_| invalid())?;
-    if id.is_nil() {
+    if id.is_nil() || id.to_string() != r.reservation_id {
         return Err(invalid());
     }
     if r.ceiling_vcpu_ms == 0
@@ -114,7 +113,7 @@ pub(super) fn initialize(ledger: &PgLedger, b: ExternalComputeBaseline) -> anyho
             if row.get::<_,i64>(0) == external && row.get::<_,String>(1) == b.evidence_digest { tx.commit().await?; return Ok(()); }
             tx.rollback().await.ok(); return Err(conflict());
         }
-        let native: i64 = tx.query_one("SELECT COALESCE(accrued_vcpu_ms,0) FROM compute_accrual WHERE tenant=$1 AND period_key=$2", &[&b.tenant_id, &(b.period_key as i32)]).await?.get(0);
+        let native: i64 = tx.query_one("SELECT COALESCE((SELECT accrued_vcpu_ms FROM compute_accrual WHERE tenant=$1 AND period_key=$2),0)", &[&b.tenant_id, &(b.period_key as i32)]).await?.get(0);
         let total = native.checked_add(external).ok_or_else(invalid)?;
         tx.execute("INSERT INTO external_compute_periods (tenant,period_key,external_vcpu_ms,evidence_digest) VALUES ($1,$2,$3,$4)", &[&b.tenant_id, &(b.period_key as i32), &external, &b.evidence_digest]).await?;
         tx.execute("INSERT INTO compute_accrual (tenant,period_key,accrued_vcpu_ms) VALUES ($1,$2,$3) ON CONFLICT (tenant,period_key) DO UPDATE SET accrued_vcpu_ms=$3", &[&b.tenant_id, &(b.period_key as i32), &total]).await?;

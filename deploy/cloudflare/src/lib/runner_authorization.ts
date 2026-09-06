@@ -4,6 +4,7 @@ export type RunnerAuthorization = {
   tenant: string;
   maxConcurrency: number;
   maxVcpuH?: number;
+  computeGrant?: string;
 };
 
 export class RunnerAuthorizationError extends Error {
@@ -23,9 +24,13 @@ function validResponse(value: unknown): RunnerAuthorization | null {
   const tenant = record.tenant;
   const maxConcurrency = record.max_concurrency;
   const maxVcpuH = record.max_vcpu_h;
+  const computeGrant = record.compute_grant;
   if (!required(tenant) || typeof maxConcurrency !== "number" || !Number.isSafeInteger(maxConcurrency) || maxConcurrency <= 0) return null;
-  if (maxVcpuH !== undefined && (typeof maxVcpuH !== "number" || !Number.isFinite(maxVcpuH) || maxVcpuH < 0)) return null;
+  if (maxVcpuH !== undefined && (typeof maxVcpuH !== "number" || !Number.isSafeInteger(maxVcpuH) || maxVcpuH <= 0 || maxVcpuH > 0xffffffff)) return null;
+  if (maxVcpuH !== undefined && (typeof computeGrant !== "string" || computeGrant.length < 1 || computeGrant.length > 8192)) return null;
+  if (maxVcpuH === undefined && computeGrant !== undefined) return null;
   return {
+    ...(typeof computeGrant === "string" ? { computeGrant } : {}),
     tenant,
     maxConcurrency,
     ...(maxVcpuH === undefined ? {} : { maxVcpuH }),
@@ -54,6 +59,7 @@ export async function authorizeRunner(env: MintEnv, params: MintParams): Promise
       headers,
       body: JSON.stringify({
         job_id: jobId,
+        ...(params.computeReservationId ? { compute_reservation_id: params.computeReservationId } : {}),
         repo_full_name: repo,
         ...(installationId ? { installation_id: installationId } : {}),
       }),

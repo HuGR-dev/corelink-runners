@@ -241,6 +241,7 @@ export interface MintParams {
   acquiringPat?: string;
   /** Issuer cleanup remains active until the durable Worker adoption ACK. */
   credentialOperationId?: string;
+  computeReservationId?: string;
 }
 export interface MintResult {
   token: string;
@@ -295,6 +296,8 @@ export async function revokeCasPatById(
 export type ColdReason = "mint_key_unarmed" | "no_repo" | "no_installation_or_pat";
 
 export interface ContainerEnvResult {
+  /** Durable shared compute reservation, held independently of PAT cleanup. */
+  computeReservationId?: string;
   authz: "ok" | "forbidden";
   containerEnv: Record<string, string>;
   /** Present on a 403 so edge-proxy failures are retryable and authz is auditable. */

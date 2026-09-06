@@ -12,13 +12,13 @@ function calls(fetcher: ReturnType<typeof vi.fn>) { return fetcher.mock.calls[0]
 describe("ComputeBudgetClient", () => {
   afterEach(() => vi.useRealTimers());
 
-  it("requires an HTTPS origin and rejects endpoint injection", () => {
+  it("requires an HTTPS origin and rejects endpoint injection", async () => {
     expect(() => new ComputeBudgetClient("http://fabric.example")).toThrow(ComputeBudgetClientError);
     expect(() => new ComputeBudgetClient("https://fabric.example/path")).toThrow(ComputeBudgetClientError);
     expect(() => new ComputeBudgetClient("https://user:pass@fabric.example")).toThrow(ComputeBudgetClientError);
     expect(() => new ComputeBudgetClient("https://fabric.example?x=1")).toThrow(ComputeBudgetClientError);
     const fetcher = vi.fn(async () => ok("prepared"));
-    void new ComputeBudgetClient("https://fabric.example", fetcher).reserve(TOKEN, ID);
+    await new ComputeBudgetClient("https://fabric.example", fetcher).reserve(TOKEN, ID);
     expect((fetcher.mock.calls[0]![1] as RequestInit).redirect).toBe("error");
   });
 
@@ -78,7 +78,7 @@ describe("ComputeBudgetClient", () => {
   });
 
   it("bounds an oversized streamed response", async () => {
-    const stream = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new Uint8Array(8192)); controller.enqueue(new Uint8Array(1)); } });
+    const stream = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new Uint8Array(8192)); controller.enqueue(new Uint8Array(1)); }, cancel() { return new Promise(() => {}); } });
     await expect(client(vi.fn(async () => new Response(stream, { status: 200 }))).reserve(TOKEN, ID)).rejects.toMatchObject({ code: "ambiguous" });
   });
 
