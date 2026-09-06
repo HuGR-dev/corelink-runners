@@ -32,6 +32,7 @@
 // stub), so the stash/redeem/wipe semantics are exercised for real, not faked.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { runnerCredentialLeaseId } from "../src/lib/runner_credential_lease";
 
 // ── Test double for @cloudflare/containers (mirrors webhook-route.test.ts), but
 // with a GATED startWithEnv (a per-test behavior hook) so we can (a) hold a
@@ -492,7 +493,7 @@ describe("SJ-2 cell 1 — warm env-0 injects a CLW_CRED_TICKET overlay, never th
     expect(typeof e.CLW_CRED_TICKET).toBe("string");
     expect(e.CLW_CRED_TICKET.length).toBe(64); // 256-bit hex ticket
     expect(e.CLW_ENDPOINT).toBe(CAS_ENDPOINT);
-    expect(e.CLW_LEASE_ID).toBe("2001"); // the redemption key == GH jobId
+    expect(e.CLW_LEASE_ID).toBe(runnerCredentialLeaseId("2001", "acme", "pat-1"));
     expect(e.CLW_FABRIC_ENDPOINT).toBe(PUBLIC_URL); // where clw redeems
     expect(e.CLW_REF_DOMAIN).toBe("runner");
     // CRUCIAL: no raw PAT anywhere.

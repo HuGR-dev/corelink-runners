@@ -9,7 +9,7 @@ import {
   type ContainerEnvResult,
   type ColdReason,
 } from "../lib";
-import { buildCLW_LEASE_ID } from "./runner_credential_lease";
+import { runnerCredentialLeaseId } from "./runner_credential_lease";
 
 export class MintForbiddenError extends Error {
   readonly source: "edge_proxy" | "authz";
@@ -129,7 +129,7 @@ export async function buildContainerEnv(
     return forbidden(undefined, e instanceof MintForbiddenError ? e : undefined, source);
   }
   const endpoint = env.CLW_ENDPOINT ?? "https://corelink-api.humangr.com";
-  const leaseId = buildCLW_LEASE_ID(params.jobId, m.tenant, m.patId);
+  const leaseId = runnerCredentialLeaseId(params.jobId, m.tenant, m.patId);
   // Production and all successful authorization require env-0. The raw PAT is
   // never placed in an untrusted container, including when legacy is set.
   try {

@@ -40,6 +40,7 @@ import {
   type StashRecord,
   RUNNER_BOX_VCPU,
 } from "../src/lib";
+import { runnerCredentialLeaseId } from "../src/lib/runner_credential_lease";
 
 describe("safeEqual (constant-time bearer compare)", () => {
   it("true for equal strings", () => expect(safeEqual("abc", "abc")).toBe(true));
@@ -281,13 +282,13 @@ describe("env-0 (cred-ticket): buildContainerEnv stashes the PAT, injects a tick
     // THE load-bearing assertion: the raw PAT is NOT in the container env.
     expect(r.containerEnv.CLW_TOKEN).toBeUndefined();
     expect(r.containerEnv.CLW_CRED_TICKET).toMatch(/^[0-9a-f]{64}$/);
-    expect(r.containerEnv.CLW_LEASE_ID).toBe(JOB);
+    expect(r.containerEnv.CLW_LEASE_ID).toBe(runnerCredentialLeaseId(JOB, "srv-derived-tenant", "pat-123"));
     expect(r.containerEnv.CLW_FABRIC_ENDPOINT).toBe("https://corelink-spawn-worker.example.dev");
     expect(r.containerEnv.CLW_TENANT).toBe("srv-derived-tenant");
     expect(r.containerEnv.CLW_REF_DOMAIN).toBe("runner");
     // The PAT was stashed server-side, keyed by leaseId, under the SAME ticket.
     expect(stashed).toHaveLength(1);
-    expect(stashed[0].leaseId).toBe(JOB);
+    expect(stashed[0].leaseId).toBe(runnerCredentialLeaseId(JOB, "srv-derived-tenant", "pat-123"));
     expect(stashed[0].ticket).toBe(r.containerEnv.CLW_CRED_TICKET);
     expect(stashed[0].cred).toEqual({
       token: "per-job-pat",
