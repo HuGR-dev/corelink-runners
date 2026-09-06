@@ -13,7 +13,7 @@ the agreed four sprint scopes. Six of twelve Sprint 1 WPs have complete code;
 no new sprint or WP is recorded as delivered. Historical source records are
 not independently recertified delivery.
 
-Full CI and heavy/runtime suites run only when the complete sprint is composed.
+Full CI and heavy test suites run only when the complete sprint is composed.
 This checkpoint has successful Rust metadata compilation and TypeScript checks,
 plus focused author tests recorded separately in the execution evidence. No
 sprint CI, deployment, live provider action or sibling mutation was performed.
@@ -43,3 +43,7 @@ Do not repeat these permission questions without checking for an answer. An
 elapsed timeout is not approval. Continue independent authorized implementation
 when possible, and retain the production containment interlocks until their
 version-bound recovery prerequisites are met.
+
+The A3.1/A3.2 engine/Worker teardown contract was pulled forward together for
+T3-W10 correctness: the Worker returns 503 on an unconfirmed destroy. T3-W1
+remains partial in Sprint 2; remaining wire/logging acceptance is not waived.

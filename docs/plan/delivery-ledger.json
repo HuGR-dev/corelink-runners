@@ -306,11 +306,12 @@
         "dd7ea7f80980d453c57bca9f6f8fa5afe6149fb5",
         "5b44b72c3bdbe4964f8d1fc63f0eef591494446d",
         "9fe16556b992175e0164ccfa69a743b392ef2322",
-        "dbe9b4340c0512cd80637e0388d42922fe55b62e"
+        "dbe9b4340c0512cd80637e0388d42922fe55b62e",
+        "a6d04957d1b48b0f9a74e9a5fef4f13e7886d0ba"
       ],
       "review": {
         "status": "approved",
-        "commit": "dbe9b4340c0512cd80637e0388d42922fe55b62e",
+        "commit": "a6d04957d1b48b0f9a74e9a5fef4f13e7886d0ba",
         "evidence": [
           "docs/plan/execution/2026-09-05-provider-recovery.json"
         ]
@@ -694,21 +695,25 @@
     {
       "id": "T3-W1",
       "sprint": 2,
-      "state": "backlog",
-      "implementation": "unknown",
+      "state": "prepared",
+      "implementation": "partial",
       "owner": "root",
       "dependencies": [
         "T3-W3"
       ],
-      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare/src/index.ts; crates/corelink-cloud-engine/src/cloudflare.rs.",
+      "next_action": "A3.1/A3.2 paired engine mode/status and Worker non-2xx teardown behavior pulled forward for T3-W10 safety. Complete remaining A3.7 wire/logging acceptance and joint Sprint2 verification; this is not whole-WP delivery.",
       "blockers": [],
-      "commits": [],
+      "commits": [
+        "a6d04957d1b48b0f9a74e9a5fef4f13e7886d0ba"
+      ],
       "review": {
         "status": "pending",
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [
+        "docs/plan/execution/2026-09-05-provider-recovery.json"
+      ]
     },
     {
       "id": "T3-W2",
@@ -1703,7 +1708,8 @@
         "dd7ea7f80980d453c57bca9f6f8fa5afe6149fb5",
         "5b44b72c3bdbe4964f8d1fc63f0eef591494446d",
         "9fe16556b992175e0164ccfa69a743b392ef2322",
-        "dbe9b4340c0512cd80637e0388d42922fe55b62e"
+        "dbe9b4340c0512cd80637e0388d42922fe55b62e",
+        "a6d04957d1b48b0f9a74e9a5fef4f13e7886d0ba"
       ],
       "evidence": [
         "docs/plan/execution/2026-09-05-held-cleanup.json",

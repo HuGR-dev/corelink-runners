@@ -1,7 +1,7 @@
 {
   "scope": "T3-W10 source acceptance: AU3.25 confirmed Pending cleanup retry/cap fence, AU7.7 frozen cas_cred errors, Held teardown safety and exact durable binding recovery.",
-  "source_commit": "dbe9b4340c0512cd80637e0388d42922fe55b62e",
-  "review": "Root reviewed integration and corrective helper source; independent scope assessment confirms AU3.25 does not promise discovery of never-persisted provider identities. New Held cannot transition before durable bind. Invalid/domain-changed references and unknown legacy local state remain fail-closed.",
+  "source_commit": "a6d04957d1b48b0f9a74e9a5fef4f13e7886d0ba",
+  "review": "Root reviewed integration and corrective helper source; independent scope assessment confirms AU3.25 does not promise discovery of never-persisted provider identities. New Held cannot transition before durable bind. Invalid/domain-changed references and unknown legacy local state remain fail-closed. Final coupled review pulled forward canonical A3.2: the Worker must return non-2xx when provider teardown throws; otherwise the Rust confirmation would be false.",
   "checks": [
     {
       "command": "cargo check -p corelink-fabric-server --tests --locked",
@@ -9,6 +9,19 @@
       "elapsed_seconds": 206,
       "observer": "root",
       "kind": "Metadata only; no Rust runtime tests, linking, database or CI."
+    },
+    {
+      "command": "vitest run test/check-host.test.ts -t teardown",
+      "exit": 0,
+      "observer": "root",
+      "tests": 13,
+      "skipped": 23,
+      "kind": "Focused Worker route checks; runner/check errors return 503, retry-confirmed deletion returns 204."
+    },
+    {
+      "command": "tsc --noEmit",
+      "exit": 0,
+      "observer": "root after final Worker return-path correction"
     }
   ],
   "authored_oracles": [
