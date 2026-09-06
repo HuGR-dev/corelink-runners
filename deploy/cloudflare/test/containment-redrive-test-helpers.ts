@@ -1,6 +1,6 @@
 import { expect, vi } from "vitest";
 
-import { ContainmentDO, REDRIVE_RESERVATION_TTL_MS, type ContainmentEvent, type ContainmentRedriveReservation } from "../src/index";
+import { ConcurrencySlotsDO, ContainmentDO, REDRIVE_RESERVATION_TTL_MS, type ContainmentEvent, type ContainmentRedriveReservation } from "../src/index";
 
 export const T0 = 1_750_000_000_000;
 
@@ -32,7 +32,13 @@ export class FakeStorage {
 }
 
 export function ns<T>(instance: T, name = "global") { return { idFromName: vi.fn(() => name), get: vi.fn(() => instance) }; }
-export function makeDO(runtimeEnv: Record<string, unknown> = {}) { const storage = new FakeStorage(); const instance = new ContainmentDO({ storage } as never, runtimeEnv as never); return { storage, instance, binding: ns(instance), runtimeEnv }; }
+export function makeDO(runtimeEnv: Record<string, unknown> = {}) {
+  const storage = new FakeStorage();
+  const instance = new ContainmentDO({ storage } as never, runtimeEnv as never);
+  const slotsStorage = new FakeStorage();
+  const slots = new ConcurrencySlotsDO({ storage: slotsStorage } as never, {} as never);
+  return { storage, instance, binding: ns(instance), slotsStorage, slots, slotsBinding: ns(slots), runtimeEnv };
+}
 export async function bootstrap(d: ReturnType<typeof makeDO>, job = "1", repo = "acme/repo") {
   const result = await d.instance.bootstrapContainedEventIndex(repo, job);
   expect(result).toMatchObject({ status: "bootstrapped" });
@@ -52,7 +58,7 @@ export function env(d: ReturnType<typeof makeDO>, store = kv(), extra: Record<st
   return {
     GITHUB_WEBHOOK_SECRET: "secret", GITHUB_MINT_TOKEN: "mint", RUNNER_JOB_PATS: store, CONTAINMENT: d.binding,
     REPO_INSTALLATION_MAP: JSON.stringify({ "acme/repo": "42" }), RUNNER_CONTAINER: {}, CHECK_HOST_CONTAINER: {},
-    CONCURRENCY_SLOTS: ns({ acquire: vi.fn(async () => ({ admitted: true })), release: vi.fn(async () => {}) }),
+    CONCURRENCY_SLOTS: d.slotsBinding,
     CRED_STASH: ns({ stash: vi.fn(async () => "ticket"), wipe: vi.fn(async () => {}) }), ...extra,
   } as never;
 }
