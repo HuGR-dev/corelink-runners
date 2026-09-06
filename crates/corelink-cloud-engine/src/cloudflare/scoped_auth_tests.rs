@@ -117,6 +117,7 @@ fn engine_worker_control_requests_match_conformance_fixture() {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let engine = CloudflareEngine::new(PairTransport { requests: requests.clone() }, config("fixture-spawn-secret", "fixture-exec-secret", "fixture-lifecycle-secret"));
     let mut spec = runner_spec();
+    spec.no_network = true;
     spec.allow_egress = false;
     spec.env.push(("TOOLCHAIN_DIGEST".to_string(), "sha256:fixture".to_string()));
     let container = engine.spawn(&spec).expect("real spawn method");
