@@ -150,8 +150,19 @@ export class RunnerDevEnvDO extends Container<any> {
     let pending = true;
     try {
       pending = await this.ctx.blockConcurrencyWhile(async () => {
-        const result = await this.computeObligations().drainUnused(Date.now());
-        return result.pending;
+        const cursor = await this.ctx.storage.get<string>("compute:drain-cursor");
+        const result = await this.computeObligations().drainUnused(Date.now(), cursor);
+        const retryRequired = result.retryRequired ||
+          await this.ctx.storage.get<boolean>("compute:drain-retry") === true;
+        if (result.cursor) {
+          // Keep failures from earlier pages until this complete pass finishes.
+          await this.ctx.storage.put("compute:drain-retry", retryRequired);
+          await this.ctx.storage.put("compute:drain-cursor", result.cursor);
+        } else {
+          await this.ctx.storage.delete("compute:drain-cursor");
+          await this.ctx.storage.delete("compute:drain-retry");
+        }
+        return !!result.cursor || retryRequired;
       });
     } catch { /* retain the independent retry alarm */ }
     if (pending) await this.schedule(new Date(Date.now() + 60_000), "retryUnusedCompute", payload);

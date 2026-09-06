@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("@cloudflare/containers", () => ({ Container: class {}, getContainer: vi.fn() }));
 import { ContainmentDO } from "../src/index";
 
@@ -30,7 +30,7 @@ function gate() {
 }
 
 function token(now = Date.now(), id = reservationId, workloadId = "job-1") {
-  const payload = { v: 1, key_id: "key", tenant_id: tenantId, workload_kind: "spawn_worker_runner", workload_id: workloadId, reservation_id: id, period_key: 202609, ceiling_vcpu_ms: "1000000", vcpu_count: 4, maximum_wall_ms: 28_800_000, issued_at_ms: now - 1_000, expires_at_ms: now + 60_000 };
+  const payload = { v: 1, key_id: "key", tenant_id: tenantId, workload_kind: "spawn_worker_runner", workload_id: workloadId, reservation_id: id, period_key: 202609, ceiling_vcpu_ms: "864000000", vcpu_count: 4, maximum_wall_ms: 28_800_000, issued_at_ms: now - 1_000, expires_at_ms: now + 60_000 };
   const encoded = btoa(JSON.stringify(payload)).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
   return `${encoded}.signature`;
 }
@@ -48,7 +48,8 @@ function fixture(fetcher: typeof fetch) {
 
 function receipt(state: string, id = reservationId) { return new Response(JSON.stringify({ reservation_id: id, state }), { status: 200 }); }
 
-afterEach(() => vi.unstubAllGlobals());
+beforeEach(() => vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-09-06T12:00:00Z")));
+afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe("compute budget admission integration", () => {
   it("prepares through reserve/activate and fences a provider claim", async () => {
@@ -65,7 +66,7 @@ describe("compute budget admission integration", () => {
     ["over compute", 429, undefined],
     ["missing baseline", 503, undefined],
     ["bad receipt", 200, "not-a-valid-state"],
-  ])("refuses claim after %s and produces no provider effect", async (_name, status, state) => {
+  ])("refuses claim after %s", async (_name, status, state) => {
     const fetcher = vi.fn(async () => state ? receipt(state) : new Response("busy", { status }));
     const { containment, storage } = fixture(fetcher);
     await expect(containment.prepareCompute(binding())).rejects.toThrow();
@@ -79,10 +80,34 @@ describe("compute budget admission integration", () => {
     const first = fixture(fetcher);
     const b = binding();
     await first.containment.prepareCompute(b);
+    await first.containment.claimComputeProvider(reservationId, "job-1");
     const restarted = new ContainmentDO({ storage: first.storage, blockConcurrencyWhile: gate() } as never, { FABRIC_COMPUTE_URL: "https://fabric.example" } as never);
-    await restarted.prepareCompute(b);
+    await expect(restarted.prepareCompute(b)).rejects.toThrow();
     expect(fetcher).toHaveBeenCalledTimes(2);
-    await restarted.claimComputeProvider(reservationId, "job-1");
+    await expect(restarted.claimComputeProvider(reservationId, "job-1")).rejects.toThrow("claim refused");
+  });
+
+  it("recovers an activation committed remotely whose HTTP reply was lost", async () => {
+    let remotelyActive = false;
+    const fetcher = vi.fn(async (url: string, init: RequestInit) => {
+      if (url.endsWith("/activate")) { remotelyActive = true; throw new Error("lost reply"); }
+      if (url.endsWith("/cancel")) {
+        expect(remotelyActive).toBe(true);
+        return new Response("conflict", { status: 409 });
+      }
+      if (url.endsWith("/settle")) {
+        expect(JSON.parse(String(init.body)).actual_vcpu_ms).toBe("0");
+        return receipt("settled");
+      }
+      return receipt("prepared");
+    });
+    const first = fixture(fetcher);
+    await expect(first.containment.prepareCompute(binding())).rejects.toThrow("ambiguous");
+    const restarted = new ContainmentDO({ storage: first.storage, blockConcurrencyWhile: gate() } as never,
+      { FABRIC_COMPUTE_URL: "https://fabric.example" } as never);
+    await restarted.abandonUnusedCompute(reservationId);
+    await expect(restarted.claimComputeProvider(reservationId, "job-1")).rejects.toThrow("claim refused");
+    expect(await first.storage.get(`compute:obligation:${reservationId}`)).toMatchObject({ phase: "terminal", actualVcpuMs: "0" });
   });
 
   it("keeps a lost activation acknowledgement recoverable and settles zero use on cancel conflict", async () => {

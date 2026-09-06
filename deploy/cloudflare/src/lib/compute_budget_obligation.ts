@@ -142,7 +142,7 @@ export class ComputeObligations {
     await this.storage.put(this.key(reservationId), { ...next, phase: "terminal" as const, terminalKind: "settled" });
   }
 
-  async drainUnused(nowMs: number, cursor?: string): Promise<{ cursor?: string; pending: boolean }> {
+  async drainUnused(nowMs: number, cursor?: string): Promise<{ cursor?: string; pending: boolean; retryRequired: boolean }> {
     if (!Number.isSafeInteger(nowMs) || nowMs < 0) throw new Error("invalid cleanup clock");
     const page = await this.storage.list<unknown>({ prefix: "compute:obligation:", limit: 25, ...(cursor ? { startAfter: cursor } : {}) });
     let processed = 0;
@@ -164,7 +164,7 @@ export class ComputeObligations {
       try { await this.abandonUnused(row.binding.reservationId); } catch { pending = true; }
     }
     const continuation = (remaining || page.size === 25) && last ? last : undefined;
-    return { ...(continuation ? { cursor: continuation } : {}), pending: pending || !!continuation };
+    return { ...(continuation ? { cursor: continuation } : {}), pending: pending || !!continuation, retryRequired: pending };
   }
 }
 

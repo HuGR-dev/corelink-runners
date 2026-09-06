@@ -55,7 +55,7 @@ describe("compute obligation recovery integration", () => {
     const storage = new Storage();
     const attempted: string[] = [];
     let cursor: string | undefined;
-    const failures = new Set(["11111111-1111-4111-8111-111111111101", "11111111-1111-4111-8111-111111111102"]);
+    const failures = new Set(["11111111-1111-4111-8111-000000000001", "11111111-1111-4111-8111-000000000002"]);
     const transport: ComputeTransport = {
       reserve: async (_t, id) => ({ reservation_id: id, state: "prepared" }), activate: async (_t, id) => ({ reservation_id: id, state: "active" }),
       settle: async (_t, id) => ({ reservation_id: id, state: "settled" }),
@@ -69,12 +69,16 @@ describe("compute obligation recovery integration", () => {
     const obligations = new ComputeObligations(storage, transport);
     let pending = true;
     for (let page = 0; page < 20 && pending; page++) {
+      const before = attempted.length;
       const result = await obligations.drainUnused(2_000_000, cursor);
+      expect(attempted.length - before).toBeLessThanOrEqual(2);
       cursor = result.cursor;
       pending = result.pending;
     }
     expect(attempted).toContain("11111111-1111-4111-8111-000000000003");
     expect(attempted).toContain("11111111-1111-4111-8111-000000000028");
     expect(attempted).toContain("11111111-1111-4111-8111-000000000001");
+    expect(await storage.get("compute:obligation:11111111-1111-4111-8111-000000000001")).toMatchObject({ phase: "abandoning" });
+    expect(await storage.get("compute:obligation:11111111-1111-4111-8111-000000000028")).toMatchObject({ phase: "terminal", terminalKind: "cancelled" });
   });
 });
