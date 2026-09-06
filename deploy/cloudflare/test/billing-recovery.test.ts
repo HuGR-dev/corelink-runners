@@ -80,14 +80,20 @@ describe("durable billing recovery", () => {
   it("replays the same idempotent event safely", async () => {
     const kv = kvWithPages({ "usage:42": record("42") });
     const bodies: string[] = [];
+    let attempts = 0;
     vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => {
+      attempts += 1;
       bodies.push(String(init?.body));
-      return new Response(null, { status: 202 });
+      return new Response(null, { status: attempts === 1 ? 503 : 202 });
     }));
     const env = { RUNNER_JOB_PATS: kv, BILLING_INGEST_URL: "https://billing.test/usage", BILLING_INGEST_AUTH_KEY: "secret" };
     await flushBillingUsageBacklog(env);
     await flushBillingUsageBacklog(env);
-    expect(JSON.parse(bodies[0])[0].idem_key).toBe(JSON.parse(bodies[1])[0].idem_key);
+    await flushBillingUsageBacklog(env);
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]).toBe(bodies[1]);
+    expect(JSON.parse(bodies[0])[0].idem_key).toMatch(/^[0-9a-f]{64}$/);
     expect(JSON.parse(bodies[0])[0].event_kind).toBe("runner_slot_seconds");
+    expect(attempts).toBe(2);
   });
 });
