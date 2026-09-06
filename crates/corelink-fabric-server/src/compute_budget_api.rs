@@ -4,7 +4,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::extract::{Bytes, DefaultBodyLimit, State};
+use axum::body::Bytes;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
@@ -32,7 +33,7 @@ const AUTH_HEADER: &str = "ComputeGrant ";
 const ADMIN_HEADER: &str = "x-corelink-internal-auth";
 
 struct ApiState {
-    ledger: Arc<dyn LeaseLedger>,
+    ledger: Arc<dyn LeaseLedger + Send + Sync>,
     verifier: Arc<GrantVerifier>,
     admin_key: Option<String>,
     blocking: Arc<Semaphore>,
@@ -61,7 +62,7 @@ struct BaselineBody {
 /// Build the standalone compute API router. The parent application may merge
 /// this router; it owns all application-level state and route wiring.
 pub fn router(
-    ledger: Arc<dyn LeaseLedger>,
+    ledger: Arc<dyn LeaseLedger + Send + Sync>,
     public_keys: HashMap<String, Vec<u8>>,
     admin_key: Option<String>,
 ) -> Router {
