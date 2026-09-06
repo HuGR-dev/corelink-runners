@@ -167,6 +167,61 @@ fn real_pg_native_and_external_reservations_share_the_budget_lock() -> anyhow::R
 }
 
 #[test]
+fn real_pg_cancel_fence_blocks_late_reserve_and_races() -> anyhow::Result<()> {
+    let Some(url) = env::var("TEST_DATABASE_URL").ok() else {
+        eprintln!("external compute cancel fence: TEST_DATABASE_URL unset — skipping");
+        return Ok(());
+    };
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let first = PgLedger::connect(&url, 4, PgTlsMode::Disable).await?;
+        let second = PgLedger::connect(&url, 4, PgTlsMode::Disable).await?;
+        let clock = first.pool.get().await?.query_one("SELECT EXTRACT(YEAR FROM (clock_timestamp() AT TIME ZONE 'UTC'))::int * 100 + EXTRACT(MONTH FROM (clock_timestamp() AT TIME ZONE 'UTC'))::int, (EXTRACT(EPOCH FROM (clock_timestamp() AT TIME ZONE 'UTC')) * 1000)::bigint", &[]).await?;
+        let period = clock.get::<_, i32>(0) as u32;
+        let expiry = clock.get::<_, i64>(1) as u64 + 60_000;
+        let tenant = uuid::Uuid::new_v4().to_string();
+        let fence = reservation(&tenant, &uuid::Uuid::new_v4().to_string(), period, expiry);
+        assert_eq!(first.cancel_external_compute(&fence)?.state, ExternalComputeState::Cancelled);
+        assert_eq!(first.cancel_external_compute(&fence)?.state, ExternalComputeState::Cancelled);
+        assert!(first.reserve_external_compute(fence.clone()).is_err());
+        assert!(first.activate_external_compute(&fence).is_err());
+        assert!(first.settle_external_compute(&fence, ExternalComputeSettlement { actual_vcpu_ms: 1, terminal_evidence_digest: "a".repeat(64) }).is_err());
+        let mut divergent = fence.clone(); divergent.grant_digest = "b".repeat(64);
+        assert!(first.cancel_external_compute(&divergent).is_err());
+
+        first.initialize_external_compute_period(ExternalComputeBaseline { tenant_id: tenant.clone(), period_key: period, external_vcpu_ms: 0, evidence_digest: "c".repeat(64) })?;
+        let next = reservation(&tenant, &uuid::Uuid::new_v4().to_string(), period, expiry);
+        assert!(matches!(first.reserve_external_compute(next)?, ExternalComputeAdmission::Admitted(_)));
+
+        let race_id = uuid::Uuid::new_v4().to_string();
+        let race = reservation(&tenant, &race_id, period, expiry);
+        let barrier = std::sync::Barrier::new(2);
+        let race_reserve = race.clone();
+        let race_cancel = race.clone();
+        let (reserve_result, cancel_result) = std::thread::scope(|scope| {
+            let reserve_thread = scope.spawn(|| { barrier.wait(); first.reserve_external_compute(race_reserve) });
+            let cancel_thread = scope.spawn(|| { barrier.wait(); second.cancel_external_compute(&race_cancel) });
+            (reserve_thread.join().unwrap(), cancel_thread.join().unwrap())
+        });
+        match reserve_result {
+            Ok(ExternalComputeAdmission::Admitted(_)) => {
+                assert_eq!(cancel_result?.state, ExternalComputeState::Cancelled);
+                assert!(first.activate_external_compute(&race).is_err());
+            }
+            Err(error) => {
+                assert!(error.downcast_ref::<crate::compute_budget::ExternalComputeError>() == Some(&crate::compute_budget::ExternalComputeError::Conflict));
+                assert_eq!(cancel_result?.state, ExternalComputeState::Cancelled);
+            }
+            Ok(other) => panic!("unexpected reserve outcome: {other:?}"),
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+}
+
+#[test]
 fn real_pg_same_reservation_uuid_is_cross_tenant_collision_safe() -> anyhow::Result<()> {
     let Some(url) = env::var("TEST_DATABASE_URL").ok() else {
         eprintln!("external compute collision test: TEST_DATABASE_URL unset — skipping");
