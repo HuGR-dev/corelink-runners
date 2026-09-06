@@ -1,5 +1,5 @@
 // Unit tests for the spawn-Worker's security-critical pure logic: constant-time
-// auth compare, GitHub HMAC verification, and the FAIL-OPEN warm-mint env build.
+// auth compare, GitHub HMAC verification, and the required warm-mint env build.
 // Plain vitest (node) — these functions don't need the Workers runtime
 // (crypto.subtle + crypto.randomUUID are on Node 20+).
 import { describe, it, expect, vi, afterEach } from "vitest";
@@ -38,7 +38,6 @@ import {
   type CredStashLike,
   type StashedCred,
   type StashRecord,
-  RUNNER_BOX_VCPU,
 } from "../src/lib";
 import { runnerCredentialLeaseId } from "../src/lib/runner_credential_lease";
 
@@ -88,7 +87,7 @@ describe("verifyGithubHmac", () => {
   });
 });
 
-describe("buildContainerEnv (AUTHORIZE + warm-mint; 403 HARD DENY, 5xx FAIL-OPEN)", () => {
+describe("buildContainerEnv (required mint authorization + env-0 credential ticket)", () => {
   afterEach(() => vi.unstubAllGlobals());
 
   const JOB = "987654321"; // GH workflow_job.id
@@ -112,34 +111,39 @@ describe("buildContainerEnv (AUTHORIZE + warm-mint; 403 HARD DENY, 5xx FAIL-OPEN
     );
   }
 
-  it("COLD (authz ok, empty overlay) when no mint key configured", async () => {
+  it("missing mint key is forbidden with an empty overlay", async () => {
     const env = { CLW_TENANT: "t" } as never; // key absent
     const r = await buildContainerEnv(env, PARAMS);
-    expect(r.authz).toBe("ok");
-    expect(r.containerEnv).toEqual({}); // overlay is CLW_* only — NO jit here
+    expect(r.authz).toBe("forbidden");
+    expect(r.containerEnv).toEqual({});
+    expect(r.coldReason).toBe("mint_key_unarmed");
     expect(r.patId).toBeUndefined();
     expect(r.tenant).toBeUndefined();
   });
 
-  it("COLD when mint configured but installation is missing (can't authorize)", async () => {
+  it("missing installation identity is forbidden with an empty overlay", async () => {
     const env = { CORELINK_RUNNER_MINT_AUTH_KEY: "k" } as never;
     const r = await buildContainerEnv(env, { jobId: JOB, repoFullName: REPO, installationId: "" });
-    expect(r.authz).toBe("ok");
+    expect(r.authz).toBe("forbidden");
     expect(r.containerEnv).toEqual({});
+    expect(r.coldReason).toBe("no_installation_or_pat");
   });
 
-  it("WARM: injects the SERVER-DERIVED tenant into CLW_TENANT (not env's) + captures max_concurrency", async () => {
+  it("WARM env-0: injects the SERVER-DERIVED tenant and captures max_concurrency", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => ok200()));
     const env = {
       CORELINK_RUNNER_MINT_AUTH_KEY: "k",
       CLW_TENANT: "wrangler-tenant-IGNORED", // must NOT be injected
       CLW_ENDPOINT: "https://corelink-api.humangr.com",
       CORELINK_MINT_URL: "https://corelink-api.humangr.com",
-      ALLOW_LEGACY_PAT_ENV: "1", // legacy warm overlay (env-0 not wired in this test)
     } as never;
-    const r = await buildContainerEnv(env, PARAMS);
+    const r = await buildContainerEnv(env, PARAMS, {
+      stash: { stash: async (_leaseId, ticket) => ticket },
+      fabricEndpoint: "https://corelink-spawn-worker.example.dev",
+    });
     expect(r.authz).toBe("ok");
-    expect(r.containerEnv.CLW_TOKEN).toBe("per-job-pat");
+    expect(r.containerEnv.CLW_TOKEN).toBeUndefined();
+    expect(r.containerEnv.CLW_CRED_TICKET).toMatch(/^[0-9a-f]{64}$/);
     expect(r.containerEnv.CLW_TENANT).toBe("srv-derived-tenant"); // DERIVED, not wrangler's
     expect(r.containerEnv.CLW_ENDPOINT).toBe("https://corelink-api.humangr.com");
     expect(r.containerEnv.CLW_REF_DOMAIN).toBe("runner");
@@ -149,7 +153,7 @@ describe("buildContainerEnv (AUTHORIZE + warm-mint; 403 HARD DENY, 5xx FAIL-OPEN
     expect(r.maxConcurrency).toBe(5);
   });
 
-  it("F2-5: legacy ALLOW_LEGACY_PAT_ENV=1 is REFUSED when the prod marker SPAWN_WORKER_PUBLIC_URL is set ⇒ COLD (no raw PAT)", async () => {
+  it("missing env-0 dependencies is forbidden even when the legacy flag and prod marker are set", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => ok200()));
     const env = {
       CORELINK_RUNNER_MINT_AUTH_KEY: "k",
@@ -158,10 +162,10 @@ describe("buildContainerEnv (AUTHORIZE + warm-mint; 403 HARD DENY, 5xx FAIL-OPEN
       ALLOW_LEGACY_PAT_ENV: "1", // mis-set...
       SPAWN_WORKER_PUBLIC_URL: "https://corelink-spawn-worker.gmhelmold.workers.dev", // ...but PROD marker present
     } as never;
-    // No env-0 deps passed (the residual "deps missing" hole) — the guard must STILL refuse.
+    // Required env-0 dependencies are absent, so mint authorization is refused.
     const r = await buildContainerEnv(env, PARAMS);
-    expect(r.authz).toBe("ok");
-    expect(r.containerEnv).toEqual({}); // COLD — NO CLW_TOKEN ever reaches the untrusted container
+    expect(r.authz).toBe("forbidden");
+    expect(r.containerEnv).toEqual({});
     expect(r.containerEnv.CLW_TOKEN).toBeUndefined();
   });
 
@@ -169,7 +173,10 @@ describe("buildContainerEnv (AUTHORIZE + warm-mint; 403 HARD DENY, 5xx FAIL-OPEN
     const fetchMock = vi.fn(async () => ok200());
     vi.stubGlobal("fetch", fetchMock);
     const env = { CORELINK_RUNNER_MINT_AUTH_KEY: "k" } as never;
-    await buildContainerEnv(env, PARAMS);
+    await buildContainerEnv(env, PARAMS, {
+      stash: { stash: async (_leaseId, ticket) => ticket },
+      fabricEndpoint: "https://corelink-spawn-worker.example.dev",
+    });
     const [url, init] = fetchMock.mock.calls[0];
     expect(String(url)).toContain("/internal/v1/runner/mint");
     const body = JSON.parse((init as RequestInit).body as string);
@@ -191,54 +198,71 @@ describe("buildContainerEnv (AUTHORIZE + warm-mint; 403 HARD DENY, 5xx FAIL-OPEN
       ),
     );
     const env = { CORELINK_RUNNER_MINT_AUTH_KEY: "k" } as never;
-    const r = await buildContainerEnv(env, PARAMS);
+    const r = await buildContainerEnv(env, PARAMS, {
+      stash: { stash: async (_leaseId, ticket) => ticket },
+      fabricEndpoint: "https://corelink-spawn-worker.example.dev",
+    });
     expect(r.authz).toBe("forbidden"); // caller MUST abort — no JIT, no spawn
     expect(r.containerEnv).toEqual({});
     expect(r.patId).toBeUndefined();
     expect(r.tenant).toBeUndefined();
   });
 
-  it("500 (D1 'runner mint unavailable') ⇒ FAIL-OPEN to cold (authz ok, empty overlay)", async () => {
+  it("500 (D1 'runner mint unavailable') ⇒ forbidden with an empty overlay", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 500 })));
     const env = { CORELINK_RUNNER_MINT_AUTH_KEY: "k" } as never;
-    const r = await buildContainerEnv(env, PARAMS);
-    expect(r.authz).toBe("ok"); // still spawns (cold), unlike a 403
+    const r = await buildContainerEnv(env, PARAMS, {
+      stash: { stash: async (_leaseId, ticket) => ticket },
+      fabricEndpoint: "https://corelink-spawn-worker.example.dev",
+    });
+    expect(r.authz).toBe("forbidden");
     expect(r.containerEnv).toEqual({});
     expect(r.patId).toBeUndefined();
   });
 
-  it("network error ⇒ FAIL-OPEN to cold (authz ok)", async () => {
+  it("network error ⇒ forbidden with an empty overlay", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("ECONNRESET"); }));
     const env = { CORELINK_RUNNER_MINT_AUTH_KEY: "k" } as never;
-    const r = await buildContainerEnv(env, PARAMS);
-    expect(r.authz).toBe("ok");
+    const r = await buildContainerEnv(env, PARAMS, {
+      stash: { stash: async (_leaseId, ticket) => ticket },
+      fabricEndpoint: "https://corelink-spawn-worker.example.dev",
+    });
+    expect(r.authz).toBe("forbidden");
     expect(r.containerEnv).toEqual({});
   });
 
-  it("FAIL-OPEN to cold when the mint 200 lacks token_plaintext", async () => {
+  it("malformed mint 200 lacking token_plaintext is forbidden", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => ok200({ token_plaintext: undefined })));
     const env = { CORELINK_RUNNER_MINT_AUTH_KEY: "k" } as never;
-    const r = await buildContainerEnv(env, PARAMS);
-    expect(r.authz).toBe("ok");
+    const r = await buildContainerEnv(env, PARAMS, {
+      stash: { stash: async (_leaseId, ticket) => ticket },
+      fabricEndpoint: "https://corelink-spawn-worker.example.dev",
+    });
+    expect(r.authz).toBe("forbidden");
     expect(r.containerEnv).toEqual({});
   });
 
-  it("FAIL-OPEN to cold when the mint 200 lacks tenant (contract violation)", async () => {
+  it("malformed mint 200 lacking tenant is forbidden", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => ok200({ tenant: undefined })));
     const env = { CORELINK_RUNNER_MINT_AUTH_KEY: "k" } as never;
-    const r = await buildContainerEnv(env, PARAMS);
-    expect(r.authz).toBe("ok"); // malformed 200 is fail-open cold, not a hard deny
+    const r = await buildContainerEnv(env, PARAMS, {
+      stash: { stash: async (_leaseId, ticket) => ticket },
+      fabricEndpoint: "https://corelink-spawn-worker.example.dev",
+    });
+    expect(r.authz).toBe("forbidden");
     expect(r.containerEnv).toEqual({});
     expect(r.tenant).toBeUndefined();
   });
 
-  it("WARM without max_concurrency (absent ceiling ⇒ undefined, no gate)", async () => {
+  it("malformed mint 200 without max_concurrency is forbidden", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => ok200({ max_concurrency: undefined })));
-    const env = { CORELINK_RUNNER_MINT_AUTH_KEY: "k", ALLOW_LEGACY_PAT_ENV: "1" } as never;
-    const r = await buildContainerEnv(env, PARAMS);
-    expect(r.authz).toBe("ok");
-    expect(r.tenant).toBe("srv-derived-tenant");
-    expect(r.maxConcurrency).toBeUndefined();
+    const env = { CORELINK_RUNNER_MINT_AUTH_KEY: "k" } as never;
+    const r = await buildContainerEnv(env, PARAMS, {
+      stash: { stash: async (_leaseId, ticket) => ticket },
+      fabricEndpoint: "https://corelink-spawn-worker.example.dev",
+    });
+    expect(r.authz).toBe("forbidden");
+    expect(r.containerEnv).toEqual({});
   });
 });
 
@@ -307,26 +331,28 @@ describe("env-0 (cred-ticket): buildContainerEnv stashes the PAT, injects a tick
       },
     };
     const r = await buildContainerEnv(ENV, PARAMS, { stash, fabricEndpoint: "https://x.dev" });
-    expect(r.authz).toBe("ok");
+    expect(r.authz).toBe("forbidden");
     expect(r.containerEnv).toEqual({}); // COLD — no ticket AND no token
     expect(r.containerEnv.CLW_TOKEN).toBeUndefined();
   });
 
-  it("FAIL-CLOSED default: env-0 deps absent AND no ALLOW_LEGACY_PAT_ENV ⇒ spawn COLD, NEVER CLW_TOKEN", async () => {
-    // Coordinator env-0 review must-fix #1: a missing SPAWN_WORKER_PUBLIC_URL must
-    // NOT silently drop the raw PAT into the untrusted env. Default is COLD.
+  it("missing env-0 deps are forbidden, NEVER CLW_TOKEN", async () => {
+    // A missing SPAWN_WORKER_PUBLIC_URL must never drop the raw PAT into the
+    // untrusted env; the required mint contract refuses the spawn.
     vi.stubGlobal("fetch", vi.fn(async () => ok200()));
     const r = await buildContainerEnv(ENV, PARAMS); // no deps, no flag
-    expect(r.authz).toBe("ok");
+    expect(r.authz).toBe("forbidden");
     expect(r.containerEnv).toEqual({}); // COLD — no token, no ticket
     expect(r.containerEnv.CLW_TOKEN).toBeUndefined();
   });
 
-  it("legacy CLW_TOKEN ONLY behind the explicit ALLOW_LEGACY_PAT_ENV='1' escape hatch (non-prod)", async () => {
+  it("legacy CLW_TOKEN remains unavailable when env-0 dependencies are absent", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => ok200()));
     const LEGACY_ENV = { ...(ENV as object), ALLOW_LEGACY_PAT_ENV: "1" } as never;
     const r = await buildContainerEnv(LEGACY_ENV, PARAMS); // no deps, explicit flag
-    expect(r.containerEnv.CLW_TOKEN).toBe("per-job-pat");
+    expect(r.authz).toBe("forbidden");
+    expect(r.containerEnv).toEqual({});
+    expect(r.containerEnv.CLW_TOKEN).toBeUndefined();
     expect(r.containerEnv.CLW_CRED_TICKET).toBeUndefined();
   });
 
@@ -745,7 +771,7 @@ describe("revokeCasPatById (revoke-by-pat_id, the live /revoke contract)", () =>
   });
 });
 
-describe("billing usage-push (ASK-2, billable unit since 2026-08-02 — runner_vcpu_seconds)", () => {
+describe("billing usage-push (ASK-2, canonical runner_slot_seconds unit)", () => {
   afterEach(() => vi.unstubAllGlobals());
 
   it("billingPeriod is UTC YYYY-MM", () => {
@@ -761,7 +787,7 @@ describe("billing usage-push (ASK-2, billable unit since 2026-08-02 — runner_v
     expect(await usageIdemKey("job-1", "2026-07")).not.toBe(a); // period-scoped
   });
 
-  it("buildUsageEvent computes vCPU·seconds (allocated × vCPU), the billable kind, and the full wire", async () => {
+  it("buildUsageEvent computes allocated slot-seconds and the full wire", async () => {
     const started = "2026-06-23T11:00:00Z";
     const completed = "2026-06-23T11:00:03Z"; // +3s
     const ev = await buildUsageEvent({
@@ -772,13 +798,8 @@ describe("billing usage-push (ASK-2, billable unit since 2026-08-02 — runner_v
       region: "iad",
     });
     expect(ev.tenant_id).toBe("3560e213-1e23-4fd0-8871-7033c6052ebd");
-    // BILLABLE kind + unit. `qty` is allocated seconds × the box's vCPU count,
-    // because the entitlement it meters against (max_vcpu_h) is in vCPU-HOURS.
-    // It used to assert `3` (raw slot-seconds) — which is the exact 4×
-    // under-bill this change fixes, and which looked perfectly correct.
-    expect(ev.event_kind).toBe("runner_vcpu_seconds");
-    expect(ev.qty).toBe(3 * RUNNER_BOX_VCPU); // 3 allocated s × 4 vCPU = 12
-    expect(ev.qty).toBe(12);
+    expect(ev.event_kind).toBe("runner_slot_seconds");
+    expect(ev.qty).toBe(3);
     expect(ev.region).toBe("iad");
     expect(ev.source).toBe("corelink-runners/spawn-worker");
     expect(ev.billing_period).toBe("2026-06");
@@ -794,8 +815,7 @@ describe("billing usage-push (ASK-2, billable unit since 2026-08-02 — runner_v
       completedMs: 1000, // completed before started
       region: "iad",
     });
-    // Never bills negative — and the vCPU multiplier must not resurrect it
-    // (0 × 4 is still 0, but a sign error times a multiplier is not).
+    // Never bills negative durations.
     expect(ev.qty).toBe(0);
   });
 
@@ -819,7 +839,7 @@ describe("billing usage-push (ASK-2, billable unit since 2026-08-02 — runner_v
     expect(String(url)).toContain("/internal/v1/billing/usage");
     const body = JSON.parse((init as RequestInit).body as string);
     expect(Array.isArray(body)).toBe(true); // a batch
-    expect(body[0].event_kind).toBe("runner_vcpu_seconds"); // the BILLABLE kind
+    expect(body[0].event_kind).toBe("runner_slot_seconds"); // the canonical billable kind
     expect((init as RequestInit).headers).toMatchObject({ "x-corelink-internal-auth": "billing-key" });
   });
 
