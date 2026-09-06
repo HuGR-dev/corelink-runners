@@ -1,10 +1,12 @@
 import {
   GetObjectCommand,
   GetObjectRetentionCommand,
+  ListObjectVersionsCommand,
   PutObjectCommand,
   S3Client,
 } from "@aws-sdk/client-s3";
 import { createHash } from "node:crypto";
+import type { ImmutableJournal } from "./evidence_log.js";
 
 export interface JournalRecord {
   operationId: string;
@@ -23,6 +25,10 @@ export interface JournalReceipt {
   key: string;
   versionId: string;
   retainedUntilMs: number;
+}
+
+export interface ScannableImmutableJournal extends ImmutableJournal {
+  isEmpty(): Promise<boolean>;
 }
 
 export class JournalInputError extends Error {
@@ -177,7 +183,7 @@ function responseVersion(response: { VersionId?: string }): string {
   return response.VersionId;
 }
 
-export class S3ImmutableJournal {
+export class S3ImmutableJournal implements ScannableImmutableJournal {
   private readonly client: S3Client;
   private readonly bucket: string;
   private readonly prefix: string;
@@ -269,5 +275,27 @@ export class S3ImmutableJournal {
     if (record.operationId !== receipt.operationId || record.sequence !== receipt.sequence || record.previousDigest !== receipt.previousDigest) throw new JournalVerificationError("journal receipt mismatch");
     if (digest(recordBytes(record)) !== receipt.recordDigest) throw new JournalVerificationError("journal canonical bytes mismatch");
     return record;
+  }
+
+  async isEmpty(): Promise<boolean> {
+    const prefix = this.prefix.endsWith("/") ? this.prefix : `${this.prefix}/`;
+    const seen = new Set<string>();
+    let marker: { KeyMarker?: string; VersionIdMarker?: string } = {};
+    for (let page = 0; page < 8; page += 1) {
+      const input = { Bucket: this.bucket, Prefix: prefix, MaxKeys: 1, ...marker };
+      let response: { Versions?: unknown[]; DeleteMarkers?: unknown[]; IsTruncated?: boolean; NextKeyMarker?: string; NextVersionIdMarker?: string };
+      try { response = await this.client.send(new ListObjectVersionsCommand(input)); }
+      catch (cause) { throw new JournalVerificationError("unable to establish journal emptiness", { cause }); }
+      if ((response.Versions?.length ?? 0) > 0 || (response.DeleteMarkers?.length ?? 0) > 0) return false;
+      if (response.IsTruncated !== true) return true;
+      if (typeof response.NextKeyMarker !== "string" || response.NextKeyMarker.length === 0 || typeof response.NextVersionIdMarker !== "string" || response.NextVersionIdMarker.length === 0) {
+        throw new JournalVerificationError("truncated journal listing omitted its continuation token");
+      }
+      const next = `${response.NextKeyMarker}\u0000${response.NextVersionIdMarker}`;
+      if (seen.has(next)) throw new JournalVerificationError("journal listing continuation token repeated");
+      seen.add(next);
+      marker = { KeyMarker: response.NextKeyMarker, VersionIdMarker: response.NextVersionIdMarker };
+    }
+    throw new JournalVerificationError("journal listing exceeded the bounded page limit");
   }
 }
