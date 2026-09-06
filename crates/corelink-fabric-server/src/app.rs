@@ -1685,17 +1685,11 @@ impl AppState {
     /// Track-C AUP1: lift a tenant's suspension (idempotent). `true` iff the
     /// tenant WAS suspended (a real state change).
     pub(crate) fn unsuspend_tenant(&self, tenant: &TenantId) -> anyhow::Result<bool> {
-        let was_suspended = self
-            .suspended_tenants
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .contains(tenant.as_str());
         self.ledger.set_tenant_suspended(tenant.as_str(), false)?;
-        self.suspended_tenants
+        Ok(self.suspended_tenants
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .remove(tenant.as_str());
-        Ok(was_suspended)
+            .remove(tenant.as_str()))
     }
 
     /// Track-C AUP1: whether `tenant` is currently suspended. Read at the TOP of
