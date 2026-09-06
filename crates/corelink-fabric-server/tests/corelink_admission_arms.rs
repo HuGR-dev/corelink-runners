@@ -19,6 +19,10 @@
 //! frozen `bfb38e28…` shape. No HTTP server, no new dependency: the
 //! `IntrospectHttp` trait seam is the injection point (a canned `FakeIntrospect`).
 
+#[macro_use]
+#[path = "support/provider_binding.rs"]
+mod provider_binding_fixture;
+
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -323,6 +327,7 @@ fn arm3_missing_valid_field_is_unreachable() {
 
 struct CountingProvisioner(Arc<AtomicUsize>);
 impl BoxProvisioner for CountingProvisioner {
+    synthetic_provider_binding!();
     fn provision(&self, _id: &str, _spec: &ContainerSpec) -> AnyResult<()> {
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(())

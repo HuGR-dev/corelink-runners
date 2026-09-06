@@ -6,6 +6,10 @@
 //! `FakeHttp` here is `Send + Sync` (uses `Arc<Mutex<…>>`) so it can be
 //! shared across threads and used with `NorthflankBoxProvisioner`.
 
+#[macro_use]
+#[path = "support/provider_binding.rs"]
+mod provider_binding_fixture;
+
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -457,6 +461,7 @@ impl RecordingProvisioner {
 }
 
 impl BoxProvisioner for RecordingProvisioner {
+    synthetic_provider_binding!();
     fn provision(&self, _lease_id: &str, _spec: &ContainerSpec) -> Result<()> {
         if self.provision_ok.load(Ordering::SeqCst) {
             Ok(())
@@ -627,6 +632,7 @@ struct CountingProvisioner {
 }
 
 impl BoxProvisioner for CountingProvisioner {
+    synthetic_provider_binding!();
     fn provision(&self, _lease_id: &str, _spec: &ContainerSpec) -> Result<()> {
         self.provision_count.fetch_add(1, Ordering::SeqCst);
         Ok(())
@@ -846,11 +852,12 @@ impl Engine for LocalFakeEngine {
 }
 
 /// Provisioner whose `teardown` always returns `Err` — used to prove the
-/// best-effort teardown contract: a teardown failure must NOT affect the close
-/// response status.
+/// teardown-first contract: a failed provider delete leaves the lease Held
+/// and the close response retryable.
 struct FailingTeardownProvisioner;
 
 impl BoxProvisioner for FailingTeardownProvisioner {
+    synthetic_provider_binding!();
     fn provision(&self, _lease_id: &str, _spec: &ContainerSpec) -> Result<()> {
         Ok(())
     }

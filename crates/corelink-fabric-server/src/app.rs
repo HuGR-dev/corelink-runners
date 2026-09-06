@@ -2540,6 +2540,19 @@ mod tests {
             env: vec![],
         };
         state
+            .ledger
+            .put(corelink_fabric::LeaseRecord {
+                lease_id: "lease-p".into(),
+                tenant: TenantId::new("acme").unwrap(),
+                state: corelink_fabric::LeaseState::Pending,
+                box_ref: "box:lease-p".into(),
+                created_at_ms: 1,
+                updated_at_ms: 1,
+                deadline_ms: None,
+                billing_acquired_at_ms: None,
+            })
+            .unwrap();
+        state
             .provision_lease("lease-p", &spec)
             .await
             .expect("provision through the gate must complete");

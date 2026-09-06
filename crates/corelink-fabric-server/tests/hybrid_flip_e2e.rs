@@ -22,6 +22,10 @@
 //! side = a recording provisioner (so we can assert it got — or did not get — the
 //! lease). Zero account/network dependency.
 
+#[macro_use]
+#[path = "support/provider_binding.rs"]
+mod provider_binding_fixture;
+
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
@@ -121,6 +125,7 @@ impl RecordingProvisioner {
 }
 
 impl BoxProvisioner for RecordingProvisioner {
+    synthetic_provider_binding!();
     fn provision(&self, lease_id: &str, spec: &ContainerSpec) -> anyhow::Result<()> {
         self.calls
             .lock()

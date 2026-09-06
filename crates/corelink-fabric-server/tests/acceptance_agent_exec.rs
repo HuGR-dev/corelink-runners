@@ -8,6 +8,10 @@
 //! `FakeLeasedExec` records every argv (so the timeout/workdir wrapper is
 //! asserted and the captured result is the bytes the test owns).
 
+#[macro_use]
+#[path = "support/provider_binding.rs"]
+mod provider_binding_fixture;
+
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -53,6 +57,7 @@ impl CapturingProvisioner {
     }
 }
 impl BoxProvisioner for CapturingProvisioner {
+    synthetic_provider_binding!();
     fn provision(&self, lease_id: &str, spec: &ContainerSpec) -> Result<()> {
         self.specs
             .lock()

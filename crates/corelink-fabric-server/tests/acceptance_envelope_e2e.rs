@@ -37,6 +37,10 @@
 //! the metrics still finalize from the collector fed by the REAL ingest path.
 //! Only the test's role as the in-box subscriber is wired in-process.
 
+#[macro_use]
+#[path = "support/provider_binding.rs"]
+mod provider_binding_fixture;
+
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -109,6 +113,7 @@ impl EnvRecordingProvisioner {
 }
 
 impl BoxProvisioner for EnvRecordingProvisioner {
+    synthetic_provider_binding!();
     fn provision(&self, lease_id: &str, spec: &ContainerSpec) -> Result<()> {
         self.captured
             .lock()

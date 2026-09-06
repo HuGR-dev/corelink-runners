@@ -92,6 +92,10 @@ impl SlowLedger {
 }
 
 impl LeaseLedger for SlowLedger {
+    fn bind_provider_ref(&self, lease_id: &str, provider_ref: &str) -> anyhow::Result<LeaseRecord> {
+        self.inner.bind_provider_ref(lease_id, provider_ref)
+    }
+
     fn put(&self, rec: LeaseRecord) -> anyhow::Result<()> {
         self.inner.put(rec)
     }

@@ -16,6 +16,10 @@
 //!   (`AppState::with_max_inflight_requests`) sheds excess load with 503 rather
 //!   than queueing unboundedly.
 
+#[macro_use]
+#[path = "support/provider_binding.rs"]
+mod provider_binding_fixture;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -66,6 +70,7 @@ impl PeakProvisioner {
 }
 
 impl BoxProvisioner for PeakProvisioner {
+    synthetic_provider_binding!();
     fn provision(&self, _lease_id: &str, _spec: &ContainerSpec) -> Result<()> {
         Ok(())
     }

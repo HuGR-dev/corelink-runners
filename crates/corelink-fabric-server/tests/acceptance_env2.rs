@@ -12,6 +12,10 @@
 //! property — the ledger never reaching `Released` before the close
 //! machinery produced its outcome.
 
+#[macro_use]
+#[path = "support/provider_binding.rs"]
+mod provider_binding_fixture;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -105,6 +109,7 @@ impl TogglesTeardownProvisioner {
 }
 
 impl BoxProvisioner for TogglesTeardownProvisioner {
+    synthetic_provider_binding!();
     fn provision(&self, _lease_id: &str, _spec: &ContainerSpec) -> Result<()> {
         Ok(())
     }

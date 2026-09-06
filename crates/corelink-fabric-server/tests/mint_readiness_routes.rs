@@ -1,3 +1,7 @@
+#[macro_use]
+#[path = "support/provider_binding.rs"]
+mod provider_binding_fixture;
+
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -126,6 +130,7 @@ struct Effects {
     jit: AtomicUsize,
 }
 impl BoxProvisioner for Effects {
+    synthetic_provider_binding!();
     fn provision(&self, _: &str, _: &corelink_runner::lease::ContainerSpec) -> anyhow::Result<()> {
         self.provision.fetch_add(1, Ordering::SeqCst);
         Ok(())

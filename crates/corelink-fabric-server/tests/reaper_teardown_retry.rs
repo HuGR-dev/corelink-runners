@@ -1,5 +1,9 @@
 //! Offline checks for the confirmed-cleanup sweep.
 
+#[macro_use]
+#[path = "support/provider_binding.rs"]
+mod provider_binding_fixture;
+
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -20,7 +24,7 @@ fn pending(id: &str) -> LeaseRecord {
         lease_id: id.to_owned(),
         tenant: TenantId::new("acme").unwrap(),
         state: LeaseState::Pending,
-        box_ref: "provider-handle".to_owned(),
+        box_ref: format!("box:{id}"),
         created_at_ms: 0,
         updated_at_ms: 0,
         deadline_ms: None,
@@ -43,6 +47,7 @@ impl ScriptedProvisioner {
 }
 
 impl BoxProvisioner for ScriptedProvisioner {
+    synthetic_provider_binding!();
     fn provision(&self, _: &str, _: &corelink_runner::lease::ContainerSpec) -> Result<()> {
         Ok(())
     }
@@ -78,6 +83,10 @@ impl FinishFailsOnceLedger {
 }
 
 impl LeaseLedger for FinishFailsOnceLedger {
+    fn bind_provider_ref(&self, lease_id: &str, provider_ref: &str) -> anyhow::Result<LeaseRecord> {
+        self.inner.bind_provider_ref(lease_id, provider_ref)
+    }
+
     fn put(&self, rec: LeaseRecord) -> Result<()> {
         self.inner.put(rec)
     }

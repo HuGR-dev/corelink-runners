@@ -1,5 +1,9 @@
 //! Focused cancel teardown fence: provider failure retains Held capacity.
 
+#[macro_use]
+#[path = "support/provider_binding.rs"]
+mod provider_binding_fixture;
+
 use std::sync::{Arc, Mutex};
 
 use axum::body::Body;
@@ -15,6 +19,7 @@ struct RetryTeardown {
 }
 
 impl BoxProvisioner for RetryTeardown {
+    synthetic_provider_binding!();
     fn provision(&self, _: &str, _: &ContainerSpec) -> anyhow::Result<()> {
         Ok(())
     }
@@ -63,7 +68,7 @@ async fn failed_cancel_teardown_keeps_held_then_retry_releases() {
                 lease_id: "lease-cancel-retry".into(),
                 tenant: TenantId::new("acme").unwrap(),
                 state: LeaseState::Pending,
-                box_ref: "provider".into(),
+                box_ref: provider_binding_fixture::descriptor("lease-cancel-retry").unwrap(),
                 created_at_ms: 0,
                 updated_at_ms: 0,
                 deadline_ms: Some(2_000_000_000_000),

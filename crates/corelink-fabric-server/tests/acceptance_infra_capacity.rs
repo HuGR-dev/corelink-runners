@@ -22,6 +22,10 @@
 //! All tests are hermetic: no network, no process-environment mutation.
 //! Tick is driven directly via `run_admission_tick` (no `spawn_admission_loop`).
 
+#[macro_use]
+#[path = "support/provider_binding.rs"]
+mod provider_binding_fixture;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -162,6 +166,7 @@ impl TransientCapacityProvisioner {
 }
 
 impl BoxProvisioner for TransientCapacityProvisioner {
+    synthetic_provider_binding!();
     fn provision(&self, _lease_id: &str, _spec: &ContainerSpec) -> Result<()> {
         let n = self.attempts.fetch_add(1, Ordering::SeqCst);
         if n < self.fail_count {
