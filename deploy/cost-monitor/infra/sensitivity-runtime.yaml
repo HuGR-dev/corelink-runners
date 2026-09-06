@@ -1,0 +1,32 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CoreLink sensitivity schedule; deploy in account 286590629898 after monitor version permission.
+Parameters:
+  ResourcePrefix: {Type: String, Default: corelink-sensitivity, AllowedPattern: '^[a-z0-9-]{1,32}$'}
+  PublishedMonitorLambdaArn:
+    Type: String
+    Description: Exact published monitor Lambda version ARN; no $LATEST and no alias.
+    AllowedPattern: '^arn:[^:]+:lambda:[^:]+:[0-9]{12}:function:[A-Za-z0-9_-]+:[0-9]+$'
+  SchedulerRoleArn: {Type: String, AllowedPattern: '^arn:[^:]+:iam::286590629898:role/.+$'}
+Resources:
+  SchedulerInvokePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: invoke-published-monitor-version
+      Roles: [!Select [1, !Split ['/', !Ref SchedulerRoleArn]]]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement: [{Effect: Allow, Action: lambda:InvokeFunction, Resource: !Ref PublishedMonitorLambdaArn}]
+  SensitivitySchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: !Sub '${ResourcePrefix}-tick-60s'
+      FlexibleTimeWindow: {Mode: OFF}
+      ScheduleExpression: rate(60 seconds)
+      State: ENABLED
+      Target:
+        Arn: !Ref PublishedMonitorLambdaArn
+        RoleArn: !Ref SchedulerRoleArn
+        Input: '{"kind":"sensitivity_tick","source":"independent-scheduler"}'
+        RetryPolicy: {MaximumEventAgeInSeconds: 60, MaximumRetryAttempts: 2}
+Outputs:
+  SensitivityScheduleArn: {Value: !GetAtt SensitivitySchedule.Arn}

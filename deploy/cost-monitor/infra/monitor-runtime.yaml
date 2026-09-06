@@ -1,0 +1,104 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CoreLink monitor runtime; deploy after monitor foundation and immutable image scan.
+Parameters:
+  ResourcePrefix: {Type: String, Default: corelink-monitor, AllowedPattern: '^[a-z0-9-]{1,32}$'}
+  ImageUri:
+    Type: String
+    Description: ECR image URI with immutable sha256 digest; tags are rejected.
+    AllowedPattern: '^([0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com/)[a-z0-9/_-]+@sha256:[0-9a-f]{64}$'
+  FoundationTableName: {Type: String}
+  FoundationBucketArn: {Type: String, AllowedPattern: '^arn:[^:]+:s3:::[a-z0-9.-]+$'}
+  FoundationTopicArn: {Type: String, AllowedPattern: '^arn:[^:]+:sns:[^:]+:[0-9]{12}:.+$'}
+  RuntimeRoleArn: {Type: String, AllowedPattern: '^arn:[^:]+:iam::[0-9]{12}:role/.+$'}
+  SchedulerRoleArn: {Type: String, AllowedPattern: '^arn:[^:]+:iam::[0-9]{12}:role/.+$'}
+  JournalKeyArn: {Type: String, AllowedPattern: '^arn:[^:]+:kms:[^:]+:[0-9]{12}:key/.+$'}
+  SigningKeyArn: {Type: String, AllowedPattern: '^arn:[^:]+:kms:[^:]+:[0-9]{12}:key/.+$'}
+  SensitivitySchedulerRoleArn: {Type: String, AllowedPattern: '^arn:[^:]+:iam::286590629898:role/.+$'}
+Resources:
+  MonitorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ResourcePrefix}'
+      PackageType: Image
+      Code: {ImageUri: !Ref ImageUri}
+      Role: !Ref RuntimeRoleArn
+      MemorySize: 512
+      Timeout: 30
+      ReservedConcurrentExecutions: 10
+      Environment:
+        Variables:
+          STATE_TABLE: !Ref FoundationTableName
+          JOURNAL_BUCKET_ARN: !Ref FoundationBucketArn
+          RECEIPT_TOPIC_ARN: !Ref FoundationTopicArn
+          JOURNAL_KEY_ARN: !Ref JournalKeyArn
+          SIGNING_KEY_ARN: !Ref SigningKeyArn
+          HMAC_AUTH_MODE: application
+  PublishedVersion:
+    Type: AWS::Lambda::Version
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      FunctionName: !Ref MonitorFunction
+      Description: !Sub 'Immutable monitor image ${ImageUri}'
+  LiveAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Ref MonitorFunction
+      FunctionVersion: !GetAtt PublishedVersion.Version
+      Name: live
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub '${ResourcePrefix}-https'
+      ProtocolType: HTTP
+  HttpIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt MonitorFunction.Arn
+      PayloadFormatVersion: '2.0'
+  HttpRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: 'ANY /{proxy+}'
+      Target: !Sub integrations/${HttpIntegration}
+  HttpStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: '$default'
+      AutoDeploy: true
+  HttpInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref MonitorFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*'
+  SensitivityInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref PublishedVersion
+      Principal: !Ref SensitivitySchedulerRoleArn
+  MonitorSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: !Sub '${ResourcePrefix}-tick-60s'
+      Description: Monitor tick; application validates authenticated input and state transitions.
+      FlexibleTimeWindow: {Mode: OFF}
+      ScheduleExpression: rate(60 seconds)
+      State: ENABLED
+      Target:
+        Arn: !Ref LiveAlias
+        RoleArn: !Ref SchedulerRoleArn
+        Input: '{"kind":"monitor_tick","source":"aws-scheduler"}'
+        RetryPolicy: {MaximumEventAgeInSeconds: 60, MaximumRetryAttempts: 2}
+Outputs:
+  FunctionArn: {Value: !GetAtt MonitorFunction.Arn}
+  PublishedVersion: {Value: !GetAtt PublishedVersion.Version}
+  LiveAliasArn: {Value: !Ref LiveAlias}
+  ApiEndpoint: {Value: !GetAtt HttpApi.ApiEndpoint}
+  ScheduleArn: {Value: !GetAtt MonitorSchedule.Arn}
