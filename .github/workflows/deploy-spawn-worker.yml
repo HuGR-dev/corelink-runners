@@ -172,6 +172,12 @@ jobs:
           EXCLUDE_RUNNERS: ${{ runner.name }}
         run: bash scripts/ci/wait-for-idle-fleet.sh
 
+      - name: Guard — reject Option-C map depletion
+        working-directory: ${{ github.workspace }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python3 scripts/ci/check-repo-tenant-pat-map.py deploy/cloudflare/wrangler.jsonc
+
       - name: Deploy (wrangler)
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
