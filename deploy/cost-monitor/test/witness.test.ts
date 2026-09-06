@@ -4,6 +4,7 @@ import { MemoryStateStore } from "../src/state.js";
 import { DurableCheckpointWitness } from "../src/witness.js";
 import { checkpointRootFor } from "../src/evidence_log.js";
 import { canonicalJSON } from "../src/journal.js";
+import { verifyOrderedFields } from "../src/acks.js";
 
 const now = 1_700_000_000_000;
 const root = "0".repeat(64);
@@ -30,7 +31,7 @@ function harness() {
   const journal = { append: async (record: any) => { if (failNext) { failNext = false; throw new Error("worm unavailable"); } const key = `${record.sequence}/${record.operationId}`; const prior = objects.get(key) as any; if (prior) return prior.receipt; const recordDigest = digest(JSON.stringify([record.operationId, record.sequence, record.previousDigest, canonicalJSON(record.payload), record.trustedAtMs])); const receipt = { operationId: record.operationId, sequence: record.sequence, recordDigest, previousDigest: record.previousDigest, bucket: "b", key, versionId: "v1", retainedUntilMs: now + 8 * 24 * 60 * 60 * 1000 }; objects.set(key, { receipt, record }); return receipt; }, read: async (receipt: any) => { const found = [...objects.values()].find((entry: any) => entry.receipt.versionId === receipt.versionId && entry.receipt.key === receipt.key) as any; if (!found) throw new Error("missing WORM record"); return found.record; } };
   const store = new MemoryStateStore();
   const witness = new DurableCheckpointWitness({ store, journal: journal as never, clock: { now: async () => ({ timeMs: now, proofDigest: digest("proof"), requestDigest: digest("request"), authority: "test" }) } as never, signer: witnessSigner as never, logId: "log-1", namespace: "n", journalIdentity: journalSigner.identity });
-  return { witness, journalSigner, store, objects, failWorm: () => { failNext = true; } };
+  return { witness, journalSigner, witnessSigner, store, objects, failWorm: () => { failNext = true; } };
 }
 
 describe("DurableCheckpointWitness", () => {
@@ -84,5 +85,21 @@ describe("DurableCheckpointWitness", () => {
     const wormOperationKey = [...(worm.store as any).values.keys()].find((key: string) => key.includes(":witness:operation:"))!;
     (worm.store as any).values.get(wormOperationKey).value.journal.retainedUntilMs = 0;
     await expect(worm.witness.accept(wormInput as never)).rejects.toThrow();
+  });
+  it("returns a fresh nonce-bound head proof and refuses pending or corrupt state", async () => {
+    const empty = harness();
+    const genesis = await empty.witness.readHead("a".repeat(64));
+    expect(genesis.sequence).toBe(0); expect(genesis.logId).toBe("log-1"); expect(genesis.checkpointRoot).toBe(root); expect(genesis.witnessRoot).toBe(root);
+    await expect(empty.witness.readHead("A".repeat(64))).rejects.toThrow();
+
+    const live = harness(); const input = await checkpoint(live.journalSigner); await live.witness.accept(input as never);
+    const nonce = "b".repeat(64); const proof = await live.witness.readHead(nonce);
+    expect(proof.nonce).toBe(nonce); expect(proof.sequence).toBe(1); expect(proof.signerKeyId).toBe("witness-key"); expect(proof.trustedAtMs).toBe(now);
+    expect(verifyOrderedFields(new TextEncoder().encode(JSON.stringify([proof.version, proof.logId, proof.nonce, proof.sequence, proof.checkpointRoot, proof.witnessRoot, proof.trustedAtMs, proof.signerKeyId, proof.signerEpoch])), proof.signature, live.witnessSigner.identity)).toBe(true);
+    const head = (live.store as any).values.get("n:witness:head"); head.value.witnessRoot = "f".repeat(64);
+    await expect(live.witness.readHead(nonce)).rejects.toThrow();
+
+    const pending = harness(); const pendingInput = await checkpoint(pending.journalSigner); pending.failWorm(); await expect(pending.witness.accept(pendingInput as never)).rejects.toThrow();
+    await expect(pending.witness.readHead(nonce)).rejects.toThrow();
   });
 });

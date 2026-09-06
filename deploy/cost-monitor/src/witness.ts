@@ -2,17 +2,34 @@ import { createHash } from "node:crypto";
 import type { AsyncSigner, PublicSigningIdentity } from "./acks.js";
 import type { MonitorStateStore, Stored } from "./state.js";
 import type { TrustedClock, TrustedTimeProof } from "./trusted_time.js";
-import { canonicalCheckpointBytes, canonicalWitnessBytes, checkpointRootFor, witnessRootFor, type ImmutableJournal, type SignedCheckpoint, type WitnessReceipt } from "./evidence_log.js";
+import { canonicalCheckpointBytes, canonicalWitnessBytes, checkpointRootFor, witnessRootFor, type CheckpointWitness, type ImmutableJournal, type SignedCheckpoint, type WitnessReceipt } from "./evidence_log.js";
 import { canonicalJSON, type JournalReceipt, type JournalRecord } from "./journal.js";
 import { verifyOrderedFields } from "./acks.js";
 
 const ZERO_ROOT = "0".repeat(64);
 const HEX = /^[0-9a-f]{64}$/;
 const POSITIVE = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+const NONCE = /^[0-9a-f]{64}$/;
 
 export class WitnessInputError extends Error { override readonly name = "WitnessInputError"; }
 export class WitnessForkError extends Error { override readonly name = "WitnessForkError"; }
 export class WitnessBusyError extends Error { override readonly name = "WitnessBusyError"; }
+
+export interface SignedWitnessHead {
+  version: "1";
+  logId: string;
+  nonce: string;
+  sequence: number;
+  checkpointRoot: string;
+  witnessRoot: string;
+  trustedAtMs: number;
+  signerKeyId: string;
+  signerEpoch: string;
+  signature: string;
+}
+export interface CurrentCheckpointWitness extends CheckpointWitness {
+  readHead(nonce: string): Promise<SignedWitnessHead>;
+}
 
 function sha256(value: string): string { return createHash("sha256").update(value, "utf8").digest("hex"); }
 function arrayBytes(value: readonly unknown[]): Uint8Array { return new TextEncoder().encode(JSON.stringify(value)); }
@@ -78,6 +95,15 @@ export class DurableCheckpointWitness {
       receipt.checkpointSignerEpoch !== checkpoint.signerEpoch || receipt.witnessKeyId !== this.signer.identity.keyId ||
       receipt.witnessEpoch !== this.signer.identity.epoch || (previousWitnessRoot !== undefined && receipt.previousWitnessRoot !== previousWitnessRoot) ||
       !verifyOrderedFields(canonicalWitnessBytes(receipt), receipt.signature, this.signer.identity)) throw new WitnessInputError("invalid persisted witness receipt");
+  }
+  private async validateOperation(operation: Stored<Operation>, operationId: string): Promise<void> {
+    const value = operation.value;
+    if (!value || !validCheckpoint(value.checkpoint) || value.checkpoint.logId !== this.logId || value.checkpointRoot !== checkpointRootFor(value.checkpoint) ||
+      !verifyOrderedFields(canonicalCheckpointBytes(value.checkpoint), value.checkpoint.signature, this.journalIdentity) || !validReceipt(value.receipt) ||
+      value.witnessRoot !== witnessRootFor(value.receipt)) throw new WitnessInputError("invalid persisted witness operation");
+    this.validateReceiptRelation(value.checkpoint, value.receipt, value.checkpointRoot);
+    this.validateTimeProof(value.timeProof, value.receipt.trustedAtMs);
+    await this.validateJournal(value.journal, value.checkpoint, value.receipt, operationId, value.checkpointRoot);
   }
   private async validateJournal(receipt: JournalReceipt, checkpoint: SignedCheckpoint, response: WitnessReceipt, operationId: string, checkpointRoot: string): Promise<void> {
     if (!receipt || receipt.operationId !== operationId || receipt.sequence !== checkpoint.sequence || receipt.previousDigest !== checkpointRoot || typeof receipt.bucket !== "string" || !receipt.bucket || typeof receipt.key !== "string" || !receipt.key || typeof receipt.versionId !== "string" || !receipt.versionId || !Number.isSafeInteger(receipt.retainedUntilMs) || receipt.retainedUntilMs < response.trustedAtMs) throw new WitnessInputError("invalid durable journal receipt");
@@ -175,5 +201,56 @@ export class DurableCheckpointWitness {
     const finalPending = await this.store.get<Pending>(pendingKey);
     if (finalPending) await this.store.transact([{ key: pendingKey, expectedVersion: finalPending.version, value: { ...finalPending.value, journal: journalReceipt } }]);
     return structuredClone(pending.receipt);
+  }
+
+  async readHead(nonce: string): Promise<SignedWitnessHead> {
+    if (typeof nonce !== "string" || !NONCE.test(nonce)) throw new WitnessInputError("invalid witness head nonce");
+    let head: Stored<Head> | null = null;
+    let pending: Stored<Pending> | null = null;
+    let operationCount = 0;
+    let cursor: string | undefined;
+    do {
+      const scanned = await this.store.scan(this.key(""), cursor);
+      for (const item of scanned.items) {
+      if (item.key === this.key("head")) { head = item as Stored<Head>; continue; }
+      if (item.key.includes(":witness:pending:")) {
+        pending = item as Stored<Pending>;
+        if (!pending.value?.journal) throw new WitnessBusyError("witness head has unresolved pending state");
+        continue;
+      }
+      if (item.key.includes(":witness:operation:")) {
+        operationCount += 1;
+        const operation = item as Stored<Operation>;
+        const operationId = operation.value?.checkpoint?.operationId;
+        if (typeof operationId !== "string") throw new WitnessInputError("invalid persisted witness operation identity");
+        await this.validateOperation(operation, `${this.logId}/${operation.value.checkpoint.sequence}/${sha256(JSON.stringify(operation.value.checkpoint))}`);
+      }
+      }
+      cursor = scanned.nextCursor ?? undefined;
+    } while (cursor);
+    const checked = await this.validateStoredHead(head);
+    if (pending) {
+      if (!checked) throw new WitnessBusyError("witness pending state has no committed head");
+      if (!validCheckpoint(pending.value.checkpoint) || !validReceipt(pending.value.receipt) || pending.value.checkpointRoot !== checked.value.checkpointRoot || pending.value.witnessRoot !== checked.value.witnessRoot || JSON.stringify(pending.value.receipt) !== JSON.stringify(checked.value.receipt)) throw new WitnessInputError("pending witness does not match head");
+      this.validateReceiptRelation(pending.value.checkpoint, pending.value.receipt, pending.value.checkpointRoot);
+      this.validateTimeProof(pending.value.timeProof, pending.value.receipt.trustedAtMs);
+      const pendingJournal = pending.value.journal;
+      if (!pendingJournal) throw new WitnessBusyError("witness pending journal is missing");
+      await this.validateJournal(pendingJournal, pending.value.checkpoint, pending.value.receipt, `${this.logId}/${pending.value.checkpoint.sequence}/${sha256(JSON.stringify(pending.value.checkpoint))}`, pending.value.checkpointRoot);
+    }
+    if (!checked && operationCount > 0) throw new WitnessInputError("committed witness operation has no head");
+    const timeProof = await this.clock.now();
+    this.validateTimeProof(timeProof);
+    const unsigned = {
+      version: "1" as const, logId: this.logId, nonce,
+      sequence: checked?.value.sequence ?? 0,
+      checkpointRoot: checked?.value.checkpointRoot ?? ZERO_ROOT,
+      witnessRoot: checked?.value.witnessRoot ?? ZERO_ROOT,
+      trustedAtMs: timeProof.timeMs, signerKeyId: this.signer.identity.keyId, signerEpoch: this.signer.identity.epoch,
+    };
+    const signature = await this.signer.sign(new TextEncoder().encode(JSON.stringify(Object.values(unsigned))));
+    const result = { ...unsigned, signature };
+    if (!verifyOrderedFields(new TextEncoder().encode(JSON.stringify(Object.values(result).slice(0, 9))), signature, this.signer.identity)) throw new WitnessInputError("witness head signature failed verification");
+    return result;
   }
 }
