@@ -4,16 +4,19 @@ export const TICK_DEADLINE_MS = 60_000;
 const text = new TextEncoder();
 const stateKey = "state";
 const envelopeFields = [
-  "event_id",
-  "producer_seq",
-  "payload_digest",
+  "kind",
   "source",
   "service",
   "application",
+  "event_id",
+  "producer_seq",
+  "occurred_at",
+  "scheduled_for",
+  "version",
   "key_id",
   "credential_epoch",
+  "payload_digest",
   "monitor_rearm_tuple_digest",
-  "occurred_at",
 ] as const;
 const ackFields = [
   "ack_version",
@@ -55,16 +58,19 @@ const recoveryFields = [
 ] as const;
 
 export interface TickEnvelope {
-  event_id: string;
-  producer_seq: number;
-  payload_digest: string;
+  kind: "canary-tick" | "CANARY_CONFIG_INVALID";
   source: string;
   service: string;
   application: string;
+  event_id: string;
+  producer_seq: number;
+  occurred_at: number;
+  scheduled_for: number;
+  version: "1";
   key_id: string;
   credential_epoch: string;
+  payload_digest: string;
   monitor_rearm_tuple_digest: string;
-  occurred_at: number;
   signature: string;
 }
 export interface AckToken {
@@ -359,9 +365,13 @@ export class CanaryTickOutbox {
   async enqueueAndDrain(
     config: TickConfig | null,
     now: number,
+    scheduledFor: number,
     configInvalid = false,
   ): Promise<string> {
-    const head = await this.reserve(config, now, configInvalid);
+    if (!Number.isSafeInteger(scheduledFor) || scheduledFor <= 0) {
+      return "invalid scheduled time";
+    }
+    const head = await this.reserve(config, now, scheduledFor, configInvalid);
     if (!head || !config) return "tick config unavailable";
     const deadline = head.enqueuedAt + TICK_DEADLINE_MS;
     const remaining = deadline - Date.now();
@@ -434,6 +444,7 @@ export class CanaryTickOutbox {
   private async reserve(
     config: TickConfig | null,
     now: number,
+    scheduledFor: number,
     configInvalid: boolean,
   ): Promise<Head | undefined> {
     return this.state.blockConcurrencyWhile(async () => {
@@ -447,18 +458,22 @@ export class CanaryTickOutbox {
         return undefined;
       }
       const seq = current.seq + 1;
-      const kind = configInvalid ? "CANARY_CONFIG_INVALID" : "canary-tick";
+      const kind: TickEnvelope["kind"] = configInvalid ? "CANARY_CONFIG_INVALID" : "canary-tick";
+      const version = "1" as const;
       const unsigned = {
-        event_id: `${kind}-${seq}`,
-        producer_seq: seq,
-        payload_digest: await hash(`${kind}:${seq}:${now}`),
+        kind,
         source: config.source,
         service: config.service,
         application: config.application,
+        event_id: `${kind}-${seq}`,
+        producer_seq: seq,
+        occurred_at: now,
+        scheduled_for: scheduledFor,
+        version,
         key_id: config.keyId,
         credential_epoch: config.credentialEpoch,
+        payload_digest: await hash(JSON.stringify([kind, seq, now, scheduledFor, version])),
         monitor_rearm_tuple_digest: config.monitorRearmTupleDigest,
-        occurred_at: now,
       };
       const head: Head = {
         envelope: {

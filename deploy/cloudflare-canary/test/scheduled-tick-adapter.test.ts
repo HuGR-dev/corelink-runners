@@ -27,7 +27,7 @@ describe("scheduled tick Durable Object adapter", () => {
 
       const missing = await stub.fetch("https://canary.invalid/", {
         method: "POST",
-        body: JSON.stringify({ command: "scheduled-tick" }),
+        body: JSON.stringify({ command: "scheduled-tick", scheduled_for: 1_000 }),
       });
       expect(missing.status).toBe(200);
       expect(await missing.text()).toContain("tick config unavailable");
@@ -37,6 +37,12 @@ describe("scheduled tick Durable Object adapter", () => {
         body: "not-json",
       });
       expect(malformed.status).toBe(400);
+
+      const missingScheduledFor = await stub.fetch("https://canary.invalid/", {
+        method: "POST",
+        body: JSON.stringify({ command: "scheduled-tick" }),
+      });
+      expect(missingScheduledFor.status).toBe(400);
 
       const wrongMethod = await stub.fetch("https://canary.invalid/", {
         method: "GET",

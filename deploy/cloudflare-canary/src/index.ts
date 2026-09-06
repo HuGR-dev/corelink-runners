@@ -269,12 +269,12 @@ export async function runCycle(env: Env, now: number): Promise<string> {
   return `fabric=${fabric.reachable ? fabric.status : "DOWN"} health=${healthSummary} spawn=${spawn.reachable ? spawn.status : "DOWN"} config=${configState} | triggered=${alerts.length + storageAlerts.length} | ${sendSummary}`;
 }
 
-async function runScheduledTick(env: Env): Promise<string> {
+async function runScheduledTick(env: Env, scheduledFor: number): Promise<string> {
   if (!env.CANARY_TICK_OUTBOX) return "tick outbox unavailable";
   const stub = env.CANARY_TICK_OUTBOX.get(env.CANARY_TICK_OUTBOX.idFromName("scheduled-tick"));
   const response = await stub.fetch("https://canary.internal/tick", {
     method: "POST",
-    body: JSON.stringify({ command: "scheduled-tick" }),
+    body: JSON.stringify({ command: "scheduled-tick", scheduled_for: scheduledFor }),
   });
   return response.text();
 }
@@ -343,12 +343,12 @@ function isCooldownState(value: unknown): value is Record<string, number> {
 
 export default {
   // The heartbeat: every cron tick runs one monitor cycle, fully guarded.
-  async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+  async scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     const now = Date.now();
     ctx.waitUntil(
       (async () => {
         try {
-          const [summary, tick] = await Promise.all([runCycle(env, now), runScheduledTick(env)]);
+          const [summary, tick] = await Promise.all([runCycle(env, now), runScheduledTick(env, event.scheduledTime)]);
           console.log(`[canary] cycle ok: ${summary}; ${tick}`);
         } catch (err) {
           // A monitored surface being down is an ALERT, handled inside runCycle;

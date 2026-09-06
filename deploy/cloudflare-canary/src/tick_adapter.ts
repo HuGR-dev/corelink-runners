@@ -28,14 +28,17 @@ export class CanaryTickOutboxAdapter {
       !command ||
       typeof command !== "object" ||
       Array.isArray(command) ||
-      Object.keys(command).length !== 1 ||
-      (command as { command?: unknown }).command !== "scheduled-tick"
+      Object.keys(command).length !== 2 ||
+      (command as { command?: unknown }).command !== "scheduled-tick" ||
+      !Number.isSafeInteger((command as { scheduled_for?: unknown }).scheduled_for) ||
+      ((command as { scheduled_for: number }).scheduled_for) <= 0
     )
       return new Response("bad command", { status: 400 });
     const configInvalid = !parseProbeFlag(this.env.FABRIC_PROBES_ENABLED).valid;
     const result = await this.outbox.enqueueAndDrain(
       tickConfig(this.env),
       Date.now(),
+      (command as { scheduled_for: number }).scheduled_for,
       configInvalid,
     );
     return new Response(result, { status: 200 });

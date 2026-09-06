@@ -60,8 +60,8 @@ describe("scheduled tick durable outbox", () => {
       throw new Error("down");
     });
     try {
-      expect(await outbox.enqueueAndDrain(config, 1_000)).toContain("pending");
-      expect(await outbox.enqueueAndDrain(config, 1_001)).toContain("pending");
+      expect(await outbox.enqueueAndDrain(config, 1_000, 1_000)).toContain("pending");
+      expect(await outbox.enqueueAndDrain(config, 1_001, 1_001)).toContain("pending");
       expect(calls).toHaveLength(2);
       expect((calls[1] as { event_id: string }).event_id).toBe(
         (calls[0] as { event_id: string }).event_id,
@@ -76,7 +76,7 @@ describe("scheduled tick durable outbox", () => {
     const durable = state();
     const outbox = new CanaryTickOutbox(durable);
     const fetcher = vi.spyOn(globalThis, "fetch");
-    expect(await outbox.enqueueAndDrain(null, 1_000)).toContain(
+    expect(await outbox.enqueueAndDrain(null, 1_000, 1_000)).toContain(
       "config unavailable",
     );
     expect(fetcher).not.toHaveBeenCalled();
@@ -88,7 +88,7 @@ describe("scheduled tick durable outbox", () => {
     const fetcher = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValue(new Response("{}", { status: 200 }));
-    await outbox.enqueueAndDrain(config, 1_000, true);
+    await outbox.enqueueAndDrain(config, 1_000, 1_000, true);
     expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body)).event_id).toBe(
       "CANARY_CONFIG_INVALID-1",
     );
@@ -106,7 +106,7 @@ describe("scheduled tick durable outbox", () => {
       { status: 200 },
     );
     const fetcher = vi.spyOn(globalThis, "fetch").mockResolvedValue(body);
-    const pending = outbox.enqueueAndDrain(config, 1_000);
+    const pending = outbox.enqueueAndDrain(config, 1_000, 1_000);
     await vi.waitFor(() => expect(fetcher).toHaveBeenCalled());
     await vi.advanceTimersByTimeAsync(60_000);
     await expect(pending).resolves.toContain("TIMED_OUT");
@@ -139,7 +139,7 @@ describe("scheduled tick durable outbox", () => {
           );
         }),
     );
-    const pending = outbox.enqueueAndDrain(config, 1_000);
+    const pending = outbox.enqueueAndDrain(config, 1_000, 1_000);
     await vi.waitFor(() => expect(fetcher).toHaveBeenCalled());
     expect(fetcher).toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(60_000);
@@ -188,11 +188,11 @@ describe("scheduled tick durable outbox", () => {
         return new Response(JSON.stringify(signed.token), { status: 200 });
       });
     config.trustedNow = () => trustedNow;
-    expect(await outbox.enqueueAndDrain(config, 1_000)).toContain(
+    expect(await outbox.enqueueAndDrain(config, 1_000, 1_000)).toContain(
       "invalid ACK",
     );
     vi.setSystemTime(61_000);
-    expect(await outbox.enqueueAndDrain(config, 61_000)).toContain("TIMED_OUT");
+    expect(await outbox.enqueueAndDrain(config, 61_000, 61_000)).toContain("TIMED_OUT");
     dynamic.mockRestore();
     config.trustedNow = () => 1_000;
     delete config.ackVerifier;
@@ -238,7 +238,7 @@ describe("scheduled tick durable outbox", () => {
     const timeout = vi
       .spyOn(AbortSignal, "timeout")
       .mockReturnValue(new AbortController().signal);
-    const pending = outbox.enqueueAndDrain(boundedConfig, 1_000);
+    const pending = outbox.enqueueAndDrain(boundedConfig, 1_000, 1_000);
     await vi.waitFor(() => expect(fetcher).toHaveBeenCalled());
     await vi.waitFor(() => expect(verifier.verify).toHaveBeenCalled());
     const outcome = Promise.race([
@@ -278,7 +278,7 @@ describe("scheduled tick durable outbox", () => {
     } as unknown as DurableObjectState;
     const outbox = new CanaryTickOutbox(durable);
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
-    await outbox.enqueueAndDrain(config, 1_000);
+    await outbox.enqueueAndDrain(config, 1_000, 1_000);
     vi.setSystemTime(10_000);
     await outbox.alarm();
     expect(alarms.at(-1)).toBe(61_000);

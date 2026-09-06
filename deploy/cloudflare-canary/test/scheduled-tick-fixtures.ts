@@ -42,16 +42,19 @@ export const RECOVERY_FIELDS = [
 ] as const;
 
 export const envelope: TickEnvelope = {
-  event_id: "event-1",
-  producer_seq: 7,
-  payload_digest: HEX,
+  kind: "canary-tick",
   source: "canary",
   service: "canary",
   application: "corelink",
+  event_id: "event-1",
+  producer_seq: 7,
+  occurred_at: 1_000,
+  scheduled_for: 1_000,
+  version: "1",
   key_id: "lane",
   credential_epoch: "3",
+  payload_digest: HEX,
   monitor_rearm_tuple_digest: HEX,
-  occurred_at: 1_000,
   signature: "fixture",
 };
 export const head = { envelope, enqueuedAt: 1_000 };

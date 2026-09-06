@@ -3,16 +3,19 @@ import { parseProbeFlag, type TickConfig } from "../src/config";
 import { CanaryTickOutbox } from "../src/tick_outbox";
 
 const ENVELOPE_FIELDS = [
-  "event_id",
-  "producer_seq",
-  "payload_digest",
+  "kind",
   "source",
   "service",
   "application",
+  "event_id",
+  "producer_seq",
+  "occurred_at",
+  "scheduled_for",
+  "version",
   "key_id",
   "credential_epoch",
+  "payload_digest",
   "monitor_rearm_tuple_digest",
-  "occurred_at",
 ] as const;
 const TUPLE_DIGEST = "b".repeat(64);
 const HMAC_KEY = "scheduled-tick-test-key";
@@ -129,10 +132,12 @@ describe("scheduled tick canonical envelope", () => {
     });
 
     const now = 12_345;
+    const scheduledFor = 10_000;
     vi.setSystemTime(now);
     const result = await new CanaryTickOutbox(durableState()).enqueueAndDrain(
       config,
       now,
+      scheduledFor,
     );
     expect(result).toBe("tick terminal: ACKED");
     expect(requests).toHaveLength(1);
@@ -140,6 +145,8 @@ describe("scheduled tick canonical envelope", () => {
     const envelope = requests[0]!;
     expect(Object.keys(envelope)).toEqual([...ENVELOPE_FIELDS, "signature"]);
     expect(envelope).toMatchObject({
+      kind: "canary-tick",
+      version: "1",
       event_id: "canary-tick-1",
       producer_seq: 1,
       source: config.source,
@@ -149,25 +156,29 @@ describe("scheduled tick canonical envelope", () => {
       credential_epoch: config.credentialEpoch,
       monitor_rearm_tuple_digest: TUPLE_DIGEST,
       occurred_at: now,
+      scheduled_for: scheduledFor,
     });
     expect(JSON.stringify(envelope)).not.toContain(HMAC_KEY);
     expect(envelope.payload_digest).toBe(
-      await sha256(`canary-tick:1:${now}`),
+      await sha256(JSON.stringify(["canary-tick", 1, now, scheduledFor, "1"])),
     );
 
     const expectedCanonical = canonicalEnvelope(envelope);
     expect(expectedCanonical).toBe(
       JSON.stringify([
-        "canary-tick-1",
-        1,
-        envelope.payload_digest,
+        "canary-tick",
         config.source,
         config.service,
         config.application,
+        "canary-tick-1",
+        1,
+        now,
+        scheduledFor,
+        "1",
         config.keyId,
         config.credentialEpoch,
+        envelope.payload_digest,
         TUPLE_DIGEST,
-        now,
       ]),
     );
     expect(envelope.signature).toBe(await hmac(expectedCanonical, HMAC_KEY));
@@ -177,6 +188,16 @@ describe("scheduled tick canonical envelope", () => {
         HMAC_KEY,
       ),
     );
+    for (const field of ENVELOPE_FIELDS) {
+      const value = envelope[field];
+      const mutated = {
+        ...envelope,
+        [field]: typeof value === "number" ? value + 1 : `${value}-mutated`,
+      };
+      expect(await hmac(canonicalEnvelope(mutated), HMAC_KEY)).not.toBe(
+        envelope.signature,
+      );
+    }
   });
 
   it("advances sequence only after terminal heads and authenticates invalid config separately", async () => {
@@ -190,9 +211,9 @@ describe("scheduled tick canonical envelope", () => {
 
     expect(parseProbeFlag("0")).toEqual({ valid: true, enabled: false });
     expect(parseProbeFlag("invalid")).toMatchObject({ valid: false });
-    await outbox.enqueueAndDrain(config, 1_000);
+    await outbox.enqueueAndDrain(config, 1_000, 1_000);
     vi.setSystemTime(2_000);
-    await outbox.enqueueAndDrain(config, 2_000, true);
+    await outbox.enqueueAndDrain(config, 2_000, 2_000, true);
 
     expect(requests.map((body) => body.event_id)).toEqual([
       "canary-tick-1",

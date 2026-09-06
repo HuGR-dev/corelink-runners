@@ -65,8 +65,8 @@ describe("scheduled tick order", () => {
       .mockImplementation(async () => new Response("{}", { status: 200 }));
     const fixture = state();
     const outbox = new CanaryTickOutbox(fixture.durable);
-    await outbox.enqueueAndDrain(config, 1_000);
-    await outbox.enqueueAndDrain(config, 1_001);
+    await outbox.enqueueAndDrain(config, 1_000, 1_000);
+    await outbox.enqueueAndDrain(config, 1_001, 1_001);
     const ids = fetcher.mock.calls.map(
       ([, init]) => JSON.parse(String(init?.body)).event_id,
     );
@@ -81,8 +81,8 @@ describe("scheduled tick order", () => {
     const fixture = state();
     const outbox = new CanaryTickOutbox(fixture.durable);
     await Promise.all([
-      outbox.enqueueAndDrain(config, 1_000),
-      outbox.enqueueAndDrain(config, 1_001),
+      outbox.enqueueAndDrain(config, 1_000, 1_000),
+      outbox.enqueueAndDrain(config, 1_001, 1_001),
     ]);
     const ids = fetcher.mock.calls.map(
       ([, init]) => JSON.parse(String(init?.body)).event_id,
@@ -181,6 +181,7 @@ describe("scheduled tick order", () => {
         trustedNow: () => 1_001,
       },
       1_000,
+      1_000,
     );
     await vi.waitFor(() => expect(fetcher).toHaveBeenCalled());
     pauseTransaction = true;
@@ -275,6 +276,7 @@ describe("scheduled tick order", () => {
         },
         trustedNow: () => 1_001,
       },
+      1_000,
       1_000,
     );
     expect(result).toContain("TIMED_OUT");
