@@ -56,7 +56,7 @@ function fixture(options: { mintStatus?: number; authorizeStatus?: number; mintK
     SPAWN_WORKER_PUBLIC_URL: "https://worker.example",
     CONCURRENCY_SLOTS: ns(slots),
   });
-  return { d, store, slotsStorage, runtime, order, calls, fetchMock };
+  return { d, store, slotsStorage, slots, runtime, order, calls, fetchMock };
 }
 
 async function queued(f: ReturnType<typeof fixture>, jobId: string) {
@@ -120,6 +120,15 @@ describe("spawn preparation before containment claim", () => {
     expect(f.order.indexOf("jit")).toBeLessThan(f.order.indexOf("provider"));
     expect(f.fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/runner/mint"))).toHaveLength(1);
     expect(getContainer).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves another preparation's capacity when this same-job mint fails", async () => {
+    const f = fixture({ mintStatus: 500 });
+    await f.slots.acquire(TENANT, "7105", 1, 10, 60_000, "winning-preparation");
+    await queued(f, "7105");
+    expect(getContainer).not.toHaveBeenCalled();
+    expect(f.slotsStorage.map.get("slot-holders:v1:7105")).toMatchObject({ holders: ["winning-preparation"], legacy: false });
+    expect(await f.slots.acquire(TENANT, "other-job", 1, 10, 60_000, "other-preparation")).toMatchObject({ admitted: false });
   });
 
   it("revokes only the new prepared PAT when another owner already holds the claim", async () => {

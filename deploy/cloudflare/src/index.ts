@@ -495,14 +495,19 @@ export class ConcurrencySlotsDO extends DurableObject<Env> {
     perKeyCap: number,
     fleetCap: number,
     ttlMs: number,
+    preparationId?: string,
   ): Promise<{ admitted: boolean; reason?: string }> {
-    return this.authority().acquire(key, jobId, perKeyCap, fleetCap, Date.now(), ttlMs);
+    return this.authority().acquire(key, jobId, perKeyCap, fleetCap, Date.now(), ttlMs, preparationId);
   }
 
   // Release a slot by jobId (globally unique — no key needed). Also prunes expired
   // slots. Idempotent: releasing an unknown/already-released jobId is a safe no-op.
   async release(jobId: string, nowMs = Date.now()): Promise<void> {
     await this.authority().release(jobId, nowMs);
+  }
+
+  async releasePreparation(jobId: string, preparationId: string): Promise<boolean> {
+    return this.authority().releasePreparation(jobId, preparationId);
   }
 
   /** Prune leases even when no acquire/release request arrives. */
@@ -2681,6 +2686,7 @@ export async function acquireConcurrencySlot(
   jobId: string,
   mint: ContainerEnvResult,
   repo: string,
+  preparationId?: string,
 ): Promise<{ admitted: boolean; reason?: string }> {
   const warm = mint.tenant != null && mint.maxConcurrency != null;
   const key = warm ? (mint.tenant as string) : `repo:${repo}`;
@@ -2694,6 +2700,7 @@ export async function acquireConcurrencySlot(
       perKeyCap,
       FLEET_MAX_CONCURRENCY,
       SLOT_TTL_S * 1000,
+      preparationId,
     );
   } catch (e) {
     // Infra hiccup ⇒ ADMIT (never block a legitimate job on a DO error). A clean
@@ -2758,9 +2765,14 @@ async function prepareSpawn(
   }
   const params = { jobId, repoFullName: repo, installationId, acquiringPat };
   const authorized = await authorizeRunner(env, params);
+  const preparationId = crypto.randomUUID();
+  const releasePreparation = async () => {
+    try { await concurrencySlots(env).releasePreparation(jobId, preparationId); }
+    catch { logEvent("error", "preparation_slot_release_pending", { jobId, preparationId }); }
+  };
   const slot = await acquireConcurrencySlot(env, jobId, {
     authz: "ok", containerEnv: {}, ...authorized,
-  }, repo);
+  }, repo, preparationId);
   if (!slot.admitted) {
     await bumpMetrics(env, "spawn_at_ceiling");
     logEvent("info", "spawn_at_ceiling", { jobId, repo, tenant: authorized.tenant, reason: slot.reason });
@@ -2773,7 +2785,7 @@ async function prepareSpawn(
       await containmentAuthority(env).registerCredential({ jobId, tenant: mint.tenant, patId: mint.patId });
     }
   } catch (error) {
-    await releaseConcurrencySlot(env, jobId);
+    await releasePreparation();
     throw error;
   }
   if (mint.authz !== "ok" || mint.tenant !== authorized.tenant
@@ -2781,7 +2793,7 @@ async function prepareSpawn(
     if (mint.patId && mint.tenant) {
       await revokeIssuedCredential(env, containmentAuthority(env), { jobId, tenant: mint.tenant, patId: mint.patId });
     }
-    await releaseConcurrencySlot(env, jobId);
+    await releasePreparation();
     await bumpMetrics(env, "spawn_forbidden");
     logEvent("error", "mint_forbidden", { jobId, repo, reason: "authorization_unavailable_or_changed" });
     throw new RunnerAuthorizationError();
@@ -2806,7 +2818,7 @@ async function prepareSpawn(
       await persistJobAttribution(authorityStore, { jobId, tenant: mint.tenant });
     } catch (e) {
       if (mint.patId) await revokeIssuedCredential(env, containmentAuthority(env), { jobId, tenant: mint.tenant, patId: mint.patId }).catch(() => {});
-      await releaseConcurrencySlot(env, jobId);
+      await releasePreparation();
       throw e;
     }
   }
