@@ -4,6 +4,8 @@
 // a Workers runtime, KV, or network.
 
 import type { Snapshot } from "./types";
+export { CRITICAL_RULES, CRITICAL_CHANNEL_ID, routeCriticalCondition } from "./critical_rule_matrix";
+export type { CriticalPillar, CriticalRoute } from "./critical_rule_matrix";
 
 export type Severity = "critical" | "warn" | "info";
 
