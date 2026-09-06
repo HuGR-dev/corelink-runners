@@ -672,7 +672,7 @@
         "T4-W1",
         "R2"
       ],
-      "next_action": "Review corrected durable lostcompletion persistence, immutable replay, storage-failure handling and cursor safety; same executor collects actual focused-test exit result. Pair against real T4-W1 authority.",
+      "next_action": "T4-W2 fixed-contract correction: isolate per-job ledger read failure; sole executor runs exact small regression, then root reviews. No CI/heavy suite per WP.",
       "blockers": [],
       "commits": [
         "303622df89b201e0a53e5e23cea4a4bcba7061d3",
@@ -690,16 +690,17 @@
     {
       "id": "T3-W3",
       "sprint": 2,
-      "state": "active",
+      "state": "prepared",
       "implementation": "partial",
       "owner": "wp_t3_w3",
       "dependencies": [
         "T4-W2"
       ],
-      "next_action": "Replace inert inventedregistry seam with actual verifiedauthority producer and crash-safe durable redrive; same executor owns review fixes and any necessary siblingpatchartifact.",
+      "next_action": "Executor returned candidate; root cold review pending against canonical acceptance and actual producer interfaces. No whole-WP, integration or delivery credit from author completion.",
       "blockers": [],
       "commits": [
-        "e39d7a0f5078215396c58cf08fd4a6bd4adb4ecd"
+        "e39d7a0f5078215396c58cf08fd4a6bd4adb4ecd",
+        "31ab8b9c7c83b39572051eea0825808a620a61ca"
       ],
       "review": {
         "status": "pending",
@@ -739,16 +740,18 @@
     {
       "id": "T3-W2",
       "sprint": 2,
-      "state": "active",
-      "implementation": "unknown",
+      "state": "prepared",
+      "implementation": "partial",
       "owner": "wp_t3_w2",
       "dependencies": [
         "T3-W1",
         "T7-W4b"
       ],
-      "next_action": "One isolated Luna executor implements canonical lifecycle, metric and mint403 classification acceptance; root reviews and integrates after T3-W1. Liveproof and fulltests remain sprint gates.",
+      "next_action": "Executor returned candidate; root cold review pending against canonical acceptance and actual producer interfaces. No whole-WP, integration or delivery credit from author completion.",
       "blockers": [],
-      "commits": [],
+      "commits": [
+        "1ef55b33260fbb722c4094b89a859be9c1b0c406"
+      ],
       "review": {
         "status": "pending",
         "commit": null,
@@ -845,13 +848,14 @@
       "dependencies": [
         "T3-W9"
       ],
-      "next_action": "Same executor replaces jtenant inventory with T4-W1 authoritative enumeration, preserves exact PAT obligations and fixes producer persistence/no-op defaults, independent dispatch and event-bound ACK; review pending.",
+      "next_action": "T8-W5 fixed-contract correction: credential receipts and suspension retry after partial success; sole executor runs exact small regression, then root reviews. No CI/heavy suite per WP.",
       "blockers": [],
       "commits": [
         "50ab03667fe8d877321b6096439677938e0b3918",
         "5a1ab636a3e4cc1f96bdf559c16a02a0d2253147",
         "e34819c30411ae02fdff415365aa3b6738e31529",
-        "651c5aae801632726be14cb4c874c04a015e058a"
+        "651c5aae801632726be14cb4c874c04a015e058a",
+        "8834e9f5bdbeb33cc5381767a615608da7294df7"
       ],
       "review": {
         "status": "pending",
@@ -1872,7 +1876,7 @@
     },
     {
       "at": "2026-09-05T23:17:43.225934+00:00",
-      "task": "Compose remaining Sprint1 implementation and resolve explicit external capability/owner decisions",
+      "task": "Rolling orchestration: close Sprint1 source gaps and integrate approved dependency-ready source while executors progress against frozen contracts",
       "owner": "root",
       "state": "active",
       "scope": [
@@ -2044,7 +2048,7 @@
       "at": "2026-09-06T01:04:27.306880+00:00",
       "task": "T4-W2 Chunked durable billing backfill and lost completion recovery",
       "owner": "wp_t4_w2",
-      "state": "active",
+      "state": "completed",
       "worktree": "/private/tmp/corelink-wp-t4_w2-20260905",
       "scope": [
         "/private/tmp/corelink-wp-t4_w2-20260905/ (WP-owned helpers/tests and minimal integration wiring; no shared checkout writes)"
@@ -2055,7 +2059,7 @@
       "at": "2026-09-06T01:04:27.306880+00:00",
       "task": "T3-W3 Dropped queued job reconciliation",
       "owner": "wp_t3_w3",
-      "state": "active",
+      "state": "completed",
       "worktree": "/private/tmp/corelink-wp-t3_w3-20260905",
       "scope": [
         "/private/tmp/corelink-wp-t3_w3-20260905/ (WP-owned helpers/tests and minimal integration wiring; no shared checkout writes)"
@@ -2077,7 +2081,7 @@
       "at": "2026-09-06T01:04:27.306880+00:00",
       "task": "T8-W5 Durable completion and suspension credential revocation",
       "owner": "wp_t8_w5",
-      "state": "active",
+      "state": "completed",
       "worktree": "/private/tmp/corelink-wp-t8_w5-20260905",
       "scope": [
         "/private/tmp/corelink-wp-t8_w5-20260905/ (WP-owned helpers/tests and minimal integration wiring; no shared checkout writes)"
@@ -2088,12 +2092,43 @@
       "at": "2026-09-06T01:19:54.713935+00:00",
       "task": "T3-W2 Worker lifecycle and mint failure classification",
       "owner": "wp_t3_w2",
-      "state": "active",
+      "state": "completed",
       "worktree": "/private/tmp/corelink-wp-t3_w2-20260905",
       "scope": [
         "/private/tmp/corelink-wp-t3_w2-20260905/"
       ],
       "integration_rule": "One executor per WP; isolated source preparation only. Canonical dependency order, sprint CI/heavy tests only, no live actions."
+    },
+    {
+      "at": "2026-09-06T01:57:35.694878+00:00",
+      "task": "T4-W2 independent first-pass source review (read-only; root retains final judgment)",
+      "owner": "billing_review",
+      "state": "completed",
+      "scope": [],
+      "wp": "T4-W2",
+      "role": "reviewer"
+    },
+    {
+      "at": "2026-09-06T02:00:41.671551+00:00",
+      "task": "T4-W2 fixed-contract correction: isolate per-job ledger read failure",
+      "owner": "wp_t4_w2",
+      "state": "active",
+      "scope": [
+        "/private/tmp/corelink-wp-t4_w2-20260905/"
+      ],
+      "wp": "T4-W2",
+      "role": "executor"
+    },
+    {
+      "at": "2026-09-06T02:00:41.671551+00:00",
+      "task": "T8-W5 fixed-contract correction: credential receipts and suspension retry after partial success",
+      "owner": "wp_t8_w5",
+      "state": "active",
+      "scope": [
+        "/private/tmp/corelink-wp-t8_w5-20260905/"
+      ],
+      "wp": "T8-W5",
+      "role": "executor"
     }
   ]
 }
