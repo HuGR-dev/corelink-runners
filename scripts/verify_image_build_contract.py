@@ -46,6 +46,10 @@ def check(workflow: str, dockerfile: str, wrangler: str, devenv_dockerfile: str)
         raise ContractError("checkout action must remain pinned to the recorded commit")
     if "concurrency:\n" not in workflow or "cancel-in-progress: false" not in workflow:
         raise ContractError("image lane must serialize disk-heavy builds without canceling pushes")
+    if "group: corelink-runners-image-builder\n" not in workflow or re.search(
+        r"(?m)^  group:.*github\.", workflow
+    ):
+        raise ContractError("image builder concurrency group must be global and stable across refs")
     if workflow.count("if: github.event_name != 'pull_request'") != 3:
         raise ContractError("each registry push must be gated away from pull_request")
     step_blocks = re.findall(r"(?ms)^      - name: ([^\n]+)\n(.*?)(?=^      - name: |\Z)", workflow)
@@ -106,6 +110,7 @@ MUTATIONS = (
     Mutation("remove-pr-trigger", "  pull_request:\n    paths:", "  # pull_request removed", "bounded PR and explicit dispatch", "workflow"),
     Mutation("unpin-checkout", "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2", "actions/checkout@v4", "checkout action must remain pinned", "workflow"),
     Mutation("remove-concurrency", "concurrency:\n", "# concurrency removed\n", "serialize disk-heavy builds", "workflow"),
+    Mutation("partition-concurrency-by-ref", "group: corelink-runners-image-builder", "group: build-cf-container-images-${{ github.ref }}", "global and stable", "workflow"),
     Mutation("remove-push-gate", "if: github.event_name != 'pull_request'", "if: always()", "each registry push must be gated", "workflow"),
     Mutation("remove-pr-cleanup", "if: always()", "if: never()", "always-run cleanup", "workflow"),
     Mutation("inject-secret-into-build", "- name: Build RunnerContainer image", "- name: Build RunnerContainer image\n        env:\n          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}", "only in push steps", "workflow"),
