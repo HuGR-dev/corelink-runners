@@ -12,6 +12,7 @@
 // remaining gate is a LIVE-account smoke (SDK behavior against real Containers),
 // owner-gated at deploy — the mocks assert our contract, not Cloudflare's runtime.
 
+import { CRED_STASH_CLOSED_KEY, expireCredential, stashCredential, wipeCredential } from "./lib/cred_stash_lifecycle.js";
 import { Container, getContainer } from "@cloudflare/containers";
 import { DurableObject } from "cloudflare:workers";
 import { EXEC_SERVER_AUTH_TOKEN_FILE } from "./lib/clw";
@@ -412,14 +413,8 @@ export class CredStashDO extends DurableObject<Env> {
   // existing ticket is KEPT and returned, not overwritten with a fresh one. Returns
   // the EFFECTIVE ticket to inject, so whichever container actually registers
   // redeems a ticket the DO still recognizes.
-  async stash(ticket: string, cred: StashedCred, ttlMs: number): Promise<string> {
-    const existing = await this.ctx.storage.get<StashRecord>("rec");
-    const now = Date.now();
-    if (existing && now <= existing.expiresMs) return existing.ticket; // reuse — don't clobber
-    const expiresMs = now + ttlMs;
-    await this.ctx.storage.put("rec", { ticket, cred, expiresMs });
-    await this.ctx.storage.setAlarm(expiresMs);
-    return ticket;
+  async stash(ticket: string, cred: StashedCred, ttlMs: number, absoluteExpiresAtMs?: number): Promise<string> {
+    return this.ctx.blockConcurrencyWhile(() => stashCredential(this.ctx.storage, ticket, cred, ttlMs, absoluteExpiresAtMs));
   }
 
   // MULTI-USE redeem (lease-scoped). `{status, cred?}`: 200 (live + correct ticket,
@@ -430,26 +425,25 @@ export class CredStashDO extends DurableObject<Env> {
   // decision is the PURE `decideRedeem` (lib, unit-tested), this wrapper only
   // applies the `wipe` at expiry to strongly-consistent DO storage.
   async redeem(ticket: string): Promise<{ status: number; cred?: StashedCred }> {
-    const rec = await this.ctx.storage.get<StashRecord>("rec");
-    const d = decideRedeem(rec, false, Date.now(), ticket);
-    if (d.wipe) await this.ctx.storage.deleteAll();
-    return { status: d.status, cred: d.cred };
+    return this.ctx.blockConcurrencyWhile(async () => {
+      if (await this.ctx.storage.get(CRED_STASH_CLOSED_KEY) !== undefined) return { status: 404 };
+      const rec = await this.ctx.storage.get<StashRecord>("rec");
+      const d = decideRedeem(rec, false, Date.now(), ticket);
+      if (d.wipe) await this.ctx.storage.deleteAll();
+      return { status: d.status, cred: d.cred };
+    });
   }
 
-  // TTL cleanup — wipe the stash at lease expiry (multi-use until then).
+  // Keep DevEnv closure tombstones until expiry, including on a stale queued alarm.
   async alarm(): Promise<void> {
-    await this.ctx.storage.deleteAll();
+    await this.ctx.blockConcurrencyWhile(() => expireCredential(this.ctx.storage));
   }
 
-  // F2-3 (W3): explicit wipe, called at job COMPLETION to close the credential
-  // window immediately instead of waiting for the lease-TTL alarm. After this a
-  // redeem of the ticket returns 404 (no stash), so the per-job cas:rw PAT is no
-  // longer retrievable by in-lease code once the job ends. Idempotent (deleteAll
-  // on an already-empty store is a no-op); also clears the pending TTL alarm.
-  // The two ops are independent (deleteAlarm consumes nothing from deleteAll),
-  // so they run concurrently — same end state, half the round-trips.
-  async wipe(): Promise<void> {
-    await Promise.all([this.ctx.storage.deleteAll(), this.ctx.storage.deleteAlarm()]);
+  // Normal job completion wipes the stash and alarm. DevEnv passes the absolute
+  // PAT deadline to retain a closure tombstone: a delayed stash RPC cannot make
+  // a credential redeemable after cleanup was confirmed. Both forms are idempotent.
+  async wipe(absoluteExpiresAtMs?: number): Promise<void> {
+    await this.ctx.blockConcurrencyWhile(() => wipeCredential(this.ctx.storage, absoluteExpiresAtMs));
   }
 }
 

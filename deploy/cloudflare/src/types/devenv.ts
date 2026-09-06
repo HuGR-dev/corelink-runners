@@ -136,6 +136,7 @@ export type DevenvState =
     };
 
 // ─── RPC Payloads ────────────────────────────────────────────────────
+/** @deprecated Legacy payload accepted only by the explicit-denial startDevenv RPC. */
 export interface StartPayload {
   readonly config: {
     readonly workspaceName: string;
@@ -145,6 +146,27 @@ export interface StartPayload {
     readonly clwTenant: string;
     readonly clwToken: string;
   };
+}
+
+/** Trusted cross-worker RPC input; never accepted from HTTP request bodies. */
+export interface AuthorizedDevenvStart {
+  readonly config: {
+    readonly workspaceName: string;
+    readonly profileName: string;
+    readonly tier?: DevenvTier;
+  };
+  readonly grant: {
+    readonly tenantId: string;
+    readonly sessionUuid: string;
+    readonly casPat: string;
+    readonly patId: string;
+    readonly expiresAtMs: number;
+  };
+}
+
+export interface AuthorizedDevenvAck {
+  readonly sessionUuid: string;
+  readonly status: "starting" | "running";
 }
 
 export interface StatusResponse {

@@ -91,6 +91,15 @@ error() {
     echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] [entrypoint] ERROR: $*" >&2
 }
 
+# A caller must not restore the legacy raw PAT path, even alongside a ticket.
+if [[ -v CLW_TOKEN || -v CORELINK_TOKEN ]]; then
+    error "raw CAS credentials are forbidden; an authorized broker ticket is required"
+    exit 1
+fi
+: "${CLW_CRED_TICKET:?CLW_CRED_TICKET must be set}"
+: "${CLW_LEASE_ID:?CLW_LEASE_ID must be set}"
+: "${CLW_FABRIC_ENDPOINT:?CLW_FABRIC_ENDPOINT must be set}"
+
 # ── 1. Validate Environment Variables ─────────────────────────────────
 : "${CLW_TENANT:?CLW_TENANT must be set}"
 : "${WORKSPACE_NAME:?WORKSPACE_NAME must be set}"
@@ -126,10 +135,7 @@ CLW_REF_DOMAIN="${CLW_REF_DOMAIN:-runner}"
 PROFILE_DIR="/data/chrome"
 WORKSPACE_DIR="/data/workspace"
 
-# ── 2. CLW auth remains available only to the hydration command ────────
-if [[ -n "${CLW_TOKEN:-}" ]]; then
-    export CLW_TOKEN="${CLW_TOKEN}"
-fi
+# clw v0.1.5 redeems the broker ticket in process for each network command.
 
 # ── 3. Hydration Functions ───────────────────────────────────────────
 clw_ref_exists() {
