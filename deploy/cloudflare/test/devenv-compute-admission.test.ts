@@ -117,14 +117,30 @@ describe("authorized DevEnv compute composition", () => {
     expect(f.instance.start).toHaveBeenCalledTimes(1); expect(f.stored.has(DEVENV_CREDENTIAL_KEY)).toBe(false);
   });
 
-  it("stages ownership before a scheduling failure and performs no remote or provider effect", async () => {
-    const fetcher = vi.fn(async (url: string) => response(url)); const f = fixture(fetcher);
+  it("recovers a scheduling failure after restart before admitting a new session", async () => {
+    const fetcher = vi.fn(async (url: string, init?: RequestInit) => {
+      const authorization = new Headers(init?.headers).get("authorization")!;
+      const encoded = authorization.slice("ComputeGrant ".length).split(".")[0];
+      const payload = JSON.parse(atob(encoded.replace(/-/g, "+").replace(/_/g, "/")));
+      return new Response(JSON.stringify({ reservation_id: payload.reservation_id,
+        state: url.endsWith("/cancel") ? "cancelled" : url.endsWith("/reserve") ? "prepared" : "active" }));
+    });
+    const f = fixture(fetcher);
     vi.mocked(f.instance.schedule).mockRejectedValueOnce(new Error("scheduler unavailable"));
     const id = "33333333-3333-4333-8333-333333333333";
     await expect(f.instance.prepareAuthorizedCompute({ token: token(id), reservationId: id, tenantId, workloadKind: "devenv", workloadId: id, vcpuCount: 4, maximumWallMs: 28_800_000 })).rejects.toThrow("scheduler unavailable");
     expect(fetcher).not.toHaveBeenCalled(); expect(f.instance.start).not.toHaveBeenCalled();
     expect((f.stored.get(`compute:obligation:${id}`) as { phase: string }).phase).toBe("preparing");
     expect(await f.ctx.storage.get("compute:devenv-session")).toBe(id);
+    expect(f.stashed.size).toBe(0);
+    const restarted = new RunnerDevEnvDO(f.ctx, f.env);
+    await f.ctx.blockConcurrencyWhile(async () => undefined);
+    await restarted.prepareAuthorizedCompute({ token: token(), reservationId: sessionUuid, tenantId,
+      workloadKind: "devenv", workloadId: sessionUuid, vcpuCount: 4, maximumWallMs: 28_800_000 });
+    expect(fetcher.mock.calls.map(([url]) => new URL(url).pathname.split("/").pop())).toEqual(["cancel", "reserve", "activate"]);
+    expect(f.stored.get(`compute:obligation:${id}`)).toMatchObject({ phase: "terminal", terminalKind: "cancelled" });
+    await expect(restarted.startAuthorizedDevenv(grant())).resolves.toMatchObject({ sessionUuid, status: "starting" });
+    expect(restarted.start).toHaveBeenCalledTimes(1);
   });
 
   it("cancels a refused reservation before admitting a new session", async () => {
@@ -140,6 +156,8 @@ describe("authorized DevEnv compute composition", () => {
     await expect(f.instance.prepareAuthorizedCompute({ token: token(oldId), reservationId: oldId, tenantId, workloadKind: "devenv", workloadId: oldId, vcpuCount: 4, maximumWallMs: 28_800_000 })).rejects.toThrow();
     await f.instance.prepareAuthorizedCompute({ token: token(newId), reservationId: newId, tenantId, workloadKind: "devenv", workloadId: newId, vcpuCount: 4, maximumWallMs: 28_800_000 });
     expect(fetcher).toHaveBeenCalledTimes(4); expect(f.instance.start).not.toHaveBeenCalled();
+    expect(fetcher.mock.calls.map(([url]) => new URL(url).pathname.split("/").pop())).toEqual(["reserve", "cancel", "reserve", "activate"]);
+    expect(f.stashed.size).toBe(0);
     expect((f.stored.get(`compute:obligation:${oldId}`) as { terminalKind: string }).terminalKind).toBe("cancelled");
     expect((f.stored.get(`compute:obligation:${newId}`) as { phase: string }).phase).toBe("active");
   });
@@ -157,6 +175,8 @@ describe("authorized DevEnv compute composition", () => {
     await expect(f.instance.prepareAuthorizedCompute({ token: token(newId), reservationId: newId, tenantId, workloadKind: "devenv", workloadId: newId, vcpuCount: 4, maximumWallMs: 28_800_000 })).rejects.toThrow();
     expect(await f.ctx.storage.get("compute:devenv-session")).toBe(oldId); expect(f.instance.start).not.toHaveBeenCalled();
     expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(f.stored.has(`compute:obligation:${newId}`)).toBe(false);
+    expect(f.stashed.size).toBe(0);
   });
 
   it("carries the drain cursor across restart before reaching an expired preparation", async () => {

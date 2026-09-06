@@ -170,7 +170,7 @@ async fn transition(
     target: &str,
     allowed: &str,
 ) -> anyhow::Result<ExternalComputeReceipt> {
-    validate(r)?;
+    let reserved = validate(r)?;
     let id = r.reservation_id.clone();
     let mut client = ledger.pool.get().await?;
     let tx = client.transaction().await?;
@@ -179,7 +179,37 @@ async fn transition(
         &[&r.tenant_id],
     )
     .await?;
-    let row = tx.query_opt("SELECT state,tenant,workload_kind,workload_id,period_key,ceiling_vcpu_ms,vcpu_count,maximum_wall_ms,grant_expires_at_ms,grant_digest FROM external_compute_reservations WHERE reservation_id=$1::text::uuid", &[&id]).await?.ok_or_else(conflict)?;
+    let row = tx.query_opt("SELECT state,tenant,workload_kind,workload_id,period_key,ceiling_vcpu_ms,vcpu_count,maximum_wall_ms,grant_expires_at_ms,grant_digest FROM external_compute_reservations WHERE reservation_id=$1::text::uuid", &[&id]).await?;
+    let Some(row) = row else {
+        if target != "cancelled" {
+            return Err(conflict());
+        }
+        // Persist a full-tuple fence before acknowledging cancellation. A
+        // reserve whose request was delayed must never reopen this attempt.
+        tx.execute(
+            "INSERT INTO external_compute_reservations \
+             (reservation_id,tenant,workload_kind,workload_id,period_key,ceiling_vcpu_ms,\
+              vcpu_count,maximum_wall_ms,grant_expires_at_ms,grant_digest,state,reserved_vcpu_ms) \
+             VALUES ($1::text::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,'cancelled',$11)",
+            &[
+                &id,
+                &r.tenant_id,
+                &kind(&r.workload_kind),
+                &r.workload_id,
+                &(r.period_key as i32),
+                &checked_i64(r.ceiling_vcpu_ms)?,
+                &(r.vcpu_count as i32),
+                &checked_i64(r.maximum_wall_ms)?,
+                &checked_i64(r.grant_expires_at_ms)?,
+                &r.grant_digest,
+                &reserved,
+            ],
+        )
+        .await
+        .map_err(database_error)?;
+        tx.commit().await?;
+        return Ok(receipt(&r.reservation_id, ExternalComputeState::Cancelled));
+    };
     let same = row.get::<_, String>(1) == r.tenant_id
         && row.get::<_, String>(2) == kind(&r.workload_kind)
         && row.get::<_, String>(3) == r.workload_id
@@ -243,27 +273,7 @@ pub(super) fn cancel(
     l: &PgLedger,
     r: &ExternalComputeReservation,
 ) -> anyhow::Result<ExternalComputeReceipt> {
-    let reserved = validate(r)?;
-    let id = r.reservation_id.clone();
-    l.block_on(async {
-        let mut client = l.pool.get().await?;
-        let tx = client.transaction().await?;
-        tx.execute("SELECT pg_advisory_xact_lock(hashtext($1))", &[&r.tenant_id]).await?;
-        let row = tx.query_opt("SELECT state,tenant,workload_kind,workload_id,period_key,ceiling_vcpu_ms,vcpu_count,maximum_wall_ms,grant_expires_at_ms,grant_digest FROM external_compute_reservations WHERE reservation_id=$1::text::uuid", &[&id]).await?;
-        let Some(row) = row else {
-            tx.execute("INSERT INTO external_compute_reservations (reservation_id,tenant,workload_kind,workload_id,period_key,ceiling_vcpu_ms,vcpu_count,maximum_wall_ms,grant_expires_at_ms,grant_digest,state,reserved_vcpu_ms) VALUES ($1::text::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,'cancelled',$11)", &[&id,&r.tenant_id,&kind(&r.workload_kind),&r.workload_id,&(r.period_key as i32),&checked_i64(r.ceiling_vcpu_ms)?,&(r.vcpu_count as i32),&checked_i64(r.maximum_wall_ms)?,&checked_i64(r.grant_expires_at_ms)?,&r.grant_digest,&reserved]).await.map_err(database_error)?;
-            tx.commit().await?;
-            return Ok(receipt(&r.reservation_id, ExternalComputeState::Cancelled));
-        };
-        let same = row.get::<_,String>(1)==r.tenant_id && row.get::<_,String>(2)==kind(&r.workload_kind) && row.get::<_,String>(3)==r.workload_id && row.get::<_,i32>(4)==r.period_key as i32 && row.get::<_,i64>(5)==r.ceiling_vcpu_ms as i64 && row.get::<_,i32>(6)==r.vcpu_count as i32 && row.get::<_,i64>(7)==r.maximum_wall_ms as i64 && row.get::<_,i64>(8)==r.grant_expires_at_ms as i64 && row.get::<_,String>(9)==r.grant_digest;
-        if !same { tx.rollback().await.ok(); return Err(conflict()); }
-        let state: String = row.get(0);
-        if state == "cancelled" { tx.rollback().await.ok(); return Ok(receipt(&r.reservation_id, ExternalComputeState::Cancelled)); }
-        if state != "prepared" { tx.rollback().await.ok(); return Err(conflict()); }
-        tx.execute("UPDATE external_compute_reservations SET state='cancelled' WHERE reservation_id=$1::text::uuid AND state='prepared'", &[&id]).await?;
-        tx.commit().await?;
-        Ok(receipt(&r.reservation_id, ExternalComputeState::Cancelled))
-    })
+    l.block_on(transition(l, r, "cancelled", "prepared"))
 }
 
 pub(super) fn settle(
