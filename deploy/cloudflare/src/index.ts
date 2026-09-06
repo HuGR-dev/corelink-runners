@@ -195,7 +195,6 @@ import {
 } from "./containment_authority_records";
 import { canonicalWorkflowJobIdFromRaw } from "./workflow_job_id";
 import {
-  decodeJobAttribution,
   persistJobAttribution,
   readJobAttribution,
   type JobAttribution,
@@ -558,8 +557,6 @@ export class ContainmentDO extends DurableObject<Env> {
     tenantId: string,
     cursor?: string,
   ): Promise<{ records: JobAttribution[]; cursor?: string; complete: boolean }> { return new JobAttributionAuthority(this.ctx.storage).listJobAttributions(tenantId, cursor); }
-
-
 
   async registerCredential(identity: CredentialIdentity): Promise<void> { return new CredentialObligationAuthority(this.ctx.storage).registerCredential(identity); }
 
