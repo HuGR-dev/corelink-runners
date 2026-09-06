@@ -4,11 +4,11 @@ import { classifyMintForbidden } from "../src/lib";
 import { COUNTER_NAMES } from "../src/metrics";
 import { reapStaleSpawnClaims } from "../src/index";
 
-function fakeKv(entries: Record<string, string>) {
+function fakeKv(entries: Record<string, string>, onGet?: (key: string, store: Map<string, string>) => void) {
   const store = new Map(Object.entries(entries));
   return {
     store,
-    async get(key: string) { return store.get(key) ?? null; },
+    async get(key: string) { onGet?.(key, store); return store.get(key) ?? null; },
     async put(key: string, value: string) { store.set(key, value); },
     async delete(key: string) { store.delete(key); },
     async list({ prefix }: { prefix: string }) {
@@ -33,12 +33,32 @@ describe("T3-W2 lifecycle contracts", () => {
     ]));
   });
 
-  it("reaps an old claim only when no durable handle exists", async () => {
+  it("keeps every legacy claim and slot intact while cancellation authority is deferred", async () => {
     const now = 1_800_000_000_000;
-    const kv = fakeKv({ "spawn:stale": String(now - 7_200_001), "spawn:live": String(now - 7_200_001), "jhandle:live": "h-live" });
-    const n = await reapStaleSpawnClaims({ RUNNER_JOB_PATS: kv } as never, now);
-    expect(n).toBe(1);
-    expect(kv.store.has("spawn:stale")).toBe(false);
+    const kv = fakeKv({
+      "spawn:stale": String(now - 7_200_001),
+      "spawn:live": String(now - 7_200_001),
+      "spawn:fresh": String(now - 1_000),
+      "spawn:legacy": "1",
+      "spawn:corrupt": "not-a-timestamp",
+      "spawn:race": String(now - 7_200_001),
+      "jhandle:live": "h-live",
+    }, (key, store) => {
+      if (key === "jhandle:race") store.set("spawn:race", String(now));
+    });
+    const release = vi.fn(async () => {});
+    const env = {
+      RUNNER_JOB_PATS: kv,
+      CONCURRENCY_SLOTS: { idFromName: () => "global", get: () => ({ release }) },
+    };
+    const n = await reapStaleSpawnClaims(env as never, now);
+    expect(n).toBe(0);
+    expect(release).not.toHaveBeenCalled();
+    expect(kv.store.has("spawn:stale")).toBe(true);
     expect(kv.store.has("spawn:live")).toBe(true);
+    expect(kv.store.has("spawn:fresh")).toBe(true);
+    expect(kv.store.has("spawn:legacy")).toBe(true);
+    expect(kv.store.has("spawn:corrupt")).toBe(true);
+    expect(kv.store.get("spawn:race")).toBe(String(now));
   });
 });

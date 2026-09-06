@@ -2492,7 +2492,13 @@ async function releaseConcurrencySlot(env: Env, jobId: string): Promise<void> {
   }
 }
 
-/** Reap claims whose owner never produced a durable handle. */
+// This legacy KV-only view cannot prove provider ownership or serialize against
+// a replacement claim. Keep it diagnostic until provider cancellation and a
+// transactional generation authority exist (F007/T3-W16); it must never mutate
+// a claim or release capacity based on absence from a separate KV key.
+const STALE_CLAIM_DIAGNOSTIC_LIMIT = 32;
+
+/** Observe old claims; authoritative cancellation remains deferred. */
 export async function reapStaleSpawnClaims(env: Env, nowMs = Date.now()): Promise<number> {
   const kv = env.RUNNER_JOB_PATS;
   if (!kv) return 0;
@@ -2503,7 +2509,7 @@ export async function reapStaleSpawnClaims(env: Env, nowMs = Date.now()): Promis
     logEvent("error", "stale_spawn_claim_list_failed", { error: (e as Error).message });
     return 0;
   }
-  let reaped = 0;
+  let diagnosed = 0;
   for (const { name } of listed.keys) {
     const jobId = name.slice("spawn:".length);
     if (!jobId) continue;
@@ -2514,22 +2520,24 @@ export async function reapStaleSpawnClaims(env: Env, nowMs = Date.now()): Promis
       continue;
     }
     const age = spawnClaimAgeMs(raw, nowMs);
-    if (age !== null && age < SPAWN_CLAIM_TTL_S * 1000) continue;
-    // A durable handle proves this claim belongs to a live lifecycle. Do not
-    // clear it merely because the KV TTL/claim clock is old.
+    if (age === null || age < SPAWN_CLAIM_TTL_S * 1000) continue;
     let handle: string | null;
     try {
       handle = await kv.get(jobHandleKey(jobId));
     } catch {
       continue;
     }
-    if (handle) continue;
-    await kv.delete(name).catch(() => {});
-    await releaseConcurrencySlot(env, jobId);
-    reaped++;
+    if (diagnosed < STALE_CLAIM_DIAGNOSTIC_LIMIT) {
+      logEvent("error", "stale_spawn_claim_candidate", {
+        jobId,
+        ageMs: age,
+        durableHandlePresent: Boolean(handle),
+        authority: "deferred_provider_cancellation",
+      });
+      diagnosed++;
+    }
   }
-  if (reaped > 0) await bumpMetrics(env, ...Array(reaped).fill("stale_spawn_claim_reaped"));
-  return reaped;
+  return 0;
 }
 
 // Atomically acquire a concurrency slot for THIS spawn — warm OR cold:
