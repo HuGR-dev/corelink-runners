@@ -6,11 +6,12 @@ export interface CredentialIdentity {
   jobId: string;
   tenant: string;
   patId: string;
+  lifecycleGeneration?: string;
 }
 
 export type CredentialSelection =
   | { kind: "job"; jobId: string }
-  | { kind: "tenant"; tenant: string }
+  | { kind: "tenant"; tenant: string; throughGeneration?: string }
   | { kind: "all" };
 
 export interface CredentialPage {
@@ -34,6 +35,8 @@ export interface CredentialAuthority {
    * outside the transaction, preventing further start effects without losing PAT.
    */
   closeJobCredentials(jobId: string): Promise<{ known: boolean }>;
+  /** Permanently close all credentials for a tenant through a lifecycle generation. */
+  closeTenantCredentials(tenant: string, throughGeneration: string): Promise<void>;
   /** Explicit durable transition registered -> revoke_requested. Registration
    * alone NEVER authorizes a background retry to revoke a live credential.
    * Exact already-requested/revoked identity is idempotent; missing/corrupt
