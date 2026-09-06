@@ -228,6 +228,21 @@ future `src/trusted_time.ts`, with matching focused tests. It is necessary for
 T6-W15's implementation but does not alter any acceptance gate, sprint, or the
 qualification requirements recorded above.
 
+## T6-W15 wave 2 contract and auxiliary paths
+
+The frozen wave 2 contract is copied byte-for-byte to
+`docs/plan/execution/2026-09-06-monitor-wave2-contract.md`. It assigns
+types/config to `admission`, incidents to `devenv`, lifecycle to `engine`,
+evidence log to `mint`, witness to `containment`, producer wire to `canary`,
+and infrastructure to `external_monitor`. The integration owner remains the
+sole owner of shared package, lockfile, runtime index, and canonical composition.
+
+The bounded T6-W15 extensions are `src/evidence_log.ts`, `src/witness.ts`, and
+`infra/**`; they are support paths, not a change to acceptance gates or sprint
+scope. The package now pins the real AWS Lambda and Secrets Manager clients at
+`3.1127.0` for a later qualified-version `InvokeFunction` and `GetSecretValue`
+runtime. No runtime implementation, cloud mutation, or placeholder was added.
+
 ## Earlier integrated packets
 
 The prior packets in this tree include:
