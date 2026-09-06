@@ -363,30 +363,15 @@ RUN mkdir -p /opt/action-archive-cache && \
 # Same PINNED digest as every download stage — all stages MUST use the identical base.
 FROM ubuntu:24.04@sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae77ff1dc54
 
-# Declared HERE, before the LABEL that advertises them, so the label and the
-# install below are ONE literal each instead of two that must agree. The first
-# draft of this PR hardcoded the same values in both places; cold review pointed
-# out that nothing reconciles them and nothing consumes the labels either, so a
-# drift would be silent AND undetectable. Single-sourcing removes the drift at
-# the cost of nothing. (The remaining labels follow the file's older pattern of
-# hand-kept literals — pre-existing, not touched here.)
+# Build arguments are declared once and feed the installs below. Do not mirror
+# tool versions into OCI labels: no scheduler or runtime consumer reads them,
+# and an unconsumed label is not a contract.
 ARG NIGHTLY_DATE=2026-08-31
 ARG CARGO_FUZZ_VERSION=0.13.2
 
 LABEL org.opencontainers.image.title="CoreLink ephemeral GitHub Actions runner" \
       org.opencontainers.image.description="One-shot ephemeral runner for the CoreLink fabric (ADR-0007 Stage A)" \
-      org.opencontainers.image.vendor="HuGR / CoreLink" \
-      corelink.runner.version="2.335.1" \
-      corelink.rust.toolchain="1.96.0,1.91.1" \
-      corelink.rust.nightly="nightly-${NIGHTLY_DATE}" \
-      corelink.cargo_fuzz.version="${CARGO_FUZZ_VERSION}" \
-      corelink.python3="present" \
-      corelink.python3.jsonschema="present" \
-      corelink.gh.version="2.97.0" \
-      corelink.clw.version="0.1.4" \
-      corelink.sccache.version="0.17.0" \
-      corelink.node.version="22.23.2" \
-      corelink.pnpm.version="10.32.1"
+      org.opencontainers.image.vendor="HuGR / CoreLink"
 
 # ── System packages ───────────────────────────────────────────────────────────
 # git is required by most GitHub Actions (actions/checkout etc.)
@@ -681,7 +666,7 @@ RUN curl -fsSL "https://static.rust-lang.org/rustup/archive/${RUSTUP_INIT_VERSIO
 # To bump: pick a new date, and re-run the corelink-server fuzz lanes — a nightly
 # bump can break `cargo fuzz` compilation, which is exactly why this is pinned.
 # NIGHTLY_DATE is declared once, at the top of this stage, and feeds BOTH the
-# `corelink.rust.nightly` LABEL and the install below. One literal, two uses.
+# the install below. One literal, one use.
 ENV CORELINK_NIGHTLY=nightly-${NIGHTLY_DATE}
 RUN rustup toolchain install "nightly-${NIGHTLY_DATE}" \
         --profile minimal \

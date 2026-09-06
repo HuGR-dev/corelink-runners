@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-09-05 — bounded container-image build lane
+
+The Cloudflare container-image workflow now validates image changes on limited
+pull-request paths without requiring registry credentials, while keeping
+credentialed publishing on explicit dispatch. It fails closed below a bounded
+containerd disk budget, cleans local build state after each pushed image, and
+checks its trigger, digest handoff, OCI-label, and no-fake-RunnerDevEnv
+contracts with focused mutation tests.
+
 ### 2026-09-02 — T7-W1 current ledger and immutable finding identity
 
 The current-facing roadmap now indexes the complete remediation ledger: the 247-finding

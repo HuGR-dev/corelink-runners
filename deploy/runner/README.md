@@ -190,6 +190,14 @@ image is actually running, are in
 `build-cf-container-images.yml`) and pushed to the CF managed registry — that
 CF-registry `@sha256` is what the fabric pins. No ghcr anywhere in the loop.
 
+The image workflow is intentionally split: pull requests build all image
+contexts on the `corelink` runner without registry credentials or a push;
+operators use `workflow_dispatch` for the credentialed build-and-push. Before
+materializing layers it requires a configurable free-space floor
+(`RUNNER_IMAGE_MIN_FREE_MB`, default 8192 MiB), and it releases the local image
+and BuildKit cache after each successful push. A successful preflight is only a
+capacity bound, not proof that a particular image will fit.
+
 **Fallback-substrate manual path** (`build-and-push.sh`) — ONLY for the ADR-0008
 Northflank fallback, which cannot pull from the CF-internal registry and so needs
 a plain public OCI image. The script is registry-neutral: `REGISTRY` is REQUIRED
