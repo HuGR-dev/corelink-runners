@@ -135,6 +135,88 @@ describe("authoritative reconciler registry", () => {
     )).resolves.toBeNull();
     expect(fetcher).not.toHaveBeenCalled();
   });
+
+  it("aborts a pending fetch at the five-second deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      let aborted = false;
+      const fetcher = vi.fn((_url: string, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          aborted = true;
+          reject(new DOMException("aborted", "AbortError"));
+        }, { once: true });
+      }));
+      const pending = discoverAuthorizationCandidates(
+        { RECONCILER_REGISTRY_URL: "https://registry.test", RECONCILER_REGISTRY_AUTH_KEY: "k" }, fetcher,
+      );
+      await vi.advanceTimersByTimeAsync(5_001);
+      await expect(pending).resolves.toBeNull();
+      expect(aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("aborts a pending body reader at the five-second deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      let aborted = false;
+      const fetcher = vi.fn((_url: string, init?: RequestInit) => new Response(new ReadableStream({
+        start(controller) {
+          init?.signal?.addEventListener("abort", () => {
+            aborted = true;
+            controller.error(new DOMException("aborted", "AbortError"));
+          }, { once: true });
+        },
+      })));
+      const pending = discoverAuthorizationCandidates(
+        { RECONCILER_REGISTRY_URL: "https://registry.test", RECONCILER_REGISTRY_AUTH_KEY: "k" }, fetcher,
+      );
+      await vi.advanceTimersByTimeAsync(5_001);
+      await expect(pending).resolves.toBeNull();
+      expect(aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("accepts exactly 256 KiB and refuses one byte over the response bound", async () => {
+    const bodyOfSize = (size: number): Uint8Array => {
+      const prefix = JSON.stringify({
+        schema_version: 1,
+        source: "runner_authorization_candidates",
+        repositories: [],
+        next_cursor: null,
+        padding: "",
+      });
+      const padding = size - new TextEncoder().encode(prefix).byteLength;
+      if (padding < 0) throw new Error("fixture prefix exceeds requested bound");
+      return new TextEncoder().encode(JSON.stringify({
+        schema_version: 1,
+        source: "runner_authorization_candidates",
+        repositories: [],
+        next_cursor: null,
+        padding: "x".repeat(padding),
+      }));
+    };
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(new Response(bodyOfSize(256 * 1024)))
+      .mockResolvedValueOnce(new Response(bodyOfSize(256 * 1024 + 1)));
+    const env = { RECONCILER_REGISTRY_URL: "https://registry.test", RECONCILER_REGISTRY_AUTH_KEY: "k" };
+    await expect(discoverAuthorizationCandidates(env, fetcher)).resolves.toEqual([]);
+    await expect(discoverAuthorizationCandidates(env, fetcher)).resolves.toBeNull();
+  });
+
+  it("passes redirect:error to fetch and fails closed when the fetcher rejects a redirect", async () => {
+    const fetcher = vi.fn((_url: string, init?: RequestInit) => {
+      expect(init?.redirect).toBe("error");
+      return Promise.reject(new TypeError("redirect disallowed"));
+    });
+    await expect(discoverAuthorizationCandidates(
+      { RECONCILER_REGISTRY_URL: "https://registry.test", RECONCILER_REGISTRY_AUTH_KEY: "k" }, fetcher,
+    )).resolves.toBeNull();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("durable reconciliation handoff", () => {
