@@ -121,9 +121,28 @@
 
 use std::time::{Duration, Instant};
 
-use corelink_fabric::SlotEventKind;
+use corelink_fabric::{SlotEventKind, TenantSuspensionEvent};
 use corelink_runner::envelope::{AbnormalKind, CloseReason};
 use corelink_runners_contracts::RunnerState;
+
+/// Compose the consumer envelope from the generation captured by this exact
+/// immutable outbox event. The consumer contract carries the generation as a
+/// decimal string; reject values outside the checked PostgreSQL boundary.
+fn suspension_envelope_body(
+    event: &TenantSuspensionEvent,
+    generation: anyhow::Result<u64>,
+) -> anyhow::Result<String> {
+    let generation = generation?;
+    if generation > i64::MAX as u64 {
+        anyhow::bail!("lifecycle generation exceeds i64::MAX");
+    }
+    Ok(serde_json::to_string(&serde_json::json!({
+        "event_id": event.event_id,
+        "tenant_id": event.tenant_id,
+        "action": "suspended",
+        "lifecycle_generation": generation.to_string(),
+    }))?)
+}
 
 /// Deliver the durable suspension outbox to the authenticated runner Worker.
 /// The URL and scoped lifecycle token are Cloudflare bindings forwarded into the
@@ -153,6 +172,19 @@ pub async fn dispatch_tenant_suspension_events(state: &crate::AppState) {
         base.trim_end_matches('/')
     );
     for event in events {
+        let body = match suspension_envelope_body(
+            &event,
+            state.ledger.tenant_suspension_generation(&event.event_id),
+        ) {
+            Ok(body) => body,
+            Err(e) => {
+                eprintln!(
+                    "suspension-outbox: generation lookup/encode failed event={}: {e:#}",
+                    event.event_id
+                );
+                continue;
+            }
+        };
         if let Err(e) = state
             .ledger
             .mark_tenant_suspension_event_attempt(&event.event_id)
@@ -163,17 +195,6 @@ pub async fn dispatch_tenant_suspension_events(state: &crate::AppState) {
             );
             continue;
         }
-        let body = match serde_json::to_string(&serde_json::json!({
-            "event_id": event.event_id,
-            "tenant_id": event.tenant_id,
-            "action": "suspended",
-        })) {
-            Ok(body) => body,
-            Err(e) => {
-                eprintln!("suspension-outbox: encode failed: {e}");
-                continue;
-            }
-        };
         let url = url.clone();
         let token = token.clone();
         let expected_event_id = event.event_id.clone();
@@ -3057,5 +3078,42 @@ mod tests {
             2,
             "D3-B: two teardown calls recorded (close path + reaper)"
         );
+    }
+
+    #[test]
+    fn suspension_envelope_uses_immutable_old_event_generation_after_resume() {
+        let old_event = TenantSuspensionEvent {
+            event_id: "suspend-old".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            created_at_ms: 10,
+            attempts: 0,
+        };
+        // A later resume has generation 2, but the old event remains generation 1.
+        let body = suspension_envelope_body(&old_event, Ok(1)).unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(payload["event_id"], "suspend-old");
+        assert_eq!(payload["lifecycle_generation"], "1");
+    }
+
+    #[test]
+    fn suspension_envelope_refuses_missing_event_generation() {
+        let event = TenantSuspensionEvent {
+            event_id: "missing".to_string(),
+            tenant_id: "tenant-2".to_string(),
+            created_at_ms: 10,
+            attempts: 0,
+        };
+        assert!(suspension_envelope_body(&event, Err(anyhow::anyhow!("unknown event"))).is_err());
+    }
+
+    #[test]
+    fn suspension_envelope_refuses_generation_overflow() {
+        let event = TenantSuspensionEvent {
+            event_id: "overflow".to_string(),
+            tenant_id: "tenant-3".to_string(),
+            created_at_ms: 10,
+            attempts: 0,
+        };
+        assert!(suspension_envelope_body(&event, Ok(i64::MAX as u64 + 1)).is_err());
     }
 }
