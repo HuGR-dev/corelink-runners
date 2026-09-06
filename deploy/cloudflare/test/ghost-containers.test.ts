@@ -159,6 +159,13 @@ function installFetchRouter() {
       const url = typeof input === "string" ? input : ((input as Request).url ?? String(input));
       const method = (init?.method ?? "GET").toUpperCase();
       fetchCalls.push({ method, url });
+      if (url.endsWith("/internal/v1/runner/authorize")) {
+        return new Response(JSON.stringify({ tenant: "ghost-tenant", max_concurrency: 20 }), { status: 200 });
+      }
+      if (url.endsWith("/internal/v1/runner/mint")) {
+        return new Response(JSON.stringify({ token_plaintext: "ghost-pat", pat_id: "ghost-pat-id", tenant: "ghost-tenant", max_concurrency: 20 }), { status: 200 });
+      }
+      if (url.endsWith("/internal/v1/runner/revoke")) return new Response(null, { status: 204 });
       if (url.includes("generate-jitconfig")) {
         if (jitStatus !== 200) return new Response("jit boom", { status: jitStatus });
         jitMinted++;
@@ -196,6 +203,14 @@ function baseEnv(kv: ReturnType<typeof fakeKv>, metrics: ReturnType<typeof fakeM
     CLOUDFLARE_LIFECYCLE_AUTH_TOKEN: "lifecycle-control-secret",
     GITHUB_WEBHOOK_SECRET: SECRET,
     GITHUB_MINT_TOKEN: "ghp-mint",
+    CORELINK_RUNNER_MINT_AUTH_KEY: "ghost-mint-key",
+    CORELINK_MINT_URL: "https://mint.test",
+    REPO_INSTALLATION_MAP: JSON.stringify({ "acme/api": "42" }),
+    SPAWN_WORKER_PUBLIC_URL: "https://worker.test",
+    CRED_STASH: {
+      idFromName: vi.fn((name: string) => name),
+      get: vi.fn(() => ({ stash: vi.fn(async () => "ghost-ticket") })),
+    } as never,
     PINNED_IMAGE_DIGEST: "",
     RUNNER_JOB_PATS: kv as never,
     METRICS: metrics as never,
@@ -402,7 +417,10 @@ describe("ghost containers · cell 2 — one JIT registration per ATTEMPT, never
     expect(jitCalls()).toHaveLength(1); // attempted once…
     expect(startedRunnerBoxes()).toHaveLength(0); // …never spawned
     expect(runnerDeletes()).toHaveLength(0); // nothing to revoke
-    expect(metrics.counts.spawn_failed).toBe(1);
+    // The canonical route already marked DRIVING before the provider's JIT
+    // response, so this remains durable UNKNOWN rather than a retryable spawn
+    // failure metric.
+    expect(metrics.counts.spawn_failed ?? 0).toBe(0);
   });
 
   it("the teardown bindings point at the SURVIVING attempt's handle and runner name", async () => {
