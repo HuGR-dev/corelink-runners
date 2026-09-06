@@ -269,6 +269,15 @@ floor source `6feaeecb3f907ac38992d82fd8c2ad880c9cca13` is independently
 accepted; its integration `252c30c` passed its 4 focused tests and
 `npm run typecheck`.
 
+The journal extension source
+`1cc9bb64ac03274d1b9ec75fa29d0f5b8cd01257` and
+`b734531fd8c45de7521cc511b3698ce1b6bb9cd9` is accepted after cold review
+(10 focused tests and `tsc --noEmit`); its integration is `f580023` through
+`72c483b`, where the journal suite passed 10/10 and the typecheck completed.
+Its signed checkpoint has exactly nine nominal fields before `signature`:
+`version`, `logId`, `sequence`, `previousRoot`, `recordDigest`, `operationId`,
+`trustedAtMs`, `signerKeyId`, and `signerEpoch`. The signature is separate.
+
 For the resulting fourteen monitor suites (89 tests), every suite has a
 completed exit-0 run at `528f032`: trusted-time and evidence-log completed
 before an aggregate 120-second process limit; witness, the ten non-heavy

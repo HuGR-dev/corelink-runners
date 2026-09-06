@@ -460,11 +460,13 @@
         "1d06a04",
         "20eb33f",
         "528f032",
-        "252c30c"
+        "252c30c",
+        "f580023",
+        "72c483b"
       ],
       "review": {
         "status": "partial",
-        "commit": "252c30c",
+        "commit": "72c483b",
         "evidence": [
           "Outbox cold composition review: 8 focused tests and tsc --noEmit at a0f13d37.",
           "Witness independent review: 6 focused tests and tsc --noEmit; canonical source 5f64ca68 through baf5b9ca and integration fc1ec79 through 59b1a15.",
@@ -472,6 +474,7 @@
           "Types independent review: 8 focused tests and tsc --noEmit; canonical source 230f7e7 through 229de986 and integration c04f550 through 1d06a04.",
           "Lifecycle cold review: 14 focused tests and tsc --noEmit; canonical source 2404d93 plus 8873950 and integration 20eb33f through 528f032.",
           "Durable time floor independent review: 4 focused tests and tsc --noEmit; source 6feaeec and integration 252c30c, where 4 focused tests and npm run typecheck passed.",
+          "Journal extension cold review: 10 focused tests and tsc --noEmit; source 1cc9bb64 through b734531f and integration f580023 through 72c483b, where the journal suite passed 10/10 and typecheck completed. Signed checkpoints have nine named fields before a separate signature.",
           "Composed monitor source evidence: all 14 focused suites/89 tests completed exit 0 in bounded runs at 528f032; a prior 120-second aggregate process was not counted as an aggregate pass because of host Vitest contention."
         ]
       },
