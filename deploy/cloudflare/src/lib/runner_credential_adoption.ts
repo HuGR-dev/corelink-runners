@@ -1,7 +1,7 @@
 import { cfAccessHeaders, type MintEnv } from "../lib";
 
 const ADOPTION_ERROR = "runner credential adoption unavailable";
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const UUID = /^(?!00000000-0000-0000-0000-000000000000$)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function exactNonEmpty(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.trim() === value;

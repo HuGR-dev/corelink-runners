@@ -68,6 +68,7 @@ export async function mintCasPat(env: MintEnv, params: MintParams): Promise<Mint
       body: JSON.stringify({
         job_id: params.jobId,
         repo_full_name: params.repoFullName,
+        ...(params.credentialOperationId ? { operation_id: params.credentialOperationId } : {}),
         ...(params.installationId ? { installation_id: params.installationId } : {}),
         scope: params.scope ?? (optionC ? "cas:rw" : "read-write"),
         ...(params.ttlSeconds != null ? { ttl_seconds: params.ttlSeconds } : {}),

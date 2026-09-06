@@ -5,6 +5,8 @@ import { RetryEpochAuthority } from "./lib/retry_epoch_authority";
 import { retryEpochClient, type RetryEpochAuthorityRpc } from "./lib/retry_epoch_client";
 import { controlAuthed } from "./lib/control_auth";
 import { authorizeRunner, RunnerAuthorizationError } from "./lib/runner_authorization";
+import { adoptIssuedRunnerCredential } from "./lib/runner_credential_adoption";
+import { runnerCredentialLeaseId } from "./lib/runner_credential_lease";
 import { ConcurrencyAuthority } from "./lib/concurrency_authority";
 // CoreLink spawn-Worker + Container DO (ADR-0008).
 //
@@ -2779,13 +2781,20 @@ async function prepareSpawn(
     logEvent("info", "spawn_at_ceiling", { jobId, repo, tenant: authorized.tenant, reason: slot.reason });
     throw new SpawnRefusedError(slot.reason ?? "unknown");
   }
-  let mint: ContainerEnvResult;
+  let mint: ContainerEnvResult | undefined;
   try {
-    mint = await buildContainerEnv(env, params, env0);
+    mint = await buildContainerEnv(env, { ...params, credentialOperationId: preparationId }, env0);
     if (mint.patId && mint.tenant) {
       await containmentAuthority(env).registerCredential({ jobId, tenant: mint.tenant, patId: mint.patId });
     }
   } catch (error) {
+    // Until registration succeeds, the issuer's unadopted operation owns
+    // revocation. Close local redemption independently of that remote recovery.
+    if (mint?.patId && mint.tenant) {
+      try {
+        await env.CRED_STASH.get(env.CRED_STASH.idFromName(runnerCredentialLeaseId(jobId, mint.tenant, mint.patId))).wipe();
+      } catch { logEvent("error", "preparation_stash_wipe_pending", { jobId }); }
+    }
     await releasePreparation();
     throw error;
   }
@@ -2817,6 +2826,10 @@ async function prepareSpawn(
       const authorityStore = jobAttributionStore(env);
       if (!authorityStore) throw new Error("durable job attribution authority unavailable");
       await persistJobAttribution(authorityStore, { jobId, tenant: mint.tenant });
+      if (!mint.patId) throw new RunnerAuthorizationError();
+      // The issuer retires its timeout obligation only after durable local
+      // credential ownership and attribution exist, before any provider effect.
+      await adoptIssuedRunnerCredential(env, preparationId, mint.patId);
     } catch (e) {
       if (mint.patId) await revokeIssuedCredential(env, containmentAuthority(env), { jobId, tenant: mint.tenant, patId: mint.patId }).catch(() => {});
       await releasePreparation();

@@ -239,6 +239,8 @@ export interface MintParams {
   scope?: string;
   ttlSeconds?: number;
   acquiringPat?: string;
+  /** Issuer cleanup remains active until the durable Worker adoption ACK. */
+  credentialOperationId?: string;
 }
 export interface MintResult {
   token: string;

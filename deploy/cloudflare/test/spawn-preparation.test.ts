@@ -16,7 +16,7 @@ function json(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
 }
 
-function fixture(options: { mintStatus?: number; authorizeStatus?: number; mintKey?: boolean } = {}) {
+function fixture(options: { mintStatus?: number; authorizeStatus?: number; mintKey?: boolean; adoptStatus?: number } = {}) {
   const d = makeDO({ RUNNER_JOB_PATS: kv() });
   const store = d.runtimeEnv.RUNNER_JOB_PATS as ReturnType<typeof kv>;
   const slotsStorage = new FakeStorage();
@@ -33,6 +33,10 @@ function fixture(options: { mintStatus?: number; authorizeStatus?: number; mintK
       return json({ token_plaintext: "new-secret", pat_id: "new-pat", tenant: TENANT, max_concurrency: 2 }, options.mintStatus ?? 200);
     }
     if (url.endsWith("/internal/v1/runner/revoke")) return new Response(null, { status: 204 });
+    if (url.endsWith("/internal/v1/runner/adopt")) {
+      order.push("adopt");
+      return new Response(null, { status: options.adoptStatus ?? 204 });
+    }
     if (url.includes("generate-jitconfig")) {
       order.push("jit");
       return json({ encoded_jit_config: "jit", runner: { id: 7 } });
@@ -128,10 +132,36 @@ describe("spawn preparation before containment claim", () => {
     expect(f.order).toContain("claim");
     expect(f.order).toContain("provider");
     expect(f.order.indexOf("mint")).toBeLessThan(f.order.indexOf("claim"));
+    expect(f.order.indexOf("mint")).toBeLessThan(f.order.indexOf("adopt"));
+    expect(f.order.indexOf("adopt")).toBeLessThan(f.order.indexOf("claim"));
     expect(f.order.indexOf("claim")).toBeLessThan(f.order.indexOf("jit"));
     expect(f.order.indexOf("jit")).toBeLessThan(f.order.indexOf("provider"));
     expect(f.fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/runner/mint"))).toHaveLength(1);
     expect(getContainer).toHaveBeenCalledTimes(1);
+  });
+
+  it("retains issuer cleanup ownership when local credential registration fails", async () => {
+    const f = fixture();
+    vi.spyOn(f.d.instance, "registerCredential").mockRejectedValue(new Error("authority write unavailable"));
+    await queued(f, "7120");
+    const mint = f.calls.find(({ url }) => url.endsWith("/runner/mint"));
+    expect(JSON.parse(String(mint?.init?.body)).operation_id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(f.order).toEqual(["mint"]);
+    expect(getContainer).not.toHaveBeenCalled();
+    expect(spawnClaims(f)).toEqual([]);
+    expect(f.slotsStorage.map.get("slots") ?? []).toEqual([]);
+    expect(f.runtime.CRED_STASH.get(f.runtime.CRED_STASH.idFromName("unused")).wipe).toHaveBeenCalledOnce();
+  });
+
+  it("revokes local credential ownership and refuses provider effects after ambiguous adoption", async () => {
+    const f = fixture({ adoptStatus: 503 });
+    await queued(f, "7121");
+    expect(f.order).toEqual(["mint", "adopt"]);
+    expect(f.calls.filter(({ url }) => url.endsWith("/runner/revoke"))).toHaveLength(1);
+    expect(getContainer).not.toHaveBeenCalled();
+    expect(spawnClaims(f)).toEqual([]);
+    expect(f.slotsStorage.map.get("slots") ?? []).toEqual([]);
+    expect((await f.d.instance.pendingCredentials({ kind: "job", jobId: "7121" })).records).toEqual([]);
   });
 
   it("preserves another preparation's capacity when this same-job mint fails", async () => {
