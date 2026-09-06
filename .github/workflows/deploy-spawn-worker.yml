@@ -176,7 +176,7 @@ jobs:
         working-directory: ${{ github.workspace }}
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: python3 scripts/ci/check-repo-tenant-pat-map.py deploy/cloudflare/wrangler.jsonc
+        run: node scripts/ci/check-repo-tenant-pat-map.mjs deploy/cloudflare/wrangler.jsonc
 
       - name: Deploy (wrangler)
         env:
