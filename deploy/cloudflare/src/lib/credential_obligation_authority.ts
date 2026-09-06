@@ -57,7 +57,7 @@ export class CredentialObligationAuthority {
   private static validateFloor(key: string, tenant: string, raw: unknown): string | undefined {
     if (raw === undefined) return undefined;
     const value = raw as { schema_version?: number; tenant?: string; revokedThrough?: unknown };
-    if (value.schema_version !== 1 || value.tenant !== tenant || key !== CredentialObligationAuthority.floorKey(tenant)) throw new Error("malformed credential tenant floor");
+    if (value.schema_version !== 1 || value.tenant !== tenant || typeof value.revokedThrough !== "string" || key !== CredentialObligationAuthority.floorKey(tenant)) throw new Error("malformed credential tenant floor");
     return CredentialObligationAuthority.generation(value.revokedThrough);
   }
 
@@ -110,19 +110,12 @@ export class CredentialObligationAuthority {
 
   async closeTenantCredentials(tenant: string, throughGeneration: string): Promise<void> {
     if (typeof tenant !== "string" || tenant === "") throw new Error("invalid tenant identity");
+    if (typeof throughGeneration !== "string") throw new Error("invalid lifecycle generation");
     const through = CredentialObligationAuthority.generation(throughGeneration);
     await this.tx(async s => {
       const floorKey = CredentialObligationAuthority.floorKey(tenant);
       const current = CredentialObligationAuthority.validateFloor(floorKey, tenant, await s.get(floorKey));
-      if (current !== undefined && BigInt(current) > BigInt(through)) throw new Error("credential tenant floor regression");
-      await s.put(floorKey, { schema_version: 1, tenant, revokedThrough: current === undefined || BigInt(through) > BigInt(current) ? through : current });
-      const page = await s.list({ prefix: "credential-obligation:", limit: 1000 });
-      for (const [key, raw] of page.entries()) {
-        const record = CredentialObligationAuthority.validateCredential(key, raw);
-        if (record.tenant === tenant && BigInt(CredentialObligationAuthority.generation(record.lifecycleGeneration)) <= BigInt(through) && record.status === "registered") {
-          await s.put(key, { schema_version: 1, ...record, status: "revoke_requested" });
-        }
-      }
+      if (current === undefined || BigInt(through) > BigInt(current)) await s.put(floorKey, { schema_version: 1, tenant, revokedThrough: through });
     });
   }
 
@@ -144,6 +137,7 @@ export class CredentialObligationAuthority {
   }
 
   async pendingCredentials(selection: CredentialSelection, cursor?: string, requestedStatus?: string): Promise<CredentialPage> {
+    if (selection.kind === "tenant") CredentialObligationAuthority.validateFloor(CredentialObligationAuthority.floorKey(selection.tenant), selection.tenant, await this.storage.get(CredentialObligationAuthority.floorKey(selection.tenant)));
     const page = await this.storage.list({ prefix: "credential-obligation:", ...(cursor ? { startAfter: cursor } : {}), limit: 101 });
     const entries = [...page.entries()];
     const records: CredentialIdentity[] = [];
@@ -155,7 +149,7 @@ export class CredentialObligationAuthority {
       const floor = CredentialObligationAuthority.validateFloor(CredentialObligationAuthority.floorKey(value.tenant), value.tenant, await this.storage.get(CredentialObligationAuthority.floorKey(value.tenant)));
       const through = selection.kind === "tenant" && selection.throughGeneration !== undefined ? CredentialObligationAuthority.generation(selection.throughGeneration) : floor;
       const covered = through !== undefined && BigInt(CredentialObligationAuthority.generation(value.lifecycleGeneration)) <= BigInt(through);
-      const matches = selection.kind === "all" || (selection.kind === "job" ? value.jobId === selection.jobId : value.tenant === selection.tenant);
+      const matches = selection.kind === "all" || (selection.kind === "job" ? value.jobId === selection.jobId : value.tenant === selection.tenant && (selection.throughGeneration === undefined || BigInt(CredentialObligationAuthority.generation(value.lifecycleGeneration)) <= BigInt(CredentialObligationAuthority.generation(selection.throughGeneration))));
       const fencedRegistered = requestedStatus === "revoke_requested" && value.status === "registered" && (fence !== undefined || covered);
       if (matches && value.status !== "revoked" && ((!requestedStatus || value.status === requestedStatus) || fencedRegistered)) {
         records.push(value.lifecycleGeneration === undefined ? { jobId: value.jobId, tenant: value.tenant, patId: value.patId } : { jobId: value.jobId, tenant: value.tenant, patId: value.patId, lifecycleGeneration: value.lifecycleGeneration });

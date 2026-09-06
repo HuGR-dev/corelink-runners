@@ -39,4 +39,20 @@ describe("credential lifecycle generation floor", () => {
     expect((await authority.pendingCredentials({ kind: "all" })).records).toContainEqual(identity("legacy", "pat-legacy"));
     await expect(authority.requestCredentialRevocation(identity("job", "pat", "1"))).rejects.toThrow();
   });
+
+  it("honors an explicit tenant generation bound and keeps a higher floor monotonic", async () => {
+    const s = storage(); const authority = new CredentialObligationAuthority(s);
+    await authority.registerCredential(identity("old", "pat-old", "1"));
+    await authority.registerCredential(identity("new", "pat-new", "2"));
+    await authority.closeTenantCredentials(tenant, "2");
+    await authority.closeTenantCredentials(tenant, "1");
+    expect((await authority.pendingCredentials({ kind: "tenant", tenant, throughGeneration: "1" })).records).toEqual([identity("old", "pat-old", "1")]);
+    expect((await authority.pendingCredentials({ kind: "tenant", tenant, throughGeneration: "2" })).records).toHaveLength(2);
+  });
+
+  it("fails closed for a floor missing its generation", async () => {
+    const s = storage(); await s.put("credential-tenant-floor:tenant-a", { schema_version: 1, tenant });
+    const authority = new CredentialObligationAuthority(s);
+    await expect(authority.pendingCredentials({ kind: "tenant", tenant })).rejects.toThrow("malformed credential tenant floor");
+  });
 });
