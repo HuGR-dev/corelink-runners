@@ -1,7 +1,8 @@
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { MemoryStateStore } from "../src/state.js";
-import { canonicalJSON, type JournalRecord, type JournalReceipt, type SignedCheckpoint } from "../src/evidence_log.js";
+import { type JournalRecord, type JournalReceipt, type SignedCheckpoint } from "../src/evidence_log.js";
+import { canonicalJSON } from "../src/journal.js";
 import { canonicalCheckpointBytes, checkpointRootFor } from "../src/evidence_log.js";
 import { DurableCheckpointWitness } from "../src/witness.js";
 import { createWitnessHandler, validateWitnessConfig, type WitnessConfig, type WitnessRuntimeDependencies } from "../src/witness_runtime.js";
