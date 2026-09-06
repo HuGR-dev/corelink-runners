@@ -4974,12 +4974,8 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         else if (teardownPending === true || teardownPending === null) {
           logEvent("error", "concurrency_slot_release_deferred", { jobId });
         }
-        // F2-3 (W3): wipe the env-0 cred-stash so the per-job cas:rw PAT window
-        // closes at COMPLETION, not at the 2h lease-TTL. After this a ticket redeem
-        // by any in-lease code returns 404 (stash gone) — the credential dies with
-        // the job. Security action (NOT dedup-gated); best-effort + fail-open (a
-        // wipe failure just falls back to the TTL alarm). CRED_STASH is keyed by
-        // leaseId == jobId (CLW_LEASE_ID = jobId, lib.ts; + the cas-cred route).
+        // Exact PAT leases are closed by the durable revocation authority above.
+        // Also clean the historical job-scoped stash during migration.
         if (env.CRED_STASH) {
           await env.CRED_STASH.get(env.CRED_STASH.idFromName(jobId)).wipe().catch((e) =>
             logEvent("error", "cred_stash_wipe_failed", { jobId, error: (e as Error).message }),
