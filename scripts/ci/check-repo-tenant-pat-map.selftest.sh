@@ -15,7 +15,9 @@ guard = Path("scripts/ci/check-repo-tenant-pat-map.mjs").resolve()
 class Handler(BaseHTTPRequestHandler):
     scenario = {}
     redirect_hits = 0
+    requests = []
     def do_GET(self):
+        Handler.requests.append((self.path, self.headers.get("Authorization")))
         if self.path.endswith("/redirect-destination"):
             Handler.redirect_hits += 1
             self.send_response(200)
@@ -61,12 +63,14 @@ live_empty = (200, {"success": True, "result": {"resources": {"bindings": []}}})
 
 assert run("{}", ok_deploy, live_nonempty).returncode != 0
 assert run('{"a/b":"SECRET"}', ok_deploy, live_nonempty).returncode == 0
+assert Handler.requests[-2:] == [("/accounts/acct/workers/scripts/corelink-spawn-worker/deployments", "Bearer fixture"), ("/accounts/acct/workers/scripts/corelink-spawn-worker/versions/version", "Bearer fixture")]
 assert run("{}", ok_deploy, live_empty).returncode == 0
 assert run("{", ok_deploy, live_empty).returncode != 0
 assert run("{}", ok_deploy, (200, {"success": True, "result": {"resources": {"bindings": [{"name": "REPO_TENANT_PAT_MAP", "type": "secret_text", "text": "x"}]}}})).returncode != 0
 assert run("{}", (200, {"success": True, "result": []}), live_empty).returncode != 0
 assert run("{}", (200, {"success": True, "result": [{"versions": [{"version_id": "inactive", "percentage": 50}]}]}), live_empty).returncode != 0
 assert run("{}", (403, {"success": False, "result": None}), live_empty).returncode != 0
+assert run("{}", ok_deploy, (401, {"success": False, "result": None})).returncode != 0
 assert run_raw('// "name":"decoy"\n{"name":"corelink-spawn-worker","account_id":"acct","vars":{"REPO_TENANT_PAT_MAP":"{}"}}').returncode == 0
 bad = run_raw('{"name":"corelink-spawn-worker",')
 assert bad.returncode != 0 and "decoy" not in bad.stdout + bad.stderr
