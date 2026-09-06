@@ -985,6 +985,8 @@ export function isInstallationAllowlisted(raw: string | undefined, installationI
 /** The subset of Env the reconciler's GitHub listing reads. */
 export interface ReconcilerEnv {
   GITHUB_MINT_TOKEN?: string;
+  /** Token minted for the verified installation during registry discovery. */
+  GITHUB_RECONCILER_TOKEN?: string;
 }
 
 interface GhRun {
@@ -1123,7 +1125,7 @@ export async function listOrphanRunnerJobs(
   const gh = async (path: string): Promise<unknown> => {
     const r = await fetch(`https://api.github.com${path}`, {
       headers: {
-        authorization: `Bearer ${env.GITHUB_MINT_TOKEN ?? ""}`,
+        authorization: `Bearer ${env.GITHUB_RECONCILER_TOKEN ?? env.GITHUB_MINT_TOKEN ?? ""}`,
         accept: "application/vnd.github+json",
         "user-agent": "corelink-spawn-worker",
       },
@@ -1132,15 +1134,48 @@ export async function listOrphanRunnerJobs(
     return r.json();
   };
   try {
-    const runs = (await gh(`/repos/${repo}/actions/runs?status=queued&per_page=30`)) as {
-      workflow_runs?: GhRun[];
-    };
+    const runs: GhRun[] = [];
+    let runCursor: string | undefined;
+    for (let page = 0; page < 20; page++) {
+      const query = runCursor
+        ? `?status=queued&per_page=30&after=${encodeURIComponent(runCursor)}`
+        : "?status=queued&per_page=30";
+      const pageBody = (await gh(`/repos/${repo}/actions/runs${query}`)) as {
+        workflow_runs?: GhRun[];
+        next_cursor?: string | null;
+        next_page?: string | null;
+      };
+      runs.push(...(pageBody.workflow_runs ?? []));
+      const next = pageBody.next_cursor ?? pageBody.next_page ?? null;
+      if (next == null || next === "") break;
+      if (typeof next !== "string" || next === runCursor || page === 19) return [];
+      runCursor = next;
+    }
     const orphans: { jobId: string; labels: string[] }[] = [];
-    for (const run of runs.workflow_runs ?? []) {
+    for (const run of runs) {
       const age = nowMs - Date.parse(run.created_at);
       if (!Number.isFinite(age) || age < minAgeMs) continue; // too fresh: leave it to the webhook
-      const jobs = (await gh(`/repos/${repo}/actions/runs/${run.id}/jobs`)) as { jobs?: GhJob[] };
-      for (const j of jobs.jobs ?? []) {
+      const jobs: GhJob[] = [];
+      let jobCursor: string | undefined;
+      for (let page = 0; page < 20; page++) {
+        // Keep the original first-page URL byte-stable; subsequent pages use
+        // the provider cursor. This also avoids changing the live seam for
+        // installations whose GitHub proxy only recognizes the canonical path.
+        const query = jobCursor
+          ? `?per_page=100&after=${encodeURIComponent(jobCursor)}`
+          : "";
+        const pageBody = (await gh(`/repos/${repo}/actions/runs/${run.id}/jobs${query}`)) as {
+          jobs?: GhJob[];
+          next_cursor?: string | null;
+          next_page?: string | null;
+        };
+        jobs.push(...(pageBody.jobs ?? []));
+        const next = pageBody.next_cursor ?? pageBody.next_page ?? null;
+        if (next == null || next === "") break;
+        if (typeof next !== "string" || next === jobCursor || page === 19) return [];
+        jobCursor = next;
+      }
+      for (const j of jobs) {
         const matched = matchManagedLabels(j.labels ?? [], configured);
         // "runnerless" = no runner assigned. GitHub's Actions jobs API reports an
         // unassigned queued job as `runner_id: 0` (observed live 2026-07-20 — NOT
@@ -1156,7 +1191,9 @@ export async function listOrphanRunnerJobs(
         }
       }
     }
-    return orphans;
+    return [...new Map(orphans.map((job) => [job.jobId, job])).values()].sort((a, b) =>
+      a.jobId.localeCompare(b.jobId, undefined, { numeric: true }),
+    );
   } catch (e) {
     console.log(`reconciler list failed for ${repo} (backstop, skipping): ${(e as Error).message}`);
     return [];
