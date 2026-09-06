@@ -104,16 +104,58 @@ function operationKeyPart(operationId: string): string {
     : digest(new TextEncoder().encode(operationId));
 }
 
-async function bodyBytes(body: unknown): Promise<Uint8Array> {
-  if (body instanceof Uint8Array) return body;
-  if (typeof body === "string") return new TextEncoder().encode(body);
-  if (body && typeof (body as { transformToByteArray?: unknown }).transformToByteArray === "function") {
-    return new Uint8Array(await (body as { transformToByteArray: () => Promise<Uint8Array> }).transformToByteArray());
+function boundedStringBytes(body: string, maxBytes: number): Uint8Array {
+  if (body.length > maxBytes) throw new JournalVerificationError("journal object exceeds the byte limit");
+  const target = new Uint8Array(maxBytes + 1);
+  const encoded = new TextEncoder().encodeInto(body, target);
+  if (encoded.read > maxBytes || encoded.read < body.length) throw new JournalVerificationError("journal object exceeds the byte limit");
+  return target.slice(0, encoded.read);
+}
+
+async function bodyBytes(body: unknown, maxBytes: number): Promise<Uint8Array> {
+  if (body instanceof Uint8Array) {
+    if (body.byteLength > maxBytes) throw new JournalVerificationError("journal object exceeds the byte limit");
+    return body;
+  }
+  if (typeof body === "string") return boundedStringBytes(body, maxBytes);
+  if (body && typeof (body as { transformToWebStream?: unknown }).transformToWebStream === "function") {
+    const stream = await (body as { transformToWebStream: () => ReadableStream<Uint8Array> }).transformToWebStream();
+    const reader = stream.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    try {
+      while (true) {
+        const next = await reader.read();
+        if (next.done) break;
+        const chunk = next.value;
+        if (!(chunk instanceof Uint8Array) || chunk.byteLength > maxBytes - total) {
+          await reader.cancel("journal object exceeds the byte limit");
+          throw new JournalVerificationError("journal object exceeds the byte limit");
+        }
+        chunks.push(chunk); total += chunk.byteLength;
+      }
+    } finally { reader.releaseLock(); }
+    const result = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) { result.set(chunk, offset); offset += chunk.byteLength; }
+    return result;
   }
   if (body && typeof (body as AsyncIterable<Uint8Array>)[Symbol.asyncIterator] === "function") {
+    const iterator = (body as AsyncIterable<Uint8Array>)[Symbol.asyncIterator]();
     const chunks: Uint8Array[] = [];
-    for await (const chunk of body as AsyncIterable<Uint8Array>) chunks.push(chunk);
-    const total = chunks.reduce((n, chunk) => n + chunk.byteLength, 0);
+    let total = 0;
+    try {
+      while (true) {
+        const next = await iterator.next();
+        if (next.done) break;
+        const chunk = next.value;
+        if (!(chunk instanceof Uint8Array) || chunk.byteLength > maxBytes - total) {
+          await iterator.return?.();
+          throw new JournalVerificationError("journal object exceeds the byte limit");
+        }
+        chunks.push(chunk); total += chunk.byteLength;
+      }
+    } finally { await iterator.return?.(); }
     const result = new Uint8Array(total);
     let offset = 0;
     for (const chunk of chunks) { result.set(chunk, offset); offset += chunk.byteLength; }
@@ -140,21 +182,27 @@ export class S3ImmutableJournal {
   private readonly bucket: string;
   private readonly prefix: string;
   private readonly retentionMs: number;
+  private readonly maxRecordBytes: number;
 
-  constructor(config: { client: S3Client; bucket: string; prefix: string; retentionMs: number }) {
+  constructor(config: { client: S3Client; bucket: string; prefix: string; retentionMs: number; maxRecordBytes?: number }) {
     if (!Number.isFinite(config.retentionMs) || config.retentionMs < MIN_RETENTION_MS) {
       throw new JournalInputError("retentionMs must be at least eight days");
     }
     if (!config.bucket || !config.prefix) throw new JournalInputError("bucket and prefix are required");
+    const maxRecordBytes = config.maxRecordBytes ?? 1024 * 1024;
+    if (!Number.isSafeInteger(maxRecordBytes) || maxRecordBytes <= 0 || maxRecordBytes > 1024 * 1024) {
+      throw new JournalInputError("maxRecordBytes must be between one byte and one MiB");
+    }
     this.client = config.client;
     this.bucket = config.bucket;
     this.prefix = config.prefix;
     this.retentionMs = config.retentionMs;
+    this.maxRecordBytes = maxRecordBytes;
   }
 
   private async verifiedObject(key: string, versionId: string | undefined, expected: Uint8Array, minimumRetentionMs: number): Promise<{ versionId: string; retainedUntilMs: number }> {
     const object = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key, ...(versionId ? { VersionId: versionId } : {}) }));
-    const actual = await bodyBytes(object.Body);
+    const actual = await bodyBytes(object.Body, this.maxRecordBytes);
     if (digest(actual) !== digest(expected) || actual.length !== expected.length || !actual.every((byte, index) => byte === expected[index])) {
       throw new JournalForkError("existing journal object differs from the attempted record");
     }
@@ -170,6 +218,7 @@ export class S3ImmutableJournal {
 
   async append(record: JournalRecord): Promise<JournalReceipt> {
     const bytes = recordBytes(record);
+    if (bytes.byteLength > this.maxRecordBytes) throw new JournalInputError("journal record exceeds the byte limit");
     const recordDigest = digest(bytes);
     const key = `${this.prefix}${String(record.sequence).padStart(20, "0")}-${operationKeyPart(record.operationId)}`;
     const retainedUntilMs = record.trustedAtMs + this.retentionMs;
@@ -199,11 +248,14 @@ export class S3ImmutableJournal {
   }
 
   async read(receipt: JournalReceipt): Promise<JournalRecord> {
-    if (!receipt.bucket || !receipt.key || !receipt.versionId || !/^[a-f0-9]{64}$/.test(receipt.recordDigest)) {
+    if (!receipt || typeof receipt !== "object" || receipt.bucket !== this.bucket || typeof receipt.operationId !== "string" || receipt.operationId.length === 0 || !Number.isSafeInteger(receipt.sequence) || receipt.sequence <= 0 || typeof receipt.previousDigest !== "string" || !/^[a-f0-9]{64}$/.test(receipt.recordDigest) || typeof receipt.versionId !== "string" || receipt.versionId.length === 0 || !Number.isSafeInteger(receipt.retainedUntilMs) || receipt.retainedUntilMs <= 0) {
       throw new JournalInputError("invalid journal receipt");
     }
-    const object = await this.client.send(new GetObjectCommand({ Bucket: receipt.bucket, Key: receipt.key, VersionId: receipt.versionId }));
-    const bytes = await bodyBytes(object.Body);
+    const expectedKey = `${this.prefix}${String(receipt.sequence).padStart(20, "0")}-${operationKeyPart(receipt.operationId)}`;
+    if (receipt.key !== expectedKey) throw new JournalInputError("invalid journal receipt key");
+    const object = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: expectedKey, VersionId: receipt.versionId }));
+    if (responseVersion(object) !== receipt.versionId) throw new JournalVerificationError("journal version mismatch");
+    const bytes = await bodyBytes(object.Body, this.maxRecordBytes);
     if (digest(bytes) !== receipt.recordDigest) throw new JournalVerificationError("journal digest mismatch");
     let parsed: unknown;
     try { parsed = JSON.parse(new TextDecoder().decode(bytes)); } catch { throw new JournalVerificationError("journal bytes are not JSON"); }

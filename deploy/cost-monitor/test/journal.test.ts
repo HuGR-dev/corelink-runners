@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
 import { S3ImmutableJournal, JournalForkError, JournalInputError, JournalVerificationError, type JournalRecord } from "../src/journal.js";
 
 const retention = 8 * 24 * 60 * 60 * 1000;
@@ -28,6 +29,8 @@ describe("S3ImmutableJournal", () => {
     const receipt = await journal.append(record); expect(receipt.versionId).toBe("v1");
     expect(calls.map((c) => c.input)).toHaveLength(3);
     expect(calls[0].input.IfNoneMatch).toBe("*"); expect(calls[0].input.ObjectLockMode).toBe("COMPLIANCE");
+    expect(new TextDecoder().decode(calls[0].input.Body as Uint8Array)).toBe('["operation-1",1,"0","{\\"a\\":[true,null],\\"z\\":2}",1700000000000]');
+    expect(receipt.recordDigest).toBe("e2a8d2199183b6f1439c8adb753f069f1d4265842f81b243e08fa54695b55144");
     await expect(journal.read(receipt)).resolves.toEqual(record);
   });
   it("accepts an identical 412 retry but rejects a fork", async () => {
@@ -56,4 +59,43 @@ describe("S3ImmutableJournal", () => {
     const journal = new S3ImmutableJournal({ client: client as never, bucket: "b", prefix: "j/", retentionMs: retention });
     await expect(journal.append(record)).rejects.toBeInstanceOf(JournalVerificationError);
   });
+  it("rejects forged namespace or derived-key receipts before S3 I/O", async () => {
+    let calls = 0;
+    const client = { send: async () => { calls++; throw new Error("must not be called"); } };
+    const journal = new S3ImmutableJournal({ client: client as never, bucket: "b", prefix: "j/", retentionMs: retention });
+    const key = "j/00000000000000000001-" + "e".repeat(64);
+    const base = { ...record, bucket: "b", key, versionId: "v1", recordDigest: "a".repeat(64), retainedUntilMs: record.trustedAtMs + retention };
+    for (const forged of [{ ...base, bucket: "other" }, { ...base, key: "j/evil" }, { ...base, operationId: "other" }, { ...base, sequence: 2 }]) {
+      await expect(journal.read(forged)).rejects.toBeInstanceOf(JournalInputError);
+    }
+    expect(calls).toBe(0);
+  });
+  it("enforces the one-MiB hard cap and bounded body reads", async () => {
+    const oversized = { ...record, payload: "x".repeat(100) };
+    let appendCalls = 0;
+    const appendClient = { send: async () => { appendCalls++; throw new Error("must not write oversized record"); } };
+    const smallJournal = new S3ImmutableJournal({ client: appendClient as never, bucket: "b", prefix: "j/", retentionMs: retention, maxRecordBytes: 32 });
+    await expect(smallJournal.append(oversized)).rejects.toBeInstanceOf(JournalInputError);
+    expect(appendCalls).toBe(0);
+    const body = new Uint8Array([1, 2, 3, 4]);
+    const digest = createHash("sha256").update(body).digest("hex");
+    let mode: "exact" | "plus" = "exact";
+    const boundedClient = { send: async (command: { constructor: { name: string } }) => {
+      if (command.constructor.name !== "GetObjectCommand") throw new Error("unexpected S3 call");
+      if (mode === "exact") return { Body: (async function* () { yield body; })(), VersionId: "v1" };
+      let cancelled = false;
+      const stream = { async *[Symbol.asyncIterator]() { try { yield new Uint8Array([1, 2, 3, 4, 5]); } finally { cancelled = true; } } };
+      void cancelled;
+      return { Body: stream, VersionId: "v1" };
+    } };
+    const boundedJournal = new S3ImmutableJournal({ client: boundedClient as never, bucket: "b", prefix: "j/", retentionMs: retention, maxRecordBytes: 4 });
+    const receipt = { ...baseReceipt("b", "j/", "oooooooooooooooooooooooooooooooo", 1), recordDigest: digest };
+    await expect(boundedJournal.read(receipt)).rejects.toBeInstanceOf(JournalVerificationError);
+    mode = "plus";
+    await expect(boundedJournal.read(receipt)).rejects.toThrow("byte limit");
+  });
 });
+
+function baseReceipt(bucket: string, prefix: string, operationId: string, sequence: number) {
+  return { operationId, sequence, previousDigest: "0", bucket, key: `${prefix}${String(sequence).padStart(20, "0")}-${operationId}`, versionId: "v1", recordDigest: "a".repeat(64), retainedUntilMs: record.trustedAtMs + retention };
+}
