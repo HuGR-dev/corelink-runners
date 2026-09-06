@@ -104,6 +104,8 @@ export const COUNTER_NAMES = [
   // ── Teardown + credential + billing ──────────────────────────────────────
   "runner_torn_down", // container destroyed at completion (vs idle-out)
   "cas_pat_revoked", // per-job CAS PAT revoked at completion
+  "revoke_failed", // a PAT revoke failed and was retained for cron retry
+  "revoke_missing_tenant", // revoke refused because server-derived tenant was absent
   "billing_pushed", // runner_slot_seconds usage event emitted
   // ── Registered late (2026-08-03) ─────────────────────────────────────────
   // These four were BUMPED at their seams but never listed here, so `snapshot()`

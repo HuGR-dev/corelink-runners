@@ -97,6 +97,16 @@ pub struct LeaseRecord {
     pub billing_acquired_at_ms: Option<u64>,
 }
 
+/// Durable control-plane signal consumed by the runner Worker. Ledger-internal;
+/// it never changes the frozen lease wire contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TenantSuspensionEvent {
+    pub event_id: String,
+    pub tenant_id: String,
+    pub created_at_ms: u64,
+    pub attempts: u32,
+}
+
 /// Legal-transition matrix — contract §1, nothing else:
 ///
 /// | from \ to  | Held | Released | Expired | Crashed |
@@ -242,14 +252,36 @@ pub trait LeaseLedger {
     }
 
     /// Durably record a tenant's AUP1 suspension so it survives a shard restart
-    /// AND is visible to OTHER instances. Default: no-op — a single-instance /
-    /// ephemeral backend keeps suspension only in the fabricd's in-memory cache,
-    /// which is correct at N=1. The [`crate::pg_ledger::PgLedger`] overrides it
-    /// with a shared table, which is what makes suspend an effective abuse-control
-    /// at N>1 (a suspended tenant is blocked on EVERY shard, not just the one that
-    /// received the suspend). `&self`: pg writes via its pool; no `&mut` needed.
+    /// AND is visible to OTHER instances. Backends without a durable authority
+    /// must fail closed rather than acknowledge an in-memory-only suspension.
+    /// The [`crate::pg_ledger::PgLedger`] overrides this with a shared table.
     fn set_tenant_suspended(&self, _tenant: &str, _suspended: bool) -> anyhow::Result<()> {
-        Ok(())
+        Err(anyhow::anyhow!("durable tenant suspension authority unavailable"))
+    }
+
+    fn enqueue_tenant_suspension_event(&self, _event: TenantSuspensionEvent) -> anyhow::Result<()> {
+        // Never report success without a restart-safe outbox.
+        Err(anyhow::anyhow!("tenant suspension event outbox unavailable"))
+    }
+
+    /// Durable suspension state plus its delivery event. PostgreSQL overrides
+    /// this with one transaction so a suspension can never commit without a
+    /// revoke signal.
+    fn record_tenant_suspension(&self, event: TenantSuspensionEvent) -> anyhow::Result<()> {
+        self.set_tenant_suspended(&event.tenant_id, true)?;
+        self.enqueue_tenant_suspension_event(event)
+    }
+
+    fn pending_tenant_suspension_events(&self, _limit: usize) -> anyhow::Result<Vec<TenantSuspensionEvent>> {
+        Err(anyhow::anyhow!("tenant suspension event outbox unavailable"))
+    }
+
+    fn mark_tenant_suspension_event_delivered(&self, _event_id: &str) -> anyhow::Result<()> {
+        Err(anyhow::anyhow!("tenant suspension event outbox unavailable"))
+    }
+
+    fn mark_tenant_suspension_event_attempt(&self, _event_id: &str) -> anyhow::Result<()> {
+        Err(anyhow::anyhow!("tenant suspension event outbox unavailable"))
     }
 
     /// Whether `tenant` is DURABLY suspended (the cross-instance source of truth).

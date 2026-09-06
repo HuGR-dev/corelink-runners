@@ -79,7 +79,13 @@ pub(crate) async fn suspend(
     let Ok(tenant) = TenantId::new(&tenant) else {
         return err(StatusCode::BAD_REQUEST, "invalid tenant id");
     };
-    let newly = state.suspend_tenant(&tenant);
+    let newly = match state.suspend_tenant_with_event(&tenant, state.clock.now_ms()) {
+        Ok(newly) => newly,
+        Err(e) => {
+            eprintln!("AUP1 ENFORCEMENT: tenant={} durable suspension failed: {e:#}", tenant.as_str());
+            return err(StatusCode::SERVICE_UNAVAILABLE, "suspension persistence unavailable");
+        }
+    };
     if newly {
         state.counters.suspend_actions.incr();
     }
