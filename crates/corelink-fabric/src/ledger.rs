@@ -107,6 +107,14 @@ pub struct TenantSuspensionEvent {
     pub attempts: u32,
 }
 
+/// One PostgreSQL-owned lifecycle; generations survive every resume.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TenantLifecycle {
+    pub tenant_id: String,
+    pub generation: u64,
+    pub suspended: bool,
+}
+
 /// Legal-transition matrix — contract §1, nothing else:
 ///
 /// | from \ to  | Held | Released | Expired | Crashed |
@@ -272,6 +280,15 @@ pub trait LeaseLedger {
     /// The [`crate::pg_ledger::PgLedger`] overrides this with a shared table.
     fn set_tenant_suspended(&self, _tenant: &str, _suspended: bool) -> anyhow::Result<()> {
         Err(anyhow::anyhow!("durable tenant suspension authority unavailable"))
+    }
+
+    fn tenant_lifecycle(&self, _tenant: &str) -> anyhow::Result<TenantLifecycle> {
+        Err(anyhow::anyhow!("durable tenant lifecycle authority unavailable"))
+    }
+
+    /// Read the generation captured in this immutable event, never today's one.
+    fn tenant_suspension_generation(&self, _event_id: &str) -> anyhow::Result<u64> {
+        Err(anyhow::anyhow!("durable suspension generation unavailable"))
     }
 
     fn enqueue_tenant_suspension_event(&self, _event: TenantSuspensionEvent) -> anyhow::Result<()> {
