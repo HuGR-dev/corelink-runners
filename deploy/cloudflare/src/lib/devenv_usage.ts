@@ -50,7 +50,7 @@ function failure(
 }
 
 function validTimestamp(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= 8_640_000_000_000_000;
 }
 
 /**
@@ -85,12 +85,15 @@ export async function buildDevenvUsageEvent(input: DevenvUsageInput): Promise<De
   }
 
   const event = await buildUsageEvent({
-    tenantId: input.tenantId,
-    jobId: `devenv:${input.sessionId}`,
+    tenantId: input.tenantId.toLowerCase(),
+    jobId: `devenv:${input.sessionId.toLowerCase()}`,
     startedMs: input.startedAtMs,
     completedMs: input.completedAtMs,
     region: input.region,
     vcpu: DEVENV_TIERS[input.tier].vcpus,
   });
+  if (!Number.isFinite(event.qty) || !Number.isSafeInteger(event.qty) || !Number.isFinite(Date.parse(`${event.billing_period}-01T00:00:00Z`))) {
+    return failure("invalid_completed_at", "completedAtMs", "timestamps must produce a finite canonical billing event");
+  }
   return { ok: true, event };
 }

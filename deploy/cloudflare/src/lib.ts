@@ -1751,7 +1751,7 @@ export async function buildUsageEvent(opts: {
  * returns `{accepted, deduped, total}`; we only need the 2xx (the aggregator
  * reconciles, and idem_key makes a retry safe).
  */
-export async function pushUsageEvent(env: BillingEnv, ev: UsageEvent): Promise<void> {
+export async function pushUsageEvent(env: BillingEnv, ev: UsageEvent, signal?: AbortSignal): Promise<void> {
   const resp = await fetch(env.BILLING_INGEST_URL ?? "", {
     method: "POST",
     headers: {
@@ -1761,6 +1761,7 @@ export async function pushUsageEvent(env: BillingEnv, ev: UsageEvent): Promise<v
       "user-agent": "corelink-spawn-worker",
     },
     body: JSON.stringify([ev]),
+    ...(signal ? { signal } : {}),
   });
   if (!resp.ok) throw new Error(`billing usage-push ${resp.status}`);
 }
