@@ -2,7 +2,18 @@ import { describe, expect, it, vi, afterEach } from "vitest";
 
 vi.mock("@cloudflare/containers", () => ({ Container: class {}, getContainer: vi.fn() }));
 
-import { dispatchTenantSuspensionRevocations, type Env } from "../src/index";
+import { ContainmentDO, dispatchTenantSuspensionRevocations, type Env } from "../src/index";
+
+class AuthorityStorage {
+  map = new Map<string, unknown>();
+  async get<T>(key: string) { return this.map.get(key) as T | undefined; }
+  async put(key: string, value: unknown) { this.map.set(key, value); }
+  async list<T>(opts: { prefix?: string; startAfter?: string; limit?: number } = {}) {
+    const keys = [...this.map.keys()].filter(key => key.startsWith(opts.prefix ?? "")).filter(key => !opts.startAfter || key > opts.startAfter).sort().slice(0, opts.limit ?? Infinity);
+    return new Map(keys.map(key => [key, this.map.get(key) as T]));
+  }
+  async transaction<T>(fn: (storage: AuthorityStorage) => Promise<T>) { return fn(this); }
+}
 
 function kv(initial: Record<string, string> = {}) {
   const values = new Map(Object.entries(initial));
@@ -33,6 +44,19 @@ function envFor(authority: unknown, jobs: ReturnType<typeof kv>): Env {
 describe("durable tenant suspension revocation", () => {
   afterEach(() => vi.unstubAllGlobals());
 
+  it("persists registration and requested state across a production DO restart", async () => {
+    const storage = new AuthorityStorage();
+    const first = new ContainmentDO({ storage } as never, {} as never);
+    const identity = { jobId: "restart-job", tenant: "tenant-a", patId: "pat-a" };
+    await first.registerCredential(identity);
+    expect((await first.revocationRequestedCredentials()).records).toHaveLength(0);
+    await first.requestCredentialRevocation(identity);
+    const restarted = new ContainmentDO({ storage } as never, {} as never);
+    expect((await restarted.revocationRequestedCredentials()).records).toEqual([identity]);
+    await restarted.confirmCredentialRevoked(identity);
+    expect((await restarted.revocationRequestedCredentials()).records).toHaveLength(0);
+  });
+
   it("enumerates every attribution page and uses the exact durable job identity", async () => {
     const jobs = kv({ job_a: "pat-a", job_b: "pat-b", "jtenant:job_a": "wrong-inventory" });
     let calls = 0;
@@ -44,6 +68,7 @@ describe("durable tenant suspension revocation", () => {
           : { records: [{ jobId: "job_a", tenant: "tenant-a", patId: "pat-a" }], cursor: "credential-obligation:job_a", complete: false };
       }),
       confirmCredentialRevoked: vi.fn(async () => {}),
+      requestCredentialRevocation: vi.fn(async () => {}),
     };
     const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetchMock);
@@ -69,6 +94,7 @@ describe("durable tenant suspension revocation", () => {
         complete: true,
       })),
       confirmCredentialRevoked: vi.fn(async () => {}),
+      requestCredentialRevocation: vi.fn(async () => {}),
     };
     vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 204 })));
 
@@ -88,6 +114,7 @@ describe("durable tenant suspension revocation", () => {
     const authority = {
       pendingCredentials: vi.fn(async () => ({ records: pending, complete: true })),
       confirmCredentialRevoked: vi.fn(async (identity: { jobId: string }) => { pending = pending.filter(record => record.jobId !== identity.jobId); }),
+      requestCredentialRevocation: vi.fn(async () => {}),
     };
     let attempt = 0;
     vi.stubGlobal("fetch", vi.fn(async () => {
@@ -97,12 +124,12 @@ describe("durable tenant suspension revocation", () => {
     const env = envFor(authority, jobs);
     await expect(dispatchTenantSuspensionRevocations(env, { event_id: "suspend-3", tenant_id: "tenant-a" }))
       .rejects.toThrow("credential revoke pending for job job_b");
-    expect(jobs.values.has("job_a")).toBe(false);
+    expect(jobs.values.get("job_a")).toBe("pat-a");
     expect(jobs.values.has("job_b")).toBe(true);
 
     await expect(dispatchTenantSuspensionRevocations(env, { event_id: "suspend-3", tenant_id: "tenant-a" }))
       .resolves.toBe(1);
-    expect(jobs.values.has("job_b")).toBe(false);
+    expect(jobs.values.get("job_b")).toBe("pat-b");
     expect(jobs.values.has("suspend-revoke:suspend-3")).toBe(true);
   });
 
@@ -110,7 +137,7 @@ describe("durable tenant suspension revocation", () => {
     const jobs = kv({ job_same: "pat-new", "revoke-receipt:job_same:tenant-a:pat-old": JSON.stringify({ schema_version: 1, job_id: "job_same", tenant: "tenant-a", pat_id: "pat-old" }) });
     const authority = { pendingCredentials: vi.fn(async () => ({
       records: [{ jobId: "job_same", tenant: "tenant-a", patId: "pat-new" }], complete: true,
-    })), confirmCredentialRevoked: vi.fn(async () => {}) };
+    })), confirmCredentialRevoked: vi.fn(async () => {}), requestCredentialRevocation: vi.fn(async () => {}) };
     const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetchMock);
     await expect(dispatchTenantSuspensionRevocations(envFor(authority, jobs), { event_id: "suspend-4", tenant_id: "tenant-a" }))
@@ -124,6 +151,7 @@ describe("durable tenant suspension revocation", () => {
     const authority = {
       pendingCredentials: vi.fn(async () => { throw new Error("malformed credential obligation"); }),
       confirmCredentialRevoked: vi.fn(async () => {}),
+      requestCredentialRevocation: vi.fn(async () => {}),
     };
     await expect(dispatchTenantSuspensionRevocations(envFor(authority, jobs), { event_id: "suspend-bad", tenant_id: "tenant-a" }))
       .rejects.toThrow("malformed credential obligation");
