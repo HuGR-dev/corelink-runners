@@ -243,7 +243,7 @@ scope. The package now pins the real AWS Lambda and Secrets Manager clients at
 `3.1127.0` for a later qualified-version `InvokeFunction` and `GetSecretValue`
 runtime. No runtime implementation, cloud mutation, or placeholder was added.
 
-## T6-W15 outbox and witness source acceptance
+## T6-W15 outbox, witness, and terminal source acceptance
 
 The outbox packet is accepted at `a0f13d37c2ace4b30f2d6f42d6a1b9fa4a49b6fe`
 after the final cold composition review, including real type composition with
@@ -253,12 +253,23 @@ witness source stack `5f64ca68e6410eec32fbc4480b790d0b9853c6dc` through
 review (6 focused tests and `tsc --noEmit`); its canonical integration commits
 are `fc1ec79` and `59b1a15`.
 
-The composed monitor foundation passed ten focused suites, 65 tests total, and
-`npm run typecheck` at `59b1a15`. This accepts only the outbox and witness
-source packets. T6-W15 remains prepared and partial: types, lifecycle,
-scheduler, and terminal-ingest packets remain out of the integration tree
-pending approval. No work-package completion, deployment, or production
-qualification is implied; the qualification gates recorded above remain open.
+The paired terminal source stack
+`eb2fed47b2156c28ffaaca794ea8ae672fce99f7` through
+`d0ef2e9849ada9539e0c433637ceff9686f019d7` is accepted after independent
+cross-runtime review. Its integration commits are `bba2815` and `f0b5987`;
+the latter adds monitor/Canary RSA bridge coverage for both public-outbox kinds,
+invalid configuration, and old-terminal drain. It makes no trust-registry
+runtime claim.
+
+The composed monitor foundation passed eleven focused suites, 67 tests total,
+and `npm run typecheck` at `f0b5987`; the complete Canary suite passed 13
+files, 117 tests, and `npm run typecheck`. This accepts only the outbox,
+witness, and terminal source packets. T6-W15 remains prepared and partial:
+types, lifecycle, scheduler, and terminal-ingest packets remain out of the
+integration tree pending approval. The frozen runtime contract is recorded at
+`docs/plan/execution/2026-09-06-monitor-runtime-contract.md`. No work-package
+completion, deployment, or production qualification is implied; the
+qualification gates recorded above remain open.
 
 ## Earlier integrated packets
 
