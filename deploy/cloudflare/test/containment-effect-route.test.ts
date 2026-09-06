@@ -51,6 +51,25 @@ describe("canonical containment effect route", () => {
     expect(result.status).toBe("claim_refused"); expect(drives).toBe(0); expect(storage.map.size).toBe(0);
   });
 
+  it("abandons pre-claim preparation when the external claim is refused", async () => {
+    const { ledger } = make(); let abandoned = 0;
+    const result = await runCanonicalEffect({
+      ...deps(ledger, tuple()),
+      claim: async () => false,
+      abandonPreparation: async () => { abandoned++; },
+    });
+    expect(result.status).toBe("claim_refused"); expect(abandoned).toBe(1);
+  });
+
+  it("retains preparation once DRIVING authorized the provider", async () => {
+    const { ledger } = make(); let abandoned = 0;
+    const result = await runCanonicalEffect({
+      ...deps(ledger, tuple()),
+      abandonPreparation: async () => { abandoned++; },
+    });
+    expect(result.status).toBe("committed"); expect(abandoned).toBe(0);
+  });
+
   it("aborts before DRIVING when the pre-drive guard refuses", async () => {
     const { ledger, storage, values } = make(); let drives = 0;
     const result = await runCanonicalEffect({ ...deps(ledger, tuple()), beforeDrive: async () => false, drive: async () => { drives++; return undefined; } });

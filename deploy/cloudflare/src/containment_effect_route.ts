@@ -54,6 +54,12 @@ export interface CanonicalEffectRouteDeps<TOpts extends object> {
   /** Authority-only admission fence; runs before every mutable external seam. */
   admit?: () => Promise<boolean>;
   beforeClaim?: () => Promise<void>;
+  /**
+   * Undo credentials prepared by this invocation when the provider was never
+   * authorized to start. This deliberately has no claim or slot authority:
+   * another invocation may now own either resource for the same job.
+   */
+  abandonPreparation?: () => Promise<void>;
   beforeDrive?: () => Promise<boolean>;
   /** Legacy drain persists its recovery-only permit before owner PERMIT_ISSUED. */
   beforeConfirm?: (permitId: string) => Promise<LegacyPermit | null | undefined>;
@@ -326,6 +332,12 @@ export async function runCanonicalEffect<TOpts extends object>(
   } catch (error) {
     if (!effectStarted) await releaseClaim();
     return { status: "unavailable", reason: error instanceof Error ? error.message : "route failure" };
+  } finally {
+    // Preparation can mint a credential before this route wins the external
+    // spawn claim. If the provider was not started, revoke only that exact
+    // invocation's credential. Cleanup failures are recorded by its durable
+    // revocation path and must not alter the route's authoritative outcome.
+    if (!effectStarted && deps.abandonPreparation) await deps.abandonPreparation().catch(() => undefined);
   }
 }
 

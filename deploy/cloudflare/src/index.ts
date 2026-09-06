@@ -2725,13 +2725,13 @@ export async function acquireConcurrencySlot(
   }
 }
 
-// The spawn drive shared by the webhook path AND the re-drive reconciler:
-// Server authorization → per-tenant concurrency → env-0 mint → GitHub JIT →
-// spawn. Failed authorization or capacity throws before JIT/container effects.
-async function driveSpawn(
+// Prepare every mutable prerequisite before a canonical owner record reaches
+// DRIVING. A returned preparation retains its slot for the eventual provider
+// attempt; known preparation failures clean up their own slot and credential.
+async function prepareSpawn(
   env: Env,
   opts: ContainmentDriveOpts,
-): Promise<ProviderDriveReceipt | void> {
+): Promise<ContainerEnvResult> {
   const { jobId, repo, installationId, labels } = opts;
   // env-0: when the Worker's public URL is configured, stash the PAT in the
   // CRED_STASH DO and inject a single-use ticket instead of CLW_TOKEN.
@@ -2815,6 +2815,20 @@ async function driveSpawn(
       throw e;
     }
   }
+  return mint;
+}
+
+// The spawn drive shared by the webhook path AND the re-drive reconciler:
+// Server authorization → per-tenant concurrency → env-0 mint → GitHub JIT →
+// spawn. Canonical callers pass their pre-claim preparation so DRIVING means a
+// provider effect may actually follow; legacy callers prepare just in time.
+async function driveSpawn(
+  env: Env,
+  opts: ContainmentDriveOpts,
+  prepared?: ContainerEnvResult,
+): Promise<ProviderDriveReceipt | void> {
+  const { jobId } = opts;
+  const mint = prepared ?? await prepareSpawn(env, opts);
   // Authorized ⇒ spawn. The GitHub JIT is minted per container-start ATTEMPT
   // inside spawnRunner (see the ghost-container note on `startWithRetry`), not
   // once here — a single-use registration shared across retries is what let a
@@ -4478,20 +4492,30 @@ export async function runContainmentDrain(env: Env, dependencies: ContainmentDra
       }
       if (!env.RUNNER_JOB_PATS) break;
       const tuple = await drainOwnerTuple(event.repo, event.job_id, event.effect_id, event.event_id, owner, lease.epoch);
+      const spawnOpts: ContainmentDriveOpts = { jobId: event.job_id, repo: event.repo, installationId: event.installation_id, labels: event.labels };
+      let prepared: ContainerEnvResult | undefined;
       const routeResult = await runCanonicalEffect({
         ledger: authority,
         tuple,
-        opts: { jobId: event.job_id, repo: event.repo, installationId: event.installation_id, labels: event.labels },
+        opts: spawnOpts,
         provider: "cloudflare-container",
         resource_id: `job:${event.repo}/${event.job_id}`,
         idempotency_key: event.effect_id,
         admit: () => authority.admitDrainOwner(event.event_id, tuple),
+        beforeClaim: async () => {
+          if (drive === driveSpawn) prepared = await prepareSpawn(env, spawnOpts);
+        },
+        abandonPreparation: async () => {
+          if (prepared?.patId && prepared.tenant) {
+            await revokeIssuedCredential(env, authority, { jobId: event.job_id, tenant: prepared.tenant, patId: prepared.patId });
+          }
+        },
         claim: () => claim(env.RUNNER_JOB_PATS!, event.job_id),
         release: () => releaseSpawnClaim(env.RUNNER_JOB_PATS!, event.job_id),
         drive: async driveOpts => {
           const typed = driveOpts as ContainmentDriveOpts & { effect_id: string; containment_event_id: string; effect_permit_id: string };
           await bindClaim(env, typed);
-          return drive(env, typed);
+          return drive(env, typed, prepared);
         },
         beforeConfirm: permitId => authority.beginEffect(event.event_id, owner, lease!.epoch, Date.now(), permitId),
         beforeBegin: async permit => !!(await authority.beginEffect(event.event_id, owner, lease!.epoch, Date.now(), permit.permit_id)),
@@ -5104,16 +5128,24 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       const effectId = `containment:v1:${containmentEventId}`;
       const ownerTuple = await intakeOwnerTuple(repo, jobId, effectId, containmentEventId);
       ctx.waitUntil((async () => {
+        const spawnOpts: ContainmentDriveOpts = { jobId, repo, installationId, labels: mintLabels };
+        let prepared: ContainerEnvResult | undefined;
         const result = await runCanonicalEffect({
           ledger: ownerAuthority,
           tuple: ownerTuple,
-          opts: { jobId, repo, installationId, labels: mintLabels },
+          opts: spawnOpts,
           provider: "cloudflare-container",
           resource_id: `job:${repo}/${jobId}`,
           idempotency_key: effectId,
+          beforeClaim: async () => { prepared = await prepareSpawn(env, spawnOpts); },
+          abandonPreparation: async () => {
+            if (prepared?.patId && prepared.tenant) {
+              await revokeIssuedCredential(env, ownerAuthority, { jobId, tenant: prepared.tenant, patId: prepared.patId });
+            }
+          },
           claim: () => claimSpawn(env.RUNNER_JOB_PATS, jobId),
           release: () => releaseSpawnClaim(env.RUNNER_JOB_PATS, jobId),
-          drive: driveOpts => driveSpawn(env, driveOpts),
+          drive: driveOpts => driveSpawn(env, driveOpts, prepared),
         });
         if (result.status === "committed") await bumpMetrics(env, "webhook_spawn_claimed");
         else if (result.status === "claim_refused") await bumpMetrics(env, "webhook_spawn_deduped");
@@ -5623,18 +5655,28 @@ export async function redriveOrphanedJobs(
         if (!await recordRetryAttempt(env, redriveJobId, retryEpoch, 0)) continue;
         ctx.waitUntil((async () => {
           const effect = ownedReservation.effect_id;
+          const spawnOpts: ContainmentDriveOpts = { jobId: redriveJobId, repo: redriveRepo, installationId: reInstallationId, labels, credential_source: "installation-only" };
+          let prepared: ContainerEnvResult | undefined;
           const result = await runCanonicalEffect({
             ledger: ownedAuthority,
             tuple: await redriveOwnerTuple(ownedReservation.repo, ownedReservation.job_id, effect, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch),
-            opts: { jobId: redriveJobId, repo: redriveRepo, installationId: reInstallationId, labels, credential_source: "installation-only" as const },
+            opts: spawnOpts,
             provider: "cloudflare-container",
             resource_id: `job:${ownedReservation.repo}/${ownedReservation.job_id}`,
             idempotency_key: effect,
             admit: async () => (await ownedAuthority.beginReservedEffect(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, ownedReservation.path, effect)).status === "eligible",
-            beforeClaim: () => release(env.RUNNER_JOB_PATS, redriveJobId),
+            beforeClaim: async () => {
+              await release(env.RUNNER_JOB_PATS, redriveJobId);
+              if (drive === driveSpawn) prepared = await prepareSpawn(env, spawnOpts);
+            },
+            abandonPreparation: async () => {
+              if (prepared?.patId && prepared.tenant) {
+                await revokeIssuedCredential(env, ownedAuthority, { jobId: redriveJobId, tenant: prepared.tenant, patId: prepared.patId });
+              }
+            },
             claim: () => claim(env.RUNNER_JOB_PATS, redriveJobId),
             release: () => releaseSpawnClaim(env.RUNNER_JOB_PATS!, redriveJobId),
-            drive: driveOpts => drive(env, driveOpts),
+            drive: driveOpts => drive(env, driveOpts, prepared),
             finalize: async () => {
               const terminal = await ownedAuthority.completeRedrive(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, effect);
               return terminal.status === "completed" || terminal.status === "cleared_after_completion";
@@ -5706,6 +5748,7 @@ export async function retryOrphanedSpawns(
   drive: (
     env: Env,
     opts: { jobId: string; repo: string; installationId: string; labels: string[]; credential_source?: "installation-only" },
+    prepared?: ContainerEnvResult,
   ) => Promise<ProviderDriveReceipt | void> = driveSpawn,
   // Injected for the same reason as `drive` — so the placement-confirmation
   // branches are testable without reaching the real GitHub API. Takes the
@@ -5898,10 +5941,12 @@ export async function retryOrphanedSpawns(
       const ownedReservation = reservation;
       const ownedAuthority = reservationAuthority;
       const effect = ownedReservation.effect_id;
+      const spawnOpts: ContainmentDriveOpts = { jobId: ownedReservation.job_id, repo: bumped.repo, installationId: bumped.installationId, labels: bumped.labels, credential_source: "installation-only" };
+      let prepared: ContainerEnvResult | undefined;
       const result = await runCanonicalEffect({
         ledger: ownedAuthority,
         tuple: await redriveOwnerTuple(ownedReservation.repo, ownedReservation.job_id, effect, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch),
-        opts: { jobId: ownedReservation.job_id, repo: bumped.repo, installationId: bumped.installationId, labels: bumped.labels, credential_source: "installation-only" as const },
+        opts: spawnOpts,
         provider: "cloudflare-container",
         resource_id: `job:${ownedReservation.repo}/${ownedReservation.job_id}`,
         idempotency_key: effect,
@@ -5912,10 +5957,16 @@ export async function retryOrphanedSpawns(
             await bumpMetrics(env, "placement_unconfirmed");
           }
           await kv.put(name, JSON.stringify(bumped), { expirationTtl: ORPHAN_TTL_S });
+          if (drive === driveSpawn) prepared = await prepareSpawn(env, spawnOpts);
+        },
+        abandonPreparation: async () => {
+          if (prepared?.patId && prepared.tenant) {
+            await revokeIssuedCredential(env, ownedAuthority, { jobId: ownedReservation.job_id, tenant: prepared.tenant, patId: prepared.patId });
+          }
         },
         claim: () => claimSpawn(kv, ownedReservation.job_id),
         release: () => releaseSpawnClaim(kv, ownedReservation.job_id),
-        drive: driveOpts => drive(env, driveOpts),
+        drive: driveOpts => drive(env, driveOpts, prepared),
         finalize: async () => {
           const terminal = await ownedAuthority.completeRedrive(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, effect);
           return terminal.status === "completed" || terminal.status === "cleared_after_completion";
