@@ -5591,7 +5591,10 @@ export async function redriveOrphanedJobs(
             },
             claim: () => claim(env.RUNNER_JOB_PATS, redriveJobId),
             release: () => releaseSpawnClaim(env.RUNNER_JOB_PATS!, redriveJobId),
-            drive: driveOpts => drive(env, driveOpts, prepared),
+            drive: async driveOpts => {
+              await bindContainmentSpawnClaim(env, driveOpts);
+              return drive(env, driveOpts, prepared);
+            },
             finalize: async () => {
               const terminal = await ownedAuthority.completeRedrive(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, effect);
               return terminal.status === "completed" || terminal.status === "cleared_after_completion";
@@ -5881,7 +5884,10 @@ export async function retryOrphanedSpawns(
         },
         claim: () => claimSpawn(kv, ownedReservation.job_id),
         release: () => releaseSpawnClaim(kv, ownedReservation.job_id),
-        drive: driveOpts => drive(env, driveOpts, prepared),
+        drive: async driveOpts => {
+          await bindContainmentSpawnClaim(env, driveOpts);
+          return drive(env, driveOpts, prepared);
+        },
         finalize: async () => {
           const terminal = await ownedAuthority.completeRedrive(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, effect);
           return terminal.status === "completed" || terminal.status === "cleared_after_completion";
