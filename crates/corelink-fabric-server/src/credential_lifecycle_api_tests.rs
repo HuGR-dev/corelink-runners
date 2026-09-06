@@ -103,6 +103,7 @@ async fn response_preserves_suspension_and_decimal_generation() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers().get("cache-control").unwrap(), "no-store");
     let body = axum::body::to_bytes(response.into_body(), 1024)
         .await
         .unwrap();
