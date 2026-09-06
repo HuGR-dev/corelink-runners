@@ -33,25 +33,30 @@
 //     exist before this change, so "would they have caught the bug" does not apply
 //     to them. They fix the sweep's own contract; they do not prove the fix.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { makeWorkerAuthorities } from "./helpers/worker-authorities";
 
 interface FakeContainer {
   handle: string;
   startWithEnv: ReturnType<typeof vi.fn>;
   teardown: ReturnType<typeof vi.fn>;
+  isAlive: ReturnType<typeof vi.fn>;
   keepAlive: ReturnType<typeof vi.fn>;
 }
 let containers: FakeContainer[] = [];
 let keepAliveThrowsFor: Set<string> = new Set();
+const issuedOperations = new Map<string, string>();
 
 vi.mock("@cloudflare/containers", () => ({
   Container: class {},
   getContainer: vi.fn((_ns: unknown, handle: string): FakeContainer => {
     const existing = containers.find((c) => c.handle === handle);
     if (existing) return existing;
+    let alive = true;
     const c: FakeContainer = {
       handle,
       startWithEnv: vi.fn(async () => {}),
-      teardown: vi.fn(async () => {}),
+      teardown: vi.fn(async () => { alive = false; }),
+      isAlive: vi.fn(async () => alive),
       keepAlive: vi.fn(async () => {
         if (keepAliveThrowsFor.has(handle)) throw new Error("DO gone");
         return { ok: true };
@@ -98,29 +103,56 @@ function fakeKv(seed: Record<string, string> = {}) {
 }
 
 function envWith(kv: ReturnType<typeof fakeKv>): Env {
-  return {
+  const env = {
     RUNNER_CONTAINER: { _ns: "runner" },
     CHECK_HOST_CONTAINER: { _ns: "check" },
     GITHUB_WEBHOOK_SECRET: SECRET,
     GITHUB_MINT_TOKEN: "ghp-mint",
+    CLOUDFLARE_SPAWN_AUTH_TOKEN: "spawn-auth",
     PINNED_IMAGE_DIGEST: "",
+    CORELINK_RUNNER_MINT_AUTH_KEY: "mint-key",
+    CORELINK_MINT_URL: "https://mint.test",
+    SPAWN_WORKER_PUBLIC_URL: "https://worker.test",
+    CLW_ENDPOINT: "https://cas.test",
+    CRED_STASH: {
+      idFromName: (name: string) => name,
+      get: () => ({
+        stash: async (ticket: string) => ticket,
+        wipe: async () => {},
+      }),
+    },
     RUNNER_JOB_PATS: kv,
   } as unknown as Env;
+  const authorities = makeWorkerAuthorities(kv);
+  env.CONTAINMENT = authorities.CONTAINMENT as never;
+  env.CONCURRENCY_SLOTS = authorities.CONCURRENCY_SLOTS as never;
+  return env;
 }
 
 function installFetchRouter() {
   vi.stubGlobal(
     "fetch",
-    vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const url = typeof input === "string" ? input : ((input as Request).url ?? String(input));
       if (url.includes("generate-jitconfig")) {
         return new Response(JSON.stringify({ encoded_jit_config: "jit-ka" }), { status: 200 });
       }
+      if (url.includes("/internal/v1/runner/authorize")) {
+        return new Response(JSON.stringify({ tenant: "acme", max_concurrency: 10 }), { status: 200 });
+      }
       if (url.includes("/internal/v1/runner/mint")) {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { operation_id?: unknown };
+        if (typeof body.operation_id === "string") issuedOperations.set(body.operation_id, "p1");
         return new Response(
           JSON.stringify({ token_plaintext: "pat", pat_id: "p1", tenant: "acme", max_concurrency: 10 }),
           { status: 200 },
         );
+      }
+      if (url.includes("/internal/v1/runner/adopt")) {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { operation_id?: unknown; pat_id?: unknown };
+        return issuedOperations.get(String(body.operation_id)) === body.pat_id
+          ? new Response(null, { status: 204 })
+          : new Response("adoption mismatch", { status: 400 });
       }
       return new Response("{}", { status: 200 });
     }),
@@ -171,6 +203,7 @@ describe("keepAliveLiveRunners (the unit)", () => {
   beforeEach(() => {
     containers = [];
     keepAliveThrowsFor = new Set();
+    issuedOperations.clear();
     vi.mocked(getContainer).mockClear();
   });
 
@@ -216,6 +249,7 @@ describe("the cron keeps a running job's box alive, end to end", () => {
   beforeEach(() => {
     containers = [];
     keepAliveThrowsFor = new Set();
+    issuedOperations.clear();
     vi.mocked(getContainer).mockClear();
     installFetchRouter();
   });
