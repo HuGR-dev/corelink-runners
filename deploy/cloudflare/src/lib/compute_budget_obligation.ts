@@ -75,7 +75,8 @@ export class ComputeObligations {
     const binary = atob(padded); return Uint8Array.from(binary, c => c.charCodeAt(0));
   }
 
-  async prepare(binding: ComputeBinding, nowMs: number): Promise<void> {
+  /** Persist ownership before a caller publishes its pointer or recovery alarm. */
+  async stage(binding: ComputeBinding, nowMs: number): Promise<void> {
     const payload = this.parseToken(binding);
     const issuedAt = payload.issued_at_ms as number; const expiresAt = payload.expires_at_ms as number;
     if (!Number.isSafeInteger(nowMs) || nowMs < issuedAt || nowMs >= expiresAt) throw new Error("compute grant expired");
@@ -86,11 +87,18 @@ export class ComputeObligations {
       if (existing.phase === "active") return;
       if (existing.phase !== "preparing") throw new Error("compute obligation transition refused");
     } else await this.storage.put(key, { binding, phase: "preparing", deadlineMs: expiresAt });
+  }
+
+  async prepare(binding: ComputeBinding, nowMs: number): Promise<void> {
+    await this.stage(binding, nowMs);
+    const staged = await this.read(binding.reservationId);
+    if (!staged) throw new Error("compute obligation missing after staging");
+    if (staged.phase === "active") return;
     const reserved = await this.client.reserve(binding.token, binding.reservationId);
     if (reserved.reservation_id !== binding.reservationId || (reserved.state !== "prepared" && reserved.state !== "active")) throw new Error("invalid compute reserve receipt");
     const activated = reserved.state === "active" ? reserved : await this.client.activate(binding.token, binding.reservationId);
     if (activated.reservation_id !== binding.reservationId || activated.state !== "active") throw new Error("invalid compute activate receipt");
-    await this.storage.put(key, { binding, phase: "active", deadlineMs: expiresAt });
+    await this.storage.put(this.key(binding.reservationId), { binding, phase: "active", deadlineMs: staged.deadlineMs });
   }
 
   async claimProvider(reservationId: string, workloadId: string, nowMs: number): Promise<void> {

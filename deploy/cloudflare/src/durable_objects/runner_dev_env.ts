@@ -135,6 +135,7 @@ export class RunnerDevEnvDO extends Container<any> {
       if (this.devenvState.status !== "stopped" && this.devenvState.status !== "errored") throw new Error("DEVENV_COMPUTE_SESSION_ACTIVE");
       const previous = await this.ctx.storage.get<string>("compute:devenv-session");
       if (previous && previous !== binding.reservationId) await this.computeObligations().abandonUnused(previous);
+      await this.computeObligations().stage(binding, Date.now());
       await this.ctx.storage.put("compute:devenv-session", binding.reservationId);
       // Schedule recovery before RPCs; an uncertain reserve still has an owner.
       await this.schedule(new Date(Date.now() + 90_000), "retryUnusedCompute", { reservationId: binding.reservationId });

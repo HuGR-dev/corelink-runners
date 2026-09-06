@@ -44,8 +44,12 @@ Types and five methods are frozen in `corelink-fabric::compute_budget` and
   never reopen. Cross-tenant/workload collisions refuse.
 - Activates prepared -> active before provider effects. PostgreSQL time must be
   before the captured grant deadline. Same active activation is idempotent.
-- Cancels prepared -> cancelled only. Active reservations cannot be cancelled
-  as unused. Ambiguous activation therefore retains the reservation.
+- Cancels prepared -> cancelled. If reserve never committed, cancellation first
+  commits a cancelled tombstone containing the entire signed immutable tuple
+  under the same tenant lock. A delayed reserve cannot reopen that ID. This is
+  a durable cancellation fence, not success inferred from absent inventory.
+  Active reservations cannot be cancelled as unused. Ambiguous activation
+  therefore retains the reservation until its exact never-dispatched settlement.
 - Settles active -> settled only after a trusted caller supplies actual vCPU-ms
   and terminal evidence digest. Same settlement replay succeeds; conflicting
   amount/evidence refuses. Add actual usage and retire reservation atomically.
@@ -78,7 +82,9 @@ empty JSON objects; settle has decimal `actual_vcpu_ms` and
 `terminal_evidence_digest`. Responses200 receipt `{reservation_id,state}`;
 reserve over budget429 `{error:"monthly_compute_refused"}`; missing baseline or
 unavailable ledger503; malformed input400; invalid signature401; divergent or
-illegal transition409. Never return success from an unknown obligation.
+illegal transition409. Cancellation of an absent reservation succeeds only after
+the exact immutable cancellation tombstone commits; activate and settle of an
+unknown ID refuse.
 POST `/internal/v1/admin/compute-baseline` uses the existing operator admin gate,
 body tenant_id, period_key, external_vcpu_ms(decimal text), evidence_digest;
 success204. No live calls or baseline imports during implementation.
