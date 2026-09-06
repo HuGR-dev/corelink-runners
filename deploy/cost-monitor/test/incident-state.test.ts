@@ -80,4 +80,26 @@ describe("incident reducer", () => {
     expect(() => evaluateIncident(incident, failure(), 9)).toThrow();
     expect(() => evaluateEscalation(incident, 9)).toThrow();
   });
+
+  it("rejects malformed persisted incidents before escalation or transitions", () => {
+    const incident = evaluateIncident(null, failure(), 10).incident!;
+    for (const bad of [
+      { ...incident, revision: Number.NaN },
+      { ...incident, humanAcknowledgedAt: Number.POSITIVE_INFINITY },
+      { ...incident, status: "bogus" },
+      { ...incident, lastFailureAt: 0, openedAt: 10 },
+      { ...incident, allClearSince: 1 },
+      { ...incident, extra: true },
+      { ...incident, latestHighWaters: {} },
+    ]) {
+      expect(() => evaluateEscalation(bad as Incident, 300_000)).toThrow();
+      expect(() => evaluateIncident(bad as Incident, failure(), 300_000)).toThrow();
+    }
+  });
+
+  it("requires acknowledgement to be a coherent persisted timestamp", () => {
+    const incident = evaluateIncident(null, failure(), 10).incident!;
+    expect(() => evaluateEscalation({ ...incident, humanAcknowledgedAt: 9 }, 300_000)).toThrow();
+    expect(() => evaluateEscalation({ ...incident, humanAcknowledgedAt: 300_001 }, 300_000)).toThrow();
+  });
 });

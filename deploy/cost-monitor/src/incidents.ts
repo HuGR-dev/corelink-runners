@@ -49,9 +49,33 @@ function validateSignal(signal: Signal, nowMs: number): void {
 }
 function validatePrevious(previous: Incident | null, nowMs: number): void {
   if (!previous) return;
+  if (typeof previous !== "object" || Array.isArray(previous) || Object.getPrototypeOf(previous) !== Object.prototype) throw new Error("incident is invalid");
+  const fields = ["incidentId", "sourceKey", "monitorTupleDigest", "status", "openedAt", "lastFailureAt", "allClearSince", "initialHighWaters", "latestHighWaters", "humanAcknowledgedAt", "escalationCreated", "revision", "lastReason"];
+  const own = Object.keys(previous);
+  if (own.length !== fields.length || fields.some((field) => !Object.prototype.hasOwnProperty.call(previous, field))) throw new Error("incident fields are invalid");
+  for (const [field, value] of [["incidentId", previous.incidentId], ["sourceKey", previous.sourceKey], ["monitorTupleDigest", previous.monitorTupleDigest], ["lastReason", previous.lastReason]] as const) {
+    if (typeof value !== "string" || value.length === 0 || value.length > 256 || value.trim() !== value) throw new Error(`${field} is invalid`);
+  }
+  if (!["open", "recovering", "recovered"].includes(previous.status)) throw new Error("status is invalid");
+  if (typeof previous.escalationCreated !== "boolean") throw new Error("escalationCreated is invalid");
+  if (!Number.isSafeInteger(previous.revision) || previous.revision <= 0) throw new Error("revision is invalid");
+  const validateWaters = (waters: Record<string, number>, field: string): void => {
+    if (!waters || typeof waters !== "object" || Array.isArray(waters) || Object.getPrototypeOf(waters) !== Object.prototype) throw new Error(`${field} is invalid`);
+    for (const [key, value] of Object.entries(waters)) {
+      if (key.length === 0 || key.length > 256 || key.trim() !== key || !Number.isSafeInteger(value) || value < 0) throw new Error(`${field} is invalid`);
+    }
+  };
+  validateWaters(previous.initialHighWaters, "initialHighWaters");
+  validateWaters(previous.latestHighWaters, "latestHighWaters");
+  if (Object.keys(previous.initialHighWaters).some((key) => !(key in previous.latestHighWaters))) throw new Error("latestHighWaters is incomplete");
   validTime(previous.openedAt, "openedAt");
   validTime(previous.lastFailureAt, "lastFailureAt");
   if (previous.allClearSince !== null) validTime(previous.allClearSince, "allClearSince");
+  if (previous.lastFailureAt < previous.openedAt || (previous.allClearSince !== null && previous.allClearSince < previous.lastFailureAt)) throw new Error("incident times are incoherent");
+  if (previous.humanAcknowledgedAt !== null) validTime(previous.humanAcknowledgedAt, "humanAcknowledgedAt");
+  if (previous.humanAcknowledgedAt !== null && (previous.humanAcknowledgedAt < previous.openedAt || previous.humanAcknowledgedAt > nowMs)) throw new Error("humanAcknowledgedAt is incoherent");
+  if (previous.status === "open" && previous.allClearSince !== null) throw new Error("open incident has clear time");
+  if ((previous.status === "recovering" || previous.status === "recovered") && previous.allClearSince === null) throw new Error("cleared incident is missing clear time");
   if (nowMs < previous.openedAt || nowMs < previous.lastFailureAt || (previous.allClearSince !== null && nowMs < previous.allClearSince)) throw new Error("nowMs regresses incident time");
 }
 function alert(incident: Incident, kind: "initial" | "escalation" | "recovery" | "update", reason: string) {
