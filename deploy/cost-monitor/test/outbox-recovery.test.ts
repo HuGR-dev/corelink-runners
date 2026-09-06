@@ -1,14 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { MemoryStateStore } from "../src/state.js";
-import { DurableDeliveryOutbox, planEnqueue, type AlertTransport, type AuditLog, type DeliveryOperation, type TrustedClock } from "../src/outbox.js";
+import { DurableDeliveryOutbox, planEnqueue, queueKey, deliveryKey, type AlertTransport, type AuditLog, type DeliveryOperation, type TrustedClock } from "../src/outbox.js";
 
 const digest = "a".repeat(64);
 function alert(operationId: string) { return { operationId, incidentId: "incident", kind: "initial" as const, reason: "failure" }; }
-class Clock implements TrustedClock { constructor(public value = 1) {} async now() { return this.value; } }
-class Audit implements AuditLog { calls: unknown[] = []; failIntent = false; async append(operationId: string, payload: unknown) { if (this.failIntent && operationId.endsWith(":intent")) throw new Error("audit unavailable"); this.calls.push([operationId, payload]); return { checkpointRoot: `root-${this.calls.length}` }; } }
+class Clock implements TrustedClock { constructor(public value = 1) {} async now() { return { timeMs: this.value, proofDigest: "a".repeat(64), requestDigest: "b".repeat(64), authority: "test" }; } }
+class Audit implements AuditLog { calls: unknown[] = []; failIntent = false; async append(operationId: string, payload: unknown) { if (this.failIntent && operationId.endsWith(":intent")) throw new Error("audit unavailable"); this.calls.push([operationId, payload]); return { checkpointRoot: `root-${this.calls.length}` }; } async verify(_receipt: unknown) {} }
 class ConflictStore extends MemoryStateStore { conflictOnce = true; override async transact(writes: Parameters<MemoryStateStore["transact"]>[0]) { if (this.conflictOnce && writes.length === 2) { this.conflictOnce = false; return "conflict" as const; } return super.transact(writes); } }
 function transport(results: Array<"accepted" | "unknown">): AlertTransport & { calls: DeliveryOperation[] } { const calls: DeliveryOperation[] = []; return { calls, async publish(operation) { calls.push(operation); const status = results.shift() ?? "accepted"; return status === "accepted" ? { status, operationId: operation.operationId, provider: "aws-sns", providerMessageId: `msg-${calls.length}` } : { status, operationId: operation.operationId, reason: "timeout" }; } }; }
-async function seed(store: MemoryStateStore, sourceKey: string, operationId: string, now = 1) { const planned = planEnqueue(null, sourceKey, [alert(operationId)], "topic", now, digest); await store.transact([{ key: "ns:queue:" + sourceKey, expectedVersion: null, value: planned.queue }, ...planned.deliveries.map((d) => ({ key: "ns:delivery:" + d.operation.operationId, expectedVersion: null, value: d }))]); }
+async function seed(store: MemoryStateStore, sourceKey: string, operationId: string, now = 1) { const planned = planEnqueue(null, sourceKey, [alert(operationId)], "topic", now, digest); await store.transact([{ key: queueKey("ns", sourceKey), expectedVersion: null, value: planned.queue }, ...planned.deliveries.map((d) => ({ key: deliveryKey("ns", d.operation.operationId), expectedVersion: null, value: d }))]); }
 
 describe("delivery outbox recovery", () => {
   it("write-aheads before publish and permanently retires an accepted delivery", async () => {

@@ -1,5 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { MonitorStateStore, Stored, Write } from "./state.js";
+import type { AuditLog } from "./evidence_log.js";
+import type { TrustedClock, TrustedTimeProof } from "./trusted_time.js";
+export type { AuditLog } from "./evidence_log.js";
+export type { TrustedClock, TrustedTimeProof } from "./trusted_time.js";
 
 export type AlertIntent = {
   operationId: string;
@@ -32,8 +36,7 @@ export type DeliveryResult =
   | { status: "accepted"; operationId: string; provider: string; providerMessageId: string }
   | { status: "unknown"; operationId: string; reason: string };
 export interface AlertTransport { publish(operation: DeliveryOperation): Promise<DeliveryResult> }
-export interface TrustedClock { now(): Promise<number> }
-export interface AuditLog { append(operationId: string, payload: unknown): Promise<{ checkpointRoot?: string; [key: string]: unknown }> }
+
 
 export class OutboxCapacityError extends Error { override readonly name = "OutboxCapacityError" }
 export class OutboxValidationError extends Error { override readonly name = "OutboxValidationError" }
@@ -59,10 +62,16 @@ function queueValid(queue: DeliveryQueue): boolean {
   return !!queue && text(queue.sourceKey) && Array.isArray(queue.pendingOperationIds) &&
     queue.pendingOperationIds.length <= MAX_PENDING && queue.pendingOperationIds.every((id) => text(id));
 }
-function key(namespace: string, kind: "queue" | "delivery", id: string): string { return `${namespace}:${kind}:${id}`; }
+export function queueKey(namespace: string, sourceKey: string): string { return `${namespace}:queue:${sourceKey}`; }
+export function deliveryKey(namespace: string, operationId: string): string { return `${namespace}:delivery:${operationId}`; }
 function claimActive(item: PendingDelivery, now: number): boolean { return item.status === "inflight" && item.claimUntil !== null && item.claimUntil > now; }
-function deliveryValid(item: PendingDelivery): boolean {
-  return !!item && !!item.operation && text(item.operation.operationId) && text(item.sourceKey) && positive(item.createdAt) &&
+function operationValid(operation: DeliveryOperation, destination?: string): boolean {
+  return !!operation && text(operation.operationId) && text(operation.incidentId) && text(operation.destination) &&
+    (!destination || operation.destination === destination) && ["initial", "escalation", "recovery", "update"].includes(operation.kind) &&
+    text(operation.payload, 256 * 1024) && HEX.test(operation.payloadDigest) && digest(operation.payload) === operation.payloadDigest;
+}
+function deliveryValid(item: PendingDelivery, destination?: string): boolean {
+  return !!item && operationValid(item.operation, destination) && text(item.sourceKey) && positive(item.createdAt) &&
     (item.status === "queued" || item.status === "inflight" || item.status === "delivered") && Number.isSafeInteger(item.attempt) && item.attempt >= 0 &&
     (item.status !== "inflight" || (text(item.claimId) && positive(item.claimUntil))) &&
     (item.status === "inflight" || item.claimId === null) && (item.claimUntil === null || positive(item.claimUntil)) && positive(item.nextAttemptAt) &&
@@ -88,8 +97,13 @@ export class DurableDeliveryOutbox {
   constructor(private readonly options: { store: MonitorStateStore; audit: AuditLog; clock: TrustedClock; transport: AlertTransport; namespace: string; destination: string }) {
     if (!options.store || !options.audit || !options.clock || !options.transport || !text(options.namespace) || !text(options.destination)) throw new OutboxValidationError("invalid outbox configuration");
   }
-  private queueKey(sourceKey: string): string { return key(this.options.namespace, "queue", sourceKey); }
-  private deliveryKey(id: string): string { return key(this.options.namespace, "delivery", id); }
+  private queueKey(sourceKey: string): string { return queueKey(this.options.namespace, sourceKey); }
+  private deliveryKey(id: string): string { return deliveryKey(this.options.namespace, id); }
+  private async trustedNow(): Promise<number> {
+    const proof: TrustedTimeProof = await this.options.clock.now();
+    if (!proof || typeof proof !== "object" || !positive(proof.timeMs)) throw new OutboxValidationError("invalid trusted time proof");
+    return proof.timeMs;
+  }
   async drain(sourceKey: string, maxOperations = 10): Promise<{ delivered: number; unknown: number; pending: number }> {
     validateSource(sourceKey); if (!Number.isSafeInteger(maxOperations) || maxOperations <= 0 || maxOperations > MAX_PENDING) throw new OutboxValidationError("invalid operation limit");
     let delivered = 0; let unknown = 0; let processed = 0;
@@ -99,8 +113,8 @@ export class DurableDeliveryOutbox {
     for (const operationId of queueStored.value.pendingOperationIds) {
       if (processed >= maxOperations) break;
       const stored = await this.options.store.get<PendingDelivery>(this.deliveryKey(operationId));
-      if (!stored || !deliveryValid(stored.value) || stored.value.operation.operationId !== operationId || stored.value.sourceKey !== sourceKey) throw new OutboxValidationError("malformed delivery record");
-      const now = await this.options.clock.now(); validateTime(now);
+      if (!stored || !deliveryValid(stored.value, this.options.destination) || stored.value.operation.operationId !== operationId || stored.value.sourceKey !== sourceKey) throw new OutboxValidationError("malformed delivery record");
+      const now = await this.trustedNow();
       const item = stored.value;
       if (item.status === "delivered" || item.nextAttemptAt > now || claimActive(item, now)) continue;
       if (item.attempt >= Number.MAX_SAFE_INTEGER || now > Number.MAX_SAFE_INTEGER - CLAIM_MS) throw new OutboxValidationError("delivery counter or claim deadline overflow");
@@ -109,21 +123,24 @@ export class DurableDeliveryOutbox {
       if (await this.options.store.transact([{ key: stored.key, expectedVersion: stored.version, value: claimed }]) !== "committed") continue;
       processed++;
       const intent = await this.options.audit.append(`${operationId}:attempt:${claimed.attempt}:intent`, { type: "WRITE_AHEAD_INTENT", operation: item.operation, attempt: claimed.attempt });
-      const fresh = await this.options.store.get<PendingDelivery>(stored.key); const beforePublish = await this.options.clock.now(); validateTime(beforePublish);
-      if (!fresh || !deliveryValid(fresh.value) || fresh.value.claimId !== claimId || (fresh.value.claimUntil ?? 0) <= beforePublish) continue;
+      await this.options.audit.verify(intent);
+      const fresh = await this.options.store.get<PendingDelivery>(stored.key); const beforePublish = await this.trustedNow();
+      if (!fresh || !deliveryValid(fresh.value, this.options.destination) || fresh.value.claimId !== claimId || (fresh.value.claimUntil ?? 0) <= beforePublish) continue;
       const result = await this.options.transport.publish(item.operation);
-      const intentRoot = typeof intent.checkpointRoot === "string" ? intent.checkpointRoot : null;
-      await this.options.audit.append(`${operationId}:attempt:${claimed.attempt}:result`, { type: "DELIVERY_RESULT", operationId, attempt: claimed.attempt, intentRoot, result });
-      const finalNow = await this.options.clock.now(); validateTime(finalNow);
+      const intentRoot = typeof (intent as { checkpointRoot?: unknown }).checkpointRoot === "string" ? (intent as { checkpointRoot: string }).checkpointRoot : null;
+      const resultReceipt = await this.options.audit.append(`${operationId}:attempt:${claimed.attempt}:result`, { type: "DELIVERY_RESULT", operationId, attempt: claimed.attempt, intentRoot, result });
+      await this.options.audit.verify(resultReceipt);
+      const finalNow = await this.trustedNow();
+      if (finalNow > Number.MAX_SAFE_INTEGER - RETRY_MS) throw new OutboxValidationError("retry deadline overflow");
       const finalStored = await this.options.store.get<PendingDelivery>(stored.key);
-      if (!finalStored || !deliveryValid(finalStored.value) || finalStored.value.claimId !== claimId) continue;
+      if (!finalStored || !deliveryValid(finalStored.value, this.options.destination) || finalStored.value.claimId !== claimId) continue;
       const final: PendingDelivery = result.status === "accepted" && result.provider === "aws-sns" && result.operationId === operationId && text(result.providerMessageId)
         ? { ...finalStored.value, status: "delivered", claimId: null, claimUntil: null, acceptedMessageId: result.providerMessageId, lastResult: "accepted" }
         : { ...finalStored.value, status: "queued", claimId: null, claimUntil: null, nextAttemptAt: finalNow + RETRY_MS, lastResult: "unknown" };
       let finalized = false;
       for (let retry = 0; retry < 3 && !finalized; retry++) {
         const current = await this.options.store.get<PendingDelivery>(stored.key);
-        if (!current || !deliveryValid(current.value) || current.value.claimId !== claimId) break;
+        if (!current || !deliveryValid(current.value, this.options.destination) || current.value.claimId !== claimId) break;
         const writes: Write[] = [{ key: current.key, expectedVersion: current.version, value: final }];
         if (final.status === "delivered") {
           const q = await this.options.store.get<DeliveryQueue>(this.queueKey(sourceKey));
