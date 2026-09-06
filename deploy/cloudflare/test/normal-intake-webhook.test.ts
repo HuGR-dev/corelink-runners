@@ -30,6 +30,7 @@ function setup(rateAllowed = true) {
     else if (url.endsWith("/runner/adopt")) {
       const adoption = JSON.parse(String(init?.body ?? "{}")) as { operation_id?: unknown; pat_id?: unknown };
       expect(typeof adoption.operation_id).toBe("string");
+      expect(typeof adoption.pat_id).toBe("string");
       expect(adoption.pat_id).toBe(issuedOperations.get(adoption.operation_id as string));
       return new Response(null, { status: 204 });
     }

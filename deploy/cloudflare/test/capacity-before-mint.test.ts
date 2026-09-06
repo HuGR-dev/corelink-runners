@@ -40,6 +40,7 @@ function setup(opts: { mint?: unknown; authorize?: unknown; mintStatus?: number;
     if (url.endsWith("/internal/v1/runner/adopt")) {
       const body = JSON.parse(String(init?.body ?? "{}")) as { operation_id?: unknown; pat_id?: unknown };
       expect(typeof body.operation_id).toBe("string");
+      expect(typeof body.pat_id).toBe("string");
       expect(body.pat_id).toBe(issuedOperations.get(body.operation_id as string));
       return new Response(null, { status: 204 });
     }
