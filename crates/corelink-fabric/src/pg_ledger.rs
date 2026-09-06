@@ -207,7 +207,6 @@ CREATE TABLE IF NOT EXISTS external_compute_reservations (
   grant_expires_at_ms bigint NOT NULL, grant_digest text NOT NULL,
   state text NOT NULL, reserved_vcpu_ms bigint NOT NULL,
   actual_vcpu_ms bigint, terminal_evidence_digest text,
-  UNIQUE (tenant, workload_kind, workload_id, period_key),
   CHECK (ceiling_vcpu_ms > 0), CHECK (vcpu_count BETWEEN 1 AND 16),
   CHECK (maximum_wall_ms BETWEEN 1 AND 28800000),
   CHECK (grant_expires_at_ms > 0), CHECK (reserved_vcpu_ms > 0),
@@ -1315,7 +1314,11 @@ impl PgLedger {
                        LEAST( \
                          (SELECT COALESCE(SUM(reserved_vcpu_ms), 0) FROM leases \
                             WHERE tenant = $1 AND state IN ('pending','held') \
-                              AND accrual_period_key = $2), \
+                              AND accrual_period_key = $2) + \
+                         (SELECT COALESCE(SUM(reserved_vcpu_ms), 0) \
+                            FROM external_compute_reservations \
+                            WHERE tenant = $1 AND state IN ('prepared','active') \
+                              AND period_key = $2), \
                          $3::bigint)::bigint AS sigma, \
                        COALESCE((SELECT accrued_vcpu_ms FROM compute_accrual \
                                    WHERE tenant = $1 AND period_key = $2), 0) AS accrued",
