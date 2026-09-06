@@ -26,12 +26,12 @@ function deps(overrides: Partial<TenantSuspensionConsumerDependencies> = {}): Te
       pendingCredentials: vi.fn(async () => ({ records: [], complete: true })),
     } as never,
     revokeCredential: vi.fn(async () => {}),
-    isLegacyCoverageComplete: vi.fn(async () => true),
     ...overrides,
   };
 }
-function response(status: 200 | 202, input = INPUT, complete = status === 200, extra: Record<string, unknown> = {}) {
-  return new Response(JSON.stringify({ ...input, complete, ...extra }), { status, headers: { "content-type": "application/json" } });
+function response(status: 200 | 202, input = INPUT, complete = status === 200, extra: Record<string, unknown> = {}, coverage: string | null = status === 200 ? "verified" : null) {
+  const headers = new Headers({ "content-type": "application/json" }); if (coverage !== null) headers.set("x-corelink-legacy-coverage", coverage);
+  return new Response(JSON.stringify({ ...input, complete, ...extra }), { status, headers });
 }
 function durableStorage() {
   const map = new Map<string, unknown>();
@@ -80,17 +80,16 @@ describe("tenant suspension credential consumer", () => {
     expect(d.authority.checkpointTenantSuspension).not.toHaveBeenCalled();
   });
 
-  it("replay-completes only after begin and legacy coverage validate", async () => {
+  it("replay-completes only after begin and fresh verified server coverage", async () => {
     const begin = vi.fn(async () => ({ complete: true, cursor: "done" }));
-    const coverage = vi.fn(async () => true);
-    const d = deps({ authority: { ...deps().authority, beginTenantSuspension: begin } as never, isLegacyCoverageComplete: coverage });
-    vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("must not call producer after receipt completion"); }));
+    const d = deps({ authority: { ...deps().authority, beginTenantSuspension: begin } as never });
+    const fetchSpy = vi.fn(async () => response(200)); vi.stubGlobal("fetch", fetchSpy);
     expect(await consumeTenantSuspensionCredentials(ENV, INPUT, d)).toEqual({ complete: true });
-    expect(begin).toHaveBeenCalledWith(INPUT); expect(coverage).toHaveBeenCalledWith(INPUT.tenant_id, "7");
+    expect(begin).toHaveBeenCalledWith(INPUT); expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
   it("retains the receipt cursor when a credential revoke fails", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => response(200)));
+    vi.stubGlobal("fetch", vi.fn(async () => response(200, INPUT, true, {}, null)));
     const d = deps({
       authority: { ...deps().authority, beginTenantSuspension: vi.fn(async () => ({ complete: false, cursor: "c1" })), pendingCredentials: vi.fn(async () => ({ records: [identity("job-1")], complete: true })) } as never,
       revokeCredential: vi.fn(async () => { throw new Error("revoke unavailable"); }),
@@ -100,7 +99,7 @@ describe("tenant suspension credential consumer", () => {
   });
 
   it("advances one bounded page only after every identity is confirmed", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => response(200)));
+    vi.stubGlobal("fetch", vi.fn(async () => response(200, INPUT, true, {}, null)));
     const revoke = vi.fn(async () => {});
     const pending = vi.fn(async () => ({ records: [identity("old")], cursor: "c2", complete: false }));
     const checkpoint = vi.fn(async () => true);
@@ -118,11 +117,34 @@ describe("tenant suspension credential consumer", () => {
   });
 
   it("refuses unknown legacy coverage before marking the final page complete", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => response(200)));
+    vi.stubGlobal("fetch", vi.fn(async () => response(200, INPUT, true, {}, null)));
     const checkpoint = vi.fn(async () => true);
-    const d = deps({ authority: { ...deps().authority, checkpointTenantSuspension: checkpoint } as never, isLegacyCoverageComplete: vi.fn(async () => false) });
+    const d = deps({ authority: { ...deps().authority, checkpointTenantSuspension: checkpoint } as never });
     expect(await consumeTenantSuspensionCredentials(ENV, INPUT, d)).toEqual({ complete: false });
     expect(checkpoint).not.toHaveBeenCalled();
+  });
+
+  it("revokes known credentials even when the server coverage header is missing", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => response(200, INPUT, true, {}, null)));
+    const revoke = vi.fn(async () => {});
+    const d = deps({ authority: { ...deps().authority, pendingCredentials: vi.fn(async () => ({ records: [identity("known")], complete: true })) } as never, revokeCredential: revoke });
+    expect(await consumeTenantSuspensionCredentials(ENV, INPUT, d)).toEqual({ complete: false });
+    expect(revoke).toHaveBeenCalledWith(identity("known"));
+  });
+
+  it("finishes on the next request when unknown coverage becomes verified", async () => {
+    const begin = vi.fn().mockResolvedValueOnce({ complete: false, cursor: undefined }).mockResolvedValueOnce({ complete: false, cursor: undefined });
+    const fetchSpy = vi.fn().mockResolvedValueOnce(response(200, INPUT, true, {}, "unknown")).mockResolvedValueOnce(response(200));
+    vi.stubGlobal("fetch", fetchSpy);
+    const d = deps({ authority: { ...deps().authority, beginTenantSuspension: begin } as never });
+    expect(await consumeTenantSuspensionCredentials(ENV, INPUT, d)).toEqual({ complete: false });
+    expect(await consumeTenantSuspensionCredentials(ENV, INPUT, d)).toEqual({ complete: true });
+  });
+
+  it("does not acknowledge a completed local receipt when the fresh server proof is unavailable", async () => {
+    const d = deps({ authority: { ...deps().authority, beginTenantSuspension: vi.fn(async () => ({ complete: true })) } as never });
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("server unavailable"); }));
+    await expect(consumeTenantSuspensionCredentials(ENV, INPUT, d)).rejects.toThrow("server unavailable");
   });
 
   it("rejects strict response mismatches, auth fallback, redirects, and invalid input", async () => {
@@ -183,7 +205,6 @@ describe("tenant suspension credential consumer", () => {
     const result = await consumeTenantSuspensionCredentials(ENV, INPUT, {
       authority,
       revokeCredential: async credential => { await credentials.requestCredentialRevocation(credential); await credentials.confirmCredentialRevoked(credential); revoked.push(credential.jobId); },
-      isLegacyCoverageComplete: async () => true,
     });
     expect(result).toEqual({ complete: true });
     expect(revoked.sort()).toEqual(["late", "old"]);
