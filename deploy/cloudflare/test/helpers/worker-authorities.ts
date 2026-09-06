@@ -64,16 +64,24 @@ export function makeWorkerAuthorities(runnerJobPats: unknown) {
   const slots = new ConcurrencySlotsDO({ storage: slotsStorage } as never, {} as never);
   const acquireCalls: unknown[][] = [];
   const releaseCalls: unknown[][] = [];
-  const slotsAuthority = {
-    acquire: vi.fn(async (...args: unknown[]) => {
-      acquireCalls.push(args);
-      return slots.acquire(...(args as [string, string, number, number, number]));
-    }),
-    release: vi.fn(async (...args: unknown[]) => {
-      releaseCalls.push(args);
-      return slots.release(...(args as [string]));
-    }),
-  };
+  const acquire = vi.fn(async (...args: unknown[]) => {
+    acquireCalls.push(args);
+    return slots.acquire(...(args as [string, string, number, number, number]));
+  });
+  const release = vi.fn(async (...args: unknown[]) => {
+    releaseCalls.push(args);
+    return slots.release(...(args as [string]));
+  });
+  // Keep the real DO surface open-ended. New authority RPCs must work in every
+  // fixture without hand-maintaining a stale enumerated subset.
+  const slotsAuthority = new Proxy(slots, {
+    get(target, property, receiver) {
+      if (property === "acquire") return acquire;
+      if (property === "release") return release;
+      const value = Reflect.get(target, property, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
   return {
     CONTAINMENT: {
       idFromName: vi.fn((name: string) => name),
