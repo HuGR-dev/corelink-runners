@@ -1093,7 +1093,7 @@
         "T8-W4b",
         "T9-W0"
       ],
-      "next_action": "Shared compute admission and Worker/DevEnv composition are implemented and root-tested at de74cc3 with paired server65208a35f. Finish qualified provider terminal/usage and hard-stop producers, explicit baseline/key provisioning, paired migration and live acceptance.",
+      "next_action": "The unqualified settlement endpoint now refuses active capacity release until qualified provider terminal-artifact authority exists. T9-W1 remains partial: finish that authority, provider hard-stop/usage producers, explicit baseline/key provisioning, paired migration, and live acceptance.",
       "blockers": [
         "Qualified provider terminal/cancellation and actual usage remain F005/F007; configured8h reservation does not by itself prove provider hard-stop.",
         "Production signing/public keys and reconciled external baseline are not provisioned; paired server migration and live acceptance remain."
@@ -1106,7 +1106,8 @@
         "4a0c3c3bd3ca3bdbc8b38a34e8adac59ac12639b",
         "dc336b89a034d9961d8cd6a6c5b239edbbc494f9",
         "33d808240cfe3126bd3c42284ae7dacc2ddb00e4",
-        "de74cc32fe2b2d425f22b701785dfea2e3dafa5b"
+        "de74cc32fe2b2d425f22b701785dfea2e3dafa5b",
+        "241950da28cffebad6813680b74787f7881440b4"
       ],
       "review": {
         "status": "pending",
@@ -1117,7 +1118,8 @@
         "docs/plan/execution/2026-09-05-devenv-billing.json",
         "docs/plan/execution/2026-09-05-devenv-credentials.json",
         "docs/handoff/2026-09-06-techlead-takeover.md",
-        "docs/plan/execution/2026-09-06-shared-compute-verification.json"
+        "docs/plan/execution/2026-09-06-shared-compute-verification.json",
+        "Approved bounded regression: parent accepted valid bearer settlement of active capacity with zero usage; 241950d returns 503 without calling settlement. Focused compute_budget_api tests passed 5/5. Mocked API regression only; existing real-PG ledger conservation evidence remains separate."
       ]
     },
     {

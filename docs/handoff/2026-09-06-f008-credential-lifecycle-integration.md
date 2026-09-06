@@ -4,6 +4,9 @@
 
 Root is the orchestrator, product owner, and stakeholder representative. Agents
 implement, test, independently review, and integrate their assigned packets.
+Root retains priority, contract, risk, and acceptance decisions. Prefer Luna
+for bounded work; use Terra for integration complexity, with no more than 15
+simultaneous agents.
 This handoff records verified source state; it does not claim completion of F008
 or replace the frozen implementation contract.
 
@@ -57,6 +60,22 @@ With the required shared target controls and a sourced, non-empty
 `TEST_DATABASE_URL`, the focused command passed:
 
 - `CARGO_TARGET_DIR=/private/tmp/corelink-takeover-suspension-pg-r2/target CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 cargo test -p corelink-fabric --lib lifecycle_unsupported`
+
+## Compute settlement containment
+
+Independently approved commit `241950d` refuses `/internal/v1/compute/settle`
+with 503 until qualified provider terminal-artifact authority exists. It keeps
+an active reservation active and does not call ledger settlement when a valid
+grant presents zero usage and an arbitrary digest.
+
+The added regression was RED against parent `10355b5` in a disposable worktree:
+the valid bearer received 200. It is GREEN after the repair:
+
+- `CARGO_TARGET_DIR=/private/tmp/corelink-takeover-suspension-pg-r2/target CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 cargo test -p corelink-fabric-server --lib compute_budget_api` — 5 passed.
+
+This is a mocked API-boundary regression, not a real PostgreSQL HTTP-capacity
+proof. Existing real-PG external-compute conservation evidence remains separate;
+no cheap HTTP-plus-PG harness was available in the focused server suite.
 
 ## Earlier integrated packets
 
