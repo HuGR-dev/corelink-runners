@@ -1,13 +1,8 @@
 // Runtime-agnostic reconciliation discovery and handoff helpers.
 //
-// The registry is the authority for customer recovery.  A caller must never
-// turn "all repositories visible to a GitHub token" into a recovery set: that
-// would both widen the credential scope and make a transient registry failure
-// look like an empty (therefore safe) answer.  The registry response is a
-// bounded cursor stream with a stable contract marker; keyset pagination is
-// idempotent but does not claim a transaction-wide snapshot. Repositories are both
-// eligible and verified, together with the installation that authorizes the
-// GitHub read and subsequent spawn.
+// The registry is the authority for authorization candidates. This module only
+// consumes its bounded cursor stream; membership/eligibility decisions belong to
+// the next reconciliation stage.
 
 import type { KvLike } from "./lib";
 
@@ -21,35 +16,21 @@ export interface ReconcilerRegistryEnv {
   RECONCILER_REGISTRY_AUTH_KEY?: string;
 }
 
-export interface RegistryPage {
-  schema_version: 1;
-  source: "runner_repo_allowlist";
-  snapshot_id: string;
-  repositories: Array<{
-    repo_full_name?: string;
-    installation_id?: string | number;
-  }>;
-  next_cursor?: string | null;
-}
-
 const MAX_REGISTRY_PAGES = 100;
 const REGISTRY_TIMEOUT_MS = 5_000;
 const MAX_REGISTRY_BYTES = 256 * 1024;
 const HANDOFF_LEASE_MS = 30_000;
 const REPO_RE = /^[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9])?\/[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9])?$/;
 
-function canonicalRepo(value: unknown): string | null {
+function validRepo(value: unknown): string | null {
   if (typeof value !== "string") return null;
-  const parts = value.trim().split("/");
-  if (parts.length !== 2) return null;
-  const repo = `${parts[0].trim().toLowerCase()}/${parts[1].trim().toLowerCase()}`;
-  return REPO_RE.test(repo) ? repo : null;
+  return REPO_RE.test(value) ? value : null;
 }
 
 function installationId(value: unknown): string | null {
   const id = typeof value === "number" && Number.isSafeInteger(value)
     ? String(value)
-    : typeof value === "string" ? value.trim() : "";
+    : typeof value === "string" ? value : "";
   return /^[1-9][0-9]*$/.test(id) ? id : null;
 }
 
@@ -89,21 +70,27 @@ async function readBoundedBody(response: Response): Promise<Uint8Array | null> {
 }
 
 /**
- * Poll the authoritative eligible-repository registry.
+ * Poll the authoritative authorization-candidate registry.
  *
- * A malformed page, changed snapshot, repeated cursor, missing auth header,
+ * A malformed page, repeated cursor, missing auth header,
  * or an incomplete stream is an unknown answer and returns `null`.  Returning
  * `[]` would incorrectly authorize no repositories as a complete inventory.
  */
-export async function discoverEligibleRepositories(
+export async function discoverAuthorizationCandidates(
   env: ReconcilerRegistryEnv,
   fetcher: typeof fetch = fetch,
 ): Promise<ReconcilerRepository[] | null> {
   const base = env.RECONCILER_REGISTRY_URL?.trim();
   const auth = env.RECONCILER_REGISTRY_AUTH_KEY?.trim();
   if (!base || !auth) return null;
+  let baseUrl: URL;
+  try {
+    baseUrl = new URL(base);
+    if (baseUrl.protocol !== "https:") return null;
+  } catch {
+    return null;
+  }
   let cursor: string | undefined;
-  let snapshot: string | undefined;
   const seenCursors = new Set<string>();
   const found = new Map<string, ReconcilerRepository>();
 
@@ -112,9 +99,11 @@ export async function discoverEligibleRepositories(
     const timeout = setTimeout(() => controller.abort(), REGISTRY_TIMEOUT_MS);
     let response: Response;
     try {
-      const url = new URL(base);
+      const url = new URL(baseUrl.toString());
       if (cursor) url.searchParams.set("cursor", cursor);
       response = await fetcher(url.toString(), {
+        method: "GET",
+        redirect: "error",
         headers: {
           "x-corelink-internal-auth": auth,
           accept: "application/json",
@@ -129,30 +118,24 @@ export async function discoverEligibleRepositories(
       const body: unknown = JSON.parse(text);
       if (!record(body)
         || body.schema_version !== 1
-        || body.source !== "runner_repo_allowlist"
-        || typeof body.snapshot_id !== "string"
-        || body.snapshot_id.length === 0
-        || !Array.isArray(body.repositories)) return null;
-      if (snapshot === undefined) snapshot = body.snapshot_id;
-      if (snapshot !== body.snapshot_id) return null;
+        || body.source !== "runner_authorization_candidates"
+        || !Array.isArray(body.repositories)
+        || !Object.prototype.hasOwnProperty.call(body, "next_cursor")
+        || (body.next_cursor !== null && typeof body.next_cursor !== "string")) return null;
       for (const entry of body.repositories) {
         if (!record(entry)
-          || (entry.repo_full_name !== undefined && typeof entry.repo_full_name !== "string")
-          || (entry.installation_id !== undefined
-            && typeof entry.installation_id !== "string"
-            && typeof entry.installation_id !== "number")) return null;
-        const repo = canonicalRepo(entry.repo_full_name);
+          || typeof entry.repo_full_name !== "string"
+          || (typeof entry.installation_id !== "string" && typeof entry.installation_id !== "number")) return null;
+        const repo = validRepo(entry.repo_full_name);
         const install = installationId(entry.installation_id);
         if (!repo || !install) return null;
-        const prior = found.get(repo);
-        if (prior && prior.installationId !== install) return null;
-        found.set(repo, { repo, installationId: install });
+        found.set(`${repo}\u0000${install}`, { repo, installationId: install });
       }
       const next = body.next_cursor;
-      if (next == null || next === "") {
-        return [...found.values()].sort((a, b) => a.repo.localeCompare(b.repo));
+      if (next === null) {
+        return [...found.values()].sort((a, b) => a.repo.localeCompare(b.repo) || a.installationId.localeCompare(b.installationId));
       }
-      if (typeof next !== "string" || seenCursors.has(next)) return null;
+      if (next === "" || seenCursors.has(next)) return null;
       seenCursors.add(next);
       cursor = next;
     } catch {

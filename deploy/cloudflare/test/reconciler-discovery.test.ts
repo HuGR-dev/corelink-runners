@@ -5,11 +5,10 @@ vi.mock("@cloudflare/containers", () => ({
 }));
 import {
   claimReconcileHandoff,
-  discoverEligibleRepositories,
+  discoverAuthorizationCandidates,
   reconcileHandoffKey,
   releaseReconcileHandoff,
 } from "../src/reconciler";
-import { redriveOrphanedJobs, type Env } from "../src/index";
 
 function response(body: unknown, status = 200): Response {
   const encoded = new TextEncoder().encode(JSON.stringify(body));
@@ -24,8 +23,7 @@ describe("authoritative reconciler registry", () => {
     const fetcher = vi.fn()
       .mockResolvedValueOnce(response({
         schema_version: 1,
-        source: "runner_repo_allowlist",
-        snapshot_id: "s1",
+        source: "runner_authorization_candidates",
         repositories: [
           { repo_full_name: "Acme/Customer", installation_id: 42 },
         ],
@@ -33,38 +31,72 @@ describe("authoritative reconciler registry", () => {
       }))
       .mockResolvedValueOnce(response({
         schema_version: 1,
-        source: "runner_repo_allowlist",
-        snapshot_id: "s1",
+        source: "runner_authorization_candidates",
         repositories: [{ repo_full_name: "acme/other", installation_id: "44" }],
         next_cursor: null,
       }));
-    await expect(discoverEligibleRepositories(
+    await expect(discoverAuthorizationCandidates(
       { RECONCILER_REGISTRY_URL: "https://registry.test/repos", RECONCILER_REGISTRY_AUTH_KEY: "secret" },
       fetcher,
     )).resolves.toEqual([
-      { repo: "acme/customer", installationId: "42" },
+      { repo: "Acme/Customer", installationId: "42" },
       { repo: "acme/other", installationId: "44" },
     ]);
     expect(fetcher.mock.calls[1][0]).toContain("cursor=c1");
-    expect(fetcher.mock.calls[0][1]).toMatchObject({ headers: { "x-corelink-internal-auth": "secret" } });
+    expect(fetcher.mock.calls[0][1]).toMatchObject({
+      method: "GET",
+      headers: { "x-corelink-internal-auth": "secret" },
+      redirect: "error",
+    });
   });
 
-  it("fails closed on snapshot drift or a repeated cursor", async () => {
-    const drift = vi.fn()
-      .mockResolvedValueOnce(response({ schema_version: 1, source: "runner_repo_allowlist", snapshot_id: "s1", repositories: [], next_cursor: "c" }))
-      .mockResolvedValueOnce(response({ schema_version: 1, source: "runner_repo_allowlist", snapshot_id: "s2", repositories: [], next_cursor: null }));
-    await expect(discoverEligibleRepositories(
-      { RECONCILER_REGISTRY_URL: "https://registry.test", RECONCILER_REGISTRY_AUTH_KEY: "k" }, drift,
+  it("preserves repository spelling and deduplicates only exact repository/install pairs", async () => {
+    const fetcher = vi.fn().mockResolvedValue(response({
+      schema_version: 1,
+      source: "runner_authorization_candidates",
+      repositories: [
+        { repo_full_name: "Acme/Repo", installation_id: "42" },
+        { repo_full_name: "Acme/Repo", installation_id: 42 },
+        { repo_full_name: "Acme/Repo", installation_id: "43" },
+      ],
+      next_cursor: null,
+    }));
+    await expect(discoverAuthorizationCandidates(
+      { RECONCILER_REGISTRY_URL: "https://registry.test", RECONCILER_REGISTRY_AUTH_KEY: "k" }, fetcher,
+    )).resolves.toEqual([
+      { repo: "Acme/Repo", installationId: "42" },
+      { repo: "Acme/Repo", installationId: "43" },
+    ]);
+  });
+
+  it("refuses an incomplete 100-page stream", async () => {
+    let page = 0;
+    const fetcher = vi.fn(async () => response({
+      schema_version: 1,
+      source: "runner_authorization_candidates",
+      repositories: [],
+      next_cursor: `next-${page++}`,
+    }));
+    await expect(discoverAuthorizationCandidates(
+      { RECONCILER_REGISTRY_URL: "https://registry.test", RECONCILER_REGISTRY_AUTH_KEY: "k" }, fetcher,
     )).resolves.toBeNull();
-    const loop = vi.fn().mockResolvedValue(response({ schema_version: 1, source: "runner_repo_allowlist", snapshot_id: "s1", repositories: [], next_cursor: "same" }));
-    await expect(discoverEligibleRepositories(
+    expect(fetcher).toHaveBeenCalledTimes(100);
+  });
+
+  it("fails closed on malformed schema or a repeated cursor", async () => {
+    const malformed = vi.fn().mockResolvedValueOnce(response({ schema_version: 1, source: "wrong", repositories: [], next_cursor: null }));
+    await expect(discoverAuthorizationCandidates(
+      { RECONCILER_REGISTRY_URL: "https://registry.test", RECONCILER_REGISTRY_AUTH_KEY: "k" }, malformed,
+    )).resolves.toBeNull();
+    const loop = vi.fn().mockResolvedValue(response({ schema_version: 1, source: "runner_authorization_candidates", repositories: [], next_cursor: "same" }));
+    await expect(discoverAuthorizationCandidates(
       { RECONCILER_REGISTRY_URL: "https://registry.test", RECONCILER_REGISTRY_AUTH_KEY: "k" }, loop,
     )).resolves.toBeNull();
   });
 
   it("does not arm an inventory without registry credentials", async () => {
     const fetcher = vi.fn();
-    await expect(discoverEligibleRepositories({}, fetcher)).resolves.toBeNull();
+    await expect(discoverAuthorizationCandidates({}, fetcher)).resolves.toBeNull();
     expect(fetcher).not.toHaveBeenCalled();
   });
 
@@ -82,7 +114,7 @@ describe("authoritative reconciler registry", () => {
         },
       }),
     } as Response);
-    await expect(discoverEligibleRepositories(
+    await expect(discoverAuthorizationCandidates(
       { RECONCILER_REGISTRY_URL: "https://registry.test", RECONCILER_REGISTRY_AUTH_KEY: "k" }, fetcher,
     )).resolves.toBeNull();
     expect(cancelled).toBe(true);
@@ -90,8 +122,16 @@ describe("authoritative reconciler registry", () => {
 
   it("fails closed on an invalid registry URL before fetching", async () => {
     const fetcher = vi.fn();
-    await expect(discoverEligibleRepositories(
+    await expect(discoverAuthorizationCandidates(
       { RECONCILER_REGISTRY_URL: "::invalid-url::", RECONCILER_REGISTRY_AUTH_KEY: "k" }, fetcher,
+    )).resolves.toBeNull();
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("refuses a non-HTTPS registry before fetching", async () => {
+    const fetcher = vi.fn();
+    await expect(discoverAuthorizationCandidates(
+      { RECONCILER_REGISTRY_URL: "http://registry.test/repos", RECONCILER_REGISTRY_AUTH_KEY: "k" }, fetcher,
     )).resolves.toBeNull();
     expect(fetcher).not.toHaveBeenCalled();
   });
@@ -123,50 +163,5 @@ describe("durable reconciliation handoff", () => {
     expect(store.values.has(reconcileHandoffKey("acme/customer", "99"))).toBe(true);
     await releaseReconcileHandoff(store, "acme/customer", "99");
     await expect(claimReconcileHandoff(store, handoff, 1_000)).resolves.toBe(true);
-  });
-});
-
-describe("dropped queued webhook recovery", () => {
-  it("recovers a repo outside the static list through the verified registry", async () => {
-    const store = new Map<string, string>();
-    const kv = {
-      get: async (key: string) => store.get(key) ?? null,
-      put: async (key: string, value: string) => { store.set(key, value); },
-      delete: async (key: string) => { store.delete(key); },
-    };
-    const fetcher = vi.fn()
-      .mockResolvedValueOnce(response({
-        schema_version: 1,
-        source: "runner_repo_allowlist",
-        snapshot_id: "s1",
-        repositories: [{ repo_full_name: "customer/repo", installation_id: "77" }],
-        next_cursor: null,
-      }));
-    vi.stubGlobal("fetch", fetcher);
-    const drive = vi.fn(async () => undefined);
-    const tasks: Promise<unknown>[] = [];
-    const ctx = { waitUntil: (p: Promise<unknown>) => { tasks.push(p); } };
-    const env = {
-      RECONCILER_REGISTRY_URL: "https://registry.test/repos",
-      RECONCILER_REGISTRY_AUTH_KEY: "registry-secret",
-      RECONCILER_REPOS: "first-party/repo",
-      GITHUB_WEBHOOK_SECRET: "webhook-secret",
-      GITHUB_MINT_TOKEN: "static-token",
-      RUNNER_JOB_PATS: kv,
-    } as unknown as Env;
-    await redriveOrphanedJobs(env, ctx as never, undefined, 1_800_000_000_000, {
-      listOrphanRunnerJobs: async (scanEnv, repo) => {
-        expect(repo).toBe("customer/repo");
-        expect(scanEnv.GITHUB_RECONCILER_TOKEN).toBe("static-token");
-        return [{ jobId: "123", labels: ["corelink"] }];
-      },
-      claimSpawn: async () => true,
-      releaseSpawnClaim: async () => {},
-      driveSpawn: drive,
-    });
-    await Promise.all(tasks);
-    expect(drive).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-      jobId: "123", repo: "customer/repo", installationId: "77", labels: ["corelink"],
-    }));
   });
 });
