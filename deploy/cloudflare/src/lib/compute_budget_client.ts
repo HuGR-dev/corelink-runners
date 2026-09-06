@@ -41,7 +41,7 @@ function validateReservationId(id: string): void {
 }
 
 function validateDecimal(value: string, field: string): void {
-  if (typeof value !== "string" || !DECIMAL.test(value)) throw invalid(`invalid ${field}`);
+  if (typeof value !== "string" || value.length > 19 || !DECIMAL.test(value)) throw invalid(`invalid ${field}`);
   try {
     if (BigInt(value) > I64_MAX) throw invalid(`invalid ${field}`);
   } catch (error) {
@@ -55,9 +55,11 @@ async function readBoundedBody(response: Response, signal: AbortSignal): Promise
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
+  let onAbort: (() => void) | undefined;
   const aborted = new Promise<never>((_, reject) => {
-    if (signal.aborted) reject(new ComputeBudgetClientError("baseline_or_unavailable", "compute request timed out"));
-    else signal.addEventListener("abort", () => reject(new ComputeBudgetClientError("baseline_or_unavailable", "compute request timed out")), { once: true });
+    onAbort = () => reject(new ComputeBudgetClientError("baseline_or_unavailable", "compute request timed out"));
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
   });
   try {
     for (;;) {
@@ -65,12 +67,13 @@ async function readBoundedBody(response: Response, signal: AbortSignal): Promise
       if (part.done) break;
       total += part.value.byteLength;
       if (total > MAX_RESPONSE_BYTES) {
-        await reader.cancel("response too large").catch(() => {});
+        void reader.cancel("response too large").catch(() => {});
         throw invalid("compute response too large");
       }
       chunks.push(part.value);
     }
   } finally {
+    if (onAbort) signal.removeEventListener("abort", onAbort);
     reader.releaseLock();
   }
   if (signal.aborted) throw new ComputeBudgetClientError("baseline_or_unavailable", "compute request timed out");
@@ -87,7 +90,7 @@ function expectedState(operation: Operation): ComputeReceipt["state"][] {
 }
 
 export class ComputeBudgetClient {
-  readonly endpoint: URL;
+  private readonly origin: string;
   private readonly fetcher: typeof fetch;
 
   constructor(endpoint: string, fetcher: typeof fetch = fetch) {
@@ -96,7 +99,7 @@ export class ComputeBudgetClient {
     if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.search || parsed.hash || (parsed.pathname !== "/" && parsed.pathname !== "")) {
       throw invalid("compute endpoint must be an HTTPS origin");
     }
-    this.endpoint = parsed;
+    this.origin = parsed.origin;
     this.fetcher = fetcher;
   }
 
@@ -112,34 +115,39 @@ export class ComputeBudgetClient {
   private async call(operation: Operation, token: string, reservationId: string, body: Record<string, string> = {}): Promise<ComputeReceipt> {
     validateToken(token); validateReservationId(reservationId);
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+    let timedOut = false;
+    let timeoutReject!: (error: ComputeBudgetClientError) => void;
+    const timeout = new Promise<never>((_, reject) => { timeoutReject = reject; });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+      timeoutReject(new ComputeBudgetClientError("ambiguous", "compute result is ambiguous"));
+    }, TIMEOUT_MS);
     try {
       let response: Response;
       try {
-        response = await this.fetcher(new URL(`/internal/v1/compute/${operation}`, this.endpoint).toString(), {
-          method: "POST", signal: controller.signal,
+        response = await Promise.race([this.fetcher(new URL(`/internal/v1/compute/${operation}`, this.origin).toString(), {
+          method: "POST", redirect: "error", signal: controller.signal,
           headers: { Authorization: `ComputeGrant ${token}`, "content-type": "application/json" },
           body: JSON.stringify(body),
-        });
-      } catch (error) {
-        if (controller.signal.aborted) throw new ComputeBudgetClientError("baseline_or_unavailable", "compute request timed out");
-        throw new ComputeBudgetClientError("baseline_or_unavailable", "compute request unavailable");
+        }), timeout]);
+      } catch {
+        throw new ComputeBudgetClientError(timedOut ? "ambiguous" : "ambiguous", "compute result is ambiguous");
       }
       let text: string;
       try { text = await readBoundedBody(response, controller.signal); }
       catch (error) {
-        if (controller.signal.aborted) throw new ComputeBudgetClientError("baseline_or_unavailable", "compute request timed out");
-        throw error;
+        throw new ComputeBudgetClientError("ambiguous", "compute result is ambiguous");
       }
-      if (!response.ok) {
+      if (response.status !== 200) {
         const code: ComputeBudgetErrorCode = response.status === 429 ? "over_compute" : response.status === 401 ? "unauthorized" : response.status === 409 ? "conflict" : response.status === 503 ? "baseline_or_unavailable" : response.status >= 500 ? "baseline_or_unavailable" : "invalid";
         throw new ComputeBudgetClientError(code, "compute request rejected");
       }
       let parsed: unknown;
-      try { parsed = JSON.parse(text); } catch { throw invalid("invalid compute receipt"); }
-      if (!parsed || typeof parsed !== "object") throw invalid("invalid compute receipt");
+      try { parsed = JSON.parse(text); } catch { throw new ComputeBudgetClientError("ambiguous", "compute result is ambiguous"); }
+      if (!parsed || typeof parsed !== "object") throw new ComputeBudgetClientError("ambiguous", "compute result is ambiguous");
       const value = parsed as Record<string, unknown>;
-      if (Object.keys(value).length !== 2 || value.reservation_id !== reservationId || typeof value.state !== "string" || !expectedState(operation).includes(value.state as ComputeReceipt["state"])) throw invalid("invalid compute receipt");
+      if (Object.keys(value).length !== 2 || value.reservation_id !== reservationId || typeof value.state !== "string" || !expectedState(operation).includes(value.state as ComputeReceipt["state"])) throw new ComputeBudgetClientError("ambiguous", "compute result is ambiguous");
       return { reservation_id: reservationId, state: value.state as ComputeReceipt["state"] };
     } catch (error) {
       if (error instanceof ComputeBudgetClientError) throw error;
