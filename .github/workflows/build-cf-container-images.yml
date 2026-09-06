@@ -4,9 +4,12 @@
 # wrangler.jsonc` references them by tag/digest and a local `wrangler deploy` no
 # longer needs a Docker daemon.
 #
-# Two images are built + pushed (both are Container-DO classes in wrangler.jsonc):
+# Three images are built + pushed by explicit dispatch (the DevEnv image is
+# published for its currently image-free DO binding, ready for a later digest
+# pin):
 #   - RunnerContainer   (build context: deploy/runner)      -> corelink-spawn-worker-runnercontainer
 #   - CheckHostContainer(build context: deploy/check-host)  -> corelink-spawn-worker-checkhostcontainer
+#   - RunnerDevEnvDO    (minimal assembled context)          -> corelink-runner-devenv
 #
 # NOTE: the check-host image has NEVER been pushed to the CF registry. THIS
 # workflow creates it on its first run; only after that first push can
@@ -43,7 +46,8 @@
 # ── OWNER DEPENDENCIES ────────────────────────────────────────────────────────
 #   GH SECRET `CLOUDFLARE_API_TOKEN` — a Cloudflare API token with
 #   Containers/Workers push scope for account 6a1fc1c626fc2628823e60b9db01f5cd.
-#   Wrangler reads it from the env; the job is GUARDED on it (fails fast).
+#   It is injected only into the three dispatch-only push steps, each of which
+#   fails closed if the secret is absent.
 name: build-cf-container-images
 
 on:
@@ -80,20 +84,6 @@ jobs:
     runs-on: corelink
     timeout-minutes: 120
     steps:
-      - name: Guard — require the CLOUDFLARE_API_TOKEN secret
-        if: github.event_name != 'pull_request'
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
-            echo "::error::Missing GH secret CLOUDFLARE_API_TOKEN — a Cloudflare API" \
-                 "token with Containers/Workers push scope for account" \
-                 "${CLOUDFLARE_ACCOUNT_ID} is required. Set it in repo Settings →" \
-                 "Secrets and variables → Actions, then re-run."
-            exit 1
-          fi
-
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -162,10 +152,7 @@ jobs:
         run: bash scripts/ci/runner-image-build-preflight.sh
 
       # RunnerContainer — the image customers' `runs-on: corelink` jobs boot on.
-      - name: Build + push RunnerContainer image
-        id: runner
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      - name: Build RunnerContainer image
         run: |
           set -euo pipefail
           IMAGE="corelink-spawn-worker-runnercontainer"
@@ -173,9 +160,19 @@ jobs:
           # Build with plain `docker build` (shim -> nerdctl/buildkit); context =
           # deploy/runner (Dockerfile + action-archive-pins.txt live there).
           docker build -t "${IMAGE}:${TAG}" deploy/runner
-          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
-            echo "PR validation: RunnerContainer built locally; push is dispatch-only"
-            exit 0
+
+      - name: Push RunnerContainer image
+        if: github.event_name != 'pull_request'
+        id: runner
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          IMAGE="corelink-spawn-worker-runnercontainer"
+          TAG="${GITHUB_SHA}"
+          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
+            echo "::error::Missing CLOUDFLARE_API_TOKEN for image push"
+            exit 1
           fi
           # Push via wrangler (mints the CF registry cred; uses the docker binary).
           ( cd deploy/cloudflare && npx wrangler containers push "${IMAGE}:${TAG}" 2>&1 | tee /tmp/runner-push.out )
@@ -199,7 +196,15 @@ jobs:
              deploy/check-host/corelink-check-exec-server
           ls -la deploy/check-host/corelink-check-exec-server
 
-      - name: Build + push CheckHostContainer image
+      - name: Build CheckHostContainer image
+        run: |
+          set -euo pipefail
+          IMAGE="corelink-spawn-worker-checkhostcontainer"
+          TAG="${GITHUB_SHA}"
+          docker build -t "${IMAGE}:${TAG}" deploy/check-host
+
+      - name: Push CheckHostContainer image
+        if: github.event_name != 'pull_request'
         id: checkhost
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -207,10 +212,9 @@ jobs:
           set -euo pipefail
           IMAGE="corelink-spawn-worker-checkhostcontainer"
           TAG="${GITHUB_SHA}"
-          docker build -t "${IMAGE}:${TAG}" deploy/check-host
-          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
-            echo "PR validation: CheckHostContainer built locally; push is dispatch-only"
-            exit 0
+          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
+            echo "::error::Missing CLOUDFLARE_API_TOKEN for image push"
+            exit 1
           fi
           ( cd deploy/cloudflare && npx wrangler containers push "${IMAGE}:${TAG}" 2>&1 | tee /tmp/checkhost-push.out )
           REF="$(scripts/ci/resolve-pushed-ref.sh "${IMAGE}" "${TAG}" /tmp/checkhost-push.out)"
@@ -222,10 +226,7 @@ jobs:
       # Its Dockerfile copies the Rust workspace plus two runtime files. The
       # repository-wide .dockerignore excludes deploy/, so assemble a minimal
       # context explicitly instead of accidentally sending the whole checkout.
-      - name: Build + push RunnerDevEnvDO image
-        id: devenv
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      - name: Build RunnerDevEnvDO image
         run: |
           set -euo pipefail
           IMAGE="corelink-runner-devenv"
@@ -280,9 +281,19 @@ jobs:
             --file "${DOCKERFILE}" \
             --tag "${IMAGE}:${TAG}" \
             "${CONTEXT}"
-          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
-            echo "PR validation: RunnerDevEnvDO built locally; push is dispatch-only"
-            exit 0
+
+      - name: Push RunnerDevEnvDO image
+        if: github.event_name != 'pull_request'
+        id: devenv
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          IMAGE="corelink-runner-devenv"
+          TAG="${GITHUB_SHA}"
+          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
+            echo "::error::Missing CLOUDFLARE_API_TOKEN for image push"
+            exit 1
           fi
           ( cd deploy/cloudflare && npx wrangler containers push "${IMAGE}:${TAG}" 2>&1 | tee /tmp/devenv-push.out )
           REF="$(scripts/ci/resolve-pushed-ref.sh "${IMAGE}" "${TAG}" /tmp/devenv-push.out)"
