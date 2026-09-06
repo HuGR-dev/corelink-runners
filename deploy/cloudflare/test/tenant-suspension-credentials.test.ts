@@ -5,6 +5,8 @@ import {
   type TenantSuspensionInput,
 } from "../src/lib/tenant_suspension_credentials";
 import type { CredentialIdentity } from "../src/lib/credential_authority_contract";
+import { CredentialObligationAuthority } from "../src/lib/credential_obligation_authority";
+import { TenantSuspensionAuthority } from "../src/lib/tenant_suspension_authority";
 
 const INPUT: TenantSuspensionInput = {
   event_id: "suspend-event-1",
@@ -30,6 +32,27 @@ function deps(overrides: Partial<TenantSuspensionConsumerDependencies> = {}): Te
 }
 function response(status: 200 | 202, input = INPUT, complete = status === 200, extra: Record<string, unknown> = {}) {
   return new Response(JSON.stringify({ ...input, complete, ...extra }), { status, headers: { "content-type": "application/json" } });
+}
+function durableStorage() {
+  const map = new Map<string, unknown>();
+  const copy = <T>(value: T): T => value === undefined ? value : structuredClone(value);
+  const base = {
+    get: async <T>(key: string) => copy(map.get(key)) as T | undefined,
+    put: async (key: string, value: unknown) => { map.set(key, copy(value)); },
+    delete: async (key: string) => { map.delete(key); },
+    list: async <T>(options: { prefix?: string; startAfter?: string; limit?: number }) => new Map(
+      [...map.keys()].filter(key => key.startsWith(options.prefix ?? "") && (!options.startAfter || key > options.startAfter)).sort().slice(0, options.limit ?? Infinity).map(key => [key, copy(map.get(key)) as T]),
+    ),
+  };
+  return {
+    ...base,
+    map,
+    transaction: async <T>(fn: (s: typeof base) => Promise<T>) => {
+      const snapshot = new Map([...map].map(([key, value]) => [key, copy(value)]));
+      const tx = { ...base, get: async <V>(key: string) => copy(snapshot.get(key)) as V | undefined, put: async (key: string, value: unknown) => { snapshot.set(key, copy(value)); }, delete: async (key: string) => { snapshot.delete(key); }, list: async <V>(options: { prefix?: string; startAfter?: string; limit?: number }) => new Map([...snapshot.keys()].filter(key => key.startsWith(options.prefix ?? "") && (!options.startAfter || key > options.startAfter)).sort().slice(0, options.limit ?? Infinity).map(key => [key, copy(snapshot.get(key)) as V])) };
+      const result = await fn(tx); map.clear(); for (const [key, value] of snapshot) map.set(key, value); return result;
+    },
+  } as never;
 }
 
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
@@ -108,5 +131,63 @@ describe("tenant suspension credential consumer", () => {
     await expect(consumeTenantSuspensionCredentials({ ...ENV, CORELINK_RUNNER_MINT_AUTH_KEY: undefined }, INPUT, deps())).rejects.toThrow("auth key");
     await expect(consumeTenantSuspensionCredentials(ENV, { ...INPUT, lifecycle_generation: "01" }, deps())).rejects.toThrow("invalid tenant suspension input");
     await expect(consumeTenantSuspensionCredentials(ENV, { ...INPUT, tenant_id: "00000000-0000-0000-0000-000000000000" }, deps())).rejects.toThrow("invalid tenant suspension input");
+  });
+
+  it("bounds a streaming body without content-length and cancels the reader", async () => {
+    let canceled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new Uint8Array(4096)); },
+      pull(controller) { controller.enqueue(new Uint8Array(1)); },
+      cancel() { canceled = true; },
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(stream, { status: 200 })));
+    await expect(consumeTenantSuspensionCredentials(ENV, INPUT, deps())).rejects.toThrow("too large");
+    expect(canceled).toBe(true);
+  });
+
+  it("times out a hanging response body and keeps the receipt retryable", async () => {
+    vi.useFakeTimers();
+    const stream = new ReadableStream<Uint8Array>({ pull() { return new Promise<void>(() => {}); } });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(stream, { status: 200 })));
+    const run = consumeTenantSuspensionCredentials(ENV, INPUT, deps()).then(() => null, error => error);
+    await vi.advanceTimersByTimeAsync(5_001);
+    await expect(run).resolves.toMatchObject({ message: expect.stringMatching(/aborted|abort/i) });
+    vi.useRealTimers();
+  });
+
+  it("rejects path, query, credentials, and non-HTTPS origins before fetch", async () => {
+    const fetchSpy = vi.fn(); vi.stubGlobal("fetch", fetchSpy);
+    for (const origin of ["https://server.example/path", "https://server.example/?x=1", "https://user:pass@server.example", "http://server.example"]) {
+      await expect(consumeTenantSuspensionCredentials({ ...ENV, CORELINK_MINT_URL: origin }, INPUT, deps())).rejects.toThrow("bare HTTPS origin");
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("uses the durable floor and catches a late old-generation registration", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => response(200)));
+    const storage = durableStorage();
+    const eventAuthority = new TenantSuspensionAuthority(storage);
+    const credentials = new CredentialObligationAuthority(storage);
+    const old = identity("old");
+    await credentials.registerCredential(old);
+    let injected = false;
+    const authority = {
+      beginTenantSuspension: eventAuthority.begin.bind(eventAuthority),
+      checkpointTenantSuspension: eventAuthority.checkpoint.bind(eventAuthority),
+      pendingCredentials: async (...args: Parameters<typeof credentials.pendingCredentials>) => {
+        if (!injected) { injected = true; try { await credentials.registerCredential(identity("late")); } catch {} }
+        return credentials.pendingCredentials(...args);
+      },
+    } as never;
+    const revoked: string[] = [];
+    const result = await consumeTenantSuspensionCredentials(ENV, INPUT, {
+      authority,
+      revokeCredential: async credential => { await credentials.requestCredentialRevocation(credential); await credentials.confirmCredentialRevoked(credential); revoked.push(credential.jobId); },
+      isLegacyCoverageComplete: async () => true,
+    });
+    expect(result).toEqual({ complete: true });
+    expect(revoked.sort()).toEqual(["late", "old"]);
+    expect(storage.map.get(`credential-tenant-floor:${INPUT.tenant_id}`)).toMatchObject({ revokedThrough: "7" });
+    expect((await credentials.pendingCredentials({ kind: "tenant", tenant: INPUT.tenant_id, throughGeneration: "7" })).records).toHaveLength(0);
   });
 });

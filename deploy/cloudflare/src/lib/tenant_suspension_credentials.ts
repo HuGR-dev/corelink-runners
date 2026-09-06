@@ -34,15 +34,41 @@ function validInput(input: TenantSuspensionInput): boolean {
   try { return BigInt(input.lifecycle_generation) <= MAX_GENERATION; } catch { return false; }
 }
 
-function sameInput(a: TenantSuspensionInput, b: TenantSuspensionInput): boolean {
-  return a.event_id === b.event_id && a.tenant_id === b.tenant_id && a.lifecycle_generation === b.lifecycle_generation;
-}
-
-async function readBoundedBody(response: Response): Promise<unknown> {
+async function readBoundedBody(response: Response, signal: AbortSignal): Promise<unknown> {
   const length = response.headers.get("content-length");
-  if (length !== null && (!/^\d+$/.test(length) || Number(length) > MAX_RESPONSE_BYTES)) throw new Error("suspension response too large");
-  const text = await response.text();
-  if (new TextEncoder().encode(text).byteLength > MAX_RESPONSE_BYTES) throw new Error("suspension response too large");
+  if (length !== null && (!/^\d+$/.test(length) || Number(length) > MAX_RESPONSE_BYTES)) {
+    void response.body?.cancel();
+    throw new Error("suspension response too large");
+  }
+  if (!response.body) throw new Error("invalid suspension response");
+  const reader = response.body.getReader();
+  const bytes: Uint8Array[] = [];
+  let total = 0;
+  const read = () => new Promise<ReadableStreamReadResult<Uint8Array>>((resolve, reject) => {
+    const fail = () => { signal.removeEventListener("abort", fail); reject(new DOMException("The operation was aborted", "AbortError")); };
+    if (signal.aborted) { fail(); return; }
+    signal.addEventListener("abort", fail, { once: true });
+    reader.read().then(value => { signal.removeEventListener("abort", fail); resolve(value); }, error => { signal.removeEventListener("abort", fail); reject(error); });
+  });
+  try {
+    for (;;) {
+      const part = await read();
+      if (part.done) break;
+      total += part.value.byteLength;
+      if (total > MAX_RESPONSE_BYTES) {
+        void reader.cancel();
+        throw new Error("suspension response too large");
+      }
+      bytes.push(part.value);
+    }
+  } catch (error) {
+    void reader.cancel();
+    throw error;
+  }
+  const raw = new Uint8Array(total);
+  let offset = 0;
+  for (const part of bytes) { raw.set(part, offset); offset += part.byteLength; }
+  const text = new TextDecoder().decode(raw);
   try { return JSON.parse(text); } catch { throw new Error("invalid suspension response"); }
 }
 
@@ -51,27 +77,27 @@ async function closeGeneration(env: { CORELINK_MINT_URL?: string; CORELINK_RUNNE
   if (typeof key !== "string" || key.length === 0) throw new Error("runner mint auth key unavailable");
   const origin = env.CORELINK_MINT_URL;
   if (typeof origin !== "string" || origin.length === 0) throw new Error("mint origin unavailable");
-  let url: URL;
-  try { url = new URL("/internal/v1/runner/credentials/close-generation", origin); } catch { throw new Error("invalid mint origin"); }
-  if (url.protocol !== "https:") throw new Error("mint origin must use HTTPS");
+  let base: URL;
+  try { base = new URL(origin); } catch { throw new Error("invalid mint origin"); }
+  if (base.protocol !== "https:" || base.username || base.password || base.pathname !== "/" || base.search || base.hash) throw new Error("mint origin must be a bare HTTPS origin");
+  const url = new URL("/internal/v1/runner/credentials/close-generation", base);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 5_000);
-  let response: Response;
   try {
-    response = await fetch(url, {
+    const response = await fetch(url, {
       method: "POST", redirect: "error", signal: controller.signal,
       headers: { "content-type": "application/json", "x-corelink-internal-auth": key },
       body: JSON.stringify(input),
     });
+    if (response.status !== 200 && response.status !== 202) throw new Error(`suspension close returned ${response.status}`);
+    const value = await readBoundedBody(response, controller.signal);
+    if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid suspension response");
+    const body = value as Record<string, unknown>;
+    if (Object.keys(body).length !== 4 || body.event_id !== input.event_id || body.tenant_id !== input.tenant_id || body.lifecycle_generation !== input.lifecycle_generation || typeof body.complete !== "boolean") throw new Error("suspension response identity mismatch");
+    const expected = response.status === 200;
+    if (body.complete !== expected) throw new Error("suspension response completion mismatch");
+    return body.complete;
   } finally { clearTimeout(timer); }
-  if (response.status !== 200 && response.status !== 202) throw new Error(`suspension close returned ${response.status}`);
-  const value = await readBoundedBody(response);
-  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid suspension response");
-  const body = value as Record<string, unknown>;
-  if (Object.keys(body).length !== 4 || body.event_id !== input.event_id || body.tenant_id !== input.tenant_id || body.lifecycle_generation !== input.lifecycle_generation || typeof body.complete !== "boolean") throw new Error("suspension response identity mismatch");
-  const expected = response.status === 200;
-  if (body.complete !== expected) throw new Error("suspension response completion mismatch");
-  return body.complete;
 }
 
 export async function consumeTenantSuspensionCredentials(
