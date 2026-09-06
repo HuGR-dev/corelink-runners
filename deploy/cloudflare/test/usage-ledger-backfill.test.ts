@@ -38,7 +38,6 @@ import {
   USAGE_LEDGER_TTL_S,
   RECONCILE_MIN_AGE_MS,
   type UsageLedgerRecord,
-  RUNNER_BOX_VCPU,
 } from "../src/lib";
 
 // ── A KV double so ledger + jtenant state is observable; captures put TTLs. ──
@@ -78,6 +77,7 @@ async function ghSign(secret: string, body: string): Promise<string> {
 
 const SECRET = "whsec-ledger";
 const LABEL = "corelink-dogfood";
+const TENANT = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
 
 function baseEnv(over: Partial<Env> = {}): Env {
   return {
@@ -146,7 +146,7 @@ describe("WP-F usage ledger — write side (completed webhook)", () => {
 
   it("(a) push OFF ⇒ writes usage:<jobId> (tenant+timings+region, 60d TTL) that SURVIVES the jtenant delete", async () => {
     // Derived tenant stashed at spawn; billing push NOT configured (OFF).
-    const kv = fakeKv({ "jtenant:555": "acme" });
+    const kv = fakeKv({ "jtenant:555": TENANT });
     const env = baseEnv({ RUNNER_JOB_PATS: kv as never, BILLING_REGION: "iad" });
     const ctx = makeCtx();
 
@@ -162,7 +162,7 @@ describe("WP-F usage ledger — write side (completed webhook)", () => {
     const rec = JSON.parse(kv.store.get("usage:555") as string) as UsageLedgerRecord;
     expect(rec).toEqual({
       jobId: "555",
-      tenant: "acme",
+      tenant: TENANT,
       startedMs: Date.parse(STARTED),
       completedMs: Date.parse(COMPLETED),
       region: "iad",
@@ -246,7 +246,7 @@ describe("WP-F usage ledger — reconciler backfill (read side)", () => {
   it("(c) reads the ledger ⇒ pushes a TENANT-CORRECT usage event (the GitHub API had no tenant)", async () => {
     const rec: UsageLedgerRecord = {
       jobId: JOB_ID,
-      tenant: "acme",
+      tenant: TENANT,
       startedMs: STARTED_MS,
       completedMs: COMPLETED_MS,
       region: "iad",
@@ -259,15 +259,12 @@ describe("WP-F usage ledger — reconciler backfill (read side)", () => {
     expect(n).toBe(1);
     expect(pushed).toHaveLength(1);
     const ev = (pushed[0] as Record<string, unknown>[])[0]; // batch of one
-    expect(ev.tenant_id).toBe("acme"); // the DERIVED tenant, not CLW_TENANT
-    // 120 allocated seconds × 4 vCPU = 480 vCPU-seconds. The BACKFILL path must
-    // apply the same multiplier as the live path — a backfill that emitted raw
-    // slot-seconds would under-bill exactly the 60-day window the ledger exists
-    // to recover, and would do it silently because both numbers are "seconds".
-    expect(ev.qty).toBe(120 * RUNNER_BOX_VCPU);
-    expect(ev.qty).toBe(480);
+    expect(ev.tenant_id).toBe(TENANT); // the DERIVED tenant, not CLW_TENANT
+    // The backfill uses the same canonical per-job slot-second unit as the live
+    // completion path.
+    expect(ev.qty).toBe(120);
     expect(ev.region).toBe("iad");
-    expect(ev.event_kind).toBe("runner_vcpu_seconds"); // billable unit (2026-08-02)
+    expect(ev.event_kind).toBe("runner_slot_seconds");
     expect(ev.idem_key).toBe(await usageIdemKey(JOB_ID, billingPeriod(COMPLETED_MS)));
   });
 
@@ -281,10 +278,73 @@ describe("WP-F usage ledger — reconciler backfill (read side)", () => {
     expect(pushed).toHaveLength(0);
   });
 
+  it("recovers a lost completed webhook from durable attribution plus GitHub completion time", async () => {
+    // No usage:<jobId> exists: the completed webhook was lost. Ownership comes
+    // from T4-W1's ContainmentDO authority reader, while timestamps come from
+    // the authenticated GitHub jobs response.
+    const kv = fakeKv();
+    const pushed: unknown[][] = [];
+    installFetch(pushed);
+    const n = await reconcileCompletedJobBilling(reconcileEnv(kv), LABEL, NOW, async (jobId) => ({
+      jobId,
+      tenant: TENANT,
+    }));
+    expect(n).toBe(1);
+    expect((pushed[0] as Record<string, unknown>[])[0]).toMatchObject({
+      tenant_id: TENANT,
+      time_ms: COMPLETED_MS,
+      event_kind: "runner_slot_seconds",
+      qty: 120,
+    });
+  });
+
+  it("continues after one ledger read fails and retries that source later", async () => {
+    const first = "887";
+    const second = "889";
+    const rec: UsageLedgerRecord = {
+      jobId: second,
+      tenant: TENANT,
+      startedMs: STARTED_MS,
+      completedMs: COMPLETED_MS,
+      region: "iad",
+    };
+    const kv = fakeKv({ [`usage:${first}`]: "source-kept", [`usage:${second}`]: JSON.stringify(rec) });
+    const originalGet = kv.get;
+    kv.get = vi.fn(async (key: string) => {
+      if (key === `usage:${first}`) throw new Error("temporary KV read failure");
+      return originalGet(key);
+    });
+    const pushed: unknown[][] = [];
+    const iso = new Date(COMPLETED_MS).toISOString();
+    const startedIso = new Date(STARTED_MS).toISOString();
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      const u = String(url);
+      if (u.includes("/actions/runs?status=completed")) {
+        return new Response(JSON.stringify({ workflow_runs: [{ id: 1 }] }), { status: 200 });
+      }
+      if (u.includes("/actions/runs/1/jobs")) {
+        return new Response(JSON.stringify({ jobs: [
+          { id: Number(first), status: "completed", started_at: startedIso, completed_at: iso, labels: [LABEL] },
+          { id: Number(second), status: "completed", started_at: startedIso, completed_at: iso, labels: [LABEL] },
+        ] }), { status: 200 });
+      }
+      if (u.includes("/internal/v1/billing/usage")) {
+        pushed.push(JSON.parse(String(init?.body)));
+        return new Response(null, { status: 202 });
+      }
+      return new Response("nope", { status: 404 });
+    }));
+    const n = await reconcileCompletedJobBilling(reconcileEnv(kv), LABEL, NOW);
+    expect(n).toBe(1);
+    expect(pushed).toHaveLength(1);
+    expect((pushed[0] as Record<string, unknown>[])[0].tenant_id).toBe(TENANT);
+    expect(kv.store.get(`usage:${first}`)).toBe("source-kept");
+  });
+
   it("(d) re-push is dedup-safe — identical idem_key across backfill runs (and == the live-push key)", async () => {
     const rec: UsageLedgerRecord = {
       jobId: JOB_ID,
-      tenant: "acme",
+      tenant: TENANT,
       startedMs: STARTED_MS,
       completedMs: COMPLETED_MS,
       region: "iad",
