@@ -1,0 +1,68 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { authorizeRunner, RunnerAuthorizationError } from "../src/lib/runner_authorization";
+import type { MintEnv, MintParams } from "../src/lib";
+
+const env: MintEnv = {
+  CORELINK_RUNNER_MINT_AUTH_KEY: "dispatch-key",
+  CORELINK_MINT_URL: "https://mint.example",
+  CORELINK_CF_ACCESS_CLIENT_ID: "cf-id",
+  CORELINK_CF_ACCESS_CLIENT_SECRET: "cf-secret",
+};
+const params: MintParams = { jobId: "42", repoFullName: "acme/api", installationId: "123" };
+const good = { tenant: "tenant-1", max_concurrency: 4, max_vcpu_h: 12.5 };
+
+afterEach(() => vi.restoreAllMocks());
+
+describe("authorizeRunner", () => {
+  it("rejects missing inputs without fetch", async () => {
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+    for (const [e, p] of [
+      [{ ...env, CORELINK_RUNNER_MINT_AUTH_KEY: "" }, params],
+      [env, { ...params, jobId: " " }],
+      [env, { ...params, repoFullName: " acme/api" }],
+      [env, { ...params, installationId: "", acquiringPat: "" }],
+    ] as [MintEnv, MintParams][]) await expect(authorizeRunner(e, p)).rejects.toBeInstanceOf(RunnerAuthorizationError);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["403", new Response("secret response", { status: 403 })],
+    ["5xx", new Response("database details", { status: 503 })],
+    ["null", new Response("null", { status: 200 })],
+    ["array", new Response("[]", { status: 200 })],
+    ["malformed", new Response(JSON.stringify({ tenant: "tenant-1", max_concurrency: "4" }), { status: 200 })],
+    ["missing cap", new Response(JSON.stringify({ tenant: "tenant-1" }), { status: 200 })],
+  ])("fails closed on %s without exposing upstream details", async (_name, response) => {
+    vi.stubGlobal("fetch", vi.fn(async () => response));
+    await expect(authorizeRunner(env, params)).rejects.toBeInstanceOf(RunnerAuthorizationError);
+  });
+
+  it("fails closed on transport errors", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("secret transport detail"); }));
+    await expect(authorizeRunner(env, params)).rejects.toBeInstanceOf(RunnerAuthorizationError);
+  });
+
+  it("maps valid authorization and sends installation wire with access headers", async () => {
+    const fetch = vi.fn(async (_url: string, init: RequestInit) => {
+      expect(_url).toBe("https://mint.example/internal/v1/runner/authorize");
+      expect(new Headers(init.headers).get("x-corelink-internal-auth")).toBe("dispatch-key");
+      expect(new Headers(init.headers).get("CF-Access-Client-Id")).toBe("cf-id");
+      expect(JSON.parse(String(init.body))).toEqual({ job_id: "42", repo_full_name: "acme/api", installation_id: "123" });
+      return new Response(JSON.stringify(good), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetch);
+    await expect(authorizeRunner(env, params)).resolves.toEqual({ tenant: "tenant-1", maxConcurrency: 4, maxVcpuH: 12.5 });
+  });
+
+  it("uses Option-C bearer and omits installation_id", async () => {
+    const fetch = vi.fn(async (_url: string, init: RequestInit) => {
+      const headers = new Headers(init.headers);
+      expect(headers.get("authorization")).toBe("Bearer tenant-pat");
+      expect(JSON.parse(String(init.body))).toEqual({ job_id: "42", repo_full_name: "acme/api" });
+      return new Response(JSON.stringify({ tenant: "tenant-1", max_concurrency: 1 }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetch);
+    await expect(authorizeRunner(env, { ...params, installationId: "", acquiringPat: "tenant-pat" })).resolves.toEqual({ tenant: "tenant-1", maxConcurrency: 1 });
+  });
+});
