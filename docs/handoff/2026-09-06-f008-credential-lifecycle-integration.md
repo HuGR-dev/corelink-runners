@@ -243,6 +243,23 @@ scope. The package now pins the real AWS Lambda and Secrets Manager clients at
 `3.1127.0` for a later qualified-version `InvokeFunction` and `GetSecretValue`
 runtime. No runtime implementation, cloud mutation, or placeholder was added.
 
+## T6-W15 outbox and witness source acceptance
+
+The outbox packet is accepted at `a0f13d37c2ace4b30f2d6f42d6a1b9fa4a49b6fe`
+after the final cold composition review, including real type composition with
+trusted-time and evidence-log APIs (8 focused tests and `tsc --noEmit`). The
+witness source stack `5f64ca68e6410eec32fbc4480b790d0b9853c6dc` through
+`baf5b9caef1f31fc393009c5dc9d5bdf6a6ad06a` is also accepted after independent
+review (6 focused tests and `tsc --noEmit`); its canonical integration commits
+are `fc1ec79` and `59b1a15`.
+
+The composed monitor foundation passed ten focused suites, 65 tests total, and
+`npm run typecheck` at `59b1a15`. This accepts only the outbox and witness
+source packets. T6-W15 remains prepared and partial: types, lifecycle,
+scheduler, and terminal-ingest packets remain out of the integration tree
+pending approval. No work-package completion, deployment, or production
+qualification is implied; the qualification gates recorded above remain open.
+
 ## Earlier integrated packets
 
 The prior packets in this tree include:

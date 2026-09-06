@@ -439,22 +439,30 @@
       "id": "T6-W15",
       "sprint": 1,
       "state": "prepared",
-      "implementation": "unknown",
+      "implementation": "partial",
       "owner": "root",
       "dependencies": [
         "T6-W4",
         "O-MONITORHOST",
         "T7-W4b"
       ],
-      "next_action": "Implement the owner-approved, limited AWS Option B monitor design. Keep UNKNOWN fail-closed and complete the remaining qualification before any acceptance or deployment.",
+      "next_action": "Compose independently approved types, lifecycle, scheduler, and terminal-ingest packets. Keep UNKNOWN fail-closed and complete the remaining qualification before any work-package acceptance or deployment.",
       "blockers": [
         "Trusted time/TSA qualification, WORM and three-account independence qualification, crash/rotation/isolation tests, and seven real observation days remain required before acceptance."
       ],
-      "commits": [],
+      "commits": [
+        "a0f13d37c2ace4b30f2d6f42d6a1b9fa4a49b6fe",
+        "fc1ec79",
+        "59b1a15"
+      ],
       "review": {
-        "status": "pending",
-        "commit": null,
-        "evidence": []
+        "status": "partial",
+        "commit": "59b1a15",
+        "evidence": [
+          "Outbox cold composition review: 8 focused tests and tsc --noEmit at a0f13d37.",
+          "Witness independent review: 6 focused tests and tsc --noEmit; canonical source 5f64ca68 through baf5b9ca and integration fc1ec79 through 59b1a15.",
+          "Composed monitor foundation: 10 focused suites, 65 tests, and npm run typecheck at 59b1a15."
+        ]
       },
       "evidence": [
         "docs/handoff/2026-09-06-techlead-takeover.md",
