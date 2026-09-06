@@ -15,7 +15,7 @@ describe("ordered ACK token", () => {
     expect(verifyAck({ ...token, service: "other" }, fields, identity)).toBe(false);
     expect(verifyAck({ ...token, extra: 1 }, fields, identity)).toBe(false);
     expect(verifyAck(token, fields, { ...identity, epoch: "8" })).toBe(false);
-    expect(createAck({ ...fields, producer_seq: Number.MAX_SAFE_INTEGER }, signer)).rejects.toThrow();
+    await expect(createAck({ ...fields, producer_seq: Number.MAX_SAFE_INTEGER + 1 }, signer)).rejects.toThrow();
   });
   it("uses KMS digest signing with the configured RSA key", async () => {
     const calls: unknown[] = [];
@@ -23,7 +23,7 @@ describe("ordered ACK token", () => {
     const client = { send: async (command: { input: Record<string, unknown> }) => {
       calls.push(command.input);
       if (calls.length === 1) return { KeySpec: "RSA_3072", KeyUsage: "SIGN_VERIFY", SigningAlgorithms: ["RSASSA_PSS_SHA_256"], PublicKey: der };
-      return { Signature: sign(null, command.input.Message as Uint8Array, { key: key.privateKey, padding: 6, saltLength: 32 }) };
+      return { KeyId: identity.keyArn, SigningAlgorithm: "RSASSA_PSS_SHA_256", Signature: sign(null, command.input.Message as Uint8Array, { key: key.privateKey, padding: 6, saltLength: 32 }) };
     } };
     const kms = new AwsKmsSigner({ client: client as never, identity });
     const signature = await kms.sign(canonicalAckPayload(fields));

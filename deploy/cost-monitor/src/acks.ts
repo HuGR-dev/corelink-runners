@@ -34,7 +34,7 @@ export interface PublicSigningIdentity {
   epoch: string;
   keyArn: string;
   publicKeySpkiPem: string;
-  role: "ingest-ack" | "recovery" | "manifest" | "page-ack";
+  role: "ingest-ack" | "recovery" | "manifest" | "page-ack" | "journal" | "witness";
 }
 export interface AsyncSigner { identity: PublicSigningIdentity; sign(bytes: Uint8Array): Promise<string> }
 
@@ -65,7 +65,7 @@ function validateIdentity(identity: PublicSigningIdentity): boolean {
   return object(identity) && fieldsExactly(identity, keys) && text(identity.keyId) && text(identity.epoch) &&
     text(identity.keyArn) && typeof identity.publicKeySpkiPem === "string" &&
     identity.publicKeySpkiPem.length > 0 && identity.publicKeySpkiPem.length <= 8192 &&
-    (identity.role === "ingest-ack" || identity.role === "recovery" || identity.role === "manifest" || identity.role === "page-ack");
+    (identity.role === "ingest-ack" || identity.role === "recovery" || identity.role === "manifest" || identity.role === "page-ack" || identity.role === "journal" || identity.role === "witness");
 }
 function pemDer(pem: string): Buffer {
   const body = pem.replace(/^-----BEGIN PUBLIC KEY-----\n?/, "").replace(/\n?-----END PUBLIC KEY-----\n?$/, "").replace(/\s/g, "");
@@ -110,8 +110,12 @@ export class AwsKmsSigner implements AsyncSigner {
       MessageType: "DIGEST",
       SigningAlgorithm: "RSASSA_PSS_SHA_256",
     }));
-    if (!result.Signature) throw new Error("KMS returned no signature");
-    return b64url(result.Signature);
+    if (result.KeyId !== this.identity.keyArn || result.SigningAlgorithm !== "RSASSA_PSS_SHA_256" || !result.Signature) {
+      throw new Error("KMS returned an invalid signature response");
+    }
+    const signature = b64url(result.Signature);
+    if (!verifyOrderedFields(bytes, signature, this.identity)) throw new Error("KMS signature failed local verification");
+    return signature;
   }
 }
 
@@ -143,6 +147,7 @@ export function verifyAck(token: unknown, expected: AckFields, identity: PublicS
       typeof token.signature !== "string" || !validateFields(Object.fromEntries(ACK_FIELDS.map((f) => [f, token[f]]))) ||
       identity.role !== "ingest-ack" || token.signer_key_id !== identity.keyId || token.signer_epoch !== identity.epoch ||
       token.ack_version !== expected.ack_version || JSON.stringify(ACK_FIELDS.map((f) => token[f])) !== JSON.stringify(ACK_FIELDS.map((f) => expected[f]))) return false;
-    return verifyOrderedFields(canonicalAckPayload(token as unknown as AckFields), token.signature, identity);
+    const unsigned = Object.fromEntries(ACK_FIELDS.map((field) => [field, token[field]])) as unknown as AckFields;
+    return verifyOrderedFields(canonicalAckPayload(unsigned), token.signature, identity);
   } catch { return false; }
 }
