@@ -260,6 +260,7 @@ pub trait LeaseLedger {
     }
 
     fn enqueue_tenant_suspension_event(&self, _event: TenantSuspensionEvent) -> anyhow::Result<()> {
+        // Never report success without a restart-safe outbox.
         Err(anyhow::anyhow!("tenant suspension event outbox unavailable"))
     }
 
