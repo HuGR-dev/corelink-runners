@@ -14,6 +14,13 @@ struct InterleavingLedger {
 }
 
 impl LeaseLedger for InterleavingLedger {
+    fn record_tenant_suspension(
+        &self,
+        event: corelink_fabric::TenantSuspensionEvent,
+    ) -> anyhow::Result<()> {
+        self.inner.set_tenant_suspended(&event.tenant_id, true)
+    }
+
     fn set_tenant_suspended(&self, tenant: &str, suspended: bool) -> anyhow::Result<()> {
         if !suspended {
             self.entered_unsuspend.send(()).unwrap();
@@ -68,7 +75,7 @@ impl LeaseLedger for InterleavingLedger {
 }
 
 #[test]
-fn resuspend_waits_for_unsuspend_durable_write_and_keeps_acquire_blocked() {
+fn resuspend_waits_for_unsuspend_durable_write_and_keeps_suspension_cached() {
     let (entered_tx, entered_rx) = channel();
     let (release_tx, release_rx) = channel();
     let ledger = Arc::new(InterleavingLedger {
@@ -82,7 +89,9 @@ fn resuspend_waits_for_unsuspend_durable_write_and_keeps_acquire_blocked() {
         Arc::new(SystemClock),
     ));
     let tenant = corelink_fabric::TenantId::new("interleaving").unwrap();
-    assert!(state.suspend_tenant(&tenant));
+    assert!(state
+        .suspend_tenant_with_event(&tenant, 1)
+        .expect("event suspension should persist"));
 
     let unsuspend_state = Arc::clone(&state);
     let unsuspend_tenant = tenant.clone();
@@ -92,8 +101,16 @@ fn resuspend_waits_for_unsuspend_durable_write_and_keeps_acquire_blocked() {
     let resuspend_state = Arc::clone(&state);
     let resuspend_tenant = tenant.clone();
     let resuspend = thread::spawn(move || resuspend_state.suspend_tenant(&resuspend_tenant));
-    release_tx.send(()).unwrap();
+    let lock_held = matches!(
+        state.suspended_tenants.try_lock(),
+        Err(std::sync::TryLockError::WouldBlock)
+    );
+    let _ = release_tx.send(());
 
+    assert!(
+        lock_held,
+        "unsuspend must hold the cache mutex during persistence"
+    );
     assert!(unsuspend.join().unwrap().is_ok());
     assert!(resuspend.join().unwrap());
     assert!(state.is_tenant_suspended(&tenant));
