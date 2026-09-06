@@ -119,6 +119,7 @@
 //! After teardown the ledger lock is re-acquired (briefly) to write the
 //! `Expired` transition.  No other lock is held at that point.
 
+use std::io::Read;
 use std::time::{Duration, Instant};
 
 use corelink_fabric::{SlotEventKind, TenantSuspensionEvent};
@@ -142,6 +143,34 @@ fn suspension_envelope_body(
         "action": "suspended",
         "lifecycle_generation": generation.to_string(),
     }))?)
+}
+
+const MAX_SUSPENSION_RECEIPT_BYTES: usize = 4 * 1024;
+
+fn suspension_receipt_is_ack(
+    status: u16,
+    body: &[u8],
+    event_id: &str,
+    tenant_id: &str,
+    lifecycle_generation: &str,
+) -> bool {
+    if status != 200 || body.len() > MAX_SUSPENSION_RECEIPT_BYTES {
+        return false;
+    }
+    let Ok(payload) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return false;
+    };
+    let Some(object) = payload.as_object() else {
+        return false;
+    };
+    object.len() == 4
+        && object.get("event_id").and_then(serde_json::Value::as_str) == Some(event_id)
+        && object.get("tenant_id").and_then(serde_json::Value::as_str) == Some(tenant_id)
+        && object
+            .get("lifecycle_generation")
+            .and_then(serde_json::Value::as_str)
+            == Some(lifecycle_generation)
+        && object.get("complete").and_then(serde_json::Value::as_bool) == Some(true)
 }
 
 /// Deliver the durable suspension outbox to the authenticated runner Worker.
@@ -172,10 +201,17 @@ pub async fn dispatch_tenant_suspension_events(state: &crate::AppState) {
         base.trim_end_matches('/')
     );
     for event in events {
-        let body = match suspension_envelope_body(
-            &event,
-            state.ledger.tenant_suspension_generation(&event.event_id),
-        ) {
+        let generation = match state.ledger.tenant_suspension_generation(&event.event_id) {
+            Ok(generation) => generation,
+            Err(e) => {
+                eprintln!(
+                    "suspension-outbox: generation lookup/encode failed event={}: {e:#}",
+                    event.event_id
+                );
+                continue;
+            }
+        };
+        let body = match suspension_envelope_body(&event, Ok(generation)) {
             Ok(body) => body,
             Err(e) => {
                 eprintln!(
@@ -198,26 +234,36 @@ pub async fn dispatch_tenant_suspension_events(state: &crate::AppState) {
         let url = url.clone();
         let token = token.clone();
         let expected_event_id = event.event_id.clone();
+        let expected_tenant_id = event.tenant_id.clone();
+        let expected_generation = generation.to_string();
         let delivered = tokio::task::spawn_blocking(move || {
             let agent: ureq::Agent = ureq::Agent::config_builder()
                 .timeout_global(Some(Duration::from_secs(5)))
                 .http_status_as_error(false)
                 .build()
                 .into();
-            let mut response = agent
+            let response = agent
                 .post(&url)
                 .header("Authorization", &format!("Bearer {token}"))
                 .header("Content-Type", "application/json")
                 .send(&body);
             response
-                .as_mut()
                 .map(|r| {
-                    let status_ok = (200..300).contains(&r.status().as_u16());
-                    let payload = r.body_mut().read_to_string().ok()
-                        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
-                    status_ok
-                        && payload.as_ref().and_then(|v| v.get("ok")).and_then(serde_json::Value::as_bool) == Some(true)
-                        && payload.as_ref().and_then(|v| v.get("event_id")).and_then(serde_json::Value::as_str) == Some(expected_event_id.as_str())
+                    let status = r.status().as_u16();
+                    let mut reader = r
+                        .into_reader()
+                        .take((MAX_SUSPENSION_RECEIPT_BYTES + 1) as u64);
+                    let mut body = Vec::with_capacity(MAX_SUSPENSION_RECEIPT_BYTES + 1);
+                    if reader.read_to_end(&mut body).is_err() {
+                        return false;
+                    }
+                    suspension_receipt_is_ack(
+                        status,
+                        &body,
+                        &expected_event_id,
+                        &expected_tenant_id,
+                        &expected_generation,
+                    )
                 })
                 .unwrap_or(false)
         })
@@ -3115,5 +3161,65 @@ mod tests {
             attempts: 0,
         };
         assert!(suspension_envelope_body(&event, Ok(i64::MAX as u64 + 1)).is_err());
+    }
+
+    #[test]
+    fn suspension_receipt_requires_exact_triple_and_complete() {
+        let body = serde_json::json!({
+            "event_id": "event-1",
+            "tenant_id": "tenant-1",
+            "lifecycle_generation": "7",
+            "complete": true,
+        })
+        .to_string();
+        assert!(suspension_receipt_is_ack(200, body.as_bytes(), "event-1", "tenant-1", "7"));
+        assert!(!suspension_receipt_is_ack(202, body.as_bytes(), "event-1", "tenant-1", "7"));
+
+        for (field, value) in [
+            ("event_id", serde_json::json!("other-event")),
+            ("tenant_id", serde_json::json!("other-tenant")),
+            ("lifecycle_generation", serde_json::json!(7)),
+            ("complete", serde_json::json!(false)),
+        ] {
+            let mut receipt = serde_json::json!({
+                "event_id": "event-1",
+                "tenant_id": "tenant-1",
+                "lifecycle_generation": "7",
+                "complete": true,
+            });
+            receipt[field] = value;
+            assert!(!suspension_receipt_is_ack(
+                200,
+                receipt.to_string().as_bytes(),
+                "event-1",
+                "tenant-1",
+                "7"
+            ));
+        }
+    }
+
+    #[test]
+    fn suspension_receipt_rejects_unknown_keys_and_oversize_body() {
+        let receipt = serde_json::json!({
+            "event_id": "event-1",
+            "tenant_id": "tenant-1",
+            "lifecycle_generation": "7",
+            "complete": true,
+            "extra": "refuse",
+        });
+        assert!(!suspension_receipt_is_ack(
+            200,
+            receipt.to_string().as_bytes(),
+            "event-1",
+            "tenant-1",
+            "7"
+        ));
+        assert!(!suspension_receipt_is_ack(
+            200,
+            &vec![b'x'; MAX_SUSPENSION_RECEIPT_BYTES + 1],
+            "event-1",
+            "tenant-1",
+            "7"
+        ));
     }
 }
