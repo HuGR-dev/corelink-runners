@@ -29,6 +29,14 @@ Every active author has an owner and exclusive paths. Read-only investigators
 have no write scope. Authors work in separate worktrees; only the integrator
 changes this ledger and the delivery index.
 
+Default allocation is one Luna executor per WP, responsible for implementation
+and review corrections through acceptance. Additional agents on the same WP
+require explicitly different, non-overlapping scopes recorded here before
+delegation. Root coordinates, reviews and integrates; it does not duplicate
+an executor's edits. Parallel authorship uses isolated worktrees and preserves
+canonical integration dependencies. A returned commit is a review candidate,
+not automatic implementation or delivery credit.
+
 A new finding receives a stable ID, affected WP and sprint, severity, owner,
 reproduction, acceptance, and whether it blocks delivery. Fix it within the
 current work whenever practical. Larger fixes stay explicit in the backlog;

@@ -635,17 +635,21 @@
     {
       "id": "T4-W1",
       "sprint": 2,
-      "state": "backlog",
-      "implementation": "unknown",
-      "owner": "root",
+      "state": "active",
+      "implementation": "partial",
+      "owner": "wp_t4_w1",
       "dependencies": [
         "T3-W18",
         "T8-W4b",
         "D13"
       ],
-      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare/src/index.ts; deploy/cloudflare/src/lib.ts.",
-      "blockers": [],
-      "commits": [],
+      "next_action": "Replace defective 7200-second attribution retention with durable serialized authority; verify jobs beyond TTL and conflicting writes. Same executor owns review correction. D13 remains unratified.",
+      "blockers": [
+        "Ratified D13 owner-precedence ADR not found; do not invent precedence."
+      ],
+      "commits": [
+        "4c849cd80ac37f0eeff09e4da7e0195451a4b188"
+      ],
       "review": {
         "status": "pending",
         "commit": null,
@@ -656,16 +660,18 @@
     {
       "id": "T4-W2",
       "sprint": 2,
-      "state": "backlog",
-      "implementation": "unknown",
-      "owner": "root",
+      "state": "active",
+      "implementation": "partial",
+      "owner": "wp_t4_w2",
       "dependencies": [
         "T4-W1",
         "R2"
       ],
-      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare/src/index.ts; deploy/cloudflare/src/lib.ts.",
+      "next_action": "Same executor implements actual lost-completed recovery from durable attribution and GitHub timestamps, prevents cursor starvation, and validates poison events before batching; source candidate not accepted.",
       "blockers": [],
-      "commits": [],
+      "commits": [
+        "303622df89b201e0a53e5e23cea4a4bcba7061d3"
+      ],
       "review": {
         "status": "pending",
         "commit": null,
@@ -676,13 +682,13 @@
     {
       "id": "T3-W3",
       "sprint": 2,
-      "state": "backlog",
+      "state": "active",
       "implementation": "unknown",
-      "owner": "root",
+      "owner": "wp_t3_w3",
       "dependencies": [
         "T4-W2"
       ],
-      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare/src/index.ts; deploy/cloudflare/src/lib.ts.",
+      "next_action": "Dropped queued job reconciliation. Isolated source authoring; root integrates dependencies and reviews acceptance before code/delivery credit.",
       "blockers": [],
       "commits": [],
       "review": {
@@ -695,16 +701,17 @@
     {
       "id": "T3-W1",
       "sprint": 2,
-      "state": "prepared",
+      "state": "active",
       "implementation": "partial",
-      "owner": "root",
+      "owner": "wp_t3_w1",
       "dependencies": [
         "T3-W3"
       ],
-      "next_action": "A3.1/A3.2 paired engine mode/status and Worker non-2xx teardown behavior pulled forward for T3-W10 safety. Complete remaining A3.7 wire/logging acceptance and joint Sprint2 verification; this is not whole-WP delivery.",
+      "next_action": "Finish malformed-response and alternate Debug canary coverage; root review source candidate. Hold future-sprint source until canonical predecessor integration.",
       "blockers": [],
       "commits": [
-        "a6d04957d1b48b0f9a74e9a5fef4f13e7886d0ba"
+        "a6d04957d1b48b0f9a74e9a5fef4f13e7886d0ba",
+        "87b1c07e81ebaa0a0c971d1ff169b2ae39627720"
       ],
       "review": {
         "status": "pending",
@@ -818,15 +825,18 @@
     {
       "id": "T8-W5",
       "sprint": 2,
-      "state": "backlog",
-      "implementation": "unknown",
-      "owner": "root",
+      "state": "active",
+      "implementation": "partial",
+      "owner": "wp_t8_w5",
       "dependencies": [
         "T3-W9"
       ],
-      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare/src/index.ts; deploy/cloudflare/src/lib.ts.",
+      "next_action": "Same executor defines and implements the missing in-repo durable fabric suspension producer and authenticated Worker delivery seam. Missing source code alone is not an external owner blocker; consumer-only candidate remains partial.",
       "blockers": [],
-      "commits": [],
+      "commits": [
+        "50ab03667fe8d877321b6096439677938e0b3918",
+        "5a1ab636a3e4cc1f96bdf559c16a02a0d2253147"
+      ],
       "review": {
         "status": "pending",
         "commit": null,
@@ -2002,6 +2012,61 @@
       "owner": "sprint1_scope",
       "state": "completed",
       "scope": []
+    },
+    {
+      "at": "2026-09-06T01:04:27.306880+00:00",
+      "task": "T4-W1 Durable job tenant attribution beyond PAT TTL",
+      "owner": "wp_t4_w1",
+      "state": "active",
+      "worktree": "/private/tmp/corelink-wp-t4_w1-20260905",
+      "scope": [
+        "/private/tmp/corelink-wp-t4_w1-20260905/ (WP-owned helpers/tests and minimal integration wiring; no shared checkout writes)"
+      ],
+      "integration_rule": "Source authorship may overlap in isolated worktrees; integrate in canonical predecessor order. No sprint move, live action, heavy tests or CI per WP; unsatisfied hard predecessors prevent delivery credit."
+    },
+    {
+      "at": "2026-09-06T01:04:27.306880+00:00",
+      "task": "T4-W2 Chunked durable billing backfill and lost completion recovery",
+      "owner": "wp_t4_w2",
+      "state": "active",
+      "worktree": "/private/tmp/corelink-wp-t4_w2-20260905",
+      "scope": [
+        "/private/tmp/corelink-wp-t4_w2-20260905/ (WP-owned helpers/tests and minimal integration wiring; no shared checkout writes)"
+      ],
+      "integration_rule": "Source authorship may overlap in isolated worktrees; integrate in canonical predecessor order. No sprint move, live action, heavy tests or CI per WP; unsatisfied hard predecessors prevent delivery credit."
+    },
+    {
+      "at": "2026-09-06T01:04:27.306880+00:00",
+      "task": "T3-W3 Dropped queued job reconciliation",
+      "owner": "wp_t3_w3",
+      "state": "active",
+      "worktree": "/private/tmp/corelink-wp-t3_w3-20260905",
+      "scope": [
+        "/private/tmp/corelink-wp-t3_w3-20260905/ (WP-owned helpers/tests and minimal integration wiring; no shared checkout writes)"
+      ],
+      "integration_rule": "Source authorship may overlap in isolated worktrees; integrate in canonical predecessor order. No sprint move, live action, heavy tests or CI per WP; unsatisfied hard predecessors prevent delivery credit."
+    },
+    {
+      "at": "2026-09-06T01:04:27.306880+00:00",
+      "task": "T3-W1 Coupled mode/status/teardown and redacted HTTP Debug",
+      "owner": "wp_t3_w1",
+      "state": "active",
+      "worktree": "/private/tmp/corelink-wp-t3_w1-20260905",
+      "scope": [
+        "/private/tmp/corelink-wp-t3_w1-20260905/ (WP-owned helpers/tests and minimal integration wiring; no shared checkout writes)"
+      ],
+      "integration_rule": "Source authorship may overlap in isolated worktrees; integrate in canonical predecessor order. No sprint move, live action, heavy tests or CI per WP; unsatisfied hard predecessors prevent delivery credit."
+    },
+    {
+      "at": "2026-09-06T01:04:27.306880+00:00",
+      "task": "T8-W5 Durable completion and suspension credential revocation",
+      "owner": "wp_t8_w5",
+      "state": "active",
+      "worktree": "/private/tmp/corelink-wp-t8_w5-20260905",
+      "scope": [
+        "/private/tmp/corelink-wp-t8_w5-20260905/ (WP-owned helpers/tests and minimal integration wiring; no shared checkout writes)"
+      ],
+      "integration_rule": "Source authorship may overlap in isolated worktrees; integrate in canonical predecessor order. No sprint move, live action, heavy tests or CI per WP; unsatisfied hard predecessors prevent delivery credit."
     }
   ]
 }

@@ -17,7 +17,17 @@ Full CI and heavy test suites run only when the complete sprint is composed.
 This checkpoint has successful Rust metadata compilation and TypeScript checks,
 plus focused author tests recorded separately in the execution evidence. No
 sprint CI, deployment, live provider action or sibling mutation was performed.
-No agent-owned write task or local check remains running at this checkpoint.
+The current fan-out has one Luna executor for each of T4-W1, T4-W2, T3-W3,
+T3-W1 and T8-W5, in `/private/tmp/corelink-wp-<lowercase_wp>-20260905`.
+Root owns review, integration and ledger updates. Review corrections return
+to the same executor. The source preparation tree for Sprint 2 is
+`/private/tmp/corelink-delivery-sprint2-20260905`; pending hard dependencies
+prevent delivery credit and entry into the active delivery stack.
+T4-W1's first candidate retained the defective 7200-second attribution TTL;
+T8-W5's first candidate lacked the actual suspension producer connection.
+Both are under correction, not accepted implementations. T3-W1's redaction
+candidate is under final acceptance coverage review. Consult the ledger and
+live agent status before resuming any author task.
 
 Current implementation includes confirmed teardown/capacity retention, durable
 provider references and exact restore, mint readiness, brokered DevEnv credentials,
