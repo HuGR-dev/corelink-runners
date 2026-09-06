@@ -116,6 +116,7 @@ import {
   type CredStashLike,
   type OrphanRecord,
 } from "./lib";
+import { flushBillingUsageBacklog } from "./billing_recovery";
 import { bumpMetrics, snapshotMetrics, MetricsDO } from "./metrics";
 import { installationToken } from "./github_app";
 import {
@@ -1545,6 +1546,24 @@ function containmentAuthority(env: Env): DurableObjectStub<ContainmentDO> {
   if (!env.CONTAINMENT) throw new Error("containment authority unavailable");
   return env.CONTAINMENT.get(env.CONTAINMENT.idFromName("global"));
 }
+
+// T4-W2 consumes T4-W1's immutable ContainmentDO attribution authority. The
+// cast keeps this commit compatible with the pre-W1 local class; the ordered
+// W1 integration supplies the RPC method and its exact validation.
+async function readBillingJobAttribution(
+  env: Env,
+  jobId: string,
+): Promise<{ jobId: string; tenant: string } | null> {
+  if (!env.CONTAINMENT) return null;
+  const rpc = containmentAuthority(env) as unknown as {
+    readJobAttribution(key: string): Promise<string | null>;
+  };
+  const raw = await rpc.readJobAttribution(`job-attribution:${jobId}`);
+  if (!raw) return null;
+  const value = JSON.parse(raw) as { jobId?: unknown; tenant?: unknown };
+  if (value.jobId !== jobId || typeof value.tenant !== "string" || value.tenant.trim() === "") return null;
+  return { jobId, tenant: value.tenant };
+}
 async function containmentRedriveAuthorityReadable(env: Env): Promise<boolean> {
   // Existing fixture routes intentionally omit the mandatory binding. In every
   // deployed build this is an authority read before either reconciler can list,
@@ -2338,7 +2357,10 @@ interface CompletedJob {
 // SAME region (the reconciler later validates it is 3-char).
 function resolveBillingRegion(env: Env, request: Request): string {
   const colo = (request as unknown as { cf?: { colo?: string } }).cf?.colo;
-  return env.BILLING_REGION ?? colo ?? "";
+  // BILLING_REGION is an explicit override; otherwise use the actual colo
+  // supplied by Cloudflare. Missing provider metadata remains unbillable.
+  const candidate = env.BILLING_REGION ?? colo ?? "";
+  return /^[a-z]{3}$/i.test(candidate) ? candidate.toLowerCase() : "";
 }
 
 // WP-F: durably record this completed job's usage (server-derived tenant + timings
@@ -4504,7 +4526,12 @@ export default {
       logEvent("error", "orphan_retry_failed", { error: (e as Error).message });
     }
     try {
-      const pushed = await reconcileCompletedJobBilling(env, configured, now);
+      const pushed = await reconcileCompletedJobBilling(
+        env,
+        configured,
+        now,
+        env.CONTAINMENT ? (jobId) => readBillingJobAttribution(env, jobId) : undefined,
+      );
       if (pushed > 0) {
         logEvent("info", "billing_reconcile_pushed", { count: pushed });
       }
@@ -4512,6 +4539,17 @@ export default {
       // Never let the billing reconciler throw out of scheduled() — it is a
       // backstop, not a gate; a failure here just means next tick retries.
       logEvent("error", "billing_reconcile_failed", { error: (e as Error).message });
+    }
+    try {
+      // Flush the durable per-job source with KV pagination and bounded ingest
+      // chunks. A malformed record is quarantined in isolation; an HTTP failure
+      // leaves its source record pending for the next tick.
+      const flushed = await flushBillingUsageBacklog(env);
+      if (flushed.pushed > 0 || flushed.quarantined > 0) {
+        logEvent("info", "billing_backlog_flushed", { ...flushed });
+      }
+    } catch (e) {
+      logEvent("error", "billing_backlog_flush_failed", { error: (e as Error).message });
     }
   },
 };

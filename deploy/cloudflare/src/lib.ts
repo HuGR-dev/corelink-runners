@@ -91,7 +91,11 @@ export interface KvLike {
   // the spawn-Worker (the per-tenant concurrency counter that used it moved to the
   // atomic ConcurrencySlotsDO in W7/F7); kept optional for KVNamespace shape
   // parity so the real binding still satisfies this runtime-agnostic subset.
-  list?(options: { prefix: string }): Promise<{ keys: { name: string }[] }>;
+  list?(options: { prefix: string; cursor?: string }): Promise<{
+    keys: { name: string }[];
+    cursor?: string;
+    list_complete?: boolean;
+  }>;
 }
 
 // How long a spawn claim lives — past the longest CI job, a self-cleaning
@@ -1644,7 +1648,6 @@ const RUNNER_SLOT_SECONDS_KIND = "runner_slot_seconds";
  * redefinition of `runner_slot_seconds`: changing what an existing kind's `qty`
  * MEANS is invisible to every consumer already reading it.
  */
-const RUNNER_VCPU_SECONDS_KIND = "runner_vcpu_seconds";
 
 /**
  * vCPU count of the runner box, and the ONLY place the fleet's shape enters the
@@ -1721,24 +1724,18 @@ export async function buildUsageEvent(opts: {
    * mixed-size fleet only has to pass the real number here — the billing math
    * above it never changes.
    */
+  /** @deprecated Accepted for source compatibility; the wire contract is slot-seconds. */
   vcpu?: number;
 }): Promise<UsageEvent> {
   const allocatedS = Math.max(0, Math.floor((opts.completedMs - opts.startedMs) / 1000));
-  // Guard the multiplier the same way the duration is guarded: a non-finite or
-  // non-positive vCPU count would silently zero the bill (or negate it), and a
-  // zeroed bill is indistinguishable from a job that never ran.
-  const vcpu = Number.isFinite(opts.vcpu) && (opts.vcpu as number) > 0
-    ? (opts.vcpu as number)
-    : RUNNER_BOX_VCPU;
-  const qty = allocatedS * vcpu;
   const period = billingPeriod(opts.completedMs);
   return {
     tenant_id: opts.tenantId,
-    // BILLABLE unit — vCPU-seconds, matching the vCPU-HOUR entitlement. See
-    // RUNNER_VCPU_SECONDS_KIND for why this is a distinct kind and not a
-    // redefinition of runner_slot_seconds.
-    event_kind: RUNNER_VCPU_SECONDS_KIND,
-    qty,
+    // Frozen wire contract: every Worker completion path emits one canonical
+    // per-job slot-seconds event. vCPU accounting, where needed, is derived by
+    // the owning entitlement path and never changes this event's meaning.
+    event_kind: RUNNER_SLOT_SECONDS_KIND,
+    qty: allocatedS,
     billing_period: period,
     region: opts.region,
     source: BILLING_SOURCE,
@@ -1955,6 +1952,7 @@ export async function reconcileCompletedJobBilling(
   env: BillingReconcileEnv,
   configured: string | undefined,
   nowMs: number,
+  readAttribution?: (jobId: string) => Promise<{ jobId: string; tenant: string } | null>,
 ): Promise<number> {
   const repos = parseReconcilerRepos(env.RECONCILER_REPOS);
   if (repos.length === 0) return 0; // opt-in: no allowlist ⇒ off (mirrors the orphan re-drive)
@@ -1971,27 +1969,73 @@ export async function reconcileCompletedJobBilling(
       nowMs,
     );
     for (const job of jobs) {
-      // The ledger is the tenant-safe source of truth: it carries the DERIVED
-      // tenant the GitHub jobs API never does. No record ⇒ not backfillable
-      // (preserves the prior skip-and-count behavior — never mis-bill).
-      const rec = await readUsageLedger(env.RUNNER_JOB_PATS, job.jobId);
-      if (!rec) {
+      // A complete usage ledger supplies tenant + execution region. When the
+      // completion webhook was lost, T4-W1's ContainmentDO reader supplies the
+      // immutable tenant attribution instead.
+      let rec: UsageLedgerRecord | null;
+      try {
+        rec = await readUsageLedger(env.RUNNER_JOB_PATS, job.jobId);
+      } catch (error) {
+        // A per-job KV read failure must not abort the rest of the sweep. Keep
+        // the source untouched and let the next tick retry this same job.
+        logEvent("error", "billing_reconcile_ledger_read_failed", {
+          jobId: job.jobId,
+          error: (error as Error).message,
+        });
+        continue;
+      }
+      let tenant = rec?.tenant;
+      // GitHub's authenticated completed-job response is the lifecycle source
+      // for both timestamps. Durable attribution supplies ownership only.
+      const startedMs = rec?.startedMs ?? job.startedMs;
+      if (!tenant && readAttribution) {
+        try {
+          const attribution = await readAttribution(job.jobId);
+          if (attribution?.jobId === job.jobId && attribution.tenant.trim()) {
+            tenant = attribution.tenant;
+          }
+        } catch (error) {
+          logEvent("error", "billing_reconcile_attribution_read_failed", { jobId: job.jobId, error: (error as Error).message });
+        }
+      }
+      if (!tenant) {
         skipped += 1;
         continue;
       }
       // Prefer the region stored at completion (where the job actually ran); fall
-      // back to BILLING_REGION. Ingest validates 3-char — skip if neither is one.
-      const region = rec.region.length === 3 ? rec.region : (env.BILLING_REGION ?? "");
-      if (region.length !== 3) {
+      // back to an explicitly configured BILLING_REGION. Never invent a region.
+      const region = rec?.region?.toLowerCase() ?? env.BILLING_REGION?.toLowerCase() ?? "";
+      if (!/^[a-z]{3}$/.test(region)) {
         skipped += 1;
         continue;
       }
+      if (!rec) {
+        // A lost completion webhook has no complete usage row. Freeze the
+        // authenticated lifecycle evidence before the first HTTP attempt so a
+        // prolonged ingest outage remains recoverable after GitHub lookback.
+        if (!env.RUNNER_JOB_PATS) {
+          skipped += 1;
+          continue;
+        }
+        try {
+          await writeUsageLedger(env.RUNNER_JOB_PATS, {
+            jobId: job.jobId,
+            tenant,
+            startedMs: job.startedMs,
+            completedMs: job.completedMs,
+            region,
+          });
+        } catch (error) {
+          logEvent("error", "billing_reconcile_ledger_write_failed", { jobId: job.jobId, error: (error as Error).message });
+          continue;
+        }
+      }
       try {
         const ev = await buildUsageEvent({
-          tenantId: rec.tenant,
-          jobId: rec.jobId,
-          startedMs: rec.startedMs,
-          completedMs: rec.completedMs,
+          tenantId: tenant,
+          jobId: job.jobId,
+          startedMs,
+          completedMs: rec?.completedMs ?? job.completedMs,
           region,
         });
         await pushUsageEvent(env, ev);
@@ -2000,7 +2044,7 @@ export async function reconcileCompletedJobBilling(
         // Fail-open backstop: a push error just means the next tick retries
         // (idem_key makes the re-push safe). Never break the scan.
         logEvent("error", "billing_reconcile_push_failed", {
-          jobId: rec.jobId,
+          jobId: job.jobId,
           error: (e as Error).message,
         });
       }
