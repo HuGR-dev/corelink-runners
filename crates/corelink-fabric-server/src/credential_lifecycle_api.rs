@@ -37,7 +37,7 @@ pub fn router(ledger: Arc<dyn LeaseLedger + Send + Sync>, issuer_key: Option<Str
     });
     Router::new()
         .route(
-            "/internal/v1/credentials/tenants/:tenant/lifecycle",
+            "/internal/v1/credentials/tenants/{tenant}/lifecycle",
             get(lifecycle),
         )
         .with_state(state)
@@ -83,12 +83,17 @@ async fn lifecycle(
     if lifecycle.tenant_id != tenant_id || lifecycle.generation > i64::MAX as u64 {
         return unavailable();
     }
-    Json(LifecycleResponse {
+    let mut response = Json(LifecycleResponse {
         tenant_id,
         generation: lifecycle.generation.to_string(),
         suspended: lifecycle.suspended,
     })
-    .into_response()
+    .into_response();
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
 }
 
 fn constant_time_eq(expected: &[u8], presented: &[u8]) -> bool {
