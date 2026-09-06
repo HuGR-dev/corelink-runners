@@ -29,7 +29,7 @@ function makeDO() {
 }
 
 describe("exact minted credential stash identity", () => {
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
   it("maps concurrent same-job PATs to distinct real CredStashDO leases", async () => {
     const leases = new Map<string, CredStashDO>();
@@ -122,6 +122,19 @@ describe("exact minted credential stash identity", () => {
     for (const stash of leases.values()) expect((await stash.redeem("ticket")).status).toBe(404);
     expect((await authority.revocationRequestedCredentials()).records).toHaveLength(2);
     expect(fetchMock).toHaveBeenCalledTimes(failure === "missing key" ? 0 : 2);
+  });
+
+  it("does not copy a remote error body into credential cleanup logs", async () => {
+    const identity = { jobId: "redaction", tenant: "tenant-a", patId: "pat-a" };
+    const authority = new CredentialObligationAuthority(new FakeStorage() as never);
+    await authority.registerCredential(identity);
+    const secret = "remote-response-secret-sentinel";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(secret, { status: 503 })));
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const infoLog = vi.spyOn(console, "log").mockImplementation(() => {});
+    expect(await revokeIssuedCredential({ CORELINK_RUNNER_MINT_AUTH_KEY: "key" }, authority, identity)).toBe(false);
+    expect(JSON.stringify([...errorLog.mock.calls, ...infoLog.mock.calls])).not.toContain(secret);
+    expect((await authority.revocationRequestedCredentials()).records).toEqual([identity]);
   });
 });
 

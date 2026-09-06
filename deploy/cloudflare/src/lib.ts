@@ -273,7 +273,7 @@ export async function revokeCasPatById(
     // the mint (fallback: wrangler's CLW_TENANT for legacy single-tenant deploys).
     body: JSON.stringify({ pat_id: patId, owner_tenant: ownerTenant ?? env.CLW_TENANT }),
   });
-  if (!resp.ok) throw new Error(`D-9 revoke ${resp.status}: ${await resp.text()}`);
+  if (!resp.ok) throw new Error(`D-9 revoke ${resp.status}`);
 }
 
 // The result of the AUTHORIZE + warm-mint step. `authz` is the gate the caller
