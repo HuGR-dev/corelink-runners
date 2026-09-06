@@ -66,14 +66,14 @@ interface Operation { checkpoint: SignedCheckpoint; checkpointRoot: string; rece
 
 export class DurableCheckpointWitness {
   private readonly store: MonitorStateStore;
-  private readonly journal: ImmutableJournal & { read(receipt: JournalReceipt): Promise<JournalRecord> };
+  private readonly journal: ImmutableJournal & { read(receipt: JournalReceipt): Promise<JournalRecord>; isEmpty(): Promise<boolean> };
   private readonly clock: TrustedClock;
   private readonly signer: AsyncSigner;
   private readonly logId: string;
   private readonly namespace: string;
   private readonly journalIdentity: PublicSigningIdentity;
 
-  constructor(options: { store: MonitorStateStore; journal: ImmutableJournal & { read(receipt: JournalReceipt): Promise<JournalRecord> }; clock: TrustedClock; signer: AsyncSigner; logId: string; namespace: string; journalIdentity: PublicSigningIdentity }) {
+  constructor(options: { store: MonitorStateStore; journal: ImmutableJournal & { read(receipt: JournalReceipt): Promise<JournalRecord>; isEmpty(): Promise<boolean> }; clock: TrustedClock; signer: AsyncSigner; logId: string; namespace: string; journalIdentity: PublicSigningIdentity }) {
     if (!options.logId || !options.namespace || !identity(options.signer.identity, "witness") || !identity(options.journalIdentity, "journal")) throw new TypeError("invalid witness configuration");
     this.store = options.store; this.journal = options.journal; this.clock = options.clock; this.signer = options.signer;
     this.logId = options.logId; this.namespace = options.namespace; this.journalIdentity = options.journalIdentity;
@@ -206,7 +206,7 @@ export class DurableCheckpointWitness {
   async readHead(nonce: string): Promise<SignedWitnessHead> {
     if (typeof nonce !== "string" || !NONCE.test(nonce)) throw new WitnessInputError("invalid witness head nonce");
     let head: Stored<Head> | null = null;
-    let pending: Stored<Pending> | null = null;
+    const pendingRecords: Stored<Pending>[] = [];
     let operationCount = 0;
     let cursor: string | undefined;
     do {
@@ -214,8 +214,7 @@ export class DurableCheckpointWitness {
       for (const item of scanned.items) {
       if (item.key === this.key("head")) { head = item as Stored<Head>; continue; }
       if (item.key.includes(":witness:pending:")) {
-        pending = item as Stored<Pending>;
-        if (!pending.value?.journal) throw new WitnessBusyError("witness head has unresolved pending state");
+        pendingRecords.push(item as Stored<Pending>);
         continue;
       }
       if (item.key.includes(":witness:operation:")) {
@@ -228,6 +227,9 @@ export class DurableCheckpointWitness {
       }
       cursor = scanned.nextCursor ?? undefined;
     } while (cursor);
+    if (pendingRecords.length > 1) throw new WitnessBusyError("multiple witness pending states");
+    const pending = pendingRecords[0] ?? null;
+    if (pending && !pending.value?.journal) throw new WitnessBusyError("witness head has unresolved pending state");
     const checked = await this.validateStoredHead(head);
     if (pending) {
       if (!checked) throw new WitnessBusyError("witness pending state has no committed head");
@@ -239,6 +241,11 @@ export class DurableCheckpointWitness {
       await this.validateJournal(pendingJournal, pending.value.checkpoint, pending.value.receipt, `${this.logId}/${pending.value.checkpoint.sequence}/${sha256(JSON.stringify(pending.value.checkpoint))}`, pending.value.checkpointRoot);
     }
     if (!checked && operationCount > 0) throw new WitnessInputError("committed witness operation has no head");
+    if (!checked && !pending) {
+      let journalEmpty: boolean;
+      try { journalEmpty = await this.journal.isEmpty(); } catch { throw new WitnessInputError("journal emptiness is unavailable"); }
+      if (journalEmpty !== true) throw new WitnessInputError("genesis requires an empty durable journal");
+    }
     const timeProof = await this.clock.now();
     this.validateTimeProof(timeProof);
     const unsigned = {
