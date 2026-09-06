@@ -214,6 +214,20 @@ The waiver authorizes implementation; it is not proof of, or a waiver for, the
 remaining production and PostgreSQL gates. No deployment is in scope during this
 contract and qualification work.
 
+## T6-W15 foundation-wave composition
+
+The monitor foundation is composed through disjoint module ownership: state
+backends (`src/state.ts`), SNS delivery (`src/delivery.ts`), and immutable
+journal records (`src/journal.ts`) are independent integration packets. The
+canonical integration owner composes approved packets; their contracts remain
+bounded to durable operation records, at-least-once delivery, and observed-record
+integrity. They do not claim an SNS-internal operation-completeness proof.
+
+The limited auxiliary extension path for this work is `src/journal.ts` and the
+future `src/trusted_time.ts`, with matching focused tests. It is necessary for
+T6-W15's implementation but does not alter any acceptance gate, sprint, or the
+qualification requirements recorded above.
+
 ## Earlier integrated packets
 
 The prior packets in this tree include:
