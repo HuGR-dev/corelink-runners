@@ -55,7 +55,7 @@ describe("authorizeRunner", () => {
     await expect(authorizeRunner(env, params)).resolves.toEqual({ tenant: "tenant-1", maxConcurrency: 4, maxVcpuH: 12.5 });
   });
 
-  it("uses Option-C bearer and omits installation_id", async () => {
+  it("omits installation only when the acquiring PAT caller has none", async () => {
     const fetch = vi.fn(async (_url: string, init: RequestInit) => {
       const headers = new Headers(init.headers);
       expect(headers.get("authorization")).toBe("Bearer tenant-pat");
@@ -64,5 +64,15 @@ describe("authorizeRunner", () => {
     });
     vi.stubGlobal("fetch", fetch);
     await expect(authorizeRunner(env, { ...params, installationId: "", acquiringPat: "tenant-pat" })).resolves.toEqual({ tenant: "tenant-1", maxConcurrency: 1 });
+  });
+
+  it("preserves installation alongside acquiring PAT for server ownership validation", async () => {
+    const fetch = vi.fn(async (_url: string, init: RequestInit) => {
+      expect(new Headers(init.headers).get("authorization")).toBe("Bearer tenant-pat");
+      expect(JSON.parse(String(init.body))).toEqual({ job_id: "42", repo_full_name: "acme/api", installation_id: "123" });
+      return new Response(JSON.stringify(good), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetch);
+    await expect(authorizeRunner(env, { ...params, acquiringPat: "tenant-pat" })).resolves.toMatchObject({ tenant: "tenant-1" });
   });
 });

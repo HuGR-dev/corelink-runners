@@ -55,7 +55,7 @@ export async function authorizeRunner(env: MintEnv, params: MintParams): Promise
       body: JSON.stringify({
         job_id: jobId,
         repo_full_name: repo,
-        ...(optionC ? {} : { installation_id: installationId }),
+        ...(installationId ? { installation_id: installationId } : {}),
       }),
     });
     if (!response.ok) throw new RunnerAuthorizationError();

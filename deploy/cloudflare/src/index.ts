@@ -2746,11 +2746,9 @@ async function prepareSpawn(
         fabricEndpoint: env.SPAWN_WORKER_PUBLIC_URL,
       }
     : undefined;
-  // Option-C: if this repo is mapped to a tenant-PAT secret AND that secret is
-  // bound, present the PAT so the mint resolves the tenant by introspection
-  // (installation_id omitted). Unmapped/unbound ⇒ acquiringPat undefined ⇒ the
-  // default installation-derived mint (unchanged). The installationId still flows
-  // for the GitHub JIT/box registration below — only the CAS-tenant changes.
+  // A configured repository PAT supplements the server-owned installation
+  // identity. Both reach authorization and mint, which must derive the same
+  // tenant (ADR-0013). Missing configured credentials refuse preparation.
   // Reservation-contained re-drives explicitly use their supplied installation
   // only. They never let a first-party Option-C mapping convert an unmapped cold
   // candidate (or a stored external orphan) into a different credential source.
@@ -2760,6 +2758,9 @@ async function prepareSpawn(
   const acquiringPat = patSecretName
     ? (env as unknown as Record<string, string | undefined>)[patSecretName]
     : undefined;
+  if (patSecretName && (typeof acquiringPat !== "string" || !acquiringPat.length || acquiringPat.trim() !== acquiringPat)) {
+    throw new RunnerAuthorizationError();
+  }
   if (patSecretName && acquiringPat) {
     logEvent("info", "mint_option_c_pat_dispatch", { jobId, repo, patSecret: patSecretName });
   }

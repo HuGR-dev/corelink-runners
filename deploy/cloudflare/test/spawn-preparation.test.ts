@@ -79,6 +79,18 @@ afterEach(() => {
 });
 
 describe("spawn preparation before containment claim", () => {
+  it.each([undefined, "", " ", " padded-pat"])("refuses a configured unavailable PAT without installation fallback (%j)", async (secret) => {
+    const f = fixture();
+    Object.assign(f.runtime, { REPO_TENANT_PAT_MAP: JSON.stringify({ "acme/repo": "TENANT_PAT" }), TENANT_PAT: secret });
+    await queued(f, "7110");
+    expect(f.fetchMock).not.toHaveBeenCalled();
+    expect(getContainer).not.toHaveBeenCalled();
+    expect(spawnClaims(f)).toEqual([]);
+    expect(drivingRecords(f)).toEqual([]);
+    expect(f.slotsStorage.map.get("slots") ?? []).toEqual([]);
+    expect(await f.d.instance.getEvent("evt-7110")).toMatchObject({ state: "CLAIMED", effect_permit: null });
+  });
+
   it.each([
     ["missing mint key", { mintKey: false }],
     ["unmapped authorization 5xx", { authorizeStatus: 503 }],

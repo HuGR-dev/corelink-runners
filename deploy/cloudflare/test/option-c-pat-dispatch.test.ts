@@ -1,12 +1,10 @@
 // Option-C per-tenant-PAT dispatch (server-confirmed live 2026-07-21).
 //
-// Proves the mint wire the runners TL + server TL froze in
-// docs/handoff/2026-07-21-*optionC*: when the workflow_job repo is mapped to a
-// tenant-PAT secret, `mintCasPat` (via buildContainerEnv) resolves the tenant by
-// INTROSPECTING the acquiring PAT instead of deriving it from installation_id —
+// ADR-0013 retains both owner identities for server-side conflict validation.
+// When a workflow_job repo is mapped to a tenant-PAT secret:
 //   • KEEP  x-corelink-internal-auth (dispatcher trust boundary, unchanged)
 //   • ADD   Authorization: Bearer <pat>
-//   • OMIT  installation_id ENTIRELY (a null/"" would be a 400)
+//   • KEEP  installation_id when supplied; omit it only for native PAT callers
 //   • PIN   scope cas:rw
 // and the default installation-derived path stays byte-identical.
 import { describe, it, expect, vi, afterEach } from "vitest";
@@ -78,21 +76,20 @@ describe("mintCasPat Option-C wire (via buildContainerEnv)", () => {
     fabricEndpoint: "https://runner.example",
   };
 
-  it("acquiringPat set ⇒ Bearer + internal-auth + NO installation_id + scope cas:rw", async () => {
+  it("keeps installation identity alongside acquiring PAT for server conflict validation", async () => {
     const cap: { req?: { headers: Headers; body: any } } = {};
     vi.stubGlobal("fetch", mockMint(cap));
     const r = await buildContainerEnv(baseEnv, {
       jobId: "42",
       repoFullName: REPO,
-      installationId: "150584374", // present (for the JIT), but MUST NOT reach the mint body
+      installationId: "150584374",
       acquiringPat: COLD_PAT,
     }, env0);
     expect(cap.req).toBeDefined();
-    // internal-auth stays (trust boundary), Bearer added (names the tenant).
+    // Both credentials reach the server; the PAT cannot hide the installation.
     expect(cap.req!.headers.get("x-corelink-internal-auth")).toBe("dispatcher-key");
     expect(cap.req!.headers.get("authorization")).toBe(`Bearer ${COLD_PAT}`);
-    // installation_id OMITTED entirely (not null, not "").
-    expect(cap.req!.body).not.toHaveProperty("installation_id");
+    expect(cap.req!.body.installation_id).toBe("150584374");
     expect(cap.req!.body.repo_full_name).toBe(REPO);
     expect(cap.req!.body.scope).toBe("cas:rw");
     // Server-derived tenant threads back through.
@@ -125,10 +122,11 @@ describe("mintCasPat Option-C wire (via buildContainerEnv)", () => {
     }, env0);
     // A mint WAS attempted (not the cold fail-open) because acquiringPat is present.
     expect(cap.req).toBeDefined();
+    expect(cap.req!.body).not.toHaveProperty("installation_id");
     expect(r.tenant).toBe("3c7d77b1-0a50-4f87-893f-36ac785670df");
   });
 
-  it("gate: NO installation_id AND NO acquiringPat ⇒ COLD fail-open (no mint attempted)", async () => {
+  it("refuses without installation or acquiring PAT before mint", async () => {
     const cap: { req?: { headers: Headers; body: any } } = {};
     vi.stubGlobal("fetch", mockMint(cap));
     const r = await buildContainerEnv(baseEnv, {

@@ -48,8 +48,8 @@ export function installationIdForRepo(json: string | undefined, repoFullName: st
  * acquiring PAT (the raw PAT is a Worker secret, never in this var). Returns the
  * secret NAME, or "" when the map is absent/malformed or the repo isn't listed
  * (⇒ default installation-derived mint). Never throws. The caller reads
- * `env[<name>]` to get the PAT, so a mapped-but-unbound secret still falls back to
- * the default path (no PAT ⇒ no Option-C).
+ * `env[<name>]` to get the PAT. Under ADR-0013, a mapped-but-unbound secret must
+ * refuse preparation; it cannot silently fall back to installation-only auth.
  */
 export function tenantPatSecretForRepo(json: string | undefined, repoFullName: string): string {
   if (!json || !repoFullName) return "";
