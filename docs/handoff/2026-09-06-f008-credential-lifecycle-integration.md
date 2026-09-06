@@ -33,6 +33,19 @@ not production qualified; the active legacy PAT inventory, one invalid data
 row, live 75-second CAS gate, and seven-day monitor remain human/data or
 operational gates.
 
+## Accepted F008/T8-W5 source criteria
+
+Two independent rounds, `lifecycle_suite_critic` and `credential_cold_review`,
+accepted the paired source criteria at server `6bf459541` and Runner
+`10355b5f9ebca2cf50f0111298f0a3f352c1aa9d`. This records implementation
+acceptance only and does not deliver the work package or change F008's 16/70
+count.
+
+The remaining production gates are exactly three live 75-second CAS runs,
+private inventory qualification (137 active unknown credentials and one invalid
+metadata row), and production migration/key qualification. The private
+inventory remains outside Git; this handoff records counts only.
+
 ## Unsupported lifecycle acceptance
 
 `cabe443fdaa1826e1a35e10c4bec411258634e28` integrates independently approved
@@ -90,10 +103,9 @@ triple conflict is 409; malformed input is 400; dependency failure is 503.
 Legacy inventory unknown or empty remains pending/fail-closed and cannot be
 classified as completion.
 
-## Pending work
+## Remaining production gates
 
-The server receipt/close-generation route and Worker receipt/consumer are not
-integrated. Modern runner and DevEnv mint call sites still need the approved
-floor-aware transaction packets. Suspension ACK ordering, exact KV
-invalidation completion, terminal job fences across generations, legacy
-reconciliation, and the existing live 75-second CAS refusal gate remain open.
+The accepted source criteria do not qualify deployment or production delivery.
+The three live 75-second CAS runs, private inventory qualification, and
+production migration/key qualification remain required before F008 can move
+beyond its current source-only status.

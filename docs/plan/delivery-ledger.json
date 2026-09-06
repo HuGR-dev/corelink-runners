@@ -503,7 +503,7 @@
       "id": "T5-W3",
       "sprint": 4,
       "state": "prepared",
-      "implementation": "partial",
+      "implementation": "complete",
       "owner": "root",
       "dependencies": [
         "T5-W2"
@@ -878,7 +878,7 @@
       "dependencies": [
         "T3-W9"
       ],
-      "next_action": "Exact credential cleanup, job closure, ticket identity and independent wipe/revoke verified. Issuer handoff being composed with repaired server authority; F008 consumer epochs and migration remain open.",
+      "next_action": "F008/T8-W5 source criteria are accepted; preserve prepared state and no delivery credit. Remaining production gates are three live 75-second CAS runs, private inventory qualification (137 active unknown and one invalid metadata row), and production migration/key qualification.",
       "blockers": [],
       "commits": [
         "50ab03667fe8d877321b6096439677938e0b3918",
@@ -892,16 +892,21 @@
         "e7d95fa98e578788f3ff2aff474303e97808b13f",
         "86e9c0865070174edf149e17dfe4d8984530ee7c",
         "3ee3d74297327bd0efc0a8acd9f18faaf4c50c7c",
-        "a9f67d3634a22fc472f0731be164afabc04acbbe"
+        "a9f67d3634a22fc472f0731be164afabc04acbbe",
+        "6bf459541",
+        "10355b5f9ebca2cf50f0111298f0a3f352c1aa9d"
       ],
       "review": {
-        "status": "pending",
-        "commit": null,
-        "evidence": []
+        "status": "approved",
+        "commit": "10355b5f9ebca2cf50f0111298f0a3f352c1aa9d",
+        "evidence": [
+          "Two independent source-criteria rounds: lifecycle_suite_critic and credential_cold_review accepted paired server 6bf459541 and Runner 10355b5. This is implementation acceptance only."
+        ]
       },
       "evidence": [
         "docs/plan/execution/rework-20260906/R1-final.json",
-        "docs/handoff/2026-09-06-techlead-takeover.md"
+        "docs/handoff/2026-09-06-techlead-takeover.md",
+        "docs/handoff/2026-09-06-f008-credential-lifecycle-integration.md"
       ]
     },
     {
