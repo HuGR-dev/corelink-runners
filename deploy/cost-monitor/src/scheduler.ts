@@ -1,6 +1,6 @@
 import { deliveryKey, planEnqueue, queueKey, type AlertIntent, type DurableDeliveryOutbox } from "./outbox.js";
 import { evaluateEscalation, evaluateIncident, type Incident } from "./incidents.js";
-import { laneKey, type SourceCursor, type SourceRegistration } from "./types.js";
+import { laneKey, parseSourceCursor, type SourceCursor, type SourceRegistration } from "./types.js";
 import type { MonitorStateStore, Stored, Write } from "./state.js";
 import type { TrustedClock, TrustedTimeProof } from "./trusted_time.js";
 
@@ -23,6 +23,11 @@ function cursorValid(value: unknown, registration: SourceRegistration): value is
   if (!plain(value) || Object.keys(value).length !== CURSOR_FIELDS.length || CURSOR_FIELDS.some((key) => !Object.hasOwn(value, key))) return false;
   if (value.source !== registration.source || value.service !== registration.service || value.application !== registration.application || value.keyId !== registration.keyId || value.credentialEpoch !== registration.credentialEpoch) return false;
   if (![value.lastSequence, value.lastOccurredAt, value.lastScheduledFor, value.firstAcceptedAt, value.lastAcceptedAt].every(positive)) return false;
+  const firstAcceptedAt = value.firstAcceptedAt as number;
+  const lastAcceptedAt = value.lastAcceptedAt as number;
+  const lastScheduledFor = value.lastScheduledFor as number;
+  const lastOccurredAt = value.lastOccurredAt as number;
+  if (firstAcceptedAt > lastAcceptedAt || lastScheduledFor > lastOccurredAt || lastOccurredAt > lastAcceptedAt) return false;
   if (!DIGEST.test(String(value.lastEnvelopeDigest)) || typeof value.quarantined !== "boolean" || !["healthy", "failed", "unknown"].includes(String(value.sourceHealth)) || !text(value.sourceReason)) return false;
   if (value.expectedAt !== null && !positive(value.expectedAt)) return false;
   if (value.lastLifecycleNonce !== null && !text(value.lastLifecycleNonce)) return false;
@@ -30,6 +35,12 @@ function cursorValid(value: unknown, registration: SourceRegistration): value is
     if (!Array.isArray(value.lifecycle) || value.lifecycle.length !== 6 || !text(value.lifecycle[0]) || !positive(value.lifecycle[1]) || !text(value.lifecycle[2]) || !["unknown", "healthy", "failed"].includes(String(value.lifecycle[3])) || !positive(value.lifecycle[4]) || !text(value.lifecycle[5])) return false;
     if (registration.authoritySourceId !== value.lifecycle[0] || registration.sourceVersion !== value.lifecycle[5]) return false;
   }
+  if (registration.intervalMs === null) {
+    if (value.expectedAt !== null) return false;
+  } else {
+    if (value.expectedAt === null || lastScheduledFor > Number.MAX_SAFE_INTEGER - registration.intervalMs || value.expectedAt !== lastScheduledFor + registration.intervalMs) return false;
+  }
+  if (registration.intervalMs === 60_000 && value.sourceHealth === "healthy" && (value.lifecycle === null || value.lastLifecycleNonce === null)) return false;
   return true;
 }
 
@@ -75,7 +86,10 @@ export class MonitorScheduler {
     for (let attempt = 0; attempt < 8; attempt++) {
       const cursorStored = await this.options.store.get<SourceCursor>(cursorKey);
       if (!cursorStored) return { ...empty, unbound: 1 };
-      if (!cursorValid(cursorStored.value, registration)) return { ...empty, unknown: 1 };
+      let parsedCursor: SourceCursor;
+      try { parsedCursor = parseSourceCursor(cursorStored.value); } catch { return { ...empty, unknown: 1 }; }
+      if (!cursorValid(parsedCursor, registration)) return { ...empty, unknown: 1 };
+      cursorStored.value = parsedCursor;
       const incidentStored = await this.options.store.get<Incident>(incidentKey);
       if (incidentStored && (!plain(incidentStored.value) || incidentStored.value.sourceKey !== sourceKey)) return { ...empty, unknown: 1 };
       const failure = late || cursorStored.value.quarantined || cursorStored.value.sourceHealth !== "healthy" || (cursorStored.value.expectedAt !== null && now >= cursorStored.value.expectedAt);
