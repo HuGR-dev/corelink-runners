@@ -5,7 +5,9 @@ vi.mock("@cloudflare/containers", () => ({ Container: class {}, getContainer: vi
 import { CredStashDO } from "../src/index";
 import { buildContainerEnv, type CredStashLike, type MintEnv } from "../src/lib";
 import { runnerCredentialLeaseId } from "../src/lib/runner_credential_lease";
-import { revokeIssuedCredential, retryFailedRevocations } from "../src/lib/revocation_outbox";
+import { revokeCompletedJob, revokeIssuedCredential, retryFailedRevocations } from "../src/lib/revocation_outbox";
+import { CredentialObligationAuthority } from "../src/lib/credential_obligation_authority";
+import { FakeStorage } from "./containment-redrive-test-helpers";
 
 function makeDO() {
   const map = new Map<string, unknown>();
@@ -98,6 +100,28 @@ describe("exact minted credential stash identity", () => {
     expect((await authority.revocationRequestedCredentials()).records).toEqual([]);
     expect(wipeAttempts).toBe(2);
     expect((await stashDO.redeem("ticket-a")).status).toBe(404);
+  });
+
+  it.each(["missing key", "remote failure"])("closes every completed-job ticket despite %s and retains remote cleanup", async failure => {
+    const authority = new CredentialObligationAuthority(new FakeStorage() as never);
+    const leases = new Map<string, CredStashDO>();
+    const identities = ["pat-a", "pat-b"].map(patId => ({ jobId: "completed", tenant: "tenant-a", patId }));
+    for (const identity of identities) {
+      await authority.registerCredential(identity);
+      const stash = makeDO();
+      await stash.stash("ticket", { token: "secret", tenant: identity.tenant, endpoint: "https://fabric.invalid" }, 60_000);
+      leases.set(runnerCredentialLeaseId(identity.jobId, identity.tenant, identity.patId), stash);
+    }
+    const fetchMock = vi.fn(async () => new Response(null, { status: 503 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const env = {
+      ...(failure === "missing key" ? {} : { CORELINK_RUNNER_MINT_AUTH_KEY: "key" }),
+      CRED_STASH: { idFromName: (id: string) => id, get: (id: unknown) => leases.get(id as string)! },
+    };
+    await expect(revokeCompletedJob(env, authority, "completed")).rejects.toThrow("credential revoke pending");
+    for (const stash of leases.values()) expect((await stash.redeem("ticket")).status).toBe(404);
+    expect((await authority.revocationRequestedCredentials()).records).toHaveLength(2);
+    expect(fetchMock).toHaveBeenCalledTimes(failure === "missing key" ? 0 : 2);
   });
 });
 

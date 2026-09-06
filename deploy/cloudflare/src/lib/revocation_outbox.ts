@@ -58,13 +58,20 @@ async function retainRetry(env: RevocationEnv, identity: CredentialIdentity): Pr
 async function revokeOne(env: RevocationEnv, authority: CredentialAuthority, identity: CredentialIdentity): Promise<boolean> {
   try {
     await authority.requestCredentialRevocation(identity);
-    if (!env.CORELINK_RUNNER_MINT_AUTH_KEY) throw new Error("missing mint auth key");
-    const mintEnv: MintEnv = {
-      CORELINK_RUNNER_MINT_AUTH_KEY: env.CORELINK_RUNNER_MINT_AUTH_KEY,
-      CORELINK_MINT_URL: env.CORELINK_MINT_URL,
-    };
-    await revokeCasPatById(mintEnv, identity.patId, identity.tenant);
-    if (env.CRED_STASH) await env.CRED_STASH.get(env.CRED_STASH.idFromName(runnerCredentialLeaseId(identity.jobId, identity.tenant, identity.patId))).wipe();
+    // Local redemption closure and remote revocation are independent cleanup
+    // obligations. Failure of either must not prevent attempting the other.
+    const cleanup = await Promise.allSettled([
+      (async () => {
+        if (!env.CORELINK_RUNNER_MINT_AUTH_KEY) throw new Error("missing mint auth key");
+        const mintEnv: MintEnv = { CORELINK_RUNNER_MINT_AUTH_KEY: env.CORELINK_RUNNER_MINT_AUTH_KEY,
+          CORELINK_MINT_URL: env.CORELINK_MINT_URL };
+        await revokeCasPatById(mintEnv, identity.patId, identity.tenant);
+      })(),
+      (async () => {
+        if (env.CRED_STASH) await env.CRED_STASH.get(env.CRED_STASH.idFromName(runnerCredentialLeaseId(identity.jobId, identity.tenant, identity.patId))).wipe();
+      })(),
+    ]);
+    for (const result of cleanup) if (result.status === "rejected") throw result.reason;
     await authority.confirmCredentialRevoked(identity);
     if (env.RUNNER_JOB_PATS) await env.RUNNER_JOB_PATS.delete(retryKey(identity));
     return true;
@@ -81,13 +88,14 @@ export async function revokeCompletedJob(env: RevocationEnv, authority: Credenti
   if (!closed.known) throw new Error(`credential authority has no migrated obligation for job ${jobId}`);
   const identities = await pendingAll(authority, { kind: "job", jobId });
   if (identities.length === 0) return true;
-  if (!env.CORELINK_RUNNER_MINT_AUTH_KEY) throw new Error(`credential revoke pending for job ${jobId}`);
   if (derivedTenant && identities.some(identity => identity.tenant !== derivedTenant)) throw new Error("credential tenant attribution conflict");
   let revoked = false;
+  let pending = false;
   for (const identity of identities) {
-    if (!(await revokeOne(env, authority, identity))) throw new Error(`credential revoke pending for job ${jobId}`);
-    revoked = true;
+    if (!(await revokeOne(env, authority, identity))) pending = true;
+    else revoked = true;
   }
+  if (pending) throw new Error(`credential revoke pending for job ${jobId}`);
   return revoked;
 }
 
