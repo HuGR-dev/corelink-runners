@@ -38,7 +38,7 @@ async function boundedBody(response: Response): Promise<unknown> {
   return JSON.parse(new TextDecoder().decode(body));
 }
 
-async function requestPage(fetcher: typeof fetch, token: string, page: number): Promise<unknown> {
+async function requestPage(fetcher: typeof fetch, token: string, page: number): Promise<{ body: unknown; nextPage: number | null }> {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -50,7 +50,25 @@ async function requestPage(fetcher: typeof fetch, token: string, page: number): 
         headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "user-agent": "corelink-spawn-worker", "x-github-api-version": "2022-11-28" },
       });
       if (response.status !== 200) throw new Error("membership request failed");
-      return boundedBody(response);
+      const link = response.headers.get("link");
+      let nextPage: number | null = null;
+      if (link) {
+        for (const entry of link.split(",")) {
+          if (!/;\s*rel="?next"?/i.test(entry)) continue;
+          const match = /^\s*<([^>]+)>\s*;\s*rel="?next"?\s*$/i.exec(entry);
+          if (!match) throw new Error("invalid next link");
+          let url: URL;
+          try { url = new URL(match[1]); } catch { throw new Error("invalid next link"); }
+          if (url.origin !== "https://api.github.com" || url.pathname !== "/installation/repositories") throw new Error("invalid next link");
+          const raw = url.searchParams.get("page");
+          if (!raw || !/^[1-9][0-9]*$/.test(raw)) throw new Error("invalid next page");
+          const candidate = Number(raw);
+          if (!Number.isSafeInteger(candidate) || candidate <= page || candidate > MAX_PAGES) throw new Error("invalid next page");
+          if (nextPage !== null && nextPage !== candidate) throw new Error("conflicting next links");
+          nextPage = candidate;
+        }
+      }
+      return { body: await boundedBody(response), nextPage };
     })();
     return await Promise.race([work, new Promise<never>((_, reject) => { timer = setTimeout(() => { controller.abort(); reject(new Error("membership timeout")); }, TIMEOUT_MS); })]);
   } finally { if (timer !== undefined) clearTimeout(timer); }
@@ -74,15 +92,20 @@ export async function confirmInstallationRepositories(
       const names = new Set<string>();
       let complete = false;
       for (let page = 1; page <= MAX_PAGES; page++) {
-        const body = await requestPage(fetcher, token, page);
+        const pageResult = await requestPage(fetcher, token, page);
+        const body = pageResult.body;
         if (body === null || typeof body !== "object" || Array.isArray(body)) return null;
         const repositories = (body as Record<string, unknown>).repositories;
-        if (!Array.isArray(repositories) || repositories.length > PAGE_SIZE) return null;
+        const totalCount = (body as Record<string, unknown>).total_count;
+        if (!Number.isSafeInteger(totalCount) || (totalCount as number) < 0 || !Array.isArray(repositories) || repositories.length > PAGE_SIZE) return null;
         for (const repository of repositories) {
           if (repository === null || typeof repository !== "object" || typeof (repository as Record<string, unknown>).full_name !== "string") return null;
           names.add((repository as { full_name: string }).full_name.toLowerCase());
         }
-        if (repositories.length < PAGE_SIZE) { complete = true; break; }
+        if (pageResult.nextPage !== null) { page = pageResult.nextPage - 1; continue; }
+        if (names.size < totalCount) return null;
+        complete = true;
+        break;
       }
       if (!complete) return null;
       found.set(installationId, names);
