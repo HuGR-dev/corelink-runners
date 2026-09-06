@@ -3296,6 +3296,16 @@ export async function keepAliveLiveRunners(
     if (activity === "unknown") unverifiable++;
     else busyCount++;
 
+    if (binding.jid) {
+      try {
+        if (!(await concurrencySlots(env).renew(binding.jid, SLOT_TTL_S * 1000))) {
+          logEvent("error", "keepalive_slot_missing", { jobId: binding.jid, runnerName });
+        }
+      } catch {
+        logEvent("error", "keepalive_slot_renewal_failed", { jobId: binding.jid, runnerName });
+      }
+    }
+
     try {
       await getContainer(env.RUNNER_CONTAINER, binding.h).keepAlive();
       renewed++;
@@ -5204,6 +5214,18 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
 
     // Admission, command execution and lifecycle operations have separate authority.
     if (!controlAuthed(request, env)) return unauthorized();
+
+    const jobStatus = pathname.match(/^\/v1\/jobs\/([^/]+)\/status$/);
+    if (request.method === "GET" && jobStatus) {
+      const jobId = decodeURIComponent(jobStatus[1]);
+      if (!jobId || jobId.includes("/")) return json({ error: "invalid job id" }, 400);
+      try {
+        const refusal = await concurrencySlots(env).getRefusal(jobId);
+        return refusal ? json(refusal, 200) : json({ error: "job status unavailable" }, 404);
+      } catch {
+        return json({ error: "concurrency authority unavailable", retryable: true }, 503);
+      }
+    }
 
     // POST /v1/spawn
     if (request.method === "POST" && pathname === "/v1/spawn") {

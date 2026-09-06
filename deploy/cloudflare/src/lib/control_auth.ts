@@ -17,6 +17,7 @@ function routeDomain(request: Request): AuthDomain | undefined {
   if (request.method === "POST" && url.pathname === "/v1/spawn") return "spawn";
   if (request.method === "POST" && url.pathname === "/v1/exec") return "exec";
   if (request.method === "POST" && url.pathname === "/v1/status") return "lifecycle";
+  if (request.method === "GET" && /^\/v1\/jobs\/[^/]+\/status$/.test(url.pathname)) return "lifecycle";
   if (request.method === "GET" && url.pathname.startsWith("/v1/status/")) {
     return url.pathname.slice("/v1/status/".length).length > 0 ? "lifecycle" : undefined;
   }
