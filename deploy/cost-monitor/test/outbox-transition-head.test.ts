@@ -18,10 +18,10 @@ function envelope(seq: number, occurred: number, eventId = `event-${seq}`): Moni
   return value;
 }
 
-const lifecycleRegistration: SourceRegistration = { ...registration, allowedKinds: ["ATTEMPT_RESERVED"], intervalMs: 60000, authoritySourceId: "authority" };
-function lateTransition(seq: number, occurred: number, eventId = `transition-${seq}`): MonitorEnvelope {
-  const payload = { source_id: "authority", monotonic_seq: seq, transition_id: `t-${seq}`, state: "failed" as const, transition_at: occurred, source_version: "v1", sampled_at: occurred, nonce: `nonce-${seq}` };
-  const value: any = { kind: "ATTEMPT_RESERVED", source: "producer", service: "svc", application: "app", event_id: eventId, producer_seq: seq, occurred_at: occurred, scheduled_for: occurred, version: "1", key_id: "key", credential_epoch: "1", payload_digest: createHash("sha256").update(canonicalJson(payload)).digest("hex"), monitor_rearm_tuple_digest: "b".repeat(64), payload };
+const lifecycleRegistration: SourceRegistration = { ...registration, allowedKinds: ["BREAKER_CLOSED", "BREAKER_OPEN"], intervalMs: null, authoritySourceId: null };
+function lateTransition(seq: number, occurred: number, kind: "BREAKER_CLOSED" | "BREAKER_OPEN", state: "healthy" | "failed", eventId = `transition-${seq}`): MonitorEnvelope {
+  const payload = { source_id: "authority", monotonic_seq: seq, transition_id: `t-${seq}`, state: state === "healthy" ? "healthy" as const : "failed" as const, transition_at: occurred, source_version: "v1", sampled_at: occurred, nonce: `nonce-${seq}` };
+  const value: any = { kind, source: "producer", service: "svc", application: "app", event_id: eventId, producer_seq: seq, occurred_at: occurred, scheduled_for: occurred, version: "1", key_id: "key", credential_epoch: "1", payload_digest: createHash("sha256").update(canonicalJson(payload)).digest("hex"), monitor_rearm_tuple_digest: "b".repeat(64), payload };
   value.signature = createHmac("sha256", secret).update(JSON.stringify([value.kind, value.source, value.service, value.application, value.event_id, value.producer_seq, value.occurred_at, value.scheduled_for, value.version, value.key_id, value.credential_epoch, value.payload_digest, value.monitor_rearm_tuple_digest, canonicalJson(payload)])).digest("hex");
   return value;
 }
@@ -32,15 +32,15 @@ function make(store: MemoryStateStore, now: number, lifecycle = false) {
 }
 
 describe("periodic historical head acceptance", () => {
-  it("applies a late ATTEMPT_RESERVED transition as historical failure before ACK, then accepts its successor", async () => {
-    const store = new MemoryStateStore(); const service = make(store, 1_000, true); await service.ingest(lateTransition(1, 1_000));
-    const result = await make(store, 70_000, true).ingest(lateTransition(2, 2_000));
-    expect(result.kind).toBe("ACK"); expect((result as any).body.terminal).toBe("HISTORICAL_NO_STATE");
+  it("applies a late BREAKER_OPEN transition before normal ACK, then accepts fresh BREAKER_CLOSED", async () => {
+    const store = new MemoryStateStore(); const service = make(store, 1_000, true); await service.ingest(lateTransition(1, 1_000, "BREAKER_CLOSED", "healthy"));
+    const result = await make(store, 70_000, true).ingest(lateTransition(2, 2_000, "BREAKER_OPEN", "failed"));
+    expect(result.kind).toBe("ACK"); expect((result as any).body.ack_version).toBe("1"); expect("terminal" in (result as any).body).toBe(false);
     const lane = createHash("sha256").update(JSON.stringify([registration.source, registration.service, registration.application])).digest("hex");
     const after = (await store.get<any>(`n:source:${lane}`))!.value;
-    expect(after.sourceHealth).toBe("healthy"); expect(after.sourceReason).toBe("healthy"); expect(after.lastSequence).toBe(2);
+    expect(after.sourceHealth).toBe("failed"); expect(after.sourceReason).toBe("producer_late"); expect(after.lastSequence).toBe(2);
     expect((await store.get<any>(`n:incident:${lane}`))?.value.lastReason).toBe("producer_late");
-    const successor = await make(store, 70_000, true).ingest(lateTransition(3, 70_000));
+    const successor = await make(store, 70_000, true).ingest(lateTransition(3, 70_000, "BREAKER_CLOSED", "healthy"));
     expect(successor.kind).toBe("ACK");
     const current = (await store.get<any>(`n:source:${lane}`))!.value;
     expect(current.sourceHealth).toBe("healthy"); expect(current.lastSequence).toBe(3);
