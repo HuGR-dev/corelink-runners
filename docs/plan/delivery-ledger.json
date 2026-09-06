@@ -690,7 +690,7 @@
         "T4-W1",
         "R2"
       ],
-      "next_action": "Approved source candidate held for predecessor composition; T4-W1/D13 and R2 remain real gates. Validate paired source at sprint composition.",
+      "next_action": "Implementation criteria accepted after the R2 paired billing composition. Keep the package prepared: delivery credit remains blocked by the sprint and production gates.",
       "blockers": [],
       "commits": [
         "303622df89b201e0a53e5e23cea4a4bcba7061d3",
@@ -702,14 +702,17 @@
       ],
       "review": {
         "status": "approved",
-        "commit": "ffc5dadff397c546817673d04ad62e8ab527deae",
+        "commit": "b367aeaaf5334e9953f092534876898d1133f36f",
         "evidence": [
-          "docs/plan/execution/2026-09-05-rule-matrix-and-billing-review.json"
+          "docs/plan/execution/2026-09-05-rule-matrix-and-billing-review.json",
+          "r2_pair_acceptance accepted the final paired Runner/Server wire and focused gates."
         ]
       },
       "evidence": [
         "docs/plan/execution/2026-09-05-rule-matrix-and-billing-review.json",
-        "docs/plan/execution/rework-20260906/R1-final.json"
+        "docs/plan/execution/rework-20260906/R1-final.json",
+        "/private/tmp/corelink-r2-evidence/runner-corelink-billing.log",
+        "/private/tmp/corelink-r2-evidence/worker-usage-event-conformance.log"
       ]
     },
     {

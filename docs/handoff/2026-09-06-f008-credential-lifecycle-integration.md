@@ -109,6 +109,27 @@ The remaining legacy KV spawn-claim race is not waived by this acceptance. It
 belongs to T8-W3/A3.18's atomic spawn-claim work, with its F005/F007
 implications, rather than T8-W2's credential-scope contract.
 
+## R2/T4-W2 billing composition acceptance
+
+`r2_pair_acceptance` accepted the source-only paired billing composition. The
+Runner is at `b367aeaaf5334e9953f092534876898d1133f36f`, including bounded
+1024-event batches, serialized flushes, exact-byte retry, and prefix-identity
+retirement that preserves events appended during an in-flight post. The paired
+Server is `412c9bb03f4a171ceda5102b873e0c3bda10f015`.
+
+The Runner shared-target gate, after sourcing the PostgreSQL environment and
+asserting `TEST_DATABASE_URL`, passed `cargo test -p corelink-fabric-server
+--lib corelink_billing`: 21 passed, 0 failed, 456 filtered, exit 0. The
+corrected concurrent append/flush gate passed 1/1. The Worker wire conformance
+gate passed 5/5, and the Server `billing_ingest` gate passed 25/25. The Runner
+and Worker logs are retained outside Git at
+`/private/tmp/corelink-r2-evidence/runner-corelink-billing.log` and
+`/private/tmp/corelink-r2-evidence/worker-usage-event-conformance.log`.
+
+This accepts T4-W2 implementation criteria only. It remains prepared rather
+than delivered; F008's recorded delivery count stays 16/70, and no production
+or live qualification is claimed.
+
 ## Earlier integrated packets
 
 The prior packets in this tree include:
