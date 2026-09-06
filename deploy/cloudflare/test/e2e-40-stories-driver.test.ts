@@ -1,6 +1,6 @@
 // deploy/cloudflare/test/e2e-40-stories-driver.test.ts
 // Comprehensive 40 User Stories E2E Simulation & Behavior Analysis Driver
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // ── Test double for @cloudflare/containers ───────────────────────────
 vi.mock("@cloudflare/containers", () => {
@@ -29,6 +29,7 @@ vi.mock("@cloudflare/containers", () => {
       async destroy() {
         this.alive = false;
       }
+      async schedule() {}
       async containerFetch(req: Request | string, port?: number): Promise<Response> {
         if (!this.alive) {
           return new Response("Container not running", { status: 503 });
@@ -64,7 +65,7 @@ vi.mock("@cloudflare/containers", () => {
 });
 
 import { RunnerDevEnvDO } from "../src/durable_objects/runner_dev_env";
-import { DEVENV_TIERS, type DevenvTier, type StartPayload } from "../src/types/devenv";
+import { DEVENV_TIERS, type DevenvTier } from "../src/types/devenv";
 
 interface TelemetryPoint {
   storyId: string;
@@ -81,7 +82,7 @@ describe("CoreLink DevEnv — Master 40 User Stories E2E Execution & Analysis", 
   let mockStorage: Map<string, any>;
   let mockCtx: any;
   let mockEnv: any;
-  let billingRecords: Array<{ tenant_id: string; vcpu_seconds: number; timestamp: number }>;
+  let billingRecords: Array<Record<string, unknown>>;
   const telemetryHistory: TelemetryPoint[] = [];
 
   beforeEach(() => {
@@ -90,8 +91,8 @@ describe("CoreLink DevEnv — Master 40 User Stories E2E Execution & Analysis", 
 
     mockCtx = {
       storage: {
-        get: vi.fn(async (key: string) => mockStorage.get(key)),
-        put: vi.fn(async (key: string, val: any) => mockStorage.set(key, val)),
+        get: vi.fn(async (key: string) => { const val = mockStorage.get(key); return val === undefined ? undefined : structuredClone(val); }),
+        put: vi.fn(async (key: string, val: any) => mockStorage.set(key, structuredClone(val))),
         delete: vi.fn(async (key: string) => mockStorage.delete(key)),
       },
       blockConcurrencyWhile: vi.fn(async (fn: () => Promise<any>) => fn()),
@@ -100,18 +101,27 @@ describe("CoreLink DevEnv — Master 40 User Stories E2E Execution & Analysis", 
     };
 
     mockEnv = {
-      CONFIG_DB: {
-        prepare: vi.fn(() => ({
-          bind: vi.fn((tenantId: string, _month: number, vcpuSec: number, ts: number) => ({
-            run: vi.fn(async () => {
-              billingRecords.push({ tenant_id: tenantId, vcpu_seconds: vcpuSec, timestamp: ts });
-              return { success: true };
-            }),
-          })),
-        })),
+      CRED_STASH: {
+        idFromName: vi.fn((name: string) => name),
+        get: vi.fn(() => ({ stash: vi.fn(async () => "c".repeat(64)), wipe: vi.fn(async () => undefined) })),
       },
+      CORELINK_RUNNER_MINT_AUTH_KEY: "dispatcher-key",
+      SPAWN_WORKER_PUBLIC_URL: "https://spawn-worker.example/",
+      BILLING_INGEST_URL: "https://billing.example/internal/v1/billing/usage",
+      BILLING_INGEST_AUTH_KEY: "billing-ingest-key",
+      BILLING_REGION: "gru",
     };
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-05T12:00:00.000Z"));
+    vi.stubGlobal("fetch", vi.fn(async (input: any, init: any = {}) => {
+      if (String(input) === "https://billing.example/internal/v1/billing/usage") {
+        billingRecords.push(...JSON.parse(String(init.body)));
+      }
+      return new Response("{}", { status: 200 });
+    }));
   });
+
+  afterEach(() => vi.useRealTimers());
 
   // Helper to simulate client interaction and teardown
   async function runClientScenario(opts: {
@@ -126,18 +136,20 @@ describe("CoreLink DevEnv — Master 40 User Stories E2E Execution & Analysis", 
     await new Promise((r) => setTimeout(r, 5));
 
     // Client sends start request
-    const startPayload: StartPayload = {
+    const boot = await sandbox.startAuthorizedDevenv({
       config: {
         workspaceName: `ws-${opts.storyId.toLowerCase()}`,
         profileName: `profile-${opts.storyId.toLowerCase()}`,
         tier: opts.tier,
-        clwEndpoint: "https://corelink-api.humangr.com",
-        clwTenant: `tenant-${opts.storyId.toLowerCase()}`,
-        clwToken: "cl_pat_verified_token_1234567890abcdef",
       },
-    };
-
-    const boot = await sandbox.startDevenv(startPayload);
+      grant: {
+        tenantId: "00000000-0000-4000-8000-000000000040",
+        sessionUuid: crypto.randomUUID(),
+        casPat: "cl_pat_verified_token_1234567890abcdef",
+        patId: crypto.randomUUID(),
+        expiresAtMs: Date.now() + 60 * 60 * 1000,
+      },
+    });
     expect(boot.status).toBe("starting");
 
     await sandbox.onStart();
@@ -149,6 +161,7 @@ describe("CoreLink DevEnv — Master 40 User Stories E2E Execution & Analysis", 
 
     // Client requests stop and teardown
     await sandbox.requestStop();
+    vi.setSystemTime(new Date("2026-09-05T12:00:31.000Z"));
     await sandbox.onStop();
 
     const finalStatus = await sandbox.getStatus();
@@ -156,7 +169,7 @@ describe("CoreLink DevEnv — Master 40 User Stories E2E Execution & Analysis", 
 
     const t1 = performance.now();
     const latency = t1 - t0;
-    const vcpuSec = billingRecords[billingRecords.length - 1]?.vcpu_seconds ?? 0;
+    const vcpuSec = Number(billingRecords[billingRecords.length - 1]?.qty ?? 0);
 
     telemetryHistory.push({
       storyId: opts.storyId,
@@ -602,7 +615,8 @@ describe("CoreLink DevEnv — Master 40 User Stories E2E Execution & Analysis", 
         tier: "standard-2",
         action: async (s) => {
           const env = (s as any).envVars;
-          expect(env.CLW_TOKEN).toBeDefined();
+          expect(env.CLW_TOKEN).toBeUndefined();
+          expect(env.CLW_CRED_TICKET).toMatch(/^[0-9a-f]{64}$/);
         },
       });
     });
@@ -661,21 +675,24 @@ describe("CoreLink DevEnv — Master 40 User Stories E2E Execution & Analysis", 
   });
 
   // ════════════════════════════════════════════════════════════════════════════
-  // BLOCO H: FINOPS, AUDITORIA D1 & ANTI-FRAUDE (US-36 a US-40)
+  // BLOCO H: FINOPS, AUDITORIA DE INGEST & ANTI-FRAUDE (US-36 a US-40)
   // ════════════════════════════════════════════════════════════════════════════
-  describe("Bloco H: FinOps, Auditoria D1 & Anti-Fraude", () => {
-    it("US-36: Neutralização de micro-bursting com piso de 30 segundos (INV-05)", async () => {
+  describe("Bloco H: FinOps, Auditoria de ingest & Anti-Fraude", () => {
+    it("US-36: Canonical billing event records elapsed vCPU usage (INV-05)", async () => {
       await runClientScenario({
         storyId: "US-36",
         category: "FinOps & Billing",
-        name: "30s Micro-burst Billing Floor",
+        name: "Canonical vCPU Usage Event",
         tier: "standard-4",
         action: async () => {
           // Fast sub-second session
         },
       });
       const lastBilling = billingRecords[billingRecords.length - 1];
-      expect(lastBilling.vcpu_seconds).toBe(120); // 30s * 4 vCPU = 120
+      expect(lastBilling.event_kind).toBe("runner_vcpu_seconds");
+      expect(lastBilling.qty).toBe(124); // 31s * 4 vCPU
+      expect(lastBilling.tenant_id).toBe("00000000-0000-4000-8000-000000000040");
+      expect(lastBilling.idem_key).toMatch(/^[0-9a-f]{64}$/);
     });
 
     it("US-37: Multiplicador dinâmico de hardware por tier em tempo real", async () => {
@@ -687,18 +704,20 @@ describe("CoreLink DevEnv — Master 40 User Stories E2E Execution & Analysis", 
         action: async () => {},
       });
       const lastBilling = billingRecords[billingRecords.length - 1];
-      expect(lastBilling.vcpu_seconds).toBe(480); // 30s * 16 vCPU = 480
+      expect(lastBilling.event_kind).toBe("runner_vcpu_seconds");
+      expect(lastBilling.qty).toBe(496); // 31s * 16 vCPU
     });
 
-    it("US-38: Gravação resiliente no D1 com padrão Outbox e jitter", async () => {
+    it("US-38: Canonical ingest delivery is the billing outbox sink", async () => {
       await runClientScenario({
         storyId: "US-38",
         category: "FinOps & Billing",
-        name: "D1 Outbox Pattern under Lock",
+        name: "Billing Ingest Outbox Pattern under Lock",
         tier: "power-8",
         action: async () => {},
       });
-      expect(mockEnv.CONFIG_DB.prepare).toHaveBeenCalled();
+      expect(billingRecords).toHaveLength(1);
+      expect(billingRecords[0].event_kind).toBe("runner_vcpu_seconds");
     });
 
     it("US-39: Bloqueio preventivo ao atingir cota mensal de vCPU-horas", async () => {
