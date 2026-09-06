@@ -342,29 +342,31 @@
     {
       "id": "T6-W2",
       "sprint": 1,
-      "state": "prepared",
-      "implementation": "partial",
+      "state": "ready",
+      "implementation": "complete",
       "owner": "root",
       "dependencies": [
         "D11"
       ],
-      "next_action": "Action supports prepared clw0.1.12 atomic --require-hit with strict version/dependency refusal; root16 shell cases and3 actual action/client negative compositions passed. clw91ab817 pre-dispatch negatives reproduced. Signed release, verified image pins and real HIT acceptance remain pending; no WP delivery credit.",
-      "blockers": [
-        "Reviewed clw required-hit patch is ready; explicit owner exception to apply in isolated sibling worktree is pending. No clw release or installed capability yet."
-      ],
+      "next_action": "Source review and focused checks complete. Acceptance pending: Signed0.1.12 publication, verified immutable consumer pins and actual authenticated HIT/restore remain absent.",
+      "blockers": [],
       "commits": [
         "bb165bad54125460ebae213e405df3a75baa6566",
         "7489786a35e402732c58a74c4d005486ed3e4aba",
         "4d4d4f2dfec88355cee51ff5c2a0dadf0adb011e",
-        "8260f79d6a74062e10bbcd53bf289ad2fb1fb781"
+        "8260f79d6a74062e10bbcd53bf289ad2fb1fb781",
+        "2d2930ac7fb0ebdcc5c76291fa12f94abb586dae"
       ],
       "review": {
-        "status": "pending",
-        "commit": null,
-        "evidence": []
+        "status": "approved",
+        "commit": "2d2930ac7fb0ebdcc5c76291fa12f94abb586dae",
+        "evidence": [
+          "docs/plan/execution/2026-09-06-sprint1-source-closure.json"
+        ]
       },
       "evidence": [
-        "docs/adr/0011-memoize-miss-contract.md"
+        "docs/adr/0011-memoize-miss-contract.md",
+        "docs/plan/execution/2026-09-06-sprint1-source-closure.json"
       ]
     },
     {
@@ -1670,34 +1672,36 @@
     {
       "id": "T3-W18",
       "sprint": 1,
-      "state": "prepared",
-      "implementation": "partial",
+      "state": "ready",
+      "implementation": "complete",
       "owner": "root",
       "dependencies": [
         "T3-W17",
         "T7-W4b"
       ],
-      "next_action": "Implement and execute the genuine three-state 10/10 and nonempty ordered resume proof, including side-effect and running-instance observations. Existing live artifact remains RED.",
-      "blockers": [
-        "Three-state live matrix and nonempty resume not executed; running-box/side-effect proof absent."
-      ],
+      "next_action": "Source review and focused checks complete. Acceptance pending: Version-bound three-state live10/10 matrix, nonempty ordered resume, side effects and running-instance observations remain RED.",
+      "blockers": [],
       "commits": [
-        "bb165bad54125460ebae213e405df3a75baa6566"
+        "bb165bad54125460ebae213e405df3a75baa6566",
+        "2d2930ac7fb0ebdcc5c76291fa12f94abb586dae"
       ],
       "review": {
-        "status": "pending",
-        "commit": null,
-        "evidence": []
+        "status": "approved",
+        "commit": "2d2930ac7fb0ebdcc5c76291fa12f94abb586dae",
+        "evidence": [
+          "docs/plan/execution/2026-09-06-sprint1-source-closure.json"
+        ]
       },
       "evidence": [
-        "docs/plan/evidence/T3-W18-containment-live.json"
+        "docs/plan/evidence/T3-W18-containment-live.json",
+        "docs/plan/execution/2026-09-06-sprint1-source-closure.json"
       ]
     },
     {
       "id": "T6-W13",
       "sprint": 1,
-      "state": "prepared",
-      "implementation": "partial",
+      "state": "ready",
+      "implementation": "complete",
       "owner": "root",
       "dependencies": [
         "T6-W4",
@@ -1705,17 +1709,22 @@
         "O-CANARY",
         "T7-W4b"
       ],
-      "next_action": "Verify complete key-lane behavior and collect twelve-tick deployed evidence after composition.",
+      "next_action": "Source review and focused checks complete. Acceptance pending: Deployed current/stale metrics-key cycles, page delivery and authenticated acknowledgement remain absent.",
       "blockers": [],
       "commits": [
-        "bb165bad54125460ebae213e405df3a75baa6566"
+        "bb165bad54125460ebae213e405df3a75baa6566",
+        "2d2930ac7fb0ebdcc5c76291fa12f94abb586dae"
       ],
       "review": {
-        "status": "pending",
-        "commit": null,
-        "evidence": []
+        "status": "approved",
+        "commit": "2d2930ac7fb0ebdcc5c76291fa12f94abb586dae",
+        "evidence": [
+          "docs/plan/execution/2026-09-06-sprint1-source-closure.json"
+        ]
       },
-      "evidence": []
+      "evidence": [
+        "docs/plan/execution/2026-09-06-sprint1-source-closure.json"
+      ]
     },
     {
       "id": "T6-W14",
@@ -1898,14 +1907,17 @@
         "a85e3c53bc7c05600feec8d6293d9b93e24bf8f2",
         "015edd4010dc0e97dc398b4fb8960a7278710bc0",
         "09f3ea7b9f3602b6a9dad093033b38ad7fbba712",
-        "c97ba5878e241dce73ce979c961cc927bc0d5330"
+        "c97ba5878e241dce73ce979c961cc927bc0d5330",
+        "54b3c9d5cee9b809ae24053c92568c079cc37bd7",
+        "9e007cdc3f2ab05133ca30507643259c804d48f8"
       ],
       "evidence": [
         "Root inspected PgLedger::record_tenant_suspension, AppState::record_tenant_suspension_event, enforcement handlers and Worker revocation consumer at51ae0c.",
         "Producer03fdf87 repairs missing suspension outbox pointers and unique same-clock epochs; previously root-reproduced real PostgreSQL tests cover that bounded producer change. Full lifecycle generation binding remains absent.",
         "Root015edd4 reproduces7 focused enforcement tests: failed persistence returns503 and preserves acquire429; retry clears suspension; confirmed teardown releases held lease, unconfirmed teardown retains it; unsupported outbox refuses. Tests inject an outbox dependency and do not claim new PostgreSQL or complete F008 proof.",
         "Rootc97ba58 reproduces23 Worker auth tests plus strictTS; root09f3ea7 forwards dedicated exec/lifecycle credentials into fabricd, with18 focused routing tests plus strictTS reproduced. Root corrected paired rotation documentation.",
-        "At2026-09-06T07:33Z F008 remains open: a delayed first delivery can enumerate post-resume credentials; Worker receipt/selection has no lifecycle generation and legacy migration coverage is incomplete. These commits do not close the finding or WP."
+        "At2026-09-06T07:33Z F008 remains open: a delayed first delivery can enumerate post-resume credentials; Worker receipt/selection has no lifecycle generation and legacy migration coverage is incomplete. These commits do not close the finding or WP.",
+        "Root reproduced1 suspension interleaving test and7 enforcement tests at9e007cd with DEBUG=0 and INCREMENTAL=0. Local suspend/unsuspend durable writes and cache changes now share a mutex. Original F008 remains open for cross-service epochs, ordered resume and legacy migration."
       ]
     }
   ],

@@ -368,3 +368,35 @@ Pg/D1 generations is only a proposal: it has not established a single authority
 or a safe cross-service resume protocol and must not be implemented as two
 independent clocks. No additional user permission is needed for routine source
 work already authorized in this session.
+
+
+## Progress at 12:33 BRT (latest)
+
+User challenged unchanged delivery count. Root explicitly acknowledged that no
+new WP had been delivered during takeover and that stopping with independent
+work open was a execution failure. Do not claim background progress between turns.
+
+Root reviewed54b3c9+9e007 and reproduced1 deterministic mutex-contention test
+plus7 enforcement tests. Suspension writes/cache updates are serialized within
+one process. F008 remains open; this is not remote lifecycle generation proof.
+Source2d2930a repairs containment fixtures and obsolete auth/cleanup comments.
+Root29 containment tests and strict Worker TS passed. Canary key-lane2 tests and
+strictTS passed. Required-hit source review confirms sibling authorization was
+already granted; stale pending-permission blocker removed.
+
+The source-closure artifact records T3-W18/T6-W13/T6-W2 as implementation complete
+with explicitly pending production/release acceptance. Sprint1 now records10/12
+implementation complete (monitor and shared-budget DevEnv still unfinished).
+This is source-status reconciliation, NOT3 newly delivered WPs. Delivery remains
+16/70,54 pending,0 complete sprints. No full CI, push, release or deployment ran.
+
+Two resumed Luna lanes ignored worktree instructions and initially wrote to root.
+All edits were preserved and reviewed. Root moved containment edits to its own
+new isolated checkout, rejected weak cleanup assertions, then integrated with
+root replay assertions. Suspension commits already existed on root; root's
+redundant cherry-pick caused a conflict and was aborted without losing changes.
+The resulting failed compile was retried only after restoring clean source; the
+focused tests above then passed. Future worktrees and dependency paths must be
+created by root before dispatch, with exact working directories in every packet.
+The monitor proposal remains unanswered and unapplied; routine independent work
+is already authorized. Do not repeat the broad census or ask for sibling access.
