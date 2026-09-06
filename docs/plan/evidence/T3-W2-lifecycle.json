@@ -30,7 +30,7 @@
       "live_orphan_count": "NOT_PROVEN"
     },
     "focused_tests": {
-      "command": "vitest run test/t3-w2-lifecycle.test.ts test/metrics-do.test.ts test/stale-box-reaper.test.ts test/webhook-route.test.ts --pool=threads --maxWorkers=1 --minWorkers=1",
+      "command": "vitest run test/metrics-do.test.ts test/stale-box-reaper.test.ts test/webhook-route.test.ts --pool=threads --maxWorkers=1 --minWorkers=1; vitest run test/t3-w2-lifecycle.test.ts test/metrics-do.test.ts --pool=threads --maxWorkers=1 --minWorkers=1",
       "passed": 34,
       "failed": 0
     }
