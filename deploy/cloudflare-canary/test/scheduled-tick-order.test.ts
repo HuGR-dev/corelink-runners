@@ -103,6 +103,10 @@ describe("scheduled tick order", () => {
     vi.setSystemTime(1_000);
     const values = new Map<string, unknown>();
     let release!: () => void;
+    let releaseReadyResolve!: () => void;
+    const releaseReady = new Promise<void>((resolve) => {
+      releaseReadyResolve = resolve;
+    });
     let releaseTransaction!: () => void;
     let transactionStarted!: () => void;
     const transactionReady = new Promise<void>((resolve) => {
@@ -169,6 +173,7 @@ describe("scheduled tick order", () => {
             resolve(
               new Response(JSON.stringify(signed.token), { status: 200 }),
             );
+          releaseReadyResolve();
         });
       });
     const outbox = new CanaryTickOutbox(durable);
@@ -184,6 +189,7 @@ describe("scheduled tick order", () => {
       1_000,
     );
     await vi.waitFor(() => expect(fetcher).toHaveBeenCalled());
+    await releaseReady;
     pauseTransaction = true;
     release();
     await transactionReady;
