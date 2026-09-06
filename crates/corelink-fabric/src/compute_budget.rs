@@ -2,6 +2,24 @@
 //! External workloads share the native PgLedger tenant lock and compute_accrual.
 use serde::{Deserialize, Serialize};
 
+/// Stable classification for callers; infrastructure errors remain unavailable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalComputeError {
+    InvalidInput,
+    Conflict,
+}
+
+impl std::fmt::Display for ExternalComputeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::InvalidInput => "invalid external compute input",
+            Self::Conflict => "external compute obligation conflict",
+        })
+    }
+}
+
+impl std::error::Error for ExternalComputeError {}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExternalWorkloadKind {
