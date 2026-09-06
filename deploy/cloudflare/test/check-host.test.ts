@@ -365,7 +365,7 @@ describe("status/teardown routing by mode (audit r4)", () => {
     expect(containers[0].ns).toBe(RUNNER_NS);
   });
 
-  it("teardown swallows a destroy() throw → still 204 (idempotent, not 500)", async () => {
+  it.each(["check", "runner"])("%s teardown failure remains unconfirmed and retryable", async (mode) => {
     vi.mocked(getContainer).mockImplementationOnce((ns: unknown, handle: string) => {
       const c: FakeContainer = {
         ns,
@@ -383,10 +383,15 @@ describe("status/teardown routing by mode (audit r4)", () => {
       return c as never;
     });
     const resp = await worker.fetch(
-      post("/v1/teardown", { handle: "h1", mode: "check" }),
+      post("/v1/teardown", { handle: "h1", mode }),
       makeEnv(),
     );
-    expect(resp.status).toBe(204);
+    expect(resp.status).toBe(503);
+    expect(await resp.json()).toEqual({ error: "provider teardown unconfirmed" });
+    expect(containers[0].ns).toBe(mode === "check" ? CHECK_NS : RUNNER_NS);
+    expect(containers[0].teardown).toHaveBeenCalledOnce();
+    const retry = await worker.fetch(post("/v1/teardown", { handle: "h1", mode }), makeEnv());
+    expect(retry.status).toBe(204);
   });
 
   it("POST /v1/egress-cutoff (default) → RUNNER_CONTAINER.cutEgress, 204", async () => {

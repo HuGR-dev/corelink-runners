@@ -5131,21 +5131,20 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       // Route by mode (audit r4): without this, a check-host teardown hit
       // RUNNER_CONTAINER (wrong namespace) → a silent no-op, leaking the live
       // CheckHostContainer until its 45m sleepAfter backstop. Default 'runner'.
-      const container =
-        body.mode === "check"
-          ? getContainer(env.CHECK_HOST_CONTAINER, handle)
-          : getContainer(env.RUNNER_CONTAINER, handle);
-      // Idempotent SIGKILL teardown; already-gone is success for the caller. A
-      // destroy() throw must NOT 500 — log loud and still return 204 (the
-      // provider deadline is the backstop). Mirrors the /v1/exec error discipline.
+      // Only a confirmed provider teardown permits the fabric to free capacity.
+      // An exception is retryable uncertainty, including an unavailable binding.
       try {
+        const container =
+          body.mode === "check"
+            ? getContainer(env.CHECK_HOST_CONTAINER, handle)
+            : getContainer(env.RUNNER_CONTAINER, handle);
         await container.teardown();
-      } catch (e) {
+      } catch {
         logEvent("error", "teardown_route_failed", {
           handle,
           mode: body.mode ?? "runner",
-          error: String(e),
         });
+        return json({ error: "provider teardown unconfirmed" }, 503);
       }
       return new Response(null, { status: 204 });
     }
