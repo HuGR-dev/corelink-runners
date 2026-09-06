@@ -4,7 +4,8 @@
 // turn "all repositories visible to a GitHub token" into a recovery set: that
 // would both widen the credential scope and make a transient registry failure
 // look like an empty (therefore safe) answer.  The registry response is a
-// bounded, snapshot-pinned cursor stream of repositories that are both
+// bounded cursor stream with a stable contract marker; keyset pagination is
+// idempotent but does not claim a transaction-wide snapshot. Repositories are both
 // eligible and verified, together with the installation that authorizes the
 // GitHub read and subsequent spawn.
 
@@ -52,6 +53,37 @@ function installationId(value: unknown): string | null {
   return /^[1-9][0-9]*$/.test(id) ? id : null;
 }
 
+async function readBoundedBody(response: Response): Promise<Uint8Array | null> {
+  const reader = response.body?.getReader();
+  if (!reader) return null;
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const part = await reader.read();
+      if (part.done) break;
+      total += part.value.byteLength;
+      if (total > MAX_REGISTRY_BYTES) {
+        await reader.cancel("registry response exceeds byte limit");
+        return null;
+      }
+      chunks.push(part.value);
+    }
+    const body = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      body.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return body;
+  } catch {
+    await reader.cancel().catch(() => {});
+    return null;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 /**
  * Poll the authoritative eligible-repository registry.
  *
@@ -72,12 +104,12 @@ export async function discoverEligibleRepositories(
   const found = new Map<string, ReconcilerRepository>();
 
   for (let pageNumber = 0; pageNumber < MAX_REGISTRY_PAGES; pageNumber++) {
-    const url = new URL(base);
-    if (cursor) url.searchParams.set("cursor", cursor);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), REGISTRY_TIMEOUT_MS);
     let response: Response;
     try {
+      const url = new URL(base);
+      if (cursor) url.searchParams.set("cursor", cursor);
       response = await fetcher(url.toString(), {
         headers: {
           "x-corelink-internal-auth": auth,
@@ -87,8 +119,8 @@ export async function discoverEligibleRepositories(
         signal: controller.signal,
       });
       if (!response.ok) return null;
-      const bytes = await response.arrayBuffer();
-      if (bytes.byteLength > MAX_REGISTRY_BYTES) return null;
+      const bytes = await readBoundedBody(response);
+      if (!bytes) return null;
       const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
       const body = JSON.parse(text) as Partial<RegistryPage>;
       if (body.schema_version !== 1 || body.source !== "runner_repo_allowlist" || typeof body.snapshot_id !== "string" || body.snapshot_id.length === 0 || !Array.isArray(body.repositories)) return null;

@@ -13,11 +13,10 @@ import { redriveOrphanedJobs, type Env } from "../src/index";
 
 function response(body: unknown, status = 200): Response {
   const encoded = new TextEncoder().encode(JSON.stringify(body));
-  return {
-    ok: status >= 200 && status < 300,
+  return new Response(encoded, {
     status,
-    arrayBuffer: async () => encoded,
-  } as Response;
+    headers: { "content-type": "application/json" },
+  });
 }
 
 describe("authoritative reconciler registry", () => {
@@ -66,6 +65,34 @@ describe("authoritative reconciler registry", () => {
   it("does not arm an inventory without registry credentials", async () => {
     const fetcher = vi.fn();
     await expect(discoverEligibleRepositories({}, fetcher)).resolves.toBeNull();
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("fails closed and cancels an oversized streaming response", async () => {
+    let cancelled = false;
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(new Uint8Array(256 * 1024));
+          controller.enqueue(new Uint8Array(1));
+        },
+        cancel() {
+          cancelled = true;
+        },
+      }),
+    } as Response);
+    await expect(discoverEligibleRepositories(
+      { RECONCILER_REGISTRY_URL: "https://registry.test", RECONCILER_REGISTRY_AUTH_KEY: "k" }, fetcher,
+    )).resolves.toBeNull();
+    expect(cancelled).toBe(true);
+  });
+
+  it("fails closed on an invalid registry URL before fetching", async () => {
+    const fetcher = vi.fn();
+    await expect(discoverEligibleRepositories(
+      { RECONCILER_REGISTRY_URL: "::invalid-url::", RECONCILER_REGISTRY_AUTH_KEY: "k" }, fetcher,
+    )).resolves.toBeNull();
     expect(fetcher).not.toHaveBeenCalled();
   });
 });
