@@ -9,6 +9,7 @@ import {
   type ContainerEnvResult,
   type ColdReason,
 } from "../lib";
+import { buildCLW_LEASE_ID } from "./runner_credential_lease";
 
 export class MintForbiddenError extends Error {
   readonly source: "edge_proxy" | "authz";
@@ -128,11 +129,12 @@ export async function buildContainerEnv(
     return forbidden(undefined, e instanceof MintForbiddenError ? e : undefined, source);
   }
   const endpoint = env.CLW_ENDPOINT ?? "https://corelink-api.humangr.com";
+  const leaseId = buildCLW_LEASE_ID(params.jobId, m.tenant, m.patId);
   // Production and all successful authorization require env-0. The raw PAT is
   // never placed in an untrusted container, including when legacy is set.
   try {
     const ticket = await deps.stash.stash(
-      params.jobId,
+      leaseId,
       randomTicket(),
       { token: m.token, endpoint, tenant: m.tenant },
       CRED_TICKET_TTL_S * 1000,
@@ -144,7 +146,7 @@ export async function buildContainerEnv(
         CLW_ENDPOINT: endpoint,
         CLW_TENANT: m.tenant,
         CLW_CRED_TICKET: ticket,
-        CLW_LEASE_ID: params.jobId,
+        CLW_LEASE_ID: leaseId,
         CLW_FABRIC_ENDPOINT: deps.fabricEndpoint,
         CLW_REF_DOMAIN: "runner",
       },
