@@ -62,6 +62,8 @@ use crate::compute_meter;
 use crate::ledger::{AdmitLedger, AdmitOutcome, ComputeGate, LeaseLedger, LeaseRecord, LeaseState};
 use crate::tenant::TenantId;
 
+mod suspension;
+
 #[path = "pg_ledger/pending_cleanup_pg.rs"]
 mod pending_cleanup_pg;
 #[path = "pg_ledger/provider_binding.rs"]
@@ -192,7 +194,11 @@ CREATE TABLE IF NOT EXISTS compute_accrual (
 -- a shard restart. The fabricd keeps a fast in-memory cache; this is the
 -- cross-instance source of truth read on a cache miss at N>1.
 CREATE TABLE IF NOT EXISTS fabric_suspended_tenants (
-  tenant_id text PRIMARY KEY);
+  tenant_id text PRIMARY KEY,
+  suspension_event_id text);
+ALTER TABLE fabric_suspended_tenants
+  ADD COLUMN IF NOT EXISTS suspension_event_id text;
+CREATE SEQUENCE IF NOT EXISTS fabric_tenant_suspension_event_seq AS bigint;
 -- Durable suspension delivery outbox. The suspension row and this event are
 -- written in one transaction; delivery is retried until the Worker ACKs.
 CREATE TABLE IF NOT EXISTS tenant_suspension_events (
@@ -521,84 +527,26 @@ impl LeaseLedger for PgLedger {
     }
 
     fn set_tenant_suspended(&self, tenant: &str, suspended: bool) -> anyhow::Result<()> {
-        self.block_on(async {
-            let client = self.pool.get().await?;
-            if suspended {
-                client
-                    .execute(
-                        "INSERT INTO fabric_suspended_tenants (tenant_id) VALUES ($1) \
-                         ON CONFLICT DO NOTHING",
-                        &[&tenant],
-                    )
-                    .await?;
-            } else {
-                client
-                    .execute(
-                        "DELETE FROM fabric_suspended_tenants WHERE tenant_id = $1",
-                        &[&tenant],
-                    )
-                    .await?;
-            }
-            Ok(())
-        })
+        self.set_tenant_suspended_pg(tenant, suspended)
     }
 
-    fn record_tenant_suspension(
-        &self,
-        event: crate::TenantSuspensionEvent,
-    ) -> anyhow::Result<()> {
-        self.block_on(async {
-            let mut client = self.pool.get().await?;
-            let txn = client.transaction().await?;
-            let suspension_inserted = txn.execute(
-                "INSERT INTO fabric_suspended_tenants (tenant_id) VALUES ($1) ON CONFLICT DO NOTHING",
-                &[&event.tenant_id],
-            ).await?;
-            // One durable suspension epoch produces one revoke event. A later
-            // unsuspend removes this row and permits a new suspension epoch.
-            if suspension_inserted == 0 {
-                txn.commit().await?;
-                return Ok(());
-            }
-            txn.execute(
-                "INSERT INTO tenant_suspension_events (event_id, tenant_id, created_at_ms) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
-                &[&event.event_id, &event.tenant_id, &(event.created_at_ms as i64)],
-            ).await?;
-            txn.commit().await?;
-            Ok(())
-        })
+    fn record_tenant_suspension(&self, event: crate::TenantSuspensionEvent) -> anyhow::Result<()> {
+        self.record_tenant_suspension_pg(event)
     }
 
     fn pending_tenant_suspension_events(
         &self,
         limit: usize,
     ) -> anyhow::Result<Vec<crate::TenantSuspensionEvent>> {
-        self.block_on(async {
-            let client = self.pool.get().await?;
-            let rows = client.query(
-                "SELECT event_id, tenant_id, created_at_ms, attempts FROM tenant_suspension_events WHERE delivered_at_ms IS NULL ORDER BY created_at_ms LIMIT $1",
-                &[&(limit.min(1000) as i64)],
-            ).await?;
-            rows.into_iter().map(|row| Ok(crate::TenantSuspensionEvent {
-                event_id: row.get(0), tenant_id: row.get(1), created_at_ms: row.get::<_, i64>(2) as u64, attempts: row.get::<_, i32>(3).max(0) as u32,
-            })).collect()
-        })
+        self.pending_tenant_suspension_events_pg(limit)
     }
 
     fn mark_tenant_suspension_event_delivered(&self, event_id: &str) -> anyhow::Result<()> {
-        self.block_on(async {
-            let client = self.pool.get().await?;
-            client.execute("UPDATE tenant_suspension_events SET delivered_at_ms = (extract(epoch from clock_timestamp()) * 1000)::bigint WHERE event_id = $1 AND delivered_at_ms IS NULL", &[&event_id]).await?;
-            Ok(())
-        })
+        self.mark_tenant_suspension_event_delivered_pg(event_id)
     }
 
     fn mark_tenant_suspension_event_attempt(&self, event_id: &str) -> anyhow::Result<()> {
-        self.block_on(async {
-            let client = self.pool.get().await?;
-            client.execute("UPDATE tenant_suspension_events SET attempts = attempts + 1 WHERE event_id = $1 AND delivered_at_ms IS NULL", &[&event_id]).await?;
-            Ok(())
-        })
+        self.mark_tenant_suspension_event_attempt_pg(event_id)
     }
 
     fn is_tenant_suspended_durable(&self, tenant: &str) -> anyhow::Result<bool> {
