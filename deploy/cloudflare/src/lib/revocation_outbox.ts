@@ -87,6 +87,19 @@ export async function revokeCompletedJob(env: RevocationEnv, authority: Credenti
   return revoked;
 }
 
+/** Revoke one issued credential after an individual attempt fails. This path
+ * deliberately does not close the job: a later attempt may mint another PAT.
+ */
+export async function revokeIssuedCredential(env: RevocationEnv, authority: CredentialAuthority, identity: CredentialIdentity): Promise<boolean> {
+  if (!env.CORELINK_RUNNER_MINT_AUTH_KEY) return false;
+  const pending = await pendingAll(authority, { kind: "job", jobId: identity.jobId });
+  const exact = pending.find(candidate => candidate.tenant === identity.tenant && candidate.patId === identity.patId);
+  // Confirmed terminal records are retained by the authority but omitted from
+  // pending pages, making an already-completed exact cleanup idempotent.
+  if (!exact) return true;
+  return revokeOne(env, authority, exact);
+}
+
 export async function retryFailedRevocations(env: RevocationEnv, authority: CredentialAuthority): Promise<number> {
   if (!env.CORELINK_RUNNER_MINT_AUTH_KEY) return 0;
   let succeeded = 0;
