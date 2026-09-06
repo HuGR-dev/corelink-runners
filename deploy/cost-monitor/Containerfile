@@ -1,4 +1,5 @@
-FROM public.ecr.aws/lambda/nodejs:22
+# Official Lambda Node 22 linux/amd64 manifest, resolved 2026-09-06.
+FROM --platform=linux/amd64 public.ecr.aws/lambda/nodejs:22@sha256:09d056c2fced577c23464cc03006611dbac0995f4517d74c459cee654162c33b
 
 RUN microdnf install -y openssl && microdnf clean all
 
