@@ -1,4 +1,5 @@
 use std::env;
+use std::sync::{Arc, Barrier};
 
 use super::{PgLedger, PgTlsMode};
 use crate::LeaseLedger;
@@ -82,6 +83,7 @@ fn real_pg_lifecycle_generation_is_exact_across_same_clock_resume() -> anyhow::R
 fn real_pg_legacy_event_is_generation_zero_and_missing_pointer_repairs_current(
 ) -> anyhow::Result<()> {
     let Some(url) = env::var("TEST_DATABASE_URL").ok() else {
+        eprintln!("lifecycle pg tests: TEST_DATABASE_URL unset — skipping");
         return Ok(());
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -106,6 +108,7 @@ fn real_pg_legacy_event_is_generation_zero_and_missing_pointer_repairs_current(
 #[test]
 fn real_pg_generation_overflow_refuses_resume_and_keeps_suspended() -> anyhow::Result<()> {
     let Some(url) = env::var("TEST_DATABASE_URL").ok() else {
+        eprintln!("lifecycle pg tests: TEST_DATABASE_URL unset — skipping");
         return Ok(());
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -131,6 +134,7 @@ fn real_pg_generation_overflow_refuses_resume_and_keeps_suspended() -> anyhow::R
 fn real_pg_direct_legacy_suspension_resumes_at_generation_one_and_unknown_event_refuses(
 ) -> anyhow::Result<()> {
     let Some(url) = env::var("TEST_DATABASE_URL").ok() else {
+        eprintln!("lifecycle pg tests: TEST_DATABASE_URL unset — skipping");
         return Ok(());
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -159,6 +163,7 @@ fn real_pg_direct_legacy_suspension_resumes_at_generation_one_and_unknown_event_
 #[test]
 fn real_pg_fresh_persisted_suspension_reports_legacy_zero_before_resume() -> anyhow::Result<()> {
     let Some(url) = env::var("TEST_DATABASE_URL").ok() else {
+        eprintln!("lifecycle pg tests: TEST_DATABASE_URL unset — skipping");
         return Ok(());
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -187,6 +192,7 @@ fn real_pg_fresh_persisted_suspension_reports_legacy_zero_before_resume() -> any
 #[test]
 fn real_pg_two_connections_resume_once_under_same_tenant_lock() -> anyhow::Result<()> {
     let Some(url) = env::var("TEST_DATABASE_URL").ok() else {
+        eprintln!("lifecycle pg tests: TEST_DATABASE_URL unset — skipping");
         return Ok(());
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -201,9 +207,18 @@ fn real_pg_two_connections_resume_once_under_same_tenant_lock() -> anyhow::Resul
         let b = second.clone();
         let tenant_a = tenant.clone();
         let tenant_b = tenant.clone();
+        let barrier = Arc::new(Barrier::new(2));
+        let barrier_a = Arc::clone(&barrier);
+        let barrier_b = Arc::clone(&barrier);
         let (left, right) = tokio::join!(
-            tokio::task::spawn_blocking(move || a.set_tenant_suspended(&tenant_a, false)),
-            tokio::task::spawn_blocking(move || b.set_tenant_suspended(&tenant_b, false)),
+            tokio::task::spawn_blocking(move || {
+                barrier_a.wait();
+                a.set_tenant_suspended(&tenant_a, false)
+            }),
+            tokio::task::spawn_blocking(move || {
+                barrier_b.wait();
+                b.set_tenant_suspended(&tenant_b, false)
+            }),
         );
         left??;
         right??;
@@ -219,6 +234,7 @@ fn real_pg_two_connections_resume_once_under_same_tenant_lock() -> anyhow::Resul
 fn real_pg_negative_generation_refuses_read_and_resume_without_deleting_suspension(
 ) -> anyhow::Result<()> {
     let Some(url) = env::var("TEST_DATABASE_URL").ok() else {
+        eprintln!("lifecycle pg tests: TEST_DATABASE_URL unset — skipping");
         return Ok(());
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
