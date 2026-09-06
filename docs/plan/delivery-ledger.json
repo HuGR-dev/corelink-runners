@@ -446,7 +446,7 @@
         "O-MONITORHOST",
         "T7-W4b"
       ],
-      "next_action": "Compose independently approved types, lifecycle, scheduler, and terminal-ingest packets. Keep UNKNOWN fail-closed and complete the remaining qualification before any work-package acceptance or deployment.",
+      "next_action": "Compose independently approved scheduler and terminal-ingest packets. Keep UNKNOWN fail-closed and complete the remaining qualification before any work-package acceptance or deployment.",
       "blockers": [
         "Trusted time/TSA qualification, WORM and three-account independence qualification, crash/rotation/isolation tests, and seven real observation days remain required before acceptance."
       ],
@@ -455,16 +455,24 @@
         "fc1ec79",
         "59b1a15",
         "bba2815",
-        "f0b5987"
+        "f0b5987",
+        "c04f550",
+        "1d06a04",
+        "20eb33f",
+        "528f032",
+        "252c30c"
       ],
       "review": {
         "status": "partial",
-        "commit": "f0b5987",
+        "commit": "252c30c",
         "evidence": [
           "Outbox cold composition review: 8 focused tests and tsc --noEmit at a0f13d37.",
           "Witness independent review: 6 focused tests and tsc --noEmit; canonical source 5f64ca68 through baf5b9ca and integration fc1ec79 through 59b1a15.",
           "Terminal paired independent review: monitor helper plus ACK coverage, Canary 13 files/117 tests, real RSA cross-runtime bridge, and both typechecks; canonical source eb2fed47 through d0ef2e98 and integration bba2815 through f0b5987.",
-          "Composed monitor foundation: 11 focused suites, 67 tests, and npm run typecheck at f0b5987."
+          "Types independent review: 8 focused tests and tsc --noEmit; canonical source 230f7e7 through 229de986 and integration c04f550 through 1d06a04.",
+          "Lifecycle cold review: 14 focused tests and tsc --noEmit; canonical source 2404d93 plus 8873950 and integration 20eb33f through 528f032.",
+          "Durable time floor independent review: 4 focused tests and tsc --noEmit; source 6feaeec and integration 252c30c, where 4 focused tests and npm run typecheck passed.",
+          "Composed monitor source evidence: all 14 focused suites/89 tests completed exit 0 in bounded runs at 528f032; a prior 120-second aggregate process was not counted as an aggregate pass because of host Vitest contention."
         ]
       },
       "evidence": [

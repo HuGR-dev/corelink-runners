@@ -261,15 +261,28 @@ the latter adds monitor/Canary RSA bridge coverage for both public-outbox kinds,
 invalid configuration, and old-terminal drain. It makes no trust-registry
 runtime claim.
 
-The composed monitor foundation passed eleven focused suites, 67 tests total,
-and `npm run typecheck` at `f0b5987`; the complete Canary suite passed 13
-files, 117 tests, and `npm run typecheck`. This accepts only the outbox,
-witness, and terminal source packets. T6-W15 remains prepared and partial:
-types, lifecycle, scheduler, and terminal-ingest packets remain out of the
-integration tree pending approval. The frozen runtime contract is recorded at
+The types stack `230f7e7` through `229de986` and lifecycle commits
+`2404d93` and `8873950` are accepted after independent review (8 and 14
+focused tests respectively, each with `tsc --noEmit`). Their integration is
+`c04f550` through `1d06a04` and `20eb33f` through `528f032`. The durable time
+floor source `6feaeecb3f907ac38992d82fd8c2ad880c9cca13` is independently
+accepted; its integration `252c30c` passed its 4 focused tests and
+`npm run typecheck`.
+
+For the resulting fourteen monitor suites (89 tests), every suite has a
+completed exit-0 run at `528f032`: trusted-time and evidence-log completed
+before an aggregate 120-second process limit; witness, the ten non-heavy
+suites, and terminal then completed in bounded isolated runs. The aggregate
+timeout is not recorded as an aggregate pass. The complete Canary suite passed
+13 files, 117 tests, and `npm run typecheck` at `f0b5987`.
+
+This is source composition only. T6-W15 remains prepared and partial for
+delivery: scheduler and terminal-ingest packets remain out of the integration
+tree pending approval, and all qualification gates remain open. The frozen
+runtime contract is recorded at
 `docs/plan/execution/2026-09-06-monitor-runtime-contract.md`. No work-package
-completion, deployment, or production qualification is implied; the
-qualification gates recorded above remain open.
+completion, deployment, production qualification, or change to the recorded
+16/70 delivered count is implied.
 
 ## Earlier integrated packets
 
