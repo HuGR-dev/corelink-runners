@@ -41,7 +41,9 @@ execution backend (default-off).
 | Variable | Default | Description |
 |---|---|---|
 | `CLOUDFLARE_SPAWN_WORKER_URL` | — | The spawn-Worker base URL. When this **and** the token are present, the box engine is the all-Cloudflare spawn-Worker (co-located with R2). Absent ⇒ Northflank (if its vars are set) ⇒ else `NoBox` (lease lifecycle works, exec 503). |
-| `CLOUDFLARE_SPAWN_AUTH_TOKEN` | — | Bearer token the fabric presents to the spawn-Worker (must match the Worker's `CLOUDFLARE_SPAWN_AUTH_TOKEN`). |
+| `CLOUDFLARE_SPAWN_AUTH_TOKEN` | — | Bearer token for `POST /v1/spawn` (must match the Worker's spawn token). |
+| `CLOUDFLARE_EXEC_AUTH_TOKEN` | — | Bearer token for `POST /v1/exec`; required with the other two tokens for a valid Cloudflare engine configuration. |
+| `CLOUDFLARE_LIFECYCLE_AUTH_TOKEN` | — | Bearer token for status, teardown, egress cutoff, and suspension control; required with the other two tokens. |
 
 ### Billing usage-push (corelink-billing ingest — off the admission path)
 
@@ -138,7 +140,9 @@ CORELINK_INTROSPECT_URL=https://corelink-api.humangr.com/internal/v1/auth/intros
 FABRIC_INTROSPECT_AUTH_KEY=<dedicated introspect key>          # secret
 FABRIC_SIGNING_KEY=<base64 32-byte ed25519 seed>              # secret — prod attestation key
 CLOUDFLARE_SPAWN_WORKER_URL=<spawn-worker base url>
-CLOUDFLARE_SPAWN_AUTH_TOKEN=<matches the Worker secret>       # secret
+CLOUDFLARE_SPAWN_AUTH_TOKEN=<matches the Worker spawn secret>  # secret
+CLOUDFLARE_EXEC_AUTH_TOKEN=<dedicated Worker exec secret>     # secret
+CLOUDFLARE_LIFECYCLE_AUTH_TOKEN=<dedicated Worker lifecycle secret> # secret
 BILLING_INGEST_URL=https://corelink-api.humangr.com/internal/v1/billing/usage
 BILLING_INGEST_AUTH_KEY=<dedicated ingest key>               # secret
 BILLING_REGION=<3-char colo, e.g. iad>

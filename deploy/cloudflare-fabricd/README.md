@@ -30,6 +30,9 @@ npm install
 npx wrangler secret put FABRIC_SIGNING_KEY        < ~/.hugit/secrets/corelink/fabric-signing-key-prod
 npx wrangler secret put FABRIC_INTROSPECT_AUTH_KEY < ~/.hugit/secrets/corelink/fabric-introspect-key
 npx wrangler secret put BILLING_INGEST_AUTH_KEY    < ~/.hugit/secrets/corelink/billing-ingest-key
+npx wrangler secret put CLOUDFLARE_SPAWN_AUTH_TOKEN < ~/.hugit/secrets/corelink/cf-spawn-token
+npx wrangler secret put CLOUDFLARE_EXEC_AUTH_TOKEN < ~/.hugit/secrets/corelink/cf-exec-token
+npx wrangler secret put CLOUDFLARE_LIFECYCLE_AUTH_TOKEN < ~/.hugit/secrets/corelink/cf-lifecycle-token
 
 # 2. Deploy (builds + pushes the image, creates the Worker + container + DO + cron).
 npm run deploy
@@ -163,7 +166,9 @@ the spawn-Worker's only container is the GitHub-Actions runner image). So:
 ```bash
 # wrangler.jsonc vars:  CLOUDFLARE_SPAWN_WORKER_URL, NORTHFLANK_PROJECT_ID
 # (+ NORTHFLANK_RUNNER_* tuning as needed; see docs/deploy/fabric-server.md)
-npx wrangler secret put CLOUDFLARE_SPAWN_AUTH_TOKEN   < ~/.hugit/secrets/corelink/cf-spawn-token
+npx wrangler secret put CLOUDFLARE_SPAWN_AUTH_TOKEN       < ~/.hugit/secrets/corelink/cf-spawn-token
+npx wrangler secret put CLOUDFLARE_EXEC_AUTH_TOKEN        < ~/.hugit/secrets/corelink/cf-exec-token
+npx wrangler secret put CLOUDFLARE_LIFECYCLE_AUTH_TOKEN   < ~/.hugit/secrets/corelink/cf-lifecycle-token
 npx wrangler secret put NORTHFLANK_API_TOKEN          < <northflank token, OOB>
 # envVars are read at container start. Applying them requires an owner-approved
 # rollout with preflight, monitoring, and rollback; never delete/restart/deploy

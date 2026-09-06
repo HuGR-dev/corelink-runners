@@ -57,6 +57,8 @@ Non-secret `vars` here (not secrets): `CLW_TENANT`, `CLW_ENDPOINT`,
 | `FABRIC_INTROSPECT_AUTH_KEY` | `x-corelink-internal-auth` for PAT introspection against CoreLink (tenant derivation on acquire). | Absent ⇒ tenant introspection fails ⇒ acquires rejected. | |
 | `BILLING_INGEST_AUTH_KEY` | `x-corelink-internal-auth` for the fabricd billing usage push. | Absent ⇒ no usage-push. | Same role as the spawn-worker's, separate value. |
 | `CLOUDFLARE_SPAWN_AUTH_TOKEN` | Outbound auth to the spawn-worker's `/v1/spawn` (box provisioning). | Absent ⇒ box backend inert. **Must match** the spawn-worker's copy. | Rotate on BOTH workers together. |
+| `CLOUDFLARE_EXEC_AUTH_TOKEN` | Outbound auth to the spawn-worker's `/v1/exec`. | Missing or partial scoped-token set ⇒ Cloudflare engine configuration is rejected before transport. | Dedicated exec-control token; never reuse spawn or lifecycle. |
+| `CLOUDFLARE_LIFECYCLE_AUTH_TOKEN` | Outbound auth to status, teardown, egress-cutoff, and tenant-suspension control routes. | Missing or partial scoped-token set ⇒ Cloudflare engine configuration is rejected before transport. | Dedicated lifecycle-control token; never reuse spawn or exec. |
 | `CORELINK_RUNNER_MINT_AUTH_KEY` | `x-corelink-internal-auth` for the moat per-job CAS PAT mint (env-0 C2c). | Part of the mint-arm trio; boot guard `validate_mint_arm` fails closed if the arm is partial. | Armed together with `FABRIC_CRED_TICKET_SECRET` + the mint URL var + `FABRIC_PUBLIC_BASE_URL`. |
 | `FABRIC_CRED_TICKET_SECRET` | HMAC for the env-0 cred-ticket (the single-use `CLW_CRED_TICKET` injected instead of the raw PAT). | Part of the mint-arm trio (see above). | Keeps the CAS PAT out of the untrusted container env. |
 | `DATABASE_URL` | Postgres connection for the durable `PgLedger` (persists lease state; arms the vCPU-h ceiling). | Absent ⇒ in-memory ledger (lease state resets on restart), ceiling cannot arm. | Required before raising `FABRIC_NUM_SHARDS`/`max_instances` > 1. Pair with `FABRIC_PG_TLS=require`. |
@@ -135,9 +137,11 @@ Rotate on a **compromise**, on **staff departure**, or on a **scheduled cadence*
    npx wrangler secret put <NAME> --name <corelink-spawn-worker|corelink-fabricd>
    # (paste the value at the prompt, or pipe from a vault: `vault read ... | wrangler secret put ...`)
    ```
-3. **Shared secrets must move in lockstep.** `CLOUDFLARE_SPAWN_AUTH_TOKEN` and
-   `BILLING_INGEST_AUTH_KEY` exist on both surfaces (or must match a CoreLink
-   counterpart). Rotate BOTH before the old value is retired, or spawns/pushes 401.
+3. **Only paired credentials move in lockstep.** `CLOUDFLARE_SPAWN_AUTH_TOKEN`
+   exists on both surfaces and must match the Worker copy; rotate both before
+   retiring the old value. `BILLING_INGEST_AUTH_KEY` must match its CoreLink
+   counterpart. The exec and lifecycle tokens are dedicated fabricd credentials
+   and rotate independently; all three must be present and distinct in fabricd.
 4. **Roll the container** (fabricd only): the singleton reads env at boot, so
    after `wrangler secret put` you MUST trigger a rollout (new image digest +
    `wrangler deploy`) — see the playbook §2b. The spawn-worker picks up secrets

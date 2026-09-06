@@ -27,7 +27,8 @@
   "observability": { "enabled": true },
 
   // Non-secret config. Secrets (FABRIC_SIGNING_KEY, FABRIC_INTROSPECT_AUTH_KEY,
-  // BILLING_INGEST_AUTH_KEY, CLOUDFLARE_SPAWN_AUTH_TOKEN) are set via
+  // BILLING_INGEST_AUTH_KEY, CLOUDFLARE_SPAWN_AUTH_TOKEN,
+  // CLOUDFLARE_EXEC_AUTH_TOKEN, CLOUDFLARE_LIFECYCLE_AUTH_TOKEN) are set via
   // `wrangler secret put` — NEVER in this file. See README.md.
   "vars": {
     // ── SHARD COUNT (multi-instance fabricd, option 3) ────────────────────────

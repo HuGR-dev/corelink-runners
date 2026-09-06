@@ -36,6 +36,11 @@ export interface Env {
   FABRIC_INTROSPECT_AUTH_KEY: string;
   BILLING_INGEST_AUTH_KEY?: string;
   CLOUDFLARE_SPAWN_AUTH_TOKEN?: string;
+  // Scoped control credentials for the fabric's Cloudflare engine. Each is
+  // forwarded independently into the container; the Rust engine refuses a
+  // partial or shared-token configuration before it can send requests.
+  CLOUDFLARE_EXEC_AUTH_TOKEN?: string;
+  CLOUDFLARE_LIFECYCLE_AUTH_TOKEN?: string;
   // A GitHub PAT with repo Administration:write — lets fabricd's PAT broker mint
   // JIT runner configs WITHOUT a GitHub App (the mechanism the autoscaler uses).
   // Absent ⇒ fabricd falls back to the FABRIC_GITHUB_APP_* App path. When set it
@@ -225,6 +230,12 @@ export class FabricdContainer extends Container<Env> {
         : {}),
       ...(env.CLOUDFLARE_SPAWN_AUTH_TOKEN
         ? { CLOUDFLARE_SPAWN_AUTH_TOKEN: env.CLOUDFLARE_SPAWN_AUTH_TOKEN }
+        : {}),
+      ...(env.CLOUDFLARE_EXEC_AUTH_TOKEN
+        ? { CLOUDFLARE_EXEC_AUTH_TOKEN: env.CLOUDFLARE_EXEC_AUTH_TOKEN }
+        : {}),
+      ...(env.CLOUDFLARE_LIFECYCLE_AUTH_TOKEN
+        ? { CLOUDFLARE_LIFECYCLE_AUTH_TOKEN: env.CLOUDFLARE_LIFECYCLE_AUTH_TOKEN }
         : {}),
       ...(env.FABRIC_GITHUB_MINT_TOKEN
         ? { FABRIC_GITHUB_MINT_TOKEN: env.FABRIC_GITHUB_MINT_TOKEN }
