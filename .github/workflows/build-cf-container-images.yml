@@ -47,9 +47,24 @@
 name: build-cf-container-images
 
 on:
-  # MANUAL-ONLY: a heavy image build should not fire on every merge. Dispatch it
-  # explicitly when the runner/check-host Dockerfile (or a baked pin) changes:
-  #   gh workflow run build-cf-container-images.yml
+  # PR-limited: image changes must be built before merge so a broken RUN or
+  # missing COPY cannot hide behind a green PR. This deliberately does not
+  # build on every merge; unrelated code changes stay out of this heavy lane.
+  pull_request:
+    paths:
+      - "deploy/runner/**"
+      - "deploy/check-host/**"
+      - "deploy/cloudflare/Dockerfile.runner-devenv"
+      - "deploy/cloudflare/entrypoint.sh"
+      - "deploy/cloudflare/supervisord.conf"
+      - "scripts/ci/runner-image-build-preflight.sh"
+      - "scripts/ci/runner-image-build-cleanup.sh"
+      - "scripts/verify_image_build_contract.py"
+      - "tests/test_runner_image_build_preflight.sh"
+      - ".github/actionlint.yaml"
+      - ".github/workflows/build-cf-container-images.yml"
+  # Keep an explicit operator path for a base-image/toolchain refresh that
+  # changes no tracked Dockerfile.
   workflow_dispatch: {}
 
 permissions:
@@ -66,6 +81,7 @@ jobs:
     timeout-minutes: 120
     steps:
       - name: Guard — require the CLOUDFLARE_API_TOKEN secret
+        if: github.event_name != 'pull_request'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
@@ -80,6 +96,12 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Verify image build contract and mutation guards
+        run: python3 scripts/verify_image_build_contract.py --self-test
+
+      - name: Test image-build disk preflight and mutation guard
+        run: bash tests/test_runner_image_build_preflight.sh
 
       - name: Guard — all configured container image pins are immutable
         # A2.1 / INV-2: validate every image entry across every Wrangler
@@ -133,6 +155,12 @@ jobs:
         working-directory: deploy/cloudflare
         run: npm ci
 
+      - name: Guard — bounded disk budget before image materialization
+        # B-138: buildkit can finish exporting while containerd then fails to
+        # unpack the tarball. Refuse a known-low budget after npm setup and
+        # before paying the image materialization cost.
+        run: bash scripts/ci/runner-image-build-preflight.sh
+
       # RunnerContainer — the image customers' `runs-on: corelink` jobs boot on.
       - name: Build + push RunnerContainer image
         id: runner
@@ -145,11 +173,16 @@ jobs:
           # Build with plain `docker build` (shim -> nerdctl/buildkit); context =
           # deploy/runner (Dockerfile + action-archive-pins.txt live there).
           docker build -t "${IMAGE}:${TAG}" deploy/runner
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            echo "PR validation: RunnerContainer built locally; push is dispatch-only"
+            exit 0
+          fi
           # Push via wrangler (mints the CF registry cred; uses the docker binary).
           ( cd deploy/cloudflare && npx wrangler containers push "${IMAGE}:${TAG}" 2>&1 | tee /tmp/runner-push.out )
           REF="$(scripts/ci/resolve-pushed-ref.sh "${IMAGE}" "${TAG}" /tmp/runner-push.out)"
           echo "ref=${REF}" >> "${GITHUB_OUTPUT}"
           echo "Runner image pushed: ${REF}"
+          bash scripts/ci/runner-image-build-cleanup.sh "${IMAGE}:${TAG}"
 
       # CheckHostContainer — COPYs a prebuilt static musl exec-server from its
       # context. Build it with the image's baked toolchain (musl target baked on
@@ -175,10 +208,15 @@ jobs:
           IMAGE="corelink-spawn-worker-checkhostcontainer"
           TAG="${GITHUB_SHA}"
           docker build -t "${IMAGE}:${TAG}" deploy/check-host
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            echo "PR validation: CheckHostContainer built locally; push is dispatch-only"
+            exit 0
+          fi
           ( cd deploy/cloudflare && npx wrangler containers push "${IMAGE}:${TAG}" 2>&1 | tee /tmp/checkhost-push.out )
           REF="$(scripts/ci/resolve-pushed-ref.sh "${IMAGE}" "${TAG}" /tmp/checkhost-push.out)"
           echo "ref=${REF}" >> "${GITHUB_OUTPUT}"
           echo "Check-host image pushed: ${REF}"
+          bash scripts/ci/runner-image-build-cleanup.sh "${IMAGE}:${TAG}"
 
       # RunnerDevEnvDO — the persistent customer development environment.
       # Its Dockerfile copies the Rust workspace plus two runtime files. The
@@ -242,13 +280,23 @@ jobs:
             --file "${DOCKERFILE}" \
             --tag "${IMAGE}:${TAG}" \
             "${CONTEXT}"
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            echo "PR validation: RunnerDevEnvDO built locally; push is dispatch-only"
+            exit 0
+          fi
           ( cd deploy/cloudflare && npx wrangler containers push "${IMAGE}:${TAG}" 2>&1 | tee /tmp/devenv-push.out )
           REF="$(scripts/ci/resolve-pushed-ref.sh "${IMAGE}" "${TAG}" /tmp/devenv-push.out)"
           echo "ref=${REF}" >> "${GITHUB_OUTPUT}"
           echo "RunnerDevEnvDO image pushed: ${REF}"
+          bash scripts/ci/runner-image-build-cleanup.sh "${IMAGE}:${TAG}"
 
       - name: Summary — pushed image refs to pin in wrangler.jsonc
         run: |
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            echo "### CoreLink CF Container image PR validation" >> "$GITHUB_STEP_SUMMARY"
+            echo "All image contexts built locally; no registry push occurs from pull_request." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           {
             echo "### CoreLink CF Container images pushed (self-hosted, daemonless)"
             echo ""
