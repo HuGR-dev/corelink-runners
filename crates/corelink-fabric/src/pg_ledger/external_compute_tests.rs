@@ -197,25 +197,30 @@ fn real_pg_same_reservation_uuid_is_cross_tenant_collision_safe() -> anyhow::Res
         let b = reservation(&tenant_b, &id, period, expiry);
         let a_for_thread = a.clone();
         let b_for_thread = b.clone();
-        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let barrier = std::sync::Barrier::new(2);
         let (a_result, b_result) = std::thread::scope(|scope| {
-            let gate_a = barrier.clone();
-            let gate_b = barrier.clone();
-            let left = scope.spawn(|| { gate_a.wait(); first.reserve_external_compute(a_for_thread) });
-            let right = scope.spawn(|| { gate_b.wait(); second.reserve_external_compute(b_for_thread) });
+            let left = scope.spawn(|| { barrier.wait(); first.reserve_external_compute(a_for_thread) });
+            let right = scope.spawn(|| { barrier.wait(); second.reserve_external_compute(b_for_thread) });
             (left.join().unwrap(), right.join().unwrap())
         });
         let a_won = matches!(a_result, Ok(ExternalComputeAdmission::Admitted(_)));
         let b_won = matches!(b_result, Ok(ExternalComputeAdmission::Admitted(_)));
         assert_eq!(a_won as u8 + b_won as u8, 1);
-        let loser = if a_won { b_result } else { a_result };
-        assert!(loser.unwrap_err().downcast_ref::<crate::compute_budget::ExternalComputeError>() == Some(&crate::compute_budget::ExternalComputeError::Conflict));
+        let (winner, loser_request, loser_result) = if a_won {
+            (a, b, b_result)
+        } else {
+            (b, a, a_result)
+        };
+        assert!(loser_result.unwrap_err().downcast_ref::<crate::compute_budget::ExternalComputeError>() == Some(&crate::compute_budget::ExternalComputeError::Conflict));
         let count_a: i64 = first.pool.get().await?.query_one("SELECT count(*) FROM external_compute_reservations WHERE tenant=$1", &[&tenant_a]).await?.get(0);
         let count_b: i64 = first.pool.get().await?.query_one("SELECT count(*) FROM external_compute_reservations WHERE tenant=$1", &[&tenant_b]).await?.get(0);
-        assert_eq!(count_a + count_b, 1);
+        assert_eq!(if winner.tenant_id == tenant_a { count_a } else { count_b }, 1);
+        assert_eq!(if winner.tenant_id == tenant_a { count_b } else { count_a }, 0);
+        assert!(first.activate_external_compute(&loser_request).is_err());
+        assert!(first.settle_external_compute(&loser_request, ExternalComputeSettlement { actual_vcpu_ms: 1, terminal_evidence_digest: "c".repeat(64) }).is_err());
 
-        let winner = if a_won { a } else { b };
-        let mut divergent = if a_won { b } else { a };
+        assert_eq!(first.activate_external_compute(&winner)?.state, ExternalComputeState::Active);
+        let mut divergent = loser_request.clone();
         divergent.tenant_id = winner.tenant_id.clone();
         divergent.grant_digest = "b".repeat(64);
         let error = first.reserve_external_compute(divergent.clone()).unwrap_err();
