@@ -15,7 +15,7 @@ import {
   validateStateTransition,
 } from "../types/devenv.js";
 import { pushUsageEvent } from "../lib.js";
-import { buildDevenvUsageEvent } from "../lib/devenv_usage.js";
+import { buildDevenvUsageEvent, type DevenvUsageInput } from "../lib/devenv_usage.js";
 import {
   DEVENV_USAGE_PENDING_KEY,
   DEVENV_USAGE_SETTLED_KEY,
@@ -144,12 +144,9 @@ export class RunnerDevEnvDO extends Container<any> {
       if (this.devenvState.status !== "stopped" && this.devenvState.status !== "errored") {
         throw new Error("DEVENV_START_REQUIRES_TERMINAL_STATE");
       }
-      await this.flushPendingUsage();
-      if (this.devenvState.status === "errored" && this.env.BILLING_INGEST_URL) {
-        const settledSession = await this.ctx.storage.get(DEVENV_USAGE_SETTLED_KEY) as string | undefined;
-        if (settledSession !== (this.devenvState as any).sessionUuid) {
-          throw new Error("DEVENV_BILLING_PENDING");
-        }
+      const settlement = await this.recordUsage();
+      if (settlement.outcome === "pending" || settlement.outcome === "invalid") {
+        throw new Error("DEVENV_BILLING_PENDING");
       }
       
       const sessionUuid = crypto.randomUUID();
@@ -195,13 +192,16 @@ export class RunnerDevEnvDO extends Container<any> {
 
   async requestStop(): Promise<{ readonly ok: true }> {
     return await this.ctx.blockConcurrencyWhile(async () => {
-      if (this.devenvState.status === "stopped" || this.devenvState.status === "stopping") {
+      if (this.devenvState.status === "stopped" || this.devenvState.status === "errored") {
+        // A terminal container stays stoppable even while billing is unavailable.
+        // Preserve its identity; startDevenv requires successful settlement.
+        if (this.devenvState.status === "errored") await this.destroy();
+        await this.recordUsage();
         return { ok: true };
       }
-      
-      if (this.devenvState.status === "errored") {
-        await this.destroy();
-        await this.transitionState({ status: "stopped", createdAt: this.devenvState.createdAt });
+      if (this.devenvState.status === "stopping") {
+        // A lost provider callback must not make public stop permanently inert.
+        await this.stop();
         return { ok: true };
       }
       
@@ -284,35 +284,57 @@ export class RunnerDevEnvDO extends Container<any> {
     this.noteActivity();
   }
 
+  /** Freeze callback time before any storage or network await. */
+  private terminalUsageSnapshot(): DevenvUsageInput | undefined {
+    const state = this.devenvState;
+    if (state.status === "stopped" || state.status === "errored") return state.terminalUsage;
+    return {
+      tenantId: state.tenantId,
+      sessionId: state.sessionUuid,
+      tier: state.tier,
+      startedAtMs: state.startedAt,
+      completedAtMs: Date.now(),
+      region: this.env.BILLING_REGION,
+    };
+  }
+
   override async onStop(): Promise<void> {
-    const settlement = await this.recordUsage();
-    if (settlement.outcome === "pending") return;
-    if (this.devenvState.status !== "stopped" && this.devenvState.status !== "errored") {
-      await this.transitionState({
-        status: "stopped",
-        createdAt: this.devenvState.createdAt,
-        generationId: (this.devenvState as any).generationId,
-      });
+    const terminalUsage = this.terminalUsageSnapshot();
+    if (!terminalUsage && this.devenvState.status === "errored") {
+      // An old errored record still owns its session even without a timestamp.
+      await this.recordUsage();
+      return;
     }
+    // Retain the snapshot in memory even when the first durable write fails.
+    // recordUsage persists this state before constructing/delivering an event.
+    this.devenvState = {
+      status: "stopped",
+      createdAt: this.devenvState.createdAt,
+      generationId: this.devenvState.generationId,
+      terminalUsage,
+    };
+    await this.recordUsage();
   }
 
   override async onError(error: unknown): Promise<void> {
-    const errMsg = error instanceof Error ? error.message : String(error);
-    await this.recordUsage();
-    if (this.devenvState.status !== "stopped" && this.devenvState.status !== "errored") {
-      await this.transitionState({
+    const terminalUsage = this.terminalUsageSnapshot();
+    const state = this.devenvState;
+    if (state.status !== "stopped" && state.status !== "errored") {
+      this.devenvState = {
         status: "errored",
-        createdAt: this.devenvState.createdAt,
-        startedAt: (this.devenvState as any).startedAt,
-        sessionUuid: (this.devenvState as any).sessionUuid,
-        tenantId: (this.devenvState as any).tenantId,
-        billingSeq: (this.devenvState as any).billingSeq ?? 0,
-        lastError: errMsg.slice(0, 256),
-        lastWorkspaceName: (this.devenvState as any).workspaceName ?? "",
-        generationId: (this.devenvState as any).generationId ?? 1,
-        tier: (this.devenvState as any).tier,
-      });
+        createdAt: state.createdAt,
+        startedAt: state.startedAt,
+        sessionUuid: state.sessionUuid,
+        tenantId: state.tenantId,
+        billingSeq: state.billingSeq,
+        lastError: (error instanceof Error ? error.message : String(error)).slice(0, 256),
+        lastWorkspaceName: state.workspaceName,
+        generationId: state.generationId,
+        tier: state.tier,
+        terminalUsage,
+      };
     }
+    await this.recordUsage();
   }
 
   // ── In-Container Exec Client ─────────────────────────────────────
@@ -367,48 +389,48 @@ export class RunnerDevEnvDO extends Container<any> {
   }
 
   private async settleUsage(): Promise<DevenvUsageOutcome> {
+    // Persist the terminal timestamp even if writing the pending event fails.
+    // A restarted DO can then retry without charging time after the callback.
+    await this.persistState();
     const pending = await this.ctx.storage.get(DEVENV_USAGE_PENDING_KEY) as DevenvUsagePending | undefined;
     if (pending) return this.deliverPendingUsage(pending);
-    const state = this.devenvState as any;
-    if (state.status === "stopped") {
-      return { outcome: "no_session" };
-    }
-    if (state.startedAt === undefined || state.sessionUuid === undefined || state.tenantId === undefined || state.tier === undefined) {
-      console.error(JSON.stringify({ event: "devenv_billing_invalid", code: "missing_session_identity" }));
-      return { outcome: "invalid", code: "missing_session_identity" };
+    const state = this.devenvState;
+    if (state.status !== "stopped" && state.status !== "errored") return { outcome: "pending" };
+    const snapshot = state.terminalUsage;
+    if (!snapshot) {
+      if (state.status === "errored") {
+        const settledSession = await this.ctx.storage.get(DEVENV_USAGE_SETTLED_KEY) as string | undefined;
+        if (settledSession === state.sessionUuid) return { outcome: "no_session" };
+      }
+      // Legacy errored sessions have no trustworthy completion time. Keep them
+      // blocked instead of inventing a later timestamp or losing the identity.
+      return { outcome: state.status === "errored" ? "pending" : "no_session" };
     }
     const settledSession = await this.ctx.storage.get(DEVENV_USAGE_SETTLED_KEY) as string | undefined;
-    if (settledSession === state.sessionUuid) return { outcome: "no_session" };
+    if (settledSession === snapshot.sessionId) return { outcome: "no_session" };
     if (!this.env.BILLING_INGEST_URL) {
+      await this.ctx.storage.put(DEVENV_USAGE_SETTLED_KEY, snapshot.sessionId);
       console.info(JSON.stringify({ event: "devenv_billing_disabled", reason: "BILLING_INGEST_URL_unset" }));
       return { outcome: "disabled" };
     }
-    const result = await buildDevenvUsageEvent({
-      tenantId: state.tenantId,
-      sessionId: state.sessionUuid,
-      tier: state.tier,
-      startedAtMs: state.startedAt,
-      completedAtMs: Date.now(),
-      region: this.env.BILLING_REGION,
-    });
+    const result = await buildDevenvUsageEvent(snapshot);
     if (!result.ok) {
       console.error(JSON.stringify({ event: "devenv_billing_invalid", code: result.error.code, field: result.error.field }));
       return { outcome: "invalid", code: result.error.code };
     }
-    const frozen = freezeDevenvUsage(result.event, state.sessionUuid, Date.now());
+    const frozen = freezeDevenvUsage(result.event, snapshot.sessionId, snapshot.completedAtMs);
     await this.ctx.storage.put(DEVENV_USAGE_PENDING_KEY, frozen);
     return this.deliverPendingUsage(frozen);
   }
 
-  private async flushPendingUsage(): Promise<void> {
-    const pending = await this.ctx.storage.get(DEVENV_USAGE_PENDING_KEY) as DevenvUsagePending | undefined;
-    if (!pending) return;
-    const result = await this.deliverPendingUsage(pending);
-    if (result.outcome !== "sent") throw new Error("DEVENV_BILLING_PENDING");
-  }
-
   private async deliverPendingUsage(pending: DevenvUsagePending): Promise<DevenvUsageOutcome> {
-    if (!this.env.BILLING_INGEST_URL) return { outcome: "disabled" };
+    const settledSession = await this.ctx.storage.get(DEVENV_USAGE_SETTLED_KEY) as string | undefined;
+    if (settledSession === pending.sessionUuid) {
+      await this.ctx.storage.delete(DEVENV_USAGE_PENDING_KEY);
+      return { outcome: "sent" };
+    }
+    // Disabling delivery must not discard an event that was already queued.
+    if (!this.env.BILLING_INGEST_URL) return { outcome: "pending" };
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 5000);
     try {

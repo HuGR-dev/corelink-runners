@@ -1,5 +1,5 @@
 // deploy/cloudflare/test/devenv-do.test.ts
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   validateWorkspaceName,
   validateProfileName,
@@ -49,13 +49,18 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
 
   beforeEach(() => {
     mockStorage = new Map();
+    let gate = Promise.resolve();
     mockCtx = {
       storage: {
-        get: vi.fn(async (key: string) => mockStorage.get(key)),
-        put: vi.fn(async (key: string, val: any) => mockStorage.set(key, val)),
+        get: vi.fn(async (key: string) => structuredClone(mockStorage.get(key))),
+        put: vi.fn(async (key: string, val: any) => mockStorage.set(key, structuredClone(val))),
         delete: vi.fn(async (key: string) => { mockStorage.delete(key); }),
       },
-      blockConcurrencyWhile: vi.fn(async (fn: () => Promise<any>) => fn()),
+      blockConcurrencyWhile: vi.fn((fn: () => Promise<any>) => {
+        const result = gate.then(fn);
+        gate = result.then(() => undefined, () => undefined);
+        return result;
+      }),
       id: { toString: () => "mock-do-tenant-123" },
       acceptWebSocket: vi.fn(),
     };
@@ -68,6 +73,11 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
         })),
       },
     };
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   describe("1. Validators & Invariants", () => {
@@ -239,6 +249,7 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
       mockEnv.BILLING_REGION = "iad";
       const fetchMock = vi.fn()
         .mockRejectedValueOnce(new Error("billing unavailable"))
+        .mockRejectedValueOnce(new Error("billing still unavailable"))
         .mockResolvedValue(new Response("{}", { status: 202 }));
       vi.stubGlobal("fetch", fetchMock);
       const doInstance = new RunnerDevEnvDO(mockCtx, mockEnv);
@@ -259,11 +270,11 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
 
       const frozen = mockStorage.get("devenv:usage:pending");
       expect(frozen?.event?.idem_key).toMatch(/^[0-9a-f]{64}$/);
-      await expect(doInstance.startDevenv(payload)).rejects.toThrow("DEVENV_START_REQUIRES_TERMINAL_STATE");
-      await doInstance.onStop();
+      await expect(doInstance.startDevenv(payload)).rejects.toThrow("DEVENV_BILLING_PENDING");
+      expect(mockStorage.get("state").terminalUsage.sessionId).toBe(frozen.sessionUuid);
       await expect(doInstance.startDevenv(payload)).resolves.toMatchObject({ status: "starting" });
-      expect(fetchMock).toHaveBeenCalledTimes(2);
-      const retryBody = JSON.parse(fetchMock.mock.calls[1][1].body as string) as Array<Record<string, unknown>>;
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      const retryBody = JSON.parse(fetchMock.mock.calls[2][1].body as string) as Array<Record<string, unknown>>;
       expect(retryBody[0]).toEqual(frozen.event);
       expect(mockStorage.has("devenv:usage:pending")).toBe(false);
     });
@@ -299,12 +310,15 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
       await doInstance.onStop();
       expect(mockStorage.has("devenv:usage:settled")).toBe(true);
       expect(mockStorage.has("devenv:usage:pending")).toBe(true);
-      await doInstance.onStop();
+      const restarted = new RunnerDevEnvDO(mockCtx, mockEnv);
+      await restarted.requestStop();
       expect(mockStorage.has("devenv:usage:pending")).toBe(false);
-      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 
-    it("retains the terminal identity when the initial pending snapshot fails", async () => {
+    it("retries a failed pending write through public stop after restart without billing the next month", async () => {
+      let now = Date.parse("2026-09-30T23:59:40Z");
+      vi.spyOn(Date, "now").mockImplementation(() => now);
       mockEnv.BILLING_INGEST_URL = "https://billing.test/usage";
       mockEnv.BILLING_INGEST_AUTH_KEY = "test-key";
       mockEnv.BILLING_REGION = "iad";
@@ -332,12 +346,124 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
       });
       await doInstance.onStart();
       await doInstance.requestStop();
+      now = Date.parse("2026-09-30T23:59:50Z");
       await doInstance.onStop();
-      expect((doInstance as any).devenvState.status).toBe("stopping");
+      expect((await doInstance.getStatus()).status).toBe("stopped");
       expect(mockStorage.has("devenv:usage:pending")).toBe(false);
-      await doInstance.onStop();
-      expect((doInstance as any).devenvState.status).toBe("stopped");
+      expect(fetchMock).not.toHaveBeenCalled();
+      now = Date.parse("2026-10-01T03:00:00Z");
+      const restarted = new RunnerDevEnvDO(mockCtx, mockEnv);
+      await restarted.requestStop();
+      expect((await restarted.getStatus()).status).toBe("stopped");
       expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [event] = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(event).toMatchObject({ qty: 40, billing_period: "2026-09", time_ms: Date.parse("2026-09-30T23:59:50Z") });
+    });
+
+    it("retains callback time in memory after the first terminal-state write fails", async () => {
+      mockEnv.BILLING_INGEST_URL = "https://billing.test/usage";
+      mockEnv.BILLING_REGION = "iad";
+      const fetchMock = vi.fn(async () => new Response("{}", { status: 202 }));
+      vi.stubGlobal("fetch", fetchMock);
+      let now = 1000;
+      vi.spyOn(Date, "now").mockImplementation(() => now);
+      const instance = new RunnerDevEnvDO(mockCtx, mockEnv);
+      await instance.startDevenv(testPayload());
+      await instance.onStart();
+      const put = mockCtx.storage.put;
+      let fail = true;
+      mockCtx.storage.put = vi.fn(async (key: string, value: any) => {
+        if (key === "state" && value.terminalUsage && fail) {
+          fail = false;
+          throw new Error("storage unavailable");
+        }
+        return put(key, value);
+      });
+      now = 11000;
+      await instance.onStop();
+      expect(fetchMock).not.toHaveBeenCalled();
+      now = 900000;
+      await instance.requestStop();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(fetchMock.mock.calls[0][1].body)[0]).toMatchObject({ qty: 40, time_ms: 11000 });
+    });
+
+    it("public stop retries delivery while concurrent terminal callbacks share one request", async () => {
+      mockEnv.BILLING_INGEST_URL = "https://billing.test/usage";
+      mockEnv.BILLING_REGION = "iad";
+      let resolveDelivery!: (response: Response) => void;
+      const fetchMock = vi.fn()
+        .mockRejectedValueOnce(new Error("offline"))
+        .mockImplementationOnce(() => new Promise<Response>((resolve) => { resolveDelivery = resolve; }));
+      vi.stubGlobal("fetch", fetchMock);
+      const instance = new RunnerDevEnvDO(mockCtx, mockEnv);
+      await instance.startDevenv(testPayload());
+      await instance.onStart();
+      await instance.onError(new Error("container stopped"));
+      expect((await instance.getStatus()).status).toBe("errored");
+      const retry = instance.requestStop();
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+      const lateCallback = instance.onStop();
+      resolveDelivery(new Response("{}", { status: 202 }));
+      await Promise.all([retry, lateCallback]);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      await expect(instance.startDevenv(testPayload())).resolves.toMatchObject({ status: "starting" });
+    });
+
+    it("default-disabled billing emits nothing after a later configuration change", async () => {
+      const fetchMock = vi.fn(async () => new Response("{}", { status: 202 }));
+      vi.stubGlobal("fetch", fetchMock);
+      const instance = new RunnerDevEnvDO(mockCtx, mockEnv);
+      await instance.startDevenv(testPayload());
+      await instance.onStop();
+      mockEnv.BILLING_INGEST_URL = "https://billing.test/usage";
+      mockEnv.BILLING_REGION = "iad";
+      const restarted = new RunnerDevEnvDO(mockCtx, mockEnv);
+      await restarted.requestStop();
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(mockEnv.CONFIG_DB.prepare).not.toHaveBeenCalled();
+    });
+
+    it("disabling billing preserves pending delivery and blocks replacement", async () => {
+      mockEnv.BILLING_INGEST_URL = "https://billing.test/usage";
+      mockEnv.BILLING_REGION = "iad";
+      vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
+      const instance = new RunnerDevEnvDO(mockCtx, mockEnv);
+      await instance.startDevenv(testPayload());
+      await instance.onStop();
+      const pending = mockStorage.get("devenv:usage:pending");
+      delete mockEnv.BILLING_INGEST_URL;
+      await expect(instance.requestStop()).resolves.toEqual({ ok: true });
+      await expect(instance.startDevenv(testPayload())).rejects.toThrow("DEVENV_BILLING_PENDING");
+      expect(mockStorage.get("devenv:usage:pending")).toEqual(pending);
+    });
+
+    it("retains an unresolved legacy errored session without inventing its stop time", async () => {
+      mockEnv.BILLING_INGEST_URL = "https://billing.test/usage";
+      mockEnv.BILLING_REGION = "iad";
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+      const instance = new RunnerDevEnvDO(mockCtx, mockEnv);
+      await instance.startDevenv(testPayload());
+      const active = mockStorage.get("state");
+      mockStorage.set("state", { ...active, status: "errored", lastError: "old runtime", lastWorkspaceName: "recovery" });
+      const restarted = new RunnerDevEnvDO(mockCtx, mockEnv);
+      await restarted.requestStop();
+      await restarted.onStop();
+      await expect(restarted.startDevenv(testPayload())).rejects.toThrow("DEVENV_BILLING_PENDING");
+      expect(mockStorage.get("state").sessionUuid).toBe(active.sessionUuid);
+      expect(fetchMock).not.toHaveBeenCalled();
+      mockStorage.set("devenv:usage:settled", active.sessionUuid);
+      await expect(restarted.startDevenv(testPayload())).resolves.toMatchObject({ status: "starting" });
     });
   });
 });
+
+function testPayload(): StartPayload {
+  return { config: {
+    workspaceName: "recovery", profileName: "default", tier: "standard-4",
+    clwEndpoint: "https://corelink-api.humangr.com",
+    clwTenant: "ee30f7ba-fc25-4d71-939e-ebe130b4c6a3",
+    clwToken: "cl_pat_1234567890abcdef1234567890",
+  } };
+}

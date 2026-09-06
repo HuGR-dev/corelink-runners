@@ -1,4 +1,5 @@
 // deploy/cloudflare/src/types/devenv.ts
+import type { DevenvUsageInput } from "../lib/devenv_usage.js";
 
 // ─── Constants ────────────────────────────────────────────────────────
 export const DevenvStatus = {
@@ -13,7 +14,7 @@ export type DevenvStatus = (typeof DevenvStatus)[keyof typeof DevenvStatus];
 
 export const VALID_TRANSITIONS: Record<DevenvStatus, readonly DevenvStatus[]> = {
   stopped: ["starting"],
-  starting: ["running", "errored", "stopped"],
+  starting: ["running", "stopping", "errored", "stopped"],
   running: ["stopping", "errored"],
   stopping: ["stopped", "errored"],
   errored: ["starting", "stopped"],
@@ -77,6 +78,7 @@ export function validateTenantId(id: string): string {
 export type DevenvState =
   | {
       readonly status: "stopped";
+      readonly terminalUsage?: DevenvUsageInput;
       readonly createdAt: number;
       readonly generationId?: number;
     }
@@ -121,6 +123,7 @@ export type DevenvState =
     }
   | {
       readonly status: "errored";
+      readonly terminalUsage?: DevenvUsageInput;
       readonly createdAt: number;
       readonly startedAt: number;
       readonly sessionUuid: string;
