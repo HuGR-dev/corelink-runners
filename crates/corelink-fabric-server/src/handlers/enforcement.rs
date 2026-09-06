@@ -124,7 +124,16 @@ pub(crate) async fn unsuspend(
     let Ok(tenant) = TenantId::new(&tenant) else {
         return err(StatusCode::BAD_REQUEST, "invalid tenant id");
     };
-    let was = state.unsuspend_tenant(&tenant);
+    let was = match state.unsuspend_tenant(&tenant) {
+        Ok(was) => was,
+        Err(e) => {
+            eprintln!(
+                "AUP1 ENFORCEMENT: tenant={} durable unsuspension failed: {e:#}",
+                tenant.as_str()
+            );
+            return err(StatusCode::SERVICE_UNAVAILABLE, "suspension persistence unavailable");
+        }
+    };
     eprintln!(
         "AUP1 ENFORCEMENT: tenant={} action=unsuspend was_suspended={} at_ms={}",
         tenant.as_str(),
@@ -146,7 +155,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    use corelink_fabric::{InMemoryLedger, LeaseLedger, LeaseRecord, LeaseState};
+    use corelink_fabric::{ComputeGate, InMemoryLedger, LeaseLedger, LeaseRecord, LeaseState};
     use corelink_runners_contracts::RunnerState;
 
     use crate::{StaticPlans, SystemClock};
@@ -180,6 +189,53 @@ mod tests {
             Arc::new(SystemClock),
         )
         .with_admin_key(admin_key.map(Arc::from))
+    }
+
+    fn state_with_ledger(
+        ledger: Arc<dyn LeaseLedger + Send + Sync>,
+        admin_key: Option<&str>,
+    ) -> AppState {
+        AppState::new(
+            ledger,
+            Arc::new(StaticPlans::default()),
+            Arc::new(SystemClock),
+        )
+        .with_admin_key(admin_key.map(Arc::from))
+    }
+
+    struct FailingUnsuspendLedger {
+        inner: InMemoryLedger,
+        fail_unsuspend: std::sync::atomic::AtomicBool,
+    }
+
+    impl LeaseLedger for FailingUnsuspendLedger {
+        fn record_tenant_suspension(
+            &self,
+            event: corelink_fabric::TenantSuspensionEvent,
+        ) -> anyhow::Result<()> {
+            self.set_tenant_suspended(&event.tenant_id, true)
+        }
+        fn set_tenant_suspended(&self, _tenant: &str, _suspended: bool) -> anyhow::Result<()> {
+            if !_suspended
+                && self
+                    .fail_unsuspend
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                anyhow::bail!("injected durable unsuspend failure");
+            }
+            self.inner.set_tenant_suspended(_tenant, _suspended)
+        }
+        fn put(&self, rec: LeaseRecord) -> anyhow::Result<()> { self.inner.put(rec) }
+        fn get(&self, id: &str) -> anyhow::Result<Option<LeaseRecord>> { self.inner.get(id) }
+        fn transition(&self, id: &str, to: RunnerState, now: u64) -> anyhow::Result<LeaseRecord> { self.inner.transition(id, to, now) }
+        fn by_tenant(&self, t: &TenantId) -> anyhow::Result<Vec<LeaseRecord>> { self.inner.by_tenant(t) }
+        fn held(&self) -> anyhow::Result<Vec<LeaseRecord>> { self.inner.held() }
+        fn pending_older_than(&self, now: u64, age: u64) -> anyhow::Result<Vec<LeaseRecord>> { self.inner.pending_older_than(now, age) }
+        fn try_admit(&self, rec: LeaseRecord, max: u32) -> anyhow::Result<bool> { self.inner.try_admit(rec, max) }
+        fn try_admit_with_compute(&self, rec: LeaseRecord, max: u32, gate: Option<ComputeGate>) -> anyhow::Result<corelink_fabric::AdmitOutcome> { self.inner.try_admit_with_compute(rec, max, gate) }
+        fn set_envelope_checkpoint(&self, id: &str, checkpoint: &str) -> anyhow::Result<()> { self.inner.set_envelope_checkpoint(id, checkpoint) }
+        fn get_envelope_checkpoint(&self, id: &str) -> anyhow::Result<Option<String>> { self.inner.get_envelope_checkpoint(id) }
+        fn remove(&self, id: &str) -> anyhow::Result<bool> { self.inner.remove(id) }
     }
 
     fn hdrs(key: Option<&str>) -> HeaderMap {
@@ -252,6 +308,26 @@ mod tests {
             !state.is_tenant_suspended(&acme),
             "unsuspend must lift the flag"
         );
+    }
+
+    #[tokio::test]
+    async fn failed_durable_unsuspend_keeps_cache_blocked_and_retry_clears_it() {
+        let acme = TenantId::new("acme").unwrap();
+        let failing = Arc::new(FailingUnsuspendLedger {
+            inner: InMemoryLedger::new(),
+            fail_unsuspend: std::sync::atomic::AtomicBool::new(false),
+        });
+        let state = state_with_ledger(failing.clone(), Some(KEY));
+        state.suspend_tenant(&acme);
+        failing.fail_unsuspend.store(true, std::sync::atomic::Ordering::Relaxed);
+        let failed = unsuspend(State(state.clone()), Path("acme".into()), hdrs(Some(KEY))).await;
+        assert_eq!(failed.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(state.is_tenant_suspended(&acme));
+
+        failing.fail_unsuspend.store(false, std::sync::atomic::Ordering::Relaxed);
+        let retried = unsuspend(State(state.clone()), Path("acme".into()), hdrs(Some(KEY))).await;
+        assert_eq!(retried.status(), StatusCode::OK);
+        assert!(!state.is_tenant_suspended(&acme));
     }
 
     /// The end-to-end enforcement proof: a suspended tenant's `acquire` is
