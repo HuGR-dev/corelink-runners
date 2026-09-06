@@ -1,3 +1,4 @@
+import { createPublicKey } from "node:crypto";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { KMSClient } from "@aws-sdk/client-kms";
 import { S3Client } from "@aws-sdk/client-s3";
@@ -28,8 +29,9 @@ export class LambdaFunctionError extends Error { override readonly name = "Lambd
 function identity(value: unknown, role: "journal" | "witness"): value is PublicSigningIdentity {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const x = value as Record<string, unknown>;
-  return keysExact(x, ["keyId", "epoch", "keyArn", "publicKeySpkiPem", "role"]) && TEXT(x.keyId, 256) && TEXT(x.epoch, 256) && TEXT(x.keyArn, 512) && TEXT(x.publicKeySpkiPem, 8192) && x.role === role;
+  return keysExact(x, ["keyId", "epoch", "keyArn", "publicKeySpkiPem", "role"]) && TEXT(x.keyId, 256) && TEXT(x.epoch, 256) && TEXT(x.keyArn, 512) && typeof x.publicKeySpkiPem === "string" && x.publicKeySpkiPem.length > 0 && x.publicKeySpkiPem.length <= 8192 && x.role === role;
 }
+function validSpki(pem: string): boolean { try { const key = createPublicKey(pem); return key.asymmetricKeyType === "rsa" && key.asymmetricKeyDetails?.modulusLength === 3072; } catch { return false; } }
 function validateArn(identityValue: PublicSigningIdentity, region: string, account: string): boolean {
   const match = ARN.exec(identityValue.keyArn); return !!match && match[1] === region && match[2] === account;
 }
@@ -50,7 +52,7 @@ export function validateWitnessConfig(input: unknown): WitnessConfig {
     !Array.isArray(x.allowedLogIds) || x.allowedLogIds.length === 0 || x.allowedLogIds.length > 100 || !x.allowedLogIds.every((id) => TEXT(id, 256)) || new Set(x.allowedLogIds).size !== x.allowedLogIds.length ||
     !identity(x.journalIdentity, "journal") || !identity(x.witnessIdentity, "witness") || !validateTrustedTime(x.trustedTime)) throw new TypeError("invalid witness config");
   const journalIdentity = x.journalIdentity as PublicSigningIdentity; const witnessIdentity = x.witnessIdentity as PublicSigningIdentity;
-  if (!validateArn(journalIdentity, x.region as string, x.monitorAccountId as string) || !validateArn(witnessIdentity, x.region as string, x.verifierAccountId as string) || journalIdentity.keyArn === witnessIdentity.keyArn) throw new TypeError("invalid witness identity domain");
+  if (!validSpki(journalIdentity.publicKeySpkiPem) || !validSpki(witnessIdentity.publicKeySpkiPem) || !validateArn(journalIdentity, x.region as string, x.monitorAccountId as string) || !validateArn(witnessIdentity, x.region as string, x.verifierAccountId as string) || journalIdentity.keyArn === witnessIdentity.keyArn) throw new TypeError("invalid witness identity domain");
   return structuredClone(x) as unknown as WitnessConfig;
 }
 
