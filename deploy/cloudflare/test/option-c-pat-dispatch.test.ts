@@ -72,7 +72,10 @@ describe("mintCasPat Option-C wire (via buildContainerEnv)", () => {
     CORELINK_RUNNER_MINT_AUTH_KEY: "dispatcher-key",
     CORELINK_MINT_URL: "https://corelink-api.humangr.com",
     CLW_ENDPOINT: "https://corelink-api.humangr.com",
-    ALLOW_LEGACY_PAT_ENV: "1", // non-prod: let the warm mint complete without env-0 deps
+  };
+  const env0 = {
+    stash: { stash: async (_lease: string, _ticket: string) => "ticket-1" },
+    fabricEndpoint: "https://runner.example",
   };
 
   it("acquiringPat set ⇒ Bearer + internal-auth + NO installation_id + scope cas:rw", async () => {
@@ -83,7 +86,7 @@ describe("mintCasPat Option-C wire (via buildContainerEnv)", () => {
       repoFullName: REPO,
       installationId: "150584374", // present (for the JIT), but MUST NOT reach the mint body
       acquiringPat: COLD_PAT,
-    });
+    }, env0);
     expect(cap.req).toBeDefined();
     // internal-auth stays (trust boundary), Bearer added (names the tenant).
     expect(cap.req!.headers.get("x-corelink-internal-auth")).toBe("dispatcher-key");
@@ -104,7 +107,7 @@ describe("mintCasPat Option-C wire (via buildContainerEnv)", () => {
       jobId: "43",
       repoFullName: "HuGR-Labs/corelink-runners",
       installationId: "150584374",
-    });
+    }, env0);
     expect(cap.req!.headers.get("authorization")).toBeNull();
     expect(cap.req!.headers.get("x-corelink-internal-auth")).toBe("dispatcher-key");
     expect(cap.req!.body.installation_id).toBe("150584374");
@@ -119,7 +122,7 @@ describe("mintCasPat Option-C wire (via buildContainerEnv)", () => {
       repoFullName: REPO,
       installationId: "", // no install at all
       acquiringPat: COLD_PAT,
-    });
+    }, env0);
     // A mint WAS attempted (not the cold fail-open) because acquiringPat is present.
     expect(cap.req).toBeDefined();
     expect(r.tenant).toBe("3c7d77b1-0a50-4f87-893f-36ac785670df");
@@ -134,7 +137,7 @@ describe("mintCasPat Option-C wire (via buildContainerEnv)", () => {
       installationId: "",
     });
     expect(cap.req).toBeUndefined(); // never called the mint
-    expect(r.authz).toBe("ok");
+    expect(r.authz).toBe("forbidden");
     expect(r.containerEnv).toEqual({});
   });
 });

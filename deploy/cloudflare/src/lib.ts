@@ -232,136 +232,20 @@ export async function verifyGithubHmac(secret: string, sig: string, body: string
   return safeEqual(`sha256=${hex}`, sig);
 }
 
-// The frozen mint-request inputs (server-derived-tenant seam, 2026-07-04). The
-// Worker sends `repo_full_name` + `installation_id`; the SERVER derives the tenant
-// (we no longer send `owner_tenant`). `job_id` is the GH workflow_job.id.
 export interface MintParams {
   jobId: string;
-  repoFullName: string; // evt.repository.full_name
-  installationId: string; // evt.installation.id (stringified)
-  scope?: string; // default "read-write"
-  ttlSeconds?: number; // optional PAT TTL override
-  // Option-C (per-tenant-PAT dispatch, server confirmed live 2026-07-21): when set,
-  // the mint resolves the tenant by INTROSPECTING this acquiring PAT instead of
-  // deriving it from installation_id. Presented as `Authorization: Bearer <pat>`
-  // ALONGSIDE the dispatcher's `x-corelink-internal-auth` (both required — the
-  // internal-auth is still the trust boundary; the PAT only names the tenant), and
-  // `installation_id` is OMITTED from the body (server rejects a null/"" as
-  // malformed → 400). Used for repos in REPO_TENANT_PAT_MAP; empty map ⇒ never set.
+  repoFullName: string;
+  installationId: string;
+  scope?: string;
+  ttlSeconds?: number;
   acquiringPat?: string;
 }
-
-// The per-job CAS PAT mint result. `tenant` is the SERVER-DERIVED, authoritative
-// tenant (injected as CLW_TENANT + used as the billed tenant); `maxConcurrency`
-// is the per-tenant runner ceiling (absent ⇒ no ceiling enforced).
 export interface MintResult {
   token: string;
   patId: string;
   tenant: string;
   maxConcurrency?: number;
-  /** Monthly compute allowance (vCPU-h). Absent ⇒ no metered ceiling on file. */
   maxVcpuH?: number;
-}
-
-// A 403 from the mint is a HARD DENY (installation not mapped / tenant suspended /
-// repo not allowlisted / not runner-entitled). It is thrown as a DISTINCT error so
-// the caller ABORTS the spawn — it must NEVER fail-open to a wrong-tenant cold
-// spawn. Any OTHER failure (5xx, network) is a plain Error ⇒ fail-open to cold.
-export class MintForbiddenError extends Error {
-  readonly source: "edge_proxy" | "authz";
-
-  constructor(message = "runner mint unauthorized", source: "edge_proxy" | "authz" = "authz") {
-    super(message);
-    this.name = "MintForbiddenError";
-    this.source = source;
-  }
-}
-
-/** Classify a 403 without treating an edge response as tenant authz. */
-export function classifyMintForbidden(body: string): "edge_proxy" | "authz" {
-  const normalized = body.toLowerCase();
-  return normalized.includes("cloudflare")
-    || normalized.includes("cf-access")
-    || normalized.includes("access denied")
-    || normalized.includes("<!doctype html")
-    ? "edge_proxy"
-    : "authz";
-}
-
-// Mint a per-job CAS PAT via the runner-mint seam (corelink-server). The server
-// DERIVES the tenant from installation_id + repo_full_name (authorization happens
-// HERE): a 403 ⇒ MintForbiddenError (hard deny, abort); a 5xx/network ⇒ plain
-// Error (caller falls open to a COLD spawn — cache absent ⇒ slow, never broken).
-async function mintCasPat(env: MintEnv, params: MintParams): Promise<MintResult> {
-  const base = env.CORELINK_MINT_URL ?? "https://corelink-api.humangr.com";
-  // Option-C (per-tenant-PAT dispatch): resolve the tenant by introspecting the
-  // acquiring PAT. The dispatcher trust boundary (x-corelink-internal-auth) is
-  // UNCHANGED — the Bearer PAT is additive and only names the tenant (server
-  // runner_mint.ts:407-427). `installation_id` MUST be omitted entirely (a null/""
-  // is rejected as malformed → 400); server-confirmed scope for this path is cas:rw.
-  const optionC = !!params.acquiringPat;
-  const headers: Record<string, string> = {
-    ...cfAccessHeaders(env),
-    "x-corelink-internal-auth": env.CORELINK_RUNNER_MINT_AUTH_KEY ?? "",
-    "content-type": "application/json",
-    "user-agent": "corelink-spawn-worker",
-  };
-  if (optionC) headers["authorization"] = `Bearer ${params.acquiringPat}`;
-  const resp = await fetch(`${base}/internal/v1/runner/mint`, {
-    method: "POST",
-    headers,
-    // FROZEN request body: NO owner_tenant (server derives the tenant). Option-C
-    // OMITS installation_id (tenant comes from PAT introspection) and pins scope
-    // cas:rw; the default installation-derived path is byte-identical to before.
-    body: JSON.stringify({
-      job_id: params.jobId,
-      repo_full_name: params.repoFullName,
-      ...(optionC ? {} : { installation_id: params.installationId }),
-      scope: params.scope ?? (optionC ? "cas:rw" : "read-write"),
-      ...(params.ttlSeconds != null ? { ttl_seconds: params.ttlSeconds } : {}),
-    }),
-  });
-  // 403 FORBIDDEN ⇒ HARD DENY. Propagate a distinct error so the caller aborts
-  // the spawn (no JIT, no container) rather than fail-open to a wrong-tenant cold.
-  if (resp.status === 403) {
-    const body = await resp.text().catch(() => "");
-    throw new MintForbiddenError(
-      `runner mint unauthorized (403): ${body}`,
-      classifyMintForbidden(body),
-    );
-  }
-  // Any other non-2xx (5xx D1 error "runner mint unavailable", etc.) ⇒ plain Error
-  // ⇒ the caller MAY fail-open to a cold spawn (unchanged discipline).
-  if (!resp.ok) throw new Error(`runner mint ${resp.status}`);
-  // FROZEN 200 wire: {token_plaintext, pat_id, token_id, tenant (DERIVED,
-  // AUTHORITATIVE), expires_ms, max_concurrency}. Keys logged on a miss so any
-  // future drift is loud. A malformed 200 fails open to cold (not a hard deny).
-  const j = (await resp.json()) as {
-    token_plaintext?: string;
-    pat_id?: string;
-    tenant?: string;
-    max_concurrency?: number;
-    // ADDITIVE (server #975): the monthly compute allowance. OMITTED for a tenant
-    // with no metered ceiling, so `undefined` here is the normal case, not a
-    // contract violation — it must never fail the mint.
-    max_vcpu_h?: number;
-  };
-  if (!j.token_plaintext) {
-    throw new Error(`runner mint: no token_plaintext (200 keys: ${Object.keys(j).join(",")})`);
-  }
-  if (!j.pat_id) {
-    throw new Error(`runner mint: no pat_id (200 keys: ${Object.keys(j).join(",")})`);
-  }
-  if (!j.tenant) {
-    throw new Error(`runner mint: no tenant (200 keys: ${Object.keys(j).join(",")})`);
-  }
-  return {
-    token: j.token_plaintext,
-    patId: j.pat_id,
-    tenant: j.tenant,
-    maxConcurrency: typeof j.max_concurrency === "number" ? j.max_concurrency : undefined,
-    maxVcpuH: typeof j.max_vcpu_h === "number" ? j.max_vcpu_h : undefined,
-  };
 }
 
 // Revoke a per-job CAS PAT via D-9 — keyed by `pat_id` (the live /revoke contract:
@@ -512,153 +396,15 @@ export function decideRedeem(
   return { status: 200, cred: rec.cred }; // MULTI-USE: no consume — cred served until expiry
 }
 
-// AUTHORIZE the runner + build the cache-warm CLW_* overlay. Opt-in: only when the
-// runner-mint key is configured AND we have the authz inputs (repo + installation).
-// A 403 ⇒ authz:"forbidden" (HARD DENY — never a wrong-tenant cold spawn). A 5xx/
-// network/malformed-200 ⇒ authz:"ok" with an EMPTY overlay (FAIL-OPEN to cold —
-// the job still runs, uncached). CLW_TENANT is the SERVER-DERIVED tenant, never
-// wrangler's CLW_TENANT var. Returns pat_id/tenant/max_concurrency on a warm mint.
-//
-// env-0: when `deps.stash` + `deps.fabricEndpoint` are provided, the PAT is
-// STASHED and a single-use CLW_CRED_TICKET is injected INSTEAD of CLW_TOKEN — the
-// untrusted container never sees the raw PAT. When they're absent, the default is
-// FAIL-CLOSED (spawn COLD, no PAT) unless `env.ALLOW_LEGACY_PAT_ENV === "1"` is
-// explicitly set (the non-prod pre-env-0 escape hatch). A stash FAILURE also never
-// falls back to CLW_TOKEN — it spawns COLD (the whole point is no PAT in the untrusted env).
-export async function buildContainerEnv(
-  env: MintEnv,
-  params: MintParams,
-  deps?: { stash?: CredStashLike; fabricEndpoint?: string },
-): Promise<ContainerEnvResult> {
-  // ── Why these are no longer ONE condition (★A3.17 / union-01) ───────────────
-  //
-  // Three unrelated facts used to collapse into a single silent
-  // `{ authz: "ok", containerEnv: {} }`, and the collapse is the defect: an
-  // OPERATOR MISCONFIGURATION was indistinguishable from an ordinary cold spawn.
-  //
-  //   mint_key_unarmed        — OUR deployment is wrong. Every job on the whole
-  //                             fleet spawns COLD, tenantless and unattributed,
-  //                             and nothing anywhere says so. Money silently
-  //                             stops being attributable.
-  //   no_repo                 — a malformed request; nothing to authorize against.
-  //   no_installation_or_pat  — an ORDINARY cold spawn. A repo webhook carries no
-  //                             installation id and REPO_INSTALLATION_MAP covers
-  //                             one repo, so this is the expected path for
-  //                             everything outside the map. It is not a fault.
-  //
-  // Each now names itself in `coldReason`, so the caller can log and count them
-  // apart. The behaviour is otherwise unchanged: all three still spawn COLD.
-  //
-  // ⚠️ ON FAIL-CLOSED. A3.17 asks the worker to REFUSE to serve when the mint key
-  // is unarmed. That is available here — `REQUIRE_MINT_KEY=1` turns the
-  // misconfiguration into a hard deny — but it is deliberately NOT the default,
-  // and the reason is fresh evidence rather than timidity: on 2026-08-31 a
-  // fail-closed guard that ran before the control plane could bind turned a
-  // recoverable dependency fault into a twelve-day total outage. Refusing every
-  // spawn on a config slip trades silent misattribution for a fleet-wide CI stop.
-  // The loud half — which is what makes the failure *findable* — ships on by
-  // default; the refusing half is one deliberate var away. Arming it is the
-  // owner's ratification, not this code's assumption.
-  if (!env.CORELINK_RUNNER_MINT_AUTH_KEY) {
-    return env.REQUIRE_MINT_KEY === "1"
-      ? { authz: "forbidden", containerEnv: {}, coldReason: "mint_key_unarmed" }
-      : { authz: "ok", containerEnv: {}, coldReason: "mint_key_unarmed" };
-  }
-  if (!params.repoFullName) {
-    return { authz: "ok", containerEnv: {}, coldReason: "no_repo" };
-  }
-  // Authorizable when we have EITHER an installation_id (tenant derived from it) OR
-  // an acquiring PAT (Option-C: tenant derived by introspection).
-  if (!params.installationId && !params.acquiringPat) {
-    return { authz: "ok", containerEnv: {}, coldReason: "no_installation_or_pat" };
-  }
-  try {
-    const m = await mintCasPat(env, params);
-    const endpoint = env.CLW_ENDPOINT ?? "https://corelink-api.humangr.com";
-    // env-0 ON (stash + fabric endpoint configured): stash the PAT, inject a
-    // single-use ticket — NEVER CLW_TOKEN. A stash failure spawns COLD (no leak).
-    if (deps?.stash && deps?.fabricEndpoint) {
-      // The stash is idempotent per lease: it returns the EFFECTIVE ticket (the
-      // existing one if a prior spawn attempt for this jobId already stashed, else
-      // the fresh one). Inject whatever it returns so retries converge on one ticket.
-      let ticket: string;
-      try {
-        ticket = await deps.stash.stash(
-          params.jobId,
-          randomTicket(),
-          { token: m.token, endpoint, tenant: m.tenant },
-          CRED_TICKET_TTL_S * 1000,
-        );
-      } catch (e) {
-        // Stash failed ⇒ we CANNOT do env-0. Never fall back to CLW_TOKEN — spawn
-        // COLD (the minted PAT is undelivered and TTL-expires). No PAT ever leaks.
-        console.log(`cred-stash failed, spawning COLD (no token leaked): ${(e as Error).message}`);
-        return { authz: "ok", containerEnv: {} };
-      }
-      return {
-        authz: "ok",
-        containerEnv: {
-          CLW_ENDPOINT: endpoint,
-          CLW_TENANT: m.tenant, // server-DERIVED, authoritative (NEVER wrangler's var)
-          CLW_CRED_TICKET: ticket, // multi-use, lease-scoped; redeemed in-process by each clw
-          CLW_LEASE_ID: params.jobId, // the redemption key (= GH jobId)
-          CLW_FABRIC_ENDPOINT: deps.fabricEndpoint, // where clw redeems the ticket
-          CLW_REF_DOMAIN: "runner",
-        },
-        patId: m.patId,
-        tenant: m.tenant,
-        maxConcurrency: m.maxConcurrency,
-        maxVcpuH: m.maxVcpuH,
-      };
-    }
-    // env-0 NOT configured. FAIL-CLOSED by default: never silently inject the raw
-    // PAT (`CLW_TOKEN`) into the untrusted container. The legacy PAT overlay is a
-    // pre-env-0 transition escape hatch, gated behind an EXPLICIT non-prod flag
-    // (`ALLOW_LEGACY_PAT_ENV="1"`) — coordinator env-0 review must-fix #1. Without
-    // it we spawn COLD: the minted PAT is undelivered (TTL-expires), no leak. In
-    // prod, env-0 (`SPAWN_WORKER_PUBLIC_URL`) is armed, so this branch is dead.
-    // F2-5 (W3): refuse the legacy raw-PAT overlay whenever the PROD marker
-    // (SPAWN_WORKER_PUBLIC_URL) is present — even if ALLOW_LEGACY_PAT_ENV="1" was
-    // mis-set and the env-0 deps weren't passed. In prod the env-0 branch above
-    // already wins; this closes the residual "deps missing + flag mis-set in prod"
-    // hole so a raw PAT can NEVER reach an untrusted container in a prod deploy.
-    const legacyRefusedInProd = env.ALLOW_LEGACY_PAT_ENV === "1" && !!env.SPAWN_WORKER_PUBLIC_URL;
-    if (env.ALLOW_LEGACY_PAT_ENV !== "1" || legacyRefusedInProd) {
-      console.log(
-        legacyRefusedInProd
-          ? "ALLOW_LEGACY_PAT_ENV=1 REFUSED (SPAWN_WORKER_PUBLIC_URL set ⇒ prod env-0 armed): spawning COLD"
-          : "env-0 not configured and ALLOW_LEGACY_PAT_ENV not set: spawning COLD (no raw PAT in the untrusted container env)",
-      );
-      return { authz: "ok", containerEnv: {} };
-    }
-    // Legacy (explicit non-prod opt-in) — pre-launch transition only: inject CLW_TOKEN.
-    console.log("ALLOW_LEGACY_PAT_ENV=1: injecting legacy CLW_TOKEN (non-prod transition path)");
-    return {
-      authz: "ok",
-      containerEnv: {
-        CLW_ENDPOINT: endpoint,
-        CLW_TENANT: m.tenant, // server-DERIVED, authoritative (NEVER wrangler's var)
-        CLW_TOKEN: m.token, // per-job; never logged
-        CLW_REF_DOMAIN: "runner",
-      },
-      patId: m.patId,
-      tenant: m.tenant,
-      maxConcurrency: m.maxConcurrency,
-      maxVcpuH: m.maxVcpuH,
-    };
-  } catch (e) {
-    if (e instanceof MintForbiddenError) {
-      // 403 HARD DENY ⇒ ABORT. An unauthorized repo must not run at all — never
-      // let a 403 degrade into a (wrong-tenant) cold spawn.
-      console.log(`runner mint FORBIDDEN (aborting spawn): ${(e as Error).message}`);
-      return { authz: "forbidden", forbiddenReason: e.source, containerEnv: {} };
-    }
-    // 5xx ("runner mint unavailable") / network / malformed-200 ⇒ FAIL-OPEN to
-    // cold. The entrypoint's cache-warm hook is also fail-open — slow, never broken.
-    console.log(`warm-mint failed, spawning COLD: ${(e as Error).message}`);
-    return { authz: "ok", containerEnv: {} };
-  }
-}
+/* Required mint/env-0 implementation is exported from ./lib/build_container_env. */
+/* The old implementation was removed; this marker keeps the surrounding pure
+   credential-stash helpers and their compatibility contracts in this module. */
+export {
+  buildContainerEnv,
+  mintCasPat,
+  MintForbiddenError,
+  classifyMintForbidden,
+} from "./lib/build_container_env";
 
 // ── Concurrency slots (W7/F7) — ATOMIC per-key + fleet cap, DO-backed ─────────
 //
