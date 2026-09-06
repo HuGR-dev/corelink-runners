@@ -159,8 +159,15 @@ A3.15's Engine/Worker source pairing is accepted for that criterion only. Its
 Rust fixture stack ends at `5abfe9f2cd10e137c211abe23dfdb5a6696598d9` and its
 Worker companion is `c463d4ed3ddf46efca6850952115c30cfc513b65`; the prior
 controlled Rust gate passed 1/1 and the final Worker conformance tests passed
-2/2 within the 143-test selection. T8-W1 remains partial: A3.14 and
-F007-dependent authority work remain open.
+2/2 within the 143-test selection. A subsequent independent review at
+`ec10581` also passed 29/29 across spawn preparation, capacity-before-mint,
+and admission-budget authority tests: A3.14 orders authorization, mint, and
+adoption before claim, then JIT/provider work; failed cleanup has no provider
+effect. A3.16 limits 100 concurrent failures to five exceptional starts and
+refuses missing, unreadable, or write-failed bindings before a start. These are
+local Worker mocks with a real ContainmentDO harness, not provider-real proof.
+T8-W1 remains partial because T3-W2 and F007-dependent lifecycle authority are
+still open.
 
 These are source-level acceptance records. T3-W3, T4-W2, and T8-W1 remain
 prepared rather than delivered; the recorded delivery count remains 16/70.

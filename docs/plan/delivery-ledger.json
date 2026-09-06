@@ -806,7 +806,7 @@
       "dependencies": [
         "T3-W2"
       ],
-      "next_action": "A3.15 paired engine/Worker source criterion is accepted. A3.14 required-enrichment ordering and F007-dependent lifecycle authority still block whole-WP approval.",
+      "next_action": "Local A3.14/A3.15/A3.16 evidence is verified. Keep the whole work package partial pending T3-W2 and F007-dependent lifecycle authority; this is not whole-WP approval.",
       "blockers": [],
       "commits": [
         "61cfc0435837c3fd16006566ab4cdc6b12b3fff4",
@@ -818,7 +818,7 @@
         "status": "partial",
         "commit": "ec10581e36c139c058587d10262cf0963313c72c",
         "evidence": [
-          "A3.15 engine/Worker control-wire pairing accepted; this is not whole-T8-W1 approval."
+          "A3.14/A3.15/A3.16 local evidence accepted; A3.15 is the paired engine/Worker control wire. This is not whole-T8-W1 approval."
         ]
       },
       "evidence": [
