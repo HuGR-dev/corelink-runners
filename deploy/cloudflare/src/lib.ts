@@ -687,33 +687,14 @@ export const SLOT_TTL_S = 2700;
 // (no idle cost). The HARD ceiling is the account limit (~343 standard-4 runners
 // after the cache fleet's vCPU share); beyond that needs a CF account-limit raise.
 export const FLEET_MAX_CONCURRENCY = 250;
-// ── Fail-open BUDGET for the admission path (★A3.16 / RH3) ──────────────────
-//
-// `acquireConcurrencySlot` admits when the slot Durable Object THROWS, so an infra
-// hiccup never blocks a legitimate job. That intent is right and is kept. What was
-// wrong is that the fail-open had no bound: while the DO is throwing, NOTHING
-// enforces the per-tenant entitlement or `FLEET_MAX_CONCURRENCY`, so a sustained DO
-// fault admits every arrival — the one shape that turns "flat concurrency with
-// unlimited minutes" into unbounded spend.
-//
-// A budget separates the two cases the old code could not tell apart. A handful of
-// errors is a hiccup: absorb it, admit, stay out of the way. A sustained stream of
-// them is an outage, and during an outage the cap is not being enforced by anyone —
-// so admission must stop rather than run unmetered. Beyond the budget the answer is
-// a refusal with a distinct reason, not a silent yes.
-//
-// ⚠️ APPROXIMATE BY CONSTRUCTION. The counter is a KV read-modify-write, which is
-// not atomic and is eventually consistent, so concurrent fail-opens can undercount
-// and the real admits can exceed the number below. It is a ceiling within a factor,
-// not an exact quota — which is the whole distance from "unbounded" to "bounded",
-// and is worth having even though it is not exact. Do not cite it as an exact bound.
+// Legacy pure fail-open decision helpers retained for compatibility with their
+// historical unit suite. Production admission uses the transactional global
+// ContainmentDO authority in lib/admission_budget.ts; these helpers do no storage
+// access and are not used by acquireConcurrencySlot.
 export const FAILOPEN_WINDOW_S = 60;
-// Deliberately small. Sized for a transient, NOT to keep a fleet running through a
-// DO outage: at this rate a sustained fault admits far fewer boxes than it would
-// have, while a genuine blip (a few requests) is entirely absorbed.
 export const FAILOPEN_MAX_PER_WINDOW = 5;
 
-/** Bucket key for the current fail-open window. Exported for the test to pin it. */
+/** Legacy bucket key helper; production authority uses a rolling durable record. */
 export function failOpenWindowKey(nowMs: number): string {
   return `failopen:${Math.floor(nowMs / (FAILOPEN_WINDOW_S * 1000))}`;
 }
@@ -723,10 +704,7 @@ export function failOpenWindowKey(nowMs: number): string {
  * `decideSlotAcquire`): given how many fail-open admissions this window has already
  * recorded, may this one be admitted?
  *
- * `null` means the count could not be read at all. That is NOT treated as zero: if
- * both the slot DO and the counter store are unavailable, nothing anywhere is
- * bounding the fleet, and admitting into that is exactly the unbounded case. Two
- * independent stores failing at once is an outage, not a hiccup.
+ * `null` remains a refusal for the historical pure decision contract.
  */
 export function decideFailOpenAdmission(
   countThisWindow: number | null,

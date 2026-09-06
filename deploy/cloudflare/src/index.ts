@@ -65,9 +65,6 @@ import {
   SLOT_TTL_S,
   FLEET_MAX_CONCURRENCY,
   COLD_REPO_CAP,
-  FAILOPEN_WINDOW_S,
-  failOpenWindowKey,
-  decideFailOpenAdmission,
   decideRedeem,
   parseReconcilerRepos,
   rateLimitDeadLetterKey,
@@ -118,6 +115,7 @@ import {
   type OrphanRecord,
 } from "./lib";
 import { flushBillingUsageBacklog } from "./billing_recovery";
+import { spendAdmissionBudget, type AdmissionBudgetVerdict } from "./lib/admission_budget";
 import { bumpMetrics, snapshotMetrics, MetricsDO } from "./metrics";
 import {
   dispatchTenantSuspensionRevocations as dispatchTenantSuspensionRevocationsOwned,
@@ -527,6 +525,11 @@ export class ContainmentDO extends DurableObject<Env> {
 
   async snapshot(): Promise<ContainmentMeta> {
     return (await this.ctx.storage.get<ContainmentMeta>(CONTAINMENT_META_KEY)) ?? emptyContainmentMeta();
+  }
+
+  async spendAdmissionBudget(): Promise<AdmissionBudgetVerdict> {
+    const nowMs = Date.now();
+    return this.tx((storage) => spendAdmissionBudget(storage, nowMs));
   }
 
   async getEvent(eventId: string): Promise<ContainmentEvent | null> {
@@ -2701,7 +2704,7 @@ export async function reapStaleSpawnClaims(env: Env, nowMs = Date.now()): Promis
 //     now capped per-repo AND under the same global FLEET cap.
 // FAIL-OPEN ONLY on a THROWN DO/infra error (never block a legit job on an infra
 // hiccup); a clean `{admitted:false}` is a REAL at-capacity refusal and is honored.
-async function acquireConcurrencySlot(
+export async function acquireConcurrencySlot(
   env: Env,
   jobId: string,
   mint: ContainerEnvResult,
@@ -2724,49 +2727,21 @@ async function acquireConcurrencySlot(
     // Infra hiccup ⇒ ADMIT (never block a legitimate job on a DO error). A clean
     // at-capacity decision above is NOT an error and is honored as a real refusal.
     //
-    // BUDGETED since ★A3.16/RH3: while the DO throws, nothing enforces the tenant
-    // entitlement or FLEET_MAX_CONCURRENCY, so an unconditional yes here admitted
-    // every arrival for as long as the fault lasted. The budget absorbs a hiccup and
-    // stops an outage — see FAILOPEN_MAX_PER_WINDOW for why it is deliberately small
-    // and why it is approximate.
-    const kv = env.RUNNER_JOB_PATS;
-    const bucket = failOpenWindowKey(Date.now());
-    // NO BINDING and a FAILED READ are different facts and must not collapse into
-    // one. An absent binding means this deployment has no counter infra at all —
-    // the same situation `claimSpawn` documents as "no dedup infra ⇒ fail-open to
-    // spawn (never block a job)" — so the budget simply does not apply and the
-    // original unconditional fail-open stands. A read that THROWS means the store
-    // is unreachable *while the slot DO is also failing*: two independent stores
-    // down at once is an outage, nothing is bounding the fleet, and that is exactly
-    // the unbounded case the budget exists to close.
-    let count: number | null = null;
+    // The budget is authoritative: an absent, unreadable, or failed ContainmentDO
+    // transaction refuses rather than bypassing the bound.
     let verdict: { admitted: boolean; reason?: string };
-    if (!kv) {
-      verdict = { admitted: true, reason: "slot_failopen_unbudgeted_no_kv" };
-    } else {
-      try {
-        const raw = await kv.get(bucket);
-        // A missing key is a genuine zero (a fresh window); only a THROW is unknown.
-        count = raw ? Number.parseInt(raw, 10) : 0;
-        if (!Number.isFinite(count)) count = 0;
-      } catch {
-        count = null; // store unreachable ⇒ unknown, and unknown is not zero
-      }
-      verdict = decideFailOpenAdmission(count);
-    }
-    if (verdict.admitted && kv) {
-      // Best-effort increment. A lost write undercounts, which is already stated as
-      // the bound's known imprecision; it must never turn an admit into an error.
-      await kv
-        .put(bucket, String((count ?? 0) + 1), { expirationTtl: FAILOPEN_WINDOW_S * 2 })
-        .catch(() => {});
+    try {
+      verdict = env.CONTAINMENT
+        ? await containmentAuthority(env).spendAdmissionBudget()
+        : { admitted: false, reason: "slot_failopen_budget_unreadable" };
+    } catch {
+      verdict = { admitted: false, reason: "slot_failopen_budget_unreadable" };
     }
     logEvent("error", "concurrency_slot_acquire_error_failopen", {
       jobId,
       key,
       error: (e as Error).message,
       admitted: verdict.admitted,
-      countThisWindow: count,
       ...(verdict.reason ? { reason: verdict.reason } : {}),
     });
     return verdict;
