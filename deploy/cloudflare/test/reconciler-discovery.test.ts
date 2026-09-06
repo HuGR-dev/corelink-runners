@@ -12,7 +12,12 @@ import {
 import { redriveOrphanedJobs, type Env } from "../src/index";
 
 function response(body: unknown, status = 200): Response {
-  return { ok: status >= 200 && status < 300, status, json: async () => body } as Response;
+  const encoded = new TextEncoder().encode(JSON.stringify(body));
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    arrayBuffer: async () => encoded,
+  } as Response;
 }
 
 describe("authoritative reconciler registry", () => {
@@ -42,7 +47,7 @@ describe("authoritative reconciler registry", () => {
       { repo: "acme/other", installationId: "44" },
     ]);
     expect(fetcher.mock.calls[1][0]).toContain("cursor=c1");
-    expect(fetcher.mock.calls[0][1]).toMatchObject({ headers: { authorization: "Bearer secret" } });
+    expect(fetcher.mock.calls[0][1]).toMatchObject({ headers: { "x-corelink-internal-auth": "secret" } });
   });
 
   it("fails closed on snapshot drift or a repeated cursor", async () => {
@@ -86,11 +91,11 @@ describe("durable reconciliation handoff", () => {
       labels: ["corelink"],
       enqueued_at_ms: 1,
     };
-    await expect(claimReconcileHandoff(store, handoff)).resolves.toBe(true);
-    await expect(claimReconcileHandoff(store, handoff)).resolves.toBe(false);
+    await expect(claimReconcileHandoff(store, handoff, 1_000)).resolves.toBe(true);
+    await expect(claimReconcileHandoff(store, handoff, 1_000)).resolves.toBe(false);
     expect(store.values.has(reconcileHandoffKey("acme/customer", "99"))).toBe(true);
     await releaseReconcileHandoff(store, "acme/customer", "99");
-    await expect(claimReconcileHandoff(store, handoff)).resolves.toBe(true);
+    await expect(claimReconcileHandoff(store, handoff, 1_000)).resolves.toBe(true);
   });
 });
 

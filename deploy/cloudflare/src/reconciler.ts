@@ -32,6 +32,8 @@ export interface RegistryPage {
 }
 
 const MAX_REGISTRY_PAGES = 100;
+const REGISTRY_TIMEOUT_MS = 5_000;
+const MAX_REGISTRY_BYTES = 256 * 1024;
 const HANDOFF_LEASE_MS = 30_000;
 const REPO_RE = /^[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9])?\/[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9])?$/;
 
@@ -72,33 +74,46 @@ export async function discoverEligibleRepositories(
   for (let pageNumber = 0; pageNumber < MAX_REGISTRY_PAGES; pageNumber++) {
     const url = new URL(base);
     if (cursor) url.searchParams.set("cursor", cursor);
-    const response = await fetcher(url.toString(), {
-      headers: {
-        authorization: `Bearer ${auth}`,
-        accept: "application/json",
-        "user-agent": "corelink-spawn-worker-reconciler",
-      },
-    });
-    if (!response.ok) return null;
-    const body = await response.json() as Partial<RegistryPage>;
-    if (body.schema_version !== 1 || body.source !== "runner_repo_allowlist" || typeof body.snapshot_id !== "string" || body.snapshot_id.length === 0 || !Array.isArray(body.repositories)) return null;
-    if (snapshot === undefined) snapshot = body.snapshot_id;
-    if (snapshot !== body.snapshot_id) return null;
-    for (const entry of body.repositories) {
-      const repo = canonicalRepo(entry.repo_full_name);
-      const install = installationId(entry.installation_id);
-      if (!repo || !install) return null;
-      const prior = found.get(repo);
-      if (prior && prior.installationId !== install) return null;
-      found.set(repo, { repo, installationId: install });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), REGISTRY_TIMEOUT_MS);
+    let response: Response;
+    try {
+      response = await fetcher(url.toString(), {
+        headers: {
+          "x-corelink-internal-auth": auth,
+          accept: "application/json",
+          "user-agent": "corelink-spawn-worker-reconciler",
+        },
+        signal: controller.signal,
+      });
+      if (!response.ok) return null;
+      const bytes = await response.arrayBuffer();
+      if (bytes.byteLength > MAX_REGISTRY_BYTES) return null;
+      const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      const body = JSON.parse(text) as Partial<RegistryPage>;
+      if (body.schema_version !== 1 || body.source !== "runner_repo_allowlist" || typeof body.snapshot_id !== "string" || body.snapshot_id.length === 0 || !Array.isArray(body.repositories)) return null;
+      if (snapshot === undefined) snapshot = body.snapshot_id;
+      if (snapshot !== body.snapshot_id) return null;
+      for (const entry of body.repositories) {
+        const repo = canonicalRepo(entry.repo_full_name);
+        const install = installationId(entry.installation_id);
+        if (!repo || !install) return null;
+        const prior = found.get(repo);
+        if (prior && prior.installationId !== install) return null;
+        found.set(repo, { repo, installationId: install });
+      }
+      const next = body.next_cursor;
+      if (next == null || next === "") {
+        return [...found.values()].sort((a, b) => a.repo.localeCompare(b.repo));
+      }
+      if (typeof next !== "string" || seenCursors.has(next)) return null;
+      seenCursors.add(next);
+      cursor = next;
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timeout);
     }
-    const next = body.next_cursor;
-    if (next == null || next === "") {
-      return [...found.values()].sort((a, b) => a.repo.localeCompare(b.repo));
-    }
-    if (typeof next !== "string" || seenCursors.has(next)) return null;
-    seenCursors.add(next);
-    cursor = next;
   }
   return null;
 }

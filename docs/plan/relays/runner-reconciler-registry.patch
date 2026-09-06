@@ -1,16 +1,24 @@
 diff --git a/worker/src/lib/runner_reconciler_registry.ts b/worker/src/lib/runner_reconciler_registry.ts
 new file mode 100644
+index 0000000..f458019
 --- /dev/null
 +++ b/worker/src/lib/runner_reconciler_registry.ts
-@@
+@@ -0,0 +1,111 @@
 +/**
 + * Installation-scoped recovery inventory for corelink-runners.
 + *
-+ * This is a read-only relay over the existing D1 authority. It never accepts
-+ * a tenant or eligibility flag from the caller. The query joins the verified
-+ * installation map to runner_repo_allowlist and applies the same
-+ * offboarding/entitlement gates as runner_mint.ts before emitting a row.
++ * This is a read-only view over the same D1 authorities used by runner mint:
++ * tenant_gh_installation_map, runner_repo_allowlist, tenant_offboarding_state,
++ * and runners_entitlement. The caller cannot supply a tenant or eligibility
++ * flag; rows are emitted only after those server-side gates pass.
 + */
++import type { Env } from "../index.js";
++import { requireConsumerAuth } from "./internal_auth.js";
++
++const PAGE_SIZE = 100;
++const MAX_CURSOR_LENGTH = 512;
++const REPO_RE = /^[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9])?\/[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9])?$/;
++
 +export interface RunnerReconcilerRegistryRow {
 +  repo_full_name: string;
 +  installation_id: string;
@@ -24,51 +32,148 @@ new file mode 100644
 +  next_cursor: string | null;
 +}
 +
-+export const RUNNER_RECONCILER_REGISTRY_PATH =
-+  "/internal/v1/runner/reconciler-registry";
-diff --git a/worker/src/index.ts b/worker/src/index.ts
---- a/worker/src/index.ts
-+++ b/worker/src/index.ts
-@@
-+  // Add immediately beside the existing runner-mint internal route. The
-+  // consumer uses the dedicated runner-mint/reconciler internal key; do not
-+  // reuse a public tenant PAT or the GitHub token.
-+  if (path === "/internal/v1/runner/reconciler-registry") {
-+    return handleRunnerReconcilerRegistry(request, env);
++function errorResponse(error: string, message: string, status: number, requestId: string): Response {
++  return new Response(JSON.stringify({ error, message, request_id: requestId }), {
++    status,
++    headers: { "content-type": "application/json", "x-request-id": requestId },
++  });
++}
++
++function decodeCursor(raw: string | null): { installationId: string; repo: string } | null {
++  if (raw === null || raw === "") return { installationId: "", repo: "" };
++  if (raw.length > MAX_CURSOR_LENGTH) return null;
++  try {
++    const parsed = JSON.parse(atob(raw)) as { i?: unknown; r?: unknown };
++    if (typeof parsed.i !== "string" || typeof parsed.r !== "string" ||
++        !/^[1-9][0-9]*$/.test(parsed.i) || !REPO_RE.test(parsed.r)) return null;
++    return { installationId: parsed.i, repo: parsed.r };
++  } catch {
++    return null;
 +  }
-diff --git a/worker/src/lib/runner_reconciler_registry.ts b/worker/src/lib/runner_reconciler_registry.ts
---- a/worker/src/lib/runner_reconciler_registry.ts
-+++ b/worker/src/lib/runner_reconciler_registry.ts
-@@
++}
++
++function encodeCursor(row: RunnerReconcilerRegistryRow): string {
++  return btoa(JSON.stringify({ i: row.installation_id, r: row.repo_full_name }));
++}
++
++function snapshotId(): string {
++  // D1 has no transaction spanning paginated HTTP calls. The keyset cursor is
++  // the consistency mechanism; this versioned source marker prevents a caller
++  // from accidentally mixing a future wire contract into the stream.
++  return "runner-repo-allowlist-v1";
++}
++
++export async function queryRunnerReconcilerRegistry(
++  db: D1Database,
++  cursor: { installationId: string; repo: string },
++): Promise<RunnerReconcilerRegistryPage> {
++  const after = cursor.installationId === "" ? "" : cursor.installationId;
++  const afterRepo = cursor.repo;
++  const sql = `SELECT m.installation_id, a.repo_full_name
++    FROM tenant_gh_installation_map m
++    JOIN runner_repo_allowlist a ON a.tenant_id = m.tenant_id
++    JOIN runners_entitlement e ON e.tenant_id = m.tenant_id
++    LEFT JOIN tenant_offboarding_state o ON o.tenant_id = m.tenant_id
++    WHERE o.tenant_id IS NULL
++      AND (m.installation_id > ?1 OR (m.installation_id = ?1 AND a.repo_full_name > ?2))
++    ORDER BY m.installation_id, a.repo_full_name
++    LIMIT ?3`;
++  const result = await db.prepare(sql).bind(after, afterRepo, PAGE_SIZE + 1).all<{ installation_id: string; repo_full_name: string }>();
++  const rows = result.results ?? [];
++  if (rows.some(row => !/^[1-9][0-9]*$/.test(String(row.installation_id)) || !REPO_RE.test(row.repo_full_name))) {
++    throw new Error("runner reconciler registry returned malformed row");
++  }
++  const pageRows = rows.slice(0, PAGE_SIZE).map(row => ({
++    installation_id: String(row.installation_id),
++    repo_full_name: row.repo_full_name.toLowerCase(),
++  }));
++  return {
++    schema_version: 1,
++    source: "runner_repo_allowlist",
++    snapshot_id: snapshotId(),
++    repositories: pageRows,
++    next_cursor: rows.length > PAGE_SIZE ? encodeCursor(pageRows[pageRows.length - 1]!) : null,
++  };
++}
++
 +export async function handleRunnerReconcilerRegistry(
 +  request: Request,
-+  env: RunnerMintEnv,
++  env: Env,
++  requestId: string,
 +): Promise<Response> {
-+  if (request.method !== "GET") return reapiError("METHOD_NOT_ALLOWED", "method not allowed", 405);
-+  const key = resolveRunnerMintKey(env); // same dedicated internal-auth resolver
-+  if (!key) return reapiError("UNAVAILABLE", "unavailable", 503);
-+  if (!constantTimeEqual(request.headers.get("x-corelink-internal-auth") ?? "", key)) {
-+    return reapiError("UNAUTHORIZED", "unauthorized", 401);
++  if (request.method !== "GET") return errorResponse("METHOD_NOT_ALLOWED", "method not allowed", 405, requestId);
++  const authError = requireConsumerAuth(request, env, "runner_mint", requestId);
++  if (authError) return authError;
++  const cursor = decodeCursor(new URL(request.url).searchParams.get("cursor"));
++  if (!cursor) return errorResponse("BAD_REQUEST", "invalid cursor", 400, requestId);
++  try {
++    return new Response(JSON.stringify(await queryRunnerReconcilerRegistry(env.CONFIG_DB, cursor)), {
++      status: 200,
++      headers: { "content-type": "application/json", "x-request-id": requestId },
++    });
++  } catch {
++    return errorResponse("SERVICE_UNAVAILABLE", "runner reconciler registry unavailable", 503, requestId);
 +  }
-+  const cursor = parseBoundedCursor(new URL(request.url).searchParams.get("cursor"));
-+  if (cursor === "invalid") return reapiError("BAD_REQUEST", "invalid cursor", 400);
-+  const page = await queryRunnerReconcilerRegistry(env.CONFIG_DB, cursor);
-+  return json(200, page);
 +}
-@@
-+// The query must be the same authority as runner_mint.ts: tenant_gh_installation_map
-+// (installation → tenant), runner_repo_allowlist (tenant → repo),
-+// tenant_offboarding_state (active only), and runners_entitlement (entitled only).
-+// Order by installation_id, repo_full_name and encode the last pair as the
-+// opaque cursor. Limit is fixed and bounded; no caller-controlled page size.
-+const REGISTRY_PAGE_SIZE = 100;
-+const REGISTRY_SQL = `
-+  SELECT m.installation_id, a.repo_full_name
-+  FROM tenant_gh_installation_map m
-+  JOIN runner_repo_allowlist a ON a.tenant_id = m.tenant_id
-+  JOIN runners_entitlement e ON e.tenant_id = m.tenant_id
-+  LEFT JOIN tenant_offboarding_state o ON o.tenant_id = m.tenant_id
-+  WHERE o.tenant_id IS NULL
-+    AND (m.installation_id, a.repo_full_name) > (?1, ?2)
-+  ORDER BY m.installation_id, a.repo_full_name
-+  LIMIT ${REGISTRY_PAGE_SIZE + 1}`;
+diff --git a/worker/tests/runner_reconciler_registry.test.ts b/worker/tests/runner_reconciler_registry.test.ts
+new file mode 100644
+index 0000000..c76c817
+--- /dev/null
++++ b/worker/tests/runner_reconciler_registry.test.ts
+@@ -0,0 +1,56 @@
++import { describe, expect, it, vi } from "vitest";
++import {
++  handleRunnerReconcilerRegistry,
++  queryRunnerReconcilerRegistry,
++} from "../src/lib/runner_reconciler_registry.js";
++
++const KEY = "k".repeat(32);
++const env = (db: unknown) => ({
++  CONFIG_DB: db,
++  CORELINK_RUNNER_MINT_AUTH_KEY: KEY,
++}) as never;
++
++function db(rows: Array<{ installation_id: string; repo_full_name: string }>) {
++  return {
++    prepare: vi.fn(() => ({
++      bind: vi.fn(() => ({ all: vi.fn(async () => ({ results: rows })) })),
++    })),
++  };
++}
++
++describe("runner reconciler registry", () => {
++  it("uses the installation map plus allowlist and emits a bounded cursor", async () => {
++    const result = await queryRunnerReconcilerRegistry(db([
++      { installation_id: "42", repo_full_name: "acme/a" },
++    ]) as never, { installationId: "", repo: "" });
++    expect(result).toMatchObject({ schema_version: 1, source: "runner_repo_allowlist", next_cursor: null });
++    expect(result.repositories).toEqual([{ installation_id: "42", repo_full_name: "acme/a" }]);
++  });
++
++  it("limits output to 100 rows and returns a stable continuation cursor", async () => {
++    const rows = Array.from({ length: 101 }, (_, i) => ({ installation_id: "42", repo_full_name: `acme/r${String(i).padStart(3, "0")}` }));
++    const result = await queryRunnerReconcilerRegistry(db(rows) as never, { installationId: "", repo: "" });
++    expect(result.repositories).toHaveLength(100);
++    expect(result.next_cursor).toMatch(/^[A-Za-z0-9+/=]+$/);
++  });
++
++  it("requires the exact runner-mint internal-auth consumer", async () => {
++    const response = await handleRunnerReconcilerRegistry(
++      new Request("https://api.invalid/internal/v1/runner/reconciler-registry"),
++      env(db([])),
++      "req-1",
++    );
++    expect(response.status).toBe(401);
++  });
++
++  it("rejects malformed cursors before touching D1", async () => {
++    const database = db([]);
++    const response = await handleRunnerReconcilerRegistry(
++      new Request("https://api.invalid/internal/v1/runner/reconciler-registry?cursor=bad"),
++      env(database),
++      "req-2",
++    );
++    expect(response.status).toBe(400);
++    expect(database.prepare).not.toHaveBeenCalled();
++  });
++});
