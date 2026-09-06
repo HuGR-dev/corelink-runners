@@ -189,7 +189,7 @@ async fn restart_replays_exact_cf_handle_and_mode_for_probe_and_teardown() {
         // Provider confirmation alone does not mutate/release ledger capacity.
         assert_eq!(
             reopened.get("lease-1").unwrap().unwrap().state,
-            LeaseState::Held
+            LeaseState::Wire(corelink_runners_contracts::RunnerState::Held)
         );
     }
 }
