@@ -42,6 +42,10 @@ def check(workflow: str, dockerfile: str, wrangler: str, devenv_dockerfile: str)
             raise ContractError(f"PR trigger path missing: {path}")
     if "  pull_request:\n    paths:" not in workflow or "  workflow_dispatch: {}" not in workflow:
         raise ContractError("image lane must have bounded PR and explicit dispatch triggers")
+    if "uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2" not in workflow:
+        raise ContractError("checkout action must remain pinned to the recorded commit")
+    if "concurrency:\n" not in workflow or "cancel-in-progress: false" not in workflow:
+        raise ContractError("image lane must serialize disk-heavy builds without canceling pushes")
     if workflow.count("if: github.event_name != 'pull_request'") != 3:
         raise ContractError("each registry push must be gated away from pull_request")
     step_blocks = re.findall(r"(?ms)^      - name: ([^\n]+)\n(.*?)(?=^      - name: |\Z)", workflow)
@@ -64,7 +68,9 @@ def check(workflow: str, dockerfile: str, wrangler: str, devenv_dockerfile: str)
     ):
         raise ContractError("disk/tool preflight must run after setup and before image builds")
     if workflow.count("bash scripts/ci/runner-image-build-cleanup.sh") != 3:
-        raise ContractError("each of the three pushed images must release local build state")
+        raise ContractError("each of the three image builds must release local build state")
+    if workflow.count("if: always()") != 3:
+        raise ContractError("each image build needs an always-run cleanup, including PR builds")
     if workflow.count("scripts/ci/resolve-pushed-ref.sh") != 3:
         raise ContractError("each pushed image must resolve an immutable digest")
     if not re.search(r"(?m)^    runs-on: corelink$", workflow):
@@ -98,7 +104,10 @@ class Mutation:
 
 MUTATIONS = (
     Mutation("remove-pr-trigger", "  pull_request:\n    paths:", "  # pull_request removed", "bounded PR and explicit dispatch", "workflow"),
+    Mutation("unpin-checkout", "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2", "actions/checkout@v4", "checkout action must remain pinned", "workflow"),
+    Mutation("remove-concurrency", "concurrency:\n", "# concurrency removed\n", "serialize disk-heavy builds", "workflow"),
     Mutation("remove-push-gate", "if: github.event_name != 'pull_request'", "if: always()", "each registry push must be gated", "workflow"),
+    Mutation("remove-pr-cleanup", "if: always()", "if: never()", "always-run cleanup", "workflow"),
     Mutation("inject-secret-into-build", "- name: Build RunnerContainer image", "- name: Build RunnerContainer image\n        env:\n          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}", "only in push steps", "workflow"),
     Mutation("remove-disk-bound", "bash scripts/ci/runner-image-build-preflight.sh", "bash scripts/ci/missing.sh", "disk/tool preflight", "workflow"),
     Mutation("remove-digest-resolution", "scripts/ci/resolve-pushed-ref.sh", "scripts/ci/missing-ref.sh", "immutable digest", "workflow"),
@@ -116,7 +125,7 @@ def self_test() -> None:
     wrangler = WRANGLER.read_text(encoding="utf-8")
     for mutation in MUTATIONS:
         if mutation.target == "workflow":
-            expected_count = 3 if mutation.name in {"remove-digest-resolution", "remove-push-gate"} else 1
+            expected_count = 3 if mutation.name in {"remove-digest-resolution", "remove-push-gate", "remove-pr-cleanup"} else 1
             if workflow.count(mutation.old) != expected_count:
                 raise ContractError(f"{mutation.name}: target count is not expected")
             mutated = workflow.replace(mutation.old, mutation.new, 1)
