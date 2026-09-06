@@ -2919,6 +2919,20 @@ async function driveSpawn(
   prepared?: ContainerEnvResult,
 ): Promise<ProviderDriveReceipt | void> {
   const { jobId } = opts;
+  const containmentIdentity = isContainmentDrive(opts)
+    ? normalizeRedriveIdentity(opts.repo, opts.jobId)
+    : null;
+  if (isContainmentDrive(opts)) {
+    const observedResourceId = containmentIdentity
+      ? `job:${containmentIdentity.repo}/${containmentIdentity.job_id}`
+      : null;
+    // The receipt identity is independently derived from the actual request
+    // coordinates. It must agree with the durable canonical binding before a
+    // provider effect is attempted; opts.repo itself remains raw for mint.
+    if (!observedResourceId || observedResourceId !== opts.effect_binding.resource_id) {
+      throw new Error("containment resource identity mismatch");
+    }
+  }
   const mint = prepared ?? await prepareSpawn(env, opts);
   // Authorized ⇒ spawn. The GitHub JIT is minted per container-start ATTEMPT
   // inside spawnRunner (see the ghost-container note on `startWithRetry`), not
@@ -2939,7 +2953,9 @@ async function driveSpawn(
       await writeContainmentResultEvidence(env, opts, spawned.attempt);
     }
     return {
-      resource_id: `job:${opts.repo}/${opts.jobId}`,
+      resource_id: containmentIdentity
+        ? `job:${containmentIdentity.repo}/${containmentIdentity.job_id}`
+        : `job:${opts.repo}/${opts.jobId}`,
       receipt_id: spawned.handle,
       provider_signature: spawned.runnerName,
     };
