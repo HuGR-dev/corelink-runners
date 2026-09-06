@@ -130,6 +130,59 @@ This accepts T4-W2 implementation criteria only. It remains prepared rather
 than delivered; F008's recorded delivery count stays 16/70, and no production
 or live qualification is claimed.
 
+## T3-W3 and A3.15 source composition acceptance
+
+T3-W3 is accepted as prepared source at Runner
+`ec10581e36c139c058587d10262cf0963313c72c`; it is not delivered. The composed
+path is registry candidate discovery, positive GitHub installation membership,
+then the existing scan and modern containment reservation path. A configured
+registry that is unreadable, incomplete, or fails membership produces no scan
+and no static-list fallback. Candidate repository spelling is preserved through
+authorize and mint, while containment keys and provider receipt identity are
+derived independently from the canonical repo/job identity. The identity guard
+may run after mint preparation in a prepared redrive, but always runs before a
+provider effect.
+
+The T3 component map is deliberately small: the registry consumer is
+`reconciler.ts`, membership confirmation is `reconciler_membership.ts`, index
+wiring is `index.ts`, and the paired Server registry route is accepted at
+`32f0ae4819c95b93e78dd89ff6b06c937dcd6389` (155/155 plus typecheck). The
+Runner issuer acceptance has three cases and reaches real authorize, mint, JIT,
+container-start mock, and canonical receipt paths. The final focused Runner
+selection passed 14 files / 143 tests and typecheck; retained logs are
+`/private/tmp/corelink-t3-final-evidence/vitest-final.log`
+(`21c54597e8343ffacadc35572bf6decdaa5f3e72c6ba4f9f49f6abb0ddeda583`)
+and `typecheck-final.log`
+(`82643ccc44e5719477952a1167d376e5025923b1ebef38ba9f6705d147262265`).
+
+A3.15's Engine/Worker source pairing is accepted for that criterion only. Its
+Rust fixture stack ends at `5abfe9f2cd10e137c211abe23dfdb5a6696598d9` and its
+Worker companion is `c463d4ed3ddf46efca6850952115c30cfc513b65`; the prior
+controlled Rust gate passed 1/1 and the final Worker conformance tests passed
+2/2 within the 143-test selection. T8-W1 remains partial: A3.14 and
+F007-dependent authority work remain open.
+
+These are source-level acceptance records. T3-W3, T4-W2, and T8-W1 remain
+prepared rather than delivered; the recorded delivery count remains 16/70.
+Sprint 1 is still incomplete because T6-W15 and T9-W1 remain pending, so no
+full CI was run.
+
+## Open T9 and operational authority gates
+
+T9-W1 remains partial. The original D2 quarantine calls its deferral a waiver
+requirement, not a repair; its DoD requires that waiver before merge. The frozen
+shared-compute implementation scope also still requires F005/F007 producers and
+wiring for package completion. The current 503 containment response is therefore
+not a deployment-only block and does not complete T9-W1.
+
+The read-only legacy action card at
+`/private/tmp/corelink-f008-legacy-action-ready.md` records a private,
+hash-qualified inventory of 138 records and the canonical revoke route. Customer
+impact review and human approval remain pending; no revocation was performed.
+The monitor proposal remains at
+`/private/tmp/corelink-monitor-owner-decision-ready.md` without a human
+decision. T6-W15 source is blocked and its seven-day monitor has not started.
+
 ## Earlier integrated packets
 
 The prior packets in this tree include:

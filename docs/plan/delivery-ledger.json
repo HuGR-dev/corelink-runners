@@ -719,26 +719,31 @@
       "id": "T3-W3",
       "sprint": 2,
       "state": "prepared",
-      "implementation": "partial",
+      "implementation": "complete",
       "owner": "wp_t3_w3",
       "dependencies": [
         "T4-W2"
       ],
-      "next_action": "Paired server relay is applied in isolated dependency integration; owner already authorized bounded sibling edits. Finish composed canonical WP acceptance; no renewed permission exception pending.",
+      "next_action": "Implementation criteria accepted at canonical composition. Keep the package prepared: Sprint 1 remains incomplete, so there is no delivery credit or full-CI gate.",
       "blockers": [],
       "commits": [
         "e39d7a0f5078215396c58cf08fd4a6bd4adb4ecd",
         "31ab8b9c7c83b39572051eea0825808a620a61ca",
         "2c0114e89fecb21cee52be55aceac663aeb75965",
-        "77cb30f6c5627c56d582d9d3c65f2d76295e9474"
+        "77cb30f6c5627c56d582d9d3c65f2d76295e9474",
+        "ec10581e36c139c058587d10262cf0963313c72c"
       ],
       "review": {
-        "status": "pending",
-        "commit": null,
-        "evidence": []
+        "status": "approved",
+        "commit": "ec10581e36c139c058587d10262cf0963313c72c",
+        "evidence": [
+          "Independent T3 review accepted registry candidate discovery, positive installation membership, raw issuer spelling, and canonical containment identity."
+        ]
       },
       "evidence": [
-        "docs/handoff/2026-09-06-techlead-takeover.md"
+        "docs/handoff/2026-09-06-techlead-takeover.md",
+        "/private/tmp/corelink-t3-final-evidence/vitest-final.log",
+        "/private/tmp/corelink-t3-final-evidence/typecheck-final.log"
       ]
     },
     {
@@ -750,7 +755,7 @@
       "dependencies": [
         "T3-W3"
       ],
-      "next_action": "Source review approved; hold isolated candidate until canonical predecessor composition, then verify composed Sprint2. Authored Rust tests have not executed.",
+      "next_action": "T3-W3 predecessor is now satisfied at source composition. Keep this prepared until the remaining Sprint and production gates allow delivery.",
       "blockers": [],
       "commits": [
         "a6d04957d1b48b0f9a74e9a5fef4f13e7886d0ba",
@@ -801,19 +806,26 @@
       "dependencies": [
         "T3-W2"
       ],
-      "next_action": "A3.16 source reviewed with production DO/caller100-request evidence. Close A3.14 required-enrichment ordering and A3.15 paired engine/Worker credential domains before whole-WP approval.",
+      "next_action": "A3.15 paired engine/Worker source criterion is accepted. A3.14 required-enrichment ordering and F007-dependent lifecycle authority still block whole-WP approval.",
       "blockers": [],
       "commits": [
         "61cfc0435837c3fd16006566ab4cdc6b12b3fff4",
         "7b9fa1cd0baacb8e4d4e5cfdeb0e0cbedf6209ae",
-        "2053a7221e3a1fdabdbb3c53113d3a6741acfe0f"
+        "2053a7221e3a1fdabdbb3c53113d3a6741acfe0f",
+        "ec10581e36c139c058587d10262cf0963313c72c"
       ],
       "review": {
-        "status": "pending",
-        "commit": null,
-        "evidence": []
+        "status": "partial",
+        "commit": "ec10581e36c139c058587d10262cf0963313c72c",
+        "evidence": [
+          "A3.15 engine/Worker control-wire pairing accepted; this is not whole-T8-W1 approval."
+        ]
       },
-      "evidence": []
+      "evidence": [
+        "conformance/engine-worker-control-requests.json",
+        "deploy/cloudflare/test/engine-control-conformance.test.ts",
+        "/private/tmp/corelink-t3-final-evidence/vitest-final.log"
+      ]
     },
     {
       "id": "T8-W3",
