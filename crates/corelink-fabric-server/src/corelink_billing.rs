@@ -772,11 +772,11 @@ mod tests {
     fn fabric_billing_wire_fixture_is_byte_identical_and_retries_identically() {
         let t = target(RecordingPoster::scripted(vec![503, 200]));
         t.buffer.lock().unwrap().push(UsageEventData {
-            tenant_id: "tenant-fixed".into(), event_kind: RUNNER_SLOT_SECONDS_KIND.into(), qty: 3,
+            tenant_id: "3fa85f64-5717-4562-b3fc-2c963f66afa6".into(), event_kind: RUNNER_SLOT_SECONDS_KIND.into(), qty: 3,
             billing_period: "2026-06".into(), region: "iad".into(), source: BILLING_SOURCE.into(),
             time_ms: 1_781_524_800_000, idem_key: idem_key("lease-fixed", "2026-06"),
         });
-        let expected = include_str!("../conformance/fabric-billing-wire.json").trim_end();
+        let expected = include_str!("../conformance/fabric-billing-wire.json");
         assert!(t.flush().is_err());
         t.flush().unwrap();
         let bodies = t.poster.bodies();
