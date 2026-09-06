@@ -4569,6 +4569,23 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       return json({ counters: await snapshotMetrics(env) }, 200);
     }
 
+    // Authenticated fabric suspension signal. The producer is fabricd's
+    // durable suspension outbox and uses the existing spawn control bearer;
+    // this route is never public or tenant-authenticated.
+    if (request.method === "POST" && pathname === "/internal/v1/tenant-suspension") {
+      if (!authed(request, env)) return unauthorized();
+      let body: { event_id?: string; tenant_id?: string; action?: string };
+      try { body = (await request.json()) as typeof body; } catch { return json({ error: "invalid JSON body" }, 400); }
+      if (body.action !== "suspended" || !body.event_id || !body.tenant_id) return json({ error: "invalid suspension event" }, 400);
+      try {
+        const dispatched = await dispatchTenantSuspensionRevocations(env, { event_id: body.event_id, tenant_id: body.tenant_id });
+        return json({ ok: true, event_id: body.event_id, dispatched }, 200);
+      } catch (e) {
+        logEvent("error", "tenant_suspension_dispatch_failed", { eventId: body.event_id, error: (e as Error).message });
+        return json({ error: "suspension dispatch unavailable" }, 503);
+      }
+    }
+
     // ── POST /internal/v1/containment/drain — admin resume request ──────────
     if (request.method === "POST" && pathname === "/internal/v1/containment/drain") {
       const key = env.CONTAINMENT_ADMIN_KEY ?? "";

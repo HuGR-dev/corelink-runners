@@ -193,6 +193,16 @@ CREATE TABLE IF NOT EXISTS compute_accrual (
 -- cross-instance source of truth read on a cache miss at N>1.
 CREATE TABLE IF NOT EXISTS fabric_suspended_tenants (
   tenant_id text PRIMARY KEY);
+-- Durable suspension delivery outbox. The suspension row and this event are
+-- written in one transaction; delivery is retried until the Worker ACKs.
+CREATE TABLE IF NOT EXISTS tenant_suspension_events (
+  event_id text PRIMARY KEY,
+  tenant_id text NOT NULL,
+  created_at_ms bigint NOT NULL,
+  attempts int NOT NULL DEFAULT 0,
+  delivered_at_ms bigint);
+CREATE INDEX IF NOT EXISTS tenant_suspension_events_pending_idx
+  ON tenant_suspension_events (created_at_ms) WHERE delivered_at_ms IS NULL;
 -- Pending-cleanup ownership is ledger-internal: a cleanup claim never changes
 -- the public lifecycle state.  The FK makes final lease deletion clear the
 -- claim exactly once, including old rollback paths.
@@ -529,6 +539,58 @@ impl LeaseLedger for PgLedger {
                     )
                     .await?;
             }
+            Ok(())
+        })
+    }
+
+    fn record_tenant_suspension(
+        &self,
+        event: corelink_fabric::TenantSuspensionEvent,
+    ) -> anyhow::Result<()> {
+        self.block_on(async {
+            let mut client = self.pool.get().await?;
+            let txn = client.transaction().await?;
+            txn.execute(
+                "INSERT INTO fabric_suspended_tenants (tenant_id) VALUES ($1) ON CONFLICT DO NOTHING",
+                &[&event.tenant_id],
+            ).await?;
+            txn.execute(
+                "INSERT INTO tenant_suspension_events (event_id, tenant_id, created_at_ms) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+                &[&event.event_id, &event.tenant_id, &(event.created_at_ms as i64)],
+            ).await?;
+            txn.commit().await?;
+            Ok(())
+        })
+    }
+
+    fn pending_tenant_suspension_events(
+        &self,
+        limit: usize,
+    ) -> anyhow::Result<Vec<corelink_fabric::TenantSuspensionEvent>> {
+        self.block_on(async {
+            let client = self.pool.get().await?;
+            let rows = client.query(
+                "SELECT event_id, tenant_id, created_at_ms, attempts FROM tenant_suspension_events WHERE delivered_at_ms IS NULL ORDER BY created_at_ms LIMIT $1",
+                &[&(limit.min(1000) as i64)],
+            ).await?;
+            rows.into_iter().map(|row| Ok(corelink_fabric::TenantSuspensionEvent {
+                event_id: row.get(0), tenant_id: row.get(1), created_at_ms: row.get::<_, i64>(2) as u64, attempts: row.get::<_, i32>(3).max(0) as u32,
+            })).collect()
+        })
+    }
+
+    fn mark_tenant_suspension_event_delivered(&self, event_id: &str) -> anyhow::Result<()> {
+        self.block_on(async {
+            let client = self.pool.get().await?;
+            client.execute("UPDATE tenant_suspension_events SET delivered_at_ms = (extract(epoch from clock_timestamp()) * 1000)::bigint WHERE event_id = $1 AND delivered_at_ms IS NULL", &[&event_id]).await?;
+            Ok(())
+        })
+    }
+
+    fn mark_tenant_suspension_event_attempt(&self, event_id: &str) -> anyhow::Result<()> {
+        self.block_on(async {
+            let client = self.pool.get().await?;
+            client.execute("UPDATE tenant_suspension_events SET attempts = attempts + 1 WHERE event_id = $1 AND delivered_at_ms IS NULL", &[&event_id]).await?;
             Ok(())
         })
     }

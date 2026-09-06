@@ -125,6 +125,92 @@ use corelink_fabric::SlotEventKind;
 use corelink_runner::envelope::{AbnormalKind, CloseReason};
 use corelink_runners_contracts::RunnerState;
 
+/// Deliver the durable suspension outbox to the authenticated runner Worker.
+/// The URL/token are existing Cloudflare spawn bindings forwarded into the
+/// fabric container; absent configuration leaves the outbox pending.
+pub async fn dispatch_tenant_suspension_events(state: &crate::AppState) {
+    let Some(base) = std::env::var("CLOUDFLARE_SPAWN_WORKER_URL")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+    else {
+        return;
+    };
+    let Some(token) = std::env::var("CLOUDFLARE_SPAWN_AUTH_TOKEN")
+        .ok()
+        .filter(|v| !v.is_empty())
+    else {
+        return;
+    };
+    let events = match state.ledger.pending_tenant_suspension_events(32) {
+        Ok(events) => events,
+        Err(e) => {
+            eprintln!("suspension-outbox: read failed: {e:#}");
+            return;
+        }
+    };
+    let url = format!(
+        "{}/internal/v1/tenant-suspension",
+        base.trim_end_matches('/')
+    );
+    for event in events {
+        if let Err(e) = state
+            .ledger
+            .mark_tenant_suspension_event_attempt(&event.event_id)
+        {
+            eprintln!(
+                "suspension-outbox: attempt stamp failed event={}: {e:#}",
+                event.event_id
+            );
+            continue;
+        }
+        let body = match serde_json::to_string(&serde_json::json!({
+            "event_id": event.event_id,
+            "tenant_id": event.tenant_id,
+            "action": "suspended",
+        })) {
+            Ok(body) => body,
+            Err(e) => {
+                eprintln!("suspension-outbox: encode failed: {e}");
+                continue;
+            }
+        };
+        let url = url.clone();
+        let token = token.clone();
+        let delivered = tokio::task::spawn_blocking(move || {
+            let agent: ureq::Agent = ureq::Agent::config_builder()
+                .timeout_global(Some(Duration::from_secs(5)))
+                .http_status_as_error(false)
+                .build()
+                .into();
+            agent
+                .post(&url)
+                .header("Authorization", &format!("Bearer {token}"))
+                .header("Content-Type", "application/json")
+                .send(&body)
+                .map(|r| (200..300).contains(&r.status().as_u16()))
+                .unwrap_or(false)
+        })
+        .await
+        .unwrap_or(false);
+        if delivered {
+            if let Err(e) = state
+                .ledger
+                .mark_tenant_suspension_event_delivered(&event.event_id)
+            {
+                eprintln!(
+                    "suspension-outbox: ack failed event={}: {e:#}",
+                    event.event_id
+                );
+            }
+        } else {
+            eprintln!(
+                "suspension-outbox: delivery failed event={} tenant={} attempt={}",
+                event.event_id, event.tenant_id, event.attempts
+            );
+        }
+    }
+}
+
 /// §13.5 best-effort partial-envelope flush on an ABNORMAL lease termination
 /// (Expired / Crashed), fire-and-forget.
 ///
@@ -601,6 +687,7 @@ pub fn spawn_reaper_with_pending_age(
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tick.tick().await;
+            dispatch_tenant_suspension_events(&state).await;
             let n = reap_once(&state).await;
             if n > 0 {
                 eprintln!("reaper: expired+reclaimed {n} overdue lease(s)");

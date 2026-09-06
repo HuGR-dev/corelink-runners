@@ -78,7 +78,7 @@ pub use global_gate::{
 pub use interference::{TenantWaitStats, WaitSnapshot};
 pub use ledger::{
     AdmitLedger, AdmitOutcome, ComputeGate, FileLedger, InMemoryLedger, LeaseLedger, LeaseRecord,
-    LeaseState,
+    LeaseState, TenantSuspensionEvent,
 };
 pub use lifecycle::{BoxProbe, LeaseLifecycle};
 pub use meter::{CogsCounters, SlotEventKind, SlotOccupancyEvent};

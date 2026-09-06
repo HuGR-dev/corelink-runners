@@ -97,6 +97,16 @@ pub struct LeaseRecord {
     pub billing_acquired_at_ms: Option<u64>,
 }
 
+/// Durable control-plane signal consumed by the runner Worker. Ledger-internal;
+/// it never changes the frozen lease wire contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TenantSuspensionEvent {
+    pub event_id: String,
+    pub tenant_id: String,
+    pub created_at_ms: u64,
+    pub attempts: u32,
+}
+
 /// Legal-transition matrix — contract §1, nothing else:
 ///
 /// | from \ to  | Held | Released | Expired | Crashed |
@@ -249,6 +259,30 @@ pub trait LeaseLedger {
     /// at N>1 (a suspended tenant is blocked on EVERY shard, not just the one that
     /// received the suspend). `&self`: pg writes via its pool; no `&mut` needed.
     fn set_tenant_suspended(&self, _tenant: &str, _suspended: bool) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn enqueue_tenant_suspension_event(&self, _event: TenantSuspensionEvent) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// Durable suspension state plus its delivery event. PostgreSQL overrides
+    /// this with one transaction so a suspension can never commit without a
+    /// revoke signal.
+    fn record_tenant_suspension(&self, event: TenantSuspensionEvent) -> anyhow::Result<()> {
+        self.set_tenant_suspended(&event.tenant_id, true)?;
+        self.enqueue_tenant_suspension_event(event)
+    }
+
+    fn pending_tenant_suspension_events(&self, _limit: usize) -> anyhow::Result<Vec<TenantSuspensionEvent>> {
+        Ok(Vec::new())
+    }
+
+    fn mark_tenant_suspension_event_delivered(&self, _event_id: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn mark_tenant_suspension_event_attempt(&self, _event_id: &str) -> anyhow::Result<()> {
         Ok(())
     }
 

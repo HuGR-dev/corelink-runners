@@ -1652,6 +1652,34 @@ impl AppState {
         changed
     }
 
+    /// Record a newly observed suspension and its durable Worker-delivery
+    /// event. The PgLedger implementation commits both rows atomically.
+    pub(crate) fn record_tenant_suspension_event(
+        &self,
+        tenant: &TenantId,
+        now_ms: u64,
+    ) -> anyhow::Result<()> {
+        self.ledger
+            .record_tenant_suspension(corelink_fabric::TenantSuspensionEvent {
+                event_id: format!("tenant-suspended:{}:{}", tenant.as_str(), now_ms),
+                tenant_id: tenant.as_str().to_string(),
+                created_at_ms: now_ms,
+                attempts: 0,
+            })
+    }
+
+    pub(crate) fn suspend_tenant_with_event(&self, tenant: &TenantId, now_ms: u64) -> bool {
+        let changed = self
+            .suspended_tenants
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(tenant.as_str().to_string());
+        if let Err(e) = self.record_tenant_suspension_event(tenant, now_ms) {
+            eprintln!("suspend_tenant({tenant}): durable state/event write FAILED: {e:#}");
+        }
+        changed
+    }
+
     /// Track-C AUP1: lift a tenant's suspension (idempotent). `true` iff the
     /// tenant WAS suspended (a real state change).
     pub(crate) fn unsuspend_tenant(&self, tenant: &TenantId) -> bool {
