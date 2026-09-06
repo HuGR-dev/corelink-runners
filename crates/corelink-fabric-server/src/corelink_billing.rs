@@ -768,6 +768,21 @@ mod tests {
         assert_eq!(target.buffered(), 100_000);
     }
 
+    #[test]
+    fn fabric_billing_wire_fixture_is_byte_identical_and_retries_identically() {
+        let t = target(RecordingPoster::scripted(vec![503, 200]));
+        t.buffer.lock().unwrap().push(UsageEventData {
+            tenant_id: "tenant-fixed".into(), event_kind: RUNNER_SLOT_SECONDS_KIND.into(), qty: 3,
+            billing_period: "2026-06".into(), region: "iad".into(), source: BILLING_SOURCE.into(),
+            time_ms: 1_781_524_800_000, idem_key: idem_key("lease-fixed", "2026-06"),
+        });
+        let expected = include_str!("../conformance/fabric-billing-wire.json").trim_end();
+        assert!(t.flush().is_err());
+        t.flush().unwrap();
+        let bodies = t.poster.bodies();
+        assert_eq!(bodies, vec![expected.to_string(), expected.to_string()]);
+    }
+
     /// An empty flush is a no-op success (no POST).
     #[test]
     fn empty_flush_is_noop() {
