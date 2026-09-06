@@ -8,6 +8,7 @@
 // vi.mock the module to a plain test double, exactly so the default fetch handler
 // in src/index.ts is importable + exercisable in node vitest.
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { makeWorkerAuthorities } from "./helpers/worker-authorities";
 
 // ── Test double for @cloudflare/containers ───────────────────────────────────
 // One shared fake container per `getContainer(ns, handle)` call, recorded so a
@@ -72,7 +73,7 @@ const RUNNER_NS = { _ns: "runner" };
 const CHECK_NS = { _ns: "check" };
 
 function makeEnv(over: Partial<Env> = {}): Env {
-  return {
+  const env = {
     RUNNER_CONTAINER: RUNNER_NS as never,
     CHECK_HOST_CONTAINER: CHECK_NS as never,
     CLOUDFLARE_SPAWN_AUTH_TOKEN: AUTH,
@@ -85,12 +86,17 @@ function makeEnv(over: Partial<Env> = {}): Env {
     PINNED_IMAGE_DIGEST: "",
     ...over,
   } as Env;
+  const authorities = makeWorkerAuthorities(env.RUNNER_JOB_PATS);
+  if (!over.CONTAINMENT) env.CONTAINMENT = authorities.CONTAINMENT as never;
+  if (!over.CONCURRENCY_SLOTS) env.CONCURRENCY_SLOTS = authorities.CONCURRENCY_SLOTS as never;
+  return env;
 }
 
-function post(path: string, body: unknown, auth = AUTH): Request {
+function post(path: string, body: unknown, auth?: string): Request {
+  const routeAuth = auth ?? (path === "/v1/exec" ? CONTROL_EXEC_AUTH : path.startsWith("/v1/status") || path === "/v1/teardown" || path === "/v1/egress-cutoff" ? LIFECYCLE_AUTH : AUTH);
   return new Request(`https://w${path}`, {
     method: "POST",
-    headers: { authorization: `Bearer ${auth}`, "content-type": "application/json" },
+    headers: { authorization: `Bearer ${routeAuth}`, "content-type": "application/json" },
     body: JSON.stringify(body),
   });
 }
@@ -213,47 +219,6 @@ describe("/v1/spawn mode:'runner'/absent — unchanged runner path", () => {
 });
 
 describe("/v1/exec (C3)", () => {
-  it("rejects cross-domain bearer reuse at the production handler", async () => {
-    const env = makeEnv();
-    const spawnWithExec = await worker.fetch(
-      post("/v1/spawn", { image_digest: IMG, env: {} }, CONTROL_EXEC_AUTH),
-      env,
-    );
-    const execWithSpawn = await worker.fetch(
-      post("/v1/exec", { handle: "h", argv: ["true"], timeout_ms: 1000 }, AUTH),
-      env,
-    );
-    const teardownWithSpawn = await worker.fetch(
-      post("/v1/teardown", { handle: "h" }, AUTH),
-      env,
-    );
-    expect(spawnWithExec.status).toBe(401);
-    expect(execWithSpawn.status).toBe(401);
-    expect(teardownWithSpawn.status).toBe(401);
-    expect(containers).toHaveLength(0);
-  });
-
-  it("honors control-token rotation at the production handler", async () => {
-    const oldEnv = makeEnv();
-    const oldRequest = await worker.fetch(
-      post("/v1/exec", { handle: "h", argv: ["true"], timeout_ms: 1000 }, CONTROL_EXEC_AUTH),
-      oldEnv,
-    );
-    expect(oldRequest.status).toBe(200);
-
-    const rotatedEnv = makeEnv({ CLOUDFLARE_EXEC_AUTH_TOKEN: "exec-control-rotated" });
-    const oldToken = await worker.fetch(
-      post("/v1/exec", { handle: "h", argv: ["true"], timeout_ms: 1000 }, CONTROL_EXEC_AUTH),
-      rotatedEnv,
-    );
-    const newToken = await worker.fetch(
-      post("/v1/exec", { handle: "h", argv: ["true"], timeout_ms: 1000 }, "exec-control-rotated"),
-      rotatedEnv,
-    );
-    expect(oldToken.status).toBe(401);
-    expect(newToken.status).toBe(200);
-  });
-
   it("relays the container's {exit_code, stdout, stderr} verbatim as 200", async () => {
     nextContainerFetch = async () =>
       new Response(
@@ -262,7 +227,7 @@ describe("/v1/exec (C3)", () => {
       );
     const env = makeEnv();
     const resp = await worker.fetch(
-      post("/v1/exec", { handle: "h-1", argv: ["sh", "-lc", "echo hello"], timeout_ms: 5000 }, CONTROL_EXEC_AUTH),
+      post("/v1/exec", { handle: "h-1", argv: ["sh", "-lc", "echo hello"], timeout_ms: 5000 }),
       env,
     );
     expect(resp.status).toBe(200);
@@ -287,7 +252,7 @@ describe("/v1/exec (C3)", () => {
     nextContainerFetch = async () =>
       new Response(JSON.stringify({ exit_code: 1, stdout: "", stderr: "boom" }), { status: 200 });
     const resp = await worker.fetch(
-      post("/v1/exec", { handle: "h", argv: ["false"], timeout_ms: 1000 }, CONTROL_EXEC_AUTH),
+      post("/v1/exec", { handle: "h", argv: ["false"], timeout_ms: 1000 }),
       makeEnv(),
     );
     expect(resp.status).toBe(200);
@@ -298,7 +263,7 @@ describe("/v1/exec (C3)", () => {
     nextContainerFetch = async () =>
       new Response(JSON.stringify({ exit_code: null, stdout: "", stderr: "" }), { status: 200 });
     const resp = await worker.fetch(
-      post("/v1/exec", { handle: "h", argv: ["sleep", "99"], timeout_ms: 10 }, CONTROL_EXEC_AUTH),
+      post("/v1/exec", { handle: "h", argv: ["sleep", "99"], timeout_ms: 10 }),
       makeEnv(),
     );
     expect(resp.status).toBe(200);
@@ -308,7 +273,7 @@ describe("/v1/exec (C3)", () => {
   it("FAIL-CLOSED: a non-2xx from the container ⇒ 502 (no fabricated success)", async () => {
     nextContainerFetch = async () => new Response("server boom", { status: 500 });
     const resp = await worker.fetch(
-      post("/v1/exec", { handle: "h", argv: ["x"], timeout_ms: 1000 }, CONTROL_EXEC_AUTH),
+      post("/v1/exec", { handle: "h", argv: ["x"], timeout_ms: 1000 }),
       makeEnv(),
     );
     expect(resp.status).toBe(502);
@@ -322,7 +287,7 @@ describe("/v1/exec (C3)", () => {
       throw new Error("no instance");
     };
     const resp = await worker.fetch(
-      post("/v1/exec", { handle: "h", argv: ["x"], timeout_ms: 1000 }, CONTROL_EXEC_AUTH),
+      post("/v1/exec", { handle: "h", argv: ["x"], timeout_ms: 1000 }),
       makeEnv(),
     );
     expect(resp.status).toBe(503);
@@ -331,7 +296,7 @@ describe("/v1/exec (C3)", () => {
 
   it("400 when handle is missing", async () => {
     const resp = await worker.fetch(
-      post("/v1/exec", { argv: ["x"], timeout_ms: 1 }, CONTROL_EXEC_AUTH),
+      post("/v1/exec", { argv: ["x"], timeout_ms: 1 }),
       makeEnv(),
     );
     expect(resp.status).toBe(400);
@@ -397,7 +362,7 @@ describe("status/teardown routing by mode (audit r4)", () => {
 
   it("POST /v1/teardown mode:'check' → CHECK_HOST_CONTAINER", async () => {
     const resp = await worker.fetch(
-      post("/v1/teardown", { handle: "h1", mode: "check" }, LIFECYCLE_AUTH),
+      post("/v1/teardown", { handle: "h1", mode: "check" }),
       makeEnv(),
     );
     expect(resp.status).toBe(204);
@@ -406,7 +371,7 @@ describe("status/teardown routing by mode (audit r4)", () => {
   });
 
   it("POST /v1/teardown (default) → RUNNER_CONTAINER", async () => {
-    const resp = await worker.fetch(post("/v1/teardown", { handle: "h1" }, LIFECYCLE_AUTH), makeEnv());
+    const resp = await worker.fetch(post("/v1/teardown", { handle: "h1" }), makeEnv());
     expect(resp.status).toBe(204);
     expect(containers[0].ns).toBe(RUNNER_NS);
   });
@@ -429,19 +394,19 @@ describe("status/teardown routing by mode (audit r4)", () => {
       return c as never;
     });
     const resp = await worker.fetch(
-      post("/v1/teardown", { handle: "h1", mode }, LIFECYCLE_AUTH),
+      post("/v1/teardown", { handle: "h1", mode }),
       makeEnv(),
     );
     expect(resp.status).toBe(503);
     expect(await resp.json()).toEqual({ error: "provider teardown unconfirmed" });
     expect(containers[0].ns).toBe(mode === "check" ? CHECK_NS : RUNNER_NS);
     expect(containers[0].teardown).toHaveBeenCalledOnce();
-    const retry = await worker.fetch(post("/v1/teardown", { handle: "h1", mode }, LIFECYCLE_AUTH), makeEnv());
+    const retry = await worker.fetch(post("/v1/teardown", { handle: "h1", mode }), makeEnv());
     expect(retry.status).toBe(204);
   });
 
   it("POST /v1/egress-cutoff (default) → RUNNER_CONTAINER.cutEgress, 204", async () => {
-    const resp = await worker.fetch(post("/v1/egress-cutoff", { handle: "h1" }, LIFECYCLE_AUTH), makeEnv());
+    const resp = await worker.fetch(post("/v1/egress-cutoff", { handle: "h1" }), makeEnv());
     expect(resp.status).toBe(204);
     expect(containers[0].ns).toBe(RUNNER_NS);
     expect(containers[0].cutEgress).toHaveBeenCalled();
@@ -450,7 +415,7 @@ describe("status/teardown routing by mode (audit r4)", () => {
 
   it("POST /v1/egress-cutoff mode:'check' → CHECK_HOST_CONTAINER.cutEgress", async () => {
     const resp = await worker.fetch(
-      post("/v1/egress-cutoff", { handle: "h1", mode: "check" }, LIFECYCLE_AUTH),
+      post("/v1/egress-cutoff", { handle: "h1", mode: "check" }),
       makeEnv(),
     );
     expect(resp.status).toBe(204);

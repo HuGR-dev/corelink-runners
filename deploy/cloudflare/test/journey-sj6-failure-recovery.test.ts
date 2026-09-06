@@ -20,6 +20,7 @@
 //
 // NEW FILE. Does NOT touch any other test file.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { makeWorkerAuthorities } from "./helpers/worker-authorities";
 
 // ── Test double for @cloudflare/containers (mirrors webhook-route.test.ts) ─────
 interface FakeContainer {
@@ -158,6 +159,7 @@ const MINT_KEY = "mint-internal-key";
 
 // ── A configurable global-fetch router for every external call the drive makes ─
 //    POST …/actions/runners/generate-jitconfig   (GitHub JIT mint)   → jitStatus
+//    POST …/internal/v1/runner/authorize         (server tenant/cap) → 200
 //    POST …/internal/v1/runner/mint              (CAS-PAT warm mint) → mintStatus
 //    POST …/internal/v1/runner/revoke            (D-9 PAT revoke)    → 200
 //    GET  …/actions/runs?status=queued           (reconciler scan)   → ghRuns
@@ -185,6 +187,9 @@ function installFetchRouter() {
       if (url.includes("generate-jitconfig")) {
         if (jitStatus !== 200) return new Response("jit mint failed", { status: jitStatus });
         return new Response(JSON.stringify({ encoded_jit_config: "jit-encoded-xyz" }), { status: 200 });
+      }
+      if (url.includes("/internal/v1/runner/authorize")) {
+        return new Response(JSON.stringify({ tenant: "acme", max_concurrency: 5 }), { status: 200 });
       }
       if (url.includes("/internal/v1/runner/mint")) {
         if (mintStatus === 403) return new Response("mint forbidden", { status: 403 });
@@ -256,7 +261,7 @@ async function queuedWebhook(
 }
 
 function baseEnv(over: Partial<Env> = {}): Env {
-  return {
+  const env = {
     RUNNER_CONTAINER: RUNNER_NS as never,
     CHECK_HOST_CONTAINER: CHECK_NS as never,
     CLOUDFLARE_SPAWN_AUTH_TOKEN: "spawn-secret",
@@ -267,6 +272,10 @@ function baseEnv(over: Partial<Env> = {}): Env {
     PINNED_IMAGE_DIGEST: "",
     ...over,
   } as Env;
+  const authorities = makeWorkerAuthorities(env.RUNNER_JOB_PATS);
+  if (!over.CONTAINMENT) env.CONTAINMENT = authorities.CONTAINMENT as never;
+  if (!over.CONCURRENCY_SLOTS) env.CONCURRENCY_SLOTS = authorities.CONCURRENCY_SLOTS as never;
+  return env;
 }
 
 // Env armed for a WARM mint (env-0): mint key + fabric public URL + a CRED_STASH.
