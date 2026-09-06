@@ -78,7 +78,7 @@ concurrency:
   # Image materialization is disk-heavy and all three tags are tied to this
   # run's SHA. Queue, rather than cancel, an operator dispatch so a successful
   # push cannot be interrupted halfway through registry publication.
-  group: build-cf-container-images-${{ github.workflow }}-${{ github.ref }}
+  group: corelink-runners-image-builder
   cancel-in-progress: false
 
 env:
