@@ -34,12 +34,14 @@ export function parseSourceCursor(input: unknown, registration?: SourceRegistrat
     && typeof input.quarantined === "boolean" && tupleValid && ((tuple === null) === (input.lastLifecycleNonce === null))
     && ["healthy", "failed", "unknown"].includes(String(input.sourceHealth)) && text(input.sourceReason);
   if (!valid) throw new ValidationError("invalid source cursor");
+  if (!nonnegative(input.lastScheduledFor)) throw new ValidationError("invalid source cursor");
+  const lastScheduledFor = input.lastScheduledFor;
   if (registration) {
     const lifecycleRegistration = registration.allowedKinds.length === 1 && registration.allowedKinds[0] === "canary-lifecycle";
     const scheduleValid = registration.intervalMs === null
       ? input.expectedAt === null
-      : input.lastScheduledFor <= Number.MAX_SAFE_INTEGER - registration.intervalMs
-        && input.expectedAt === input.lastScheduledFor + registration.intervalMs;
+      : lastScheduledFor <= Number.MAX_SAFE_INTEGER - registration.intervalMs
+        && input.expectedAt === lastScheduledFor + registration.intervalMs;
     const scopeValid = [input.source, input.service, input.application].every((x, i) => x === [registration.source, registration.service, registration.application][i]);
     const authorityValid = tuple === null || (registration.authoritySourceId !== null && tuple[0] === registration.authoritySourceId && tuple[5] === registration.sourceVersion);
     if (!scopeValid || (!lifecycleRegistration && (tuple !== null || input.lastLifecycleNonce !== null))
