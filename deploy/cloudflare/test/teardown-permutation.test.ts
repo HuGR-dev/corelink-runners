@@ -125,7 +125,7 @@ function installFetchRouter() {
       }
       if (url.includes("/internal/v1/runner/adopt")) {
         const body = JSON.parse(String(init?.body ?? "{}")) as { operation_id?: unknown; pat_id?: unknown };
-        return issuedOperations.get(String(body.operation_id)) === body.pat_id
+        return typeof body.pat_id === "string" && issuedOperations.get(String(body.operation_id)) === body.pat_id
           ? new Response(null, { status: 204 })
           : new Response("adoption mismatch", { status: 400 });
       }
