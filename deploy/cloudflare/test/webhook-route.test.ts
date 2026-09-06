@@ -270,7 +270,7 @@ describe("/webhook queued — authentication gate (real HMAC)", () => {
   });
 });
 
-describe("/webhook queued — the happy-path spawn orchestration (COLD)", () => {
+describe("/webhook queued — the authenticated spawn orchestration", () => {
   it("claims → mints the GitHub JIT → issues the runner spawn → moves golden metrics", async () => {
     const kv = fakeKv();
     const metrics = fakeMetrics();
@@ -318,6 +318,9 @@ describe("/webhook queued — the happy-path spawn orchestration (COLD)", () => 
     await drain(firstCtx);
     const firstFetches = fetchCalls.length;
     const firstContainers = containers.length;
+    expect(firstContainers).toBe(1);
+    expect(jitCalls()).toHaveLength(1);
+    expect(mintCalls()).toHaveLength(1);
 
     const secondCtx = makeCtx();
     const resp = await queuedWebhook(env, secondCtx, { jobId: "1002", repo: "acme/api", installationId: 555, deliveryId: "delivery-1002" });

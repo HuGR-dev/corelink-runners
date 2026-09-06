@@ -4847,6 +4847,8 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         if (!installationId) installationId = installationIdForRepo(env.REPO_INSTALLATION_MAP, repo);
         if (installationAllowlistArmed(env.INSTALLATION_ALLOWLIST)
           && !isInstallationAllowlisted(env.INSTALLATION_ALLOWLIST, installationId)) {
+          logEvent("info", "webhook_installation_not_allowlisted", { jobId, repo, installationId });
+          ctx.waitUntil(bumpMetrics(env, "webhook_installation_not_allowlisted"));
           return json({ ok: true, ignored: "installation not allowlisted", job_id: jobId }, 202);
         }
         let intake: ContainmentSwitch;
