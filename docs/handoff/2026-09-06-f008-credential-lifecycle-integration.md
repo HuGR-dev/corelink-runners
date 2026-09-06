@@ -341,6 +341,12 @@ authorize integration. This records execution ownership and acceptance flow
 only. It preserves the T6-W15 DoD, `prepared`/partial status, qualification
 gates, 16/70 delivery count, and all worktrees and data.
 
+The ledger's direct item summary separates 16 historical
+`recorded_delivered` items from 16 nonhistorical implementation-complete items,
+6 partial items, and 32 unknown-backlog items. These categories total 70
+items. Only the historical 16 are delivery credit; the other counts do not add
+deliveries or change the T6-W15 DoD.
+
 ## Earlier integrated packets
 
 The prior packets in this tree include:

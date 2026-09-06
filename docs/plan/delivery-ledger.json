@@ -7,6 +7,13 @@
     "recorded_delivered": 16,
     "source": "docs/handoff/2026-09-05-session-state.md"
   },
+  "item_count_summary": {
+    "historical_recorded_delivered": 16,
+    "nonhistorical_implementation_complete": 16,
+    "partial": 6,
+    "unknown_backlog": 32,
+    "semantics": "These categories total the 70 ledger items. Only historical_recorded_delivered is delivery credit; implementation-complete and partial are source/status evidence, not additional deliveries."
+  },
   "sprint_scope": {
     "1": [
       "T3-W18",
@@ -139,7 +146,7 @@
       "sprint": 0,
       "state": "recorded_delivered",
       "implementation": "unknown",
-      "owner": "t6_w15_executor",
+      "owner": "root",
       "dependencies": [],
       "next_action": "Historical source delivery recorded in handoff; retain separate count from complete sprints.",
       "blockers": [],
@@ -440,7 +447,7 @@
       "sprint": 1,
       "state": "prepared",
       "implementation": "partial",
-      "owner": "root",
+      "owner": "r2_pair_acceptance",
       "dependencies": [
         "T6-W4",
         "O-MONITORHOST",
