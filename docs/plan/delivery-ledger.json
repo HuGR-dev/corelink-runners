@@ -2269,6 +2269,45 @@
       ],
       "wp": "T3-W2",
       "role": "executor"
+    },
+    {
+      "at": "2026-09-06T03:30:13.031908+00:00",
+      "task": "R1 disjoint rework step; no whole-WP acceptance credit",
+      "owner": "wp_t4_w1",
+      "state": "active",
+      "wp": "T4-W1",
+      "role": "executor",
+      "scope": [
+        "deploy/cloudflare/src/lib/job_attribution_authority.ts"
+      ],
+      "baseline": "e66db97269cea9a8045337b1ba50a7b054c6288d",
+      "worktree": "/private/tmp/corelink-rework-t4-w1-20260906"
+    },
+    {
+      "at": "2026-09-06T03:30:13.031908+00:00",
+      "task": "R1 disjoint rework step; no whole-WP acceptance credit",
+      "owner": "wp_t4_w2",
+      "state": "active",
+      "wp": "T4-W2",
+      "role": "executor",
+      "scope": [
+        "deploy/cloudflare/test/billing-recovery.test.ts"
+      ],
+      "baseline": "e66db97269cea9a8045337b1ba50a7b054c6288d",
+      "worktree": "/private/tmp/corelink-rework-t4-w2-20260906"
+    },
+    {
+      "at": "2026-09-06T03:30:13.031908+00:00",
+      "task": "R1 disjoint rework step; no whole-WP acceptance credit",
+      "owner": "wp_t8_w5",
+      "state": "active",
+      "wp": "T8-W5",
+      "role": "executor",
+      "scope": [
+        "deploy/cloudflare/src/lib/credential_obligation_authority.ts"
+      ],
+      "baseline": "e66db97269cea9a8045337b1ba50a7b054c6288d",
+      "worktree": "/private/tmp/corelink-rework-t8-w5-20260906"
     }
   ]
 }

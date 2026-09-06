@@ -341,7 +341,7 @@
       "id": "T4-W1",
       "sprint": 2,
       "model": "gpt-5.6-luna",
-      "state": "ready",
+      "state": "active",
       "owns": [
         "deploy/cloudflare/src/lib/job_attribution.ts",
         "deploy/cloudflare/src/lib/job_attribution_authority.ts",
@@ -382,13 +382,16 @@
       ],
       "execution_step": "R1 extraction/regression repair only; canonical WP acceptance remains unchanged",
       "execution_kind": "preserve_existing_source",
-      "requires_source_ancestor": "407f2ea4d9f2ae3b17c581cd9649bd9ad87f224d"
+      "requires_source_ancestor": "407f2ea4d9f2ae3b17c581cd9649bd9ad87f224d",
+      "dispatch_baseline": "e66db97269cea9a8045337b1ba50a7b054c6288d",
+      "dispatched_at": "2026-09-06T03:30:13.031908+00:00",
+      "worktree": "/private/tmp/corelink-rework-t4-w1-20260906"
     },
     {
       "id": "T4-W2",
       "sprint": 2,
       "model": "gpt-5.6-luna",
-      "state": "ready",
+      "state": "active",
       "owns": [
         "deploy/cloudflare/src/billing_recovery.ts",
         "deploy/cloudflare/test/billing-recovery.test.ts",
@@ -425,7 +428,10 @@
       ],
       "execution_step": "R1 extraction/regression repair only; canonical WP acceptance remains unchanged",
       "execution_kind": "preserve_existing_source",
-      "requires_source_ancestor": "ffc5dadff397c546817673d04ad62e8ab527deae"
+      "requires_source_ancestor": "ffc5dadff397c546817673d04ad62e8ab527deae",
+      "dispatch_baseline": "e66db97269cea9a8045337b1ba50a7b054c6288d",
+      "dispatched_at": "2026-09-06T03:30:13.031908+00:00",
+      "worktree": "/private/tmp/corelink-rework-t4-w2-20260906"
     },
     {
       "id": "T3-W3",
@@ -640,7 +646,7 @@
       "id": "T8-W5",
       "sprint": 2,
       "model": "gpt-5.6-luna",
-      "state": "ready",
+      "state": "active",
       "owns": [
         "crates/corelink-fabric-server/src/handlers/enforcement.rs",
         "crates/corelink-fabric-server/src/tenant_suspension_dispatch.rs",
@@ -693,7 +699,10 @@
       ],
       "execution_step": "R1 extraction/regression repair only; canonical WP acceptance remains unchanged",
       "execution_kind": "preserve_existing_source",
-      "requires_source_ancestor": "3ee3d74297327bd0efc0a8acd9f18faaf4c50c7c"
+      "requires_source_ancestor": "3ee3d74297327bd0efc0a8acd9f18faaf4c50c7c",
+      "dispatch_baseline": "e66db97269cea9a8045337b1ba50a7b054c6288d",
+      "dispatched_at": "2026-09-06T03:30:13.031908+00:00",
+      "worktree": "/private/tmp/corelink-rework-t8-w5-20260906"
     },
     {
       "id": "T8-W2",
