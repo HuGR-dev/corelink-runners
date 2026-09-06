@@ -20,7 +20,9 @@ function recordDigest(record: JournalRecord): string { return createHash("sha256
 function journalReceipt(record: JournalRecord): JournalReceipt { return { operationId: record.operationId, sequence: record.sequence, previousDigest: record.previousDigest, recordDigest: recordDigest(record), bucket: "bucket", key: `journal/${record.sequence}`, versionId: "v1", retainedUntilMs: now + 8 * 86400000 }; }
 class FakeJournal implements ImmutableJournal {
   calls = 0;
-  async append(record: JournalRecord): Promise<JournalReceipt> { this.calls++; return journalReceipt(record); }
+  records = new Map<string, JournalRecord>();
+  async append(record: JournalRecord): Promise<JournalReceipt> { this.calls++; const receipt = journalReceipt(record); this.records.set(receipt.versionId, structuredClone(record)); return receipt; }
+  async read(receipt: JournalReceipt): Promise<JournalRecord> { const record = this.records.get(receipt.versionId); if (!record) throw new Error("missing journal record"); return structuredClone(record); }
 }
 class FakeWitness implements CheckpointWitness {
   calls = 0;
@@ -43,6 +45,7 @@ describe("DurableAuditLog", () => {
   it("reserves, journals, independently witnesses, and commits a stable receipt", async () => {
     const x = make(); const receipt = await x.log.append("op-1", { z: 2, a: 1 });
     expect(receipt.checkpoint.sequence).toBe(1); expect(receipt.checkpoint.previousRoot).toBe("0".repeat(64)); expect(receipt.witnessReceipt.witnessKeyId).toBe("witness-key");
+    await expect(x.log.verify(receipt)).resolves.toBeUndefined();
     await expect(x.log.append("op-1", { a: 1, z: 2 })).resolves.toEqual(receipt);
     expect(x.journal.calls).toBe(1); expect(x.witness.calls).toBe(1);
   });
@@ -71,5 +74,19 @@ describe("DurableAuditLog", () => {
     const second = new DurableAuditLog({ store, journal, witness, signer: journalSigner, witnessIdentity: witnessSigner.identity, clock: { async now() { throw new Error("must not reclock"); } } as never, logId: "log", namespace: "ns" });
     await expect(second.append("op", { x: 1 })).resolves.toBeDefined();
     expect(journal.calls).toBe(1); expect(witness.calls).toBe(1);
+  });
+  it("rejects malformed or forged verification receipts before journal I/O", async () => {
+    const x = make(); const receipt = await x.log.append("op", { x: 1 });
+    let reads = 0; const original = x.journal.read.bind(x.journal); x.journal.read = async (r) => { reads++; return original(r); };
+    await expect(x.log.verify({})).rejects.toBeInstanceOf(AuditIntegrityError);
+    await expect(x.log.verify({ ...receipt, witnessRoot: "f".repeat(64) })).rejects.toBeInstanceOf(AuditIntegrityError);
+    await expect(x.log.verify({ ...receipt, checkpointRoot: "f".repeat(64) })).rejects.toBeInstanceOf(AuditIntegrityError);
+    expect(reads).toBe(0);
+  });
+  it("fails closed when durable head state is corrupted", async () => {
+    const x = make(); await x.log.append("op", { x: 1 });
+    const stored = await x.store.get<any>("ns/head");
+    await x.store.transact([{ key: "ns/head", expectedVersion: stored!.version, value: { ...stored!.value, checkpointRoot: "f".repeat(64) } }]);
+    await expect(x.log.append("next", { x: 2 })).rejects.toBeInstanceOf(AuditIntegrityError);
   });
 });

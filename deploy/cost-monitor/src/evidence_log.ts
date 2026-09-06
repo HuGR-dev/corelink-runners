@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import { canonicalJSON, type JournalReceipt, type JournalRecord } from "./journal.js";
 import { verifyOrderedFields, type AsyncSigner, type PublicSigningIdentity } from "./acks.js";
 import type { MonitorStateStore, Stored } from "./state.js";
-// @ts-expect-error supplied by the trusted-time foundation integration.
 import type { TrustedClock, TrustedTimeProof } from "./trusted_time.js";
 
 const ROOT = "0".repeat(64);
@@ -51,6 +50,7 @@ export interface CheckpointWitness {
 
 export interface ImmutableJournal {
   append(record: JournalRecord): Promise<JournalReceipt>;
+  read(receipt: JournalReceipt): Promise<JournalRecord>;
 }
 
 export class AuditBusyError extends Error { override readonly name: string = "AuditBusyError"; }
@@ -92,10 +92,14 @@ function text(value: unknown, name: string, max = 256): string {
   return value;
 }
 function digest(value: unknown, name: string): string { if (typeof value !== "string" || !DIGEST.test(value)) throw new AuditIntegrityError(`invalid ${name}`); return value; }
+function canonicalOrIntegrity(value: unknown): string { try { return canonicalJSON(value); } catch { throw new AuditIntegrityError("invalid persisted payload"); } }
 function validateJournalReceipt(receipt: JournalReceipt, record: JournalRecord): void {
+  if (!object(receipt)) throw new AuditIntegrityError("invalid journal receipt");
+  exactKeys(receipt, ["operationId", "sequence", "recordDigest", "previousDigest", "bucket", "key", "versionId", "retainedUntilMs"]);
   if (!receipt || receipt.operationId !== record.operationId || receipt.sequence !== record.sequence || receipt.previousDigest !== record.previousDigest || receipt.recordDigest !== sha(journalBytes(record)) || typeof receipt.versionId !== "string" || receipt.versionId.length === 0 || typeof receipt.key !== "string" || typeof receipt.bucket !== "string" || !Number.isSafeInteger(receipt.retainedUntilMs) || receipt.retainedUntilMs <= 0) throw new AuditIntegrityError("journal receipt refused");
 }
 function validateTimeProof(proof: TrustedTimeProof): TrustedTimeProof {
+  if (!object(proof)) throw new AuditIntegrityError("invalid trusted time proof");
   positive(proof.timeMs, "trusted time");
   digest(proof.proofDigest, "trusted proof digest"); digest(proof.requestDigest, "trusted request digest");
   text(proof.authority, "trusted authority");
@@ -103,6 +107,11 @@ function validateTimeProof(proof: TrustedTimeProof): TrustedTimeProof {
 }
 function identity(value: PublicSigningIdentity, role: "journal" | "witness"): void {
   if (!value || value.role !== role || typeof value.keyId !== "string" || typeof value.epoch !== "string") throw new AuditIntegrityError(`invalid ${role} identity`);
+}
+function object(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
+function exactKeys(value: Record<string, unknown>, keys: readonly string[], optional: readonly string[] = []): void {
+  const allowed = new Set([...keys, ...optional]);
+  if (Object.keys(value).some((key) => !allowed.has(key)) || keys.some((key) => !Object.prototype.hasOwnProperty.call(value, key))) throw new AuditIntegrityError("unexpected audit record fields");
 }
 export function canonicalCheckpointBytes(checkpoint: SignedCheckpoint): Uint8Array {
   validateCheckpoint(checkpoint);
@@ -124,10 +133,14 @@ function journalBytes(record: JournalRecord): Uint8Array {
   return bytes(JSON.stringify([record.operationId, record.sequence, record.previousDigest, canonicalJSON(record.payload), record.trustedAtMs]));
 }
 function validateCheckpoint(value: SignedCheckpoint): void {
+  if (!object(value)) throw new AuditIntegrityError("invalid checkpoint");
+  exactKeys(value, ["version", "logId", "sequence", "previousRoot", "recordDigest", "operationId", "trustedAtMs", "signerKeyId", "signerEpoch", "signature"]);
   if (value.version !== VERSION) throw new AuditIntegrityError("invalid checkpoint version");
   text(value.logId, "logId"); positive(value.sequence, "checkpoint sequence"); digest(value.previousRoot, "previousRoot"); digest(value.recordDigest, "recordDigest"); text(value.operationId, "operationId"); positive(value.trustedAtMs, "trustedAtMs"); text(value.signerKeyId, "signerKeyId"); text(value.signerEpoch, "signerEpoch"); text(value.signature, "signature", 8192);
 }
 function validateWitness(value: WitnessReceipt): void {
+  if (!object(value)) throw new AuditIntegrityError("invalid witness receipt");
+  exactKeys(value, ["version", "logId", "sequence", "checkpointRoot", "previousWitnessRoot", "checkpointSignerKeyId", "checkpointSignerEpoch", "witnessKeyId", "witnessEpoch", "trustedAtMs", "signature"]);
   if (value.version !== VERSION) throw new AuditIntegrityError("invalid witness version");
   text(value.logId, "logId"); positive(value.sequence, "witness sequence"); digest(value.checkpointRoot, "checkpointRoot"); digest(value.previousWitnessRoot, "previousWitnessRoot"); text(value.checkpointSignerKeyId, "checkpointSignerKeyId"); text(value.checkpointSignerEpoch, "checkpointSignerEpoch"); text(value.witnessKeyId, "witnessKeyId"); text(value.witnessEpoch, "witnessEpoch"); positive(value.trustedAtMs, "witness trustedAtMs"); text(value.signature, "witness signature", 8192);
 }
@@ -159,8 +172,73 @@ export class DurableAuditLog {
   }
 
   private operationKey(operationId: string): string { return `${this.namespace}/operation/${operationId}`; }
-  private async getHead(): Promise<Stored<Head> | null> { return this.store.get<Head>(this.headKey); }
-  private async getOperation(operationId: string): Promise<Stored<OperationState> | null> { return this.store.get<OperationState>(this.operationKey(operationId)); }
+  private validateHead(stored: Stored<Head> | null): Stored<Head> | null {
+    if (!stored) return null;
+    if (!object(stored.value) || stored.value.kind !== "head") throw new AuditIntegrityError("malformed audit head");
+    const value = stored.value as Head;
+    positive(value.sequence + 1, "head sequence"); digest(value.checkpointRoot, "head checkpointRoot"); digest(value.witnessRoot, "head witnessRoot");
+    if (value.pending !== undefined) this.validatePending(value.pending, value.witnessRoot);
+    return stored;
+  }
+  private validatePending(pending: Pending, previousWitnessRoot: string): void {
+    if (!object(pending) || pending.kind !== "pending") throw new AuditIntegrityError("malformed pending audit");
+    text(pending.operationId, "pending operationId");
+    if (pending.payloadCanonical !== canonicalOrIntegrity(pending.payload)) throw new AuditIntegrityError("pending payload changed");
+    validateTimeProof(pending.timeProof);
+    validateCheckpoint(pending.checkpoint); const root = verifyCheckpoint(pending.checkpoint, this.signer, pending.checkpointRoot); if (root !== pending.checkpointRoot) throw new AuditIntegrityError("pending checkpoint root changed");
+    if (!object(pending.journalRecord) || pending.journalRecord.operationId !== pending.operationId || pending.journalRecord.sequence !== pending.checkpoint.sequence || pending.journalRecord.previousDigest !== pending.checkpoint.previousRoot || pending.journalRecord.trustedAtMs !== pending.checkpoint.trustedAtMs || canonicalOrIntegrity(pending.journalRecord.payload) !== pending.payloadCanonical || sha(journalBytes(pending.journalRecord)) !== pending.checkpoint.recordDigest) throw new AuditIntegrityError("pending journal record changed");
+    if (pending.journalReceipt) validateJournalReceipt(pending.journalReceipt, pending.journalRecord);
+    if (pending.witnessReceipt) {
+      const witnessRootValue = verifyWitness(pending.witnessReceipt, pending.checkpoint, pending.checkpointRoot, this.witnessIdentity, previousWitnessRoot);
+      if (pending.witnessRoot !== witnessRootValue) throw new AuditIntegrityError("pending witness root changed");
+    }
+  }
+  private validateCommitted(receipt: AuditReceipt, payloadCanonical: string): void {
+    if (!object(receipt)) throw new AuditIntegrityError("malformed audit receipt");
+    exactKeys(receipt, ["operationId", "checkpoint", "checkpointRoot", "journalReceipt", "witnessReceipt", "witnessRoot"]);
+    text(receipt.operationId, "receipt operationId");
+    const root = verifyCheckpoint(receipt.checkpoint, this.signer, receipt.checkpointRoot);
+    if (root !== receipt.checkpointRoot || receipt.checkpoint.operationId !== receipt.operationId) throw new AuditIntegrityError("receipt checkpoint mismatch");
+    let payload: unknown; try { payload = JSON.parse(payloadCanonical); } catch { throw new AuditIntegrityError("malformed committed payload"); }
+    const record: JournalRecord = { operationId: receipt.operationId, sequence: receipt.checkpoint.sequence, previousDigest: receipt.checkpoint.previousRoot, payload, trustedAtMs: receipt.checkpoint.trustedAtMs };
+    validateJournalReceipt(receipt.journalReceipt, record);
+    if (receipt.journalReceipt.recordDigest !== receipt.checkpoint.recordDigest) throw new AuditIntegrityError("receipt journal digest mismatch");
+    const witnessRootValue = verifyWitness(receipt.witnessReceipt, receipt.checkpoint, receipt.checkpointRoot, this.witnessIdentity, receipt.witnessReceipt.previousWitnessRoot);
+    if (witnessRootValue !== receipt.witnessRoot) throw new AuditIntegrityError("receipt witness root mismatch");
+  }
+  private async getHead(): Promise<Stored<Head> | null> { return this.validateHead(await this.store.get<Head>(this.headKey)); }
+  private async getOperation(operationId: string): Promise<Stored<OperationState> | null> {
+    const stored = await this.store.get<OperationState>(this.operationKey(operationId));
+    if (!stored) return null;
+    if (!object(stored.value) || (stored.value.kind !== "pending" && stored.value.kind !== "committed")) throw new AuditIntegrityError("malformed operation record");
+    if (stored.value.kind === "pending") this.validatePending(stored.value.pending, (await this.getHead())?.value.witnessRoot ?? ROOT);
+    else {
+      if (!object(stored.value) || typeof stored.value.payloadCanonical !== "string") throw new AuditIntegrityError("malformed committed operation");
+      this.validateCommitted(stored.value.receipt, stored.value.payloadCanonical);
+    }
+    return stored;
+  }
+  private async verifyHeadMembership(head: Stored<Head> | null): Promise<void> {
+    if (!head) return;
+    if (head.value.sequence === 0) {
+      if (head.value.checkpointRoot !== ROOT || head.value.witnessRoot !== ROOT) throw new AuditIntegrityError("genesis head changed");
+      return;
+    }
+    let cursor: string | undefined;
+    do {
+      const page = await this.store.scan(`${this.namespace}/operation/`, cursor);
+      for (const item of page.items) {
+        const value = item.value as OperationState;
+        if (object(value) && value.kind === "committed" && value.receipt.checkpoint.sequence === head.value.sequence) {
+          this.validateCommitted(value.receipt, value.payloadCanonical);
+          if (value.receipt.checkpointRoot !== head.value.checkpointRoot || value.receipt.witnessRoot !== head.value.witnessRoot) throw new AuditIntegrityError("head root membership mismatch");
+          return;
+        }
+      }
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor);
+    throw new AuditIntegrityError("durable head has no committed operation");
+  }
 
   private async reserve(operationId: string, payload: unknown): Promise<Pending | AuditReceipt> {
     const payloadCanonical = canonicalJSON(payload);
@@ -170,6 +248,7 @@ export class DurableAuditLog {
       return currentOperation.value.receipt;
     }
     const head = await this.getHead();
+    await this.verifyHeadMembership(head);
     if (head?.value.pending) {
       const pending = head.value.pending;
       if (pending.operationId !== operationId) throw new AuditBusyError("audit log has a pending operation");
@@ -234,5 +313,27 @@ export class DurableAuditLog {
     const result = await this.store.transact([{ key: this.headKey, expectedVersion: head.version, value: finalHead }, { key: this.operationKey(operationId), expectedVersion: op?.version ?? null, value: { kind: "committed", receipt: audit, payloadCanonical: pending.payloadCanonical } satisfies OperationCommitted }]);
     if (result !== "committed") throw new AuditBusyError("audit commit raced");
     return audit;
+  }
+
+  async verify(receipt: unknown): Promise<void> {
+    if (!object(receipt)) throw new AuditIntegrityError("malformed audit receipt");
+    exactKeys(receipt, ["operationId", "checkpoint", "checkpointRoot", "journalReceipt", "witnessReceipt", "witnessRoot"]);
+    text(receipt.operationId, "receipt operationId"); digest(receipt.checkpointRoot, "receipt checkpointRoot"); digest(receipt.witnessRoot, "receipt witnessRoot");
+    const audit = receipt as unknown as AuditReceipt;
+    const root = verifyCheckpoint(audit.checkpoint, this.signer, audit.checkpointRoot);
+    if (root !== audit.checkpointRoot || audit.checkpoint.operationId !== audit.operationId) throw new AuditIntegrityError("receipt checkpoint mismatch");
+    validateWitness(audit.witnessReceipt);
+    const witnessRootValue = verifyWitness(audit.witnessReceipt, audit.checkpoint, audit.checkpointRoot, this.witnessIdentity, audit.witnessReceipt.previousWitnessRoot);
+    if (witnessRootValue !== audit.witnessRoot) throw new AuditIntegrityError("receipt witness root mismatch");
+    if (!object(audit.journalReceipt)) throw new AuditIntegrityError("malformed journal receipt");
+    exactKeys(audit.journalReceipt, ["operationId", "sequence", "recordDigest", "previousDigest", "bucket", "key", "versionId", "retainedUntilMs"]);
+    const record = await this.journal.read(audit.journalReceipt);
+    const operation = await this.getOperation(audit.operationId);
+    if (!operation || operation.value.kind !== "committed" || record.operationId !== audit.operationId || record.sequence !== audit.checkpoint.sequence || record.previousDigest !== audit.checkpoint.previousRoot || record.trustedAtMs !== audit.checkpoint.trustedAtMs || audit.journalReceipt.recordDigest !== audit.checkpoint.recordDigest || canonicalOrIntegrity(record.payload) !== operation.value.payloadCanonical) throw new AuditIntegrityError("journal record does not match receipt");
+    if (sha(journalBytes(record)) !== audit.checkpoint.recordDigest) throw new AuditIntegrityError("journal record digest mismatch");
+    if (JSON.stringify(operation.value.receipt) !== JSON.stringify(receipt)) throw new AuditIntegrityError("receipt is not the durable operation receipt");
+    const head = await this.getHead();
+    await this.verifyHeadMembership(head);
+    if (!head || audit.checkpoint.sequence > head.value.sequence || (audit.checkpoint.sequence === head.value.sequence && (head.value.checkpointRoot !== audit.checkpointRoot || head.value.witnessRoot !== audit.witnessRoot))) throw new AuditIntegrityError("receipt is not a member of the durable head");
   }
 }
