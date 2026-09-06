@@ -74,6 +74,13 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  # Image materialization is disk-heavy and all three tags are tied to this
+  # run's SHA. Queue, rather than cancel, an operator dispatch so a successful
+  # push cannot be interrupted halfway through registry publication.
+  group: build-cf-container-images-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   CLOUDFLARE_ACCOUNT_ID: 6a1fc1c626fc2628823e60b9db01f5cd
 
@@ -85,7 +92,7 @@ jobs:
     timeout-minutes: 120
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Verify image build contract and mutation guards
         run: python3 scripts/verify_image_build_contract.py --self-test
@@ -179,7 +186,10 @@ jobs:
           REF="$(scripts/ci/resolve-pushed-ref.sh "${IMAGE}" "${TAG}" /tmp/runner-push.out)"
           echo "ref=${REF}" >> "${GITHUB_OUTPUT}"
           echo "Runner image pushed: ${REF}"
-          bash scripts/ci/runner-image-build-cleanup.sh "${IMAGE}:${TAG}"
+
+      - name: Cleanup RunnerContainer build state
+        if: always()
+        run: bash scripts/ci/runner-image-build-cleanup.sh "corelink-spawn-worker-runnercontainer:${GITHUB_SHA}"
 
       # CheckHostContainer — COPYs a prebuilt static musl exec-server from its
       # context. Build it with the image's baked toolchain (musl target baked on
@@ -220,7 +230,10 @@ jobs:
           REF="$(scripts/ci/resolve-pushed-ref.sh "${IMAGE}" "${TAG}" /tmp/checkhost-push.out)"
           echo "ref=${REF}" >> "${GITHUB_OUTPUT}"
           echo "Check-host image pushed: ${REF}"
-          bash scripts/ci/runner-image-build-cleanup.sh "${IMAGE}:${TAG}"
+
+      - name: Cleanup CheckHostContainer build state
+        if: always()
+        run: bash scripts/ci/runner-image-build-cleanup.sh "corelink-spawn-worker-checkhostcontainer:${GITHUB_SHA}"
 
       # RunnerDevEnvDO — the persistent customer development environment.
       # Its Dockerfile copies the Rust workspace plus two runtime files. The
@@ -299,7 +312,10 @@ jobs:
           REF="$(scripts/ci/resolve-pushed-ref.sh "${IMAGE}" "${TAG}" /tmp/devenv-push.out)"
           echo "ref=${REF}" >> "${GITHUB_OUTPUT}"
           echo "RunnerDevEnvDO image pushed: ${REF}"
-          bash scripts/ci/runner-image-build-cleanup.sh "${IMAGE}:${TAG}"
+
+      - name: Cleanup RunnerDevEnvDO build state
+        if: always()
+        run: bash scripts/ci/runner-image-build-cleanup.sh "corelink-runner-devenv:${GITHUB_SHA}"
 
       - name: Summary — pushed image refs to pin in wrangler.jsonc
         run: |
