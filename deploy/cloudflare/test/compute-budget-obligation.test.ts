@@ -3,11 +3,12 @@ import { ComputeObligations, type ComputeBinding, type ComputeObligationStorage,
 import { ComputeBudgetClientError } from "../src/lib/compute_budget_client";
 
 const reservationId = "11111111-1111-4111-8111-111111111111";
+const tenantId = "22222222-2222-4222-8222-222222222222";
 function token(expires = 1_080_000) {
-  const payload = { v: 1, key_id: "k", tenant_id: "tenant", workload_kind: "devenv", workload_id: "work", reservation_id: reservationId, period_key: "202609", ceiling_vcpu_ms: "1000", vcpu_count: 2, maximum_wall_ms: 1000, issued_at_ms: 1_000_000, expires_at_ms: expires };
+  const payload = { v: 1, key_id: "k", tenant_id: tenantId, workload_kind: "devenv", workload_id: "work", reservation_id: reservationId, period_key: 202609, ceiling_vcpu_ms: "1000", vcpu_count: 2, maximum_wall_ms: 1000, issued_at_ms: 1_000_000, expires_at_ms: expires };
   return `${btoa(JSON.stringify(payload)).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_")}.sig`;
 }
-function binding(): ComputeBinding { return { token: token(), reservationId, tenantId: "tenant", workloadKind: "devenv", workloadId: "work", vcpuCount: 2, maximumWallMs: 1000 }; }
+function binding(): ComputeBinding { return { token: token(), reservationId, tenantId, workloadKind: "devenv", workloadId: "work", vcpuCount: 2, maximumWallMs: 1000 }; }
 function setup() {
   const map = new Map<string, unknown>();
   const storage: ComputeObligationStorage = { get: async key => map.get(key), put: async (key, value) => map.set(key, value), list: async options => new Map([...map].filter(([key]) => key.startsWith(options.prefix) && (!options.startAfter || key > options.startAfter)).slice(0, options.limit)) };
@@ -57,6 +58,23 @@ describe("durable compute runtime obligations", () => {
     expect(row.phase).toBe("terminal");
     expect(row.actualVcpuMs).toBe("0");
     expect(row.evidenceDigest).toMatch(/^[0-9a-f]{64}$/);
+    expect(s.calls).toEqual(["reserve", "activate", "settle"]);
+  });
+
+  it("does not call the remote when the durable preparing fence cannot be written", async () => {
+    const s = setup(); const b = binding();
+    const storage: ComputeObligationStorage = { ...s.storage, put: async () => { throw new Error("storage down"); } };
+    await expect(new ComputeObligations(storage, s.client).prepare(b, 1_050_000)).rejects.toThrow("storage down");
+    expect(s.calls).toEqual([]);
+  });
+
+  it("recovers a lost activation acknowledgement through conflict settlement", async () => {
+    const s = setup(); const b = binding(); let puts = 0;
+    const flaky: ComputeObligationStorage = { ...s.storage, put: async (key, value) => { puts++; if (puts === 2) throw new Error("lost write"); await s.storage.put(key, value); } };
+    await expect(new ComputeObligations(flaky, s.client).prepare(b, 1_050_000)).rejects.toThrow("lost write");
+    const conflict: ComputeTransport = { ...s.client, cancel: async () => { throw new ComputeBudgetClientError("conflict", "active"); } };
+    await new ComputeObligations(s.storage, conflict).abandonUnused(reservationId);
+    expect((s.map.get(`compute:obligation:${reservationId}`) as { phase: string }).phase).toBe("terminal");
     expect(s.calls).toEqual(["reserve", "activate", "settle"]);
   });
 });

@@ -1,76 +1,94 @@
 import { ComputeBudgetClientError, type ComputeReceipt } from "./compute_budget_client";
 
-/** Trusted control-plane binding, never supplied by container/user HTTP data. */
 export interface ComputeBinding {
-  token: string;
-  reservationId: string;
-  tenantId: string;
-  workloadKind: "spawn_worker_runner" | "devenv";
-  workloadId: string;
-  vcpuCount: number;
-  maximumWallMs: number;
+  token: string; reservationId: string; tenantId: string;
+  workloadKind: "spawn_worker_runner" | "devenv"; workloadId: string;
+  vcpuCount: number; maximumWallMs: number;
 }
-
 export interface ComputeObligationStorage {
   get<T>(key: string): Promise<T | undefined>;
   put(key: string, value: unknown): Promise<void>;
   list<T>(options: { prefix: string; limit: number; startAfter?: string }): Promise<Map<string, T>>;
 }
-
 export interface ComputeTransport {
   reserve(token: string, reservationId: string): Promise<ComputeReceipt>;
   activate(token: string, reservationId: string): Promise<ComputeReceipt>;
   cancel(token: string, reservationId: string): Promise<ComputeReceipt>;
   settle(token: string, reservationId: string, actualVcpuMs: string, evidence: string): Promise<ComputeReceipt>;
 }
+type Phase = "preparing" | "active" | "dispatched" | "abandoning" | "settling" | "terminal";
+interface StoredObligation {
+  binding: ComputeBinding; phase: Phase; deadlineMs: number;
+  priorPhase?: "preparing" | "active"; actualVcpuMs?: string; evidenceDigest?: string;
+}
 
-/** Caller serializes operations with its Durable Object input gate. */
 export class ComputeObligations {
   constructor(private readonly storage: ComputeObligationStorage, private readonly client: ComputeTransport) {}
-
   private key(id: string): string { return `compute:obligation:${id}`; }
-  private async read(id: string): Promise<Record<string, unknown> | undefined> { return this.storage.get(this.key(id)); }
-  private token(binding: ComputeBinding): Record<string, unknown> {
-    if (typeof binding.token !== "string" || new TextEncoder().encode(binding.token).length > 8192) throw new Error("invalid compute binding");
-    const parts = binding.token.split(".");
-    if (parts.length !== 2) throw new Error("invalid compute grant");
-    let payload: unknown;
-    try { payload = JSON.parse(new TextDecoder().decode(this.decode(parts[0]))); } catch { throw new Error("invalid compute grant"); }
-    if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error("invalid compute grant");
-    const value = payload as Record<string, unknown>;
-    const expected = ["v", "key_id", "tenant_id", "workload_kind", "workload_id", "reservation_id", "period_key", "ceiling_vcpu_ms", "vcpu_count", "maximum_wall_ms", "issued_at_ms", "expires_at_ms"];
-    if (Object.keys(value).length !== expected.length || expected.some(key => !(key in value))) throw new Error("invalid compute grant");
-    if (value.v !== 1 || value.tenant_id !== binding.tenantId || value.workload_kind !== binding.workloadKind || value.workload_id !== binding.workloadId || value.reservation_id !== binding.reservationId || value.vcpu_count !== binding.vcpuCount || value.maximum_wall_ms !== binding.maximumWallMs) throw new Error("compute binding mismatch");
-    if (!UUID.test(binding.reservationId) || (binding.workloadKind !== "spawn_worker_runner" && binding.workloadKind !== "devenv") || !Number.isSafeInteger(binding.vcpuCount) || binding.vcpuCount < 1 || binding.vcpuCount > 16 || !Number.isSafeInteger(binding.maximumWallMs) || binding.maximumWallMs < 1 || binding.maximumWallMs > 28_800_000) throw new Error("invalid compute binding");
-    if (typeof value.key_id !== "string" || !value.key_id || typeof value.workload_id !== "string" || !value.workload_id || typeof value.period_key !== "string" || !/^\d{6}$/.test(value.period_key) || typeof value.ceiling_vcpu_ms !== "string" || !/^(0|[1-9][0-9]*)$/.test(value.ceiling_vcpu_ms)) throw new Error("invalid compute grant");
-    if (typeof value.expires_at_ms !== "number" || typeof value.issued_at_ms !== "number" || !Number.isSafeInteger(value.expires_at_ms) || !Number.isSafeInteger(value.issued_at_ms) || value.issued_at_ms < 0 || value.expires_at_ms <= value.issued_at_ms || value.expires_at_ms - value.issued_at_ms > 90_000) throw new Error("invalid compute grant");
-    if (typeof value.tenant_id !== "string" || value.tenant_id.trim() !== value.tenant_id || !value.tenant_id) throw new Error("invalid compute grant");
-    return value;
+
+  private async read(id: string): Promise<StoredObligation | undefined> {
+    const raw = await this.storage.get<unknown>(this.key(id));
+    if (raw === undefined) return undefined;
+    return this.validateStored(raw);
   }
-  private decode(value: string): Uint8Array { if (!/^[A-Za-z0-9_-]+$/.test(value)) throw new Error("invalid compute grant"); const padded = value.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - value.length % 4) % 4); const binary = atob(padded); return Uint8Array.from(binary, c => c.charCodeAt(0)); }
+
+  private validateStored(raw: unknown): StoredObligation {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("corrupt compute obligation");
+    const row = raw as Record<string, unknown>;
+    if (!row.binding || typeof row.phase !== "string" || !PHASES.has(row.phase as Phase) || !Number.isSafeInteger(row.deadlineMs)) throw new Error("corrupt compute obligation");
+    const binding = row.binding as Partial<ComputeBinding>;
+    if (typeof binding.token !== "string" || typeof binding.reservationId !== "string" || typeof binding.tenantId !== "string" || typeof binding.workloadKind !== "string" || typeof binding.workloadId !== "string" || typeof binding.vcpuCount !== "number" || typeof binding.maximumWallMs !== "number") throw new Error("corrupt compute obligation");
+    this.parseToken(binding as ComputeBinding);
+    if (row.phase === "abandoning" && row.priorPhase !== "preparing" && row.priorPhase !== "active") throw new Error("corrupt compute obligation");
+    if ((row.phase === "settling" || row.phase === "terminal" || row.actualVcpuMs !== undefined || row.evidenceDigest !== undefined) && (typeof row.actualVcpuMs !== "string" || typeof row.evidenceDigest !== "string")) throw new Error("corrupt compute obligation");
+    return raw as StoredObligation;
+  }
+
+  private parseToken(binding: ComputeBinding): Record<string, unknown> {
+    if (typeof binding.token !== "string" || new TextEncoder().encode(binding.token).length > 8192) throw new Error("invalid compute grant");
+    const parts = binding.token.split(".");
+    if (parts.length !== 2 || !/^[A-Za-z0-9_-]+$/.test(parts[0]) || !/^[A-Za-z0-9_-]+$/.test(parts[1])) throw new Error("invalid compute grant");
+    let value: unknown;
+    try { value = JSON.parse(new TextDecoder().decode(this.decode(parts[0]))); } catch { throw new Error("invalid compute grant"); }
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid compute grant");
+    const payload = value as Record<string, unknown>;
+    const fields = ["v", "key_id", "tenant_id", "workload_kind", "workload_id", "reservation_id", "period_key", "ceiling_vcpu_ms", "vcpu_count", "maximum_wall_ms", "issued_at_ms", "expires_at_ms"];
+    if (Object.keys(payload).length !== fields.length || fields.some(field => !(field in payload))) throw new Error("invalid compute grant");
+    if (payload.v !== 1 || payload.tenant_id !== binding.tenantId || payload.workload_kind !== binding.workloadKind || payload.workload_id !== binding.workloadId || payload.reservation_id !== binding.reservationId || payload.vcpu_count !== binding.vcpuCount || payload.maximum_wall_ms !== binding.maximumWallMs) throw new Error("compute binding mismatch");
+    if (!UUID.test(binding.reservationId) || !UUID.test(binding.tenantId) || !/^(spawn_worker_runner|devenv)$/.test(binding.workloadKind) || !ASCII.test(binding.workloadId) || binding.workloadId.length > 256 || !Number.isSafeInteger(binding.vcpuCount) || binding.vcpuCount < 1 || binding.vcpuCount > 16 || !Number.isSafeInteger(binding.maximumWallMs) || binding.maximumWallMs < 1 || binding.maximumWallMs > 28_800_000) throw new Error("invalid compute binding");
+    if (typeof payload.key_id !== "string" || !ASCII.test(payload.key_id) || payload.key_id.length > 64 || typeof payload.tenant_id !== "string" || typeof payload.period_key !== "number" || !Number.isSafeInteger(payload.period_key) || !validPeriod(payload.period_key) || typeof payload.ceiling_vcpu_ms !== "string" || !/^[1-9][0-9]{0,18}$/.test(payload.ceiling_vcpu_ms) || BigInt(payload.ceiling_vcpu_ms) > I64_MAX) throw new Error("invalid compute grant");
+    if (typeof payload.issued_at_ms !== "number" || typeof payload.expires_at_ms !== "number" || !Number.isSafeInteger(payload.issued_at_ms) || !Number.isSafeInteger(payload.expires_at_ms) || payload.issued_at_ms < 0 || payload.expires_at_ms <= payload.issued_at_ms || payload.expires_at_ms - payload.issued_at_ms > 90_000) throw new Error("invalid compute grant");
+    return payload;
+  }
+
+  private decode(value: string): Uint8Array {
+    const padded = value.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - value.length % 4) % 4);
+    const binary = atob(padded); return Uint8Array.from(binary, c => c.charCodeAt(0));
+  }
 
   async prepare(binding: ComputeBinding, nowMs: number): Promise<void> {
-    const payload = this.token(binding);
-    if (!Number.isSafeInteger(nowMs) || nowMs < 0 || nowMs >= (payload.expires_at_ms as number)) throw new Error("compute grant expired");
+    const payload = this.parseToken(binding);
+    const issuedAt = payload.issued_at_ms as number; const expiresAt = payload.expires_at_ms as number;
+    if (!Number.isSafeInteger(nowMs) || nowMs < issuedAt || nowMs >= expiresAt) throw new Error("compute grant expired");
     const key = this.key(binding.reservationId);
-    const existing = await this.storage.get<Record<string, unknown>>(key);
+    const existing = await this.read(binding.reservationId);
     if (existing) {
-      if (!existing.binding || JSON.stringify(existing.binding) !== JSON.stringify(binding) || existing.deadlineMs !== payload.expires_at_ms) throw new Error("compute obligation conflict");
+      if (!sameBinding(existing.binding, binding) || existing.deadlineMs !== expiresAt) throw new Error("compute obligation conflict");
       if (existing.phase === "active") return;
       if (existing.phase !== "preparing") throw new Error("compute obligation transition refused");
-    } else {
-      await this.storage.put(key, { binding, phase: "preparing", deadlineMs: payload.expires_at_ms });
-    }
+    } else await this.storage.put(key, { binding, phase: "preparing", deadlineMs: expiresAt });
     const reserved = await this.client.reserve(binding.token, binding.reservationId);
     if (reserved.reservation_id !== binding.reservationId || (reserved.state !== "prepared" && reserved.state !== "active")) throw new Error("invalid compute reserve receipt");
     const activated = reserved.state === "active" ? reserved : await this.client.activate(binding.token, binding.reservationId);
     if (activated.reservation_id !== binding.reservationId || activated.state !== "active") throw new Error("invalid compute activate receipt");
-    await this.storage.put(key, { binding, phase: "active", deadlineMs: payload.expires_at_ms });
+    await this.storage.put(key, { binding, phase: "active", deadlineMs: expiresAt });
   }
 
   async claimProvider(reservationId: string, workloadId: string, nowMs: number): Promise<void> {
     const row = await this.read(reservationId);
-    if (!row || row.phase !== "active" || typeof row.deadlineMs !== "number" || row.deadlineMs <= nowMs || !row.binding || (row.binding as ComputeBinding).workloadId !== workloadId) throw new Error("compute obligation claim refused");
+    if (!row || row.phase !== "active" || !Number.isSafeInteger(nowMs) || row.binding.workloadId !== workloadId) throw new Error("compute obligation claim refused");
+    const payload = this.parseToken(row.binding);
+    if (nowMs < (payload.issued_at_ms as number) || nowMs >= (payload.expires_at_ms as number) || row.deadlineMs <= nowMs) throw new Error("compute obligation claim refused");
     await this.storage.put(this.key(reservationId), { ...row, phase: "dispatched" });
   }
 
@@ -81,52 +99,64 @@ export class ComputeObligations {
     const prior = row.phase === "abandoning" ? row.priorPhase : row.phase;
     if (prior !== "preparing" && prior !== "active") throw new Error("compute obligation abandonment refused");
     if (row.phase !== "abandoning") await this.storage.put(this.key(reservationId), { ...row, phase: "abandoning", priorPhase: prior });
-    const binding = row.binding as ComputeBinding;
     let receipt: ComputeReceipt;
-    let settlement: { actualVcpuMs: string; evidenceDigest: string } | undefined;
-    try { receipt = await this.client.cancel(binding.token, reservationId); }
-    catch (error) {
-      if (prior !== "active" || !(error instanceof ComputeBudgetClientError) || error.code !== "conflict") throw error;
-      const evidenceDigest = await this.neverDispatchedDigest(reservationId);
-      receipt = await this.client.settle(binding.token, reservationId, "0", evidenceDigest);
-      settlement = { actualVcpuMs: "0", evidenceDigest };
+    let proof = row.actualVcpuMs && row.evidenceDigest ? { actualVcpuMs: row.actualVcpuMs, evidenceDigest: row.evidenceDigest } : undefined;
+    try {
+      if (proof) throw new ComputeBudgetClientError("conflict", "retry settlement");
+      receipt = await this.client.cancel(row.binding.token, reservationId);
+    } catch (error) {
+      if (!(error instanceof ComputeBudgetClientError) || error.code !== "conflict") throw error;
+      proof ??= { actualVcpuMs: "0", evidenceDigest: await this.neverDispatchedDigest(reservationId) };
+      await this.storage.put(this.key(reservationId), { ...row, phase: "abandoning", priorPhase: prior, ...proof });
+      receipt = await this.client.settle(row.binding.token, reservationId, proof.actualVcpuMs, proof.evidenceDigest);
     }
     if (receipt.reservation_id !== reservationId || (receipt.state !== "cancelled" && receipt.state !== "settled")) throw new Error("invalid compute cleanup receipt");
-    await this.storage.put(this.key(reservationId), { ...row, phase: "terminal", priorPhase: prior, ...settlement });
+    await this.storage.put(this.key(reservationId), { ...row, phase: "terminal", priorPhase: prior, ...proof });
   }
 
   private async neverDispatchedDigest(reservationId: string): Promise<string> {
-    const data = new TextEncoder().encode(`corelink:compute:never-dispatched:${reservationId}`);
-    const hash = await crypto.subtle.digest("SHA-256", data);
+    const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`corelink:compute:never-dispatched:${reservationId}`));
     return [...new Uint8Array(hash)].map(byte => byte.toString(16).padStart(2, "0")).join("");
   }
 
   async settleProven(reservationId: string, actualVcpuMs: string, evidenceDigest: string): Promise<void> {
-    if (!/^(0|[1-9][0-9]*)$/.test(actualVcpuMs) || !/^[0-9a-f]{64}$/i.test(evidenceDigest)) throw new Error("invalid compute settlement");
+    if (!/^(0|[1-9][0-9]*)$/.test(actualVcpuMs) || BigInt(actualVcpuMs) > I64_MAX || !/^[0-9a-f]{64}$/i.test(evidenceDigest)) throw new Error("invalid compute settlement");
     const row = await this.read(reservationId);
     if (!row) throw new Error("compute settlement refused");
-    if (row.phase === "terminal") {
-      if (row.actualVcpuMs === actualVcpuMs && row.evidenceDigest === evidenceDigest) return;
-      throw new Error("compute settlement conflict");
-    }
+    if (row.phase === "terminal") { if (row.actualVcpuMs === actualVcpuMs && row.evidenceDigest === evidenceDigest) return; throw new Error("compute settlement conflict"); }
     if (row.phase !== "dispatched" && row.phase !== "settling") throw new Error("compute settlement refused");
     if (row.phase === "settling" && (row.actualVcpuMs !== actualVcpuMs || row.evidenceDigest !== evidenceDigest)) throw new Error("compute settlement conflict");
-    const next = { ...row, phase: "settling", actualVcpuMs, evidenceDigest };
+    const next = { ...row, phase: "settling" as const, actualVcpuMs, evidenceDigest };
     if (row.phase !== "settling") await this.storage.put(this.key(reservationId), next);
-    const receipt = await this.client.settle((row.binding as ComputeBinding).token, reservationId, actualVcpuMs, evidenceDigest);
+    const receipt = await this.client.settle(row.binding.token, reservationId, actualVcpuMs, evidenceDigest);
     if (receipt.reservation_id !== reservationId || receipt.state !== "settled") throw new Error("invalid compute settlement receipt");
-    await this.storage.put(this.key(reservationId), { ...next, phase: "terminal" });
+    await this.storage.put(this.key(reservationId), { ...next, phase: "terminal" as const });
   }
 
-  async drainUnused(nowMs: number, cursor?: string): Promise<{ cursor?: string }> {
-    const page = await this.storage.list<Record<string, unknown>>({ prefix: "compute:obligation:", limit: 25, ...(cursor ? { startAfter: cursor } : {}) });
-    for (const [key, row] of page) {
-      if ((row.phase === "preparing" || row.phase === "active" || row.phase === "abandoning") && typeof row.deadlineMs === "number" && row.deadlineMs <= nowMs) {
-        try { await this.abandonUnused(key.slice("compute:obligation:".length)); } catch { /* retain for next bounded drain */ }
-      }
+  async drainUnused(nowMs: number, cursor?: string): Promise<{ cursor?: string; pending: boolean }> {
+    const page = await this.storage.list<unknown>({ prefix: "compute:obligation:", limit: 25, ...(cursor ? { startAfter: cursor } : {}) });
+    let processed = 0; let last: string | undefined; let pending = false;
+    for (const [key, raw] of page) {
+      last = key;
+      let row: StoredObligation;
+      try { row = this.validateStored(raw); } catch { pending = true; continue; }
+      const eligible = row.phase === "preparing" || row.phase === "active" || row.phase === "abandoning";
+      if (!eligible || (row.phase !== "abandoning" && row.deadlineMs > nowMs)) { if (eligible) pending = true; continue; }
+      if (processed >= 2) { pending = true; break; }
+      processed++;
+      try { await this.abandonUnused(key.slice("compute:obligation:".length)); } catch { pending = true; }
+      if (processed === 2) { pending = true; break; }
     }
-    return page.size === 25 ? { cursor: [...page.keys()].at(-1) } : {};
+    if (page.size === 25 && last && processed < 2) pending = true;
+    return { ...(page.size === 25 && last ? { cursor: last } : {}), pending };
   }
 }
 
+function sameBinding(a: ComputeBinding, b: ComputeBinding): boolean {
+  return a.token === b.token && a.reservationId === b.reservationId && a.tenantId === b.tenantId && a.workloadKind === b.workloadKind && a.workloadId === b.workloadId && a.vcpuCount === b.vcpuCount && a.maximumWallMs === b.maximumWallMs;
+}
+function validPeriod(period: number): boolean { const month = period % 100; return period >= 197001 && period <= 999912 && month >= 1 && month <= 12; }
+const ASCII = /^[\x21-\x7e]+$/;
 const UUID = /^(?!00000000-0000-0000-0000-000000000000$)[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const PHASES = new Set<Phase>(["preparing", "active", "dispatched", "abandoning", "settling", "terminal"]);
+const I64_MAX = 9_223_372_036_854_775_807n;
