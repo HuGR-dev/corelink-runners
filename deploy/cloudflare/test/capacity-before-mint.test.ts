@@ -25,12 +25,12 @@ function setup(opts: { mint?: unknown; authorize?: unknown; mintStatus?: number;
   const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
     if (url.endsWith("/internal/v1/runner/authorize")) {
-      return response(opts.authorize ?? { tenant: TENANT, max_concurrency: 1 }, opts.authorizeStatus ?? 200);
+      return response(opts.authorize ?? { tenant: TENANT, lifecycle_generation: "1", max_concurrency: 1 }, opts.authorizeStatus ?? 200);
     }
     if (url.endsWith("/internal/v1/runner/mint")) {
       const requestBody = JSON.parse(String(init?.body ?? "{}")) as { operation_id?: unknown };
       const operationId = typeof requestBody.operation_id === "string" ? requestBody.operation_id : "";
-      const mint = opts.mint ?? { token_plaintext: "secret-pat", pat_id: "pat-1", tenant: TENANT, max_concurrency: 1 };
+      const mint = opts.mint ?? { token_plaintext: "secret-pat", pat_id: "pat-1", tenant: TENANT, lifecycle_generation: "1", max_concurrency: 1 };
       const mintBody = { ...mint, operation_id: operationId } as { operation_id?: unknown; pat_id?: unknown };
       if (typeof mintBody.operation_id === "string" && typeof mintBody.pat_id === "string") {
         issuedOperations.set(mintBody.operation_id, mintBody.pat_id);
@@ -85,7 +85,7 @@ describe("capacity admission precedes required mint", () => {
   });
 
   it("acquires the real slot before the mint request", async () => {
-    const f = setup({ authorize: { tenant: TENANT, max_concurrency: 2 }, mint: { token_plaintext: "secret-pat", pat_id: "pat-2", tenant: TENANT, max_concurrency: 2 } });
+    const f = setup({ authorize: { tenant: TENANT, lifecycle_generation: "1", max_concurrency: 2 }, mint: { token_plaintext: "secret-pat", pat_id: "pat-2", tenant: TENANT, lifecycle_generation: "1", max_concurrency: 2 } });
     f.fetchMock.mockImplementation(async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith("/internal/v1/runner/adopt")) {
@@ -100,11 +100,11 @@ describe("capacity admission precedes required mint", () => {
         f.issuedOperations.set(operationId, "pat-2");
         const slots = f.slotsStorage.map.get("slots") as Array<{ jobId: string }>;
         expect(slots.map((slot) => slot.jobId)).toContain("1002");
-        return response({ operation_id: operationId, token_plaintext: "secret-pat", pat_id: "pat-2", tenant: TENANT, max_concurrency: 2 });
+        return response({ operation_id: operationId, token_plaintext: "secret-pat", pat_id: "pat-2", tenant: TENANT, lifecycle_generation: "1", max_concurrency: 2 });
       }
       if (url.includes("generate-jitconfig")) return response({ encoded_jit_config: "jit", runner: { id: 8 } });
       if (url.endsWith("/internal/v1/runner/revoke")) return new Response(null, { status: 204 });
-      return response({ tenant: TENANT, max_concurrency: 2 });
+      return response({ tenant: TENANT, lifecycle_generation: "1", max_concurrency: 2 });
     });
     await queueAndDrain(f, "1002");
     expect(f.fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/runner/authorize"))).toHaveLength(1);
@@ -113,7 +113,7 @@ describe("capacity admission precedes required mint", () => {
   });
 
   it("releases the acquired slot and revokes the exact minted identity on authorization mismatch", async () => {
-    const f = setup({ authorize: { tenant: TENANT, max_concurrency: 2 }, mint: { token_plaintext: "secret-pat", pat_id: "pat-mismatch", tenant: TENANT, max_concurrency: 3 } });
+    const f = setup({ authorize: { tenant: TENANT, lifecycle_generation: "1", max_concurrency: 2 }, mint: { token_plaintext: "secret-pat", pat_id: "pat-mismatch", tenant: TENANT, lifecycle_generation: "1", max_concurrency: 3 } });
     await queueAndDrain(f, "1003");
     expect(f.fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/internal/v1/runner/revoke"))).toHaveLength(1);
     const revoke = f.fetchMock.mock.calls.find(([url]) => String(url).endsWith("/internal/v1/runner/revoke"));

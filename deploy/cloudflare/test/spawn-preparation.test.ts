@@ -43,13 +43,13 @@ function fixture(options: { mintStatus?: number; authorizeStatus?: number; mintK
           ceiling_vcpu_ms: "864000000", vcpu_count: 4, maximum_wall_ms: 28_800_000,
           issued_at_ms: now, expires_at_ms: now + 60_000 };
         const token = btoa(JSON.stringify(payload)).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
-        return json({ tenant: TENANT, max_concurrency: 2, max_vcpu_h: 240, compute_grant: `${token}.signature` });
+        return json({ tenant: TENANT, lifecycle_generation: "1", max_concurrency: 2, max_vcpu_h: 240, compute_grant: `${token}.signature` });
       }
-      return json({ tenant: TENANT, max_concurrency: 2 }, options.authorizeStatus ?? 200);
+      return json({ tenant: TENANT, lifecycle_generation: "1", max_concurrency: 2 }, options.authorizeStatus ?? 200);
     }
     if (url.endsWith("/internal/v1/runner/mint")) {
       order.push("mint");
-      return json({ token_plaintext: "new-secret", pat_id: "new-pat", tenant: TENANT, max_concurrency: 2,
+      return json({ token_plaintext: "new-secret", pat_id: "new-pat", tenant: TENANT, lifecycle_generation: "1", max_concurrency: 2,
         ...(options.metered ? { max_vcpu_h: 240 } : {}) }, options.mintStatus ?? 200);
     }
     if (url.endsWith("/internal/v1/runner/revoke")) return new Response(null, { status: options.revokeStatus ?? 204 });

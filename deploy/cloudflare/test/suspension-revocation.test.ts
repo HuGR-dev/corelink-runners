@@ -34,6 +34,10 @@ function envFor(authority: unknown, jobs: ReturnType<typeof kv>): Env {
     CORELINK_RUNNER_MINT_AUTH_KEY: "mint-key",
     CORELINK_MINT_URL: "https://mint.invalid",
     RUNNER_JOB_PATS: jobs,
+    CRED_STASH: {
+      idFromName: () => "lease",
+      get: () => ({ wipe: async () => {} }),
+    },
     CONTAINMENT: {
       idFromName: () => "global",
       get: () => authority,

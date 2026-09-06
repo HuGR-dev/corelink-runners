@@ -231,7 +231,7 @@ fn real_pg_two_connections_resume_once_under_same_tenant_lock() -> anyhow::Resul
 }
 
 #[test]
-fn real_pg_negative_generation_refuses_read_and_resume_without_deleting_suspension(
+fn real_pg_negative_generation_is_rejected_without_deleting_suspension(
 ) -> anyhow::Result<()> {
     let Some(url) = env::var("TEST_DATABASE_URL").ok() else {
         eprintln!("lifecycle pg tests: TEST_DATABASE_URL unset — skipping");
@@ -245,13 +245,14 @@ fn real_pg_negative_generation_refuses_read_and_resume_without_deleting_suspensi
         let tenant = uuid::Uuid::new_v4().to_string();
         ledger.record_tenant_suspension(event(&tenant, "negative-generation", 12))?;
         let db = ledger.pool.get().await?;
-        db.execute(
+        assert!(db
+            .execute(
             "UPDATE tenant_lifecycle_generations SET generation=-1 WHERE tenant_id=$1",
             &[&tenant],
         )
-        .await?;
-        assert!(ledger.tenant_lifecycle(&tenant).is_err());
-        assert!(ledger.set_tenant_suspended(&tenant, false).is_err());
+        .await
+        .is_err());
+        assert!(ledger.tenant_lifecycle(&tenant)?.suspended);
         let still_suspended: bool = db
             .query_one(
                 "SELECT EXISTS(SELECT 1 FROM fabric_suspended_tenants WHERE tenant_id=$1)",
