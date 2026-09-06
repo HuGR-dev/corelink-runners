@@ -58,8 +58,8 @@ Resources:
             Version: '2012-10-17'
             Statement:
               - {Effect: Allow, Action: [dynamodb:GetItem, dynamodb:Query], Resource: !GetAtt VerificationHead.Arn}
-              - {Effect: Allow, Action: [s3:GetObject, s3:HeadObject], Resource: !Sub '${JournalBucket.Arn}/journal/*'}
-              - {Effect: Allow, Action: kms:Sign, Resource: !GetAtt WitnessKey.Arn}
+              - {Effect: Allow, Action: [s3:GetObject, s3:GetObjectRetention], Resource: !Sub '${JournalBucket.Arn}/journal/*'}
+              - {Effect: Allow, Action: [kms:Sign, kms:GetPublicKey], Resource: !GetAtt WitnessKey.Arn}
               - {Effect: Allow, Action: [logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents], Resource: '*'}
 Outputs:
   VerificationHeadTableArn: {Value: !GetAtt VerificationHead.Arn}

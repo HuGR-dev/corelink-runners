@@ -8,12 +8,13 @@ Parameters:
     AllowedPattern: '^([0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com/)[a-z0-9/_-]+@sha256:[0-9a-f]{64}$'
   FoundationTableName: {Type: String}
   FoundationBucketArn: {Type: String, AllowedPattern: '^arn:[^:]+:s3:::[a-z0-9.-]+$'}
-  FoundationTopicArn: {Type: String, AllowedPattern: '^arn:[^:]+:sns:[^:]+:[0-9]{12}:.+$'}
-  RuntimeRoleArn: {Type: String, AllowedPattern: '^arn:[^:]+:iam::[0-9]{12}:role/.+$'}
-  SchedulerRoleArn: {Type: String, AllowedPattern: '^arn:[^:]+:iam::[0-9]{12}:role/.+$'}
-  JournalKeyArn: {Type: String, AllowedPattern: '^arn:[^:]+:kms:[^:]+:[0-9]{12}:key/.+$'}
-  SigningKeyArn: {Type: String, AllowedPattern: '^arn:[^:]+:kms:[^:]+:[0-9]{12}:key/.+$'}
+  FoundationTopicArn: {Type: String, AllowedPattern: '^arn:[^:]+:sns:[^:]+:975306274105:.+$'}
+  RuntimeRoleArn: {Type: String, AllowedPattern: '^arn:[^:]+:iam::975306274105:role/.+$'}
+  SchedulerRoleArn: {Type: String, AllowedPattern: '^arn:[^:]+:iam::975306274105:role/.+$'}
+  JournalKeyArn: {Type: String, AllowedPattern: '^arn:[^:]+:kms:[^:]+:975306274105:key/.+$'}
+  SigningKeyArn: {Type: String, AllowedPattern: '^arn:[^:]+:kms:[^:]+:975306274105:key/.+$'}
   SensitivitySchedulerRoleArn: {Type: String, AllowedPattern: '^arn:[^:]+:iam::286590629898:role/.+$'}
+  SchedulerDeadLetterQueueArn: {Type: String, AllowedPattern: '^arn:[^:]+:sqs:[^:]+:975306274105:.+$'}
 Resources:
   MonitorFunction:
     Type: AWS::Lambda::Function
@@ -94,6 +95,7 @@ Resources:
       Target:
         Arn: !Ref LiveAlias
         RoleArn: !Ref SchedulerRoleArn
+        DeadLetterConfig: {Arn: !Ref SchedulerDeadLetterQueueArn}
         Input: '{"kind":"monitor_tick","source":"aws-scheduler"}'
         RetryPolicy: {MaximumEventAgeInSeconds: 60, MaximumRetryAttempts: 2}
 Outputs:

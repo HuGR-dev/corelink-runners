@@ -5,8 +5,9 @@ Parameters:
   PublishedMonitorLambdaArn:
     Type: String
     Description: Exact published monitor Lambda version ARN; no $LATEST and no alias.
-    AllowedPattern: '^arn:[^:]+:lambda:[^:]+:[0-9]{12}:function:[A-Za-z0-9_-]+:[0-9]+$'
+    AllowedPattern: '^arn:[^:]+:lambda:[^:]+:975306274105:function:[A-Za-z0-9_-]+:[0-9]+$'
   SchedulerRoleArn: {Type: String, AllowedPattern: '^arn:[^:]+:iam::286590629898:role/.+$'}
+  SchedulerDeadLetterQueueArn: {Type: String, AllowedPattern: '^arn:[^:]+:sqs:[^:]+:286590629898:.+$'}
 Resources:
   SchedulerInvokePolicy:
     Type: AWS::IAM::Policy
@@ -26,6 +27,7 @@ Resources:
       Target:
         Arn: !Ref PublishedMonitorLambdaArn
         RoleArn: !Ref SchedulerRoleArn
+        DeadLetterConfig: {Arn: !Ref SchedulerDeadLetterQueueArn}
         Input: '{"kind":"sensitivity_tick","source":"independent-scheduler"}'
         RetryPolicy: {MaximumEventAgeInSeconds: 60, MaximumRetryAttempts: 2}
 Outputs:

@@ -123,6 +123,13 @@ Resources:
             Action: s3:*
             Resource: [!GetAtt JournalBucket.Arn, !Sub '${JournalBucket.Arn}/*']
             Condition: {Bool: {aws:SecureTransport: 'false'}}
+  SchedulerDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      QueueName: !Sub '${ResourcePrefix}-scheduler-dlq'
+      SqsManagedSseEnabled: true
   ReceiptTopic:
     Type: AWS::SNS::Topic
     Properties:
@@ -153,10 +160,10 @@ Resources:
                 Resource: !GetAtt StateTable.Arn
               - {Effect: Allow, Action: sns:Publish, Resource: !Ref ReceiptTopic}
               - Effect: Allow
-                Action: [s3:PutObject, s3:GetObject, s3:HeadObject, s3:PutObjectRetention]
+                Action: [s3:PutObject, s3:GetObject, s3:GetObjectRetention, s3:PutObjectRetention]
                 Resource: !Sub '${JournalBucket.Arn}/journal/*'
               - {Effect: Allow, Action: [kms:Encrypt, kms:Decrypt, kms:GenerateDataKey], Resource: !GetAtt JournalKey.Arn}
-              - {Effect: Allow, Action: kms:Sign, Resource: !GetAtt SigningKey.Arn}
+              - {Effect: Allow, Action: [kms:Sign, kms:GetPublicKey], Resource: !GetAtt SigningKey.Arn}
               - {Effect: Allow, Action: [logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents], Resource: '*'}
   SchedulerRole:
     Type: AWS::IAM::Role
@@ -173,36 +180,39 @@ Resources:
               - Effect: Allow
                 Action: lambda:InvokeFunction
                 Resource: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${ResourcePrefix}:live'
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt SchedulerDeadLetterQueue.Arn
   IngestRole:
     Type: AWS::IAM::Role
     Properties:
       RoleName: !Sub '${ResourcePrefix}-ingest'
       AssumeRolePolicyDocument: {Version: '2012-10-17', Statement: [{Effect: Allow, Principal: {Service: lambda.amazonaws.com}, Action: sts:AssumeRole}]}
-      Policies: [{PolicyName: sign-ingest, PolicyDocument: {Version: '2012-10-17', Statement: [{Effect: Allow, Action: kms:Sign, Resource: !GetAtt IngestKey.Arn}]}}]
+      Policies: [{PolicyName: sign-ingest, PolicyDocument: {Version: '2012-10-17', Statement: [{Effect: Allow, Action: [kms:Sign, kms:GetPublicKey], Resource: !GetAtt IngestKey.Arn}]}}]
   AckRole:
     Type: AWS::IAM::Role
     Properties:
       RoleName: !Sub '${ResourcePrefix}-ack'
       AssumeRolePolicyDocument: {Version: '2012-10-17', Statement: [{Effect: Allow, Principal: {Service: lambda.amazonaws.com}, Action: sts:AssumeRole}]}
-      Policies: [{PolicyName: sign-ack, PolicyDocument: {Version: '2012-10-17', Statement: [{Effect: Allow, Action: kms:Sign, Resource: !GetAtt AckKey.Arn}]}}]
+      Policies: [{PolicyName: sign-ack, PolicyDocument: {Version: '2012-10-17', Statement: [{Effect: Allow, Action: [kms:Sign, kms:GetPublicKey], Resource: !GetAtt AckKey.Arn}]}}]
   RecoveryRole:
     Type: AWS::IAM::Role
     Properties:
       RoleName: !Sub '${ResourcePrefix}-recovery'
       AssumeRolePolicyDocument: {Version: '2012-10-17', Statement: [{Effect: Allow, Principal: {Service: lambda.amazonaws.com}, Action: sts:AssumeRole}]}
-      Policies: [{PolicyName: sign-recovery, PolicyDocument: {Version: '2012-10-17', Statement: [{Effect: Allow, Action: kms:Sign, Resource: !GetAtt RecoveryKey.Arn}]}}]
+      Policies: [{PolicyName: sign-recovery, PolicyDocument: {Version: '2012-10-17', Statement: [{Effect: Allow, Action: [kms:Sign, kms:GetPublicKey], Resource: !GetAtt RecoveryKey.Arn}]}}]
   ManifestRole:
     Type: AWS::IAM::Role
     Properties:
       RoleName: !Sub '${ResourcePrefix}-manifest'
       AssumeRolePolicyDocument: {Version: '2012-10-17', Statement: [{Effect: Allow, Principal: {Service: lambda.amazonaws.com}, Action: sts:AssumeRole}]}
-      Policies: [{PolicyName: sign-manifest, PolicyDocument: {Version: '2012-10-17', Statement: [{Effect: Allow, Action: kms:Sign, Resource: !GetAtt SigningKey.Arn}]}}]
+      Policies: [{PolicyName: sign-manifest, PolicyDocument: {Version: '2012-10-17', Statement: [{Effect: Allow, Action: [kms:Sign, kms:GetPublicKey], Resource: !GetAtt SigningKey.Arn}]}}]
   PageAckRole:
     Type: AWS::IAM::Role
     Properties:
       RoleName: !Sub '${ResourcePrefix}-page-ack'
       AssumeRolePolicyDocument: {Version: '2012-10-17', Statement: [{Effect: Allow, Principal: {Service: lambda.amazonaws.com}, Action: sts:AssumeRole}]}
-      Policies: [{PolicyName: sign-page-ack, PolicyDocument: {Version: '2012-10-17', Statement: [{Effect: Allow, Action: kms:Sign, Resource: !GetAtt PageAckKey.Arn}]}}]
+      Policies: [{PolicyName: sign-page-ack, PolicyDocument: {Version: '2012-10-17', Statement: [{Effect: Allow, Action: [kms:Sign, kms:GetPublicKey], Resource: !GetAtt PageAckKey.Arn}]}}]
   JournalRole:
     Type: AWS::IAM::Role
     Properties:
@@ -230,3 +240,4 @@ Outputs:
   RuntimeRepositoryUri: {Value: !GetAtt RuntimeRepository.RepositoryUri}
   RuntimeRoleArn: {Value: !GetAtt RuntimeRole.Arn}
   SchedulerRoleArn: {Value: !GetAtt SchedulerRole.Arn}
+  SchedulerDeadLetterQueueArn: {Value: !GetAtt SchedulerDeadLetterQueue.Arn}
