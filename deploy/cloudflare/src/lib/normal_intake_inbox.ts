@@ -17,11 +17,6 @@ export class NormalIntakeConflictError extends Error {
   readonly status = 409 as const; readonly code = "normal_intake_conflict" as const;
   constructor(message = "normal intake event conflicts with durable evidence") { super(message); this.name = "NormalIntakeConflictError"; }
 }
-export class NormalIntakeCapacityError extends Error {
-  readonly status = 503 as const; readonly code = "normal_intake_capacity" as const;
-  constructor() { super("normal intake inbox is at capacity"); this.name = "NormalIntakeCapacityError"; }
-}
-
 const EVENT = "normal-inbox:v1:event:";
 const PENDING = "normal-inbox:v1:pending:";
 const COUNT = "normal-inbox:v1:count";
@@ -70,15 +65,15 @@ export class NormalIntakeInbox {
       const key = eventKey(normalized.event_id);
       const old = await tx.get<unknown>(key);
       if (old !== undefined) {
-      if (!validRecord(old, normalized.event_id)) fail("malformed event record");
+        if (!validRecord(old, normalized.event_id)) fail("malformed event record");
         if (old.body_sha256 !== normalized.body_sha256 || old.job_id !== normalized.job_id || old.repo !== normalized.repo
           || old.installation_id !== normalized.installation_id || JSON.stringify(old.labels) !== JSON.stringify(normalized.labels)) return { status: "conflict" };
         return { status: "duplicate", record: old };
       }
       const countValue = await tx.get<unknown>(COUNT);
       if (countValue === undefined) {
-        const existingPending = await tx.list({ prefix: PENDING, limit: 1 });
-        if (existingPending.size > 0) fail("missing active count");
+        const existingEvents = await tx.list({ prefix: EVENT, limit: 1 });
+        if (existingEvents.size > 0) fail("missing active count");
       }
       const count = countValue === undefined ? 0 : countValue;
       if (!validCount(count)) fail("malformed active count");
@@ -96,16 +91,21 @@ export class NormalIntakeInbox {
   async pending(now: number, limit = 25): Promise<NormalIntakeRecord[]> {
     validateNow(now);
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 25) throw new Error("invalid normal intake limit");
-    const page = await this.storage.list<string>({ prefix: PENDING, limit: 26 });
-    const result: NormalIntakeRecord[] = [];
-    for (const [key, value] of page) {
-      if (typeof value !== "string" || !key.startsWith(PENDING)) fail("malformed pending index");
-      const record = await this.storage.get<unknown>(eventKey(value));
-      if (!validRecord(record, value)) fail("malformed event record");
-      if (record.state !== "pending" || key !== pendingKey(record)) fail("pending index/state mismatch");
-      if (record.next_attempt_ms <= now) result.push(record);
-    }
-    return result.sort((a, b) => a.received_at_ms - b.received_at_ms || a.event_id.localeCompare(b.event_id)).slice(0, limit);
+    return this.storage.transaction(async tx => {
+      // The active set has a hard bound. Inspect it completely so delayed heads
+      // cannot permanently hide ready work beyond a short page.
+      const page = await tx.list<string>({ prefix: PENDING, limit: MAX + 1 });
+      if (page.size > MAX) fail("pending index exceeds capacity");
+      const result: NormalIntakeRecord[] = [];
+      for (const [key, value] of page) {
+        if (typeof value !== "string" || !key.startsWith(PENDING)) fail("malformed pending index");
+        const record = await tx.get<unknown>(eventKey(value));
+        if (!validRecord(record, value)) fail("malformed event record");
+        if (record.state !== "pending" || key !== pendingKey(record)) fail("pending index/state mismatch");
+        if (record.next_attempt_ms <= now) result.push(record);
+      }
+      return result.sort((a, b) => a.received_at_ms - b.received_at_ms || a.event_id.localeCompare(b.event_id)).slice(0, limit);
+    });
   }
 
   async settle(eventId: string, expectedBodySha: string, outcome: NormalIntakeOutcome, now: number): Promise<void> {

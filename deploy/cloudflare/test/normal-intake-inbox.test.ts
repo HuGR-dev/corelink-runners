@@ -7,7 +7,7 @@ class Store {
   async put(key: string, value: unknown) { if (this.fail) throw new Error("put failed"); this.data.set(key, value); }
   async delete(key: string) { this.data.delete(key); }
   async list<T>(options: { prefix?: string; limit?: number }) {
-    return [...this.data.entries()].filter(([k]) => k.startsWith(options.prefix ?? "")).sort(([a], [b]) => a.localeCompare(b)).slice(0, options.limit ?? Infinity) as [string, T][];
+    return new Map([...this.data.entries()].filter(([k]) => k.startsWith(options.prefix ?? "")).sort(([a], [b]) => a.localeCompare(b)).slice(0, options.limit ?? Infinity) as [string, T][]);
   }
   async transaction<T>(fn: (tx: Store) => Promise<T>) {
     const run = this.tail.then(async () => { const copy = new Map(this.data); const tx = Object.create(this) as Store; tx.data = copy; const result = await fn(tx); this.data = copy; return result; });
@@ -58,8 +58,19 @@ describe("NormalIntakeInbox", () => {
   });
   it("looks past delayed successors without unbounded reads", async () => {
     const storage = new Store(); const inbox = new NormalIntakeInbox(storage as never);
-    for (let i = 0; i < 25; i++) await inbox.enqueue(input(`delayed-${i}`, i), 0, 10000);
-    await inbox.enqueue(input("ready", 25), 0);
+    for (let i = 0; i < 499; i++) await inbox.enqueue(input(`delayed-${i}`, i), 0, 10000);
+    await inbox.enqueue(input("ready", 499), 0);
     expect((await inbox.pending(1, 1)).map((x) => x.event_id)).toEqual(["ready"]);
+  });
+  it("refuses a missing counter and divergent index, and strips non-contract fields", async () => {
+    const storage = new Store(); const inbox = new NormalIntakeInbox(storage as never);
+    await inbox.enqueue({ ...input("safe"), raw_payload: "must-not-persist", token: "must-not-persist" } as never, 0);
+    expect(storage.data.get("normal-inbox:v1:event:safe")).not.toHaveProperty("token");
+    expect(storage.data.get("normal-inbox:v1:event:safe")).not.toHaveProperty("raw_payload");
+    storage.data.delete("normal-inbox:v1:count");
+    await expect(inbox.enqueue(input("other"), 0)).rejects.toThrow("missing active count");
+    storage.data.set("normal-inbox:v1:pending:0000000000000000:wrong", "safe");
+    await expect(inbox.pending(1001)).rejects.toThrow("pending index/state mismatch");
+    await expect(inbox.enqueue({ ...input("bad"), schema_version: 2 } as never, 0)).rejects.toThrow();
   });
 });

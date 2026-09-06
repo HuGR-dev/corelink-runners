@@ -1,3 +1,4 @@
+import { NormalIntakeInbox, type NormalIntakeInput, type NormalIntakeRecord } from "./lib/normal_intake_inbox";
 import { JobAttributionAuthority } from "./lib/job_attribution_authority";
 import { CredentialObligationAuthority } from "./lib/credential_obligation_authority";
 import { RetryEpochAuthority } from "./lib/retry_epoch_authority";
@@ -72,8 +73,6 @@ import {
   COLD_REPO_CAP,
   decideRedeem,
   parseReconcilerRepos,
-  rateLimitDeadLetterKey,
-  rateLimitDeadLetterStep,
   vcpuCeilingKey,
   vcpuUsageKey,
   vcpuWarnedKey,
@@ -82,8 +81,6 @@ import {
   RUNNER_BOX_VCPU,
   VCPU_KEY_TTL_S,
   VCPU_WARN_THRESHOLDS,
-  RATE_LIMIT_DEADLETTER_MAX,
-  RATE_LIMIT_DEADLETTER_WINDOW_S,
   installationIdForRepo,
   tenantPatSecretForRepo,
   installationAllowlistArmed,
@@ -540,6 +537,18 @@ export class ContainmentDO extends DurableObject<Env> {
 
   async snapshot(): Promise<ContainmentMeta> {
     return (await this.ctx.storage.get<ContainmentMeta>(CONTAINMENT_META_KEY)) ?? emptyContainmentMeta();
+  }
+
+  async normalIntakeEnqueue(input: NormalIntakeInput, delayMs = 0) {
+    return new NormalIntakeInbox(this.ctx.storage).enqueue(input, Date.now(), delayMs);
+  }
+
+  async normalIntakePending(limit = 25): Promise<NormalIntakeRecord[]> {
+    return new NormalIntakeInbox(this.ctx.storage).pending(Date.now(), limit);
+  }
+
+  async normalIntakeSettle(eventId: string, bodySha: string, outcome: "complete" | "uncertain" | "retry"): Promise<void> {
+    return new NormalIntakeInbox(this.ctx.storage).settle(eventId, bodySha, outcome, Date.now());
   }
 
   async spendAdmissionBudget(): Promise<AdmissionBudgetVerdict> {
@@ -1558,17 +1567,6 @@ function trimAsciiWhitespace(value: string): string {
   // JavaScript's `\\s` would hide among non-ASCII whitespace we must preserve.
   return value.replace(/^[\t\n\v\f\r ]+|[\t\n\v\f\r ]+$/g, "");
 }
-// TODO(T3-W17): delete this once legacy route fixtures bind CONTAINMENT. This is
-// Vite/Vitest compile-context only — not an Env, Node, or request-controlled
-// switch. The target Wrangler config defines `import.meta.env.MODE` to a
-// production string, so its dry-run bundle eliminates this test-only branch;
-// deployed Workers therefore take the required fail-closed authority path.
-function isVitestLegacyFixtureContext(env: Env): boolean {
-  return (import.meta as ImportMeta & { env: { MODE: string } }).env.MODE === "test"
-    && !env.CONTAINMENT
-    && env.AUTOSCALER_INTAKE_PAUSED === undefined
-    && env.AUTOSCALER_REDRIVE_PAUSED === undefined;
-}
 function containmentAuthority(env: Env): DurableObjectStub<ContainmentDO> {
   if (!env.CONTAINMENT) throw new Error("containment authority unavailable");
   return env.CONTAINMENT.get(env.CONTAINMENT.idFromName("global"));
@@ -1592,10 +1590,7 @@ async function readBillingJobAttribution(
   return { jobId, tenant: value.tenant };
 }
 async function containmentRedriveAuthorityReadable(env: Env): Promise<boolean> {
-  // Existing fixture routes intentionally omit the mandatory binding. In every
-  // deployed build this is an authority read before either reconciler can list,
-  // release, claim, or drive a job; an unavailable authority is fail-closed.
-  if (isVitestLegacyFixtureContext(env)) return true;
+  // An unavailable authority refuses every reconciler before external effects.
   try {
     await containmentAuthority(env).snapshot();
     return true;
@@ -3044,70 +3039,6 @@ async function fetchJobPlacement(
   }
 }
 
-// ── Bounded dead-letter for a RATE-LIMITED spawn (2026-08-02) ────────────────
-//
-// A rate-limit refusal is backpressure, exactly like the ceiling refusal — the
-// job is fine, the ingress is momentarily full. But GitHub delivers
-// `workflow_job.queued` once and never redelivers a non-2xx, so without a record
-// the job is lost forever. This writes that record.
-//
-// It is BOUNDED per repo per window because the retry is not free: `driveSpawn`
-// mints the per-job CAS PAT BEFORE the concurrency-slot check, so every
-// reconciler retry costs a real mint against corelink-server even when the spawn
-// is then refused at the ceiling. Dead-lettering an unbounded flood would make
-// the rate limiter the CAUSE of sustained load rather than the bound on it.
-//
-// Best-effort throughout, and deliberately so: this runs in `waitUntil` after the
-// 429 has already been returned, so nothing here can affect the response. A KV
-// hiccup costs at most one unrecovered job — the same outcome as before the fix,
-// never worse.
-async function deadLetterRateLimited(
-  env: Env,
-  opts: { jobId: string; repo: string; installationId: string; labels: string[] },
-): Promise<void> {
-  const kv = env.RUNNER_JOB_PATS;
-  if (!kv) return;
-  // A COLD spawn (no installation id) cannot be re-driven WARM without bypassing
-  // per-job authz, so `recordOrphan` would no-op anyway. Skip early and SAY SO —
-  // this is a real, deliberate coverage gap and it should be visible in the logs
-  // rather than inferred from an absence.
-  if (!opts.installationId) {
-    logEvent("info", "rate_limit_deadletter_skipped_cold", {
-      jobId: opts.jobId,
-      repo: opts.repo,
-    });
-    return;
-  }
-  try {
-    const key = rateLimitDeadLetterKey(opts.repo);
-    const raw = await kv.get(key);
-    const count = raw ? Number.parseInt(raw, 10) : 0;
-    const step = rateLimitDeadLetterStep(Number.isFinite(count) ? count : 0);
-    if (!step.record) {
-      // LOUD: past this point jobs ARE being dropped again. That is the intended
-      // behaviour under a flood, but it must never be silent — a human reading
-      // the logs has to be able to tell "we shed load" from "we lost work".
-      logEvent("error", "rate_limit_deadletter_capped", {
-        jobId: opts.jobId,
-        repo: opts.repo,
-        count,
-        max: RATE_LIMIT_DEADLETTER_MAX,
-      });
-      await bumpMetrics(env, "rate_limit_deadletter_capped");
-      return;
-    }
-    await kv.put(key, String(step.nextCount), {
-      expirationTtl: RATE_LIMIT_DEADLETTER_WINDOW_S,
-    });
-    await recordOrphan(env, opts);
-  } catch (e) {
-    logEvent("error", "rate_limit_deadletter_failed", {
-      jobId: opts.jobId,
-      error: (e as Error).message,
-    });
-  }
-}
-
 // Ask GitHub about ONE runner: `GET /repos/{owner}/{repo}/actions/runners/{id}`.
 //
 // Documented response fields include `status` (required, string) and `busy`
@@ -4491,6 +4422,9 @@ export async function runContainmentDrain(env: Env, dependencies: ContainmentDra
         continue;
       }
       if (!env.RUNNER_JOB_PATS) break;
+      if (installationAllowlistArmed(env.INSTALLATION_ALLOWLIST)
+        && !isInstallationAllowlisted(env.INSTALLATION_ALLOWLIST, event.installation_id)) break;
+      if (env.WEBHOOK_LIMITER && !(await env.WEBHOOK_LIMITER.limit({ key: `spawn:${event.repo}` })).success) break;
       const tuple = await drainOwnerTuple(event.repo, event.job_id, event.effect_id, event.event_id, owner, lease.epoch);
       const spawnOpts: ContainmentDriveOpts = { jobId: event.job_id, repo: event.repo, installationId: event.installation_id, labels: event.labels };
       let prepared: ContainerEnvResult | undefined;
@@ -4529,6 +4463,53 @@ export async function runContainmentDrain(env: Env, dependencies: ContainmentDra
   }
 }
 
+/** Recover normal arrivals without moving them into the containment backlog. */
+export async function runNormalIntakeDrain(env: Env, alreadyRateAdmittedEventId?: string): Promise<void> {
+  const authority = containmentAuthority(env);
+  for (const event of await authority.normalIntakePending(25)) {
+    if (parseContainmentSwitch(env.AUTOSCALER_INTAKE_PAUSED) !== "normal") return;
+    if ((await authority.snapshot()).backlog_count !== 0) return;
+    if (installationAllowlistArmed(env.INSTALLATION_ALLOWLIST)
+      && !isInstallationAllowlisted(env.INSTALLATION_ALLOWLIST, event.installation_id)) {
+      await authority.normalIntakeSettle(event.event_id, event.body_sha256, "complete");
+      continue;
+    }
+    if (event.event_id !== alreadyRateAdmittedEventId && env.WEBHOOK_LIMITER
+      && !(await env.WEBHOOK_LIMITER.limit({ key: `spawn:${event.repo}` })).success) {
+      await authority.normalIntakeSettle(event.event_id, event.body_sha256, "retry");
+      continue;
+    }
+    const spawnOpts: ContainmentDriveOpts = { jobId: event.job_id, repo: event.repo,
+      installationId: event.installation_id, labels: event.labels };
+    let prepared: ContainerEnvResult | undefined;
+    const result = await runCanonicalEffect({
+      ledger: authority,
+      tuple: await intakeOwnerTuple(event.repo, event.job_id, `containment:v1:${event.event_id}`, event.event_id),
+      opts: spawnOpts, provider: "cloudflare-container",
+      resource_id: `job:${event.repo}/${event.job_id}`, idempotency_key: `containment:v1:${event.event_id}`,
+      admit: async () => parseContainmentSwitch(env.AUTOSCALER_INTAKE_PAUSED) === "normal"
+        && (await authority.snapshot()).backlog_count === 0,
+      beforeClaim: async () => { prepared = await prepareSpawn(env, spawnOpts); },
+      abandonPreparation: async () => {
+        if (prepared?.patId && prepared.tenant) {
+          await revokeIssuedCredential(env, authority, { jobId: event.job_id, tenant: prepared.tenant, patId: prepared.patId });
+        }
+      },
+      claim: () => claimSpawn(env.RUNNER_JOB_PATS, event.job_id),
+      release: () => releaseSpawnClaim(env.RUNNER_JOB_PATS, event.job_id),
+      drive: async opts => {
+        await bindContainmentSpawnClaim(env, opts);
+        return driveSpawn(env, opts, prepared);
+      },
+    });
+    await authority.normalIntakeSettle(event.event_id, event.body_sha256,
+      result.status === "committed" ? "complete"
+        : result.status === "unknown_terminal" || result.status === "mirror_tampered" ? "uncertain" : "retry");
+    if (result.status === "committed") await bumpMetrics(env, "webhook_spawn_claimed");
+    else if (result.status === "claim_refused") await bumpMetrics(env, "webhook_spawn_deduped");
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     // Top-level guard: every route below already has its OWN try/catch around
@@ -4561,12 +4542,15 @@ export default {
     // set, pins to the exact label. Passed as the `configured` arg.
     const configured = env.AUTOSCALER_LABEL;
     const now = Date.now();
-    if (!isVitestLegacyFixtureContext(env)) {
+    {
       try {
         await deliverInvalidConfig(env);
         const intake = parseContainmentSwitch(env.AUTOSCALER_INTAKE_PAUSED);
         if (intake === "invalid") await observeInvalidConfig(env, "AUTOSCALER_INTAKE_PAUSED", env.AUTOSCALER_INTAKE_PAUSED as string);
-        if (intake === "normal") await runContainmentDrain(env);
+        if (intake === "normal") {
+          await runContainmentDrain(env);
+          await runNormalIntakeDrain(env);
+        }
       } catch (e) {
         logEvent("error", "containment_tick_failed", { error: (e as Error).message });
       }
@@ -4828,13 +4812,17 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
 
       // T3-W17 queued-intake gate. Completed events deliberately skip this block
       // and continue through the existing cleanup path below.
-      if (evt.action === "queued" && !isVitestLegacyFixtureContext(env)) {
+      if (evt.action === "queued") {
         const rawRepo = evt.repository?.full_name ?? "";
         const identity = normalizeRedriveIdentity(rawRepo, jobId);
         if (!identity) return json({ error: "no repository in payload" }, 400);
         const repo = identity.repo;
         let installationId = evt.installation?.id != null ? String(evt.installation.id) : "";
         if (!installationId) installationId = installationIdForRepo(env.REPO_INSTALLATION_MAP, repo);
+        if (installationAllowlistArmed(env.INSTALLATION_ALLOWLIST)
+          && !isInstallationAllowlisted(env.INSTALLATION_ALLOWLIST, installationId)) {
+          return json({ ok: true, ignored: "installation not allowlisted", job_id: jobId }, 202);
+        }
         let intake: ContainmentSwitch;
         try {
           intake = parseContainmentSwitch(env.AUTOSCALER_INTAKE_PAUSED);
@@ -4902,7 +4890,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         // continuation; the DO either clears an already-COMPLETED tombstone or
         // latches observation on EFFECT_ELIGIBLE for that owner to resolve.
         const completedIdentity = normalizeRedriveIdentity(evt.repository?.full_name ?? "", jobId);
-        if (completedIdentity && env.CONTAINMENT && !isVitestLegacyFixtureContext(env)) {
+        if (completedIdentity && env.CONTAINMENT) {
           try {
             await containmentAuthority(env).clearCompletedRedrive(
               completedIdentity.repo,
@@ -5030,25 +5018,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       // unbounded). Rejecting first would have let a repo-less flood bypass the
       // limiter entirely — caught by the I1 regression test when this block was
       // first reordered.
-      // ── Multi-tenant runner-mint authorization inputs ────────────────────────
-      // The server DERIVES the tenant from installation_id + repo_full_name (we no
-      // longer send owner_tenant). `installation.id` is present ONLY on GitHub
-      // *App* webhook deliveries — a plain *repo* webhook (this repo's autoscaler
-      // hook) NEVER includes it. #283 originally 400-rejected a queued event with
-      // no installation_id when the mint key was armed; on a repo webhook that
-      // rejects EVERY spawn (observed 2026-07-06: workflow_job.queued → 400, jobs
-      // never spawn). FAIL-OPEN TO COLD instead (the north star: slow, never
-      // broken). With installationId == "" the mint is skipped downstream
-      // (`buildContainerEnv` returns an empty overlay), so the runner spawns COLD
-      // — no tenant, no CAS, no cache-warm, and CRUCIALLY no wrong-tenant WARM
-      // spawn (the only thing the 400 actually protected against). Server-derived
-      // tenant + env-0 cache-warm require the *App* webhook (which carries
-      // installation.id); until that's wired, repo-webhook spawns are COLD.
-      // installation.id comes only on App-webhook deliveries. On a repo webhook it
-      // is absent; inject the known installation_id for first-party repos from
-      // REPO_INSTALLATION_MAP so the server-derived mint (#283) runs WARM. If the
-      // repo isn't mapped, installationId stays "" ⇒ the mint is skipped downstream
-      // and the runner spawns COLD (fail-open, north star — never a 400).
+      // Resolve the server authorization identity before durable admission.
       let installationId = evt.installation?.id != null ? String(evt.installation.id) : "";
       if (!installationId) {
         installationId = installationIdForRepo(env.REPO_INSTALLATION_MAP, repo);
@@ -5056,41 +5026,6 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       if (env.CORELINK_RUNNER_MINT_AUTH_KEY && !installationId) {
         logEvent("info", "installation_id_missing", { jobId, repo });
       }
-      // ── Rate limit (defense-in-depth) — refuse, but do NOT lose the job ─────
-      // Bucketed per REPO (`spawn:<repoFullName>`) so one busy repo cannot starve
-      // another tenant's spawns; when the repo is absent we still limit under the
-      // literal `spawn:` bucket — NEVER fail-open to unbounded spawns (I1).
-      //
-      // Placed AFTER the installation-id resolution and the allowlist gate, and
-      // BEFORE `claimSpawn`, so that: a refusal knows enough to dead-letter the
-      // job, and a non-allowlisted flood is refused for free without spending
-      // limiter budget.
-      //
-      // 2026-08-02: a refusal here used to `return 429` with no record at all.
-      // GitHub sends `workflow_job.queued` exactly ONCE and never redelivers a
-      // non-2xx, so the job hung `queued` forever with nothing reported as
-      // failed — the same defect #437 fixed for the ceiling refusal, surviving in
-      // a sibling branch. A refused job is now dead-lettered so the scheduled
-      // reconciler re-drives it, which is the whole recovery mechanism.
-      //
-      // The dead-lettering is BOUNDED (see RATE_LIMIT_DEADLETTER_MAX): recording
-      // every refusal would convert a flood into sustained mint load, because
-      // `driveSpawn` mints the CAS PAT before it checks the concurrency slot, so
-      // each retry costs a real mint even when the spawn is then refused. The
-      // limiter must not become the amplifier. The 429 itself is unchanged —
-      // only whether the job survives it.
-      if (env.WEBHOOK_LIMITER) {
-        const rateKey = `spawn:${repo}`;
-        const { success } = await env.WEBHOOK_LIMITER.limit({ key: rateKey });
-        if (!success) {
-          ctx?.waitUntil?.(bumpMetrics(env, "webhook_rate_limited"));
-          ctx?.waitUntil?.(deadLetterRateLimited(env, { jobId, repo, installationId, labels: mintLabels }));
-          logEvent("info", "webhook_rate_limited", { jobId, repo });
-          return json({ error: "rate limited" }, 429);
-        }
-      }
-      // Deferred from above: a queued+labeled job with no repository is malformed.
-      // Checked HERE so the limiter above has already counted it (I1).
       if (!repo) return json({ error: "no repository in payload" }, 400);
       // ── External-GA installation allowlist gate (WP-D) ───────────────────────
       // MUST run here — after the installation id is resolved (App id, or the
@@ -5111,46 +5046,26 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
           );
         }
       }
-      if (isVitestLegacyFixtureContext(env)) {
-        if (!(await claimSpawn(env.RUNNER_JOB_PATS, jobId))) {
-          ctx?.waitUntil?.(bumpMetrics(env, "webhook_spawn_deduped"));
-          return json({ ok: true, deduped: true, job_id: jobId }, 200);
-        }
-        ctx?.waitUntil?.(bumpMetrics(env, "webhook_spawn_claimed"));
-        ctx.waitUntil(driveSpawnGuarded(env, { jobId, repo, installationId, labels: mintLabels }));
-        return json({ ok: true, spawning: true, job_id: jobId }, 202);
+      // A 202 acknowledges a recoverable command, including limiter refusals.
+      // This inbox is separate from T3-W17's ordered containment backlog.
+      try {
+        const authority = containmentAuthority(env);
+        const bodySha = await sha256Hex(raw);
+        const eventId = trimAsciiWhitespace(request.headers.get("x-github-delivery") ?? "")
+          || await sha256Hex(`containment:v1\n${jobId}\nqueued\n${bodySha}`);
+        const admitted = !env.WEBHOOK_LIMITER || (await env.WEBHOOK_LIMITER.limit({ key: `spawn:${repo}` })).success;
+        const result = await authority.normalIntakeEnqueue({
+          schema_version: 1, event_id: eventId, body_sha256: bodySha, job_id: jobId,
+          repo, installation_id: installationId, labels: mintLabels, received_at_ms: Date.now(),
+        }, admitted ? 0 : 60_000);
+        if (result.status === "conflict") return json({ error: "delivery id conflicts with different body" }, 409);
+        if (result.status === "full") return json({ error: "intake capacity unavailable", retryable: true }, 503);
+        if (admitted) ctx.waitUntil(runNormalIntakeDrain(env, eventId));
+        else ctx.waitUntil(bumpMetrics(env, "webhook_rate_limited"));
+        return json({ ok: true, queued: true, rate_limited: !admitted, job_id: jobId }, 202);
+      } catch {
+        return json({ error: "durable intake unavailable", retryable: true }, 503);
       }
-      // Canonical owner admission is claim-first: a duplicate creates no owner
-      // record, mirror, binding, provider call, or success metric.
-      let ownerAuthority: DurableObjectStub<ContainmentDO>;
-      try { ownerAuthority = containmentAuthority(env); } catch { return json({ error: "containment authority unavailable" }, 503); }
-      const containmentEventId = trimAsciiWhitespace(request.headers.get("x-github-delivery") ?? "") || await sha256Hex(`containment:v1\n${jobId}\nqueued\n${await sha256Hex(raw)}`);
-      const effectId = `containment:v1:${containmentEventId}`;
-      const ownerTuple = await intakeOwnerTuple(repo, jobId, effectId, containmentEventId);
-      ctx.waitUntil((async () => {
-        const spawnOpts: ContainmentDriveOpts = { jobId, repo, installationId, labels: mintLabels };
-        let prepared: ContainerEnvResult | undefined;
-        const result = await runCanonicalEffect({
-          ledger: ownerAuthority,
-          tuple: ownerTuple,
-          opts: spawnOpts,
-          provider: "cloudflare-container",
-          resource_id: `job:${repo}/${jobId}`,
-          idempotency_key: effectId,
-          beforeClaim: async () => { prepared = await prepareSpawn(env, spawnOpts); },
-          abandonPreparation: async () => {
-            if (prepared?.patId && prepared.tenant) {
-              await revokeIssuedCredential(env, ownerAuthority, { jobId, tenant: prepared.tenant, patId: prepared.patId });
-            }
-          },
-          claim: () => claimSpawn(env.RUNNER_JOB_PATS, jobId),
-          release: () => releaseSpawnClaim(env.RUNNER_JOB_PATS, jobId),
-          drive: driveOpts => driveSpawn(env, driveOpts, prepared),
-        });
-        if (result.status === "committed") await bumpMetrics(env, "webhook_spawn_claimed");
-        else if (result.status === "claim_refused") await bumpMetrics(env, "webhook_spawn_deduped");
-      })());
-      return json({ ok: true, spawning: true, job_id: jobId }, 202);
     }
 
     // ── POST /v1/leases/{lease_id}/cas-cred — env-0 cred-ticket redemption ────
@@ -5542,7 +5457,7 @@ export async function redriveOrphanedJobs(
   } catch { return; }
   if (redriveState !== "normal") return;
   if (!(await containmentRedriveAuthorityReadable(env))) return;
-  const reservationAuthority = isVitestLegacyFixtureContext(env) ? null : containmentAuthority(env);
+  const reservationAuthority = containmentAuthority(env);
   const staticRepos = parseReconcilerRepos(env.RECONCILER_REPOS);
   let registryRepos: ReconcilerRepository[] | null = null;
   if (env.RECONCILER_REGISTRY_URL?.trim()) {
@@ -5767,7 +5682,7 @@ export async function retryOrphanedSpawns(
   } catch { return; }
   if (redriveState !== "normal") return;
   if (!(await containmentRedriveAuthorityReadable(env))) return;
-  const reservationAuthority = isVitestLegacyFixtureContext(env) ? null : containmentAuthority(env);
+  const reservationAuthority = containmentAuthority(env);
   const kv = env.RUNNER_JOB_PATS;
   if (!kv) return; // no dead-letter store bound ⇒ nothing to retry
   let listed: { keys: { name: string }[] };
