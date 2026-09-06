@@ -19,7 +19,8 @@ class Storage {
 }
 
 function env(): RevocationEnv {
-  return { CORELINK_RUNNER_MINT_AUTH_KEY: "mint-key", CORELINK_MINT_URL: "https://mint.invalid" };
+  return { CORELINK_RUNNER_MINT_AUTH_KEY: "mint-key", CORELINK_MINT_URL: "https://mint.invalid",
+    CRED_STASH: { idFromName: (name: string) => name, get: () => ({ wipe: async () => {} }) } };
 }
 
 describe("exact credential attempt cleanup", () => {
@@ -69,6 +70,17 @@ describe("exact credential attempt cleanup", () => {
     vi.stubGlobal("fetch", fetcher);
     await expect(revokeIssuedCredential(env(), authority, { jobId: "unknown", tenant: "tenant-a", patId: "pat-a" })).resolves.toBe(false);
     expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("does not confirm remote revoke when the required stash binding is absent", async () => {
+    const authority = new ContainmentDO({ storage: new Storage() } as never, {} as never);
+    const identity = { jobId: "no-stash", tenant: "tenant-a", patId: "pat-a" };
+    await authority.registerCredential(identity);
+    const fetcher = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetcher);
+    await expect(revokeIssuedCredential({ CORELINK_RUNNER_MINT_AUTH_KEY: "mint-key", CORELINK_MINT_URL: "https://mint.invalid" }, authority, identity)).resolves.toBe(false);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect((await authority.revocationRequestedCredentials()).records).toEqual([identity]);
   });
 
   it("keeps completion fences separate from attempt cleanup", async () => {

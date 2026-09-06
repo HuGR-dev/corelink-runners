@@ -68,7 +68,8 @@ async function revokeOne(env: RevocationEnv, authority: CredentialAuthority, ide
         await revokeCasPatById(mintEnv, identity.patId, identity.tenant);
       })(),
       (async () => {
-        if (env.CRED_STASH) await env.CRED_STASH.get(env.CRED_STASH.idFromName(runnerCredentialLeaseId(identity.jobId, identity.tenant, identity.patId))).wipe();
+        if (!env.CRED_STASH) throw new Error("credential stash binding unavailable");
+        await env.CRED_STASH.get(env.CRED_STASH.idFromName(runnerCredentialLeaseId(identity.jobId, identity.tenant, identity.patId))).wipe();
       })(),
     ]);
     for (const result of cleanup) if (result.status === "rejected") throw result.reason;
