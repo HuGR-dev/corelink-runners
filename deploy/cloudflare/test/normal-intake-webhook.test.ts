@@ -29,8 +29,9 @@ function setup(rateAllowed = true, options: { authorizeStatus?: number; mintStat
       const requestBody = JSON.parse(String(init?.body ?? "{}")) as { operation_id?: unknown };
       const operationId = typeof requestBody.operation_id === "string" ? requestBody.operation_id : "";
       if ((options.mintStatus ?? 200) !== 200) return new Response("mint unavailable", { status: options.mintStatus });
-      issuedOperations.set(operationId, "pat-a");
-      body = { operation_id: operationId, tenant: "tenant-a", max_concurrency: 2, pat_id: "pat-a", token_plaintext: "secret-pat" };
+      const patId = `pat-${operationId}`;
+      issuedOperations.set(operationId, patId);
+      body = { operation_id: operationId, tenant: "tenant-a", max_concurrency: 2, pat_id: patId, token_plaintext: `secret-${operationId}` };
     }
     else if (url.endsWith("/runner/adopt")) {
       const adoption = JSON.parse(String(init?.body ?? "{}")) as { operation_id?: unknown; pat_id?: unknown };
@@ -133,7 +134,11 @@ describe("normal webhook durable acknowledgement", () => {
     expect(responses.every(response => response.status === 202)).toBe(true);
     await settle(context);
     f.limiter.mockResolvedValue({ success: true });
-    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 60_001);
+    const retryNow = Date.now() + 60_001;
+    vi.spyOn(Date, "now").mockReturnValue(retryNow);
+    await runNormalIntakeDrain(f.runtime);
+    await runNormalIntakeDrain(f.runtime);
+    await runNormalIntakeDrain(f.runtime);
     await runNormalIntakeDrain(f.runtime);
     const records = [...f.d.storage.map.entries()].filter(([key]) => key.startsWith("normal-inbox:v1:event:"));
     expect(records).toHaveLength(100);
@@ -145,7 +150,8 @@ describe("normal webhook durable acknowledgement", () => {
     expect(mintCalls).toHaveLength(0);
     expect(jitCalls).toHaveLength(0);
     if (options.mintKey === "") expect(authorizeCalls).toHaveLength(0);
-    else expect(authorizeCalls).toHaveLength(25);
+    else expect(authorizeCalls).toHaveLength(100);
+    expect(records.every(([, value]) => (value as { next_attempt_ms: number }).next_attempt_ms > retryNow)).toBe(true);
     expect(getContainer).not.toHaveBeenCalled();
     expect(f.slotsStorage.map.get("slots") ?? []).toEqual([]);
   }, 20_000);
@@ -160,7 +166,7 @@ describe("normal webhook durable acknowledgement", () => {
     expect(getContainer).not.toHaveBeenCalled();
   });
 
-  it.fails("concurrent duplicate delivery of one queued workflow currently duplicates the spawn", async () => {
+  it("concurrent duplicate delivery starts exactly one provider while owner ledger admits one effect", async () => {
     const f = setup();
     const context = ctx();
     const request = await webhook(8500, "same-workflow-delivery");
@@ -171,7 +177,7 @@ describe("normal webhook durable acknowledgement", () => {
     expect(responses.map(response => response.status)).toEqual([202, 202]);
     await settle(context);
     expect([...f.d.storage.map.keys()].filter(key => key.startsWith("normal-inbox:v1:event:"))).toHaveLength(1);
-    expect(f.fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/runner/mint"))).toHaveLength(1);
     expect(getContainer).toHaveBeenCalledTimes(1);
+    expect([...f.d.storage.map.entries()].filter(([key]) => key.startsWith("normal-inbox:v1:event:")).map(([, value]) => (value as { state: string }).state)).toEqual(["complete"]);
   });
 });
