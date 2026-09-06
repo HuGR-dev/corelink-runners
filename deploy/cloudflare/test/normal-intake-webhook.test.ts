@@ -3,9 +3,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 vi.mock("@cloudflare/containers", () => ({ Container: class {}, getContainer: vi.fn() }));
 import { getContainer } from "@cloudflare/containers";
 import worker, { ConcurrencySlotsDO, ContainmentDO, runNormalIntakeDrain } from "../src/index";
-import { ctx, env, FakeStorage, kv, makeDO, ns, webhook } from "./containment-redrive-test-helpers";
+import { ctx, env, FakeStorage, kv, makeDO, ns, settle, webhook } from "./containment-redrive-test-helpers";
 
-function setup(rateAllowed = true) {
+function setup(rateAllowed = true, options: { mintStatus?: number; mintKey?: string } = {}) {
   const d = makeDO();
   const store = kv();
   const slotsStorage = new FakeStorage();
@@ -13,7 +13,8 @@ function setup(rateAllowed = true) {
   const issuedOperations = new Map<string, string>();
   const limiter = vi.fn(async () => ({ success: rateAllowed }));
   const runtime = env(d, store, {
-    CORELINK_RUNNER_MINT_AUTH_KEY: "mint-auth", CORELINK_MINT_URL: "https://mint.example",
+    ...(options.mintKey === undefined ? { CORELINK_RUNNER_MINT_AUTH_KEY: "mint-auth" } : options.mintKey ? { CORELINK_RUNNER_MINT_AUTH_KEY: options.mintKey } : {}),
+    CORELINK_MINT_URL: "https://mint.example",
     SPAWN_WORKER_PUBLIC_URL: "https://worker.example", CONCURRENCY_SLOTS: ns(slots),
     WEBHOOK_LIMITER: { limit: limiter },
   });
@@ -24,6 +25,7 @@ function setup(rateAllowed = true) {
     else if (url.endsWith("/runner/mint")) {
       const requestBody = JSON.parse(String(init?.body ?? "{}")) as { operation_id?: unknown };
       const operationId = typeof requestBody.operation_id === "string" ? requestBody.operation_id : "";
+      if ((options.mintStatus ?? 200) !== 200) return new Response("mint unavailable", { status: options.mintStatus });
       issuedOperations.set(operationId, "pat-a");
       body = { operation_id: operationId, tenant: "tenant-a", max_concurrency: 2, pat_id: "pat-a", token_plaintext: "secret-pat" };
     }
@@ -58,7 +60,7 @@ describe("normal webhook durable acknowledgement", () => {
     expect(await f.d.instance.normalIntakePending()).toEqual([]);
     expect(f.fetchMock).not.toHaveBeenCalled();
     expect(getContainer).not.toHaveBeenCalled();
-    expect(f.slotsStorage.map.size).toBe(0);
+    expect(f.slotsStorage.map.get("slots") ?? []).toEqual([]);
     await Promise.all(context.tasks);
   });
 
@@ -114,6 +116,49 @@ describe("normal webhook durable acknowledgement", () => {
     await runNormalIntakeDrain({ ...f.runtime, AUTOSCALER_INTAKE_PAUSED: "1" } as never);
     expect(f.fetchMock).not.toHaveBeenCalled();
     await runNormalIntakeDrain(f.runtime);
+    expect(getContainer).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["missing production mint key", { mintKey: "" }],
+    ["wrong production mint key", { mintStatus: 403 }],
+  ])("durably retains 100 verified webhooks for retry when %s", async (_label, options) => {
+    const f = setup(true, options);
+    const context = ctx();
+    const requests = await Promise.all(Array.from({ length: 100 }, (_, i) => webhook(8300 + i, `retry-8300-${i}`)));
+    const responses = await Promise.all(requests.map(request => worker.fetch(request, f.runtime, context as never)));
+    expect(responses.every(response => response.status === 202)).toBe(true);
+    await settle(context);
+    const records = [...f.d.storage.map.entries()].filter(([key]) => key.startsWith("normal-inbox:v1:event:"));
+    expect(records).toHaveLength(100);
+    expect(records.every(([, value]) => (value as { state: string }).state === "pending")).toBe(true);
+    expect(f.d.storage.map.get("normal-inbox:v1:count")).toBe(100);
+    expect(getContainer).not.toHaveBeenCalled();
+    expect(f.slotsStorage.map.get("slots") ?? []).toEqual([]);
+  }, 20_000);
+
+  it("returns 503 for all 100 verified webhooks when the durable intake store is unavailable", async () => {
+    const f = setup();
+    vi.spyOn(f.d.storage, "transaction").mockRejectedValue(new Error("durable store unavailable"));
+    const requests = await Promise.all(Array.from({ length: 100 }, (_, i) => webhook(8400 + i, `unavailable-8400-${i}`)));
+    const responses = await Promise.all(requests.map(request => worker.fetch(request, f.runtime, ctx() as never)));
+    expect(responses.every(response => response.status === 503)).toBe(true);
+    expect(f.fetchMock).not.toHaveBeenCalled();
+    expect(getContainer).not.toHaveBeenCalled();
+  });
+
+  it("concurrent duplicate delivery of one queued workflow produces exactly one durable event and spawn", async () => {
+    const f = setup();
+    const context = ctx();
+    const request = await webhook(8500, "same-workflow-delivery");
+    const responses = await Promise.all([
+      worker.fetch(request.clone(), f.runtime, context as never),
+      worker.fetch(request.clone(), f.runtime, context as never),
+    ]);
+    expect(responses.map(response => response.status)).toEqual([202, 202]);
+    await settle(context);
+    expect([...f.d.storage.map.keys()].filter(key => key.startsWith("normal-inbox:v1:event:"))).toHaveLength(1);
+    expect(f.fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/runner/mint"))).toHaveLength(1);
     expect(getContainer).toHaveBeenCalledTimes(1);
   });
 });

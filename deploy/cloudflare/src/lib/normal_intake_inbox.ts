@@ -20,6 +20,8 @@ export class NormalIntakeConflictError extends Error {
 const EVENT = "normal-inbox:v1:event:";
 const PENDING = "normal-inbox:v1:pending:";
 const COUNT = "normal-inbox:v1:count";
+const PROCESSING = "normal-inbox:v1:processing:";
+const PROCESSING_TTL_MS = 15 * 60_000;
 const MAX = 500;
 const MAX_TEXT = 256;
 const SHA = /^[0-9a-f]{64}$/;
@@ -108,11 +110,28 @@ export class NormalIntakeInbox {
     });
   }
 
+  async claim(eventId: string, expectedBodySha: string, owner: string, now = Date.now()): Promise<boolean> {
+    if (!text(eventId) || !text(owner) || !SHA.test(expectedBodySha)) throw new Error("invalid normal intake claim");
+    validateNow(now);
+    if (now > Number.MAX_SAFE_INTEGER - PROCESSING_TTL_MS) throw new Error("invalid normal intake claim time");
+    return this.storage.transaction(async tx => {
+      const record = await tx.get<unknown>(eventKey(eventId));
+      if (!validRecord(record, eventId)) fail("missing or malformed event record");
+      if (record.body_sha256 !== expectedBodySha || record.state !== "pending" || record.next_attempt_ms > now) return false;
+      const key = `${PROCESSING}${encodeURIComponent(eventId)}`;
+      const prior = await tx.get<unknown>(key) as { owner?: unknown; expires_ms?: unknown } | undefined;
+      if (prior && typeof prior.owner === "string" && Number.isSafeInteger(prior.expires_ms) && (prior.expires_ms as number) > now) return false;
+      await tx.put(key, { owner, expires_ms: now + PROCESSING_TTL_MS });
+      return true;
+    });
+  }
+
   async settle(eventId: string, expectedBodySha: string, outcome: NormalIntakeOutcome, now: number): Promise<void> {
     if (!text(eventId) || !["complete", "uncertain", "retry"].includes(outcome)) throw new Error("invalid normal intake settlement");
     validateBody(expectedBodySha); validateNow(now);
     return this.storage.transaction(async (tx: AuthorityTransaction) => {
       const key = eventKey(eventId);
+      const processingKey = `${PROCESSING}${encodeURIComponent(eventId)}`;
       const value = await tx.get<unknown>(key);
       if (!validRecord(value, eventId)) fail("missing or malformed event record");
       if (value.body_sha256 !== expectedBodySha) throw new NormalIntakeConflictError();
@@ -127,6 +146,7 @@ export class NormalIntakeInbox {
       if (outcome === "complete") { if (countValue < 1) fail("active count underflow"); await tx.delete(pendingKey(value)); await tx.put(COUNT, countValue - 1); }
       else if (outcome === "uncertain") await tx.delete(pendingKey(value));
       else await tx.put(pendingKey(next), next.event_id);
+      await tx.delete(processingKey);
       await tx.put(key, next);
       return;
     });

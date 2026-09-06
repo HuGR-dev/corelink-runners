@@ -586,6 +586,10 @@ export class ContainmentDO extends DurableObject<Env> {
     return new NormalIntakeInbox(this.ctx.storage).pending(Date.now(), limit);
   }
 
+  async normalIntakeClaim(eventId: string, bodySha: string, owner: string): Promise<boolean> {
+    return new NormalIntakeInbox(this.ctx.storage).claim(eventId, bodySha, owner, Date.now());
+  }
+
   async normalIntakeSettle(eventId: string, bodySha: string, outcome: "complete" | "uncertain" | "retry"): Promise<void> {
     return new NormalIntakeInbox(this.ctx.storage).settle(eventId, bodySha, outcome, Date.now());
   }
@@ -4535,9 +4539,15 @@ export async function runContainmentDrain(env: Env, dependencies: ContainmentDra
 /** Recover normal arrivals without moving them into the containment backlog. */
 export async function runNormalIntakeDrain(env: Env, alreadyRateAdmittedEventId?: string): Promise<void> {
   const authority = containmentAuthority(env);
+  const owner = crypto.randomUUID();
   for (const event of await authority.normalIntakePending(25)) {
     if (parseContainmentSwitch(env.AUTOSCALER_INTAKE_PAUSED) !== "normal") return;
     if ((await authority.snapshot()).backlog_count !== 0) return;
+    try {
+      if (!(await authority.normalIntakeClaim(event.event_id, event.body_sha256, owner))) continue;
+    } catch {
+      return;
+    }
     if (installationAllowlistArmed(env.INSTALLATION_ALLOWLIST)
       && !isInstallationAllowlisted(env.INSTALLATION_ALLOWLIST, event.installation_id)) {
       await authority.normalIntakeSettle(event.event_id, event.body_sha256, "complete");
