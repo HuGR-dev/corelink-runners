@@ -1,5 +1,6 @@
 import { JobAttributionAuthority } from "./lib/job_attribution_authority";
 import { CredentialObligationAuthority } from "./lib/credential_obligation_authority";
+import { controlAuthed } from "./lib/control_auth";
 // CoreLink spawn-Worker + Container DO (ADR-0008).
 //
 // Cloudflare side of the frozen seam (docs/spec/cloudflare-spawn-worker-contract.md).
@@ -240,6 +241,9 @@ export interface Env {
   // Worker secret (`wrangler secret put`). Must match the fabric's
   // CLOUDFLARE_SPAWN_AUTH_TOKEN. Missing/mismatch ⇒ 401.
   CLOUDFLARE_SPAWN_AUTH_TOKEN: string;
+  // Independent control domains; all three keys must differ. No shared-key fallback.
+  CLOUDFLARE_EXEC_AUTH_TOKEN?: string;
+  CLOUDFLARE_LIFECYCLE_AUTH_TOKEN?: string;
   AUTOSCALER_INTAKE_PAUSED?: string;
   AUTOSCALER_REDRIVE_PAUSED?: string;
   CONTAINMENT_ADMIN_KEY?: string;
@@ -5180,8 +5184,8 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       }
     }
 
-    // ── /v1/* routes — bearer-authed (the fabric/Engine seam) ────────────────
-    if (!authed(request, env)) return unauthorized();
+    // Admission, command execution and lifecycle operations have separate authority.
+    if (!controlAuthed(request, env)) return unauthorized();
 
     // POST /v1/spawn
     if (request.method === "POST" && pathname === "/v1/spawn") {
