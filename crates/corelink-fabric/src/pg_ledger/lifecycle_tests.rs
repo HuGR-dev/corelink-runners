@@ -79,8 +79,8 @@ fn real_pg_lifecycle_generation_is_exact_across_same_clock_resume() -> anyhow::R
 }
 
 #[test]
-fn real_pg_legacy_event_is_generation_zero_and_missing_pointer_repairs_current()
--> anyhow::Result<()> {
+fn real_pg_legacy_event_is_generation_zero_and_missing_pointer_repairs_current(
+) -> anyhow::Result<()> {
     let Some(url) = env::var("TEST_DATABASE_URL").ok() else {
         return Ok(());
     };
@@ -128,8 +128,8 @@ fn real_pg_generation_overflow_refuses_resume_and_keeps_suspended() -> anyhow::R
 }
 
 #[test]
-fn real_pg_direct_legacy_suspension_resumes_at_generation_one_and_unknown_event_refuses()
--> anyhow::Result<()> {
+fn real_pg_direct_legacy_suspension_resumes_at_generation_one_and_unknown_event_refuses(
+) -> anyhow::Result<()> {
     let Some(url) = env::var("TEST_DATABASE_URL").ok() else {
         return Ok(());
     };
@@ -149,11 +149,101 @@ fn real_pg_direct_legacy_suspension_resumes_at_generation_one_and_unknown_event_
         let lifecycle = ledger.tenant_lifecycle(&tenant)?;
         assert_eq!(lifecycle.generation, 1);
         assert!(!lifecycle.suspended);
-        assert!(
-            ledger
-                .tenant_suspension_generation("missing-event")
-                .is_err()
+        assert!(ledger
+            .tenant_suspension_generation("missing-event")
+            .is_err());
+        Ok::<_, anyhow::Error>(())
+    })
+}
+
+#[test]
+fn real_pg_fresh_persisted_suspension_reports_legacy_zero_before_resume() -> anyhow::Result<()> {
+    let Some(url) = env::var("TEST_DATABASE_URL").ok() else {
+        return Ok(());
+    };
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let ledger = PgLedger::connect(&url, 4, PgTlsMode::Disable).await?;
+        let tenant = uuid::Uuid::new_v4().to_string();
+        let db = ledger.pool.get().await?;
+        db.execute(
+            "INSERT INTO fabric_suspended_tenants (tenant_id,suspension_event_id) VALUES ($1,NULL)",
+            &[&tenant],
+        )
+        .await?;
+        let before = ledger.tenant_lifecycle(&tenant)?;
+        assert_eq!(before.generation, 0);
+        assert!(before.suspended);
+        ledger.set_tenant_suspended(&tenant, false)?;
+        let after = ledger.tenant_lifecycle(&tenant)?;
+        assert_eq!(after.generation, 1);
+        assert!(!after.suspended);
+        Ok::<_, anyhow::Error>(())
+    })
+}
+
+#[test]
+fn real_pg_two_connections_resume_once_under_same_tenant_lock() -> anyhow::Result<()> {
+    let Some(url) = env::var("TEST_DATABASE_URL").ok() else {
+        return Ok(());
+    };
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let first = PgLedger::connect(&url, 4, PgTlsMode::Disable).await?;
+        let second = PgLedger::connect(&url, 4, PgTlsMode::Disable).await?;
+        let tenant = uuid::Uuid::new_v4().to_string();
+        first.record_tenant_suspension(event(&tenant, "concurrent-suspend", 11))?;
+        let a = first.clone();
+        let b = second.clone();
+        let tenant_a = tenant.clone();
+        let tenant_b = tenant.clone();
+        let (left, right) = tokio::join!(
+            tokio::task::spawn_blocking(move || a.set_tenant_suspended(&tenant_a, false)),
+            tokio::task::spawn_blocking(move || b.set_tenant_suspended(&tenant_b, false)),
         );
+        left??;
+        right??;
+        assert_eq!(first.tenant_lifecycle(&tenant)?.generation, 2);
+        assert!(!first.tenant_lifecycle(&tenant)?.suspended);
+        first.set_tenant_suspended(&tenant, false)?;
+        assert_eq!(second.tenant_lifecycle(&tenant)?.generation, 2);
+        Ok::<_, anyhow::Error>(())
+    })
+}
+
+#[test]
+fn real_pg_negative_generation_refuses_read_and_resume_without_deleting_suspension(
+) -> anyhow::Result<()> {
+    let Some(url) = env::var("TEST_DATABASE_URL").ok() else {
+        return Ok(());
+    };
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let ledger = PgLedger::connect(&url, 4, PgTlsMode::Disable).await?;
+        let tenant = uuid::Uuid::new_v4().to_string();
+        ledger.record_tenant_suspension(event(&tenant, "negative-generation", 12))?;
+        let db = ledger.pool.get().await?;
+        db.execute(
+            "UPDATE tenant_lifecycle_generations SET generation=-1 WHERE tenant_id=$1",
+            &[&tenant],
+        )
+        .await?;
+        assert!(ledger.tenant_lifecycle(&tenant).is_err());
+        assert!(ledger.set_tenant_suspended(&tenant, false).is_err());
+        let still_suspended: bool = db
+            .query_one(
+                "SELECT EXISTS(SELECT 1 FROM fabric_suspended_tenants WHERE tenant_id=$1)",
+                &[&tenant],
+            )
+            .await?
+            .get(0);
+        assert!(still_suspended);
         Ok::<_, anyhow::Error>(())
     })
 }
