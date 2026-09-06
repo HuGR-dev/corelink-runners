@@ -21,7 +21,7 @@ function fail(message: string): never { throw new SchedulerValidationError(messa
 function trustedTime(proof: TrustedTimeProof): number { if (!proof || !positive(proof.timeMs)) return fail("invalid trusted time"); return proof.timeMs; }
 function cursorValid(value: unknown, registration: SourceRegistration): value is SourceCursor {
   if (!plain(value) || Object.keys(value).length !== CURSOR_FIELDS.length || CURSOR_FIELDS.some((key) => !Object.hasOwn(value, key))) return false;
-  if (value.source !== registration.source || value.service !== registration.service || value.application !== registration.application || value.keyId !== registration.keyId || value.credentialEpoch !== registration.credentialEpoch) return false;
+  if (value.source !== registration.source || value.service !== registration.service || value.application !== registration.application) return false;
   if (![value.lastSequence, value.lastOccurredAt, value.lastScheduledFor, value.firstAcceptedAt, value.lastAcceptedAt].every(positive)) return false;
   const firstAcceptedAt = value.firstAcceptedAt as number;
   const lastAcceptedAt = value.lastAcceptedAt as number;

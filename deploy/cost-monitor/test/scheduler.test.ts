@@ -24,6 +24,13 @@ describe("missing-source scheduler", () => {
     expect(box.calls).toHaveLength(1);
   });
 
+  it("keeps detecting a source across credential rotation", async () => {
+    const store = new MemoryStateStore(); const { scheduler, box } = makeScheduler(store, 1_300_000);
+    await store.transact([{ key: `ns:source:${laneKey(registration)}`, expectedVersion: null, value: cursor({ keyId: "previous-key", credentialEpoch: "old-epoch" }) }]);
+    await expect(scheduler.run(1_300_000)).resolves.toMatchObject({ checked: 1, alertsCreated: 1, delivered: 1, unknown: 0 });
+    expect(box.calls).toHaveLength(1);
+  });
+
   it("refuses future and marks late invocations without healthy reporting", async () => {
     const future = makeScheduler(new MemoryStateStore(), 2_000).scheduler;
     await expect(future.run(2_001)).rejects.toThrow("future");
