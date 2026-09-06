@@ -1,3 +1,5 @@
+import { JobAttributionAuthority } from "./lib/job_attribution_authority";
+import { CredentialObligationAuthority } from "./lib/credential_obligation_authority";
 // CoreLink spawn-Worker + Container DO (ADR-0008).
 //
 // Cloudflare side of the frozen seam (docs/spec/cloudflare-spawn-worker-contract.md).
@@ -540,22 +542,11 @@ export class ContainmentDO extends DurableObject<Env> {
     return new ContainmentEffectLedger(this.ctx.storage as never, this.env.RUNNER_JOB_PATS);
   }
 
-  async readJobAttribution(key: string): Promise<string | null> {
-    return (await this.ctx.storage.get<string>(key)) ?? null;
-  }
+  async readJobAttribution(key: string): Promise<string | null> { return new JobAttributionAuthority(this.ctx.storage).readJobAttribution(key); }
 
-  async putJobAttributionIfAbsent(key: string, value: string): Promise<string> {
-    return this.tx(async s => {
-      const existing = await s.get<string>(key);
-      if (existing !== undefined) return existing;
-      await s.put(key, value);
-      return value;
-    });
-  }
+  async putJobAttributionIfAbsent(key: string, value: string): Promise<string> { return new JobAttributionAuthority(this.ctx.storage).putJobAttributionIfAbsent(key, value); }
 
-  async deleteJobAttribution(key: string): Promise<void> {
-    await this.ctx.storage.delete(key);
-  }
+  async deleteJobAttribution(key: string): Promise<void> { return new JobAttributionAuthority(this.ctx.storage).deleteJobAttribution(key); }
 
   /**
    * Enumerate durable ownership for settlement/reconciliation. The scan reads
@@ -566,82 +557,19 @@ export class ContainmentDO extends DurableObject<Env> {
   async listJobAttributions(
     tenantId: string,
     cursor?: string,
-  ): Promise<{ records: JobAttribution[]; cursor?: string; complete: boolean }> {
-    if (!tenantId) throw new Error("tenant id required");
-    const page = await this.ctx.storage.list<string>({
-      prefix: "job-attribution:",
-      ...(cursor ? { startAfter: cursor } : {}),
-      limit: 101,
-    });
-    const entries = [...page.entries()];
-    const records: JobAttribution[] = [];
-    for (const [key, raw] of entries) {
-      const jobId = key.slice("job-attribution:".length);
-      const record = decodeJobAttribution(raw, jobId);
-      if (record.tenant === tenantId) records.push(record);
-    }
-    const lastScanned = entries.at(-1)?.[0];
-    const complete = entries.length < 101;
-    return complete
-      ? { records, complete }
-      : { records, cursor: lastScanned, complete: false };
-  }
+  ): Promise<{ records: JobAttribution[]; cursor?: string; complete: boolean }> { return new JobAttributionAuthority(this.ctx.storage).listJobAttributions(tenantId, cursor); }
 
-  private static credentialKey(identity: CredentialIdentity): string {
-    return `credential-obligation:${encodeURIComponent(identity.jobId)}:${encodeURIComponent(identity.tenant)}:${encodeURIComponent(identity.patId)}`;
-  }
 
-  async registerCredential(identity: CredentialIdentity): Promise<void> {
-    if (!identity.jobId || !identity.tenant || !identity.patId) throw new Error("invalid credential identity");
-    await this.tx(async s => {
-      const key = ContainmentDO.credentialKey(identity);
-      const existing = await s.get(key) as (CredentialIdentity & { schema_version?: number; status?: string }) | undefined;
-      if (existing !== undefined) {
-        if (existing.schema_version !== 1 || existing.jobId !== identity.jobId || existing.tenant !== identity.tenant || existing.patId !== identity.patId || ContainmentDO.credentialKey(existing as CredentialIdentity) !== key || existing.status !== "registered" && existing.status !== "revoke_requested" && existing.status !== "revoked") throw new Error("credential obligation identity conflict");
-        return;
-      }
-      await s.put(key, { schema_version: 1, ...identity, status: "registered" });
-    });
-  }
 
-  async requestCredentialRevocation(identity: CredentialIdentity): Promise<void> {
-    await this.tx(async s => {
-      const key = ContainmentDO.credentialKey(identity);
-      const raw = await s.get(key) as Partial<CredentialIdentity> & { schema_version?: number; status?: string } | undefined;
-      if (!raw || raw.schema_version !== 1 || raw.jobId !== identity.jobId || raw.tenant !== identity.tenant || raw.patId !== identity.patId || key !== ContainmentDO.credentialKey(raw as CredentialIdentity)) throw new Error("credential obligation missing or divergent");
-      if (raw.status === "registered") await s.put(key, { schema_version: 1, ...identity, status: "revoke_requested" });
-      else if (raw.status !== "revoke_requested" && raw.status !== "revoked") throw new Error("credential obligation status invalid");
-    });
-  }
+  async registerCredential(identity: CredentialIdentity): Promise<void> { return new CredentialObligationAuthority(this.ctx.storage).registerCredential(identity); }
 
-  async revocationRequestedCredentials(cursor?: string): Promise<CredentialPage> {
-    return this.pendingCredentials({ kind: "all" }, cursor, "revoke_requested");
-  }
+  async requestCredentialRevocation(identity: CredentialIdentity): Promise<void> { return new CredentialObligationAuthority(this.ctx.storage).requestCredentialRevocation(identity); }
 
-  async pendingCredentials(selection: CredentialSelection, cursor?: string, requestedStatus?: string): Promise<CredentialPage> {
-    const page = await this.ctx.storage.list({ prefix: "credential-obligation:", ...(cursor ? { startAfter: cursor } : {}), limit: 101 });
-    const entries = [...page.entries()];
-    const records: CredentialIdentity[] = [];
-    for (const [key, raw] of entries) {
-      const value = raw as Partial<CredentialIdentity> & { schema_version?: number; status?: string };
-      if (value.schema_version !== 1 || typeof value.jobId !== "string" || value.jobId === "" || typeof value.tenant !== "string" || value.tenant === "" || typeof value.patId !== "string" || value.patId === "" || (value.status !== "registered" && value.status !== "revoke_requested" && value.status !== "revoked") || key !== ContainmentDO.credentialKey(value as CredentialIdentity)) throw new Error("malformed credential obligation");
-      const matches = selection.kind === "all" || (selection.kind === "job" ? value.jobId === selection.jobId : value.tenant === selection.tenant);
-      if (matches && value.status !== "revoked" && (!requestedStatus || value.status === requestedStatus)) records.push({ jobId: value.jobId, tenant: value.tenant, patId: value.patId });
-      if (!key.startsWith("credential-obligation:")) throw new Error("credential obligation key divergent");
-    }
-    const complete = entries.length < 101;
-    return complete ? { records, complete } : { records, cursor: entries.at(-1)?.[0], complete: false };
-  }
+  async revocationRequestedCredentials(cursor?: string): Promise<CredentialPage> { return new CredentialObligationAuthority(this.ctx.storage).revocationRequestedCredentials(cursor); }
 
-  async confirmCredentialRevoked(identity: CredentialIdentity): Promise<void> {
-    const key = ContainmentDO.credentialKey(identity);
-    await this.tx(async s => {
-      const raw = await s.get(key) as Partial<CredentialIdentity> & { schema_version?: number; status?: string } | undefined;
-      if (!raw || raw.schema_version !== 1 || raw.jobId !== identity.jobId || raw.tenant !== identity.tenant || raw.patId !== identity.patId) throw new Error("credential obligation missing or divergent");
-      if (raw.status !== "revoke_requested" && raw.status !== "revoked") throw new Error("credential obligation status invalid");
-      if (raw.status === "revoke_requested") await s.put(key, { schema_version: 1, ...identity, status: "revoked", confirmed_at_ms: Date.now() });
-    });
-  }
+  async pendingCredentials(selection: CredentialSelection, cursor?: string, requestedStatus?: string): Promise<CredentialPage> { return new CredentialObligationAuthority(this.ctx.storage).pendingCredentials(selection, cursor, requestedStatus); }
+
+  async confirmCredentialRevoked(identity: CredentialIdentity): Promise<void> { return new CredentialObligationAuthority(this.ctx.storage).confirmCredentialRevoked(identity); }
 
   async getEffectAttempt(identity: ContainmentEffectIdentity, nonce: string): Promise<ContainmentEffectAttempt | null> {
     return this.effectLedger().getEffectAttempt(identity, nonce);
