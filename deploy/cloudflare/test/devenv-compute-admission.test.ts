@@ -21,11 +21,11 @@ const NOW = Date.parse("2026-09-05T12:00:00Z");
 const tenantId = "ee30f7ba-fc25-4d71-939e-ebe130b4c6a3";
 const sessionUuid = "11111111-1111-4111-8111-111111111111";
 
-function grant(): AuthorizedDevenvStart {
-  return { config: { workspaceName: "repo", profileName: "browser", tier: "standard-4" }, grant: { tenantId, sessionUuid, patId: "22222222-2222-4222-8222-222222222222", casPat: "synthetic-cas-secret", expiresAtMs: NOW + 60_000, computeReservationId: sessionUuid } };
+function grant(id = sessionUuid, patId = "22222222-2222-4222-8222-222222222222"): AuthorizedDevenvStart {
+  return { config: { workspaceName: "repo", profileName: "browser", tier: "standard-4" }, grant: { tenantId, sessionUuid: id, patId, casPat: "synthetic-cas-secret", expiresAtMs: NOW + 60_000, computeReservationId: id } };
 }
-function token() {
-  const payload = { v: 1, key_id: "key", tenant_id: tenantId, workload_kind: "devenv", workload_id: sessionUuid, reservation_id: sessionUuid, period_key: 202609, ceiling_vcpu_ms: "864000000", vcpu_count: 4, maximum_wall_ms: 28_800_000, issued_at_ms: NOW - 1_000, expires_at_ms: NOW + 60_000 };
+function token(id = sessionUuid) {
+  const payload = { v: 1, key_id: "key", tenant_id: tenantId, workload_kind: "devenv", workload_id: id, reservation_id: id, period_key: 202609, ceiling_vcpu_ms: "864000000", vcpu_count: 4, maximum_wall_ms: 28_800_000, issued_at_ms: NOW - 1_000, expires_at_ms: NOW + 60_000 };
   return `${btoa(JSON.stringify(payload)).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_")}.signature`;
 }
 function obligationToken(id: string, workloadId: string, expiresAtMs = NOW + 60_000) {
@@ -115,6 +115,48 @@ describe("authorized DevEnv compute composition", () => {
     await expect(f.instance.startAuthorizedDevenv(grant())).rejects.toThrow("DEVENV_AUTHORIZED_START_FAILED");
     expect((f.stored.get(`compute:obligation:${sessionUuid}`) as { phase: string }).phase).toBe("dispatched");
     expect(f.instance.start).toHaveBeenCalledTimes(1); expect(f.stored.has(DEVENV_CREDENTIAL_KEY)).toBe(false);
+  });
+
+  it("stages ownership before a scheduling failure and performs no remote or provider effect", async () => {
+    const fetcher = vi.fn(async (url: string) => response(url)); const f = fixture(fetcher);
+    vi.mocked(f.instance.schedule).mockRejectedValueOnce(new Error("scheduler unavailable"));
+    const id = "33333333-3333-4333-8333-333333333333";
+    await expect(f.instance.prepareAuthorizedCompute({ token: token(id), reservationId: id, tenantId, workloadKind: "devenv", workloadId: id, vcpuCount: 4, maximumWallMs: 28_800_000 })).rejects.toThrow("scheduler unavailable");
+    expect(fetcher).not.toHaveBeenCalled(); expect(f.instance.start).not.toHaveBeenCalled();
+    expect((f.stored.get(`compute:obligation:${id}`) as { phase: string }).phase).toBe("preparing");
+    expect(await f.ctx.storage.get("compute:devenv-session")).toBe(id);
+  });
+
+  it("cancels a refused reservation before admitting a new session", async () => {
+    const oldId = "44444444-4444-4444-8444-444444444444"; const newId = "55555555-5555-4555-8555-555555555555";
+    let calls = 0;
+    const fetcher = vi.fn(async (url: string) => {
+      calls++;
+      if (calls === 1) return new Response("over", { status: 429 });
+      if (url.endsWith("/cancel")) return new Response(JSON.stringify({ reservation_id: oldId, state: "cancelled" }));
+      return new Response(JSON.stringify({ reservation_id: newId, state: url.endsWith("/reserve") ? "prepared" : "active" }));
+    });
+    const f = fixture(fetcher);
+    await expect(f.instance.prepareAuthorizedCompute({ token: token(oldId), reservationId: oldId, tenantId, workloadKind: "devenv", workloadId: oldId, vcpuCount: 4, maximumWallMs: 28_800_000 })).rejects.toThrow();
+    await f.instance.prepareAuthorizedCompute({ token: token(newId), reservationId: newId, tenantId, workloadKind: "devenv", workloadId: newId, vcpuCount: 4, maximumWallMs: 28_800_000 });
+    expect(fetcher).toHaveBeenCalledTimes(4); expect(f.instance.start).not.toHaveBeenCalled();
+    expect((f.stored.get(`compute:obligation:${oldId}`) as { terminalKind: string }).terminalKind).toBe("cancelled");
+    expect((f.stored.get(`compute:obligation:${newId}`) as { phase: string }).phase).toBe("active");
+  });
+
+  it("retains the old pointer when cancellation is unavailable and refuses the new session", async () => {
+    const oldId = "66666666-6666-4666-8666-666666666666"; const newId = "77777777-7777-4777-8777-777777777777";
+    let cancel = false;
+    const fetcher = vi.fn(async (url: string) => {
+      if (url.endsWith("/cancel") || cancel) return new Response("unavailable", { status: 503 });
+      return new Response(JSON.stringify({ reservation_id: oldId, state: url.endsWith("/reserve") ? "prepared" : "active" }));
+    });
+    const f = fixture(fetcher);
+    await f.instance.prepareAuthorizedCompute({ token: token(oldId), reservationId: oldId, tenantId, workloadKind: "devenv", workloadId: oldId, vcpuCount: 4, maximumWallMs: 28_800_000 });
+    cancel = true;
+    await expect(f.instance.prepareAuthorizedCompute({ token: token(newId), reservationId: newId, tenantId, workloadKind: "devenv", workloadId: newId, vcpuCount: 4, maximumWallMs: 28_800_000 })).rejects.toThrow();
+    expect(await f.ctx.storage.get("compute:devenv-session")).toBe(oldId); expect(f.instance.start).not.toHaveBeenCalled();
+    expect(fetcher).toHaveBeenCalledTimes(3);
   });
 
   it("carries the drain cursor across restart before reaching an expired preparation", async () => {
