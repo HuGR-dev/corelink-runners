@@ -73,7 +73,7 @@ function productionWitnesses(config: WitnessConfig): ReadonlyMap<string, Current
 function requestKeys(event: Record<string, unknown>, expected: readonly string[]): boolean { return keysExact(event, expected); }
 function contextQualified(context: unknown, config: WitnessConfig): boolean {
   if (!context || typeof context !== "object") return false; const arn = (context as { invokedFunctionArn?: unknown }).invokedFunctionArn;
-  const match = typeof arn === "string" ? LAMBDA.exec(arn) : null; return !!match && match[1] === config.region && match[2] === config.monitorAccountId;
+  const match = typeof arn === "string" ? LAMBDA.exec(arn) : null; return !!match && match[1] === config.region && match[2] === config.verifierAccountId;
 }
 function allowed(config: WitnessConfig, logId: string): boolean { return config.allowedLogIds.includes(logId); }
 
