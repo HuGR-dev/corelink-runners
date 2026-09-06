@@ -5,7 +5,7 @@ vi.mock("@cloudflare/containers", () => ({ Container: class {}, getContainer: vi
 vi.mock("../src/github_app.js", () => ({ installationToken: installationTokenMock }));
 
 import { redriveOrphanedJobs } from "../src/index";
-import { bootstrap, ctx, env, kv, makeDO, providerReceipt, settle, T0 } from "./containment-redrive-test-helpers";
+import { bootstrap, ctx, env, kv, makeDO, providerReceipt, reserveKey, settle, T0 } from "./containment-redrive-test-helpers";
 
 function json(body: unknown, status = 200, headers: HeadersInit = { "content-type": "application/json" }) {
   return new Response(JSON.stringify(body), { status, headers });
@@ -84,10 +84,11 @@ describe("T3-W3 integrated authorization candidate redrive", () => {
       labels: ["corelink"],
     }), undefined);
     expect(installationTokenMock.mock.calls.map((call) => call[1])).toEqual(expect.arrayContaining(["7", "8"]));
-    const scanRequests = requests.filter((request) => request.url.includes("/actions/runs"));
+    const scanRequests = requests.filter((request) => new URL(request.url).pathname.endsWith("/actions/runs"));
     expect(scanRequests).toHaveLength(2);
     expect(new Set(scanRequests.map((request) => request.headers.get("authorization")))).toEqual(new Set(["Bearer installation-token-7", "Bearer installation-token-8"]));
-    expect(store.map.has("spawn:91")).toBe(false);
+    expect(store.map.has("spawn:91")).toBe(true);
+    expect(d.storage.map.get(reserveKey("acme/customer", "91"))).toMatchObject({ state: "COMPLETED" });
   });
 
   it("fails closed on registry or membership uncertainty without static fallback or effects", async () => {
@@ -140,6 +141,7 @@ describe("T3-W3 integrated authorization candidate redrive", () => {
       if (url.pathname === "/installation/repositories") return json({ repositories: [{ full_name: "acme/customer" }], total_count: 1 });
       if (url.pathname === "/internal/v1/runner/authorize") return json({ tenant: "tenant-7", max_concurrency: 2 });
       if (url.pathname === "/internal/v1/runner/mint") return json({ token_plaintext: "pat-plaintext", pat_id: "pat-1", tenant: "tenant-7", max_concurrency: 2, lifecycle_generation: "1" });
+      if (url.pathname === "/internal/v1/runner/adopt") return new Response(null, { status: 204 });
       if (url.pathname === "/internal/v1/runner/revoke") return json({ ok: true });
       if (url.pathname.endsWith("/actions/runs")) return json({ workflow_runs: [{ id: 502, created_at: new Date(T0 - 1_000_000).toISOString() }] });
       if (url.pathname.endsWith("/actions/runs/502/jobs")) return json({ jobs: [{ id: 93, status: "queued", runner_id: 0, labels: ["corelink"] }] });
