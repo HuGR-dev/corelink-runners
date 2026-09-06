@@ -62,6 +62,8 @@ use crate::compute_meter;
 use crate::ledger::{AdmitLedger, AdmitOutcome, ComputeGate, LeaseLedger, LeaseRecord, LeaseState};
 use crate::tenant::TenantId;
 
+mod suspension;
+
 /// Transport-security mode for the Postgres ledger connection (WP-B).
 ///
 /// Opt-in via the `FABRIC_PG_TLS` env var; **default [`PgTlsMode::Disable`]**.
@@ -187,7 +189,21 @@ CREATE TABLE IF NOT EXISTS compute_accrual (
 -- a shard restart. The fabricd keeps a fast in-memory cache; this is the
 -- cross-instance source of truth read on a cache miss at N>1.
 CREATE TABLE IF NOT EXISTS fabric_suspended_tenants (
-  tenant_id text PRIMARY KEY);
+  tenant_id text PRIMARY KEY,
+  suspension_event_id text);
+ALTER TABLE fabric_suspended_tenants
+  ADD COLUMN IF NOT EXISTS suspension_event_id text;
+CREATE SEQUENCE IF NOT EXISTS fabric_tenant_suspension_event_seq AS bigint;
+-- Durable suspension delivery outbox. The suspension row and its event are
+-- written in one transaction; delivery is retried until the Worker ACKs.
+CREATE TABLE IF NOT EXISTS tenant_suspension_events (
+  event_id text PRIMARY KEY,
+  tenant_id text NOT NULL,
+  created_at_ms bigint NOT NULL,
+  attempts int NOT NULL DEFAULT 0,
+  delivered_at_ms bigint);
+CREATE INDEX IF NOT EXISTS tenant_suspension_events_pending_idx
+  ON tenant_suspension_events (created_at_ms) WHERE delivered_at_ms IS NULL;
 ";
 
 // -- M1 WAVE-0 frozen anchor (tenant_plans) ---------------------------------
@@ -489,26 +505,14 @@ impl LeaseLedger for PgLedger {
     }
 
     fn set_tenant_suspended(&self, tenant: &str, suspended: bool) -> anyhow::Result<()> {
-        self.block_on(async {
-            let client = self.pool.get().await?;
-            if suspended {
-                client
-                    .execute(
-                        "INSERT INTO fabric_suspended_tenants (tenant_id) VALUES ($1) \
-                         ON CONFLICT DO NOTHING",
-                        &[&tenant],
-                    )
-                    .await?;
-            } else {
-                client
-                    .execute(
-                        "DELETE FROM fabric_suspended_tenants WHERE tenant_id = $1",
-                        &[&tenant],
-                    )
-                    .await?;
-            }
-            Ok(())
-        })
+        self.set_tenant_suspended_pg(tenant, suspended)
+    }
+
+    fn record_tenant_suspension(
+        &self,
+        event: crate::ledger::TenantSuspensionEvent,
+    ) -> anyhow::Result<()> {
+        self.record_tenant_suspension_pg(event)
     }
 
     fn is_tenant_suspended_durable(&self, tenant: &str) -> anyhow::Result<bool> {
