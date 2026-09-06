@@ -18,7 +18,7 @@ This checkpoint has successful Rust metadata compilation and TypeScript checks,
 plus focused author tests recorded separately in the execution evidence. No
 sprint CI, deployment, live provider action or sibling mutation was performed.
 The current fan-out has one Luna executor for each of T4-W1, T4-W2, T3-W3,
-T3-W1 and T8-W5, in `/private/tmp/corelink-wp-<lowercase_wp>-20260905`.
+T3-W2 and T8-W5, in `/private/tmp/corelink-wp-<lowercase_wp>-20260905`.
 Root owns review, integration and ledger updates. Review corrections return
 to the same executor. The source preparation tree for Sprint 2 is
 `/private/tmp/corelink-delivery-sprint2-20260905`; pending hard dependencies
@@ -26,7 +26,9 @@ prevent delivery credit and entry into the active delivery stack.
 T4-W1's first candidate retained the defective 7200-second attribution TTL;
 T8-W5's first candidate lacked the actual suspension producer connection.
 Both are under correction, not accepted implementations. T3-W1's redaction
-candidate is under final acceptance coverage review. Consult the ledger and
+candidate `a54470eabad870568ae8ab8fbeec83c0f45099ba` passed source review and
+is held as prepared; authored Rust runtime tests await sprint validation.
+T3-W2 occupies the completed executor lane. Consult the ledger and
 live agent status before resuming any author task.
 
 Current implementation includes confirmed teardown/capacity retention, durable
@@ -56,4 +58,5 @@ version-bound recovery prerequisites are met.
 
 The A3.1/A3.2 engine/Worker teardown contract was pulled forward together for
 T3-W10 correctness: the Worker returns 503 on an unconfirmed destroy. T3-W1
-remains partial in Sprint 2; remaining wire/logging acceptance is not waived.
+now has complete prepared source in Sprint 2; runtime verification, integration
+dependencies and delivery acceptance are not waived.
