@@ -1,6 +1,7 @@
 import { bumpMetrics } from "../metrics";
 import { logEvent, revokeCasPatById, type MintEnv } from "../lib";
 import type { CredentialAuthority, CredentialIdentity, CredentialPage, CredentialSelection } from "./credential_authority_contract.js";
+import { buildCLW_LEASE_ID } from "./runner_credential_lease.js";
 
 export interface RevocationKv {
   get(key: string): Promise<string | null>;
@@ -13,6 +14,7 @@ export interface RevocationEnv {
   CORELINK_MINT_URL?: string;
   RUNNER_JOB_PATS?: RevocationKv;
   METRICS?: any;
+  CRED_STASH?: { idFromName(name: string): unknown; get(id: unknown): { wipe(): Promise<void> } };
 }
 const RETRY_PREFIX = "revoke-retry:";
 const MAX_LIST_PAGES = 128;
@@ -63,6 +65,7 @@ async function revokeOne(env: RevocationEnv, authority: CredentialAuthority, ide
     };
     await revokeCasPatById(mintEnv, identity.patId, identity.tenant);
     await authority.confirmCredentialRevoked(identity);
+    if (env.CRED_STASH) await env.CRED_STASH.get(env.CRED_STASH.idFromName(buildCLW_LEASE_ID(identity.jobId, identity.tenant, identity.patId))).wipe();
     if (env.RUNNER_JOB_PATS) await env.RUNNER_JOB_PATS.delete(retryKey(identity));
     return true;
   } catch (e) {
