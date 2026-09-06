@@ -47,10 +47,16 @@ function validateOperation(operation: DeliveryOperation, destination: string, ma
   }
   if (operation.destination !== destination) throw new DeliveryValidationError("destination is not approved");
   if (!HEX_SHA256.test(operation.payloadDigest)) throw new DeliveryValidationError("payloadDigest is invalid");
-  const bytes = Buffer.byteLength(operation.payload, "utf8");
-  if (bytes > maxBytes) throw new DeliveryValidationError("payload exceeds configured limit");
   const digest = createHash("sha256").update(operation.payload, "utf8").digest("hex");
   if (digest !== operation.payloadDigest) throw new DeliveryValidationError("payloadDigest does not match payload");
+  const attributeBytes = [
+    ["operation", operation.operationId],
+    ["incident", operation.incidentId],
+    ["payloadDigest", operation.payloadDigest],
+  ].reduce((total, [name, value]) => total + Buffer.byteLength(name, "utf8") + Buffer.byteLength("String", "utf8") + Buffer.byteLength(value, "utf8"), 0);
+  if (Buffer.byteLength(operation.payload, "utf8") + attributeBytes > maxBytes) {
+    throw new DeliveryValidationError("SNS message and attributes exceed configured limit");
+  }
 }
 
 export class SnsAlertTransport implements AlertTransport {

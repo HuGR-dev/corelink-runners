@@ -61,6 +61,23 @@ describe("SnsAlertTransport", () => {
     expect(send).not.toHaveBeenCalled();
   });
 
+  it("enforces the exact total payload plus attribute byte boundary", async () => {
+    const cap = 512;
+    const attributeBytes = [
+      ["operation", operation.operationId],
+      ["incident", operation.incidentId],
+      ["payloadDigest", "0".repeat(64)],
+    ].reduce((total, [name, value]) => total + Buffer.byteLength(name) + Buffer.byteLength("String") + Buffer.byteLength(value), 0);
+    const exactPayload = "x".repeat(cap - attributeBytes);
+    const exact = { ...operation, payload: exactPayload, payloadDigest: createHash("sha256").update(exactPayload).digest("hex") };
+    const send = vi.fn().mockResolvedValue({ MessageId: "exact" });
+    await expect(new SnsAlertTransport({ client: { send } as never, topicArn: "alerts", destination: "ops-email", maxPayloadBytes: cap }).publish(exact)).resolves.toMatchObject({ status: "accepted" });
+    const overPayload = exactPayload + "x";
+    const over = { ...operation, payload: overPayload, payloadDigest: createHash("sha256").update(overPayload).digest("hex") };
+    await expect(new SnsAlertTransport({ client: { send } as never, topicArn: "alerts", destination: "ops-email", maxPayloadBytes: cap }).publish(over)).rejects.toBeInstanceOf(DeliveryValidationError);
+    expect(send).toHaveBeenCalledOnce();
+  });
+
   it("rejects FIFO topics and oversized configuration", () => {
     expect(() => new SnsAlertTransport({ client: {} as never, topicArn: "alerts.fifo", destination: "ops-email", maxPayloadBytes: 1 })).toThrow(DeliveryValidationError);
     expect(() => new SnsAlertTransport({ client: {} as never, topicArn: "alerts", destination: "ops-email", maxPayloadBytes: 256 * 1024 + 1 })).toThrow(DeliveryValidationError);
