@@ -255,3 +255,53 @@ Architecture/remaining acceptance:
   subsequent sprint acceptance and seven-day observation remain outstanding.
 - Lima/PG stopped; primary conflicting checkout and original worktrees preserved.
   Disk last~8GiB free. Do not prune unknown/other agents' trees or dependencies.
+
+
+## Progress at 04:05 BRT (latest)
+
+Runners root b621893bf0589c6306835fa1b6bf630fc581cc8b is clean; paired server
+root dc169f8c53196e242fff213bdb3c77be3a7ade00 remains clean. No new remote
+publication, full CI, release or deployment. Delivered count still16/70.
+
+- Root reproduced all111 route adoption tests and99 index unit tests. Rejected
+  incomplete groupB package384d836/99fe0c8; its seven files were repaired in four
+  bounded Luna lanes. Integrated8 capacity/normal-inbox tests,44 SJ5,10 lifecycle,
+  and13 webhook tests after source allowlist metric repairb621893.
+- Root strengthened SJ5 beyond the author's direct-enqueue seam: signed actual
+  webhook202 -> durable capacity refusal with original tenant installation ->
+  60-second retry -> exactly one JIT/container -> complete settlement. Restored
+  no-spawn-failure metric assertion; no actual request is lost behind a fixture.
+- Root repaired fixture undefined-PAT adoption matches and ensured dedup first
+  delivery really spawned once before measuring the redelivery's no-op.
+- Source27e9a96 requires the stash binding before confirming credential cleanup.
+  Remote revoke remains independent. Recovery8079103 integrated61a4080 proves
+  authority restart, restoring real CredStashDO, exact ticket wipe and terminal
+  confirmation. Root66 tests passed before new recovery,20 webhook+stash tests
+  passed after it; strict Worker TS passed. These counts overlap; do not sum them.
+- The credential agent initially edited the root despite its assigned worktree;
+  its bounded diff was reviewed, preserved and reproduced. Followup used the
+  assigned isolated tree. No unrelated changes were included.
+- Root server115 focused tests,13 real SQLite tests andstrictTS remain green for
+  issuer handoff. No source claim of universal native-fabric issuer ownership:
+  the new adoption protocol is wired in the Worker dispatcher only.
+- Required-hit action integration now active in
+  /private/tmp/corelink-takeover-memoize-required-hit. First5059a7d was rejected:
+  known0.1.12 but absent credentials could fall through to cold execution, and
+  failed version command could be accepted. Luna fixing explicit negatives.
+- clw76c4cb fixes pre-dispatch required-hit errors to78; author focused actual
+  process tests passed. Root review source complete; test-file split underway
+  to avoid growing existing giant e2e. Root reproduction still pending.
+- Primary checkout remains preserved; root-local npm dependencies are isolated.
+  Disk4.4GiB free at04:02; do not create redundant Cargo targets or prune unknown
+  worktrees. Lima/PG remain stopped.
+
+Remaining source dependencies include external monitor (owner proposal still
+unanswered), shared tenant compute authority, F008 resume/credential generations,
+and F005/F007 authoritative provider cancellation/reconciliation. Read-only
+Sprint1 census found most other original source slices already present; missing
+source must not be confused with pending live evidence. T4-W4 historical A4.4
+wording conflicts with exact fractional parser tests; strict IntrospectBody is a
+conformance lens, NOT the runtime parser. Paired server producer still emits only
+positiveu32 or omitted cap. Preserve actual code and report the inconsistency;
+do not invent a fresh owner approval or silently change frozen billing vectors.
+The shared-budget scratch proposal remains unapproved and partly stale.
