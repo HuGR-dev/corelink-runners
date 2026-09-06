@@ -174,6 +174,7 @@ let jitStatus = 200;
 let mintStatus = 200;
 let ghRuns: { id: number; createdMsAgo: number }[] = [];
 let ghJobsByRun: Record<number, { id: number; status: string; runner_id: number | null; labels: string[] }[]> = {};
+const issuedOperations = new Map<string, string>();
 
 function installFetchRouter() {
   vi.stubGlobal(
@@ -192,17 +193,24 @@ function installFetchRouter() {
         return new Response(JSON.stringify({ tenant: "acme", max_concurrency: 5 }), { status: 200 });
       }
       if (url.includes("/internal/v1/runner/mint")) {
+        const requestBody = body ? JSON.parse(body) as { operation_id?: unknown } : undefined;
         if (mintStatus === 403) return new Response("mint forbidden", { status: 403 });
         if (mintStatus !== 200) return new Response("mint unavailable", { status: mintStatus });
-        return new Response(
-          JSON.stringify({
+        const response = {
             token_plaintext: "cas-pat-plaintext",
             pat_id: "pat-1",
             tenant: "acme",
             max_concurrency: 5,
-          }),
-          { status: 200 },
-        );
+        };
+        if (typeof requestBody?.operation_id === "string") issuedOperations.set(requestBody.operation_id, response.pat_id);
+        return new Response(JSON.stringify(response), { status: 200 });
+      }
+      if (url.includes("/internal/v1/runner/adopt")) {
+        const requestBody = body ? JSON.parse(body) as { operation_id?: unknown; pat_id?: unknown } : undefined;
+        const expectedPat = typeof requestBody?.operation_id === "string" ? issuedOperations.get(requestBody.operation_id) : undefined;
+        return expectedPat === requestBody?.pat_id
+          ? new Response(null, { status: 204 })
+          : new Response("adoption mismatch", { status: 400 });
       }
       if (url.includes("/internal/v1/runner/revoke")) {
         return new Response(JSON.stringify({ ok: true }), { status: 200 });
@@ -310,6 +318,7 @@ beforeEach(() => {
   reqs = [];
   jitStatus = 200;
   mintStatus = 200;
+  issuedOperations.clear();
   ghRuns = [];
   ghJobsByRun = {};
   vi.mocked(getContainer).mockClear();

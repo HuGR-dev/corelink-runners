@@ -236,6 +236,7 @@ let billStatus = 200;
 let mintTenant = "acme";
 let mintMaxConcurrency: number | undefined = 5;
 let mintBodies: unknown[] = [];
+const issuedOperations = new Map<string, string>();
 let revokeBodies: unknown[] = [];
 let billBodies: unknown[] = [];
 
@@ -264,18 +265,25 @@ function installFetchRouter() {
         }), { status: 200 });
       }
       if (url.includes("/internal/v1/runner/mint")) {
-        mintBodies.push(parseBody(init));
+        const body = parseBody(init) as { operation_id?: unknown } | undefined;
+        mintBodies.push(body);
         if (mintStatus === 403) return new Response("mint forbidden", { status: 403 });
         if (mintStatus !== 200) return new Response("mint unavailable", { status: mintStatus });
-        return new Response(
-          JSON.stringify({
+        const response = {
             token_plaintext: RAW_PAT,
             pat_id: "pat-1",
             tenant: mintTenant,
             ...(mintMaxConcurrency != null ? { max_concurrency: mintMaxConcurrency } : {}),
-          }),
-          { status: 200 },
-        );
+        };
+        if (typeof body?.operation_id === "string") issuedOperations.set(body.operation_id, response.pat_id);
+        return new Response(JSON.stringify(response), { status: 200 });
+      }
+      if (url.includes("/internal/v1/runner/adopt")) {
+        const body = parseBody(init) as { operation_id?: unknown; pat_id?: unknown } | undefined;
+        const expectedPat = typeof body?.operation_id === "string" ? issuedOperations.get(body.operation_id) : undefined;
+        return expectedPat === body?.pat_id
+          ? new Response(null, { status: 204 })
+          : new Response("adoption mismatch", { status: 400 });
       }
       if (url.includes("/internal/v1/runner/revoke")) {
         revokeBodies.push(parseBody(init));
@@ -443,6 +451,7 @@ beforeEach(() => {
   aliveHandles.clear();
   fetchCalls = [];
   mintBodies = [];
+  issuedOperations.clear();
   revokeBodies = [];
   billBodies = [];
   logLines = [];

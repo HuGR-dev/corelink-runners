@@ -147,7 +147,7 @@ async function ghSign(secret: string, body: string): Promise<string> {
 // ── fetch router: the GitHub JIT mint + the registration DELETE ──────────────
 // Each mint returns a DISTINCT config and runner id, so a test can tell whether
 // two boxes booted with the same single-use registration.
-let fetchCalls: { method: string; url: string }[] = [];
+let fetchCalls: { method: string; url: string; body?: unknown }[] = [];
 let jitStatus = 200;
 let deleteStatus = 204;
 let jitMinted = 0;
@@ -158,7 +158,17 @@ function installFetchRouter() {
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const url = typeof input === "string" ? input : ((input as Request).url ?? String(input));
       const method = (init?.method ?? "GET").toUpperCase();
-      fetchCalls.push({ method, url });
+      const body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
+      fetchCalls.push({ method, url, body });
+      if (url.endsWith("/internal/v1/runner/adopt")) {
+        const operationId = (body as { operation_id?: unknown } | undefined)?.operation_id;
+        const patId = (body as { pat_id?: unknown } | undefined)?.pat_id;
+        const mint = fetchCalls.findLast((call) => call.url.endsWith("/internal/v1/runner/mint"));
+        const mintBody = mint?.body as { operation_id?: unknown } | undefined;
+        return operationId === mintBody?.operation_id && patId === "ghost-pat-id"
+          ? new Response(null, { status: 204 })
+          : new Response("adoption mismatch", { status: 400 });
+      }
       if (url.endsWith("/internal/v1/runner/authorize")) {
         return new Response(JSON.stringify({ tenant: "ghost-tenant", max_concurrency: 20 }), { status: 200 });
       }
