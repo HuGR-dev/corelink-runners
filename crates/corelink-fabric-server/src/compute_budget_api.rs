@@ -15,7 +15,8 @@ use corelink_fabric::compute_budget::{
 };
 use corelink_fabric::ledger::LeaseLedger;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::json;
+use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
@@ -289,7 +290,11 @@ fn ledger_error(error: anyhow::Error) -> Response {
 }
 
 fn decimal_i64(value: &str) -> Option<u64> {
-    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+    if value.is_empty()
+        || value.len() > 19
+        || (value != "0" && value.as_bytes()[0] == b'0')
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+    {
         return None;
     }
     value
@@ -303,7 +308,7 @@ fn hex_digest(value: &str) -> bool {
 }
 
 fn valid_period(period: u32) -> bool {
-    (1000..=999912).contains(&period) && (1..=12).contains(&(period % 100))
+    (197001..=999912).contains(&period) && (1..=12).contains(&(period % 100))
 }
 
 fn now_ms() -> u64 {
@@ -314,10 +319,11 @@ fn now_ms() -> u64 {
 }
 
 fn constant_time_eq(expected: &[u8], presented: &[u8]) -> bool {
-    let mut diff = (expected.len() ^ presented.len()) as u8;
-    for index in 0..expected.len().max(presented.len()) {
-        diff |=
-            expected.get(index).copied().unwrap_or(0) ^ presented.get(index).copied().unwrap_or(0);
+    let expected = Sha256::digest(expected);
+    let presented = Sha256::digest(presented);
+    let mut diff = 0u8;
+    for index in 0..expected.len() {
+        diff |= expected[index] ^ presented[index];
     }
     diff == 0
 }
