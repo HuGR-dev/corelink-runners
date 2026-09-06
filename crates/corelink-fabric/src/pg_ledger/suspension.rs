@@ -62,6 +62,18 @@ impl PgLedger {
                     if outbox_tenant != event.tenant_id {
                         anyhow::bail!("suspension pointer crosses tenant boundary");
                     }
+                    let outbox_generation: i64 = tx
+                        .query_one(
+                            "SELECT generation FROM tenant_suspension_events WHERE event_id = $1",
+                            &[&pointer],
+                        )
+                        .await?
+                        .get(0);
+                    if outbox_generation != generation {
+                        anyhow::bail!(
+                            "suspension event generation disagrees with tenant generation"
+                        );
+                    }
                     tx.commit().await?;
                     return Ok(());
                 }
@@ -109,9 +121,10 @@ impl PgLedger {
                 )
                 .await?;
             } else {
+                let currently_suspended = tx.query_opt("SELECT 1 FROM fabric_suspended_tenants WHERE tenant_id = $1", &[&tenant]).await?.is_some();
                 let current = tx.query_opt("SELECT generation FROM tenant_lifecycle_generations WHERE tenant_id = $1 FOR UPDATE", &[&tenant]).await?;
-                if current.is_none() { ensure_generation(&tx, tenant, false).await?; }
-                if tx.query_opt("SELECT 1 FROM fabric_suspended_tenants WHERE tenant_id = $1", &[&tenant]).await?.is_some() {
+                if current.is_none() { ensure_generation(&tx, tenant, currently_suspended).await?; }
+                if currently_suspended {
                     let generation: i64 = tx.query_one("SELECT generation FROM tenant_lifecycle_generations WHERE tenant_id = $1", &[&tenant]).await?.get(0);
                     let next = generation.checked_add(1).ok_or_else(|| anyhow::anyhow!("tenant lifecycle generation overflow"))?;
                     tx.execute("UPDATE tenant_lifecycle_generations SET generation=$2 WHERE tenant_id=$1", &[&tenant, &next]).await?;
@@ -248,7 +261,11 @@ async fn ensure_generation(
         )
         .await?
     {
-        return Ok(row.get(0));
+        let generation: i64 = row.get(0);
+        if generation < 0 {
+            anyhow::bail!("negative tenant lifecycle generation");
+        }
+        return Ok(generation);
     }
     let generation = if suspended { 0 } else { 1 };
     tx.execute(

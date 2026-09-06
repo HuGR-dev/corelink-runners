@@ -88,3 +88,34 @@ fn real_pg_generation_overflow_refuses_resume_and_keeps_suspended() -> anyhow::R
         Ok::<_, anyhow::Error>(())
     })
 }
+
+#[test]
+fn real_pg_direct_legacy_suspension_resumes_at_generation_one_and_unknown_event_refuses()
+-> anyhow::Result<()> {
+    let Some(url) = env::var("TEST_DATABASE_URL").ok() else {
+        return Ok(());
+    };
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let ledger = PgLedger::connect(&url, 4, PgTlsMode::Disable).await?;
+        let tenant = uuid::Uuid::new_v4().to_string();
+        let db = ledger.pool.get().await?;
+        db.execute(
+            "INSERT INTO fabric_suspended_tenants (tenant_id,suspension_event_id) VALUES ($1,NULL)",
+            &[&tenant],
+        )
+        .await?;
+        ledger.set_tenant_suspended(&tenant, false)?;
+        let lifecycle = ledger.tenant_lifecycle(&tenant)?;
+        assert_eq!(lifecycle.generation, 1);
+        assert!(!lifecycle.suspended);
+        assert!(
+            ledger
+                .tenant_suspension_generation("missing-event")
+                .is_err()
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+}
