@@ -56,8 +56,8 @@ function validTimestamp(value: unknown): value is number {
 /**
  * Build the canonical billing event for a completed DevEnv session.
  *
- * Validation happens before calling `buildUsageEvent`; malformed lifecycle
- * state therefore returns a typed failure and cannot emit a partial event.
+ * Malformed lifecycle state returns a typed failure before event construction
+ * and cannot emit a partial event.
  * Floors elapsed wall-clock seconds and multiplies by the tier's actual vCPU
  * count. There is deliberately no minimum-duration charge.
  */
