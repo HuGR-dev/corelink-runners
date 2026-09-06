@@ -41,7 +41,7 @@ describe("exact credential attempt cleanup", () => {
     expect((await authority.pendingCredentials({ kind: "job", jobId: "attempt" })).records).toEqual([b]);
   });
 
-  it("does not repeat HTTP for an exact already-revoked attempt", async () => {
+  it("allows the idempotent mint revoke to receive an already-revoked attempt", async () => {
     const authority = new ContainmentDO({ storage: new Storage() } as never, {} as never);
     const identity = { jobId: "idempotent", tenant: "tenant-a", patId: "pat-a" };
     await authority.registerCredential(identity);
@@ -49,7 +49,26 @@ describe("exact credential attempt cleanup", () => {
     vi.stubGlobal("fetch", fetcher);
     await expect(revokeIssuedCredential(env(), authority, identity)).resolves.toBe(true);
     await expect(revokeIssuedCredential(env(), authority, identity)).resolves.toBe(true);
-    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the exact request durable when the mint key is missing", async () => {
+    const authority = new ContainmentDO({ storage: new Storage() } as never, {} as never);
+    const identity = { jobId: "missing-key", tenant: "tenant-a", patId: "pat-a" };
+    await authority.registerCredential(identity);
+    const fetcher = vi.fn();
+    vi.stubGlobal("fetch", fetcher);
+    await expect(revokeIssuedCredential({}, authority, identity)).resolves.toBe(false);
+    expect((await authority.revocationRequestedCredentials()).records).toEqual([identity]);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("rejects an unknown exact identity without making HTTP", async () => {
+    const authority = new ContainmentDO({ storage: new Storage() } as never, {} as never);
+    const fetcher = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetcher);
+    await expect(revokeIssuedCredential(env(), authority, { jobId: "unknown", tenant: "tenant-a", patId: "pat-a" })).resolves.toBe(false);
+    expect(fetcher).not.toHaveBeenCalled();
   });
 
   it("keeps completion fences separate from attempt cleanup", async () => {

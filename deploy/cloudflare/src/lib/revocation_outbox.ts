@@ -56,6 +56,7 @@ async function retainRetry(env: RevocationEnv, identity: CredentialIdentity): Pr
 async function revokeOne(env: RevocationEnv, authority: CredentialAuthority, identity: CredentialIdentity): Promise<boolean> {
   try {
     await authority.requestCredentialRevocation(identity);
+    if (!env.CORELINK_RUNNER_MINT_AUTH_KEY) throw new Error("missing mint auth key");
     const mintEnv: MintEnv = {
       CORELINK_RUNNER_MINT_AUTH_KEY: env.CORELINK_RUNNER_MINT_AUTH_KEY,
       CORELINK_MINT_URL: env.CORELINK_MINT_URL,
@@ -91,13 +92,10 @@ export async function revokeCompletedJob(env: RevocationEnv, authority: Credenti
  * deliberately does not close the job: a later attempt may mint another PAT.
  */
 export async function revokeIssuedCredential(env: RevocationEnv, authority: CredentialAuthority, identity: CredentialIdentity): Promise<boolean> {
-  if (!env.CORELINK_RUNNER_MINT_AUTH_KEY) return false;
-  const pending = await pendingAll(authority, { kind: "job", jobId: identity.jobId });
-  const exact = pending.find(candidate => candidate.tenant === identity.tenant && candidate.patId === identity.patId);
-  // Confirmed terminal records are retained by the authority but omitted from
-  // pending pages, making an already-completed exact cleanup idempotent.
-  if (!exact) return true;
-  return revokeOne(env, authority, exact);
+  // The authority transition is the source of truth. A missing pending-page
+  // row can mean terminal, malformed, or unknown state, so absence must not be
+  // treated as proof that this exact identity was already revoked.
+  return revokeOne(env, authority, identity);
 }
 
 export async function retryFailedRevocations(env: RevocationEnv, authority: CredentialAuthority): Promise<number> {
