@@ -92,6 +92,22 @@ class LedgerCorruptionTests(unittest.TestCase):
         errors = self.validate_fixture(value, "ready-ci", 1)
         self.assertFalse(errors)
 
+    def test_ready_ci_accepts_ancestral_review_only_commit(self):
+        value, head = self.ready_fixture()
+        review_only = ledger.git(self.repo, "rev-parse", "HEAD^")
+        self.assertTrue(review_only)
+        for item in value["items"]:
+            if item.get("sprint") == 1:
+                item["review"] = {
+                    "status": "approved",
+                    "commit": review_only,
+                    "evidence": ["review-only commit"],
+                }
+        self.assertEqual(self.validate_fixture(value, "ready-ci", 1), [])
+        value["items"][16]["review"]["commit"] = "0" * 40
+        errors = self.validate_fixture(value, "ready-ci", 1)
+        self.assertTrue(any("review commit is not valid" in error for error in errors))
+
     def test_frozen_scope_rejects_swap(self):
         value = self.fixture()
         self.assertEqual(self.validate_fixture(value), [])
