@@ -47,7 +47,6 @@
     // today via the webhook path — so this changes recovery, and nothing else.
     "RECONCILER_REPOS": "HuGR-Labs/corelink-runners HuGR-Labs/corelink-server",
     "AUTOSCALER_REDRIVE_PAUSED": "1",
-    "AUTOSCALER_INTAKE_PAUSED": "1",
     // Inject the known installation_id for first-party repos (the repo webhook has
     // none) so the server-derived mint (#283) runs WARM without an App webhook.
     // dogfood: HuGR-Labs/corelink-runners → installation 150584374 → tenant
