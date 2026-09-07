@@ -26,12 +26,10 @@ if [[ "$base" != '0000000000000000000000000000000000000000' ]]; then
 fi
 git -C "$repo" cat-file -e "${head}^{commit}" 2>/dev/null || { printf 'secret-scan: head commit is unavailable\n' >&2; exit 2; }
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/corelink-secret-scan.XXXXXX")"
-cleanup() { rm -rf "$work_dir"; }
-on_signal() { local signal="$1" code="$2"; trap - "$signal"; exit "$code"; }
-trap cleanup EXIT
-trap 'on_signal HUP 129' HUP
-trap 'on_signal INT 130' INT
-trap 'on_signal TERM 143' TERM
+trap 'rm -rf "$work_dir"' EXIT
+trap 'trap - HUP; exit 129' HUP
+trap 'trap - INT; exit 130' INT
+trap 'trap - TERM; exit 143' TERM
 config="$work_dir/gitleaks.toml"; ignore_file="$work_dir/gitleaksignore"
 report="$work_dir/report.json"; log="$work_dir/scanner.log"
 printf '[extend]\nuseDefault = true\n' >"$config"

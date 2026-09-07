@@ -54,6 +54,13 @@ sed "s#/usr/local/bin/corelink-check-exec-server#\"$bin/exec-server\"#" \
     "$root/entrypoint.sh" >"$check_script"
 chmod 0755 "$check_script"
 
+assert_absent() {
+    if grep -q "$@"; then
+        echo 'unexpected secret or marker found' >&2
+        exit 1
+    fi
+}
+
 auth="$tmp/run/corelink/exec-server-auth-token"
 mkdir -p "$(dirname "$auth")"
 AUTH_ENV_CAPTURE="$tmp/check.env" AUTH_FILE_CAPTURE="$tmp/check.file" AUTH_MODE_CAPTURE="$tmp/check.mode" AUTH_ARG_CAPTURE="$tmp/check.argv" \
@@ -64,9 +71,9 @@ AUTH_ENV_CAPTURE="$tmp/check.env" AUTH_FILE_CAPTURE="$tmp/check.file" AUTH_MODE_
 test "$(cat "$tmp/check.file")" = bridge-secret
 test "$(cat "$tmp/check.mode")" = 400
 test ! -e "$auth"
-! grep -q '^EXEC_SERVER_AUTH_TOKEN=' "$tmp/check.env"
+assert_absent '^EXEC_SERVER_AUTH_TOKEN=' "$tmp/check.env"
 grep -q "^EXEC_SERVER_AUTH_TOKEN_FILE=$auth$" "$tmp/check.env"
-! grep -q 'bridge-secret' "$tmp/check.argv"
+assert_absent 'bridge-secret' "$tmp/check.argv"
 
 # A provider-injected marker cannot bypass a raw token bridge.
 marked_auth="$tmp/marked/run/corelink/token"
@@ -75,7 +82,7 @@ AUTH_ENV_CAPTURE="$tmp/marked.env" AUTH_FILE_CAPTURE="$tmp/marked.file" AUTH_MOD
     EXEC_SERVER_AUTH_TOKEN_FILE="$marked_auth" TOOLCHAIN_DIGEST=digest \
     TOOLCHAIN_DIR="$tmp/toolchain" "$check_script"
 test "$(cat "$tmp/marked.file")" = marked-secret
-! grep -q '^EXEC_SERVER_AUTH_TOKEN=' "$tmp/marked.env"
+assert_absent '^EXEC_SERVER_AUTH_TOKEN=' "$tmp/marked.env"
 
 if CORELINK_AUTH_BRIDGED=1 EXEC_SERVER_AUTH_TOKEN='' EXEC_SERVER_AUTH_TOKEN_FILE="$tmp/marked-empty" \
     TOOLCHAIN_DIGEST=digest TOOLCHAIN_DIR="$tmp/toolchain" "$check_script" 2>/dev/null; then
@@ -172,10 +179,10 @@ AUTH_ENV_CAPTURE="$tmp/cloud.env" AUTH_FILE_CAPTURE="$tmp/cloud.file" AUTH_MODE_
 test "$(cat "$tmp/cloud.file")" = cloud-secret
 test "$(cat "$tmp/cloud.mode")" = 400
 test ! -e "$cloud_auth"
-! grep -q '^EXEC_SERVER_AUTH_TOKEN=' "$tmp/cloud.env"
+assert_absent '^EXEC_SERVER_AUTH_TOKEN=' "$tmp/cloud.env"
 grep -q "^EXEC_SERVER_AUTH_TOKEN_FILE=$cloud_auth$" "$tmp/cloud.env"
-! grep -q 'cloud-secret' "$tmp/cloud.argv" "$tmp/cloud.log"
-! grep -q '^EXEC_SERVER_AUTH_TOKEN=' "$tmp/cloud.outer.env"
+assert_absent 'cloud-secret' "$tmp/cloud.argv" "$tmp/cloud.log"
+assert_absent '^EXEC_SERVER_AUTH_TOKEN=' "$tmp/cloud.outer.env"
 grep -q '^ENTRYPOINT \["/entrypoint.sh"\]' "$root/../cloudflare/Dockerfile.runner-devenv"
 
 # An injected dumb-init marker cannot suppress the clean outer-init re-exec.
@@ -185,7 +192,7 @@ AUTH_ENV_CAPTURE="$tmp/marked-init.env" AUTH_FILE_CAPTURE="$tmp/marked-init.file
     EXEC_SERVER_AUTH_TOKEN_FILE="$marked_init_auth" CLW_TENANT=tenant \
     WORKSPACE_NAME=workspace PROFILE_NAME=profile "$cloud_script" >/dev/null 2>&1
 test -s "$tmp/marked-init.outer.env"
-! grep -q '^EXEC_SERVER_AUTH_TOKEN=' "$tmp/marked-init.outer.env"
+assert_absent '^EXEC_SERVER_AUTH_TOKEN=' "$tmp/marked-init.outer.env"
 grep -q '^user=coder$' "$root/../cloudflare/supervisord.conf"
 grep -q '^USER coder$' "$root/../cloudflare/Dockerfile.runner-devenv"
 
