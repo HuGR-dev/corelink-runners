@@ -215,7 +215,10 @@
         "ephemeral_ssm_iam": "deleted",
         "security_group_final": "deleted",
         "running_resources_final": 0,
-        "cost_posture": "bounded below US$1 by two short-lived instances, 20-GiB delete-on-termination volumes, one 21-KiB temporary bundle, and no persistent IP"
+        "cost_posture": "bounded below US$1 by two short-lived instances, 20-GiB delete-on-termination volumes, one 21-KiB temporary bundle, and no persistent IP",
+        "cost_api_daily_unblended_ec2_usd": 0,
+        "cost_api_period": "2026-09-07",
+        "cost_api_note": "Cost Explorer returned HTTP 200; provider cost data can lag"
       },
       "runner_proof": {
         "runner_name": "t3-w18-aws-11",
