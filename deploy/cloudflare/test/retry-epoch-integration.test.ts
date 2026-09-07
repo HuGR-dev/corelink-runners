@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 vi.mock("@cloudflare/containers", () => ({ Container: class {}, getContainer: vi.fn() }));
 import { ConcurrencySlotsDO, retryOrphanedSpawns, type Env } from "../src/index";
+import { makeDO, providerReceipt } from "./containment-redrive-test-helpers";
 
 class DurableStorage {
   map = new Map<string, unknown>();
@@ -45,20 +46,22 @@ describe("retry epoch authority through ConcurrencySlotsDO", () => {
   it("uses the actual DO RPC before the retry drive and reads its durable cap", async () => {
     const storage = new DurableStorage();
     const authority = makeAuthority(storage);
-    const values = new Map<string, string>([["orphan:job", JSON.stringify({ repo: "acme/repo", installationId: "1", labels: ["corelink"], attempts: 1 })]]);
+    const values = new Map<string, string>([["orphan:1", JSON.stringify({ repo: "acme/repo", installationId: "1", labels: ["corelink"], attempts: 1 })]]);
     const kv = {
       async get(key: string) { return values.get(key) ?? null; },
       async put(key: string, value: string) { values.set(key, value); },
       async delete(key: string) { values.delete(key); },
-      async list() { return { keys: [{ name: "orphan:job" }] }; },
+      async list() { return { keys: [{ name: "orphan:1" }] }; },
     };
+    const containment = makeDO({ RUNNER_JOB_PATS: kv });
     const env = {
       RUNNER_JOB_PATS: kv,
+      CONTAINMENT: containment.binding,
       CONCURRENCY_SLOTS: { idFromName: () => "global", get: () => ({ recordRetry: authority.recordRetry.bind(authority), readRetry: authority.readRetry.bind(authority) }) },
     } as unknown as Env;
-    const drive = async () => {};
+    const drive = async (_env: Env, opts: { jobId: string; repo: string }) => providerReceipt(opts);
     await retryOrphanedSpawns(env, {} as never, Date.now(), drive);
-    expect(JSON.parse(values.get("orphan:job")!).attempts).toBe(2);
-    expect(await authority.readRetry("job")).toBe(2);
+    expect(JSON.parse(values.get("orphan:1")!).attempts).toBe(2);
+    expect(await authority.readRetry("1")).toBe(2);
   });
 });
