@@ -43,6 +43,15 @@ use tower::ServiceExt;
 const PINNED_IMAGE: &str =
     "alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc";
 
+// Keep the fixture aligned with the Worker control-plane contract: spawn,
+// exec, and lifecycle requests each carry their own exact, distinct token.
+// The acquire path provisions through /v1/spawn, while the check path executes
+// through /v1/exec; leaving the exec credential unset makes both end-to-end
+// cases fail before the fake Worker can prove routing or fail-closed behavior.
+const SPAWN_AUTH_TOKEN: &str = "fixture-spawn-auth-token";
+const EXEC_AUTH_TOKEN: &str = "fixture-exec-auth-token";
+const LIFECYCLE_AUTH_TOKEN: &str = "fixture-lifecycle-auth-token";
+
 /// The toolchain digest the check-host lease hydrates AND the CheckDef requests
 /// — they MUST match or the C6 false-cache-hit guard (400) fires before exec.
 const TOOLCHAIN: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -159,7 +168,8 @@ fn harness(exec_status: u16, exec_body: &str) -> Harness {
     let registry = BoxRegistry::new();
     let engine = Arc::new(CloudflareEngine::new(
         ArcWorker(Arc::clone(&worker)),
-        CloudflareConfig::new("https://spawn.example.dev", "super-secret-token"),
+        CloudflareConfig::new("https://spawn.example.dev", SPAWN_AUTH_TOKEN)
+            .with_scoped_tokens(EXEC_AUTH_TOKEN, LIFECYCLE_AUTH_TOKEN),
     ));
     let runner_sub: Arc<dyn BoxProvisioner> = Arc::new(CloudflareBoxProvisioner::new(
         Arc::clone(&engine),
