@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 vi.mock("@cloudflare/containers", () => ({ Container: class {}, getContainer: vi.fn() }));
 import worker, { redriveOrphanedJobs, retryOrphanedSpawns, runContainmentDrain } from "../src/index";
-import { ctx, env, event, makeDO, kv, providerReceipt, T0 } from "./containment-redrive-test-helpers";
+import { ctx, env, event, makeDO, kv, providerReceipt, T0, writeDeliveredProof } from "./containment-redrive-test-helpers";
 
 async function request(secret: string, body: unknown, delivery = "delivery") {
   const raw = JSON.stringify(body); const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
@@ -133,7 +133,10 @@ describe("AU5.10 tombstone fences every recovery side effect", () => {
     vi.useFakeTimers();
     try {
       vi.setSystemTime(T0 + 120_000);
-      const drive = vi.fn(async (_env: unknown, opts: { jobId: string; repo: string }) => providerReceipt(opts));
+      const drive = vi.fn(async (_env: unknown, opts: { jobId: string; repo: string; effect_id?: string; containment_event_id?: string; effect_permit_id?: string }) => {
+        await writeDeliveredProof(store, { jobId: opts.jobId, effect_id: opts.effect_id!, containment_event_id: opts.containment_event_id!, effect_permit_id: opts.effect_permit_id! });
+        return providerReceipt(opts);
+      });
       await runContainmentDrain(env(d, store), { claimSpawn: async () => true, bindContainmentSpawnClaim: async () => {}, driveSpawn: drive });
       expect(drive).toHaveBeenCalledTimes(1);
       expect(drive.mock.calls[0][1]).toMatchObject({ jobId: "2", installationId: "43" });
