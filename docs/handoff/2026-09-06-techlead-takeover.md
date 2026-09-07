@@ -443,3 +443,18 @@ focused tests above then passed. Future worktrees and dependency paths must be
 created by root before dispatch, with exact working directories in every packet.
 The monitor proposal remains unanswered and unapplied; routine independent work
 is already authorized. Do not repeat the broad census or ask for sibling access.
+
+## B2 scaffold — 2026-09-07
+
+B1/#559 is confirmed merged on `origin/main` at
+`0cc2d82373b9786450414a77dba656ea43e015a0` (merge 1/3). B2 is anchored on that
+exact SHA in `/private/tmp/corelink-b2-integration-20260907`, branch
+`bundle/b2-sprint2-closeout-20260906`. Its population is frozen at the canonical
+14 items; no product code, PR, push, deployment, CI or heavy test ran for this
+scaffold.
+
+The canonical DAG cold-review gate remains `NOT FROZEN · NOT DISPATCHABLE · quiet
+count 0`. The scope freeze does not waive it. At a later valid dispatch gate,
+read the ledger's exact D/O/R predecessors again; the first source-continuation
+candidate is T3-W2, while T2-W2b remains blocked by O1, O-DEVENV-PIN and
+O-FLEETBUSY.
