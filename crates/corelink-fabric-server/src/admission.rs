@@ -3263,6 +3263,27 @@ mod queue_tests {
                 1,
             )
             .unwrap();
+
+        // Model the post-finalize phase faithfully: the default no-box
+        // provisioner only has authoritative cleanup evidence after its
+        // provision seam has run.  A manually inserted Pending row alone is
+        // intentionally insufficient evidence; treating it as destroyed
+        // would violate the fail-closed cleanup contract.
+        let provisioned_lease = RunnerLease {
+            lease_id: lease_id.to_string(),
+            principal_chain: vec!["tenant:alpha".to_string()],
+            path_set: vec!["/work/tmp".to_string()],
+            expiry: now + 60_000,
+            net_policy: "isolated".to_string(),
+            tmp_root: "/work/tmp".to_string(),
+            state: RunnerState::Held,
+        };
+        let provisioned_spec =
+            ContainerSpec::from_lease(&provisioned_lease, PINNED).expect("valid test spec");
+        state
+            .provisioner
+            .provision(lease_id, &provisioned_spec)
+            .unwrap();
         assert!(
             ledger
                 .claim_stale_pending_cleanup(now, 1)
