@@ -65,6 +65,13 @@ Resources:
       ApiId: !Ref HttpApi
       RouteKey: 'ANY /{proxy+}'
       Target: !Sub integrations/${HttpIntegration}
+  PageAckRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: 'POST /v1/incidents/{incidentId}/pages/{pageId}/ack'
+      AuthorizationType: AWS_IAM
+      Target: !Sub integrations/${HttpIntegration}
   HttpStage:
     Type: AWS::ApiGatewayV2::Stage
     Properties:
