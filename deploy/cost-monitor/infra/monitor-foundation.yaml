@@ -169,7 +169,10 @@ Resources:
               - Effect: Allow
                 Action: [s3:PutObject, s3:GetObject, s3:GetObjectRetention, s3:PutObjectRetention]
                 Resource: !Sub '${JournalBucket.Arn}/journal/*'
-              - {Effect: Allow, Action: kms:Encrypt, Resource: !GetAtt JournalKey.Arn}
+              - Effect: Allow
+                Action: s3:ListBucketVersions
+                Resource: !GetAtt JournalBucket.Arn
+                Condition: {StringLike: {s3:prefix: ['journal/*']}}
               # The runtime can sign only with the three distinct monitor
               # authorities it binds from MONITOR_CONFIG_JSON.  It has no
               # wildcard KMS authority and cannot manage or decrypt keys.

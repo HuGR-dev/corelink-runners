@@ -53,7 +53,7 @@ describe("T6-W15 runtime and on-call hardening", () => {
     const path = join(dirname(fileURLToPath(import.meta.url)), "..", "infra", "monitor-foundation.yaml");
     const template = await readFile(path, "utf8");
     const runtimePolicy = template.slice(template.indexOf("  RuntimeRole:"), template.indexOf("  SchedulerRole:"));
-    for (const required of ["dynamodb:GetItem, dynamodb:Query, dynamodb:TransactWriteItems", "lambda:InvokeFunction, Resource: !Ref WitnessFunctionArn", "secretsmanager:GetSecretValue, Resource: !Ref SourceSecretArns", "!GetAtt IngestKey.Arn", "!GetAtt AckKey.Arn"]) expect(runtimePolicy).toContain(required);
-    for (const forbidden of ["dynamodb:PutItem", "dynamodb:UpdateItem", "kms:Decrypt", "kms:GenerateDataKey"]) expect(runtimePolicy).not.toContain(forbidden);
+    for (const required of ["dynamodb:GetItem, dynamodb:Query, dynamodb:TransactWriteItems", "Action: s3:ListBucketVersions", "Resource: !GetAtt JournalBucket.Arn", "s3:prefix: ['journal/*']", "lambda:InvokeFunction, Resource: !Ref WitnessFunctionArn", "secretsmanager:GetSecretValue, Resource: !Ref SourceSecretArns", "!GetAtt IngestKey.Arn", "!GetAtt AckKey.Arn"]) expect(runtimePolicy).toContain(required);
+    for (const forbidden of ["dynamodb:PutItem", "dynamodb:UpdateItem", "kms:Encrypt", "kms:Decrypt", "kms:GenerateDataKey"]) expect(runtimePolicy).not.toContain(forbidden);
   });
 });
