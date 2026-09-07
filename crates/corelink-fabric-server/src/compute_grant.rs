@@ -2,9 +2,9 @@
 
 use std::collections::HashMap;
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use corelink_fabric::compute_budget::{ExternalComputeReservation, ExternalWorkloadKind};
-use ring::signature::{UnparsedPublicKey, ED25519};
+use ring::signature::{ED25519, UnparsedPublicKey};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;

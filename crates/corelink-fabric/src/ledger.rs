@@ -246,19 +246,35 @@ struct LeaseReservation {
 }
 
 pub trait LeaseLedger {
-    fn initialize_external_compute_period(&self, _baseline: crate::compute_budget::ExternalComputeBaseline) -> anyhow::Result<()> {
+    fn initialize_external_compute_period(
+        &self,
+        _baseline: crate::compute_budget::ExternalComputeBaseline,
+    ) -> anyhow::Result<()> {
         anyhow::bail!("shared compute authority unavailable")
     }
-    fn reserve_external_compute(&self, _reservation: crate::compute_budget::ExternalComputeReservation) -> anyhow::Result<crate::compute_budget::ExternalComputeAdmission> {
+    fn reserve_external_compute(
+        &self,
+        _reservation: crate::compute_budget::ExternalComputeReservation,
+    ) -> anyhow::Result<crate::compute_budget::ExternalComputeAdmission> {
         anyhow::bail!("shared compute authority unavailable")
     }
-    fn activate_external_compute(&self, _reservation: &crate::compute_budget::ExternalComputeReservation) -> anyhow::Result<crate::compute_budget::ExternalComputeReceipt> {
+    fn activate_external_compute(
+        &self,
+        _reservation: &crate::compute_budget::ExternalComputeReservation,
+    ) -> anyhow::Result<crate::compute_budget::ExternalComputeReceipt> {
         anyhow::bail!("shared compute authority unavailable")
     }
-    fn cancel_external_compute(&self, _reservation: &crate::compute_budget::ExternalComputeReservation) -> anyhow::Result<crate::compute_budget::ExternalComputeReceipt> {
+    fn cancel_external_compute(
+        &self,
+        _reservation: &crate::compute_budget::ExternalComputeReservation,
+    ) -> anyhow::Result<crate::compute_budget::ExternalComputeReceipt> {
         anyhow::bail!("shared compute authority unavailable")
     }
-    fn settle_external_compute(&self, _reservation: &crate::compute_budget::ExternalComputeReservation, _settlement: crate::compute_budget::ExternalComputeSettlement) -> anyhow::Result<crate::compute_budget::ExternalComputeReceipt> {
+    fn settle_external_compute(
+        &self,
+        _reservation: &crate::compute_budget::ExternalComputeReservation,
+        _settlement: crate::compute_budget::ExternalComputeSettlement,
+    ) -> anyhow::Result<crate::compute_budget::ExternalComputeReceipt> {
         anyhow::bail!("shared compute authority unavailable")
     }
     /// Whether this backend enforces the concurrency/vCPU cap SAFELY across
@@ -279,11 +295,15 @@ pub trait LeaseLedger {
     /// must fail closed rather than acknowledge an in-memory-only suspension.
     /// The [`crate::pg_ledger::PgLedger`] overrides this with a shared table.
     fn set_tenant_suspended(&self, _tenant: &str, _suspended: bool) -> anyhow::Result<()> {
-        Err(anyhow::anyhow!("durable tenant suspension authority unavailable"))
+        Err(anyhow::anyhow!(
+            "durable tenant suspension authority unavailable"
+        ))
     }
 
     fn tenant_lifecycle(&self, _tenant: &str) -> anyhow::Result<TenantLifecycle> {
-        Err(anyhow::anyhow!("durable tenant lifecycle authority unavailable"))
+        Err(anyhow::anyhow!(
+            "durable tenant lifecycle authority unavailable"
+        ))
     }
 
     /// Read the generation captured in this immutable event, never today's one.
@@ -293,7 +313,9 @@ pub trait LeaseLedger {
 
     fn enqueue_tenant_suspension_event(&self, _event: TenantSuspensionEvent) -> anyhow::Result<()> {
         // Never report success without a restart-safe outbox.
-        Err(anyhow::anyhow!("tenant suspension event outbox unavailable"))
+        Err(anyhow::anyhow!(
+            "tenant suspension event outbox unavailable"
+        ))
     }
 
     /// Durable suspension state plus its delivery event. PostgreSQL overrides
@@ -304,16 +326,25 @@ pub trait LeaseLedger {
         self.enqueue_tenant_suspension_event(event)
     }
 
-    fn pending_tenant_suspension_events(&self, _limit: usize) -> anyhow::Result<Vec<TenantSuspensionEvent>> {
-        Err(anyhow::anyhow!("tenant suspension event outbox unavailable"))
+    fn pending_tenant_suspension_events(
+        &self,
+        _limit: usize,
+    ) -> anyhow::Result<Vec<TenantSuspensionEvent>> {
+        Err(anyhow::anyhow!(
+            "tenant suspension event outbox unavailable"
+        ))
     }
 
     fn mark_tenant_suspension_event_delivered(&self, _event_id: &str) -> anyhow::Result<()> {
-        Err(anyhow::anyhow!("tenant suspension event outbox unavailable"))
+        Err(anyhow::anyhow!(
+            "tenant suspension event outbox unavailable"
+        ))
     }
 
     fn mark_tenant_suspension_event_attempt(&self, _event_id: &str) -> anyhow::Result<()> {
-        Err(anyhow::anyhow!("tenant suspension event outbox unavailable"))
+        Err(anyhow::anyhow!(
+            "tenant suspension event outbox unavailable"
+        ))
     }
 
     /// Whether `tenant` is DURABLY suspended (the cross-instance source of truth).
@@ -2733,11 +2764,27 @@ mod lifecycle_unsupported {
     #[test]
     fn in_memory_backend_refuses_lifecycle_reads_without_fabricating_state() {
         let ledger = InMemoryLedger::new();
-        assert!(ledger.tenant_lifecycle("11111111-1111-4111-8111-111111111111").is_err());
-        assert!(ledger.tenant_suspension_generation("event-never-written").is_err());
+        assert!(
+            ledger
+                .tenant_lifecycle("11111111-1111-4111-8111-111111111111")
+                .is_err()
+        );
+        assert!(
+            ledger
+                .tenant_suspension_generation("event-never-written")
+                .is_err()
+        );
         // Repeated reads remain unsupported; no implicit generation or event row
         // appears merely because a caller asked the public lifecycle seam.
-        assert!(ledger.tenant_lifecycle("11111111-1111-4111-8111-111111111111").is_err());
-        assert!(ledger.tenant_suspension_generation("event-never-written").is_err());
+        assert!(
+            ledger
+                .tenant_lifecycle("11111111-1111-4111-8111-111111111111")
+                .is_err()
+        );
+        assert!(
+            ledger
+                .tenant_suspension_generation("event-never-written")
+                .is_err()
+        );
     }
 }

@@ -32,20 +32,27 @@ async fn open() -> anyhow::Result<(PgLedger, tokio_postgres::Client)> {
     let database_url = url()?;
     let ledger = PgLedger::connect(&database_url, 4, PgTlsMode::Disable).await?;
     let (db, connection) = tokio_postgres::connect(&database_url, NoTls).await?;
-    tokio::spawn(async move { let _ = connection.await; });
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
     Ok((ledger, db))
 }
 
 #[test]
 fn repeat_restart_unsuspend_resuspend_same_clock_gets_new_epoch() -> anyhow::Result<()> {
-    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
     runtime.block_on(async {
         let (ledger, db) = open().await?;
         let tenant_id = tenant("cycle");
         ledger.record_tenant_suspension(event(&tenant_id, "admin-a", 7_000))?;
         ledger.record_tenant_suspension(event(&tenant_id, "admin-b", 7_000))?;
         let first_row = db
-            .query_one("SELECT suspension_event_id FROM fabric_suspended_tenants WHERE tenant_id = $1", &[&tenant_id])
+            .query_one(
+                "SELECT suspension_event_id FROM fabric_suspended_tenants WHERE tenant_id = $1",
+                &[&tenant_id],
+            )
             .await?;
         let first: String = first_row.get(0);
         drop(ledger);
@@ -53,12 +60,18 @@ fn repeat_restart_unsuspend_resuspend_same_clock_gets_new_epoch() -> anyhow::Res
         ledger.set_tenant_suspended(&tenant_id, false)?;
         ledger.record_tenant_suspension(event(&tenant_id, "admin-c", 7_000))?;
         let second: String = db
-            .query_one("SELECT suspension_event_id FROM fabric_suspended_tenants WHERE tenant_id = $1", &[&tenant_id])
+            .query_one(
+                "SELECT suspension_event_id FROM fabric_suspended_tenants WHERE tenant_id = $1",
+                &[&tenant_id],
+            )
             .await?
             .get(0);
         assert_ne!(first, second);
         let count: i64 = db
-            .query_one("SELECT count(*) FROM tenant_suspension_events WHERE tenant_id = $1", &[&tenant_id])
+            .query_one(
+                "SELECT count(*) FROM tenant_suspension_events WHERE tenant_id = $1",
+                &[&tenant_id],
+            )
             .await?
             .get(0);
         assert_eq!(count, 2);
@@ -68,7 +81,9 @@ fn repeat_restart_unsuspend_resuspend_same_clock_gets_new_epoch() -> anyhow::Res
 
 #[test]
 fn legacy_pointer_repairs_and_corrupt_pointer_rolls_back() -> anyhow::Result<()> {
-    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
     runtime.block_on(async {
         let (ledger, db) = open().await?;
         let legacy = tenant("legacy");

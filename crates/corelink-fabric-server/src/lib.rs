@@ -27,14 +27,14 @@ pub mod cloud_exec;
 /// WP-6 stub — clw drive seam (A8: exit-transparency + non-zero-not-cached).
 pub mod clw_drive;
 pub mod compute_budget_api;
-pub mod compute_grant;
-pub mod credential_lifecycle_api;
 mod compute_budget_config;
+pub mod compute_grant;
 pub mod corelink_auth;
 /// WP-BILLING-TARGET — the corelink-billing usage-push adapter (default-off).
 pub mod corelink_billing;
 pub mod corelink_plans;
 pub mod cred_ticket;
+pub mod credential_lifecycle_api;
 mod decimal;
 pub mod envelope_inject;
 pub mod exec;

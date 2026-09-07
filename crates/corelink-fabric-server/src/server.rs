@@ -331,7 +331,13 @@ impl std::fmt::Debug for ServerConfig {
                 &self.admin_key.as_ref().map(|_| "***REDACTED***"),
             )
             .field("billing_export_interval", &self.billing_export_interval)
-            .field("credential_issuer_key", &self.credential_issuer_key.as_ref().map(|_| "***REDACTED***"))
+            .field(
+                "credential_issuer_key",
+                &self
+                    .credential_issuer_key
+                    .as_ref()
+                    .map(|_| "***REDACTED***"),
+            )
             .field("runner_vcpu", &self.runner_vcpu)
             .field("tenant_max_vcpu_h", &self.tenant_max_vcpu_h)
             .finish()
@@ -738,17 +744,22 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<S
     // ── WP-C admin onboarding key — DEFAULT-OFF ──────────────────────────────
     // Same shape as the observability key: trimmed, blank → None → the admin
     // route 404s. Independent secret.
-    let compute_grant_public_keys = crate::compute_budget_config::parse(
-        get("FABRIC_COMPUTE_GRANT_PUBLIC_KEYS").as_deref(),
-    )?;
-    anyhow::ensure!(compute_grant_public_keys.is_empty() || ledger_backend == LedgerBackend::Postgres,
-        "compute grants require the shared PostgreSQL ledger");
+    let compute_grant_public_keys =
+        crate::compute_budget_config::parse(get("FABRIC_COMPUTE_GRANT_PUBLIC_KEYS").as_deref())?;
+    anyhow::ensure!(
+        compute_grant_public_keys.is_empty() || ledger_backend == LedgerBackend::Postgres,
+        "compute grants require the shared PostgreSQL ledger"
+    );
     let credential_issuer_key = get("FABRIC_CREDENTIAL_ISSUER_AUTH_KEY");
     if let Some(key) = &credential_issuer_key {
-        anyhow::ensure!((32..=4096).contains(&key.len()) && key.bytes().all(|b| b.is_ascii_graphic()),
-            "credential issuer key must contain 32..4096 printable non-space ASCII bytes");
-        anyhow::ensure!(ledger_backend == LedgerBackend::Postgres,
-            "credential lifecycle authority requires PostgreSQL");
+        anyhow::ensure!(
+            (32..=4096).contains(&key.len()) && key.bytes().all(|b| b.is_ascii_graphic()),
+            "credential issuer key must contain 32..4096 printable non-space ASCII bytes"
+        );
+        anyhow::ensure!(
+            ledger_backend == LedgerBackend::Postgres,
+            "credential lifecycle authority requires PostgreSQL"
+        );
     }
     let admin_key = get("FABRIC_ADMIN_KEY")
         .map(|s| s.trim().to_string())
@@ -1513,7 +1524,8 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
     let state = state.with_cred_signer(cred_signer);
     // Track-C AUP1: the operator secret gating the enforcement endpoints (same
     // FABRIC_ADMIN_KEY as the tenant-plan admin). Absent ⇒ the suspend routes 404.
-    let state = state.with_admin_key(cfg.admin_key.as_deref().map(std::sync::Arc::from))
+    let state = state
+        .with_admin_key(cfg.admin_key.as_deref().map(std::sync::Arc::from))
         .with_compute_grant_public_keys(cfg.compute_grant_public_keys.clone())
         .with_credential_issuer_key(cfg.credential_issuer_key.clone());
 

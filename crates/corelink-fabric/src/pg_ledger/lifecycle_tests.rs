@@ -80,8 +80,8 @@ fn real_pg_lifecycle_generation_is_exact_across_same_clock_resume() -> anyhow::R
 }
 
 #[test]
-fn real_pg_legacy_event_is_generation_zero_and_missing_pointer_repairs_current(
-) -> anyhow::Result<()> {
+fn real_pg_legacy_event_is_generation_zero_and_missing_pointer_repairs_current()
+-> anyhow::Result<()> {
     let Some(url) = env::var("TEST_DATABASE_URL").ok() else {
         eprintln!("lifecycle pg tests: TEST_DATABASE_URL unset — skipping");
         return Ok(());
@@ -131,8 +131,8 @@ fn real_pg_generation_overflow_refuses_resume_and_keeps_suspended() -> anyhow::R
 }
 
 #[test]
-fn real_pg_direct_legacy_suspension_resumes_at_generation_one_and_unknown_event_refuses(
-) -> anyhow::Result<()> {
+fn real_pg_direct_legacy_suspension_resumes_at_generation_one_and_unknown_event_refuses()
+-> anyhow::Result<()> {
     let Some(url) = env::var("TEST_DATABASE_URL").ok() else {
         eprintln!("lifecycle pg tests: TEST_DATABASE_URL unset — skipping");
         return Ok(());
@@ -153,9 +153,11 @@ fn real_pg_direct_legacy_suspension_resumes_at_generation_one_and_unknown_event_
         let lifecycle = ledger.tenant_lifecycle(&tenant)?;
         assert_eq!(lifecycle.generation, 1);
         assert!(!lifecycle.suspended);
-        assert!(ledger
-            .tenant_suspension_generation("missing-event")
-            .is_err());
+        assert!(
+            ledger
+                .tenant_suspension_generation("missing-event")
+                .is_err()
+        );
         Ok::<_, anyhow::Error>(())
     })
 }
@@ -231,8 +233,7 @@ fn real_pg_two_connections_resume_once_under_same_tenant_lock() -> anyhow::Resul
 }
 
 #[test]
-fn real_pg_negative_generation_is_rejected_without_deleting_suspension(
-) -> anyhow::Result<()> {
+fn real_pg_negative_generation_is_rejected_without_deleting_suspension() -> anyhow::Result<()> {
     let Some(url) = env::var("TEST_DATABASE_URL").ok() else {
         eprintln!("lifecycle pg tests: TEST_DATABASE_URL unset — skipping");
         return Ok(());
@@ -245,13 +246,14 @@ fn real_pg_negative_generation_is_rejected_without_deleting_suspension(
         let tenant = uuid::Uuid::new_v4().to_string();
         ledger.record_tenant_suspension(event(&tenant, "negative-generation", 12))?;
         let db = ledger.pool.get().await?;
-        assert!(db
-            .execute(
-            "UPDATE tenant_lifecycle_generations SET generation=-1 WHERE tenant_id=$1",
-            &[&tenant],
-        )
-        .await
-        .is_err());
+        assert!(
+            db.execute(
+                "UPDATE tenant_lifecycle_generations SET generation=-1 WHERE tenant_id=$1",
+                &[&tenant],
+            )
+            .await
+            .is_err()
+        );
         assert!(ledger.tenant_lifecycle(&tenant)?.suspended);
         let still_suspended: bool = db
             .query_one(

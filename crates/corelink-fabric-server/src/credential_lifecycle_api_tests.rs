@@ -1,12 +1,12 @@
 use super::*;
 use axum::body::Body;
 use axum::http::Request;
-use corelink_fabric::ledger::{LeaseLedger, LeaseRecord, TenantLifecycle};
 use corelink_fabric::TenantId;
+use corelink_fabric::ledger::{LeaseLedger, LeaseRecord, TenantLifecycle};
 use corelink_runners_contracts::RunnerState;
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicUsize, Ordering},
 };
 use tower::util::ServiceExt;
 

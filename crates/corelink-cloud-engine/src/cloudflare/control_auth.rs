@@ -1,8 +1,8 @@
 //! Exact operation-to-credential routing for the Cloudflare Worker.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
-use super::{bounded_provider_body, CloudflareEngine};
+use super::{CloudflareEngine, bounded_provider_body};
 use crate::http::{HttpRequest, HttpResponse, HttpTransport, Method};
 use corelink_runner::isolation::RunningContainer;
 
@@ -103,7 +103,9 @@ impl<H: HttpTransport> CloudflareEngine<H> {
             AuthScope::Lifecycle => ("lifecycle", &self.cfg.lifecycle_auth_token),
         };
         if !valid_token(token) {
-            bail!("Cloudflare {operation} auth credential is unavailable or invalid; refusing transport");
+            bail!(
+                "Cloudflare {operation} auth credential is unavailable or invalid; refusing transport"
+            );
         }
         self.http.send(&HttpRequest {
             method,

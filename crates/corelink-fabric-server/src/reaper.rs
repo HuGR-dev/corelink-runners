@@ -165,7 +165,9 @@ fn secure_worker_origin(raw: &str) -> Option<&str> {
     if authority.is_empty()
         || authority.contains('@')
         || authority.contains('%')
-        || authority.chars().any(|c| c.is_ascii_whitespace() || c.is_control())
+        || authority
+            .chars()
+            .any(|c| c.is_ascii_whitespace() || c.is_control())
     {
         return None;
     }
@@ -3218,8 +3220,20 @@ mod tests {
             "complete": true,
         })
         .to_string();
-        assert!(suspension_receipt_is_ack(200, body.as_bytes(), "event-1", "tenant-1", "7"));
-        assert!(!suspension_receipt_is_ack(202, body.as_bytes(), "event-1", "tenant-1", "7"));
+        assert!(suspension_receipt_is_ack(
+            200,
+            body.as_bytes(),
+            "event-1",
+            "tenant-1",
+            "7"
+        ));
+        assert!(!suspension_receipt_is_ack(
+            202,
+            body.as_bytes(),
+            "event-1",
+            "tenant-1",
+            "7"
+        ));
 
         for (field, value) in [
             ("event_id", serde_json::json!("other-event")),
@@ -3288,7 +3302,10 @@ mod tests {
             "https://:443",
             "https://worker.example:bad",
         ] {
-            assert!(secure_worker_origin(invalid).is_none(), "accepted {invalid}");
+            assert!(
+                secure_worker_origin(invalid).is_none(),
+                "accepted {invalid}"
+            );
         }
     }
 }

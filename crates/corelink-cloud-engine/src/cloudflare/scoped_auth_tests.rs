@@ -3,14 +3,23 @@ use crate::http::HttpRequest;
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
-struct PairTransport { requests: Arc<Mutex<Vec<HttpRequest>>> }
+struct PairTransport {
+    requests: Arc<Mutex<Vec<HttpRequest>>>,
+}
 impl HttpTransport for PairTransport {
     fn send(&self, req: &HttpRequest) -> anyhow::Result<HttpResponse> {
         self.requests.lock().unwrap().push(req.clone());
-        let body = if req.url.ends_with("/spawn") { r#"{"handle":"fixture-handle"}"# }
-            else if req.url.ends_with("/exec") { r#"{"exit_code":0,"stdout":"fixture-out","stderr":""}"# }
-            else { "{}" };
-        Ok(HttpResponse { status: 200, body: body.to_string() })
+        let body = if req.url.ends_with("/spawn") {
+            r#"{"handle":"fixture-handle"}"#
+        } else if req.url.ends_with("/exec") {
+            r#"{"exit_code":0,"stdout":"fixture-out","stderr":""}"#
+        } else {
+            "{}"
+        };
+        Ok(HttpResponse {
+            status: 200,
+            body: body.to_string(),
+        })
     }
 }
 
@@ -115,13 +124,25 @@ fn every_pair_duplicate_fails_all_operations_before_transport() {
 #[test]
 fn engine_worker_control_requests_match_conformance_fixture() {
     let requests = Arc::new(Mutex::new(Vec::new()));
-    let engine = CloudflareEngine::new(PairTransport { requests: requests.clone() }, config("fixture-spawn-secret", "fixture-exec-secret", "fixture-lifecycle-secret"));
+    let engine = CloudflareEngine::new(
+        PairTransport {
+            requests: requests.clone(),
+        },
+        config(
+            "fixture-spawn-secret",
+            "fixture-exec-secret",
+            "fixture-lifecycle-secret",
+        ),
+    );
     let mut spec = runner_spec();
     spec.no_network = true;
     spec.allow_egress = false;
-    spec.env.push(("TOOLCHAIN_DIGEST".to_string(), "sha256:fixture".to_string()));
+    spec.env
+        .push(("TOOLCHAIN_DIGEST".to_string(), "sha256:fixture".to_string()));
     let container = engine.spawn(&spec).expect("real spawn method");
-    engine.exec_captured(&container, &["echo", "fixture"]).expect("real exec method");
+    engine
+        .exec_captured(&container, &["echo", "fixture"])
+        .expect("real exec method");
     engine.teardown(&container).expect("real teardown method");
     let actual = requests.lock().unwrap().iter().map(|req| serde_json::json!({
         "operation": if req.url.ends_with("/spawn") { "spawn" } else if req.url.ends_with("/exec") { "exec" } else { "teardown" },
@@ -129,6 +150,9 @@ fn engine_worker_control_requests_match_conformance_fixture() {
         "headers": { "Authorization": format!("Bearer {}", req.bearer_token), "content-type": if req.json_body.is_some() { "application/json" } else { "" } },
         "body": req.json_body,
     })).collect::<Vec<_>>();
-    let expected: serde_json::Value = serde_json::from_str(include_str!("../../../../conformance/engine-worker-control-requests.json")).unwrap();
+    let expected: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../conformance/engine-worker-control-requests.json"
+    ))
+    .unwrap();
     assert_eq!(serde_json::Value::Array(actual), expected["requests"]);
 }

@@ -3,20 +3,20 @@ use axum::body::Body;
 use axum::http::Request;
 use axum::response::Response;
 use base64::Engine as _;
+use corelink_fabric::TenantId;
 use corelink_fabric::compute_budget::{
     ExternalComputeAdmission, ExternalComputeReceipt, ExternalComputeReservation,
     ExternalComputeSettlement, ExternalComputeState,
 };
 use corelink_fabric::ledger::{LeaseLedger, LeaseRecord};
-use corelink_fabric::TenantId;
 use corelink_runners_contracts::RunnerState;
 use ring::rand::SystemRandom;
 use ring::signature::{Ed25519KeyPair, KeyPair};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicUsize, Ordering},
 };
 use tower::util::ServiceExt;
 

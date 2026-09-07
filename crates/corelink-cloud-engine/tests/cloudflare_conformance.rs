@@ -24,8 +24,8 @@ use std::sync::{Arc, Mutex};
 use corelink_cloud_engine::{
     CloudflareConfig, CloudflareEngine, HttpRequest, HttpResponse, HttpTransport, Method,
 };
-use corelink_runner::isolation::Engine;
 use corelink_runner::ContainerSpec;
+use corelink_runner::isolation::Engine;
 
 /// The env key the engine lifts into the top-level `jitconfig` field (mirrors
 /// the private `JITCONFIG_ENV_KEY` in `cloudflare.rs`; transcribed here, as the

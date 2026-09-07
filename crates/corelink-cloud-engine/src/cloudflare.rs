@@ -44,11 +44,11 @@
 //! (floors, auth, fail-closed error mapping, the exact request shapes) against a
 //! fake transport with zero account/network dependency.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
+use corelink_runner::ContainerSpec;
 use corelink_runner::isolation::{Engine, IsolationProbe, RunningContainer};
 use corelink_runner::lease::CmdOutput;
 use corelink_runner::pin::PinnedImageRef;
-use corelink_runner::ContainerSpec;
 
 use crate::http::{HttpResponse, HttpTransport, Method};
 use crate::northflank::RUNNER_EPHEMERAL_STORAGE_FLOOR_MB;

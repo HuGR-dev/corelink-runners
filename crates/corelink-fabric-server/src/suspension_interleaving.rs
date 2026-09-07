@@ -1,4 +1,4 @@
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -89,9 +89,11 @@ fn resuspend_waits_for_unsuspend_durable_write_and_keeps_suspension_cached() {
         Arc::new(SystemClock),
     ));
     let tenant = corelink_fabric::TenantId::new("interleaving").unwrap();
-    assert!(state
-        .suspend_tenant_with_event(&tenant, 1)
-        .expect("event suspension should persist"));
+    assert!(
+        state
+            .suspend_tenant_with_event(&tenant, 1)
+            .expect("event suspension should persist")
+    );
 
     let unsuspend_state = Arc::clone(&state);
     let unsuspend_tenant = tenant.clone();
