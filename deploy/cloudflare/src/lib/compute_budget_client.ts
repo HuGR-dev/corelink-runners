@@ -192,7 +192,13 @@ export async function verifyAuthenticatedTerminalReceipt(
 function decodeBase64Url(value: string): Uint8Array {
   if (!/^[A-Za-z0-9_-]+$/.test(value)) throw new Error("invalid base64url");
   const padded = value.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - value.length % 4) % 4);
-  return Uint8Array.from(atob(padded), char => char.charCodeAt(0));
+  const decoded = Uint8Array.from(atob(padded), char => char.charCodeAt(0));
+  if (encodeBase64Url(decoded) !== value) throw new Error("non-canonical base64url");
+  return decoded;
+}
+
+function encodeBase64Url(value: Uint8Array): string {
+  return btoa(String.fromCharCode(...value)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
 export class ComputeBudgetClient {

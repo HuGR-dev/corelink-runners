@@ -83,7 +83,7 @@ describe("ComputeBudgetClient", () => {
   it.each(["signature", "payload", "authority", "fence"] as const)("rejects a validly shaped receipt when %s is mutated", async kind => {
     const response = await ok("cancelled");
     const body = await response.json() as Record<string, unknown>;
-    if (kind === "signature") body.signature = `${String(body.signature).slice(0, -1)}A`;
+    if (kind === "signature") body.signature = `${String(body.signature)[0] === "A" ? "B" : "A"}${String(body.signature).slice(1)}`;
     if (kind === "payload") body.actual_vcpu_ms = "1";
     if (kind === "authority") body.authority = "other-authority";
     if (kind === "fence") body.future_materialization_fence = "c".repeat(64);
