@@ -693,7 +693,7 @@ B22: T1-W4
 
 The checker validates that every predecessor token is in the registry, every WP appears exactly
 once in the ready-set output, no batch exceeds eight, and the final emitted count equals the table
-vertex count. This rendering has 22 batches, 69 unique emissions and maximum width eight. Kahn's
+vertex count. This rendering has 23 batches, 70 unique emissions and maximum width eight. Kahn's
 algorithm consumed all vertices (no residual indegree), proving this version acyclic. A future
 change must regenerate the batches and update `schema: dispatch-dag/v1`; hand-edited edges or
 repeated DAG text in another document are invalid.
