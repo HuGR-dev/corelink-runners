@@ -45,6 +45,10 @@ def run(map_value, deployments, settings):
     with tempfile.NamedTemporaryFile("w", suffix=".jsonc") as config:
         config.write('{"name":"corelink-spawn-worker","account_id":"acct","vars":{"REPO_TENANT_PAT_MAP":%s}}' % json.dumps(map_value))
         config.flush()
+        # Keep this assertion scoped to the invocation under test.  A prior
+        # subprocess can finish its socket handling just after it exits, so
+        # retaining process-wide request history makes the wiring check flaky.
+        Handler.requests.clear()
         Handler.scenario = {"deployments": deployments, "version": settings}
         env = dict(os.environ, CLOUDFLARE_API_TOKEN="fixture", CLOUDFLARE_API_BASE=base)
         return subprocess.run(["node", str(guard), config.name], env=env, text=True, capture_output=True)
