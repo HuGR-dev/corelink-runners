@@ -402,6 +402,12 @@ bounded C1–C5 review/promote path. Entries without a proven bundle destination
 remain explicitly `origin_destination_to_resolve`; no age-based cleanup is
 authorized.
 
+The resumable state checkpoint is
+`docs/handoff/2026-09-06-compaction-checkpoint.md`. It mirrors the current
+closeout state for compaction recovery without becoming a second execution
+plan; the canonical plan remains
+`docs/plan/execution/2026-09-06-closeout-three-bundles.md`.
+
 ## Earlier integrated packets
 
 The prior packets in this tree include:
