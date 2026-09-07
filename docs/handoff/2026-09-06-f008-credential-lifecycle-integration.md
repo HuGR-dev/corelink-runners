@@ -355,7 +355,7 @@ deliveries or change the T6-W15 DoD.
 `docs/plan/execution/2026-09-06-closeout-three-bundles.md` is the sole
 canonical closeout plan, byte-identical to
 `$CODEX_HOME/plans/corelink-wp-closeout-20260906.md` at SHA-256
-`35aa85e3902a3d5c5ae42add58422e606f91b55f7b592f400efb475b83807f72`.
+`06307751902236105e09bd17f84915fc0cd7ebb97860fe61124b1cd9914d2477`.
 It fixes exactly three serialized operational Runner sprints and merges: S1/B1
 has 12 WPs, S2/B2 has 14, and S3/B3 has 28. Historical Sprint 3/4 membership
 is retained in the ledger only to trace the criteria inherited by S3/B3; it
@@ -384,6 +384,23 @@ For T6-W15 base acceptance, trusted time/TSA, WORM, three-account independence,
 crash/rotation/isolation, and A6.10 probe 3/3 remain required. The A6.17
 seven-day observation is a later final qualification performed by T6-W12 and
 collected by T6-W10; it is not a base-only T6-W15 blocker or a waiver.
+
+## Git closeout inventory
+
+`docs/plan/execution/2026-09-06-git-closeout-inventory.json` is the bounded,
+metadata-only integration record for Git-CLOSEOUT-01. It enumerates the eleven
+open source PRs (#548–#558), 265 refs, 265 registered worktrees, known agent
+source commits, reachability from this integration head and `origin/main`, and
+the primary checkout's three preserved `UU`/`DU` conflicts. It is not a WP,
+source audit, or delivery record.
+
+The inventory classifies later-sprint source as preserved, records ingest and
+three codecs as proven substituted sources, and retains the exact B1 T6-W15
+witness-runtime (`cc9fa84c09cc4f654549db97403606620f719cc3`) and verifier
+journal-prefix (`eacd95a5337dd065181e30dffd87129a60d23f55`) packets for the
+bounded C1–C5 review/promote path. Entries without a proven bundle destination
+remain explicitly `origin_destination_to_resolve`; no age-based cleanup is
+authorized.
 
 ## Earlier integrated packets
 

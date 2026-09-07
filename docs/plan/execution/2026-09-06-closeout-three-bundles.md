@@ -3,6 +3,136 @@
 Data: 2026-09-06. Dono deste plano: root. Estado: EM EXECUÇÃO.
 Este é o plano operacional que o orquestrador deve seguir, por determinação explícita do usuário. Substitui integralmente a versão operacional anterior. Espelho canônico no repositório: docs/plan/execution/2026-09-06-closeout-three-bundles.md; ambos devem conter a mesma versão, não planos concorrentes.
 
+## Âncoras operacionais — onde consultar, quem mantém e quando atualizar
+
+Âncora é um registro existente e verificável, não a memória da conversa. Não criar planilhas paralelas com estados diferentes. Os paths abaixo são relativos à raiz do repositório, exceto o espelho pessoal explicitamente indicado.
+
+| ID | Fonte exata | Uso obrigatório | Responsável / atualização |
+|---|---|---|---|
+| A0 — Mandato | Mandato, método e adendos deste plano; instruções explícitas mais recentes do usuário prevalecem | Conferir três sprints seriais, três merges, paralelismo interno e limites antes de mudar a operação | Root registra toda mudança autorizada neste mesmo plano |
+| A1 — Plano único | `docs/plan/execution/2026-09-06-closeout-three-bundles.md` | Ordem de execução, checklists e regras de promoção; primeira leitura em retomadas | Root decide; integrador sincroniza e commita. Espelho pessoal: `/Users/gustavoschneiter/.codex/plans/corelink-wp-closeout-20260906.md` |
+| A2 — Estado e achados | `docs/plan/delivery-ledger.json` | Sprint ativa, 54 WPs restantes, dono, estágio, dependências, achados e próxima ação | Integrador atualiza em toda transição, a partir de evidência validada por root |
+| A3 — Contratos e aceite | `docs/plan/2026-09-01-reconciled-dispatch-dag.md`, `docs/plan/2026-09-01-round3-remediation-delta.md`, `docs/plan/2026-08-30-golive-remediation-plan.md`; contratos específicos apontados pelo pacote do WP | Critérios originais e interfaces congeladas; consultar trechos pertinentes antes de executar/revisar | Root resolve ambiguidade e registra decisão; agente não inventa requisito nem muda o contrato unilateralmente |
+| A4 — Código e merges | Git: baseline remoto, SHA do executor, SHA aprovado, SHA do bundle e SHA de merge; branches `bundle/b1-sprint1-closeout-20260906`, `bundle/b2-sprint2-closeout-20260906`, `bundle/b3-sprint3-closeout-20260906`; PRs efetivamente criados | Identificar o alvo exato e provar incorporação. Nome de branch não substitui SHA; PR planejado não é PR existente | Integrador verifica refs/remote e atualiza A2 em cada integração/merge |
+| A5 — Evidências | Artefatos referenciados pelo WP no ledger em `docs/plan/evidence/` e `docs/plan/execution/`; checks do PR e artefatos de CI correspondentes | Sustentar PASS/FAIL, revisões, aceites e deployment/version binding | Executor produz, revisor confere, integrador vincula e preserva antes da entrega |
+| A6 — Retomada | `docs/handoff/2026-09-06-techlead-takeover.md` | Resumo curto: sprint ativa, bundle/SHA/PR, agentes ativos, impedimentos, última ação concluída e próxima ação de root | Integrador atualiza em checkpoints/retomadas; contém ponteiros para A1–A5, não uma segunda verdade |
+
+**Consistência:** A1 define o método; A2 registra estado; A3 define o comportamento contratado; A4/A5 provam o estado; A6 facilita a retomada. Handoff antigo não prevalece sobre Git/evidência atual. Diante de contradição, suspender somente a promoção dependente, conferir a fonte e corrigir o registro com motivo. O restante independente da sprint ativa continua. Uma lacuna de contrato sob responsabilidade de root precisa de decisão de root; não é transferida ao executor.
+
+**Persistência:** o plano canônico e o espelho pessoal devem ter conteúdo idêntico após sincronização. Toda atualização termina com commit do canônico e registro do SHA no handoff. Divergência é resolvida pela última decisão explicitamente registrada, não pelo horário do arquivo. Logs em `/tmp` ou worktrees não são a única evidência de uma entrega: antes de apagar ou mesclar, preservar a prova necessária em local durável referenciado, sem secrets ou inventários privados no Git. Caminhos/IDs ausentes ficam como pendentes, jamais inventados.
+
+## Checklists de condução — usar nas transições, não preencher por ritual
+
+**Lembrete obrigatório de root em TODOS os checklists:**
+
+- [ ] **PARALELIZAR:** há trabalho independente elegível na sprint ativa aguardando enquanto existe capacidade? Despachar/retomar de forma assíncrona, até 15 agentes, com um dono por WP e paths sem conflito. Não esperar um lote inteiro quando um resultado já permite a próxima ação. Não iniciar a sprint seguinte nem criar trabalho artificial para ocupar vagas.
+- [ ] **INTERROMPER LOOPS:** estou repetindo revisão, comando, planejamento ou discussão sem nova evidência? Identificar a causa e tomar uma ação diferente que a resolva: fechar contrato, corrigir escopo/contexto, executar o fix ou remover o impedimento real. Reutilizar evidência válida; não voltar a auditar tudo. Segurança e critérios de aceite permanecem obrigatórios.
+- [ ] **AVANÇAR PARA O OBJETIVO:** qual pendência concreta será encerrada nesta rodada e como aproxima o WP do aceite, a sprint de seu merge e o backlog de zero? Registrar resultado verificável e próxima ação com dono. Agente completed com WP pendente exige encaminhamento, não abandono. Quando existir bloqueio real, registrar resolução necessária e manter os trabalhos independentes elegíveis avançando.
+
+Essas três perguntas são verificadas na retomada, em cada retorno de agente e antes de encerrar um ciclo de orquestração. Atividade, quantidade de agentes e quantidade de testes não substituem progresso verificável. O objetivo continua: concluir todos os WPs e qualificar o go-live em três sprints seriais e três merges.
+
+
+Os itens abaixo são condições de passagem, não tarefas extras nem comprovantes de execução. Marcar no registro do WP/ciclo com evidência; deixar pendente ou justificar não aplicável. Não marcar esta lista global como se valesse para todos os WPs. Segurança obrigatória não admite não-aplicável sem fundamento no escopo.
+
+### C0 — Retomar a sessão ou receber nova orientação
+
+- [ ] Ler A1 e A6; confirmar em A2 a única sprint ativa e o próximo marco.
+- [ ] Conferir agentes reais e Git do bundle; distinguir ativo, completed, bloqueado e ainda não integrado.
+- [ ] Incorporar a orientação nova sem perder objetivo, aprovações, fontes e trabalho já concluído.
+- [ ] Identificar o próximo bloqueio do caminho crítico e seu dono; resolver primeiro pendências de planejamento que são de root.
+- [ ] Retomar a próxima ação autorizada; não recomeçar a campanha nem abrir outro plano.
+
+### C1 — Abrir uma sprint
+
+- [ ] A anterior tem aceite e merge confirmados; para S1, baseline remoto conferido.
+- [ ] Escopo é exatamente S1=12, S2=14 ou S3=28 WPs, sem duplicação nem transferência silenciosa.
+- [ ] Um bundle/stacked PR da sprint, base e responsável de integração definidos; PR inexistente marcado pendente.
+- [ ] WPs elegíveis e donos definidos; nenhuma execução de outra sprint em paralelo.
+- [ ] CI/testes pesados reservados para o candidato completo; capacidade de execução conhecida.
+
+### C2 — Delegar ou retomar um WP
+
+- [ ] Porta de entrada de seis itens deste plano completa: baseline, dono/paths, contratos, aceite, dependências e checks.
+- [ ] Código e evidências existentes localizados; não pedir reimplementação ou nova auditoria do que já está válido.
+- [ ] Um executor responsável até o fim; escopo sem conflito com outros agentes ativos.
+- [ ] Critério de saída e retorno exigido explícitos; limites de testes/efeitos externos definidos.
+- [ ] Dono e próxima ação registrados em A2 antes da execução; ao retomar completed, usar followup_task.
+
+### C3 — Receber trabalho e promover por revisão
+
+- [ ] SHA/base/paths e estado do checkout conferidos; nenhuma fonte de outro WP incluída sem vínculo.
+- [ ] Todos os critérios do mandato cobertos ou explicitamente pendentes; PASS apoiado em A5.
+- [ ] Fixes cobrem causa, ramificações, consequências e prevenção proporcional; solução sem generalização desnecessária.
+- [ ] Parecer independente consolidado: PROMOVER, CORRIGIR ou INCONCLUSIVO, com condições objetivas.
+- [ ] Achados impeditivos resolvidos para o estágio solicitado; revisão de fonte não declarada como aceite live.
+- [ ] Se reprovado, correções voltam ao mesmo executor; segunda reprovação aciona diagnóstico de root.
+
+### C4 — Incorporar ao bundle
+
+- [ ] Aprovação corresponde ao SHA e contratos/dependências reais da composição.
+- [ ] Conteúdo pertence à sprint ativa; não importar acidentalmente trabalho de S2/S3 para S1.
+- [ ] Conflitos resolvidos sem descartar trabalho; diff final revisado no escopo afetado.
+- [ ] Checks pequenos necessários aprovados; sem reexecutar bateria pesada ou evidência inalterada por hábito.
+- [ ] A2 registra SHA incorporado e critérios ainda pendentes; worktrees/evidências só são limpos depois de preservados.
+
+### C5 — Encerrar implementação e abrir o gate de CI da sprint
+
+- [ ] Todos os WPs da sprint têm implementação completa, revisão e incorporação comprovadas.
+- [ ] Nenhum stub temporário, declaração falsa, supressão de erro ou defeito impeditivo usado para produzir verde.
+- [ ] PR do bundle tem escopo, SHAs e matriz de aceite atualizados; dependências externas concretamente verificadas.
+- [ ] Disparar CI completa e testes pesados uma vez no candidato completo; armazenar resultados por job/SHA.
+- [ ] Qualificação em produção permanece distinta do CI; provas têm runtime/configuração/versão corretos.
+
+### C6 — Tratar CI vermelha
+
+- [ ] Consolidar N falhas por causa e escopo; identificar cascatas e falhas ambientais sem presumir sua causa.
+- [ ] Criar pacotes de correção disjuntos dentro dos WPs existentes, cada um com reprodução e critério de saída.
+- [ ] Paralelizar fixes independentes; serializar/unificar arquivos conflitantes e manter a mesma sprint ativa.
+- [ ] Cada fix cobre causa raiz, ramificações, consequências e prevenção proporcional.
+- [ ] Incorporar correções aprovadas; repetir jobs afetados e checks exigidos no novo SHA, sem N execuções da suíte inteira.
+
+### C7 — Promover e mesclar a sprint
+
+- [ ] Todos os critérios de entrega aplicáveis satisfeitos; nenhum bloqueio de segurança, integridade ou qualidade obrigatório aberto.
+- [ ] CI/checks exigidos verdes no SHA final e aceites operacionais vinculados à versão correta.
+- [ ] Diff e base do PR conferidos; ordem e compatibilidade Runner/Server demonstradas quando necessárias.
+- [ ] Executar somente o merge B1, B2 ou B3 autorizado pelo plano; confirmar SHA na main remota.
+- [ ] Registrar WPs entregues, provas e merge em A2; atualizar A6 e liberar somente então a próxima sprint.
+
+### C8 — Conferir 100% e go-live
+
+- [ ] Os 54 WPs remanescentes aparecem exatamente uma vez nos três bundles, todos com seus critérios fechados.
+- [ ] Três merges confirmados; nenhum WP escondido como parcial em PR auxiliar, worktree ou ledger.
+- [ ] Releases/deployments compatíveis com as fontes aprovadas; provas temporais reais, inclusive sete dias onde exigidos, concluídas.
+- [ ] Consequências operacionais/dados afetados reconciliadas, runbooks/rollback e artefatos finais verificados.
+- [ ] Evidências duráveis preservadas, pendências zero comprovadas e estado final comunicado sem crédito fictício.
+
+## Organização do Git — PRs, commits, branches e worktrees
+
+Escopo esclarecido pelo usuário: organizar o trabalho acumulado no Git, não reorganizar pastas, reescrever documentação histórica ou refatorar arquitetura. Responsável: integrador global; root decide destino e prioridade. É trabalho de integração dos três bundles, sem quarto bundle e sem WP genérico de limpeza.
+
+**Estado inicialmente confirmado:** integração limpa; checkout principal em `pr-0c-d4-openrouter` com três conflitos preexistentes (index.ts, metrics.ts e containment-intake.test.ts sob deploy/cloudflare); onze PRs #548–#558 abertos em cadeia, nove drafts; 265 worktrees registrados. A contagem não prova que um item esteja abandonado ou pertença à campanha. Commits aprovados já existem tanto na integração quanto em worktrees de autores; nenhum deles deve ficar sem destino registrado.
+
+### Mandato finito de reconciliação
+
+Objetivo: dar destino comprovável a cada item Git em escopo da campanha e deixar exatamente os três PRs/bundles de entrega, sem perda de trabalho. Começo: snapshot somente de metadados Git/PR e estado dirty/conflito. Meio: mapa de incorporação e destino. Fim: itens da campanha reconciliados, material necessário preservado e checklist abaixo concluído nos marcos correspondentes. Não auditar código inteiro nem disparar testes pesados para inventariar refs.
+
+O inventário usa um único registro referenciado pelo ledger, contendo por item: tipo/ID (PR, branch, worktree ou commit), dono conhecido ou desconhecido, WP/bundle, SHA atual, dirty/conflito, prova de incorporação/reachability quando existir, destino, próxima ação e responsável. Não copiar conteúdo de secrets ou arquivos privados para o inventário. Cobrir branches locais/remotas, PRs da campanha, worktrees associados e commits conhecidos em retornos/reflogs pertinentes que ainda não estejam ligados ao candidato; não chamar cada commit histórico sem branch própria de commit perdido.
+
+Classificação obrigatória: **ATIVO NA SPRINT**, **PRESERVADO PARA SPRINT FUTURA**, **APROVADO A INCORPORAR**, **SUBSTITUÍDO COM CONTEÚDO COMPROVADO**, **FORA DA CAMPANHA** ou **ORIGEM/DESTINO A RESOLVER**. Idade ou nome de branch não determinam descarte.
+
+### Checklist de organização do Git
+
+- [ ] **PRs:** mapear #548–#558 aos WPs e às correções atuais; incorporar conteúdo válido nos três bundles. Fechar/sinalizar como substituído somente depois de comprovar preservação e registrar o destino. Nenhum merge individual dessa pilha. Outros PRs só entram se pertencerem comprovadamente à campanha.
+- [ ] **Commits:** todo trabalho entregue por agente tem SHA completo, revisão, destino e prova de incorporação ou pendência explícita. Conferir commits ainda só presentes em worktrees/branches/reflogs pertinentes e protegê-los contra perda antes de limpeza. SHA antigo aprovado não substitui revisão de uma correção posterior.
+- [ ] **Branches:** cada branch da campanha corresponde a WP/bundle ativo, material futuro preservado ou conteúdo substituído comprovado. Remover refs redundantes somente com conteúdo preservado, sem consumidor ativo ou dependência de pilha; registrar recuperação possível. Não reescrever branches compartilhadas indiscriminadamente.
+- [ ] **Worktrees:** identificar dono/uso, mudanças não commitadas, conflitos e dependências reais. Remover apenas as elegíveis da campanha depois de preservar código, evidência e arquivos necessários. Não apagar worktree dirty, desconhecida ou utilizada por outro job; não forçar remoção para reduzir contagem.
+- [ ] **Checkout principal:** identificar a operação Git pendente e a intenção dos dois lados dos três conflitos, preservar trabalho e conduzir a resolução apropriada. Não usar reset, ours/theirs ou stash destrutivo como atalho de organização. Resolver no contexto correto sem misturar WPs da sprint seguinte.
+- [ ] **Bundles:** S1/S2/S3 têm refs inequívocas e estado rastreável. Refs vazias planejadas são identificadas como tal, não como candidatos prontos. Cada stacked PR contém apenas sua sprint, com base atualizada e commits recuperáveis.
+- [ ] **Encerramento:** nenhum item da campanha fica como origem/destino desconhecido, commit aprovado esquecido, PR antigo pendurado sem justificativa ou worktree órfã com código único. Material de outras campanhas fica identificado e preservado; não é apagado para alegar limpeza total.
+
+**Execução por marco:** durante S1, reconciliar a pilha existente e capturar todos os destinos conhecidos, preservando o trabalho já produzido para S2/S3 sem retomar sua implementação. Após cada incorporação/merge, limpar apenas o material que se tornou seguramente redundante. Antes do merge final, reconferir o inventário completo da campanha e as três provas de merge. Organização não pode virar outra auditoria sem fim: o critério é destino/reachability/uso comprovados para os itens definidos, não estética nem zero branches no repositório.
+
 ## Mandato e invariantes
 
 - Encerrar os 54 WPs remanescentes e qualificar o go-live, preservando o escopo e os critérios originais dos 70 WPs. Os 16 registros históricos continuam separados e sua aplicabilidade é conferida quando forem dependências; não representam novas entregas desta execução.
