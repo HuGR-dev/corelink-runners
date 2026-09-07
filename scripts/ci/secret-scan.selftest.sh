@@ -4,8 +4,8 @@ set -euo pipefail
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 scanner="$(command -v gitleaks || true)"
 [[ -x "$scanner" ]] || { printf 'secret-scan selftest: gitleaks is required\n' >&2; exit 2; }
-checker="${script_dir}/secret-scan.sh"; fixture_repo="$(mktemp -d)"; unrelated_repo=''
-cleanup() { rm -rf "$fixture_repo"; [[ -z "$unrelated_repo" ]] || rm -rf "$unrelated_repo"; }
+checker="${script_dir}/secret-scan.sh"; fixture_repo="$(mktemp -d)"; unrelated_repo=''; scoped_repo=''
+cleanup() { rm -rf "$fixture_repo"; [[ -z "$unrelated_repo" ]] || rm -rf "$unrelated_repo"; [[ -z "$scoped_repo" ]] || rm -rf "$scoped_repo"; }
 trap cleanup EXIT
 run_scan_at() { SECRET_SCAN_TEST_MODE=1 "$checker" --repo "$1" --base "$2" --head "$3" --scanner "$scanner" >/dev/null 2>&1; }
 run_scan() { run_scan_at "$fixture_repo" "$1" "$2"; }
@@ -51,4 +51,14 @@ set +e; git -C "$fixture_repo" merge --no-ff merge-side -m merge >/dev/null 2>&1
 printf 'synthetic=%s%s\n' "$prefix" "$suffix" >"$fixture_repo/merge.txt"; git -C "$fixture_repo" add merge.txt; git -C "$fixture_repo" commit -qm merge-resolution
 merge_head="$(git -C "$fixture_repo" rev-parse HEAD)"
 expect_status 1 run_scan "$merge_base" "$merge_head"
+
+# The production config has narrow fingerprint exceptions for historical
+# synthetic fixtures. A new value in the same path must still fail.
+scoped_repo="$(mktemp -d)"
+git -C "$scoped_repo" init -q; git -C "$scoped_repo" config user.email fixture@example.invalid; git -C "$scoped_repo" config user.name fixture
+printf 'clean\n' >"$scoped_repo/README.md"; git -C "$scoped_repo" add .; git -C "$scoped_repo" commit -qm initial; scoped_base="$(git -C "$scoped_repo" rev-parse HEAD)"
+mkdir -p "$scoped_repo/deploy/cloudflare/test"
+printf 'const token = "%s%s";\n' 'ghp_' '1234567890abcdef1234567890abcdef1234' >"$scoped_repo/deploy/cloudflare/test/compute-terminal-test-helpers.ts"
+git -C "$scoped_repo" add .; git -C "$scoped_repo" commit -qm fresh-allowlisted-path-value; scoped_head="$(git -C "$scoped_repo" rev-parse HEAD)"
+expect_status 1 run_scan_at "$scoped_repo" "$scoped_base" "$scoped_head"
 printf 'secret-scan selftest: PASS (detection, zero-base, waivers, merge, clean, missing refs, scanner error)\n'

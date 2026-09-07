@@ -34,7 +34,33 @@ trap 'on_signal INT 130' INT
 trap 'on_signal TERM 143' TERM
 config="$work_dir/gitleaks.toml"; ignore_file="$work_dir/gitleaksignore"
 report="$work_dir/report.json"; log="$work_dir/scanner.log"
-printf '[extend]\nuseDefault = true\n' >"$config"; : >"$ignore_file"
+printf '[extend]\nuseDefault = true\n' >"$config"
+# These 20 fingerprints are the reviewed deterministic fixture/reference
+# findings from the frozen cda90940..52197fd0 range. Fingerprints are the
+# narrowest supported exception: a changed value, commit, path or detector
+# produces a different fingerprint and remains visible to the scanner.
+cat >"$ignore_file" <<'EOF'
+1400ebbc5c3f0e95d0d813e412bdf15757fccc92:deploy/cloudflare/test/compute-terminal-test-helpers.ts:generic-api-key:3
+014c07ce43b51c9a17b88bf9f915faeb4a499cc3:docs/handoff/2026-09-06-compaction-checkpoint.md:generic-api-key:43
+10181a778dfc7c5479d240d43b4b1fe341884414:deploy/cost-monitor/test/fixtures/trusted-time/pki/tsa-bad-eku.key:private-key:1
+10181a778dfc7c5479d240d43b4b1fe341884414:deploy/cost-monitor/test/fixtures/trusted-time/pki/tsa-good.key:private-key:1
+090c5f3e1b483f9729d2bdc914b5157f37bd00b6:conformance/spawn-worker-billing-wire.json:generic-api-key:1
+1c73050d5c5e9377e711eb64534142970ef7804b:crates/corelink-fabric-server/conformance/fabric-billing-wire.json:generic-api-key:1
+16b2b5c2968b91282d4ad41d52002b5ae961cfb4:crates/corelink-fabric-server/conformance/fabric-billing-wire.json:generic-api-key:1
+49896886f8425aef7d49326fa8cc89849bc00d1b:deploy/cloudflare/test/runner-credential-adoption.test.ts:generic-api-key:41
+67fa575d0d3fecd88bf98849f942b48b002b9660:docs/handoff/2026-09-06-techlead-takeover.md:generic-api-key:26
+67fa575d0d3fecd88bf98849f942b48b002b9660:docs/handoff/2026-09-06-techlead-takeover.md:generic-api-key:30
+64a83e4d3a03f3cbc4e89683eeb662ba7ea3c77b:deploy/cloudflare/test/devenv-do.test.ts:generic-api-key:161
+64a83e4d3a03f3cbc4e89683eeb662ba7ea3c77b:deploy/cloudflare/test/devenv-do.test.ts:generic-api-key:263
+64a83e4d3a03f3cbc4e89683eeb662ba7ea3c77b:deploy/cloudflare/test/devenv-do.test.ts:generic-api-key:305
+64a83e4d3a03f3cbc4e89683eeb662ba7ea3c77b:deploy/cloudflare/test/devenv-do.test.ts:generic-api-key:344
+64a83e4d3a03f3cbc4e89683eeb662ba7ea3c77b:deploy/cloudflare/test/devenv-do.test.ts:generic-api-key:467
+9b87d3b5e588fe19357741fb76c270bad3fe7437:deploy/cloudflare/test/devenv-do.test.ts:generic-api-key:467
+d741e623c22c5bd6220d862bfcad6964ff2dfaa8:deploy/cloudflare/test/devenv-do.test.ts:generic-api-key:151
+d741e623c22c5bd6220d862bfcad6964ff2dfaa8:deploy/cloudflare/test/devenv-do.test.ts:generic-api-key:294
+d741e623c22c5bd6220d862bfcad6964ff2dfaa8:deploy/cloudflare/test/devenv-do.test.ts:generic-api-key:330
+91af0ac8a08ae8199bf9ed7f57a6bbdb8d7bd3e0:deploy/cloudflare/test/devenv-do.test.ts:generic-api-key:234
+EOF
 install_scanner() {
   local archive checksum_tool
   command -v curl >/dev/null 2>&1 || { printf 'secret-scan: curl is required\n' >&2; return 2; }
