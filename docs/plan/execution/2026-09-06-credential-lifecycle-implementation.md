@@ -2,13 +2,13 @@
 
 Root implementation decision under the owner's existing autonomy. This does
 not waive legacy migration, CAS refusal timing or paired acceptance. Shared
-compute work is recorded separately; do not reopen that implementation wave.
+compute: separate record; do not reopen that implementation wave.
 
 ## One generation authority
 
 PostgreSQL owns a persistent counter per tenant. The existing suspension table
 continues to own suspended/active state. Counter creation, reads, suspend and
-resume use the SAME existing suspension advisory transaction lock. D1 and
+resume rely on the SAME existing suspension advisory transaction lock. D1 and
 Worker storage consume this counter; they never increment their own generation.
 
 Generation0 identifies pre-migration credential history. On first touch, an
@@ -31,7 +31,7 @@ or corrupt/overflowing generation refuses; there is no wall-clock-derived epoch.
 The issuer reads the current snapshot over an authenticated, bounded Fabric
 HTTP route before preparing a credential. Generation travels over JSON as a
 canonical nonnegative decimal STRING bounded by i64::MAX. A dedicated issuer
-credential is separate from spawn/exec/lifecycle/admin keys. Missing authority
+credential will be separate from spawn/exec/lifecycle/admin keys. Missing authority
 configuration or a suspended snapshot refuses issuance. Root owns this route,
 configuration and paired caller composition.
 
@@ -61,11 +61,11 @@ event's first enumeration. Post-resume credentials use PostgreSQL's newer
 generation and survive an old delivery. Exact cache invalidation is a retained
 obligation; no false success from a failed invalidation or unknown inventory.
 
-Legacy0 is a classification, NOT proof of complete historical inventory.
+Legacy0 will be a classification, NOT proof of complete historical inventory.
 Coverage must join the server's known runner/DevEnv credential authority with
 the Worker obligations; unrelated customer PATs cannot be swept just because
 they belong to a tenant. Unknown/empty legacy history retains a migration/retry
-gate until supported by actual reconciled coverage. The existing75s live CAS
+gate until supported by actual reconciled coverage. The existing75s production CAS
 refusal acceptance remains mandatory.
 
 ## Integration ownership

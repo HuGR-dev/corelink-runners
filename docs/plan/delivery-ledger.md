@@ -1,6 +1,6 @@
 # Delivery ledger
 
-`delivery-ledger.json` is the execution record for three serialized operational
+`delivery-ledger.json` serves as the execution record for three serialized operational
 sprints. The canonical dispatch registry still owns WP identities and dependency
 edges. The ledger preserves all 70 vertices, the exact 12/14/28 operational
 scopes, and the historical 12/14/15/13 origin scopes; it does not replace the
@@ -39,19 +39,19 @@ canonical integration dependencies. A returned commit is a review candidate,
 not automatic implementation or delivery credit.
 
 The owner explicitly invoked HuGR TechLead during this session. Its local entry
-is `/Users/gustavoschneiter/.claude/skills/techlead/SKILL.md`, resolving to the
+resides at `/Users/gustavoschneiter/.claude/skills/techlead/SKILL.md`, resolving to the
 HuGR techlead repository. The lead read its contract, decomposition, packet,
 verification and rolling-loop subskills. Apply rolling dispatch and integration:
 freeze cross-WP interfaces before authoring; source-ready soft dependencies may
-use those contracts, while real external/hard capabilities remain prerequisites.
-An author return frees the execution seat and enters review; it is not a seal.
-First-pass read-only review may run independently, with final judgment and
+rely on those contracts, while real external/hard capabilities remain prerequisites.
+An author return frees the execution seat and enters review; it remains non-sealing.
+First-pass read-only review may execute independently, with final judgment and
 integration retained by root. Integrate approved source when its prerequisites
 permit, without waiting for unrelated authors. The owner's sprint-only full CI
 and heavy-test rule takes precedence over per-merge examples in the skill.
-The Arsenal scheduler/relay tools are not exposed in this API session; do not
+The Arsenal scheduler/relay tools remain unavailable in this API session; do not
 claim they were armed or that a SubagentStop hook enforced author completion.
-Use the existing ledger, actual Git objects and explicit check results as the
+Rely on the existing ledger, actual Git objects and explicit check results as the
 execution record. Do not add permission gates or repeat plan decomposition just
 to reproduce unavailable skill tooling.
 

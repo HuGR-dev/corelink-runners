@@ -21,9 +21,9 @@ The focused route suite covers the finite startup/readiness matrix:
   cancel the single-flight probe or start a duplicate;
 - the probe sends `{}` and no bearer credential.
 
-The production path creates the gate only when both mint environment variables
-are armed; a missing half-configured arm fails at boot. Secret-bearing config
-uses redacted `Debug` implementations and the readiness probe carries only the
+The production path creates the gate only with both mint environment variables
+configured; a missing half-configured arm fails at boot. Secret-bearing config
+used redacted `Debug` implementations and the readiness probe carried only the
 internal auth header, never a bearer token or request body secret. The source
 SHA above binds these claims to the reviewed implementation version.
 

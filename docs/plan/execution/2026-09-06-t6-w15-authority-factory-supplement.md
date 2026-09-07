@@ -214,5 +214,4 @@ timers, credentials ou high-waters live.
 | Runtime | factory singleton/wiring do ingest promovido; config/permission fail-closed; três rotas/status; scheduler exact two-field tick; unknown route/event; no local clock/defaults; concrete KMS/witness/secret command args |
 
 Executar somente esses testes focados e `npm run typecheck` no owner. CI pesada,
-deploy e probe live continuam no gate do bundle.
-
+deploy e probe production continuam no gate do bundle.

@@ -1,4 +1,4 @@
-# T9-W1 — live compute acceptance card
+# T9-W1 — production compute acceptance card
 
 **Decision anchor:** `6489f319e0f068da06a04e9cdd30ddcb9c209c63`  
 **Decision tree:** `4ab27e95b47ccf05441df8c7bc41cc7264da4545`  
@@ -6,9 +6,9 @@
 **Compute implementation tree:** `1f2475f31817fdabfc9c181919000f94b2bbdaa0`  
 **Status at preparation:** `BLOCKED-TARGET`
 
-This card is the version-bound execution record for the five T9-W1 provider receipts. It contains
-no provider credentials and authorizes no live mutation by itself. A receipt is acceptable only when
-it is linked to the deployed authority version, the exact grant key id, the reservation id and the
+This card defines the version-bound execution record for the five T9-W1 provider receipts. It contains
+no provider credentials and authorizes no production mutation by itself. A receipt qualifies only when
+linked to the deployed authority version, the exact grant key id, the reservation id and the
 same generation on every record.
 
 ## Binding discovered in source
@@ -49,22 +49,22 @@ The only documented public host is `https://corelink-api.humangr.com`. Read-only
 
 | Probe | Result | Meaning |
 |---|---:|---|
-| `GET https://corelink-api.humangr.com/` | `404` | Host is reachable; root is not an identity/readiness contract. |
-| `GET https://corelink-api.humangr.com/v1/health` | `401` JSON | Host is reachable but this route requires authentication. |
-| `GET` and `OPTIONS` on each compute path | `403` HTML | Edge access policy answered before the compute application; this is not proof that the compute API is deployed or ready. |
+| `GET https://corelink-api.humangr.com/` | `404` | Host returned 404; root was not an identity/readiness contract. |
+| `GET https://corelink-api.humangr.com/v1/health` | `401` JSON | Host returned 401; this route required authentication. |
+| `GET` and `OPTIONS` on each compute path | `403` HTML | Edge access policy answered before the compute application; compute API deployment or readiness remained unproven. |
 
 No POST was sent, no grant was presented, and no provider-side state or spend was created. These
 probes do not turn the public production host into an acceptance target. The required missing
 inputs are:
 
-1. a dedicated non-production HTTPS `FABRIC_COMPUTE_URL` origin serving the four compute routes;
-2. the deployed authority version/digest and its readiness or identity evidence;
+1. a dedicated non-production HTTPS `FABRIC_COMPUTE_URL` origin for the four compute routes;
+2. the authority version/digest and its readiness or identity evidence;
 3. the matching public grant key configuration and key id, with the issuer-side signing authority;
-4. a bounded entitled test tenant and five fresh grants whose ceiling and expiry are recorded; and
+4. a bounded entitled test tenant and five fresh grants with recorded ceiling and expiry; and
 5. a non-production ledger baseline, with Postgres enabled and durable receipts retained outside the
    service logs.
 
-Until those bindings are supplied and independently verified, the correct result is
+Bindings were still pending independent verification; the correct result remained
 `BLOCKED-TARGET`; issuing a grant against the documented production host would violate the D2
 decision and could create uncontrolled compute or billing effects.
 
@@ -149,9 +149,9 @@ Do not use a local cap, monthly display, fake timer or in-memory ledger as the p
 
 ### R5 — restart, retry and bounded concurrency
 
-Use two or three fresh reservations under the same bounded test tenant. Interrupt after a remote
+Execute two or three fresh reservations under the same bounded test tenant. Interrupt after a remote
 request is sent but before its response is observed, then restart/recreate the Worker/DO. Retry the
-same reservation id and generation; it must converge idempotently. Run the bounded concurrency set
+same reservation id and generation; it must converge idempotently. Execute the bounded concurrency set
 within the test tenant's explicit cap and verify no duplicate provider materialization and no
 cross-reservation receipt mix-up. An ambiguous result must retain its obligation and must not mint a
 new attempt against the same reservation.
@@ -167,4 +167,3 @@ the grant key id cannot be matched, the ledger baseline is not explicit and dura
 version is unknown, or any response is ambiguous. Never probe these gates by sending a real grant
 to production. Never report `PASS` from local unit tests, a fake authority, a timer, a successful
 `destroy()`, a monthly aggregate, or the current Durable Object state.
-

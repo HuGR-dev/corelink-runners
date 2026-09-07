@@ -33,4 +33,4 @@ Focused shell fixtures cover optional COLD/fallback and required cached exit
 preservation, miss/setup failures, missing dependencies and version refusals.
 Root also ran the action with the actual locally built client: invalid setup and
 missing endpoint returned 78 with no child; optional setup failure ran COLD.
-These negative checks do not claim a live CAS HIT.
+These negative checks do not claim a production CAS HIT.

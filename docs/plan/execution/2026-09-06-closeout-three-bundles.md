@@ -81,8 +81,8 @@ Os itens abaixo são condições de passagem, não tarefas extras nem comprovant
 - [ ] Nenhum stub temporário, declaração falsa, supressão de erro ou defeito impeditivo usado para produzir verde.
 - [ ] PR do bundle tem escopo, SHAs e matriz de aceite atualizados; dependências externas concretamente verificadas.
 - [ ] Disparar CI completa e testes pesados uma vez no candidato completo; armazenar resultados por job/SHA.
-- [ ] Cada WP que dependa de operação tem seu cartão de execução versionado e sua fonte PROMOTE incorporada; o cartão não duplica um probe live por WP.
-- [ ] A qualificação compartilhada de deploy/live da Sprint 1 roda uma vez no SHA do bundle, com runtime/configuração/versão corretos; ela permanece obrigatória para o merge B1.
+- [ ] Cada WP que dependa de operação tem seu cartão de execução versionado e sua fonte PROMOTE incorporada; o cartão não duplica um probe production por WP.
+- [ ] A qualificação compartilhada de deploy/production da Sprint 1 roda uma vez no SHA do bundle, com runtime/configuração/versão corretos; ela permanece obrigatória para o merge B1.
 
 ### C6 — Tratar CI vermelha
 
@@ -95,7 +95,7 @@ Os itens abaixo são condições de passagem, não tarefas extras nem comprovant
 ### C7 — Promover e mesclar a sprint
 
 - [ ] Todos os critérios de entrega aplicáveis satisfeitos; nenhum bloqueio de segurança, integridade ou qualidade obrigatório aberto.
-- [ ] CI/checks exigidos verdes no SHA final e o gate compartilhado de deploy/live da Sprint 1, quando aplicável, vinculado à versão correta.
+- [ ] CI/checks exigidos verdes no SHA final e o gate compartilhado de deploy/production da Sprint 1, quando aplicável, vinculado à versão correta.
 - [ ] Diff e base do PR conferidos; ordem e compatibilidade Runner/Server demonstradas quando necessárias.
 - [ ] Executar somente o merge B1, B2 ou B3 autorizado pelo plano; confirmar SHA na main remota.
 - [ ] Registrar WPs entregues, provas e merge em A2; atualizar A6 e liberar somente então a próxima sprint.

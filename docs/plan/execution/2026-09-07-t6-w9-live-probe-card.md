@@ -1,26 +1,26 @@
-# T6-W9 external detector and live-probe execution card
+# T6-W9 external detector and production-probe execution card
 
-Status: `READY-PENDING-LIVE`. This card is an execution packet, not live
+Status: `READY-PENDING-LIVE`. This card defines an execution packet, not production
 evidence. It contains no endpoint credential, token, secret value, page
 payload, or fabricated receipt.
 
 ## Fixed deploy target and non-secret configuration
 
-The canary target is the Cloudflare Worker `corelink-canary` in account
+The canary target names the Cloudflare Worker `corelink-canary` in account
 `6a1fc1c626fc2628823e60b9db01f5cd`, using
 `deploy/cloudflare-canary/wrangler.jsonc`, the existing `CANARY_KV` binding,
 the `CanaryTickOutboxAdapter` Durable Object migration, and cron
 `*/5 * * * *`. Existing service bindings remain `FABRICD_SVC=corelink-fabricd`
 and `SPAWN_SVC=corelink-spawn-worker`.
 
-The non-secret deployment variables are:
+The non-secret deployment variables:
 
 | Name | Required value or source |
 | --- | --- |
 | `FABRIC_STATUS_URL` | existing fabricd status URL in `wrangler.jsonc` |
 | `FABRIC_HEALTH_URL` | existing fabricd health URL in `wrangler.jsonc` |
 | `SPAWN_METRICS_URL` | existing spawn metrics URL in `wrangler.jsonc` |
-| `FABRIC_PROBES_ENABLED` | `0` for the T6-W4 default-off lane; change only under its live authorization |
+| `FABRIC_PROBES_ENABLED` | `0` for the T6-W4 default-off lane; change only under its approved authorization |
 | `ALERT_COOLDOWN_MINUTES` | existing `30` |
 | `STALENESS_HOURS` | existing `0` unless the owner binds an explicit window |
 | `CANARY_TICK_INGEST_URL` | exact T6-W15 named ingest route, pending owner binding |
@@ -53,13 +53,13 @@ Before any injection, capture one immutable tuple containing:
 4. the `external-primary-page` route reference and destination identity; and
 5. the provider-issued page/ACK receipt authority.
 
-The probe is invalid if any field is absent, changes during the run, or is
-reported by the canary itself. T6-W15 must independently observe the event,
+The probe fails validation if any field remains absent, changes during execution, or
+comes from the canary itself. T6-W15 must independently observe the event,
 create the incident/page, and persist the page ACK before a trial is counted.
 
 ## Probe sequence
 
-Run the following against the exact tuple, with one fresh event identity per
+Execute the following against the exact tuple, with one fresh event identity per
 trial and append-only receipts:
 
 1. For each of the 19 frozen C1–C5 conditions, inject the already-classified

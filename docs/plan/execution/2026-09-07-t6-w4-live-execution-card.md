@@ -1,11 +1,11 @@
-# T6-W4 live execution card — AWS monitor runtime
+# T6-W4 production execution card — AWS monitor runtime
 
-Status: **READY TO EXECUTE AFTER DEPLOYMENT** · no live probe was run by this card.
+Status: **READY TO EXECUTE AFTER DEPLOYMENT** · no production probe was executed by this card.
 
 Source composition: `a2c18f6b2621824bd12a2a34426215efe9dfeec5`.
-The monitor runtime is the T6-W15 AWS composition: API Gateway HTTP API v2 →
-qualified Lambda `live` alias → `POST /v1/ingest`; DynamoDB is the state CAS,
-S3 Object Lock is the journal, and the verifier-account qualified witness
+The monitor runtime will follow the T6-W15 AWS composition: API Gateway HTTP API v2 →
+qualified Lambda `live` alias → `POST /v1/ingest`; DynamoDB supplies the state CAS,
+S3 Object Lock supplies the journal, and the verifier-account qualified witness
 Lambda supplies the independent receipt proof. The canary remains default-off
 until the owner activates it.
 
@@ -42,8 +42,8 @@ trusted_time_endpoint: http://timestamp.digicert.com
 max_pending_deliveries_per_source: 100
 ```
 
-`monitor.corelink.humangr.com` is the required named host and DNS/API Gateway
-custom-domain binding; it is a prepared name, not a claim that DNS or the
+`monitor.corelink.humangr.com` remains the required named host and DNS/API Gateway
+custom-domain binding; it remains a prepared name, with no claim that DNS or the
 custom domain already exists. The generated API endpoint must not be placed in
 the canary until TLS/custom-domain routing and `POST /v1/ingest` return a
 version-bound deployment record.
@@ -89,7 +89,7 @@ not be copied into this card or committed.
 Required inputs supplied by the deployment record: `INGEST_URL`, `SOURCE`,
 `SERVICE`, `APPLICATION`, `KEY_ID`, `CREDENTIAL_EPOCH`, `TUPLE_DIGEST`,
 `ENVELOPE_HMAC_KEY` (kept in the canary secret store), and the monitor
-deployment/config/image digests. The probe must use one canary DO identity and
+deployment/config/image digests. The probe must rely on one canary DO identity and
 one original `scheduled_for` per attempt.
 
 1. Verify `GET/HEAD` reachability of the named host and record DNS, TLS,
@@ -113,12 +113,12 @@ one original `scheduled_for` per attempt.
    recovery against the original ACK digest and current manifest/tuple; altered
    head, signer, tuple, digest or extra fields must remain pending/rejected.
 
-The live artifact must preserve raw request/response bodies after secret and
+The planned production artifact must preserve raw request/response bodies after secret and
 token redaction, HTTP status, terminal state, sequence, side-effect counts,
 deployment/image/config/tuple digests, and the exact source SHA. It may be
-promoted to `ACCEPT` only when T3-W18 is green and the named host, owner config,
+promoted to `ACCEPT` only when T3-W18 has green evidence and the named host, owner config,
 T6-W15 qualified runtime, independent trust/revocation binding and all six
-probe cells are version-bound to the same deployment.
+probe cells become version-bound to the same deployment.
 
 ## Stop conditions
 

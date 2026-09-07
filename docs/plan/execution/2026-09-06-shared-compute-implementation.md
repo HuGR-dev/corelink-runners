@@ -7,9 +7,9 @@ change delivered counts, arm PostgreSQL, or waive provider/monitor acceptance.
 ## Authority and units
 
 Extend the existing Fabric PostgreSQL authority. Native lease admission and
-external admission use the SAME `pg_advisory_xact_lock(hashtext(tenant))`,
+external admission will use the SAME `pg_advisory_xact_lock(hashtext(tenant))`,
 `compute_accrual(tenant, period_key)`, and sum of active reservations. External
-reservations live separately from provider-managed native leases so the native
+reservations production separately from provider-managed native leases so the native
 reaper never mistakes them for native containers. Native admission includes
 prepared/active external reservations; external admission includes pending/held
 native reservations. No new in-memory/KV fallback.
@@ -58,10 +58,10 @@ Types and five methods are frozen in `corelink-fabric::compute_budget` and
 - TTL, an HTTP timeout and inventory absence never release an active reservation.
   Grant expiry prohibits activation; it is not provider-terminal evidence.
 
-The Rust producer API must authenticate before ledger access. Metered grants are
+The Rust producer API must authenticate before ledger access. Metered grants will be
 issued by corelink-server after existing identity/entitlement authorization and
-are signed with an issuer-only Ed25519 key; Fabric holds public keys only.
-Raw Worker cap values are not authority. Key provisioning is a deployment
+will be signed with an issuer-only Ed25519 key; Fabric holds public keys only.
+Raw Worker cap values will not be authority. Key provisioning will be a deployment
 prerequisite, not permission to invent a signing key in configuration.
 
 ## Grant and HTTP shape
@@ -112,12 +112,12 @@ call sites, review and focused verification. Agents do not run full CI.
 Merge order is issuer/client, ledger/API, durable obligations, then production
 callers. Every returned diff is reviewed; failed reviews stay incomplete.
 
-The deployed Worker runner and DevEnv container declarations both select
-`standard-4`; shared reservations therefore use four allocated vCPUs. A requested
+The planned for deployment Worker runner and DevEnv container declarations both select
+`standard-4`; shared reservations therefore receive four allocated vCPUs. A requested
 DevEnv UI tier does not authorize a fictitious hardware count. Existing billing
 wire shapes remain unchanged. Worker provider retries each need a new funded
 reservation: the metered path makes one start attempt per reservation; a later
-redrive obtains a separate reservation while earlier ambiguous work stays held.
+redrive obtains a separate reservation while earlier ambiguous will work stays held.
 
 Control keys: corelink-server owns `COMPUTE_GRANT_SIGNING_KEY` (base64 PKCS8) and
 `COMPUTE_GRANT_KEY_ID`; Fabric receives `FABRIC_COMPUTE_GRANT_PUBLIC_KEYS` (JSON

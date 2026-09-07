@@ -2,7 +2,7 @@
 
 Decision owner: D0/root. Integration owner: I0/root. Sole executor: Luna.
 Canonical acceptance and sprint remain as recorded in delivery-ledger.json.
-This packet is one bounded execution step; it grants no whole-WP completion.
+This packet defines one bounded execution step; it grants no whole-WP completion.
 
 ## Frozen action
 
@@ -32,7 +32,7 @@ From deploy/cloudflare run:
 ./node_modules/.bin/vitest run test/suspension-revocation.test.ts --pool=threads --maxWorkers=1 --minWorkers=1 --silent
 ```
 
-No full suite, CI, Cargo build, deployment, live probe or sibling mutation.
+No full suite, CI, Cargo build, deployment, production probe or sibling mutation.
 Poll a running test session to actual exit; never turn a session ID into success.
 One code commit, DCO-signed with configured identity, `[skip ci]` in the subject,
 and `Co-Authored-By: Codex <noreply@openai.com>` as a separate paragraph.
