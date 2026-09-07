@@ -1,57 +1,80 @@
 {
   "schema_version": "evidence/v1",
   "artifact_id": "t3-w18-containment-live",
-  "kind": "probe",
+  "kind": "test+probe",
   "status": "RED",
-  "observed_at": "2026-09-07T00:47:58Z",
+  "observed_at": "2026-09-07T01:15:00Z",
   "source": {
     "repository": "corelink-runners",
-    "commit_sha": "e89f9a7c289bb8069ac266d4c94b8649f291a73c",
+    "commit_sha": "d1539be4fad9caf8c62ce36d05ce5405644f33dd",
     "path": "docs/plan/evidence/T3-W18-containment-live.json"
   },
   "claims": ["A3.30", "T3-W18"],
-  "version": { "id": "1f5f1958-6f3f-44ef-b095-3facade2c4c4" },
+  "version": { "id": "d04aa4ea-80a3-481e-9f2e-e785e8824480" },
   "evidence": {
-    "scope": "Version-bound production three-state containment probe; final safety posture retained",
+    "scope": "RCA, fix, and version-bound three-state live containment probe; final safe posture retained",
     "target_proof": {
       "worker": "corelink-spawn-worker",
-      "source_commit_sha": "e89f9a7c289bb8069ac266d4c94b8649f291a73c",
-      "source_tree": "fc7d4052eefa27c5c2f2cbd5212f987e444523c2",
+      "source_commit_sha": "d1539be4fad9caf8c62ce36d05ce5405644f33dd",
+      "final_config_commit_sha": "6effb2019d98e8f65054ed370eecfc19c453fb77",
       "original_config_sha256": "88eea2c09c776d75d0747242814b396221d51579a3aa8b72a997af6504e3f188",
       "containment_namespace_id": "4915d895460b4db8b1eb634770286efe",
       "migrations_retained": ["v1", "v2", "v3", "v4", "v5", "v6", "v7"],
-      "runner_container_application": "a03d11a2-7e03-48a4-96bb-4d2c43892cd4",
-      "check_host_container_application": "a038b8b1-aeb8-4664-a9d6-ffe65e31f0f5",
-      "traffic": "100%",
-      "fault_injection": "none; no authorized production job or webhook payload was fabricated"
+      "runner_application": "a03d11a2-7e03-48a4-96bb-4d2c43892cd4",
+      "check_host_application": "a038b8b1-aeb8-4664-a9d6-ffe65e31f0f5",
+      "pinned_runner_image": "sha256:2f3dd8a166e890888d026669757c996750b42230a04710fa08f13db56b0cf029",
+      "pinned_check_host_image": "sha256:4e09fc21ddc437684a921fdeedbf5c98264a7a7db77dbc76dae3a4ea75017851",
+      "fault_injection": "none; no synthetic production HMAC or fake workflow event was used"
     },
-    "three_state_live_deployments": [
+    "rca": {
+      "finding": "GitHub startup failure occurred before a workflow_job existed, so the Worker could not receive the event needed to provision a runner.",
+      "proof": {
+        "runs_while_intake_paused": ["34070435982", "34070437650", "34070439138", "34070444351", "34070445850", "34070447339", "34070448906", "34070450417", "34070451931", "34070453580"],
+        "runs_after_intake_reopened": ["34071378809", "34071380820", "34071382795", "34071384615", "34071387974", "34071389493", "34071391113", "34071392956", "34071394587", "34071396918", "34071763360"],
+        "conclusion": "startup_failure",
+        "jobs_created": 0,
+        "run_log": "log not found because GitHub created no job/check run",
+        "only_registered_runner": {"id": 2, "name": "corelink-runners-builder-01", "status": "offline", "labels": ["self-hosted", "macOS", "X64", "mac", "corelink-builder"]},
+        "last_green_runner": "cf-runner-fafb6baa from run 33561991562 on 2026-09-01; no longer registered",
+        "worker_tail": "no workflow_job delivery observed on versions 18c5cb39-ba15-4ceb-b923-44356c9201f0 and ee34810a-8a72-4588-99bc-d3d3be334dca"
+      },
+      "classification": "external GitHub scheduling/bootstrap target; no Worker image, process, env, auth, or health regression observed"
+    },
+    "webhook_route_fix": {
+      "repository_hook_id": 675536825,
+      "active": true,
+      "events": ["workflow_job"],
+      "url": "https://corelink-spawn-worker.gmhelmold.workers.dev/webhook",
+      "secret_binding": "GITHUB_WEBHOOK_REPO_SECRET; value excluded",
+      "app_secret_preserved": "GITHUB_WEBHOOK_SECRET remains independent",
+      "fix_commit": "d1539be4fad9caf8c62ce36d05ce5405644f33dd",
+      "behavior": "Worker accepts the App secret or the separately bound repository-hook secret; targeted HMAC test passed",
+      "delivery_proof": {"ping_before_alignment": 401, "ping_after_alignment_and_active_deploy": 200, "workflow_job_deliveries_after_ping": 0, "interpretation": "transport is reachable and authenticated; GitHub did not emit workflow_job because no eligible runner existed"}
+    },
+    "three_state_live_matrix": [
       {
         "state": "intake_paused_redrive_enabled",
-        "deployment_id": "e81e4396-685b-4100-be95-02ab4018d8d3",
-        "version_id": "70715de6-54e1-4ed8-bdfd-c3754b86eb6d",
-        "created_at": "2026-09-07T00:36:59.451254Z",
-        "config_sha256": "82616ffa1d7557692b3e9ab1cdb57ccbdcf5915c3642fcecc0548fa98cb2f71e",
-        "config": {"AUTOSCALER_INTAKE_PAUSED": "1", "AUTOSCALER_REDRIVE_PAUSED": "0"},
-        "control_response": {"http_status": 200, "schema_version": 1, "drain_requested": false, "intake_paused": true, "backlog_count": 0, "drain_cursor": 0}
+        "version_id": "8732ceac-1bbc-47be-9fe4-707353f484a7",
+        "config_sha256": "d8f96272748c00e27b75269077336eb1b50f6104ece4b461faf812fb5b7fdada",
+        "runs": 10,
+        "responses": "10/10 HTTP 200; intake_paused=true; backlog_count=0; drain_cursor=0",
+        "log_sha256": "c9dc8236ce32141c19f7dcc37ab565ab7939369c336e5487b6610fa1358c6800"
       },
       {
         "state": "intake_enabled_redrive_paused",
-        "deployment_id": "cd43dcd4-fc2e-4170-a3e4-9ada628b1f38",
-        "version_id": "23075dc7-eaa1-4223-a777-628889356ff3",
-        "created_at": "2026-09-07T00:39:52.687876Z",
+        "version_id": "41034f64-dba2-4f11-9dbd-c84e4cca6c0c",
         "config_sha256": "88eea2c09c776d75d0747242814b396221d51579a3aa8b72a997af6504e3f188",
-        "config": {"AUTOSCALER_INTAKE_PAUSED": "0/absent", "AUTOSCALER_REDRIVE_PAUSED": "1"},
-        "control_response": {"http_status": 200, "schema_version": 1, "drain_requested": false, "intake_paused": false, "backlog_count": 0, "drain_cursor": 0}
+        "runs": 10,
+        "responses": "10/10 HTTP 200; intake_paused=false; backlog_count=0; drain_cursor=0",
+        "log_sha256": "97be2ca0611936c321b33c826846e511275757d69304b2d6aad2500284ef3686"
       },
       {
         "state": "both_paused_final_recovery_posture",
-        "deployment_id": "df6a469c-164b-4f8e-b91c-b36a21304e34",
-        "version_id": "1f5f1958-6f3f-44ef-b095-3facade2c4c4",
-        "created_at": "2026-09-07T00:40:35.041487Z",
+        "version_id": "d04aa4ea-80a3-481e-9f2e-e785e8824480",
         "config_sha256": "aeba9554a7357d717d26b7a04a981cadbe3f9d6a71003d4210322bf83bbca400",
-        "config": {"AUTOSCALER_INTAKE_PAUSED": "1", "AUTOSCALER_REDRIVE_PAUSED": "1"},
-        "control_response": {"http_status": 200, "schema_version": 1, "drain_requested": false, "intake_paused": true, "backlog_count": 0, "drain_cursor": 0}
+        "runs": 10,
+        "responses": "10/10 HTTP 200; intake_paused=true; backlog_count=0; drain_cursor=0",
+        "log_sha256": "c9dc8236ce32141c19f7dcc37ab565ab7939369c336e5487b6610fa1358c6800"
       }
     ],
     "authenticated_controls": {
@@ -60,54 +83,34 @@
       "authenticated_nonempty_body_response": {"error": "body must be empty"},
       "credentials": "admin key loaded from the authorized local 0600 file; value excluded"
     },
-    "focused_matrix": {
-      "status": "PASS_LOCAL_ONLY",
-      "runs": 10,
-      "command": "npm exec vitest run -- test/containment-intake.test.ts test/containment-redrive.test.ts",
-      "test_files_per_run": 2,
-      "tests_per_run": 29,
-      "passed_per_run": 29,
-      "failed_per_run": 0,
-      "log_sha256": "0bc72deb0baf8ab97e74a3f9e92924df64b63e023313583690b6d104aca8e23f",
-      "coverage_note": "Local deterministic switch, HMAC, identity, storage-failure, append, and redrive matrix; not a live event credit"
-    },
     "ordered_resume_nonempty": {
       "status": "PASS_LOCAL_ONLY",
       "runs": 10,
-      "command": "npm exec vitest run -- test/containment-redrive-drain.test.ts -t 'real drain|clears drain_requested'",
       "tests_selected_per_run": 2,
       "passed_per_run": 2,
       "skipped_per_run": 13,
-      "log_sha256": "e285b0b197343c5c1280aefaea43d95597b6bb4077e3d8f62b41d52f99c2fc8",
-      "coverage_note": "Ordered nonempty resume and final-ACK semantics pass deterministically in local DO tests; no live nonempty backlog was available"
+      "log_sha256": "c30949cdf45f0eace7605e6bd046aaff6baf8e8845be75ffb1d08d33471f717c",
+      "coverage_note": "Real drain and final-ACK ordered resume semantics pass deterministically; live nonempty backlog remained unavailable"
     },
-    "authorized_live_stimulus_attempt": {
-      "status": "BLOCKED_TARGET",
-      "github_workflow": "corelink-smoke.yml",
-      "dispatch_count": 10,
-      "run_ids": ["34070435982", "34070437650", "34070439138", "34070444351", "34070445850", "34070447339", "34070448906", "34070450417", "34070451931", "34070453580"],
-      "run_conclusion": "startup_failure",
-      "jobs_created": 0,
-      "reason": "The authorized workflow dispatch target failed at startup before creating a job; repository HTTP hook inventory was empty, so no valid signed webhook stimulus existed. No synthetic HMAC or production job was fabricated."
-    },
-    "provider_inventory": {
-      "before": {"runner": {"durable_object_records": 426, "running": [], "states": {"inactive": 426}}, "check_host": {"durable_object_records": 0, "running": [], "states": {}}},
-      "after": {"runner": {"durable_object_records": 426, "running": [], "states": {"inactive": 426}}, "check_host": {"durable_object_records": 0, "running": [], "states": {}}},
-      "effect": "No running-box delta or unintended container wake was observed; a live nonempty job was unavailable, so preservation under load is not claimed"
-    },
-    "acceptance": {
-      "verdict": "BLOCKED-TARGET",
-      "matrix": {"intake_paused_10_of_10": "BLOCKED_TARGET", "redrive_paused_10_of_10": "BLOCKED_TARGET", "both_paused_10_of_10": "BLOCKED_TARGET", "nonempty_ordered_resume_10_of_10": "PASS_LOCAL_ONLY"},
-      "cause": "Target limitation, not a source-code failure: no authorized live event/backlog could be produced after the workflow dispatch path failed before job creation and no repository webhook hook was available.",
-      "next_required_observation": "Run the same version-bound three-state matrix against one authorized real queued workflow event or existing queued+labeled orphan, then capture nonempty drain responses, ordered ACKs, side-effect counts, and before/after running-instance inventory."
+    "zero_unintended_or_running": {
+      "provider_inventory": {"runner_records": 426, "runner_running": 0, "runner_states": {"inactive": 426}, "check_host_records": 0, "check_host_running": 0},
+      "github_runner_inventory": {"registered": 1, "online": 0, "busy": 0, "corelink_labeled_online": 0},
+      "effect": "No live job was created, no runner was woken, and no unintended side effect was observed"
     },
     "reversal": {
       "mode": "FORWARD_ONLY",
-      "current_version_id": "1f5f1958-6f3f-44ef-b095-3facade2c4c4",
+      "current_version_id": "d04aa4ea-80a3-481e-9f2e-e785e8824480",
       "current_config": {"AUTOSCALER_INTAKE_PAUSED": "1", "AUTOSCALER_REDRIVE_PAUSED": "1"},
-      "mechanism": "Deploy a reviewed forward version preserving ContainmentDO, namespace, and migrations v1-v7; do not roll back directly across the v7 Durable Object migration.",
+      "mechanism": "Deploy a reviewed forward version preserving ContainmentDO, namespace, and migrations v1-v7; do not roll back directly across v7.",
       "preserve": ["ContainmentDO export", "CONTAINMENT binding", "v1-v7 migrations", "existing durable storage"]
+    },
+    "acceptance": {
+      "verdict": "BLOCKED-TARGET",
+      "fix_status": "FIXED_IN_SCOPE; external target remains blocked",
+      "cause_root": "The original 401 ping was corrected by aligning the repository-hook secret binding and deploying the fallback verifier. The remaining blocker is GitHub scheduling: no online runner with the corelink label means no workflow_job event is emitted.",
+      "required_external_action": "Bring an authorized GitHub runner registration/scale-set target with the corelink label online, or have the GitHub App/Actions integration emit a queued workflow_job for this repository. Then rerun the same version-bound matrix.",
+      "why_not_accept": "The live nonempty ordered-resume and spawn side effects cannot be proven without a real workflow_job target; empty controls and local tests do not substitute for that event."
     }
   },
-  "notes": "Three production configurations were version-bound by deployment ID, version ID, and config digest. Authenticated controls and local deterministic 10/10 matrices passed. The requested live nonempty ordered-resume proof remains BLOCKED-TARGET because the only authorized stimulus path created zero jobs; final production posture is both pauses enabled. No code fix was indicated, so this is not FIX or ACCEPT."
+  "notes": "The Worker fix, signed repository ingress, three live switch configurations, authenticated 10/10 controls, local ordered-resume 10/10, image/config comparisons, and zero-running inventory are recorded. Production ends with both containment pauses enabled. Final disposition is BLOCKED-TARGET due to an irreducible external GitHub bootstrap condition, not an unresolved product defect."
 }
