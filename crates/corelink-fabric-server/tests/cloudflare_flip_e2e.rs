@@ -80,6 +80,15 @@ use tower::ServiceExt;
 const PINNED_IMAGE: &str =
     "alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc";
 
+// Keep the fixture aligned with the Worker control-plane contract: spawn,
+// exec, and lifecycle requests each carry their own exact, distinct token.
+// The runner path does not exec, but the same engine reaches lifecycle auth
+// during close (and probe/reaper paths), so leaving either scoped credential
+// unset makes the acquire fail before the fake Worker is contacted.
+const SPAWN_AUTH_TOKEN: &str = "fixture-spawn-auth-token";
+const EXEC_AUTH_TOKEN: &str = "fixture-exec-auth-token";
+const LIFECYCLE_AUTH_TOKEN: &str = "fixture-lifecycle-auth-token";
+
 fn acme() -> TenantId {
     TenantId::new("acme").expect("valid tenant id")
 }
@@ -183,7 +192,8 @@ fn cloudflare_harness(
         // CloudflareEngine consumes the transport by value; clone the Arc-wrapped
         // worker into it so the test keeps its own handle for request assertions.
         ArcWorker(Arc::clone(&worker)),
-        CloudflareConfig::new("https://spawn.example.dev", "super-secret-token"),
+        CloudflareConfig::new("https://spawn.example.dev", SPAWN_AUTH_TOKEN)
+            .with_scoped_tokens(EXEC_AUTH_TOKEN, LIFECYCLE_AUTH_TOKEN),
     ));
     let prov: Arc<dyn BoxProvisioner> = Arc::new(CloudflareBoxProvisioner::new(
         engine,
@@ -331,7 +341,7 @@ async fn cloudflare_flip_happy_path_acquire_spawn_held_close_teardown() {
         "spawn must address the configured Worker /v1/spawn endpoint"
     );
     assert_eq!(
-        spawn.bearer_token, "super-secret-token",
+        spawn.bearer_token, SPAWN_AUTH_TOKEN,
         "spawn must carry the configured Worker bearer token"
     );
     let spawn_body: serde_json::Value = serde_json::from_str(
@@ -389,6 +399,10 @@ async fn cloudflare_flip_happy_path_acquire_spawn_held_close_teardown() {
     assert_eq!(
         teardown.url, "https://spawn.example.dev/v1/teardown",
         "teardown must address the Worker /v1/teardown endpoint"
+    );
+    assert_eq!(
+        teardown.bearer_token, LIFECYCLE_AUTH_TOKEN,
+        "teardown must carry the lifecycle-scoped Worker bearer token"
     );
     let teardown_body: serde_json::Value = serde_json::from_str(
         teardown
