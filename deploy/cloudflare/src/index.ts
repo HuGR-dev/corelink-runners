@@ -568,8 +568,21 @@ export class ContainmentDO extends DurableObject<Env> {
     return this.ctx.blockConcurrencyWhile(async () => {
       const cursor = await this.ctx.storage.get<string>("compute:drain-cursor");
       const result = await this.computeObligations().drainUnused(Date.now(), cursor);
-      if (result.cursor) await this.ctx.storage.put("compute:drain-cursor", result.cursor);
-      else await this.ctx.storage.delete("compute:drain-cursor");
+      const previousRetry = await this.ctx.storage.get<boolean>("compute:drain-retry") === true;
+      // A prior-page failure must survive the rest of that bounded sweep. Once
+      // the cursor is gone, the next invocation is a fresh full pass; a clean
+      // pass may then retire the retry marker.
+      const retryRequired = result.retryRequired || (cursor !== undefined && previousRetry);
+      if (result.cursor) {
+        // Preserve failures from an earlier page while the bounded sweep
+        // advances. A short final page must not erase that obligation.
+        await this.ctx.storage.put("compute:drain-cursor", result.cursor);
+        await this.ctx.storage.put("compute:drain-retry", retryRequired);
+      } else {
+        await this.ctx.storage.delete("compute:drain-cursor");
+        if (retryRequired) await this.ctx.storage.put("compute:drain-retry", true);
+        else await this.ctx.storage.delete("compute:drain-retry");
+      }
     });
   }
 
