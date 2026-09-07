@@ -169,6 +169,10 @@ function envWith(kv: ReturnType<typeof kvWith>) {
     RUNNER_JOB_PATS: kv,
     RUNNER_CONTAINER: {},
     CONTAINMENT: containmentFixture(kv),
+    CRED_STASH: {
+      idFromName: (_name: string) => "runner-credential",
+      get: () => ({ wipe: async () => {} }),
+    },
     // METRICS absent ⇒ bumpMetrics is a documented no-op.
     CONCURRENCY_SLOTS: {
       idFromName: (n: string) => n,
