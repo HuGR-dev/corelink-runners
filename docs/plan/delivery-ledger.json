@@ -475,7 +475,7 @@
         "O-MONITORHOST",
         "T7-W4b"
       ],
-      "next_action": "Use the frozen service contracts at docs/plan/execution/2026-09-06-t6-w15-services-decision.md to complete the durable signer registry, ACK recovery, human page acknowledgement, and concrete main runtime. T6-W15 remains partial; keep UNKNOWN fail-closed and retain all qualification criteria.",
+      "next_action": "Implement the remaining T6-W15 authorities and runtime against the frozen service decision plus authority/factory supplement. T6-W15 remains partial; retain UNKNOWN fail-closed and all qualification criteria.",
       "blockers": [
         "Trusted time/TSA qualification, WORM and three-account independence qualification, crash/rotation/isolation tests, and the base A6.10 probe 3/3 remain required before base acceptance."
       ],
@@ -549,7 +549,8 @@
       "evidence": [
         "docs/handoff/2026-09-06-techlead-takeover.md",
         "docs/handoff/2026-09-06-f008-credential-lifecycle-integration.md",
-        "Service contract decision integrated from 7fa6efe9ee0b1112fa3b937fbc92f950cd705eba as 75f928453b0c981b3faaa767e3e03393ebb45ed0; documentary contract only, no completion credit."
+        "Service contract decision integrated from 7fa6efe9ee0b1112fa3b937fbc92f950cd705eba as 75f928453b0c981b3faaa767e3e03393ebb45ed0; documentary contract only, no completion credit.",
+        "Second-submission authority/factory supplement integrated from b0b29bd73ad827ba033fc8320ce64fda4c4f32a1 as 328c189d633e2bed98b2490ce6befcee4ff1226e; records the resolved contract gap without completion credit."
       ],
       "historical_sprint": 1,
       "decision_contract": {
@@ -557,6 +558,19 @@
         "source_commit": "7fa6efe9ee0b1112fa3b937fbc92f950cd705eba",
         "integration_commit": "75f928453b0c981b3faaa767e3e03393ebb45ed0",
         "disposition": "Freezes the service contracts for the durable signer registry, ACK recovery, human page acknowledgement, and concrete main runtime. It does not complete T6-W15 or waive qualification, review, acceptance, or deployment criteria."
+      },
+      "authority_factory_supplement": {
+        "path": "docs/plan/execution/2026-09-06-t6-w15-authority-factory-supplement.md",
+        "source_commit": "b0b29bd73ad827ba033fc8320ce64fda4c4f32a1",
+        "integration_commit": "328c189d633e2bed98b2490ce6befcee4ff1226e",
+        "disposition": "Binds the existing approved state, journal, audit, witness, KMS, Lambda, and SNS components to concrete T6-W15 authorities and runtime factory requirements; documentary contract only."
+      },
+      "second_submission_diagnostic": {
+        "status": "resolved_contract_gap",
+        "submission": 2,
+        "cause": "The prior service decision did not yet bind the authority persistence, witness-root distinction, custody/revocation identity checks, recovery idempotency, page-ACK crash recovery, bootstrap boundaries, and runtime factory wiring to concrete existing resources.",
+        "resolution": "The authority/factory supplement freezes those interfaces and least-privilege bindings without adding a new durable service.",
+        "remaining": "Implementation and qualification of the durable signer registry, ACK recovery, page acknowledgement, main runtime, and base acceptance criteria remain required."
       }
     },
     {
