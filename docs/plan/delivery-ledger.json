@@ -1203,10 +1203,11 @@
         "T3-W18",
         "T9-W0"
       ],
-      "next_action": "Code independently approved; validate complete sprint and later deployed image/process evidence. Re-review only if DevEnv integration changes bridge.",
+      "next_action": "T8-W4b implementation is complete and acceptance is ready. Preserve the bridge/tree identity evidence and await T3 live evidence plus complete Sprint 1 composition; do not mark accepted yet.",
       "blockers": [],
       "commits": [
-        "bb165bad54125460ebae213e405df3a75baa6566"
+        "bb165bad54125460ebae213e405df3a75baa6566",
+        "37d4cbee0014a6547ee53075494e5fd365cd62fd"
       ],
       "review": {
         "status": "approved",
@@ -1216,9 +1217,23 @@
         ]
       },
       "evidence": [
-        "docs/plan/execution/2026-09-05-auth-bridge-review.json"
+        "docs/plan/execution/2026-09-05-auth-bridge-review.json",
+        "PROMOTE 37d4cbe is already ancestor of the integration head: bridge PASS, 70/70, and Rust tree identity preserves prior 12/12. T3 live remains pending."
       ],
-      "historical_sprint": 1
+      "historical_sprint": 1,
+      "acceptance": {
+        "status": "ready",
+        "complete": false,
+        "integration_commit": "37d4cbee0014a6547ee53075494e5fd365cd62fd",
+        "evidence": [
+          "docs/plan/evidence/sprint1-t8-w4b-acceptance-2026-09-06.md",
+          "Auth-secret bridge PASS; 70/70 check-host coverage; Rust tree identity preserved with prior 12/12."
+        ],
+        "residual": [
+          "T3-W18 genuine live evidence",
+          "complete Sprint 1 composition and applicable deployed image/process evidence"
+        ]
+      }
     },
     {
       "id": "T8-W6",
