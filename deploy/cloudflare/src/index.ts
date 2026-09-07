@@ -482,6 +482,8 @@ export interface ActiveSpawnAttempt {
   createdAtMs: number;
   /** Written before start; retained until exact teardown is confirmed. */
   teardownIntent: true;
+  /** Exact handle was observed down; capacity cleanup may still be pending. */
+  teardownConfirmedAtMs?: number;
 }
 
 // ── env-0 cred-stash Durable Object — the Worker-native single-use latch ──────
@@ -654,6 +656,23 @@ export class ConcurrencySlotsDO extends DurableObject<Env> {
   async pendingActiveAttempts(limit = 25): Promise<ActiveSpawnAttempt[]> {
     const page = await this.ctx.storage.list<ActiveSpawnAttempt>({ prefix: "spawn-active-attempt:v1:", limit });
     return [...page.values()];
+  }
+
+  /**
+   * Checkpoint a successful exact-handle teardown before local capacity cleanup.
+   * A retry after a slot-release outage therefore never issues a second destroy,
+   * while a replacement generation still fences this stale callback completely.
+   */
+  async markAttemptTeardownConfirmed(jobId: string, generation: number, ownerToken: string, handle: string): Promise<boolean> {
+    return this.spawnClaimTx(async storage => {
+      const key = this.attemptKey(jobId);
+      const attempt = await storage.get<ActiveSpawnAttempt>(key);
+      if (!attempt || attempt.generation !== generation || attempt.ownerToken !== ownerToken || attempt.handle !== handle) return false;
+      const claim = await storage.get<SpawnClaimRecord>(`spawn-claim:${jobId}`);
+      if (claim && (claim.generation !== generation || claim.ownerToken !== ownerToken)) return false;
+      if (!attempt.teardownConfirmedAtMs) await storage.put(key, { ...attempt, teardownConfirmedAtMs: Date.now() });
+      return true;
+    });
   }
 
   /** Terminalize only the generation that owns this exact provider handle. */
@@ -2535,6 +2554,13 @@ async function spawnRunner(
   // (The jobId->patId revoke-key is now written at MINT time in driveSpawn, BEFORE
   // the spawn — F2/W3 — so a start failure can revoke the PAT rather than orphan it.
   // Intentionally NOT re-written here.)
+  // Normal arrivals use the compatibility projections directly. Contained work
+  // keeps its immutable witness/read-back sequence below, which binds the same
+  // facts to the containment permit before it may become terminal.
+  if (!isContainmentDrive(opts)) {
+    await persistSpawnPostStartProjections(env, opts, mint, handle, runnerName, provisioned.minted.runnerId);
+    return { handle, runnerName, attempt };
+  }
   if (mint.tenant && env.RUNNER_JOB_PATS) {
     // Stash the derived tenant for completion (concurrency-slot release + billing).
     try { await env.RUNNER_JOB_PATS.put(jobTenantKey(jobId), mint.tenant); }
@@ -2615,6 +2641,41 @@ async function spawnRunner(
 }
 
 /**
+ * Write the best-effort KV compatibility projections after the provider has
+ * started. The durable active-attempt record already exists at this point, so a
+ * failed projection deliberately throws into exact-handle cleanup rather than
+ * silently returning a false successful spawn.
+ */
+export async function persistSpawnPostStartProjections(
+  env: Env,
+  opts: Pick<ContainmentDriveOpts, "jobId" | "repo" | "installationId">,
+  mint: Pick<ContainerEnvResult, "tenant" | "maxVcpuH">,
+  handle: string,
+  runnerName: string,
+  runnerId: number | undefined,
+): Promise<void> {
+  const { jobId, repo, installationId } = opts;
+  const kv = env.RUNNER_JOB_PATS;
+  if (!kv) return;
+  if (mint.tenant) {
+    try { await kv.put(jobTenantKey(jobId), mint.tenant); }
+    catch (e) { logEvent("error", "kv_put_job_tenant_failed", { jobId, error: (e as Error).message }); throw e; }
+    if (typeof mint.maxVcpuH === "number" && mint.maxVcpuH > 0) {
+      try { await kv.put(vcpuCeilingKey(mint.tenant), String(mint.maxVcpuH), { expirationTtl: VCPU_KEY_TTL_S }); }
+      catch (e) { logEvent("error", "kv_put_vcpu_ceiling_failed", { jobId, error: (e as Error).message }); throw e; }
+    }
+  }
+  try { await kv.put(jobHandleKey(jobId), handle, { expirationTtl: JOB_PAT_TTL_S }); }
+  catch (e) { logEvent("error", "kv_put_job_handle_failed", { jobId, error: (e as Error).message }); throw e; }
+  try {
+    await kv.put(runnerHandleKey(runnerName), encodeRunnerBinding({ h: handle, rid: runnerId, repo, inst: installationId, jid: jobId, t: Date.now() }), { expirationTtl: JOB_PAT_TTL_S });
+  } catch (e) { logEvent("error", "kv_put_runner_handle_failed", { jobId, runnerName, error: (e as Error).message }); throw e; }
+  try {
+    await kv.put(spawnedBoxKey(runnerName), JSON.stringify({ h: handle, rid: runnerId, repo, inst: installationId, t: Date.now() }), { expirationTtl: SPAWNED_BOX_TTL_S });
+  } catch (e) { logEvent("error", "kv_put_spawned_box_failed", { jobId, runnerName, error: (e as Error).message }); throw e; }
+}
+
+/**
  * Drive the durable teardown intent.  This intentionally never clears a tenant
  * vCPU key: it is tenant-wide subscription state, not an attempt projection.
  */
@@ -2623,17 +2684,22 @@ async function recoverActiveSpawnAttempt(env: Env, jobId: string): Promise<boole
   try { attempt = await concurrencySlots(env).readActiveAttempt(jobId); }
   catch { return false; }
   if (!attempt) return false;
-  // Revoke exactly the JIT registration recorded for this handle before a late
-  // provider boot can claim unrelated queued work.  This is idempotent (404 is
-  // success) and uses the installation captured at mint time.
-  await deleteRunnerRegistration(env, attempt.repo, attempt.runnerId, attempt.installationId);
-  const container = getContainer(env.RUNNER_CONTAINER, attempt.handle);
-  // A failed teardown is not evidence that the exact handle is down. Retain the
-  // intent for cron even if a follow-up liveness probe happens to say false.
-  try { await container.teardown(); } catch { return false; }
-  let alive: boolean;
-  try { alive = await container.isAlive(); } catch { return false; }
-  if (alive) return false;
+  if (!attempt.teardownConfirmedAtMs) {
+    // Revoke exactly the JIT registration recorded for this handle before a late
+    // provider boot can claim unrelated queued work.  This is idempotent (404 is
+    // success) and uses the installation captured at mint time.
+    await deleteRunnerRegistration(env, attempt.repo, attempt.runnerId, attempt.installationId);
+    const container = getContainer(env.RUNNER_CONTAINER, attempt.handle);
+    // A failed teardown is not evidence that the exact handle is down. Retain the
+    // intent for cron even if a follow-up liveness probe happens to say false.
+    try { await container.teardown(); } catch { return false; }
+    let alive: boolean;
+    try { alive = await container.isAlive(); } catch { return false; }
+    if (alive) return false;
+    try {
+      if (!(await concurrencySlots(env).markAttemptTeardownConfirmed(jobId, attempt.generation, attempt.ownerToken, attempt.handle))) return false;
+    } catch { return false; }
+  }
   // Retain the intent until EVERY local release has acknowledged.  A release
   // outage remains in the cron retry set instead of becoming an unowned leak.
   if (attempt.preparationId) {

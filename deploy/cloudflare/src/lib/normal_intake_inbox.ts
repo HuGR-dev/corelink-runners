@@ -1,6 +1,6 @@
 import { normalizeRedriveIdentity } from "../containment_authority_helpers";
 import type { AuthorityStorage, AuthorityTransaction } from "./authority_storage";
-import { canonicalInstallationId } from "./repo_config_lookup";
+import { canonicalInstallationId } from "../repo_config_lookup";
 
 export type NormalIntakeState = "pending" | "uncertain" | "complete";
 export interface NormalIntakeRecord {
