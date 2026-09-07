@@ -2079,9 +2079,9 @@ async function mintJit(
 // load-bearing half, not a nicety: the box can boot, but it can never be given
 // work. The container destroy that follows is what actually ends it.
 //
-// Best-effort and deliberately so: it runs on an already-failing path, and every
-// outcome (deleted, 404-already-gone, 422-busy, unreachable) leaves us no worse
-// than before. Logged, never thrown.
+// Never throws so callers can preserve their original failure, but false is an
+// uncertain ownership result. Durable retry/teardown callers must retain their
+// attempt until this returns true (including 404-already-gone).
 async function deleteRunnerRegistration(
   env: Env,
   repoFullName: string,
@@ -2502,6 +2502,15 @@ async function cancelSpawnAttempt(
         installationId,
       );
     }
+    // Deletion is the ownership fence: a false result includes a rejected or
+    // unreachable GitHub request, so it cannot prove runner A will not claim
+    // work later.  Keep its durable claim/attempt intact and refuse B even if
+    // the local destroy below happens to report the box down.
+    if (minted && !registrationDeleted) {
+      await abandonContainer(env, handle, "runner", reason);
+      logEvent("error", "container_start_registration_delete_unconfirmed", { jobId, repo, handle, reason });
+      return false;
+    }
     const tornDown = await abandonContainer(env, handle, "runner", reason);
     if (!activeAttemptPersisted) return true;
     if (!tornDown) {
@@ -2746,7 +2755,10 @@ async function recoverActiveSpawnAttempt(env: Env, jobId: string): Promise<boole
     // Revoke exactly the JIT registration recorded for this handle before a late
     // provider boot can claim unrelated queued work.  This is idempotent (404 is
     // success) and uses the installation captured at mint time.
-    await deleteRunnerRegistration(env, attempt.repo, attempt.runnerId, attempt.installationId);
+    // A failed DELETE means GitHub may still allow this exact runner to claim a
+    // job. Do not certify the container, release capacity, or terminalize the
+    // intent until the registration fence is confirmed (404 is confirmed).
+    if (!(await deleteRunnerRegistration(env, attempt.repo, attempt.runnerId, attempt.installationId))) return false;
     const container = getContainer(env.RUNNER_CONTAINER, attempt.handle);
     // A failed teardown is not evidence that the exact handle is down. Retain the
     // intent for cron even if a follow-up liveness probe happens to say false.
