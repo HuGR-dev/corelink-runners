@@ -841,13 +841,14 @@
         "b861037a04ff65022fd7afa2f636703129486d38",
         "b94844e",
         "106f2a3",
-        "b8d94d1",
-        "212d0ee"
+        "b8d94d1"
       ],
       "review": {
         "status": "approved",
         "commit": "212d0eef88a3857b0ae72c3c37bcff2f58619ae7",
+        "role": "review_only",
         "evidence": [
+          "Review-only commit 212d0eef (test(deploy): assert active version request wiring) is a valid local commit whose parent is the product commit b8d94d1; it is intentionally not a product commit.",
           "credential_completion approved actual Worker handler coverage (11/11); cold review approved the active-version JSONC guard after isolated npm ci --ignore-scripts using the committed lockfile."
         ]
       },
@@ -881,7 +882,9 @@
       "review": {
         "status": "approved",
         "commit": "b367aeaaf5334e9953f092534876898d1133f36f",
+        "role": "review_only",
         "evidence": [
+          "Review-only commit b367aea (test(billing): release appended serialized batch) is a valid local commit; it records review coverage rather than a T4-W2 product commit.",
           "docs/plan/execution/2026-09-05-rule-matrix-and-billing-review.json",
           "r2_pair_acceptance accepted the final paired Runner/Server wire and focused gates."
         ]
@@ -1102,9 +1105,13 @@
         "86e9c0865070174edf149e17dfe4d8984530ee7c",
         "3ee3d74297327bd0efc0a8acd9f18faaf4c50c7c",
         "a9f67d3634a22fc472f0731be164afabc04acbbe",
-        "6bf459541",
         "10355b5f9ebca2cf50f0111298f0a3f352c1aa9d"
       ],
+      "source_provenance": {
+        "external_repository": "paired server repository, outside this corelink-runners object database",
+        "external_source_commit": "6bf459541",
+        "verification": "git cat-file confirms this external short source reference is unavailable locally; Runner commit 10355b5f9ebca2cf50f0111298f0a3f352c1aa9d is a local ancestor and remains the recorded product commit."
+      },
       "review": {
         "status": "approved",
         "commit": "10355b5f9ebca2cf50f0111298f0a3f352c1aa9d",
@@ -1130,10 +1137,12 @@
       ],
       "next_action": "A3.13 source criteria accepted (focused proof 31/31); retain prepared state and no delivery credit. T8-W5 and the three live 75-second refusal proofs owned by T8-W6 remain blocking.",
       "blockers": ["T8-W5", "T8-W6 live refusal proof"],
-      "commits": [
-        "68221dff4a65ef4b05c39ef094b735c7ec68e23b",
-        "1e3d66381bead72b896ba7a7bba8a2204ebfcb67"
-      ],
+      "commits": ["1e3d66381bead72b896ba7a7bba8a2204ebfcb67"],
+      "source_provenance": {
+        "external_repository": "paired server repository, outside this corelink-runners object database",
+        "external_source_commit": "68221dff4a65ef4b05c39ef094b735c7ec68e23b",
+        "verification": "git cat-file confirms this external source reference is unavailable locally; Runner commit 1e3d66381bead72b896ba7a7bba8a2204ebfcb67 is a local ancestor and remains the recorded product commit."
+      },
       "review": {
         "status": "approved",
         "commit": "1e3d66381bead72b896ba7a7bba8a2204ebfcb67",
