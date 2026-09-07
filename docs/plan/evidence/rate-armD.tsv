@@ -1,7 +1,0 @@
-ts	attempt	http	verdict	detail
-03:45:54	1	500	BOOT_FAILED	Failed to start container: The container is not running, consider calling start()
-03:46:13	2	500	BOOT_FAILED	Failed to start container: There has been an internal error connecting to the port
-03:46:36	3	500	BOOT_FAILED	Failed to start container: The container is not running, consider calling start()
-03:46:58	4	500	BOOT_FAILED	Failed to start container: The container is not running, consider calling start()
-03:47:17	5	500	BOOT_FAILED	Failed to start container: The container is not running, consider calling start()
-03:47:40	6	500	BOOT_FAILED	Failed to start container: The container is not running, consider calling start()

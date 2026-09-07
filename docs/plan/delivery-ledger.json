@@ -2,10 +2,17 @@
   "schema_version": "delivery-ledger/v1",
   "registry": "docs/plan/2026-09-01-reconciled-dispatch-dag.md",
   "baseline": {
-    "main_commit": "cda90940f74735c006693d9b9e3be85c37b26f1a",
+    "main_commit": "0cc2d82373b9786450414a77dba656ea43e015a0",
     "prepared_commit": "bb165bad54125460ebae213e405df3a75baa6566",
     "recorded_delivered": 16,
-    "source": "docs/handoff/2026-09-05-session-state.md"
+    "source": "docs/handoff/2026-09-05-session-state.md",
+    "b2_baseline_commit": "0cc2d82373b9786450414a77dba656ea43e015a0",
+    "b2_branch": "bundle/b2-sprint2-closeout-20260906",
+    "b2_scope_freeze": {
+      "work_packages": 14,
+      "scope": ["T2-W2b", "T2-W4", "T2-W6", "T4-W1", "T4-W2", "T3-W3", "T3-W1", "T3-W2", "T8-W1", "T8-W3", "T3-W14", "T3-W9", "T8-W5", "T8-W2"],
+      "dispatchability": "blocked: canonical DAG remains NOT FROZEN / quiet count 0; scope freeze grants no dispatch authority"
+    }
   },
   "item_count_summary": {
     "historical_recorded_delivered": 16,
@@ -79,27 +86,27 @@
   "sprints": [
     {
       "id": 1,
-      "state": "acceptance",
-      "tip_commit": "42435da0ebb9a37f23689ce7a8f44739e71273b3",
+      "state": "merged",
+      "tip_commit": "92270962d633838ee854df77058027c9443b4a35",
       "ci": {
-        "status": "not_run",
-        "commit": null,
-        "evidence": []
+        "status": "passed_for_merged_bundle",
+        "commit": "92270962d633838ee854df77058027c9443b4a35",
+        "evidence": ["B1/#559 merged to origin/main as 0cc2d82373b9786450414a77dba656ea43e015a0"]
       },
       "acceptance": {
-        "status": "pending",
-        "evidence": ["Sprint 1 implementation closure: 12/12 work packages are implementation-complete and code-accepted at the composed candidate."],
+        "status": "accepted_for_merged_bundle",
+        "evidence": ["Sprint 1 implementation closure: 12/12 work packages are implementation-complete and code-accepted at the composed candidate.", "B1/#559 merged to origin/main as 0cc2d82373b9786450414a77dba656ea43e015a0."],
         "shared_bundle_gate": {
           "status": "pending",
           "policy": "PROMOTE source, focused checks, and version-bound execution cards close individual code acceptance. Shared deploy/live qualification and full CI run once on the composed Sprint 1 bundle and remain mandatory before B1 merge.",
           "requirements": ["version-bound deployment/runtime/configuration", "applicable live receipts", "full Sprint 1 CI", "T6-W2 signing, publication, and self-hosted Windows availability"]
         }
       },
-      "merge_commit": null
+      "merge_commit": "0cc2d82373b9786450414a77dba656ea43e015a0"
     },
     {
       "id": 2,
-      "state": "backlog",
+      "state": "preparation",
       "tip_commit": null,
       "ci": {
         "status": "not_run",
