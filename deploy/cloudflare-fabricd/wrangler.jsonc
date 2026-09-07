@@ -276,8 +276,8 @@
       // content-derived and CI-written-once, so it is deterministic in practice, but
       // it is NOT the invariant. RE-PIN to @sha256 immediately after this deploy —
       // `wrangler containers info <app-id>` reports the resolved digest once the
-      // rollout lands. Rollback: the previous pin was
-      // @sha256:db3b03ef829e21d203e1a5ac003a724fe1319eb271d849bd88178f080b468c3d.
+      // rollout lands. Canonical live digest:
+      // @sha256:2e7bcea926f4ce2b38edb1a381f3821fcf4c898377e4f988b763fd3232c0e565.
       // ⚠️ 2026-08-30 BISECT — TEMPORARY, NOT THE INTENDED STEADY PIN.
       // Both the Inc-3 image (db3b03ef @ e5f07f8, 2026-08-19) and a fresh rebuild
       // from main (8631abb, run 33347304356) fail IDENTICALLY: the container never
@@ -327,11 +327,13 @@
       "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer@sha256:2e7bcea926f4ce2b38edb1a381f3821fcf4c898377e4f988b763fd3232c0e565",
       // HTTP control plane. Bumped standard-1 → standard-2 (2026-07-07 acquire-storm
       // hardening): the single-flight singleton must keep /v1/health + lease ops
-      // responsive under a burst of box provisions; 2 vCPU gives headroom so a few
-      // concurrent provisions can't peg the box (paired with the FABRIC_PROVISION_
-      // MAX_INFLIGHT gate that bounds concurrent provisions). Multi-instance (now
-      // pg-enabled) is the next scaling step — see README "Known limit".
+      // responsive under a burst of box provisions. The provider shape for
+      // standard-2 is 1 vCPU / 6 GiB / 12 GB; the FABRIC_PROVISION_MAX_INFLIGHT
+      // gate bounds concurrent provisions. Multi-instance (now pg-enabled) is the
+      // next scaling step — see README "Known limit".
       // Bumped standard-1 → standard-2 (2026-07-07 acquire-storm hardening).
+      // standard-2 currently provides 1 vCPU / 6 GiB / 12 GB; do not infer a
+      // different capacity or alter this instance type as part of pin updates.
       // A 2026-08-30 bisect raised this to standard-4 and PROVED the shape was not
       // the outage cause, so it is reverted rather than left as an unratified cost.
       "instance_type": "standard-2",  // MEASURED: standard-4 changed nothing (0/6)
