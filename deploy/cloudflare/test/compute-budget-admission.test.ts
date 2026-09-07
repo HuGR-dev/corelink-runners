@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("@cloudflare/containers", () => ({ Container: class {}, getContainer: vi.fn() }));
 import { ContainmentDO } from "../src/index";
+import { cancelledEvidence, terminalConfig, terminalResponse } from "./compute-terminal-test-helpers";
 
 const tenantId = "22222222-2222-4222-8222-222222222222";
 const reservationId = "11111111-1111-4111-8111-111111111111";
@@ -38,28 +39,20 @@ function token(now = Date.now(), id = reservationId, workloadId = "job-1") {
 function binding(id = reservationId, workloadId = "job-1") {
   return { token: token(Date.now(), id, workloadId), reservationId: id, tenantId, workloadKind: "spawn_worker_runner" as const, workloadId, vcpuCount: 4, maximumWallMs: 28_800_000 };
 }
+const computeEnv = { FABRIC_COMPUTE_URL: "https://fabric.example", FABRIC_COMPUTE_TERMINAL_AUTHORITY: terminalConfig.terminalAuthority, FABRIC_COMPUTE_TERMINAL_PUBLIC_KEY: terminalConfig.terminalPublicKey, FABRIC_COMPUTE_TERMINAL_RECEIPT_VERSION: terminalConfig.receiptVersion, FABRIC_COMPUTE_TERMINAL_KEY_ID: terminalConfig.terminalKeyId };
 
 function fixture(fetcher: typeof fetch) {
   const storage = new Storage();
-  const containment = new ContainmentDO({ storage, blockConcurrencyWhile: gate() } as never, { FABRIC_COMPUTE_URL: "https://fabric.example" } as never);
+  const containment = new ContainmentDO({ storage, blockConcurrencyWhile: gate() } as never, computeEnv as never);
   vi.stubGlobal("fetch", fetcher);
   return { storage, containment };
 }
 
-function receipt(state: string, id = reservationId) {
+async function receipt(state: string, id = reservationId) {
   const terminal = state === "cancelled" || state === "settled";
-  return new Response(JSON.stringify(terminal ? {
-    reservation_id: id, state, materialized: state === "settled", actual_vcpu_ms: state === "settled" ? "1" : "0",
-    evidence_digest: "a".repeat(64), future_materialization_fence: "b".repeat(64), terminal_authority: "fabric_compute", authority_signature: "c".repeat(86),
-  } : { reservation_id: id, state }), { status: 200 });
+  return terminal ? terminalResponse(state as "cancelled" | "settled", id) : new Response(JSON.stringify({ reservation_id: id, state }), { status: 200 });
 }
-function cancelledEvidence(id: string) {
-  return { terminalKind: "cancelled", actualVcpuMs: "0", evidenceDigest: "a".repeat(64), providerReceipt: {
-    reservation_id: id, state: "cancelled", materialized: false, actual_vcpu_ms: "0", evidence_digest: "a".repeat(64),
-    future_materialization_fence: "b".repeat(64), terminal_authority: "fabric_compute", authority_signature: "c".repeat(86),
-  } };
-}
-function receiptForRequest(state: string, init?: RequestInit) {
+async function receiptForRequest(state: string, init?: RequestInit) {
   const authorization = new Headers(init?.headers).get("authorization") ?? "";
   const encoded = authorization.slice("ComputeGrant ".length).split(".")[0] ?? "";
   const payload = JSON.parse(atob(encoded.replace(/-/g, "+").replace(/_/g, "/"))) as { reservation_id: string };
@@ -99,7 +92,7 @@ describe("compute budget admission integration", () => {
     const b = binding();
     await first.containment.prepareCompute(b);
     await first.containment.claimComputeProvider(reservationId, "job-1");
-    const restarted = new ContainmentDO({ storage: first.storage, blockConcurrencyWhile: gate() } as never, { FABRIC_COMPUTE_URL: "https://fabric.example" } as never);
+    const restarted = new ContainmentDO({ storage: first.storage, blockConcurrencyWhile: gate() } as never, computeEnv as never);
     await expect(restarted.prepareCompute(b)).rejects.toThrow();
     expect(fetcher).toHaveBeenCalledTimes(2);
     await expect(restarted.claimComputeProvider(reservationId, "job-1")).rejects.toThrow("claim refused");
@@ -117,8 +110,7 @@ describe("compute budget admission integration", () => {
     });
     const first = fixture(fetcher);
     await expect(first.containment.prepareCompute(binding())).rejects.toThrow("ambiguous");
-    const restarted = new ContainmentDO({ storage: first.storage, blockConcurrencyWhile: gate() } as never,
-      { FABRIC_COMPUTE_URL: "https://fabric.example" } as never);
+    const restarted = new ContainmentDO({ storage: first.storage, blockConcurrencyWhile: gate() } as never, computeEnv as never);
     await expect(restarted.abandonUnusedCompute(reservationId)).rejects.toThrow("compute request rejected");
     await expect(restarted.claimComputeProvider(reservationId, "job-1")).rejects.toThrow("claim refused");
     expect(await first.storage.get(`compute:obligation:${reservationId}`)).toMatchObject({ phase: "abandoning" });
@@ -173,7 +165,7 @@ describe("compute budget admission integration", () => {
       const id = `11111111-1111-4111-8111-${String(n).padStart(12, "0")}`;
       await first.storage.put(`compute:obligation:${id}`, n === 26 ? {
         binding: { ...binding(id, id), token: token(Date.now() - 120_000, id, id) }, phase: "preparing", deadlineMs: Date.now() - 60_000,
-      } : { binding: binding(id, id), phase: "terminal", deadlineMs: Date.now() + 60_000, ...cancelledEvidence(id) });
+      } : { binding: binding(id, id), phase: "terminal", deadlineMs: Date.now() + 60_000, ...(await cancelledEvidence(id)) });
     }
     const originalPut = first.storage.put.bind(first.storage);
     let failMirror = true;
@@ -185,7 +177,7 @@ describe("compute budget admission integration", () => {
     expect(first.storage.values.get("compute:drain-state")).toMatchObject({ retryRequired: false, cursor: expect.stringContaining("compute:obligation:") });
     first.storage.put = originalPut;
 
-    const restarted = new ContainmentDO({ storage: first.storage, blockConcurrencyWhile: gate() } as never, { FABRIC_COMPUTE_URL: "https://fabric.example" } as never);
+    const restarted = new ContainmentDO({ storage: first.storage, blockConcurrencyWhile: gate() } as never, computeEnv as never);
     await restarted.drainUnusedCompute();
     expect(await first.storage.get(`compute:obligation:11111111-1111-4111-8111-000000000026`)).toMatchObject({ phase: "terminal", terminalKind: "cancelled" });
     expect(first.storage.values.has("compute:drain-state")).toBe(false);
@@ -201,12 +193,12 @@ describe("compute budget admission integration", () => {
       const id = `11111111-1111-4111-8111-${String(n).padStart(12, "0")}`;
       await first.storage.put(`compute:obligation:${id}`, n === 1 || n === 26 ? {
         binding: { ...binding(id, id), token: token(Date.now() - 120_000, id, id) }, phase: "preparing", deadlineMs: Date.now() - 60_000,
-      } : { binding: binding(id, id), phase: "terminal", deadlineMs: Date.now() + 60_000, ...cancelledEvidence(id) });
+      } : { binding: binding(id, id), phase: "terminal", deadlineMs: Date.now() + 60_000, ...(await cancelledEvidence(id)) });
     }
     await first.containment.drainUnusedCompute();
     expect(first.storage.values.get("compute:drain-state")).toMatchObject({ retryRequired: true, cursor: expect.stringContaining("000000000025") });
     unavailable = false;
-    const restarted = new ContainmentDO({ storage: first.storage, blockConcurrencyWhile: gate() } as never, { FABRIC_COMPUTE_URL: "https://fabric.example" } as never);
+    const restarted = new ContainmentDO({ storage: first.storage, blockConcurrencyWhile: gate() } as never, computeEnv as never);
     await restarted.drainUnusedCompute();
     expect(await first.storage.get(`compute:obligation:11111111-1111-4111-8111-000000000026`)).toMatchObject({ phase: "terminal" });
     expect(first.storage.values.get("compute:drain-retry")).toBe(true);
