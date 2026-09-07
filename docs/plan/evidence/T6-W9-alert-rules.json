@@ -3,7 +3,7 @@
   "artifact_id": "t6-w9-alert-rules",
   "kind": "test+probe",
   "status": "RED",
-  "observed_at": "2026-09-06T22:03:00Z",
+  "observed_at": "2026-09-07T01:10:00Z",
   "source": {
     "repository": "corelink-runners",
     "commit_sha": "a2c18f6b2621824bd12a2a34426215efe9dfeec5",
@@ -15,44 +15,52 @@
   },
   "evidence": {
     "acceptance_state": "READY-PENDING-LIVE",
-    "tested_integration_head": "a2c18f6b2621824bd12a2a34426215efe9dfeec5",
-    "local_validation": {
-      "status": "PASS",
-      "command": "npx vitest run test/critical-rule-matrix.test.ts test/containment.test.ts test/rules.test.ts",
-      "test_files": 3,
-      "tests_passed": 63,
-      "tests_failed": 0,
-      "typecheck": "PASS",
-      "coverage": {
-        "c1_c5_positive_routes": "all 19 frozen conditions",
-        "malformed_200": "empty, invalid JSON, null, array, object without counters, empty counters",
-        "auth_and_route_posture": "401, unarmed 404, configured 404",
-        "response_drain": "provider error body is consumed and never logged"
-      }
+    "execution_card": "docs/plan/execution/2026-09-07-t6-w9-live-probe-card.md",
+    "deploy_target": {
+      "worker": "corelink-canary",
+      "config": "deploy/cloudflare-canary/wrangler.jsonc",
+      "account_id": "6a1fc1c626fc2628823e60b9db01f5cd",
+      "cron": "*/5 * * * *",
+      "service_bindings": ["FABRICD_SVC=corelink-fabricd", "SPAWN_SVC=corelink-spawn-worker"]
     },
-    "external_binding": {
-      "channel": "external-primary-page",
-      "route_reference": "REQUIRED_FROM_O-MONITORHOST",
-      "detector": "REQUIRED_EXTERNAL_C1-C5_DETECTOR",
-      "version_binding": "The live result must name the deployed detector version and the exact integration HEAD above; mixed or absent versions are invalid.",
-      "delivery_ack": "REQUIRED_EXTERNAL_PAGE_AND_ACK"
+    "secret_names": [
+      "FABRIC_OBSERVABILITY_KEY",
+      "METRICS_OBSERVABILITY_KEY",
+      "RESEND_API_KEY",
+      "CANARY_TICK_ENVELOPE_HMAC_KEY"
+    ],
+    "detector_binding": {
+      "owner": "T6-W15",
+      "route_channel": "external-primary-page",
+      "ingest_url": "PENDING_T6-W15_OWNER_BINDING",
+      "source": "PENDING_T6-W15_OWNER_BINDING",
+      "service": "PENDING_T6-W15_OWNER_BINDING",
+      "application": "PENDING_T6-W15_OWNER_BINDING",
+      "key_id": "PENDING_T6-W15_OWNER_BINDING",
+      "credential_epoch": "PENDING_T6-W15_OWNER_BINDING",
+      "monitor_rearm_tuple_digest": "PENDING_T6-W15_OWNER_BINDING",
+      "detector_version": "PENDING_DEPLOYED_VERSION_RECEIPT"
     },
-    "live_probe": {
+    "probe": {
       "status": "PREPARED",
-      "trials": 3,
-      "cases": [
-        "inject one classified positive condition in each C1-C5 pillar and verify the same external-primary-page route",
-        "inject malformed/auth failures and verify typed incident delivery without credential disclosure",
-        "return a non-2xx provider body and verify the response is drained before delivery state is recorded"
+      "trial_count": "3/3 for selected injection classes",
+      "matrix": [
+        "all 19 C1-C5 classified positive conditions",
+        "malformed 200 bodies",
+        "401 and unarmed/armed 404 posture",
+        "429 and 5xx provider response drain",
+        "external page delivery and authenticated ACK",
+        "stopped-canary and monitor-path independence"
       ],
-      "required_observations": [
-        "external detector receives the classified event independently of the canary",
-        "deployed detector version and route binding are recorded in the receipt",
-        "page and acknowledgement identifiers are recorded for every trial",
-        "no local canary self-evaluation is accepted as delivery evidence"
-      ],
-      "blocked_on": ["T6-W4 live binding", "O-CANARY", "T7-W4b", "external detector deployment", "real channel receipt/ack"]
-    }
+      "receipt_requirements": [
+        "canary Worker version id",
+        "T6-W15 detector version",
+        "route/channel reference",
+        "provider page and delivery ids",
+        "authenticated ACK ids and trusted timestamps"
+      ]
+    },
+    "blocked_on": ["T6-W4 live binding", "T6-W15 named ingest route", "T7-W4b trust binding", "real page delivery and ACK"]
   },
-  "notes": "This artifact was rerun against the current integration HEAD, including the current page-ack/tick composition. Local C1-C5 routing and failure/drain behavior is ready. It remains RED until T6-W4/T3 live bindings, the external detector version, and real-channel delivery plus acknowledgement are independently observed. No live credential, endpoint, deployment, page, or ACK is fabricated."
+  "notes": "Execution card and non-secret target/secret-name contract are prepared. No endpoint credential, secret value, page payload, deployment receipt, page, or ACK is fabricated. This remains RED until the owner bindings close and the complete external probe runs against the immutable tuple."
 }
