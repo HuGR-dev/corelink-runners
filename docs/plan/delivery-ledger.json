@@ -11,7 +11,32 @@
     "b2_scope_freeze": {
       "work_packages": 14,
       "scope": ["T2-W2b", "T2-W4", "T2-W6", "T4-W1", "T4-W2", "T3-W3", "T3-W1", "T3-W2", "T8-W1", "T8-W3", "T3-W14", "T3-W9", "T8-W5", "T8-W2"],
-      "dispatchability": "blocked: canonical DAG remains NOT FROZEN / quiet count 0; scope freeze grants no dispatch authority",
+      "dispatchability": "blocked: canonical DAG is PROMOTED/FROZEN; post-promotion quiet count 0 means no dispatch authority",
+      "promotion": {
+        "status": "PROMOTED_FROZEN_NOT_DISPATCHABLE",
+        "pre_promotion_target": "fdf3a27fab6aa2231323ed6a95af369ae46f136a",
+        "valid_pre_reviews": [
+          {
+            "author": "b2_quiet_pre_2",
+            "target": "fdf3a27fab6aa2231323ed6a95af369ae46f136a",
+            "conclusion": "QUIET_PROMOTE"
+          },
+          {
+            "author": "b2_quiet_pre_replacement",
+            "target": "fdf3a27fab6aa2231323ed6a95af369ae46f136a",
+            "conclusion": "QUIET_PROMOTE"
+          }
+        ],
+        "invalid_pre_reviews": [
+          {
+            "author": "b2_quiet_pre_1",
+            "target": "19eb (root checkout; no target worktree)",
+            "conclusion": "invalid; no quiet credit"
+          }
+        ],
+        "post_promotion_quiet_count": 0,
+        "next_gate": "two independent quiet reviews over byte-identical promoted bytes, then the clean post-incident baseline"
+      },
       "gate_evidence": [
         "At 265557bf018dc29f7cdf2cd0c0e867a5a95fc9a7, root-reported focused source proof: T4-W1 19/19 plus typecheck PASS; T4-W2 11/11; T3-W3 18/18 plus typecheck PASS; T3-W1 Rust 40/40 plus Worker 41/41; T8-W1 15/15; T3-W14 21/21 mapped AU3.19/AU4.14/AU3.20/AU3.21; T8-W5 18/18; T8-W2 31/31.",
         "Read-only hygiene package is staged at /tmp/corelink-b2-hygiene.T8Ay9K; it is contextual evidence only and grants no delivery or quiet-round credit."
@@ -2815,6 +2840,56 @@
         "finding": "the rendered 23 batches emit all 70 canonical vertices while the prose reported 22 batches and 69 emissions",
         "credit": "mechanical review evidence only; not a quiet round"
       }
+    },
+    {
+      "at": "2026-09-07T19:00:00+00:00",
+      "task": "B2 PRE quiet review",
+      "owner": "b2_quiet_pre_2",
+      "state": "completed",
+      "scope": [
+        "docs/plan/2026-09-01-reconciled-dispatch-dag.md",
+        "docs/plan/delivery-ledger.json"
+      ],
+      "target": "fdf3a27fab6aa2231323ed6a95af369ae46f136a",
+      "conclusion": "QUIET_PROMOTE",
+      "credit": "valid PRE quiet review; promotion evidence only"
+    },
+    {
+      "at": "2026-09-07T19:00:01+00:00",
+      "task": "B2 PRE quiet review",
+      "owner": "b2_quiet_pre_replacement",
+      "state": "completed",
+      "scope": [
+        "docs/plan/2026-09-01-reconciled-dispatch-dag.md",
+        "docs/plan/delivery-ledger.json"
+      ],
+      "target": "fdf3a27fab6aa2231323ed6a95af369ae46f136a",
+      "conclusion": "QUIET_PROMOTE",
+      "credit": "valid PRE quiet review; promotion evidence only"
+    },
+    {
+      "at": "2026-09-07T19:00:02+00:00",
+      "task": "B2 PRE quiet review invalidated",
+      "owner": "b2_quiet_pre_1",
+      "state": "completed",
+      "scope": [],
+      "target": "19eb (root checkout; no target worktree)",
+      "conclusion": "INVALID_NO_CREDIT",
+      "credit": "none"
+    },
+    {
+      "at": "2026-09-07T19:00:03+00:00",
+      "task": "B2 normative promotion and freeze",
+      "owner": "root",
+      "state": "integrated",
+      "scope": [
+        "docs/plan/2026-09-01-reconciled-dispatch-dag.md",
+        "docs/plan/delivery-ledger.json",
+        "docs/plan/wp-check.py"
+      ],
+      "source_target": "fdf3a27fab6aa2231323ed6a95af369ae46f136a",
+      "conclusion": "PROMOTED_FROZEN_NOT_DISPATCHABLE",
+      "post_promotion_quiet_count": 0
     }
   ],
   "execution_plan": "docs/plan/execution/2026-09-06-closeout-three-bundles.md",
