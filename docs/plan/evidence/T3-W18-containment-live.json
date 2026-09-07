@@ -116,6 +116,78 @@
       "teardown": "POST /v1/teardown with the returned handle, then verify GET /v1/status/{handle}=404 and the provider inventory has zero running instances",
       "safety": "No runner was started on the shared developer host; production remains both-paused"
     },
+    "control_plane_and_alternate_target_audit": {
+      "observed_at": "2026-09-07T01:26:00Z",
+      "github": {
+        "identity": "gmhelmold",
+        "organization_id": 311862110,
+        "organization_membership": "admin/active",
+        "repository_permissions": "admin",
+        "organization_actions_permissions": {
+          "enabled_repositories": "all",
+          "allowed_actions": "all",
+          "sha_pinning_required": false
+        },
+        "repository_actions_permissions": {
+          "enabled": true,
+          "allowed_actions": "all",
+          "sha_pinning_required": false
+        },
+        "legacy_billing_endpoint": {
+          "path": "/orgs/HuGR-Labs/settings/billing/actions",
+          "http_status": 410,
+          "meaning": "GitHub reports the endpoint moved"
+        },
+        "current_billing_api": {
+          "path": "/organizations/HuGR-Labs/settings/billing/budgets",
+          "http_status": 200,
+          "total_count": 0,
+          "has_next_page": false
+        },
+        "current_actions_usage_summary": {
+          "path": "/organizations/HuGR-Labs/settings/billing/usage/summary",
+          "http_status": 200,
+          "period": "2026-09",
+          "actions_net_quantity": 0,
+          "actions_net_amount": 0,
+          "actions_gross_minutes": 20
+        },
+        "historical_budget_record": {
+          "source_commit": "b3371e8b6e9803d0ceac3b5df2677366b37aad1b",
+          "document": "docs/handoff/2026-09-01-session-state-go-live-remediation.md",
+          "recorded_budget_id": "95f39884-fa30-4d81-84f5-dee0ba4b2a0c",
+          "recorded_amount": 47,
+          "recorded_prevent_further_usage": true,
+          "current_lookup_http_status": 404,
+          "interpretation": "Historical source only; current API exposes no matching active budget"
+        },
+        "mutation_result": "none; Actions is already enabled at org and repository scope, and no current budget exists to update safely"
+      },
+      "aws_alternate_target": {
+        "caller_account": "046797548582",
+        "caller": "arn:aws:iam::046797548582:user/Gus_CLI",
+        "region": "us-east-1",
+        "attached_policy": "AdministratorAccess",
+        "default_vpc": "vpc-0b22e968ccfddd63e",
+        "available_subnets": 6,
+        "existing_corelink_instances": 0,
+        "existing_corelink_amis": 0,
+        "existing_corelink_ecr_repositories": 0,
+        "existing_ecs_clusters": 0,
+        "existing_ecs_task_definitions": 0,
+        "ssm_managed_instances": 0,
+        "official_registry_head_http_status": 401,
+        "aws_budget_guard": {
+          "name": "skill002-guard",
+          "monthly_limit_usd": 10,
+          "actual_usd": 0,
+          "forecast_usd": 0.027
+        },
+        "disposition": "NOT_STARTED",
+        "reason": "AWS identity has broad capability but no existing CoreLink bootstrap/image distribution; creating new compute and republishing the private pinned image would be an unreviewed infrastructure mutation"
+      },
+      "external_action_required": "Billing owner must confirm or clear the historical Actions budget in the GitHub billing UI/API after migration; infrastructure owner must provide an approved non-host runner target plus secret-channel registry/spawn credential. No local mutation was applied."
+    },
     "reversal": {
       "mode": "FORWARD_ONLY",
       "current_version_id": "d04aa4ea-80a3-481e-9f2e-e785e8824480",
