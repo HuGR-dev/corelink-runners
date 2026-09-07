@@ -6,7 +6,7 @@
 # Stage 1 (clw-builder): validates the pinned clw artifact + builds the
 # corelink-check-exec-server
 # Stage 2 (bin-downloader): downloads ttyd + code-server
-# Stage 3 (runtime): Debian 12 slim + Chromium + Xvfb + noVNC + non-root user coder
+# Stage 3 (runtime): Ubuntu 24.04 + Chromium + Xvfb + noVNC + non-root user coder
 
 # ══════════════════════════════════════════════════════════════════════
 # STAGE 1: Download and validate the verified clw binary
