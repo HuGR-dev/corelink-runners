@@ -21,9 +21,9 @@
   "account_id": "6a1fc1c626fc2628823e60b9db01f5cd",
 
   // Non-secret config. Secrets (FABRIC_OBSERVABILITY_KEY, METRICS_OBSERVABILITY_KEY,
-  // RESEND_API_KEY, PAGE_ACK_AUTHORIZATION) are set via `wrangler secret put`
-  // — NEVER in this file. PAGE_ACK_URL and the PAGE_ACK_* correlation vars are
-  // intentionally absent until the monitor has provisioned the exact delivery.
+  // RESEND_API_KEY) is set via `wrangler secret put` — NEVER in this file.
+  // PAGE_URL and PAGE_* correlation vars are intentionally absent until the
+  // monitor has provisioned the exact delivery. There is no human bearer here.
   "vars": {
     // Monitored surfaces (defaults live in src/index.ts; pinned here for clarity).
     "FABRIC_STATUS_URL": "https://corelink-fabricd.gmhelmold.workers.dev/internal/v1/status",

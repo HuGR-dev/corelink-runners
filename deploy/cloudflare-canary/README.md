@@ -19,12 +19,12 @@ Each tick: fetch all three, store the snapshot in KV, diff vs the previous
 snapshot, evaluate the **pure** rules in `src/rules.ts`, apply a per-alert
 cooldown, and send at most one summary email.
 
-When the optional T6-W15 page-ACK configuration is complete, a successfully
-delivered alert also posts the frozen `PageAckRequest` to
-`PAGE_ACK_URL`. The monitor owns human authentication, signing, schedule
-authorization and CAS; the canary stores the returned `{token,auditReceipt}`
-under its incident/page/delivery correlation key and suppresses duplicate ACK
-posts. The canary never implements or imports the monitor's cryptography.
+When the optional T6-W15 page configuration is complete, a successfully
+delivered alert includes an HTTPS `PAGE_URL` and its incident/page/delivery
+correlation. The human opens that link and authenticates the exact AWS_IAM
+route with SigV4. The canary never POSTs the ACK route, carries a bearer, or
+writes `humanAcknowledgedAt`; it only records a token-free delivery marker in
+KV and suppresses duplicate link delivery.
 
 `FABRIC_PROBES_ENABLED=0` is the explicit containment mode for a fabricd that
 must scale to zero. It skips both fabricd requests and records health as
@@ -81,12 +81,10 @@ npx tsc --noEmit                                          # clean
    `ALERT_EMAIL_FROM` **must** be a Resend-verified `humangr.com` sender
    (e.g. `alerts@humangr.com`) — verify the domain in Resend first.
 4. If the owner has provisioned a monitor page delivery, configure the exact
-   public ACK route and its on-call authorization without logging the secret:
-   `PAGE_ACK_URL`, secret `PAGE_ACK_AUTHORIZATION`, and vars
-   `PAGE_ACK_INCIDENT_ID`, `PAGE_ACK_PAGE_ID`, `PAGE_ACK_DELIVERY_ID`,
-   `PAGE_ACK_DESTINATION`, `PAGE_ACK_PAYLOAD`. All six correlation/payload
-   values must match the monitor's existing delivery; incomplete config is
-   fail-closed and does not claim an acknowledgement.
+   HTTPS AWS_IAM route and its correlation: `PAGE_URL`,
+   `PAGE_INCIDENT_ID`, `PAGE_ID`, `PAGE_DELIVERY_ID`, `PAGE_DESTINATION`,
+   `PAGE_PAYLOAD`. The canary has no human credential and performs no ACK
+   request; incomplete config is fail-closed.
 5. `npm run deploy`.
 
 Tunables (vars): `ALERT_COOLDOWN_MINUTES` (default 30), `STALENESS_HOURS`

@@ -13,6 +13,12 @@ export interface NotifyEnv {
   ALERT_EMAIL_TO?: string;
   /** From address — MUST be on a Resend-verified humangr.com domain. */
   ALERT_EMAIL_FROM?: string;
+  PAGE_URL?: string;
+  PAGE_INCIDENT_ID?: string;
+  PAGE_ID?: string;
+  PAGE_DELIVERY_ID?: string;
+  PAGE_DESTINATION?: string;
+  PAGE_PAYLOAD?: string;
 }
 
 export interface SendResult {
@@ -33,7 +39,7 @@ function topSeverity(alerts: Alert[]): Severity {
 }
 
 /** Build the plain-text email (subject + body) for a set of alerts. PURE. */
-export function formatAlertEmail(alerts: Alert[], now = Date.now()): { subject: string; text: string } {
+export function formatAlertEmail(alerts: Alert[], now = Date.now(), page?: Pick<NotifyEnv, "PAGE_URL" | "PAGE_INCIDENT_ID" | "PAGE_ID" | "PAGE_DELIVERY_ID" | "PAGE_DESTINATION">): { subject: string; text: string } {
   const sev = topSeverity(alerts);
   const tag = sev === "critical" ? "CRITICAL" : sev === "warn" ? "WARN" : "INFO";
   const subject = `[CoreLink canary] ${tag}: ${alerts.length} alert${alerts.length === 1 ? "" : "s"}`;
@@ -47,6 +53,15 @@ export function formatAlertEmail(alerts: Alert[], now = Date.now()): { subject: 
     lines.push("");
   }
   lines.push(`Detected at ${new Date(now).toISOString()}.`);
+  if (page?.PAGE_URL && page.PAGE_INCIDENT_ID && page.PAGE_ID && page.PAGE_DELIVERY_ID && page.PAGE_DESTINATION) {
+    lines.push("");
+    lines.push("Human acknowledgement (AWS_IAM SigV4 only):");
+    lines.push(`  page_url: ${page.PAGE_URL}`);
+    lines.push(`  incident_id: ${page.PAGE_INCIDENT_ID}`);
+    lines.push(`  page_id: ${page.PAGE_ID}`);
+    lines.push(`  delivery_id: ${page.PAGE_DELIVERY_ID}`);
+    lines.push(`  destination: ${page.PAGE_DESTINATION}`);
+  }
   lines.push("Surfaces watched: fabricd /internal/v1/status + /v1/health, spawn-worker /internal/v1/metrics.");
   return { subject, text: lines.join("\n") };
 }
@@ -75,7 +90,7 @@ export async function sendAlert(env: NotifyEnv, alerts: Alert[]): Promise<SendRe
     return { sent: false, reason: "not-configured" };
   }
 
-  const { subject, text } = formatAlertEmail(alerts);
+  const { subject, text } = formatAlertEmail(alerts, Date.now(), env);
   try {
     const resp = await fetch("https://api.resend.com/emails", {
       method: "POST",
