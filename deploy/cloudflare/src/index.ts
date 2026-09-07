@@ -288,6 +288,10 @@ export interface Env {
   // GitHub webhook HMAC secret (X-Hub-Signature-256). Absent ⇒ /webhook is
   // disabled (the route returns 503), so the autoscaler is opt-in.
   GITHUB_WEBHOOK_SECRET?: string;
+  // Optional repository-hook secret. The CoreLink App uses GITHUB_WEBHOOK_SECRET;
+  // a first-party repository hook may use this separate secret so rotating or
+  // restoring the repo delivery path never changes the App's credential.
+  GITHUB_WEBHOOK_REPO_SECRET?: string;
   // A GitHub token with repo Administration:write — used to mint the JIT runner
   // config (POST generate-jitconfig). Worker secret. Absent ⇒ /webhook 503.
   // This is the STATIC first-party dogfood credential: it only has rights on
@@ -4907,12 +4911,17 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
     // is the all-Cloudflare autoscaler: no external fabric. Opt-in (disabled
     // unless both the webhook secret and the mint token are configured).
     if (request.method === "POST" && pathname === "/webhook") {
-      if (!env.GITHUB_WEBHOOK_SECRET || !env.GITHUB_MINT_TOKEN) {
+      const webhookSecrets = [env.GITHUB_WEBHOOK_SECRET, env.GITHUB_WEBHOOK_REPO_SECRET]
+        .filter((secret): secret is string => Boolean(secret));
+      if (webhookSecrets.length === 0 || !env.GITHUB_MINT_TOKEN) {
         return json({ error: "autoscaler not configured" }, 503);
       }
       const rawBytes = await request.arrayBuffer();
       const sig = request.headers.get("x-hub-signature-256") ?? "";
-      if (!(await verifyGithubHmacBytes(env.GITHUB_WEBHOOK_SECRET, sig, rawBytes))) {
+      const signatureValid = await Promise.all(
+        webhookSecrets.map((secret) => verifyGithubHmacBytes(secret, sig, rawBytes)),
+      );
+      if (!signatureValid.some(Boolean)) {
         return unauthorized();
       }
       let raw: string;

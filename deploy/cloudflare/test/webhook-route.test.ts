@@ -268,6 +268,19 @@ describe("/webhook queued — authentication gate (real HMAC)", () => {
     expect(resp.status).toBe(503);
     expect(containers).toHaveLength(0);
   });
+
+  it("accepts a separately bound repository-hook secret without replacing the App secret", async () => {
+    const kv = fakeKv();
+    const env = baseEnv({
+      GITHUB_WEBHOOK_SECRET: "app-secret-preserved",
+      GITHUB_WEBHOOK_REPO_SECRET: SECRET,
+      RUNNER_JOB_PATS: kv as never,
+    });
+    const ctx = makeCtx();
+    const resp = await queuedWebhook(env, ctx, { jobId: "902", repo: "acme/api", signSecret: SECRET });
+    expect(resp.status).toBe(202);
+    await drain(ctx);
+  });
 });
 
 describe("/webhook queued — the authenticated spawn orchestration", () => {
