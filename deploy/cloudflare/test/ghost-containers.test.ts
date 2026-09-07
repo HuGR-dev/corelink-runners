@@ -307,6 +307,13 @@ describe("ghost containers · cell 1 — a superseded start attempt is cancelled
     // referenced that handle again and only `sleepAfter` (15m) reclaimed the box.
     expect(teardownHandles).toContain(abandoned);
     expect(teardownHandles).not.toContain(survivor);
+    // The confirmed cancellation retires only A's durable attempt, letting B
+    // bind its own JIT identity under the same workflow claim.
+    const slots = env.CONCURRENCY_SLOTS.get(env.CONCURRENCY_SLOTS.idFromName("global"));
+    const active = await slots.readActiveAttempt("3001");
+    expect(active).toMatchObject({ handle: survivor, jitAttempt: 2 });
+    expect(active?.runnerName).not.toBe("cf-runner-1");
+    expect(await slots.readSpawnClaim("3001")).toMatchObject({ providerIdentity: active?.runnerName });
     // …and it is counted, not silent.
     expect(metrics.counts.container_start_abandoned).toBe(1);
   });
@@ -366,6 +373,26 @@ describe("ghost containers · cell 1 — a superseded start attempt is cancelled
     expect(ghostKeys(kv)).toHaveLength(3);
     expect(metrics.counts.container_start_abandoned).toBe(3);
   }, 15000);
+
+  it("an unconfirmed cancellation retains A and blocks a replacement JIT", async () => {
+    const kv = fakeKv();
+    const metrics = fakeMetrics();
+    const env = baseEnv(kv, metrics);
+    const ctx = makeCtx();
+    startBehavior = async () => { throw new Error("start lost its response"); };
+    // Teardown returned, but the handle is still live: no amount of retry
+    // convenience can prove it is safe to mint runner B.
+    teardownBehavior = async (handle) => { aliveByHandle[handle] = true; };
+
+    await queuedWebhook(env, ctx, { jobId: "3005", repo: "acme/api", installationId: 555 });
+    await drain(ctx);
+
+    expect(startedRunnerBoxes()).toHaveLength(1);
+    expect(jitCalls()).toHaveLength(1);
+    const first = startedRunnerBoxes()[0];
+    expect((await env.CONCURRENCY_SLOTS.get(env.CONCURRENCY_SLOTS.idFromName("global")).readActiveAttempt("3005"))?.handle).toBe(first.handle);
+    expect(kv.store.has(`ghost:${first.handle}`)).toBe(true);
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
