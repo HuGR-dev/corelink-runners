@@ -469,3 +469,20 @@ T8-W3 (atomic claim and required-mint proof) and T3-W9 (spawn durability).
 External/live gates remain T2-W2b, T2-W4 and T2-W6, plus the named live gates
 for source-done WPs. This reconciliation changes neither B2's 14-WP scope nor
 the canonical no-dispatch gate; it performs no freeze or promotion.
+
+### B2 F007 decision and source-proof reconciliation
+
+Root resolved the apparent T3-W2→T3-W16 dependency: it is not a B2 prerequisite.
+ContainmentDO redrive is authoritative and fenced, KV reaping is diagnostic-only,
+and `teardownCompletedRunner` confirms `isAlive=false` before slot release.
+T3-W16/F005 is retained as Sprint 3 preventive hardening. T3-W2 therefore needs
+only its F007 acceptance/evidence and three focused lifecycle permutations before
+it can compose with T8-W1.
+
+At B2 SHA `265557bf018dc29f7cdf2cd0c0e867a5a95fc9a7`, root reported focused
+source proofs: T4-W1 19/19 plus typecheck PASS; T4-W2 11/11; T3-W3 18/18 plus
+typecheck PASS; T3-W1 Rust 40/40 plus Worker 41/41; T8-W1 15/15; T3-W14 21/21
+(AU3.19/AU4.14/AU3.20/AU3.21); T8-W5 18/18; and T8-W2 31/31. The read-only
+hygiene package at `/tmp/corelink-b2-hygiene.T8Ay9K` is contextual evidence
+only. None of these source proofs is a quiet review, live proof, or delivery
+credit.
