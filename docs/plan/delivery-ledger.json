@@ -308,7 +308,7 @@
         "T3-W4",
         "T4-W4"
       ],
-      "next_action": "Code and metadata checks complete. Execute runtime acceptance only in complete Sprint1 CI; discovery of unbound/historical identities is explicitly tracked as successor F-20260905-005.",
+      "next_action": "T3-W10 acceptance is accepted and complete at source tip 2a3c49e773e47faa2715bf6aeb1f5a74cf2bed51; retain its teardown/reaper evidence and run complete Sprint 1 validation only at the composed bundle tip. F-20260905-005 remains separately tracked.",
       "blockers": [],
       "commits": [
         "bb165bad54125460ebae213e405df3a75baa6566",
@@ -330,9 +330,21 @@
       "evidence": [
         "docs/plan/execution/2026-09-05-held-cleanup.json",
         "docs/plan/execution/2026-09-05-provider-binding.json",
-        "docs/plan/execution/2026-09-05-provider-recovery.json"
+        "docs/plan/execution/2026-09-05-provider-recovery.json",
+        "PROMOTE acceptance artifact 524a704 replayed as cf921701; re-review evidence records held teardown 2/2 and reaper retry 8/8."
       ],
-      "historical_sprint": 1
+      "historical_sprint": 1,
+      "acceptance": {
+        "status": "accepted",
+        "complete": true,
+        "source_tip": "2a3c49e773e47faa2715bf6aeb1f5a74cf2bed51",
+        "source_commit": "524a704ec71c11ee1850d82756c380eeeac3263c",
+        "integration_commit": "cf921701c69618792a1e6ad3304f9df1a4c5ae19",
+        "evidence": [
+          "docs/validation/evidence/2026-09-06-T3-W10-teardown-reaper-acceptance.json",
+          "held_teardown_confirmation: 2/2 passed; reaper_teardown_retry: 8/8 passed."
+        ]
+      }
     },
     {
       "id": "T6-W1",
