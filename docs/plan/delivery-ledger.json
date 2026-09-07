@@ -1784,7 +1784,7 @@
     {
       "id": "T6-W9",
       "sprint": 1,
-      "state": "prepared",
+      "state": "ready",
       "implementation": "complete",
       "owner": "root",
       "dependencies": [
@@ -1792,7 +1792,7 @@
         "O-CANARY",
         "T7-W4b"
       ],
-      "next_action": "Named C1-C5 rule/channel source integrated. Real external binding, deployed detectors and end-to-end acceptance remain pending at canonical later gates; no live credit.",
+      "next_action": "T6-W9 is ready but not accepted. Bind the target a2c18f6b2621824bd12a2a34426215efe9dfeec5 to the deployed external detector and real page/ack receipts through the required T6-W4/T3 live and owner bindings.",
       "blockers": [],
       "commits": [
         "bb165bad54125460ebae213e405df3a75baa6566",
@@ -1807,9 +1807,27 @@
         ]
       },
       "evidence": [
-        "docs/plan/execution/2026-09-05-rule-matrix-and-billing-review.json"
+        "docs/plan/execution/2026-09-05-rule-matrix-and-billing-review.json",
+        "READY-PENDING-LIVE artifact c5d2d83 reran 63/63 focused C1-C5 checks plus typecheck on target a2c18f6; no live binding, detector, page, or ACK is claimed."
       ],
-      "historical_sprint": 1
+      "historical_sprint": 1,
+      "acceptance": {
+        "status": "ready",
+        "complete": false,
+        "target_commit": "a2c18f6b2621824bd12a2a34426215efe9dfeec5",
+        "source_commit": "c5d2d83aefeb1a5ff86871157947b6732a7b9f72",
+        "integration_commit": "c5d2d83aefeb1a5ff86871157947b6732a7b9f72",
+        "evidence": [
+          "docs/plan/evidence/T6-W9-alert-rules.json",
+          "63/63 focused tests and package typecheck passed at the target."
+        ],
+        "residual": [
+          "T6-W4/T3 live binding",
+          "O-CANARY and T7-W4b",
+          "deployed external C1-C5 detector/version",
+          "real external page and acknowledgement receipt"
+        ]
+      }
     },
     {
       "id": "T6-W10",
