@@ -148,12 +148,15 @@ export async function runCanonicalEffect<TOpts extends object>(
     const resumable = existing.kind === "owned" && (existing.state === "PREPARED" || existing.state === "CLAIM_ACQUIRED" || existing.state === "PERMIT_ISSUED" || existing.state === "BOUND");
     let state: "PREPARED" | "CLAIM_ACQUIRED" | "PERMIT_ISSUED" | "BOUND" = (resumable ? existing.state : "PREPARED") as "PREPARED" | "CLAIM_ACQUIRED" | "PERMIT_ISSUED" | "BOUND";
     let ownerRecord: any = resumable ? existing.record : undefined;
-    if (deps.beforeClaim) await deps.beforeClaim();
     claimAdmitted = await deps.claim();
     // A persisted tuple does not transfer or replace the external claim. Every
     // invocation must win the claim in this invocation; only that claim may be
     // released on an abortable failure.
     if (!claimAdmitted) return { status: "claim_refused" };
+    // The external claim is the first side effect fence. Preparation may
+    // authorize, reserve capacity, mint credentials, or create JIT state, so
+    // it must never run before this authority has admitted the attempt.
+    if (deps.beforeClaim) await deps.beforeClaim();
     if (deps.beforeDrive && !(await deps.beforeDrive())) { await releaseClaim(); return { status: "before_drive_refused" }; }
     if (!resumable) {
       const prepared = await deps.ledger.ownerPrepare(req);

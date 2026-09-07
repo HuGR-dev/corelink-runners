@@ -295,7 +295,7 @@ describe("T3-W17 deterministic first-party reservation seams", () => {
     )));
     await Promise.all(contexts.map(settle));
     expect(list).toHaveBeenCalledTimes(100); expect(release).toHaveBeenCalledTimes(1); expect(claim).toHaveBeenCalledTimes(1); expect(drive).toHaveBeenCalledTimes(1); expect(orphan).not.toHaveBeenCalled();
-    expect(order).toEqual(["release", "claim", "drive"]);
+    expect(order).toEqual(["claim", "release", "drive"]);
     expect(d.storage.map.get(reserveKey())).toMatchObject({ state: "COMPLETED", epoch: 1, effect_id: "containment:v1:redrive:acme/repo/123" });
   });
 
@@ -363,7 +363,7 @@ describe("T3-W17 retry ordering and independent switches", () => {
     const drive = vi.fn(async (_env: unknown, opts: { jobId: string; repo: string }) => providerReceipt(opts)); const contexts = [...Array(100)].map(() => ctx());
     await Promise.all(contexts.map((c) => retryOrphanedSpawns(env(d, store, { AUTOSCALER_REDRIVE_PAUSED: "0" }), c as never, T0, drive, vi.fn(async () => null))));
     await Promise.all(contexts.map(settle));
-    expect(order).toEqual(["orphan:123", "spawn:123"]); expect(drive).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(["spawn:123", "orphan:123"]); expect(drive).toHaveBeenCalledTimes(1);
     expect(d.storage.map.get(reserveKey())).toMatchObject({ state: "COMPLETED" });
   });
 
@@ -376,7 +376,7 @@ describe("T3-W17 retry ordering and independent switches", () => {
     const drive = vi.fn(async (_env: unknown, opts: { jobId: string; repo: string }) => providerReceipt(opts));
     await retryOrphanedSpawns(env(d, store, { AUTOSCALER_REDRIVE_PAUSED: "0" }), ctx() as never, T0, drive, vi.fn(async () => null));
     expect(d.storage.map.get(reserveKey())).toMatchObject({ state: "EFFECT_ELIGIBLE" });
-    expect(JSON.parse(store.map.get("orphan:123")!)).toMatchObject({ attempts: 2 });
+    expect(JSON.parse(store.map.get("orphan:123")!)).toMatchObject({ attempts: 1 });
     expect(drive).not.toHaveBeenCalled();
     store.put.mockClear();
     await retryOrphanedSpawns(env(d, store, { AUTOSCALER_REDRIVE_PAUSED: "0" }), ctx() as never, T0 + 10 * REDRIVE_RESERVATION_TTL_MS, drive, vi.fn(async () => null));
@@ -389,7 +389,8 @@ describe("T3-W17 retry ordering and independent switches", () => {
     const live = makeDO(); const liveStore = kv(); const liveCtx = ctx();
     const fresh = await worker.fetch(await webhook(123, "redrive-only-pause"), env(live, liveStore, { AUTOSCALER_INTAKE_PAUSED: "0", AUTOSCALER_REDRIVE_PAUSED: "1" }), liveCtx as never);
     await settle(liveCtx);
-    expect(fresh.status).toBe(202); expect(liveStore.put).not.toHaveBeenCalled();
+    expect(fresh.status).toBe(202); expect(liveStore.put).toHaveBeenCalled();
+    expect(liveStore.put.mock.calls.some(([key]) => key === "spawn:123")).toBe(true);
     expect((await live.instance.snapshot()).backlog_count).toBe(0);
     expect(live.storage.map.get("normal-inbox:v1:event:redrive-only-pause")).toMatchObject({ state: "pending", job_id: "123", repo: "acme/repo" });
 
