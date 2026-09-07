@@ -152,6 +152,10 @@ fi
 
 # The DevEnv entrypoint applies the same bridge before supervisord. Substitute
 # fixed image paths so this remains an offline host-shell test.
+# The current entrypoint requires the broker ticket tuple before it reaches
+# the auth bridge; use inert fixture values because this smoke never contacts
+# the broker.
+export CLW_CRED_TICKET=fixture-ticket CLW_LEASE_ID=fixture-lease CLW_FABRIC_ENDPOINT=https://fixture.invalid
 cloud_script="$tmp/cloudflare.sh"
 sed -e "s#/usr/local/bin/clw#$bin/clw#g" \
     -e "s#/usr/bin/supervisord#$bin/supervisord#g" \
