@@ -441,7 +441,7 @@
         "T3-W18",
         "T7-W4b"
       ],
-      "next_action": "Producer, secret-scan and stress code approved. Run full acceptance only after complete sprint composition; owner config/live evidence remains pending.",
+      "next_action": "T6-W4 is ready but not accepted. Produce version-bound live T3-W18, owner-configured named ingest, independent ACK/recovery trust, and deployed terminal-record evidence; no live credit before those bindings.",
       "blockers": [],
       "commits": [
         "bb165bad54125460ebae213e405df3a75baa6566",
@@ -460,9 +460,26 @@
         "docs/plan/execution/2026-09-05-stress-inputs.json",
         "docs/plan/execution/2026-09-05-secret-scan.json",
         "docs/plan/execution/2026-09-05-tick-envelope.json",
-        "docs/plan/execution/2026-09-05-tick-source-review.json"
+        "docs/plan/execution/2026-09-05-tick-source-review.json",
+        "READY-PENDING-LIVE artifact af1b34c replayed as eb8f962: 6 focused files / 30 tests passed on target a2c18f6; residual T3/live, owner config, and named ingest remain."
       ],
-      "historical_sprint": 1
+      "historical_sprint": 1,
+      "acceptance": {
+        "status": "ready",
+        "complete": false,
+        "target_commit": "a2c18f6b2621824bd12a2a34426215efe9dfeec5",
+        "source_commit": "af1b34ca1f3244a4135bccf341c94520be2d0b7a",
+        "integration_commit": "eb8f9622f9d25ecedba4890525d2bc718c89e250",
+        "evidence": [
+          "docs/plan/evidence/2026-09-07-T6-W4-acceptance.json",
+          "6 focused files / 30 tests passed at target."
+        ],
+        "residual": [
+          "T3-W18 genuine live three-state/resume evidence",
+          "production live ingest and terminal record",
+          "owner configuration, independent ACK/recovery trust, and named ingest binding"
+        ]
+      }
     },
     {
       "id": "T6-W15",
